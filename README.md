@@ -1,21 +1,36 @@
-﻿# Crypto Trading System
+# CryptoTradingSystem
 
-多交易所加密交易系统（现货/模拟盘优先），包含数据采集、策略执行、风控、回测与 Web 控制台。
+一个面向研究与实盘演进的加密交易系统（当前以 `Binance/Gate/OKX` 接入、`模拟盘` 与 `Web 控制台` 为主），包含：
 
-## Python 版本
+- 多交易所连接与账户视图
+- 策略注册/参数编辑/并行实例运行
+- 数据页面（秒级到日级 K 线、缺口自动补数）
+- 回测页面（单策略、多策略对比、参数优化）
+- 高级研究页面（因子库、相关性、情绪、研究结论）
+- 新闻页面（实时新闻流、结构化事件、多颗粒度统计）
+- 高频研究主线（5m 永续、多空、成本模型、funding、报告脚本）
 
-- 推荐并已验证：`Python 3.11`
-- 不建议使用 3.9 运行本仓库（已统一清理 3.9 相关缓存）
+## 1. 当前版本定位
 
-## 环境要求
+本仓库当前版本已经具备较完整的“研究 + 控制台 + 模拟执行”闭环，适合作为：
 
+- 策略研究与筛选工作台
+- 模拟盘验证平台
+- 实盘接入前的工程化底座
+
+说明：
+- 保持了原有 live trading 逻辑接口（增量改造，不推翻）
+- 大量增强集中在：回测、研究、新闻、前端控制台、状态稳定性
+
+## 2. Python 与环境要求
+
+- 推荐 Python：`3.11`
 - Windows PowerShell 5+（或 PowerShell 7）
-- Python 3.11
 - 可选：Conda（推荐）
 
-## 安装依赖
+## 3. 安装
 
-### Conda（推荐）
+### 3.1 Conda（推荐）
 
 ```powershell
 conda create -n crypto_trading python=3.11 -y
@@ -23,7 +38,7 @@ conda activate crypto_trading
 pip install -r requirements.txt
 ```
 
-### venv
+### 3.2 venv
 
 ```powershell
 py -3.11 -m venv .venv
@@ -32,171 +47,237 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## 配置
+## 4. 配置
 
-1. 复制模板：
+1. 复制配置模板：
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-2. 按需填写你的 API Key（请勿提交 `.env`）。
+2. 在 `.env` 中填写需要的密钥（不要提交到 GitHub）
 
-## Windows 开发快速启动
+常见项（按需）：
 
-### 启动 Web（自动准备环境）
+- 交易所 API Key（Binance / Gate / OKX）
+- `ZHIPU_API_KEY`（新闻摘要/结构化事件使用 GLM）
+- 新闻源 Key（如 `NEWSAPI_KEY`、`CRYPTOPANIC_TOKEN`，按需启用）
 
-```powershell
-.\scripts\dev_web.ps1
-```
+## 5. 启动方式
 
-### 运行测试
-
-```powershell
-.\scripts\test.ps1
-```
-
-### 清理仓库缓存/临时文件
+### 5.1 Web（推荐）
 
 ```powershell
-# 仅预览将删除内容
-.\scripts\cleanup_repo.ps1 -DryRun
-
-# 实际清理（默认清理 7 天前日志）
-.\scripts\cleanup_repo.ps1
-```
-
-## 运行
-
-```powershell
-# Web 模式
-python main.py --mode web
-
-# CLI 模式
-python main.py --mode cli
-
-# 指定交易模式（paper/live）
 python main.py --mode web --trading-mode paper
+```
+
+或：
+
+```powershell
 python main.py --mode web --trading-mode live
 ```
 
-## API 文档
+默认端口：`8000`
 
-服务启动后访问：
+访问地址：
 
-- `http://localhost:8000/docs`
+- 主控制台：`http://127.0.0.1:8000/`
+- 新闻页：`http://127.0.0.1:8000/news`
+- FastAPI 文档：`http://127.0.0.1:8000/docs`
 
-## 测试
+### 5.2 CLI
+
+```powershell
+python main.py --mode cli --trading-mode paper
+```
+
+### 5.3 Windows 开发脚本
+
+```powershell
+.\scripts\dev_web.ps1
+.\scripts\test.ps1
+```
+
+## 6. 页面功能概览（当前版本）
+
+## 6.1 仪表盘
+
+- 账户总览（真实账户 / 虚拟账户）
+- 资产净值曲线与币种分布
+- 风险监控（风险等级、熔断、日内总盈亏、浮盈亏、已实现盈亏）
+- 交易所连接状态
+- 未结构化新闻流（含结构化事件活跃度小图）
+
+备注：
+- 状态徽章使用 `/api/status` 缓存与前端独立轮询，避免“状态延迟”误报
+
+## 6.2 策略页面
+
+- 已注册策略（按分类折叠显示、卡片化）
+- 策略参数编辑（点击卡片即加载）
+- 支持：
+  - 启动/停止
+  - 复制新实例
+  - 删除实例
+  - 一键清空
+  - 时间周期（`1m/5m/1h...`）配置
+  - 运行时长限制（分钟）
+- 同一策略可多实例并行（不同参数）
+
+## 6.3 数据页面
+
+- 多粒度 K 线（默认 `1m`）
+- 支持秒级周期（`1s/5s/10s/30s`）
+- K 线时间轴与右侧刻度显示已修复
+- 秒级缺口自动补 `1s` 后再重采样（提升 `10s` 连续性）
+
+## 6.4 回测页面
+
+支持三类核心操作：
+
+1. 普通回测（单策略）
+2. 多策略对比
+3. 参数优化
+
+已增强：
+
+- 分钟级区间选择（`datetime-local`）
+- 区间锁定标识（普通回测 / 对比 / 优化）
+- 多策略对比支持：
+  - 自选策略集合
+  - 预设保存/加载（浏览器本地）
+  - 按来源加载（策略库全部 / 已注册策略去重）
+  - 预优化后再对比
+  - 排行榜可点击预览（联动上方回测图）
+  - 一键注册收益第一/前3策略为新实例
+- 参数优化支持：
+  - 胜率 / 最大回撤 / 收益率联合图
+  - 2 参数热力图（参数敏感性）
+  - 一键回填最佳参数到策略参数编辑
+  - 一键按最佳参数注册新实例（可并行运行）
+
+## 6.5 高级研究页面
+
+- 因子实验室（筛选 / 排序 / 导出）
+- 因子相关性矩阵
+- 多币种收益相关性矩阵
+- 市场情绪仪表盘
+- 研究结论与推荐策略卡
+- 多粒度、多币种研究（默认已扩展到 30 币种研究宇宙）
+
+说明：
+- 因子库已扩展（31 因子）
+- 因子标签中 `偏多` 为绿色、`偏空` 为红色
+
+## 6.6 新闻页面 / 新闻 Tab
+
+数据流（当前）：
+
+- `GDELT + Jin10 + RSS`（按可用性组合）
+- 可选 GLM 标题摘要/情绪判断（失败自动快速回退）
+
+能力：
+
+- 未结构化新闻流 + 结构化事件流
+- 顶部统计支持颗粒度切换（当前列表 / `5m/15m/1h/4h/1d`）
+- 结构化事件统计分析（多时间颗粒度）
+- 统计口径说明（避免顶部统计与来源统计混淆）
+
+## 7. 高频研究（5m Binance 永续，多空）
+
+本仓库已加入“高频研究主线”（不改 live 下单接口）：
+
+- 时间序列因子库：`core/factors_ts/*`
+- 多因子高频策略：`strategies/quantitative/multi_factor_hf.py`
+- 高频成本模型：
+  - `maker/taker`
+  - 动态滑点（`atr_pct / realized_vol / spread_proxy`）
+  - 资金费率（可选）
+- 研究脚本六件套：`scripts/research/*`
+
+### 7.1 一键运行研究报告（推荐）
+
+```powershell
+python scripts/research/all_reports.py --exchange binance --symbol BTC/USDT --timeframe 5m --days 30 --config config/strategy_multi_factor_hf.yaml
+```
+
+输出示例目录：
+
+- `data/reports/YYYYMMDD_hf_research/`
+
+### 7.2 预拉取资金费率缓存（推荐）
+
+```powershell
+python scripts/research/pull_funding_cache.py --symbols BTC/USDT,ETH/USDT --days 180 --source auto
+```
+
+缓存路径：
+
+- `data/funding/binance/*_funding.parquet`
+
+### 7.3 数据覆盖审计（30 币种多粒度）
+
+```powershell
+python scripts/research/audit_universe30_local_data.py --exchange binance --timeframes "1m,5m,15m,1h,4h,1d"
+```
+
+## 8. 文档（已整理）
+
+- 回测逻辑：`docs/backtest_logic_current.md`
+- 因子公式：`docs/factor_formulas.md`
+- 适配器架构：`docs/architecture_adapters.md`
+- 开源组件选型：`docs/open_source_reference.md`
+
+## 9. 目录结构（核心）
+
+```text
+config/        配置
+core/          核心模块（交易/风控/回测/新闻/研究/适配器）
+strategies/    策略实现（技术/量化/宏观/套利）
+web/           FastAPI + 前端模板 + API
+scripts/       开发脚本 / 研究脚本 / 数据维护脚本
+docs/          项目文档
+tests/         测试
+data/          本地数据（已加入 .gitignore）
+logs/          日志（已加入 .gitignore）
+main.py        入口
+```
+
+## 10. 测试与开发检查
+
+### 10.1 运行测试
 
 ```powershell
 pytest -q
 ```
 
-## Docker
+### 10.2 常用脚本
+
+```powershell
+.\scripts\cleanup_repo.ps1
+.\scripts\test.ps1
+.\scripts\dev_web.ps1
+```
+
+## 11. Docker（可选）
 
 ```powershell
 docker compose build
 docker compose up -d
 ```
 
-## 项目结构（核心）
+## 12. 注意事项与风险提示
 
-```text
-config/        # 配置
-core/          # 核心模块
-strategies/    # 策略实现
-web/           # FastAPI + 前端模板
-data/          # 本地数据
-logs/          # 日志
-tests/         # 测试
-scripts/       # 开发脚本
-main.py        # 入口
-```
+1. 本项目用于研究、开发与模拟验证，实盘交易风险自负
+2. 服务启动后前几十秒可能出现状态延迟（交易所初始化阶段），属于正常现象
+3. 新闻摘要依赖外部 LLM 接口，若超时会自动回退到快速模式
+4. `.env`、`keys.txt`、`data/`、`logs/` 已加入 `.gitignore`，请勿手动上传敏感信息
 
-## Web 页面布局（当前）
-
-- `http://localhost:8000/`：主控制台（仪表盘/交易/策略/数据/研究/回测）
-- `http://localhost:8000/news`：独立新闻页（实时新闻流、事件标签、情绪/影响分数）
-- 仪表盘内新增 `实时新闻` 卡片：自动轮询更新，可手动触发拉取
-
-## 新闻数据流（只读，不下单）
-
-- 新闻拉取：`CryptoPanic + GDELT + NewsAPI -> news_raw`（按可用性自动降级）
-- 事件抽取：`GLM5(可选) / 规则回退 -> news_events`
-- Web 接口：`/api/news/*`（`latest`、`summary`、`events`、`pull_now`）
-- 说明：新闻模块仅提供信息与信号素材，不直接触发交易执行
-
-### 消息面环境变量（可选）
-
-- `NEWSAPI_KEY`：NewsAPI key（demo/dev 用）
-- `CRYPTOPANIC_TOKEN`：CryptoPanic token
-- `CMC_API_KEY`：CoinMarketCap key（可用于后续市场因子增强）
-- `NEWS_ENABLE_GDELT/NEWS_ENABLE_NEWSAPI/NEWS_ENABLE_CRYPTOPANIC`：源开关
-- `NEWS_PULL_INTERVAL_SEC`：后台拉取间隔（秒）
-- `NEWS_PULL_SINCE_MINUTES`：每次拉取回看窗口（分钟）
-- `NEWS_PULL_MAX_RECORDS`：每次最大拉取条数
-
-## 风险提示
-
-- 本项目仅用于研究与开发验证。
-- 实盘交易有风险，请先在模拟盘充分验证。
-
-## 高频研究（5m Binance 永续，多空）如何跑
-
-说明：
-- 本次升级不改 live 下单接口，只增强研究与回测模块。
-- 新增 `MultiFactorHFStrategy`（配置驱动）与 `core/factors_ts`（时间序列因子库）。
-- 回测引擎支持 `maker/taker`、动态滑点、PnL 成本分解；资金费率默认关闭（可开启）。现在支持通过 `FundingRateProvider` 自动从本地缓存 / Binance 公共 funding 接口补齐。
-
-### 1) 运行 5m 高频研究六件套（建议先本地准备好 Binance 5m 数据）
+## 13. Git 提交建议（当前仓库已初始化）
 
 ```powershell
-python scripts/research/all_reports.py --exchange binance --symbol BTC/USDT --timeframe 5m --days 30 --config config/strategy_multi_factor_hf.yaml
+git add .
+git commit -m "your message"
+git push
 ```
 
-### 1.1) 预先拉取并缓存永续资金费率（推荐）
-
-```bash
-python scripts/research/pull_funding_cache.py --symbols BTC/USDT,ETH/USDT --days 180 --source auto
-```
-
-- 缓存位置：`data/funding/binance/*_funding.parquet`
-- 当 `BacktestConfig(include_funding=True)` 且行情数据缺少 `funding_rate` 列时，回测引擎会尝试使用该缓存自动补齐
-
-输出目录示例：
-- `data/reports/YYYYMMDD_hf_research/`
-
-包含（轻量版）：
-- `data_quality_report.csv`
-- `factor_edge_table.csv`
-- `factor_corr_heatmap.png`
-- `cost_sensitivity_table.csv`
-- `cost_curve.png`
-- `leaderboard.csv`
-- `walk_forward_stability.png`
-- `robustness_report.md`
-
-### 2) 单独跑数据质量 / 成本敏感性 / 因子研究
-
-```powershell
-python scripts/research/data_qa.py --exchange binance --symbol BTC/USDT --timeframe 5m --days 30
-python scripts/research/cost_sensitivity.py --exchange binance --symbol BTC/USDT --timeframe 5m --days 30
-python scripts/research/factor_study.py --exchange binance --symbol BTC/USDT --timeframe 5m --days 30 --horizon-bars 3
-```
-
-### 3) 调整多因子组合（只改 YAML）
-
-默认配置文件：
-- `config/strategy_multi_factor_hf.yaml`
-
-可调项：
-- `factors`：因子组合/权重/transform
-- `enter_th / exit_th`：滞回阈值
-- `gates`：波动/点差/成交量过滤
-- `cooldown_bars`
-- `position_sizing`
-
-### 4) 关键限制（当前版本）
-
-- 资金费率结算支持已加入回测引擎，但默认关闭；开启后会优先读取行情数据中的 `funding_rate` 列，若缺失且配置了 `FundingRateProvider` 则自动回填。
-- `spread_proxy` 使用 `(high-low)/close`，是无盘口条件下的粗代理，适合研究筛选，不等价于真实盘口点差。
