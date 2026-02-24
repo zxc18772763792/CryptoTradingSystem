@@ -1,19 +1,45 @@
-# 模块化适配层设计文档（适配 `crypto_trading_system`）
+# 模块化适配层设计文档（适配当前 `crypto_trading_system`）
 
-目标：增强现有仓库的 Binance 永续（5m、多空）稳定性与工程化，不推翻现有交易执行逻辑。
+更新时间：2026-02-24
 
-## 1. 设计目标
+目标：在不推翻现有 live 下单接口的前提下，为 Binance 永续（5m、多空、高换手）补齐工程化基础设施，包括适配层、WS、订单状态一致性、记账分解、资金费率数据接入。
 
-1. 保持现有 `core/trading/*` live 下单接口与业务逻辑不变
-2. 新增“适配层 + 状态机 + WS 客户端 + 记账组件”，先旁路运行
-3. 统一口径：订单状态、持仓、手续费、滑点、funding、PnL 分解
-4. 让回测/模拟盘/实盘逐步共享同一套 accounting 字段
+## 1. 设计原则（当前仓库约束）
 
----
+1. 不改现有 `core/trading/*` 的主执行接口（增量改造）
+2. 先做“旁路组件”，再逐步接线
+3. 回测 / 模拟盘 / 实盘逐步统一字段口径（尤其 PnL 分解）
+4. 优先解决稳定性问题：
+- 限流
+- 重连
+- 订单状态乱序
+- funding 处理
 
-## 2. 最小可行 Patch 计划（MVP）
+## 2. 当前状态（已落地 vs 规划中）
 
-新增目录（不改现有业务逻辑）：
+## 2.1 已有/已落地（本仓库已有文件）
+
+已新增并可用（至少 skeleton + 部分实现）：
+
+- `core/exchange_adapters/base.py`
+- `core/exchange_adapters/ccxt_adapter.py`（只读能力优先）
+- `core/marketdata/ws_client.py`
+- `core/marketdata/binance_perp_ws_client.py`（骨架）
+- `core/execution/order_state_machine.py`（已实现核心状态机）
+- `core/execution/rate_limit_and_reconnect.py`（已实现 token bucket/退避）
+- `core/execution/order_intent_router.py`（桥接骨架）
+- `core/accounting/pnl_decomposer.py`（统一 PnL 分解方向）
+- `core/backtest/funding_provider.py`（已实现本地缓存 + Binance funding 拉取）
+- `core/backtest/cost_models.py`（成本模型抽离方向）
+
+## 2.2 仍以规划为主（可继续接线）
+
+- Binance 永续 WS 行情/用户流完整接入现有执行链路
+- 订单状态机与真实下单执行链路联动
+- 实盘与回测统一 accounting ledger
+- 已注册实例参数逐个回测 compare 接口（当前 compare 仍主要按策略类型）
+
+## 3. 推荐目录结构（当前已采用）
 
 ```text
 core/
@@ -38,195 +64,250 @@ core/
     cost_models.py
 ```
 
-实施顺序：
+## 4. 各模块职责与建议接口
 
-### Phase A（旁路，不碰下单）
-- `ccxt_adapter.py`：只读接口（market、position、funding）
-- `binance_perp_ws_client.py`：只订阅行情，输出标准化事件
-- `pnl_decomposer.py`：镜像记账（不替换现有统计）
-
-### Phase B（小范围接入执行状态）
-- `order_state_machine.py`：合并 REST/WS 订单状态
-- `rate_limit_and_reconnect.py`：统一重试/退避策略
-
-### Phase C（统一回测/实盘口径）
-- `funding_provider.py`：历史 funding 数据对齐
-- `cost_models.py`：回测与研究脚本复用成本公式
-
----
-
-## 3. 模块职责与建议函数签名
-
-## 3.1 `core/exchange_adapters/base.py`
+## 4.1 `core/exchange_adapters/base.py`
 
 职责：
-- 定义交易所适配器抽象接口（REST）
-- 统一返回对象：市场信息、订单快照、持仓快照、funding 数据点
 
-建议接口：
-- `async initialize() -> None`
-- `async close() -> None`
-- `async fetch_markets(reload: bool = False) -> list[MarketInfo]`
-- `async fetch_ticker(symbol: str) -> dict`
-- `async fetch_balances() -> dict`
-- `async fetch_positions(symbols: list[str] | None = None) -> list[ExchangePositionSnapshot]`
-- `async create_order(request: ExchangeOrderRequest) -> ExchangeOrderSnapshot`
-- `async cancel_order(symbol: str, order_id: str, params: dict | None = None) -> ExchangeOrderSnapshot`
-- `async fetch_order(symbol: str, order_id: str) -> ExchangeOrderSnapshot`
-- `async fetch_open_orders(symbol: str | None = None) -> list[ExchangeOrderSnapshot]`
-- `async fetch_funding_rate(symbol: str) -> FundingRatePoint | None`
-- `async fetch_funding_history(symbol: str, start_time: datetime | None, end_time: datetime | None, limit: int = 200) -> list[FundingRatePoint]`
+- 定义统一交易所适配接口（REST 为主）
+- 隔离 `ccxt` / 原生 SDK / 交易所差异
+- 统一市场信息、订单快照、持仓快照、funding 数据结构
 
-## 3.2 `core/exchange_adapters/ccxt_adapter.py`
+建议接口（抽象层）：
+
+- `initialize() -> None`
+- `close() -> None`
+- `fetch_markets(reload=False) -> list[...]`
+- `fetch_ticker(symbol) -> dict`
+- `fetch_balances() -> dict`
+- `fetch_positions(symbols=None) -> list[...]`
+- `create_order(...)`
+- `cancel_order(...)`
+- `fetch_order(...)`
+- `fetch_open_orders(...)`
+- `fetch_funding_rate(symbol)`
+- `fetch_funding_history(symbol, start_time, end_time, limit=...)`
+
+## 4.2 `core/exchange_adapters/ccxt_adapter.py`
 
 职责：
-- 使用 `ccxt` 实现 Binance 永续/合约 REST 适配器
-- 做 symbol、market type、异常、精度/规则归一化
+
+- 使用 `ccxt` 实现 Binance/其他交易所的统一 REST 适配
+- 先做只读（市场、资金费率、持仓、余额），再逐步做写操作
+- 做 symbol、market type、异常、精度规则归一化
+
+当前建议（与你仓库一致）：
+
+- 研究/回测优先使用只读能力（特别是 funding）
+- 实盘下单暂不强制切换到 adapter（降低改动风险）
+
+## 4.3 `core/marketdata/ws_client.py`
+
+职责：
+
+- 通用 WebSocket 客户端框架
+- 统一连接、断线重连、订阅恢复、消息分发
 
 关键点：
-- 支持 `swap/future`
-- 统一 `BTC/USDT` vs `BTCUSDT` 转换
-- 支持 `fetch_funding_rate / funding_history`
 
-## 3.3 `core/marketdata/ws_client.py`
+- handler 注册机制
+- 心跳/超时检测
+- 重连 backoff（建议与 `rate_limit_and_reconnect.py` 共用策略）
 
-职责：
-- 通用 WS 客户端框架：连接、断线重连、订阅恢复、handler 注册
-
-建议接口：
-- `register_handler(channel: str, handler: Callable[..., Awaitable[None]])`
-- `async connect()`
-- `async disconnect()`
-- `async subscribe(payload: dict)`
-- `async run_forever()`
-- `async _dispatch(channel: str, message: dict)`
-
-## 3.4 `core/marketdata/binance_perp_ws_client.py`
+## 4.4 `core/marketdata/binance_perp_ws_client.py`
 
 职责：
-- Binance 永续 WS 订阅封装与事件标准化
 
-建议接口：
-- `async subscribe_book_ticker(symbols)`
-- `async subscribe_depth(symbols, level=20)`
-- `async subscribe_agg_trade(symbols)`
-- `async subscribe_kline(symbols, interval="5m")`
-- `async subscribe_mark_price(symbols)`
-- `async subscribe_funding(symbols)`
-- `normalize_event(message: dict) -> dict`
+- Binance 永续 WS 订阅封装与标准化输出
 
-## 3.5 `core/execution/order_state_machine.py`
+建议先接入的频道：
 
-职责：
-- 管理订单生命周期状态流转，解决重复/乱序回报
+- `bookTicker`
+- `markPrice`
+- `kline_5m`
+- `aggTrade`
 
-状态建议：
-- `NEW`
-- `SUBMITTED`
-- `ACKED`
-- `PARTIALLY_FILLED`
-- `FILLED`
-- `CANCELED`
-- `REJECTED`
-- `EXPIRED`
+后续可接：
 
-建议接口：
-- `on_submit(...) -> OrderStateSnapshot`
-- `apply_update(order_id, status, filled_qty=None, avg_price=None, raw=None) -> OrderStateSnapshot | None`
-- `snapshot(order_id) -> OrderStateSnapshot | None`
-- `all_open() -> list[OrderStateSnapshot]`
+- 用户流（订单回报、账户更新、持仓更新）
 
-## 3.6 `core/execution/order_intent_router.py`
+## 4.5 `core/execution/order_state_machine.py`
 
 职责：
-- 将现有策略 `Signal` 转换为 adapter 侧 `OrderIntent/OrderRequest`
-- 初期仅做桥接层，不替换执行引擎
 
-建议接口：
-- `build_order_intent(signal, context=None) -> OrderIntent`
-- `async submit_intent(intent) -> ExchangeOrderSnapshot`
+- 统一管理订单生命周期
+- 处理 REST/WS 回报乱序、重复消息、终态回退问题
 
-## 3.7 `core/execution/rate_limit_and_reconnect.py`
+当前已实现能力（本仓库）：
 
-职责：
-- REST 限速（token bucket）
-- WS 重连退避（指数退避 + 抖动）
+- `submit -> ack -> partial -> filled/canceled/rejected`
+- 多键索引（`order_id/client_order_id/exchange_order_id`）
+- 终态不回退
+- 重复事件基础去重
+- `snapshot/export/restore`
 
-建议接口：
-- `configure_bucket(key, capacity, refill_per_sec)`
-- `acquire(key, cost=1.0) -> bool`
-- `record_success(key)`
-- `record_failure(key)`
-- `next_retry_delay(key, base=1.0, cap=30.0) -> float`
+建议接线点：
 
-## 3.8 `core/accounting/pnl_decomposer.py`
+- 先作为“订单状态镜像”（不替换现有执行逻辑）
+- 用于对账与 UI 展示一致性增强
+
+## 4.6 `core/execution/order_intent_router.py`
 
 职责：
-- 统一 PnL 分解字段（回测/模拟盘/实盘）
-- 统一输出：`gross_pnl / fee / slippage_cost / funding_pnl / net_pnl`
 
-建议接口：
-- `on_fill(...)`
-- `on_funding(symbol, amount, ...)`
-- `mark_to_market(marks: dict[str, float])`
-- `position_snapshot(symbol) -> dict | None`
-- `portfolio_breakdown() -> dict[str, float]`
+- 将策略 `Signal` 转换为标准化 `OrderIntent`
+- 为未来多交易所/多账户/多执行通道打桥接层
 
-## 3.9 `core/backtest/funding_provider.py`
+当前策略：
 
-职责：
-- 提供回测资金费率历史读取与时间对齐
+- 先保留为薄层，不替换现有 `execution_engine`
+- 用于研究“同信号在不同执行通道”的兼容性
 
-建议接口：
-- `load_from_parquet(symbol, path)`
-- `load_from_csv(symbol, path)`
-- `get_rate(symbol, timestamp) -> float`
-- `get_series(symbol, start_time=None, end_time=None) -> pd.Series`
-
-## 3.10 `core/backtest/cost_models.py`
+## 4.7 `core/execution/rate_limit_and_reconnect.py`
 
 职责：
-- 抽离回测/研究脚本成本公式，避免散落在多个模块
 
-建议接口：
-- `fee_rate(config, role="taker") -> float`
-- `dynamic_slippage_rate(atr_pct, realized_vol, spread_proxy, params) -> float`
+- REST 限流（token bucket）
+- 重试/退避策略（含 jitter）
+- 连接异常后的冷却与降级模式
 
----
+当前已实现能力（本仓库）：
 
-## 4. 与现有系统的接线策略（不改 live 下单接口）
+- 多 bucket 限流
+- penalty/cooldown
+- `reduce-only` 冷却模式（禁开仓、允许减仓）
+- 同步/异步获取令牌
+- 重连退避与统计输出
 
-### 4.1 旁路镜像阶段（推荐）
-- 保留现有 `core/trading/execution_engine.py`
-- 新模块仅做：
-  - 行情订阅镜像（WS）
-  - 订单状态镜像（state machine）
-  - PnL 镜像记账（decomposer）
+建议用法：
 
-优点：
-- 风险低
-- 可对比现有口径与新口径差异
+- 对交易所写操作、查询、WS 控制消息分 bucket 管理
+- 将“超限/风控返回”统一映射到 penalty 逻辑
 
-### 4.2 渐进替换阶段
-- 先替换“读路径”：
-  - 市场规则、funding 查询、持仓查询
-- 再替换“状态归并路径”：
-  - 订单状态由 `order_state_machine` 输出统一视图
-- 最后才考虑替换“下单提交路径”
+## 4.8 `core/accounting/pnl_decomposer.py`
 
----
+职责：
 
-## 5. 验收建议（工程化）
+- 统一实盘/模拟盘/回测的 PnL 分解字段
+- 输出一致口径：
+  - `gross_pnl`
+  - `fee`
+  - `slippage_cost`
+  - `funding_pnl`
+  - `net_pnl`
+
+价值：
+
+- 前端展示口径统一（避免“日内盈亏”和“浮盈亏”混淆）
+- 研究报告更容易做成本归因
+
+## 4.9 `core/backtest/funding_provider.py`
+
+职责：
+
+- 资金费率历史缓存与对齐
+- 为回测引擎补齐 `funding_rate` 列
+
+当前已实现（本仓库）：
+
+- 本地缓存读写（parquet/csv）
+- Binance 公共 funding 历史拉取
+- 对齐到 OHLCV DataFrame 索引
+- `scripts/research/pull_funding_cache.py` 脚本支持预拉取
+
+## 4.10 `core/backtest/cost_models.py`
+
+职责：
+
+- 抽离并统一成本模型公式
+- 让回测引擎与研究脚本共享同一成本逻辑
+
+建议覆盖：
+
+- flat / maker-taker fee
+- dynamic slippage（`atr_pct/rv/spread_proxy`）
+- funding 成本辅助计算
+
+## 5. 分阶段落地计划（不破坏现有 live 逻辑）
+
+## Phase A：旁路镜像（低风险）
+
+目标：不动下单主链路，先建立可观测性与一致性基础。
+
+任务：
+
+1. `ccxt_adapter` 只读接入（市场、余额、持仓、funding）
+2. `binance_perp_ws_client` 行情订阅（bookTicker/markPrice/kline）
+3. `order_state_machine` 作为镜像状态机接收订单事件
+4. `pnl_decomposer` 做镜像记账对比
+
+产出：
+
+- 更稳定的状态/订单展示
+- 研究与实盘口径差异可审计
+
+## Phase B：状态一致性与风控增强
+
+目标：降低高换手场景下的拒单、乱序、重连波动。
+
+任务：
+
+1. 接入 `rate_limit_and_reconnect` 到交易所调用路径
+2. 将交易所错误映射为统一 penalty/cooldown
+3. 用 `order_state_machine` 驱动订单状态视图与对账
+
+产出：
+
+- 订单生命周期可追踪
+- 重连/限流行为可控
+
+## Phase C：回测/实盘口径统一深化
+
+目标：研究结果更接近交易执行与账户表现。
+
+任务：
+
+1. 回测使用统一 `cost_models`
+2. funding provider 与研究脚本、回测引擎统一
+3. `pnl_decomposer` 字段逐步接入模拟盘/实盘统计与前端展示
+
+产出：
+
+- 成本与资金费率归因统一
+- 页面展示与回测结果更一致
+
+## 6. 与当前仓库的接线建议（具体）
+
+## 6.1 不要做的事（当前阶段）
+
+- 不要直接替换 `core/trading/execution_engine.py` 下单逻辑
+- 不要一次性引入大型框架并替换现有策略系统
+
+## 6.2 优先做的事（收益最高）
+
+1. 用 `funding_provider` 强化永续研究口径（已部分完成）
+2. 用 `rate_limit_and_reconnect` 管理交易所请求节奏（已具备基础实现）
+3. 用 `order_state_machine` 做订单状态镜像与 UI 对账
+4. 用 `ccxt_adapter` 统一只读数据来源
+
+## 7. 验收建议（工程化）
 
 1. 稳定性
-- Binance WS 连续运行 4h+，自动重连后订阅恢复
+- 状态接口不因某个慢依赖长期失败（已加缓存与兜底）
+- WS 断线后能恢复订阅
 
-2. 状态一致性
-- 同一订单的 REST 与 WS 回报不会出现状态回退
+2. 一致性
+- 同一订单在 REST/WS/页面中的状态不回退
+- PnL 分解字段在回测/模拟盘/实盘命名一致
 
-3. 口径一致性
-- `gross/fee/slippage/funding/net` 在回测、模拟盘、展示层字段一致
+3. 侵入性控制
+- 未切换前，现有策略注册、下单、风控、页面功能不受影响
 
-4. 侵入性控制
-- 未接线前不影响现有策略注册、下单、风控逻辑
+## 8. 当前文档对应文件（便于继续开发）
+
+- 适配器设计：`docs/architecture_adapters.md`
+- 开源选型：`docs/open_source_reference.md`
+- 回测逻辑：`docs/backtest_logic_current.md`
+- 因子公式：`docs/factor_formulas.md`
 

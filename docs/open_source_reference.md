@@ -1,148 +1,215 @@
-# 开源组件参考与嫁接建议（面向 `crypto_trading_system`）
+# 开源组件选型与嫁接建议（面向 `crypto_trading_system`）
 
-目标场景：`Binance 永续`、`5m`、`多空`、`高换手零售级`。
+更新时间：2026-02-24
 
-原则：
-- 不替换现有系统，只做“可嫁接组件”选型与落地计划。
-- 优先引入：稳定性、连接恢复、成本/资金费率记账、订单状态一致性。
-- 许可证优先级：`MIT/Apache` > `LGPL(参考为主)` > `GPL(仅参考)`.
+目标场景（当前仓库主线）：
 
-## 结论摘要（先给可执行建议）
+- Binance 永续
+- 5m 为主（可扩展 1m / 15m / 1h）
+- 多空策略
+- 高频研究与零售级自动化交易
+- 不推翻现有执行逻辑，只做增量增强
 
-推荐优先引入（可直接落地到你当前仓库）：
-1. `ccxt/ccxt`（MIT）：统一 REST 适配层、合约规则、funding 查询
-2. `vnpy_evo + vnpy_binance`（MIT）：Gateway 抽象、事件驱动边界、Binance 网关映射思路
-3. `hummingbot`（Apache-2.0，参考实现）：WS orderbook/reconnect/rate-limit 设计模式
-4. `nautilus_trader`（LGPL-3.0，参考设计）：accounting / PnL decomposition / funding 处理模型
+## 1. 结论摘要（先给可执行建议）
 
-明确仅参考（不建议直接抄入核心）：
-- `freqtrade`（GPLv3）
-- `jesse`（MIT，但框架耦合强，适合参考研究工作流）
+优先引入（可直接嫁接或高度可复用）：
 
----
+1. `ccxt/ccxt`（MIT）
+- 用于统一 REST 适配层（市场信息、持仓、余额、funding）
 
-## 对比表（按你指定项目）
+2. `veighna-global/vnpy_evo` + `vnpy_binance`（MIT）
+- 重点参考/复用 Gateway 边界、Binance 网关映射与事件驱动模式
 
-| 项目 | 链接 | License | 分类 | 核心模块 | 可复用点 | 许可风险提醒 | 与你场景匹配度 |
+3. `hummingbot/hummingbot`（Apache-2.0）
+- 重点参考 WS orderbook、重连、限流、connector 设计模式
+
+设计参考优先（不建议直接搬核心代码）：
+
+4. `nautechsystems/nautilus_trader`（LGPLv3+）
+- 强项：accounting、PnL 分解、事件模型、funding 处理
+
+5. `jesse-ai/jesse`（MIT）
+- 强项：研究工作流、回测/优化组织方式
+
+只适合参考（注意许可）：
+
+6. `freqtrade/freqtrade`（GPLv3）
+- 不建议直接拷入私有/闭源核心代码
+
+## 2. 对比表（按可落地性排序）
+
+| 项目 | 链接 | 协议 | 分类 | 核心模块 | 可复用点 | 许可风险 | 匹配度（Binance futures 5m 多空） |
 |---|---|---|---|---|---|---|---|
-| ccxt/ccxt | https://github.com/ccxt/ccxt | MIT | 可直接嫁接 | 统一交易所 REST API、市场元数据、账户/下单接口 | `ExchangeAdapter`、交易规则/精度、funding 查询、异常归一化 | MIT 风险低，保留许可声明 | 9/10 |
-| hummingbot/hummingbot | https://github.com/hummingbot/hummingbot | Apache-2.0 | 参考为主（局部可嫁接） | Connector、WS/REST 协同、orderbook tracker、事件循环 | WebSocket 重连、心跳、订阅恢复、orderbook 增量维护、connector 状态模式 | Apache-2.0 需保留许可证与 NOTICE | 8.5/10 |
-| jesse-ai/jesse | https://github.com/jesse-ai/jesse | MIT | 参考为主 | 回测/优化工作流、策略开发体验 | 研究脚本组织、walk-forward/优化流程设计 | MIT 可用，但直接嵌入收益低 | 7.5/10 |
-| nautechsystems/nautilus_trader | https://github.com/nautechsystems/nautilus_trader | LGPL-3.0 | 参考为主（建议进程边界） | 高性能事件驱动交易/回测、accounting、订单生命周期 | PnL 分解、funding 计费、订单事件模型、记账一致性 | LGPLv3 合规复杂，建议参考设计或独立服务 | 9/10（功能匹配高） |
-| veighna-global/vnpy_evo | https://github.com/veighna-global/vnpy_evo | MIT | 可直接嫁接（设计/局部实现） | 网关抽象、事件引擎、策略运行框架 | Gateway 接口、事件总线边界、模块化结构 | MIT 风险低 | 8/10 |
-| veighna-global/vnpy_binance | https://github.com/veighna-global/vnpy_binance | MIT | 可直接嫁接（参考实现优先） | Binance 网关插件（Evo） | Binance 合约映射、委托/持仓状态处理、WS+REST 协同 | MIT 风险低 | 8.5/10 |
-| freqtrade/freqtrade | https://github.com/freqtrade/freqtrade | GPLv3 | 只适合参考 | 策略管理、回测、优化、工作流 | 报告结构、配置管理、策略生命周期管理思路 | GPLv3 不要直接抄入闭源/私有核心 | 7/10 |
+| ccxt/ccxt | https://github.com/ccxt/ccxt | MIT | 可直接嫁接 | 统一交易所 REST API | ExchangeAdapter、funding 查询、市场规则/精度 | 风险低（保留许可） | 9/10 |
+| veighna-global/vnpy_evo | https://github.com/veighna-global/vnpy_evo | MIT | 可直接嫁接（设计/局部实现） | Gateway、事件引擎、策略运行框架 | Gateway 边界、事件模型、模块分层 | 风险低 | 8/10 |
+| veighna-global/vnpy_binance | https://github.com/veighna-global/vnpy_binance | MIT | 可直接嫁接（参考实现优先） | Binance 网关插件 | Binance 委托/成交/持仓字段映射，WS+REST 协同 | 风险低 | 8.5/10 |
+| hummingbot/hummingbot | https://github.com/hummingbot/hummingbot | Apache-2.0 | 只适合参考（局部模式可用） | Connector、orderbook、WS/REST 协同 | 重连、订阅恢复、订单簿维护、限流思路 | 需保留 NOTICE | 8.5/10 |
+| jesse-ai/jesse | https://github.com/jesse-ai/jesse | MIT | 只适合参考 | 回测/优化工作流、策略开发体验 | 研究脚本组织、walk-forward/优化流程 | 风险低 | 7.5/10 |
+| nautechsystems/nautilus_trader | https://github.com/nautechsystems/nautilus_trader | LGPLv3+ | 只适合参考（设计优先） | 事件驱动交易/回测、accounting、PnL 分解 | funding/accounting 模型、订单状态事件设计 | LGPL 合规复杂 | 9/10（能力匹配高） |
+| freqtrade/freqtrade | https://github.com/freqtrade/freqtrade | GPLv3 | 仅参考 | 策略管理、回测、优化、工作流 | 报告结构、配置管理、策略生命周期思路 | GPLv3 不宜直接抄入私有核心 | 7/10 |
 
----
+## 3. 分类说明：可直接嫁接 vs 只适合参考
 
-## 分项目建议（你关心的“能不能嫁接”）
+## 3.1 可直接嫁接（优先）
 
-### 1) ccxt/ccxt（MIT）
+### `ccxt/ccxt`（MIT）
 
-适合直接嫁接：
-- `ExchangeAdapter` REST 实现（查市场、查单、下单、撤单、资金费率）
-- 合约规格/精度/最小下单量获取
-- 错误码和异常归一化
+建议用途：
 
-不建议用法：
-- 不要让策略直接调用 ccxt；应通过你自己的 adapter 接口隔离
+- `core/exchange_adapters/ccxt_adapter.py`
+- 市场规则/精度/最小下单量获取
+- funding 查询与历史 funding 拉取（部分交易所能力差异需兼容）
 
-### 2) hummingbot（Apache-2.0）
+为什么适合：
 
-适合参考：
-- WebSocket 连接管理（重连、退避、心跳）
-- orderbook tracker / snapshot + diff 处理
-- connector 的职责划分
+- 你当前系统已在做交易所抽象与多交易所支持
+- ccxt 适合作为“统一 REST 后端”，不强制改变策略层/执行层接口
+
+### `vnpy_evo + vnpy_binance`（MIT）
+
+建议用途：
+
+- 参考 Gateway 边界和 Binance 网关字段映射
+- 参考事件驱动拆分思路（行情、委托、成交、账户更新分离）
+
+为什么适合：
+
+- 你的系统已经在向“模块化/工程化”方向走，vn.py 系的网关设计可直接借鉴
+
+## 3.2 只适合参考（按模块借鉴）
+
+### `hummingbot`（Apache-2.0）
+
+重点借鉴：
+
+- WS 重连与订阅恢复
+- orderbook snapshot + diff 维护
+- connector 状态管理
+- 限流与节流设计
 
 不建议：
-- 整体引入框架（太重，与你现有结构冲突大）
 
-### 3) jesse（MIT）
+- 整体引入框架（对你现有系统侵入过大）
 
-适合参考：
-- 研究与优化脚本工作流
-- 参数搜索与 walk-forward 的组织方式
+### `jesse`（MIT）
 
-不建议：
-- 直接复用其核心执行/框架层（与现有策略/执行接口不兼容）
+重点借鉴：
 
-### 4) nautilus_trader（LGPL-3.0）
+- 研究脚本组织方式
+- 参数优化 / walk-forward 的工作流与输出结构
 
-最有价值但高集成成本：
-- 订单生命周期状态模型
-- accounting / PnL decomposition / funding 处理
-- 回测与实盘口径一致的设计方法
+### `nautilus_trader`（LGPLv3+）
 
-建议落地方式：
-- 参考设计，自行实现
-- 或做独立对照服务，不直接嵌核心仓库
+重点借鉴：
 
-### 5) vnpy_evo（MIT）
+- accounting / PnL decomposition 设计
+- funding 记账与事件模型
+- 订单状态生命周期建模
 
-适合直接借鉴：
-- Gateway 抽象接口
-- EventEngine 模式
-- 模块边界（交易/行情/策略/风险）
+合规提醒：
 
-### 6) vnpy_binance（MIT）
+- 不建议直接嵌入核心代码到私有交易系统中
+- 更适合“设计参考”或独立服务边界集成
 
-适合直接借鉴：
-- Binance 网关状态映射
-- WS/REST 对账模式
-- 委托/成交/持仓字段归一化
+### `freqtrade`（GPLv3）
 
-### 7) freqtrade（GPLv3）
+重点借鉴：
 
-可参考：
-- 工作流、报表项目项、配置体验
+- 配置/工作流/报告组织
+- 用户交互与优化流程思路
 
-不可直接抄入（你的场景）：
-- 若你后续闭源、私有分发、商用，直接复制 GPLv3 核心代码风险高
+明确限制：
 
----
+- GPLv3 代码不要直接拷入你的私有核心逻辑中
 
-## 许可风险提醒（落地前必须再次确认）
+## 4. 许可协议风险速记
 
-### 可直接集成（通常）
-- MIT：`ccxt`, `jesse`, `vnpy_evo`, `vnpy_binance`
-- Apache-2.0：`hummingbot`（注意 `NOTICE`）
+## 4.1 风险较低（通常可直接集成）
 
-### 参考设计优先
-- LGPL-3.0：`nautilus_trader`（边界与分发合规需谨慎）
+- `MIT`
+- `Apache-2.0`（需保留许可与 NOTICE）
 
-### 仅参考，不直接抄码
-- GPLv3：`freqtrade`
+## 4.2 需谨慎（设计参考优先）
 
----
+- `LGPLv3+`
+  - 动态链接/分发边界/修改分发要求更复杂
+  - 对纯 Python 项目通常不建议直接深度耦合
 
-## 对你仓库的“优先引入模块”（建议顺序）
+## 4.3 仅参考（避免直接抄代码）
 
-### P0（立即收益）
-1. `ExchangeAdapter`（ccxt）
-2. `WebSocket marketdata client`（Binance futures）
-3. `Order state machine`（防乱序/重复）
-4. `PnL decomposition ledger`（实盘/回测统一字段）
+- `GPLv3`
+  - 若你的系统后续是私有/商业化分发，直接嵌入 GPL 核心代码风险高
 
-### P1（稳定性增强）
-5. `Rate-limit & reconnect policy`
-6. `Funding provider`（历史 funding 落盘 + 对齐）
-7. `Backtest accounting` 与 live/paper 字段统一
+## 5. 针对当前仓库的落地方案（按优先级）
 
-### P2（高频研究增强）
+## P0（立即收益，低侵入）
+
+1. `ExchangeAdapter（ccxt）`
+- 统一只读数据：市场规则、持仓、余额、funding
+
+2. `Rate-limit & reconnect policy`
+- 管理 REST 限流、WS 控制消息、重连 backoff
+- 你仓库已落地基础实现：`core/execution/rate_limit_and_reconnect.py`
+
+3. `Order State Machine`
+- 统一订单生命周期，解决乱序/重复事件
+- 你仓库已落地核心实现：`core/execution/order_state_machine.py`
+
+4. `Funding handling`
+- 研究/回测 funding 数据缓存与对齐
+- 你仓库已落地：`core/backtest/funding_provider.py`
+
+## P1（稳定性与口径统一）
+
+5. `WebSocket marketdata client`
+- 先读行情（bookTicker/markPrice/kline），再接用户流
+- 已有骨架：`core/marketdata/*`
+
+6. `PnL decomposition ledger`
+- 将回测、模拟盘、实盘逐步统一到同一分解字段口径
+- 已有方向：`core/accounting/pnl_decomposer.py`
+
+7. `Backtest cost models reuse`
+- 将动态滑点、maker/taker 费率、funding 成本统一为共享模型
+- 已有方向：`core/backtest/cost_models.py`
+
+## P2（高频研究增强）
+
 8. `Local orderbook + microstructure features`
-9. `Execution QoS telemetry`（ack/fill/cancel 延迟、reject 原因）
+- 为动态滑点和执行质量建模提供更真实特征
 
----
+9. `Execution QoS telemetry`
+- ack/fill/reject 延迟、拒单原因、重试次数、限流触发频率
 
-## 与本仓库的增量落地方向（不改 live 下单接口）
+## 6. 与你当前仓库的实际映射（已做/可继续）
 
-- 新增目录：`core/exchange_adapters/`, `core/marketdata/`, `core/execution/`, `core/accounting/`
-- 先做 skeleton + 接口，不接线到现有执行引擎
-- 再通过“旁路镜像”逐步接入（行情镜像、订单状态镜像、PnL 镜像）
+当前仓库已完成的基础工作（与你之前的需求一致）：
 
----
+- 高频回测成本模型增强（maker/taker + dynamic slippage + funding）
+- 时间序列因子库（TS）
+- 多因子高频策略（配置驱动）
+- funding provider 与研究脚本
+- 开源组件选型文档与 skeleton 模块
+- 订单状态机与限流/重连基础模块
 
-## 参考链接（指定项目）
+下一步建议（若继续做工程化）：
+
+1. 将 `order_state_machine` 接入真实订单事件流（镜像模式）
+2. 将 `ccxt_adapter` 只读能力接到状态/研究接口
+3. 完成 Binance 永续 WS 行情/用户流的“标准化事件输出”
+
+## 7. 推荐的最小实现边界（避免过度重构）
+
+建议坚持下面边界：
+
+- 策略层继续输出 `Signal`
+- 执行主逻辑先不推翻
+- 新模块先旁路运行与对账
+- 页面展示先吃“标准化状态/记账输出”
+
+这样可以在不影响现有交易功能的前提下，逐步把系统升级到更稳定、更可复现、更适合高频研究的结构。
+
+## 8. 参考链接（指定项目）
 
 - ccxt/ccxt: https://github.com/ccxt/ccxt
 - hummingbot/hummingbot: https://github.com/hummingbot/hummingbot
