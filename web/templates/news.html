@@ -1,0 +1,142 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>新闻中心 - 加密交易系统</title>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+    <link rel="stylesheet" href="/static/css/style.css?v=42">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <h1>新闻中心</h1>
+                <p class="header-subtitle">实时新闻流 | 未结构化原文 | 结构化事件</p>
+            </div>
+            <div class="status-bar">
+                <span id="news-health-badge" class="status-badge">加载中...</span>
+                <span id="news-now-time"></span>
+                <a class="page-link-btn" href="/?tab=dashboard">交易仪表盘</a>
+                <a class="page-link-btn" href="/?tab=data">数据页面</a>
+            </div>
+        </header>
+
+        <main>
+            <div class="grid">
+                <div class="card">
+                    <h3>新闻统计（可切换颗粒度）</h3>
+                    <div class="inline-actions" style="margin-bottom: 8px;">
+                        <label style="font-size:12px; color:#9fb1c9;">统计颗粒度</label>
+                        <select id="news-summary-granularity" style="width: 140px;">
+                            <option value="feed">当前列表</option>
+                            <option value="5m">5m</option>
+                            <option value="15m">15m</option>
+                            <option value="1h" selected>1h</option>
+                            <option value="4h">4h</option>
+                            <option value="1d">1d</option>
+                        </select>
+                        <span id="news-summary-gran-meta" style="font-size:12px; color:#9fb1c9;">-</span>
+                    </div>
+                    <div id="news-summary-metrics" class="metrics">
+                        <div class="metric">
+                            <span class="label">当前列表总条数</span>
+                            <span class="value total" id="news-events-count">0</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">利好（当前列表）</span>
+                            <span class="value positive" id="news-positive-count">0</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">中性（当前列表）</span>
+                            <span class="value neutral" id="news-neutral-count">0</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">利空（当前列表）</span>
+                            <span class="value negative" id="news-negative-count">0</span>
+                        </div>
+                    </div>
+                    <div id="news-summary-note" class="list" style="margin-top: 8px; max-height: 130px;">统计说明加载中...</div>
+                    <div id="news-source-stats" class="list" style="margin-top: 8px; max-height: 180px;">来源统计加载中...</div>
+                </div>
+
+                <div class="card">
+                    <h3>刷新与筛选</h3>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>币种（可选）</label>
+                            <input type="text" id="news-symbol" placeholder="例如 BTCUSDT">
+                        </div>
+                        <div class="form-group">
+                            <label>回看时长（小时）</label>
+                            <select id="news-hours">
+                                <option value="6">6h</option>
+                                <option value="12">12h</option>
+                                <option value="24" selected>24h</option>
+                                <option value="48">48h</option>
+                                <option value="72">72h</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>自动刷新</label>
+                            <select id="news-auto-refresh-sec">
+                                <option value="10">10秒</option>
+                                <option value="15" selected>15秒</option>
+                                <option value="30">30秒</option>
+                                <option value="60">60秒</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>拉取条数</label>
+                            <input type="number" id="news-max-records" min="10" max="250" step="1" value="120">
+                        </div>
+                    </div>
+                    <div class="inline-actions">
+                        <button class="btn btn-primary btn-sm" id="news-refresh-btn">刷新列表</button>
+                        <button class="btn btn-primary btn-sm" id="news-pull-btn">立即拉取新闻</button>
+                    </div>
+                    <pre id="news-action-output" class="output-box">等待操作...</pre>
+                </div>
+
+                <div class="card wide">
+                    <h3>结构化事件统计分析（多时间颗粒度）</h3>
+                    <div class="inline-actions" style="margin-bottom: 8px;">
+                        <label style="font-size:12px; color:#9fb1c9;">颗粒度</label>
+                        <select id="news-bucket-granularity" style="width: 120px;">
+                            <option value="5m">5分钟</option>
+                            <option value="15m">15分钟</option>
+                            <option value="1h" selected>1小时</option>
+                            <option value="4h">4小时</option>
+                            <option value="1d">1天</option>
+                        </select>
+                        <span id="news-bucket-meta" style="font-size:12px; color:#9fb1c9;">-</span>
+                    </div>
+                    <div id="news-bucket-chart" style="height: 320px;">加载中...</div>
+                    <div id="news-bucket-list" class="list" style="margin-top: 8px; max-height: 220px;">加载中...</div>
+                </div>
+
+                <div class="card wide">
+                    <h3>未结构化新闻（原始消息）</h3>
+                    <div class="inline-actions" style="margin-bottom: 8px;">
+                        <span id="news-unstructured-count" style="font-size:12px; color:#9fb1c9;">0 条</span>
+                    </div>
+                    <div id="news-unstructured-list" class="list" style="max-height: 380px;">加载中...</div>
+                </div>
+
+                <div class="card wide">
+                    <h3>已结构化事件（可用于策略）</h3>
+                    <div class="inline-actions" style="margin-bottom: 8px;">
+                        <span id="news-structured-count" style="font-size:12px; color:#9fb1c9;">0 条</span>
+                    </div>
+                    <div id="news-structured-list" class="list" style="max-height: 480px;">加载中...</div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <div id="notification" class="notification"></div>
+    <script charset="utf-8" src="/static/js/news.js?v=14"></script>
+</body>
+</html>

@@ -1,0 +1,137 @@
+﻿defaults:
+  default_symbol: BTCUSDT
+  default_impact_score: 0.35
+  default_half_life_min: 240
+  gdelt_timeout_sec: 30
+  gdelt_max_records: 120
+  gdelt_query: "(bitcoin OR ethereum OR binance OR crypto OR ETF OR SEC OR hack OR liquidation OR fed)"
+  news_sources: [jin10, rss, cryptopanic, gdelt, newsapi]
+  jin10_timeout_sec: 18
+  jin10_max_records: 120
+  jin10_endpoint: "https://flash-api.jin10.com/get_flash_list"
+  jin10_app_id: "rU6QIu7JHe2gOUeR"
+  jin10_version: "1.0.0"
+  jin10_referer: "https://www.jin10.com/"
+  rss_timeout_sec: 20
+  rss_max_records: 120
+  rss_query_template: "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+  rss_feeds:
+    - name: coindesk
+      url: "https://www.coindesk.com/arc/outboundfeeds/rss/"
+    - name: cointelegraph
+      url: "https://cointelegraph.com/rss"
+    - name: decrypt
+      url: "https://decrypt.co/feed"
+    - name: google_crypto
+      url: "https://news.google.com/rss/search?q=bitcoin%20OR%20ethereum%20OR%20crypto%20OR%20etf&hl=en-US&gl=US&ceid=US:en"
+    - name: google_macro
+      url: "https://news.google.com/rss/search?q=fed%20OR%20interest%20rate%20OR%20inflation%20crypto&hl=en-US&gl=US&ceid=US:en"
+  cryptopanic_timeout_sec: 30
+  cryptopanic_max_records: 80
+  cryptopanic_filter: hot
+  cryptopanic_currencies: "BTC,ETH,BNB,SOL,XRP,ADA,DOGE"
+  newsapi_timeout_sec: 30
+  newsapi_max_records: 80
+  newsapi_language: en
+  newsapi_query: "(bitcoin OR ethereum OR binance OR crypto OR ETF OR SEC OR hack OR liquidation OR fed)"
+
+llm:
+  model: glm-4.7-flashx
+  base_url: https://open.bigmodel.cn/api/paas/v4
+  timeout_sec: 45
+  batch_size: 8
+  summarize_limit: 40
+  summarize_timeout_sec: 45
+  summarize_batch_size: 6
+  summarize_max_glm_items: 40
+
+thresholds:
+  alpha_threshold: 0.08
+  cooldown_min: 20
+  max_vol: 0.12
+  max_spread: 0.004
+  breaker_drawdown: 0.15
+
+rules:
+  - name: regulation_negative_sec
+    event_type: regulation
+    sentiment: -1
+    impact_score: 0.90
+    half_life_min: 720
+    keywords_any: [sec sues, sec lawsuit, sec crackdown, banned, ban crypto, enforcement action, regulatory clampdown]
+    symbols: [BTCUSDT, ETHUSDT, BNBUSDT]
+
+  - name: regulation_positive_approval
+    event_type: regulation
+    sentiment: 1
+    impact_score: 0.82
+    half_life_min: 720
+    keywords_any: [approved, approval, legal clarity, regulatory green light, license granted, etf approved]
+    symbols: [BTCUSDT, ETHUSDT]
+
+  - name: hack_or_exploit
+    event_type: hack
+    sentiment: -1
+    impact_score: 0.95
+    half_life_min: 1440
+    keywords_any: [hack, hacked, exploit, drained, stolen funds, private key leaked, bridge attack]
+
+  - name: exchange_outage_or_freeze
+    event_type: exchange
+    sentiment: -1
+    impact_score: 0.75
+    half_life_min: 360
+    keywords_any: [withdrawal halted, withdrawals suspended, exchange outage, engine downtime, delisting warning]
+
+  - name: exchange_listing
+    event_type: listing
+    sentiment: 1
+    impact_score: 0.55
+    half_life_min: 180
+    keywords_any: [listed on, listing announcement, perpetual listing, futures listing]
+
+  - name: etf_inflow
+    event_type: etf
+    sentiment: 1
+    impact_score: 0.72
+    half_life_min: 480
+    keywords_any: [etf inflow, record inflow, net inflow, spot etf buying]
+    symbols: [BTCUSDT, ETHUSDT]
+
+  - name: etf_outflow
+    event_type: etf
+    sentiment: -1
+    impact_score: 0.65
+    half_life_min: 480
+    keywords_any: [etf outflow, net outflow, redemption pressure]
+    symbols: [BTCUSDT, ETHUSDT]
+
+  - name: liquidation_flush
+    event_type: liquidation
+    sentiment: -1
+    impact_score: 0.70
+    half_life_min: 120
+    keywords_any: [long liquidations, liquidation cascade, forced selling]
+
+  - name: short_squeeze
+    event_type: liquidation
+    sentiment: 1
+    impact_score: 0.60
+    half_life_min: 90
+    keywords_any: [short squeeze, shorts liquidated, forced short covering]
+
+  - name: macro_hawkish
+    event_type: macro
+    sentiment: -1
+    impact_score: 0.70
+    half_life_min: 600
+    keywords_any: [fed rate hike, hawkish, tighter policy, higher for longer, strong dollar]
+    symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+
+  - name: macro_dovish
+    event_type: macro
+    sentiment: 1
+    impact_score: 0.68
+    half_life_min: 600
+    keywords_any: [rate cut, dovish, liquidity expansion, easing cycle]
+    symbols: [BTCUSDT, ETHUSDT, SOLUSDT]

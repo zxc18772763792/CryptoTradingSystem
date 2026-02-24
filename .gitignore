@@ -1,0 +1,43 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test/cache artifacts
+.pytest_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Runtime files
+logs/
+logs/*.log
+logs/*.out
+logs/*.err
+logs/web_*.log
+data/
+data/cache/
+data/tmp/
+data/research/auto_snapshots/
+.tmp_uvicorn_*.log
+.uv_*.log
+
+# Secrets
+.env
+keys.txt
+
+# OS
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,63 @@
+﻿# Core Dependencies
+ccxt>=4.4,<5
+pandas>=2.2,<3
+numpy>=1.26,<2
+python-dotenv>=1.0,<2
+pydantic>=2.10,<3
+pydantic-settings>=2.7,<3
+
+# Web Framework
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+aiohttp>=3.11,<4
+websockets>=14,<15
+
+# Database
+sqlalchemy>=2.0,<3
+aiosqlite>=0.20,<1
+redis>=5,<6
+
+# Backtesting
+backtrader>=1.9,<2
+
+# Blockchain (DEX)
+web3>=7.6,<8
+
+# Data Processing
+pyarrow>=18,<19
+polars>=1.18,<2
+
+# Visualization
+plotly>=5.24,<6
+matplotlib>=3.10,<4
+
+# Scheduling
+schedule>=1.2,<2
+apscheduler>=3.11,<4
+
+# Technical Analysis
+ta-lib>=0.4,<0.5
+pandas-ta>=0.3.14b0,<0.4
+
+# Logging
+loguru>=0.7,<1
+
+# Testing
+pytest>=8.3,<9
+pytest-asyncio>=0.25,<1
+pytest-cov>=6,<7
+
+# Type Checking
+mypy>=1.14,<2
+types-redis>=4.6,<5
+
+# Utilities
+httpx>=0.28,<1
+tenacity>=9,<10
+python-dateutil>=2.9,<3
+pytz>=2024,<2026
+requests>=2.32,<3
+pyyaml>=6,<7
+
+# News & Sentiment
+feedparser>=6.0,<7

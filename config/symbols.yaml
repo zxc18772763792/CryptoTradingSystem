@@ -1,0 +1,61 @@
+﻿symbols:
+  BTC:
+    canonical: BTCUSDT
+    aliases: [btc, bitcoin, xbt, btcusdt, btc/usdt]
+  ETH:
+    canonical: ETHUSDT
+    aliases: [eth, ethereum, ethusdt, eth/usdt]
+  BNB:
+    canonical: BNBUSDT
+    aliases: [bnb, bnbusdt, bnb/usdt, binancecoin]
+  SOL:
+    canonical: SOLUSDT
+    aliases: [sol, solana, solusdt, sol/usdt]
+  XRP:
+    canonical: XRPUSDT
+    aliases: [xrp, xrpusdt, xrp/usdt, ripple]
+  ADA:
+    canonical: ADAUSDT
+    aliases: [ada, cardano, adausdt, ada/usdt]
+  DOGE:
+    canonical: DOGEUSDT
+    aliases: [doge, dogecoin, dogeusdt, doge/usdt]
+  TRX:
+    canonical: TRXUSDT
+    aliases: [trx, tron, trxusdt, trx/usdt]
+  TON:
+    canonical: TONUSDT
+    aliases: [ton, toncoin, tonusdt, ton/usdt]
+  AVAX:
+    canonical: AVAXUSDT
+    aliases: [avax, avalanche, avaxusdt, avax/usdt]
+  LINK:
+    canonical: LINKUSDT
+    aliases: [link, chainlink, linkusdt, link/usdt]
+  DOT:
+    canonical: DOTUSDT
+    aliases: [dot, polkadot, dotusdt, dot/usdt]
+  MATIC:
+    canonical: MATICUSDT
+    aliases: [matic, polygon, maticusdt, matic/usdt, pol]
+  LTC:
+    canonical: LTCUSDT
+    aliases: [ltc, litecoin, ltcusdt, ltc/usdt]
+  BCH:
+    canonical: BCHUSDT
+    aliases: [bch, bitcoincash, bchusdt, bch/usdt]
+  AAVE:
+    canonical: AAVEUSDT
+    aliases: [aave, aaveusdt, aave/usdt]
+  UNI:
+    canonical: UNIUSDT
+    aliases: [uni, uniswap, uniusdt, uni/usdt]
+  ARB:
+    canonical: ARBUSDT
+    aliases: [arb, arbitrum, arbusdt, arb/usdt]
+  OP:
+    canonical: OPUSDT
+    aliases: [op, optimism, opusdt, op/usdt]
+  SUI:
+    canonical: SUIUSDT
+    aliases: [sui, suiusdt, sui/usdt]

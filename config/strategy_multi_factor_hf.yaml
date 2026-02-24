@@ -1,0 +1,40 @@
+timeframe: "5m"
+
+factors:
+  - name: "ema_slope"
+    params:
+      fast: 8
+      slow: 21
+    weight: 0.70
+    transform: "zscore"
+  - name: "zscore_price"
+    params:
+      lookback: 30
+    weight: -0.30
+    transform: "none"
+
+enter_th: 0.80
+exit_th: 0.30
+cooldown_bars: 2
+
+gates:
+  max_rv: 0.012
+  max_atr_pct: 0.020
+  max_spread_proxy: 0.004
+  min_volume_z: -1.5
+
+position_sizing:
+  base_pct: 0.12
+  max_pct: 0.35
+  leverage: 2.0
+  scale_by_score: true
+
+risk:
+  stop_loss_atr_mult: 1.8
+  take_profit_atr_mult: 2.6
+
+news_gate:
+  enabled: false
+  risk_scalar: 1.0
+  threshold_bias: 0.0
+
