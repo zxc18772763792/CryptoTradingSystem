@@ -776,6 +776,40 @@ async def _binance_public_quotes_usd(assets: List[str]) -> Dict[str, float]:
         return {asset: float(price or 0.0) for asset, price in zip(unique_assets, prices)}
 
 
+async def _fetch_binance_realized_pnl_income(days: int = 30) -> List[Dict[str, Any]]:
+    if not _binance_has_credentials():
+        return []
+    start_time_ms = int((datetime.utcnow() - timedelta(days=max(1, int(days or 30)))).timestamp() * 1000)
+    rows = await _binance_signed_request(
+        "GET",
+        "/fapi/v1/income",
+        host="fapi",
+        params={
+            "incomeType": "REALIZED_PNL",
+            "startTime": start_time_ms,
+            "limit": 1000,
+        },
+        timeout_sec=8.0,
+    )
+    out: List[Dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or "").strip()
+        ts = _safe_dt(row.get("time"))
+        pnl = _safe_float(row.get("income"), default=0.0)
+        if not symbol or not ts:
+            continue
+        out.append(
+            {
+                "symbol": _binance_ccxt_symbol(symbol, futures=True),
+                "timestamp": ts,
+                "pnl": pnl,
+            }
+        )
+    return out
+
+
 async def _fetch_binance_live_wallet_snapshot_fast() -> Dict[str, Any]:
     if not _binance_has_credentials():
         raise RuntimeError("binance api credentials unavailable")
@@ -2563,16 +2597,22 @@ async def get_balance_history(
     hours: int = 24,
     exchange: str = "all",
     limit: int = 500,
+    mode: Optional[str] = None,
 ):
+    resolved_mode = str(mode or ("paper" if execution_engine.is_paper_mode() else "live")).strip().lower()
+    if resolved_mode not in {"paper", "live"}:
+        resolved_mode = "paper" if execution_engine.is_paper_mode() else "live"
     history = await account_snapshot_manager.get_history(
         hours=hours,
         exchange=exchange,
         limit=limit,
+        mode=resolved_mode,
     )
     return {
         "exchange": exchange,
         "hours": hours,
         "points": len(history),
+        "mode": resolved_mode,
         "history": history,
     }
 
@@ -3700,32 +3740,116 @@ async def get_pnl_heatmap(
     bucket: str = "day",
 ):
     bucket_name = "hour" if str(bucket or "").lower() == "hour" else "day"
-    cutoff = datetime.utcnow() - timedelta(days=max(1, min(int(days or 30), 365)))
-    closed_positions = position_manager.get_closed_positions(limit=5000)
+    days = max(1, min(int(days or 30), 365))
+    records = _iter_trade_records(days=days)
 
-    filtered = []
-    for pos in closed_positions:
-        closed_at = _safe_dt(getattr(pos, "updated_at", None)) or _safe_dt(getattr(pos, "opened_at", None))
-        if not closed_at or closed_at < cutoff:
+    filtered: List[Dict[str, Any]] = []
+    for row in records:
+        closed_at = _safe_dt(row.get("timestamp"))
+        if not closed_at:
             continue
-        symbol = str(getattr(pos, "symbol", "") or "").strip() or "UNKNOWN"
-        pnl = _safe_float(getattr(pos, "realized_pnl", 0.0), default=0.0)
+        symbol = str(row.get("symbol") or "").strip() or "UNKNOWN"
+        pnl = _safe_float(row.get("pnl"), default=0.0)
         filtered.append(
             {
                 "symbol": symbol,
                 "closed_at": closed_at,
-                "pnl": pnl,
+                "value": pnl,
             }
         )
+
+    display_mode = "realized_pnl"
+    value_title = "PnL"
+    value_hover = "PnL"
+    note = "按已平仓真实交易盈亏聚合。"
+
+    if not filtered:
+        if not execution_engine.is_paper_mode():
+            try:
+                live_income_rows = await asyncio.wait_for(
+                    _fetch_binance_realized_pnl_income(days=days),
+                    timeout=5.5,
+                )
+            except Exception:
+                live_income_rows = []
+            for row in live_income_rows:
+                filtered.append(
+                    {
+                        "symbol": str(row.get("symbol") or "").strip() or "UNKNOWN",
+                        "closed_at": _safe_dt(row.get("timestamp")),
+                        "value": _safe_float(row.get("pnl"), default=0.0),
+                    }
+                )
+            filtered = [row for row in filtered if row.get("closed_at")]
+
+    if not filtered:
+        try:
+            audit_rows = await audit_logger.list_logs(
+                module="trading",
+                action="trade_close",
+                status="success",
+                hours=days * 24,
+                limit=5000,
+            )
+        except Exception:
+            audit_rows = []
+        for row in audit_rows:
+            details = dict(row.get("details") or {})
+            ts = _safe_dt(details.get("timestamp") or row.get("timestamp"))
+            if not ts:
+                continue
+            symbol = str(details.get("symbol") or "").strip() or "UNKNOWN"
+            pnl = _safe_float(details.get("pnl"), default=0.0)
+            filtered.append(
+                {
+                    "symbol": symbol,
+                    "closed_at": ts,
+                    "value": pnl,
+                }
+            )
+
+    if not filtered:
+        fallback_orders = []
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        for order in order_manager.get_recent_orders(limit=5000):
+            ts = _safe_dt(getattr(order, "timestamp", None))
+            if not ts or ts < cutoff:
+                continue
+            status = str(getattr(getattr(order, "status", None), "value", getattr(order, "status", "")) or "").lower()
+            if status not in {"closed", "filled"}:
+                continue
+            amount = _safe_float(getattr(order, "filled", None), default=_safe_float(getattr(order, "amount", 0.0)))
+            price = _safe_float(getattr(order, "price", 0.0))
+            symbol = str(getattr(order, "symbol", "") or "").strip() or "UNKNOWN"
+            if amount <= 0 or price <= 0:
+                continue
+            side = str(getattr(getattr(order, "side", None), "value", getattr(order, "side", "")) or "").lower()
+            signed_cashflow = amount * price * (-1.0 if side == "buy" else 1.0)
+            fallback_orders.append(
+                {
+                    "symbol": symbol,
+                    "closed_at": ts,
+                    "value": signed_cashflow,
+                }
+            )
+        filtered = fallback_orders
+        display_mode = "cashflow_proxy"
+        value_title = "Cashflow"
+        value_hover = "现金流代理"
+        note = "当前无已平仓盈亏记录，回退显示已成交订单现金流代理（卖出为正，买入为负）。"
 
     if not filtered:
         return {
             "bucket": bucket_name,
-            "days": max(1, min(int(days or 30), 365)),
+            "days": days,
             "times": [],
             "symbols": [],
             "matrix": [],
             "trade_count": 0,
+            "display_mode": "empty",
+            "value_title": value_title,
+            "value_hover": value_hover,
+            "note": "暂无可用于绘制热力图的已平仓交易或已成交订单记录。",
         }
 
     symbol_set = sorted({row["symbol"] for row in filtered})
@@ -3737,15 +3861,19 @@ async def get_pnl_heatmap(
     for row in filtered:
         x = symbol_index[row["symbol"]]
         y = bucket_index[_bucket_key(row["closed_at"], bucket_name)]
-        matrix[y][x] += float(row["pnl"])
+        matrix[y][x] += float(row["value"])
 
     return {
         "bucket": bucket_name,
-        "days": max(1, min(int(days or 30), 365)),
+        "days": days,
         "times": bucket_set,
         "symbols": symbol_set,
         "matrix": [[round(float(v), 6) for v in row] for row in matrix],
         "trade_count": len(filtered),
+        "display_mode": display_mode,
+        "value_title": value_title,
+        "value_hover": value_hover,
+        "note": note,
     }
 
 

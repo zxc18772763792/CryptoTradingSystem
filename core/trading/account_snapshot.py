@@ -70,6 +70,7 @@ class AccountSnapshotManager:
         hours: int = 24,
         exchange: str = "all",
         limit: int = 500,
+        mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Get snapshot history for charting."""
         hours = max(1, hours)
@@ -80,33 +81,41 @@ class AccountSnapshotManager:
             stmt = (
                 select(AccountSnapshot)
                 .where(AccountSnapshot.timestamp >= cutoff)
+                .where(AccountSnapshot.total_usd > 0)
                 .where(
                     AccountSnapshot.source == ("portfolio" if exchange == "all" else "exchange")
                 )
-                .order_by(AccountSnapshot.timestamp.asc())
+                .order_by(AccountSnapshot.timestamp.desc())
                 .limit(limit)
             )
+            if mode:
+                stmt = stmt.where(AccountSnapshot.mode == str(mode))
             if exchange != "all":
                 stmt = stmt.where(AccountSnapshot.exchange == exchange)
 
             result = await session.execute(stmt)
-            rows = result.scalars().all()
+            rows = list(reversed(result.scalars().all()))
 
-        return [
-            {
-                "timestamp": (
-                    (row.timestamp.replace(tzinfo=timezone.utc) if row.timestamp and row.timestamp.tzinfo is None else row.timestamp)
-                    .astimezone(timezone.utc)
-                    .isoformat()
-                    if row.timestamp
-                    else None
-                ),
-                "exchange": row.exchange,
-                "total_usd": round(float(row.total_usd or 0.0), 2),
-                "mode": row.mode,
-            }
-            for row in rows
-        ]
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            total_usd = round(float(row.total_usd or 0.0), 2)
+            if total_usd <= 0:
+                continue
+            out.append(
+                {
+                    "timestamp": (
+                        (row.timestamp.replace(tzinfo=timezone.utc) if row.timestamp and row.timestamp.tzinfo is None else row.timestamp)
+                        .astimezone(timezone.utc)
+                        .isoformat()
+                        if row.timestamp
+                        else None
+                    ),
+                    "exchange": row.exchange,
+                    "total_usd": total_usd,
+                    "mode": row.mode,
+                }
+            )
+        return out
 
     async def get_day_start_total(
         self,

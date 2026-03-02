@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 
 from config.settings import settings
+from core.audit import audit_logger
 from core.exchanges import exchange_manager
 from core.risk.risk_manager import risk_manager
 from core.strategies import Signal, SignalType
@@ -1152,6 +1153,29 @@ class ExecutionEngine:
                 "slippage_cost_usd": slippage_cost_usd,
             },
         }
+        try:
+            await audit_logger.log(
+                module="trading",
+                action="trade_close",
+                status="success",
+                message=f"closed {signal.symbol} {position_side.value}",
+                details={
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "symbol": signal.symbol,
+                    "strategy": signal.strategy_name,
+                    "exchange": exchange,
+                    "side": position_side.value,
+                    "pnl": float(result.get("pnl") or 0.0),
+                    "fee_usd": float(result.get("fee_usd") or 0.0),
+                    "slippage_cost_usd": float(result.get("slippage_cost_usd") or 0.0),
+                    "close_price": float(result.get("close_price") or 0.0),
+                    "quantity": float(close_qty or 0.0),
+                    "notional": float(close_price * close_qty),
+                    "account_id": account_id,
+                },
+            )
+        except Exception as audit_err:
+            logger.debug(f"trade_close audit log skipped: {audit_err}")
         await self._notify_callbacks("order_executed", result)
         return result
 

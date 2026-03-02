@@ -54,7 +54,7 @@ _AUTO_PULL_RUNNING = False
 _AUTO_PULL_LAST_AT: Optional[datetime] = None
 _NEWS_PIPELINE_LOCK = asyncio.Lock()
 _MANUAL_PULL_SEQ = 0
-_NEWS_RESPONSE_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {"latest": {}, "summary": {}}
+_NEWS_RESPONSE_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {"latest": {}, "summary": {}, "health": {}}
 
 
 class PullNowRequest(BaseModel):
@@ -931,6 +931,12 @@ async def pull_and_store_news(cfg: Dict[str, Any], payload: PullNowRequest) -> D
 
 @router.get("/health")
 async def health() -> Dict[str, Any]:
+    cache_key = "default"
+    ttl_sec = _env_int("NEWS_API_HEALTH_CACHE_TTL_SEC", 15)
+    cached = _cache_get("health", cache_key, ttl_sec)
+    if cached:
+        return cached
+
     def _enabled(name: str, default: bool = True) -> bool:
         return str(os.environ.get(name, "1" if default else "0")).strip().lower() not in {"0", "false", "no", "off"}
 
@@ -943,28 +949,61 @@ async def health() -> Dict[str, Any]:
     cryptopanic_enabled = bool(os.environ.get("CRYPTOPANIC_TOKEN") or os.environ.get("CRYPTOPANIC_API_KEY"))
     if str(os.environ.get("NEWS_ENABLE_CRYPTOPANIC", "1")).strip().lower() in {"0", "false", "no", "off"}:
         cryptopanic_enabled = False
-    source_states = await news_db.list_source_states()
-    llm_queue = await news_db.get_llm_queue_stats()
-    return {
-        "status": "ok",
-        "service": "web_news",
-        "timestamp": _now_utc().isoformat(),
-        "llm_enabled": bool(os.environ.get("ZHIPU_API_KEY")),
-        "sources": {
-            "jin10": jin10_enabled,
-            "rss": rss_enabled,
-            "gdelt": gdelt_enabled,
-            "newsapi": newsapi_enabled,
-            "cryptopanic": cryptopanic_enabled,
-            "chaincatcher_flash": _enabled("NEWS_ENABLE_CHAINCATCHER_FLASH", True),
-            "binance_announcements": _enabled("NEWS_ENABLE_BINANCE_ANNOUNCEMENTS", True),
-            "okx_announcements": _enabled("NEWS_ENABLE_OKX_ANNOUNCEMENTS", True),
-            "bybit_announcements": _enabled("NEWS_ENABLE_BYBIT_ANNOUNCEMENTS", True),
-            "cryptocompare_news": _enabled("NEWS_ENABLE_CRYPTOCOMPARE_NEWS", True),
-        },
-        "source_states": source_states,
-        "llm_queue": llm_queue,
-    }
+    try:
+        db_timeout = max(1, _env_int("NEWS_API_HEALTH_DB_TIMEOUT_SEC", 2))
+        source_states, llm_queue = await asyncio.gather(
+            asyncio.wait_for(news_db.list_source_states(), timeout=db_timeout),
+            asyncio.wait_for(news_db.get_llm_queue_stats(), timeout=db_timeout),
+        )
+        payload = {
+            "status": "ok",
+            "service": "web_news",
+            "timestamp": _now_utc().isoformat(),
+            "llm_enabled": bool(os.environ.get("ZHIPU_API_KEY")),
+            "sources": {
+                "jin10": jin10_enabled,
+                "rss": rss_enabled,
+                "gdelt": gdelt_enabled,
+                "newsapi": newsapi_enabled,
+                "cryptopanic": cryptopanic_enabled,
+                "chaincatcher_flash": _enabled("NEWS_ENABLE_CHAINCATCHER_FLASH", True),
+                "binance_announcements": _enabled("NEWS_ENABLE_BINANCE_ANNOUNCEMENTS", True),
+                "okx_announcements": _enabled("NEWS_ENABLE_OKX_ANNOUNCEMENTS", True),
+                "bybit_announcements": _enabled("NEWS_ENABLE_BYBIT_ANNOUNCEMENTS", True),
+                "cryptocompare_news": _enabled("NEWS_ENABLE_CRYPTOCOMPARE_NEWS", True),
+            },
+            "source_states": source_states,
+            "llm_queue": llm_queue,
+        }
+        return _cache_set("health", cache_key, payload)
+    except Exception as exc:
+        logger.warning(f"news health failed: {exc}")
+        stale = _cache_get_stale("health", cache_key)
+        if stale:
+            stale["status"] = "degraded"
+            stale["fallback_reason"] = str(exc)
+            return stale
+        return {
+            "status": "degraded",
+            "service": "web_news",
+            "timestamp": _now_utc().isoformat(),
+            "llm_enabled": bool(os.environ.get("ZHIPU_API_KEY")),
+            "sources": {
+                "jin10": jin10_enabled,
+                "rss": rss_enabled,
+                "gdelt": gdelt_enabled,
+                "newsapi": newsapi_enabled,
+                "cryptopanic": cryptopanic_enabled,
+                "chaincatcher_flash": _enabled("NEWS_ENABLE_CHAINCATCHER_FLASH", True),
+                "binance_announcements": _enabled("NEWS_ENABLE_BINANCE_ANNOUNCEMENTS", True),
+                "okx_announcements": _enabled("NEWS_ENABLE_OKX_ANNOUNCEMENTS", True),
+                "bybit_announcements": _enabled("NEWS_ENABLE_BYBIT_ANNOUNCEMENTS", True),
+                "cryptocompare_news": _enabled("NEWS_ENABLE_CRYPTOCOMPARE_NEWS", True),
+            },
+            "source_states": [],
+            "llm_queue": {},
+            "fallback_reason": str(exc),
+        }
 
 
 @router.post("/pull_now")

@@ -262,11 +262,22 @@ scales:{x:{ticks:{autoSkip:true,maxTicksLimit:8}},y:{ticks:{callback:v=>`$${Numb
 });
 }
 function drawEquity(hist){
-if(!equityChart||!hist?.length)return;
+if(!equityChart)return;
+if(!hist?.length){
+equityChart.data.labels=[];
+equityChart.data.datasets[0].data=[];
+equityChart.update('none');
+return;
+}
 const max=220;
 const sampled=hist.length>max?hist.filter((_,i)=>i%Math.ceil(hist.length/max)===0):hist;
-const rows=sampled.map(x=>({timestamp:x.timestamp,total:Number(x.total_usd||0)})).filter(x=>Number.isFinite(x.total)&&toDate(x.timestamp));
-if(!rows.length)return;
+const rows=sampled.map(x=>({timestamp:x.timestamp,total:Number(x.total_usd||0)})).filter(x=>Number.isFinite(x.total)&&x.total>0&&toDate(x.timestamp));
+if(!rows.length){
+equityChart.data.labels=[];
+equityChart.data.datasets[0].data=[];
+equityChart.update('none');
+return;
+}
 equityChart.data.labels=rows.map(x=>fmtAxisDateTime(x.timestamp));
 equityChart.data.datasets[0].data=rows.map(x=>x.total);
 equityChart.$rawTs=rows.map(x=>x.timestamp);
@@ -291,16 +302,15 @@ function renderExchanges(b){const el=document.getElementById('exchanges-list');i
 
 async function loadSummary(){
 try{
-const [sr,br,hr]=await Promise.allSettled([
+const [sr,br]=await Promise.allSettled([
 api('/trading/stats',{timeoutMs:8000}),
 api('/trading/balances',{timeoutMs:22000}),
-api('/trading/balances/history?hours=72&exchange=all&limit=500',{timeoutMs:8000}),
 ]);
 const s=sr.status==='fulfilled'?sr.value:{};
 const b=br.status==='fulfilled'?br.value:{};
-const h=hr.status==='fulfilled'?hr.value:{};
 const statusMode=String(state?._systemStatusLast?.trading_mode||'').toLowerCase();
 const activeType=String(b?.active_account_type??b?.mode??statusMode??'paper').toLowerCase();
+const h=await api(`/trading/balances/history?hours=72&exchange=all&limit=500&mode=${encodeURIComponent(activeType==='live'?'live':'paper')}`,{timeoutMs:8000}).catch(()=>({history:[]}));
 const activeUsd=Number(b?.active_account_usd_estimate??b?.total_usd_estimate??0);
 const mergedRisk=(b?.risk_report||s?.risk||null);
 const mergedEquity=(mergedRisk?.equity||{});
@@ -328,7 +338,8 @@ async function loadRisk(){try{renderRisk(await api('/trading/risk/report'));}cat
 function renderPnlHeatmap(data){
 const box=document.getElementById('pnl-heatmap');
 if(!box)return;
-if(!data?.times?.length||!data?.symbols?.length||!data?.matrix?.length){box.innerHTML='<div class="list-item">暂无已平仓盈亏数据，请先运行策略或手动交易。</div>';return;}
+const note=String(data?.note||'').trim();
+if(!data?.times?.length||!data?.symbols?.length||!data?.matrix?.length){box.innerHTML=`<div class="list-item">${esc(note||'暂无已平仓盈亏数据，请先运行策略或手动交易。')}</div>`;return;}
 if(typeof Plotly==='undefined'){box.innerHTML='<div class="list-item">图表库未加载，热力图暂不可用。</div>';return;}
 const flat=(data.matrix||[]).flat().map(v=>Number(v||0)).filter(v=>Number.isFinite(v));
 if(!flat.length){box.innerHTML='<div class="list-item">热力图数据为空。</div>';return;}
@@ -339,8 +350,10 @@ const yLabels=(data.times||[]).map(t=>fmtHeatmapBucket(t,bucket));
 const xLabels=(data.symbols||[]).map(s=>String(s||'').replace('/USDT','').replace('/USD','').replace('/PERP',''));
 const zmax=Math.max(absMax,1e-8),zmin=-zmax;
 const chartHeight=Math.max(300,Math.min(680,150 + yLabels.length*30 + (xLabels.length>10?80:40)));
-box.style.height=`${chartHeight}px`;
-Plotly.react(box,[{
+box.innerHTML=`${note?`<div class="list-item" style="margin-bottom:8px;">${esc(note)}</div>`:''}<div id="pnl-heatmap-plot" style="height:${chartHeight}px;"></div>`;
+const plotEl=document.getElementById('pnl-heatmap-plot');
+if(!plotEl)return;
+Plotly.react(plotEl,[{
 type:'heatmap',
 x:xLabels,
 y:yLabels,
@@ -349,10 +362,10 @@ colorscale:[[0,'#b13a48'],[0.5,'#1f2a3a'],[1,'#1f9d63']],
 zmid:0,
 zmin,
 zmax,
-colorbar:{title:'PnL',thickness:14,len:.88,y:.5},
+colorbar:{title:String(data?.value_title||'PnL'),thickness:14,len:.88,y:.5},
 xgap:1,
 ygap:1,
-hovertemplate:'币种=%{x}<br>时间=%{y}<br>PnL=%{z:.6f}<extra></extra>',
+hovertemplate:`币种=%{x}<br>时间=%{y}<br>${esc(String(data?.value_hover||'PnL'))}=%{z:.6f}<extra></extra>`,
 }],{
 paper_bgcolor:'#111723',
 plot_bgcolor:'#111723',
@@ -885,7 +898,7 @@ loadStrategies().catch(()=>{});
 }
 async function compareLive(name){try{const d=await api(`/strategies/${name}/live-vs-backtest`);(document.getElementById('editor-compare-output')||document.getElementById('backtest-extra-output')).textContent=JSON.stringify(d,null,2);notify(`策略 ${name} 实盘/回测对比已刷新`);}catch(e){notify(`策略对比失败: ${e.message}`,true);}}
 
-const marketDataState={exchange:'',symbol:'',timeframe:'',limit:1200,bars:[],isLoading:false,isLoadingLeft:false,isLoadingRight:false,lastRange:null,realtimeTimer:null,chartBound:false,realtimeInFlight:false,lastRealtimePollAt:0,lastChartKey:''};
+const marketDataState={exchange:'',symbol:'',timeframe:'',limit:1200,bars:[],isLoading:false,isLoadingLeft:false,isLoadingRight:false,lastRange:null,realtimeTimer:null,chartBound:false,realtimeInFlight:false,lastRealtimePollAt:0,lastChartKey:'',loadSeq:0};
 const autoDataOpsState={downloadAt:new Map(),repairAt:new Map(),lastHintAt:0};
 const MARKET_MAX_BARS=14000;
 function klinePad2(n){return String(Math.max(0,Number(n)||0)).padStart(2,'0');}
@@ -1019,6 +1032,15 @@ if(!resetView&&marketDataState.lastRange?.start&&marketDataState.lastRange?.end)
 Plotly.react(c,[{type:'candlestick',x,open:o,high:h,low:l,close:cl,increasing:{line:{color:'#1f9d63'}},decreasing:{line:{color:'#d9534f'}},xaxis:'x',yaxis:'y'},{type:'bar',x,y:v,marker:{color:vc,opacity:.7},xaxis:'x2',yaxis:'y2'}],layout,{responsive:true,scrollZoom:true,displaylogo:false,modeBarButtonsToAdd:['drawline','drawopenpath','drawrect','eraseshape'],modeBarButtonsToRemove:['lasso2d','select2d']});
 schedulePlotlyResize(document.getElementById('data')||document);
 }
+function resetKlineChartForSwitch(message='正在切换币种并加载新行情...'){
+const c=document.getElementById('candlestick-chart');
+marketDataState.bars=[];
+marketDataState.chartBound=false;
+marketDataState.lastRange=null;
+if(!c)return;
+try{if(typeof Plotly!=='undefined')Plotly.purge(c);}catch{}
+c.innerHTML=`<p style="color:#8b949e;text-align:center;padding:50px;">${esc(message)}</p>`;
+}
 async function loadMoreLeftByViewport(){
 if(marketDataState.isLoadingLeft||marketDataState.isLoading)return;
 const bars=marketDataState.bars||[];
@@ -1092,6 +1114,7 @@ bindKlineChartEvents();
 async function refreshKlineRealtime(){
 if(!isDataTabActive()||marketDataState.isLoading||marketDataState.realtimeInFlight)return;
 if(!marketDataState.exchange||!marketDataState.symbol||!marketDataState.timeframe)return;
+const refreshKey=`${marketDataState.exchange}|${marketDataState.symbol}|${marketDataState.timeframe}|${marketDataState.loadSeq}`;
 const bars=marketDataState.bars||[];
 if(!bars.length){try{await loadKlinesByForm();}catch{}return;}
 marketDataState.realtimeInFlight=true;
@@ -1101,6 +1124,7 @@ const lastMs=klineToMs(bars[bars.length-1]?.timestamp);
 if(!Number.isFinite(lastMs))return;
 const startTime=new Date(lastMs-Math.max(1000,tfSec*3000)).toISOString();
 const latest=await fetchKlinesChunk({exchange:marketDataState.exchange,symbol:marketDataState.symbol,timeframe:marketDataState.timeframe,limit:Math.min(600,marketDataState.limit),startTime,align:'head',timeoutMs:9000});
+if(refreshKey!==`${marketDataState.exchange}|${marketDataState.symbol}|${marketDataState.timeframe}|${marketDataState.loadSeq}`)return;
 marketDataState.lastRealtimePollAt=Date.now();
 if(latest.length){marketDataState.bars=cropBars(mergeBars(marketDataState.bars,latest));renderKlineChart(true);}else if(hasLargeGap(marketDataState.bars,marketDataState.timeframe)){
   const range=inferBackfillRangeFromBars(marketDataState.bars, marketDataState.timeframe);
@@ -1116,13 +1140,15 @@ setTimeout(()=>{refreshKlineRealtime().catch(()=>{});},300);
 }
 async function loadKlinesByForm(){
 const ex=document.getElementById('data-exchange').value,s=document.getElementById('data-symbol').value,tf=document.getElementById('data-timeframe').value,l=parseInt(document.getElementById('data-limit').value||'1200',10);
+const loadSeq=marketDataState.loadSeq+1;
+marketDataState.loadSeq=loadSeq;
 marketDataState.exchange=ex;
 marketDataState.symbol=s;
 marketDataState.timeframe=tf;
 marketDataState.limit=Math.max(100,Math.min(5000,l));
 marketDataState.isLoading=true;
 marketDataState.lastRange=null;
-scheduleKlineRealtime();
+resetKlineChartForSwitch(`正在加载 ${s} ${tf} 行情...`);
 try{
 let actualExchange=ex;
 const isSubSecond=String(tf||'').endsWith('s');
@@ -1143,15 +1169,17 @@ await autoBackfillData({exchange:actualExchange,symbol:s,timeframe:tf,reason:'in
 await new Promise(r=>setTimeout(r,isSubSecond?1800:900));
 data=await fetchKlinesChunk({exchange:actualExchange,symbol:s,timeframe:tf,limit:marketDataState.limit,align:'tail',timeoutMs:isSubSecond?35000:22000});
 }
+if(loadSeq!==marketDataState.loadSeq)return;
 if(!data.length){throw new Error(`${s} ${tf} 暂无可用数据，已触发后台自动补数，请稍后再试`);}
 marketDataState.exchange=actualExchange;
 await drawK(data);
+if(loadSeq===marketDataState.loadSeq)scheduleKlineRealtime();
 if(hasLargeGap(marketDataState.bars,marketDataState.timeframe)){
   const range=inferBackfillRangeFromBars(marketDataState.bars, marketDataState.timeframe);
   await autoBackfillData({exchange:actualExchange,symbol:s,timeframe:tf,reason:'gap-check',...range});
 }
 }finally{
-marketDataState.isLoading=false;
+if(loadSeq===marketDataState.loadSeq)marketDataState.isLoading=false;
 }
 }
 async function loadDataSymbolOptions(exchange, selectIds=['data-symbol','download-symbol']){
@@ -1329,12 +1357,12 @@ const run=async(a,btn)=>{
 [['btn-integrity-check','check'],['btn-integrity-repair','repair'],['btn-cross-validate','cross'],['btn-reconnect','reconnect']].forEach(([id,a])=>{const b=document.getElementById(id);if(b)b.onclick=()=>run(a,b);});
 const dataExchange=document.getElementById('data-exchange');
 const downloadExchange=document.getElementById('download-exchange');
-if(dataExchange)dataExchange.onchange=async()=>{await loadDataSymbolOptions(dataExchange.value,['data-symbol']);scheduleDataChartReload(220);};
+if(dataExchange)dataExchange.onchange=async()=>{resetKlineChartForSwitch('正在切换交易所并加载新行情...');await loadDataSymbolOptions(dataExchange.value,['data-symbol']);scheduleDataChartReload(220);};
 if(downloadExchange)downloadExchange.onchange=()=>loadDataSymbolOptions(downloadExchange.value,['download-symbol']);
 const dataSymbol=document.getElementById('data-symbol');
-if(dataSymbol)dataSymbol.onchange=()=>scheduleDataChartReload(120);
+if(dataSymbol)dataSymbol.onchange=()=>{resetKlineChartForSwitch('正在切换币种并加载新行情...');scheduleDataChartReload(120);};
 const dataTimeframe=document.getElementById('data-timeframe');
-if(dataTimeframe)dataTimeframe.onchange=()=>scheduleDataChartReload(120);
+if(dataTimeframe)dataTimeframe.onchange=()=>{resetKlineChartForSwitch('正在切换周期并加载新行情...');scheduleDataChartReload(120);};
 loadDataSymbolOptions(document.getElementById('data-exchange')?.value||'binance',['data-symbol']);
 loadDataSymbolOptions(document.getElementById('download-exchange')?.value||'binance',['download-symbol']);
 loadDataSymbolOptions('binance',['backtest-symbol']);
@@ -1759,7 +1787,7 @@ ${renderRangeLockIndicatorHtml(data,false)}
 </div>
 <div class="inline-actions" style="margin-top:10px;">
   <button type="button" class="btn btn-primary btn-sm" id="btn-apply-opt-best">一键回填最佳参数到策略参数编辑</button>
-  <button type="button" class="btn btn-primary btn-sm" id="btn-register-opt-best">按最佳参数注册新实例</button>
+  <button type="button" class="btn btn-primary btn-sm" id="btn-register-opt-best" onclick="registerOptimizeBestAsNewStrategyInstance()">按最佳参数注册新实例</button>
   <span style="font-size:12px;color:#9fb1c9;">回填仅填前端编辑面板；注册选项：${regCfg.allocation.toFixed(2)}${regCfg.autoStart?' / 自动启动':''}${regCfg.suffix?` / ${regCfg.suffix}`:''}</span>
 </div>
 <div class="section-title">Top 参数组合</div>
@@ -1940,13 +1968,24 @@ const name=String(spec?.name||'').trim()||buildBacktestRegisteredName(strategyTy
 const payload={name,strategy_type:strategyType,params,symbols:[symbol],timeframe,exchange,allocation};
 const r=await api('/strategies/register',{method:'POST',body:JSON.stringify(payload)});
 const actualName=String(r?.name||name);
+const out=getBacktestExtraPanel();
+if(out){
+  out.insertAdjacentHTML('afterbegin', `<div class="list-item"><span>已注册新实例</span><span>${esc(actualName)}</span></div>`);
+}
 if(autoStart){
   try{await api(`/strategies/${encodeURIComponent(actualName)}/start`,{method:'POST'});}catch(e){notify(`实例已注册但自动启动失败: ${e.message}`,true);}
 }
 notify(`已注册新实例：${actualName}${autoStart?'（已启动）':''}`);
 await Promise.all([loadStrategies(),loadStrategySummary()]);
 activateTab('strategies');
-setTimeout(()=>openEditor(actualName).catch(()=>{}),80);
+setTimeout(async()=>{
+  try{
+    await loadStrategies();
+    await openEditor(actualName);
+  }catch(e){
+    console.warn('openEditor after register failed', e?.message||e);
+  }
+},180);
 return actualName;
 }
 async function registerOptimizeBestAsNewStrategyInstance(){
@@ -1954,14 +1993,22 @@ try{
 const opt=backtestUIState.lastOptimize;
 const best=opt?.best;
 if(!opt||!best){notify('暂无可注册的优化结果',true);return;}
+const btn=document.getElementById('btn-register-opt-best');
+const prevText=btn?btn.textContent:'';
+if(btn){btn.disabled=true;btn.textContent='注册中...';}
 await registerStrategyInstanceFromBacktestSpec({
-  strategy_type: opt.strategy,
+  strategy_type: String(opt.strategy_type||opt.strategy||'').trim(),
   symbol: opt.symbol,
   timeframe: opt.timeframe,
   params: best.params||{},
   exchange: 'binance',
 });
-}catch(e){notify(`注册优化最佳实例失败: ${e.message}`,true);}
+}catch(e){
+  notify(`注册优化最佳实例失败: ${e.message}`,true);
+}finally{
+  const btn=document.getElementById('btn-register-opt-best');
+  if(btn){btn.disabled=false;btn.textContent='按最佳参数注册新实例';}
+}
 }
 async function registerCompareStrategyByRank(rankIndex){
 const ranked=Array.isArray(backtestUIState?.lastCompare?.ranked)?backtestUIState.lastCompare.ranked:[];
@@ -2892,7 +2939,7 @@ setInterval(()=>{loadPositions().catch(()=>{});loadBalances().catch(()=>{});load
 setInterval(()=>{loadOrders();loadOpenOrders();loadStrategySummary();},10000);
 setInterval(()=>{loadPnlHeatmap();loadNotificationCenter();loadAuditLogs();loadStrategyHealth();},20000);}
 
-window.cancelOrder=cancelOrder;window.cancelConditional=cancelConditional;window.registerStrategy=registerStrategy;window.toggleStrategy=toggleStrategy;window.saveAllocation=saveAllocation;window.openEditor=openEditor;window.compareLive=compareLive;window.openStrategyEditor=openEditor;window.compareStrategyLive=compareLive;window.previewCompareStrategyByRank=previewCompareStrategyByRank;window.registerCompareStrategyByRank=registerCompareStrategyByRank;window.editNotifyRule=editNotifyRule;window.toggleNotifyRule=toggleNotifyRule;window.deleteNotifyRule=deleteNotifyRule;
+window.cancelOrder=cancelOrder;window.cancelConditional=cancelConditional;window.registerStrategy=registerStrategy;window.toggleStrategy=toggleStrategy;window.saveAllocation=saveAllocation;window.openEditor=openEditor;window.compareLive=compareLive;window.openStrategyEditor=openEditor;window.compareStrategyLive=compareLive;window.previewCompareStrategyByRank=previewCompareStrategyByRank;window.registerCompareStrategyByRank=registerCompareStrategyByRank;window.registerOptimizeBestAsNewStrategyInstance=registerOptimizeBestAsNewStrategyInstance;window.editNotifyRule=editNotifyRule;window.toggleNotifyRule=toggleNotifyRule;window.deleteNotifyRule=deleteNotifyRule;
 window.addEventListener('error',e=>{markBootFailure(e?.error||new Error(e?.message||'前端错误'));});
 window.addEventListener('unhandledrejection',e=>{markBootFailure(e?.reason||new Error('未处理的Promise异常'));});
 init().catch(markBootFailure);

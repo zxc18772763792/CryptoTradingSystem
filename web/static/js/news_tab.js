@@ -357,7 +357,7 @@
     }
 
     async function loadHealth() {
-        return request("/health", { timeoutMs: 12000 });
+        return request("/health", { timeoutMs: 6000 });
     }
 
     async function loadFeed(useSummarize = false) {
@@ -385,14 +385,24 @@
 
     async function refreshAll() {
         try {
-            const [summary, latest, health] = await Promise.all([loadSummary(), loadFeed(false), loadHealth()]);
-            state.health = health || null;
+            const [summary, latest] = await Promise.all([loadSummary(), loadFeed(false)]);
             applyData(summary, latest);
+            loadHealth().then((health) => {
+                state.health = health || state.health || null;
+                renderHealth(state.summary || {}, state.health || {});
+            }).catch(() => {
+                renderHealth(state.summary || {}, state.health || {});
+            });
         } catch (e) {
             try {
-                const [summary, latest, health] = await Promise.all([loadSummary(), loadFeed(false), loadHealth()]);
-                state.health = health || null;
+                const [summary, latest] = await Promise.all([loadSummary(), loadFeed(false)]);
                 applyData(summary, latest);
+                loadHealth().then((health) => {
+                    state.health = health || state.health || null;
+                    renderHealth(state.summary || {}, state.health || {});
+                }).catch(() => {
+                    renderHealth(state.summary || {}, state.health || {});
+                });
                 notify("新闻接口较慢，已回退到快速刷新");
             } catch (e2) {
                 notify(`新闻刷新失败: ${e2.message || e.message}`, true);
