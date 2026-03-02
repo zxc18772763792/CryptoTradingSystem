@@ -122,6 +122,24 @@ def _hash_event_fallback(item: Dict[str, Any]) -> str:
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:24]
 
 
+def _semantic_event_key(event: Dict[str, Any]) -> str:
+    evidence = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
+    title = str(evidence.get("title") or "").strip().lower()
+    title = re.sub(r"\s+", " ", title)
+    title = re.sub(r"[^\w\u4e00-\u9fff ]+", "", title)
+    url = str(evidence.get("url") or "").strip().lower()
+    anchor = title or url or "no_anchor"
+    ts = str(event.get("ts") or "")
+    bucket = ts[:16]
+    seed = (
+        f"{str(event.get('symbol') or '').upper()}|"
+        f"{str(event.get('event_type') or '').lower()}|"
+        f"{int(event.get('sentiment') or 0)}|"
+        f"{bucket}|{anchor}"
+    )
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()
+
+
 def _summary_cache_key(title: str, max_length: int) -> str:
     seed = f"{str(title or '').strip()}|{int(max_length)}"
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()
@@ -392,7 +410,12 @@ def extract_events_glm5_with_meta(news_items: List[Dict[str, Any]], cfg: Dict[st
         try:
             events = _call_glm5_once(batch=batch, cfg=cfg, mapper=mapper, feedback="")
             llm_used = True
-            all_events.extend(events)
+            if not events:
+                fallback = extract_events_rules(batch, cfg)
+                all_events.extend(fallback)
+            else:
+                all_events.extend(events)
+                all_events.extend(extract_events_rules(batch, cfg))
             continue
         except Exception as first_exc:
             feedback = f"Validation or parsing error: {first_exc}"
@@ -400,7 +423,12 @@ def extract_events_glm5_with_meta(news_items: List[Dict[str, Any]], cfg: Dict[st
         try:
             events = _call_glm5_once(batch=batch, cfg=cfg, mapper=mapper, feedback=feedback)
             llm_used = True
-            all_events.extend(events)
+            if not events:
+                fallback = extract_events_rules(batch, cfg)
+                all_events.extend(fallback)
+            else:
+                all_events.extend(events)
+                all_events.extend(extract_events_rules(batch, cfg))
             continue
         except Exception as second_exc:
             err_msg = f"batch={idx} llm failed after retry: {second_exc}"
@@ -409,14 +437,18 @@ def extract_events_glm5_with_meta(news_items: List[Dict[str, Any]], cfg: Dict[st
             fallback = extract_events_rules(batch, cfg)
             all_events.extend(fallback)
 
-    # final de-dup by event_id
+    # Final de-dup by event_id and semantic identity so duplicated headlines from
+    # different aggregator URLs do not inflate structured event counts.
     deduped: List[Dict[str, Any]] = []
     seen: set[str] = set()
+    seen_semantic: set[str] = set()
     for event in all_events:
         event_id = str(event.get("event_id") or "")
-        if not event_id or event_id in seen:
+        semantic_key = _semantic_event_key(event)
+        if not event_id or event_id in seen or semantic_key in seen_semantic:
             continue
         seen.add(event_id)
+        seen_semantic.add(semantic_key)
         deduped.append(event)
 
     return deduped, llm_used, errors

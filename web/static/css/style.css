@@ -700,6 +700,19 @@ input[type="datetime-local"]::-webkit-inner-spin-button {
     gap: 10px;
 }
 
+/* Prevent long field values from stretching outside card bounds */
+.form-row .form-group {
+    min-width: 0;
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
 .inline-actions {
     display: flex;
     align-items: center;
@@ -854,7 +867,14 @@ input[type="datetime-local"]::-webkit-inner-spin-button {
 }
 
 .orders-scroll {
-    max-height: 560px;
+    max-height: 700px;
+    overflow-y: auto;
+    border: 1px solid #24384f;
+    border-radius: 10px;
+}
+
+.open-orders-scroll {
+    max-height: 520px;
     overflow-y: auto;
     border: 1px solid #24384f;
     border-radius: 10px;

@@ -39,7 +39,7 @@ from core.strategies import (
     strategy_health_monitor,
     strategy_manager,
 )
-from core.trading import execution_engine, order_manager, position_manager
+from core.trading import account_manager, execution_engine, order_manager, position_manager
 
 _AUTO_SYNC_SYMBOLS = [
     "BTC/USDT",
@@ -77,6 +77,12 @@ _DATA_MAINTENANCE_ENABLED = _env_bool("DATA_MAINTENANCE_ENABLED", False)
 _STATUS_CACHE_TTL_SEC = 1.5
 _status_cache_payload: Dict[str, Any] | None = None
 _status_cache_at: float = 0.0
+
+
+def invalidate_status_cache() -> None:
+    global _status_cache_payload, _status_cache_at
+    _status_cache_payload = None
+    _status_cache_at = 0.0
 
 
 def _safe_json(obj: Any) -> Dict[str, Any]:
@@ -357,14 +363,14 @@ async def _sync_market_dataset(exchange: str, symbol: str, timeframe: str) -> Di
                         end_time=now,
                         window_days=1,
                     )
-            result["download"] = await data_api.download_historical_data(
+            result["download"] = await data_api.run_download_historical_data(
                 exchange=exchange,
                 symbol=symbol,
                 timeframe="1s",
                 days=_sync_days_for_timeframe("1s"),
             )
         else:
-            result["download"] = await data_api.download_historical_data(
+            result["download"] = await data_api.run_download_historical_data(
                 exchange=exchange,
                 symbol=symbol,
                 timeframe=timeframe,
@@ -569,11 +575,21 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Load news config failed: {e}")
         app.state.news_cfg = {}
 
-    # Safety default: always boot in paper mode, can switch via API with confirmation.
-    if settings.TRADING_MODE != "paper":
-        logger.warning("Startup trading mode forced to paper. Use API confirmation flow to switch to live.")
-    settings.TRADING_MODE = "paper"
-    execution_engine.set_paper_trading(True)
+    restored_mode = "paper"
+    try:
+        main_account = account_manager.get_account("main") or {}
+        restored_mode = str(main_account.get("mode") or settings.TRADING_MODE or "paper").strip().lower()
+        if restored_mode not in {"paper", "live"}:
+            restored_mode = "paper"
+    except Exception as e:
+        logger.warning(f"Failed to restore trading mode from account config: {e}")
+        restored_mode = str(settings.TRADING_MODE or "paper").strip().lower()
+        if restored_mode not in {"paper", "live"}:
+            restored_mode = "paper"
+
+    settings.TRADING_MODE = restored_mode
+    execution_engine.set_paper_trading(restored_mode != "live")
+    logger.info(f"Startup trading mode restored: {restored_mode}")
     await execution_engine.start()
 
     if not getattr(app.state, "strategy_signal_hooked", False):
@@ -733,6 +749,12 @@ async def get_status():
             "timestamp": datetime.now().isoformat(),
             "trading_mode": execution_engine.get_trading_mode(),
             "paper_trading": execution_engine.is_paper_mode(),
+            "execution_engine": {
+                "running": bool(execution_engine.is_running),
+                "queue_size": int(execution_engine.get_queue_size()),
+                "queue_worker_alive": bool(execution_engine.is_queue_worker_alive()),
+                "signal_diagnostics": execution_engine.get_signal_diagnostics(),
+            },
             "paper_cost_model": {
                 "initial_equity": float(settings.PAPER_INITIAL_EQUITY or 0.0),
                 "fee_rate": float(settings.PAPER_FEE_RATE or 0.0),

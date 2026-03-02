@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import math
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -45,6 +46,7 @@ _RESAMPLE_RULES = {
 }
 _REPLAY_SESSIONS: Dict[str, Dict[str, Any]] = {}
 _RESEARCH_COVERAGE_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "df": None}
+_DOWNLOAD_TASKS: Dict[str, Dict[str, Any]] = {}
 
 
 class KlineRequest(BaseModel):
@@ -556,6 +558,14 @@ def _new_replay_id(payload: Dict[str, Any]) -> str:
     raw = (
         f"{payload.get('exchange')}|{payload.get('symbol')}|{payload.get('timeframe')}|"
         f"{datetime.utcnow().isoformat()}|{len(_REPLAY_SESSIONS)}"
+    )
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _new_download_task_id(payload: Dict[str, Any]) -> str:
+    raw = (
+        f"{payload.get('exchange')}|{payload.get('symbol')}|{payload.get('timeframe')}|"
+        f"{payload.get('start_time')}|{payload.get('end_time')}|{time.time()}|{len(_DOWNLOAD_TASKS)}"
     )
     return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
 
@@ -1175,8 +1185,7 @@ async def get_tickers(exchange: str):
     return {"exchange": exchange, "tickers": tickers}
 
 
-@router.post("/download")
-async def download_historical_data(
+async def run_download_historical_data(
     exchange: str,
     symbol: str,
     timeframe: str = "1h",
@@ -1327,6 +1336,92 @@ async def download_historical_data(
         "count": len(klines),
         "start": start_time.isoformat(),
         "end": end_time.isoformat(),
+    }
+
+
+async def _run_download_task(task_id: str, payload: Dict[str, Any]) -> None:
+    task = _DOWNLOAD_TASKS.get(task_id)
+    if not task:
+        return
+    task["status"] = "running"
+    task["started_at"] = datetime.utcnow().isoformat()
+    try:
+        result = await run_download_historical_data(
+            exchange=str(payload.get("exchange") or "binance"),
+            symbol=str(payload.get("symbol") or "BTC/USDT"),
+            timeframe=str(payload.get("timeframe") or "1h"),
+            days=int(payload.get("days") or 365),
+            start_time=payload.get("start_time"),
+            end_time=payload.get("end_time"),
+        )
+        task["status"] = "completed"
+        task["result"] = result
+    except Exception as e:
+        task["status"] = "failed"
+        task["error"] = str(e)
+    finally:
+        task["finished_at"] = datetime.utcnow().isoformat()
+
+
+@router.post("/download")
+async def download_historical_data(
+    exchange: str,
+    symbol: str,
+    timeframe: str = "1h",
+    days: int = 365,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    background: bool = True,
+):
+    payload = {
+        "exchange": exchange,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "days": days,
+        "start_time": start_time,
+        "end_time": end_time,
+    }
+    span_ref_end = _normalize_query_datetime(end_time) or datetime.now()
+    span_ref_start = _normalize_query_datetime(start_time) or (span_ref_end - timedelta(days=max(1, int(days or 1))))
+    span_days = max(0.0, (span_ref_end - span_ref_start).total_seconds() / 86400.0)
+    should_background = bool(background)
+    if str(timeframe or "") in {"1h", "4h", "1d"} and span_days <= 30:
+        should_background = bool(background and False)
+    if not should_background:
+        return await run_download_historical_data(
+            exchange=exchange,
+            symbol=symbol,
+            timeframe=timeframe,
+            days=days,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+    task_id = _new_download_task_id(payload)
+    task_record = {
+        "task_id": task_id,
+        "status": "pending",
+        "exchange": exchange,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "days": int(days or 0),
+        "start_time": start_time.isoformat() if start_time else None,
+        "end_time": end_time.isoformat() if end_time else None,
+        "created_at": datetime.utcnow().isoformat(),
+        "started_at": None,
+        "finished_at": None,
+        "result": None,
+        "error": None,
+    }
+    _DOWNLOAD_TASKS[task_id] = task_record
+    asyncio.create_task(_run_download_task(task_id, payload))
+    return {
+        "queued": True,
+        "task_id": task_id,
+        "status": "pending",
+        "message": "历史数据下载已转为后台任务",
+        "async_task": task_record,
+        "task": task_record,
     }
 
 
@@ -1512,6 +1607,63 @@ async def get_available_data():
     return {"available": available, "count": len(available)}
 
 
+@router.get("/symbols")
+async def get_data_symbols(exchange: str = "binance"):
+    def _normalize_symbol_choice(raw: str) -> Optional[str]:
+        text = str(raw or "").strip().upper()
+        if not text:
+            return None
+        if ":" in text:
+            text = text.split(":", 1)[0]
+        text = text.replace("-", "/").replace("_", "/")
+        if "/" not in text and text.endswith("USDT") and len(text) > 4:
+            text = f"{text[:-4]}/USDT"
+        if "/" not in text:
+            return None
+        base, quote = [part.strip() for part in text.split("/", 1)]
+        if not base or not quote:
+            return None
+        if quote not in {"USDT", "USD", "USDC"}:
+            return None
+        return f"{base}/{quote}"
+
+    exchange_name = str(exchange or "binance").strip().lower() or "binance"
+    configured = exchange_manager.get_supported_symbols(exchange_name) or []
+    available_rows = (await get_available_data()).get("available") or []
+    local_symbols = sorted(
+        {
+            str(item.get("symbol") or "").strip()
+            for item in available_rows
+            if str(item.get("exchange") or "").strip().lower() == exchange_name and str(item.get("symbol") or "").strip()
+        }
+    )
+    preferred = [
+        "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT",
+        "DOGE/USDT", "TRX/USDT", "LINK/USDT", "AVAX/USDT", "DOT/USDT", "POL/USDT",
+        "LTC/USDT", "BCH/USDT", "ETC/USDT", "ATOM/USDT", "NEAR/USDT", "APT/USDT",
+        "ARB/USDT", "OP/USDT", "SUI/USDT", "INJ/USDT", "RUNE/USDT", "AAVE/USDT",
+        "MKR/USDT", "UNI/USDT", "FIL/USDT", "HBAR/USDT", "ICP/USDT", "TON/USDT",
+    ]
+    merged_raw = {
+        normalized
+        for x in [*preferred, *configured, *local_symbols]
+        for normalized in [_normalize_symbol_choice(str(x).strip())]
+        if normalized
+    }
+    preferred_rank = {sym: idx for idx, sym in enumerate(preferred)}
+    merged = sorted(
+        merged_raw,
+        key=lambda sym: (preferred_rank.get(sym, 9999), sym),
+    )
+    return {
+        "exchange": exchange_name,
+        "symbols": merged,
+        "configured_count": len(configured),
+        "local_count": len(local_symbols),
+        "count": len(merged),
+    }
+
+
 @router.get("/collector/tasks")
 async def get_collector_tasks():
     return {
@@ -1519,6 +1671,24 @@ async def get_collector_tasks():
         "task_count": data_collector.task_count,
         "tasks": data_collector.list_tasks(),
     }
+
+
+@router.get("/download/tasks")
+async def list_download_tasks():
+    tasks = sorted(
+        _DOWNLOAD_TASKS.values(),
+        key=lambda item: str(item.get("created_at") or ""),
+        reverse=True,
+    )
+    return {"count": len(tasks), "tasks": tasks[:100]}
+
+
+@router.get("/download/tasks/{task_id}")
+async def get_download_task(task_id: str):
+    task = _DOWNLOAD_TASKS.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
 
 
 @router.post("/seconds/backfill/start")

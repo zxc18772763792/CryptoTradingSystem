@@ -5,7 +5,35 @@
   gdelt_timeout_sec: 30
   gdelt_max_records: 120
   gdelt_query: "(bitcoin OR ethereum OR binance OR crypto OR ETF OR SEC OR hack OR liquidation OR fed)"
-  news_sources: [jin10, rss, cryptopanic, gdelt, newsapi]
+  news_sources:
+    [
+      chaincatcher_flash,
+      binance_announcements,
+      okx_announcements,
+      bybit_announcements,
+      jin10,
+      cryptopanic,
+      cryptocompare_news,
+      rss,
+      gdelt,
+      newsapi,
+    ]
+  # Optional env toggles:
+  # NEWS_ENABLE_CHAINCATCHER_FLASH / NEWS_ENABLE_BINANCE_ANNOUNCEMENTS / NEWS_ENABLE_OKX_ANNOUNCEMENTS
+  # NEWS_ENABLE_BYBIT_ANNOUNCEMENTS / NEWS_ENABLE_CRYPTOCOMPARE_NEWS / NEWS_PULL_SYNC_LLM
+  # CRYPTOCOMPARE_API_KEY optional; without key collector still runs with stricter rate limit.
+  chaincatcher_flash_timeout_sec: 20
+  chaincatcher_flash_max_records: 80
+  chaincatcher_flash_min_interval_sec: 15
+  okx_announcements_timeout_sec: 20
+  okx_announcements_max_records: 60
+  bybit_announcements_timeout_sec: 20
+  bybit_announcements_max_records: 60
+  binance_announcements_timeout_sec: 20
+  binance_announcements_max_records: 80
+  binance_announcements_categories: [listing, delisting, api, maintenance]
+  cryptocompare_news_timeout_sec: 20
+  cryptocompare_news_max_records: 80
   jin10_timeout_sec: 18
   jin10_max_records: 120
   jin10_endpoint: "https://flash-api.jin10.com/get_flash_list"
@@ -106,6 +134,45 @@ rules:
     keywords_any: [etf outflow, net outflow, redemption pressure]
     symbols: [BTCUSDT, ETHUSDT]
 
+  - name: institution_custody_or_adoption_positive
+    event_type: institution
+    sentiment: 1
+    impact_score: 0.66
+    half_life_min: 720
+    keywords_any:
+      [
+        custody service,
+        crypto custody,
+        institutional adoption,
+        treasury purchase,
+        bought bitcoin,
+        buy bitcoin,
+        adds crypto trading,
+        adds crypto custody,
+        allocates to bitcoin,
+        corporate treasury,
+      ]
+    symbols: [BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT]
+
+  - name: institution_probe_negative
+    event_type: institution
+    sentiment: -1
+    impact_score: 0.72
+    half_life_min: 720
+    keywords_any:
+      [
+        probe,
+        investigation,
+        subpoena,
+        charged,
+        fraud charges,
+        laundering probe,
+        under scrutiny,
+        enforcement probe,
+      ]
+    exclude_keywords: [etf approved, approval, net inflow]
+    symbols: [BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT]
+
   - name: liquidation_flush
     event_type: liquidation
     sentiment: -1
@@ -135,3 +202,17 @@ rules:
     half_life_min: 600
     keywords_any: [rate cut, dovish, liquidity expansion, easing cycle]
     symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+
+  - name: tech_upgrade_positive
+    event_type: tech
+    sentiment: 1
+    impact_score: 0.52
+    half_life_min: 240
+    keywords_any: [mainnet upgrade, protocol upgrade, network upgrade, hard fork, staking launch, roadmap update]
+
+  - name: exchange_recovery_positive
+    event_type: exchange
+    sentiment: 1
+    impact_score: 0.44
+    half_life_min: 180
+    keywords_any: [withdrawals resumed, trading resumed, service restored, outage resolved]

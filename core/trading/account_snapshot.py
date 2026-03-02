@@ -108,6 +108,40 @@ class AccountSnapshotManager:
             for row in rows
         ]
 
+    async def get_day_start_total(
+        self,
+        mode: str = "live",
+        exchange: str = "all",
+        day: Optional[datetime] = None,
+    ) -> Optional[float]:
+        """Get the earliest recorded total_usd for the given UTC day."""
+        anchor = day or datetime.utcnow()
+        day_start = anchor.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        async with async_session_maker() as session:
+            stmt = (
+                select(AccountSnapshot.total_usd)
+                .where(AccountSnapshot.timestamp >= day_start)
+                .where(
+                    AccountSnapshot.source == ("portfolio" if exchange == "all" else "exchange")
+                )
+                .where(AccountSnapshot.mode == str(mode))
+                .order_by(AccountSnapshot.timestamp.asc())
+                .limit(1)
+            )
+            if exchange != "all":
+                stmt = stmt.where(AccountSnapshot.exchange == exchange)
+
+            result = await session.execute(stmt)
+            row = result.first()
+
+        if not row:
+            return None
+        try:
+            return float(row[0] or 0.0)
+        except Exception:
+            return None
+
     async def clear_history(self, mode: str = "paper") -> int:
         """Delete stored account snapshot rows by mode."""
         async with async_session_maker() as session:

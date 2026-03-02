@@ -1,4 +1,4 @@
-(function () {
+﻿(function () {
     const API_BASE = "/api/news";
     const LIST_ID = "dashboard-unstructured-list";
     const COUNT_ID = "dashboard-unstructured-count";
@@ -10,7 +10,11 @@
 
     function esc(value) {
         return String(value ?? "").replace(/[&<>"']/g, (m) => ({
-            "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
         }[m]));
     }
 
@@ -57,8 +61,11 @@
                 },
             });
             const payload = await response.json().catch(() => ({}));
-            if (!response.ok) throw new Error(payload.detail || payload.error || `request failed (${response.status})`);
+            if (!response.ok) throw new Error(payload.detail || payload.error || `请求失败(${response.status})`);
             return payload;
+        } catch (e) {
+            if (e?.name === "AbortError") throw new Error(`请求超时: ${path}`);
+            throw e;
         } finally {
             clearTimeout(timer);
         }
@@ -115,56 +122,59 @@
             el.innerHTML = `<div class="list-item" style="padding:8px;">结构化事件活跃度（${gran}）：${recent.map(x => Number(x.count || 0)).join(" / ")}</div>`;
             return;
         }
-        el.innerHTML = "";
-        const x = recent.map((row) => parseTs(row.bucket_start) || row.bucket_start);
-        const total = recent.map((row) => Number(row.count || 0));
-        const pos = recent.map((row) => Number(row.positive || 0));
-        const neg = recent.map((row) => Number(row.negative || 0));
-        try {
-            if (typeof Plotly.purge === "function") Plotly.purge(el);
-            Plotly.react(
-                el,
-                [
-                    { type: "bar", x, y: total, name: "总", marker: { color: "#1f9d63", opacity: 0.35 } },
-                    { type: "scatter", mode: "lines+markers", x, y: pos, name: "+", line: { color: "#20bf78", width: 1.6 }, marker: { size: 4 } },
-                    { type: "scatter", mode: "lines+markers", x, y: neg, name: "-", line: { color: "#ea5b61", width: 1.6 }, marker: { size: 4 } },
-                ],
-                {
-                    paper_bgcolor: "#111723",
-                    plot_bgcolor: "#111723",
-                    font: { color: "#d7dde8", size: 10 },
-                    margin: { l: 24, r: 12, t: 8, b: 20 },
-                    xaxis: { showgrid: false, tickfont: { size: 10 } },
-                    yaxis: { showgrid: true, gridcolor: "#283242", rangemode: "tozero", tickfont: { size: 10 } },
-                    legend: { orientation: "h", x: 0, y: 1.18, font: { size: 10 } },
-                    barmode: "overlay",
-                    hovermode: "x unified",
-                },
-                { responsive: true, displaylogo: false }
-            );
-            setTimeout(() => { try { Plotly.Plots.resize(el); } catch (_) {} }, 50);
-            setTimeout(() => { try { Plotly.Plots.resize(el); } catch (_) {} }, 250);
-        } catch (e) {
-            el.innerHTML = `<div class="list-item" style="padding:8px;">图表渲染失败: ${esc(e?.message || e)}</div>`;
-        }
+        const draw = () => {
+            if (!el || el.offsetWidth < 30 || el.offsetHeight < 30) {
+                setTimeout(() => renderBucketSpark(summary), 180);
+                return;
+            }
+            el.innerHTML = "";
+            const x = recent.map((row) => parseTs(row.bucket_start) || row.bucket_start);
+            const total = recent.map((row) => Number(row.count || 0));
+            const pos = recent.map((row) => Number(row.positive || 0));
+            const neg = recent.map((row) => Number(row.negative || 0));
+            try {
+                if (typeof Plotly.purge === "function") Plotly.purge(el);
+                Plotly.react(
+                    el,
+                    [
+                        { type: "bar", x, y: total, name: "总数", marker: { color: "#1f9d63", opacity: 0.35 } },
+                        { type: "scatter", mode: "lines+markers", x, y: pos, name: "正面", line: { color: "#20bf78", width: 1.6 }, marker: { size: 4 } },
+                        { type: "scatter", mode: "lines+markers", x, y: neg, name: "负面", line: { color: "#ea5b61", width: 1.6 }, marker: { size: 4 } },
+                    ],
+                    {
+                        paper_bgcolor: "#111723",
+                        plot_bgcolor: "#111723",
+                        font: { color: "#d7dde8", size: 10 },
+                        margin: { l: 24, r: 12, t: 8, b: 20 },
+                        xaxis: { showgrid: false, tickfont: { size: 10 }, automargin: true },
+                        yaxis: { showgrid: true, gridcolor: "#283242", rangemode: "tozero", tickfont: { size: 10 }, automargin: true },
+                        legend: { orientation: "h", x: 0, y: 1.18, font: { size: 10 } },
+                        barmode: "overlay",
+                        hovermode: "x unified",
+                    },
+                    { responsive: true, displaylogo: false }
+                );
+                setTimeout(() => { try { Plotly.Plots.resize(el); } catch (_) {} }, 50);
+                setTimeout(() => { try { Plotly.Plots.resize(el); } catch (_) {} }, 250);
+            } catch (e) {
+                el.innerHTML = `<div class="list-item" style="padding:8px;">图表渲染失败: ${esc(e?.message || e)}</div>`;
+            }
+        };
+        requestAnimationFrame(draw);
     }
 
     async function loadSummary() {
-        return await request("/summary?hours=24&feed_limit=60", { timeoutMs: 18000 });
+        return request("/summary?hours=24&feed_limit=60", { timeoutMs: 12000 });
     }
 
     async function loadNews() {
         if (loading) return;
         loading = true;
         try {
-            let data;
-            try {
-                data = await request("/latest?limit=40&hours=24&summarize=true", { timeoutMs: 65000 });
-            } catch (_) {
-                data = await request("/latest?limit=60&hours=24&summarize=false", { timeoutMs: 25000 });
-            }
-            let summary = null;
-            try { summary = await loadSummary(); } catch (_) { summary = null; }
+            const [data, summary] = await Promise.all([
+                request("/latest?limit=40&hours=24&summarize=false", { timeoutMs: 12000 }),
+                loadSummary().catch(() => null),
+            ]);
             renderUnstructuredNews(data.items || []);
             renderBucketSpark(summary);
         } catch (err) {
@@ -181,15 +191,17 @@
     }
 
     function connectWs() {
-        const proto = location.protocol === "https:" ? "wss" : "ws";
-        const ws = new WebSocket(`${proto}://${location.host}/ws`);
-        ws.onmessage = (evt) => {
-            try {
-                const msg = JSON.parse(evt.data || "{}");
-                if (msg?.event === "news_update") loadNews();
-            } catch (_) {}
-        };
-        ws.onclose = () => setTimeout(connectWs, 2000);
+        try {
+            const proto = location.protocol === "https:" ? "wss" : "ws";
+            const ws = new WebSocket(`${proto}://${location.host}/ws`);
+            ws.onmessage = (evt) => {
+                try {
+                    const msg = JSON.parse(evt.data || "{}");
+                    if (msg?.event === "news_update") loadNews();
+                } catch (_) {}
+            };
+            ws.onclose = () => setTimeout(connectWs, 2000);
+        } catch (_) {}
     }
 
     async function start() {

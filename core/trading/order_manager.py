@@ -1,6 +1,7 @@
 ﻿"""
 Order management module.
 """
+import asyncio
 from datetime import datetime
 import math
 from typing import Optional, List, Dict, Any
@@ -53,6 +54,7 @@ class OrderManager:
         self._order_meta: Dict[str, Dict[str, Any]] = {}
         self._paper_trading: bool = True
         self._paper_order_seq: int = 0
+        self._last_error: str = ""
 
     @staticmethod
     def _request_meta(request: OrderRequest) -> Dict[str, Any]:
@@ -117,9 +119,13 @@ class OrderManager:
                 logger.error(f"Order callback error: {e}")
 
     async def create_order(self, request: OrderRequest) -> Optional[Order]:
+        self._last_error = ""
         if self._paper_trading:
             return await self._create_paper_order(request)
         return await self._create_real_order(request)
+
+    def get_last_error(self) -> str:
+        return str(self._last_error or "")
 
     def _next_paper_order_id(self) -> str:
         self._paper_order_seq = (self._paper_order_seq + 1) % 1000000
@@ -227,22 +233,113 @@ class OrderManager:
 
         try:
             params = dict(request.params or {})
-            if request.stop_loss is not None:
-                params.setdefault("stopLossPrice", float(request.stop_loss))
-                params.setdefault("stopPrice", float(request.stop_loss))
-            if request.take_profit is not None:
-                params.setdefault("takeProfitPrice", float(request.take_profit))
-            if request.trigger_price is not None:
-                params.setdefault("triggerPrice", float(request.trigger_price))
+            order_price = request.price
+            if request.order_type == OrderType.MARKET:
+                order_price = None
+            # Binance/major CEX normal MARKET/LIMIT endpoints reject stop-loss / take-profit
+            # attachment params (e.g. -4120). Keep these for true trigger/conditional orders only.
+            allow_trigger_params = (
+                request.order_mode in {"conditional"}
+                or request.order_type
+                in {
+                    OrderType.STOP_LOSS,
+                    OrderType.STOP_LOSS_LIMIT,
+                    OrderType.TAKE_PROFIT,
+                    OrderType.TAKE_PROFIT_LIMIT,
+                }
+            )
+            if allow_trigger_params:
+                if request.stop_loss is not None:
+                    params.setdefault("stopLossPrice", float(request.stop_loss))
+                    params.setdefault("stopPrice", float(request.stop_loss))
+                if request.take_profit is not None:
+                    params.setdefault("takeProfitPrice", float(request.take_profit))
+                if request.trigger_price is not None:
+                    params.setdefault("triggerPrice", float(request.trigger_price))
             if request.reduce_only:
                 params.setdefault("reduceOnly", True)
+
+            market_type = str(params.get("market_type") or "").strip().lower()
+            if (
+                str(request.exchange or "").lower() == "binance"
+                and market_type in {"future", "futures", "swap", "perp", "perpetual", "contract"}
+                and request.order_type in {OrderType.MARKET, OrderType.LIMIT}
+            ):
+                try:
+                    from web.api.trading import (
+                        _binance_signed_request,
+                        _binance_market_symbol,
+                        _binance_ccxt_symbol,
+                    )
+
+                    raw_payload: Dict[str, Any] = {
+                        "symbol": _binance_market_symbol(request.symbol),
+                        "side": request.side.value.upper(),
+                        "type": request.order_type.value.upper(),
+                        "quantity": request.amount,
+                        "newOrderRespType": "RESULT",
+                    }
+                    if order_price is not None and request.order_type == OrderType.LIMIT:
+                        raw_payload["price"] = float(order_price)
+                        raw_payload["timeInForce"] = "GTC"
+                    if request.reduce_only:
+                        raw_payload["reduceOnly"] = "true"
+                    raw_order = await _binance_signed_request(
+                        "POST",
+                        "/fapi/v1/order",
+                        host="fapi",
+                        params=raw_payload,
+                        timeout_sec=8.0,
+                    )
+                    status_text = str((raw_order or {}).get("status") or "").upper()
+                    status_map = {
+                        "NEW": OrderStatus.OPEN,
+                        "PARTIALLY_FILLED": OrderStatus.OPEN,
+                        "FILLED": OrderStatus.CLOSED,
+                        "CANCELED": OrderStatus.CANCELED,
+                        "CANCELLED": OrderStatus.CANCELED,
+                        "EXPIRED": OrderStatus.EXPIRED,
+                        "REJECTED": OrderStatus.REJECTED,
+                    }
+                    fill_price = self._safe_nonnegative_float(
+                        (raw_order or {}).get("avgPrice"),
+                        self._safe_nonnegative_float((raw_order or {}).get("price"), 0.0),
+                    )
+                    amount = self._safe_nonnegative_float((raw_order or {}).get("origQty"), request.amount)
+                    filled = self._safe_nonnegative_float((raw_order or {}).get("executedQty"), 0.0)
+                    order = Order(
+                        id=str((raw_order or {}).get("orderId") or ""),
+                        symbol=_binance_ccxt_symbol(str((raw_order or {}).get("symbol") or ""), futures=True),
+                        side=request.side,
+                        type=request.order_type,
+                        price=float(fill_price or 0.0),
+                        amount=float(amount or 0.0),
+                        filled=float(filled or 0.0),
+                        remaining=max(0.0, float(amount or 0.0) - float(filled or 0.0)),
+                        cost=self._safe_nonnegative_float((raw_order or {}).get("cumQuote"), float(fill_price or 0.0) * float(filled or 0.0)),
+                        status=status_map.get(status_text, OrderStatus.OPEN),
+                        timestamp=datetime.fromtimestamp(
+                            self._safe_nonnegative_float((raw_order or {}).get("updateTime"), 0.0) / 1000.0
+                        ) if self._safe_nonnegative_float((raw_order or {}).get("updateTime"), 0.0) > 0 else datetime.now(),
+                        exchange=request.exchange,
+                    )
+                    self._orders[order.id] = order
+                    self._order_meta[order.id] = self._request_meta(request)
+                    logger.info(
+                        f"Fast Binance futures order created: {order.id} "
+                        f"{request.side.value} {request.amount} {request.symbol} @ {order_price}"
+                    )
+                    await self._notify_callbacks(order, "created")
+                    return order
+                except Exception as fast_err:
+                    logger.warning(f"Fast Binance futures order path failed, fallback to ccxt: {fast_err}")
 
             order = await exchange.create_order(
                 symbol=request.symbol,
                 side=request.side,
                 order_type=request.order_type,
                 amount=request.amount,
-                price=request.price,
+                price=order_price,
                 params=params,
             )
 
@@ -250,13 +347,18 @@ class OrderManager:
             self._order_meta[order.id] = self._request_meta(request)
             logger.info(
                 f"Order created: {order.id} "
-                f"{request.side.value} {request.amount} {request.symbol} @ {request.price}"
+                f"{request.side.value} {request.amount} {request.symbol} @ {order_price}"
             )
 
             await self._notify_callbacks(order, "created")
             return order
         except Exception as e:
-            logger.error(f"Failed to create order: {e}")
+            self._last_error = str(e)
+            logger.error(
+                f"Failed to create order: exchange={request.exchange} symbol={request.symbol} "
+                f"type={request.order_type.value} side={request.side.value} amount={request.amount} "
+                f"price={order_price} params={params} error={e}"
+            )
             return None
 
     async def record_rejected_order(
@@ -368,7 +470,40 @@ class OrderManager:
             ]
 
         if exchange is None:
-            return []
+            exchanges = exchange_manager.get_connected_exchanges()
+            if not exchanges:
+                return []
+
+            async def _fetch_open_orders(ex_name: str) -> List[Order]:
+                connector = exchange_manager.get_exchange(ex_name)
+                if not connector:
+                    return []
+                try:
+                    rows = await asyncio.wait_for(connector.get_open_orders(symbol), timeout=7.0)
+                    for row in rows:
+                        if not getattr(row, "exchange", ""):
+                            row.exchange = ex_name
+                    return rows
+                except Exception as ex:
+                    logger.warning(f"Failed to get open orders from {ex_name}: {ex}")
+                    return []
+
+            result = await asyncio.gather(
+                *[_fetch_open_orders(ex_name) for ex_name in exchanges],
+                return_exceptions=False,
+            )
+            merged: List[Order] = []
+            seen = set()
+            for rows in result:
+                for row in rows:
+                    key = (str(getattr(row, "exchange", "")).lower(), str(getattr(row, "id", "")))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    self._orders[row.id] = row
+                    merged.append(row)
+            merged.sort(key=lambda x: x.timestamp or datetime.min, reverse=True)
+            return merged
 
         connector = exchange_manager.get_exchange(exchange)
         if not connector:

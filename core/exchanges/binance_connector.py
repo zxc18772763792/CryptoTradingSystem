@@ -303,6 +303,7 @@ class BinanceConnector(BaseExchange):
             funding_timed_out = False
             funding_snapshot: Dict[str, Dict[str, float]] = {}
             futures_loaded = False
+            default_type = str(getattr(self.config, "default_type", "") or "").lower()
 
             funding_methods = [
                 "sapiPostAssetGetFundingAsset",
@@ -393,37 +394,66 @@ class BinanceConnector(BaseExchange):
 
             spot_loaded = False
             try:
-                spot = await asyncio.wait_for(
-                    self._client.fetch_balance(),
-                    timeout=_BALANCE_SPOT_TIMEOUT_SEC,
-                )
+                # Important: when defaultType=future/swap, bare fetch_balance() may return
+                # derivatives wallet instead of spot wallet. Request spot explicitly to avoid
+                # double counting between spot and futures balances.
+                if default_type in {"future", "swap"}:
+                    spot = await asyncio.wait_for(
+                        self._client.fetch_balance({"type": "spot"}),
+                        timeout=_BALANCE_SPOT_TIMEOUT_SEC,
+                    )
+                else:
+                    spot = await asyncio.wait_for(
+                        self._client.fetch_balance(),
+                        timeout=_BALANCE_SPOT_TIMEOUT_SEC,
+                    )
                 _merge_ccxt_balance_payload(spot, merged)
                 spot_loaded = True
             except Exception as e:
                 logger.debug(f"[{self.name}] spot balance fetch failed: {e}")
 
             future_types: List[str] = []
-            if str(getattr(self.config, "default_type", "") or "").lower() in {"future", "swap"}:
-                future_types.extend(["future", "swap"])
-            elif not merged:
+            if default_type in {"future", "swap"}:
+                # Use default type first, then fallback to the alternate type.
+                alt_type = "swap" if default_type == "future" else "future"
+                future_types.extend([default_type, alt_type])
+            else:
+                # Even when the connector default type is spot, Binance assets may still
+                # live in the USD-M futures wallet. Include futures explicitly so the
+                # account valuation reflects funding + spot + futures as one total.
                 future_types.extend(["future", "swap"])
 
-            seen_future_types: set[str] = set()
+            chosen_futures_snapshot: Dict[str, Dict[str, float]] = {}
+            tried_future_types: set[str] = set()
             for account_type in future_types:
-                if account_type in seen_future_types:
+                if account_type in tried_future_types:
                     continue
-                seen_future_types.add(account_type)
+                tried_future_types.add(account_type)
                 try:
                     future_balance = await asyncio.wait_for(
                         self._client.fetch_balance({"type": account_type}),
                         timeout=_BALANCE_SPOT_TIMEOUT_SEC,
                     )
-                    before = len(merged)
-                    _merge_ccxt_balance_payload(future_balance, merged)
-                    if len(merged) > before:
-                        futures_loaded = True
+                    current_snapshot: Dict[str, Dict[str, float]] = {}
+                    _merge_ccxt_balance_payload(future_balance, current_snapshot)
+                    if not current_snapshot:
+                        continue
+                    chosen_futures_snapshot = current_snapshot
+                    futures_loaded = True
+                    # Stop at first valid futures payload to avoid future/swap alias double counting.
+                    break
                 except Exception as e:
                     logger.debug(f"[{self.name}] {account_type} balance fetch failed: {e}")
+
+            if chosen_futures_snapshot:
+                for currency, values in chosen_futures_snapshot.items():
+                    _merge_amount(
+                        merged,
+                        str(currency).upper(),
+                        float(values.get("free", 0) or 0),
+                        float(values.get("used", 0) or 0),
+                        float(values.get("total", 0) or 0),
+                    )
 
             if not merged and not funding_loaded and not spot_loaded and not futures_loaded:
                 raise RuntimeError("spot/funding/future balance unavailable")
@@ -495,18 +525,38 @@ class BinanceConnector(BaseExchange):
 
     async def get_positions(self) -> List[Position]:
         try:
-            if self.config.default_type not in ["future", "swap"]:
-                return []
+            default_type = str(getattr(self.config, "default_type", "") or "").lower()
+            positions: List[dict] = []
+            if default_type in ["future", "swap"]:
+                positions = await self._client.fetch_positions()
+            else:
+                original_default_type = self._client.options.get("defaultType")
+                for account_type in ("future", "swap"):
+                    try:
+                        self._client.options["defaultType"] = account_type
+                        positions = await self._client.fetch_positions()
+                        if positions:
+                            break
+                    except Exception as inner:
+                        logger.debug(f"[{self.name}] fetch_positions fallback {account_type} failed: {inner}")
+                    finally:
+                        if original_default_type is None:
+                            self._client.options.pop("defaultType", None)
+                        else:
+                            self._client.options["defaultType"] = original_default_type
 
-            positions = await self._client.fetch_positions()
             result = []
             for pos in positions:
-                if float(pos.get("contracts", 0) or 0) > 0:
+                raw_contracts = float(pos.get("contracts", 0) or 0)
+                if abs(raw_contracts) > 0:
+                    raw_side = str(pos.get("side", "") or "").strip().lower()
+                    if raw_side not in {"long", "short"}:
+                        raw_side = "short" if raw_contracts < 0 else "long"
                     result.append(
                         Position(
                             symbol=pos.get("symbol", ""),
-                            side=pos.get("side", ""),
-                            amount=float(pos.get("contracts", 0) or 0),
+                            side=raw_side,
+                            amount=abs(raw_contracts),
                             entry_price=float(pos.get("entryPrice", 0) or 0),
                             current_price=float(pos.get("markPrice", 0) or 0),
                             unrealized_pnl=float(pos.get("unrealizedPnl", 0) or 0),

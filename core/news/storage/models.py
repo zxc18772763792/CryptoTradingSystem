@@ -1,4 +1,4 @@
-﻿"""News domain models and schemas."""
+"""News domain models and schemas."""
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
@@ -75,12 +75,54 @@ class NewsEvent(NewsBase):
     )
 
 
+class NewsSourceState(NewsBase):
+    """Incremental cursor and health state per source."""
+
+    __tablename__ = "news_source_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    cursor_type: Mapped[str] = mapped_column(String(24), nullable=False, default="ts")
+    cursor_value: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    last_success_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    paused_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class NewsLLMTask(NewsBase):
+    """Async queue for event extraction."""
+
+    __tablename__ = "news_llm_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    raw_news_id: Mapped[int] = mapped_column(Integer, unique=True, index=True, nullable=False)
+    source: Mapped[str] = mapped_column(String(64), index=True, nullable=False, default="news")
+    status: Mapped[str] = mapped_column(String(24), index=True, nullable=False, default="pending")
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_news_llm_tasks_status_priority", "status", "priority"),
+    )
+
+
 def parse_any_datetime(value: Any) -> datetime:
     """Normalize timestamp to timezone-aware UTC datetime."""
     if isinstance(value, datetime):
         dt = value
     elif isinstance(value, date):
         dt = datetime.combine(value, datetime.min.time())
+    elif isinstance(value, (int, float)):
+        dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
     elif isinstance(value, str):
         dt = dt_parser.isoparse(value)
     else:

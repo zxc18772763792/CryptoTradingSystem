@@ -165,6 +165,20 @@ class AccountManager:
         item = self._accounts.get(account_id)
         return bool(item and item.enabled)
 
+    def set_mode_for_all(self, mode: str) -> int:
+        target = str(mode or "paper").strip().lower()
+        if target not in {"paper", "live"}:
+            raise ValueError("mode must be paper or live")
+        updated = 0
+        now = datetime.utcnow().isoformat()
+        for item in self._accounts.values():
+            if item.mode != target:
+                item.mode = target
+                item.updated_at = now
+                updated += 1
+        if updated > 0:
+            self._save()
+        return updated
+
 
 account_manager = AccountManager()
-

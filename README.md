@@ -281,3 +281,32 @@ git commit -m "your message"
 git push
 ```
 
+
+## News Worker Notes
+
+Environment variables:
+
+- `NEWS_ENABLE_CHAINCATCHER_FLASH=1`
+- `NEWS_ENABLE_BINANCE_ANNOUNCEMENTS=1`
+- `NEWS_ENABLE_OKX_ANNOUNCEMENTS=1`
+- `NEWS_ENABLE_BYBIT_ANNOUNCEMENTS=1`
+- `NEWS_ENABLE_CRYPTOCOMPARE_NEWS=1`
+- `CRYPTOCOMPARE_API_KEY=` optional, collector still works without it with stricter rate limit
+- `NEWS_PULL_SYNC_LLM=1` keeps `/ingest/pull_now` backward-compatible with sync extraction
+- `NEWS_LLM_MIN_IMPORTANCE=35`
+
+Run examples:
+
+```powershell
+python -m uvicorn core.news.service.api:app --host 0.0.0.0 --port 8008
+python -m core.news.service.worker --once
+python -m core.news.service.worker
+python -m core.news.service.llm_worker
+```
+
+Optional one-click startup with dedicated news worker:
+
+```powershell
+$env:START_NEWS_WORKER = '1'
+.\_once.ps1
+```

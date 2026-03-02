@@ -13,7 +13,8 @@ from loguru import logger
 from config.settings import settings
 from core.exchanges import exchange_manager
 from core.risk.risk_manager import risk_manager
-from core.strategies import Signal, SignalType, strategy_manager
+from core.strategies import Signal, SignalType
+from core.strategies.strategy_manager import strategy_manager
 from core.trading.account_manager import account_manager
 from core.trading.order_manager import OrderRequest, OrderSide, OrderType, order_manager
 from core.trading.position_manager import PositionSide, position_manager
@@ -66,16 +67,29 @@ class ExecutionEngine:
     def __init__(self):
         self._running: bool = False
         self._signal_queue: asyncio.Queue = asyncio.Queue()
+        self._queue_task: Optional[asyncio.Task] = None
         self._execution_callbacks: List[callable] = []
         self._paper_trading: bool = True
 
         self._cached_equity: float = 0.0
         self._equity_updated_at: Optional[datetime] = None
-        self._equity_cache_seconds = 12
+        self._equity_cache_seconds = 45
         self._asset_unit_usd_cache: Dict[str, Dict[str, float]] = {}
         self._paper_equity_anchor: float = 0.0
         self._paper_total_fees_usd: float = 0.0
         self._paper_fee_applied_orders: set[str] = set()
+        self._signal_diagnostics: Dict[str, Any] = {
+            "submitted": 0,
+            "executed": 0,
+            "skipped_zero_qty": 0,
+            "risk_rejected": 0,
+            "order_failed": 0,
+            "order_timeout": 0,
+            "exceptions": 0,
+            "last_signal": None,
+            "last_result": None,
+            "last_updated_at": None,
+        }
 
         self._conditional_orders: Dict[str, ConditionalManualOrder] = {}
         self._conditional_seq = 0
@@ -86,6 +100,7 @@ class ExecutionEngine:
         self._paper_trading = bool(enabled)
         settings.TRADING_MODE = "paper" if self._paper_trading else "live"
         order_manager.set_paper_trading(self._paper_trading)
+        risk_manager.set_account_scope("paper" if self._paper_trading else "live", reset_baseline=True)
         if self._paper_trading and self._paper_equity_anchor < 100:
             report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
             seed = float(self._cached_equity or 0.0)
@@ -111,9 +126,46 @@ class ExecutionEngine:
                 logger.error(f"Execution callback error: {e}")
 
     async def submit_signal(self, signal: Signal) -> bool:
-        await self._signal_queue.put(signal)
-        logger.debug(f"Signal queued: {signal.signal_type.value} {signal.symbol}")
+        self._signal_diagnostics["submitted"] = int(self._signal_diagnostics.get("submitted", 0)) + 1
+        self._signal_diagnostics["last_signal"] = {
+            "strategy": signal.strategy_name,
+            "symbol": signal.symbol,
+            "signal_type": signal.signal_type.value,
+            "price": float(signal.price or 0.0),
+            "strength": float(signal.strength or 0.0),
+            "timestamp": signal.timestamp.isoformat() if signal.timestamp else datetime.utcnow().isoformat(),
+        }
+        self._signal_diagnostics["last_updated_at"] = datetime.utcnow().isoformat()
+        if self._running:
+            await self._ensure_queue_worker()
+        if self._queue_task and not self._queue_task.done():
+            await self._signal_queue.put(signal)
+            logger.debug(
+                f"Signal queued: {signal.signal_type.value} {signal.symbol} "
+                f"(queue_size={self._signal_queue.qsize()})"
+            )
+            return True
+
+        logger.warning(
+            f"Signal queue worker unavailable, execute inline: "
+            f"{signal.signal_type.value} {signal.symbol}"
+        )
+        asyncio.create_task(self.execute_signal(signal))
         return True
+
+    async def _ensure_queue_worker(self) -> None:
+        if not self._running:
+            return
+        if self._queue_task and not self._queue_task.done():
+            return
+        self._queue_task = asyncio.create_task(
+            self._process_signal_queue(),
+            name="execution_signal_queue",
+        )
+        logger.warning("Execution signal queue worker started/restarted")
+
+    def is_queue_worker_alive(self) -> bool:
+        return bool(self._queue_task and not self._queue_task.done())
 
     async def _estimate_asset_usd(self, connector: Any, currency: str, total: float) -> float:
         if total <= 0:
@@ -133,11 +185,29 @@ class ExecutionEngine:
     async def _refresh_equity(self) -> float:
         total_usd = 0.0
         has_unpriced_assets = False
+        report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
         for exchange_name in exchange_manager.get_connected_exchanges():
             connector = exchange_manager.get_exchange(exchange_name)
             if not connector:
                 continue
             try:
+                if (not self._paper_trading) and str(exchange_name).lower() == "binance":
+                    try:
+                        # Reuse the web trading API's fast Binance wallet snapshot logic so live
+                        # strategy sizing does not depend on the slower generic CCXT balance path.
+                        from web.api.trading import _fetch_binance_live_wallet_snapshot_fast
+
+                        snap = await asyncio.wait_for(
+                            _fetch_binance_live_wallet_snapshot_fast(),
+                            timeout=8.5,
+                        )
+                        snap_total = float((snap or {}).get("total_usd") or 0.0)
+                        if snap_total > 0:
+                            total_usd += snap_total
+                            continue
+                    except Exception as e:
+                        logger.debug(f"Fast Binance equity snapshot unavailable in execution engine: {e}")
+
                 balances = await connector.get_balance()
                 unit_cache = self._asset_unit_usd_cache.setdefault(exchange_name, {})
 
@@ -182,6 +252,16 @@ class ExecutionEngine:
         if total_usd > 0:
             candidate = float(total_usd)
             if (
+                (not self._paper_trading)
+                and report_eq > 100
+                and candidate < report_eq * 0.35
+            ):
+                logger.warning(
+                    f"Skip suspicious low live equity snapshot in execution engine: "
+                    f"candidate={candidate:.4f}, report_eq={report_eq:.4f}"
+                )
+                candidate = float(report_eq)
+            if (
                 has_unpriced_assets
                 and float(self._cached_equity or 0.0) > 0
                 and candidate < float(self._cached_equity) * 0.6
@@ -201,23 +281,41 @@ class ExecutionEngine:
         return float(self._cached_equity or 0.0)
 
     async def _get_account_equity(self, force: bool = False) -> float:
+        report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
         if self._paper_trading:
             return await self.get_account_equity_snapshot(force=force)
 
         now = datetime.utcnow()
+        cached_eq = float(self._cached_equity or 0.0)
+        if not force:
+            if report_eq > 100:
+                if report_eq > cached_eq:
+                    self._cached_equity = report_eq
+                    self._equity_updated_at = now
+                return float(report_eq)
+            if (
+                cached_eq > 100
+                and self._equity_updated_at
+                and (now - self._equity_updated_at).total_seconds() < max(30, int(self._equity_cache_seconds))
+            ):
+                return float(cached_eq)
+
         if (
             not force
             and self._equity_updated_at
             and (now - self._equity_updated_at).total_seconds() < self._equity_cache_seconds
         ):
-            eq = float(self._cached_equity or 0.0)
+            eq = cached_eq
         else:
             eq = await self._refresh_equity()
 
         if eq <= 0:
-            report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
             if report_eq > 0:
                 eq = report_eq
+            elif cached_eq > 0:
+                eq = cached_eq
+        elif (not self._paper_trading) and report_eq > 100 and eq < report_eq * 0.35:
+            eq = report_eq
 
         if self._paper_trading and eq < 100:
             eq = max(eq, float(getattr(settings, "PAPER_INITIAL_EQUITY", 10000.0) or 10000.0))
@@ -297,6 +395,44 @@ class ExecutionEngine:
         factor = 10 ** decimals
         return math.floor(float(value) * factor) / factor
 
+    @staticmethod
+    def _ceil_to_decimals(value: float, decimals: int = 8) -> float:
+        if decimals < 0:
+            decimals = 0
+        factor = 10 ** decimals
+        return math.ceil(float(value) * factor) / factor
+
+    async def _get_exchange_amount_rules(self, exchange: str, symbol: str) -> Tuple[float, int]:
+        connector = exchange_manager.get_exchange(exchange)
+        client = getattr(connector, "_client", None) if connector else None
+        min_amount = 0.0
+        decimals = 8
+        if not client:
+            return min_amount, decimals
+        try:
+            market = client.market(symbol)
+        except Exception:
+            market = None
+        if isinstance(market, dict):
+            try:
+                min_amount = max(0.0, float((((market.get("limits") or {}).get("amount") or {}).get("min")) or 0.0))
+            except Exception:
+                min_amount = 0.0
+            try:
+                precision = (market.get("precision") or {}).get("amount")
+                if precision is not None:
+                    if isinstance(precision, int):
+                        decimals = max(0, int(precision))
+                    else:
+                        precision_value = float(precision)
+                        if precision_value >= 1:
+                            decimals = 0
+                        elif precision_value > 0:
+                            decimals = max(0, int(round(-math.log10(precision_value))))
+            except Exception:
+                decimals = 8
+        return min_amount, decimals
+
     def _consume_paper_order_cost(self, order_id: Optional[str]) -> Dict[str, float]:
         if not self._paper_trading:
             return {"fee_usd": 0.0, "slippage_cost_usd": 0.0}
@@ -342,7 +478,7 @@ class ExecutionEngine:
         price = await self._resolve_price(exchange, signal.symbol, signal.price)
         if price <= 0:
             return 0.0
-        min_notional = max(1.0, float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 100.0) or 100.0))
+        configured_min_notional = max(1.0, float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 100.0) or 100.0))
         risk_buffer = 0.998
 
         if signal.quantity is not None:
@@ -365,6 +501,14 @@ class ExecutionEngine:
         single_cap = equity * float(risk_manager.max_position_size or 0.1)
         alloc_ratio = max(0.0, min(float(strategy_allocation or 0.0), 1.0))
         alloc_cap = equity * alloc_ratio if alloc_ratio > 0 else single_cap
+        market_type = str((signal.metadata or {}).get("market_type") or "").strip().lower()
+        if not market_type and signal.strategy_name:
+            strategy = strategy_manager.get_strategy(signal.strategy_name)
+            market_type = str((getattr(strategy, "params", {}) or {}).get("market_type") or "").strip().lower()
+        is_binance_futures = str(exchange or "").lower() == "binance" and market_type in {
+            "future", "futures", "swap", "contract", "perp", "perpetual"
+        }
+        exchange_min_notional = 100.0 if is_binance_futures else 10.0
 
         current_strategy_exposure = 0.0
         if signal.strategy_name:
@@ -376,20 +520,32 @@ class ExecutionEngine:
         remaining_alloc_cap = max(0.0, alloc_cap - current_strategy_exposure)
         if alloc_ratio > 0 and remaining_alloc_cap <= 0:
             return 0.0
-        if alloc_ratio > 0 and remaining_alloc_cap < min_notional:
+        effective_min_notional = configured_min_notional
+        if alloc_ratio > 0:
+            effective_min_notional = min(
+                configured_min_notional,
+                max(exchange_min_notional, remaining_alloc_cap * 0.98),
+            )
+        else:
+            effective_min_notional = min(
+                configured_min_notional,
+                max(exchange_min_notional, single_cap * 0.98),
+            )
+        effective_min_notional = max(exchange_min_notional, effective_min_notional)
+        if alloc_ratio > 0 and remaining_alloc_cap < effective_min_notional:
             logger.debug(
                 f"Skip tiny order for {signal.strategy_name or 'unknown'}: "
-                f"remaining allocation {remaining_alloc_cap:.4f} < min_notional {min_notional:.4f}"
+                f"remaining allocation {remaining_alloc_cap:.4f} < min_notional {effective_min_notional:.4f}"
             )
             return 0.0
 
         target_notional = min(single_cap, remaining_alloc_cap if alloc_ratio > 0 else single_cap)
         target_notional *= strength
-        target_notional = max(min_notional, target_notional)
+        target_notional = max(effective_min_notional, target_notional)
         buffered_cap = single_cap * risk_buffer
         if alloc_ratio > 0:
             buffered_cap = min(buffered_cap, remaining_alloc_cap * risk_buffer)
-            if buffered_cap < min_notional:
+            if buffered_cap < effective_min_notional:
                 return 0.0
             target_notional = min(target_notional, buffered_cap)
         else:
@@ -398,7 +554,54 @@ class ExecutionEngine:
             return 0.0
 
         qty = target_notional / price
-        return max(0.0, self._floor_to_decimals(qty, 8))
+        min_amount, amount_decimals = await self._get_exchange_amount_rules(exchange, signal.symbol)
+        if min_amount > 0 and qty < min_amount:
+            min_amount_notional = min_amount * price
+            effective_cap = max(0.0, buffered_cap)
+            if alloc_ratio > 0:
+                effective_cap = min(effective_cap, max(0.0, remaining_alloc_cap))
+            if effective_cap <= 0 or min_amount_notional > (effective_cap + max(0.05, effective_cap * 0.01)):
+                logger.info(
+                    f"Skip strategy order below exchange min amount: strategy={signal.strategy_name} "
+                    f"symbol={signal.symbol} qty={qty:.8f} min_amount={min_amount:.8f} "
+                    f"required_notional={min_amount_notional:.4f} cap={effective_cap:.4f}"
+                )
+                return 0.0
+            qty = float(min_amount)
+
+        floored_qty = max(0.0, self._floor_to_decimals(qty, amount_decimals))
+        if floored_qty <= 0:
+            return 0.0
+
+        floored_notional = floored_qty * price
+        if floored_notional + 1e-9 >= effective_min_notional:
+            return floored_qty
+
+        required_qty = self._ceil_to_decimals(effective_min_notional / price, amount_decimals)
+        if required_qty <= 0:
+            return floored_qty
+
+        required_notional = required_qty * price
+        effective_cap = max(0.0, buffered_cap)
+        if alloc_ratio > 0:
+            effective_cap = min(effective_cap, max(0.0, remaining_alloc_cap))
+
+        if required_notional <= effective_cap + max(0.05, effective_cap * 0.01):
+            logger.info(
+                f"Adjust quantity upward to satisfy min notional: strategy={signal.strategy_name} "
+                f"symbol={signal.symbol} qty={floored_qty:.8f}->{required_qty:.8f} "
+                f"notional={floored_notional:.4f}->{required_notional:.4f} "
+                f"cap={effective_cap:.4f}"
+            )
+            return required_qty
+
+        logger.info(
+            f"Skip strategy order after precision floor broke min notional: strategy={signal.strategy_name} "
+            f"symbol={signal.symbol} floored_qty={floored_qty:.8f} "
+            f"required_qty={required_qty:.8f} required_notional={required_notional:.4f} "
+            f"cap={effective_cap:.4f}"
+        )
+        return 0.0
 
     def _resolve_strategy_trade_policy(
         self,
@@ -524,7 +727,23 @@ class ExecutionEngine:
                     if existing_position and existing_position.side != position_side:
                         return None
 
-            account_equity = await self._get_account_equity()
+            logger.info(
+                f"Executing strategy signal: strategy={signal.strategy_name} "
+                f"symbol={signal.symbol} type={signal.signal_type.value}"
+            )
+            try:
+                account_equity = await asyncio.wait_for(self._get_account_equity(), timeout=12.0)
+            except asyncio.TimeoutError:
+                report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
+                cached_eq = float(self._cached_equity or 0.0)
+                fallback_eq = max(report_eq, cached_eq, 1000.0 if not self._paper_trading else 0.0)
+                if fallback_eq <= 0:
+                    raise
+                account_equity = float(fallback_eq)
+                logger.warning(
+                    f"Strategy equity snapshot timed out, fallback used: "
+                    f"strategy={signal.strategy_name} equity={account_equity:.4f}"
+                )
             strategy_allocation = strategy_manager.get_strategy_allocation(signal.strategy_name)
 
             qty = await self._calculate_quantity(
@@ -534,9 +753,27 @@ class ExecutionEngine:
                 strategy_allocation=strategy_allocation,
             )
             if qty <= 0:
+                self._signal_diagnostics["skipped_zero_qty"] = int(self._signal_diagnostics.get("skipped_zero_qty", 0)) + 1
+                self._signal_diagnostics["last_result"] = {
+                    "status": "skipped_zero_qty",
+                    "strategy": signal.strategy_name,
+                    "symbol": signal.symbol,
+                    "exchange": exchange,
+                    "equity": float(account_equity or 0.0),
+                    "allocation": float(strategy_allocation or 0.0),
+                }
+                self._signal_diagnostics["last_updated_at"] = datetime.utcnow().isoformat()
+                logger.info(
+                    f"Skip strategy order due to zero quantity: strategy={signal.strategy_name} "
+                    f"symbol={signal.symbol} exchange={exchange} equity={account_equity} "
+                    f"allocation={strategy_allocation}"
+                )
                 return None
 
-            quote_price, order_value = await self._resolve_order_context(exchange, signal.symbol, qty, signal.price)
+            quote_price, order_value = await asyncio.wait_for(
+                self._resolve_order_context(exchange, signal.symbol, qty, signal.price),
+                timeout=8.0,
+            )
 
             req = OrderRequest(
                 symbol=signal.symbol,
@@ -585,7 +822,17 @@ class ExecutionEngine:
                 strategy_allocation=strategy_allocation,
                 allow_close=closes_existing,
             ):
+                self._signal_diagnostics["risk_rejected"] = int(self._signal_diagnostics.get("risk_rejected", 0)) + 1
                 reason = self._build_reject_reason()
+                self._signal_diagnostics["last_result"] = {
+                    "status": "risk_rejected",
+                    "strategy": signal.strategy_name,
+                    "symbol": signal.symbol,
+                    "exchange": exchange,
+                    "reason": reason,
+                    "order_value": float(order_value or 0.0),
+                }
+                self._signal_diagnostics["last_updated_at"] = datetime.utcnow().isoformat()
                 rejected = await order_manager.record_rejected_order(
                     request=req,
                     reason=reason,
@@ -602,12 +849,50 @@ class ExecutionEngine:
                     },
                 )
                 return None
-            order = await order_manager.create_order(req)
-            if not order:
+            try:
+                order = await asyncio.wait_for(order_manager.create_order(req), timeout=20.0)
+            except asyncio.TimeoutError:
+                fail_reason = "策略下单超时"
+                self._signal_diagnostics["order_timeout"] = int(self._signal_diagnostics.get("order_timeout", 0)) + 1
+                self._signal_diagnostics["last_result"] = {
+                    "status": "order_timeout",
+                    "strategy": signal.strategy_name,
+                    "symbol": signal.symbol,
+                    "exchange": exchange,
+                    "account_id": account_id,
+                }
+                self._signal_diagnostics["last_updated_at"] = datetime.utcnow().isoformat()
                 await order_manager.record_rejected_order(
                     request=req,
-                    reason="下单执行失败",
+                    reason=fail_reason,
                     price=quote_price or signal.price,
+                )
+                logger.error(
+                    f"Strategy order timeout: strategy={signal.strategy_name} "
+                    f"symbol={signal.symbol} exchange={exchange} account_id={account_id}"
+                )
+                return None
+            if not order:
+                fail_reason = str(order_manager.get_last_error() or "").strip() or "下单执行失败"
+                self._signal_diagnostics["order_failed"] = int(self._signal_diagnostics.get("order_failed", 0)) + 1
+                self._signal_diagnostics["last_result"] = {
+                    "status": "order_failed",
+                    "strategy": signal.strategy_name,
+                    "symbol": signal.symbol,
+                    "exchange": exchange,
+                    "account_id": account_id,
+                    "reason": fail_reason,
+                }
+                self._signal_diagnostics["last_updated_at"] = datetime.utcnow().isoformat()
+                await order_manager.record_rejected_order(
+                    request=req,
+                    reason=fail_reason,
+                    price=quote_price or signal.price,
+                )
+                logger.error(
+                    f"Strategy order failed: strategy={signal.strategy_name} "
+                    f"symbol={signal.symbol} exchange={exchange} account_id={account_id} "
+                    f"reason={fail_reason}"
                 )
                 return None
 
@@ -724,9 +1009,29 @@ class ExecutionEngine:
                 },
                 "timestamp": datetime.now().isoformat(),
             }
+            self._signal_diagnostics["executed"] = int(self._signal_diagnostics.get("executed", 0)) + 1
+            self._signal_diagnostics["last_result"] = {
+                "status": "executed",
+                "strategy": signal.strategy_name,
+                "symbol": signal.symbol,
+                "exchange": exchange,
+                "order_id": order.id,
+                "amount": float(order.amount or 0.0),
+                "filled": float(order.filled or 0.0),
+                "price": float(order.price or 0.0),
+            }
+            self._signal_diagnostics["last_updated_at"] = datetime.utcnow().isoformat()
             await self._notify_callbacks("order_executed", result)
             return result
         except Exception as e:
+            self._signal_diagnostics["exceptions"] = int(self._signal_diagnostics.get("exceptions", 0)) + 1
+            self._signal_diagnostics["last_result"] = {
+                "status": "exception",
+                "strategy": signal.strategy_name,
+                "symbol": signal.symbol,
+                "reason": str(e),
+            }
+            self._signal_diagnostics["last_updated_at"] = datetime.utcnow().isoformat()
             logger.error(f"Failed to execute signal: {e}")
             return None
 
@@ -1484,18 +1789,37 @@ class ExecutionEngine:
             except Exception as e:
                 logger.error(f"Signal processing error: {e}")
 
+    async def _prime_live_equity(self) -> None:
+        if self._paper_trading:
+            return
+        try:
+            await asyncio.wait_for(self._refresh_equity(), timeout=30.0)
+            logger.info(f"Live equity primed: {float(self._cached_equity or 0.0):.4f}")
+        except Exception as e:
+            logger.warning(f"Live equity prime skipped: {e}")
+
     async def start(self) -> None:
         if self._running:
             return
         self._running = True
         self._paper_trading = settings.TRADING_MODE == "paper"
         order_manager.set_paper_trading(self._paper_trading)
-        asyncio.create_task(self._process_signal_queue())
+        risk_manager.set_account_scope("paper" if self._paper_trading else "live", reset_baseline=False)
+        await self._ensure_queue_worker()
+        if not self._paper_trading:
+            asyncio.create_task(self._prime_live_equity(), name="execution_prime_live_equity")
         logger.info(f"Execution engine started (paper trading: {self._paper_trading})")
 
     async def stop(self) -> None:
         self._running = False
         self._conditional_orders.clear()
+        if self._queue_task and not self._queue_task.done():
+            self._queue_task.cancel()
+            try:
+                await self._queue_task
+            except asyncio.CancelledError:
+                pass
+        self._queue_task = None
         for exchange in exchange_manager.get_connected_exchanges():
             await order_manager.cancel_all_orders(exchange=exchange)
         logger.info("Execution engine stopped")
@@ -1545,6 +1869,9 @@ class ExecutionEngine:
 
     def get_queue_size(self) -> int:
         return self._signal_queue.qsize()
+
+    def get_signal_diagnostics(self) -> Dict[str, Any]:
+        return dict(self._signal_diagnostics or {})
 
 
 execution_engine = ExecutionEngine()

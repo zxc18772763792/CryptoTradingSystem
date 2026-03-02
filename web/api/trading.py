@@ -1,5 +1,9 @@
-"""Trading API endpoints."""
+﻿"""Trading API endpoints."""
 import asyncio
+import contextlib
+import copy
+import hashlib
+import hmac
 import json
 import math
 import statistics
@@ -7,6 +11,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode
 from uuid import uuid4
 
 import pandas as pd
@@ -15,14 +20,16 @@ from fastapi import APIRouter, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from config.exchanges import get_exchange_config
 from config.settings import settings
 from core.audit import audit_logger
 from core.data import data_storage
 from core.exchanges import exchange_manager
+from core.exchanges.binance_connector import BinanceConnector
 from core.notifications import notification_manager
 from core.realtime import event_bus
 from core.risk.risk_manager import risk_manager
-from core.strategies import strategy_manager
+from core.strategies import Signal, SignalType, strategy_manager
 from core.trading import (
     account_manager,
     account_snapshot_manager,
@@ -30,18 +37,28 @@ from core.trading import (
     order_manager,
     position_manager,
 )
+from core.trading.order_manager import OrderRequest as CoreOrderRequest
+from core.exchanges.base_exchange import OrderSide, OrderType
 from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
 
 router = APIRouter()
 
-_BALANCE_FETCH_TIMEOUT_SEC = 14.0
+_BALANCE_FETCH_TIMEOUT_SEC = 5.5
 _TICKER_FETCH_TIMEOUT_SEC = 1.6
 _BALANCE_SNAPSHOT_CACHE_TTL_SEC = 300.0
 _BALANCE_SNAPSHOT_FAST_AGE_SEC = 12.0
+_LIVE_ORDER_DETAILS_CACHE_TTL_SEC = 8.0
 _BALANCE_SNAPSHOT_CACHE: Dict[str, Dict[str, Any]] = {}
+_LIVE_POSITION_SNAPSHOT_CACHE: Dict[str, Any] = {"ts": 0.0, "data": {}}
+_LIVE_POSITION_SNAPSHOT_TTL_SEC = 6.0
+_LIVE_POSITION_FETCH_TIMEOUT_SEC = 8.5
+_LIVE_POSITION_DETAILS_CACHE_TTL_SEC = 12.0
+_LIVE_POSITION_DETAILS_CACHE: Dict[str, Any] = {"ts": 0.0, "positions": [], "diagnostics": None}
+_LIVE_ORDER_DETAILS_CACHE: Dict[str, Any] = {"ts": 0.0, "orders": []}
 _ANALYTICS_ROOT = Path("./data/cache/analytics")
 _BEHAVIOR_JOURNAL_PATH = _ANALYTICS_ROOT / "behavior_journal.json"
 _STOPLOSS_POLICY_PATH = _ANALYTICS_ROOT / "stoploss_policy.json"
+_LIVE_EQUITY_BASELINE_PATH = _ANALYTICS_ROOT / "live_equity_baseline.json"
 _DEFAULT_STOPLOSS_POLICY: Dict[str, Any] = {
     "atr": {"enabled": True, "period": 14, "multiplier": 2.0},
     "time_stop": {"enabled": True, "max_hours": 24},
@@ -49,6 +66,50 @@ _DEFAULT_STOPLOSS_POLICY: Dict[str, Any] = {
     "trailing": {"enabled": True},
     "partial_stop": {"enabled": True, "r1_ratio": 0.5, "r2_ratio": 0.5},
 }
+
+_BINANCE_RECV_WINDOW = 5000
+_BINANCE_REST_TIMEOUT_SEC = 4.5
+_BINANCE_TIME_OFFSET_MS: Dict[str, Any] = {"api": 0, "fapi": 0, "ts": 0.0}
+
+
+async def _clear_local_trading_runtime(
+    *,
+    clear_paper_snapshots: bool = False,
+) -> Dict[str, Any]:
+    """Clear in-memory paper/local trading residue to avoid cross-mode contamination."""
+    runtime_reset = execution_engine.clear_paper_runtime()
+    order_reset = order_manager.clear_paper_history()
+    position_reset = position_manager.clear_all()
+    risk_reset = risk_manager.clear_runtime_history()
+    snapshots_deleted = 0
+    if clear_paper_snapshots:
+        with contextlib.suppress(Exception):
+            snapshots_deleted = int(await account_snapshot_manager.clear_history(mode="paper"))
+
+    strategy_signal_cleared = 0
+    strategy_position_cleared = 0
+    for strategy in strategy_manager.get_all_strategies().values():
+        try:
+            strategy_signal_cleared += len(getattr(strategy, "signals_history", []) or [])
+            strategy_position_cleared += len(getattr(strategy, "positions", {}) or {})
+            strategy.signals_history.clear()
+            strategy.positions.clear()
+        except Exception:
+            continue
+
+    _BALANCE_SNAPSHOT_CACHE.clear()
+    _LIVE_POSITION_SNAPSHOT_CACHE["ts"] = 0.0
+    _LIVE_POSITION_SNAPSHOT_CACHE["data"] = {}
+
+    return {
+        "runtime": runtime_reset,
+        "orders": order_reset,
+        "positions": position_reset,
+        "risk": risk_reset,
+        "snapshots_deleted": snapshots_deleted,
+        "strategy_signal_cleared": strategy_signal_cleared,
+        "strategy_position_cleared": strategy_position_cleared,
+    }
 
 
 class OrderRequest(BaseModel):
@@ -122,6 +183,15 @@ class AccountUpdateRequest(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
+class PositionCloseRequest(BaseModel):
+    exchange: str
+    symbol: str
+    side: str = Field(..., pattern="^(long|short)$")
+    quantity: Optional[float] = None
+    account_id: Optional[str] = None
+    source: Optional[str] = None  # local | exchange_live
+
+
 class BehaviorJournalRequest(BaseModel):
     mood: str = Field(default="neutral")
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
@@ -141,6 +211,15 @@ _mode_switch_pending: Dict[str, Dict[str, Any]] = {}
 
 def _serialize_order(order: Any) -> Dict[str, Any]:
     meta = order_manager.get_order_metadata(order.id)
+    order_type = str(getattr(getattr(order, "type", None), "value", getattr(order, "type", "")) or "").lower()
+    order_price = float(order.price or 0.0)
+    stop_loss = meta.get("stop_loss")
+    take_profit = meta.get("take_profit")
+    trigger_price = meta.get("trigger_price")
+    if stop_loss is None and "stop" in order_type and order_price > 0:
+        stop_loss = order_price
+    if take_profit is None and "take_profit" in order_type and order_price > 0:
+        take_profit = order_price
     return {
         "id": order.id,
         "exchange": order.exchange,
@@ -155,11 +234,11 @@ def _serialize_order(order: Any) -> Dict[str, Any]:
         "strategy": meta.get("strategy"),
         "account_id": meta.get("account_id", "main"),
         "order_mode": meta.get("order_mode", "normal"),
-        "stop_loss": meta.get("stop_loss"),
-        "take_profit": meta.get("take_profit"),
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
         "trailing_stop_pct": meta.get("trailing_stop_pct"),
         "trailing_stop_distance": meta.get("trailing_stop_distance"),
-        "trigger_price": meta.get("trigger_price"),
+        "trigger_price": trigger_price,
         "reduce_only": bool(meta.get("reduce_only", False)),
         "rejected": bool(meta.get("rejected", False)),
         "reject_reason": meta.get("reject_reason"),
@@ -211,6 +290,235 @@ def _safe_dt(value: Any) -> Optional[datetime]:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
     except Exception:
         return None
+
+
+async def _collect_live_position_snapshot(force_refresh: bool = False) -> Dict[str, Any]:
+    if execution_engine.is_paper_mode():
+        return {"unrealized_pnl_usd": 0.0, "position_count": 0, "by_exchange": {}, "distribution": {}}
+
+    now_ts = time.time()
+    cached = _LIVE_POSITION_SNAPSHOT_CACHE.get("data") or {}
+    cached_ts = float(_LIVE_POSITION_SNAPSHOT_CACHE.get("ts") or 0.0)
+    if (
+        not force_refresh
+        and cached
+        and (now_ts - cached_ts) <= _LIVE_POSITION_SNAPSHOT_TTL_SEC
+    ):
+        return dict(cached)
+
+    rows: List[tuple[str, Any]] = []
+    for exchange_name in exchange_manager.get_connected_exchanges():
+        connector = exchange_manager.get_exchange(exchange_name)
+        if not connector:
+            continue
+        rows.append((exchange_name, connector))
+
+    if not rows:
+        snapshot = {"unrealized_pnl_usd": 0.0, "position_count": 0, "by_exchange": {}, "distribution": {}}
+        _LIVE_POSITION_SNAPSHOT_CACHE["ts"] = now_ts
+        _LIVE_POSITION_SNAPSHOT_CACHE["data"] = dict(snapshot)
+        return snapshot
+
+    def _contract_bucket_label(symbol: str, side: str) -> str:
+        text = str(symbol or "").upper()
+        if ":" in text:
+            text = text.split(":", 1)[0]
+        base = text.split("/", 1)[0].strip() if "/" in text else text.strip()
+        base = base or text or "UNKNOWN"
+        side_text = "多" if str(side or "").lower() == "long" else "空"
+        return f"{base} {side_text}(合约)"
+
+    async def _fetch_one(exchange_name: str, connector: Any) -> Dict[str, Any]:
+        try:
+            if exchange_name == "binance":
+                positions = await asyncio.wait_for(
+                    _fetch_binance_positions_fast(),
+                    timeout=min(_LIVE_POSITION_FETCH_TIMEOUT_SEC, 4.8),
+                )
+            else:
+                positions = await asyncio.wait_for(
+                    connector.get_positions(),
+                    timeout=_LIVE_POSITION_FETCH_TIMEOUT_SEC,
+                )
+        except Exception as e:
+            if exchange_name == "binance":
+                try:
+                    positions = await asyncio.wait_for(
+                        _fetch_binance_positions_via_fallback(),
+                        timeout=min(max(_LIVE_POSITION_FETCH_TIMEOUT_SEC * 0.75, 4.0), 7.0),
+                    )
+                    if positions is None:
+                        positions = []
+                except Exception as fallback_err:
+                    return {
+                        "exchange": exchange_name,
+                        "position_count": 0,
+                        "unrealized_pnl_usd": 0.0,
+                        "distribution": {},
+                        "error": str(fallback_err or e),
+                    }
+            else:
+                return {
+                    "exchange": exchange_name,
+                    "position_count": 0,
+                    "unrealized_pnl_usd": 0.0,
+                    "distribution": {},
+                    "error": (
+                        f"position request timeout after {_LIVE_POSITION_FETCH_TIMEOUT_SEC:.1f}s"
+                        if isinstance(e, asyncio.TimeoutError)
+                        else str(e)
+                    ),
+                }
+
+        count = 0
+        unrealized = 0.0
+        distribution: Dict[str, float] = {}
+        for pos in positions or []:
+            amount = abs(float((pos.get("amount") if isinstance(pos, dict) else getattr(pos, "amount", 0.0)) or 0.0))
+            if amount <= 0:
+                continue
+            count += 1
+            unrealized += float((pos.get("unrealized_pnl") if isinstance(pos, dict) else getattr(pos, "unrealized_pnl", 0.0)) or 0.0)
+            current_price = float((pos.get("current_price") if isinstance(pos, dict) else getattr(pos, "current_price", 0.0)) or 0.0)
+            if current_price <= 0:
+                current_price = float((pos.get("entry_price") if isinstance(pos, dict) else getattr(pos, "entry_price", 0.0)) or 0.0)
+            notional_usd = amount * max(current_price, 0.0)
+            if notional_usd > 0:
+                label = _contract_bucket_label(
+                    str((pos.get("symbol") if isinstance(pos, dict) else getattr(pos, "symbol", "")) or ""),
+                    str((pos.get("side") if isinstance(pos, dict) else getattr(pos, "side", "")) or ""),
+                )
+                distribution[label] = distribution.get(label, 0.0) + float(notional_usd)
+        return {
+            "exchange": exchange_name,
+            "position_count": count,
+            "unrealized_pnl_usd": unrealized,
+            "distribution": distribution,
+        }
+
+    fetched = await asyncio.gather(*[_fetch_one(name, conn) for name, conn in rows], return_exceptions=False)
+
+    by_exchange: Dict[str, Dict[str, Any]] = {}
+    total_count = 0
+    total_unrealized = 0.0
+    total_distribution: Dict[str, float] = {}
+    for row in fetched:
+        ex_name = str(row.get("exchange") or "").lower()
+        if not ex_name:
+            continue
+        by_exchange[ex_name] = {
+            "position_count": int(row.get("position_count") or 0),
+            "unrealized_pnl_usd": round(float(row.get("unrealized_pnl_usd") or 0.0), 4),
+            "error": row.get("error"),
+            "distribution": dict(row.get("distribution") or {}),
+        }
+        total_count += int(row.get("position_count") or 0)
+        total_unrealized += float(row.get("unrealized_pnl_usd") or 0.0)
+        for label, usd_value in (row.get("distribution") or {}).items():
+            key = str(label or "").strip()
+            if not key:
+                continue
+            total_distribution[key] = total_distribution.get(key, 0.0) + float(usd_value or 0.0)
+
+    # Fallback: include local live strategy/manual positions when exchange snapshots
+    # are unavailable, so dashboard exposure still reflects actual contract holdings.
+    for pos in position_manager.get_all_positions():
+        try:
+            exchange_name = str(getattr(pos, "exchange", "") or "").strip().lower()
+            if not exchange_name:
+                continue
+            qty = abs(float(getattr(pos, "quantity", 0.0) or 0.0))
+            if qty <= 0:
+                continue
+            source = str((getattr(pos, "metadata", {}) or {}).get("source") or "").strip().lower()
+            if source == "exchange_live":
+                continue
+            exchange_row = by_exchange.setdefault(exchange_name, {
+                "position_count": 0,
+                "unrealized_pnl_usd": 0.0,
+                "error": None,
+                "distribution": {},
+            })
+            if int(exchange_row.get("position_count") or 0) > 0:
+                continue
+            current_price = float(getattr(pos, "current_price", 0.0) or 0.0)
+            if current_price <= 0:
+                current_price = float(getattr(pos, "entry_price", 0.0) or 0.0)
+            notional_usd = qty * max(current_price, 0.0)
+            if notional_usd <= 0:
+                continue
+            side_value = str(getattr(getattr(pos, "side", None), "value", getattr(pos, "side", "")) or "")
+            label = _contract_bucket_label(str(getattr(pos, "symbol", "") or ""), side_value)
+            exchange_row["position_count"] = int(exchange_row.get("position_count") or 0) + 1
+            exchange_row["unrealized_pnl_usd"] = float(exchange_row.get("unrealized_pnl_usd") or 0.0) + float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
+            local_distribution = dict(exchange_row.get("distribution") or {})
+            local_distribution[label] = local_distribution.get(label, 0.0) + float(notional_usd)
+            exchange_row["distribution"] = local_distribution
+            total_count += 1
+            total_unrealized += float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
+            total_distribution[label] = total_distribution.get(label, 0.0) + float(notional_usd)
+        except Exception:
+            continue
+
+    snapshot = {
+        "unrealized_pnl_usd": round(total_unrealized, 4),
+        "position_count": int(total_count),
+        "by_exchange": by_exchange,
+        "distribution": total_distribution,
+    }
+    _LIVE_POSITION_SNAPSHOT_CACHE["ts"] = now_ts
+    _LIVE_POSITION_SNAPSHOT_CACHE["data"] = dict(snapshot)
+    return snapshot
+
+
+def _apply_live_snapshot_to_risk_report(
+    risk_report: Dict[str, Any],
+    live_snapshot: Dict[str, Any],
+    live_daily_total_pnl: Optional[float] = None,
+    live_day_start_equity: Optional[float] = None,
+) -> Dict[str, Any]:
+    out = dict(risk_report or {})
+    equity = dict(out.get("equity") or {})
+    live_unrealized = float(live_snapshot.get("unrealized_pnl_usd") or 0.0)
+    daily_equity_delta = float(equity.get("daily_pnl_usd") or 0.0)
+    daily_total = float(live_daily_total_pnl) if live_daily_total_pnl is not None else daily_equity_delta
+    has_live_positions = int(live_snapshot.get("position_count") or 0) > 0 or abs(live_unrealized) > 0
+    daily_realized = (
+        daily_total - live_unrealized
+        if has_live_positions
+        else float(equity.get("daily_realized_pnl_usd") or 0.0)
+    )
+    daily_stop_basis = float(equity.get("daily_stop_basis_usd") or (daily_realized + min(0.0, live_unrealized)))
+
+    equity["current_unrealized_pnl_usd"] = round(live_unrealized, 4)
+    equity["daily_total_pnl_usd"] = round(daily_total, 4)
+    equity["daily_pnl_usd"] = round(daily_total, 4)
+    equity["daily_realized_pnl_usd"] = round(daily_realized, 4)
+    equity["daily_stop_basis_usd"] = round(daily_stop_basis, 4)
+    equity["daily_unrealized_component_usd"] = round(
+        live_unrealized if has_live_positions else float(equity.get("daily_unrealized_component_usd") or 0.0),
+        4,
+    )
+    if live_day_start_equity is not None and float(live_day_start_equity or 0.0) > 0:
+        day_start_equity = float(live_day_start_equity or 0.0)
+        equity["day_start"] = round(day_start_equity, 4)
+        equity["daily_total_pnl_ratio"] = round(daily_total / max(day_start_equity, 1e-6), 6)
+        equity["daily_stop_basis_ratio"] = round(daily_stop_basis / max(day_start_equity, 1e-6), 6)
+    equity["pnl_scope_note"] = "daily_total_pnl_usd 为账户权益变化；daily_stop_basis_usd = 已实现盈亏 + 当前浮亏，仅该值用于熔断"
+    out["equity"] = equity
+    out["live_positions"] = {
+        "position_count": int(live_snapshot.get("position_count") or 0),
+        "by_exchange": live_snapshot.get("by_exchange") or {},
+    }
+    return out
+
+
+async def _build_effective_risk_report(force_live_refresh: bool = False) -> Dict[str, Any]:
+    report = risk_manager.get_risk_report()
+    if execution_engine.is_paper_mode():
+        return report
+    live_snapshot = await _collect_live_position_snapshot(force_refresh=force_live_refresh)
+    return _apply_live_snapshot_to_risk_report(report, live_snapshot)
 
 
 def _bucket_key(ts: datetime, mode: str) -> str:
@@ -275,6 +583,467 @@ def _save_stoploss_policy(policy: Dict[str, Any]) -> Dict[str, Any]:
             merged[key] = value
     _write_json_file(_STOPLOSS_POLICY_PATH, merged)
     return merged
+
+
+async def _create_binance_readonly_connector() -> Optional[BinanceConnector]:
+    base_cfg = get_exchange_config("binance")
+    if not base_cfg:
+        return None
+    cfg = copy.deepcopy(base_cfg)
+    cfg.api_key = settings.BINANCE_API_KEY or cfg.api_key
+    cfg.api_secret = settings.BINANCE_API_SECRET or cfg.api_secret
+    cfg.default_type = str(getattr(settings, "BINANCE_DEFAULT_TYPE", cfg.default_type) or cfg.default_type or "spot")
+    connector = BinanceConnector(cfg)
+    ok = await connector.connect()
+    if not ok:
+        with contextlib.suppress(Exception):
+            await connector.disconnect()
+        return None
+    return connector
+
+
+async def _fetch_binance_balances_via_fallback() -> Optional[List[Any]]:
+    connector = await _create_binance_readonly_connector()
+    if not connector:
+        return None
+    try:
+        return await connector.get_balance()
+    finally:
+        with contextlib.suppress(Exception):
+            await connector.disconnect()
+
+
+async def _fetch_binance_positions_via_fallback() -> Optional[List[Any]]:
+    connector = await _create_binance_readonly_connector()
+    if not connector:
+        return None
+    try:
+        return await connector.get_positions()
+    finally:
+        with contextlib.suppress(Exception):
+            await connector.disconnect()
+
+
+def _binance_has_credentials() -> bool:
+    return bool((settings.BINANCE_API_KEY or "").strip() and (settings.BINANCE_API_SECRET or "").strip())
+
+
+def _binance_market_symbol(symbol: Optional[str]) -> Optional[str]:
+    text = str(symbol or "").upper().strip()
+    if not text:
+        return None
+    if ":" in text:
+        text = text.split(":", 1)[0]
+    return text.replace("/", "").replace("-", "")
+
+
+def _binance_ccxt_symbol(symbol: str, quote: str = "USDT", futures: bool = False) -> str:
+    base = str(symbol or "").upper().replace("/", "").replace("-", "")
+    if base.endswith(quote):
+        asset = base[: -len(quote)]
+        if asset:
+            return f"{asset}/{quote}:USDT" if futures else f"{asset}/{quote}"
+    return symbol
+
+
+async def _binance_signed_request(
+    method: str,
+    path: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    host: str = "api",
+    timeout_sec: float = _BINANCE_REST_TIMEOUT_SEC,
+) -> Any:
+    if not _binance_has_credentials():
+        raise RuntimeError("binance api credentials unavailable")
+    base_url = "https://api.binance.com"
+    if host == "fapi":
+        base_url = "https://fapi.binance.com"
+    elif host == "sapi":
+        base_url = "https://api.binance.com"
+    proxy_url = settings.HTTP_PROXY or settings.HTTPS_PROXY or None
+
+    async def _refresh_time_offset(target_host: str, *, force: bool = False) -> int:
+        now_ts = time.time()
+        if (not force) and (now_ts - float(_BINANCE_TIME_OFFSET_MS.get("ts") or 0.0)) <= 180.0:
+            cached = int(_BINANCE_TIME_OFFSET_MS.get(target_host, 0) or 0)
+            if cached:
+                return cached
+        time_url = "https://api.binance.com/api/v3/time"
+        if target_host == "fapi":
+            time_url = "https://fapi.binance.com/fapi/v1/time"
+        client_kwargs: Dict[str, Any] = {"timeout": 3.0}
+        if proxy_url:
+            client_kwargs["proxies"] = proxy_url
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            resp = await client.get(time_url)
+            resp.raise_for_status()
+            server_ms = int((resp.json() or {}).get("serverTime") or 0)
+        offset = int(server_ms - int(time.time() * 1000))
+        _BINANCE_TIME_OFFSET_MS[target_host] = offset
+        _BINANCE_TIME_OFFSET_MS["ts"] = now_ts
+        return offset
+
+    async def _ensure_offsets() -> None:
+        await asyncio.gather(
+            _refresh_time_offset("api", force=False),
+            _refresh_time_offset("fapi", force=False),
+            return_exceptions=True,
+        )
+
+    async def _send_once(force_time_refresh: bool = False) -> httpx.Response:
+        if force_time_refresh:
+            await _refresh_time_offset("fapi" if host == "fapi" else "api", force=True)
+        offset_ms = int(
+            _BINANCE_TIME_OFFSET_MS.get("fapi" if host == "fapi" else "api", 0) or 0
+        )
+        payload: Dict[str, Any] = dict(params or {})
+        payload["timestamp"] = int(time.time() * 1000) + offset_ms
+        payload["recvWindow"] = int(_BINANCE_RECV_WINDOW)
+        query = urlencode([(k, v) for k, v in payload.items() if v is not None], doseq=True)
+        secret = (settings.BINANCE_API_SECRET or "").strip().encode("utf-8")
+        signature = hmac.new(secret, query.encode("utf-8"), hashlib.sha256).hexdigest()
+        headers = {"X-MBX-APIKEY": (settings.BINANCE_API_KEY or "").strip()}
+        url = f"{base_url}{path}"
+        client_kwargs: Dict[str, Any] = {"timeout": timeout_sec, "headers": headers}
+        if proxy_url:
+            client_kwargs["proxies"] = proxy_url
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            if method.upper() == "GET":
+                return await client.get(url, params={**payload, "signature": signature})
+            return await client.post(url, data={**payload, "signature": signature})
+
+    await _ensure_offsets()
+    resp = await _send_once(force_time_refresh=False)
+    if resp.status_code >= 400:
+        text = resp.text or ""
+        if "-1021" in text:
+            resp = await _send_once(force_time_refresh=True)
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _binance_public_price_usd(asset: str, timeout_sec: float = 1.6) -> float:
+    ccy = str(asset or "").upper().strip()
+    if not ccy:
+        return 0.0
+    if ccy in STABLE_COINS:
+        return 1.0
+    symbol = f"{ccy}USDT"
+    async with httpx.AsyncClient(timeout=timeout_sec) as client:
+        try:
+            resp = await client.get(
+                "https://api.binance.com/api/v3/ticker/price",
+                params={"symbol": symbol},
+            )
+            resp.raise_for_status()
+            return _safe_float((resp.json() or {}).get("price"), default=0.0)
+        except Exception:
+            return 0.0
+
+
+async def _binance_public_quotes_usd(assets: List[str]) -> Dict[str, float]:
+    unique_assets = []
+    seen = set()
+    for asset in assets:
+        ccy = str(asset or "").upper().strip()
+        if not ccy or ccy in seen:
+            continue
+        seen.add(ccy)
+        unique_assets.append(ccy)
+    if not unique_assets:
+        return {}
+    proxy_url = settings.HTTP_PROXY or settings.HTTPS_PROXY or None
+    client_kwargs: Dict[str, Any] = {"timeout": 2.5}
+    if proxy_url:
+        client_kwargs["proxies"] = proxy_url
+    try:
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            resp = await client.get("https://api.binance.com/api/v3/ticker/price")
+            resp.raise_for_status()
+            rows = resp.json() or []
+        price_map = {
+            str(row.get("symbol") or "").upper(): _safe_float(row.get("price"), default=0.0)
+            for row in rows
+            if isinstance(row, dict)
+        }
+        return {asset: float(price_map.get(f"{asset}USDT", 0.0) or 0.0) for asset in unique_assets}
+    except Exception:
+        prices = await asyncio.gather(
+            *[_binance_public_price_usd(asset) for asset in unique_assets],
+            return_exceptions=False,
+        )
+        return {asset: float(price or 0.0) for asset, price in zip(unique_assets, prices)}
+
+
+async def _fetch_binance_live_wallet_snapshot_fast() -> Dict[str, Any]:
+    if not _binance_has_credentials():
+        raise RuntimeError("binance api credentials unavailable")
+
+    async def _get_spot_account():
+        return await _binance_signed_request("GET", "/api/v3/account", host="api")
+
+    async def _get_futures_balance():
+        try:
+            return await _binance_signed_request("GET", "/fapi/v3/balance", host="fapi")
+        except Exception:
+            return await _binance_signed_request("GET", "/fapi/v2/balance", host="fapi")
+
+    async def _get_funding_wallet():
+        try:
+            return await _binance_signed_request(
+                "POST",
+                "/sapi/v1/asset/get-funding-asset",
+                host="sapi",
+                params={"needBtcValuation": "false"},
+            )
+        except Exception:
+            return []
+
+    spot_raw, futures_raw, funding_raw = await asyncio.gather(
+        _get_spot_account(),
+        _get_futures_balance(),
+        _get_funding_wallet(),
+        return_exceptions=True,
+    )
+
+    warnings: List[str] = []
+    balances: List[Dict[str, Any]] = []
+    distribution: Dict[str, float] = {}
+    components: Dict[str, float] = {"spot": 0.0, "funding": 0.0, "futures": 0.0}
+    quote_assets: List[str] = []
+
+    def _append_balance(currency: str, free: float, used: float, total: float, source: str, unit_usd: float = 0.0):
+        ccy = str(currency or "").upper().strip()
+        total_amt = float(total or 0.0)
+        if not ccy or total_amt <= 0:
+            return
+        if ccy not in STABLE_COINS and unit_usd <= 0:
+            quote_assets.append(ccy)
+        balances.append(
+            {
+                "currency": ccy,
+                "free": float(free or 0.0),
+                "used": float(used or 0.0),
+                "total": total_amt,
+                "unit_usd": float(unit_usd or 0.0),
+                "usd_value": 0.0,
+                "valuation_source": source,
+                "wallet_source": source,
+            }
+        )
+
+    if isinstance(spot_raw, Exception):
+        warnings.append(f"spot: {spot_raw}")
+    else:
+        for row in (spot_raw or {}).get("balances", []) or []:
+            free = _safe_float(row.get("free"), default=0.0)
+            locked = _safe_float(row.get("locked"), default=0.0)
+            total = free + locked
+            if total <= 0:
+                continue
+            _append_balance(str(row.get("asset") or ""), free, locked, total, "spot")
+
+    if isinstance(funding_raw, Exception):
+        warnings.append(f"funding: {funding_raw}")
+    else:
+        funding_rows = funding_raw if isinstance(funding_raw, list) else []
+        for row in funding_rows:
+            free = _safe_float(row.get("free"), default=0.0)
+            locked = (
+                _safe_float(row.get("locked"), default=0.0)
+                + _safe_float(row.get("freeze"), default=0.0)
+                + _safe_float(row.get("withdrawing"), default=0.0)
+            )
+            total = free + locked
+            if total <= 0:
+                continue
+            _append_balance(str(row.get("asset") or ""), free, locked, total, "funding")
+
+    if isinstance(futures_raw, Exception):
+        warnings.append(f"futures: {futures_raw}")
+    else:
+        futures_rows = futures_raw if isinstance(futures_raw, list) else []
+        for row in futures_rows:
+            currency = str(row.get("asset") or "").upper().strip()
+            wallet_balance = _safe_float(row.get("balance"), default=0.0)
+            available = _safe_float(row.get("availableBalance"), default=wallet_balance)
+            unrealized = _safe_float(row.get("crossUnPnl"), default=0.0)
+            total = wallet_balance + unrealized
+            used = max(total - available, 0.0)
+            if total <= 0:
+                continue
+            _append_balance(currency, available, used, total, "futures", 1.0 if currency in STABLE_COINS else 0.0)
+
+    quotes = await _binance_public_quotes_usd(quote_assets)
+    total_usd = 0.0
+    for row in balances:
+        currency = str(row.get("currency") or "").upper()
+        unit_usd = 1.0 if currency in STABLE_COINS else _safe_float(quotes.get(currency), default=0.0)
+        usd_value = _safe_float(row.get("total"), default=0.0) * unit_usd if unit_usd > 0 else 0.0
+        row["unit_usd"] = round(unit_usd, 8) if unit_usd > 0 else 0.0
+        row["usd_value"] = round(usd_value, 4)
+        row["valuation_source"] = "stable" if currency in STABLE_COINS else ("live" if unit_usd > 0 else "unpriced")
+        distribution[currency] = distribution.get(currency, 0.0) + float(usd_value or 0.0)
+        wallet_source = str(row.get("wallet_source") or "spot")
+        components[wallet_source] = components.get(wallet_source, 0.0) + float(usd_value or 0.0)
+        total_usd += float(usd_value or 0.0)
+
+    balances.sort(key=lambda item: float(item.get("usd_value") or 0.0), reverse=True)
+    return {
+        "balances": balances,
+        "distribution": distribution,
+        "total_usd": round(total_usd, 2),
+        "components": {k: round(v, 2) for k, v in components.items()},
+        "warnings": warnings,
+        "valuation_coverage": {
+            "priced_assets": sum(1 for row in balances if float(row.get("usd_value") or 0.0) > 0),
+            "unpriced_assets": sum(
+                1
+                for row in balances
+                if float(row.get("total") or 0.0) > 0 and float(row.get("usd_value") or 0.0) <= 0
+            ),
+        },
+    }
+
+
+async def _fetch_binance_positions_fast() -> List[Dict[str, Any]]:
+    if not _binance_has_credentials():
+        return []
+    try:
+        rows = await _binance_signed_request("GET", "/fapi/v2/positionRisk", host="fapi")
+    except Exception:
+        rows = await _binance_signed_request("GET", "/fapi/v3/positionRisk", host="fapi")
+    out: List[Dict[str, Any]] = []
+    for row in rows or []:
+        amount = _safe_float(row.get("positionAmt"), default=0.0)
+        if abs(amount) <= 0:
+            continue
+        side = "short" if amount < 0 else "long"
+        out.append(
+            {
+                "symbol": _binance_ccxt_symbol(str(row.get("symbol") or ""), futures=True),
+                "side": side,
+                "amount": abs(amount),
+                "entry_price": _safe_float(row.get("entryPrice"), default=0.0),
+                "current_price": _safe_float(row.get("markPrice"), default=0.0),
+                "unrealized_pnl": _safe_float(row.get("unRealizedProfit"), default=0.0),
+                "leverage": _safe_float(row.get("leverage"), default=1.0),
+                "liquidation_price": _safe_float(row.get("liquidationPrice"), default=0.0),
+            }
+        )
+    return out
+
+
+async def _fetch_binance_open_orders_fast(symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+    if not _binance_has_credentials():
+        return []
+    params: Dict[str, Any] = {}
+    raw_symbol = _binance_market_symbol(symbol)
+    if raw_symbol:
+        params["symbol"] = raw_symbol
+    rows = await _binance_signed_request("GET", "/fapi/v1/openOrders", host="fapi", params=params)
+    orders: List[Dict[str, Any]] = []
+    for row in rows or []:
+        raw_type = str(row.get("type") or "").lower()
+        stop_loss = None
+        take_profit = None
+        trigger_price = _safe_float(row.get("stopPrice"), default=0.0)
+        if "take_profit" in raw_type:
+            take_profit = trigger_price if trigger_price > 0 else _safe_float(row.get("price"), default=0.0)
+        elif "stop" in raw_type:
+            stop_loss = trigger_price if trigger_price > 0 else _safe_float(row.get("price"), default=0.0)
+        orders.append(
+            {
+                "id": str(row.get("orderId") or row.get("clientOrderId") or ""),
+                "exchange": "binance",
+                "symbol": _binance_ccxt_symbol(str(row.get("symbol") or ""), futures=True),
+                "side": str(row.get("side") or "").lower(),
+                "type": str(row.get("type") or "").lower(),
+                "price": _safe_float(row.get("price"), default=0.0),
+                "amount": _safe_float(row.get("origQty"), default=0.0),
+                "filled": _safe_float(row.get("executedQty"), default=0.0),
+                "status": str(row.get("status") or "").lower(),
+                "timestamp": _safe_dt(row.get("time") or row.get("updateTime")).isoformat()
+                if _safe_dt(row.get("time") or row.get("updateTime"))
+                else None,
+                "strategy": None,
+                "account_id": "exchange_live",
+                "order_mode": "normal",
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "trailing_stop_pct": None,
+                "trailing_stop_distance": None,
+                "trigger_price": trigger_price if trigger_price > 0 else None,
+                "reduce_only": bool(row.get("reduceOnly")),
+                "rejected": False,
+                "reject_reason": None,
+                "paper_fee_rate": 0.0,
+                "paper_fee_usd": 0.0,
+                "paper_slippage_bps": 0.0,
+                "paper_slippage_cost_usd": 0.0,
+                "paper_reference_price": 0.0,
+                "paper_notional_usd": 0.0,
+            }
+        )
+    return orders
+
+
+async def _resolve_live_equity_baseline(
+    current_total_usd: float,
+    exchange_totals: Dict[str, float],
+    live_snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    now = datetime.utcnow()
+    day_key = now.strftime("%Y-%m-%d")
+    stored = _read_json_file(_LIVE_EQUITY_BASELINE_PATH, default={})
+    if not isinstance(stored, dict):
+        stored = {}
+
+    stored_day = str(stored.get("day") or "")
+    stored_portfolio = _safe_float(stored.get("portfolio_total_usd"), default=0.0)
+    stored_by_exchange = stored.get("by_exchange") if isinstance(stored.get("by_exchange"), dict) else {}
+    stored_binance = _safe_float(stored_by_exchange.get("binance"), default=0.0)
+
+    db_portfolio = await account_snapshot_manager.get_day_start_total(mode="live", exchange="all", day=now)
+    db_binance = await account_snapshot_manager.get_day_start_total(mode="live", exchange="binance", day=now)
+
+    baseline_portfolio = _safe_float(db_portfolio, default=0.0)
+    if baseline_portfolio <= 0 and stored_day == day_key:
+        baseline_portfolio = stored_portfolio
+    if baseline_portfolio <= 0:
+        baseline_portfolio = _safe_float(current_total_usd, default=0.0)
+
+    baseline_binance = _safe_float(db_binance, default=0.0)
+    if baseline_binance <= 0 and stored_day == day_key:
+        baseline_binance = stored_binance
+    if baseline_binance <= 0:
+        baseline_binance = _safe_float(exchange_totals.get("binance"), default=0.0)
+
+    current_total = _safe_float(current_total_usd, default=0.0)
+    live_unrealized = abs(_safe_float((live_snapshot or {}).get("unrealized_pnl_usd"), default=0.0))
+    if baseline_portfolio > 0 and current_total > 0:
+        delta_usd = current_total - baseline_portfolio
+        delta_ratio = abs(delta_usd) / max(abs(baseline_portfolio), 1e-6)
+        if delta_ratio >= 0.35 and live_unrealized < abs(delta_usd) * 0.45:
+            logger.warning(
+                "Reset live equity baseline due to incompatible day-start snapshot: "
+                f"baseline={baseline_portfolio:.4f}, current={current_total:.4f}, "
+                f"delta={delta_usd:.4f}, live_unrealized={live_unrealized:.4f}"
+            )
+            baseline_portfolio = current_total
+            baseline_binance = _safe_float(exchange_totals.get("binance"), default=baseline_binance)
+
+    payload = {
+        "day": day_key,
+        "portfolio_total_usd": round(_safe_float(baseline_portfolio), 8),
+        "by_exchange": {
+            "binance": round(_safe_float(baseline_binance), 8),
+        },
+        "updated_at": now.isoformat(),
+    }
+    _write_json_file(_LIVE_EQUITY_BASELINE_PATH, payload)
+    return payload
 
 
 def _iter_trade_records(days: int = 90) -> List[Dict[str, Any]]:
@@ -514,33 +1283,122 @@ async def _load_rule_prices() -> Dict[str, float]:
     return prices
 
 
+async def _precheck_binance_futures_order(request: OrderRequest) -> None:
+    if str(request.exchange or "").lower() != "binance":
+        return
+    if execution_engine.is_paper_mode():
+        return
+    if bool(request.reduce_only):
+        return
+
+    connector = exchange_manager.get_exchange("binance")
+    if not connector:
+        return
+    default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").lower()
+    if default_type not in {"future", "swap"}:
+        return
+
+    px = float(request.price or 0.0)
+    if px <= 0:
+        try:
+            ticker = await asyncio.wait_for(connector.get_ticker(request.symbol), timeout=2.5)
+            px = float(getattr(ticker, "last", 0.0) or 0.0)
+        except Exception:
+            px = 0.0
+    notional = float(request.amount or 0.0) * max(px, 0.0)
+    if notional > 0 and notional < 20.0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Binance 合约最小名义金额为 20 USDT，当前约 {notional:.2f} USDT。请提高数量或价格。",
+        )
+
+    try:
+        balances = await asyncio.wait_for(connector.get_balance(), timeout=4.0)
+        usdt_free = 0.0
+        for b in balances or []:
+            ccy = str(getattr(b, "currency", "") or "").upper()
+            if ccy == "USDT":
+                usdt_free = float(getattr(b, "free", 0.0) or 0.0)
+                break
+        lev = max(1.0, float(request.leverage or 1.0))
+        required_margin = (notional / lev) if notional > 0 else 0.0
+        if required_margin > 0 and usdt_free > 0 and required_margin > usdt_free * 0.98:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"保证金不足：估算需 {required_margin:.2f} USDT（杠杆 {lev:.1f}x），"
+                    f"当前 USDT 可用约 {usdt_free:.2f}。"
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        # Non-critical precheck failure should not block actual order path.
+        return
+
+
 @router.post("/order", response_model=OrderResponse)
 async def create_order(request: OrderRequest):
-    result = await execution_engine.execute_manual_order(
-        exchange=request.exchange,
-        symbol=request.symbol,
-        side=request.side,
-        order_type=request.order_type,
-        amount=request.amount,
-        price=request.price,
-        leverage=request.leverage,
-        stop_loss=request.stop_loss,
-        take_profit=request.take_profit,
-        trailing_stop_pct=request.trailing_stop_pct,
-        trailing_stop_distance=request.trailing_stop_distance,
-        trigger_price=request.trigger_price,
-        order_mode=request.order_mode,
-        iceberg_parts=request.iceberg_parts,
-        algo_slices=request.algo_slices,
-        algo_interval_sec=request.algo_interval_sec,
-        account_id=request.account_id,
-        reduce_only=request.reduce_only,
-        strategy="manual",
-    )
+    mode = str(request.order_mode or "normal").lower()
+    timeout_sec = 30.0
+    if mode in {"iceberg", "twap", "vwap"}:
+        pieces = max(1, int(request.iceberg_parts if mode == "iceberg" else request.algo_slices))
+        interval_sec = max(0, int(request.algo_interval_sec or 0))
+        timeout_sec = min(180.0, max(40.0, float(interval_sec * max(0, pieces - 1) + 35)))
+    elif mode == "conditional":
+        timeout_sec = 40.0
+
+    await _precheck_binance_futures_order(request)
+
+    try:
+        result = await asyncio.wait_for(
+            execution_engine.execute_manual_order(
+                exchange=request.exchange,
+                symbol=request.symbol,
+                side=request.side,
+                order_type=request.order_type,
+                amount=request.amount,
+                price=request.price,
+                leverage=request.leverage,
+                stop_loss=request.stop_loss,
+                take_profit=request.take_profit,
+                trailing_stop_pct=request.trailing_stop_pct,
+                trailing_stop_distance=request.trailing_stop_distance,
+                trigger_price=request.trigger_price,
+                order_mode=request.order_mode,
+                iceberg_parts=request.iceberg_parts,
+                algo_slices=request.algo_slices,
+                algo_interval_sec=request.algo_interval_sec,
+                account_id=request.account_id,
+                reduce_only=request.reduce_only,
+                strategy="manual",
+            ),
+            timeout=timeout_sec,
+        )
+    except asyncio.TimeoutError:
+        detail = f"下单超时（{int(timeout_sec)}s），请检查交易所连接后重试"
+        await audit_logger.log(
+            module="trading",
+            action="create_order",
+            status="failed",
+            message=detail,
+            details={**request.model_dump(), "timeout_sec": timeout_sec},
+        )
+        raise HTTPException(status_code=504, detail=detail)
 
     if not result:
         risk = risk_manager.get_risk_report()
-        detail = risk.get("halt_reason") or "下单失败，可能触发风控限制"
+        raw_error = str(order_manager.get_last_error() or "")
+        mapped_error = raw_error
+        if "-4164" in raw_error:
+            mapped_error = "下单名义金额不足 20 USDT（非 reduce-only）。请提高数量或价格。"
+        elif "-2019" in raw_error:
+            mapped_error = "保证金不足。请确认 Binance U 本位合约可用余额，并降低数量或提高杠杆。"
+        detail = (
+            risk.get("halt_reason")
+            or mapped_error
+            or "下单失败，可能触发风控或交易所限制"
+        )
         await audit_logger.log(
             module="trading",
             action="create_order",
@@ -593,14 +1451,72 @@ async def get_orders(
             exchange=exchange,
             limit=limit,
         )
-    else:
-        orders = await order_manager.get_open_orders(
-            symbol=symbol,
-            exchange=exchange,
+        if not execution_engine.is_paper_mode():
+            orders = [
+                o
+                for o in orders
+                if not (
+                    str(getattr(o, "id", "")).startswith("paper_")
+                    or bool(order_manager.get_order_metadata(str(getattr(o, "id", ""))).get("paper"))
+                )
+            ]
+        return {"orders": [_serialize_order(o) for o in orders]}
+
+    request_limit = max(1, int(limit or 100))
+    cache_age = max(0.0, time.time() - float(_LIVE_ORDER_DETAILS_CACHE.get("ts") or 0.0))
+    cached_orders = list(_LIVE_ORDER_DETAILS_CACHE.get("orders") or [])
+    if (
+        not execution_engine.is_paper_mode()
+        and (exchange is None or str(exchange).lower() == "binance")
+    ):
+        try:
+            fast_orders = await asyncio.wait_for(
+                _fetch_binance_open_orders_fast(symbol=symbol),
+                timeout=4.2,
+            )
+            _LIVE_ORDER_DETAILS_CACHE["ts"] = time.time()
+            _LIVE_ORDER_DETAILS_CACHE["orders"] = list(fast_orders)
+            return {"orders": fast_orders[:request_limit]}
+        except Exception as fast_err:
+            logger.warning(f"[binance] fast open orders fetch failed: {fast_err}")
+            if cached_orders and cache_age <= _LIVE_ORDER_DETAILS_CACHE_TTL_SEC:
+                return {
+                    "orders": cached_orders[:request_limit],
+                    "cache_fallback": {"used": True, "age_sec": round(cache_age, 2), "reason": str(fast_err)},
+                }
+            return {
+                "orders": [],
+                "cache_fallback": {"used": False, "age_sec": round(cache_age, 2), "reason": str(fast_err)},
+            }
+
+    try:
+        orders = await asyncio.wait_for(
+            order_manager.get_open_orders(
+                symbol=symbol,
+                exchange=exchange,
+            ),
+            timeout=4.5,
         )
+    except asyncio.TimeoutError:
+        if (not execution_engine.is_paper_mode()) and cached_orders and cache_age <= _LIVE_ORDER_DETAILS_CACHE_TTL_SEC:
+            return {
+                "orders": cached_orders[:request_limit],
+                "cache_fallback": {"used": True, "age_sec": round(cache_age, 2), "reason": "timeout"},
+            }
+        raise HTTPException(status_code=504, detail="褰撳墠濮旀墭鏌ヨ瓒呮椂锛岃绋嶅悗閲嶈瘯")
+    except Exception as exc:
+        if (not execution_engine.is_paper_mode()) and cached_orders and cache_age <= _LIVE_ORDER_DETAILS_CACHE_TTL_SEC:
+            return {
+                "orders": cached_orders[:request_limit],
+                "cache_fallback": {"used": True, "age_sec": round(cache_age, 2), "reason": str(exc)},
+            }
+        raise HTTPException(status_code=502, detail=f"褰撳墠濮旀墭鏌ヨ澶辫触: {exc}")
 
-    return {"orders": [_serialize_order(o) for o in orders]}
-
+    serialized = [_serialize_order(o) for o in orders[:request_limit]]
+    if not execution_engine.is_paper_mode():
+        _LIVE_ORDER_DETAILS_CACHE["ts"] = time.time()
+        _LIVE_ORDER_DETAILS_CACHE["orders"] = list(serialized)
+    return {"orders": serialized}
 
 @router.get("/orders/conditional")
 async def get_conditional_orders():
@@ -662,10 +1578,355 @@ async def cancel_all_orders(
 
 @router.get("/positions")
 async def get_positions():
-    positions = position_manager.get_all_positions()
+    now_ts = time.time()
+    cached_positions = list(_LIVE_POSITION_DETAILS_CACHE.get("positions") or [])
+    cached_diagnostics = _LIVE_POSITION_DETAILS_CACHE.get("diagnostics")
+    cached_ts = float(_LIVE_POSITION_DETAILS_CACHE.get("ts") or 0.0)
+
+    positions = [p.to_dict() for p in position_manager.get_all_positions()]
+    exchange_positions: List[Dict[str, Any]] = []
+    diagnostics: Dict[str, Any] = {"fetched_exchanges": [], "skipped_exchanges": []}
+
+    def _canonical_symbol(sym: Any) -> str:
+        text = str(sym or "").upper().strip()
+        if ":" in text:
+            text = text.split(":", 1)[0].strip()
+        return text
+
+    if not execution_engine.is_paper_mode():
+        # Include live exchange positions so manually-held futures positions are visible in the UI.
+        # In live mode, exchange positions are treated as source-of-truth for the same symbol.
+        exchange_keys = set()
+        exchange_symbol_set = set()
+        for exchange_name in exchange_manager.get_connected_exchanges():
+            connector = exchange_manager.get_exchange(exchange_name)
+            if not connector:
+                diagnostics["skipped_exchanges"].append({"exchange": exchange_name, "reason": "not_connected"})
+                continue
+            default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").lower()
+            if default_type not in {"future", "swap"}:
+                diagnostics["skipped_exchanges"].append(
+                    {"exchange": exchange_name, "reason": f"default_type={default_type or 'unknown'}"}
+                )
+                continue
+            try:
+                if exchange_name == "binance":
+                    raw_fast_positions = await asyncio.wait_for(
+                        _fetch_binance_positions_fast(),
+                        timeout=min(_LIVE_POSITION_FETCH_TIMEOUT_SEC, 4.8),
+                    )
+                    ex_positions = raw_fast_positions or []
+                else:
+                    ex_positions = await asyncio.wait_for(
+                        connector.get_positions(),
+                        timeout=min(_LIVE_POSITION_FETCH_TIMEOUT_SEC, 6.5),
+                    )
+                diagnostics["fetched_exchanges"].append(
+                    {"exchange": exchange_name, "count": len(ex_positions), "default_type": default_type}
+                )
+                for p in ex_positions:
+                    symbol = str((p.get("symbol") if isinstance(p, dict) else getattr(p, "symbol", "")) or "")
+                    symbol_key = _canonical_symbol(symbol)
+                    side = str((p.get("side") if isinstance(p, dict) else getattr(p, "side", "")) or "").lower()
+                    key = (exchange_name.lower(), symbol_key, side)
+                    if key in exchange_keys:
+                        continue
+                    exchange_keys.add(key)
+                    amount = float((p.get("amount") if isinstance(p, dict) else getattr(p, "amount", 0.0)) or 0.0)
+                    entry_px = float((p.get("entry_price") if isinstance(p, dict) else getattr(p, "entry_price", 0.0)) or 0.0)
+                    current_px = float((p.get("current_price") if isinstance(p, dict) else getattr(p, "current_price", 0.0)) or 0.0)
+                    unrealized = float((p.get("unrealized_pnl") if isinstance(p, dict) else getattr(p, "unrealized_pnl", 0.0)) or 0.0)
+                    value = abs(amount) * (current_px if current_px > 0 else entry_px)
+                    exchange_symbol_set.add((exchange_name.lower(), symbol_key))
+                    exchange_positions.append(
+                        {
+                            "symbol": symbol,
+                            "exchange": exchange_name,
+                            "side": side or ("short" if amount < 0 else "long"),
+                            "entry_price": entry_px,
+                            "current_price": current_px,
+                            "quantity": abs(amount),
+                            "value": value,
+                            "unrealized_pnl": unrealized,
+                            "unrealized_pnl_pct": 0.0,
+                            "realized_pnl": 0.0,
+                            "leverage": float((p.get("leverage") if isinstance(p, dict) else getattr(p, "leverage", 1.0)) or 1.0),
+                            "margin": 0.0,
+                            "opened_at": None,
+                            "updated_at": datetime.utcnow().isoformat(),
+                            "strategy": None,
+                            "account_id": "exchange_live",
+                            "metadata": {
+                                "source": "exchange_live",
+                                "liquidation_price": (
+                                    p.get("liquidation_price") if isinstance(p, dict) else getattr(p, "liquidation_price", None)
+                                ),
+                                "synced_from_exchange": exchange_name,
+                            },
+                        }
+                    )
+            except Exception as e:
+                if exchange_name == "binance":
+                    try:
+                        ex_positions = await asyncio.wait_for(
+                            _fetch_binance_positions_via_fallback(),
+                            timeout=10.0,
+                        ) or []
+                        if not ex_positions and cached_positions and (now_ts - cached_ts) <= _LIVE_POSITION_DETAILS_CACHE_TTL_SEC:
+                            ex_positions = cached_positions
+                        diagnostics["fetched_exchanges"].append(
+                            {
+                                "exchange": exchange_name,
+                                "count": len(ex_positions),
+                                "default_type": default_type,
+                                "fallback_used": True,
+                            }
+                        )
+                        for p in ex_positions:
+                            symbol = str((p.get("symbol") if isinstance(p, dict) else getattr(p, "symbol", "")) or "")
+                            symbol_key = _canonical_symbol(symbol)
+                            side = str((p.get("side") if isinstance(p, dict) else getattr(p, "side", "")) or "").lower()
+                            key = (exchange_name.lower(), symbol_key, side)
+                            if key in exchange_keys:
+                                continue
+                            exchange_keys.add(key)
+                            amount = float((p.get("amount") if isinstance(p, dict) else getattr(p, "amount", 0.0)) or 0.0)
+                            entry_px = float((p.get("entry_price") if isinstance(p, dict) else getattr(p, "entry_price", 0.0)) or 0.0)
+                            current_px = float((p.get("current_price") if isinstance(p, dict) else getattr(p, "current_price", 0.0)) or 0.0)
+                            unrealized = float((p.get("unrealized_pnl") if isinstance(p, dict) else getattr(p, "unrealized_pnl", 0.0)) or 0.0)
+                            value = abs(amount) * (current_px if current_px > 0 else entry_px)
+                            exchange_symbol_set.add((exchange_name.lower(), symbol_key))
+                            exchange_positions.append(
+                                {
+                                    "symbol": symbol,
+                                    "exchange": exchange_name,
+                                    "side": side or ("short" if amount < 0 else "long"),
+                                    "entry_price": entry_px,
+                                    "current_price": current_px,
+                                    "quantity": abs(amount),
+                                    "value": value,
+                                    "unrealized_pnl": unrealized,
+                                    "unrealized_pnl_pct": 0.0,
+                                    "realized_pnl": 0.0,
+                                    "leverage": float((p.get("leverage") if isinstance(p, dict) else getattr(p, "leverage", 1.0)) or 1.0),
+                                    "margin": 0.0,
+                                    "opened_at": None,
+                                    "updated_at": datetime.utcnow().isoformat(),
+                                    "strategy": None,
+                                    "account_id": "exchange_live",
+                                    "metadata": {
+                                        "source": "exchange_live",
+                                        "liquidation_price": (
+                                            p.get("liquidation_price") if isinstance(p, dict) else getattr(p, "liquidation_price", None)
+                                        ),
+                                        "synced_from_exchange": exchange_name,
+                                        "fallback_used": True,
+                                    },
+                                }
+                            )
+                        continue
+                    except Exception as fallback_err:
+                        diagnostics["skipped_exchanges"].append(
+                            {"exchange": exchange_name, "reason": str(fallback_err or e)}
+                        )
+                        continue
+                diagnostics["skipped_exchanges"].append({"exchange": exchange_name, "reason": str(e)})
+
+        if exchange_symbol_set:
+            positions = [
+                p
+                for p in positions
+                if (
+                    str(p.get("exchange", "")).lower(),
+                    _canonical_symbol(p.get("symbol")),
+                )
+                not in exchange_symbol_set
+            ]
+
+    all_positions = positions + exchange_positions
+    if exchange_positions:
+        _LIVE_POSITION_DETAILS_CACHE["ts"] = now_ts
+        _LIVE_POSITION_DETAILS_CACHE["positions"] = list(exchange_positions)
+        _LIVE_POSITION_DETAILS_CACHE["diagnostics"] = copy.deepcopy(diagnostics)
+    elif (
+        not execution_engine.is_paper_mode()
+        and cached_positions
+        and (now_ts - cached_ts) <= _LIVE_POSITION_DETAILS_CACHE_TTL_SEC
+    ):
+        diagnostics = dict(cached_diagnostics or diagnostics)
+        diagnostics["cache_fallback"] = {
+            "used": True,
+            "age_sec": round(max(0.0, now_ts - cached_ts), 2),
+        }
+        all_positions = positions + cached_positions
+
+    stats_positions = all_positions
+    stats = {
+        "position_count": len(stats_positions),
+        "total_value": round(sum(float(p.get("value") or 0.0) for p in stats_positions), 8),
+        "total_unrealized_pnl": round(sum(float(p.get("unrealized_pnl") or 0.0) for p in stats_positions), 8),
+        "total_realized_pnl": round(sum(float(p.get("realized_pnl") or 0.0) for p in stats_positions), 8),
+        "long_positions": len([p for p in stats_positions if str(p.get("side") or "").lower() == "long"]),
+        "short_positions": len([p for p in stats_positions if str(p.get("side") or "").lower() == "short"]),
+        "winning_positions": len([p for p in stats_positions if float(p.get("unrealized_pnl") or 0.0) > 0]),
+        "losing_positions": len([p for p in stats_positions if float(p.get("unrealized_pnl") or 0.0) < 0]),
+    }
+
     return {
-        "positions": [p.to_dict() for p in positions],
-        "stats": position_manager.get_stats(),
+        "positions": all_positions,
+        "stats": stats,
+        "exchange_positions_count": len(exchange_positions),
+        "diagnostics": diagnostics if not execution_engine.is_paper_mode() else None,
+    }
+
+
+@router.post("/positions/close")
+async def close_position(req: PositionCloseRequest):
+    exchange = str(req.exchange or "").strip().lower()
+    symbol = str(req.symbol or "").strip().upper()
+    side = str(req.side or "").strip().lower()
+    source = str(req.source or "").strip().lower()
+    requested_qty = float(req.quantity or 0.0)
+    if requested_qty < 0:
+        requested_qty = abs(requested_qty)
+
+    if not exchange or not symbol:
+        raise HTTPException(status_code=400, detail="exchange/symbol is required")
+
+    # Prefer closing through execution_engine when the position exists in local position_manager
+    # so paper/live accounting, risk, and order history remain consistent.
+    local_pos = position_manager.get_position(exchange, symbol, account_id=req.account_id)
+    if local_pos and str(local_pos.side.value) == side:
+        close_signal = Signal(
+            symbol=symbol,
+            signal_type=(SignalType.CLOSE_LONG if side == "long" else SignalType.CLOSE_SHORT),
+            price=float(local_pos.current_price or local_pos.entry_price or 0.0),
+            timestamp=datetime.utcnow(),
+            strategy_name=str(local_pos.strategy or "manual_ui_close"),
+            strength=1.0,
+            quantity=float(local_pos.quantity or 0.0),
+            metadata={
+                "exchange": exchange,
+                "account_id": str(local_pos.account_id or req.account_id or "main"),
+                "source": "manual_ui_close",
+                "requested_from": source or "local",
+            },
+        )
+        result = await execution_engine.execute_signal(close_signal)
+        if not result:
+            raise HTTPException(status_code=400, detail="閺堫剙婀撮幐浣风波楠炲厖绮ㄦ径杈Е")
+        await audit_logger.log(
+            module="trading",
+            action="close_position",
+            status="success",
+            message=f"closed local {exchange} {symbol} {side}",
+            details={
+                "exchange": exchange,
+                "symbol": symbol,
+                "side": side,
+                "quantity": float(local_pos.quantity or 0.0),
+                "source": "local",
+                "account_id": str(local_pos.account_id or "main"),
+            },
+        )
+        return {
+            "ok": True,
+            "mode": execution_engine.get_trading_mode(),
+            "source": "local",
+            "exchange": exchange,
+            "symbol": symbol,
+            "side": side,
+            "result": result,
+        }
+
+    # For live-only exchange-synced positions (e.g. manual futures positions not tracked in position_manager),
+    # send a reduce-only market order to the exchange.
+    if execution_engine.is_paper_mode():
+        raise HTTPException(status_code=400, detail="濡剝瀚欓惄妯绘弓閹垫儳鍩岀€电懓绨查張顒€婀撮幐浣风波")
+
+    connector = exchange_manager.get_exchange(exchange)
+    if not connector:
+        raise HTTPException(status_code=404, detail=f"娴溿倖妲楅幍鈧張顏囩箾閹? {exchange}")
+
+    default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").lower()
+    if default_type not in {"future", "swap"}:
+        raise HTTPException(status_code=400, detail=f"{exchange} 闂堢偛鎮庣痪锕佸閹?default_type={default_type or 'unknown'})")
+
+    qty = requested_qty
+    matched_side = side
+    if qty <= 0:
+        try:
+            ex_positions = await connector.get_positions()
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"鐠囪褰囨禍銈嗘閹碘偓閹镐椒绮ㄦ径杈Е: {e}") from e
+
+        norm_symbol = symbol.upper()
+        for p in ex_positions:
+            p_symbol = str(getattr(p, "symbol", "") or "").upper()
+            p_side = str(getattr(p, "side", "") or "").lower()
+            p_amt = float(getattr(p, "amount", 0.0) or 0.0)
+            if not p_symbol:
+                continue
+            if p_symbol != norm_symbol:
+                continue
+            if p_side and p_side != side:
+                continue
+            if abs(p_amt) <= 0:
+                continue
+            qty = abs(p_amt)
+            matched_side = p_side or ("short" if p_amt < 0 else "long")
+            break
+    if qty <= 0:
+        raise HTTPException(status_code=404, detail="閺堫亝澹橀崚鏉垮讲楠炲厖绮ㄩ惃鍕唉閺勬挻澧嶉幐浣风波")
+
+    close_side = "sell" if matched_side == "long" else "buy"
+    order = await order_manager.create_order(
+        CoreOrderRequest(
+            symbol=symbol,
+            side=OrderSide.SELL if close_side == "sell" else OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            amount=qty,
+            price=None,
+            exchange=exchange,
+            strategy="manual_ui_close",
+            account_id=str(req.account_id or "main"),
+            reduce_only=True,
+            params={"source": "manual_ui_close", "position_side": matched_side},
+        )
+    )
+    if not order:
+        raise HTTPException(status_code=400, detail="娴溿倖妲楅幍鈧獮鍏呯波娑撳宕熸径杈Е")
+
+    await audit_logger.log(
+        module="trading",
+        action="close_position",
+        status="success",
+        message=f"reduce-only close {exchange} {symbol} {matched_side}",
+        details={
+            "exchange": exchange,
+            "symbol": symbol,
+            "side": matched_side,
+            "quantity": qty,
+            "source": "exchange_live",
+            "order_id": order.id,
+            "reduce_only": True,
+        },
+    )
+    return {
+        "ok": True,
+        "mode": execution_engine.get_trading_mode(),
+        "source": "exchange_live",
+        "exchange": exchange,
+        "symbol": symbol,
+        "side": matched_side,
+        "quantity": qty,
+        "order": {
+            "id": order.id,
+            "status": getattr(getattr(order, "status", None), "value", str(getattr(order, "status", ""))),
+            "price": float(getattr(order, "price", 0.0) or 0.0),
+            "amount": float(getattr(order, "amount", 0.0) or qty),
+            "filled": float(getattr(order, "filled", 0.0) or 0.0),
+        },
     }
 
 
@@ -706,9 +1967,11 @@ async def get_all_balances():
     results: Dict[str, Dict[str, Any]] = {}
     total_usd = 0.0
     distribution_map: Dict[str, float] = {}
+    exchange_total_map: Dict[str, float] = {}
     total_unpriced_assets = 0
     mode_name = execution_engine.get_trading_mode()
     is_paper_mode = execution_engine.is_paper_mode()
+    risk_manager.set_account_scope("paper" if is_paper_mode else "live", reset_baseline=False)
     paper_account: Optional[Dict[str, Any]] = None
 
     async def _collect_exchange(exchange_name: str):
@@ -725,6 +1988,58 @@ async def get_all_balances():
                 float(cached.get("total_usd", 0.0) or 0.0),
                 dict(cached.get("distribution") or {}),
             )
+
+        if exchange_name == "binance" and not is_paper_mode:
+            try:
+                fast_snapshot = await asyncio.wait_for(
+                    _fetch_binance_live_wallet_snapshot_fast(),
+                    timeout=max(_BALANCE_FETCH_TIMEOUT_SEC, 10.5),
+                )
+                exchange_result = {
+                    "connected": True,
+                    "balances": list(fast_snapshot.get("balances") or []),
+                    "total_usd": round(_safe_float(fast_snapshot.get("total_usd"), default=0.0), 2),
+                    "valuation_coverage": dict(fast_snapshot.get("valuation_coverage") or {}),
+                    "from_cache": False,
+                    "fallback_used": True,
+                    "wallet_components": dict(fast_snapshot.get("components") or {}),
+                }
+                warnings = [str(x) for x in (fast_snapshot.get("warnings") or []) if str(x).strip()]
+                if warnings:
+                    exchange_result["warning"] = " | ".join(warnings[:3])
+                local_distribution = dict(fast_snapshot.get("distribution") or {})
+                exchange_total_usd = float(fast_snapshot.get("total_usd") or 0.0)
+                _BALANCE_SNAPSHOT_CACHE[exchange_name] = {
+                    "ts": time.time(),
+                    "result": {
+                        "connected": exchange_result["connected"],
+                        "balances": exchange_result["balances"],
+                        "total_usd": exchange_result["total_usd"],
+                        "wallet_components": exchange_result.get("wallet_components"),
+                    },
+                    "total_usd": exchange_total_usd,
+                    "distribution": dict(local_distribution),
+                }
+                return (
+                    exchange_name,
+                    exchange_result,
+                    exchange_total_usd,
+                    local_distribution,
+                )
+            except Exception as fast_err:
+                logger.warning(f"[binance] live fast wallet snapshot failed: {fast_err}")
+                if cached and (time.time() - float(cached.get("ts", 0.0))) <= _BALANCE_SNAPSHOT_CACHE_TTL_SEC:
+                    age = max(0.0, time.time() - float(cached.get("ts", 0.0)))
+                    cached_result = dict(cached.get("result") or {})
+                    cached_result["from_cache"] = True
+                    cached_result["cache_age_sec"] = round(age, 2)
+                    cached_result["warning"] = str(fast_err)
+                    return (
+                        exchange_name,
+                        cached_result,
+                        float(cached.get("total_usd", 0.0) or 0.0),
+                        dict(cached.get("distribution") or {}),
+                    )
 
         connector = exchange_manager.get_exchange(exchange_name)
         if not connector:
@@ -839,6 +2154,107 @@ async def get_all_balances():
                 local_distribution,
             )
         except Exception as e:
+            cached = _BALANCE_SNAPSHOT_CACHE.get(exchange_name)
+            if cached and (time.time() - float(cached.get("ts", 0.0))) <= _BALANCE_SNAPSHOT_CACHE_TTL_SEC:
+                err_msg = (
+                    f"balance request timeout after {_BALANCE_FETCH_TIMEOUT_SEC:.0f}s"
+                    if isinstance(e, asyncio.TimeoutError)
+                    else str(e)
+                )
+                age = max(0.0, time.time() - float(cached.get("ts", 0.0)))
+                cached_result = dict(cached.get("result") or {})
+                cached_result["from_cache"] = True
+                cached_result["cache_age_sec"] = round(age, 2)
+                cached_result["warning"] = err_msg
+                return (
+                    exchange_name,
+                    cached_result,
+                    float(cached.get("total_usd", 0.0) or 0.0),
+                    dict(cached.get("distribution") or {}),
+                )
+
+            if exchange_name == "binance":
+                try:
+                    logger.warning(f"[binance] primary balance fetch failed, trying readonly fallback: {e}")
+                    balances = await asyncio.wait_for(
+                        _fetch_binance_balances_via_fallback(),
+                        timeout=min(max(_BALANCE_FETCH_TIMEOUT_SEC * 0.5, 5.0), 8.0),
+                    )
+                    if balances:
+                        exchange_balances: List[Dict[str, Any]] = []
+                        exchange_total_usd = 0.0
+                        local_distribution: Dict[str, float] = {}
+                        quote_map: Dict[str, float] = {}
+                        price_candidates: List[str] = []
+                        for b in balances:
+                            ccy = str(getattr(b, "currency", "") or "").upper()
+                            total = float(getattr(b, "total", 0.0) or 0.0)
+                            if total > 0 and ccy not in STABLE_COINS and ccy not in price_candidates:
+                                price_candidates.append(ccy)
+                        if price_candidates:
+                            quote_map = await build_currency_usd_quotes(
+                                connector=connector,
+                                currencies=price_candidates,
+                                timeout_sec=_TICKER_FETCH_TIMEOUT_SEC,
+                                max_parallel=2,
+                            )
+                        priced_assets = 0
+                        unpriced_assets = 0
+                        for b in balances:
+                            currency = str(getattr(b, "currency", "") or "").upper()
+                            total = float(getattr(b, "total", 0.0) or 0.0)
+                            unit_usd = 1.0 if currency in STABLE_COINS else float(quote_map.get(currency, 0.0) or 0.0)
+                            valuation_source = "live" if unit_usd > 0 and currency not in STABLE_COINS else "stable"
+                            usd_value = float(total) * float(unit_usd) if total > 0 and unit_usd > 0 else 0.0
+                            if total > 0:
+                                if usd_value > 0:
+                                    priced_assets += 1
+                                else:
+                                    unpriced_assets += 1
+                            exchange_total_usd += usd_value
+                            local_distribution[currency] = local_distribution.get(currency, 0.0) + usd_value
+                            exchange_balances.append(
+                                {
+                                    "currency": currency,
+                                    "free": float(getattr(b, "free", 0.0) or 0.0),
+                                    "used": float(getattr(b, "used", 0.0) or 0.0),
+                                    "total": total,
+                                    "usd_value": round(usd_value, 4),
+                                    "unit_usd": round(float(unit_usd), 8) if unit_usd > 0 else 0.0,
+                                    "valuation_source": valuation_source,
+                                }
+                            )
+                        exchange_balances.sort(key=lambda item: item["usd_value"], reverse=True)
+                        exchange_result = {
+                            "connected": True,
+                            "balances": exchange_balances,
+                            "total_usd": round(exchange_total_usd, 2),
+                            "valuation_coverage": {
+                                "priced_assets": priced_assets,
+                                "unpriced_assets": unpriced_assets,
+                            },
+                            "from_cache": False,
+                            "fallback_used": True,
+                        }
+                        _BALANCE_SNAPSHOT_CACHE[exchange_name] = {
+                            "ts": time.time(),
+                            "result": {
+                                "connected": exchange_result["connected"],
+                                "balances": exchange_result["balances"],
+                                "total_usd": exchange_result["total_usd"],
+                            },
+                            "total_usd": exchange_total_usd,
+                            "distribution": dict(local_distribution),
+                        }
+                        return (
+                            exchange_name,
+                            exchange_result,
+                            exchange_total_usd,
+                            local_distribution,
+                        )
+                except Exception as fallback_err:
+                    logger.error(f"[binance] readonly fallback balance fetch failed: {fallback_err}")
+
             err_msg = (
                 f"balance request timeout after {_BALANCE_FETCH_TIMEOUT_SEC:.0f}s"
                 if isinstance(e, asyncio.TimeoutError)
@@ -878,6 +2294,7 @@ async def get_all_balances():
     for exchange_name, exchange_result, exchange_total_usd, local_distribution in rows:
         results[exchange_name] = exchange_result
         total_usd += float(exchange_total_usd or 0.0)
+        exchange_total_map[exchange_name] = float(exchange_total_usd or 0.0)
         coverage = exchange_result.get("valuation_coverage") if isinstance(exchange_result, dict) else None
         total_unpriced_assets += int(((coverage or {}).get("unpriced_assets") or 0))
         for ccy, val in local_distribution.items():
@@ -888,6 +2305,18 @@ async def get_all_balances():
     prev_equity = float(((risk_report_before.get("equity") or {}).get("current") or 0.0))
     risk_equity_input = float(market_total_usd)
     paper_equity = 0.0
+    live_position_snapshot: Dict[str, Any] = {"unrealized_pnl_usd": 0.0, "position_count": 0, "by_exchange": {}}
+    live_equity_baseline: Dict[str, Any] = {}
+    live_day_start_equity = 0.0
+    live_daily_total_pnl = 0.0
+    balance_warning_present = any(
+        isinstance(v, dict) and (v.get("error") or v.get("warning"))
+        for v in results.values()
+    )
+    binance_balance_issue = bool(
+        isinstance(results.get("binance"), dict)
+        and ((results["binance"].get("error")) or (results["binance"].get("warning")))
+    )
 
     if is_paper_mode:
         try:
@@ -896,22 +2325,95 @@ async def get_all_balances():
                 risk_equity_input = paper_equity
         except Exception as e:
             logger.warning(f"Failed to refresh paper equity snapshot: {e}")
+    else:
+        try:
+            live_position_snapshot = await _collect_live_position_snapshot(force_refresh=False)
+        except Exception as e:
+            logger.debug(f"Failed to collect live position snapshot before risk update: {e}")
+        try:
+            live_equity_baseline = await _resolve_live_equity_baseline(
+                current_total_usd=market_total_usd,
+                exchange_totals=exchange_total_map,
+                live_snapshot=live_position_snapshot,
+            )
+            live_day_start_equity = _safe_float(
+                live_equity_baseline.get("portfolio_total_usd"),
+                default=0.0,
+            )
+            if live_day_start_equity > 0 and market_total_usd > 0:
+                live_daily_total_pnl = float(market_total_usd) - float(live_day_start_equity)
+        except Exception as e:
+            logger.warning(f"Failed to resolve live equity baseline: {e}")
+
+        for label, usd_value in (live_position_snapshot.get("distribution") or {}).items():
+            key = str(label or "").strip()
+            val = float(usd_value or 0.0)
+            if key and val > 0:
+                distribution_map[key] = distribution_map.get(key, 0.0) + val
 
     if (
         (not is_paper_mode)
-        and total_unpriced_assets > 0
         and prev_equity > 0
         and risk_equity_input > 0
         and risk_equity_input < prev_equity * 0.6
+        and (
+            total_unpriced_assets > 0
+            or balance_warning_present
+            or binance_balance_issue
+        )
     ):
         logger.warning(
             f"Skip abnormal equity drop for risk update: prev={prev_equity:.4f}, "
-            f"new={risk_equity_input:.4f}, unpriced_assets={total_unpriced_assets}"
+            f"new={risk_equity_input:.4f}, unpriced_assets={total_unpriced_assets}, "
+            f"balance_warning_present={balance_warning_present}"
+        )
+        risk_equity_input = prev_equity
+
+    if (not is_paper_mode) and prev_equity > 0 and risk_equity_input > 0:
+        delta_usd = risk_equity_input - prev_equity
+        move_ratio = abs(delta_usd) / max(prev_equity, 1e-6)
+        live_unrealized_abs = abs(float(live_position_snapshot.get("unrealized_pnl_usd") or 0.0))
+        pnl_explained = live_unrealized_abs >= abs(delta_usd) * 0.45
+        # Internal transfers (spot/funding/futures wallet moves) should not be treated as trading PnL.
+        # Ignore large equity jumps/drops not explained by live position PnL to avoid false circuit-breakers.
+        if move_ratio >= 0.55 and (not pnl_explained):
+            logger.warning(
+                "Skip abnormal equity move likely transfer/cashflow: "
+                f"prev={prev_equity:.4f}, new={risk_equity_input:.4f}, "
+                f"delta={delta_usd:.4f}, live_unrealized={live_unrealized_abs:.4f}, "
+                f"warnings={balance_warning_present}, unpriced={total_unpriced_assets}"
+            )
+            risk_equity_input = prev_equity
+
+    if (
+        (not is_paper_mode)
+        and prev_equity > 0
+        and risk_equity_input <= 0
+        and (balance_warning_present or binance_balance_issue)
+    ):
+        logger.warning(
+            f"Skip zero/negative equity update for risk: prev={prev_equity:.4f}, "
+            f"new={risk_equity_input:.4f}, balance_warning_present={balance_warning_present}"
         )
         risk_equity_input = prev_equity
 
     display_total_usd = risk_equity_input if (is_paper_mode and risk_equity_input > 0) else market_total_usd
-    risk_manager.update_equity(risk_equity_input)
+    if (not is_paper_mode) and display_total_usd <= 0 and risk_equity_input > 0:
+        display_total_usd = risk_equity_input
+
+    risk_manager.update_equity(
+        risk_equity_input,
+        day_start_equity=(
+            live_day_start_equity
+            if (not is_paper_mode and live_day_start_equity > 0)
+            else None
+        ),
+        current_unrealized_pnl=(
+            float(live_position_snapshot.get("unrealized_pnl_usd") or 0.0)
+            if not is_paper_mode
+            else float(position_manager.get_total_pnl() or 0.0)
+        ),
+    )
 
     if is_paper_mode:
         asset_map: Dict[str, Dict[str, float]] = {}
@@ -983,6 +2485,10 @@ async def get_all_balances():
     )
 
     distribution_total = float(display_total_usd if is_paper_mode else market_total_usd)
+    if not is_paper_mode:
+        dist_sum = sum(float(v or 0.0) for v in distribution_map.values())
+        if dist_sum > 0:
+            distribution_total = float(dist_sum)
     distribution = [
         {
             "currency": ccy,
@@ -992,7 +2498,14 @@ async def get_all_balances():
         for ccy, val in sorted(distribution_map.items(), key=lambda x: x[1], reverse=True)
         if val > 0
     ]
-    risk_report = risk_manager.get_risk_report()
+    if not is_paper_mode and not live_position_snapshot:
+        live_position_snapshot = await _collect_live_position_snapshot(force_refresh=False)
+    risk_report = _apply_live_snapshot_to_risk_report(
+        risk_manager.get_risk_report(),
+        live_position_snapshot,
+        live_daily_total_pnl=live_daily_total_pnl,
+        live_day_start_equity=live_day_start_equity,
+    ) if not is_paper_mode else risk_manager.get_risk_report()
     rule_prices = await _load_rule_prices()
     rule_eval = await notification_manager.evaluate_rules(
         {
@@ -1010,6 +2523,7 @@ async def get_all_balances():
         "distribution": distribution,
         "total_usd_estimate": round(display_total_usd, 2),
         "market_total_usd_estimate": round(market_total_usd, 2),
+        "binance_total_usd_estimate": round(_safe_float(exchange_total_map.get("binance"), default=0.0), 2),
         "paper_equity_estimate": round(paper_equity, 2) if is_paper_mode else None,
         "real_account_usd_estimate": round(market_total_usd, 2),
         "virtual_account_usd_estimate": round(paper_equity, 2) if is_paper_mode else None,
@@ -1020,9 +2534,20 @@ async def get_all_balances():
         ),
         "paper_account": paper_account,
         "risk_equity_input": round(risk_equity_input, 2),
+        "live_day_start_equity": round(live_day_start_equity, 2) if not is_paper_mode else None,
+        "live_daily_total_pnl_usd": round(live_daily_total_pnl, 2) if not is_paper_mode else None,
+        "live_unrealized_pnl_usd": (
+            round(float(live_position_snapshot.get("unrealized_pnl_usd") or 0.0), 4)
+            if not is_paper_mode else 0.0
+        ),
+        "live_position_count": (
+            int(live_position_snapshot.get("position_count") or 0)
+            if not is_paper_mode else int(position_manager.get_position_count() or 0)
+        ),
         "unpriced_assets": total_unpriced_assets,
         "connected_exchanges": exchange_manager.get_connected_exchanges(),
         "mode": mode_name,
+        "risk_report": risk_report,
         "risk": {
             "trading_halted": risk_report.get("trading_halted", False),
             "risk_level": risk_report.get("risk_level", "low"),
@@ -1054,7 +2579,7 @@ async def get_balance_history(
 
 @router.get("/risk/report")
 async def get_risk_report():
-    return risk_manager.get_risk_report()
+    return await _build_effective_risk_report(force_live_refresh=False)
 
 
 @router.post("/risk/params")
@@ -1070,7 +2595,7 @@ async def update_risk_params(request: RiskUpdateRequest):
     )
     return {
         "success": True,
-        "report": risk_manager.get_risk_report(),
+        "report": await _build_effective_risk_report(force_live_refresh=True),
     }
 
 
@@ -1085,41 +2610,16 @@ async def reset_risk_halt():
     )
     return {
         "success": True,
-        "report": risk_manager.get_risk_report(),
+        "report": await _build_effective_risk_report(force_live_refresh=True),
     }
 
 
 @router.post("/paper/reset")
 async def reset_paper_trading_state(clear_snapshots: bool = True):
     if not execution_engine.is_paper_mode():
-        raise HTTPException(status_code=400, detail="当前为实盘模式，禁止执行模拟盘清零")
+        raise HTTPException(status_code=400, detail="?????????????????")
 
-    runtime_reset = execution_engine.clear_paper_runtime()
-    order_reset = order_manager.clear_paper_history()
-    position_reset = position_manager.clear_all()
-    risk_reset = risk_manager.clear_runtime_history()
-    snapshots_deleted = await account_snapshot_manager.clear_history(mode="paper") if clear_snapshots else 0
-
-    strategy_signal_cleared = 0
-    strategy_position_cleared = 0
-    for strategy in strategy_manager.get_all_strategies().values():
-        try:
-            strategy_signal_cleared += len(getattr(strategy, "signals_history", []) or [])
-            strategy_position_cleared += len(getattr(strategy, "positions", {}) or {})
-            strategy.signals_history.clear()
-            strategy.positions.clear()
-        except Exception:
-            continue
-
-    payload = {
-        "runtime": runtime_reset,
-        "orders": order_reset,
-        "positions": position_reset,
-        "risk": risk_reset,
-        "snapshots_deleted": int(snapshots_deleted),
-        "strategy_signal_cleared": strategy_signal_cleared,
-        "strategy_position_cleared": strategy_position_cleared,
-    }
+    payload = await _clear_local_trading_runtime(clear_paper_snapshots=clear_snapshots)
     await audit_logger.log(
         module="trading",
         action="paper_reset",
@@ -1130,97 +2630,13 @@ async def reset_paper_trading_state(clear_snapshots: bool = True):
     return {"success": True, "result": payload}
 
 
-@router.get("/pnl/heatmap")
-async def get_pnl_heatmap(
-    days: int = 30,
-    bucket: str = "day",
-):
-    days = max(1, min(days, 365))
-    mode = bucket if bucket in {"day", "hour"} else "day"
-    cutoff = datetime.utcnow().timestamp() - days * 86400
-    agg: Dict[tuple, float] = {}
-    source_count = {"position": 0, "risk_trade": 0}
-
-    for record in _iter_trade_records(days=days):
-        ts = _safe_dt(record.get("timestamp"))
-        if not ts or ts.timestamp() < cutoff:
-            continue
-        symbol = str(record.get("symbol") or "").strip().upper() or "UNKNOWN"
-        pnl = _safe_float(record.get("pnl"))
-        key = (_bucket_key(ts, mode), symbol)
-        agg[key] = agg.get(key, 0.0) + pnl
-        source_name = str(record.get("source") or "risk_trade")
-        source_count[source_name] = source_count.get(source_name, 0) + 1
-
-    if not agg:
-        return {
-            "bucket": mode,
-            "days": days,
-            "times": [],
-            "symbols": [],
-            "matrix": [],
-            "points": [],
-            "meta": {
-                "source_count": source_count,
-                "non_zero_points": 0,
-            },
-        }
-
-    times = sorted({k[0] for k in agg.keys()})
-    symbols = sorted({k[1] for k in agg.keys()})
-    matrix: List[List[float]] = []
-    points: List[Dict[str, Any]] = []
-
-    for t in times:
-        row: List[float] = []
-        for s in symbols:
-            pnl = round(float(agg.get((t, s), 0.0)), 6)
-            row.append(pnl)
-            if pnl != 0:
-                points.append({"time": t, "symbol": s, "pnl": pnl})
-        matrix.append(row)
-
-    return {
-        "bucket": mode,
-        "days": days,
-        "times": times,
-        "symbols": symbols,
-        "matrix": matrix,
-        "points": points,
-        "meta": {
-            "source_count": source_count,
-            "non_zero_points": len(points),
-        },
-    }
-
-
-@router.get("/audit")
-async def get_audit_logs(
-    module: Optional[str] = None,
-    action: Optional[str] = None,
-    status: Optional[str] = None,
-    hours: int = 72,
-    limit: int = 200,
-):
-    logs = await audit_logger.list_logs(
-        module=module,
-        action=action,
-        status=status,
-        hours=hours,
-        limit=limit,
-    )
-    return {
-        "count": len(logs),
-        "logs": logs,
-    }
-
-
 @router.get("/stats")
 async def get_trading_stats():
+    risk_report = await _build_effective_risk_report(force_live_refresh=False)
     return {
         "orders": order_manager.get_stats(),
         "positions": position_manager.get_stats(),
-        "risk": risk_manager.get_risk_report(),
+        "risk": risk_report,
         "trading_mode": execution_engine.get_trading_mode(),
     }
 
@@ -1256,7 +2672,7 @@ async def get_trading_mode():
 async def request_trading_mode_switch(req: TradingModeRequest):
     target = req.target_mode.lower()
     if target == execution_engine.get_trading_mode():
-        return {"success": True, "mode": target, "message": "当前已是目标模式"}
+        return {"success": True, "mode": target, "message": "褰撳墠宸叉槸鐩爣妯″紡"}
 
     token = uuid4().hex
     created_at = datetime.utcnow()
@@ -1273,7 +2689,7 @@ async def request_trading_mode_switch(req: TradingModeRequest):
         "target_mode": target,
         "confirm_text": _MODE_CONFIRM_TEXT,
         "expires_at": expires_at.isoformat(),
-        "warning": "切换实盘风险很高，请确认API权限和风控参数。",
+        "warning": "切换实盘风险较高，请确认 API 权限与风控参数。",
     }
 
 
@@ -1281,32 +2697,57 @@ async def request_trading_mode_switch(req: TradingModeRequest):
 async def confirm_trading_mode_switch(req: TradingModeConfirmRequest):
     pending = _mode_switch_pending.get(req.token)
     if not pending:
-        raise HTTPException(status_code=404, detail="切换令牌不存在或已过期")
+        raise HTTPException(status_code=404, detail="???????????")
     if pending.get("expires_at") and pending["expires_at"] < datetime.utcnow():
         _mode_switch_pending.pop(req.token, None)
-        raise HTTPException(status_code=400, detail="切换令牌已过期")
+        raise HTTPException(status_code=400, detail="???????")
     if req.confirm_text.strip() != _MODE_CONFIRM_TEXT:
-        raise HTTPException(status_code=400, detail="确认文本不匹配")
+        raise HTTPException(status_code=400, detail="???????")
 
-    target_mode = str(pending.get("target_mode", "paper"))
+    target_mode = str(pending.get("target_mode", "paper") or "paper").strip().lower()
+    cleanup_result: Dict[str, Any] = {}
     execution_engine.set_paper_trading(target_mode != "live")
+    order_manager.set_paper_trading(target_mode != "live")
+    updated_accounts = 0
+    try:
+        updated_accounts = int(account_manager.set_mode_for_all(target_mode) or 0)
+    except Exception as e:
+        logger.warning(f"Failed to sync account modes after trading mode switch: {e}")
+
+    if target_mode == "live":
+        cleanup_result = await _clear_local_trading_runtime(clear_paper_snapshots=True)
+
     _mode_switch_pending.pop(req.token, None)
+
+    with contextlib.suppress(Exception):
+        from web import main as web_main
+        web_main.invalidate_status_cache()
 
     await audit_logger.log(
         module="trading",
         action="switch_mode",
         status="success",
         message=f"mode={target_mode}",
-        details={"target_mode": target_mode},
+        details={
+            "target_mode": target_mode,
+            "updated_accounts": updated_accounts,
+            "cleanup": cleanup_result,
+        },
     )
     await event_bus.publish_nowait_safe(
         event="mode_changed",
-        payload={"mode": execution_engine.get_trading_mode()},
+        payload={
+            "mode": execution_engine.get_trading_mode(),
+            "updated_accounts": updated_accounts,
+            "cleanup": cleanup_result,
+        },
     )
     return {
         "success": True,
         "mode": execution_engine.get_trading_mode(),
         "paper_trading": execution_engine.is_paper_mode(),
+        "updated_accounts": updated_accounts,
+        "cleanup": cleanup_result,
     }
 
 
@@ -1396,10 +2837,10 @@ async def account_summary():
 def _session_name(ts: datetime) -> str:
     hour = int(ts.hour)
     if 0 <= hour < 8:
-        return "亚盘"
+        return "浜氱洏"
     if 8 <= hour < 16:
-        return "欧盘"
-    return "美盘"
+        return "娆х洏"
+    return "缇庣洏"
 
 
 def _parse_target_allocations(raw: str) -> Dict[str, float]:
@@ -1784,7 +3225,7 @@ async def get_trading_calendar(days: int = 30):
             events.append(
                 {
                     "category": "economic",
-                    "name": "美国CPI（预估）",
+                    "name": "缇庡浗CPI锛堥浼帮級",
                     "time_utc": cpi_day.isoformat(),
                     "importance": "high",
                 }
@@ -1797,7 +3238,7 @@ async def get_trading_calendar(days: int = 30):
             events.append(
                 {
                     "category": "economic",
-                    "name": "美国非农就业（预估）",
+                    "name": "缇庡浗闈炲啘灏变笟锛堥浼帮級",
                     "time_utc": nfp_day.isoformat(),
                     "importance": "high",
                 }
@@ -1822,7 +3263,7 @@ async def get_trading_calendar(days: int = 30):
             events.append(
                 {
                     "category": "economic",
-                    "name": "FOMC利率决议（预估）",
+                    "name": "FOMC鍒╃巼鍐宠锛堥浼帮級",
                     "time_utc": dt.isoformat(),
                     "importance": "high",
                 }
@@ -1845,7 +3286,7 @@ async def get_trading_calendar(days: int = 30):
             events.append(
                 {
                     "category": "unlock",
-                    "name": f"{token} 代币解锁（估算）",
+                    "name": f"{token} 浠ｅ竵瑙ｉ攣锛堜及绠楋級",
                     "time_utc": dt.isoformat(),
                     "importance": "medium",
                 }
@@ -1862,7 +3303,7 @@ async def get_trading_calendar(days: int = 30):
             events.append(
                 {
                     "category": "expiry",
-                    "name": "周五交割/到期提醒",
+                    "name": "鍛ㄤ簲浜ゅ壊/鍒版湡鎻愰啋",
                     "time_utc": expiry.isoformat(),
                     "importance": "medium",
                 }
@@ -1872,7 +3313,7 @@ async def get_trading_calendar(days: int = 30):
     events.sort(key=lambda x: x["time_utc"])
     return {
         "source": "internal_estimate",
-        "note": "经济与解锁事件为内置估算日历，建议与专业日历交叉确认。",
+        "note": "宏观与解锁事件为内置估算日历，建议与专业日历交叉确认。",
         "days": days,
         "events": events,
         "count": len(events),
@@ -1999,7 +3440,7 @@ async def get_market_microstructure(
         "large_orders": large_orders,
         "iceberg_detection": {
             "candidate_count": iceberg_candidates,
-            "note": "基于盘口重复量级的启发式检测",
+            "note": "基于盘口重复量级的启发式检测。",
         },
         "aggressor_flow": flow,
         "funding_rate": funding,
@@ -2229,3 +3670,82 @@ async def get_community_overview(symbol: str = "BTC/USDT", exchange: str = "bina
         },
         "announcements": announcements,
     }
+
+
+@router.get("/audit")
+async def get_audit_logs(
+    hours: int = 168,
+    limit: int = 100,
+    module: Optional[str] = None,
+    action: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    rows = await audit_logger.list_logs(
+        module=(module or None),
+        action=(action or None),
+        status=(status or None),
+        hours=max(1, min(int(hours or 168), 24 * 365)),
+        limit=max(1, min(int(limit or 100), 500)),
+    )
+    return {
+        "hours": max(1, min(int(hours or 168), 24 * 365)),
+        "count": len(rows),
+        "logs": rows,
+    }
+
+
+@router.get("/pnl/heatmap")
+async def get_pnl_heatmap(
+    days: int = 30,
+    bucket: str = "day",
+):
+    bucket_name = "hour" if str(bucket or "").lower() == "hour" else "day"
+    cutoff = datetime.utcnow() - timedelta(days=max(1, min(int(days or 30), 365)))
+    closed_positions = position_manager.get_closed_positions(limit=5000)
+
+    filtered = []
+    for pos in closed_positions:
+        closed_at = _safe_dt(getattr(pos, "updated_at", None)) or _safe_dt(getattr(pos, "opened_at", None))
+        if not closed_at or closed_at < cutoff:
+            continue
+        symbol = str(getattr(pos, "symbol", "") or "").strip() or "UNKNOWN"
+        pnl = _safe_float(getattr(pos, "realized_pnl", 0.0), default=0.0)
+        filtered.append(
+            {
+                "symbol": symbol,
+                "closed_at": closed_at,
+                "pnl": pnl,
+            }
+        )
+
+    if not filtered:
+        return {
+            "bucket": bucket_name,
+            "days": max(1, min(int(days or 30), 365)),
+            "times": [],
+            "symbols": [],
+            "matrix": [],
+            "trade_count": 0,
+        }
+
+    symbol_set = sorted({row["symbol"] for row in filtered})
+    bucket_set = sorted({_bucket_key(row["closed_at"], bucket_name) for row in filtered})
+    symbol_index = {sym: idx for idx, sym in enumerate(symbol_set)}
+    bucket_index = {ts: idx for idx, ts in enumerate(bucket_set)}
+    matrix = [[0.0 for _ in symbol_set] for _ in bucket_set]
+
+    for row in filtered:
+        x = symbol_index[row["symbol"]]
+        y = bucket_index[_bucket_key(row["closed_at"], bucket_name)]
+        matrix[y][x] += float(row["pnl"])
+
+    return {
+        "bucket": bucket_name,
+        "days": max(1, min(int(days or 30), 365)),
+        "times": bucket_set,
+        "symbols": symbol_set,
+        "matrix": [[round(float(v), 6) for v in row] for row in matrix],
+        "trade_count": len(filtered),
+    }
+
+

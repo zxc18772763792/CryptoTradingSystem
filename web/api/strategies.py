@@ -12,12 +12,16 @@ import strategies as strategy_module
 from config.settings import settings
 from core.audit import audit_logger
 from core.data import data_storage
-from core.strategies import strategy_manager
+from core.exchanges import exchange_manager
+from core.risk.risk_manager import risk_manager
+from core.strategies import Signal, SignalType, strategy_manager
 from core.strategies.persistence import (
     persist_strategy_snapshot,
     delete_strategy_snapshot,
 )
 from core.strategies.health_monitor import strategy_health_monitor
+from core.trading.execution_engine import execution_engine
+from core.trading.position_manager import PositionSide, position_manager
 from strategies import ALL_STRATEGIES
 from web.api.backtest import (
     _run_backtest_core,
@@ -288,6 +292,7 @@ class StrategyUpdateRequest(BaseModel):
 
 class StrategyConfigUpdateRequest(BaseModel):
     timeframe: Optional[str] = None
+    symbols: Optional[List[str]] = None
     runtime_limit_minutes: Optional[int] = Field(default=None, ge=0, le=10080)
 
 
@@ -315,6 +320,224 @@ class StrategyImportRequest(BaseModel):
     rename_prefix: Optional[str] = None
     auto_start: bool = False
     overwrite: bool = False
+
+
+def _normalize_symbols_input(symbols: Optional[List[str]]) -> Optional[List[str]]:
+    if symbols is None:
+        return None
+    normalized = []
+    for item in symbols:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        normalized.append(text.upper())
+    if not normalized:
+        return ["BTC/USDT"]
+    deduped: List[str] = []
+    seen = set()
+    for item in normalized:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
+
+
+def _ceil_to_decimals(value: float, decimals: int = 8) -> float:
+    if decimals < 0:
+        decimals = 0
+    factor = 10 ** decimals
+    return float(np.ceil(float(value) * factor) / factor)
+
+
+async def _build_strategy_sizing_preview(name: str) -> Dict[str, Any]:
+    info = strategy_manager.get_strategy_info(name)
+    if not info:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    exchange = str(info.get("exchange") or "binance").strip().lower() or "binance"
+    symbols = list(info.get("symbols") or ["BTC/USDT"])
+    symbol = str(symbols[0] if symbols else "BTC/USDT")
+    params = dict(info.get("params") or {})
+    allocation = max(0.0, min(float(info.get("allocation") or 0.0), 1.0))
+    market_type = str(params.get("market_type") or "").strip().lower()
+
+    account_equity = 0.0
+    try:
+        account_equity = float(await asyncio.wait_for(execution_engine._get_account_equity(), timeout=8.0))
+    except Exception:
+        account_equity = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
+
+    connector = exchange_manager.get_exchange(exchange)
+    last_price = 0.0
+    price_source = "unavailable"
+    if not connector:
+        try:
+            await exchange_manager.initialize([exchange])
+            connector = exchange_manager.get_exchange(exchange)
+        except Exception:
+            connector = None
+    if connector:
+        try:
+            ticker = await asyncio.wait_for(connector.get_ticker(symbol), timeout=5.0)
+            last_price = float(getattr(ticker, "last", 0.0) or 0.0)
+            if last_price > 0:
+                price_source = "live"
+        except Exception:
+            last_price = 0.0
+    if last_price <= 0:
+        timeframe_candidates = [
+            str(info.get("timeframe") or "").strip() or "1m",
+            "1m",
+            "5m",
+            "15m",
+            "1h",
+        ]
+        seen_tf: set[str] = set()
+        for timeframe in timeframe_candidates:
+            tf = str(timeframe or "").strip() or "1m"
+            if tf in seen_tf:
+                continue
+            seen_tf.add(tf)
+            try:
+                df = await data_storage.load_klines_from_parquet(
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe=tf,
+                )
+                if df is not None and not df.empty:
+                    px = _safe_float(df["close"].iloc[-1], 0.0)
+                    if px > 0:
+                        last_price = px
+                        price_source = f"cache:{tf}"
+                        break
+            except Exception:
+                continue
+
+    min_amount, amount_decimals = await execution_engine._get_exchange_amount_rules(exchange, symbol)
+    configured_min_notional = max(1.0, float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 100.0) or 100.0))
+    is_binance_futures = exchange == "binance" and market_type in {
+        "future", "futures", "swap", "contract", "perp", "perpetual"
+    }
+    exchange_min_notional = 100.0 if is_binance_futures else 10.0
+    effective_min_notional = max(exchange_min_notional, configured_min_notional)
+
+    single_cap = max(0.0, account_equity * float(risk_manager.max_position_size or 0.1))
+    alloc_cap = max(0.0, account_equity * allocation) if allocation > 0 else single_cap
+    available_notional = min(single_cap, alloc_cap if allocation > 0 else single_cap)
+
+    min_legal_qty = 0.0
+    min_legal_notional = 0.0
+    if last_price > 0:
+        qty_by_notional = _ceil_to_decimals(effective_min_notional / last_price, amount_decimals)
+        min_legal_qty = max(float(min_amount or 0.0), float(qty_by_notional or 0.0))
+        min_legal_notional = float(min_legal_qty * last_price)
+
+    has_price = last_price > 0
+    can_estimate = bool(has_price and effective_min_notional > 0)
+    executable_now = bool(
+        can_estimate
+        and available_notional > 0
+        and min_legal_notional > 0
+        and available_notional + max(0.05, available_notional * 0.01) >= min_legal_notional
+    )
+    preview_status = "ok" if executable_now else ("blocked" if can_estimate else "unknown")
+    note = (
+        "当前资金足够满足交易所最小下单门槛"
+        if executable_now
+        else (
+            f"当前资金占比或单笔风控上限不足，最少需要 {min_legal_notional:.2f} USDT 名义金额"
+            if can_estimate
+            else "暂时无法获取实时价格或交易规则，当前预估结果不可用于判断是否可下单"
+        )
+    )
+
+    return {
+        "strategy": name,
+        "exchange": exchange,
+        "symbol": symbol,
+        "market_type": market_type or None,
+        "allocation": allocation,
+        "account_equity": round(account_equity, 6),
+        "risk_single_cap": round(single_cap, 6),
+        "allocation_cap": round(alloc_cap, 6),
+        "available_notional": round(available_notional, 6),
+        "price": round(last_price, 8) if last_price > 0 else 0.0,
+        "price_source": price_source,
+        "exchange_min_notional": round(exchange_min_notional, 6),
+        "configured_min_notional": round(configured_min_notional, 6),
+        "effective_min_notional": round(effective_min_notional, 6),
+        "min_amount": round(float(min_amount or 0.0), 12),
+        "amount_decimals": int(amount_decimals),
+        "min_legal_qty": round(min_legal_qty, 12),
+        "min_legal_notional": round(min_legal_notional, 6),
+        "executable_now": executable_now,
+        "can_estimate": can_estimate,
+        "status": preview_status,
+        "note": note,
+    }
+
+
+async def _close_strategy_positions(name: str) -> Dict[str, Any]:
+    positions = list(position_manager.get_positions_by_strategy(name) or [])
+    if not positions:
+        return {"requested": 0, "closed": 0, "failed": 0, "results": []}
+
+    results: List[Dict[str, Any]] = []
+    closed = 0
+    failed = 0
+    for pos in positions:
+        close_signal = Signal(
+            symbol=str(pos.symbol),
+            signal_type=(SignalType.CLOSE_LONG if pos.side == PositionSide.LONG else SignalType.CLOSE_SHORT),
+            price=float(pos.current_price or pos.entry_price or 0.0),
+            timestamp=datetime.utcnow(),
+            strategy_name=name,
+            strength=1.0,
+            quantity=float(pos.quantity or 0.0),
+            metadata={
+                "exchange": str(pos.exchange or "binance"),
+                "account_id": str(pos.account_id or "main"),
+                "source": "strategy_stop_close",
+                "close_reason": "strategy_stopped",
+            },
+        )
+        try:
+            res = await execution_engine.execute_signal(close_signal)
+            if res:
+                closed += 1
+                results.append(
+                    {
+                        "symbol": pos.symbol,
+                        "exchange": pos.exchange,
+                        "account_id": pos.account_id,
+                        "status": "closed",
+                        "result": res,
+                    }
+                )
+            else:
+                failed += 1
+                results.append(
+                    {
+                        "symbol": pos.symbol,
+                        "exchange": pos.exchange,
+                        "account_id": pos.account_id,
+                        "status": "failed",
+                        "reason": "close_signal_rejected",
+                    }
+                )
+        except Exception as exc:
+            failed += 1
+            results.append(
+                {
+                    "symbol": pos.symbol,
+                    "exchange": pos.exchange,
+                    "account_id": pos.account_id,
+                    "status": "failed",
+                    "reason": str(exc),
+                }
+            )
+    return {"requested": len(positions), "closed": closed, "failed": failed, "results": results}
 
 
 def _get_strategy_classes() -> Dict[str, Any]:
@@ -446,7 +669,7 @@ async def _auto_register_defaults_for_start_all() -> List[str]:
         if strategy_class is None:
             continue
 
-        base_name = f"paper_{strategy_type}_{suffix}"
+        base_name = f"{strategy_type}_{suffix}"
         name = base_name
         i = 1
         while strategy_manager.get_strategy(name) is not None:
@@ -854,10 +1077,22 @@ async def start_all_strategies():
 
 @router.post("/stop-all")
 async def stop_all_strategies():
-    await strategy_manager.stop_all()
-    for item in strategy_manager.list_strategies():
+    stop_results: List[Dict[str, Any]] = []
+    for item in list(strategy_manager.list_strategies()):
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        success = await strategy_manager.stop_strategy(name)
+        close_summary = await _close_strategy_positions(name) if success else {"requested": 0, "closed": 0, "failed": 0, "results": []}
         await _persist_if_exists(item.get("name", ""), state_override="stopped")
-    return {"success": True}
+        stop_results.append(
+            {
+                "name": name,
+                "stopped": bool(success),
+                "close_summary": close_summary,
+            }
+        )
+    return {"success": True, "results": stop_results}
 
 
 @router.post("/register")
@@ -972,6 +1207,11 @@ async def get_strategy_params_schema(name: str):
     raise HTTPException(status_code=404, detail="Strategy not found")
 
 
+@router.get("/{name}/sizing-preview")
+async def get_strategy_sizing_preview(name: str):
+    return await _build_strategy_sizing_preview(name)
+
+
 @router.get("/{name}/live-vs-backtest")
 async def get_live_vs_backtest(name: str, initial_capital: float = 10000):
     info = strategy_manager.get_strategy_info(name)
@@ -1048,9 +1288,10 @@ async def start_strategy(name: str):
 async def stop_strategy(name: str):
     success = await strategy_manager.stop_strategy(name)
     if success:
+        close_summary = await _close_strategy_positions(name)
         await _persist_if_exists(name, state_override="stopped")
         await audit_logger.log(module="strategy", action="stop", status="success", message=name)
-        return {"success": True, "name": name, "status": "stopped"}
+        return {"success": True, "name": name, "status": "stopped", "close_summary": close_summary}
     await audit_logger.log(module="strategy", action="stop", status="failed", message=name)
     raise HTTPException(status_code=400, detail="Failed to stop strategy")
 
@@ -1100,13 +1341,15 @@ async def update_strategy_config(name: str, request: StrategyConfigUpdateRequest
     if not info:
         raise HTTPException(status_code=404, detail="Strategy not found")
 
+    normalized_symbols = _normalize_symbols_input(request.symbols)
     success = strategy_manager.update_strategy_runtime_config(
         name,
         timeframe=request.timeframe,
+        symbols=normalized_symbols,
         runtime_limit_minutes=request.runtime_limit_minutes,
     )
     if not success:
-        raise HTTPException(status_code=400, detail="Invalid strategy config (timeframe/runtime)")
+        raise HTTPException(status_code=400, detail="Invalid strategy config (timeframe/symbols/runtime)")
 
     await _persist_if_exists(name)
     updated = strategy_manager.get_strategy_info(name) or {}
@@ -1114,6 +1357,7 @@ async def update_strategy_config(name: str, request: StrategyConfigUpdateRequest
         "success": True,
         "name": name,
         "timeframe": updated.get("timeframe"),
+        "symbols": updated.get("symbols") or [],
         "runtime": updated.get("runtime") or {},
     }
 

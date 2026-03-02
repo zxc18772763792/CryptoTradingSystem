@@ -73,6 +73,32 @@ class StrategyManager:
         self._running_since: Dict[str, datetime] = {}
         self._runtime_deadlines: Dict[str, datetime] = {}
 
+    def _ensure_strategy_account(self, name: str, params: Dict[str, Any]) -> None:
+        from core.trading.account_manager import account_manager
+
+        account_id = str(params.get("account_id") or self._default_strategy_account_id(name)).strip()
+        if not account_id:
+            return
+        exchange = str(params.get("exchange") or "binance").strip().lower() or "binance"
+        main_account = account_manager.get_account("main") or {}
+        mode = str(main_account.get("mode") or settings.TRADING_MODE or "paper").strip().lower()
+        existing = account_manager.get_account(account_id)
+        payload = {
+            "name": f"策略账户 {name}",
+            "exchange": exchange,
+            "mode": mode if mode in {"paper", "live"} else "paper",
+            "parent_account_id": "main",
+            "enabled": True,
+            "metadata": {"strategy_name": name, "auto_created": True, "isolated": account_id != "main"},
+        }
+        try:
+            if existing:
+                account_manager.update_account(account_id, payload)
+            else:
+                account_manager.create_account(account_id=account_id, **payload)
+        except Exception as e:
+            logger.warning(f"Failed to ensure strategy account for {name}: {e}")
+
     def _timeframe_to_seconds(self, timeframe: str) -> int:
         if not timeframe:
             return 60
@@ -356,6 +382,7 @@ class StrategyManager:
             stats.last_signal_at = datetime.utcnow()
 
         for signal in signals:
+            execution_signal_dispatched = False
             meta = dict(signal.metadata or {})
             meta.setdefault("account_id", account_id)
             meta.setdefault("exchange", default_exchange)
@@ -366,8 +393,63 @@ class StrategyManager:
             for callback in self._signal_callbacks:
                 try:
                     await callback(signal)
+                    cb_name = str(getattr(callback, "__name__", "") or "")
+                    cb_self = getattr(callback, "__self__", None)
+                    if cb_name == "submit_signal" or cb_self.__class__.__name__ == "ExecutionEngine":
+                        execution_signal_dispatched = True
                 except Exception as e:
                     logger.error(f"Signal callback error: {e}")
+
+            if not execution_signal_dispatched:
+                try:
+                    from core.trading.execution_engine import execution_engine
+
+                    await execution_engine.submit_signal(signal)
+                    execution_signal_dispatched = True
+                    logger.warning(
+                        f"Execution signal callback missing, fallback routed directly: "
+                        f"{strategy_name} {signal.signal_type.value} {signal.symbol}"
+                    )
+                except Exception as e:
+                    logger.error(f"Fallback strategy signal dispatch failed: {e}")
+
+    async def _close_positions_for_strategy_stop(self, name: str, reason: str = "strategy_stopped") -> Dict[str, Any]:
+        from core.strategies import Signal, SignalType
+        from core.trading.execution_engine import execution_engine
+        from core.trading.position_manager import PositionSide, position_manager
+
+        positions = list(position_manager.get_positions_by_strategy(name) or [])
+        if not positions:
+            return {"requested": 0, "closed": 0, "failed": 0}
+
+        closed = 0
+        failed = 0
+        for pos in positions:
+            close_signal = Signal(
+                symbol=str(pos.symbol),
+                signal_type=(SignalType.CLOSE_LONG if pos.side == PositionSide.LONG else SignalType.CLOSE_SHORT),
+                price=float(pos.current_price or pos.entry_price or 0.0),
+                timestamp=datetime.utcnow(),
+                strategy_name=name,
+                strength=1.0,
+                quantity=float(pos.quantity or 0.0),
+                metadata={
+                    "exchange": str(pos.exchange or "binance"),
+                    "account_id": str(pos.account_id or "main"),
+                    "source": "strategy_stop_close",
+                    "close_reason": reason,
+                },
+            )
+            try:
+                result = await execution_engine.execute_signal(close_signal)
+                if result:
+                    closed += 1
+                else:
+                    failed += 1
+            except Exception as exc:
+                failed += 1
+                logger.error(f"Auto-close on strategy stop failed: strategy={name} symbol={pos.symbol} error={exc}")
+        return {"requested": len(positions), "closed": closed, "failed": failed}
 
     async def _run_strategy_once(self, name: str) -> None:
         strategy = self._strategies.get(name)
@@ -468,6 +550,16 @@ class StrategyManager:
                 strategy.stop()
                 self._running_since.pop(name, None)
                 self._runtime_deadlines.pop(name, None)
+                try:
+                    close_summary = await self._close_positions_for_strategy_stop(name, reason="runtime_limit_reached")
+                    logger.info(
+                        f"Strategy {name} auto-closed positions on runtime stop: "
+                        f"requested={close_summary.get('requested', 0)} "
+                        f"closed={close_summary.get('closed', 0)} "
+                        f"failed={close_summary.get('failed', 0)}"
+                    )
+                except Exception as exc:
+                    logger.error(f"Strategy {name} runtime-limit auto-close failed: {exc}")
                 break
 
             await self._run_strategy_once(name)
@@ -508,6 +600,7 @@ class StrategyManager:
         try:
             params = dict(params or {})
             params.setdefault("account_id", self._default_strategy_account_id(name))
+            self._ensure_strategy_account(name, params)
             strategy = strategy_class(name=name, params=params)
 
             config = StrategyConfig(
@@ -703,6 +796,7 @@ class StrategyManager:
         name: str,
         *,
         timeframe: Optional[str] = None,
+        symbols: Optional[List[str]] = None,
         runtime_limit_minutes: Optional[int] = None,
     ) -> bool:
         cfg = self._configs.get(name)
@@ -713,6 +807,15 @@ class StrategyManager:
             if tf not in _RESAMPLE_RULES:
                 return False
             cfg.timeframe = tf
+        if symbols is not None:
+            normalized_symbols = [
+                str(symbol).strip()
+                for symbol in list(symbols)
+                if str(symbol).strip()
+            ]
+            if not normalized_symbols:
+                normalized_symbols = ["BTC/USDT"]
+            cfg.symbols = normalized_symbols
         if runtime_limit_minutes is not None:
             val = max(0, int(runtime_limit_minutes))
             cfg.runtime_limit_minutes = val or None
