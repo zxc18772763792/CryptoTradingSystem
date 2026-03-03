@@ -1,6 +1,6 @@
 ﻿(function () {
     const API_BASE = "/api/news";
-    const state = { timer: null, ws: null, summary: null, latest: null, health: null, pulling: false };
+    const state = { timer: null, ws: null, summary: null, latest: null, health: null, pulling: false, queueSamples: [] };
 
     function esc(v) {
         return String(v ?? "").replace(/[&<>"']/g, (m) => ({
@@ -42,6 +42,34 @@
         if (!Number.isFinite(value) || value <= 0) return "--";
         if (value < 60) return `${value.toFixed(1)}s`;
         return `${(value / 60).toFixed(1)}m`;
+    }
+
+    function fmtRate(value) {
+        const v = Number(value || 0);
+        if (!Number.isFinite(v) || v <= 0) return "--";
+        if (v >= 1) return `${v.toFixed(1)} 条/分`;
+        return `${(v * 60).toFixed(1)} 条/时`;
+    }
+
+    function fmtEta(minutes) {
+        const v = Number(minutes || 0);
+        if (!Number.isFinite(v) || v <= 0) return "--";
+        if (v < 60) return `${v.toFixed(1)} 分钟`;
+        const hours = Math.floor(v / 60);
+        const mins = Math.round(v % 60);
+        return `${hours}小时${mins}分钟`;
+    }
+
+    function fmtRetryCountdown(ts) {
+        const dt = parseTs(ts);
+        if (!dt) return "--";
+        const diffMs = dt.getTime() - Date.now();
+        if (diffMs <= 0) return "已到期";
+        const sec = Math.round(diffMs / 1000);
+        if (sec < 60) return `${sec} 秒`;
+        const min = Math.floor(sec / 60);
+        const rem = sec % 60;
+        return rem > 0 ? `${min} 分 ${rem} 秒` : `${min} 分钟`;
     }
 
     function sentimentClass(v) {
@@ -186,6 +214,92 @@
         if (clock) {
             clock.textContent = fmtTs((health || {}).timestamp || new Date().toISOString());
         }
+    }
+
+    function updateQueueSamples(summary, health) {
+        const queue = summary?.llm_queue || health?.llm_queue || {};
+        const counts = queue?.counts || {};
+        const sample = {
+            ts: Date.now(),
+            pending: Number(queue?.pending_total || counts?.pending || 0),
+            running: Number(counts?.running || 0),
+            done: Number(counts?.done || 0),
+            retry: Number(counts?.retry || 0),
+            failed: Number(counts?.failed || 0),
+        };
+        const prev = state.queueSamples[state.queueSamples.length - 1];
+        if (!prev || prev.pending !== sample.pending || prev.running !== sample.running || prev.done !== sample.done || prev.retry !== sample.retry || sample.ts - prev.ts > 120000) {
+            state.queueSamples.push(sample);
+        } else {
+            state.queueSamples[state.queueSamples.length - 1] = sample;
+        }
+        if (state.queueSamples.length > 12) state.queueSamples = state.queueSamples.slice(-12);
+    }
+
+    function estimateQueueDrain() {
+        if (state.queueSamples.length < 2) return { drainPerMin: 0, etaMin: null };
+        const first = state.queueSamples[0];
+        const last = state.queueSamples[state.queueSamples.length - 1];
+        const elapsedMin = Math.max(0.001, (last.ts - first.ts) / 60000);
+        const pendingDrop = Number(first.pending || 0) - Number(last.pending || 0);
+        const doneIncrease = Number(last.done || 0) - Number(first.done || 0);
+        const consumePerMin = doneIncrease > 0 ? (doneIncrease / elapsedMin) : 0;
+        const netDrainPerMin = pendingDrop > 0 ? (pendingDrop / elapsedMin) : 0;
+        const etaMin = consumePerMin > 0 ? (Number(last.pending || 0) / consumePerMin) : null;
+        return { consumePerMin, netDrainPerMin, etaMin };
+    }
+
+    function renderQueuePanel(summary, health) {
+        updateQueueSamples(summary, health);
+        const queue = summary?.llm_queue || health?.llm_queue || {};
+        const counts = queue?.counts || {};
+        const sourceStates = Array.isArray(summary?.source_states) ? summary.source_states : (Array.isArray(health?.source_states) ? health.source_states : []);
+        const pending = Number(queue?.pending_total || counts?.pending || 0);
+        const running = Number(counts?.running || 0);
+        const done = Number(counts?.done || 0);
+        const retry = Number(counts?.retry || 0);
+        const failed = Number(counts?.failed || 0);
+        const maxPriority = Number(queue?.max_priority || 0);
+        const backoffUntil = queue?.backoff_until || null;
+        const nextRetryAt = queue?.next_retry_at || null;
+        const sourceErrors = sourceStates.filter((item) => Number(item?.error_count || 0) > 0).length;
+        const stalledSources = sourceStates.filter((item) => {
+            const lastSuccess = parseTs(item?.last_success_at);
+            return lastSuccess && (Date.now() - lastSuccess.getTime()) > 15 * 60 * 1000;
+        }).length;
+        const metrics = {
+            "news-llm-pending-count": pending,
+            "news-llm-running-count": running,
+            "news-llm-done-count": done,
+            "news-llm-retry-count": retry + failed,
+        };
+        Object.entries(metrics).forEach(([id, value]) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = String(value);
+        });
+        const note = document.getElementById("news-llm-queue-note");
+        if (!note) return;
+        const { consumePerMin, netDrainPerMin, etaMin } = estimateQueueDrain();
+        const statusText = backoffUntil
+            ? "退避中"
+            : (running > 0 ? "消费中" : (pending > 0 ? "待处理堆积" : "队列空闲"));
+        note.innerHTML = [
+            `<div class="list-item"><span>队列状态</span><span>${statusText}</span></div>`,
+            `<div class="list-item"><span>消费速度</span><span>${fmtRate(consumePerMin)}</span></div>`,
+            `<div class="list-item"><span>净堆积变化</span><span>${fmtSignedRate(netDrainPerMin)}</span></div>`,
+            `<div class="list-item"><span>预计清空</span><span>${fmtEta(etaMin)}</span></div>`,
+            `<div class="list-item"><span>全局退避至</span><span>${backoffUntil ? fmtTs(backoffUntil) : "--"}</span></div>`,
+            `<div class="list-item"><span>下次重试</span><span>${nextRetryAt ? `${fmtTs(nextRetryAt)} | 剩余 ${fmtRetryCountdown(nextRetryAt)}` : "--"}</span></div>`,
+            `<div class="list-item"><span>最高优先级</span><span>${maxPriority}</span></div>`,
+            `<div class="list-item"><span>异常源 / 停滞源</span><span>${sourceErrors} / ${stalledSources}</span></div>`,
+        ].join("");
+    }
+
+    function fmtSignedRate(value) {
+        const num = Number(value || 0);
+        if (!Number.isFinite(num) || Math.abs(num) < 0.01) return "--";
+        const sign = num > 0 ? "-" : "+";
+        return `${sign}${Math.abs(num).toFixed(1)} / 分钟`;
     }
 
     function updateSummary(summary, latest) {
@@ -381,6 +495,7 @@
         renderUnstructured(latest?.items || []);
         renderStructured(latest?.items || []);
         renderHealth(summary || {}, state.health || {});
+        renderQueuePanel(summary || {}, state.health || {});
     }
 
     async function refreshAll() {
@@ -390,20 +505,24 @@
             loadHealth().then((health) => {
                 state.health = health || state.health || null;
                 renderHealth(state.summary || {}, state.health || {});
+                renderQueuePanel(state.summary || {}, state.health || {});
             }).catch(() => {
                 renderHealth(state.summary || {}, state.health || {});
+                renderQueuePanel(state.summary || {}, state.health || {});
             });
         } catch (e) {
             try {
                 const [summary, latest] = await Promise.all([loadSummary(), loadFeed(false)]);
                 applyData(summary, latest);
                 loadHealth().then((health) => {
-                    state.health = health || state.health || null;
-                    renderHealth(state.summary || {}, state.health || {});
-                }).catch(() => {
-                    renderHealth(state.summary || {}, state.health || {});
-                });
-                notify("新闻接口较慢，已回退到快速刷新");
+                state.health = health || state.health || null;
+                renderHealth(state.summary || {}, state.health || {});
+                renderQueuePanel(state.summary || {}, state.health || {});
+            }).catch(() => {
+                renderHealth(state.summary || {}, state.health || {});
+                renderQueuePanel(state.summary || {}, state.health || {});
+            });
+            notify("新闻接口较慢，已回退到快速刷新");
             } catch (e2) {
                 notify(`新闻刷新失败: ${e2.message || e.message}`, true);
             }

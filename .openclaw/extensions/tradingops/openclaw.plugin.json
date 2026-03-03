@@ -1,0 +1,27 @@
+{
+  "id": "tradingops",
+  "name": "Trading Ops Control",
+  "version": "0.1.0",
+  "main": "index.ts",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:8711"
+      },
+      "token": {
+        "type": "string"
+      },
+      "timeoutMs": {
+        "type": "number",
+        "default": 15000,
+        "minimum": 1000
+      }
+    },
+    "required": ["token"]
+  },
+  "uiHints": {
+    "sensitiveFields": ["token"]
+  }
+}

@@ -1,6 +1,7 @@
-﻿"""Risk gate for signal filtering."""
+"""Risk gate for signal filtering."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,6 +14,14 @@ class RiskGateConfig:
     max_vol: float = 0.12
     max_spread: float = 0.004
     breaker_drawdown: float = 0.15
+    pm_features_enable: bool = False
+    pm_global_risk_medium: float = 0.45
+    pm_global_risk_high: float = 0.65
+    pm_geo_halt_minutes: int = 15
+    pm_spread_liquidity_min: float = 1.0
+    pm_reduce_only_on_high_risk: bool = True
+    pm_notional_multiplier_high_risk: float = 0.5
+    pm_leverage_multiplier_high_risk: float = 0.4
 
 
 class RiskGate:
@@ -21,15 +30,30 @@ class RiskGate:
     def __init__(self, cfg: Optional[Dict[str, Any]] = None):
         thresholds = (cfg or {}).get("thresholds") if isinstance(cfg, dict) else {}
         thresholds = thresholds or {}
+        pm_cfg = (cfg or {}).get("polymarket") if isinstance(cfg, dict) else {}
+        pm_cfg = pm_cfg or {}
         self.config = RiskGateConfig(
             alpha_threshold=float(thresholds.get("alpha_threshold") or 0.08),
             cooldown_min=int(thresholds.get("cooldown_min") or 20),
             max_vol=float(thresholds.get("max_vol") or 0.12),
             max_spread=float(thresholds.get("max_spread") or 0.004),
             breaker_drawdown=float(thresholds.get("breaker_drawdown") or 0.15),
+            pm_features_enable=bool(
+                pm_cfg.get("enable")
+                if pm_cfg.get("enable") is not None
+                else str(os.getenv("PM_FEATURES_ENABLE") or "").strip().lower() in {"1", "true", "yes", "on", "y"}
+            ),
+            pm_global_risk_medium=float(pm_cfg.get("global_risk_medium") or os.getenv("PM_GLOBAL_RISK_MEDIUM") or 0.45),
+            pm_global_risk_high=float(pm_cfg.get("global_risk_high") or os.getenv("PM_GLOBAL_RISK_HIGH") or 0.65),
+            pm_geo_halt_minutes=int(pm_cfg.get("geo_halt_minutes") or os.getenv("PM_GEO_HALT_MINUTES") or 15),
+            pm_spread_liquidity_min=float(pm_cfg.get("spread_liquidity_min") or os.getenv("PM_SPREAD_LIQUIDITY_MIN") or 1.0),
+            pm_reduce_only_on_high_risk=bool(pm_cfg.get("reduce_only_on_high_risk", True)),
+            pm_notional_multiplier_high_risk=float(pm_cfg.get("notional_multiplier_high_risk") or os.getenv("PM_NOTIONAL_MULTIPLIER_HIGH_RISK") or 0.5),
+            pm_leverage_multiplier_high_risk=float(pm_cfg.get("leverage_multiplier_high_risk") or os.getenv("PM_LEVERAGE_MULTIPLIER_HIGH_RISK") or 0.4),
         )
         self._last_active_signal_at: Dict[str, datetime] = {}
         self._breaker_on: bool = False
+        self._pm_halt_until: Dict[str, datetime] = {}
 
     @staticmethod
     def _to_float(value: Any, default: float = 0.0) -> float:
@@ -60,6 +84,11 @@ class RiskGate:
         vol_1h = abs(self._to_float(features.get("vol_1h"), 0.0))
         drawdown = abs(self._to_float(features.get("drawdown"), 0.0))
         breaker_flag = bool(features.get("circuit_breaker") or features.get("breaker_on") or self._breaker_on)
+        pm_global_risk = self._to_float(features.get("pm_global_risk"), 0.0)
+        pm_macro_shock = self._to_float(features.get("pm_macro_shock_sev"), 0.0)
+        pm_geo_shock = self._to_float(features.get("pm_geo_shock_sev"), 0.0)
+        pm_reg_shock = self._to_float(features.get("pm_reg_shock_sev"), 0.0)
+        pm_liquidity_score = self._to_float(features.get("pm_liquidity_score", features.get("pm_price_liquidity")), 0.0)
 
         if spread > self.config.max_spread:
             reasons.append(f"spread {spread:.5f} > max_spread {self.config.max_spread:.5f}")
@@ -74,6 +103,36 @@ class RiskGate:
             reasons.append(
                 f"drawdown {drawdown:.4f} >= breaker_drawdown {self.config.breaker_drawdown:.4f}"
             )
+
+        pm_halt_until = self._pm_halt_until.get(symbol)
+        if pm_halt_until and pm_halt_until > now:
+            reasons.append(f"pm geo halt active until {pm_halt_until.isoformat()}")
+
+        if self.config.pm_features_enable:
+            if pm_global_risk >= self.config.pm_global_risk_high and signal != "FLAT":
+                reasons.append(
+                    f"pm_global_risk {pm_global_risk:.4f} >= high {self.config.pm_global_risk_high:.4f}"
+                )
+            elif pm_global_risk >= self.config.pm_global_risk_medium and signal != "FLAT":
+                reasons.append(
+                    f"pm_global_risk elevated {pm_global_risk:.4f} >= medium {self.config.pm_global_risk_medium:.4f}"
+                )
+
+            if (
+                pm_geo_shock >= self.config.pm_global_risk_medium
+                and spread > self.config.max_spread
+                and pm_liquidity_score <= self.config.pm_spread_liquidity_min
+            ):
+                halt_until = now + timedelta(minutes=max(1, int(self.config.pm_geo_halt_minutes)))
+                self._pm_halt_until[symbol] = halt_until
+                reasons.append(
+                    f"geo shock {pm_geo_shock:.4f} + weak liquidity {pm_liquidity_score:.4f} -> halt until {halt_until.isoformat()}"
+                )
+
+            if pm_macro_shock > 0:
+                reasons.append(f"pm macro shock {pm_macro_shock:.4f}")
+            if pm_reg_shock > 0:
+                reasons.append(f"pm reg shock {pm_reg_shock:.4f}")
 
         cooldown = max(0, int(self.config.cooldown_min))
         if signal != "FLAT" and cooldown > 0:

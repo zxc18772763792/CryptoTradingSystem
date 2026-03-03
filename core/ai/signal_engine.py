@@ -1,7 +1,8 @@
-﻿"""News signal engine (read-only, outputs signal JSON only)."""
+"""News signal engine (read-only, outputs signal JSON only)."""
 from __future__ import annotations
 
 import math
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -9,6 +10,7 @@ from core.ai.risk_gate import RiskGate
 from core.news.eventizer.rules import SymbolMapper
 from core.news.storage import db as news_db
 from core.news.storage.models import SignalSchema, parse_any_datetime
+from prediction_markets.polymarket import db as pm_db
 
 
 MODEL_VERSION = "glm5_event_rules_v1"
@@ -101,6 +103,10 @@ async def generate_signal(
     now = datetime.now(timezone.utc)
 
     threshold = float(((cfg.get("thresholds") or {}).get("alpha_threshold")) or 0.08)
+    pm_enable = str(os.getenv("PM_FEATURES_ENABLE") or "").strip().lower() in {"1", "true", "yes", "on", "y"}
+    pm_cfg = cfg.get("polymarket") or {}
+    pm_alpha = float(os.getenv("PM_SIGNAL_ALPHA") or pm_cfg.get("alpha_weight") or 0.35)
+    pm_beta = float(os.getenv("PM_RISK_BETA") or pm_cfg.get("global_risk_penalty") or 0.40)
 
     alpha = 0.0
     weighted_half_numer = 0.0
@@ -123,6 +129,25 @@ async def generate_signal(
         weighted_half_denom += abs_contrib
         weighted_contribs.append((event, contrib))
 
+    merged_features = dict(market_features or {})
+    pm_explain: List[str] = []
+    if pm_enable:
+        try:
+            pm_snapshot = await pm_db.get_features_asof(symbol=symbol_norm, ts=now, timeframe="1m")
+            if pm_snapshot:
+                for key, value in pm_snapshot.items():
+                    merged_features.setdefault(key, value)
+                pm_price_signal = _safe_float(pm_snapshot.get("pm_price_signal"), 0.0)
+                pm_global_risk = _safe_float(pm_snapshot.get("pm_global_risk"), 0.0)
+                alpha = alpha + pm_alpha * pm_price_signal - pm_beta * pm_global_risk
+                pm_explain.append(
+                    f"pm boost: alpha += {pm_alpha:.2f}*{pm_price_signal:.4f} - {pm_beta:.2f}*{pm_global_risk:.4f}"
+                )
+            else:
+                pm_explain.append("pm features unavailable -> fallback to news-only alpha")
+        except Exception as exc:
+            pm_explain.append(f"pm features failed: {exc}")
+
     desired_signal = "FLAT"
     if alpha > threshold:
         desired_signal = "LONG"
@@ -133,7 +158,7 @@ async def generate_signal(
     final_signal, gate_reasons = gate.evaluate(
         symbol=symbol_norm,
         proposed_signal=desired_signal,
-        market_features=market_features,
+        market_features=merged_features,
         now=now,
     )
 
@@ -150,6 +175,7 @@ async def generate_signal(
         f"news_alpha={alpha:.6f} threshold={threshold:.6f}",
         f"events={len(events)} lookback={since_minutes}m weighted_half_life={weighted_half_life:.1f}m",
     ]
+    explain.extend(pm_explain)
 
     if desired_signal != final_signal:
         explain.append(f"risk gate override: {desired_signal} -> {final_signal}")
@@ -162,7 +188,7 @@ async def generate_signal(
         "signal": final_signal,
         "strength": round(strength, 6),
         "confidence": round(confidence, 6),
-        "risk": _build_risk(final_signal, market_features or {}),
+        "risk": _build_risk(final_signal, merged_features or {}),
         "explain": explain,
         "used_events": used_events,
         "model_version": MODEL_VERSION,

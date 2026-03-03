@@ -1,0 +1,97 @@
+defaults:
+  enabled: false
+  exchange_map:
+    BTC: BTCUSDT
+    ETH: ETHUSDT
+    SOL: SOLUSDT
+  gamma:
+    base_url: https://gamma-api.polymarket.com
+    refresh_interval_sec: 1200
+    page_limit: 100
+    request_timeout_sec: 15
+  clob:
+    base_url: https://clob.polymarket.com
+    ws_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
+    quote_poll_fallback_sec: 15
+    request_timeout_sec: 8
+    burst: 20
+    refill_per_sec: 5
+    max_concurrency: 6
+    breaker_errors: 8
+    breaker_cooldown_sec: 120
+  storage:
+    raw_quote_retention_days: 14
+    minute_feature_retention_days: 365
+  features:
+    shock_abs_dprob_5m: 0.05
+    spread_hard_cap: 0.10
+    min_depth5: 50
+    liquidity_floor: 1.0
+  risk:
+    enable: true
+    global_risk_high: 0.65
+    global_risk_medium: 0.45
+    geo_halt_minutes: 15
+    leverage_multiplier_high_risk: 0.4
+    notional_multiplier_high_risk: 0.5
+  signal:
+    enable: false
+    alpha_weight: 0.35
+    global_risk_penalty: 0.40
+  trading:
+    enabled: false
+    require_approval: true
+  worker:
+    quote_loop_sec: 10
+    ws_enabled: true
+    max_subscription_assets: 120
+categories:
+  PRICE:
+    keywords: ["BTC", "Bitcoin", "ETH", "Ethereum", "SOL", "Solana", "Will BTC", "Will ETH", "Will SOL", "above", "below", "hit", "by"]
+    tags: []
+    max_markets: 24
+    min_liquidity: 5000
+    max_spread: 0.08
+    target_symbols:
+      BTCUSDT: 1.0
+      ETHUSDT: 1.0
+      SOLUSDT: 1.0
+      BNBUSDT: 0.4
+      XRPUSDT: 0.4
+      ADAUSDT: 0.4
+  MACRO:
+    keywords: ["Fed", "FOMC", "rate cut", "rate hike", "CPI", "inflation", "recession", "GDP", "Powell"]
+    tags: []
+    max_markets: 18
+    min_liquidity: 3000
+    max_spread: 0.10
+    target_symbols:
+      BTCUSDT: 1.0
+      ETHUSDT: 0.8
+      SOLUSDT: 0.6
+      BNBUSDT: 0.4
+      XRPUSDT: 0.4
+  REG_ETF:
+    keywords: ["SEC", "ETF", "approval", "denial", "lawsuit", "Coinbase", "Binance regulation", "MiCA"]
+    tags: []
+    max_markets: 18
+    min_liquidity: 3000
+    max_spread: 0.10
+    target_symbols:
+      BTCUSDT: 1.0
+      ETHUSDT: 0.8
+      SOLUSDT: 0.5
+      BNBUSDT: 0.4
+      XRPUSDT: 0.4
+  ELECTION_GEO:
+    keywords: ["election", "Trump", "Biden", "Taiwan", "Ukraine", "Israel", "Iran", "NATO", "China"]
+    tags: []
+    max_markets: 18
+    min_liquidity: 3000
+    max_spread: 0.10
+    target_symbols:
+      BTCUSDT: 1.0
+      ETHUSDT: 0.8
+      SOLUSDT: 0.6
+      BNBUSDT: 0.4
+      XRPUSDT: 0.4

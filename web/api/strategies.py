@@ -50,60 +50,130 @@ DEFAULT_START_ALL_STRATEGIES: List[str] = [
 ]
 
 _STRATEGY_LIBRARY_META: Dict[str, Dict[str, Any]] = {
-    "MAStrategy": {"category": "趋势", "risk": "low", "usage": "双均线顺势"},
-    "EMAStrategy": {"category": "趋势", "risk": "low", "usage": "快慢EMA趋势"},
-    "RSIStrategy": {"category": "震荡", "risk": "medium", "usage": "超买超卖反转"},
-    "RSIDivergenceStrategy": {"category": "反转", "risk": "medium", "usage": "背离反转"},
+    # ===== 趋势类 (Trend) =====
+    "MAStrategy": {"category": "趋势", "risk": "low", "usage": "双均线金叉死叉"},
+    "EMAStrategy": {"category": "趋势", "risk": "low", "usage": "EMA快慢线交叉"},
     "MACDStrategy": {"category": "趋势", "risk": "medium", "usage": "MACD趋势跟随"},
-    "MACDHistogramStrategy": {"category": "趋势", "risk": "medium", "usage": "柱体拐点"},
+    "MACDHistogramStrategy": {"category": "趋势", "risk": "medium", "usage": "MACD柱体动量"},
+    "ADXTrendStrategy": {"category": "趋势", "risk": "medium", "usage": "ADX趋势强度确认"},
+    "TrendFollowingStrategy": {"category": "趋势", "risk": "medium", "usage": "多均线趋势跟踪"},
+    "AroonStrategy": {"category": "趋势", "risk": "medium", "usage": "Aroon趋势识别"},
+
+    # ===== 震荡类 (Oscillator) =====
+    "RSIStrategy": {"category": "震荡", "risk": "medium", "usage": "RSI超买超卖"},
+    "RSIDivergenceStrategy": {"category": "震荡", "risk": "medium", "usage": "RSI顶底背离"},
+    "StochasticStrategy": {"category": "震荡", "risk": "medium", "usage": "KDJ随机震荡"},
     "BollingerBandsStrategy": {"category": "震荡", "risk": "medium", "usage": "布林带回归"},
-    "BollingerSqueezeStrategy": {"category": "突破", "risk": "medium", "usage": "波动收敛后突破"},
-    "DonchianBreakoutStrategy": {"category": "突破", "risk": "medium", "usage": "通道突破"},
-    "StochasticStrategy": {"category": "震荡", "risk": "medium", "usage": "随机指标"},
-    "ADXTrendStrategy": {"category": "趋势", "risk": "medium", "usage": "ADX强趋势"},
-    "VWAPReversionStrategy": {"category": "均值回归", "risk": "medium", "usage": "VWAP偏离回归"},
+    "WilliamsRStrategy": {"category": "震荡", "risk": "medium", "usage": "威廉超买超卖"},
+    "CCIStrategy": {"category": "震荡", "risk": "medium", "usage": "CCI通道指数"},
+    "StochRSIStrategy": {"category": "震荡", "risk": "medium", "usage": "RSI随机震荡"},
+
+    # ===== 动量类 (Momentum) =====
+    "MomentumStrategy": {"category": "动量", "risk": "medium", "usage": "价格动量突破"},
+    "ROCStrategy": {"category": "动量", "risk": "medium", "usage": "变化率动量"},
+    "PriceAccelerationStrategy": {"category": "动量", "risk": "medium", "usage": "价格加速度"},
+
+    # ===== 均值回归类 (Mean Reversion) =====
     "MeanReversionStrategy": {"category": "均值回归", "risk": "medium", "usage": "Z-Score回归"},
-    "BollingerMeanReversionStrategy": {"category": "均值回归", "risk": "medium", "usage": "布林均值回归"},
-    "MomentumStrategy": {"category": "动量", "risk": "medium", "usage": "动量突破"},
-    "TrendFollowingStrategy": {"category": "趋势", "risk": "medium", "usage": "趋势跟随"},
-    "PairsTradingStrategy": {"category": "统计套利", "risk": "high", "usage": "价差回归（双腿）"},
-    "FamaFactorArbitrageStrategy": {"category": "因子套利", "risk": "high", "usage": "多因子横截面多空"},
-    "CEXArbitrageStrategy": {"category": "套利", "risk": "high", "usage": "跨交易所套利"},
+    "BollingerMeanReversionStrategy": {"category": "均值回归", "risk": "medium", "usage": "布林带均值回归"},
+    "VWAPReversionStrategy": {"category": "均值回归", "risk": "low", "usage": "VWAP价格回归"},
+    "VWAPStrategy": {"category": "均值回归", "risk": "low", "usage": "成交量加权回归"},
+    "MeanReversionHalfLifeStrategy": {"category": "均值回归", "risk": "medium", "usage": "半衰期回归"},
+
+    # ===== 突破类 (Breakout) =====
+    "BollingerSqueezeStrategy": {"category": "突破", "risk": "medium", "usage": "布林带收窄突破"},
+    "DonchianBreakoutStrategy": {"category": "突破", "risk": "medium", "usage": "唐奇安通道突破"},
+
+    # ===== 成交量类 (Volume) =====
+    "MFIStrategy": {"category": "成交量", "risk": "medium", "usage": "资金流量指标"},
+    "OBVStrategy": {"category": "成交量", "risk": "medium", "usage": "能量潮背离"},
+    "TradeIntensityStrategy": {"category": "成交量", "risk": "medium", "usage": "成交量异动"},
+
+    # ===== 波动率类 (Volatility) =====
+    "ParkinsonVolStrategy": {"category": "波动率", "risk": "medium", "usage": "高低波动率回归"},
+
+    # ===== 风险类 (Risk) =====
+    "UlcerIndexStrategy": {"category": "风险", "risk": "low", "usage": "下行风险择时"},
+    "VaRBreakoutStrategy": {"category": "风险", "risk": "medium", "usage": "VaR异常突破"},
+    "MaxDrawdownStrategy": {"category": "风险", "risk": "low", "usage": "回撤反弹买入"},
+    "SortinoRatioStrategy": {"category": "风险", "risk": "medium", "usage": "风险调整趋势"},
+
+    # ===== 统计套利类 (Statistical Arbitrage) =====
+    "PairsTradingStrategy": {"category": "统计套利", "risk": "high", "usage": "配对价差回归"},
+    "FamaFactorArbitrageStrategy": {"category": "统计套利", "risk": "high", "usage": "多因子横截面"},
+    "HurstExponentStrategy": {"category": "统计套利", "risk": "medium", "usage": "长记忆regime"},
+
+    # ===== 微观结构类 (Microstructure) =====
+    "OrderFlowImbalanceStrategy": {"category": "微观结构", "risk": "medium", "usage": "订单流失衡"},
+
+    # ===== 套利类 (Arbitrage) =====
+    "CEXArbitrageStrategy": {"category": "套利", "risk": "high", "usage": "跨所价差套利"},
     "TriangularArbitrageStrategy": {"category": "套利", "risk": "high", "usage": "三角路径套利"},
-    "DEXArbitrageStrategy": {"category": "套利", "risk": "high", "usage": "链上价差套利"},
+    "DEXArbitrageStrategy": {"category": "套利", "risk": "high", "usage": "链上DEX套利"},
     "FlashLoanArbitrageStrategy": {"category": "套利", "risk": "high", "usage": "闪电贷套利"},
-    "MarketSentimentStrategy": {"category": "宏观", "risk": "medium", "usage": "市场情绪因子"},
-    "SocialSentimentStrategy": {"category": "宏观", "risk": "medium", "usage": "社媒情绪因子"},
-    "FundFlowStrategy": {"category": "宏观", "risk": "medium", "usage": "资金流因子"},
-    "WhaleActivityStrategy": {"category": "宏观", "risk": "high", "usage": "巨鲸行为跟踪"},
+
+    # ===== 宏观类 (Macro) =====
+    "MarketSentimentStrategy": {"category": "宏观", "risk": "medium", "usage": "恐慌贪婪指数"},
+    "SocialSentimentStrategy": {"category": "宏观", "risk": "medium", "usage": "社媒情绪分析"},
+    "FundFlowStrategy": {"category": "宏观", "risk": "medium", "usage": "交易所资金流"},
+    "WhaleActivityStrategy": {"category": "宏观", "risk": "high", "usage": "巨鲸地址追踪"},
 }
 
 _CRYPTO_COMMON_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    # ===== 趋势类 (Trend) =====
     "MAStrategy": {"fast_period": 20, "slow_period": 60, "signal_threshold": 0.0015, "stop_loss_pct": 0.03, "take_profit_pct": 0.08},
     "EMAStrategy": {"fast_period": 12, "slow_period": 26, "signal_threshold": 0.0012, "stop_loss_pct": 0.025, "take_profit_pct": 0.06},
-    "RSIStrategy": {"period": 14, "oversold": 30, "overbought": 70, "exit_oversold": 42, "exit_overbought": 58, "stop_loss_pct": 0.025, "take_profit_pct": 0.055},
-    "RSIDivergenceStrategy": {"period": 14, "lookback": 34, "min_divergence": 0.015, "extrema_order": 5, "stop_loss_pct": 0.03, "take_profit_pct": 0.08},
     "MACDStrategy": {"fast_period": 12, "slow_period": 26, "signal_period": 9, "stop_loss_pct": 0.025, "take_profit_pct": 0.06},
     "MACDHistogramStrategy": {"fast_period": 12, "slow_period": 26, "signal_period": 9, "min_histogram": 0.0002, "stop_loss_pct": 0.025, "take_profit_pct": 0.06},
-    "BollingerBandsStrategy": {"period": 20, "num_std": 2.0, "stop_loss_pct": 0.025, "take_profit_pct": 0.05},
-    "BollingerSqueezeStrategy": {"period": 20, "num_std": 2.0, "squeeze_threshold": 0.018, "breakout_threshold": 0.008, "stop_loss_pct": 0.03, "take_profit_pct": 0.08},
-    "DonchianBreakoutStrategy": {"lookback": 20, "exit_lookback": 10, "breakout_buffer_pct": 0.001, "stop_loss_pct": 0.025, "take_profit_pct": 0.08},
-    "StochasticStrategy": {"k_period": 14, "d_period": 3, "smooth_k": 3, "oversold": 20.0, "overbought": 80.0, "stop_loss_pct": 0.02, "take_profit_pct": 0.05},
     "ADXTrendStrategy": {"period": 14, "adx_threshold": 23.0, "stop_loss_pct": 0.025, "take_profit_pct": 0.07},
-    "VWAPReversionStrategy": {"window": 48, "entry_deviation_pct": 0.012, "exit_deviation_pct": 0.003, "stop_loss_pct": 0.02, "take_profit_pct": 0.035},
+    "TrendFollowingStrategy": {"short_period": 20, "long_period": 55, "adx_threshold": 23, "stop_loss_pct": 0.03, "take_profit_pct": 0.09},
+    "AroonStrategy": {"period": 25, "buy_threshold": 50, "sell_threshold": -50, "stop_loss_pct": 0.03, "take_profit_pct": 0.06},
+
+    # ===== 震荡类 (Oscillator) =====
+    "RSIStrategy": {"period": 14, "oversold": 30, "overbought": 70, "exit_oversold": 42, "exit_overbought": 58, "stop_loss_pct": 0.025, "take_profit_pct": 0.055},
+    "RSIDivergenceStrategy": {"period": 14, "lookback": 34, "min_divergence": 0.015, "extrema_order": 5, "stop_loss_pct": 0.03, "take_profit_pct": 0.08},
+    "StochasticStrategy": {"k_period": 14, "d_period": 3, "smooth_k": 3, "oversold": 20.0, "overbought": 80.0, "stop_loss_pct": 0.02, "take_profit_pct": 0.05},
+    "BollingerBandsStrategy": {"period": 20, "num_std": 2.0, "stop_loss_pct": 0.025, "take_profit_pct": 0.05},
+    "WilliamsRStrategy": {"period": 14, "oversold": -80, "overbought": -20, "stop_loss_pct": 0.025, "take_profit_pct": 0.05},
+    "CCIStrategy": {"period": 20, "constant": 0.015, "oversold": -100, "overbought": 100, "stop_loss_pct": 0.025, "take_profit_pct": 0.05},
+    "StochRSIStrategy": {"rsi_period": 14, "stoch_period": 14, "oversold": 20, "overbought": 80, "stop_loss_pct": 0.025, "take_profit_pct": 0.05},
+
+    # ===== 动量类 (Momentum) =====
+    "MomentumStrategy": {"lookback_period": 20, "momentum_threshold": 0.015, "stop_loss_pct": 0.03, "take_profit_pct": 0.07},
+    "ROCStrategy": {"period": 14, "buy_threshold": 5.0, "sell_threshold": -5.0, "stop_loss_pct": 0.03, "take_profit_pct": 0.06},
+    "PriceAccelerationStrategy": {"fast": 5, "slow": 15, "accel_threshold": 0.1, "stop_loss_pct": 0.025, "take_profit_pct": 0.05},
+
+    # ===== 均值回归类 (Mean Reversion) =====
     "MeanReversionStrategy": {"lookback_period": 24, "entry_z_score": 2.1, "exit_z_score": 0.6, "stop_loss_pct": 0.03, "take_profit_pct": 0.06},
     "BollingerMeanReversionStrategy": {"period": 20, "num_std": 2.2, "stop_loss_pct": 0.02, "take_profit_pct": 0.04},
-    "MomentumStrategy": {"lookback_period": 20, "momentum_threshold": 0.015, "stop_loss_pct": 0.03, "take_profit_pct": 0.07},
-    "TrendFollowingStrategy": {"short_period": 20, "long_period": 55, "adx_threshold": 23, "stop_loss_pct": 0.03, "take_profit_pct": 0.09},
+    "VWAPReversionStrategy": {"window": 48, "entry_deviation_pct": 0.012, "exit_deviation_pct": 0.003, "stop_loss_pct": 0.02, "take_profit_pct": 0.035},
+    "VWAPStrategy": {"period": 20, "buy_threshold": -0.02, "sell_threshold": 0.02, "stop_loss_pct": 0.02, "take_profit_pct": 0.03},
+    "MeanReversionHalfLifeStrategy": {"lookback": 60, "zscore_entry": 2.0, "zscore_exit": 0.5, "stop_loss_pct": 0.03, "take_profit_pct": 0.05},
+
+    # ===== 突破类 (Breakout) =====
+    "BollingerSqueezeStrategy": {"period": 20, "num_std": 2.0, "squeeze_threshold": 0.018, "breakout_threshold": 0.008, "stop_loss_pct": 0.03, "take_profit_pct": 0.08},
+    "DonchianBreakoutStrategy": {"lookback": 20, "exit_lookback": 10, "breakout_buffer_pct": 0.001, "stop_loss_pct": 0.025, "take_profit_pct": 0.08},
+
+    # ===== 成交量类 (Volume) =====
+    "MFIStrategy": {"period": 14, "oversold": 20, "overbought": 80, "stop_loss_pct": 0.025, "take_profit_pct": 0.05},
+    "OBVStrategy": {"smooth": 20, "divergence_threshold": 1.5, "stop_loss_pct": 0.025, "take_profit_pct": 0.05},
+    "TradeIntensityStrategy": {"fast": 5, "slow": 20, "intensity_threshold": 1.5, "stop_loss_pct": 0.025, "take_profit_pct": 0.05},
+
+    # ===== 波动率类 (Volatility) =====
+    "ParkinsonVolStrategy": {"period": 20, "vol_percentile_low": 20, "vol_percentile_high": 80, "stop_loss_pct": 0.03, "take_profit_pct": 0.05},
+
+    # ===== 风险类 (Risk) =====
+    "UlcerIndexStrategy": {"period": 14, "high_risk_threshold": 10, "low_risk_threshold": 3, "stop_loss_pct": 0.03, "take_profit_pct": 0.06},
+    "VaRBreakoutStrategy": {"var_period": 20, "confidence": 0.95, "multiplier": 1.5, "stop_loss_pct": 0.02, "take_profit_pct": 0.04},
+    "MaxDrawdownStrategy": {"lookback": 30, "dd_threshold": -0.10, "recovery_threshold": 0.3, "stop_loss_pct": 0.03, "take_profit_pct": 0.08},
+    "SortinoRatioStrategy": {"period": 30, "sortino_threshold": 1.0, "lookback_trend": 5, "stop_loss_pct": 0.03, "take_profit_pct": 0.06},
+
+    # ===== 统计套利类 (Statistical Arbitrage) =====
     "PairsTradingStrategy": {"lookback_period": 48, "entry_z_score": 2.0, "exit_z_score": 0.6, "hedge_ratio_method": "ols", "min_hedge_ratio": 0.1, "max_hedge_ratio": 5.0, "stop_loss_pct": 0.04, "pair_symbol": "ETH/USDT"},
     "FamaFactorArbitrageStrategy": {
         "exchange": "binance",
         "factor_timeframe": "1h",
-        "universe_symbols": [
-            "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT",
-            "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT",
-            "MATIC/USDT", "LTC/USDT",
-        ],
+        "universe_symbols": ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT", "MATIC/USDT", "LTC/USDT"],
         "max_symbols": 100,
         "lookback_bars": 720,
         "min_symbol_bars": 300,
@@ -124,6 +194,12 @@ _CRYPTO_COMMON_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "reverse_on_signal": True,
         "allow_pyramiding": False,
     },
+    "HurstExponentStrategy": {"hurst_period": 100, "zscore_period": 20, "trending_threshold": 0.55, "mean_revert_threshold": 0.45, "zscore_threshold": 1.5, "stop_loss_pct": 0.03, "take_profit_pct": 0.06},
+
+    # ===== 微观结构类 (Microstructure) =====
+    "OrderFlowImbalanceStrategy": {"period": 10, "imbalance_threshold": 1.0, "stop_loss_pct": 0.02, "take_profit_pct": 0.04},
+
+    # ===== 套利类 (Arbitrage) =====
     "CEXArbitrageStrategy": {
         "min_spread": 0.002,
         "alpha_threshold": 0.002,
@@ -150,6 +226,8 @@ _CRYPTO_COMMON_DEFAULTS: Dict[str, Dict[str, Any]] = {
     },
     "DEXArbitrageStrategy": {"min_spread": 0.008, "min_profit_usd": 30, "max_gas_cost": 20, "dex_list": ["uniswap", "sushiswap"], "chain": "ethereum"},
     "FlashLoanArbitrageStrategy": {"min_profit": 0.004, "loan_amount": 100000, "dex_list": ["uniswap", "sushiswap"]},
+
+    # ===== 宏观类 (Macro) =====
     "MarketSentimentStrategy": {"fear_threshold": 25, "greed_threshold": 75, "lookback_period": 7, "stop_loss_pct": 0.04, "take_profit_pct": 0.09, "timeout_sec": 6},
     "SocialSentimentStrategy": {"positive_threshold": 0.2, "negative_threshold": -0.2, "min_mentions": 30, "stop_loss_pct": 0.04, "take_profit_pct": 0.09, "timeout_sec": 6},
     "FundFlowStrategy": {"inflow_threshold": 150000.0, "outflow_threshold": -150000.0, "min_imbalance_ratio": 0.03, "lookback_period": 7, "book_depth": 80, "stop_loss_pct": 0.04, "take_profit_pct": 0.09},
@@ -157,28 +235,69 @@ _CRYPTO_COMMON_DEFAULTS: Dict[str, Dict[str, Any]] = {
 }
 
 _RECOMMENDED_TIMEFRAMES: Dict[str, str] = {
+    # ===== 趋势类 (Trend) =====
     "MAStrategy": "15m",
     "EMAStrategy": "15m",
-    "RSIStrategy": "15m",
-    "RSIDivergenceStrategy": "15m",
     "MACDStrategy": "15m",
     "MACDHistogramStrategy": "15m",
-    "BollingerBandsStrategy": "15m",
-    "BollingerSqueezeStrategy": "15m",
-    "DonchianBreakoutStrategy": "1h",
-    "StochasticStrategy": "15m",
     "ADXTrendStrategy": "1h",
-    "VWAPReversionStrategy": "15m",
+    "TrendFollowingStrategy": "1h",
+    "AroonStrategy": "1h",
+
+    # ===== 震荡类 (Oscillator) =====
+    "RSIStrategy": "15m",
+    "RSIDivergenceStrategy": "15m",
+    "StochasticStrategy": "15m",
+    "BollingerBandsStrategy": "15m",
+    "WilliamsRStrategy": "15m",
+    "CCIStrategy": "15m",
+    "StochRSIStrategy": "15m",
+
+    # ===== 动量类 (Momentum) =====
+    "MomentumStrategy": "1h",
+    "ROCStrategy": "15m",
+    "PriceAccelerationStrategy": "15m",
+
+    # ===== 均值回归类 (Mean Reversion) =====
     "MeanReversionStrategy": "1h",
     "BollingerMeanReversionStrategy": "1h",
-    "MomentumStrategy": "1h",
-    "TrendFollowingStrategy": "1h",
+    "VWAPReversionStrategy": "15m",
+    "VWAPStrategy": "15m",
+    "MeanReversionHalfLifeStrategy": "1h",
+
+    # ===== 突破类 (Breakout) =====
+    "BollingerSqueezeStrategy": "15m",
+    "DonchianBreakoutStrategy": "1h",
+
+    # ===== 成交量类 (Volume) =====
+    "MFIStrategy": "15m",
+    "OBVStrategy": "15m",
+    "TradeIntensityStrategy": "5m",
+
+    # ===== 波动率类 (Volatility) =====
+    "ParkinsonVolStrategy": "1h",
+
+    # ===== 风险类 (Risk) =====
+    "UlcerIndexStrategy": "1h",
+    "VaRBreakoutStrategy": "15m",
+    "MaxDrawdownStrategy": "1h",
+    "SortinoRatioStrategy": "1h",
+
+    # ===== 统计套利类 (Statistical Arbitrage) =====
     "PairsTradingStrategy": "1h",
     "FamaFactorArbitrageStrategy": "1h",
+    "HurstExponentStrategy": "1h",
+
+    # ===== 微观结构类 (Microstructure) =====
+    "OrderFlowImbalanceStrategy": "5m",
+
+    # ===== 套利类 (Arbitrage) =====
     "CEXArbitrageStrategy": "5m",
     "TriangularArbitrageStrategy": "5m",
     "DEXArbitrageStrategy": "5m",
     "FlashLoanArbitrageStrategy": "5m",
+
+    # ===== 宏观类 (Macro) =====
     "MarketSentimentStrategy": "15m",
     "SocialSentimentStrategy": "15m",
     "FundFlowStrategy": "15m",

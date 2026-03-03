@@ -127,3 +127,10 @@ FACTOR_CLASS_MAP = {
     "volume_z": VolumeZFactor,
 }
 
+# Import extended factors and merge
+try:
+    from core.factors_ts.extended_factors import EXTENDED_FACTOR_CLASS_MAP
+    FACTOR_CLASS_MAP.update(EXTENDED_FACTOR_CLASS_MAP)
+except ImportError:
+    pass
+

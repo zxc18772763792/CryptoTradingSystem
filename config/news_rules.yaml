@@ -64,10 +64,10 @@
   newsapi_query: "(bitcoin OR ethereum OR binance OR crypto OR ETF OR SEC OR hack OR liquidation OR fed)"
 
 llm:
-  model: glm-4.7-flashx
-  base_url: https://open.bigmodel.cn/api/paas/v4
+  model: GLM-4.5-Air
+  base_url: https://open.bigmodel.cn/api/coding/paas/v4
   timeout_sec: 45
-  batch_size: 8
+  batch_size: 3
   summarize_limit: 40
   summarize_timeout_sec: 45
   summarize_batch_size: 6

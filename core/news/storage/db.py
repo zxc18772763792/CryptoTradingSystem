@@ -1,14 +1,16 @@
 """Async DB helpers for news/event storage."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
+import os
 import re
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, event, insert, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from config.settings import settings
@@ -23,8 +25,27 @@ from core.news.storage.models import (
 )
 
 
-news_engine = create_async_engine(settings.DATABASE_URL, echo=False, future=True)
+_news_engine_kwargs: Dict[str, Any] = {"echo": False, "future": True}
+if str(settings.DATABASE_URL).startswith("sqlite"):
+    _news_engine_kwargs["connect_args"] = {"timeout": 30}
+
+news_engine = create_async_engine(settings.DATABASE_URL, **_news_engine_kwargs)
 NewsSessionLocal = async_sessionmaker(news_engine, class_=AsyncSession, expire_on_commit=False)
+
+if str(settings.DATABASE_URL).startswith("sqlite"):
+    @event.listens_for(news_engine.sync_engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+        finally:
+            cursor.close()
+
+# Global rate limit backoff state
+_global_rate_limit_backoff: Optional[datetime] = None
+_global_rate_limit_lock = asyncio.Lock()
 
 
 SOURCE_IMPORTANCE = {
@@ -245,6 +266,36 @@ def _row_to_state_dict(row: NewsSourceState) -> Dict[str, Any]:
 async def init_news_db() -> None:
     async with news_engine.begin() as conn:
         await conn.run_sync(NewsBase.metadata.create_all)
+        if news_engine.dialect.name == "sqlite":
+            await _ensure_sqlite_news_schema(conn)
+
+
+async def _ensure_sqlite_news_schema(conn) -> None:
+    async def _table_columns(table_name: str) -> set[str]:
+        rows = (await conn.execute(text(f"PRAGMA table_info({table_name})"))).fetchall()
+        return {str(row[1]) for row in rows}
+
+    llm_columns = await _table_columns("news_llm_tasks")
+    llm_alters = {
+        "next_retry_at": "ALTER TABLE news_llm_tasks ADD COLUMN next_retry_at DATETIME",
+        "last_rate_limit_at": "ALTER TABLE news_llm_tasks ADD COLUMN last_rate_limit_at DATETIME",
+        "started_at": "ALTER TABLE news_llm_tasks ADD COLUMN started_at DATETIME",
+        "finished_at": "ALTER TABLE news_llm_tasks ADD COLUMN finished_at DATETIME",
+    }
+    for column_name, ddl in llm_alters.items():
+        if column_name not in llm_columns:
+            await conn.execute(text(ddl))
+
+    state_columns = await _table_columns("news_source_state")
+    state_alters = {
+        "last_success_at": "ALTER TABLE news_source_state ADD COLUMN last_success_at DATETIME",
+        "paused_until": "ALTER TABLE news_source_state ADD COLUMN paused_until DATETIME",
+        "success_count": "ALTER TABLE news_source_state ADD COLUMN success_count INTEGER DEFAULT 0",
+        "failure_count": "ALTER TABLE news_source_state ADD COLUMN failure_count INTEGER DEFAULT 0",
+    }
+    for column_name, ddl in state_alters.items():
+        if column_name not in state_columns:
+            await conn.execute(text(ddl))
 
 
 async def close_news_db() -> None:
@@ -281,21 +332,35 @@ async def list_source_states() -> List[Dict[str, Any]]:
 
 async def get_llm_queue_stats() -> Dict[str, Any]:
     async with news_session_scope() as session:
-        rows = (await session.execute(select(NewsLLMTask.status, NewsLLMTask.priority))).all()
+        rows = (
+            await session.execute(
+                select(NewsLLMTask.status, NewsLLMTask.priority, NewsLLMTask.next_retry_at)
+            )
+        ).all()
     counts: Dict[str, int] = {"pending": 0, "running": 0, "retry": 0, "failed": 0, "done": 0}
     priorities: List[int] = []
-    for status, priority in rows:
+    retry_times: List[datetime] = []
+    for status, priority, next_retry_at in rows:
         key = str(status or "pending").strip().lower() or "pending"
         counts[key] = counts.get(key, 0) + 1
         try:
             priorities.append(int(priority or 0))
         except Exception:
             continue
+        if next_retry_at:
+            try:
+                retry_times.append(parse_any_datetime(next_retry_at))
+            except Exception:
+                pass
+    backoff_until = await get_global_backoff()
+    next_retry_at = min(retry_times) if retry_times else None
     return {
         "counts": counts,
         "total": int(sum(counts.values())),
         "pending_total": int(counts.get("pending", 0) + counts.get("retry", 0)),
         "max_priority": max(priorities) if priorities else 0,
+        "backoff_until": _utc_iso(backoff_until),
+        "next_retry_at": _utc_iso(next_retry_at),
     }
 
 
@@ -400,20 +465,37 @@ async def save_news_raw(news_items: List[Dict[str, Any]]) -> Dict[str, Any]:
         }
 
         objects: List[NewsRaw] = []
+        rows_to_insert: List[Dict[str, Any]] = []
         deduped_count = local_dup
         for item in normalized:
             title_bucket = _title_bucket_key(item["title"], item["published_at"])
             if item["url"] in existing_urls or item["content_hash"] in existing_hashes or (title_bucket and title_bucket in existing_title_buckets):
                 deduped_count += 1
                 continue
-            obj = NewsRaw(**item)
-            session.add(obj)
-            objects.append(obj)
+            rows_to_insert.append(item)
             if title_bucket:
                 existing_title_buckets.add(title_bucket)
-
-        await session.flush()
-        inserted = [_row_to_news_dict(obj) for obj in objects]
+        if news_engine.dialect.name == "sqlite":
+            if rows_to_insert:
+                await session.execute(insert(NewsRaw).prefix_with("OR IGNORE"), rows_to_insert)
+                await session.flush()
+                inserted_hashes = [str(item["content_hash"]) for item in rows_to_insert]
+                rows = (
+                    await session.execute(
+                        select(NewsRaw).where(NewsRaw.content_hash.in_(inserted_hashes)).order_by(NewsRaw.published_at.desc())
+                    )
+                ).scalars().all()
+                inserted = [_row_to_news_dict(row) for row in rows]
+                deduped_count = max(deduped_count, pulled_count - len(inserted))
+            else:
+                inserted = []
+        else:
+            for item in rows_to_insert:
+                obj = NewsRaw(**item)
+                session.add(obj)
+                objects.append(obj)
+            await session.flush()
+            inserted = [_row_to_news_dict(obj) for obj in objects]
 
     return {
         "inserted": inserted,
@@ -458,13 +540,50 @@ async def enqueue_llm_tasks(news_items: List[Dict[str, Any]], min_importance: in
 
 
 async def claim_llm_tasks(limit: int = 10) -> List[Dict[str, Any]]:
+    """Claim LLM tasks for processing, respecting retry backoff."""
     max_rows = max(1, min(int(limit or 10), 100))
     now = datetime.now(timezone.utc)
+    running_timeout_sec = max(120, int(os.getenv("NEWS_LLM_RUNNING_TIMEOUT_SEC") or 900))
+    stale_before = now - timedelta(seconds=running_timeout_sec)
     async with news_session_scope() as session:
+        # Reclaim tasks stuck in running state after worker crash/timeout.
+        stale_running = (
+            await session.execute(
+                select(NewsLLMTask).where(
+                    and_(
+                        NewsLLMTask.status == "running",
+                        NewsLLMTask.started_at.is_not(None),
+                        NewsLLMTask.started_at <= stale_before,
+                    )
+                )
+            )
+        ).scalars().all()
+        for row in stale_running:
+            attempt = int(row.attempt_count or 0)
+            row.updated_at = now
+            row.started_at = None
+            if attempt >= 6:
+                row.status = "failed"
+                row.finished_at = now
+                row.last_error = f"llm task stale timeout after {running_timeout_sec}s"
+            else:
+                row.status = "retry"
+                row.next_retry_at = now
+                row.last_error = f"reclaimed stale running task after {running_timeout_sec}s"
+
+        # Only claim tasks that are not in backoff period
         rows = (
             await session.execute(
                 select(NewsLLMTask)
-                .where(NewsLLMTask.status.in_(["pending", "retry"]))
+                .where(
+                    and_(
+                        NewsLLMTask.status.in_(["pending", "retry"]),
+                        or_(
+                            NewsLLMTask.next_retry_at.is_(None),
+                            NewsLLMTask.next_retry_at <= now,
+                        ),
+                    )
+                )
                 .order_by(NewsLLMTask.priority.desc(), NewsLLMTask.created_at.asc())
                 .limit(max_rows)
             )
@@ -474,6 +593,7 @@ async def claim_llm_tasks(limit: int = 10) -> List[Dict[str, Any]]:
             row.status = "running"
             row.attempt_count = int(row.attempt_count or 0) + 1
             row.started_at = now
+            row.finished_at = None
             row.updated_at = now
             raw_ids.append(int(row.raw_news_id))
         await session.flush()
@@ -496,20 +616,60 @@ async def claim_llm_tasks(limit: int = 10) -> List[Dict[str, Any]]:
         return tasks
 
 
-async def finish_llm_tasks(raw_news_ids: List[int], *, success: bool, error: Optional[str] = None) -> None:
+async def finish_llm_tasks(
+    raw_news_ids: List[int],
+    *,
+    success: bool,
+    error: Optional[str] = None,
+    error_type: str = "general",
+    is_rate_limited: bool = False,
+) -> None:
+    """Mark LLM tasks as complete, with intelligent retry backoff.
+
+    Args:
+        raw_news_ids: List of raw news IDs to mark complete
+        success: Whether processing succeeded
+        error: Error message if failed
+        error_type: Type of error ("general", "rate_limit", "timeout", etc.)
+        is_rate_limited: Whether the error was due to rate limiting (429)
+    """
     keys = [int(x) for x in raw_news_ids if x]
     if not keys:
         return
     now = datetime.now(timezone.utc)
+
     async with news_session_scope() as session:
         rows = (
             await session.execute(select(NewsLLMTask).where(NewsLLMTask.raw_news_id.in_(keys)))
         ).scalars().all()
         for row in rows:
-            row.status = "done" if success else ("failed" if int(row.attempt_count or 0) >= 2 else "retry")
-            row.last_error = None if success else str(error or "llm extraction failed")
+            if success:
+                row.status = "done"
+                row.last_error = None
+                row.finished_at = now
+            else:
+                attempt = int(row.attempt_count or 0)
+
+                # Rate limited - set next_retry_at with exponential backoff
+                if is_rate_limited or error_type == "rate_limit":
+                    backoff_seconds = min(300, 30 * (2 ** (attempt - 1)))  # Max 5 min backoff
+                    row.next_retry_at = now + timedelta(seconds=backoff_seconds)
+                    row.last_rate_limit_at = now
+                    row.status = "retry"
+                    row.last_error = f"Rate limited, retry after {backoff_seconds}s: {error or '429'}"
+                # Max attempts reached - mark as failed
+                elif attempt >= 3:
+                    row.status = "failed"
+                    row.last_error = str(error or "llm extraction failed")
+                    row.finished_at = now
+                # Other errors - retry with shorter backoff
+                else:
+                    backoff_seconds = min(60, 10 * (2 ** (attempt - 1)))  # Max 1 min backoff
+                    row.next_retry_at = now + timedelta(seconds=backoff_seconds)
+                    row.status = "retry"
+                    row.last_error = str(error or "llm extraction failed")
+
             row.updated_at = now
-            row.finished_at = now if success or row.status == "failed" else None
         await session.flush()
 
 
@@ -616,6 +776,47 @@ async def get_recent_events(symbol: Optional[str], since_minutes: int) -> List[D
     minutes = max(1, int(since_minutes or 240))
     since = datetime.now(timezone.utc) - timedelta(minutes=minutes)
     return await list_events(symbol=symbol, since=since, limit=2000)
+
+
+async def set_global_backoff(backoff_until: datetime) -> None:
+    """Set a global rate limit backoff that affects all LLM processing.
+
+    Args:
+        backoff_until: UTC datetime until which all LLM tasks should be paused
+    """
+    global _global_rate_limit_backoff
+    async with _global_rate_limit_lock:
+        _global_rate_limit_backoff = parse_any_datetime(backoff_until)
+
+
+async def get_global_backoff() -> Optional[datetime]:
+    """Get the current global rate limit backoff time.
+
+    Returns:
+        UTC datetime until which LLM processing should be paused, or None
+    """
+    global _global_rate_limit_backoff
+    async with _global_rate_limit_lock:
+        if _global_rate_limit_backoff is None:
+            return None
+        # Clear expired backoff
+        if _global_rate_limit_backoff <= datetime.now(timezone.utc):
+            _global_rate_limit_backoff = None
+            return None
+        return _global_rate_limit_backoff
+
+
+async def clear_global_backoff() -> None:
+    """Clear the global rate limit backoff."""
+    global _global_rate_limit_backoff
+    async with _global_rate_limit_lock:
+        _global_rate_limit_backoff = None
+
+
+async def is_in_global_backoff() -> bool:
+    """Check if we are currently in a global rate limit backoff period."""
+    backoff = await get_global_backoff()
+    return backoff is not None
 
 
 async def build_daily_report(day: date) -> Dict[str, Any]:

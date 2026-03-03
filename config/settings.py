@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     # LLM API
     ZHIPU_API_KEY: str = ""
     ZHIPU_BASE_URL: str = "https://open.bigmodel.cn/api/coding/paas/v4"
-    ZHIPU_MODEL: str = "glm-5"  # coding plan 使用 glm-5
+    ZHIPU_MODEL: str = "GLM-4.5-Air"
 
     # Storage
     DATABASE_URL: str = "sqlite+aiosqlite:///./data/crypto_trading.db"

@@ -33,6 +33,7 @@ if settings.ZHIPU_MODEL:
 from core.data import data_storage, second_level_backfill_manager
 from core.exchanges import exchange_manager
 from core.news.storage import db as news_db
+from core.ops.service import create_router as create_ops_router, initialize_ops_runtime, shutdown_ops_runtime
 from core.realtime import event_bus
 from core.strategies import (
     restore_strategies_from_db,
@@ -575,6 +576,8 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Load news config failed: {e}")
         app.state.news_cfg = {}
 
+    await initialize_ops_runtime(app, standalone=False)
+
     restored_mode = "paper"
     try:
         main_account = account_manager.get_account("main") or {}
@@ -671,6 +674,7 @@ async def lifespan(app: FastAPI):
             await news_task
 
     await strategy_health_monitor.stop()
+    await shutdown_ops_runtime(app, standalone=False)
     await strategy_manager.stop_all()
     await execution_engine.stop()
     await exchange_manager.close_all()
@@ -712,6 +716,7 @@ app.include_router(strategies.router, prefix="/api/strategies", tags=["strategie
 app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["notifications"])
 app.include_router(news.router, prefix="/api/news", tags=["news"])
+app.include_router(create_ops_router())
 
 
 @app.get("/", response_class=HTMLResponse)

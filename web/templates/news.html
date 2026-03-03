@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>新闻中心 - 加密交易系统</title>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-    <link rel="stylesheet" href="/static/css/style.css?v=43">
+    <link rel="stylesheet" href="/static/css/style.css?v=44">
 </head>
-<body>
+<body class="news-page">
     <div class="container">
         <header>
             <div>
@@ -23,8 +23,8 @@
         </header>
 
         <main>
-            <div class="grid">
-                <div class="card">
+            <div class="grid news-layout">
+                <div class="card news-card news-card-summary">
                     <h3>新闻统计（可切换颗粒度）</h3>
                     <div class="inline-actions" style="margin-bottom: 8px;">
                         <label style="font-size:12px; color:#9fb1c9;">统计颗粒度</label>
@@ -60,7 +60,7 @@
                     <div id="news-source-stats" class="list" style="margin-top: 8px; max-height: 180px;">来源统计加载中...</div>
                 </div>
 
-                <div class="card">
+                <div class="card news-card news-card-controls">
                     <h3>刷新与筛选</h3>
                     <div class="form-row">
                         <div class="form-group">
@@ -100,7 +100,30 @@
                     <pre id="news-action-output" class="output-box">等待操作...</pre>
                 </div>
 
-                <div class="card wide">
+                <div class="card news-card news-card-queue">
+                    <h3>LLM 队列监控</h3>
+                    <div id="news-llm-queue-metrics" class="metrics">
+                        <div class="metric">
+                            <span class="label">待处理</span>
+                            <span class="value total" id="news-llm-pending-count">0</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">处理中</span>
+                            <span class="value neutral" id="news-llm-running-count">0</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">已完成</span>
+                            <span class="value positive" id="news-llm-done-count">0</span>
+                        </div>
+                        <div class="metric">
+                            <span class="label">失败/重试</span>
+                            <span class="value negative" id="news-llm-retry-count">0</span>
+                        </div>
+                    </div>
+                    <div id="news-llm-queue-note" class="list" style="margin-top: 8px;">队列监控加载中...</div>
+                </div>
+
+                <div class="card news-card news-card-chart">
                     <h3>结构化事件统计分析（多时间颗粒度）</h3>
                     <div class="inline-actions" style="margin-bottom: 8px;">
                         <label style="font-size:12px; color:#9fb1c9;">颗粒度</label>
@@ -117,7 +140,7 @@
                     <div id="news-bucket-list" class="list" style="margin-top: 8px; max-height: 220px;">加载中...</div>
                 </div>
 
-                <div class="card wide">
+                <div class="card news-card news-card-raw">
                     <h3>未结构化新闻（原始消息）</h3>
                     <div class="inline-actions" style="margin-bottom: 8px;">
                         <span id="news-unstructured-count" style="font-size:12px; color:#9fb1c9;">0 条</span>
@@ -125,7 +148,7 @@
                     <div id="news-unstructured-list" class="list" style="max-height: 380px;">加载中...</div>
                 </div>
 
-                <div class="card wide">
+                <div class="card news-card news-card-structured">
                     <h3>已结构化事件（可用于策略）</h3>
                     <div class="inline-actions" style="margin-bottom: 8px;">
                         <span id="news-structured-count" style="font-size:12px; color:#9fb1c9;">0 条</span>
@@ -137,6 +160,6 @@
     </div>
 
     <div id="notification" class="notification"></div>
-    <script charset="utf-8" src="/static/js/news_tab.js?v=18"></script>
+    <script charset="utf-8" src="/static/js/news_tab.js?v=21"></script>
 </body>
 </html>

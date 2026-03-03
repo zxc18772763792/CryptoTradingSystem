@@ -4,7 +4,9 @@ param(
     [int]$Port = 8000,
     [bool]$OpenBrowser = $true,
     [int]$HealthWaitSec = 20,
-    [bool]$StartNewsWorker = $false
+    [bool]$StartNewsWorker = $false,
+    [bool]$StartNewsLlmWorker = $false,
+    [bool]$StartPmWorker = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,6 +34,22 @@ function Get-ListeningPid {
 function Get-WorkerPid {
     $workers = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
         $_.CommandLine -like "*core.news.service.worker*"
+    }
+    if (-not $workers) { return $null }
+    return [int]($workers | Select-Object -First 1).ProcessId
+}
+
+function Get-LlmWorkerPid {
+    $workers = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -like "*core.news.service.llm_worker*"
+    }
+    if (-not $workers) { return $null }
+    return [int]($workers | Select-Object -First 1).ProcessId
+}
+
+function Get-PmWorkerPid {
+    $workers = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -like "*prediction_markets.polymarket.worker*"
     }
     if (-not $workers) { return $null }
     return [int]($workers | Select-Object -First 1).ProcessId
@@ -92,6 +110,27 @@ function Resolve-PythonExecutable {
     throw "Cannot find Python executable. Please install Conda or create .venv."
 }
 
+function Import-DotEnvFile {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return }
+    foreach ($line in Get-Content $Path) {
+        $text = [string]$line
+        if (-not $text) { continue }
+        $trimmed = $text.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith("#")) { continue }
+        $eq = $trimmed.IndexOf("=")
+        if ($eq -lt 1) { continue }
+        $name = $trimmed.Substring(0, $eq).Trim()
+        $value = $trimmed.Substring($eq + 1).Trim()
+        if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        if ($name) {
+            Set-Item -Path ("Env:" + $name) -Value $value
+        }
+    }
+}
+
 $pidOnPort = Get-ListeningPid -PortNumber $Port
 if ($pidOnPort) {
     $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pidOnPort" -ErrorAction SilentlyContinue
@@ -111,6 +150,8 @@ if (Enable-CondaEnv -Name $EnvName) {
     Write-Host "Conda env '$EnvName' not found from common paths/PATH. Falling back to .venv or system python."
 }
 
+Import-DotEnvFile -Path (Join-Path $PSScriptRoot ".env")
+
 $pythonExe = Resolve-PythonExecutable
 Write-Host "Python executable: $pythonExe"
 
@@ -128,6 +169,22 @@ if (-not $shouldStartWorker) {
     }
 }
 
+$shouldStartLlmWorker = $StartNewsLlmWorker
+if (-not $shouldStartLlmWorker) {
+    $rawLlmToggle = [string]($env:START_NEWS_LLM_WORKER)
+    if ($rawLlmToggle) {
+        $shouldStartLlmWorker = $rawLlmToggle.Trim().ToLower() -in @("1", "true", "yes", "on")
+    }
+}
+
+$shouldStartPmWorker = $StartPmWorker
+if (-not $shouldStartPmWorker) {
+    $rawPmToggle = [string]($env:START_PM_WORKER)
+    if ($rawPmToggle) {
+        $shouldStartPmWorker = $rawPmToggle.Trim().ToLower() -in @("1", "true", "yes", "on")
+    }
+}
+
 if ($shouldStartWorker) {
     $workerPid = Get-WorkerPid
     if ($workerPid) {
@@ -139,6 +196,34 @@ if ($shouldStartWorker) {
             -WorkingDirectory $PSScriptRoot `
             -PassThru
         Write-Host "Started news worker PID=$($workerProc.Id)"
+    }
+}
+
+if ($shouldStartLlmWorker) {
+    $llmWorkerPid = Get-LlmWorkerPid
+    if ($llmWorkerPid) {
+        Write-Host "News LLM worker already running (PID=$llmWorkerPid)."
+    } else {
+        $llmProc = Start-Process `
+            -FilePath $pythonExe `
+            -ArgumentList @("-m", "core.news.service.llm_worker") `
+            -WorkingDirectory $PSScriptRoot `
+            -PassThru
+        Write-Host "Started news LLM worker PID=$($llmProc.Id)"
+    }
+}
+
+if ($shouldStartPmWorker) {
+    $pmWorkerPid = Get-PmWorkerPid
+    if ($pmWorkerPid) {
+        Write-Host "Polymarket worker already running (PID=$pmWorkerPid)."
+    } else {
+        $pmProc = Start-Process `
+            -FilePath $pythonExe `
+            -ArgumentList @("-m", "prediction_markets.polymarket.worker") `
+            -WorkingDirectory $PSScriptRoot `
+            -PassThru
+        Write-Host "Started Polymarket worker PID=$($pmProc.Id)"
     }
 }
 

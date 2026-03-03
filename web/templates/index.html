@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=43">
+    <link rel="stylesheet" href="/static/css/style.css?v=45">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
@@ -228,8 +228,8 @@
             </div>
 
             <div id="trading" class="tab-content">
-                <div class="grid">
-                    <div class="card">
+                <div class="grid news-layout">
+                    <div class="card news-card news-card-summary">
                         <h3>下单面板</h3>
                         <form id="order-form" class="form">
                             <div class="form-group">
@@ -1032,7 +1032,7 @@
                         <div id="news-source-stats" class="list" style="margin-top: 8px; max-height: 180px;">来源统计加载中...</div>
                     </div>
 
-                    <div class="card">
+                    <div class="card news-card news-card-controls">
                         <h3>刷新与筛选</h3>
                         <div class="form-row">
                             <div class="form-group">
@@ -1072,7 +1072,30 @@
                         <pre id="news-action-output" class="output-box">等待操作...</pre>
                     </div>
 
-                    <div class="card wide">
+                    <div class="card news-card news-card-queue">
+                        <h3>LLM 队列监控</h3>
+                        <div id="news-llm-queue-metrics" class="metrics">
+                            <div class="metric">
+                                <span class="label">待处理</span>
+                                <span class="value total" id="news-llm-pending-count">0</span>
+                            </div>
+                            <div class="metric">
+                                <span class="label">处理中</span>
+                                <span class="value neutral" id="news-llm-running-count">0</span>
+                            </div>
+                            <div class="metric">
+                                <span class="label">已完成</span>
+                                <span class="value positive" id="news-llm-done-count">0</span>
+                            </div>
+                            <div class="metric">
+                                <span class="label">失败/重试</span>
+                                <span class="value negative" id="news-llm-retry-count">0</span>
+                            </div>
+                        </div>
+                        <div id="news-llm-queue-note" class="list" style="margin-top: 8px;">队列监控加载中...</div>
+                    </div>
+
+                    <div class="card news-card news-card-chart">
                         <h3>结构化事件统计分析（多时间颗粒度）</h3>
                         <div class="inline-actions" style="margin-bottom: 8px;">
                             <label style="font-size:12px; color:#9fb1c9;">颗粒度</label>
@@ -1089,7 +1112,7 @@
                         <div id="news-bucket-list" class="list" style="margin-top: 8px; max-height: 220px;">加载中...</div>
                     </div>
 
-                    <div class="card wide">
+                    <div class="card news-card news-card-raw">
                         <h3>新闻流（未结构化）</h3>
                         <div class="inline-actions" style="margin-bottom: 8px;">
                             <span id="news-unstructured-count" style="font-size:12px; color:#9fb1c9;">0 条</span>
@@ -1097,7 +1120,7 @@
                         <div id="news-unstructured-list" class="list" style="max-height: 580px;">加载中...</div>
                     </div>
 
-                    <div class="card wide">
+                    <div class="card news-card news-card-structured">
                         <h3>已结构化事件</h3>
                         <div class="inline-actions" style="margin-bottom: 8px;">
                             <span id="news-structured-count" style="font-size:12px; color:#9fb1c9;">0 条</span>
@@ -1115,33 +1138,67 @@
                             <div class="form-group">
                                 <label>策略</label>
                                 <select id="backtest-strategy">
-                                    <optgroup label="趋势跟踪类">
-                                        <option value="MAStrategy">MA均线交叉 - 短期均线上穿/下穿长期均线</option>
-                                        <option value="EMAStrategy">EMA指数均线 - 对价格更敏感的均线交叉</option>
-                                        <option value="MACDStrategy">MACD趋势 - 利用MACD金叉死叉判断趋势</option>
-                                        <option value="MACDHistogramStrategy">MACD柱状图 - MACD柱体变化判断动能</option>
-                                        <option value="TrendFollowingStrategy">趋势跟踪 - 顺应价格趋势方向交易</option>
-                                        <option value="DonchianBreakoutStrategy">唐奇安通道突破 - 价格突破N日高低点</option>
-                                        <option value="ADXTrendStrategy">ADX趋势强度 - ADX>25时确认趋势</option>
+                                    <optgroup label="趋势类 (7)">
+                                        <option value="MAStrategy">MA双均线 - 金叉死叉顺势</option>
+                                        <option value="EMAStrategy">EMA均线 - 快慢线交叉</option>
+                                        <option value="MACDStrategy">MACD趋势 - 金叉死叉跟随</option>
+                                        <option value="MACDHistogramStrategy">MACD柱体 - 动量拐点</option>
+                                        <option value="ADXTrendStrategy">ADX趋势 - 趋势强度确认</option>
+                                        <option value="TrendFollowingStrategy">趋势跟踪 - 多均线跟随</option>
+                                        <option value="AroonStrategy">Aroon - 趋势方向识别</option>
                                     </optgroup>
-                                    <optgroup label="均值回归类">
-                                        <option value="BollingerBandsStrategy">布林带 - 价格触及上下轨回归</option>
-                                        <option value="BollingerSqueezeStrategy">布林带收窄 - 波动收窄后突破交易</option>
-                                        <option value="MeanReversionStrategy">均值回归 - 价格回归移动平均</option>
-                                        <option value="BollingerMeanReversionStrategy">布林均值回归 - 结合布林带做回归</option>
-                                        <option value="VWAPReversionStrategy">VWAP回归 - 价格回归成交量加权均价</option>
+                                    <optgroup label="震荡类 (7)">
+                                        <option value="RSIStrategy">RSI - 超买超卖反转</option>
+                                        <option value="RSIDivergenceStrategy">RSI背离 - 顶底背离信号</option>
+                                        <option value="StochasticStrategy">KDJ随机 - K/D交叉</option>
+                                        <option value="BollingerBandsStrategy">布林带 - 价格回归轨道</option>
+                                        <option value="WilliamsRStrategy">W%R - 威廉超买超卖</option>
+                                        <option value="CCIStrategy">CCI - 通道指数突破</option>
+                                        <option value="StochRSIStrategy">StochRSI - RSI随机震荡</option>
                                     </optgroup>
-                                    <optgroup label="动量振荡类">
-                                        <option value="RSIStrategy">RSI超买超卖 - RSI<30买入>70卖出</option>
-                                        <option value="RSIDivergenceStrategy">RSI背离 - 价格与RSI走势背离</option>
-                                        <option value="StochasticStrategy">KDJ随机指标 - K/D线交叉信号</option>
-                                        <option value="MomentumStrategy">动量策略 - 价格动量方向交易</option>
+                                    <optgroup label="动量类 (3)">
+                                        <option value="MomentumStrategy">动量 - 价格动量突破</option>
+                                        <option value="ROCStrategy">ROC - 变化率动量</option>
+                                        <option value="PriceAccelerationStrategy">加速度 - 价格加速度</option>
                                     </optgroup>
-                                    <optgroup label="情绪资金类">
-                                        <option value="MarketSentimentStrategy">宏观情绪 - 宏观新闻/政策影响</option>
-                                        <option value="SocialSentimentStrategy">社媒情绪 - Twitter/Reddit情绪分析</option>
-                                        <option value="FundFlowStrategy">资金流向 - 交易所资金进出</option>
-                                        <option value="WhaleActivityStrategy">巨鲸跟踪 - 大户链上转账监控</option>
+                                    <optgroup label="均值回归类 (5)">
+                                        <option value="MeanReversionStrategy">Z-Score回归 - 统计均值回归</option>
+                                        <option value="BollingerMeanReversionStrategy">布林回归 - 布林带均值回归</option>
+                                        <option value="VWAPReversionStrategy">VWAP回归 - 偏离VWAP回归</option>
+                                        <option value="VWAPStrategy">成交量加权 - VWAP价格回归</option>
+                                        <option value="MeanReversionHalfLifeStrategy">半衰期回归 - 基于回归速度</option>
+                                    </optgroup>
+                                    <optgroup label="突破类 (2)">
+                                        <option value="BollingerSqueezeStrategy">布林收窄 - 收窄后突破</option>
+                                        <option value="DonchianBreakoutStrategy">唐奇安通道 - 通道突破</option>
+                                    </optgroup>
+                                    <optgroup label="成交量类 (3)">
+                                        <option value="MFIStrategy">MFI - 资金流量指标</option>
+                                        <option value="OBVStrategy">OBV - 能量潮背离</option>
+                                        <option value="TradeIntensityStrategy">成交量异动 - 交易强度</option>
+                                    </optgroup>
+                                    <optgroup label="波动率类 (1)">
+                                        <option value="ParkinsonVolStrategy">Parkinson - 高低波动率回归</option>
+                                    </optgroup>
+                                    <optgroup label="风险类 (4)">
+                                        <option value="UlcerIndexStrategy">Ulcer指数 - 下行风险择时</option>
+                                        <option value="VaRBreakoutStrategy">VaR突破 - 异常波动突破</option>
+                                        <option value="MaxDrawdownStrategy">回撤恢复 - 回撤后反弹买入</option>
+                                        <option value="SortinoRatioStrategy">Sortino - 风险调整趋势</option>
+                                    </optgroup>
+                                    <optgroup label="统计套利类 (3)">
+                                        <option value="PairsTradingStrategy">配对交易 - 价差回归</option>
+                                        <option value="FamaFactorArbitrageStrategy">多因子 - 横截面多空</option>
+                                        <option value="HurstExponentStrategy">Hurst - 长记忆regime</option>
+                                    </optgroup>
+                                    <optgroup label="微观结构类 (1)">
+                                        <option value="OrderFlowImbalanceStrategy">订单流失衡 - 买卖压力</option>
+                                    </optgroup>
+                                    <optgroup label="宏观类 (4)">
+                                        <option value="MarketSentimentStrategy">恐慌贪婪 - 市场情绪指数</option>
+                                        <option value="SocialSentimentStrategy">社媒情绪 - Twitter分析</option>
+                                        <option value="FundFlowStrategy">资金流 - 交易所资金进出</option>
+                                        <option value="WhaleActivityStrategy">巨鲸跟踪 - 大户链上监控</option>
                                     </optgroup>
                                 </select>
                             </div>
@@ -1262,8 +1319,8 @@
 
     <div id="notification" class="notification"></div>
 
-    <script charset="utf-8" src="/static/js/app.js?v=91"></script>
-    <script charset="utf-8" src="/static/js/news_tab.js?v=18"></script>
+    <script charset="utf-8" src="/static/js/app.js?v=92"></script>
+    <script charset="utf-8" src="/static/js/news_tab.js?v=21"></script>
     <script charset="utf-8" src="/static/js/dashboard_unstructured_news.js?v=12"></script>
 </body>
 </html>

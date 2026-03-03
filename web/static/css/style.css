@@ -1937,10 +1937,167 @@ canvas {
     row-gap: 8px;
 }
 
+body.news-page .news-layout,
+#news .news-layout {
+    grid-template-columns: minmax(300px, 1.05fr) minmax(280px, 0.95fr) minmax(300px, 1.05fr);
+    align-items: start;
+}
+
+body.news-page .news-card,
+#news .news-card {
+    min-width: 0;
+    overflow: hidden;
+}
+
+body.news-page .news-card-summary,
+#news .news-card-summary {
+    grid-column: 1;
+    min-height: 540px;
+}
+
+body.news-page .news-card-controls,
+#news .news-card-controls {
+    grid-column: 2;
+    min-height: 540px;
+}
+
+body.news-page .news-card-queue,
+#news .news-card-queue {
+    grid-column: 3;
+    min-height: 540px;
+}
+
+body.news-page .news-card-chart,
+#news .news-card-chart {
+    grid-column: 1 / span 2;
+    min-height: 620px;
+}
+
+body.news-page .news-card-raw,
+#news .news-card-raw {
+    grid-column: 3;
+    min-height: 620px;
+}
+
+body.news-page .news-card-structured,
+#news .news-card-structured {
+    grid-column: 1 / -1;
+    min-height: 560px;
+}
+
+body.news-page .news-card-controls .form-row,
+#news .news-card-controls .form-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+}
+
+body.news-page .news-card-controls .inline-actions,
+#news .news-card-controls .inline-actions {
+    flex-wrap: wrap;
+}
+
+body.news-page .news-card-controls .output-box,
+#news .news-card-controls .output-box {
+    min-height: 92px;
+    max-height: 140px;
+}
+
+body.news-page .news-card-summary #news-summary-note,
+#news .news-card-summary #news-summary-note {
+    max-height: 150px !important;
+    overflow-y: auto !important;
+}
+
+body.news-page .news-card-summary #news-source-stats,
+#news .news-card-summary #news-source-stats {
+    max-height: 320px !important;
+    overflow-y: auto !important;
+}
+
+body.news-page .news-card-queue #news-llm-queue-note,
+#news .news-card-queue #news-llm-queue-note {
+    max-height: 260px;
+    overflow-y: auto;
+}
+
+body.news-page .news-card-chart #news-bucket-chart,
+#news .news-card-chart #news-bucket-chart {
+    height: 360px !important;
+}
+
+body.news-page .news-card-chart #news-bucket-list,
+#news .news-card-chart #news-bucket-list {
+    max-height: 210px !important;
+}
+
+body.news-page .news-card-raw #news-unstructured-list,
+#news .news-card-raw #news-unstructured-list {
+    max-height: 520px !important;
+}
+
+body.news-page .news-card-structured #news-structured-list,
+#news .news-card-structured #news-structured-list {
+    max-height: 460px !important;
+}
+
+body.news-page .news-card-summary .list-item,
+body.news-page .news-card-chart .list-item,
+body.news-page .news-card-raw .list-item,
+body.news-page .news-card-structured .list-item,
+#news .news-card-summary .list-item,
+#news .news-card-chart .list-item,
+#news .news-card-raw .list-item,
+#news .news-card-structured .list-item {
+    align-items: flex-start;
+}
+
+body.news-page .news-card-raw .news-row,
+body.news-page .news-card-structured .news-row,
+#news .news-card-raw .news-row,
+#news .news-card-structured .news-row {
+    align-items: flex-start;
+}
+
+body.news-page .news-card-raw .news-main,
+body.news-page .news-card-structured .news-main,
+#news .news-card-raw .news-main,
+#news .news-card-structured .news-main {
+    min-width: 0;
+}
+
+body.news-page .news-card-raw .news-title,
+body.news-page .news-card-structured .news-title,
+#news .news-card-raw .news-title,
+#news .news-card-structured .news-title {
+    line-height: 1.45;
+    word-break: break-word;
+}
+
 @media (max-width: 768px) {
     #news-summary-note .list-item > span:last-child,
     #news-source-stats .list-item > span:last-child,
     #news-bucket-list .list-item > span:last-child {
         text-align: left;
+    }
+
+    body.news-page .news-layout,
+    #news .news-layout {
+        grid-template-columns: 1fr;
+    }
+
+    body.news-page .news-card-summary,
+    body.news-page .news-card-controls,
+    body.news-page .news-card-queue,
+    body.news-page .news-card-chart,
+    body.news-page .news-card-raw,
+    body.news-page .news-card-structured,
+    #news .news-card-summary,
+    #news .news-card-controls,
+    #news .news-card-queue,
+    #news .news-card-chart,
+    #news .news-card-raw,
+    #news .news-card-structured {
+        grid-column: 1;
+        min-height: 0;
     }
 }

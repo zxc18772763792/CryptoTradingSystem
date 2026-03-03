@@ -72,6 +72,26 @@ _BACKTEST_STRATEGY_CATALOG: List[Dict[str, Any]] = [
     {"name": "SocialSentimentStrategy", "description": "社媒情绪策略", "backtest_supported": True},
     {"name": "FundFlowStrategy", "description": "资金流策略", "backtest_supported": True},
     {"name": "WhaleActivityStrategy", "description": "巨鲸活动策略", "backtest_supported": True},
+    # ===== 新增因子策略 =====
+    {"name": "AroonStrategy", "description": "Aroon趋势策略", "backtest_supported": True},
+    {"name": "ROCStrategy", "description": "变化率动量策略", "backtest_supported": True},
+    {"name": "PriceAccelerationStrategy", "description": "价格加速度策略", "backtest_supported": True},
+    {"name": "WilliamsRStrategy", "description": "威廉%R策略", "backtest_supported": True},
+    {"name": "CCIStrategy", "description": "CCI通道策略", "backtest_supported": True},
+    {"name": "StochRSIStrategy", "description": "随机RSI策略", "backtest_supported": True},
+    {"name": "VWAPStrategy", "description": "VWAP均值回归策略", "backtest_supported": True},
+    {"name": "MeanReversionHalfLifeStrategy", "description": "半衰期均值回归策略", "backtest_supported": True},
+    {"name": "MFIStrategy", "description": "资金流量指标策略", "backtest_supported": True},
+    {"name": "OBVStrategy", "description": "能量潮背离策略", "backtest_supported": True},
+    {"name": "TradeIntensityStrategy", "description": "交易强度策略", "backtest_supported": True},
+    {"name": "ParkinsonVolStrategy", "description": "Parkinson波动率策略", "backtest_supported": True},
+    {"name": "UlcerIndexStrategy", "description": "Ulcer风险择时策略", "backtest_supported": True},
+    {"name": "VaRBreakoutStrategy", "description": "VaR异常突破策略", "backtest_supported": True},
+    {"name": "MaxDrawdownStrategy", "description": "回撤恢复策略", "backtest_supported": True},
+    {"name": "SortinoRatioStrategy", "description": "Sortino风险调整策略", "backtest_supported": True},
+    {"name": "HurstExponentStrategy", "description": "Hurst长记忆策略", "backtest_supported": True},
+    {"name": "OrderFlowImbalanceStrategy", "description": "订单流失衡策略", "backtest_supported": True},
+    # ===== 不支持回测的套利策略 =====
     {
         "name": "CEXArbitrageStrategy",
         "description": "跨交易所套利策略",
@@ -203,6 +223,94 @@ _BACKTEST_OPTIMIZATION_GRIDS: Dict[str, Dict[str, List[Any]]] = {
         "min_whale_size": [100000, 150000, 300000],
         "accumulation_threshold": [3, 4, 5],
         "distribution_threshold": [3, 4, 5],
+    },
+    # ===== 新增因子策略优化网格 =====
+    "AroonStrategy": {
+        "period": [14, 25, 35],
+        "buy_threshold": [30, 50, 70],
+        "sell_threshold": [-70, -50, -30],
+    },
+    "ROCStrategy": {
+        "period": [10, 14, 21],
+        "buy_threshold": [3.0, 5.0, 8.0],
+        "sell_threshold": [-8.0, -5.0, -3.0],
+    },
+    "PriceAccelerationStrategy": {
+        "fast": [3, 5, 8],
+        "slow": [10, 15, 20],
+        "accel_threshold": [0.05, 0.1, 0.15],
+    },
+    "WilliamsRStrategy": {
+        "period": [10, 14, 21],
+        "oversold": [-90, -80, -70],
+        "overbought": [-30, -20, -10],
+    },
+    "CCIStrategy": {
+        "period": [14, 20, 30],
+        "oversold": [-150, -100, -80],
+        "overbought": [80, 100, 150],
+    },
+    "StochRSIStrategy": {
+        "rsi_period": [10, 14, 21],
+        "stoch_period": [10, 14, 21],
+        "oversold": [15, 20, 25],
+        "overbought": [75, 80, 85],
+    },
+    "VWAPStrategy": {
+        "period": [14, 20, 30],
+        "buy_threshold": [-0.03, -0.02, -0.01],
+        "sell_threshold": [0.01, 0.02, 0.03],
+    },
+    "MeanReversionHalfLifeStrategy": {
+        "lookback": [30, 60, 90],
+        "zscore_entry": [1.5, 2.0, 2.5],
+        "zscore_exit": [0.3, 0.5, 0.8],
+    },
+    "MFIStrategy": {
+        "period": [10, 14, 21],
+        "oversold": [15, 20, 25],
+        "overbought": [75, 80, 85],
+    },
+    "OBVStrategy": {
+        "smooth": [10, 20, 30],
+        "divergence_threshold": [1.0, 1.5, 2.0],
+    },
+    "TradeIntensityStrategy": {
+        "fast": [3, 5, 8],
+        "slow": [15, 20, 30],
+        "intensity_threshold": [1.2, 1.5, 2.0],
+    },
+    "ParkinsonVolStrategy": {
+        "period": [14, 20, 30],
+        "vol_percentile_low": [15, 20, 25],
+        "vol_percentile_high": [75, 80, 85],
+    },
+    "UlcerIndexStrategy": {
+        "period": [10, 14, 21],
+        "high_risk_threshold": [8, 10, 12],
+        "low_risk_threshold": [2, 3, 5],
+    },
+    "VaRBreakoutStrategy": {
+        "var_period": [15, 20, 30],
+        "confidence": [0.90, 0.95, 0.99],
+        "multiplier": [1.2, 1.5, 2.0],
+    },
+    "MaxDrawdownStrategy": {
+        "lookback": [20, 30, 45],
+        "dd_threshold": [-0.15, -0.10, -0.08],
+        "recovery_threshold": [0.2, 0.3, 0.4],
+    },
+    "SortinoRatioStrategy": {
+        "period": [20, 30, 45],
+        "sortino_threshold": [0.5, 1.0, 1.5],
+    },
+    "HurstExponentStrategy": {
+        "hurst_period": [50, 100, 150],
+        "zscore_threshold": [1.0, 1.5, 2.0],
+    },
+    "OrderFlowImbalanceStrategy": {
+        "period": [5, 10, 15],
+        "imbalance_threshold": [0.8, 1.0, 1.5],
     },
 }
 _BACKTEST_OPT_OBJECTIVES = {"total_return", "sharpe_ratio", "win_rate"}
@@ -661,6 +769,303 @@ def _build_positions(strategy: str, df: pd.DataFrame, params: Optional[Dict[str,
             if not in_position and bool(en):
                 in_position = True
             elif in_position and bool(ex):
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    # ===== 新增因子策略回测逻辑 =====
+    elif strategy == "AroonStrategy":
+        period = int(params.get("period", 25))
+        high = df["high"]
+        low = df["low"]
+        aroon_up = high.rolling(period + 1).apply(lambda x: (period - np.argmax(x)) / period * 100, raw=True)
+        aroon_down = low.rolling(period + 1).apply(lambda x: (period - np.argmin(x)) / period * 100, raw=True)
+        aroon = aroon_up - aroon_down
+        buy_th = float(params.get("buy_threshold", 50))
+        sell_th = float(params.get("sell_threshold", -50))
+        in_position = False
+        values = []
+        for a in aroon.fillna(0):
+            if not in_position and a >= buy_th:
+                in_position = True
+            elif in_position and a <= sell_th:
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "ROCStrategy":
+        period = int(params.get("period", 14))
+        buy_th = float(params.get("buy_threshold", 5.0))
+        sell_th = float(params.get("sell_threshold", -5.0))
+        roc = (close / close.shift(period) - 1) * 100
+        in_position = False
+        values = []
+        for r in roc.fillna(0):
+            if not in_position and r >= buy_th:
+                in_position = True
+            elif in_position and r <= sell_th:
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "PriceAccelerationStrategy":
+        fast = int(params.get("fast", 5))
+        slow = int(params.get("slow", 15))
+        th = float(params.get("accel_threshold", 0.1))
+        fast_mom = close.pct_change(fast)
+        slow_mom = close.pct_change(slow)
+        accel = (fast_mom - slow_mom) / slow_mom.abs().replace(0, np.nan)
+        in_position = False
+        values = []
+        for a in accel.fillna(0):
+            if not in_position and a >= th:
+                in_position = True
+            elif in_position and a <= -th:
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "MFIStrategy":
+        period = int(params.get("period", 14))
+        oversold = float(params.get("oversold", 20))
+        overbought = float(params.get("overbought", 80))
+        high = df["high"]
+        low = df["low"]
+        vol = df["volume"]
+        tp = (high + low + close) / 3
+        mf = tp * vol
+        pos_mf = mf.where(tp > tp.shift(1), 0)
+        neg_mf = mf.where(tp < tp.shift(1), 0)
+        pos_sum = pos_mf.rolling(period).sum()
+        neg_sum = neg_mf.rolling(period).sum()
+        mfi = 100 - (100 / (1 + pos_sum / neg_sum.replace(0, np.nan)))
+        in_position = False
+        values = []
+        for m in mfi.fillna(50):
+            if not in_position and m <= oversold:
+                in_position = True
+            elif in_position and m >= overbought:
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "OBVStrategy":
+        smooth = int(params.get("smooth", 20))
+        div_th = float(params.get("divergence_threshold", 1.5))
+        vol = df["volume"]
+        direction = np.sign(close.diff())
+        obv = (direction * vol).cumsum()
+        obv_z = (obv - obv.rolling(smooth).mean()) / obv.rolling(smooth).std().replace(0, np.nan)
+        in_position = False
+        values = []
+        price_falling = close < close.shift(5)
+        price_rising = close > close.shift(5)
+        for i, (oz, pf, pr) in enumerate(zip(obv_z.fillna(0), price_falling.fillna(False), price_rising.fillna(False))):
+            if not in_position and pf and oz >= div_th:
+                in_position = True
+            elif in_position and pr and oz <= -div_th:
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "VWAPStrategy":
+        period = int(params.get("period", 20))
+        buy_th = float(params.get("buy_threshold", -0.02))
+        sell_th = float(params.get("sell_threshold", 0.02))
+        high = df["high"]
+        low = df["low"]
+        vol = df["volume"]
+        tp = (high + low + close) / 3
+        vwap = (tp * vol).rolling(period).sum() / vol.rolling(period).sum().replace(0, np.nan)
+        dev = (close - vwap) / vwap
+        in_position = False
+        values = []
+        for d in dev.fillna(0):
+            if not in_position and d <= buy_th:
+                in_position = True
+            elif in_position and d >= sell_th:
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "TradeIntensityStrategy":
+        fast = int(params.get("fast", 5))
+        slow = int(params.get("slow", 20))
+        th = float(params.get("intensity_threshold", 1.5)) - 1
+        vol = df["volume"]
+        fast_vol = vol.rolling(fast).mean()
+        slow_vol = vol.rolling(slow).mean()
+        intensity = fast_vol / slow_vol.replace(0, np.nan) - 1
+        price_chg = close.pct_change(fast)
+        in_position = False
+        values = []
+        for inten, pchg in zip(intensity.fillna(0), price_chg.fillna(0)):
+            if not in_position and inten >= th and pchg > 0:
+                in_position = True
+            elif in_position and (inten >= th and pchg < 0):
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "ParkinsonVolStrategy":
+        period = int(params.get("period", 20))
+        vol_low = float(params.get("vol_percentile_low", 20))
+        vol_high = float(params.get("vol_percentile_high", 80))
+        high = df["high"]
+        low = df["low"]
+        hl_log = np.log(high / low.replace(0, np.nan))
+        variance = (hl_log ** 2) / (4 * np.log(2))
+        park_vol = np.sqrt(variance.rolling(period).mean())
+        vol_pct = park_vol.rolling(period * 2).rank(pct=True) * 100
+        in_position = False
+        values = []
+        for vp in vol_pct.fillna(50):
+            if not in_position and vp <= vol_low:
+                in_position = True
+            elif in_position and vp >= vol_high:
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "UlcerIndexStrategy":
+        period = int(params.get("period", 14))
+        high_th = float(params.get("high_risk_threshold", 10))
+        low_th = float(params.get("low_risk_threshold", 3))
+        rolling_max = close.rolling(period).max()
+        drawdown_pct = ((close - rolling_max) / rolling_max.replace(0, np.nan)) * 100
+        ulcer = np.sqrt((drawdown_pct ** 2).rolling(period).mean())
+        in_position = False
+        values = []
+        for u in ulcer.fillna(0):
+            if not in_position and u <= low_th:
+                in_position = True
+            elif in_position and u >= high_th:
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "VaRBreakoutStrategy":
+        var_period = int(params.get("var_period", 20))
+        conf = float(params.get("confidence", 0.95))
+        mult = float(params.get("multiplier", 1.5))
+        returns = close.pct_change()
+        def calc_var(s):
+            r = s.dropna()
+            if len(r) < var_period // 2:
+                return np.nan
+            return np.percentile(r, (1 - conf) * 100)
+        var = returns.rolling(var_period).apply(calc_var, raw=False)
+        bar_ret = returns.fillna(0)
+        in_position = False
+        values = []
+        for r, v in zip(bar_ret, var.fillna(0)):
+            if not in_position and v != 0 and r < v * mult:
+                in_position = True
+            elif in_position and v != 0 and r > -v * mult:
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "MaxDrawdownStrategy":
+        lookback = int(params.get("lookback", 30))
+        dd_th = float(params.get("dd_threshold", -0.10))
+        recovery_th = float(params.get("recovery_threshold", 0.3))
+        rolling_max = close.rolling(lookback).max()
+        rolling_min = close.rolling(lookback).min()
+        drawdown = (close - rolling_max) / rolling_max.replace(0, np.nan)
+        recovery = (close - rolling_min) / (rolling_max - rolling_min).replace(0, np.nan)
+        prev_dd = drawdown.shift(1)
+        in_position = False
+        values = []
+        for dd, pd, rec, price in zip(drawdown.fillna(0), prev_dd.fillna(0), recovery.fillna(0), close):
+            if not in_position and pd <= dd_th and rec > recovery_th and price > close.shift(1).fillna(price):
+                in_position = True
+            elif in_position and rec >= 0.8:
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "SortinoRatioStrategy":
+        period = int(params.get("period", 30))
+        th = float(params.get("sortino_threshold", 1.0))
+        returns = close.pct_change()
+        def calc_sortino(s):
+            r = s.dropna()
+            if len(r) < period // 2:
+                return np.nan
+            mean_ret = r.mean()
+            downside = r[r < 0]
+            if len(downside) < 2:
+                return np.nan
+            downside_std = np.sqrt((downside ** 2).mean())
+            return mean_ret / downside_std if downside_std > 0 else np.nan
+        sortino = returns.rolling(period).apply(calc_sortino, raw=False)
+        in_position = False
+        values = []
+        for s in sortino.fillna(0):
+            if not in_position and s >= th:
+                in_position = True
+            elif in_position and s <= -th:
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "HurstExponentStrategy":
+        hurst_period = int(params.get("hurst_period", 100))
+        zscore_period = int(params.get("zscore_period", 20))
+        z_th = float(params.get("zscore_threshold", 1.5))
+        returns = close.pct_change()
+        # Simplified Hurst proxy using variance ratio
+        def calc_vr(s):
+            r = s.dropna()
+            if len(r) < 20:
+                return np.nan
+            var_1 = np.var(r)
+            lag_ret = r[::5]
+            if len(lag_ret) < 5:
+                return np.nan
+            var_lag = np.var(lag_ret) * 5
+            return var_lag / var_1 if var_1 > 0 else np.nan
+        vr = returns.rolling(hurst_period).apply(calc_vr, raw=False)
+        mean = close.rolling(zscore_period).mean()
+        std = close.rolling(zscore_period).std().replace(0, np.nan)
+        zscore = (close - mean) / std
+        in_position = False
+        values = []
+        for v, z in zip(vr.fillna(1), zscore.fillna(0)):
+            # VR > 1.1 = trending, use momentum
+            if v > 1.1:
+                if not in_position and z >= z_th:
+                    in_position = True
+                elif in_position and z <= -z_th:
+                    in_position = False
+            # VR < 0.9 = mean reverting
+            elif v < 0.9:
+                if not in_position and z <= -z_th:
+                    in_position = True
+                elif in_position and z >= z_th:
+                    in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "MeanReversionHalfLifeStrategy":
+        lookback = int(params.get("lookback", 60))
+        z_entry = float(params.get("zscore_entry", 2.0))
+        mean = close.rolling(lookback).mean()
+        std = close.rolling(lookback).std().replace(0, np.nan)
+        zscore = (close - mean) / std
+        in_position = False
+        values = []
+        for z in zscore.fillna(0):
+            if not in_position and z <= -z_entry:
+                in_position = True
+            elif in_position and z >= z_entry:
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "OrderFlowImbalanceStrategy":
+        period = int(params.get("period", 10))
+        imbal_th = float(params.get("imbalance_threshold", 1.0))
+        high = df["high"]
+        low = df["low"]
+        vol = df["volume"]
+        mid = (high + low) / 2
+        rng = (high - low).replace(0, np.nan)
+        imbalance = ((close - mid) / rng * vol).fillna(0)
+        cum_imbal = imbalance.rolling(period).sum()
+        ofi_z = (cum_imbal - cum_imbal.rolling(period).mean()) / cum_imbal.rolling(period).std().replace(0, np.nan)
+        in_position = False
+        values = []
+        for oz in ofi_z.fillna(0):
+            if not in_position and oz >= imbal_th:
+                in_position = True
+            elif in_position and oz <= -imbal_th:
                 in_position = False
             values.append(1.0 if in_position else 0.0)
         position = pd.Series(values, index=df.index)

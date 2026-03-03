@@ -49,6 +49,38 @@ from strategies.macro import (
     WhaleActivityStrategy,
 )
 
+# Factor-based strategies
+try:
+    from strategies.factor_based import (
+        # Momentum and Trend
+        ROCStrategy,
+        PriceAccelerationStrategy,
+        AroonStrategy,
+        # Volatility
+        ParkinsonVolStrategy,
+        UlcerIndexStrategy,
+        # Liquidity and Volume
+        MFIStrategy,
+        VWAPStrategy,
+        OBVStrategy,
+        # Microstructure
+        OrderFlowImbalanceStrategy,
+        TradeIntensityStrategy,
+        # Statistical Arbitrage
+        MeanReversionHalfLifeStrategy,
+        HurstExponentStrategy,
+        # Risk-Based
+        VaRBreakoutStrategy,
+        MaxDrawdownStrategy,
+        SortinoRatioStrategy,
+        # Technical Analysis
+        WilliamsRStrategy,
+        CCIStrategy,
+        StochRSIStrategy,
+    )
+except ImportError:
+    pass
+
 ALL_STRATEGIES = [
     "MAStrategy",
     "EMAStrategy",
@@ -77,6 +109,25 @@ ALL_STRATEGIES = [
     "SocialSentimentStrategy",
     "FundFlowStrategy",
     "WhaleActivityStrategy",
+    # Factor-based strategies
+    "ROCStrategy",
+    "PriceAccelerationStrategy",
+    "AroonStrategy",
+    "ParkinsonVolStrategy",
+    "UlcerIndexStrategy",
+    "MFIStrategy",
+    "VWAPStrategy",
+    "OBVStrategy",
+    "OrderFlowImbalanceStrategy",
+    "TradeIntensityStrategy",
+    "MeanReversionHalfLifeStrategy",
+    "HurstExponentStrategy",
+    "VaRBreakoutStrategy",
+    "MaxDrawdownStrategy",
+    "SortinoRatioStrategy",
+    "WilliamsRStrategy",
+    "CCIStrategy",
+    "StochRSIStrategy",
 ]
 
 # Optional strategies may be unavailable if dependency is missing.
@@ -118,6 +169,25 @@ __all__ = [
     "SocialSentimentStrategy",
     "FundFlowStrategy",
     "WhaleActivityStrategy",
+    # Factor-based strategies
+    "ROCStrategy",
+    "PriceAccelerationStrategy",
+    "AroonStrategy",
+    "ParkinsonVolStrategy",
+    "UlcerIndexStrategy",
+    "MFIStrategy",
+    "VWAPStrategy",
+    "OBVStrategy",
+    "OrderFlowImbalanceStrategy",
+    "TradeIntensityStrategy",
+    "MeanReversionHalfLifeStrategy",
+    "HurstExponentStrategy",
+    "VaRBreakoutStrategy",
+    "MaxDrawdownStrategy",
+    "SortinoRatioStrategy",
+    "WilliamsRStrategy",
+    "CCIStrategy",
+    "StochRSIStrategy",
     "ALL_STRATEGIES",
 ]
 

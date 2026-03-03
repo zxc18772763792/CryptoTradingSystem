@@ -15,8 +15,8 @@ from core.news.eventizer.rules import SymbolMapper, extract_events_rules
 from core.news.storage.models import EVENT_TYPES, EventSchema
 
 
-DEFAULT_ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
-DEFAULT_ZHIPU_MODEL = "glm-4.7-flashx"
+DEFAULT_ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
+DEFAULT_ZHIPU_MODEL = "GLM-4.5-Air"
 _SUMMARY_CACHE: Dict[str, Dict[str, Any]] = {}
 _SUMMARY_CACHE_MAX = 4000
 _POS_SENTIMENT_HINTS = {

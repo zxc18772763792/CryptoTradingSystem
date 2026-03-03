@@ -1,0 +1,70 @@
+# Factor-based Strategy Configuration
+# Example configuration for using extended factors and strategies
+
+# ===========================================
+# Time Series Factor Configuration
+# ===========================================
+# Use in MultiFactorHFStrategy or for signal generation
+
+timeframe: "5m"
+
+factors:
+  # Momentum Factors
+  - name: "roc"
+    params: { period: 14 }
+    weight: 0.15
+    transform: "zscore"
+
+  - name: "price_accel"
+    params: { fast: 5, slow: 15 }
+    weight: 0.10
+    transform: "zscore"
+
+  - name: "aroon"
+    params: { period: 25 }
+    weight: 0.08
+    transform: "none"
+
+  # Volatility Factors
+  - name: "parkinson_vol"
+    params: { period: 20 }
+    weight: -0.10  # Negative: low vol = bullish
+    transform: "zscore"
+
+  - name: "ulcer_index"
+    params: { period: 14 }
+    weight: -0.08  # Negative: low risk = bullish
+    transform: "zscore"
+
+  # Liquidity Factors
+  - name: "mfi"
+    params: { period: 14 }
+    weight: 0.12
+    transform: "none"
+
+  - name: "vwap"
+    params: { period: 20 }
+    weight: -0.10  # Contrarian: buy when below VWAP
+    transform: "zscore"
+
+  - name: "obv"
+    params: { smooth: 20 }
+    weight: 0.10
+    transform: "zscore"
+
+  # Risk Factors
+  - name: "sortino"
+    params: { period: 30 }
+    weight: 0.10
+    transform: "zscore"
+
+  # Technical Factors
+  - name: "williams_r"
+    params: { period: 14 }
+    weight: 0.07
+    transform: "none"
+
+# Signal generation thresholds
+signal_threshold: 0.5
+risk_gate: true
+max_position_pct: 0.05

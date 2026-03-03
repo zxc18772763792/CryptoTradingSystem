@@ -109,9 +109,12 @@ class NewsLLMTask(NewsBase):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    last_rate_limit_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     __table_args__ = (
         Index("ix_news_llm_tasks_status_priority", "status", "priority"),
+        Index("ix_news_llm_tasks_next_retry", "next_retry_at"),
     )
 
 

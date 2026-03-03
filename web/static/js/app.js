@@ -66,31 +66,62 @@ tickformatstops:[
 };
 }
 const STRATEGY_META={
-MAStrategy:{cat:'趋势',desc:'双均线金叉死叉顺势'},
-EMAStrategy:{cat:'趋势',desc:'EMA 快慢线更灵敏'},
-MACDStrategy:{cat:'趋势',desc:'MACD 线与信号线'},
-MACDHistogramStrategy:{cat:'趋势',desc:'MACD 柱体拐点'},
-ADXTrendStrategy:{cat:'趋势',desc:'ADX + DI 强趋势过滤'},
-DonchianBreakoutStrategy:{cat:'突破',desc:'通道突破入场，回落离场'},
-BollingerBandsStrategy:{cat:'震荡',desc:'布林带反转交易'},
-BollingerSqueezeStrategy:{cat:'突破',desc:'布林收窄后突破'},
-RSIStrategy:{cat:'震荡',desc:'RSI 超买超卖反转'},
-RSIDivergenceStrategy:{cat:'反转',desc:'价格与 RSI 背离'},
-StochasticStrategy:{cat:'震荡',desc:'KDJ/Stochastic 交叉'},
-VWAPReversionStrategy:{cat:'均值回归',desc:'偏离 VWAP 后回归'},
-MeanReversionStrategy:{cat:'均值回归',desc:'Z-score 回归'},
-BollingerMeanReversionStrategy:{cat:'均值回归',desc:'布林偏离回归'},
-MomentumStrategy:{cat:'动量',desc:'动量突破跟随'},
-TrendFollowingStrategy:{cat:'趋势',desc:'趋势确认跟随'},
-PairsTradingStrategy:{cat:'统计套利',desc:'价差回归（需配对数据）'},
-CEXArbitrageStrategy:{cat:'套利',desc:'中心化交易所价差套利'},
+// ===== 趋势类 =====
+MAStrategy:{cat:'趋势',desc:'双均线金叉死叉'},
+EMAStrategy:{cat:'趋势',desc:'EMA快慢线交叉'},
+MACDStrategy:{cat:'趋势',desc:'MACD趋势跟随'},
+MACDHistogramStrategy:{cat:'趋势',desc:'MACD柱体动量'},
+ADXTrendStrategy:{cat:'趋势',desc:'ADX趋势强度确认'},
+TrendFollowingStrategy:{cat:'趋势',desc:'多均线趋势跟踪'},
+AroonStrategy:{cat:'趋势',desc:'Aroon趋势识别'},
+// ===== 震荡类 =====
+RSIStrategy:{cat:'震荡',desc:'RSI超买超卖'},
+RSIDivergenceStrategy:{cat:'震荡',desc:'RSI顶底背离'},
+StochasticStrategy:{cat:'震荡',desc:'KDJ随机震荡'},
+BollingerBandsStrategy:{cat:'震荡',desc:'布林带回归'},
+WilliamsRStrategy:{cat:'震荡',desc:'威廉超买超卖'},
+CCIStrategy:{cat:'震荡',desc:'CCI通道指数'},
+StochRSIStrategy:{cat:'震荡',desc:'RSI随机震荡'},
+// ===== 动量类 =====
+MomentumStrategy:{cat:'动量',desc:'价格动量突破'},
+ROCStrategy:{cat:'动量',desc:'变化率动量'},
+PriceAccelerationStrategy:{cat:'动量',desc:'价格加速度'},
+// ===== 均值回归类 =====
+MeanReversionStrategy:{cat:'均值回归',desc:'Z-Score回归'},
+BollingerMeanReversionStrategy:{cat:'均值回归',desc:'布林带均值回归'},
+VWAPReversionStrategy:{cat:'均值回归',desc:'VWAP价格回归'},
+VWAPStrategy:{cat:'均值回归',desc:'成交量加权回归'},
+MeanReversionHalfLifeStrategy:{cat:'均值回归',desc:'半衰期回归'},
+// ===== 突破类 =====
+BollingerSqueezeStrategy:{cat:'突破',desc:'布林带收窄突破'},
+DonchianBreakoutStrategy:{cat:'突破',desc:'唐奇安通道突破'},
+// ===== 成交量类 =====
+MFIStrategy:{cat:'成交量',desc:'资金流量指标'},
+OBVStrategy:{cat:'成交量',desc:'能量潮背离'},
+TradeIntensityStrategy:{cat:'成交量',desc:'成交量异动'},
+// ===== 波动率类 =====
+ParkinsonVolStrategy:{cat:'波动率',desc:'高低波动率回归'},
+// ===== 风险类 =====
+UlcerIndexStrategy:{cat:'风险',desc:'下行风险择时'},
+VaRBreakoutStrategy:{cat:'风险',desc:'VaR异常突破'},
+MaxDrawdownStrategy:{cat:'风险',desc:'回撤反弹买入'},
+SortinoRatioStrategy:{cat:'风险',desc:'风险调整趋势'},
+// ===== 统计套利类 =====
+PairsTradingStrategy:{cat:'统计套利',desc:'配对价差回归'},
+FamaFactorArbitrageStrategy:{cat:'统计套利',desc:'多因子横截面'},
+HurstExponentStrategy:{cat:'统计套利',desc:'长记忆regime'},
+// ===== 微观结构类 =====
+OrderFlowImbalanceStrategy:{cat:'微观结构',desc:'订单流失衡'},
+// ===== 套利类 =====
+CEXArbitrageStrategy:{cat:'套利',desc:'跨所价差套利'},
 TriangularArbitrageStrategy:{cat:'套利',desc:'三角路径套利'},
-DEXArbitrageStrategy:{cat:'套利',desc:'链上/链下价差套利'},
-FlashLoanArbitrageStrategy:{cat:'套利',desc:'闪电贷套利框架'},
-MarketSentimentStrategy:{cat:'宏观',desc:'市场情绪因子'},
-SocialSentimentStrategy:{cat:'宏观',desc:'社媒情绪因子'},
-FundFlowStrategy:{cat:'宏观',desc:'资金流入流出'},
-WhaleActivityStrategy:{cat:'宏观',desc:'大户活动跟踪'}
+DEXArbitrageStrategy:{cat:'套利',desc:'链上DEX套利'},
+FlashLoanArbitrageStrategy:{cat:'套利',desc:'闪电贷套利'},
+// ===== 宏观类 =====
+MarketSentimentStrategy:{cat:'宏观',desc:'恐慌贪婪指数'},
+SocialSentimentStrategy:{cat:'宏观',desc:'社媒情绪分析'},
+FundFlowStrategy:{cat:'宏观',desc:'交易所资金流'},
+WhaleActivityStrategy:{cat:'宏观',desc:'巨鲸地址追踪'}
 };
 
 function notify(msg,err=false){const n=document.getElementById('notification');if(!n)return;n.textContent=msg;n.className=`notification show ${err?'error':''}`;setTimeout(()=>n.classList.remove('show'),3000);}
@@ -1026,7 +1057,7 @@ const minLow=Math.min(...l);
 const maxHigh=Math.max(...h);
 const priceSpan=Math.max(Math.abs(maxHigh-minLow), Math.abs(maxHigh||0)*0.002, 1e-8);
 const pricePad=priceSpan*0.08;
-const resetView=!preserveRange||chartChanged;
+const resetView=!preserveRange||chartChanged||!marketDataState.lastRange;
 const layout={paper_bgcolor:'#111723',plot_bgcolor:'#111723',font:{color:'#d7dde8'},margin:{l:50,r:62,t:10,b:28},showlegend:false,dragmode:'pan',uirevision:chartKey,xaxis:plotlyTimeAxis({domain:[0,1],anchor:'y',rangeslider:{visible:false}}),yaxis:{domain:[.28,1],side:'right',showgrid:true,gridcolor:'#283242',automargin:true,autorange:resetView,range:resetView?[minLow-pricePad,maxHigh+pricePad]:undefined},xaxis2:plotlyTimeAxis({domain:[0,1],anchor:'y2',matches:'x'}),yaxis2:{domain:[0,.22],side:'right',showgrid:true,gridcolor:'#283242',automargin:true,autorange:true},hovermode:'x unified'};
 if(!resetView&&marketDataState.lastRange?.start&&marketDataState.lastRange?.end){layout.xaxis.range=[marketDataState.lastRange.start,marketDataState.lastRange.end];}
 Plotly.react(c,[{type:'candlestick',x,open:o,high:h,low:l,close:cl,increasing:{line:{color:'#1f9d63'}},decreasing:{line:{color:'#d9534f'}},xaxis:'x',yaxis:'y'},{type:'bar',x,y:v,marker:{color:vc,opacity:.7},xaxis:'x2',yaxis:'y2'}],layout,{responsive:true,scrollZoom:true,displaylogo:false,modeBarButtonsToAdd:['drawline','drawopenpath','drawrect','eraseshape'],modeBarButtonsToRemove:['lasso2d','select2d']});
@@ -1108,6 +1139,7 @@ if(maxMs-rightMs<=edge)loadMoreRightByViewport();
 }
 async function drawK(data){
 marketDataState.bars=cropBars(mergeBars([],data||[]));
+marketDataState.lastRange=null; // Force autoscale on new data load
 renderKlineChart(false);
 bindKlineChartEvents();
 }
@@ -1442,10 +1474,18 @@ function backtestCompareCatalog(){if(!backtestUIState.compareCatalog)backtestUIS
 function backtestCompareCurrentSource(){return String(document.getElementById('backtest-compare-source')?.value||'library').trim()||'library';}
 function mapStrategyCatToBacktestGroup(cat){
 const c=String(cat||'').trim();
-if(['趋势','突破'].includes(c))return'趋势跟踪类';
-if(['均值回归','震荡','反转'].includes(c))return'均值回归类';
-if(['动量','统计套利','套利'].includes(c))return'动量振荡类';
-if(['宏观'].includes(c))return'情绪资金类';
+if(['趋势'].includes(c))return'趋势类';
+if(['震荡'].includes(c))return'震荡类';
+if(['动量'].includes(c))return'动量类';
+if(['均值回归'].includes(c))return'均值回归类';
+if(['突破'].includes(c))return'突破类';
+if(['成交量'].includes(c))return'成交量类';
+if(['波动率'].includes(c))return'波动率类';
+if(['风险'].includes(c))return'风险类';
+if(['统计套利'].includes(c))return'统计套利类';
+if(['微观结构'].includes(c))return'微观结构类';
+if(['套利'].includes(c))return'套利类';
+if(['宏观'].includes(c))return'宏观类';
 return'其他';
 }
 async function getRegisteredStrategyTypesForCompare(){
