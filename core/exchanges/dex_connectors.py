@@ -7,8 +7,14 @@ from datetime import datetime
 from typing import Optional, Any, List
 from decimal import Decimal
 from loguru import logger
-from web3 import Web3
-from web3.contract import Contract
+try:
+    from web3 import Web3
+    from web3.contract import Contract
+    _WEB3_IMPORT_ERROR: Optional[Exception] = None
+except Exception as exc:  # pragma: no cover - optional dependency
+    Web3 = None  # type: ignore[assignment]
+    Contract = Any  # type: ignore[assignment]
+    _WEB3_IMPORT_ERROR = exc
 
 from config.exchanges import ExchangeConfig, ExchangeType
 from config.settings import settings
@@ -65,6 +71,18 @@ UNISWAP_V2_ROUTER_ABI = [
 ]
 
 
+def _require_web3() -> None:
+    if Web3 is not None:
+        return
+    detail = "missing optional dependency `web3`"
+    if _WEB3_IMPORT_ERROR is not None:
+        detail = f"{type(_WEB3_IMPORT_ERROR).__name__}: {_WEB3_IMPORT_ERROR}"
+    raise RuntimeError(
+        "DEX connectors require the optional `web3` package. "
+        f"Install it before running DEX strategies ({detail})."
+    )
+
+
 class BaseDEXConnector(BaseExchange):
     """DEX基类"""
 
@@ -78,6 +96,7 @@ class BaseDEXConnector(BaseExchange):
     async def connect(self) -> bool:
         """连接DEX"""
         try:
+            _require_web3()
             rpc_url = RPC_ENDPOINTS.get(self.chain)
             if not rpc_url:
                 raise ValueError(f"Unsupported chain: {self.chain}")
@@ -103,6 +122,7 @@ class BaseDEXConnector(BaseExchange):
     async def get_token_info(self, token_address: str) -> dict:
         """获取代币信息"""
         try:
+            _require_web3()
             contract = self.w3.eth.contract(
                 address=Web3.to_checksum_address(token_address),
                 abi=ERC20_ABI,
@@ -120,6 +140,7 @@ class BaseDEXConnector(BaseExchange):
     async def get_token_balance(self, token_address: str, wallet_address: str) -> Decimal:
         """获取代币余额"""
         try:
+            _require_web3()
             contract = self.w3.eth.contract(
                 address=Web3.to_checksum_address(token_address),
                 abi=ERC20_ABI,
@@ -143,6 +164,7 @@ class BaseDEXConnector(BaseExchange):
     ) -> Decimal:
         """获取兑换报价"""
         try:
+            _require_web3()
             token_in_contract = self.w3.eth.contract(
                 address=Web3.to_checksum_address(token_in),
                 abi=ERC20_ABI,
@@ -236,6 +258,7 @@ class UniswapConnector(BaseDEXConnector):
         """连接Uniswap"""
         success = await super().connect()
         if success:
+            _require_web3()
             self.router_contract = self.w3.eth.contract(
                 address=Web3.to_checksum_address(self.router_address),
                 abi=UNISWAP_V2_ROUTER_ABI,
@@ -268,6 +291,7 @@ class SushiSwapConnector(BaseDEXConnector):
         """连接SushiSwap"""
         success = await super().connect()
         if success:
+            _require_web3()
             self.router_contract = self.w3.eth.contract(
                 address=Web3.to_checksum_address(self.router_address),
                 abi=UNISWAP_V2_ROUTER_ABI,
@@ -299,6 +323,7 @@ class PancakeSwapConnector(BaseDEXConnector):
         """连接PancakeSwap"""
         success = await super().connect()
         if success:
+            _require_web3()
             self.router_contract = self.w3.eth.contract(
                 address=Web3.to_checksum_address(self.router_address),
                 abi=UNISWAP_V2_ROUTER_ABI,

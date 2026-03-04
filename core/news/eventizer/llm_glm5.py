@@ -130,7 +130,7 @@ def _semantic_event_key(event: Dict[str, Any]) -> str:
     url = str(evidence.get("url") or "").strip().lower()
     anchor = title or url or "no_anchor"
     ts = str(event.get("ts") or "")
-    bucket = ts[:16]
+    bucket = ts[:19]
     seed = (
         f"{str(event.get('symbol') or '').upper()}|"
         f"{str(event.get('event_type') or '').lower()}|"

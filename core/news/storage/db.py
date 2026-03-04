@@ -11,6 +11,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy import and_, event, insert, or_, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from config.settings import settings
@@ -47,6 +48,10 @@ if str(settings.DATABASE_URL).startswith("sqlite"):
 _global_rate_limit_backoff: Optional[datetime] = None
 _global_rate_limit_lock = asyncio.Lock()
 
+# Per-provider rate limit backoff state
+_provider_rate_limit_backoff: Dict[str, datetime] = {}
+_provider_rate_limit_lock = asyncio.Lock()
+
 
 SOURCE_IMPORTANCE = {
     "binance_announcements": 48,
@@ -70,12 +75,14 @@ KEYWORD_SCORES = {
     "maintenance": 18,
     "api update": 15,
     "api": 10,
-    "hack": 26,
-    "exploit": 24,
-    "drained": 24,
-    "stolen": 24,
-    "etf": 18,
-    "sec": 16,
+    "hack": 28,
+    "hacked": 28,
+    "exploit": 26,
+    "drained": 26,
+    "stolen": 26,
+    "etf": 24,
+    "etf approval": 28,
+    "sec": 23,
     "lawsuit": 14,
     "liquidation": 16,
     "liquidations": 16,
@@ -332,33 +339,38 @@ async def list_source_states() -> List[Dict[str, Any]]:
 
 async def get_llm_queue_stats() -> Dict[str, Any]:
     async with news_session_scope() as session:
-        rows = (
+        # Use SQL aggregation instead of full-table-scan + Python aggregation
+        count_rows = (
             await session.execute(
-                select(NewsLLMTask.status, NewsLLMTask.priority, NewsLLMTask.next_retry_at)
+                text("SELECT status, COUNT(*) as cnt FROM news_llm_tasks GROUP BY status")
             )
         ).all()
+        agg_rows = (
+            await session.execute(
+                text(
+                    "SELECT MAX(priority), MIN(next_retry_at) "
+                    "FROM news_llm_tasks WHERE status IN ('pending','retry','running')"
+                )
+            )
+        ).one_or_none()
     counts: Dict[str, int] = {"pending": 0, "running": 0, "retry": 0, "failed": 0, "done": 0}
-    priorities: List[int] = []
-    retry_times: List[datetime] = []
-    for status, priority, next_retry_at in rows:
+    for status, cnt in count_rows:
         key = str(status or "pending").strip().lower() or "pending"
-        counts[key] = counts.get(key, 0) + 1
+        counts[key] = int(cnt)
+    max_priority = int(agg_rows[0] or 0) if agg_rows and agg_rows[0] is not None else 0
+    next_retry_raw = agg_rows[1] if agg_rows else None
+    next_retry_at = None
+    if next_retry_raw:
         try:
-            priorities.append(int(priority or 0))
+            next_retry_at = parse_any_datetime(next_retry_raw)
         except Exception:
-            continue
-        if next_retry_at:
-            try:
-                retry_times.append(parse_any_datetime(next_retry_at))
-            except Exception:
-                pass
+            pass
     backoff_until = await get_global_backoff()
-    next_retry_at = min(retry_times) if retry_times else None
     return {
         "counts": counts,
         "total": int(sum(counts.values())),
         "pending_total": int(counts.get("pending", 0) + counts.get("retry", 0)),
-        "max_priority": max(priorities) if priorities else 0,
+        "max_priority": max_priority,
         "backoff_until": _utc_iso(backoff_until),
         "next_retry_at": _utc_iso(next_retry_at),
     }
@@ -493,8 +505,12 @@ async def save_news_raw(news_items: List[Dict[str, Any]]) -> Dict[str, Any]:
             for item in rows_to_insert:
                 obj = NewsRaw(**item)
                 session.add(obj)
-                objects.append(obj)
-            await session.flush()
+                try:
+                    await session.flush()
+                    objects.append(obj)
+                except IntegrityError:
+                    await session.rollback()
+                    deduped_count += 1
             inserted = [_row_to_news_dict(obj) for obj in objects]
 
     return {
@@ -657,14 +673,22 @@ async def finish_llm_tasks(
                     row.last_rate_limit_at = now
                     row.status = "retry"
                     row.last_error = f"Rate limited, retry after {backoff_seconds}s: {error or '429'}"
-                # Max attempts reached - mark as failed
-                elif attempt >= 3:
+                # Timeout errors get more attempts (network issues are transient)
+                elif error_type == "timeout" and attempt >= 5:
                     row.status = "failed"
                     row.last_error = str(error or "llm extraction failed")
                     row.finished_at = now
-                # Other errors - retry with shorter backoff
+                # Max attempts reached - mark as failed
+                elif error_type != "timeout" and attempt >= 3:
+                    row.status = "failed"
+                    row.last_error = str(error or "llm extraction failed")
+                    row.finished_at = now
+                # Other errors - retry with backoff (timeout uses longer backoff)
                 else:
-                    backoff_seconds = min(60, 10 * (2 ** (attempt - 1)))  # Max 1 min backoff
+                    if error_type == "timeout":
+                        backoff_seconds = min(120, 30 * (2 ** (attempt - 1)))  # timeout: 30s/60s/120s
+                    else:
+                        backoff_seconds = min(60, 10 * (2 ** (attempt - 1)))   # other: 10s/20s/40s
                     row.next_retry_at = now + timedelta(seconds=backoff_seconds)
                     row.status = "retry"
                     row.last_error = str(error or "llm extraction failed")
@@ -702,21 +726,31 @@ async def save_events(events: List[Dict[str, Any]], model_source: str = "rules")
         existing_rows = await session.execute(select(NewsEvent.event_id).where(NewsEvent.event_id.in_(event_ids)))
         existing = {row[0] for row in existing_rows.all()}
         existing_recent_rows = await session.execute(
-            select(NewsEvent.symbol, NewsEvent.event_type, NewsEvent.sentiment, NewsEvent.ts, NewsEvent.evidence).where(
+            select(NewsEvent.symbol, NewsEvent.event_type, NewsEvent.sentiment, NewsEvent.ts, NewsEvent.evidence, NewsEvent.impact_score).where(
                 and_(NewsEvent.ts >= min_ts, NewsEvent.ts <= max_ts)
             )
         )
-        existing_semantic = {
-            _event_semantic_key(row[0], row[1], row[2], row[3], row[4] if isinstance(row[4], dict) else {})
-            for row in existing_recent_rows.all()
-        }
+        existing_semantic: Dict[str, Dict[str, Any]] = {}
+        for row in existing_recent_rows.all():
+            key = _event_semantic_key(row[0], row[1], row[2], row[3], row[4] if isinstance(row[4], dict) else {})
+            existing_semantic[key] = {"sentiment": int(row[2]), "impact_score": float(row[5] or 0)}
 
         objects: List[NewsEvent] = []
         for item in validated:
             semantic_key = item.pop("_semantic_key", "")
-            if item["event_id"] in existing or (semantic_key and semantic_key in existing_semantic):
+            if item["event_id"] in existing:
                 deduped_count += 1
                 continue
+            if semantic_key and semantic_key in existing_semantic:
+                prev = existing_semantic[semantic_key]
+                new_impact = float(item.get("impact_score") or 0)
+                prev_impact = prev["impact_score"]
+                new_sentiment = int(item.get("sentiment") or 0)
+                prev_sentiment = prev["sentiment"]
+                impact_diff = abs(new_impact - prev_impact) / max(abs(prev_impact), 0.01)
+                if impact_diff <= 0.05 and new_sentiment == prev_sentiment:
+                    deduped_count += 1
+                    continue
             obj = NewsEvent(
                 event_id=item["event_id"],
                 ts=parse_any_datetime(item["ts"]),
@@ -733,7 +767,7 @@ async def save_events(events: List[Dict[str, Any]], model_source: str = "rules")
             session.add(obj)
             objects.append(obj)
             if semantic_key:
-                existing_semantic.add(semantic_key)
+                existing_semantic[semantic_key] = {"sentiment": int(item.get("sentiment") or 0), "impact_score": float(item.get("impact_score") or 0)}
 
         await session.flush()
         inserted = [_row_to_event_dict(obj) for obj in objects]
@@ -817,6 +851,24 @@ async def is_in_global_backoff() -> bool:
     """Check if we are currently in a global rate limit backoff period."""
     backoff = await get_global_backoff()
     return backoff is not None
+
+
+async def set_provider_backoff(provider: str, until: datetime) -> None:
+    """Set a per-provider rate limit backoff."""
+    async with _provider_rate_limit_lock:
+        _provider_rate_limit_backoff[provider] = parse_any_datetime(until)
+
+
+async def get_provider_backoff(provider: str) -> Optional[datetime]:
+    """Get the current per-provider rate limit backoff time."""
+    async with _provider_rate_limit_lock:
+        backoff = _provider_rate_limit_backoff.get(provider)
+        if backoff is None:
+            return None
+        if backoff <= datetime.now(timezone.utc):
+            _provider_rate_limit_backoff.pop(provider, None)
+            return None
+        return backoff
 
 
 async def build_daily_report(day: date) -> Dict[str, Any]:

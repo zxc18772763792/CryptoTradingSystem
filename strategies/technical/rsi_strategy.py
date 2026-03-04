@@ -50,7 +50,7 @@ class RSIStrategy(StrategyBase):
         signals: List[Signal] = []
 
         if prev_rsi < oversold <= current_rsi:
-            strength = max(0.1, min(1.0, (oversold - min(current_rsi, oversold)) / max(oversold, 1e-9) + 0.2))
+            strength = min(1.0, max(0.1, (oversold - prev_rsi) / max(oversold, 1e-9) * 1.5 + 0.3))
             signals.append(
                 Signal(
                     symbol=symbol,
@@ -66,7 +66,7 @@ class RSIStrategy(StrategyBase):
             )
             logger.info(f"RSI oversold bounce for {symbol}: RSI={current_rsi:.2f}")
         elif prev_rsi > overbought >= current_rsi:
-            strength = max(0.1, min(1.0, (max(current_rsi, overbought) - overbought) / max(100 - overbought, 1e-9) + 0.2))
+            strength = min(1.0, max(0.1, (prev_rsi - overbought) / max(100 - overbought, 1e-9) * 1.5 + 0.3))
             signals.append(
                 Signal(
                     symbol=symbol,

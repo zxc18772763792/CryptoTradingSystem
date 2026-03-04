@@ -150,6 +150,7 @@ class BinanceConnector(BaseExchange):
                     self._time_offset = int(local_time - server_time)
                 self._client.options["adjustForTimeDifference"] = True
                 self._client.options["timeDifference"] = int(self._time_offset)
+                self._client.options["warnOnFetchOpenOrdersWithoutSymbol"] = False
                 logger.info(f"[{self.name}] Time synced, offset: {self._time_offset}ms")
             except Exception as e:
                 logger.warning(f"[{self.name}] Time sync failed: {e}")

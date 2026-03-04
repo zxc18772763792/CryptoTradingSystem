@@ -10,6 +10,7 @@ from xml.etree import ElementTree as ET
 
 import requests
 from dateutil import parser as dt_parser
+from loguru import logger
 
 
 def _strip_html(text: str) -> str:
@@ -172,7 +173,8 @@ class RSSNewsCollector:
                 resp.raise_for_status()
                 body = resp.text or ""
                 parsed = self._parse_feed(name, url, body)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"RSS feed error for {url}: {type(e).__name__}: {e}")
                 continue
 
             for item in parsed:

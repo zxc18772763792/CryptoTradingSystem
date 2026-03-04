@@ -94,10 +94,57 @@ async def process_llm_batch(cfg: Dict[str, Any], limit: int = 8) -> Dict[str, An
     if not batch:
         return {"claimed": 0, "events_count": 0, "llm_used": False, "errors": []}
 
+    # Filter out items whose provider is in backoff
+    filtered_batch = []
+    backoff_ids = []
+    for item in batch:
+        provider = str(item.get("source") or (item.get("payload") or {}).get("provider") or "unknown")
+        provider_backoff = await news_db.get_provider_backoff(provider)
+        if provider_backoff:
+            logger.debug(f"Skipping item from provider={provider}, in backoff until {provider_backoff.isoformat()}")
+            if item.get("id"):
+                backoff_ids.append(int(item["id"]))
+        else:
+            filtered_batch.append(item)
+
+    # Re-queue items that are in provider backoff
+    if backoff_ids:
+        await news_db.finish_llm_tasks(
+            backoff_ids,
+            success=False,
+            error="provider in backoff",
+            error_type="rate_limit",
+            is_rate_limited=True,
+        )
+
+    if not filtered_batch:
+        return {"claimed": len(batch), "events_count": 0, "llm_used": False, "errors": ["provider_backoff"]}
+
+    batch = filtered_batch
     raw_ids = [int(item.get("id")) for item in batch if item.get("id")]
+
+    # Build URL → raw_news_id map for linking extracted events back to source news
+    def _norm_url(u: str) -> str:
+        return str(u or "").strip().split("?")[0].split("#")[0].rstrip("/").lower()
+
+    url_to_raw_id = {_norm_url(item.get("url", "")): item.get("id") for item in batch if item.get("url") and item.get("id")}
 
     try:
         events, llm_used, error_type = await extract_events_async_with_meta(batch, cfg)
+
+        # Attach raw_news_id to each event by matching evidence URL to source news URL
+        for event in events:
+            if event.get("raw_news_id"):
+                continue
+            evidence = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
+            ev_url = _norm_url(str(evidence.get("url") or ""))
+            if ev_url and ev_url in url_to_raw_id:
+                event["raw_news_id"] = url_to_raw_id[ev_url]
+            elif len(batch) == 1:
+                event["raw_news_id"] = batch[0].get("id")
+
+        if not events:
+            logger.debug(f"LLM batch processed {len(batch)} items, 0 events extracted (normal for non-market-moving news)")
 
         event_stats = await news_db.save_events(events, model_source="mixed")
 
@@ -105,13 +152,16 @@ async def process_llm_batch(cfg: Dict[str, Any], limit: int = 8) -> Dict[str, An
         is_success = error_type == "none"
         is_rate_limited = error_type == "rate_limit"
 
-        # Set global backoff if rate limited
+        # Set per-provider backoff if rate limited
         if is_rate_limited:
             from core.news.eventizer.rate_limiter import rate_limiter
             backoff_seconds = int(rate_limiter.get_backoff_time())
             backoff_until = datetime.now(timezone.utc) + timedelta(seconds=max(30, backoff_seconds))
-            await news_db.set_global_backoff(backoff_until)
-            logger.warning(f"Rate limit hit, setting global backoff until {backoff_until.isoformat()}")
+            # Determine which provider(s) caused the rate limit
+            providers = {str(item.get("source") or (item.get("payload") or {}).get("provider") or "unknown") for item in batch}
+            for provider in providers:
+                await news_db.set_provider_backoff(provider, backoff_until)
+                logger.warning(f"Rate limit hit for provider={provider}, backoff until {backoff_until.isoformat()}")
 
         await news_db.finish_llm_tasks(
             raw_ids,
@@ -259,8 +309,10 @@ async def _process_event_batch(batch: List[Dict[str, Any]], cfg: Dict[str, Any])
             from core.news.eventizer.rate_limiter import rate_limiter
             backoff_seconds = int(rate_limiter.get_backoff_time())
             backoff_until = datetime.now(timezone.utc) + timedelta(seconds=max(30, backoff_seconds))
-            await news_db.set_global_backoff(backoff_until)
-            logger.warning(f"Rate limit in event processor, backoff until {backoff_until.isoformat()}")
+            providers = {str(item.get("source") or (item.get("payload") or {}).get("provider") or "unknown") for item in batch}
+            for provider in providers:
+                await news_db.set_provider_backoff(provider, backoff_until)
+                logger.warning(f"Rate limit in event processor for provider={provider}, backoff until {backoff_until.isoformat()}")
 
         await news_db.finish_llm_tasks(
             raw_ids,

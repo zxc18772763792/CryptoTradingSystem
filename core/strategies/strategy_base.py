@@ -236,6 +236,20 @@ class StrategyBase(ABC):
             "signals_count": len(self.signals_history),
         }
 
+    @staticmethod
+    def normalize_strength(raw_value: float, lookback_values: list) -> float:
+        """Normalize signal strength using rolling percentile ranking."""
+        if not lookback_values:
+            return 0.5
+        pct = sum(1 for v in lookback_values if v <= raw_value) / len(lookback_values)
+        return round(max(0.1, min(1.0, pct)), 3)
+
+    @property
+    def min_bars(self) -> int:
+        """Minimum number of bars required for signal generation."""
+        period = self.params.get('period', 20)
+        return max(int(period) * 2, 50)
+
     @property
     def is_running(self) -> bool:
         """是否正在运行"""

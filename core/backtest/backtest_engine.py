@@ -9,6 +9,9 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from core.backtest.cost_models import fee_rate as resolve_fee_rate
+from core.backtest.cost_models import microstructure_proxies
+from core.backtest.cost_models import slippage_rate as resolve_slippage_rate
 from core.backtest.funding_provider import FundingRateProvider
 from core.strategies import Signal, SignalType, StrategyBase
 
@@ -208,51 +211,18 @@ class BacktestEngine:
         return out
 
     def _fee_rate(self, signal: Optional[Signal] = None) -> float:
-        if str(self.config.fee_model or "flat").lower() == "maker_taker":
-            role = str(
-                (signal.metadata.get("execution_role") if signal and isinstance(signal.metadata, dict) else None)
-                or self.config.default_execution_role
-                or "taker"
-            ).lower()
-            return float(self.config.maker_fee if role == "maker" else self.config.taker_fee)
-        return float(max(0.0, self.config.commission_rate))
+        role = str(
+            (signal.metadata.get("execution_role") if signal and isinstance(signal.metadata, dict) else None)
+            or self.config.default_execution_role
+            or "taker"
+        ).lower()
+        return resolve_fee_rate(self.config, role=role)
 
     def _slippage_rate(self, window: Optional[pd.DataFrame]) -> float:
-        if str(self.config.slippage_model or "flat").lower() != "dynamic" or window is None or window.empty:
-            return float(max(0.0, self.config.slippage))
-        p = dict(self.config.dynamic_slip or {})
-        min_slip = float(p.get("min_slip", 0.0))
-        k_atr = float(p.get("k_atr", 0.0))
-        k_rv = float(p.get("k_rv", 0.0))
-        k_spread = float(p.get("k_spread", 0.0))
-        metrics = self._microstructure_proxies(window)
-        slip = max(
-            min_slip,
-            k_atr * float(metrics.get("atr_pct", 0.0))
-            + k_rv * float(metrics.get("realized_vol", 0.0))
-            + k_spread * float(metrics.get("spread_proxy", 0.0)),
-        )
-        return float(max(0.0, slip))
+        return resolve_slippage_rate(self.config, window=window)
 
     def _microstructure_proxies(self, window: pd.DataFrame) -> Dict[str, float]:
-        w = window.tail(120)
-        close = pd.to_numeric(w.get("close"), errors="coerce")
-        high = pd.to_numeric(w.get("high"), errors="coerce")
-        low = pd.to_numeric(w.get("low"), errors="coerce")
-        if close.empty:
-            return {"atr_pct": 0.0, "realized_vol": 0.0, "spread_proxy": 0.0}
-        ret = np.log(close / close.shift(1))
-        rv = float(ret.tail(60).std(ddof=0) or 0.0)
-        spread_proxy = float((((high - low) / close.replace(0, np.nan)).iloc[-1]) if "high" in w and "low" in w else 0.0)
-        prev_close = close.shift(1)
-        tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
-        atr = float(tr.tail(30).mean() or 0.0)
-        atr_pct = atr / max(float(close.iloc[-1]), 1e-12)
-        return {
-            "atr_pct": max(0.0, float(atr_pct)),
-            "realized_vol": max(0.0, rv),
-            "spread_proxy": max(0.0, spread_proxy if np.isfinite(spread_proxy) else 0.0),
-        }
+        return microstructure_proxies(window)
 
     async def _execute_signal(
         self,
@@ -488,8 +458,9 @@ class BacktestEngine:
     def _funding_boundary(self, ts: datetime) -> Optional[pd.Timestamp]:
         if not self.config.include_funding:
             return None
-        t = pd.Timestamp(ts)
-        if not isinstance(t, pd.Timestamp):
+        try:
+            t = pd.Timestamp(ts)
+        except Exception:
             return None
         interval = max(1, int(self.config.funding_interval_hours))
         if t.minute != 0 or t.second != 0:
@@ -524,10 +495,12 @@ class BacktestEngine:
             if notional <= 0:
                 continue
             # Positive funding: longs pay shorts receive.
+            # Funding is accumulated in pos["funding_pnl"] and only realized when the
+            # position is closed (added to net_pnl in _close_position). Do NOT credit
+            # _capital here to avoid double-counting with the close settlement.
             funding_cash = -rate * notional if pos.get("side") == "long" else rate * notional
             pos["funding_pnl"] = float(pos.get("funding_pnl", 0.0)) + funding_cash
             pos["last_funding_boundary"] = boundary
-            self._capital += funding_cash
             self._trades.append(
                 BacktestTrade(
                     timestamp=boundary.to_pydatetime(),

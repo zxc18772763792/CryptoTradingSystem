@@ -64,7 +64,7 @@ class ROCStrategy(FactorStrategyBase):
     Generates sell signals when ROC crosses below negative threshold.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "ROC", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "period": 14,
             "buy_threshold": 5.0,  # ROC above 5%
@@ -74,7 +74,7 @@ class ROCStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("ROC", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["period"] + 2:
@@ -132,7 +132,7 @@ class PriceAccelerationStrategy(FactorStrategyBase):
     Detects momentum acceleration/deceleration for early trend signals.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "PriceAcceleration", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "fast": 5,
             "slow": 15,
@@ -142,7 +142,7 @@ class PriceAccelerationStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("PriceAcceleration", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["slow"] * 2 + 5:
@@ -202,7 +202,7 @@ class AroonStrategy(FactorStrategyBase):
     Uses Aroon oscillator for trend detection.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "Aroon", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "period": 25,
             "buy_threshold": 50,  # Aroon > 50 = uptrend
@@ -212,40 +212,39 @@ class AroonStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("Aroon", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
-        if data.empty or len(data) < self.params["period"] + 2:
+        if data.empty or len(data) < self.params["period"] + 3:
             return []
 
         signals = []
         n = self.params["period"]
-        high = data["high"]
-        low = data["low"]
+        high_arr = data["high"].values
+        low_arr = data["low"].values
         close = data["close"]
         symbol = self._get_symbol(data)
         current_price = close.iloc[-1]
 
-        # Calculate Aroon
-        def calc_aroon_up(x):
-            return (n - np.argmax(x)) / n * 100
+        # Vectorized Aroon calculation (only compute last 2 values needed for signal)
+        window = n + 1
+        aroon_up_curr = float((n - np.argmax(high_arr[-window:])) / n * 100)
+        aroon_down_curr = float((n - np.argmin(low_arr[-window:])) / n * 100)
+        aroon_curr = aroon_up_curr - aroon_down_curr
 
-        def calc_aroon_down(x):
-            return (n - np.argmin(x)) / n * 100
+        aroon_up_prev = float((n - np.argmax(high_arr[-window - 1:-1])) / n * 100)
+        aroon_down_prev = float((n - np.argmin(low_arr[-window - 1:-1])) / n * 100)
+        aroon_prev = aroon_up_prev - aroon_down_prev
 
-        aroon_up = high.rolling(n + 1).apply(calc_aroon_up, raw=True)
-        aroon_down = low.rolling(n + 1).apply(calc_aroon_down, raw=True)
-        aroon = aroon_up - aroon_down
-
-        current_aroon = aroon.iloc[-1]
-        prev_aroon = aroon.iloc[-2]
+        current_aroon = aroon_curr
+        prev_aroon = aroon_prev
 
         # Buy signal: Aroon crosses above threshold
         if prev_aroon < self.params["buy_threshold"] and current_aroon >= self.params["buy_threshold"]:
             signal = self._create_signal(
                 symbol, SignalType.BUY, current_price,
                 strength=min(current_aroon / 100, 1.0),
-                metadata={"aroon": current_aroon, "aroon_up": aroon_up.iloc[-1]}
+                metadata={"aroon": current_aroon, "aroon_up": aroon_up_curr}
             )
             signal.stop_loss = current_price * (1 - self.params["stop_loss_pct"])
             signal.take_profit = current_price * (1 + self.params["take_profit_pct"])
@@ -256,7 +255,7 @@ class AroonStrategy(FactorStrategyBase):
             signal = self._create_signal(
                 symbol, SignalType.SELL, current_price,
                 strength=min(abs(current_aroon) / 100, 1.0),
-                metadata={"aroon": current_aroon, "aroon_down": aroon_down.iloc[-1]}
+                metadata={"aroon": current_aroon, "aroon_down": aroon_down_curr}
             )
             signal.stop_loss = current_price * (1 + self.params["stop_loss_pct"])
             signal.take_profit = current_price * (1 - self.params["take_profit_pct"])
@@ -282,7 +281,7 @@ class ParkinsonVolStrategy(FactorStrategyBase):
     Uses high-low range volatility for overbought/oversold detection.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "ParkinsonVol", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "period": 20,
             "vol_percentile_low": 20,  # Low vol = buy
@@ -292,7 +291,7 @@ class ParkinsonVolStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("ParkinsonVol", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["period"] * 3:
@@ -355,7 +354,7 @@ class UlcerIndexStrategy(FactorStrategyBase):
     Uses downside risk measure for position timing.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "UlcerIndex", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "period": 14,
             "high_risk_threshold": 10,  # UI > 10 = high risk, sell
@@ -365,7 +364,7 @@ class UlcerIndexStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("UlcerIndex", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["period"] + 2:
@@ -427,7 +426,7 @@ class MFIStrategy(FactorStrategyBase):
     Volume-weighted RSI for overbought/oversold detection.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "MFI", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "period": 14,
             "oversold": 20,  # MFI < 20 = oversold
@@ -437,7 +436,7 @@ class MFIStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("MFI", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["period"] + 2:
@@ -505,7 +504,7 @@ class VWAPStrategy(FactorStrategyBase):
     Price deviation from VWAP for mean reversion signals.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "VWAP", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "period": 20,
             "buy_threshold": -0.02,  # 2% below VWAP
@@ -515,7 +514,7 @@ class VWAPStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("VWAP", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["period"] + 1:
@@ -580,7 +579,7 @@ class OBVStrategy(FactorStrategyBase):
     Uses OBV divergence with price for signal generation.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "OBV", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "smooth": 20,
             "divergence_threshold": 1.5,  # Z-score threshold
@@ -589,7 +588,7 @@ class OBVStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("OBV", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["smooth"] + 2:
@@ -659,7 +658,7 @@ class OrderFlowImbalanceStrategy(FactorStrategyBase):
     Uses approximate OFI for detecting informed trading.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "OrderFlowImbalance", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "period": 10,
             "imbalance_threshold": 1.0,  # Z-score threshold
@@ -668,7 +667,7 @@ class OrderFlowImbalanceStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("OrderFlowImbalance", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["period"] * 2 + 2:
@@ -734,7 +733,7 @@ class TradeIntensityStrategy(FactorStrategyBase):
     Detects volume surges relative to normal levels.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "TradeIntensity", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "fast": 5,
             "slow": 20,
@@ -744,7 +743,7 @@ class TradeIntensityStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("TradeIntensity", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["slow"] + 1:
@@ -812,7 +811,7 @@ class MeanReversionHalfLifeStrategy(FactorStrategyBase):
     of reversion within estimated half-life period.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "MeanReversionHalfLife", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "lookback": 60,
             "zscore_entry": 2.0,
@@ -822,7 +821,7 @@ class MeanReversionHalfLifeStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("MeanReversionHalfLife", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["lookback"] + 2:
@@ -882,7 +881,7 @@ class HurstExponentStrategy(FactorStrategyBase):
     Adapts strategy based on whether market is trending or mean-reverting.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "HurstExponent", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "hurst_period": 100,
             "zscore_period": 20,
@@ -894,7 +893,7 @@ class HurstExponentStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("HurstExponent", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["hurst_period"] + 2:
@@ -977,7 +976,7 @@ class VaRBreakoutStrategy(FactorStrategyBase):
     Uses VaR to identify abnormal price movements.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "VaRBreakout", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "var_period": 20,
             "confidence": 0.95,
@@ -987,7 +986,7 @@ class VaRBreakoutStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("VaRBreakout", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["var_period"] + 2:
@@ -1053,7 +1052,7 @@ class MaxDrawdownStrategy(FactorStrategyBase):
     Buys when recovering from significant drawdowns.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "MaxDrawdown", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "lookback": 30,
             "dd_threshold": -0.10,  # 10% drawdown
@@ -1063,7 +1062,7 @@ class MaxDrawdownStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("MaxDrawdown", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["lookback"] + 1:
@@ -1119,7 +1118,7 @@ class SortinoRatioStrategy(FactorStrategyBase):
     Follows trends when risk-adjusted returns are favorable.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "SortinoRatio", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "period": 30,
             "sortino_threshold": 1.0,  # Minimum Sortino ratio
@@ -1129,7 +1128,7 @@ class SortinoRatioStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("SortinoRatio", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["period"] + 2:
@@ -1204,7 +1203,7 @@ class WilliamsRStrategy(FactorStrategyBase):
     Overbought/oversold oscillator strategy.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "WilliamsR", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "period": 14,
             "oversold": -80,
@@ -1214,7 +1213,7 @@ class WilliamsRStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("WilliamsR", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["period"] + 1:
@@ -1274,7 +1273,7 @@ class CCIStrategy(FactorStrategyBase):
     CCI for trend identification and overbought/oversold.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "CCI", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "period": 20,
             "constant": 0.015,
@@ -1285,7 +1284,7 @@ class CCIStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("CCI", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["period"] + 1:
@@ -1347,7 +1346,7 @@ class StochRSIStrategy(FactorStrategyBase):
     More sensitive oscillator combining Stochastic and RSI.
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, name: str = "StochRSI", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "rsi_period": 14,
             "stoch_period": 14,
@@ -1358,7 +1357,7 @@ class StochRSIStrategy(FactorStrategyBase):
         }
         if params:
             default_params.update(params)
-        super().__init__("StochRSI", default_params)
+        super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < self.params["rsi_period"] + self.params["stoch_period"] + 5:

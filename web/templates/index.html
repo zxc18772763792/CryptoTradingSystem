@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=45">
+    <link rel="stylesheet" href="/static/css/style.css?v=51">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
@@ -228,8 +228,9 @@
             </div>
 
             <div id="trading" class="tab-content">
-                <div class="grid news-layout">
-                    <div class="card news-card news-card-summary">
+                <div class="trading-workspace">
+                    <aside class="trading-sidebar">
+                    <div class="card trading-card trading-order-card trading-sticky">
                         <h3>下单面板</h3>
                         <form id="order-form" class="form">
                             <div class="form-group">
@@ -334,85 +335,7 @@
                         </form>
                     </div>
 
-                    <div class="card wide">
-                        <h3>最近订单</h3>
-                        <div class="inline-actions" style="margin-bottom: 8px;">
-                            <label style="min-width:88px;">订单来源</label>
-                            <select id="orders-view-filter" style="max-width: 220px;">
-                                <option value="all">全部订单</option>
-                                <option value="strategy">仅策略单</option>
-                                <option value="manual">仅手动单</option>
-                            </select>
-                            <button class="btn btn-primary btn-sm" id="btn-refresh-orders">刷新订单</button>
-                            <button class="btn btn-danger btn-sm" id="btn-paper-reset">模拟盘清零</button>
-                        </div>
-                        <div class="table-container orders-scroll">
-                            <table class="data-table">
-                                <thead>
-                                    <tr>
-                                        <th>交易对</th>
-                                        <th>来源/策略</th>
-                                        <th>账户</th>
-                                        <th>方向/状态</th>
-                                        <th>价格</th>
-                                        <th>数量</th>
-                                        <th>操作</th>
-                                        <th>备注</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="orders-tbody"></tbody>
-                            </table>
-                        </div>
-                    </div>
-
-                    <div class="card wide">
-                        <h3>当前委托（未成交）</h3>
-                        <div class="inline-actions">
-                            <button class="btn btn-primary btn-sm" id="btn-refresh-open-orders">刷新当前委托</button>
-                        </div>
-                        <div class="table-container open-orders-scroll" style="margin-top: 8px;">
-                            <table class="data-table">
-                                <thead>
-                                    <tr>
-                                        <th>交易对</th>
-                                        <th>来源/策略</th>
-                                        <th>账户</th>
-                                        <th>方向/状态</th>
-                                        <th>价格</th>
-                                        <th>数量</th>
-                                        <th>止盈/止损</th>
-                                        <th>操作</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="open-orders-tbody"></tbody>
-                            </table>
-                        </div>
-                    </div>
-
-                    <div class="card wide">
-                        <h3>条件触发单</h3>
-                        <div class="inline-actions">
-                            <button class="btn btn-primary btn-sm" id="btn-refresh-conditional">刷新</button>
-                        </div>
-                        <div class="table-container" style="margin-top: 8px;">
-                            <table class="data-table">
-                                <thead>
-                                    <tr>
-                                        <th>ID</th>
-                                        <th>交易对</th>
-                                        <th>方向</th>
-                                        <th>触发价</th>
-                                        <th>数量</th>
-                                        <th>账户</th>
-                                        <th>操作</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="conditional-orders-tbody"></tbody>
-                            </table>
-                        </div>
-                    </div>
-
-                    <div class="card">
+                    <div class="card trading-card trading-account-card">
                         <h3>账户管理</h3>
                         <div class="form-row">
                             <div class="form-group">
@@ -447,8 +370,88 @@
                         </div>
                         <pre id="accounts-output" class="output-box">账户列表与统计显示在这里</pre>
                     </div>
+                    </aside>
 
-                    <div class="card wide">
+                    <div class="trading-main">
+                    <div class="card trading-card trading-orders-card trading-span-2">
+                        <h3>最近订单</h3>
+                        <div class="inline-actions" style="margin-bottom: 8px;">
+                            <label style="min-width:88px;">订单来源</label>
+                            <select id="orders-view-filter" style="max-width: 220px;">
+                                <option value="all">全部订单</option>
+                                <option value="strategy">仅策略单</option>
+                                <option value="manual">仅手动单</option>
+                            </select>
+                            <button class="btn btn-primary btn-sm" id="btn-refresh-orders">刷新订单</button>
+                            <button class="btn btn-danger btn-sm" id="btn-paper-reset">模拟盘清零</button>
+                        </div>
+                        <div class="table-container orders-scroll">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>交易对</th>
+                                        <th>来源/策略</th>
+                                        <th>账户</th>
+                                        <th>方向/状态</th>
+                                        <th>价格</th>
+                                        <th>数量</th>
+                                        <th>操作</th>
+                                        <th>备注</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="orders-tbody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="card trading-card trading-open-orders-card">
+                        <h3>当前委托（未成交）</h3>
+                        <div class="inline-actions">
+                            <button class="btn btn-primary btn-sm" id="btn-refresh-open-orders">刷新当前委托</button>
+                        </div>
+                        <div class="table-container open-orders-scroll" style="margin-top: 8px;">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>交易对</th>
+                                        <th>来源/策略</th>
+                                        <th>账户</th>
+                                        <th>方向/状态</th>
+                                        <th>价格</th>
+                                        <th>数量</th>
+                                        <th>止盈/止损</th>
+                                        <th>操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="open-orders-tbody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="card trading-card trading-conditional-card">
+                        <h3>条件触发单</h3>
+                        <div class="inline-actions">
+                            <button class="btn btn-primary btn-sm" id="btn-refresh-conditional">刷新</button>
+                        </div>
+                        <div class="table-container" style="margin-top: 8px;">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>交易对</th>
+                                        <th>方向</th>
+                                        <th>触发价</th>
+                                        <th>数量</th>
+                                        <th>账户</th>
+                                        <th>操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="conditional-orders-tbody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="card trading-card trading-positions-card trading-span-2">
                         <h3>当前持仓</h3>
                         <div class="table-container">
                             <table class="data-table">
@@ -465,6 +468,7 @@
                                 <tbody id="positions-tbody"></tbody>
                             </table>
                         </div>
+                    </div>
                     </div>
                 </div>
             </div>
@@ -675,8 +679,16 @@
                         </form>
                     </div>
 
-                    <div class="card wide">
-                        <h3>数据完整性与交叉验证</h3>
+                    <div class="card wide data-health-card">
+                        <div class="card-head">
+                            <h3>数据健康工作台</h3>
+                            <div class="inline-actions">
+                                <button class="btn btn-primary btn-sm" id="btn-refresh-storage-health">刷新体检</button>
+                                <button class="btn btn-primary btn-sm" id="btn-batch-health-repair">批量补全问题项</button>
+                                <button class="btn btn-danger btn-sm" id="btn-batch-health-redownload">批量重拉损坏项</button>
+                            </div>
+                        </div>
+                        <div class="section-title">完整性检查 / 交叉验证 / 行情重连</div>
                         <div class="form-row">
                             <div class="form-group">
                                 <label>主交易所</label>
@@ -700,6 +712,15 @@
                             <button class="btn btn-primary btn-sm" id="btn-reconnect">行情重连</button>
                         </div>
                         <pre id="data-integrity-output" class="output-box">点击按钮开始检查</pre>
+                        <div class="section-title" style="margin-top:14px;">数据仓体检</div>
+                        <div id="data-storage-health-summary" class="data-health-summary">
+                            <div class="list-item"><span>状态</span><span>加载中...</span></div>
+                        </div>
+                        <div id="data-storage-health-exchanges" class="list" style="margin-top:10px;">等待体检结果...</div>
+                        <div id="data-storage-health-table" class="data-health-table-wrap" style="margin-top:10px;">
+                            <div class="list-item"><span>明细</span><span>等待体检结果...</span></div>
+                        </div>
+                        <pre id="data-storage-health-notes" class="output-box">这里会显示重复目录、最近备份和扫描说明。</pre>
                     </div>
 
                     <div class="card replay-card">
@@ -995,8 +1016,8 @@
             </div>
 
             <div id="news" class="tab-content">
-                <div class="grid">
-                    <div class="card">
+                <div class="grid news-layout">
+                    <div class="card news-card news-card-summary">
                         <h3>新闻统计（可切换颗粒度）</h3>
                         <div class="inline-actions" style="margin-bottom: 8px;">
     <label style="font-size:12px; color:#9fb1c9;">统计颗粒度</label>
@@ -1028,8 +1049,8 @@
                                 <span class="value negative" id="news-negative-count">0</span>
                             </div>
                         </div>
-                        <div id="news-summary-note" class="list" style="margin-top: 8px; max-height: 130px;">统计说明加载中...</div>
-                        <div id="news-source-stats" class="list" style="margin-top: 8px; max-height: 180px;">来源统计加载中...</div>
+                        <div id="news-summary-note" class="list news-scroll news-scroll-compact">统计说明加载中...</div>
+                        <div id="news-source-stats" class="list news-scroll news-scroll-fill">来源统计加载中...</div>
                     </div>
 
                     <div class="card news-card news-card-controls">
@@ -1092,7 +1113,7 @@
                                 <span class="value negative" id="news-llm-retry-count">0</span>
                             </div>
                         </div>
-                        <div id="news-llm-queue-note" class="list" style="margin-top: 8px;">队列监控加载中...</div>
+                        <div id="news-llm-queue-note" class="list news-scroll news-scroll-fill">队列监控加载中...</div>
                     </div>
 
                     <div class="card news-card news-card-chart">
@@ -1108,8 +1129,8 @@
                             </select>
                             <span id="news-bucket-meta" style="font-size:12px; color:#9fb1c9;">-</span>
                         </div>
-                        <div id="news-bucket-chart" style="height: 320px;">加载中...</div>
-                        <div id="news-bucket-list" class="list" style="margin-top: 8px; max-height: 220px;">加载中...</div>
+                        <div id="news-bucket-chart" class="news-chart-host">加载中...</div>
+                        <div id="news-bucket-list" class="list news-scroll news-scroll-chart">加载中...</div>
                     </div>
 
                     <div class="card news-card news-card-raw">
@@ -1117,7 +1138,7 @@
                         <div class="inline-actions" style="margin-bottom: 8px;">
                             <span id="news-unstructured-count" style="font-size:12px; color:#9fb1c9;">0 条</span>
                         </div>
-                        <div id="news-unstructured-list" class="list" style="max-height: 580px;">加载中...</div>
+                        <div id="news-unstructured-list" class="list news-scroll news-scroll-feed">加载中...</div>
                     </div>
 
                     <div class="card news-card news-card-structured">
@@ -1125,7 +1146,7 @@
                         <div class="inline-actions" style="margin-bottom: 8px;">
                             <span id="news-structured-count" style="font-size:12px; color:#9fb1c9;">0 条</span>
                         </div>
-                        <div id="news-structured-list" class="list" style="max-height: 580px;">加载中...</div>
+                        <div id="news-structured-list" class="list news-scroll news-scroll-feed">加载中...</div>
                     </div>
                 </div>
             </div>
@@ -1138,74 +1159,32 @@
                             <div class="form-group">
                                 <label>策略</label>
                                 <select id="backtest-strategy">
-                                    <optgroup label="趋势类 (7)">
-                                        <option value="MAStrategy">MA双均线 - 金叉死叉顺势</option>
-                                        <option value="EMAStrategy">EMA均线 - 快慢线交叉</option>
-                                        <option value="MACDStrategy">MACD趋势 - 金叉死叉跟随</option>
-                                        <option value="MACDHistogramStrategy">MACD柱体 - 动量拐点</option>
-                                        <option value="ADXTrendStrategy">ADX趋势 - 趋势强度确认</option>
-                                        <option value="TrendFollowingStrategy">趋势跟踪 - 多均线跟随</option>
-                                        <option value="AroonStrategy">Aroon - 趋势方向识别</option>
-                                    </optgroup>
-                                    <optgroup label="震荡类 (7)">
-                                        <option value="RSIStrategy">RSI - 超买超卖反转</option>
-                                        <option value="RSIDivergenceStrategy">RSI背离 - 顶底背离信号</option>
-                                        <option value="StochasticStrategy">KDJ随机 - K/D交叉</option>
-                                        <option value="BollingerBandsStrategy">布林带 - 价格回归轨道</option>
-                                        <option value="WilliamsRStrategy">W%R - 威廉超买超卖</option>
-                                        <option value="CCIStrategy">CCI - 通道指数突破</option>
-                                        <option value="StochRSIStrategy">StochRSI - RSI随机震荡</option>
-                                    </optgroup>
-                                    <optgroup label="动量类 (3)">
-                                        <option value="MomentumStrategy">动量 - 价格动量突破</option>
-                                        <option value="ROCStrategy">ROC - 变化率动量</option>
-                                        <option value="PriceAccelerationStrategy">加速度 - 价格加速度</option>
-                                    </optgroup>
-                                    <optgroup label="均值回归类 (5)">
-                                        <option value="MeanReversionStrategy">Z-Score回归 - 统计均值回归</option>
-                                        <option value="BollingerMeanReversionStrategy">布林回归 - 布林带均值回归</option>
-                                        <option value="VWAPReversionStrategy">VWAP回归 - 偏离VWAP回归</option>
-                                        <option value="VWAPStrategy">成交量加权 - VWAP价格回归</option>
-                                        <option value="MeanReversionHalfLifeStrategy">半衰期回归 - 基于回归速度</option>
-                                    </optgroup>
-                                    <optgroup label="突破类 (2)">
-                                        <option value="BollingerSqueezeStrategy">布林收窄 - 收窄后突破</option>
-                                        <option value="DonchianBreakoutStrategy">唐奇安通道 - 通道突破</option>
-                                    </optgroup>
-                                    <optgroup label="成交量类 (3)">
-                                        <option value="MFIStrategy">MFI - 资金流量指标</option>
-                                        <option value="OBVStrategy">OBV - 能量潮背离</option>
-                                        <option value="TradeIntensityStrategy">成交量异动 - 交易强度</option>
-                                    </optgroup>
-                                    <optgroup label="波动率类 (1)">
-                                        <option value="ParkinsonVolStrategy">Parkinson - 高低波动率回归</option>
-                                    </optgroup>
-                                    <optgroup label="风险类 (4)">
-                                        <option value="UlcerIndexStrategy">Ulcer指数 - 下行风险择时</option>
-                                        <option value="VaRBreakoutStrategy">VaR突破 - 异常波动突破</option>
-                                        <option value="MaxDrawdownStrategy">回撤恢复 - 回撤后反弹买入</option>
-                                        <option value="SortinoRatioStrategy">Sortino - 风险调整趋势</option>
-                                    </optgroup>
-                                    <optgroup label="统计套利类 (3)">
-                                        <option value="PairsTradingStrategy">配对交易 - 价差回归</option>
-                                        <option value="FamaFactorArbitrageStrategy">多因子 - 横截面多空</option>
-                                        <option value="HurstExponentStrategy">Hurst - 长记忆regime</option>
-                                    </optgroup>
-                                    <optgroup label="微观结构类 (1)">
-                                        <option value="OrderFlowImbalanceStrategy">订单流失衡 - 买卖压力</option>
-                                    </optgroup>
-                                    <optgroup label="宏观类 (4)">
-                                        <option value="MarketSentimentStrategy">恐慌贪婪 - 市场情绪指数</option>
-                                        <option value="SocialSentimentStrategy">社媒情绪 - Twitter分析</option>
-                                        <option value="FundFlowStrategy">资金流 - 交易所资金进出</option>
-                                        <option value="WhaleActivityStrategy">巨鲸跟踪 - 大户链上监控</option>
-                                    </optgroup>
+                                    <option value="" selected disabled>策略目录加载中...</option>
                                 </select>
                             </div>
                             <div class="form-group">
                                 <label>交易对</label>
                                 <select id="backtest-symbol">
                                     <option value="BTC/USDT" selected>BTC/USDT</option>
+                                    <option value="ETH/USDT">ETH/USDT</option>
+                                    <option value="BNB/USDT">BNB/USDT</option>
+                                    <option value="SOL/USDT">SOL/USDT</option>
+                                    <option value="XRP/USDT">XRP/USDT</option>
+                                    <option value="ADA/USDT">ADA/USDT</option>
+                                    <option value="DOGE/USDT">DOGE/USDT</option>
+                                    <option value="AVAX/USDT">AVAX/USDT</option>
+                                    <option value="DOT/USDT">DOT/USDT</option>
+                                    <option value="LINK/USDT">LINK/USDT</option>
+                                    <option value="LTC/USDT">LTC/USDT</option>
+                                    <option value="BCH/USDT">BCH/USDT</option>
+                                    <option value="ATOM/USDT">ATOM/USDT</option>
+                                    <option value="NEAR/USDT">NEAR/USDT</option>
+                                    <option value="ARB/USDT">ARB/USDT</option>
+                                    <option value="OP/USDT">OP/USDT</option>
+                                    <option value="SUI/USDT">SUI/USDT</option>
+                                    <option value="INJ/USDT">INJ/USDT</option>
+                                    <option value="TRX/USDT">TRX/USDT</option>
+                                    <option value="TON/USDT">TON/USDT</option>
                                 </select>
                             </div>
                             <div class="form-group">
@@ -1319,7 +1298,7 @@
 
     <div id="notification" class="notification"></div>
 
-    <script charset="utf-8" src="/static/js/app.js?v=92"></script>
+    <script charset="utf-8" src="/static/js/app.js?v=97"></script>
     <script charset="utf-8" src="/static/js/news_tab.js?v=21"></script>
     <script charset="utf-8" src="/static/js/dashboard_unstructured_news.js?v=12"></script>
 </body>

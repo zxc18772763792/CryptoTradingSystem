@@ -578,18 +578,24 @@ async def _run_manual_pull_job(request: Request, job_id: str, cfg: Dict[str, Any
             store["active"] = None
 
 
-def _event_lookup_maps(events: List[Dict[str, Any]]) -> tuple[Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]]]:
+def _event_lookup_maps(
+    events: List[Dict[str, Any]],
+) -> tuple[Dict[str, List[Dict[str, Any]]], Dict[str, List[Dict[str, Any]]], Dict[int, List[Dict[str, Any]]]]:
     by_url: Dict[str, List[Dict[str, Any]]] = {}
     by_title: Dict[str, List[Dict[str, Any]]] = {}
+    by_raw_id: Dict[int, List[Dict[str, Any]]] = {}
     for event in events:
         evidence = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
         url = _canonical_url(evidence.get("url"))
         title_key = _canonical_title(evidence.get("title"))
+        raw_news_id = event.get("raw_news_id")
         if url:
             by_url.setdefault(url, []).append(event)
         if title_key:
             by_title.setdefault(title_key, []).append(event)
-    return by_url, by_title
+        if raw_news_id:
+            by_raw_id.setdefault(int(raw_news_id), []).append(event)
+    return by_url, by_title, by_raw_id
 
 
 async def _backfill_recent_events(
@@ -607,15 +613,18 @@ async def _backfill_recent_events(
 
     keywords = _topic_keywords(cfg)
     anchor_keywords = _topic_anchor_keywords(cfg)
-    events_by_url, events_by_title = _event_lookup_maps(events)
+    events_by_url, events_by_title, events_by_raw_id = _event_lookup_maps(events)
 
     candidates: List[Dict[str, Any]] = []
     seen_raw_keys: set[str] = set()
     for raw in raw_rows:
         if not _is_relevant_news(raw, keywords, anchor_keywords):
             continue
+        raw_id = raw.get("id")
         raw_url = _canonical_url(raw.get("url"))
         raw_title = _canonical_title(raw.get("title"))
+        if raw_id and int(raw_id) in events_by_raw_id:
+            continue
         if raw_url and raw_url in events_by_url:
             continue
         if raw_title and raw_title in events_by_title:
@@ -689,7 +698,7 @@ async def build_latest_feed(
     keywords = _topic_keywords(cfg)
     anchor_keywords = _topic_anchor_keywords(cfg)
 
-    events_by_url, events_by_title = _event_lookup_maps(events)
+    events_by_url, events_by_title, events_by_raw_id = _event_lookup_maps(events)
 
     items: List[Dict[str, Any]] = []
     used_event_ids: set[str] = set()
@@ -699,12 +708,16 @@ async def build_latest_feed(
     for raw in raw_items:
         if not _is_relevant_news(raw, keywords, anchor_keywords):
             continue
+        raw_id = raw.get("id")
         url = _canonical_url(raw.get("url"))
         title_key = _canonical_title(raw.get("title"))
         story_key = title_key or url
         if story_key and story_key in seen_story_keys:
             continue
-        matched_events = events_by_url.get(url) or []
+        # Priority: match by raw_news_id (most reliable) > URL > title
+        matched_events = (events_by_raw_id.get(int(raw_id)) if raw_id else None) or []
+        if not matched_events:
+            matched_events = events_by_url.get(url) or []
         if not matched_events:
             matched_events = events_by_title.get(title_key) or []
 

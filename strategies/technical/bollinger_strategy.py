@@ -80,7 +80,7 @@ class BollingerBandsStrategy(StrategyBase):
                 strategy_name=self.name,
                 strength=1 - bb_position,  # 越靠近下轨，信号越强
                 stop_loss=current_close * (1 - self.params["stop_loss_pct"]),
-                take_profit=current_middle,  # 止盈到中轨
+                take_profit=current_close + (current_middle - current_lower),
                 metadata={
                     "upper": current_upper,
                     "middle": current_middle,
@@ -101,7 +101,7 @@ class BollingerBandsStrategy(StrategyBase):
                 strategy_name=self.name,
                 strength=bb_position,  # 越靠近上轨，信号越强
                 stop_loss=current_close * (1 + self.params["stop_loss_pct"]),
-                take_profit=current_middle,  # 止盈到中轨
+                take_profit=current_close - (current_upper - current_middle),
                 metadata={
                     "upper": current_upper,
                     "middle": current_middle,

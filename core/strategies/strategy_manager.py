@@ -4,10 +4,11 @@ import contextlib
 import inspect
 import re
 import statistics
+import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import pandas as pd
 from loguru import logger
@@ -61,6 +62,9 @@ class StrategyRuntimeStats:
     total_cycle_ms: float = 0.0
 
 
+_SIGNAL_CONFLICT_WINDOW_SECONDS = 60
+
+
 class StrategyManager:
     def __init__(self):
         self._strategies: Dict[str, StrategyBase] = {}
@@ -72,6 +76,12 @@ class StrategyManager:
         self._stats: Dict[str, StrategyRuntimeStats] = {}
         self._running_since: Dict[str, datetime] = {}
         self._runtime_deadlines: Dict[str, datetime] = {}
+        # symbol -> most recent Signal, used for conflict detection
+        self._recent_signal_by_symbol: Dict[str, Signal] = {}
+        # Shared market data cache: (exchange, symbol, timeframe, limit) -> (df, timestamp)
+        # TTL = 30s to avoid redundant loads when multiple strategies share same symbol/timeframe
+        self._market_data_cache: Dict[Tuple, Tuple[pd.DataFrame, float]] = {}
+        self._market_data_cache_ttl: float = 30.0
 
     def _ensure_strategy_account(self, name: str, params: Dict[str, Any]) -> None:
         from core.trading.account_manager import account_manager
@@ -128,6 +138,14 @@ class StrategyManager:
         timeframe: str,
         limit: int = 300,
     ) -> pd.DataFrame:
+        cache_key = (exchange, symbol, timeframe, limit)
+        now = time.monotonic()
+        cached = self._market_data_cache.get(cache_key)
+        if cached is not None:
+            df_cached, ts = cached
+            if now - ts < self._market_data_cache_ttl:
+                return df_cached.copy()
+
         local_df = await data_storage.load_klines_from_parquet(
             exchange=exchange,
             symbol=symbol,
@@ -174,7 +192,14 @@ class StrategyManager:
 
         result = df.tail(limit).copy()
         result["symbol"] = symbol
-        return result
+        self._market_data_cache[cache_key] = (result, time.monotonic())
+        # Evict cache entries older than 2x TTL to prevent unbounded growth
+        if len(self._market_data_cache) > 200:
+            cutoff = time.monotonic() - self._market_data_cache_ttl * 2
+            stale = [k for k, (_, t) in self._market_data_cache.items() if t < cutoff]
+            for k in stale:
+                del self._market_data_cache[k]
+        return result.copy()
 
     @staticmethod
     def _df_from_klines(klines: List[Any]) -> pd.DataFrame:
@@ -382,6 +407,34 @@ class StrategyManager:
             stats.last_signal_at = datetime.utcnow()
 
         for signal in signals:
+            # Conflict detection: drop weaker conflicting signals within the window
+            prior = self._recent_signal_by_symbol.get(signal.symbol)
+            if prior is not None:
+                age = (signal.timestamp - prior.timestamp).total_seconds()
+                if age <= _SIGNAL_CONFLICT_WINDOW_SECONDS:
+                    prior_side = prior.signal_type.value
+                    new_side = signal.signal_type.value
+                    buy_sides = {"buy", "close_short"}
+                    sell_sides = {"sell", "close_long"}
+                    is_conflict = (prior_side in buy_sides and new_side in sell_sides) or (
+                        prior_side in sell_sides and new_side in buy_sides
+                    )
+                    if is_conflict:
+                        if signal.strength <= prior.strength:
+                            logger.warning(
+                                f"Signal conflict for {signal.symbol}: dropping {new_side} "
+                                f"(strength={signal.strength:.2f}) vs existing {prior_side} "
+                                f"(strength={prior.strength:.2f})"
+                            )
+                            continue
+                        else:
+                            logger.warning(
+                                f"Signal conflict for {signal.symbol}: replacing {prior_side} "
+                                f"(strength={prior.strength:.2f}) with stronger {new_side} "
+                                f"(strength={signal.strength:.2f})"
+                            )
+            self._recent_signal_by_symbol[signal.symbol] = signal
+
             execution_signal_dispatched = False
             meta = dict(signal.metadata or {})
             meta.setdefault("account_id", account_id)
@@ -509,9 +562,11 @@ class StrategyManager:
                     if pair_df.empty:
                         continue
 
-                    try:
+                    sig = inspect.signature(strategy.generate_signals)
+                    params = list(sig.parameters.keys())
+                    if len(params) >= 2:
                         signals = strategy.generate_signals(df, pair_df)  # type: ignore[arg-type]
-                    except TypeError:
+                    else:
                         signals = strategy.generate_signals(df)
 
                     if signals:

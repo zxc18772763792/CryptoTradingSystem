@@ -73,7 +73,7 @@ class SymbolMapper:
 
         return self._canonical_map.get(upper, "")
 
-    def extract_symbols_from_text(self, text: str, limit: int = 3) -> List[str]:
+    def extract_symbols_from_text(self, text: str, limit: int = 8) -> List[str]:
         raw = self._normalize_alias(text)
         if not raw:
             return []

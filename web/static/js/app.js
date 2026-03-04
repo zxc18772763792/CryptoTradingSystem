@@ -1,7 +1,9 @@
 ﻿const API_BASE='/api';
-const state={positions:[],orders:[],strategies:[],availableStrategyTypes:[],strategyLibraryRows:[],summary:{running:[],recent_signals:[],runtime:{}},notifyRules:{},wsConnected:false,modeToken:'',bootCompleted:false,bootFailed:false,strategyHealth:null,lastHealthAlertKey:'',selectedStrategyName:'',closingPositions:{}};
+const state={positions:[],orders:[],strategies:[],availableStrategyTypes:[],strategyLibraryRows:[],strategyCatalogRows:[],summary:{running:[],recent_signals:[],runtime:{}},notifyRules:{},wsConnected:false,modeToken:'',bootCompleted:false,bootFailed:false,strategyHealth:null,lastHealthAlertKey:'',selectedStrategyName:'',closingPositions:{}};
 const researchState={lastFactorLibrary:null,lastMultiAsset:null,lastSentiment:null,lastAnalytics:null,lastOnchain:null,lastOverview:null};
 const backtestUIState={lastOptimize:null,lastCompare:null,defaultCompareStrategies:[]};
+const dataHealthState={last:null};
+const RESEARCH_DEFAULT_SYMBOLS=['BTC/USDT','ETH/USDT','BNB/USDT','SOL/USDT','XRP/USDT','ADA/USDT','DOGE/USDT','TRX/USDT','LINK/USDT','AVAX/USDT','DOT/USDT','POL/USDT','LTC/USDT','BCH/USDT','ETC/USDT','ATOM/USDT','NEAR/USDT','APT/USDT','ARB/USDT','OP/USDT','SUI/USDT','INJ/USDT','RUNE/USDT','AAVE/USDT','MKR/USDT','UNI/USDT','FIL/USDT','HBAR/USDT','ICP/USDT','TON/USDT'];
 let equityChart=null;
 let plotlyResizeSeq=0;
 let dataReloadTimer=null;
@@ -121,8 +123,131 @@ FlashLoanArbitrageStrategy:{cat:'套利',desc:'闪电贷套利'},
 MarketSentimentStrategy:{cat:'宏观',desc:'恐慌贪婪指数'},
 SocialSentimentStrategy:{cat:'宏观',desc:'社媒情绪分析'},
 FundFlowStrategy:{cat:'宏观',desc:'交易所资金流'},
-WhaleActivityStrategy:{cat:'宏观',desc:'巨鲸地址追踪'}
+WhaleActivityStrategy:{cat:'宏观',desc:'巨鲸地址追踪'},
+// ===== 量化多因子类 =====
+MultiFactorHFStrategy:{cat:'量化',desc:'多因子高频组合(5m)'}
 };
+function getStrategyMeta(name){
+const meta=STRATEGY_META[String(name||'').trim()]||{};
+return{cat:String(meta.cat||'其他'),desc:String(meta.desc||'可注册后在参数面板调整'),risk:String(meta.risk||'medium')};
+}
+function strategyCatalogMap(){
+return Object.fromEntries((state.strategyCatalogRows||[]).map(row=>[String(row?.name||'').trim(),row]).filter(([name])=>Boolean(name)));
+}
+function mergeStrategyCatalogRows(rows){
+const normalized=(Array.isArray(rows)?rows:[]).map(row=>{
+  const name=String(row?.name||'').trim();
+  if(!name)return null;
+  const existing=STRATEGY_META[name]||{};
+  STRATEGY_META[name]={
+    ...existing,
+    cat:String(row?.category||existing.cat||'其他'),
+    desc:String(row?.usage||existing.desc||name),
+    risk:String(row?.risk||existing.risk||'medium'),
+    backtestSupported:!!row?.backtest_supported,
+    backtestReason:String(row?.backtest_reason||existing.backtestReason||''),
+    defaultStart:!!row?.default_start,
+    recommendedTimeframe:String(row?.recommended_timeframe||existing.recommendedTimeframe||''),
+    recommendedSymbols:Array.isArray(row?.recommended_symbols)?row.recommended_symbols:[...(existing.recommendedSymbols||[])],
+  };
+  return{
+    ...row,
+    name,
+    category:String(row?.category||existing.cat||'其他'),
+    usage:String(row?.usage||existing.desc||name),
+    risk:String(row?.risk||existing.risk||'medium'),
+    backtest_supported:!!row?.backtest_supported,
+    default_start:!!row?.default_start,
+  };
+}).filter(Boolean);
+state.strategyCatalogRows=normalized;
+if(normalized.length){
+  state.availableStrategyTypes=normalized.map(row=>row.name);
+  backtestUIState.defaultCompareStrategies=normalized.filter(row=>row.backtest_supported&&row.default_start).map(row=>row.name);
+}
+return normalized;
+}
+async function ensureStrategyCatalog(force=false){
+if(!force&&Array.isArray(state.strategyCatalogRows)&&state.strategyCatalogRows.length)return state.strategyCatalogRows;
+try{
+  const d=await api('/strategies/catalog',{timeoutMs:18000});
+  return mergeStrategyCatalogRows(Array.isArray(d?.strategies)?d.strategies:[]);
+}catch(e){
+  console.error(e);
+  return Array.isArray(state.strategyCatalogRows)?state.strategyCatalogRows:[];
+}
+}
+function syncBacktestStrategyMeta(strategyName){
+const catalogMap=strategyCatalogMap();
+const row=catalogMap[String(strategyName||'').trim()];
+if(!row)return;
+// Sync recommended timeframe
+const tf=String(row.recommended_timeframe||'').trim();
+const tfSel=document.getElementById('backtest-timeframe');
+if(tf&&tfSel){const opts=[...tfSel.options].map(o=>o.value);if(opts.includes(tf))tfSel.value=tf;}
+// Sync recommended symbols into #backtest-symbol
+const syms=Array.isArray(row.recommended_symbols)&&row.recommended_symbols.length?row.recommended_symbols:null;
+if(!syms)return;
+const symSel=document.getElementById('backtest-symbol');
+if(!symSel)return;
+const currentVal=String(symSel.value||'').trim();
+const existingVals=new Set([...symSel.options].map(o=>String(o.value||'').trim()));
+// Insert recommended symbols at the top (before existing options) if not already present
+const toAdd=syms.filter(s=>String(s||'').trim()&&!existingVals.has(String(s).trim()));
+if(toAdd.length){
+  const frag=document.createDocumentFragment();
+  toAdd.forEach(s=>{const opt=document.createElement('option');opt.value=s;opt.textContent=s;frag.appendChild(opt);});
+  symSel.insertBefore(frag,symSel.firstChild);
+}
+// Select the first recommended symbol if the current selection is not in the recommended list
+const recSet=new Set(syms.map(s=>String(s||'').trim()));
+if(!recSet.has(currentVal)&&syms.length){symSel.value=String(syms[0]).trim();}
+}
+function renderBacktestStrategySelect(rows){
+const sel=document.getElementById('backtest-strategy');
+if(!sel)return;
+const supported=(Array.isArray(rows)?rows:[]).filter(row=>row&&row.name&&row.backtest_supported);
+if(!supported.length)return;
+const prev=String(sel.value||'').trim();
+const grouped={};
+for(const row of supported){
+  const groupLabel=mapStrategyCatToBacktestGroup(row.category||'其他');
+  (grouped[groupLabel]||(grouped[groupLabel]=[])).push(row);
+}
+const groupOrder=['趋势类','震荡类','动量类','均值回归类','突破类','成交量类','波动率类','风险类','统计套利类','微观结构类','套利类','宏观类','其他'];
+sel.innerHTML=groupOrder.filter(group=>Array.isArray(grouped[group])&&grouped[group].length).map(group=>{
+  const options=grouped[group].sort((a,b)=>String(a.name).localeCompare(String(b.name),'zh-CN')).map(row=>{
+    const usage=String(row.usage||'').trim();
+    const label=usage?`${strategyTypeShortName(row.name)} - ${usage}`:String(row.name);
+    return `<option value="${esc(row.name)}">${esc(label)}</option>`;
+  }).join('');
+  return `<optgroup label="${esc(group)} (${grouped[group].length})">${options}</optgroup>`;
+}).join('');
+const fallback=supported.some(row=>row.name===prev)?prev:(supported.find(row=>row.default_start)?.name||supported[0]?.name||'');
+if(fallback)sel.value=fallback;
+backtestUIState.compareCatalog=null;
+// Bind strategy change → auto-sync timeframe & symbols
+if(!sel._btMetaBound){
+  sel._btMetaBound=true;
+  sel.addEventListener('change',()=>syncBacktestStrategyMeta(sel.value));
+}
+// Only sync recommended meta on first load or when the selected strategy actually changes.
+if(!prev || prev!==sel.value)syncBacktestStrategyMeta(sel.value);
+}
+async function ensureBacktestStrategySelect(force=false){
+const rows=await ensureStrategyCatalog(force);
+const sel=document.getElementById('backtest-strategy');
+const hasLoadedOptions=!!sel&&[...sel.options].some(opt=>String(opt.value||'').trim());
+if(!force&&hasLoadedOptions&&Array.isArray(rows)&&rows.length)return rows;
+renderBacktestStrategySelect(rows);
+return rows;
+}
+async function ensureSelectedBacktestStrategy(){
+await ensureBacktestStrategySelect();
+const value=String(document.getElementById('backtest-strategy')?.value||'').trim();
+if(!value)throw new Error('回测策略目录尚未加载完成');
+return value;
+}
 
 function notify(msg,err=false){const n=document.getElementById('notification');if(!n)return;n.textContent=msg;n.className=`notification show ${err?'error':''}`;setTimeout(()=>n.classList.remove('show'),3000);}
 function isVisibleEl(el){
@@ -136,7 +261,7 @@ function getLocalJson(key, fallback){try{const raw=localStorage.getItem(key);if(
 function setLocalJson(key, value){try{localStorage.setItem(key, JSON.stringify(value));return true;}catch{return false;}}
 function strategyTypeShortName(v){
 const s=String(v||'').replace(/Strategy$/,'');
-const map={BollingerBands:'布林带',BollingerSqueeze:'布林挤压',BollingerMeanReversion:'布林回归',MeanReversion:'均值回归',TrendFollowing:'趋势跟随',DonchianBreakout:'唐奇安突破',WhaleActivity:'巨鲸',MarketSentiment:'市场情绪',SocialSentiment:'社媒情绪',FundFlow:'资金流',VWAPReversion:'VWAP回归',MACDHistogram:'MACD柱',MACD:'MACD',EMA:'EMA',MA:'MA',RSIDivergence:'RSI背离',RSI:'RSI',Stochastic:'随机指标',ADXTrend:'ADX趋势',Momentum:'动量',PairsTrading:'配对交易',CEXArbitrage:'CEX套利',TriangularArbitrage:'三角套利',DEXArbitrage:'DEX套利',FlashLoanArbitrage:'闪电贷套利',FamaFactorArbitrage:'Fama因子套利'};
+const map={BollingerBands:'布林带',BollingerSqueeze:'布林挤压',BollingerMeanReversion:'布林回归',MeanReversion:'均值回归',TrendFollowing:'趋势跟随',DonchianBreakout:'唐奇安突破',WhaleActivity:'巨鲸',MarketSentiment:'市场情绪',SocialSentiment:'社媒情绪',FundFlow:'资金流',VWAPReversion:'VWAP回归',MACDHistogram:'MACD柱',MACD:'MACD',EMA:'EMA',MA:'MA',RSIDivergence:'RSI背离',RSI:'RSI',Stochastic:'随机指标',ADXTrend:'ADX趋势',Momentum:'动量',PairsTrading:'配对交易',CEXArbitrage:'CEX套利',TriangularArbitrage:'三角套利',DEXArbitrage:'DEX套利',FlashLoanArbitrage:'闪电贷套利',FamaFactorArbitrage:'Fama因子套利',MultiFactorHF:'多因子高频',MeanReversionHalfLife:'半衰期回归',HurstExponent:'Hurst指数',VaRBreakout:'VaR突破',MaxDrawdown:'最大回撤',SortinoRatio:'Sortino比率',OrderFlowImbalance:'订单流失衡',TradeIntensity:'成交强度',ParkinsonVol:'波动率回归',UlcerIndex:'风险指数'};
 return map[s]||s;
 }
 function strategyInstanceSuffix(name){
@@ -533,16 +658,21 @@ async function cancelOrder(id,symbol,exchange){try{await api(`/trading/order/${i
 
 async function loadStrategies(){
 try{
+await Promise.allSettled([ensureStrategyCatalog(),ensureBacktestStrategySelect()]);
 const d=await api('/strategies/list');
-state.availableStrategyTypes=Array.isArray(d?.strategies)?d.strategies:[];
+const availableTypes=Array.isArray(d?.strategies)?d.strategies:[];
+state.availableStrategyTypes=availableTypes;
 state.strategies=d.registered||[];
 const pool=document.getElementById('strategies-list');
 if(pool){
 const catalog=backtestCompareCatalog();
-const libraryRows=(d.strategies||[]).map(s=>{
-  const m=STRATEGY_META[s]||{cat:'其他',desc:'可注册后在参数面板调整'};
-  const groupLabel=(catalog.byValue?.[s]?.groupLabel)||mapStrategyCatToBacktestGroup(m.cat);
-  const card=`<div class="strategy-card" onclick="registerStrategy('${s}')"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${s}</h4><span class="status-badge">${m.cat}</span></div><p>${m.desc}</p><p style="font-size:11px;color:#8fa6c0;">点击卡片注册到策略池（模拟盘）</p></div>`;
+const catalogRows=strategyCatalogMap();
+const libraryRows=availableTypes.map(s=>{
+  const row=catalogRows[s]||{};
+  const m=getStrategyMeta(s);
+  const groupLabel=(catalog.byValue?.[s]?.groupLabel)||mapStrategyCatToBacktestGroup(row.category||m.cat);
+  const desc=String(row.usage||m.desc||s);
+  const card=`<div class="strategy-card" onclick="registerStrategy('${s}')"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${s}</h4><span class="status-badge">${row.category||m.cat}</span></div><p>${desc}</p><p style="font-size:11px;color:#8fa6c0;">点击卡片注册到策略池（模拟盘）</p></div>`;
   return {strategy:s,groupLabel,card};
 });
 if(!libraryRows.length){pool.innerHTML='<div class="list-item">暂无可用策略</div>';}
@@ -564,7 +694,7 @@ if(!grid)return;
 const filters=getRegisteredStrategyFilters();
 const filteredStrategies=(state.strategies||[]).filter(s=>{
   const stype=String(s?.strategy_type||'');
-  const cat=(STRATEGY_META[stype]?.cat)||'其他';
+  const cat=getStrategyMeta(stype).cat;
   const sState=String(s?.state||'').toLowerCase();
   if(filters.category && cat!==filters.category)return false;
   if(filters.state && sState!==filters.state)return false;
@@ -592,13 +722,13 @@ if(!filteredStrategies.length){grid.innerHTML='<div class="list-item">没有匹�
 const typeCounts=filteredStrategies.reduce((m,s)=>{const k=String(s?.strategy_type||'未知');m[k]=(m[k]||0)+1;return m;},{});
 const typeSeen={};
 const grouped={};
-filteredStrategies.forEach(s=>{const cat=(STRATEGY_META[s?.strategy_type]?.cat)||'其他';(grouped[cat]||(grouped[cat]=[])).push(s);});
-const catOrder=['趋势','震荡','突破','均值回归','动量','反转','统计套利','套利','宏观','其他'];
+filteredStrategies.forEach(s=>{const cat=getStrategyMeta(s?.strategy_type).cat;(grouped[cat]||(grouped[cat]=[])).push(s);});
+const catOrder=['趋势','震荡','突破','均值回归','动量','反转','统计套利','成交量','波动率','风险','微观结构','套利','量化','宏观','其他'];
 grid.innerHTML=catOrder.filter(cat=>Array.isArray(grouped[cat])&&grouped[cat].length).map(cat=>{
   const cards=(grouped[cat]||[]).map(s=>{
 const stype=String(s?.strategy_type||'未知');
 typeSeen[stype]=(typeSeen[stype]||0)+1;
-const r=s.runtime||{},a=Number(s.allocation||0),m=STRATEGY_META[s.strategy_type]||{cat:'其他'};
+const r=s.runtime||{},a=Number(s.allocation||0),m=getStrategyMeta(s.strategy_type);
 const uptime=fmtDurationSec(r.uptime_seconds||0),accountId=String(r.account_id||s.account_id||'main');
 const isolated=Boolean(r.isolated_account),runnerAlive=Boolean(r.runner_alive);
 const typeCount=Number(typeCounts[stype]||1),typeIndex=Number(typeSeen[stype]||1);
@@ -653,17 +783,16 @@ if(document.getElementById('backtest-compare-strategy-list') && typeof loadBackt
 }
 async function registerStrategy(type){
 try{
-const profile={
+// Try to get timeframe/symbols from cached library data (populated by loadStrategyLibrary)
+const libEntry=(state.strategyLibraryRows||[]).find(r=>r.name===type);
+const hardcoded={
 PairsTradingStrategy:{exchange:'binance',timeframe:'1h',symbols:['BTC/USDT','ETH/USDT']},
-CEXArbitrageStrategy:{exchange:'binance',timeframe:'5m',symbols:['BTC/USDT']},
-TriangularArbitrageStrategy:{exchange:'binance',timeframe:'5m',symbols:['BTC/USDT']},
-DEXArbitrageStrategy:{exchange:'binance',timeframe:'5m',symbols:['BTC/USDT']},
-FlashLoanArbitrageStrategy:{exchange:'binance',timeframe:'5m',symbols:['BTC/USDT']},
-MarketSentimentStrategy:{exchange:'binance',timeframe:'15m',symbols:['BTC/USDT']},
-SocialSentimentStrategy:{exchange:'binance',timeframe:'15m',symbols:['BTC/USDT']},
-FundFlowStrategy:{exchange:'binance',timeframe:'15m',symbols:['BTC/USDT']},
-WhaleActivityStrategy:{exchange:'binance',timeframe:'15m',symbols:['BTC/USDT']},
-}[type]||{exchange:'binance',timeframe:'15m',symbols:['BTC/USDT']};
+}[type];
+const profile={
+  exchange:'binance',
+  timeframe:hardcoded?.timeframe||libEntry?.default_timeframe||'15m',
+  symbols:hardcoded?.symbols||(libEntry?.default_symbols?.length?libEntry.default_symbols:['BTC/USDT']),
+};
 const name=`${type}_${Date.now()}`;
 await api('/strategies/register',{method:'POST',body:JSON.stringify({name,strategy_type:type,params:{},symbols:profile.symbols,timeframe:profile.timeframe,exchange:profile.exchange,allocation:.2})});
 notify(`策略 ${type} 注册成功`);
@@ -731,6 +860,8 @@ async function selectRegisteredStrategy(name){
 state.selectedStrategyName=String(name||'');
 activateTab('strategies');
 await openEditor(state.selectedStrategyName);
+const panel=document.getElementById('strategy-edit-panel');
+if(panel)panel.scrollIntoView({behavior:'smooth',block:'nearest'});
 await loadStrategies();
 }
 async function saveAllocation(name){const i=document.querySelector(`input[data-alloc='${name}']`);if(!i)return;try{await api(`/strategies/${name}/allocation`,{method:'PUT',body:JSON.stringify({allocation:Number(i.value||0)})});notify(`策略 ${name} 资金占比已更新`);await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`更新资金占比失败: ${e.message}`,true);}}
@@ -754,7 +885,7 @@ a.innerHTML=(running.map(s=>{const p=perf[s.name]||{},rt=s.runtime||{};const rp=
 }
 if(r)r.innerHTML=signals.length?signals.map(s=>`<div class="list-item"><span>${s.strategy} | ${s.symbol} | ${s.signal_type.toUpperCase()}</span><span>${new Date(s.timestamp).toLocaleTimeString('zh-CN')}</span></div>`).join(''):`<div class="list-item"><span>${running.length?`实时刷新中（${d.refresh_hint_seconds||5}秒）暂无新信号，可能是策略条件未触发`:'暂无近期信号'}</span><span>${new Date().toLocaleTimeString('zh-CN')}</span></div>`;
 if(rt){
-rt.innerHTML=running.length?running.map(s=>{const p=perf[s.name]||{},ri=s.runtime||{};const rp=Number(p.return_pct),dd=Number(p.max_drawdown_pct),realized=Number(p.realized_pnl),unrealized=Number(p.unrealized_pnl),absPnl=(Number.isFinite(realized)?realized:0)+(Number.isFinite(unrealized)?unrealized:0),lu=p.last_update;const runtimeTxt=fmtDurationSec(ri.uptime_seconds||0);const lastRunTxt=s.last_run_at?new Date(s.last_run_at).toLocaleString('zh-CN'):'-';const rpTxt=Number.isFinite(rp)?`${rp.toFixed(2)}%`:'--';const ddTxt=Number.isFinite(dd)?`${dd.toFixed(2)}%`:'--';const absTxt=Number.isFinite(absPnl)?fmt(absPnl):'--';const rpCls=Number.isFinite(rp)?(rp>=0?'positive':'negative'):'';const absCls=Number.isFinite(absPnl)?(absPnl>=0?'positive':'negative'):'';const stype=s.strategy_type||s.name;const meta=STRATEGY_META[stype]||{};const desc=meta.desc||s.description||stype;const cat=meta.cat||'';return`<tr><td>${s.name}</td><td style="font-size:12px;color:#9fb1c9;max-width:200px;">${cat?`[${cat}] `:''}${esc(desc)}</td><td class="${rpCls}">${rpTxt}</td><td>${ddTxt}</td><td class="${absCls}">${absTxt}</td><td>${runtimeTxt}</td><td>${lastRunTxt}</td><td>${lu?new Date(lu).toLocaleString('zh-CN'):'-'}</td></tr>`;}).join(''):'<tr><td colspan="8">暂无运行中策略数据</td></tr>';
+rt.innerHTML=running.length?running.map(s=>{const p=perf[s.name]||{},ri=s.runtime||{};const rp=Number(p.return_pct),dd=Number(p.max_drawdown_pct),realized=Number(p.realized_pnl),unrealized=Number(p.unrealized_pnl),absPnl=(Number.isFinite(realized)?realized:0)+(Number.isFinite(unrealized)?unrealized:0),lu=p.last_update;const runtimeTxt=fmtDurationSec(ri.uptime_seconds||0);const lastRunTxt=s.last_run_at?new Date(s.last_run_at).toLocaleString('zh-CN'):'-';const rpTxt=Number.isFinite(rp)?`${rp.toFixed(2)}%`:'--';const ddTxt=Number.isFinite(dd)?`${dd.toFixed(2)}%`:'--';const absTxt=Number.isFinite(absPnl)?fmt(absPnl):'--';const rpCls=Number.isFinite(rp)?(rp>=0?'positive':'negative'):'';const absCls=Number.isFinite(absPnl)?(absPnl>=0?'positive':'negative'):'';const stype=s.strategy_type||s.name;const meta=getStrategyMeta(stype);const desc=meta.desc||s.description||stype;const cat=meta.cat||'';return`<tr><td>${s.name}</td><td style="font-size:12px;color:#9fb1c9;max-width:200px;">${cat?`[${cat}] `:''}${esc(desc)}</td><td class="${rpCls}">${rpTxt}</td><td>${ddTxt}</td><td class="${absCls}">${absTxt}</td><td>${runtimeTxt}</td><td>${lastRunTxt}</td><td>${lu?new Date(lu).toLocaleString('zh-CN'):'-'}</td></tr>`;}).join(''):'<tr><td colspan="8">暂无运行中策略数据</td></tr>';
 }
 renderStrategyHealthAlerts(d,state.strategyHealth);
 }catch(e){console.error(e);}
@@ -834,7 +965,7 @@ state.selectedStrategyName=String(name||'');
 const [info,schema,sizing]=await Promise.all([
   api(`/strategies/${name}`),
   api(`/strategies/${name}/params/schema`),
-  api(`/strategies/${name}/sizing-preview`).catch(()=>null),
+  api(`/strategies/${name}/sizing-preview`,{timeoutMs:8000}).catch(()=>null),
 ]);
 const runtime=info.runtime||{};
 const currentSymbols=Array.isArray(info.symbols)&&info.symbols.length?info.symbols:['BTC/USDT'];
@@ -1253,28 +1384,39 @@ if(el instanceof HTMLSelectElement && el.multiple){
 el.value=String((wanted[0]||fallback)||fallback);
 }
 async function loadResearchSymbolOptions(exchange){
+const renderResearchSymbolSelects=symbols=>{
+  const normalized=[];
+  const seen=new Set();
+  (Array.isArray(symbols)?symbols:[]).forEach(sym=>{
+    const text=String(sym||'').trim();
+    if(!text||seen.has(text))return;
+    seen.add(text);
+    normalized.push(text);
+  });
+  const finalSymbols=normalized.length?normalized:[...RESEARCH_DEFAULT_SYMBOLS];
+  const primary=document.getElementById('research-symbol');
+  if(primary){
+    const current=String(primary.value||'BTC/USDT').trim()||'BTC/USDT';
+    primary.innerHTML=finalSymbols.map(sym=>`<option value="${esc(sym)}"${sym===current?' selected':''}>${esc(sym)}</option>`).join('');
+    primary.value=finalSymbols.includes(current)?current:(finalSymbols.includes('BTC/USDT')?'BTC/USDT':finalSymbols[0]);
+  }
+  const multi=document.getElementById('research-symbols');
+  if(multi){
+    const currentSet=new Set(getSelectValues('research-symbols'));
+    const chosen=currentSet.size?currentSet:new Set(RESEARCH_DEFAULT_SYMBOLS.filter(sym=>finalSymbols.includes(sym)));
+    multi.innerHTML=finalSymbols.map(sym=>`<option value="${esc(sym)}"${chosen.has(sym)?' selected':''}>${esc(sym)}</option>`).join('');
+    if(!Array.from(multi.selectedOptions||[]).length && multi.options.length){
+      const fallbackList=RESEARCH_DEFAULT_SYMBOLS.filter(sym=>finalSymbols.includes(sym)).slice(0,Math.min(12,multi.options.length));
+      setSelectValues('research-symbols',fallbackList.length?fallbackList:[multi.options[0].value]);
+    }
+  }
+};
+renderResearchSymbolSelects(RESEARCH_DEFAULT_SYMBOLS);
 try{
 const ex=String(exchange||getResearchExchange()||'binance').trim().toLowerCase()||'binance';
-const resp=await api(`/data/symbols?exchange=${encodeURIComponent(ex)}`,{timeoutMs:15000});
+const resp=await api(`/data/research/symbols?exchange=${encodeURIComponent(ex)}`,{timeoutMs:15000});
 const symbols=(Array.isArray(resp?.symbols)?resp.symbols:[]).filter(Boolean);
-if(!symbols.length)return;
-const primary=document.getElementById('research-symbol');
-if(primary){
-  const current=String(primary.value||'BTC/USDT').trim()||'BTC/USDT';
-  primary.innerHTML=symbols.map(sym=>`<option value="${esc(sym)}"${sym===current?' selected':''}>${esc(sym)}</option>`).join('');
-  primary.value=symbols.includes(current)?current:(symbols.includes('BTC/USDT')?'BTC/USDT':symbols[0]);
-}
-const multi=document.getElementById('research-symbols');
-if(multi){
-  const currentSet=new Set(getSelectValues('research-symbols'));
-  const default30=['BTC/USDT','ETH/USDT','BNB/USDT','SOL/USDT','XRP/USDT','ADA/USDT','DOGE/USDT','TRX/USDT','LINK/USDT','AVAX/USDT','DOT/USDT','POL/USDT','LTC/USDT','BCH/USDT','ETC/USDT','ATOM/USDT','NEAR/USDT','APT/USDT','ARB/USDT','OP/USDT','SUI/USDT','INJ/USDT','RUNE/USDT','AAVE/USDT','MKR/USDT','UNI/USDT','FIL/USDT','HBAR/USDT','ICP/USDT','TON/USDT'];
-  const chosen=currentSet.size?currentSet:new Set(default30.filter(sym=>symbols.includes(sym)));
-  multi.innerHTML=symbols.map(sym=>`<option value="${esc(sym)}"${chosen.has(sym)?' selected':''}>${esc(sym)}</option>`).join('');
-  if(!Array.from(multi.selectedOptions||[]).length && multi.options.length){
-    const fallbackList=(default30.filter(sym=>symbols.includes(sym)).slice(0,Math.min(12,multi.options.length)));
-    setSelectValues('research-symbols',fallbackList.length?fallbackList:[multi.options[0].value]);
-  }
-}
+if(symbols.length)renderResearchSymbolSelects(symbols);
 }catch(e){console.warn('loadResearchSymbolOptions failed',e?.message||e);}
 }
 async function pollDownloadTask(taskId,{timeoutMs=12*60*1000,intervalMs=2500}={}){
@@ -1292,6 +1434,240 @@ if(dataReloadTimer)clearTimeout(dataReloadTimer);
 dataReloadTimer=setTimeout(()=>{
   loadKlinesByForm().catch(err=>console.warn('scheduleDataChartReload failed', err?.message||err));
 }, Math.max(0, Number(delay||0)));
+}
+function guessDataDownloadDays(tf,start=null,end=null){
+const t=String(tf||'1h').toLowerCase();
+let fallback=365;
+if(t.endsWith('s'))fallback=7;
+else if(t==='1m')fallback=30;
+else if(t==='5m')fallback=60;
+else if(t==='15m')fallback=120;
+else if(t==='1h')fallback=365;
+const st=toDate(start),et=toDate(end);
+if(st&&et&&et>st){
+  const spanDays=Math.ceil((et.getTime()-st.getTime())/86400000)+2;
+  return Math.max(1,Math.min(1200,spanDays));
+}
+return fallback;
+}
+function getDataHealthActionRows(action){
+const rows=Array.isArray(dataHealthState.last?.datasets)?dataHealthState.last.datasets:[];
+return rows.filter(row=>String(row?.recommended_action||'').trim()===String(action||'').trim());
+}
+async function executeDataHealthAction(target,{btn=null,refreshAfter=true}={}){
+const action=String(target?.action||'').trim();
+const exchange=String(target?.exchange||'').trim();
+const symbol=String(target?.symbol||'').trim();
+const timeframe=String(target?.timeframe||'').trim();
+const start=String(target?.start||'').trim();
+const end=String(target?.end||'').trim();
+if(!action||!exchange||!symbol||!timeframe)throw new Error('缺少体检动作参数');
+const notesEl=document.getElementById('data-storage-health-notes');
+const prevText=btn?btn.textContent:'';
+try{
+  if(btn){btn.disabled=true;btn.textContent='处理中...';}
+  if(action==='repair'){
+    if(notesEl)notesEl.textContent=`正在补全 ${exchange} ${symbol} ${timeframe} ...`;
+    try{
+      await api(`/data/integrity/repair?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`,{method:'POST',timeoutMs:120000});
+    }catch(err){
+      const msg=String(err?.message||'');
+      if(msg.includes('无本地数据可修复')||msg.includes('404')){
+        const days=guessDataDownloadDays(timeframe,start,end);
+        const query=end&&start
+          ?`exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&start_time=${encodeURIComponent(start)}&end_time=${encodeURIComponent(end)}&background=true`
+          :`exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&days=${days}&background=true`;
+        const dl=await api(`/data/download?${query}`,{method:'POST',timeoutMs:20000});
+        if(dl?.task_id)await pollDownloadTask(dl.task_id,{timeoutMs:20*60*1000,intervalMs:3000});
+        await api(`/data/integrity/repair?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`,{method:'POST',timeoutMs:120000});
+      }else{
+        throw err;
+      }
+    }
+    notify(`已补全 ${exchange} ${symbol} ${timeframe}`);
+  }else if(action==='redownload'){
+    if(notesEl)notesEl.textContent=`正在重拉 ${exchange} ${symbol} ${timeframe} ...`;
+    const days=guessDataDownloadDays(timeframe,start,end);
+    const query=end&&start
+      ?`exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&start_time=${encodeURIComponent(start)}&end_time=${encodeURIComponent(end)}&background=true`
+      :`exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&days=${days}&background=true`;
+    const dl=await api(`/data/download?${query}`,{method:'POST',timeoutMs:20000});
+    if(dl?.task_id)await pollDownloadTask(dl.task_id,{timeoutMs:20*60*1000,intervalMs:3000});
+    notify(`已重拉 ${exchange} ${symbol} ${timeframe}`);
+  }else{
+    throw new Error(`未知动作: ${action}`);
+  }
+  if(document.getElementById('data-exchange')?.value===exchange&&document.getElementById('data-symbol')?.value===symbol&&document.getElementById('data-timeframe')?.value===timeframe){
+    loadKlinesByForm().catch(()=>{});
+  }
+  if(refreshAfter)await loadDataStorageHealth();
+}finally{
+  if(btn){btn.disabled=false;btn.textContent=prevText;}
+}
+}
+async function runBatchDataHealthAction(action,btn){
+const rows=getDataHealthActionRows(action);
+if(!rows.length){notify(action==='redownload'?'当前没有需要重拉的损坏项':'当前没有需要补全的问题项',true);return;}
+if(typeof confirm==='function'){
+  const ok=confirm(`${action==='redownload'?'批量重拉':'批量补全'} ${rows.length} 个数据集，可能持续较久，是否继续？`);
+  if(!ok)return;
+}
+const notesEl=document.getElementById('data-storage-health-notes');
+const prevText=btn?btn.textContent:'';
+let okCount=0,failCount=0;
+const failures=[];
+try{
+  if(btn){btn.disabled=true;btn.textContent='批处理中...';}
+  for(let i=0;i<rows.length;i++){
+    const row=rows[i];
+    if(notesEl)notesEl.textContent=`批处理进度 ${i+1}/${rows.length}: ${row.exchange} ${row.symbol} ${row.timeframe}`;
+    try{
+      await executeDataHealthAction({
+        action,
+        exchange:row.exchange,
+        symbol:row.symbol,
+        timeframe:row.timeframe,
+        start:row.start,
+        end:row.end,
+      },{refreshAfter:false});
+      okCount+=1;
+    }catch(err){
+      failCount+=1;
+      failures.push(`${row.exchange} ${row.symbol} ${row.timeframe}: ${err.message}`);
+    }
+  }
+  await loadDataStorageHealth();
+  if(notesEl&&failures.length){
+    notesEl.textContent=`批处理完成：成功 ${okCount}，失败 ${failCount}\n${failures.slice(0,8).join('\n')}`;
+  }
+  notify(`${action==='redownload'?'批量重拉':'批量补全'}完成：成功 ${okCount}，失败 ${failCount}`,failCount>0);
+}finally{
+  if(btn){btn.disabled=false;btn.textContent=prevText;}
+}
+}
+function bindDataStorageHealthActions(){
+const tableEl=document.getElementById('data-storage-health-table');
+if(!tableEl||tableEl._healthBound)return;
+tableEl._healthBound=true;
+tableEl.addEventListener('click',async e=>{
+  const btn=e.target?.closest?.('button[data-health-action]');
+  if(!btn)return;
+  const action=String(btn.dataset.healthAction||'').trim();
+  const exchange=String(btn.dataset.exchange||'').trim();
+  const symbol=String(btn.dataset.symbol||'').trim();
+  const timeframe=String(btn.dataset.timeframe||'').trim();
+  const start=String(btn.dataset.start||'').trim();
+  const end=String(btn.dataset.end||'').trim();
+  if(!action||!exchange||!symbol||!timeframe)return;
+  try{
+    await executeDataHealthAction({action,exchange,symbol,timeframe,start,end},{btn});
+  }catch(err){
+    const notesEl=document.getElementById('data-storage-health-notes');
+    if(notesEl)notesEl.textContent=`体检动作失败: ${err.message}`;
+    notify(`体检动作失败: ${err.message}`,true);
+  }
+ });
+}
+function renderDataStorageHealth(data){
+dataHealthState.last=data||null;
+const summaryEl=document.getElementById('data-storage-health-summary');
+const exchangesEl=document.getElementById('data-storage-health-exchanges');
+const tableEl=document.getElementById('data-storage-health-table');
+const notesEl=document.getElementById('data-storage-health-notes');
+const summary=data?.summary||{};
+const metrics=[
+  ['数据集', Number(summary.dataset_count||0).toLocaleString('zh-CN')],
+  ['币种数', Number(summary.symbol_count||0).toLocaleString('zh-CN')],
+  ['活跃文件', Number(summary.active_files||0).toLocaleString('zh-CN')],
+  ['分片文件', Number(summary.partition_files||0).toLocaleString('zh-CN')],
+  ['损坏文件', Number(summary.corrupt_files||0).toLocaleString('zh-CN')],
+  ['问题数据集', Number(summary.datasets_with_issues||0).toLocaleString('zh-CN')],
+  ['重复目录桶', Number(summary.duplicate_symbol_buckets||0).toLocaleString('zh-CN')],
+  ['备份批次', Number(summary.backup_batches||0).toLocaleString('zh-CN')],
+  ['总大小', `${Number(summary.total_size_mb||0).toFixed(2)} MB`],
+  ['精确扫描', Number(summary.exact_scan_count||0).toLocaleString('zh-CN')],
+  ['快扫抑制', Number(summary.suppressed_gap_datasets||0).toLocaleString('zh-CN')],
+];
+if(summaryEl){
+  summaryEl.innerHTML=metrics.map(([label,value])=>`<div class="stat-box"><div class="stat-label">${esc(label)}</div><div class="stat-value">${esc(value)}</div></div>`).join('');
+}
+const exchanges=Array.isArray(data?.exchanges)?data.exchanges:[];
+if(exchangesEl){
+  exchangesEl.innerHTML=exchanges.length?exchanges.map(row=>`<div class="list-item"><span>${esc(row.exchange)} ｜ 数据集 ${Number(row.dataset_count||0)} ｜ 币种 ${Number(row.symbol_count||0)} ｜ 问题 ${Number(row.issue_count||0)}</span><span>${esc(`${Number(row.size_mb||0).toFixed(2)} MB ｜ 最近 ${row.latest_modified_at?fmtDateTime(row.latest_modified_at):'--'}`)}</span></div>`).join(''):'<div class="list-item"><span>交易所</span><span>暂无数据</span></div>';
+}
+const rows=Array.isArray(data?.datasets)?data.datasets:[];
+if(tableEl){
+  tableEl.innerHTML=!rows.length?'<div class="list-item"><span>明细</span><span>暂无数据</span></div>':`
+  <table>
+    <thead>
+      <tr>
+        <th>交易所</th>
+        <th>币种</th>
+        <th>周期</th>
+        <th>覆盖范围</th>
+        <th>行数</th>
+        <th>缺口</th>
+        <th>文件</th>
+        <th>来源</th>
+        <th>问题</th>
+        <th>最近更新</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows.map(row=>{
+        const issues=Array.isArray(row?.issues)?row.issues:[];
+        const issueClass=Number(row?.corrupt_files||0)>0?'data-health-note-bad':(issues.length?'data-health-note-warn':'data-health-note-good');
+        const gapPreview=Array.isArray(row?.gap_preview)&&row.gap_preview.length?`<div class="mini">${esc(row.gap_preview.slice(0,3).join(', '))}</div>`:'';
+        const scanNote=String(row?.scan_note||'').trim();
+        const action=String(row?.recommended_action||'').trim();
+        const actionHtml=action
+          ?`<div class="data-health-actions"><button type="button" class="btn btn-primary btn-sm" data-health-action="${esc(action)}" data-exchange="${esc(row.exchange||'')}" data-symbol="${esc(row.symbol||'')}" data-timeframe="${esc(row.timeframe||'')}" data-start="${esc(row.start||'')}" data-end="${esc(row.end||'')}">${action==='redownload'?'重拉':'补全'}</button></div>`
+          :'<span class="mini">无需操作</span>';
+        return `<tr>
+          <td>${esc(row.exchange||'-')}</td>
+          <td>${esc(row.symbol||'-')}</td>
+          <td>${esc(row.timeframe||'-')}</td>
+          <td>${esc(`${row.start||'--'} ~ ${row.end||'--'}`)}</td>
+          <td>${esc(`${Number(row.rows||0).toLocaleString('zh-CN')} ${row.scan_mode==='fast'?'(快扫)':''}`)}${row.coverage_ratio!==null&&row.coverage_ratio!==undefined?`<div class="mini">覆盖率 ${(Number(row.coverage_ratio||0)*100).toFixed(1)}%</div>`:''}</td>
+          <td class="${issueClass}">${esc(String(Number(row.gap_count||0)))}${gapPreview}${scanNote?`<div class="mini">${esc(scanNote)}</div>`:''}</td>
+          <td>${esc(`${Number(row.active_files||0)} 文件 / ${Number(row.partition_files||0)} 分片 / ${Number(row.size_mb||0).toFixed(2)} MB`)}</td>
+          <td>${esc(`${row.source_type||'-'}${Number(row.duplicate_dirs||0)>0?` / 重复目录 ${Number(row.duplicate_dirs||0)}`:''}`)}</td>
+          <td class="${issueClass}">${esc(issues.length?issues.join('、'):'正常')}</td>
+          <td>${esc(row.modified_at?fmtDateTime(row.modified_at):'--')}</td>
+          <td>${actionHtml}</td>
+        </tr>`;
+      }).join('')}
+    </tbody>
+  </table>`;
+}
+if(notesEl){
+  const duplicates=Array.isArray(data?.duplicates)?data.duplicates:[];
+  const backups=Array.isArray(data?.backups?.recent)?data.backups.recent:[];
+  const lines=[
+    `生成时间: ${data?.generated_at?fmtDateTime(data.generated_at):'--'}`,
+    `说明: 非秒级且数据量较小的数据集会做精确缺口扫描；其余使用快速估算。秒级快扫在覆盖率过低时会抑制缺口告警，避免误报。`,
+    `重复目录: ${duplicates.length?duplicates.map(item=>`${item.exchange} ${item.symbol} -> ${item.directories.join(', ')}`).join(' | '):'无'}`,
+    `最近备份: ${backups.length?backups.map(item=>`${item.batch} (${Number(item.symbol_dirs||0)}个symbol目录)`).join(' | '):'无'}`,
+  ];
+  notesEl.textContent=lines.join('\n');
+}
+bindDataStorageHealthActions();
+}
+async function loadDataStorageHealth(btn=null){
+const prevText=btn?btn.textContent:'';
+  const notesEl=document.getElementById('data-storage-health-notes');
+try{
+  if(btn){btn.disabled=true;btn.textContent='扫描中...';}
+  if(notesEl)notesEl.textContent='正在扫描数据仓，请稍候...';
+  const data=await api('/data/storage/health',{timeoutMs:60000});
+  renderDataStorageHealth(data);
+}catch(err){
+  if(notesEl)notesEl.textContent=`数据仓体检失败: ${err.message}`;
+  notify(`数据仓体检失败: ${err.message}`,true);
+}finally{
+  if(btn){btn.disabled=false;btn.textContent=prevText;}
+}
 }
 function bindData(){
 const f=document.getElementById('data-form');
@@ -1344,15 +1720,6 @@ const formatIntegrityOutput=(action,payload)=>{
   }
   return JSON.stringify(payload,null,2);
 };
-const guessDownloadDays=tf=>{
-  const t=String(tf||'1h').toLowerCase();
-  if(t.endsWith('s'))return 7;
-  if(t==='1m')return 30;
-  if(t==='5m')return 60;
-  if(t==='15m')return 120;
-  if(t==='1h')return 365;
-  return 365;
-};
 const run=async(a,btn)=>{
   const ex=document.getElementById('data-exchange').value,s=document.getElementById('data-symbol').value,tf=document.getElementById('data-timeframe').value,p=document.getElementById('integrity-primary').value,sec=document.getElementById('integrity-secondary').value;
   const prevText=btn?btn.textContent:'';
@@ -1366,8 +1733,8 @@ const run=async(a,btn)=>{
       }catch(err){
         const msg=String(err?.message||'');
         if(msg.includes('无本地数据可修复')||msg.includes('404')){
-          if(out)out.textContent=`本地暂无 ${s} ${tf} 数据，正在自动下载最近 ${guessDownloadDays(tf)} 天后再补全...`;
-          const dl=await api(`/data/download?exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(s)}&timeframe=${encodeURIComponent(tf)}&days=${guessDownloadDays(tf)}&background=true`,{method:'POST',timeoutMs:20000});
+          if(out)out.textContent=`本地暂无 ${s} ${tf} 数据，正在自动下载最近 ${guessDataDownloadDays(tf)} 天后再补全...`;
+          const dl=await api(`/data/download?exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(s)}&timeframe=${encodeURIComponent(tf)}&days=${guessDataDownloadDays(tf)}&background=true`,{method:'POST',timeoutMs:20000});
           if(dl?.task_id)await pollDownloadTask(dl.task_id,{timeoutMs:15*60*1000,intervalMs:3000});
           r=await api(`/data/integrity/repair?exchange=${ex}&symbol=${encodeURIComponent(s)}&timeframe=${tf}`,{method:'POST',timeoutMs:90000});
         }else{
@@ -1387,6 +1754,12 @@ const run=async(a,btn)=>{
   }
 };
 [['btn-integrity-check','check'],['btn-integrity-repair','repair'],['btn-cross-validate','cross'],['btn-reconnect','reconnect']].forEach(([id,a])=>{const b=document.getElementById(id);if(b)b.onclick=()=>run(a,b);});
+const healthBtn=document.getElementById('btn-refresh-storage-health');
+if(healthBtn)healthBtn.onclick=()=>loadDataStorageHealth(healthBtn);
+const batchRepairBtn=document.getElementById('btn-batch-health-repair');
+if(batchRepairBtn)batchRepairBtn.onclick=()=>runBatchDataHealthAction('repair',batchRepairBtn);
+const batchRedownloadBtn=document.getElementById('btn-batch-health-redownload');
+if(batchRedownloadBtn)batchRedownloadBtn.onclick=()=>runBatchDataHealthAction('redownload',batchRedownloadBtn);
 const dataExchange=document.getElementById('data-exchange');
 const downloadExchange=document.getElementById('download-exchange');
 if(dataExchange)dataExchange.onchange=async()=>{resetKlineChartForSwitch('正在切换交易所并加载新行情...');await loadDataSymbolOptions(dataExchange.value,['data-symbol']);scheduleDataChartReload(220);};
@@ -1398,6 +1771,7 @@ if(dataTimeframe)dataTimeframe.onchange=()=>{resetKlineChartForSwitch('正在切
 loadDataSymbolOptions(document.getElementById('data-exchange')?.value||'binance',['data-symbol']);
 loadDataSymbolOptions(document.getElementById('download-exchange')?.value||'binance',['download-symbol']);
 loadDataSymbolOptions('binance',['backtest-symbol']);
+setTimeout(()=>{loadDataStorageHealth().catch(err=>console.warn('loadDataStorageHealth failed',err?.message||err));},900);
 scheduleKlineRealtime();
 setTimeout(()=>{if(document.getElementById('candlestick-chart')&&!marketDataState.bars.length){loadKlinesByForm().catch(()=>{});}},500);
 setInterval(()=>{if(isDataTabActive()&&!marketDataState.isLoading&&!(marketDataState.bars||[]).length){loadKlinesByForm().catch(()=>{});}},7000);
@@ -1542,9 +1916,8 @@ updateCount();
 }
 async function loadBacktestComparePickerSource(source='library', opts={}){
 const src=String(source||'library').trim();
+await ensureBacktestStrategySelect();
 const catalog=backtestCompareCatalog();
-const hardDefault=['MAStrategy','EMAStrategy','RSIStrategy','RSIDivergenceStrategy','MACDStrategy','MACDHistogramStrategy','BollingerBandsStrategy','BollingerSqueezeStrategy','MeanReversionStrategy','BollingerMeanReversionStrategy','MomentumStrategy','TrendFollowingStrategy','PairsTradingStrategy','DonchianBreakoutStrategy','StochasticStrategy','ADXTrendStrategy','VWAPReversionStrategy','MarketSentimentStrategy','SocialSentimentStrategy','FundFlowStrategy','WhaleActivityStrategy'];
-backtestUIState.defaultCompareStrategies=catalog.items.map(x=>x.value).filter(v=>hardDefault.includes(v));
 let items=[];
 if(src==='registered'){
   const counts=await getRegisteredStrategyTypesForCompare();
@@ -1552,7 +1925,7 @@ if(src==='registered'){
   items=Object.keys(counts).map(type=>{
     const base=catalog.byValue?.[type];
     if(!base){skipped.push(type);return null;}
-    const groupLabel=base.groupLabel || mapStrategyCatToBacktestGroup(STRATEGY_META[type]?.cat);
+    const groupLabel=base.groupLabel || mapStrategyCatToBacktestGroup(getStrategyMeta(type).cat);
     const label=(base?.label)||type;
     return {value:type,label,groupLabel,registeredCount:counts[type]};
   }).filter(it=>it&&Boolean(it.value));
@@ -1562,7 +1935,9 @@ if(src==='registered'){
     return ai-bi || String(a.value).localeCompare(String(b.value),'zh-CN');
   });
 }else{
-  let available=Array.isArray(state.availableStrategyTypes)?state.availableStrategyTypes:[];
+  let available=(Array.isArray(state.strategyCatalogRows)&&state.strategyCatalogRows.length)
+    ?state.strategyCatalogRows.filter(row=>row?.backtest_supported).map(row=>String(row?.name||'').trim()).filter(Boolean)
+    :(Array.isArray(state.availableStrategyTypes)?state.availableStrategyTypes:[]);
   let libraryRows=Array.isArray(state.strategyLibraryRows)?state.strategyLibraryRows:[];
   if(!libraryRows.length){
     try{
@@ -1583,11 +1958,13 @@ if(src==='registered'){
       console.error(e);
     }
   }
-  const sourceList=(libraryRows&&libraryRows.length)?libraryRows.map(r=>String(r?.name||'').trim()).filter(Boolean):((available&&available.length)?available:(catalog.items||[]).map(it=>it.value));
+  const sourceList=(Array.isArray(state.strategyCatalogRows)&&state.strategyCatalogRows.length)
+    ?state.strategyCatalogRows.filter(row=>row?.backtest_supported).map(row=>String(row?.name||'').trim()).filter(Boolean)
+    :((libraryRows&&libraryRows.length)?libraryRows.map(r=>String(r?.name||'').trim()).filter(Boolean):((available&&available.length)?available:(catalog.items||[]).map(it=>it.value)));
   items=sourceList.map(type=>{
     const base=catalog.byValue?.[type];
-    const libMeta=(libraryRows||[]).find(r=>String(r?.name||'')===type)||{};
-    const meta=STRATEGY_META[type]||{};
+    const libMeta=(state.strategyCatalogRows||[]).find(r=>String(r?.name||'')===type)||(libraryRows||[]).find(r=>String(r?.name||'')===type)||{};
+    const meta=getStrategyMeta(type);
     return {
       value:type,
       label:(base?.label)||`${type}${libMeta?.usage?` - ${String(libMeta.usage).slice(0,24)}`:''}`,
@@ -1749,7 +2126,7 @@ ${renderRangeLockIndicatorHtml(data,false)}
 <div class="section-title">策略排行榜（按收益率排序，点击行可在上方预览该策略区间回测）</div>
 <div class="backtest-table-wrap">
 <table class="data-table">
-<thead><tr><th>排名</th><th>策略</th><th>参数来源</th><th>收益率</th><th>夏普</th><th>回撤</th><th>胜率</th><th>交易数</th><th>成本拖累</th><th>质量</th><th>操作</th></tr></thead>
+<thead><tr><th>排名</th><th>策略</th><th>参数来源</th><th>收益率</th><th>夏普</th><th>回撤</th><th>胜率</th><th>交易数</th><th>建议样本</th><th>零交易诊断</th><th>成本拖累</th><th>质量</th><th>操作</th></tr></thead>
 <tbody>
 ${ranked.map((r,i)=>`<tr class="bt-compare-row ${Number(backtestUIState?.lastComparePreviewRank??-1)===i?'active-preview':''}" data-rank-index="${i}" onclick="previewCompareStrategyByRank(${i})" style="cursor:pointer;">
 <td>${i+1}</td>
@@ -1760,6 +2137,8 @@ ${ranked.map((r,i)=>`<tr class="bt-compare-row ${Number(backtestUIState?.lastCom
 <td>${btPct(r.max_drawdown)}</td>
 <td>${btPct(r.win_rate)}</td>
 <td>${btMetricCell(r.total_trades,'int')}</td>
+<td>${btMetricCell(r.recommended_min_bars,'int')}</td>
+<td style="max-width:260px;white-space:normal;word-break:break-word;color:${Number(r.total_trades||0)===0?'#f2c96d':'#9fb1c9'};">${esc(r.zero_trade_reason||'--')}</td>
 <td>${btPct(r.cost_drag_return_pct)}</td>
 <td>${esc(r.quality_flag||'-')}</td>
 <td>
@@ -1768,7 +2147,7 @@ ${ranked.map((r,i)=>`<tr class="bt-compare-row ${Number(backtestUIState?.lastCom
     <button type="button" class="btn btn-primary btn-sm" onclick="event.stopPropagation();registerCompareStrategyByRank(${i})">注册</button>
   </div>
 </td>
-</tr>`).join('') || '<tr><td colspan="11">无成功结果</td></tr>'}
+</tr>`).join('') || '<tr><td colspan="13">无成功结果</td></tr>'}
 </tbody></table></div>
 <div id="backtest-extra-chart" class="backtest-chart"></div>
 ${errRows.length?`<div class="section-title">失败策略</div><div class="backtest-table-wrap"><table class="data-table"><thead><tr><th>策略</th><th>错误</th></tr></thead><tbody>${errRows.map(r=>`<tr><td>${esc(r.strategy||'-')}</td><td>${esc(r.error||'')}</td></tr>`).join('')}</tbody></table></div>`:''}
@@ -2160,16 +2539,16 @@ function bindAccountControls(){const b1=document.getElementById('btn-account-cre
 
 async function loadStrategyLibrary(){
 const out=document.getElementById('strategy-library-output');
-if(!out)return;
 try{
 const d=await api('/strategies/library',{timeoutMs:18000});
-out.textContent=JSON.stringify(d,null,2);
+state.strategyLibraryRows=Array.isArray(d?.library)?d.library:[];
+if(out)out.textContent=JSON.stringify(d,null,2);
 }catch(e){
 try{
 const d=await api('/strategies/runtime',{timeoutMs:12000});
-out.textContent=JSON.stringify({fallback:'runtime',note:'策略库接口异常，已降级展示运行面板',data:d},null,2);
+if(out)out.textContent=JSON.stringify({fallback:'runtime',note:'策略库接口异常，已降级展示运行面板',data:d},null,2);
 }catch(e2){
-out.textContent=`策略库加载失败: ${e.message||e2.message}`;
+if(out)out.textContent=`策略库加载失败: ${e.message||e2.message}`;
 }
 }
 }
@@ -2861,12 +3240,13 @@ function bindDataAdvanced(){const rout=document.getElementById('replay-output');
 
 function bindBacktest(){
 initBacktestComparePicker();
+ensureBacktestStrategySelect().catch(e=>console.error(e));
 const f=document.getElementById('backtest-form');
 if(f)f.onsubmit=async e=>{
 e.preventDefault();
 try{
 notify('回测运行中...');
-const st=document.getElementById('backtest-strategy').value,s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date').value,ed=document.getElementById('backtest-end-date').value,cr=0.0004,sb=2;
+const st=await ensureSelectedBacktestStrategy(),s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date').value,ed=document.getElementById('backtest-end-date').value,cr=0.0004,sb=2;
 let u=`/backtest/run?strategy=${st}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&include_series=true`;
 if(sd)u+=`&start_date=${encodeURIComponent(sd)}`;
 if(ed)u+=`&end_date=${encodeURIComponent(ed)}`;
@@ -2878,6 +3258,7 @@ const b1=document.getElementById('btn-backtest-compare');
 if(b1)b1.onclick=async()=>{
 try{
 renderBacktestExtraLoading('多策略对比运行中');
+await ensureSelectedBacktestStrategy();
 const s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2;
 const chosenStrategies=getSelectedBacktestCompareStrategies();
 if(!chosenStrategies.length){notify('请至少勾选一个策略',true);return;}
@@ -2897,7 +3278,7 @@ const b2=document.getElementById('btn-backtest-optimize');
 if(b2)b2.onclick=async()=>{
 try{
 renderBacktestExtraLoading('参数优化运行中');
-const st=document.getElementById('backtest-strategy').value,s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2;
+const st=await ensureSelectedBacktestStrategy(),s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2;
 const objective=String(document.getElementById('backtest-opt-objective')?.value||'total_return');
 const maxTrials=Math.max(8,Math.min(512,parseInt(document.getElementById('backtest-opt-trials')?.value||'64',10)||64));
 let ou=`/backtest/optimize?strategy=${st}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&objective=${encodeURIComponent(objective)}&max_trials=${maxTrials}&include_all_trials=true`;
@@ -2910,7 +3291,8 @@ notify('参数优化完成');
 };
 const b3=document.getElementById('btn-backtest-export');
 if(b3)b3.onclick=()=>{
-const st=document.getElementById('backtest-strategy').value,s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2,fmt=document.getElementById('backtest-export-format')?.value||'xlsx';
+const st=String(document.getElementById('backtest-strategy')?.value||'').trim(),s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2,fmt=document.getElementById('backtest-export-format')?.value||'xlsx';
+if(!st){notify('回测策略目录尚未加载完成',true);return;}
 let eu=`${API_BASE}/backtest/export?strategy=${st}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&format=${fmt}`;
 if(sd)eu+=`&start_date=${encodeURIComponent(sd)}`;
 if(ed)eu+=`&end_date=${encodeURIComponent(ed)}`;

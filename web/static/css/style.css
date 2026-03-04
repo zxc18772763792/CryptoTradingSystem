@@ -313,6 +313,118 @@ header h1 {
     grid-column: 1 / -1;
 }
 
+.trading-workspace {
+    display: grid;
+    grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
+    gap: 20px;
+    align-items: start;
+}
+
+.trading-sidebar,
+.trading-main,
+.trading-card,
+.trading-card .form-row,
+.trading-card .table-container {
+    min-width: 0;
+}
+
+.trading-sidebar {
+    display: grid;
+    gap: 18px;
+    align-content: start;
+}
+
+.trading-main {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+}
+
+.trading-card {
+    overflow: hidden;
+}
+
+.trading-card h3 {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.trading-card h3::after {
+    content: "";
+    flex: 1 1 auto;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(77, 182, 255, 0.26), rgba(32, 191, 120, 0));
+}
+
+.trading-sticky {
+    position: static;
+}
+
+.trading-span-2 {
+    grid-column: 1 / -1;
+}
+
+.trading-order-card {
+    background:
+        radial-gradient(circle at top right, rgba(58, 166, 255, 0.1), transparent 34%),
+        linear-gradient(180deg, #162232 0%, #142030 100%);
+}
+
+.trading-account-card {
+    background:
+        radial-gradient(circle at top left, rgba(32, 191, 120, 0.09), transparent 36%),
+        linear-gradient(180deg, #162232 0%, #142030 100%);
+}
+
+.trading-order-card .form-row,
+.trading-account-card .form-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.trading-order-card .form-group label,
+.trading-account-card .form-group label {
+    letter-spacing: 0.1px;
+}
+
+.trading-order-card .btn[type="submit"] {
+    margin-top: 4px;
+    width: 100%;
+}
+
+.trading-account-card .output-box {
+    min-height: 150px;
+    max-height: 300px;
+}
+
+.trading-orders-card .table-container,
+.trading-open-orders-card .table-container,
+.trading-conditional-card .table-container,
+.trading-positions-card .table-container {
+    margin-top: 8px;
+    overflow: auto;
+    border-radius: 12px;
+    border: 1px solid #23374d;
+    background: rgba(12, 19, 30, 0.55);
+}
+
+.trading-orders-card .table-container {
+    max-height: none;
+}
+
+.trading-open-orders-card .table-container,
+.trading-conditional-card .table-container,
+.trading-positions-card .table-container {
+    max-height: none;
+}
+
+.trading-orders-card .inline-actions,
+.trading-open-orders-card .inline-actions,
+.trading-conditional-card .inline-actions {
+    align-items: center;
+}
+
 .card {
     background: linear-gradient(180deg, #162232 0%, #152233 100%);
     border: 1px solid var(--card-border);
@@ -1445,6 +1557,77 @@ canvas {
     line-height: 1.5;
 }
 
+.card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.card-head h3 {
+    margin: 0;
+}
+
+.data-health-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.data-health-table-wrap {
+    border: 1px solid #24384f;
+    border-radius: 10px;
+    overflow: auto;
+    max-height: 420px;
+    background: #101a28;
+}
+
+.data-health-table-wrap table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 1080px;
+}
+
+.data-health-table-wrap th,
+.data-health-table-wrap td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #223449;
+    font-size: 12px;
+    vertical-align: top;
+    text-align: left;
+}
+
+.data-health-table-wrap th {
+    position: sticky;
+    top: 0;
+    background: #152436;
+    z-index: 1;
+    color: #d6e2f3;
+}
+
+.data-health-table-wrap tr:hover td {
+    background: rgba(67, 105, 148, 0.1);
+}
+
+.data-health-note-good {
+    color: #74d99f;
+}
+
+.data-health-note-warn {
+    color: #ffb15f;
+}
+
+.data-health-note-bad {
+    color: #ff8b8b;
+}
+
+.data-health-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .backtest-extra-panel {
     max-height: none;
     white-space: normal;
@@ -1870,25 +2053,149 @@ canvas {
 }
 
 /* News page/news tab layout hardening */
+body.news-page #news,
+#news {
+    --news-top-card-min: clamp(460px, 56vh, 620px);
+    --news-panel-min: clamp(560px, 68vh, 820px);
+    --news-feed-min: clamp(420px, 56vh, 760px);
+    --news-chart-height: clamp(300px, 38vh, 420px);
+}
+
 #news-summary-note .list-item,
 #news-source-stats .list-item,
 #news-bucket-list .list-item {
     align-items: flex-start;
 }
 
-#news-summary-note,
-#news-source-stats {
+body.news-page .news-layout,
+#news .news-layout {
+    grid-template-columns: minmax(300px, 0.95fr) minmax(300px, 0.95fr) minmax(360px, 1.1fr);
+    grid-auto-flow: row dense;
+    align-items: start;
+}
+
+body.news-page .news-card,
+#news .news-card {
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+body.news-page .news-card > h3,
+#news .news-card > h3 {
+    margin-bottom: 2px;
+}
+
+body.news-page .news-card > .inline-actions,
+#news .news-card > .inline-actions {
+    align-items: center;
+    row-gap: 8px;
+}
+
+body.news-page .news-card-summary,
+#news .news-card-summary {
+    grid-column: 1;
+    min-height: var(--news-top-card-min);
+    height: var(--news-top-card-min);
+    align-self: stretch;
+}
+
+body.news-page .news-card-controls,
+#news .news-card-controls {
+    grid-column: 2;
+    min-height: var(--news-top-card-min);
+    height: var(--news-top-card-min);
+    align-self: stretch;
+}
+
+body.news-page .news-card-queue,
+#news .news-card-queue {
+    grid-column: 3;
+    min-height: var(--news-top-card-min);
+    height: var(--news-top-card-min);
+    align-self: stretch;
+}
+
+body.news-page .news-card-chart,
+#news .news-card-chart {
+    grid-column: 1 / span 2;
+    min-height: var(--news-panel-min);
+}
+
+body.news-page .news-card-raw,
+#news .news-card-raw {
+    grid-column: 3;
+    min-height: var(--news-panel-min);
+}
+
+body.news-page .news-card-structured,
+#news .news-card-structured {
+    grid-column: 1 / -1;
+    min-height: var(--news-panel-min);
+    height: var(--news-panel-min);
+}
+
+body.news-page .news-card-controls,
+body.news-page .news-card-queue,
+#news .news-card-controls,
+#news .news-card-queue {
+    position: static;
+}
+
+body.news-page .news-card-controls .form-row,
+#news .news-card-controls .form-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+}
+
+body.news-page .news-card-controls .inline-actions,
+#news .news-card-controls .inline-actions {
+    flex-wrap: wrap;
+}
+
+body.news-page .news-card-controls .output-box,
+#news .news-card-controls .output-box {
+    min-height: 96px;
+    max-height: 148px;
+    margin-top: auto;
+}
+
+body.news-page .news-scroll,
+#news .news-scroll {
     max-height: none !important;
-    overflow: visible !important;
+    min-height: 0;
+    overflow-y: auto !important;
+    scrollbar-gutter: stable both-edges;
+    padding: 10px 12px;
+    border: 1px solid #22364d;
+    border-radius: 12px;
+    background: linear-gradient(180deg, rgba(14, 22, 33, 0.96), rgba(12, 19, 30, 0.94));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
-#news-summary-note {
-    margin-top: 12px !important;
-    margin-bottom: 10px;
+body.news-page .news-scroll-compact,
+#news .news-scroll-compact {
+    flex: 0 0 clamp(132px, 18vh, 180px);
 }
 
-#news-source-stats {
-    margin-top: 10px !important;
+body.news-page .news-scroll-fill,
+#news .news-scroll-fill {
+    flex: 1 1 auto;
+}
+
+body.news-page .news-scroll-chart,
+#news .news-scroll-chart {
+    flex: 1 1 auto;
+    min-height: clamp(180px, 22vh, 260px);
+}
+
+body.news-page .news-scroll-feed,
+#news .news-scroll-feed {
+    flex: 1 1 auto;
+    min-height: var(--news-feed-min);
 }
 
 #news-summary-note .list-item > span:first-child,
@@ -1909,13 +2216,20 @@ canvas {
     text-align: right;
 }
 
+.news-chart-host,
 #news-bucket-chart,
 #dashboard-news-bucket-chart {
     position: relative;
     overflow: hidden;
     border: 1px solid #23374d;
-    border-radius: 10px;
+    border-radius: 12px;
     background: #111723;
+}
+
+body.news-page .news-card-chart #news-bucket-chart,
+#news .news-card-chart #news-bucket-chart {
+    flex: 0 0 auto;
+    height: var(--news-chart-height) !important;
 }
 
 #news-bucket-chart .js-plotly-plot,
@@ -1926,118 +2240,6 @@ canvas {
 #dashboard-news-bucket-chart .svg-container {
     width: 100% !important;
     height: 100% !important;
-}
-
-#news-bucket-list {
-    overflow-y: auto;
-}
-
-#news .card .inline-actions {
-    align-items: center;
-    row-gap: 8px;
-}
-
-body.news-page .news-layout,
-#news .news-layout {
-    grid-template-columns: minmax(300px, 1.05fr) minmax(280px, 0.95fr) minmax(300px, 1.05fr);
-    align-items: start;
-}
-
-body.news-page .news-card,
-#news .news-card {
-    min-width: 0;
-    overflow: hidden;
-}
-
-body.news-page .news-card-summary,
-#news .news-card-summary {
-    grid-column: 1;
-    min-height: 540px;
-}
-
-body.news-page .news-card-controls,
-#news .news-card-controls {
-    grid-column: 2;
-    min-height: 540px;
-}
-
-body.news-page .news-card-queue,
-#news .news-card-queue {
-    grid-column: 3;
-    min-height: 540px;
-}
-
-body.news-page .news-card-chart,
-#news .news-card-chart {
-    grid-column: 1 / span 2;
-    min-height: 620px;
-}
-
-body.news-page .news-card-raw,
-#news .news-card-raw {
-    grid-column: 3;
-    min-height: 620px;
-}
-
-body.news-page .news-card-structured,
-#news .news-card-structured {
-    grid-column: 1 / -1;
-    min-height: 560px;
-}
-
-body.news-page .news-card-controls .form-row,
-#news .news-card-controls .form-row {
-    grid-template-columns: 1fr;
-    gap: 10px;
-}
-
-body.news-page .news-card-controls .inline-actions,
-#news .news-card-controls .inline-actions {
-    flex-wrap: wrap;
-}
-
-body.news-page .news-card-controls .output-box,
-#news .news-card-controls .output-box {
-    min-height: 92px;
-    max-height: 140px;
-}
-
-body.news-page .news-card-summary #news-summary-note,
-#news .news-card-summary #news-summary-note {
-    max-height: 150px !important;
-    overflow-y: auto !important;
-}
-
-body.news-page .news-card-summary #news-source-stats,
-#news .news-card-summary #news-source-stats {
-    max-height: 320px !important;
-    overflow-y: auto !important;
-}
-
-body.news-page .news-card-queue #news-llm-queue-note,
-#news .news-card-queue #news-llm-queue-note {
-    max-height: 260px;
-    overflow-y: auto;
-}
-
-body.news-page .news-card-chart #news-bucket-chart,
-#news .news-card-chart #news-bucket-chart {
-    height: 360px !important;
-}
-
-body.news-page .news-card-chart #news-bucket-list,
-#news .news-card-chart #news-bucket-list {
-    max-height: 210px !important;
-}
-
-body.news-page .news-card-raw #news-unstructured-list,
-#news .news-card-raw #news-unstructured-list {
-    max-height: 520px !important;
-}
-
-body.news-page .news-card-structured #news-structured-list,
-#news .news-card-structured #news-structured-list {
-    max-height: 460px !important;
 }
 
 body.news-page .news-card-summary .list-item,
@@ -2073,7 +2275,64 @@ body.news-page .news-card-structured .news-title,
     word-break: break-word;
 }
 
+@media (max-width: 1080px) {
+    .trading-workspace {
+        grid-template-columns: 1fr;
+    }
+
+    .trading-sticky {
+        position: static;
+    }
+
+    .trading-main {
+        grid-template-columns: 1fr;
+    }
+
+    .trading-span-2 {
+        grid-column: 1;
+    }
+
+    body.news-page .news-layout,
+    #news .news-layout {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    body.news-page .news-card-summary,
+    #news .news-card-summary {
+        grid-column: 1;
+    }
+
+    body.news-page .news-card-controls,
+    #news .news-card-controls {
+        grid-column: 2;
+    }
+
+    body.news-page .news-card-queue,
+    body.news-page .news-card-chart,
+    body.news-page .news-card-raw,
+    body.news-page .news-card-structured,
+    #news .news-card-queue,
+    #news .news-card-chart,
+    #news .news-card-raw,
+    #news .news-card-structured {
+        grid-column: 1 / -1;
+    }
+
+    body.news-page .news-card-controls,
+    body.news-page .news-card-queue,
+    #news .news-card-controls,
+    #news .news-card-queue {
+        position: static;
+    }
+}
+
 @media (max-width: 768px) {
+    .trading-order-card .form-row,
+    .trading-account-card .form-row,
+    .trading-main {
+        grid-template-columns: 1fr;
+    }
+
     #news-summary-note .list-item > span:last-child,
     #news-source-stats .list-item > span:last-child,
     #news-bucket-list .list-item > span:last-child {
@@ -2099,5 +2358,277 @@ body.news-page .news-card-structured .news-title,
     #news .news-card-structured {
         grid-column: 1;
         min-height: 0;
+        height: auto;
+        position: static;
     }
+
+    body.news-page #news,
+    #news {
+        --news-feed-min: clamp(280px, 42vh, 460px);
+        --news-chart-height: clamp(240px, 32vh, 320px);
+    }
+}
+
+/* ================================================================
+   DESIGN ENHANCEMENTS v2 — appended, safe cascade override
+   ================================================================ */
+
+/* ─── Extended CSS tokens ──────────────────────────────────────── */
+:root {
+    --accent-glow:   rgba(58, 166, 255, 0.20);
+    --positive-glow: rgba(32, 191, 120, 0.20);
+    --negative-glow: rgba(234, 91, 97, 0.20);
+    --transition-f:  0.14s ease;
+    --transition-s:  0.22s ease;
+}
+
+/* ─── Custom scrollbars ────────────────────────────────────────── */
+::-webkit-scrollbar              { width: 5px; height: 5px; }
+::-webkit-scrollbar-track        { background: #0d1520; border-radius: 99px; }
+::-webkit-scrollbar-thumb        { background: #2a3e57; border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover  { background: #3d5878; }
+
+/* ─── Text selection ───────────────────────────────────────────── */
+::selection { background: rgba(58, 166, 255, 0.28); color: #fff; }
+
+/* ─── Header gradient title ────────────────────────────────────── */
+header h1 {
+    background: linear-gradient(100deg, #c8e8ff 0%, #82c8ff 42%, #5adab8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+/* ─── Tab bar — accent underline active state ──────────────────── */
+.tab-btn {
+    position: relative;
+    transition: background-color var(--transition-s), color var(--transition-s);
+}
+.tab-btn.active {
+    background: rgba(28, 44, 68, 0.45);
+    border-color: transparent;
+    border-bottom: 2px solid var(--accent);
+    color: #c8e8ff;
+}
+.tab-btn:hover {
+    transform: none;
+}
+
+/* ─── Card heading indicator glow ─────────────────────────────── */
+.card h3::before {
+    box-shadow: 0 0 6px rgba(77, 182, 255, 0.45), 0 0 14px rgba(32, 191, 120, 0.18);
+}
+
+/* ─── Metric enhancements ──────────────────────────────────────── */
+.metric {
+    transition: background-color var(--transition-s), border-color var(--transition-s);
+}
+.metric:hover {
+    background-color: #1e3148;
+    border-color: #3b5570;
+}
+.metric .value {
+    font-size: 20px;
+}
+.metric .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+/* ─── Button enhancements ──────────────────────────────────────── */
+.btn:active {
+    transform: translateY(0) scale(0.97);
+    filter: brightness(0.94);
+}
+.btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+.btn:disabled,
+.btn[disabled] {
+    opacity: 0.40;
+    cursor: not-allowed;
+    transform: none !important;
+    filter: none !important;
+    pointer-events: none;
+}
+
+/* Secondary (outline) button variant */
+.btn-secondary {
+    background: transparent;
+    border: 1px solid #3b5a7e;
+    color: #b8d4ee;
+    transition: background-color var(--transition-s), border-color var(--transition-s),
+                color var(--transition-s), transform 0.18s ease, filter 0.18s ease;
+}
+.btn-secondary:hover {
+    background: rgba(58, 166, 255, 0.10);
+    border-color: var(--accent);
+    color: #d0eaff;
+    filter: none;
+}
+/* Brighter primary / danger */
+.btn-primary {
+    background: linear-gradient(135deg, #1a9a5e, #26dc85);
+    box-shadow: 0 2px 10px rgba(32, 191, 120, 0.26);
+}
+.btn-danger {
+    background: linear-gradient(135deg, #c2373e, #f0686e);
+    box-shadow: 0 2px 10px rgba(234, 91, 97, 0.24);
+}
+
+/* ─── Form input placeholder & focus ──────────────────────────── */
+.form-group input::placeholder,
+.form-group textarea::placeholder,
+.inline-actions input::placeholder {
+    color: #4c6480;
+}
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2.5px rgba(58, 166, 255, 0.22);
+}
+
+/* Native input accent color */
+input[type="range"],
+input[type="checkbox"],
+input[type="radio"] {
+    accent-color: var(--accent);
+}
+
+/* ─── Data table: alternating rows & uppercase headers ─────────── */
+.data-table th {
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-size: 11px;
+}
+.data-table tbody tr:nth-child(even) {
+    background: rgba(20, 33, 50, 0.50);
+}
+.data-table tbody tr:hover {
+    background-color: rgba(58, 166, 255, 0.09);
+}
+
+/* ─── Output box ───────────────────────────────────────────────── */
+.output-box {
+    font-family: ui-monospace, "Cascadia Code", SFMono-Regular, Menlo, monospace;
+    background: #090f1c;
+    box-shadow: inset 0 2px 7px rgba(0, 0, 0, 0.40);
+    border-color: #253a53;
+}
+
+/* ─── List item hover tint ─────────────────────────────────────── */
+.list-item {
+    transition: background-color var(--transition-f);
+}
+.list-item:hover {
+    background: rgba(28, 44, 66, 0.45);
+    border-radius: 6px;
+}
+
+/* ─── News row hover tint ──────────────────────────────────────── */
+.news-row {
+    transition: background-color var(--transition-f);
+    border-radius: 7px;
+}
+.news-row:hover {
+    background: rgba(28, 44, 66, 0.45);
+}
+
+/* ─── Strategy library card (strategy-card) hover lift ─────────── */
+.strategy-card:hover {
+    background: linear-gradient(180deg, #233a56 0%, #1e3248 100%);
+    border-color: #4579a8;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 18px rgba(4, 10, 18, 0.35);
+}
+
+/* ─── Registered strategy card enhanced hover & active ─────────── */
+.registered-strategy-card:hover {
+    background: linear-gradient(180deg, #1b2f49 0%, #172743 100%);
+    box-shadow: 0 4px 16px rgba(4, 10, 18, 0.32);
+    transform: translateY(-2px);
+}
+.registered-strategy-card.active {
+    border-color: var(--positive);
+    background: linear-gradient(180deg, #142e1f 0%, #112a1b 100%);
+    box-shadow: 0 0 0 1px rgba(32, 191, 120, 0.22) inset,
+                0 4px 14px rgba(32, 191, 120, 0.10);
+}
+
+/* ─── Category group: hover header & open shadow ───────────────── */
+.registered-category-group summary:hover {
+    background: rgba(26, 42, 62, 0.55);
+}
+.registered-category-group[open] {
+    box-shadow: 0 4px 16px rgba(4, 10, 18, 0.22);
+}
+
+/* ─── Backtest rank card: slide-right on hover ─────────────────── */
+.backtest-rank-card {
+    transition: background var(--transition-s), border-color var(--transition-s),
+                transform var(--transition-s), box-shadow var(--transition-s);
+}
+.backtest-rank-card:hover {
+    border-color: rgba(58, 166, 255, 0.55);
+    background: linear-gradient(180deg, #1e3150 0%, #182a42 100%);
+    transform: translateX(3px);
+    box-shadow: 0 4px 14px rgba(4, 10, 18, 0.28);
+}
+
+/* ─── Backtest compare item hover ──────────────────────────────── */
+.backtest-compare-item {
+    transition: background-color var(--transition-f), border-color var(--transition-f);
+}
+.backtest-compare-item:hover {
+    background: #1a2c42;
+    border-color: #3b5570;
+}
+
+/* ─── Backtest compare group summary hover ─────────────────────── */
+.backtest-compare-group summary:hover {
+    background: rgba(26, 44, 64, 0.50);
+}
+
+/* ─── Exchange section gradient header & name ──────────────────── */
+.exchange-header {
+    background: linear-gradient(135deg, #1a2f48 0%, #16273a 100%);
+    border-bottom: 1px solid rgba(45, 67, 94, 0.70);
+}
+.exchange-name {
+    background: linear-gradient(90deg, #7dcfff 0%, #4ddab0 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+/* ─── Connected badge pulse animation ──────────────────────────── */
+@keyframes badge-pulse {
+    0%, 100% { box-shadow: 0 0 0 0   rgba(32, 191, 120, 0.50); }
+    60%       { box-shadow: 0 0 0 5px rgba(32, 191, 120, 0);    }
+}
+.status-badge.connected {
+    animation: badge-pulse 3s ease-in-out infinite;
+}
+
+/* ─── Notification: slide-in with backdrop blur ─────────────────── */
+.notification {
+    border-radius: 12px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    background: rgba(23, 127, 78, 0.90);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.42),
+                0 0 0 1px rgba(32, 191, 120, 0.22);
+    font-weight: 600;
+}
+.notification.error {
+    background: rgba(195, 55, 62, 0.90);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.42),
+                0 0 0 1px rgba(234, 91, 97, 0.22);
+}
+@keyframes slideIn {
+    from { transform: translateX(60px) translateY(6px); opacity: 0; }
+    to   { transform: translateX(0)    translateY(0);   opacity: 1; }
 }

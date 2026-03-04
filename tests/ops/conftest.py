@@ -24,6 +24,7 @@ def ops_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     app.state.live_approvals = {}
     app.state.research_jobs = {}
     app.state.research_latest_path = tmp_path / "latest.json"
+    app.state.ai_proposal_registry_path = tmp_path / "ai_proposals.json"
     app.state.ops_exchange_init_error = None
     app.state.ops_standalone = False
     app.state.ops_enabled = True

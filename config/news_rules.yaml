@@ -66,10 +66,10 @@
 llm:
   model: GLM-4.5-Air
   base_url: https://open.bigmodel.cn/api/coding/paas/v4
-  timeout_sec: 45
+  timeout_sec: 90
   batch_size: 3
   summarize_limit: 40
-  summarize_timeout_sec: 45
+  summarize_timeout_sec: 60
   summarize_batch_size: 6
   summarize_max_glm_items: 40
 

@@ -3,6 +3,7 @@ import io
 import itertools
 import json
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import matplotlib
@@ -14,6 +15,15 @@ from fastapi.responses import StreamingResponse
 from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
+from config.strategy_registry import (
+    get_backtest_optimization_grid as registry_backtest_optimization_grid,
+    get_backtest_strategy_catalog as registry_backtest_strategy_catalog,
+    get_backtest_strategy_info as registry_backtest_strategy_info,
+    get_strategy_defaults,
+    is_strategy_backtest_supported as registry_is_strategy_backtest_supported,
+)
+from core.backtest.cost_models import fee_rate as resolve_fee_rate
+from core.backtest.cost_models import slippage_rate as resolve_slippage_rate
 from core.data import data_storage
 
 router = APIRouter()
@@ -50,268 +60,14 @@ _RETURN_CLIP_BY_TIMEFRAME = {
 }
 
 
-_BACKTEST_STRATEGY_CATALOG: List[Dict[str, Any]] = [
-    {"name": "MAStrategy", "description": "双均线趋势策略（Long/Flat）", "backtest_supported": True},
-    {"name": "EMAStrategy", "description": "EMA双均线趋势策略", "backtest_supported": True},
-    {"name": "RSIStrategy", "description": "RSI超卖入场、超买离场", "backtest_supported": True},
-    {"name": "RSIDivergenceStrategy", "description": "RSI背离策略", "backtest_supported": True},
-    {"name": "MACDStrategy", "description": "MACD上穿持有、下穿离场", "backtest_supported": True},
-    {"name": "MACDHistogramStrategy", "description": "MACD柱体拐点策略", "backtest_supported": True},
-    {"name": "BollingerBandsStrategy", "description": "布林带均值回归策略", "backtest_supported": True},
-    {"name": "BollingerSqueezeStrategy", "description": "布林挤压突破策略", "backtest_supported": True},
-    {"name": "MeanReversionStrategy", "description": "Z-Score均值回归策略", "backtest_supported": True},
-    {"name": "BollingerMeanReversionStrategy", "description": "布林均值回归策略", "backtest_supported": True},
-    {"name": "MomentumStrategy", "description": "动量突破策略", "backtest_supported": True},
-    {"name": "TrendFollowingStrategy", "description": "趋势跟随策略", "backtest_supported": True},
-    {"name": "PairsTradingStrategy", "description": "配对交易策略（近似单腿回测）", "backtest_supported": True},
-    {"name": "DonchianBreakoutStrategy", "description": "Donchian通道突破策略", "backtest_supported": True},
-    {"name": "StochasticStrategy", "description": "随机指标策略", "backtest_supported": True},
-    {"name": "ADXTrendStrategy", "description": "ADX趋势策略", "backtest_supported": True},
-    {"name": "VWAPReversionStrategy", "description": "VWAP偏离回归策略", "backtest_supported": True},
-    {"name": "MarketSentimentStrategy", "description": "宏观情绪策略", "backtest_supported": True},
-    {"name": "SocialSentimentStrategy", "description": "社媒情绪策略", "backtest_supported": True},
-    {"name": "FundFlowStrategy", "description": "资金流策略", "backtest_supported": True},
-    {"name": "WhaleActivityStrategy", "description": "巨鲸活动策略", "backtest_supported": True},
-    # ===== 新增因子策略 =====
-    {"name": "AroonStrategy", "description": "Aroon趋势策略", "backtest_supported": True},
-    {"name": "ROCStrategy", "description": "变化率动量策略", "backtest_supported": True},
-    {"name": "PriceAccelerationStrategy", "description": "价格加速度策略", "backtest_supported": True},
-    {"name": "WilliamsRStrategy", "description": "威廉%R策略", "backtest_supported": True},
-    {"name": "CCIStrategy", "description": "CCI通道策略", "backtest_supported": True},
-    {"name": "StochRSIStrategy", "description": "随机RSI策略", "backtest_supported": True},
-    {"name": "VWAPStrategy", "description": "VWAP均值回归策略", "backtest_supported": True},
-    {"name": "MeanReversionHalfLifeStrategy", "description": "半衰期均值回归策略", "backtest_supported": True},
-    {"name": "MFIStrategy", "description": "资金流量指标策略", "backtest_supported": True},
-    {"name": "OBVStrategy", "description": "能量潮背离策略", "backtest_supported": True},
-    {"name": "TradeIntensityStrategy", "description": "交易强度策略", "backtest_supported": True},
-    {"name": "ParkinsonVolStrategy", "description": "Parkinson波动率策略", "backtest_supported": True},
-    {"name": "UlcerIndexStrategy", "description": "Ulcer风险择时策略", "backtest_supported": True},
-    {"name": "VaRBreakoutStrategy", "description": "VaR异常突破策略", "backtest_supported": True},
-    {"name": "MaxDrawdownStrategy", "description": "回撤恢复策略", "backtest_supported": True},
-    {"name": "SortinoRatioStrategy", "description": "Sortino风险调整策略", "backtest_supported": True},
-    {"name": "HurstExponentStrategy", "description": "Hurst长记忆策略", "backtest_supported": True},
-    {"name": "OrderFlowImbalanceStrategy", "description": "订单流失衡策略", "backtest_supported": True},
-    # ===== 不支持回测的套利策略 =====
-    {
-        "name": "CEXArbitrageStrategy",
-        "description": "跨交易所套利策略",
-        "backtest_supported": False,
-        "reason": "依赖多交易所盘口/买卖价差，非单一OHLCV回测模型",
-    },
-    {
-        "name": "TriangularArbitrageStrategy",
-        "description": "三角套利策略",
-        "backtest_supported": False,
-        "reason": "依赖同交易所多交易对实时报价，不适用单一K线回测",
-    },
-    {
-        "name": "DEXArbitrageStrategy",
-        "description": "DEX套利策略",
-        "backtest_supported": False,
-        "reason": "依赖链上流动性池与实时路由报价",
-    },
-    {
-        "name": "FlashLoanArbitrageStrategy",
-        "description": "闪电贷套利策略",
-        "backtest_supported": False,
-        "reason": "依赖链上原子交易执行，K线回测无法刻画",
-    },
-]
-
+_BACKTEST_STRATEGY_CATALOG: List[Dict[str, Any]] = registry_backtest_strategy_catalog()
 _BACKTEST_STRATEGY_META: Dict[str, Dict[str, Any]] = {
     str(item["name"]): dict(item) for item in _BACKTEST_STRATEGY_CATALOG
 }
-
 _BACKTEST_OPTIMIZATION_GRIDS: Dict[str, Dict[str, List[Any]]] = {
-    "MAStrategy": {
-        "fast_period": [5, 8, 10, 12, 20],
-        "slow_period": [20, 30, 40, 60],
-    },
-    "EMAStrategy": {
-        "fast_period": [8, 12, 16],
-        "slow_period": [21, 26, 34, 55],
-    },
-    "RSIStrategy": {
-        "period": [10, 14, 21],
-        "oversold": [20, 25, 30],
-        "overbought": [65, 70, 75],
-    },
-    "RSIDivergenceStrategy": {
-        "period": [10, 14, 21],
-        "lookback": [12, 20, 30],
-        "min_divergence": [0.01, 0.02, 0.03],
-        "extrema_order": [3, 5, 7],
-    },
-    "MACDStrategy": {
-        "fast_period": [8, 12, 16],
-        "slow_period": [21, 26, 34],
-        "signal_period": [7, 9, 12],
-    },
-    "MACDHistogramStrategy": {
-        "fast_period": [8, 12, 16],
-        "slow_period": [21, 26, 34],
-        "signal_period": [7, 9, 12],
-        "min_histogram": [0.00005, 0.0001, 0.0002],
-    },
-    "BollingerBandsStrategy": {
-        "period": [14, 20, 26],
-        "num_std": [1.8, 2.0, 2.2, 2.5],
-    },
-    "BollingerSqueezeStrategy": {
-        "period": [14, 20, 26],
-        "num_std": [1.8, 2.0, 2.2],
-        "squeeze_threshold": [0.01, 0.02, 0.03],
-        "breakout_threshold": [0.005, 0.01, 0.015],
-    },
-    "MeanReversionStrategy": {
-        "lookback_period": [14, 20, 30],
-        "entry_z_score": [1.5, 2.0, 2.5],
-    },
-    "BollingerMeanReversionStrategy": {
-        "period": [14, 20, 26],
-        "num_std": [1.8, 2.0, 2.2, 2.5],
-    },
-    "MomentumStrategy": {
-        "lookback_period": [10, 14, 20, 30],
-        "momentum_threshold": [0.01, 0.015, 0.02, 0.03],
-    },
-    "TrendFollowingStrategy": {
-        "short_period": [10, 20, 30],
-        "long_period": [40, 50, 80],
-        "adx_threshold": [20, 25, 30],
-    },
-    "PairsTradingStrategy": {
-        "lookback_period": [14, 20, 30, 40],
-        "entry_z_score": [1.5, 2.0, 2.5],
-        "exit_z_score": [0.3, 0.5, 0.8],
-    },
-    "DonchianBreakoutStrategy": {
-        "lookback": [14, 20, 30],
-        "exit_lookback": [7, 10, 14],
-    },
-    "StochasticStrategy": {
-        "k_period": [9, 14, 21],
-        "d_period": [3, 5],
-        "oversold": [15, 20, 25],
-        "overbought": [75, 80, 85],
-    },
-    "ADXTrendStrategy": {
-        "period": [10, 14, 20],
-        "adx_threshold": [20, 25, 30],
-    },
-    "VWAPReversionStrategy": {
-        "window": [24, 48, 72],
-        "entry_deviation_pct": [0.006, 0.01, 0.015],
-        "exit_deviation_pct": [0.001, 0.002, 0.003],
-    },
-    "MarketSentimentStrategy": {
-        "lookback_period": [12, 24, 36],
-        "panic_threshold": [-0.06, -0.04, -0.03],
-        "euphoria_threshold": [0.03, 0.04, 0.06],
-    },
-    "SocialSentimentStrategy": {
-        "lookback_period": [6, 12, 24],
-        "enter_momentum": [0.008, 0.015, 0.02],
-        "exit_momentum": [-0.01, -0.008, -0.005],
-    },
-    "FundFlowStrategy": {
-        "min_imbalance_ratio": [0.05, 0.08, 0.12],
-        "inflow_threshold": [200000, 500000, 1000000],
-        "outflow_threshold": [-200000, -500000, -1000000],
-    },
-    "WhaleActivityStrategy": {
-        "min_whale_size": [100000, 150000, 300000],
-        "accumulation_threshold": [3, 4, 5],
-        "distribution_threshold": [3, 4, 5],
-    },
-    # ===== 新增因子策略优化网格 =====
-    "AroonStrategy": {
-        "period": [14, 25, 35],
-        "buy_threshold": [30, 50, 70],
-        "sell_threshold": [-70, -50, -30],
-    },
-    "ROCStrategy": {
-        "period": [10, 14, 21],
-        "buy_threshold": [3.0, 5.0, 8.0],
-        "sell_threshold": [-8.0, -5.0, -3.0],
-    },
-    "PriceAccelerationStrategy": {
-        "fast": [3, 5, 8],
-        "slow": [10, 15, 20],
-        "accel_threshold": [0.05, 0.1, 0.15],
-    },
-    "WilliamsRStrategy": {
-        "period": [10, 14, 21],
-        "oversold": [-90, -80, -70],
-        "overbought": [-30, -20, -10],
-    },
-    "CCIStrategy": {
-        "period": [14, 20, 30],
-        "oversold": [-150, -100, -80],
-        "overbought": [80, 100, 150],
-    },
-    "StochRSIStrategy": {
-        "rsi_period": [10, 14, 21],
-        "stoch_period": [10, 14, 21],
-        "oversold": [15, 20, 25],
-        "overbought": [75, 80, 85],
-    },
-    "VWAPStrategy": {
-        "period": [14, 20, 30],
-        "buy_threshold": [-0.03, -0.02, -0.01],
-        "sell_threshold": [0.01, 0.02, 0.03],
-    },
-    "MeanReversionHalfLifeStrategy": {
-        "lookback": [30, 60, 90],
-        "zscore_entry": [1.5, 2.0, 2.5],
-        "zscore_exit": [0.3, 0.5, 0.8],
-    },
-    "MFIStrategy": {
-        "period": [10, 14, 21],
-        "oversold": [15, 20, 25],
-        "overbought": [75, 80, 85],
-    },
-    "OBVStrategy": {
-        "smooth": [10, 20, 30],
-        "divergence_threshold": [1.0, 1.5, 2.0],
-    },
-    "TradeIntensityStrategy": {
-        "fast": [3, 5, 8],
-        "slow": [15, 20, 30],
-        "intensity_threshold": [1.2, 1.5, 2.0],
-    },
-    "ParkinsonVolStrategy": {
-        "period": [14, 20, 30],
-        "vol_percentile_low": [15, 20, 25],
-        "vol_percentile_high": [75, 80, 85],
-    },
-    "UlcerIndexStrategy": {
-        "period": [10, 14, 21],
-        "high_risk_threshold": [8, 10, 12],
-        "low_risk_threshold": [2, 3, 5],
-    },
-    "VaRBreakoutStrategy": {
-        "var_period": [15, 20, 30],
-        "confidence": [0.90, 0.95, 0.99],
-        "multiplier": [1.2, 1.5, 2.0],
-    },
-    "MaxDrawdownStrategy": {
-        "lookback": [20, 30, 45],
-        "dd_threshold": [-0.15, -0.10, -0.08],
-        "recovery_threshold": [0.2, 0.3, 0.4],
-    },
-    "SortinoRatioStrategy": {
-        "period": [20, 30, 45],
-        "sortino_threshold": [0.5, 1.0, 1.5],
-    },
-    "HurstExponentStrategy": {
-        "hurst_period": [50, 100, 150],
-        "zscore_threshold": [1.0, 1.5, 2.0],
-    },
-    "OrderFlowImbalanceStrategy": {
-        "period": [5, 10, 15],
-        "imbalance_threshold": [0.8, 1.0, 1.5],
-    },
+    name: registry_backtest_optimization_grid(name)
+    for name in _BACKTEST_STRATEGY_META.keys()
+    if registry_backtest_optimization_grid(name)
 }
 _BACKTEST_OPT_OBJECTIVES = {"total_return", "sharpe_ratio", "win_rate"}
 
@@ -321,12 +77,24 @@ def get_backtest_strategy_catalog() -> List[Dict[str, Any]]:
 
 
 def get_backtest_strategy_info(strategy: str) -> Dict[str, Any]:
-    return dict(_BACKTEST_STRATEGY_META.get(str(strategy), {}))
+    return dict(registry_backtest_strategy_info(strategy))
 
 
 def is_strategy_backtest_supported(strategy: str) -> bool:
-    info = _BACKTEST_STRATEGY_META.get(str(strategy), {})
-    return bool(info.get("backtest_supported", False))
+    return bool(registry_is_strategy_backtest_supported(strategy))
+
+
+def _resolve_cost_rates(commission_rate: float, slippage_bps: float) -> tuple[float, float]:
+    config = SimpleNamespace(
+        fee_model="flat",
+        commission_rate=max(0.0, float(commission_rate or 0.0)),
+        slippage_model="flat",
+        slippage=max(0.0, float(slippage_bps or 0.0)) / 10000.0,
+    )
+    return (
+        float(resolve_fee_rate(config, role="taker")),
+        float(resolve_slippage_rate(config)),
+    )
 
 
 def _annual_factor(timeframe: str) -> int:
@@ -454,6 +222,254 @@ def _normalize_optimize_objective(objective: str) -> str:
     return text if text in _BACKTEST_OPT_OBJECTIVES else "total_return"
 
 
+def _timeframe_to_seconds(timeframe: str) -> int:
+    text = str(timeframe or "").strip()
+    if not text:
+        return 3600
+    try:
+        value = max(1, int(text[:-1] or 1))
+    except Exception:
+        return 3600
+    unit = text[-1]
+    if unit == "s":
+        return value
+    if unit == "m":
+        return value * 60
+    if unit == "h":
+        return value * 3600
+    if unit == "d":
+        return value * 86400
+    if unit == "w":
+        return value * 7 * 86400
+    if unit == "M":
+        return value * 30 * 86400
+    return 3600
+
+
+def _normalize_symbol(value: Any) -> str:
+    text = str(value or "").strip().upper().replace("_", "/")
+    if not text:
+        return ""
+    if "/" not in text:
+        text = f"{text}/USDT"
+    return text
+
+
+def _default_fama_universe(anchor_symbol: str = "BTC/USDT") -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in [
+        anchor_symbol,
+        "BTC/USDT",
+        "ETH/USDT",
+        "BNB/USDT",
+        "SOL/USDT",
+        "XRP/USDT",
+        "DOGE/USDT",
+        "ADA/USDT",
+        "AVAX/USDT",
+        "LINK/USDT",
+        "DOT/USDT",
+        "MATIC/USDT",
+        "LTC/USDT",
+    ]:
+        symbol = _normalize_symbol(item)
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        out.append(symbol)
+    return out
+
+
+def _cross_sectional_zscore(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    mean = df.mean(axis=1)
+    std = df.std(axis=1).replace(0, np.nan)
+    out = df.sub(mean, axis=0).div(std, axis=0)
+    return out.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
+def _portfolio_trade_stats(returns: pd.Series, turnover: pd.Series) -> Dict[str, Any]:
+    change_ts = [ts for ts, val in turnover.items() if float(val or 0.0) > 1e-12]
+    if not change_ts:
+        return {"entries": 0, "exits": 0, "completed": 0, "win_rate": 0.0}
+
+    change_pos = [returns.index.get_loc(ts) for ts in change_ts]
+    segment_returns: List[float] = []
+    start_pos = 0
+    for pos in change_pos[1:]:
+        chunk = returns.iloc[start_pos : pos + 1]
+        start_pos = pos + 1
+        if not chunk.empty:
+            segment_returns.append(float(np.expm1(np.log1p(chunk.clip(lower=-0.95)).sum())))
+
+    tail = returns.iloc[start_pos:]
+    if not tail.empty:
+        segment_returns.append(float(np.expm1(np.log1p(tail.clip(lower=-0.95)).sum())))
+
+    completed = len(segment_returns)
+    wins = sum(1 for item in segment_returns if item > 0)
+    win_rate = (wins / completed * 100.0) if completed else 0.0
+    changes = len(change_ts)
+    return {
+        "entries": changes,
+        "exits": changes,
+        "completed": completed,
+        "win_rate": round(win_rate, 2),
+    }
+
+
+def _build_fama_backtest_components(
+    market_bundle: Dict[str, pd.DataFrame],
+    timeframe: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    params = dict(params or {})
+    if not market_bundle:
+        raise HTTPException(status_code=400, detail="Fama 回测缺少横截面市场数据")
+
+    normalized_bundle: Dict[str, pd.DataFrame] = {}
+    for raw_symbol, frame in market_bundle.items():
+        symbol = _normalize_symbol(raw_symbol)
+        if not symbol or frame is None or frame.empty:
+            continue
+        df = frame.copy()
+        df.index = pd.to_datetime(df.index)
+        df = df.sort_index()
+        if not {"close", "volume"}.issubset(df.columns):
+            continue
+        normalized_bundle[symbol] = df
+
+    if len(normalized_bundle) < 2:
+        raise HTTPException(status_code=400, detail="Fama 回测至少需要 2 个可用标的")
+
+    common_index = None
+    for frame in normalized_bundle.values():
+        idx = pd.Index(pd.to_datetime(frame.index))
+        common_index = idx if common_index is None else common_index.intersection(idx)
+    common_index = pd.Index(common_index) if common_index is not None else pd.Index([])
+    if len(common_index) < _min_required_bars(timeframe):
+        raise HTTPException(status_code=400, detail="Fama 回测有效公共样本不足")
+
+    symbols = list(normalized_bundle.keys())
+    close_df = pd.DataFrame({sym: normalized_bundle[sym].reindex(common_index)["close"] for sym in symbols}).ffill()
+    volume_df = pd.DataFrame({sym: normalized_bundle[sym].reindex(common_index)["volume"] for sym in symbols}).fillna(0.0)
+    high_df = pd.DataFrame({sym: normalized_bundle[sym].reindex(common_index)["high"] for sym in symbols}).ffill()
+    low_df = pd.DataFrame({sym: normalized_bundle[sym].reindex(common_index)["low"] for sym in symbols}).ffill()
+
+    close_df = close_df.dropna(axis=1, how="all").ffill().dropna(how="all")
+    volume_df = volume_df.reindex(close_df.index).fillna(0.0)[close_df.columns]
+    high_df = high_df.reindex(close_df.index).ffill()[close_df.columns]
+    low_df = low_df.reindex(close_df.index).ffill()[close_df.columns]
+    if close_df.shape[1] < 2 or close_df.empty:
+        raise HTTPException(status_code=400, detail="Fama 回测有效标的不足")
+
+    lookback_bars = max(60, int(params.get("lookback_bars", 240) or 240))
+    quantile = max(0.05, min(0.45, float(params.get("quantile", 0.25) or 0.25)))
+    min_abs_score = max(0.0, float(params.get("min_abs_score", params.get("alpha_threshold", 0.10)) or 0.0))
+    top_n = max(1, int(params.get("top_n", 6) or 6))
+    allow_long = bool(params.get("allow_long", True))
+    allow_short = bool(params.get("allow_short", True))
+    max_vol = max(0.0, float(params.get("max_vol", 0.0) or 0.0))
+    max_spread = max(0.0, float(params.get("max_spread", 0.0) or 0.0))
+
+    returns_df = close_df.pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    momentum_window = max(4, min(lookback_bars // 4, max(6, len(close_df) // 3)))
+    value_window = max(8, min(lookback_bars // 2, max(10, len(close_df) // 2)))
+    quality_window = max(8, min(lookback_bars // 3, max(10, len(close_df) // 2)))
+    vol_window = max(8, min(lookback_bars // 4, max(10, len(close_df) // 2)))
+    liq_window = max(8, min(lookback_bars // 5, max(10, len(close_df) // 2)))
+    ema_fast = max(3, momentum_window // 2)
+    ema_slow = max(8, value_window // 2)
+
+    momentum = close_df.pct_change(momentum_window)
+    value = -(close_df / close_df.rolling(value_window, min_periods=max(4, value_window // 2)).mean() - 1.0)
+    quality = returns_df.rolling(quality_window, min_periods=max(4, quality_window // 2)).mean() / (
+        returns_df.rolling(quality_window, min_periods=max(4, quality_window // 2)).std().replace(0, np.nan)
+    )
+    low_vol = -returns_df.rolling(vol_window, min_periods=max(4, vol_window // 2)).std()
+    trend = (
+        close_df.ewm(span=ema_fast, adjust=False).mean()
+        / close_df.ewm(span=ema_slow, adjust=False).mean().replace(0, np.nan)
+    ) - 1.0
+    liquidity = np.log((close_df * volume_df).rolling(liq_window, min_periods=max(4, liq_window // 2)).mean())
+
+    score_df = (
+        _cross_sectional_zscore(momentum) * 0.35
+        + _cross_sectional_zscore(value) * 0.20
+        + _cross_sectional_zscore(quality) * 0.20
+        + _cross_sectional_zscore(low_vol) * 0.10
+        + _cross_sectional_zscore(liquidity) * 0.05
+        + _cross_sectional_zscore(trend) * 0.10
+    ).replace([np.inf, -np.inf], np.nan)
+
+    spread_proxy = ((high_df - low_df) / close_df.replace(0, np.nan)).rolling(
+        max(4, vol_window // 2),
+        min_periods=max(3, vol_window // 4),
+    ).median()
+    rolling_vol = returns_df.rolling(vol_window, min_periods=max(4, vol_window // 2)).std()
+
+    interval_minutes = max(1, int(params.get("rebalance_interval_minutes", params.get("cooldown_min", 60)) or 60))
+    rebalance_bars = max(1, int(round(interval_minutes * 60 / max(1, _timeframe_to_seconds(timeframe)))))
+    eligible_min = max(2, int(np.ceil(close_df.shape[1] * quantile)))
+    weights = pd.DataFrame(0.0, index=close_df.index, columns=close_df.columns)
+    current = pd.Series(0.0, index=close_df.columns, dtype=float)
+    warmup = max(momentum_window, value_window, quality_window, vol_window, liq_window)
+
+    for idx, ts in enumerate(close_df.index):
+        if idx < warmup:
+            weights.iloc[idx] = current
+            continue
+        if idx % rebalance_bars != 0 and idx != len(close_df.index) - 1:
+            weights.iloc[idx] = current
+            continue
+
+        score_row = score_df.loc[ts].dropna().sort_values(ascending=False)
+        if score_row.empty:
+            current = pd.Series(0.0, index=close_df.columns, dtype=float)
+            weights.iloc[idx] = current
+            continue
+
+        if max_vol > 0:
+            vol_row = rolling_vol.loc[ts].reindex(score_row.index)
+            score_row = score_row[vol_row.fillna(max_vol + 1) <= max_vol]
+        if max_spread > 0:
+            spread_row = spread_proxy.loc[ts].reindex(score_row.index)
+            score_row = score_row[spread_row.fillna(max_spread + 1) <= max_spread]
+        if min_abs_score > 0:
+            score_row = score_row[score_row.abs() >= min_abs_score]
+
+        current = pd.Series(0.0, index=close_df.columns, dtype=float)
+        if len(score_row) >= eligible_min:
+            divisor = 2 if allow_long and allow_short else 1
+            leg_n = min(top_n, max(1, len(score_row) // divisor))
+            if allow_long:
+                longs = list(score_row.head(leg_n).index)
+                if longs:
+                    current.loc[longs] = 0.5 / len(longs) if allow_short else 1.0 / len(longs)
+            if allow_short:
+                shorts = list(score_row.tail(leg_n).index)
+                if shorts:
+                    current.loc[shorts] = -(0.5 / len(shorts) if allow_long else 1.0 / len(shorts))
+        weights.iloc[idx] = current
+
+    turnover = weights.diff().abs().sum(axis=1).fillna(weights.abs().sum(axis=1))
+    benchmark_symbol = _normalize_symbol(params.get("benchmark_symbol") or close_df.columns[0])
+    if benchmark_symbol not in close_df.columns:
+        benchmark_symbol = str(close_df.columns[0])
+
+    return {
+        "returns": returns_df,
+        "weights": weights,
+        "turnover": turnover,
+        "benchmark_symbol": benchmark_symbol,
+        "benchmark_close": close_df[benchmark_symbol].copy(),
+        "universe_size": int(close_df.shape[1]),
+        "quantile": quantile,
+    }
+
+
 def _optimize_strategy_on_df(
     strategy: str,
     df: pd.DataFrame,
@@ -463,6 +479,7 @@ def _optimize_strategy_on_df(
     slippage_bps: float,
     objective: str = "total_return",
     max_trials: int = 64,
+    market_bundle: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> Dict[str, Any]:
     if strategy not in _BACKTEST_OPTIMIZATION_GRIDS:
         raise ValueError(f"暂不支持 {strategy} 参数优化")
@@ -492,6 +509,7 @@ def _optimize_strategy_on_df(
                 include_series=False,
                 commission_rate=max(0.0, float(commission_rate or 0.0)),
                 slippage_bps=max(0.0, float(slippage_bps or 0.0)),
+                market_bundle=market_bundle,
             )
             score = float(metrics.get(objective_key, 0))
             trials.append({"params": params, "metrics": metrics, "score": score})
@@ -530,8 +548,8 @@ def _build_positions(strategy: str, df: pd.DataFrame, params: Optional[Dict[str,
     position = pd.Series(0.0, index=df.index)
 
     if strategy == "MAStrategy":
-        fast_n = int(params.get("fast_period", 10))
-        slow_n = int(params.get("slow_period", 30))
+        fast_n = int(params.get("fast_period", 20))
+        slow_n = int(params.get("slow_period", 60))
         fast = close.rolling(fast_n, min_periods=fast_n).mean()
         slow = close.rolling(slow_n, min_periods=slow_n).mean()
         position = (fast > slow).astype(float)
@@ -606,9 +624,9 @@ def _build_positions(strategy: str, df: pd.DataFrame, params: Optional[Dict[str,
                 in_position = False
             values.append(1.0 if in_position else 0.0)
         position = pd.Series(values, index=df.index)
-    elif strategy in {"MomentumStrategy", "TrendFollowingStrategy"}:
-        lookback = int(params.get("lookback_period", 14))
-        threshold = float(params.get("momentum_threshold", 0.02))
+    elif strategy == "MomentumStrategy":
+        lookback = int(params.get("lookback_period", 20))
+        threshold = float(params.get("momentum_threshold", 0.015))
 
         momentum = close / close.shift(lookback) - 1
         in_position = False
@@ -617,6 +635,38 @@ def _build_positions(strategy: str, df: pd.DataFrame, params: Optional[Dict[str,
             if not in_position and m >= threshold:
                 in_position = True
             elif in_position and m <= -threshold * 0.5:
+                in_position = False
+            values.append(1.0 if in_position else 0.0)
+        position = pd.Series(values, index=df.index)
+    elif strategy == "TrendFollowingStrategy":
+        short_n = int(params.get("short_period", 20))
+        long_n = int(params.get("long_period", 55))
+        adx_threshold = float(params.get("adx_threshold", 23))
+
+        short_ma = close.rolling(short_n, min_periods=short_n).mean()
+        long_ma = close.rolling(long_n, min_periods=long_n).mean()
+
+        # ADX calculation for trend strength filter
+        high = df["high"]
+        low = df["low"]
+        adx_period = int(params.get("adx_period", 14))
+        up_move = high.diff()
+        down_move = -low.diff()
+        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+        tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1 / adx_period, adjust=False).mean()
+        plus_di = 100 * (plus_dm.ewm(alpha=1 / adx_period, adjust=False).mean() / atr.replace(0, np.nan))
+        minus_di = 100 * (minus_dm.ewm(alpha=1 / adx_period, adjust=False).mean() / atr.replace(0, np.nan))
+        dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
+        adx = dx.ewm(alpha=1 / adx_period, adjust=False).mean()
+
+        in_position = False
+        values = []
+        for s, l, a in zip(short_ma.fillna(0), long_ma.fillna(0), adx.fillna(0)):
+            if not in_position and s > l and a >= adx_threshold:
+                in_position = True
+            elif in_position and s < l:
                 in_position = False
             values.append(1.0 if in_position else 0.0)
         position = pd.Series(values, index=df.index)
@@ -966,8 +1016,8 @@ def _build_positions(strategy: str, df: pd.DataFrame, params: Optional[Dict[str,
         prev_dd = drawdown.shift(1)
         in_position = False
         values = []
-        for dd, pd, rec, price in zip(drawdown.fillna(0), prev_dd.fillna(0), recovery.fillna(0), close):
-            if not in_position and pd <= dd_th and rec > recovery_th and price > close.shift(1).fillna(price):
+        for dd, prev, rec, price in zip(drawdown.fillna(0), prev_dd.fillna(0), recovery.fillna(0), close):
+            if not in_position and prev <= dd_th and rec > recovery_th and price > close.shift(1).fillna(price):
                 in_position = True
             elif in_position and rec >= 0.8:
                 in_position = False
@@ -1127,6 +1177,93 @@ def _trade_stats(close: pd.Series, position: pd.Series) -> Dict[str, Any]:
     }
 
 
+def _strategy_recommended_min_bars(
+    strategy: str,
+    timeframe: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> int:
+    base_min = _min_required_bars(timeframe)
+    merged = dict(get_strategy_defaults(strategy) or {})
+    merged.update(params or {})
+
+    period_like_keys = (
+        "period",
+        "lookback",
+        "window",
+        "fast",
+        "slow",
+        "signal",
+        "short",
+        "long",
+        "exit_lookback",
+        "adx_period",
+        "vol_window",
+    )
+    ignore_keys = (
+        "threshold",
+        "oversold",
+        "overbought",
+        "num_std",
+        "zscore",
+        "entry_z",
+        "exit_z",
+        "quantile",
+        "top_n",
+        "min_abs_score",
+        "max_spread",
+        "max_vol",
+    )
+
+    lookbacks: List[int] = []
+    for key, raw_value in merged.items():
+        key_text = str(key or "").strip().lower()
+        if not key_text or any(token in key_text for token in ignore_keys):
+            continue
+        if not any(token in key_text for token in period_like_keys):
+            continue
+        try:
+            value = int(float(raw_value))
+        except Exception:
+            continue
+        if value > 1:
+            lookbacks.append(value)
+
+    max_lookback = max(lookbacks) if lookbacks else base_min
+    return max(base_min, min(5000, max_lookback * 4))
+
+
+def _diagnose_zero_trade_reason(
+    strategy: str,
+    df: pd.DataFrame,
+    position: pd.Series,
+    trade_stats: Dict[str, Any],
+    timeframe: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> str:
+    recommended_min_bars = _strategy_recommended_min_bars(strategy, timeframe, params=params)
+    sample_size = int(len(df))
+    if sample_size < recommended_min_bars:
+        return f"当前样本仅 {sample_size} 根，低于建议的 {recommended_min_bars} 根"
+
+    entries = int(trade_stats.get("entries") or 0)
+    exits = int(trade_stats.get("exits") or 0)
+    completed = int(trade_stats.get("completed") or 0)
+    last_pos = float(position.iloc[-1]) if len(position) else 0.0
+    active_ratio = float((position > 0).mean()) if len(position) else 0.0
+
+    if entries == 0 and exits == 0:
+        if active_ratio >= 0.98:
+            return "策略几乎全程持仓，未出现完整平仓，无法形成闭环交易"
+        return "当前区间未触发入场条件，阈值可能过严或行情不匹配"
+
+    if completed == 0 and entries > 0:
+        if last_pos > 0:
+            return "触发了入场，但直到区间结束仍未满足平仓条件"
+        return "出现零散入场/出场信号，但未配对成完整交易"
+
+    return ""
+
+
 def _run_backtest_core(
     strategy: str,
     df: pd.DataFrame,
@@ -1136,6 +1273,7 @@ def _run_backtest_core(
     include_series: bool = False,
     commission_rate: float = 0.0004,
     slippage_bps: float = 2.0,
+    market_bundle: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> Dict[str, Any]:
     if not is_strategy_backtest_supported(strategy):
         info = get_backtest_strategy_info(strategy)
@@ -1152,16 +1290,34 @@ def _run_backtest_core(
             detail=f"数据量不足，无法回测（{timeframe} 至少需要 {min_bars} 根K线，当前 {len(df)} 根）",
         )
 
-    position = _build_positions(strategy, df, params=params)
-    returns, anomaly_ratio, clip_limit = _safe_bar_returns(df["close"], timeframe)
-    gross_returns = position.shift(1).fillna(0.0) * returns
+    benchmark_close = df["close"]
+    if strategy == "FamaFactorArbitrageStrategy":
+        components = _build_fama_backtest_components(
+            market_bundle=market_bundle or {},
+            timeframe=timeframe,
+            params=params,
+        )
+        asset_returns = components["returns"]
+        weights = components["weights"]
+        turnover = components["turnover"]
+        benchmark_close = components["benchmark_close"]
+        returns, anomaly_ratio, clip_limit = _safe_bar_returns(benchmark_close, timeframe)
+        gross_returns = (weights.shift(1).fillna(0.0) * asset_returns).sum(axis=1)
+        gross_returns = gross_returns.reindex(benchmark_close.index).fillna(0.0)
+        exposure = weights.abs().sum(axis=1).reindex(benchmark_close.index).fillna(0.0)
+        position = exposure
+        trade_stats = _portfolio_trade_stats(gross_returns, turnover.reindex(benchmark_close.index).fillna(0.0))
+    else:
+        position = _build_positions(strategy, df, params=params)
+        returns, anomaly_ratio, clip_limit = _safe_bar_returns(df["close"], timeframe)
+        gross_returns = position.shift(1).fillna(0.0) * returns
 
-    turnover = position.diff().abs().fillna(0.0)
-    if len(position) > 0:
-        turnover.iloc[0] = abs(float(position.iloc[0] or 0.0))
+        turnover = position.diff().abs().fillna(0.0)
+        if len(position) > 0:
+            turnover.iloc[0] = abs(float(position.iloc[0] or 0.0))
+        trade_stats = _trade_stats(df["close"], position)
 
-    fee_rate = max(0.0, float(commission_rate or 0.0))
-    slip_rate = max(0.0, float(slippage_bps or 0.0)) / 10000.0
+    fee_rate, slip_rate = _resolve_cost_rates(commission_rate=commission_rate, slippage_bps=slippage_bps)
     total_cost_rate = fee_rate + slip_rate
 
     trade_cost = turnover * total_cost_rate
@@ -1183,7 +1339,6 @@ def _run_backtest_core(
     std = float(strategy_returns.std() or 0.0)
     sharpe = float(strategy_returns.mean() / std * np.sqrt(ann)) if std > 0 else 0.0
 
-    trade_stats = _trade_stats(df["close"], position)
     quality_flag = "ok"
     if anomaly_ratio > 0.02:
         quality_flag = "warning_high_outlier"
@@ -1211,21 +1366,41 @@ def _run_backtest_core(
         "anomaly_bar_ratio": round(float(anomaly_ratio), 6),
         "return_clip_limit": round(float(clip_limit), 6),
         "quality_flag": quality_flag,
+        "recommended_min_bars": int(_strategy_recommended_min_bars(strategy, timeframe, params=params)),
+        "zero_trade_reason": "",
     }
+    if int(trade_stats.get("completed") or 0) == 0:
+        result["zero_trade_reason"] = _diagnose_zero_trade_reason(
+            strategy=strategy,
+            df=df,
+            position=position,
+            trade_stats=trade_stats,
+            timeframe=timeframe,
+            params=params,
+        )
+    if strategy == "FamaFactorArbitrageStrategy":
+        result["portfolio_mode"] = "cross_sectional_long_short"
+        result["benchmark_symbol"] = components.get("benchmark_symbol")
+        result["universe_size"] = int(components.get("universe_size") or 0)
+        result["quantile"] = float(components.get("quantile") or 0.0)
 
     if include_series:
-        points = _extract_trade_points(df["close"], position)
+        points = (
+            {"buy_points": [], "sell_points": [], "entries": trade_stats["entries"], "exits": trade_stats["exits"]}
+            if strategy == "FamaFactorArbitrageStrategy"
+            else _extract_trade_points(df["close"], position)
+        )
 
         # Downsample for frontend payload size.
         max_points = 1800
         series_df = pd.DataFrame(
             {
-                "timestamp": df.index,
+                "timestamp": benchmark_close.index,
                 "equity": equity.values,
                 "gross_equity": gross_equity.values,
                 "drawdown": (drawdown.fillna(0) * 100).values,
                 "position": position.values,
-                "close": df["close"].values,
+                "close": benchmark_close.values,
                 "cost": trade_cost.values,
             }
         )
@@ -1310,6 +1485,64 @@ async def _load_backtest_df(
     return best
 
 
+async def _load_fama_market_bundle(
+    symbol: str,
+    timeframe: str,
+    params: Optional[Dict[str, Any]] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+) -> Dict[str, pd.DataFrame]:
+    params = dict(params or {})
+    requested = _normalize_symbol(symbol) or "BTC/USDT"
+    universe_raw = list(params.get("universe_symbols") or _default_fama_universe(requested))
+    universe: List[str] = []
+    seen: set[str] = set()
+    max_symbols = max(4, int(params.get("max_symbols", 20) or 20))
+    for item in [requested, *universe_raw]:
+        sym = _normalize_symbol(item)
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        universe.append(sym)
+    universe = universe[:max_symbols]
+
+    bundle: Dict[str, pd.DataFrame] = {}
+    min_rows = max(_min_required_bars(timeframe), min(300, max(60, int(params.get("min_symbol_bars", 120) or 120))))
+    for sym in universe:
+        df = await _load_backtest_df(sym, timeframe, start_time=start_time, end_time=end_time)
+        if df.empty or len(df) < min_rows:
+            continue
+        bundle[sym] = df.copy()
+    return bundle
+
+
+async def _load_backtest_inputs(
+    strategy: str,
+    symbol: str,
+    timeframe: str,
+    params: Optional[Dict[str, Any]] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+) -> tuple[pd.DataFrame, Optional[Dict[str, pd.DataFrame]], str]:
+    if strategy == "FamaFactorArbitrageStrategy":
+        bundle = await _load_fama_market_bundle(
+            symbol=symbol,
+            timeframe=timeframe,
+            params=params,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        if not bundle:
+            return pd.DataFrame(), None, _normalize_symbol(symbol) or "BTC/USDT"
+        resolved_symbol = _normalize_symbol(symbol) or next(iter(bundle.keys()))
+        if resolved_symbol not in bundle:
+            resolved_symbol = next(iter(bundle.keys()))
+        return bundle[resolved_symbol].copy(), bundle, resolved_symbol
+
+    df = await _load_backtest_df(symbol, timeframe, start_time=start_time, end_time=end_time)
+    return df, None, _normalize_symbol(symbol) or symbol
+
+
 @router.post("/run")
 async def run_backtest(
     strategy: str = "MAStrategy",
@@ -1325,9 +1558,10 @@ async def run_backtest(
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
     parsed_end = _parse_backtest_bound(end_date, bound="end_date")
 
-    df = await _load_backtest_df(
-        symbol,
-        timeframe,
+    df, market_bundle, resolved_symbol = await _load_backtest_inputs(
+        strategy=strategy,
+        symbol=symbol,
+        timeframe=timeframe,
         start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
         end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
     )
@@ -1361,12 +1595,14 @@ async def run_backtest(
         include_series=include_series,
         commission_rate=max(0.0, float(commission_rate or 0.0)),
         slippage_bps=max(0.0, float(slippage_bps or 0.0)),
+        market_bundle=market_bundle,
+        params=get_strategy_defaults(strategy),
     )
 
     result.update(
         {
             "strategy": strategy,
-            "symbol": symbol,
+            "symbol": resolved_symbol,
             "timeframe": timeframe,
             "initial_capital": initial_capital,
             "commission_rate": max(0.0, float(commission_rate or 0.0)),
@@ -1388,7 +1624,7 @@ async def compare_backtests(
         "BollingerBandsStrategy,BollingerSqueezeStrategy,MeanReversionStrategy,BollingerMeanReversionStrategy,"
         "MomentumStrategy,TrendFollowingStrategy,PairsTradingStrategy,DonchianBreakoutStrategy,StochasticStrategy,"
         "ADXTrendStrategy,VWAPReversionStrategy,MarketSentimentStrategy,SocialSentimentStrategy,FundFlowStrategy,"
-        "WhaleActivityStrategy"
+        "WhaleActivityStrategy,FamaFactorArbitrageStrategy"
     ),
     symbol: str = "BTC/USDT",
     timeframe: str = "1h",
@@ -1408,40 +1644,53 @@ async def compare_backtests(
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
     parsed_end = _parse_backtest_bound(end_date, bound="end_date")
 
-    df = await _load_backtest_df(
+    common_df = await _load_backtest_df(
         symbol,
         timeframe,
         start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
         end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
     )
-    if df.empty:
+    if common_df.empty:
         raise HTTPException(status_code=404, detail="缺少历史数据")
     if parsed_start is not None:
-        df = df[df.index >= parsed_start]
+        common_df = common_df[common_df.index >= parsed_start]
     if parsed_end is not None:
-        df = df[df.index <= parsed_end]
-    if df.empty:
+        common_df = common_df[common_df.index <= parsed_end]
+    if common_df.empty:
         raise HTTPException(status_code=404, detail="该时间范围内无可用数据")
     min_bars = _min_required_bars(timeframe)
-    if len(df) < min_bars:
+    if len(common_df) < min_bars:
         raise HTTPException(
             status_code=400,
-            detail=f"该时间范围内K线不足（{len(df)} 根），{timeframe} 至少需要 {min_bars} 根",
+            detail=f"该时间范围内K线不足（{len(common_df)} 根），{timeframe} 至少需要 {min_bars} 根",
         )
 
     results = []
     for strategy in strategy_list:
         try:
+            loop_df = common_df
+            loop_bundle = None
+            if strategy == "FamaFactorArbitrageStrategy":
+                loop_df, loop_bundle, _ = await _load_backtest_inputs(
+                    strategy=strategy,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
+                    end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
+                )
+                if loop_df.empty:
+                    raise HTTPException(status_code=404, detail="Fama 回测缺少可用横截面数据")
             if pre_optimize and strategy in _BACKTEST_OPTIMIZATION_GRIDS:
                 opt = _optimize_strategy_on_df(
                     strategy=strategy,
-                    df=df,
+                    df=loop_df,
                     timeframe=timeframe,
                     initial_capital=initial_capital,
                     commission_rate=max(0.0, float(commission_rate or 0.0)),
                     slippage_bps=max(0.0, float(slippage_bps or 0.0)),
                     objective=optimize_objective,
                     max_trials=max(1, min(int(optimize_max_trials or 16), 256)),
+                    market_bundle=loop_bundle,
                 )
                 if opt.get("best"):
                     metrics = dict(opt["best"]["metrics"])
@@ -1459,12 +1708,14 @@ async def compare_backtests(
                 else:
                     metrics = _run_backtest_core(
                         strategy=strategy,
-                        df=df,
+                        df=loop_df,
                         timeframe=timeframe,
                         initial_capital=initial_capital,
                         include_series=False,
                         commission_rate=max(0.0, float(commission_rate or 0.0)),
                         slippage_bps=max(0.0, float(slippage_bps or 0.0)),
+                        market_bundle=loop_bundle,
+                        params=get_strategy_defaults(strategy),
                     )
                     metrics.update(
                         {
@@ -1479,12 +1730,14 @@ async def compare_backtests(
             else:
                 metrics = _run_backtest_core(
                     strategy=strategy,
-                    df=df,
+                    df=loop_df,
                     timeframe=timeframe,
                     initial_capital=initial_capital,
                     include_series=False,
                     commission_rate=max(0.0, float(commission_rate or 0.0)),
                     slippage_bps=max(0.0, float(slippage_bps or 0.0)),
+                    market_bundle=loop_bundle,
+                    params=get_strategy_defaults(strategy),
                 )
                 metrics.update(
                     {
@@ -1513,9 +1766,9 @@ async def compare_backtests(
         "slippage_bps": max(0.0, float(slippage_bps or 0.0)),
         "requested_start_date": start_date,
         "requested_end_date": end_date,
-        "data_points": int(len(df)),
-        "start_date": df.index[0].isoformat(),
-        "end_date": df.index[-1].isoformat(),
+        "data_points": int(len(common_df)),
+        "start_date": common_df.index[0].isoformat(),
+        "end_date": common_df.index[-1].isoformat(),
         "pre_optimize": bool(pre_optimize),
         "optimize_objective": _normalize_optimize_objective(optimize_objective),
         "optimize_max_trials": max(1, min(int(optimize_max_trials or 16), 256)),
@@ -1550,9 +1803,11 @@ async def run_backtest_custom(
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
     parsed_end = _parse_backtest_bound(end_date, bound="end_date")
 
-    df = await _load_backtest_df(
-        symbol,
-        timeframe,
+    df, market_bundle, resolved_symbol = await _load_backtest_inputs(
+        strategy=strategy,
+        symbol=symbol,
+        timeframe=timeframe,
+        params=custom_params,
         start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
         end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
     )
@@ -1576,11 +1831,12 @@ async def run_backtest_custom(
         include_series=include_series,
         commission_rate=max(0.0, float(commission_rate or 0.0)),
         slippage_bps=max(0.0, float(slippage_bps or 0.0)),
+        market_bundle=market_bundle,
     )
     result.update(
         {
             "strategy": strategy,
-            "symbol": symbol,
+            "symbol": resolved_symbol,
             "timeframe": timeframe,
             "initial_capital": initial_capital,
             "commission_rate": max(0.0, float(commission_rate or 0.0)),
@@ -1611,9 +1867,10 @@ async def optimize_backtest(
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
     parsed_end = _parse_backtest_bound(end_date, bound="end_date")
 
-    df = await _load_backtest_df(
-        symbol,
-        timeframe,
+    df, market_bundle, resolved_symbol = await _load_backtest_inputs(
+        strategy=strategy,
+        symbol=symbol,
+        timeframe=timeframe,
         start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
         end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
     )
@@ -1641,13 +1898,14 @@ async def optimize_backtest(
             slippage_bps=max(0.0, float(slippage_bps or 0.0)),
             objective=objective,
             max_trials=max_trials,
+            market_bundle=market_bundle,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
     return {
         "strategy": strategy,
-        "symbol": symbol,
+        "symbol": resolved_symbol,
         "timeframe": timeframe,
         "requested_start_date": start_date,
         "requested_end_date": end_date,
@@ -1680,9 +1938,10 @@ async def export_backtest_report(
 ):
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
     parsed_end = _parse_backtest_bound(end_date, bound="end_date")
-    df = await _load_backtest_df(
-        symbol,
-        timeframe,
+    df, market_bundle, resolved_symbol = await _load_backtest_inputs(
+        strategy=strategy,
+        symbol=symbol,
+        timeframe=timeframe,
         start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
         end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
     )
@@ -1703,13 +1962,15 @@ async def export_backtest_report(
         include_series=True,
         commission_rate=max(0.0, float(commission_rate or 0.0)),
         slippage_bps=max(0.0, float(slippage_bps or 0.0)),
+        market_bundle=market_bundle,
+        params=get_strategy_defaults(strategy),
     )
 
     summary_df = pd.DataFrame(
         [
             {
                 "strategy": strategy,
-                "symbol": symbol,
+                "symbol": resolved_symbol,
                 "timeframe": timeframe,
                 "initial_capital": initial_capital,
                 "commission_rate": max(0.0, float(commission_rate or 0.0)),
@@ -1739,7 +2000,7 @@ async def export_backtest_report(
 
     if format_lower == "csv":
         content = summary_df.to_csv(index=False).encode("utf-8-sig")
-        filename = f"backtest_{strategy}_{symbol.replace('/', '_')}_{timeframe}.csv"
+        filename = f"backtest_{strategy}_{resolved_symbol.replace('/', '_')}_{timeframe}.csv"
         media_type = "text/csv"
     elif format_lower == "pdf":
         output = io.BytesIO()
@@ -1790,7 +2051,7 @@ async def export_backtest_report(
                 plt.close(fig)
 
         content = output.getvalue()
-        filename = f"backtest_{strategy}_{symbol.replace('/', '_')}_{timeframe}.pdf"
+        filename = f"backtest_{strategy}_{resolved_symbol.replace('/', '_')}_{timeframe}.pdf"
         media_type = "application/pdf"
     else:
         output = io.BytesIO()
@@ -1799,7 +2060,7 @@ async def export_backtest_report(
             if not series_df.empty:
                 series_df.to_excel(writer, index=False, sheet_name="series")
         content = output.getvalue()
-        filename = f"backtest_{strategy}_{symbol.replace('/', '_')}_{timeframe}.xlsx"
+        filename = f"backtest_{strategy}_{resolved_symbol.replace('/', '_')}_{timeframe}.xlsx"
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
     return StreamingResponse(

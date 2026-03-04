@@ -10,14 +10,19 @@ from typing import Any, Dict, List, Optional
 import httpx
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from loguru import logger
 
 from config.settings import settings
 from core.data import (
+    candidate_symbol_dirs,
+    canonical_symbol_dir,
     data_collector,
     data_storage,
+    normalize_symbol,
+    symbol_from_storage_dirname,
     historical_data_manager,
     second_level_backfill_manager,
     download_binance_1s_daily_archive,
@@ -47,6 +52,12 @@ _RESAMPLE_RULES = {
 _REPLAY_SESSIONS: Dict[str, Dict[str, Any]] = {}
 _RESEARCH_COVERAGE_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "df": None}
 _DOWNLOAD_TASKS: Dict[str, Dict[str, Any]] = {}
+_HEALTH_EXACT_SCAN_ROW_LIMIT = 250000
+_HEALTH_EXACT_SCAN_FILE_LIMIT = 32
+_HEALTH_GAP_PREVIEW_LIMIT = 8
+_HEALTH_FAST_SCAN_RELAXED_TIMEFRAMES = {"1s", "5s", "10s", "30s"}
+_HEALTH_FAST_SCAN_MIN_EXPECTED_BARS = 20000
+_HEALTH_FAST_SCAN_DENSITY_THRESHOLD = 0.35
 
 
 class KlineRequest(BaseModel):
@@ -99,6 +110,119 @@ def _normalize_query_datetime(dt: Optional[datetime]) -> Optional[datetime]:
     # Frontend passes ISO timestamps with timezone; convert to local naive
     # datetime to match parquet index convention in this project.
     return dt.astimezone().replace(tzinfo=None)
+
+
+def _safe_iso_timestamp(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        ts = pd.Timestamp(value)
+        if pd.isna(ts):
+            return None
+        if getattr(ts, "tzinfo", None) is not None:
+            ts = ts.tz_convert(None)
+        return ts.to_pydatetime().replace(tzinfo=None).isoformat()
+    except Exception:
+        text = str(value or "").strip()
+        return text or None
+
+
+def _coerce_timestamp(value: Any) -> Optional[pd.Timestamp]:
+    if value is None:
+        return None
+    try:
+        ts = pd.Timestamp(value)
+        if pd.isna(ts):
+            return None
+        if getattr(ts, "tzinfo", None) is not None:
+            ts = ts.tz_convert(None)
+        return ts.tz_localize(None) if getattr(ts, "tzinfo", None) is not None else ts
+    except Exception:
+        return None
+
+
+def _estimate_expected_bars(start_ts: Any, end_ts: Any, timeframe: str) -> Optional[int]:
+    start = _coerce_timestamp(start_ts)
+    end = _coerce_timestamp(end_ts)
+    if start is None or end is None or end < start:
+        return None
+    step_seconds = _timeframe_seconds(timeframe)
+    if step_seconds <= 0:
+        return None
+    total_seconds = (end.to_pydatetime() - start.to_pydatetime()).total_seconds()
+    return max(1, int(total_seconds // step_seconds) + 1)
+
+
+def _scan_parquet_files(file_paths: List[Path]) -> Dict[str, Any]:
+    rows = 0
+    size_bytes = 0
+    modified_at = None
+    start_ts = None
+    end_ts = None
+    read_errors: List[str] = []
+
+    for file_path in file_paths:
+        try:
+            stat = file_path.stat()
+            size_bytes += int(stat.st_size)
+            if modified_at is None or stat.st_mtime > modified_at:
+                modified_at = stat.st_mtime
+        except Exception:
+            pass
+
+        try:
+            parquet_file = pq.ParquetFile(file_path)
+            metadata = parquet_file.metadata
+            rows += int(metadata.num_rows or 0)
+            names = list(getattr(metadata.schema, "names", []) or [])
+            ts_index = None
+            for candidate in ("timestamp", "__index_level_0__", "index"):
+                if candidate in names:
+                    ts_index = names.index(candidate)
+                    break
+            if ts_index is None:
+                continue
+            for group_idx in range(int(metadata.num_row_groups or 0)):
+                column = metadata.row_group(group_idx).column(ts_index)
+                stats = getattr(column, "statistics", None)
+                if not stats or not getattr(stats, "has_min_max", False):
+                    continue
+                local_start = _coerce_timestamp(getattr(stats, "min", None))
+                local_end = _coerce_timestamp(getattr(stats, "max", None))
+                if local_start is not None and (start_ts is None or local_start < start_ts):
+                    start_ts = local_start
+                if local_end is not None and (end_ts is None or local_end > end_ts):
+                    end_ts = local_end
+        except Exception as e:
+            read_errors.append(f"{file_path.name}: {e}")
+
+    return {
+        "rows": rows,
+        "size_bytes": size_bytes,
+        "modified_at": datetime.fromtimestamp(modified_at).isoformat() if modified_at else None,
+        "start": _safe_iso_timestamp(start_ts),
+        "end": _safe_iso_timestamp(end_ts),
+        "read_errors": read_errors[:5],
+    }
+
+
+def _summarize_backup_batches(backup_root: Path) -> Dict[str, Any]:
+    if not backup_root.exists():
+        return {"count": 0, "symbol_dirs": 0, "recent": []}
+
+    batches: List[Dict[str, Any]] = []
+    symbol_dir_total = 0
+    for batch_dir in sorted([p for p in backup_root.iterdir() if p.is_dir()], reverse=True):
+        symbol_dirs = [p for p in batch_dir.rglob("*") if p.is_dir() and any(p.glob("*.parquet"))]
+        symbol_dir_total += len(symbol_dirs)
+        batches.append(
+            {
+                "batch": batch_dir.name,
+                "symbol_dirs": len(symbol_dirs),
+                "path": str(batch_dir),
+            }
+        )
+    return {"count": len(batches), "symbol_dirs": symbol_dir_total, "recent": batches[:5]}
 
 
 def _normalize_symbol_alias(symbol: str) -> str:
@@ -196,8 +320,7 @@ def _resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
 
 
 def _parquet_path(exchange: str, symbol: str, timeframe: str) -> Path:
-    base = Path(settings.DATA_STORAGE_PATH)
-    return base / exchange / symbol.replace("/", "_") / f"{timeframe}.parquet"
+    return canonical_symbol_dir(Path(settings.DATA_STORAGE_PATH), exchange, symbol) / f"{timeframe}.parquet"
 
 
 async def _save_df_to_parquet(exchange: str, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
@@ -211,11 +334,14 @@ async def _save_df_to_parquet(exchange: str, symbol: str, timeframe: str, df: pd
     merged.index = pd.to_datetime(merged.index)
     merged = merged.sort_index()
 
-    if target.exists():
-        existing = pd.read_parquet(target)
+    for symbol_root in candidate_symbol_dirs(Path(settings.DATA_STORAGE_PATH), exchange, symbol):
+        existing_path = symbol_root / f"{timeframe}.parquet"
+        if not existing_path.exists():
+            continue
+        existing = pd.read_parquet(existing_path)
         existing.index = pd.to_datetime(existing.index)
         merged = pd.concat([existing, merged])
-        merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
 
     merged.to_parquet(target)
 
@@ -734,18 +860,7 @@ def _factor_series_from_returns(returns_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _normalize_symbol_folder(folder_name: str) -> str:
-    raw = str(folder_name or "").strip().upper()
-    if not raw:
-        return ""
-    if "/" in raw:
-        return raw
-    if "_" in raw:
-        parts = raw.split("_")
-        if len(parts) >= 2:
-            return f"{parts[0]}/{parts[1]}"
-    if raw.endswith("USDT") and len(raw) > 4:
-        return f"{raw[:-4]}/USDT"
-    return raw
+    return symbol_from_storage_dirname(folder_name)
 
 
 def _discover_local_symbols(exchange: str, timeframe: str, max_count: int = 200) -> List[str]:
@@ -806,18 +921,17 @@ def _expand_symbols_with_local(
 
 
 def _latest_partition_end_time(exchange: str, symbol: str, timeframe: str) -> Optional[datetime]:
-    sym_dir = Path(settings.DATA_STORAGE_PATH) / str(exchange or "").lower() / str(symbol).replace("/", "_")
-    parts_dir = sym_dir / f"{timeframe}_parts"
-    if not parts_dir.exists() or not parts_dir.is_dir():
-        return None
-
-    files = sorted(parts_dir.glob("*.parquet"), reverse=True)
-    for path in files:
-        try:
-            day = pd.Timestamp(path.stem).to_pydatetime()
-            return day + timedelta(days=1)
-        except Exception:
+    for sym_dir in candidate_symbol_dirs(Path(settings.DATA_STORAGE_PATH), exchange, symbol):
+        parts_dir = sym_dir / f"{timeframe}_parts"
+        if not parts_dir.exists() or not parts_dir.is_dir():
             continue
+        files = sorted(parts_dir.glob("*.parquet"), reverse=True)
+        for path in files:
+            try:
+                day = pd.Timestamp(path.stem).to_pydatetime()
+                return day + timedelta(days=1)
+            except Exception:
+                continue
     return None
 
 
@@ -1583,10 +1697,269 @@ async def get_storage_stats():
     return await data_storage.get_storage_stats()
 
 
+@router.get("/storage/health")
+async def get_storage_health():
+    storage_root = Path(settings.DATA_STORAGE_PATH)
+    backup_root = Path(settings.CACHE_PATH) / "symbol_dir_backups"
+
+    datasets: List[Dict[str, Any]] = []
+    exchange_rows: List[Dict[str, Any]] = []
+    duplicate_symbol_dirs: List[Dict[str, Any]] = []
+    unique_symbols = set()
+    unique_timeframes = set()
+    total_active_files = 0
+    total_partition_files = 0
+    total_corrupt_files = 0
+    total_size_bytes = 0
+    datasets_with_issues = 0
+    exact_scan_count = 0
+    fast_scan_count = 0
+    suppressed_gap_datasets = 0
+
+    if storage_root.exists():
+        for exchange_dir in sorted([p for p in storage_root.iterdir() if p.is_dir()]):
+            exchange_name = exchange_dir.name
+            symbol_buckets: Dict[str, List[Path]] = {}
+            for symbol_dir in sorted([p for p in exchange_dir.iterdir() if p.is_dir()]):
+                normalized_symbol = symbol_from_storage_dirname(symbol_dir.name)
+                if not normalized_symbol:
+                    continue
+                symbol_buckets.setdefault(normalized_symbol, []).append(symbol_dir)
+
+            exchange_dataset_rows: List[Dict[str, Any]] = []
+            exchange_size_bytes = 0
+            exchange_corrupt_files = 0
+            exchange_partition_files = 0
+            exchange_active_files = 0
+
+            for normalized_symbol, symbol_dirs in sorted(symbol_buckets.items()):
+                unique_symbols.add((exchange_name, normalized_symbol))
+                if len(symbol_dirs) > 1:
+                    duplicate_symbol_dirs.append(
+                        {
+                            "exchange": exchange_name,
+                            "symbol": normalized_symbol,
+                            "directories": [p.name for p in symbol_dirs],
+                        }
+                    )
+
+                timeframe_map: Dict[str, Dict[str, Any]] = {}
+                for symbol_dir in symbol_dirs:
+                    for file_path in sorted(symbol_dir.glob("*.parquet")):
+                        timeframe = file_path.name.split(".corrupt_", 1)[0].replace(".parquet", "")
+                        if not timeframe:
+                            continue
+                        bucket = timeframe_map.setdefault(
+                            timeframe,
+                            {"single_files": [], "partition_files": [], "corrupt_files": 0},
+                        )
+                        if ".corrupt_" in file_path.name:
+                            bucket["corrupt_files"] += 1
+                            total_corrupt_files += 1
+                            exchange_corrupt_files += 1
+                            continue
+                        bucket["single_files"].append(file_path)
+                        total_active_files += 1
+                        exchange_active_files += 1
+
+                    for part_dir in sorted([p for p in symbol_dir.iterdir() if p.is_dir() and p.name.endswith("_parts")]):
+                        timeframe = part_dir.name[:-6]
+                        if not timeframe:
+                            continue
+                        bucket = timeframe_map.setdefault(
+                            timeframe,
+                            {"single_files": [], "partition_files": [], "corrupt_files": 0},
+                        )
+                        for file_path in sorted(part_dir.glob("*.parquet")):
+                            if ".corrupt_" in file_path.name:
+                                bucket["corrupt_files"] += 1
+                                total_corrupt_files += 1
+                                exchange_corrupt_files += 1
+                                continue
+                            bucket["partition_files"].append(file_path)
+                            total_partition_files += 1
+                            exchange_partition_files += 1
+
+                for timeframe, bucket in sorted(timeframe_map.items()):
+                    physical_files = [*bucket["single_files"], *bucket["partition_files"]]
+                    if not physical_files:
+                        continue
+                    unique_timeframes.add(timeframe)
+
+                    scan = _scan_parquet_files(physical_files)
+                    total_size_bytes += int(scan["size_bytes"] or 0)
+                    exchange_size_bytes += int(scan["size_bytes"] or 0)
+                    scan_mode = "fast"
+                    gap_count = None
+                    gap_preview: List[str] = []
+                    gap_issue_suppressed = False
+                    scan_note = None
+                    coverage_ratio = None
+                    logical_rows = int(scan["rows"] or 0)
+                    start_at = scan.get("start")
+                    end_at = scan.get("end")
+
+                    should_exact_scan = (
+                        timeframe not in _SUB_MINUTE_TIMEFRAMES
+                        and logical_rows <= _HEALTH_EXACT_SCAN_ROW_LIMIT
+                        and len(physical_files) <= _HEALTH_EXACT_SCAN_FILE_LIMIT
+                    )
+                    if should_exact_scan:
+                        try:
+                            df = await data_storage.load_klines_from_parquet(
+                                exchange=exchange_name,
+                                symbol=normalized_symbol,
+                                timeframe=timeframe,
+                            )
+                            logical_rows = int(len(df))
+                            if not df.empty:
+                                start_at = _safe_iso_timestamp(df.index.min())
+                                end_at = _safe_iso_timestamp(df.index.max())
+                                missing = _detect_missing_bars(df, timeframe, max_preview=_HEALTH_GAP_PREVIEW_LIMIT)
+                                gap_count = int(missing.get("missing_count") or 0)
+                                gap_preview = list(missing.get("missing_preview") or [])[:_HEALTH_GAP_PREVIEW_LIMIT]
+                            else:
+                                gap_count = 0
+                            scan_mode = "exact"
+                            exact_scan_count += 1
+                        except Exception as e:
+                            scan["read_errors"] = [*(scan.get("read_errors") or []), f"exact_scan: {e}"][:5]
+
+                    if scan_mode != "exact":
+                        fast_scan_count += 1
+                        expected_bars = _estimate_expected_bars(start_at, end_at, timeframe)
+                        if expected_bars is not None:
+                            coverage_ratio = round(
+                                min(1.0, max(0.0, (float(logical_rows) / float(expected_bars)) if expected_bars > 0 else 0.0)),
+                                6,
+                            )
+                            estimated_gap_count = max(0, int(expected_bars) - int(logical_rows))
+                            if (
+                                timeframe in _HEALTH_FAST_SCAN_RELAXED_TIMEFRAMES
+                                and expected_bars >= _HEALTH_FAST_SCAN_MIN_EXPECTED_BARS
+                                and coverage_ratio < _HEALTH_FAST_SCAN_DENSITY_THRESHOLD
+                            ):
+                                gap_count = 0
+                                gap_issue_suppressed = True
+                                suppressed_gap_datasets += 1
+                                scan_note = (
+                                    f"快扫样本稀疏，当前覆盖率约 {coverage_ratio:.1%}，缺口告警已抑制；"
+                                    "如需精查建议按更短时间窗口下载。"
+                                )
+                            else:
+                                gap_count = estimated_gap_count
+
+                    source_type = (
+                        "mixed"
+                        if bucket["single_files"] and bucket["partition_files"]
+                        else ("partitioned" if bucket["partition_files"] else "single")
+                    )
+                    issues: List[str] = []
+                    if len(symbol_dirs) > 1:
+                        issues.append("重复目录")
+                    if int(bucket["corrupt_files"] or 0) > 0:
+                        issues.append("存在损坏文件")
+                    if int(gap_count or 0) > 0 and not gap_issue_suppressed:
+                        issues.append("存在缺口")
+                    if scan.get("read_errors"):
+                        issues.append("元数据读取异常")
+                    if issues:
+                        datasets_with_issues += 1
+
+                    row = {
+                        "exchange": exchange_name,
+                        "symbol": normalized_symbol,
+                        "timeframe": timeframe,
+                        "source_type": source_type,
+                        "rows": logical_rows,
+                        "physical_rows": int(scan["rows"] or 0),
+                        "start": start_at,
+                        "end": end_at,
+                        "gap_count": int(gap_count or 0),
+                        "gap_preview": gap_preview,
+                        "coverage_ratio": coverage_ratio,
+                        "scan_note": scan_note,
+                        "gap_issue_suppressed": gap_issue_suppressed,
+                        "corrupt_files": int(bucket["corrupt_files"] or 0),
+                        "active_files": len(physical_files),
+                        "partition_files": len(bucket["partition_files"]),
+                        "duplicate_dirs": len(symbol_dirs) - 1,
+                        "directories": [p.name for p in symbol_dirs],
+                        "size_mb": round((int(scan["size_bytes"] or 0) / (1024 * 1024)), 2),
+                        "modified_at": scan.get("modified_at"),
+                        "scan_mode": scan_mode,
+                        "issues": issues,
+                        "read_errors": scan.get("read_errors") or [],
+                        "recommended_action": (
+                            "redownload"
+                            if int(bucket["corrupt_files"] or 0) > 0
+                            else ("repair" if int(gap_count or 0) > 0 and not gap_issue_suppressed else None)
+                        ),
+                    }
+                    datasets.append(row)
+                    exchange_dataset_rows.append(row)
+
+            exchange_rows.append(
+                {
+                    "exchange": exchange_name,
+                    "dataset_count": len(exchange_dataset_rows),
+                    "symbol_count": len({row["symbol"] for row in exchange_dataset_rows}),
+                    "timeframe_count": len({row["timeframe"] for row in exchange_dataset_rows}),
+                    "files": exchange_active_files,
+                    "partition_files": exchange_partition_files,
+                    "corrupt_files": exchange_corrupt_files,
+                    "size_mb": round(exchange_size_bytes / (1024 * 1024), 2),
+                    "issue_count": sum(1 for row in exchange_dataset_rows if row["issues"]),
+                    "latest_modified_at": max(
+                        [row["modified_at"] for row in exchange_dataset_rows if row.get("modified_at")],
+                        default=None,
+                    ),
+                }
+            )
+
+    backup_summary = _summarize_backup_batches(backup_root)
+    datasets.sort(
+        key=lambda row: (
+            -len(row.get("issues") or []),
+            -int(row.get("gap_count") or 0),
+            -int(row.get("corrupt_files") or 0),
+            str(row.get("exchange") or ""),
+            str(row.get("symbol") or ""),
+            str(row.get("timeframe") or ""),
+        )
+    )
+
+    return {
+        "generated_at": datetime.now().isoformat(),
+        "summary": {
+            "exchange_count": len(exchange_rows),
+            "dataset_count": len(datasets),
+            "symbol_count": len(unique_symbols),
+            "timeframe_count": len(unique_timeframes),
+            "active_files": total_active_files,
+            "partition_files": total_partition_files,
+            "corrupt_files": total_corrupt_files,
+            "duplicate_symbol_buckets": len(duplicate_symbol_dirs),
+            "datasets_with_issues": datasets_with_issues,
+            "backup_batches": int(backup_summary["count"]),
+            "backup_symbol_dirs": int(backup_summary["symbol_dirs"]),
+            "total_size_mb": round(total_size_bytes / (1024 * 1024), 2),
+            "exact_scan_count": exact_scan_count,
+            "fast_scan_count": fast_scan_count,
+            "suppressed_gap_datasets": suppressed_gap_datasets,
+        },
+        "exchanges": exchange_rows,
+        "duplicates": duplicate_symbol_dirs,
+        "backups": backup_summary,
+        "datasets": datasets,
+    }
+
+
 @router.get("/available")
 async def get_available_data():
     storage_path = Path(settings.DATA_STORAGE_PATH)
     available = []
+    seen = set()
 
     if storage_path.exists():
         for exchange_dir in storage_path.iterdir():
@@ -1596,10 +1969,19 @@ async def get_available_data():
                 if not symbol_dir.is_dir():
                     continue
                 for file in symbol_dir.glob("*.parquet"):
+                    if ".corrupt_" in file.name:
+                        continue
+                    normalized_symbol = symbol_from_storage_dirname(symbol_dir.name)
+                    if not normalized_symbol:
+                        continue
+                    key = (exchange_dir.name, normalized_symbol, file.stem)
+                    if key in seen:
+                        continue
+                    seen.add(key)
                     available.append(
                         {
                             "exchange": exchange_dir.name,
-                            "symbol": symbol_dir.name.replace("_", "/"),
+                            "symbol": normalized_symbol,
                             "timeframe": file.stem,
                         }
                     )
@@ -1610,14 +1992,9 @@ async def get_available_data():
 @router.get("/symbols")
 async def get_data_symbols(exchange: str = "binance"):
     def _normalize_symbol_choice(raw: str) -> Optional[str]:
-        text = str(raw or "").strip().upper()
+        text = normalize_symbol(raw)
         if not text:
             return None
-        if ":" in text:
-            text = text.split(":", 1)[0]
-        text = text.replace("-", "/").replace("_", "/")
-        if "/" not in text and text.endswith("USDT") and len(text) > 4:
-            text = f"{text[:-4]}/USDT"
         if "/" not in text:
             return None
         base, quote = [part.strip() for part in text.split("/", 1)]
@@ -1627,16 +2004,36 @@ async def get_data_symbols(exchange: str = "binance"):
             return None
         return f"{base}/{quote}"
 
-    exchange_name = str(exchange or "binance").strip().lower() or "binance"
-    configured = exchange_manager.get_supported_symbols(exchange_name) or []
-    available_rows = (await get_available_data()).get("available") or []
-    local_symbols = sorted(
-        {
-            str(item.get("symbol") or "").strip()
-            for item in available_rows
-            if str(item.get("exchange") or "").strip().lower() == exchange_name and str(item.get("symbol") or "").strip()
+    def _build_symbol_payload(exchange_name: str, preferred: List[str]) -> Dict[str, Any]:
+        configured = exchange_manager.get_supported_symbols(exchange_name) or []
+        local_symbols = sorted(
+            {
+                str(item.get("symbol") or "").strip()
+                for item in available_rows
+                if str(item.get("exchange") or "").strip().lower() == exchange_name and str(item.get("symbol") or "").strip()
+            }
+        )
+        merged_raw = {
+            normalized
+            for x in [*preferred, *configured, *local_symbols]
+            for normalized in [_normalize_symbol_choice(str(x).strip())]
+            if normalized
         }
-    )
+        preferred_rank = {sym: idx for idx, sym in enumerate(preferred)}
+        merged = sorted(
+            merged_raw,
+            key=lambda sym: (preferred_rank.get(sym, 9999), sym),
+        )
+        return {
+            "exchange": exchange_name,
+            "symbols": merged,
+            "configured_count": len(configured),
+            "local_count": len(local_symbols),
+            "count": len(merged),
+        }
+
+    exchange_name = str(exchange or "binance").strip().lower() or "binance"
+    available_rows = (await get_available_data()).get("available") or []
     preferred = [
         "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT",
         "DOGE/USDT", "TRX/USDT", "LINK/USDT", "AVAX/USDT", "DOT/USDT", "POL/USDT",
@@ -1644,24 +2041,15 @@ async def get_data_symbols(exchange: str = "binance"):
         "ARB/USDT", "OP/USDT", "SUI/USDT", "INJ/USDT", "RUNE/USDT", "AAVE/USDT",
         "MKR/USDT", "UNI/USDT", "FIL/USDT", "HBAR/USDT", "ICP/USDT", "TON/USDT",
     ]
-    merged_raw = {
-        normalized
-        for x in [*preferred, *configured, *local_symbols]
-        for normalized in [_normalize_symbol_choice(str(x).strip())]
-        if normalized
-    }
-    preferred_rank = {sym: idx for idx, sym in enumerate(preferred)}
-    merged = sorted(
-        merged_raw,
-        key=lambda sym: (preferred_rank.get(sym, 9999), sym),
-    )
-    return {
-        "exchange": exchange_name,
-        "symbols": merged,
-        "configured_count": len(configured),
-        "local_count": len(local_symbols),
-        "count": len(merged),
-    }
+    return _build_symbol_payload(exchange_name, preferred)
+
+
+@router.get("/research/symbols")
+async def get_research_symbols(exchange: str = "binance"):
+    data = await get_data_symbols(exchange=exchange)
+    data["source"] = "research_universe"
+    data["default_count"] = min(30, len(data.get("symbols") or []))
+    return data
 
 
 @router.get("/collector/tasks")

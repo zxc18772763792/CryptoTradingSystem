@@ -12,8 +12,10 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path as FPath, Request
 from pydantic import BaseModel, Field
 
+from config.strategy_registry import get_backtest_optimization_grid
 from config.database import close_db, init_db
 from config.settings import settings
+from core.ai.proposal_schemas import ProposalValidationSummary, ResearchProposal
 from core.audit.ops_audit import ops_audit_scope
 from core.data import data_storage
 from core.exchanges import exchange_manager
@@ -21,6 +23,7 @@ from core.news.service.api import IngestRequest, load_service_config, run_ingest
 from core.news.service.worker import process_llm_batch, run_pull_cycle
 from core.news.storage import db as news_db
 from core.ops.service.auth import get_ops_token, get_request_auth, ops_token_configured, require_ops_auth
+from core.research.experiment_registry import ProposalRegistry
 from core.research.strategy_research import ResearchConfig, run_strategy_research
 from core.risk.risk_manager import risk_manager
 from core.strategies import Signal, SignalType
@@ -61,6 +64,34 @@ class ResearchRunRequest(BaseModel):
     slippage_bps: float = Field(default=2.0, ge=0.0, le=10000.0)
     initial_capital: float = Field(default=10000.0, gt=0.0)
     background: bool = True
+
+
+class AIProposalCreateRequest(BaseModel):
+    thesis: str = Field(..., min_length=8, max_length=600)
+    symbols: List[str] = Field(default_factory=lambda: ["BTCUSDT"])
+    timeframes: List[str] = Field(default_factory=lambda: ["5m", "15m", "1h"])
+    market_regime: str = "mixed"
+    strategy_templates: List[str] = Field(default_factory=list)
+    source: str = Field(default="ai")
+    expected_holding_period: str = "1d"
+    risk_hypothesis: str = ""
+    invalidation_rules: List[str] = Field(default_factory=list)
+    required_features: List[str] = Field(default_factory=list)
+    parameter_space: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    notes: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AIProposalRunRequest(BaseModel):
+    exchange: str = "binance"
+    symbol: Optional[str] = None
+    days: int = Field(default=30, ge=1, le=3650)
+    commission_rate: float = Field(default=0.0004, ge=0.0, le=1.0)
+    slippage_bps: float = Field(default=2.0, ge=0.0, le=10000.0)
+    initial_capital: float = Field(default=10000.0, gt=0.0)
+    background: bool = True
+    timeframes: List[str] = Field(default_factory=list)
+    strategies: List[str] = Field(default_factory=list)
 
 
 class ManualSignalRequest(BaseModel):
@@ -112,6 +143,68 @@ def _normalize_symbol(symbol: str) -> str:
     return raw
 
 
+def _dedupe_keep_order(values: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for item in values or []:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _normalize_timeframes(values: List[str]) -> List[str]:
+    cleaned = _dedupe_keep_order([str(item or "").strip() for item in values or []])
+    return cleaned or ["5m", "15m", "1h"]
+
+
+def _default_strategy_templates(market_regime: str, symbols: List[str]) -> List[str]:
+    regime = str(market_regime or "").strip().lower()
+    if regime in {"trend", "trending"}:
+        return ["MAStrategy", "EMAStrategy", "MACDStrategy", "TrendFollowingStrategy"]
+    if regime in {"mean_reversion", "reversion"}:
+        return ["RSIStrategy", "BollingerBandsStrategy", "MeanReversionStrategy", "VWAPReversionStrategy"]
+    if regime in {"breakout"}:
+        return ["DonchianBreakoutStrategy", "BollingerSqueezeStrategy", "MomentumStrategy"]
+    if regime in {"stat_arb", "statarb", "cross_sectional"}:
+        return ["PairsTradingStrategy", "FamaFactorArbitrageStrategy"]
+    if regime in {"news", "news_event", "event"}:
+        return ["MarketSentimentStrategy", "SocialSentimentStrategy", "FundFlowStrategy", "WhaleActivityStrategy"]
+    if len(symbols) >= 2:
+        return ["PairsTradingStrategy", "FamaFactorArbitrageStrategy", "MAStrategy"]
+    return ["MAStrategy", "RSIStrategy", "MACDStrategy", "BollingerBandsStrategy", "MarketSentimentStrategy"]
+
+
+def _derive_required_features(strategy_templates: List[str], provided: List[str]) -> List[str]:
+    features = set(_dedupe_keep_order(provided))
+    if not features:
+        features.add("ohlcv")
+    for name in strategy_templates:
+        if name in {"PairsTradingStrategy"}:
+            features.update({"pair_prices", "spread"})
+        elif name in {"FamaFactorArbitrageStrategy"}:
+            features.update({"cross_sectional_close", "cross_sectional_volume", "factor_scores"})
+        elif name in {"MarketSentimentStrategy", "SocialSentimentStrategy", "FundFlowStrategy", "WhaleActivityStrategy"}:
+            features.update({"news_events", "sentiment", "onchain_or_flow"})
+    return sorted(features)
+
+
+def _derive_parameter_space(
+    strategy_templates: List[str],
+    parameter_space: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    if parameter_space:
+        return {str(k): dict(v or {}) for k, v in dict(parameter_space).items()}
+    out: Dict[str, Dict[str, Any]] = {}
+    for name in strategy_templates:
+        grid = get_backtest_optimization_grid(name)
+        if grid:
+            out[name] = dict(grid)
+    return out
+
+
 def _signal_type(value: str) -> SignalType:
     text = str(value or "").strip().upper()
     mapping = {
@@ -139,6 +232,12 @@ def _ensure_ops_runtime_state(app: FastAPI) -> None:
         app.state.polymarket_cfg = load_polymarket_config()
     if not hasattr(app.state, "polymarket_trading_approvals"):
         app.state.polymarket_trading_approvals = {}
+    if not hasattr(app.state, "ai_proposal_registry_path"):
+        app.state.ai_proposal_registry_path = (
+            (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "ai" / "proposals.json").resolve()
+        )
+    if not isinstance(getattr(app.state, "ai_proposal_registry", None), ProposalRegistry):
+        app.state.ai_proposal_registry = ProposalRegistry(Path(app.state.ai_proposal_registry_path))
 
 
 def _cleanup_live_approvals(app: FastAPI) -> None:
@@ -379,6 +478,302 @@ async def _run_research_job(app: FastAPI, job_id: str, config: ResearchConfig, r
         )
     finally:
         jobs[job_id] = job
+
+
+async def _run_ai_proposal_research_job(
+    app: FastAPI,
+    job_id: str,
+    proposal_id: str,
+    config: ResearchConfig,
+    request_payload: Dict[str, Any],
+) -> None:
+    _ensure_ops_runtime_state(app)
+    jobs = app.state.research_jobs
+    job = jobs.get(job_id) or {}
+    job["status"] = "running"
+    job["started_at"] = _now_utc().isoformat()
+    jobs[job_id] = job
+
+    proposal = _proposal_from_registry(app, proposal_id)
+    proposal.status = "research_running"
+    proposal.metadata["last_research_request"] = request_payload
+    proposal.metadata["last_research_job_id"] = job_id
+    _save_proposal(app, proposal)
+
+    try:
+        result = await run_strategy_research(config)
+        output_dir = str(Path(result.get("csv_path") or "").resolve().parent) if result.get("csv_path") else str(config.output_dir.resolve())
+        latest_payload = {
+            "job_id": job_id,
+            "proposal_id": proposal_id,
+            "request_summary": request_payload,
+            "output_dir": output_dir,
+            "csv_path": result.get("csv_path"),
+            "markdown_path": result.get("markdown_path"),
+            "top_result_summary": result.get("best"),
+            "finished_at": _now_utc().isoformat(),
+        }
+        latest_path = Path(app.state.research_latest_path)
+        latest_path.parent.mkdir(parents=True, exist_ok=True)
+        latest_path.write_text(json.dumps(latest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        job.update(
+            {
+                "status": "completed",
+                "finished_at": _now_utc().isoformat(),
+                "result": result,
+                "error": None,
+            }
+        )
+        proposal = _proposal_from_registry(app, proposal_id)
+        proposal = _apply_research_result_to_proposal(proposal, result, job_id=job_id)
+        _save_proposal(app, proposal)
+    except Exception as exc:
+        job.update(
+            {
+                "status": "failed",
+                "finished_at": _now_utc().isoformat(),
+                "result": None,
+                "error": str(exc),
+            }
+        )
+        proposal = _proposal_from_registry(app, proposal_id)
+        proposal.status = "rejected"
+        proposal.metadata["last_research_error"] = str(exc)
+        proposal.metadata["last_research_job_id"] = job_id
+        _save_proposal(app, proposal)
+    finally:
+        jobs[job_id] = job
+
+
+def _build_ai_research_proposal(payload: AIProposalCreateRequest, actor: str) -> ResearchProposal:
+    now = _now_utc()
+    symbols = _dedupe_keep_order([_normalize_symbol(item) for item in payload.symbols])
+    if not symbols:
+        symbols = ["BTC/USDT"]
+    timeframes = _normalize_timeframes(payload.timeframes)
+    strategy_templates = _dedupe_keep_order(payload.strategy_templates) or _default_strategy_templates(
+        market_regime=payload.market_regime,
+        symbols=symbols,
+    )
+    required_features = _derive_required_features(
+        strategy_templates=strategy_templates,
+        provided=payload.required_features,
+    )
+    proposal = ResearchProposal(
+        proposal_id=f"proposal-{int(now.timestamp())}-{secrets.token_hex(4)}",
+        created_at=now,
+        updated_at=now,
+        status="draft",
+        source=_normalize_proposal_source(payload.source),
+        thesis=str(payload.thesis).strip(),
+        market_regime=str(payload.market_regime or "mixed").strip() or "mixed",
+        target_symbols=symbols,
+        target_timeframes=timeframes,
+        strategy_templates=strategy_templates,
+        parameter_space=_derive_parameter_space(strategy_templates, payload.parameter_space),
+        required_features=required_features,
+        risk_hypothesis=str(payload.risk_hypothesis or "").strip(),
+        invalidation_rules=_dedupe_keep_order(payload.invalidation_rules),
+        expected_holding_period=str(payload.expected_holding_period or "1d").strip() or "1d",
+        notes=_dedupe_keep_order(payload.notes),
+        metadata={
+            "created_by": actor,
+            "input_symbol_count": len(payload.symbols or []),
+            **dict(payload.metadata or {}),
+        },
+    )
+    return proposal
+
+
+def _save_proposal(app: FastAPI, proposal: ResearchProposal) -> ResearchProposal:
+    _ensure_ops_runtime_state(app)
+    proposal.updated_at = _now_utc()
+    return app.state.ai_proposal_registry.save(proposal)
+
+
+def _proposal_from_registry(app: FastAPI, proposal_id: str) -> ResearchProposal:
+    _ensure_ops_runtime_state(app)
+    proposal = app.state.ai_proposal_registry.get(proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="proposal not found")
+    return proposal
+
+
+def _build_research_config_from_proposal(
+    proposal: ResearchProposal,
+    payload: AIProposalRunRequest,
+) -> ResearchConfig:
+    symbol = _normalize_symbol(payload.symbol or (proposal.target_symbols[0] if proposal.target_symbols else "BTC/USDT"))
+    timeframes = _normalize_timeframes(payload.timeframes or proposal.target_timeframes)
+    strategies = _dedupe_keep_order(payload.strategies or proposal.strategy_templates)
+    if not strategies:
+        raise ValueError("proposal has no strategy templates to research")
+    return ResearchConfig(
+        exchange=str(payload.exchange or "binance").strip().lower() or "binance",
+        symbol=symbol,
+        days=int(payload.days),
+        initial_capital=float(payload.initial_capital),
+        timeframes=timeframes,
+        strategies=strategies,
+        commission_rate=float(payload.commission_rate),
+        slippage_bps=float(payload.slippage_bps),
+    )
+
+
+def _proposal_status_from_research_result(result: Dict[str, Any]) -> str:
+    if int(result.get("valid_runs", 0) or 0) > 0 and result.get("best"):
+        return "validated"
+    return "rejected"
+
+
+def _normalize_proposal_source(value: str) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in {"ai", "human", "hybrid"} else "ai"
+
+
+def _clip_score(value: float) -> float:
+    return round(max(0.0, min(100.0, float(value))), 2)
+
+
+def _score_ratio(value: float, good_at: float) -> float:
+    good = max(float(good_at), 1e-9)
+    return _clip_score(float(value) / good * 100.0)
+
+
+def _inverse_score(value: float, bad_at: float) -> float:
+    bad = max(float(bad_at), 1e-9)
+    return _clip_score(100.0 - (float(value) / bad * 100.0))
+
+
+def _build_validation_summary_from_research_result(result: Dict[str, Any]) -> ProposalValidationSummary:
+    now = _now_utc()
+    runs = max(0, int(result.get("runs", 0) or 0))
+    valid_runs = max(0, int(result.get("valid_runs", 0) or 0))
+    best = dict(result.get("best") or {})
+    quality_counts = dict(result.get("quality_counts") or {})
+    quality_ok = int(quality_counts.get("ok", 0) or 0)
+
+    if not best or valid_runs <= 0:
+        return ProposalValidationSummary(
+            computed_at=now,
+            decision="reject",
+            edge_score=0.0,
+            risk_score=0.0,
+            stability_score=0.0,
+            efficiency_score=0.0,
+            deployment_score=0.0,
+            reasons=["no valid research runs"],
+            metrics={
+                "runs": runs,
+                "valid_runs": valid_runs,
+                "quality_counts": quality_counts,
+            },
+        )
+
+    total_return = float(best.get("total_return", 0.0) or 0.0)
+    gross_total_return = float(best.get("gross_total_return", total_return) or total_return)
+    sharpe_ratio = float(best.get("sharpe_ratio", 0.0) or 0.0)
+    max_drawdown = float(best.get("max_drawdown", 0.0) or 0.0)
+    win_rate = float(best.get("win_rate", 0.0) or 0.0)
+    total_trades = float(best.get("total_trades", 0.0) or 0.0)
+    anomaly_ratio = float(best.get("anomaly_bar_ratio", 0.0) or 0.0)
+    cost_drag = abs(float(best.get("cost_drag_return_pct", 0.0) or 0.0))
+    valid_ratio = (valid_runs / max(runs, 1)) * 100.0
+    ok_ratio = (quality_ok / max(runs, 1)) * 100.0 if runs else 0.0
+
+    return_score = _score_ratio(max(total_return, 0.0), 25.0)
+    sharpe_score = _score_ratio(max(sharpe_ratio, 0.0), 2.0)
+    win_score = _clip_score(win_rate)
+    edge_score = _clip_score(return_score * 0.45 + sharpe_score * 0.4 + win_score * 0.15)
+
+    drawdown_score = _inverse_score(max(max_drawdown, 0.0), 25.0)
+    anomaly_score = _inverse_score(max(anomaly_ratio, 0.0), 0.03)
+    risk_score = _clip_score(drawdown_score * 0.8 + anomaly_score * 0.2)
+
+    stability_score = _clip_score(valid_ratio * 0.6 + ok_ratio * 0.4)
+
+    gross_abs = max(abs(gross_total_return), 1.0)
+    cost_burden_pct = cost_drag / gross_abs * 100.0
+    cost_score = _inverse_score(cost_burden_pct, 35.0)
+    trade_score = _clip_score(100.0 if total_trades >= 20 else total_trades / 20.0 * 100.0)
+    efficiency_score = _clip_score(cost_score * 0.7 + trade_score * 0.3)
+
+    deployment_score = _clip_score(
+        edge_score * 0.35
+        + risk_score * 0.25
+        + stability_score * 0.20
+        + efficiency_score * 0.20
+    )
+
+    reasons: List[str] = []
+    if total_return <= 0:
+        reasons.append("best strategy net return is non-positive")
+    if max_drawdown > 15:
+        reasons.append(f"max drawdown too high ({max_drawdown:.2f}%)")
+    if sharpe_ratio < 1.0:
+        reasons.append(f"sharpe too low ({sharpe_ratio:.2f})")
+    if cost_burden_pct > 35:
+        reasons.append(f"cost drag too high ({cost_burden_pct:.2f}% of gross return)")
+    if valid_ratio < 50:
+        reasons.append(f"valid run ratio too low ({valid_ratio:.2f}%)")
+    if anomaly_ratio > 0.02:
+        reasons.append(f"anomaly ratio elevated ({anomaly_ratio:.4f})")
+
+    decision = "reject"
+    if deployment_score >= 75 and sharpe_ratio >= 1.2 and max_drawdown <= 12 and valid_ratio >= 60:
+        decision = "live_candidate"
+    elif deployment_score >= 60 and sharpe_ratio >= 1.0 and max_drawdown <= 15:
+        decision = "paper"
+    elif deployment_score >= 45 and valid_runs > 0:
+        decision = "shadow"
+
+    return ProposalValidationSummary(
+        computed_at=now,
+        decision=decision,
+        edge_score=edge_score,
+        risk_score=risk_score,
+        stability_score=stability_score,
+        efficiency_score=efficiency_score,
+        deployment_score=deployment_score,
+        reasons=reasons,
+        metrics={
+            "runs": runs,
+            "valid_runs": valid_runs,
+            "valid_ratio_pct": round(valid_ratio, 2),
+            "quality_ok_ratio_pct": round(ok_ratio, 2),
+            "best_return_pct": round(total_return, 4),
+            "best_gross_return_pct": round(gross_total_return, 4),
+            "best_sharpe_ratio": round(sharpe_ratio, 4),
+            "best_max_drawdown_pct": round(max_drawdown, 4),
+            "best_win_rate_pct": round(win_rate, 4),
+            "best_total_trades": int(total_trades),
+            "anomaly_ratio": round(anomaly_ratio, 6),
+            "cost_drag_return_pct": round(cost_drag, 4),
+            "cost_burden_pct_of_gross": round(cost_burden_pct, 4),
+            "quality_counts": quality_counts,
+        },
+    )
+
+
+def _apply_research_result_to_proposal(proposal: ResearchProposal, result: Dict[str, Any], *, job_id: str | None = None) -> ResearchProposal:
+    validation_summary = _build_validation_summary_from_research_result(result)
+    proposal.validation_summary = validation_summary
+    proposal.status = "validated" if validation_summary.decision != "reject" else "rejected"
+    proposal.metadata["last_research_result"] = {
+        "job_id": job_id,
+        "best": result.get("best"),
+        "valid_runs": int(result.get("valid_runs", 0) or 0),
+        "runs": int(result.get("runs", 0) or 0),
+        "exchange": result.get("exchange"),
+        "symbol": result.get("symbol"),
+        "timeframes": result.get("timeframes"),
+        "strategies": result.get("strategies"),
+        "csv_path": result.get("csv_path"),
+        "markdown_path": result.get("markdown_path"),
+        "validation_summary": validation_summary.model_dump(mode="json"),
+    }
+    proposal.metadata.pop("last_research_error", None)
+    return proposal
 
 
 async def _ops_startup(app: FastAPI, standalone: bool) -> None:
@@ -624,6 +1019,144 @@ def create_router() -> APIRouter:
             return _ok(payload)
         except Exception as exc:
             return _err(f"failed to read latest research: {exc}")
+
+    @router.post("/ai/proposal")
+    async def create_ai_proposal(request: Request, payload: AIProposalCreateRequest):
+        auth = get_request_auth(request)
+        params = payload.model_dump()
+        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/ai/proposal", method="POST", params=params, ip=auth.client_ip) as audit_state:
+            try:
+                _ensure_ops_runtime_state(request.app)
+                proposal = _build_ai_research_proposal(payload, actor=auth.actor)
+                request.app.state.ai_proposal_registry.save(proposal)
+                audit_state["extra"] = {
+                    "proposal_id": proposal.proposal_id,
+                    "templates": len(proposal.strategy_templates),
+                    "symbols": len(proposal.target_symbols),
+                }
+                return _ok(
+                    {
+                        "proposal": proposal.model_dump(mode="json"),
+                        "registry_path": str(request.app.state.ai_proposal_registry.path),
+                    }
+                )
+            except Exception as exc:
+                audit_state["status"] = "failed"
+                audit_state["error"] = str(exc)
+                return _err(str(exc))
+
+    @router.get("/ai/proposals")
+    async def list_ai_proposals(request: Request, limit: int = 20):
+        _ensure_ops_runtime_state(request.app)
+        rows = request.app.state.ai_proposal_registry.list(limit=max(1, min(int(limit), 200)))
+        return _ok(
+            {
+                "items": [item.model_dump(mode="json") for item in rows],
+                "count": len(rows),
+                "registry_path": str(request.app.state.ai_proposal_registry.path),
+            }
+        )
+
+    @router.get("/ai/proposal/{proposal_id}")
+    async def get_ai_proposal(request: Request, proposal_id: str = FPath(...)):
+        _ensure_ops_runtime_state(request.app)
+        item = request.app.state.ai_proposal_registry.get(proposal_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="proposal not found")
+        return _ok({"proposal": item.model_dump(mode="json")})
+
+    @router.get("/ai/proposal/{proposal_id}/validation")
+    async def get_ai_proposal_validation(request: Request, proposal_id: str = FPath(...)):
+        item = _proposal_from_registry(request.app, proposal_id)
+        return _ok(
+            {
+                "proposal_id": proposal_id,
+                "status": item.status,
+                "validation_summary": item.validation_summary.model_dump(mode="json") if item.validation_summary else None,
+            }
+        )
+
+    @router.post("/ai/proposal/{proposal_id}/run")
+    async def run_ai_proposal(request: Request, proposal_id: str, payload: AIProposalRunRequest):
+        auth = get_request_auth(request)
+        params = payload.model_dump()
+        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/ai/proposal/run", method="POST", params={"proposal_id": proposal_id, **params}, ip=auth.client_ip) as audit_state:
+            try:
+                _ensure_ops_runtime_state(request.app)
+                proposal = _proposal_from_registry(request.app, proposal_id)
+                config = _build_research_config_from_proposal(proposal, payload)
+                request_payload = {
+                    "proposal_id": proposal_id,
+                    "exchange": config.exchange,
+                    "symbol": config.symbol,
+                    "days": config.days,
+                    "timeframes": list(config.timeframes),
+                    "strategies": list(config.strategies),
+                    "commission_rate": float(config.commission_rate),
+                    "slippage_bps": float(config.slippage_bps),
+                    "initial_capital": float(config.initial_capital),
+                    "background": bool(payload.background),
+                    "proposal_status_before": proposal.status,
+                }
+                if not payload.background:
+                    proposal.status = "research_running"
+                    proposal.metadata["last_research_request"] = request_payload
+                    _save_proposal(request.app, proposal)
+                    try:
+                        result = await run_strategy_research(config)
+                    except Exception as exc:
+                        proposal = _proposal_from_registry(request.app, proposal_id)
+                        proposal.status = "rejected"
+                        proposal.metadata["last_research_error"] = str(exc)
+                        _save_proposal(request.app, proposal)
+                        raise
+                    proposal = _proposal_from_registry(request.app, proposal_id)
+                    proposal = _apply_research_result_to_proposal(proposal, result, job_id=None)
+                    _save_proposal(request.app, proposal)
+                    audit_state["extra"] = {
+                        "proposal_id": proposal_id,
+                        "status": proposal.status,
+                        "valid_runs": int(result.get("valid_runs", 0) or 0),
+                    }
+                    return _ok(
+                        {
+                            "proposal": proposal.model_dump(mode="json"),
+                            "research_result": result,
+                        }
+                    )
+
+                job_id = f"proposal-research-{int(_now_utc().timestamp())}-{secrets.token_hex(4)}"
+                job = {
+                    "job_id": job_id,
+                    "proposal_id": proposal_id,
+                    "status": "pending",
+                    "created_at": _now_utc().isoformat(),
+                    "started_at": None,
+                    "finished_at": None,
+                    "request": request_payload,
+                    "result": None,
+                    "error": None,
+                }
+                request.app.state.research_jobs[job_id] = job
+                proposal.status = "research_queued"
+                proposal.metadata["last_research_job_id"] = job_id
+                proposal.metadata["last_research_request"] = request_payload
+                _save_proposal(request.app, proposal)
+                asyncio.create_task(
+                    _run_ai_proposal_research_job(request.app, job_id, proposal_id, config, request_payload),
+                    name=f"ops_ai_proposal_{job_id}",
+                )
+                audit_state["extra"] = {"proposal_id": proposal_id, "job_id": job_id}
+                return _ok(
+                    {
+                        "job": job,
+                        "proposal": proposal.model_dump(mode="json"),
+                    }
+                )
+            except Exception as exc:
+                audit_state["status"] = "failed"
+                audit_state["error"] = str(exc)
+                return _err(str(exc))
 
     @router.get("/polymarket/status")
     async def polymarket_status(request: Request):
