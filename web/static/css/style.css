@@ -2055,10 +2055,10 @@ canvas {
 /* News page/news tab layout hardening */
 body.news-page #news,
 #news {
-    --news-top-card-min: clamp(460px, 56vh, 620px);
-    --news-panel-min: clamp(560px, 68vh, 820px);
-    --news-feed-min: clamp(420px, 56vh, 760px);
-    --news-chart-height: clamp(300px, 38vh, 420px);
+    --news-top-card-min: clamp(520px, 60vh, 660px);
+    --news-panel-min: clamp(580px, 66vh, 760px);
+    --news-feed-min: clamp(260px, 32vh, 380px);
+    --news-chart-height: clamp(300px, 36vh, 390px);
 }
 
 #news-summary-note .list-item,
@@ -2123,12 +2123,16 @@ body.news-page .news-card-chart,
 #news .news-card-chart {
     grid-column: 1 / span 2;
     min-height: var(--news-panel-min);
+    height: var(--news-panel-min);
+    align-self: stretch;
 }
 
 body.news-page .news-card-raw,
 #news .news-card-raw {
     grid-column: 3;
     min-height: var(--news-panel-min);
+    height: var(--news-panel-min);
+    align-self: stretch;
 }
 
 body.news-page .news-card-structured,
@@ -2189,13 +2193,13 @@ body.news-page .news-scroll-fill,
 body.news-page .news-scroll-chart,
 #news .news-scroll-chart {
     flex: 1 1 auto;
-    min-height: clamp(180px, 22vh, 260px);
+    min-height: 0;
 }
 
 body.news-page .news-scroll-feed,
 #news .news-scroll-feed {
     flex: 1 1 auto;
-    min-height: var(--news-feed-min);
+    min-height: 0;
 }
 
 #news-summary-note .list-item > span:first-child,
@@ -2230,6 +2234,17 @@ body.news-page .news-card-chart #news-bucket-chart,
 #news .news-card-chart #news-bucket-chart {
     flex: 0 0 auto;
     height: var(--news-chart-height) !important;
+}
+
+body.news-page .news-card-chart #news-bucket-list,
+#news .news-card-chart #news-bucket-list,
+body.news-page .news-card-raw #news-unstructured-list,
+#news .news-card-raw #news-unstructured-list,
+body.news-page .news-card-structured #news-structured-list,
+#news .news-card-structured #news-structured-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto !important;
 }
 
 #news-bucket-chart .js-plotly-plot,
