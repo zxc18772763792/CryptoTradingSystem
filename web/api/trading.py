@@ -4,11 +4,12 @@ import contextlib
 import copy
 import hashlib
 import hmac
+import inspect
 import json
 import math
 import statistics
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
@@ -70,6 +71,17 @@ _DEFAULT_STOPLOSS_POLICY: Dict[str, Any] = {
 _BINANCE_RECV_WINDOW = 5000
 _BINANCE_REST_TIMEOUT_SEC = 4.5
 _BINANCE_TIME_OFFSET_MS: Dict[str, Any] = {"api": 0, "fapi": 0, "ts": 0.0}
+_HTTPX_SUPPORTS_PROXY_KW = "proxy" in inspect.signature(httpx.AsyncClient.__init__).parameters
+
+
+def _apply_httpx_proxy_kw(client_kwargs: Dict[str, Any], proxy_url: Optional[str]) -> None:
+    proxy = str(proxy_url or "").strip()
+    if not proxy:
+        return
+    if _HTTPX_SUPPORTS_PROXY_KW:
+        client_kwargs["proxy"] = proxy
+    else:
+        client_kwargs["proxies"] = proxy
 
 
 async def _clear_local_trading_runtime(
@@ -499,11 +511,34 @@ def _apply_live_snapshot_to_risk_report(
         live_unrealized if has_live_positions else float(equity.get("daily_unrealized_component_usd") or 0.0),
         4,
     )
+    day_start_equity = 0.0
     if live_day_start_equity is not None and float(live_day_start_equity or 0.0) > 0:
         day_start_equity = float(live_day_start_equity or 0.0)
+    else:
+        day_start_equity = _safe_float(equity.get("day_start"), default=0.0)
+        if day_start_equity <= 0:
+            current_equity = _safe_float(equity.get("current"), default=0.0)
+            derived_day_start = current_equity - daily_total
+            if current_equity > 0 and derived_day_start > 0:
+                day_start_equity = float(derived_day_start)
+
+    if day_start_equity > 0:
         equity["day_start"] = round(day_start_equity, 4)
         equity["daily_total_pnl_ratio"] = round(daily_total / max(day_start_equity, 1e-6), 6)
         equity["daily_stop_basis_ratio"] = round(daily_stop_basis / max(day_start_equity, 1e-6), 6)
+        equity["daily_pnl_ratio"] = equity["daily_stop_basis_ratio"]
+    else:
+        total_ratio = _safe_float(
+            equity.get("daily_total_pnl_ratio"),
+            default=_safe_float(equity.get("daily_pnl_ratio"), default=0.0),
+        )
+        stop_ratio = _safe_float(
+            equity.get("daily_stop_basis_ratio"),
+            default=_safe_float(equity.get("daily_pnl_ratio"), default=0.0),
+        )
+        equity["daily_total_pnl_ratio"] = round(total_ratio, 6)
+        equity["daily_stop_basis_ratio"] = round(stop_ratio, 6)
+        equity["daily_pnl_ratio"] = round(stop_ratio, 6)
     equity["pnl_scope_note"] = "daily_total_pnl_usd 为账户权益变化；daily_stop_basis_usd = 已实现盈亏 + 当前浮亏，仅该值用于熔断"
     out["equity"] = equity
     out["live_positions"] = {
@@ -673,8 +708,7 @@ async def _binance_signed_request(
         if target_host == "fapi":
             time_url = "https://fapi.binance.com/fapi/v1/time"
         client_kwargs: Dict[str, Any] = {"timeout": 3.0}
-        if proxy_url:
-            client_kwargs["proxies"] = proxy_url
+        _apply_httpx_proxy_kw(client_kwargs, proxy_url)
         async with httpx.AsyncClient(**client_kwargs) as client:
             resp = await client.get(time_url)
             resp.raise_for_status()
@@ -706,8 +740,7 @@ async def _binance_signed_request(
         headers = {"X-MBX-APIKEY": (settings.BINANCE_API_KEY or "").strip()}
         url = f"{base_url}{path}"
         client_kwargs: Dict[str, Any] = {"timeout": timeout_sec, "headers": headers}
-        if proxy_url:
-            client_kwargs["proxies"] = proxy_url
+        _apply_httpx_proxy_kw(client_kwargs, proxy_url)
         async with httpx.AsyncClient(**client_kwargs) as client:
             if method.upper() == "GET":
                 return await client.get(url, params={**payload, "signature": signature})
@@ -755,8 +788,7 @@ async def _binance_public_quotes_usd(assets: List[str]) -> Dict[str, float]:
         return {}
     proxy_url = settings.HTTP_PROXY or settings.HTTPS_PROXY or None
     client_kwargs: Dict[str, Any] = {"timeout": 2.5}
-    if proxy_url:
-        client_kwargs["proxies"] = proxy_url
+    _apply_httpx_proxy_kw(client_kwargs, proxy_url)
     try:
         async with httpx.AsyncClient(**client_kwargs) as client:
             resp = await client.get("https://api.binance.com/api/v3/ticker/price")
@@ -779,7 +811,7 @@ async def _binance_public_quotes_usd(assets: List[str]) -> Dict[str, float]:
 async def _fetch_binance_realized_pnl_income(days: int = 30) -> List[Dict[str, Any]]:
     if not _binance_has_credentials():
         return []
-    start_time_ms = int((datetime.utcnow() - timedelta(days=max(1, int(days or 30)))).timestamp() * 1000)
+    start_time_ms = int((datetime.now(timezone.utc) - timedelta(days=max(1, int(days or 30)))).timestamp() * 1000)
     rows = await _binance_signed_request(
         "GET",
         "/fapi/v1/income",
@@ -1028,7 +1060,7 @@ async def _resolve_live_equity_baseline(
     exchange_totals: Dict[str, float],
     live_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     day_key = now.strftime("%Y-%m-%d")
     stored = _read_json_file(_LIVE_EQUITY_BASELINE_PATH, default={})
     if not isinstance(stored, dict):
@@ -1081,7 +1113,7 @@ async def _resolve_live_equity_baseline(
 
 
 def _iter_trade_records(days: int = 90) -> List[Dict[str, Any]]:
-    cutoff_ts = datetime.utcnow().timestamp() - max(1, int(days)) * 86400
+    cutoff_ts = datetime.now(timezone.utc).timestamp() - max(1, int(days)) * 86400
     out: List[Dict[str, Any]] = []
     signatures = set()
 
@@ -1617,7 +1649,8 @@ async def get_positions():
     cached_diagnostics = _LIVE_POSITION_DETAILS_CACHE.get("diagnostics")
     cached_ts = float(_LIVE_POSITION_DETAILS_CACHE.get("ts") or 0.0)
 
-    positions = [p.to_dict() for p in position_manager.get_all_positions()]
+    local_positions = list(position_manager.get_all_positions())
+    positions = [p.to_dict() for p in local_positions]
     exchange_positions: List[Dict[str, Any]] = []
     diagnostics: Dict[str, Any] = {"fetched_exchanges": [], "skipped_exchanges": []}
 
@@ -1625,13 +1658,83 @@ async def get_positions():
         text = str(sym or "").upper().strip()
         if ":" in text:
             text = text.split(":", 1)[0].strip()
+        if "_" in text and "/" not in text:
+            left, right = text.split("_", 1)
+            text = f"{left}/{right}"
+        if text.endswith("USDT") and "/" not in text and len(text) > 4:
+            text = f"{text[:-4]}/USDT"
         return text
+
+    def _parse_exchange_position(raw: Any, exchange_name: str, *, fallback_used: bool = False) -> Optional[Dict[str, Any]]:
+        exchange_key = str(exchange_name or "").strip().lower()
+        if not exchange_key:
+            return None
+        if isinstance(raw, dict):
+            raw_exchange = str(raw.get("exchange") or exchange_key).strip().lower()
+            if raw_exchange and raw_exchange != exchange_key:
+                return None
+
+        symbol = str((raw.get("symbol") if isinstance(raw, dict) else getattr(raw, "symbol", "")) or "")
+        symbol_key = _canonical_symbol(symbol)
+        if not symbol_key:
+            return None
+
+        amount = float((raw.get("amount") if isinstance(raw, dict) else getattr(raw, "amount", 0.0)) or 0.0)
+        if isinstance(raw, dict) and abs(amount) <= 1e-12:
+            amount = float(raw.get("quantity") or 0.0)
+        if abs(amount) <= 1e-12:
+            return None
+
+        side = str((raw.get("side") if isinstance(raw, dict) else getattr(raw, "side", "")) or "").strip().lower()
+        if side not in {"long", "short"}:
+            side = "short" if amount < 0 else "long"
+
+        entry_px = float((raw.get("entry_price") if isinstance(raw, dict) else getattr(raw, "entry_price", 0.0)) or 0.0)
+        current_px = float((raw.get("current_price") if isinstance(raw, dict) else getattr(raw, "current_price", 0.0)) or 0.0)
+        unrealized = float((raw.get("unrealized_pnl") if isinstance(raw, dict) else getattr(raw, "unrealized_pnl", 0.0)) or 0.0)
+        leverage = float((raw.get("leverage") if isinstance(raw, dict) else getattr(raw, "leverage", 1.0)) or 1.0)
+        liquidation_price = raw.get("liquidation_price") if isinstance(raw, dict) else getattr(raw, "liquidation_price", None)
+        value = abs(amount) * (current_px if current_px > 0 else entry_px)
+
+        meta = {
+            "source": "exchange_live",
+            "liquidation_price": liquidation_price,
+            "synced_from_exchange": exchange_name,
+        }
+        if fallback_used:
+            meta["fallback_used"] = True
+
+        return {
+            "key": (exchange_key, symbol_key, side),
+            "symbol_key": symbol_key,
+            "row": {
+                "symbol": symbol,
+                "exchange": exchange_name,
+                "side": side,
+                "entry_price": entry_px,
+                "current_price": current_px,
+                "quantity": abs(amount),
+                "value": value,
+                "unrealized_pnl": unrealized,
+                "unrealized_pnl_pct": 0.0,
+                "realized_pnl": 0.0,
+                "leverage": leverage,
+                "margin": 0.0,
+                "opened_at": None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "strategy": None,
+                "account_id": "exchange_live",
+                "metadata": meta,
+            },
+        }
 
     if not execution_engine.is_paper_mode():
         # Include live exchange positions so manually-held futures positions are visible in the UI.
         # In live mode, exchange positions are treated as source-of-truth for the same symbol.
         exchange_keys = set()
         exchange_symbol_set = set()
+        exchange_side_set = set()
+        fetched_exchange_set = set()
         for exchange_name in exchange_manager.get_connected_exchanges():
             connector = exchange_manager.get_exchange(exchange_name)
             if not connector:
@@ -1655,50 +1758,21 @@ async def get_positions():
                         connector.get_positions(),
                         timeout=min(_LIVE_POSITION_FETCH_TIMEOUT_SEC, 6.5),
                     )
+                fetched_exchange_set.add(str(exchange_name or "").lower())
                 diagnostics["fetched_exchanges"].append(
                     {"exchange": exchange_name, "count": len(ex_positions), "default_type": default_type}
                 )
                 for p in ex_positions:
-                    symbol = str((p.get("symbol") if isinstance(p, dict) else getattr(p, "symbol", "")) or "")
-                    symbol_key = _canonical_symbol(symbol)
-                    side = str((p.get("side") if isinstance(p, dict) else getattr(p, "side", "")) or "").lower()
-                    key = (exchange_name.lower(), symbol_key, side)
+                    parsed = _parse_exchange_position(p, exchange_name, fallback_used=False)
+                    if not parsed:
+                        continue
+                    key = parsed["key"]
                     if key in exchange_keys:
                         continue
                     exchange_keys.add(key)
-                    amount = float((p.get("amount") if isinstance(p, dict) else getattr(p, "amount", 0.0)) or 0.0)
-                    entry_px = float((p.get("entry_price") if isinstance(p, dict) else getattr(p, "entry_price", 0.0)) or 0.0)
-                    current_px = float((p.get("current_price") if isinstance(p, dict) else getattr(p, "current_price", 0.0)) or 0.0)
-                    unrealized = float((p.get("unrealized_pnl") if isinstance(p, dict) else getattr(p, "unrealized_pnl", 0.0)) or 0.0)
-                    value = abs(amount) * (current_px if current_px > 0 else entry_px)
-                    exchange_symbol_set.add((exchange_name.lower(), symbol_key))
-                    exchange_positions.append(
-                        {
-                            "symbol": symbol,
-                            "exchange": exchange_name,
-                            "side": side or ("short" if amount < 0 else "long"),
-                            "entry_price": entry_px,
-                            "current_price": current_px,
-                            "quantity": abs(amount),
-                            "value": value,
-                            "unrealized_pnl": unrealized,
-                            "unrealized_pnl_pct": 0.0,
-                            "realized_pnl": 0.0,
-                            "leverage": float((p.get("leverage") if isinstance(p, dict) else getattr(p, "leverage", 1.0)) or 1.0),
-                            "margin": 0.0,
-                            "opened_at": None,
-                            "updated_at": datetime.utcnow().isoformat(),
-                            "strategy": None,
-                            "account_id": "exchange_live",
-                            "metadata": {
-                                "source": "exchange_live",
-                                "liquidation_price": (
-                                    p.get("liquidation_price") if isinstance(p, dict) else getattr(p, "liquidation_price", None)
-                                ),
-                                "synced_from_exchange": exchange_name,
-                            },
-                        }
-                    )
+                    exchange_symbol_set.add((str(exchange_name).lower(), parsed["symbol_key"]))
+                    exchange_side_set.add(key)
+                    exchange_positions.append(parsed["row"])
             except Exception as e:
                 if exchange_name == "binance":
                     try:
@@ -1708,6 +1782,7 @@ async def get_positions():
                         ) or []
                         if not ex_positions and cached_positions and (now_ts - cached_ts) <= _LIVE_POSITION_DETAILS_CACHE_TTL_SEC:
                             ex_positions = cached_positions
+                        fetched_exchange_set.add(str(exchange_name or "").lower())
                         diagnostics["fetched_exchanges"].append(
                             {
                                 "exchange": exchange_name,
@@ -1717,47 +1792,16 @@ async def get_positions():
                             }
                         )
                         for p in ex_positions:
-                            symbol = str((p.get("symbol") if isinstance(p, dict) else getattr(p, "symbol", "")) or "")
-                            symbol_key = _canonical_symbol(symbol)
-                            side = str((p.get("side") if isinstance(p, dict) else getattr(p, "side", "")) or "").lower()
-                            key = (exchange_name.lower(), symbol_key, side)
+                            parsed = _parse_exchange_position(p, exchange_name, fallback_used=True)
+                            if not parsed:
+                                continue
+                            key = parsed["key"]
                             if key in exchange_keys:
                                 continue
                             exchange_keys.add(key)
-                            amount = float((p.get("amount") if isinstance(p, dict) else getattr(p, "amount", 0.0)) or 0.0)
-                            entry_px = float((p.get("entry_price") if isinstance(p, dict) else getattr(p, "entry_price", 0.0)) or 0.0)
-                            current_px = float((p.get("current_price") if isinstance(p, dict) else getattr(p, "current_price", 0.0)) or 0.0)
-                            unrealized = float((p.get("unrealized_pnl") if isinstance(p, dict) else getattr(p, "unrealized_pnl", 0.0)) or 0.0)
-                            value = abs(amount) * (current_px if current_px > 0 else entry_px)
-                            exchange_symbol_set.add((exchange_name.lower(), symbol_key))
-                            exchange_positions.append(
-                                {
-                                    "symbol": symbol,
-                                    "exchange": exchange_name,
-                                    "side": side or ("short" if amount < 0 else "long"),
-                                    "entry_price": entry_px,
-                                    "current_price": current_px,
-                                    "quantity": abs(amount),
-                                    "value": value,
-                                    "unrealized_pnl": unrealized,
-                                    "unrealized_pnl_pct": 0.0,
-                                    "realized_pnl": 0.0,
-                                    "leverage": float((p.get("leverage") if isinstance(p, dict) else getattr(p, "leverage", 1.0)) or 1.0),
-                                    "margin": 0.0,
-                                    "opened_at": None,
-                                    "updated_at": datetime.utcnow().isoformat(),
-                                    "strategy": None,
-                                    "account_id": "exchange_live",
-                                    "metadata": {
-                                        "source": "exchange_live",
-                                        "liquidation_price": (
-                                            p.get("liquidation_price") if isinstance(p, dict) else getattr(p, "liquidation_price", None)
-                                        ),
-                                        "synced_from_exchange": exchange_name,
-                                        "fallback_used": True,
-                                    },
-                                }
-                            )
+                            exchange_symbol_set.add((str(exchange_name).lower(), parsed["symbol_key"]))
+                            exchange_side_set.add(key)
+                            exchange_positions.append(parsed["row"])
                         continue
                     except Exception as fallback_err:
                         diagnostics["skipped_exchanges"].append(
@@ -1765,6 +1809,63 @@ async def get_positions():
                         )
                         continue
                 diagnostics["skipped_exchanges"].append({"exchange": exchange_name, "reason": str(e)})
+
+        reconciled_local_positions: List[Dict[str, Any]] = []
+        if fetched_exchange_set:
+            for local_pos in list(local_positions):
+                local_exchange = str(getattr(local_pos, "exchange", "") or "").strip().lower()
+                if not local_exchange or local_exchange not in fetched_exchange_set:
+                    continue
+                source = str((getattr(local_pos, "metadata", {}) or {}).get("source") or "").strip().lower()
+                if source == "exchange_live":
+                    continue
+                local_updated_at = getattr(local_pos, "updated_at", None)
+                if isinstance(local_updated_at, datetime):
+                    age_sec = max(0.0, now_ts - float(local_updated_at.timestamp()))
+                    if age_sec < 20.0:
+                        continue
+                local_symbol_key = _canonical_symbol(getattr(local_pos, "symbol", ""))
+                local_side = str(getattr(getattr(local_pos, "side", None), "value", "") or "").strip().lower()
+                if local_side not in {"long", "short"}:
+                    continue
+                if (local_exchange, local_symbol_key, local_side) in exchange_side_set:
+                    continue
+
+                close_price = float(
+                    getattr(local_pos, "current_price", 0.0)
+                    or getattr(local_pos, "entry_price", 0.0)
+                    or 0.0
+                )
+                if close_price <= 0:
+                    close_price = float(getattr(local_pos, "entry_price", 0.0) or 0.0)
+                closed = position_manager.close_position(
+                    exchange=local_exchange,
+                    symbol=str(getattr(local_pos, "symbol", "") or ""),
+                    close_price=close_price,
+                    quantity=float(getattr(local_pos, "quantity", 0.0) or 0.0),
+                    account_id=str(getattr(local_pos, "account_id", "main") or "main"),
+                )
+                if not closed:
+                    continue
+                reconciled_local_positions.append(
+                    {
+                        "exchange": local_exchange,
+                        "symbol": closed.symbol,
+                        "side": local_side,
+                        "account_id": closed.account_id,
+                        "reason": "exchange_flat_manual_close",
+                    }
+                )
+                logger.warning(
+                    "Reconciled stale local position on positions API read: "
+                    f"exchange={local_exchange} symbol={closed.symbol} side={local_side} account_id={closed.account_id}"
+                )
+            if reconciled_local_positions:
+                diagnostics["reconciled_local_positions"] = reconciled_local_positions
+                local_positions = list(position_manager.get_all_positions())
+                positions = [p.to_dict() for p in local_positions]
+                _LIVE_POSITION_SNAPSHOT_CACHE["ts"] = 0.0
+                _LIVE_POSITION_SNAPSHOT_CACHE["data"] = {}
 
         if exchange_symbol_set:
             positions = [
@@ -1835,7 +1936,7 @@ async def close_position(req: PositionCloseRequest):
             symbol=symbol,
             signal_type=(SignalType.CLOSE_LONG if side == "long" else SignalType.CLOSE_SHORT),
             price=float(local_pos.current_price or local_pos.entry_price or 0.0),
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             strategy_name=str(local_pos.strategy or "manual_ui_close"),
             strength=1.0,
             quantity=float(local_pos.quantity or 0.0),
@@ -2683,11 +2784,11 @@ async def get_trading_stats():
 
 @router.get("/mode")
 async def get_trading_mode():
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     pending = []
     for token, item in list(_mode_switch_pending.items()):
         expires_at = item.get("expires_at")
-        if expires_at and expires_at < datetime.utcnow():
+        if expires_at and expires_at < datetime.now(timezone.utc):
             _mode_switch_pending.pop(token, None)
             continue
         pending.append(
@@ -2715,7 +2816,7 @@ async def request_trading_mode_switch(req: TradingModeRequest):
         return {"success": True, "mode": target, "message": "褰撳墠宸叉槸鐩爣妯″紡"}
 
     token = uuid4().hex
-    created_at = datetime.utcnow()
+    created_at = datetime.now(timezone.utc)
     expires_at = created_at + timedelta(minutes=5)
     _mode_switch_pending[token] = {
         "target_mode": target,
@@ -2738,7 +2839,7 @@ async def confirm_trading_mode_switch(req: TradingModeConfirmRequest):
     pending = _mode_switch_pending.get(req.token)
     if not pending:
         raise HTTPException(status_code=404, detail="???????????")
-    if pending.get("expires_at") and pending["expires_at"] < datetime.utcnow():
+    if pending.get("expires_at") and pending["expires_at"] < datetime.now(timezone.utc):
         _mode_switch_pending.pop(req.token, None)
         raise HTTPException(status_code=400, detail="???????")
     if req.confirm_text.strip() != _MODE_CONFIRM_TEXT:
@@ -3034,7 +3135,7 @@ async def get_analytics_overview(
     modules = {name: result for name, result in zip(module_names, module_results)}
     ok_count = len([x for x in modules.values() if x.get("ok")])
     return {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "all_ok": ok_count == len(modules),
         "ok_count": ok_count,
         "total": len(modules),
@@ -3227,7 +3328,7 @@ async def get_risk_dashboard(lookback: int = 240):
     implicit_lev = (total_exposure / equity) if equity > 0 else 0.0
     explicit_lev = (weighted_lev / total_exposure) if total_exposure > 0 else 0.0
     return {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "risk_level": report.get("risk_level", "low"),
         "total_exposure": round(total_exposure, 6),
         "exposure_pct_of_equity": round((total_exposure / equity * 100) if equity > 0 else 0.0, 4),
@@ -3252,7 +3353,7 @@ async def get_risk_dashboard(lookback: int = 240):
 @router.get("/analytics/calendar")
 async def get_trading_calendar(days: int = 30):
     days = max(1, min(int(days or 30), 180))
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     end = now + timedelta(days=days)
     events: List[Dict[str, Any]] = []
 
@@ -3465,7 +3566,7 @@ async def get_market_microstructure(
     return {
         "exchange": exchange,
         "symbol": symbol,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "available": bool(ob.get("available", True)),
         "source_error": ob.get("error"),
         "orderbook": {
@@ -3492,7 +3593,7 @@ async def get_market_microstructure(
 async def add_behavior_journal(request: BehaviorJournalRequest):
     rows = _load_behavior_journal()
     item = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "mood": str(request.mood or "neutral").strip().lower(),
         "confidence": round(_safe_float(request.confidence), 6),
         "plan_adherence": round(_safe_float(request.plan_adherence), 6),
@@ -3508,7 +3609,7 @@ async def add_behavior_journal(request: BehaviorJournalRequest):
 @router.get("/analytics/behavior/report")
 async def get_behavior_report(days: int = 7):
     days = max(1, min(int(days or 7), 90))
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     rows = []
     for row in _load_behavior_journal():
         ts = _safe_dt(row.get("timestamp"))
@@ -3563,7 +3664,7 @@ async def get_stoploss_policy():
         qty = abs(_safe_float(getattr(pos, "quantity", 0.0)))
         side = str(getattr(pos, "side", "") or "")
         opened_at = getattr(pos, "opened_at", None)
-        hold_hours = ((datetime.utcnow() - opened_at).total_seconds() / 3600.0) if isinstance(opened_at, datetime) else 0.0
+        hold_hours = ((datetime.now(timezone.utc) - opened_at).total_seconds() / 3600.0) if isinstance(opened_at, datetime) else 0.0
 
         atr_stop = None
         if atr and entry > 0:
@@ -3810,7 +3911,7 @@ async def get_pnl_heatmap(
 
     if not filtered:
         fallback_orders = []
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         for order in order_manager.get_recent_orders(limit=5000):
             ts = _safe_dt(getattr(order, "timestamp", None))
             if not ts or ts < cutoff:

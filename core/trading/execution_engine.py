@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
@@ -13,6 +13,8 @@ from loguru import logger
 from config.settings import settings
 from core.audit import audit_logger
 from core.exchanges import exchange_manager
+from core.governance.audit import GovernanceAuditEvent, write_audit
+from core.governance.decision_engine import decision_engine
 from core.risk.risk_manager import risk_manager
 from core.strategies import Signal, SignalType
 from core.strategies.strategy_manager import strategy_manager
@@ -96,6 +98,10 @@ class ExecutionEngine:
         self._conditional_seq = 0
         self._last_bg_check_at: Optional[datetime] = None
         self._bg_check_interval_seconds = 2.0
+        self._last_live_reconcile_at: Optional[datetime] = None
+        self._live_reconcile_interval_seconds = 12.0
+        self._live_reconcile_grace_seconds = 20.0
+        self._real_order_timeout_seconds = 30.0
 
     def set_paper_trading(self, enabled: bool) -> None:
         self._paper_trading = bool(enabled)
@@ -134,9 +140,9 @@ class ExecutionEngine:
             "signal_type": signal.signal_type.value,
             "price": float(signal.price or 0.0),
             "strength": float(signal.strength or 0.0),
-            "timestamp": signal.timestamp.isoformat() if signal.timestamp else datetime.utcnow().isoformat(),
+            "timestamp": signal.timestamp.isoformat() if signal.timestamp else datetime.now(timezone.utc).isoformat(),
         }
-        self._signal_diagnostics["last_updated_at"] = datetime.utcnow().isoformat()
+        self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
         if self._running:
             await self._ensure_queue_worker()
         if self._queue_task and not self._queue_task.done():
@@ -276,7 +282,7 @@ class ExecutionEngine:
             if self._paper_trading and candidate < 100 and float(self._cached_equity or 0.0) >= 100:
                 candidate = float(self._cached_equity)
             self._cached_equity = candidate
-            self._equity_updated_at = datetime.utcnow()
+            self._equity_updated_at = datetime.now(timezone.utc)
             risk_manager.update_equity(self._cached_equity)
 
         return float(self._cached_equity or 0.0)
@@ -286,7 +292,7 @@ class ExecutionEngine:
         if self._paper_trading:
             return await self.get_account_equity_snapshot(force=force)
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         cached_eq = float(self._cached_equity or 0.0)
         if not force:
             if report_eq > 100:
@@ -352,7 +358,7 @@ class ExecutionEngine:
             mark_equity = raw_mark_equity
 
         self._cached_equity = float(mark_equity)
-        self._equity_updated_at = datetime.utcnow()
+        self._equity_updated_at = datetime.now(timezone.utc)
         risk_manager.update_equity(self._cached_equity)
         return float(self._cached_equity)
 
@@ -488,13 +494,13 @@ class ExecutionEngine:
                 return 0.0
             # Unless explicitly requested, avoid sending dust-size strategy orders.
             if not bool((signal.metadata or {}).get("respect_quantity", False)):
-                qty = max(qty, min_notional / price)
+                qty = max(qty, configured_min_notional / price)
             return max(0.0, self._floor_to_decimals(qty, 8))
 
         equity = float(account_equity or 0.0)
         if equity <= 0:
             # Conservative fallback for unknown equity in paper mode.
-            return max(0.0, round(max(10.0, min_notional) / price, 8))
+            return max(0.0, round(max(10.0, configured_min_notional) / price, 8))
 
         strength = float(signal.strength or 1.0)
         strength = max(0.1, min(strength, 1.0))
@@ -634,6 +640,162 @@ class ExecutionEngine:
             "reverse_on_signal": reverse_on_signal,
             "allow_pyramiding": allow_pyramiding,
         }
+
+    @staticmethod
+    def _canonical_symbol(symbol: str) -> str:
+        raw = str(symbol or "").strip().upper()
+        if not raw:
+            return ""
+        if ":" in raw:
+            raw = raw.split(":", 1)[0]
+        if "_" in raw and "/" not in raw:
+            left, right = raw.split("_", 1)
+            raw = f"{left}/{right}"
+        if raw.endswith("USDT") and "/" not in raw and len(raw) > 4:
+            raw = f"{raw[:-4]}/USDT"
+        return raw
+
+    async def _exchange_has_side_position(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        side: PositionSide,
+        min_qty: float = 1e-12,
+    ) -> Tuple[bool, bool]:
+        connector = exchange_manager.get_exchange(exchange)
+        if connector is None:
+            return False, False
+        try:
+            positions = await asyncio.wait_for(connector.get_positions(), timeout=8.0)
+        except Exception as e:
+            logger.warning(f"Failed to query exchange positions for reconciliation: {e}")
+            return False, False
+        target_symbol = self._canonical_symbol(symbol)
+        target_side = "long" if side == PositionSide.LONG else "short"
+        for pos in positions or []:
+            pos_symbol = self._canonical_symbol(
+                str((pos.get("symbol") if isinstance(pos, dict) else getattr(pos, "symbol", "")) or "")
+            )
+            if pos_symbol != target_symbol:
+                continue
+            pos_side = str((pos.get("side") if isinstance(pos, dict) else getattr(pos, "side", "")) or "").strip().lower()
+            pos_qty = abs(float((pos.get("amount") if isinstance(pos, dict) else getattr(pos, "amount", 0.0)) or 0.0))
+            if pos_side == target_side and pos_qty > max(1e-12, float(min_qty or 0.0)):
+                return True, True
+        return False, True
+
+    @staticmethod
+    def _is_reduce_only_rejected(error_text: str) -> bool:
+        text = str(error_text or "").lower()
+        return ("reduceonly order is rejected" in text) or ("\"code\":-2022" in text) or ("code:-2022" in text)
+
+    async def _reconcile_local_positions_with_exchange(self) -> None:
+        """In live mode, drop stale local positions that no longer exist on exchange."""
+        if self._paper_trading:
+            return
+        local_positions = list(position_manager.get_all_positions())
+        if not local_positions:
+            return
+
+        now = datetime.now(timezone.utc)
+        if (
+            self._last_live_reconcile_at
+            and (now - self._last_live_reconcile_at).total_seconds() < self._live_reconcile_interval_seconds
+        ):
+            return
+        self._last_live_reconcile_at = now
+
+        now_ts = datetime.now().timestamp()
+        grouped: Dict[str, List[Any]] = {}
+        for pos in local_positions:
+            exchange_name = str(getattr(pos, "exchange", "") or "").strip().lower()
+            if not exchange_name:
+                continue
+            grouped.setdefault(exchange_name, []).append(pos)
+
+        for exchange_name, positions in grouped.items():
+            connector = exchange_manager.get_exchange(exchange_name)
+            if not connector:
+                continue
+            default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").lower()
+            if default_type not in {"future", "swap"}:
+                continue
+
+            try:
+                exchange_positions = await asyncio.wait_for(connector.get_positions(), timeout=7.5)
+            except Exception as e:
+                logger.debug(f"Skip local position reconcile for {exchange_name}: {e}")
+                continue
+
+            exchange_side_keys: set[Tuple[str, str, str]] = set()
+            for ex_pos in exchange_positions or []:
+                symbol_raw = str((ex_pos.get("symbol") if isinstance(ex_pos, dict) else getattr(ex_pos, "symbol", "")) or "")
+                symbol_key = self._canonical_symbol(symbol_raw)
+                if not symbol_key:
+                    continue
+                amount = float((ex_pos.get("amount") if isinstance(ex_pos, dict) else getattr(ex_pos, "amount", 0.0)) or 0.0)
+                if abs(amount) <= 1e-12:
+                    continue
+                side = str((ex_pos.get("side") if isinstance(ex_pos, dict) else getattr(ex_pos, "side", "")) or "").strip().lower()
+                if not side:
+                    side = "short" if amount < 0 else "long"
+                if side not in {"long", "short"}:
+                    continue
+                exchange_side_keys.add((exchange_name, symbol_key, side))
+
+            for local_pos in positions:
+                metadata = getattr(local_pos, "metadata", {}) or {}
+                source = str(metadata.get("source") or "").strip().lower()
+                if source == "exchange_live":
+                    continue
+                local_updated_at = getattr(local_pos, "updated_at", None)
+                if isinstance(local_updated_at, datetime):
+                    age = max(0.0, now_ts - float(local_updated_at.timestamp()))
+                    if age < self._live_reconcile_grace_seconds:
+                        continue
+
+                local_symbol = self._canonical_symbol(str(getattr(local_pos, "symbol", "") or ""))
+                local_side = str(getattr(getattr(local_pos, "side", None), "value", "") or "").strip().lower()
+                if not local_symbol or local_side not in {"long", "short"}:
+                    continue
+                if (exchange_name, local_symbol, local_side) in exchange_side_keys:
+                    continue
+
+                close_price = float(
+                    getattr(local_pos, "current_price", 0.0)
+                    or getattr(local_pos, "entry_price", 0.0)
+                    or 0.0
+                )
+                if close_price <= 0:
+                    close_price = float(getattr(local_pos, "entry_price", 0.0) or 0.0)
+
+                closed = position_manager.close_position(
+                    exchange=exchange_name,
+                    symbol=str(getattr(local_pos, "symbol", "") or ""),
+                    close_price=close_price,
+                    quantity=float(getattr(local_pos, "quantity", 0.0) or 0.0),
+                    account_id=str(getattr(local_pos, "account_id", "main") or "main"),
+                )
+                if not closed:
+                    continue
+                logger.warning(
+                    "Reconciled stale local position from exchange snapshot: "
+                    f"exchange={exchange_name} symbol={closed.symbol} side={closed.side.value} "
+                    f"account_id={closed.account_id}"
+                )
+                await self._notify_callbacks(
+                    "position_reconciled",
+                    {
+                        "exchange": exchange_name,
+                        "symbol": closed.symbol,
+                        "side": closed.side.value,
+                        "account_id": closed.account_id,
+                        "close_price": close_price,
+                        "reason": "exchange_flat_manual_close",
+                    },
+                )
+
     async def execute_signal(self, signal: Signal) -> Optional[Dict[str, Any]]:
         try:
             if signal.signal_type == SignalType.CLOSE_LONG:
@@ -763,7 +925,7 @@ class ExecutionEngine:
                     "equity": float(account_equity or 0.0),
                     "allocation": float(strategy_allocation or 0.0),
                 }
-                self._signal_diagnostics["last_updated_at"] = datetime.utcnow().isoformat()
+                self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
                 logger.info(
                     f"Skip strategy order due to zero quantity: strategy={signal.strategy_name} "
                     f"symbol={signal.symbol} exchange={exchange} equity={account_equity} "
@@ -813,6 +975,66 @@ class ExecutionEngine:
                 )
             )
 
+            governance_check = await decision_engine.evaluate_order_intent(
+                symbol=signal.symbol,
+                side=side.value,
+                leverage=leverage,
+                order_value=float(order_value or 0.0),
+                account_equity=float(account_equity or 0.0),
+                signal_ts=signal.timestamp,
+                allow_close=closes_existing,
+                spread_bps=None,
+                timeframe=str(signal.metadata.get("timeframe") or ""),
+                source="strategy_signal",
+            )
+            req.params["trace_id"] = governance_check.trace_id
+            if not governance_check.allowed:
+                self._signal_diagnostics["risk_rejected"] = int(self._signal_diagnostics.get("risk_rejected", 0)) + 1
+                reason = f"治理风控拦截: {governance_check.reason}"
+                self._signal_diagnostics["last_result"] = {
+                    "status": "governance_rejected",
+                    "strategy": signal.strategy_name,
+                    "symbol": signal.symbol,
+                    "exchange": exchange,
+                    "reason": reason,
+                    "trace_id": governance_check.trace_id,
+                }
+                self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                rejected = await order_manager.record_rejected_order(
+                    request=req,
+                    reason=reason,
+                    price=quote_price or signal.price,
+                )
+                await self._notify_callbacks(
+                    "governance_rejected",
+                    {
+                        "type": "strategy_signal",
+                        "symbol": signal.symbol,
+                        "strategy": signal.strategy_name,
+                        "reason": reason,
+                        "order_id": rejected.id,
+                        "trace_id": governance_check.trace_id,
+                    },
+                )
+                await write_audit(
+                    GovernanceAuditEvent(
+                        module="trading.execution",
+                        action="order_intent_rejected",
+                        status="denied",
+                        actor="system",
+                        role="SYSTEM",
+                        trace_id=governance_check.trace_id,
+                        input_payload={
+                            "symbol": signal.symbol,
+                            "strategy": signal.strategy_name,
+                            "side": side.value,
+                            "order_value": float(order_value or 0.0),
+                        },
+                        output_payload={"reason": reason, "order_id": rejected.id},
+                    )
+                )
+                return None
+
             if not risk_manager.pre_trade_check(
                 symbol=signal.symbol,
                 side=side.value,
@@ -833,7 +1055,7 @@ class ExecutionEngine:
                     "reason": reason,
                     "order_value": float(order_value or 0.0),
                 }
-                self._signal_diagnostics["last_updated_at"] = datetime.utcnow().isoformat()
+                self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
                 rejected = await order_manager.record_rejected_order(
                     request=req,
                     reason=reason,
@@ -851,7 +1073,7 @@ class ExecutionEngine:
                 )
                 return None
             try:
-                order = await asyncio.wait_for(order_manager.create_order(req), timeout=20.0)
+                order = await asyncio.wait_for(order_manager.create_order(req), timeout=float(self._real_order_timeout_seconds))
             except asyncio.TimeoutError:
                 fail_reason = "策略下单超时"
                 self._signal_diagnostics["order_timeout"] = int(self._signal_diagnostics.get("order_timeout", 0)) + 1
@@ -862,7 +1084,7 @@ class ExecutionEngine:
                     "exchange": exchange,
                     "account_id": account_id,
                 }
-                self._signal_diagnostics["last_updated_at"] = datetime.utcnow().isoformat()
+                self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
                 await order_manager.record_rejected_order(
                     request=req,
                     reason=fail_reason,
@@ -884,7 +1106,7 @@ class ExecutionEngine:
                     "account_id": account_id,
                     "reason": fail_reason,
                 }
-                self._signal_diagnostics["last_updated_at"] = datetime.utcnow().isoformat()
+                self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
                 await order_manager.record_rejected_order(
                     request=req,
                     reason=fail_reason,
@@ -1021,8 +1243,35 @@ class ExecutionEngine:
                 "filled": float(order.filled or 0.0),
                 "price": float(order.price or 0.0),
             }
-            self._signal_diagnostics["last_updated_at"] = datetime.utcnow().isoformat()
+            self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
             await self._notify_callbacks("order_executed", result)
+            await write_audit(
+                GovernanceAuditEvent(
+                    module="trading.execution",
+                    action="order_executed",
+                    status="success",
+                    actor="system",
+                    role="SYSTEM",
+                    trace_id=str(req.params.get("trace_id") or ""),
+                    input_payload={
+                        "symbol": signal.symbol,
+                        "strategy": signal.strategy_name,
+                        "side": side.value,
+                        "qty": float(qty),
+                        "price": float(fill_price),
+                    },
+                    output_payload={
+                        "order_id": order.id,
+                        "status": order.status.value,
+                        "filled": float(order.filled or 0.0),
+                    },
+                    payload_json={
+                        "fee_usd": fee_usd,
+                        "slippage_cost_usd": slippage_cost_usd,
+                        "account_id": account_id,
+                    },
+                )
+            )
             return result
         except Exception as e:
             self._signal_diagnostics["exceptions"] = int(self._signal_diagnostics.get("exceptions", 0)) + 1
@@ -1032,13 +1281,14 @@ class ExecutionEngine:
                 "symbol": signal.symbol,
                 "reason": str(e),
             }
-            self._signal_diagnostics["last_updated_at"] = datetime.utcnow().isoformat()
+            self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
             logger.error(f"Failed to execute signal: {e}")
             return None
 
     async def _close_position(self, signal: Signal, position_side: PositionSide) -> Optional[Dict[str, Any]]:
         account_id = str(signal.metadata.get("account_id", "main"))
         exchange = account_manager.resolve_exchange(account_id, str(signal.metadata.get("exchange", "binance")))
+        trade_policy = self._resolve_strategy_trade_policy(signal.strategy_name, exchange)
         position = position_manager.get_position(exchange, signal.symbol, account_id=account_id)
         if not position or position.side != position_side:
             return None
@@ -1077,7 +1327,11 @@ class ExecutionEngine:
                 strategy=signal.strategy_name,
                 account_id=account_id,
                 reduce_only=True,
-                params={"close_reason": signal.signal_type.value, "leverage": float(position.leverage or 1.0)},
+                params={
+                    "close_reason": signal.signal_type.value,
+                    "leverage": float(position.leverage or 1.0),
+                    "market_type": str(trade_policy.get("market_type") or ""),
+                },
             )
             await order_manager.record_rejected_order(
                 request=request,
@@ -1096,13 +1350,67 @@ class ExecutionEngine:
             strategy=signal.strategy_name,
             account_id=account_id,
             reduce_only=True,
-            params={"close_reason": signal.signal_type.value, "leverage": float(position.leverage or 1.0)},
+            params={
+                "close_reason": signal.signal_type.value,
+                "leverage": float(position.leverage or 1.0),
+                "market_type": str(trade_policy.get("market_type") or ""),
+            },
         )
         close_order = await order_manager.create_order(close_request)
         if not close_order:
+            last_error = str(order_manager.get_last_error() or "")
+            if self._is_reduce_only_rejected(last_error):
+                has_exchange_pos, checked = await self._exchange_has_side_position(
+                    exchange=exchange,
+                    symbol=signal.symbol,
+                    side=position_side,
+                    min_qty=close_qty * 0.5,
+                )
+                if checked and not has_exchange_pos:
+                    close_price = float(quote_price or signal.price or position.current_price or position.entry_price or 0.0)
+                    if close_price <= 0:
+                        close_price = float(position.entry_price or 0.0)
+                    closed = position_manager.close_position(
+                        exchange=exchange,
+                        symbol=signal.symbol,
+                        close_price=close_price,
+                        quantity=close_qty,
+                        account_id=account_id,
+                    )
+                    if closed:
+                        logger.warning(
+                            f"Reconciled local-only position after reduce-only rejection: "
+                            f"strategy={signal.strategy_name} symbol={signal.symbol} side={position_side.value} "
+                            f"account_id={account_id} error={last_error}"
+                        )
+                        result = {
+                            "action": "close_position_reconciled",
+                            "symbol": signal.symbol,
+                            "side": position_side.value,
+                            "close_price": close_price,
+                            "pnl": float(closed.realized_pnl or 0.0),
+                            "fee_usd": 0.0,
+                            "slippage_cost_usd": 0.0,
+                            "account_id": account_id,
+                            "order": None,
+                            "reason": "exchange_no_position_reduce_only_rejected",
+                        }
+                        self._signal_diagnostics["last_result"] = {
+                            "status": "reconciled",
+                            "strategy": signal.strategy_name,
+                            "symbol": signal.symbol,
+                            "exchange": exchange,
+                            "reason": "reduce_only_rejected_exchange_flat",
+                        }
+                        self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                        await self._notify_callbacks("order_executed", result)
+                        return result
+            reject_reason = "平仓下单失败"
+            if last_error:
+                reject_reason = f"{reject_reason}: {last_error}"
             await order_manager.record_rejected_order(
                 request=close_request,
-                reason="平仓下单失败",
+                reason=reject_reason,
                 price=quote_price if quote_price > 0 else signal.price,
             )
             return None
@@ -1160,7 +1468,7 @@ class ExecutionEngine:
                 status="success",
                 message=f"closed {signal.symbol} {position_side.value}",
                 details={
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "symbol": signal.symbol,
                     "strategy": signal.strategy_name,
                     "exchange": exchange,
@@ -1181,7 +1489,7 @@ class ExecutionEngine:
 
     def _new_conditional_id(self) -> str:
         self._conditional_seq += 1
-        return f"cond_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{self._conditional_seq:04d}"
+        return f"cond_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{self._conditional_seq:04d}"
     async def _queue_conditional_order(
         self,
         exchange: str,
@@ -1203,7 +1511,7 @@ class ExecutionEngine:
         cid = self._new_conditional_id()
         self._conditional_orders[cid] = ConditionalManualOrder(
             conditional_id=cid,
-            created_at=datetime.utcnow().isoformat(),
+            created_at=datetime.now(timezone.utc).isoformat(),
             exchange=exchange,
             symbol=symbol,
             side=side,
@@ -1282,6 +1590,20 @@ class ExecutionEngine:
 
         quote_price, order_value = await self._resolve_order_context(exchange, symbol, exec_amount, price)
         account_equity = await self._get_account_equity()
+        governance_check = await decision_engine.evaluate_order_intent(
+            symbol=symbol,
+            side=side_lower,
+            leverage=float(leverage or 1.0),
+            order_value=float(order_value or 0.0),
+            account_equity=float(account_equity or 0.0),
+            signal_ts=datetime.now(timezone.utc),
+            allow_close=closes_existing,
+            spread_bps=None,
+            timeframe=None,
+            source="manual_order",
+        )
+        if not governance_check.allowed:
+            return None
 
         if not risk_manager.pre_trade_check(
             symbol=symbol,
@@ -1314,7 +1636,7 @@ class ExecutionEngine:
             algo_slices=max(1, int(algo_slices or 1)),
             algo_interval_sec=max(0, int(algo_interval_sec or 0)),
             reduce_only=reduce_only,
-            params=dict(params or {}, leverage=float(leverage)),
+            params=dict(params or {}, leverage=float(leverage), trace_id=governance_check.trace_id),
         )
         order = await order_manager.create_order(request)
         if not order:
@@ -1618,7 +1940,7 @@ class ExecutionEngine:
             notional = sum(float(x.get("filled") or x.get("amount") or 0.0) * float(x.get("price") or 0.0) for x in child)
             avg_price = (notional / filled) if filled > 0 else 0.0
             merged = {
-                "order_id": f"{mode}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}",
+                "order_id": f"{mode}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}",
                 "status": "closed",
                 "price": avg_price,
                 "amount": float(amount),
@@ -1796,10 +2118,11 @@ class ExecutionEngine:
                 self._conditional_orders.pop(cid, None)
 
     async def _background_tick(self) -> None:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if self._last_bg_check_at and (now - self._last_bg_check_at).total_seconds() < self._bg_check_interval_seconds:
             return
         self._last_bg_check_at = now
+        await self._reconcile_local_positions_with_exchange()
         await self._check_conditional_orders()
         await self._check_protective_orders()
 
@@ -1871,6 +2194,7 @@ class ExecutionEngine:
             except Exception:
                 break
         self._last_bg_check_at = None
+        self._last_live_reconcile_at = None
         self._paper_total_fees_usd = 0.0
         self._paper_fee_applied_orders.clear()
         if self._paper_trading:
