@@ -134,3 +134,31 @@ try:
 except ImportError:
     pass
 
+# Import funding rate factors and merge
+try:
+    from core.factors_ts.funding_rate_factors import FUNDING_RATE_FACTOR_CLASS_MAP
+    FACTOR_CLASS_MAP.update(FUNDING_RATE_FACTOR_CLASS_MAP)
+except ImportError:
+    pass
+
+# Import sentiment factors and merge
+try:
+    from core.factors_ts.sentiment_factors import SENTIMENT_FACTOR_CLASS_MAP
+    FACTOR_CLASS_MAP.update(SENTIMENT_FACTOR_CLASS_MAP)
+except ImportError:
+    pass
+
+# Import orderbook factors and merge
+try:
+    from core.factors_ts.orderbook_factors import ORDERBOOK_FACTOR_CLASS_MAP
+    FACTOR_CLASS_MAP.update(ORDERBOOK_FACTOR_CLASS_MAP)
+except ImportError:
+    pass
+
+# Import OI factors and merge
+try:
+    from core.factors_ts.oi_factors import OI_FACTOR_CLASS_MAP
+    FACTOR_CLASS_MAP.update(OI_FACTOR_CLASS_MAP)
+except ImportError:
+    pass
+

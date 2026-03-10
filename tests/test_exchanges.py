@@ -1,39 +1,35 @@
-"""
-交易所连接器测试
-"""
-import pytest
-from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+"""Exchange connector tests."""
 
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime
+
+import pytest
+
+from config.exchanges import ExchangeConfig, ExchangeType
 from core.exchanges.base_exchange import (
-    BaseExchange,
-    Ticker,
+    Balance,
     Kline,
     Order,
-    Balance,
     OrderSide,
-    OrderType,
     OrderStatus,
+    OrderType,
+    Ticker,
 )
 from core.exchanges.binance_connector import BinanceConnector
-from config.exchanges import ExchangeConfig, ExchangeType
 
 
 class TestBaseExchange:
-    """BaseExchange测试"""
-
     def test_order_side_enum(self):
-        """测试订单方向枚举"""
         assert OrderSide.BUY.value == "buy"
         assert OrderSide.SELL.value == "sell"
 
     def test_order_type_enum(self):
-        """测试订单类型枚举"""
         assert OrderType.MARKET.value == "market"
         assert OrderType.LIMIT.value == "limit"
 
     def test_ticker_dataclass(self):
-        """测试Ticker数据类"""
         ticker = Ticker(
             symbol="BTC/USDT",
             last=50000.0,
@@ -49,7 +45,6 @@ class TestBaseExchange:
         assert ticker.last == 50000.0
 
     def test_kline_dataclass(self):
-        """测试Kline数据类"""
         kline = Kline(
             symbol="BTC/USDT",
             timeframe="1h",
@@ -66,7 +61,6 @@ class TestBaseExchange:
         assert kline.high > kline.low
 
     def test_order_dataclass(self):
-        """测试Order数据类"""
         order = Order(
             id="12345",
             symbol="BTC/USDT",
@@ -82,7 +76,6 @@ class TestBaseExchange:
         assert order.status == OrderStatus.OPEN
 
     def test_balance_dataclass(self):
-        """测试Balance数据类"""
         balance = Balance(
             currency="USDT",
             free=10000.0,
@@ -94,11 +87,8 @@ class TestBaseExchange:
 
 
 class TestBinanceConnector:
-    """Binance连接器测试"""
-
     @pytest.fixture
     def config(self):
-        """测试配置"""
         return ExchangeConfig(
             name="binance",
             exchange_type=ExchangeType.CEX,
@@ -109,17 +99,14 @@ class TestBinanceConnector:
 
     @pytest.fixture
     def connector(self, config):
-        """创建连接器实例"""
         return BinanceConnector(config)
 
     def test_connector_initialization(self, connector, config):
-        """测试连接器初始化"""
         assert connector.name == "binance"
         assert connector.config == config
         assert not connector.is_connected
 
     def test_parse_order(self, connector):
-        """测试订单解析"""
         ccxt_order = {
             "id": "12345",
             "symbol": "BTC/USDT",
@@ -143,25 +130,26 @@ class TestBinanceConnector:
         assert order.status == OrderStatus.OPEN
 
 
-@pytest.mark.asyncio
 class TestExchangeManager:
-    """交易所管理器测试"""
+    def test_exchange_manager_initialization(self):
+        async def _run():
+            from core.exchanges import ExchangeManager
 
-    async def test_exchange_manager_initialization(self):
-        """测试交易所管理器初始化"""
-        from core.exchanges import ExchangeManager
+            manager = ExchangeManager()
+            assert not manager.is_connected
+            assert len(manager.get_all_exchanges()) == 0
 
-        manager = ExchangeManager()
-        assert not manager.is_connected
-        assert len(manager.get_all_exchanges()) == 0
+        asyncio.run(_run())
 
-    async def test_get_nonexistent_exchange(self):
-        """测试获取不存在的交易所"""
-        from core.exchanges import ExchangeManager
+    def test_get_nonexistent_exchange(self):
+        async def _run():
+            from core.exchanges import ExchangeManager
 
-        manager = ExchangeManager()
-        exchange = manager.get_exchange("nonexistent")
-        assert exchange is None
+            manager = ExchangeManager()
+            exchange = manager.get_exchange("nonexistent")
+            assert exchange is None
+
+        asyncio.run(_run())
 
 
 if __name__ == "__main__":

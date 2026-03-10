@@ -164,7 +164,16 @@ class BaseNewsCollector:
             time.sleep(wait)
         self._last_request_ts = time.monotonic()
 
-    def _request(self, url: str, *, params: Optional[Dict[str, Any]] = None, headers: Optional[Dict[str, str]] = None) -> requests.Response:
+    def _request(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        json_body: Optional[Dict[str, Any]] = None,
+        data: Optional[Any] = None,
+    ) -> requests.Response:
         last_error: Optional[Exception] = None
         merged_headers = dict(self._session.headers)
         if headers:
@@ -172,7 +181,15 @@ class BaseNewsCollector:
         for attempt in range(self.retry_count + 1):
             try:
                 self._respect_rate_limit()
-                resp = self._session.get(url, params=params, headers=merged_headers, timeout=self.timeout_sec)
+                resp = self._session.request(
+                    method=str(method or "GET").upper(),
+                    url=url,
+                    params=params,
+                    headers=merged_headers,
+                    json=json_body,
+                    data=data,
+                    timeout=self.timeout_sec,
+                )
                 resp.raise_for_status()
                 return resp
             except Exception as exc:

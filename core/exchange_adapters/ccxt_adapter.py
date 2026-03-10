@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import ccxt
@@ -274,7 +274,7 @@ class CCXTExchangeAdapter(ExchangeAdapter):
         ts = _to_dt_ms(raw.get("timestamp")) or _to_dt_ms(raw.get("fundingTimestamp"))
         return FundingRatePoint(
             symbol=s,
-            timestamp=ts or datetime.utcnow(),
+            timestamp=ts or datetime.now(timezone.utc),
             rate=float(rate),
             mark_price=(float(raw.get("markPrice")) if raw.get("markPrice") is not None else None),
             index_price=(float(raw.get("indexPrice")) if raw.get("indexPrice") is not None else None),

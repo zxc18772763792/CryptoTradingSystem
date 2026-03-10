@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>新闻中心 - 加密交易系统</title>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-    <link rel="stylesheet" href="/static/css/style.css?v=44">
+    <link rel="stylesheet" href="/static/css/style.css?v=64">
 </head>
 <body class="news-page">
     <div class="container">
@@ -17,8 +17,8 @@
             <div class="status-bar">
                 <span id="news-health-badge" class="status-badge">加载中...</span>
                 <span id="news-now-time"></span>
-                <a class="page-link-btn" href="/?tab=dashboard">交易仪表盘</a>
-                <a class="page-link-btn" href="/?tab=data">数据页面</a>
+                <a class="page-link-btn" href="/">交易仪表盘</a>
+                <a class="page-link-btn" href="/ai">AI 研究中心</a>
             </div>
         </header>
 
@@ -96,6 +96,8 @@
                     <div class="inline-actions">
                         <button class="btn btn-primary btn-sm" id="news-refresh-btn">刷新列表</button>
                         <button class="btn btn-primary btn-sm" id="news-pull-btn">立即拉取新闻</button>
+                        <button class="btn btn-sm" id="news-backfill-btn">回补历史结构化</button>
+                        <button class="btn btn-sm" id="news-requeue-btn">重试失败任务</button>
                     </div>
                     <pre id="news-action-output" class="output-box">等待操作...</pre>
                 </div>
@@ -160,6 +162,6 @@
     </div>
 
     <div id="notification" class="notification"></div>
-    <script charset="utf-8" src="/static/js/news_tab.js?v=21"></script>
+    <script charset="utf-8" src="/static/js/news_tab_runtime.js?v=6"></script>
 </body>
 </html>

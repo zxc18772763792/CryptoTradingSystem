@@ -4,6 +4,7 @@ import asyncio
 import time
 
 from core.ops.service import api as ops_api
+from core.research import orchestrator as ai_orchestrator
 
 
 def test_create_ai_proposal_generates_templates_and_registry_entry(client, ops_headers):
@@ -74,7 +75,7 @@ def test_run_ai_proposal_sync_updates_status_and_result(client, ops_headers, mon
             "markdown_path": "research_out.md",
         }
 
-    monkeypatch.setattr(ops_api, "run_strategy_research", fake_run_strategy_research)
+    monkeypatch.setattr(ai_orchestrator, "run_strategy_research", fake_run_strategy_research)
 
     created = client.post(
         "/ops/ai/proposal",
@@ -96,8 +97,9 @@ def test_run_ai_proposal_sync_updates_status_and_result(client, ops_headers, mon
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["data"]["proposal"]["status"] == "validated"
+    assert body["data"]["proposal"]["status"] in {"validated", "paper_running", "shadow_running", "live_candidate"}
     assert body["data"]["research_result"]["best"]["strategy"] == "MAStrategy"
+    assert body["data"]["candidate"]["strategy"] == "MAStrategy"
     validation = body["data"]["proposal"]["validation_summary"]
     assert validation["decision"] in {"paper", "shadow", "live_candidate"}
     assert validation["deployment_score"] > 0
@@ -125,7 +127,7 @@ def test_run_ai_proposal_background_sets_queued_job(client, ops_headers, monkeyp
             "markdown_path": "research_bg.md",
         }
 
-    monkeypatch.setattr(ops_api, "run_strategy_research", fake_run_strategy_research)
+    monkeypatch.setattr(ai_orchestrator, "run_strategy_research", fake_run_strategy_research)
 
     created = client.post(
         "/ops/ai/proposal",
@@ -153,3 +155,64 @@ def test_run_ai_proposal_background_sets_queued_job(client, ops_headers, monkeyp
     fetched = client.get(f"/ops/ai/proposal/{proposal_id}", headers=ops_headers).json()
     assert fetched["ok"] is True
     assert fetched["data"]["proposal"]["status"] in {"research_running", "rejected", "validated"}
+
+
+def test_ai_candidate_and_lifecycle_endpoints(client, ops_headers, monkeypatch):
+    async def fake_run_strategy_research(config):
+        return {
+            "exchange": config.exchange,
+            "symbol": config.symbol,
+            "timeframes": list(config.timeframes),
+            "strategies": list(config.strategies),
+            "runs": 5,
+            "valid_runs": 3,
+            "best": {
+                "strategy": config.strategies[0],
+                "timeframe": config.timeframes[0],
+                "total_return": 9.5,
+                "sharpe_ratio": 1.05,
+                "max_drawdown": 8.0,
+                "score": 22.5,
+            },
+            "quality_counts": {"ok": 3},
+            "csv_path": "research_ops.csv",
+            "markdown_path": "research_ops.md",
+        }
+
+    monkeypatch.setattr(ai_orchestrator, "run_strategy_research", fake_run_strategy_research)
+
+    created = client.post(
+        "/ops/ai/proposal",
+        json={
+            "thesis": "测试 AI workbench 的 candidate、lifecycle 与 promote 接口。",
+            "symbols": ["BTCUSDT"],
+            "strategy_templates": ["MAStrategy"],
+            "timeframes": ["15m"],
+        },
+        headers=ops_headers,
+    ).json()
+    proposal_id = created["data"]["proposal"]["proposal_id"]
+
+    run_resp = client.post(
+        f"/ops/ai/proposal/{proposal_id}/run",
+        json={"background": False, "exchange": "binance", "days": 30},
+        headers=ops_headers,
+    ).json()
+    candidate_id = run_resp["data"]["candidate"]["candidate_id"]
+
+    lifecycle = client.get(f"/ops/ai/proposal/{proposal_id}/lifecycle", headers=ops_headers).json()
+    assert lifecycle["ok"] is True
+    assert lifecycle["data"]["count"] >= 2
+
+    candidates = client.get("/ops/ai/candidates?limit=10", headers=ops_headers).json()
+    assert candidates["ok"] is True
+    assert any(item["candidate_id"] == candidate_id for item in candidates["data"]["items"])
+
+    promote = client.post(
+        f"/ops/ai/candidate/{candidate_id}/promote",
+        json={"target": run_resp["data"]["candidate"]["promotion"]["decision"]},
+        headers=ops_headers,
+    ).json()
+    assert promote["ok"] is True
+    assert promote["data"]["candidate_id"] == candidate_id
+    assert promote["data"]["promotion"]["decision"] in {"paper", "shadow", "live_candidate"}

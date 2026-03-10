@@ -17,10 +17,18 @@ from uuid import uuid4
 
 import pandas as pd
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
+from sqlalchemy import case, func, select
 
+from config.database import (
+    AnalyticsCommunitySnapshot,
+    AnalyticsHistoryIngestStatus,
+    AnalyticsMicrostructureSnapshot,
+    AnalyticsWhaleSnapshot,
+    async_session_maker,
+)
 from config.exchanges import get_exchange_config
 from config.settings import settings
 from core.audit import audit_logger
@@ -30,6 +38,7 @@ from core.exchanges.binance_connector import BinanceConnector
 from core.notifications import notification_manager
 from core.realtime import event_bus
 from core.risk.risk_manager import risk_manager
+from core.runtime import runtime_state
 from core.strategies import Signal, SignalType, strategy_manager
 from core.trading import (
     account_manager,
@@ -41,8 +50,15 @@ from core.trading import (
 from core.trading.order_manager import OrderRequest as CoreOrderRequest
 from core.exchanges.base_exchange import OrderSide, OrderType
 from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
-
-router = APIRouter()
+from web.services import (
+    build_runtime_diagnostics,
+    cancel_mode_switch as cancel_trading_mode_switch_token,
+    clear_local_trading_runtime as clear_local_runtime_service,
+    get_mode_confirm_text,
+    list_pending_mode_switches,
+    request_mode_switch as request_trading_mode_switch_service,
+    switch_trading_mode as switch_trading_mode_service,
+)
 
 _BALANCE_FETCH_TIMEOUT_SEC = 5.5
 _TICKER_FETCH_TIMEOUT_SEC = 1.6
@@ -60,6 +76,18 @@ _ANALYTICS_ROOT = Path("./data/cache/analytics")
 _BEHAVIOR_JOURNAL_PATH = _ANALYTICS_ROOT / "behavior_journal.json"
 _STOPLOSS_POLICY_PATH = _ANALYTICS_ROOT / "stoploss_policy.json"
 _LIVE_EQUITY_BASELINE_PATH = _ANALYTICS_ROOT / "live_equity_baseline.json"
+_ANALYTICS_ORDERBOOK_TIMEOUT_SEC = 2.2
+_ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC = 2.2
+_ANALYTICS_FUNDING_TIMEOUT_SEC = 1.8
+_ANALYTICS_BASIS_TIMEOUT_SEC = 2.2
+_ANALYTICS_WHALE_TIMEOUT_SEC = 6.0
+_ANALYTICS_WHALE_MIN_BTC = 10.0
+_ANALYTICS_ANNOUNCEMENT_TIMEOUT_SEC = 4.0
+_ANALYTICS_COLLECTOR_TIMEOUT_SEC = 8.0
+_ANALYTICS_HISTORY_HEALTH_CACHE_TTL_SEC = 20.0
+_ANALYTICS_HISTORY_STATUS_CACHE_TTL_SEC = 8.0
+_ANALYTICS_HISTORY_HEALTH_READ_TIMEOUT_SEC = 6.0
+_ANALYTICS_HISTORY_STATUS_READ_TIMEOUT_SEC = 4.0
 _DEFAULT_STOPLOSS_POLICY: Dict[str, Any] = {
     "atr": {"enabled": True, "period": 14, "multiplier": 2.0},
     "time_stop": {"enabled": True, "max_hours": 24},
@@ -74,6 +102,43 @@ _BINANCE_TIME_OFFSET_MS: Dict[str, Any] = {"api": 0, "fapi": 0, "ts": 0.0}
 _HTTPX_SUPPORTS_PROXY_KW = "proxy" in inspect.signature(httpx.AsyncClient.__init__).parameters
 
 
+def _clear_trading_api_runtime_caches() -> Dict[str, Any]:
+    balance_entries = len(_BALANCE_SNAPSHOT_CACHE)
+    _BALANCE_SNAPSHOT_CACHE.clear()
+    _LIVE_POSITION_SNAPSHOT_CACHE["ts"] = 0.0
+    _LIVE_POSITION_SNAPSHOT_CACHE["data"] = {}
+    _LIVE_POSITION_DETAILS_CACHE["ts"] = 0.0
+    _LIVE_POSITION_DETAILS_CACHE["positions"] = []
+    _LIVE_POSITION_DETAILS_CACHE["diagnostics"] = None
+    _LIVE_ORDER_DETAILS_CACHE["ts"] = 0.0
+    _LIVE_ORDER_DETAILS_CACHE["orders"] = []
+    return {"balance_entries_cleared": balance_entries}
+
+
+def _inspect_trading_api_runtime_caches() -> Dict[str, Any]:
+    now_ts = time.time()
+
+    def _age(value: float) -> Optional[float]:
+        if value <= 0:
+            return None
+        return round(max(0.0, now_ts - float(value)), 3)
+
+    return {
+        "balance_snapshot_entries": len(_BALANCE_SNAPSHOT_CACHE),
+        "live_position_snapshot_age_sec": _age(float(_LIVE_POSITION_SNAPSHOT_CACHE.get("ts") or 0.0)),
+        "live_position_details_age_sec": _age(float(_LIVE_POSITION_DETAILS_CACHE.get("ts") or 0.0)),
+        "live_order_details_age_sec": _age(float(_LIVE_ORDER_DETAILS_CACHE.get("ts") or 0.0)),
+    }
+
+
+runtime_state.register_cache(
+    "web_api_trading",
+    clear=_clear_trading_api_runtime_caches,
+    inspect=_inspect_trading_api_runtime_caches,
+    scope="global",
+)
+
+
 def _apply_httpx_proxy_kw(client_kwargs: Dict[str, Any], proxy_url: Optional[str]) -> None:
     proxy = str(proxy_url or "").strip()
     if not proxy:
@@ -84,44 +149,124 @@ def _apply_httpx_proxy_kw(client_kwargs: Dict[str, Any], proxy_url: Optional[str
         client_kwargs["proxies"] = proxy
 
 
-async def _clear_local_trading_runtime(
+def _binance_rest_symbol(symbol: str) -> str:
+    text = str(symbol or "").upper().strip()
+    if ":" in text:
+        text = text.split(":", 1)[0]
+    return text.replace("/", "").replace("-", "")
+
+
+async def _fetch_binance_public_json(
+    path: str,
     *,
-    clear_paper_snapshots: bool = False,
+    params: Optional[Dict[str, Any]] = None,
+    timeout_sec: float,
+    futures: bool = False,
 ) -> Dict[str, Any]:
-    """Clear in-memory paper/local trading residue to avoid cross-mode contamination."""
-    runtime_reset = execution_engine.clear_paper_runtime()
-    order_reset = order_manager.clear_paper_history()
-    position_reset = position_manager.clear_all()
-    risk_reset = risk_manager.clear_runtime_history()
-    snapshots_deleted = 0
-    if clear_paper_snapshots:
-        with contextlib.suppress(Exception):
-            snapshots_deleted = int(await account_snapshot_manager.clear_history(mode="paper"))
+    base_url = "https://fapi.binance.com" if futures else "https://api.binance.com"
+    client_kwargs: Dict[str, Any] = {"timeout": timeout_sec}
+    _apply_httpx_proxy_kw(client_kwargs, settings.HTTP_PROXY or settings.HTTPS_PROXY)
+    async with httpx.AsyncClient(**client_kwargs) as client:
+        resp = await client.get(f"{base_url}{path}", params=params or {})
+        resp.raise_for_status()
+        return resp.json() or {}
 
-    strategy_signal_cleared = 0
-    strategy_position_cleared = 0
-    for strategy in strategy_manager.get_all_strategies().values():
-        try:
-            strategy_signal_cleared += len(getattr(strategy, "signals_history", []) or [])
-            strategy_position_cleared += len(getattr(strategy, "positions", {}) or {})
-            strategy.signals_history.clear()
-            strategy.positions.clear()
-        except Exception:
-            continue
 
-    _BALANCE_SNAPSHOT_CACHE.clear()
-    _LIVE_POSITION_SNAPSHOT_CACHE["ts"] = 0.0
-    _LIVE_POSITION_SNAPSHOT_CACHE["data"] = {}
+async def _fetch_binance_public_orderbook(symbol: str, limit: int = 80) -> Dict[str, Any]:
+    try:
+        payload = await _fetch_binance_public_json(
+            "/api/v3/depth",
+            params={"symbol": _binance_rest_symbol(symbol), "limit": max(5, min(int(limit), 100))},
+            timeout_sec=_ANALYTICS_ORDERBOOK_TIMEOUT_SEC,
+        )
+        return {
+            "available": True,
+            "bids": payload.get("bids") or [],
+            "asks": payload.get("asks") or [],
+            "timestamp": payload.get("lastUpdateId"),
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "error": str(exc),
+            "bids": [],
+            "asks": [],
+            "timestamp": None,
+        }
 
+
+async def _fetch_binance_public_trade_imbalance(symbol: str, limit: int = 600) -> Dict[str, Any]:
+    try:
+        rows = await _fetch_binance_public_json(
+            "/api/v3/trades",
+            params={"symbol": _binance_rest_symbol(symbol), "limit": max(50, min(int(limit), 1000))},
+            timeout_sec=_ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC,
+        )
+        trades = list(rows or [])
+    except Exception:
+        return {"count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+    buy_volume = 0.0
+    sell_volume = 0.0
+    for row in trades:
+        qty = abs(_safe_float(row.get("qty")))
+        if bool(row.get("isBuyerMaker")):
+            sell_volume += qty
+        else:
+            buy_volume += qty
+    total = buy_volume + sell_volume
     return {
-        "runtime": runtime_reset,
-        "orders": order_reset,
-        "positions": position_reset,
-        "risk": risk_reset,
-        "snapshots_deleted": snapshots_deleted,
-        "strategy_signal_cleared": strategy_signal_cleared,
-        "strategy_position_cleared": strategy_position_cleared,
+        "count": len(trades),
+        "buy_volume": round(buy_volume, 6),
+        "sell_volume": round(sell_volume, 6),
+        "imbalance": round(((buy_volume - sell_volume) / total) if total > 0 else 0.0, 6),
     }
+
+
+async def _fetch_binance_public_funding_and_basis(symbol: str) -> Dict[str, Dict[str, Any]]:
+    rest_symbol = _binance_rest_symbol(symbol)
+    try:
+        premium_index, spot_ticker, perp_ticker = await asyncio.gather(
+            _fetch_binance_public_json(
+                "/fapi/v1/premiumIndex",
+                params={"symbol": rest_symbol},
+                timeout_sec=_ANALYTICS_FUNDING_TIMEOUT_SEC,
+                futures=True,
+            ),
+            _fetch_binance_public_json(
+                "/api/v3/ticker/price",
+                params={"symbol": rest_symbol},
+                timeout_sec=_ANALYTICS_BASIS_TIMEOUT_SEC,
+            ),
+            _fetch_binance_public_json(
+                "/fapi/v1/ticker/price",
+                params={"symbol": rest_symbol},
+                timeout_sec=_ANALYTICS_BASIS_TIMEOUT_SEC,
+                futures=True,
+            ),
+        )
+    except Exception:
+        return {"funding": {"available": False}, "basis": {"available": False}}
+    funding = {
+        "available": True,
+        "symbol": f"{symbol}:USDT" if ":" not in str(symbol or "") else symbol,
+        "funding_rate": _safe_float(premium_index.get("lastFundingRate")),
+        "next_funding_time": _safe_dt(premium_index.get("nextFundingTime")).isoformat() if _safe_dt(premium_index.get("nextFundingTime")) else None,
+    }
+    spot_px = _safe_float(spot_ticker.get("price"))
+    perp_px = _safe_float(perp_ticker.get("price") or premium_index.get("markPrice"))
+    if spot_px > 0 and perp_px > 0:
+        basis_val = (perp_px - spot_px) / spot_px
+        basis = {
+            "available": True,
+            "spot_symbol": symbol,
+            "perp_symbol": f"{symbol}:USDT" if ":" not in str(symbol or "") else symbol,
+            "spot_price": spot_px,
+            "perp_price": perp_px,
+            "basis_pct": round(basis_val * 100, 6),
+        }
+    else:
+        basis = {"available": False}
+    return {"funding": funding, "basis": basis}
 
 
 class OrderRequest(BaseModel):
@@ -217,10 +362,6 @@ class StoplossPolicyUpdateRequest(BaseModel):
     policy: Dict[str, Any] = Field(default_factory=dict)
 
 
-_MODE_CONFIRM_TEXT = "CONFIRM LIVE TRADING"
-_mode_switch_pending: Dict[str, Dict[str, Any]] = {}
-
-
 def _serialize_order(order: Any) -> Dict[str, Any]:
     meta = order_manager.get_order_metadata(order.id)
     order_type = str(getattr(getattr(order, "type", None), "value", getattr(order, "type", "")) or "").lower()
@@ -302,6 +443,1096 @@ def _safe_dt(value: Any) -> Optional[datetime]:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
     except Exception:
         return None
+
+
+def _utc_now_naive() -> datetime:
+    return datetime.utcnow().replace(tzinfo=None)
+
+
+def _utc_iso(value: Optional[datetime]) -> Optional[str]:
+    if not isinstance(value, datetime):
+        return None
+    dt = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _compact_microstructure_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    orderbook = payload.get("orderbook") or {}
+    return {
+        "timestamp": payload.get("timestamp"),
+        "available": bool(payload.get("available", True)),
+        "source_error": payload.get("source_error"),
+        "orderbook": {
+            "best_bid": _safe_float(orderbook.get("best_bid")),
+            "best_ask": _safe_float(orderbook.get("best_ask")),
+            "mid_price": _safe_float(orderbook.get("mid_price")),
+            "spread": _safe_float(orderbook.get("spread")),
+            "spread_bps": _safe_float(orderbook.get("spread_bps")),
+            "bid_depth": list(orderbook.get("bid_depth") or [])[:10],
+            "ask_depth": list(orderbook.get("ask_depth") or [])[:10],
+        },
+        "large_orders": list(payload.get("large_orders") or [])[:10],
+        "iceberg_detection": payload.get("iceberg_detection") or {},
+        "aggressor_flow": payload.get("aggressor_flow") or {},
+        "funding_rate": payload.get("funding_rate") or {},
+        "spot_futures_basis": payload.get("spot_futures_basis") or {},
+    }
+
+
+def _compact_community_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "timestamp": payload.get("timestamp"),
+        "twitter_watchlist": list(payload.get("twitter_watchlist") or [])[:10],
+        "flow_proxy": payload.get("flow_proxy") or {},
+        "security_alerts": payload.get("security_alerts") or {},
+        "announcements": list(payload.get("announcements") or [])[:10],
+    }
+
+
+def _compact_whale_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "available": bool(payload.get("available", False)),
+        "error": payload.get("error"),
+        "threshold_btc": _safe_float(payload.get("threshold_btc")),
+        "btc_price": _safe_float(payload.get("btc_price")),
+        "count": int(_safe_float(payload.get("count"))),
+        "transactions": list(payload.get("transactions") or [])[:10],
+    }
+
+
+_ANALYTICS_HISTORY_INGEST_VERSION = "v1"
+_ANALYTICS_HISTORY_COLLECTORS = ("microstructure", "community", "whales")
+_ANALYTICS_HISTORY_DEFAULT_EXCHANGE = "binance"
+_ANALYTICS_HISTORY_DEFAULT_SYMBOL = "BTC/USDT"
+# SQLite writes are serialized to avoid lock contention between background workers
+# and manual refresh endpoints.
+_ANALYTICS_HISTORY_COLLECTION_LOCK = asyncio.Lock()
+_ANALYTICS_HISTORY_HEALTH_CACHE: Dict[str, Dict[str, Any]] = {}
+_ANALYTICS_HISTORY_STATUS_CACHE: Dict[str, Dict[str, Any]] = {}
+_ANALYTICS_HISTORY_STATUS_LAST: Dict[str, Dict[str, Any]] = {}
+
+
+def _clip_analytics_error(error: Any, limit: int = 280) -> str:
+    text = str(error or "").strip()
+    if not text:
+        return ""
+    return text[:limit]
+
+
+def _analytics_history_cache_key(exchange: str, symbol: str, hours: Optional[int] = None) -> str:
+    ex = str(exchange or _ANALYTICS_HISTORY_DEFAULT_EXCHANGE).strip().lower()
+    sym = str(symbol or _ANALYTICS_HISTORY_DEFAULT_SYMBOL).strip().upper()
+    if hours is None:
+        return f"{ex}|{sym}"
+    return f"{ex}|{sym}|{int(hours)}"
+
+
+def _cache_put(cache: Dict[str, Dict[str, Any]], key: str, payload: Dict[str, Any]) -> None:
+    cache[key] = {
+        "ts": time.time(),
+        "payload": copy.deepcopy(payload or {}),
+    }
+
+
+def _cache_get(
+    cache: Dict[str, Dict[str, Any]],
+    key: str,
+    *,
+    max_age_sec: Optional[float] = None,
+) -> tuple[Optional[Dict[str, Any]], Optional[float]]:
+    row = cache.get(key)
+    if not row:
+        return None, None
+    age_sec = max(0.0, time.time() - float(row.get("ts") or 0.0))
+    if max_age_sec is not None and age_sec > float(max_age_sec):
+        return None, age_sec
+    payload = copy.deepcopy(row.get("payload") or {})
+    return payload, age_sec
+
+
+def _invalidate_analytics_history_cache(exchange: str, symbol: str) -> None:
+    prefix = _analytics_history_cache_key(exchange=exchange, symbol=symbol)
+    for cache in (_ANALYTICS_HISTORY_HEALTH_CACHE, _ANALYTICS_HISTORY_STATUS_CACHE):
+        stale_keys = [key for key in cache.keys() if str(key).startswith(prefix)]
+        for key in stale_keys:
+            cache.pop(key, None)
+
+
+def _status_map_to_collectors(status_map: Dict[str, Dict[str, Any]], *, exchange: str, symbol: str) -> List[Dict[str, Any]]:
+    collectors: List[Dict[str, Any]] = []
+    exchange_lower = str(exchange or "").lower()
+    symbol_text = str(symbol or "")
+    for collector in _ANALYTICS_HISTORY_COLLECTORS:
+        row = dict(status_map.get(collector) or {})
+        if not row:
+            continue
+        if row.get("exchange") and str(row.get("exchange")).lower() != exchange_lower:
+            row["scope_warning"] = f"最近一次采集是 {row.get('exchange')} {row.get('symbol')}"
+        elif row.get("symbol") and str(row.get("symbol")) != symbol_text:
+            row["scope_warning"] = f"最近一次采集是 {row.get('exchange')} {row.get('symbol')}"
+        collectors.append(row)
+    return collectors
+
+
+def _empty_analytics_history_health(
+    *,
+    exchange: str,
+    symbol: str,
+    hours: int,
+    error: str,
+) -> Dict[str, Any]:
+    status_map: Dict[str, Dict[str, Any]] = {}
+    for collector in _ANALYTICS_HISTORY_COLLECTORS:
+        status_map[collector] = {
+            "collector": collector,
+            "exchange": exchange,
+            "symbol": symbol,
+            "status": "degraded",
+            "error": error,
+            "rows_written": 0,
+            "started_at": None,
+            "finished_at": None,
+            "updated_at": _utc_iso(datetime.now(timezone.utc)),
+            "details": {"phase": "fallback"},
+        }
+    return {
+        "exchange": exchange,
+        "symbol": symbol,
+        "hours": int(hours),
+        "generated_at": _utc_iso(datetime.now(timezone.utc)),
+        "storage": {
+            "database": str(Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", ""))).replace("\\", "/")
+            if str(settings.DATABASE_URL).startswith("sqlite+aiosqlite:///")
+            else settings.DATABASE_URL,
+            "tables": [
+                "analytics_microstructure_snapshots",
+                "analytics_community_snapshots",
+                "analytics_whale_snapshots",
+                "analytics_history_ingest_status",
+            ],
+        },
+        "sources": [],
+        "status": status_map,
+        "summary": {
+            "dataset_count": 0,
+            "total_rows": 0,
+            "ready_datasets": 0,
+            "latest_at": None,
+            "ok_rows": 0,
+            "degraded_rows": 0,
+            "failed_rows": 0,
+        },
+        "datasets": [],
+        "recent": {},
+        "error": error,
+    }
+
+
+def _status_fallback_analytics_history_health(
+    *,
+    exchange: str,
+    symbol: str,
+    hours: int,
+    status_map: Dict[str, Dict[str, Any]],
+    error: str,
+) -> Dict[str, Any]:
+    collector_meta = {
+        "microstructure": ("微观结构", "analytics_microstructure_snapshots"),
+        "community": ("社区资金与公告", "analytics_community_snapshots"),
+        "whales": ("巨鲸转账", "analytics_whale_snapshots"),
+    }
+    datasets: List[Dict[str, Any]] = []
+    for collector in _ANALYTICS_HISTORY_COLLECTORS:
+        row = dict(status_map.get(collector) or {})
+        if not row:
+            continue
+        status = str(row.get("status") or "degraded")
+        details = dict(row.get("details") or {})
+        latest_summary = dict(details.get("summary") or {})
+        latest_at = row.get("finished_at") or row.get("updated_at")
+        rows_written = int(_safe_float(row.get("rows_written"), default=0.0))
+        if rows_written <= 0:
+            rows_written = 1
+        title, _ = collector_meta.get(collector, (collector, ""))
+        datasets.append(
+            {
+                "key": collector,
+                "title": title,
+                "count": rows_written,
+                "recent_count": rows_written,
+                "first_at": latest_at,
+                "latest_at": latest_at,
+                "ok_count": 1 if status == "ok" else 0,
+                "degraded_count": 1 if status == "degraded" else 0,
+                "failed_count": 1 if status == "failed" else 0,
+                "coverage_hours": 0.0,
+                "latest_summary": latest_summary,
+            }
+        )
+
+    latest_at = max((item.get("latest_at") for item in datasets if item.get("latest_at")), default=None)
+    return {
+        "exchange": exchange,
+        "symbol": symbol,
+        "hours": int(hours),
+        "generated_at": _utc_iso(datetime.now(timezone.utc)),
+        "storage": {
+            "database": str(Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", ""))).replace("\\", "/")
+            if str(settings.DATABASE_URL).startswith("sqlite+aiosqlite:///")
+            else settings.DATABASE_URL,
+            "tables": [
+                "analytics_microstructure_snapshots",
+                "analytics_community_snapshots",
+                "analytics_whale_snapshots",
+                "analytics_history_ingest_status",
+            ],
+        },
+        "sources": [],
+        "status": status_map,
+        "summary": {
+            "dataset_count": len(datasets),
+            "total_rows": sum(int(item.get("count") or 0) for item in datasets),
+            "ready_datasets": sum(1 for item in datasets if int(item.get("count") or 0) > 0),
+            "latest_at": latest_at,
+            "ok_rows": sum(int(item.get("ok_count") or 0) for item in datasets),
+            "degraded_rows": sum(int(item.get("degraded_count") or 0) for item in datasets),
+            "failed_rows": sum(int(item.get("failed_count") or 0) for item in datasets),
+        },
+        "datasets": datasets,
+        "recent": {},
+        "error": error,
+        "fallback_mode": "status_snapshot",
+    }
+
+
+def _calc_buy_sell_ratio(imbalance: Any) -> tuple[float, float]:
+    value = _safe_float(imbalance)
+    buy_ratio = max(0.0, min(1.0, (1.0 + value) / 2.0))
+    sell_ratio = max(0.0, min(1.0, (1.0 - value) / 2.0))
+    return buy_ratio, sell_ratio
+
+
+def _community_source_name(payload: Dict[str, Any]) -> str:
+    parts: List[str] = ["proxy_layer"]
+    if list(payload.get("announcements") or []):
+        parts.append("official_announcements")
+    source = str(((payload.get("security_alerts") or {}).get("source")) or "").strip().lower()
+    if source:
+        parts.append(source)
+    return "+".join(dict.fromkeys(parts))
+
+
+def _micro_quality(payload: Dict[str, Any], latency_ms: int) -> Dict[str, Any]:
+    orderbook = payload.get("orderbook") or {}
+    funding = payload.get("funding_rate") or {}
+    basis = payload.get("spot_futures_basis") or {}
+    source_error = _clip_analytics_error(payload.get("source_error"))
+    available = bool(payload.get("available", True))
+    funding_available = bool(funding.get("available"))
+    basis_available = bool(basis.get("available"))
+    has_core = _safe_float(orderbook.get("mid_price")) > 0 and _safe_float(orderbook.get("spread_bps")) >= 0
+    if not available or not has_core:
+        capture_status = "failed" if source_error else "degraded"
+    elif source_error or not (funding_available and basis_available):
+        capture_status = "degraded"
+    else:
+        capture_status = "ok"
+    return {
+        "capture_status": capture_status,
+        "source_error": source_error,
+        "source_name": "exchange_public",
+        "latency_ms": int(max(0, latency_ms)),
+        "ingest_version": _ANALYTICS_HISTORY_INGEST_VERSION,
+        "source_ok": capture_status == "ok",
+    }
+
+
+def _community_quality(payload: Dict[str, Any], latency_ms: int) -> Dict[str, Any]:
+    source_error = _clip_analytics_error(payload.get("source_error"))
+    capture_status = "degraded" if source_error else "ok"
+    return {
+        "capture_status": capture_status,
+        "source_error": source_error,
+        "source_name": _community_source_name(payload),
+        "latency_ms": int(max(0, latency_ms)),
+        "ingest_version": _ANALYTICS_HISTORY_INGEST_VERSION,
+    }
+
+
+def _whale_quality(payload: Dict[str, Any], latency_ms: int) -> Dict[str, Any]:
+    source_error = _clip_analytics_error(payload.get("error"))
+    available = bool(payload.get("available", False))
+    if available and not source_error:
+        capture_status = "ok"
+    elif source_error:
+        capture_status = "failed"
+    else:
+        capture_status = "degraded"
+    return {
+        "capture_status": capture_status,
+        "source_error": source_error,
+        "source_name": "public_chain_proxy",
+        "latency_ms": int(max(0, latency_ms)),
+        "ingest_version": _ANALYTICS_HISTORY_INGEST_VERSION,
+    }
+
+
+async def _record_analytics_ingest_status(
+    *,
+    collector: str,
+    exchange: str,
+    symbol: str,
+    status: str,
+    error: str = "",
+    rows_written: int = 0,
+    started_at: Optional[datetime] = None,
+    finished_at: Optional[datetime] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    async with async_session_maker() as session:
+        row = (
+            await session.execute(
+                select(AnalyticsHistoryIngestStatus).where(AnalyticsHistoryIngestStatus.collector == collector)
+            )
+        ).scalars().first()
+        if not row:
+            row = AnalyticsHistoryIngestStatus(
+                collector=collector,
+                exchange=exchange,
+                symbol=symbol,
+            )
+            session.add(row)
+        row.exchange = exchange
+        row.symbol = symbol
+        row.status = str(status or "idle")
+        row.error = _clip_analytics_error(error)
+        row.rows_written = int(max(0, rows_written))
+        if started_at is not None:
+            row.started_at = started_at
+        if finished_at is not None:
+            row.finished_at = finished_at
+        row.details = dict(details or {})
+        await session.commit()
+        result = {
+            "collector": collector,
+            "exchange": exchange,
+            "symbol": symbol,
+            "status": row.status,
+            "error": row.error,
+            "rows_written": row.rows_written,
+            "started_at": _utc_iso(row.started_at),
+            "finished_at": _utc_iso(row.finished_at),
+            "updated_at": _utc_iso(row.updated_at),
+            "details": dict(row.details or {}),
+        }
+        _ANALYTICS_HISTORY_STATUS_LAST[str(collector)] = dict(result)
+        return result
+
+
+async def _load_analytics_ingest_status_map() -> Dict[str, Dict[str, Any]]:
+    async with async_session_maker() as session:
+        rows = (
+            await session.execute(
+                select(AnalyticsHistoryIngestStatus).where(
+                    AnalyticsHistoryIngestStatus.collector.in_(_ANALYTICS_HISTORY_COLLECTORS)
+                )
+            )
+        ).scalars().all()
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in rows or []:
+        out[str(row.collector)] = {
+            "collector": str(row.collector),
+            "exchange": str(row.exchange or ""),
+            "symbol": str(row.symbol or ""),
+            "status": str(row.status or "idle"),
+            "error": str(row.error or ""),
+            "rows_written": int(row.rows_written or 0),
+            "started_at": _utc_iso(row.started_at),
+            "finished_at": _utc_iso(row.finished_at),
+            "updated_at": _utc_iso(row.updated_at),
+            "details": dict(row.details or {}),
+        }
+    for collector in _ANALYTICS_HISTORY_COLLECTORS:
+        out.setdefault(
+            collector,
+            {
+                "collector": collector,
+                "exchange": _ANALYTICS_HISTORY_DEFAULT_EXCHANGE,
+                "symbol": _ANALYTICS_HISTORY_DEFAULT_SYMBOL,
+                "status": "idle",
+                "error": "",
+                "rows_written": 0,
+                "started_at": None,
+                "finished_at": None,
+                "updated_at": None,
+                "details": {},
+            },
+        )
+    return out
+
+
+async def _persist_microstructure_snapshot(
+    *,
+    exchange: str,
+    symbol: str,
+    payload: Dict[str, Any],
+    latency_ms: int,
+) -> Dict[str, Any]:
+    captured_at = _utc_now_naive()
+    orderbook = payload.get("orderbook") or {}
+    aggressor_flow = payload.get("aggressor_flow") or {}
+    funding = payload.get("funding_rate") or {}
+    basis = payload.get("spot_futures_basis") or {}
+    buy_ratio, sell_ratio = _calc_buy_sell_ratio(aggressor_flow.get("imbalance"))
+    quality = _micro_quality(payload, latency_ms)
+    row = AnalyticsMicrostructureSnapshot(
+        timestamp=captured_at,
+        exchange=exchange,
+        symbol=symbol,
+        source_ok=bool(quality.get("source_ok")),
+        capture_status=str(quality.get("capture_status")),
+        source_error=str(quality.get("source_error")),
+        source_name=str(quality.get("source_name")),
+        latency_ms=int(quality.get("latency_ms") or 0),
+        ingest_version=str(quality.get("ingest_version")),
+        spread_bps=_safe_float(orderbook.get("spread_bps")),
+        mid_price=_safe_float(orderbook.get("mid_price")),
+        order_flow_imbalance=_safe_float(aggressor_flow.get("imbalance")),
+        buy_ratio=buy_ratio,
+        sell_ratio=sell_ratio,
+        large_order_count=len(list(payload.get("large_orders") or [])),
+        iceberg_candidates=int(_safe_float((payload.get("iceberg_detection") or {}).get("candidate_count"))),
+        funding_rate=_safe_float(funding.get("funding_rate")) if bool(funding.get("available")) else None,
+        basis_pct=_safe_float(basis.get("basis_pct")) if bool(basis.get("available")) else None,
+        payload=_compact_microstructure_payload(payload),
+    )
+    async with async_session_maker() as session:
+        session.add(row)
+        await session.commit()
+    return {
+        "id": row.id,
+        "captured_at": _utc_iso(captured_at),
+        "capture_status": row.capture_status,
+        "source_error": row.source_error,
+        "source_name": row.source_name,
+        "latency_ms": int(row.latency_ms or 0),
+        "rows_written": 1,
+        "summary": {
+            "available": bool(payload.get("available", True)),
+            "spread_bps": _safe_float(orderbook.get("spread_bps")),
+            "funding_available": bool(funding.get("available")),
+            "basis_available": bool(basis.get("available")),
+        },
+    }
+
+
+async def _persist_community_snapshot(
+    *,
+    exchange: str,
+    symbol: str,
+    payload: Dict[str, Any],
+    latency_ms: int,
+) -> Dict[str, Any]:
+    captured_at = _utc_now_naive()
+    flow = payload.get("flow_proxy") or {}
+    security_alerts = payload.get("security_alerts") or {}
+    announcements = list(payload.get("announcements") or [])
+    buy_ratio, sell_ratio = _calc_buy_sell_ratio(flow.get("imbalance"))
+    quality = _community_quality(payload, latency_ms)
+    row = AnalyticsCommunitySnapshot(
+        timestamp=captured_at,
+        exchange=exchange,
+        symbol=symbol,
+        capture_status=str(quality.get("capture_status")),
+        source_error=str(quality.get("source_error")),
+        source_name=str(quality.get("source_name")),
+        latency_ms=int(quality.get("latency_ms") or 0),
+        ingest_version=str(quality.get("ingest_version")),
+        flow_imbalance=_safe_float(flow.get("imbalance")),
+        buy_ratio=buy_ratio,
+        sell_ratio=sell_ratio,
+        announcement_count=len(announcements),
+        security_alert_count=len(list(security_alerts.get("events") or [])),
+        payload=_compact_community_payload(payload),
+    )
+    async with async_session_maker() as session:
+        session.add(row)
+        await session.commit()
+    return {
+        "id": row.id,
+        "captured_at": _utc_iso(captured_at),
+        "capture_status": row.capture_status,
+        "source_error": row.source_error,
+        "source_name": row.source_name,
+        "latency_ms": int(row.latency_ms or 0),
+        "rows_written": 1,
+        "summary": {
+            "announcement_count": len(announcements),
+            "security_alert_count": len(list(security_alerts.get("events") or [])),
+            "flow_imbalance": _safe_float(flow.get("imbalance")),
+        },
+    }
+
+
+async def _persist_whale_snapshot(
+    *,
+    exchange: str,
+    symbol: str,
+    payload: Dict[str, Any],
+    latency_ms: int,
+) -> Dict[str, Any]:
+    captured_at = _utc_now_naive()
+    transactions = list(payload.get("transactions") or [])
+    quality = _whale_quality(payload, latency_ms)
+    row = AnalyticsWhaleSnapshot(
+        timestamp=captured_at,
+        exchange=exchange,
+        symbol=symbol,
+        capture_status=str(quality.get("capture_status")),
+        source_error=str(quality.get("source_error")),
+        source_name=str(quality.get("source_name")),
+        latency_ms=int(quality.get("latency_ms") or 0),
+        ingest_version=str(quality.get("ingest_version")),
+        whale_count=int(_safe_float(payload.get("count"))),
+        total_btc=round(sum(_safe_float(item.get("btc")) for item in transactions), 6),
+        max_btc=round(max((_safe_float(item.get("btc")) for item in transactions), default=0.0), 6),
+        payload=_compact_whale_payload(payload),
+    )
+    async with async_session_maker() as session:
+        session.add(row)
+        await session.commit()
+    return {
+        "id": row.id,
+        "captured_at": _utc_iso(captured_at),
+        "capture_status": row.capture_status,
+        "source_error": row.source_error,
+        "source_name": row.source_name,
+        "latency_ms": int(row.latency_ms or 0),
+        "rows_written": 1,
+        "summary": {
+            "available": bool(payload.get("available", False)),
+            "count": int(_safe_float(payload.get("count"))),
+            "total_btc": round(sum(_safe_float(item.get("btc")) for item in transactions), 6),
+        },
+    }
+
+
+async def _persist_analytics_snapshots(
+    *,
+    exchange: str,
+    symbol: str,
+    microstructure: Dict[str, Any],
+    community: Dict[str, Any],
+) -> Dict[str, Any]:
+    captured_at = _utc_now_naive()
+    flow = community.get("flow_proxy") or {}
+    whales = community.get("whale_transfers") or {}
+    security_alerts = community.get("security_alerts") or {}
+    announcements = list(community.get("announcements") or [])
+    whale_transactions = list(whales.get("transactions") or [])
+    micro_orderbook = microstructure.get("orderbook") or {}
+    aggressor_flow = microstructure.get("aggressor_flow") or {}
+    funding = microstructure.get("funding_rate") or {}
+    basis = microstructure.get("spot_futures_basis") or {}
+
+    micro_row = AnalyticsMicrostructureSnapshot(
+        timestamp=captured_at,
+        exchange=exchange,
+        symbol=symbol,
+        source_ok=bool(microstructure.get("available", True)) and not bool(microstructure.get("source_error")),
+        spread_bps=_safe_float(micro_orderbook.get("spread_bps")),
+        mid_price=_safe_float(micro_orderbook.get("mid_price")),
+        order_flow_imbalance=_safe_float(aggressor_flow.get("imbalance")),
+        buy_ratio=max(0.0, min(1.0, (1.0 + _safe_float(aggressor_flow.get("imbalance"))) / 2.0)),
+        sell_ratio=max(0.0, min(1.0, (1.0 - _safe_float(aggressor_flow.get("imbalance"))) / 2.0)),
+        large_order_count=len(list(microstructure.get("large_orders") or [])),
+        iceberg_candidates=int(_safe_float((microstructure.get("iceberg_detection") or {}).get("candidate_count"))),
+        funding_rate=(
+            _safe_float(funding.get("funding_rate"))
+            if bool(funding.get("available"))
+            else None
+        ),
+        basis_pct=(
+            _safe_float(basis.get("basis_pct"))
+            if bool(basis.get("available"))
+            else None
+        ),
+        payload=_compact_microstructure_payload(microstructure),
+    )
+
+    community_row = AnalyticsCommunitySnapshot(
+        timestamp=captured_at,
+        exchange=exchange,
+        symbol=symbol,
+        flow_imbalance=_safe_float(flow.get("imbalance")),
+        buy_ratio=max(0.0, min(1.0, (1.0 + _safe_float(flow.get("imbalance"))) / 2.0)),
+        sell_ratio=max(0.0, min(1.0, (1.0 - _safe_float(flow.get("imbalance"))) / 2.0)),
+        announcement_count=len(announcements),
+        security_alert_count=len(list(security_alerts.get("events") or [])),
+        payload=_compact_community_payload(community),
+    )
+
+    whale_row = AnalyticsWhaleSnapshot(
+        timestamp=captured_at,
+        exchange=exchange,
+        symbol=symbol,
+        whale_count=int(_safe_float(whales.get("count"))),
+        total_btc=round(sum(_safe_float(item.get("btc")) for item in whale_transactions), 6),
+        max_btc=round(max((_safe_float(item.get("btc")) for item in whale_transactions), default=0.0), 6),
+        payload=_compact_whale_payload(whales),
+    )
+
+    async with async_session_maker() as session:
+        session.add_all([micro_row, community_row, whale_row])
+        await session.commit()
+
+    return {
+        "captured_at": _utc_iso(captured_at),
+        "microstructure_id": micro_row.id,
+        "community_id": community_row.id,
+        "whale_id": whale_row.id,
+    }
+
+
+def _analytics_fallback_microstructure(exchange: str, symbol: str, error: str) -> Dict[str, Any]:
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "exchange": exchange,
+        "symbol": symbol,
+        "available": False,
+        "source_error": str(error or "microstructure unavailable"),
+        "orderbook": {"spread_bps": 0.0, "mid_price": 0.0, "bids": [], "asks": []},
+        "aggressor_flow": {"imbalance": 0.0, "buy_volume": 0.0, "sell_volume": 0.0},
+        "large_orders": [],
+        "iceberg_detection": {"candidate_count": 0},
+        "funding_rate": {"available": False},
+        "spot_futures_basis": {"available": False},
+    }
+
+
+def _analytics_fallback_community(exchange: str, symbol: str, error: str) -> Dict[str, Any]:
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "symbol": symbol,
+        "exchange": exchange,
+        "source_error": str(error or "community unavailable"),
+        "twitter_watchlist": [],
+        "flow_proxy": {"imbalance": 0.0, "buy_volume": 0.0, "sell_volume": 0.0},
+        "whale_transfers": {"available": False, "count": 0, "transactions": [], "error": str(error or "")},
+        "security_alerts": {
+            "source": "fallback",
+            "events": [{"level": "warning", "message": str(error or "社区/巨鲸数据暂不可用")}],
+        },
+        "announcements": [],
+    }
+
+
+def _analytics_fallback_whales(error: str) -> Dict[str, Any]:
+    return {
+        "available": False,
+        "error": str(error or "whale transfers unavailable"),
+        "threshold_btc": _ANALYTICS_WHALE_MIN_BTC,
+        "btc_price": 0.0,
+        "count": 0,
+        "transactions": [],
+    }
+
+
+async def _collect_analytics_component(
+    *,
+    label: str,
+    timeout_sec: float,
+    coro,
+    fallback_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        return await asyncio.wait_for(coro, timeout=max(1.0, float(timeout_sec)))
+    except Exception as exc:
+        payload = dict(fallback_payload or {})
+        payload.setdefault("source_error", f"{label} failed: {exc}")
+        logger.warning(f"{label} analytics fallback: {exc}")
+        return payload
+
+
+async def _collect_analytics_component_with_meta(
+    *,
+    label: str,
+    timeout_sec: float,
+    coro,
+    fallback_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    started = time.perf_counter()
+    payload = await _collect_analytics_component(
+        label=label,
+        timeout_sec=timeout_sec,
+        coro=coro,
+        fallback_payload=fallback_payload,
+    )
+    return {
+        "payload": payload,
+        "latency_ms": int(round((time.perf_counter() - started) * 1000)),
+    }
+
+
+def _serialize_analytics_series_row(row: Any, metric: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = dict(extra or {})
+    payload.update(
+        {
+            "timestamp": _utc_iso(getattr(row, "timestamp", None)),
+            "value": _safe_float(getattr(row, metric, 0.0)),
+        }
+    )
+    return payload
+
+
+def _normalize_analytics_collectors(collectors: Optional[Any]) -> List[str]:
+    if collectors is None:
+        return list(_ANALYTICS_HISTORY_COLLECTORS)
+    if isinstance(collectors, str):
+        values = [item.strip().lower() for item in str(collectors).split(",")]
+    else:
+        values = [str(item or "").strip().lower() for item in list(collectors or [])]
+    normalized = [item for item in values if item in _ANALYTICS_HISTORY_COLLECTORS]
+    return normalized or list(_ANALYTICS_HISTORY_COLLECTORS)
+
+
+async def run_analytics_history_collection(
+    *,
+    exchange: str = _ANALYTICS_HISTORY_DEFAULT_EXCHANGE,
+    symbol: str = _ANALYTICS_HISTORY_DEFAULT_SYMBOL,
+    depth_limit: int = 80,
+    collectors: Optional[Any] = None,
+) -> Dict[str, Any]:
+    async with _ANALYTICS_HISTORY_COLLECTION_LOCK:
+        selected = _normalize_analytics_collectors(collectors)
+        started_at = _utc_now_naive()
+        started_map = {collector: _utc_now_naive() for collector in selected}
+        for collector in selected:
+            await _record_analytics_ingest_status(
+                collector=collector,
+                exchange=exchange,
+                symbol=symbol,
+                status="running",
+                error="",
+                rows_written=0,
+                started_at=started_map[collector],
+                finished_at=None,
+                details={"phase": "collecting"},
+            )
+
+        jobs: Dict[str, Any] = {}
+        if "microstructure" in selected:
+            jobs["microstructure"] = _collect_analytics_component_with_meta(
+                label="microstructure",
+                timeout_sec=_ANALYTICS_COLLECTOR_TIMEOUT_SEC,
+                coro=get_market_microstructure(exchange=exchange, symbol=symbol, depth_limit=depth_limit),
+                fallback_payload=_analytics_fallback_microstructure(exchange=exchange, symbol=symbol, error="微观结构抓取超时"),
+            )
+        if "community" in selected or "whales" in selected:
+            if "community" in selected:
+                jobs["community_bundle"] = _collect_analytics_component_with_meta(
+                    label="community",
+                    timeout_sec=_ANALYTICS_COLLECTOR_TIMEOUT_SEC,
+                    coro=get_community_overview(symbol=symbol, exchange=exchange),
+                    fallback_payload=_analytics_fallback_community(exchange=exchange, symbol=symbol, error="社区/公告抓取超时"),
+                )
+            else:
+                jobs["whales"] = _collect_analytics_component_with_meta(
+                    label="whales",
+                    timeout_sec=_ANALYTICS_COLLECTOR_TIMEOUT_SEC,
+                    coro=_fetch_whale_transfers(min_btc=_ANALYTICS_WHALE_MIN_BTC),
+                    fallback_payload=_analytics_fallback_whales("巨鲸抓取超时"),
+                )
+
+        job_names = list(jobs.keys())
+        job_results = await asyncio.gather(*jobs.values()) if jobs else []
+        resolved = {name: result for name, result in zip(job_names, job_results)}
+        collector_results: Dict[str, Dict[str, Any]] = {}
+
+        async def _finalize_collector(collector: str, save_result: Dict[str, Any]) -> None:
+            collector_results[collector] = dict(save_result or {})
+            await _record_analytics_ingest_status(
+                collector=collector,
+                exchange=exchange,
+                symbol=symbol,
+                status=str(save_result.get("capture_status") or "ok"),
+                error=str(save_result.get("source_error") or ""),
+                rows_written=int(save_result.get("rows_written") or 0),
+                started_at=started_map.get(collector),
+                finished_at=_utc_now_naive(),
+                details={
+                    "source_name": save_result.get("source_name"),
+                    "latency_ms": int(save_result.get("latency_ms") or 0),
+                    "captured_at": save_result.get("captured_at"),
+                    "summary": dict(save_result.get("summary") or {}),
+                },
+            )
+
+        try:
+            if "microstructure" in selected:
+                meta = resolved.get("microstructure") or {}
+                await _finalize_collector(
+                    "microstructure",
+                    await _persist_microstructure_snapshot(
+                        exchange=exchange,
+                        symbol=symbol,
+                        payload=dict(meta.get("payload") or {}),
+                        latency_ms=int(meta.get("latency_ms") or 0),
+                    ),
+                )
+            if "community" in selected:
+                meta = resolved.get("community_bundle") or {}
+                community_payload = dict(meta.get("payload") or {})
+                await _finalize_collector(
+                    "community",
+                    await _persist_community_snapshot(
+                        exchange=exchange,
+                        symbol=symbol,
+                        payload=community_payload,
+                        latency_ms=int(meta.get("latency_ms") or 0),
+                    ),
+                )
+            if "whales" in selected:
+                if "community" in selected:
+                    bundle = resolved.get("community_bundle") or {}
+                    community_payload = dict(bundle.get("payload") or {})
+                    whale_payload = dict(community_payload.get("whale_transfers") or {})
+                    whale_latency_ms = int(bundle.get("latency_ms") or 0)
+                    if not whale_payload:
+                        whale_payload = _analytics_fallback_whales("社区包内未返回巨鲸数据")
+                else:
+                    whale_meta = resolved.get("whales") or {}
+                    whale_payload = dict(whale_meta.get("payload") or {})
+                    whale_latency_ms = int(whale_meta.get("latency_ms") or 0)
+                await _finalize_collector(
+                    "whales",
+                    await _persist_whale_snapshot(
+                        exchange=exchange,
+                        symbol=symbol,
+                        payload=whale_payload,
+                        latency_ms=whale_latency_ms,
+                    ),
+                )
+        except Exception as exc:
+            error_text = _clip_analytics_error(exc)
+            for collector in selected:
+                if collector in collector_results:
+                    continue
+                await _record_analytics_ingest_status(
+                    collector=collector,
+                    exchange=exchange,
+                    symbol=symbol,
+                    status="failed",
+                    error=error_text,
+                    rows_written=0,
+                    started_at=started_map.get(collector),
+                    finished_at=_utc_now_naive(),
+                    details={"phase": "persist_failed"},
+                )
+            raise
+
+        finished_at = _utc_now_naive()
+        return {
+            "success": True,
+            "exchange": exchange,
+            "symbol": symbol,
+            "collectors": selected,
+            "started_at": _utc_iso(started_at),
+            "finished_at": _utc_iso(finished_at),
+            "rows_written": sum(int(item.get("rows_written") or 0) for item in collector_results.values()),
+            "results": collector_results,
+        }
+
+
+async def _build_analytics_history_health(
+    *,
+    exchange: str,
+    symbol: str,
+    hours: int,
+) -> Dict[str, Any]:
+    cutoff = _utc_now_naive() - timedelta(hours=hours)
+
+    async with async_session_maker() as session:
+        datasets: List[Dict[str, Any]] = []
+        recent: Dict[str, List[Dict[str, Any]]] = {}
+
+        specs = [
+            (
+                "microstructure",
+                "微观结构",
+                AnalyticsMicrostructureSnapshot,
+                "spread_bps",
+                lambda row: {
+                    "source_ok": bool(row.source_ok),
+                    "capture_status": str(getattr(row, "capture_status", "ok") or "ok"),
+                    "source_name": str(getattr(row, "source_name", "exchange_public") or "exchange_public"),
+                    "source_error": str(getattr(row, "source_error", "") or ""),
+                    "latency_ms": int(getattr(row, "latency_ms", 0) or 0),
+                    "ingest_version": str(getattr(row, "ingest_version", "v1") or "v1"),
+                    "funding_rate": row.funding_rate,
+                    "basis_pct": row.basis_pct,
+                    "large_order_count": int(row.large_order_count or 0),
+                    "iceberg_candidates": int(row.iceberg_candidates or 0),
+                    "mid_price": _safe_float(row.mid_price),
+                },
+            ),
+            (
+                "community",
+                "社区资金与公告",
+                AnalyticsCommunitySnapshot,
+                "flow_imbalance",
+                lambda row: {
+                    "capture_status": str(getattr(row, "capture_status", "ok") or "ok"),
+                    "source_name": str(getattr(row, "source_name", "proxy_layer") or "proxy_layer"),
+                    "source_error": str(getattr(row, "source_error", "") or ""),
+                    "latency_ms": int(getattr(row, "latency_ms", 0) or 0),
+                    "ingest_version": str(getattr(row, "ingest_version", "v1") or "v1"),
+                    "announcement_count": int(row.announcement_count or 0),
+                    "security_alert_count": int(row.security_alert_count or 0),
+                    "buy_ratio": _safe_float(row.buy_ratio),
+                    "sell_ratio": _safe_float(row.sell_ratio),
+                },
+            ),
+            (
+                "whales",
+                "巨鲸转账",
+                AnalyticsWhaleSnapshot,
+                "whale_count",
+                lambda row: {
+                    "capture_status": str(getattr(row, "capture_status", "ok") or "ok"),
+                    "source_name": str(getattr(row, "source_name", "public_chain_proxy") or "public_chain_proxy"),
+                    "source_error": str(getattr(row, "source_error", "") or ""),
+                    "latency_ms": int(getattr(row, "latency_ms", 0) or 0),
+                    "ingest_version": str(getattr(row, "ingest_version", "v1") or "v1"),
+                    "whale_count": int(row.whale_count or 0),
+                    "total_btc": _safe_float(row.total_btc),
+                    "max_btc": _safe_float(row.max_btc),
+                },
+            ),
+        ]
+
+        for key, title, model, metric, extra_builder in specs:
+            filters = [model.exchange == exchange, model.symbol == symbol]
+            agg_row = (
+                await session.execute(
+                    select(
+                        func.count(model.id),
+                        func.min(model.timestamp),
+                        func.max(model.timestamp),
+                        func.sum(case((model.capture_status == "ok", 1), else_=0)),
+                        func.sum(case((model.capture_status == "degraded", 1), else_=0)),
+                        func.sum(case((model.capture_status == "failed", 1), else_=0)),
+                    ).where(*filters)
+                )
+            ).one_or_none()
+            total = int(_safe_float(agg_row[0] if agg_row else 0, default=0.0))
+            first_ts = agg_row[1] if agg_row else None
+            latest_ts = agg_row[2] if agg_row else None
+            ok_count = int(_safe_float(agg_row[3] if agg_row else 0, default=0.0))
+            degraded_count = int(_safe_float(agg_row[4] if agg_row else 0, default=0.0))
+            failed_count = int(_safe_float(agg_row[5] if agg_row else 0, default=0.0))
+            recent_count = int(
+                _safe_float(
+                    await session.scalar(
+                        select(func.count()).select_from(model).where(*filters, model.timestamp >= cutoff)
+                    ),
+                    default=0.0,
+                )
+            )
+            latest_row = (
+                await session.execute(select(model).where(*filters).order_by(model.timestamp.desc()).limit(1))
+            ).scalars().first()
+            recent_rows = (
+                await session.execute(
+                    select(model)
+                    .where(*filters)
+                    .order_by(model.timestamp.desc())
+                    .limit(24)
+                )
+            ).scalars().all()
+            recent[key] = [
+                _serialize_analytics_series_row(row, metric, extra_builder(row))
+                for row in reversed(list(recent_rows or []))
+            ]
+            datasets.append(
+                {
+                    "key": key,
+                    "title": title,
+                    "count": total,
+                    "recent_count": recent_count,
+                    "first_at": _utc_iso(first_ts) if first_ts else None,
+                    "latest_at": _utc_iso(latest_ts) if latest_ts else None,
+                    "ok_count": ok_count,
+                    "degraded_count": degraded_count,
+                    "failed_count": failed_count,
+                    "coverage_hours": round(
+                        ((latest_ts - first_ts).total_seconds() / 3600.0)
+                        if first_ts and latest_ts
+                        else 0.0,
+                        2,
+                    ),
+                    "latest_summary": extra_builder(latest_row) if latest_row else {},
+                }
+            )
+
+    now_utc = datetime.now(timezone.utc)
+    try:
+        status_map = await asyncio.wait_for(
+            _load_analytics_ingest_status_map(),
+            timeout=max(1.0, _ANALYTICS_HISTORY_STATUS_READ_TIMEOUT_SEC),
+        )
+    except Exception as exc:
+        logger.warning(f"analytics history status-map read degraded: {_clip_analytics_error(exc)}")
+        status_map = {}
+    return {
+        "exchange": exchange,
+        "symbol": symbol,
+        "hours": hours,
+        "generated_at": _utc_iso(now_utc),
+        "storage": {
+            "database": str(Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", ""))).replace("\\", "/")
+            if str(settings.DATABASE_URL).startswith("sqlite+aiosqlite:///")
+            else settings.DATABASE_URL,
+            "tables": [
+                "analytics_microstructure_snapshots",
+                "analytics_community_snapshots",
+                "analytics_whale_snapshots",
+                "analytics_history_ingest_status",
+            ],
+        },
+        "sources": [
+            {
+                "name": "微观结构",
+                "acquisition": "交易所订单簿、逐笔成交、资金费率、现货/合约基差",
+                "stored_as": "analytics_microstructure_snapshots",
+                "quality_note": "基础层为公开交易所接口；资金费率或基差缺失时允许降级入库。",
+            },
+            {
+                "name": "社区/公告",
+                "acquisition": "逐笔成交流向代理、官方公告源、内部安全事件占位源",
+                "stored_as": "analytics_community_snapshots",
+                "quality_note": "这是社区代理层，不是完整社交媒体舆情库；占位源会显式标记。",
+            },
+            {
+                "name": "巨鲸",
+                "acquisition": "Blockchain 未确认交易 + Binance BTC 价格估值",
+                "stored_as": "analytics_whale_snapshots",
+                "quality_note": "这是公开链上大额转账代理，不是地址标签级鲸鱼画像。",
+            },
+        ],
+        "status": status_map,
+        "summary": {
+            "dataset_count": len(datasets),
+            "total_rows": sum(int(item.get("count") or 0) for item in datasets),
+            "ready_datasets": sum(1 for item in datasets if int(item.get("count") or 0) > 0),
+            "latest_at": max((item.get("latest_at") for item in datasets if item.get("latest_at")), default=None),
+            "ok_rows": sum(int(item.get("ok_count") or 0) for item in datasets),
+            "degraded_rows": sum(int(item.get("degraded_count") or 0) for item in datasets),
+            "failed_rows": sum(int(item.get("failed_count") or 0) for item in datasets),
+        },
+        "datasets": datasets,
+        "recent": recent,
+    }
 
 
 async def _collect_live_position_snapshot(force_refresh: bool = False) -> Dict[str, Any]:
@@ -1242,6 +2473,8 @@ async def _load_symbol_returns(symbol: str, lookback: int = 240) -> pd.Series:
 
 
 async def _fetch_orderbook(exchange: str, symbol: str, limit: int = 80) -> Dict[str, Any]:
+    if str(exchange or "").lower() == "binance":
+        return await _fetch_binance_public_orderbook(symbol=symbol, limit=limit)
     connector = exchange_manager.get_exchange(exchange)
     if not connector:
         return {
@@ -1254,7 +2487,7 @@ async def _fetch_orderbook(exchange: str, symbol: str, limit: int = 80) -> Dict[
     try:
         orderbook = await asyncio.wait_for(
             connector.get_order_book(symbol, limit=max(5, min(int(limit), 200))),
-            timeout=2.8,
+            timeout=_ANALYTICS_ORDERBOOK_TIMEOUT_SEC,
         )
     except (asyncio.TimeoutError, asyncio.CancelledError) as e:
         return {
@@ -1291,6 +2524,8 @@ async def _fetch_orderbook(exchange: str, symbol: str, limit: int = 80) -> Dict[
 
 
 async def _fetch_trade_imbalance(exchange: str, symbol: str, limit: int = 600) -> Dict[str, Any]:
+    if str(exchange or "").lower() == "binance":
+        return await _fetch_binance_public_trade_imbalance(symbol=symbol, limit=limit)
     connector = exchange_manager.get_exchange(exchange)
     if not connector:
         return {"count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
@@ -1301,7 +2536,7 @@ async def _fetch_trade_imbalance(exchange: str, symbol: str, limit: int = 600) -
     try:
         trades = await asyncio.wait_for(
             fetch_trades(symbol, limit=max(50, min(int(limit), 2000))),
-            timeout=2.8,
+            timeout=_ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC,
         )
     except (asyncio.TimeoutError, asyncio.CancelledError):
         return {"count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
@@ -1403,7 +2638,6 @@ async def _precheck_binance_futures_order(request: OrderRequest) -> None:
         return
 
 
-@router.post("/order", response_model=OrderResponse)
 async def create_order(request: OrderRequest):
     mode = str(request.order_mode or "normal").lower()
     timeout_sec = 30.0
@@ -1504,7 +2738,6 @@ async def create_order(request: OrderRequest):
     )
 
 
-@router.get("/orders")
 async def get_orders(
     symbol: Optional[str] = None,
     exchange: Optional[str] = None,
@@ -1584,7 +2817,6 @@ async def get_orders(
         _LIVE_ORDER_DETAILS_CACHE["orders"] = list(serialized)
     return {"orders": serialized}
 
-@router.get("/orders/conditional")
 async def get_conditional_orders():
     return {
         "orders": execution_engine.list_conditional_orders(),
@@ -1592,7 +2824,6 @@ async def get_conditional_orders():
     }
 
 
-@router.delete("/orders/conditional/{conditional_id}")
 async def cancel_conditional_order(conditional_id: str):
     ok = execution_engine.cancel_conditional_order(conditional_id)
     if not ok:
@@ -1600,7 +2831,6 @@ async def cancel_conditional_order(conditional_id: str):
     return {"success": True, "conditional_id": conditional_id}
 
 
-@router.delete("/order/{order_id}")
 async def cancel_order(
     order_id: str,
     symbol: str,
@@ -1626,7 +2856,6 @@ async def cancel_order(
     raise HTTPException(status_code=400, detail="Failed to cancel order")
 
 
-@router.delete("/orders")
 async def cancel_all_orders(
     symbol: Optional[str] = None,
     exchange: str = "binance",
@@ -1642,7 +2871,6 @@ async def cancel_all_orders(
     return {"cancelled": count}
 
 
-@router.get("/positions")
 async def get_positions():
     now_ts = time.time()
     cached_positions = list(_LIVE_POSITION_DETAILS_CACHE.get("positions") or [])
@@ -1915,7 +3143,6 @@ async def get_positions():
     }
 
 
-@router.post("/positions/close")
 async def close_position(req: PositionCloseRequest):
     exchange = str(req.exchange or "").strip().lower()
     symbol = str(req.symbol or "").strip().upper()
@@ -2065,916 +3292,6 @@ async def close_position(req: PositionCloseRequest):
     }
 
 
-@router.get("/balance")
-async def get_balance(exchange: str = "gate"):
-    connector = exchange_manager.get_exchange(exchange)
-    if not connector:
-        return {
-            "exchange": exchange,
-            "balances": [],
-            "error": "Exchange not connected",
-        }
-
-    try:
-        balances = await connector.get_balance()
-        return {
-            "exchange": exchange,
-            "balances": [
-                {
-                    "currency": b.currency,
-                    "free": b.free,
-                    "used": b.used,
-                    "total": b.total,
-                }
-                for b in balances
-            ],
-        }
-    except Exception as e:
-        return {
-            "exchange": exchange,
-            "balances": [],
-            "error": str(e),
-        }
-
-
-@router.get("/balances")
-async def get_all_balances():
-    results: Dict[str, Dict[str, Any]] = {}
-    total_usd = 0.0
-    distribution_map: Dict[str, float] = {}
-    exchange_total_map: Dict[str, float] = {}
-    total_unpriced_assets = 0
-    mode_name = execution_engine.get_trading_mode()
-    is_paper_mode = execution_engine.is_paper_mode()
-    risk_manager.set_account_scope("paper" if is_paper_mode else "live", reset_baseline=False)
-    paper_account: Optional[Dict[str, Any]] = None
-
-    async def _collect_exchange(exchange_name: str):
-        now_ts = time.time()
-        cached = _BALANCE_SNAPSHOT_CACHE.get(exchange_name)
-        if cached and (now_ts - float(cached.get("ts", 0.0))) <= _BALANCE_SNAPSHOT_FAST_AGE_SEC:
-            age = max(0.0, now_ts - float(cached.get("ts", 0.0)))
-            cached_result = dict(cached.get("result") or {})
-            cached_result["from_cache"] = True
-            cached_result["cache_age_sec"] = round(age, 2)
-            return (
-                exchange_name,
-                cached_result,
-                float(cached.get("total_usd", 0.0) or 0.0),
-                dict(cached.get("distribution") or {}),
-            )
-
-        if exchange_name == "binance" and not is_paper_mode:
-            try:
-                fast_snapshot = await asyncio.wait_for(
-                    _fetch_binance_live_wallet_snapshot_fast(),
-                    timeout=max(_BALANCE_FETCH_TIMEOUT_SEC, 10.5),
-                )
-                exchange_result = {
-                    "connected": True,
-                    "balances": list(fast_snapshot.get("balances") or []),
-                    "total_usd": round(_safe_float(fast_snapshot.get("total_usd"), default=0.0), 2),
-                    "valuation_coverage": dict(fast_snapshot.get("valuation_coverage") or {}),
-                    "from_cache": False,
-                    "fallback_used": True,
-                    "wallet_components": dict(fast_snapshot.get("components") or {}),
-                }
-                warnings = [str(x) for x in (fast_snapshot.get("warnings") or []) if str(x).strip()]
-                if warnings:
-                    exchange_result["warning"] = " | ".join(warnings[:3])
-                local_distribution = dict(fast_snapshot.get("distribution") or {})
-                exchange_total_usd = float(fast_snapshot.get("total_usd") or 0.0)
-                _BALANCE_SNAPSHOT_CACHE[exchange_name] = {
-                    "ts": time.time(),
-                    "result": {
-                        "connected": exchange_result["connected"],
-                        "balances": exchange_result["balances"],
-                        "total_usd": exchange_result["total_usd"],
-                        "wallet_components": exchange_result.get("wallet_components"),
-                    },
-                    "total_usd": exchange_total_usd,
-                    "distribution": dict(local_distribution),
-                }
-                return (
-                    exchange_name,
-                    exchange_result,
-                    exchange_total_usd,
-                    local_distribution,
-                )
-            except Exception as fast_err:
-                logger.warning(f"[binance] live fast wallet snapshot failed: {fast_err}")
-                if cached and (time.time() - float(cached.get("ts", 0.0))) <= _BALANCE_SNAPSHOT_CACHE_TTL_SEC:
-                    age = max(0.0, time.time() - float(cached.get("ts", 0.0)))
-                    cached_result = dict(cached.get("result") or {})
-                    cached_result["from_cache"] = True
-                    cached_result["cache_age_sec"] = round(age, 2)
-                    cached_result["warning"] = str(fast_err)
-                    return (
-                        exchange_name,
-                        cached_result,
-                        float(cached.get("total_usd", 0.0) or 0.0),
-                        dict(cached.get("distribution") or {}),
-                    )
-
-        connector = exchange_manager.get_exchange(exchange_name)
-        if not connector:
-            return (
-                exchange_name,
-                {
-                    "connected": False,
-                    "balances": [],
-                    "total_usd": 0,
-                    "from_cache": False,
-                },
-                0.0,
-                {},
-            )
-
-        try:
-            balances = await asyncio.wait_for(
-                connector.get_balance(),
-                timeout=_BALANCE_FETCH_TIMEOUT_SEC,
-            )
-            exchange_balances: List[Dict[str, Any]] = []
-            exchange_total_usd = 0.0
-            local_distribution: Dict[str, float] = {}
-
-            quote_map: Dict[str, float] = {}
-            price_candidates: List[str] = []
-            last_unit_usd: Dict[str, float] = {}
-            if cached:
-                for row in (cached.get("result") or {}).get("balances", []):
-                    if not isinstance(row, dict):
-                        continue
-                    currency = str(row.get("currency") or "").upper()
-                    total_prev = float(row.get("total") or 0.0)
-                    usd_prev = float(row.get("usd_value") or 0.0)
-                    if currency and total_prev > 0 and usd_prev > 0:
-                        last_unit_usd[currency] = usd_prev / total_prev
-            for b in balances:
-                ccy = str(b.currency or "").upper()
-                total = float(b.total or 0.0)
-                if total <= 0:
-                    continue
-                if ccy in STABLE_COINS:
-                    continue
-                if ccy not in price_candidates:
-                    price_candidates.append(ccy)
-
-            if price_candidates:
-                quote_map = await build_currency_usd_quotes(
-                    connector=connector,
-                    currencies=price_candidates,
-                    timeout_sec=_TICKER_FETCH_TIMEOUT_SEC,
-                    max_parallel=2,
-                )
-
-            priced_assets = 0
-            unpriced_assets = 0
-            for b in balances:
-                currency = str(b.currency or "").upper()
-                total = float(b.total or 0.0)
-                unit_usd = 1.0 if currency in STABLE_COINS else float(quote_map.get(currency, 0.0) or 0.0)
-                valuation_source = "live" if unit_usd > 0 and currency not in STABLE_COINS else "stable"
-                if unit_usd <= 0 and currency not in STABLE_COINS:
-                    fallback_unit = float(last_unit_usd.get(currency, 0.0) or 0.0)
-                    if fallback_unit > 0:
-                        unit_usd = fallback_unit
-                        valuation_source = "cache"
-                usd_value = float(total) * float(unit_usd) if total > 0 and unit_usd > 0 else 0.0
-                if total > 0:
-                    if usd_value > 0:
-                        priced_assets += 1
-                    else:
-                        unpriced_assets += 1
-                exchange_total_usd += usd_value
-                local_distribution[currency] = local_distribution.get(currency, 0.0) + usd_value
-                exchange_balances.append(
-                    {
-                        "currency": currency,
-                        "free": float(b.free or 0.0),
-                        "used": float(b.used or 0.0),
-                        "total": total,
-                        "usd_value": round(usd_value, 4),
-                        "unit_usd": round(float(unit_usd), 8) if unit_usd > 0 else 0.0,
-                        "valuation_source": valuation_source,
-                    }
-                )
-
-            exchange_balances.sort(key=lambda item: item["usd_value"], reverse=True)
-            exchange_result = {
-                "connected": True,
-                "balances": exchange_balances,
-                "total_usd": round(exchange_total_usd, 2),
-                "valuation_coverage": {
-                    "priced_assets": priced_assets,
-                    "unpriced_assets": unpriced_assets,
-                },
-                "from_cache": False,
-            }
-            _BALANCE_SNAPSHOT_CACHE[exchange_name] = {
-                "ts": time.time(),
-                "result": {
-                    "connected": exchange_result["connected"],
-                    "balances": exchange_result["balances"],
-                    "total_usd": exchange_result["total_usd"],
-                },
-                "total_usd": exchange_total_usd,
-                "distribution": dict(local_distribution),
-            }
-            return (
-                exchange_name,
-                exchange_result,
-                exchange_total_usd,
-                local_distribution,
-            )
-        except Exception as e:
-            cached = _BALANCE_SNAPSHOT_CACHE.get(exchange_name)
-            if cached and (time.time() - float(cached.get("ts", 0.0))) <= _BALANCE_SNAPSHOT_CACHE_TTL_SEC:
-                err_msg = (
-                    f"balance request timeout after {_BALANCE_FETCH_TIMEOUT_SEC:.0f}s"
-                    if isinstance(e, asyncio.TimeoutError)
-                    else str(e)
-                )
-                age = max(0.0, time.time() - float(cached.get("ts", 0.0)))
-                cached_result = dict(cached.get("result") or {})
-                cached_result["from_cache"] = True
-                cached_result["cache_age_sec"] = round(age, 2)
-                cached_result["warning"] = err_msg
-                return (
-                    exchange_name,
-                    cached_result,
-                    float(cached.get("total_usd", 0.0) or 0.0),
-                    dict(cached.get("distribution") or {}),
-                )
-
-            if exchange_name == "binance":
-                try:
-                    logger.warning(f"[binance] primary balance fetch failed, trying readonly fallback: {e}")
-                    balances = await asyncio.wait_for(
-                        _fetch_binance_balances_via_fallback(),
-                        timeout=min(max(_BALANCE_FETCH_TIMEOUT_SEC * 0.5, 5.0), 8.0),
-                    )
-                    if balances:
-                        exchange_balances: List[Dict[str, Any]] = []
-                        exchange_total_usd = 0.0
-                        local_distribution: Dict[str, float] = {}
-                        quote_map: Dict[str, float] = {}
-                        price_candidates: List[str] = []
-                        for b in balances:
-                            ccy = str(getattr(b, "currency", "") or "").upper()
-                            total = float(getattr(b, "total", 0.0) or 0.0)
-                            if total > 0 and ccy not in STABLE_COINS and ccy not in price_candidates:
-                                price_candidates.append(ccy)
-                        if price_candidates:
-                            quote_map = await build_currency_usd_quotes(
-                                connector=connector,
-                                currencies=price_candidates,
-                                timeout_sec=_TICKER_FETCH_TIMEOUT_SEC,
-                                max_parallel=2,
-                            )
-                        priced_assets = 0
-                        unpriced_assets = 0
-                        for b in balances:
-                            currency = str(getattr(b, "currency", "") or "").upper()
-                            total = float(getattr(b, "total", 0.0) or 0.0)
-                            unit_usd = 1.0 if currency in STABLE_COINS else float(quote_map.get(currency, 0.0) or 0.0)
-                            valuation_source = "live" if unit_usd > 0 and currency not in STABLE_COINS else "stable"
-                            usd_value = float(total) * float(unit_usd) if total > 0 and unit_usd > 0 else 0.0
-                            if total > 0:
-                                if usd_value > 0:
-                                    priced_assets += 1
-                                else:
-                                    unpriced_assets += 1
-                            exchange_total_usd += usd_value
-                            local_distribution[currency] = local_distribution.get(currency, 0.0) + usd_value
-                            exchange_balances.append(
-                                {
-                                    "currency": currency,
-                                    "free": float(getattr(b, "free", 0.0) or 0.0),
-                                    "used": float(getattr(b, "used", 0.0) or 0.0),
-                                    "total": total,
-                                    "usd_value": round(usd_value, 4),
-                                    "unit_usd": round(float(unit_usd), 8) if unit_usd > 0 else 0.0,
-                                    "valuation_source": valuation_source,
-                                }
-                            )
-                        exchange_balances.sort(key=lambda item: item["usd_value"], reverse=True)
-                        exchange_result = {
-                            "connected": True,
-                            "balances": exchange_balances,
-                            "total_usd": round(exchange_total_usd, 2),
-                            "valuation_coverage": {
-                                "priced_assets": priced_assets,
-                                "unpriced_assets": unpriced_assets,
-                            },
-                            "from_cache": False,
-                            "fallback_used": True,
-                        }
-                        _BALANCE_SNAPSHOT_CACHE[exchange_name] = {
-                            "ts": time.time(),
-                            "result": {
-                                "connected": exchange_result["connected"],
-                                "balances": exchange_result["balances"],
-                                "total_usd": exchange_result["total_usd"],
-                            },
-                            "total_usd": exchange_total_usd,
-                            "distribution": dict(local_distribution),
-                        }
-                        return (
-                            exchange_name,
-                            exchange_result,
-                            exchange_total_usd,
-                            local_distribution,
-                        )
-                except Exception as fallback_err:
-                    logger.error(f"[binance] readonly fallback balance fetch failed: {fallback_err}")
-
-            err_msg = (
-                f"balance request timeout after {_BALANCE_FETCH_TIMEOUT_SEC:.0f}s"
-                if isinstance(e, asyncio.TimeoutError)
-                else str(e)
-            )
-            logger.error(f"[{exchange_name}] Failed to get balances: {err_msg}")
-            cached = _BALANCE_SNAPSHOT_CACHE.get(exchange_name)
-            if cached and (time.time() - float(cached.get("ts", 0.0))) <= _BALANCE_SNAPSHOT_CACHE_TTL_SEC:
-                age = max(0.0, time.time() - float(cached.get("ts", 0.0)))
-                cached_result = dict(cached.get("result") or {})
-                cached_result["from_cache"] = True
-                cached_result["cache_age_sec"] = round(age, 2)
-                cached_result["warning"] = err_msg
-                return (
-                    exchange_name,
-                    cached_result,
-                    float(cached.get("total_usd", 0.0) or 0.0),
-                    dict(cached.get("distribution") or {}),
-                )
-            return (
-                exchange_name,
-                {
-                    "connected": bool(getattr(connector, "is_connected", False)),
-                    "error": err_msg,
-                    "balances": [],
-                    "total_usd": 0,
-                    "from_cache": False,
-                },
-                0.0,
-                {},
-            )
-
-    rows = await asyncio.gather(
-        *[_collect_exchange(exchange_name) for exchange_name in ["gate", "binance", "okx"]],
-        return_exceptions=False,
-    )
-    for exchange_name, exchange_result, exchange_total_usd, local_distribution in rows:
-        results[exchange_name] = exchange_result
-        total_usd += float(exchange_total_usd or 0.0)
-        exchange_total_map[exchange_name] = float(exchange_total_usd or 0.0)
-        coverage = exchange_result.get("valuation_coverage") if isinstance(exchange_result, dict) else None
-        total_unpriced_assets += int(((coverage or {}).get("unpriced_assets") or 0))
-        for ccy, val in local_distribution.items():
-            distribution_map[ccy] = distribution_map.get(ccy, 0.0) + float(val or 0.0)
-
-    market_total_usd = float(total_usd or 0.0)
-    risk_report_before = risk_manager.get_risk_report()
-    prev_equity = float(((risk_report_before.get("equity") or {}).get("current") or 0.0))
-    risk_equity_input = float(market_total_usd)
-    paper_equity = 0.0
-    live_position_snapshot: Dict[str, Any] = {"unrealized_pnl_usd": 0.0, "position_count": 0, "by_exchange": {}}
-    live_equity_baseline: Dict[str, Any] = {}
-    live_day_start_equity = 0.0
-    live_daily_total_pnl = 0.0
-    balance_warning_present = any(
-        isinstance(v, dict) and (v.get("error") or v.get("warning"))
-        for v in results.values()
-    )
-    binance_balance_issue = bool(
-        isinstance(results.get("binance"), dict)
-        and ((results["binance"].get("error")) or (results["binance"].get("warning")))
-    )
-
-    if is_paper_mode:
-        try:
-            paper_equity = float(await execution_engine.get_account_equity_snapshot() or 0.0)
-            if paper_equity > 0:
-                risk_equity_input = paper_equity
-        except Exception as e:
-            logger.warning(f"Failed to refresh paper equity snapshot: {e}")
-    else:
-        try:
-            live_position_snapshot = await _collect_live_position_snapshot(force_refresh=False)
-        except Exception as e:
-            logger.debug(f"Failed to collect live position snapshot before risk update: {e}")
-        try:
-            live_equity_baseline = await _resolve_live_equity_baseline(
-                current_total_usd=market_total_usd,
-                exchange_totals=exchange_total_map,
-                live_snapshot=live_position_snapshot,
-            )
-            live_day_start_equity = _safe_float(
-                live_equity_baseline.get("portfolio_total_usd"),
-                default=0.0,
-            )
-            if live_day_start_equity > 0 and market_total_usd > 0:
-                live_daily_total_pnl = float(market_total_usd) - float(live_day_start_equity)
-        except Exception as e:
-            logger.warning(f"Failed to resolve live equity baseline: {e}")
-
-        for label, usd_value in (live_position_snapshot.get("distribution") or {}).items():
-            key = str(label or "").strip()
-            val = float(usd_value or 0.0)
-            if key and val > 0:
-                distribution_map[key] = distribution_map.get(key, 0.0) + val
-
-    if (
-        (not is_paper_mode)
-        and prev_equity > 0
-        and risk_equity_input > 0
-        and risk_equity_input < prev_equity * 0.6
-        and (
-            total_unpriced_assets > 0
-            or balance_warning_present
-            or binance_balance_issue
-        )
-    ):
-        logger.warning(
-            f"Skip abnormal equity drop for risk update: prev={prev_equity:.4f}, "
-            f"new={risk_equity_input:.4f}, unpriced_assets={total_unpriced_assets}, "
-            f"balance_warning_present={balance_warning_present}"
-        )
-        risk_equity_input = prev_equity
-
-    if (not is_paper_mode) and prev_equity > 0 and risk_equity_input > 0:
-        delta_usd = risk_equity_input - prev_equity
-        move_ratio = abs(delta_usd) / max(prev_equity, 1e-6)
-        live_unrealized_abs = abs(float(live_position_snapshot.get("unrealized_pnl_usd") or 0.0))
-        pnl_explained = live_unrealized_abs >= abs(delta_usd) * 0.45
-        # Internal transfers (spot/funding/futures wallet moves) should not be treated as trading PnL.
-        # Ignore large equity jumps/drops not explained by live position PnL to avoid false circuit-breakers.
-        if move_ratio >= 0.55 and (not pnl_explained):
-            logger.warning(
-                "Skip abnormal equity move likely transfer/cashflow: "
-                f"prev={prev_equity:.4f}, new={risk_equity_input:.4f}, "
-                f"delta={delta_usd:.4f}, live_unrealized={live_unrealized_abs:.4f}, "
-                f"warnings={balance_warning_present}, unpriced={total_unpriced_assets}"
-            )
-            risk_equity_input = prev_equity
-
-    if (
-        (not is_paper_mode)
-        and prev_equity > 0
-        and risk_equity_input <= 0
-        and (balance_warning_present or binance_balance_issue)
-    ):
-        logger.warning(
-            f"Skip zero/negative equity update for risk: prev={prev_equity:.4f}, "
-            f"new={risk_equity_input:.4f}, balance_warning_present={balance_warning_present}"
-        )
-        risk_equity_input = prev_equity
-
-    display_total_usd = risk_equity_input if (is_paper_mode and risk_equity_input > 0) else market_total_usd
-    if (not is_paper_mode) and display_total_usd <= 0 and risk_equity_input > 0:
-        display_total_usd = risk_equity_input
-
-    risk_manager.update_equity(
-        risk_equity_input,
-        day_start_equity=(
-            live_day_start_equity
-            if (not is_paper_mode and live_day_start_equity > 0)
-            else None
-        ),
-        current_unrealized_pnl=(
-            float(live_position_snapshot.get("unrealized_pnl_usd") or 0.0)
-            if not is_paper_mode
-            else float(position_manager.get_total_pnl() or 0.0)
-        ),
-    )
-
-    if is_paper_mode:
-        asset_map: Dict[str, Dict[str, float]] = {}
-        long_value_sum = 0.0
-        for pos in position_manager.get_all_positions():
-            side_name = str(getattr(getattr(pos, "side", None), "value", getattr(pos, "side", "")) or "").lower()
-            if side_name != "long":
-                continue
-            symbol = str(getattr(pos, "symbol", "") or "").upper()
-            base = symbol.split("/")[0].strip() if "/" in symbol else symbol.strip()
-            if not base:
-                continue
-            qty = abs(float(getattr(pos, "quantity", 0.0) or 0.0))
-            px = float(getattr(pos, "current_price", 0.0) or 0.0)
-            if px <= 0:
-                px = float(getattr(pos, "entry_price", 0.0) or 0.0)
-            if qty <= 0 or px <= 0:
-                continue
-            usd_val = qty * px
-            long_value_sum += usd_val
-            slot = asset_map.setdefault(base, {"total": 0.0, "usd_value": 0.0, "unit_usd": 0.0})
-            slot["total"] += qty
-            slot["usd_value"] += usd_val
-            slot["unit_usd"] = px
-
-        cash_usdt = max(0.0, float(display_total_usd) - float(long_value_sum))
-        if cash_usdt > 0:
-            slot = asset_map.setdefault("USDT", {"total": 0.0, "usd_value": 0.0, "unit_usd": 1.0})
-            slot["total"] += cash_usdt
-            slot["usd_value"] += cash_usdt
-            slot["unit_usd"] = 1.0
-
-        paper_balances: List[Dict[str, Any]] = []
-        paper_distribution_map: Dict[str, float] = {}
-        for ccy, row in asset_map.items():
-            usd_val = float(row.get("usd_value", 0.0) or 0.0)
-            if usd_val <= 0:
-                continue
-            total_val = float(row.get("total", 0.0) or 0.0)
-            unit_usd = float(row.get("unit_usd", 0.0) or 0.0)
-            paper_distribution_map[ccy] = paper_distribution_map.get(ccy, 0.0) + usd_val
-            paper_balances.append(
-                {
-                    "currency": ccy,
-                    "free": total_val,
-                    "used": 0.0,
-                    "total": total_val,
-                    "usd_value": round(usd_val, 4),
-                    "unit_usd": round(unit_usd, 8) if unit_usd > 0 else 0.0,
-                    "valuation_source": "paper",
-                }
-            )
-        paper_balances.sort(key=lambda item: item["usd_value"], reverse=True)
-        paper_account = {
-            "connected": True,
-            "balances": paper_balances,
-            "total_usd": round(float(display_total_usd), 2),
-            "valuation_coverage": {
-                "priced_assets": len([x for x in paper_balances if float(x.get("usd_value", 0.0) or 0.0) > 0]),
-                "unpriced_assets": 0,
-            },
-        }
-        distribution_map = paper_distribution_map
-
-    await account_snapshot_manager.record_snapshot(
-        total_usd=display_total_usd,
-        exchanges=results,
-        mode=mode_name,
-    )
-
-    distribution_total = float(display_total_usd if is_paper_mode else market_total_usd)
-    if not is_paper_mode:
-        dist_sum = sum(float(v or 0.0) for v in distribution_map.values())
-        if dist_sum > 0:
-            distribution_total = float(dist_sum)
-    distribution = [
-        {
-            "currency": ccy,
-            "usd_value": round(val, 4),
-            "weight": round((val / distribution_total), 6) if distribution_total > 0 else 0,
-        }
-        for ccy, val in sorted(distribution_map.items(), key=lambda x: x[1], reverse=True)
-        if val > 0
-    ]
-    if not is_paper_mode and not live_position_snapshot:
-        live_position_snapshot = await _collect_live_position_snapshot(force_refresh=False)
-    risk_report = _apply_live_snapshot_to_risk_report(
-        risk_manager.get_risk_report(),
-        live_position_snapshot,
-        live_daily_total_pnl=live_daily_total_pnl,
-        live_day_start_equity=live_day_start_equity,
-    ) if not is_paper_mode else risk_manager.get_risk_report()
-    rule_prices = await _load_rule_prices()
-    rule_eval = await notification_manager.evaluate_rules(
-        {
-            "total_usd": display_total_usd,
-            "prices": rule_prices,
-            "risk_report": risk_report,
-            "position_count": position_manager.get_position_count(),
-            "connected_exchanges": exchange_manager.get_connected_exchanges(),
-            "strategy_summary": strategy_manager.get_dashboard_summary(signal_limit=10),
-        }
-    )
-
-    return {
-        "exchanges": results,
-        "distribution": distribution,
-        "total_usd_estimate": round(display_total_usd, 2),
-        "market_total_usd_estimate": round(market_total_usd, 2),
-        "binance_total_usd_estimate": round(_safe_float(exchange_total_map.get("binance"), default=0.0), 2),
-        "paper_equity_estimate": round(paper_equity, 2) if is_paper_mode else None,
-        "real_account_usd_estimate": round(market_total_usd, 2),
-        "virtual_account_usd_estimate": round(paper_equity, 2) if is_paper_mode else None,
-        "active_account_type": "paper" if is_paper_mode else "live",
-        "active_account_usd_estimate": round(display_total_usd, 2),
-        "inactive_account_usd_estimate": (
-            round(market_total_usd, 2) if is_paper_mode else (round(paper_equity, 2) if paper_equity > 0 else None)
-        ),
-        "paper_account": paper_account,
-        "risk_equity_input": round(risk_equity_input, 2),
-        "live_day_start_equity": round(live_day_start_equity, 2) if not is_paper_mode else None,
-        "live_daily_total_pnl_usd": round(live_daily_total_pnl, 2) if not is_paper_mode else None,
-        "live_unrealized_pnl_usd": (
-            round(float(live_position_snapshot.get("unrealized_pnl_usd") or 0.0), 4)
-            if not is_paper_mode else 0.0
-        ),
-        "live_position_count": (
-            int(live_position_snapshot.get("position_count") or 0)
-            if not is_paper_mode else int(position_manager.get_position_count() or 0)
-        ),
-        "unpriced_assets": total_unpriced_assets,
-        "connected_exchanges": exchange_manager.get_connected_exchanges(),
-        "mode": mode_name,
-        "risk_report": risk_report,
-        "risk": {
-            "trading_halted": risk_report.get("trading_halted", False),
-            "risk_level": risk_report.get("risk_level", "low"),
-        },
-        "notifications": {
-            "triggered_count": rule_eval.get("triggered_count", 0),
-        },
-    }
-
-
-@router.get("/balances/history")
-async def get_balance_history(
-    hours: int = 24,
-    exchange: str = "all",
-    limit: int = 500,
-    mode: Optional[str] = None,
-):
-    resolved_mode = str(mode or ("paper" if execution_engine.is_paper_mode() else "live")).strip().lower()
-    if resolved_mode not in {"paper", "live"}:
-        resolved_mode = "paper" if execution_engine.is_paper_mode() else "live"
-    history = await account_snapshot_manager.get_history(
-        hours=hours,
-        exchange=exchange,
-        limit=limit,
-        mode=resolved_mode,
-    )
-    return {
-        "exchange": exchange,
-        "hours": hours,
-        "points": len(history),
-        "mode": resolved_mode,
-        "history": history,
-    }
-
-
-@router.get("/risk/report")
-async def get_risk_report():
-    return await _build_effective_risk_report(force_live_refresh=False)
-
-
-@router.post("/risk/params")
-async def update_risk_params(request: RiskUpdateRequest):
-    payload = request.model_dump(exclude_none=True)
-    risk_manager.update_parameters(payload)
-    await audit_logger.log(
-        module="risk",
-        action="update_params",
-        status="success",
-        message="Risk params updated",
-        details=payload,
-    )
-    return {
-        "success": True,
-        "report": await _build_effective_risk_report(force_live_refresh=True),
-    }
-
-
-@router.post("/risk/reset")
-async def reset_risk_halt():
-    risk_manager.reset_halt()
-    await audit_logger.log(
-        module="risk",
-        action="reset_halt",
-        status="success",
-        message="Risk halt reset",
-    )
-    return {
-        "success": True,
-        "report": await _build_effective_risk_report(force_live_refresh=True),
-    }
-
-
-@router.post("/paper/reset")
-async def reset_paper_trading_state(clear_snapshots: bool = True):
-    if not execution_engine.is_paper_mode():
-        raise HTTPException(status_code=400, detail="?????????????????")
-
-    payload = await _clear_local_trading_runtime(clear_paper_snapshots=clear_snapshots)
-    await audit_logger.log(
-        module="trading",
-        action="paper_reset",
-        status="success",
-        message="Paper trading state reset",
-        details=payload,
-    )
-    return {"success": True, "result": payload}
-
-
-@router.get("/stats")
-async def get_trading_stats():
-    risk_report = await _build_effective_risk_report(force_live_refresh=False)
-    return {
-        "orders": order_manager.get_stats(),
-        "positions": position_manager.get_stats(),
-        "risk": risk_report,
-        "trading_mode": execution_engine.get_trading_mode(),
-    }
-
-
-@router.get("/mode")
-async def get_trading_mode():
-    now = datetime.now(timezone.utc).isoformat()
-    pending = []
-    for token, item in list(_mode_switch_pending.items()):
-        expires_at = item.get("expires_at")
-        if expires_at and expires_at < datetime.now(timezone.utc):
-            _mode_switch_pending.pop(token, None)
-            continue
-        pending.append(
-            {
-                "token": token,
-                "target_mode": item.get("target_mode"),
-                "reason": item.get("reason"),
-                "created_at": item.get("created_at"),
-                "expires_at": expires_at.isoformat() if expires_at else None,
-            }
-        )
-    return {
-        "mode": execution_engine.get_trading_mode(),
-        "paper_trading": execution_engine.is_paper_mode(),
-        "server_time": now,
-        "pending_switches": pending,
-        "confirm_hint": _MODE_CONFIRM_TEXT,
-    }
-
-
-@router.post("/mode/request")
-async def request_trading_mode_switch(req: TradingModeRequest):
-    target = req.target_mode.lower()
-    if target == execution_engine.get_trading_mode():
-        return {"success": True, "mode": target, "message": "褰撳墠宸叉槸鐩爣妯″紡"}
-
-    token = uuid4().hex
-    created_at = datetime.now(timezone.utc)
-    expires_at = created_at + timedelta(minutes=5)
-    _mode_switch_pending[token] = {
-        "target_mode": target,
-        "reason": req.reason or "",
-        "created_at": created_at.isoformat(),
-        "expires_at": expires_at,
-    }
-    return {
-        "success": True,
-        "token": token,
-        "target_mode": target,
-        "confirm_text": _MODE_CONFIRM_TEXT,
-        "expires_at": expires_at.isoformat(),
-        "warning": "切换实盘风险较高，请确认 API 权限与风控参数。",
-    }
-
-
-@router.post("/mode/confirm")
-async def confirm_trading_mode_switch(req: TradingModeConfirmRequest):
-    pending = _mode_switch_pending.get(req.token)
-    if not pending:
-        raise HTTPException(status_code=404, detail="???????????")
-    if pending.get("expires_at") and pending["expires_at"] < datetime.now(timezone.utc):
-        _mode_switch_pending.pop(req.token, None)
-        raise HTTPException(status_code=400, detail="???????")
-    if req.confirm_text.strip() != _MODE_CONFIRM_TEXT:
-        raise HTTPException(status_code=400, detail="???????")
-
-    target_mode = str(pending.get("target_mode", "paper") or "paper").strip().lower()
-    cleanup_result: Dict[str, Any] = {}
-    execution_engine.set_paper_trading(target_mode != "live")
-    order_manager.set_paper_trading(target_mode != "live")
-    updated_accounts = 0
-    try:
-        updated_accounts = int(account_manager.set_mode_for_all(target_mode) or 0)
-    except Exception as e:
-        logger.warning(f"Failed to sync account modes after trading mode switch: {e}")
-
-    if target_mode == "live":
-        cleanup_result = await _clear_local_trading_runtime(clear_paper_snapshots=True)
-
-    _mode_switch_pending.pop(req.token, None)
-
-    with contextlib.suppress(Exception):
-        from web import main as web_main
-        web_main.invalidate_status_cache()
-
-    await audit_logger.log(
-        module="trading",
-        action="switch_mode",
-        status="success",
-        message=f"mode={target_mode}",
-        details={
-            "target_mode": target_mode,
-            "updated_accounts": updated_accounts,
-            "cleanup": cleanup_result,
-        },
-    )
-    await event_bus.publish_nowait_safe(
-        event="mode_changed",
-        payload={
-            "mode": execution_engine.get_trading_mode(),
-            "updated_accounts": updated_accounts,
-            "cleanup": cleanup_result,
-        },
-    )
-    return {
-        "success": True,
-        "mode": execution_engine.get_trading_mode(),
-        "paper_trading": execution_engine.is_paper_mode(),
-        "updated_accounts": updated_accounts,
-        "cleanup": cleanup_result,
-    }
-
-
-@router.post("/mode/cancel")
-async def cancel_trading_mode_switch(token: str):
-    if token in _mode_switch_pending:
-        _mode_switch_pending.pop(token, None)
-        return {"success": True, "token": token}
-    raise HTTPException(status_code=404, detail="切换令牌不存在")
-
-
-@router.get("/accounts")
-async def list_accounts():
-    return {"accounts": account_manager.list_accounts()}
-
-
-@router.post("/accounts")
-async def create_account(req: AccountCreateRequest):
-    try:
-        item = account_manager.create_account(
-            account_id=req.account_id,
-            name=req.name,
-            exchange=req.exchange,
-            mode=req.mode,
-            parent_account_id=req.parent_account_id,
-            enabled=req.enabled,
-            metadata=req.metadata,
-        )
-        return {"success": True, "account": item}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@router.put("/accounts/{account_id}")
-async def update_account(account_id: str, req: AccountUpdateRequest):
-    payload = req.model_dump(exclude_none=True)
-    try:
-        item = account_manager.update_account(account_id, payload)
-        return {"success": True, "account": item}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@router.delete("/accounts/{account_id}")
-async def delete_account(account_id: str):
-    try:
-        ok = account_manager.delete_account(account_id)
-        if not ok:
-            raise HTTPException(status_code=404, detail="Account not found")
-        return {"success": True, "account_id": account_id}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@router.get("/accounts/summary")
-async def account_summary():
-    positions = [p.to_dict() for p in position_manager.get_all_positions()]
-    orders = [_serialize_order(o) for o in order_manager.get_recent_orders(limit=1000)]
-    agg: Dict[str, Dict[str, Any]] = {}
-
-    for item in account_manager.list_accounts():
-        aid = item["account_id"]
-        agg[aid] = {
-            "account": item,
-            "positions": 0,
-            "position_value": 0.0,
-            "unrealized_pnl": 0.0,
-            "orders": 0,
-        }
-
-    for p in positions:
-        aid = p.get("account_id", "main")
-        if aid not in agg:
-            continue
-        agg[aid]["positions"] += 1
-        agg[aid]["position_value"] += float(p.get("value") or 0.0)
-        agg[aid]["unrealized_pnl"] += float(p.get("unrealized_pnl") or 0.0)
-
-    for o in orders:
-        aid = o.get("account_id", "main")
-        if aid in agg:
-            agg[aid]["orders"] += 1
-
-    return {"accounts": list(agg.values())}
-
-
 def _session_name(ts: datetime) -> str:
     hour = int(ts.hour)
     if 0 <= hour < 8:
@@ -3025,9 +3342,9 @@ async def _estimate_atr_for_symbol(symbol: str, period: int = 14) -> Optional[fl
     return None
 
 
-async def _fetch_whale_transfers(min_btc: float = 100.0) -> Dict[str, Any]:
+async def _fetch_whale_transfers(min_btc: float = _ANALYTICS_WHALE_MIN_BTC) -> Dict[str, Any]:
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=_ANALYTICS_WHALE_TIMEOUT_SEC) as client:
             tx_res, px_res = await asyncio.gather(
                 client.get("https://blockchain.info/unconfirmed-transactions?format=json"),
                 client.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
@@ -3037,21 +3354,17 @@ async def _fetch_whale_transfers(min_btc: float = 100.0) -> Dict[str, Any]:
             tx_json = tx_res.json() or {}
             px_json = px_res.json() or {}
     except (asyncio.TimeoutError, asyncio.CancelledError) as e:
-        return {"available": False, "error": f"timeout_or_cancelled:{e}", "count": 0, "transactions": []}
-    except (asyncio.TimeoutError, asyncio.CancelledError) as e:
-        return {"available": False, "error": f"whale_timeout:{e}", "count": 0, "transactions": []}
+        return {"available": False, "error": f"whale_timeout:{type(e).__name__}", "count": 0, "transactions": []}
     except Exception as e:
         return {"available": False, "error": str(e), "count": 0, "transactions": []}
 
     btc_price = _safe_float(px_json.get("price"), default=0.0)
-    whales = []
+    candidates = []
     for tx in (tx_json.get("txs") or [])[:500]:
         out_value_satoshi = sum(_safe_float(v.get("value")) for v in (tx.get("out") or []))
         btc_amount = out_value_satoshi / 1e8
-        if btc_amount < float(min_btc):
-            continue
         ts = int(_safe_float(tx.get("time"), default=0))
-        whales.append(
+        candidates.append(
             {
                 "hash": tx.get("hash"),
                 "btc": round(btc_amount, 6),
@@ -3059,14 +3372,45 @@ async def _fetch_whale_transfers(min_btc: float = 100.0) -> Dict[str, Any]:
                 "timestamp": datetime.utcfromtimestamp(ts).isoformat() if ts > 0 else None,
             }
         )
+    requested_threshold = float(max(1.0, min_btc))
+    effective_threshold = requested_threshold
+    whales = [item for item in candidates if _safe_float(item.get("btc")) >= effective_threshold]
+    if not whales and requested_threshold > _ANALYTICS_WHALE_MIN_BTC:
+        effective_threshold = _ANALYTICS_WHALE_MIN_BTC
+        whales = [item for item in candidates if _safe_float(item.get("btc")) >= effective_threshold]
     whales.sort(key=lambda x: _safe_float(x.get("btc")), reverse=True)
     return {
         "available": True,
-        "threshold_btc": float(min_btc),
+        "threshold_btc": float(effective_threshold),
+        "requested_threshold_btc": float(requested_threshold),
         "btc_price": btc_price,
         "count": len(whales),
         "transactions": whales[:30],
     }
+
+
+async def _fetch_binance_announcements(limit: int = 6) -> List[Dict[str, Any]]:
+    announcements: List[Dict[str, Any]] = []
+    try:
+        async with httpx.AsyncClient(timeout=_ANALYTICS_ANNOUNCEMENT_TIMEOUT_SEC) as client:
+            resp = await client.get(
+                "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query",
+                params={"type": 1, "catalogId": 48, "pageNo": 1, "pageSize": max(1, min(int(limit), 12))},
+            )
+            if resp.status_code != 200:
+                return announcements
+            rows = (((resp.json() or {}).get("data") or {}).get("articles") or [])
+            for row in rows[:limit]:
+                announcements.append(
+                    {
+                        "title": row.get("title"),
+                        "code": row.get("code"),
+                        "release_date": row.get("releaseDate"),
+                    }
+                )
+    except Exception:
+        return announcements
+    return announcements
 
 
 async def _capture_analytics(task_name: str, coro: Any) -> Dict[str, Any]:
@@ -3088,7 +3432,6 @@ async def _capture_analytics(task_name: str, coro: Any) -> Dict[str, Any]:
         }
 
 
-@router.get("/analytics/overview")
 async def get_analytics_overview(
     days: int = 90,
     lookback: int = 240,
@@ -3143,7 +3486,6 @@ async def get_analytics_overview(
     }
 
 
-@router.get("/analytics/performance")
 async def get_advanced_performance(days: int = 90):
     days = max(1, min(days, 720))
     records = _iter_trade_records(days=days)
@@ -3247,7 +3589,6 @@ async def get_advanced_performance(days: int = 90):
     }
 
 
-@router.get("/analytics/risk-dashboard")
 async def get_risk_dashboard(lookback: int = 240):
     lookback = max(60, min(int(lookback or 240), 2000))
     report = risk_manager.get_risk_report()
@@ -3350,44 +3691,43 @@ async def get_risk_dashboard(lookback: int = 240):
     }
 
 
-@router.get("/analytics/calendar")
 async def get_trading_calendar(days: int = 30):
     days = max(1, min(int(days or 30), 180))
     now = datetime.now(timezone.utc)
     end = now + timedelta(days=days)
     events: List[Dict[str, Any]] = []
 
-    month_cursor = datetime(now.year, now.month, 1)
+    month_cursor = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     while month_cursor <= end:
-        cpi_day = datetime(month_cursor.year, month_cursor.month, 12, 13, 30)
+        cpi_day = datetime(month_cursor.year, month_cursor.month, 12, 13, 30, tzinfo=timezone.utc)
         while cpi_day.weekday() >= 5:
             cpi_day += timedelta(days=1)
         if now <= cpi_day <= end:
             events.append(
                 {
                     "category": "economic",
-                    "name": "缇庡浗CPI锛堥浼帮級",
+                    "name": "美国 CPI（预估）",
                     "time_utc": cpi_day.isoformat(),
                     "importance": "high",
                 }
             )
 
-        first_day = datetime(month_cursor.year, month_cursor.month, 1, 13, 30)
+        first_day = datetime(month_cursor.year, month_cursor.month, 1, 13, 30, tzinfo=timezone.utc)
         offset = (4 - first_day.weekday()) % 7
         nfp_day = first_day + timedelta(days=offset)
         if now <= nfp_day <= end:
             events.append(
                 {
                     "category": "economic",
-                    "name": "缇庡浗闈炲啘灏变笟锛堥浼帮級",
+                    "name": "美国非农就业（预估）",
                     "time_utc": nfp_day.isoformat(),
                     "importance": "high",
                 }
             )
         if month_cursor.month == 12:
-            month_cursor = datetime(month_cursor.year + 1, 1, 1)
+            month_cursor = datetime(month_cursor.year + 1, 1, 1, tzinfo=timezone.utc)
         else:
-            month_cursor = datetime(month_cursor.year, month_cursor.month + 1, 1)
+            month_cursor = datetime(month_cursor.year, month_cursor.month + 1, 1, tzinfo=timezone.utc)
 
     fomc_2026 = [
         "2026-03-18T18:00:00",
@@ -3400,11 +3740,13 @@ async def get_trading_calendar(days: int = 30):
     ]
     for item in fomc_2026:
         dt = _safe_dt(item)
+        if dt and dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         if dt and now <= dt <= end:
             events.append(
                 {
                     "category": "economic",
-                    "name": "FOMC鍒╃巼鍐宠锛堥浼帮級",
+                    "name": "FOMC 利率决议（预估）",
                     "time_utc": dt.isoformat(),
                     "importance": "high",
                 }
@@ -3417,7 +3759,7 @@ async def get_trading_calendar(days: int = 30):
         ("OP", 21),
     ]
     for token, base_day in unlock_templates:
-        dt = datetime(now.year, now.month, min(base_day, 28), 8, 0)
+        dt = datetime(now.year, now.month, min(base_day, 28), 8, 0, tzinfo=timezone.utc)
         for _ in range(4):
             if dt < now:
                 dt = (dt + timedelta(days=32)).replace(day=min(base_day, 28))
@@ -3427,7 +3769,7 @@ async def get_trading_calendar(days: int = 30):
             events.append(
                 {
                     "category": "unlock",
-                    "name": f"{token} 浠ｅ竵瑙ｉ攣锛堜及绠楋級",
+                    "name": f"{token} 代币解锁（估算）",
                     "time_utc": dt.isoformat(),
                     "importance": "medium",
                 }
@@ -3444,7 +3786,7 @@ async def get_trading_calendar(days: int = 30):
             events.append(
                 {
                     "category": "expiry",
-                    "name": "鍛ㄤ簲浜ゅ壊/鍒版湡鎻愰啋",
+                    "name": "周五交割 / 到期提醒",
                     "time_utc": expiry.isoformat(),
                     "importance": "medium",
                 }
@@ -3461,13 +3803,15 @@ async def get_trading_calendar(days: int = 30):
     }
 
 
-@router.get("/analytics/microstructure")
 async def get_market_microstructure(
     exchange: str = "binance",
     symbol: str = "BTC/USDT",
     depth_limit: int = 80,
 ):
-    ob = await _fetch_orderbook(exchange=exchange, symbol=symbol, limit=depth_limit)
+    ob, flow = await asyncio.gather(
+        _fetch_orderbook(exchange=exchange, symbol=symbol, limit=depth_limit),
+        _fetch_trade_imbalance(exchange=exchange, symbol=symbol, limit=800),
+    )
     bids = [[_safe_float(x[0]), _safe_float(x[1])] for x in (ob.get("bids") or []) if len(x) >= 2]
     asks = [[_safe_float(x[0]), _safe_float(x[1])] for x in (ob.get("asks") or []) if len(x) >= 2]
     bids = [x for x in bids if x[0] > 0 and x[1] > 0]
@@ -3518,36 +3862,47 @@ async def get_market_microstructure(
         if repeat >= 3:
             iceberg_candidates += 1
 
-    flow = await _fetch_trade_imbalance(exchange=exchange, symbol=symbol, limit=800)
-
     funding = {"available": False}
     basis = {"available": False}
-    connector = exchange_manager.get_exchange(exchange)
-    client = getattr(connector, "_client", None) if connector else None
-    if client:
-        fetch_funding_rate = getattr(client, "fetch_funding_rate", None)
-        perp_symbol = symbol if ":" in symbol else f"{symbol}:USDT"
-        if callable(fetch_funding_rate):
-            try:
-                fr = await asyncio.wait_for(fetch_funding_rate(perp_symbol), timeout=2.5)
+    if str(exchange or "").lower() == "binance":
+        funding_basis = await _fetch_binance_public_funding_and_basis(symbol)
+        funding = dict(funding_basis.get("funding") or {"available": False})
+        basis = dict(funding_basis.get("basis") or {"available": False})
+    else:
+        connector = exchange_manager.get_exchange(exchange)
+        client = getattr(connector, "_client", None) if connector else None
+        if client:
+            fetch_funding_rate = getattr(client, "fetch_funding_rate", None)
+            perp_symbol = symbol if ":" in symbol else f"{symbol}:USDT"
+            fetch_ticker = getattr(client, "fetch_ticker", None)
+            jobs: List[Any] = []
+            if callable(fetch_funding_rate):
+                jobs.append(asyncio.wait_for(fetch_funding_rate(perp_symbol), timeout=_ANALYTICS_FUNDING_TIMEOUT_SEC))
+            else:
+                jobs.append(asyncio.sleep(0, result=None))
+            if callable(fetch_ticker):
+                jobs.append(
+                    asyncio.wait_for(
+                        asyncio.gather(
+                            fetch_ticker(symbol),
+                            fetch_ticker(perp_symbol),
+                        ),
+                        timeout=_ANALYTICS_BASIS_TIMEOUT_SEC,
+                    )
+                )
+            else:
+                jobs.append(asyncio.sleep(0, result=None))
+            funding_result, basis_result = await asyncio.gather(*jobs, return_exceptions=True)
+            if not isinstance(funding_result, Exception) and funding_result:
+                fr = funding_result or {}
                 funding = {
                     "available": True,
                     "symbol": perp_symbol,
                     "funding_rate": _safe_float(fr.get("fundingRate")),
                     "next_funding_time": _safe_dt(fr.get("nextFundingTimestamp")).isoformat() if _safe_dt(fr.get("nextFundingTimestamp")) else None,
                 }
-            except Exception:
-                pass
-        fetch_ticker = getattr(client, "fetch_ticker", None)
-        if callable(fetch_ticker):
-            try:
-                spot_ticker, perp_ticker = await asyncio.wait_for(
-                    asyncio.gather(
-                        fetch_ticker(symbol),
-                        fetch_ticker(perp_symbol),
-                    ),
-                    timeout=3.0,
-                )
+            if not isinstance(basis_result, Exception) and basis_result:
+                spot_ticker, perp_ticker = basis_result
                 spot_px = _safe_float((spot_ticker or {}).get("last"))
                 perp_px = _safe_float((perp_ticker or {}).get("last"))
                 if spot_px > 0 and perp_px > 0:
@@ -3560,8 +3915,6 @@ async def get_market_microstructure(
                         "perp_price": perp_px,
                         "basis_pct": round(basis_val * 100, 6),
                     }
-            except Exception:
-                pass
 
     return {
         "exchange": exchange,
@@ -3589,7 +3942,6 @@ async def get_market_microstructure(
     }
 
 
-@router.post("/analytics/behavior/journal")
 async def add_behavior_journal(request: BehaviorJournalRequest):
     rows = _load_behavior_journal()
     item = {
@@ -3606,7 +3958,6 @@ async def add_behavior_journal(request: BehaviorJournalRequest):
     return {"success": True, "entry": item, "count": len(rows)}
 
 
-@router.get("/analytics/behavior/report")
 async def get_behavior_report(days: int = 7):
     days = max(1, min(int(days or 7), 90))
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
@@ -3651,7 +4002,6 @@ async def get_behavior_report(days: int = 7):
     }
 
 
-@router.get("/analytics/stoploss/policy")
 async def get_stoploss_policy():
     policy = _load_stoploss_policy()
     suggestions = []
@@ -3689,13 +4039,11 @@ async def get_stoploss_policy():
     return {"policy": policy, "position_suggestions": suggestions}
 
 
-@router.post("/analytics/stoploss/policy")
 async def update_stoploss_policy(request: StoplossPolicyUpdateRequest):
     policy = _save_stoploss_policy(request.policy or {})
     return {"success": True, "policy": policy}
 
 
-@router.get("/analytics/equity/rebalance")
 async def get_equity_rebalance(
     hours: int = 168,
     target_alloc: str = "BTC:0.4,ETH:0.3,USDT:0.3",
@@ -3766,32 +4114,15 @@ async def get_equity_rebalance(
     }
 
 
-@router.get("/analytics/community/overview")
 async def get_community_overview(symbol: str = "BTC/USDT", exchange: str = "binance"):
-    flow = await _fetch_trade_imbalance(exchange=exchange, symbol=symbol, limit=600)
-    whales = await _fetch_whale_transfers(min_btc=100.0)
-
-    announcements = []
-    try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            resp = await client.get(
-                "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query",
-                params={"type": 1, "catalogId": 48, "pageNo": 1, "pageSize": 6},
-            )
-            if resp.status_code == 200:
-                rows = (((resp.json() or {}).get("data") or {}).get("articles") or [])
-                for row in rows[:6]:
-                    announcements.append(
-                        {
-                            "title": row.get("title"),
-                            "code": row.get("code"),
-                            "release_date": row.get("releaseDate"),
-                        }
-                    )
-    except Exception:
-        pass
+    flow, whales, announcements = await asyncio.gather(
+        _fetch_trade_imbalance(exchange=exchange, symbol=symbol, limit=600),
+        _fetch_whale_transfers(min_btc=_ANALYTICS_WHALE_MIN_BTC),
+        _fetch_binance_announcements(limit=6),
+    )
 
     return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "symbol": symbol,
         "exchange": exchange,
         "twitter_watchlist": [
@@ -3813,7 +4144,213 @@ async def get_community_overview(symbol: str = "BTC/USDT", exchange: str = "bina
     }
 
 
-@router.get("/audit")
+async def collect_analytics_history(
+    exchange: str = "binance",
+    symbol: str = "BTC/USDT",
+    depth_limit: int = 80,
+    collectors: Optional[str] = None,
+):
+    result = await run_analytics_history_collection(
+        exchange=exchange,
+        symbol=symbol,
+        depth_limit=depth_limit,
+        collectors=collectors,
+    )
+    _invalidate_analytics_history_cache(exchange=exchange, symbol=symbol)
+    return {
+        **result,
+        "saved": {
+            "captured_at": result.get("finished_at"),
+            "rows_written": int(result.get("rows_written") or 0),
+        },
+        "microstructure": dict((result.get("results") or {}).get("microstructure", {}).get("summary") or {}),
+        "community": dict((result.get("results") or {}).get("community", {}).get("summary") or {}),
+        "whales": dict((result.get("results") or {}).get("whales", {}).get("summary") or {}),
+    }
+
+
+async def get_analytics_history_health(
+    exchange: str = "binance",
+    symbol: str = "BTC/USDT",
+    hours: int = 24 * 7,
+    refresh: bool = False,
+    depth_limit: int = 80,
+):
+    hours = max(24, min(int(hours or 24 * 7), 24 * 365))
+    cache_key = _analytics_history_cache_key(exchange=exchange, symbol=symbol, hours=hours)
+    cached, cached_age = _cache_get(
+        _ANALYTICS_HISTORY_HEALTH_CACHE,
+        cache_key,
+        max_age_sec=_ANALYTICS_HISTORY_HEALTH_CACHE_TTL_SEC,
+    )
+    health: Dict[str, Any]
+    if cached is not None:
+        health = cached
+        health["cache_hit"] = True
+        health["cache_age_sec"] = round(float(cached_age or 0.0), 3)
+        health["stale"] = False
+    else:
+        try:
+            health = await asyncio.wait_for(
+                _build_analytics_history_health(exchange=exchange, symbol=symbol, hours=hours),
+                timeout=max(1.0, _ANALYTICS_HISTORY_HEALTH_READ_TIMEOUT_SEC),
+            )
+            _cache_put(_ANALYTICS_HISTORY_HEALTH_CACHE, cache_key, health)
+            health["cache_hit"] = False
+            health["cache_age_sec"] = 0.0
+            health["stale"] = False
+        except Exception as exc:
+            stale, stale_age = _cache_get(_ANALYTICS_HISTORY_HEALTH_CACHE, cache_key)
+            if stale is not None:
+                health = stale
+                health["stale"] = True
+                health["cache_hit"] = True
+                health["cache_age_sec"] = round(float(stale_age or 0.0), 3)
+                health["stale_reason"] = _clip_analytics_error(exc)
+            else:
+                error_text = _clip_analytics_error(exc) or "analytics history health read failed"
+                status_map = {}
+                status_cache_key = _analytics_history_cache_key(exchange=exchange, symbol=symbol)
+                cached_status_payload, _ = _cache_get(
+                    _ANALYTICS_HISTORY_STATUS_CACHE,
+                    status_cache_key,
+                    max_age_sec=None,
+                )
+                if cached_status_payload is not None:
+                    for row in list(cached_status_payload.get("collectors") or []):
+                        collector = str((row or {}).get("collector") or "").strip().lower()
+                        if not collector:
+                            continue
+                        status_map[collector] = dict(row or {})
+                if not status_map and _ANALYTICS_HISTORY_STATUS_LAST:
+                    for collector in _ANALYTICS_HISTORY_COLLECTORS:
+                        if collector in _ANALYTICS_HISTORY_STATUS_LAST:
+                            status_map[collector] = dict(_ANALYTICS_HISTORY_STATUS_LAST.get(collector) or {})
+                if not status_map:
+                    try:
+                        status_map = await asyncio.wait_for(
+                            _load_analytics_ingest_status_map(),
+                            timeout=max(1.0, min(3.0, _ANALYTICS_HISTORY_STATUS_READ_TIMEOUT_SEC)),
+                        )
+                    except Exception:
+                        status_map = {}
+                health = (
+                    _status_fallback_analytics_history_health(
+                        exchange=exchange,
+                        symbol=symbol,
+                        hours=hours,
+                        status_map=status_map,
+                        error=error_text,
+                    )
+                    if status_map
+                    else _empty_analytics_history_health(
+                        exchange=exchange,
+                        symbol=symbol,
+                        hours=hours,
+                        error=error_text,
+                    )
+                )
+                health["stale"] = True
+                health["cache_hit"] = False
+                health["cache_age_sec"] = None
+    health["refreshed"] = None
+    health["refresh_requested"] = bool(refresh)
+    health["refresh_note"] = "health 接口当前为纯读接口；实时采集请改用 POST /api/trading/analytics/history/collect。"
+    return health
+
+
+async def get_analytics_history_status(
+    exchange: str = "binance",
+    symbol: str = "BTC/USDT",
+):
+    cache_key = _analytics_history_cache_key(exchange=exchange, symbol=symbol)
+    cached, cached_age = _cache_get(
+        _ANALYTICS_HISTORY_STATUS_CACHE,
+        cache_key,
+        max_age_sec=_ANALYTICS_HISTORY_STATUS_CACHE_TTL_SEC,
+    )
+    if cached is not None:
+        collectors = list(cached.get("collectors") or [])
+        return {
+            "generated_at": _utc_iso(datetime.now(timezone.utc)),
+            "exchange": exchange,
+            "symbol": symbol,
+            "collectors": collectors,
+            "cache_hit": True,
+            "cache_age_sec": round(float(cached_age or 0.0), 3),
+        }
+
+    try:
+        status_map = await asyncio.wait_for(
+            _load_analytics_ingest_status_map(),
+            timeout=max(1.0, _ANALYTICS_HISTORY_STATUS_READ_TIMEOUT_SEC),
+        )
+        collectors = _status_map_to_collectors(status_map, exchange=exchange, symbol=symbol)
+        payload = {
+            "generated_at": _utc_iso(datetime.now(timezone.utc)),
+            "exchange": exchange,
+            "symbol": symbol,
+            "collectors": collectors,
+            "cache_hit": False,
+            "cache_age_sec": 0.0,
+        }
+        _cache_put(_ANALYTICS_HISTORY_STATUS_CACHE, cache_key, payload)
+        return payload
+    except Exception as exc:
+        stale, stale_age = _cache_get(_ANALYTICS_HISTORY_STATUS_CACHE, cache_key)
+        if stale is not None:
+            return {
+                **stale,
+                "generated_at": _utc_iso(datetime.now(timezone.utc)),
+                "cache_hit": True,
+                "cache_age_sec": round(float(stale_age or 0.0), 3),
+                "stale": True,
+                "stale_reason": _clip_analytics_error(exc),
+            }
+        if _ANALYTICS_HISTORY_STATUS_LAST:
+            collectors = _status_map_to_collectors(
+                {k: dict(v) for k, v in _ANALYTICS_HISTORY_STATUS_LAST.items()},
+                exchange=exchange,
+                symbol=symbol,
+            )
+            if collectors:
+                return {
+                    "generated_at": _utc_iso(datetime.now(timezone.utc)),
+                    "exchange": exchange,
+                    "symbol": symbol,
+                    "collectors": collectors,
+                    "cache_hit": False,
+                    "cache_age_sec": None,
+                    "stale": True,
+                    "stale_reason": _clip_analytics_error(exc),
+                    "fallback_mode": "in_memory_status",
+                }
+        fallback_status_map: Dict[str, Dict[str, Any]] = {}
+        for collector in _ANALYTICS_HISTORY_COLLECTORS:
+            fallback_status_map[collector] = {
+                "collector": collector,
+                "exchange": exchange,
+                "symbol": symbol,
+                "status": "degraded",
+                "error": _clip_analytics_error(exc),
+                "rows_written": 0,
+                "started_at": None,
+                "finished_at": None,
+                "updated_at": _utc_iso(datetime.now(timezone.utc)),
+                "details": {"phase": "fallback"},
+            }
+        return {
+            "generated_at": _utc_iso(datetime.now(timezone.utc)),
+            "exchange": exchange,
+            "symbol": symbol,
+            "collectors": _status_map_to_collectors(fallback_status_map, exchange=exchange, symbol=symbol),
+            "cache_hit": False,
+            "cache_age_sec": None,
+            "stale": True,
+            "stale_reason": _clip_analytics_error(exc),
+        }
+
+
 async def get_audit_logs(
     hours: int = 168,
     limit: int = 100,
@@ -3835,7 +4372,6 @@ async def get_audit_logs(
     }
 
 
-@router.get("/pnl/heatmap")
 async def get_pnl_heatmap(
     days: int = 30,
     bucket: str = "day",

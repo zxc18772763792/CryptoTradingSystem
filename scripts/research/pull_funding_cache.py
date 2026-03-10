@@ -55,7 +55,7 @@ def main() -> None:
             rows.append({"symbol": sym, "error": str(e)})
 
     summary = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "exchange": args.exchange,
         "source": args.source,
         "days": int(args.days),

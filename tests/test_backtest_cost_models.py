@@ -3,6 +3,7 @@ import asyncio
 import numpy as np
 import pandas as pd
 
+from core.backtest.common_pnl import build_common_pnl_summary
 from core.backtest.backtest_engine import BacktestConfig, BacktestEngine
 from core.backtest.funding_provider import FundingProviderConfig, FundingRateProvider
 from core.strategies import Signal, SignalType, StrategyBase
@@ -121,3 +122,29 @@ def test_backtest_engine_uses_funding_provider_when_column_missing(tmp_path):
     # Funding provider path should produce funding entries because strategy holds across boundaries.
     funding_trades = [t for t in result.trades if getattr(t, "trade_stage", "") == "funding"]
     assert len(funding_trades) > 0
+
+
+def test_common_pnl_summary_schema():
+    payload = build_common_pnl_summary(
+        source="web_quick_backtest",
+        unit="pct_return",
+        gross_pnl=12.34567,
+        fee=1.23456,
+        slippage_cost=None,
+        funding_pnl=0.0,
+        net_pnl=11.11111,
+        turnover=None,
+        trade_count=8,
+        win_rate=62.5,
+        cost_model_version="web_api_backtest_v1",
+        metadata={"strategy": "MAStrategy"},
+    )
+
+    assert payload["source"] == "web_quick_backtest"
+    assert payload["unit"] == "pct_return"
+    assert payload["gross_pnl"] == 12.34567
+    assert payload["fee"] == 1.23456
+    assert payload["slippage_cost"] is None
+    assert payload["net_pnl"] == 11.11111
+    assert payload["trade_count"] == 8
+    assert payload["win_rate"] == 62.5

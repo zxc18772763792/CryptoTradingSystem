@@ -57,6 +57,17 @@ def _zhipu_model(cfg: Dict[str, Any]) -> str:
     )
 
 
+def _thinking_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    llm_cfg = cfg.get("llm") or {}
+    raw = llm_cfg.get("thinking")
+    if isinstance(raw, dict) and raw.get("type") in {"enabled", "disabled"}:
+        return {"type": str(raw.get("type"))}
+    disable = llm_cfg.get("disable_thinking")
+    if disable is None:
+        disable = True
+    return {"type": "disabled" if bool(disable) else "enabled"}
+
+
 def _safe_json_loads(text: str) -> Any:
     return json.loads(text)
 
@@ -338,6 +349,7 @@ class AsyncGLMClient:
             "temperature": temperature,
             "top_p": top_p,
             "response_format": {"type": "json_object"},
+            "thinking": _thinking_cfg(self._cfg),
             "messages": messages,
         }
 
@@ -383,6 +395,7 @@ class AsyncGLMClient:
             "temperature": temperature,
             "top_p": top_p,
             "stream": True,
+            "thinking": _thinking_cfg(self._cfg),
             "messages": messages,
         }
 
@@ -622,7 +635,7 @@ class AsyncGLMClient:
 
         llm_cfg = effective_cfg.get("llm") or {}
         batch_size = int(llm_cfg.get("batch_size") or 8)
-        batch_size = min(20, max(5, batch_size))
+        batch_size = max(1, min(20, batch_size))
 
         all_events: List[Dict[str, Any]] = []
         llm_used = False
@@ -637,12 +650,9 @@ class AsyncGLMClient:
             try:
                 events, error_type = await self._call_extract_once(batch, mapper, feedback="")
                 if error_type == "none":
-                    # A valid empty array is still a successful extraction result.
-                    # Keep optional rule supplementation, but do not mark the task as failed
-                    # just because there were no market-moving events in this batch.
-                    llm_events = list(events)
-                    rule_events = extract_events_rules(batch, effective_cfg)
-                    return llm_events + rule_events, "none"
+                    # LLM success (including empty events) should be authoritative.
+                    # Rules are only used when LLM failed.
+                    return list(events), "none"
                 elif error_type in ("rate_limit", "timeout"):
                     # Transient error, return empty to trigger backoff
                     return [], error_type
@@ -654,9 +664,7 @@ class AsyncGLMClient:
                     feedback = f"Validation or parsing error: {first_exc}"
                     events, error_type = await self._call_extract_once(batch, mapper, feedback=feedback)
                     if error_type == "none":
-                        llm_events = list(events)
-                        rule_events = extract_events_rules(batch, effective_cfg)
-                        return llm_events + rule_events, "none"
+                        return list(events), "none"
                     return extract_events_rules(batch, effective_cfg), "other"
                 except Exception as second_exc:
                     logger.warning(f"LLM extract failed after retry: {second_exc!r}")

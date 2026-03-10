@@ -1,0 +1,866 @@
+================================================================================
+                    免费数据源扩展计划 - 执行步骤
+================================================================================
+创建时间: 2026-03-09
+目标: 为加密货币交易系统添加资金费率、订单簿、链上数据、社交情绪等免费数据源
+
+================================================================================
+目录
+================================================================================
+1. 项目概述
+2. Phase 1: 资金费率采集器
+3. Phase 2: 恐惧贪婪指数
+4. Phase 3: 订单簿 Level 2 增强
+5. Phase 4: 未平仓合约 (OI)
+6. Phase 5: 链上数据
+7. Phase 6: 社交情绪
+8. 文件结构总览
+9. 依赖配置
+
+================================================================================
+1. 项目概述
+================================================================================
+
+1.1 目标
+--------
+为 crypto_trading_system 添加以下免费数据源支持:
+- 资金费率 (Funding Rate) - 4大交易所
+- 恐惧贪婪指数 (Fear & Greed Index)
+- 订单簿 Level 2 数据
+- 未平仓合约 (Open Interest)
+- 链上基础数据 (Etherscan, Dune)
+- 社交情绪 (Reddit, CryptoCompare)
+
+1.2 现有架构
+------------
+- core/data/data_collector.py - 数据采集基类
+- core/exchanges/ - 交易所连接器 (Binance, Bybit, OKX, Gate)
+- core/factors_ts/ - 因子计算框架
+- core/marketdata/ - WebSocket 客户端框架
+
+1.3 扩展原则
+------------
+- 所有数据源必须免费
+- 遵循现有代码风格
+- 使用 async/await 模式
+- 添加完整的日志记录
+- 编写单元测试
+
+================================================================================
+2. Phase 1: 资金费率采集器 (优先级: P0)
+================================================================================
+
+2.1 数据源详情
+--------------
+交易所          端点                                                认证
+--------------------------------------------------------------------------
+Binance         GET /fapi/v1/fundingRate                            无需
+Bybit           GET /v5/public/funding/history-funding-rate         无需
+OKX             GET /api/v5/public/funding-rate                     无需
+Gate            GET /api/v4/futures/usdt/funding_rate               无需
+
+2.2 实现步骤
+------------
+
+Step 1: 创建资金费率数据模型
+文件: core/data/funding_rate_models.py
+
+class FundingRate:
+    - exchange: str          # 交易所
+    - symbol: str            # 交易对
+    - funding_rate: float    # 资金费率
+    - funding_time: datetime # 结算时间
+    - timestamp: datetime    # 采集时间
+
+Step 2: 创建资金费率采集器
+文件: core/data/funding_rate_collector.py
+
+class FundingRateCollector:
+    - __init__():
+        初始化各交易所客户端
+    
+    - async fetch_binance(symbol: str) -> FundingRate:
+        GET https://fapi.binance.com/fapi/v1/fundingRate
+        参数: symbol, limit
+    
+    - async fetch_bybit(symbol: str) -> FundingRate:
+        GET https://api.bybit.com/v5/public/funding/history-funding-rate
+        参数: category=linear, symbol
+    
+    - async fetch_okx(symbol: str) -> FundingRate:
+        GET https://www.okx.com/api/v5/public/funding-rate
+        参数: instId
+    
+    - async fetch_gate(symbol: str) -> FundingRate:
+        GET https://api.gateio.ws/api/v4/futures/usdt/funding_rate
+        参数: contract
+    
+    - async fetch_all(symbol: str) -> Dict[str, FundingRate]:
+        并行获取所有交易所数据
+    
+    - start_collection(symbols: List[str], interval: int = 60):
+        启动定时采集
+
+Step 3: 创建资金费率因子
+文件: core/factors_ts/funding_rate_factors.py
+
+class FundingRateFactor(TimeSeriesFactor):
+    - 当前资金费率
+    
+class FundingRateZscoreFactor(TimeSeriesFactor):
+    - 资金费率 Z-score (历史标准化)
+    - 窗口: 30/60/90 期
+    
+class FundingRateMomentumFactor(TimeSeriesFactor):
+    - 资金费率变化趋势
+    - 计算: rate[t] - rate[t-n]
+    
+class FundingRateExtremeFactor(TimeSeriesFactor):
+    - 极端资金费率检测
+    - 阈值: > 0.01 或 < -0.01
+    
+class BasisFactor(TimeSeriesFactor):
+    - 现货-期货价差
+    - 需要: 现货价格 + 永续价格 + 资金费率
+
+Step 4: 更新 DataType 枚举
+文件: core/data/data_collector.py
+
+在 DataType 枚举中添加:
+    FUNDING_RATE = "funding_rate"
+
+Step 5: 配置支持
+文件: config/settings.py
+
+添加配置项:
+    FUNDING_RATE_COLLECTION_INTERVAL = 60  # 秒
+    FUNDING_RATE_HISTORY_DAYS = 30
+
+Step 6: 数据存储
+文件: core/data/data_storage.py
+
+添加资金费率存储方法:
+    - save_funding_rate()
+    - get_funding_rate_history()
+
+2.3 API 响应示例
+----------------
+
+Binance 响应:
+{
+    "symbol": "BTCUSDT",
+    "fundingRate": "0.00010000",
+    "fundingTime": 1704067200000
+}
+
+Bybit 响应:
+{
+    "result": {
+        "list": [{
+            "symbol": "BTCUSDT",
+            "fundingRate": "0.0001",
+            "fundingRateTimestamp": "1704067200000"
+        }]
+    }
+}
+
+OKX 响应:
+{
+    "data": [{
+        "instId": "BTC-USDT-SWAP",
+        "fundingRate": "0.0001",
+        "fundingTime": "1704067200000"
+    }]
+}
+
+Gate 响应:
+{
+    "contract": "BTC_USDT",
+    "funding_rate": "0.0001",
+    "funding_rate_indicative": "0.0001",
+    "t": 1704067200
+}
+
+2.4 测试步骤
+------------
+
+1. 单元测试
+   文件: tests/test_funding_rate.py
+   
+   - test_parse_binance_response()
+   - test_parse_bybit_response()
+   - test_parse_okx_response()
+   - test_parse_gate_response()
+   - test_funding_rate_factor_calculation()
+
+2. 集成测试
+   - 手动调用各交易所 API 验证数据
+   - 检查数据格式转换正确性
+
+3. 运行测试
+   pytest tests/test_funding_rate.py -v
+
+================================================================================
+3. Phase 2: 恐惧贪婪指数 (优先级: P1)
+================================================================================
+
+3.1 数据源详情
+--------------
+来源: Alternative.me
+端点: GET https://api.alternative.me/fng/
+认证: 无需
+限制: 无严格限制
+
+参数:
+- limit: 返回数据条数 (默认 1, 最大 0 = 全部)
+- format: json (默认) 或 csv
+
+3.2 实现步骤
+------------
+
+Step 1: 创建恐惧贪婪采集器
+文件: core/data/sentiment/fear_greed_collector.py
+
+class FearGreedCollector:
+    - BASE_URL = "https://api.alternative.me/fng/"
+    
+    - async fetch_current() -> FearGreedIndex:
+        GET /fng/?limit=1
+    
+    - async fetch_history(days: int = 30) -> List[FearGreedIndex]:
+        GET /fng/?limit={days}
+    
+    - async start_collection(interval: int = 3600):
+        每小时采集一次
+
+Step 2: 创建数据模型
+文件: core/data/sentiment/fear_greed_models.py
+
+class FearGreedIndex:
+    - value: int              # 0-100
+    - value_classification: str  # Extreme Fear/Fear/Neutral/Greed/Extreme Greed
+    - timestamp: datetime
+    - time_until_update: str  # 下次更新时间
+
+Step 3: 创建恐惧贪婪因子
+文件: core/factors_ts/sentiment_factors.py
+
+class FearGreedFactor(TimeSeriesFactor):
+    - 当前恐惧贪婪值
+    
+class FearGreedZscoreFactor(TimeSeriesFactor):
+    - 历史标准化得分
+    
+class FearGreedMomentumFactor(TimeSeriesFactor):
+    - 变化趋势
+    
+class ExtremeSentimentFactor(TimeSeriesFactor):
+    - 极端情绪检测
+    - 阈值: < 20 极度恐惧, > 80 极度贪婪
+
+3.3 API 响应示例
+----------------
+
+{
+    "name": "Fear and Greed Index",
+    "data": [
+        {
+            "value": "45",
+            "value_classification": "Fear",
+            "timestamp": "1704067200",
+            "time_until_update": "72400"
+        }
+    ],
+    "metadata": {
+        "error": null
+    }
+}
+
+3.4 交易信号
+------------
+
+值范围        分类           信号建议
+------------------------------------------
+0-24         极度恐惧       可能买入机会
+25-49        恐惧           偏多
+50-74        贪婪           偏空
+75-100       极度贪婪       可能卖出/做空
+
+================================================================================
+4. Phase 3: 订单簿 Level 2 增强 (优先级: P1)
+================================================================================
+
+4.1 数据源详情
+--------------
+交易所        WebSocket 端点                           频道
+--------------------------------------------------------------------
+Binance       wss://fstream.binance.com/ws            {symbol}@depth@100ms
+Bybit         wss://stream.bybit.com/v5/public/linear orderbook.50.{symbol}
+OKX           wss://ws.okx.com:8443/ws/v5/public      books-l2-tbt.{instId}
+
+4.2 实现步骤
+------------
+
+Step 1: 扩展现有 WebSocket 客户端
+文件: core/marketdata/orderbook_ws_client.py
+
+class OrderbookWSClient:
+    - _connections: Dict[str, WebSocket]  # 按交易所存储连接
+    - _orderbooks: Dict[str, OrderBook]   # 本地订单簿缓存
+    
+    - async subscribe_binance(symbol: str, depth: int = 50):
+        订阅 depth@100ms 频道
+        
+    - async subscribe_bybit(symbol: str, depth: int = 50):
+        订阅 orderbook.50 频道
+        
+    - async subscribe_okx(symbol: str):
+        订阅 books-l2-tbt 频道
+    
+    - _handle_message(exchange: str, message: dict):
+        解析并更新本地订单簿
+    
+    - get_orderbook(exchange: str, symbol: str) -> OrderBook:
+        获取当前订单簿快照
+
+Step 2: 创建订单簿数据模型
+文件: core/marketdata/orderbook_models.py
+
+@dataclass
+class PriceLevel:
+    price: float
+    size: float
+    
+@dataclass
+class OrderBook:
+    exchange: str
+    symbol: str
+    bids: List[PriceLevel]  # 买单 (价格降序)
+    asks: List[PriceLevel]  # 卖单 (价格升序)
+    timestamp: datetime
+    
+    - mid_price() -> float:
+        中间价
+    
+    - spread() -> float:
+        买卖价差
+    
+    - bid_notional() -> float:
+        买盘总价值
+    
+    - ask_notional() -> float:
+        卖盘总价值
+    
+    - imbalance() -> float:
+        买卖失衡 (-1 到 1)
+
+Step 3: 创建订单簿因子
+文件: core/factors_ts/orderbook_factors.py
+
+class RealKyleLambdaFactor(TimeSeriesFactor):
+    """真实 Kyle's Lambda - 价格冲击系数"""
+    - 计算方法: 回归 |价格变化| ~ |净订单流|
+    
+class VPINFactor(TimeSeriesFactor):
+    """VPIN - Volume-synchronized Probability of Informed Trading"""
+    - 参考: Easley et al. (2012)
+    
+class BidAskImbalanceFactor(TimeSeriesFactor):
+    """买卖盘失衡"""
+    - 计算: (bid_notional - ask_notional) / (bid_notional + ask_notional)
+    
+class DepthSkewFactor(TimeSeriesFactor):
+    """深度倾斜"""
+    - 计算: log(bid_depth / ask_depth)
+    
+class SpreadFactor(TimeSeriesFactor):
+    """买卖价差"""
+    - 绝对价差
+    - 相对价差 (bps)
+    
+class WeightedMidPriceFactor(TimeSeriesFactor):
+    """加权中间价偏离"""
+    - 使用订单量加权的中间价
+
+4.3 订单簿处理逻辑
+------------------
+
+1. 增量更新:
+   - Binance: 发送增量更新，需要本地维护完整订单簿
+   - Bybit: 发送快照+增量
+   - OKX: 发送全量快照
+
+2. 深度管理:
+   - 维护固定深度 (如 50 档)
+   - 定期清理过期价格档位
+   - 处理价格精度
+
+3. 重连机制:
+   - 检测连接断开
+   - 自动重连并重新订阅
+   - 重新获取快照
+
+================================================================================
+5. Phase 4: 未平仓合约 OI (优先级: P2)
+================================================================================
+
+5.1 数据源详情
+--------------
+交易所        端点                                      参数
+--------------------------------------------------------------------
+Binance       GET /fapi/v1/openInterest                 symbol
+Bybit         GET /v5/public/open-interest              category=linear, symbol
+OKX           GET /api/v5/public/open-interest          instId
+Coinglass     爬虫: https://coinglass.com/api/futures/OpenInterest
+
+5.2 实现步骤
+------------
+
+Step 1: 创建 OI 采集器
+文件: core/data/derivatives/oi_collector.py
+
+class OpenInterestCollector:
+    - async fetch_binance(symbol: str) -> OpenInterest:
+        GET /fapi/v1/openInterest
+    
+    - async fetch_bybit(symbol: str) -> OpenInterest:
+        GET /v5/public/open-interest
+    
+    - async fetch_okx(symbol: str) -> OpenInterest:
+        GET /api/v5/public/open-interest
+    
+    - async fetch_all(symbol: str) -> Dict[str, OpenInterest]:
+        并行获取
+
+Step 2: 创建 OI 模型
+文件: core/data/derivatives/derivatives_models.py
+
+class OpenInterest:
+    exchange: str
+    symbol: str
+    open_interest: float    # 持仓量
+    open_interest_value: float  # 持仓价值 (USD)
+    timestamp: datetime
+
+Step 3: 创建 OI 因子
+文件: core/factors_ts/derivatives_factors.py
+
+class OpenInterestFactor(TimeSeriesFactor):
+    """当前未平仓合约"""
+    
+class OIChangeFactor(TimeSeriesFactor):
+    """OI 变化率"""
+    - 计算: (OI[t] - OI[t-n]) / OI[t-n]
+    
+class OIZscoreFactor(TimeSeriesFactor):
+    """OI Z-score"""
+    
+class OIvsVolumeFactor(TimeSeriesFactor):
+    """OI 与成交量比率"""
+
+5.3 清算数据 (可选)
+------------------
+
+来源: Coinglass (爬虫)
+端点: https://coinglass.com/api/futures/Liquidation
+
+class LiquidationCollector:
+    - fetch_liquidation_heatmap() -> LiquidationData:
+        获取清算热力图数据
+
+================================================================================
+6. Phase 5: 链上数据 (优先级: P2)
+================================================================================
+
+6.1 数据源详情
+--------------
+
+6.1.1 Etherscan (免费层)
+------------------------
+基础 URL: https://api.etherscan.io/api
+认证: API Key (免费注册)
+限制: 5 calls/second, 100,000 calls/day
+
+端点:
+- 账户余额: ?module=account&action=balance&address={address}
+- 代币余额: ?module=account&action=tokenbalance&contractaddress={token}&address={address}
+- 交易列表: ?module=account&action=txlist&address={address}
+- ERC20 转账: ?module=account&action=tokentx&address={address}
+- Gas 价格: ?module=gastracker&action=gasoracle
+
+6.1.2 Dune Analytics (免费)
+---------------------------
+方式: SQL 查询 -> 导出结果
+特点: 需要手动或使用 Playwright 自动化
+
+常用查询:
+- 交易所流入流出
+- 稳定币市值变化
+- DeFi 协议 TVL
+- NFT 交易量
+
+6.1.3 Arkham (免费层)
+---------------------
+API: https://api.arkhamintelligence.com
+认证: API Key
+特点: 巨鲸标签、实体追踪
+
+6.2 实现步骤
+------------
+
+Step 1: 创建 Etherscan 客户端
+文件: core/data/onchain/etherscan_client.py
+
+class EtherscanClient:
+    API_URL = "https://api.etherscan.io/api"
+    
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+    
+    - async get_balance(address: str) -> float:
+        获取 ETH 余额
+    
+    - async get_token_balance(token: str, address: str) -> float:
+        获取 ERC20 代币余额
+    
+    - async get_transactions(address: str, limit: int = 100) -> List[Tx]:
+        获取交易历史
+    
+    - async get_gas_price() -> GasPrice:
+        获取当前 Gas 价格
+
+Step 2: 创建交易所地址监控
+文件: core/data/onchain/exchange_monitor.py
+
+# 预定义交易所冷钱包地址
+EXCHANGE_ADDRESSES = {
+    "binance": {
+        "cold_wallet_1": "0x...",
+        "cold_wallet_2": "0x...",
+    },
+    "coinbase": {...},
+    "kraken": {...},
+}
+
+class ExchangeFlowMonitor:
+    - async get_exchange_balance(exchange: str) -> float:
+        获取交易所钱包总余额
+    
+    - async detect_large_transfers(threshold: float) -> List[LargeTransfer]:
+        检测大额转账
+    
+    - async calculate_net_flow(exchange: str, hours: int = 24) -> float:
+        计算净流入/流出
+
+Step 3: 创建 Dune 查询集成
+文件: core/data/onchain/dune_client.py
+
+class DuneClient:
+    - 方式1: 手动运行查询，导出 CSV，程序读取
+    - 方式2: 使用 Playwright 自动化操作
+    
+    - get_exchange_flow_data() -> pd.DataFrame:
+        获取交易所流入流出数据
+    
+    - get_stablecoin_flow() -> pd.DataFrame:
+        获取稳定币流动数据
+
+Step 4: 创建链上因子
+文件: core/factors_ts/onchain_factors.py
+
+class ExchangeFlowFactor(TimeSeriesFactor):
+    """交易所净流入/流出"""
+    - 正值 = 流入 (潜在卖压)
+    - 负值 = 流出 (潜在买盘)
+    
+class WhaleActivityFactor(TimeSeriesFactor):
+    """巨鲸活动指数"""
+    - 大额转账频率
+    - 大额转账方向
+    
+class GasPriceFactor(TimeSeriesFactor):
+    """Gas 价格因子"""
+    - 高 Gas = 网络活跃
+    - 用于确认交易信号
+
+6.3 重要地址列表
+----------------
+
+交易所          地址前缀                                    用途
+--------------------------------------------------------------------
+Binance         0x28C6...                                  冷钱包
+Coinbase        0x5038...                                  热钱包
+Kraken          0x2910...                                  操作钱包
+USDT Treasury   0x5754...                                  USDT 发行
+USDC Treasury   0x55fe...                                  USDC 发行
+
+================================================================================
+7. Phase 6: 社交情绪 (优先级: P3)
+================================================================================
+
+7.1 数据源详情
+--------------
+
+7.1.1 Reddit API (免费)
+-----------------------
+认证: OAuth (注册 Reddit App)
+限制: 60 requests/minute
+
+端点:
+- 热帖: GET /r/{subreddit}/hot
+- 新帖: GET /r/{subreddit}/new
+- 搜索: GET /r/{subreddit}/search
+
+关键 Subreddit:
+- r/cryptocurrency (6M+ 成员)
+- r/Bitcoin (5M+ 成员)
+- r/ethfinance (200K+ 成员)
+- r/CryptoMarkets
+
+7.1.2 CryptoCompare API (免费层)
+--------------------------------
+基础 URL: https://min-api.cryptocompare.com
+认证: API Key (免费)
+限制: 100,000 calls/month
+
+端点:
+- 社交统计: /data/social/coin/latest
+- 新闻: /v2/news/
+- 趋势: /data/social/coin/histo/
+
+7.2 实现步骤
+------------
+
+Step 1: 创建 Reddit 客户端
+文件: core/data/sentiment/reddit_client.py
+
+class RedditSentimentCollector:
+    def __init__(self, client_id: str, client_secret: str, user_agent: str):
+        初始化 OAuth
+    
+    - async get_hot_posts(subreddit: str, limit: int = 100) -> List[Post]:
+        获取热帖
+    
+    - async search_posts(query: str, subreddit: str) -> List[Post]:
+        搜索帖子
+    
+    - calculate_sentiment(posts: List[Post]) -> SentimentScore:
+        计算情绪得分 (使用本地 NLP)
+
+Step 2: 创建 CryptoCompare 客户端
+文件: core/data/sentiment/cryptocompare_client.py
+
+class CryptoCompareClient:
+    - async get_social_stats(coin: str) -> SocialStats:
+        获取社交统计
+    
+    - async get_news(coin: str, limit: int = 50) -> List[News]:
+        获取新闻
+
+Step 3: 创建情绪分析器
+文件: core/data/sentiment/sentiment_analyzer.py
+
+class SentimentAnalyzer:
+    - analyze_text(text: str) -> float:
+        分析文本情绪 (-1 到 1)
+        使用 VADER 或 TextBlob (本地运行)
+    
+    - analyze_batch(texts: List[str]) -> List[float]:
+        批量分析
+    
+    - calculate_aggregate_sentiment(posts: List[Post]) -> AggregateSentiment:
+        聚合情绪计算
+
+Step 4: 创建社交情绪因子
+文件: core/factors_ts/sentiment_factors.py
+
+class SocialVolumeFactor(TimeSeriesFactor):
+    """社交讨论量"""
+    
+class RedditSentimentFactor(TimeSeriesFactor):
+    """Reddit 情绪得分"""
+    
+class TwitterSentimentFactor(TimeSeriesFactor):
+    """Twitter 情绪 (如果有数据源)"""
+    
+class SentimentDivergenceFactor(TimeSeriesFactor):
+    """情绪与价格背离"""
+    - 价格下跌但情绪积极 = 潜在买入机会
+    - 价格上涨但情绪消极 = 潜在卖出机会
+
+================================================================================
+8. 文件结构总览
+================================================================================
+
+crypto_trading_system/
+├── core/
+│   ├── data/
+│   │   ├── data_collector.py              # 现有 (需更新)
+│   │   ├── funding_rate_collector.py      # 新增: Phase 1
+│   │   ├── funding_rate_models.py         # 新增: Phase 1
+│   │   ├── derivatives/
+│   │   │   ├── __init__.py
+│   │   │   ├── oi_collector.py            # 新增: Phase 4
+│   │   │   └── derivatives_models.py      # 新增: Phase 4
+│   │   ├── onchain/
+│   │   │   ├── __init__.py
+│   │   │   ├── etherscan_client.py        # 新增: Phase 5
+│   │   │   ├── dune_client.py             # 新增: Phase 5
+│   │   │   └── exchange_monitor.py        # 新增: Phase 5
+│   │   └── sentiment/
+│   │       ├── __init__.py
+│   │       ├── fear_greed_collector.py    # 新增: Phase 2
+│   │       ├── reddit_client.py           # 新增: Phase 6
+│   │       ├── cryptocompare_client.py    # 新增: Phase 6
+│   │       └── sentiment_analyzer.py      # 新增: Phase 6
+│   ├── marketdata/
+│   │   ├── ws_client.py                   # 现有
+│   │   ├── orderbook_ws_client.py         # 新增: Phase 3
+│   │   └── orderbook_models.py            # 新增: Phase 3
+│   └── factors_ts/
+│       ├── funding_rate_factors.py        # 新增: Phase 1
+│       ├── orderbook_factors.py           # 新增: Phase 3
+│       ├── derivatives_factors.py         # 新增: Phase 4
+│       ├── onchain_factors.py             # 新增: Phase 5
+│       └── sentiment_factors.py           # 新增: Phase 2/6
+├── config/
+│   └── settings.py                        # 更新: 添加配置项
+└── tests/
+    ├── test_funding_rate.py               # 新增
+    ├── test_orderbook.py                  # 新增
+    ├── test_onchain.py                    # 新增
+    └── test_sentiment.py                  # 新增
+
+================================================================================
+9. 依赖配置
+================================================================================
+
+9.1 requirements.txt 添加
+-------------------------
+
+# 数据采集
+aiohttp>=3.8.0           # 异步 HTTP
+websockets>=10.0         # WebSocket
+
+# 情绪分析
+textblob>=0.17.0         # 简单 NLP
+vaderSentiment>=3.3.0    # 社交媒体情绪分析
+
+# Reddit API
+praw>=7.0.0              # Reddit API 客户端
+
+# 数据处理
+pandas>=1.5.0            # 数据处理 (已有)
+numpy>=1.21.0            # 数值计算 (已有)
+
+9.2 环境变量 (.env)
+-------------------
+
+# API Keys (可选，免费数据源)
+ETHERSCAN_API_KEY=your_key_here
+REDDIT_CLIENT_ID=your_id_here
+REDDIT_CLIENT_SECRET=your_secret_here
+CRYPTOCOMPARE_API_KEY=your_key_here
+
+# 采集配置
+FUNDING_RATE_INTERVAL=60
+FEAR_GREED_INTERVAL=3600
+ORDERBOOK_UPDATE_INTERVAL=100  # ms
+
+================================================================================
+10. 执行顺序
+================================================================================
+
+推荐执行顺序:
+
+[ ] Phase 1: 资金费率采集器 (1-2 小时)
+    [ ] 创建 funding_rate_models.py
+    [ ] 创建 funding_rate_collector.py
+    [ ] 创建 funding_rate_factors.py
+    [ ] 更新 DataType 枚举
+    [ ] 编写测试
+    [ ] 验证数据采集
+
+[ ] Phase 2: 恐惧贪婪指数 (30 分钟)
+    [ ] 创建 fear_greed_collector.py
+    [ ] 创建 fear_greed_models.py
+    [ ] 更新 sentiment_factors.py
+    [ ] 编写测试
+
+[ ] Phase 3: 订单簿 Level 2 (2-4 小时)
+    [ ] 创建 orderbook_models.py
+    [ ] 创建 orderbook_ws_client.py
+    [ ] 创建 orderbook_factors.py
+    [ ] 实现增量更新逻辑
+    [ ] 编写测试
+
+[ ] Phase 4: 未平仓合约 OI (1-2 小时)
+    [ ] 创建 derivatives_models.py
+    [ ] 创建 oi_collector.py
+    [ ] 创建 derivatives_factors.py
+    [ ] 编写测试
+
+[ ] Phase 5: 链上数据 (2-4 小时)
+    [ ] 注册 Etherscan API Key
+    [ ] 创建 etherscan_client.py
+    [ ] 创建 exchange_monitor.py
+    [ ] 创建 onchain_factors.py
+    [ ] 编写测试
+
+[ ] Phase 6: 社交情绪 (2-3 小时)
+    [ ] 注册 Reddit App
+    [ ] 创建 reddit_client.py
+    [ ] 创建 sentiment_analyzer.py
+    [ ] 更新 sentiment_factors.py
+    [ ] 编写测试
+
+================================================================================
+11. 快速验证脚本
+================================================================================
+
+创建 scripts/test_data_sources.py:
+
+```python
+import asyncio
+
+async def test_funding_rate():
+    from core.data.funding_rate_collector import FundingRateCollector
+    collector = FundingRateCollector()
+    
+    # 测试 Binance
+    rate = await collector.fetch_binance("BTCUSDT")
+    print(f"Binance BTCUSDT funding rate: {rate.funding_rate}")
+    
+    # 测试所有交易所
+    rates = await collector.fetch_all("BTCUSDT")
+    for ex, r in rates.items():
+        print(f"{ex}: {r.funding_rate}")
+
+async def test_fear_greed():
+    from core.data.sentiment.fear_greed_collector import FearGreedCollector
+    collector = FearGreedCollector()
+    
+    index = await collector.fetch_current()
+    print(f"Fear & Greed Index: {index.value} ({index.value_classification})")
+
+async def test_orderbook():
+    from core.marketdata.orderbook_ws_client import OrderbookWSClient
+    client = OrderbookWSClient()
+    
+    await client.subscribe_binance("BTCUSDT")
+    await asyncio.sleep(2)
+    
+    ob = client.get_orderbook("binance", "BTCUSDT")
+    print(f"Best bid: {ob.bids[0].price}")
+    print(f"Best ask: {ob.asks[0].price}")
+    print(f"Spread: {ob.spread()}")
+
+if __name__ == "__main__":
+    asyncio.run(test_funding_rate())
+    asyncio.run(test_fear_greed())
+    asyncio.run(test_orderbook())
+```
+
+================================================================================
+结束
+================================================================================

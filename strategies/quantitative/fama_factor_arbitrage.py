@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 import pandas as pd
@@ -128,7 +128,7 @@ class FamaFactorArbitrageStrategy(StrategyBase):
             symbol=symbol,
             signal_type=signal_type,
             price=price,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             strategy_name=strategy_name,
             strength=strength,
             stop_loss=stop_loss,
@@ -177,7 +177,7 @@ class FamaFactorArbitrageStrategy(StrategyBase):
         if str(symbol or "").strip().upper().replace("_", "/") != trigger:
             return []
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if not self._is_rebalance_due(now):
             return []
 

@@ -7,7 +7,7 @@ import json
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -216,7 +216,7 @@ async def _fill_one(
     default_start = now - timedelta(days=max(1, int(days)))
     existing = await data_storage.load_klines_from_parquet(exchange=exchange_name, symbol=symbol, timeframe=timeframe)
     if existing is not None and not existing.empty:
-        last_ts = pd.to_datetime(existing.index.max()).to_pydatetime()
+        last_ts = pd.Timestamp(existing.index.max()).to_pydatetime().replace(tzinfo=None)
         start_dt = max(default_start, last_ts - timedelta(seconds=tf_sec * max(1, overlap_bars)))
     else:
         start_dt = default_start
@@ -365,7 +365,7 @@ async def main() -> None:
     df0.sort_values(["symbol", "timeframe"]).to_csv(csv_path, index=False, encoding="utf-8-sig")
 
     summary = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "exchange": exchange_name,
         "symbols": len(symbols),
         "timeframes": tfs,

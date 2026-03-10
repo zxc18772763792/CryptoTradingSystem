@@ -6,18 +6,36 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+_PROJECT_ROOT = Path(__file__).parent.parent
+_SQLITE_ASYNC_PREFIX = "sqlite+aiosqlite:///"
+
+
+def _default_database_url() -> str:
+    return f"{_SQLITE_ASYNC_PREFIX}{(_PROJECT_ROOT / 'data' / 'crypto_trading.db').resolve().as_posix()}"
+
+
+def _normalize_sqlite_database_url(value: str) -> str:
+    text = str(value or "").strip()
+    if not text.startswith(_SQLITE_ASYNC_PREFIX):
+        return text
+    raw_path = Path(text[len(_SQLITE_ASYNC_PREFIX):])
+    if raw_path.is_absolute():
+        return text
+    return f"{_SQLITE_ASYNC_PREFIX}{(_PROJECT_ROOT / raw_path).resolve().as_posix()}"
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment and .env."""
 
     model_config = SettingsConfigDict(
-        env_file=str(Path(__file__).parent.parent / ".env"),
+        env_file=str(_PROJECT_ROOT / ".env"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )
 
     # Project paths
-    BASE_DIR: Path = Field(default_factory=lambda: Path(__file__).parent.parent)
+    BASE_DIR: Path = Field(default_factory=lambda: _PROJECT_ROOT)
     DATA_STORAGE_PATH: Path = Field(default=Path("./data/historical"))
     CACHE_PATH: Path = Field(default=Path("./data/cache"))
     LOG_PATH: Path = Field(default=Path("./logs"))
@@ -39,7 +57,7 @@ class Settings(BaseSettings):
     ZHIPU_MODEL: str = "GLM-4.5-Air"
 
     # Storage
-    DATABASE_URL: str = "sqlite+aiosqlite:///./data/crypto_trading.db"
+    DATABASE_URL: str = Field(default_factory=_default_database_url)
     REDIS_URL: str = "redis://localhost:6379/0"
 
     # Network proxy
@@ -52,10 +70,15 @@ class Settings(BaseSettings):
     MAX_DAILY_LOSS: float = 0.02
     MAX_OPEN_POSITIONS: int = 100
     MIN_STRATEGY_ORDER_USD: float = 100.0
+    DEFAULT_STRATEGY_ALLOCATION: float = 0.15
     PAPER_INITIAL_EQUITY: float = 10000.0
     PAPER_FEE_RATE: float = 0.001
     PAPER_SLIPPAGE_BPS: float = 2.0
     RISK_FREE_RATE: float = 0.02
+    GOVERNANCE_ENABLED: bool = False
+    DECISION_MODE: str = "shadow"  # shadow/paper/live
+    REQUIRE_DUAL_APPROVAL_FOR_LIVE: bool = True
+    AUDIT_LEVEL: str = "full"  # full/minimal
 
     # Exchange market type (spot/future/swap/margin)
     BINANCE_DEFAULT_TYPE: str = "spot"
@@ -107,6 +130,10 @@ class Settings(BaseSettings):
         "1M",
     ]
     MAX_CANDLES_PER_REQUEST: int = 1000
+    ANALYTICS_HISTORY_ENABLED: bool = True
+    ANALYTICS_HISTORY_MICRO_INTERVAL_SEC: int = 300
+    ANALYTICS_HISTORY_COMMUNITY_INTERVAL_SEC: int = 900
+    ANALYTICS_HISTORY_WHALE_INTERVAL_SEC: int = 600
 
     # Logging
     LOG_LEVEL: str = "INFO"
@@ -119,6 +146,27 @@ class Settings(BaseSettings):
         if v not in ("paper", "live"):
             raise ValueError("TRADING_MODE must be 'paper' or 'live'")
         return v
+
+    @field_validator("DECISION_MODE")
+    @classmethod
+    def validate_decision_mode(cls, v: str) -> str:
+        text = str(v or "shadow").strip().lower()
+        if text not in {"shadow", "paper", "live"}:
+            raise ValueError("DECISION_MODE must be one of: shadow/paper/live")
+        return text
+
+    @field_validator("AUDIT_LEVEL")
+    @classmethod
+    def validate_audit_level(cls, v: str) -> str:
+        text = str(v or "full").strip().lower()
+        if text not in {"full", "minimal"}:
+            raise ValueError("AUDIT_LEVEL must be one of: full/minimal")
+        return text
+
+    @field_validator("DATABASE_URL")
+    @classmethod
+    def normalize_database_url(cls, v: str) -> str:
+        return _normalize_sqlite_database_url(v)
 
     @field_validator(
         "BINANCE_DEFAULT_TYPE",

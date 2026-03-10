@@ -35,16 +35,13 @@ class PnLDecomposer:
         self.positions: Dict[str, PositionLedger] = {}
 
     def on_fill(self, symbol: str, side: str, qty: float, price: float, fee: float = 0.0, slippage_cost: float = 0.0, timestamp: Optional[datetime] = None, reduce_only: bool = False, meta: Optional[Dict[str, Any]] = None) -> None:
-        _ = (symbol, side, qty, price, fee, slippage_cost, timestamp, reduce_only, meta)
-        # TODO: implement fill aggregation and realized pnl updates
+        raise NotImplementedError("PnLDecomposer.on_fill not yet implemented")
 
     def on_funding(self, symbol: str, amount: float, timestamp: Optional[datetime] = None, meta: Optional[Dict[str, Any]] = None) -> None:
-        _ = (symbol, amount, timestamp, meta)
-        # TODO: accrue funding to open position
+        raise NotImplementedError("PnLDecomposer.on_funding not yet implemented")
 
     def mark_to_market(self, marks: Dict[str, float]) -> None:
-        _ = marks
-        # TODO: update unrealized pnl
+        raise NotImplementedError("PnLDecomposer.mark_to_market not yet implemented")
 
     def position_snapshot(self, symbol: str) -> Optional[Dict[str, Any]]:
         p = self.positions.get(symbol)

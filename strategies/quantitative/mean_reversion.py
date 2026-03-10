@@ -51,6 +51,9 @@ class MeanReversionStrategy(StrategyBase):
 
         z_score = self._calculate_z_score(data)
 
+        if len(z_score) < 2:
+            return []
+
         current_z = z_score.iloc[-1]
         prev_z = z_score.iloc[-2]
 

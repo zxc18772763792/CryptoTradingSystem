@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 
@@ -41,7 +41,7 @@ class RealtimeEventBus:
         envelope = RealtimeEvent(
             event=event,
             payload=payload or {},
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
         ).to_dict()
 
         async with self._lock:

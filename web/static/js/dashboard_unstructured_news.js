@@ -6,7 +6,11 @@
     const BUCKET_GRAN_ID = "dashboard-news-bucket-granularity";
     const BUCKET_CHART_ID = "dashboard-news-bucket-chart";
     const REFRESH_MS = 30000;
+    const SUMMARY_STALE_MS = 2 * 60 * 1000;
     let loading = false;
+    let latestSummary = null;
+    let latestSummaryAt = 0;
+    let needsRefresh = false;
 
     function esc(value) {
         return String(value ?? "").replace(/[&<>"']/g, (m) => ({
@@ -16,6 +20,14 @@
             '"': "&quot;",
             "'": "&#39;",
         }[m]));
+    }
+
+    function plainText(value) {
+        return String(value ?? "")
+            .replace(/<\s*br\s*\/?>/gi, " ")
+            .replace(/<[^>]+>/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
     }
 
     function parseTs(value) {
@@ -43,9 +55,16 @@
         return "中性";
     }
 
+    function isDashboardVisible() {
+        const host = document.getElementById(LIST_ID);
+        if (!host) return false;
+        const tab = document.getElementById("dashboard");
+        return !!tab && tab.classList.contains("active");
+    }
+
     async function request(path, options = {}) {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), Math.max(5000, Number(options.timeoutMs || 15000)));
+        const timer = setTimeout(() => controller.abort(), Math.max(5000, Number(options.timeoutMs || 25000)));
         const sep = path.includes("?") ? "&" : "?";
         const finalPath = `${path}${sep}_ts=${Date.now()}`;
         try {
@@ -82,9 +101,9 @@
             return;
         }
         box.innerHTML = unstructured.slice(0, 6).map((item) => {
-            const title = esc(item.summary_title || item.title || "（无标题）");
+            const title = esc(plainText(item.summary_title || item.title || "（无标题）"));
             const url = String(item.url || "").trim();
-            const provider = esc(item.provider || "-");
+            const provider = esc(plainText(item.provider || "-"));
             const tsText = fmtTs(item.published_at);
             const summarySentiment = item.summary_sentiment || "neutral";
             const sentimentCls = summarySentimentClass(summarySentiment);
@@ -164,17 +183,28 @@
     }
 
     async function loadSummary() {
-        return request("/summary?hours=24&feed_limit=60", { timeoutMs: 12000 });
+        return request("/summary?hours=24&feed_limit=60", { timeoutMs: 25000 });
     }
 
-    async function loadNews() {
+    async function loadNews(forceSummary = false) {
+        if (!isDashboardVisible()) {
+            needsRefresh = true;
+            return;
+        }
         if (loading) return;
         loading = true;
+        needsRefresh = false;
         try {
-            const [data, summary] = await Promise.all([
-                request("/latest?limit=40&hours=24&summarize=false", { timeoutMs: 12000 }),
-                loadSummary().catch(() => null),
-            ]);
+            let data;
+            data = await request("/latest?limit=40&hours=24&summarize=false", { timeoutMs: 25000 });
+            let summary = latestSummary;
+            if (forceSummary || !latestSummary || (Date.now() - latestSummaryAt) >= SUMMARY_STALE_MS) {
+                summary = await loadSummary().catch(() => latestSummary);
+                if (summary) {
+                    latestSummary = summary;
+                    latestSummaryAt = Date.now();
+                }
+            }
             renderUnstructuredNews(data.items || []);
             renderBucketSpark(summary);
         } catch (err) {
@@ -182,12 +212,24 @@
             if (box) box.innerHTML = `<div class="list-item">加载失败: ${esc(err.message)}</div>`;
         } finally {
             loading = false;
+            if (needsRefresh && isDashboardVisible()) {
+                needsRefresh = false;
+                setTimeout(() => loadNews(false), 80);
+            }
         }
     }
 
     function bindActions() {
-        document.getElementById(REFRESH_BTN_ID)?.addEventListener("click", loadNews);
-        document.getElementById(BUCKET_GRAN_ID)?.addEventListener("change", loadNews);
+        document.getElementById(REFRESH_BTN_ID)?.addEventListener("click", () => loadNews(true));
+        document.getElementById(BUCKET_GRAN_ID)?.addEventListener("change", () => loadNews(true));
+        document.querySelectorAll('.tab-btn[data-tab="dashboard"]').forEach((btn) => btn.addEventListener("click", () => {
+            setTimeout(() => {
+                if (needsRefresh) loadNews(true);
+            }, 120);
+        }));
+        document.addEventListener("visibilitychange", () => {
+            if (!document.hidden && isDashboardVisible() && needsRefresh) loadNews(false);
+        });
     }
 
     function connectWs() {
@@ -197,7 +239,10 @@
             ws.onmessage = (evt) => {
                 try {
                     const msg = JSON.parse(evt.data || "{}");
-                    if (msg?.event === "news_update") loadNews();
+                    if (msg?.event === "news_update") {
+                        if (isDashboardVisible()) loadNews(false);
+                        else needsRefresh = true;
+                    }
                 } catch (_) {}
             };
             ws.onclose = () => setTimeout(connectWs, 2000);
@@ -208,8 +253,12 @@
         if (!document.getElementById(LIST_ID)) return;
         bindActions();
         connectWs();
-        await loadNews();
-        setInterval(loadNews, REFRESH_MS);
+        if (isDashboardVisible()) await loadNews(true);
+        else needsRefresh = true;
+        setInterval(() => {
+            if (document.hidden || !isDashboardVisible()) return;
+            loadNews(false);
+        }, REFRESH_MS);
     }
 
     if (document.readyState === "loading") {

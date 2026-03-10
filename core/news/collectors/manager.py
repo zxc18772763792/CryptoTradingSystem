@@ -7,7 +7,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -266,6 +266,21 @@ class MultiSourceNewsCollector:
                 "errors": [],
             }
             state = await news_db.get_source_state(spec.name)
+            paused_until = None
+            if state and state.get("paused_until"):
+                try:
+                    paused_until = dt_parser.parse(str(state.get("paused_until")))
+                    if paused_until.tzinfo is None:
+                        paused_until = paused_until.replace(tzinfo=timezone.utc)
+                    else:
+                        paused_until = paused_until.astimezone(timezone.utc)
+                except Exception:
+                    paused_until = None
+            if paused_until and paused_until > datetime.now(timezone.utc):
+                source_stats[spec.name]["errors"].append(f"paused until {paused_until.isoformat()}")
+                source_stats[spec.name]["cursor_before"] = state.get("cursor_value") if state else None
+                source_stats[spec.name]["cursor_after"] = state.get("cursor_value") if state else None
+                continue
             cursor = state.get("cursor_value") if state else None
             source_stats[spec.name]["cursor_before"] = cursor
             try:
@@ -294,8 +309,19 @@ class MultiSourceNewsCollector:
                 logger.warning(err_msg)
                 errors.append(err_msg)
                 source_stats[spec.name]["errors"].append(str(exc))
-                state_after = await news_db.set_source_state(spec.name, last_error=str(exc), mark_failure=True)
+                pause_until = None
+                if "429" in str(exc) or "Too Many Requests" in str(exc):
+                    cooldown = max(180, _safe_int(self.defaults.get("news_source_429_cooldown_sec"), 900))
+                    pause_until = datetime.now(timezone.utc) + timedelta(seconds=cooldown)
+                state_after = await news_db.set_source_state(
+                    spec.name,
+                    last_error=str(exc),
+                    mark_failure=True,
+                    paused_until=pause_until,
+                )
                 source_stats[spec.name]["cursor_after"] = state_after.get("cursor_value")
+                if pause_until is not None:
+                    source_stats[spec.name]["errors"].append(f"paused until {pause_until.isoformat()}")
                 continue
 
             for item in items:

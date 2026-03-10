@@ -197,7 +197,11 @@ class PositionManager:
             f"{qty} @ {price} (leverage: {lev}x)"
         )
 
-        asyncio.create_task(self._notify_callbacks(position, "opened"))
+        try:
+            asyncio.get_running_loop()
+            asyncio.create_task(self._notify_callbacks(position, "opened"))
+        except RuntimeError:
+            pass
         return position
 
     def close_position(
@@ -237,7 +241,11 @@ class PositionManager:
                 f"realized PnL: {realized_piece:.2f}"
             )
 
-            asyncio.create_task(self._notify_callbacks(position, "partial_close"))
+            try:
+                asyncio.get_running_loop()
+                asyncio.create_task(self._notify_callbacks(position, "partial_close"))
+            except RuntimeError:
+                pass
             return position
 
         position.update_price(close_px)
@@ -251,7 +259,11 @@ class PositionManager:
         self._position_history.append(position)
         del self._positions[key]
 
-        asyncio.create_task(self._notify_callbacks(position, "closed"))
+        try:
+            asyncio.get_running_loop()
+            asyncio.create_task(self._notify_callbacks(position, "closed"))
+        except RuntimeError:
+            pass
         return position
 
     def update_position_price(

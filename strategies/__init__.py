@@ -49,6 +49,10 @@ from strategies.macro import (
     WhaleActivityStrategy,
 )
 
+from strategies.ai import (
+    MLXGBoostStrategy,
+)
+
 # Factor-based strategies
 try:
     from strategies.factor_based import (
@@ -109,6 +113,7 @@ ALL_STRATEGIES = [
     "SocialSentimentStrategy",
     "FundFlowStrategy",
     "WhaleActivityStrategy",
+    "MLXGBoostStrategy",
     # Factor-based strategies
     "ROCStrategy",
     "PriceAccelerationStrategy",
@@ -169,6 +174,7 @@ __all__ = [
     "SocialSentimentStrategy",
     "FundFlowStrategy",
     "WhaleActivityStrategy",
+    "MLXGBoostStrategy",
     # Factor-based strategies
     "ROCStrategy",
     "PriceAccelerationStrategy",

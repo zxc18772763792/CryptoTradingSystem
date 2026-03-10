@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -138,19 +139,20 @@ def _parse_since(since: Optional[str]) -> datetime:
         raise HTTPException(status_code=400, detail=f"invalid since value: {exc}") from exc
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="Crypto News Signal Service", version="1.1.0")
-
-    @app.on_event("startup")
-    async def _startup() -> None:
-        cfg = load_service_config()
-        app.state.cfg = cfg
-        app.state.risk_gate = RiskGate(cfg)
-        await news_db.init_news_db()
-
-    @app.on_event("shutdown")
-    async def _shutdown() -> None:
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    cfg = load_service_config()
+    app.state.cfg = cfg
+    app.state.risk_gate = RiskGate(cfg)
+    await news_db.init_news_db()
+    try:
+        yield
+    finally:
         await news_db.close_news_db()
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Crypto News Signal Service", version="1.1.0", lifespan=_lifespan)
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:

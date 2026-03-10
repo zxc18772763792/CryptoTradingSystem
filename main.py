@@ -57,6 +57,19 @@ def ensure_runtime_directories(run_config: RunConfig) -> None:
         path.mkdir(parents=True, exist_ok=True)
 
 
+def configure_asyncio_policy() -> None:
+    """Use selector loop on Windows to avoid Proactor accept/socket instability."""
+    if sys.platform != "win32":
+        return
+    policy_cls = getattr(asyncio, "WindowsSelectorEventLoopPolicy", None)
+    if policy_cls is None:
+        return
+    current = asyncio.get_event_loop_policy()
+    if isinstance(current, policy_cls):
+        return
+    asyncio.set_event_loop_policy(policy_cls())
+
+
 def setup_logging(run_config: RunConfig) -> None:
     """Configure stdout and file logging sinks."""
     logger.remove()
@@ -141,6 +154,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    configure_asyncio_policy()
     run_config = build_run_config(args)
 
     ensure_runtime_directories(run_config)

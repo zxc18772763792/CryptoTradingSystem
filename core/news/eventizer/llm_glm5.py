@@ -56,6 +56,17 @@ def _zhipu_model(cfg: Dict[str, Any]) -> str:
     )
 
 
+def _thinking_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    llm_cfg = cfg.get("llm") or {}
+    raw = llm_cfg.get("thinking")
+    if isinstance(raw, dict) and raw.get("type") in {"enabled", "disabled"}:
+        return {"type": str(raw.get("type"))}
+    disable = llm_cfg.get("disable_thinking")
+    if disable is None:
+        disable = True
+    return {"type": "disabled" if bool(disable) else "enabled"}
+
+
 def _batched(items: List[Dict[str, Any]], size: int) -> Iterable[List[Dict[str, Any]]]:
     step = max(1, size)
     for i in range(0, len(items), step):
@@ -360,6 +371,7 @@ def _call_glm5_once(
         "temperature": 0,
         "top_p": 0.1,
         "response_format": {"type": "json_object"},
+        "thinking": _thinking_cfg(cfg),
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -395,7 +407,7 @@ def extract_events_glm5_with_meta(news_items: List[Dict[str, Any]], cfg: Dict[st
 
     mapper: SymbolMapper = cfg.get("_symbol_mapper") or SymbolMapper({"symbols": cfg.get("symbols") or {}})
     batch_size = int((cfg.get("llm") or {}).get("batch_size") or 8)
-    batch_size = min(20, max(5, batch_size))
+    batch_size = max(1, min(20, batch_size))
 
     all_events: List[Dict[str, Any]] = []
     errors: List[str] = []
@@ -410,12 +422,9 @@ def extract_events_glm5_with_meta(news_items: List[Dict[str, Any]], cfg: Dict[st
         try:
             events = _call_glm5_once(batch=batch, cfg=cfg, mapper=mapper, feedback="")
             llm_used = True
-            if not events:
-                fallback = extract_events_rules(batch, cfg)
-                all_events.extend(fallback)
-            else:
-                all_events.extend(events)
-                all_events.extend(extract_events_rules(batch, cfg))
+            # LLM success (including empty events) is authoritative.
+            # Rules fallback is only for LLM failures.
+            all_events.extend(events)
             continue
         except Exception as first_exc:
             feedback = f"Validation or parsing error: {first_exc}"
@@ -423,12 +432,7 @@ def extract_events_glm5_with_meta(news_items: List[Dict[str, Any]], cfg: Dict[st
         try:
             events = _call_glm5_once(batch=batch, cfg=cfg, mapper=mapper, feedback=feedback)
             llm_used = True
-            if not events:
-                fallback = extract_events_rules(batch, cfg)
-                all_events.extend(fallback)
-            else:
-                all_events.extend(events)
-                all_events.extend(extract_events_rules(batch, cfg))
+            all_events.extend(events)
             continue
         except Exception as second_exc:
             err_msg = f"batch={idx} llm failed after retry: {second_exc}"
@@ -507,6 +511,7 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
         "top_p": 0.9,
         "max_tokens": max_length + 50,
         "response_format": {"type": "json_object"},
+        "thinking": _thinking_cfg(cfg),
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -606,6 +611,7 @@ def _call_glm5_batch_summarize(
         "temperature": 0.2,
         "top_p": 0.8,
         "response_format": {"type": "json_object"},
+        "thinking": _thinking_cfg(cfg),
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},

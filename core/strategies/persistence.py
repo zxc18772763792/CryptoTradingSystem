@@ -1,11 +1,13 @@
 """Strategy persistence helpers for restart recovery."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
 from sqlalchemy import select
 
+from config.settings import settings
 from config.database import Strategy as StrategyModel
 from config.database import async_session_maker
 from core.strategies.strategy_manager import strategy_manager
@@ -28,15 +30,30 @@ def _get_strategy_classes() -> Dict[str, Any]:
 
 def _build_payload(info: Dict[str, Any]) -> Dict[str, Any]:
     params = dict(info.get("params") or {})
+    runtime = dict(info.get("runtime") or {})
     return {
         "user_params": params,
         "symbols": list(info.get("symbols") or []),
         "timeframe": str(info.get("timeframe") or "1h"),
         "exchange": str(info.get("exchange") or params.get("exchange") or "gate"),
-        "allocation": float(info.get("allocation") or 1.0),
-        "runtime_limit_minutes": (info.get("runtime") or {}).get("runtime_limit_minutes"),
+        "allocation": float(info.get("allocation") or settings.DEFAULT_STRATEGY_ALLOCATION),
+        "runtime_limit_minutes": runtime.get("runtime_limit_minutes"),
+        "runtime_started_at": runtime.get("started_at"),
         "state": str(info.get("state") or "idle"),
     }
+
+
+def _parse_runtime_anchor(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 async def persist_strategy_snapshot(name: str, state_override: Optional[str] = None) -> bool:
@@ -124,8 +141,9 @@ async def restore_strategies_from_db() -> Dict[str, Any]:
         user_params.setdefault("exchange", exchange)
         symbols = list(payload.get("symbols") or [])
         timeframe = str(payload.get("timeframe") or "1h")
-        allocation = float(payload.get("allocation") or 1.0)
+        allocation = float(payload.get("allocation") or settings.DEFAULT_STRATEGY_ALLOCATION)
         runtime_limit_minutes = payload.get("runtime_limit_minutes")
+        runtime_started_at = _parse_runtime_anchor(payload.get("runtime_started_at"))
         state = str(payload.get("state") or ("running" if row.is_active else "stopped")).lower()
 
         if strategy_manager.get_strategy(name) is None:
@@ -146,6 +164,8 @@ async def restore_strategies_from_db() -> Dict[str, Any]:
 
         if state == "running":
             if await strategy_manager.start_strategy(name):
+                if runtime_started_at is not None:
+                    strategy_manager.restore_strategy_runtime_anchor(name, runtime_started_at)
                 started.append(name)
             else:
                 skipped.append({"name": name, "reason": "start_failed"})

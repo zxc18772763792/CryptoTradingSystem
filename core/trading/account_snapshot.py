@@ -24,7 +24,7 @@ class AccountSnapshotManager:
         mode: str = "paper",
     ) -> None:
         """Store one portfolio-level snapshot plus per-exchange snapshots."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if (
             self._last_recorded_at
             and (now - self._last_recorded_at).total_seconds() < self._min_interval_seconds
@@ -75,7 +75,7 @@ class AccountSnapshotManager:
         """Get snapshot history for charting."""
         hours = max(1, hours)
         limit = max(1, min(limit, 5000))
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         async with async_session_maker() as session:
             stmt = (
@@ -124,7 +124,7 @@ class AccountSnapshotManager:
         day: Optional[datetime] = None,
     ) -> Optional[float]:
         """Get the earliest recorded total_usd for the given UTC day."""
-        anchor = day or datetime.utcnow()
+        anchor = day or datetime.now(timezone.utc)
         day_start = anchor.replace(hour=0, minute=0, second=0, microsecond=0)
 
         async with async_session_maker() as session:

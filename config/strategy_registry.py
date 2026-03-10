@@ -358,6 +358,18 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "symbols": ["BTC/USDT"],
         "backtest": {"supported": True, "description": "多因子高频策略(5m)", "optimization_grid": {"enter_th": [0.5, 0.65, 0.75, 0.9], "exit_th": [0.1, 0.2, 0.3], "cooldown_bars": [1, 2, 3]}},
     },
+    "MLXGBoostStrategy": {
+        "category": "机器学习",
+        "risk": "medium",
+        "usage": "XGBoost 方向预测",
+        "family": "ml",
+        "decision_engine": "ml",
+        "ai_driven": True,
+        "defaults": {"threshold": 0.55, "stop_loss_pct": 0.025, "take_profit_pct": 0.06},
+        "timeframe": "1h",
+        "symbols": ["BTC/USDT"],
+        "backtest": {"supported": True, "description": "XGBoost 价格方向分类策略", "optimization_grid": {"threshold": [0.52, 0.55, 0.58, 0.62]}},
+    },
     "CEXArbitrageStrategy": {
         "category": "套利",
         "risk": "high",
@@ -433,13 +445,50 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
 }
 
 
+_STRATEGY_META_OVERRIDES: Dict[str, Dict[str, Any]] = {
+    "MLXGBoostStrategy": {
+        "family": "ml",
+        "decision_engine": "ml",
+        "ai_driven": True,
+    },
+    "MarketSentimentStrategy": {
+        "family": "ai_glm",
+        "decision_engine": "glm",
+        "ai_driven": True,
+    },
+    "SocialSentimentStrategy": {
+        "family": "ai_glm",
+        "decision_engine": "glm",
+        "ai_driven": True,
+    },
+    "FundFlowStrategy": {
+        "family": "ai_glm",
+        "decision_engine": "glm",
+        "ai_driven": True,
+    },
+    "WhaleActivityStrategy": {
+        "family": "ai_glm",
+        "decision_engine": "glm",
+        "ai_driven": True,
+    },
+}
+
+
 def get_strategy_registry_entry(name: str) -> Dict[str, Any]:
-    return deepcopy(STRATEGY_REGISTRY.get(str(name), {}))
+    key = str(name)
+    item = deepcopy(STRATEGY_REGISTRY.get(key, {}))
+    if item:
+        item.update(_STRATEGY_META_OVERRIDES.get(key, {}))
+    return item
 
 
 def get_strategy_library_meta(name: str) -> Dict[str, Any]:
     item = get_strategy_registry_entry(name)
-    return {k: item.get(k) for k in ("category", "risk", "usage") if k in item}
+    return {
+        k: item.get(k)
+        for k in ("category", "risk", "usage", "family", "decision_engine", "ai_driven")
+        if k in item
+    }
 
 
 def get_strategy_defaults(name: str) -> Dict[str, Any]:
@@ -500,4 +549,3 @@ def is_strategy_backtest_supported(name: str) -> bool:
 
 def get_backtest_optimization_grid(name: str) -> Dict[str, List[Any]]:
     return deepcopy(STRATEGY_REGISTRY.get(str(name), {}).get("backtest", {}).get("optimization_grid", {}))
-

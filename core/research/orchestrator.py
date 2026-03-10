@@ -12,7 +12,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 
 from config.settings import settings
+from config.strategy_registry import get_strategy_registry_entry
 from core.ai.proposal_schemas import ResearchProposal
+from core.backtest.common_pnl import build_common_pnl_summary
 from core.ai.research_planner import PlannerGenerateRequest, generate_research_proposal
 from core.deployment.promotion_engine import (
     promote_candidate,
@@ -491,10 +493,21 @@ def delete_proposal(
     for job_id, job in (app.state.research_jobs or {}).items():
         if str(job.get("proposal_id") or "") != str(proposal_id):
             continue
-        proposal_jobs.append((str(job_id), dict(job or {})))
+        raw = dict(job or {})
+        status = str(raw.get("status") or "")
+        task = (app.state.research_job_tasks or {}).get(str(job_id))
+        # Allow deleting proposals whose persisted job is stale after restart or task loss.
+        if status in {"pending", "running"} and (task is None or getattr(task, "done", lambda: False)()):
+            raw["status"] = "failed"
+            raw["finished_at"] = raw.get("finished_at") or _now_utc().isoformat()
+            raw["error"] = raw.get("error") or "stale research job recovered during delete"
+            app.state.research_jobs[str(job_id)] = raw
+        proposal_jobs.append((str(job_id), raw))
     has_active_job = any(str(job.get("status") or "") in {"pending", "running"} for _, job in proposal_jobs)
     if has_active_job:
         raise HTTPException(status_code=409, detail="proposal has active research job, cannot delete")
+    if proposal_jobs:
+        _persist_research_jobs(app)
 
     blocked_states = {
         "paper_running",
@@ -656,6 +669,120 @@ def _correlation_filter_candidates(
             accepted_curves[strat] = my_curve
 
 
+def _correlation_filter_candidates_v2(
+    candidates: List[StrategyCandidate],
+    corr_threshold: float = 0.85,
+    existing_candidates: Optional[List[StrategyCandidate]] = None,
+) -> None:
+    """In-place: mark candidates that are effectively redundant."""
+    import numpy as np
+
+    def _get_curve(c: StrategyCandidate) -> Optional[List[float]]:
+        best_meta = dict(c.metadata.get("best") or {})
+        raw = best_meta.get("equity_curve_sample") or []
+        return list(raw) if len(raw) >= 10 else None
+
+    def _params_key(c: StrategyCandidate) -> tuple[tuple[str, str], ...]:
+        params = dict(c.params or {})
+        return tuple(sorted((str(k), str(v)) for k, v in params.items()))
+
+    def _signature(c: StrategyCandidate) -> tuple[str, str, str, str]:
+        meta = get_strategy_registry_entry(c.strategy)
+        family = str(meta.get("family") or meta.get("decision_engine") or meta.get("category") or c.strategy)
+        category = str(meta.get("category") or "")
+        return (family, category, str(c.symbol or ""), str(c.timeframe or ""))
+
+    def _reject(c: StrategyCandidate, reason: str) -> None:
+        c.metadata["correlation_filtered"] = True
+        if c.promotion and c.promotion.decision != "reject":
+            from core.research.experiment_schemas import PromotionDecision as _PD
+
+            c.promotion = _PD(
+                candidate_id=c.candidate_id,
+                decision="reject",
+                reason=reason,
+                constraints={},
+                created_at=_now_utc(),
+            )
+            c.promotion_target = None
+
+    curves: Dict[str, Optional[List[float]]] = {c.strategy: _get_curve(c) for c in candidates}
+    accepted: List[Dict[str, Any]] = []
+    accepted_exact_keys: set[tuple[str, str, str, tuple[tuple[str, str], ...]]] = set()
+    existing_strategy_set = set()
+
+    for exc in (existing_candidates or []):
+        exact_key = (str(exc.strategy or ""), str(exc.symbol or ""), str(exc.timeframe or ""), _params_key(exc))
+        if exact_key in accepted_exact_keys:
+            continue
+        accepted_exact_keys.add(exact_key)
+        accepted.append(
+            {
+                "strategy": exc.strategy,
+                "curve": _get_curve(exc),
+                "signature": _signature(exc),
+            }
+        )
+        existing_strategy_set.add(exc.strategy)
+
+    for cand in candidates:
+        strat = cand.strategy
+        my_curve = curves.get(strat)
+        my_signature = _signature(cand)
+        my_exact_key = (str(cand.strategy or ""), str(cand.symbol or ""), str(cand.timeframe or ""), _params_key(cand))
+
+        if my_exact_key in accepted_exact_keys:
+            cand.metadata["correlated_with"] = str(cand.strategy)
+            cand.metadata["correlation_value"] = 1.0
+            cand.metadata["correlation_is_cross_batch"] = True
+            cand.metadata["duplicate_signature"] = True
+            _reject(cand, "redundant candidate: identical strategy/timeframe/params already exists")
+            continue
+
+        max_corr = 0.0
+        corr_peer: Optional[str] = None
+        corr_peer_signature: Optional[tuple[str, str, str, str]] = None
+        effective_threshold = corr_threshold
+
+        if my_curve is not None:
+            for accepted_item in accepted:
+                acc_strat = str(accepted_item.get("strategy") or "")
+                peer_curve = accepted_item.get("curve")
+                if peer_curve is None or acc_strat == strat:
+                    continue
+                n = min(len(my_curve), len(peer_curve))
+                x = np.array(my_curve[:n], dtype=float)
+                y = np.array(peer_curve[:n], dtype=float)
+                if x.std() < 1e-9 or y.std() < 1e-9:
+                    continue
+                corr = abs(float(np.corrcoef(x, y)[0, 1]))
+                if corr > max_corr:
+                    max_corr = corr
+                    corr_peer = acc_strat
+                    corr_peer_signature = accepted_item.get("signature")
+                    effective_threshold = min(corr_threshold, 0.72) if corr_peer_signature == my_signature else corr_threshold
+
+        if my_curve is not None and max_corr >= effective_threshold and corr_peer is not None:
+            cand.metadata["correlated_with"] = corr_peer
+            cand.metadata["correlation_value"] = round(max_corr, 3)
+            cand.metadata["correlation_is_cross_batch"] = corr_peer in existing_strategy_set
+            cand.metadata["duplicate_signature"] = corr_peer_signature == my_signature
+            if corr_peer_signature == my_signature:
+                reason = f"redundant candidate: same family/signature and highly correlated with {corr_peer} (corr={max_corr:.2f})"
+            else:
+                reason = f"redundant candidate: highly correlated with {corr_peer} (corr={max_corr:.2f})"
+            _reject(cand, reason)
+        else:
+            accepted.append(
+                {
+                    "strategy": strat,
+                    "curve": my_curve,
+                    "signature": my_signature,
+                }
+            )
+            accepted_exact_keys.add(my_exact_key)
+
+
 def _create_candidates_from_result(
     proposal: ResearchProposal,
     experiment: ExperimentSpec,
@@ -679,6 +806,7 @@ def _create_candidates_from_result(
     for strat_name, strat_best in best_per_strategy.items():
         if not strat_best:
             continue
+        strategy_meta = get_strategy_registry_entry(str(strat_best.get("strategy") or strat_name))
         # Build per-strategy validation using strategy-level run counts
         valid_r = max(int(valid_counts.get(strat_name, 0) or 0), 1)
         error_r = int(error_counts.get(strat_name, 0) or 0)
@@ -706,22 +834,45 @@ def _create_candidates_from_result(
             metadata={
                 "exchange": experiment.exchange,
                 "best": strat_best,
+                "common_pnl": build_common_pnl_summary(
+                    source="research_batch_backtest",
+                    unit="pct_return",
+                    gross_pnl=strat_best.get("gross_total_return"),
+                    fee=strat_best.get("cost_drag_return_pct"),
+                    slippage_cost=None,
+                    funding_pnl=0.0,
+                    net_pnl=strat_best.get("total_return"),
+                    turnover=None,
+                    trade_count=strat_best.get("total_trades"),
+                    win_rate=strat_best.get("win_rate"),
+                    cost_model_version="research_batch_v1",
+                    metadata={
+                        "timeframe": str(strat_best.get("timeframe") or ""),
+                        "strategy": str(strat_best.get("strategy") or strat_name),
+                        "funding_available": bool(result.get("funding_available", False)),
+                    },
+                ),
                 "top_results": strat_top,
                 "strategy_valid_counts": valid_counts,
                 "strategy_error_counts": error_counts,
                 "csv_path": result.get("csv_path"),
                 "markdown_path": result.get("markdown_path"),
+                "news_events_count": int(result.get("news_events_count", 0) or 0),
+                "funding_available": bool(result.get("funding_available", False)),
+                "decision_engine": strategy_meta.get("decision_engine"),
+                "ai_driven": bool(strategy_meta.get("ai_driven", False)),
             },
         )
         promo = build_promotion_decision(candidate.candidate_id, strat_summary)
         candidate.promotion = promo
-        candidate.promotion_target = promo.decision if promo.decision in {"paper", "shadow", "live_candidate"} else None
+        normalized_target = "paper" if promo.decision == "shadow" else promo.decision
+        candidate.promotion_target = normalized_target if normalized_target in {"paper", "live_candidate"} else None
         candidates.append(candidate)
 
     candidates.sort(key=lambda c: c.score, reverse=True)
     # Correlation filter: mark redundant candidates (within batch + cross-batch vs existing running)
     if len(candidates) > 1 or existing_candidates:
-        _correlation_filter_candidates(candidates, corr_threshold=0.85, existing_candidates=existing_candidates or [])
+        _correlation_filter_candidates_v2(candidates, corr_threshold=0.85, existing_candidates=existing_candidates or [])
 
     best_candidate = next((c for c in candidates if not c.metadata.get("correlation_filtered")), None) or (candidates[0] if candidates else None)
     return overall_summary, candidates, best_candidate
@@ -829,7 +980,28 @@ async def _finalize_research_run(
         "run_id": run.run_id,
         "csv_path": result.get("csv_path"),
         "markdown_path": result.get("markdown_path"),
+        "news_events_count": int(result.get("news_events_count", 0) or 0),
+        "funding_available": bool(result.get("funding_available", False)),
         "best": result.get("best"),
+        "common_pnl": build_common_pnl_summary(
+            source="research_batch_backtest",
+            unit="pct_return",
+            gross_pnl=(result.get("best") or {}).get("gross_total_return"),
+            fee=(result.get("best") or {}).get("cost_drag_return_pct"),
+            slippage_cost=None,
+            funding_pnl=0.0,
+            net_pnl=(result.get("best") or {}).get("total_return"),
+            turnover=None,
+            trade_count=(result.get("best") or {}).get("total_trades"),
+            win_rate=(result.get("best") or {}).get("win_rate"),
+            cost_model_version="research_batch_v1",
+            metadata={
+                "symbol": config.symbol,
+                "exchange": config.exchange,
+                "timeframes": list(config.timeframes),
+                "funding_available": bool(result.get("funding_available", False)),
+            },
+        ),
         "validation_summary": summary.model_dump(mode="json"),
     }
     proposal.metadata.pop("last_research_error", None)
@@ -892,22 +1064,22 @@ async def _finalize_research_run(
 
     governance_enabled = bool(getattr(settings, "GOVERNANCE_ENABLED", True))
     if promotion is not None and promotion.decision != "reject":
+        normalized_target = "paper" if str(promotion.decision) == "shadow" else str(promotion.decision)
+        promotion.decision = normalized_target
+        candidate.promotion_target = normalized_target if normalized_target in {"paper", "live_candidate"} else None
+        candidate.metadata["recommended_runtime_target"] = normalized_target
+        candidate.metadata["manual_register_required"] = True
+        proposal.metadata["manual_register_required"] = True
+        candidate.metadata.pop("promotion_pending_human_gate", None)
+        proposal.metadata.pop("promotion_pending_human_gate", None)
         if governance_enabled:
             candidate.metadata["promotion_pending_human_gate"] = True
-            candidate.metadata["recommended_runtime_target"] = str(promotion.decision)
             proposal.metadata["promotion_pending_human_gate"] = True
             app.state.ai_candidate_registry.save(candidate)
             save_proposal(app, proposal)
         else:
-            try:
-                promotion_result = await promote_candidate(app, proposal=proposal, candidate=candidate, promotion=promotion, actor=actor)
-                app.state.ai_candidate_registry.save(candidate)
-                save_proposal(app, proposal)
-            except Exception as exc:
-                candidate.metadata["promotion_error"] = str(exc)
-                proposal.metadata["last_promotion_error"] = str(exc)
-                app.state.ai_candidate_registry.save(candidate)
-                save_proposal(app, proposal)
+            app.state.ai_candidate_registry.save(candidate)
+            save_proposal(app, proposal)
     elif promotion is not None:
         if proposal.status == "validated":
             transition_proposal(proposal, to_state="rejected", lifecycle_registry=app.state.ai_lifecycle_registry, actor=actor, reason=promotion.reason)
@@ -1303,12 +1475,18 @@ async def promote_existing_candidate(
     promotion = candidate.promotion
     if target:
         decision = str(target).strip()
-        if decision not in {"paper", "shadow", "live_candidate"}:
+        if decision == "shadow":
+            decision = "paper"
+        if decision not in {"paper", "live_candidate"}:
             raise HTTPException(status_code=400, detail="unsupported promotion target")
         paper_allocation_cap = max(0.0, min(1.0, float(getattr(settings, "DEFAULT_STRATEGY_ALLOCATION", 0.15) or 0.15)))
         promotion.decision = decision
         promotion.constraints["allocation_cap"] = paper_allocation_cap if decision == "paper" else 0.0
-        promotion.constraints["runtime_mode"] = "paper" if decision == "paper" else ("shadow_virtual" if decision == "shadow" else "candidate_only")
+        promotion.constraints["runtime_mode"] = "paper" if decision == "paper" else "candidate_only"
+    elif str(promotion.decision) == "shadow":
+        promotion.decision = "paper"
+        promotion.constraints["allocation_cap"] = max(0.0, min(1.0, float(getattr(settings, "DEFAULT_STRATEGY_ALLOCATION", 0.15) or 0.15)))
+        promotion.constraints["runtime_mode"] = "paper"
     result = await promote_candidate(app, proposal=proposal, candidate=candidate, promotion=promotion, actor=actor)
     app.state.ai_candidate_registry.save(candidate)
     save_proposal(app, proposal)

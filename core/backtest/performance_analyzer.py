@@ -140,8 +140,8 @@ class PerformanceAnalyzer:
         """年化收益率"""
         if periods <= 0:
             return 0
-        # 假设periods是天数
-        years = periods / 252
+        # 加密货币 7×24 全年交易，使用 365 天
+        years = periods / 365
         if years <= 0:
             return total_return
         return (1 + total_return) ** (1 / years) - 1
@@ -156,7 +156,7 @@ class PerformanceAnalyzer:
         """计算年化波动率"""
         if len(returns) < 2:
             return 0
-        return float(np.std(returns) * np.sqrt(252))
+        return float(np.std(returns) * np.sqrt(365))
 
     def _calculate_var(self, returns: np.ndarray, confidence: float) -> float:
         """计算VaR"""
@@ -175,8 +175,8 @@ class PerformanceAnalyzer:
         """计算夏普比率"""
         if len(returns) < 2:
             return 0
-        mean_return = np.mean(returns) * 252
-        std_return = np.std(returns) * np.sqrt(252)
+        mean_return = np.mean(returns) * 365
+        std_return = np.std(returns) * np.sqrt(365)
         if std_return == 0:
             return 0
         return float((mean_return - self.risk_free_rate) / std_return)
@@ -185,11 +185,11 @@ class PerformanceAnalyzer:
         """计算索提诺比率"""
         if len(returns) < 2:
             return 0
-        mean_return = np.mean(returns) * 252
+        mean_return = np.mean(returns) * 365
         downside_returns = returns[returns < 0]
         if len(downside_returns) == 0:
             return float("inf")
-        downside_std = np.std(downside_returns) * np.sqrt(252)
+        downside_std = np.std(downside_returns) * np.sqrt(365)
         if downside_std == 0:
             return 0
         return float((mean_return - self.risk_free_rate) / downside_std)
@@ -197,7 +197,7 @@ class PerformanceAnalyzer:
     def _calculate_calmar(self, annual_return: float, max_drawdown: float) -> float:
         """计算卡玛比率"""
         if max_drawdown == 0:
-            return float("inf")
+            return 0.0
         return annual_return / max_drawdown
 
     def _analyze_trades(self, trades: List[BacktestTrade]) -> Dict:

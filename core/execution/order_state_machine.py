@@ -5,7 +5,7 @@ Standalone component: can be wired into the existing execution engine later.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -84,7 +84,7 @@ class OrderStateSnapshot:
 
 
 def _now() -> datetime:
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)
 
 
 def _coerce_dt(v: Any) -> Optional[datetime]:

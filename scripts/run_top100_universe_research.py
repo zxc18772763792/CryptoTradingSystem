@@ -5,7 +5,7 @@ import argparse
 import asyncio
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -648,7 +648,7 @@ async def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     result = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "exchange": exchange,
         "base_timeframe": base_timeframe,
         "universe_count_input": len(symbols),

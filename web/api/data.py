@@ -1,9 +1,10 @@
 ﻿"""Data API."""
 import asyncio
+import copy
 import hashlib
 import math
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +31,16 @@ from core.data import (
 from core.data.factor_library import FACTOR_CATALOG, build_factor_library
 from core.exchanges import exchange_manager
 
+try:
+    from core.data.funding_rate_collector import FundingRateCollector
+except Exception:  # pragma: no cover - optional integration
+    FundingRateCollector = None
+
+try:
+    from core.data.sentiment.fear_greed_collector import FearGreedCollector
+except Exception:  # pragma: no cover - optional integration
+    FearGreedCollector = None
+
 router = APIRouter()
 
 
@@ -52,12 +63,22 @@ _RESAMPLE_RULES = {
 _REPLAY_SESSIONS: Dict[str, Dict[str, Any]] = {}
 _RESEARCH_COVERAGE_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "df": None}
 _DOWNLOAD_TASKS: Dict[str, Dict[str, Any]] = {}
+_ONCHAIN_OVERVIEW_CACHE: Dict[str, Dict[str, Any]] = {}
+_ONCHAIN_OVERVIEW_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
+_FACTOR_LIBRARY_CACHE: Dict[str, Dict[str, Any]] = {}
+_FACTOR_LIBRARY_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
+_FAMA_CACHE: Dict[str, Dict[str, Any]] = {}
+_FAMA_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
 _HEALTH_EXACT_SCAN_ROW_LIMIT = 250000
 _HEALTH_EXACT_SCAN_FILE_LIMIT = 32
 _HEALTH_GAP_PREVIEW_LIMIT = 8
 _HEALTH_FAST_SCAN_RELAXED_TIMEFRAMES = {"1s", "5s", "10s", "30s"}
 _HEALTH_FAST_SCAN_MIN_EXPECTED_BARS = 20000
 _HEALTH_FAST_SCAN_DENSITY_THRESHOLD = 0.35
+_ONCHAIN_OVERVIEW_CACHE_TTL_SEC = 180.0
+_ONCHAIN_OVERVIEW_CACHE_STALE_SEC = 1800.0
+_FACTOR_CACHE_TTL_SEC = 300.0
+_FACTOR_CACHE_STALE_SEC = 1800.0
 
 
 class KlineRequest(BaseModel):
@@ -125,6 +146,52 @@ def _safe_iso_timestamp(value: Any) -> Optional[str]:
     except Exception:
         text = str(value or "").strip()
         return text or None
+
+
+def _utc_iso(dt: Optional[datetime] = None) -> str:
+    current = dt or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    return current.isoformat().replace("+00:00", "Z")
+
+
+def _error_text(err: Any) -> str:
+    if err is None:
+        return ""
+    text = str(err).strip()
+    return text or type(err).__name__
+
+
+def _onchain_overview_cache_key(exchange: str, symbol: str, whale_threshold_btc: float, chain: str) -> str:
+    return "|".join(
+        [
+            str(exchange or "binance").strip().lower(),
+            str(symbol or "BTC/USDT").strip().upper(),
+            f"{float(whale_threshold_btc or 0.0):.4f}",
+            str(chain or "Ethereum").strip(),
+        ]
+    )
+
+
+def _research_payload_cache_key(prefix: str, **kwargs: Any) -> str:
+    ordered = [prefix]
+    for key in sorted(kwargs.keys()):
+        value = kwargs[key]
+        if isinstance(value, (list, tuple, set)):
+            text = ",".join(str(item) for item in value)
+        else:
+            text = str(value)
+        ordered.append(f"{key}={text}")
+    return "|".join(ordered)
+
+
+def _clone_jsonable(payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return copy.deepcopy(payload)
+    except Exception:
+        return dict(payload or {})
 
 
 def _coerce_timestamp(value: Any) -> Optional[pd.Timestamp]:
@@ -683,7 +750,7 @@ def _fill_missing_bars(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
 def _new_replay_id(payload: Dict[str, Any]) -> str:
     raw = (
         f"{payload.get('exchange')}|{payload.get('symbol')}|{payload.get('timeframe')}|"
-        f"{datetime.utcnow().isoformat()}|{len(_REPLAY_SESSIONS)}"
+        f"{datetime.now(timezone.utc).isoformat()}|{len(_REPLAY_SESSIONS)}"
     )
     return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
 
@@ -703,6 +770,8 @@ async def _load_symbol_df(
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
 ) -> pd.DataFrame:
+    start_time = _normalize_query_datetime(start_time)
+    end_time = _normalize_query_datetime(end_time)
     df = await _load_local_or_aggregate(
         exchange=exchange,
         symbol=symbol,
@@ -756,27 +825,30 @@ async def _fetch_defillama_chain_tvl(chain: str = "Ethereum") -> Dict[str, Any]:
     }
 
 
-async def _fetch_btc_whale_unconfirmed(min_btc: float = 100.0) -> Dict[str, Any]:
+async def _fetch_btc_whale_unconfirmed(min_btc: float = 10.0) -> Dict[str, Any]:
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            tx_res = await client.get("https://blockchain.info/unconfirmed-transactions?format=json")
-            px_res = await client.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
+        # Fetch tx + BTC price concurrently to avoid serial latency blowing through API timeout.
+        async with httpx.AsyncClient(timeout=6.5) as client:
+            tx_res, px_res = await asyncio.gather(
+                client.get("https://blockchain.info/unconfirmed-transactions?format=json"),
+                client.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
+            )
             tx_res.raise_for_status()
             px_res.raise_for_status()
             tx_json = tx_res.json() or {}
             px_json = px_res.json() or {}
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        return {"available": False, "error": f"whale_timeout:{type(exc).__name__}", "count": 0, "transactions": []}
     except Exception as e:
         return {"available": False, "error": str(e), "count": 0, "transactions": []}
 
     btc_price = float(px_json.get("price") or 0.0)
     txs = tx_json.get("txs") or []
-    whales = []
+    candidates = []
     for tx in txs[:500]:
         out_value_satoshi = sum(float(v.get("value", 0.0) or 0.0) for v in (tx.get("out") or []))
         btc_amount = out_value_satoshi / 1e8
-        if btc_amount < float(min_btc):
-            continue
-        whales.append(
+        candidates.append(
             {
                 "hash": tx.get("hash"),
                 "btc": round(btc_amount, 6),
@@ -786,14 +858,119 @@ async def _fetch_btc_whale_unconfirmed(min_btc: float = 100.0) -> Dict[str, Any]
                 else None,
             }
         )
-
+    requested_threshold = float(max(1.0, min_btc))
+    effective_threshold = requested_threshold
+    whales = [item for item in candidates if float(item.get("btc") or 0.0) >= effective_threshold]
+    if not whales and requested_threshold > 10.0:
+        effective_threshold = 10.0
+        whales = [item for item in candidates if float(item.get("btc") or 0.0) >= effective_threshold]
     whales.sort(key=lambda x: float(x.get("btc") or 0.0), reverse=True)
     return {
         "available": True,
         "btc_price": btc_price,
-        "threshold_btc": float(min_btc),
+        "threshold_btc": float(effective_threshold),
+        "requested_threshold_btc": float(requested_threshold),
         "count": len(whales),
         "transactions": whales[:50],
+    }
+
+
+async def _fetch_multi_exchange_funding(symbol: str) -> Dict[str, Any]:
+    if FundingRateCollector is None:
+        return {"available": False, "count": 0, "rates": {}, "error": "funding_collector_unavailable"}
+
+    try:
+        async with FundingRateCollector(timeout=8) as collector:
+            rates = await collector.fetch_all(symbol)
+    except Exception as exc:
+        return {
+            "available": False,
+            "count": 0,
+            "rates": {},
+            "symbol": symbol,
+            "error": _error_text(exc),
+        }
+
+    if not rates:
+        return {
+            "available": False,
+            "count": 0,
+            "rates": {},
+            "symbol": symbol,
+            "error": "no_exchange_data",
+        }
+
+    normalized: Dict[str, Dict[str, Any]] = {}
+    values: List[float] = []
+    for exchange, row in rates.items():
+        try:
+            value = float(getattr(row, "funding_rate", 0.0))
+            values.append(value)
+            normalized[str(exchange)] = {
+                "symbol": str(getattr(row, "symbol", "") or ""),
+                "funding_rate": value,
+                "funding_rate_pct": round(value * 100.0, 6),
+                "funding_time": (
+                    getattr(row, "funding_time", None).isoformat()
+                    if getattr(row, "funding_time", None)
+                    else None
+                ),
+                "source": "exchange_public_api",
+            }
+        except Exception:
+            continue
+
+    if not normalized:
+        return {
+            "available": False,
+            "count": 0,
+            "rates": {},
+            "symbol": symbol,
+            "error": "parse_empty",
+        }
+
+    spread_rate = (max(values) - min(values)) if values else 0.0
+    mean_rate = (sum(values) / len(values)) if values else 0.0
+    return {
+        "available": True,
+        "symbol": symbol,
+        "count": len(normalized),
+        "rates": normalized,
+        "mean_rate": round(mean_rate, 10),
+        "mean_rate_pct": round(mean_rate * 100.0, 6),
+        "spread_rate": round(spread_rate, 10),
+        "spread_rate_pct": round(spread_rate * 100.0, 6),
+        "max_abs_rate_pct": round(max(abs(v) for v in values) * 100.0, 6) if values else 0.0,
+        "timestamp": _utc_iso(),
+    }
+
+
+async def _fetch_fear_greed_snapshot() -> Dict[str, Any]:
+    if FearGreedCollector is None:
+        return {"available": False, "error": "fear_greed_collector_unavailable"}
+
+    try:
+        async with FearGreedCollector(timeout=8) as collector:
+            current = await collector.fetch_current()
+    except Exception as exc:
+        return {"available": False, "error": _error_text(exc)}
+
+    if not current:
+        return {"available": False, "error": "empty_response"}
+
+    return {
+        "available": True,
+        "value": int(getattr(current, "value", 0)),
+        "classification": str(getattr(current, "classification", "") or ""),
+        "signal": str(getattr(current, "signal", "") or ""),
+        "signal_strength": round(float(getattr(current, "signal_strength", 0.0) or 0.0), 4),
+        "timestamp": (
+            getattr(current, "timestamp", None).isoformat()
+            if getattr(current, "timestamp", None)
+            else None
+        ),
+        "time_until_update": getattr(current, "time_until_update", None),
+        "source": "alternative.me",
     }
 
 
@@ -822,6 +999,349 @@ def _calc_trade_imbalance_proxy(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
         "buy_volume": round(buy_volume, 6),
         "sell_volume": round(sell_volume, 6),
         "imbalance": round(imbalance, 6),
+    }
+
+
+def _build_onchain_component_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    flow = dict(payload.get("exchange_flow_proxy") or {})
+    tvl = dict(payload.get("defi_tvl") or {})
+    whales = dict(payload.get("whale_activity") or {})
+    funding_multi = dict(payload.get("funding_rate_multi_source") or {})
+    fear_greed = dict(payload.get("fear_greed_index") or {})
+    return {
+        "exchange_flow_proxy": {
+            "status": "ok" if flow.get("available") else "degraded",
+            "source": "exchange_public_trades",
+            "error": flow.get("error"),
+        },
+        "defi_tvl": {
+            "status": "ok" if tvl.get("available") else "degraded",
+            "source": "defillama",
+            "error": tvl.get("error"),
+        },
+        "whale_activity": {
+            "status": "ok" if whales.get("available") else "degraded",
+            "source": "blockchain_info+binance_price",
+            "error": whales.get("error"),
+        },
+        "funding_rate_multi_source": {
+            "status": "ok" if funding_multi.get("available") else "degraded",
+            "source": "binance+bybit+okx+gate",
+            "error": funding_multi.get("error"),
+        },
+        "fear_greed_index": {
+            "status": "ok" if fear_greed.get("available") else "degraded",
+            "source": "alternative.me",
+            "error": fear_greed.get("error"),
+        },
+    }
+
+
+async def _compute_onchain_overview(
+    exchange: str,
+    symbol: str,
+    whale_threshold_btc: float,
+    chain: str,
+) -> Dict[str, Any]:
+    started_at = time.monotonic()
+    connector = exchange_manager.get_exchange(exchange)
+    if connector is None:
+        imbalance = {
+            "available": False,
+            "count": 0,
+            "buy_volume": 0.0,
+            "sell_volume": 0.0,
+            "imbalance": 0.0,
+            "error": f"exchange_not_connected:{exchange}",
+        }
+    else:
+        imbalance = {
+            "available": False,
+            "count": 0,
+            "buy_volume": 0.0,
+            "sell_volume": 0.0,
+            "imbalance": 0.0,
+            "error": "live_flow_proxy_disabled_for_fast_path",
+        }
+
+    tvl_task = asyncio.create_task(asyncio.wait_for(_fetch_defillama_chain_tvl(chain=chain), timeout=6.0))
+    whale_task = asyncio.create_task(
+        asyncio.wait_for(_fetch_btc_whale_unconfirmed(min_btc=max(1.0, whale_threshold_btc)), timeout=8.0)
+    )
+    funding_task = asyncio.create_task(asyncio.wait_for(_fetch_multi_exchange_funding(symbol=symbol), timeout=6.5))
+    fear_greed_task = asyncio.create_task(asyncio.wait_for(_fetch_fear_greed_snapshot(), timeout=6.5))
+
+    tvl_result, whale_result, funding_result, fear_greed_result = await asyncio.gather(
+        tvl_task,
+        whale_task,
+        funding_task,
+        fear_greed_task,
+        return_exceptions=True,
+    )
+    tvl = (
+        tvl_result
+        if isinstance(tvl_result, dict)
+        else {"chain": chain, "available": False, "error": _error_text(tvl_result), "series": []}
+    )
+    whales = (
+        whale_result
+        if isinstance(whale_result, dict)
+        else {"available": False, "error": _error_text(whale_result), "count": 0, "transactions": []}
+    )
+    funding_multi = (
+        funding_result
+        if isinstance(funding_result, dict)
+        else {"available": False, "error": _error_text(funding_result), "count": 0, "rates": {}, "symbol": symbol}
+    )
+    fear_greed = (
+        fear_greed_result
+        if isinstance(fear_greed_result, dict)
+        else {"available": False, "error": _error_text(fear_greed_result)}
+    )
+    payload = {
+        "symbol": symbol,
+        "exchange": exchange,
+        "window_hours": 4,
+        "exchange_flow_proxy": imbalance,
+        "defi_tvl": tvl,
+        "whale_activity": whales,
+        "funding_rate_multi_source": funding_multi,
+        "fear_greed_index": fear_greed,
+        "generated_at": _utc_iso(),
+        "latency_ms": int((time.monotonic() - started_at) * 1000),
+    }
+    payload["component_status"] = _build_onchain_component_status(payload)
+    payload["degraded"] = any(v.get("status") != "ok" for v in payload["component_status"].values())
+    return payload
+
+
+async def _refresh_onchain_overview_cache(
+    cache_key: str,
+    *,
+    exchange: str,
+    symbol: str,
+    whale_threshold_btc: float,
+    chain: str,
+) -> None:
+    try:
+        payload = await _compute_onchain_overview(
+            exchange=exchange,
+            symbol=symbol,
+            whale_threshold_btc=whale_threshold_btc,
+            chain=chain,
+        )
+        _ONCHAIN_OVERVIEW_CACHE[cache_key] = {
+            "created_monotonic": time.monotonic(),
+            "payload": payload,
+        }
+    except Exception as e:
+        logger.warning(f"onchain overview refresh failed {cache_key}: {e}")
+        cached = dict(_ONCHAIN_OVERVIEW_CACHE.get(cache_key) or {})
+        if cached:
+            payload = dict(cached.get("payload") or {})
+            payload["refresh_error"] = str(e)
+            payload["refresh_failed_at"] = _utc_iso()
+            cached["payload"] = payload
+            _ONCHAIN_OVERVIEW_CACHE[cache_key] = cached
+    finally:
+        _ONCHAIN_OVERVIEW_REFRESH_TASKS.pop(cache_key, None)
+
+
+def _prepare_cached_onchain_payload(cache_key: str, refresh: bool = False) -> Optional[Dict[str, Any]]:
+    cached = dict(_ONCHAIN_OVERVIEW_CACHE.get(cache_key) or {})
+    payload = dict(cached.get("payload") or {})
+    if not payload:
+        return None
+    age_sec = max(0.0, time.monotonic() - float(cached.get("created_monotonic") or 0.0))
+    payload["cached"] = True
+    payload["cache_age_sec"] = round(age_sec, 3)
+    payload["refreshing"] = cache_key in _ONCHAIN_OVERVIEW_REFRESH_TASKS
+    payload["stale"] = age_sec > _ONCHAIN_OVERVIEW_CACHE_TTL_SEC
+    payload["stale_too_long"] = age_sec > _ONCHAIN_OVERVIEW_CACHE_STALE_SEC
+    payload["served_mode"] = "cache_refresh" if refresh else "cache"
+    return payload
+
+
+def _build_onchain_placeholder(
+    *,
+    exchange: str,
+    symbol: str,
+    whale_threshold_btc: float,
+    chain: str,
+    reason: str = "后台刷新中",
+) -> Dict[str, Any]:
+    payload = {
+        "symbol": symbol,
+        "exchange": exchange,
+        "window_hours": 4,
+        "exchange_flow_proxy": {
+            "available": False,
+            "count": 0,
+            "buy_volume": 0.0,
+            "sell_volume": 0.0,
+            "imbalance": 0.0,
+            "error": reason,
+        },
+        "defi_tvl": {
+            "chain": chain,
+            "available": False,
+            "latest_tvl": None,
+            "change_1d_pct": 0.0,
+            "change_7d_pct": 0.0,
+            "series": [],
+            "error": reason,
+        },
+        "whale_activity": {
+            "available": False,
+            "btc_price": None,
+            "threshold_btc": float(max(1.0, whale_threshold_btc)),
+            "count": 0,
+            "transactions": [],
+            "error": reason,
+        },
+        "funding_rate_multi_source": {
+            "available": False,
+            "symbol": symbol,
+            "count": 0,
+            "rates": {},
+            "mean_rate": None,
+            "mean_rate_pct": None,
+            "spread_rate": None,
+            "spread_rate_pct": None,
+            "max_abs_rate_pct": None,
+            "error": reason,
+        },
+        "fear_greed_index": {
+            "available": False,
+            "value": None,
+            "classification": "",
+            "signal": "",
+            "signal_strength": None,
+            "timestamp": None,
+            "source": "alternative.me",
+            "error": reason,
+        },
+        "generated_at": _utc_iso(),
+        "latency_ms": 0,
+        "degraded": True,
+        "cached": False,
+        "cache_age_sec": 0.0,
+        "refreshing": True,
+        "stale": False,
+        "stale_too_long": False,
+        "served_mode": "bootstrap",
+    }
+    payload["component_status"] = _build_onchain_component_status(payload)
+    return payload
+
+
+def _prepare_research_cached_payload(
+    cache_store: Dict[str, Dict[str, Any]],
+    task_store: Dict[str, asyncio.Task],
+    cache_key: str,
+    *,
+    refresh: bool = False,
+) -> Optional[Dict[str, Any]]:
+    cached = dict(cache_store.get(cache_key) or {})
+    payload = dict(cached.get("payload") or {})
+    if not payload:
+        return None
+    age_sec = max(0.0, time.monotonic() - float(cached.get("created_monotonic") or 0.0))
+    payload["cached"] = True
+    payload["cache_age_sec"] = round(age_sec, 3)
+    payload["refreshing"] = cache_key in task_store
+    payload["stale"] = age_sec > _FACTOR_CACHE_TTL_SEC
+    payload["stale_too_long"] = age_sec > _FACTOR_CACHE_STALE_SEC
+    payload["served_mode"] = "cache_refresh" if refresh else "cache"
+    return payload
+
+
+def _store_research_cached_payload(
+    cache_store: Dict[str, Dict[str, Any]],
+    cache_key: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    cache_store[cache_key] = {
+        "created_monotonic": time.monotonic(),
+        "payload": _clone_jsonable(payload),
+    }
+    return payload
+
+
+def _build_factor_library_placeholder(
+    *,
+    exchange: str,
+    timeframe: str,
+    symbols_requested: List[str],
+    exclude_retired: bool,
+    excluded_symbols: Optional[List[str]] = None,
+    reason: str = "因子库正在后台计算",
+) -> Dict[str, Any]:
+    return {
+        "exchange": exchange,
+        "timeframe": timeframe,
+        "lookback_effective": 0,
+        "symbols_requested": list(symbols_requested or []),
+        "retired_filter": {
+            "enabled": bool(exclude_retired),
+            "excluded_symbols": list(excluded_symbols or []),
+            "requested_after_filter": list(symbols_requested or []),
+        },
+        "symbols_used": [],
+        "points": 0,
+        "factors": [],
+        "catalog": FACTOR_CATALOG,
+        "universe_size": 0,
+        "universe_quality": "empty",
+        "warnings": [str(reason)],
+        "latest": {},
+        "mean_24": {},
+        "std_24": {},
+        "correlation": {},
+        "series": [],
+        "asset_scores": [],
+        "error": str(reason),
+        "degraded": True,
+        "cached": False,
+        "cache_age_sec": 0.0,
+        "refreshing": False,
+        "served_mode": "fallback",
+    }
+
+
+def _build_fama_placeholder(
+    *,
+    exchange: str,
+    timeframe: str,
+    symbols_requested: List[str],
+    exclude_retired: bool,
+    excluded_symbols: Optional[List[str]] = None,
+    reason: str = "Fama 因子正在后台计算",
+) -> Dict[str, Any]:
+    return {
+        "exchange": exchange,
+        "timeframe": timeframe,
+        "symbols_requested": list(symbols_requested or []),
+        "retired_filter": {
+            "enabled": bool(exclude_retired),
+            "excluded_symbols": list(excluded_symbols or []),
+            "requested_after_filter": list(symbols_requested or []),
+        },
+        "symbols_used": [],
+        "points": 0,
+        "universe_size": 0,
+        "universe_quality": "empty",
+        "latest": {"MKT": 0.0, "SMB": 0.0, "HML": 0.0, "MOM": 0.0, "RMW": 0.0, "CMA": 0.0, "VOL": 0.0},
+        "mean_24": {"MKT": 0.0, "SMB": 0.0, "HML": 0.0, "MOM": 0.0, "RMW": 0.0, "CMA": 0.0, "VOL": 0.0},
+        "std_24": {"MKT": 0.0, "SMB": 0.0, "HML": 0.0, "MOM": 0.0, "RMW": 0.0, "CMA": 0.0, "VOL": 0.0},
+        "series": [],
+        "warnings": [str(reason)],
+        "error": str(reason),
+        "degraded": True,
+        "cached": False,
+        "cache_age_sec": 0.0,
+        "refreshing": False,
+        "served_mode": "fallback",
     }
 
 
@@ -945,25 +1465,27 @@ async def _build_factor_input_frames(
     tf_seconds = max(1, _timeframe_seconds(timeframe))
     # Bound disk scan cost for high-frequency data by querying a recent window first.
     window_seconds = max(3600, min(approx_bars * tf_seconds * 2, 366 * 24 * 3600))
+    common_end_candidates: Dict[str, Optional[datetime]] = {
+        sym: _latest_partition_end_time(exchange=exchange, symbol=sym, timeframe=timeframe) for sym in symbol_list
+    }
+    known_ends = [ts for ts in common_end_candidates.values() if ts is not None]
+    common_end = min(known_ends) if known_ends else None
+    query_start = (common_end - timedelta(seconds=window_seconds)) if common_end else None
 
     close_map: Dict[str, pd.Series] = {}
     volume_map: Dict[str, pd.Series] = {}
 
     for sym in symbol_list:
-        end_hint = _latest_partition_end_time(exchange=exchange, symbol=sym, timeframe=timeframe)
-        anchor = end_hint or datetime.utcnow()
-        query_start = anchor - timedelta(seconds=window_seconds)
-
         df = await _load_symbol_df(
             exchange=exchange,
             symbol=sym,
             timeframe=timeframe,
             start_time=query_start,
-            end_time=end_hint,
+            end_time=common_end,
         )
         if df.empty and timeframe not in _SUB_MINUTE_TIMEFRAMES:
-            # Fallback to full scan for symbols whose recent window has no local cache.
-            df = await _load_symbol_df(exchange=exchange, symbol=sym, timeframe=timeframe)
+            # Fallback to full scan for symbols whose shared window has no local cache.
+            df = await _load_symbol_df(exchange=exchange, symbol=sym, timeframe=timeframe, end_time=common_end)
         if df.empty:
             continue
         tail = df.tail(max(120, int(lookback)))
@@ -975,21 +1497,346 @@ async def _build_factor_input_frames(
         volume = volume.reindex(close.index).fillna(0.0)
         if len(close) < 30:
             continue
-        close_map[sym] = close
-        volume_map[sym] = volume
+        close_map[sym] = close[~close.index.duplicated(keep="last")].sort_index()
+        volume_map[sym] = volume[~volume.index.duplicated(keep="last")].sort_index()
 
     if not close_map:
         return pd.DataFrame(), pd.DataFrame(), []
 
-    close_df = pd.DataFrame(close_map).sort_index()
-    volume_df = pd.DataFrame(volume_map).reindex(close_df.index).sort_index().fillna(0.0)
-    used = [c for c in close_df.columns if c in volume_df.columns]
+    used = [c for c in close_map.keys() if c in volume_map]
     if not used:
         return pd.DataFrame(), pd.DataFrame(), []
+
+    common_index = None
+    for sym in used:
+        idx = close_map[sym].index.intersection(volume_map[sym].index)
+        common_index = idx if common_index is None else common_index.intersection(idx)
+
+    if common_index is None or len(common_index) < 30:
+        close_df = pd.DataFrame(close_map).sort_index()
+        volume_df = pd.DataFrame(volume_map).reindex(close_df.index).sort_index().fillna(0.0)
+        coverage_threshold = max(2, int(np.ceil(len(used) * 0.6)))
+        eligible = close_df.notna().sum(axis=1) >= coverage_threshold
+        close_df = close_df.loc[eligible].dropna(axis=1, how="all")
+        volume_df = volume_df.reindex(close_df.index)[close_df.columns].fillna(0.0)
+        used = list(close_df.columns)
+    else:
+        common_index = common_index.sort_values()
+        close_df = pd.DataFrame({sym: close_map[sym].reindex(common_index) for sym in used}, index=common_index)
+        volume_df = pd.DataFrame({sym: volume_map[sym].reindex(common_index) for sym in used}, index=common_index).fillna(0.0)
 
     close_df = close_df[used].dropna(how="all")
     volume_df = volume_df[used].reindex(close_df.index).fillna(0.0)
     return close_df, volume_df, used
+
+
+async def _compute_factor_library_payload(
+    *,
+    exchange: str,
+    symbols_requested: List[str],
+    timeframe: str,
+    lookback: int,
+    quantile: float,
+    series_limit: int,
+    exclude_retired: bool,
+) -> Dict[str, Any]:
+    requested, excluded_retired = _research_retired_filter(
+        exchange=exchange,
+        timeframe=timeframe,
+        requested=symbols_requested,
+        exclude_retired=exclude_retired,
+    )
+    symbol_list = _expand_symbols_with_local(
+        exchange=exchange,
+        timeframe=timeframe,
+        requested=requested,
+        min_symbols=4,
+        max_symbols=30,
+        excluded_symbols=set(excluded_retired),
+    )
+    close_df, volume_df, used = await _build_factor_input_frames(
+        exchange=exchange,
+        symbol_list=symbol_list,
+        timeframe=timeframe,
+        lookback=lookback,
+    )
+    if close_df.empty or len(used) < 2:
+        return _build_factor_library_placeholder(
+            exchange=exchange,
+            timeframe=timeframe,
+            symbols_requested=symbols_requested,
+            exclude_retired=exclude_retired,
+            excluded_symbols=excluded_retired,
+            reason="可用于多因子计算的数据不足（至少2个币种）",
+        )
+
+    result = await asyncio.to_thread(
+        build_factor_library,
+        close_df=close_df,
+        volume_df=volume_df,
+        quantile=float(quantile),
+        timeframe=timeframe,
+    )
+    factors = result.factors
+    if factors.empty:
+        return _build_factor_library_placeholder(
+            exchange=exchange,
+            timeframe=timeframe,
+            symbols_requested=symbols_requested,
+            exclude_retired=exclude_retired,
+            excluded_symbols=excluded_retired,
+            reason="多因子计算失败",
+        )
+
+    latest = factors.iloc[-1].to_dict()
+    mean_24 = factors.tail(min(24, len(factors))).mean().to_dict()
+    std_24 = factors.tail(min(24, len(factors))).std().fillna(0.0).to_dict()
+    corr = factors.corr().round(4).fillna(0.0).to_dict()
+
+    series: List[Dict[str, Any]] = []
+    tail = factors.tail(max(30, min(int(series_limit), 800)))
+    for idx, row in tail.iterrows():
+        payload = {"timestamp": idx.isoformat()}
+        for col in factors.columns:
+            payload[col] = round(float(row.get(col, 0.0)), 10)
+        series.append(payload)
+
+    asset_scores = []
+    if not result.asset_scores.empty:
+        for _, row in result.asset_scores.head(60).iterrows():
+            asset_scores.append(
+                {
+                    "symbol": str(row.get("symbol")),
+                    "score": round(float(row.get("score", 0.0)), 6),
+                    "momentum": round(float(row.get("momentum", 0.0)), 6),
+                    "value": round(float(row.get("value", 0.0)), 6),
+                    "value_hml": round(float(row.get("value_hml", 0.0)), 6),
+                    "quality": round(float(row.get("quality", 0.0)), 6),
+                    "profitability": round(float(row.get("profitability", 0.0)), 6),
+                    "investment": round(float(row.get("investment", 0.0)), 6),
+                    "low_vol": round(float(row.get("low_vol", 0.0)), 6),
+                    "liquidity": round(float(row.get("liquidity", 0.0)), 6),
+                    "low_beta": round(float(row.get("low_beta", 0.0)), 6),
+                    "size": round(float(row.get("size", 0.0)), 6),
+                }
+            )
+
+    warnings: List[str] = []
+    if len(used) < 4:
+        warnings.append("当前可用币种较少（<4），横截面因子稳定性有限，建议补充更多币种历史数据。")
+
+    return {
+        "exchange": exchange,
+        "timeframe": timeframe,
+        "lookback_effective": lookback,
+        "symbols_requested": symbols_requested,
+        "retired_filter": {
+            "enabled": bool(exclude_retired),
+            "excluded_symbols": excluded_retired,
+            "requested_after_filter": requested,
+        },
+        "symbols_used": used,
+        "points": int(len(factors)),
+        "factors": list(factors.columns),
+        "catalog": FACTOR_CATALOG,
+        "universe_size": len(used),
+        "universe_quality": "low" if len(used) < 4 else "normal",
+        "warnings": warnings,
+        "latest": {k: round(float(v), 10) for k, v in latest.items()},
+        "mean_24": {k: round(float(v), 10) for k, v in mean_24.items()},
+        "std_24": {k: round(float(v), 10) for k, v in std_24.items()},
+        "correlation": corr,
+        "series": series,
+        "asset_scores": asset_scores,
+        "degraded": bool(warnings),
+        "error": "",
+        "served_mode": "live",
+    }
+
+
+async def _compute_fama_payload(
+    *,
+    exchange: str,
+    symbols_requested: List[str],
+    timeframe: str,
+    lookback: int,
+    exclude_retired: bool,
+) -> Dict[str, Any]:
+    requested, excluded_retired = _research_retired_filter(
+        exchange=exchange,
+        timeframe=timeframe,
+        requested=symbols_requested,
+        exclude_retired=exclude_retired,
+    )
+    symbol_list = _expand_symbols_with_local(
+        exchange=exchange,
+        timeframe=timeframe,
+        requested=requested,
+        min_symbols=2,
+        max_symbols=24,
+        excluded_symbols=set(excluded_retired),
+    )
+    close_df, volume_df, used = await _build_factor_input_frames(
+        exchange=exchange,
+        symbol_list=symbol_list,
+        timeframe=timeframe,
+        lookback=int(lookback),
+    )
+    if close_df.empty or len(used) < 2:
+        return _build_fama_placeholder(
+            exchange=exchange,
+            timeframe=timeframe,
+            symbols_requested=symbols_requested,
+            exclude_retired=exclude_retired,
+            excluded_symbols=excluded_retired,
+            reason="可用于因子计算的数据不足",
+        )
+
+    if close_df.empty or volume_df.empty:
+        return _build_fama_placeholder(
+            exchange=exchange,
+            timeframe=timeframe,
+            symbols_requested=symbols_requested,
+            exclude_retired=exclude_retired,
+            excluded_symbols=excluded_retired,
+            reason="Fama 输入为空，无法计算风格因子",
+        )
+
+    factor_result = await asyncio.to_thread(
+        build_factor_library,
+        close_df=close_df,
+        volume_df=volume_df,
+        quantile=0.3,
+        timeframe=timeframe,
+    )
+    factors = factor_result.factors.copy()
+    if factors.empty:
+        return _build_fama_placeholder(
+            exchange=exchange,
+            timeframe=timeframe,
+            symbols_requested=symbols_requested,
+            exclude_retired=exclude_retired,
+            excluded_symbols=excluded_retired,
+            reason="Fama 风格因子计算失败",
+        )
+
+    wanted = ["MKT", "SMB", "HML", "MOM", "RMW", "CMA", "VOL"]
+    for col in wanted:
+        if col not in factors.columns:
+            factors[col] = 0.0
+    factors = factors[wanted].fillna(0.0)
+
+    latest = factors.iloc[-1].to_dict()
+    mean_24 = factors.tail(min(24, len(factors))).mean().to_dict()
+    std_24 = factors.tail(min(24, len(factors))).std().fillna(0.0).to_dict()
+
+    out_series = []
+    for idx, row in factors.tail(400).iterrows():
+        out_series.append(
+            {
+                "timestamp": idx.isoformat(),
+                "MKT": round(float(row.get("MKT", 0.0)), 8),
+                "SMB": round(float(row.get("SMB", 0.0)), 8),
+                "HML": round(float(row.get("HML", 0.0)), 8),
+                "MOM": round(float(row.get("MOM", 0.0)), 8),
+                "RMW": round(float(row.get("RMW", 0.0)), 8),
+                "CMA": round(float(row.get("CMA", 0.0)), 8),
+                "VOL": round(float(row.get("VOL", 0.0)), 8),
+            }
+        )
+
+    warnings: List[str] = []
+    if len(used) < 4:
+        warnings.append("当前可用币种较少（<4），Fama 风格因子稳定性有限。")
+
+    return {
+        "exchange": exchange,
+        "timeframe": timeframe,
+        "symbols_requested": symbols_requested,
+        "retired_filter": {
+            "enabled": bool(exclude_retired),
+            "excluded_symbols": excluded_retired,
+            "requested_after_filter": requested,
+        },
+        "symbols_used": used,
+        "points": len(factors),
+        "universe_size": len(used),
+        "universe_quality": "low" if len(used) < 4 else "normal",
+        "latest": {k: round(float(v), 8) for k, v in latest.items()},
+        "mean_24": {k: round(float(v), 8) for k, v in mean_24.items()},
+        "std_24": {k: round(float(v), 8) for k, v in std_24.items()},
+        "series": out_series,
+        "warnings": warnings,
+        "degraded": bool(warnings),
+        "error": "",
+        "served_mode": "live",
+    }
+
+
+async def _refresh_factor_library_cache(
+    cache_key: str,
+    *,
+    exchange: str,
+    symbols_requested: List[str],
+    timeframe: str,
+    lookback: int,
+    quantile: float,
+    series_limit: int,
+    exclude_retired: bool,
+) -> None:
+    try:
+        payload = await _compute_factor_library_payload(
+            exchange=exchange,
+            symbols_requested=symbols_requested,
+            timeframe=timeframe,
+            lookback=lookback,
+            quantile=quantile,
+            series_limit=series_limit,
+            exclude_retired=exclude_retired,
+        )
+        _store_research_cached_payload(_FACTOR_LIBRARY_CACHE, cache_key, payload)
+    except Exception as e:
+        logger.warning(f"factor library refresh failed {cache_key}: {e}")
+        cached = dict(_FACTOR_LIBRARY_CACHE.get(cache_key) or {})
+        if cached:
+            payload = dict(cached.get("payload") or {})
+            payload["refresh_error"] = str(e)
+            payload["refresh_failed_at"] = _utc_iso()
+            cached["payload"] = payload
+            _FACTOR_LIBRARY_CACHE[cache_key] = cached
+    finally:
+        _FACTOR_LIBRARY_REFRESH_TASKS.pop(cache_key, None)
+
+
+async def _refresh_fama_cache(
+    cache_key: str,
+    *,
+    exchange: str,
+    symbols_requested: List[str],
+    timeframe: str,
+    lookback: int,
+    exclude_retired: bool,
+) -> None:
+    try:
+        payload = await _compute_fama_payload(
+            exchange=exchange,
+            symbols_requested=symbols_requested,
+            timeframe=timeframe,
+            lookback=lookback,
+            exclude_retired=exclude_retired,
+        )
+        _store_research_cached_payload(_FAMA_CACHE, cache_key, payload)
+    except Exception as e:
+        logger.warning(f"fama refresh failed {cache_key}: {e}")
+        cached = dict(_FAMA_CACHE.get(cache_key) or {})
+        if cached:
+            payload = dict(cached.get("payload") or {})
+            payload["refresh_error"] = str(e)
+            payload["refresh_failed_at"] = _utc_iso()
+            cached["payload"] = payload
+            _FAMA_CACHE[cache_key] = cached
+    finally:
+        _FAMA_REFRESH_TASKS.pop(cache_key, None)
 
 
 @router.get("/klines")
@@ -1458,7 +2305,7 @@ async def _run_download_task(task_id: str, payload: Dict[str, Any]) -> None:
     if not task:
         return
     task["status"] = "running"
-    task["started_at"] = datetime.utcnow().isoformat()
+    task["started_at"] = datetime.now(timezone.utc).isoformat()
     try:
         result = await run_download_historical_data(
             exchange=str(payload.get("exchange") or "binance"),
@@ -1474,7 +2321,7 @@ async def _run_download_task(task_id: str, payload: Dict[str, Any]) -> None:
         task["status"] = "failed"
         task["error"] = str(e)
     finally:
-        task["finished_at"] = datetime.utcnow().isoformat()
+        task["finished_at"] = datetime.now(timezone.utc).isoformat()
 
 
 @router.post("/download")
@@ -1521,7 +2368,7 @@ async def download_historical_data(
         "days": int(days or 0),
         "start_time": start_time.isoformat() if start_time else None,
         "end_time": end_time.isoformat() if end_time else None,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "started_at": None,
         "finished_at": None,
         "result": None,
@@ -1698,7 +2545,7 @@ async def get_storage_stats():
 
 
 @router.get("/storage/health")
-async def get_storage_health():
+async def get_storage_health(exact: bool = False):
     storage_root = Path(settings.DATA_STORAGE_PATH)
     backup_root = Path(settings.CACHE_PATH) / "symbol_dir_backups"
 
@@ -1800,7 +2647,8 @@ async def get_storage_health():
                     end_at = scan.get("end")
 
                     should_exact_scan = (
-                        timeframe not in _SUB_MINUTE_TIMEFRAMES
+                        bool(exact)
+                        and timeframe not in _SUB_MINUTE_TIMEFRAMES
                         and logical_rows <= _HEALTH_EXACT_SCAN_ROW_LIMIT
                         and len(physical_files) <= _HEALTH_EXACT_SCAN_FILE_LIMIT
                     )
@@ -1947,6 +2795,7 @@ async def get_storage_health():
             "exact_scan_count": exact_scan_count,
             "fast_scan_count": fast_scan_count,
             "suppressed_gap_datasets": suppressed_gap_datasets,
+            "scan_profile": "exact" if exact else "fast",
         },
         "exchanges": exchange_rows,
         "duplicates": duplicate_symbol_dirs,
@@ -2156,7 +3005,7 @@ async def start_replay(req: ReplayStartRequest):
         "speed": max(0.1, min(float(req.speed or 1.0), 100.0)),
         "data": df,
         "cursor": 0,
-        "started_at": datetime.utcnow().isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
     }
     return {
         "replay_id": replay_id,
@@ -2253,26 +3102,72 @@ async def stop_replay(replay_id: str):
 async def get_onchain_overview(
     symbol: str = "BTC/USDT",
     exchange: str = "binance",
-    whale_threshold_btc: float = 100.0,
+    whale_threshold_btc: float = 10.0,
     chain: str = "Ethereum",
+    refresh: bool = False,
+    hours: int = 4,
 ):
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(hours=4)
-    trades = await _fetch_public_trades(exchange, symbol, start_time, end_time, limit=1000)
-    imbalance = _calc_trade_imbalance_proxy(trades)
+    cache_key = _onchain_overview_cache_key(exchange, symbol, whale_threshold_btc, chain)
+    cached_payload = _prepare_cached_onchain_payload(cache_key, refresh=bool(refresh))
+    if cached_payload and not refresh and not cached_payload.get("stale"):
+        return cached_payload
 
-    tvl_task = asyncio.create_task(_fetch_defillama_chain_tvl(chain=chain))
-    whale_task = asyncio.create_task(_fetch_btc_whale_unconfirmed(min_btc=max(1.0, whale_threshold_btc)))
-    tvl, whales = await asyncio.gather(tvl_task, whale_task)
-
-    return {
-        "symbol": symbol,
-        "exchange": exchange,
-        "window_hours": 4,
-        "exchange_flow_proxy": imbalance,
-        "defi_tvl": tvl,
-        "whale_activity": whales,
-    }
+    existing_task = _ONCHAIN_OVERVIEW_REFRESH_TASKS.get(cache_key)
+    if existing_task is None or existing_task.done():
+        _ONCHAIN_OVERVIEW_REFRESH_TASKS[cache_key] = asyncio.create_task(
+            _refresh_onchain_overview_cache(
+                cache_key,
+                exchange=exchange,
+                symbol=symbol,
+                whale_threshold_btc=whale_threshold_btc,
+                chain=chain,
+            )
+        )
+    current_task = _ONCHAIN_OVERVIEW_REFRESH_TASKS.get(cache_key)
+    if refresh and not cached_payload:
+        placeholder = _build_onchain_placeholder(
+            exchange=exchange,
+            symbol=symbol,
+            whale_threshold_btc=whale_threshold_btc,
+            chain=chain,
+            reason="链上概览正在后台预热",
+        )
+        placeholder["window_hours"] = max(4, int(hours or 4))
+        return placeholder
+    if not cached_payload and not refresh:
+        placeholder = _build_onchain_placeholder(
+            exchange=exchange,
+            symbol=symbol,
+            whale_threshold_btc=whale_threshold_btc,
+            chain=chain,
+            reason="链上概览正在后台预热",
+        )
+        placeholder["window_hours"] = max(4, int(hours or 4))
+        return placeholder
+    if not cached_payload and current_task:
+        try:
+            await asyncio.wait_for(asyncio.shield(current_task), timeout=7.5)
+            refreshed = _prepare_cached_onchain_payload(cache_key, refresh=bool(refresh))
+            if refreshed:
+                refreshed["window_hours"] = max(4, int(hours or 4))
+                return refreshed
+        except Exception:
+            pass
+    if cached_payload:
+        payload = _clone_jsonable(cached_payload)
+        payload["refreshing"] = True
+        payload["served_mode"] = "cache_refresh"
+        payload["window_hours"] = max(4, int(hours or 4))
+        return payload
+    placeholder = _build_onchain_placeholder(
+        exchange=exchange,
+        symbol=symbol,
+        whale_threshold_btc=whale_threshold_btc,
+        chain=chain,
+        reason="链上概览正在后台预热",
+    )
+    placeholder["window_hours"] = max(4, int(hours or 4))
+    return placeholder
 
 
 @router.get("/multi-assets/overview")
@@ -2344,69 +3239,51 @@ async def get_fama_like_factors(
     exclude_retired: bool = True,
 ):
     requested0 = [s.strip().upper() for s in symbols.split(",") if s.strip()]
-    requested, excluded_retired = _research_retired_filter(
-        exchange=exchange, timeframe=timeframe, requested=requested0, exclude_retired=exclude_retired
-    )
-    symbol_list = _expand_symbols_with_local(
+    cache_key = _research_payload_cache_key(
+        "fama",
         exchange=exchange,
         timeframe=timeframe,
-        requested=requested,
-        min_symbols=2,
-        max_symbols=40,
-        excluded_symbols=set(excluded_retired),
+        lookback=lookback,
+        exclude_retired=exclude_retired,
+        symbols=requested0,
     )
-    close_df, volume_df, used = await _build_factor_input_frames(
-        exchange=exchange,
-        symbol_list=symbol_list,
-        timeframe=timeframe,
-        lookback=int(lookback),
-    )
-    if close_df.empty or len(used) < 2:
-        raise HTTPException(status_code=404, detail="可用于因子计算的数据不足")
+    cached_payload = _prepare_research_cached_payload(_FAMA_CACHE, _FAMA_REFRESH_TASKS, cache_key, refresh=False)
+    if cached_payload and not cached_payload.get("stale"):
+        return cached_payload
 
-    result = build_factor_library(close_df=close_df, volume_df=volume_df, quantile=0.3, timeframe=timeframe)
-    full = result.factors
-    if full.empty:
-        raise HTTPException(status_code=404, detail="因子计算失败")
-
-    factors = full[[c for c in ["MKT", "SMB", "HML", "MOM", "RMW", "CMA", "VOL"] if c in full.columns]].copy()
-    latest = factors.iloc[-1].to_dict()
-    mean_24 = factors.tail(min(24, len(factors))).mean().to_dict()
-    std_24 = factors.tail(min(24, len(factors))).std().fillna(0.0).to_dict()
-
-    out_series = []
-    for idx, row in factors.tail(400).iterrows():
-        out_series.append(
-            {
-                "timestamp": idx.isoformat(),
-                "MKT": round(float(row.get("MKT", 0.0)), 8),
-                "SMB": round(float(row.get("SMB", 0.0)), 8),
-                "HML": round(float(row.get("HML", 0.0)), 8),
-                "MOM": round(float(row.get("MOM", 0.0)), 8),
-                "RMW": round(float(row.get("RMW", 0.0)), 8),
-                "CMA": round(float(row.get("CMA", 0.0)), 8),
-                "VOL": round(float(row.get("VOL", 0.0)), 8),
-            }
+    existing_task = _FAMA_REFRESH_TASKS.get(cache_key)
+    if existing_task is None or existing_task.done():
+        _FAMA_REFRESH_TASKS[cache_key] = asyncio.create_task(
+            _refresh_fama_cache(
+                cache_key,
+                exchange=exchange,
+                symbols_requested=requested0,
+                timeframe=timeframe,
+                lookback=int(lookback),
+                exclude_retired=exclude_retired,
+            )
         )
-
-    return {
-        "exchange": exchange,
-        "timeframe": timeframe,
-        "symbols_requested": requested0,
-        "retired_filter": {
-            "enabled": bool(exclude_retired),
-            "excluded_symbols": excluded_retired,
-            "requested_after_filter": requested,
-        },
-        "symbols_used": used,
-        "points": len(factors),
-        "universe_size": len(used),
-        "universe_quality": "low" if len(used) < 4 else "normal",
-        "latest": {k: round(float(v), 8) for k, v in latest.items()},
-        "mean_24": {k: round(float(v), 8) for k, v in mean_24.items()},
-        "std_24": {k: round(float(v), 8) for k, v in std_24.items()},
-        "series": out_series,
-    }
+    current_task = _FAMA_REFRESH_TASKS.get(cache_key)
+    if not cached_payload and current_task:
+        try:
+            await asyncio.wait_for(asyncio.shield(current_task), timeout=2.0)
+            refreshed = _prepare_research_cached_payload(_FAMA_CACHE, _FAMA_REFRESH_TASKS, cache_key, refresh=False)
+            if refreshed:
+                return refreshed
+        except Exception:
+            pass
+    if cached_payload:
+        payload = _clone_jsonable(cached_payload)
+        payload["refreshing"] = True
+        payload["served_mode"] = "cache_refresh"
+        return payload
+    return _build_fama_placeholder(
+        exchange=exchange,
+        timeframe=timeframe,
+        symbols_requested=requested0,
+        exclude_retired=exclude_retired,
+        reason="Fama 因子正在后台计算",
+    )
 
 
 @router.get("/factors/library")
@@ -2436,89 +3313,52 @@ async def get_factor_library(
     lookback = max(120, lookback)
 
     requested0 = [s.strip().upper() for s in symbols.split(",") if s.strip()]
-    requested, excluded_retired = _research_retired_filter(
-        exchange=exchange, timeframe=timeframe, requested=requested0, exclude_retired=exclude_retired
-    )
-    symbol_list = _expand_symbols_with_local(
+    cache_key = _research_payload_cache_key(
+        "factor_library",
         exchange=exchange,
-        timeframe=timeframe,
-        requested=requested,
-        min_symbols=4,
-        max_symbols=60,
-        excluded_symbols=set(excluded_retired),
-    )
-    close_df, volume_df, used = await _build_factor_input_frames(
-        exchange=exchange,
-        symbol_list=symbol_list,
         timeframe=timeframe,
         lookback=lookback,
+        quantile=quantile,
+        series_limit=series_limit,
+        exclude_retired=exclude_retired,
+        symbols=requested0,
     )
-    if close_df.empty or len(used) < 2:
-        raise HTTPException(status_code=404, detail="可用于多因子计算的数据不足（至少2个币种）")
+    cached_payload = _prepare_research_cached_payload(_FACTOR_LIBRARY_CACHE, _FACTOR_LIBRARY_REFRESH_TASKS, cache_key, refresh=False)
+    if cached_payload and not cached_payload.get("stale"):
+        return cached_payload
 
-    result = build_factor_library(close_df=close_df, volume_df=volume_df, quantile=float(quantile), timeframe=timeframe)
-    factors = result.factors
-    if factors.empty:
-        raise HTTPException(status_code=404, detail="多因子计算失败")
-
-    latest = factors.iloc[-1].to_dict()
-    mean_24 = factors.tail(min(24, len(factors))).mean().to_dict()
-    std_24 = factors.tail(min(24, len(factors))).std().fillna(0.0).to_dict()
-    corr = factors.corr().round(4).fillna(0.0).to_dict()
-
-    series: List[Dict[str, Any]] = []
-    tail = factors.tail(max(30, min(int(series_limit), 2000)))
-    for idx, row in tail.iterrows():
-        payload = {"timestamp": idx.isoformat()}
-        for col in factors.columns:
-            payload[col] = round(float(row.get(col, 0.0)), 10)
-        series.append(payload)
-
-    asset_scores = []
-    if not result.asset_scores.empty:
-        for _, row in result.asset_scores.head(30).iterrows():
-            asset_scores.append(
-                {
-                    "symbol": str(row.get("symbol")),
-                    "score": round(float(row.get("score", 0.0)), 6),
-                    "momentum": round(float(row.get("momentum", 0.0)), 6),
-                    "value": round(float(row.get("value", 0.0)), 6),
-                    "value_hml": round(float(row.get("value_hml", 0.0)), 6),
-                    "quality": round(float(row.get("quality", 0.0)), 6),
-                    "profitability": round(float(row.get("profitability", 0.0)), 6),
-                    "investment": round(float(row.get("investment", 0.0)), 6),
-                    "low_vol": round(float(row.get("low_vol", 0.0)), 6),
-                    "liquidity": round(float(row.get("liquidity", 0.0)), 6),
-                    "low_beta": round(float(row.get("low_beta", 0.0)), 6),
-                    "size": round(float(row.get("size", 0.0)), 6),
-                }
+    existing_task = _FACTOR_LIBRARY_REFRESH_TASKS.get(cache_key)
+    if existing_task is None or existing_task.done():
+        _FACTOR_LIBRARY_REFRESH_TASKS[cache_key] = asyncio.create_task(
+            _refresh_factor_library_cache(
+                cache_key,
+                exchange=exchange,
+                symbols_requested=requested0,
+                timeframe=timeframe,
+                lookback=lookback,
+                quantile=float(quantile),
+                series_limit=int(series_limit),
+                exclude_retired=exclude_retired,
             )
-
-    warnings: List[str] = []
-    if len(used) < 4:
-        warnings.append("当前可用币种较少（<4），横截面因子稳定性有限，建议补充更多币种历史数据。")
-
-    return {
-        "exchange": exchange,
-        "timeframe": timeframe,
-        "lookback_effective": lookback,
-        "symbols_requested": requested0,
-        "retired_filter": {
-            "enabled": bool(exclude_retired),
-            "excluded_symbols": excluded_retired,
-            "requested_after_filter": requested,
-        },
-        "symbols_used": used,
-        "points": int(len(factors)),
-        "factors": list(factors.columns),
-        "catalog": FACTOR_CATALOG,
-        "universe_size": len(used),
-        "universe_quality": "low" if len(used) < 4 else "normal",
-        "warnings": warnings,
-        "latest": {k: round(float(v), 10) for k, v in latest.items()},
-        "mean_24": {k: round(float(v), 10) for k, v in mean_24.items()},
-        "std_24": {k: round(float(v), 10) for k, v in std_24.items()},
-        "correlation": corr,
-        "series": series,
-        "asset_scores": asset_scores,
-    }
+        )
+    current_task = _FACTOR_LIBRARY_REFRESH_TASKS.get(cache_key)
+    if not cached_payload and current_task:
+        try:
+            await asyncio.wait_for(asyncio.shield(current_task), timeout=3.0)
+            refreshed = _prepare_research_cached_payload(_FACTOR_LIBRARY_CACHE, _FACTOR_LIBRARY_REFRESH_TASKS, cache_key, refresh=False)
+            if refreshed:
+                return refreshed
+        except Exception:
+            pass
+    if cached_payload:
+        payload = _clone_jsonable(cached_payload)
+        payload["refreshing"] = True
+        payload["served_mode"] = "cache_refresh"
+        return payload
+    return _build_factor_library_placeholder(
+        exchange=exchange,
+        timeframe=timeframe,
+        symbols_requested=requested0,
+        exclude_retired=exclude_retired,
+        reason="因子库正在后台计算",
+    )

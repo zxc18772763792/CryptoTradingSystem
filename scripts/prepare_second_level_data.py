@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List
 
@@ -43,7 +43,7 @@ def _format_task(task: dict) -> str:
 
 
 async def _wait_tasks(task_ids: List[str], poll_seconds: int, max_hours: float) -> None:
-    start_ts = datetime.utcnow()
+    start_ts = datetime.now(timezone.utc)
     while True:
         tasks = [second_level_backfill_manager.get_task(task_id) for task_id in task_ids]
         tasks = [task for task in tasks if task]
@@ -61,7 +61,7 @@ async def _wait_tasks(task_ids: List[str], poll_seconds: int, max_hours: float) 
             return
 
         if max_hours > 0:
-            elapsed_hours = (datetime.utcnow() - start_ts).total_seconds() / 3600.0
+            elapsed_hours = (datetime.now(timezone.utc) - start_ts).total_seconds() / 3600.0
             if elapsed_hours >= max_hours:
                 logger.warning(f"达到最大运行时长 {max_hours} 小时，停止等待。")
                 return
@@ -92,7 +92,7 @@ async def main() -> None:
     logger.info(f"准备秒级数据: exchanges={exchanges} symbols={symbols} days={days}")
     await exchange_manager.initialize(exchanges)
 
-    end_time = datetime.utcnow()
+    end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(days=days)
 
     task_ids: List[str] = []

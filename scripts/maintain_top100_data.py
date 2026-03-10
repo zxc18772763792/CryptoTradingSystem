@@ -5,7 +5,7 @@ import argparse
 import asyncio
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -310,7 +310,7 @@ async def main() -> None:
 
     results: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
-    started_at = datetime.utcnow().isoformat()
+    started_at = datetime.now(timezone.utc).isoformat()
 
     for idx, item in enumerate(selected, start=1):
         symbol = str(item["pair"]).upper()
@@ -337,7 +337,7 @@ async def main() -> None:
 
     downloaded_total = int(sum(int(x.get("downloaded", 0) or 0) for x in results))
     summary = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "started_at": started_at,
         "exchange": exchange_name,
         "top_n_requested": top_n,

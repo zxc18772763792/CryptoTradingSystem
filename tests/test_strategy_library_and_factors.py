@@ -133,6 +133,16 @@ def test_factor_library_supports_small_universe():
     assert set(["MKT", "SMB", "MOM", "VOL"]).issubset(result.factors.columns)
 
 
+def test_factor_library_key_style_factors_are_not_all_zero():
+    close_df, volume_df = _factor_input(assets=8, rows=960, seed=23)
+    result = build_factor_library(close_df=close_df, volume_df=volume_df, quantile=0.3, timeframe="5m")
+
+    tail = result.factors.tail(240)
+    for col in ["HML", "MOM", "LIQ", "RMW", "CMA", "QMJ", "BAB"]:
+        assert col in tail.columns
+        assert tail[col].abs().sum() > 0, f"{col} should have non-zero signal in recent window"
+
+
 def test_fama_factor_strategy_is_supported_in_web_backtest():
     assert is_strategy_backtest_supported("FamaFactorArbitrageStrategy")
 

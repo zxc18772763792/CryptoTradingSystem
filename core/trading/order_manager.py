@@ -2,7 +2,7 @@
 Order management module.
 """
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import math
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
@@ -12,6 +12,8 @@ from loguru import logger
 
 from config.settings import settings
 from core.exchanges import exchange_manager
+from core.governance.decision_engine import decision_engine
+from core.risk.risk_manager import risk_manager
 from core.exchanges.base_exchange import Order, OrderSide, OrderType, OrderStatus
 from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
 
@@ -91,6 +93,49 @@ class OrderManager:
             return max(0.0, out)
         except Exception:
             return float(default)
+
+    @staticmethod
+    def _normalize_leverage(value: Any, default: int = 1) -> int:
+        try:
+            lev = float(value)
+            if math.isnan(lev) or math.isinf(lev):
+                lev = float(default)
+        except Exception:
+            lev = float(default)
+        # Binance USDT-M futures leverage is an integer between 1 and 125.
+        return int(max(1, min(125, round(lev))))
+
+    async def _sync_binance_futures_leverage(self, symbol: str, leverage: Any) -> bool:
+        target_leverage = self._normalize_leverage(leverage, default=1)
+        try:
+            from web.api.trading import _binance_market_symbol, _binance_signed_request
+
+            market_symbol = str(_binance_market_symbol(symbol) or "").strip().upper()
+            if not market_symbol:
+                self._last_error = f"binance leverage sync failed: invalid symbol {symbol!r}"
+                return False
+            await _binance_signed_request(
+                "POST",
+                "/fapi/v1/leverage",
+                host="fapi",
+                params={
+                    "symbol": market_symbol,
+                    "leverage": target_leverage,
+                },
+                timeout_sec=5.0,
+            )
+            logger.info(
+                f"Binance futures leverage synced: symbol={market_symbol} "
+                f"target={target_leverage}x"
+            )
+            return True
+        except Exception as e:
+            self._last_error = (
+                f"binance leverage sync failed: symbol={symbol} "
+                f"target={target_leverage}x error={e}"
+            )
+            logger.error(self._last_error)
+            return False
 
     def _resolve_paper_cost_params(self, request: OrderRequest) -> tuple[float, float]:
         params = dict(request.params or {})
@@ -233,9 +278,33 @@ class OrderManager:
 
         try:
             params = dict(request.params or {})
+            requested_leverage = self._normalize_leverage(params.get("leverage", 1.0), default=1)
+            params["leverage"] = float(requested_leverage)
             order_price = request.price
             if request.order_type == OrderType.MARKET:
                 order_price = None
+            report = risk_manager.get_risk_report()
+            equity = float((report.get("equity") or {}).get("current") or 0.0)
+            order_value = abs(float(request.amount or 0.0) * float(request.price or 0.0))
+            governance_check = await decision_engine.evaluate_order_intent(
+                symbol=request.symbol,
+                side=request.side.value,
+                leverage=float(params.get("leverage", 1.0) or 1.0),
+                order_value=float(order_value or 0.0),
+                account_equity=float(equity or 0.0),
+                signal_ts=datetime.now(timezone.utc),
+                allow_close=bool(request.reduce_only),
+                spread_bps=None,
+                timeframe=str(params.get("timeframe") or ""),
+                source="order_manager_real_submit",
+            )
+            if not governance_check.allowed:
+                self._last_error = f"governance blocked: {governance_check.reason}"
+                return None
+            if governance_check.reduce_only and not bool(request.reduce_only):
+                self._last_error = "governance reduce_only enabled"
+                return None
+            params.setdefault("trace_id", governance_check.trace_id)
             # Binance/major CEX normal MARKET/LIMIT endpoints reject stop-loss / take-profit
             # attachment params (e.g. -4120). Keep these for true trigger/conditional orders only.
             allow_trigger_params = (
@@ -260,9 +329,20 @@ class OrderManager:
                 params.setdefault("reduceOnly", True)
 
             market_type = str(params.get("market_type") or "").strip().lower()
-            if (
+            is_binance_futures = (
                 str(request.exchange or "").lower() == "binance"
                 and market_type in {"future", "futures", "swap", "perp", "perpetual", "contract"}
+            )
+            if is_binance_futures and not bool(request.reduce_only):
+                synced = await self._sync_binance_futures_leverage(
+                    symbol=request.symbol,
+                    leverage=requested_leverage,
+                )
+                if not synced:
+                    return None
+
+            if (
+                is_binance_futures
                 and request.order_type in {OrderType.MARKET, OrderType.LIMIT}
             ):
                 try:
@@ -327,7 +407,8 @@ class OrderManager:
                     self._order_meta[order.id] = self._request_meta(request)
                     logger.info(
                         f"Fast Binance futures order created: {order.id} "
-                        f"{request.side.value} {request.amount} {request.symbol} @ {order_price}"
+                        f"{request.side.value} {request.amount} {request.symbol} "
+                        f"@ {order_price} lev={requested_leverage}x"
                     )
                     await self._notify_callbacks(order, "created")
                     return order
@@ -347,7 +428,8 @@ class OrderManager:
             self._order_meta[order.id] = self._request_meta(request)
             logger.info(
                 f"Order created: {order.id} "
-                f"{request.side.value} {request.amount} {request.symbol} @ {order_price}"
+                f"{request.side.value} {request.amount} {request.symbol} "
+                f"@ {order_price} lev={requested_leverage}x"
             )
 
             await self._notify_callbacks(order, "created")

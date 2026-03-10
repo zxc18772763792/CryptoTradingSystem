@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -54,7 +54,7 @@ class RiskManager:
         # Runtime state
         self._daily_trades = 0
         self._daily_realized_pnl = 0.0
-        self._daily_start = self._day_start(datetime.utcnow())
+        self._daily_start = self._day_start(datetime.now(timezone.utc))
         self._day_start_equity: Optional[float] = None
         self._current_equity: Optional[float] = None
         self._last_equity: Optional[float] = None
@@ -98,7 +98,7 @@ class RiskManager:
         s = state or {}
         self._daily_trades = int(s.get("daily_trades", 0) or 0)
         self._daily_realized_pnl = float(s.get("daily_realized_pnl", 0.0) or 0.0)
-        self._daily_start = s.get("daily_start") or self._day_start(datetime.utcnow())
+        self._daily_start = s.get("daily_start") or self._day_start(datetime.now(timezone.utc))
         self._day_start_equity = s.get("day_start_equity")
         self._current_equity = s.get("current_equity")
         self._last_equity = s.get("last_equity")
@@ -123,13 +123,13 @@ class RiskManager:
             logger.info(f"Risk manager scope switched: {current} -> {target}")
 
         if reset_baseline:
-            self._daily_start = self._day_start(datetime.utcnow())
+            self._daily_start = self._day_start(datetime.now(timezone.utc))
             self._daily_trades = 0
             self._daily_realized_pnl = 0.0
             self._alerts.clear()
             self._trading_halted = False
             self._halt_reason = ""
-            self._daily_stop_guard_until = datetime.utcnow() + timedelta(seconds=90)
+            self._daily_stop_guard_until = datetime.now(timezone.utc) + timedelta(seconds=90)
             self._daily_stop_breach_count = 0
             if self._current_equity and float(self._current_equity) > 0:
                 self._day_start_equity = float(self._current_equity)
@@ -142,7 +142,7 @@ class RiskManager:
             logger.info(f"Risk manager baseline reset for scope={self._risk_scope}")
 
     def _check_new_day(self) -> None:
-        now_day = self._day_start(datetime.utcnow())
+        now_day = self._day_start(datetime.now(timezone.utc))
         if now_day <= self._daily_start:
             return
 
@@ -159,7 +159,7 @@ class RiskManager:
 
         self._trading_halted = False
         self._halt_reason = ""
-        self._daily_stop_guard_until = datetime.utcnow() + timedelta(seconds=45)
+        self._daily_stop_guard_until = datetime.now(timezone.utc) + timedelta(seconds=45)
         self._daily_stop_breach_count = 0
         self._current_unrealized_pnl = 0.0
         logger.info("Risk manager daily counters reset")
@@ -172,7 +172,7 @@ class RiskManager:
         data: Optional[Dict[str, Any]] = None,
     ) -> None:
         alert = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "title": title,
             "message": message,
             "severity": severity,
@@ -231,7 +231,7 @@ class RiskManager:
         self._evaluate_daily_stop()
 
     def _evaluate_daily_stop(self) -> None:
-        if self._daily_stop_guard_until and datetime.utcnow() < self._daily_stop_guard_until:
+        if self._daily_stop_guard_until and datetime.now(timezone.utc) < self._daily_stop_guard_until:
             return
         if not self._day_start_equity or self._day_start_equity <= 0 or not self._current_equity:
             return
@@ -320,7 +320,7 @@ class RiskManager:
             self._last_equity = float(self._current_equity)
             self._daily_realized_pnl = 0.0
         guard_sec = 120 if str(getattr(self, "_risk_scope", "paper")) == "live" else 30
-        self._daily_stop_guard_until = datetime.utcnow() + timedelta(seconds=guard_sec)
+        self._daily_stop_guard_until = datetime.now(timezone.utc) + timedelta(seconds=guard_sec)
         self._daily_stop_breach_count = 0
         self._add_alert(
             title="手动解除熔断",
@@ -339,13 +339,13 @@ class RiskManager:
         self._equity_curve.clear()
         self._daily_trades = 0
         self._daily_realized_pnl = 0.0
-        self._daily_start = self._day_start(datetime.utcnow())
+        self._daily_start = self._day_start(datetime.now(timezone.utc))
         self._day_start_equity = self._current_equity
         self._last_equity = self._current_equity
         self._current_unrealized_pnl = 0.0
         self._trading_halted = False
         self._halt_reason = ""
-        self._daily_stop_guard_until = datetime.utcnow() + timedelta(seconds=30)
+        self._daily_stop_guard_until = datetime.now(timezone.utc) + timedelta(seconds=30)
         self._daily_stop_breach_count = 0
 
         return {
@@ -471,7 +471,7 @@ class RiskManager:
         self._trade_history.append(
             {
                 **trade,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )
         self._trade_history = self._trade_history[-2000:]
@@ -547,16 +547,18 @@ class RiskManager:
             current_equity = float(self._last_equity or 0.0)
         if day_start_equity <= 0 and current_equity > 0:
             day_start_equity = current_equity - daily_total_pnl
+        daily_total_pnl_ratio = (daily_total_pnl / day_start_equity) if day_start_equity > 0 else 0.0
+        daily_stop_basis_ratio = (daily_stop_basis / day_start_equity) if day_start_equity > 0 else 0.0
         # `daily_total_pnl` is equity-based, so the residual may include funding/fees/transfers.
         daily_unrealized_component = daily_total_pnl - daily_realized_pnl
         return {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "risk_level": metrics.risk_level.value,
             "trading_halted": metrics.trading_halted,
             "halt_reason": self._halt_reason,
             "daily_stop_guard_seconds": max(
                 0,
-                int((self._daily_stop_guard_until - datetime.utcnow()).total_seconds()),
+                int((self._daily_stop_guard_until - datetime.now(timezone.utc)).total_seconds()),
             )
             if self._daily_stop_guard_until
             else 0,
@@ -569,7 +571,9 @@ class RiskManager:
                 "daily_unrealized_component_usd": round(daily_unrealized_component, 4),
                 "current_unrealized_pnl_usd": round(current_unrealized_pnl, 4),
                 "daily_stop_basis_usd": round(daily_stop_basis, 4),
-                "daily_pnl_ratio": round(float(metrics.daily_pnl_ratio), 6),
+                "daily_total_pnl_ratio": round(daily_total_pnl_ratio, 6),
+                "daily_stop_basis_ratio": round(daily_stop_basis_ratio, 6),
+                "daily_pnl_ratio": round(daily_stop_basis_ratio, 6),
                 "max_drawdown": round(float(metrics.max_drawdown), 6),
                 "pnl_scope_note": "daily_total_pnl_usd为今日权益变化；daily_stop_basis_usd=已实现盈亏+当前浮亏，仅该值用于熔断",
             },

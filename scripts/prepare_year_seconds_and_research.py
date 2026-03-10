@@ -5,7 +5,7 @@ import argparse
 import asyncio
 import json
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict
 
@@ -33,7 +33,7 @@ def _normalize_symbol(value: str) -> str:
 async def _run_gate_backfill(symbol: str, days: int, max_hours: float, poll_seconds: int) -> Dict:
     await exchange_manager.initialize(["gate"])
 
-    end_time = datetime.utcnow()
+    end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(days=days)
     task = second_level_backfill_manager.start_task(
         exchange="gate",
@@ -45,7 +45,7 @@ async def _run_gate_backfill(symbol: str, days: int, max_hours: float, poll_seco
     task_id = task["task_id"]
     logger.info(f"Gate 秒级回填任务已启动: {task_id}")
 
-    started = datetime.utcnow()
+    started = datetime.now(timezone.utc)
     while True:
         state = second_level_backfill_manager.get_task(task_id) or {}
         status = state.get("status")
@@ -58,7 +58,7 @@ async def _run_gate_backfill(symbol: str, days: int, max_hours: float, poll_seco
             return state
 
         if max_hours > 0:
-            elapsed = (datetime.utcnow() - started).total_seconds() / 3600.0
+            elapsed = (datetime.now(timezone.utc) - started).total_seconds() / 3600.0
             if elapsed >= max_hours:
                 second_level_backfill_manager.stop_task(task_id)
                 await exchange_manager.close_all()
@@ -86,7 +86,7 @@ async def main() -> None:
 
     symbol = _normalize_symbol(args.symbol)
     days = max(1, min(1200, int(args.days)))
-    end_date = datetime.utcnow().date() - timedelta(days=1)
+    end_date = datetime.now(timezone.utc).date() - timedelta(days=1)
     start_date = end_date - timedelta(days=days - 1)
 
     logger.info(f"Step1/3 下载 Binance 1s 历史包: symbol={symbol} days={days}")

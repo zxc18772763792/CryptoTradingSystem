@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import math
 import os
 import re
@@ -10,7 +11,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
-from sqlalchemy import and_, event, insert, or_, select, text
+from sqlalchemy import and_, event, func, insert, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -27,8 +28,15 @@ from core.news.storage.models import (
 
 
 _news_engine_kwargs: Dict[str, Any] = {"echo": False, "future": True}
+try:
+    _NEWS_SQLITE_BUSY_TIMEOUT_SEC = max(
+        3.0,
+        float(os.environ.get("NEWS_SQLITE_BUSY_TIMEOUT_SEC") or os.environ.get("SQLITE_BUSY_TIMEOUT_SEC") or "8"),
+    )
+except Exception:
+    _NEWS_SQLITE_BUSY_TIMEOUT_SEC = 8.0
 if str(settings.DATABASE_URL).startswith("sqlite"):
-    _news_engine_kwargs["connect_args"] = {"timeout": 30}
+    _news_engine_kwargs["connect_args"] = {"timeout": _NEWS_SQLITE_BUSY_TIMEOUT_SEC}
 
 news_engine = create_async_engine(settings.DATABASE_URL, **_news_engine_kwargs)
 NewsSessionLocal = async_sessionmaker(news_engine, class_=AsyncSession, expire_on_commit=False)
@@ -40,7 +48,7 @@ if str(settings.DATABASE_URL).startswith("sqlite"):
         try:
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute(f"PRAGMA busy_timeout={int(_NEWS_SQLITE_BUSY_TIMEOUT_SEC * 1000)}")
         finally:
             cursor.close()
 
@@ -123,12 +131,21 @@ def _hash_news(url: str, title: str, published_at: datetime) -> str:
 
 
 def _canonical_title(value: Any) -> str:
-    text = str(value or "").strip().lower()
+    text = _strip_html_text(value).lower()
     if not text:
         return ""
-    text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"[^\w\u4e00-\u9fff ]+", "", text)
+    return text.strip()
+
+
+def _strip_html_text(value: Any) -> str:
+    text = html.unescape(str(value or "").strip())
+    if not text:
+        return ""
+    text = re.sub(r"(?i)<\s*br\s*/?\s*>", " ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
@@ -148,6 +165,15 @@ def _event_semantic_key(symbol: Any, event_type: Any, sentiment: Any, ts: Any, e
     anchor = title_key or url_key or "no_anchor"
     seed = f"{str(symbol).upper()}|{str(event_type).lower()}|{int(sentiment)}|{bucket}|{anchor}"
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()
+
+
+def _is_llm_summary_source(source: Any) -> bool:
+    text = str(source or "").strip().lower()
+    if not text:
+        return False
+    if text in {"glm", "glm5", "llm", "llm_cache", "glm_cache", "glm5_cache"}:
+        return True
+    return ("glm" in text) or text.startswith("llm")
 
 
 def _importance_score(source: str, title: str, content: str, payload: Dict[str, Any]) -> int:
@@ -187,9 +213,9 @@ def _percentile(values: List[float], p: float) -> float:
 
 def _normalize_news_item(item: Dict[str, Any]) -> Dict[str, Any]:
     url = str(item.get("url") or "").strip()
-    title = str(item.get("title") or "").strip()
+    title = _strip_html_text(item.get("title"))
     source = str(item.get("source") or "gdelt").strip() or "gdelt"
-    content = str(item.get("content") or item.get("summary") or "").strip()
+    content = _strip_html_text(item.get("content") or item.get("summary"))
     lang = str(item.get("lang") or item.get("language") or "en").strip() or "en"
 
     published_raw = item.get("published_at") or item.get("published") or item.get("seendate")
@@ -376,6 +402,46 @@ async def get_llm_queue_stats() -> Dict[str, Any]:
     }
 
 
+async def count_news_raw(since: Optional[datetime] = None) -> int:
+    async with news_session_scope() as session:
+        stmt = select(func.count(NewsRaw.id))
+        if since is not None:
+            stmt = stmt.where(NewsRaw.published_at >= parse_any_datetime(since))
+        value = (await session.execute(stmt)).scalar_one()
+    return int(value or 0)
+
+
+async def count_events(symbol: Optional[str] = None, since: Optional[datetime] = None) -> int:
+    async with news_session_scope() as session:
+        stmt = select(func.count(NewsEvent.id))
+        if symbol:
+            stmt = stmt.where(NewsEvent.symbol == str(symbol).strip().upper())
+        if since is not None:
+            stmt = stmt.where(NewsEvent.ts >= parse_any_datetime(since))
+        value = (await session.execute(stmt)).scalar_one()
+    return int(value or 0)
+
+
+async def latest_news_raw_timestamp(since: Optional[datetime] = None) -> Optional[str]:
+    async with news_session_scope() as session:
+        stmt = select(func.max(NewsRaw.published_at))
+        if since is not None:
+            stmt = stmt.where(NewsRaw.published_at >= parse_any_datetime(since))
+        value = (await session.execute(stmt)).scalar_one()
+    return _utc_iso(value) if value is not None else None
+
+
+async def latest_event_timestamp(symbol: Optional[str] = None, since: Optional[datetime] = None) -> Optional[str]:
+    async with news_session_scope() as session:
+        stmt = select(func.max(NewsEvent.ts))
+        if symbol:
+            stmt = stmt.where(NewsEvent.symbol == str(symbol).strip().upper())
+        if since is not None:
+            stmt = stmt.where(NewsEvent.ts >= parse_any_datetime(since))
+        value = (await session.execute(stmt)).scalar_one()
+    return _utc_iso(value) if value is not None else None
+
+
 async def set_source_state(
     source: str,
     *,
@@ -428,6 +494,142 @@ async def list_news_raw_by_ids(ids: List[int]) -> List[Dict[str, Any]]:
     async with news_session_scope() as session:
         rows = (await session.execute(select(NewsRaw).where(NewsRaw.id.in_(keys)).order_by(NewsRaw.published_at.desc()))).scalars().all()
     return [_row_to_news_dict(row) for row in rows]
+
+
+async def save_news_raw_summaries(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Persist headline summaries into news_raw.payload with LLM-priority semantics."""
+    if not rows:
+        return {"updated_count": 0, "skipped_count": 0}
+
+    normalized: Dict[int, Dict[str, Any]] = {}
+    skipped_count = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            skipped_count += 1
+            continue
+        raw_id = row.get("raw_news_id") or row.get("id")
+        try:
+            raw_key = int(raw_id)
+        except Exception:
+            skipped_count += 1
+            continue
+
+        summary_title = _strip_html_text(row.get("summary_title") or row.get("summary"))
+        if not summary_title:
+            skipped_count += 1
+            continue
+        summary_title = summary_title[:220]
+
+        sentiment = str(row.get("summary_sentiment") or row.get("sentiment") or "neutral").strip().lower()
+        if sentiment not in {"positive", "negative", "neutral"}:
+            sentiment = "neutral"
+        summary_source = str(row.get("summary_source") or row.get("source") or "").strip().lower() or "unknown"
+
+        existing = normalized.get(raw_key)
+        if existing:
+            if _is_llm_summary_source(existing.get("summary_source")) and not _is_llm_summary_source(summary_source):
+                continue
+            if _is_llm_summary_source(summary_source) and not _is_llm_summary_source(existing.get("summary_source")):
+                normalized[raw_key] = {
+                    "summary_title": summary_title,
+                    "summary_sentiment": sentiment,
+                    "summary_source": summary_source,
+                }
+            continue
+
+        normalized[raw_key] = {
+            "summary_title": summary_title,
+            "summary_sentiment": sentiment,
+            "summary_source": summary_source,
+        }
+
+    if not normalized:
+        return {"updated_count": 0, "skipped_count": skipped_count}
+
+    now_iso = _utc_iso(datetime.now(timezone.utc))
+    updated_count = 0
+    async with news_session_scope() as session:
+        db_rows = (
+            await session.execute(select(NewsRaw).where(NewsRaw.id.in_(list(normalized.keys()))))
+        ).scalars().all()
+        for db_row in db_rows:
+            incoming = normalized.get(int(db_row.id))
+            if not incoming:
+                skipped_count += 1
+                continue
+
+            payload = dict(db_row.payload or {})
+            existing_source = str(payload.get("summary_source") or "").strip().lower()
+            incoming_source = str(incoming.get("summary_source") or "").strip().lower()
+            if _is_llm_summary_source(existing_source) and not _is_llm_summary_source(incoming_source):
+                skipped_count += 1
+                continue
+
+            payload["summary_title"] = incoming.get("summary_title") or ""
+            payload["summary_sentiment"] = incoming.get("summary_sentiment") or "neutral"
+            payload["summary_source"] = incoming_source or "unknown"
+            payload["summary_updated_at"] = now_iso
+            db_row.payload = payload
+            updated_count += 1
+
+        await session.flush()
+
+    return {"updated_count": updated_count, "skipped_count": skipped_count}
+
+
+async def list_llm_task_status(raw_ids: List[int]) -> Dict[int, str]:
+    keys = [int(x) for x in raw_ids if x]
+    if not keys:
+        return {}
+    async with news_session_scope() as session:
+        rows = (
+            await session.execute(
+                select(NewsLLMTask.raw_news_id, NewsLLMTask.status).where(NewsLLMTask.raw_news_id.in_(keys))
+            )
+        ).all()
+    out: Dict[int, str] = {}
+    for raw_id, status in rows:
+        try:
+            out[int(raw_id)] = str(status or "").strip().lower()
+        except Exception:
+            continue
+    return out
+
+
+async def requeue_llm_tasks(statuses: Optional[List[str]] = None, limit: int = 200) -> Dict[str, Any]:
+    target_statuses = [str(x or "").strip().lower() for x in (statuses or ["failed"]) if str(x or "").strip()]
+    if not target_statuses:
+        target_statuses = ["failed"]
+    max_rows = max(1, min(int(limit or 200), 2000))
+    now = datetime.now(timezone.utc)
+
+    async with news_session_scope() as session:
+        rows = (
+            await session.execute(
+                select(NewsLLMTask)
+                .where(NewsLLMTask.status.in_(target_statuses))
+                .order_by(NewsLLMTask.updated_at.desc())
+                .limit(max_rows)
+            )
+        ).scalars().all()
+
+        affected_ids: List[int] = []
+        for row in rows:
+            row.status = "retry"
+            row.next_retry_at = now
+            row.started_at = None
+            row.finished_at = None
+            row.updated_at = now
+            row.attempt_count = 0
+            affected_ids.append(int(row.raw_news_id))
+        await session.flush()
+
+    return {
+        "matched_count": len(rows),
+        "requeued_count": len(rows),
+        "target_statuses": target_statuses,
+        "raw_news_ids_sample": affected_ids[:20],
+    }
 
 
 async def save_news_raw(news_items: List[Dict[str, Any]]) -> Dict[str, Any]:

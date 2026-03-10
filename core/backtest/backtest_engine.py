@@ -551,7 +551,7 @@ class BacktestEngine:
             base = np.where(equity_array[:-1] == 0, np.nan, equity_array[:-1])
             returns = np.diff(equity_array) / base
             returns = returns[np.isfinite(returns)]
-            sharpe = float(np.mean(returns) / np.std(returns) * np.sqrt(252)) if returns.size > 1 and float(np.std(returns)) > 0 else 0.0
+            sharpe = float(np.mean(returns) / np.std(returns) * np.sqrt(365)) if returns.size > 1 and float(np.std(returns)) > 0 else 0.0
         else:
             sharpe = 0.0
 
@@ -571,7 +571,7 @@ class BacktestEngine:
             final_capital=final_capital,
             total_return=total_return,
             total_return_pct=total_return_pct,
-            max_drawdown=max_drawdown * initial_capital,
+            max_drawdown=max_drawdown,
             max_drawdown_pct=max_drawdown_pct,
             sharpe_ratio=sharpe,
             win_rate=win_rate,

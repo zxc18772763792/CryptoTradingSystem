@@ -5,7 +5,7 @@ import argparse
 import asyncio
 import json
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List
 
@@ -72,7 +72,7 @@ async def _load_symbol_frames(
     slow_timeframes: List[str],
 ) -> Dict[str, pd.DataFrame]:
     frames: Dict[str, pd.DataFrame] = {}
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     fast_start = now - timedelta(days=max(1, int(fast_days)))
     base_1s = await data_storage.load_klines_from_parquet(
@@ -150,7 +150,7 @@ async def main() -> None:
     slow_timeframes = [x.lower() for x in _parse_csv(args.slow_timeframes) if x.lower() in RESAMPLE_RULES]
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    run_ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    run_ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
     strategy_catalog = get_backtest_strategy_catalog()
     strategies = [x["name"] for x in strategy_catalog if bool(x.get("backtest_supported"))]

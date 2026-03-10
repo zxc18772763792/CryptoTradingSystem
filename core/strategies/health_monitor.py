@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -25,7 +25,7 @@ class StrategyHealthMonitor:
         self._last_error: Optional[str] = None
 
     def _now(self) -> datetime:
-        return datetime.utcnow()
+        return datetime.now(timezone.utc)
 
     def _default_channels(self) -> List[str]:
         status = notification_manager.channel_status()

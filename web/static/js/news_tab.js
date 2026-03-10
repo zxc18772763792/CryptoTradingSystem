@@ -12,6 +12,14 @@
         }[m]));
     }
 
+    function plainText(value) {
+        return String(value ?? "")
+            .replace(/<\s*br\s*\/?>/gi, " ")
+            .replace(/<[^>]+>/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+    }
+
     function notify(msg, isError = false) {
         if (typeof window.notify === "function") {
             window.notify(msg, isError);
@@ -471,7 +479,11 @@
     }
 
     async function loadHealth() {
-        return request("/health", { timeoutMs: 6000 });
+        return request("/health", { timeoutMs: 15000 });
+    }
+
+    async function loadWorkerStatus() {
+        return request("/worker_status", { timeoutMs: 10000 });
     }
 
     async function loadFeed(useSummarize = false) {
@@ -480,7 +492,7 @@
         const maxRecords = getMaxRecords();
         const params = new URLSearchParams({
             hours: String(hours),
-            limit: String(useSummarize ? Math.min(60, maxRecords) : maxRecords),
+            limit: String(maxRecords),
             summarize: useSummarize ? "true" : "false",
         });
         if (symbol) params.set("symbol", symbol);
@@ -560,6 +572,122 @@
                 notify(`后台结构化完成：新增事件 ${Number(job?.result?.events_count || 0)} 条`);
             } else {
                 notify(`拉取完成：新增事件 ${Number(data?.events_count || 0)} 条`);
+            }
+            await refreshAll();
+        } catch (e) {
+            if (output) output.textContent = `拉取失败: ${e.message}`;
+            notify(`拉取失败: ${e.message}`, true);
+        } finally {
+            state.pulling = false;
+        }
+    }
+
+    function renderUnstructured(items) {
+        const box = document.getElementById("news-unstructured-list");
+        const counter = document.getElementById("news-unstructured-count");
+        if (!box) return;
+        const rows = (items || []).filter((x) => !x.has_event);
+        if (counter) counter.textContent = `${rows.length} 条`;
+        if (!rows.length) {
+            box.innerHTML = '<div class="list-item news-white">暂无未结构化新闻</div>';
+            return;
+        }
+        box.innerHTML = rows.map((item) => {
+            const title = esc(plainText(item.summary_title || item.title || "（无标题）"));
+            const url = String(item.url || "").trim();
+            const source = esc(plainText(item.source || "-"));
+            const provider = esc(plainText(item.provider || "-"));
+            const tsText = fmtTs(item.published_at);
+            const ss = item.summary_sentiment || "neutral";
+            const titleHtml = url ? `<a class="news-title news-white" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${title}</a>` : `<span class="news-title news-white">${title}</span>`;
+            return `<div class="list-item news-row"><div class="news-main">${titleHtml}<div class="news-meta"><span>${tsText}</span><span class="news-tag-white">${provider}</span><span class="${summarySentimentClass(ss)}">${summarySentimentText(ss)}</span><span>${source}</span></div></div></div>`;
+        }).join("");
+    }
+
+    function renderStructured(items) {
+        const box = document.getElementById("news-structured-list");
+        const counter = document.getElementById("news-structured-count");
+        if (!box) return;
+        const rows = (items || []).filter((x) => !!x.has_event);
+        if (counter) counter.textContent = `${rows.length} 条`;
+        if (!rows.length) {
+            box.innerHTML = '<div class="list-item news-white">暂无已结构化事件</div>';
+            return;
+        }
+        box.innerHTML = rows.map((item) => {
+            const title = esc(plainText(item.summary_title || item.title || "（无标题）"));
+            const url = String(item.url || "").trim();
+            const source = esc(plainText(item.source || "-"));
+            const provider = esc(plainText(item.provider || "-"));
+            const symbol = esc(plainText(item.symbol || "-"));
+            const eventType = esc(plainText(item.event_type || "raw"));
+            const impact = Number(item.impact_score || 0);
+            const s = Number(item.sentiment || 0);
+            const tsText = fmtTs(item.published_at);
+            const titleHtml = url ? `<a class="news-title news-white" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${title}</a>` : `<span class="news-title news-white">${title}</span>`;
+            return `<div class="list-item news-row"><div class="news-main">${titleHtml}<div class="news-meta"><span>${tsText}</span><span class="news-tag-white">${provider}</span><span class="news-tag-white">${symbol}</span><span class="news-tag-white">${eventType}</span><span class="${sentimentClass(s)}">${sentimentText(s)}</span><span>impact ${impact.toFixed(3)}</span><span>${source}</span></div></div></div>`;
+        }).join("");
+    }
+
+    async function refreshAll() {
+        try {
+            const [summary, latest, health, worker] = await Promise.all([
+                loadSummary(),
+                loadFeed(true),
+                loadHealth().catch(() => null),
+                loadWorkerStatus().catch(() => null),
+            ]);
+            applyData(summary, latest);
+            state.health = { ...(worker || {}), ...(health || {}) };
+            renderHealth(state.summary || {}, state.health || {});
+            renderQueuePanel(state.summary || {}, state.health || {});
+        } catch (e) {
+            try {
+                const [summaryRes, latestRes, workerRes] = await Promise.allSettled([
+                    loadSummary(),
+                    loadFeed(false),
+                    loadWorkerStatus(),
+                ]);
+                const summary = summaryRes.status === "fulfilled" ? summaryRes.value : (state.summary || {});
+                const latest = latestRes.status === "fulfilled" ? latestRes.value : null;
+                const worker = workerRes.status === "fulfilled" ? workerRes.value : null;
+                if (!latest) throw new Error(summaryRes.status === "rejected" ? (summaryRes.reason?.message || "新闻摘要读取失败") : "新闻列表读取失败");
+                applyData(summary, latest);
+                state.health = worker || state.health || null;
+                renderHealth(state.summary || {}, state.health || {});
+                renderQueuePanel(state.summary || {}, state.health || {});
+                notify("新闻摘要较慢，已回退到快速刷新");
+            } catch (e2) {
+                notify(`新闻刷新失败: ${e2.message || e.message}`, true);
+            }
+        }
+    }
+
+    async function pullNow() {
+        if (state.pulling) return;
+        state.pulling = true;
+        const output = document.getElementById("news-action-output");
+        try {
+            const data = await request("/pull_now", {
+                method: "POST",
+                timeoutMs: 20000,
+                body: JSON.stringify({ since_minutes: Math.max(30, Math.min(1440, getHours() * 60)), max_records: getMaxRecords() }),
+            });
+            if (output) output.textContent = JSON.stringify(data, null, 2);
+            if (data?.queued && data?.job_id) {
+                notify(`后台新闻任务已启动: ${data.job_id}`);
+                const job = await waitPullJob(data.job_id);
+                const result = job?.result || {};
+                if (output) output.textContent = JSON.stringify(result || job, null, 2);
+                if (Number(result?.queued_count || 0) > 0) {
+                    request("/worker/run_once?llm_limit=12&background=true", { method: "POST", timeoutMs: 8000 }).catch(() => ({}));
+                }
+                notify(`后台拉取完成：新增原始 ${Number(result?.raw_inserted_count || 0)} 条，排队 ${Number(result?.queued_count || 0)} 条，结构化处理中`);
+            } else {
+                if (Number(data?.queued_count || 0) > 0) {
+                    request("/worker/run_once?llm_limit=12&background=true", { method: "POST", timeoutMs: 8000 }).catch(() => ({}));
+                }
+                notify(`拉取完成：新增原始 ${Number(data?.raw_inserted_count || 0)} 条，新增事件 ${Number(data?.events_count || 0)} 条`);
             }
             await refreshAll();
         } catch (e) {

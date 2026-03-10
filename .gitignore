@@ -34,6 +34,12 @@ data/tmp/
 data/research/auto_snapshots/
 .tmp_uvicorn_*.log
 .uv_*.log
+runtime/
+test-results/
+.pytest_tmp/
+node_modules/
+tmp_ai_proposals*.json
+web_start*.log
 
 # Secrets
 .env

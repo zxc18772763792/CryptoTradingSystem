@@ -7,14 +7,14 @@ import json
 import os
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.requests import Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from loguru import logger
@@ -35,12 +35,14 @@ from core.exchanges import exchange_manager
 from core.news.storage import db as news_db
 from core.ops.service import create_router as create_ops_router, initialize_ops_runtime, shutdown_ops_runtime
 from core.realtime import event_bus
+from core.runtime import RuntimeTaskSupervisor, runtime_state
 from core.strategies import (
     restore_strategies_from_db,
     strategy_health_monitor,
     strategy_manager,
 )
 from core.trading import account_manager, execution_engine, order_manager, position_manager
+from web.api import ai_research
 
 _AUTO_SYNC_SYMBOLS = [
     "BTC/USDT",
@@ -74,7 +76,46 @@ _NEWS_PULL_INTERVAL_SEC = max(20, _env_int("NEWS_PULL_INTERVAL_SEC", 60))
 _NEWS_PULL_SINCE_MINUTES = max(30, _env_int("NEWS_PULL_SINCE_MINUTES", 180))
 _NEWS_PULL_MAX_RECORDS = max(20, _env_int("NEWS_PULL_MAX_RECORDS", 80))
 _NEWS_BACKGROUND_ENABLED = _env_bool("NEWS_BACKGROUND_ENABLED", True)
+_NEWS_LLM_INTERVAL_SEC = max(15, _env_int("NEWS_LLM_INTERVAL_SEC", 60))
+_NEWS_LLM_BATCH = max(1, min(12, _env_int("NEWS_LLM_BATCH", 4)))
+_NEWS_LLM_BACKGROUND_ENABLED = _env_bool("NEWS_LLM_BACKGROUND_ENABLED", True)
 _DATA_MAINTENANCE_ENABLED = _env_bool("DATA_MAINTENANCE_ENABLED", False)
+_ANALYTICS_HISTORY_ENABLED = _env_bool(
+    "ANALYTICS_HISTORY_ENABLED",
+    bool(getattr(settings, "ANALYTICS_HISTORY_ENABLED", False)),
+)
+_ANALYTICS_HISTORY_MICRO_INTERVAL_SEC = max(
+    60,
+    _env_int(
+        "ANALYTICS_HISTORY_MICRO_INTERVAL_SEC",
+        int(getattr(settings, "ANALYTICS_HISTORY_MICRO_INTERVAL_SEC", 300)),
+    ),
+)
+_ANALYTICS_HISTORY_COMMUNITY_INTERVAL_SEC = max(
+    120,
+    _env_int(
+        "ANALYTICS_HISTORY_COMMUNITY_INTERVAL_SEC",
+        int(getattr(settings, "ANALYTICS_HISTORY_COMMUNITY_INTERVAL_SEC", 900)),
+    ),
+)
+_ANALYTICS_HISTORY_WHALE_INTERVAL_SEC = max(
+    120,
+    _env_int(
+        "ANALYTICS_HISTORY_WHALE_INTERVAL_SEC",
+        int(getattr(settings, "ANALYTICS_HISTORY_WHALE_INTERVAL_SEC", 600)),
+    ),
+)
+_ANALYTICS_HISTORY_DEFAULT_EXCHANGE = str(
+    os.getenv("ANALYTICS_HISTORY_EXCHANGE", _AUTO_SYNC_PRIMARY_EXCHANGE)
+).strip().lower() or _AUTO_SYNC_PRIMARY_EXCHANGE
+_ANALYTICS_HISTORY_DEFAULT_SYMBOL = str(
+    os.getenv("ANALYTICS_HISTORY_SYMBOL", _AUTO_SYNC_SYMBOLS[0])
+).strip().upper() or _AUTO_SYNC_SYMBOLS[0]
+_ANALYTICS_HISTORY_WORKER_SPECS = (
+    ("microstructure", _ANALYTICS_HISTORY_MICRO_INTERVAL_SEC, 12),
+    ("community", _ANALYTICS_HISTORY_COMMUNITY_INTERVAL_SEC, 24),
+    ("whales", _ANALYTICS_HISTORY_WHALE_INTERVAL_SEC, 36),
+)
 _STATUS_CACHE_TTL_SEC = 1.5
 _status_cache_payload: Dict[str, Any] | None = None
 _status_cache_at: float = 0.0
@@ -84,6 +125,28 @@ def invalidate_status_cache() -> None:
     global _status_cache_payload, _status_cache_at
     _status_cache_payload = None
     _status_cache_at = 0.0
+
+
+def _inspect_status_cache() -> Dict[str, Any]:
+    age_sec = None
+    if _status_cache_payload is not None and _status_cache_at > 0:
+        age_sec = round(max(0.0, time.monotonic() - _status_cache_at), 3)
+    return {
+        "has_payload": _status_cache_payload is not None,
+        "age_sec": age_sec,
+    }
+
+
+runtime_state.register_cache(
+    "web_status_cache",
+    clear=invalidate_status_cache,
+    inspect=_inspect_status_cache,
+    scope="global",
+)
+
+
+def _touch_runtime_task(task_name: str, *, success: bool = False) -> None:
+    runtime_state.touch_task(task_name, success=success)
 
 
 def _safe_json(obj: Any) -> Dict[str, Any]:
@@ -102,7 +165,7 @@ async def _emit_runtime_snapshot() -> None:
             "strategy_summary": strategy_manager.get_dashboard_summary(signal_limit=10),
             "positions": position_manager.get_stats(),
             "orders": order_manager.get_stats(),
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         },
     )
 
@@ -205,6 +268,7 @@ async def _runtime_pusher(stop_event: asyncio.Event) -> None:
         try:
             await _emit_runtime_snapshot()
             await _emit_market_ticks()
+            _touch_runtime_task("runtime", success=True)
         except Exception as e:
             logger.debug(f"runtime snapshot push failed: {e}")
         await asyncio.sleep(2)
@@ -222,7 +286,7 @@ async def _emit_news_preview(app: FastAPI, limit: int = 10, hours: int = 24) -> 
     await event_bus.publish_nowait_safe(
         event="news_update",
         payload={
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "count": int(feed.get("count") or 0),
             "items": feed.get("items") or [],
         },
@@ -273,11 +337,93 @@ async def _news_refresh_worker(app: FastAPI, stop_event: asyncio.Event) -> None:
             if should_emit:
                 emit_counter = 0
                 await _emit_news_preview(app=app, limit=12, hours=24)
+            _touch_runtime_task("news", success=True)
         except Exception as e:
             logger.debug(f"background news refresh failed: {e}")
             sleep_seconds = max(_NEWS_PULL_INTERVAL_SEC, 300)
 
         for _ in range(sleep_seconds):
+            if stop_event.is_set():
+                break
+            await asyncio.sleep(1)
+
+
+async def _news_llm_worker(app: FastAPI, stop_event: asyncio.Event) -> None:
+    from web.api import news as news_api
+
+    await asyncio.sleep(8)
+    while not stop_event.is_set():
+        try:
+            cfg = getattr(app.state, "news_cfg", None)
+            if not isinstance(cfg, dict):
+                cfg = news_api.load_news_cfg()
+                app.state.news_cfg = cfg
+            result = await news_api.process_llm_batch(cfg, limit=_NEWS_LLM_BATCH)
+            app.state.news_last_llm_batch = {
+                **_safe_json(result),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "limit": _NEWS_LLM_BATCH,
+            }
+            _touch_runtime_task("news_llm", success=True)
+        except Exception as e:
+            app.state.news_last_llm_batch = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "claimed": 0,
+                "events_count": 0,
+                "errors": [str(e)],
+                "limit": _NEWS_LLM_BATCH,
+            }
+            logger.warning(f"background news llm worker failed: {e}")
+
+        for _ in range(_NEWS_LLM_INTERVAL_SEC):
+            if stop_event.is_set():
+                break
+            await asyncio.sleep(1)
+
+
+async def _analytics_history_worker(
+    app: FastAPI,
+    stop_event: asyncio.Event,
+    *,
+    collector: str,
+    interval_sec: int,
+    exchange: str,
+    symbol: str,
+    depth_limit: int = 80,
+    startup_delay_sec: int = 12,
+) -> None:
+    from web.api import trading as trading_api
+
+    await asyncio.sleep(max(3, int(startup_delay_sec)))
+    while not stop_event.is_set():
+        try:
+            result = await trading_api.run_analytics_history_collection(
+                exchange=exchange,
+                symbol=symbol,
+                depth_limit=depth_limit,
+                collectors=[collector],
+            )
+            app.state.analytics_history_last_runs = getattr(app.state, "analytics_history_last_runs", {})
+            app.state.analytics_history_last_runs[collector] = result
+            _touch_runtime_task(f"analytics_history_{collector}", success=True)
+        except Exception as e:
+            logger.warning(f"analytics history worker failed collector={collector}: {e}")
+            app.state.analytics_history_last_runs = getattr(app.state, "analytics_history_last_runs", {})
+            app.state.analytics_history_last_runs[collector] = {
+                "success": False,
+                "collector": collector,
+                "exchange": exchange,
+                "symbol": symbol,
+                "error": str(e),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
+        sleep_span = max(5, int(interval_sec))
+        if collector == "community":
+            sleep_span += 7
+        elif collector == "whales":
+            sleep_span += 13
+        for _ in range(sleep_span):
             if stop_event.is_set():
                 break
             await asyncio.sleep(1)
@@ -290,7 +436,7 @@ def _maintenance_snapshot_path(kind: str) -> Path:
 
 
 def _save_maintenance_snapshot(kind: str, payload: Dict[str, Any]) -> None:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     folder = _maintenance_snapshot_path(kind)
     file_path = folder / f"{kind}_{now.strftime('%Y%m%d_%H%M%S')}.json"
     file_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -313,7 +459,7 @@ def _sync_days_for_timeframe(timeframe: str) -> int:
 
 async def _has_recent_kline(exchange: str, symbol: str, timeframe: str, hours: int = 12) -> bool:
     try:
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(hours=max(1, int(hours)))
         df = await data_storage.load_klines_from_parquet(
             exchange=exchange,
@@ -356,7 +502,7 @@ async def _sync_market_dataset(exchange: str, symbol: str, timeframe: str) -> Di
                         "task_id": active_tasks[0].get("task_id"),
                     }
                 else:
-                    now = datetime.utcnow()
+                    now = datetime.now(timezone.utc)
                     result["seconds_backfill"] = second_level_backfill_manager.start_task(
                         exchange=exchange,
                         symbol=symbol,
@@ -413,20 +559,20 @@ async def _collect_news_snapshot() -> Dict[str, Any]:
 
 
 async def _maintenance_safe_call(name: str, coro: Any) -> Dict[str, Any]:
-    started = datetime.utcnow()
+    started = datetime.now(timezone.utc)
     try:
         data = await coro
         return {
             "ok": True,
             "name": name,
-            "latency_ms": round((datetime.utcnow() - started).total_seconds() * 1000, 3),
+            "latency_ms": round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 3),
             "data": data,
         }
     except Exception as e:
         return {
             "ok": False,
             "name": name,
-            "latency_ms": round((datetime.utcnow() - started).total_seconds() * 1000, 3),
+            "latency_ms": round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 3),
             "error": str(e),
         }
 
@@ -435,7 +581,7 @@ async def _run_data_maintenance_once() -> Dict[str, Any]:
     from web.api import data as data_api
     from web.api import trading as trading_api
 
-    started_at = datetime.utcnow()
+    started_at = datetime.now(timezone.utc)
     tasks: List[Dict[str, Any]] = []
     _save_maintenance_snapshot(
         "maintenance_progress",
@@ -508,8 +654,8 @@ async def _run_data_maintenance_once() -> Dict[str, Any]:
 
     report = {
         "started_at": started_at.isoformat(),
-        "finished_at": datetime.utcnow().isoformat(),
-        "duration_sec": round((datetime.utcnow() - started_at).total_seconds(), 3),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "duration_sec": round((datetime.now(timezone.utc) - started_at).total_seconds(), 3),
         "market_sync_count": len(tasks),
         "market_sync": tasks,
         "analytics_overview": analytics,
@@ -523,7 +669,7 @@ async def _run_data_maintenance_once() -> Dict[str, Any]:
         "maintenance_progress",
         {
             "started_at": started_at.isoformat(),
-            "finished_at": datetime.utcnow().isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
             "status": "completed",
             "market_sync_count": len(tasks),
         },
@@ -532,10 +678,30 @@ async def _run_data_maintenance_once() -> Dict[str, Any]:
     return report
 
 
+async def _cusum_monitor_worker(stop_event: asyncio.Event, app: FastAPI) -> None:
+    """Periodically scan all running candidates for CUSUM decay (every 5 min)."""
+    from core.monitoring.cusum_watcher import run_cusum_checks_for_all_candidates
+
+    INTERVAL = 300  # 5 minutes
+    await asyncio.sleep(30)  # stagger startup
+    while not stop_event.is_set():
+        try:
+            reports = await run_cusum_checks_for_all_candidates(app)
+            if reports:
+                logger.info(f"CUSUM watcher: {len(reports)} decay trigger(s) detected and processed")
+            _touch_runtime_task("cusum_monitor", success=True)
+        except Exception as e:
+            logger.warning(f"CUSUM watcher error: {e}")
+        for _ in range(INTERVAL):
+            if stop_event.is_set():
+                break
+            await asyncio.sleep(1)
+
+
 async def _data_maintenance_worker(stop_event: asyncio.Event) -> None:
     await asyncio.sleep(10)
     while not stop_event.is_set():
-        started = datetime.utcnow()
+        started = datetime.now(timezone.utc)
         try:
             result = await _run_data_maintenance_once()
             logger.info(
@@ -543,20 +709,85 @@ async def _data_maintenance_worker(stop_event: asyncio.Event) -> None:
                 f"sync={result.get('market_sync_count', 0)}, "
                 f"duration={result.get('duration_sec', 0)}s"
             )
+            _touch_runtime_task("data_maintenance", success=True)
         except Exception as e:
             logger.warning(f"Background data maintenance failed: {e}")
             _save_maintenance_snapshot(
                 "maintenance_error",
-                {"timestamp": datetime.utcnow().isoformat(), "error": str(e)},
+                {"timestamp": datetime.now(timezone.utc).isoformat(), "error": str(e)},
             )
 
         # Run every 6 hours after one full pass.
-        elapsed = (datetime.utcnow() - started).total_seconds()
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
         sleep_seconds = max(300, int(6 * 3600 - elapsed))
         for _ in range(sleep_seconds):
             if stop_event.is_set():
                 break
             await asyncio.sleep(1)
+
+
+async def _ai_research_scheduler_worker(app: FastAPI, stop_event: asyncio.Event) -> None:
+    from core.ai.research_scheduler import research_scheduler
+    from core.research.orchestrator import ensure_ai_research_runtime_state
+
+    ensure_ai_research_runtime_state(app)
+    research_scheduler.set_app(app)
+    research_scheduler.start()
+    try:
+        while not stop_event.is_set():
+            _touch_runtime_task("ai_research_scheduler", success=True)
+            await asyncio.sleep(5)
+    finally:
+        with contextlib.suppress(Exception):
+            await research_scheduler.stop()
+
+
+def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
+    factories: Dict[str, Dict[str, Any]] = {
+        "runtime": {
+            "factory": lambda stop_event: _runtime_pusher(stop_event),
+            "restart_on_failure": True,
+        },
+        "ai_research_scheduler": {
+            "factory": lambda stop_event: _ai_research_scheduler_worker(app, stop_event),
+            "restart_on_failure": True,
+        },
+        "cusum_monitor": {
+            "factory": lambda stop_event: _cusum_monitor_worker(stop_event, app),
+            "restart_on_failure": True,
+        },
+    }
+    if _DATA_MAINTENANCE_ENABLED:
+        factories["data_maintenance"] = {
+            "factory": lambda stop_event: _data_maintenance_worker(stop_event),
+            "restart_on_failure": True,
+        }
+    if _NEWS_BACKGROUND_ENABLED:
+        factories["news"] = {
+            "factory": lambda stop_event: _news_refresh_worker(app, stop_event),
+            "restart_on_failure": True,
+        }
+    if _NEWS_LLM_BACKGROUND_ENABLED:
+        factories["news_llm"] = {
+            "factory": lambda stop_event: _news_llm_worker(app, stop_event),
+            "restart_on_failure": True,
+        }
+    if _ANALYTICS_HISTORY_ENABLED:
+        for collector, interval_sec, startup_delay_sec in _ANALYTICS_HISTORY_WORKER_SPECS:
+            factories[f"analytics_history_{collector}"] = {
+                "factory": lambda stop_event, collector=collector, interval_sec=interval_sec, startup_delay_sec=startup_delay_sec: _analytics_history_worker(
+                    app,
+                    stop_event,
+                    collector=collector,
+                    interval_sec=interval_sec,
+                    exchange=_ANALYTICS_HISTORY_DEFAULT_EXCHANGE,
+                    symbol=_ANALYTICS_HISTORY_DEFAULT_SYMBOL,
+                    depth_limit=80,
+                    startup_delay_sec=startup_delay_sec,
+                ),
+                "restart_on_failure": True,
+            }
+    return factories
 
 
 @asynccontextmanager
@@ -590,8 +821,8 @@ async def lifespan(app: FastAPI):
         if restored_mode not in {"paper", "live"}:
             restored_mode = "paper"
 
-    settings.TRADING_MODE = restored_mode
-    execution_engine.set_paper_trading(restored_mode != "live")
+    runtime_state.initialize_mode(restored_mode, reason="lifespan.startup")
+    execution_engine.set_paper_trading(restored_mode != "live", sync_runtime_state=False)
     logger.info(f"Startup trading mode restored: {restored_mode}")
     await execution_engine.start()
 
@@ -619,26 +850,28 @@ async def lifespan(app: FastAPI):
         f"skipped={len(restore_result.get('skipped', []))}"
     )
     await strategy_health_monitor.start()
-
-    app.state.runtime_stop_event = asyncio.Event()
-    app.state.runtime_task = asyncio.create_task(_runtime_pusher(app.state.runtime_stop_event))
-    app.state.data_maintenance_stop_event = asyncio.Event()
-    app.state.data_maintenance_task = None
-    if _DATA_MAINTENANCE_ENABLED:
-        app.state.data_maintenance_task = asyncio.create_task(
-            _data_maintenance_worker(app.state.data_maintenance_stop_event)
+    app.state.news_last_llm_batch = None
+    app.state.analytics_history_last_runs = {}
+    app.state.runtime_supervisor = RuntimeTaskSupervisor(runtime_state)
+    app.state.runtime_task_factories = _build_runtime_task_factories(app)
+    app.state.analytics_history_stop_events = {}
+    app.state.analytics_history_tasks = {}
+    for name, item in app.state.runtime_task_factories.items():
+        managed = app.state.runtime_supervisor.start_task(
+            name,
+            item["factory"],
+            restart_on_failure=bool(item.get("restart_on_failure", False)),
         )
-        logger.info("Background data maintenance worker enabled")
-    else:
-        logger.info("Background data maintenance worker disabled (set DATA_MAINTENANCE_ENABLED=1 to enable)")
-
-    app.state.news_stop_event = asyncio.Event()
-    app.state.news_task = None
-    if _NEWS_BACKGROUND_ENABLED:
-        app.state.news_task = asyncio.create_task(_news_refresh_worker(app, app.state.news_stop_event))
-        logger.info("Background news refresh worker enabled")
-    else:
-        logger.info("Background news refresh worker disabled (set NEWS_BACKGROUND_ENABLED=1 to enable)")
+        setattr(app.state, f"{name}_task", managed.task)
+        setattr(app.state, f"{name}_stop_event", managed.stop_event)
+        if name.startswith("analytics_history_"):
+            collector = name.replace("analytics_history_", "", 1)
+            app.state.analytics_history_stop_events[collector] = managed.stop_event
+            app.state.analytics_history_tasks[collector] = managed.task
+    logger.info(
+        "Managed background tasks started: "
+        + ", ".join(sorted(app.state.runtime_task_factories.keys()))
+    )
     with contextlib.suppress(Exception):
         await _emit_news_preview(app=app, limit=10, hours=24)
 
@@ -646,32 +879,9 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Shutting down Crypto Trading System...")
-
-    stop_event: asyncio.Event = getattr(app.state, "runtime_stop_event", asyncio.Event())
-    stop_event.set()
-    runtime_task = getattr(app.state, "runtime_task", None)
-    if runtime_task:
-        runtime_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await runtime_task
-
-    maintenance_stop_event: asyncio.Event = getattr(
-        app.state, "data_maintenance_stop_event", asyncio.Event()
-    )
-    maintenance_stop_event.set()
-    maintenance_task = getattr(app.state, "data_maintenance_task", None)
-    if maintenance_task:
-        maintenance_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await maintenance_task
-
-    news_stop_event: asyncio.Event = getattr(app.state, "news_stop_event", asyncio.Event())
-    news_stop_event.set()
-    news_task = getattr(app.state, "news_task", None)
-    if news_task:
-        news_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await news_task
+    supervisor: RuntimeTaskSupervisor | None = getattr(app.state, "runtime_supervisor", None)
+    if supervisor is not None:
+        await supervisor.stop_all(timeout_sec=6.0)
 
     await strategy_health_monitor.stop()
     await shutdown_ops_runtime(app, standalone=False)
@@ -708,10 +918,30 @@ templates_path = Path(__file__).parent / "templates"
 templates_path.mkdir(parents=True, exist_ok=True)
 templates = Jinja2Templates(directory=str(templates_path))
 
-from web.api import backtest, data, news, notifications, strategies, trading
+from web.api import (
+    backtest,
+    data,
+    news,
+    notifications,
+    research,
+    strategies,
+    trading_accounts,
+    trading_analytics,
+    trading_balances,
+    trading_orders,
+    trading_positions,
+    trading_runtime,
+)
 
-app.include_router(trading.router, prefix="/api/trading", tags=["trading"])
+app.include_router(trading_orders.router, prefix="/api/trading", tags=["trading"])
+app.include_router(trading_positions.router, prefix="/api/trading", tags=["trading"])
+app.include_router(trading_accounts.router, prefix="/api/trading", tags=["trading"])
+app.include_router(trading_balances.router, prefix="/api/trading", tags=["trading"])
+app.include_router(trading_analytics.router, prefix="/api/trading", tags=["trading"])
+app.include_router(trading_runtime.router, prefix="/api/trading", tags=["trading"])
 app.include_router(data.router, prefix="/api/data", tags=["data"])
+app.include_router(research.router, prefix="/api/research", tags=["research"])
+app.include_router(ai_research.router, prefix="/api/ai", tags=["ai_research"])
 app.include_router(strategies.router, prefix="/api/strategies", tags=["strategies"])
 app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["notifications"])
@@ -727,6 +957,11 @@ async def index(request: Request):
 @app.get("/news", response_class=HTMLResponse)
 async def news_page(request: Request):
     return templates.TemplateResponse("news.html", {"request": request})
+
+
+@app.get("/ai")
+async def ai_page(request: Request):
+    return RedirectResponse(url="/?tab=ai-research", status_code=307)
 
 
 @app.get("/api/status")
@@ -754,6 +989,11 @@ async def get_status():
             "timestamp": datetime.now().isoformat(),
             "trading_mode": execution_engine.get_trading_mode(),
             "paper_trading": execution_engine.is_paper_mode(),
+            "runtime": {
+                "account_scope": runtime_state.get_account_scope(),
+                "task_count": len(runtime_state.get_task_diagnostics()),
+                "last_mode_switch_at": runtime_state.snapshot().get("last_mode_switch_at"),
+            },
             "execution_engine": {
                 "running": bool(execution_engine.is_running),
                 "queue_size": int(execution_engine.get_queue_size()),
@@ -796,9 +1036,9 @@ async def websocket_endpoint(websocket: WebSocket):
             "event": "hello",
             "payload": {
                 "mode": execution_engine.get_trading_mode(),
-                "server_time": datetime.utcnow().isoformat(),
+                "server_time": datetime.now(timezone.utc).isoformat(),
             },
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     )
     try:
@@ -820,8 +1060,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_json(
                         {
                             "event": "pong",
-                            "payload": {"server_time": datetime.utcnow().isoformat()},
-                            "timestamp": datetime.utcnow().isoformat(),
+                            "payload": {"server_time": datetime.now(timezone.utc).isoformat()},
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
                         }
                     )
                 elif message == "status":

@@ -6,7 +6,8 @@ param(
     [int]$HealthWaitSec = 20,
     [bool]$StartNewsWorker = $false,
     [bool]$StartNewsLlmWorker = $false,
-    [bool]$StartPmWorker = $false
+    [bool]$StartPmWorker = $false,
+    [bool]$TestDataSources = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -247,4 +248,25 @@ if ($status) {
     }
 } else {
     Write-Host "Process started (PID=$($proc.Id)) but status endpoint not ready within ${HealthWaitSec}s."
+}
+
+# 测试数据源 (可选)
+$shouldTestDataSources = $TestDataSources
+if (-not $shouldTestDataSources) {
+    $rawTestToggle = [string]($env:TEST_DATA_SOURCES)
+    if ($rawTestToggle) {
+        $shouldTestDataSources = $rawTestToggle.Trim().ToLower() -in @("1", "true", "yes", "on")
+    }
+}
+
+if ($shouldTestDataSources) {
+    Write-Host ""
+    Write-Host "Testing data sources..." -ForegroundColor Cyan
+    $testProc = Start-Process `
+        -FilePath $pythonExe `
+        -ArgumentList @("scripts/test_api_direct.py") `
+        -WorkingDirectory $PSScriptRoot `
+        -NoNewWindow `
+        -Wait
+    Write-Host "Data source test complete."
 }

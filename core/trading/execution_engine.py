@@ -16,6 +16,7 @@ from core.exchanges import exchange_manager
 from core.governance.audit import GovernanceAuditEvent, write_audit
 from core.governance.decision_engine import decision_engine
 from core.risk.risk_manager import risk_manager
+from core.runtime import runtime_state
 from core.strategies import Signal, SignalType
 from core.strategies.strategy_manager import strategy_manager
 from core.trading.account_manager import account_manager
@@ -103,11 +104,13 @@ class ExecutionEngine:
         self._live_reconcile_grace_seconds = 20.0
         self._real_order_timeout_seconds = 30.0
 
-    def set_paper_trading(self, enabled: bool) -> None:
+    def set_paper_trading(self, enabled: bool, *, sync_runtime_state: bool = True) -> None:
         self._paper_trading = bool(enabled)
-        settings.TRADING_MODE = "paper" if self._paper_trading else "live"
+        mode = "paper" if self._paper_trading else "live"
         order_manager.set_paper_trading(self._paper_trading)
-        risk_manager.set_account_scope("paper" if self._paper_trading else "live", reset_baseline=True)
+        risk_manager.set_account_scope(mode, reset_baseline=True)
+        if sync_runtime_state:
+            runtime_state.initialize_mode(mode, reason="execution_engine.set_paper_trading")
         if self._paper_trading and self._paper_equity_anchor < 100:
             report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
             seed = float(self._cached_equity or 0.0)
@@ -284,6 +287,7 @@ class ExecutionEngine:
             self._cached_equity = candidate
             self._equity_updated_at = datetime.now(timezone.utc)
             risk_manager.update_equity(self._cached_equity)
+            runtime_state.update_equity_snapshot(self._cached_equity, updated_at=self._equity_updated_at)
 
         return float(self._cached_equity or 0.0)
 
@@ -299,6 +303,7 @@ class ExecutionEngine:
                 if report_eq > cached_eq:
                     self._cached_equity = report_eq
                     self._equity_updated_at = now
+                    runtime_state.update_equity_snapshot(self._cached_equity, updated_at=self._equity_updated_at)
                 return float(report_eq)
             if (
                 cached_eq > 100
@@ -360,6 +365,7 @@ class ExecutionEngine:
         self._cached_equity = float(mark_equity)
         self._equity_updated_at = datetime.now(timezone.utc)
         risk_manager.update_equity(self._cached_equity)
+        runtime_state.update_equity_snapshot(self._cached_equity, updated_at=self._equity_updated_at)
         return float(self._cached_equity)
 
     async def _resolve_price(self, exchange: str, symbol: str, preferred_price: Optional[float] = None) -> float:
@@ -2149,7 +2155,7 @@ class ExecutionEngine:
         if self._running:
             return
         self._running = True
-        self._paper_trading = settings.TRADING_MODE == "paper"
+        self._paper_trading = runtime_state.is_paper_mode()
         order_manager.set_paper_trading(self._paper_trading)
         risk_manager.set_account_scope("paper" if self._paper_trading else "live", reset_baseline=False)
         await self._ensure_queue_worker()
@@ -2220,6 +2226,9 @@ class ExecutionEngine:
 
     def get_signal_diagnostics(self) -> Dict[str, Any]:
         return dict(self._signal_diagnostics or {})
+
+    async def prime_live_equity(self) -> None:
+        await self._prime_live_equity()
 
 
 execution_engine = ExecutionEngine()

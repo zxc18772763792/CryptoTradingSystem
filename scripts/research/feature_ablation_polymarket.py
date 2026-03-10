@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -31,7 +31,7 @@ async def _main(symbol: str, days: int, timeframes: list[str], out_dir: Path) ->
     await pm_db.init_pm_db()
     rows = []
     try:
-        end = datetime.utcnow()
+        end = datetime.now(timezone.utc)
         start = end - timedelta(days=days)
         for tf in timeframes:
             klines = await data_storage.load_klines_from_parquet("binance", _normalize_symbol(symbol), tf, start, end)

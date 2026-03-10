@@ -7,7 +7,7 @@ import statistics
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import pandas as pd
@@ -45,7 +45,7 @@ class StrategyConfig:
     timeframe: str
     enabled: bool = True
     exchange: str = "gate"
-    allocation: float = 1.0
+    allocation: float = settings.DEFAULT_STRATEGY_ALLOCATION
     runtime_limit_minutes: Optional[int] = None
 
 
@@ -404,7 +404,7 @@ class StrategyManager:
         stats = self._stats_for(strategy_name)
         if signals:
             stats.signal_count += len(signals)
-            stats.last_signal_at = datetime.utcnow()
+            stats.last_signal_at = datetime.now(timezone.utc)
 
         for signal in signals:
             # Conflict detection: drop weaker conflicting signals within the window
@@ -441,6 +441,8 @@ class StrategyManager:
             meta.setdefault("exchange", default_exchange)
             meta.setdefault("source", "strategy")
             meta.setdefault("is_strategy_isolated", True)
+            if config:
+                meta.setdefault("timeframe", str(config.timeframe or ""))
             signal.metadata = meta
             strategy.add_signal_to_history(signal)
             for callback in self._signal_callbacks:
@@ -482,7 +484,7 @@ class StrategyManager:
                 symbol=str(pos.symbol),
                 signal_type=(SignalType.CLOSE_LONG if pos.side == PositionSide.LONG else SignalType.CLOSE_SHORT),
                 price=float(pos.current_price or pos.entry_price or 0.0),
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 strategy_name=name,
                 strength=1.0,
                 quantity=float(pos.quantity or 0.0),
@@ -511,7 +513,7 @@ class StrategyManager:
             return
 
         stats = self._stats_for(name)
-        cycle_start = datetime.utcnow()
+        cycle_start = datetime.now(timezone.utc)
         stats.run_count += 1
         stats.last_run_at = cycle_start
         self._last_run_at[name] = cycle_start
@@ -584,11 +586,11 @@ class StrategyManager:
                     )
             except Exception as e:
                 stats.error_count += 1
-                stats.last_error_at = datetime.utcnow()
+                stats.last_error_at = datetime.now(timezone.utc)
                 stats.last_error = str(e)
                 logger.error(f"Strategy {name} run error on {symbol}: {e}")
 
-        cycle_ms = (datetime.utcnow() - cycle_start).total_seconds() * 1000
+        cycle_ms = (datetime.now(timezone.utc) - cycle_start).total_seconds() * 1000
         stats.total_cycle_ms += cycle_ms
         stats.avg_cycle_ms = stats.total_cycle_ms / max(1, stats.run_count)
 
@@ -600,7 +602,7 @@ class StrategyManager:
                 break
 
             deadline = self._runtime_deadlines.get(name)
-            if deadline and datetime.utcnow() >= deadline:
+            if deadline and datetime.now(timezone.utc) >= deadline:
                 logger.info(f"Strategy {name} reached runtime limit, stopping automatically")
                 strategy.stop()
                 self._running_since.pop(name, None)
@@ -635,8 +637,14 @@ class StrategyManager:
         task = self._strategy_tasks.pop(name, None)
         if task and not task.done():
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            # Wait at most 2 s for the task to honour cancellation.
+            # strategy.stop() already sets state=STOPPED, so the runner
+            # will exit on its next is_running check even if we don't wait.
+            done, _ = await asyncio.wait({task}, timeout=2.0)
+            if done:
+                # Retrieve the result/exception so Python doesn't warn about it.
+                with contextlib.suppress(BaseException):
+                    task.result()
 
     def register_strategy(
         self,
@@ -645,7 +653,7 @@ class StrategyManager:
         params: Optional[Dict[str, Any]] = None,
         symbols: Optional[List[str]] = None,
         timeframe: str = "1h",
-        allocation: float = 1.0,
+        allocation: float = settings.DEFAULT_STRATEGY_ALLOCATION,
         runtime_limit_minutes: Optional[int] = None,
     ) -> bool:
         if name in self._strategies:
@@ -725,10 +733,10 @@ class StrategyManager:
 
         strategy.initialize()
         strategy.start()
-        self._running_since[name] = datetime.utcnow()
+        self._running_since[name] = datetime.now(timezone.utc)
         cfg = self._configs.get(name)
         if cfg and cfg.runtime_limit_minutes and int(cfg.runtime_limit_minutes) > 0:
-            self._runtime_deadlines[name] = datetime.utcnow() + pd.Timedelta(minutes=int(cfg.runtime_limit_minutes))
+            self._runtime_deadlines[name] = datetime.now(timezone.utc) + pd.Timedelta(minutes=int(cfg.runtime_limit_minutes))
         else:
             self._runtime_deadlines.pop(name, None)
         self._start_task_for_strategy(name)
@@ -766,10 +774,10 @@ class StrategyManager:
             return False
 
         strategy.resume()
-        self._running_since[name] = datetime.utcnow()
+        self._running_since[name] = datetime.now(timezone.utc)
         cfg = self._configs.get(name)
         if cfg and cfg.runtime_limit_minutes and int(cfg.runtime_limit_minutes) > 0:
-            self._runtime_deadlines[name] = datetime.utcnow() + pd.Timedelta(minutes=int(cfg.runtime_limit_minutes))
+            self._runtime_deadlines[name] = datetime.now(timezone.utc) + pd.Timedelta(minutes=int(cfg.runtime_limit_minutes))
         else:
             self._runtime_deadlines.pop(name, None)
         self._start_task_for_strategy(name)
@@ -800,7 +808,7 @@ class StrategyManager:
         except Exception as e:
             stats = self._stats_for(strategy_name)
             stats.error_count += 1
-            stats.last_error_at = datetime.utcnow()
+            stats.last_error_at = datetime.now(timezone.utc)
             stats.last_error = str(e)
             logger.error(f"Strategy {strategy_name} error: {e}")
             return []
@@ -876,9 +884,28 @@ class StrategyManager:
             cfg.runtime_limit_minutes = val or None
             strategy = self._strategies.get(name)
             if strategy and strategy.is_running and val > 0:
-                self._runtime_deadlines[name] = datetime.utcnow() + pd.Timedelta(minutes=val)
+                self._runtime_deadlines[name] = datetime.now(timezone.utc) + pd.Timedelta(minutes=val)
             else:
                 self._runtime_deadlines.pop(name, None)
+        return True
+
+    def restore_strategy_runtime_anchor(self, name: str, started_at: Optional[datetime]) -> bool:
+        """Restore strategy running anchor from persisted state after process restart."""
+        strategy = self._strategies.get(name)
+        cfg = self._configs.get(name)
+        if not strategy or not strategy.is_running or started_at is None:
+            return False
+
+        anchor = started_at
+        if anchor.tzinfo is None:
+            anchor = anchor.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        if anchor > now:
+            anchor = now
+
+        self._running_since[name] = anchor
+        if cfg and cfg.runtime_limit_minutes and int(cfg.runtime_limit_minutes) > 0:
+            self._runtime_deadlines[name] = anchor + pd.Timedelta(minutes=int(cfg.runtime_limit_minutes))
         return True
 
     def rebalance_allocations(self, allocations: Dict[str, float]) -> Dict[str, float]:
@@ -1011,9 +1038,9 @@ class StrategyManager:
         cfg = self._configs.get(name)
         deadline = self._runtime_deadlines.get(name)
         is_running = bool(strategy and strategy.is_running)
-        uptime_seconds = int((datetime.utcnow() - started_at).total_seconds()) if (is_running and started_at) else 0
+        uptime_seconds = int((datetime.now(timezone.utc) - started_at).total_seconds()) if (is_running and started_at) else 0
         remaining_seconds = (
-            max(0, int((deadline - datetime.utcnow()).total_seconds()))
+            max(0, int((deadline - datetime.now(timezone.utc)).total_seconds()))
             if (deadline and is_running)
             else None
         )
@@ -1135,7 +1162,7 @@ class StrategyManager:
             "paused": 0,
             "stopped": 0,
         }
-        now_utc = datetime.utcnow()
+        now_utc = datetime.now(timezone.utc)
 
         for name, strategy in self._strategies.items():
             config = self._configs.get(name)
@@ -1242,7 +1269,7 @@ class StrategyManager:
         risk_report = risk_manager.get_risk_report()
         current_equity = float(((risk_report.get("equity") or {}).get("current") or 0.0))
         min_notional = max(1.0, float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 100.0) or 100.0))
-        now_iso = datetime.utcnow().isoformat()
+        now_iso = datetime.now(timezone.utc).isoformat()
 
         grouped_trades: Dict[str, List[Dict[str, Any]]] = {}
         for row in risk_manager.get_trade_history(limit=5000):

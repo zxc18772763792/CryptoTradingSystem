@@ -5,7 +5,7 @@ import argparse
 import asyncio
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
@@ -48,7 +48,7 @@ def _safe_name(raw: str) -> str:
 def _snapshot_payload() -> Dict:
     summary = strategy_manager.get_dashboard_summary(signal_limit=20)
     return {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "running_count": summary.get("running_count", 0),
         "stale_running_count": summary.get("stale_running_count", 0),
         "recent_signals_count": len(summary.get("recent_signals", [])),
@@ -109,7 +109,7 @@ async def main() -> None:
         if cls is None:
             logger.warning(f"Skip unavailable strategy class: {name}")
             continue
-        instance_name = f"paper_{_safe_name(name)}_{int(datetime.utcnow().timestamp())}"
+        instance_name = f"paper_{_safe_name(name)}_{int(datetime.now(timezone.utc).timestamp())}"
         ok = strategy_manager.register_strategy(
             name=instance_name,
             strategy_class=cls,
@@ -128,10 +128,10 @@ async def main() -> None:
     for name in registered:
         await strategy_manager.start_strategy(name)
 
-    started_at = datetime.utcnow()
+    started_at = datetime.now(timezone.utc)
     snapshots: List[Dict] = []
     while True:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         elapsed = int((now - started_at).total_seconds())
         if elapsed >= duration_seconds:
             break
@@ -154,7 +154,7 @@ async def main() -> None:
     await data_storage.close()
     await close_db()
 
-    ended_at = datetime.utcnow()
+    ended_at = datetime.now(timezone.utc)
     result = {
         "started_at": started_at.isoformat(),
         "ended_at": ended_at.isoformat(),

@@ -5,7 +5,7 @@ import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -31,6 +31,75 @@ DEFAULT_INTERVALS = {
 HIGH_PRIORITY = {"chaincatcher_flash", "okx_announcements", "bybit_announcements", "binance_announcements"}
 MID_PRIORITY = {"cryptopanic", "cryptocompare_news", "jin10"}
 LOW_PRIORITY = {"rss", "gdelt", "newsapi"}
+
+
+def _norm_url(u: str) -> str:
+    return str(u or "").strip().split("?")[0].split("#")[0].rstrip("/").lower()
+
+
+async def _execute_llm_batch(
+    batch: List[Dict[str, Any]],
+    cfg: Dict[str, Any],
+    raw_ids: List[int],
+    *,
+    url_to_raw_id: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], bool, str, int]:
+    """Extract events via LLM, persist results, and mark tasks done.
+
+    Returns (events, llm_used, error_type, events_count).
+    On exception: marks tasks failed and re-raises.
+    """
+    try:
+        events, llm_used, error_type = await extract_events_async_with_meta(batch, cfg)
+
+        # Optionally link each event back to its source news row via URL matching.
+        if url_to_raw_id is not None:
+            for event in events:
+                if event.get("raw_news_id"):
+                    continue
+                evidence = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
+                ev_url = _norm_url(str(evidence.get("url") or ""))
+                if ev_url and ev_url in url_to_raw_id:
+                    event["raw_news_id"] = url_to_raw_id[ev_url]
+                elif len(batch) == 1:
+                    event["raw_news_id"] = batch[0].get("id")
+
+        event_stats = await news_db.save_events(events, model_source="mixed")
+
+        is_success = error_type == "none"
+        is_rate_limited = error_type == "rate_limit"
+
+        if is_rate_limited:
+            from core.news.eventizer.rate_limiter import rate_limiter
+            backoff_seconds = int(rate_limiter.get_backoff_time())
+            backoff_until = datetime.now(timezone.utc) + timedelta(seconds=max(30, backoff_seconds))
+            providers = {
+                str(item.get("source") or (item.get("payload") or {}).get("provider") or "unknown")
+                for item in batch
+            }
+            for provider in providers:
+                await news_db.set_provider_backoff(provider, backoff_until)
+                logger.warning(f"Rate limit hit for provider={provider}, backoff until {backoff_until.isoformat()}")
+
+        await news_db.finish_llm_tasks(
+            raw_ids,
+            success=is_success,
+            error=f"LLM extraction failed: {error_type}" if not is_success else None,
+            error_type=error_type,
+            is_rate_limited=is_rate_limited,
+        )
+
+        return events, llm_used, error_type, int(event_stats.get("events_count") or 0)
+
+    except Exception as exc:
+        await news_db.finish_llm_tasks(
+            raw_ids,
+            success=False,
+            error=str(exc),
+            error_type="other",
+            is_rate_limited=False,
+        )
+        raise
 
 
 def _config_paths() -> Dict[str, Path]:
@@ -66,6 +135,23 @@ def _min_importance() -> int:
 
 def _source_interval(source: str) -> int:
     return max(10, _env_int(f"NEWS_INTERVAL_{source.upper()}", DEFAULT_INTERVALS.get(source, 300)))
+
+
+def _worker_cfg(cfg: Dict[str, Any], limit: int) -> Dict[str, Any]:
+    effective = dict(cfg or {})
+    llm_cfg = dict(effective.get("llm") or {})
+    worker_timeout = max(8, _env_int("NEWS_LLM_WORKER_TIMEOUT_SEC", 16))
+    worker_connect_timeout = max(3, _env_int("NEWS_LLM_WORKER_CONNECT_TIMEOUT_SEC", 6))
+    worker_batch_size = max(1, min(int(limit or 1), _env_int("NEWS_LLM_WORKER_BATCH_SIZE", 8)))
+    current_timeout = int(llm_cfg.get("timeout_sec") or worker_timeout)
+    current_connect_timeout = int(llm_cfg.get("connect_timeout_sec") or worker_connect_timeout)
+    current_batch_size = int(llm_cfg.get("batch_size") or worker_batch_size)
+    llm_cfg["timeout_sec"] = min(current_timeout, worker_timeout)
+    llm_cfg["connect_timeout_sec"] = min(current_connect_timeout, worker_connect_timeout)
+    llm_cfg["batch_size"] = min(current_batch_size, worker_batch_size)
+    llm_cfg["disable_thinking"] = bool(llm_cfg.get("disable_thinking", True))
+    effective["llm"] = llm_cfg
+    return effective
 
 
 async def process_llm_batch(cfg: Dict[str, Any], limit: int = 8) -> Dict[str, Any]:
@@ -122,70 +208,25 @@ async def process_llm_batch(cfg: Dict[str, Any], limit: int = 8) -> Dict[str, An
 
     batch = filtered_batch
     raw_ids = [int(item.get("id")) for item in batch if item.get("id")]
-
-    # Build URL → raw_news_id map for linking extracted events back to source news
-    def _norm_url(u: str) -> str:
-        return str(u or "").strip().split("?")[0].split("#")[0].rstrip("/").lower()
+    effective_cfg = _worker_cfg(cfg, limit=len(batch))
 
     url_to_raw_id = {_norm_url(item.get("url", "")): item.get("id") for item in batch if item.get("url") and item.get("id")}
 
     try:
-        events, llm_used, error_type = await extract_events_async_with_meta(batch, cfg)
-
-        # Attach raw_news_id to each event by matching evidence URL to source news URL
-        for event in events:
-            if event.get("raw_news_id"):
-                continue
-            evidence = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
-            ev_url = _norm_url(str(evidence.get("url") or ""))
-            if ev_url and ev_url in url_to_raw_id:
-                event["raw_news_id"] = url_to_raw_id[ev_url]
-            elif len(batch) == 1:
-                event["raw_news_id"] = batch[0].get("id")
-
+        events, llm_used, error_type, events_count = await _execute_llm_batch(
+            batch, effective_cfg, raw_ids, url_to_raw_id=url_to_raw_id
+        )
         if not events:
             logger.debug(f"LLM batch processed {len(batch)} items, 0 events extracted (normal for non-market-moving news)")
-
-        event_stats = await news_db.save_events(events, model_source="mixed")
-
-        # Determine success/failure based on error type
         is_success = error_type == "none"
-        is_rate_limited = error_type == "rate_limit"
-
-        # Set per-provider backoff if rate limited
-        if is_rate_limited:
-            from core.news.eventizer.rate_limiter import rate_limiter
-            backoff_seconds = int(rate_limiter.get_backoff_time())
-            backoff_until = datetime.now(timezone.utc) + timedelta(seconds=max(30, backoff_seconds))
-            # Determine which provider(s) caused the rate limit
-            providers = {str(item.get("source") or (item.get("payload") or {}).get("provider") or "unknown") for item in batch}
-            for provider in providers:
-                await news_db.set_provider_backoff(provider, backoff_until)
-                logger.warning(f"Rate limit hit for provider={provider}, backoff until {backoff_until.isoformat()}")
-
-        await news_db.finish_llm_tasks(
-            raw_ids,
-            success=is_success,
-            error=f"LLM extraction failed: {error_type}" if not is_success else None,
-            error_type=error_type,
-            is_rate_limited=is_rate_limited,
-        )
-
         return {
             "claimed": len(batch),
-            "events_count": int(event_stats.get("events_count") or 0),
+            "events_count": events_count,
             "llm_used": bool(llm_used),
             "errors": [] if is_success else [error_type],
             "error_type": error_type,
         }
     except Exception as exc:
-        await news_db.finish_llm_tasks(
-            raw_ids,
-            success=False,
-            error=str(exc),
-            error_type="other",
-            is_rate_limited=False,
-        )
         return {"claimed": len(batch), "events_count": 0, "llm_used": False, "errors": [str(exc)]}
 
 
@@ -286,58 +327,16 @@ async def _event_processor_loop() -> None:
 
 
 async def _process_event_batch(batch: List[Dict[str, Any]], cfg: Dict[str, Any]) -> None:
-    """Process a batch of news items with LLM extraction.
-
-    This is called from the background event processor.
-
-    Args:
-        batch: List of news items to process
-        cfg: Configuration dictionary
-    """
+    """Process a batch of news items with LLM extraction (called from background event processor)."""
+    raw_ids = [item.get("id") for item in batch if item.get("id")]
     try:
-        events, llm_used, error_type = await extract_events_async_with_meta(batch, cfg)
-
-        # Save events to database
-        await news_db.save_events(events, model_source="mixed")
-
-        # Update LLM tasks status
-        raw_ids = [item.get("id") for item in batch if item.get("id")]
-        is_success = error_type == "none"
-        is_rate_limited = error_type == "rate_limit"
-
-        if is_rate_limited:
-            from core.news.eventizer.rate_limiter import rate_limiter
-            backoff_seconds = int(rate_limiter.get_backoff_time())
-            backoff_until = datetime.now(timezone.utc) + timedelta(seconds=max(30, backoff_seconds))
-            providers = {str(item.get("source") or (item.get("payload") or {}).get("provider") or "unknown") for item in batch}
-            for provider in providers:
-                await news_db.set_provider_backoff(provider, backoff_until)
-                logger.warning(f"Rate limit in event processor for provider={provider}, backoff until {backoff_until.isoformat()}")
-
-        await news_db.finish_llm_tasks(
-            raw_ids,
-            success=is_success,
-            error=f"LLM extraction failed: {error_type}" if not is_success else None,
-            error_type=error_type,
-            is_rate_limited=is_rate_limited,
-        )
-
+        events, llm_used, error_type, _ = await _execute_llm_batch(batch, cfg, raw_ids)
         logger.debug(
             f"Event processor processed batch: {len(batch)} items, "
             f"{len(events)} events, llm_used={llm_used}"
         )
-
     except Exception as e:
         logger.error(f"Error processing event batch: {e}")
-        # Mark tasks as failed
-        raw_ids = [item.get("id") for item in batch if item.get("id")]
-        await news_db.finish_llm_tasks(
-            raw_ids,
-            success=False,
-            error=str(e),
-            error_type="other",
-            is_rate_limited=False,
-        )
 
 
 async def pull_source_once(

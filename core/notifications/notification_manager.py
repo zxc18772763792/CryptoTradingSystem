@@ -10,7 +10,7 @@ import smtplib
 import ssl
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -46,8 +46,8 @@ class AlertRule:
             params=dict(model.params or {}),
             enabled=bool(model.enabled),
             cooldown_seconds=int(model.cooldown_seconds or 300),
-            created_at=model.created_at or datetime.utcnow(),
-            updated_at=model.updated_at or datetime.utcnow(),
+            created_at=model.created_at or datetime.now(timezone.utc),
+            updated_at=model.updated_at or datetime.now(timezone.utc),
             last_triggered_at=model.last_triggered_at,
             trigger_count=int(model.trigger_count or 0),
         )
@@ -153,7 +153,7 @@ class NotificationManager:
     ) -> None:
         self._events.append(
             {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "channel": channel,
                 "status": status,
                 "title": title,
@@ -458,7 +458,7 @@ class NotificationManager:
     ) -> Dict[str, Any]:
         await self._ensure_loaded()
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         rule = AlertRule(
             id=str(uuid4()),
             name=name,
@@ -491,7 +491,7 @@ class NotificationManager:
         if "cooldown_seconds" in updates and updates["cooldown_seconds"] is not None:
             rule.cooldown_seconds = max(1, int(updates["cooldown_seconds"]))
 
-        rule.updated_at = datetime.utcnow()
+        rule.updated_at = datetime.now(timezone.utc)
         await self._upsert_rule(rule)
         return rule.to_dict()
 
@@ -509,7 +509,7 @@ class NotificationManager:
     def _cooldown_ok(self, rule: AlertRule) -> bool:
         if not rule.last_triggered_at:
             return True
-        elapsed = (datetime.utcnow() - rule.last_triggered_at).total_seconds()
+        elapsed = (datetime.now(timezone.utc) - rule.last_triggered_at).total_seconds()
         return elapsed >= max(1, rule.cooldown_seconds)
 
     def _eval_rule(self, rule: AlertRule, context: Dict[str, Any]) -> Optional[str]:
@@ -626,9 +626,9 @@ class NotificationManager:
                 channels=channels,
             )
 
-            rule.last_triggered_at = datetime.utcnow()
+            rule.last_triggered_at = datetime.now(timezone.utc)
             rule.trigger_count += 1
-            rule.updated_at = datetime.utcnow()
+            rule.updated_at = datetime.now(timezone.utc)
             dirty_rules.append(rule)
 
             triggered.append(

@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import json
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List
 
@@ -30,7 +30,7 @@ def _normalize_symbol(symbol: str) -> str:
 
 
 async def _load_prices(exchange: str, symbol: str, timeframe: str, days: int) -> pd.DataFrame:
-    end = datetime.utcnow()
+    end = datetime.now(timezone.utc)
     start = end - timedelta(days=max(1, int(days)))
     df = await data_storage.load_klines_from_parquet(exchange=exchange, symbol=_normalize_symbol(symbol), timeframe=timeframe, start_time=start, end_time=end)
     if df.empty:
@@ -49,7 +49,7 @@ async def _main(symbol: str, days: int, timeframe: str, out_dir: Path) -> None:
     await pm_db.init_pm_db()
     try:
         prices = await _load_prices("binance", symbol, timeframe, days)
-        features = await pm_db.get_features_range(symbol=symbol, since=datetime.utcnow() - timedelta(days=days), until=datetime.utcnow(), timeframe=timeframe)
+        features = await pm_db.get_features_range(symbol=symbol, since=datetime.now(timezone.utc) - timedelta(days=days), until=datetime.now(timezone.utc), timeframe=timeframe)
         feat_df = pd.DataFrame(features)
         if feat_df.empty or prices.empty:
             raise RuntimeError("insufficient data for event study")

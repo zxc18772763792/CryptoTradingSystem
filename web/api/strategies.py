@@ -1,6 +1,6 @@
 ﻿"""Strategy API endpoints."""
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -132,7 +132,7 @@ class StrategyRegisterRequest(BaseModel):
     symbols: Optional[List[str]] = None
     timeframe: str = "1h"
     exchange: str = "gate"
-    allocation: float = Field(default=1.0, ge=0.0, le=1.0)
+    allocation: float = Field(default=settings.DEFAULT_STRATEGY_ALLOCATION, ge=0.0, le=1.0)
     runtime_limit_minutes: Optional[int] = Field(default=None, ge=0, le=10080)
 
 
@@ -161,7 +161,7 @@ class StrategyImportItem(BaseModel):
     symbols: List[str] = Field(default_factory=lambda: ["BTC/USDT"])
     timeframe: str = "1h"
     exchange: str = "gate"
-    allocation: float = Field(default=0.2, ge=0.0, le=1.0)
+    allocation: float = Field(default=settings.DEFAULT_STRATEGY_ALLOCATION, ge=0.0, le=1.0)
     state: str = "idle"
 
 
@@ -330,7 +330,7 @@ async def _close_strategy_positions(name: str) -> Dict[str, Any]:
             symbol=str(pos.symbol),
             signal_type=(SignalType.CLOSE_LONG if pos.side == PositionSide.LONG else SignalType.CLOSE_SHORT),
             price=float(pos.current_price or pos.entry_price or 0.0),
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             strategy_name=name,
             strength=1.0,
             quantity=float(pos.quantity or 0.0),
@@ -389,7 +389,7 @@ def _get_strategy_classes() -> Dict[str, Any]:
 
 
 def _audit_dataframe(symbol: str = "BTC/USDT", rows: int = 320) -> pd.DataFrame:
-    index = pd.date_range(end=datetime.utcnow(), periods=max(120, int(rows)), freq="H")
+    index = pd.date_range(end=datetime.now(timezone.utc), periods=max(120, int(rows)), freq="H")
     rng = np.random.default_rng(seed=42)
     close = pd.Series(50000 + np.cumsum(rng.normal(0, 80, len(index))), index=index).abs() + 1000
     open_ = close.shift(1).fillna(close.iloc[0])
@@ -410,7 +410,7 @@ def _audit_dataframe(symbol: str = "BTC/USDT", rows: int = 320) -> pd.DataFrame:
 
 
 def _audit_pair_dataframe(symbol: str = "ETH/USDT", rows: int = 320) -> pd.DataFrame:
-    index = pd.date_range(end=datetime.utcnow(), periods=max(120, int(rows)), freq="H")
+    index = pd.date_range(end=datetime.now(timezone.utc), periods=max(120, int(rows)), freq="H")
     rng = np.random.default_rng(seed=99)
     close = pd.Series(3000 + np.cumsum(rng.normal(0, 10, len(index))), index=index).abs() + 50
     open_ = close.shift(1).fillna(close.iloc[0])
@@ -553,6 +553,9 @@ async def get_strategy_catalog():
                 "category": meta.get("category", "其他"),
                 "risk": meta.get("risk", "medium"),
                 "usage": meta.get("usage", ""),
+                "family": meta.get("family", "traditional"),
+                "decision_engine": meta.get("decision_engine", "rule"),
+                "ai_driven": bool(meta.get("ai_driven", False)),
                 "default_start": name in DEFAULT_START_ALL_STRATEGIES,
                 "recommended_timeframe": _recommended_timeframe(name),
                 "recommended_symbols": _recommended_symbols(name),
@@ -561,7 +564,7 @@ async def get_strategy_catalog():
                 "backtest_reason": get_backtest_strategy_info(name).get("reason"),
             }
         )
-    return {"strategies": rows, "total": len(rows), "generated_at": datetime.utcnow().isoformat()}
+    return {"strategies": rows, "total": len(rows), "generated_at": datetime.now(timezone.utc).isoformat()}
 
 
 @router.get("/library")
@@ -603,6 +606,9 @@ async def get_strategy_library():
                 "category": meta.get("category", "其他"),
                 "risk": meta.get("risk", "medium"),
                 "usage": meta.get("usage", ""),
+                "family": meta.get("family", "traditional"),
+                "decision_engine": meta.get("decision_engine", "rule"),
+                "ai_driven": bool(meta.get("ai_driven", False)),
                 "default_timeframe": _recommended_timeframe(name),
                 "default_symbols": _recommended_symbols(name),
                 "required_data": required_data,
@@ -621,7 +627,7 @@ async def get_strategy_library():
         "registered_total": len(registered),
         "running_total": len([x for x in registered if str(x.get("state", "")).lower() == "running"]),
         "library": rows,
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -711,7 +717,7 @@ async def audit_strategy_library(
     failed = [x for x in details if not (x.get("init_ok") and x.get("sync_ok"))]
 
     return {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "symbol": symbol,
         "run_async_checks": bool(run_async_checks),
         "summary": {
@@ -743,7 +749,7 @@ async def export_strategy(name: str):
             "symbols": info.get("symbols", []),
             "timeframe": info.get("timeframe", "1h"),
             "exchange": info.get("exchange", "gate"),
-            "allocation": info.get("allocation", 1.0),
+            "allocation": info.get("allocation", settings.DEFAULT_STRATEGY_ALLOCATION),
             "state": info.get("state", "idle"),
         },
         "exported_at": info.get("last_run_at"),
@@ -762,7 +768,7 @@ async def export_all_strategies():
                 "symbols": info.get("symbols", []),
                 "timeframe": info.get("timeframe", "1h"),
                 "exchange": info.get("exchange", "gate"),
-                "allocation": info.get("allocation", 1.0),
+                "allocation": info.get("allocation", settings.DEFAULT_STRATEGY_ALLOCATION),
                 "state": info.get("state", "idle"),
             }
         )
@@ -1138,7 +1144,7 @@ async def get_live_vs_backtest(name: str, initial_capital: float = 10000):
             "account_id": runtime.get("account_id") or info.get("account_id"),
             "isolated_account": bool(runtime.get("isolated_account", False)),
             "runner_alive": bool(runtime.get("runner_alive", False)),
-            "allocation": info.get("allocation", 1.0),
+            "allocation": info.get("allocation", settings.DEFAULT_STRATEGY_ALLOCATION),
         },
         "backtest": backtest,
     }

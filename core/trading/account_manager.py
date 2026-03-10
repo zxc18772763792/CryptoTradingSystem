@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, asdict, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -20,8 +20,8 @@ class TradingAccount:
     mode: str = "paper"
     parent_account_id: Optional[str] = None
     enabled: bool = True
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -63,8 +63,8 @@ class AccountManager:
                     mode=str(row.get("mode") or "paper").lower(),
                     parent_account_id=row.get("parent_account_id"),
                     enabled=bool(row.get("enabled", True)),
-                    created_at=str(row.get("created_at") or datetime.utcnow().isoformat()),
-                    updated_at=str(row.get("updated_at") or datetime.utcnow().isoformat()),
+                    created_at=str(row.get("created_at") or datetime.now(timezone.utc).isoformat()),
+                    updated_at=str(row.get("updated_at") or datetime.now(timezone.utc).isoformat()),
                     metadata=dict(row.get("metadata") or {}),
                 )
             self._accounts = loaded
@@ -76,7 +76,7 @@ class AccountManager:
     def _save(self) -> None:
         try:
             payload = {
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
                 "accounts": [asdict(v) for v in self._accounts.values()],
             }
             self._file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -105,7 +105,7 @@ class AccountManager:
             raise ValueError("account_id 不能为空")
         if aid in self._accounts:
             raise ValueError(f"账户 {aid} 已存在")
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         self._accounts[aid] = TradingAccount(
             account_id=aid,
             name=str(name or aid),
@@ -138,7 +138,7 @@ class AccountManager:
             merged = dict(item.metadata)
             merged.update(updates["metadata"])
             item.metadata = merged
-        item.updated_at = datetime.utcnow().isoformat()
+        item.updated_at = datetime.now(timezone.utc).isoformat()
         self._save()
         return asdict(item)
 
@@ -170,7 +170,7 @@ class AccountManager:
         if target not in {"paper", "live"}:
             raise ValueError("mode must be paper or live")
         updated = 0
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         for item in self._accounts.values():
             if item.mode != target:
                 item.mode = target

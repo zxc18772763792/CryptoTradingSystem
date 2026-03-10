@@ -1,5 +1,5 @@
 """Operation audit logger."""
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -42,7 +42,7 @@ class AuditLogger:
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
         limit = max(1, min(limit, 2000))
-        cutoff = datetime.utcnow() - timedelta(hours=max(1, hours))
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, hours))
 
         async with async_session_maker() as session:
             stmt = (

@@ -22,8 +22,39 @@ from core.exchanges import exchange_manager
 from core.news.service.api import IngestRequest, load_service_config, run_ingest_pull_now
 from core.news.service.worker import process_llm_batch, run_pull_cycle
 from core.news.storage import db as news_db
+from core.governance.rbac import GovernanceIdentity
+from core.governance.schemas import RiskConfigPayload
+from core.governance.service import (
+    approve_risk_change,
+    ensure_risk_config_initialized,
+    get_active_risk_config,
+    list_api_users as list_governance_api_users,
+    list_audit_records as list_governance_audit_records,
+    list_risk_change_requests,
+    list_strategy_specs as list_governance_strategy_specs,
+    propose_strategy as governance_propose_strategy,
+    request_risk_change as governance_request_risk_change,
+    transition_strategy as governance_transition_strategy,
+    upsert_api_user as governance_upsert_api_user,
+)
 from core.ops.service.auth import get_ops_token, get_request_auth, ops_token_configured, require_ops_auth
-from core.research.experiment_registry import ProposalRegistry
+from core.research.orchestrator import (
+    create_manual_proposal,
+    delete_proposal as delete_ai_proposal_item,
+    ensure_ai_research_runtime_state,
+    get_candidate as get_ai_candidate_item,
+    get_deployment_status as get_ai_deployment_status,
+    get_experiment as get_ai_experiment_item,
+    get_proposal as get_ai_proposal_item,
+    list_candidates as list_ai_candidate_items,
+    list_experiment_runs as list_ai_experiment_runs,
+    list_experiments as list_ai_experiment_items,
+    list_lifecycle as list_ai_lifecycle,
+    list_promotions as list_ai_promotions,
+    list_proposals as list_ai_proposal_items,
+    promote_existing_candidate,
+    run_proposal as run_ai_proposal_service,
+)
 from core.research.strategy_research import ResearchConfig, run_strategy_research
 from core.risk.risk_manager import risk_manager
 from core.strategies import Signal, SignalType
@@ -39,6 +70,7 @@ from prediction_markets.polymarket.worker import (
     refresh_quotes_once as pm_refresh_quotes_once,
     run_worker_once as pm_run_worker_once,
 )
+from web.services import ensure_trading_mode_started
 
 
 class OpsNewsPullRequest(BaseModel):
@@ -94,6 +126,10 @@ class AIProposalRunRequest(BaseModel):
     strategies: List[str] = Field(default_factory=list)
 
 
+class AICandidatePromotionRequest(BaseModel):
+    target: Optional[str] = None
+
+
 class ManualSignalRequest(BaseModel):
     symbol: str
     signal_type: str
@@ -119,6 +155,45 @@ class PolymarketWorkerRunRequest(BaseModel):
     categories: List[str] = Field(default_factory=list)
 
 
+class GovernanceStrategyProposeRequest(BaseModel):
+    strategy_id: str
+    name: str
+    strategy_class: str
+    params: Dict[str, Any] = Field(default_factory=dict)
+    guardrails: Dict[str, Any] = Field(default_factory=dict)
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+    regime: str = "mixed"
+
+
+class GovernanceStrategyTransitionRequest(BaseModel):
+    note: str = ""
+
+
+class GovernanceRiskChangeRequest(BaseModel):
+    proposed_config: RiskConfigPayload
+    reason: str = ""
+
+
+class GovernanceRiskToggleRequest(BaseModel):
+    enabled: bool = True
+    reason: str = ""
+
+
+class GovernanceAuditQuery(BaseModel):
+    module: Optional[str] = None
+    action: Optional[str] = None
+    actor: Optional[str] = None
+    trace_id: Optional[str] = None
+    limit: int = Field(default=200, ge=1, le=2000)
+
+
+class GovernanceApiUserUpsertRequest(BaseModel):
+    name: str
+    role: str
+    api_key: str
+    is_active: bool = True
+
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -129,6 +204,16 @@ def _ok(data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
 def _err(message: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return {"ok": False, "ts": _now_utc().isoformat(), "data": data or {}, "error": str(message)}
+
+
+def _governance_identity_from_auth(auth: Any) -> GovernanceIdentity:
+    return GovernanceIdentity(
+        actor=str(getattr(auth, "actor", "") or "openclaw"),
+        role=str(getattr(auth, "role", "") or "SYSTEM"),
+        api_key_present=bool(getattr(auth, "api_key_present", False)),
+        token_present=bool(getattr(auth, "token_present", False)),
+        client_ip=str(getattr(auth, "client_ip", "") or ""),
+    )
 
 
 def _normalize_symbol(symbol: str) -> str:
@@ -232,12 +317,13 @@ def _ensure_ops_runtime_state(app: FastAPI) -> None:
         app.state.polymarket_cfg = load_polymarket_config()
     if not hasattr(app.state, "polymarket_trading_approvals"):
         app.state.polymarket_trading_approvals = {}
-    if not hasattr(app.state, "ai_proposal_registry_path"):
-        app.state.ai_proposal_registry_path = (
-            (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "ai" / "proposals.json").resolve()
-        )
-    if not isinstance(getattr(app.state, "ai_proposal_registry", None), ProposalRegistry):
-        app.state.ai_proposal_registry = ProposalRegistry(Path(app.state.ai_proposal_registry_path))
+    if not isinstance(getattr(app.state, "governance_runtime", None), dict):
+        app.state.governance_runtime = {
+            "reduce_only": False,
+            "kill_switch": False,
+            "risk_config_version": None,
+        }
+    ensure_ai_research_runtime_state(app)
 
 
 def _cleanup_live_approvals(app: FastAPI) -> None:
@@ -317,21 +403,11 @@ async def _build_polymarket_status(app: FastAPI) -> Dict[str, Any]:
 
 
 async def _ensure_live_mode_started() -> None:
-    was_running = bool(execution_engine.is_running)
-    execution_engine.set_paper_trading(False)
-    if was_running:
-        try:
-            await execution_engine._prime_live_equity()  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        return
-    await execution_engine.start()
+    await ensure_trading_mode_started("live")
 
 
 async def _ensure_paper_mode_started() -> None:
-    execution_engine.set_paper_trading(True)
-    if not execution_engine.is_running:
-        await execution_engine.start()
+    await ensure_trading_mode_started("paper")
 
 
 async def _get_ticker_price(symbol: str, exchange_name: str = "binance") -> float:
@@ -405,7 +481,7 @@ async def _close_local_positions() -> Dict[str, Any]:
             symbol=str(pos.symbol or ""),
             signal_type=(SignalType.CLOSE_LONG if pos.side == PositionSide.LONG else SignalType.CLOSE_SHORT),
             price=float(pos.current_price or pos.entry_price or 0.0),
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             strategy_name=str(pos.strategy or "ops_kill_switch"),
             strength=1.0,
             quantity=float(pos.quantity or 0.0),
@@ -830,6 +906,11 @@ async def initialize_ops_runtime(app: FastAPI, standalone: bool = False) -> None
     if standalone:
         get_ops_token(required=True)
     await pm_db.init_pm_db()
+    current = await ensure_risk_config_initialized(actor="system")
+    cfg = dict(current.get("config") or {})
+    app.state.governance_runtime["reduce_only"] = bool(cfg.get("reduce_only", False))
+    app.state.governance_runtime["kill_switch"] = bool(cfg.get("kill_switch", False))
+    app.state.governance_runtime["risk_config_version"] = current.get("version")
 
 
 async def shutdown_ops_runtime(app: FastAPI, standalone: bool = False) -> None:
@@ -849,6 +930,8 @@ async def _lifespan(app: FastAPI):
 
 
 def create_router() -> APIRouter:
+    from core.ops.service import ai_routes, governance_routes, news_routes, polymarket_routes, research_routes, trading_routes
+
     router = APIRouter(prefix="/ops", dependencies=[Depends(require_ops_auth)], tags=["ops"])
 
     @router.get("/health")
@@ -909,559 +992,14 @@ def create_router() -> APIRouter:
             data["polymarket"] = {"error": str(exc)}
         return _ok(data)
 
-    @router.post("/news/pull_now")
-    async def news_pull_now(request: Request, payload: OpsNewsPullRequest):
-        auth = get_request_auth(request)
-        params = payload.model_dump()
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/news/pull_now", method="POST", params=params, ip=auth.client_ip) as audit_state:
-            try:
-                cfg = load_service_config()
-                result = await run_ingest_pull_now(cfg=cfg, payload=IngestRequest(**params))
-                audit_state["extra"] = {"queued_count": result.get("queued_count", 0), "events_count": result.get("events_count", 0)}
-                return _ok(result)
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
+    router.include_router(governance_routes.router)
 
-    @router.post("/news/worker_run_once")
-    async def news_worker_run_once(request: Request, payload: OpsWorkerRunRequest):
-        auth = get_request_auth(request)
-        params = payload.model_dump()
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/news/worker_run_once", method="POST", params=params, ip=auth.client_ip) as audit_state:
-            try:
-                cfg = load_service_config()
-                sources = [str(x).strip().lower() for x in payload.sources if str(x).strip()]
-                out: Dict[str, Any] = {}
-                if not payload.llm_only:
-                    out["pull"] = await run_pull_cycle(cfg, sources or (cfg.get("defaults") or {}).get("news_sources") or [])
-                if not payload.pull_only:
-                    out["llm"] = await process_llm_batch(cfg, limit=payload.llm_limit)
-                out["source_states"] = await news_db.list_source_states()
-                out["llm_queue"] = await news_db.get_llm_queue_stats()
-                return _ok(out)
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
+    router.include_router(news_routes.router)
+    router.include_router(research_routes.router)
+    router.include_router(ai_routes.router)
+    router.include_router(polymarket_routes.router)
 
-    @router.post("/research/run")
-    async def research_run(request: Request, payload: ResearchRunRequest):
-        auth = get_request_auth(request)
-        params = payload.model_dump()
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/research/run", method="POST", params=params, ip=auth.client_ip) as audit_state:
-            try:
-                _ensure_ops_runtime_state(request.app)
-                symbol = _normalize_symbol(payload.symbol)
-                default_research = ResearchConfig()
-                config = ResearchConfig(
-                    exchange=str(payload.exchange or "binance").strip().lower(),
-                    symbol=symbol,
-                    days=int(payload.days),
-                    initial_capital=float(payload.initial_capital),
-                    timeframes=list(payload.timeframes or ["1m", "5m", "15m"]),
-                    strategies=list(payload.strategies or default_research.strategies),
-                    commission_rate=float(payload.commission_rate),
-                    slippage_bps=float(payload.slippage_bps),
-                    output_dir=default_research.output_dir,
-                )
-                if not payload.background:
-                    result = await run_strategy_research(config)
-                    latest_payload = {
-                        "job_id": None,
-                        "request_summary": params,
-                        "output_dir": str(Path(result.get("csv_path") or "").resolve().parent) if result.get("csv_path") else str(config.output_dir.resolve()),
-                        "csv_path": result.get("csv_path"),
-                        "markdown_path": result.get("markdown_path"),
-                        "top_result_summary": result.get("best"),
-                        "finished_at": _now_utc().isoformat(),
-                    }
-                    latest_path = Path(request.app.state.research_latest_path)
-                    latest_path.parent.mkdir(parents=True, exist_ok=True)
-                    latest_path.write_text(json.dumps(latest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-                    return _ok(result)
-                job_id = f"research-{int(_now_utc().timestamp())}-{secrets.token_hex(4)}"
-                job = {
-                    "job_id": job_id,
-                    "status": "pending",
-                    "created_at": _now_utc().isoformat(),
-                    "started_at": None,
-                    "finished_at": None,
-                    "request": params,
-                    "result": None,
-                    "error": None,
-                }
-                request.app.state.research_jobs[job_id] = job
-                asyncio.create_task(_run_research_job(request.app, job_id, config, params), name=f"ops_research_{job_id}")
-                audit_state["extra"] = {"job_id": job_id}
-                return _ok(job)
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
-
-    @router.get("/research/job/{job_id}")
-    async def research_job(request: Request, job_id: str = FPath(...)):
-        _ensure_ops_runtime_state(request.app)
-        job = request.app.state.research_jobs.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="research job not found")
-        return _ok(job)
-
-    @router.get("/research/latest")
-    async def research_latest(request: Request):
-        _ensure_ops_runtime_state(request.app)
-        latest_path = Path(request.app.state.research_latest_path)
-        if not latest_path.exists():
-            return _err("latest research not found")
-        try:
-            payload = json.loads(latest_path.read_text(encoding="utf-8"))
-            return _ok(payload)
-        except Exception as exc:
-            return _err(f"failed to read latest research: {exc}")
-
-    @router.post("/ai/proposal")
-    async def create_ai_proposal(request: Request, payload: AIProposalCreateRequest):
-        auth = get_request_auth(request)
-        params = payload.model_dump()
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/ai/proposal", method="POST", params=params, ip=auth.client_ip) as audit_state:
-            try:
-                _ensure_ops_runtime_state(request.app)
-                proposal = _build_ai_research_proposal(payload, actor=auth.actor)
-                request.app.state.ai_proposal_registry.save(proposal)
-                audit_state["extra"] = {
-                    "proposal_id": proposal.proposal_id,
-                    "templates": len(proposal.strategy_templates),
-                    "symbols": len(proposal.target_symbols),
-                }
-                return _ok(
-                    {
-                        "proposal": proposal.model_dump(mode="json"),
-                        "registry_path": str(request.app.state.ai_proposal_registry.path),
-                    }
-                )
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
-
-    @router.get("/ai/proposals")
-    async def list_ai_proposals(request: Request, limit: int = 20):
-        _ensure_ops_runtime_state(request.app)
-        rows = request.app.state.ai_proposal_registry.list(limit=max(1, min(int(limit), 200)))
-        return _ok(
-            {
-                "items": [item.model_dump(mode="json") for item in rows],
-                "count": len(rows),
-                "registry_path": str(request.app.state.ai_proposal_registry.path),
-            }
-        )
-
-    @router.get("/ai/proposal/{proposal_id}")
-    async def get_ai_proposal(request: Request, proposal_id: str = FPath(...)):
-        _ensure_ops_runtime_state(request.app)
-        item = request.app.state.ai_proposal_registry.get(proposal_id)
-        if item is None:
-            raise HTTPException(status_code=404, detail="proposal not found")
-        return _ok({"proposal": item.model_dump(mode="json")})
-
-    @router.get("/ai/proposal/{proposal_id}/validation")
-    async def get_ai_proposal_validation(request: Request, proposal_id: str = FPath(...)):
-        item = _proposal_from_registry(request.app, proposal_id)
-        return _ok(
-            {
-                "proposal_id": proposal_id,
-                "status": item.status,
-                "validation_summary": item.validation_summary.model_dump(mode="json") if item.validation_summary else None,
-            }
-        )
-
-    @router.post("/ai/proposal/{proposal_id}/run")
-    async def run_ai_proposal(request: Request, proposal_id: str, payload: AIProposalRunRequest):
-        auth = get_request_auth(request)
-        params = payload.model_dump()
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/ai/proposal/run", method="POST", params={"proposal_id": proposal_id, **params}, ip=auth.client_ip) as audit_state:
-            try:
-                _ensure_ops_runtime_state(request.app)
-                proposal = _proposal_from_registry(request.app, proposal_id)
-                config = _build_research_config_from_proposal(proposal, payload)
-                request_payload = {
-                    "proposal_id": proposal_id,
-                    "exchange": config.exchange,
-                    "symbol": config.symbol,
-                    "days": config.days,
-                    "timeframes": list(config.timeframes),
-                    "strategies": list(config.strategies),
-                    "commission_rate": float(config.commission_rate),
-                    "slippage_bps": float(config.slippage_bps),
-                    "initial_capital": float(config.initial_capital),
-                    "background": bool(payload.background),
-                    "proposal_status_before": proposal.status,
-                }
-                if not payload.background:
-                    proposal.status = "research_running"
-                    proposal.metadata["last_research_request"] = request_payload
-                    _save_proposal(request.app, proposal)
-                    try:
-                        result = await run_strategy_research(config)
-                    except Exception as exc:
-                        proposal = _proposal_from_registry(request.app, proposal_id)
-                        proposal.status = "rejected"
-                        proposal.metadata["last_research_error"] = str(exc)
-                        _save_proposal(request.app, proposal)
-                        raise
-                    proposal = _proposal_from_registry(request.app, proposal_id)
-                    proposal = _apply_research_result_to_proposal(proposal, result, job_id=None)
-                    _save_proposal(request.app, proposal)
-                    audit_state["extra"] = {
-                        "proposal_id": proposal_id,
-                        "status": proposal.status,
-                        "valid_runs": int(result.get("valid_runs", 0) or 0),
-                    }
-                    return _ok(
-                        {
-                            "proposal": proposal.model_dump(mode="json"),
-                            "research_result": result,
-                        }
-                    )
-
-                job_id = f"proposal-research-{int(_now_utc().timestamp())}-{secrets.token_hex(4)}"
-                job = {
-                    "job_id": job_id,
-                    "proposal_id": proposal_id,
-                    "status": "pending",
-                    "created_at": _now_utc().isoformat(),
-                    "started_at": None,
-                    "finished_at": None,
-                    "request": request_payload,
-                    "result": None,
-                    "error": None,
-                }
-                request.app.state.research_jobs[job_id] = job
-                proposal.status = "research_queued"
-                proposal.metadata["last_research_job_id"] = job_id
-                proposal.metadata["last_research_request"] = request_payload
-                _save_proposal(request.app, proposal)
-                asyncio.create_task(
-                    _run_ai_proposal_research_job(request.app, job_id, proposal_id, config, request_payload),
-                    name=f"ops_ai_proposal_{job_id}",
-                )
-                audit_state["extra"] = {"proposal_id": proposal_id, "job_id": job_id}
-                return _ok(
-                    {
-                        "job": job,
-                        "proposal": proposal.model_dump(mode="json"),
-                    }
-                )
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
-
-    @router.get("/polymarket/status")
-    async def polymarket_status(request: Request):
-        try:
-            return _ok(await _build_polymarket_status(request.app))
-        except Exception as exc:
-            return _err(str(exc))
-
-    @router.post("/polymarket/subscribe")
-    async def polymarket_subscribe(request: Request, payload: PolymarketSubscribeRequest):
-        auth = get_request_auth(request)
-        params = payload.model_dump()
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/polymarket/subscribe", method="POST", params=params, ip=auth.client_ip) as audit_state:
-            try:
-                _ensure_ops_runtime_state(request.app)
-                cfg = dict(request.app.state.polymarket_cfg or load_polymarket_config())
-                categories = dict(cfg.get("categories") or {})
-                cat = str(payload.category or "").strip().upper()
-                if cat not in categories:
-                    return _err(f"unknown category: {cat}")
-                if payload.mode == "manual":
-                    item = dict(categories.get(cat) or {})
-                    if payload.keywords:
-                        item["keywords"] = list(payload.keywords)
-                    if payload.tags:
-                        item["tags"] = [int(x) for x in payload.tags]
-                    if payload.max_markets:
-                        item["max_markets"] = int(payload.max_markets)
-                    categories[cat] = item
-                    cfg["categories"] = categories
-                    request.app.state.polymarket_cfg = cfg
-                result = await pm_refresh_markets_once(cfg, categories=[cat])
-                audit_state["extra"] = {"category": cat}
-                return _ok({"category": cat, "mode": payload.mode, "result": result})
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
-
-    @router.post("/polymarket/unsubscribe")
-    async def polymarket_unsubscribe(request: Request, payload: PolymarketUnsubscribeRequest):
-        auth = get_request_auth(request)
-        params = payload.model_dump()
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/polymarket/unsubscribe", method="POST", params=params, ip=auth.client_ip) as audit_state:
-            try:
-                result = await pm_db.disable_subscriptions(payload.market_ids)
-                return _ok(result)
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
-
-    @router.post("/polymarket/worker_run_once")
-    async def polymarket_worker_run_once(request: Request, payload: PolymarketWorkerRunRequest):
-        auth = get_request_auth(request)
-        params = payload.model_dump()
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/polymarket/worker_run_once", method="POST", params=params, ip=auth.client_ip) as audit_state:
-            try:
-                _ensure_ops_runtime_state(request.app)
-                cfg = request.app.state.polymarket_cfg or load_polymarket_config()
-                result = await pm_run_worker_once(
-                    cfg,
-                    refresh_markets=bool(payload.refresh_markets),
-                    refresh_quotes=bool(payload.refresh_quotes),
-                    categories=[str(x).strip().upper() for x in payload.categories if str(x).strip()] or None,
-                )
-                return _ok(result)
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
-
-    @router.get("/polymarket/alerts")
-    async def polymarket_alerts(since: Optional[str] = None, category: Optional[str] = None, limit: int = 200):
-        try:
-            since_ts = parse_any_datetime(since) if since else None
-            rows = await pm_db.list_alerts(since=since_ts, category=category, limit=limit)
-            return _ok({"count": len(rows), "items": rows})
-        except Exception as exc:
-            return _err(str(exc))
-
-    @router.get("/polymarket/features")
-    async def polymarket_features(symbol: str, tf: str = "1m", since: Optional[str] = None):
-        try:
-            since_ts = parse_any_datetime(since) if since else (_now_utc() - timedelta(hours=24))
-            rows = await pm_db.get_features_range(
-                symbol=str(symbol or "").strip().upper(),
-                since=since_ts,
-                until=_now_utc(),
-                timeframe=str(tf or "1m").strip().lower(),
-            )
-            return _ok({"count": len(rows), "items": rows})
-        except Exception as exc:
-            return _err(str(exc))
-
-    @router.post("/polymarket/arm_trading")
-    async def polymarket_arm_trading(request: Request):
-        auth = get_request_auth(request)
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/polymarket/arm_trading", method="POST", params={}, ip=auth.client_ip) as audit_state:
-            try:
-                _ensure_ops_runtime_state(request.app)
-                code = secrets.token_urlsafe(8).replace("-", "").replace("_", "")[:10]
-                expires_at = _now_utc() + timedelta(seconds=120)
-                request.app.state.polymarket_trading_approvals[code] = {
-                    "approval_code": code,
-                    "issued_at": _now_utc(),
-                    "expires_at": expires_at,
-                    "actor": auth.actor,
-                    "used": False,
-                }
-                return _ok({"approval_code": code, "expires_at": expires_at.isoformat(), "note": "Call /ops/polymarket/enable_trading with X-OPS-APPROVAL within 120s"})
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
-
-    @router.post("/polymarket/enable_trading")
-    async def polymarket_enable_trading(request: Request, x_ops_approval: Optional[str] = Header(default=None, alias="X-OPS-APPROVAL")):
-        auth = get_request_auth(request)
-        params = {"approval_code": x_ops_approval or ""}
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/polymarket/enable_trading", method="POST", params=params, ip=auth.client_ip) as audit_state:
-            try:
-                _ensure_ops_runtime_state(request.app)
-                code = str(x_ops_approval or "").strip()
-                approval = request.app.state.polymarket_trading_approvals.get(code)
-                if not approval:
-                    audit_state["status"] = "denied"
-                    audit_state["error"] = "invalid approval code"
-                    raise HTTPException(status_code=403, detail="invalid approval code")
-                if approval.get("expires_at") <= _now_utc():
-                    request.app.state.polymarket_trading_approvals.pop(code, None)
-                    audit_state["status"] = "denied"
-                    audit_state["error"] = "approval code expired"
-                    raise HTTPException(status_code=403, detail="approval code expired")
-                request.app.state.polymarket_cfg.setdefault("defaults", {}).setdefault("trading", {})["enabled"] = True
-                request.app.state.polymarket_trading_approvals.pop(code, None)
-                return _ok({"trading_enabled": True})
-            except HTTPException:
-                raise
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
-
-    @router.post("/trading/start_paper")
-    async def trading_start_paper(request: Request):
-        auth = get_request_auth(request)
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/trading/start_paper", method="POST", params={}, ip=auth.client_ip) as audit_state:
-            try:
-                await _ensure_paper_mode_started()
-                return _ok(
-                    {
-                        "running": bool(execution_engine.is_running),
-                        "mode": execution_engine.get_trading_mode(),
-                        "queue_size": int(execution_engine.get_queue_size()),
-                        "risk_scope": "paper",
-                    }
-                )
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
-
-    @router.post("/trading/arm_live")
-    async def trading_arm_live(request: Request):
-        auth = get_request_auth(request)
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/trading/arm_live", method="POST", params={}, ip=auth.client_ip) as audit_state:
-            try:
-                _ensure_ops_runtime_state(request.app)
-                _cleanup_live_approvals(request.app)
-                code = secrets.token_urlsafe(8).replace("-", "").replace("_", "")[:10]
-                expires_at = _now_utc() + timedelta(seconds=120)
-                request.app.state.live_approvals[code] = {
-                    "approval_code": code,
-                    "issued_at": _now_utc(),
-                    "expires_at": expires_at,
-                    "actor": auth.actor,
-                    "used": False,
-                }
-                audit_state["extra"] = {"approval_expires_at": expires_at.isoformat()}
-                return _ok(
-                    {
-                        "approval_code": code,
-                        "expires_at": expires_at.isoformat(),
-                        "note": "Call /ops/trading/start_live with X-OPS-APPROVAL within 120s",
-                    }
-                )
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
-
-    @router.post("/trading/start_live")
-    async def trading_start_live(request: Request, x_ops_approval: Optional[str] = Header(default=None, alias="X-OPS-APPROVAL")):
-        auth = get_request_auth(request)
-        params = {"approval_code": x_ops_approval or ""}
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/trading/start_live", method="POST", params=params, ip=auth.client_ip) as audit_state:
-            _ensure_ops_runtime_state(request.app)
-            _cleanup_live_approvals(request.app)
-            code = str(x_ops_approval or "").strip()
-            approval = request.app.state.live_approvals.get(code)
-            if not code or not approval:
-                audit_state["status"] = "denied"
-                audit_state["error"] = "invalid approval code"
-                raise HTTPException(status_code=403, detail="invalid approval code")
-            if approval.get("used"):
-                audit_state["status"] = "denied"
-                audit_state["error"] = "approval code already used"
-                raise HTTPException(status_code=403, detail="approval code already used")
-            expires_at = approval.get("expires_at")
-            if not isinstance(expires_at, datetime) or expires_at <= _now_utc():
-                request.app.state.live_approvals.pop(code, None)
-                audit_state["status"] = "denied"
-                audit_state["error"] = "approval code expired"
-                raise HTTPException(status_code=403, detail="approval code expired")
-            try:
-                await _ensure_live_mode_started()
-                approval["used"] = True
-                request.app.state.live_approvals.pop(code, None)
-                return _ok(_build_status_execution())
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
-
-    @router.post("/trading/stop")
-    async def trading_stop(request: Request):
-        auth = get_request_auth(request)
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/trading/stop", method="POST", params={}, ip=auth.client_ip) as audit_state:
-            try:
-                await execution_engine.stop()
-                return _ok(
-                    {
-                        "running": False,
-                        "mode": execution_engine.get_trading_mode(),
-                        "conditional_orders_count": len(execution_engine.list_conditional_orders()),
-                    }
-                )
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
-
-    @router.post("/trading/kill_switch")
-    async def trading_kill_switch(request: Request):
-        auth = get_request_auth(request)
-        params = {"mode": execution_engine.get_trading_mode()}
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/trading/kill_switch", method="POST", params=params, ip=auth.client_ip) as audit_state:
-            try:
-                connected = list(exchange_manager.get_connected_exchanges())
-                pre_open_orders: Dict[str, int] = {}
-                for exchange_name in connected:
-                    connector = exchange_manager.get_exchange(exchange_name)
-                    if not connector:
-                        continue
-                    try:
-                        pre_open_orders[exchange_name] = len(await connector.get_open_orders())
-                    except Exception:
-                        pre_open_orders[exchange_name] = 0
-                conditional_before = len(execution_engine.list_conditional_orders())
-                await execution_engine.stop()
-                local = await _close_local_positions()
-                orphan = {"closed": [], "failures": []}
-                if not execution_engine.is_paper_mode():
-                    orphan = await _close_exchange_orphan_positions()
-                result = {
-                    "engine_stopped": True,
-                    "cancelled_orders": {
-                        "exchange_open_orders_before": pre_open_orders,
-                        "conditional_orders_before": conditional_before,
-                        "total_exchange_open_orders_before": int(sum(pre_open_orders.values())),
-                    },
-                    "closed_local_positions": local.get("closed", []),
-                    "closed_exchange_positions": orphan.get("closed", []),
-                    "failures": list(local.get("failures", [])) + list(orphan.get("failures", [])),
-                }
-                audit_state["extra"] = {
-                    "closed_local": len(result["closed_local_positions"]),
-                    "closed_exchange": len(result["closed_exchange_positions"]),
-                    "failures": len(result["failures"]),
-                }
-                return _ok(result)
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
-
-    @router.post("/risk/reset_halt")
-    async def risk_reset_halt(request: Request):
-        auth = get_request_auth(request)
-        async with ops_audit_scope(actor=auth.actor, endpoint="/ops/risk/reset_halt", method="POST", params={}, ip=auth.client_ip) as audit_state:
-            try:
-                risk_manager.reset_halt()
-                report = risk_manager.get_risk_report()
-                return _ok(
-                    {
-                        "trading_halted": bool(report.get("trading_halted", False)),
-                        "halt_reason": str(report.get("halt_reason") or ""),
-                        "report": report,
-                    }
-                )
-            except Exception as exc:
-                audit_state["status"] = "failed"
-                audit_state["error"] = str(exc)
-                return _err(str(exc))
+    router.include_router(trading_routes.router)
 
     if str(os.getenv("OPS_ALLOW_MANUAL_SIGNAL") or "").strip().lower() in {"1", "true", "yes", "on", "y"}:
 
@@ -1483,7 +1021,7 @@ def create_router() -> APIRouter:
                         symbol=symbol,
                         signal_type=signal_type,
                         price=float(price or 0.0),
-                        timestamp=datetime.utcnow(),
+                        timestamp=datetime.now(timezone.utc),
                         strategy_name="ops_manual_signal",
                         strength=float(payload.strength or 0.0),
                         metadata={

@@ -3,6 +3,7 @@ import io
 import itertools
 import json
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -22,9 +23,15 @@ from config.strategy_registry import (
     get_strategy_defaults,
     is_strategy_backtest_supported as registry_is_strategy_backtest_supported,
 )
+from core.backtest.common_pnl import build_common_pnl_summary
 from core.backtest.cost_models import fee_rate as resolve_fee_rate
 from core.backtest.cost_models import slippage_rate as resolve_slippage_rate
+from core.ai.ml_signal import build_feature_frame
 from core.data import data_storage
+from core.research.strategy_research import (
+    _attach_research_enrichment as attach_research_enrichment,
+    _build_research_enrichment as build_research_enrichment,
+)
 
 router = APIRouter()
 
@@ -82,6 +89,80 @@ def get_backtest_strategy_info(strategy: str) -> Dict[str, Any]:
 
 def is_strategy_backtest_supported(strategy: str) -> bool:
     return bool(registry_is_strategy_backtest_supported(strategy))
+
+
+def _strategy_family(strategy: str) -> str:
+    meta = _BACKTEST_STRATEGY_META.get(str(strategy or "").strip(), {})
+    return str(meta.get("family") or "traditional")
+
+
+def _strategy_decision_engine(strategy: str) -> str:
+    meta = _BACKTEST_STRATEGY_META.get(str(strategy or "").strip(), {})
+    return str(meta.get("decision_engine") or "rule")
+
+
+def _strategy_data_mode(strategy: str, *, news_events_count: int = 0, funding_available: bool = False) -> str:
+    family = _strategy_family(strategy)
+    if family == "ai_glm":
+        if news_events_count > 0 and funding_available:
+            return "OHLCV + News + Macro"
+        if news_events_count > 0:
+            return "OHLCV + News"
+        if funding_available:
+            return "OHLCV + Macro"
+        return "OHLCV only"
+    if family == "ml":
+        return "OHLCV only"
+    return "OHLCV"
+
+
+def _data_column_or_default(df: pd.DataFrame, column: str, default: float = 0.0) -> pd.Series:
+    if column in df.columns:
+        return pd.to_numeric(df[column], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(default)
+    return pd.Series(float(default), index=df.index, dtype=float)
+
+
+def _clamp_series(series: pd.Series, lower: float = -1.0, upper: float = 1.0) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(lower, upper)
+
+
+async def _attach_backtest_enrichment_if_needed(
+    strategy: str,
+    df: pd.DataFrame,
+    symbol: str,
+    start_time: Optional[datetime],
+    end_time: Optional[datetime],
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+    family = _strategy_family(strategy)
+    news_events_count = 0
+    funding_available = False
+    out = df.copy()
+
+    if family == "ai_glm":
+        try:
+            enrichment = await build_research_enrichment(
+                symbol=symbol,
+                start_time=start_time,
+                end_time=end_time,
+            )
+            news_events_count = int(enrichment.get("events_count", 0) or 0)
+            funding_available = bool(enrichment.get("funding_available", False))
+            out = attach_research_enrichment(out, symbol, enrichment)
+        except Exception:
+            out = df.copy()
+
+    out.attrs["news_events_count"] = int(news_events_count)
+    out.attrs["funding_available"] = bool(funding_available)
+    out.attrs["decision_engine"] = _strategy_decision_engine(strategy)
+    out.attrs["strategy_family"] = family
+    out.attrs["data_mode"] = _strategy_data_mode(
+        strategy,
+        news_events_count=int(news_events_count),
+        funding_available=bool(funding_available),
+    )
+    return out
 
 
 def _resolve_cost_rates(commission_rate: float, slippage_bps: float) -> tuple[float, float]:
@@ -527,6 +608,11 @@ def _optimize_strategy_on_df(
             "max_drawdown": float(item.get("metrics", {}).get("max_drawdown") or 0.0),
             "win_rate": float(item.get("metrics", {}).get("win_rate") or 0.0),
             "total_trades": int(item.get("metrics", {}).get("total_trades") or 0),
+            "entry_signals": int(item.get("metrics", {}).get("entry_signals") or 0),
+            "exit_signals": int(item.get("metrics", {}).get("exit_signals") or 0),
+            "trade_points": int(item.get("metrics", {}).get("entry_signals") or 0)
+            + int(item.get("metrics", {}).get("exit_signals") or 0),
+            "zero_trade_reason": str(item.get("metrics", {}).get("zero_trade_reason") or ""),
         }
         for item in trials
     ]
@@ -763,65 +849,122 @@ def _build_positions(strategy: str, df: pd.DataFrame, params: Optional[Dict[str,
             values.append(1.0 if in_position else 0.0)
         position = pd.Series(values, index=df.index)
     elif strategy == "MarketSentimentStrategy":
-        lookback = int(params.get("lookback_period", 24))
-        panic_th = float(params.get("panic_threshold", -0.04))
-        euphoria_th = float(params.get("euphoria_threshold", 0.04))
-        mood = close.pct_change().rolling(lookback, min_periods=lookback).sum()
+        lookback = max(5, int(params.get("lookback_period", 7)))
+        fear_th = float(params.get("fear_threshold", 25))
+        greed_th = float(params.get("greed_threshold", 75))
+        regime_window = max(lookback * 6, 24)
+        regime_ret = close.pct_change(lookback).clip(-0.20, 0.20)
+        mood = ((regime_ret - regime_ret.rolling(regime_window, min_periods=max(3, regime_window // 3)).min()) /
+            (regime_ret.rolling(regime_window, min_periods=max(3, regime_window // 3)).max() -
+             regime_ret.rolling(regime_window, min_periods=max(3, regime_window // 3)).min()).replace(0, np.nan) * 100.0
+        ).clip(0.0, 100.0).fillna(50.0)
+        news_sentiment = _clamp_series(_data_column_or_default(df, "news_sentiment_score"), -3.0, 3.0)
+        macro_score = _clamp_series(_data_column_or_default(df, "news_macro_score"), -3.0, 3.0)
+        funding_rate = _clamp_series(_data_column_or_default(df, "funding_rate"), -0.02, 0.02)
+        sentiment_component = (
+            50.0 + 28.0 * np.tanh(news_sentiment * 0.65 + macro_score * 0.90 - funding_rate * 180.0)
+        ).clip(0.0, 100.0)
+        fear_greed_score = (mood * 0.55 + sentiment_component * 0.45).clip(0.0, 100.0)
         in_position = False
         values = []
-        for m in mood.fillna(0):
-            if not in_position and m <= panic_th:
+        for score in fear_greed_score.fillna(50.0):
+            if not in_position and score <= fear_th:
                 in_position = True
-            elif in_position and m >= euphoria_th:
+            elif in_position and score >= max(50.0, greed_th - 15.0):
                 in_position = False
             values.append(1.0 if in_position else 0.0)
         position = pd.Series(values, index=df.index)
     elif strategy == "SocialSentimentStrategy":
-        lookback = max(2, int(params.get("lookback_period", 12)))
-        enter_th = float(params.get("enter_momentum", 0.015))
-        exit_th = float(params.get("exit_momentum", -0.008))
-        momentum = close / close.shift(lookback) - 1.0
+        pos_th = float(params.get("positive_threshold", 0.2))
+        neg_th = float(params.get("negative_threshold", -0.2))
+        momentum = close.pct_change(6).clip(-0.15, 0.15)
+        volume_ratio = df["volume"] / df["volume"].rolling(24, min_periods=12).mean().replace(0, np.nan)
+        news_sentiment = _clamp_series(_data_column_or_default(df, "news_sentiment_score"), -3.0, 3.0)
+        event_intensity = _clamp_series(_data_column_or_default(df, "news_event_intensity"), 0.0, 3.0)
+        social_score = np.tanh(
+            news_sentiment * 0.85
+            + event_intensity * 0.30
+            + momentum * 6.5
+            + (volume_ratio.fillna(1.0) - 1.0) * 0.8
+        )
         in_position = False
         values = []
-        for m in momentum.fillna(0):
-            if not in_position and m >= enter_th:
+        for score in social_score.fillna(0.0):
+            if not in_position and score >= pos_th:
                 in_position = True
-            elif in_position and m <= exit_th:
+            elif in_position and score <= max(0.0, neg_th + 0.1):
                 in_position = False
             values.append(1.0 if in_position else 0.0)
         position = pd.Series(values, index=df.index)
     elif strategy == "FundFlowStrategy":
-        vol = df["volume"].fillna(0.0)
-        vol_ma = vol.rolling(24, min_periods=24).mean()
-        price_ma = close.rolling(24, min_periods=24).mean()
-        flow_signal = (vol > (vol_ma * 1.2)) & (close > price_ma)
-        exit_signal = close < price_ma
+        flow_window = max(6, int(params.get("lookback_period", 7)) * 3)
+        min_ratio = abs(float(params.get("min_imbalance_ratio", 0.03)))
+        signed_flow = (close.pct_change().clip(-0.05, 0.05) * close * df["volume"]).fillna(0.0)
+        flow_sum = signed_flow.rolling(flow_window, min_periods=max(4, flow_window // 3)).sum()
+        flow_abs = signed_flow.abs().rolling(flow_window, min_periods=max(4, flow_window // 3)).sum().replace(0, np.nan)
+        imbalance = (flow_sum / flow_abs).fillna(0.0)
+        news_flow = _clamp_series(_data_column_or_default(df, "news_flow_score"), -3.0, 3.0)
+        funding_rate = _clamp_series(_data_column_or_default(df, "funding_rate"), -0.02, 0.02)
+        flow_score = (
+            imbalance * 0.75
+            + np.tanh(news_flow * 0.70) * 0.20
+            - np.tanh(funding_rate * 160.0) * 0.10
+        ).clip(-1.0, 1.0)
+        neutral_ratio = max(min_ratio * 0.5, 0.01)
         in_position = False
         values = []
-        for en, ex in zip(flow_signal.fillna(False), exit_signal.fillna(False)):
-            if not in_position and bool(en):
+        for score in flow_score:
+            if not in_position and score >= min_ratio:
                 in_position = True
-            elif in_position and bool(ex):
+            elif in_position and score <= neutral_ratio:
                 in_position = False
             values.append(1.0 if in_position else 0.0)
         position = pd.Series(values, index=df.index)
     elif strategy == "WhaleActivityStrategy":
-        vol = df["volume"].fillna(0.0)
-        vol_mean = vol.rolling(48, min_periods=24).mean()
-        vol_std = vol.rolling(48, min_periods=24).std().replace(0, np.nan)
-        vol_z = (vol - vol_mean) / vol_std
-        bar_ret = close.pct_change().fillna(0.0)
-        entry = (vol_z >= 1.8) & (bar_ret > 0)
-        exit_sig = (bar_ret < 0) | (vol_z < 0.2)
+        lookback = max(6, int(params.get("lookback_hours", 24)))
+        accumulation = max(1, int(params.get("accumulation_threshold", 2)))
+        distribution = max(1, int(params.get("distribution_threshold", 2)))
+        notional = (close * df["volume"]).fillna(0.0)
+        baseline = notional.rolling(lookback, min_periods=max(4, lookback // 3)).mean().replace(0, np.nan)
+        whale_bar = (notional >= baseline * 1.8).fillna(False)
+        buy_spikes = (whale_bar & (close.pct_change().fillna(0.0) > 0)).rolling(lookback, min_periods=1).sum()
+        sell_spikes = (whale_bar & (close.pct_change().fillna(0.0) < 0)).rolling(lookback, min_periods=1).sum()
+        news_whale = _clamp_series(_data_column_or_default(df, "news_whale_score"), -3.0, 3.0)
+        event_intensity = _clamp_series(_data_column_or_default(df, "news_event_intensity"), 0.0, 3.0)
+        whale_signal = np.tanh(news_whale * 0.90 + event_intensity * 0.15)
+        buy_pressure = buy_spikes.fillna(0.0) + whale_signal.clip(lower=0.0) * float(accumulation)
+        sell_pressure = sell_spikes.fillna(0.0) + (-whale_signal.clip(upper=0.0)) * float(distribution)
         in_position = False
         values = []
-        for en, ex in zip(entry.fillna(False), exit_sig.fillna(False)):
-            if not in_position and bool(en):
+        for buy_count, sell_count in zip(buy_pressure, sell_pressure):
+            if not in_position and buy_count >= accumulation and buy_count > sell_count:
                 in_position = True
-            elif in_position and bool(ex):
+            elif in_position and sell_count >= distribution:
                 in_position = False
             values.append(1.0 if in_position else 0.0)
         position = pd.Series(values, index=df.index)
+    elif strategy == "MLXGBoostStrategy":
+        try:
+            import xgboost as xgb  # noqa: F401
+        except ImportError:
+            raise HTTPException(status_code=400, detail="MLXGBoostStrategy 需要安装 xgboost")
+        model_path = str(params.get("model_path", ""))
+        if not model_path or not Path(model_path).exists():
+            candidates = [
+                Path(model_path) if model_path else None,
+                Path("models/ml_signal_xgb.json"),
+                Path(__file__).resolve().parents[2] / "models" / "ml_signal_xgb.json",
+            ]
+            model_path = next((str(p) for p in candidates if p and p.exists()), "")
+        if not model_path:
+            raise HTTPException(status_code=400, detail="MLXGBoostStrategy 模型文件不存在")
+        model = xgb.Booster()
+        model.load_model(model_path)
+        feat_df = build_feature_frame(df)
+        proba = model.predict(xgb.DMatrix(feat_df.values, feature_names=list(feat_df.columns)))
+        proba = pd.Series(proba, index=df.index).clip(0.0, 1.0)
+        threshold_ml = float(params.get("threshold", 0.55))
+        position = (proba >= threshold_ml).astype(float)
     # ===== 新增因子策略回测逻辑 =====
     elif strategy == "AroonStrategy":
         period = int(params.get("period", 25))
@@ -1368,7 +1511,38 @@ def _run_backtest_core(
         "quality_flag": quality_flag,
         "recommended_min_bars": int(_strategy_recommended_min_bars(strategy, timeframe, params=params)),
         "zero_trade_reason": "",
+        "news_events_count": int(df.attrs.get("news_events_count", 0) or 0),
+        "funding_available": bool(df.attrs.get("funding_available", False)),
+        "data_mode": str(
+            df.attrs.get("data_mode")
+            or _strategy_data_mode(
+                strategy,
+                news_events_count=int(df.attrs.get("news_events_count", 0) or 0),
+                funding_available=bool(df.attrs.get("funding_available", False)),
+            )
+        ),
+        "decision_engine": str(df.attrs.get("decision_engine") or _strategy_decision_engine(strategy)),
+        "strategy_family": str(df.attrs.get("strategy_family") or _strategy_family(strategy)),
     }
+    result["common_pnl"] = build_common_pnl_summary(
+        source="web_quick_backtest",
+        unit="pct_return",
+        gross_pnl=result["gross_total_return"],
+        fee=result["estimated_trade_cost_pct"],
+        slippage_cost=None,
+        funding_pnl=0.0,
+        net_pnl=result["total_return"],
+        turnover=None,
+        trade_count=result["total_trades"],
+        win_rate=result["win_rate"],
+        cost_model_version="web_api_backtest_v1",
+        metadata={
+            "timeframe": timeframe,
+            "strategy": strategy,
+            "decision_engine": result["decision_engine"],
+            "funding_available": bool(result["funding_available"]),
+        },
+    )
     if int(trade_stats.get("completed") or 0) == 0:
         result["zero_trade_reason"] = _diagnose_zero_trade_reason(
             strategy=strategy,
@@ -1565,6 +1739,13 @@ async def run_backtest(
         start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
         end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
     )
+    df = await _attach_backtest_enrichment_if_needed(
+        strategy=strategy,
+        df=df,
+        symbol=resolved_symbol,
+        start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
+        end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
+    )
     if df.empty:
         raise HTTPException(
             status_code=404,
@@ -1680,6 +1861,14 @@ async def compare_backtests(
                 )
                 if loop_df.empty:
                     raise HTTPException(status_code=404, detail="Fama 回测缺少可用横截面数据")
+            else:
+                loop_df = await _attach_backtest_enrichment_if_needed(
+                    strategy=strategy,
+                    df=loop_df,
+                    symbol=symbol,
+                    start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
+                    end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
+                )
             if pre_optimize and strategy in _BACKTEST_OPTIMIZATION_GRIDS:
                 opt = _optimize_strategy_on_df(
                     strategy=strategy,
@@ -1703,6 +1892,11 @@ async def compare_backtests(
                             "optimization_trials": int(opt.get("trials") or 0),
                             "optimization_failed_trials": int(opt.get("failed_trials") or 0),
                             "optimization_objective": opt.get("objective"),
+                            "news_events_count": int(loop_df.attrs.get("news_events_count", 0) or 0),
+                            "funding_available": bool(loop_df.attrs.get("funding_available", False)),
+                            "data_mode": str(loop_df.attrs.get("data_mode") or _strategy_data_mode(strategy)),
+                            "decision_engine": str(loop_df.attrs.get("decision_engine") or _strategy_decision_engine(strategy)),
+                            "strategy_family": str(loop_df.attrs.get("strategy_family") or _strategy_family(strategy)),
                         }
                     )
                 else:
@@ -1725,6 +1919,11 @@ async def compare_backtests(
                             "optimization_trials": int(opt.get("trials") or 0),
                             "optimization_failed_trials": int(opt.get("failed_trials") or 0),
                             "optimization_objective": opt.get("objective"),
+                            "news_events_count": int(loop_df.attrs.get("news_events_count", 0) or 0),
+                            "funding_available": bool(loop_df.attrs.get("funding_available", False)),
+                            "data_mode": str(loop_df.attrs.get("data_mode") or _strategy_data_mode(strategy)),
+                            "decision_engine": str(loop_df.attrs.get("decision_engine") or _strategy_decision_engine(strategy)),
+                            "strategy_family": str(loop_df.attrs.get("strategy_family") or _strategy_family(strategy)),
                         }
                     )
             else:
@@ -1746,6 +1945,11 @@ async def compare_backtests(
                         "optimization_reason": (
                             "未启用预优化" if not pre_optimize else "该策略暂不支持参数优化"
                         ),
+                        "news_events_count": int(loop_df.attrs.get("news_events_count", 0) or 0),
+                        "funding_available": bool(loop_df.attrs.get("funding_available", False)),
+                        "data_mode": str(loop_df.attrs.get("data_mode") or _strategy_data_mode(strategy)),
+                        "decision_engine": str(loop_df.attrs.get("decision_engine") or _strategy_decision_engine(strategy)),
+                        "strategy_family": str(loop_df.attrs.get("strategy_family") or _strategy_family(strategy)),
                     }
                 )
             results.append(metrics)
@@ -1808,6 +2012,13 @@ async def run_backtest_custom(
         symbol=symbol,
         timeframe=timeframe,
         params=custom_params,
+        start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
+        end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
+    )
+    df = await _attach_backtest_enrichment_if_needed(
+        strategy=strategy,
+        df=df,
+        symbol=resolved_symbol,
         start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
         end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
     )
@@ -1874,6 +2085,13 @@ async def optimize_backtest(
         start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
         end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
     )
+    df = await _attach_backtest_enrichment_if_needed(
+        strategy=strategy,
+        df=df,
+        symbol=resolved_symbol,
+        start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
+        end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
+    )
     if df.empty:
         raise HTTPException(status_code=404, detail="缺少历史数据")
     if parsed_start is not None:
@@ -1915,6 +2133,11 @@ async def optimize_backtest(
         "objective": opt_result.get("objective"),
         "commission_rate": max(0.0, float(commission_rate or 0.0)),
         "slippage_bps": max(0.0, float(slippage_bps or 0.0)),
+        "news_events_count": int(df.attrs.get("news_events_count", 0) or 0),
+        "funding_available": bool(df.attrs.get("funding_available", False)),
+        "data_mode": str(df.attrs.get("data_mode") or _strategy_data_mode(strategy)),
+        "decision_engine": str(df.attrs.get("decision_engine") or _strategy_decision_engine(strategy)),
+        "strategy_family": str(df.attrs.get("strategy_family") or _strategy_family(strategy)),
         "trials": int(opt_result.get("trials") or 0),
         "failed_trials": int(opt_result.get("failed_trials") or 0),
         "best": opt_result.get("best"),
@@ -1942,6 +2165,13 @@ async def export_backtest_report(
         strategy=strategy,
         symbol=symbol,
         timeframe=timeframe,
+        start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
+        end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
+    )
+    df = await _attach_backtest_enrichment_if_needed(
+        strategy=strategy,
+        df=df,
+        symbol=resolved_symbol,
         start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
         end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
     )

@@ -1,12 +1,16 @@
 ﻿const API_BASE='/api';
-const state={positions:[],orders:[],strategies:[],availableStrategyTypes:[],strategyLibraryRows:[],strategyCatalogRows:[],summary:{running:[],recent_signals:[],runtime:{}},notifyRules:{},wsConnected:false,modeToken:'',bootCompleted:false,bootFailed:false,strategyHealth:null,lastHealthAlertKey:'',selectedStrategyName:'',closingPositions:{}};
-const researchState={lastFactorLibrary:null,lastMultiAsset:null,lastSentiment:null,lastAnalytics:null,lastOnchain:null,lastOverview:null};
-const backtestUIState={lastOptimize:null,lastCompare:null,defaultCompareStrategies:[]};
+const state={positions:[],orders:[],strategies:[],availableStrategyTypes:[],strategyLibraryRows:[],strategyCatalogRows:[],summary:{running:[],recent_signals:[],runtime:{}},notifyRules:{},wsConnected:false,modeToken:'',bootCompleted:false,bootFailed:false,strategyHealth:null,lastHealthAlertKey:'',selectedStrategyName:'',closingPositions:{},lastSummarySnapshot:null};
+const researchState={lastFactorLibrary:null,lastMultiAsset:null,lastSentiment:null,lastAnalytics:null,lastOnchain:null,lastFama:null,lastOverview:null,pendingTimers:{}};
+const backtestUIState={lastOptimize:null,lastCompare:null,lastRenderedBacktest:null,defaultCompareStrategies:[]};
 const dataHealthState={last:null};
+const dataAnalyticsHealthState={last:null};
+const uiLoadState={tabs:{},inFlight:{},dataInitialized:false};
 const RESEARCH_DEFAULT_SYMBOLS=['BTC/USDT','ETH/USDT','BNB/USDT','SOL/USDT','XRP/USDT','ADA/USDT','DOGE/USDT','TRX/USDT','LINK/USDT','AVAX/USDT','DOT/USDT','POL/USDT','LTC/USDT','BCH/USDT','ETC/USDT','ATOM/USDT','NEAR/USDT','APT/USDT','ARB/USDT','OP/USDT','SUI/USDT','INJ/USDT','RUNE/USDT','AAVE/USDT','MKR/USDT','UNI/USDT','FIL/USDT','HBAR/USDT','ICP/USDT','TON/USDT'];
+const DEFAULT_STRATEGY_ALLOCATION=0.15;
 let equityChart=null;
 let plotlyResizeSeq=0;
 let dataReloadTimer=null;
+let summaryLoadPromise=null;
 if(typeof globalThis!=='undefined'&&typeof globalThis.sseError==='undefined')globalThis.sseError=null;
 
 const mapOrderStatus=s=>({open:'未成交',closed:'已成交',canceled:'已撤销',expired:'已过期',rejected:'已拒绝',queued:'待触发'}[s]||s);
@@ -14,6 +18,7 @@ const mapSide=s=>s==='buy'?'买':s==='sell'?'卖':s;
 const mapState=s=>({running:'运行中',idle:'空闲',paused:'已暂停',stopped:'已停止'}[s]||s);
 const fmt=v=>new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(Number(v||0));
 const fmtMaybe=v=>(v===null||v===undefined||Number.isNaN(Number(v)))?'--':fmt(v);
+const fmtCompactUsd=v=>(v===null||v===undefined||Number.isNaN(Number(v)))?'--':new Intl.NumberFormat('en-US',{notation:'compact',maximumFractionDigits:2}).format(Number(v||0));
 function fmtDurationSec(v){const sec=Math.max(0,Math.floor(Number(v||0)));const d=Math.floor(sec/86400),h=Math.floor((sec%86400)/3600),m=Math.floor((sec%3600)/60),s=sec%60;const out=[];if(d>0)out.push(`${d}d`);if(h>0||d>0)out.push(`${h}h`);if(m>0||h>0||d>0)out.push(`${m}m`);out.push(`${s}s`);return out.join(' ');}
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
 const TIME_LOCALE='zh-CN';
@@ -120,16 +125,25 @@ TriangularArbitrageStrategy:{cat:'套利',desc:'三角路径套利'},
 DEXArbitrageStrategy:{cat:'套利',desc:'链上DEX套利'},
 FlashLoanArbitrageStrategy:{cat:'套利',desc:'闪电贷套利'},
 // ===== 宏观类 =====
-MarketSentimentStrategy:{cat:'宏观',desc:'恐慌贪婪指数'},
-SocialSentimentStrategy:{cat:'宏观',desc:'社媒情绪分析'},
-FundFlowStrategy:{cat:'宏观',desc:'交易所资金流'},
-WhaleActivityStrategy:{cat:'宏观',desc:'巨鲸地址追踪'},
+MarketSentimentStrategy:{cat:'宏观',desc:'恐慌贪婪指数',family:'ai_glm',decisionEngine:'glm',aiDriven:true},
+SocialSentimentStrategy:{cat:'宏观',desc:'社媒情绪分析',family:'ai_glm',decisionEngine:'glm',aiDriven:true},
+FundFlowStrategy:{cat:'宏观',desc:'交易所资金流',family:'ai_glm',decisionEngine:'glm',aiDriven:true},
+WhaleActivityStrategy:{cat:'宏观',desc:'巨鲸地址追踪',family:'ai_glm',decisionEngine:'glm',aiDriven:true},
 // ===== 量化多因子类 =====
-MultiFactorHFStrategy:{cat:'量化',desc:'多因子高频组合(5m)'}
+MultiFactorHFStrategy:{cat:'量化',desc:'多因子高频组合(5m)'},
+// ===== ML 类 =====
+MLXGBoostStrategy:{cat:'机器学习',desc:'XGBoost 方向预测',family:'ml',decisionEngine:'ml',aiDriven:true}
 };
 function getStrategyMeta(name){
 const meta=STRATEGY_META[String(name||'').trim()]||{};
-return{cat:String(meta.cat||'其他'),desc:String(meta.desc||'可注册后在参数面板调整'),risk:String(meta.risk||'medium')};
+return{
+cat:String(meta.cat||'其他'),
+desc:String(meta.desc||'可注册后在参数面板调整'),
+risk:String(meta.risk||'medium'),
+family:String(meta.family||'traditional'),
+decisionEngine:String(meta.decisionEngine||'rule'),
+aiDriven:!!meta.aiDriven,
+};
 }
 function strategyCatalogMap(){
 return Object.fromEntries((state.strategyCatalogRows||[]).map(row=>[String(row?.name||'').trim(),row]).filter(([name])=>Boolean(name)));
@@ -144,6 +158,9 @@ const normalized=(Array.isArray(rows)?rows:[]).map(row=>{
     cat:String(row?.category||existing.cat||'其他'),
     desc:String(row?.usage||existing.desc||name),
     risk:String(row?.risk||existing.risk||'medium'),
+    family:String(row?.family||existing.family||'traditional'),
+    decisionEngine:String(row?.decision_engine||existing.decisionEngine||'rule'),
+    aiDriven:!!(row?.ai_driven ?? existing.aiDriven),
     backtestSupported:!!row?.backtest_supported,
     backtestReason:String(row?.backtest_reason||existing.backtestReason||''),
     defaultStart:!!row?.default_start,
@@ -156,6 +173,9 @@ const normalized=(Array.isArray(rows)?rows:[]).map(row=>{
     category:String(row?.category||existing.cat||'其他'),
     usage:String(row?.usage||existing.desc||name),
     risk:String(row?.risk||existing.risk||'medium'),
+    family:String(row?.family||existing.family||'traditional'),
+    decision_engine:String(row?.decision_engine||existing.decisionEngine||'rule'),
+    ai_driven:!!(row?.ai_driven ?? existing.aiDriven),
     backtest_supported:!!row?.backtest_supported,
     default_start:!!row?.default_start,
   };
@@ -311,7 +331,7 @@ const suffixTxt=normalizeInstanceSuffixText(suffix);
 return `${base}_${prefix}_${stamp}_${rnd}${suffixTxt?`_${suffixTxt}`:''}`;
 }
 function getBacktestRegisterOptions(){
-const allocation=Math.max(0,Math.min(1,Number(document.getElementById('backtest-register-allocation')?.value||0.05)));
+const allocation=Math.max(0,Math.min(1,Number(document.getElementById('backtest-register-allocation')?.value||DEFAULT_STRATEGY_ALLOCATION)));
 const autoStart=!!document.getElementById('backtest-register-auto-start')?.checked;
 const suffix=normalizeInstanceSuffixText(document.getElementById('backtest-register-suffix')?.value||'');
 return{allocation,autoStart,suffix};
@@ -338,8 +358,74 @@ el.style.alignItems='';
 el.style.justifyContent='';
 el.style.position=el.style.position||'relative';
 }
+function clearPlotlyHost(el){
+if(!el)return;
+if(typeof Plotly!=='undefined'&&typeof Plotly.purge==='function'){
+  try{Plotly.purge(el);}catch{}
+}
+el.replaceChildren();
+}
 async function api(ep,opt={}){const o=opt||{};const tmo=Math.max(1000,Number(o.timeoutMs||12000));const {timeoutMs,...rest}=o;const c=new AbortController();const timer=setTimeout(()=>c.abort(),tmo);try{const r=await fetch(`${API_BASE}${ep}`,{...rest,signal:c.signal,headers:{'Content-Type':'application/json',...(rest.headers||{})}});const ct=(r.headers.get('content-type')||'').toLowerCase();let d={};if(ct.includes('application/json')){d=await r.json();}else{const t=await r.text();d=t?{detail:t}:{};}if(!r.ok)throw new Error(d.detail||d.error||`接口请求失败(${r.status})`);return d;}catch(e){if(e?.name==='AbortError')throw new Error(`接口超时(${tmo}ms): ${ep}`);throw e;}finally{clearTimeout(timer);}}
 function markBootFailure(err){const msg=err?.message||String(err||'未知错误');if(state.bootCompleted){console.error('runtime error:',err);notify(`运行期异常: ${msg}`,true);return;}if(state.bootFailed)return;state.bootFailed=true;console.error('bootstrap failed:',err);const st=document.getElementById('system-status'),m=document.getElementById('trading-mode'),ex=document.getElementById('exchanges-list');if(st)st.textContent='前端初始化失败';if(m)m.textContent='未知';if(ex)ex.innerHTML=`<div class=\"list-item\">页面初始化失败: ${esc(msg)}</div>`;notify(`前端初始化失败: ${msg}`,true);}
+function getActiveTabName(){
+return String(document.querySelector('.tab-btn.active')?.dataset?.tab||document.querySelector('.tab-content.active')?.id||'dashboard').trim()||'dashboard';
+}
+async function ensureDataTabInitialized(){
+if(uiLoadState.dataInitialized)return;
+uiLoadState.dataInitialized=true;
+loadDataSymbolOptions(document.getElementById('data-exchange')?.value||'binance',['data-symbol']);
+loadDataSymbolOptions(document.getElementById('download-exchange')?.value||'binance',['download-symbol']);
+loadDataSymbolOptions('binance',['backtest-symbol']);
+scheduleKlineRealtime();
+setTimeout(()=>{loadDataStorageHealth(null,{skipStorage:true}).catch(err=>console.warn('loadDataStorageHealth failed',err?.message||err));},900);
+setTimeout(()=>{if(document.getElementById('candlestick-chart')&&!marketDataState.bars.length){loadKlinesByForm().catch(()=>{});}},500);
+}
+async function loadDashboardTabData(){
+await Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary(),loadPnlHeatmap(),loadNotificationCenter(),loadAuditLogs()]);
+}
+async function loadTradingTabData(){
+await Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk()]);
+}
+async function loadStrategiesTabData(){
+await Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
+}
+async function loadDataTabData(){
+await ensureDataTabInitialized();
+}
+async function loadResearchTabData(){
+await loadResearchSymbolOptions(getResearchExchange());
+renderResearchStatusCards();
+}
+async function loadBacktestTabData(){
+loadDataSymbolOptions('binance',['backtest-symbol']);
+await ensureBacktestStrategySelect().catch(e=>console.error(e));
+}
+async function ensureTabLoaded(tabName,{force=false}={}){
+const tab=String(tabName||'').trim();
+if(!tab)return;
+if(!force&&uiLoadState.tabs[tab])return;
+if(uiLoadState.inFlight[tab])return uiLoadState.inFlight[tab];
+const loaders={
+  dashboard:loadDashboardTabData,
+  trading:loadTradingTabData,
+  strategies:loadStrategiesTabData,
+  data:loadDataTabData,
+  research:loadResearchTabData,
+  backtest:loadBacktestTabData,
+};
+const loader=loaders[tab];
+if(!loader){uiLoadState.tabs[tab]=true;return;}
+const task=(async()=>{
+  try{
+    await loader();
+    uiLoadState.tabs[tab]=true;
+  }finally{
+    delete uiLoadState.inFlight[tab];
+  }
+})();
+uiLoadState.inFlight[tab]=task;
+return task;
+}
 
 function activateTab(tabName){
 if(!tabName)return;
@@ -351,6 +437,7 @@ b.classList.add('active');
 const panel=document.getElementById(b.dataset.tab);
 panel?.classList.add('active');
 if(panel)schedulePlotlyResize(panel);
+ensureTabLoaded(tabName).catch(err=>console.error(`tab load failed: ${tabName}`,err));
 }
 function initTabs(){
 document.querySelectorAll('.tab-btn').forEach(b=>b.onclick=()=>activateTab(b.dataset.tab));
@@ -457,16 +544,31 @@ ${a.slice(-3).map(x=>`<div class="list-item"><span>${x.title}</span><span>${x.ti
 function renderExchanges(b){const el=document.getElementById('exchanges-list');if(!el)return;const mode=String(b?.mode||b?.active_account_type||'').toLowerCase();const ex=b?.exchanges||{},keys=Object.keys(ex);const statusRows=keys.map(k=>{const i=ex[k]||{};return `<div class="list-item"><span>${k.toUpperCase()}</span><span class="status-badge ${i.connected?'connected':''}">${i.connected?'已连接':'未连接'}</span></div>`;}).join('')||'<div class="list-item">暂无交易所连接</div>';if(mode==='paper'){const i=b?.paper_account||{};const all=(i.balances||[]).filter(x=>Number(x.total)>0);const stable=all.filter(x=>['USDT','USDC'].includes(String(x.currency||'').toUpperCase()));const others=all.filter(x=>!['USDT','USDC'].includes(String(x.currency||'').toUpperCase()));const pick=[...stable,...others].slice(0,12);const rows=pick.map(v=>`<div class="balance-item"><span class="currency">${v.currency}</span><span class="amount">${Number(v.total||0).toFixed(6)}${Number(v.usd_value||0)>0?` (~$${Number(v.usd_value).toFixed(2)})`:''}</span></div>`).join('')||'<div class="balance-item">无资产</div>';el.innerHTML=`<div class="exchange-section"><div class="exchange-header"><span class="exchange-name">PAPER</span><span class="exchange-usd">$${Number(i.total_usd||0).toFixed(2)}</span><span class="status-badge connected">模拟仓</span></div><div class="balance-list">${rows}</div></div><div class="exchange-section"><div class="exchange-header"><span class="exchange-name">交易所连接状态</span></div><div class="balance-list">${statusRows}</div></div>`;return;}if(!keys.length){el.innerHTML='<div class="list-item">暂无交易所连接</div>';return;}el.innerHTML=keys.map(k=>{const i=ex[k];if(!i.connected)return `<div class="exchange-section"><div class="exchange-header"><span class="exchange-name">${k.toUpperCase()}</span><span class="status-badge">未连接</span></div></div>`;const all=(i.balances||[]).filter(x=>Number(x.total)>0);const stable=all.filter(x=>['USDT','USDC'].includes(String(x.currency||'').toUpperCase()));const others=all.filter(x=>!['USDT','USDC'].includes(String(x.currency||'').toUpperCase()));const pick=[...stable,...others].slice(0,12);const rows=pick.map(v=>`<div class="balance-item"><span class="currency">${v.currency}</span><span class="amount">${Number(v.total||0).toFixed(6)}${Number(v.usd_value||0)>0?` (~$${Number(v.usd_value).toFixed(2)})`:''}</span></div>`).join('')||'<div class="balance-item">无资产</div>';return `<div class="exchange-section"><div class="exchange-header"><span class="exchange-name">${k.toUpperCase()}</span><span class="exchange-usd">$${Number(i.total_usd||0).toFixed(2)}</span><span class="status-badge connected">已连接</span></div><div class="balance-list">${rows}</div></div>`;}).join('');}
 
 async function loadSummary(){
+if(summaryLoadPromise)return summaryLoadPromise;
+summaryLoadPromise=(async()=>{
 try{
+const prevSnapshot=(state.lastSummarySnapshot&&typeof state.lastSummarySnapshot==='object')?state.lastSummarySnapshot:{};
+const prevStats=(prevSnapshot.stats&&typeof prevSnapshot.stats==='object')?prevSnapshot.stats:{};
+const prevBalances=(prevSnapshot.balances&&typeof prevSnapshot.balances==='object')?prevSnapshot.balances:{};
+const prevHistoryByMode=(prevSnapshot.historyByMode&&typeof prevSnapshot.historyByMode==='object')?prevSnapshot.historyByMode:{};
 const [sr,br]=await Promise.allSettled([
 api('/trading/stats',{timeoutMs:8000}),
-api('/trading/balances',{timeoutMs:22000}),
+api('/trading/balances',{timeoutMs:65000}),
 ]);
-const s=sr.status==='fulfilled'?sr.value:{};
-const b=br.status==='fulfilled'?br.value:{};
+const statsFresh=(sr.status==='fulfilled'&&sr.value&&typeof sr.value==='object')?sr.value:null;
+const balancesFresh=(br.status==='fulfilled'&&br.value&&typeof br.value==='object')?br.value:null;
+const s=statsFresh||prevStats||{};
+const b=balancesFresh||prevBalances||{};
 const statusMode=String(state?._systemStatusLast?.trading_mode||'').toLowerCase();
 const activeType=String(b?.active_account_type??b?.mode??statusMode??'paper').toLowerCase();
-const h=await api(`/trading/balances/history?hours=72&exchange=all&limit=500&mode=${encodeURIComponent(activeType==='live'?'live':'paper')}`,{timeoutMs:8000}).catch(()=>({history:[]}));
+const historyMode=activeType==='live'?'live':'paper';
+const historyFresh=await api(`/trading/balances/history?hours=72&exchange=all&limit=500&mode=${encodeURIComponent(historyMode)}`,{timeoutMs:8000}).catch(()=>null);
+const historyByMode={...prevHistoryByMode};
+if(Array.isArray(historyFresh?.history))historyByMode[historyMode]=historyFresh.history;
+const historyRows=Array.isArray(historyByMode?.[historyMode])?historyByMode[historyMode]:[];
+if(statsFresh||balancesFresh||Array.isArray(historyFresh?.history)){
+  state.lastSummarySnapshot={stats:s,balances:b,historyByMode};
+}
 const activeUsd=Number(b?.active_account_usd_estimate??b?.total_usd_estimate??0);
 const mergedRisk=(b?.risk_report||s?.risk||null);
 const mergedEquity=(mergedRisk?.equity||{});
@@ -483,14 +585,17 @@ const activeEl=document.getElementById('active-account-value');
 if(activeEl)activeEl.textContent=fmtMaybe(activeUsd);
 const pnl=Number((mergedEquity?.current_unrealized_pnl_usd ?? s?.positions?.total_unrealized_pnl) || 0),p=document.getElementById('total-pnl');
 p.textContent=fmt(pnl);p.className=`value ${pnl>=0?'positive':'negative'}`;
-renderExchanges(b);drawEquity(h?.history||[]);drawPie(b?.distribution||[],activeType);renderRisk(mergedRisk);
+renderExchanges(b);drawEquity(historyRows);drawPie(b?.distribution||[],activeType);renderRisk(mergedRisk);
 if(sr.status==='rejected'&&br.status==='rejected'){const ex=document.getElementById('exchanges-list');if(ex)ex.innerHTML='<div class=\"list-item\">资产接口暂时不可用，系统正在自动重试...</div>';}
 }catch(e){console.error(e);const ex=document.getElementById('exchanges-list');if(ex)ex.innerHTML='<div class=\"list-item\">资产加载失败，正在重试...</div>';}
+finally{summaryLoadPromise=null;}
+})();
+return summaryLoadPromise;
 }
 async function loadStats(){return loadSummary();}
 async function loadBalances(){return loadSummary();}
 async function loadBanlances(){return loadSummary();}
-async function loadRisk(){try{renderRisk(await api('/trading/risk/report'));}catch{}}
+async function loadRisk(){try{return await loadSummary();}catch{}}
 function renderPnlHeatmap(data){
 const box=document.getElementById('pnl-heatmap');
 if(!box)return;
@@ -779,22 +884,73 @@ if(document.getElementById('backtest-compare-strategy-list') && typeof loadBackt
     loadBacktestComparePickerSource('registered',{preserveSelection:true,selectAll:false,useDefault:false}).catch(()=>{});
   }
 }
+renderStrategyConsolePanel();
 }catch(e){console.error(e);}
+}
+function renderStrategyConsolePanel(){
+const cards=document.getElementById('strategy-console-cards');
+const notes=document.getElementById('strategy-console-notes');
+if(!cards)return;
+const registered=Array.isArray(state.strategies)?state.strategies.length:0;
+const summary=state.summary||{};
+const running=Number((summary.running_count ?? (summary.running||[]).length) || 0);
+const paused=Number(summary.paused_count||0);
+const idle=Number(summary.idle_count||0);
+const stopped=Number(summary.stopped_count||0);
+const staleCount=Number((summary.stale_running_count ?? (summary.stale_running||[]).length) || 0);
+const catalogRows=Array.isArray(state.strategyCatalogRows)?state.strategyCatalogRows:[];
+const availableCount=catalogRows.length || (Array.isArray(state.availableStrategyTypes)?state.availableStrategyTypes.length:0);
+const backtestableCount=catalogRows.filter(row=>row?.backtest_supported).length;
+const autoStartCount=catalogRows.filter(row=>row?.default_start).length;
+const health=state.strategyHealth||{};
+const lastCheck=health?.last_check_at ? fmtDateTime(health.last_check_at) : '--';
+const lastAlert=health?.last_alert_at ? fmtDateTime(health.last_alert_at) : '--';
+const recentSignals=Array.isArray(summary.recent_signals)?summary.recent_signals.length:0;
+cards.innerHTML=`
+<div class="strategy-console-stat">
+  <div class="label">策略总览</div>
+  <div class="value">${registered}</div>
+  <div class="hint">已注册实例 ${registered} 个，最近信号 ${recentSignals} 条</div>
+</div>
+<div class="strategy-console-stat">
+  <div class="label">运行状态</div>
+  <div class="value">${running}</div>
+  <div class="hint">运行中 ${running} / 空闲 ${idle} / 暂停 ${paused} / 停止 ${stopped}</div>
+</div>
+<div class="strategy-console-stat">
+  <div class="label">可回测策略</div>
+  <div class="value">${backtestableCount || availableCount}</div>
+  <div class="hint">目录共 ${availableCount} 个，默认推荐 ${autoStartCount} 个</div>
+</div>
+<div class="strategy-console-stat">
+  <div class="label">健康告警</div>
+  <div class="value" style="color:${staleCount>0?'#ffb15f':'#dfe9f7'};">${staleCount}</div>
+  <div class="hint">最近检查 ${esc(lastCheck)}${lastAlert!=='--' ? ` | 最近告警 ${esc(lastAlert)}` : ''}</div>
+</div>`;
+if(notes){
+  const hints=[
+    running>0?`当前有 ${running} 个策略实例在运行`:'当前没有运行中的策略实例',
+    staleCount>0?`发现 ${staleCount} 个运行异常实例，建议先执行健康检查再决定是否停机`:'运行器健康，无阻塞告警',
+    backtestableCount>0?`可直接从“可用策略”卡片注册 ${backtestableCount} 个可回测策略`:'策略目录尚未完成加载',
+  ];
+  notes.textContent=hints.join('；');
+}
 }
 async function registerStrategy(type){
 try{
-// Try to get timeframe/symbols from cached library data (populated by loadStrategyLibrary)
+// Use catalog metadata first; library metadata is only a fallback.
 const libEntry=(state.strategyLibraryRows||[]).find(r=>r.name===type);
+const catalogEntry=(strategyCatalogMap()||{})[String(type||'').trim()]||{};
 const hardcoded={
 PairsTradingStrategy:{exchange:'binance',timeframe:'1h',symbols:['BTC/USDT','ETH/USDT']},
 }[type];
 const profile={
   exchange:'binance',
-  timeframe:hardcoded?.timeframe||libEntry?.default_timeframe||'15m',
-  symbols:hardcoded?.symbols||(libEntry?.default_symbols?.length?libEntry.default_symbols:['BTC/USDT']),
+  timeframe:hardcoded?.timeframe||catalogEntry?.recommended_timeframe||libEntry?.default_timeframe||'15m',
+  symbols:hardcoded?.symbols||(Array.isArray(catalogEntry?.recommended_symbols)&&catalogEntry.recommended_symbols.length?catalogEntry.recommended_symbols:(libEntry?.default_symbols?.length?libEntry.default_symbols:['BTC/USDT'])),
 };
 const name=`${type}_${Date.now()}`;
-await api('/strategies/register',{method:'POST',body:JSON.stringify({name,strategy_type:type,params:{},symbols:profile.symbols,timeframe:profile.timeframe,exchange:profile.exchange,allocation:.2})});
+await api('/strategies/register',{method:'POST',body:JSON.stringify({name,strategy_type:type,params:{},symbols:profile.symbols,timeframe:profile.timeframe,exchange:profile.exchange,allocation:DEFAULT_STRATEGY_ALLOCATION})});
 notify(`策略 ${type} 注册成功`);
 await Promise.all([loadStrategies(),loadStrategySummary()]);
 activateTab('strategies');
@@ -815,7 +971,7 @@ const payload={
   symbols: Array.isArray(info?.symbols)?info.symbols:['BTC/USDT'],
   timeframe: String(info?.timeframe||'1h'),
   exchange: String(info?.exchange||'binance'),
-  allocation: Number(info?.allocation??0.2),
+  allocation: Number(info?.allocation??DEFAULT_STRATEGY_ALLOCATION),
   runtime_limit_minutes: (info?.runtime?.runtime_limit_minutes??null),
  };
  await api('/strategies/register',{method:'POST',body:JSON.stringify(payload)});
@@ -865,7 +1021,7 @@ if(panel)panel.scrollIntoView({behavior:'smooth',block:'nearest'});
 await loadStrategies();
 }
 async function saveAllocation(name){const i=document.querySelector(`input[data-alloc='${name}']`);if(!i)return;try{await api(`/strategies/${name}/allocation`,{method:'PUT',body:JSON.stringify({allocation:Number(i.value||0)})});notify(`策略 ${name} 资金占比已更新`);await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`更新资金占比失败: ${e.message}`,true);}}
-async function toggleStrategy(name,st){const act=st==='running'?'stop':'start';try{await api(`/strategies/${name}/${act}`,{method:'POST'});notify(`策略已${act==='start'?'启动':'停止'}`);await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`策略${act}失败: ${e.message}`,true);}}
+async function toggleStrategy(name,st){const act=st==='running'?'stop':'start';try{await api(`/strategies/${encodeURIComponent(name)}/${act}`,{method:'POST',timeoutMs:15000});notify(`策略已${act==='start'?'启动':'停止'}`);await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`策略${act}失败: ${e.message}`,true);}}
 
 async function loadStrategySummary(){
 try{
@@ -888,6 +1044,7 @@ if(rt){
 rt.innerHTML=running.length?running.map(s=>{const p=perf[s.name]||{},ri=s.runtime||{};const rp=Number(p.return_pct),dd=Number(p.max_drawdown_pct),realized=Number(p.realized_pnl),unrealized=Number(p.unrealized_pnl),absPnl=(Number.isFinite(realized)?realized:0)+(Number.isFinite(unrealized)?unrealized:0),lu=p.last_update;const runtimeTxt=fmtDurationSec(ri.uptime_seconds||0);const lastRunTxt=s.last_run_at?new Date(s.last_run_at).toLocaleString('zh-CN'):'-';const rpTxt=Number.isFinite(rp)?`${rp.toFixed(2)}%`:'--';const ddTxt=Number.isFinite(dd)?`${dd.toFixed(2)}%`:'--';const absTxt=Number.isFinite(absPnl)?fmt(absPnl):'--';const rpCls=Number.isFinite(rp)?(rp>=0?'positive':'negative'):'';const absCls=Number.isFinite(absPnl)?(absPnl>=0?'positive':'negative'):'';const stype=s.strategy_type||s.name;const meta=getStrategyMeta(stype);const desc=meta.desc||s.description||stype;const cat=meta.cat||'';return`<tr><td>${s.name}</td><td style="font-size:12px;color:#9fb1c9;max-width:200px;">${cat?`[${cat}] `:''}${esc(desc)}</td><td class="${rpCls}">${rpTxt}</td><td>${ddTxt}</td><td class="${absCls}">${absTxt}</td><td>${runtimeTxt}</td><td>${lastRunTxt}</td><td>${lu?new Date(lu).toLocaleString('zh-CN'):'-'}</td></tr>`;}).join(''):'<tr><td colspan="8">暂无运行中策略数据</td></tr>';
 }
 renderStrategyHealthAlerts(d,state.strategyHealth);
+renderStrategyConsolePanel();
 }catch(e){console.error(e);}
 }
 function renderStrategyHealthAlerts(summary,health){
@@ -916,6 +1073,7 @@ const d=await api(p);
 if(d&&Object.prototype.hasOwnProperty.call(d,'running')&&Object.prototype.hasOwnProperty.call(d,'last_result')){
 state.strategyHealth=d;
 renderStrategyHealthAlerts(state.summary||{},d);
+renderStrategyConsolePanel();
 const lr=d.last_result||{};
 out.textContent=`策略监控: ${d.running?'运行中':'已停止'}\n检查间隔: ${d.check_interval_seconds||'-'}s\n冷却时间: ${d.alert_cooldown_seconds||'-'}s\n最近检查: ${d.last_check_at||'-'}\n最近告警: ${d.last_alert_at||'-'}\n异常策略数: ${lr.stale_running_count??'-'}\n异常策略: ${(lr.stale_strategies||[]).join(', ')||'无'}\n最近错误: ${d.last_error||'无'}`;
 }else{
@@ -929,6 +1087,7 @@ lastErr=e.message;
 try{
 const s=await api('/strategies/summary?limit=20');
 renderStrategyHealthAlerts(s,state.strategyHealth);
+renderStrategyConsolePanel();
 out.textContent=JSON.stringify({fallback:'summary',running_count:(s.running||[]).length,stale_running:s.stale_running||[],runtime:s.runtime||{},timestamp:s.timestamp||new Date().toISOString(),note:'健康监控接口不可用，已降级显示策略摘要'},null,2);
 }catch{
 out.textContent=`加载策略健康状态失败: ${lastErr}`;
@@ -1406,17 +1565,19 @@ const renderResearchSymbolSelects=symbols=>{
     const chosen=currentSet.size?currentSet:new Set(RESEARCH_DEFAULT_SYMBOLS.filter(sym=>finalSymbols.includes(sym)));
     multi.innerHTML=finalSymbols.map(sym=>`<option value="${esc(sym)}"${chosen.has(sym)?' selected':''}>${esc(sym)}</option>`).join('');
     if(!Array.from(multi.selectedOptions||[]).length && multi.options.length){
-      const fallbackList=RESEARCH_DEFAULT_SYMBOLS.filter(sym=>finalSymbols.includes(sym)).slice(0,Math.min(12,multi.options.length));
+      const fallbackList=RESEARCH_DEFAULT_SYMBOLS.filter(sym=>finalSymbols.includes(sym)).slice(0,Math.min(30,multi.options.length));
       setSelectValues('research-symbols',fallbackList.length?fallbackList:[multi.options[0].value]);
     }
   }
 };
 renderResearchSymbolSelects(RESEARCH_DEFAULT_SYMBOLS);
+renderResearchStatusCards();
 try{
 const ex=String(exchange||getResearchExchange()||'binance').trim().toLowerCase()||'binance';
 const resp=await api(`/data/research/symbols?exchange=${encodeURIComponent(ex)}`,{timeoutMs:15000});
 const symbols=(Array.isArray(resp?.symbols)?resp.symbols:[]).filter(Boolean);
 if(symbols.length)renderResearchSymbolSelects(symbols);
+renderResearchStatusCards();
 }catch(e){console.warn('loadResearchSymbolOptions failed',e?.message||e);}
 }
 async function pollDownloadTask(taskId,{timeoutMs=12*60*1000,intervalMs=2500}={}){
@@ -1500,7 +1661,7 @@ try{
   if(document.getElementById('data-exchange')?.value===exchange&&document.getElementById('data-symbol')?.value===symbol&&document.getElementById('data-timeframe')?.value===timeframe){
     loadKlinesByForm().catch(()=>{});
   }
-  if(refreshAfter)await loadDataStorageHealth();
+  if(refreshAfter)await loadDataStorageHealth(null,{skipStorage:false});
 }finally{
   if(btn){btn.disabled=false;btn.textContent=prevText;}
 }
@@ -1536,7 +1697,7 @@ try{
       failures.push(`${row.exchange} ${row.symbol} ${row.timeframe}: ${err.message}`);
     }
   }
-  await loadDataStorageHealth();
+  await loadDataStorageHealth(null,{skipStorage:false});
   if(notesEl&&failures.length){
     notesEl.textContent=`批处理完成：成功 ${okCount}，失败 ${failCount}\n${failures.slice(0,8).join('\n')}`;
   }
@@ -1654,19 +1815,288 @@ if(notesEl){
 }
 bindDataStorageHealthActions();
 }
-async function loadDataStorageHealth(btn=null){
+function getDataHealthSelection(){
+const exchange=(document.getElementById('data-exchange')?.value||'binance').trim()||'binance';
+const symbol=(document.getElementById('data-symbol')?.value||'BTC/USDT').trim()||'BTC/USDT';
+return{exchange,symbol};
+}
+function analyticsStatusLabel(status){
+const key=String(status||'idle').trim().toLowerCase();
+return({ok:'正常',degraded:'降级',failed:'失败',running:'运行中',idle:'空闲'}[key]||status||'--');
+}
+function analyticsSourceLabel(sourceName){
+const raw=String(sourceName||'').trim();
+if(!raw)return'--';
+return raw.split('+').map(part=>({
+  exchange_public:'交易所公开源',
+  official_announcements:'官方公告源',
+  proxy_layer:'代理源',
+  internal_placeholder:'占位源',
+  fallback:'降级回退',
+  public_chain_proxy:'公开链上代理',
+}[part]||part)).join(' + ');
+}
+function normalizeAnalyticsStatusMap(payload){
+const statusPayload=payload?.status;
+if(Array.isArray(statusPayload?.collectors)){
+  return Object.fromEntries(statusPayload.collectors.map(item=>[String(item?.collector||''),item]).filter(([k])=>Boolean(k)));
+}
+if(statusPayload&&typeof statusPayload==='object'&&!Array.isArray(statusPayload))return statusPayload;
+return{};
+}
+function formatAnalyticsDatasetSummary(row){
+if(!row)return'--';
+const latest=row.latest_summary||{};
+if(row.key==='microstructure'){
+  const spread=Number(latest.spread_bps||0).toFixed(2);
+  const large=Number(latest.large_order_count||0);
+  const funding=(latest.funding_rate===null||latest.funding_rate===undefined)?'--':Number(latest.funding_rate||0).toFixed(6);
+  return `点差 ${spread} bps | 大单 ${large} | 资金费率 ${funding}`;
+}
+if(row.key==='community'){
+  return `买入占比 ${(Number(latest.buy_ratio||0)*100).toFixed(1)}% | 公告 ${Number(latest.announcement_count||0)} | 安全事件 ${Number(latest.security_alert_count||0)}`;
+}
+if(row.key==='whales'){
+  return `巨鲸 ${Number(latest.whale_count||0)} 笔 | 合计 ${Number(latest.total_btc||0).toFixed(2)} BTC | 最大 ${Number(latest.max_btc||0).toFixed(2)} BTC`;
+}
+return'--';
+}
+function renderDataAnalyticsHealth(data){
+dataAnalyticsHealthState.last=data||null;
+const summaryEl=document.getElementById('data-analytics-health-summary');
+const tableEl=document.getElementById('data-analytics-health-table');
+const notesEl=document.getElementById('data-analytics-health-notes');
+const summary=data?.summary||{};
+const refreshed=data?.refreshed||null;
+const statusMap=normalizeAnalyticsStatusMap(data);
+const collectorList=Object.values(statusMap||{});
+const latestRun=collectorList.map(item=>item?.finished_at||item?.updated_at||'').filter(Boolean).sort().slice(-1)[0]||'';
+const metrics=[
+  ['历史数据集',Number(summary.dataset_count||0).toLocaleString('zh-CN')],
+  ['总快照数',Number(summary.total_rows||0).toLocaleString('zh-CN')],
+  ['正常样本',Number(summary.ok_rows||0).toLocaleString('zh-CN')],
+  ['降级样本',Number(summary.degraded_rows||0).toLocaleString('zh-CN')],
+  ['失败样本',Number(summary.failed_rows||0).toLocaleString('zh-CN')],
+  ['最近更新',summary.latest_at?fmtDateTime(summary.latest_at):'--'],
+  ['最近采集',latestRun?fmtDateTime(latestRun):'--'],
+];
+if(summaryEl){
+  summaryEl.innerHTML=metrics.map(([label,value])=>`<div class="stat-box"><div class="stat-label">${esc(label)}</div><div class="stat-value">${esc(value)}</div></div>`).join('');
+}
+const rows=Array.isArray(data?.datasets)?data.datasets:[];
+if(tableEl){
+  tableEl.innerHTML=!rows.length?'<div class="list-item"><span>分析历史</span><span>暂无数据</span></div>':`
+  <table>
+    <thead>
+      <tr>
+        <th>类型</th>
+        <th>累计快照</th>
+        <th>近${esc(String(Number(data?.hours||168)))}h</th>
+        <th>正常/降级/失败</th>
+        <th>覆盖跨度</th>
+        <th>最近采样</th>
+        <th>最近采集状态</th>
+        <th>来源</th>
+        <th>最新摘要</th>
+        <th>最近序列</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows.map(row=>{
+        const series=Array.isArray(data?.recent?.[row.key])?data.recent[row.key]:[];
+        const recentPreview=series.slice(-3).map(item=>`${fmtDateTime(item.timestamp)} ${Number(item.value||0).toFixed(row.key==='whales'?0:4)}`).join(' | ');
+        const latest=row.latest_summary||{};
+        const status=statusMap?.[row.key]||{};
+        return `<tr>
+          <td>${esc(row.title||row.key||'-')}</td>
+          <td>${esc(Number(row.count||0).toLocaleString('zh-CN'))}</td>
+          <td>${esc(Number(row.recent_count||0).toLocaleString('zh-CN'))}</td>
+          <td>${esc(`${Number(row.ok_count||0)}/${Number(row.degraded_count||0)}/${Number(row.failed_count||0)}`)}</td>
+          <td>${esc(`${Number(row.coverage_hours||0).toFixed(1)} h`)}<div class="mini">${esc(`${row.first_at?fmtDateTime(row.first_at):'--'} -> ${row.latest_at?fmtDateTime(row.latest_at):'--'}`)}</div></td>
+          <td>${esc(row.latest_at?fmtDateTime(row.latest_at):'--')}</td>
+          <td>${esc(analyticsStatusLabel(status.status||latest.capture_status))}<div class="mini">${esc(status.finished_at?fmtDateTime(status.finished_at):'--')}</div></td>
+          <td>${esc(analyticsSourceLabel(latest.source_name||status?.details?.source_name))}<div class="mini">${esc(latest.source_error||status.error||'--')}</div></td>
+          <td>${esc(formatAnalyticsDatasetSummary(row))}</td>
+          <td>${esc(recentPreview||'暂无')}</td>
+        </tr>`;
+      }).join('')}
+    </tbody>
+  </table>`;
+}
+if(notesEl){
+  const sourceLines=(Array.isArray(data?.sources)?data.sources:[]).map(item=>`${item.name}: ${item.acquisition} -> ${item.stored_as}${item?.quality_note?` (${item.quality_note})`:''}`);
+  const collectorLines=collectorList.map(item=>`${analyticsStatusLabel(item?.status)} ${item?.collector||'-'}${item?.finished_at?` @ ${fmtDateTime(item.finished_at)}`:''}${item?.scope_warning?` | ${item.scope_warning}`:''}${item?.error?` | ${item.error}`:''}`);
+  const lines=[
+    `生成时间: ${data?.generated_at?fmtDateTime(data.generated_at):'--'}`,
+    `当前标的: ${(data?.exchange||'binance')} ${data?.symbol||'BTC/USDT'}`,
+    `数据库: ${data?.storage?.database||'--'}`,
+    `表: ${Array.isArray(data?.storage?.tables)?data.storage.tables.join(', '):'--'}`,
+    refreshed?.saved?.captured_at?`本次刷新已抓取并入库: ${fmtDateTime(refreshed.saved.captured_at)}`:'本次未执行前台抓取',
+    `采集状态: ${collectorLines.length?collectorLines.join(' | '):'--'}`,
+    '说明: 页面会先读取历史库，再后台补抓；单次补抓失败不会清空已有历史结果。',
+    `数据来源: ${sourceLines.length?sourceLines.join(' | '):'--'}`,
+  ];
+  notesEl.textContent=lines.join('\n');
+}
+}
+function withApiTiming(label,promise){
+const started=performance.now();
+return Promise.resolve(promise).then(value=>({ok:true,label,ms:Math.round(performance.now()-started),value})).catch(error=>({ok:false,label,ms:Math.round(performance.now()-started),error}));
+}
+function mergeAnalyticsStatusPayload(healthPayload,statusPayload){
+const payload={...(healthPayload||{})};
+if(statusPayload)payload.status=statusPayload;
+return payload;
+}
+function appendDataHealthDiagnostics(el,diagnostics,extraLines=[]){
+if(!el)return;
+const parts=(Array.isArray(diagnostics)?diagnostics:[]).map(item=>`${item.ok?'OK':'ERR'} ${item.label} ${Number(item.ms||0)}ms${item.ok?'':` | ${item.error?.message||item.error}`}`);
+const lines=[String(el.textContent||'').trim(),...extraLines.filter(Boolean),parts.length?`接口诊断: ${parts.join(' | ')}`:''].filter(Boolean);
+el.textContent=lines.join('\n');
+}
+function analyticsHistoryNeedsRefresh(payload){
+const latestAt=String(payload?.summary?.latest_at||'').trim();
+if(!latestAt)return true;
+const ts=Date.parse(latestAt);
+if(!Number.isFinite(ts))return true;
+return Date.now()-ts>3*60*60*1000;
+}
+function pickAnalyticsCollectorsForRefresh(payload,{manual=false}={}){
+const rows=Array.isArray(payload?.datasets)?payload.datasets:[];
+const priority=rows.filter(row=>Number(row?.count||0)<=0||Number(row?.failed_count||0)>0||Number(row?.degraded_count||0)>0).map(row=>String(row?.key||'').trim()).filter(Boolean);
+if(manual){
+  if(priority.length)return Array.from(new Set(priority));
+  return['microstructure','community','whales'];
+}
+const passivePriority=Array.from(new Set(priority.filter(key=>key!=='microstructure')));
+if(passivePriority.length)return passivePriority;
+return['community','whales'];
+}
+function triggerAnalyticsHistoryRefresh({exchange,symbol,depthLimit=80,afterRefresh=true,collectors=[],timeoutMs=15000}={}){
+  const analyticsNotesEl=document.getElementById('data-analytics-health-notes');
+  const collectorList=Array.isArray(collectors)?collectors.filter(Boolean):[];
+  const effectiveTimeoutMs=Math.max(4000,Number(timeoutMs||15000));
+  const params=[
+    `exchange=${encodeURIComponent(exchange||'binance')}`,
+    `symbol=${encodeURIComponent(symbol||'BTC/USDT')}`,
+    `depth_limit=${encodeURIComponent(String(depthLimit||80))}`,
+  ];
+  if(collectorList.length)params.push(`collectors=${encodeURIComponent(collectorList.join(','))}`);
+  const query=params.join('&');
+  const url=`/api/trading/analytics/history/collect?${query}`;
+  const startedAt=Date.now();
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),effectiveTimeoutMs);
+  if(analyticsNotesEl){
+    const current=String(analyticsNotesEl.textContent||'').trim();
+    analyticsNotesEl.textContent=[current,`后台刷新已启动，正在采集 ${collectorList.length?collectorList.join(' / '):'社区 / 巨鲸 / 微观结构'} 快照...`].filter(Boolean).join('\n');
+  }
+  fetch(url,{
+    method:'POST',
+    cache:'no-store',
+    keepalive:true,
+    headers:{'Cache-Control':'no-cache',Pragma:'no-cache'},
+    signal:controller.signal,
+  }).then(async res=>{
+    const payload=await res.json().catch(()=>({}));
+    if(!res.ok)throw new Error(payload.detail||payload.error||`请求失败(${res.status})`);
+    if(analyticsNotesEl){
+      const spent=Math.max(0,Date.now()-startedAt);
+      analyticsNotesEl.textContent=`后台刷新完成，最新入库时间: ${payload?.saved?.captured_at?fmtDateTime(payload.saved.captured_at):'--'} | 用时 ${(spent/1000).toFixed(1)}s`;
+    }
+    if(afterRefresh){
+      setTimeout(()=>{loadDataStorageHealth().catch(err=>console.warn('loadDataStorageHealth failed',err?.message||err));},1200);
+    }
+  }).catch(err=>{
+    console.warn('triggerAnalyticsHistoryRefresh failed',err?.message||err);
+    if(analyticsNotesEl){
+      const current=String(analyticsNotesEl.textContent||'').trim();
+      const message=err?.name==='AbortError'?`后台刷新超时(${effectiveTimeoutMs}ms)`:(err.message||err);
+      analyticsNotesEl.textContent=[current,`后台刷新失败: ${message}`].filter(Boolean).join('\n');
+    }
+  }).finally(()=>{
+    clearTimeout(timer);
+  });
+}
+async function loadDataStorageHealth(btn=null,options={}){
 const prevText=btn?btn.textContent:'';
-  const notesEl=document.getElementById('data-storage-health-notes');
+const notesEl=document.getElementById('data-storage-health-notes');
+const analyticsNotesEl=document.getElementById('data-analytics-health-notes');
+const skipStorage=btn?Boolean(options?.skipStorage):(options?.skipStorage!==false);
 try{
-  if(btn){btn.disabled=true;btn.textContent='扫描中...';}
-  if(notesEl)notesEl.textContent='正在扫描数据仓，请稍候...';
-  const data=await api('/data/storage/health',{timeoutMs:60000});
-  renderDataStorageHealth(data);
+  if(btn){btn.disabled=true;btn.textContent='刷新中...';}
+  if(notesEl)notesEl.textContent=skipStorage?'数据仓体检较重，默认改为按需扫描。点击“刷新体检”可查看完整仓库状态。':'正在扫描数据仓，请稍候...';
+  const cachedAnalytics=(dataAnalyticsHealthState.last&&typeof dataAnalyticsHealthState.last==='object')?dataAnalyticsHealthState.last:null;
+  if(analyticsNotesEl)analyticsNotesEl.textContent=cachedAnalytics?'正在刷新历史体检（先显示上次快照）...':'正在读取历史体检结果...';
+  const {exchange,symbol}=getDataHealthSelection();
+  const diagnostics=[];
+  let analyticsHealthPayload=cachedAnalytics&&cachedAnalytics.exchange===exchange&&cachedAnalytics.symbol===symbol?cachedAnalytics:null;
+  let analyticsStatusPayload=null;
+  const renderAnalyticsSnapshot=(extraLines=[])=>{
+    if(!analyticsHealthPayload)return;
+    renderDataAnalyticsHealth(mergeAnalyticsStatusPayload(analyticsHealthPayload,analyticsStatusPayload));
+    appendDataHealthDiagnostics(analyticsNotesEl,diagnostics,extraLines);
+  };
+  if(analyticsHealthPayload)renderAnalyticsSnapshot(['已显示上次历史快照，正在后台刷新接口状态...']);
+  const analyticsHealthTask=withApiTiming('trading/analytics/history/health',api(`/trading/analytics/history/health?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&hours=168&refresh=false&depth_limit=80`,{timeoutMs:30000}));
+  const analyticsStatusTask=withApiTiming('trading/analytics/history/status',api(`/trading/analytics/history/status?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}`,{timeoutMs:20000}));
+
+  analyticsHealthTask.then(result=>{
+    diagnostics.push(result);
+    if(result.ok){
+      analyticsHealthPayload=result.value||{};
+      renderAnalyticsSnapshot(['页面已显示历史快照。']);
+    }else if(analyticsHealthPayload){
+      renderAnalyticsSnapshot([`分析历史读取失败，已保留上次快照: ${result.error?.message||result.error}`]);
+    }else if(analyticsNotesEl){
+      analyticsNotesEl.textContent=`分析历史读取失败: ${result.error?.message||result.error}`;
+      appendDataHealthDiagnostics(analyticsNotesEl,diagnostics);
+    }
+  });
+  analyticsStatusTask.then(result=>{
+    diagnostics.push(result);
+    if(result.ok){
+      analyticsStatusPayload=result.value||{};
+      if(analyticsHealthPayload)renderAnalyticsSnapshot();
+      else appendDataHealthDiagnostics(analyticsNotesEl,diagnostics,['采集状态已更新，正在等待历史快照...']);
+    }else if(analyticsHealthPayload){
+      renderAnalyticsSnapshot([`采集状态读取失败: ${result.error?.message||result.error}`]);
+    }else if(analyticsNotesEl){
+      analyticsNotesEl.textContent=`采集状态读取失败: ${result.error?.message||result.error}`;
+      appendDataHealthDiagnostics(analyticsNotesEl,diagnostics);
+    }
+  });
+
+  const [analyticsHealthResult,analyticsStatusResult]=await Promise.all([analyticsHealthTask,analyticsStatusTask]);
+  if(!skipStorage){
+    const storageTask=withApiTiming('data/storage/health',api('/data/storage/health',{timeoutMs:45000}));
+    const storageResult=await storageTask;
+    diagnostics.push(storageResult);
+    if(storageResult.ok){
+      renderDataStorageHealth(storageResult.value);
+      appendDataHealthDiagnostics(notesEl,diagnostics);
+    }else if(notesEl){
+      notesEl.textContent=`数据仓体检失败: ${storageResult.error?.message||storageResult.error}`;
+      appendDataHealthDiagnostics(notesEl,diagnostics);
+    }
+  }else if(notesEl){
+    appendDataHealthDiagnostics(notesEl,diagnostics,['自动加载已跳过数据仓深度扫描。']);
+  }
+  const failedParts=[analyticsHealthResult,analyticsStatusResult].filter(item=>!item.ok).map(item=>`${item.label}: ${item.error?.message||item.error}`);
+  if(failedParts.length)notify(failedParts.join(' | '),true);
+  const shouldRefresh=!!btn||(analyticsHealthResult.ok&&analyticsHistoryNeedsRefresh(analyticsHealthResult.value));
+  if(shouldRefresh){
+    const collectors=pickAnalyticsCollectorsForRefresh(analyticsHealthResult.ok?analyticsHealthResult.value:null,{manual:!!btn});
+    triggerAnalyticsHistoryRefresh({exchange,symbol,depthLimit:80,collectors,afterRefresh:!!btn,timeoutMs:30000});
+  }else if(analyticsNotesEl){
+    appendDataHealthDiagnostics(analyticsNotesEl,diagnostics,['历史快照仍较新，本次未触发后台补抓。']);
+  }
 }catch(err){
   if(notesEl)notesEl.textContent=`数据仓体检失败: ${err.message}`;
-  notify(`数据仓体检失败: ${err.message}`,true);
+  if(analyticsNotesEl)analyticsNotesEl.textContent=`分析历史体检失败: ${err.message}`;
+  notify(`数据体检失败: ${err.message}`,true);
 }finally{
-  if(btn){btn.disabled=false;btn.textContent=prevText;}
+  if(btn){btn.disabled=false;btn.textContent=prevText||'刷新体检';}
 }
 }
 function bindData(){
@@ -1768,18 +2198,20 @@ const dataSymbol=document.getElementById('data-symbol');
 if(dataSymbol)dataSymbol.onchange=()=>{resetKlineChartForSwitch('正在切换币种并加载新行情...');scheduleDataChartReload(120);};
 const dataTimeframe=document.getElementById('data-timeframe');
 if(dataTimeframe)dataTimeframe.onchange=()=>{resetKlineChartForSwitch('正在切换周期并加载新行情...');scheduleDataChartReload(120);};
-loadDataSymbolOptions(document.getElementById('data-exchange')?.value||'binance',['data-symbol']);
-loadDataSymbolOptions(document.getElementById('download-exchange')?.value||'binance',['download-symbol']);
-loadDataSymbolOptions('binance',['backtest-symbol']);
-setTimeout(()=>{loadDataStorageHealth().catch(err=>console.warn('loadDataStorageHealth failed',err?.message||err));},900);
-scheduleKlineRealtime();
-setTimeout(()=>{if(document.getElementById('candlestick-chart')&&!marketDataState.bars.length){loadKlinesByForm().catch(()=>{});}},500);
 setInterval(()=>{if(isDataTabActive()&&!marketDataState.isLoading&&!(marketDataState.bars||[]).length){loadKlinesByForm().catch(()=>{});}},7000);
 }
 
 function renderBacktest(r){
 const box=document.getElementById('backtest-results');
 if(!box)return;
+backtestUIState.lastRenderedBacktest={
+  strategy:String(r?.strategy||'').trim(),
+  symbol:String(r?.symbol||'').trim(),
+  timeframe:String(r?.timeframe||'').trim(),
+  fromComparePreview:!!r?._from_compare_preview,
+  compareRank:Number.isFinite(Number(r?._compare_rank))?Number(r._compare_rank):null,
+  updatedAt:Date.now(),
+};
 const c=Number(r.total_return||0)>=0?'#3fb950':'#f85149';
 box.innerHTML=`
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px;">
@@ -1804,10 +2236,15 @@ ${renderRangeLockIndicatorHtml(r,true)}`;
 const ec=document.getElementById('backtest-equity-chart');
 if(ec&&r.series?.length){
 if(typeof Plotly==='undefined'){ec.innerHTML='<div class="list-item">图表库未加载，回测曲线暂不可用。</div>';return;}
-const rows=(r.series||[]).map(i=>({timestamp:toDate(i.timestamp),equity:+i.equity,gross_equity:+i.gross_equity,drawdown:+i.drawdown})).filter(i=>i.timestamp&&Number.isFinite(i.equity)&&Number.isFinite(i.gross_equity)&&Number.isFinite(i.drawdown));
+const rows=(r.series||[]).map(i=>({timestamp:toDate(i.timestamp),equity:+i.equity,gross_equity:+i.gross_equity,drawdown:+i.drawdown,close:+i.close})).filter(i=>i.timestamp&&Number.isFinite(i.equity)&&Number.isFinite(i.gross_equity)&&Number.isFinite(i.drawdown)&&Number.isFinite(i.close));
 if(!rows.length){ec.innerHTML='<div class="list-item">回测时间序列为空或时间格式异常。</div>';return;}
-const x=rows.map(i=>i.timestamp),e=rows.map(i=>i.equity),ge=rows.map(i=>i.gross_equity),dd=rows.map(i=>i.drawdown);
-Plotly.newPlot(ec,[{type:'scatter',mode:'lines',x,y:e,name:'净值曲线',line:{color:'#3fb950',width:2},yaxis:'y'},{type:'scatter',mode:'lines',x,y:ge,name:'毛净值曲线',line:{color:'#4da3ff',width:1},yaxis:'y'},{type:'scatter',mode:'lines',x,y:dd,name:'回撤(%)',line:{color:'#f85149',width:1},yaxis:'y2'}],{paper_bgcolor:'#111723',plot_bgcolor:'#111723',font:{color:'#d7dde8'},margin:{l:50,r:40,t:20,b:30},xaxis:plotlyTimeAxis({}),yaxis:{title:'权益',side:'left',showgrid:true,gridcolor:'#283242'},yaxis2:{title:'回撤%',overlaying:'y',side:'right',showgrid:false},legend:{orientation:'h'}},{responsive:true,displaylogo:false});
+const toTradeRows=list=>(list||[]).map(p=>({timestamp:toDate(p?.timestamp),price:Number(p?.price)})).filter(p=>p.timestamp&&Number.isFinite(p.price));
+const x=rows.map(i=>i.timestamp),e=rows.map(i=>i.equity),ge=rows.map(i=>i.gross_equity),dd=rows.map(i=>i.drawdown),cl=rows.map(i=>i.close);
+const tp=r.trade_points||{},buyRows=toTradeRows(tp.buy_points),sellRows=toTradeRows(tp.sell_points);
+const traces=[{type:'scatter',mode:'lines',x,y:e,name:'净值曲线',line:{color:'#3fb950',width:2},yaxis:'y'},{type:'scatter',mode:'lines',x,y:ge,name:'毛净值曲线',line:{color:'#4da3ff',width:1},yaxis:'y'},{type:'scatter',mode:'lines',x,y:dd,name:'回撤(%)',line:{color:'#f85149',width:1},yaxis:'y2'},{type:'scatter',mode:'lines',x,y:cl,name:'价格',line:{color:'#9fb1c9',width:1,dash:'dot'},yaxis:'y3',hovertemplate:'%{x|%Y-%m-%d %H:%M:%S}<br>价格: %{y:.6f}<extra></extra>'}];
+if(buyRows.length)traces.push({type:'scatter',mode:'markers',x:buyRows.map(i=>i.timestamp),y:buyRows.map(i=>i.price),name:'买点',marker:{symbol:'triangle-up',size:9,color:'#3fb950',line:{color:'#0e1b2a',width:1}},yaxis:'y3',hovertemplate:'%{x|%Y-%m-%d %H:%M:%S}<br>买入: %{y:.6f}<extra></extra>'});
+if(sellRows.length)traces.push({type:'scatter',mode:'markers',x:sellRows.map(i=>i.timestamp),y:sellRows.map(i=>i.price),name:'卖点',marker:{symbol:'triangle-down',size:9,color:'#f85149',line:{color:'#0e1b2a',width:1}},yaxis:'y3',hovertemplate:'%{x|%Y-%m-%d %H:%M:%S}<br>卖出: %{y:.6f}<extra></extra>'});
+Plotly.newPlot(ec,traces,{paper_bgcolor:'#111723',plot_bgcolor:'#111723',font:{color:'#d7dde8'},margin:{l:50,r:72,t:20,b:30},xaxis:plotlyTimeAxis({}),yaxis:{title:'权益',side:'left',showgrid:true,gridcolor:'#283242'},yaxis2:{title:'回撤%',overlaying:'y',side:'right',showgrid:false},yaxis3:{title:'价格',overlaying:'y',side:'right',position:0.9,showgrid:false,tickfont:{color:'#9fb1c9'},titlefont:{color:'#9fb1c9'}},legend:{orientation:'h'}},{responsive:true,displaylogo:false});
 }
 }
 function getBacktestStrategyCatalogFromSelect(){
@@ -2194,15 +2631,57 @@ const allTrials=Array.isArray(data?.all_trials)?data.all_trials:[];
 const objective=String(data?.objective||'total_return');
 const objectiveMap={total_return:'收益率',sharpe_ratio:'夏普',win_rate:'胜率'};
 const objectiveLabel=objectiveMap[objective]||objective;
+const strategyName=String(data?.strategy_type||data?.strategy||'').trim();
+const strategyMeta=getStrategyMeta(strategyName);
+const newsCount=Math.max(0,Number(data?.news_events_count||0));
+const fundingAvailable=!!data?.funding_available;
+const optimizeViewMeta=((meta)=>{
+  const family=String(meta?.family||'traditional');
+  const decision=String(meta?.decisionEngine||'rule');
+  const resolvedDataMode=String(data?.data_mode||'').trim();
+  if(family==='ml'){
+    return {
+      familyLabel:'ML驱动',
+      familyColor:'#ff6b35',
+      familyBg:'rgba(255,107,53,.14)',
+      decisionLabel:'ML / 模型决策',
+      dataMode:resolvedDataMode||'OHLCV only',
+      dataHint:newsCount>0||fundingAvailable?'当前模型回测已带增强上下文':'当前模型回测以 OHLCV 为主',
+    };
+  }
+  if(family==='ai_glm'){
+    return {
+      familyLabel:'GLM/AI驱动',
+      familyColor:'#38bdf8',
+      familyBg:'rgba(56,189,248,.14)',
+      decisionLabel:'GLM / AI事件决策',
+      dataMode:resolvedDataMode||'OHLCV only',
+      dataHint:newsCount>0||fundingAvailable?'本次优化已接入历史新闻/宏观增强':'当前区间未命中可用新闻/宏观增强',
+    };
+  }
+  return {
+    familyLabel:'传统规则',
+    familyColor:'#94a3b8',
+    familyBg:'rgba(148,163,184,.14)',
+    decisionLabel:'规则 / 指标决策',
+    dataMode:resolvedDataMode||'OHLCV',
+    dataHint:'价格与成交量主线回测',
+  };
+})(strategyMeta);
+const familyBadge=`<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:${optimizeViewMeta.familyBg};border:1px solid ${optimizeViewMeta.familyColor}44;color:${optimizeViewMeta.familyColor};font-size:12px;font-weight:700;">${esc(optimizeViewMeta.familyLabel)}</span>`;
+const dataBadge=`<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:#1d2b3d;border:1px solid #32475f;color:#9fb1c9;font-size:12px;font-weight:700;">${esc(optimizeViewMeta.dataMode)}</span>`;
+const newsBadge=`<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:#162535;border:1px solid #35506d;color:#9fc3ea;font-size:12px;font-weight:700;">News ${newsCount}</span>`;
 out.innerHTML=`
-<div class="list-item"><span>参数优化（${esc(data?.strategy||'-')} / ${esc(data?.symbol||'-')} / ${esc(data?.timeframe||'-')}）</span><span>试验 ${Number(data?.trials||top.length||0)} 次</span></div>
+<div class="list-item"><span>参数优化（${esc(data?.strategy||'-')} / ${esc(data?.symbol||'-')} / ${esc(data?.timeframe||'-')}） ${familyBadge} ${dataBadge} ${newsBadge}</span><span>试验 ${Number(data?.trials||top.length||0)} 次</span></div>
 ${renderRangeLockIndicatorHtml(data,false)}
 <div class="list-item"><span>回测区间 / 样本数</span><span>${esc(String(data?.requested_start_date||data?.start_date||'-'))} ~ ${esc(String(data?.requested_end_date||data?.end_date||'-'))} | ${Number(data?.data_points||0)} 根</span></div>
 <div class="backtest-subgrid">
   <div class="stat-box"><div class="stat-label">优化目标</div><div class="stat-value">${esc(objectiveLabel)}</div><div class="stat-label">手续费 ${(Number(data?.commission_rate||0)*100).toFixed(4)}% | 滑点 ${btNum(data?.slippage_bps||0)}bps</div></div>
   <div class="stat-box"><div class="stat-label">最佳得分</div><div class="stat-value">${btNum(best?.score||0)}</div><div class="stat-label">${best?`收益 ${btPct(best.metrics?.total_return)} / 回撤 ${btPct(best.metrics?.max_drawdown)} / 夏普 ${btNum(best.metrics?.sharpe_ratio)}`:'--'}</div></div>
   <div class="stat-box"><div class="stat-label">推荐参数</div><div class="stat-value">${best&&best.params?Object.keys(best.params).length:0} 项</div><div class="stat-label">${best&&best.params?esc(Object.entries(best.params).map(([k,v])=>`${k}=${v}`).join(', ')):'--'}</div></div>
-  <div class="stat-box"><div class="stat-label">建议</div><div class="stat-value">${best&&Number(best.metrics?.max_drawdown||0)<20?'可做滚动验证':'先降低风险参数/换周期'}</div><div class="stat-label">下一步：walk-forward 或分段回测验证稳定性</div></div>
+  <div class="stat-box"><div class="stat-label">决策引擎</div><div class="stat-value">${esc(optimizeViewMeta.familyLabel)}</div><div class="stat-label">${esc(optimizeViewMeta.decisionLabel)} | ${esc(optimizeViewMeta.dataMode)}</div></div>
+  <div class="stat-box"><div class="stat-label">增强数据</div><div class="stat-value">News ${newsCount}</div><div class="stat-label">${fundingAvailable?'Funding/Macro 已启用':'Funding/Macro 未命中'}</div></div>
+  <div class="stat-box"><div class="stat-label">建议</div><div class="stat-value">${best&&Number(best.metrics?.max_drawdown||0)<20?'可做滚动验证':'先降低风险参数/换周期'}</div><div class="stat-label">${esc(optimizeViewMeta.dataHint)}</div></div>
 </div>
 <div class="inline-actions" style="margin-top:10px;">
   <button type="button" class="btn btn-primary btn-sm" id="btn-apply-opt-best">一键回填最佳参数到策略参数编辑</button>
@@ -2212,18 +2691,32 @@ ${renderRangeLockIndicatorHtml(data,false)}
 <div class="section-title">Top 参数组合</div>
 <div class="backtest-table-wrap">
 <table class="data-table">
-<thead><tr><th>排名</th><th>得分(${esc(objectiveLabel)})</th><th>收益率</th><th>夏普</th><th>回撤</th><th>胜率</th><th>交易数</th><th>参数</th></tr></thead>
+<thead><tr><th>排名</th><th>引擎</th><th>数据层</th><th>得分(${esc(objectiveLabel)})</th><th>收益率</th><th>夏普</th><th>回撤</th><th>胜率</th><th>交易数</th><th>交易点</th><th>零交易原因</th><th>参数</th><th>操作</th></tr></thead>
 <tbody>
-${top.map((t,i)=>`<tr>
+${top.map((t,i)=>{
+const entrySignals=Number(t?.metrics?.entry_signals||0);
+const exitSignals=Number(t?.metrics?.exit_signals||0);
+const tradePoints=entrySignals+exitSignals;
+const zeroTradeReason=String(t?.metrics?.zero_trade_reason||'').trim();
+const tradePointText=tradePoints>0?`${tradePoints} (${entrySignals}/${exitSignals})`:'0';
+const zeroTradeHtml=zeroTradeReason
+  ? `<span title="${esc(zeroTradeReason)}" style="color:#f0b429;">${esc(zeroTradeReason.length>20?`${zeroTradeReason.slice(0,20)}...`:zeroTradeReason)}</span>`
+  : '<span style="color:#6b7fa0;">--</span>';
+return `<tr class="bt-optimize-row ${Number(backtestUIState?.lastOptimizePreviewRank??-1)===i?'active-preview':''}" data-rank-index="${i}" onclick="previewOptimizeTrialByRank(${i})" style="cursor:pointer;">
 <td>${i+1}</td>
+<td><span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:${optimizeViewMeta.familyBg};border:1px solid ${optimizeViewMeta.familyColor}44;color:${optimizeViewMeta.familyColor};font-size:11px;font-weight:700;">${esc(optimizeViewMeta.familyLabel)}</span></td>
+<td><span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:#1d2b3d;border:1px solid #32475f;color:#9fb1c9;font-size:11px;font-weight:700;">${esc(optimizeViewMeta.dataMode)}</span></td>
 <td>${btNum(t.score)}</td>
 <td class="${Number(t?.metrics?.total_return||0)>=0?'positive':'negative'}">${btPct(t?.metrics?.total_return)}</td>
 <td>${btNum(t?.metrics?.sharpe_ratio)}</td>
 <td>${btPct(t?.metrics?.max_drawdown)}</td>
 <td>${btPct(t?.metrics?.win_rate)}</td>
 <td>${btMetricCell(t?.metrics?.total_trades,'int')}</td>
+<td title="入场/出场 = ${entrySignals}/${exitSignals}">${esc(tradePointText)}</td>
+<td>${zeroTradeHtml}</td>
 <td>${esc(Object.entries(t.params||{}).map(([k,v])=>`${k}=${v}`).join(', '))}</td>
-</tr>`).join('') || '<tr><td colspan="8">无优化结果</td></tr>'}
+<td><button type="button" class="btn btn-primary btn-sm" onclick="event.stopPropagation();previewOptimizeTrialByRank(${i})">预览</button></td>
+</tr>`;}).join('') || '<tr><td colspan="13">无优化结果</td></tr>'}
 </tbody></table></div>
 <div id="backtest-extra-chart" class="backtest-chart"></div>
 <div id="backtest-extra-heatmap" class="backtest-heatmap"></div>
@@ -2456,6 +2949,64 @@ for(let i=0;i<count;i++){
 }
 notify(`前${count}策略注册完成：成功 ${ok}，失败 ${fail}`,fail>0);
 }
+async function previewOptimizeTrialByRank(rankIndex){
+try{
+  backtestUIState.lastOptimizePreviewRank=Number(rankIndex)||0;
+  document.querySelectorAll('.bt-optimize-row').forEach(row=>{
+    row.classList.toggle('active-preview', Number(row.getAttribute('data-rank-index')||-1)===backtestUIState.lastOptimizePreviewRank);
+    if(Number(row.getAttribute('data-rank-index')||-1)===backtestUIState.lastOptimizePreviewRank){
+      row.style.background='rgba(77,163,255,.10)';
+      row.style.outline='1px solid rgba(77,163,255,.25)';
+    }else{
+      row.style.background='';
+      row.style.outline='';
+    }
+  });
+  const opt=backtestUIState?.lastOptimize||{};
+  const top=Array.isArray(opt.top)?opt.top:[];
+  const row=top[Number(rankIndex)||0];
+  if(!row){notify('未找到该参数组合',true);return;}
+  const st=String(opt.strategy_type||opt.strategy||'').trim();
+  const meta=getStrategyMeta(st);
+  const familyLabel=meta.family==='ml'?'ML驱动':(meta.family==='ai_glm'?'GLM/AI驱动':'传统规则');
+  const symbol=String(opt.symbol||document.getElementById('backtest-symbol')?.value||'BTC/USDT');
+  const tf=String(opt.timeframe||document.getElementById('backtest-timeframe')?.value||'1h');
+  const capital=Number(document.getElementById('backtest-capital')?.value||opt.initial_capital||10000);
+  const sdInput=String(document.getElementById('backtest-start-date')?.value||'').trim();
+  const edInput=String(document.getElementById('backtest-end-date')?.value||'').trim();
+  const sd=sdInput||String(opt.requested_start_date||opt.start_date||'').trim();
+  const ed=edInput||String(opt.requested_end_date||opt.end_date||'').trim();
+  const cr=Number(opt.commission_rate ?? 0.0004);
+  const sb=Number(opt.slippage_bps ?? 2);
+  const params=(row.params&&typeof row.params==='object')?row.params:{};
+  let u=`/backtest/run_custom?strategy=${encodeURIComponent(st)}&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(tf)}&initial_capital=${encodeURIComponent(capital)}&commission_rate=${encodeURIComponent(cr)}&slippage_bps=${encodeURIComponent(sb)}&include_series=true`;
+  if(sd)u+=`&start_date=${encodeURIComponent(sd)}`;
+  if(ed)u+=`&end_date=${encodeURIComponent(ed)}`;
+  if(Object.keys(params).length)u+=`&params_json=${encodeURIComponent(JSON.stringify(params))}`;
+  notify(`正在预览参数组合 #${Number(rankIndex)+1}`);
+  const r=await api(u,{method:'POST',timeoutMs:90000});
+  r._from_optimize_preview=true;
+  r._optimize_rank=Number(rankIndex)+1;
+  r._optimize_params=params;
+  renderBacktest(r);
+  const box=document.getElementById('backtest-results');
+  if(box){
+    const hint=document.createElement('div');
+    hint.className='list-item';
+    hint.style.marginTop='8px';
+    const dataMode=String(r?.data_mode||opt?.data_mode|| (meta.aiDriven?'OHLCV only':'OHLCV'));
+    const newsCount=Math.max(0,Number(r?.news_events_count ?? opt?.news_events_count ?? 0));
+    const fundingText=(r?.funding_available ?? opt?.funding_available) ? 'Macro On' : 'Macro Off';
+    const entrySignals=Number(r?.entry_signals ?? row?.metrics?.entry_signals ?? 0);
+    const exitSignals=Number(r?.exit_signals ?? row?.metrics?.exit_signals ?? 0);
+    const zeroTradeReason=String(r?.zero_trade_reason ?? row?.metrics?.zero_trade_reason ?? '').trim();
+    const tradePointText=`${entrySignals+exitSignals} (${entrySignals}/${exitSignals})`;
+    hint.innerHTML=`<span>参数优化预览来源</span><span>#${Number(rankIndex)+1} ${esc(st)} | ${esc(familyLabel)} | ${esc(dataMode)} | News ${newsCount} | ${esc(fundingText)} | 交易点 ${esc(tradePointText)}${zeroTradeReason?` | ${esc(zeroTradeReason)}`:''} | ${esc(Object.entries(params).map(([k,v])=>`${k}=${v}`).join(', ')||'默认参数')}</span>`;
+    box.appendChild(hint);
+  }
+  notify(`已在上方展示参数组合 #${Number(rankIndex)+1} 的回测图`);
+}catch(e){notify(`参数组合预览失败: ${e.message}`,true);}
+}
 async function previewCompareStrategyByRank(rankIndex){
 try{
   backtestUIState.lastComparePreviewRank=Number(rankIndex)||0;
@@ -2552,7 +3103,7 @@ if(out)out.textContent=`策略库加载失败: ${e.message||e2.message}`;
 }
 }
 }
-function bindStrategyAdvanced(){const exp=document.getElementById('btn-strategy-export-all'),imp=document.getElementById('btn-strategy-import-json'),rk=document.getElementById('btn-strategy-ranking'),lib=document.getElementById('btn-strategy-library'),out=document.getElementById('strategy-health-output');if(exp)exp.onclick=async()=>{try{const d=await api('/strategies/export');if(out)out.textContent=JSON.stringify(d,null,2);notify('策略JSON已导出到面板');}catch(e){notify(`导出失败: ${e.message}`,true);}};if(imp)imp.onclick=async()=>{try{const raw=document.getElementById('strategy-import-json').value.trim();if(!raw){notify('请先粘贴JSON',true);return;}const payload=JSON.parse(raw);const d=await api('/strategies/import',{method:'POST',body:JSON.stringify(payload)});if(out)out.textContent=JSON.stringify(d,null,2);notify('策略导入完成');await Promise.all([loadStrategies(),loadStrategySummary(),loadStrategyLibrary()]);}catch(e){notify(`导入失败: ${e.message}`,true);}};if(rk)rk.onclick=async()=>{try{const s=document.getElementById('backtest-symbol')?.value||'BTC/USDT',tf=document.getElementById('backtest-timeframe')?.value||'1h';const d=await api(`/strategies/ranking?symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=10000&top_n=20`);if(out)out.textContent=JSON.stringify(d,null,2);notify('策略评分完成');}catch(e){notify(`评分失败: ${e.message}`,true);}};if(lib)lib.onclick=loadStrategyLibrary;}
+function bindStrategyAdvanced(){const exp=document.getElementById('btn-strategy-export-all'),imp=document.getElementById('btn-strategy-import-json'),rk=document.getElementById('btn-strategy-ranking'),lib=document.getElementById('btn-strategy-library'),out=document.getElementById('strategy-health-output');if(exp)exp.onclick=async()=>{try{const d=await api('/strategies/export');if(out)out.textContent=JSON.stringify(d,null,2);notify('策略JSON已导出到面板');}catch(e){notify(`导出失败: ${e.message}`,true);}};if(imp)imp.onclick=async()=>{try{const raw=document.getElementById('strategy-import-json').value.trim();if(!raw){notify('请先粘贴JSON',true);return;}const payload=JSON.parse(raw);const d=await api('/strategies/import',{method:'POST',body:JSON.stringify(payload)});if(out)out.textContent=JSON.stringify(d,null,2);notify('策略导入完成');await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`导入失败: ${e.message}`,true);}};if(rk)rk.onclick=async()=>{try{const s=document.getElementById('backtest-symbol')?.value||'BTC/USDT',tf=document.getElementById('backtest-timeframe')?.value||'1h';const d=await api(`/strategies/ranking?symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=10000&top_n=20`);if(out)out.textContent=JSON.stringify(d,null,2);notify('策略评分完成');}catch(e){notify(`评分失败: ${e.message}`,true);}};if(lib)lib.onclick=loadStrategyLibrary;}
 
 function getResearchOutputEl(){return document.getElementById('research-output')||document.getElementById('analytics-output')||document.getElementById('factor-output');}
 function getResearchSummaryEl(){return document.getElementById('research-quick-summary');}
@@ -2562,6 +3113,80 @@ function getResearchTimeframe(){return document.getElementById('research-timefra
 function getResearchLookback(){return Math.max(120,Number(document.getElementById('research-lookback')?.value||1000));}
 function getResearchExcludeRetired(){return (document.getElementById('research-exclude-retired')?.checked)!==false;}
 function getResearchSymbols(){const raw=getSelectValues('research-symbols');return raw.length?raw:['BTC/USDT','ETH/USDT'];}
+function timeframeToMinutes(tf){
+const raw=String(tf||'1h').trim();
+const m=raw.match(/^(\d+)([smhdwM])$/i);
+if(!m)return 60;
+const n=Math.max(1,Number(m[1]||1));
+const unit=String(m[2]||'h').toLowerCase();
+if(unit==='s')return n/60;
+if(unit==='m')return n;
+if(unit==='h')return n*60;
+if(unit==='d')return n*1440;
+if(unit==='w')return n*10080;
+if(unit==='m'&&String(m[2])==='M')return n*43200;
+return 60;
+}
+function estimateResearchWindowHours(){
+  const hours=(getResearchLookback()*timeframeToMinutes(getResearchTimeframe()))/60;
+  return Math.max(1,Math.min(24*180,Math.round(hours)));
+}
+function estimateResearchWindowDays(){
+  return Math.max(1,Math.min(365,Math.ceil(estimateResearchWindowHours()/24)));
+}
+function symbolBaseAsset(sym){
+  return String(sym||'').trim().toUpperCase().split(':')[0].split('/')[0]||'BTC';
+}
+function buildResearchTargetAllocations(limit=3){
+  const picks=getResearchSymbols().slice(0,Math.max(1,limit)).map(symbolBaseAsset).filter(Boolean);
+  if(!picks.length)return 'BTC:0.4,ETH:0.3,USDT:0.3';
+  const cashWeight=0.2;
+  const each=((1-cashWeight)/picks.length);
+  const out=picks.map(asset=>`${asset}:${each.toFixed(2)}`);
+  out.push(`USDT:${cashWeight.toFixed(2)}`);
+  return out.join(',');
+}
+function renderResearchStatusCards(){
+if(window.workbenchState?.initialized&&typeof window.renderResearchStatusCards==='function'&&window.renderResearchStatusCards!==renderResearchStatusCards)return window.renderResearchStatusCards();
+const configEl=document.getElementById('research-config-snapshot');
+const dataEl=document.getElementById('research-data-snapshot');
+const moduleEl=document.getElementById('research-module-snapshot');
+const nextEl=document.getElementById('research-next-step');
+if(!configEl||!dataEl||!moduleEl||!nextEl)return;
+const symbols=getResearchSymbols();
+const configText=`研究配置：${getResearchExchange()} / ${getResearchSymbol()} / ${getResearchTimeframe()} | 观察窗口约 ${estimateResearchWindowDays()} 天 | 多币种 ${symbols.length} 个`;
+const factorData=(researchState.lastFactorLibrary&&!researchState.lastFactorLibrary.error)?researchState.lastFactorLibrary:null;
+const multiData=(researchState.lastMultiAsset&&!researchState.lastMultiAsset.error)?researchState.lastMultiAsset:null;
+const sentiment=researchState.lastSentiment&& !researchState.lastSentiment.error ? researchState.lastSentiment : null;
+const analytics=(researchState.lastAnalytics&&!researchState.lastAnalytics.error)?researchState.lastAnalytics:null;
+const onchain=(researchState.lastOnchain&&!researchState.lastOnchain.error)?researchState.lastOnchain:null;
+const fama=(researchState.lastFama&&!researchState.lastFama.error)?researchState.lastFama:null;
+configEl.textContent=configText;
+const coverageParts=[
+  factorData?`因子 ${(factorData.factors||[]).length} / 样本 ${Number(factorData.points||0)}`:'因子未加载',
+  fama?`Fama ${Number(fama.points||0)} 点`:'Fama 未加载',
+  multiData?`多币 ${Number(multiData.count||0)}`:'多币未加载',
+  sentiment?`新闻 ${Number(sentiment.news_events||0)}`:'情绪未加载',
+  onchain?`巨鲸 ${Number(onchain?.whale_activity?.count||0)}`:'链上未加载',
+];
+dataEl.textContent=`数据覆盖：${coverageParts.join(' | ')}`;
+const moduleStates=[
+  analytics?'分析总览':'分析待加载',
+  factorData?'因子库':'因子待加载',
+  fama?'Fama':'Fama待加载',
+  multiData?'多币种':'多币待加载',
+  sentiment?'情绪':'情绪待加载',
+  onchain?'链上':'链上待加载',
+];
+moduleEl.textContent=`模块状态：${moduleStates.join(' / ')}`;
+let nextAction='下一步：先运行研究总览';
+if(analytics && !sentiment)nextAction='下一步：补跑市场情绪仪表盘，确认新闻/资金费率方向';
+else if(analytics && !factorData)nextAction='下一步：刷新因子库，补齐横截面打分';
+else if(analytics && factorData && !multiData)nextAction='下一步：运行多币种概览，确认广度与相关性';
+else if(analytics && factorData && multiData && !onchain)nextAction='下一步：补跑链上概览，确认巨鲸与链上资金扰动';
+else if(analytics && factorData && multiData && sentiment)nextAction='下一步：查看研究结论，选择顺势/回归方向再执行';
+nextEl.textContent=nextAction;
+}
 function getFactorLookbackForTimeframe(tf,requested){
 const q=Math.max(120,Number(requested||1000));
 const t=String(tf||'1h').toLowerCase();
@@ -2585,6 +3210,7 @@ return Math.min(120000, base + Math.min(30000, n*600));
 }
 function clamp01(v){return Math.max(0,Math.min(1,Number(v)||0));}
 function clamp11(v){return Math.max(-1,Math.min(1,Number(v)||0));}
+function hasFiniteScore(v){return v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));}
 function symbolToNewsKey(sym){
 const raw=String(sym||'').trim().toUpperCase();
 if(!raw)return'';
@@ -2645,17 +3271,17 @@ const metrics=[
 {name:'点差健康度',score:spreadScore,raw:spreadBps,fmt:spreadAvailable?spreadBps.toFixed(3)+' bps':'--',hint:spreadAvailable?'点差越小流动性越好':'暂无盘口点差数据',available:spreadAvailable},
 {name:'拥挤风险',score:riskCrowding,raw:riskCrowding,fmt:riskCrowding.toFixed(3),hint:`巨鲸=${whaleCount}，公告=${annCount}`},
 ];
-const validMetrics=metrics.filter(m=>Number.isFinite(Number(m.score)));
+const validMetrics=metrics.filter(m=>hasFiniteScore(m.score));
 const composite=validMetrics.length?validMetrics.reduce((s,m)=>s+Number(m.score||0),0)/validMetrics.length:0;
 const confidence=clamp01(validMetrics.length/metrics.length);
 const stance=validMetrics.length===0?'数据不足':composite>0.18?'偏多':composite<-0.18?'偏空':'中性';
-const caution=[spreadAvailable&&spreadBps>5?'点差偏大':null,fundingAvailable&&Math.abs(funding)>0.0015?'资金费率极端':null,whaleCount>=12?'巨鲸转账活跃':null,!newsAvailable?'新闻样本不足':null,newsAvailable&&newsN===0&&newsFeedCount>0?'结构化事件仍在补齐':null,!flowAvailable||!spreadAvailable||!fundingAvailable||!basisAvailable?'部分微观结构数据缺失':null,String(news?.scope||'')==='global_fallback'?'新闻已回退到全市场样本':null].filter(Boolean);
+const caution=[spreadAvailable&&spreadBps>5?'点差偏大':null,fundingAvailable&&Math.abs(funding)>0.0015?'资金费率极端':null,whaleCount>=12?'巨鲸转账活跃':null,!newsAvailable?'新闻样本不足':null,newsAvailable&&newsN===0&&newsFeedCount>0?'结构化事件仍在补齐':null,!flowAvailable||!spreadAvailable||!fundingAvailable||!basisAvailable?'部分微观结构数据缺失':null,String(news?.scope||'')==='global_fallback'?'新闻已回退到全市场样本':null,micro?.source_error?`交易所微观结构不可用: ${micro.source_error}`:null].filter(Boolean);
 researchState.lastSentiment={raw:payload,composite_score:composite,confidence,stance,metrics,spread_bps:spreadBps,imbalance,funding_rate:funding,basis_pct:basisPct,whale_count:whaleCount,news_events:newsEvents,news_feed_count:newsFeedCount,news_raw_count:newsRawCount};
 if(summary){
 summary.innerHTML=`<div class="list-item"><span>综合情绪 / 置信度</span><span>${stance} (${composite.toFixed(3)}) / ${confidence.toFixed(2)}</span></div><div class="list-item"><span>新闻事件(24h)</span><span>结构化 ${newsEvents} | 当前流 ${newsFeedCount} | 原始 ${newsRawCount}</span></div><div class="list-item"><span>资金费率 / 基差</span><span>${fundingAvailable?(funding*100).toFixed(4)+'%':'--'} / ${basisAvailable?basisPct.toFixed(4)+'%':'--'}</span></div><div class="list-item"><span>点差 / 主动流</span><span>${spreadAvailable?spreadBps.toFixed(3)+' bps':'--'} / ${flowAvailable?imbalance.toFixed(4):'--'}</span></div><div class="list-item"><span>风控提示</span><span>${esc(caution.join('；')||(validMetrics.length?'无明显异常':'数据不足，建议稍后重试'))}</span></div>`;
 }
 if(grid){
-grid.innerHTML=metrics.map(m=>{const hasScore=Number.isFinite(Number(m.score));const positive=hasScore&&Number(m.score)>=0;const badgeText=!hasScore?'缺失':positive?'正向':'负向';const badgeClass=!hasScore?'warning':positive?'connected':'';return `<div class="strategy-card"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${esc(m.name)}</h4><span class="status-badge ${badgeClass}">${badgeText}</span></div><p>标准化分数：${hasScore?Number(m.score).toFixed(3):'--'}</p><p>原始值：${esc(String(m.fmt))}</p><p style="font-size:11px;color:#8fa6c0;">${esc(m.hint||'')}</p></div>`;}).join('');
+grid.innerHTML=metrics.map(m=>{const hasScore=hasFiniteScore(m.score);const positive=hasScore&&Number(m.score)>=0;const badgeText=!hasScore?'缺失':positive?'正向':'负向';const badgeClass=!hasScore?'warning':positive?'connected':'';return `<div class="strategy-card"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${esc(m.name)}</h4><span class="status-badge ${badgeClass}">${badgeText}</span></div><p>标准化分数：${hasScore?Number(m.score).toFixed(3):'--'}</p><p>原始值：${esc(String(m.fmt))}</p><p style="font-size:11px;color:#8fa6c0;">${esc(m.hint||'')}</p></div>`;}).join('');
 }
 renderMarketSentimentChart(validMetrics);
 renderResearchConclusionCard();
@@ -2695,9 +3321,10 @@ notify(`市场情绪加载失败: ${e.message}`,true);
 function applyResearchPreset(kind){
 const tfEl=document.getElementById('research-timeframe'),lookbackEl=document.getElementById('research-lookback'),symbolsEl=document.getElementById('research-symbols'),symbolEl=document.getElementById('research-symbol');
 const default30=['BTC/USDT','ETH/USDT','BNB/USDT','SOL/USDT','XRP/USDT','ADA/USDT','DOGE/USDT','TRX/USDT','LINK/USDT','AVAX/USDT','DOT/USDT','POL/USDT','LTC/USDT','BCH/USDT','ETC/USDT','ATOM/USDT','NEAR/USDT','APT/USDT','ARB/USDT','OP/USDT','SUI/USDT','INJ/USDT','RUNE/USDT','AAVE/USDT','MKR/USDT','UNI/USDT','FIL/USDT','HBAR/USDT','ICP/USDT','TON/USDT'];
-if(kind==='hf30'){if(tfEl)tfEl.value='5m';if(lookbackEl)lookbackEl.value='1800';setSelectValues('research-symbols',default30);if(symbolEl&&!symbolEl.value.trim())symbolEl.value='BTC/USDT';notify('已应用预设: 高频30币 (5m / 1800)');return;}
-if(kind==='intraday'){if(tfEl)tfEl.value='1m';if(lookbackEl)lookbackEl.value='1200';setSelectValues('research-symbols',default30.slice(0,15));if(symbolEl)symbolEl.value='BTC/USDT';notify('已应用预设: 盘中研究 (1m / 1200)');return;}
-if(kind==='swing'){if(tfEl)tfEl.value='1h';if(lookbackEl)lookbackEl.value='1000';setSelectValues('research-symbols',default30);if(symbolEl)symbolEl.value='BTC/USDT';notify('已应用预设: 波段研究 (1h / 1000)');}
+if(kind==='hf30'){if(tfEl)tfEl.value='5m';if(lookbackEl)lookbackEl.value='1800';setSelectValues('research-symbols',default30);if(symbolEl&&!symbolEl.value.trim())symbolEl.value='BTC/USDT';renderResearchStatusCards();notify('已应用预设: 高频30币 (5m / 1800)');return;}
+if(kind==='intraday'){if(tfEl)tfEl.value='1m';if(lookbackEl)lookbackEl.value='1200';setSelectValues('research-symbols',default30.slice(0,15));if(symbolEl)symbolEl.value='BTC/USDT';renderResearchStatusCards();notify('已应用预设: 盘中研究 (1m / 1200)');return;}
+if(kind==='swing'){if(tfEl)tfEl.value='1h';if(lookbackEl)lookbackEl.value='1000';setSelectValues('research-symbols',default30);if(symbolEl)symbolEl.value='BTC/USDT';renderResearchStatusCards();notify('已应用预设: 波段研究 (1h / 1000)');return;}
+renderResearchStatusCards();
 }
 function bindResearchPresets(){
 const b1=document.getElementById('btn-research-preset-hf'),b2=document.getElementById('btn-research-preset-intraday'),b3=document.getElementById('btn-research-preset-swing');
@@ -2706,10 +3333,11 @@ if(b2)b2.onclick=()=>applyResearchPreset('intraday');
 if(b3)b3.onclick=()=>applyResearchPreset('swing');
 }
 function bindResearchSentiment(){const b=document.getElementById('btn-load-market-sentiment');if(b)b.onclick=loadMarketSentimentDashboard;}
-function renderResearchQuickSummary(rows){const box=getResearchSummaryEl();if(!box)return;if(!rows?.length){box.innerHTML='<div class="list-item"><span>暂无摘要</span><span>-</span></div>';return;}box.innerHTML=rows.map(r=>`<div class="list-item"><span>${esc(r.label||'-')}</span><span>${esc(String(r.value??'-'))}</span></div>`).join('');}
+function renderResearchQuickSummary(rows){const box=getResearchSummaryEl();if(!box)return;if(!rows?.length){box.innerHTML='<div class="list-item"><span>暂无摘要</span><span>-</span></div>';renderResearchStatusCards();return;}box.innerHTML=rows.map(r=>`<div class="list-item"><span>${esc(r.label||'-')}</span><span>${esc(String(r.value??'-'))}</span></div>`).join('');renderResearchStatusCards();}
 function getResearchConclusionSummaryEl(){return document.getElementById('research-conclusion-summary');}
 function getResearchConclusionBulletsEl(){return document.getElementById('research-conclusion-bullets');}
 function renderResearchConclusionCard(){
+if(window.workbenchState?.initialized&&typeof window.renderResearchConclusionCard==='function'&&window.renderResearchConclusionCard!==renderResearchConclusionCard)return window.renderResearchConclusionCard();
 const summaryEl=getResearchConclusionSummaryEl(),bulletsEl=getResearchConclusionBulletsEl();
 if(!summaryEl||!bulletsEl)return;
 const factorData=(researchState.lastFactorLibrary&&!researchState.lastFactorLibrary.error)?researchState.lastFactorLibrary:null;
@@ -2807,6 +3435,7 @@ if(retiredExcluded.length){
 bullets.push({title:'样本过滤',badge:'已排除',body:`已按本地覆盖审计结果排除停更/退市币种：${retiredExcluded.join(', ')}`});
 }
 bulletsEl.innerHTML=bullets.map(item=>`<div class="research-conclusion-item"><div class="title"><span>${esc(item.title)}</span><span class="status-badge">${esc(item.badge)}</span></div><div class="body">${esc(item.body)}</div></div>`).join('');
+renderResearchStatusCards();
 }
 function downloadTextFile(filename,text,type='text/plain;charset=utf-8'){try{const blob=new Blob([text],{type});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},0);}catch(e){notify(`导出失败: ${e.message}`,true);}}
 function getFactorTableSearch(){return (document.getElementById('factor-score-search')?.value||'').trim().toUpperCase();}
@@ -2827,26 +3456,66 @@ return (av-bv)*dir;
 });
 return out.slice(0,getFactorTopN());
 }
+function hasFactorLibraryContent(data){
+if(!data||typeof data!=='object')return false;
+return Boolean((Array.isArray(data?.factors)&&data.factors.length)||Object.keys(data?.latest||{}).length||(Array.isArray(data?.asset_scores)&&data.asset_scores.length)||(Array.isArray(data?.series)&&data.series.length)||Number(data?.points||0)>0);
+}
+function hasFamaContent(data){
+if(!data||typeof data!=='object')return false;
+return Boolean((Array.isArray(data?.series)&&data.series.length)||Number(data?.points||0)>0||Object.values(data?.latest||{}).some(v=>Math.abs(Number(v||0))>0));
+}
+function hasOnchainContent(data){
+if(!data||typeof data!=='object')return false;
+return Boolean((Array.isArray(data?.defi_tvl?.series)&&data.defi_tvl.series.length)||(Array.isArray(data?.whale_activity?.transactions)&&data.whale_activity.transactions.length)||Math.abs(Number(data?.defi_tvl?.latest_tvl||0))>0||Number(data?.whale_activity?.count||0)>0);
+}
+function isResearchAsyncPending(data,kind='generic'){
+if(!data||typeof data!=='object')return false;
+const mode=String(data?.served_mode||'').toLowerCase();
+const msg=[String(data?.error||''),...(Array.isArray(data?.warnings)?data.warnings:[])].join(' ');
+const modePending=['fallback','bootstrap','loading','background','cache_refresh'].includes(mode)||data?.refreshing===true;
+const textPending=/后台|预热|加载中|refresh|warming/i.test(msg);
+if(kind==='factor_library')return !hasFactorLibraryContent(data)&&(modePending||textPending);
+if(kind==='fama')return !hasFamaContent(data)&&(modePending||textPending);
+if(kind==='onchain')return !hasOnchainContent(data)&&(modePending||textPending);
+return modePending||textPending;
+}
+function clearResearchPendingTimer(kind){
+const timer=researchState.pendingTimers?.[kind];
+if(timer){clearTimeout(timer);delete researchState.pendingTimers[kind];}
+}
+function queueResearchPendingRefresh(kind,loader,delayMs=3000){
+if(typeof loader!=='function')return;
+clearResearchPendingTimer(kind);
+researchState.pendingTimers[kind]=setTimeout(()=>{Promise.resolve().then(loader).catch(()=>{});},Math.max(1200,Number(delayMs||3000)));
+}
+function pendingResearchNote(data,fallback='后台计算中'){
+if(!data||typeof data!=='object')return fallback;
+return String(data?.error||((Array.isArray(data?.warnings)&&data.warnings[0])||fallback));
+}
 function renderFactorCorrelationHeatmap(data){
 const el=document.getElementById('factor-corr-chart');
-if(!el||typeof Plotly==='undefined')return;
+if(!el)return;
+if(typeof Plotly==='undefined'){el.innerHTML='<div class="list-item">图表库未加载，因子相关性矩阵暂不可用。</div>';return;}
 const corr=data?.correlation||{};
-const factors=(data?.factors||[]).filter(k=>corr&&corr[k]);
+const factors=((Array.isArray(data?.factors)&&data.factors.length?data.factors:Object.keys(corr||{}))).filter(k=>corr&&corr[k]);
 if(!factors.length){el.innerHTML='<div class="list-item">暂无因子相关性矩阵</div>';return;}
+clearPlotlyHost(el);
 preparePlotlyHost(el);
 const z=factors.map(r=>factors.map(c=>Number(corr?.[r]?.[c]??0)));
-Plotly.newPlot(el,[{type:'heatmap',x:factors,y:factors,z,colorscale:[[0,'#b22222'],[.5,'#1f2937'],[1,'#0ea5a4']],zmin:-1,zmax:1,hovertemplate:'%{y} vs %{x}: %{z:.3f}<extra></extra>'}],{paper_bgcolor:'#111723',plot_bgcolor:'#111723',font:{color:'#d7dde8'},margin:{l:70,r:30,t:20,b:60},xaxis:{tickangle:-35},yaxis:{autorange:'reversed'}},{responsive:true,displaylogo:false});
+Plotly.react(el,[{type:'heatmap',x:factors,y:factors,z,colorscale:[[0,'#b22222'],[.5,'#1f2937'],[1,'#0ea5a4']],zmin:-1,zmax:1,hovertemplate:'%{y} vs %{x}: %{z:.3f}<extra></extra>'}],{paper_bgcolor:'#111723',plot_bgcolor:'#111723',font:{color:'#d7dde8'},margin:{l:70,r:30,t:20,b:60},xaxis:{tickangle:-35},yaxis:{autorange:'reversed'}},{responsive:true,displaylogo:false});
 schedulePlotlyResize(document.getElementById('research')||document);
 }
 function renderMultiAssetCorrelationHeatmap(data){
 const el=document.getElementById('multi-asset-corr-chart');
-if(!el||typeof Plotly==='undefined')return;
+if(!el)return;
+if(typeof Plotly==='undefined'){el.innerHTML='<div class="list-item">图表库未加载，多币种相关性矩阵暂不可用。</div>';return;}
 const corr=data?.correlation||{};
 const assets=Object.keys(corr||{}).filter(k=>corr&&typeof corr[k]==='object');
 if(!assets.length){el.innerHTML='<div class="list-item">暂无多币种收益相关性矩阵</div>';return;}
+clearPlotlyHost(el);
 preparePlotlyHost(el);
 const z=assets.map(r=>assets.map(c=>Number(corr?.[r]?.[c]??0)));
-Plotly.newPlot(el,[{type:'heatmap',x:assets,y:assets,z,colorscale:[[0,'#a61b29'],[.5,'#1f2937'],[1,'#0f766e']],zmin:-1,zmax:1,hovertemplate:'%{y} vs %{x}: %{z:.3f}<extra></extra>'}],{paper_bgcolor:'#111723',plot_bgcolor:'#111723',font:{color:'#d7dde8'},margin:{l:80,r:30,t:20,b:80},xaxis:{tickangle:-35},yaxis:{autorange:'reversed'}},{responsive:true,displaylogo:false});
+Plotly.react(el,[{type:'heatmap',x:assets,y:assets,z,colorscale:[[0,'#a61b29'],[.5,'#1f2937'],[1,'#0f766e']],zmin:-1,zmax:1,hovertemplate:'%{y} vs %{x}: %{z:.3f}<extra></extra>'}],{paper_bgcolor:'#111723',plot_bgcolor:'#111723',font:{color:'#d7dde8'},margin:{l:80,r:30,t:20,b:80},xaxis:{tickangle:-35},yaxis:{autorange:'reversed'}},{responsive:true,displaylogo:false});
 schedulePlotlyResize(document.getElementById('research')||document);
 }
 function renderMultiAssetPanel(data){
@@ -2859,7 +3528,7 @@ if(!data||data.error){
 const msg=data?.error||'多币种概览加载失败';
 if(summary)summary.innerHTML=`<div class="list-item"><span>${esc(msg)}</span><span>错误</span></div>`;
 if(tbody)tbody.innerHTML=`<tr><td colspan="6">${esc(msg)}</td></tr>`;
-const corrEl=document.getElementById('multi-asset-corr-chart');if(corrEl)corrEl.innerHTML='<div class="list-item">暂无多币种收益相关性矩阵</div>';
+const corrEl=document.getElementById('multi-asset-corr-chart');if(corrEl){clearPlotlyHost(corrEl);corrEl.innerHTML='<div class="list-item">暂无多币种收益相关性矩阵</div>';}
 renderResearchConclusionCard();
 return;
 }
@@ -2880,6 +3549,264 @@ tbody.innerHTML=rows.length?rows.map(r=>`<tr><td>${esc(r.symbol||'-')}</td><td>$
 }
 renderMultiAssetCorrelationHeatmap(data);
 renderResearchConclusionCard();
+}
+function renderFamaChart(data){
+const el=document.getElementById('fama-factor-chart');
+if(!el||typeof Plotly==='undefined')return;
+const rows=Array.isArray(data?.series)?data.series:[];
+if(!rows.length){el.innerHTML='<div class="list-item">暂无 Fama 因子图</div>';return;}
+clearPlotlyHost(el);
+preparePlotlyHost(el);
+const x=rows.map(r=>r.timestamp);
+const traces=[
+  {key:'MKT',name:'MKT',color:'#4da3ff'},
+  {key:'MOM',name:'MOM',color:'#20bf78'},
+  {key:'SMB',name:'SMB',color:'#ffd166'},
+  {key:'HML',name:'HML',color:'#f87171'},
+].map(item=>({
+  type:'scatter',
+  mode:'lines',
+  x,
+  y:rows.map(r=>Number(r?.[item.key]||0)),
+  name:item.name,
+  line:{width:2,color:item.color},
+}));
+Plotly.react(el,traces,{
+paper_bgcolor:'#111723',plot_bgcolor:'#111723',font:{color:'#d7dde8'},
+margin:{l:48,r:20,t:16,b:42},
+xaxis:plotlyTimeAxis({title:'时间'}),
+yaxis:{title:'因子值',showgrid:true,gridcolor:'#283242',zerolinecolor:'#415066'},
+legend:{orientation:'h',y:1.12}
+},{responsive:true,displaylogo:false});
+schedulePlotlyResize(document.getElementById('research')||document);
+}
+function renderFamaPanel(data){
+const prevGood=hasFamaContent(researchState.lastFama)?researchState.lastFama:null;
+const pending=isResearchAsyncPending(data,'fama');
+const renderData=pending&&prevGood?prevGood:data;
+if(hasFamaContent(data)||(!pending&&data&&typeof data==='object'&&!data.error))researchState.lastFama=data;
+const summary=document.getElementById('fama-factor-summary');
+const tbody=document.getElementById('fama-factor-tbody');
+if(summary)summary.innerHTML='<div class="list-item"><span>加载中...</span><span>-</span></div>';
+if(tbody)tbody.innerHTML='<tr><td colspan="5">加载中...</td></tr>';
+if(pending&&!hasFamaContent(renderData)){
+  const msg=pendingResearchNote(data,'Fama 因子正在后台计算');
+  if(summary)summary.innerHTML=`<div class="list-item"><span>${esc(msg)}</span><span>预热中</span></div>`;
+  if(tbody)tbody.innerHTML='<tr><td colspan="5">后台计算中，稍后自动补齐</td></tr>';
+  const chart=document.getElementById('fama-factor-chart');if(chart){clearPlotlyHost(chart);chart.innerHTML='<div class="list-item">Fama 因子正在后台计算</div>';}
+  renderResearchStatusCards();
+  return;
+}
+if(!renderData||renderData.error){
+  const msg=data?.error||'Fama 因子加载失败';
+  if(summary)summary.innerHTML=`<div class="list-item"><span>${esc(msg)}</span><span>错误</span></div>`;
+  if(tbody)tbody.innerHTML=`<tr><td colspan="5">${esc(msg)}</td></tr>`;
+  const chart=document.getElementById('fama-factor-chart');if(chart){clearPlotlyHost(chart);chart.innerHTML='<div class="list-item">暂无 Fama 因子图</div>';}
+  renderResearchStatusCards();
+  return;
+}
+const latest=renderData?.latest||{};
+const universe=Number(renderData?.universe_size||0);
+const points=Number(renderData?.points||0);
+const quality=String(renderData?.universe_quality||'-');
+if(summary){
+  summary.innerHTML=`
+  <div class="list-item"><span>样本点 / 币种数</span><span>${points} / ${universe}</span></div>
+  <div class="list-item"><span>MKT / MOM</span><span>${Number(latest?.MKT||0).toFixed(6)} / ${Number(latest?.MOM||0).toFixed(6)}</span></div>
+  <div class="list-item"><span>SMB / HML</span><span>${Number(latest?.SMB||0).toFixed(6)} / ${Number(latest?.HML||0).toFixed(6)}</span></div>
+  <div class="list-item"><span>质量</span><span>${esc(quality)}${pending?` | ${esc(pendingResearchNote(data,'后台刷新中'))}`:(renderData?.warnings?.length?` | ${esc(String(renderData.warnings[0]))}`:'')}</span></div>`;
+}
+const rows=(Array.isArray(renderData?.series)?renderData.series:[]).slice(-12).reverse();
+if(tbody){
+  tbody.innerHTML=rows.length?rows.map(r=>`<tr><td>${esc(fmtAxisDateTime(r.timestamp))}</td><td>${Number(r?.MKT||0).toFixed(6)}</td><td>${Number(r?.SMB||0).toFixed(6)}</td><td>${Number(r?.HML||0).toFixed(6)}</td><td>${Number(r?.MOM||0).toFixed(6)}</td></tr>`).join(''):'<tr><td colspan="5">暂无数据</td></tr>';
+}
+renderFamaChart(renderData);
+renderResearchStatusCards();
+}
+function renderOnchainChart(data){
+const el=document.getElementById('onchain-overview-chart');
+if(!el||typeof Plotly==='undefined')return;
+const series=Array.isArray(data?.defi_tvl?.series)?data.defi_tvl.series:[];
+const whales=Array.isArray(data?.whale_activity?.transactions)?data.whale_activity.transactions:[];
+if(!series.length && !whales.length){clearPlotlyHost(el);el.innerHTML='<div class="list-item">暂无链上图表数据</div>';return;}
+clearPlotlyHost(el);
+preparePlotlyHost(el);
+const traces=[];
+if(series.length){
+  traces.push({
+    type:'scatter',
+    mode:'lines',
+    x:series.map(r=>r.timestamp),
+    y:series.map(r=>Number(r?.tvl||0)),
+    name:'TVL',
+    line:{width:2,color:'#4da3ff'},
+    yaxis:'y1',
+  });
+}
+if(whales.length){
+  const top=whales.slice(0,8).reverse();
+  traces.push({
+    type:'bar',
+    orientation:'h',
+    x:top.map(r=>Number(r?.btc||0)),
+    y:top.map(r=>String(r?.hash||'').slice(0,10)||'--'),
+    name:'巨鲸BTC',
+    marker:{color:'#20bf78',opacity:0.72},
+    xaxis:'x2',
+    yaxis:'y2',
+  });
+}
+Plotly.react(el,traces,{
+paper_bgcolor:'#111723',plot_bgcolor:'#111723',font:{color:'#d7dde8'},
+margin:{l:56,r:26,t:16,b:42},
+grid:{rows:whales.length?2:1,columns:1,pattern:'independent',roworder:'top to bottom'},
+xaxis:plotlyTimeAxis({title:'时间'}),
+yaxis:{title:'TVL',showgrid:true,gridcolor:'#283242'},
+xaxis2:{title:'BTC 数量',showgrid:true,gridcolor:'#283242'},
+yaxis2:{title:'巨鲸转账',automargin:true},
+legend:{orientation:'h',y:1.12}
+},{responsive:true,displaylogo:false});
+schedulePlotlyResize(document.getElementById('research')||document);
+}
+function getOnchainStatusLine(data){
+const status=data?.component_status||{};
+const labels=[
+  ['exchange_flow_proxy','流向'],
+  ['defi_tvl','TVL'],
+  ['whale_activity','巨鲸'],
+  ['funding_rate_multi_source','Funding'],
+  ['fear_greed_index','情绪'],
+];
+const parts=[];
+for(const [key,label] of labels){
+  const item=status?.[key];
+  if(!item)continue;
+  parts.push(`${label}:${item?.status==='ok'?'正常':'降级'}`);
+}
+return parts.join(' | ')||'组件状态未知';
+}
+async function loadOnchainOverviewPanel({refresh=false,quiet=false,showLoading=true,timeoutMs=12000}={}){
+const out=getResearchOutputEl();
+if(showLoading)setResearchMiniPanelLoading('onchain');
+try{
+  const d=await api(`/data/onchain/overview?exchange=${encodeURIComponent(getResearchExchange())}&symbol=${encodeURIComponent(getResearchSymbol())}&whale_threshold_btc=10&chain=Ethereum&refresh=${refresh?'true':'false'}`,{timeoutMs});
+  renderOnchainPanel(d);
+  if(out&&!quiet)out.textContent=JSON.stringify(d,null,2);
+  if(isResearchAsyncPending(d,'onchain')||d?.refreshing&&(!d?.cached||d?.served_mode==='bootstrap')){
+    queueResearchPendingRefresh('onchain',()=>loadOnchainOverviewPanel({refresh:false,quiet:true,showLoading:false,timeoutMs}),3000);
+  }
+  if(!quiet)notify(d?.served_mode==='bootstrap'?'链上概览正在后台预热，面板会自动补全':d?.cached&&d?.refreshing?'链上概览已显示缓存并在后台刷新':'链上概览已更新');
+  return d;
+}catch(e){
+  renderOnchainPanel({error:e.message});
+  if(out&&!quiet)out.textContent=`链上概览失败: ${e.message}`;
+  if(!quiet)notify(`链上概览失败: ${e.message}`,true);
+  return {error:e.message};
+}
+}
+function renderOnchainPanel(data){
+const prevGood=hasOnchainContent(researchState.lastOnchain)?researchState.lastOnchain:null;
+const pending=isResearchAsyncPending(data,'onchain');
+const renderData=pending&&prevGood?prevGood:data;
+if(hasOnchainContent(data)||(!pending&&data&&typeof data==='object'&&!data.error))researchState.lastOnchain=data;
+const summary=document.getElementById('onchain-overview-summary');
+const tbody=document.getElementById('onchain-whale-tbody');
+if(summary)summary.innerHTML='<div class="list-item"><span>加载中...</span><span>-</span></div>';
+if(tbody)tbody.innerHTML='<tr><td colspan="4">加载中...</td></tr>';
+if(pending&&!hasOnchainContent(renderData)){
+  const msg=pendingResearchNote(data,'链上面板正在后台预热');
+  if(summary)summary.innerHTML=`<div class="list-item"><span>${esc(msg)}</span><span>预热中</span></div>`;
+  if(tbody)tbody.innerHTML='<tr><td colspan="4">后台补拉链上数据中，稍后自动更新</td></tr>';
+  const chart=document.getElementById('onchain-overview-chart');if(chart){clearPlotlyHost(chart);chart.innerHTML='<div class="list-item">链上图表正在后台加载</div>';}
+  renderResearchConclusionCard();
+  return;
+}
+if(!renderData||renderData.error){
+  const msg=data?.error||'链上概览加载失败';
+  if(summary)summary.innerHTML=`<div class="list-item"><span>${esc(msg)}</span><span>错误</span></div>`;
+  if(tbody)tbody.innerHTML=`<tr><td colspan="4">${esc(msg)}</td></tr>`;
+  const chart=document.getElementById('onchain-overview-chart');if(chart){clearPlotlyHost(chart);chart.innerHTML='<div class="list-item">暂无链上图表数据</div>';}
+  renderResearchConclusionCard();
+  return;
+}
+const flow=Number(renderData?.exchange_flow_proxy?.imbalance ?? 0);
+const tvl=renderData?.defi_tvl||{};
+const whales=renderData?.whale_activity||{};
+const fundingMulti=renderData?.funding_rate_multi_source||{};
+const fundingCount=Number(fundingMulti?.count||0);
+const fundingMeanPct=Number(fundingMulti?.mean_rate_pct);
+const fundingSpreadPct=Number(fundingMulti?.spread_rate_pct);
+const fearGreed=renderData?.fear_greed_index||{};
+const fearGreedValue=Number(fearGreed?.value);
+const fearGreedOk=!!fearGreed?.available&&Number.isFinite(fearGreedValue);
+const servedMode=renderData?.served_mode==='cache_refresh'?'缓存+后台刷新':renderData?.served_mode==='cache'?'缓存':'实时';
+const generatedAt=renderData?.generated_at?fmtDateTime(renderData.generated_at):'--';
+const cacheAgeSec=Number(renderData?.cache_age_sec||0);
+const statusLine=getOnchainStatusLine(renderData);
+if(summary){
+  summary.innerHTML=`
+  <div class="list-item"><span>链 / 观察窗口</span><span>${esc(tvl?.chain||'Ethereum')} / ${Number(renderData?.window_hours||0)}h</span></div>
+  <div class="list-item"><span>最新 TVL</span><span>${fmtCompactUsd(tvl?.latest_tvl)} | 1d ${Number(tvl?.change_1d_pct||0).toFixed(2)}%</span></div>
+  <div class="list-item"><span>7d 变化 / 交易所流向</span><span>${Number(tvl?.change_7d_pct||0).toFixed(2)}% / ${flow.toFixed(4)}</span></div>
+  <div class="list-item"><span>巨鲸数量</span><span>${Number(whales?.count||0)} 笔 | 阈值 ${Number(whales?.threshold_btc||0)} BTC</span></div>
+  <div class="list-item"><span>多所 Funding</span><span>${fundingCount>0?`${fundingCount}源 | 均值 ${Number.isFinite(fundingMeanPct)?fundingMeanPct.toFixed(4)+'%':'--'} | 分歧 ${Number.isFinite(fundingSpreadPct)?fundingSpreadPct.toFixed(4)+'%':'--'}`:'暂无可用数据'}</span></div>
+  <div class="list-item"><span>恐慌贪婪指数</span><span>${fearGreedOk?`${fearGreedValue} (${esc(fearGreed?.classification||'-')}) | 信号 ${esc(fearGreed?.signal||'neutral')}`:'暂无可用数据'}</span></div>
+  <div class="list-item"><span>返回方式 / 生成时间</span><span>${esc(servedMode)} / ${esc(generatedAt)}</span></div>
+  <div class="list-item"><span>组件状态</span><span>${esc(statusLine)}${renderData?.cached?` | ${cacheAgeSec.toFixed(1)}s`:''}${pending?` | ${esc(pendingResearchNote(data,'后台刷新中'))}`:''}</span></div>`;
+}
+const txRows=(Array.isArray(whales?.transactions)?whales.transactions:[]).slice(0,12);
+if(tbody){
+  tbody.innerHTML=txRows.length?txRows.map(r=>`<tr><td>${esc(fmtDateTime(r?.timestamp))}</td><td>${Number(r?.btc||0).toFixed(3)}</td><td>${fmtCompactUsd(r?.usd_estimate)}</td><td title="${esc(r?.hash||'')}">${esc(String(r?.hash||'').slice(0,14) || '--')}</td></tr>`).join(''):'<tr><td colspan="4">暂无巨鲸转账</td></tr>';
+}
+renderOnchainChart(renderData);
+renderResearchConclusionCard();
+}
+function setResearchMiniPanelLoading(kind='fama'){
+const map={
+  fama:{summary:'fama-factor-summary',tbody:'fama-factor-tbody',colspan:5,chart:'fama-factor-chart'},
+  onchain:{summary:'onchain-overview-summary',tbody:'onchain-whale-tbody',colspan:4,chart:'onchain-overview-chart'},
+};
+const cfg=map[kind];
+if(!cfg)return;
+const summary=document.getElementById(cfg.summary);
+const tbody=document.getElementById(cfg.tbody);
+const chart=document.getElementById(cfg.chart);
+if(summary)summary.innerHTML='<div class="list-item"><span>加载中...</span><span>请稍候</span></div>';
+if(tbody)tbody.innerHTML=`<tr><td colspan="${cfg.colspan}">加载中...</td></tr>`;
+if(chart)chart.innerHTML='<div class="list-item">加载中...</div>';
+}
+async function loadFamaPanelWithAutoRefresh({quiet=false,attempt=0,timeoutMs=30000}={}){
+const syms=getResearchSymbols();
+if(!syms.includes('ADA/USDT'))syms.push('ADA/USDT');
+const d=await api(`/data/factors/fama?exchange=${encodeURIComponent(getResearchExchange())}&symbols=${encodeURIComponent(syms.join(','))}&timeframe=${encodeURIComponent(getResearchTimeframe())}&lookback=${Math.min(2400,getResearchLookback())}&exclude_retired=${getResearchExcludeRetired()?'true':'false'}`,{timeoutMs});
+renderFamaPanel(d);
+if(isResearchAsyncPending(d,'fama')&&attempt<4){
+  queueResearchPendingRefresh('fama',()=>loadFamaPanelWithAutoRefresh({quiet:true,attempt:attempt+1,timeoutMs:Math.max(timeoutMs,20000)}),2800+(attempt*1200));
+}else{
+  clearResearchPendingTimer('fama');
+}
+if(!quiet){
+  renderResearchQuickSummary([{label:'Fama样本点',value:Number(d?.points||0)},{label:'MKT',value:Number(d?.latest?.MKT||0).toFixed(6)},{label:'MOM',value:Number(d?.latest?.MOM||0).toFixed(6)}]);
+}
+return d;
+}
+async function loadFactorLibraryWithAutoRefresh({quiet=false,attempt=0}={}){
+const syms=getResearchSymbols();
+['ADA/USDT','TRX/USDT','LINK/USDT'].forEach(x=>{if(!syms.includes(x))syms.push(x);});
+const tf=getResearchTimeframe();
+const factorLookback=getFactorLookbackForTimeframe(tf,getResearchLookback());
+const factorTimeoutMs=getFactorApiTimeoutMs(tf,syms.length);
+const d=await api(`/data/factors/library?exchange=${encodeURIComponent(getResearchExchange())}&symbols=${encodeURIComponent(syms.join(','))}&timeframe=${encodeURIComponent(tf)}&lookback=${factorLookback}&quantile=0.3&series_limit=500&exclude_retired=${getResearchExcludeRetired()?'true':'false'}`,{timeoutMs:factorTimeoutMs});
+renderFactorLibraryPanel(d);
+if(isResearchAsyncPending(d,'factor_library')&&attempt<4){
+  queueResearchPendingRefresh('factor_library',()=>loadFactorLibraryWithAutoRefresh({quiet:true,attempt:attempt+1}),3200+(attempt*1400));
+}else{
+  clearResearchPendingTimer('factor_library');
+}
+if(!quiet){
+  renderResearchQuickSummary([{label:'因子数量',value:(d?.factors||[]).length},{label:'覆盖币种',value:(d?.symbols_used||[]).length},{label:'已排除',value:Number(d?.retired_filter?.excluded_symbols?.length||0)},{label:'有效时间点',value:Number(d?.points||0)},{label:'质量',value:d?.universe_quality||'-'}]);
+}
+return d;
 }
 function exportFactorLibrary(kind='json'){
 const data=researchState.lastFactorLibrary;
@@ -2922,24 +3849,36 @@ const summary=document.getElementById('factor-library-summary'),grid=document.ge
 if(summary)summary.innerHTML='<div class="list-item"><span>加载中...</span><span>-</span></div>';
 if(grid)grid.innerHTML='';
 if(tbody)tbody.innerHTML='<tr><td colspan="9">加载中...</td></tr>';
-researchState.lastFactorLibrary=data&&typeof data==='object'?data:null;
-if(!data||data.error){
-const msg=data?.error||'因子库加载失败';
-if(summary)summary.innerHTML=`<div class="list-item"><span>${esc(msg)}</span><span>错误</span></div>`;
-if(tbody)tbody.innerHTML=`<tr><td colspan="9">${esc(msg)}</td></tr>`;
-const corr=document.getElementById('factor-corr-chart');if(corr)corr.innerHTML='<div class="list-item">暂无因子相关性矩阵</div>';
+const prevGood=hasFactorLibraryContent(researchState.lastFactorLibrary)?researchState.lastFactorLibrary:null;
+const pending=isResearchAsyncPending(data,'factor_library');
+const renderData=pending&&prevGood?prevGood:data;
+if(hasFactorLibraryContent(data)||(!pending&&data&&typeof data==='object'&&!data.error))researchState.lastFactorLibrary=data;
+if(pending&&!hasFactorLibraryContent(renderData)){
+const msg=pendingResearchNote(data,'因子库正在后台计算');
+if(summary)summary.innerHTML=`<div class="list-item"><span>${esc(msg)}</span><span>预热中</span></div>`;
+if(grid)grid.innerHTML='<div class="list-item">因子卡片正在后台生成</div>';
+if(tbody)tbody.innerHTML='<tr><td colspan="9">后台计算中，稍后自动补齐打分表</td></tr>';
+const corr=document.getElementById('factor-corr-chart');if(corr){clearPlotlyHost(corr);corr.innerHTML='<div class="list-item">因子相关性矩阵正在后台生成</div>';}
 renderResearchConclusionCard();
 return;
 }
-const latest=data.latest||{},mean=data.mean_24||{},std=data.std_24||{};
+if(!renderData||renderData.error){
+const msg=data?.error||'因子库加载失败';
+if(summary)summary.innerHTML=`<div class="list-item"><span>${esc(msg)}</span><span>错误</span></div>`;
+if(tbody)tbody.innerHTML=`<tr><td colspan="9">${esc(msg)}</td></tr>`;
+const corr=document.getElementById('factor-corr-chart');if(corr){clearPlotlyHost(corr);corr.innerHTML='<div class="list-item">暂无因子相关性矩阵</div>';}
+renderResearchConclusionCard();
+return;
+}
+const latest=renderData.latest||{},mean=renderData.mean_24||{},std=renderData.std_24||{};
 if(summary){
 summary.innerHTML=`
-<div class="list-item"><span>交易所 / 周期</span><span>${esc(data.exchange||'-')} / ${esc(data.timeframe||'-')}</span></div>
-<div class="list-item"><span>因子数量 / 有效时间点</span><span>${(data.factors||[]).length} / ${Number(data.points||0)}</span></div>
-<div class="list-item"><span>币种覆盖</span><span>${(data.symbols_used||[]).length} 个</span></div>
-<div class="list-item"><span>相关性矩阵</span><span>${data.correlation?'已加载':'无'}</span></div>
+<div class="list-item"><span>交易所 / 周期</span><span>${esc(renderData.exchange||'-')} / ${esc(renderData.timeframe||'-')}</span></div>
+<div class="list-item"><span>因子数量 / 有效时间点</span><span>${(renderData.factors||[]).length} / ${Number(renderData.points||0)}</span></div>
+<div class="list-item"><span>币种覆盖</span><span>${(renderData.symbols_used||[]).length} 个</span></div>
+<div class="list-item"><span>相关性矩阵</span><span>${Object.keys(renderData.correlation||{}).length?'已加载':'无'}</span></div>
 <div class="list-item"><span>说明</span><span>有效时间点=多币种对齐后可计算因子的 bar 数</span></div>
-<div class="list-item"><span>风险提示</span><span>${esc((data.warnings||[])[0]||'无')}</span></div>`;
+<div class="list-item"><span>风险提示</span><span>${esc(pending?pendingResearchNote(data,'后台刷新中'):((renderData.warnings||[])[0]||'无'))}</span></div>`;
 }
 const factorKeys=Object.keys(latest||{});
 if(grid){
@@ -2949,10 +3888,10 @@ return `<div class="strategy-card"><div class="list-item" style="padding:0 0 6px
 }).join(''):'<div class="list-item">暂无因子指标</div>';
 }
 if(tbody){
-const rows=getFilteredSortedFactorRows(data);
+const rows=getFilteredSortedFactorRows(renderData);
 tbody.innerHTML=rows.length?rows.map(r=>`<tr><td>${esc(r.symbol||'-')}</td><td>${Number(r.score||0).toFixed(6)}</td><td>${Number(r.momentum||0).toFixed(6)}</td><td>${Number(r.value||0).toFixed(6)}</td><td>${Number(r.quality||0).toFixed(6)}</td><td>${Number(r.low_vol||0).toFixed(6)}</td><td>${Number(r.liquidity||0).toFixed(6)}</td><td>${Number(r.low_beta||0).toFixed(6)}</td><td>${Number(r.size||0).toFixed(6)}</td></tr>`).join(''):'<tr><td colspan="9">暂无币种打分</td></tr>';
 }
-renderFactorCorrelationHeatmap(data);
+renderFactorCorrelationHeatmap(renderData);
 renderResearchConclusionCard();
 }
 function normalizeAnalyticsModules(data){
@@ -2993,6 +3932,72 @@ if(name==='community'){return `巨鲸 ${Number(d?.whale_transfers?.count??0)} | 
 if(name==='behavior_report'){return `冲动占比 ${Number((d?.impulsive_ratio||0)*100).toFixed(2)}%`;}
 if(name==='stoploss_policy'){return `建议仓位 ${Number((d?.position_suggestions||[]).length)}`;}
 return `数据项 ${Object.keys(d||{}).length}`;
+}
+function countWorkbenchNewsSamples(news){
+const events=Number(news?.events_count||0);
+const feed=Number(news?.feed_count||0);
+const raw=Number(news?.raw_count||0);
+return {events,feed,raw,total:events+feed+raw};
+}
+function fmtWorkbenchMetric(value,formatter='raw'){
+if(value===null||value===undefined||value==='')return '--';
+const num=Number(value);
+if(!Number.isFinite(num))return String(value);
+if(formatter==='pct4')return `${(num*100).toFixed(4)}%`;
+if(formatter==='pct2')return `${num.toFixed(2)}%`;
+if(formatter==='fixed4')return num.toFixed(4);
+if(formatter==='bps')return `${num.toFixed(3)} bps`;
+return String(value);
+}
+function renderWorkbenchMarketStatePanel(module){
+const out=getResearchOutputEl(),summary=document.getElementById('analytics-overview-summary'),grid=document.getElementById('analytics-module-grid');
+if(!summary||!grid)return;
+const payload=module?.payload||module||{};
+if(!module||module?.error||payload?.error){
+const msg=payload?.error||module?.error||'市场状态加载失败';
+researchState.lastAnalytics={error:msg};
+summary.innerHTML=`<div class="list-item"><span>${esc(msg)}</span><span>错误</span></div>`;
+grid.innerHTML='<div class="list-item">暂无市场状态卡片</div>';
+if(out)out.textContent=`市场状态加载失败: ${msg}`;
+renderResearchConclusionCard();
+return;
+}
+const regime=payload.regime||{};
+const sentiment=payload.sentiment_dashboard||{};
+const micro=sentiment.microstructure||{};
+const community=sentiment.community||{};
+const news=sentiment.news||{};
+const calendarRows=Array.isArray(payload.calendar_watchlist)?payload.calendar_watchlist:[];
+const newsCount=countWorkbenchNewsSamples(news);
+const spreadBps=Number.isFinite(Number(micro?.orderbook?.spread_bps))&&Number(micro?.orderbook?.spread_bps)>0?Number(micro.orderbook.spread_bps):null;
+const imbalance=Number.isFinite(Number(micro?.aggressor_flow?.imbalance))?Number(micro.aggressor_flow.imbalance):null;
+const funding=Number.isFinite(Number(micro?.funding_rate?.funding_rate))?Number(micro.funding_rate.funding_rate):null;
+const basisPct=Number.isFinite(Number(micro?.spot_futures_basis?.basis_pct))?Number(micro.spot_futures_basis.basis_pct):null;
+const sourceError=String(micro?.source_error||'').trim();
+const announcements=Array.isArray(community?.announcements)?community.announcements:[];
+const whaleCount=Number(community?.whale_transfers?.count||0);
+const warnings=(Array.isArray(module?.warnings)?module.warnings:[]).filter(Boolean);
+const cards=[
+{title:'市场状态',badge:regime?.regime||'待判定',status:'connected',lines:[`方向: ${regime?.bias||'neutral'}`,`置信度: ${Number(regime?.confidence||0).toFixed(2)}`,`风险: ${regime?.risk_level||'unknown'}`]},
+{title:'交易日历',badge:`${calendarRows.length} 条`,status:calendarRows.length?'connected':'warning',lines:calendarRows.length?calendarRows.slice(0,3).map(item=>`${item?.title||item?.event||'事件'} | ${fmtDateTime(item?.timestamp||item?.start_time||item?.time||new Date().toISOString())}`):['当前窗口内暂无重点事件','可先运行研究总览补齐观察清单']},
+{title:'情绪与新闻',badge:newsCount.total?`${newsCount.total} 样本`:'样本不足',status:newsCount.total?'connected':'warning',lines:[`结构化: ${newsCount.events}`,`当前流: ${newsCount.feed}`,`原始新闻: ${newsCount.raw}`]},
+{title:'社区与公告',badge:`公告 ${announcements.length}`,status:(announcements.length||whaleCount)?'connected':'warning',lines:[`巨鲸: ${whaleCount}`,announcements[0]?.title||announcements[0]?.headline||'暂无公告样本']},
+{title:'微观结构',badge:sourceError?'不可用':(spreadBps!==null?'可用':'样本不足'),status:sourceError?'warning':'connected',lines:[`点差: ${fmtWorkbenchMetric(spreadBps,'bps')}`,`主动流: ${fmtWorkbenchMetric(imbalance,'fixed4')}`,sourceError?`来源: ${sourceError}`:`资金费率: ${fmtWorkbenchMetric(funding,'pct4')} | 基差: ${fmtWorkbenchMetric(basisPct,'pct2')}`]},
+{title:'数据提醒',badge:warnings.length?`${warnings.length} 条`:'正常',status:warnings.length?'warning':'connected',lines:warnings.length?warnings.slice(0,3):['当前模块已返回有效摘要','可继续查看因子与链上模块']},
+];
+researchState.lastAnalytics={workbench:true,risk_level:regime?.risk_level||'unknown',market_regime:regime?.regime||'未知',direction_bias:regime?.bias||'neutral',confidence:Number(regime?.confidence||0),calendar_count:calendarRows.length,news_samples:newsCount.total,whale_count:whaleCount,microstructure_available:!sourceError&&spreadBps!==null};
+summary.innerHTML=[
+`<div class="list-item"><span>市场状态 / 方向</span><span>${esc(regime?.regime||'未知')} / ${esc(regime?.bias||'neutral')}</span></div>`,
+`<div class="list-item"><span>置信度 / 风险等级</span><span>${Number(regime?.confidence||0).toFixed(2)} / ${esc(regime?.risk_level||'unknown')}</span></div>`,
+`<div class="list-item"><span>交易日历 / 新闻样本</span><span>${calendarRows.length} / ${newsCount.total}</span></div>`,
+`<div class="list-item"><span>公告 / 巨鲸</span><span>${announcements.length} / ${whaleCount}</span></div>`,
+`<div class="list-item"><span>微观结构</span><span>${sourceError?esc(sourceError):(spreadBps!==null?`${spreadBps.toFixed(3)} bps / ${fmtWorkbenchMetric(imbalance,'fixed4')}`:'样本不足')}</span></div>`,
+].join('');
+grid.innerHTML=cards.map(card=>`<div class="strategy-card"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${esc(card.title)}</h4><span class="status-badge ${esc(card.status)}">${esc(card.badge)}</span></div>${card.lines.map(line=>`<p>${esc(String(line||'--'))}</p>`).join('')}</div>`).join('');
+if(out){
+out.textContent=JSON.stringify({market_state:regime,calendar_watchlist:calendarRows.slice(0,8),community:{announcements:announcements.length,whale_count:whaleCount},microstructure:{spread_bps:spreadBps,imbalance,funding_rate:funding,basis_pct:basisPct,source_error:sourceError||null},news:newsCount,warnings},null,2);
+}
+renderResearchConclusionCard();
 }
 function renderAnalyticsOverviewPanel(data){
 const out=getResearchOutputEl(),summary=document.getElementById('analytics-overview-summary'),grid=document.getElementById('analytics-module-grid');
@@ -3049,7 +4054,10 @@ schedulePlotlyResize(document.getElementById('research')||document);
 if(!String(endpoint||'').includes('/trading/analytics/overview')){
 try{
 const ex=getResearchExchange(),s=getResearchSymbol();
-const fb=await api(`/trading/analytics/overview?days=90&lookback=240&calendar_days=30&exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(s)}`,{timeoutMs:45000});
+const days=Math.max(7,Math.min(365,estimateResearchWindowDays()*2));
+const lookback=Math.max(120,Math.min(2000,getResearchLookback()));
+const calendarDays=Math.max(7,Math.min(90,estimateResearchWindowDays()));
+const fb=await api(`/trading/analytics/overview?days=${days}&lookback=${lookback}&calendar_days=${calendarDays}&exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(s)}`,{timeoutMs:45000});
 renderAnalyticsOverviewPanel(fb);
 notify('目标模块加载失败，已自动降级到分析总览',true);
 return;
@@ -3066,30 +4074,39 @@ try{
 const ex=getResearchExchange(),symbol=getResearchSymbol(),timeframe=getResearchTimeframe(),lookback=getResearchLookback(),symbolsArr=getResearchSymbols(),symbols=symbolsArr.join(','),excludeRetired=getResearchExcludeRetired();
 const factorLookback=getFactorLookbackForTimeframe(timeframe,lookback);
 const factorTimeoutMs=getFactorApiTimeoutMs(timeframe,symbolsArr.length);
-const [analytics,multi,factors,onchain]=await Promise.allSettled([
-api(`/trading/analytics/overview?days=90&lookback=240&calendar_days=30&exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(symbol)}`,{timeoutMs:45000}),
+const overviewDays=Math.max(7,Math.min(365,estimateResearchWindowDays()*2));
+const overviewCalendarDays=Math.max(7,Math.min(90,estimateResearchWindowDays()));
+const [analytics,multi,factors]=await Promise.allSettled([
+api(`/trading/analytics/overview?days=${overviewDays}&lookback=${Math.max(120,Math.min(2000,lookback))}&calendar_days=${overviewCalendarDays}&exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(symbol)}`,{timeoutMs:45000}),
 api(`/data/multi-assets/overview?exchange=${encodeURIComponent(ex)}&symbols=${encodeURIComponent(symbols)}&timeframe=${encodeURIComponent(timeframe)}&lookback=${Math.min(2000,lookback)}&exclude_retired=${excludeRetired?'true':'false'}`,{timeoutMs:25000}),
 api(`/data/factors/library?exchange=${encodeURIComponent(ex)}&symbols=${encodeURIComponent(symbols)}&timeframe=${encodeURIComponent(timeframe)}&lookback=${factorLookback}&quantile=0.3&series_limit=500&exclude_retired=${excludeRetired?'true':'false'}`,{timeoutMs:factorTimeoutMs}),
-api(`/data/onchain/overview?exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(symbol)}&whale_threshold_btc=100&chain=Ethereum`,{timeoutMs:25000}),
 ]);
+const prevOnchain=(researchState.lastOnchain&&typeof researchState.lastOnchain==='object')?researchState.lastOnchain:{pending:true};
 const summary={
 timestamp:new Date().toISOString(),
 config:{exchange:ex,symbol,timeframe,lookback,symbols:symbols.split(','),factor_lookback:factorLookback,exclude_retired:excludeRetired},
 analytics:analytics.status==='fulfilled'?analytics.value:{error:analytics.reason?.message||'加载失败'},
 multi_assets:multi.status==='fulfilled'?multi.value:{error:multi.reason?.message||'加载失败'},
 factor_library:factors.status==='fulfilled'?factors.value:{error:factors.reason?.message||'加载失败'},
-onchain:onchain.status==='fulfilled'?onchain.value:{error:onchain.reason?.message||'加载失败'}
+onchain:prevOnchain
 };
 researchState.lastOverview=summary;
-researchState.lastOnchain=summary.onchain;
 renderAnalyticsOverviewPanel(summary.analytics);
 renderFactorLibraryPanel(summary.factor_library);
 renderMultiAssetPanel(summary.multi_assets);
+if(isResearchAsyncPending(summary.factor_library,'factor_library')){
+  queueResearchPendingRefresh('factor_library',()=>loadFactorLibraryWithAutoRefresh({quiet:true,attempt:1}),3200);
+}
+if(prevOnchain?.pending){
+  setResearchMiniPanelLoading('onchain');
+}else{
+  renderOnchainPanel(summary.onchain);
+}
 renderResearchQuickSummary([
 {label:'多币种覆盖',value:Number(summary.multi_assets?.count||0)},
 {label:'过滤停更',value:summary.config.exclude_retired?'开启':'关闭'},
 {label:'排除币种',value:Number(summary.factor_library?.retired_filter?.excluded_symbols?.length||summary.multi_assets?.retired_filter?.excluded_symbols?.length||0)},
-{label:'链上巨鲸笔数',value:Number(summary.onchain?.whale_activity?.count||0)},
+{label:'链上巨鲸笔数',value:prevOnchain?.pending?'加载中':Number(summary.onchain?.whale_activity?.count||0)},
 {label:'交易所',value:summary.config.exchange},
 {label:'周期',value:summary.config.timeframe},
 ]);
@@ -3097,13 +4114,14 @@ const moduleStatus=[
 `analytics:${summary.analytics?.error?'失败':'成功'}`,
 `multi_assets:${summary.multi_assets?.error?'失败':'成功'}`,
 `factor_library:${summary.factor_library?.error?'失败':'成功'}`,
-`onchain:${summary.onchain?.error?'失败':'成功'}`
+`onchain:${prevOnchain?.pending?'后台加载中':summary.onchain?.error?'失败':'成功'}`
 ].join(' | ');
 out.textContent=[
 '研究总览说明：',
 '- 用途：一次性刷新研究页核心模块（分析总览 / 因子库 / 多币种概览 / 链上概览）',
 `- 参数：${summary.config.exchange} | ${summary.config.symbol} | ${summary.config.timeframe} | lookback=${summary.config.lookback} | 排除停更=${summary.config.exclude_retired?'是':'否'}`,
 `- 模块状态：${moduleStatus}`,
+'- 链上概览已改为异步懒加载，主总览会先返回，链上面板随后更新。',
 '- 下方为完整原始结果（用于排查与导出）',
 '',
 JSON.stringify(summary,null,2)
@@ -3111,6 +4129,37 @@ JSON.stringify(summary,null,2)
 schedulePlotlyResize(document.getElementById('research')||document);
 renderResearchConclusionCard();
 notify('研究总览已更新');
+loadOnchainOverviewPanel({refresh:false,quiet:true,showLoading:Boolean(prevOnchain?.pending)}).then(d=>{
+  const merged={...(researchState.lastOverview||summary),onchain:d};
+  researchState.lastOverview=merged;
+  const currentOut=getResearchOutputEl();
+  if(currentOut){
+    const moduleStatus2=[
+      `analytics:${merged.analytics?.error?'失败':'成功'}`,
+      `multi_assets:${merged.multi_assets?.error?'失败':'成功'}`,
+      `factor_library:${merged.factor_library?.error?'失败':'成功'}`,
+      `onchain:${d?.error?'失败':d?.cached&&d?.refreshing?'缓存+刷新':'成功'}`
+    ].join(' | ');
+    currentOut.textContent=[
+      '研究总览说明：',
+      '- 用途：一次性刷新研究页核心模块（分析总览 / 因子库 / 多币种概览 / 链上概览）',
+      `- 参数：${merged.config.exchange} | ${merged.config.symbol} | ${merged.config.timeframe} | lookback=${merged.config.lookback} | 排除停更=${merged.config.exclude_retired?'是':'否'}`,
+      `- 模块状态：${moduleStatus2}`,
+      '- 链上概览已完成异步更新。',
+      '',
+      JSON.stringify(merged,null,2)
+    ].join('\n');
+  }
+  renderResearchQuickSummary([
+    {label:'多币种覆盖',value:Number(merged.multi_assets?.count||0)},
+    {label:'过滤停更',value:merged.config.exclude_retired?'开启':'关闭'},
+    {label:'排除币种',value:Number(merged.factor_library?.retired_filter?.excluded_symbols?.length||merged.multi_assets?.retired_filter?.excluded_symbols?.length||0)},
+    {label:'链上巨鲸笔数',value:Number(d?.whale_activity?.count||0)},
+    {label:'交易所',value:merged.config.exchange},
+    {label:'周期',value:merged.config.timeframe},
+  ]);
+  renderResearchConclusionCard();
+}).catch(()=>{});
 }catch(e){
 out.textContent=`研究总览加载失败: ${e.message}`;
 notify(`研究总览加载失败: ${e.message}`,true);
@@ -3142,31 +4191,57 @@ const fn=document.getElementById('factor-score-topn');
 const rex=document.getElementById('research-exchange');
 
 if(rex){
-rex.onchange=()=>loadResearchSymbolOptions(rex.value);
-loadResearchSymbolOptions(rex.value);
+rex.onchange=()=>{loadResearchSymbolOptions(rex.value);renderResearchStatusCards();};
 }else{
-loadResearchSymbolOptions(getResearchExchange());
+renderResearchStatusCards();
 }
+renderResearchStatusCards();
+['research-symbol','research-timeframe','research-lookback','research-exclude-retired'].forEach(id=>{
+const el=document.getElementById(id);
+if(!el)return;
+el.addEventListener(el.tagName==='INPUT'?'input':'change',()=>renderResearchStatusCards());
+});
+const researchSymbolsEl=document.getElementById('research-symbols');
+if(researchSymbolsEl)researchSymbolsEl.addEventListener('change',()=>renderResearchStatusCards());
 
 if(o0)o0.onclick=loadResearchOverview;
 if(o)o.onclick=()=>{
 const ex=getResearchExchange(),s=getResearchSymbol();
-loadAnalyticsPanel(`/trading/analytics/overview?days=90&lookback=240&calendar_days=30&exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(s)}`);
+const days=Math.max(7,Math.min(365,estimateResearchWindowDays()*2));
+const lookback=Math.max(120,Math.min(2000,getResearchLookback()));
+const calendarDays=Math.max(7,Math.min(90,estimateResearchWindowDays()));
+loadAnalyticsPanel(`/trading/analytics/overview?days=${days}&lookback=${lookback}&calendar_days=${calendarDays}&exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(s)}`);
 };
-if(b1)b1.onclick=()=>loadAnalyticsPanel('/trading/analytics/performance?days=90');
-if(b2)b2.onclick=()=>loadAnalyticsPanel('/trading/analytics/risk-dashboard?lookback=240');
-if(b3)b3.onclick=()=>loadAnalyticsPanel('/trading/analytics/calendar?days=30');
+if(b1)b1.onclick=()=>{
+const days=Math.max(7,Math.min(365,estimateResearchWindowDays()*2));
+loadAnalyticsPanel(`/trading/analytics/performance?days=${days}`);
+};
+if(b2)b2.onclick=()=>{
+const lookback=Math.max(120,Math.min(2000,getResearchLookback()));
+loadAnalyticsPanel(`/trading/analytics/risk-dashboard?lookback=${lookback}`);
+};
+if(b3)b3.onclick=()=>{
+const days=Math.max(7,Math.min(90,estimateResearchWindowDays()));
+loadAnalyticsPanel(`/trading/analytics/calendar?days=${days}`);
+};
 if(b4)b4.onclick=()=>{
 const ex=getResearchExchange(),s=getResearchSymbol();
 loadAnalyticsPanel(`/trading/analytics/microstructure?exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(s)}&depth_limit=80`);
 };
-if(b5)b5.onclick=()=>loadAnalyticsPanel('/trading/analytics/equity/rebalance?hours=168&target_alloc=BTC:0.4,ETH:0.3,USDT:0.3');
+if(b5)b5.onclick=()=>{
+const hours=Math.max(24,Math.min(24*30,estimateResearchWindowHours()));
+const alloc=buildResearchTargetAllocations(3);
+loadAnalyticsPanel(`/trading/analytics/equity/rebalance?hours=${hours}&target_alloc=${encodeURIComponent(alloc)}`);
+};
 if(b6)b6.onclick=()=>{
 const ex=getResearchExchange(),s=getResearchSymbol();
 loadAnalyticsPanel(`/trading/analytics/community/overview?exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(s)}`);
 };
 if(b7)b7.onclick=logBehaviorJournal;
-if(b8)b8.onclick=()=>loadAnalyticsPanel('/trading/analytics/behavior/report?days=7');
+if(b8)b8.onclick=()=>{
+const days=Math.max(3,Math.min(30,estimateResearchWindowDays()));
+loadAnalyticsPanel(`/trading/analytics/behavior/report?days=${days}`);
+};
 if(b9)b9.onclick=()=>loadAnalyticsPanel('/trading/analytics/stoploss/policy');
 
 if(fxj)fxj.onclick=()=>exportFactorLibrary('json');
@@ -3190,12 +4265,11 @@ if(out)out.textContent=`多币种概览失败: ${e.message}`;
 if(m2)m2.onclick=async()=>{
 const out=getResearchOutputEl();
 try{
-const syms=getResearchSymbols();
-if(!syms.includes('ADA/USDT'))syms.push('ADA/USDT');
-const d=await api(`/data/factors/fama?exchange=${encodeURIComponent(getResearchExchange())}&symbols=${encodeURIComponent(syms.join(','))}&timeframe=${encodeURIComponent(getResearchTimeframe())}&lookback=${Math.min(2400,getResearchLookback())}&exclude_retired=${getResearchExcludeRetired()?'true':'false'}`);
-renderResearchQuickSummary([{label:'Fama样本点',value:Number(d?.points||0)},{label:'MKT',value:Number(d?.latest?.MKT||0).toFixed(6)},{label:'MOM',value:Number(d?.latest?.MOM||0).toFixed(6)}]);
+setResearchMiniPanelLoading('fama');
+const d=await loadFamaPanelWithAutoRefresh({quiet:false,attempt:0,timeoutMs:30000});
 if(out)out.textContent=JSON.stringify(d,null,2);
 }catch(e){
+renderFamaPanel({error:e.message});
 if(out)out.textContent=`因子加载失败: ${e.message}`;
 }
 };
@@ -3203,34 +4277,14 @@ if(out)out.textContent=`因子加载失败: ${e.message}`;
 if(m4)m4.onclick=async()=>{
 const out=getResearchOutputEl();
 try{
-const syms=getResearchSymbols();
-['ADA/USDT','TRX/USDT','LINK/USDT'].forEach(x=>{if(!syms.includes(x))syms.push(x);});
-const tf=getResearchTimeframe();
-const factorLookback=getFactorLookbackForTimeframe(tf,getResearchLookback());
-const factorTimeoutMs=getFactorApiTimeoutMs(tf,syms.length);
-const d=await api(`/data/factors/library?exchange=${encodeURIComponent(getResearchExchange())}&symbols=${encodeURIComponent(syms.join(','))}&timeframe=${encodeURIComponent(tf)}&lookback=${factorLookback}&quantile=0.3&series_limit=500&exclude_retired=${getResearchExcludeRetired()?'true':'false'}`,{timeoutMs:factorTimeoutMs});
-renderFactorLibraryPanel(d);
-renderResearchQuickSummary([{label:'因子数量',value:(d?.factors||[]).length},{label:'覆盖币种',value:(d?.symbols_used||[]).length},{label:'已排除',value:Number(d?.retired_filter?.excluded_symbols?.length||0)},{label:'有效时间点',value:Number(d?.points||0)},{label:'质量',value:d?.universe_quality||'-'}]);
+const d=await loadFactorLibraryWithAutoRefresh({quiet:false,attempt:0});
 if(out)out.textContent=JSON.stringify(d,null,2);
 }catch(e){
 if(out)out.textContent=`多因子加载失败: ${e.message}`;
 }
 };
 
-if(m3)m3.onclick=async()=>{
-const out=getResearchOutputEl();
-try{
-const d=await api(`/data/onchain/overview?exchange=${encodeURIComponent(getResearchExchange())}&symbol=${encodeURIComponent(getResearchSymbol())}&whale_threshold_btc=100&chain=Ethereum`);
-researchState.lastOnchain=d&&typeof d==='object'?d:null;
-renderResearchConclusionCard();
-renderResearchQuickSummary([{label:'链上窗口',value:`${Number(d?.window_hours||0)}h`},{label:'巨鲸笔数',value:Number(d?.whale_activity?.count||0)},{label:'TVL链',value:d?.defi_tvl?.chain||'-'}]);
-if(out)out.textContent=JSON.stringify(d,null,2);
-}catch(e){
-researchState.lastOnchain={error:e.message};
-renderResearchConclusionCard();
-if(out)out.textContent=`链上概览失败: ${e.message}`;
-}
-};
+if(m3)m3.onclick=()=>loadOnchainOverviewPanel({refresh:true,quiet:false,showLoading:true});
 
 renderResearchConclusionCard();
 }
@@ -3240,7 +4294,6 @@ function bindDataAdvanced(){const rout=document.getElementById('replay-output');
 
 function bindBacktest(){
 initBacktestComparePicker();
-ensureBacktestStrategySelect().catch(e=>console.error(e));
 const f=document.getElementById('backtest-form');
 if(f)f.onsubmit=async e=>{
 e.preventDefault();
@@ -3277,8 +4330,11 @@ notify('多策略对比完成');
 const b2=document.getElementById('btn-backtest-optimize');
 if(b2)b2.onclick=async()=>{
 try{
-renderBacktestExtraLoading('参数优化运行中');
-const st=await ensureSelectedBacktestStrategy(),s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2;
+const selectedSt=await ensureSelectedBacktestStrategy();
+const displayedSt=String(backtestUIState?.lastRenderedBacktest?.strategy||'').trim();
+const st=displayedSt||selectedSt;
+const s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2;
+renderBacktestExtraLoading(`参数优化运行中（${st}${displayedSt&&displayedSt!==selectedSt?'，来自当前展示':'，来自下拉选择'}）`);
 const objective=String(document.getElementById('backtest-opt-objective')?.value||'total_return');
 const maxTrials=Math.max(8,Math.min(512,parseInt(document.getElementById('backtest-opt-trials')?.value||'64',10)||64));
 let ou=`/backtest/optimize?strategy=${st}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&objective=${encodeURIComponent(objective)}&max_trials=${maxTrials}&include_all_trials=true`;
@@ -3353,15 +4409,40 @@ await Promise.all([loadOrders(),loadPositions(),loadSummary(),loadRisk(),loadCon
 };
 }
 
-async function init(){initTabs();initClock();initEquity();bindTrade();bindOrderView();bindData();bindDataAdvanced();bindBacktest();bindNotificationCenter();bindAudit();bindStrategyOps();bindStrategyAdvanced();bindResearchPanel();bindResearchPresets();bindResearchSentiment();bindModeControls();bindAccountControls();initWebSocket();await loadSystemStatus();await Promise.all([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadStrategies(),loadStrategySummary(),loadStrategyHealth(),loadRisk(),loadPnlHeatmap(),loadNotificationCenter(),loadAuditLogs(),loadStrategyLibrary()]);state.bootCompleted=true;state.bootFailed=false;
+async function init(){initTabs();initClock();initEquity();bindTrade();bindOrderView();bindData();bindDataAdvanced();bindBacktest();bindNotificationCenter();bindAudit();bindStrategyOps();bindStrategyAdvanced();bindResearchPanel();bindResearchPresets();bindResearchSentiment();bindModeControls();bindAccountControls();initWebSocket();renderStrategyConsolePanel();renderResearchStatusCards();await loadSystemStatus();await ensureTabLoaded(getActiveTabName(),{force:true});state.bootCompleted=true;state.bootFailed=false;
 // Status polling is lightweight but user-visible; keep it independent from heavier dashboard batches
-setInterval(()=>{loadSystemStatus();},8000);
-setInterval(()=>{if(!state.wsConnected){loadSummary();loadPositions();loadOrders();loadOpenOrders();loadStrategies();loadStrategySummary();loadRisk();loadConditionalOrders();loadAccounts();loadModeInfo();}},8000);
-setInterval(()=>{loadPositions().catch(()=>{});loadBalances().catch(()=>{});loadOrders().catch(()=>{});loadOpenOrders().catch(()=>{});loadRisk().catch(()=>{});},10000);
-setInterval(()=>{loadOrders();loadOpenOrders();loadStrategySummary();},10000);
-setInterval(()=>{loadPnlHeatmap();loadNotificationCenter();loadAuditLogs();loadStrategyHealth();},20000);}
+setInterval(()=>{if(document.hidden)return;loadSystemStatus();},20000);
+setInterval(()=>{
+  if(document.hidden)return;
+  if(state.wsConnected)return;
+  const tab=getActiveTabName();
+  if(tab==='dashboard')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary()]);
+  else if(tab==='trading')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk()]);
+  else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
+},8000);
+setInterval(()=>{
+  if(document.hidden)return;
+  const tab=getActiveTabName();
+  if(tab==='dashboard')Promise.allSettled([loadPositions(),loadBalances(),loadOrders(),loadOpenOrders(),loadRisk()]);
+  else if(tab==='trading')Promise.allSettled([loadPositions(),loadBalances(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts()]);
+  else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary()]);
+},10000);
+setInterval(()=>{
+  if(document.hidden)return;
+  const tab=getActiveTabName();
+  if(tab==='dashboard')Promise.allSettled([loadPnlHeatmap(),loadNotificationCenter(),loadAuditLogs()]);
+  else if(tab==='strategies')Promise.allSettled([loadStrategyHealth()]);
+},20000);}
 
 window.cancelOrder=cancelOrder;window.cancelConditional=cancelConditional;window.registerStrategy=registerStrategy;window.toggleStrategy=toggleStrategy;window.saveAllocation=saveAllocation;window.openEditor=openEditor;window.compareLive=compareLive;window.openStrategyEditor=openEditor;window.compareStrategyLive=compareLive;window.previewCompareStrategyByRank=previewCompareStrategyByRank;window.registerCompareStrategyByRank=registerCompareStrategyByRank;window.registerOptimizeBestAsNewStrategyInstance=registerOptimizeBestAsNewStrategyInstance;window.editNotifyRule=editNotifyRule;window.toggleNotifyRule=toggleNotifyRule;window.deleteNotifyRule=deleteNotifyRule;
-window.addEventListener('error',e=>{markBootFailure(e?.error||new Error(e?.message||'前端错误'));});
+window.addEventListener('error',e=>{
+const runtimeErr=e?.error;
+if(!runtimeErr){
+  const src=String(e?.target?.src||e?.target?.href||e?.filename||'').trim();
+  if(src && !src.endsWith('/favicon.ico')) console.warn(`resource load failed: ${src}`);
+  return;
+}
+markBootFailure(runtimeErr);
+});
 window.addEventListener('unhandledrejection',e=>{markBootFailure(e?.reason||new Error('未处理的Promise异常'));});
 init().catch(markBootFailure);

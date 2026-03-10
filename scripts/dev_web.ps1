@@ -67,4 +67,14 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 
 Write-Host "Starting web service on 0.0.0.0:8000"
+Write-Host ""
+Write-Host "Available data sources:" -ForegroundColor Cyan
+Write-Host "  - Funding Rate (Binance, Bybit, OKX, Gate)" -ForegroundColor Gray
+Write-Host "  - Fear & Greed Index" -ForegroundColor Gray
+Write-Host "  - Order Book Level 2" -ForegroundColor Gray
+Write-Host "  - Open Interest" -ForegroundColor Gray
+Write-Host ""
+Write-Host "Tip: Run 'python scripts/test_api_direct.py' to test API connectivity" -ForegroundColor Yellow
+Write-Host ""
+
 python main.py --mode web

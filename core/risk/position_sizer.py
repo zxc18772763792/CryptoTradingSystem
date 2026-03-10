@@ -144,6 +144,8 @@ class PositionSizer:
         """基于ATR的仓位"""
         if not atr:
             return self._percent_sizing(account_balance, entry_price, **kwargs)
+        if not risk_multiple:
+            return self._percent_sizing(account_balance, entry_price, **kwargs)
 
         risk = risk_per_trade or self.default_risk_per_trade
         risk_amount = account_balance * risk
