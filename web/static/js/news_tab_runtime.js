@@ -4,9 +4,11 @@
     const SUMMARY_LIMIT = 24;
     const state = {
         timer: null,
+        bucketRenderTimer: null,
         latest: null,
         brief: null,
         summary: null,
+        summaryLoading: false,
         health: null,
         worker: null,
         pulling: false,
@@ -173,7 +175,7 @@
                 ...feedStats(state.latest?.items || []),
             };
         }
-        const buckets = state.summary?.bucket_stats?.[gran] || [];
+        const buckets = getBucketRows(gran);
         const latestBucket = buckets.length ? buckets[buckets.length - 1] : null;
         if (!latestBucket) {
             return {
@@ -195,6 +197,39 @@
                 negative: Number(latestBucket.negative || 0),
             },
         };
+    }
+
+    function normalizeBuckets(raw) {
+        if (Array.isArray(raw)) return raw;
+        if (!raw || typeof raw !== "object") return [];
+        if (Array.isArray(raw.items)) return raw.items;
+        if (Array.isArray(raw.buckets)) return raw.buckets;
+        const rows = Object.entries(raw).map(([bucketStart, row]) => ({
+            ...(row && typeof row === "object" ? row : {}),
+            bucket_start: (row && row.bucket_start) || bucketStart,
+            count: Number(row?.count || 0),
+            positive: Number(row?.positive || 0),
+            neutral: Number(row?.neutral || 0),
+            negative: Number(row?.negative || 0),
+        }));
+        rows.sort((a, b) => {
+            const ta = parseTs(a.bucket_start)?.getTime() || 0;
+            const tb = parseTs(b.bucket_start)?.getTime() || 0;
+            return ta - tb;
+        });
+        return rows;
+    }
+
+    function getBucketRows(gran) {
+        return normalizeBuckets(state.summary?.bucket_stats?.[gran]);
+    }
+
+    function scheduleBucketRender(delayMs = 220) {
+        if (state.bucketRenderTimer) clearTimeout(state.bucketRenderTimer);
+        state.bucketRenderTimer = setTimeout(() => {
+            state.bucketRenderTimer = null;
+            renderBuckets();
+        }, Math.max(0, Number(delayMs) || 0));
     }
 
     function renderHealth() {
@@ -292,7 +327,12 @@
         const list = el("news-bucket-list");
         const meta = el("news-bucket-meta");
         const gran = getVal("news-bucket-granularity", "1h");
-        const buckets = state.summary?.bucket_stats?.[gran] || [];
+        const buckets = getBucketRows(gran);
+        if (chart && isNewsVisible() && ((chart.clientWidth || 0) < 64 || (chart.clientHeight || 0) < 64)) {
+            if (meta) meta.textContent = "结构化统计面板切换中，正在重绘...";
+            scheduleBucketRender(260);
+            return;
+        }
         if (meta) {
             if (buckets.length) {
                 meta.textContent = `结构化事件统计（${gran}）| 桶数 ${buckets.length}`;
@@ -306,28 +346,50 @@
         }
         if (!buckets.length) {
             const emptyText = state.summary ? "暂无结构化事件统计" : "结构化统计暂不可用，正在自动重试";
-            if (chart) chart.innerHTML = `<div class="list-item">${emptyText}</div>`;
+            if (chart) {
+                if (typeof Plotly !== "undefined") {
+                    try { Plotly.purge(chart); } catch (_) {}
+                }
+                chart.innerHTML = `<div class="list-item news-bucket-fallback">${emptyText}</div>`;
+            }
             if (list) list.innerHTML = `<div class="list-item">${emptyText}</div>`;
             return;
         }
         const recent = buckets.slice(-36);
         if (chart && typeof Plotly !== "undefined") {
-            chart.innerHTML = "";
-            Plotly.react(chart, [
-                { type: "bar", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.count || 0)), name: "总数", marker: { color: "#1f9d63", opacity: 0.35 } },
-                { type: "scatter", mode: "lines+markers", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.positive || 0)), name: "利好", line: { color: "#20bf78", width: 2 } },
-                { type: "scatter", mode: "lines+markers", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.negative || 0)), name: "利空", line: { color: "#ea5b61", width: 2 } },
-            ], {
-                paper_bgcolor: "#111723",
-                plot_bgcolor: "#111723",
-                font: { color: "#d7dde8" },
-                margin: { l: 36, r: 24, t: 16, b: 32 },
-                legend: { orientation: "h", y: 1.12 },
-                barmode: "overlay",
-                hovermode: "x unified",
-            }, { responsive: true, displaylogo: false });
+            try {
+                chart.querySelectorAll(".news-bucket-fallback").forEach((node) => node.remove());
+                if (!chart.classList.contains("js-plotly-plot")) {
+                    chart.innerHTML = "";
+                }
+                if (chart.classList.contains("js-plotly-plot") && !chart.querySelector(".plot-container")) {
+                    try { Plotly.purge(chart); } catch (_) {}
+                    chart.innerHTML = "";
+                }
+                Plotly.react(chart, [
+                    { type: "bar", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.count || 0)), name: "总数", marker: { color: "#1f9d63", opacity: 0.35 } },
+                    { type: "scatter", mode: "lines+markers", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.positive || 0)), name: "利好", line: { color: "#20bf78", width: 2 } },
+                    { type: "scatter", mode: "lines+markers", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.negative || 0)), name: "利空", line: { color: "#ea5b61", width: 2 } },
+                ], {
+                    paper_bgcolor: "#111723",
+                    plot_bgcolor: "#111723",
+                    font: { color: "#d7dde8" },
+                    margin: { l: 36, r: 24, t: 16, b: 32 },
+                    legend: { orientation: "h", y: 1.12 },
+                    barmode: "overlay",
+                    hovermode: "x unified",
+                }, { responsive: true, displaylogo: false });
+                setTimeout(() => {
+                    try { Plotly.Plots.resize(chart); } catch (_) {}
+                }, 90);
+            } catch (err) {
+                try { Plotly.purge(chart); } catch (_) {}
+                chart.innerHTML = `<div class="list-item">结构化统计图渲染失败: ${esc(err?.message || "unknown")}</div>`;
+                if (meta) meta.textContent = "结构化统计图渲染失败，已降级为列表";
+            }
         } else if (chart) {
             chart.innerHTML = '<div class="list-item">图表库未加载，无法绘制结构化统计图</div>';
+            if (typeof Plotly === "undefined") scheduleBucketRender(300);
         }
         if (list) {
             list.innerHTML = recent.slice().reverse().map((row) => {
@@ -484,6 +546,7 @@
                 renderAll();
                 ensureLlmKickoff().catch(() => {});
                 if (shouldLoadSummary) {
+                    state.summaryLoading = true;
                     loadSummary().then((summary) => {
                         state.summary = summary || null;
                         state.summaryLoadedAt = Date.now();
@@ -493,6 +556,8 @@
                         state.summary = state.summary || null;
                         renderBuckets();
                         renderProviders();
+                    }).finally(() => {
+                        state.summaryLoading = false;
                     });
                 }
                 enrichHeadlines();
@@ -656,12 +721,15 @@
         ["news-hours", "news-symbol", "news-max-records"].forEach((id) => el(id)?.addEventListener("change", () => refreshAll(true)));
         el("news-auto-refresh-sec")?.addEventListener("change", restartTimer);
         el("news-bucket-granularity")?.addEventListener("change", () => {
-            if (!state.summary && isNewsVisible()) {
+            if (!state.summary && !state.summaryLoading && isNewsVisible()) {
+                state.summaryLoading = true;
                 loadSummary().then((summary) => {
                     state.summary = summary || null;
                     state.summaryLoadedAt = Date.now();
                     renderAll();
-                }).catch(() => {});
+                }).catch(() => {}).finally(() => {
+                    state.summaryLoading = false;
+                });
                 return;
             }
             renderBuckets();
@@ -671,11 +739,16 @@
             setTimeout(() => {
                 restartTimer();
                 if (state.needsRefresh || !state.latest) refreshAll(true).catch(() => {});
+                else scheduleBucketRender(220);
             }, 120);
         }));
         document.addEventListener("visibilitychange", () => {
-            if (!document.hidden && isNewsVisible()) refreshAll(false).catch(() => {});
+            if (!document.hidden && isNewsVisible()) {
+                refreshAll(false).catch(() => {});
+                scheduleBucketRender(200);
+            }
         });
+        window.addEventListener("resize", () => scheduleBucketRender(180));
     }
 
     async function init() {
@@ -683,7 +756,10 @@
         bind();
         restartTimer();
         connectWs();
-        if (isNewsVisible()) await refreshAll(true);
+        if (isNewsVisible()) {
+            await refreshAll(true);
+            scheduleBucketRender(220);
+        }
         else state.needsRefresh = true;
     }
 

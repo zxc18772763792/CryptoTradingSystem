@@ -3014,7 +3014,7 @@ canvas {
 }
 
 /* News page/news tab layout hardening */
-body.news-page #news,
+body.news-page,
 #news {
     --news-top-card-min: clamp(520px, 60vh, 660px);
     --news-panel-min: clamp(580px, 66vh, 760px);
@@ -3338,7 +3338,7 @@ body.news-page .news-card-structured .news-title,
         position: static;
     }
 
-    body.news-page #news,
+    body.news-page,
     #news {
         --news-feed-min: clamp(280px, 42vh, 460px);
         --news-chart-height: clamp(240px, 32vh, 320px);

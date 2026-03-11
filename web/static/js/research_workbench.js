@@ -958,7 +958,7 @@
     grid.innerHTML = '<div style="color:#6b7fa0;font-size:12px;">加载中...</div>';
     try {
       const data = await apiResearch(
-        `/workbench/regime-calendar?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&days=${days}`
+        `/regime-calendar?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&days=${days}`
       );
       const calendar = Array.isArray(data?.calendar) ? data.calendar : [];
       if (!calendar.length) {
