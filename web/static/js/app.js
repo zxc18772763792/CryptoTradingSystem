@@ -1,6 +1,6 @@
 ﻿const API_BASE='/api';
 const state={positions:[],orders:[],strategies:[],availableStrategyTypes:[],strategyLibraryRows:[],strategyCatalogRows:[],summary:{running:[],recent_signals:[],runtime:{}},notifyRules:{},wsConnected:false,modeToken:'',bootCompleted:false,bootFailed:false,strategyHealth:null,lastHealthAlertKey:'',selectedStrategyName:'',closingPositions:{},lastSummarySnapshot:null};
-const researchState={lastFactorLibrary:null,lastMultiAsset:null,lastSentiment:null,lastAnalytics:null,lastOnchain:null,lastFama:null,lastOverview:null,pendingTimers:{}};
+const researchState={lastFactorLibrary:null,lastMultiAsset:null,lastSentiment:null,lastAnalytics:null,lastOnchain:null,lastFama:null,lastOverview:null,pendingTimers:{},lastSentimentReqId:0};
 const backtestUIState={lastOptimize:null,lastCompare:null,lastRenderedBacktest:null,defaultCompareStrategies:[]};
 const dataHealthState={last:null};
 const dataAnalyticsHealthState={last:null};
@@ -3257,6 +3257,67 @@ const main=raw.split(':')[0];
 if(main.includes('/'))return main.split('/')[0];
 return main.replace(/(USDT|USDC|FDUSD|BUSD|USD)$/,'')||main;
 }
+function normalizeSymbolKey(sym){
+const text=String(sym||'').trim().toUpperCase();
+if(!text)return'';
+return text.split(':')[0];
+}
+function hasUsableSpreadValue(micro){
+const spread=Number(micro?.orderbook?.spread_bps);
+const mid=Number(micro?.orderbook?.mid_price);
+return Number.isFinite(spread)&&Number.isFinite(mid)&&mid>0;
+}
+function hasUsableFlowValue(micro){
+const imbalance=Number(micro?.aggressor_flow?.imbalance);
+return Number.isFinite(imbalance);
+}
+function getSentimentMicroFallback(exchange,symbol,maxAgeMs=15*60*1000){
+const last=researchState?.lastSentiment;
+const raw=last?.raw||{};
+const micro=raw?.microstructure||null;
+if(!micro)return null;
+const sameExchange=String(raw?.exchange||'').toLowerCase()===String(exchange||'').toLowerCase();
+const sameSymbol=normalizeSymbolKey(raw?.symbol)===normalizeSymbolKey(symbol);
+if(!sameExchange||!sameSymbol)return null;
+const ts=toMs(raw?.timestamp||last?.timestamp);
+if(Number.isFinite(ts)&&Date.now()-ts>Math.max(5000,Number(maxAgeMs||0)))return null;
+if(!hasUsableSpreadValue(micro)&&!hasUsableFlowValue(micro))return null;
+return {
+...micro,
+orderbook:{...(micro?.orderbook||{})},
+aggressor_flow:{...(micro?.aggressor_flow||{})},
+};
+}
+function mergeMicrostructureWithFallback(liveMicro,cachedMicro){
+const merged={
+...(liveMicro||{}),
+orderbook:{...((liveMicro||{})?.orderbook||{})},
+aggressor_flow:{...((liveMicro||{})?.aggressor_flow||{})},
+};
+const usedSpread=!hasUsableSpreadValue(merged)&&hasUsableSpreadValue(cachedMicro);
+const usedFlow=!hasUsableFlowValue(merged)&&hasUsableFlowValue(cachedMicro);
+if(usedSpread){
+  merged.orderbook={...(cachedMicro?.orderbook||{}),available:true,stale:true};
+}
+if(usedFlow){
+  merged.aggressor_flow={...(cachedMicro?.aggressor_flow||{}),available:true,stale:true};
+}
+if(usedSpread||usedFlow){
+  const baseErr=String(merged?.source_error||merged?.error||'').trim();
+  const fallbackMsg='实时微观结构波动，已回退最近快照';
+  merged.available=true;
+  merged.stale=true;
+  merged.fallback_mode='recent_snapshot';
+  merged.source_error=baseErr?`${baseErr}; ${fallbackMsg}`:fallbackMsg;
+}
+if(hasUsableSpreadValue(merged)&&merged?.orderbook?.available===undefined){
+  merged.orderbook.available=true;
+}
+if(hasUsableFlowValue(merged)&&merged?.aggressor_flow?.available===undefined){
+  merged.aggressor_flow.available=true;
+}
+return merged;
+}
 function renderMarketSentimentChart(metrics){
 const el=document.getElementById('market-sentiment-chart');
 if(!el||typeof Plotly==='undefined')return;
@@ -3279,9 +3340,11 @@ renderMarketSentimentChart([]);
 renderResearchConclusionCard();
 return;
 }
-const micro=payload.microstructure||{},community=payload.community||{},news=payload.news||{};
-const spreadAvailable=micro?.orderbook?.available!==false&&Number.isFinite(Number(micro?.orderbook?.spread_bps));
-const flowAvailable=micro?.aggressor_flow?.available!==false&&Number.isFinite(Number(micro?.aggressor_flow?.imbalance));
+const cachedMicro=getSentimentMicroFallback(payload?.exchange,payload?.symbol);
+const micro=mergeMicrostructureWithFallback(payload?.microstructure||{},cachedMicro);
+const community=payload.community||{},news=payload.news||{};
+const spreadAvailable=micro?.orderbook?.available!==false&&hasUsableSpreadValue(micro);
+const flowAvailable=micro?.aggressor_flow?.available!==false&&hasUsableFlowValue(micro);
 const spreadBps=spreadAvailable?Number(micro?.orderbook?.spread_bps):null;
 const imbalance=flowAvailable?Number(micro?.aggressor_flow?.imbalance):null;
 const fundingFromMicro=firstFiniteNumber(micro?.funding_rate?.funding_rate,micro?.funding_rate?.rate);
@@ -3330,10 +3393,12 @@ renderResearchConclusionCard();
 }
 async function loadMarketSentimentDashboard(){
 const out=getResearchOutputEl();
+const reqId=Number(researchState.lastSentimentReqId||0)+1;
+researchState.lastSentimentReqId=reqId;
 try{
 const ex=getResearchExchange(),sym=getResearchSymbol(),newsSym=symbolToNewsKey(sym);
 const [micro,community,newsScoped,newsGlobal,onchain]=await Promise.allSettled([
-api(`/trading/analytics/microstructure?exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(sym)}&depth_limit=20`,{timeoutMs:8000}),
+api(`/trading/analytics/microstructure?exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(sym)}&depth_limit=20`,{timeoutMs:12000}),
 api(`/trading/analytics/community/overview?exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(sym)}`,{timeoutMs:12000}),
 api(`/news/summary?symbol=${encodeURIComponent(newsSym)}&hours=24`,{timeoutMs:15000}),
 api(`/news/summary?hours=24`,{timeoutMs:15000}),
@@ -3353,10 +3418,12 @@ community:community.status==='fulfilled'?community.value:{error:community.reason
 news:newsPayload,
 onchain:onchain.status==='fulfilled'?onchain.value:{},
 };
+if(reqId!==researchState.lastSentimentReqId)return;
 renderMarketSentimentPanel(payload);
 renderResearchQuickSummary([{label:'情绪模块',value:'市场情绪仪表盘'},{label:'交易所',value:ex},{label:'标的',value:sym},{label:'新闻样本',value:`结构化 ${Number(payload.news?.events_count||0)} / 当前流 ${Number(payload.news?.feed_count||0)}`}]);
 if(out)out.textContent=JSON.stringify(payload,null,2);
 }catch(e){
+if(reqId!==researchState.lastSentimentReqId)return;
 renderMarketSentimentPanel({error:e.message});
 if(out)out.textContent=`市场情绪加载失败: ${e.message}`;
 notify(`市场情绪加载失败: ${e.message}`,true);
@@ -3376,7 +3443,14 @@ if(b1)b1.onclick=()=>applyResearchPreset('hf30');
 if(b2)b2.onclick=()=>applyResearchPreset('intraday');
 if(b3)b3.onclick=()=>applyResearchPreset('swing');
 }
-function bindResearchSentiment(){const b=document.getElementById('btn-load-market-sentiment');if(b)b.onclick=loadMarketSentimentDashboard;}
+function bindResearchSentiment(){
+const ids=['btn-load-market-sentiment','btn-refresh-market-sentiment-panel'];
+ids.forEach(id=>{
+  const btn=document.getElementById(id);
+  if(!btn)return;
+  btn.onclick=()=>loadMarketSentimentDashboard();
+});
+}
 function renderResearchQuickSummary(rows){const box=getResearchSummaryEl();if(!box)return;if(!rows?.length){box.innerHTML='<div class="list-item"><span>暂无摘要</span><span>-</span></div>';renderResearchStatusCards();return;}box.innerHTML=rows.map(r=>`<div class="list-item"><span>${esc(r.label||'-')}</span><span>${esc(String(r.value??'-'))}</span></div>`).join('');renderResearchStatusCards();}
 function getResearchConclusionSummaryEl(){return document.getElementById('research-conclusion-summary');}
 function getResearchConclusionBulletsEl(){return document.getElementById('research-conclusion-bullets');}

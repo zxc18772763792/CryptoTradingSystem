@@ -76,8 +76,8 @@ _ANALYTICS_ROOT = Path("./data/cache/analytics")
 _BEHAVIOR_JOURNAL_PATH = _ANALYTICS_ROOT / "behavior_journal.json"
 _STOPLOSS_POLICY_PATH = _ANALYTICS_ROOT / "stoploss_policy.json"
 _LIVE_EQUITY_BASELINE_PATH = _ANALYTICS_ROOT / "live_equity_baseline.json"
-_ANALYTICS_ORDERBOOK_TIMEOUT_SEC = 2.2
-_ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC = 2.2
+_ANALYTICS_ORDERBOOK_TIMEOUT_SEC = 3.6
+_ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC = 3.6
 _ANALYTICS_FUNDING_TIMEOUT_SEC = 1.8
 _ANALYTICS_BASIS_TIMEOUT_SEC = 2.2
 _ANALYTICS_WHALE_TIMEOUT_SEC = 6.0
@@ -203,8 +203,8 @@ async def _fetch_binance_public_trade_imbalance(symbol: str, limit: int = 600) -
             timeout_sec=_ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC,
         )
         trades = list(rows or [])
-    except Exception:
-        return {"count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
     buy_volume = 0.0
     sell_volume = 0.0
     for row in trades:
@@ -215,6 +215,7 @@ async def _fetch_binance_public_trade_imbalance(symbol: str, limit: int = 600) -
             buy_volume += qty
     total = buy_volume + sell_volume
     return {
+        "available": True,
         "count": len(trades),
         "buy_volume": round(buy_volume, 6),
         "sell_volume": round(sell_volume, 6),
@@ -2533,22 +2534,20 @@ async def _fetch_trade_imbalance(exchange: str, symbol: str, limit: int = 600) -
         return await _fetch_binance_public_trade_imbalance(symbol=symbol, limit=limit)
     connector = exchange_manager.get_exchange(exchange)
     if not connector:
-        return {"count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+        return {"available": False, "error": f"exchange_not_connected:{exchange}", "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
     client = getattr(connector, "_client", None)
     fetch_trades = getattr(client, "fetch_trades", None)
     if not callable(fetch_trades):
-        return {"count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+        return {"available": False, "error": "fetch_trades_unavailable", "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
     try:
         trades = await asyncio.wait_for(
             fetch_trades(symbol, limit=max(50, min(int(limit), 2000))),
             timeout=_ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC,
         )
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        return {"count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        return {"count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
-    except Exception:
-        return {"count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+    except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+        return {"available": False, "error": f"timeout_or_cancelled:{e}", "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+    except Exception as e:
+        return {"available": False, "error": str(e), "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
     buy_volume = 0.0
     sell_volume = 0.0
     for row in trades or []:
@@ -2564,6 +2563,7 @@ async def _fetch_trade_imbalance(exchange: str, symbol: str, limit: int = 600) -
             buy_volume += qty
     total = buy_volume + sell_volume
     return {
+        "available": True,
         "count": len(trades or []),
         "buy_volume": round(buy_volume, 6),
         "sell_volume": round(sell_volume, 6),
@@ -3941,6 +3941,7 @@ async def get_market_microstructure(
         "available": bool(ob.get("available", True)),
         "source_error": ob.get("error"),
         "orderbook": {
+            "available": bool(ob.get("available", True)) and mid > 0,
             "best_bid": best_bid,
             "best_ask": best_ask,
             "mid_price": round(mid, 8),
@@ -3954,7 +3955,14 @@ async def get_market_microstructure(
             "candidate_count": iceberg_candidates,
             "note": "基于盘口重复量级的启发式检测。",
         },
-        "aggressor_flow": flow,
+        "aggressor_flow": {
+            "available": bool(flow.get("available", True)),
+            "error": flow.get("error"),
+            "count": int(_safe_float(flow.get("count"))),
+            "buy_volume": _safe_float(flow.get("buy_volume")),
+            "sell_volume": _safe_float(flow.get("sell_volume")),
+            "imbalance": _safe_float(flow.get("imbalance")),
+        },
         "funding_rate": funding,
         "spot_futures_basis": basis,
     }
