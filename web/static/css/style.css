@@ -5240,3 +5240,23 @@ input[type="radio"] {
     border-radius: 8px;
     white-space: nowrap;
 }
+
+/* Multi-asset correlation matrix: keep near 2x vertical space for readability */
+#research #multi-asset-corr-chart {
+    min-height: 440px !important;
+    height: 440px !important;
+}
+
+@media (max-width: 1220px) {
+    #research #multi-asset-corr-chart {
+        min-height: 360px !important;
+        height: 360px !important;
+    }
+}
+
+@media (max-width: 760px) {
+    #research #multi-asset-corr-chart {
+        min-height: 320px !important;
+        height: 320px !important;
+    }
+}
