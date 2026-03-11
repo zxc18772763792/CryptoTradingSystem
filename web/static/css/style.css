@@ -4808,3 +4808,54 @@ input[type="radio"] {
     justify-self: start !important;
   }
 }
+
+/* Market State module cards: compact to prevent overlap */
+#research #analytics-module-grid.research-strip-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  gap: 8px !important;
+}
+
+#research #analytics-module-grid .strategy-card {
+  min-height: 94px !important;
+  padding: 10px 11px !important;
+  border-radius: 10px !important;
+}
+
+#research #analytics-module-grid .strategy-card h4 {
+  font-size: 13px !important;
+  line-height: 1.2 !important;
+  margin-bottom: 3px !important;
+}
+
+#research #analytics-module-grid .strategy-card p {
+  font-size: 11px !important;
+  line-height: 1.32 !important;
+  margin: 0 !important;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+#research #analytics-module-grid .strategy-card .list-item {
+  gap: 6px !important;
+  margin-top: 4px !important;
+}
+
+#research #analytics-module-grid .strategy-card .status-badge {
+  font-size: 10px !important;
+  padding: 3px 8px !important;
+  min-width: 44px !important;
+}
+
+@media (max-width: 1220px) {
+  #research #analytics-module-grid.research-strip-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 760px) {
+  #research #analytics-module-grid.research-strip-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
