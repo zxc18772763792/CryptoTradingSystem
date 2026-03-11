@@ -1568,6 +1568,7 @@
                                 <input type="number" id="run-days" value="3" min="1" max="730" style="width:55px;font-size:12px;" title="回测天数（短周期研究默认3天）">
                                 <span style="font-size:11px;color:#7e92b2;">天</span>
                                 <button class="btn btn-primary btn-sm" id="run-selected-btn" disabled title="请先在左侧选择研究任务">▶ 运行研究</button>
+                                <button class="btn btn-sm" id="ai-compare-btn" style="display:none;">对比选中</button>
                             </div>
                         </div>
                         <div id="ai-candidate-cards" class="ai-candidate-cards">
@@ -1599,6 +1600,16 @@
                         </div>
                     </aside>
 
+                </div>
+
+                <div id="ai-candidate-compare-modal" class="modal-overlay" style="display:none;">
+                    <div class="modal-box modal-box-lg">
+                        <div class="modal-header">
+                            <h3>候选策略对比</h3>
+                            <button type="button" class="modal-close" id="ai-candidate-compare-close">×</button>
+                        </div>
+                        <div id="ai-candidate-compare-body"></div>
+                    </div>
                 </div>
             </div>
 

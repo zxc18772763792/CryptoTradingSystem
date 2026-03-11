@@ -26,6 +26,7 @@ from core.strategies.persistence import (
     persist_strategy_snapshot,
     delete_strategy_snapshot,
 )
+from core.strategies.runtime_policy import build_runtime_limit_policy
 from core.strategies.health_monitor import strategy_health_monitor
 from core.trading.execution_engine import execution_engine
 from core.trading.position_manager import PositionSide, position_manager
@@ -515,13 +516,19 @@ async def _auto_register_defaults_for_start_all() -> List[str]:
             i += 1
             name = f"{base_name}_{i}"
 
+        params = _build_strategy_register_params(strategy_type, "binance", {})
+        runtime_policy = build_runtime_limit_policy(
+            timeframe=_recommended_timeframe(strategy_type),
+            params=params,
+        )
         ok = strategy_manager.register_strategy(
             name=name,
             strategy_class=strategy_class,
-            params=_build_strategy_register_params(strategy_type, "binance", {}),
+            params=params,
             symbols=_recommended_symbols(strategy_type),
             timeframe=_recommended_timeframe(strategy_type),
             allocation=allocation,
+            runtime_limit_minutes=runtime_policy["runtime_limit_minutes"],
         )
         if not ok:
             continue
@@ -798,6 +805,10 @@ async def import_strategies(payload: StrategyImportRequest):
         if existing and payload.overwrite:
             strategy_manager.unregister_strategy(name)
 
+        runtime_policy = build_runtime_limit_policy(
+            timeframe=item.timeframe,
+            params=item.params,
+        )
         ok = strategy_manager.register_strategy(
             name=name,
             strategy_class=strategy_class,
@@ -811,6 +822,7 @@ async def import_strategies(payload: StrategyImportRequest):
             symbols=item.symbols,
             timeframe=item.timeframe,
             allocation=item.allocation,
+            runtime_limit_minutes=runtime_policy["runtime_limit_minutes"],
         )
         if not ok:
             skipped.append({"name": name, "reason": "register_failed"})
@@ -992,6 +1004,15 @@ async def register_strategy(request: StrategyRegisterRequest):
         user_params=request.params,
     )
 
+    runtime_limit_minutes = request.runtime_limit_minutes
+    runtime_policy = None
+    if runtime_limit_minutes is None:
+        runtime_policy = build_runtime_limit_policy(
+            timeframe=request.timeframe,
+            params=params,
+        )
+        runtime_limit_minutes = int(runtime_policy["runtime_limit_minutes"])
+
     success = strategy_manager.register_strategy(
         name=request.name,
         strategy_class=strategy_class,
@@ -999,7 +1020,7 @@ async def register_strategy(request: StrategyRegisterRequest):
         symbols=request.symbols,
         timeframe=request.timeframe,
         allocation=request.allocation,
-        runtime_limit_minutes=request.runtime_limit_minutes,
+        runtime_limit_minutes=runtime_limit_minutes,
     )
 
     if not success:
@@ -1028,6 +1049,8 @@ async def register_strategy(request: StrategyRegisterRequest):
         "name": request.name,
         "strategy_type": request.strategy_type,
         "allocation": request.allocation,
+        "runtime_limit_minutes": runtime_limit_minutes,
+        "runtime_policy": runtime_policy,
     }
 
 

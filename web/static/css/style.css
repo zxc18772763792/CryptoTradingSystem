@@ -3790,6 +3790,166 @@ input[type="radio"] {
 .cand-signal-badge.match { background: rgba(32,191,120,.15); color: #20bf78; }
 
 .cand-card-actions { display: flex; gap: 7px; justify-content: flex-end; }
+.cand-compare-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: #9fb1c9;
+    padding: 1px 6px;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 999px;
+    background: rgba(255,255,255,.03);
+}
+.cand-compare-toggle input[type="checkbox"] {
+    width: 12px;
+    height: 12px;
+    margin: 0;
+}
+
+/* AI candidate validation pipeline */
+.vp-bar {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+}
+.vp-dot {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 999px;
+}
+.vp-ok { background: rgba(16, 185, 129, .2); color: #34d399; }
+.vp-warn { background: rgba(245, 158, 11, .2); color: #fbbf24; }
+.vp-fail { background: rgba(239, 68, 68, .2); color: #f87171; }
+.vp-na { background: rgba(148, 163, 184, .2); color: #94a3b8; }
+.vp-arrow { color: #6b7fa0; font-size: 10px; }
+
+/* AI detail lifecycle stepper */
+.lc-stepper {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 8px;
+}
+.lc-step {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 999px;
+}
+.lc-connector {
+    width: 16px;
+    height: 1px;
+    background: rgba(255,255,255,.15);
+}
+.lc-done { background: rgba(16, 185, 129, .2); color: #34d399; }
+.lc-active { background: rgba(59, 130, 246, .25); color: #93c5fd; font-weight: 700; }
+.lc-future { background: rgba(148, 163, 184, .18); color: #94a3b8; }
+.lc-inactive { background: rgba(71, 85, 105, .18); color: #64748b; }
+.lc-rejected { background: rgba(239, 68, 68, .2); color: #fca5a5; font-weight: 700; }
+
+/* approval queue dense metrics */
+.appr-meta { margin-bottom: 8px; }
+.appr-metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+}
+.appr-m {
+    background: rgba(255,255,255,.03);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 6px;
+    padding: 4px 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+.appr-ml { font-size: 10px; color: #7e92b2; }
+.appr-m b { font-size: 12px; color: #c2d0e8; }
+.appr-spark { margin-top: 6px; }
+.appr-spark-svg {
+    display: block;
+    width: 100%;
+    height: 28px;
+    border-radius: 4px;
+    background: rgba(16, 24, 40, .6);
+}
+
+/* param sensitivity */
+.ai-param-sensitivity-details {
+    margin-bottom: 14px;
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: rgba(255,255,255,.02);
+}
+.ai-param-sensitivity-details summary {
+    font-size: 12px;
+    color: #9fb1c9;
+    cursor: pointer;
+}
+.ai-param-sensitivity-panel {
+    margin-top: 8px;
+    padding: 8px;
+    background: #141f2f;
+    border-radius: 6px;
+    font-size: 12px;
+    color: #9fb1c9;
+}
+.ps-row {
+    display: grid;
+    grid-template-columns: 110px minmax(0, 1fr);
+    gap: 8px;
+    margin-bottom: 10px;
+}
+.ps-param {
+    font-size: 11px;
+    color: #9fb1c9;
+    word-break: break-word;
+    padding-top: 2px;
+}
+.ps-bars { display: flex; flex-direction: column; gap: 4px; }
+.ps-bar-row { display: flex; align-items: center; gap: 6px; }
+.ps-lbl { width: 36px; font-size: 10px; color: #7e92b2; }
+.ps-bar-track {
+    flex: 0 0 126px;
+    height: 8px;
+    border-radius: 999px;
+    background: rgba(255,255,255,.08);
+    overflow: hidden;
+}
+.ps-bar-fill { display: block; height: 100%; border-radius: 999px; }
+.ps-val { font-size: 11px; color: #c2d0e8; min-width: 42px; text-align: right; }
+
+/* compare modal table */
+.compare-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+.compare-table th,
+.compare-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(255,255,255,.08);
+    text-align: left;
+    vertical-align: top;
+}
+.compare-table th {
+    color: #d7e4ff;
+    font-weight: 700;
+}
+.compare-table .compare-label {
+    color: #9fb1c9;
+    white-space: nowrap;
+}
+.compare-subid {
+    color: #7e92b2;
+    font-size: 10px;
+    font-weight: 400;
+}
 
 /* ── 评分分解条 ── */
 .score-breakdown-row {

@@ -545,6 +545,126 @@ async def get_ai_candidate_lifecycle(request: Request, candidate_id: str, limit:
     return {"candidate_id": candidate_id, "items": rows, "count": len(rows)}
 
 
+@router.get("/candidates/{candidate_id}/param-sensitivity")
+async def get_candidate_param_sensitivity(
+    request: Request,
+    candidate_id: str,
+    max_params: int = 5,
+):
+    """Single-parameter sensitivity scan using [-20%, base, +20%] perturbation."""
+    ensure_ai_research_runtime_state(request.app)
+    candidate = get_candidate(request.app, candidate_id)
+    params = dict(candidate.params or {})
+    if not params:
+        return {"candidate_id": candidate_id, "items": [], "note": "candidate has no params"}
+
+    numeric_rows: List[tuple[str, float, bool]] = []
+    for key, value in params.items():
+        if isinstance(value, bool):
+            continue
+        try:
+            val = float(value)
+        except Exception:
+            continue
+        if not pd.notna(val):
+            continue
+        numeric_rows.append((str(key), float(val), isinstance(value, int)))
+    if not numeric_rows:
+        return {"candidate_id": candidate_id, "items": [], "note": "candidate has no numeric params"}
+
+    max_params = max(1, min(int(max_params or 5), 8))
+    numeric_rows = numeric_rows[:max_params]
+    timeframe = str(candidate.timeframe or "1h")
+    symbol = _normalize_symbol(candidate.symbol or "BTC/USDT")
+
+    from web.api.backtest import (  # noqa: PLC0415
+        _attach_backtest_enrichment_if_needed,
+        _load_backtest_inputs,
+        _run_backtest_core,
+    )
+
+    end_time = datetime.now(timezone.utc)
+    start_time = end_time - timedelta(days=30)
+    df, bundle, resolved_symbol = await _load_backtest_inputs(
+        strategy=candidate.strategy,
+        symbol=symbol,
+        timeframe=timeframe,
+        params=params,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    df = await _attach_backtest_enrichment_if_needed(
+        strategy=candidate.strategy,
+        df=df,
+        symbol=resolved_symbol,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    if df.empty:
+        return {"candidate_id": candidate_id, "items": [], "note": "no market data for sensitivity"}
+
+    try:
+        base_result = _run_backtest_core(
+            strategy=candidate.strategy,
+            df=df,
+            timeframe=timeframe,
+            initial_capital=10000.0,
+            params=params,
+            commission_rate=0.0004,
+            slippage_bps=2.0,
+            market_bundle=bundle,
+        )
+        base_sharpe = float(base_result.get("sharpe_ratio") or 0.0)
+    except Exception:
+        base_sharpe = 0.0
+
+    items: List[Dict[str, Any]] = []
+    for key, base_value, is_int in numeric_rows:
+        row: Dict[str, Any] = {
+            "param": key,
+            "base_val": int(base_value) if is_int else round(base_value, 8),
+            "low_val": None,
+            "high_val": None,
+            "sharpe_low": None,
+            "sharpe_base": round(base_sharpe, 4),
+            "sharpe_high": None,
+        }
+        for label, multiplier in (("low", 0.8), ("high", 1.2)):
+            shifted = base_value * multiplier
+            if is_int:
+                shifted = max(1.0, round(shifted))
+                shifted_val: Any = int(shifted)
+            else:
+                shifted_val = round(float(shifted), 8)
+            row[f"{label}_val"] = shifted_val
+
+            trial_params = dict(params)
+            trial_params[key] = shifted_val
+            try:
+                result = _run_backtest_core(
+                    strategy=candidate.strategy,
+                    df=df,
+                    timeframe=timeframe,
+                    initial_capital=10000.0,
+                    params=trial_params,
+                    commission_rate=0.0004,
+                    slippage_bps=2.0,
+                    market_bundle=bundle,
+                )
+                row[f"sharpe_{label}"] = round(float(result.get("sharpe_ratio") or 0.0), 4)
+            except Exception:
+                row[f"sharpe_{label}"] = None
+        items.append(row)
+
+    return {
+        "candidate_id": candidate_id,
+        "symbol": resolved_symbol,
+        "timeframe": timeframe,
+        "items": items,
+        "param_count": len(items),
+    }
+
+
 @router.post("/candidates/{candidate_id}/promote")
 async def promote_ai_candidate(request: Request, candidate_id: str, payload: AICandidatePromotionRequest):
     ensure_ai_research_runtime_state(request.app)
@@ -1084,6 +1204,8 @@ async def quick_register_candidate(
             raise HTTPException(status_code=400, detail="candidate has no validation summary")
         cand.promotion = build_promotion_decision(cand.candidate_id, cand.validation_summary)
     cand.promotion.decision = "paper"
+    cand.promotion.constraints["allocation_cap"] = float(payload.allocation_pct)
+    cand.promotion.constraints["runtime_mode"] = "paper"
 
     # Clear governance gate
     cand.metadata.pop("promotion_pending_human_gate", None)
@@ -1094,10 +1216,10 @@ async def quick_register_candidate(
 
     result = await promote_candidate(
         request.app,
-        candidate=cand,
         proposal=proposal,
-        lifecycle_registry=request.app.state.ai_lifecycle_registry,
-        promotion_registry=request.app.state.ai_promotion_registry,
+        candidate=cand,
+        promotion=cand.promotion,
+        actor="quick_register",
     )
     request.app.state.ai_candidate_registry.save(result["candidate"])
     save_proposal(request.app, result["proposal"])

@@ -74,6 +74,7 @@
     jobPollingTimers: {},   // proposalId → intervalId
     sortBy: 'score',        // 'score' | 'sharpe' | 'return' | 'drawdown'
     filterCategory: '',     // '' | '趋势' | '震荡' | ...
+    compareCandidateIds: new Set(),
   };
 
   /* ── 工具函数 ── */
@@ -645,12 +646,17 @@
       }
       return Number(b.score || 0) - Number(a.score || 0);
     });
+    const dedupedIds = new Set(dedupeCandidatesForDisplay(state.candidates).map(c => String(c?.candidate_id || '')));
+    Array.from(state.compareCandidateIds).forEach((cid) => {
+      if (!dedupedIds.has(String(cid))) state.compareCandidateIds.delete(String(cid));
+    });
 
     if (cnt) cnt.textContent = visible.length
       ? `${visible.length}/${state.candidates.length} 个`
       : (state.candidates.length ? `0/${state.candidates.length} (筛选后为空)` : '');
 
     if (!visible.length) {
+      refreshCompareToolbar();
       if (cnt) cnt.textContent = totalCount ? `0/${totalCount}` : '';
       box.innerHTML = state.candidates.length
         ? `<div class="ai-empty-hint">当前类别筛选无结果，请调整筛选条件</div>`
@@ -660,6 +666,7 @@
     box.innerHTML = visible.map(c => buildCandidateCard(c)).join('');
     box.innerHTML = normalizeUiText(box.innerHTML);
     normalizeDomText(box);
+    refreshCompareToolbar();
     if (cnt) cnt.textContent = `${visible.length}/${totalCount}`;
   }
 
@@ -753,6 +760,107 @@
     </div>`;
   }
 
+  const LIFECYCLE_STEPS = [
+    { key: 'new', label: '新建' },
+    { key: 'paper_running', label: '纸盘' },
+    { key: 'shadow_running', label: '影子' },
+    { key: 'live_candidate', label: '候选' },
+  ];
+
+  function renderLifecycleStepper(currentStatus) {
+    const status = String(currentStatus || 'new');
+    const retired = status === 'retired';
+    const rejected = status === 'rejected';
+    const currentIndex = LIFECYCLE_STEPS.findIndex((s) => s.key === status);
+    const activeIndex = currentIndex >= 0 ? currentIndex : 0;
+    return `<div class="lc-stepper">
+      ${LIFECYCLE_STEPS.map((step, idx) => {
+        let cls = 'lc-step lc-future';
+        if (retired || rejected) cls = 'lc-step lc-inactive';
+        else if (idx < activeIndex) cls = 'lc-step lc-done';
+        else if (idx === activeIndex) cls = 'lc-step lc-active';
+        const doneMark = (!retired && !rejected && idx < activeIndex) ? '✓ ' : '';
+        const connector = idx < LIFECYCLE_STEPS.length - 1 ? '<div class="lc-connector"></div>' : '';
+        return `<div class="${cls}">${doneMark}${esc(step.label)}</div>${connector}`;
+      }).join('')}
+      ${retired ? '<div class="lc-step lc-rejected">已退役</div>' : ''}
+      ${rejected ? '<div class="lc-step lc-rejected">已拒绝</div>' : ''}
+    </div>`;
+  }
+
+  function _renderValidationPipeline(vs) {
+    const summary = vs || {};
+    const _scoreState = (value, warn = 0.3, ok = 0.6) => {
+      if (value == null || !Number.isFinite(Number(value))) return 'vp-na';
+      const num = Number(value);
+      if (num >= ok) return 'vp-ok';
+      if (num >= warn) return 'vp-warn';
+      return 'vp-fail';
+    };
+    const dataReady = (summary.is_score != null || summary.oos_score != null) ? 'vp-ok' : 'vp-na';
+    const riskScore = Number(summary.risk_score);
+    const riskState = Number.isFinite(riskScore)
+      ? (riskScore >= 70 ? 'vp-ok' : riskScore >= 50 ? 'vp-warn' : 'vp-fail')
+      : 'vp-na';
+    const steps = [
+      { label: 'Data', cls: dataReady },
+      { label: 'IS', cls: _scoreState(summary.is_score, 0.2, 0.8) },
+      { label: 'OOS', cls: _scoreState(summary.oos_score, 0.2, 0.8) },
+      { label: 'WF', cls: _scoreState(summary.wf_stability, 0.4, 0.7) },
+      { label: 'DSR', cls: _scoreState(summary.dsr_score, 0.25, 0.5) },
+      { label: 'Risk', cls: riskState },
+    ];
+    return `<div class="vp-bar">${steps.map((step, idx) => {
+      const connector = idx < steps.length - 1 ? '<span class="vp-arrow">→</span>' : '';
+      return `<span class="vp-dot ${step.cls}">${esc(step.label)}</span>${connector}`;
+    }).join('')}</div>`;
+  }
+
+  function _inlineSparkline(values, width = 140, height = 28) {
+    const points = normalizeNumberSeries(values, 80);
+    if (points.length < 2) return '';
+    const min = Math.min(...points);
+    const max = Math.max(...points);
+    const span = Math.max(max - min, 1e-9);
+    const stepX = width / Math.max(points.length - 1, 1);
+    const polyline = points.map((v, i) => {
+      const x = i * stepX;
+      const y = height - ((v - min) / span) * height;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    }).join(' ');
+    const up = points[points.length - 1] >= points[0];
+    const color = up ? '#4ade80' : '#f87171';
+    return `<svg viewBox="0 0 ${width} ${height}" class="appr-spark-svg" aria-hidden="true">
+      <polyline points="${polyline}" fill="none" stroke="${color}" stroke-width="1.6" />
+    </svg>`;
+  }
+
+  function _renderApprovalMeta(cand) {
+    const summary = cand?.validation_summary || {};
+    const top = candidateTopResults(cand)[0] || {};
+    const sharpe = summary.is_score ?? top.sharpe_ratio ?? null;
+    const oos = summary.oos_score ?? null;
+    const dsr = summary.dsr_score ?? null;
+    const wf = summary.wf_stability ?? summary.wf_consistency ?? null;
+    const fmt2 = (v) => (v == null || !Number.isFinite(Number(v))) ? '--' : Number(v).toFixed(2);
+    const fmtPct = (v) => (v == null || !Number.isFinite(Number(v))) ? '--' : `${(Number(v) * 100).toFixed(0)}%`;
+    const eq = normalizeNumberSeries(
+      cand?.metadata?.best?.equity_curve_sample
+      || cand?.metadata?.equity_curve_sample
+      || [],
+      64,
+    );
+    return `<div class="appr-meta">
+      <div class="appr-metrics">
+        <span class="appr-m"><span class="appr-ml">Sharpe</span><b>${fmt2(sharpe)}</b></span>
+        <span class="appr-m"><span class="appr-ml">OOS</span><b>${fmt2(oos)}</b></span>
+        <span class="appr-m"><span class="appr-ml">DSR</span><b>${fmtPct(dsr)}</b></span>
+        <span class="appr-m"><span class="appr-ml">WF</span><b>${fmtPct(wf)}</b></span>
+      </div>
+      ${eq.length > 1 ? `<div class="appr-spark">${_inlineSparkline(eq)}</div>` : ''}
+    </div>`;
+  }
+
   function buildCandidateCard(cand) {
     const score = Number(cand?.score || 0);
     const color = scoreColor(score);
@@ -816,6 +924,7 @@
       signalBadge = `<span class="cand-signal-badge">${esc(sym.split('/')[0])} ${dirLabel} ${conf}%</span><br>`;
     }
     const canRegister = canRegisterCandidate(cand);
+    const compareChecked = state.compareCandidateIds.has(cid) ? 'checked' : '';
     const category = STRATEGY_CATEGORIES[strat] || '';
     const catColor = CATEGORY_COLORS[category] || '#64748b';
     const familyMeta = getFamilyMeta(strat);
@@ -842,7 +951,13 @@
                data-candidate-id="${esc(cid)}" data-action="select-candidate">
       <div class="cand-card-header">
         <div class="cand-card-title">${emoji} ${esc(strat)}</div>
-        <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">${familyBadge}${catBadge}<div class="cand-score-badge ${color}">${score.toFixed(0)}</div></div>
+        <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">
+          ${familyBadge}${catBadge}<div class="cand-score-badge ${color}">${score.toFixed(0)}</div>
+          <label class="cand-compare-toggle" title="加入对比" data-action="toggle-compare" data-candidate-id="${esc(cid)}">
+            <input type="checkbox" data-action="toggle-compare" data-candidate-id="${esc(cid)}" ${compareChecked} />
+            <span>对比</span>
+          </label>
+        </div>
       </div>
       <div style="font-size:12px;color:#7e92b2;margin-bottom:5px;">
         ${esc(sym)} / ${esc(tf)} / ${esc(statusText(status))}
@@ -1027,6 +1142,11 @@
         <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">方案生命周期</div>
         ${renderLifecycleRows(proposalLifecycle, '暂无方案生命周期记录')}
       </div>`;
+    const paramSensitivityHtml = `
+      <details id="ai-param-sensitivity-details" class="ai-param-sensitivity-details">
+        <summary>参数敏感性分析</summary>
+        <div id="ai-param-sensitivity" class="ai-param-sensitivity-panel">展开后加载参数扰动结果...</div>
+      </details>`;
 
     panel.innerHTML = `
       <div style="margin-bottom:14px;">
@@ -1058,6 +1178,7 @@
       ${artifactsHtml}
       ${experimentHtml}
       ${lifecycleHtml}
+      ${paramSensitivityHtml}
       ${cand?.metadata?.correlation_filtered ? `
       <div style="margin-bottom:12px;padding:8px 10px;background:#3a1a0a;border:1px solid #8b4513;border-radius:6px;font-size:12px;color:#e09060;">
         ⚠ 该候选与 <strong>${esc(cand.metadata.correlated_with || '')}</strong> ${cand.metadata.correlation_is_cross_batch ? '（已运行策略）' : ''}高度相关
@@ -1160,6 +1281,7 @@
       .replace('WF Consistency', 'WF 一致性')
       .replace('folds+', '折以上');
     normalizeDomText(panel);
+    bindParamSensitivity(candidateId);
 
     // 绑定详情面板里的按钮
     panel.querySelector('.btn-register-cta')?.addEventListener('click', () => {
@@ -1281,6 +1403,145 @@
   /* ══════════════════════════════════════════════════════════════
      一键注册 Modal
   ══════════════════════════════════════════════════════════════ */
+  function refreshCompareToolbar() {
+    const btn = document.getElementById('ai-compare-btn');
+    if (!btn) return;
+    const selected = state.compareCandidateIds.size;
+    btn.style.display = selected >= 2 ? '' : 'none';
+    btn.textContent = selected >= 2 ? `对比选中 (${selected})` : '对比选中';
+  }
+
+  function toggleCandidateCompare(candidateId) {
+    const cid = String(candidateId || '').trim();
+    if (!cid) return;
+    if (state.compareCandidateIds.has(cid)) {
+      state.compareCandidateIds.delete(cid);
+    } else {
+      if (state.compareCandidateIds.size >= 4) {
+        notify('最多同时对比 4 个候选策略', true);
+        return;
+      }
+      state.compareCandidateIds.add(cid);
+    }
+    refreshCompareToolbar();
+    const list = document.getElementById('ai-candidate-cards');
+    if (!list) return;
+    list.querySelectorAll('input[data-action="toggle-compare"]').forEach((inputEl) => {
+      const id = String(inputEl.getAttribute('data-candidate-id') || '');
+      inputEl.checked = state.compareCandidateIds.has(id);
+    });
+  }
+
+  function openCompareModal() {
+    const selectedIds = Array.from(state.compareCandidateIds);
+    if (selectedIds.length < 2) return;
+    const candidates = selectedIds
+      .map((id) => state.candidates.find((cand) => String(cand?.candidate_id || '') === id))
+      .filter(Boolean);
+    if (candidates.length < 2) {
+      notify('可对比的候选策略不足，请重新选择', true);
+      return;
+    }
+
+    const metrics = [
+      ['策略', (c) => esc(String(c?.strategy || '--'))],
+      ['状态', (c) => esc(statusText(c?.status || 'new'))],
+      ['交易对', (c) => esc(String(c?.symbol || '--'))],
+      ['周期', (c) => esc(String(c?.timeframe || '--'))],
+      ['综合评分', (c) => Number(c?.score || 0).toFixed(1)],
+      ['IS Sharpe', (c) => fmtNum(c?.validation_summary?.is_score, 2)],
+      ['OOS Sharpe', (c) => fmtNum(c?.validation_summary?.oos_score, 2)],
+      ['WF 稳定', (c) => c?.validation_summary?.wf_stability != null ? `${(Number(c.validation_summary.wf_stability) * 100).toFixed(0)}%` : '--'],
+      ['DSR', (c) => c?.validation_summary?.dsr_score != null ? `${(Number(c.validation_summary.dsr_score) * 100).toFixed(0)}%` : '--'],
+      ['风险评分', (c) => fmtNum(c?.validation_summary?.risk_score, 0)],
+      ['收益率', (c) => {
+        const top = candidateTopResults(c)[0] || {};
+        const ret = Number(top.total_return);
+        return Number.isFinite(ret) ? `${ret >= 0 ? '+' : ''}${ret.toFixed(2)}%` : '--';
+      }],
+      ['最大回撤', (c) => {
+        const top = candidateTopResults(c)[0] || {};
+        const dd = Number(top.max_drawdown);
+        return Number.isFinite(dd) ? `${dd.toFixed(2)}%` : '--';
+      }],
+    ];
+
+    const header = candidates.map((c) => {
+      const id = String(c?.candidate_id || '').slice(0, 8);
+      return `<th>${esc(String(c?.strategy || '--'))}<br><span class="compare-subid">${esc(id)}</span></th>`;
+    }).join('');
+    const rows = metrics.map(([label, getter]) => {
+      const cells = candidates.map((c) => `<td>${getter(c)}</td>`).join('');
+      return `<tr><td class="compare-label">${label}</td>${cells}</tr>`;
+    }).join('');
+
+    const overlay = document.getElementById('ai-candidate-compare-modal');
+    const body = document.getElementById('ai-candidate-compare-body');
+    if (!overlay || !body) return;
+    body.innerHTML = `<table class="compare-table"><thead><tr><th>指标</th>${header}</tr></thead><tbody>${rows}</tbody></table>`;
+    overlay.style.display = 'flex';
+  }
+
+  function bindParamSensitivity(candidateId) {
+    const details = document.getElementById('ai-param-sensitivity-details');
+    if (!details) return;
+    const loadIfNeeded = async () => {
+      if (details.dataset.loaded === '1' || details.dataset.loading === '1') return;
+      details.dataset.loading = '1';
+      try {
+        await loadParamSensitivity(candidateId);
+        details.dataset.loaded = '1';
+      } finally {
+        details.dataset.loading = '0';
+      }
+    };
+    details.addEventListener('toggle', () => {
+      if (details.open) loadIfNeeded().catch(() => {});
+    });
+    if (details.open) loadIfNeeded().catch(() => {});
+  }
+
+  async function loadParamSensitivity(candidateId) {
+    const panel = document.getElementById('ai-param-sensitivity');
+    if (!panel) return;
+    panel.textContent = '计算中...';
+    try {
+      const payload = await aiApi(`/candidates/${encodeURIComponent(candidateId)}/param-sensitivity?max_params=5`, {
+        timeoutMs: 40000,
+      });
+      const items = toArray(payload?.items);
+      if (!items.length) {
+        panel.textContent = String(payload?.note || '暂无参数敏感性数据');
+        return;
+      }
+      panel.innerHTML = items.map((row) => {
+        const values = [Number(row.sharpe_low), Number(row.sharpe_base), Number(row.sharpe_high)]
+          .map((v) => (Number.isFinite(v) ? v : 0));
+        const maxAbs = Math.max(0.1, ...values.map((v) => Math.abs(v)));
+        const bar = (value, color, label) => {
+          const v = Number(value);
+          const safe = Number.isFinite(v) ? v : 0;
+          const width = Math.max(6, Math.round((Math.abs(safe) / maxAbs) * 120));
+          return `<div class="ps-bar-row">
+            <span class="ps-lbl">${label}</span>
+            <span class="ps-bar-track"><span class="ps-bar-fill" style="width:${width}px;background:${color};"></span></span>
+            <span class="ps-val">${Number.isFinite(v) ? v.toFixed(3) : '--'}</span>
+          </div>`;
+        };
+        return `<div class="ps-row">
+          <div class="ps-param">${esc(row.param)}</div>
+          <div class="ps-bars">
+            ${bar(row.sharpe_low, '#f87171', '-20%')}
+            ${bar(row.sharpe_base, '#60a5fa', 'Base')}
+            ${bar(row.sharpe_high, '#4ade80', '+20%')}
+          </div>
+        </div>`;
+      }).join('');
+    } catch (err) {
+      panel.textContent = `加载失败: ${String(err?.message || err)}`;
+    }
+  }
+
   async function openRegisterModal(candidateId) {
     if (governanceEnabled()) {
       notify('治理模式已开启，请使用“待审批”中的人工批准流程', true);
@@ -1420,6 +1681,7 @@
           <span class="cand-score-badge ${color}" style="font-size:11px;">${score.toFixed(0)}</span>
         </div>
         <div style="color:#9fb1c9;margin-bottom:5px;">推荐目标：<strong>${target}</strong></div>
+        ${_renderApprovalMeta(cand)}
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
           <button class="btn btn-sm" style="font-size:11px;color:#20bf78;border-color:#20bf78;"
             data-action="human-approve" data-candidate-id="${cid}" data-target="${target}">✓ 批准</button>
@@ -2096,6 +2358,7 @@
     /* 运行研究 */
     document.getElementById('run-selected-btn')?.addEventListener('click', () =>
       runProposal(state.selectedProposalId).catch(err => notify(`运行失败: ${err.message}`, true)));
+    document.getElementById('ai-compare-btn')?.addEventListener('click', () => openCompareModal());
 
     /* 信号刷新 */
     document.getElementById('signal-refresh-btn')?.addEventListener('click', () =>
@@ -2119,6 +2382,14 @@
     document.getElementById('ai-register-modal')?.addEventListener('click', e => {
       if (e.target === document.getElementById('ai-register-modal'))
         document.getElementById('ai-register-modal').style.display = 'none';
+    });
+    document.getElementById('ai-candidate-compare-close')?.addEventListener('click', () => {
+      const modal = document.getElementById('ai-candidate-compare-modal');
+      if (modal) modal.style.display = 'none';
+    });
+    document.getElementById('ai-candidate-compare-modal')?.addEventListener('click', (e) => {
+      const modal = document.getElementById('ai-candidate-compare-modal');
+      if (modal && e.target === modal) modal.style.display = 'none';
     });
 
     /* 研究队列点击代理 */
@@ -2189,6 +2460,11 @@
       if (action === 'view-candidate' && cid) {
         e.stopPropagation();
         viewCandidate(cid).catch(err => notify(`加载详情失败: ${err.message}`, true));
+        return;
+      }
+      if (action === 'toggle-compare' && cid) {
+        e.stopPropagation();
+        toggleCandidateCompare(cid);
         return;
       }
       if (action === 'open-register' && cid) {
@@ -2375,6 +2651,8 @@
     viewCandidate:   id => viewCandidate(id).catch(err => notify(`加载详情失败: ${err.message}`, true)),
     openRegister:    id => openRegisterModal(id).catch(err => notify(`打开注册失败: ${err.message}`, true)),
     runProposal:     id => runProposal(id).catch(err => notify(`运行失败: ${err.message}`, true)),
+    toggleCompare:   id => toggleCandidateCompare(id),
+    showComparePanel: () => openCompareModal(),
     refreshWorkbench,
   };
 })();

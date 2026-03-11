@@ -13,6 +13,7 @@ from config.strategy_registry import get_strategy_defaults
 from core.ai.proposal_schemas import ResearchProposal
 from core.research.experiment_registry import LifecycleRegistry
 from core.research.experiment_schemas import LifecycleRecord, PromotionDecision, StrategyCandidate
+from core.strategies.runtime_policy import build_runtime_limit_policy
 from core.strategies import strategy_manager
 from core.strategies.persistence import persist_strategy_snapshot
 from core.trading.execution_engine import execution_engine
@@ -124,6 +125,37 @@ def _resolve_strategy_class(strategy_type: str):
     return getattr(strategy_module, str(strategy_type), None)
 
 
+def _resolve_observed_trades_per_day(app: FastAPI, candidate: StrategyCandidate) -> Optional[float]:
+    best = dict(candidate.metadata.get("best") or {})
+    trade_count = float(best.get("total_trades") or best.get("trade_count") or 0.0)
+    if trade_count <= 0 and candidate.validation_summary is not None:
+        try:
+            metrics_best = dict((candidate.validation_summary.metrics or {}).get("best") or {})
+            trade_count = float(metrics_best.get("total_trades") or metrics_best.get("trade_count") or 0.0)
+        except Exception:
+            trade_count = 0.0
+    if trade_count <= 0:
+        return None
+
+    days = None
+    try:
+        registry = getattr(app.state, "ai_experiment_registry", None)
+        if registry is not None:
+            exp = registry.get(candidate.experiment_id)
+            if exp is not None:
+                days = float(getattr(exp, "days", 0.0) or 0.0)
+    except Exception:
+        days = None
+    if not days or days <= 0:
+        try:
+            days = float(candidate.metadata.get("research_days") or 0.0)
+        except Exception:
+            days = 0.0
+    if not days or days <= 0:
+        return None
+    return float(trade_count / days)
+
+
 async def promote_candidate(
     app: FastAPI,
     *,
@@ -171,14 +203,33 @@ async def promote_candidate(
 
     if decision == "paper":
         default_allocation = max(0.0, min(1.0, float(getattr(settings, "DEFAULT_STRATEGY_ALLOCATION", 0.15) or 0.15)))
+        constraints = dict(promotion.constraints or {})
+        runtime_limit_minutes: Optional[int]
+        runtime_policy: Dict[str, Any]
+        runtime_override = constraints.get("runtime_limit_minutes")
+        if runtime_override is not None:
+            runtime_limit_minutes = max(0, int(float(runtime_override)))
+            runtime_limit_minutes = runtime_limit_minutes or None
+            runtime_policy = {
+                "runtime_limit_minutes": runtime_limit_minutes,
+                "source": "promotion_constraint",
+            }
+        else:
+            observed_tpd = _resolve_observed_trades_per_day(app, candidate)
+            runtime_policy = build_runtime_limit_policy(
+                timeframe=str(candidate.timeframe or "1h"),
+                params=params,
+                observed_trades_per_day=observed_tpd,
+            )
+            runtime_limit_minutes = int(runtime_policy["runtime_limit_minutes"])
         ok = strategy_manager.register_strategy(
             name=strategy_name,
             strategy_class=strategy_class,
             params=params,
             symbols=[candidate.symbol],
             timeframe=candidate.timeframe,
-            allocation=float((promotion.constraints or {}).get("allocation_cap", default_allocation) or default_allocation),
-            runtime_limit_minutes=None,
+            allocation=float(constraints.get("allocation_cap", default_allocation) or default_allocation),
+            runtime_limit_minutes=runtime_limit_minutes,
         )
         if not ok:
             raise RuntimeError("strategy registration failed during paper promotion")
@@ -192,8 +243,11 @@ async def promote_candidate(
             "mode": "paper",
             "registered_strategy_name": strategy_name,
             "started": True,
+            "runtime_limit_minutes": runtime_limit_minutes,
+            "runtime_policy": runtime_policy,
             "promoted_at": _now_utc().isoformat(),
         }
+        candidate.metadata["registered_strategy_name"] = strategy_name
         return {
             "candidate": candidate,
             "proposal": proposal,
