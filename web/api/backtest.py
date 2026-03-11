@@ -330,6 +330,17 @@ def _resolve_backtest_protective_settings(
     merged_params = dict(params or {})
     defaults = get_strategy_defaults(strategy)
 
+    # Explicit switch has top priority: when disabled, force no protective exits.
+    if not bool(use_stop_take):
+        merged_params.pop("stop_loss_pct", None)
+        merged_params.pop("take_profit_pct", None)
+        return {
+            "enabled": False,
+            "stop_loss_pct": None,
+            "take_profit_pct": None,
+            "params": merged_params,
+        }
+
     sl = _safe_positive_pct(stop_loss_pct)
     tp = _safe_positive_pct(take_profit_pct)
     if sl is None:
@@ -345,7 +356,7 @@ def _resolve_backtest_protective_settings(
         _safe_positive_pct(merged_params.get("stop_loss_pct")) is not None
         or _safe_positive_pct(merged_params.get("take_profit_pct")) is not None
     )
-    enabled = bool(use_stop_take or has_param_protection)
+    enabled = bool(has_param_protection or sl is not None or tp is not None)
     if enabled:
         merged_params["stop_loss_pct"] = sl
         merged_params["take_profit_pct"] = tp
@@ -355,21 +366,20 @@ def _resolve_backtest_protective_settings(
         "take_profit_pct": tp,
         "params": merged_params,
     }
-
-
 def _build_pct_candidates(center: Optional[float], *, floor: float, cap: float) -> List[float]:
     if center is None:
         center = max(floor, min(cap, (floor + cap) * 0.5))
     core = float(max(floor, min(cap, center)))
-    values = [
-        max(floor, min(cap, core * 0.65)),
+    coarse = [
+        max(floor, min(cap, core * 0.8)),
         core,
-        max(floor, min(cap, core * 1.35)),
+        max(floor, min(cap, core * 1.6)),
     ]
-    unique = sorted({round(float(v), 6) for v in values if float(v) > 0})
+    unique = sorted({round(float(v), 6) for v in coarse if float(v) > 0})
+    # Keep stop/take candidate space intentionally coarse to avoid overfitting.
+    if len(unique) > 2:
+        return [unique[0], unique[-1]]
     return unique
-
-
 def _augment_grid_with_stop_take(
     *,
     grid: Dict[str, List[Any]],
@@ -696,11 +706,7 @@ def _optimize_strategy_on_df(
                 commission_rate=max(0.0, float(commission_rate or 0.0)),
                 slippage_bps=max(0.0, float(slippage_bps or 0.0)),
                 market_bundle=market_bundle,
-                use_stop_take=bool(
-                    use_stop_take
-                    or trial_stop_loss is not None
-                    or trial_take_profit is not None
-                ),
+                use_stop_take=bool(use_stop_take),
                 stop_loss_pct=effective_stop_loss,
                 take_profit_pct=effective_take_profit,
             )
@@ -2610,3 +2616,4 @@ async def get_available_strategies():
         "supported_count": sum(1 for x in strategies if bool(x.get("backtest_supported"))),
         "unsupported_count": sum(1 for x in strategies if not bool(x.get("backtest_supported"))),
     }
+

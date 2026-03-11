@@ -3874,6 +3874,8 @@ async def get_market_microstructure(
         funding = dict(funding_basis.get("funding") or {"available": False})
         basis = dict(funding_basis.get("basis") or {"available": False})
     else:
+        # For non-Binance exchanges, try exchange-specific client first, then fall back
+        # to Binance public API as a market-wide reference for funding/basis data.
         connector = exchange_manager.get_exchange(exchange)
         client = getattr(connector, "_client", None) if connector else None
         if client:
@@ -3920,6 +3922,17 @@ async def get_market_microstructure(
                         "perp_price": perp_px,
                         "basis_pct": round(basis_val * 100, 6),
                     }
+
+    # Fallback: if still no funding/basis data, use Binance public API as reference
+    if not funding.get("available") or not basis.get("available"):
+        try:
+            fb = await _fetch_binance_public_funding_and_basis(symbol)
+            if not funding.get("available") and fb.get("funding", {}).get("available"):
+                funding = {**fb["funding"], "source": "binance_public_fallback"}
+            if not basis.get("available") and fb.get("basis", {}).get("available"):
+                basis = {**fb["basis"], "source": "binance_public_fallback"}
+        except Exception:
+            pass
 
     return {
         "exchange": exchange,

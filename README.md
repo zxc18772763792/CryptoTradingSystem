@@ -240,3 +240,18 @@ pytest -q tests/ops tests/polymarket
 - `live` ????? approval code ????
 - `POLY_ENABLE_TRADING=false` ??????????? Polymarket ??
 - OpenClaw ??? Ops token???????? Polymarket ??
+
+## One-click Startup (Recommended)
+Use the root script to start web service with stable defaults (PowerShell policy bypass + health wait):
+
+```bat
+start_web_oneclick.bat
+```
+
+Optional args (passed through to `scripts/start_web_ps.ps1`):
+
+```bat
+start_web_oneclick.bat -Port 8000 -HealthWaitSec 150 -StartNewsLlmWorker
+```
+
+If startup fails, check log file: `logs/web_ps.log`.

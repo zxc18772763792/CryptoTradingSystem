@@ -2234,10 +2234,11 @@ box.innerHTML=`
 </div>
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-top:12px;">
 <div class="stat-box"><div class="stat-label">止盈止损回测</div><div class="stat-value">${r.use_stop_take?'已启用':'未启用'}</div></div>
-<div class="stat-box"><div class="stat-label">止损/止盈参数</div><div class="stat-value">${Number.isFinite(Number(r.stop_loss_pct))?Number(r.stop_loss_pct).toFixed(3):'--'} / ${Number.isFinite(Number(r.take_profit_pct))?Number(r.take_profit_pct).toFixed(3):'--'}</div></div>
+<div class="stat-box"><div class="stat-label">止损/止盈比例</div><div class="stat-value">${Number.isFinite(Number(r.stop_loss_pct))?(Number(r.stop_loss_pct)*100).toFixed(1)+'%':'--'} / ${Number.isFinite(Number(r.take_profit_pct))?(Number(r.take_profit_pct)*100).toFixed(1)+'%':'--'}</div></div>
 <div class="stat-box"><div class="stat-label">保护性平仓次数</div><div class="stat-value">${Number(r.forced_protective_exits||0)} 次</div></div>
 <div class="stat-box"><div class="stat-label">止损/止盈触发</div><div class="stat-value">${Number(r.forced_stop_exits||0)} / ${Number(r.forced_take_exits||0)}</div></div>
 </div>
+${(()=>{const slPct=Number(r.stop_loss_pct),tpPct=Number(r.take_profit_pct),exits=Number(r.forced_protective_exits||0),trades=Number(r.total_trades||0);if(r.use_stop_take&&exits===0&&trades>0){return`<div class="list-item" style="margin-top:8px;padding:8px 12px;background:rgba(255,177,95,.1);border:1px solid rgba(255,177,95,.3);border-radius:8px;color:#ffb15f;font-size:12px;">提示：止盈止损已启用，但本次回测中未触发任何强制平仓（止损${Number.isFinite(slPct)?(slPct*100).toFixed(1):'--'}% / 止盈${Number.isFinite(tpPct)?(tpPct*100).toFixed(1):'--'}%）。持仓期间价格波动未达阈值，结果与未启用时相同。如需验证，可适当调大止损/止盈比例。</div>`;}return'';})()}
 ${renderRangeLockIndicatorHtml(r,true)}`;
 const ec=document.getElementById('backtest-equity-chart');
 if(ec&&r.series?.length){
@@ -3281,12 +3282,15 @@ return;
 const micro=payload.microstructure||{},community=payload.community||{},news=payload.news||{};
 const spreadAvailable=micro?.orderbook?.available!==false&&Number.isFinite(Number(micro?.orderbook?.spread_bps));
 const flowAvailable=micro?.aggressor_flow?.available!==false&&Number.isFinite(Number(micro?.aggressor_flow?.imbalance));
-const fundingAvailable=micro?.funding_rate?.available!==false&&Number.isFinite(Number(micro?.funding_rate?.funding_rate));
-const basisAvailable=micro?.spot_futures_basis?.available!==false&&Number.isFinite(Number(micro?.spot_futures_basis?.basis_pct));
 const spreadBps=spreadAvailable?Number(micro?.orderbook?.spread_bps):null;
 const imbalance=flowAvailable?Number(micro?.aggressor_flow?.imbalance):null;
-const funding=fundingAvailable?Number(micro?.funding_rate?.funding_rate):null;
-const basisPct=basisAvailable?Number(micro?.spot_futures_basis?.basis_pct):null;
+const fundingFromMicro=firstFiniteNumber(micro?.funding_rate?.funding_rate,micro?.funding_rate?.rate);
+const fundingFromOnchainPct=firstFiniteNumber(payload?.onchain?.funding_rate_multi_source?.mean_rate_pct,researchState?.lastOnchain?.funding_rate_multi_source?.mean_rate_pct);
+const fundingFromOnchain=Number.isFinite(Number(fundingFromOnchainPct))?Number(fundingFromOnchainPct)/100:null;
+const funding=firstFiniteNumber(fundingFromMicro,fundingFromOnchain,researchState?.lastSentiment?.funding_rate);
+const fundingAvailable=Number.isFinite(Number(funding));
+const basisPct=firstFiniteNumber(micro?.spot_futures_basis?.basis_pct,micro?.spot_futures_basis?.basis,researchState?.lastSentiment?.basis_pct);
+const basisAvailable=Number.isFinite(Number(basisPct));
 const whaleCount=Number(community?.whale_transfers?.count||0);
 const annCount=Number((community?.announcements||[]).length||0);
 const newsEvents=Number(news?.events_count||0);
@@ -3297,7 +3301,7 @@ const pos=Number(news?.sentiment?.positive||0),neg=Number(news?.sentiment?.negat
 const newsBalance=newsN>0?((pos-neg)/newsN):0;
 const spreadScore=spreadAvailable?clamp11((2.5-spreadBps)/2.5):null;
 const imbalanceScore=flowAvailable?clamp11(imbalance):null;
-const fundingScore=fundingAvailable?clamp11((-funding)/0.0015):null; // contrarian: high positive funding often crowded long
+const fundingScore=fundingAvailable?clamp11((-funding)/0.0015):null;
 const basisScore=basisAvailable?clamp11((-basisPct)/0.35):null;
 const newsScore=newsAvailable&&newsN>0?clamp11(newsBalance):null;
 const riskCrowding=clamp11(((whaleCount>=10?0.35:0)+((spreadAvailable&&spreadBps>5)?0.35:0)+((fundingAvailable&&funding>0.001)?0.3:0))*-1);
@@ -3328,11 +3332,12 @@ async function loadMarketSentimentDashboard(){
 const out=getResearchOutputEl();
 try{
 const ex=getResearchExchange(),sym=getResearchSymbol(),newsSym=symbolToNewsKey(sym);
-const [micro,community,newsScoped,newsGlobal]=await Promise.allSettled([
+const [micro,community,newsScoped,newsGlobal,onchain]=await Promise.allSettled([
 api(`/trading/analytics/microstructure?exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(sym)}&depth_limit=20`,{timeoutMs:8000}),
 api(`/trading/analytics/community/overview?exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(sym)}`,{timeoutMs:12000}),
 api(`/news/summary?symbol=${encodeURIComponent(newsSym)}&hours=24`,{timeoutMs:15000}),
 api(`/news/summary?hours=24`,{timeoutMs:15000}),
+api(`/data/onchain/overview?exchange=${encodeURIComponent(ex)}&symbol=${encodeURIComponent(sym)}&refresh=false`,{timeoutMs:12000}),
 ]);
 let newsPayload=newsScoped.status==='fulfilled'?newsScoped.value:{error:newsScoped.reason?.message||'加载失败',sentiment:{positive:0,neutral:0,negative:0}};
 const scopedTotal=Number(newsPayload?.events_count||0)+Number(newsPayload?.feed_count||0)+Number(newsPayload?.raw_count||0);
@@ -3346,6 +3351,7 @@ timestamp:new Date().toISOString(),
 microstructure:micro.status==='fulfilled'?micro.value:{available:false,error:micro.reason?.message||'加载失败'},
 community:community.status==='fulfilled'?community.value:{error:community.reason?.message||'加载失败'},
 news:newsPayload,
+onchain:onchain.status==='fulfilled'?onchain.value:{},
 };
 renderMarketSentimentPanel(payload);
 renderResearchQuickSummary([{label:'情绪模块',value:'市场情绪仪表盘'},{label:'交易所',value:ex},{label:'标的',value:sym},{label:'新闻样本',value:`结构化 ${Number(payload.news?.events_count||0)} / 当前流 ${Number(payload.news?.feed_count||0)}`}]);
@@ -3748,12 +3754,15 @@ const pending=isResearchAsyncPending(data,'onchain');
 const renderData=pending&&prevGood?prevGood:data;
 if(hasOnchainContent(data)||(!pending&&data&&typeof data==='object'&&!data.error))researchState.lastOnchain=data;
 const summary=document.getElementById('onchain-overview-summary');
+const externalSummary=document.getElementById('external-info-summary');
 const tbody=document.getElementById('onchain-whale-tbody');
 if(summary)summary.innerHTML='<div class="list-item"><span>加载中...</span><span>-</span></div>';
+if(externalSummary)externalSummary.innerHTML='<div class="list-item"><span>加载中...</span><span>-</span></div>';
 if(tbody)tbody.innerHTML='<tr><td colspan="4">加载中...</td></tr>';
 if(pending&&!hasOnchainContent(renderData)){
   const msg=pendingResearchNote(data,'链上面板正在后台预热');
   if(summary)summary.innerHTML=`<div class="list-item"><span>${esc(msg)}</span><span>预热中</span></div>`;
+  if(externalSummary)externalSummary.innerHTML=`<div class="list-item"><span>${esc(msg)}</span><span>预热中</span></div>`;
   if(tbody)tbody.innerHTML='<tr><td colspan="4">后台补拉链上数据中，稍后自动更新</td></tr>';
   const chart=document.getElementById('onchain-overview-chart');if(chart){clearPlotlyHost(chart);chart.innerHTML='<div class="list-item">链上图表正在后台加载</div>';}
   renderResearchConclusionCard();
@@ -3762,6 +3771,7 @@ if(pending&&!hasOnchainContent(renderData)){
 if(!renderData||renderData.error){
   const msg=data?.error||'链上概览加载失败';
   if(summary)summary.innerHTML=`<div class="list-item"><span>${esc(msg)}</span><span>错误</span></div>`;
+  if(externalSummary)externalSummary.innerHTML=`<div class="list-item"><span>${esc(msg)}</span><span>错误</span></div>`;
   if(tbody)tbody.innerHTML=`<tr><td colspan="4">${esc(msg)}</td></tr>`;
   const chart=document.getElementById('onchain-overview-chart');if(chart){clearPlotlyHost(chart);chart.innerHTML='<div class="list-item">暂无链上图表数据</div>';}
   renderResearchConclusionCard();
@@ -3781,18 +3791,31 @@ const servedMode=renderData?.served_mode==='cache_refresh'?'缓存+后台刷新'
 const generatedAt=renderData?.generated_at?fmtDateTime(renderData.generated_at):'--';
 const cacheAgeSec=Number(renderData?.cache_age_sec||0);
 const statusLine=getOnchainStatusLine(renderData);
+const statusParts=String(statusLine||'').split('|').map(x=>x.trim()).filter(Boolean);
+const statusLine1=statusParts.slice(0,2).join(' | ');
+const statusLine2=statusParts.slice(2,4).join(' | ');
+const statusLine3=[statusParts.slice(4).join(' | '),renderData?.cached?`${cacheAgeSec.toFixed(1)}s`:null,pending?pendingResearchNote(data,'后台刷新中'):null].filter(Boolean).join(' | ');
+const fundingLine1=fundingCount>0?`${fundingCount}源 | 均值 ${Number.isFinite(fundingMeanPct)?fundingMeanPct.toFixed(4)+'%':'--'}`:'暂无可用数据';
+const fundingLine2=fundingCount>0?`分歧 ${Number.isFinite(fundingSpreadPct)?fundingSpreadPct.toFixed(4)+'%':'--'}`:'';
 if(summary){
   summary.innerHTML=`
-  <div class="list-item"><span>链 / 观察窗口</span><span>${esc(tvl?.chain||'Ethereum')} / ${Number(renderData?.window_hours||0)}h</span></div>
-  <div class="list-item"><span>最新 TVL</span><span>${fmtCompactUsd(tvl?.latest_tvl)} | 1d ${Number(tvl?.change_1d_pct||0).toFixed(2)}%</span></div>
-  <div class="list-item"><span>7d 变化 / 交易所流向</span><span>${Number(tvl?.change_7d_pct||0).toFixed(2)}% / ${flow.toFixed(4)}</span></div>
-  <div class="list-item"><span>巨鲸数量</span><span>${Number(whales?.count||0)} 笔 | 阈值 ${Number(whales?.threshold_btc||0)} BTC</span></div>
-  <div class="list-item"><span>多所 Funding</span><span>${fundingCount>0?`${fundingCount}源 | 均值 ${Number.isFinite(fundingMeanPct)?fundingMeanPct.toFixed(4)+'%':'--'} | 分歧 ${Number.isFinite(fundingSpreadPct)?fundingSpreadPct.toFixed(4)+'%':'--'}`:'暂无可用数据'}</span></div>
-  <div class="list-item"><span>恐慌贪婪指数</span><span>${fearGreedOk?`${fearGreedValue} (${esc(fearGreed?.classification||'-')}) | 信号 ${esc(fearGreed?.signal||'neutral')}`:'暂无可用数据'}</span></div>
-  <div class="list-item"><span>返回方式 / 生成时间</span><span>${esc(servedMode)} / ${esc(generatedAt)}</span></div>
-  <div class="list-item"><span>组件状态</span><span>${esc(statusLine)}${renderData?.cached?` | ${cacheAgeSec.toFixed(1)}s`:''}${pending?` | ${esc(pendingResearchNote(data,'后台刷新中'))}`:''}</span></div>`;
+  <div class="list-item"><span>链 / 观察窗口</span>${formatMetricLines([`${tvl?.chain||'Ethereum'} / ${Number(renderData?.window_hours||0)}h`])}</div>
+  <div class="list-item"><span>最新 TVL</span>${formatMetricLines([`${fmtCompactUsd(tvl?.latest_tvl)} | 1d ${Number(tvl?.change_1d_pct||0).toFixed(2)}%`])}</div>
+  <div class="list-item"><span>7d 变化 / 交易所流向</span>${formatMetricLines([`${Number(tvl?.change_7d_pct||0).toFixed(2)}% / ${flow.toFixed(4)}`])}</div>
+  <div class="list-item"><span>巨鲸数量</span>${formatMetricLines([`${Number(whales?.count||0)} 笔`,`阈值 ${Number(whales?.threshold_btc||0)} BTC`])}</div>
+  <div class="list-item"><span>多所 Funding</span>${formatMetricLines([fundingLine1,fundingLine2])}</div>
+  <div class="list-item"><span>恐慌贪婪指数</span>${formatMetricLines([fearGreedOk?`${fearGreedValue} (${fearGreed?.classification||'-'})`:'暂无可用数据',fearGreedOk?`信号 ${fearGreed?.signal||'neutral'}`:''])}</div>
+  <div class="list-item"><span>返回方式 / 生成时间</span>${formatMetricLines([servedMode,generatedAt])}</div>
+  <div class="list-item"><span>组件状态</span>${formatMetricLines([statusLine1,statusLine2,statusLine3])}</div>`;
 }
-const txRows=(Array.isArray(whales?.transactions)?whales.transactions:[]).slice(0,12);
+if(externalSummary){
+  externalSummary.innerHTML=`
+  <div class="list-item"><span>外生资金</span>${formatMetricLines([fundingLine1,fundingLine2])}</div>
+  <div class="list-item"><span>风险情绪</span>${formatMetricLines([fearGreedOk?`${fearGreedValue} (${fearGreed?.classification||'-'})`:'暂无可用数据',fearGreedOk?`信号 ${fearGreed?.signal||'neutral'}`:''])}</div>
+  <div class="list-item"><span>返回模式</span>${formatMetricLines([servedMode,generatedAt])}</div>
+  <div class="list-item"><span>组件健康</span>${formatMetricLines([statusLine1,statusLine2,statusLine3])}</div>`;
+}
+const txRows=(Array.isArray(whales?.transactions)?whales.transactions:[]).slice(0,24);
 if(tbody){
   tbody.innerHTML=txRows.length?txRows.map(r=>`<tr><td>${esc(fmtDateTime(r?.timestamp))}</td><td>${Number(r?.btc||0).toFixed(3)}</td><td>${fmtCompactUsd(r?.usd_estimate)}</td><td title="${esc(r?.hash||'')}">${esc(String(r?.hash||'').slice(0,14) || '--')}</td></tr>`).join(''):'<tr><td colspan="4">暂无巨鲸转账</td></tr>';
 }
@@ -3987,6 +4010,18 @@ if(formatter==='fixed4')return num.toFixed(4);
 if(formatter==='bps')return `${num.toFixed(3)} bps`;
 return String(value);
 }
+function firstFiniteNumber(...values){
+for(const val of values){
+  const num=Number(val);
+  if(Number.isFinite(num))return num;
+}
+return null;
+}
+function formatMetricLines(lines){
+const arr=(Array.isArray(lines)?lines:[lines]).map(v=>String(v??'').trim()).filter(Boolean);
+if(!arr.length)return '<span class="metric-lines">--</span>';
+return `<span class="metric-lines">${arr.map(item=>esc(item)).join('<br>')}</span>`;
+}
 function renderWorkbenchMarketStatePanel(module){
 const out=getResearchOutputEl(),summary=document.getElementById('analytics-overview-summary'),grid=document.getElementById('analytics-module-grid');
 if(!summary||!grid)return;
@@ -4009,19 +4044,19 @@ const calendarRows=Array.isArray(payload.calendar_watchlist)?payload.calendar_wa
 const newsCount=countWorkbenchNewsSamples(news);
 const spreadBps=Number.isFinite(Number(micro?.orderbook?.spread_bps))&&Number(micro?.orderbook?.spread_bps)>0?Number(micro.orderbook.spread_bps):null;
 const imbalance=Number.isFinite(Number(micro?.aggressor_flow?.imbalance))?Number(micro.aggressor_flow.imbalance):null;
-const funding=Number.isFinite(Number(micro?.funding_rate?.funding_rate))?Number(micro.funding_rate.funding_rate):null;
-const basisPct=Number.isFinite(Number(micro?.spot_futures_basis?.basis_pct))?Number(micro.spot_futures_basis.basis_pct):null;
+const funding=firstFiniteNumber(micro?.funding_rate?.funding_rate,micro?.funding_rate?.rate,researchState?.lastSentiment?.funding_rate);
+const basisPct=firstFiniteNumber(micro?.spot_futures_basis?.basis_pct,micro?.spot_futures_basis?.basis,researchState?.lastSentiment?.basis_pct);
 const sourceError=String(micro?.source_error||'').trim();
 const announcements=Array.isArray(community?.announcements)?community.announcements:[];
 const whaleCount=Number(community?.whale_transfers?.count||0);
 const warnings=(Array.isArray(module?.warnings)?module.warnings:[]).filter(Boolean);
 const cards=[
-{title:'市场状态',badge:regime?.regime||'待判定',status:'connected',lines:[`方向: ${regime?.bias||'neutral'}`,`置信度: ${Number(regime?.confidence||0).toFixed(2)}`,`风险: ${regime?.risk_level||'unknown'}`]},
-{title:'交易日历',badge:`${calendarRows.length} 条`,status:calendarRows.length?'connected':'warning',lines:calendarRows.length?calendarRows.slice(0,3).map(item=>`${item?.title||item?.event||'事件'} | ${fmtDateTime(item?.timestamp||item?.start_time||item?.time||new Date().toISOString())}`):['当前窗口内暂无重点事件','可先运行研究总览补齐观察清单']},
-{title:'情绪与新闻',badge:newsCount.total?`${newsCount.total} 样本`:'样本不足',status:newsCount.total?'connected':'warning',lines:[`结构化: ${newsCount.events}`,`当前流: ${newsCount.feed}`,`原始新闻: ${newsCount.raw}`]},
-{title:'社区与公告',badge:`公告 ${announcements.length}`,status:(announcements.length||whaleCount)?'connected':'warning',lines:[`巨鲸: ${whaleCount}`,announcements[0]?.title||announcements[0]?.headline||'暂无公告样本']},
-{title:'微观结构',badge:sourceError?'不可用':(spreadBps!==null?'可用':'样本不足'),status:sourceError?'warning':'connected',lines:[`点差: ${fmtWorkbenchMetric(spreadBps,'bps')}`,`主动流: ${fmtWorkbenchMetric(imbalance,'fixed4')}`,sourceError?`来源: ${sourceError}`:`资金费率: ${fmtWorkbenchMetric(funding,'pct4')} | 基差: ${fmtWorkbenchMetric(basisPct,'pct2')}`]},
-{title:'数据提醒',badge:warnings.length?`${warnings.length} 条`:'正常',status:warnings.length?'warning':'connected',lines:warnings.length?warnings.slice(0,3):['当前模块已返回有效摘要','可继续查看因子与链上模块']},
+{title:'市场状态',badge:regime?.regime||'待判定',status:'connected',lines:[`方向 ${regime?.bias||'neutral'}`,`置信 ${Number(regime?.confidence||0).toFixed(2)} | 风险 ${regime?.risk_level||'unknown'}`]},
+{title:'交易日历',badge:calendarRows.length?`${calendarRows.length}条`:'暂无',status:calendarRows.length?'connected':'warning',lines:[calendarRows.length?`事件 ${calendarRows.length} 条`:'当前窗口内暂无重点事件',calendarRows[0]?.title||calendarRows[0]?.event||'等待下一次刷新']},
+{title:'情绪与新闻',badge:newsCount.total?`${newsCount.total}样本`:'样本不足',status:newsCount.total?'connected':'warning',lines:[`结构化 ${newsCount.events} | 当前流 ${newsCount.feed}`,`原始新闻 ${newsCount.raw}`]},
+{title:'社区与公告',badge:(announcements.length||whaleCount)?'正常':'稀疏',status:(announcements.length||whaleCount)?'connected':'warning',lines:[`公告 ${announcements.length} | 巨鲸 ${whaleCount}`,announcements[0]?.title||announcements[0]?.headline||'暂无公告样本']},
+{title:'微观结构',badge:sourceError?'降级':(spreadBps!==null?'正常':'样本不足'),status:sourceError?'warning':'connected',lines:[`点差 ${fmtWorkbenchMetric(spreadBps,'bps')} | 主动流 ${fmtWorkbenchMetric(imbalance,'fixed4')}`,sourceError?`来源 ${sourceError}`:`费率 ${fmtWorkbenchMetric(funding,'pct4')} | 基差 ${fmtWorkbenchMetric(basisPct,'pct2')}`]},
+{title:'数据提醒',badge:warnings.length?`${warnings.length}条`:'正常',status:warnings.length?'warning':'connected',lines:warnings.length?[String(warnings[0]||'').slice(0,40),String(warnings[1]||'无额外警告').slice(0,40)]:['当前模块已返回有效摘要','可继续查看因子与链上模块']},
 ];
 researchState.lastAnalytics={workbench:true,risk_level:regime?.risk_level||'unknown',market_regime:regime?.regime||'未知',direction_bias:regime?.bias||'neutral',confidence:Number(regime?.confidence||0),calendar_count:calendarRows.length,news_samples:newsCount.total,whale_count:whaleCount,microstructure_available:!sourceError&&spreadBps!==null};
 summary.innerHTML=[
@@ -4489,3 +4524,4 @@ markBootFailure(runtimeErr);
 });
 window.addEventListener('unhandledrejection',e=>{markBootFailure(e?.reason||new Error('未处理的Promise异常'));});
 init().catch(markBootFailure);
+

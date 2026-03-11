@@ -2505,8 +2505,7 @@ canvas {
     justify-content: flex-start;
 }
 
-#research #analytics-module-grid.research-strip-grid,
-#research #market-sentiment-grid,
+/* discipline-grid default: single column (overridden to 2-col further below for sentiment/analytics) */
 #research #discipline-grid {
     display: grid !important;
     grid-template-columns: minmax(0, 1fr) !important;
@@ -4856,6 +4855,188 @@ input[type="radio"] {
 
 @media (max-width: 760px) {
   #research #analytics-module-grid.research-strip-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* --- 2026-03-11: research/backtest layout hotfixes --- */
+#research .metric-lines {
+  display: block;
+  line-height: 1.36;
+  white-space: normal;
+  word-break: break-word;
+  text-align: left;
+}
+
+#research #onchain-overview-summary,
+#research #external-info-summary {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 8px !important;
+}
+
+#research #onchain-overview-summary .list-item,
+#research #external-info-summary .list-item {
+  grid-template-columns: minmax(88px, 0.95fr) minmax(0, 1.45fr) !important;
+  align-items: start !important;
+  min-height: 52px !important;
+}
+
+#research #onchain-overview-summary .list-item span:last-child,
+#research #external-info-summary .list-item span:last-child {
+  text-align: left !important;
+  justify-self: stretch !important;
+}
+
+#research #onchain-overview-chart,
+#research .research-chart-box-mini#onchain-overview-chart {
+  min-height: 300px !important;
+  height: 300px !important;
+}
+
+#research #onchain-whale-scroll {
+  max-height: 250px !important;
+  overflow: auto !important;
+}
+
+#research #onchain-whale-scroll .data-table th,
+#research #onchain-whale-scroll .data-table td {
+  white-space: nowrap;
+}
+
+#research #market-sentiment-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 8px !important;
+}
+
+#research #market-sentiment-grid .strategy-card {
+  min-height: 96px !important;
+  padding: 9px 10px !important;
+}
+
+#research #market-sentiment-grid .strategy-card h4 {
+  font-size: 13px !important;
+  line-height: 1.2 !important;
+  margin-bottom: 2px !important;
+}
+
+#research #market-sentiment-grid .strategy-card p {
+  margin: 1px 0 !important;
+  font-size: 11px !important;
+  line-height: 1.3 !important;
+}
+
+#research #analytics-module-grid.research-strip-grid {
+  grid-auto-flow: row !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  grid-auto-columns: unset !important;
+  overflow: visible !important;
+  gap: 8px !important;
+}
+
+#research #analytics-module-grid .strategy-card {
+  min-height: 98px !important;
+  padding: 9px 10px !important;
+}
+
+#research #analytics-module-grid .strategy-card h4 {
+  font-size: 13px !important;
+  line-height: 1.2 !important;
+}
+
+#research #analytics-module-grid .strategy-card p {
+  margin: 1px 0 !important;
+  font-size: 11px !important;
+  line-height: 1.3 !important;
+}
+
+.backtest-protection-row {
+  grid-template-columns: minmax(240px, 1.15fr) minmax(0, 1fr) minmax(0, 1fr) !important;
+  align-items: end;
+}
+
+.backtest-protection-toggle {
+  border: 1px solid #27405a;
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(16, 31, 49, 0.78);
+}
+
+.backtest-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  margin: 0;
+  user-select: none;
+}
+
+.backtest-switch input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.backtest-switch-ui {
+  width: 42px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid #345679;
+  background: #1b2b3f;
+  position: relative;
+  transition: all .18s ease;
+}
+
+.backtest-switch-ui::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #d7dde8;
+  transition: all .18s ease;
+}
+
+.backtest-switch input[type="checkbox"]:checked + .backtest-switch-ui {
+  background: #167a58;
+  border-color: #20bf78;
+}
+
+.backtest-switch input[type="checkbox"]:checked + .backtest-switch-ui::after {
+  left: 22px;
+  background: #ffffff;
+}
+
+.backtest-switch-text {
+  font-size: 12px;
+  color: #d7dde8;
+  line-height: 1.2;
+}
+
+.backtest-protection-toggle .form-help {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #9fb1c9;
+}
+
+@media (max-width: 1220px) {
+  #research #market-sentiment-grid,
+  #research #analytics-module-grid.research-strip-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  .backtest-protection-row {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+@media (max-width: 760px) {
+  #research #market-sentiment-grid,
+  #research #analytics-module-grid.research-strip-grid,
+  #research #onchain-overview-summary,
+  #research #external-info-summary {
     grid-template-columns: 1fr !important;
   }
 }
