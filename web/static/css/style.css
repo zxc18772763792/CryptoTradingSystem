@@ -4518,3 +4518,293 @@ input[type="radio"] {
     overflow-y: auto;
   }
 }
+
+/* ===== Research Compact Layout Refinement ===== */
+#research .research-workspace {
+  display: grid !important;
+  grid-template-columns: minmax(270px, 310px) minmax(0, 1fr) !important;
+  gap: 14px !important;
+  align-items: start;
+}
+
+#research .research-sidebar {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 10px !important;
+}
+
+#research .research-main {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 12px !important;
+}
+
+#research .research-actions-panel,
+#research .research-status-board,
+#research .research-overview-board,
+#research .research-conclusion-card,
+#research .research-factor-lab,
+#research .research-multi-lab,
+#research .research-discipline-card,
+#research .research-output-card,
+#research .research-sidebar .card {
+  padding: 14px !important;
+  border-radius: 12px !important;
+}
+
+#research h3 {
+  margin: 0 0 8px !important;
+  font-size: 18px !important;
+  line-height: 1.25 !important;
+}
+
+#research .research-sidebar h3 {
+  font-size: 17px !important;
+}
+
+#research .research-top-grid {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 1fr) !important;
+  gap: 12px !important;
+  align-items: start;
+}
+
+#research .research-grid-2,
+#research .research-mini-grid,
+#research .research-bottom-grid {
+  display: grid !important;
+  gap: 12px !important;
+}
+
+#research .research-grid-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+
+#research .research-mini-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+
+#research .research-bottom-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+
+#research .research-quick-actions {
+  gap: 8px !important;
+}
+
+#research .research-action-group {
+  padding: 8px !important;
+  border-radius: 10px !important;
+}
+
+#research .research-action-group-title {
+  margin-bottom: 4px !important;
+  font-size: 12px !important;
+}
+
+#research .research-behavior-section {
+  margin-top: 8px !important;
+  padding: 8px !important;
+}
+
+#research .research-config-section {
+  margin-bottom: 8px !important;
+  padding-bottom: 6px !important;
+}
+
+#research .research-quick-summary-box {
+  margin-top: 6px !important;
+  padding: 8px !important;
+}
+
+#research #research-quick-summary,
+#research #research-overview-summary-list,
+#research #research-overview-actions,
+#research #analytics-overview-summary,
+#research #market-sentiment-summary,
+#research #research-conclusion-summary,
+#research #fama-factor-summary,
+#research #multi-asset-summary,
+#research #factor-library-summary,
+#research #onchain-overview-summary,
+#research #external-info-summary,
+#research #discipline-summary {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) !important;
+  gap: 8px !important;
+}
+
+#research #research-quick-summary .list-item,
+#research #research-overview-summary-list .list-item,
+#research #research-overview-actions .list-item,
+#research #analytics-overview-summary .list-item,
+#research #market-sentiment-summary .list-item,
+#research #research-conclusion-summary .list-item,
+#research #fama-factor-summary .list-item,
+#research #multi-asset-summary .list-item,
+#research #factor-library-summary .list-item,
+#research #onchain-overview-summary .list-item,
+#research #external-info-summary .list-item,
+#research #discipline-summary .list-item {
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  gap: 8px !important;
+  min-height: 44px !important;
+  padding: 8px 10px !important;
+  border-radius: 8px !important;
+}
+
+#research #research-quick-summary .list-item span:last-child,
+#research #research-overview-summary-list .list-item span:last-child,
+#research #research-overview-actions .list-item span:last-child,
+#research #analytics-overview-summary .list-item span:last-child,
+#research #market-sentiment-summary .list-item span:last-child,
+#research #research-conclusion-summary .list-item span:last-child,
+#research #fama-factor-summary .list-item span:last-child,
+#research #multi-asset-summary .list-item span:last-child,
+#research #factor-library-summary .list-item span:last-child,
+#research #onchain-overview-summary .list-item span:last-child,
+#research #external-info-summary .list-item span:last-child,
+#research #discipline-summary .list-item span:last-child {
+  text-align: right !important;
+  justify-self: end !important;
+}
+
+#research .research-filter-bar {
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 100px !important;
+  gap: 8px !important;
+  padding: 8px !important;
+  margin-bottom: 8px !important;
+}
+
+#research .research-lab-header {
+  margin-bottom: 8px !important;
+}
+
+#research .research-lab-header .inline-actions {
+  gap: 6px !important;
+}
+
+#research #analytics-module-grid.research-strip-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  gap: 10px !important;
+}
+
+#research #factor-library-grid {
+  grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+  gap: 10px !important;
+}
+
+#research #market-sentiment-chart,
+#research #factor-corr-chart,
+#research #fama-factor-chart,
+#research #multi-asset-corr-chart,
+#research #onchain-overview-chart {
+  min-height: 220px !important;
+}
+
+#research .research-chart-box {
+  height: 220px !important;
+}
+
+#research .research-chart-box-mini {
+  height: 140px !important;
+}
+
+@media (max-width: 1450px) {
+  #research .research-workspace {
+    grid-template-columns: minmax(250px, 290px) minmax(0, 1fr) !important;
+  }
+
+  #research .research-top-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  #research #analytics-module-grid.research-strip-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  #research #factor-library-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 1220px) {
+  #research .research-workspace {
+    grid-template-columns: 1fr !important;
+  }
+
+  #research .research-grid-2,
+  #research .research-mini-grid,
+  #research .research-bottom-grid,
+  #research .research-status-strip {
+    grid-template-columns: 1fr !important;
+  }
+
+  #research .research-sticky {
+    position: static !important;
+  }
+
+  #research #analytics-module-grid.research-strip-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  #research #factor-library-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  }
+}
+
+@media (max-width: 900px) {
+  #research .research-actions-panel,
+  #research .research-status-board,
+  #research .research-overview-board,
+  #research .research-conclusion-card,
+  #research .research-factor-lab,
+  #research .research-multi-lab,
+  #research .research-discipline-card,
+  #research .research-output-card,
+  #research .research-sidebar .card {
+    padding: 12px !important;
+  }
+
+  #research #analytics-module-grid.research-strip-grid,
+  #research #factor-library-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  #research .research-actions-panel .form-row,
+  #research .research-control-card .form-row,
+  #research .research-factor-lab .form-row {
+    grid-template-columns: 1fr !important;
+  }
+
+  #research #research-quick-summary .list-item,
+  #research #research-overview-summary-list .list-item,
+  #research #research-overview-actions .list-item,
+  #research #analytics-overview-summary .list-item,
+  #research #market-sentiment-summary .list-item,
+  #research #research-conclusion-summary .list-item,
+  #research #fama-factor-summary .list-item,
+  #research #multi-asset-summary .list-item,
+  #research #factor-library-summary .list-item,
+  #research #onchain-overview-summary .list-item,
+  #research #external-info-summary .list-item,
+  #research #discipline-summary .list-item {
+    grid-template-columns: 1fr !important;
+  }
+
+  #research #research-quick-summary .list-item span:last-child,
+  #research #research-overview-summary-list .list-item span:last-child,
+  #research #research-overview-actions .list-item span:last-child,
+  #research #analytics-overview-summary .list-item span:last-child,
+  #research #market-sentiment-summary .list-item span:last-child,
+  #research #research-conclusion-summary .list-item span:last-child,
+  #research #fama-factor-summary .list-item span:last-child,
+  #research #multi-asset-summary .list-item span:last-child,
+  #research #factor-library-summary .list-item span:last-child,
+  #research #onchain-overview-summary .list-item span:last-child,
+  #research #external-info-summary .list-item span:last-child,
+  #research #discipline-summary .list-item span:last-child {
+    text-align: left !important;
+    justify-self: start !important;
+  }
+}
