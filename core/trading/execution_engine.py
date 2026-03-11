@@ -402,6 +402,26 @@ class ExecutionEngine:
             return float(default)
 
     @staticmethod
+    def _safe_positive_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+        try:
+            out = float(value)
+            if out <= 0:
+                return default
+            return out
+        except Exception:
+            return default
+
+    @staticmethod
+    def _safe_protective_pct(value: Any) -> Optional[float]:
+        try:
+            out = float(value)
+            if 0 < out < 1:
+                return out
+            return None
+        except Exception:
+            return None
+
+    @staticmethod
     def _floor_to_decimals(value: float, decimals: int = 8) -> float:
         if decimals < 0:
             decimals = 0
@@ -638,6 +658,8 @@ class ExecutionEngine:
         allow_short = bool(params.get("allow_short", default_allow_short))
         reverse_on_signal = bool(params.get("reverse_on_signal", True))
         allow_pyramiding = bool(params.get("allow_pyramiding", False))
+        stop_loss_pct = self._safe_protective_pct(params.get("stop_loss_pct"))
+        take_profit_pct = self._safe_protective_pct(params.get("take_profit_pct"))
 
         return {
             "market_type": market_type,
@@ -645,7 +667,111 @@ class ExecutionEngine:
             "allow_short": allow_short,
             "reverse_on_signal": reverse_on_signal,
             "allow_pyramiding": allow_pyramiding,
+            "stop_loss_pct": stop_loss_pct,
+            "take_profit_pct": take_profit_pct,
         }
+
+    def _normalize_protection_levels(
+        self,
+        *,
+        side: OrderSide,
+        entry_price: float,
+        stop_loss: Optional[float],
+        take_profit: Optional[float],
+    ) -> Tuple[Optional[float], Optional[float]]:
+        sl = self._safe_positive_float(stop_loss)
+        tp = self._safe_positive_float(take_profit)
+        px = float(entry_price or 0.0)
+        if px <= 0:
+            return sl, tp
+
+        eps = max(1e-8, px * 1e-8)
+        if side == OrderSide.BUY:
+            if sl is not None and sl >= px - eps:
+                sl = None
+            if tp is not None and tp <= px + eps:
+                tp = None
+        elif side == OrderSide.SELL:
+            if sl is not None and sl <= px + eps:
+                sl = None
+            if tp is not None and tp >= px - eps:
+                tp = None
+        return sl, tp
+
+    def _resolve_signal_protection_pcts(
+        self,
+        *,
+        signal: Signal,
+        trade_policy: Dict[str, Any],
+    ) -> Tuple[Optional[float], Optional[float]]:
+        meta = dict(signal.metadata or {})
+        signal_sl_pct = self._safe_protective_pct(meta.get("stop_loss_pct"))
+        signal_tp_pct = self._safe_protective_pct(meta.get("take_profit_pct"))
+        policy_sl_pct = self._safe_protective_pct(trade_policy.get("stop_loss_pct"))
+        policy_tp_pct = self._safe_protective_pct(trade_policy.get("take_profit_pct"))
+        default_sl_pct = self._safe_protective_pct(
+            getattr(settings, "STRATEGY_DEFAULT_STOP_LOSS_PCT", 0.03)
+        )
+        default_tp_pct = self._safe_protective_pct(
+            getattr(settings, "STRATEGY_DEFAULT_TAKE_PROFIT_PCT", 0.06)
+        )
+
+        sl_pct = (
+            signal_sl_pct
+            if signal_sl_pct is not None
+            else (policy_sl_pct if policy_sl_pct is not None else default_sl_pct)
+        )
+        tp_pct = (
+            signal_tp_pct
+            if signal_tp_pct is not None
+            else (policy_tp_pct if policy_tp_pct is not None else default_tp_pct)
+        )
+        return sl_pct, tp_pct
+
+    def _ensure_signal_protection_levels(
+        self,
+        *,
+        signal: Signal,
+        side: OrderSide,
+        entry_price: float,
+        trade_policy: Dict[str, Any],
+    ) -> Tuple[Optional[float], Optional[float]]:
+        stop_loss, take_profit = self._normalize_protection_levels(
+            side=side,
+            entry_price=float(entry_price or 0.0),
+            stop_loss=signal.stop_loss,
+            take_profit=signal.take_profit,
+        )
+        sl_pct, tp_pct = self._resolve_signal_protection_pcts(
+            signal=signal,
+            trade_policy=trade_policy,
+        )
+
+        px = float(entry_price or 0.0)
+        auto_stop = False
+        auto_take = False
+        if px > 0:
+            if stop_loss is None and sl_pct is not None:
+                stop_loss = px * (1.0 - sl_pct) if side == OrderSide.BUY else px * (1.0 + sl_pct)
+                auto_stop = True
+            if take_profit is None and tp_pct is not None:
+                take_profit = px * (1.0 + tp_pct) if side == OrderSide.BUY else px * (1.0 - tp_pct)
+                auto_take = True
+
+            stop_loss, take_profit = self._normalize_protection_levels(
+                side=side,
+                entry_price=px,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+            )
+
+        if auto_stop or auto_take:
+            logger.warning(
+                "Auto-injected protective levels for strategy signal: "
+                f"strategy={signal.strategy_name} symbol={signal.symbol} side={side.value} "
+                f"entry={px:.8f} stop_loss={stop_loss} take_profit={take_profit}"
+            )
+        return stop_loss, take_profit
 
     @staticmethod
     def _canonical_symbol(symbol: str) -> str:
@@ -943,6 +1069,15 @@ class ExecutionEngine:
                 self._resolve_order_context(exchange, signal.symbol, qty, signal.price),
                 timeout=8.0,
             )
+            level_price = float(quote_price or signal.price or 0.0)
+            resolved_stop_loss, resolved_take_profit = self._ensure_signal_protection_levels(
+                signal=signal,
+                side=side,
+                entry_price=level_price,
+                trade_policy=trade_policy,
+            )
+            signal.stop_loss = resolved_stop_loss
+            signal.take_profit = resolved_take_profit
 
             req = OrderRequest(
                 symbol=signal.symbol,
@@ -953,8 +1088,8 @@ class ExecutionEngine:
                 exchange=exchange,
                 strategy=signal.strategy_name,
                 account_id=account_id,
-                stop_loss=signal.stop_loss,
-                take_profit=signal.take_profit,
+                stop_loss=resolved_stop_loss,
+                take_profit=resolved_take_profit,
                 trailing_stop_pct=(
                     float(signal.metadata.get("trailing_stop_pct"))
                     if signal.metadata.get("trailing_stop_pct") is not None
@@ -1131,6 +1266,19 @@ class ExecutionEngine:
             fill_price = float(order.price or signal.price or quote_price or 0.0)
             trade_pnl = 0.0
             current_position = position_manager.get_position(exchange, signal.symbol, account_id=account_id)
+            if fill_price > 0 and (req.stop_loss is None or req.take_profit is None):
+                fill_stop_loss, fill_take_profit = self._ensure_signal_protection_levels(
+                    signal=signal,
+                    side=side,
+                    entry_price=fill_price,
+                    trade_policy=trade_policy,
+                )
+                if req.stop_loss is None:
+                    req.stop_loss = fill_stop_loss
+                if req.take_profit is None:
+                    req.take_profit = fill_take_profit
+                signal.stop_loss = req.stop_loss
+                signal.take_profit = req.take_profit
 
             def _merge_protection_settings() -> None:
                 if not current_position:

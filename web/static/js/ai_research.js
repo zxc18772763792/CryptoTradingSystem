@@ -238,14 +238,6 @@
     return [];
   }
 
-  /* 状态文本 */
-  function statusText(s) {
-    return { draft:'草稿', research_queued:'排队中', research_running:'研究中',
-             validated:'已验证', rejected:'已拒绝', paper_running:'纸盘运行',
-             shadow_running:'影子追踪', live_candidate:'实盘候选', retired:'已退役',
-             new:'新建', }[String(s || '')] || String(s || '--');
-  }
-
   /* 晋级建议文本（人性化） */
   function promotionText(d) {
     return { paper:'先以纸盘模拟（低风险试跑）',
@@ -274,10 +266,6 @@
   /* ── API 请求 ── */
   function getStrategyFamily(strategy) {
     return STRATEGY_FAMILIES[String(strategy || '').trim()] || 'traditional';
-  }
-
-  function getFamilyMeta(strategy) {
-    return FAMILY_META[getStrategyFamily(strategy)] || FAMILY_META.traditional;
   }
 
   function getCurrentResearchExchange() {
@@ -354,21 +342,6 @@
     return macroContext;
   }
 
-  function getCandidateEnrichment(cand) {
-    const meta = cand?.metadata || {};
-    const newsCount = Number(meta.news_events_count ?? meta.best?.news_events_count ?? 0);
-    const fundingAvailable = !!(meta.funding_available ?? meta.best?.funding_available);
-    let mode = '仅 OHLCV';
-    if (newsCount > 0 && fundingAvailable) mode = 'OHLCV + 新闻 + 宏观';
-    else if (newsCount > 0) mode = 'OHLCV + 新闻';
-    else if (fundingAvailable) mode = 'OHLCV + 宏观';
-    return {
-      newsCount: Number.isFinite(newsCount) ? Math.max(0, Math.round(newsCount)) : 0,
-      fundingAvailable,
-      mode,
-    };
-  }
-
   function buildCandidateDedupKey(cand) {
     const strategy = String(cand?.strategy || '').trim();
     const symbol = String(cand?.symbol || '').trim();
@@ -420,17 +393,6 @@
         hidden_duplicates_count: item.duplicates.length,
       },
     }));
-  }
-
-  function formatPlannerMacroSummary(macroContext) {
-    if (!macroContext) return '宏观摘要：暂无可用外部数据';
-    const funding = macroContext?.microstructure?.funding_rate;
-    const basis = macroContext?.microstructure?.basis_pct;
-    const whales = macroContext?.community?.whale_count ?? 0;
-    const news = macroContext?.news?.events_count ?? 0;
-    const fundingText = Number.isFinite(Number(funding)) ? Number(funding).toFixed(6) : '--';
-    const basisText = Number.isFinite(Number(basis)) ? `${Number(basis).toFixed(3)}%` : '--';
-    return normalizeUiText(`宏观摘要：Funding ${fundingText} / Basis ${basisText} / 鲸鱼 ${whales} / 新闻 ${news}`);
   }
 
   function statusText(s) {
@@ -554,9 +516,7 @@
     if (!box) return;
     const entries = Object.entries(state.latestSignals);
     if (!entries.length) {
-      box.innerHTML = normalizeUiText('<div style="color:#6b7fa0;font-size:12px;">暂无数据</div>');
-      box.innerHTML = normalizeUiText(box.innerHTML);
-      box.innerHTML = normalizeUiText(box.innerHTML);
+      box.innerHTML = '<div style="color:#6b7fa0;font-size:12px;">暂无数据</div>';
       return;
     }
     box.innerHTML = normalizeUiText(entries.map(([sym, data]) => {
@@ -596,42 +556,8 @@
   }
 
   /* ══════════════════════════════════════════════════════════════
-     研究队列（Proposal 紧凑列表）
+     候选策略卡片
   ══════════════════════════════════════════════════════════════ */
-  function renderProposalList() {
-    const box   = document.getElementById('ai-proposal-list');
-    const badge = document.getElementById('ai-queue-badge');
-    if (!box) return;
-    if (badge) badge.textContent = state.proposals.length ? `${state.proposals.length} 项` : '';
-    if (!state.proposals.length) {
-      box.innerHTML = normalizeUiText('<div style="color:#6b7fa0;font-size:12px;padding:8px 0;">暂无研究任务</div>');
-      return;
-    }
-    box.innerHTML = normalizeUiText(state.proposals.map((item, idx) => {
-      const pid  = String(item?.proposal_id || '');
-      const sel  = pid === state.selectedProposalId ? ' selected' : '';
-      const st   = String(item?.status || 'draft');
-      const dotCls = { research_running:'running', research_queued:'queued',
-                       validated:'validated', rejected:'rejected' }[st] || '';
-      const name = proposalDisplayName(item, idx);
-      const running = ['research_queued','research_running'].includes(st);
-      const runnable = isRunnableProposalStatus(st);
-      return `<div class="proposal-compact-item${sel}" data-proposal-id="${esc(pid)}" data-proposal-status="${esc(st)}" data-action="select-proposal">
-        <div class="pci-dot ${dotCls}" title="${esc(statusText(st))}"></div>
-        <div class="pci-name" title="${esc(name)}">${esc(name)}</div>
-        <div class="pci-actions">
-          ${running
-            ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#f0b429;" data-action="cancel-proposal" data-proposal-id="${esc(pid)}" title="取消运行">■</button>`
-            : (runnable
-              ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;" data-action="run-proposal" data-proposal-id="${esc(pid)}" title="运行回测">▶</button>`
-              : '<span style="font-size:10px;color:#7e92b2;">不可运行</span>')}
-          <button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#e05260;" data-action="delete-proposal" data-proposal-id="${esc(pid)}" title="删除">✕</button>
-        </div>
-      </div>`;
-    }).join(''));
-    normalizeDomText(box);
-  }
-
   function proposalDisplayName(item, index) {
     const metaName = String(item?.metadata?.display_name || '').trim();
     if (metaName) return metaName;
@@ -661,7 +587,7 @@
       const dotCls = { research_running: 'running', research_queued: 'queued', validated: 'validated', rejected: 'rejected' }[st] || '';
       const name = proposalDisplayName(item, idx);
       const running = ['research_queued', 'research_running'].includes(st);
-      const retirable = ['shadow_running', 'live_candidate'].includes(st);
+      const retirable = ['shadow_running', 'live_candidate', 'paper_running'].includes(st);
       const runnable = isRunnableProposalStatus(st);
       const meta = getProposalResearchMeta(item);
       const timeLabel = meta.lastTs ? fmtTs(meta.lastTs) : '--';
@@ -734,136 +660,6 @@
     box.innerHTML = normalizeUiText(box.innerHTML);
     normalizeDomText(box);
     if (cnt) cnt.textContent = `${visible.length}/${totalCount}`;
-  }
-
-  function buildCandidateCard(cand) {
-    const score  = Number(cand?.score || 0);
-    const color  = scoreColor(score);
-    const emoji  = scoreEmoji(score);
-    const cid    = String(cand?.candidate_id || '');
-    const strat  = String(cand?.strategy || '--');
-    const sym    = String(cand?.symbol || '--');
-    const tf     = String(cand?.timeframe || '--');
-    const status = String(cand?.status || 'new');
-    const decision = cand?.promotion?.decision || cand?.promotion_target || '';
-    const sel    = cid === state.selectedCandidateId ? ' selected' : '';
-
-    // 从 top_results 提取核心指标
-    const top = candidateTopResults(cand)[0] || {};
-    const ret    = top.total_return   != null ? Number(top.total_return)   : null;
-    const dd     = top.max_drawdown   != null ? Number(top.max_drawdown)   : null;
-    const wr     = top.win_rate       != null ? Number(top.win_rate) : null;
-    const sr     = top.sharpe_ratio   != null ? Number(top.sharpe_ratio)   : null;
-
-    const retStr = ret != null ? `<strong style="color:${ret >= 0 ? '#20bf78' : '#e05260'}">${ret >= 0 ? '+' : ''}${ret.toFixed(1)}%</strong>` : '<strong>--</strong>';
-    const ddStr  = dd  != null ? `<strong style="color:#e05260">${dd.toFixed(1)}%</strong>` : '<strong>--</strong>';
-    const wrStr  = wr  != null ? `<strong>${wr.toFixed(0)}%</strong>` : '<strong>--</strong>';
-    const srStr  = sr  != null ? `<strong>${sr.toFixed(2)}</strong>` : '<strong>--</strong>';
-
-    // C: IS/OOS/WF badges
-    const vs = cand?.validation_summary || {};
-    let oosBadge = '';
-    if (vs.oos_score != null) {
-      const oos = Number(vs.oos_score);
-      const oosClr = oos >= 1.0 ? '#20bf78' : oos >= 0.5 ? '#f59e0b' : '#e05260';
-      oosBadge = `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:${oosClr}22;color:${oosClr};border:1px solid ${oosClr}44;">OOS ${oos.toFixed(2)}</span>`;
-    }
-    let wfBadge = '';
-    if (vs.wf_stability != null) {
-      const wfs = Number(vs.wf_stability);
-      const wfClr = wfs >= 0.7 ? '#20bf78' : wfs >= 0.4 ? '#f59e0b' : '#e05260';
-      wfBadge = `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:${wfClr}22;color:${wfClr};border:1px solid ${wfClr}44;">WF ${(wfs*100).toFixed(0)}%</span>`;
-    }
-
-    // DSR badge
-    const dsrScore = vs.dsr_score;
-    const dsrColor = dsrScore != null ? (dsrScore >= 0.5 ? '#2a7a2a' : '#7a2a2a') : '#444';
-    const dsrBadge = dsrScore != null
-      ? `<span class="cand-badge" style="background:${dsrColor};color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;">DSR ${(dsrScore*100).toFixed(0)}%</span>`
-      : '';
-    // opt_method badge
-    const optMethod = (cand?.metadata && cand.metadata.opt_method) || '';
-    const optBadge = optMethod
-      ? `<span class="cand-badge" style="background:#1a3a5a;color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;">${optMethod === 'scipy_lhs' ? '🔬 Bayes' : '📊 Grid'}</span>`
-      : '';
-    // Correlation filter badge
-    const corrFiltered  = cand?.metadata?.correlation_filtered;
-    const corrWith      = cand?.metadata?.correlated_with || '';
-    const corrVal       = cand?.metadata?.correlation_value;
-    const corrIsCross   = cand?.metadata?.correlation_is_cross_batch;
-    const corrLabel     = corrIsCross ? '⚠ 跨批相关' : '⚠ 相关';
-    const corrBadge = corrFiltered
-      ? `<span class="cand-badge" style="background:#7a3a2a;color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;" title="与 ${esc(corrWith)} 相关 ρ=${corrVal}">${corrLabel}</span>`
-      : '';
-
-    // B: best_params badge (show trial count)
-    const bestParams = cand?.params || {};
-    const trials = cand?.metadata?.best?.optimization_trials;
-    let paramsBadge = '';
-    if (trials > 0) {
-      paramsBadge = `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:#a78bfa22;color:#a78bfa;border:1px solid #a78bfa44;">🔧 ${trials} trials</span>`;
-    }
-
-    // 信号徽章：若已拉取到该 symbol 的信号则显示
-    let signalBadge = '';
-    const sigData = state.latestSignals[sym];
-    if (sigData && String(sigData.direction || '') !== 'FLAT') {
-      const dir  = String(sigData.direction).toUpperCase();
-      const conf = Math.round(Number(sigData.confidence || 0) * 100);
-      const dirLabel = { LONG:'看多', SHORT:'看空' }[dir] || dir;
-      signalBadge = `<span class="cand-signal-badge">📡 ${esc(sym.split('/')[0])} ${dirLabel} ${conf}%</span><br>`;
-    }
-
-    const canRegister = canRegisterCandidate(cand);
-
-    const category = STRATEGY_CATEGORIES[strat] || '';
-    const catColor  = CATEGORY_COLORS[category] || '#64748b';
-    const familyMeta = getFamilyMeta(strat);
-    const enrichment = getCandidateEnrichment(cand);
-    const catBadge  = category
-      ? `<span class="cand-category-badge" style="background:${catColor}22;color:${catColor};border:1px solid ${catColor}44;">${esc(category)}</span>`
-      : '';
-    const familyBadge = `<span class="cand-category-badge" style="background:${familyMeta.accent};color:${familyMeta.color};border:1px solid ${familyMeta.color}44;">${esc(familyMeta.label)}</span>`;
-    const hiddenDuplicates = Number(cand?.metadata?.hidden_duplicates_count || 0);
-    const enrichmentBadges = `<span class="cand-category-badge" style="background:#1d2b3d;color:#9fb1c9;border:1px solid #32475f;">新闻 ${enrichment.newsCount}</span>${
-      enrichment.fundingAvailable
-        ? '<span class="cand-category-badge" style="background:#143224;color:#20bf78;border:1px solid #245b42;">宏观开启</span>'
-        : '<span class="cand-category-badge" style="background:#2a2330;color:#9a8bb3;border:1px solid #4d4259;">宏观关闭</span>'
-    }${hiddenDuplicates > 0
-      ? `<span class="cand-category-badge" style="background:#3d2b14;color:#f0b429;border:1px solid #6f5321;">去重隐藏 ${hiddenDuplicates}</span>`
-      : ''}`;
-    const aiCardStyle = getStrategyFamily(strat) === 'traditional'
-      ? ''
-      : ` style="box-shadow:0 0 0 1px ${familyMeta.color}33 inset, 0 10px 30px ${familyMeta.accent};"`;
-
-    return `<div class="research-candidate-card score-${color}${sel}"${aiCardStyle}
-               data-candidate-id="${esc(cid)}" data-action="select-candidate">
-      <div class="cand-card-header">
-        <div class="cand-card-title">${emoji} ${esc(strat)}</div>
-        <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">${familyBadge}${catBadge}<div class="cand-score-badge ${color}">${score.toFixed(0)}</div></div>
-      </div>
-      <div style="font-size:12px;color:#7e92b2;margin-bottom:5px;">
-        ${esc(sym)} · ${esc(tf)} · ${esc(statusText(status))}
-      </div>
-      <div class="cand-score-bar">
-        <div class="cand-score-bar-fill ${color}" style="width:${Math.min(100, score).toFixed(0)}%;"></div>
-      </div>
-      <div class="cand-metrics">
-        <div class="cand-metric-item">年化 ${retStr}</div>
-        <div class="cand-metric-item">回撤 ${ddStr}</div>
-        <div class="cand-metric-item">胜率 ${wrStr}</div>
-        <div class="cand-metric-item">夏普 ${srStr}</div>
-      </div>
-      <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">${enrichmentBadges}</div>
-      <div style="font-size:11px;color:#7e92b2;margin-top:4px;">回放模式：${esc(enrichment.mode)}</div>
-      ${oosBadge || wfBadge || paramsBadge || dsrBadge || optBadge || corrBadge ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">${oosBadge}${wfBadge}${paramsBadge}${dsrBadge}${optBadge}${corrBadge}</div>` : ''}
-      ${signalBadge}
-      <div class="cand-recommendation">AI推荐：${esc(promotionText(decision))}</div>
-      <div class="cand-card-actions">
-        <button class="btn btn-sm" data-action="view-candidate" data-candidate-id="${esc(cid)}" style="font-size:12px;">详情</button>
-        ${canRegister ? `<button class="btn-register-cta" data-action="open-register" data-candidate-id="${esc(cid)}">一键注册策略 →</button>` : ''}
-      </div>
-    </div>`;
   }
 
   /* ══════════════════════════════════════════════════════════════
@@ -1295,6 +1091,14 @@
       })()}
 
       <div style="margin-bottom:14px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;">实盘/纸盘性能历史</div>
+          <button class="btn btn-sm" id="btn-load-perf-history" style="font-size:11px;padding:2px 8px;" data-candidate-id="${esc(candidateId)}">加载</button>
+        </div>
+        <div id="perf-history-panel" style="font-size:12px;color:#6b7fa0;">点击加载查看策略运行性能快照</div>
+      </div>
+
+      <div style="margin-bottom:14px;">
         <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px;">Top 回测结果</div>
         <div style="overflow-x:auto;">
           <table class="data-table" style="font-size:12px;">
@@ -1401,6 +1205,54 @@
           notify(`拒绝失败: ${err.message}`, true);
           rejectBtn.textContent = '✗ 拒绝';
           rejectBtn.disabled = false;
+        }
+      });
+    }
+
+    const perfHistBtn = panel.querySelector('#btn-load-perf-history');
+    if (perfHistBtn) {
+      perfHistBtn.addEventListener('click', async () => {
+        const perfPanel = panel.querySelector('#perf-history-panel');
+        if (!perfPanel) return;
+        perfHistBtn.disabled = true;
+        perfHistBtn.textContent = '加载中...';
+        try {
+          const data = await aiApi(
+            `/performance/snapshots?candidate_id=${encodeURIComponent(candidateId)}&days=30&limit=60`,
+            { timeoutMs: 12000 }
+          );
+          const snaps = Array.isArray(data?.snapshots) ? data.snapshots : [];
+          if (!snaps.length) {
+            perfPanel.textContent = '暂无性能快照（策略运行后自动记录）';
+          } else {
+            const reversed = [...snaps].reverse();
+            const pnlSeries = reversed.map(s => Number(s.total_pnl_pct || 0));
+            perfPanel.innerHTML = `
+              <div style="margin-bottom:8px;">${renderSparklineSvg(pnlSeries)}</div>
+              <div style="overflow-x:auto;">
+                <table class="data-table" style="font-size:11px;width:100%;">
+                  <thead><tr><th>时间</th><th>模式</th><th>PnL%</th><th>夏普</th><th>胜率</th><th>交易数</th></tr></thead>
+                  <tbody>${reversed.slice(0, 10).map(s => {
+                    const pct = Number(s.total_pnl_pct || 0);
+                    return `<tr>
+                      <td>${esc(String(s.snapshot_at || '').slice(0, 16))}</td>
+                      <td>${esc(s.mode || '--')}</td>
+                      <td style="color:${pct >= 0 ? '#20bf78' : '#e05260'}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</td>
+                      <td>${s.sharpe_ratio != null ? Number(s.sharpe_ratio).toFixed(2) : '--'}</td>
+                      <td>${s.win_rate != null ? Number(s.win_rate).toFixed(0) + '%' : '--'}</td>
+                      <td>${s.trade_count ?? '--'}</td>
+                    </tr>`;
+                  }).join('')}</tbody>
+                </table>
+              </div>
+              <div style="font-size:10px;color:#4a5f7a;margin-top:4px;">共 ${snaps.length} 条快照，显示最近 10 条</div>
+            `;
+          }
+        } catch (err) {
+          if (perfPanel) perfPanel.textContent = `加载失败: ${String(err?.message || err)}`;
+        } finally {
+          perfHistBtn.textContent = '加载';
+          perfHistBtn.disabled = false;
         }
       });
     }
@@ -1724,15 +1576,82 @@
   /* ══════════════════════════════════════════════════════════════
      操作函数
   ══════════════════════════════════════════════════════════════ */
+  /* ── 实时市场上下文采集（生成研究前自动执行）── */
+  async function _collectLiveMarketContext(primarySymbol) {
+    const sym = primarySymbol || getCurrentResearchSymbol() || 'BTC/USDT';
+    const exchange = getCurrentResearchExchange() || 'binance';
+    const [signalRes, microRes, newsSummaryRes] = await Promise.allSettled([
+      aiApi(`/signals/latest?symbol=${encodeURIComponent(sym)}`, { timeoutMs: 8000 }),
+      rootApi(`/trading/analytics/microstructure?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(sym)}&depth_limit=10`, { timeoutMs: 8000 }),
+      rootApi(`/news/summary?symbol=${encodeURIComponent(sym.split('/')[0])}&hours=6`, { timeoutMs: 8000 }),
+    ]);
+    const signal  = signalRes.status  === 'fulfilled' ? (signalRes.value  || {}) : {};
+    const micro   = microRes.status   === 'fulfilled' ? (microRes.value   || {}) : {};
+    const news    = newsSummaryRes.status === 'fulfilled' ? (newsSummaryRes.value || {}) : {};
+
+    const direction   = String(signal.direction || 'FLAT').toUpperCase();
+    const confidence  = Number(signal.confidence || 0);
+    const fundingRate = micro?.funding_rate?.funding_rate ?? micro?.microstructure?.funding_rate ?? null;
+    const imbalance   = micro?.aggressor_flow?.imbalance ?? micro?.microstructure?.order_flow_imbalance ?? null;
+    const spreadBps   = micro?.orderbook?.spread_bps ?? null;
+    const newsEvents  = Number(news?.events_count ?? 0);
+    const whaleCount  = Number(micro?.whale_activity?.count ?? 0);
+
+    // Derive volatility hint from spread
+    let volatility = '';
+    if (spreadBps != null) {
+      volatility = spreadBps >= 8 ? 'high' : spreadBps <= 2 ? 'low' : 'normal';
+    }
+
+    return {
+      symbol: sym,
+      sentiment: direction,
+      confidence,
+      volatility,
+      factors: {
+        momentum:      direction === 'LONG'  ? Math.min(1, confidence * 1.2) : 0,
+        mean_reversion: direction === 'FLAT' ? 0.6 : 0,
+        trend_strength: direction !== 'FLAT' ? Math.min(1, confidence * 1.5) : 0,
+      },
+      microstructure: {
+        funding_rate:        fundingRate,
+        order_flow_imbalance: imbalance,
+        spread_bps:          spreadBps,
+        volume_surge:        imbalance != null ? Math.abs(imbalance) : 0,
+      },
+      news:  { events_count: newsEvents },
+      whale: { count: whaleCount },
+    };
+  }
+
   async function generateProposal() {
     const goal = String(document.getElementById('ai-planner-goal')?.value || '').trim();
     if (goal.length < 8) { notify('研究目标太短（至少8个字符）', true); return; }
+    const symbols   = csvInput('ai-planner-symbols');
+    const primarySym = symbols[0] || getCurrentResearchSymbol() || 'BTC/USDT';
+
+    // ── 自动采集实时市场上下文 ──
+    const marketCtxEl = document.getElementById('ai-market-context-hint');
+    if (marketCtxEl) marketCtxEl.textContent = '正在采集市场上下文...';
+    const liveCtx = await _collectLiveMarketContext(primarySym).catch(() => ({}));
+    if (marketCtxEl) {
+      const dir   = String(liveCtx.sentiment || 'FLAT');
+      const conf  = Math.round(Number(liveCtx.confidence || 0) * 100);
+      const fr    = liveCtx.microstructure?.funding_rate;
+      const ofi   = liveCtx.microstructure?.order_flow_imbalance;
+      const ne    = liveCtx.news?.events_count ?? '--';
+      const frTxt = fr != null ? fr.toFixed(5) : '--';
+      const ofiTxt= ofi != null ? ofi.toFixed(3) : '--';
+      marketCtxEl.innerHTML = `<span style="color:${dir==='LONG'?'#20bf78':dir==='SHORT'?'#e05260':'#9fb1c9'}">方向 ${dir} ${conf}%</span> · Funding ${frTxt} · OFI ${ofiTxt} · 新闻事件 ${ne}`;
+    }
+
     const payload = {
       goal,
       market_regime: String(document.getElementById('ai-planner-regime')?.value || 'mixed'),
-      symbols:       csvInput('ai-planner-symbols'),
+      symbols,
       timeframes:    csvInput('ai-planner-timeframes'),
       constraints:   { max_templates: Number(document.getElementById('ai-planner-max-templates')?.value || 5) },
+      market_context: liveCtx,
     };
     // Attach pending LLM context if available, then clear it
     if (state.pendingLlmContext) {
@@ -1920,117 +1839,6 @@
     return first || getCurrentResearchSymbol();
   }
 
-  async function retireProposal(proposalId) {
-    if (!proposalId) return;
-    const item = state.proposals.find(p => String(p?.proposal_id || '') === proposalId);
-    const status = String(item?.status || '');
-    if (!['shadow_running', 'live_candidate'].includes(status)) {
-      notify(`当前状态「${statusText(status)}」不可直接退役`, true);
-      return;
-    }
-    if (!window.confirm(`确认将该研究方案退役？\n${proposalId}\n退役后即可删除。`)) return;
-    await aiApi(`/proposals/${encodeURIComponent(proposalId)}/retire`, {
-      method: 'POST',
-      body: JSON.stringify({ notes: 'retired from AI research queue' }),
-      timeoutMs: 15000,
-    });
-    notify('方案已退役，可继续删除');
-    await refreshWorkbench(proposalId, '');
-  }
-
-  async function loadDataReadiness() {
-    const panel = document.getElementById('ai-data-readiness-panel');
-    const summaryEl = document.getElementById('ai-data-readiness-summary');
-    const detailsEl = document.getElementById('ai-data-readiness-details');
-    if (!panel || !summaryEl || !detailsEl) return;
-    const exchange = String(document.getElementById('run-exchange')?.value || getCurrentResearchExchange() || 'binance');
-    const symbol = getPrimaryPlannerSymbol();
-    const newsSymbol = symbolToNewsKey(symbol);
-
-    summaryEl.textContent = '正在检测新闻与宏观数据...';
-    const [newsHealth, newsSummary, newsPull, fundingDiag, micro, community] = await Promise.allSettled([
-      rootApi('/news/health', { timeoutMs: 12000 }),
-      rootApi(`/news/summary?symbol=${encodeURIComponent(newsSymbol)}&hours=24`, { timeoutMs: 12000 }),
-      rootApi('/news/pull_status', { timeoutMs: 12000 }),
-      aiApi(`/diagnostics/funding-cache?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&days=60`, { timeoutMs: 12000 }),
-      rootApi(`/trading/analytics/microstructure?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&depth_limit=20`, { timeoutMs: 12000 }),
-      rootApi(`/trading/analytics/community/overview?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}`, { timeoutMs: 12000 }),
-    ]);
-
-    const health = newsHealth.status === 'fulfilled' ? (newsHealth.value || {}) : {};
-    const summary = newsSummary.status === 'fulfilled' ? (newsSummary.value || {}) : {};
-    const pullStatus = newsPull.status === 'fulfilled' ? (newsPull.value || {}) : {};
-    const funding = fundingDiag.status === 'fulfilled' ? (fundingDiag.value?.funding || {}) : {};
-    const microData = micro.status === 'fulfilled' ? (micro.value || {}) : {};
-    const communityData = community.status === 'fulfilled' ? (community.value || {}) : {};
-
-    const newsEvents = Number(summary?.events_count || 0);
-    const rawCount = Number(summary?.raw_count || 0);
-    const feedCount = Number(summary?.feed_count || 0);
-    const sourceStates = Array.isArray(health?.source_states) ? health.source_states : [];
-    const enabledSources = Object.entries(health?.sources || {}).filter(([, enabled]) => !!enabled).length;
-    const llmQueue = health?.llm_queue || pullStatus?.llm_queue || {};
-    const pendingNewsTasks = Number(llmQueue?.pending_total || 0);
-    const fundingRows = Number(funding?.rows || 0);
-    const fundingRate = microData?.funding_rate?.funding_rate;
-    const basisPct = microData?.spot_futures_basis?.basis_pct;
-    const whaleCount = Number(communityData?.whale_transfers?.count || 0);
-    const issues = [];
-    if (!newsEvents) issues.push('暂无结构化新闻事件');
-    if (!fundingRows) issues.push('暂无资金费率历史缓存');
-    if (!Number.isFinite(Number(fundingRate))) issues.push('实时资金费率不可用');
-    if (!whaleCount) issues.push('暂无巨鲸社区信号');
-
-    summaryEl.textContent = issues.length
-      ? `待补齐：${issues.join(' / ')}`
-      : '新闻与宏观增强已就绪';
-
-    const fundingPath = String(funding?.cache_path || '--');
-    const coverage = funding?.coverage || {};
-    const storageTips = [
-      `新闻来源：抓取后写入 ${health?.service ? 'SQLite 新闻库' : '本地新闻库'}，主库路径默认是 ${'./data/crypto_trading.db'}`,
-      `资金费率：写入本地 Parquet 缓存 ${fundingPath}`,
-      '社区/微观结构：当前用于实时诊断与 AI 规划，尚未做历史全量回放落库',
-    ];
-
-    detailsEl.innerHTML = `
-      <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">新闻</div>
-        <div>结构化事件 ${newsEvents} / 原始新闻 ${rawCount} / Feed ${feedCount}</div>
-        <div>已启用源 ${enabledSources} / 已记录源状态 ${sourceStates.length} / 队列待处理 ${pendingNewsTasks}</div>
-        <div style="margin-top:4px;color:#7e92b2;">获取方式：调用新闻抓取器聚合 RSS、GDELT、Jin10 等，再写入本地新闻库并生成结构化事件。</div>
-      </div>
-      <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">宏观 / 资金</div>
-        <div>缓存行数 ${fundingRows} / 实时资金费率 ${Number.isFinite(Number(fundingRate)) ? Number(fundingRate).toFixed(6) : '--'} / Basis ${Number.isFinite(Number(basisPct)) ? Number(basisPct).toFixed(3) + '%' : '--'}</div>
-        <div>缓存覆盖 ${esc(coverage?.start || '--')} ~ ${esc(coverage?.end || '--')}</div>
-        <div style="margin-top:4px;color:#7e92b2;">获取方式：从 Binance 公共 funding API 拉历史，落到本地 Parquet；研究回测自动读取。</div>
-      </div>
-      <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">社区 / 微观结构</div>
-        <div>巨鲸转账 ${whaleCount} / 订单流和盘口通过交易分析接口实时获取</div>
-        <div style="margin-top:4px;color:#7e92b2;">当前这层主要用于 AI 规划和即时诊断，历史重放仍以新闻事件与资金费率为主。</div>
-      </div>
-      <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">存储说明</div>
-        ${storageTips.map(line => `<div style="margin-top:3px;color:#9fb1c9;">${esc(line)}</div>`).join('')}
-      </div>
-    `;
-    normalizeDomText(detailsEl);
-  }
-
-  async function pullNewsForResearch() {
-    const symbol = getPrimaryPlannerSymbol();
-    const query = symbolToNewsKey(symbol);
-    const result = await rootApi('/news/pull_now?background=true', {
-      method: 'POST',
-      body: JSON.stringify({ since_minutes: 720, max_records: 120, query }),
-      timeoutMs: 12000,
-    });
-    notify(result?.queued ? '新闻抓取任务已提交' : '已有新闻抓取任务在运行');
-    await loadDataReadiness().catch(() => {});
-  }
-
   async function warmFundingForResearch() {
     const exchange = String(document.getElementById('run-exchange')?.value || getCurrentResearchExchange() || 'binance');
     const symbol = getPrimaryPlannerSymbol();
@@ -2052,11 +1860,11 @@
       notify('缺少 proposal_id，无法退役', true);
       return;
     }
-    if (!['shadow_running', 'live_candidate'].includes(status)) {
+    if (!['shadow_running', 'live_candidate', 'paper_running'].includes(status)) {
       notify(`当前状态 ${statusText(status)} 不支持退役`, true);
       return;
     }
-    if (!window.confirm(`确认将该研究退役？\n${proposalId}\n退役后会退出影子跟踪并允许删除。`)) return;
+    if (!window.confirm(`确认将该研究退役？\n${proposalId}\n退役后会退出跟踪并允许删除。`)) return;
     try {
       await aiApi(`/proposals/${encodeURIComponent(proposalId)}/retire`, {
         method: 'POST',

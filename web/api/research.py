@@ -1347,3 +1347,98 @@ async def run_research_workbench_module_query(
 @router.post("/workbench/recommendations")
 async def get_research_workbench_recommendations(payload: ResearchRecommendationRequest) -> Dict[str, Any]:
     return await _get_research_workbench_recommendations(payload)
+
+
+@router.get("/workbench/regime-calendar")
+async def get_regime_calendar(
+    exchange: str = "binance",
+    symbol: str = "BTC/USDT",
+    days: int = 7,
+) -> Dict[str, Any]:
+    """Return a daily market-regime timeline for the past N days.
+
+    Uses stored microstructure + community snapshots to reconstruct the
+    intraday regime label for each calendar day.
+    """
+    from config.database import AnalyticsMicrostructureSnapshot, AnalyticsCommunitySnapshot, async_session_maker as _asm
+    from sqlalchemy import select as _sel
+
+    days = max(1, min(int(days), 30))
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    sym_key = _normalize_symbol(symbol)
+
+    try:
+        async with _asm() as session:
+            micro_stmt = (
+                _sel(AnalyticsMicrostructureSnapshot)
+                .where(
+                    AnalyticsMicrostructureSnapshot.exchange == exchange,
+                    AnalyticsMicrostructureSnapshot.symbol == sym_key,
+                    AnalyticsMicrostructureSnapshot.timestamp >= since,
+                    AnalyticsMicrostructureSnapshot.capture_status.in_(["ok", "degraded"]),
+                )
+                .order_by(AnalyticsMicrostructureSnapshot.timestamp.asc())
+            )
+            micro_rows = (await session.execute(micro_stmt)).scalars().all()
+    except Exception as exc:
+        return {"calendar": [], "error": str(exc), "generated_at": _now_iso()}
+
+    # Group by calendar date (UTC)
+    from collections import defaultdict
+    daily: Dict[str, list] = defaultdict(list)
+    for row in micro_rows:
+        ts = row.timestamp
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        date_str = ts.strftime("%Y-%m-%d")
+        daily[date_str].append(row)
+
+    calendar = []
+    for date_str in sorted(daily.keys()):
+        rows = daily[date_str]
+        # Average key metrics over the day
+        imbalances = [r.order_flow_imbalance for r in rows if r.order_flow_imbalance is not None]
+        funding_rates = [r.funding_rate for r in rows if r.funding_rate is not None]
+        basis_pcts = [r.basis_pct for r in rows if r.basis_pct is not None]
+        spread_bps_list = [r.spread_bps for r in rows if r.spread_bps is not None]
+
+        avg_imbalance = sum(imbalances) / len(imbalances) if imbalances else 0.0
+        avg_funding = sum(funding_rates) / len(funding_rates) if funding_rates else None
+        avg_basis = sum(basis_pcts) / len(basis_pcts) if basis_pcts else None
+        avg_spread = sum(spread_bps_list) / len(spread_bps_list) if spread_bps_list else 0.0
+
+        # Classify daily regime
+        if avg_spread >= 8:
+            regime = "高风险震荡"
+            bias = "defensive"
+        elif avg_imbalance >= 0.12:
+            regime = "顺势偏多"
+            bias = "bullish"
+        elif avg_imbalance <= -0.12:
+            regime = "顺势偏空"
+            bias = "bearish"
+        elif abs(avg_imbalance) <= 0.05:
+            regime = "低信息震荡"
+            bias = "neutral"
+        else:
+            regime = "事件驱动混合"
+            bias = "neutral"
+
+        calendar.append({
+            "date": date_str,
+            "regime": regime,
+            "bias": bias,
+            "avg_imbalance": round(avg_imbalance, 4),
+            "avg_funding": round(avg_funding, 6) if avg_funding is not None else None,
+            "avg_basis": round(avg_basis, 4) if avg_basis is not None else None,
+            "avg_spread_bps": round(avg_spread, 2),
+            "snapshot_count": len(rows),
+        })
+
+    return {
+        "symbol": sym_key,
+        "exchange": exchange,
+        "days": days,
+        "calendar": calendar,
+        "generated_at": _now_iso(),
+    }

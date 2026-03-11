@@ -9,7 +9,7 @@ from config.strategy_registry import DEFAULT_START_ALL_STRATEGIES, get_backtest_
 from core.backtest.cost_models import fee_rate, slippage_rate
 from strategies import ALL_STRATEGIES
 from core.data.factor_library import build_factor_library
-from web.api.backtest import _run_backtest_core, is_strategy_backtest_supported
+from web.api.backtest import _optimize_strategy_on_df, _run_backtest_core, is_strategy_backtest_supported
 
 
 def _sample_ohlcv(symbol: str, rows: int = 420, seed: int = 42) -> pd.DataFrame:
@@ -29,6 +29,26 @@ def _sample_ohlcv(symbol: str, rows: int = 420, seed: int = 42) -> pd.DataFrame:
             "low": low,
             "close": close.values,
             "volume": volume,
+            "symbol": [symbol] * rows,
+        },
+        index=index,
+    )
+
+
+def _trend_ohlcv(symbol: str = "BTC/USDT", rows: int = 240) -> pd.DataFrame:
+    index = pd.date_range(start="2025-01-01", periods=rows, freq="h")
+    close = pd.Series(np.linspace(100.0, 220.0, rows), index=index)
+    open_ = close.shift(1).fillna(close.iloc[0] * 0.998)
+    high = close * 1.003
+    low = close * 0.997
+    volume = pd.Series(np.full(rows, 1200.0), index=index)
+    return pd.DataFrame(
+        {
+            "open": open_.values,
+            "high": high.values,
+            "low": low.values,
+            "close": close.values,
+            "volume": volume.values,
             "symbol": [symbol] * rows,
         },
         index=index,
@@ -188,3 +208,65 @@ def test_fama_factor_strategy_is_supported_in_web_backtest():
     assert result["universe_size"] >= 2
     assert result["final_capital"] > 0
     assert "series" in result and result["series"]
+
+
+def test_backtest_core_stop_take_switch_forces_protective_exits():
+    df = _trend_ohlcv(rows=260)
+    params = {"fast_period": 3, "slow_period": 8}
+    base = _run_backtest_core(
+        strategy="EMAStrategy",
+        df=df,
+        timeframe="1h",
+        initial_capital=10000,
+        params=params,
+        include_series=False,
+    )
+    with_protection = _run_backtest_core(
+        strategy="EMAStrategy",
+        df=df,
+        timeframe="1h",
+        initial_capital=10000,
+        params=params,
+        include_series=False,
+        use_stop_take=True,
+        stop_loss_pct=0.001,
+        take_profit_pct=0.001,
+    )
+
+    assert base["use_stop_take"] is False
+    assert with_protection["use_stop_take"] is True
+    assert with_protection["forced_protective_exits"] > 0
+    assert with_protection["take_profit_pct"] == 0.001
+    assert with_protection["stop_loss_pct"] == 0.001
+
+
+def test_optimize_can_include_stop_take_params_when_enabled():
+    df = _trend_ohlcv(rows=260)
+    result = _optimize_strategy_on_df(
+        strategy="EMAStrategy",
+        df=df,
+        timeframe="1h",
+        initial_capital=10000,
+        commission_rate=0.0004,
+        slippage_bps=2.0,
+        objective="total_return",
+        max_trials=18,
+        use_stop_take=True,
+        stop_loss_pct=0.01,
+        take_profit_pct=0.03,
+    )
+    assert int(result.get("trials") or 0) > 0
+    top_rows = list(result.get("top") or [])
+    assert top_rows
+    best_params = dict((result.get("best") or {}).get("params") or {})
+    assert "stop_loss_pct" in best_params
+    assert "take_profit_pct" in best_params
+    best_metrics = dict((result.get("best") or {}).get("metrics") or {})
+    assert best_metrics.get("stop_loss_pct") == best_params.get("stop_loss_pct")
+    assert best_metrics.get("take_profit_pct") == best_params.get("take_profit_pct")
+
+    for row in list(result.get("top") or [])[:5]:
+        params = dict(row.get("params") or {})
+        metrics = dict(row.get("metrics") or {})
+        assert metrics.get("stop_loss_pct") == params.get("stop_loss_pct")
+        assert metrics.get("take_profit_pct") == params.get("take_profit_pct")

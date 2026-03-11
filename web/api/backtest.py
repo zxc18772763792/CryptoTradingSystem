@@ -77,6 +77,10 @@ _BACKTEST_OPTIMIZATION_GRIDS: Dict[str, Dict[str, List[Any]]] = {
     if registry_backtest_optimization_grid(name)
 }
 _BACKTEST_OPT_OBJECTIVES = {"total_return", "sharpe_ratio", "win_rate"}
+_BACKTEST_COMPARE_DEFAULT_TRIALS = 48
+_BACKTEST_COMPARE_MAX_TRIALS = 512
+_BACKTEST_OPTIMIZE_DEFAULT_TRIALS = 96
+_BACKTEST_OPTIMIZE_MAX_TRIALS = 1024
 
 
 def get_backtest_strategy_catalog() -> List[Dict[str, Any]]:
@@ -301,6 +305,97 @@ def _default_subminute_lookback_days(timeframe: str) -> int:
 def _normalize_optimize_objective(objective: str) -> str:
     text = str(objective or "").strip()
     return text if text in _BACKTEST_OPT_OBJECTIVES else "total_return"
+
+
+def _safe_positive_pct(value: Any) -> Optional[float]:
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    if out <= 0:
+        return None
+    if out >= 1:
+        return None
+    return out
+
+
+def _resolve_backtest_protective_settings(
+    *,
+    strategy: str,
+    params: Optional[Dict[str, Any]] = None,
+    use_stop_take: bool = False,
+    stop_loss_pct: Optional[float] = None,
+    take_profit_pct: Optional[float] = None,
+) -> Dict[str, Any]:
+    merged_params = dict(params or {})
+    defaults = get_strategy_defaults(strategy)
+
+    sl = _safe_positive_pct(stop_loss_pct)
+    tp = _safe_positive_pct(take_profit_pct)
+    if sl is None:
+        sl = _safe_positive_pct(merged_params.get("stop_loss_pct"))
+    if tp is None:
+        tp = _safe_positive_pct(merged_params.get("take_profit_pct"))
+    if sl is None:
+        sl = _safe_positive_pct(defaults.get("stop_loss_pct"))
+    if tp is None:
+        tp = _safe_positive_pct(defaults.get("take_profit_pct"))
+
+    has_param_protection = (
+        _safe_positive_pct(merged_params.get("stop_loss_pct")) is not None
+        or _safe_positive_pct(merged_params.get("take_profit_pct")) is not None
+    )
+    enabled = bool(use_stop_take or has_param_protection)
+    if enabled:
+        merged_params["stop_loss_pct"] = sl
+        merged_params["take_profit_pct"] = tp
+    return {
+        "enabled": bool(enabled and (sl is not None or tp is not None)),
+        "stop_loss_pct": sl,
+        "take_profit_pct": tp,
+        "params": merged_params,
+    }
+
+
+def _build_pct_candidates(center: Optional[float], *, floor: float, cap: float) -> List[float]:
+    if center is None:
+        center = max(floor, min(cap, (floor + cap) * 0.5))
+    core = float(max(floor, min(cap, center)))
+    values = [
+        max(floor, min(cap, core * 0.65)),
+        core,
+        max(floor, min(cap, core * 1.35)),
+    ]
+    unique = sorted({round(float(v), 6) for v in values if float(v) > 0})
+    return unique
+
+
+def _augment_grid_with_stop_take(
+    *,
+    grid: Dict[str, List[Any]],
+    strategy: str,
+    use_stop_take: bool,
+    stop_loss_pct: Optional[float],
+    take_profit_pct: Optional[float],
+) -> Dict[str, List[Any]]:
+    out = {str(k): list(v) for k, v in dict(grid or {}).items()}
+    if not use_stop_take:
+        return out
+    if strategy == "FamaFactorArbitrageStrategy":
+        return out
+
+    resolved = _resolve_backtest_protective_settings(
+        strategy=strategy,
+        params={},
+        use_stop_take=True,
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+    )
+    sl_center = _safe_positive_pct(resolved.get("stop_loss_pct")) or 0.03
+    tp_center = _safe_positive_pct(resolved.get("take_profit_pct")) or 0.06
+    out["stop_loss_pct"] = _build_pct_candidates(sl_center, floor=0.003, cap=0.20)
+    out["take_profit_pct"] = _build_pct_candidates(tp_center, floor=0.005, cap=0.50)
+    return out
 
 
 def _timeframe_to_seconds(timeframe: str) -> int:
@@ -561,25 +656,35 @@ def _optimize_strategy_on_df(
     objective: str = "total_return",
     max_trials: int = 64,
     market_bundle: Optional[Dict[str, pd.DataFrame]] = None,
+    use_stop_take: bool = False,
+    stop_loss_pct: Optional[float] = None,
+    take_profit_pct: Optional[float] = None,
 ) -> Dict[str, Any]:
     if strategy not in _BACKTEST_OPTIMIZATION_GRIDS:
         raise ValueError(f"暂不支持 {strategy} 参数优化")
 
-    grid = _BACKTEST_OPTIMIZATION_GRIDS[strategy]
+    grid = _augment_grid_with_stop_take(
+        grid=_BACKTEST_OPTIMIZATION_GRIDS[strategy],
+        strategy=strategy,
+        use_stop_take=bool(use_stop_take),
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+    )
     keys = list(grid.keys())
     values = [grid[k] for k in keys]
-    all_combos = list(itertools.product(*values))
-
     limit = max(1, int(max_trials or 1))
-    if len(all_combos) > limit:
-        all_combos = all_combos[:limit]
+    combo_iter = itertools.islice(itertools.product(*values), limit)
 
     objective_key = _normalize_optimize_objective(objective)
     trials: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
 
-    for combo in all_combos:
+    for combo in combo_iter:
         params = {keys[idx]: combo[idx] for idx in range(len(keys))}
+        trial_stop_loss = _safe_positive_pct(params.get("stop_loss_pct"))
+        trial_take_profit = _safe_positive_pct(params.get("take_profit_pct"))
+        effective_stop_loss = trial_stop_loss if trial_stop_loss is not None else _safe_positive_pct(stop_loss_pct)
+        effective_take_profit = trial_take_profit if trial_take_profit is not None else _safe_positive_pct(take_profit_pct)
         try:
             metrics = _run_backtest_core(
                 strategy=strategy,
@@ -591,6 +696,13 @@ def _optimize_strategy_on_df(
                 commission_rate=max(0.0, float(commission_rate or 0.0)),
                 slippage_bps=max(0.0, float(slippage_bps or 0.0)),
                 market_bundle=market_bundle,
+                use_stop_take=bool(
+                    use_stop_take
+                    or trial_stop_loss is not None
+                    or trial_take_profit is not None
+                ),
+                stop_loss_pct=effective_stop_loss,
+                take_profit_pct=effective_take_profit,
             )
             score = float(metrics.get(objective_key, 0))
             trials.append({"params": params, "metrics": metrics, "score": score})
@@ -1320,6 +1432,83 @@ def _trade_stats(close: pd.Series, position: pd.Series) -> Dict[str, Any]:
     }
 
 
+def _apply_protective_position_rules(
+    df: pd.DataFrame,
+    position: pd.Series,
+    *,
+    stop_loss_pct: Optional[float],
+    take_profit_pct: Optional[float],
+) -> tuple[pd.Series, Dict[str, int]]:
+    effective = position.fillna(0.0).astype(float).clip(lower=0.0, upper=1.0).copy()
+    if effective.empty:
+        return effective, {"forced_stop_exits": 0, "forced_take_exits": 0}
+
+    sl_pct = _safe_positive_pct(stop_loss_pct)
+    tp_pct = _safe_positive_pct(take_profit_pct)
+    if sl_pct is None and tp_pct is None:
+        return effective, {"forced_stop_exits": 0, "forced_take_exits": 0}
+
+    close = pd.to_numeric(df.get("close"), errors="coerce")
+    high = pd.to_numeric(df.get("high", close), errors="coerce")
+    low = pd.to_numeric(df.get("low", close), errors="coerce")
+
+    in_position = False
+    entry_price = 0.0
+    forced_stop = 0
+    forced_take = 0
+
+    for idx, ts in enumerate(effective.index):
+        desired = bool(float(effective.iloc[idx]) > 0.0)
+        px = float(close.loc[ts]) if pd.notna(close.loc[ts]) else float("nan")
+        hi = float(high.loc[ts]) if pd.notna(high.loc[ts]) else px
+        lo = float(low.loc[ts]) if pd.notna(low.loc[ts]) else px
+
+        if (not np.isfinite(px)) or px <= 0:
+            effective.iloc[idx] = 1.0 if in_position else 0.0
+            continue
+
+        if (not in_position) and desired:
+            in_position = True
+            entry_price = px
+            effective.iloc[idx] = 1.0
+            continue
+
+        if not in_position:
+            effective.iloc[idx] = 0.0
+            continue
+
+        hit_stop = False
+        hit_take = False
+        if sl_pct is not None:
+            stop_price = entry_price * (1.0 - sl_pct)
+            if np.isfinite(lo) and lo <= stop_price:
+                hit_stop = True
+        if tp_pct is not None:
+            take_price = entry_price * (1.0 + tp_pct)
+            if np.isfinite(hi) and hi >= take_price:
+                hit_take = True
+
+        if hit_stop or hit_take:
+            if hit_stop:
+                forced_stop += 1
+            else:
+                forced_take += 1
+            in_position = False
+            entry_price = 0.0
+            effective.iloc[idx] = 0.0
+            continue
+
+        if not desired:
+            in_position = False
+            entry_price = 0.0
+            effective.iloc[idx] = 0.0
+            continue
+
+        effective.iloc[idx] = 1.0
+
+    return effective, {"forced_stop_exits": int(forced_stop), "forced_take_exits": int(forced_take)}
+
+
 def _strategy_recommended_min_bars(
     strategy: str,
     timeframe: str,
@@ -1417,6 +1606,9 @@ def _run_backtest_core(
     commission_rate: float = 0.0004,
     slippage_bps: float = 2.0,
     market_bundle: Optional[Dict[str, pd.DataFrame]] = None,
+    use_stop_take: bool = False,
+    stop_loss_pct: Optional[float] = None,
+    take_profit_pct: Optional[float] = None,
 ) -> Dict[str, Any]:
     if not is_strategy_backtest_supported(strategy):
         info = get_backtest_strategy_info(strategy)
@@ -1433,12 +1625,25 @@ def _run_backtest_core(
             detail=f"数据量不足，无法回测（{timeframe} 至少需要 {min_bars} 根K线，当前 {len(df)} 根）",
         )
 
+    resolved_protection = _resolve_backtest_protective_settings(
+        strategy=strategy,
+        params=params,
+        use_stop_take=bool(use_stop_take),
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+    )
+    merged_params = dict(resolved_protection.get("params") or {})
+    protective_enabled = bool(resolved_protection.get("enabled"))
+    resolved_stop_loss_pct = _safe_positive_pct(resolved_protection.get("stop_loss_pct"))
+    resolved_take_profit_pct = _safe_positive_pct(resolved_protection.get("take_profit_pct"))
+
     benchmark_close = df["close"]
+    protective_stats = {"forced_stop_exits": 0, "forced_take_exits": 0}
     if strategy == "FamaFactorArbitrageStrategy":
         components = _build_fama_backtest_components(
             market_bundle=market_bundle or {},
             timeframe=timeframe,
-            params=params,
+            params=merged_params,
         )
         asset_returns = components["returns"]
         weights = components["weights"]
@@ -1450,8 +1655,19 @@ def _run_backtest_core(
         exposure = weights.abs().sum(axis=1).reindex(benchmark_close.index).fillna(0.0)
         position = exposure
         trade_stats = _portfolio_trade_stats(gross_returns, turnover.reindex(benchmark_close.index).fillna(0.0))
+        if protective_enabled:
+            protective_enabled = False
     else:
-        position = _build_positions(strategy, df, params=params)
+        raw_position = _build_positions(strategy, df, params=merged_params)
+        if protective_enabled:
+            position, protective_stats = _apply_protective_position_rules(
+                df,
+                raw_position,
+                stop_loss_pct=resolved_stop_loss_pct,
+                take_profit_pct=resolved_take_profit_pct,
+            )
+        else:
+            position = raw_position
         returns, anomaly_ratio, clip_limit = _safe_bar_returns(df["close"], timeframe)
         gross_returns = position.shift(1).fillna(0.0) * returns
 
@@ -1459,6 +1675,10 @@ def _run_backtest_core(
         if len(position) > 0:
             turnover.iloc[0] = abs(float(position.iloc[0] or 0.0))
         trade_stats = _trade_stats(df["close"], position)
+
+    if not protective_enabled:
+        resolved_stop_loss_pct = None
+        resolved_take_profit_pct = None
 
     fee_rate, slip_rate = _resolve_cost_rates(commission_rate=commission_rate, slippage_bps=slippage_bps)
     total_cost_rate = fee_rate + slip_rate
@@ -1509,8 +1729,17 @@ def _run_backtest_core(
         "anomaly_bar_ratio": round(float(anomaly_ratio), 6),
         "return_clip_limit": round(float(clip_limit), 6),
         "quality_flag": quality_flag,
-        "recommended_min_bars": int(_strategy_recommended_min_bars(strategy, timeframe, params=params)),
+        "recommended_min_bars": int(_strategy_recommended_min_bars(strategy, timeframe, params=merged_params)),
         "zero_trade_reason": "",
+        "use_stop_take": bool(protective_enabled),
+        "stop_loss_pct": resolved_stop_loss_pct,
+        "take_profit_pct": resolved_take_profit_pct,
+        "forced_stop_exits": int(protective_stats.get("forced_stop_exits") or 0),
+        "forced_take_exits": int(protective_stats.get("forced_take_exits") or 0),
+        "forced_protective_exits": int(
+            int(protective_stats.get("forced_stop_exits") or 0)
+            + int(protective_stats.get("forced_take_exits") or 0)
+        ),
         "news_events_count": int(df.attrs.get("news_events_count", 0) or 0),
         "funding_available": bool(df.attrs.get("funding_available", False)),
         "data_mode": str(
@@ -1550,7 +1779,7 @@ def _run_backtest_core(
             position=position,
             trade_stats=trade_stats,
             timeframe=timeframe,
-            params=params,
+            params=merged_params,
         )
     if strategy == "FamaFactorArbitrageStrategy":
         result["portfolio_mode"] = "cross_sectional_long_short"
@@ -1728,6 +1957,9 @@ async def run_backtest(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     include_series: bool = True,
+    use_stop_take: bool = False,
+    stop_loss_pct: Optional[float] = None,
+    take_profit_pct: Optional[float] = None,
 ):
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
     parsed_end = _parse_backtest_bound(end_date, bound="end_date")
@@ -1778,6 +2010,9 @@ async def run_backtest(
         slippage_bps=max(0.0, float(slippage_bps or 0.0)),
         market_bundle=market_bundle,
         params=get_strategy_defaults(strategy),
+        use_stop_take=bool(use_stop_take),
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
     )
 
     result.update(
@@ -1793,6 +2028,9 @@ async def run_backtest(
             "end_date": df.index[-1].isoformat(),
             "auto_expanded_range": auto_expanded_range,
             "min_required_bars": min_bars,
+            "use_stop_take": bool(result.get("use_stop_take", False)),
+            "stop_loss_pct": result.get("stop_loss_pct"),
+            "take_profit_pct": result.get("take_profit_pct"),
         }
     )
     return result
@@ -1816,7 +2054,10 @@ async def compare_backtests(
     end_date: Optional[str] = None,
     pre_optimize: bool = True,
     optimize_objective: str = "total_return",
-    optimize_max_trials: int = 16,
+    optimize_max_trials: int = _BACKTEST_COMPARE_DEFAULT_TRIALS,
+    use_stop_take: bool = False,
+    stop_loss_pct: Optional[float] = None,
+    take_profit_pct: Optional[float] = None,
 ):
     strategy_list = [s.strip() for s in strategies.split(",") if s.strip()]
     if not strategy_list:
@@ -1878,8 +2119,17 @@ async def compare_backtests(
                     commission_rate=max(0.0, float(commission_rate or 0.0)),
                     slippage_bps=max(0.0, float(slippage_bps or 0.0)),
                     objective=optimize_objective,
-                    max_trials=max(1, min(int(optimize_max_trials or 16), 256)),
+                    max_trials=max(
+                        1,
+                        min(
+                            int(optimize_max_trials or _BACKTEST_COMPARE_DEFAULT_TRIALS),
+                            _BACKTEST_COMPARE_MAX_TRIALS,
+                        ),
+                    ),
                     market_bundle=loop_bundle,
+                    use_stop_take=bool(use_stop_take),
+                    stop_loss_pct=stop_loss_pct,
+                    take_profit_pct=take_profit_pct,
                 )
                 if opt.get("best"):
                     metrics = dict(opt["best"]["metrics"])
@@ -1910,6 +2160,9 @@ async def compare_backtests(
                         slippage_bps=max(0.0, float(slippage_bps or 0.0)),
                         market_bundle=loop_bundle,
                         params=get_strategy_defaults(strategy),
+                        use_stop_take=bool(use_stop_take),
+                        stop_loss_pct=stop_loss_pct,
+                        take_profit_pct=take_profit_pct,
                     )
                     metrics.update(
                         {
@@ -1937,6 +2190,9 @@ async def compare_backtests(
                     slippage_bps=max(0.0, float(slippage_bps or 0.0)),
                     market_bundle=loop_bundle,
                     params=get_strategy_defaults(strategy),
+                    use_stop_take=bool(use_stop_take),
+                    stop_loss_pct=stop_loss_pct,
+                    take_profit_pct=take_profit_pct,
                 )
                 metrics.update(
                     {
@@ -1975,7 +2231,16 @@ async def compare_backtests(
         "end_date": common_df.index[-1].isoformat(),
         "pre_optimize": bool(pre_optimize),
         "optimize_objective": _normalize_optimize_objective(optimize_objective),
-        "optimize_max_trials": max(1, min(int(optimize_max_trials or 16), 256)),
+        "optimize_max_trials": max(
+            1,
+            min(
+                int(optimize_max_trials or _BACKTEST_COMPARE_DEFAULT_TRIALS),
+                _BACKTEST_COMPARE_MAX_TRIALS,
+            ),
+        ),
+        "use_stop_take": bool(use_stop_take),
+        "stop_loss_pct": _safe_positive_pct(stop_loss_pct),
+        "take_profit_pct": _safe_positive_pct(take_profit_pct),
         "results": results,
         "best": ranked[0] if ranked else None,
     }
@@ -1993,6 +2258,9 @@ async def run_backtest_custom(
     end_date: Optional[str] = None,
     include_series: bool = True,
     params_json: Optional[str] = None,
+    use_stop_take: bool = False,
+    stop_loss_pct: Optional[float] = None,
+    take_profit_pct: Optional[float] = None,
 ):
     custom_params: Optional[Dict[str, Any]] = None
     if params_json:
@@ -2043,6 +2311,9 @@ async def run_backtest_custom(
         commission_rate=max(0.0, float(commission_rate or 0.0)),
         slippage_bps=max(0.0, float(slippage_bps or 0.0)),
         market_bundle=market_bundle,
+        use_stop_take=bool(use_stop_take),
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
     )
     result.update(
         {
@@ -2056,6 +2327,9 @@ async def run_backtest_custom(
             "start_date": df.index[0].isoformat(),
             "end_date": df.index[-1].isoformat(),
             "custom_params": custom_params or {},
+            "use_stop_take": bool(result.get("use_stop_take", False)),
+            "stop_loss_pct": result.get("stop_loss_pct"),
+            "take_profit_pct": result.get("take_profit_pct"),
         }
     )
     return result
@@ -2072,8 +2346,11 @@ async def optimize_backtest(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     objective: str = "total_return",
-    max_trials: int = 64,
+    max_trials: int = _BACKTEST_OPTIMIZE_DEFAULT_TRIALS,
     include_all_trials: bool = True,
+    use_stop_take: bool = False,
+    stop_loss_pct: Optional[float] = None,
+    take_profit_pct: Optional[float] = None,
 ):
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
     parsed_end = _parse_backtest_bound(end_date, bound="end_date")
@@ -2107,6 +2384,13 @@ async def optimize_backtest(
             detail=f"该时间范围内K线不足（{len(df)} 根），{timeframe} 至少需要 {min_bars} 根",
         )
     try:
+        resolved_max_trials = max(
+            1,
+            min(
+                int(max_trials or _BACKTEST_OPTIMIZE_DEFAULT_TRIALS),
+                _BACKTEST_OPTIMIZE_MAX_TRIALS,
+            ),
+        )
         opt_result = _optimize_strategy_on_df(
             strategy=strategy,
             df=df,
@@ -2115,8 +2399,11 @@ async def optimize_backtest(
             commission_rate=max(0.0, float(commission_rate or 0.0)),
             slippage_bps=max(0.0, float(slippage_bps or 0.0)),
             objective=objective,
-            max_trials=max_trials,
+            max_trials=resolved_max_trials,
             market_bundle=market_bundle,
+            use_stop_take=bool(use_stop_take),
+            stop_loss_pct=stop_loss_pct,
+            take_profit_pct=take_profit_pct,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -2133,12 +2420,16 @@ async def optimize_backtest(
         "objective": opt_result.get("objective"),
         "commission_rate": max(0.0, float(commission_rate or 0.0)),
         "slippage_bps": max(0.0, float(slippage_bps or 0.0)),
+        "use_stop_take": bool(use_stop_take),
+        "stop_loss_pct": _safe_positive_pct(stop_loss_pct),
+        "take_profit_pct": _safe_positive_pct(take_profit_pct),
         "news_events_count": int(df.attrs.get("news_events_count", 0) or 0),
         "funding_available": bool(df.attrs.get("funding_available", False)),
         "data_mode": str(df.attrs.get("data_mode") or _strategy_data_mode(strategy)),
         "decision_engine": str(df.attrs.get("decision_engine") or _strategy_decision_engine(strategy)),
         "strategy_family": str(df.attrs.get("strategy_family") or _strategy_family(strategy)),
         "trials": int(opt_result.get("trials") or 0),
+        "max_trials": int(resolved_max_trials),
         "failed_trials": int(opt_result.get("failed_trials") or 0),
         "best": opt_result.get("best"),
         "top": opt_result.get("top") or [],
@@ -2158,6 +2449,9 @@ async def export_backtest_report(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     format: str = "xlsx",
+    use_stop_take: bool = False,
+    stop_loss_pct: Optional[float] = None,
+    take_profit_pct: Optional[float] = None,
 ):
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
     parsed_end = _parse_backtest_bound(end_date, bound="end_date")
@@ -2194,6 +2488,9 @@ async def export_backtest_report(
         slippage_bps=max(0.0, float(slippage_bps or 0.0)),
         market_bundle=market_bundle,
         params=get_strategy_defaults(strategy),
+        use_stop_take=bool(use_stop_take),
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
     )
 
     summary_df = pd.DataFrame(
@@ -2221,6 +2518,11 @@ async def export_backtest_report(
                 "anomaly_bar_ratio": result.get("anomaly_bar_ratio"),
                 "return_clip_limit": result.get("return_clip_limit"),
                 "quality_flag": result.get("quality_flag"),
+                "use_stop_take": bool(result.get("use_stop_take", False)),
+                "stop_loss_pct": result.get("stop_loss_pct"),
+                "take_profit_pct": result.get("take_profit_pct"),
+                "forced_stop_exits": result.get("forced_stop_exits"),
+                "forced_take_exits": result.get("forced_take_exits"),
             }
         ]
     )

@@ -135,8 +135,13 @@ def _cache_set(namespace: str, key: str, payload: Dict[str, Any]) -> Dict[str, A
     return result
 
 
-def _invalidate_news_caches() -> None:
-    for namespace in ("latest", "summary", "brief", "health", "pull_status", "worker_status"):
+def _invalidate_news_caches(*, clear_feed: bool = False) -> None:
+    # Keep latest/brief/summary as stale fallback snapshots by default.
+    # This prevents "sudden empty feed" when DB is momentarily contended.
+    namespaces = ["health", "pull_status", "worker_status"]
+    if clear_feed:
+        namespaces.extend(["latest", "summary", "brief"])
+    for namespace in namespaces:
         _NEWS_RESPONSE_CACHE.setdefault(namespace, {}).clear()
 
 
@@ -185,8 +190,8 @@ def _news_runtime_snapshot(request: Request) -> Dict[str, Any]:
 
 async def _collect_news_db_snapshot(timeout_sec: int) -> Dict[str, Any]:
     results = await asyncio.gather(
-        asyncio.wait_for(news_db.list_source_states(), timeout=timeout_sec),
-        asyncio.wait_for(news_db.get_llm_queue_stats(), timeout=timeout_sec),
+        asyncio.wait_for(asyncio.shield(news_db.list_source_states()), timeout=timeout_sec),
+        asyncio.wait_for(asyncio.shield(news_db.get_llm_queue_stats()), timeout=timeout_sec),
         return_exceptions=True,
     )
     source_states_result, llm_queue_result = results
@@ -440,6 +445,39 @@ def _is_relevant_news(item: Dict[str, Any], keywords: List[str], anchor_keywords
     return True
 
 
+def _raw_related_symbols(raw: Dict[str, Any], cfg: Dict[str, Any]) -> List[str]:
+    mapper = _get_mapper(cfg)
+    related: set[str] = set()
+    payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+    symbol_field = raw.get("symbols") or payload.get("symbols") or payload.get("currencies")
+
+    candidates: List[Any] = []
+    if isinstance(symbol_field, dict):
+        candidates.extend(list(symbol_field.keys()))
+        for value in symbol_field.values():
+            if isinstance(value, str):
+                candidates.append(value)
+            elif isinstance(value, list):
+                candidates.extend(value)
+    elif isinstance(symbol_field, list):
+        candidates.extend(symbol_field)
+    elif isinstance(symbol_field, str):
+        candidates.extend([x.strip() for x in symbol_field.split(",") if str(x).strip()])
+
+    for raw_symbol in candidates:
+        normalized = mapper.normalize_symbol(raw_symbol)
+        if normalized:
+            related.add(normalized)
+
+    text = f"{raw.get('title') or ''}\n{raw.get('content') or raw.get('summary') or ''}"
+    for inferred in mapper.extract_symbols_from_text(text, limit=10):
+        normalized = mapper.normalize_symbol(inferred)
+        if normalized:
+            related.add(normalized)
+
+    return sorted(related)
+
+
 def _event_as_feed_item(event: Dict[str, Any]) -> Dict[str, Any]:
     evidence = event.get("evidence") or {}
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
@@ -665,6 +703,38 @@ def _apply_display_summaries(items: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return items
 
 
+def _event_ts_hint(row: Dict[str, Any]) -> Any:
+    if not isinstance(row, dict):
+        return None
+    for key in ("ts", "published_at", "created_at", "time"):
+        value = row.get(key)
+        if value:
+            return value
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    for key in ("ts", "published_at", "created_at", "time"):
+        value = payload.get(key)
+        if value:
+            return value
+    return None
+
+
+def _first_iso_ts(rows: List[Dict[str, Any]]) -> Optional[str]:
+    for row in rows or []:
+        value = _event_ts_hint(row)
+        if not value:
+            continue
+        with contextlib.suppress(Exception):
+            return parse_any_datetime(value).isoformat()
+    return None
+
+
+def _bucket_has_data(bucket_stats: Dict[str, List[Dict[str, Any]]]) -> bool:
+    for rows in (bucket_stats or {}).values():
+        if rows:
+            return True
+    return False
+
+
 def _bucketize_events(events: List[Dict[str, Any]], granularities: Optional[List[str]] = None) -> Dict[str, List[Dict[str, Any]]]:
     rules = granularities or ["5m", "15m", "1h", "4h", "1d"]
     out: Dict[str, List[Dict[str, Any]]] = {}
@@ -673,8 +743,11 @@ def _bucketize_events(events: List[Dict[str, Any]], granularities: Optional[List
 
     rows: List[Dict[str, Any]] = []
     for event in events:
+        ts_hint = _event_ts_hint(event)
+        if not ts_hint:
+            continue
         try:
-            ts = parse_any_datetime(event.get("ts"))
+            ts = parse_any_datetime(ts_hint)
         except Exception:
             continue
         rows.append({"ts": ts, "sentiment": int(event.get("sentiment") or 0)})
@@ -1108,10 +1181,32 @@ async def build_latest_feed(
 
     raw_limit = max(200, limit * 8)
     event_limit = max(300, limit * 10)
+    db_timeout = max(2.5, min(8.0, float(_env_int("NEWS_API_FEED_DB_TIMEOUT_SEC", 5))))
+    db_failures: List[str] = []
+    raw_result, events_result = await asyncio.gather(
+        asyncio.wait_for(asyncio.shield(news_db.list_news_raw(since=since, limit=raw_limit)), timeout=db_timeout),
+        asyncio.wait_for(asyncio.shield(news_db.list_events(symbol=symbol_norm, since=since, limit=event_limit)), timeout=db_timeout),
+        return_exceptions=True,
+    )
+    raw_items = list(raw_result) if not isinstance(raw_result, Exception) else []
+    events = list(events_result) if not isinstance(events_result, Exception) else []
+    if isinstance(raw_result, Exception):
+        db_failures.append(f"list_news_raw={type(raw_result).__name__}")
+    if isinstance(events_result, Exception):
+        db_failures.append(f"list_events={type(events_result).__name__}")
 
-    raw_items = await news_db.list_news_raw(since=since, limit=raw_limit)
-    events = await news_db.list_events(symbol=symbol_norm, since=since, limit=event_limit)
-    task_status_map = await news_db.list_llm_task_status([int(row.get("id")) for row in raw_items if row.get("id")])
+    raw_ids = [int(row.get("id")) for row in raw_items if row.get("id")]
+    task_status_map: Dict[int, str] = {}
+    if raw_ids:
+        task_status_result = await asyncio.gather(
+            asyncio.wait_for(asyncio.shield(news_db.list_llm_task_status(raw_ids)), timeout=db_timeout),
+            return_exceptions=True,
+        )
+        task_status_payload = task_status_result[0] if task_status_result else {}
+        if isinstance(task_status_payload, Exception):
+            db_failures.append(f"list_llm_task_status={type(task_status_payload).__name__}")
+        else:
+            task_status_map = dict(task_status_payload or {})
     min_importance = _llm_min_importance()
     keywords = _topic_keywords(cfg)
     anchor_keywords = _topic_anchor_keywords(cfg)
@@ -1127,6 +1222,7 @@ async def build_latest_feed(
         if not _is_relevant_news(raw, keywords, anchor_keywords):
             continue
         raw_id = raw.get("id")
+        related_symbols = _raw_related_symbols(raw, cfg)
         url = _canonical_url(raw.get("url"))
         title_key = _canonical_title(raw.get("title"))
         story_key = title_key or url
@@ -1156,7 +1252,7 @@ async def build_latest_feed(
                     break
             if matched_events and not picked_event:
                 continue
-            if not matched_events:
+            if not matched_events and symbol_norm not in related_symbols:
                 continue
             grouped_events = [picked_event] if picked_event else []
         elif matched_events:
@@ -1174,6 +1270,10 @@ async def build_latest_feed(
                 llm_task_status=task_status,
                 min_importance=min_importance,
             )
+            if related_symbols:
+                feed_item["related_symbols"] = _sorted_unique_texts(related_symbols)
+            if symbol_norm and symbol_norm in related_symbols:
+                feed_item["symbol"] = symbol_norm
         items.append(feed_item)
         if story_key:
             seen_story_keys.add(story_key)
@@ -1306,7 +1406,7 @@ async def build_latest_feed(
         source_name = str(item.get("source") or "unknown").strip().lower() or "unknown"
         by_source[source_name] = by_source.get(source_name, 0) + 1
 
-    return {
+    response = {
         "count": len(items),
         "symbol": symbol_norm,
         "hours": hours,
@@ -1318,6 +1418,9 @@ async def build_latest_feed(
             "by_source": dict(sorted(by_source.items(), key=lambda kv: kv[1], reverse=True)[:12]),
         },
     }
+    if db_failures:
+        response["db_failures"] = db_failures
+    return response
 
 
 async def pull_and_store_news(cfg: Dict[str, Any], payload: PullNowRequest) -> Dict[str, Any]:
@@ -1507,8 +1610,8 @@ async def health(request: Request) -> Dict[str, Any]:
         base_payload["llm_queue"] = dict(stale.get("llm_queue") or {})
     db_timeout = max(2, _env_int("NEWS_API_HEALTH_DB_TIMEOUT_SEC", 4))
     results = await asyncio.gather(
-        asyncio.wait_for(news_db.list_source_states(), timeout=db_timeout),
-        asyncio.wait_for(news_db.get_llm_queue_stats(), timeout=db_timeout),
+        asyncio.wait_for(asyncio.shield(news_db.list_source_states()), timeout=db_timeout),
+        asyncio.wait_for(asyncio.shield(news_db.get_llm_queue_stats()), timeout=db_timeout),
         return_exceptions=True,
     )
     source_states_result, llm_queue_result = results
@@ -1852,10 +1955,17 @@ async def latest(
         return cached
 
     try:
+        latest_timeout = max(4.0, min(10.0, float(_env_int("NEWS_API_LATEST_TOTAL_TIMEOUT_SEC", 6 if not summarize else 9))))
         if summarize:
-            feed = await build_latest_feed(cfg=cfg, symbol=symbol, hours=hours, limit=limit, summarize=True)
+            feed = await asyncio.wait_for(
+                build_latest_feed(cfg=cfg, symbol=symbol, hours=hours, limit=limit, summarize=True),
+                timeout=latest_timeout,
+            )
         else:
-            feed = await build_latest_feed(cfg=cfg, symbol=symbol, hours=hours, limit=limit, summarize=False)
+            feed = await asyncio.wait_for(
+                build_latest_feed(cfg=cfg, symbol=symbol, hours=hours, limit=limit, summarize=False),
+                timeout=latest_timeout,
+            )
         auto_pull = await _auto_pull_if_stale(cfg=cfg, latest_items=feed.get("items") or [], hours=hours)
         feed["auto_pull_triggered"] = bool(auto_pull)
         return _cache_set("latest", cache_key, feed)
@@ -1877,7 +1987,18 @@ async def latest(
             feed["auto_pull_triggered"] = False
             feed["fallback_reason"] = f"summarize fallback: {exc}"
             return _cache_set("latest", fast_key, feed)
-        raise
+        return {
+            "count": 0,
+            "symbol": symbol_norm,
+            "hours": hours,
+            "since": (_now_utc() - timedelta(hours=max(1, int(hours or 24)))).isoformat(),
+            "items": [],
+            "feed_stats": _feed_sentiment_summary([]),
+            "source_stats": {"by_provider": {}, "by_source": {}},
+            "auto_pull_triggered": False,
+            "fallback_reason": str(exc),
+            "degraded": True,
+        }
 
 
 @router.get("/brief")
@@ -1897,15 +2018,49 @@ async def brief(
 
     since = _now_utc() - timedelta(hours=hours)
     try:
-        feed_preview, source_states, llm_queue, raw_count, events_count, latest_raw_at, latest_event_at = await asyncio.gather(
-            build_latest_feed(cfg=cfg, symbol=symbol_norm, hours=hours, limit=min(max(10, feed_limit), 60), summarize=False),
-            news_db.list_source_states(),
-            news_db.get_llm_queue_stats(),
-            news_db.count_news_raw(since=since),
-            news_db.count_events(symbol=symbol_norm, since=since),
-            news_db.latest_news_raw_timestamp(since=since),
-            news_db.latest_event_timestamp(symbol=symbol_norm, since=since),
+        db_timeout = max(1.5, min(4.0, float(_env_int("NEWS_API_BRIEF_DB_TIMEOUT_SEC", 4))))
+        results = await asyncio.gather(
+            asyncio.wait_for(
+                build_latest_feed(cfg=cfg, symbol=symbol_norm, hours=hours, limit=min(max(10, feed_limit), 60), summarize=False),
+                timeout=max(db_timeout + 2.0, 6.0),
+            ),
+            asyncio.wait_for(asyncio.shield(news_db.list_source_states()), timeout=db_timeout),
+            asyncio.wait_for(asyncio.shield(news_db.get_llm_queue_stats()), timeout=db_timeout),
+            asyncio.wait_for(asyncio.shield(news_db.count_news_raw(since=since)), timeout=db_timeout),
+            asyncio.wait_for(asyncio.shield(news_db.count_events(symbol=symbol_norm, since=since)), timeout=db_timeout),
+            asyncio.wait_for(asyncio.shield(news_db.latest_news_raw_timestamp(since=since)), timeout=db_timeout),
+            asyncio.wait_for(asyncio.shield(news_db.latest_event_timestamp(symbol=symbol_norm, since=since)), timeout=db_timeout),
+            return_exceptions=True,
         )
+        failures: List[str] = []
+        feed_preview_raw, source_states_raw, llm_queue_raw, raw_count_raw, events_count_raw, latest_raw_at_raw, latest_event_at_raw = results
+        if isinstance(feed_preview_raw, Exception):
+            failures.append(f"feed={type(feed_preview_raw).__name__}")
+            feed_preview = {
+                "count": 0,
+                "feed_stats": _feed_sentiment_summary([]),
+                "source_stats": {"by_provider": {}, "by_source": {}},
+            }
+        else:
+            feed_preview = dict(feed_preview_raw or {})
+        source_states = [] if isinstance(source_states_raw, Exception) else list(source_states_raw or [])
+        llm_queue = {} if isinstance(llm_queue_raw, Exception) else dict(llm_queue_raw or {})
+        raw_count = 0 if isinstance(raw_count_raw, Exception) else int(raw_count_raw or 0)
+        events_count = 0 if isinstance(events_count_raw, Exception) else int(events_count_raw or 0)
+        latest_raw_at = None if isinstance(latest_raw_at_raw, Exception) else latest_raw_at_raw
+        latest_event_at = None if isinstance(latest_event_at_raw, Exception) else latest_event_at_raw
+        if isinstance(source_states_raw, Exception):
+            failures.append(f"source_states={type(source_states_raw).__name__}")
+        if isinstance(llm_queue_raw, Exception):
+            failures.append(f"llm_queue={type(llm_queue_raw).__name__}")
+        if isinstance(raw_count_raw, Exception):
+            failures.append(f"raw_count={type(raw_count_raw).__name__}")
+        if isinstance(events_count_raw, Exception):
+            failures.append(f"events_count={type(events_count_raw).__name__}")
+        if isinstance(latest_raw_at_raw, Exception):
+            failures.append(f"latest_raw_at={type(latest_raw_at_raw).__name__}")
+        if isinstance(latest_event_at_raw, Exception):
+            failures.append(f"latest_event_at={type(latest_event_at_raw).__name__}")
         payload = {
             "symbol": symbol_norm,
             "hours": hours,
@@ -1922,6 +2077,9 @@ async def brief(
             "llm_queue": llm_queue,
             "timestamp": _now_utc().isoformat(),
         }
+        if failures:
+            payload["degraded"] = True
+            payload["failures"] = failures
         return _cache_set("brief", cache_key, payload)
     except Exception as exc:
         logger.warning(f"news brief failed symbol={symbol_norm or '-'}: {exc}")
@@ -1974,25 +2132,48 @@ async def summary(
     if cached:
         return cached
     since = _now_utc() - timedelta(hours=hours)
-    db_timeout = max(4.0, float(_env_int("NEWS_API_SUMMARY_DB_TIMEOUT_SEC", 12)))
+    db_timeout = max(2.0, min(5.0, float(_env_int("NEWS_API_SUMMARY_DB_TIMEOUT_SEC", 6))))
     raw_limit = max(1000, min(3000, feed_limit * 24))
     event_limit = max(1000, min(3000, feed_limit * 24))
     try:
-        events_task = asyncio.wait_for(news_db.list_events(symbol=symbol_norm, since=since, limit=event_limit), timeout=db_timeout)
-        raw_task = asyncio.wait_for(news_db.list_news_raw(since=since, limit=raw_limit), timeout=db_timeout)
-        source_task = asyncio.wait_for(news_db.list_source_states(), timeout=db_timeout)
-        queue_task = asyncio.wait_for(news_db.get_llm_queue_stats(), timeout=db_timeout)
-        feed_task = asyncio.wait_for(
-            build_latest_feed(cfg=cfg, symbol=symbol_norm, hours=hours, limit=feed_limit, summarize=False),
-            timeout=max(db_timeout + 3.0, 10.0),
+        results = await asyncio.gather(
+            asyncio.wait_for(asyncio.shield(news_db.list_events(symbol=symbol_norm, since=since, limit=event_limit)), timeout=db_timeout),
+            asyncio.wait_for(asyncio.shield(news_db.list_news_raw(since=since, limit=raw_limit)), timeout=db_timeout),
+            asyncio.wait_for(asyncio.shield(news_db.list_source_states()), timeout=db_timeout),
+            asyncio.wait_for(asyncio.shield(news_db.get_llm_queue_stats()), timeout=db_timeout),
+            asyncio.wait_for(
+                build_latest_feed(cfg=cfg, symbol=symbol_norm, hours=hours, limit=min(feed_limit, 60), summarize=False),
+                timeout=max(db_timeout + 1.0, 5.5),
+            ),
+            return_exceptions=True,
         )
-        events, raw_rows, source_states, llm_queue, feed_preview = await asyncio.gather(
-            events_task,
-            raw_task,
-            source_task,
-            queue_task,
-            feed_task,
-        )
+        failures: List[str] = []
+        events_raw, raw_rows_raw, source_states_raw, llm_queue_raw, feed_preview_raw = results
+        events = [] if isinstance(events_raw, Exception) else list(events_raw or [])
+        raw_rows = [] if isinstance(raw_rows_raw, Exception) else list(raw_rows_raw or [])
+        source_states = [] if isinstance(source_states_raw, Exception) else list(source_states_raw or [])
+        llm_queue = {} if isinstance(llm_queue_raw, Exception) else dict(llm_queue_raw or {})
+        if isinstance(feed_preview_raw, Exception):
+            feed_preview = {
+                "count": 0,
+                "feed_stats": _feed_sentiment_summary([]),
+                "source_stats": {"by_provider": _count_by_provider(raw_rows), "by_source": {}},
+                "items": [],
+            }
+        else:
+            feed_preview = dict(feed_preview_raw or {})
+            if not isinstance(feed_preview.get("items"), list):
+                feed_preview["items"] = []
+        if isinstance(events_raw, Exception):
+            failures.append(f"events={type(events_raw).__name__}")
+        if isinstance(raw_rows_raw, Exception):
+            failures.append(f"raw_rows={type(raw_rows_raw).__name__}")
+        if isinstance(source_states_raw, Exception):
+            failures.append(f"source_states={type(source_states_raw).__name__}")
+        if isinstance(llm_queue_raw, Exception):
+            failures.append(f"llm_queue={type(llm_queue_raw).__name__}")
+        if isinstance(feed_preview_raw, Exception):
+            failures.append(f"feed={type(feed_preview_raw).__name__}")
 
         sentiment = {"positive": 0, "neutral": 0, "negative": 0}
         by_type: Dict[str, int] = {}
@@ -2017,6 +2198,20 @@ async def summary(
 
         sorted_by_type = dict(sorted(by_type.items(), key=lambda kv: kv[1], reverse=True))
         sorted_by_symbol = dict(sorted(by_symbol.items(), key=lambda kv: kv[1], reverse=True)[:12])
+        bucket_stats = _bucketize_events(events)
+        if not _bucket_has_data(bucket_stats):
+            fallback_rows = [
+                {
+                    "ts": item.get("published_at") or item.get("ts") or item.get("created_at"),
+                    "sentiment": int(item.get("sentiment") or 0),
+                }
+                for item in (feed_preview.get("items") or [])
+                if bool(item.get("has_event"))
+            ]
+            fallback_buckets = _bucketize_events(fallback_rows)
+            if _bucket_has_data(fallback_buckets):
+                bucket_stats = fallback_buckets
+                failures.append("bucket_stats=feed_fallback")
 
         payload = {
             "symbol": symbol_norm,
@@ -2024,6 +2219,8 @@ async def summary(
             "since": since.isoformat(),
             "raw_count": len(raw_rows),
             "events_count": len(events),
+            "latest_raw_at": _first_iso_ts(raw_rows),
+            "latest_event_at": _first_iso_ts(events),
             "sentiment": sentiment,
             "feed_count": int(feed_preview.get("count") or 0),
             "feed_stats": feed_preview.get("feed_stats") or _feed_sentiment_summary([]),
@@ -2033,9 +2230,12 @@ async def summary(
             "source_summary": _build_source_summary(raw_rows, source_states),
             "source_states": source_states,
             "llm_queue": llm_queue,
-            "bucket_stats": _bucketize_events(events),
+            "bucket_stats": bucket_stats,
             "timestamp": _now_utc().isoformat(),
         }
+        if failures:
+            payload["degraded"] = True
+            payload["failures"] = failures
         return _cache_set("summary", cache_key, payload)
     except Exception as exc:
         logger.warning(f"news summary failed symbol={symbol_norm or '-'}: {exc}")
@@ -2043,4 +2243,25 @@ async def summary(
         if stale:
             stale["fallback_reason"] = str(exc)
             return stale
-        raise
+        return {
+            "symbol": symbol_norm,
+            "hours": hours,
+            "since": since.isoformat(),
+            "raw_count": 0,
+            "events_count": 0,
+            "latest_raw_at": None,
+            "latest_event_at": None,
+            "sentiment": {"positive": 0, "neutral": 0, "negative": 0},
+            "feed_count": 0,
+            "feed_stats": _feed_sentiment_summary([]),
+            "by_type": {},
+            "by_symbol": {},
+            "by_provider": {},
+            "source_summary": {},
+            "source_states": [],
+            "llm_queue": {},
+            "bucket_stats": _bucketize_events([]),
+            "timestamp": _now_utc().isoformat(),
+            "degraded": True,
+            "fallback_reason": str(exc),
+        }

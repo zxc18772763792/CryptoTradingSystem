@@ -1,5 +1,6 @@
 ﻿"""Binance connector."""
 import asyncio
+import contextlib
 import re
 import time
 from datetime import datetime
@@ -160,7 +161,7 @@ class BinanceConnector(BaseExchange):
             self._connected = True
             logger.info(f"[{self.name}] Connected successfully")
             return True
-        except Exception as e:
+        except BaseException as e:
             try:
                 if self._client:
                     await self._client.close()
@@ -168,12 +169,15 @@ class BinanceConnector(BaseExchange):
                 pass
             self._client = None
             self._connected = False
+            if isinstance(e, asyncio.CancelledError):
+                raise
             self._handle_error(e, "connect")
             return False
 
     async def disconnect(self) -> None:
         if self._client:
-            await self._client.close()
+            with contextlib.suppress(Exception):
+                await self._client.close()
         self._connected = False
         logger.info(f"[{self.name}] Disconnected")
 

@@ -59,6 +59,13 @@
         return "中性";
     }
 
+    function summarySentimentText(v) {
+        const key = String(v || "neutral").toLowerCase();
+        if (key === "positive") return "利好";
+        if (key === "negative") return "利空";
+        return "中性";
+    }
+
     
     function processingStatusText(v) {
         const key = String(v || "").toLowerCase();
@@ -103,10 +110,10 @@
                 },
             });
             const data = await res.json().catch(() => ({}));
-            if (!res.ok) throw new Error(data.detail || data.error || `璇锋眰澶辫触(${res.status})`);
+            if (!res.ok) throw new Error(data.detail || data.error || `请求失败(${res.status})`);
             return data;
         } catch (err) {
-            if (err?.name === "AbortError") throw new Error(`璇锋眰瓒呮椂(${timeoutMs}ms): ${path}`);
+            if (err?.name === "AbortError") throw new Error(`请求超时(${timeoutMs}ms): ${path}`);
             throw err;
         } finally {
             clearTimeout(timer);
@@ -198,7 +205,7 @@
         const enabled = Object.entries(state.health?.sources || {}).filter(([, v]) => !!v).length || sourceStates.length;
         const errors = sourceStates.filter((row) => Number(row?.error_count || 0) > 0).length;
         badge.className = `status-badge ${errors ? "warning" : "connected"}`;
-        badge.textContent = `鏉ユ簮 ${enabled} | 寰呭鐞?${Number(queue?.pending_total || 0)} | 寮傚父 ${errors}`;
+        badge.textContent = `来源 ${enabled} | 待处理 ${Number(queue?.pending_total || 0)} | 异常 ${errors}`;
         if (el("news-now-time")) {
             el("news-now-time").textContent = fmtTs(state.health?.timestamp || state.worker?.timestamp || new Date().toISOString());
         }
@@ -243,7 +250,7 @@
         const bySource = state.latest?.source_stats?.by_source || {};
         const names = Array.from(new Set([...Object.keys(sourceSummary), ...Object.keys(byProvider), ...Object.keys(bySource)])).filter(Boolean);
         if (!names.length) {
-            box.innerHTML = '<div class="list-item">鏆傛棤鏉ユ簮缁熻</div>';
+            box.innerHTML = '<div class="list-item">暂无来源统计</div>';
             return;
         }
         names.sort((a, b) => Number(sourceSummary[b]?.inserted_count || byProvider[b] || bySource[b] || 0) - Number(sourceSummary[a]?.inserted_count || byProvider[a] || bySource[a] || 0));
@@ -251,14 +258,16 @@
             const inserted = Number(sourceSummary[name]?.inserted_count || byProvider[name] || 0);
             const live = Number(bySource[name] || 0);
             const lastErr = plainText(sourceSummary[name]?.last_error || "");
-            const tail = lastErr ? ` | 鏈€杩戦敊璇?${esc(lastErr.slice(0, 32))}` : "";
-            return `<div class="list-item"><span>${esc(plainText(name))}</span><span>24h ${inserted} | 褰撳墠 ${live}${tail}</span></div>`;
+            const tail = lastErr ? ` | 最近错误 ${esc(lastErr.slice(0, 32))}` : "";
+            return `<div class="list-item"><span>${esc(plainText(name))}</span><span>24h ${inserted} | 当前 ${live}${tail}</span></div>`;
         }).join("");
     }
 
     function renderSummary() {
         const latest = state.latest || {};
         const base = state.summary || state.brief || {};
+        const latestRawAt = base?.latest_raw_at || state.brief?.latest_raw_at || null;
+        const latestEventAt = base?.latest_event_at || state.brief?.latest_event_at || null;
         const stats = summaryMetrics();
         const breakdown = latest?.feed_stats?.unstructured_breakdown || stats?.unstructured_breakdown || {};
         const breakdownText = `待入模 ${Number(breakdown.pending || 0)} | 处理中 ${Number(breakdown.running || 0)} | 重试 ${Number(breakdown.retry || 0)} | 失败 ${Number(breakdown.failed || 0)} | done无事件 ${Number(breakdown.done_no_event || 0)} | 低优先未入队 ${Number(breakdown.skipped_low_importance || 0)} | 未入队 ${Number(breakdown.not_queued || 0)}`;
@@ -268,12 +277,12 @@
         if (el("news-negative-count")) el("news-negative-count").textContent = String(stats.sentiment.negative);
         if (el("news-summary-gran-meta")) el("news-summary-gran-meta").textContent = `${stats.scope} | ${stats.total} 条`;
         if (!el("news-summary-note")) return;
-        const summaryState = latest?.fallback_reason ? "GLM 超时，已回退" : "正常";
+        const summaryState = (latest?.fallback_reason || state.summary?.fallback_reason) ? "GLM 超时，已回退" : "正常";
         el("news-summary-note").innerHTML = [
             `<div class="list-item"><span>24h 原始新闻 / 事件</span><span>${Number(base?.raw_count || 0)} / ${Number(base?.events_count || 0)}</span></div>`,
             `<div class="list-item"><span>当前 Feed 结构化 / 未结构化</span><span>${Number(stats.structured || 0)} / ${Number(stats.unstructured || 0)}</span></div>`,
             `<div class="list-item"><span>未结构化处理状态</span><span>${esc(breakdownText)}</span></div>`,
-            `<div class="list-item"><span>最近原始新闻 / 事件</span><span>${fmtTs(base?.latest_raw_at)} / ${fmtTs(base?.latest_event_at)}</span></div>`,
+            `<div class="list-item"><span>最近原始新闻 / 事件</span><span>${fmtTs(latestRawAt)} / ${fmtTs(latestEventAt)}</span></div>`,
             `<div class="list-item"><span>标题摘要状态</span><span>${esc(summaryState)}</span></div>`,
         ].join("");
     }
@@ -284,18 +293,30 @@
         const meta = el("news-bucket-meta");
         const gran = getVal("news-bucket-granularity", "1h");
         const buckets = state.summary?.bucket_stats?.[gran] || [];
-        if (meta) meta.textContent = buckets.length ? `缁撴瀯鍖栦簨浠剁粺璁★紙${gran}锛?| 妗舵暟 ${buckets.length}` : "缁撴瀯鍖栫粺璁″姞杞戒腑...";
+        if (meta) {
+            if (buckets.length) {
+                meta.textContent = `结构化事件统计（${gran}）| 桶数 ${buckets.length}`;
+            } else if (state.summary?.fallback_reason) {
+                meta.textContent = `结构化统计降级：${state.summary.fallback_reason}`;
+            } else if (state.summary) {
+                meta.textContent = "结构化统计暂无数据";
+            } else {
+                meta.textContent = "结构化统计暂不可用，自动重试中...";
+            }
+        }
         if (!buckets.length) {
-            if (chart) chart.innerHTML = '<div class="list-item">鏆傛棤缁撴瀯鍖栦簨浠剁粺璁?/div>';
-            if (list) list.innerHTML = '<div class="list-item">鏆傛棤缁撴瀯鍖栦簨浠剁粺璁?/div>';
+            const emptyText = state.summary ? "暂无结构化事件统计" : "结构化统计暂不可用，正在自动重试";
+            if (chart) chart.innerHTML = `<div class="list-item">${emptyText}</div>`;
+            if (list) list.innerHTML = `<div class="list-item">${emptyText}</div>`;
             return;
         }
         const recent = buckets.slice(-36);
         if (chart && typeof Plotly !== "undefined") {
+            chart.innerHTML = "";
             Plotly.react(chart, [
-                { type: "bar", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.count || 0)), name: "鎬绘暟", marker: { color: "#1f9d63", opacity: 0.35 } },
-                { type: "scatter", mode: "lines+markers", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.positive || 0)), name: "鍒╁ソ", line: { color: "#20bf78", width: 2 } },
-                { type: "scatter", mode: "lines+markers", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.negative || 0)), name: "鍒╃┖", line: { color: "#ea5b61", width: 2 } },
+                { type: "bar", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.count || 0)), name: "总数", marker: { color: "#1f9d63", opacity: 0.35 } },
+                { type: "scatter", mode: "lines+markers", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.positive || 0)), name: "利好", line: { color: "#20bf78", width: 2 } },
+                { type: "scatter", mode: "lines+markers", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.negative || 0)), name: "利空", line: { color: "#ea5b61", width: 2 } },
             ], {
                 paper_bgcolor: "#111723",
                 plot_bgcolor: "#111723",
@@ -305,6 +326,8 @@
                 barmode: "overlay",
                 hovermode: "x unified",
             }, { responsive: true, displaylogo: false });
+        } else if (chart) {
+            chart.innerHTML = '<div class="list-item">图表库未加载，无法绘制结构化统计图</div>';
         }
         if (list) {
             list.innerHTML = recent.slice().reverse().map((row) => {
@@ -312,7 +335,7 @@
                 const positive = Number(row.positive || 0);
                 const neutral = Number(row.neutral || 0);
                 const negative = Number(row.negative || 0);
-                return `<div class="list-item"><span>${fmtTs(row.bucket_start)}</span><span>鎬?${total} | +${positive} / 0:${neutral} / -${negative}</span></div>`;
+                return `<div class="list-item"><span>${fmtTs(row.bucket_start)}</span><span>总 ${total} | +${positive} / 0:${neutral} / -${negative}</span></div>`;
             }).join("");
         }
     }
@@ -465,11 +488,20 @@
                         state.summary = summary || null;
                         state.summaryLoadedAt = Date.now();
                         renderAll();
-                    }).catch(() => {});
+                    }).catch(() => {
+                        // Keep the page responsive when summary endpoint is slow/failing.
+                        state.summary = state.summary || null;
+                        renderBuckets();
+                        renderProviders();
+                    });
                 }
                 enrichHeadlines();
             } catch (err) {
-                notify(`鏂伴椈鍒锋柊澶辫触: ${err.message}`, true);
+                notify(`新闻刷新失败: ${err.message}`, true);
+                const rawBox = el("news-unstructured-list");
+                const structuredBox = el("news-structured-list");
+                if (rawBox && !state.latest) rawBox.innerHTML = `<div class="list-item news-white">加载失败: ${esc(err.message)}</div>`;
+                if (structuredBox && !state.latest) structuredBox.innerHTML = `<div class="list-item news-white">加载失败: ${esc(err.message)}</div>`;
             } finally {
                 state.refreshPromise = null;
                 if (state.needsRefresh && isNewsVisible()) {
@@ -488,10 +520,10 @@
             const jobs = Array.isArray(status?.jobs) ? status.jobs : [];
             const job = jobs.find((row) => String(row?.job_id || "") === String(jobId || ""));
             if (job?.status === "completed") return job;
-            if (job?.status === "failed") throw new Error(job?.error || "鏂伴椈鎷夊彇澶辫触");
+            if (job?.status === "failed") throw new Error(job?.error || "新闻拉取失败");
             await new Promise((resolve) => setTimeout(resolve, 2000));
         }
-        throw new Error(`鏂伴椈鍚庡彴浠诲姟瓒呮椂: ${jobId}`);
+        throw new Error(`新闻后台任务超时: ${jobId}`);
     }
 
     async function waitLlmJob(jobId) {

@@ -1860,7 +1860,12 @@ async def _create_binance_readonly_connector() -> Optional[BinanceConnector]:
     cfg.api_secret = settings.BINANCE_API_SECRET or cfg.api_secret
     cfg.default_type = str(getattr(settings, "BINANCE_DEFAULT_TYPE", cfg.default_type) or cfg.default_type or "spot")
     connector = BinanceConnector(cfg)
-    ok = await connector.connect()
+    try:
+        ok = await connector.connect()
+    except asyncio.CancelledError:
+        with contextlib.suppress(Exception):
+            await connector.disconnect()
+        raise
     if not ok:
         with contextlib.suppress(Exception):
             await connector.disconnect()
@@ -4178,85 +4183,98 @@ async def get_analytics_history_health(
 ):
     hours = max(24, min(int(hours or 24 * 7), 24 * 365))
     cache_key = _analytics_history_cache_key(exchange=exchange, symbol=symbol, hours=hours)
+
+    def _with_common_fields(payload: Dict[str, Any], *, cache_hit: bool, cache_age: Optional[float], stale: bool) -> Dict[str, Any]:
+        out = dict(payload or {})
+        out["cache_hit"] = bool(cache_hit)
+        out["cache_age_sec"] = round(float(cache_age or 0.0), 3) if cache_age is not None else None
+        out["stale"] = bool(stale)
+        out["refreshed"] = None
+        out["refresh_requested"] = bool(refresh)
+        out["refresh_note"] = "health 接口当前为纯读接口；实时采集请改用 POST /api/trading/analytics/history/collect。"
+        return out
+
     cached, cached_age = _cache_get(
         _ANALYTICS_HISTORY_HEALTH_CACHE,
         cache_key,
         max_age_sec=_ANALYTICS_HISTORY_HEALTH_CACHE_TTL_SEC,
     )
-    health: Dict[str, Any]
     if cached is not None:
-        health = cached
-        health["cache_hit"] = True
-        health["cache_age_sec"] = round(float(cached_age or 0.0), 3)
-        health["stale"] = False
-    else:
-        try:
-            health = await asyncio.wait_for(
-                _build_analytics_history_health(exchange=exchange, symbol=symbol, hours=hours),
-                timeout=max(1.0, _ANALYTICS_HISTORY_HEALTH_READ_TIMEOUT_SEC),
+        return _with_common_fields(cached, cache_hit=True, cache_age=float(cached_age or 0.0), stale=False)
+
+    stale_cached, stale_age = _cache_get(
+        _ANALYTICS_HISTORY_HEALTH_CACHE,
+        cache_key,
+        max_age_sec=None,
+    )
+    if (not bool(refresh)) and (stale_cached is not None):
+        return _with_common_fields(stale_cached, cache_hit=True, cache_age=float(stale_age or 0.0), stale=True)
+
+    # Fast path for dashboard polling: derive health from ingest status map only.
+    # This avoids expensive aggregate scans causing frontend timeout.
+    if not bool(refresh):
+        status_map: Dict[str, Dict[str, Any]] = {}
+        status_cache_key = _analytics_history_cache_key(exchange=exchange, symbol=symbol)
+        cached_status_payload, _ = _cache_get(
+            _ANALYTICS_HISTORY_STATUS_CACHE,
+            status_cache_key,
+            max_age_sec=None,
+        )
+        if cached_status_payload is not None:
+            for row in list(cached_status_payload.get("collectors") or []):
+                collector = str((row or {}).get("collector") or "").strip().lower()
+                if collector:
+                    status_map[collector] = dict(row or {})
+        if not status_map and _ANALYTICS_HISTORY_STATUS_LAST:
+            for collector in _ANALYTICS_HISTORY_COLLECTORS:
+                if collector in _ANALYTICS_HISTORY_STATUS_LAST:
+                    status_map[collector] = dict(_ANALYTICS_HISTORY_STATUS_LAST.get(collector) or {})
+        if not status_map:
+            with contextlib.suppress(Exception):
+                status_map = await asyncio.wait_for(
+                    _load_analytics_ingest_status_map(),
+                    timeout=max(0.6, min(1.2, _ANALYTICS_HISTORY_STATUS_READ_TIMEOUT_SEC)),
+                )
+        quick_payload = (
+            _status_fallback_analytics_history_health(
+                exchange=exchange,
+                symbol=symbol,
+                hours=hours,
+                status_map=status_map,
+                error="quick_status_mode",
             )
-            _cache_put(_ANALYTICS_HISTORY_HEALTH_CACHE, cache_key, health)
-            health["cache_hit"] = False
-            health["cache_age_sec"] = 0.0
-            health["stale"] = False
-        except Exception as exc:
-            stale, stale_age = _cache_get(_ANALYTICS_HISTORY_HEALTH_CACHE, cache_key)
-            if stale is not None:
-                health = stale
-                health["stale"] = True
-                health["cache_hit"] = True
-                health["cache_age_sec"] = round(float(stale_age or 0.0), 3)
-                health["stale_reason"] = _clip_analytics_error(exc)
-            else:
-                error_text = _clip_analytics_error(exc) or "analytics history health read failed"
-                status_map = {}
-                status_cache_key = _analytics_history_cache_key(exchange=exchange, symbol=symbol)
-                cached_status_payload, _ = _cache_get(
-                    _ANALYTICS_HISTORY_STATUS_CACHE,
-                    status_cache_key,
-                    max_age_sec=None,
-                )
-                if cached_status_payload is not None:
-                    for row in list(cached_status_payload.get("collectors") or []):
-                        collector = str((row or {}).get("collector") or "").strip().lower()
-                        if not collector:
-                            continue
-                        status_map[collector] = dict(row or {})
-                if not status_map and _ANALYTICS_HISTORY_STATUS_LAST:
-                    for collector in _ANALYTICS_HISTORY_COLLECTORS:
-                        if collector in _ANALYTICS_HISTORY_STATUS_LAST:
-                            status_map[collector] = dict(_ANALYTICS_HISTORY_STATUS_LAST.get(collector) or {})
-                if not status_map:
-                    try:
-                        status_map = await asyncio.wait_for(
-                            _load_analytics_ingest_status_map(),
-                            timeout=max(1.0, min(3.0, _ANALYTICS_HISTORY_STATUS_READ_TIMEOUT_SEC)),
-                        )
-                    except Exception:
-                        status_map = {}
-                health = (
-                    _status_fallback_analytics_history_health(
-                        exchange=exchange,
-                        symbol=symbol,
-                        hours=hours,
-                        status_map=status_map,
-                        error=error_text,
-                    )
-                    if status_map
-                    else _empty_analytics_history_health(
-                        exchange=exchange,
-                        symbol=symbol,
-                        hours=hours,
-                        error=error_text,
-                    )
-                )
-                health["stale"] = True
-                health["cache_hit"] = False
-                health["cache_age_sec"] = None
-    health["refreshed"] = None
-    health["refresh_requested"] = bool(refresh)
-    health["refresh_note"] = "health 接口当前为纯读接口；实时采集请改用 POST /api/trading/analytics/history/collect。"
-    return health
+            if status_map
+            else _empty_analytics_history_health(
+                exchange=exchange,
+                symbol=symbol,
+                hours=hours,
+                error="quick_status_mode",
+            )
+        )
+        quick_payload["fallback_mode"] = "quick_status"
+        _cache_put(_ANALYTICS_HISTORY_HEALTH_CACHE, cache_key, quick_payload)
+        return _with_common_fields(quick_payload, cache_hit=False, cache_age=0.0, stale=True)
+
+    # Explicit refresh mode: allow expensive read and fallback to stale snapshot on failure.
+    try:
+        health = await asyncio.wait_for(
+            _build_analytics_history_health(exchange=exchange, symbol=symbol, hours=hours),
+            timeout=max(1.0, _ANALYTICS_HISTORY_HEALTH_READ_TIMEOUT_SEC),
+        )
+        _cache_put(_ANALYTICS_HISTORY_HEALTH_CACHE, cache_key, health)
+        return _with_common_fields(health, cache_hit=False, cache_age=0.0, stale=False)
+    except Exception as exc:
+        if stale_cached is not None:
+            stale_payload = dict(stale_cached)
+            stale_payload["stale_reason"] = _clip_analytics_error(exc)
+            return _with_common_fields(stale_payload, cache_hit=True, cache_age=float(stale_age or 0.0), stale=True)
+        fallback = _empty_analytics_history_health(
+            exchange=exchange,
+            symbol=symbol,
+            hours=hours,
+            error=_clip_analytics_error(exc) or "analytics history health read failed",
+        )
+        return _with_common_fields(fallback, cache_hit=False, cache_age=None, stale=True)
 
 
 async def get_analytics_history_status(
@@ -4264,6 +4282,20 @@ async def get_analytics_history_status(
     symbol: str = "BTC/USDT",
 ):
     cache_key = _analytics_history_cache_key(exchange=exchange, symbol=symbol)
+    status_timeout_sec = max(0.8, min(1.8, _ANALYTICS_HISTORY_STATUS_READ_TIMEOUT_SEC))
+    stale_cached, stale_age = _cache_get(
+        _ANALYTICS_HISTORY_STATUS_CACHE,
+        cache_key,
+        max_age_sec=None,
+    )
+    if stale_cached is not None and float(stale_age or 0.0) <= 90.0:
+        return {
+            **stale_cached,
+            "generated_at": _utc_iso(datetime.now(timezone.utc)),
+            "cache_hit": True,
+            "cache_age_sec": round(float(stale_age or 0.0), 3),
+            "stale": bool(float(stale_age or 0.0) > _ANALYTICS_HISTORY_STATUS_CACHE_TTL_SEC),
+        }
     cached, cached_age = _cache_get(
         _ANALYTICS_HISTORY_STATUS_CACHE,
         cache_key,
@@ -4280,10 +4312,30 @@ async def get_analytics_history_status(
             "cache_age_sec": round(float(cached_age or 0.0), 3),
         }
 
+    if _ANALYTICS_HISTORY_STATUS_LAST:
+        collectors = _status_map_to_collectors(
+            {k: dict(v) for k, v in _ANALYTICS_HISTORY_STATUS_LAST.items()},
+            exchange=exchange,
+            symbol=symbol,
+        )
+        if collectors:
+            payload = {
+                "generated_at": _utc_iso(datetime.now(timezone.utc)),
+                "exchange": exchange,
+                "symbol": symbol,
+                "collectors": collectors,
+                "cache_hit": False,
+                "cache_age_sec": None,
+                "stale": True,
+                "fallback_mode": "in_memory_status",
+            }
+            _cache_put(_ANALYTICS_HISTORY_STATUS_CACHE, cache_key, payload)
+            return payload
+
     try:
         status_map = await asyncio.wait_for(
             _load_analytics_ingest_status_map(),
-            timeout=max(1.0, _ANALYTICS_HISTORY_STATUS_READ_TIMEOUT_SEC),
+            timeout=status_timeout_sec,
         )
         collectors = _status_map_to_collectors(status_map, exchange=exchange, symbol=symbol)
         payload = {

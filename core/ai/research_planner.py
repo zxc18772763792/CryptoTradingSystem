@@ -194,10 +194,38 @@ def _parse_market_context(market_context: Dict[str, Any]) -> Tuple[List[str], Li
     # Microstructure signals
     microstructure = market_context.get("microstructure") or {}
     if isinstance(microstructure, dict):
-        if float(microstructure.get("order_flow_imbalance", 0) or 0) > 0.3:
-            boosted.extend(["量化"])
+        ofi = float(microstructure.get("order_flow_imbalance", 0) or 0)
+        if ofi > 0.3:
+            boosted.extend(["量化", "成交量"])
+        elif ofi < -0.3:
+            boosted.extend(["震荡", "均值回归"])
         if float(microstructure.get("volume_surge", 0) or 0) > 0.5:
             boosted.extend(["成交量", "突破"])
+        # Funding rate: high positive = crowded long = risk; high negative = bearish trend
+        funding_rate = microstructure.get("funding_rate")
+        if funding_rate is not None:
+            fr = float(funding_rate or 0)
+            if fr > 0.0001:          # >0.01% per 8h = crowded long, risky
+                boosted.extend(["风险", "震荡"])
+                suppressed.extend(["趋势"])
+            elif fr < -0.0001:       # negative funding = bearish momentum
+                boosted.extend(["趋势"])
+                suppressed.extend(["震荡"])
+
+    # News event count: many events = macro-driven
+    news = market_context.get("news") or {}
+    news_events = int(news.get("events_count", 0) or 0)
+    if news_events >= 10:
+        boosted.extend(["宏观"])
+    elif news_events >= 5:
+        boosted.extend(["宏观"])
+
+    # Whale activity: large whale movements = external shock risk
+    whale = market_context.get("whale") or {}
+    whale_count = int(whale.get("count", 0) or 0)
+    if whale_count >= 5:
+        boosted.extend(["宏观", "风险"])
+        suppressed.extend(["统计套利"])
 
     return _dedupe_keep_order(boosted), _dedupe_keep_order(suppressed)
 
@@ -336,22 +364,38 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
     if market_context:
         signal_parts: List[str] = []
         sentiment = str(market_context.get("sentiment") or market_context.get("direction") or "").strip()
+        confidence = float(market_context.get("confidence", 0) or 0)
         if sentiment:
-            signal_parts.append(f"sentiment={sentiment}")
+            conf_str = f"{confidence*100:.0f}%" if confidence > 0 else ""
+            signal_parts.append(f"方向={sentiment}{(' ' + conf_str) if conf_str else ''}")
         vol = str(market_context.get("volatility") or "").strip()
         if vol:
-            signal_parts.append(f"volatility={vol}")
+            signal_parts.append(f"波动={vol}")
+        micro = market_context.get("microstructure") or {}
+        if isinstance(micro, dict):
+            fr = micro.get("funding_rate")
+            if fr is not None:
+                signal_parts.append(f"Funding={float(fr):.5f}")
+            ofi = micro.get("order_flow_imbalance")
+            if ofi is not None:
+                signal_parts.append(f"OFI={float(ofi):.3f}")
+        news_ev = int((market_context.get("news") or {}).get("events_count", 0) or 0)
+        if news_ev:
+            signal_parts.append(f"新闻事件={news_ev}")
+        whale_c = int((market_context.get("whale") or {}).get("count", 0) or 0)
+        if whale_c:
+            signal_parts.append(f"巨鲸={whale_c}")
         factors = market_context.get("factors") or {}
         if isinstance(factors, dict) and factors:
-            top_factors = [f"{k}={v:.2f}" for k, v in factors.items() if float(v or 0) > 0.3]
+            top_factors = [f"{k}={float(v):.2f}" for k, v in factors.items() if float(v or 0) > 0.3]
             if top_factors:
-                signal_parts.append("factors=[" + ", ".join(top_factors[:3]) + "]")
+                signal_parts.append("因子=[" + ", ".join(top_factors[:3]) + "]")
         if signal_parts:
-            planner_notes.append(f"market context used: {', '.join(signal_parts)}")
+            planner_notes.append(f"市场上下文: {' · '.join(signal_parts)}")
         if boost_categories:
-            planner_notes.append(f"boosted categories: {', '.join(boost_categories[:4])}")
+            planner_notes.append(f"提升分类: {' / '.join(boost_categories[:5])}")
         if suppress_categories:
-            planner_notes.append(f"suppressed categories: {', '.join(suppress_categories[:4])}")
+            planner_notes.append(f"降权分类: {' / '.join(suppress_categories[:4])}")
 
     selected = _catalog_candidates(
         request.market_regime, exclude_categories,

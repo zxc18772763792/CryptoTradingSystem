@@ -4412,3 +4412,109 @@ input[type="radio"] {
         justify-self: start;
     }
 }
+
+
+/* ── Regime Calendar ─────────────────────────────────────────── */
+.regime-day-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 8px;
+  min-width: 80px;
+  border: 1px solid rgba(255,255,255,.08);
+  background: #121e2e;
+  gap: 3px;
+}
+.regime-day-date {
+  font-size: 11px;
+  color: #7e92b2;
+  font-weight: 600;
+}
+.regime-day-label {
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+.regime-day-meta {
+  font-size: 10px;
+  color: #6b7fa0;
+  text-align: center;
+}
+.regime-bias-bullish  { color: #20bf78; border-color: #20bf7844; background: #0a1e13; }
+.regime-bias-bearish  { color: #e05260; border-color: #e0526044; background: #1e0a0d; }
+.regime-bias-defensive{ color: #f0b429; border-color: #f0b42944; background: #1e160a; }
+.regime-bias-neutral  { color: #9fb1c9; border-color: #3a4f6a;  background: #121e2e; }
+
+/* ── Module Status Chips ────────────────────────────────────── */
+.module-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px 2px 5px;
+  border-radius: 20px;
+  border: 1px solid;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .3px;
+  white-space: nowrap;
+  cursor: default;
+}
+.chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.chip-time {
+  font-size: 9px;
+  font-weight: 400;
+  opacity: .75;
+}
+#research-module-snapshot .status-value {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: flex-start;
+}
+
+/* ── Button Loading Spinner ─────────────────────────────────── */
+.btn-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid rgba(255,255,255,.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: btn-spin .7s linear infinite;
+  vertical-align: middle;
+}
+@keyframes btn-spin {
+  to { transform: rotate(360deg); }
+}
+.btn-loading { opacity: .8; }
+
+/* ── AI Hub Detail Panel scroll fix ────────────────────────── */
+@media (min-width: 1101px) {
+  .ai-hub-detail {
+    min-height: 0;
+    overflow-y: auto;
+    scroll-behavior: smooth;
+  }
+  .ai-detail-panel {
+    position: relative;
+  }
+}
+/* Restore detail panel visibility at mid-widths */
+@media (min-width: 960px) and (max-width: 1100px) {
+  .ai-hub-layout {
+    grid-template-columns: 1fr 1fr;
+    height: auto;
+  }
+  .ai-hub-detail {
+    display: block !important;
+    grid-column: 1 / -1;
+    max-height: 500px;
+    overflow-y: auto;
+  }
+}

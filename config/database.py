@@ -339,6 +339,40 @@ class AnalyticsWhaleSnapshot(Base):
     payload = Column(JSON, default={})
 
 
+class StrategyPerformanceSnapshot(Base):
+    """Periodic performance snapshots for live/paper running strategies."""
+    __tablename__ = "strategy_performance_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    snapshot_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    candidate_id = Column(String(80), nullable=True, index=True)   # AI research candidate ID
+    strategy_name = Column(String(120), nullable=False, index=True)
+    symbol = Column(String(40), nullable=False, index=True)
+    timeframe = Column(String(10), nullable=False)
+    mode = Column(String(20), default="paper", index=True)          # paper | shadow | live
+    # Performance metrics
+    total_pnl = Column(Float, default=0.0)
+    total_pnl_pct = Column(Float, default=0.0)
+    unrealized_pnl = Column(Float, default=0.0)
+    realized_pnl = Column(Float, default=0.0)
+    trade_count = Column(Integer, default=0)
+    win_count = Column(Integer, default=0)
+    loss_count = Column(Integer, default=0)
+    win_rate = Column(Float, nullable=True)
+    sharpe_ratio = Column(Float, nullable=True)
+    max_drawdown = Column(Float, nullable=True)
+    calmar_ratio = Column(Float, nullable=True)
+    # Risk context
+    cusum_triggered = Column(Boolean, default=False, index=True)
+    cusum_low = Column(Float, nullable=True)
+    # Extra payload for extensibility
+    payload = Column(JSON, default={})
+
+    __table_args__ = (
+        UniqueConstraint("strategy_name", "symbol", "timeframe", "snapshot_at", name="uq_perf_snap"),
+    )
+
+
 class AnalyticsHistoryIngestStatus(Base):
     """Last known ingest status per analytics collector."""
     __tablename__ = "analytics_history_ingest_status"

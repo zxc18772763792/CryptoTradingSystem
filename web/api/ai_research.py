@@ -10,6 +10,7 @@ from loguru import logger
 import pandas as pd
 from pydantic import BaseModel, Field
 
+from config.database import StrategyPerformanceSnapshot, async_session_maker
 from config.settings import settings
 from core.backtest.funding_provider import FundingProviderConfig, FundingRateProvider
 from core.governance.audit import GovernanceAuditEvent, write_audit
@@ -857,3 +858,125 @@ async def get_latest_signals(
             "components": {},
             "error": str(exc),
         }
+
+
+# ── Strategy Performance Snapshot endpoints ──────────────────────────────────
+
+class PerformanceSnapshotRequest(BaseModel):
+    strategy_name: str
+    symbol: str
+    timeframe: str
+    mode: str = "paper"
+    candidate_id: Optional[str] = None
+    total_pnl: float = 0.0
+    total_pnl_pct: float = 0.0
+    unrealized_pnl: float = 0.0
+    realized_pnl: float = 0.0
+    trade_count: int = 0
+    win_count: int = 0
+    loss_count: int = 0
+    win_rate: Optional[float] = None
+    sharpe_ratio: Optional[float] = None
+    max_drawdown: Optional[float] = None
+    calmar_ratio: Optional[float] = None
+    cusum_triggered: bool = False
+    cusum_low: Optional[float] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/performance/snapshots")
+async def save_performance_snapshot(body: PerformanceSnapshotRequest):
+    """Persist a strategy performance snapshot to the DB."""
+    from sqlalchemy import insert as sa_insert
+
+    row = StrategyPerformanceSnapshot(
+        snapshot_at=datetime.now(timezone.utc),
+        candidate_id=body.candidate_id,
+        strategy_name=body.strategy_name,
+        symbol=body.symbol,
+        timeframe=body.timeframe,
+        mode=body.mode,
+        total_pnl=body.total_pnl,
+        total_pnl_pct=body.total_pnl_pct,
+        unrealized_pnl=body.unrealized_pnl,
+        realized_pnl=body.realized_pnl,
+        trade_count=body.trade_count,
+        win_count=body.win_count,
+        loss_count=body.loss_count,
+        win_rate=body.win_rate,
+        sharpe_ratio=body.sharpe_ratio,
+        max_drawdown=body.max_drawdown,
+        calmar_ratio=body.calmar_ratio,
+        cusum_triggered=body.cusum_triggered,
+        cusum_low=body.cusum_low,
+        payload=body.payload or {},
+    )
+    try:
+        async with async_session_maker() as session:
+            session.add(row)
+            await session.commit()
+    except Exception as exc:
+        logger.warning(f"save_performance_snapshot failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"ok": True, "snapshot_at": row.snapshot_at.isoformat()}
+
+
+@router.get("/performance/snapshots")
+async def list_performance_snapshots(
+    strategy_name: Optional[str] = None,
+    candidate_id: Optional[str] = None,
+    symbol: Optional[str] = None,
+    mode: Optional[str] = None,
+    days: int = 30,
+    limit: int = 200,
+):
+    """List recent performance snapshots with optional filters."""
+    from sqlalchemy import select as sa_select
+
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, min(int(days), 3650)))
+    try:
+        async with async_session_maker() as session:
+            q = sa_select(StrategyPerformanceSnapshot).where(
+                StrategyPerformanceSnapshot.snapshot_at >= since
+            )
+            if strategy_name:
+                q = q.where(StrategyPerformanceSnapshot.strategy_name == strategy_name)
+            if candidate_id:
+                q = q.where(StrategyPerformanceSnapshot.candidate_id == candidate_id)
+            if symbol:
+                q = q.where(StrategyPerformanceSnapshot.symbol == symbol)
+            if mode:
+                q = q.where(StrategyPerformanceSnapshot.mode == mode)
+            q = q.order_by(StrategyPerformanceSnapshot.snapshot_at.desc()).limit(max(1, min(int(limit), 2000)))
+            result = await session.execute(q)
+            rows = result.scalars().all()
+    except Exception as exc:
+        logger.warning(f"list_performance_snapshots failed: {exc}")
+        return {"snapshots": [], "error": str(exc)}
+
+    snapshots = []
+    for row in rows:
+        snapshots.append({
+            "id": row.id,
+            "snapshot_at": row.snapshot_at.isoformat() if row.snapshot_at else None,
+            "candidate_id": row.candidate_id,
+            "strategy_name": row.strategy_name,
+            "symbol": row.symbol,
+            "timeframe": row.timeframe,
+            "mode": row.mode,
+            "total_pnl": row.total_pnl,
+            "total_pnl_pct": row.total_pnl_pct,
+            "unrealized_pnl": row.unrealized_pnl,
+            "realized_pnl": row.realized_pnl,
+            "trade_count": row.trade_count,
+            "win_count": row.win_count,
+            "loss_count": row.loss_count,
+            "win_rate": row.win_rate,
+            "sharpe_ratio": row.sharpe_ratio,
+            "max_drawdown": row.max_drawdown,
+            "calmar_ratio": row.calmar_ratio,
+            "cusum_triggered": row.cusum_triggered,
+            "cusum_low": row.cusum_low,
+            "payload": row.payload or {},
+        })
+    return {"snapshots": snapshots, "count": len(snapshots)}

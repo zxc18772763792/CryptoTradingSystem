@@ -5,6 +5,7 @@
     profile: null,
     overview: null,
     modules: {},
+    moduleTimes: {},
     recommendations: null,
     lastDebug: null,
     retryTimers: {},
@@ -171,9 +172,13 @@
     };
   }
 
-  function moduleStatusText(name) {
-    const status = state.modules?.[name]?.status || 'idle';
-    return `${MODULE_LABELS[name] || name}：${STATUS_LABELS[status] || '待运行'}`;
+  const MODULE_STATUS_COLORS = { ok: '#20bf78', degraded: '#f59e0b', error: '#e05260', idle: '#6b7fa0', loading: '#3aa6ff' };
+
+  function setStatusItemValue(el, html) {
+    if (!el) return;
+    const valEl = el.querySelector('.status-value');
+    if (valEl) valEl.innerHTML = html;
+    else el.innerHTML = html; // fallback
   }
 
   function renderStatusCards() {
@@ -195,15 +200,32 @@
     );
     const whaleCount = Number(state.modules?.onchain?.payload?.onchain?.whale_activity?.count || 0);
 
-    configEl.textContent = `配置：${profile.exchange} / ${profile.primary_symbol} / ${profile.timeframe} | lookback ${profile.lookback} | 币池 ${profile.universe_symbols.length}`;
-    dataEl.textContent = `覆盖：正常 ${okCount} | 降级 ${degradedCount} | 失败 ${errorCount} | 新闻 ${newsEvents} | 巨鲸 ${whaleCount}`;
-    moduleEl.textContent = `模块：${MODULE_NAMES.map(moduleStatusText).join(' | ')}`;
+    setStatusItemValue(configEl,
+      `${escSafe(profile.exchange)} / ${escSafe(profile.primary_symbol)} / ${escSafe(profile.timeframe)}<div style="color:#7a8fa6;font-size:11px;margin-top:2px;">lookback ${profile.lookback} · 币池 ${profile.universe_symbols.length}</div>`
+    );
+    setStatusItemValue(dataEl,
+      `<span style="color:#20bf78;">✔ ${okCount}</span> <span style="color:#f59e0b;">⚡ ${degradedCount}</span> <span style="color:#e05260;">✘ ${errorCount}</span>`
+      + `<div style="color:#7a8fa6;font-size:11px;margin-top:2px;">新闻事件 ${newsEvents} · 巨鲸 ${whaleCount}</div>`
+    );
 
-    let nextText = '下一步：先运行研究总览';
-    if (state.recommendations?.next_actions?.length) nextText = `下一步：${state.recommendations.next_actions[0]}`;
-    else if (state.overview && !state.recommendations) nextText = '下一步：刷新研究建议';
-    else if (errorCount > 0) nextText = '下一步：先修复失败模块，再看综合结论';
-    nextEl.textContent = nextText;
+    // Per-module colored chips with last-updated time
+    const chips = MODULE_NAMES.map((name) => {
+      const mod = state.modules?.[name];
+      const st = mod?.status || 'idle';
+      const color = MODULE_STATUS_COLORS[st] || '#6b7fa0';
+      const t = state.moduleTimes?.[name];
+      const timeStr = t ? new Date(t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
+      const label = MODULE_LABELS[name] || name;
+      const title = `${label}：${STATUS_LABELS[st] || st}${timeStr ? ' · ' + timeStr : ''}`;
+      return `<span class="module-chip" style="color:${color};border-color:${color}40;" title="${escSafe(title)}"><span class="chip-dot" style="background:${color};"></span>${escSafe(label.slice(0, 2))}${timeStr ? `<span class="chip-time">${escSafe(timeStr)}</span>` : ''}</span>`;
+    }).join('');
+    setStatusItemValue(moduleEl, chips);
+
+    let nextHtml = '先运行研究总览';
+    if (state.recommendations?.next_actions?.length) nextHtml = escSafe(state.recommendations.next_actions[0]);
+    else if (state.overview && !state.recommendations) nextHtml = '刷新研究建议';
+    else if (errorCount > 0) nextHtml = '先修复失败模块，再看综合结论';
+    setStatusItemValue(nextEl, nextHtml);
   }
 
   function renderOverview() {
@@ -348,6 +370,7 @@
   function renderModule(name, module) {
     if (!module) return;
     state.modules[name] = module;
+    state.moduleTimes[name] = new Date().toISOString();
     const payload = module.payload || {};
 
     try {
@@ -355,6 +378,8 @@
         if (typeof window.renderWorkbenchMarketStatePanel === 'function') window.renderWorkbenchMarketStatePanel(module);
         else if (typeof window.renderAnalyticsOverviewPanel === 'function') window.renderAnalyticsOverviewPanel(payload.analytics_overview || {});
         if (typeof window.renderMarketSentimentPanel === 'function') window.renderMarketSentimentPanel(payload.sentiment_dashboard || {});
+        // Auto-refresh regime calendar when market_state data is fresh
+        loadRegimeCalendar().catch(() => {});
       } else if (name === 'factors') {
         if (typeof window.renderFactorLibraryPanel === 'function') window.renderFactorLibraryPanel(payload.factor_library || {});
         if (typeof window.renderFamaPanel === 'function') window.renderFamaPanel(payload.fama || {});
@@ -859,17 +884,19 @@
     const el = q(id);
     if (!el) return;
     el.onclick = async () => {
-      const oldText = el.textContent;
+      const origHtml = el.innerHTML;
       try {
         el.disabled = true;
-        el.textContent = '加载中...';
+        el.classList.add('btn-loading');
+        el.innerHTML = '<span class="btn-spinner"></span> 加载中';
         await handler();
       } catch (err) {
         if (typeof window.notify === 'function') window.notify(`高级研究失败: ${err.message || err}`, true);
         setDebug(`research.workbench.error.${id}`, String(err?.message || err));
       } finally {
         el.disabled = false;
-        el.textContent = oldText;
+        el.classList.remove('btn-loading');
+        el.innerHTML = origHtml;
       }
     };
   }
@@ -913,6 +940,46 @@
     });
   }
 
+  /* ── Regime Calendar ─────────────────────────────────────────── */
+  const BIAS_CLASS = {
+    bullish: 'regime-bias-bullish',
+    bearish: 'regime-bias-bearish',
+    defensive: 'regime-bias-defensive',
+    neutral: 'regime-bias-neutral',
+  };
+
+  async function loadRegimeCalendar() {
+    const grid = q('regime-calendar-grid');
+    if (!grid) return;
+    const profile = state.profile || getProfile();
+    const days = Number(q('regime-calendar-days')?.value || 7);
+    const exchange = profile.exchange || 'binance';
+    const symbol = profile.primary_symbol || 'BTC/USDT';
+    grid.innerHTML = '<div style="color:#6b7fa0;font-size:12px;">加载中...</div>';
+    try {
+      const data = await apiResearch(
+        `/workbench/regime-calendar?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&days=${days}`
+      );
+      const calendar = Array.isArray(data?.calendar) ? data.calendar : [];
+      if (!calendar.length) {
+        grid.innerHTML = '<div style="color:#6b7fa0;font-size:12px;">暂无历史快照数据（需先运行市场状态分析采集数据）</div>';
+        return;
+      }
+      grid.innerHTML = calendar.map((item) => {
+        const biasClass = BIAS_CLASS[item.bias] || 'regime-bias-neutral';
+        const funding = item.avg_funding != null ? item.avg_funding.toFixed(5) : '--';
+        const basis = item.avg_basis != null ? `${item.avg_basis.toFixed(3)}%` : '--';
+        return `<div class="regime-day-cell ${biasClass}" title="快照 ${item.snapshot_count} 条 | Funding ${funding} | Basis ${basis}">
+          <div class="regime-day-date">${escSafe(item.date.slice(5))}</div>
+          <div class="regime-day-label">${escSafe(item.regime)}</div>
+          <div class="regime-day-meta">F:${funding} B:${basis}</div>
+        </div>`;
+      }).join('');
+    } catch (err) {
+      grid.innerHTML = `<div style="color:#e05260;font-size:12px;">加载失败: ${escSafe(String(err?.message || err))}</div>`;
+    }
+  }
+
   function bindWorkbenchButtons() {
     bindAsyncButton('btn-workbench-overview', runWorkbenchOverviewDirect);
     bindAsyncButton('btn-workbench-recommendations', () => refreshRecommendations(false));
@@ -925,6 +992,9 @@
     bindAsyncButton('btn-workbench-onchain', () => runWorkbenchModuleDirect('onchain', false));
     bindAsyncButton('btn-workbench-onchain-secondary', () => runWorkbenchModuleDirect('onchain', false));
     bindAsyncButton('btn-workbench-discipline', () => runWorkbenchModuleDirect('discipline', false));
+    bindAsyncButton('btn-load-regime-calendar', loadRegimeCalendar);
+    const calDaysEl = q('regime-calendar-days');
+    if (calDaysEl) calDaysEl.addEventListener('change', () => loadRegimeCalendar().catch(() => {}));
   }
 
   function bindConfigWatchers() {

@@ -1,6 +1,7 @@
 """Multi-source news collector manager with de-duplication and source stats."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import os
@@ -255,6 +256,7 @@ class MultiSourceNewsCollector:
         source_count = max(1, len(specs))
         per_source = max(10, min(250, int(math.ceil(max_records / source_count * 1.6))))
 
+        pending_jobs: List[Tuple[_CollectorSpec, asyncio.Task]] = []
         for spec in specs:
             source_stats[spec.name] = {
                 "enabled": True,
@@ -283,18 +285,24 @@ class MultiSourceNewsCollector:
                 continue
             cursor = state.get("cursor_value") if state else None
             source_stats[spec.name]["cursor_before"] = cursor
+            pending_jobs.append(
+                (
+                    spec,
+                    asyncio.create_task(
+                        self._run_incremental_source_pull(
+                            spec=spec,
+                            query=query,
+                            per_source=per_source,
+                            since_minutes=since_minutes,
+                            cursor=cursor,
+                        )
+                    ),
+                )
+            )
+
+        for spec, task in pending_jobs:
             try:
-                if hasattr(spec.collector, "pull_incremental"):
-                    items, new_cursor = spec.collector.pull_incremental(
-                        query=query,
-                        max_records=per_source,
-                        since_minutes=since_minutes,
-                        cursor=cursor,
-                    )
-                else:
-                    items = spec.collector.pull_latest(query=query, max_records=per_source, since_minutes=since_minutes)
-                    ts_values = [_parse_ts_to_unix(item.get("published_at")) for item in items]
-                    new_cursor = str(max(ts_values)) if ts_values else cursor
+                items, new_cursor = await task
                 source_stats[spec.name]["pulled_count"] = len(items)
                 source_stats[spec.name]["cursor_after"] = new_cursor
                 await news_db.set_source_state(
@@ -336,6 +344,37 @@ class MultiSourceNewsCollector:
                 all_items.append(item)
 
         return self._merge_results(all_items, source_stats, errors, max_records)
+
+    async def _run_incremental_source_pull(
+        self,
+        *,
+        spec: _CollectorSpec,
+        query: Optional[str],
+        per_source: int,
+        since_minutes: int,
+        cursor: Optional[str],
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Run blocking collector I/O on a worker thread to avoid blocking the event loop."""
+        if hasattr(spec.collector, "pull_incremental"):
+            items, new_cursor = await asyncio.to_thread(
+                spec.collector.pull_incremental,
+                query=query,
+                max_records=per_source,
+                since_minutes=since_minutes,
+                cursor=cursor,
+            )
+            return list(items or []), new_cursor
+
+        items = await asyncio.to_thread(
+            spec.collector.pull_latest,
+            query=query,
+            max_records=per_source,
+            since_minutes=since_minutes,
+        )
+        rows = list(items or [])
+        ts_values = [_parse_ts_to_unix(item.get("published_at")) for item in rows]
+        new_cursor = str(max(ts_values)) if ts_values else cursor
+        return rows, new_cursor
 
     @staticmethod
     def _merge_results(

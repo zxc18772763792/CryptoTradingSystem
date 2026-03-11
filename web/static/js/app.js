@@ -2232,6 +2232,12 @@ box.innerHTML=`
 <div class="stat-box"><div class="stat-label">最大回撤 / 夏普</div><div class="stat-value">${Number(r.max_drawdown||0).toFixed(2)}% / ${Number(r.sharpe_ratio||0).toFixed(2)}</div></div>
 <div class="stat-box"><div class="stat-label">手续费/滑点</div><div class="stat-value">${(Number(r.commission_rate||0)*100).toFixed(4)}% / ${Number(r.slippage_bps||0).toFixed(2)}bps</div></div>
 </div>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-top:12px;">
+<div class="stat-box"><div class="stat-label">止盈止损回测</div><div class="stat-value">${r.use_stop_take?'已启用':'未启用'}</div></div>
+<div class="stat-box"><div class="stat-label">止损/止盈参数</div><div class="stat-value">${Number.isFinite(Number(r.stop_loss_pct))?Number(r.stop_loss_pct).toFixed(3):'--'} / ${Number.isFinite(Number(r.take_profit_pct))?Number(r.take_profit_pct).toFixed(3):'--'}</div></div>
+<div class="stat-box"><div class="stat-label">保护性平仓次数</div><div class="stat-value">${Number(r.forced_protective_exits||0)} 次</div></div>
+<div class="stat-box"><div class="stat-label">止损/止盈触发</div><div class="stat-value">${Number(r.forced_stop_exits||0)} / ${Number(r.forced_take_exits||0)}</div></div>
+</div>
 ${renderRangeLockIndicatorHtml(r,true)}`;
 const ec=document.getElementById('backtest-equity-chart');
 if(ec&&r.series?.length){
@@ -2524,6 +2530,36 @@ return {locked:true,status:'已锁定',text:`已锁定（请求 ${reqStart||'-'}
 function renderRangeLockIndicatorHtml(data, fallbackFromForm=true){
 const s=getBacktestRangeLockState(data,fallbackFromForm);
 return `<div class="list-item range-lock-row"><span>区间锁定</span><span class="status-badge ${s.className==='ok'?'connected':''}" ${s.className==='warn'?'style="background:rgba(255,177,95,.14);color:#ffb15f;border-color:rgba(255,177,95,.35);"':''}>${esc(s.status)}</span><span class="range-lock-text">${esc(s.text)}</span></div>`;
+}
+function getBacktestProtectionConfig(){
+const enabled=!!document.getElementById('backtest-use-stop-take')?.checked;
+const slRaw=Number(document.getElementById('backtest-stop-loss-pct')?.value||0);
+const tpRaw=Number(document.getElementById('backtest-take-profit-pct')?.value||0);
+const stopLossPct=(Number.isFinite(slRaw)&&slRaw>0&&slRaw<1)?slRaw:null;
+const takeProfitPct=(Number.isFinite(tpRaw)&&tpRaw>0&&tpRaw<1)?tpRaw:null;
+return{enabled,stopLossPct,takeProfitPct};
+}
+function appendBacktestProtectionParams(url,cfg=null){
+const conf=cfg||getBacktestProtectionConfig();
+let out=String(url||'');
+out+=`&use_stop_take=${conf.enabled?'true':'false'}`;
+if(conf.enabled){
+  if(Number.isFinite(conf.stopLossPct))out+=`&stop_loss_pct=${encodeURIComponent(conf.stopLossPct)}`;
+  if(Number.isFinite(conf.takeProfitPct))out+=`&take_profit_pct=${encodeURIComponent(conf.takeProfitPct)}`;
+}
+return out;
+}
+function bindBacktestProtectionControls(){
+const toggle=document.getElementById('backtest-use-stop-take');
+const sl=document.getElementById('backtest-stop-loss-pct');
+const tp=document.getElementById('backtest-take-profit-pct');
+const apply=()=>{
+  const on=!!toggle?.checked;
+  if(sl)sl.disabled=!on;
+  if(tp)tp.disabled=!on;
+};
+if(toggle)toggle.addEventListener('change',apply);
+apply();
 }
 function getBacktestExtraPanel(){return document.getElementById('backtest-extra-output');}
 function renderBacktestExtraLoading(title='处理中'){const out=getBacktestExtraPanel();if(!out)return;out.innerHTML=`<div class="list-item"><span>${esc(title)}</span><span>请稍候...</span></div>`;}
@@ -2983,6 +3019,7 @@ try{
   if(sd)u+=`&start_date=${encodeURIComponent(sd)}`;
   if(ed)u+=`&end_date=${encodeURIComponent(ed)}`;
   if(Object.keys(params).length)u+=`&params_json=${encodeURIComponent(JSON.stringify(params))}`;
+  u=appendBacktestProtectionParams(u);
   notify(`正在预览参数组合 #${Number(rankIndex)+1}`);
   const r=await api(u,{method:'POST',timeoutMs:90000});
   r._from_optimize_preview=true;
@@ -3037,6 +3074,7 @@ try{
   if(sd)u+=`&start_date=${encodeURIComponent(sd)}`;
   if(ed)u+=`&end_date=${encodeURIComponent(ed)}`;
   if(params)u+=`&params_json=${encodeURIComponent(JSON.stringify(params))}`;
+  u=appendBacktestProtectionParams(u);
   notify(`正在预览策略: ${st}`);
   const r=await api(u,{method:'POST',timeoutMs:90000});
   r._from_compare_preview=true;
@@ -4294,6 +4332,7 @@ function bindDataAdvanced(){const rout=document.getElementById('replay-output');
 
 function bindBacktest(){
 initBacktestComparePicker();
+bindBacktestProtectionControls();
 const f=document.getElementById('backtest-form');
 if(f)f.onsubmit=async e=>{
 e.preventDefault();
@@ -4303,6 +4342,7 @@ const st=await ensureSelectedBacktestStrategy(),s=document.getElementById('backt
 let u=`/backtest/run?strategy=${st}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&include_series=true`;
 if(sd)u+=`&start_date=${encodeURIComponent(sd)}`;
 if(ed)u+=`&end_date=${encodeURIComponent(ed)}`;
+u=appendBacktestProtectionParams(u);
 renderBacktest(await api(u,{method:'POST'}));
 notify('回测完成');
 }catch(err){notify(`回测失败: ${err.message}`,true);}
@@ -4316,11 +4356,12 @@ const s=document.getElementById('backtest-symbol').value,tf=document.getElementB
 const chosenStrategies=getSelectedBacktestCompareStrategies();
 if(!chosenStrategies.length){notify('请至少勾选一个策略',true);return;}
 const objective=String(document.getElementById('backtest-opt-objective')?.value||'total_return');
-const maxTrials=Math.max(8,Math.min(128,parseInt(document.getElementById('backtest-opt-trials')?.value||'64',10)||64));
+const maxTrials=Math.max(8,Math.min(512,parseInt(document.getElementById('backtest-opt-trials')?.value||'96',10)||96));
 const compareTimeoutMs=Math.max(30000,Math.min(8*60*1000, chosenStrategies.length*maxTrials*220 + 25000));
 let cu=`/backtest/compare?strategies=${encodeURIComponent(chosenStrategies.join(','))}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&pre_optimize=true&optimize_objective=${encodeURIComponent(objective)}&optimize_max_trials=${maxTrials}`;
 if(sd)cu+=`&start_date=${encodeURIComponent(sd)}`;
 if(ed)cu+=`&end_date=${encodeURIComponent(ed)}`;
+cu=appendBacktestProtectionParams(cu);
 const d=await api(cu,{method:'POST',timeoutMs:compareTimeoutMs});
 backtestUIState.lastCompare=d||null;
 renderBacktestCompareOutput(d);
@@ -4336,10 +4377,11 @@ const st=displayedSt||selectedSt;
 const s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2;
 renderBacktestExtraLoading(`参数优化运行中（${st}${displayedSt&&displayedSt!==selectedSt?'，来自当前展示':'，来自下拉选择'}）`);
 const objective=String(document.getElementById('backtest-opt-objective')?.value||'total_return');
-const maxTrials=Math.max(8,Math.min(512,parseInt(document.getElementById('backtest-opt-trials')?.value||'64',10)||64));
+const maxTrials=Math.max(8,Math.min(1024,parseInt(document.getElementById('backtest-opt-trials')?.value||'96',10)||96));
 let ou=`/backtest/optimize?strategy=${st}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&objective=${encodeURIComponent(objective)}&max_trials=${maxTrials}&include_all_trials=true`;
 if(sd)ou+=`&start_date=${encodeURIComponent(sd)}`;
 if(ed)ou+=`&end_date=${encodeURIComponent(ed)}`;
+ou=appendBacktestProtectionParams(ou);
 const d=await api(ou,{method:'POST',timeoutMs:90000});
 renderBacktestOptimizeOutput(d);
 notify('参数优化完成');
@@ -4352,6 +4394,7 @@ if(!st){notify('回测策略目录尚未加载完成',true);return;}
 let eu=`${API_BASE}/backtest/export?strategy=${st}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&format=${fmt}`;
 if(sd)eu+=`&start_date=${encodeURIComponent(sd)}`;
 if(ed)eu+=`&end_date=${encodeURIComponent(ed)}`;
+eu=appendBacktestProtectionParams(eu);
 window.open(eu,'_blank');
 };
 }
