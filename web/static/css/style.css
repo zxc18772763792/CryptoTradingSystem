@@ -5040,3 +5040,43 @@ input[type="radio"] {
     grid-template-columns: 1fr !important;
   }
 }
+
+/* ── Phase A: 实时信号面板 ─────────────────────────────────────── */
+.ai-live-signals-card {
+    margin-bottom: 8px;
+    padding: 10px 12px;
+    flex-shrink: 0;
+}
+.live-sig-row {
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(255,255,255,.05);
+}
+.live-sig-row:last-child { border-bottom: none; }
+.live-sig-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    margin-bottom: 3px;
+}
+.live-sig-name { font-weight: 600; color: #c2d0e8; }
+.live-sig-bars {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: #7e92b2;
+    flex-wrap: wrap;
+}
+.live-sig-bar-label {
+    background: rgba(255,255,255,.07);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 10px;
+}
+.live-sig-badge {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 8px;
+    white-space: nowrap;
+}

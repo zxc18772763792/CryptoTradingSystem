@@ -980,3 +980,144 @@ async def list_performance_snapshots(
             "payload": row.payload or {},
         })
     return {"snapshots": snapshots, "count": len(snapshots)}
+
+
+# ── Phase A: Live signals for all active candidates ───────────────────────────
+
+@router.get("/candidates/live-signals")
+async def get_live_signals(request: Request, symbol: Optional[str] = None):
+    """Return SignalAggregator output for all paper_running/live_running candidates.
+
+    Uses the module-level signal_aggregator singleton (same one used by /signals/latest).
+    Market data loaded from local parquet cache — no live network calls.
+    """
+    import pandas as pd
+    from core.ai.signal_aggregator import signal_aggregator
+    from core.data import data_storage
+
+    ensure_ai_research_runtime_state(request.app)
+
+    all_candidates = list_candidates(request.app, limit=200)
+    active = [
+        c for c in all_candidates
+        if str(c.status) in {"paper_running", "shadow_running", "live_running", "live_candidate"}
+    ]
+    if symbol:
+        sym_norm = _normalize_symbol(symbol)
+        active = [c for c in active if _normalize_symbol((c.symbols or ["BTC/USDT"])[0]) == sym_norm]
+
+    results = []
+    for cand in active:
+        cand_symbol = (cand.symbols or ["BTC/USDT"])[0]
+        try:
+            df = pd.DataFrame()
+            try:
+                end_time = datetime.now(timezone.utc)
+                start_time = end_time - timedelta(hours=48)
+                loaded = await data_storage.load_klines_from_parquet(
+                    exchange="binance", symbol=cand_symbol,
+                    timeframe="1h", start_time=start_time, end_time=end_time,
+                )
+                if loaded is not None:
+                    df = loaded
+            except Exception:
+                pass
+            sig = await signal_aggregator.aggregate(cand_symbol, df)
+            results.append({
+                "candidate_id": cand.candidate_id,
+                "strategy": cand.strategy,
+                "symbol": cand_symbol,
+                "status": str(cand.status),
+                "signal": sig.to_dict(),
+            })
+        except Exception as exc:
+            logger.debug(f"live-signals: error for {cand.candidate_id}: {exc}")
+            results.append({
+                "candidate_id": cand.candidate_id,
+                "strategy": cand.strategy,
+                "symbol": cand_symbol,
+                "status": str(cand.status),
+                "signal": None,
+                "error": str(exc),
+            })
+
+    return {"items": results, "count": len(results), "ts": datetime.now(timezone.utc).isoformat()}
+
+
+# ── Phase B: Quick register (human-approve shortcut with allocation_pct) ─────
+
+class AIQuickRegisterRequest(BaseModel):
+    allocation_pct: float = Field(default=0.05, ge=0.001, le=1.0)
+
+
+@router.post("/candidates/{candidate_id}/quick-register")
+async def quick_register_candidate(
+    request: Request,
+    candidate_id: str,
+    payload: AIQuickRegisterRequest,
+):
+    """Quick register: store allocation_pct then human-approve to paper.
+
+    Requires the candidate to be pending human approval (promotion_pending_human_gate).
+    Thin wrapper around the human-approve logic — no duplicate code paths.
+    """
+    from core.deployment.promotion_engine import promote_candidate
+    from core.research.validation_gate import build_promotion_decision
+
+    ensure_ai_research_runtime_state(request.app)
+    cand = get_candidate(request.app, candidate_id)
+
+    if not cand.metadata.get("promotion_pending_human_gate"):
+        raise HTTPException(
+            status_code=400,
+            detail="candidate is not pending human approval; use /register for non-gated candidates",
+        )
+
+    proposal = get_proposal(request.app, cand.proposal_id)
+
+    # Store allocation preference in metadata
+    cand.metadata["allocation_pct"] = float(payload.allocation_pct)
+
+    # Build or update promotion decision → paper
+    if cand.promotion is None:
+        if cand.validation_summary is None:
+            raise HTTPException(status_code=400, detail="candidate has no validation summary")
+        cand.promotion = build_promotion_decision(cand.candidate_id, cand.validation_summary)
+    cand.promotion.decision = "paper"
+
+    # Clear governance gate
+    cand.metadata.pop("promotion_pending_human_gate", None)
+    proposal.metadata.pop("promotion_pending_human_gate", None)
+    cand.metadata["human_approved_at"] = datetime.now(timezone.utc).isoformat()
+    cand.metadata["human_approved_by"] = "quick_register"
+    cand.metadata["human_approval_notes"] = f"Quick register: allocation {payload.allocation_pct:.0%}"
+
+    result = await promote_candidate(
+        request.app,
+        candidate=cand,
+        proposal=proposal,
+        lifecycle_registry=request.app.state.ai_lifecycle_registry,
+        promotion_registry=request.app.state.ai_promotion_registry,
+    )
+    request.app.state.ai_candidate_registry.save(result["candidate"])
+    save_proposal(request.app, result["proposal"])
+
+    asyncio.create_task(write_audit(
+        GovernanceAuditEvent(
+            module="ai.research",
+            action="quick_register",
+            status="approved",
+            actor="web_ui",
+            role="HUMAN",
+            input_payload={"candidate_id": candidate_id, "allocation_pct": payload.allocation_pct},
+            output_payload={"runtime_status": result.get("runtime_status")},
+        )
+    ))
+    return {
+        "candidate_id": candidate_id,
+        "allocation_pct": payload.allocation_pct,
+        "candidate": result["candidate"].model_dump(mode="json"),
+        "promotion": result["promotion"].model_dump(mode="json"),
+        "runtime_status": result.get("runtime_status"),
+        "registered_strategy_name": result.get("registered_strategy_name"),
+    }

@@ -68,6 +68,7 @@
     latestSignals: {},
     signalTimer: null,
     refreshTimer: null,
+    liveSignalTimer: null,
     signalLoading: false,
     signalPanelCollapsed: false,
     jobPollingTimers: {},   // proposalId → intervalId
@@ -1417,11 +1418,13 @@
           <span class="cand-score-badge ${color}" style="font-size:11px;">${score.toFixed(0)}</span>
         </div>
         <div style="color:#9fb1c9;margin-bottom:5px;">推荐目标：<strong>${target}</strong></div>
-        <div style="display:flex;gap:6px;">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
           <button class="btn btn-sm" style="font-size:11px;color:#20bf78;border-color:#20bf78;"
             data-action="human-approve" data-candidate-id="${cid}" data-target="${target}">✓ 批准</button>
           <button class="btn btn-sm" style="font-size:11px;color:#e05260;border-color:#e05260;"
             data-action="human-reject" data-candidate-id="${cid}">✗ 拒绝</button>
+          <button class="btn btn-sm" style="font-size:11px;color:#f59e0b;border-color:#f59e0b;"
+            data-action="quick-register" data-candidate-id="${cid}">纸盘 5%</button>
         </div>
       </div>`;
     }).join(''));
@@ -2068,6 +2071,10 @@
       if (action === 'human-reject' && cid) {
         humanReject(cid).catch(err => notify(`拒绝失败: ${err.message}`, true));
       }
+      if (action === 'quick-register' && cid) {
+        e.stopPropagation();
+        quickRegister(cid).catch(err => notify(`快速注册失败: ${err.message}`, true));
+      }
     });
 
     /* 刷新 */
@@ -2195,8 +2202,10 @@
   function startPolling() {
     clearInterval(state.signalTimer);
     clearInterval(state.refreshTimer);
+    clearInterval(state.liveSignalTimer);
     if (!isAiResearchActive() || document.hidden) return;
     loadSignal().catch(() => {});
+    loadLiveSignals().catch(() => {});
     state.signalTimer = setInterval(() => {
       if (!isAiResearchActive() || document.hidden) return;
       loadSignal().catch(() => {});
@@ -2205,13 +2214,19 @@
       if (!isAiResearchActive() || document.hidden) return;
       refreshWorkbench().catch(() => {});
     }, REFRESH_INTERVAL_MS);
+    state.liveSignalTimer = setInterval(() => {
+      if (!isAiResearchActive() || document.hidden) return;
+      loadLiveSignals().catch(() => {});
+    }, 30000);
   }
 
   function stopPolling() {
     clearInterval(state.signalTimer);
     clearInterval(state.refreshTimer);
+    clearInterval(state.liveSignalTimer);
     state.signalTimer = null;
     state.refreshTimer = null;
+    state.liveSignalTimer = null;
   }
 
   function isAiResearchActive() {
@@ -2276,6 +2291,82 @@
     stopPolling();
     Object.values(state.jobPollingTimers).forEach(t => clearInterval(t));
   });
+
+  /* ══════════════════════════════════════════════════════════════
+     Phase A — 实时信号面板（30s 轮询）
+  ══════════════════════════════════════════════════════════════ */
+
+  async function loadLiveSignals() {
+    try {
+      const res = await aiApi('/candidates/live-signals', { timeoutMs: 20000 });
+      renderLiveSignalPanel(res?.items || []);
+    } catch (e) {
+      /* silent — non-critical */
+    }
+  }
+
+  function renderLiveSignalPanel(items) {
+    const el = document.getElementById('ai-live-signals-panel');
+    if (!el) return;
+
+    if (!items.length) {
+      el.innerHTML = '<div style="font-size:11px;color:#6b7fa0;padding:6px 0;">暂无运行中候选</div>';
+      return;
+    }
+
+    const dirIcon  = d => d === 'LONG' ? '▲' : d === 'SHORT' ? '▼' : '─';
+    const dirColor = d => d === 'LONG' ? '#4ade80' : d === 'SHORT' ? '#f87171' : '#6b7fa0';
+    const pct      = v => ((v || 0) * 100).toFixed(0) + '%';
+
+    el.innerHTML = items.map(item => {
+      const sig  = item.signal;
+      if (!sig) return `<div class="live-sig-row"><span style="color:#6b7fa0;font-size:11px">${esc(item.strategy)} — 信号错误</span></div>`;
+      const comp = sig.components || {};
+      const blockedBadge   = sig.blocked_by_risk
+        ? `<span class="live-sig-badge" style="background:#7f1d1d;color:#fca5a5;" title="${esc(sig.risk_reason)}">风控</span>` : '';
+      const approvalBadge  = (sig.requires_approval && !sig.blocked_by_risk)
+        ? `<span class="live-sig-badge" style="background:#78350f;color:#fcd34d;">待审</span>` : '';
+
+      return `<div class="live-sig-row">
+  <div class="live-sig-header">
+    <span class="live-sig-name">${esc(item.strategy)}</span>
+    <span style="font-size:10px;color:#6b7fa0;">${esc(item.symbol)}</span>
+    <span style="font-weight:700;font-size:13px;margin-left:auto;color:${dirColor(sig.direction)}">${dirIcon(sig.direction)} ${sig.direction}</span>
+    ${blockedBadge}${approvalBadge}
+  </div>
+  <div class="live-sig-bars">
+    ${['llm', 'ml', 'factor'].map(k => {
+      const c = comp[k] || {};
+      return `<span class="live-sig-bar-label">${k.toUpperCase()}</span>`
+           + `<span style="color:${dirColor(c.direction)};font-size:10px">${dirIcon(c.direction || 'FLAT')}</span>`
+           + `<span style="font-size:10px;min-width:26px;text-align:right">${pct(c.confidence)}</span>`;
+    }).join('')}
+    <span style="font-size:10px;color:#6b7fa0;margin-left:4px">合计</span>
+    <span style="font-size:11px;font-weight:600">${pct(sig.confidence)}</span>
+  </div>
+</div>`;
+    }).join('');
+  }
+
+  /* ══════════════════════════════════════════════════════════════
+     Phase B — 快速注册
+  ══════════════════════════════════════════════════════════════ */
+
+  async function quickRegister(candidateId, allocationPct = 0.05) {
+    if (!confirm(`确认将候选 ${candidateId.slice(0, 8)} 快速注册为纸盘交易，分配 ${(allocationPct * 100).toFixed(0)}% 仓位？`)) return;
+    try {
+      const result = await aiApi(`/candidates/${encodeURIComponent(candidateId)}/quick-register`, {
+        method: 'POST',
+        body: JSON.stringify({ allocation_pct: allocationPct }),
+        timeoutMs: 30000,
+      });
+      const stratName = result?.registered_strategy_name || result?.runtime_status || '纸盘';
+      notify(`已快速注册为纸盘: ${stratName}（${(allocationPct * 100).toFixed(0)}%）`);
+      await refreshWorkbench('', candidateId);
+    } catch (err) {
+      notify(`快速注册失败: ${err.message}`, true);
+    }
+  }
 
   /* 暴露给外部调用（兼容旧代码） */
   window.AI = {
