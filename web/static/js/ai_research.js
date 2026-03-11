@@ -860,6 +860,7 @@
       <div style="font-size:11px;color:#7e92b2;margin-top:4px;">回放模式：${esc(enrichment.mode)}</div>
       ${oosBadge || wfBadge || paramsBadge || dsrBadge || optBadge || corrBadge ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">${oosBadge}${wfBadge}${paramsBadge}${dsrBadge}${optBadge}${corrBadge}</div>` : ''}
       ${signalBadge}
+      ${_renderValidationPipeline(vs)}
       <div class="cand-recommendation">AI建议：${esc(promotionText(decision))}</div>
       <div class="cand-card-actions">
         <button class="btn btn-sm" data-action="view-candidate" data-candidate-id="${esc(cid)}" style="font-size:12px;">详情</button>
@@ -1037,6 +1038,7 @@
         <div style="font-size:12px;color:#7e92b2;">
           ${esc(cand?.symbol || '--')} · ${esc(cand?.timeframe || '--')} · ${esc(statusText(cand?.status))}
         </div>
+        ${renderLifecycleStepper(cand?.status)}
       </div>
 
       <div style="margin-bottom:14px;">
