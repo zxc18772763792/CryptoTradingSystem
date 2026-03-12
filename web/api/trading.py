@@ -4588,6 +4588,18 @@ async def get_audit_logs(
     }
 
 
+async def get_live_trade_review(
+    hours: int = 24 * 7,
+    limit: int = 200,
+    strategy: Optional[str] = None,
+):
+    return execution_engine.get_live_trade_review(
+        hours=max(1, min(int(hours or 24 * 7), 24 * 365)),
+        limit=max(1, min(int(limit or 200), 2000)),
+        strategy=(strategy or None),
+    )
+
+
 async def get_pnl_heatmap(
     days: int = 30,
     bucket: str = "day",

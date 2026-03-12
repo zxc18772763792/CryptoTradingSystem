@@ -160,6 +160,19 @@ async def get_audit_logs(
     )
 
 
+@router.get("/analytics/live-trade-review")
+async def get_live_trade_review(
+    hours: int = 24 * 7,
+    limit: int = 200,
+    strategy: Optional[str] = None,
+):
+    return await trading_api.get_live_trade_review(
+        hours=hours,
+        limit=limit,
+        strategy=strategy,
+    )
+
+
 @router.get("/pnl/heatmap")
 async def get_pnl_heatmap(
     days: int = 30,

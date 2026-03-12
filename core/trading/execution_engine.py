@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
@@ -103,6 +105,191 @@ class ExecutionEngine:
         self._live_reconcile_interval_seconds = 12.0
         self._live_reconcile_grace_seconds = 20.0
         self._real_order_timeout_seconds = 30.0
+        self._live_review_root = Path("./data/cache/live_review")
+        self._live_trade_journal_path = self._live_review_root / "strategy_trade_journal.jsonl"
+        self._live_trade_counts_path = self._live_review_root / "strategy_trade_counts.json"
+        self._live_strategy_trade_counts: Dict[str, int] = self._load_live_trade_counts()
+        self._live_review_lock = asyncio.Lock()
+
+    def _load_live_trade_counts(self) -> Dict[str, int]:
+        try:
+            if not self._live_trade_counts_path.exists():
+                return {}
+            raw = json.loads(self._live_trade_counts_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return {}
+            counts: Dict[str, int] = {}
+            for key, value in raw.items():
+                name = str(key or "").strip()
+                if not name:
+                    continue
+                try:
+                    counts[name] = max(0, int(value))
+                except Exception:
+                    continue
+            return counts
+        except Exception as exc:
+            logger.debug(f"load live trade counts failed: {exc}")
+            return {}
+
+    def _persist_live_trade_counts(self) -> None:
+        try:
+            self._live_review_root.mkdir(parents=True, exist_ok=True)
+            tmp = self._live_trade_counts_path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(self._live_strategy_trade_counts, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp.replace(self._live_trade_counts_path)
+        except Exception as exc:
+            logger.warning(f"persist live trade counts failed: {exc}")
+
+    @staticmethod
+    def _signal_to_dict_safe(signal: Signal) -> Dict[str, Any]:
+        try:
+            payload = signal.to_dict()
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            pass
+        return {
+            "symbol": str(getattr(signal, "symbol", "") or ""),
+            "signal_type": str(getattr(getattr(signal, "signal_type", None), "value", "") or ""),
+            "price": float(getattr(signal, "price", 0.0) or 0.0),
+            "timestamp": (
+                getattr(signal, "timestamp", None).isoformat()
+                if getattr(signal, "timestamp", None) is not None
+                else datetime.now(timezone.utc).isoformat()
+            ),
+            "strategy_name": str(getattr(signal, "strategy_name", "") or ""),
+            "strength": float(getattr(signal, "strength", 0.0) or 0.0),
+            "quantity": getattr(signal, "quantity", None),
+            "stop_loss": getattr(signal, "stop_loss", None),
+            "take_profit": getattr(signal, "take_profit", None),
+            "metadata": dict(getattr(signal, "metadata", {}) or {}),
+        }
+
+    async def _record_live_strategy_trade(
+        self,
+        *,
+        signal: Signal,
+        exchange: str,
+        account_id: str,
+        side: str,
+        quantity: float,
+        fill_price: float,
+        order_id: Optional[str],
+        order_status: Optional[str],
+        pnl: float,
+        fee_usd: float,
+        slippage_cost_usd: float,
+        action: str,
+    ) -> None:
+        if self._paper_trading:
+            return
+
+        strategy = str(getattr(signal, "strategy_name", "") or "").strip() or "unknown"
+        symbol = str(getattr(signal, "symbol", "") or "").strip()
+        ts = datetime.now(timezone.utc)
+        signal_payload = self._signal_to_dict_safe(signal)
+        signal_type = str(signal_payload.get("signal_type") or side or "").strip().lower()
+
+        entry: Dict[str, Any]
+        async with self._live_review_lock:
+            strategy_count = int(self._live_strategy_trade_counts.get(strategy, 0)) + 1
+            self._live_strategy_trade_counts[strategy] = strategy_count
+            self._persist_live_trade_counts()
+            self._live_review_root.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "timestamp": ts.isoformat(),
+                "mode": "live",
+                "action": str(action or "trade"),
+                "strategy": strategy,
+                "strategy_trade_count": strategy_count,
+                "exchange": str(exchange or "").strip().lower(),
+                "account_id": str(account_id or "main"),
+                "symbol": symbol,
+                "side": str(side or "").lower(),
+                "signal_type": signal_type,
+                "quantity": float(quantity or 0.0),
+                "fill_price": float(fill_price or 0.0),
+                "notional": float(quantity or 0.0) * float(fill_price or 0.0),
+                "order_id": str(order_id or ""),
+                "order_status": str(order_status or ""),
+                "pnl": float(pnl or 0.0),
+                "fee_usd": float(fee_usd or 0.0),
+                "slippage_cost_usd": float(slippage_cost_usd or 0.0),
+                "signal": signal_payload,
+            }
+            with self._live_trade_journal_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        try:
+            await audit_logger.log(
+                module="trading.live_review",
+                action="strategy_trade",
+                status="success",
+                message=f"{strategy} {symbol} {signal_type}",
+                details=entry,
+            )
+        except Exception as exc:
+            logger.debug(f"record live strategy audit skipped: {exc}")
+
+    def get_live_trade_review(
+        self,
+        *,
+        limit: int = 200,
+        strategy: Optional[str] = None,
+        hours: int = 24 * 7,
+    ) -> Dict[str, Any]:
+        size = max(1, min(int(limit or 200), 2000))
+        lookback_hours = max(1, min(int(hours or 24 * 7), 24 * 365))
+        strategy_filter = str(strategy or "").strip()
+        cutoff = datetime.now(timezone.utc).timestamp() - lookback_hours * 3600
+
+        items: List[Dict[str, Any]] = []
+        if self._live_trade_journal_path.exists():
+            try:
+                with self._live_trade_journal_path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        text = str(line or "").strip()
+                        if not text:
+                            continue
+                        try:
+                            row = json.loads(text)
+                        except Exception:
+                            continue
+                        if not isinstance(row, dict):
+                            continue
+                        if strategy_filter and str(row.get("strategy") or "") != strategy_filter:
+                            continue
+                        ts_raw = str(row.get("timestamp") or "")
+                        try:
+                            ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                            if ts.tzinfo is None:
+                                ts = ts.replace(tzinfo=timezone.utc)
+                            if ts.timestamp() < cutoff:
+                                continue
+                        except Exception:
+                            continue
+                        items.append(row)
+            except Exception as exc:
+                logger.debug(f"read live trade review failed: {exc}")
+        items = items[-size:]
+
+        strategy_counts = dict(self._live_strategy_trade_counts or {})
+        if strategy_filter:
+            strategy_counts = {strategy_filter: int(strategy_counts.get(strategy_filter, 0))}
+
+        return {
+            "mode": "live",
+            "hours": lookback_hours,
+            "limit": size,
+            "strategy": strategy_filter or None,
+            "count": len(items),
+            "strategy_trade_counts": strategy_counts,
+            "items": items,
+        }
 
     def set_paper_trading(self, enabled: bool, *, sync_runtime_state: bool = True) -> None:
         self._paper_trading = bool(enabled)
@@ -1372,6 +1559,20 @@ class ExecutionEngine:
                     "slippage_cost_usd": slippage_cost_usd,
                 }
             )
+            await self._record_live_strategy_trade(
+                signal=signal,
+                exchange=exchange,
+                account_id=account_id,
+                side=side.value,
+                quantity=float(order.filled or qty or 0.0),
+                fill_price=float(fill_price or 0.0),
+                order_id=order.id,
+                order_status=order.status.value,
+                pnl=float(trade_pnl or 0.0),
+                fee_usd=fee_usd,
+                slippage_cost_usd=slippage_cost_usd,
+                action="open_or_add",
+            )
 
             result = {
                 "signal": signal.to_dict(),
@@ -1595,13 +1796,28 @@ class ExecutionEngine:
                 "slippage_cost_usd": slippage_cost_usd,
             }
         )
+        close_pnl = float(closed.realized_pnl or 0.0) - fee_usd
+        await self._record_live_strategy_trade(
+            signal=signal,
+            exchange=exchange,
+            account_id=account_id,
+            side=close_side.value,
+            quantity=float(close_order.filled or close_qty or 0.0),
+            fill_price=float(close_price or 0.0),
+            order_id=close_order.id,
+            order_status=close_order.status.value,
+            pnl=close_pnl,
+            fee_usd=fee_usd,
+            slippage_cost_usd=slippage_cost_usd,
+            action="close",
+        )
 
         result = {
             "action": "close_position",
             "symbol": signal.symbol,
             "side": position_side.value,
             "close_price": close_price,
-            "pnl": float(closed.realized_pnl or 0.0) - fee_usd,
+            "pnl": close_pnl,
             "fee_usd": fee_usd,
             "slippage_cost_usd": slippage_cost_usd,
             "account_id": account_id,
