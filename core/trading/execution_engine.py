@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 
 from config.settings import settings
+from core.ai.live_decision_router import live_decision_router
 from core.audit import audit_logger
 from core.exchanges import exchange_manager
 from core.governance.audit import GovernanceAuditEvent, write_audit
@@ -89,6 +90,7 @@ class ExecutionEngine:
             "executed": 0,
             "skipped_zero_qty": 0,
             "risk_rejected": 0,
+            "ai_rejected": 0,
             "order_failed": 0,
             "order_timeout": 0,
             "exceptions": 0,
@@ -1115,6 +1117,58 @@ class ExecutionEngine:
                     },
                 )
 
+    async def _evaluate_live_ai_decision(
+        self,
+        *,
+        signal: Signal,
+        side: OrderSide,
+        exchange: str,
+        account_id: str,
+        leverage: float,
+        account_equity: float,
+        order_value: float,
+        quote_price: float,
+        existing_position: Any,
+        trade_policy: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        position_payload: Dict[str, Any] = {}
+        if existing_position is not None:
+            try:
+                position_payload = {
+                    "side": str(getattr(existing_position, "side", None).value),
+                    "quantity": float(getattr(existing_position, "quantity", 0.0) or 0.0),
+                    "entry_price": float(getattr(existing_position, "entry_price", 0.0) or 0.0),
+                    "unrealized_pnl": float(getattr(existing_position, "unrealized_pnl", 0.0) or 0.0),
+                }
+            except Exception:
+                position_payload = {}
+
+        metadata = dict(signal.metadata or {})
+        metadata.update(
+            {
+                "exchange": exchange,
+                "account_id": account_id,
+                "stop_loss": signal.stop_loss,
+                "take_profit": signal.take_profit,
+            }
+        )
+
+        return await live_decision_router.evaluate_signal(
+            trading_mode=self.get_trading_mode(),
+            strategy=str(signal.strategy_name or ""),
+            symbol=str(signal.symbol or ""),
+            signal_type=str(getattr(signal.signal_type, "value", side.value) or side.value),
+            signal_strength=float(signal.strength or 0.0),
+            price=float(quote_price or signal.price or 0.0),
+            account_equity=float(account_equity or 0.0),
+            order_value=float(order_value or 0.0),
+            leverage=float(leverage or 1.0),
+            timeframe=str(metadata.get("timeframe") or ""),
+            existing_position=position_payload,
+            trade_policy=dict(trade_policy or {}),
+            metadata=metadata,
+        )
+
     async def execute_signal(self, signal: Signal) -> Optional[Dict[str, Any]]:
         try:
             if signal.signal_type == SignalType.CLOSE_LONG:
@@ -1302,6 +1356,68 @@ class ExecutionEngine:
                     or (side == OrderSide.SELL and existing_position.side == PositionSide.LONG)
                 )
             )
+
+            ai_decision = await self._evaluate_live_ai_decision(
+                signal=signal,
+                side=side,
+                exchange=exchange,
+                account_id=account_id,
+                leverage=leverage,
+                account_equity=float(account_equity or 0.0),
+                order_value=float(order_value or 0.0),
+                quote_price=float(quote_price or 0.0),
+                existing_position=existing_position,
+                trade_policy=trade_policy,
+            )
+            req.params["ai_live_decision"] = ai_decision
+            if str(ai_decision.get("action") or "").lower() == "block" and bool(ai_decision.get("applied")):
+                self._signal_diagnostics["ai_rejected"] = int(self._signal_diagnostics.get("ai_rejected", 0)) + 1
+                reason = (
+                    f"AI决策拦截({ai_decision.get('provider')}/{ai_decision.get('model')}): "
+                    f"{ai_decision.get('reason')}"
+                )
+                self._signal_diagnostics["last_result"] = {
+                    "status": "ai_rejected",
+                    "strategy": signal.strategy_name,
+                    "symbol": signal.symbol,
+                    "exchange": exchange,
+                    "reason": reason,
+                    "ai_decision": ai_decision,
+                }
+                self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                rejected = await order_manager.record_rejected_order(
+                    request=req,
+                    reason=reason,
+                    price=quote_price or signal.price,
+                )
+                await self._notify_callbacks(
+                    "ai_decision_rejected",
+                    {
+                        "type": "strategy_signal",
+                        "symbol": signal.symbol,
+                        "strategy": signal.strategy_name,
+                        "reason": reason,
+                        "order_id": rejected.id,
+                        "ai_decision": ai_decision,
+                    },
+                )
+                await write_audit(
+                    GovernanceAuditEvent(
+                        module="trading.execution",
+                        action="ai_live_decision_rejected",
+                        status="denied",
+                        actor="system",
+                        role="SYSTEM",
+                        input_payload={
+                            "symbol": signal.symbol,
+                            "strategy": signal.strategy_name,
+                            "side": side.value,
+                            "order_value": float(order_value or 0.0),
+                        },
+                        output_payload={"reason": reason, "order_id": rejected.id, "ai_decision": ai_decision},
+                    )
+                )
+                return None
 
             governance_check = await decision_engine.evaluate_order_intent(
                 symbol=signal.symbol,

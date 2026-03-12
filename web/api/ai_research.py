@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from config.database import StrategyPerformanceSnapshot, async_session_maker
 from config.settings import settings
+from core.ai.live_decision_router import live_decision_router
 from core.backtest.funding_provider import FundingProviderConfig, FundingRateProvider
 from core.governance.audit import GovernanceAuditEvent, write_audit
 from core.deployment.promotion_engine import transition_candidate, transition_proposal
@@ -111,6 +112,18 @@ class AIFundingWarmRequest(BaseModel):
     symbol: str = "BTC/USDT"
     days: int = Field(default=60, ge=1, le=3650)
     source: str = "auto"
+
+
+class AILiveDecisionConfigUpdateRequest(BaseModel):
+    enabled: Optional[bool] = None
+    mode: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    timeout_ms: Optional[int] = Field(default=None, ge=1000, le=60000)
+    max_tokens: Optional[int] = Field(default=None, ge=32, le=4096)
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=1.5)
+    fail_open: Optional[bool] = None
+    apply_in_paper: Optional[bool] = None
 
 
 def _proposal_job_summary(app: Request | Any, proposal_id: str, preferred_job_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -235,7 +248,27 @@ async def get_ai_runtime_config(request: Request):
         "governance_enabled": bool(getattr(settings, "GOVERNANCE_ENABLED", True)),
         "decision_mode": str(getattr(settings, "DECISION_MODE", "shadow") or "shadow"),
         "trading_mode": str(getattr(settings, "TRADING_MODE", "paper") or "paper"),
+        "ai_live_decision": live_decision_router.get_runtime_config(),
     }
+
+
+@router.get("/runtime-config/live-decision")
+async def get_ai_live_decision_runtime_config(request: Request):
+    ensure_ai_research_runtime_state(request.app)
+    return live_decision_router.get_runtime_config()
+
+
+@router.post("/runtime-config/live-decision")
+async def update_ai_live_decision_runtime_config(
+    request: Request,
+    payload: AILiveDecisionConfigUpdateRequest,
+):
+    ensure_ai_research_runtime_state(request.app)
+    try:
+        updated = await live_decision_router.update_runtime_config(**payload.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"updated": True, "config": updated}
 
 
 @router.post("/proposals/generate")

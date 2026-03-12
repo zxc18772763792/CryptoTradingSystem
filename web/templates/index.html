@@ -1549,6 +1549,31 @@
                                     <button class="btn btn-sm" id="ai-news-pull-btn">拉取新闻</button>
                                     <button class="btn btn-sm" id="ai-funding-warm-btn">预热宏观缓存</button>
                                 </div>
+                                <div style="padding:8px;background:#141f2f;border-radius:6px;margin-bottom:8px;">
+                                    <div style="color:#c2d0e8;font-weight:700;margin-bottom:6px;">AI实盘决策开关</div>
+                                    <div class="form-row" style="grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap:6px; margin-bottom:6px;">
+                                        <label style="font-size:12px;color:#b7c8dd;display:flex;align-items:center;gap:6px;">
+                                            <input type="checkbox" id="ai-live-decision-enabled">
+                                            启用AI决策
+                                        </label>
+                                        <select id="ai-live-decision-mode">
+                                            <option value="shadow">shadow（只提示不拦截）</option>
+                                            <option value="enforce">enforce（可拦截实盘）</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-row" style="grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap:6px; margin-bottom:6px;">
+                                        <select id="ai-live-decision-provider">
+                                            <option value="glm">GLM</option>
+                                            <option value="codex">Codex / OpenAI</option>
+                                            <option value="claude">Claude</option>
+                                        </select>
+                                        <input id="ai-live-decision-model" type="text" placeholder="模型名（可留空用默认）">
+                                    </div>
+                                    <div class="inline-actions" style="gap:6px;">
+                                        <button class="btn btn-sm" id="ai-live-decision-save-btn">保存AI决策配置</button>
+                                        <span id="ai-live-decision-status" style="font-size:11px;color:#9fb1c9;">未加载</span>
+                                    </div>
+                                </div>
                                 <div id="ai-data-readiness-details" style="display:flex;flex-direction:column;gap:6px;"></div>
                             </div>
                         </div>

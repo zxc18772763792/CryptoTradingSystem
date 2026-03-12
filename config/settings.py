@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     ZHIPU_API_KEY: str = ""
     ZHIPU_BASE_URL: str = "https://open.bigmodel.cn/api/coding/paas/v4"
     ZHIPU_MODEL: str = "GLM-4.5-Air"
+    OPENAI_API_KEY: str = ""
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    OPENAI_MODEL: str = "gpt-5-mini"
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_BASE_URL: str = "https://api.anthropic.com"
+    ANTHROPIC_MODEL: str = "claude-3-5-sonnet-latest"
 
     # Storage
     DATABASE_URL: str = Field(default_factory=_default_database_url)
@@ -81,6 +87,15 @@ class Settings(BaseSettings):
     DECISION_MODE: str = "shadow"  # shadow/paper/live
     REQUIRE_DUAL_APPROVAL_FOR_LIVE: bool = True
     AUDIT_LEVEL: str = "full"  # full/minimal
+    AI_LIVE_DECISION_ENABLED: bool = False
+    AI_LIVE_DECISION_MODE: str = "shadow"  # shadow/enforce
+    AI_LIVE_DECISION_PROVIDER: str = "glm"  # glm/codex/claude
+    AI_LIVE_DECISION_MODEL: str = ""  # optional provider-specific override
+    AI_LIVE_DECISION_TIMEOUT_MS: int = 6000
+    AI_LIVE_DECISION_MAX_TOKENS: int = 220
+    AI_LIVE_DECISION_TEMPERATURE: float = 0.0
+    AI_LIVE_DECISION_FAIL_OPEN: bool = True
+    AI_LIVE_DECISION_APPLY_IN_PAPER: bool = False
 
     # Exchange market type (spot/future/swap/margin)
     BINANCE_DEFAULT_TYPE: str = "spot"
@@ -163,6 +178,22 @@ class Settings(BaseSettings):
         text = str(v or "full").strip().lower()
         if text not in {"full", "minimal"}:
             raise ValueError("AUDIT_LEVEL must be one of: full/minimal")
+        return text
+
+    @field_validator("AI_LIVE_DECISION_MODE")
+    @classmethod
+    def validate_ai_live_decision_mode(cls, v: str) -> str:
+        text = str(v or "shadow").strip().lower()
+        if text not in {"shadow", "enforce"}:
+            raise ValueError("AI_LIVE_DECISION_MODE must be one of: shadow/enforce")
+        return text
+
+    @field_validator("AI_LIVE_DECISION_PROVIDER")
+    @classmethod
+    def validate_ai_live_decision_provider(cls, v: str) -> str:
+        text = str(v or "glm").strip().lower()
+        if text not in {"glm", "codex", "claude"}:
+            raise ValueError("AI_LIVE_DECISION_PROVIDER must be one of: glm/codex/claude")
         return text
 
     @field_validator("DATABASE_URL")

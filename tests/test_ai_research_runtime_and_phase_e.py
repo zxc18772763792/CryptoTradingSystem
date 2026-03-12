@@ -331,3 +331,49 @@ def test_live_signals_works_with_symbol_field_candidates(monkeypatch):
     assert item["strategy"] == "MAStrategy"
     assert item["symbol"] == "BTC/USDT"
     assert item["signal"]["direction"] == "LONG"
+
+
+def test_runtime_config_contains_ai_live_decision(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(
+        ai_module.live_decision_router,
+        "get_runtime_config",
+        lambda: {"enabled": False, "mode": "shadow", "provider": "glm", "model": "GLM-4.5-Air"},
+    )
+
+    result = asyncio.run(ai_module.get_ai_runtime_config(request))
+    assert "ai_live_decision" in result
+    assert result["ai_live_decision"]["provider"] == "glm"
+    assert result["ai_live_decision"]["mode"] == "shadow"
+
+
+def test_update_runtime_config_live_decision_endpoint(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+
+    async def _fake_update_runtime_config(**kwargs):
+        return {
+            "enabled": bool(kwargs.get("enabled")),
+            "mode": str(kwargs.get("mode") or "shadow"),
+            "provider": str(kwargs.get("provider") or "glm"),
+            "model": str(kwargs.get("model") or ""),
+        }
+
+    monkeypatch.setattr(ai_module.live_decision_router, "update_runtime_config", _fake_update_runtime_config)
+
+    payload = ai_module.AILiveDecisionConfigUpdateRequest(
+        enabled=True,
+        mode="enforce",
+        provider="claude",
+        model="claude-3-5-sonnet-latest",
+    )
+    result = asyncio.run(ai_module.update_ai_live_decision_runtime_config(request, payload))
+    assert result["updated"] is True
+    assert result["config"]["enabled"] is True
+    assert result["config"]["mode"] == "enforce"
+    assert result["config"]["provider"] == "claude"

@@ -61,7 +61,7 @@
     pendingApprovals: [],   // candidates with human gate
     pendingLlmContext: null, // last AI-generated research context
     pendingMacroContext: null,
-    runtimeConfig: null,    // { governance_enabled, decision_mode, trading_mode }
+    runtimeConfig: null,    // { governance_enabled, decision_mode, trading_mode, ai_live_decision }
     runtimeConfigLoaded: false,
     selectedProposalId: '',
     selectedCandidateId: '',
@@ -203,6 +203,70 @@
   function governanceEnabled() {
     return !!(state.runtimeConfig && state.runtimeConfig.governance_enabled);
   }
+
+  function getLiveDecisionRuntimeConfig() {
+    return (state.runtimeConfig && state.runtimeConfig.ai_live_decision) || null;
+  }
+
+  function renderLiveDecisionRuntimeConfig() {
+    const cfg = getLiveDecisionRuntimeConfig();
+    const enabledEl = document.getElementById('ai-live-decision-enabled');
+    const modeEl = document.getElementById('ai-live-decision-mode');
+    const providerEl = document.getElementById('ai-live-decision-provider');
+    const modelEl = document.getElementById('ai-live-decision-model');
+    const statusEl = document.getElementById('ai-live-decision-status');
+    if (!enabledEl || !modeEl || !providerEl || !modelEl || !statusEl) return;
+    if (!cfg) {
+      statusEl.textContent = '未加载';
+      return;
+    }
+    enabledEl.checked = !!cfg.enabled;
+    modeEl.value = String(cfg.mode || 'shadow');
+    providerEl.value = String(cfg.provider || 'glm');
+    modelEl.value = String(cfg.model || '');
+    const selectedProvider = String(cfg.provider || 'glm');
+    const providerMeta = (cfg.providers || {})[selectedProvider] || {};
+    const available = !!providerMeta.available;
+    const modeText = String(cfg.mode || 'shadow');
+    const providerText = `${selectedProvider}/${String(cfg.model || '')}`;
+    statusEl.textContent = `${cfg.enabled ? '已启用' : '未启用'} | ${modeText} | ${providerText} | ${available ? 'key就绪' : 'key缺失'}`;
+    statusEl.style.color = available ? '#9fb1c9' : '#f0b429';
+  }
+
+  async function saveLiveDecisionRuntimeConfig() {
+    const enabledEl = document.getElementById('ai-live-decision-enabled');
+    const modeEl = document.getElementById('ai-live-decision-mode');
+    const providerEl = document.getElementById('ai-live-decision-provider');
+    const modelEl = document.getElementById('ai-live-decision-model');
+    const btn = document.getElementById('ai-live-decision-save-btn');
+    if (!enabledEl || !modeEl || !providerEl || !modelEl) return;
+    const payload = {
+      enabled: !!enabledEl.checked,
+      mode: String(modeEl.value || 'shadow'),
+      provider: String(providerEl.value || 'glm'),
+      model: String(modelEl.value || '').trim(),
+    };
+    try {
+      if (btn) { btn.disabled = true; btn.textContent = '保存中...'; }
+      const res = await aiApi('/runtime-config/live-decision', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        timeoutMs: 15000,
+      });
+      const nextCfg = res?.config || null;
+      state.runtimeConfig = {
+        ...(state.runtimeConfig || {}),
+        ai_live_decision: nextCfg,
+      };
+      renderLiveDecisionRuntimeConfig();
+      notify('AI实盘决策配置已更新');
+    } catch (err) {
+      notify(`AI实盘决策配置保存失败: ${err.message}`, true);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '保存AI决策配置'; }
+    }
+  }
+
   function canRegisterCandidate(cand) {
     if (!cand) return false;
     if (governanceEnabled()) return false;
@@ -1813,8 +1877,10 @@
         governance_enabled: !!res?.governance_enabled,
         decision_mode: String(res?.decision_mode || ''),
         trading_mode: String(res?.trading_mode || ''),
+        ai_live_decision: res?.ai_live_decision || null,
       };
       state.runtimeConfigLoaded = true;
+      renderLiveDecisionRuntimeConfig();
       const nextGovernance = !!state.runtimeConfig.governance_enabled;
       if (prevGovernance !== nextGovernance) {
         renderCandidateCards();
@@ -1825,9 +1891,15 @@
     } catch (err) {
       // Non-fatal: default to governance disabled for UI guard only.
       if (!state.runtimeConfig) {
-        state.runtimeConfig = { governance_enabled: false, decision_mode: '', trading_mode: '' };
+        state.runtimeConfig = {
+          governance_enabled: false,
+          decision_mode: '',
+          trading_mode: '',
+          ai_live_decision: null,
+        };
       }
       state.runtimeConfigLoaded = true;
+      renderLiveDecisionRuntimeConfig();
       console.debug('loadRuntimeConfig failed:', err);
     }
   }
@@ -2410,6 +2482,8 @@
       pullNewsForResearch().catch(err => notify(`新闻拉取失败: ${err.message}`, true)));
     document.getElementById('ai-funding-warm-btn')?.addEventListener('click', () =>
       warmFundingForResearch().catch(err => notify(`宏观缓存预热失败: ${err.message}`, true)));
+    document.getElementById('ai-live-decision-save-btn')?.addEventListener('click', () =>
+      saveLiveDecisionRuntimeConfig().catch(err => notify(`AI实盘决策保存失败: ${err.message}`, true)));
     document.getElementById('ai-planner-symbols')?.addEventListener('change', () =>
       loadDataReadiness().catch(() => {}));
     document.getElementById('run-exchange')?.addEventListener('change', () =>
