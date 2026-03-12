@@ -51,6 +51,16 @@ async def get_market_microstructure(
     return await trading_api.get_market_microstructure(exchange=exchange, symbol=symbol, depth_limit=depth_limit)
 
 
+@router.get("/market_microstructure")
+async def get_market_microstructure_compat(
+    exchange: str = "binance",
+    symbol: str = "BTC/USDT",
+    depth_limit: int = 80,
+):
+    """Backward-compatible alias kept for CLAUDE.md Phase-F acceptance path."""
+    return await trading_api.get_market_microstructure(exchange=exchange, symbol=symbol, depth_limit=depth_limit)
+
+
 @router.post("/analytics/behavior/journal")
 async def add_behavior_journal(request: trading_api.BehaviorJournalRequest):
     return await trading_api.add_behavior_journal(request)

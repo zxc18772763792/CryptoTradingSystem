@@ -2212,7 +2212,7 @@
     const newsSymbol = symbolToNewsKey(symbol);
 
     summaryEl.textContent = '正在检查新闻、宏观与微观数据...';
-    const [newsHealthRes, newsSymbolRes, newsGlobalRes, newsPullRes, newsWorkerRes, fundingDiagRes, microRes, communityRes] = await Promise.allSettled([
+    const [newsHealthRes, newsSymbolRes, newsGlobalRes, newsPullRes, newsWorkerRes, fundingDiagRes, microRes, communityRes, premiumRes] = await Promise.allSettled([
       rootApi('/news/health', { timeoutMs: 12000 }),
       rootApi(`/news/summary?symbol=${encodeURIComponent(newsSymbol)}&hours=24`, { timeoutMs: 12000 }),
       rootApi('/news/summary?hours=24', { timeoutMs: 12000 }),
@@ -2221,6 +2221,7 @@
       aiApi(`/diagnostics/funding-cache?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&days=60`, { timeoutMs: 12000 }),
       rootApi(`/trading/analytics/microstructure?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&depth_limit=20`, { timeoutMs: 12000 }),
       rootApi(`/trading/analytics/community/overview?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}`, { timeoutMs: 12000 }),
+      aiApi('/premium-data/status', { timeoutMs: 12000 }),
     ]);
 
     const health = newsHealthRes.status === 'fulfilled' ? (newsHealthRes.value || {}) : {};
@@ -2231,6 +2232,22 @@
     const funding = fundingDiagRes.status === 'fulfilled' ? (fundingDiagRes.value?.funding || {}) : {};
     const microData = microRes.status === 'fulfilled' ? (microRes.value || {}) : {};
     const communityData = communityRes.status === 'fulfilled' ? (communityRes.value || {}) : {};
+    const premiumData = premiumRes.status === 'fulfilled' ? (premiumRes.value || {}) : {};
+    const premiumSources = premiumData?.sources || {};
+    const premiumRows = Object.entries(premiumSources).map(([name, source]) => {
+      const hasCached = !!source?.has_cached_data;
+      const configured = !!source?.key_configured;
+      return {
+        name,
+        hasCached,
+        configured,
+        available: !!source?.available,
+      };
+    });
+    const premiumCachedCount = premiumRows.filter(row => row.hasCached).length;
+    const premiumConfiguredCount = premiumRows.filter(row => row.configured).length;
+    const premiumTotalCount = premiumRows.length;
+    const premiumActiveNames = premiumRows.filter(row => row.hasCached).map(row => row.name);
 
     const summary = Number(symbolSummary?.events_count || 0) > 0 || Number(symbolSummary?.feed_count || 0) > 0
       ? symbolSummary
@@ -2256,6 +2273,7 @@
     if (!fundingRows) issues.push('资金费率缓存为空');
     if (!Number.isFinite(Number(fundingRate))) issues.push('实时 funding 不可用');
     if (!whaleCount && !announcementCount) issues.push('社区/巨鲸数据较弱');
+    if (premiumConfiguredCount > 0 && premiumCachedCount === 0) issues.push('高级数据源已配置但暂未形成缓存');
 
     summaryEl.textContent = issues.length ? `待处理: ${issues.join(' / ')}` : '新闻、宏观与微观数据已就绪';
 
@@ -2281,9 +2299,15 @@
         <div>巨鲸 ${whaleCount} / 公告 ${announcementCount} / 微观点差 ${Number(microData?.orderbook?.spread_bps || 0).toFixed(2)} bps</div>
       </div>
       <div style="padding:8px;background:#141f2f;border-radius:6px;">
+        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">高级数据源</div>
+        <div>缓存 ${premiumCachedCount}/${premiumTotalCount} / Key 已配置 ${premiumConfiguredCount}</div>
+        <div>${premiumActiveNames.length ? `活跃源 ${esc(premiumActiveNames.join(' / '))}` : '暂无活跃缓存源（可选）'}</div>
+      </div>
+      <div style="padding:8px;background:#141f2f;border-radius:6px;">
         <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">存储说明</div>
         <div style="margin-top:3px;color:#9fb1c9;">新闻库: ./data/crypto_trading.db</div>
         <div style="margin-top:3px;color:#9fb1c9;">资金费率缓存: ${esc(fundingPath)}</div>
+        <div style="margin-top:3px;color:#9fb1c9;">高级源缓存: ./data/premium/*</div>
         <div style="margin-top:3px;color:#9fb1c9;">当币种新闻过少时会自动回退到全市场摘要，避免诊断全 0。</div>
       </div>
     `;

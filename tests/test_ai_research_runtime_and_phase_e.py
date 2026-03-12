@@ -262,6 +262,13 @@ def test_research_onchain_ui_mentions_premium_sources():
     assert "高级源快照" in js_text
 
 
+def test_ai_research_readiness_mentions_premium_sources():
+    repo_root = Path(__file__).resolve().parents[1]
+    js_text = (repo_root / "web" / "static" / "js" / "ai_research.js").read_text(encoding="utf-8")
+    assert "/premium-data/status" in js_text
+    assert "高级数据源" in js_text
+
+
 def test_premium_data_status_treats_cached_data_as_available(monkeypatch):
     from web.api import ai_research as ai_module
 
