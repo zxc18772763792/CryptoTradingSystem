@@ -86,6 +86,8 @@ async def run_cusum_checks_for_all_candidates(app: FastAPI) -> List[Dict[str, An
                 # Capture status BEFORE demotion (transition_candidate modifies in-place)
                 previous_status = str(cand.status)
                 new_status = await _demote_on_decay(app, cand)
+                # Auto-draft replacement proposal (best-effort, non-blocking)
+                _auto_draft_replacement(app, cand, result)
                 report = {
                     "candidate_id": cand.candidate_id,
                     "strategy": strat_name or cand.strategy,
@@ -184,3 +186,39 @@ async def _demote_on_decay(app: FastAPI, candidate: Any) -> str:
 
     # Already retired or unknown — no further action
     return current
+
+
+def _auto_draft_replacement(app: Any, candidate: Any, decay_result: Dict[str, Any]) -> None:
+    """Auto-create a draft replacement proposal after decay demotion (best-effort, non-fatal)."""
+    try:
+        from core.research.orchestrator import create_manual_proposal  # noqa: PLC0415
+        symbol = (getattr(candidate, "symbols", None) or ["BTC/USDT"])[0]
+        timeframes = getattr(candidate, "timeframes", None) or ["15m", "1h"]
+        decay_pct = decay_result.get("decay_pct", 0)
+        thesis = (
+            f"替代策略研究（自动生成）：{candidate.strategy} 在 {symbol} 上触发 CUSUM 衰减"
+            f"（衰减幅度 {decay_pct:.1f}%），寻找替代方向。"
+        )
+        new_proposal = create_manual_proposal(
+            app,
+            actor="cusum_auto",
+            thesis=thesis,
+            symbols=[symbol],
+            timeframes=timeframes,
+            market_regime="mixed",
+            strategy_templates=[],
+            source="cusum_auto",
+            expected_holding_period="1d",
+            risk_hypothesis="",
+            invalidation_rules=[],
+            required_features=[],
+            parameter_space={},
+            notes=[f"由 CUSUM 衰减自动生成，原候选: {candidate.candidate_id}"],
+            metadata={"parent_candidate_id": candidate.candidate_id, "auto_generated": True},
+        )
+        logger.info(
+            f"cusum_watcher: auto-drafted replacement proposal {new_proposal.proposal_id} "
+            f"for {candidate.candidate_id}"
+        )
+    except Exception as exc:
+        logger.debug(f"cusum_watcher: auto-draft failed (non-fatal): {exc}")

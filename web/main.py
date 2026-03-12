@@ -678,6 +678,122 @@ async def _run_data_maintenance_once() -> Dict[str, Any]:
     return report
 
 
+async def _google_trends_worker(stop_event: asyncio.Event) -> None:
+    """Update Google Trends cache every 6 hours (requires pytrends, graceful no-op if absent)."""
+    INTERVAL = 6 * 3600
+    STARTUP_DELAY = 120  # let other workers start first
+    await asyncio.sleep(STARTUP_DELAY)
+    while not stop_event.is_set():
+        try:
+            from core.data.google_trends_collector import update_all_keywords  # noqa: PLC0415
+            result = await update_all_keywords()
+            if result:
+                logger.debug(f"google_trends_worker: updated {list(result.keys())}")
+            _touch_runtime_task("google_trends", success=True)
+        except Exception as exc:
+            logger.debug(f"google_trends_worker: {exc}")
+        for _ in range(INTERVAL):
+            if stop_event.is_set():
+                break
+            await asyncio.sleep(1)
+
+
+async def _macro_cache_worker(stop_event: asyncio.Event) -> None:
+    """Update FRED macro cache once daily (requires FRED_API_KEY env var)."""
+    INTERVAL = 24 * 3600
+    STARTUP_DELAY = 180
+    await asyncio.sleep(STARTUP_DELAY)
+    while not stop_event.is_set():
+        try:
+            from core.data.macro_collector import update_macro_cache  # noqa: PLC0415
+            result = await update_macro_cache()
+            if result:
+                logger.debug(f"macro_cache_worker: updated {list(result.keys())}")
+            _touch_runtime_task("macro_cache", success=True)
+        except Exception as exc:
+            logger.debug(f"macro_cache_worker: {exc}")
+        for _ in range(INTERVAL):
+            if stop_event.is_set():
+                break
+            await asyncio.sleep(1)
+
+
+async def _glassnode_worker(stop_event: asyncio.Event) -> None:
+    """Update Glassnode on-chain cache every 4h (no-op without GLASSNODE_API_KEY)."""
+    INTERVAL = 4 * 3600
+    await asyncio.sleep(240)  # stagger: 4 min after startup
+    while not stop_event.is_set():
+        try:
+            from core.data.glassnode_collector import update_glassnode_cache  # noqa: PLC0415
+            result = await update_glassnode_cache()
+            if result:
+                logger.debug(f"glassnode_worker: updated {list(result.keys())}")
+            _touch_runtime_task("glassnode", success=True)
+        except Exception as exc:
+            logger.debug(f"glassnode_worker: {exc}")
+        for _ in range(INTERVAL):
+            if stop_event.is_set():
+                break
+            await asyncio.sleep(1)
+
+
+async def _cryptoquant_worker(stop_event: asyncio.Event) -> None:
+    """Update CryptoQuant on-chain cache every 4h (no-op without CRYPTOQUANT_API_KEY)."""
+    INTERVAL = 4 * 3600
+    await asyncio.sleep(270)  # stagger: 4.5 min after startup
+    while not stop_event.is_set():
+        try:
+            from core.data.cryptoquant_collector import update_cryptoquant_cache  # noqa: PLC0415
+            result = await update_cryptoquant_cache()
+            if result:
+                logger.debug(f"cryptoquant_worker: updated {list(result.keys())}")
+            _touch_runtime_task("cryptoquant", success=True)
+        except Exception as exc:
+            logger.debug(f"cryptoquant_worker: {exc}")
+        for _ in range(INTERVAL):
+            if stop_event.is_set():
+                break
+            await asyncio.sleep(1)
+
+
+async def _nansen_worker(stop_event: asyncio.Event) -> None:
+    """Update Nansen smart-money cache every 4h (no-op without NANSEN_API_KEY)."""
+    INTERVAL = 4 * 3600
+    await asyncio.sleep(300)  # stagger: 5 min after startup
+    while not stop_event.is_set():
+        try:
+            from core.data.nansen_collector import update_nansen_cache  # noqa: PLC0415
+            result = await update_nansen_cache()
+            if result:
+                logger.debug(f"nansen_worker: updated {list(result.keys())}")
+            _touch_runtime_task("nansen", success=True)
+        except Exception as exc:
+            logger.debug(f"nansen_worker: {exc}")
+        for _ in range(INTERVAL):
+            if stop_event.is_set():
+                break
+            await asyncio.sleep(1)
+
+
+async def _kaiko_worker(stop_event: asyncio.Event) -> None:
+    """Update Kaiko microstructure cache every 1h (no-op without KAIKO_API_KEY)."""
+    INTERVAL = 3600
+    await asyncio.sleep(330)  # stagger: 5.5 min after startup
+    while not stop_event.is_set():
+        try:
+            from core.data.kaiko_collector import update_kaiko_cache  # noqa: PLC0415
+            result = await update_kaiko_cache()
+            if result:
+                logger.debug(f"kaiko_worker: updated {list(result.keys())}")
+            _touch_runtime_task("kaiko", success=True)
+        except Exception as exc:
+            logger.debug(f"kaiko_worker: {exc}")
+        for _ in range(INTERVAL):
+            if stop_event.is_set():
+                break
+            await asyncio.sleep(1)
+
+
 async def _cusum_monitor_worker(stop_event: asyncio.Event, app: FastAPI) -> None:
     """Periodically scan all running candidates for CUSUM decay (every 5 min)."""
     from core.monitoring.cusum_watcher import run_cusum_checks_for_all_candidates
@@ -755,6 +871,30 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
         "cusum_monitor": {
             "factory": lambda stop_event: _cusum_monitor_worker(stop_event, app),
             "restart_on_failure": True,
+        },
+        "google_trends": {
+            "factory": lambda stop_event: _google_trends_worker(stop_event),
+            "restart_on_failure": False,  # non-critical; don't spam restarts on 429s
+        },
+        "macro_cache": {
+            "factory": lambda stop_event: _macro_cache_worker(stop_event),
+            "restart_on_failure": False,
+        },
+        "glassnode": {
+            "factory": lambda stop_event: _glassnode_worker(stop_event),
+            "restart_on_failure": False,  # no-op without key
+        },
+        "cryptoquant": {
+            "factory": lambda stop_event: _cryptoquant_worker(stop_event),
+            "restart_on_failure": False,
+        },
+        "nansen": {
+            "factory": lambda stop_event: _nansen_worker(stop_event),
+            "restart_on_failure": False,
+        },
+        "kaiko": {
+            "factory": lambda stop_event: _kaiko_worker(stop_event),
+            "restart_on_failure": False,
         },
     }
     if _DATA_MAINTENANCE_ENABLED:

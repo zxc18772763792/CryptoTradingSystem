@@ -227,6 +227,126 @@ def _parse_market_context(market_context: Dict[str, Any]) -> Tuple[List[str], Li
         boosted.extend(["宏观", "风险"])
         suppressed.extend(["统计套利"])
 
+    # F0b: OI change rate — rising OI = adding leverage (trend); falling OI = deleveraging (chop)
+    oi_change_pct = float(market_context.get("oi_change_pct") or 0.0)
+    if oi_change_pct > 10:
+        boosted.extend(["趋势"])
+        suppressed.extend(["震荡"])
+    elif oi_change_pct < -10:
+        boosted.extend(["震荡"])
+        suppressed.extend(["趋势"])
+
+    # F1: Deribit options skew — put premium = downside hedging; call premium = FOMO
+    options_skew = float(market_context.get("options_skew_25d") or 0.0)
+    if options_skew > 0.08:      # strong put IV premium → hedging against downside
+        boosted.extend(["风险"])
+        suppressed.extend(["趋势", "动量"])
+    elif options_skew > 0.04:    # mild put premium → cautious
+        boosted.extend(["震荡"])
+    elif options_skew < -0.05:   # call IV premium → FOMO / upside demand
+        boosted.extend(["趋势", "动量"])
+
+    # F2: Google Trends — high retail interest = crowded/FOMO; low = disinterest/mean-reversion
+    try:
+        from core.data.google_trends_collector import load_latest  # noqa: PLC0415
+        trend_val = load_latest("bitcoin")
+        if trend_val is not None:
+            if trend_val > 75:
+                boosted.extend(["风险"])
+                suppressed.extend(["趋势"])
+            elif trend_val < 20:
+                boosted.extend(["均值回归"])
+    except Exception:
+        pass
+
+    # F3: Macro (yfinance primary + FRED supplement)
+    try:
+        from core.data.macro_collector import load_macro_snapshot  # noqa: PLC0415
+        macro = load_macro_snapshot()
+        vix = macro.get("vix")
+        if vix is not None:
+            if vix > 30:        # elevated fear — defensive
+                boosted.extend(["风险"])
+                suppressed.extend(["趋势", "动量"])
+            elif vix < 15:      # complacency — trend-friendly
+                boosted.extend(["趋势"])
+        dxy = macro.get("dxy")
+        if dxy is not None:     # strong USD historically pressures crypto
+            if dxy > 108:
+                boosted.extend(["风险", "震荡"])
+            elif dxy < 98:
+                boosted.extend(["趋势"])
+        tnx = macro.get("tnx_10y")
+        if tnx is not None:
+            if tnx > 4.5:       # high real rates → risk-off for crypto
+                boosted.extend(["风险"])
+                suppressed.extend(["动量"])
+            elif tnx < 3.5:     # low rates → risk-on
+                boosted.extend(["动量"])
+    except Exception:
+        pass
+
+    # F4a: Glassnode on-chain (no-op if key absent / cache cold)
+    try:
+        from core.data.glassnode_collector import load_glassnode_snapshot  # noqa: PLC0415
+        gn = load_glassnode_snapshot()
+        sopr = gn.get("sopr")
+        if sopr is not None:
+            if sopr < 0.97:       # loss realisation — capitulation → contrarian buy
+                boosted.extend(["均值回归", "趋势"])
+            elif sopr > 1.05:     # profit taking → potential sell pressure
+                boosted.extend(["风险"])
+                suppressed.extend(["动量"])
+        mvrv_z = gn.get("mvrv_z")
+        if mvrv_z is not None:
+            if mvrv_z > 6:        # historically overvalued
+                boosted.extend(["风险"])
+                suppressed.extend(["趋势", "动量"])
+            elif mvrv_z < 0:      # historically undervalued
+                boosted.extend(["趋势"])
+        netflow = gn.get("exchange_netflow")
+        if netflow is not None:
+            if netflow > 0:       # net inflow to exchanges = potential selling
+                boosted.extend(["风险", "震荡"])
+            elif netflow < 0:     # outflow = accumulation signal
+                boosted.extend(["趋势"])
+    except Exception:
+        pass
+
+    # F4b: CryptoQuant flows (no-op if key absent / cache cold)
+    try:
+        from core.data.cryptoquant_collector import load_cryptoquant_snapshot  # noqa: PLC0415
+        cq = load_cryptoquant_snapshot()
+        cq_netflow = cq.get("exchange_netflow")
+        if cq_netflow is not None:
+            if cq_netflow > 0:
+                boosted.extend(["风险"])
+            elif cq_netflow < 0:
+                boosted.extend(["趋势"])
+        ffr = cq.get("fund_flow_ratio")
+        if ffr is not None and ffr > 0.2:   # >20% of supply on exchanges = sell risk
+            boosted.extend(["风险"])
+    except Exception:
+        pass
+
+    # F4c: Nansen smart money (no-op if key absent / cache cold)
+    try:
+        from core.data.nansen_collector import load_nansen_snapshot  # noqa: PLC0415
+        ns = load_nansen_snapshot()
+        sm_net = ns.get("smart_money_netflow")
+        if sm_net is not None:
+            if sm_net > 0:        # smart money accumulating
+                boosted.extend(["趋势", "动量"])
+            elif sm_net < 0:      # smart money distributing
+                boosted.extend(["风险"])
+                suppressed.extend(["动量"])
+        lp_chg = ns.get("dex_lp_tvl_change")
+        if lp_chg is not None:
+            if lp_chg < -5:       # LP withdrawing = risk-off
+                boosted.extend(["风险"])
+    except Exception:
+        pass
+
     return _dedupe_keep_order(boosted), _dedupe_keep_order(suppressed)
 
 
@@ -385,6 +505,36 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
         whale_c = int((market_context.get("whale") or {}).get("count", 0) or 0)
         if whale_c:
             signal_parts.append(f"巨鲸={whale_c}")
+        oi_chg = float(market_context.get("oi_change_pct") or 0)
+        if abs(oi_chg) > 5:
+            signal_parts.append(f"OI变化={oi_chg:+.1f}%")
+        opt_skew = market_context.get("options_skew_25d")
+        if opt_skew is not None:
+            opt_sig = market_context.get("options_signal") or ""
+            signal_parts.append(f"期权偏斜={float(opt_skew):.3f}({opt_sig})")
+        try:
+            from core.data.google_trends_collector import load_latest as _gt_latest  # noqa: PLC0415
+            _tv = _gt_latest("bitcoin")
+            if _tv is not None:
+                signal_parts.append(f"谷歌趋势={_tv:.0f}")
+        except Exception:
+            pass
+        try:
+            from core.data.macro_collector import load_macro_snapshot as _macro_snap  # noqa: PLC0415
+            _m = _macro_snap()
+            _macro_parts = []
+            if _m.get("vix") is not None:
+                _macro_parts.append(f"VIX={_m['vix']:.1f}")
+            if _m.get("dxy") is not None:
+                _macro_parts.append(f"DXY={_m['dxy']:.1f}")
+            if _m.get("tnx_10y") is not None:
+                _macro_parts.append(f"10Y={_m['tnx_10y']:.2f}%")
+            if _m.get("fed_rate") is not None:
+                _macro_parts.append(f"FF={_m['fed_rate']:.2f}%")
+            if _macro_parts:
+                signal_parts.append("宏观=[" + " · ".join(_macro_parts) + "]")
+        except Exception:
+            pass
         factors = market_context.get("factors") or {}
         if isinstance(factors, dict) and factors:
             top_factors = [f"{k}={float(v):.2f}" for k, v in factors.items() if float(v or 0) > 0.3]

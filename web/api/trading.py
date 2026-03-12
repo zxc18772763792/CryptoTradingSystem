@@ -3934,6 +3934,20 @@ async def get_market_microstructure(
         except Exception:
             pass
 
+    # F1: Deribit options snapshot (best-effort, non-blocking)
+    options_data: Dict = {"available": False}
+    try:
+        from core.data.options_collector import options_collector  # noqa: PLC0415
+        currency = symbol.split("/")[0].split(":")[0].upper()
+        snap = await asyncio.wait_for(
+            options_collector.fetch_snapshot(currency),
+            timeout=8.0,
+        )
+        if snap is not None:
+            options_data = snap.to_dict()
+    except Exception:
+        pass
+
     return {
         "exchange": exchange,
         "symbol": symbol,
@@ -3965,6 +3979,7 @@ async def get_market_microstructure(
         },
         "funding_rate": funding,
         "spot_futures_basis": basis,
+        "options": options_data,
     }
 
 

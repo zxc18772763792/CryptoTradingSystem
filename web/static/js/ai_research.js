@@ -761,29 +761,38 @@
   }
 
   const LIFECYCLE_STEPS = [
-    { key: 'new', label: '新建' },
-    { key: 'paper_running', label: '纸盘' },
-    { key: 'shadow_running', label: '影子' },
+    { key: 'draft',          label: '研究中' },
+    { key: 'validated',      label: '已验证' },
+    { key: 'paper_running',  label: '纸盘' },
     { key: 'live_candidate', label: '候选' },
+    { key: 'live_running',   label: '实盘' },
   ];
 
+  // Maps every possible status string to its step index in LIFECYCLE_STEPS
+  const STATUS_TO_STEP = {
+    new: 0, draft: 0, research_queued: 0, research_running: 0,
+    validated: 1,
+    paper_running: 2, shadow_running: 2,
+    live_candidate: 3,
+    live_running: 4,
+  };
+
   function renderLifecycleStepper(currentStatus) {
-    const status = String(currentStatus || 'new');
-    const retired = status === 'retired';
+    const status = String(currentStatus || 'draft');
+    const retired  = status === 'retired';
     const rejected = status === 'rejected';
-    const currentIndex = LIFECYCLE_STEPS.findIndex((s) => s.key === status);
-    const activeIndex = currentIndex >= 0 ? currentIndex : 0;
+    const activeIndex = STATUS_TO_STEP[status] ?? -1;
     return `<div class="lc-stepper">
       ${LIFECYCLE_STEPS.map((step, idx) => {
         let cls = 'lc-step lc-future';
         if (retired || rejected) cls = 'lc-step lc-inactive';
-        else if (idx < activeIndex) cls = 'lc-step lc-done';
+        else if (idx < activeIndex)  cls = 'lc-step lc-done';
         else if (idx === activeIndex) cls = 'lc-step lc-active';
         const doneMark = (!retired && !rejected && idx < activeIndex) ? '✓ ' : '';
         const connector = idx < LIFECYCLE_STEPS.length - 1 ? '<div class="lc-connector"></div>' : '';
         return `<div class="${cls}">${doneMark}${esc(step.label)}</div>${connector}`;
       }).join('')}
-      ${retired ? '<div class="lc-step lc-rejected">已退役</div>' : ''}
+      ${retired  ? '<div class="lc-step lc-rejected">已退役</div>' : ''}
       ${rejected ? '<div class="lc-step lc-rejected">已拒绝</div>' : ''}
     </div>`;
   }
@@ -1265,14 +1274,21 @@
       </div>
 
       ${showRegisterButton
-        ? `<button class="btn-register-cta full" data-action="open-register" data-candidate-id="${esc(candidateId)}">
+        ? `<button class=”btn-register-cta full” data-action=”open-register” data-candidate-id=”${esc(candidateId)}”>
             一键注册策略 →
           </button>`
         : (governanceGateHint
-          ? `<div style="font-size:12px;color:#f0b429;background:#2b1f06;border:1px solid #5c4310;border-radius:6px;padding:8px 10px;">
-              治理模式已开启：请使用上方“待人工审批”进行批准/拒绝。
+          ? `<div style=”font-size:12px;color:#f0b429;background:#2b1f06;border:1px solid #5c4310;border-radius:6px;padding:8px 10px;”>
+              治理模式已开启：请使用上方”待人工审批”进行批准/拒绝。
             </div>`
-          : '')}`;
+          : '')}
+
+      <div style=”margin-top:10px;”>
+        <button class=”btn btn-sm” id=”btn-order-preview” style=”font-size:12px;width:100%;”>
+          生成订单预览
+        </button>
+        <div id=”ai-order-preview-result” style=”display:none;margin-top:10px;padding:12px;background:#0d1a2a;border:1px solid #1e3a5a;border-radius:8px;”></div>
+      </div>`;
     panel.innerHTML = normalizeUiText(panel.innerHTML)
       .replace(' (Best Params)', '')
       .replace('CSV:', 'CSV 文件：')
@@ -1282,6 +1298,11 @@
       .replace('folds+', '折以上');
     normalizeDomText(panel);
     bindParamSensitivity(candidateId);
+
+    // 订单预览按钮
+    panel.querySelector('#btn-order-preview')?.addEventListener('click', () => {
+      showOrderPreview(candidateId);
+    });
 
     // 绑定详情面板里的按钮
     panel.querySelector('.btn-register-cta')?.addEventListener('click', () => {
@@ -1863,6 +1884,10 @@
     const spreadBps   = micro?.orderbook?.spread_bps ?? null;
     const newsEvents  = Number(news?.events_count ?? 0);
     const whaleCount  = Number(micro?.whale_activity?.count ?? 0);
+    const oiChangePct   = micro?.oi?.change_pct_1h ?? micro?.open_interest?.change_pct_1h ?? 0;
+    const optionsSkew   = micro?.options?.skew_25d ?? null;
+    const optionsPcRatio = micro?.options?.put_call_ratio ?? null;
+    const optionsSignal  = micro?.options?.signal ?? null;
 
     // Derive volatility hint from spread
     let volatility = '';
@@ -1888,6 +1913,10 @@
       },
       news:  { events_count: newsEvents },
       whale: { count: whaleCount },
+      oi_change_pct: oiChangePct,
+      options_skew_25d:   optionsSkew,
+      options_pc_ratio:   optionsPcRatio,
+      options_signal:     optionsSignal,
     };
   }
 
@@ -1907,9 +1936,16 @@
       const fr    = liveCtx.microstructure?.funding_rate;
       const ofi   = liveCtx.microstructure?.order_flow_imbalance;
       const ne    = liveCtx.news?.events_count ?? '--';
-      const frTxt = fr != null ? fr.toFixed(5) : '--';
-      const ofiTxt= ofi != null ? ofi.toFixed(3) : '--';
-      marketCtxEl.innerHTML = `<span style="color:${dir==='LONG'?'#20bf78':dir==='SHORT'?'#e05260':'#9fb1c9'}">方向 ${dir} ${conf}%</span> · Funding ${frTxt} · OFI ${ofiTxt} · 新闻事件 ${ne}`;
+      const frTxt  = fr != null ? fr.toFixed(5) : '--';
+      const ofiTxt = ofi != null ? ofi.toFixed(3) : '--';
+      const oi     = liveCtx.oi_change_pct;
+      const oiTxt  = oi != null && oi !== 0 ? (oi > 0 ? '+' : '') + Number(oi).toFixed(1) + '%' : '--';
+      const optSkew = liveCtx.options_skew_25d;
+      const optSig  = liveCtx.options_signal;
+      const optTxt  = optSkew != null
+        ? `${Number(optSkew).toFixed(3)}(${optSig || '?'})`
+        : '--';
+      marketCtxEl.innerHTML = `<span style="color:${dir==='LONG'?'#20bf78':dir==='SHORT'?'#e05260':'#9fb1c9'}">方向 ${dir} ${conf}%</span> · Funding ${frTxt} · OFI ${ofiTxt} · OI ${oiTxt} · 期权偏斜 ${optTxt} · 新闻事件 ${ne}`;
     }
 
     const payload = {
@@ -2643,6 +2679,64 @@
       await refreshWorkbench('', candidateId);
     } catch (err) {
       notify(`快速注册失败: ${err.message}`, true);
+    }
+  }
+
+  /* ── Phase D — 订单预览 ───────────────────────────────────────────────────── */
+
+  async function showOrderPreview(candidateId) {
+    const btn = document.getElementById('btn-order-preview');
+    const resultEl = document.getElementById('ai-order-preview-result');
+    if (btn) { btn.disabled = true; btn.textContent = '计算中...'; }
+    try {
+      const r = await aiApi(`/candidates/${encodeURIComponent(candidateId)}/order-preview`, {
+        method: 'POST',
+        timeoutMs: 15000,
+      });
+      const dirColor = r.direction === 'LONG' ? '#4ade80' : r.direction === 'SHORT' ? '#f87171' : '#94a3b8';
+      const dirIcon  = d => d === 'LONG' ? '▲' : d === 'SHORT' ? '▼' : '─';
+      const pct = v => (v * 100).toFixed(1) + '%';
+      const comp = r.components || {};
+      const blockedHtml = r.blocked_by_risk
+        ? `<div style="color:#f87171;margin-top:8px;font-size:12px;">⚠ 风控拦截：${esc(r.risk_reason || '')}</div>` : '';
+      const approvalHtml = (r.requires_approval && !r.blocked_by_risk)
+        ? `<div style="color:#fcd34d;margin-top:8px;font-size:12px;">⚠ 置信度不足（${pct(r.confidence)}），建议人工确认</div>` : '';
+
+      const html = `
+<div style="font-size:13px;line-height:1.6;">
+  <div style="font-size:16px;font-weight:700;color:${dirColor};margin-bottom:10px;">
+    ${dirIcon(r.direction)} ${r.direction} &nbsp; <span style="font-size:13px;font-weight:500;">置信度 ${pct(r.confidence)}</span>
+  </div>
+  <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px;">
+    <tr><td style="color:#7e92b2;padding:2px 0;">标的</td><td style="font-weight:600;">${esc(r.symbol)}</td></tr>
+    <tr><td style="color:#7e92b2;padding:2px 0;">建议仓位</td><td>${r.size_usdt.toLocaleString()} USDT（${pct(r.allocation_pct)}）</td></tr>
+    <tr><td style="color:#7e92b2;padding:2px 0;">止损</td><td>${pct(r.stop_loss_pct)}</td></tr>
+    <tr><td style="color:#7e92b2;padding:2px 0;">止盈</td><td>${pct(r.take_profit_pct)}</td></tr>
+  </table>
+  <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">信号分解</div>
+  <div style="display:flex;gap:6px;margin-bottom:8px;">
+    ${['llm', 'ml', 'factor'].map(k => {
+      const c = comp[k] || {};
+      const dc = c.direction === 'LONG' ? '#4ade80' : c.direction === 'SHORT' ? '#f87171' : '#94a3b8';
+      return `<div style="flex:1;background:#0a1520;border:1px solid #1e3a5a;border-radius:6px;padding:6px 8px;font-size:11px;">
+        <div style="font-weight:700;text-transform:uppercase;margin-bottom:3px;">${k}</div>
+        <div style="color:${dc};font-size:13px;">${dirIcon(c.direction || 'FLAT')} ${c.direction || 'FLAT'}</div>
+        <div style="color:#7e92b2;">${pct(c.confidence || 0)}</div>
+      </div>`;
+    }).join('')}
+  </div>
+  ${blockedHtml}${approvalHtml}
+  <div style="font-size:10px;color:#4a5f7a;margin-top:8px;font-style:italic;">${esc(r.note)}</div>
+</div>`;
+
+      if (resultEl) {
+        resultEl.innerHTML = html;
+        resultEl.style.display = 'block';
+      }
+    } catch (err) {
+      notify(`订单预览失败: ${err.message}`, true);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '生成订单预览'; }
     }
   }
 

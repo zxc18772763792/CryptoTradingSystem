@@ -1243,3 +1243,207 @@ async def quick_register_candidate(
         "runtime_status": result.get("runtime_status"),
         "registered_strategy_name": result.get("registered_strategy_name"),
     }
+
+
+# ── Phase D — Order Preview (read-only, no order placed) ──────────────────────
+
+@router.post("/candidates/{candidate_id}/order-preview")
+async def generate_order_preview(request: Request, candidate_id: str):
+    """Generate a suggested order preview from SignalAggregator. Does NOT place any order.
+
+    Returns direction, estimated size, stop/take levels, and component breakdown.
+    The candidate must be in validated/paper_running/shadow_running/live_candidate/live_running.
+    """
+    import pandas as pd
+
+    ensure_ai_research_runtime_state(request.app)
+    cand = get_candidate(request.app, candidate_id)
+
+    allowed_statuses = {"validated", "paper_running", "shadow_running", "live_candidate", "live_running"}
+    if str(cand.status) not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"候选状态 {cand.status} 不支持订单预览（需为 {'/'.join(sorted(allowed_statuses))}）",
+        )
+
+    cand_symbol = (cand.symbols or ["BTC/USDT"])[0]
+    allocation_pct = float(cand.metadata.get("allocation_pct") or 0.05)
+
+    # Lazy singleton aggregator (shared with live-signals endpoint)
+    if not hasattr(request.app.state, "_signal_aggregator"):
+        from core.ai.signal_aggregator import SignalAggregator  # noqa: PLC0415
+        request.app.state._signal_aggregator = SignalAggregator()
+    aggregator = request.app.state._signal_aggregator
+
+    # Load market data from strategy_manager cache (non-blocking, 30s TTL)
+    df = pd.DataFrame()
+    try:
+        from core.strategies import strategy_manager as sm  # noqa: PLC0415
+        df = sm._load_market_data(cand_symbol, "1h")
+    except Exception:
+        pass
+
+    sig = await aggregator.aggregate(cand_symbol, df)
+
+    # Estimate portfolio capital (read-only)
+    total_capital = 10000.0
+    try:
+        from core.risk.risk_manager import risk_manager  # noqa: PLC0415
+        total_capital = float(getattr(risk_manager, "_cached_equity", None) or 10000.0)
+    except Exception:
+        pass
+
+    size_usdt = round(total_capital * allocation_pct, 2)
+
+    # ATR-based stop/take; fall back to fixed 3%/6% if unavailable
+    stop_loss_pct = 0.03
+    take_profit_pct = 0.06
+    if not df.empty and "atr" in df.columns:
+        try:
+            atr_raw = float(df["atr"].iloc[-1])
+            close = float(df["close"].iloc[-1])
+            if close > 0 and atr_raw > 0:
+                atr_pct = atr_raw / close
+                stop_loss_pct = round(min(max(atr_pct * 1.4, 0.01), 0.15), 4)
+                take_profit_pct = round(stop_loss_pct * 2.0, 4)
+        except Exception:
+            pass
+
+    return {
+        "candidate_id": candidate_id,
+        "symbol": cand_symbol,
+        "direction": sig.direction,
+        "confidence": sig.confidence,
+        "requires_approval": sig.requires_approval,
+        "blocked_by_risk": sig.blocked_by_risk,
+        "risk_reason": getattr(sig, "risk_reason", None),
+        "size_usdt": size_usdt,
+        "allocation_pct": allocation_pct,
+        "stop_loss_pct": stop_loss_pct,
+        "take_profit_pct": take_profit_pct,
+        "components": sig.components,
+        "note": "此为预览，不会自动下单。确认后请在交易面板手动执行。",
+        "ts": sig.timestamp.isoformat(),
+    }
+
+
+# ── Premium Data Status ────────────────────────────────────────────────────────
+
+@router.get("/premium-data/status")
+async def get_premium_data_status():
+    """Return availability and latest snapshot for all premium/optional data sources.
+
+    Sources: Glassnode, CryptoQuant, Nansen, Kaiko, Google Trends, FRED Macro.
+    Each entry includes: available (bool), last_updated (str|None), snapshot (dict).
+    No keys required — sources without keys report available=False gracefully.
+    """
+    from pathlib import Path as _Path  # noqa: PLC0415
+
+    def _cache_mtime(cache_dir: str, name: str) -> Optional[str]:
+        p = _Path(cache_dir) / f"{name}.parquet"
+        try:
+            mtime = p.stat().st_mtime
+            return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+        except Exception:
+            return None
+
+    result = {}
+
+    # Glassnode
+    try:
+        from core.data.glassnode_collector import load_glassnode_snapshot, _api_key as _gn_key  # noqa: PLC0415
+        snap = load_glassnode_snapshot()
+        has_data = any(v is not None for v in snap.values())
+        result["glassnode"] = {
+            "available": bool(_gn_key()),
+            "has_cached_data": has_data,
+            "last_updated": _cache_mtime("data/premium/glassnode", "sopr"),
+            "snapshot": snap,
+        }
+    except Exception as exc:
+        result["glassnode"] = {"available": False, "error": str(exc)}
+
+    # CryptoQuant
+    try:
+        from core.data.cryptoquant_collector import load_cryptoquant_snapshot, _api_key as _cq_key  # noqa: PLC0415
+        snap = load_cryptoquant_snapshot()
+        has_data = any(v is not None for v in snap.values())
+        result["cryptoquant"] = {
+            "available": bool(_cq_key()),
+            "has_cached_data": has_data,
+            "last_updated": _cache_mtime("data/premium/cryptoquant", "exchange_netflow"),
+            "snapshot": snap,
+        }
+    except Exception as exc:
+        result["cryptoquant"] = {"available": False, "error": str(exc)}
+
+    # Nansen
+    try:
+        from core.data.nansen_collector import load_nansen_snapshot, _api_key as _ns_key  # noqa: PLC0415
+        snap = load_nansen_snapshot()
+        has_data = any(v is not None for v in snap.values())
+        result["nansen"] = {
+            "available": bool(_ns_key()),
+            "has_cached_data": has_data,
+            "last_updated": _cache_mtime("data/premium/nansen", "smart_money_netflow"),
+            "snapshot": snap,
+        }
+    except Exception as exc:
+        result["nansen"] = {"available": False, "error": str(exc)}
+
+    # Kaiko
+    try:
+        from core.data.kaiko_collector import load_kaiko_snapshot, _api_key as _kk_key  # noqa: PLC0415
+        snap = load_kaiko_snapshot()
+        has_data = any(v is not None for v in snap.values())
+        result["kaiko"] = {
+            "available": bool(_kk_key()),
+            "has_cached_data": has_data,
+            "last_updated": _cache_mtime("data/premium/kaiko", "cross_exchange_spread_bps"),
+            "snapshot": snap,
+        }
+    except Exception as exc:
+        result["kaiko"] = {"available": False, "error": str(exc)}
+
+    # Google Trends (free)
+    try:
+        from core.data.google_trends_collector import load_latest as _gt  # noqa: PLC0415
+        btc_val = _gt("bitcoin")
+        result["google_trends"] = {
+            "available": True,
+            "has_cached_data": btc_val is not None,
+            "last_updated": _cache_mtime("data/google_trends", "bitcoin_trends"),
+            "snapshot": {"bitcoin": btc_val},
+        }
+    except Exception as exc:
+        result["google_trends"] = {"available": False, "error": str(exc)}
+
+    # FRED Macro (free with key)
+    try:
+        from core.data.macro_collector import load_macro_snapshot, _api_key as _fred_key  # noqa: PLC0415
+        snap = load_macro_snapshot()
+        has_data = any(v is not None for v in snap.values())
+        result["fred_macro"] = {
+            "available": bool(_fred_key()),
+            "has_cached_data": has_data,
+            "last_updated": _cache_mtime("data/macro", "vix"),
+            "snapshot": snap,
+        }
+    except Exception as exc:
+        result["fred_macro"] = {"available": False, "error": str(exc)}
+
+    # Deribit Options (free)
+    try:
+        from core.data.options_collector import options_collector  # noqa: PLC0415
+        cached = options_collector._cache.get("BTC")
+        snap_dict = cached[1].to_dict() if cached and cached[1] else {}
+        result["deribit_options"] = {
+            "available": True,
+            "has_cached_data": bool(snap_dict),
+            "last_updated": snap_dict.get("timestamp"),
+            "snapshot": snap_dict,
+        }
+    except Exception as exc:
+        result["deribit_options"] = {"available": False, "error": str(exc)}
+
+    return {"sources": result, "ts": datetime.now(timezone.utc).isoformat()}

@@ -252,6 +252,18 @@ class SignalAggregator:
             else:
                 direction = "FLAT"
 
+            # F0a: Fear & Greed adjustment (±0.08 confidence boost at extremes)
+            try:
+                from core.data.sentiment.fear_greed_collector import fear_greed_collector  # noqa: PLC0415
+                fg = fear_greed_collector._history[0] if fear_greed_collector._history else None
+                if fg:
+                    if fg.is_extreme_fear and direction == "LONG":
+                        confidence = min(1.0, confidence + 0.08)
+                    elif fg.is_extreme_greed and direction == "SHORT":
+                        confidence = min(1.0, confidence + 0.08)
+            except Exception:
+                pass
+
             return direction, confidence
         except Exception as exc:
             logger.debug(f"SignalAggregator: factor signal failed: {exc}")
