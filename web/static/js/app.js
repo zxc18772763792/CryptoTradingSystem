@@ -384,7 +384,7 @@ async function loadDashboardTabData(){
 await Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary(),loadPnlHeatmap(),loadNotificationCenter(),loadAuditLogs()]);
 }
 async function loadTradingTabData(){
-await Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk()]);
+await Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk(),loadLiveTradeReview()]);
 }
 async function loadStrategiesTabData(){
 await Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
@@ -639,6 +639,77 @@ yaxis:{title:bucket==='hour'?'时间(本地时区)':'日期(本地时区)',autom
 }
 async function loadPnlHeatmap(){try{const d=Number(document.getElementById('pnl-heatmap-days')?.value||30),b=document.getElementById('pnl-heatmap-bucket')?.value||'day';const r=await api(`/trading/pnl/heatmap?days=${Math.max(1,d)}&bucket=${encodeURIComponent(b)}`,{timeoutMs:8000});renderPnlHeatmap(r);}catch(e){const box=document.getElementById('pnl-heatmap');if(box)box.innerHTML=`<div class="list-item">热力图加载失败: ${esc(e.message)}</div>`;}}
 
+function fmtNum(v,digits=4){
+const n=Number(v);
+if(!Number.isFinite(n))return'--';
+return n.toFixed(digits);
+}
+
+function renderLiveTradeReview(payload){
+const summaryEl=document.getElementById('live-review-summary');
+const tbody=document.getElementById('live-review-tbody');
+if(!summaryEl||!tbody)return;
+const records=Array.isArray(payload?.items)?payload.items:[];
+const counts=payload?.strategy_trade_counts&&typeof payload.strategy_trade_counts==='object'?payload.strategy_trade_counts:{};
+const strategyPairs=Object.entries(counts).map(([k,v])=>[String(k||''),Number(v||0)]).filter(([k,v])=>k&&Number.isFinite(v));
+strategyPairs.sort((a,b)=>b[1]-a[1]);
+const topStrategy=strategyPairs.length?`${strategyPairs[0][0]} (${strategyPairs[0][1]})`:'--';
+summaryEl.innerHTML=`
+<div class="live-review-chip"><span class="k">记录数</span><span class="v">${records.length}</span></div>
+<div class="live-review-chip"><span class="k">策略数</span><span class="v">${strategyPairs.length}</span></div>
+<div class="live-review-chip"><span class="k">Top策略</span><span class="v" title="${esc(topStrategy)}">${esc(topStrategy)}</span></div>`;
+if(!records.length){
+const mode=String(state?._systemStatusLast?.trading_mode||'').toLowerCase();
+const hint=mode==='live'?'暂无实盘成交复盘记录':'当前为模拟盘，暂无实盘复盘记录';
+tbody.innerHTML=`<tr><td colspan="9">${esc(hint)}</td></tr>`;
+return;
+}
+const sorted=records.slice().sort((a,b)=>toMs(b?.timestamp)-toMs(a?.timestamp));
+tbody.innerHTML=sorted.map(row=>{
+const signal=row?.signal||{};
+const strategy=String(row?.strategy||signal?.strategy_name||'--');
+const strategyCount=Number(row?.strategy_trade_count||0);
+const signalType=String(row?.signal_type||signal?.signal_type||'').toLowerCase();
+const side=String(row?.side||'').toLowerCase();
+const signalClass=(signalType==='sell'||signalType==='close_short')?'sell':'buy';
+const signalTag=signalType?`<span class="live-review-signal-tag ${signalClass}">${esc(signalType)}</span>`:'--';
+const pnl=Number(row?.pnl||0);
+const pnlClass=Number.isFinite(pnl)?(pnl>=0?'positive':'negative'):'';
+const notional=Number(row?.notional||0);
+const feeUsd=Number(row?.fee_usd||0);
+const slippageUsd=Number(row?.slippage_cost_usd||0);
+const orderId=String(row?.order_id||'');
+return`<tr>
+<td>${esc(fmtDateTime(row?.timestamp))}</td>
+<td><div class="live-review-strategy" title="${esc(strategy)}">${esc(strategy)}</div><span class="live-review-count-tag">#${Number.isFinite(strategyCount)?strategyCount:'--'}</span></td>
+<td>${esc(String(row?.exchange||'-').toUpperCase())} ${esc(String(row?.symbol||'--'))}</td>
+<td>${signalTag}<div style="margin-top:4px;color:#9fb1c9;">${esc(side||'--')}</div></td>
+<td>${fmtNum(row?.quantity,6)} @ ${fmtNum(row?.fill_price,4)}</td>
+<td>${Number.isFinite(notional)?fmt(notional):'--'}</td>
+<td class="${pnlClass}">${Number.isFinite(pnl)?fmt(pnl):'--'}</td>
+<td><div>${Number.isFinite(feeUsd)?`fee ${fmt(feeUsd)}`:'fee --'}</div><div style="color:#9fb1c9;">slip ${Number.isFinite(slippageUsd)?fmt(slippageUsd):'--'}</div></td>
+<td>${orderId?`<span title="${esc(orderId)}">${esc(orderId.slice(0,18))}${orderId.length>18?'...':''}</span>`:'--'}</td>
+</tr>`;
+}).join('');
+}
+
+async function loadLiveTradeReview(){
+const tbody=document.getElementById('live-review-tbody');
+if(tbody)tbody.innerHTML='<tr><td colspan="9">加载中...</td></tr>';
+try{
+const hours=Math.max(1,Math.min(24*365,Number(document.getElementById('live-review-hours')?.value||168)));
+const strategy=String(document.getElementById('live-review-strategy')?.value||'').trim();
+let ep=`/trading/analytics/live-trade-review?hours=${hours}&limit=200`;
+if(strategy)ep+=`&strategy=${encodeURIComponent(strategy)}`;
+const d=await api(ep,{timeoutMs:15000});
+renderLiveTradeReview(d||{});
+}catch(e){
+const summaryEl=document.getElementById('live-review-summary');
+if(summaryEl)summaryEl.innerHTML=`<div class="live-review-chip"><span class="k">状态</span><span class="v">加载失败</span></div><div class="live-review-chip"><span class="k">原因</span><span class="v" title="${esc(e.message)}">${esc(e.message)}</span></div><div class="live-review-chip"><span class="k">建议</span><span class="v">稍后重试</span></div>`;
+if(tbody)tbody.innerHTML=`<tr><td colspan="9">复盘记录加载失败: ${esc(e.message)}</td></tr>`;
+}
+}
+
 function positionCloseKey(p){return[String(p.exchange||''),String(p.symbol||''),String(p.side||''),String(p.account_id||''),String(p?.metadata?.source||'local')].join('|');}
 async function closePositionFromRow(btn){
 try{
@@ -758,6 +829,19 @@ if(v)v.onchange=()=>loadOrders();
 if(b)b.onclick=()=>loadOrders();
 const bo=document.getElementById('btn-refresh-open-orders');
 if(bo)bo.onclick=()=>loadOpenOrders();
+}
+function bindLiveTradeReview(){
+const btn=document.getElementById('btn-refresh-live-review');
+const hours=document.getElementById('live-review-hours');
+const strategy=document.getElementById('live-review-strategy');
+if(btn)btn.onclick=()=>loadLiveTradeReview();
+if(hours)hours.onchange=()=>loadLiveTradeReview();
+if(strategy)strategy.addEventListener('keydown',e=>{
+  if(e.key==='Enter'){
+    e.preventDefault();
+    loadLiveTradeReview();
+  }
+});
 }
 async function cancelOrder(id,symbol,exchange){try{await api(`/trading/order/${id}?symbol=${encodeURIComponent(symbol)}&exchange=${exchange}`,{method:'DELETE'});notify('订单已撤销');await Promise.allSettled([loadOrders(),loadOpenOrders()]);}catch(e){notify(`撤销失败: ${e.message}`,true);}}
 
@@ -3109,7 +3193,7 @@ async function loadAuditLogs(){try{const d=await api('/trading/audit?hours=168&l
 function bindAudit(){const b=document.getElementById('btn-refresh-audit');if(b)b.onclick=loadAuditLogs;}
 
 let wsClient=null,wsRetryTimer=null,softRefreshTimer=null,replaySessionId='',lastTickRenderAt=0;
-function softRefresh(delay=250){if(softRefreshTimer)clearTimeout(softRefreshTimer);softRefreshTimer=setTimeout(()=>{loadSummary();loadPositions();loadOrders();loadOpenOrders();loadStrategies();loadStrategySummary();loadRisk();loadConditionalOrders();loadAccounts();loadModeInfo();},delay);}
+function softRefresh(delay=250){if(softRefreshTimer)clearTimeout(softRefreshTimer);softRefreshTimer=setTimeout(()=>{loadSummary();loadPositions();loadOrders();loadOpenOrders();loadStrategies();loadStrategySummary();loadRisk();loadConditionalOrders();loadAccounts();loadModeInfo();if(getActiveTabName()==='trading')loadLiveTradeReview();},delay);}
 function setWsBadge(connected){state.wsConnected=!!connected;const st=document.getElementById('system-status');if(st)st.textContent=connected?'运行中(WS在线)':'运行中(轮询)';}
 function applyMarketTick(payload){try{const ex=marketDataState.exchange||document.getElementById('data-exchange')?.value,sym=marketDataState.symbol||document.getElementById('data-symbol')?.value,tf=marketDataState.timeframe||document.getElementById('data-timeframe')?.value||'1m';if(!ex||!sym||!marketDataState.bars?.length)return;const t=payload?.[ex]?.[sym];if(!t)return;const px=Number(t.last||0);if(px<=0)return;const tfSec=timeframeSeconds(tf);const nowMs=Date.now();const bucketMs=Math.floor(nowMs/(tfSec*1000))*(tfSec*1000);const bars=marketDataState.bars;const last=bars[bars.length-1];const lastMs=klineToMs(last?.timestamp);if(!Number.isFinite(lastMs))return;const lastBucket=Math.floor(lastMs/(tfSec*1000))*(tfSec*1000);if(lastBucket===bucketMs){last.high=Math.max(Number(last.high||px),px);last.low=Math.min(Number(last.low||px),px);if(!Number.isFinite(last.low))last.low=px;if(!Number.isFinite(last.high))last.high=px;last.close=px;}else if(bucketMs>lastBucket){if(isSubMinuteTf(tf)){return;}const openPx=Number(last.close||px);bars.push({timestamp:klineLocalIso(bucketMs),open:openPx,high:Math.max(openPx,px),low:Math.min(openPx,px),close:px,volume:0});marketDataState.bars=cropBars(mergeBars([],bars));}const renderThrottle=isSubMinuteTf(tf)?900:450;const now=Date.now();if(now-lastTickRenderAt>=renderThrottle){lastTickRenderAt=now;renderKlineChart(true);}}catch(e){console.error(e);}}
 function initWebSocket(){try{if(wsClient)wsClient.close();const proto=location.protocol==='https:'?'wss':'ws';wsClient=new WebSocket(`${proto}://${location.host}/ws`);wsClient.onopen=()=>{setWsBadge(true);};wsClient.onmessage=e=>{try{const m=JSON.parse(e.data||'{}');const ev=m.event||'';if(['order_event','position_event','execution_event','mode_changed','runtime_snapshot','strategy_signal'].includes(ev)){softRefresh(120);}if(ev==='mode_changed'){notify(`交易模式已切换: ${m?.payload?.mode||'-'}`);}if(ev==='order_event'){const o=m?.payload?.order||{};notify(`订单更新: ${o.symbol||''} ${mapOrderStatus(o.status||'')}`);}if(ev==='strategy_signal'){pushRealtimeSignal(m?.payload||{});}if(ev==='market_tick'){applyMarketTick(m?.payload||{});} }catch{}};wsClient.onclose=()=>{setWsBadge(false);if(wsRetryTimer)clearTimeout(wsRetryTimer);wsRetryTimer=setTimeout(initWebSocket,2000);};wsClient.onerror=()=>{setWsBadge(false);};}catch{setWsBadge(false);}}
@@ -4573,7 +4657,7 @@ await Promise.all([loadOrders(),loadPositions(),loadSummary(),loadRisk(),loadCon
 };
 }
 
-async function init(){initTabs();initClock();initEquity();bindTrade();bindOrderView();bindData();bindDataAdvanced();bindBacktest();bindNotificationCenter();bindAudit();bindStrategyOps();bindStrategyAdvanced();bindResearchPanel();bindResearchPresets();bindResearchSentiment();bindModeControls();bindAccountControls();initWebSocket();renderStrategyConsolePanel();renderResearchStatusCards();await loadSystemStatus();await ensureTabLoaded(getActiveTabName(),{force:true});state.bootCompleted=true;state.bootFailed=false;
+async function init(){initTabs();initClock();initEquity();bindTrade();bindOrderView();bindLiveTradeReview();bindData();bindDataAdvanced();bindBacktest();bindNotificationCenter();bindAudit();bindStrategyOps();bindStrategyAdvanced();bindResearchPanel();bindResearchPresets();bindResearchSentiment();bindModeControls();bindAccountControls();initWebSocket();renderStrategyConsolePanel();renderResearchStatusCards();await loadSystemStatus();await ensureTabLoaded(getActiveTabName(),{force:true});state.bootCompleted=true;state.bootFailed=false;
 // Status polling is lightweight but user-visible; keep it independent from heavier dashboard batches
 setInterval(()=>{if(document.hidden)return;loadSystemStatus();},20000);
 setInterval(()=>{
@@ -4581,14 +4665,14 @@ setInterval(()=>{
   if(state.wsConnected)return;
   const tab=getActiveTabName();
   if(tab==='dashboard')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary()]);
-  else if(tab==='trading')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk()]);
+  else if(tab==='trading')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk(),loadLiveTradeReview()]);
   else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
 },8000);
 setInterval(()=>{
   if(document.hidden)return;
   const tab=getActiveTabName();
   if(tab==='dashboard')Promise.allSettled([loadPositions(),loadBalances(),loadOrders(),loadOpenOrders(),loadRisk()]);
-  else if(tab==='trading')Promise.allSettled([loadPositions(),loadBalances(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts()]);
+  else if(tab==='trading')Promise.allSettled([loadPositions(),loadBalances(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadLiveTradeReview()]);
   else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary()]);
 },10000);
 setInterval(()=>{

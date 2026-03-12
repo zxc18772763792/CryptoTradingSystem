@@ -652,6 +652,78 @@ header h1 {
     align-items: center;
 }
 
+.trading-live-review-card .live-review-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.trading-live-review-card .live-review-chip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid #27405b;
+    background: rgba(17, 31, 47, 0.75);
+}
+
+.trading-live-review-card .live-review-chip .k {
+    color: #9fb1c9;
+    font-size: 12px;
+}
+
+.trading-live-review-card .live-review-chip .v {
+    color: #e8f1ff;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.trading-live-review-card .live-review-strategy {
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.trading-live-review-card .live-review-count-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    font-size: 11px;
+    color: #d7e6fb;
+    background: rgba(58, 166, 255, 0.16);
+    border: 1px solid rgba(77, 182, 255, 0.32);
+}
+
+.trading-live-review-card .live-review-table-scroll {
+    max-height: 420px;
+    overflow: auto;
+    border-radius: 12px;
+    border: 1px solid #23374d;
+    background: rgba(12, 19, 30, 0.55);
+}
+
+.trading-live-review-card .live-review-signal-tag {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 7px;
+    font-size: 11px;
+    color: #cfe0f6;
+    background: rgba(58, 166, 255, 0.14);
+    border: 1px solid rgba(77, 182, 255, 0.28);
+}
+
+.trading-live-review-card .live-review-signal-tag.sell,
+.trading-live-review-card .live-review-signal-tag.close_short {
+    background: rgba(234, 91, 97, 0.15);
+    border-color: rgba(234, 91, 97, 0.35);
+    color: #ffd5d8;
+}
+
 .card {
     background: linear-gradient(180deg, #162232 0%, #152233 100%);
     border: 1px solid var(--card-border);
@@ -3264,6 +3336,10 @@ body.news-page .news-card-structured .news-title,
         grid-template-columns: 1fr;
     }
 
+    .trading-live-review-card .live-review-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
     .trading-span-2 {
         grid-column: 1;
     }
@@ -3306,6 +3382,10 @@ body.news-page .news-card-structured .news-title,
     .trading-order-card .form-row,
     .trading-account-card .form-row,
     .trading-main {
+        grid-template-columns: 1fr;
+    }
+
+    .trading-live-review-card .live-review-summary {
         grid-template-columns: 1fr;
     }
 

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=70">
+    <link rel="stylesheet" href="/static/css/style.css?v=71">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
@@ -467,6 +467,47 @@
                                     </tr>
                                 </thead>
                                 <tbody id="positions-tbody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="card trading-card trading-live-review-card trading-span-2">
+                        <h3>实盘复盘记录（策略信号 / 交易次数）</h3>
+                        <div class="inline-actions" style="margin-bottom: 8px;">
+                            <label style="min-width: 72px;">回看窗口</label>
+                            <select id="live-review-hours" style="max-width: 140px;">
+                                <option value="24">24小时</option>
+                                <option value="72">72小时</option>
+                                <option value="168" selected>7天</option>
+                                <option value="720">30天</option>
+                            </select>
+                            <label style="min-width: 72px;">策略筛选</label>
+                            <input type="text" id="live-review-strategy" placeholder="可留空，例: MAStrategy_ai_1234" style="max-width: 280px;">
+                            <button class="btn btn-primary btn-sm" id="btn-refresh-live-review">刷新复盘</button>
+                        </div>
+                        <div id="live-review-summary" class="live-review-summary">
+                            <div class="live-review-chip"><span class="k">记录数</span><span class="v">加载中...</span></div>
+                            <div class="live-review-chip"><span class="k">策略数</span><span class="v">--</span></div>
+                            <div class="live-review-chip"><span class="k">Top策略</span><span class="v">--</span></div>
+                        </div>
+                        <div class="table-container live-review-table-scroll">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>时间</th>
+                                        <th>策略 / 次数</th>
+                                        <th>交易对</th>
+                                        <th>信号 / 方向</th>
+                                        <th>数量 / 价格</th>
+                                        <th>名义金额</th>
+                                        <th>PnL</th>
+                                        <th>费用</th>
+                                        <th>订单</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="live-review-tbody">
+                                    <tr><td colspan="9">加载中...</td></tr>
+                                </tbody>
                             </table>
                         </div>
                     </div>
@@ -1781,7 +1822,7 @@
 
     <div id="notification" class="notification"></div>
 
-    <script charset="utf-8" src="/static/js/app.js?v=114"></script>
+    <script charset="utf-8" src="/static/js/app.js?v=115"></script>
     <script charset="utf-8" src="/static/js/research_workbench.js?v=7"></script>
     <script charset="utf-8" src="/static/js/ai_research.js?v=26"></script>
     <script charset="utf-8" src="/static/js/ai_research_patch.js?v=1"></script>
