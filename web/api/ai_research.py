@@ -1354,8 +1354,10 @@ async def get_premium_data_status():
         from core.data.glassnode_collector import load_glassnode_snapshot, _api_key as _gn_key  # noqa: PLC0415
         snap = load_glassnode_snapshot()
         has_data = any(v is not None for v in snap.values())
+        key_configured = bool(_gn_key())
         result["glassnode"] = {
-            "available": bool(_gn_key()),
+            "available": bool(has_data or key_configured),
+            "key_configured": key_configured,
             "has_cached_data": has_data,
             "last_updated": _cache_mtime("data/premium/glassnode", "sopr"),
             "snapshot": snap,
@@ -1368,8 +1370,10 @@ async def get_premium_data_status():
         from core.data.cryptoquant_collector import load_cryptoquant_snapshot, _api_key as _cq_key  # noqa: PLC0415
         snap = load_cryptoquant_snapshot()
         has_data = any(v is not None for v in snap.values())
+        key_configured = bool(_cq_key())
         result["cryptoquant"] = {
-            "available": bool(_cq_key()),
+            "available": bool(has_data or key_configured),
+            "key_configured": key_configured,
             "has_cached_data": has_data,
             "last_updated": _cache_mtime("data/premium/cryptoquant", "exchange_netflow"),
             "snapshot": snap,
@@ -1382,8 +1386,10 @@ async def get_premium_data_status():
         from core.data.nansen_collector import load_nansen_snapshot, _api_key as _ns_key  # noqa: PLC0415
         snap = load_nansen_snapshot()
         has_data = any(v is not None for v in snap.values())
+        key_configured = bool(_ns_key())
         result["nansen"] = {
-            "available": bool(_ns_key()),
+            "available": bool(has_data or key_configured),
+            "key_configured": key_configured,
             "has_cached_data": has_data,
             "last_updated": _cache_mtime("data/premium/nansen", "smart_money_netflow"),
             "snapshot": snap,
@@ -1396,8 +1402,10 @@ async def get_premium_data_status():
         from core.data.kaiko_collector import load_kaiko_snapshot, _api_key as _kk_key  # noqa: PLC0415
         snap = load_kaiko_snapshot()
         has_data = any(v is not None for v in snap.values())
+        key_configured = bool(_kk_key())
         result["kaiko"] = {
-            "available": bool(_kk_key()),
+            "available": bool(has_data or key_configured),
+            "key_configured": key_configured,
             "has_cached_data": has_data,
             "last_updated": _cache_mtime("data/premium/kaiko", "cross_exchange_spread_bps"),
             "snapshot": snap,

@@ -253,3 +253,23 @@ def test_phase_e_ui_functions_present():
     assert "function _renderApprovalMeta" in js_text
     assert "function loadParamSensitivity" in js_text
     assert "function openCompareModal" in js_text
+
+
+def test_research_onchain_ui_mentions_premium_sources():
+    repo_root = Path(__file__).resolve().parents[1]
+    js_text = (repo_root / "web" / "static" / "js" / "app.js").read_text(encoding="utf-8")
+    assert "premium_external" in js_text
+    assert "高级源快照" in js_text
+
+
+def test_premium_data_status_treats_cached_data_as_available(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    monkeypatch.setattr("core.data.glassnode_collector.load_glassnode_snapshot", lambda: {"sopr": 1.02, "mvrv_z": None})
+    monkeypatch.setattr("core.data.glassnode_collector._api_key", lambda: "")
+
+    result = asyncio.run(ai_module.get_premium_data_status())
+    source = result["sources"]["glassnode"]
+    assert source["has_cached_data"] is True
+    assert source["key_configured"] is False
+    assert source["available"] is True

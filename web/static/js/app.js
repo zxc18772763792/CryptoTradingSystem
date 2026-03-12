@@ -3584,7 +3584,7 @@ return Boolean((Array.isArray(data?.series)&&data.series.length)||Number(data?.p
 }
 function hasOnchainContent(data){
 if(!data||typeof data!=='object')return false;
-return Boolean((Array.isArray(data?.defi_tvl?.series)&&data.defi_tvl.series.length)||(Array.isArray(data?.whale_activity?.transactions)&&data.whale_activity.transactions.length)||Math.abs(Number(data?.defi_tvl?.latest_tvl||0))>0||Number(data?.whale_activity?.count||0)>0);
+return Boolean((Array.isArray(data?.defi_tvl?.series)&&data.defi_tvl.series.length)||(Array.isArray(data?.whale_activity?.transactions)&&data.whale_activity.transactions.length)||Math.abs(Number(data?.defi_tvl?.latest_tvl||0))>0||Number(data?.whale_activity?.count||0)>0||Number(data?.premium_external?.summary?.cached_sources||0)>0);
 }
 function isResearchAsyncPending(data,kind='generic'){
 if(!data||typeof data!=='object')return false;
@@ -3794,6 +3794,7 @@ const labels=[
   ['whale_activity','巨鲸'],
   ['funding_rate_multi_source','Funding'],
   ['fear_greed_index','情绪'],
+  ['premium_external','高级源'],
 ];
 const parts=[];
 for(const [key,label] of labels){
@@ -3861,6 +3862,15 @@ const fundingSpreadPct=Number(fundingMulti?.spread_rate_pct);
 const fearGreed=renderData?.fear_greed_index||{};
 const fearGreedValue=Number(fearGreed?.value);
 const fearGreedOk=!!fearGreed?.available&&Number.isFinite(fearGreedValue);
+const premiumExternal=renderData?.premium_external||{};
+const premiumSummary=premiumExternal?.summary||{};
+const premiumSources=premiumExternal?.sources||{};
+const premiumTotal=Number(premiumSummary?.total_sources||Object.keys(premiumSources||{}).length||0);
+const premiumCached=Number(premiumSummary?.cached_sources||0);
+const premiumConfigured=Number(premiumSummary?.configured_keys||0);
+const premiumActive=Array.isArray(premiumSummary?.active_sources)?premiumSummary.active_sources:Object.keys(premiumSources||{}).filter(k=>premiumSources?.[k]?.has_cached_data);
+const premiumLine1=premiumTotal>0?`高级源 ${premiumCached}/${premiumTotal} 已缓存 | Key ${premiumConfigured}`:'高级源未配置';
+const premiumLine2=premiumActive.length?`活跃 ${premiumActive.slice(0,4).join(' / ')}`:(premiumConfigured>0?'等待首轮采集':'未配置付费源');
 const servedMode=renderData?.served_mode==='cache_refresh'?'缓存+后台刷新':renderData?.served_mode==='cache'?'缓存':'实时';
 const generatedAt=renderData?.generated_at?fmtDateTime(renderData.generated_at):'--';
 const cacheAgeSec=Number(renderData?.cache_age_sec||0);
@@ -3879,6 +3889,7 @@ if(summary){
   <div class="list-item"><span>巨鲸数量</span>${formatMetricLines([`${Number(whales?.count||0)} 笔`,`阈值 ${Number(whales?.threshold_btc||0)} BTC`])}</div>
   <div class="list-item"><span>多所 Funding</span>${formatMetricLines([fundingLine1,fundingLine2])}</div>
   <div class="list-item"><span>恐慌贪婪指数</span>${formatMetricLines([fearGreedOk?`${fearGreedValue} (${fearGreed?.classification||'-'})`:'暂无可用数据',fearGreedOk?`信号 ${fearGreed?.signal||'neutral'}`:''])}</div>
+  <div class="list-item"><span>高级源快照</span>${formatMetricLines([premiumLine1,premiumLine2])}</div>
   <div class="list-item"><span>返回方式 / 生成时间</span>${formatMetricLines([servedMode,generatedAt])}</div>
   <div class="list-item"><span>组件状态</span>${formatMetricLines([statusLine1,statusLine2,statusLine3])}</div>`;
 }
@@ -3886,6 +3897,7 @@ if(externalSummary){
   externalSummary.innerHTML=`
   <div class="list-item"><span>外生资金</span>${formatMetricLines([fundingLine1,fundingLine2])}</div>
   <div class="list-item"><span>风险情绪</span>${formatMetricLines([fearGreedOk?`${fearGreedValue} (${fearGreed?.classification||'-'})`:'暂无可用数据',fearGreedOk?`信号 ${fearGreed?.signal||'neutral'}`:''])}</div>
+  <div class="list-item"><span>高级源快照</span>${formatMetricLines([premiumLine1,premiumLine2])}</div>
   <div class="list-item"><span>返回模式</span>${formatMetricLines([servedMode,generatedAt])}</div>
   <div class="list-item"><span>组件健康</span>${formatMetricLines([statusLine1,statusLine2,statusLine3])}</div>`;
 }

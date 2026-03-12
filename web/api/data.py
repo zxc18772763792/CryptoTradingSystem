@@ -164,6 +164,94 @@ def _error_text(err: Any) -> str:
     return text or type(err).__name__
 
 
+def _has_snapshot_values(snapshot: Dict[str, Any]) -> bool:
+    if not isinstance(snapshot, dict):
+        return False
+    for value in snapshot.values():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            if value:
+                return True
+            continue
+        if isinstance(value, (int, float)):
+            if math.isfinite(float(value)):
+                return True
+            continue
+        if isinstance(value, str):
+            if value.strip():
+                return True
+            continue
+        return True
+    return False
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _load_premium_external_snapshot() -> Dict[str, Any]:
+    """Load optional premium source snapshots from local cache (no remote requests)."""
+    sources: Dict[str, Dict[str, Any]] = {}
+
+    def _append_source(name: str, snapshot: Dict[str, Any], key_configured: Optional[bool]) -> None:
+        has_cached_data = _has_snapshot_values(snapshot)
+        available = bool(has_cached_data or key_configured is True)
+        sources[name] = {
+            "available": available,
+            "has_cached_data": has_cached_data,
+            "key_configured": bool(key_configured) if key_configured is not None else None,
+            "snapshot": snapshot if isinstance(snapshot, dict) else {},
+        }
+
+    try:
+        from core.data.glassnode_collector import load_glassnode_snapshot, _api_key as _gn_key  # noqa: PLC0415
+
+        _append_source("glassnode", load_glassnode_snapshot() or {}, bool(_gn_key()))
+    except Exception as exc:
+        sources["glassnode"] = {"available": False, "has_cached_data": False, "key_configured": False, "error": _error_text(exc), "snapshot": {}}
+
+    try:
+        from core.data.cryptoquant_collector import load_cryptoquant_snapshot, _api_key as _cq_key  # noqa: PLC0415
+
+        _append_source("cryptoquant", load_cryptoquant_snapshot() or {}, bool(_cq_key()))
+    except Exception as exc:
+        sources["cryptoquant"] = {"available": False, "has_cached_data": False, "key_configured": False, "error": _error_text(exc), "snapshot": {}}
+
+    try:
+        from core.data.nansen_collector import load_nansen_snapshot, _api_key as _ns_key  # noqa: PLC0415
+
+        _append_source("nansen", load_nansen_snapshot() or {}, bool(_ns_key()))
+    except Exception as exc:
+        sources["nansen"] = {"available": False, "has_cached_data": False, "key_configured": False, "error": _error_text(exc), "snapshot": {}}
+
+    try:
+        from core.data.kaiko_collector import load_kaiko_snapshot, _api_key as _kk_key  # noqa: PLC0415
+
+        _append_source("kaiko", load_kaiko_snapshot() or {}, bool(_kk_key()))
+    except Exception as exc:
+        sources["kaiko"] = {"available": False, "has_cached_data": False, "key_configured": False, "error": _error_text(exc), "snapshot": {}}
+
+    total_sources = len(sources)
+    configured_keys = sum(1 for source in sources.values() if source.get("key_configured") is True)
+    cached_sources = sum(1 for source in sources.values() if source.get("has_cached_data"))
+    available_sources = sum(1 for source in sources.values() if source.get("available"))
+
+    return {
+        "sources": sources,
+        "summary": {
+            "total_sources": total_sources,
+            "configured_keys": configured_keys,
+            "cached_sources": cached_sources,
+            "available_sources": available_sources,
+            "active_sources": [name for name, source in sources.items() if source.get("has_cached_data")],
+        },
+    }
+
+
 def _onchain_overview_cache_key(exchange: str, symbol: str, whale_threshold_btc: float, chain: str) -> str:
     return "|".join(
         [
@@ -1008,6 +1096,13 @@ def _build_onchain_component_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     whales = dict(payload.get("whale_activity") or {})
     funding_multi = dict(payload.get("funding_rate_multi_source") or {})
     fear_greed = dict(payload.get("fear_greed_index") or {})
+    premium_external = dict(payload.get("premium_external") or {})
+    premium_summary = dict(premium_external.get("summary") or {})
+    premium_sources = dict(premium_external.get("sources") or {})
+    configured_keys = _safe_int(premium_summary.get("configured_keys"), 0)
+    cached_sources = _safe_int(premium_summary.get("cached_sources"), 0)
+    total_sources = _safe_int(premium_summary.get("total_sources"), len(premium_sources))
+    premium_ok = cached_sources > 0 or configured_keys == 0
     return {
         "exchange_flow_proxy": {
             "status": "ok" if flow.get("available") else "degraded",
@@ -1034,6 +1129,12 @@ def _build_onchain_component_status(payload: Dict[str, Any]) -> Dict[str, Any]:
             "source": "alternative.me",
             "error": fear_greed.get("error"),
         },
+        "premium_external": {
+            "status": "ok" if premium_ok else "degraded",
+            "source": "glassnode+cryptoquant+nansen+kaiko",
+            "detail": f"cached={cached_sources}/{max(total_sources, 0)} key={configured_keys}",
+            "error": None if premium_ok else "premium_sources_configured_but_cache_empty",
+        },
     }
 
 
@@ -1044,6 +1145,7 @@ async def _compute_onchain_overview(
     chain: str,
 ) -> Dict[str, Any]:
     started_at = time.monotonic()
+    premium_external = _load_premium_external_snapshot()
     connector = exchange_manager.get_exchange(exchange)
     if connector is None:
         imbalance = {
@@ -1107,6 +1209,7 @@ async def _compute_onchain_overview(
         "whale_activity": whales,
         "funding_rate_multi_source": funding_multi,
         "fear_greed_index": fear_greed,
+        "premium_external": premium_external,
         "generated_at": _utc_iso(),
         "latency_ms": int((time.monotonic() - started_at) * 1000),
     }
@@ -1220,6 +1323,21 @@ def _build_onchain_placeholder(
             "timestamp": None,
             "source": "alternative.me",
             "error": reason,
+        },
+        "premium_external": {
+            "sources": {
+                "glassnode": {"available": False, "has_cached_data": False, "key_configured": False, "snapshot": {}},
+                "cryptoquant": {"available": False, "has_cached_data": False, "key_configured": False, "snapshot": {}},
+                "nansen": {"available": False, "has_cached_data": False, "key_configured": False, "snapshot": {}},
+                "kaiko": {"available": False, "has_cached_data": False, "key_configured": False, "snapshot": {}},
+            },
+            "summary": {
+                "total_sources": 4,
+                "configured_keys": 0,
+                "cached_sources": 0,
+                "available_sources": 0,
+                "active_sources": [],
+            },
         },
         "generated_at": _utc_iso(),
         "latency_ms": 0,
