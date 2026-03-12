@@ -267,6 +267,7 @@ def test_ai_research_readiness_mentions_premium_sources():
     js_text = (repo_root / "web" / "static" / "js" / "ai_research.js").read_text(encoding="utf-8")
     assert "/premium-data/status" in js_text
     assert "高级数据源" in js_text
+    assert "/live-signals" in js_text
 
 
 def test_premium_data_status_treats_cached_data_as_available(monkeypatch):
@@ -280,3 +281,53 @@ def test_premium_data_status_treats_cached_data_as_available(monkeypatch):
     assert source["has_cached_data"] is True
     assert source["key_configured"] is False
     assert source["available"] is True
+
+
+def test_candidate_symbol_and_strategy_helpers_support_legacy_fields():
+    from web.api import ai_research as ai_module
+
+    current = SimpleNamespace(symbol="ETHUSDT", strategy="Trend")
+    legacy = SimpleNamespace(symbols=["BTC/USDT"], strategy_name="MeanRev")
+    missing = SimpleNamespace()
+
+    assert ai_module._candidate_primary_symbol(current) == "ETH/USDT"
+    assert ai_module._candidate_primary_symbol(legacy) == "BTC/USDT"
+    assert ai_module._candidate_primary_symbol(missing) == "BTC/USDT"
+    assert ai_module._candidate_strategy_name(current) == "Trend"
+    assert ai_module._candidate_strategy_name(legacy) == "MeanRev"
+    assert ai_module._candidate_strategy_name(missing) == "unknown"
+
+
+def test_live_signals_works_with_symbol_field_candidates(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    candidate = SimpleNamespace(
+        candidate_id="cand-live-signals",
+        strategy="MAStrategy",
+        symbol="BTC/USDT",
+        status="paper_running",
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    class _Signal:
+        def to_dict(self):
+            return {"direction": "LONG", "components": {"factor": {"confidence": 0.62}}}
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=200: [candidate])
+    monkeypatch.setattr(
+        "core.data.data_storage.load_klines_from_parquet",
+        AsyncMock(return_value=pd.DataFrame({"close": [1.0, 1.1, 1.2]})),
+    )
+    monkeypatch.setattr(
+        "core.ai.signal_aggregator.signal_aggregator",
+        SimpleNamespace(aggregate=AsyncMock(return_value=_Signal())),
+    )
+
+    result = asyncio.run(ai_module.get_live_signals(request))
+    assert result["count"] == 1
+    item = result["items"][0]
+    assert item["candidate_id"] == "cand-live-signals"
+    assert item["strategy"] == "MAStrategy"
+    assert item["symbol"] == "BTC/USDT"
+    assert item["signal"]["direction"] == "LONG"

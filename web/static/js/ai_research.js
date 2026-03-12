@@ -2636,7 +2636,7 @@
 
   async function loadLiveSignals() {
     try {
-      const res = await aiApi('/candidates/live-signals', { timeoutMs: 20000 });
+      const res = await aiApi('/live-signals', { timeoutMs: 20000 });
       renderLiveSignalPanel(res?.items || []);
     } catch (e) {
       /* silent — non-critical */

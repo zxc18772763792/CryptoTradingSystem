@@ -4055,6 +4055,15 @@ async def get_market_microstructure(
         if repeat >= 3:
             iceberg_candidates += 1
 
+    options_payload = dict(options_data or {})
+    options_payload.setdefault("available", False)
+    options_payload.setdefault("currency", symbol.split("/")[0].split(":")[0].upper() if symbol else None)
+    options_payload.setdefault("atm_iv", None)
+    options_payload.setdefault("skew_25d", None)
+    options_payload.setdefault("put_call_ratio", None)
+    options_payload.setdefault("signal", None)
+    options_payload.setdefault("timestamp", None)
+
     payload = {
         "exchange": exchange,
         "symbol": symbol,
@@ -4096,7 +4105,7 @@ async def get_market_microstructure(
         },
         "funding_rate": funding,
         "spot_futures_basis": basis,
-        "options": options_data,
+        "options": options_payload,
     }
     _MICROSTRUCTURE_SNAPSHOT_CACHE[cache_key] = {"ts": time.time(), "payload": copy.deepcopy(payload)}
     return payload

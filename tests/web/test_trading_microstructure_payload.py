@@ -40,10 +40,21 @@ def test_market_microstructure_includes_orderbook_and_flow_availability(monkeypa
             "sample_size": 13,
         }
 
+    async def fake_options(*args, **kwargs):
+        return {
+            "available": True,
+            "currency": "BTC",
+            "atm_iv": 0.55,
+            "skew_25d": 0.07,
+            "put_call_ratio": 1.4,
+            "signal": "fear",
+        }
+
     monkeypatch.setattr(trading_api, "_fetch_orderbook", fake_orderbook)
     monkeypatch.setattr(trading_api, "_fetch_trade_imbalance", fake_flow)
     monkeypatch.setattr(trading_api, "_fetch_binance_public_funding_and_basis", fake_funding_basis)
     monkeypatch.setattr(trading_api, "_fetch_open_interest_snapshot", fake_oi)
+    monkeypatch.setattr(trading_api, "_fetch_options_snapshot", fake_options)
 
     payload = asyncio.run(trading_api.get_market_microstructure(exchange="binance", symbol="BTC/USDT", depth_limit=20))
 
@@ -53,6 +64,8 @@ def test_market_microstructure_includes_orderbook_and_flow_availability(monkeypa
     assert payload["aggressor_flow"]["imbalance"] == pytest.approx(0.333333, rel=1e-6)
     assert payload["oi"]["available"] is True
     assert payload["oi"]["change_pct_1h"] == pytest.approx(2.5, rel=1e-6)
+    assert payload["options"]["available"] is True
+    assert payload["options"]["skew_25d"] == pytest.approx(0.07, rel=1e-6)
 
 
 def test_market_microstructure_preserves_flow_error_flag(monkeypatch):

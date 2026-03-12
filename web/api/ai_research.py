@@ -175,6 +175,28 @@ def _news_key(symbol: str) -> str:
     return raw.replace("USDT", "") or raw
 
 
+def _candidate_primary_symbol(candidate: Any, default: str = "BTC/USDT") -> str:
+    symbol_value = getattr(candidate, "symbol", None)
+    if isinstance(symbol_value, str) and symbol_value.strip():
+        return _normalize_symbol(symbol_value)
+    symbols_value = getattr(candidate, "symbols", None)
+    if isinstance(symbols_value, (list, tuple)) and symbols_value:
+        first = symbols_value[0]
+        if isinstance(first, str) and first.strip():
+            return _normalize_symbol(first)
+    return _normalize_symbol(default)
+
+
+def _candidate_strategy_name(candidate: Any, default: str = "unknown") -> str:
+    strategy_value = getattr(candidate, "strategy", None)
+    if isinstance(strategy_value, str) and strategy_value.strip():
+        return strategy_value.strip()
+    strategy_name = getattr(candidate, "strategy_name", None)
+    if isinstance(strategy_name, str) and strategy_name.strip():
+        return strategy_name.strip()
+    return default
+
+
 def _serialize_funding_cache(provider: FundingRateProvider, *, exchange: str, symbol: str, series) -> Dict[str, Any]:
     path = provider._cache_path(symbol, exchange=exchange)  # noqa: SLF001
     rows = int(len(series)) if series is not None else 0
@@ -1104,6 +1126,7 @@ async def list_performance_snapshots(
 
 # ── Phase A: Live signals for all active candidates ───────────────────────────
 
+@router.get("/live-signals")
 @router.get("/candidates/live-signals")
 async def get_live_signals(request: Request, symbol: Optional[str] = None):
     """Return SignalAggregator output for all paper_running/live_running candidates.
@@ -1124,11 +1147,13 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
     ]
     if symbol:
         sym_norm = _normalize_symbol(symbol)
-        active = [c for c in active if _normalize_symbol((c.symbols or ["BTC/USDT"])[0]) == sym_norm]
+        active = [c for c in active if _candidate_primary_symbol(c) == sym_norm]
 
     results = []
     for cand in active:
-        cand_symbol = (cand.symbols or ["BTC/USDT"])[0]
+        cand_symbol = _candidate_primary_symbol(cand)
+        cand_strategy = _candidate_strategy_name(cand)
+        cand_status = str(getattr(cand, "status", "unknown"))
         try:
             df = pd.DataFrame()
             try:
@@ -1145,18 +1170,18 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
             sig = await signal_aggregator.aggregate(cand_symbol, df)
             results.append({
                 "candidate_id": cand.candidate_id,
-                "strategy": cand.strategy,
+                "strategy": cand_strategy,
                 "symbol": cand_symbol,
-                "status": str(cand.status),
+                "status": cand_status,
                 "signal": sig.to_dict(),
             })
         except Exception as exc:
             logger.debug(f"live-signals: error for {cand.candidate_id}: {exc}")
             results.append({
                 "candidate_id": cand.candidate_id,
-                "strategy": cand.strategy,
+                "strategy": cand_strategy,
                 "symbol": cand_symbol,
-                "status": str(cand.status),
+                "status": cand_status,
                 "signal": None,
                 "error": str(exc),
             })
@@ -1266,7 +1291,7 @@ async def generate_order_preview(request: Request, candidate_id: str):
             detail=f"候选状态 {cand.status} 不支持订单预览（需为 {'/'.join(sorted(allowed_statuses))}）",
         )
 
-    cand_symbol = (cand.symbols or ["BTC/USDT"])[0]
+    cand_symbol = _candidate_primary_symbol(cand)
     allocation_pct = float(cand.metadata.get("allocation_pct") or 0.05)
 
     # Lazy singleton aggregator (shared with live-signals endpoint)
