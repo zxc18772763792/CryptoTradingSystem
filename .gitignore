@@ -37,6 +37,7 @@ data/research/auto_snapshots/
 runtime/
 test-results/
 .pytest_tmp/
+MagicMock/
 node_modules/
 tmp_ai_proposals*.json
 web_start*.log
@@ -44,6 +45,8 @@ web_start*.log
 # Secrets
 .env
 keys.txt
+config/*_api_key.txt
+config/fred_api_key.txt
 
 # OS
 Thumbs.db

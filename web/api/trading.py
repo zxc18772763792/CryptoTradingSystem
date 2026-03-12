@@ -72,6 +72,8 @@ _LIVE_POSITION_FETCH_TIMEOUT_SEC = 8.5
 _LIVE_POSITION_DETAILS_CACHE_TTL_SEC = 12.0
 _LIVE_POSITION_DETAILS_CACHE: Dict[str, Any] = {"ts": 0.0, "positions": [], "diagnostics": None}
 _LIVE_ORDER_DETAILS_CACHE: Dict[str, Any] = {"ts": 0.0, "orders": []}
+_MICROSTRUCTURE_SNAPSHOT_CACHE: Dict[str, Any] = {}
+_MICROSTRUCTURE_SNAPSHOT_CACHE_TTL_SEC = 6.0
 _ANALYTICS_ROOT = Path("./data/cache/analytics")
 _BEHAVIOR_JOURNAL_PATH = _ANALYTICS_ROOT / "behavior_journal.json"
 _STOPLOSS_POLICY_PATH = _ANALYTICS_ROOT / "stoploss_policy.json"
@@ -80,6 +82,8 @@ _ANALYTICS_ORDERBOOK_TIMEOUT_SEC = 3.6
 _ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC = 3.6
 _ANALYTICS_FUNDING_TIMEOUT_SEC = 1.8
 _ANALYTICS_BASIS_TIMEOUT_SEC = 2.2
+_ANALYTICS_OI_TIMEOUT_SEC = 3.2
+_ANALYTICS_OPTIONS_TIMEOUT_SEC = 1.8
 _ANALYTICS_WHALE_TIMEOUT_SEC = 6.0
 _ANALYTICS_WHALE_MIN_BTC = 10.0
 _ANALYTICS_ANNOUNCEMENT_TIMEOUT_SEC = 4.0
@@ -104,7 +108,9 @@ _HTTPX_SUPPORTS_PROXY_KW = "proxy" in inspect.signature(httpx.AsyncClient.__init
 
 def _clear_trading_api_runtime_caches() -> Dict[str, Any]:
     balance_entries = len(_BALANCE_SNAPSHOT_CACHE)
+    micro_entries = len(_MICROSTRUCTURE_SNAPSHOT_CACHE)
     _BALANCE_SNAPSHOT_CACHE.clear()
+    _MICROSTRUCTURE_SNAPSHOT_CACHE.clear()
     _LIVE_POSITION_SNAPSHOT_CACHE["ts"] = 0.0
     _LIVE_POSITION_SNAPSHOT_CACHE["data"] = {}
     _LIVE_POSITION_DETAILS_CACHE["ts"] = 0.0
@@ -112,7 +118,10 @@ def _clear_trading_api_runtime_caches() -> Dict[str, Any]:
     _LIVE_POSITION_DETAILS_CACHE["diagnostics"] = None
     _LIVE_ORDER_DETAILS_CACHE["ts"] = 0.0
     _LIVE_ORDER_DETAILS_CACHE["orders"] = []
-    return {"balance_entries_cleared": balance_entries}
+    return {
+        "balance_entries_cleared": balance_entries,
+        "microstructure_entries_cleared": micro_entries,
+    }
 
 
 def _inspect_trading_api_runtime_caches() -> Dict[str, Any]:
@@ -125,6 +134,7 @@ def _inspect_trading_api_runtime_caches() -> Dict[str, Any]:
 
     return {
         "balance_snapshot_entries": len(_BALANCE_SNAPSHOT_CACHE),
+        "microstructure_snapshot_entries": len(_MICROSTRUCTURE_SNAPSHOT_CACHE),
         "live_position_snapshot_age_sec": _age(float(_LIVE_POSITION_SNAPSHOT_CACHE.get("ts") or 0.0)),
         "live_position_details_age_sec": _age(float(_LIVE_POSITION_DETAILS_CACHE.get("ts") or 0.0)),
         "live_order_details_age_sec": _age(float(_LIVE_ORDER_DETAILS_CACHE.get("ts") or 0.0)),
@@ -268,6 +278,167 @@ async def _fetch_binance_public_funding_and_basis(symbol: str) -> Dict[str, Dict
     else:
         basis = {"available": False}
     return {"funding": funding, "basis": basis}
+
+
+async def _fetch_binance_public_open_interest(symbol: str) -> Dict[str, Any]:
+    rest_symbol = _binance_rest_symbol(symbol)
+    try:
+        current_payload, history_payload = await asyncio.gather(
+            _fetch_binance_public_json(
+                "/fapi/v1/openInterest",
+                params={"symbol": rest_symbol},
+                timeout_sec=_ANALYTICS_OI_TIMEOUT_SEC,
+                futures=True,
+            ),
+            _fetch_binance_public_json(
+                "/futures/data/openInterestHist",
+                params={"symbol": rest_symbol, "period": "5m", "limit": 13},
+                timeout_sec=_ANALYTICS_OI_TIMEOUT_SEC,
+                futures=True,
+            ),
+        )
+    except Exception as exc:
+        return {
+            "available": False,
+            "source": "binance_public",
+            "error": str(exc),
+            "symbol": symbol,
+            "volume": 0.0,
+            "value": 0.0,
+            "change_pct_1h": None,
+            "timestamp": None,
+        }
+
+    rows = list(history_payload or [])
+    rows = [row for row in rows if isinstance(row, dict)]
+    rows.sort(key=lambda row: _safe_float(row.get("timestamp")))
+
+    latest_row = rows[-1] if rows else {}
+    latest_volume = _safe_float(latest_row.get("sumOpenInterest")) if latest_row else 0.0
+    latest_value = _safe_float(latest_row.get("sumOpenInterestValue")) if latest_row else 0.0
+    current_volume = _safe_float(current_payload.get("openInterest"))
+    effective_volume = current_volume if current_volume > 0 else latest_volume
+    effective_value = latest_value
+
+    change_pct_1h: Optional[float] = None
+    if len(rows) >= 13:
+        ref_row = rows[-13]
+        ref_value = _safe_float(ref_row.get("sumOpenInterestValue"))
+        if ref_value > 0:
+            change_pct_1h = round((effective_value - ref_value) / ref_value * 100.0, 6)
+
+    timestamp_ms = _safe_float(current_payload.get("time"))
+    if timestamp_ms <= 0 and latest_row:
+        timestamp_ms = _safe_float(latest_row.get("timestamp"))
+    ts = _safe_dt(timestamp_ms)
+
+    return {
+        "available": bool(effective_volume > 0 or effective_value > 0),
+        "source": "binance_public",
+        "error": None,
+        "symbol": symbol,
+        "volume": round(effective_volume, 6),
+        "value": round(effective_value, 6),
+        "change_pct_1h": change_pct_1h,
+        "timestamp": ts.isoformat() if ts else None,
+        "sample_size": len(rows),
+    }
+
+
+async def _fetch_open_interest_snapshot(exchange: str, symbol: str) -> Dict[str, Any]:
+    payload = await _fetch_binance_public_open_interest(symbol=symbol)
+    if str(exchange or "").lower() != "binance":
+        payload = dict(payload or {})
+        payload["source"] = "binance_public_fallback"
+    return payload
+
+
+async def _fetch_funding_basis_snapshot(exchange: str, symbol: str) -> Dict[str, Dict[str, Any]]:
+    funding = {"available": False}
+    basis = {"available": False}
+    if str(exchange or "").lower() == "binance":
+        funding_basis = await _fetch_binance_public_funding_and_basis(symbol)
+        funding = dict(funding_basis.get("funding") or {"available": False})
+        basis = dict(funding_basis.get("basis") or {"available": False})
+    else:
+        # For non-Binance exchanges, try exchange-specific client first, then fall back
+        # to Binance public API as a market-wide reference for funding/basis data.
+        connector = exchange_manager.get_exchange(exchange)
+        client = getattr(connector, "_client", None) if connector else None
+        if client:
+            fetch_funding_rate = getattr(client, "fetch_funding_rate", None)
+            perp_symbol = symbol if ":" in symbol else f"{symbol}:USDT"
+            fetch_ticker = getattr(client, "fetch_ticker", None)
+            jobs: List[Any] = []
+            if callable(fetch_funding_rate):
+                jobs.append(asyncio.wait_for(fetch_funding_rate(perp_symbol), timeout=_ANALYTICS_FUNDING_TIMEOUT_SEC))
+            else:
+                jobs.append(asyncio.sleep(0, result=None))
+            if callable(fetch_ticker):
+                jobs.append(
+                    asyncio.wait_for(
+                        asyncio.gather(
+                            fetch_ticker(symbol),
+                            fetch_ticker(perp_symbol),
+                        ),
+                        timeout=_ANALYTICS_BASIS_TIMEOUT_SEC,
+                    )
+                )
+            else:
+                jobs.append(asyncio.sleep(0, result=None))
+            funding_result, basis_result = await asyncio.gather(*jobs, return_exceptions=True)
+            if not isinstance(funding_result, Exception) and funding_result:
+                fr = funding_result or {}
+                funding = {
+                    "available": True,
+                    "symbol": perp_symbol,
+                    "funding_rate": _safe_float(fr.get("fundingRate")),
+                    "next_funding_time": _safe_dt(fr.get("nextFundingTimestamp")).isoformat() if _safe_dt(fr.get("nextFundingTimestamp")) else None,
+                }
+            if not isinstance(basis_result, Exception) and basis_result:
+                spot_ticker, perp_ticker = basis_result
+                spot_px = _safe_float((spot_ticker or {}).get("last"))
+                perp_px = _safe_float((perp_ticker or {}).get("last"))
+                if spot_px > 0 and perp_px > 0:
+                    basis_val = (perp_px - spot_px) / spot_px
+                    basis = {
+                        "available": True,
+                        "spot_symbol": symbol,
+                        "perp_symbol": perp_symbol,
+                        "spot_price": spot_px,
+                        "perp_price": perp_px,
+                        "basis_pct": round(basis_val * 100, 6),
+                    }
+
+    # Fallback: if still no funding/basis data, use Binance public API as reference
+    if not funding.get("available") or not basis.get("available"):
+        try:
+            fb = await _fetch_binance_public_funding_and_basis(symbol)
+            if not funding.get("available") and fb.get("funding", {}).get("available"):
+                funding = {**fb["funding"], "source": "binance_public_fallback"}
+            if not basis.get("available") and fb.get("basis", {}).get("available"):
+                basis = {**fb["basis"], "source": "binance_public_fallback"}
+        except Exception:
+            pass
+
+    return {"funding": funding, "basis": basis}
+
+
+async def _fetch_options_snapshot(symbol: str) -> Dict[str, Any]:
+    # F1: Deribit options snapshot (best-effort, strict timeout for API latency budget)
+    options_data: Dict[str, Any] = {"available": False}
+    try:
+        from core.data.options_collector import options_collector  # noqa: PLC0415
+        currency = symbol.split("/")[0].split(":")[0].upper()
+        snap = await asyncio.wait_for(
+            options_collector.fetch_snapshot(currency),
+            timeout=_ANALYTICS_OPTIONS_TIMEOUT_SEC,
+        )
+        if snap is not None:
+            options_data = snap.to_dict()
+    except Exception:
+        pass
+    return options_data
 
 
 class OrderRequest(BaseModel):
@@ -3813,10 +3984,27 @@ async def get_market_microstructure(
     symbol: str = "BTC/USDT",
     depth_limit: int = 80,
 ):
-    ob, flow = await asyncio.gather(
+    cache_key = f"{str(exchange or '').lower()}|{str(symbol or '').upper()}|{max(5, min(int(depth_limit), 200))}"
+    now_ts = time.time()
+    cached = _MICROSTRUCTURE_SNAPSHOT_CACHE.get(cache_key)
+    if cached and (now_ts - float(cached.get("ts") or 0.0)) <= _MICROSTRUCTURE_SNAPSHOT_CACHE_TTL_SEC:
+        payload = cached.get("payload")
+        if isinstance(payload, dict):
+            return copy.deepcopy(payload)
+
+    funding_basis_task = asyncio.create_task(_fetch_funding_basis_snapshot(exchange=exchange, symbol=symbol))
+    options_task = asyncio.create_task(_fetch_options_snapshot(symbol=symbol))
+
+    ob, flow, oi = await asyncio.gather(
         _fetch_orderbook(exchange=exchange, symbol=symbol, limit=depth_limit),
         _fetch_trade_imbalance(exchange=exchange, symbol=symbol, limit=800),
+        _fetch_open_interest_snapshot(exchange=exchange, symbol=symbol),
     )
+
+    funding_basis = await funding_basis_task
+    funding = dict((funding_basis or {}).get("funding") or {"available": False})
+    basis = dict((funding_basis or {}).get("basis") or {"available": False})
+    options_data = await options_task
     bids = [[_safe_float(x[0]), _safe_float(x[1])] for x in (ob.get("bids") or []) if len(x) >= 2]
     asks = [[_safe_float(x[0]), _safe_float(x[1])] for x in (ob.get("asks") or []) if len(x) >= 2]
     bids = [x for x in bids if x[0] > 0 and x[1] > 0]
@@ -3867,88 +4055,7 @@ async def get_market_microstructure(
         if repeat >= 3:
             iceberg_candidates += 1
 
-    funding = {"available": False}
-    basis = {"available": False}
-    if str(exchange or "").lower() == "binance":
-        funding_basis = await _fetch_binance_public_funding_and_basis(symbol)
-        funding = dict(funding_basis.get("funding") or {"available": False})
-        basis = dict(funding_basis.get("basis") or {"available": False})
-    else:
-        # For non-Binance exchanges, try exchange-specific client first, then fall back
-        # to Binance public API as a market-wide reference for funding/basis data.
-        connector = exchange_manager.get_exchange(exchange)
-        client = getattr(connector, "_client", None) if connector else None
-        if client:
-            fetch_funding_rate = getattr(client, "fetch_funding_rate", None)
-            perp_symbol = symbol if ":" in symbol else f"{symbol}:USDT"
-            fetch_ticker = getattr(client, "fetch_ticker", None)
-            jobs: List[Any] = []
-            if callable(fetch_funding_rate):
-                jobs.append(asyncio.wait_for(fetch_funding_rate(perp_symbol), timeout=_ANALYTICS_FUNDING_TIMEOUT_SEC))
-            else:
-                jobs.append(asyncio.sleep(0, result=None))
-            if callable(fetch_ticker):
-                jobs.append(
-                    asyncio.wait_for(
-                        asyncio.gather(
-                            fetch_ticker(symbol),
-                            fetch_ticker(perp_symbol),
-                        ),
-                        timeout=_ANALYTICS_BASIS_TIMEOUT_SEC,
-                    )
-                )
-            else:
-                jobs.append(asyncio.sleep(0, result=None))
-            funding_result, basis_result = await asyncio.gather(*jobs, return_exceptions=True)
-            if not isinstance(funding_result, Exception) and funding_result:
-                fr = funding_result or {}
-                funding = {
-                    "available": True,
-                    "symbol": perp_symbol,
-                    "funding_rate": _safe_float(fr.get("fundingRate")),
-                    "next_funding_time": _safe_dt(fr.get("nextFundingTimestamp")).isoformat() if _safe_dt(fr.get("nextFundingTimestamp")) else None,
-                }
-            if not isinstance(basis_result, Exception) and basis_result:
-                spot_ticker, perp_ticker = basis_result
-                spot_px = _safe_float((spot_ticker or {}).get("last"))
-                perp_px = _safe_float((perp_ticker or {}).get("last"))
-                if spot_px > 0 and perp_px > 0:
-                    basis_val = (perp_px - spot_px) / spot_px
-                    basis = {
-                        "available": True,
-                        "spot_symbol": symbol,
-                        "perp_symbol": perp_symbol,
-                        "spot_price": spot_px,
-                        "perp_price": perp_px,
-                        "basis_pct": round(basis_val * 100, 6),
-                    }
-
-    # Fallback: if still no funding/basis data, use Binance public API as reference
-    if not funding.get("available") or not basis.get("available"):
-        try:
-            fb = await _fetch_binance_public_funding_and_basis(symbol)
-            if not funding.get("available") and fb.get("funding", {}).get("available"):
-                funding = {**fb["funding"], "source": "binance_public_fallback"}
-            if not basis.get("available") and fb.get("basis", {}).get("available"):
-                basis = {**fb["basis"], "source": "binance_public_fallback"}
-        except Exception:
-            pass
-
-    # F1: Deribit options snapshot (best-effort, non-blocking)
-    options_data: Dict = {"available": False}
-    try:
-        from core.data.options_collector import options_collector  # noqa: PLC0415
-        currency = symbol.split("/")[0].split(":")[0].upper()
-        snap = await asyncio.wait_for(
-            options_collector.fetch_snapshot(currency),
-            timeout=8.0,
-        )
-        if snap is not None:
-            options_data = snap.to_dict()
-    except Exception:
-        pass
-
-    return {
+    payload = {
         "exchange": exchange,
         "symbol": symbol,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -3977,10 +4084,22 @@ async def get_market_microstructure(
             "sell_volume": _safe_float(flow.get("sell_volume")),
             "imbalance": _safe_float(flow.get("imbalance")),
         },
+        "oi": {
+            "available": bool(oi.get("available", False)),
+            "source": oi.get("source"),
+            "error": oi.get("error"),
+            "volume": _safe_float(oi.get("volume")),
+            "value": _safe_float(oi.get("value")),
+            "change_pct_1h": oi.get("change_pct_1h"),
+            "timestamp": oi.get("timestamp"),
+            "sample_size": int(_safe_float(oi.get("sample_size"))),
+        },
         "funding_rate": funding,
         "spot_futures_basis": basis,
         "options": options_data,
     }
+    _MICROSTRUCTURE_SNAPSHOT_CACHE[cache_key] = {"ts": time.time(), "payload": copy.deepcopy(payload)}
+    return payload
 
 
 async def add_behavior_journal(request: BehaviorJournalRequest):

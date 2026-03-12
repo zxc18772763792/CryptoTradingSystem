@@ -347,6 +347,26 @@ def _parse_market_context(market_context: Dict[str, Any]) -> Tuple[List[str], Li
     except Exception:
         pass
 
+    # F4d: Kaiko microstructure quality (no-op if key absent / cache cold)
+    try:
+        from core.data.kaiko_collector import load_kaiko_snapshot  # noqa: PLC0415
+        kk = load_kaiko_snapshot()
+        spread_bps = kk.get("cross_exchange_spread_bps")
+        if spread_bps is not None:
+            if spread_bps > 6.0:   # cross-exchange spread widening = fragmented liquidity
+                boosted.extend(["风险", "震荡"])
+                suppressed.extend(["趋势"])
+            elif spread_bps < 2.0:
+                boosted.extend(["趋势"])
+        depth_1pct = kk.get("liquidity_depth_1pct")
+        if depth_1pct is not None and depth_1pct < 2_000_000:
+            boosted.extend(["风险"])
+        trade_cnt = kk.get("trade_count_1h")
+        if trade_cnt is not None and trade_cnt > 50_000:
+            boosted.extend(["动量"])
+    except Exception:
+        pass
+
     return _dedupe_keep_order(boosted), _dedupe_keep_order(suppressed)
 
 
@@ -535,17 +555,31 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
                 signal_parts.append("宏观=[" + " · ".join(_macro_parts) + "]")
         except Exception:
             pass
+        try:
+            from core.data.kaiko_collector import load_kaiko_snapshot as _kaiko_snap  # noqa: PLC0415
+            _k = _kaiko_snap()
+            _kaiko_parts = []
+            if _k.get("cross_exchange_spread_bps") is not None:
+                _kaiko_parts.append(f"跨所点差={float(_k['cross_exchange_spread_bps']):.2f}bps")
+            if _k.get("liquidity_depth_1pct") is not None:
+                _kaiko_parts.append(f"1%深度={float(_k['liquidity_depth_1pct']):.0f}")
+            if _k.get("trade_count_1h") is not None:
+                _kaiko_parts.append(f"成交数={float(_k['trade_count_1h']):.0f}")
+            if _kaiko_parts:
+                signal_parts.append("Kaiko=[" + " · ".join(_kaiko_parts) + "]")
+        except Exception:
+            pass
         factors = market_context.get("factors") or {}
         if isinstance(factors, dict) and factors:
             top_factors = [f"{k}={float(v):.2f}" for k, v in factors.items() if float(v or 0) > 0.3]
             if top_factors:
                 signal_parts.append("因子=[" + ", ".join(top_factors[:3]) + "]")
         if signal_parts:
-            planner_notes.append(f"市场上下文: {' · '.join(signal_parts)}")
+            planner_notes.append(f"市场上下文 (market context): {' · '.join(signal_parts)}")
         if boost_categories:
-            planner_notes.append(f"提升分类: {' / '.join(boost_categories[:5])}")
+            planner_notes.append(f"提升分类 (boosted): {' / '.join(boost_categories[:5])}")
         if suppress_categories:
-            planner_notes.append(f"降权分类: {' / '.join(suppress_categories[:4])}")
+            planner_notes.append(f"降权分类 (suppressed): {' / '.join(suppress_categories[:4])}")
 
     selected = _catalog_candidates(
         request.market_regime, exclude_categories,
