@@ -96,6 +96,28 @@ class Settings(BaseSettings):
     AI_LIVE_DECISION_TEMPERATURE: float = 0.0
     AI_LIVE_DECISION_FAIL_OPEN: bool = True
     AI_LIVE_DECISION_APPLY_IN_PAPER: bool = False
+    AI_AUTONOMOUS_AGENT_ENABLED: bool = False
+    AI_AUTONOMOUS_AGENT_AUTO_START: bool = False
+    AI_AUTONOMOUS_AGENT_MODE: str = "shadow"  # shadow/execute
+    AI_AUTONOMOUS_AGENT_PROVIDER: str = "glm"  # glm/codex/claude
+    AI_AUTONOMOUS_AGENT_MODEL: str = ""
+    AI_AUTONOMOUS_AGENT_EXCHANGE: str = "binance"
+    AI_AUTONOMOUS_AGENT_SYMBOL: str = "BTC/USDT"
+    AI_AUTONOMOUS_AGENT_TIMEFRAME: str = "15m"
+    AI_AUTONOMOUS_AGENT_INTERVAL_SEC: int = 120
+    AI_AUTONOMOUS_AGENT_LOOKBACK_BARS: int = 240
+    AI_AUTONOMOUS_AGENT_MIN_CONFIDENCE: float = 0.58
+    AI_AUTONOMOUS_AGENT_DEFAULT_LEVERAGE: float = 3.0
+    AI_AUTONOMOUS_AGENT_MAX_LEVERAGE: float = 20.0
+    AI_AUTONOMOUS_AGENT_STOP_LOSS_PCT: float = 0.02
+    AI_AUTONOMOUS_AGENT_TAKE_PROFIT_PCT: float = 0.04
+    AI_AUTONOMOUS_AGENT_TIMEOUT_MS: int = 12000
+    AI_AUTONOMOUS_AGENT_MAX_TOKENS: int = 420
+    AI_AUTONOMOUS_AGENT_TEMPERATURE: float = 0.15
+    AI_AUTONOMOUS_AGENT_COOLDOWN_SEC: int = 180
+    AI_AUTONOMOUS_AGENT_ALLOW_LIVE: bool = False
+    AI_AUTONOMOUS_AGENT_ACCOUNT_ID: str = "main"
+    AI_AUTONOMOUS_AGENT_STRATEGY_NAME: str = "AI_AutonomousAgent"
 
     # Exchange market type (spot/future/swap/margin)
     BINANCE_DEFAULT_TYPE: str = "spot"
@@ -194,6 +216,22 @@ class Settings(BaseSettings):
         text = str(v or "glm").strip().lower()
         if text not in {"glm", "codex", "claude"}:
             raise ValueError("AI_LIVE_DECISION_PROVIDER must be one of: glm/codex/claude")
+        return text
+
+    @field_validator("AI_AUTONOMOUS_AGENT_MODE")
+    @classmethod
+    def validate_ai_autonomous_agent_mode(cls, v: str) -> str:
+        text = str(v or "shadow").strip().lower()
+        if text not in {"shadow", "execute"}:
+            raise ValueError("AI_AUTONOMOUS_AGENT_MODE must be one of: shadow/execute")
+        return text
+
+    @field_validator("AI_AUTONOMOUS_AGENT_PROVIDER")
+    @classmethod
+    def validate_ai_autonomous_agent_provider(cls, v: str) -> str:
+        text = str(v or "glm").strip().lower()
+        if text not in {"glm", "codex", "claude"}:
+            raise ValueError("AI_AUTONOMOUS_AGENT_PROVIDER must be one of: glm/codex/claude")
         return text
 
     @field_validator("DATABASE_URL")

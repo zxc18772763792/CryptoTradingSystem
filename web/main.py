@@ -21,6 +21,7 @@ from loguru import logger
 
 from config.database import close_db, init_db
 from config.settings import settings
+from core.ai.autonomous_agent import autonomous_trading_agent
 
 # Sync LLM API keys to environment variables for modules that use os.environ.get()
 if settings.ZHIPU_API_KEY:
@@ -1012,6 +1013,10 @@ async def lifespan(app: FastAPI):
         "Managed background tasks started: "
         + ", ".join(sorted(app.state.runtime_task_factories.keys()))
     )
+    if bool(getattr(settings, "AI_AUTONOMOUS_AGENT_AUTO_START", False)):
+        with contextlib.suppress(Exception):
+            await autonomous_trading_agent.update_runtime_config(enabled=True)
+            await autonomous_trading_agent.start()
     with contextlib.suppress(Exception):
         await _emit_news_preview(app=app, limit=10, hours=24)
 
@@ -1022,6 +1027,8 @@ async def lifespan(app: FastAPI):
     supervisor: RuntimeTaskSupervisor | None = getattr(app.state, "runtime_supervisor", None)
     if supervisor is not None:
         await supervisor.stop_all(timeout_sec=6.0)
+    with contextlib.suppress(Exception):
+        await autonomous_trading_agent.stop()
 
     await strategy_health_monitor.stop()
     await shutdown_ops_runtime(app, standalone=False)
