@@ -6,6 +6,7 @@
   const REFRESH_INTERVAL_MS = 60000;
   const JOB_POLL_MS         = 3000;
   const PREMIUM_SOURCE_LABEL = '高级数据源';
+  const FLOW_HINT_DEFAULT = '推荐顺序：1) 生成研究 → 2) 运行研究 → 3) 审批/注册。想快可直接用“一键研究+部署”。';
 
   /* 策略类别与颜色 */
   const STRATEGY_CATEGORIES = {
@@ -73,6 +74,7 @@
     signalLoading: false,
     signalPanelCollapsed: false,
     jobPollingTimers: {},   // proposalId → intervalId
+    actionLocks: { generate: false, run: false, oneclick: false },
     sortBy: 'score',        // 'score' | 'sharpe' | 'return' | 'drawdown'
     filterCategory: '',     // '' | '趋势' | '震荡' | ...
     compareCandidateIds: new Set(),
@@ -1346,7 +1348,7 @@
       </div>
 
       ${(function(){
-        if (!cand?.metadata?.promotion_pending_human_gate) return '';
+        if (!governanceEnabled() || !cand?.metadata?.promotion_pending_human_gate) return '';
         const recTarget = esc(cand?.metadata?.recommended_runtime_target || decision || 'paper');
         return `<div style="margin-bottom:14px;padding:10px 12px;background:#1a0f00;border:2px solid #f59e0b;border-radius:6px;">
           <div style="font-size:11px;color:#f59e0b;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u23f3 \u5f85\u4eba\u5de5\u5ba1\u6279</div>
@@ -1834,6 +1836,13 @@
     const badge = document.getElementById('ai-approval-badge');
     if (!card || !list) return;
 
+    if (!governanceEnabled()) {
+      card.style.display = 'none';
+      if (badge) badge.textContent = '';
+      list.innerHTML = '';
+      return;
+    }
+
     const items = state.pendingApprovals;
     card.style.display = items.length > 0 ? '' : 'none';
     if (badge) badge.textContent = items.length > 0 ? `(${items.length})` : '';
@@ -2015,11 +2024,51 @@
     normalizeDomText(document.getElementById('ai-research'));
   }
 
+  function hasActionLock() {
+    const locks = state.actionLocks || {};
+    return Object.values(locks).some(Boolean);
+  }
+
+  function syncPrimaryActionButtons() {
+    const generateBtn = document.getElementById('ai-generate-btn');
+    const oneclickBtn = document.getElementById('ai-oneclick-btn');
+    const hintEl = document.getElementById('ai-flow-hint');
+    const busy = hasActionLock();
+    if (generateBtn && !state.actionLocks.generate) generateBtn.disabled = busy;
+    if (oneclickBtn && !state.actionLocks.oneclick) oneclickBtn.disabled = busy;
+    if (hintEl) {
+      hintEl.textContent = busy
+        ? '正在执行研究任务，请等待当前流程完成后再触发其他主操作。'
+        : FLOW_HINT_DEFAULT;
+    }
+    updateRunBtn();
+  }
+
+  function setActionLock(name, locked) {
+    if (!state.actionLocks) state.actionLocks = { generate: false, run: false, oneclick: false };
+    state.actionLocks[name] = !!locked;
+    syncPrimaryActionButtons();
+  }
+
+  async function withActionLock(name, fn) {
+    setActionLock(name, true);
+    try {
+      return await fn();
+    } finally {
+      setActionLock(name, false);
+    }
+  }
+
   function updateRunBtn() {
     const btn = document.getElementById('run-selected-btn');
     if (!btn) return;
+    const busy = hasActionLock();
     const has = !!state.selectedProposalId;
-    btn.disabled = !has;
+    btn.disabled = !has || busy;
+    if (busy) {
+      btn.title = '当前有任务执行中，请等待完成后再运行研究';
+      return;
+    }
     btn.title = has ? `运行研究: ${state.selectedProposalId}` : '请先在左侧选择研究任务';
   }
 
@@ -2592,9 +2641,9 @@
   function bindEvents() {
     /* 生成研究 */
     document.getElementById('ai-generate-btn')?.addEventListener('click', () =>
-      generateProposal().catch(err => notify(`生成失败: ${err.message}`, true)));
+      withActionLock('generate', () => generateProposal()).catch(err => notify(`生成失败: ${err.message}`, true)));
     document.getElementById('ai-oneclick-btn')?.addEventListener('click', () =>
-      runOneClickResearchDeploy().catch(err => notify(`一键执行失败: ${err.message}`, true)));
+      withActionLock('oneclick', () => runOneClickResearchDeploy()).catch(err => notify(`一键执行失败: ${err.message}`, true)));
 
     /* AI辅助研究瑙勫垝 */
     document.getElementById('ai-context-btn')?.addEventListener('click', () =>
@@ -2637,7 +2686,7 @@
 
     /* 运行研究 */
     document.getElementById('run-selected-btn')?.addEventListener('click', () =>
-      runProposal(state.selectedProposalId).catch(err => notify(`运行失败: ${err.message}`, true)));
+      withActionLock('run', () => runProposal(state.selectedProposalId)).catch(err => notify(`运行失败: ${err.message}`, true)));
     document.getElementById('ai-compare-btn')?.addEventListener('click', () => openCompareModal());
 
     /* 信号刷新 */
@@ -2691,7 +2740,7 @@
       if (action === 'run-proposal' && pid) {
         e.stopPropagation();
         state.selectedProposalId = pid;
-        runProposal(pid).catch(err => notify(`运行失败: ${err.message}`, true));
+        withActionLock('run', () => runProposal(pid)).catch(err => notify(`运行失败: ${err.message}`, true));
         return;
       }
       if (action === 'cancel-proposal' && pid) {
@@ -2839,6 +2888,7 @@
     bindLayoutSync();
     syncHubLayoutHeight();
     bindEvents();
+    syncPrimaryActionButtons();
     normalizeDomText(document.getElementById('ai-research'));
     refreshWorkbench().catch(err => console.error('AI研究初始化失败:', err));
     if (isAiResearchActive()) startPolling();
@@ -2994,7 +3044,7 @@
   window.AI = {
     viewCandidate:   id => viewCandidate(id).catch(err => notify(`加载详情失败: ${err.message}`, true)),
     openRegister:    id => openRegisterModal(id).catch(err => notify(`打开注册失败: ${err.message}`, true)),
-    runProposal:     id => runProposal(id).catch(err => notify(`运行失败: ${err.message}`, true)),
+    runProposal:     id => withActionLock('run', () => runProposal(id)).catch(err => notify(`运行失败: ${err.message}`, true)),
     toggleCompare:   id => toggleCandidateCompare(id),
     showComparePanel: () => openCompareModal(),
     refreshWorkbench,
