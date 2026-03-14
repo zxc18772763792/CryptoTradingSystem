@@ -1307,3 +1307,165 @@ async def get_strategy_signals(name: str, limit: int = 100):
         "strategy": name,
         "signals": [s.to_dict() for s in signals],
     }
+
+
+@router.get("/{name}/monitor-data")
+async def get_strategy_monitor_data(name: str, bars: int = 200):
+    """Return combined OHLCV + signals + equity curve for the strategy monitor panel.
+
+    Data sources (all read-only, no side effects):
+      - OHLCV: data_storage.load_klines_from_parquet (local parquet cache)
+      - Signals: strategy.get_recent_signals(200) (in-memory, last 1000 max)
+      - Equity curve: risk_manager.get_trade_history filtered by strategy name,
+                      reconstructed with per-trade timestamps
+      - Positions: position_manager.get_positions_by_strategy(name)
+    """
+    from datetime import timedelta
+    from core.data.data_storage import data_storage
+    from core.trading.position_manager import position_manager
+
+    bars = max(50, min(int(bars), 500))
+
+    # ── 1. Strategy info ─────────────────────────────────────────────────────
+    strategy = strategy_manager.get_strategy(name)
+    info = strategy_manager.get_strategy_info(name)
+    if not info:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    symbol = (info.get("symbols") or ["BTC/USDT"])[0]
+    timeframe = str(info.get("timeframe") or "1h")
+    is_running = bool(info.get("state") == "running")
+
+    # ── 2. OHLCV bars ────────────────────────────────────────────────────────
+    ohlcv: list = []
+    try:
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(
+            seconds=_timeframe_to_seconds(timeframe) * (bars + 50)
+        )
+        df = await data_storage.load_klines_from_parquet(
+            exchange=str(info.get("exchange") or "binance"),
+            symbol=symbol,
+            timeframe=timeframe,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        if df is not None and not df.empty:
+            df = df.tail(bars)
+            for row in df.itertuples():
+                ts = row.Index
+                ts_str = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                ohlcv.append({
+                    "t": ts_str,
+                    "o": float(row.open)   if hasattr(row, "open")   else None,
+                    "h": float(row.high)   if hasattr(row, "high")   else None,
+                    "l": float(row.low)    if hasattr(row, "low")    else None,
+                    "c": float(row.close)  if hasattr(row, "close")  else None,
+                    "v": float(row.volume) if hasattr(row, "volume") else None,
+                })
+    except Exception as exc:
+        logger.debug(f"monitor-data: OHLCV load failed for {name}: {exc}")
+
+    # ── 3. Signals ───────────────────────────────────────────────────────────
+    signals: list = []
+    if strategy:
+        for sig in strategy.get_recent_signals(200):
+            signals.append({
+                "t":           sig.timestamp.isoformat() if hasattr(sig.timestamp, "isoformat") else str(sig.timestamp),
+                "type":        sig.signal_type.value,
+                "price":       float(sig.price or 0),
+                "strength":    float(sig.strength or 0),
+                "stop_loss":   float(sig.stop_loss)   if sig.stop_loss   is not None else None,
+                "take_profit": float(sig.take_profit) if sig.take_profit is not None else None,
+            })
+
+    # ── 4. Equity curve with timestamps ──────────────────────────────────────
+    equity: list = []
+    metrics: dict = {}
+    try:
+        min_notional = max(1.0, float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 100.0) or 100.0))
+        risk_report = risk_manager.get_risk_report()
+        current_equity = float(((risk_report.get("equity") or {}).get("current") or 0.0))
+        config = strategy_manager._configs.get(name)
+        equity_base = max(
+            min_notional,
+            current_equity * float((config.allocation if config else 0) or 0),
+        )
+
+        trades = sorted(
+            [r for r in risk_manager.get_trade_history(limit=5000)
+             if isinstance(r, dict) and str(r.get("strategy") or "").strip() == name],
+            key=lambda r: str(r.get("timestamp") or ""),
+        )
+
+        mark = equity_base
+        realized = 0.0
+        equity.append({"t": None, "v": round(mark, 4)})
+        for trade in trades:
+            pnl = float(trade.get("pnl") or 0.0)
+            ts_raw = str(trade.get("timestamp") or "").strip()
+            mark += pnl
+            realized += pnl
+            equity.append({"t": ts_raw or None, "v": round(mark, 4)})
+
+        unrealized = sum(
+            float(p.unrealized_pnl or 0.0)
+            for p in position_manager.get_positions_by_strategy(name)
+        )
+        if equity:
+            equity[-1]["v"] = round(mark + unrealized, 4)
+
+        win_count = sum(1 for t in trades if float(t.get("pnl") or 0) > 0)
+        metrics = {
+            "equity_base":    round(equity_base, 2),
+            "realized_pnl":   round(realized, 4),
+            "unrealized_pnl": round(unrealized, 4),
+            "total_pnl":      round(realized + unrealized, 4),
+            "return_pct":     round((realized + unrealized) / equity_base * 100, 3) if equity_base > 0 else 0,
+            "trade_count":    len(trades),
+            "win_count":      win_count,
+            "win_rate":       round(win_count / len(trades) * 100, 1) if trades else None,
+        }
+    except Exception as exc:
+        logger.debug(f"monitor-data: equity curve failed for {name}: {exc}")
+
+    # ── 5. Current open positions ─────────────────────────────────────────────
+    positions_data: list = []
+    try:
+        for pos in position_manager.get_positions_by_strategy(name):
+            positions_data.append({
+                "symbol":             pos.symbol,
+                "side":               pos.side,
+                "entry_price":        float(pos.entry_price or 0),
+                "current_price":      float(pos.current_price or 0),
+                "quantity":           float(pos.quantity or 0),
+                "unrealized_pnl":     float(pos.unrealized_pnl or 0),
+                "unrealized_pnl_pct": float(pos.unrealized_pnl_pct or 0),
+                "entry_time":         pos.entry_time.isoformat() if hasattr(pos.entry_time, "isoformat") else str(pos.entry_time),
+            })
+    except Exception as exc:
+        logger.debug(f"monitor-data: positions failed for {name}: {exc}")
+
+    return {
+        "name":       name,
+        "symbol":     symbol,
+        "timeframe":  timeframe,
+        "is_running": is_running,
+        "ohlcv":      ohlcv,
+        "signals":    signals,
+        "equity":     equity,
+        "metrics":    metrics,
+        "positions":  positions_data,
+        "ts":         datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _timeframe_to_seconds(tf: str) -> int:
+    """Convert timeframe string like '15m', '1h', '4h' to seconds."""
+    import re as _re
+    tf = str(tf or "1h").strip().lower()
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+    m = _re.fullmatch(r"(\d+)([smhdw])", tf)
+    if m:
+        return int(m.group(1)) * units[m.group(2)]
+    return 3600

@@ -24,15 +24,15 @@ _PROPOSAL_TRANSITIONS = {
     "research_queued": {"research_running"},
     "research_running": {"validated", "rejected"},
     "validated": {"paper_running", "shadow_running", "live_candidate", "retired", "research_queued", "research_running"},
-    "paper_running": {"retired"},
-    "shadow_running": {"retired"},
+    "paper_running": {"live_candidate", "retired"},
+    "shadow_running": {"paper_running", "retired"},
     "live_candidate": {"retired"},
     "rejected": {"retired", "research_queued", "research_running"},
 }
 _CANDIDATE_TRANSITIONS = {
     "new": {"paper_running", "shadow_running", "live_candidate", "retired"},
-    "paper_running": {"retired"},
-    "shadow_running": {"retired"},
+    "paper_running": {"live_candidate", "retired"},
+    "shadow_running": {"paper_running", "retired"},
     "live_candidate": {"retired"},
 }
 

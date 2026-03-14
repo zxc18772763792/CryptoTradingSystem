@@ -608,6 +608,27 @@
                         <div id="strategy-edit-panel" class="list">点击左侧已注册策略卡片后在此编辑与操作</div>
                     </div>
 
+                    <!-- 策略实时监控面板 -->
+                    <div class="card wide" id="strategy-monitor-panel" style="display:none">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+                            <h3 style="margin:0" id="monitor-panel-title">策略监控</h3>
+                            <div style="display:flex;gap:8px;align-items:center">
+                                <span id="monitor-status-badge"
+                                      style="font-size:11px;padding:2px 8px;border-radius:10px;background:var(--bg-3);color:var(--text-muted)">未选择</span>
+                                <button class="btn btn-sm btn-primary"
+                                        id="btn-monitor-refresh"
+                                        onclick="refreshStrategyMonitor()">刷新</button>
+                                <button class="btn btn-sm"
+                                        onclick="closeStrategyMonitor()"
+                                        style="background:var(--bg-3);color:var(--text-muted)">关闭</button>
+                            </div>
+                        </div>
+                        <div id="monitor-metrics-row"
+                             style="display:flex;gap:16px;margin-bottom:10px;flex-wrap:wrap"></div>
+                        <div id="strategy-monitor-chart" style="width:100%;height:520px"></div>
+                        <div id="monitor-positions-row" style="margin-top:8px"></div>
+                    </div>
+
                     <div class="card wide">
                         <h3>策略性能监控</h3>
                         <div class="table-container strategy-scroll">

@@ -1226,6 +1226,7 @@ const sizingResult=sizingStatus==='ok'?'当前可正常下单':(sizingStatus==='
 const sizingHtml=sizing?`<div class="form-group" style="margin-top:10px;"><label>下单预估</label><div class="list-item"><span>当前价格 / 账户权益</span><span>${Number(sizing.price||0).toFixed(4)} / ${Number(sizing.account_equity||0).toFixed(2)} USDT</span></div><div class="list-item"><span>价格来源</span><span>${esc(String(sizing.price_source||'unavailable'))}</span></div><div class="list-item"><span>分配资金 / 单笔上限</span><span>${Number(sizing.allocation_cap||0).toFixed(2)} / ${Number(sizing.risk_single_cap||0).toFixed(2)} USDT</span></div><div class="list-item"><span>当前可用名义金额</span><span>${Number(sizing.available_notional||0).toFixed(2)} USDT</span></div><div class="list-item"><span>最小合法数量 / 名义金额</span><span>${fmtQtyPreview(sizing.min_legal_qty||0)} / ${Number(sizing.min_legal_notional||0).toFixed(2)} USDT</span></div><div class="list-item"><span>结果</span><span style="color:${sizingColor};">${sizingResult}</span></div><div class="list-item"><span>说明</span><span>${esc(sizing.note||'-')}</span></div></div>`:'';
 panel.innerHTML=`<div class="form-group"><label>策略: ${info.name} (${info.strategy_type})</label><div class="list-item"><span>状态</span><span>${mapState(info.state)}</span></div><div class="list-item"><span>周期</span><span>${esc(info.timeframe||'-')}</span></div><div class="list-item"><span>交易对</span><span>${esc(currentSymbols.join(', '))}</span></div><div class="list-item"><span>最近运行</span><span>${info.last_run_at?new Date(info.last_run_at).toLocaleString('zh-CN'):'-'}</span></div><div class="list-item"><span>运行时长限制</span><span>${runtime.runtime_limit_minutes?`${runtime.runtime_limit_minutes} 分钟`:'不限时'}${runtime.remaining_seconds!==undefined&&runtime.remaining_seconds!==null?` | 剩余 ${fmtDurationSec(runtime.remaining_seconds)}`:''}</span></div></div>${sizingHtml}<div class="inline-actions" style="margin-top:4px;"><button class="btn btn-primary btn-sm" id="edit-toggle">${info.state==='running'?'停止策略':'启动策略'}</button><button class="btn btn-primary btn-sm" id="edit-clone">复制新实例</button><button class="btn btn-danger btn-sm" id="edit-delete">删除实例</button><button class="btn btn-primary btn-sm" id="edit-cmp">刷新对比</button>${canApplyBestOpt?'<button class="btn btn-primary btn-sm" id="edit-apply-best-opt">应用最近优化最佳参数</button>':''}</div><div class="param-grid"><div class="form-group"><label>策略周期（timeframe）</label><select id="edit-timeframe">${tfHtml}</select></div><div class="form-group"><label>交易对（逗号分隔，可多币）</label><input id="edit-symbols" type="text" value="${esc(currentSymbols.join(', '))}" placeholder="例如 ETH/USDT 或 BTC/USDT,ETH/USDT"></div><div class="form-group"><label>策略运行时长（分钟，0=不限）</label><input id="edit-runtime-min" type="number" min="0" max="10080" step="1" value="${Number(runtime.runtime_limit_minutes||0)}"></div><div class="form-group"><label>资金占比 (0~1)</label><input id="edit-alloc" type="number" min="0" max="1" step="0.01" value="${Number(info.allocation||0).toFixed(2)}"></div></div><div class="param-grid">${fields||'<div class="list-item">该策略无可编辑参数</div>'}</div><div class="inline-actions" style="margin-top:10px;"><button class="btn btn-primary btn-sm" id="edit-save">保存参数</button><button class="btn btn-primary btn-sm" id="edit-save-as">另存为新实例（当前编辑值）</button></div><pre id="editor-compare-output" class="output-box">点击“刷新对比”查看实盘与回测差异</pre>`;
 panel.classList.add('strategy-edit-active');
+openStrategyMonitor(name).catch(() => {});
 panel.dataset.strategyName=String(info.name||name||'');
 panel.dataset.strategyType=String(info.strategy_type||'');
 const collectEditorDraft=()=>{
@@ -4694,4 +4695,173 @@ markBootFailure(runtimeErr);
 });
 window.addEventListener('unhandledrejection',e=>{markBootFailure(e?.reason||new Error('未处理的Promise异常'));});
 init().catch(markBootFailure);
+
+// ── 策略实时监控面板 ──────────────────────────────────────────────────────────
+
+let _monitorTimer = null;
+let _monitorCurrentName = '';
+
+async function openStrategyMonitor(name) {
+    const panel = document.getElementById('strategy-monitor-panel');
+    if (!panel) return;
+    _monitorCurrentName = String(name || '');
+    panel.style.display = 'block';
+    setTimeout(() => panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 80);
+    await _loadMonitorData(name);
+    if (_monitorTimer) clearInterval(_monitorTimer);
+    _monitorTimer = setInterval(() => {
+        if (_monitorCurrentName) _loadMonitorData(_monitorCurrentName).catch(() => {});
+    }, 30000);
+}
+
+function closeStrategyMonitor() {
+    const panel = document.getElementById('strategy-monitor-panel');
+    if (panel) panel.style.display = 'none';
+    if (_monitorTimer) { clearInterval(_monitorTimer); _monitorTimer = null; }
+    _monitorCurrentName = '';
+}
+
+async function refreshStrategyMonitor() {
+    if (_monitorCurrentName) await _loadMonitorData(_monitorCurrentName);
+}
+
+async function _loadMonitorData(name) {
+    const badge = document.getElementById('monitor-status-badge');
+    const title = document.getElementById('monitor-panel-title');
+    if (badge) badge.textContent = '加载中...';
+
+    let data;
+    try {
+        data = await api(`/strategies/${encodeURIComponent(name)}/monitor-data?bars=200`);
+    } catch (e) {
+        if (badge) {
+            badge.textContent = '加载失败';
+            badge.style.background = '#7f1d1d';
+            badge.style.color = '#fca5a5';
+        }
+        return;
+    }
+
+    if (title) title.textContent = `策略监控 — ${esc(name)}`;
+    if (badge) {
+        badge.textContent = data.is_running ? '运行中' : '未运行';
+        badge.style.background = data.is_running ? '#14532d' : 'var(--bg-3)';
+        badge.style.color     = data.is_running ? '#86efac' : 'var(--text-muted)';
+    }
+
+    const metricsEl = document.getElementById('monitor-metrics-row');
+    if (metricsEl) {
+        const m = data.metrics || {};
+        const pnlColor = c => (c || 0) >= 0 ? '#4ade80' : '#f87171';
+        const pct = v => v != null ? (v > 0 ? '+' : '') + v.toFixed(2) + '%' : 'N/A';
+        metricsEl.innerHTML = [
+            ['资本基数',   m.equity_base    != null ? m.equity_base.toFixed(2) + ' U' : '--'],
+            ['已实现盈亏', m.realized_pnl   != null ? `<span style="color:${pnlColor(m.realized_pnl)}">${m.realized_pnl.toFixed(2)} U</span>` : '--'],
+            ['浮动盈亏',   m.unrealized_pnl != null ? `<span style="color:${pnlColor(m.unrealized_pnl)}">${m.unrealized_pnl.toFixed(2)} U</span>` : '--'],
+            ['总收益',     m.total_pnl      != null ? `<span style="color:${pnlColor(m.total_pnl)}">${m.total_pnl.toFixed(2)} U (${pct(m.return_pct)})</span>` : '--'],
+            ['交易次数',   m.trade_count    != null ? m.trade_count : '--'],
+            ['胜率',       m.win_rate       != null ? m.win_rate.toFixed(1) + '%' : '--'],
+        ].map(([label, val]) =>
+            `<div class="monitor-metric"><div class="monitor-metric-label">${label}</div><div class="monitor-metric-val">${val}</div></div>`
+        ).join('');
+    }
+
+    _renderMonitorChart(data);
+
+    const posEl = document.getElementById('monitor-positions-row');
+    if (posEl) {
+        if (!data.positions || !data.positions.length) {
+            posEl.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:4px 0">当前无持仓</div>';
+        } else {
+            posEl.innerHTML =
+                '<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">当前持仓</div>' +
+                data.positions.map(p => {
+                    const c = p.unrealized_pnl >= 0 ? '#4ade80' : '#f87171';
+                    return `<div class="monitor-position-row"><span class="monitor-pos-side ${p.side === 'long' ? 'pos-long' : 'pos-short'}">${p.side === 'long' ? '多' : '空'}</span><span>${esc(p.symbol)}</span><span>入场 ${p.entry_price.toFixed(4)}</span><span>现价 ${p.current_price.toFixed(4)}</span><span>数量 ${p.quantity.toFixed(6)}</span><span style="color:${c}">浮盈 ${p.unrealized_pnl.toFixed(2)} U (${(p.unrealized_pnl_pct*100).toFixed(2)}%)</span></div>`;
+                }).join('');
+        }
+    }
+}
+
+function _renderMonitorChart(data) {
+    const chartEl = document.getElementById('strategy-monitor-chart');
+    if (!chartEl || typeof Plotly === 'undefined') return;
+
+    const ohlcv   = data.ohlcv   || [];
+    const signals = data.signals || [];
+    const equity  = data.equity  || [];
+
+    const candleTrace = {
+        type: 'candlestick',
+        name: data.symbol || '',
+        x:     ohlcv.map(b => b.t),
+        open:  ohlcv.map(b => b.o),
+        high:  ohlcv.map(b => b.h),
+        low:   ohlcv.map(b => b.l),
+        close: ohlcv.map(b => b.c),
+        increasing: { line: { color: '#4ade80', width: 1 }, fillcolor: '#4ade80' },
+        decreasing: { line: { color: '#f87171', width: 1 }, fillcolor: '#f87171' },
+        xaxis: 'x', yaxis: 'y',
+    };
+
+    const buySigs  = signals.filter(s => ['buy',  'close_short'].includes(s.type));
+    const sellSigs = signals.filter(s => ['sell', 'close_long' ].includes(s.type));
+
+    const buyMarker = {
+        type: 'scatter', mode: 'markers', name: '买入/平空',
+        x: buySigs.map(s => s.t),
+        y: buySigs.map(s => s.price),
+        marker: { symbol: 'triangle-up', size: buySigs.map(s => 8 + (s.strength || 0.5) * 8), color: '#4ade80', line: { color: '#fff', width: 1 } },
+        text: buySigs.map(s => `${s.type} | 强度 ${(s.strength||0).toFixed(2)}` + (s.stop_loss ? ` | SL ${s.stop_loss.toFixed(4)}` : '') + (s.take_profit ? ` | TP ${s.take_profit.toFixed(4)}` : '')),
+        hovertemplate: '%{text}<br>价格: %{y}<br>时间: %{x}<extra></extra>',
+        xaxis: 'x', yaxis: 'y',
+    };
+
+    const sellMarker = {
+        type: 'scatter', mode: 'markers', name: '卖出/平多',
+        x: sellSigs.map(s => s.t),
+        y: sellSigs.map(s => s.price),
+        marker: { symbol: 'triangle-down', size: sellSigs.map(s => 8 + (s.strength || 0.5) * 8), color: '#f87171', line: { color: '#fff', width: 1 } },
+        text: sellSigs.map(s => `${s.type} | 强度 ${(s.strength||0).toFixed(2)}`),
+        hovertemplate: '%{text}<br>价格: %{y}<br>时间: %{x}<extra></extra>',
+        xaxis: 'x', yaxis: 'y',
+    };
+
+    const equityPts = equity.filter(e => e.t);
+    const equityTrace = {
+        type: 'scatter', mode: 'lines', name: '权益曲线',
+        x: equityPts.map(e => e.t),
+        y: equityPts.map(e => e.v),
+        line: { color: '#60a5fa', width: 1.5 },
+        fill: 'tozeroy', fillcolor: 'rgba(96,165,250,0.08)',
+        hovertemplate: '权益: %{y:.2f} U<br>时间: %{x}<extra></extra>',
+        xaxis: 'x', yaxis: 'y2',
+    };
+
+    const hasEquity = equityPts.length > 0;
+
+    const layout = {
+        paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+        font: { color: '#dfe9f7', size: 11 },
+        margin: { t: 16, b: 40, l: 60, r: 40 },
+        xaxis:  { ...plotlyTimeAxis(), domain: [0, 1], anchor: 'y', rangeslider: { visible: false } },
+        yaxis:  { domain: hasEquity ? [0.32, 1] : [0, 1], gridcolor: '#283242', title: { text: '价格', font: { size: 10 } } },
+        xaxis2: hasEquity ? { ...plotlyTimeAxis(), domain: [0, 1], anchor: 'y2' } : undefined,
+        yaxis2: hasEquity ? { domain: [0, 0.28], gridcolor: '#283242', title: { text: '权益(U)', font: { size: 10 } } } : undefined,
+        showlegend: true,
+        legend: { orientation: 'h', y: 1.04, x: 0, font: { size: 10 } },
+    };
+
+    const traces = [candleTrace, buyMarker, sellMarker];
+    if (hasEquity) traces.push(equityTrace);
+
+    try {
+        Plotly.react(chartEl, traces, layout, {
+            responsive: true, displayModeBar: true,
+            modeBarButtonsToRemove: ['select2d', 'lasso2d'], displaylogo: false,
+        });
+    } catch (e) {
+        chartEl.innerHTML = `<div style="color:var(--text-muted);padding:20px;text-align:center">图表渲染失败: ${esc(e.message)}</div>`;
+    }
+}
 

@@ -469,7 +469,7 @@
       validated: '已验证',
       rejected: '已拒绝',
       paper_running: '纸盘运行',
-      shadow_running: '影子跟踪',
+      shadow_running: '影子跟踪（未运行）',
       live_candidate: '实盘候选',
       live_running: '实盘运行',
       retired: '已退役',
@@ -1352,7 +1352,19 @@
           生成订单预览
         </button>
         <div id=”ai-order-preview-result” style=”display:none;margin-top:10px;padding:12px;background:#0d1a2a;border:1px solid #1e3a5a;border-radius:8px;”></div>
-      </div>`;
+      </div>
+      ${String(cand?.status || '') === 'paper_running' && !governanceEnabled()
+        ? `<div style=”margin-top:8px;”>
+            <button class=”btn btn-sm” id=”btn-escalate-live”
+              style=”font-size:12px;width:100%;color:#f0b429;border-color:#f0b429;”>
+              升级为实盘候选 →
+            </button>
+            <div style=”font-size:10px;color:#6b7fa0;margin-top:3px;”>
+              将纸盘标记为实盘候选（不自动下单，需进一步人工确认）
+            </div>
+           </div>`
+        : ''}
+      `;
     panel.innerHTML = normalizeUiText(panel.innerHTML)
       .replace(' (Best Params)', '')
       .replace('CSV:', 'CSV 文件：')
@@ -1366,6 +1378,25 @@
     // 订单预览按钮
     panel.querySelector('#btn-order-preview')?.addEventListener('click', () => {
       showOrderPreview(candidateId);
+    });
+
+    // 纸盘 → 实盘候选升级按钮
+    panel.querySelector('#btn-escalate-live')?.addEventListener('click', async () => {
+      if (!confirm(`确认将纸盘候选 ${candidateId.slice(0, 8)} 升级为实盘候选？\n（不会自动下单，后续需要人工确认才能实际启动实盘）`)) return;
+      const btn = panel.querySelector('#btn-escalate-live');
+      if (btn) { btn.textContent = '升级中...'; btn.disabled = true; }
+      try {
+        await aiApi(`/candidates/${encodeURIComponent(candidateId)}/promote`, {
+          method: 'POST',
+          body: JSON.stringify({ target: 'live_candidate' }),
+          timeoutMs: 20000,
+        });
+        notify('已升级为实盘候选，等待进一步审批');
+        await refreshWorkbench('', candidateId);
+      } catch (err) {
+        if (btn) { btn.textContent = '升级为实盘候选 →'; btn.disabled = false; }
+        notify(`升级失败: ${err.message}`, true);
+      }
     });
 
     // 绑定详情面板里的按钮
@@ -2711,15 +2742,20 @@
   async function loadLiveSignals() {
     try {
       const res = await aiApi('/live-signals', { timeoutMs: 20000 });
-      renderLiveSignalPanel(res?.items || []);
+      renderLiveSignalPanel(res?.items || [], !!res?.ml_model_loaded);
     } catch (e) {
       /* silent — non-critical */
     }
   }
 
-  function renderLiveSignalPanel(items) {
+  function renderLiveSignalPanel(items, mlLoaded) {
     const el = document.getElementById('ai-live-signals-panel');
     if (!el) return;
+
+    // ML 未激活提示（仅在有运行候选时显示）
+    const mlNote = (items.length > 0 && !mlLoaded)
+      ? '<div style="font-size:10px;color:#78350f;background:#451a03;border-radius:4px;padding:2px 6px;margin-bottom:4px;">ML组件未激活（需训练模型），信号仅用 LLM+Factor</div>'
+      : '';
 
     if (!items.length) {
       el.innerHTML = '<div style="font-size:11px;color:#6b7fa0;padding:6px 0;">暂无运行中候选</div>';
@@ -2730,7 +2766,7 @@
     const dirColor = d => d === 'LONG' ? '#4ade80' : d === 'SHORT' ? '#f87171' : '#6b7fa0';
     const pct      = v => ((v || 0) * 100).toFixed(0) + '%';
 
-    el.innerHTML = items.map(item => {
+    el.innerHTML = mlNote + items.map(item => {
       const sig  = item.signal;
       if (!sig) return `<div class="live-sig-row"><span style="color:#6b7fa0;font-size:11px">${esc(item.strategy)} — 信号错误</span></div>`;
       const comp = sig.components || {};
@@ -2749,9 +2785,10 @@
   <div class="live-sig-bars">
     ${['llm', 'ml', 'factor'].map(k => {
       const c = comp[k] || {};
-      return `<span class="live-sig-bar-label">${k.toUpperCase()}</span>`
-           + `<span style="color:${dirColor(c.direction)};font-size:10px">${dirIcon(c.direction || 'FLAT')}</span>`
-           + `<span style="font-size:10px;min-width:26px;text-align:right">${pct(c.confidence)}</span>`;
+      const mlOffline = k === 'ml' && !mlLoaded;
+      return `<span class="live-sig-bar-label"${mlOffline ? ' style="opacity:.45"' : ''}>${k.toUpperCase()}${mlOffline ? '⊘' : ''}</span>`
+           + `<span style="color:${mlOffline ? '#6b7fa0' : dirColor(c.direction)};font-size:10px">${mlOffline ? '─' : dirIcon(c.direction || 'FLAT')}</span>`
+           + `<span style="font-size:10px;min-width:26px;text-align:right;${mlOffline ? 'opacity:.45' : ''}">${mlOffline ? '--' : pct(c.confidence)}</span>`;
     }).join('')}
     <span style="font-size:10px;color:#6b7fa0;margin-left:4px">合计</span>
     <span style="font-size:11px;font-weight:600">${pct(sig.confidence)}</span>

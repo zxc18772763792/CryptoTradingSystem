@@ -5321,6 +5321,46 @@ input[type="radio"] {
     white-space: nowrap;
 }
 
+/* ── 策略实时监控面板 ── */
+#strategy-monitor-panel { transition: none; }
+
+.monitor-metric {
+    display: flex;
+    flex-direction: column;
+    min-width: 90px;
+    background: var(--bg-2);
+    border-radius: 6px;
+    padding: 6px 10px;
+}
+.monitor-metric-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+}
+.monitor-metric-val {
+    font-size: 13px;
+    font-weight: 600;
+}
+.monitor-position-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    font-size: 11px;
+    padding: 4px 8px;
+    background: var(--bg-2);
+    border-radius: 5px;
+    margin-bottom: 4px;
+}
+.monitor-pos-side {
+    font-weight: 700;
+    font-size: 12px;
+    padding: 1px 6px;
+    border-radius: 4px;
+}
+.pos-long  { background: #14532d; color: #86efac; }
+.pos-short { background: #7f1d1d; color: #fca5a5; }
+
 /* Multi-asset correlation matrix: keep near 2x vertical space for readability */
 #research #multi-asset-corr-chart {
     min-height: 440px !important;

@@ -1318,7 +1318,13 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
                 "error": str(exc),
             })
 
-    return {"items": results, "count": len(results), "ts": datetime.now(timezone.utc).isoformat()}
+    ml_model_loaded = signal_aggregator._ml_model.is_loaded()
+    return {
+        "items": results,
+        "count": len(results),
+        "ml_model_loaded": ml_model_loaded,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ── Phase B: Quick register (human-approve shortcut with allocation_pct) ─────
@@ -1344,11 +1350,39 @@ async def quick_register_candidate(
     ensure_ai_research_runtime_state(request.app)
     cand = get_candidate(request.app, candidate_id)
 
-    if not cand.metadata.get("promotion_pending_human_gate"):
-        raise HTTPException(
-            status_code=400,
-            detail="candidate is not pending human approval; use /register for non-gated candidates",
+    has_gate = bool(cand.metadata.get("promotion_pending_human_gate"))
+    governance_enabled = bool(getattr(settings, "GOVERNANCE_ENABLED", True))
+    if not has_gate:
+        if governance_enabled:
+            raise HTTPException(
+                status_code=400,
+                detail="候选未在审批队列中；治理模式下需先完成研究流程后自动进入待审批",
+            )
+        # 非治理模式：无门控，直接走 promote_existing_candidate（与 /register 等价），附带 allocation_pct
+        cand.metadata["allocation_pct"] = float(payload.allocation_pct)
+        request.app.state.ai_candidate_registry.save(cand)
+        result = await promote_existing_candidate(
+            request.app, candidate_id=candidate_id, actor="quick_register", target="paper"
         )
+        asyncio.create_task(write_audit(
+            GovernanceAuditEvent(
+                module="ai.research",
+                action="quick_register_no_gate",
+                status="approved",
+                actor="web_ui",
+                role="HUMAN",
+                input_payload={"candidate_id": candidate_id, "allocation_pct": payload.allocation_pct},
+                output_payload={"runtime_status": result.get("runtime_status")},
+            )
+        ))
+        return {
+            "candidate_id": candidate_id,
+            "allocation_pct": payload.allocation_pct,
+            "candidate": result["candidate"].model_dump(mode="json"),
+            "promotion": result["promotion"].model_dump(mode="json"),
+            "runtime_status": result.get("runtime_status"),
+            "registered_strategy_name": result.get("registered_strategy_name"),
+        }
 
     proposal = get_proposal(request.app, cand.proposal_id)
 
