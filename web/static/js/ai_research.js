@@ -2255,7 +2255,7 @@
   }
 
   async function runProposal(proposalId) {
-    if (!proposalId) { notify('），建议人工确认', true); return; }
+    if (!proposalId) { notify('请先选择研究任务', true); return; }
     const proposal = state.proposals.find(p => String(p?.proposal_id || '') === String(proposalId));
     const proposalStatus = String(proposal?.status || '');
     if (proposal && !isRunnableProposalStatus(proposalStatus)) {
@@ -2264,7 +2264,7 @@
     }
     const exchange = String(document.getElementById('run-exchange')?.value || 'binance');
     const days     = Math.max(1, Math.min(3650, parseInt(document.getElementById('run-days')?.value || '3', 10) || 3));
-    notify(`研究任务已提交，后台运行中...`);
+    notify('研究任务已提交，后台运行中...');
     const result = await aiApi(`/proposals/${encodeURIComponent(proposalId)}/run`, {
       method: 'POST',
       body: JSON.stringify({ exchange, days, background: true }),
@@ -2494,15 +2494,21 @@
   async function pollJobStatus(proposalId, _jobId) {
     const data = await aiApi(`/proposals/${encodeURIComponent(proposalId)}/job-status`, { timeoutMs: 8000 });
     const js   = data?.job_status;
+    const proposalStatus = String(data?.proposal_status || '');
+    const proposalReason = String(data?.proposal_reason || '').trim();
     // Keep proposal list dot up to date
     const idx  = state.proposals.findIndex(p => String(p?.proposal_id || '') === proposalId);
-    if (idx >= 0 && state.proposals[idx].status !== data?.proposal_status) {
-      state.proposals[idx] = { ...state.proposals[idx], status: data.proposal_status };
+    if (idx >= 0 && state.proposals[idx].status !== proposalStatus) {
+      state.proposals[idx] = { ...state.proposals[idx], status: proposalStatus };
       renderProposalList();
     }
     if (js === 'completed') {
       stopJobPolling(proposalId);
-      notify(`\u7814\u7a76\u4efb\u52a1\u5df2\u5b8c\u6210\uff0c\u5de5\u4f5c\u53f0\u72b6\u6001\u5df2\u66f4\u65b0`);
+      if (proposalStatus === 'rejected') {
+        notify(`研究完成，但未通过验证${proposalReason ? `：${proposalReason}` : ''}`);
+      } else {
+        notify('研究任务已完成，工作台状态已更新');
+      }
       await refreshWorkbench(proposalId, '');
     } else if (js === 'cancelled') {
       stopJobPolling(proposalId);

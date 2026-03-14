@@ -23,7 +23,7 @@ _PROPOSAL_TRANSITIONS = {
     "draft": {"research_queued", "research_running"},
     "research_queued": {"research_running"},
     "research_running": {"validated", "rejected"},
-    "validated": {"paper_running", "shadow_running", "live_candidate", "retired", "research_queued", "research_running"},
+    "validated": {"paper_running", "shadow_running", "live_candidate", "retired", "rejected", "research_queued", "research_running"},
     "paper_running": {"live_candidate", "retired"},
     "shadow_running": {"paper_running", "retired"},
     "live_candidate": {"retired"},

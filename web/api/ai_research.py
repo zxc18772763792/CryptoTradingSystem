@@ -781,9 +781,18 @@ async def get_ai_proposal_job_status(request: Request, proposal_id: str):
     if job_id:
         raw = request.app.state.research_jobs.get(job_id) or {}
         job = {k: v for k, v in raw.items() if k != "result"}
+    proposal_reason = None
+    if str(item.status) == "rejected":
+        summary = getattr(item, "validation_summary", None)
+        reasons = list(getattr(summary, "reasons", []) or [])
+        if reasons:
+            proposal_reason = str(reasons[0] or "").strip() or None
+        if not proposal_reason:
+            proposal_reason = str((item.metadata or {}).get("last_research_error") or "").strip() or None
     return {
         "proposal_id": proposal_id,
         "proposal_status": item.status,
+        "proposal_reason": proposal_reason,
         "job_id": job_id,
         "job_status": job.get("status"),
         "started_at": job.get("started_at"),

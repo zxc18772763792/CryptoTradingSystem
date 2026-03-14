@@ -14,6 +14,36 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def test_transition_proposal_allows_validated_to_rejected():
+    from core.ai.proposal_schemas import ResearchProposal
+    from core.deployment.promotion_engine import transition_proposal
+
+    now = _now()
+    proposal = ResearchProposal(
+        proposal_id="proposal-transition-reject",
+        created_at=now,
+        updated_at=now,
+        thesis="transition check",
+        status="validated",
+    )
+    lifecycle_registry = MagicMock()
+    lifecycle_registry.append = MagicMock()
+
+    result = transition_proposal(
+        proposal,
+        to_state="rejected",
+        lifecycle_registry=lifecycle_registry,
+        actor="unit_test",
+        reason="validation gate rejected candidate",
+    )
+
+    assert result.status == "rejected"
+    assert lifecycle_registry.append.call_count == 1
+    record = lifecycle_registry.append.call_args.args[0]
+    assert record.from_state == "validated"
+    assert record.to_state == "rejected"
+
+
 def test_promote_candidate_auto_runtime_limit(monkeypatch):
     from core.ai.proposal_schemas import ResearchProposal
     from core.deployment.promotion_engine import promote_candidate
