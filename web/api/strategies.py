@@ -1,6 +1,7 @@
 ﻿"""Strategy API endpoints."""
 import asyncio
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -69,6 +70,43 @@ def _safe_float(value: Any, fallback: float = 0.0) -> float:
     if np.isnan(out) or np.isinf(out):
         return float(fallback)
     return float(out)
+
+
+def _safe_optional_float(value: Any) -> Optional[float]:
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    if np.isnan(out) or np.isinf(out):
+        return None
+    return float(out)
+
+
+def _json_safe_value(value: Any) -> Any:
+    """Convert runtime payloads to JSON-safe primitives."""
+    if value is None:
+        return None
+    if isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return None if (np.isnan(value) or np.isinf(value)) else float(value)
+    if isinstance(value, np.floating):
+        num = float(value)
+        return None if (np.isnan(num) or np.isinf(num)) else num
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, Enum):
+        return _json_safe_value(value.value)
+    if isinstance(value, dict):
+        return {str(k): _json_safe_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(v) for v in value]
+    if hasattr(value, "isoformat") and callable(getattr(value, "isoformat")):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    return str(value)
 
 
 def _normalize_strategy_specific_params(strategy_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -1357,11 +1395,11 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
                 ts_str = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
                 ohlcv.append({
                     "t": ts_str,
-                    "o": float(row.open)   if hasattr(row, "open")   else None,
-                    "h": float(row.high)   if hasattr(row, "high")   else None,
-                    "l": float(row.low)    if hasattr(row, "low")    else None,
-                    "c": float(row.close)  if hasattr(row, "close")  else None,
-                    "v": float(row.volume) if hasattr(row, "volume") else None,
+                    "o": _safe_optional_float(getattr(row, "open", None)),
+                    "h": _safe_optional_float(getattr(row, "high", None)),
+                    "l": _safe_optional_float(getattr(row, "low", None)),
+                    "c": _safe_optional_float(getattr(row, "close", None)),
+                    "v": _safe_optional_float(getattr(row, "volume", None)),
                 })
     except Exception as exc:
         logger.debug(f"monitor-data: OHLCV load failed for {name}: {exc}")
@@ -1369,15 +1407,21 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     # ── 3. Signals ───────────────────────────────────────────────────────────
     signals: list = []
     if strategy:
-        for sig in strategy.get_recent_signals(200):
-            signals.append({
-                "t":           sig.timestamp.isoformat() if hasattr(sig.timestamp, "isoformat") else str(sig.timestamp),
-                "type":        sig.signal_type.value,
-                "price":       float(sig.price or 0),
-                "strength":    float(sig.strength or 0),
-                "stop_loss":   float(sig.stop_loss)   if sig.stop_loss   is not None else None,
-                "take_profit": float(sig.take_profit) if sig.take_profit is not None else None,
-            })
+        try:
+            for sig in (strategy.get_recent_signals(200) or []):
+                sig_ts = getattr(sig, "timestamp", None)
+                sig_type = getattr(sig, "signal_type", None)
+                sig_type_value = sig_type.value if hasattr(sig_type, "value") else str(sig_type or "")
+                signals.append({
+                    "t":           sig_ts.isoformat() if hasattr(sig_ts, "isoformat") else str(sig_ts),
+                    "type":        sig_type_value,
+                    "price":       _safe_float(getattr(sig, "price", 0.0), 0.0),
+                    "strength":    _safe_float(getattr(sig, "strength", 0.0), 0.0),
+                    "stop_loss":   _safe_optional_float(getattr(sig, "stop_loss", None)),
+                    "take_profit": _safe_optional_float(getattr(sig, "take_profit", None)),
+                })
+        except Exception as exc:
+            logger.debug(f"monitor-data: signals failed for {name}: {exc}")
 
     # ── 4. Equity curve with timestamps ──────────────────────────────────────
     equity: list = []
@@ -1433,20 +1477,23 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     positions_data: list = []
     try:
         for pos in position_manager.get_positions_by_strategy(name):
+            side = getattr(pos, "side", None)
+            side_value = side.value if hasattr(side, "value") else str(side or "")
+            entry_time = getattr(pos, "entry_time", None)
             positions_data.append({
-                "symbol":             pos.symbol,
-                "side":               pos.side,
-                "entry_price":        float(pos.entry_price or 0),
-                "current_price":      float(pos.current_price or 0),
-                "quantity":           float(pos.quantity or 0),
-                "unrealized_pnl":     float(pos.unrealized_pnl or 0),
-                "unrealized_pnl_pct": float(pos.unrealized_pnl_pct or 0),
-                "entry_time":         pos.entry_time.isoformat() if hasattr(pos.entry_time, "isoformat") else str(pos.entry_time),
+                "symbol":             str(getattr(pos, "symbol", "") or ""),
+                "side":               side_value,
+                "entry_price":        _safe_float(getattr(pos, "entry_price", 0.0), 0.0),
+                "current_price":      _safe_float(getattr(pos, "current_price", 0.0), 0.0),
+                "quantity":           _safe_float(getattr(pos, "quantity", 0.0), 0.0),
+                "unrealized_pnl":     _safe_float(getattr(pos, "unrealized_pnl", 0.0), 0.0),
+                "unrealized_pnl_pct": _safe_float(getattr(pos, "unrealized_pnl_pct", 0.0), 0.0),
+                "entry_time":         entry_time.isoformat() if hasattr(entry_time, "isoformat") else str(entry_time),
             })
     except Exception as exc:
         logger.debug(f"monitor-data: positions failed for {name}: {exc}")
 
-    return {
+    payload = {
         "name":       name,
         "symbol":     symbol,
         "timeframe":  timeframe,
@@ -1458,6 +1505,7 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
         "positions":  positions_data,
         "ts":         datetime.now(timezone.utc).isoformat(),
     }
+    return _json_safe_value(payload)
 
 
 def _timeframe_to_seconds(tf: str) -> int:

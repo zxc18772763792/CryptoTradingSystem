@@ -76,6 +76,8 @@
     sortBy: 'score',        // 'score' | 'sharpe' | 'return' | 'drawdown'
     filterCategory: '',     // '' | '趋势' | '震荡' | ...
     compareCandidateIds: new Set(),
+    candidateDetailReqSeq: 0,
+    perfHistoryCache: {},
   };
 
   /* ── 工具函数 ── */
@@ -1053,7 +1055,7 @@
         <div class="cand-metric-item">夏普 ${srStr}</div>
       </div>
       <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">${enrichmentBadges}</div>
-      <div style="font-size:11px;color:#7e92b2;margin-top:4px;">回放模式锛${esc(enrichment.mode)}</div>
+      <div style="font-size:11px;color:#7e92b2;margin-top:4px;">回放模式：${esc(enrichment.mode)}</div>
       ${oosBadge || wfBadge || paramsBadge || dsrBadge || optBadge || corrBadge ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">${oosBadge}${wfBadge}${paramsBadge}${dsrBadge}${optBadge}${corrBadge}</div>` : ''}
       ${signalBadge}
       ${_renderValidationPipeline(vs)}
@@ -1065,11 +1067,16 @@
     </div>`;
   }
 
-  async function viewCandidate(candidateId) {
+  async function viewCandidate(candidateId, options = {}) {
     if (!candidateId) return;
+    const requestSeq = ++state.candidateDetailReqSeq;
     const panel = document.getElementById('ai-detail-panel');
-    if (panel) panel.innerHTML = '<div style="padding:20px;color:#7e92b2;font-size:13px;">加载中...</div>';
+    const keepContent = !!options.keepContent;
+    if (panel && !(keepContent && panel.dataset.candidateId === String(candidateId))) {
+      panel.innerHTML = '<div style="padding:20px;color:#7e92b2;font-size:13px;">加载中...</div>';
+    }
     const resp  = await aiApi(`/candidates/${encodeURIComponent(candidateId)}`, { timeoutMs: 20000 });
+    if (requestSeq !== state.candidateDetailReqSeq) return;
     const cand  = resp?.candidate || {};
     state.selectedCandidateId = candidateId;
     renderCandidateCards();   // 更新选中高亮
@@ -1380,7 +1387,18 @@
       .replace('DSR Score', 'DSR 分数')
       .replace('WF Consistency', 'WF 一致性')
       .replace('folds+', '折以上');
+    panel.dataset.candidateId = String(candidateId);
     normalizeDomText(panel);
+    const cachedPerf = state.perfHistoryCache[String(candidateId)];
+    if (cachedPerf) {
+      const perfPanel = panel.querySelector('#perf-history-panel');
+      const perfBtn = panel.querySelector('#btn-load-perf-history');
+      if (perfPanel) {
+        if (cachedPerf.kind === 'html') perfPanel.innerHTML = cachedPerf.content;
+        else perfPanel.textContent = cachedPerf.content;
+      }
+      if (perfBtn) perfBtn.textContent = '刷新';
+    }
     bindParamSensitivity(candidateId);
 
     // 订单预览按钮
@@ -1472,11 +1490,13 @@
           );
           const snaps = Array.isArray(data?.snapshots) ? data.snapshots : [];
           if (!snaps.length) {
-            perfPanel.textContent = '暂无性能快照（策略运行后自动记录）';
+            const emptyText = '暂无性能快照（策略运行后自动记录）';
+            perfPanel.textContent = emptyText;
+            state.perfHistoryCache[String(candidateId)] = { kind: 'text', content: emptyText };
           } else {
             const reversed = [...snaps].reverse();
             const pnlSeries = reversed.map(s => Number(s.total_pnl_pct || 0));
-            perfPanel.innerHTML = `
+            const perfHtml = `
               <div style="margin-bottom:8px;">${renderSparklineSvg(pnlSeries)}</div>
               <div style="overflow-x:auto;">
                 <table class="data-table" style="font-size:11px;width:100%;">
@@ -1496,11 +1516,13 @@
               </div>
               <div style="font-size:10px;color:#4a5f7a;margin-top:4px;">共 ${snaps.length} 条快照，显示最近 10 条</div>
             `;
+            perfPanel.innerHTML = perfHtml;
+            state.perfHistoryCache[String(candidateId)] = { kind: 'html', content: perfHtml };
           }
         } catch (err) {
           if (perfPanel) perfPanel.textContent = `加载失败: ${String(err?.message || err)}`;
         } finally {
-          perfHistBtn.textContent = '加载';
+          perfHistBtn.textContent = '刷新';
           perfHistBtn.disabled = false;
         }
       });
@@ -1509,7 +1531,7 @@
     const decayBtn = panel.querySelector('#btn-decay-check');
     if (decayBtn) {
       decayBtn.addEventListener('click', async () => {
-        decayBtn.textContent = '妫€测中...';
+        decayBtn.textContent = '检测中...';
         decayBtn.disabled = true;
         try {
           await aiApi(`/candidates/${encodeURIComponent(candidateId)}/decay-check`, { timeoutMs: 15000 });
@@ -1924,7 +1946,7 @@
       if (prevGovernance !== nextGovernance) {
         renderCandidateCards();
         if (state.selectedCandidateId) {
-          viewCandidate(state.selectedCandidateId).catch(() => {});
+          viewCandidate(state.selectedCandidateId, { keepContent: true }).catch(() => {});
         }
       }
     } catch (err) {
@@ -2087,7 +2109,7 @@
     if (plannerNotesEl) {
       let html = '';
       if (plannerNotes.length) {
-        html += `<div style="font-size:11px;color:#9fb1c9;margin-bottom:3px;">馃搵 ${plannerNotes.map(n => esc(n)).join(' · ')}</div>`;
+        html += `<div style="font-size:11px;color:#9fb1c9;margin-bottom:3px;">规划说明：${plannerNotes.map(n => esc(n)).join(' · ')}</div>`;
       }
       if (filteredTpls.length) {
         html += `<div style="font-size:11px;color:#f59e0b;margin-top:3px;">⚠️ 过滤模板（${filteredTpls.length}）: ${filteredTpls.slice(0,5).map(t => esc(t)).join(', ')}${filteredTpls.length > 5 ? '...' : ''}</div>`;
@@ -2284,7 +2306,7 @@
     const proposal = state.proposals.find(p => String(p?.proposal_id || '') === String(proposalId));
     const status = String(proposal?.status || '');
     if (!['research_queued', 'research_running'].includes(status)) {
-      notify(`褰撳墠鐘舵€併€${statusText(status)}銆嶆棤闇€取消`, true);
+      notify(`当前状态「${statusText(status)}」无需取消`, true);
       return;
     }
     if (!window.confirm(`确认取消该研究任务运行？\n${proposalId}`)) return;
@@ -2448,7 +2470,7 @@
     const lastLlm = workerStatus?.last_llm_batch || {};
     detailsEl.innerHTML = `
       <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">新闻璇婃柇</div>
+        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">新闻诊断</div>
         <div>摘要范围 ${esc(summaryScope)} / 结构化事件 ${newsEvents} / 原始新闻 ${rawCount} / Feed ${feedCount}</div>
         <div>启用源 ${enabledSources} / 源状态 ${sourceStates.length} / LLM 队列 ${pendingNewsTasks}</div>
         <div>最近拉取 ${esc(lastPull?.timestamp ? fmtTs(lastPull.timestamp) : '--')} / 最近 LLM ${esc(lastLlm?.timestamp ? fmtTs(lastLlm.timestamp) : '--')}</div>
