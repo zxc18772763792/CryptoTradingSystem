@@ -62,7 +62,7 @@
     pendingApprovals: [],   // candidates with human gate
     pendingLlmContext: null, // last AI-generated research context
     pendingMacroContext: null,
-    runtimeConfig: null,    // { governance_enabled, decision_mode, trading_mode, ai_live_decision }
+    runtimeConfig: null,    // { governance_enabled, decision_mode, trading_mode, ai_live_decision, ai_autonomous_agent }
     runtimeConfigLoaded: false,
     selectedProposalId: '',
     selectedCandidateId: '',
@@ -210,6 +210,30 @@
     return (state.runtimeConfig && state.runtimeConfig.ai_live_decision) || null;
   }
 
+  function renderRuntimeSummary() {
+    const root = document.getElementById('ai-runtime-summary');
+    if (!root) return;
+    const cfg = state.runtimeConfig || {};
+    const liveCfg = cfg.ai_live_decision || {};
+    const agentCfg = cfg.ai_autonomous_agent || {};
+    const governanceOn = !!cfg.governance_enabled;
+    const tradingMode = String(cfg.trading_mode || '--');
+    const decisionMode = String(cfg.decision_mode || '--');
+    const liveEnabled = !!liveCfg.enabled;
+    const liveMode = String(liveCfg.mode || 'shadow');
+    const agentEnabled = !!agentCfg.enabled;
+    const chips = [
+      { label: '治理', value: governanceOn ? '开启' : '关闭', cls: governanceOn ? 'is-warn' : 'is-on' },
+      { label: '交易模式', value: tradingMode, cls: tradingMode === 'live' ? 'is-warn' : 'is-on' },
+      { label: '决策模式', value: decisionMode, cls: decisionMode === 'enforce' ? 'is-warn' : '' },
+      { label: 'AI实盘决策', value: liveEnabled ? `开启(${liveMode})` : '关闭', cls: liveEnabled ? 'is-on' : '' },
+      { label: 'AI自治代理', value: agentEnabled ? '已启用' : '已关闭', cls: agentEnabled ? 'is-on' : '' },
+    ];
+    root.innerHTML = chips
+      .map((chip) => `<span class="ai-runtime-chip ${chip.cls}">${esc(chip.label)}：${esc(chip.value)}</span>`)
+      .join('');
+  }
+
   function renderLiveDecisionRuntimeConfig() {
     const cfg = getLiveDecisionRuntimeConfig();
     const enabledEl = document.getElementById('ai-live-decision-enabled');
@@ -260,6 +284,7 @@
         ...(state.runtimeConfig || {}),
         ai_live_decision: nextCfg,
       };
+      renderRuntimeSummary();
       renderLiveDecisionRuntimeConfig();
       notify('AI实盘决策配置已更新');
     } catch (err) {
@@ -1939,8 +1964,10 @@
         decision_mode: String(res?.decision_mode || ''),
         trading_mode: String(res?.trading_mode || ''),
         ai_live_decision: res?.ai_live_decision || null,
+        ai_autonomous_agent: res?.ai_autonomous_agent || null,
       };
       state.runtimeConfigLoaded = true;
+      renderRuntimeSummary();
       renderLiveDecisionRuntimeConfig();
       const nextGovernance = !!state.runtimeConfig.governance_enabled;
       if (prevGovernance !== nextGovernance) {
@@ -1957,9 +1984,11 @@
           decision_mode: '',
           trading_mode: '',
           ai_live_decision: null,
+          ai_autonomous_agent: null,
         };
       }
       state.runtimeConfigLoaded = true;
+      renderRuntimeSummary();
       renderLiveDecisionRuntimeConfig();
       console.debug('loadRuntimeConfig failed:', err);
     }

@@ -1488,6 +1488,14 @@
                     </div>
                 </div>
 
+                <div id="ai-runtime-summary" class="ai-runtime-summary">
+                    <span class="ai-runtime-chip">治理：加载中</span>
+                    <span class="ai-runtime-chip">交易模式：加载中</span>
+                    <span class="ai-runtime-chip">决策模式：加载中</span>
+                    <span class="ai-runtime-chip">AI实盘决策：加载中</span>
+                    <span class="ai-runtime-chip">AI自治代理：加载中</span>
+                </div>
+
                 <!-- ── 三栏 Hub 布局 ── -->
                 <div class="ai-hub-layout">
 
@@ -1551,10 +1559,13 @@
                                 <input type="text" id="ai-planner-timeframes" value="1m, 5m, 15m, 1h">
                             </div>
                             <div class="inline-actions">
-                                <button class="btn btn-primary btn-sm" id="ai-generate-btn">生成研究</button>
-                                <button class="btn btn-sm" id="ai-oneclick-btn" title="生成+运行+自动注册/审批">⚡ 一键研究+部署</button>
+                                <button class="btn btn-primary btn-sm" id="ai-generate-btn">1) 生成研究</button>
+                                <button class="btn btn-sm" id="ai-oneclick-btn" title="生成+运行+自动注册/审批">⚡ 一键研究+部署（全流程）</button>
                                 <button class="btn btn-sm" id="ai-context-btn" title="调用 AI 生成研究假设与实验计划">🤖 AI辅助</button>
                                 <button class="btn btn-sm" id="ai-refresh-btn">刷新</button>
+                            </div>
+                            <div id="ai-flow-hint" class="ai-flow-hint">
+                                推荐顺序：1) 生成研究 → 2) 运行研究 → 3) 审批/注册。想快可直接用“一键研究+部署”。
                             </div>
                             <!-- 实时市场上下文摘要 -->
                             <div id="ai-market-context-hint" style="margin-top:5px;font-size:11px;color:#7a8fa6;min-height:14px;"></div>
@@ -1676,7 +1687,7 @@
                                 </select>
                                 <input type="number" id="run-days" value="3" min="1" max="730" style="width:55px;font-size:12px;" title="回测天数（短周期研究默认3天）">
                                 <span style="font-size:11px;color:#7e92b2;">天</span>
-                                <button class="btn btn-primary btn-sm" id="run-selected-btn" disabled title="请先在左侧选择研究任务">▶ 运行研究</button>
+                                <button class="btn btn-primary btn-sm" id="run-selected-btn" disabled title="请先在左侧选择研究任务">2) 运行研究</button>
                                 <button class="btn btn-sm" id="ai-compare-btn" style="display:none;">对比选中</button>
                             </div>
                         </div>

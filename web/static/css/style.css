@@ -3693,6 +3693,40 @@ input[type="radio"] {
    AI 研究中心 — 三栏 Hub 布局
    ============================================================ */
 
+.ai-runtime-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 10px;
+}
+
+.ai-runtime-chip {
+    font-size: 11px;
+    color: #9fb1c9;
+    background: rgba(21, 31, 48, 0.92);
+    border: 1px solid rgba(159, 177, 201, 0.24);
+    border-radius: 999px;
+    padding: 4px 10px;
+    line-height: 1.3;
+}
+
+.ai-runtime-chip.is-on {
+    color: #20bf78;
+    border-color: rgba(32, 191, 120, 0.35);
+}
+
+.ai-runtime-chip.is-warn {
+    color: #f0b429;
+    border-color: rgba(240, 180, 41, 0.35);
+}
+
+.ai-flow-hint {
+    margin-top: 6px;
+    font-size: 11px;
+    color: #7e92b2;
+    line-height: 1.45;
+}
+
 /* 三栏主布局 */
 .ai-hub-layout {
     display: grid;
