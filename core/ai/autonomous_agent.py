@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import re
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -133,6 +135,20 @@ def _default_profile() -> Dict[str, Any]:
     }
 
 
+_AGENT_PERSISTABLE_KEYS = frozenset({
+    "AI_AUTONOMOUS_AGENT_ENABLED",
+    "AI_AUTONOMOUS_AGENT_AUTO_START",
+    "AI_AUTONOMOUS_AGENT_PROVIDER",
+    "AI_AUTONOMOUS_AGENT_MODEL",
+    "AI_AUTONOMOUS_AGENT_INTERVAL_SEC",
+    "AI_AUTONOMOUS_AGENT_COOLDOWN_SEC",
+    "AI_AUTONOMOUS_AGENT_MODE",
+    "AI_AUTONOMOUS_AGENT_ALLOW_LIVE",
+    "AI_AUTONOMOUS_AGENT_ACCOUNT_ID",
+    "AI_AUTONOMOUS_AGENT_STRATEGY_NAME",
+})
+
+
 class AutonomousTradingAgent:
     """Independent AI trading agent that generates and executes signals."""
 
@@ -146,7 +162,11 @@ class AutonomousTradingAgent:
         self._cache_root = root
         self._journal_path = self._cache_root / "autonomous_agent_journal.jsonl"
         self._profile_path = self._cache_root / "autonomous_agent_profile.json"
+        self._overlay_path = Path(
+            os.environ.get("AI_AGENT_CONFIG_PATH", str(self._cache_root / "agent_runtime_config.json"))
+        )
 
+        self._load_overlay()
         self._profile = self._load_profile()
         self._last_error: Optional[str] = None
         self._last_run_at: Optional[str] = None
@@ -275,6 +295,7 @@ class AutonomousTradingAgent:
             return self.get_runtime_config()
         async with self._lock:
             self._override.update(updates)
+        self._save_overlay()
         return self.get_runtime_config()
 
     def is_running(self) -> bool:
@@ -666,6 +687,30 @@ class AutonomousTradingAgent:
             metadata=metadata,
         )
 
+    def _load_overlay(self) -> None:
+        """Load persisted agent config from JSON overlay on startup."""
+        try:
+            if self._overlay_path.exists():
+                raw = self._overlay_path.read_text(encoding="utf-8")
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    safe = {k: v for k, v in data.items() if k in _AGENT_PERSISTABLE_KEYS}
+                    self._override.update(safe)
+                    logger.info(f"autonomous_agent: loaded {len(safe)} persisted config keys")
+        except Exception as exc:
+            logger.warning(f"autonomous_agent: failed to load overlay (using defaults): {exc}")
+
+    def _save_overlay(self) -> None:
+        """Atomically persist current _override to JSON overlay."""
+        try:
+            self._overlay_path.parent.mkdir(parents=True, exist_ok=True)
+            safe = {k: v for k, v in self._override.items() if k in _AGENT_PERSISTABLE_KEYS}
+            tmp = self._overlay_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(safe, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(self._overlay_path)
+        except Exception as exc:
+            logger.warning(f"autonomous_agent: failed to save overlay: {exc}")
+
     def _load_profile(self) -> Dict[str, Any]:
         try:
             if not self._profile_path.exists():
@@ -749,8 +794,11 @@ class AutonomousTradingAgent:
         cfg = self.get_runtime_config()
         if not bool(cfg.get("enabled")) and not force:
             result = {
+                "request_id": str(uuid.uuid4())[:8],
                 "skipped": True,
                 "reason": "agent_disabled",
+                "rejection_reason": "agent_disabled",
+                "execution_allowed": False,
                 "trigger": trigger,
                 "timestamp": _utc_now().isoformat(),
             }
@@ -833,10 +881,17 @@ class AutonomousTradingAgent:
 
         latency_ms = int((time.perf_counter() - started) * 1000)
         now_iso = _utc_now().isoformat()
+        # Derive rejection_reason for easy observability:
+        #   "none" if submitted, otherwise the execution.reason string
+        exec_reason = str(execution.get("reason") or "hold")
+        rejection_reason = None if execution.get("submitted") else exec_reason
         journal_row = {
+            "request_id": str(uuid.uuid4())[:8],
             "timestamp": now_iso,
             "trigger": str(trigger or "manual"),
             "latency_ms": latency_ms,
+            "execution_allowed": bool(execution.get("submitted")),
+            "rejection_reason": rejection_reason,
             "config": {
                 "provider": cfg.get("provider"),
                 "model": cfg.get("model"),

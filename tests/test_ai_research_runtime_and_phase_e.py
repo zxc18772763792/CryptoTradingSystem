@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import pytest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -377,3 +378,368 @@ def test_update_runtime_config_live_decision_endpoint(monkeypatch):
     assert result["config"]["enabled"] is True
     assert result["config"]["mode"] == "enforce"
     assert result["config"]["provider"] == "claude"
+
+
+# ── Step 2 回归：ml_model 可用性场景 ─────────────────────────────────────────
+
+def test_live_signals_ml_model_unavailable(monkeypatch):
+    """ml_model_loaded=False when aggregator has no _ml_model attribute."""
+    from web.api import ai_research as ai_module
+
+    class _Signal:
+        def to_dict(self):
+            return {"direction": "FLAT", "components": {}}
+
+    stub_aggregator = SimpleNamespace(aggregate=AsyncMock(return_value=_Signal()))
+    # stub_aggregator intentionally has NO _ml_model
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=200: [])
+    monkeypatch.setattr("core.ai.signal_aggregator.signal_aggregator", stub_aggregator)
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    result = asyncio.run(ai_module.get_live_signals(request))
+    assert result["ml_model_loaded"] is False
+
+
+def test_live_signals_ml_model_loaded_true(monkeypatch):
+    """ml_model_loaded=True when aggregator._ml_model.is_loaded() returns True."""
+    from web.api import ai_research as ai_module
+
+    class _Signal:
+        def to_dict(self):
+            return {"direction": "LONG", "components": {}}
+
+    ml_stub = SimpleNamespace(is_loaded=lambda: True)
+    stub_aggregator = SimpleNamespace(aggregate=AsyncMock(return_value=_Signal()), _ml_model=ml_stub)
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=200: [])
+    monkeypatch.setattr("core.ai.signal_aggregator.signal_aggregator", stub_aggregator)
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    result = asyncio.run(ai_module.get_live_signals(request))
+    assert result["ml_model_loaded"] is True
+
+
+def test_live_signals_ml_model_loaded_false(monkeypatch):
+    """ml_model_loaded=False when model exists but is_loaded() returns False."""
+    from web.api import ai_research as ai_module
+
+    ml_stub = SimpleNamespace(is_loaded=lambda: False)
+    stub_aggregator = SimpleNamespace(
+        aggregate=AsyncMock(return_value=SimpleNamespace(to_dict=lambda: {})),
+        _ml_model=ml_stub,
+    )
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=200: [])
+    monkeypatch.setattr("core.ai.signal_aggregator.signal_aggregator", stub_aggregator)
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    result = asyncio.run(ai_module.get_live_signals(request))
+    assert result["ml_model_loaded"] is False
+
+
+# ── Step 3 回归：exchange/symbol 解析 ────────────────────────────────────────
+
+def test_candidate_exchange_from_direct_attribute():
+    from web.api import ai_research as ai_module
+
+    cand = SimpleNamespace(exchange="bybit", metadata={})
+    assert ai_module._candidate_exchange(cand) == "bybit"
+
+
+def test_candidate_exchange_from_metadata():
+    from web.api import ai_research as ai_module
+
+    cand = SimpleNamespace(metadata={"exchange": "okx"})
+    assert ai_module._candidate_exchange(cand) == "okx"
+
+
+def test_candidate_exchange_default_fallback():
+    from web.api import ai_research as ai_module
+
+    cand = SimpleNamespace()
+    assert ai_module._candidate_exchange(cand) == "binance"
+
+
+def test_live_signals_uses_candidate_exchange(monkeypatch):
+    """Market data loads with candidate's exchange, not hardcoded 'binance'."""
+    from web.api import ai_research as ai_module
+
+    candidate = SimpleNamespace(
+        candidate_id="cand-okx",
+        strategy="RSIStrategy",
+        symbol="ETH/USDT",
+        status="paper_running",
+        exchange="okx",
+        metadata={"exchange": "okx"},
+    )
+
+    class _Signal:
+        def to_dict(self):
+            return {"direction": "SHORT", "components": {}}
+
+    captured_exchange = []
+
+    async def _fake_load(exchange, symbol, timeframe, start_time, end_time):
+        captured_exchange.append(exchange)
+        return pd.DataFrame({"close": [1.0, 1.1]})
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=200: [candidate])
+    monkeypatch.setattr("core.data.data_storage.load_klines_from_parquet", _fake_load)
+    monkeypatch.setattr(
+        "core.ai.signal_aggregator.signal_aggregator",
+        SimpleNamespace(aggregate=AsyncMock(return_value=_Signal())),
+    )
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    asyncio.run(ai_module.get_live_signals(request))
+    assert captured_exchange == ["okx"]
+
+
+# ── Step 5 回归：注册状态机语义 ───────────────────────────────────────────────
+
+def test_promote_candidate_paper_in_live_mode_raises_http_400(monkeypatch):
+    """Human approve / quick-register must return 400 (not 500) when system is in live mode."""
+    from fastapi import HTTPException
+    from web.api import ai_research as ai_module
+
+    async def _mock_promote(*args, **kwargs):
+        raise RuntimeError("系统当前运行在 'live' 模式，无法自动注册纸盘策略。")
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr("core.deployment.promotion_engine.promote_candidate", _mock_promote)
+
+    cand = SimpleNamespace(
+        candidate_id="cand-step5",
+        proposal_id="prop-step5",
+        metadata={"promotion_pending_human_gate": True},
+        promotion=SimpleNamespace(
+            decision="paper",
+            constraints={},
+            model_dump=lambda mode=None: {},
+        ),
+        validation_summary=None,
+    )
+    proposal = SimpleNamespace(
+        proposal_id="prop-step5",
+        metadata={},
+        model_dump=lambda mode=None: {},
+    )
+
+    monkeypatch.setattr(ai_module, "get_candidate", lambda app, cid: cand)
+    monkeypatch.setattr(ai_module, "get_proposal", lambda app, pid: proposal)
+
+    payload = ai_module.AIHumanApprovalRequest(target="paper", notes="test")
+
+    try:
+        asyncio.run(ai_module.human_approve_candidate(request, "cand-step5", payload))
+        assert False, "should have raised HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "模式" in exc.detail or "paper" in exc.detail.lower()
+
+
+def test_step6_autonomous_agent_ui_present():
+    """Step 6: AI自治代理控制面板必须出现在 HTML 中."""
+    repo_root = Path(__file__).resolve().parents[1]
+    html = (repo_root / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    assert "ai-agent-card" in html
+    assert "agentStart" in html
+    assert "agentStop" in html
+    assert "agentRunOnce" in html
+    assert "ai-agent-journal" in html
+
+
+def test_step6_autonomous_agent_js_functions_present():
+    """Step 6: JS 里必须有 loadAgentStatus / agentStart / agentStop / agentRunOnce."""
+    repo_root = Path(__file__).resolve().parents[1]
+    js = (repo_root / "web" / "static" / "js" / "ai_research.js").read_text(encoding="utf-8")
+    assert "function loadAgentStatus" in js
+    assert "function agentStart" in js
+    assert "function agentStop" in js
+    assert "function agentRunOnce" in js
+    assert "window.agentStart" in js
+    assert "/ai/autonomous-agent/status" in js
+    assert "/ai/autonomous-agent/journal" in js
+
+
+def test_promotion_error_message_is_chinese_and_contains_mode(monkeypatch):
+    """The RuntimeError message from promotion_engine contains the current mode."""
+    from core.deployment.promotion_engine import promote_candidate
+    from core.ai.proposal_schemas import ResearchProposal
+    from core.research.experiment_schemas import PromotionDecision, StrategyCandidate
+
+    now = datetime.now(timezone.utc)
+    proposal = ResearchProposal(
+        proposal_id="prop-mode-msg",
+        created_at=now,
+        updated_at=now,
+        thesis="mode msg test",
+        status="validated",
+    )
+    candidate = StrategyCandidate(
+        candidate_id="cand-mode-msg",
+        proposal_id="prop-mode-msg",
+        experiment_id="exp-mode-msg",
+        created_at=now,
+        strategy="MAStrategy",
+        timeframe="1h",
+        symbol="BTC/USDT",
+        params={},
+        metadata={"exchange": "binance"},
+    )
+    promotion = PromotionDecision(
+        candidate_id="cand-mode-msg",
+        decision="paper",
+        reason="test",
+        constraints={},
+        created_at=now,
+    )
+
+    app = MagicMock()
+    app.state.ai_lifecycle_registry = MagicMock()
+    app.state.ai_lifecycle_registry.append = MagicMock()
+    app.state.ai_experiment_registry = MagicMock()
+    app.state.ai_experiment_registry.get = MagicMock(return_value=SimpleNamespace(days=30))
+
+    monkeypatch.setattr("core.deployment.promotion_engine._resolve_strategy_class", lambda _: object)
+    monkeypatch.setattr("core.deployment.promotion_engine.get_strategy_defaults", lambda _: {})
+    monkeypatch.setattr("core.deployment.promotion_engine.execution_engine.get_trading_mode", lambda: "live")
+
+    try:
+        asyncio.run(promote_candidate(app, proposal=proposal, candidate=candidate, promotion=promotion, actor="test"))
+        assert False, "should have raised RuntimeError"
+    except RuntimeError as exc:
+        msg = str(exc)
+        assert "live" in msg
+        assert "paper" in msg  # must mention target mode
+
+
+# ── Phase C: CUSUM auto-draft ─────────────────────────────────────────────────
+
+def test_auto_draft_replacement_creates_proposal(monkeypatch):
+    """_auto_draft_replacement must call create_manual_proposal with correct args."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from core.monitoring.cusum_watcher import _auto_draft_replacement
+
+    created_proposals = []
+
+    def _fake_create(app, **kwargs):
+        created_proposals.append({
+            "thesis": kwargs.get("thesis", ""),
+            "symbols": kwargs.get("symbols", []),
+            "actor": kwargs.get("actor", ""),
+            "source_candidate": (kwargs.get("metadata") or {}).get("parent_candidate_id"),
+        })
+        return SimpleNamespace(proposal_id="prop-auto-draft")
+
+    candidate = SimpleNamespace(
+        candidate_id="cand-cusum-c",
+        strategy="BollingerStrategy",
+        symbols=["ETH/USDT"],
+        timeframes=["15m", "1h"],
+        status="paper_running",
+    )
+    decay_result = {"decay_pct": 14.2, "cusum_low": -3.1}
+    app = MagicMock()
+
+    with patch("core.research.orchestrator.create_manual_proposal", _fake_create):
+        _auto_draft_replacement(app, candidate, decay_result)
+
+    assert len(created_proposals) == 1
+    p = created_proposals[0]
+    assert "ETH/USDT" in p["symbols"]
+    assert p["actor"] == "cusum_auto"
+    assert "BollingerStrategy" in p["thesis"]
+    assert p["source_candidate"] == "cand-cusum-c"
+
+
+def test_auto_draft_replacement_non_fatal_on_error(monkeypatch):
+    """_auto_draft_replacement must not raise even if create_manual_proposal fails."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from core.monitoring.cusum_watcher import _auto_draft_replacement
+
+    candidate = SimpleNamespace(
+        candidate_id="cand-error",
+        strategy="Test",
+        symbols=["BTC/USDT"],
+        timeframes=["1h"],
+        status="paper_running",
+    )
+    app = MagicMock()
+
+    with patch("core.research.orchestrator.create_manual_proposal", side_effect=RuntimeError("boom")):
+        _auto_draft_replacement(app, candidate, {"decay_pct": 5.0})  # must not raise
+
+
+# ── Phase D: Order preview endpoint ──────────────────────────────────────────
+
+def test_order_preview_returns_direction_and_size(monkeypatch):
+    """generate_order_preview must return direction, size_usdt, stop/take levels."""
+    from web.api import ai_research as ai_module
+
+    class _Sig:
+        direction = "LONG"
+        confidence = 0.72
+        requires_approval = False
+        blocked_by_risk = False
+        risk_reason = None
+        components = {"llm": {"direction": "LONG", "confidence": 0.8, "weight": 0.4}}
+        timestamp = datetime.now(timezone.utc)
+        def to_dict(self): return {"direction": self.direction, "confidence": self.confidence}
+
+    cand = SimpleNamespace(
+        candidate_id="cand-preview",
+        status="validated",
+        symbol="BTC/USDT",
+        metadata={"allocation_pct": 0.05},
+    )
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "get_candidate", lambda app, cid: cand)
+
+    # generate_order_preview uses app.state._signal_aggregator (lazy singleton),
+    # so pre-set it directly on the mock state.
+    fake_agg = SimpleNamespace(aggregate=AsyncMock(return_value=_Sig()))
+    app_state = SimpleNamespace(_signal_aggregator=fake_agg)
+    request = SimpleNamespace(app=SimpleNamespace(state=app_state))
+    result = asyncio.run(ai_module.generate_order_preview(request, "cand-preview"))
+
+    assert result["direction"] == "LONG"
+    assert result["confidence"] == pytest.approx(0.72, abs=0.01)
+    assert result["symbol"] == "BTC/USDT"
+    assert result["size_usdt"] > 0
+    assert result["stop_loss_pct"] > 0
+    assert result["take_profit_pct"] > 0
+    assert "components" in result
+
+
+def test_order_preview_rejects_wrong_status(monkeypatch):
+    """generate_order_preview must return 400 for unsupported candidate status."""
+    from fastapi import HTTPException
+    from web.api import ai_research as ai_module
+
+    cand = SimpleNamespace(
+        candidate_id="cand-draft",
+        status="draft",
+        symbol="BTC/USDT",
+        metadata={},
+    )
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "get_candidate", lambda app, cid: cand)
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    try:
+        asyncio.run(ai_module.generate_order_preview(request, "cand-draft"))
+        assert False, "should have raised HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 400

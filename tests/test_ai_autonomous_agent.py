@@ -1,11 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pandas as pd
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_agent_overlay(tmp_path, monkeypatch):
+    """Redirect agent overlay path so tests don't pollute cache/ or each other."""
+    import core.ai.autonomous_agent as _mod
+    monkeypatch.setattr(
+        _mod.autonomous_trading_agent, "_overlay_path",
+        tmp_path / "agent_runtime_config.json",
+    )
 
 
 def _sample_df() -> pd.DataFrame:
@@ -153,3 +165,65 @@ def test_autonomous_agent_run_once_blocks_live_when_not_allowed(monkeypatch, tmp
     assert result["execution"]["submitted"] is False
     assert result["execution"]["reason"] == "live_mode_blocked"
     assert submit_mock.await_count == 0
+
+
+# ── Overlay persistence ───────────────────────────────────────────────────────
+
+def test_agent_config_persists_to_overlay(tmp_path):
+    """update_runtime_config writes overlay that is reloaded by a new agent instance."""
+    from core.ai.autonomous_agent import AutonomousTradingAgent
+
+    agent = AutonomousTradingAgent(cache_root=tmp_path / "agent_a")
+    asyncio.run(agent.update_runtime_config(enabled=True, allow_live=True, cooldown_sec=60))
+
+    overlay_path = agent._overlay_path
+    assert overlay_path.exists(), "overlay file should have been written"
+    data = json.loads(overlay_path.read_text())
+    assert data["AI_AUTONOMOUS_AGENT_ENABLED"] is True
+    assert data["AI_AUTONOMOUS_AGENT_ALLOW_LIVE"] is True
+    assert data["AI_AUTONOMOUS_AGENT_COOLDOWN_SEC"] == 60
+
+    # New agent reading same overlay
+    agent2 = AutonomousTradingAgent(cache_root=tmp_path / "agent_b")
+    agent2._overlay_path = overlay_path
+    agent2._load_overlay()
+    cfg = agent2.get_runtime_config()
+    assert cfg["enabled"] is True
+    assert cfg["allow_live"] is True
+    assert cfg["cooldown_sec"] == 60
+
+
+def test_agent_corrupt_overlay_safe_start(tmp_path):
+    """A corrupt overlay must not prevent agent startup."""
+    from core.ai.autonomous_agent import AutonomousTradingAgent
+
+    agent = AutonomousTradingAgent(cache_root=tmp_path / "agent_corrupt")
+    agent._overlay_path.parent.mkdir(parents=True, exist_ok=True)
+    agent._overlay_path.write_text("{ corrupt json", encoding="utf-8")
+    agent._load_overlay()  # must not raise
+    cfg = agent.get_runtime_config()
+    assert isinstance(cfg, dict)
+    assert "enabled" in cfg
+
+
+def test_agent_journal_contains_request_id(tmp_path, monkeypatch):
+    """Journal rows must have request_id, execution_allowed, and rejection_reason fields."""
+    from core.ai.autonomous_agent import AutonomousTradingAgent
+
+    agent = AutonomousTradingAgent(cache_root=tmp_path / "agent_journal")
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute"))
+
+    # Inject a pre-built journal row to verify schema
+    agent._append_journal({
+        "request_id": "abc12345",
+        "timestamp": "2026-01-01T00:00:00",
+        "trigger": "test",
+        "execution_allowed": False,
+        "rejection_reason": "shadow_mode",
+        "decision": {"action": "hold"},
+        "execution": {"submitted": False, "reason": "shadow_mode"},
+    })
+    rows = agent.read_journal(limit=5)
+    assert any(r.get("request_id") for r in rows)
+    assert any("rejection_reason" in r for r in rows)
+    assert any("execution_allowed" in r for r in rows)

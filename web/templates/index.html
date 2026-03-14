@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=71">
+    <link rel="stylesheet" href="/static/css/style.css?v=72">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
@@ -1552,6 +1552,7 @@
                             </div>
                             <div class="inline-actions">
                                 <button class="btn btn-primary btn-sm" id="ai-generate-btn">生成研究</button>
+                                <button class="btn btn-sm" id="ai-oneclick-btn" title="生成+运行+自动注册/审批">⚡ 一键研究+部署</button>
                                 <button class="btn btn-sm" id="ai-context-btn" title="调用 AI 生成研究假设与实验计划">🤖 AI辅助</button>
                                 <button class="btn btn-sm" id="ai-refresh-btn">刷新</button>
                             </div>
@@ -1606,6 +1607,24 @@
                                 <span id="ai-approval-badge" style="font-size:11px;color:#f59e0b;font-weight:400;text-transform:none;"></span>
                             </div>
                             <div id="ai-approval-list"></div>
+                        </div>
+
+                        <!-- AI自治代理控制面板 -->
+                        <div class="card ai-sidebar-card" id="ai-agent-card">
+                            <div class="ai-sidebar-title" style="margin-bottom:8px;">
+                                <span>🤖 AI自治代理</span>
+                                <span id="ai-agent-status-dot" class="agent-dot agent-dot-off" title="未运行"></span>
+                            </div>
+                            <div id="ai-agent-info" style="font-size:11px;color:#7e92b2;margin-bottom:8px;">加载中...</div>
+                            <div class="inline-actions" style="gap:6px;flex-wrap:wrap;">
+                                <button class="btn btn-sm btn-success" id="ai-agent-start-btn" onclick="agentStart()">启动</button>
+                                <button class="btn btn-sm btn-danger" id="ai-agent-stop-btn" onclick="agentStop()">停止</button>
+                                <button class="btn btn-sm" id="ai-agent-run-once-btn" onclick="agentRunOnce()">单次运行</button>
+                            </div>
+                            <details style="margin-top:8px;">
+                                <summary style="font-size:11px;cursor:pointer;color:#7e92b2;">查看最近决策日志</summary>
+                                <div id="ai-agent-journal" style="margin-top:6px;max-height:200px;overflow-y:auto;font-size:11px;"></div>
+                            </details>
                         </div>
 
                         <!-- 研究队列（Proposal 紧凑列表） -->

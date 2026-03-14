@@ -199,7 +199,11 @@ async def promote_candidate(
     params.setdefault("account_id", f"ai_{strategy_name.lower()}")
 
     if decision == "paper" and execution_engine.get_trading_mode() != "paper":
-        raise RuntimeError("current system trading mode is not paper; refusing automatic paper promotion")
+        current_mode = execution_engine.get_trading_mode()
+        raise RuntimeError(
+            f"系统当前运行在 {current_mode!r} 模式，无法自动注册纸盘策略。"
+            " 请先将系统切换到 paper 模式，或将注册目标改为 live_candidate。"
+        )
 
     if decision == "paper":
         default_allocation = max(0.0, min(1.0, float(getattr(settings, "DEFAULT_STRATEGY_ALLOCATION", 0.15) or 0.15)))

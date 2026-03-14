@@ -5380,3 +5380,21 @@ input[type="radio"] {
         height: 320px !important;
     }
 }
+
+/* Step 6 — AI自治代理状态指示灯 */
+.agent-dot {
+    display: inline-block;
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    margin-left: auto;
+    flex-shrink: 0;
+}
+.agent-dot-on  { background: #4ade80; box-shadow: 0 0 5px #4ade8088; animation: agent-pulse 2s infinite; }
+.agent-dot-off { background: #475569; }
+@keyframes agent-pulse { 0%,100% { opacity:1; } 50% { opacity:.5; } }
+
+/* AI自治代理日志表格 */
+.agent-journal-row { padding: 3px 0; border-bottom: 1px solid var(--border); line-height: 1.4; }
+.agent-journal-ts  { color: var(--text-muted); font-size: 10px; }
+.agent-journal-action { font-weight: 600; margin: 0 4px; }
+.agent-journal-detail { color: var(--text-muted); }

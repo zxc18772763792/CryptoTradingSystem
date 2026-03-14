@@ -2,15 +2,32 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import aiohttp
 from loguru import logger
 
 from config.settings import settings
+
+# Persistent overlay for runtime config — survives service restarts
+_OVERLAY_PATH = Path(os.environ.get("AI_RUNTIME_CONFIG_PATH", "data/ai_runtime_config.json"))
+# Keys that may be persisted (excludes secrets like API keys)
+_PERSISTABLE_KEYS = frozenset({
+    "AI_LIVE_DECISION_ENABLED",
+    "AI_LIVE_DECISION_MODE",
+    "AI_LIVE_DECISION_PROVIDER",
+    "AI_LIVE_DECISION_MODEL",
+    "AI_LIVE_DECISION_TIMEOUT_MS",
+    "AI_LIVE_DECISION_MAX_TOKENS",
+    "AI_LIVE_DECISION_CONFIDENCE_THRESHOLD",
+    "AI_LIVE_DECISION_FAIL_OPEN",
+    "AI_LIVE_DECISION_APPLY_IN_PAPER",
+})
 
 
 _DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -110,6 +127,33 @@ class LiveAIDecisionRouter:
     def __init__(self) -> None:
         self._override: Dict[str, Any] = {}
         self._lock = asyncio.Lock()
+        self._load_overlay()
+
+    # ── Persistence helpers ───────────────────────────────────────────────────
+
+    def _load_overlay(self) -> None:
+        """Load persisted runtime config from JSON overlay on startup."""
+        try:
+            if _OVERLAY_PATH.exists():
+                raw = _OVERLAY_PATH.read_text(encoding="utf-8")
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    safe = {k: v for k, v in data.items() if k in _PERSISTABLE_KEYS}
+                    self._override.update(safe)
+                    logger.info(f"live_decision_router: loaded {len(safe)} persisted config keys from {_OVERLAY_PATH}")
+        except Exception as exc:
+            logger.warning(f"live_decision_router: failed to load overlay (using defaults): {exc}")
+
+    def _save_overlay(self) -> None:
+        """Atomically persist current _override to JSON overlay."""
+        try:
+            _OVERLAY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            safe = {k: v for k, v in self._override.items() if k in _PERSISTABLE_KEYS}
+            tmp = _OVERLAY_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(safe, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(_OVERLAY_PATH)
+        except Exception as exc:
+            logger.warning(f"live_decision_router: failed to save overlay: {exc}")
 
     def _provider_base_url(self, provider: str) -> str:
         provider = _normalize_provider(provider)
@@ -205,6 +249,7 @@ class LiveAIDecisionRouter:
         async with self._lock:
             self._override.update(updates)
 
+        self._save_overlay()
         return self.get_runtime_config()
 
     async def _call_provider(

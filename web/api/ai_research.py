@@ -84,6 +84,30 @@ class AIProposalRunRequest(BaseModel):
     strategies: List[str] = Field(default_factory=list)
 
 
+class AIOneClickResearchDeployRequest(BaseModel):
+    goal: str = Field(..., min_length=8, max_length=600)
+    market_regime: str = "mixed"
+    symbols: List[str] = Field(default_factory=lambda: ["BTC/USDT"])
+    timeframes: List[str] = Field(default_factory=lambda: ["15m", "1h"])
+    constraints: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    origin_context: Dict[str, Any] = Field(default_factory=dict)
+    market_context: Dict[str, Any] = Field(default_factory=dict)
+    llm_research_output: Dict[str, Any] = Field(default_factory=dict)
+    exchange: str = "binance"
+    symbol: Optional[str] = None
+    days: int = Field(default=30, ge=1, le=3650)
+    commission_rate: float = Field(default=0.0004, ge=0.0, le=1.0)
+    slippage_bps: float = Field(default=2.0, ge=0.0, le=10000.0)
+    initial_capital: float = Field(default=10000.0, gt=0.0)
+    strategies: List[str] = Field(default_factory=list)
+    target: str = "auto"  # auto | paper | live_candidate
+    allocation_pct: float = Field(default=0.05, ge=0.001, le=1.0)
+    strategy_name: str = ""
+    approval_notes: str = "oneclick approve"
+    skip_deploy: bool = False
+
+
 class AICandidatePromotionRequest(BaseModel):
     target: Optional[str] = None
 
@@ -215,6 +239,13 @@ def _normalize_symbol(value: str) -> str:
     return raw
 
 
+def _normalize_deploy_target(value: str) -> str:
+    text = str(value or "auto").strip().lower()
+    if text not in {"auto", "paper", "live_candidate"}:
+        return "auto"
+    return text
+
+
 def _news_key(symbol: str) -> str:
     raw = _normalize_symbol(symbol).split(":")[0]
     if "/" in raw:
@@ -241,6 +272,18 @@ def _candidate_strategy_name(candidate: Any, default: str = "unknown") -> str:
     strategy_name = getattr(candidate, "strategy_name", None)
     if isinstance(strategy_name, str) and strategy_name.strip():
         return strategy_name.strip()
+    return default
+
+
+def _candidate_exchange(candidate: Any, default: str = "binance") -> str:
+    """Extract exchange from candidate, falling back to default."""
+    exchange = getattr(candidate, "exchange", None)
+    if isinstance(exchange, str) and exchange.strip():
+        return _normalize_exchange(exchange)
+    meta = getattr(candidate, "metadata", None) or {}
+    meta_exchange = meta.get("exchange") if isinstance(meta, dict) else None
+    if isinstance(meta_exchange, str) and meta_exchange.strip():
+        return _normalize_exchange(meta_exchange)
     return default
 
 
@@ -539,6 +582,117 @@ async def run_ai_proposal_endpoint(request: Request, proposal_id: str, payload: 
         "candidate": result["candidate"].model_dump(mode="json") if result.get("candidate") else None,
         "promotion": result["promotion"].model_dump(mode="json") if result.get("promotion") else None,
         "research_result": result["research_result"],
+    }
+
+
+@router.post("/oneclick/research-deploy")
+async def oneclick_ai_research_deploy(request: Request, payload: AIOneClickResearchDeployRequest):
+    """One-click orchestration: generate -> run -> deploy/approve."""
+    ensure_ai_research_runtime_state(request.app)
+
+    generated = generate_planned_proposal(
+        request.app,
+        actor="web_ui_oneclick",
+        goal=payload.goal,
+        market_regime=payload.market_regime,
+        symbols=payload.symbols,
+        timeframes=payload.timeframes,
+        constraints=payload.constraints,
+        metadata=payload.metadata,
+        origin_context=payload.origin_context,
+        market_context=payload.market_context,
+        llm_research_output=payload.llm_research_output,
+    )
+    proposal = generated["proposal"]
+
+    run_result = await run_proposal(
+        request.app,
+        proposal_id=str(proposal.proposal_id),
+        actor="web_ui_oneclick",
+        exchange=payload.exchange,
+        symbol=payload.symbol,
+        days=payload.days,
+        commission_rate=payload.commission_rate,
+        slippage_bps=payload.slippage_bps,
+        initial_capital=payload.initial_capital,
+        background=False,
+        timeframes=payload.timeframes,
+        strategies=payload.strategies,
+    )
+
+    candidate = run_result.get("candidate")
+    if candidate is None:
+        status = str(getattr(run_result.get("proposal"), "status", "unknown"))
+        raise HTTPException(
+            status_code=409,
+            detail=f"research completed without deployable candidate (proposal_status={status})",
+        )
+
+    raw_target = _normalize_deploy_target(payload.target)
+    resolved_target = raw_target
+    if raw_target == "auto":
+        decision = str(getattr(run_result.get("promotion"), "decision", "") or "").strip().lower()
+        if decision == "shadow":
+            decision = "paper"
+        resolved_target = decision if decision in {"paper", "live_candidate"} else "paper"
+
+    governance_enabled = bool(getattr(settings, "GOVERNANCE_ENABLED", True))
+    deploy_action: Optional[str] = None
+    deploy_result: Optional[Dict[str, Any]] = None
+
+    candidate_id = str(getattr(candidate, "candidate_id", "") or "")
+    if not candidate_id:
+        raise HTTPException(status_code=500, detail="candidate_id missing from run result")
+
+    if not payload.skip_deploy:
+        if governance_enabled:
+            if resolved_target == "paper":
+                deploy_action = "quick_register"
+                deploy_result = await quick_register_candidate(
+                    request,
+                    candidate_id,
+                    AIQuickRegisterRequest(allocation_pct=float(payload.allocation_pct)),
+                )
+            else:
+                deploy_action = "human_approve"
+                deploy_result = await human_approve_candidate(
+                    request,
+                    candidate_id,
+                    AIHumanApprovalRequest(target="live_candidate", notes=payload.approval_notes),
+                )
+        else:
+            deploy_action = "register"
+            deploy_result = await register_ai_candidate(
+                request,
+                candidate_id,
+                AICandidateRegisterRequest(mode=resolved_target, name=(payload.strategy_name or None)),
+            )
+
+    return {
+        "proposal_id": str(proposal.proposal_id),
+        "candidate_id": candidate_id,
+        "governance_enabled": governance_enabled,
+        "target": resolved_target,
+        "deploy": {
+            "performed": bool(not payload.skip_deploy),
+            "action": deploy_action,
+            "result": deploy_result,
+            "runtime_status": (deploy_result or {}).get("runtime_status"),
+        },
+        "generated": {
+            "proposal": _serialize_proposal(request, proposal),
+            "planner_notes": generated.get("planner_notes", []),
+            "filtered_templates": generated.get("filtered_templates", []),
+        },
+        "run": {
+            "proposal": _serialize_proposal(request, run_result["proposal"]),
+            "experiment": run_result["experiment"].model_dump(mode="json"),
+            "run": run_result["run"].model_dump(mode="json"),
+            "candidate": candidate.model_dump(mode="json"),
+            "promotion": run_result["promotion"].model_dump(mode="json") if run_result.get("promotion") else None,
+        },
+        "runtime_status": (deploy_result or {}).get("runtime_status"),
+        "registered_strategy_name": (deploy_result or {}).get("registered_strategy_name"),
     }
 
 
@@ -907,9 +1061,12 @@ async def human_approve_candidate(request: Request, candidate_id: str, payload: 
     cand.metadata["human_approval_notes"] = payload.notes
 
     # Promote (bypasses the 409 guard in promote_existing_candidate)
-    result = await promote_candidate(
-        request.app, proposal=proposal, candidate=cand, promotion=cand.promotion, actor="human_approver"
-    )
+    try:
+        result = await promote_candidate(
+            request.app, proposal=proposal, candidate=cand, promotion=cand.promotion, actor="human_approver"
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     request.app.state.ai_candidate_registry.save(cand)
     save_proposal(request.app, proposal)
 
@@ -1291,8 +1448,9 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
             try:
                 end_time = datetime.now(timezone.utc)
                 start_time = end_time - timedelta(hours=48)
+                cand_exchange = _candidate_exchange(cand)
                 loaded = await data_storage.load_klines_from_parquet(
-                    exchange="binance", symbol=cand_symbol,
+                    exchange=cand_exchange, symbol=cand_symbol,
                     timeframe="1h", start_time=start_time, end_time=end_time,
                 )
                 if loaded is not None:
@@ -1318,7 +1476,14 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
                 "error": str(exc),
             })
 
-    ml_model_loaded = signal_aggregator._ml_model.is_loaded()
+    # Safe ml_model check: aggregator may be a test stub or lightweight singleton
+    ml_model_loaded = False
+    try:
+        ml_model = getattr(signal_aggregator, "_ml_model", None)
+        if ml_model is not None and callable(getattr(ml_model, "is_loaded", None)):
+            ml_model_loaded = bool(ml_model.is_loaded())
+    except Exception:
+        pass
     return {
         "items": results,
         "count": len(results),
@@ -1405,13 +1570,16 @@ async def quick_register_candidate(
     cand.metadata["human_approved_by"] = "quick_register"
     cand.metadata["human_approval_notes"] = f"Quick register: allocation {payload.allocation_pct:.0%}"
 
-    result = await promote_candidate(
-        request.app,
-        proposal=proposal,
-        candidate=cand,
-        promotion=cand.promotion,
-        actor="quick_register",
-    )
+    try:
+        result = await promote_candidate(
+            request.app,
+            proposal=proposal,
+            candidate=cand,
+            promotion=cand.promotion,
+            actor="quick_register",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     request.app.state.ai_candidate_registry.save(result["candidate"])
     save_proposal(request.app, result["proposal"])
 

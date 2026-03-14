@@ -1,47 +1,48 @@
 (function () {
   'use strict';
 
-  /* ── 轮询间隔 ── */
+  /* 鈹€鈹€ 杞闂撮殧 鈹€鈹€ */
   const SIGNAL_INTERVAL_MS  = 30000;
   const REFRESH_INTERVAL_MS = 60000;
   const JOB_POLL_MS         = 3000;
+  const PREMIUM_SOURCE_LABEL = '高级数据源';
 
-  /* ── 策略类别 & 颜色 ── */
+  /* 策略类别与颜色 */
   const STRATEGY_CATEGORIES = {
     // 趋势
-    MAStrategy:'趋势', EMAStrategy:'趋势', MACDStrategy:'趋势', MACDHistogramStrategy:'趋势',
-    ADXTrendStrategy:'趋势', TrendFollowingStrategy:'趋势', AroonStrategy:'趋势',
+    MAStrategy: '趋势', EMAStrategy: '趋势', MACDStrategy: '趋势', MACDHistogramStrategy: '趋势',
+    ADXTrendStrategy: '趋势', TrendFollowingStrategy: '趋势', AroonStrategy: '趋势',
     // 震荡
-    RSIStrategy:'震荡', RSIDivergenceStrategy:'震荡', StochasticStrategy:'震荡',
-    BollingerBandsStrategy:'震荡', WilliamsRStrategy:'震荡', CCIStrategy:'震荡', StochRSIStrategy:'震荡',
+    RSIStrategy: '震荡', RSIDivergenceStrategy: '震荡', StochasticStrategy: '震荡',
+    BollingerBandsStrategy: '震荡', WilliamsRStrategy: '震荡', CCIStrategy: '震荡', StochRSIStrategy: '震荡',
     // 动量
-    MomentumStrategy:'动量', ROCStrategy:'动量', PriceAccelerationStrategy:'动量',
+    MomentumStrategy: '动量', ROCStrategy: '动量', PriceAccelerationStrategy: '动量',
     // 均值回归
-    MeanReversionStrategy:'均值回归', BollingerMeanReversionStrategy:'均值回归',
-    VWAPReversionStrategy:'均值回归', VWAPStrategy:'均值回归', MeanReversionHalfLifeStrategy:'均值回归',
+    MeanReversionStrategy: '均值回归', BollingerMeanReversionStrategy: '均值回归',
+    VWAPReversionStrategy: '均值回归', VWAPStrategy: '均值回归', MeanReversionHalfLifeStrategy: '均值回归',
     // 突破
-    BollingerSqueezeStrategy:'突破', DonchianBreakoutStrategy:'突破',
+    BollingerSqueezeStrategy: '突破', DonchianBreakoutStrategy: '突破',
     // 成交量
-    MFIStrategy:'成交量', OBVStrategy:'成交量', TradeIntensityStrategy:'成交量',
+    MFIStrategy: '成交量', OBVStrategy: '成交量', TradeIntensityStrategy: '成交量',
     // 风险
-    ParkinsonVolStrategy:'风险', UlcerIndexStrategy:'风险', VaRBreakoutStrategy:'风险',
-    MaxDrawdownStrategy:'风险', SortinoRatioStrategy:'风险',
+    ParkinsonVolStrategy: '风险', UlcerIndexStrategy: '风险', VaRBreakoutStrategy: '风险',
+    MaxDrawdownStrategy: '风险', SortinoRatioStrategy: '风险',
     // 套利
-    PairsTradingStrategy:'套利', HurstExponentStrategy:'套利',
+    PairsTradingStrategy: '套利', HurstExponentStrategy: '套利',
     // 量化
-    OrderFlowImbalanceStrategy:'量化', MultiFactorHFStrategy:'量化',
+    OrderFlowImbalanceStrategy: '量化', MultiFactorHFStrategy: '量化',
     // ML
-    MLXGBoostStrategy:'ML',
+    MLXGBoostStrategy: 'ML',
     // 宏观
-    MarketSentimentStrategy:'宏观', SocialSentimentStrategy:'宏观', FundFlowStrategy:'宏观', WhaleActivityStrategy:'宏观',
+    MarketSentimentStrategy: '宏观', SocialSentimentStrategy: '宏观', FundFlowStrategy: '宏观', WhaleActivityStrategy: '宏观',
   };
   const CATEGORY_COLORS = {
-    '趋势':'#3b82f6', '震荡':'#8b5cf6', '动量':'#20bf78', '均值回归':'#06b6d4',
-    '突破':'#f59e0b', '成交量':'#84cc16', '风险':'#f43f5e', '套利':'#e05260',
-    '量化':'#a78bfa', 'ML':'#ff6b35', '宏观':'#64748b',
+    '趋势': '#3b82f6', '震荡': '#8b5cf6', '动量': '#20bf78', '均值回归': '#06b6d4',
+    '突破': '#f59e0b', '成交量': '#84cc16', '风险': '#f43f5e', '套利': '#e05260',
+    '量化': '#a78bfa', 'ML': '#ff6b35', '宏观': '#64748b',
   };
 
-  /* ── 状态 ── */
+  /* 鈹€鈹€ 鐘舵€?鈹€鈹€ */
   const STRATEGY_FAMILIES = {
     MLXGBoostStrategy: 'ml',
     MarketSentimentStrategy: 'ai_glm',
@@ -50,9 +51,9 @@
     WhaleActivityStrategy: 'ai_glm',
   };
   const FAMILY_META = {
-    traditional: { label: '传统规则', color: '#64748b', accent: 'rgba(100,116,139,.16)' },
-    ml: { label: 'ML驱动', color: '#ff6b35', accent: 'rgba(255,107,53,.16)' },
-    ai_glm: { label: 'GLM/AI驱动', color: '#38bdf8', accent: 'rgba(56,189,248,.16)' },
+    traditional: { label: '浼犵粺瑙勫垯', color: '#64748b', accent: 'rgba(100,116,139,.16)' },
+    ml: { label: 'ML椹卞姩', color: '#ff6b35', accent: 'rgba(255,107,53,.16)' },
+    ai_glm: { label: 'GLM/AI椹卞姩', color: '#38bdf8', accent: 'rgba(56,189,248,.16)' },
   };
 
   const state = {
@@ -71,13 +72,13 @@
     liveSignalTimer: null,
     signalLoading: false,
     signalPanelCollapsed: false,
-    jobPollingTimers: {},   // proposalId → intervalId
+    jobPollingTimers: {},   // proposalId 鈫?intervalId
     sortBy: 'score',        // 'score' | 'sharpe' | 'return' | 'drawdown'
-    filterCategory: '',     // '' | '趋势' | '震荡' | ...
+    filterCategory: '',     // '' | '瓒嬪娍' | '闇囪崱' | ...
     compareCandidateIds: new Set(),
   };
 
-  /* ── 工具函数 ── */
+  /* 鈹€鈹€ 宸ュ叿鍑芥暟 鈹€鈹€ */
   function esc(v) {
     return String(v ?? '').replace(/[&<>"']/g, m =>
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
@@ -85,7 +86,7 @@
 
   function repairUtf8Mojibake(text) {
     const value = String(text ?? '');
-    if (!/[ÃÂÅÆÇÐÑÕÖØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿ]/.test(value)) {
+    if (!/[脙脗脜脝脟脨脩脮脰脴脵脷脹脺脻脼脽脿谩芒茫盲氓忙莽猫茅锚毛矛铆卯茂冒帽貌贸么玫枚酶霉煤没眉媒镁每]/.test(value)) {
       return value;
     }
     try {
@@ -103,7 +104,6 @@
       ['Markdown:', 'Markdown 报告：'],
       ['DSR Score', 'DSR 分数'],
       ['WF Consistency', 'WF 一致性'],
-      ['folds+', '折以上'],
       ['OHLCV only', '仅 OHLCV'],
       ['OHLCV + News + Macro', 'OHLCV + 新闻 + 宏观'],
       ['OHLCV + News', 'OHLCV + 新闻'],
@@ -247,7 +247,7 @@
       model: String(modelEl.value || '').trim(),
     };
     try {
-      if (btn) { btn.disabled = true; btn.textContent = '保存中...'; }
+      if (btn) { btn.disabled = true; btn.textContent = '淇濆瓨涓?..'; }
       const res = await aiApi('/runtime-config/live-decision', {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -261,9 +261,9 @@
       renderLiveDecisionRuntimeConfig();
       notify('AI实盘决策配置已更新');
     } catch (err) {
-      notify(`AI实盘决策配置保存失败: ${err.message}`, true);
+      notify(`AI瀹炵洏鍐崇瓥閰嶇疆淇濆瓨澶辫触: ${err.message}`, true);
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = '保存AI决策配置'; }
+      if (btn) { btn.disabled = false; btn.textContent = '淇濆瓨AI鍐崇瓥閰嶇疆'; }
     }
   }
 
@@ -304,32 +304,40 @@
     return [];
   }
 
-  /* 晋级建议文本（人性化） */
+  /* 晋级建议文本 */
   function promotionText(d) {
-    return { paper:'先以纸盘模拟（低风险试跑）',
-             shadow:'影子模式追踪，观察真实行情',
-             live_candidate:'条件成熟，可申请实盘候选',
-             reject:'暂不建议注册，需进一步优化', }[String(d || '')] || (d ? String(d) : '待定');
+    return {
+      paper: '先以纸盘模拟（低风险试跑）',
+      shadow: '影子模式追踪，观察真实行情',
+      live_candidate: '条件成熟，可申请实盘候选',
+      reject: '暂不建议注册，需进一步优化',
+    }[String(d || '')] || (d ? String(d) : '待定');
   }
 
   /* 市场状态中文 */
   function regimeText(r) {
-    return { mixed:'混合行情', trend_up:'上涨趋势', trend_down:'下跌趋势',
-             mean_reversion:'震荡回归', breakout:'突破行情',
-             stat_arb:'统计套利', news_event:'新闻事件' }[String(r || '')] || String(r || '--');
+    return {
+      mixed: '混合行情',
+      trend_up: '上涨趋势',
+      trend_down: '下跌趋势',
+      mean_reversion: '震荡回归',
+      breakout: '突破行情',
+      stat_arb: '统计套利',
+      news_event: '新闻事件',
+    }[String(r || '')] || String(r || '--');
   }
 
-  /* 分数对应颜色等级 */
+  /* 鍒嗘暟瀵瑰簲棰滆壊绛夌骇 */
   function scoreColor(score) {
     const n = Number(score || 0);
     return n >= 70 ? 'green' : n >= 50 ? 'yellow' : 'red';
   }
 
   function scoreEmoji(score) {
-    return Number(score || 0) >= 70 ? '🟢' : Number(score || 0) >= 50 ? '🟡' : '🔴';
+    return Number(score || 0) >= 70 ? '●' : Number(score || 0) >= 50 ? '◐' : '○';
   }
 
-  /* ── API 请求 ── */
+  /* 鈹€鈹€ API 璇锋眰 鈹€鈹€ */
   function getStrategyFamily(strategy) {
     return STRATEGY_FAMILIES[String(strategy || '').trim()] || 'traditional';
   }
@@ -480,22 +488,22 @@
   function getFamilyMeta(strategy) {
     const family = getStrategyFamily(strategy);
     if (family === 'ml') {
-      return { label: 'ML驱动', color: '#ff6b35', accent: 'rgba(255,107,53,.16)' };
+      return { label: 'ML椹卞姩', color: '#ff6b35', accent: 'rgba(255,107,53,.16)' };
     }
     if (family === 'ai_glm') {
-      return { label: 'GLM/AI驱动', color: '#38bdf8', accent: 'rgba(56,189,248,.16)' };
+      return { label: 'GLM/AI椹卞姩', color: '#38bdf8', accent: 'rgba(56,189,248,.16)' };
     }
-    return { label: '传统规则', color: '#64748b', accent: 'rgba(100,116,139,.16)' };
+    return { label: '浼犵粺瑙勫垯', color: '#64748b', accent: 'rgba(100,116,139,.16)' };
   }
 
   function getCandidateEnrichment(cand) {
     const meta = cand?.metadata || {};
     const newsCount = Number(meta.news_events_count ?? meta.best?.news_events_count ?? 0);
     const fundingAvailable = !!(meta.funding_available ?? meta.best?.funding_available);
-    let mode = '仅 OHLCV';
-    if (newsCount > 0 && fundingAvailable) mode = 'OHLCV + 新闻 + 宏观';
-    else if (newsCount > 0) mode = 'OHLCV + 新闻';
-    else if (fundingAvailable) mode = 'OHLCV + 宏观';
+    let mode = '浠?OHLCV';
+    if (newsCount > 0 && fundingAvailable) mode = 'OHLCV + 鏂伴椈 + 瀹忚';
+    else if (newsCount > 0) mode = 'OHLCV + 鏂伴椈';
+    else if (fundingAvailable) mode = 'OHLCV + 瀹忚';
     return {
       newsCount: Number.isFinite(newsCount) ? Math.max(0, Math.round(newsCount)) : 0,
       fundingAvailable,
@@ -544,10 +552,10 @@
       });
       const ct = String(resp.headers.get('content-type') || '').toLowerCase();
       const data = ct.includes('application/json') ? await resp.json() : { detail: await resp.text() };
-      if (!resp.ok) throw new Error(data.detail || data.error || `请求失败(${resp.status})`);
+      if (!resp.ok) throw new Error(data.detail || data.error || `璇锋眰澶辫触(${resp.status})`);
       return data;
     } catch (err) {
-      if (err?.name === 'AbortError') throw new Error(`接口超时(${timeoutMs}ms): ${p}`);
+      if (err?.name === 'AbortError') throw new Error(`鎺ュ彛瓒呮椂(${timeoutMs}ms): ${p}`);
       throw err;
     } finally {
       clearTimeout(timer);
@@ -567,31 +575,31 @@
       });
       const ct = String(resp.headers.get('content-type') || '').toLowerCase();
       const data = ct.includes('application/json') ? await resp.json() : { detail: await resp.text() };
-      if (!resp.ok) throw new Error(data.detail || data.error || `请求失败(${resp.status})`);
+      if (!resp.ok) throw new Error(data.detail || data.error || `璇锋眰澶辫触(${resp.status})`);
       return data;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  /* ══════════════════════════════════════════════════════════════
-     信号迷你面板
-  ══════════════════════════════════════════════════════════════ */
+  /* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+     淇″彿杩蜂綘闈㈡澘
+  鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲 */
   function renderSignalMini() {
     const box = document.getElementById('ai-signal-mini');
     if (!box) return;
     const entries = Object.entries(state.latestSignals);
     if (!entries.length) {
-      box.innerHTML = '<div style="color:#6b7fa0;font-size:12px;">暂无数据</div>';
+      box.innerHTML = '<div style="color:#6b7fa0;font-size:12px;">鏆傛棤鏁版嵁</div>';
       return;
     }
     box.innerHTML = normalizeUiText(entries.map(([sym, data]) => {
       const dir   = String(data?.direction || 'FLAT').toUpperCase();
       const conf  = Math.min(100, Math.round(Number(data?.confidence || 0) * 100));
-      const label = { LONG:'看多', SHORT:'看空', FLAT:'持平' }[dir] || dir;
+      const label = { LONG:'鐪嬪', SHORT:'鐪嬬┖', FLAT:'鎸佸钩' }[dir] || dir;
       const blocked = data?.blocked_by_risk;
-      const badge  = blocked ? '<span style="color:#e05260;font-size:10px;">风控</span>'
-                             : (data?.requires_approval ? '<span style="color:#f0b429;font-size:10px;">审批</span>' : '');
+      const badge  = blocked ? '<span style="color:#e05260;font-size:10px;">椋庢帶</span>'
+                             : (data?.requires_approval ? '<span style="color:#f0b429;font-size:10px;">瀹℃壒</span>' : '');
       return `<div class="ai-signal-mini-row">
         <span class="signal-mini-sym">${esc(sym.split('/')[0])}</span>
         <span class="signal-mini-dir ${dir}">${label}${badge}</span>
@@ -606,24 +614,24 @@
     if (state.signalLoading) return;
     state.signalLoading = true;
     const statusEl = document.getElementById('signal-status');
-    if (statusEl) statusEl.textContent = '刷新中...';
+    if (statusEl) statusEl.textContent = '鍒锋柊涓?..';
     try {
       const sym = symbol || String(document.getElementById('signal-symbol')?.value || 'BTC/USDT');
       const data = await aiApi(`/signals/latest?symbol=${encodeURIComponent(sym)}`, { timeoutMs: 15000 });
       state.latestSignals[sym] = data;
       renderSignalMini();
-      renderCandidateCards();  // 更新卡片上的信号徽章
-      if (statusEl) statusEl.textContent = `刷新于 ${fmtTs(data?.timestamp || new Date().toISOString())}`;
+      renderCandidateCards();  // 鏇存柊鍗＄墖涓婄殑淇″彿寰界珷
+      if (statusEl) statusEl.textContent = `鍒锋柊浜?${fmtTs(data?.timestamp || new Date().toISOString())}`;
     } catch (err) {
-      if (statusEl) statusEl.textContent = `信号失败: ${err.message}`;
+      if (statusEl) statusEl.textContent = `淇″彿澶辫触: ${err.message}`;
     } finally {
       state.signalLoading = false;
     }
   }
 
-  /* ══════════════════════════════════════════════════════════════
-     候选策略卡片
-  ══════════════════════════════════════════════════════════════ */
+  /* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+     鍊欓€夌瓥鐣ュ崱鐗?
+  鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲 */
   function proposalDisplayName(item, index) {
     const metaName = String(item?.metadata?.display_name || '').trim();
     if (metaName) return metaName;
@@ -633,16 +641,16 @@
     return `${mark} ${head || String(item?.proposal_id || '').slice(-6)}`.trim();
   }
 
-  /* ══════════════════════════════════════════════════════════════
-     候选策略卡片
-  ══════════════════════════════════════════════════════════════ */
+  /* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+     鍊欓€夌瓥鐣ュ崱鐗?
+  鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲 */
   function renderProposalList() {
     const box = document.getElementById('ai-proposal-list');
     const badge = document.getElementById('ai-queue-badge');
     if (!box) return;
     if (badge) badge.textContent = state.proposals.length ? `${state.proposals.length} 项` : '';
     if (!state.proposals.length) {
-      box.innerHTML = '<div style="color:#6b7fa0;font-size:12px;padding:8px 0;">暂无研究任务</div>';
+      box.innerHTML = '<div style="color:#6b7fa0;font-size:12px;padding:8px 0;">鏆傛棤鐮旂┒浠诲姟</div>';
       normalizeDomText(box);
       return;
     }
@@ -676,12 +684,12 @@
         </div>
         <div class="pci-actions">
           ${running
-            ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#f0b429;" data-action="cancel-proposal" data-proposal-id="${esc(pid)}" title="取消运行">停</button>`
+            ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#f0b429;" data-action="cancel-proposal" data-proposal-id="${esc(pid)}" title="鍙栨秷杩愯">鍋?/button>`
             : (runnable
-              ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;" data-action="run-proposal" data-proposal-id="${esc(pid)}" title="运行研究">跑</button>`
-              : '<span style="font-size:10px;color:#7e92b2;">不可运行</span>')}
-          ${retirable ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#f59e0b;" data-action="retire-proposal" data-proposal-id="${esc(pid)}" title="退役">退</button>` : ''}
-          <button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#e05260;" data-action="delete-proposal" data-proposal-id="${esc(pid)}" title="删除">删</button>
+              ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;" data-action="run-proposal" data-proposal-id="${esc(pid)}" title="杩愯鐮旂┒">璺?/button>`
+              : '<span style="font-size:10px;color:#7e92b2;">涓嶅彲杩愯</span>')}
+          ${retirable ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#f59e0b;" data-action="retire-proposal" data-proposal-id="${esc(pid)}" title="閫€褰?>閫€</button>` : ''}
+          <button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#e05260;" data-action="delete-proposal" data-proposal-id="${esc(pid)}" title="鍒犻櫎">鍒?/button>
         </div>
       </div>`;
     }).join('');
@@ -723,8 +731,8 @@
       refreshCompareToolbar();
       if (cnt) cnt.textContent = totalCount ? `0/${totalCount}` : '';
       box.innerHTML = state.candidates.length
-        ? `<div class="ai-empty-hint">当前类别筛选无结果，请调整筛选条件</div>`
-        : `<div class="ai-empty-hint">暂无候选策略。<br>在左侧填写研究目标，点击 <strong>生成研究</strong>，<br>再选中研究任务并点击 <strong>▶ 运行研究</strong> 开始回测。</div>`;
+        ? `<div class="ai-empty-hint">褰撳墠绫诲埆绛涢€夋棤缁撴灉锛岃璋冩暣绛涢€夋潯浠?/div>`
+        : `<div class="ai-empty-hint">鏆傛棤鍊欓€夌瓥鐣ャ€?br>鍦ㄥ乏渚у～鍐欑爺绌剁洰鏍囷紝鐐瑰嚮 <strong>鐢熸垚鐮旂┒</strong>锛?br>鍐嶉€変腑鐮旂┒浠诲姟骞剁偣鍑?<strong>鈻?杩愯鐮旂┒</strong> 寮€濮嬪洖娴嬨€?/div>`;
       return;
     }
     box.innerHTML = visible.map(c => buildCandidateCard(c)).join('');
@@ -734,9 +742,9 @@
     if (cnt) cnt.textContent = `${visible.length}/${totalCount}`;
   }
 
-  /* ══════════════════════════════════════════════════════════════
-     右侧详情面板
-  ══════════════════════════════════════════════════════════════ */
+  /* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+     鍙充晶璇︽儏闈㈡澘
+  鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲 */
   function scoreBar(label, value, max = 100) {
     const n   = Number(value || 0);
     const pct = Math.min(100, (n / max) * 100).toFixed(0);
@@ -788,7 +796,7 @@
     </svg>`;
   }
 
-  function renderLifecycleRows(rows, emptyText = '暂无生命周期记录') {
+  function renderLifecycleRows(rows, emptyText = '鏆傛棤鐢熷懡鍛ㄦ湡璁板綍') {
     const items = toArray(rows).slice(0, 8);
     if (!items.length) {
       return `<div style="font-size:12px;color:#6b7fa0;">${esc(emptyText)}</div>`;
@@ -797,16 +805,16 @@
       ${items.map(item => `
         <div style="font-size:12px;color:#b7c7e2;padding:6px 8px;background:#141f2f;border-radius:6px;">
           <div style="display:flex;justify-content:space-between;gap:8px;">
-            <span>${esc(String(item?.from_state || 'new'))} → ${esc(String(item?.to_state || '--'))}</span>
+            <span>${esc(String(item?.from_state || 'new'))} 鈫?${esc(String(item?.to_state || '--'))}</span>
             <span style="color:#7e92b2;">${esc(fmtTs(item?.ts))}</span>
           </div>
-          <div style="color:#7e92b2;margin-top:2px;">${esc(String(item?.actor || 'system'))} · ${esc(String(item?.reason || ''))}</div>
+          <div style="color:#7e92b2;margin-top:2px;">${esc(String(item?.actor || 'system'))} 路 ${esc(String(item?.reason || ''))}</div>
         </div>
       `).join('')}
     </div>`;
   }
 
-  function renderRunRows(rows, emptyText = '暂无实验运行记录') {
+  function renderRunRows(rows, emptyText = '鏆傛棤瀹為獙杩愯璁板綍') {
     const items = toArray(rows).slice(0, 6);
     if (!items.length) {
       return `<div style="font-size:12px;color:#6b7fa0;">${esc(emptyText)}</div>`;
@@ -818,18 +826,18 @@
             <span>${esc(String(item?.status || '--'))}</span>
             <span style="color:#7e92b2;">${esc(fmtTs(item?.finished_at || item?.started_at || item?.created_at))}</span>
           </div>
-          <div style="color:#7e92b2;margin-top:2px;">运行 ID：${esc(String(item?.run_id || '--'))}</div>
+          <div style="color:#7e92b2;margin-top:2px;">?? ID?${esc(String(item?.run_id || '--'))}</div>
         </div>
       `).join('')}
     </div>`;
   }
 
   const LIFECYCLE_STEPS = [
-    { key: 'draft',          label: '研究中' },
-    { key: 'validated',      label: '已验证' },
-    { key: 'paper_running',  label: '纸盘' },
-    { key: 'live_candidate', label: '候选' },
-    { key: 'live_running',   label: '实盘' },
+    { key: 'draft',          label: '???' },
+    { key: 'validated',      label: '???' },
+    { key: 'paper_running',  label: '绾哥洏' },
+    { key: 'live_candidate', label: '??' },
+    { key: 'live_running',   label: '瀹炵洏' },
   ];
 
   // Maps every possible status string to its step index in LIFECYCLE_STEPS
@@ -852,12 +860,12 @@
         if (retired || rejected) cls = 'lc-step lc-inactive';
         else if (idx < activeIndex)  cls = 'lc-step lc-done';
         else if (idx === activeIndex) cls = 'lc-step lc-active';
-        const doneMark = (!retired && !rejected && idx < activeIndex) ? '✓ ' : '';
+        const doneMark = (!retired && !rejected && idx < activeIndex) ? '鉁?' : '';
         const connector = idx < LIFECYCLE_STEPS.length - 1 ? '<div class="lc-connector"></div>' : '';
         return `<div class="${cls}">${doneMark}${esc(step.label)}</div>${connector}`;
       }).join('')}
-      ${retired  ? '<div class="lc-step lc-rejected">已退役</div>' : ''}
-      ${rejected ? '<div class="lc-step lc-rejected">已拒绝</div>' : ''}
+      ${retired  ? '<div class="lc-step lc-rejected">宸查€€褰?/div>' : ''}
+      ${rejected ? '<div class="lc-step lc-rejected">宸叉嫆缁?/div>' : ''}
     </div>`;
   }
 
@@ -884,7 +892,7 @@
       { label: 'Risk', cls: riskState },
     ];
     return `<div class="vp-bar">${steps.map((step, idx) => {
-      const connector = idx < steps.length - 1 ? '<span class="vp-arrow">→</span>' : '';
+      const connector = idx < steps.length - 1 ? '<span class="vp-arrow">鈫?/span>' : '';
       return `<span class="vp-dot ${step.cls}">${esc(step.label)}</span>${connector}`;
     }).join('')}</div>`;
   }
@@ -980,9 +988,9 @@
     const corrWith = cand?.metadata?.correlated_with || '';
     const corrVal = cand?.metadata?.correlation_value;
     const corrIsCross = cand?.metadata?.correlation_is_cross_batch;
-    const corrLabel = corrIsCross ? '跨批相关' : '相关';
+    const corrLabel = corrIsCross ? '璺ㄦ壒鐩稿叧' : '鐩稿叧';
     const corrBadge = corrFiltered
-      ? `<span class="cand-badge" style="background:#7a3a2a;color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;" title="与 ${esc(corrWith)} 相关 ρ=${corrVal}">${corrLabel}</span>`
+      ? `<span class="cand-badge" style="background:#7a3a2a;color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;" title="涓?${esc(corrWith)} 鐩稿叧 蟻=${corrVal}">${corrLabel}</span>`
       : '';
     const trials = cand?.metadata?.best?.optimization_trials;
     const paramsBadge = trials > 0
@@ -993,7 +1001,7 @@
     if (sigData && String(sigData.direction || '') !== 'FLAT') {
       const dir = String(sigData.direction).toUpperCase();
       const conf = Math.round(Number(sigData.confidence || 0) * 100);
-      const dirLabel = { LONG: '看多', SHORT: '看空' }[dir] || dir;
+      const dirLabel = { LONG: '鐪嬪', SHORT: '鐪嬬┖' }[dir] || dir;
       signalBadge = `<span class="cand-signal-badge">${esc(sym.split('/')[0])} ${dirLabel} ${conf}%</span><br>`;
     }
     const canRegister = canRegisterCandidate(cand);
@@ -1008,12 +1016,12 @@
     const familyBadge = `<span class="cand-category-badge" style="background:${familyMeta.accent};color:${familyMeta.color};border:1px solid ${familyMeta.color}44;">${esc(familyMeta.label)}</span>`;
     const hiddenDuplicates = Number(cand?.metadata?.hidden_duplicates_count || 0);
     const enrichmentBadges = [
-      `<span class="cand-category-badge" style="background:#1d2b3d;color:#9fb1c9;border:1px solid #32475f;">新闻 ${enrichment.newsCount}</span>`,
+      `<span class="cand-category-badge" style="background:#1d2b3d;color:#9fb1c9;border:1px solid #32475f;">鏂伴椈 ${enrichment.newsCount}</span>`,
       enrichment.fundingAvailable
-        ? '<span class="cand-category-badge" style="background:#143224;color:#20bf78;border:1px solid #245b42;">宏观 已启用</span>'
-        : '<span class="cand-category-badge" style="background:#2a2330;color:#9a8bb3;border:1px solid #4d4259;">宏观 未启用</span>',
+        ? '<span class="cand-category-badge" style="background:#143224;color:#20bf78;border:1px solid #245b42;">瀹忚 宸插惎鐢?/span>'
+        : '<span class="cand-category-badge" style="background:#2a2330;color:#9a8bb3;border:1px solid #4d4259;">瀹忚 鏈惎鐢?/span>',
       hiddenDuplicates > 0
-        ? `<span class="cand-category-badge" style="background:#3d2b14;color:#f0b429;border:1px solid #6f5321;">去重隐藏 ${hiddenDuplicates}</span>`
+        ? `<span class="cand-category-badge" style="background:#3d2b14;color:#f0b429;border:1px solid #6f5321;">鍘婚噸闅愯棌 ${hiddenDuplicates}</span>`
         : '',
     ].filter(Boolean).join('');
     const aiCardStyle = getStrategyFamily(strat) === 'traditional'
@@ -1026,9 +1034,9 @@
         <div class="cand-card-title">${emoji} ${esc(strat)}</div>
         <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">
           ${familyBadge}${catBadge}<div class="cand-score-badge ${color}">${score.toFixed(0)}</div>
-          <label class="cand-compare-toggle" title="加入对比" data-action="toggle-compare" data-candidate-id="${esc(cid)}">
+          <label class="cand-compare-toggle" title="鍔犲叆瀵规瘮" data-action="toggle-compare" data-candidate-id="${esc(cid)}">
             <input type="checkbox" data-action="toggle-compare" data-candidate-id="${esc(cid)}" ${compareChecked} />
-            <span>对比</span>
+            <span>瀵规瘮</span>
           </label>
         </div>
       </div>
@@ -1039,20 +1047,20 @@
         <div class="cand-score-bar-fill ${color}" style="width:${Math.min(100, score).toFixed(0)}%;"></div>
       </div>
       <div class="cand-metrics">
-        <div class="cand-metric-item">收益 ${retStr}</div>
-        <div class="cand-metric-item">回撤 ${ddStr}</div>
-        <div class="cand-metric-item">胜率 ${wrStr}</div>
-        <div class="cand-metric-item">夏普 ${srStr}</div>
+        <div class="cand-metric-item">鏀剁泭 ${retStr}</div>
+        <div class="cand-metric-item">鍥炴挙 ${ddStr}</div>
+        <div class="cand-metric-item">鑳滅巼 ${wrStr}</div>
+        <div class="cand-metric-item">澶忔櫘 ${srStr}</div>
       </div>
       <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">${enrichmentBadges}</div>
-      <div style="font-size:11px;color:#7e92b2;margin-top:4px;">回放模式：${esc(enrichment.mode)}</div>
+      <div style="font-size:11px;color:#7e92b2;margin-top:4px;">鍥炴斁妯″紡锛${esc(enrichment.mode)}</div>
       ${oosBadge || wfBadge || paramsBadge || dsrBadge || optBadge || corrBadge ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">${oosBadge}${wfBadge}${paramsBadge}${dsrBadge}${optBadge}${corrBadge}</div>` : ''}
       ${signalBadge}
       ${_renderValidationPipeline(vs)}
-      <div class="cand-recommendation">AI建议：${esc(promotionText(decision))}</div>
+      <div class="cand-recommendation">AI寤鸿锛${esc(promotionText(decision))}</div>
       <div class="cand-card-actions">
-        <button class="btn btn-sm" data-action="view-candidate" data-candidate-id="${esc(cid)}" style="font-size:12px;">详情</button>
-        ${canRegister ? `<button class="btn-register-cta" data-action="open-register" data-candidate-id="${esc(cid)}">一键注册策略</button>` : ''}
+        <button class="btn btn-sm" data-action="view-candidate" data-candidate-id="${esc(cid)}" style="font-size:12px;">璇︽儏</button>
+        ${canRegister ? `<button class="btn-register-cta" data-action="open-register" data-candidate-id="${esc(cid)}">涓€閿敞鍐岀瓥鐣?/button>` : ''}
       </div>
     </div>`;
   }
@@ -1060,11 +1068,11 @@
   async function viewCandidate(candidateId) {
     if (!candidateId) return;
     const panel = document.getElementById('ai-detail-panel');
-    if (panel) panel.innerHTML = '<div style="padding:20px;color:#7e92b2;font-size:13px;">加载中...</div>';
+    if (panel) panel.innerHTML = '<div style="padding:20px;color:#7e92b2;font-size:13px;">鍔犺浇涓?..</div>';
     const resp  = await aiApi(`/candidates/${encodeURIComponent(candidateId)}`, { timeoutMs: 20000 });
     const cand  = resp?.candidate || {};
     state.selectedCandidateId = candidateId;
-    renderCandidateCards();   // 更新选中高亮
+    renderCandidateCards();   // 鏇存柊閫変腑楂樹寒
 
     if (!panel) return;
     const vs       = cand?.validation_summary || {};
@@ -1109,11 +1117,11 @@
     const bestParamsKeys = Object.keys(bestParams);
     const bestParamsHtml = bestParamsKeys.length
       ? `<div style="margin-bottom:14px;">
-          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">最优参数 (Best Params)</div>
+          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">鏈€浼樺弬鏁?(Best Params)</div>
           <div style="font-size:12px;color:#c2d0e8;background:#1a2436;border-radius:4px;padding:8px;font-family:monospace;">
             ${bestParamsKeys.map(k => `<span style="color:#a78bfa">${esc(k)}</span>=<span style="color:#20bf78">${esc(String(bestParams[k]))}</span>`).join('  ')}
           </div>
-          ${(cand?.metadata?.best?.optimization_trials > 0) ? `<div style="font-size:11px;color:#6b7fa0;margin-top:3px;">共试验 ${cand.metadata.best.optimization_trials} 组参数组合</div>` : ''}
+          ${(cand?.metadata?.best?.optimization_trials > 0) ? `<div style="font-size:11px;color:#6b7fa0;margin-top:3px;">鍏辫瘯楠?${cand.metadata.best.optimization_trials} 缁勫弬鏁扮粍鍚?/div>` : ''}
         </div>`
       : '';
 
@@ -1127,32 +1135,32 @@
     const wfConsist = vs?.wf_consistency != null ? `${(Number(vs.wf_consistency)*100).toFixed(0)}% folds+` : '--';
     const validationHtml = `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">IS / OOS / 滚动验证</div>
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">IS / OOS / 婊氬姩楠岃瘉</div>
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;">
           <div style="text-align:center;padding:6px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">IS夏普</div>
+            <div style="font-size:10px;color:#6b7fa0;">IS澶忔櫘</div>
             <div style="font-size:14px;font-weight:700;color:#c2d0e8;">${isScore}</div>
           </div>
           <div style="text-align:center;padding:6px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">OOS夏普</div>
+            <div style="font-size:10px;color:#6b7fa0;">OOS澶忔櫘</div>
             <div style="font-size:14px;font-weight:700;color:${oosClr};">${oosScore}</div>
           </div>
           <div style="text-align:center;padding:6px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">WF稳定性</div>
+            <div style="font-size:10px;color:#6b7fa0;">WF绋冲畾鎬?/div>
             <div style="font-size:14px;font-weight:700;color:#c2d0e8;">${wfStab}</div>
           </div>
           <div style="text-align:center;padding:6px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">鲁棒性分</div>
+            <div style="font-size:10px;color:#6b7fa0;">椴佹鎬у垎</div>
             <div style="font-size:14px;font-weight:700;color:#c2d0e8;">${robustness}</div>
           </div>
         </div>
         <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-top:6px;">
           <div style="text-align:center;padding:6px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">DSR 分数</div>
+            <div style="font-size:10px;color:#6b7fa0;">DSR 鍒嗘暟</div>
             <div style="font-size:14px;font-weight:700;color:#c2d0e8;">${dsrVal}</div>
           </div>
           <div style="text-align:center;padding:6px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">WF 一致性</div>
+            <div style="font-size:10px;color:#6b7fa0;">WF 涓€鑷存€?/div>
             <div style="font-size:14px;font-weight:700;color:#c2d0e8;">${wfConsist}</div>
           </div>
         </div>
@@ -1161,64 +1169,64 @@
     const equityCurve = normalizeNumberSeries(cand?.metadata?.best?.equity_curve_sample || []);
     const equityCurveHtml = `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">资金曲线样本</div>
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">璧勯噾鏇茬嚎鏍锋湰</div>
         ${equityCurve.length >= 2
           ? renderSparklineSvg(equityCurve)
-          : '<div style="font-size:12px;color:#6b7fa0;">暂无资金曲线样本。</div>'}
+          : '<div style="font-size:12px;color:#6b7fa0;">鏆傛棤璧勯噾鏇茬嚎鏍锋湰銆?/div>'}
       </div>`;
 
     const artifactsHtml = `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">研究产物</div>
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">鐮旂┒浜х墿</div>
         <div style="font-size:12px;color:#b7c7e2;background:#141f2f;border-radius:6px;padding:8px;">
-          <div>CSV 文件：${esc(String(cand?.metadata?.csv_path || '--'))}</div>
-          <div style="margin-top:4px;">Markdown 报告：${esc(String(cand?.metadata?.markdown_path || '--'))}</div>
+          <div>CSV 鏂囦欢锛${esc(String(cand?.metadata?.csv_path || '--'))}</div>
+          <div style="margin-top:4px;">Markdown 鎶ュ憡锛${esc(String(cand?.metadata?.markdown_path || '--'))}</div>
         </div>
       </div>`;
 
     const enrichmentHtml = `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">研究增强</div>
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">鐮旂┒澧炲己</div>
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;">
           <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">决策引擎</div>
+            <div style="font-size:10px;color:#6b7fa0;">鍐崇瓥寮曟搸</div>
             <div style="font-size:13px;font-weight:700;color:${familyMeta.color};">${esc(familyMeta.label)}</div>
           </div>
           <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">新闻事件</div>
+            <div style="font-size:10px;color:#6b7fa0;">????</div>
             <div style="font-size:13px;font-weight:700;color:#c2d0e8;">${enrichment.newsCount}</div>
           </div>
           <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">宏观层</div>
-            <div style="font-size:13px;font-weight:700;color:${enrichment.fundingAvailable ? '#20bf78' : '#9a8bb3'};">${enrichment.fundingAvailable ? '已启用' : '未启用'}</div>
+            <div style="font-size:10px;color:#6b7fa0;">???</div>
+            <div style="font-size:13px;font-weight:700;color:${enrichment.fundingAvailable ? "#20bf78" : "#9a8bb3"};">${enrichment.fundingAvailable ? "???" : "???"}</div>
           </div>
         </div>
-        <div style="font-size:11px;color:#7e92b2;margin-top:6px;">回放模式：${esc(enrichment.mode)}</div>
+        <div style="font-size:11px;color:#7e92b2;margin-top:6px;">?????${esc(enrichment.mode)}</div>
       </div>`;
 
     const experimentHtml = `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">实验记录</div>
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">瀹為獙璁板綍</div>
         <div style="font-size:12px;color:#b7c7e2;background:#141f2f;border-radius:6px;padding:8px;margin-bottom:6px;">
-          <div>实验 ID：${esc(String(experimentId || '--'))}</div>
-          <div style="margin-top:4px;">状态：${esc(String(experimentInfo?.status || '--'))}</div>
+          <div>?? ID?${esc(String(experimentId || '--'))}</div>
+          <div style="margin-top:4px;">???${esc(String(experimentInfo?.status || '--'))}</div>
         </div>
         ${renderRunRows(experimentRuns)}
       </div>`;
 
     const lifecycleHtml = `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">候选生命周期</div>
-        ${renderLifecycleRows(candidateLifecycle, '暂无候选生命周期记录')}
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">??????</div>
+        ${renderLifecycleRows(candidateLifecycle, '??????????')}
       </div>
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">方案生命周期</div>
-        ${renderLifecycleRows(proposalLifecycle, '暂无方案生命周期记录')}
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">??????</div>
+        ${renderLifecycleRows(proposalLifecycle, '鏆傛棤鏂规鐢熷懡鍛ㄦ湡璁板綍')}
       </div>`;
     const paramSensitivityHtml = `
       <details id="ai-param-sensitivity-details" class="ai-param-sensitivity-details">
-        <summary>参数敏感性分析</summary>
-        <div id="ai-param-sensitivity" class="ai-param-sensitivity-panel">展开后加载参数扰动结果...</div>
+        <summary>???????</summary>
+        <div id="ai-param-sensitivity" class="ai-param-sensitivity-panel">???????????...</div>
       </details>`;
 
     panel.innerHTML = `
@@ -1226,22 +1234,22 @@
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
           <span style="font-size:15px;font-weight:700;color:#c2d0e8;">${esc(cand?.strategy || '--')}</span>
           <span class="cand-category-badge" style="background:${familyMeta.accent};color:${familyMeta.color};border:1px solid ${familyMeta.color}44;">${esc(familyMeta.label)}</span>
-          <span class="cand-score-badge ${color}" style="font-size:13px;">${score.toFixed(0)} 分</span>
+          <span class="cand-score-badge ${color}" style="font-size:13px;">${score.toFixed(0)} ?</span>
         </div>
         <div style="font-size:12px;color:#7e92b2;">
-          ${esc(cand?.symbol || '--')} · ${esc(cand?.timeframe || '--')} · ${esc(statusText(cand?.status))}
+          ${esc(cand?.symbol || '--')} 路 ${esc(cand?.timeframe || '--')} 路 ${esc(statusText(cand?.status))}
         </div>
         ${renderLifecycleStepper(cand?.status)}
       </div>
 
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px;">评分分解</div>
-        ${scoreBar('边际优势', vs?.edge_score)}
-        ${scoreBar('风险控制', vs?.risk_score)}
-        ${scoreBar('信号稳定', vs?.stability_score)}
-        ${scoreBar('执行效率', vs?.efficiency_score)}
-        ${scoreBar('综合部署', vs?.deployment_score)}
-        ${vs?.reasons?.length ? `<div style="font-size:11px;color:#6b7fa0;margin-top:6px;">说明：${esc(joinText(vs.reasons))}</div>` : ''}
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px;">????</div>
+        ${scoreBar('杈归檯浼樺娍', vs?.edge_score)}
+        ${scoreBar('椋庨櫓鎺у埗', vs?.risk_score)}
+        ${scoreBar('淇″彿绋冲畾', vs?.stability_score)}
+        ${scoreBar('鎵ц鏁堢巼', vs?.efficiency_score)}
+        ${scoreBar('缁煎悎閮ㄧ讲', vs?.deployment_score)}
+        ${vs?.reasons?.length ? `<div style="font-size:11px;color:#6b7fa0;margin-top:6px;">???${esc(joinText(vs.reasons))}</div>` : ''}
       </div>
 
       ${validationHtml}
@@ -1254,13 +1262,13 @@
       ${paramSensitivityHtml}
       ${cand?.metadata?.correlation_filtered ? `
       <div style="margin-bottom:12px;padding:8px 10px;background:#3a1a0a;border:1px solid #8b4513;border-radius:6px;font-size:12px;color:#e09060;">
-        ⚠ 该候选与 <strong>${esc(cand.metadata.correlated_with || '')}</strong> ${cand.metadata.correlation_is_cross_batch ? '（已运行策略）' : ''}高度相关
-        (ρ = ${(cand.metadata.correlation_value || 0).toFixed(2)})，已被相关性过滤器标记为冗余策略。
+        ? ???? <strong>${esc(cand.metadata.correlated_with || '')}</strong> ${cand.metadata.correlation_is_cross_batch ? '???????' : ''}????
+        (? = ${(cand.metadata.correlation_value || 0).toFixed(2)})?????????????????
       </div>` : ''}
 
       ${cand?.metadata?.llm_rationale ? `
       <div style="margin-bottom:14px;padding:10px 12px;background:#0f1e2e;border:1px solid #1e3a5a;border-radius:6px;">
-        <div style="font-size:10px;color:#5b8fc4;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">🤖 AI 分析</div>
+        <div style="font-size:10px;color:#5b8fc4;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">?? AI ??</div>
         <div style="font-size:12px;color:#b0c4de;line-height:1.6;">${esc(cand.metadata.llm_rationale)}</div>
       </div>` : ''}
 
@@ -1272,16 +1280,16 @@
         const checkedAt = cs?.checked_at ? new Date(cs.checked_at).toLocaleString() : '';
         const statusHtml = cs
           ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-              <span style="font-size:12px;font-weight:700;color:${triggered ? '#e05260' : '#20bf78'};">${triggered ? '⚠ 已触发衰减' : '✓ 运行正常'}</span>
-              <span style="font-size:11px;color:#6b7fa0;">${nBars} 笔交易</span>
+              <span style="font-size:12px;font-weight:700;color:${triggered ? '#e05260' : '#20bf78'};">${triggered ? '? ?????' : '? ????'}</span>
+              <span style="font-size:11px;color:#6b7fa0;">${nBars} ???</span>
             </div>
             <div style="font-size:11px;color:#7e92b2;">${esc(msg)}</div>
-            ${checkedAt ? `<div style="font-size:10px;color:#4a5f7a;margin-top:3px;">检测于 ${checkedAt}</div>` : ''}`
-          : `<div style="font-size:12px;color:#5b7a9a;">尚未检测。点击按钮对已注册策略执行 CUSUM 衰减分析。</div>`;
+            ${checkedAt ? `<div style="font-size:10px;color:#4a5f7a;margin-top:3px;">妫€娴嬩簬 ${checkedAt}</div>` : ''}`
+          : `<div style="font-size:12px;color:#5b7a9a;">????????????????? CUSUM ?????</div>`;
         return `<div style="margin-bottom:14px;">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-            <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;">策略衰减检测 (CUSUM)</div>
-            <button class="btn btn-sm" id="btn-decay-check" style="font-size:11px;padding:2px 8px;">检查衰减</button>
+            <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;">绛栫暐琛板噺妫€娴?(CUSUM)</div>
+            <button class="btn btn-sm" id="btn-decay-check" style="font-size:11px;padding:2px 8px;">妫€鏌ヨ“鍑?/button>
           </div>
           ${statusHtml}
         </div>`;
@@ -1289,18 +1297,18 @@
 
       <div style="margin-bottom:14px;">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;">实盘/纸盘性能历史</div>
-          <button class="btn btn-sm" id="btn-load-perf-history" style="font-size:11px;padding:2px 8px;" data-candidate-id="${esc(candidateId)}">加载</button>
+          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;">瀹炵洏/绾哥洏鎬ц兘鍘嗗彶</div>
+          <button class="btn btn-sm" id="btn-load-perf-history" style="font-size:11px;padding:2px 8px;" data-candidate-id="${esc(candidateId)}">鍔犺浇</button>
         </div>
-        <div id="perf-history-panel" style="font-size:12px;color:#6b7fa0;">点击加载查看策略运行性能快照</div>
+        <div id="perf-history-panel" style="font-size:12px;color:#6b7fa0;">鐐瑰嚮鍔犺浇鏌ョ湅绛栫暐杩愯鎬ц兘蹇収</div>
       </div>
 
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px;">Top 回测结果</div>
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px;">Top 鍥炴祴缁撴灉</div>
         <div style="overflow-x:auto;">
           <table class="data-table" style="font-size:12px;">
-            <thead><tr><th>#</th><th>策略</th><th>周期</th><th>年化</th><th>夏普</th><th>回撤</th></tr></thead>
-            <tbody>${topRows || '<tr><td colspan="6" style="color:#6b7fa0;">暂无数据</td></tr>'}</tbody>
+            <thead><tr><th>#</th><th>绛栫暐</th><th>鍛ㄦ湡</th><th>骞村寲</th><th>澶忔櫘</th><th>鍥炴挙</th></tr></thead>
+            <tbody>${topRows || '<tr><td colspan="6" style="color:#6b7fa0;">鏆傛棤鏁版嵁</td></tr>'}</tbody>
           </table>
         </div>
       </div>
@@ -1309,102 +1317,102 @@
         if (!cand?.metadata?.promotion_pending_human_gate) return '';
         const recTarget = esc(cand?.metadata?.recommended_runtime_target || decision || 'paper');
         return `<div style="margin-bottom:14px;padding:10px 12px;background:#1a0f00;border:2px solid #f59e0b;border-radius:6px;">
-          <div style="font-size:11px;color:#f59e0b;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">⏳ 待人工审批</div>
+          <div style="font-size:11px;color:#f59e0b;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">鈴?寰呬汉宸ュ鎵?/div>
           <div style="font-size:12px;color:#c2d0e8;margin-bottom:8px;">
-            AI推荐目标：<strong style="color:#f59e0b;">${recTarget}</strong>
+            AI鎺ㄨ崘鐩爣锛?strong style="color:#f59e0b;">${recTarget}</strong>
           </div>
           <div class="form-group" style="margin-bottom:8px;">
-            <label style="font-size:11px;color:#9fb1c9;">运行目标</label>
+            <label style="font-size:11px;color:#9fb1c9;">杩愯鐩爣</label>
             <select id="approval-target-select" style="width:100%;font-size:12px;">
-              <option value="paper" ${recTarget === 'paper' ? 'selected' : ''}>纸盘 (paper)</option>
-              <option value="live_candidate" ${recTarget === 'live_candidate' ? 'selected' : ''}>实盘候选 (live_candidate)</option>
+              <option value="paper" ${recTarget === 'paper' ? 'selected' : ''}>绾哥洏 (paper)</option>
+              <option value="live_candidate" ${recTarget === 'live_candidate' ? 'selected' : ''}>瀹炵洏鍊欓€?(live_candidate)</option>
             </select>
           </div>
           <div class="form-group" style="margin-bottom:8px;">
-            <label style="font-size:11px;color:#9fb1c9;">备注</label>
-            <input type="text" id="approval-notes-input" placeholder="审批备注（可选）" style="width:100%;font-size:12px;">
+            <label style="font-size:11px;color:#9fb1c9;">澶囨敞</label>
+            <input type="text" id="approval-notes-input" placeholder="瀹℃壒澶囨敞锛堝彲閫夛級" style="width:100%;font-size:12px;">
           </div>
           <div style="display:flex;gap:8px;">
-            <button id="btn-human-approve" class="btn" style="flex:1;font-size:12px;color:#20bf78;border-color:#20bf78;">✓ 批准</button>
-            <button id="btn-human-reject" class="btn" style="flex:1;font-size:12px;color:#e05260;border-color:#e05260;">✗ 拒绝</button>
+            <button id="btn-human-approve" class="btn" style="flex:1;font-size:12px;color:#20bf78;border-color:#20bf78;">鉁?鎵瑰噯</button>
+            <button id="btn-human-reject" class="btn" style="flex:1;font-size:12px;color:#e05260;border-color:#e05260;">鉁?鎷掔粷</button>
           </div>
         </div>`;
       })()}
 
       <div style="margin-bottom:16px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">AI 推荐</div>
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">AI 鎺ㄨ崘</div>
         <div style="font-size:13px;color:#c2d0e8;margin-bottom:3px;">${esc(promotionText(decision))}</div>
         ${promo?.reason ? `<div style="font-size:12px;color:#7e92b2;">${esc(promo.reason)}</div>` : ''}
       </div>
 
       ${showRegisterButton
-        ? `<button class=”btn-register-cta full” data-action=”open-register” data-candidate-id=”${esc(candidateId)}”>
-            一键注册策略 →
+        ? `<button class=鈥漛tn-register-cta full鈥?data-action=鈥漮pen-register鈥?data-candidate-id=鈥${esc(candidateId)}鈥?
+            涓€閿敞鍐岀瓥鐣?鈫?
           </button>`
         : (governanceGateHint
-          ? `<div style=”font-size:12px;color:#f0b429;background:#2b1f06;border:1px solid #5c4310;border-radius:6px;padding:8px 10px;”>
-              治理模式已开启：请使用上方”待人工审批”进行批准/拒绝。
+          ? `<div style=鈥漟ont-size:12px;color:#f0b429;background:#2b1f06;border:1px solid #5c4310;border-radius:6px;padding:8px 10px;鈥?
+              娌荤悊妯″紡宸插紑鍚細璇蜂娇鐢ㄤ笂鏂光€濆緟浜哄伐瀹℃壒鈥濊繘琛屾壒鍑?鎷掔粷銆?
             </div>`
           : '')}
 
-      <div style=”margin-top:10px;”>
-        <button class=”btn btn-sm” id=”btn-order-preview” style=”font-size:12px;width:100%;”>
-          生成订单预览
+      <div style="margin-bottom:14px;">
+        <button class=鈥漛tn btn-sm鈥?id=鈥漛tn-order-preview鈥?style=鈥漟ont-size:12px;width:100%;鈥?
+          鐢熸垚璁㈠崟棰勮
         </button>
-        <div id=”ai-order-preview-result” style=”display:none;margin-top:10px;padding:12px;background:#0d1a2a;border:1px solid #1e3a5a;border-radius:8px;”></div>
+        <div id=鈥漚i-order-preview-result鈥?style=鈥漝isplay:none;margin-top:10px;padding:12px;background:#0d1a2a;border:1px solid #1e3a5a;border-radius:8px;鈥?</div>
       </div>
       ${String(cand?.status || '') === 'paper_running' && !governanceEnabled()
-        ? `<div style=”margin-top:8px;”>
-            <button class=”btn btn-sm” id=”btn-escalate-live”
-              style=”font-size:12px;width:100%;color:#f0b429;border-color:#f0b429;”>
-              升级为实盘候选 →
+        ? `<div style=鈥漨argin-top:8px;鈥?
+            <button class=鈥漛tn btn-sm鈥?id=鈥漛tn-escalate-live鈥?
+              style=鈥漟ont-size:12px;width:100%;color:#f0b429;border-color:#f0b429;鈥?
+              鍗囩骇涓哄疄鐩樺€欓€?鈫?
             </button>
-            <div style=”font-size:10px;color:#6b7fa0;margin-top:3px;”>
-              将纸盘标记为实盘候选（不自动下单，需进一步人工确认）
+            <div style=鈥漟ont-size:10px;color:#6b7fa0;margin-top:3px;鈥?
+              灏嗙焊鐩樻爣璁颁负瀹炵洏鍊欓€夛紙涓嶈嚜鍔ㄤ笅鍗曪紝闇€杩涗竴姝ヤ汉宸ョ‘璁わ級
             </div>
            </div>`
         : ''}
       `;
     panel.innerHTML = normalizeUiText(panel.innerHTML)
       .replace(' (Best Params)', '')
-      .replace('CSV:', 'CSV 文件：')
-      .replace('Markdown:', 'Markdown 报告：')
-      .replace('DSR Score', 'DSR 分数')
-      .replace('WF Consistency', 'WF 一致性')
-      .replace('folds+', '折以上');
+      .replace('CSV:', 'CSV ???')
+      .replace('Markdown:', 'Markdown ???')
+      .replace('DSR Score', 'DSR 鍒嗘暟')
+      .replace('WF Consistency', 'WF ???')
+      .replace('folds+', '???');
     normalizeDomText(panel);
     bindParamSensitivity(candidateId);
 
-    // 订单预览按钮
+    // 璁㈠崟棰勮鎸夐挳
     panel.querySelector('#btn-order-preview')?.addEventListener('click', () => {
       showOrderPreview(candidateId);
     });
 
-    // 纸盘 → 实盘候选升级按钮
+    // 绾哥洏 鈫?瀹炵洏鍊欓€夊崌绾ф寜閽?
     panel.querySelector('#btn-escalate-live')?.addEventListener('click', async () => {
-      if (!confirm(`确认将纸盘候选 ${candidateId.slice(0, 8)} 升级为实盘候选？\n（不会自动下单，后续需要人工确认才能实际启动实盘）`)) return;
+      if (!confirm(`纭灏嗙焊鐩樺€欓€?${candidateId.slice(0, 8)} 鍗囩骇涓哄疄鐩樺€欓€夛紵\n锛堜笉浼氳嚜鍔ㄤ笅鍗曪紝鍚庣画闇€瑕佷汉宸ョ‘璁ゆ墠鑳藉疄闄呭惎鍔ㄥ疄鐩橈級`)) return;
       const btn = panel.querySelector('#btn-escalate-live');
-      if (btn) { btn.textContent = '升级中...'; btn.disabled = true; }
+      if (btn) { btn.textContent = '鍗囩骇涓?..'; btn.disabled = true; }
       try {
         await aiApi(`/candidates/${encodeURIComponent(candidateId)}/promote`, {
           method: 'POST',
           body: JSON.stringify({ target: 'live_candidate' }),
           timeoutMs: 20000,
         });
-        notify('已升级为实盘候选，等待进一步审批');
+        notify('????????????????');
         await refreshWorkbench('', candidateId);
       } catch (err) {
-        if (btn) { btn.textContent = '升级为实盘候选 →'; btn.disabled = false; }
-        notify(`升级失败: ${err.message}`, true);
+        if (btn) { btn.textContent = '??????? ?'; btn.disabled = false; }
+        notify(`鍗囩骇澶辫触: ${err.message}`, true);
       }
     });
 
-    // 绑定详情面板里的按钮
+    // 缁戝畾璇︽儏闈㈡澘閲岀殑鎸夐挳
     panel.querySelector('.btn-register-cta')?.addEventListener('click', () => {
-      openRegisterModal(candidateId).catch(err => notify(`打开注册失败: ${err.message}`, true));
+      openRegisterModal(candidateId).catch(err => notify(`鎵撳紑娉ㄥ唽澶辫触: ${err.message}`, true));
     });
 
-    // 人工审批按钮
+    // 浜哄伐瀹℃壒鎸夐挳
     const approvalSelect = panel.querySelector('#approval-target-select');
     if (approvalSelect) {
       approvalSelect.querySelector('option[value="shadow"]')?.remove();
@@ -1415,17 +1423,17 @@
       approveBtn.addEventListener('click', async () => {
         const target = document.getElementById('approval-target-select')?.value || 'paper';
         const notes  = document.getElementById('approval-notes-input')?.value || '';
-        approveBtn.textContent = '批准中...';
+        approveBtn.textContent = '鎵瑰噯涓?..';
         approveBtn.disabled = true;
         try {
           await aiApi(`/candidates/${encodeURIComponent(candidateId)}/human-approve`, {
             method: 'POST', body: JSON.stringify({ target, notes }), timeoutMs: 30000,
           });
-          notify(`已批准策略候选 (${target})`);
+          notify(`宸叉壒鍑嗙瓥鐣ュ€欓€?(${target})`);
           await refreshWorkbench('', candidateId);
         } catch (err) {
-          notify(`批准失败: ${err.message}`, true);
-          approveBtn.textContent = '✓ 批准';
+          notify(`鎵瑰噯澶辫触: ${err.message}`, true);
+          approveBtn.textContent = '鉁?鎵瑰噯';
           approveBtn.disabled = false;
         }
       });
@@ -1434,17 +1442,17 @@
     if (rejectBtn) {
       rejectBtn.addEventListener('click', async () => {
         const notes = document.getElementById('approval-notes-input')?.value || '';
-        rejectBtn.textContent = '拒绝中...';
+        rejectBtn.textContent = '鎷掔粷涓?..';
         rejectBtn.disabled = true;
         try {
           await aiApi(`/candidates/${encodeURIComponent(candidateId)}/human-reject`, {
             method: 'POST', body: JSON.stringify({ notes }), timeoutMs: 15000,
           });
-          notify('已拒绝策略候选');
+          notify('???????');
           await refreshWorkbench('', '');
         } catch (err) {
-          notify(`拒绝失败: ${err.message}`, true);
-          rejectBtn.textContent = '✗ 拒绝';
+          notify(`鎷掔粷澶辫触: ${err.message}`, true);
+          rejectBtn.textContent = '鉁?鎷掔粷';
           rejectBtn.disabled = false;
         }
       });
@@ -1456,7 +1464,7 @@
         const perfPanel = panel.querySelector('#perf-history-panel');
         if (!perfPanel) return;
         perfHistBtn.disabled = true;
-        perfHistBtn.textContent = '加载中...';
+        perfHistBtn.textContent = '鍔犺浇涓?..';
         try {
           const data = await aiApi(
             `/performance/snapshots?candidate_id=${encodeURIComponent(candidateId)}&days=30&limit=60`,
@@ -1464,7 +1472,7 @@
           );
           const snaps = Array.isArray(data?.snapshots) ? data.snapshots : [];
           if (!snaps.length) {
-            perfPanel.textContent = '暂无性能快照（策略运行后自动记录）';
+            perfPanel.textContent = '?????????????????';
           } else {
             const reversed = [...snaps].reverse();
             const pnlSeries = reversed.map(s => Number(s.total_pnl_pct || 0));
@@ -1472,7 +1480,7 @@
               <div style="margin-bottom:8px;">${renderSparklineSvg(pnlSeries)}</div>
               <div style="overflow-x:auto;">
                 <table class="data-table" style="font-size:11px;width:100%;">
-                  <thead><tr><th>时间</th><th>模式</th><th>PnL%</th><th>夏普</th><th>胜率</th><th>交易数</th></tr></thead>
+                  <thead><tr><th>鏃堕棿</th><th>妯″紡</th><th>PnL%</th><th>澶忔櫘</th><th>鑳滅巼</th><th>浜ゆ槗鏁?/th></tr></thead>
                   <tbody>${reversed.slice(0, 10).map(s => {
                     const pct = Number(s.total_pnl_pct || 0);
                     return `<tr>
@@ -1486,13 +1494,13 @@
                   }).join('')}</tbody>
                 </table>
               </div>
-              <div style="font-size:10px;color:#4a5f7a;margin-top:4px;">共 ${snaps.length} 条快照，显示最近 10 条</div>
+              <div style="font-size:10px;color:#4a5f7a;margin-top:4px;">鍏?${snaps.length} 鏉″揩鐓э紝鏄剧ず鏈€杩?10 鏉?/div>
             `;
           }
         } catch (err) {
-          if (perfPanel) perfPanel.textContent = `加载失败: ${String(err?.message || err)}`;
+          if (perfPanel) perfPanel.textContent = `鍔犺浇澶辫触: ${String(err?.message || err)}`;
         } finally {
-          perfHistBtn.textContent = '加载';
+          perfHistBtn.textContent = '鍔犺浇';
           perfHistBtn.disabled = false;
         }
       });
@@ -1501,30 +1509,30 @@
     const decayBtn = panel.querySelector('#btn-decay-check');
     if (decayBtn) {
       decayBtn.addEventListener('click', async () => {
-        decayBtn.textContent = '检测中...';
+        decayBtn.textContent = '妫€娴嬩腑...';
         decayBtn.disabled = true;
         try {
           await aiApi(`/candidates/${encodeURIComponent(candidateId)}/decay-check`, { timeoutMs: 15000 });
-          notify('衰减检测完成');
+          notify('??????');
           viewCandidate(candidateId);   // re-render with fresh data
         } catch (err) {
-          notify(`衰减检测失败: ${err.message}`, true);
-          decayBtn.textContent = '检查衰减';
+          notify(`琛板噺妫€娴嬪け璐? ${err.message}`, true);
+          decayBtn.textContent = '????';
           decayBtn.disabled = false;
         }
       });
     }
   }
 
-  /* ══════════════════════════════════════════════════════════════
-     一键注册 Modal
-  ══════════════════════════════════════════════════════════════ */
+  /* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+     涓€閿敞鍐?Modal
+  鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲 */
   function refreshCompareToolbar() {
     const btn = document.getElementById('ai-compare-btn');
     if (!btn) return;
     const selected = state.compareCandidateIds.size;
     btn.style.display = selected >= 2 ? '' : 'none';
-    btn.textContent = selected >= 2 ? `对比选中 (${selected})` : '对比选中';
+    btn.textContent = selected >= 2 ? `瀵规瘮閫変腑 (${selected})` : '瀵规瘮閫変腑';
   }
 
   function toggleCandidateCompare(candidateId) {
@@ -1534,7 +1542,7 @@
       state.compareCandidateIds.delete(cid);
     } else {
       if (state.compareCandidateIds.size >= 4) {
-        notify('最多同时对比 4 个候选策略', true);
+        notify('?????? 4 ?????', true);
         return;
       }
       state.compareCandidateIds.add(cid);
@@ -1555,27 +1563,27 @@
       .map((id) => state.candidates.find((cand) => String(cand?.candidate_id || '') === id))
       .filter(Boolean);
     if (candidates.length < 2) {
-      notify('可对比的候选策略不足，请重新选择', true);
+      notify('鍙姣旂殑鍊欓€夌瓥鐣ヤ笉瓒筹紝璇烽噸鏂伴€夋嫨', true);
       return;
     }
 
     const metrics = [
-      ['策略', (c) => esc(String(c?.strategy || '--'))],
-      ['状态', (c) => esc(statusText(c?.status || 'new'))],
-      ['交易对', (c) => esc(String(c?.symbol || '--'))],
-      ['周期', (c) => esc(String(c?.timeframe || '--'))],
-      ['综合评分', (c) => Number(c?.score || 0).toFixed(1)],
+      ['绛栫暐', (c) => esc(String(c?.strategy || '--'))],
+      ['??', (c) => esc(statusText(c?.status || 'new'))],
+      ['???', (c) => esc(String(c?.symbol || '--'))],
+      ['鍛ㄦ湡', (c) => esc(String(c?.timeframe || '--'))],
+      ['缁煎悎璇勫垎', (c) => Number(c?.score || 0).toFixed(1)],
       ['IS Sharpe', (c) => fmtNum(c?.validation_summary?.is_score, 2)],
       ['OOS Sharpe', (c) => fmtNum(c?.validation_summary?.oos_score, 2)],
-      ['WF 稳定', (c) => c?.validation_summary?.wf_stability != null ? `${(Number(c.validation_summary.wf_stability) * 100).toFixed(0)}%` : '--'],
+      ['WF 绋冲畾', (c) => c?.validation_summary?.wf_stability != null ? `${(Number(c.validation_summary.wf_stability) * 100).toFixed(0)}%` : '--'],
       ['DSR', (c) => c?.validation_summary?.dsr_score != null ? `${(Number(c.validation_summary.dsr_score) * 100).toFixed(0)}%` : '--'],
-      ['风险评分', (c) => fmtNum(c?.validation_summary?.risk_score, 0)],
-      ['收益率', (c) => {
+      ['椋庨櫓璇勫垎', (c) => fmtNum(c?.validation_summary?.risk_score, 0)],
+      ['???', (c) => {
         const top = candidateTopResults(c)[0] || {};
         const ret = Number(top.total_return);
         return Number.isFinite(ret) ? `${ret >= 0 ? '+' : ''}${ret.toFixed(2)}%` : '--';
       }],
-      ['最大回撤', (c) => {
+      ['????', (c) => {
         const top = candidateTopResults(c)[0] || {};
         const dd = Number(top.max_drawdown);
         return Number.isFinite(dd) ? `${dd.toFixed(2)}%` : '--';
@@ -1594,7 +1602,7 @@
     const overlay = document.getElementById('ai-candidate-compare-modal');
     const body = document.getElementById('ai-candidate-compare-body');
     if (!overlay || !body) return;
-    body.innerHTML = `<table class="compare-table"><thead><tr><th>指标</th>${header}</tr></thead><tbody>${rows}</tbody></table>`;
+    body.innerHTML = `<table class="compare-table"><thead><tr><th>鎸囨爣</th>${header}</tr></thead><tbody>${rows}</tbody></table>`;
     overlay.style.display = 'flex';
   }
 
@@ -1620,14 +1628,14 @@
   async function loadParamSensitivity(candidateId) {
     const panel = document.getElementById('ai-param-sensitivity');
     if (!panel) return;
-    panel.textContent = '计算中...';
+    panel.textContent = '璁＄畻涓?..';
     try {
       const payload = await aiApi(`/candidates/${encodeURIComponent(candidateId)}/param-sensitivity?max_params=5`, {
         timeoutMs: 40000,
       });
       const items = toArray(payload?.items);
       if (!items.length) {
-        panel.textContent = String(payload?.note || '暂无参数敏感性数据');
+        panel.textContent = String(payload?.note || '?????????');
         return;
       }
       panel.innerHTML = items.map((row) => {
@@ -1654,20 +1662,20 @@
         </div>`;
       }).join('');
     } catch (err) {
-      panel.textContent = `加载失败: ${String(err?.message || err)}`;
+      panel.textContent = `鍔犺浇澶辫触: ${String(err?.message || err)}`;
     }
   }
 
   async function openRegisterModal(candidateId) {
     if (governanceEnabled()) {
-      notify('治理模式已开启，请使用“待审批”中的人工批准流程', true);
+      notify('????????????????????????', true);
       return;
     }
     const modal = document.getElementById('ai-register-modal');
     const body  = document.getElementById('ai-register-body');
     if (!modal || !body) return;
     modal.style.display = 'flex';
-    body.innerHTML = '<div style="padding:20px;color:#7e92b2;">加载中...</div>';
+    body.innerHTML = '<div style="padding:20px;color:#7e92b2;">鍔犺浇涓?..</div>';
 
     const resp   = await aiApi(`/candidates/${encodeURIComponent(candidateId)}`, { timeoutMs: 20000 });
     const cand   = resp?.candidate || {};
@@ -1694,31 +1702,31 @@
 
     body.innerHTML = `
       <div class="form-group" style="margin-bottom:10px;">
-        <label>策略名称（可修改）</label>
+        <label>绛栫暐鍚嶇О锛堝彲淇敼锛?/label>
         <input type="text" id="reg-name" value="${esc(defaultName)}" style="width:100%;">
       </div>
       <div class="form-row" style="margin-bottom:0;">
-        <div class="form-group"><label>交易对</label><input readonly value="${esc(sym || '--')}"></div>
-        <div class="form-group"><label>时间框</label><input readonly value="${esc(tf || '--')}"></div>
+        <div class="form-group"><label>浜ゆ槗瀵?/label><input readonly value="${esc(sym || '--')}"></div>
+        <div class="form-group"><label>鏃堕棿妗?/label><input readonly value="${esc(tf || '--')}"></div>
       </div>
-      <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin:10px 0 4px;">回测表现</div>
+      <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin:10px 0 4px;">鍥炴祴琛ㄧ幇</div>
       <div class="ai-register-metrics-grid">
-        ${metricBox('年化收益', ret != null ? `${ret >= 0 ? '+' : ''}${ret.toFixed(1)}%` : '--', ret != null && ret >= 0 ? 'positive' : 'negative')}
-        ${metricBox('最大回撤', dd != null ? `${dd.toFixed(1)}%` : '--', 'negative')}
-        ${metricBox('胜率', wr != null ? `${wr.toFixed(0)}%` : '--')}
-        ${metricBox('夏普比率', sr != null ? sr.toFixed(2) : '--')}
+        ${metricBox('骞村寲鏀剁泭', ret != null ? `${ret >= 0 ? '+' : ''}${ret.toFixed(1)}%` : '--', ret != null && ret >= 0 ? 'positive' : 'negative')}
+        ${metricBox('????', dd != null ? `${dd.toFixed(1)}%` : '--', 'negative')}
+        ${metricBox('鑳滅巼', wr != null ? `${wr.toFixed(0)}%` : '--')}
+        ${metricBox('澶忔櫘姣旂巼', sr != null ? sr.toFixed(2) : '--')}
       </div>
       <div class="form-group">
-        <label>运行模式</label>
+        <label>杩愯妯″紡</label>
         <div class="ai-mode-radio-group">
-          <label><input type="radio" name="reg-mode" value="paper" ${decision === 'paper' || !['shadow','live_candidate'].includes(decision) ? 'checked' : ''}> 纸盘（推荐，低风险模拟）</label>
-          <label><input type="radio" name="reg-mode" value="shadow" ${decision === 'shadow' ? 'checked' : ''}> 影子追踪（虚拟跟踪）</label>
-          <label><input type="radio" name="reg-mode" value="live_candidate" ${decision === 'live_candidate' ? 'checked' : ''}> 实盘候选（待人工确认）</label>
+          <label><input type="radio" name="reg-mode" value="paper" ${decision === 'paper' || !['shadow','live_candidate'].includes(decision) ? 'checked' : ''}> 绾哥洏锛堟帹鑽愶紝浣庨闄╂ā鎷燂級</label>
+          <label><input type="radio" name="reg-mode" value="shadow" ${decision === 'shadow' ? 'checked' : ''}> 褰卞瓙杩借釜锛堣櫄鎷熻窡韪級</label>
+          <label><input type="radio" name="reg-mode" value="live_candidate" ${decision === 'live_candidate' ? 'checked' : ''}> 瀹炵洏鍊欓€夛紙寰呬汉宸ョ‘璁わ級</label>
         </div>
       </div>
       <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;padding-top:12px;border-top:1px solid rgba(255,255,255,.07);">
-        <button class="btn" id="reg-cancel-btn">取消</button>
-        <button class="btn-register-cta" id="reg-confirm-btn" data-candidate-id="${esc(candidateId)}">确认注册</button>
+        <button class="btn" id="reg-cancel-btn">鍙栨秷</button>
+        <button class="btn-register-cta" id="reg-confirm-btn" data-candidate-id="${esc(candidateId)}">纭娉ㄥ唽</button>
       </div>`;
     body.innerHTML = normalizeUiText(body.innerHTML);
     normalizeDomText(body);
@@ -1738,11 +1746,11 @@
 
   async function confirmRegister(candidateId, mode, name) {
     if (governanceEnabled()) {
-      notify('治理模式已开启，请改用人工审批流程', true);
+      notify('?????????????????', true);
       return;
     }
     const btn = document.getElementById('reg-confirm-btn');
-    if (btn) { btn.textContent = '注册中...'; btn.disabled = true; }
+    if (btn) { btn.textContent = '娉ㄥ唽涓?..'; btn.disabled = true; }
     try {
       const result = await aiApi(`/candidates/${encodeURIComponent(candidateId)}/register`, {
         method: 'POST',
@@ -1751,24 +1759,24 @@
       });
       document.getElementById('ai-register-modal').style.display = 'none';
       const stratName = result?.registered_strategy_name || result?.runtime_status || mode;
-      notify(`策略已注册: ${stratName}`);
+      notify(`绛栫暐宸叉敞鍐? ${stratName}`);
       await refreshWorkbench('', candidateId);
     } catch (err) {
-      if (btn) { btn.textContent = '确认注册'; btn.disabled = false; }
-      notify(`注册失败: ${err.message}`, true);
+      if (btn) { btn.textContent = '纭娉ㄥ唽'; btn.disabled = false; }
+      notify(`娉ㄥ唽澶辫触: ${err.message}`, true);
     }
   }
 
-  /* ══════════════════════════════════════════════════════════════
-     人工审批队列
-  ══════════════════════════════════════════════════════════════ */
+  /* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+     浜哄伐瀹℃壒闃熷垪
+  鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲 */
   async function loadPendingApprovals() {
     try {
       const res = await aiApi('/candidates/pending-approvals', { timeoutMs: 15000 });
       state.pendingApprovals = toArray(res?.items);
       renderApprovalQueue();
     } catch (err) {
-      // Non-fatal — approval queue is best-effort
+      // Non-fatal 鈥?approval queue is best-effort
       console.debug('loadPendingApprovals failed:', err);
     }
   }
@@ -1796,15 +1804,15 @@
           <span style="color:#c2d0e8;font-weight:600;">${strategy}</span>
           <span class="cand-score-badge ${color}" style="font-size:11px;">${score.toFixed(0)}</span>
         </div>
-        <div style="color:#9fb1c9;margin-bottom:5px;">推荐目标：<strong>${target}</strong></div>
+        <div style="color:#9fb1c9;margin-bottom:5px;">鎺ㄨ崘鐩爣锛?strong>${target}</strong></div>
         ${_renderApprovalMeta(cand)}
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
           <button class="btn btn-sm" style="font-size:11px;color:#20bf78;border-color:#20bf78;"
-            data-action="human-approve" data-candidate-id="${cid}" data-target="${target}">✓ 批准</button>
+            data-action="human-approve" data-candidate-id="${cid}" data-target="${target}">鉁?鎵瑰噯</button>
           <button class="btn btn-sm" style="font-size:11px;color:#e05260;border-color:#e05260;"
-            data-action="human-reject" data-candidate-id="${cid}">✗ 拒绝</button>
+            data-action="human-reject" data-candidate-id="${cid}">鉁?鎷掔粷</button>
           <button class="btn btn-sm" style="font-size:11px;color:#f59e0b;border-color:#f59e0b;"
-            data-action="quick-register" data-candidate-id="${cid}">纸盘 5%</button>
+            data-action="quick-register" data-candidate-id="${cid}">绾哥洏 5%</button>
         </div>
       </div>`;
     }).join(''));
@@ -1812,7 +1820,7 @@
   }
 
   async function humanApprove(candidateId, target) {
-    const notes = window.prompt(`批准候选 ${candidateId.slice(0, 8)} 运行为 [${target}]？\n请输入备注（可留空）：`, '') ?? '';
+    const notes = window.prompt(`???? ${candidateId.slice(0, 8)} ???[${target}]?\n???????????`, '') ?? '';
     if (notes === null) return; // user cancelled
     try {
       await aiApi(`/candidates/${encodeURIComponent(candidateId)}/human-approve`, {
@@ -1820,15 +1828,15 @@
         body: JSON.stringify({ target, notes }),
         timeoutMs: 30000,
       });
-      notify(`已批准策略候选 (${target})`);
+      notify(`???????(${target})`);
       await refreshWorkbench('', candidateId);
     } catch (err) {
-      notify(`批准失败: ${err.message}`, true);
+      notify(`????: ${err.message}`, true);
     }
   }
 
   async function humanReject(candidateId) {
-    const reason = window.prompt(`拒绝候选 ${candidateId.slice(0, 8)}？\n请输入拒绝原因：`, '') ?? '';
+    const reason = window.prompt(`鎷掔粷鍊欓€?${candidateId.slice(0, 8)}锛焅n璇疯緭鍏ユ嫆缁濆師鍥狅細`, '') ?? '';
     if (reason === null) return; // user cancelled
     try {
       await aiApi(`/candidates/${encodeURIComponent(candidateId)}/human-reject`, {
@@ -1836,24 +1844,24 @@
         body: JSON.stringify({ notes: reason }),
         timeoutMs: 15000,
       });
-      notify('已拒绝策略候选');
+      notify('???????');
       await refreshWorkbench('', '');
     } catch (err) {
-      notify(`拒绝失败: ${err.message}`, true);
+      notify(`鎷掔粷澶辫触: ${err.message}`, true);
     }
   }
 
-  /* ══════════════════════════════════════════════════════════════
-     LLM 辅助研究规划
-  ══════════════════════════════════════════════════════════════ */
+  /* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+     LLM 杈呭姪鐮旂┒瑙勫垝
+  鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲 */
   async function generateAIContext() {
     const btn = document.getElementById('ai-context-btn');
-    if (btn) { btn.textContent = 'AI生成中...'; btn.disabled = true; }
+    if (btn) { btn.textContent = 'AI鐢熸垚涓?..'; btn.disabled = true; }
     try {
       const goals = String(document.getElementById('ai-planner-goal')?.value || '').trim();
       if (goals.length < 8) {
-        notify('请先填写研究目标（至少8个字符）', true);
-        if (btn) { btn.textContent = '🤖 AI辅助'; btn.disabled = false; btn.style.color = ''; }
+        notify('璇峰厛濉啓鐮旂┒鐩爣锛堣嚦灏?涓瓧绗︼級', true);
+        if (btn) { btn.textContent = '馃 AI杈呭姪'; btn.disabled = false; btn.style.color = ''; }
         return;
       }
       const macroContext = await loadPlannerMacroContext().catch(() => null);
@@ -1867,38 +1875,38 @@
         state.pendingLlmContext = result.llm_research_output;
         const hypothesis = String(result.llm_research_output.hypothesis || '').trim();
         const uncertainty = String(result.llm_research_output.uncertainty || '').trim().toLowerCase();
-        const suggestedMax = ['高', 'high'].includes(uncertainty) ? 3 : (['低', 'low'].includes(uncertainty) ? 6 : 4);
+        const suggestedMax = ['?', 'high'].includes(uncertainty) ? 3 : (['?', 'low'].includes(uncertainty) ? 6 : 4);
         if (macroContext) state.pendingMacroContext = macroContext;
         const goalInput = document.getElementById('ai-planner-goal');
         if (goalInput && hypothesis) {
-          goalInput.value = `${goals.replace(/\s+/g, ' ').trim()}；AI假设：${hypothesis}`.slice(0, 580);
+          goalInput.value = `${goals.replace(/\s+/g, ' ').trim()}?AI???${hypothesis}`.slice(0, 580);
         }
         const maxTemplatesEl = document.getElementById('ai-planner-max-templates');
         if (maxTemplatesEl) maxTemplatesEl.value = String(suggestedMax);
-        if (btn) { btn.textContent = 'AI建议已生成 ✓'; btn.disabled = false; btn.style.color = '#20bf78'; }
+        if (btn) { btn.textContent = 'AI????? ?'; btn.disabled = false; btn.style.color = '#20bf78'; }
         // Show hypothesis in planner notes
         const plannerNotesEl = document.getElementById('ai-planner-notes');
         const macroSummary = macroContext
-          ? `宏观摘要：Funding ${macroContext?.microstructure?.funding_rate ?? '--'} / Basis ${macroContext?.microstructure?.basis_pct ?? '--'} / 巨鲸 ${macroContext?.community?.whale_count ?? 0} / News ${macroContext?.news?.events_count ?? 0}`
-          : '宏观摘要：暂无';
+          ? `?????Funding ${macroContext?.microstructure?.funding_rate ?? '--'} / Basis ${macroContext?.microstructure?.basis_pct ?? '--'} / ?? ${macroContext?.community?.whale_count ?? 0} / News ${macroContext?.news?.events_count ?? 0}`
+          : '???????';
         if (plannerNotesEl && result.llm_research_output.hypothesis) {
           const existing = plannerNotesEl.innerHTML;
-          plannerNotesEl.innerHTML = `<div style="font-size:11px;color:#20bf78;margin-bottom:3px;">🤖 AI假设：${esc(result.llm_research_output.hypothesis)}</div>` + existing;
+          plannerNotesEl.innerHTML = `<div style="font-size:11px;color:#20bf78;margin-bottom:3px;">?? AI???${esc(result.llm_research_output.hypothesis)}</div>` + existing;
         }
-        notify('AI辅助建议已生成。下一步请点“生成研究”，会自动带上这份建议。');
+        notify('AI??????????????????????????????');
       } else {
-        notify(`AI辅助失败: ${result?.error || 'LLM不可用'}`, true);
-        if (btn) { btn.textContent = '🤖 AI辅助'; btn.disabled = false; btn.style.color = ''; }
+        notify(`AI????: ${result?.error || 'LLM???'}`, true);
+        if (btn) { btn.textContent = '?? AI??'; btn.disabled = false; btn.style.color = ''; }
       }
     } catch (err) {
-      notify(`AI辅助失败: ${err.message}`, true);
-      if (btn) { btn.textContent = '🤖 AI辅助'; btn.disabled = false; btn.style.color = ''; }
+      notify(`AI杈呭姪澶辫触: ${err.message}`, true);
+      if (btn) { btn.textContent = '馃 AI杈呭姪'; btn.disabled = false; btn.style.color = ''; }
     }
   }
 
-  /* ══════════════════════════════════════════════════════════════
-     数据加载
-  ══════════════════════════════════════════════════════════════ */
+  /* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+     鏁版嵁鍔犺浇
+  鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲 */
   async function loadRuntimeConfig(force = false) {
     if (!force && state.runtimeConfigLoaded && state.runtimeConfig) return;
     const prevGovernance = !!(state.runtimeConfig && state.runtimeConfig.governance_enabled);
@@ -1961,13 +1969,13 @@
     if (!btn) return;
     const has = !!state.selectedProposalId;
     btn.disabled = !has;
-    btn.title = has ? `运行研究: ${state.selectedProposalId}` : '请先在左侧选择研究任务';
+    btn.title = has ? `杩愯鐮旂┒: ${state.selectedProposalId}` : '璇峰厛鍦ㄥ乏渚ч€夋嫨鐮旂┒浠诲姟';
   }
 
-  /* ══════════════════════════════════════════════════════════════
-     操作函数
-  ══════════════════════════════════════════════════════════════ */
-  /* ── 实时市场上下文采集（生成研究前自动执行）── */
+  /* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+     鎿嶄綔鍑芥暟
+  鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲 */
+  /* 鈹€鈹€ 瀹炴椂甯傚満涓婁笅鏂囬噰闆嗭紙鐢熸垚鐮旂┒鍓嶈嚜鍔ㄦ墽琛岋級鈹€鈹€ */
   async function _collectLiveMarketContext(primarySymbol) {
     const sym = primarySymbol || getCurrentResearchSymbol() || 'BTC/USDT';
     const exchange = getCurrentResearchExchange() || 'binance';
@@ -2025,13 +2033,13 @@
 
   async function generateProposal() {
     const goal = String(document.getElementById('ai-planner-goal')?.value || '').trim();
-    if (goal.length < 8) { notify('研究目标太短（至少8个字符）', true); return; }
+    if (goal.length < 8) { notify('鐮旂┒鐩爣澶煭锛堣嚦灏?涓瓧绗︼級', true); return; }
     const symbols   = csvInput('ai-planner-symbols');
     const primarySym = symbols[0] || getCurrentResearchSymbol() || 'BTC/USDT';
 
-    // ── 自动采集实时市场上下文 ──
+    // 鈹€鈹€ 鑷姩閲囬泦瀹炴椂甯傚満涓婁笅鏂?鈹€鈹€
     const marketCtxEl = document.getElementById('ai-market-context-hint');
-    if (marketCtxEl) marketCtxEl.textContent = '正在采集市场上下文...';
+    if (marketCtxEl) marketCtxEl.textContent = '姝ｅ湪閲囬泦甯傚満涓婁笅鏂?..';
     const liveCtx = await _collectLiveMarketContext(primarySym).catch(() => ({}));
     if (marketCtxEl) {
       const dir   = String(liveCtx.sentiment || 'FLAT');
@@ -2048,7 +2056,7 @@
       const optTxt  = optSkew != null
         ? `${Number(optSkew).toFixed(3)}(${optSig || '?'})`
         : '--';
-      marketCtxEl.innerHTML = `<span style="color:${dir==='LONG'?'#20bf78':dir==='SHORT'?'#e05260':'#9fb1c9'}">方向 ${dir} ${conf}%</span> · Funding ${frTxt} · OFI ${ofiTxt} · OI ${oiTxt} · 期权偏斜 ${optTxt} · 新闻事件 ${ne}`;
+      marketCtxEl.innerHTML = `<span style="color:${dir==='LONG'?'#20bf78':dir==='SHORT'?'#e05260':'#9fb1c9'}">鏂瑰悜 ${dir} ${conf}%</span> 路 Funding ${frTxt} 路 OFI ${ofiTxt} 路 OI ${oiTxt} 路 鏈熸潈鍋忔枩 ${optTxt} 路 鏂伴椈浜嬩欢 ${ne}`;
     }
 
     const payload = {
@@ -2064,25 +2072,25 @@
       payload.llm_research_output = state.pendingLlmContext;
       state.pendingLlmContext = null;
       const btn = document.getElementById('ai-context-btn');
-      if (btn) { btn.textContent = '🤖 AI辅助'; btn.disabled = false; btn.style.color = ''; }
+      if (btn) { btn.textContent = '馃 AI杈呭姪'; btn.disabled = false; btn.style.color = ''; }
     }
     const result = await aiApi('/proposals/generate', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 30000 });
     // A: show filtered templates and planner notes
     const filteredTpls = result?.filtered_templates || result?.proposal?.filtered_templates || [];
     const plannerNotes = result?.planner_notes || [];
-    let notifMsg = '研究任务已生成';
+    let notifMsg = '???????';
     if (filteredTpls.length > 0) {
-      notifMsg += `（过滤了 ${filteredTpls.length} 个不支持的模板）`;
+      notifMsg += `锛堣繃婊や簡 ${filteredTpls.length} 涓笉鏀寔鐨勬ā鏉匡級`;
     }
     // Update planner notes UI if it exists
     const plannerNotesEl = document.getElementById('ai-planner-notes');
     if (plannerNotesEl) {
       let html = '';
       if (plannerNotes.length) {
-        html += `<div style="font-size:11px;color:#9fb1c9;margin-bottom:3px;">📋 ${plannerNotes.map(n => esc(n)).join(' · ')}</div>`;
+        html += `<div style="font-size:11px;color:#9fb1c9;margin-bottom:3px;">馃搵 ${plannerNotes.map(n => esc(n)).join(' 路 ')}</div>`;
       }
       if (filteredTpls.length) {
-        html += `<div style="font-size:11px;color:#f59e0b;margin-top:3px;">⚠️ 过滤模板（${filteredTpls.length}）: ${filteredTpls.slice(0,5).map(t => esc(t)).join(', ')}${filteredTpls.length > 5 ? '...' : ''}</div>`;
+        html += `<div style="font-size:11px;color:#f59e0b;margin-top:3px;">鈿狅笍 杩囨护妯℃澘锛${filteredTpls.length}锛? ${filteredTpls.slice(0,5).map(t => esc(t)).join(', ')}${filteredTpls.length > 5 ? '...' : ''}</div>`;
       }
       plannerNotesEl.innerHTML = html;
     }
@@ -2092,13 +2100,13 @@
 
   generateAIContext = async function generateAIContextOverride() {
     const btn = document.getElementById('ai-context-btn');
-    if (btn) { btn.textContent = 'AI 分析中...'; btn.disabled = true; btn.style.color = ''; }
+    if (btn) { btn.textContent = 'AI 鍒嗘瀽涓?..'; btn.disabled = true; btn.style.color = ''; }
     try {
       const goalInput = document.getElementById('ai-planner-goal');
       const goals = String(goalInput?.value || '').trim();
       if (goals.length < 8) {
-        notify('请先填写足够明确的研究目标。', true);
-        if (btn) { btn.textContent = 'AI 辅助'; btn.disabled = false; }
+        notify('??????????????', true);
+        if (btn) { btn.textContent = 'AI 杈呭姪'; btn.disabled = false; }
         return;
       }
 
@@ -2110,8 +2118,8 @@
         timeoutMs: 40000,
       });
       if (!result?.llm_research_output) {
-        notify(`AI 辅助失败: ${result?.error || 'LLM 未返回有效内容'}`, true);
-        if (btn) { btn.textContent = 'AI 辅助'; btn.disabled = false; }
+        notify(`AI ????: ${result?.error || 'LLM ???????'}`, true);
+        if (btn) { btn.textContent = 'AI 杈呭姪'; btn.disabled = false; }
         return;
       }
 
@@ -2120,9 +2128,9 @@
 
       const hypothesis = String(result.llm_research_output.hypothesis || '').trim();
       const uncertainty = String(result.llm_research_output.uncertainty || '').trim().toLowerCase();
-      const suggestedMax = ['high', '高'].includes(uncertainty) ? 3 : (['low', '低'].includes(uncertainty) ? 6 : 4);
+      const suggestedMax = ['high', '?'].includes(uncertainty) ? 3 : (['low', '?'].includes(uncertainty) ? 6 : 4);
       if (goalInput && hypothesis) {
-        goalInput.value = `${goals.replace(/\s+/g, ' ').trim()} | AI假设: ${hypothesis}`.slice(0, 580);
+        goalInput.value = `${goals.replace(/\s+/g, ' ').trim()} | AI??: ${hypothesis}`.slice(0, 580);
       }
 
       const maxTemplatesEl = document.getElementById('ai-planner-max-templates');
@@ -2131,23 +2139,23 @@
       const plannerNotesEl = document.getElementById('ai-planner-notes');
       if (plannerNotesEl) {
         const notes = [];
-        if (hypothesis) notes.push(`<div style="font-size:11px;color:#20bf78;margin-bottom:4px;">AI 假设：${esc(hypothesis)}</div>`);
-        notes.push(`<div style="font-size:11px;color:#9fb1c9;margin-bottom:4px;">AI 建议策略数上限：${suggestedMax}</div>`);
+        if (hypothesis) notes.push(`<div style="font-size:11px;color:#20bf78;margin-bottom:4px;">AI ???${esc(hypothesis)}</div>`);
+        notes.push(`<div style="font-size:11px;color:#9fb1c9;margin-bottom:4px;">AI 寤鸿绛栫暐鏁颁笂闄愶細${suggestedMax}</div>`);
         notes.push(`<div style="font-size:11px;color:#9fb1c9;">${esc(formatPlannerMacroSummary(macroContext))}</div>`);
         plannerNotesEl.innerHTML = notes.join('');
       }
 
-      if (btn) { btn.textContent = 'AI 建议已应用'; btn.disabled = false; btn.style.color = '#20bf78'; }
-      notify('AI 辅助已写回研究目标、策略数量和宏观上下文。');
+      if (btn) { btn.textContent = 'AI ?????'; btn.disabled = false; btn.style.color = '#20bf78'; }
+      notify('AI ?????????????????????');
     } catch (err) {
-      notify(`AI 辅助失败: ${err.message}`, true);
-      if (btn) { btn.textContent = 'AI 辅助'; btn.disabled = false; btn.style.color = ''; }
+      notify(`AI 杈呭姪澶辫触: ${err.message}`, true);
+      if (btn) { btn.textContent = 'AI 杈呭姪'; btn.disabled = false; btn.style.color = ''; }
     }
   };
 
   generateProposal = async function generateProposalOverride() {
     const goal = String(document.getElementById('ai-planner-goal')?.value || '').trim();
-    if (goal.length < 8) { notify('请先填写研究目标。', true); return; }
+    if (goal.length < 8) { notify('?????????', true); return; }
 
     let marketContext = state.pendingMacroContext || null;
     if (!marketContext) {
@@ -2166,7 +2174,7 @@
       payload.llm_research_output = state.pendingLlmContext;
       state.pendingLlmContext = null;
       const btn = document.getElementById('ai-context-btn');
-      if (btn) { btn.textContent = 'AI 辅助'; btn.disabled = false; btn.style.color = ''; }
+      if (btn) { btn.textContent = 'AI 杈呭姪'; btn.disabled = false; btn.style.color = ''; }
     }
 
     const result = await aiApi('/proposals/generate', {
@@ -2180,30 +2188,84 @@
     if (plannerNotesEl) {
       let html = '';
       if (plannerNotes.length) {
-        html += `<div style="font-size:11px;color:#9fb1c9;margin-bottom:4px;">规划说明：${plannerNotes.map(n => esc(n)).join(' ｜ ')}</div>`;
+        html += `<div style="font-size:11px;color:#9fb1c9;margin-bottom:4px;">瑙勫垝璇存槑锛${plannerNotes.map(n => esc(n)).join(' 锝?')}</div>`;
       }
       html += `<div style="font-size:11px;color:#9fb1c9;margin-bottom:4px;">${esc(formatPlannerMacroSummary(marketContext))}</div>`;
       if (filteredTpls.length) {
-        html += `<div style="font-size:11px;color:#f59e0b;">已过滤未接入研究引擎的策略 ${filteredTpls.length} 个：${filteredTpls.slice(0, 5).map(t => esc(t)).join(', ')}${filteredTpls.length > 5 ? '...' : ''}</div>`;
+        html += `<div style="font-size:11px;color:#f59e0b;">宸茶繃婊ゆ湭鎺ュ叆鐮旂┒寮曟搸鐨勭瓥鐣?${filteredTpls.length} 涓細${filteredTpls.slice(0, 5).map(t => esc(t)).join(', ')}${filteredTpls.length > 5 ? '...' : ''}</div>`;
       }
       plannerNotesEl.innerHTML = html;
     }
 
-    notify(filteredTpls.length ? `研究方案已生成，过滤了 ${filteredTpls.length} 个未接入策略。` : '研究方案已生成。');
+    notify(filteredTpls.length ? `??????????? ${filteredTpls.length} ???????` : '????????');
     await refreshWorkbench(result?.proposal?.proposal_id || '', '');
   };
 
+  async function runOneClickResearchDeploy() {
+    const btn = document.getElementById('ai-oneclick-btn');
+    const goal = String(document.getElementById('ai-planner-goal')?.value || '').trim();
+    if (goal.length < 8) { notify('?????????', true); return; }
+
+    const symbols = csvInput('ai-planner-symbols');
+    const timeframes = csvInput('ai-planner-timeframes');
+    const exchange = String(document.getElementById('run-exchange')?.value || getCurrentResearchExchange() || 'binance');
+    const days = Math.max(1, Math.min(3650, parseInt(document.getElementById('run-days')?.value || '3', 10) || 3));
+    const payload = {
+      goal,
+      market_regime: String(document.getElementById('ai-planner-regime')?.value || 'mixed'),
+      symbols: symbols.length ? symbols : [getCurrentResearchSymbol() || 'BTC/USDT'],
+      timeframes: timeframes.length ? timeframes : ['15m', '1h'],
+      constraints: { max_templates: Number(document.getElementById('ai-planner-max-templates')?.value || 5) },
+      metadata: { source: 'ai_research_ui_oneclick' },
+      origin_context: {},
+      market_context: state.pendingMacroContext || {},
+      llm_research_output: state.pendingLlmContext || {},
+      exchange,
+      days,
+      target: 'auto',
+      allocation_pct: 0.05,
+      strategy_name: '',
+      approval_notes: 'oneclick approve from ui',
+      skip_deploy: false,
+    };
+
+    try {
+      if (btn) { btn.disabled = true; btn.textContent = '鎵ц涓?..'; }
+      notify('涓€閿祦绋嬪惎鍔細鐢熸垚 -> 杩愯 -> 閮ㄧ讲');
+      const result = await aiApi('/oneclick/research-deploy', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        timeoutMs: 180000,
+      });
+      state.pendingLlmContext = null;
+      const contextBtn = document.getElementById('ai-context-btn');
+      if (contextBtn) { contextBtn.textContent = 'AI ??'; contextBtn.disabled = false; contextBtn.style.color = ''; }
+
+      const proposalId = String(result?.proposal_id || result?.run?.proposal?.proposal_id || '').trim();
+      const candidateId = String(result?.candidate_id || result?.run?.candidate?.candidate_id || '').trim();
+      const runtimeStatus = String(result?.runtime_status || result?.deploy?.runtime_status || '').trim();
+      const action = String(result?.deploy?.action || '').trim();
+      await refreshWorkbench(proposalId, candidateId);
+      if (candidateId) viewCandidate(candidateId).catch(() => {});
+      notify(`??????${runtimeStatus ? `: ${runtimeStatus}` : ''}${action ? ` (${action})` : ''}`);
+    } catch (err) {
+      notify(`??????: ${err.message}`, true);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '? ????+??'; }
+    }
+  }
+
   async function runProposal(proposalId) {
-    if (!proposalId) { notify('请先选择研究任务', true); return; }
+    if (!proposalId) { notify('????????', true); return; }
     const proposal = state.proposals.find(p => String(p?.proposal_id || '') === String(proposalId));
     const proposalStatus = String(proposal?.status || '');
     if (proposal && !isRunnableProposalStatus(proposalStatus)) {
-      notify(`当前状态「${statusText(proposalStatus)}」不可运行`, true);
+      notify(`?????${statusText(proposalStatus)}?????`, true);
       return;
     }
     const exchange = String(document.getElementById('run-exchange')?.value || 'binance');
     const days     = Math.max(1, Math.min(3650, parseInt(document.getElementById('run-days')?.value || '3', 10) || 3));
-    notify(`研究任务已提交，后台运行中...`);
+    notify(`?????????????...`);
     const result = await aiApi(`/proposals/${encodeURIComponent(proposalId)}/run`, {
       method: 'POST',
       body: JSON.stringify({ exchange, days, background: true }),
@@ -2222,19 +2284,19 @@
     const proposal = state.proposals.find(p => String(p?.proposal_id || '') === String(proposalId));
     const status = String(proposal?.status || '');
     if (!['research_queued', 'research_running'].includes(status)) {
-      notify(`当前状态「${statusText(status)}」无需取消`, true);
+      notify(`褰撳墠鐘舵€併€${statusText(status)}銆嶆棤闇€鍙栨秷`, true);
       return;
     }
-    if (!window.confirm(`确认取消该研究任务运行？\n${proposalId}`)) return;
+    if (!window.confirm(`纭鍙栨秷璇ョ爺绌朵换鍔¤繍琛岋紵\n${proposalId}`)) return;
     const result = await aiApi(`/proposals/${encodeURIComponent(proposalId)}/cancel`, {
       method: 'POST',
       timeoutMs: 15000,
     });
     stopJobPolling(proposalId);
     if (result?.cancelled) {
-      notify('研究任务已取消');
+      notify('???????');
     } else {
-      notify(result?.reason || '未找到可取消任务', true);
+      notify(result?.reason || '鏈壘鍒板彲鍙栨秷浠诲姟', true);
     }
     await refreshWorkbench(proposalId, '');
   }
@@ -2254,35 +2316,35 @@
       timeoutMs: 30000,
     });
     const path = String(result?.funding?.cache_path || '');
-    notify(path ? `宏观缓存已预热: ${path}` : '宏观缓存已预热');
+    notify(path ? `???????: ${path}` : '???????');
     await loadDataReadiness().catch(() => {});
   }
 
-  /* ── 任务进度轮询 ── */
+  /* 鈹€鈹€ 浠诲姟杩涘害杞 鈹€鈹€ */
   async function retireProposal(proposalId) {
     const item = state.proposals.find(p => String(p?.proposal_id || '') === proposalId);
     const status = String(item?.status || '');
     if (!proposalId) {
-      notify('缺少 proposal_id，无法退役', true);
+      notify('?? proposal_id?????', true);
       return;
     }
     if (!['shadow_running', 'live_candidate', 'paper_running'].includes(status)) {
-      notify(`当前状态 ${statusText(status)} 不支持退役`, true);
+      notify(`?????${statusText(status)}??????`, true);
       return;
     }
-    if (!window.confirm(`确认将该研究退役？\n${proposalId}\n退役后会退出跟踪并允许删除。`)) return;
+    if (!window.confirm(`?????????\n${proposalId}\n??????????????`)) return;
     try {
       await aiApi(`/proposals/${encodeURIComponent(proposalId)}/retire`, {
         method: 'POST',
         body: JSON.stringify({ notes: 'retired from AI research queue' }),
         timeoutMs: 15000,
       });
-      notify('研究已退役');
+      notify('?????');
     } catch (err) {
       const msg = String(err?.message || '');
       if (/404|not found/i.test(msg)) {
         await deleteProposal(proposalId);
-        notify('旧影子记录未命中退役接口，已直接删除');
+        notify('??????????????????');
         return;
       }
       throw err;
@@ -2301,7 +2363,7 @@
     if (Number(result?.queued_count || result?.job?.result?.queued_count || 0) > 0) {
       rootApi('/news/worker/run_once?llm_limit=12&background=true', { method: 'POST', timeoutMs: 8000 }).catch(() => ({}));
     }
-    notify(result?.queued ? '新闻拉取任务已提交' : '新闻拉取完成');
+    notify(result?.queued ? '?????????' : '??????');
     await loadDataReadiness().catch(() => {});
   }
 
@@ -2314,7 +2376,7 @@
     const symbol = getPrimaryPlannerSymbol();
     const newsSymbol = symbolToNewsKey(symbol);
 
-    summaryEl.textContent = '正在检查新闻、宏观与微观数据...';
+    summaryEl.textContent = '姝ｅ湪妫€鏌ユ柊闂汇€佸畯瑙備笌寰鏁版嵁...';
     const [newsHealthRes, newsSymbolRes, newsGlobalRes, newsPullRes, newsWorkerRes, fundingDiagRes, microRes, communityRes, premiumRes] = await Promise.allSettled([
       rootApi('/news/health', { timeoutMs: 12000 }),
       rootApi(`/news/summary?symbol=${encodeURIComponent(newsSymbol)}&hours=24`, { timeoutMs: 12000 }),
@@ -2355,7 +2417,7 @@
     const summary = Number(symbolSummary?.events_count || 0) > 0 || Number(symbolSummary?.feed_count || 0) > 0
       ? symbolSummary
       : globalSummary;
-    const summaryScope = summary === symbolSummary ? `币种 ${newsSymbol}` : '全市场';
+    const summaryScope = summary === symbolSummary ? `?? ${newsSymbol}` : '???';
     const newsEvents = Number(summary?.events_count || 0);
     const rawCount = Number(summary?.raw_count || 0);
     const feedCount = Number(summary?.feed_count || 0);
@@ -2371,14 +2433,14 @@
     const whaleCount = Number(communityData?.whale_transfers?.count || 0);
     const announcementCount = Array.isArray(communityData?.announcements) ? communityData.announcements.length : 0;
     const issues = [];
-    if (!rawCount && !feedCount) issues.push('新闻摘要为空');
-    if (pendingNewsTasks > 0 && !Number(health?.sync_pull_llm)) issues.push(`LLM 队列积压 ${pendingNewsTasks} 条`);
-    if (!fundingRows) issues.push('资金费率缓存为空');
-    if (!Number.isFinite(Number(fundingRate))) issues.push('实时 funding 不可用');
-    if (!whaleCount && !announcementCount) issues.push('社区/巨鲸数据较弱');
-    if (premiumConfiguredCount > 0 && premiumCachedCount === 0) issues.push('高级数据源已配置但暂未形成缓存');
+    if (!rawCount && !feedCount) issues.push('??????');
+    if (pendingNewsTasks > 0 && !Number(health?.sync_pull_llm)) issues.push(`LLM ???? ${pendingNewsTasks} ?`);
+    if (!fundingRows) issues.push('????????');
+    if (!Number.isFinite(Number(fundingRate))) issues.push('?? funding ???');
+    if (!whaleCount && !announcementCount) issues.push('??/??????');
+    if (premiumConfiguredCount > 0 && premiumCachedCount === 0) issues.push('???????????????');
 
-    summaryEl.textContent = issues.length ? `待处理: ${issues.join(' / ')}` : '新闻、宏观与微观数据已就绪';
+    summaryEl.textContent = issues.length ? `???: ${issues.join(' / ')}` : '?????????????';
 
     const fundingPath = String(funding?.cache_path || '--');
     const coverage = funding?.coverage || {};
@@ -2386,32 +2448,32 @@
     const lastLlm = workerStatus?.last_llm_batch || {};
     detailsEl.innerHTML = `
       <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">新闻诊断</div>
-        <div>摘要范围 ${esc(summaryScope)} / 结构化事件 ${newsEvents} / 原始新闻 ${rawCount} / Feed ${feedCount}</div>
-        <div>启用源 ${enabledSources} / 源状态 ${sourceStates.length} / LLM 队列 ${pendingNewsTasks}</div>
-        <div>最近拉取 ${esc(lastPull?.timestamp ? fmtTs(lastPull.timestamp) : '--')} / 最近 LLM ${esc(lastLlm?.timestamp ? fmtTs(lastLlm.timestamp) : '--')}</div>
+        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">鏂伴椈璇婃柇</div>
+        <div>鎽樿鑼冨洿 ${esc(summaryScope)} / 缁撴瀯鍖栦簨浠?${newsEvents} / 鍘熷鏂伴椈 ${rawCount} / Feed ${feedCount}</div>
+        <div>鍚敤婧?${enabledSources} / 婧愮姸鎬?${sourceStates.length} / LLM 闃熷垪 ${pendingNewsTasks}</div>
+        <div>鏈€杩戞媺鍙?${esc(lastPull?.timestamp ? fmtTs(lastPull.timestamp) : '--')} / 鏈€杩?LLM ${esc(lastLlm?.timestamp ? fmtTs(lastLlm.timestamp) : '--')}</div>
       </div>
       <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">宏观 / 资金费率</div>
-        <div>缓存行数 ${fundingRows} / Funding ${Number.isFinite(Number(fundingRate)) ? Number(fundingRate).toFixed(6) : '--'} / Basis ${Number.isFinite(Number(basisPct)) ? Number(basisPct).toFixed(3) + '%' : '--'}</div>
-        <div>覆盖区间 ${esc(coverage?.start || '--')} ~ ${esc(coverage?.end || '--')}</div>
-        <div style="margin-top:4px;color:#7e92b2;">Funding 缓存路径: ${esc(fundingPath)}</div>
+        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">瀹忚 / 璧勯噾璐圭巼</div>
+        <div>缂撳瓨琛屾暟 ${fundingRows} / Funding ${Number.isFinite(Number(fundingRate)) ? Number(fundingRate).toFixed(6) : '--'} / Basis ${Number.isFinite(Number(basisPct)) ? Number(basisPct).toFixed(3) + '%' : '--'}</div>
+        <div>瑕嗙洊鍖洪棿 ${esc(coverage?.start || '--')} ~ ${esc(coverage?.end || '--')}</div>
+        <div style="margin-top:4px;color:#7e92b2;">Funding 缂撳瓨璺緞: ${esc(fundingPath)}</div>
       </div>
       <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">社区 / 巨鲸 / 公告</div>
-        <div>巨鲸 ${whaleCount} / 公告 ${announcementCount} / 微观点差 ${Number(microData?.orderbook?.spread_bps || 0).toFixed(2)} bps</div>
+        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">绀惧尯 / 宸ㄩ哺 / 鍏憡</div>
+        <div>宸ㄩ哺 ${whaleCount} / 鍏憡 ${announcementCount} / 寰鐐瑰樊 ${Number(microData?.orderbook?.spread_bps || 0).toFixed(2)} bps</div>
       </div>
       <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">高级数据源</div>
-        <div>缓存 ${premiumCachedCount}/${premiumTotalCount} / Key 已配置 ${premiumConfiguredCount}</div>
-        <div>${premiumActiveNames.length ? `活跃源 ${esc(premiumActiveNames.join(' / '))}` : '暂无活跃缓存源（可选）'}</div>
+        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">楂樼骇鏁版嵁婧?/div>
+        <div>缂撳瓨 ${premiumCachedCount}/${premiumTotalCount} / Key 宸查厤缃?${premiumConfiguredCount}</div>
+        <div>${premiumActiveNames.length ? `娲昏穬婧?${esc(premiumActiveNames.join(' / '))}` : '鏆傛棤娲昏穬缂撳瓨婧愶紙鍙€夛級'}</div>
       </div>
       <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">存储说明</div>
-        <div style="margin-top:3px;color:#9fb1c9;">新闻库: ./data/crypto_trading.db</div>
-        <div style="margin-top:3px;color:#9fb1c9;">资金费率缓存: ${esc(fundingPath)}</div>
-        <div style="margin-top:3px;color:#9fb1c9;">高级源缓存: ./data/premium/*</div>
-        <div style="margin-top:3px;color:#9fb1c9;">当币种新闻过少时会自动回退到全市场摘要，避免诊断全 0。</div>
+        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">瀛樺偍璇存槑</div>
+        <div style="margin-top:3px;color:#9fb1c9;">鏂伴椈搴? ./data/crypto_trading.db</div>
+        <div style="margin-top:3px;color:#9fb1c9;">璧勯噾璐圭巼缂撳瓨: ${esc(fundingPath)}</div>
+        <div style="margin-top:3px;color:#9fb1c9;">楂樼骇婧愮紦瀛? ./data/premium/*</div>
+        <div style="margin-top:3px;color:#9fb1c9;">褰撳竵绉嶆柊闂昏繃灏戞椂浼氳嚜鍔ㄥ洖閫€鍒板叏甯傚満鎽樿锛岄伩鍏嶈瘖鏂叏 0銆?/div>
       </div>
     `;
     normalizeDomText(detailsEl);
@@ -2441,15 +2503,15 @@
     }
     if (js === 'completed') {
       stopJobPolling(proposalId);
-      notify(`研究完成，候选策略已更新`);
+      notify(`鐮旂┒瀹屾垚锛屽€欓€夌瓥鐣ュ凡鏇存柊`);
       await refreshWorkbench(proposalId, '');
     } else if (js === 'cancelled') {
       stopJobPolling(proposalId);
-      notify('研究任务已取消');
+      notify('???????');
       await loadProposals(proposalId);
     } else if (js === 'failed') {
       stopJobPolling(proposalId);
-      notify(`研究失败: ${data?.error || '未知错误'}`, true);
+      notify(`鐮旂┒澶辫触: ${data?.error || '鏈煡閿欒'}`, true);
       await loadProposals(proposalId);
     }
   }
@@ -2459,33 +2521,35 @@
     const item = state.proposals.find(p => String(p?.proposal_id || '') === proposalId);
     const blocked = new Set(['paper_running','shadow_running','live_running']);
     if (item && blocked.has(String(item?.status || ''))) {
-      notify(`当前状态「${statusText(item.status)}」不可删除，请先停止后再删除。`, true);
+      notify(`?????${statusText(item.status)}???????????????`, true);
       return;
     }
-    if (!window.confirm(`确认删除此研究任务？\n${proposalId}\n将级联删除相关候选记录。`)) return;
+    if (!window.confirm(`??????????\n${proposalId}\n????????????`)) return;
     await aiApi(`/proposals/${encodeURIComponent(proposalId)}`, { method: 'DELETE', timeoutMs: 20000 });
-    notify(`研究任务已删除`);
+    notify(`???????`);
     if (state.selectedProposalId === proposalId) {
       state.selectedProposalId = '';
       const panel = document.getElementById('ai-detail-panel');
-      if (panel) panel.innerHTML = '<div class="ai-detail-placeholder"><div style="font-size:36px;opacity:.3;">📊</div><div style="margin-top:10px;color:#6b7fa0;font-size:13px;">点击候选策略卡片<br>查看详细分析与注册</div></div>';
+      if (panel) panel.innerHTML = '<div class="ai-detail-placeholder"><div style="font-size:36px;opacity:.3;">馃搳</div><div style="margin-top:10px;color:#6b7fa0;font-size:13px;">鐐瑰嚮鍊欓€夌瓥鐣ュ崱鐗?br>鏌ョ湅璇︾粏鍒嗘瀽涓庢敞鍐?/div></div>';
     }
     await refreshWorkbench('', '');
   }
 
-  /* ══════════════════════════════════════════════════════════════
-     事件绑定
-  ══════════════════════════════════════════════════════════════ */
+  /* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+     浜嬩欢缁戝畾
+  鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲 */
   function bindEvents() {
-    /* 生成研究 */
+    /* 鐢熸垚鐮旂┒ */
     document.getElementById('ai-generate-btn')?.addEventListener('click', () =>
-      generateProposal().catch(err => notify(`生成失败: ${err.message}`, true)));
+      generateProposal().catch(err => notify(`鐢熸垚澶辫触: ${err.message}`, true)));
+    document.getElementById('ai-oneclick-btn')?.addEventListener('click', () =>
+      runOneClickResearchDeploy().catch(err => notify(`一键执行失败: ${err.message}`, true)));
 
-    /* AI辅助研究规划 */
+    /* AI杈呭姪鐮旂┒瑙勫垝 */
     document.getElementById('ai-context-btn')?.addEventListener('click', () =>
-      generateAIContext().catch(err => notify(`AI辅助失败: ${err.message}`, true)));
+      generateAIContext().catch(err => notify(`AI杈呭姪澶辫触: ${err.message}`, true)));
 
-    /* 待审批队列事件代理 */
+    /* 寰呭鎵归槦鍒椾簨浠朵唬鐞?*/
     document.getElementById('ai-approval-list')?.addEventListener('click', e => {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
@@ -2493,45 +2557,45 @@
       const action = String(btn.dataset.action || '').trim();
       if (action === 'human-approve' && cid) {
         const target = String(btn.dataset.target || 'paper');
-        humanApprove(cid, target).catch(err => notify(`批准失败: ${err.message}`, true));
+        humanApprove(cid, target).catch(err => notify(`鎵瑰噯澶辫触: ${err.message}`, true));
       }
       if (action === 'human-reject' && cid) {
-        humanReject(cid).catch(err => notify(`拒绝失败: ${err.message}`, true));
+        humanReject(cid).catch(err => notify(`鎷掔粷澶辫触: ${err.message}`, true));
       }
       if (action === 'quick-register' && cid) {
         e.stopPropagation();
-        quickRegister(cid).catch(err => notify(`快速注册失败: ${err.message}`, true));
+        quickRegister(cid).catch(err => notify(`蹇€熸敞鍐屽け璐? ${err.message}`, true));
       }
     });
 
-    /* 刷新 */
+    /* 鍒锋柊 */
     document.getElementById('ai-refresh-btn')?.addEventListener('click', () =>
-      refreshWorkbench().catch(err => notify(`刷新失败: ${err.message}`, true)));
+      refreshWorkbench().catch(err => notify(`鍒锋柊澶辫触: ${err.message}`, true)));
     document.getElementById('ai-data-refresh-btn')?.addEventListener('click', () =>
-      loadDataReadiness().catch(err => notify(`数据诊断失败: ${err.message}`, true)));
+      loadDataReadiness().catch(err => notify(`鏁版嵁璇婃柇澶辫触: ${err.message}`, true)));
     document.getElementById('ai-news-pull-btn')?.addEventListener('click', () =>
-      pullNewsForResearch().catch(err => notify(`新闻拉取失败: ${err.message}`, true)));
+      pullNewsForResearch().catch(err => notify(`鏂伴椈鎷夊彇澶辫触: ${err.message}`, true)));
     document.getElementById('ai-funding-warm-btn')?.addEventListener('click', () =>
-      warmFundingForResearch().catch(err => notify(`宏观缓存预热失败: ${err.message}`, true)));
+      warmFundingForResearch().catch(err => notify(`瀹忚缂撳瓨棰勭儹澶辫触: ${err.message}`, true)));
     document.getElementById('ai-live-decision-save-btn')?.addEventListener('click', () =>
-      saveLiveDecisionRuntimeConfig().catch(err => notify(`AI实盘决策保存失败: ${err.message}`, true)));
+      saveLiveDecisionRuntimeConfig().catch(err => notify(`AI瀹炵洏鍐崇瓥淇濆瓨澶辫触: ${err.message}`, true)));
     document.getElementById('ai-planner-symbols')?.addEventListener('change', () =>
       loadDataReadiness().catch(() => {}));
     document.getElementById('run-exchange')?.addEventListener('change', () =>
       loadDataReadiness().catch(() => {}));
 
-    /* 运行研究 */
+    /* 杩愯鐮旂┒ */
     document.getElementById('run-selected-btn')?.addEventListener('click', () =>
-      runProposal(state.selectedProposalId).catch(err => notify(`运行失败: ${err.message}`, true)));
+      runProposal(state.selectedProposalId).catch(err => notify(`杩愯澶辫触: ${err.message}`, true)));
     document.getElementById('ai-compare-btn')?.addEventListener('click', () => openCompareModal());
 
-    /* 信号刷新 */
+    /* 淇″彿鍒锋柊 */
     document.getElementById('signal-refresh-btn')?.addEventListener('click', () =>
-      loadSignal().catch(err => notify(`信号失败: ${err.message}`, true)));
+      loadSignal().catch(err => notify(`淇″彿澶辫触: ${err.message}`, true)));
     document.getElementById('signal-symbol')?.addEventListener('change', (e) =>
       loadSignal(e.target.value).catch(() => {}));
 
-    /* 信号面板折叠 */
+    /* 淇″彿闈㈡澘鎶樺彔 */
     document.getElementById('signal-panel-toggle')?.addEventListener('click', () => {
       state.signalPanelCollapsed = !state.signalPanelCollapsed;
       const body   = document.getElementById('signal-panel-body');
@@ -2540,7 +2604,7 @@
       if (toggle) toggle.classList.toggle('collapsed', state.signalPanelCollapsed);
     });
 
-    /* 注册 Modal 关闭 */
+    /* 娉ㄥ唽 Modal 鍏抽棴 */
     document.getElementById('ai-register-close')?.addEventListener('click', () => {
       document.getElementById('ai-register-modal').style.display = 'none';
     });
@@ -2557,7 +2621,7 @@
       if (modal && e.target === modal) modal.style.display = 'none';
     });
 
-    /* 研究队列点击代理 */
+    /* 鐮旂┒闃熷垪鐐瑰嚮浠ｇ悊 */
     document.getElementById('ai-proposal-list')?.addEventListener('click', e => {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
@@ -2576,39 +2640,39 @@
       if (action === 'run-proposal' && pid) {
         e.stopPropagation();
         state.selectedProposalId = pid;
-        runProposal(pid).catch(err => notify(`运行失败: ${err.message}`, true));
+        runProposal(pid).catch(err => notify(`杩愯澶辫触: ${err.message}`, true));
         return;
       }
       if (action === 'cancel-proposal' && pid) {
         e.stopPropagation();
         state.selectedProposalId = pid;
-        cancelProposal(pid).catch(err => notify(`取消失败: ${err.message}`, true));
+        cancelProposal(pid).catch(err => notify(`鍙栨秷澶辫触: ${err.message}`, true));
         return;
       }
       if (action === 'delete-proposal' && pid) {
         e.stopPropagation();
-        deleteProposal(pid).catch(err => notify(`删除失败: ${err.message}`, true));
+        deleteProposal(pid).catch(err => notify(`鍒犻櫎澶辫触: ${err.message}`, true));
         return;
       }
       if (action === 'retire-proposal' && pid) {
         e.stopPropagation();
-        retireProposal(pid).catch(err => notify(`退役失败: ${err.message}`, true));
+        retireProposal(pid).catch(err => notify(`閫€褰瑰け璐? ${err.message}`, true));
       }
     });
 
-    /* 排序 */
+    /* 鎺掑簭 */
     document.getElementById('cand-sort-select')?.addEventListener('change', e => {
       state.sortBy = String(e.target.value || 'score');
       renderCandidateCards();
     });
 
-    /* 类别筛选 */
+    /* 绫诲埆绛涢€?*/
     document.getElementById('cand-filter-category')?.addEventListener('change', e => {
       state.filterCategory = String(e.target.value || '');
       renderCandidateCards();
     });
 
-    /* 候选卡片点击代理 */
+    /* 鍊欓€夊崱鐗囩偣鍑讳唬鐞?*/
     document.getElementById('ai-candidate-cards')?.addEventListener('click', e => {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
@@ -2619,12 +2683,12 @@
         const card = e.target.closest('.research-candidate-card');
         const id   = String(card?.dataset?.candidateId || cid || '').trim();
         if (!id) return;
-        viewCandidate(id).catch(err => notify(`加载详情失败: ${err.message}`, true));
+        viewCandidate(id).catch(err => notify(`鍔犺浇璇︽儏澶辫触: ${err.message}`, true));
         return;
       }
       if (action === 'view-candidate' && cid) {
         e.stopPropagation();
-        viewCandidate(cid).catch(err => notify(`加载详情失败: ${err.message}`, true));
+        viewCandidate(cid).catch(err => notify(`鍔犺浇璇︽儏澶辫触: ${err.message}`, true));
         return;
       }
       if (action === 'toggle-compare' && cid) {
@@ -2634,14 +2698,14 @@
       }
       if (action === 'open-register' && cid) {
         e.stopPropagation();
-        openRegisterModal(cid).catch(err => notify(`打开注册失败: ${err.message}`, true));
+        openRegisterModal(cid).catch(err => notify(`鎵撳紑娉ㄥ唽澶辫触: ${err.message}`, true));
       }
     });
   }
 
-  /* ══════════════════════════════════════════════════════════════
-     轮询
-  ══════════════════════════════════════════════════════════════ */
+  /* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+     杞
+  鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲 */
   function startPolling() {
     clearInterval(state.signalTimer);
     clearInterval(state.refreshTimer);
@@ -2716,16 +2780,16 @@
     });
   }
 
-  /* ══════════════════════════════════════════════════════════════
-     初始化
-  ══════════════════════════════════════════════════════════════ */
+  /* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+     鍒濆鍖?
+  鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲 */
   function init() {
-    if (!document.getElementById('ai-candidate-cards')) return;  // tab 未激活时跳过
+    if (!document.getElementById('ai-candidate-cards')) return;  // tab 鏈縺娲绘椂璺宠繃
     bindLayoutSync();
     syncHubLayoutHeight();
     bindEvents();
     normalizeDomText(document.getElementById('ai-research'));
-    refreshWorkbench().catch(err => console.error('AI研究初始化失败:', err));
+    refreshWorkbench().catch(err => console.error('AI鐮旂┒鍒濆鍖栧け璐?', err));
     if (isAiResearchActive()) startPolling();
   }
 
@@ -2735,16 +2799,16 @@
     Object.values(state.jobPollingTimers).forEach(t => clearInterval(t));
   });
 
-  /* ══════════════════════════════════════════════════════════════
-     Phase A — 实时信号面板（30s 轮询）
-  ══════════════════════════════════════════════════════════════ */
+  /* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+     Phase A 鈥?瀹炴椂淇″彿闈㈡澘锛?0s 杞锛?
+  鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲 */
 
   async function loadLiveSignals() {
     try {
       const res = await aiApi('/live-signals', { timeoutMs: 20000 });
       renderLiveSignalPanel(res?.items || [], !!res?.ml_model_loaded);
     } catch (e) {
-      /* silent — non-critical */
+      /* silent 鈥?non-critical */
     }
   }
 
@@ -2752,28 +2816,28 @@
     const el = document.getElementById('ai-live-signals-panel');
     if (!el) return;
 
-    // ML 未激活提示（仅在有运行候选时显示）
+    // ML 鏈縺娲绘彁绀猴紙浠呭湪鏈夎繍琛屽€欓€夋椂鏄剧ず锛?
     const mlNote = (items.length > 0 && !mlLoaded)
-      ? '<div style="font-size:10px;color:#78350f;background:#451a03;border-radius:4px;padding:2px 6px;margin-bottom:4px;">ML组件未激活（需训练模型），信号仅用 LLM+Factor</div>'
+      ? '<div style="font-size:10px;color:#78350f;background:#451a03;border-radius:4px;padding:2px 6px;margin-bottom:4px;">ML缁勪欢鏈縺娲伙紙闇€璁粌妯″瀷锛夛紝淇″彿浠呯敤 LLM+Factor</div>'
       : '';
 
     if (!items.length) {
-      el.innerHTML = '<div style="font-size:11px;color:#6b7fa0;padding:6px 0;">暂无运行中候选</div>';
+      el.innerHTML = '<div style="font-size:11px;color:#6b7fa0;padding:6px 0;">???????</div>';
       return;
     }
 
-    const dirIcon  = d => d === 'LONG' ? '▲' : d === 'SHORT' ? '▼' : '─';
+    const dirIcon  = d => d === 'LONG' ? '?' : d === 'SHORT' ? '?' : '?';
     const dirColor = d => d === 'LONG' ? '#4ade80' : d === 'SHORT' ? '#f87171' : '#6b7fa0';
     const pct      = v => ((v || 0) * 100).toFixed(0) + '%';
 
     el.innerHTML = mlNote + items.map(item => {
       const sig  = item.signal;
-      if (!sig) return `<div class="live-sig-row"><span style="color:#6b7fa0;font-size:11px">${esc(item.strategy)} — 信号错误</span></div>`;
+      if (!sig) return `<div class="live-sig-row"><span style="color:#6b7fa0;font-size:11px">${esc(item.strategy)} - ????</span></div>`;
       const comp = sig.components || {};
       const blockedBadge   = sig.blocked_by_risk
-        ? `<span class="live-sig-badge" style="background:#7f1d1d;color:#fca5a5;" title="${esc(sig.risk_reason)}">风控</span>` : '';
+        ? `<span class="live-sig-badge" style="background:#7f1d1d;color:#fca5a5;" title="${esc(sig.risk_reason)}">椋庢帶</span>` : '';
       const approvalBadge  = (sig.requires_approval && !sig.blocked_by_risk)
-        ? `<span class="live-sig-badge" style="background:#78350f;color:#fcd34d;">待审</span>` : '';
+        ? `<span class="live-sig-badge" style="background:#78350f;color:#fcd34d;">寰呭</span>` : '';
 
       return `<div class="live-sig-row">
   <div class="live-sig-header">
@@ -2786,69 +2850,69 @@
     ${['llm', 'ml', 'factor'].map(k => {
       const c = comp[k] || {};
       const mlOffline = k === 'ml' && !mlLoaded;
-      return `<span class="live-sig-bar-label"${mlOffline ? ' style="opacity:.45"' : ''}>${k.toUpperCase()}${mlOffline ? '⊘' : ''}</span>`
-           + `<span style="color:${mlOffline ? '#6b7fa0' : dirColor(c.direction)};font-size:10px">${mlOffline ? '─' : dirIcon(c.direction || 'FLAT')}</span>`
+      return `<span class="live-sig-bar-label"${mlOffline ? ' style="opacity:.45"' : ''}>${k.toUpperCase()}${mlOffline ? '?' : ''}</span>`
+           + `<span style="color:${mlOffline ? '#6b7fa0' : dirColor(c.direction)};font-size:10px">${mlOffline ? '鈹€' : dirIcon(c.direction || 'FLAT')}</span>`
            + `<span style="font-size:10px;min-width:26px;text-align:right;${mlOffline ? 'opacity:.45' : ''}">${mlOffline ? '--' : pct(c.confidence)}</span>`;
     }).join('')}
-    <span style="font-size:10px;color:#6b7fa0;margin-left:4px">合计</span>
+    <span style="font-size:10px;color:#6b7fa0;margin-left:4px">鍚堣</span>
     <span style="font-size:11px;font-weight:600">${pct(sig.confidence)}</span>
   </div>
 </div>`;
     }).join('');
   }
 
-  /* ══════════════════════════════════════════════════════════════
-     Phase B — 快速注册
-  ══════════════════════════════════════════════════════════════ */
+  /* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+     Phase B 鈥?蹇€熸敞鍐?
+  鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲 */
 
   async function quickRegister(candidateId, allocationPct = 0.05) {
-    if (!confirm(`确认将候选 ${candidateId.slice(0, 8)} 快速注册为纸盘交易，分配 ${(allocationPct * 100).toFixed(0)}% 仓位？`)) return;
+    if (!confirm(`????? ${candidateId.slice(0, 8)} ???????????? ${(allocationPct * 100).toFixed(0)}% ???`)) return;
     try {
       const result = await aiApi(`/candidates/${encodeURIComponent(candidateId)}/quick-register`, {
         method: 'POST',
         body: JSON.stringify({ allocation_pct: allocationPct }),
         timeoutMs: 30000,
       });
-      const stratName = result?.registered_strategy_name || result?.runtime_status || '纸盘';
-      notify(`已快速注册为纸盘: ${stratName}（${(allocationPct * 100).toFixed(0)}%）`);
+      const stratName = result?.registered_strategy_name || result?.runtime_status || '??';
+      notify(`????????: ${stratName}?${(allocationPct * 100).toFixed(0)}%?`);
       await refreshWorkbench('', candidateId);
     } catch (err) {
-      notify(`快速注册失败: ${err.message}`, true);
+      notify(`蹇€熸敞鍐屽け璐? ${err.message}`, true);
     }
   }
 
-  /* ── Phase D — 订单预览 ───────────────────────────────────────────────────── */
+  /* 鈹€鈹€ Phase D 鈥?璁㈠崟棰勮 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 
   async function showOrderPreview(candidateId) {
     const btn = document.getElementById('btn-order-preview');
     const resultEl = document.getElementById('ai-order-preview-result');
-    if (btn) { btn.disabled = true; btn.textContent = '计算中...'; }
+    if (btn) { btn.disabled = true; btn.textContent = '???...'; }
     try {
       const r = await aiApi(`/candidates/${encodeURIComponent(candidateId)}/order-preview`, {
         method: 'POST',
         timeoutMs: 15000,
       });
       const dirColor = r.direction === 'LONG' ? '#4ade80' : r.direction === 'SHORT' ? '#f87171' : '#94a3b8';
-      const dirIcon  = d => d === 'LONG' ? '▲' : d === 'SHORT' ? '▼' : '─';
+      const dirIcon  = d => d === 'LONG' ? '?' : d === 'SHORT' ? '?' : '?';
       const pct = v => (v * 100).toFixed(1) + '%';
       const comp = r.components || {};
       const blockedHtml = r.blocked_by_risk
-        ? `<div style="color:#f87171;margin-top:8px;font-size:12px;">⚠ 风控拦截：${esc(r.risk_reason || '')}</div>` : '';
+        ? `<div style="color:#f87171;margin-top:8px;font-size:12px;">? ?????${esc(r.risk_reason || '')}</div>` : '';
       const approvalHtml = (r.requires_approval && !r.blocked_by_risk)
-        ? `<div style="color:#fcd34d;margin-top:8px;font-size:12px;">⚠ 置信度不足（${pct(r.confidence)}），建议人工确认</div>` : '';
+        ? `<div style="color:#fcd34d;margin-top:8px;font-size:12px;">? ??????${pct(r.confidence)}????????</div>` : '';
 
       const html = `
 <div style="font-size:13px;line-height:1.6;">
   <div style="font-size:16px;font-weight:700;color:${dirColor};margin-bottom:10px;">
-    ${dirIcon(r.direction)} ${r.direction} &nbsp; <span style="font-size:13px;font-weight:500;">置信度 ${pct(r.confidence)}</span>
+    ${dirIcon(r.direction)} ${r.direction} &nbsp; <span style="font-size:13px;font-weight:500;">缃俊搴?${pct(r.confidence)}</span>
   </div>
   <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px;">
-    <tr><td style="color:#7e92b2;padding:2px 0;">标的</td><td style="font-weight:600;">${esc(r.symbol)}</td></tr>
-    <tr><td style="color:#7e92b2;padding:2px 0;">建议仓位</td><td>${r.size_usdt.toLocaleString()} USDT（${pct(r.allocation_pct)}）</td></tr>
-    <tr><td style="color:#7e92b2;padding:2px 0;">止损</td><td>${pct(r.stop_loss_pct)}</td></tr>
-    <tr><td style="color:#7e92b2;padding:2px 0;">止盈</td><td>${pct(r.take_profit_pct)}</td></tr>
+    <tr><td style="color:#7e92b2;padding:2px 0;">鏍囩殑</td><td style="font-weight:600;">${esc(r.symbol)}</td></tr>
+    <tr><td style="color:#7e92b2;padding:2px 0;">寤鸿浠撲綅</td><td>${r.size_usdt.toLocaleString()} USDT锛${pct(r.allocation_pct)}锛?/td></tr>
+    <tr><td style="color:#7e92b2;padding:2px 0;">姝㈡崯</td><td>${pct(r.stop_loss_pct)}</td></tr>
+    <tr><td style="color:#7e92b2;padding:2px 0;">姝㈢泩</td><td>${pct(r.take_profit_pct)}</td></tr>
   </table>
-  <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">信号分解</div>
+  <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">淇″彿鍒嗚В</div>
   <div style="display:flex;gap:6px;margin-bottom:8px;">
     ${['llm', 'ml', 'factor'].map(k => {
       const c = comp[k] || {};
@@ -2869,19 +2933,147 @@
         resultEl.style.display = 'block';
       }
     } catch (err) {
-      notify(`订单预览失败: ${err.message}`, true);
+      notify(`璁㈠崟棰勮澶辫触: ${err.message}`, true);
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = '生成订单预览'; }
+      if (btn) { btn.disabled = false; btn.textContent = '鐢熸垚璁㈠崟棰勮'; }
     }
   }
 
-  /* 暴露给外部调用（兼容旧代码） */
+  /* 鏆撮湶缁欏閮ㄨ皟鐢紙鍏煎鏃т唬鐮侊級 */
   window.AI = {
-    viewCandidate:   id => viewCandidate(id).catch(err => notify(`加载详情失败: ${err.message}`, true)),
-    openRegister:    id => openRegisterModal(id).catch(err => notify(`打开注册失败: ${err.message}`, true)),
-    runProposal:     id => runProposal(id).catch(err => notify(`运行失败: ${err.message}`, true)),
+    viewCandidate:   id => viewCandidate(id).catch(err => notify(`鍔犺浇璇︽儏澶辫触: ${err.message}`, true)),
+    openRegister:    id => openRegisterModal(id).catch(err => notify(`鎵撳紑娉ㄥ唽澶辫触: ${err.message}`, true)),
+    runProposal:     id => runProposal(id).catch(err => notify(`杩愯澶辫触: ${err.message}`, true)),
     toggleCompare:   id => toggleCandidateCompare(id),
     showComparePanel: () => openCompareModal(),
     refreshWorkbench,
   };
+
+  // 鈹€鈹€ Step 6: AI鑷不浠ｇ悊鎺у埗闈㈡澘 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+
+  async function loadAgentStatus() {
+    try {
+      const r = await rootApi('/ai/autonomous-agent/status');
+      _renderAgentPanel(r.status || {}, r.config || {});
+    } catch(e) { /* silent */ }
+  }
+
+  function _renderAgentPanel(status, cfg) {
+    const dot  = document.getElementById('ai-agent-status-dot');
+    const info = document.getElementById('ai-agent-info');
+    if (!dot || !info) return;
+
+    const running = Boolean(status.running);
+    dot.className = `agent-dot ${running ? 'agent-dot-on' : 'agent-dot-off'}`;
+    dot.title = running ? '???' : '???';
+
+    const tickCount = Number(status.tick_count || 0);
+    const submitted = Number(status.submitted_count || 0);
+    const lastRunAt = status.last_run_at ? status.last_run_at.slice(0, 19) : '??';
+    const lastErr   = status.last_error ? `<span style="color:#f87171"> | ??: ${status.last_error}</span>` : '';
+    const allowLive = cfg.allow_live
+      ? '<span style="color:#f87171">鍚疄鐩?/span>'
+      : '<span style="color:#94a3b8">浠呯焊鐩?/span>';
+
+    info.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;font-size:11px;">
+        <span style="color:var(--text-muted)">Provider</span>
+        <span>${cfg.provider || '-'}/${(cfg.model||'-').split('-').slice(-1)[0]}</span>
+        <span style="color:var(--text-muted)">妯″紡</span><span>${allowLive}</span>
+        <span style="color:var(--text-muted)">杩愯娆℃暟</span><span>${tickCount}</span>
+        <span style="color:var(--text-muted)">宸叉彁浜?/span><span>${submitted}</span>
+        <span style="color:var(--text-muted)">鏈€鍚庤繍琛?/span><span>${lastRunAt}${lastErr}</span>
+      </div>`;
+
+    const startBtn = document.getElementById('ai-agent-start-btn');
+    const stopBtn  = document.getElementById('ai-agent-stop-btn');
+    if (startBtn) startBtn.disabled = running;
+    if (stopBtn)  stopBtn.disabled  = !running;
+  }
+
+  async function _loadAgentJournal() {
+    const el = document.getElementById('ai-agent-journal');
+    if (!el) return;
+    try {
+      const r = await rootApi('/ai/autonomous-agent/journal?limit=15');
+      const rows = (r.items || []).slice().reverse();
+      if (!rows.length) { el.innerHTML = '<div style="color:var(--text-muted)">鏆傛棤鏃ュ織</div>'; return; }
+      el.innerHTML = rows.map(row => {
+        const ts = (row.ts || row.timestamp || '').slice(0, 19);
+        const action = row.action || row.trigger || row.event || '?';
+        const detail = String(row.decision || row.result || row.error || '').slice(0, 80);
+        const color  = (row.error || String(action).includes('error')) ? '#f87171' : 'var(--text-muted)';
+        return `<div class="agent-journal-row">
+          <span class="agent-journal-ts">${ts}</span>
+          <span class="agent-journal-action" style="color:${color}"> ${action}</span>
+          <span class="agent-journal-detail"> ${detail}</span>
+        </div>`;
+      }).join('');
+    } catch(e) {
+      el.innerHTML = '<div style="color:var(--text-muted)">鏃ュ織鍔犺浇澶辫触</div>';
+    }
+  }
+
+  // Journal expand on <details> toggle
+  document.addEventListener('DOMContentLoaded', () => {
+    const agentCard = document.getElementById('ai-agent-card');
+    if (agentCard) {
+      const det = agentCard.querySelector('details');
+      if (det) det.addEventListener('toggle', () => { if (det.open) _loadAgentJournal(); });
+    }
+  });
+
+  async function agentStart() {
+    const btn = document.getElementById('ai-agent-start-btn');
+    const saved = btn ? btn.innerHTML : '鍚姩';
+    if (btn) { btn.disabled = true; btn.textContent = '鍚姩涓?..'; }
+    try {
+      await rootApi('/ai/autonomous-agent/start', { method: 'POST', body: JSON.stringify({ enable: true }) });
+      notify('AI???????');
+      await loadAgentStatus();
+    } catch(e) {
+      notify(`鍚姩澶辫触: ${e.message}`, true);
+      if (btn) { btn.disabled = false; btn.innerHTML = saved; }
+    }
+  }
+
+  async function agentStop() {
+    const btn = document.getElementById('ai-agent-stop-btn');
+    const saved = btn ? btn.innerHTML : '鍋滄';
+    if (btn) { btn.disabled = true; btn.textContent = '鍋滄涓?..'; }
+    try {
+      await rootApi('/ai/autonomous-agent/stop', { method: 'POST' });
+      notify('AI???????');
+      await loadAgentStatus();
+    } catch(e) {
+      notify(`鍋滄澶辫触: ${e.message}`, true);
+      if (btn) { btn.disabled = false; btn.innerHTML = saved; }
+    }
+  }
+
+  async function agentRunOnce() {
+    const btn = document.getElementById('ai-agent-run-once-btn');
+    const saved = btn ? btn.innerHTML : '鍗曟杩愯';
+    if (btn) { btn.disabled = true; btn.textContent = '杩愯涓?..'; }
+    try {
+      const r = await rootApi('/ai/autonomous-agent/run-once', { method: 'POST', body: JSON.stringify({}) });
+      const decision = r.result?.decision || r.result?.action || 'done';
+      notify(`鍗曟杩愯瀹屾垚: ${decision}`);
+      await loadAgentStatus();
+    } catch(e) {
+      notify(`杩愯澶辫触: ${e.message}`, true);
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = saved; }
+    }
+  }
+
+  // Expose for HTML onclick
+  window.agentStart   = agentStart;
+  window.agentStop    = agentStop;
+  window.agentRunOnce = agentRunOnce;
+
+  // Poll every 30s; also auto-refresh on workbench refresh
+  loadAgentStatus().catch(() => {});
+  setInterval(loadAgentStatus, 30000);
+
 })();

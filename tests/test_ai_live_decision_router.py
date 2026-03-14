@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
+
+import pytest
 
 from config.settings import settings
 from core.ai.live_decision_router import LiveAIDecisionRouter
+
+
+@pytest.fixture(autouse=True)
+def _isolate_overlay(tmp_path, monkeypatch):
+    """Redirect overlay path to a temp dir so tests don't pollute data/ or each other."""
+    import core.ai.live_decision_router as _mod
+    monkeypatch.setattr(_mod, "_OVERLAY_PATH", tmp_path / "ai_runtime_config.json")
 
 
 def _evaluate(router: LiveAIDecisionRouter):
@@ -121,3 +132,54 @@ def test_update_runtime_config_roundtrip():
     assert updated["temperature"] == 0.15
     assert updated["fail_open"] is False
     assert updated["apply_in_paper"] is True
+
+
+# ── Step 4 回归：运行时配置持久化 ────────────────────────────────────────────
+
+def test_runtime_config_persists_to_overlay(tmp_path, monkeypatch):
+    """update_runtime_config writes overlay JSON that is reloaded by a new router."""
+    overlay_path = tmp_path / "ai_runtime_config.json"
+    monkeypatch.setattr("core.ai.live_decision_router._OVERLAY_PATH", overlay_path)
+
+    router = LiveAIDecisionRouter()
+    asyncio.run(router.update_runtime_config(enabled=True, mode="enforce", provider="claude"))
+
+    assert overlay_path.exists(), "overlay file should have been created"
+    data = json.loads(overlay_path.read_text())
+    assert data["AI_LIVE_DECISION_ENABLED"] is True
+    assert data["AI_LIVE_DECISION_MODE"] == "enforce"
+    assert data["AI_LIVE_DECISION_PROVIDER"] == "claude"
+
+    # New router instance should pick up the persisted values
+    router2 = LiveAIDecisionRouter()
+    cfg = router2.get_runtime_config()
+    assert cfg["enabled"] is True
+    assert cfg["mode"] == "enforce"
+    assert cfg["provider"] == "claude"
+
+
+def test_runtime_config_corrupt_overlay_safe_start(tmp_path, monkeypatch):
+    """A corrupt overlay file must not prevent the router from starting."""
+    overlay_path = tmp_path / "ai_runtime_config.json"
+    overlay_path.write_text("{ not valid json !!!", encoding="utf-8")
+    monkeypatch.setattr("core.ai.live_decision_router._OVERLAY_PATH", overlay_path)
+
+    router = LiveAIDecisionRouter()  # must not raise
+    cfg = router.get_runtime_config()
+    # Falls back to settings defaults (enabled=False is the default)
+    assert isinstance(cfg, dict)
+    assert "enabled" in cfg
+
+
+def test_runtime_config_overlay_does_not_store_api_keys(tmp_path, monkeypatch):
+    """API key fields must never be written to the overlay."""
+    overlay_path = tmp_path / "ai_runtime_config.json"
+    monkeypatch.setattr("core.ai.live_decision_router._OVERLAY_PATH", overlay_path)
+
+    router = LiveAIDecisionRouter()
+    # Force an internal override with a key-like entry to simulate accidental injection
+    router._override["ZHIPU_API_KEY"] = "secret"
+    router._save_overlay()
+
+    data = json.loads(overlay_path.read_text())
+    assert "ZHIPU_API_KEY" not in data, "API keys must not be persisted to overlay"
