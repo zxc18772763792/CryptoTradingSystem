@@ -654,18 +654,21 @@ const counts=payload?.strategy_trade_counts&&typeof payload.strategy_trade_count
 const strategyPairs=Object.entries(counts).map(([k,v])=>[String(k||''),Number(v||0)]).filter(([k,v])=>k&&Number.isFinite(v));
 strategyPairs.sort((a,b)=>b[1]-a[1]);
 const topStrategy=strategyPairs.length?`${strategyPairs[0][0]} (${strategyPairs[0][1]})`:'--';
-summaryEl.innerHTML=`
+const summaryHtml=`
 <div class="live-review-chip"><span class="k">记录数</span><span class="v">${records.length}</span></div>
 <div class="live-review-chip"><span class="k">策略数</span><span class="v">${strategyPairs.length}</span></div>
 <div class="live-review-chip"><span class="k">Top策略</span><span class="v" title="${esc(topStrategy)}">${esc(topStrategy)}</span></div>`;
+if(summaryEl.innerHTML!==summaryHtml)summaryEl.innerHTML=summaryHtml;
 if(!records.length){
 const mode=String(state?._systemStatusLast?.trading_mode||'').toLowerCase();
 const hint=mode==='live'?'暂无实盘成交复盘记录':'当前为模拟盘，暂无实盘复盘记录';
-tbody.innerHTML=`<tr><td colspan="9">${esc(hint)}</td></tr>`;
+const hintHtml=`<tr><td colspan="9">${esc(hint)}</td></tr>`;
+if(tbody.innerHTML!==hintHtml)tbody.innerHTML=hintHtml;
+tbody.dataset.hasData='1';
 return;
 }
 const sorted=records.slice().sort((a,b)=>toMs(b?.timestamp)-toMs(a?.timestamp));
-tbody.innerHTML=sorted.map(row=>{
+const rowsHtml=sorted.map(row=>{
 const signal=row?.signal||{};
 const strategy=String(row?.strategy||signal?.strategy_name||'--');
 const strategyCount=Number(row?.strategy_trade_count||0);
@@ -691,6 +694,8 @@ return`<tr>
 <td>${orderId?`<span title="${esc(orderId)}">${esc(orderId.slice(0,18))}${orderId.length>18?'...':''}</span>`:'--'}</td>
 </tr>`;
 }).join('');
+if(tbody.innerHTML!==rowsHtml)tbody.innerHTML=rowsHtml;
+tbody.dataset.hasData='1';
 }
 
 async function loadLiveTradeReview(){
@@ -709,7 +714,8 @@ if(!force&&minIntervalMs>0&&loadLiveTradeReview._lastReqKey===reqKey&&now-Number
   return;
 }
 const tbody=document.getElementById('live-review-tbody');
-if(showLoading&&tbody)tbody.innerHTML='<tr><td colspan="9">加载中...</td></tr>';
+const hadStableData=!!(tbody&&tbody.dataset.hasData==='1');
+if(showLoading&&tbody&&!hadStableData)tbody.innerHTML='<tr><td colspan="9">加载中...</td></tr>';
 const task=(async()=>{
   try{
     let ep=`/trading/analytics/live-trade-review?hours=${hours}&limit=200`;
@@ -719,7 +725,7 @@ const task=(async()=>{
     loadLiveTradeReview._lastSuccessAt=Date.now();
     loadLiveTradeReview._lastReqKey=reqKey;
   }catch(e){
-    if(showLoading){
+    if(showLoading&&!hadStableData){
       const summaryEl=document.getElementById('live-review-summary');
       if(summaryEl)summaryEl.innerHTML=`<div class="live-review-chip"><span class="k">状态</span><span class="v">加载失败</span></div><div class="live-review-chip"><span class="k">原因</span><span class="v" title="${esc(e.message)}">${esc(e.message)}</span></div><div class="live-review-chip"><span class="k">建议</span><span class="v">稍后重试</span></div>`;
       if(tbody)tbody.innerHTML=`<tr><td colspan="9">复盘记录加载失败: ${esc(e.message)}</td></tr>`;
@@ -4812,10 +4818,63 @@ async function _loadMonitorData(name) {
 function _renderMonitorChart(data) {
     const chartEl = document.getElementById('strategy-monitor-chart');
     if (!chartEl || typeof Plotly === 'undefined') return;
+    const showChartMessage = (msg) => {
+        clearPlotlyHost(chartEl);
+        chartEl.dataset.monitorPlotMode = 'message';
+        chartEl.innerHTML = `<div style="color:var(--text-muted);padding:20px;text-align:center">${esc(msg)}</div>`;
+    };
 
-    const ohlcv   = data.ohlcv   || [];
-    const signals = data.signals || [];
-    const equity  = data.equity  || [];
+    const ohlcvRaw = Array.isArray(data?.ohlcv) ? data.ohlcv : [];
+    const signals  = Array.isArray(data?.signals) ? data.signals : [];
+    const equityRaw = Array.isArray(data?.equity) ? data.equity : [];
+    const ohlcv = ohlcvRaw.filter((b) => b && b.t != null && [b.o, b.h, b.l, b.c].every((v) => Number.isFinite(Number(v))));
+    const equityPts = equityRaw
+        .filter((e) => e && e.t != null && Number.isFinite(Number(e.v)))
+        .map((e) => ({ t: e.t, v: Number(e.v) }));
+    const hasPrice = ohlcv.length > 0;
+    const hasEquity = equityPts.length > 0;
+
+    if (!hasPrice && !hasEquity) {
+        showChartMessage('暂无可绘制的监控数据');
+        return;
+    }
+    const nextMode = !hasPrice ? 'equity-only' : (hasEquity ? 'price-equity' : 'price-only');
+    const prevMode = chartEl.dataset.monitorPlotMode || '';
+    if (prevMode && prevMode !== nextMode) clearPlotlyHost(chartEl);
+    preparePlotlyHost(chartEl);
+
+    // Equity-only fallback: avoid constructing multi-axis candlestick layout when price bars are absent.
+    if (!hasPrice && hasEquity) {
+        try {
+            Plotly.react(chartEl, [{
+                type: 'scatter',
+                mode: 'lines',
+                name: '权益曲线',
+                x: equityPts.map((e) => e.t),
+                y: equityPts.map((e) => e.v),
+                line: { color: '#60a5fa', width: 1.8 },
+                fill: 'tozeroy',
+                fillcolor: 'rgba(96,165,250,0.08)',
+                hovertemplate: '权益: %{y:.2f} U<br>时间: %{x}<extra></extra>',
+            }], {
+                paper_bgcolor: 'transparent',
+                plot_bgcolor: 'transparent',
+                font: { color: '#dfe9f7', size: 11 },
+                margin: { t: 16, b: 40, l: 60, r: 40 },
+                xaxis: { ...plotlyTimeAxis(), domain: [0, 1], rangeslider: { visible: false } },
+                yaxis: { gridcolor: '#283242', title: { text: '权益(U)', font: { size: 10 } } },
+                showlegend: true,
+                legend: { orientation: 'h', y: 1.04, x: 0, font: { size: 10 } },
+            }, {
+                responsive: true, displayModeBar: true,
+                modeBarButtonsToRemove: ['select2d', 'lasso2d'], displaylogo: false,
+            });
+            chartEl.dataset.monitorPlotMode = nextMode;
+        } catch (e) {
+            showChartMessage(`图表渲染失败: ${e.message}`);
+        }
+        return;
+    }
 
     const candleTrace = {
         type: 'candlestick',
@@ -4853,7 +4912,6 @@ function _renderMonitorChart(data) {
         xaxis: 'x', yaxis: 'y',
     };
 
-    const equityPts = equity.filter(e => e.t);
     const equityTrace = {
         type: 'scatter', mode: 'lines', name: '权益曲线',
         x: equityPts.map(e => e.t),
@@ -4864,17 +4922,14 @@ function _renderMonitorChart(data) {
         xaxis: 'x', yaxis: 'y2',
     };
 
-    const hasEquity = equityPts.length > 0;
-
     const layout = {
         paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
         font: { color: '#dfe9f7', size: 11 },
         margin: { t: 16, b: 40, l: 60, r: 40 },
-        xaxis:  { ...plotlyTimeAxis(), domain: [0, 1], anchor: 'y', rangeslider: { visible: false } },
+        xaxis:  { ...plotlyTimeAxis(), domain: [0, 1], rangeslider: { visible: false } },
         yaxis:  { domain: hasEquity ? [0.32, 1] : [0, 1], gridcolor: '#283242', title: { text: '价格', font: { size: 10 } } },
         ...(hasEquity ? {
-            xaxis2: { ...plotlyTimeAxis(), domain: [0, 1], anchor: 'y2' },
-            yaxis2: { domain: [0, 0.28], gridcolor: '#283242', title: { text: '权益(U)', font: { size: 10 } } },
+            yaxis2: { domain: [0, 0.28], anchor: 'x', gridcolor: '#283242', title: { text: '权益(U)', font: { size: 10 } } },
         } : {}),
         showlegend: true,
         legend: { orientation: 'h', y: 1.04, x: 0, font: { size: 10 } },
@@ -4888,8 +4943,9 @@ function _renderMonitorChart(data) {
             responsive: true, displayModeBar: true,
             modeBarButtonsToRemove: ['select2d', 'lasso2d'], displaylogo: false,
         });
+        chartEl.dataset.monitorPlotMode = nextMode;
     } catch (e) {
-        chartEl.innerHTML = `<div style="color:var(--text-muted);padding:20px;text-align:center">图表渲染失败: ${esc(e.message)}</div>`;
+        showChartMessage(`图表渲染失败: ${e.message}`);
     }
 }
 
