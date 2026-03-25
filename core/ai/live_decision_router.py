@@ -477,7 +477,8 @@ class LiveAIDecisionRouter:
             confidence = _coerce_float(payload.get("confidence", 0.5), 0.5, low=0.0, high=1.0)
             reason = str(payload.get("reason") or "model_decision").strip()[:140] or "model_decision"
             blocked = action == "block"
-            applied = bool(blocked and mode == "enforce")
+            reduce_only = action == "reduce_only"
+            applied = bool(mode == "enforce" and action in {"block", "reduce_only"})
             allowed = not blocked if mode == "enforce" else True
             latency_ms = int((time.perf_counter() - started) * 1000)
             return LiveDecisionOutcome(

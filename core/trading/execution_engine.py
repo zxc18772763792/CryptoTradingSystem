@@ -1370,7 +1370,9 @@ class ExecutionEngine:
                 trade_policy=trade_policy,
             )
             req.params["ai_live_decision"] = ai_decision
-            if str(ai_decision.get("action") or "").lower() == "block" and bool(ai_decision.get("applied")):
+            ai_action = str(ai_decision.get("action") or "").lower()
+            ai_applied = bool(ai_decision.get("applied"))
+            if ai_action == "block" and ai_applied:
                 self._signal_diagnostics["ai_rejected"] = int(self._signal_diagnostics.get("ai_rejected", 0)) + 1
                 reason = (
                     f"AI决策拦截({ai_decision.get('provider')}/{ai_decision.get('model')}): "
@@ -1418,6 +1420,73 @@ class ExecutionEngine:
                     )
                 )
                 return None
+            if ai_action == "reduce_only" and ai_applied:
+                req.reduce_only = True
+                req.params["ai_reduce_only"] = True
+                req.params["ai_reduce_only_reason"] = str(ai_decision.get("reason") or "")
+                if not closes_existing or existing_position is None:
+                    self._signal_diagnostics["ai_reduce_only_rejected"] = int(
+                        self._signal_diagnostics.get("ai_reduce_only_rejected", 0)
+                    ) + 1
+                    reason = (
+                        f"AI仅允许减仓({ai_decision.get('provider')}/{ai_decision.get('model')}): "
+                        f"{ai_decision.get('reason')}"
+                    )
+                    self._signal_diagnostics["last_result"] = {
+                        "status": "ai_reduce_only_rejected",
+                        "strategy": signal.strategy_name,
+                        "symbol": signal.symbol,
+                        "exchange": exchange,
+                        "reason": reason,
+                        "ai_decision": ai_decision,
+                    }
+                    self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                    rejected = await order_manager.record_rejected_order(
+                        request=req,
+                        reason=reason,
+                        price=quote_price or signal.price,
+                    )
+                    await self._notify_callbacks(
+                        "ai_decision_reduce_only_rejected",
+                        {
+                            "type": "strategy_signal",
+                            "symbol": signal.symbol,
+                            "strategy": signal.strategy_name,
+                            "reason": reason,
+                            "order_id": rejected.id,
+                            "ai_decision": ai_decision,
+                        },
+                    )
+                    await write_audit(
+                        GovernanceAuditEvent(
+                            module="trading.execution",
+                            action="ai_live_decision_reduce_only_rejected",
+                            status="denied",
+                            actor="system",
+                            role="SYSTEM",
+                            input_payload={
+                                "symbol": signal.symbol,
+                                "strategy": signal.strategy_name,
+                                "side": side.value,
+                                "order_value": float(order_value or 0.0),
+                            },
+                            output_payload={"reason": reason, "order_id": rejected.id, "ai_decision": ai_decision},
+                        )
+                    )
+                    return None
+
+                existing_qty = float(getattr(existing_position, "quantity", 0.0) or 0.0)
+                if existing_qty <= 0:
+                    return None
+                if float(req.amount or 0.0) > existing_qty:
+                    prev_amount = max(float(req.amount or 0.0), 1e-12)
+                    req.amount = existing_qty
+                    qty = existing_qty
+                    order_value = float(order_value or 0.0) * (existing_qty / prev_amount)
+                    self._signal_diagnostics["ai_reduce_only_adjusted"] = int(
+                        self._signal_diagnostics.get("ai_reduce_only_adjusted", 0)
+                    ) + 1
+                    req.params["ai_reduce_only_adjusted_amount"] = existing_qty
 
             governance_check = await decision_engine.evaluate_order_intent(
                 symbol=signal.symbol,
@@ -1601,13 +1670,14 @@ class ExecutionEngine:
                     if dist > 0:
                         current_position.trailing_stop_pct = None
 
+            exec_amount = float(order.filled or qty or 0.0)
             if side == OrderSide.BUY:
                 if current_position and current_position.side == PositionSide.LONG:
-                    total_qty = current_position.quantity + qty
+                    total_qty = current_position.quantity + exec_amount
                     if total_qty > 0:
                         current_position.entry_price = (
                             (current_position.entry_price * current_position.quantity)
-                            + (fill_price * qty)
+                            + (fill_price * exec_amount)
                         ) / total_qty
                     current_position.quantity = total_qty
                     current_position.margin = (
@@ -1615,13 +1685,42 @@ class ExecutionEngine:
                     ) / max(1e-9, float(current_position.leverage or leverage or 1.0))
                     _merge_protection_settings()
                     current_position.update_price(fill_price)
+                elif current_position and current_position.side == PositionSide.SHORT:
+                    close_qty = min(exec_amount, float(current_position.quantity or 0.0))
+                    prev_realized = float(current_position.realized_pnl or 0.0)
+                    closed = position_manager.close_position(
+                        exchange=exchange,
+                        symbol=signal.symbol,
+                        close_price=fill_price,
+                        quantity=close_qty,
+                        account_id=account_id,
+                    )
+                    if closed:
+                        trade_pnl += float(closed.realized_pnl or 0.0) - prev_realized
+                    remaining = max(0.0, exec_amount - close_qty)
+                    if remaining > 0 and not req.reduce_only:
+                        position_manager.open_position(
+                            exchange=exchange,
+                            symbol=signal.symbol,
+                            side=PositionSide.LONG,
+                            entry_price=fill_price,
+                            quantity=remaining,
+                            leverage=leverage,
+                            strategy=signal.strategy_name,
+                            account_id=account_id,
+                            stop_loss=req.stop_loss,
+                            take_profit=req.take_profit,
+                            trailing_stop_pct=req.trailing_stop_pct,
+                            trailing_stop_distance=req.trailing_stop_distance,
+                            metadata={"source": "strategy", "reduce_only": bool(req.reduce_only)},
+                        )
                 else:
                     position_manager.open_position(
                         exchange=exchange,
                         symbol=signal.symbol,
                         side=position_side,
                         entry_price=fill_price,
-                        quantity=qty,
+                        quantity=exec_amount,
                         leverage=leverage,
                         strategy=signal.strategy_name,
                         account_id=account_id,
@@ -1629,15 +1728,44 @@ class ExecutionEngine:
                         take_profit=req.take_profit,
                         trailing_stop_pct=req.trailing_stop_pct,
                         trailing_stop_distance=req.trailing_stop_distance,
-                        metadata={"source": "strategy"},
+                        metadata={"source": "strategy", "reduce_only": bool(req.reduce_only)},
                     )
             else:
-                if current_position and current_position.side == PositionSide.SHORT:
-                    total_qty = current_position.quantity + qty
+                if current_position and current_position.side == PositionSide.LONG:
+                    close_qty = min(exec_amount, float(current_position.quantity or 0.0))
+                    prev_realized = float(current_position.realized_pnl or 0.0)
+                    closed = position_manager.close_position(
+                        exchange=exchange,
+                        symbol=signal.symbol,
+                        close_price=fill_price,
+                        quantity=close_qty,
+                        account_id=account_id,
+                    )
+                    if closed:
+                        trade_pnl += float(closed.realized_pnl or 0.0) - prev_realized
+                    remaining = max(0.0, exec_amount - close_qty)
+                    if remaining > 0 and not req.reduce_only:
+                        position_manager.open_position(
+                            exchange=exchange,
+                            symbol=signal.symbol,
+                            side=PositionSide.SHORT,
+                            entry_price=fill_price,
+                            quantity=remaining,
+                            leverage=leverage,
+                            strategy=signal.strategy_name,
+                            account_id=account_id,
+                            stop_loss=req.stop_loss,
+                            take_profit=req.take_profit,
+                            trailing_stop_pct=req.trailing_stop_pct,
+                            trailing_stop_distance=req.trailing_stop_distance,
+                            metadata={"source": "strategy", "reduce_only": bool(req.reduce_only)},
+                        )
+                elif current_position and current_position.side == PositionSide.SHORT:
+                    total_qty = current_position.quantity + exec_amount
                     if total_qty > 0:
                         current_position.entry_price = (
                             (current_position.entry_price * current_position.quantity)
-                            + (fill_price * qty)
+                            + (fill_price * exec_amount)
                         ) / total_qty
                     current_position.quantity = total_qty
                     current_position.margin = (
@@ -1651,7 +1779,7 @@ class ExecutionEngine:
                         symbol=signal.symbol,
                         side=position_side,
                         entry_price=fill_price,
-                        quantity=qty,
+                        quantity=exec_amount,
                         leverage=leverage,
                         strategy=signal.strategy_name,
                         account_id=account_id,
@@ -1659,7 +1787,7 @@ class ExecutionEngine:
                         take_profit=req.take_profit,
                         trailing_stop_pct=req.trailing_stop_pct,
                         trailing_stop_distance=req.trailing_stop_distance,
-                        metadata={"source": "strategy"},
+                        metadata={"source": "strategy", "reduce_only": bool(req.reduce_only)},
                     )
 
             trade_pnl -= fee_usd
@@ -1669,7 +1797,7 @@ class ExecutionEngine:
                     "exchange": exchange,
                     "strategy": signal.strategy_name,
                     "side": side.value,
-                    "notional": float(qty * fill_price),
+                    "notional": float(exec_amount * fill_price),
                     "pnl": trade_pnl,
                     "fee_usd": fee_usd,
                     "slippage_cost_usd": slippage_cost_usd,
@@ -1680,7 +1808,7 @@ class ExecutionEngine:
                 exchange=exchange,
                 account_id=account_id,
                 side=side.value,
-                quantity=float(order.filled or qty or 0.0),
+                quantity=exec_amount,
                 fill_price=float(fill_price or 0.0),
                 order_id=order.id,
                 order_status=order.status.value,
@@ -1728,7 +1856,7 @@ class ExecutionEngine:
                         "symbol": signal.symbol,
                         "strategy": signal.strategy_name,
                         "side": side.value,
-                        "qty": float(qty),
+                        "qty": exec_amount,
                         "price": float(fill_price),
                     },
                     output_payload={

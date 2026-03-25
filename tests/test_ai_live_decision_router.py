@@ -73,6 +73,25 @@ def test_live_decision_enforce_block_applied(monkeypatch):
     assert result["mode"] == "enforce"
 
 
+def test_live_decision_enforce_reduce_only_applied(monkeypatch):
+    router = LiveAIDecisionRouter()
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_ENABLED", True, raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODE", "enforce", raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_PROVIDER", "codex", raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODEL", "gpt-5.4", raising=False)
+
+    async def _fake_call_provider(**kwargs):
+        return {"action": "reduce_only", "reason": "only de-risk here", "confidence": 0.71}
+
+    monkeypatch.setattr(router, "_call_provider", _fake_call_provider)
+
+    result = asyncio.run(_evaluate(router))
+    assert result["action"] == "reduce_only"
+    assert result["applied"] is True
+    assert result["allowed"] is True
+    assert result["mode"] == "enforce"
+
+
 def test_live_decision_fail_open(monkeypatch):
     router = LiveAIDecisionRouter()
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_ENABLED", True, raising=False)
