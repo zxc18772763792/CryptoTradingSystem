@@ -221,6 +221,45 @@
     return (state.runtimeConfig && state.runtimeConfig.ai_live_decision) || null;
   }
 
+  function safeJsonClone(value, fallback = null) {
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  function getWorkbenchSnapshot() {
+    return {
+      proposals: safeJsonClone(state.proposals, []),
+      candidates: safeJsonClone(state.candidates, []),
+      pendingApprovals: safeJsonClone(state.pendingApprovals, []),
+      runtimeConfig: safeJsonClone(state.runtimeConfig, null),
+      runtimeConfigLoaded: !!state.runtimeConfigLoaded,
+      selectedProposalId: String(state.selectedProposalId || ''),
+      selectedCandidateId: String(state.selectedCandidateId || ''),
+      latestSignals: safeJsonClone(state.latestSignals, {}),
+      actionLocks: safeJsonClone(state.actionLocks, {}),
+      sortBy: String(state.sortBy || 'score'),
+      filterCategory: String(state.filterCategory || ''),
+    };
+  }
+
+  function emitWorkbenchState(reason, extra = {}) {
+    if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
+    try {
+      window.dispatchEvent(new CustomEvent('ai-research:state', {
+        detail: {
+          reason: String(reason || 'update'),
+          snapshot: getWorkbenchSnapshot(),
+          ...extra,
+        },
+      }));
+    } catch (err) {
+      console.debug('emitWorkbenchState failed:', err);
+    }
+  }
+
   function renderRuntimeSummary() {
     const root = document.getElementById('ai-runtime-summary');
     if (!root) return;
@@ -243,6 +282,7 @@
     root.innerHTML = chips
       .map((chip) => `<span class="ai-runtime-chip ${chip.cls}">${esc(chip.label)}：${esc(chip.value)}</span>`)
       .join('');
+    emitWorkbenchState('runtime-summary');
   }
 
   function renderLiveDecisionRuntimeConfig() {
@@ -935,6 +975,7 @@
       state.latestSignals[sym] = data;
       renderSignalMini();
       renderCandidateCards();  // 更新卡片上的信号徽章
+      emitWorkbenchState('signal-mini', { symbol: sym });
       if (statusEl) statusEl.textContent = `刷新于${fmtTs(data?.timestamp || new Date().toISOString())}`;
     } catch (err) {
       if (statusEl) statusEl.textContent = `信号失败: ${err.message}`;
@@ -966,6 +1007,7 @@
     if (!state.proposals.length) {
       box.innerHTML = '<div style="color:#6b7fa0;font-size:12px;padding:8px 0;">暂无研究任务</div>';
       normalizeDomText(box);
+      emitWorkbenchState('proposal-list');
       return;
     }
     box.innerHTML = state.proposals.map((item, idx) => {
@@ -1010,6 +1052,7 @@
       </div>`;
     }).join('');
     normalizeDomText(box);
+    emitWorkbenchState('proposal-list');
   }
 
   function renderCandidateCards() {
@@ -1049,6 +1092,7 @@
       box.innerHTML = state.candidates.length
         ? `<div class="ai-empty-hint">当前类别筛选无结果，请调整筛选条件</div>`
         : `<div class="ai-empty-hint">暂无候选策略。<br>在左侧填写研究目标，点击 <strong>生成研究</strong>，<br>再选中研究任务并点击 <strong>▶ 运行研究</strong> 开始回测。</div>`;
+      emitWorkbenchState('candidate-cards');
       return;
     }
     box.innerHTML = visible.map(c => buildCandidateCard(c)).join('');
@@ -1056,6 +1100,7 @@
     normalizeDomText(box);
     refreshCompareToolbar();
     if (cnt) cnt.textContent = `${visible.length}/${totalCount}`;
+    emitWorkbenchState('candidate-cards');
   }
 
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1580,9 +1625,9 @@
           <span class="cand-score-badge ${color}" style="font-size:13px;">${score.toFixed(0)} \u5206</span>
         </div>
         <div style="font-size:12px;color:#7e92b2;">
-          ${esc(cand?.symbol || '--')} ? ${esc(cand?.timeframe || '--')} ? ${esc(statusText(cand?.status))}
+          ${esc(cand?.symbol || '--')} · ${esc(cand?.timeframe || '--')} · ${esc(statusText(cand?.status))}
         </div>
-        ${searchRoleMeta && championStrategy ? `<div style="font-size:11px;color:#7e92b2;margin-top:4px;">Search role: ${esc(searchRoleMeta.label)}${cand?.metadata?.search_role === 'challenger' ? ` 路 champion ${esc(championStrategy)}` : ''}</div>` : ''}
+        ${searchRoleMeta && championStrategy ? `<div style="font-size:11px;color:#7e92b2;margin-top:4px;">搜索角色：${esc(searchRoleMeta.label)}${cand?.metadata?.search_role === 'challenger' ? ` · 对照 champion ${esc(championStrategy)}` : ''}</div>` : ''}
         ${renderLifecycleStepper(cand?.status)}
       </div>
 
@@ -1804,7 +1849,7 @@
           await aiApi(`/candidates/${encodeURIComponent(candidateId)}/human-reject`, {
             method: 'POST', body: JSON.stringify({ notes }), timeoutMs: 15000,
           });
-          notify('研究提案已生成');
+          notify('候选已拒绝');
           await refreshWorkbench('', '');
         } catch (err) {
           notify(`拒绝失败: ${err.message}`, true);
@@ -1882,6 +1927,11 @@
         }
       });
     }
+    emitWorkbenchState('candidate-detail', {
+      candidateId: String(candidateId || ''),
+      proposalId,
+      experimentId,
+    });
   }
 
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2135,6 +2185,7 @@
       const res = await aiApi('/candidates/pending-approvals', { timeoutMs: 15000 });
       state.pendingApprovals = toArray(res?.items);
       renderApprovalQueue();
+      emitWorkbenchState('pending-approvals');
     } catch (err) {
       // Non-fatal — approval queue is best-effort
       console.debug('loadPendingApprovals failed:', err);
@@ -2333,6 +2384,7 @@
     await loadRuntimeConfig();
     await Promise.all([loadProposals(selectProposalId), loadCandidates(selectCandidateId), loadPendingApprovals(), loadDataReadiness().catch(() => null)]);
     normalizeDomText(document.getElementById('ai-research'));
+    emitWorkbenchState('refresh-workbench');
   }
 
   function hasActionLock() {
@@ -2353,6 +2405,7 @@
         : FLOW_HINT_DEFAULT;
     }
     updateRunBtn();
+    emitWorkbenchState('action-locks');
   }
 
   function setActionLock(name, locked) {
@@ -2604,7 +2657,7 @@
     });
     stopJobPolling(proposalId);
     if (result?.cancelled) {
-      notify('研究提案已生成');
+      notify('研究任务已取消');
     } else {
       notify(result?.reason || '未找到可取消任务', true);
     }
@@ -2618,16 +2671,10 @@
   }
 
   async function warmFundingForResearch() {
-    const exchange = String(document.getElementById('run-exchange')?.value || getCurrentResearchExchange() || 'binance');
-    const symbol = getPrimaryPlannerSymbol();
-    const result = await aiApi('/diagnostics/funding-cache/warm', {
-      method: 'POST',
-      body: JSON.stringify({ exchange, symbol, days: 90, source: 'auto' }),
-      timeoutMs: 30000,
-    });
-    const path = String(result?.funding?.cache_path || '');
-    notify(path ? `宏观缓存已预热: ${path}` : '宏观缓存已预热');
-    await loadDataReadiness().catch(() => {});
+    if (window.AI?.modules?.diagnostics?.warmFunding) {
+      return window.AI.modules.diagnostics.warmFunding();
+    }
+    throw new Error('diagnostics module unavailable');
   }
 
   /* ── 任务进度轮询 ── */
@@ -2663,130 +2710,17 @@
   }
 
   async function pullNewsForResearch() {
-    const symbol = getPrimaryPlannerSymbol();
-    const query = symbolToNewsKey(symbol);
-    const result = await rootApi('/news/pull_now?background=true', {
-      method: 'POST',
-      body: JSON.stringify({ since_minutes: 720, max_records: 120, query }),
-      timeoutMs: 12000,
-    });
-    if (Number(result?.queued_count || result?.job?.result?.queued_count || 0) > 0) {
-      rootApi('/news/worker/run_once?llm_limit=12&background=true', { method: 'POST', timeoutMs: 8000 }).catch(() => ({}));
+    if (window.AI?.modules?.diagnostics?.pullNews) {
+      return window.AI.modules.diagnostics.pullNews();
     }
-    notify(result?.queued ? '新闻拉取任务已提交' : '新闻拉取完成');
-    await loadDataReadiness().catch(() => {});
+    throw new Error('diagnostics module unavailable');
   }
 
   async function loadDataReadiness() {
-    const panel = document.getElementById('ai-data-readiness-panel');
-    const summaryEl = document.getElementById('ai-data-readiness-summary');
-    const detailsEl = document.getElementById('ai-data-readiness-details');
-    if (!panel || !summaryEl || !detailsEl) return;
-    const exchange = String(document.getElementById('run-exchange')?.value || getCurrentResearchExchange() || 'binance');
-    const symbol = getPrimaryPlannerSymbol();
-    const newsSymbol = symbolToNewsKey(symbol);
-
-    summaryEl.textContent = '正在检查新闻、宏观与微观数据...';
-    const [newsHealthRes, newsSymbolRes, newsGlobalRes, newsPullRes, newsWorkerRes, fundingDiagRes, microRes, communityRes, premiumRes] = await Promise.allSettled([
-      rootApi('/news/health', { timeoutMs: 12000 }),
-      rootApi(`/news/summary?symbol=${encodeURIComponent(newsSymbol)}&hours=24`, { timeoutMs: 12000 }),
-      rootApi('/news/summary?hours=24', { timeoutMs: 12000 }),
-      rootApi('/news/pull_status', { timeoutMs: 12000 }),
-      rootApi('/news/worker_status', { timeoutMs: 12000 }),
-      aiApi(`/diagnostics/funding-cache?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&days=60`, { timeoutMs: 12000 }),
-      rootApi(`/trading/analytics/microstructure?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&depth_limit=20`, { timeoutMs: 12000 }),
-      rootApi(`/trading/analytics/community/overview?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}`, { timeoutMs: 12000 }),
-      aiApi('/premium-data/status', { timeoutMs: 12000 }),
-    ]);
-
-    const health = newsHealthRes.status === 'fulfilled' ? (newsHealthRes.value || {}) : {};
-    const symbolSummary = newsSymbolRes.status === 'fulfilled' ? (newsSymbolRes.value || {}) : {};
-    const globalSummary = newsGlobalRes.status === 'fulfilled' ? (newsGlobalRes.value || {}) : {};
-    const pullStatus = newsPullRes.status === 'fulfilled' ? (newsPullRes.value || {}) : {};
-    const workerStatus = newsWorkerRes.status === 'fulfilled' ? (newsWorkerRes.value || {}) : {};
-    const funding = fundingDiagRes.status === 'fulfilled' ? (fundingDiagRes.value?.funding || {}) : {};
-    const microData = microRes.status === 'fulfilled' ? (microRes.value || {}) : {};
-    const communityData = communityRes.status === 'fulfilled' ? (communityRes.value || {}) : {};
-    const premiumData = premiumRes.status === 'fulfilled' ? (premiumRes.value || {}) : {};
-    const premiumSources = premiumData?.sources || {};
-    const premiumRows = Object.entries(premiumSources).map(([name, source]) => {
-      const hasCached = !!source?.has_cached_data;
-      const configured = !!source?.key_configured;
-      return {
-        name,
-        hasCached,
-        configured,
-        available: !!source?.available,
-      };
-    });
-    const premiumCachedCount = premiumRows.filter(row => row.hasCached).length;
-    const premiumConfiguredCount = premiumRows.filter(row => row.configured).length;
-    const premiumTotalCount = premiumRows.length;
-    const premiumActiveNames = premiumRows.filter(row => row.hasCached).map(row => row.name);
-
-    const summary = Number(symbolSummary?.events_count || 0) > 0 || Number(symbolSummary?.feed_count || 0) > 0
-      ? symbolSummary
-      : globalSummary;
-    const summaryScope = summary === symbolSummary ? `币种 ${newsSymbol}` : '全市场';
-    const newsEvents = Number(summary?.events_count || 0);
-    const rawCount = Number(summary?.raw_count || 0);
-    const feedCount = Number(summary?.feed_count || 0);
-    const sourceStates = Array.isArray(health?.source_states) && health.source_states.length
-      ? health.source_states
-      : (Array.isArray(workerStatus?.source_states) ? workerStatus.source_states : []);
-    const enabledSources = Object.entries(health?.sources || {}).filter(([, enabled]) => !!enabled).length;
-    const llmQueue = health?.llm_queue || workerStatus?.llm_queue || pullStatus?.llm_queue || {};
-    const pendingNewsTasks = Number(llmQueue?.pending_total || 0);
-    const fundingRows = Number(funding?.rows || 0);
-    const fundingRate = microData?.funding_rate?.funding_rate;
-    const basisPct = microData?.spot_futures_basis?.basis_pct;
-    const whaleCount = Number(communityData?.whale_transfers?.count || 0);
-    const announcementCount = Array.isArray(communityData?.announcements) ? communityData.announcements.length : 0;
-    const issues = [];
-    if (!rawCount && !feedCount) issues.push('新闻摘要为空');
-    if (pendingNewsTasks > 0 && !Number(health?.sync_pull_llm)) issues.push(`LLM 队列积压 ${pendingNewsTasks} 条`);
-    if (!fundingRows) issues.push('），建议人工确认');
-    if (!Number.isFinite(Number(fundingRate))) issues.push('实时 funding 不可用');
-    if (!whaleCount && !announcementCount) issues.push('社区/巨鲸数据较弱');
-    if (premiumConfiguredCount > 0 && premiumCachedCount === 0) issues.push('高级数据源已配置但暂未形成缓存');
-
-    summaryEl.textContent = issues.length ? `待处理: ${issues.join(' / ')}` : '新闻、宏观与微观数据已就绪';
-
-    const fundingPath = String(funding?.cache_path || '--');
-    const coverage = funding?.coverage || {};
-    const lastPull = workerStatus?.last_pull || pullStatus?.latest_result || {};
-    const lastLlm = workerStatus?.last_llm_batch || {};
-    detailsEl.innerHTML = `
-      <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">新闻诊断</div>
-        <div>摘要范围 ${esc(summaryScope)} / 结构化事件 ${newsEvents} / 原始新闻 ${rawCount} / Feed ${feedCount}</div>
-        <div>启用源 ${enabledSources} / 源状态 ${sourceStates.length} / LLM 队列 ${pendingNewsTasks}</div>
-        <div>最近拉取 ${esc(lastPull?.timestamp ? fmtTs(lastPull.timestamp) : '--')} / 最近 LLM ${esc(lastLlm?.timestamp ? fmtTs(lastLlm.timestamp) : '--')}</div>
-      </div>
-      <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">宏观 / 资金费率</div>
-        <div>缓存行数 ${fundingRows} / Funding ${Number.isFinite(Number(fundingRate)) ? Number(fundingRate).toFixed(6) : '--'} / Basis ${Number.isFinite(Number(basisPct)) ? Number(basisPct).toFixed(3) + '%' : '--'}</div>
-        <div>覆盖区间 ${esc(coverage?.start || '--')} ~ ${esc(coverage?.end || '--')}</div>
-        <div style="margin-top:4px;color:#7e92b2;">Funding 缓存路径: ${esc(fundingPath)}</div>
-      </div>
-      <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">社区 / 巨鲸 / 公告</div>
-        <div>巨鲸 ${whaleCount} / 公告 ${announcementCount} / 微观点差 ${Number(microData?.orderbook?.spread_bps || 0).toFixed(2)} bps</div>
-      </div>
-      <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">高级数据源</div>
-        <div>缓存 ${premiumCachedCount}/${premiumTotalCount} / Key 已配置 ${premiumConfiguredCount}</div>
-        <div>${premiumActiveNames.length ? `活跃源 ${esc(premiumActiveNames.join(' / '))}` : '暂无活跃缓存源（可选）'}</div>
-      </div>
-      <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">存储说明</div>
-        <div style="margin-top:3px;color:#9fb1c9;">新闻库: ./data/crypto_trading.db</div>
-        <div style="margin-top:3px;color:#9fb1c9;">资金费率缓存: ${esc(fundingPath)}</div>
-        <div style="margin-top:3px;color:#9fb1c9;">高级源缓存: ./data/premium/*</div>
-        <div style="margin-top:3px;color:#9fb1c9;">当币种新闻过少时会自动回退到全市场摘要，避免诊断全 0。</div>
-      </div>
-    `;
-    normalizeDomText(detailsEl);
+    if (window.AI?.modules?.diagnostics?.refresh) {
+      return window.AI.modules.diagnostics.refresh();
+    }
+    return null;
   }
 
   function startJobPolling(proposalId, jobId) {
@@ -3264,138 +3198,18 @@
     toggleCompare:   id => toggleCandidateCompare(id),
     showComparePanel: () => openCompareModal(),
     refreshWorkbench,
+    getSnapshot: () => getWorkbenchSnapshot(),
+    emitState: (reason, extra = {}) => emitWorkbenchState(reason, extra),
+    util: {
+      esc,
+      fmtTs,
+      notify,
+      providerDisplayName,
+      researchModeText,
+      statusText,
+      proposalDisplayName,
+    },
+    modules: window.AI?.modules || {},
   };
-
-  // \u2500\u2500 Step 6: AI\u81ea\u6cbb\u4ee3\u7406\u63a7\u5236\u9762\u677f \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n
-  async function loadAgentStatus() {
-    try {
-      const r = await rootApi('/ai/autonomous-agent/status');
-      _renderAgentPanel(r.status || {}, r.config || {});
-    } catch(e) { /* silent */ }
-  }
-
-  function _renderAgentPanel(status, cfg) {
-    const dot  = document.getElementById('ai-agent-status-dot');
-    const info = document.getElementById('ai-agent-info');
-    if (!dot || !info) return;
-
-    const running = Boolean(status.running);
-    dot.className = `agent-dot ${running ? 'agent-dot-on' : 'agent-dot-off'}`;
-    dot.title = running ? '\u8fd0\u884c\u4e2d' : '\u5df2\u505c\u6b62';
-
-    const tickCount = Number(status.tick_count || 0);
-    const submitted = Number(status.submitted_count || 0);
-    const lastRunAt = status.last_run_at ? status.last_run_at.slice(0, 19) : '--';
-    const lastErr   = status.last_error ? `<span style="color:#f87171"> | \u9519\u8bef: ${esc(String(status.last_error))}</span>` : '';
-    const researchCtx = status.last_research_context || {};
-    const selectedResearch = researchCtx.selected_candidate || {};
-    const researchLine = selectedResearch.candidate_id
-      ? `${esc(selectedResearch.strategy || '--')} / ${esc(selectedResearch.candidate_id)}`
-      : '--';
-    const allowLive = cfg.allow_live
-      ? '<span style="color:#f87171">\u5141\u8bb8\u5b9e\u76d8</span>'
-      : '<span style="color:#94a3b8">\u4ec5\u7eb8\u76d8</span>';
-
-    info.innerHTML = `
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;font-size:11px;">
-        <span style="color:var(--text-muted)">Provider</span>
-        <span>${providerDisplayName(cfg.provider || '-')}/${(cfg.model || '-').split('-').slice(-1)[0]}</span>
-        <span style="color:var(--text-muted)">\u6a21\u5f0f</span><span>${allowLive}</span>
-        <span style="color:var(--text-muted)">\u8fd0\u884c Tick</span><span>${tickCount}</span>
-        <span style="color:var(--text-muted)">\u5df2\u63d0\u4ea4</span><span>${submitted}</span>
-        <span style="color:var(--text-muted)">Research</span><span>${researchLine}</span>
-        <span style="color:var(--text-muted)">\u6700\u540e\u8fd0\u884c</span><span>${lastRunAt}${lastErr}</span>
-      </div>`;
-
-    const startBtn = document.getElementById('ai-agent-start-btn');
-    const stopBtn  = document.getElementById('ai-agent-stop-btn');
-    if (startBtn) startBtn.disabled = running;
-    if (stopBtn)  stopBtn.disabled  = !running;
-  }
-
-  async function _loadAgentJournal() {
-    const el = document.getElementById('ai-agent-journal');
-    if (!el) return;
-    try {
-      const r = await rootApi('/ai/autonomous-agent/journal?limit=15');
-      const rows = (r.items || []).slice().reverse();
-      if (!rows.length) { el.innerHTML = '<div style="color:var(--text-muted)">暂无日志</div>'; return; }
-      el.innerHTML = rows.map(row => {
-        const ts = (row.ts || row.timestamp || '').slice(0, 19);
-        const action = row.action || row.trigger || row.event || '?';
-        const detail = String(row.decision || row.result || row.error || '').slice(0, 80);
-        const color  = (row.error || String(action).includes('error')) ? '#f87171' : 'var(--text-muted)';
-        return `<div class="agent-journal-row">
-          <span class="agent-journal-ts">${ts}</span>
-          <span class="agent-journal-action" style="color:${color}"> ${action}</span>
-          <span class="agent-journal-detail"> ${detail}</span>
-        </div>`;
-      }).join('');
-    } catch(e) {
-      el.innerHTML = '<div style="color:var(--text-muted)">日志加载失败</div>';
-    }
-  }
-
-  // Journal expand on <details> toggle
-  document.addEventListener('DOMContentLoaded', () => {
-    const agentCard = document.getElementById('ai-agent-card');
-    if (agentCard) {
-      const det = agentCard.querySelector('details');
-      if (det) det.addEventListener('toggle', () => { if (det.open) _loadAgentJournal(); });
-    }
-  });
-
-  async function agentStart() {
-    const btn = document.getElementById('ai-agent-start-btn');
-    const saved = btn ? btn.innerHTML : '\u542f\u52a8';
-    if (btn) { btn.disabled = true; btn.textContent = '\u542f\u52a8\u4e2d...'; }
-    try {
-      await rootApi('/ai/autonomous-agent/start', { method: 'POST', body: JSON.stringify({ enable: true }) });
-      notify('AI\u4ee3\u7406\u5df2\u542f\u52a8');
-      await loadAgentStatus();
-    } catch(e) {
-      notify(`\u542f\u52a8\u5931\u8d25: ${e.message}`, true);
-      if (btn) { btn.disabled = false; btn.innerHTML = saved; }
-    }
-  }
-
-  async function agentStop() {
-    const btn = document.getElementById('ai-agent-stop-btn');
-    const saved = btn ? btn.innerHTML : '\u505c\u6b62';
-    if (btn) { btn.disabled = true; btn.textContent = '\u505c\u6b62\u4e2d...'; }
-    try {
-      await rootApi('/ai/autonomous-agent/stop', { method: 'POST' });
-      notify('AI\u4ee3\u7406\u5df2\u505c\u6b62');
-      await loadAgentStatus();
-    } catch(e) {
-      notify(`\u505c\u6b62\u5931\u8d25: ${e.message}`, true);
-      if (btn) { btn.disabled = false; btn.innerHTML = saved; }
-    }
-  }
-
-  async function agentRunOnce() {
-    const btn = document.getElementById('ai-agent-run-once-btn');
-    const saved = btn ? btn.innerHTML : '\u5355\u6b21\u8fd0\u884c';
-    if (btn) { btn.disabled = true; btn.textContent = '\u8fd0\u884c\u4e2d...'; }
-    try {
-      const r = await rootApi('/ai/autonomous-agent/run-once', { method: 'POST', body: JSON.stringify({}) });
-      const decision = r.result?.decision || r.result?.action || 'done';
-      notify(`\u5355\u6b21\u8fd0\u884c\u7ed3\u679c: ${decision}`);
-      await loadAgentStatus();
-    } catch(e) {
-      notify(`\u8fd0\u884c\u5931\u8d25: ${e.message}`, true);
-    } finally {
-      if (btn) { btn.disabled = false; btn.innerHTML = saved; }
-    }
-  }
-
-  // Expose for HTML onclick
-  window.agentStart   = agentStart;
-  window.agentStop    = agentStop;
-  window.agentRunOnce = agentRunOnce;
-
-  // Poll every 30s; also auto-refresh on workbench refresh
-  loadAgentStatus().catch(() => {});
-  setInterval(loadAgentStatus, 30000);
 
 })();
