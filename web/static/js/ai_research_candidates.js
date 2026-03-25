@@ -43,12 +43,48 @@
     return Number.isFinite(n) ? n : 0;
   }
 
+  function findSelectedCandidateRecord(snapshot) {
+    const selectedId = String(snapshot?.selectedCandidateId || '').trim();
+    if (!selectedId || !Array.isArray(snapshot?.candidates)) return null;
+    return snapshot.candidates.find((item) => String(item?.candidate_id || '').trim() === selectedId) || null;
+  }
+
+  function virtualProposalFromCandidate(candidate) {
+    const proposalId = String(candidate?.proposal_id || '').trim();
+    if (!proposalId) return null;
+    const summary = candidate?.metadata?.search_summary || {};
+    const budget = candidate?.metadata?.search_budget || {};
+    const proposalName = String(candidate?.metadata?.proposal_display_name || '').trim()
+      || `候选链路 · ${String(candidate?.strategy || '--')} @ ${String(candidate?.symbol || '--')} ${String(candidate?.timeframe || '--')}`;
+    return {
+      proposal_id: proposalId,
+      thesis: String(candidate?.metadata?.thesis || candidate?.strategy || proposalName).trim(),
+      research_mode: String(candidate?.metadata?.research_mode || 'template').trim() || 'template',
+      metadata: {
+        display_name: proposalName,
+        search_summary: summary,
+        search_budget: budget,
+        virtual_context: true,
+      },
+    };
+  }
+
   function findSelectedProposal(snapshot) {
     const proposals = Array.isArray(snapshot?.proposals) ? snapshot.proposals : [];
     const selectedId = String(snapshot?.selectedProposalId || '').trim();
     if (selectedId) {
       const matched = proposals.find((item) => String(item?.proposal_id || '').trim() === selectedId);
       if (matched) return matched;
+    }
+    const selectedCandidate = findSelectedCandidateRecord(snapshot);
+    if (selectedCandidate) {
+      const candidateProposalId = String(selectedCandidate?.proposal_id || '').trim();
+      if (candidateProposalId) {
+        const matched = proposals.find((item) => String(item?.proposal_id || '').trim() === candidateProposalId);
+        if (matched) return matched;
+        const virtualProposal = virtualProposalFromCandidate(selectedCandidate);
+        if (virtualProposal) return virtualProposal;
+      }
     }
     return proposals[0] || null;
   }
@@ -162,14 +198,16 @@
     const running = pool.filter((item) => ['paper_running', 'shadow_running', 'live_candidate', 'live_running'].includes(String(item?.status || '').trim())).length;
     const summary = proposal?.metadata?.search_summary || {};
     const budget = proposal?.metadata?.search_budget || {};
+    const proposalLabel = proposalDisplayName(proposal);
+    const isVirtualContext = !!proposal?.metadata?.virtual_context;
     const avgScore = pool.length ? (pool.reduce((acc, item) => acc + score(item?.score), 0) / pool.length).toFixed(1) : '--';
     const subtitle = proposal
-      ? `${proposalDisplayName(proposal)} · ${researchModeText(proposal?.metadata?.research_mode || 'template')} · ${pool.length} 个候选`
+      ? `${proposalLabel} · ${researchModeText(proposal?.metadata?.research_mode || proposal?.research_mode || 'template')} · ${pool.length} 个候选`
       : '等待研究提案与候选结果进入工作台。';
     subtitleEl.textContent = subtitle;
 
     badgeEl.innerHTML = [
-      proposal ? badge(`提案 ${proposalDisplayName(proposal)}`, 'info') : null,
+      proposal ? badge(`${isVirtualContext ? '候选链路' : '提案'} ${proposalLabel}`, isVirtualContext ? 'warn' : 'info') : null,
       pool.length ? badge(`候选 ${pool.length}`, 'on') : badge('暂无候选'),
       pendingApprovals > 0 ? badge(`待审批 ${pendingApprovals}`, 'warn') : null,
       running > 0 ? badge(`运行中 ${running}`, 'on') : null,

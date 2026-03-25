@@ -210,16 +210,7 @@ class AutonomousTradingAgent:
             return str(getattr(settings, "ANTHROPIC_API_KEY", "") or "").strip()
         return str(getattr(settings, "ZHIPU_API_KEY", "") or "").strip()
 
-    def _get(self, name: str, fallback: Any = None) -> Any:
-        if name in self._override:
-            return self._override[name]
-        return getattr(settings, name, fallback)
-
-    def get_runtime_config(self) -> Dict[str, Any]:
-        provider = _normalize_provider(self._get("AI_AUTONOMOUS_AGENT_PROVIDER", "codex"))
-        model_override = str(self._get("AI_AUTONOMOUS_AGENT_MODEL", "") or "").strip()
-        model = model_override or self._provider_model(provider)
-
+    def _provider_catalog(self) -> Dict[str, Dict[str, Any]]:
         providers: Dict[str, Dict[str, Any]] = {}
         for item in sorted(_SUPPORTED_PROVIDERS):
             providers[item] = {
@@ -227,13 +218,38 @@ class AutonomousTradingAgent:
                 "default_model": self._provider_model(item),
                 "base_url": self._provider_base_url(item),
             }
+        return providers
 
+    def _resolve_provider(self, provider: str, providers: Dict[str, Dict[str, Any]]) -> tuple[str, bool]:
+        provider = _normalize_provider(provider)
+        if providers.get(provider, {}).get("available"):
+            return provider, False
+        if providers.get("codex", {}).get("available"):
+            return "codex", True
+        for item, meta in providers.items():
+            if meta.get("available"):
+                return str(item), True
+        return provider, False
+
+    def _get(self, name: str, fallback: Any = None) -> Any:
+        if name in self._override:
+            return self._override[name]
+        return getattr(settings, name, fallback)
+
+    def get_runtime_config(self) -> Dict[str, Any]:
+        requested_provider = _normalize_provider(self._get("AI_AUTONOMOUS_AGENT_PROVIDER", "codex"))
+        model_override = str(self._get("AI_AUTONOMOUS_AGENT_MODEL", "") or "").strip()
+        providers = self._provider_catalog()
+        provider, provider_fallback = self._resolve_provider(requested_provider, providers)
+        model = ("" if provider_fallback else model_override) or self._provider_model(provider)
         return {
             "enabled": bool(self._get("AI_AUTONOMOUS_AGENT_ENABLED", False)),
             "auto_start": bool(self._get("AI_AUTONOMOUS_AGENT_AUTO_START", False)),
             "mode": _normalize_mode(self._get("AI_AUTONOMOUS_AGENT_MODE", "shadow")),
             "provider": provider,
             "model": model,
+            "provider_requested": requested_provider,
+            "provider_fallback": provider_fallback,
             "exchange": str(self._get("AI_AUTONOMOUS_AGENT_EXCHANGE", "binance") or "binance").strip().lower(),
             "symbol": str(self._get("AI_AUTONOMOUS_AGENT_SYMBOL", "BTC/USDT") or "BTC/USDT").strip().upper(),
             "timeframe": str(self._get("AI_AUTONOMOUS_AGENT_TIMEFRAME", "15m") or "15m").strip(),

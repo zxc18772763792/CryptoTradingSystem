@@ -190,15 +190,38 @@ class LiveAIDecisionRouter:
             return str(getattr(settings, "ANTHROPIC_API_KEY", "") or "").strip()
         return str(getattr(settings, "ZHIPU_API_KEY", "") or "").strip()
 
+    def _provider_catalog(self) -> Dict[str, Dict[str, Any]]:
+        providers: Dict[str, Dict[str, Any]] = {}
+        for item in sorted(_SUPPORTED_PROVIDERS):
+            providers[item] = {
+                "available": bool(self._provider_api_key(item)),
+                "default_model": self._provider_model(item),
+                "base_url": self._provider_base_url(item),
+            }
+        return providers
+
+    def _resolve_provider(self, provider: str, providers: Dict[str, Dict[str, Any]]) -> tuple[str, bool]:
+        provider = _normalize_provider(provider)
+        if providers.get(provider, {}).get("available"):
+            return provider, False
+        if providers.get("codex", {}).get("available"):
+            return "codex", True
+        for item, meta in providers.items():
+            if meta.get("available"):
+                return str(item), True
+        return provider, False
+
     def _get(self, name: str, fallback: Any = None) -> Any:
         if name in self._override:
             return self._override[name]
         return getattr(settings, name, fallback)
 
     def get_runtime_config(self) -> Dict[str, Any]:
-        provider = _normalize_provider(self._get("AI_LIVE_DECISION_PROVIDER", "codex"))
+        requested_provider = _normalize_provider(self._get("AI_LIVE_DECISION_PROVIDER", "codex"))
         model_override = str(self._get("AI_LIVE_DECISION_MODEL", "") or "").strip()
-        model = model_override or self._provider_model(provider)
+        providers = self._provider_catalog()
+        provider, provider_fallback = self._resolve_provider(requested_provider, providers)
+        model = ("" if provider_fallback else model_override) or self._provider_model(provider)
         mode = _normalize_mode(self._get("AI_LIVE_DECISION_MODE", "shadow"))
         timeout_ms = _coerce_int(self._get("AI_LIVE_DECISION_TIMEOUT_MS", 6000), 6000, low=1000, high=60000)
         max_tokens = _coerce_int(self._get("AI_LIVE_DECISION_MAX_TOKENS", 220), 220, low=32, high=4096)
@@ -212,19 +235,13 @@ class LiveAIDecisionRouter:
         fail_open = bool(self._get("AI_LIVE_DECISION_FAIL_OPEN", True))
         apply_in_paper = bool(self._get("AI_LIVE_DECISION_APPLY_IN_PAPER", False))
 
-        providers = {}
-        for item in sorted(_SUPPORTED_PROVIDERS):
-            providers[item] = {
-                "available": bool(self._provider_api_key(item)),
-                "default_model": self._provider_model(item),
-                "base_url": self._provider_base_url(item),
-            }
-
         return {
             "enabled": enabled,
             "mode": mode,
             "provider": provider,
             "model": model,
+            "provider_requested": requested_provider,
+            "provider_fallback": provider_fallback,
             "timeout_ms": timeout_ms,
             "max_tokens": max_tokens,
             "temperature": temperature,

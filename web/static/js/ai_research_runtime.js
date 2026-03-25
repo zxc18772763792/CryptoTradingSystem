@@ -66,12 +66,47 @@
     return topRows.length ? topRows[0] : null;
   }
 
+  function findSelectedCandidateRecord(snapshot) {
+    const selectedId = String(snapshot?.selectedCandidateId || '').trim();
+    if (!selectedId || !Array.isArray(snapshot?.candidates)) return null;
+    return snapshot.candidates.find((item) => String(item?.candidate_id || '').trim() === selectedId) || null;
+  }
+
+  function virtualProposalFromCandidate(candidate) {
+    const proposalId = String(candidate?.proposal_id || '').trim();
+    if (!proposalId) return null;
+    const proposalName = String(candidate?.metadata?.proposal_display_name || '').trim()
+      || `候选链路 · ${String(candidate?.strategy || '--')} @ ${String(candidate?.symbol || '--')} ${String(candidate?.timeframe || '--')}`;
+    return {
+      proposal_id: proposalId,
+      thesis: String(candidate?.metadata?.thesis || candidate?.strategy || proposalName).trim(),
+      research_mode: String(candidate?.metadata?.research_mode || 'template').trim() || 'template',
+      metadata: {
+        display_name: proposalName,
+        search_summary: candidate?.metadata?.search_summary || {},
+        search_budget: candidate?.metadata?.search_budget || {},
+        strategy_drafts: candidate?.metadata?.strategy_drafts || [],
+        virtual_context: true,
+      },
+    };
+  }
+
   function findSelectedProposal(snapshot) {
     const items = Array.isArray(snapshot?.proposals) ? snapshot.proposals : [];
     const selectedId = String(snapshot?.selectedProposalId || '').trim();
     if (selectedId) {
       const matched = items.find((item) => String(item?.proposal_id || '').trim() === selectedId);
       if (matched) return matched;
+    }
+    const selectedCandidate = findSelectedCandidateRecord(snapshot);
+    if (selectedCandidate) {
+      const candidateProposalId = String(selectedCandidate?.proposal_id || '').trim();
+      if (candidateProposalId) {
+        const matched = items.find((item) => String(item?.proposal_id || '').trim() === candidateProposalId);
+        if (matched) return matched;
+        const virtualProposal = virtualProposalFromCandidate(selectedCandidate);
+        if (virtualProposal) return virtualProposal;
+      }
     }
     return items[0] || null;
   }

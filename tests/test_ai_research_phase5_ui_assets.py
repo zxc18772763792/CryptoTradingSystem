@@ -27,12 +27,18 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     runtime_js = _read("web/static/js/ai_research_runtime.js")
     candidates_js = _read("web/static/js/ai_research_candidates.js")
     agent_js = _read("web/static/js/ai_research_agent.js")
+    ai_js = _read("web/static/js/ai_research.js")
+    template = _read("web/templates/index.html")
     style_css = _read("web/static/css/style.css")
 
     assert "modules.diagnostics" in diagnostics_js
     assert "ai-flow-stage-grid" in runtime_js
     assert "modules.candidates" in candidates_js
     assert "window.agentStart = agentStart" in agent_js
+    assert "function selectProposal(" in ai_js
+    assert "provider_fallback" in ai_js
+    assert 'option value="codex">OpenAI' in template
+    assert "先选研究任务，再点击候选策略卡片" in template
     assert ".ai-flow-console" in style_css
     assert ".ai-flow-stage-grid" in style_css
     assert ".ai-search-overview-card" in style_css

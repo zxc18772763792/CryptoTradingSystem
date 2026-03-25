@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock
 import pandas as pd
 import pytest
 
+from config.settings import settings
+
 
 @pytest.fixture(autouse=True)
 def _isolate_agent_overlay(tmp_path, monkeypatch):
@@ -204,6 +206,36 @@ def test_agent_corrupt_overlay_safe_start(tmp_path):
     cfg = agent.get_runtime_config()
     assert isinstance(cfg, dict)
     assert "enabled" in cfg
+
+
+def test_agent_runtime_config_falls_back_to_openai_when_glm_unavailable(tmp_path, monkeypatch):
+    """Agent runtime should auto-switch off stale GLM config when only OpenAI is available."""
+    from core.ai.autonomous_agent import AutonomousTradingAgent
+
+    agent = AutonomousTradingAgent(cache_root=tmp_path / "agent_fallback")
+    agent._overlay_path.parent.mkdir(parents=True, exist_ok=True)
+    agent._overlay_path.write_text(
+        json.dumps(
+            {
+                "AI_AUTONOMOUS_AGENT_ENABLED": True,
+                "AI_AUTONOMOUS_AGENT_PROVIDER": "glm",
+                "AI_AUTONOMOUS_AGENT_MODEL": "GLM-4.5-Air",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-openai", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.4", raising=False)
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    agent._load_overlay()
+    cfg = agent.get_runtime_config()
+
+    assert cfg["provider"] == "codex"
+    assert cfg["model"] == "gpt-5.4"
+    assert cfg["provider_requested"] == "glm"
+    assert cfg["provider_fallback"] is True
 
 
 def test_agent_journal_contains_request_id(tmp_path, monkeypatch):

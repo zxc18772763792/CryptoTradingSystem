@@ -202,3 +202,31 @@ def test_runtime_config_overlay_does_not_store_api_keys(tmp_path, monkeypatch):
 
     data = json.loads(overlay_path.read_text())
     assert "ZHIPU_API_KEY" not in data, "API keys must not be persisted to overlay"
+
+
+def test_runtime_config_falls_back_to_openai_when_glm_unavailable(tmp_path, monkeypatch):
+    """A stale GLM overlay should not keep the runtime pinned to an unavailable provider."""
+    overlay_path = tmp_path / "ai_runtime_config.json"
+    overlay_path.write_text(
+        json.dumps(
+            {
+                "AI_LIVE_DECISION_ENABLED": True,
+                "AI_LIVE_DECISION_PROVIDER": "glm",
+                "AI_LIVE_DECISION_MODEL": "GLM-4.5-Air",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("core.ai.live_decision_router._OVERLAY_PATH", overlay_path)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-openai", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.4", raising=False)
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    router = LiveAIDecisionRouter()
+    cfg = router.get_runtime_config()
+
+    assert cfg["provider"] == "codex"
+    assert cfg["model"] == "gpt-5.4"
+    assert cfg["provider_requested"] == "glm"
+    assert cfg["provider_fallback"] is True

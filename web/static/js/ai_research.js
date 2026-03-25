@@ -285,6 +285,42 @@
     emitWorkbenchState('runtime-summary');
   }
 
+  function resolveLiveDecisionProviderState(cfg) {
+    const providers = (cfg && typeof cfg.providers === 'object' && cfg.providers) || {};
+    const requestedProvider = String(cfg?.provider_requested || cfg?.provider || 'codex').trim() || 'codex';
+    const configuredProvider = String(cfg?.provider || requestedProvider).trim() || requestedProvider;
+    const availableProviders = Object.entries(providers)
+      .filter(([, meta]) => !!meta?.available)
+      .map(([name]) => String(name));
+    const provider = availableProviders.includes(configuredProvider)
+      ? configuredProvider
+      : (availableProviders.includes(requestedProvider)
+        ? requestedProvider
+        : (availableProviders.includes('codex') ? 'codex' : (availableProviders[0] || configuredProvider)));
+    const providerMeta = providers[provider] || {};
+    return {
+      provider,
+      providerMeta,
+      requestedProvider,
+      fallbackUsed: !!cfg?.provider_fallback || provider !== requestedProvider,
+      model: String(cfg?.model || providerMeta.default_model || ''),
+    };
+  }
+
+  function renderLiveDecisionProviderOptions(cfg, activeProvider) {
+    const providerEl = document.getElementById('ai-live-decision-provider');
+    if (!providerEl) return;
+    const providers = (cfg && typeof cfg.providers === 'object' && cfg.providers) || {};
+    Array.from(providerEl.options).forEach((option) => {
+      const key = String(option.value || '').trim();
+      const meta = providers[key] || {};
+      const available = !!meta.available;
+      option.textContent = `${providerDisplayName(key)}${available ? '' : '（未配置）'}`;
+      option.disabled = !available && key !== activeProvider;
+    });
+    providerEl.dataset.previousProvider = String(activeProvider || '');
+  }
+
   function renderLiveDecisionRuntimeConfig() {
     const cfg = getLiveDecisionRuntimeConfig();
     const enabledEl = document.getElementById('ai-live-decision-enabled');
@@ -297,16 +333,45 @@
       statusEl.textContent = '未加载';
       return;
     }
+    const providerState = resolveLiveDecisionProviderState(cfg);
+    renderLiveDecisionProviderOptions(cfg, providerState.provider);
     enabledEl.checked = !!cfg.enabled;
     modeEl.value = String(cfg.mode || 'shadow');
-    providerEl.value = String(cfg.provider || 'codex');
-    modelEl.value = String(cfg.model || '');
-    const selectedProvider = String(cfg.provider || 'codex');
-    const providerMeta = (cfg.providers || {})[selectedProvider] || {};
-    const available = !!providerMeta.available;
+    providerEl.value = providerState.provider;
+    modelEl.value = providerState.model;
+    providerEl.dataset.previousProvider = providerState.provider;
+    const selectedProvider = providerState.provider;
+    const available = !!providerState.providerMeta.available;
     const modeText = String(cfg.mode || 'shadow');
-    const providerText = `${providerDisplayName(selectedProvider)}/${String(cfg.model || '')}`;
-    statusEl.textContent = `${cfg.enabled ? '已启用' : '未启用'} | ${modeText} | ${providerText} | ${available ? 'key就绪' : 'key缺失'}`;
+    const providerText = `${providerDisplayName(selectedProvider)}/${String(providerState.model || '--')}`;
+    const fallbackText = providerState.fallbackUsed
+      ? ` | 已从 ${providerDisplayName(providerState.requestedProvider)} 自动切换`
+      : '';
+    statusEl.textContent = `${cfg.enabled ? '已启用' : '未启用'} | ${modeText} | ${providerText} | ${available ? 'key就绪' : 'key缺失'}${fallbackText}`;
+    statusEl.style.color = available ? '#9fb1c9' : '#f0b429';
+  }
+
+  function previewLiveDecisionProviderSelection() {
+    const cfg = getLiveDecisionRuntimeConfig() || {};
+    const enabledEl = document.getElementById('ai-live-decision-enabled');
+    const modeEl = document.getElementById('ai-live-decision-mode');
+    const providerEl = document.getElementById('ai-live-decision-provider');
+    const modelEl = document.getElementById('ai-live-decision-model');
+    const statusEl = document.getElementById('ai-live-decision-status');
+    if (!providerEl || !modelEl || !statusEl) return;
+    const providers = (cfg && typeof cfg.providers === 'object' && cfg.providers) || {};
+    const nextProvider = String(providerEl.value || 'codex').trim() || 'codex';
+    const prevProvider = String(providerEl.dataset.previousProvider || '').trim();
+    const prevDefaultModel = String(providers[prevProvider]?.default_model || '');
+    const nextDefaultModel = String(providers[nextProvider]?.default_model || '');
+    const currentModel = String(modelEl.value || '').trim();
+    if (!currentModel || (prevDefaultModel && currentModel === prevDefaultModel)) {
+      modelEl.value = nextDefaultModel;
+    }
+    providerEl.dataset.previousProvider = nextProvider;
+    const available = !!providers[nextProvider]?.available;
+    const providerText = `${providerDisplayName(nextProvider)}/${String(modelEl.value || nextDefaultModel || '--')}`;
+    statusEl.textContent = `${enabledEl?.checked ? '已启用' : '未启用'} | ${String(modeEl?.value || cfg.mode || 'shadow')} | ${providerText} | ${available ? 'key就绪' : 'key缺失'}`;
     statusEl.style.color = available ? '#9fb1c9' : '#f0b429';
   }
 
@@ -996,6 +1061,130 @@
     return `${mark} ${head || String(item?.proposal_id || '').slice(-6)}`.trim();
   }
 
+  function findProposalById(proposalId) {
+    const target = String(proposalId || '').trim();
+    if (!target) return null;
+    return state.proposals.find((item) => String(item?.proposal_id || '').trim() === target) || null;
+  }
+
+  function upsertProposal(proposal) {
+    const proposalId = String(proposal?.proposal_id || '').trim();
+    if (!proposalId) return null;
+    const idx = state.proposals.findIndex((item) => String(item?.proposal_id || '').trim() === proposalId);
+    if (idx >= 0) {
+      state.proposals[idx] = { ...state.proposals[idx], ...(proposal || {}) };
+      return state.proposals[idx];
+    }
+    state.proposals = [proposal, ...state.proposals];
+    return state.proposals[0];
+  }
+
+  function proposalFallbackFromCandidate(candidate) {
+    const proposalId = String(candidate?.proposal_id || '').trim();
+    if (!proposalId) return null;
+    const displayName = String(candidate?.metadata?.proposal_display_name || '').trim()
+      || `候选链路 · ${String(candidate?.strategy || '--')} @ ${String(candidate?.symbol || '--')} ${String(candidate?.timeframe || '--')}`;
+    return {
+      proposal_id: proposalId,
+      thesis: String(candidate?.metadata?.thesis || candidate?.strategy || displayName).trim(),
+      research_mode: String(candidate?.metadata?.research_mode || 'template').trim() || 'template',
+      status: String(candidate?.status || 'validated').trim() || 'validated',
+      metadata: {
+        display_name: displayName,
+        search_summary: candidate?.metadata?.search_summary || {},
+        search_budget: candidate?.metadata?.search_budget || {},
+        strategy_drafts: candidate?.metadata?.strategy_drafts || [],
+        virtual_context: true,
+      },
+    };
+  }
+
+  function findCandidateById(candidateId) {
+    const target = String(candidateId || '').trim();
+    if (!target) return null;
+    return state.candidates.find((item) => String(item?.candidate_id || '').trim() === target) || null;
+  }
+
+  function proposalIdForCandidate(candidateId) {
+    return String(findCandidateById(candidateId)?.proposal_id || '').trim();
+  }
+
+  function candidateCountForProposal(proposalId) {
+    const target = String(proposalId || '').trim();
+    if (!target) return 0;
+    return state.candidates.filter((item) => String(item?.proposal_id || '').trim() === target).length;
+  }
+
+  function candidateDetailPlaceholderHtml(proposalId = '') {
+    const activeProposalId = String(proposalId || '').trim();
+    const proposal = findProposalById(activeProposalId);
+    const proposalName = proposal ? proposalDisplayName(proposal, Math.max(0, state.proposals.findIndex((item) => item === proposal))) : '';
+    const candidateCount = activeProposalId ? candidateCountForProposal(activeProposalId) : 0;
+    const summary = proposal
+      ? `当前研究任务：${proposalName}${candidateCount ? ` · ${candidateCount} 个候选` : ' · 暂无候选'}`
+      : '先选研究任务，再点击候选策略卡片';
+    const hint = proposal
+      ? (candidateCount
+        ? '点击候选策略卡片，查看验证、谱系与注册动作'
+        : '先运行该研究任务，产出候选后再查看详情')
+      : '查看详细分析与注册';
+    return `<div class="ai-detail-placeholder">
+      <div style="font-size:36px;opacity:.3;">📊</div>
+      <div style="margin-top:10px;color:#6b7fa0;font-size:13px;">${esc(summary)}<br>${esc(hint)}</div>
+    </div>`;
+  }
+
+  function renderCandidateDetailPlaceholder(proposalId = '') {
+    const panel = document.getElementById('ai-detail-panel');
+    if (!panel) return;
+    panel.innerHTML = candidateDetailPlaceholderHtml(proposalId);
+    panel.dataset.candidateId = '';
+    normalizeDomText(panel);
+  }
+
+  function syncSelectedProposal(preferredProposalId = '') {
+    const validIds = new Set(
+      state.proposals
+        .map((item) => String(item?.proposal_id || '').trim())
+        .filter(Boolean)
+    );
+    const candidateProposalId = proposalIdForCandidate(state.selectedCandidateId);
+    const nextProposalId = [
+      String(preferredProposalId || '').trim(),
+      candidateProposalId,
+      String(state.selectedProposalId || '').trim(),
+      String(state.proposals[0]?.proposal_id || '').trim(),
+    ].find((proposalId) => proposalId && validIds.has(proposalId)) || '';
+    state.selectedProposalId = nextProposalId;
+    const selectedCandidateProposalId = proposalIdForCandidate(state.selectedCandidateId);
+    if (state.selectedCandidateId && selectedCandidateProposalId && nextProposalId && selectedCandidateProposalId !== nextProposalId) {
+      state.selectedCandidateId = '';
+    }
+    return nextProposalId;
+  }
+
+  function applyWorkbenchSelection(preferredProposalId = '') {
+    syncSelectedProposal(preferredProposalId);
+    renderProposalList();
+    updateRunBtn();
+    renderCandidateCards();
+    if (!state.selectedCandidateId) {
+      renderCandidateDetailPlaceholder(state.selectedProposalId);
+    }
+  }
+
+  function selectProposal(proposalId) {
+    const nextProposalId = String(proposalId || '').trim();
+    if (!nextProposalId) return;
+    state.selectedProposalId = nextProposalId;
+    const selectedCandidateProposalId = proposalIdForCandidate(state.selectedCandidateId);
+    if (selectedCandidateProposalId && selectedCandidateProposalId !== nextProposalId) {
+      state.selectedCandidateId = '';
+    }
+    applyWorkbenchSelection(nextProposalId);
+    emitWorkbenchState('proposal-selection', { proposalId: nextProposalId });
+  }
+
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
      候选策略卡片
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
@@ -1066,6 +1255,14 @@
       visible = visible.filter(c => STRATEGY_CATEGORIES[c.strategy] === state.filterCategory);
     }
     visible.sort((a, b) => {
+      const contextDelta = (() => {
+        const activeProposalId = String(state.selectedProposalId || '').trim();
+        if (!activeProposalId) return 0;
+        const aDelta = String(a?.proposal_id || '').trim() === activeProposalId ? 0 : 1;
+        const bDelta = String(b?.proposal_id || '').trim() === activeProposalId ? 0 : 1;
+        return aDelta - bDelta;
+      })();
+      if (contextDelta) return contextDelta;
       if (state.sortBy === 'sharpe') {
         return Number(candidateTopResults(b)[0]?.sharpe_ratio ?? 0) - Number(candidateTopResults(a)[0]?.sharpe_ratio ?? 0);
       }
@@ -1308,6 +1505,7 @@
     const color = scoreColor(score);
     const emoji = scoreEmoji(score);
     const cid = String(cand?.candidate_id || '');
+    const proposalId = String(cand?.proposal_id || '').trim();
     const strat = String(cand?.strategy || '--');
     const sym = String(cand?.symbol || '--');
     const tf = String(cand?.timeframe || '--');
@@ -1379,6 +1577,9 @@
     const searchRoleBadge = searchRoleMeta
       ? `<span class="cand-category-badge" style="background:${searchRoleMeta.bg};color:${searchRoleMeta.fg};border:1px solid ${searchRoleMeta.border};">${esc(searchRoleMeta.label)}</span>`
       : '';
+    const proposalScopeBadge = state.selectedProposalId && state.proposals.length > 1
+      ? `<span class="cand-category-badge" style="background:${proposalId === state.selectedProposalId ? '#143224' : '#1d2b3d'};color:${proposalId === state.selectedProposalId ? '#20bf78' : '#9fb1c9'};border:1px solid ${proposalId === state.selectedProposalId ? '#245b42' : '#32475f'};">${proposalId === state.selectedProposalId ? '当前提案' : '其他提案'}</span>`
+      : '';
     const hiddenDuplicates = Number(cand?.metadata?.hidden_duplicates_count || 0);
     const enrichmentBadges = [
       `<span class="cand-category-badge" style="background:#1d2b3d;color:#9fb1c9;border:1px solid #32475f;">新闻 ${enrichment.newsCount}</span>`,
@@ -1394,11 +1595,11 @@
       : ` style="box-shadow:0 0 0 1px ${familyMeta.color}33 inset, 0 10px 30px ${familyMeta.accent};"`;
 
     return `<div class="research-candidate-card score-${color}${sel}"${aiCardStyle}
-               data-candidate-id="${esc(cid)}" data-action="select-candidate">
+               data-candidate-id="${esc(cid)}" data-proposal-id="${esc(proposalId)}" data-action="select-candidate">
       <div class="cand-card-header">
         <div class="cand-card-title">${emoji} ${esc(strat)}</div>
         <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">
-          ${familyBadge}${catBadge}${searchRoleBadge}<div class="cand-score-badge ${color}">${score.toFixed(0)}</div>
+          ${familyBadge}${catBadge}${searchRoleBadge}${proposalScopeBadge}<div class="cand-score-badge ${color}">${score.toFixed(0)}</div>
           <label class="cand-compare-toggle" title="加入对比" data-action="toggle-compare" data-candidate-id="${esc(cid)}">
             <input type="checkbox" data-action="toggle-compare" data-candidate-id="${esc(cid)}" ${compareChecked} />
             <span>对比</span>
@@ -1441,8 +1642,14 @@
     const resp  = await aiApi(`/candidates/${encodeURIComponent(candidateId)}`, { timeoutMs: 20000 });
     if (requestSeq !== state.candidateDetailReqSeq) return;
     const cand  = resp?.candidate || {};
+    const linkedProposalId = String(cand?.proposal_id || '').trim();
     state.selectedCandidateId = candidateId;
+    if (linkedProposalId) {
+      state.selectedProposalId = linkedProposalId;
+    }
+    renderProposalList();
     renderCandidateCards();   // 更新选中高亮
+    updateRunBtn();
 
     if (!panel) return;
     const vs       = cand?.validation_summary || {};
@@ -1471,8 +1678,13 @@
     if (requestSeq !== state.candidateDetailReqSeq) return;
 
     const proposalInfo = proposalResp.status === 'fulfilled'
-      ? (proposalResp.value?.proposal || proposalSnapshot)
-      : proposalSnapshot;
+      ? (proposalResp.value?.proposal || proposalSnapshot || proposalFallbackFromCandidate(cand))
+      : (proposalSnapshot || proposalFallbackFromCandidate(cand));
+    if (proposalInfo) {
+      upsertProposal(proposalInfo);
+      renderProposalList();
+      updateRunBtn();
+    }
     const proposalLifecycle = proposalLifecycleResp.status === 'fulfilled' ? toArray(proposalLifecycleResp.value?.items) : [];
     const candidateLifecycle = candidateLifecycleResp.status === 'fulfilled' ? toArray(candidateLifecycleResp.value?.items) : [];
     const experimentInfo = experimentResp.status === 'fulfilled' ? (experimentResp.value?.experiment || null) : null;
@@ -2345,6 +2557,8 @@
         renderCandidateCards();
         if (state.selectedCandidateId) {
           viewCandidate(state.selectedCandidateId, { keepContent: true }).catch(() => {});
+        } else {
+          renderCandidateDetailPlaceholder(state.selectedProposalId);
         }
       }
     } catch (err) {
@@ -2366,9 +2580,15 @@
   }
 
   async function loadProposals(selectId = '') {
+    const preservedProposalId = String(selectId || state.selectedProposalId || proposalIdForCandidate(state.selectedCandidateId) || '').trim();
+    const preservedProposal = findProposalById(preservedProposalId);
     const res = await aiApi('/proposals?limit=50', { timeoutMs: 20000 });
     state.proposals = toArray(res?.items);
+    if (preservedProposal && !findProposalById(preservedProposalId)) {
+      state.proposals = [preservedProposal, ...state.proposals];
+    }
     if (selectId) state.selectedProposalId = selectId;
+    syncSelectedProposal(selectId);
     renderProposalList();
     updateRunBtn();
   }
@@ -2377,12 +2597,17 @@
     const res = await aiApi('/candidates?limit=50', { timeoutMs: 20000 });
     state.candidates = toArray(res?.items);
     if (selectId) state.selectedCandidateId = selectId;
+    if (state.selectedCandidateId && !findCandidateById(state.selectedCandidateId)) {
+      state.selectedCandidateId = '';
+    }
+    syncSelectedProposal();
     renderCandidateCards();
   }
 
   async function refreshWorkbench(selectProposalId = '', selectCandidateId = '') {
     await loadRuntimeConfig();
     await Promise.all([loadProposals(selectProposalId), loadCandidates(selectCandidateId), loadPendingApprovals(), loadDataReadiness().catch(() => null)]);
+    applyWorkbenchSelection(selectProposalId);
     normalizeDomText(document.getElementById('ai-research'));
     emitWorkbenchState('refresh-workbench');
   }
@@ -2779,9 +3004,8 @@
     notify(`研究任务已删除`);
     if (state.selectedProposalId === proposalId) {
       state.selectedProposalId = '';
-      const panel = document.getElementById('ai-detail-panel');
-      if (panel) panel.innerHTML = '<div class="ai-detail-placeholder"><div style="font-size:36px;opacity:.3;">📊</div><div style="margin-top:10px;color:#6b7fa0;font-size:13px;">点击候选策略卡片<br>查看详细分析与注册</div></div>';
     }
+    if (proposalIdForCandidate(state.selectedCandidateId) === proposalId) state.selectedCandidateId = '';
     await refreshWorkbench('', '');
   }
 
@@ -2829,6 +3053,10 @@
       warmFundingForResearch().catch(err => notify(`宏观缓存预热失败: ${err.message}`, true)));
     document.getElementById('ai-live-decision-save-btn')?.addEventListener('click', () =>
       saveLiveDecisionRuntimeConfig().catch(err => notify(`AI实盘决策保存失败: ${err.message}`, true)));
+    ['ai-live-decision-enabled', 'ai-live-decision-mode', 'ai-live-decision-provider'].forEach((id) => {
+      document.getElementById(id)?.addEventListener('change', () => previewLiveDecisionProviderSelection());
+    });
+    document.getElementById('ai-live-decision-model')?.addEventListener('input', () => previewLiveDecisionProviderSelection());
     document.getElementById('ai-planner-symbols')?.addEventListener('change', () =>
       loadDataReadiness().catch(() => {}));
     document.getElementById('run-exchange')?.addEventListener('change', () =>
@@ -2882,20 +3110,18 @@
         const item = e.target.closest('.proposal-compact-item');
         const id   = String(item?.dataset?.proposalId || pid || '').trim();
         if (!id) return;
-        state.selectedProposalId = id;
-        renderProposalList();
-        updateRunBtn();
+        selectProposal(id);
         return;
       }
       if (action === 'run-proposal' && pid) {
         e.stopPropagation();
-        state.selectedProposalId = pid;
+        selectProposal(pid);
         withActionLock('run', () => runProposal(pid)).catch(err => notify(`运行失败: ${err.message}`, true));
         return;
       }
       if (action === 'cancel-proposal' && pid) {
         e.stopPropagation();
-        state.selectedProposalId = pid;
+        selectProposal(pid);
         cancelProposal(pid).catch(err => notify(`取消失败: ${err.message}`, true));
         return;
       }
