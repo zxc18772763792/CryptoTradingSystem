@@ -1230,7 +1230,7 @@ async def get_ai_deployments_status(request: Request):
 
 @router.post("/research/generate-context")
 async def generate_research_context_endpoint(request: Request, payload: AIResearchContextRequest):
-    """Call GLM to generate a research hypothesis + experiment plan from market signals."""
+    """Call the configured OpenAI-compatible model to generate a research hypothesis and experiment plan."""
     from core.ai.research_context_generator import generate_research_context
 
     try:

@@ -46,15 +46,16 @@
   /* ── 状态 ── */
   const STRATEGY_FAMILIES = {
     MLXGBoostStrategy: 'ml',
-    MarketSentimentStrategy: 'ai_glm',
-    SocialSentimentStrategy: 'ai_glm',
-    FundFlowStrategy: 'ai_glm',
-    WhaleActivityStrategy: 'ai_glm',
+    MarketSentimentStrategy: 'ai_openai',
+    SocialSentimentStrategy: 'ai_openai',
+    FundFlowStrategy: 'ai_openai',
+    WhaleActivityStrategy: 'ai_openai',
   };
   const FAMILY_META = {
     traditional: { label: '传统规则', color: '#64748b', accent: 'rgba(100,116,139,.16)' },
     ml: { label: 'ML驱动', color: '#ff6b35', accent: 'rgba(255,107,53,.16)' },
-    ai_glm: { label: 'GLM/AI驱动', color: '#38bdf8', accent: 'rgba(56,189,248,.16)' },
+    ai_glm: { label: 'OpenAI/AI驱动', color: '#38bdf8', accent: 'rgba(56,189,248,.16)' },
+    ai_openai: { label: 'OpenAI/AI驱动', color: '#38bdf8', accent: 'rgba(56,189,248,.16)' },
   };
 
   const state = {
@@ -160,6 +161,14 @@
     }
   }
 
+  function providerDisplayName(provider) {
+    const value = String(provider || '').trim().toLowerCase();
+    if (value === 'codex' || value === 'openai') return 'OpenAI';
+    if (value === 'glm') return 'GLM';
+    if (value === 'claude') return 'Claude';
+    return String(provider || '-');
+  }
+
   function notify(msg, isError = false) {
     if (typeof window.notify === 'function') { window.notify(msg, !!isError); return; }
     const box = document.getElementById('notification');
@@ -250,13 +259,13 @@
     }
     enabledEl.checked = !!cfg.enabled;
     modeEl.value = String(cfg.mode || 'shadow');
-    providerEl.value = String(cfg.provider || 'glm');
+    providerEl.value = String(cfg.provider || 'codex');
     modelEl.value = String(cfg.model || '');
-    const selectedProvider = String(cfg.provider || 'glm');
+    const selectedProvider = String(cfg.provider || 'codex');
     const providerMeta = (cfg.providers || {})[selectedProvider] || {};
     const available = !!providerMeta.available;
     const modeText = String(cfg.mode || 'shadow');
-    const providerText = `${selectedProvider}/${String(cfg.model || '')}`;
+    const providerText = `${providerDisplayName(selectedProvider)}/${String(cfg.model || '')}`;
     statusEl.textContent = `${cfg.enabled ? '已启用' : '未启用'} | ${modeText} | ${providerText} | ${available ? 'key就绪' : 'key缺失'}`;
     statusEl.style.color = available ? '#9fb1c9' : '#f0b429';
   }
@@ -271,7 +280,7 @@
     const payload = {
       enabled: !!enabledEl.checked,
       mode: String(modeEl.value || 'shadow'),
-      provider: String(providerEl.value || 'glm'),
+      provider: String(providerEl.value || 'codex'),
       model: String(modelEl.value || '').trim(),
     };
     try {
@@ -501,8 +510,14 @@
   }
 
   /* ── API 请求 ── */
-  function getStrategyFamily(strategy) {
-    return STRATEGY_FAMILIES[String(strategy || '').trim()] || 'traditional';
+  function getStrategyFamily(item) {
+    if (item && typeof item === 'object') {
+      const metadataFamily = String(item?.metadata?.strategy_family || item?.strategy_family || '').trim();
+      if (metadataFamily) return metadataFamily;
+      const strategyName = String(item?.strategy || item?.name || '').trim();
+      return STRATEGY_FAMILIES[strategyName] || 'traditional';
+    }
+    return STRATEGY_FAMILIES[String(item || '').trim()] || 'traditional';
   }
 
   function getCurrentResearchExchange() {
@@ -648,15 +663,9 @@
     }[String(s || '')] || String(s || '--');
   }
 
-  function getFamilyMeta(strategy) {
-    const family = getStrategyFamily(strategy);
-    if (family === 'ml') {
-      return { label: 'ML驱动', color: '#ff6b35', accent: 'rgba(255,107,53,.16)' };
-    }
-    if (family === 'ai_glm') {
-      return { label: 'GLM/AI驱动', color: '#38bdf8', accent: 'rgba(56,189,248,.16)' };
-    }
-    return { label: '传统规则', color: '#64748b', accent: 'rgba(100,116,139,.16)' };
+  function getFamilyMeta(item) {
+    const family = getStrategyFamily(item);
+    return FAMILY_META[family] || FAMILY_META.traditional;
   }
 
   function getCandidateEnrichment(cand) {
@@ -1177,7 +1186,7 @@
     const compareChecked = state.compareCandidateIds.has(cid) ? 'checked' : '';
     const category = STRATEGY_CATEGORIES[strat] || '';
     const catColor = CATEGORY_COLORS[category] || '#64748b';
-    const familyMeta = getFamilyMeta(strat);
+    const familyMeta = getFamilyMeta(cand);
     const enrichment = getCandidateEnrichment(cand);
     const catBadge = category
       ? `<span class="cand-category-badge" style="background:${catColor}22;color:${catColor};border:1px solid ${catColor}44;">${esc(category)}</span>`
@@ -1193,7 +1202,7 @@
         ? `<span class="cand-category-badge" style="background:#3d2b14;color:#f0b429;border:1px solid #6f5321;">去重隐藏 ${hiddenDuplicates}</span>`
         : '',
     ].filter(Boolean).join('');
-    const aiCardStyle = getStrategyFamily(strat) === 'traditional'
+    const aiCardStyle = getStrategyFamily(cand) === 'traditional'
       ? ''
       : ` style="box-shadow:0 0 0 1px ${familyMeta.color}33 inset, 0 10px 30px ${familyMeta.accent};"`;
 
@@ -1259,7 +1268,7 @@
     const governanceGateHint = governanceEnabled() && cand?.metadata?.promotion_pending_human_gate;
     const proposalId = String(cand?.proposal_id || '').trim();
     const experimentId = String(cand?.experiment_id || '').trim();
-    const familyMeta = getFamilyMeta(cand?.strategy || '');
+    const familyMeta = getFamilyMeta(cand);
     const enrichment = getCandidateEnrichment(cand);
 
     const proposalSnapshot = state.proposals.find(item => String(item?.proposal_id || '').trim() === proposalId) || null;
@@ -3138,7 +3147,7 @@
     info.innerHTML = `
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;font-size:11px;">
         <span style="color:var(--text-muted)">Provider</span>
-        <span>${cfg.provider || '-'}/${(cfg.model || '-').split('-').slice(-1)[0]}</span>
+        <span>${providerDisplayName(cfg.provider || '-')}/${(cfg.model || '-').split('-').slice(-1)[0]}</span>
         <span style="color:var(--text-muted)">\u6a21\u5f0f</span><span>${allowLive}</span>
         <span style="color:var(--text-muted)">\u8fd0\u884c Tick</span><span>${tickCount}</span>
         <span style="color:var(--text-muted)">\u5df2\u63d0\u4ea4</span><span>${submitted}</span>

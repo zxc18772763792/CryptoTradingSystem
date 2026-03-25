@@ -212,6 +212,38 @@ def test_run_backtest_core_with_params():
     assert "total_return" in result
 
 
+def test_run_backtest_core_supports_strategy_programs():
+    """B+: _run_backtest_core should execute AI-authored strategy programs outside the fixed library."""
+    from core.ai.proposal_schemas import StrategyCondition, StrategyProgram
+    from core.research.strategy_research import _run_backtest_core
+
+    df = _make_ohlcv(320)
+    strategy_name = "OpenAI EMA Draft"
+    program = StrategyProgram(
+        program_id="prog-ema",
+        name=strategy_name,
+        description="EMA crossover draft",
+        entry_conditions=[StrategyCondition(left="ema_fast", op="cross_over", right="ema_slow")],
+        exit_conditions=[StrategyCondition(left="ema_fast", op="cross_under", right="ema_slow")],
+        params={"fast_period": 8, "slow_period": 21},
+    )
+
+    result = _run_backtest_core(
+        strategy=strategy_name,
+        df=df,
+        timeframe="1m",
+        initial_capital=10000.0,
+        params={"fast_period": 8, "slow_period": 21},
+        commission_rate=0.0004,
+        slippage_bps=2.0,
+        strategy_programs={strategy_name: program},
+    )
+
+    assert result["quality_flag"] != "invalid"
+    assert "sharpe_ratio" in result
+    assert "total_return" in result
+
+
 def test_social_sentiment_strategy_responds_to_news_columns():
     """B+: AI sentiment strategy should be able to enter from news even on quiet price action."""
     from core.research.strategy_research import _build_positions
@@ -239,11 +271,18 @@ def test_social_sentiment_strategy_responds_to_news_columns():
 
 def test_create_candidates_from_result_carries_research_enrichment():
     """B+: Candidate metadata should preserve news/macro replay summary for the UI."""
-    from core.ai.proposal_schemas import ResearchProposal
+    from core.ai.proposal_schemas import ResearchProposal, StrategyCondition, StrategyDraft, StrategyProgram
     from core.research.experiment_schemas import ExperimentSpec
     from core.research.orchestrator import _create_candidates_from_result
 
     now = _now()
+    program = StrategyProgram(
+        program_id="prog-openai-ema",
+        name="OpenAI EMA Draft",
+        description="AI-authored EMA crossover",
+        entry_conditions=[StrategyCondition(left="ema_fast", op="cross_over", right="ema_slow")],
+        exit_conditions=[StrategyCondition(left="ema_fast", op="cross_under", right="ema_slow")],
+    )
     proposal = ResearchProposal(
         proposal_id="p-enrichment",
         created_at=now,
@@ -252,6 +291,15 @@ def test_create_candidates_from_result_carries_research_enrichment():
         target_symbols=["BTC/USDT"],
         target_timeframes=["1h"],
         strategy_templates=["MarketSentimentStrategy"],
+        strategy_drafts=[
+            StrategyDraft(
+                draft_id="draft-openai-ema",
+                name="OpenAI EMA Draft",
+                mode="dsl_seed",
+                thesis="AI-authored EMA crossover",
+                program=program,
+            )
+        ],
     )
     experiment = ExperimentSpec(
         experiment_id="exp-enrichment",
@@ -260,13 +308,14 @@ def test_create_candidates_from_result_carries_research_enrichment():
         exchange="binance",
         symbol="BTC/USDT",
         timeframes=["1h"],
-        strategies=["MarketSentimentStrategy"],
+        strategies=["MarketSentimentStrategy", "OpenAI EMA Draft"],
+        strategy_programs=[program],
     )
     result = {
-        "runs": 1,
-        "valid_runs": 1,
-        "quality_counts": {"ok": 1},
-        "top_results": [],
+        "runs": 2,
+        "valid_runs": 2,
+        "quality_counts": {"ok": 2},
+        "top_results": [{"strategy": "OpenAI EMA Draft", "timeframe": "1h", "score": 82.0}],
         "best_per_strategy": {
             "MarketSentimentStrategy": {
                 "strategy": "MarketSentimentStrategy",
@@ -281,7 +330,21 @@ def test_create_candidates_from_result_carries_research_enrichment():
                 "anomaly_bar_ratio": 0.0,
                 "quality_flag": "ok",
                 "score": 78.0,
-            }
+            },
+            "OpenAI EMA Draft": {
+                "strategy": "OpenAI EMA Draft",
+                "timeframe": "1h",
+                "total_return": 18.0,
+                "gross_total_return": 19.0,
+                "cost_drag_return_pct": 1.0,
+                "sharpe_ratio": 1.8,
+                "max_drawdown": 5.0,
+                "win_rate": 58.0,
+                "total_trades": 22,
+                "anomaly_bar_ratio": 0.0,
+                "quality_flag": "ok",
+                "score": 82.0,
+            },
         },
         "news_events_count": 27,
         "funding_available": True,
@@ -295,6 +358,11 @@ def test_create_candidates_from_result_carries_research_enrichment():
     assert best_candidate is not None
     assert best_candidate.metadata["news_events_count"] == 27
     assert best_candidate.metadata["funding_available"] is True
+    program_candidate = next(c for c in candidates if c.strategy == "OpenAI EMA Draft")
+    assert program_candidate.metadata["decision_engine"] == "openai"
+    assert program_candidate.metadata["strategy_family"] == "ai_openai"
+    assert program_candidate.metadata["strategy_program"]["program_id"] == "prog-openai-ema"
+
 
 
 def test_backtest_core_carries_enrichment_attrs():

@@ -24,6 +24,39 @@ ProposalSource = Literal["ai", "human", "hybrid"]
 ValidationDecision = Literal["reject", "paper", "shadow", "live_candidate"]
 ResearchMode = Literal["template", "hybrid", "autonomous_draft"]
 StrategyDraftMode = Literal["template_seed", "hybrid_seed", "dsl_seed"]
+StrategyIndicatorKind = Literal["price", "sma", "ema", "rsi", "zscore", "returns"]
+StrategyConditionOp = Literal["gt", "gte", "lt", "lte", "cross_over", "cross_under"]
+StrategyConditionCombine = Literal["all", "any"]
+StrategyExecutionMode = Literal["stateful_long", "signal_long"]
+
+
+class StrategyIndicatorSpec(BaseModel):
+    name: str
+    kind: StrategyIndicatorKind = "price"
+    source: str = "close"
+    period: Optional[int] = None
+
+
+class StrategyCondition(BaseModel):
+    left: str
+    op: StrategyConditionOp = "gt"
+    right: Any
+
+
+class StrategyProgram(BaseModel):
+    program_id: str = ""
+    name: str = ""
+    description: str = ""
+    indicators: List[StrategyIndicatorSpec] = Field(default_factory=list)
+    entry_conditions: List[StrategyCondition] = Field(default_factory=list)
+    exit_conditions: List[StrategyCondition] = Field(default_factory=list)
+    entry_combine: StrategyConditionCombine = "all"
+    exit_combine: StrategyConditionCombine = "any"
+    execution_mode: StrategyExecutionMode = "stateful_long"
+    params: Dict[str, Any] = Field(default_factory=dict)
+    parameter_space: Dict[str, Any] = Field(default_factory=dict)
+    tags: List[str] = Field(default_factory=list)
+    source: str = "llm"
 
 
 class StrategyDraft(BaseModel):
@@ -38,6 +71,7 @@ class StrategyDraft(BaseModel):
     exit_logic: List[str] = Field(default_factory=list)
     risk_logic: List[str] = Field(default_factory=list)
     params: Dict[str, Any] = Field(default_factory=dict)
+    program: Optional[StrategyProgram] = None
     confidence: float = 0.0
     tags: List[str] = Field(default_factory=list)
     source: str = "llm"

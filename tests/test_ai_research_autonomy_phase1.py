@@ -7,7 +7,9 @@ from core.ai.proposal_schemas import (
     ResearchLineage,
     ResearchProposal,
     ResearchSearchBudget,
+    StrategyCondition,
     StrategyDraft,
+    StrategyProgram,
 )
 from core.ai.research_planner import PlannerGenerateRequest, generate_research_proposal
 from core.research.orchestrator import _build_experiment_spec, build_research_config_from_proposal
@@ -125,6 +127,89 @@ def test_build_research_config_uses_draft_template_hint_when_templates_missing()
     assert config.symbol == "BTC/USDT"
     assert config.timeframes == ["1h"]
     assert config.strategies == ["MAStrategy"]
+
+
+def test_generate_research_proposal_captures_structured_strategy_program():
+    req = PlannerGenerateRequest(
+        goal="Research an autonomous EMA crossover draft on BTC/USDT",
+        market_regime="trend_up",
+        symbols=["BTCUSDT"],
+        timeframes=["1h"],
+        llm_research_output={
+            "hypothesis": "An EMA crossover draft should be executable as a program.",
+            "proposed_strategy_changes": [
+                {
+                    "name": "OpenAI EMA Draft",
+                    "strategy": "EMAStrategy",
+                    "thesis": "Use an EMA crossover with a program payload.",
+                    "params": {"fast_period": 8, "slow_period": 21},
+                    "program": {
+                        "name": "OpenAI EMA Draft",
+                        "entry_conditions": [{"left": "ema_fast", "op": "cross_over", "right": "ema_slow"}],
+                        "exit_conditions": [{"left": "ema_fast", "op": "cross_under", "right": "ema_slow"}],
+                        "parameter_space": {"fast_period": [5, 8], "slow_period": [21, 34]},
+                    },
+                }
+            ]
+        },
+    )
+
+    out = generate_research_proposal(req, actor="pytest")
+    draft = out.proposal.strategy_drafts[0]
+
+    assert draft.program is not None
+    assert draft.program.name == "OpenAI EMA Draft"
+    assert draft.program.entry_conditions[0].op == "cross_over"
+    assert draft.program.parameter_space == {"fast_period": [5, 8], "slow_period": [21, 34]}
+
+
+def test_build_research_config_includes_strategy_programs():
+    now = _now()
+    program = StrategyProgram(
+        program_id="prog-ema",
+        name="OpenAI EMA Draft",
+        description="Executable AI strategy draft.",
+        entry_conditions=[StrategyCondition(left="ema_fast", op="cross_over", right="ema_slow")],
+        exit_conditions=[StrategyCondition(left="ema_fast", op="cross_under", right="ema_slow")],
+        params={"fast_period": 8, "slow_period": 21},
+        parameter_space={"fast_period": [5, 8], "slow_period": [21, 34]},
+    )
+    proposal = ResearchProposal(
+        proposal_id="proposal-program-config",
+        created_at=now,
+        updated_at=now,
+        research_mode="autonomous_draft",
+        thesis="Use program strategies directly in research config.",
+        target_symbols=["BTC/USDT"],
+        target_timeframes=["1h"],
+        strategy_templates=[],
+        strategy_drafts=[
+            StrategyDraft(
+                draft_id="draft-program-01",
+                name="OpenAI EMA Draft",
+                mode="dsl_seed",
+                thesis="Executable EMA crossover.",
+                program=program,
+            )
+        ],
+    )
+
+    config = build_research_config_from_proposal(
+        proposal,
+        exchange="binance",
+        symbol=None,
+        days=30,
+        commission_rate=0.0004,
+        slippage_bps=2.0,
+        initial_capital=10000.0,
+        timeframes=[],
+        strategies=[],
+    )
+
+    assert config.strategies == ["OpenAI EMA Draft"]
+    assert "OpenAI EMA Draft" in config.strategy_programs
+    assert config.strategy_programs["OpenAI EMA Draft"].program_id == "prog-ema"
+    assert config.parameter_space["OpenAI EMA Draft"] == {"fast_period": [5, 8], "slow_period": [21, 34]}
 
 
 def test_build_experiment_spec_propagates_autonomy_fields():

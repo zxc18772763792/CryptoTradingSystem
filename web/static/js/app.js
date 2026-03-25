@@ -125,10 +125,10 @@ TriangularArbitrageStrategy:{cat:'套利',desc:'三角路径套利'},
 DEXArbitrageStrategy:{cat:'套利',desc:'链上DEX套利'},
 FlashLoanArbitrageStrategy:{cat:'套利',desc:'闪电贷套利'},
 // ===== 宏观类 =====
-MarketSentimentStrategy:{cat:'宏观',desc:'恐慌贪婪指数',family:'ai_glm',decisionEngine:'glm',aiDriven:true},
-SocialSentimentStrategy:{cat:'宏观',desc:'社媒情绪分析',family:'ai_glm',decisionEngine:'glm',aiDriven:true},
-FundFlowStrategy:{cat:'宏观',desc:'交易所资金流',family:'ai_glm',decisionEngine:'glm',aiDriven:true},
-WhaleActivityStrategy:{cat:'宏观',desc:'巨鲸地址追踪',family:'ai_glm',decisionEngine:'glm',aiDriven:true},
+MarketSentimentStrategy:{cat:'宏观',desc:'恐慌贪婪指数',family:'ai_openai',decisionEngine:'openai',aiDriven:true},
+SocialSentimentStrategy:{cat:'宏观',desc:'社媒情绪分析',family:'ai_openai',decisionEngine:'openai',aiDriven:true},
+FundFlowStrategy:{cat:'宏观',desc:'交易所资金流',family:'ai_openai',decisionEngine:'openai',aiDriven:true},
+WhaleActivityStrategy:{cat:'宏观',desc:'巨鲸地址追踪',family:'ai_openai',decisionEngine:'openai',aiDriven:true},
 // ===== 量化多因子类 =====
 MultiFactorHFStrategy:{cat:'量化',desc:'多因子高频组合(5m)'},
 // ===== ML 类 =====
@@ -2803,12 +2803,12 @@ const optimizeViewMeta=((meta)=>{
       dataHint:newsCount>0||fundingAvailable?'当前模型回测已带增强上下文':'当前模型回测以 OHLCV 为主',
     };
   }
-  if(family==='ai_glm'){
+  if(family==='ai_glm'||family==='ai_openai'||decision==='glm'||decision==='openai'){
     return {
-      familyLabel:'GLM/AI驱动',
+      familyLabel:'OpenAI/AI驱动',
       familyColor:'#38bdf8',
       familyBg:'rgba(56,189,248,.14)',
-      decisionLabel:'GLM / AI事件决策',
+      decisionLabel:'OpenAI / AI事件决策',
       dataMode:resolvedDataMode||'OHLCV only',
       dataHint:newsCount>0||fundingAvailable?'本次优化已接入历史新闻/宏观增强':'当前区间未命中可用新闻/宏观增强',
     };
@@ -3122,7 +3122,7 @@ try{
   if(!row){notify('未找到该参数组合',true);return;}
   const st=String(opt.strategy_type||opt.strategy||'').trim();
   const meta=getStrategyMeta(st);
-  const familyLabel=meta.family==='ml'?'ML驱动':(meta.family==='ai_glm'?'GLM/AI驱动':'传统规则');
+  const familyLabel=meta.family==='ml'?'ML驱动':((meta.family==='ai_glm'||meta.family==='ai_openai')?'OpenAI/AI驱动':'传统规则');
   const symbol=String(opt.symbol||document.getElementById('backtest-symbol')?.value||'BTC/USDT');
   const tf=String(opt.timeframe||document.getElementById('backtest-timeframe')?.value||'1h');
   const capital=Number(document.getElementById('backtest-capital')?.value||opt.initial_capital||10000);

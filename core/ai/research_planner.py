@@ -16,6 +16,7 @@ from core.ai.proposal_schemas import (
     StrategyDraft,
 )
 from core.governance.schemas import LLMResearchOutput
+from core.research.strategy_program import build_strategy_program_from_draft
 
 
 class PlannerGenerateRequest(BaseModel):
@@ -478,6 +479,19 @@ def _normalize_strategy_draft(
     else:
         mode = "dsl_seed"
 
+    program = build_strategy_program_from_draft(
+        raw_change=change,
+        draft_id=str(change.get("draft_id") or f"draft-{index + 1:02d}"),
+        draft_name=title,
+        thesis=thesis,
+        template_hint=template_hint,
+        features=features,
+        entry_logic=entry_logic,
+        exit_logic=exit_logic,
+        params=params,
+        tags=tags,
+    )
+
     return StrategyDraft(
         draft_id=str(change.get("draft_id") or f"draft-{index + 1:02d}"),
         name=title,
@@ -490,6 +504,7 @@ def _normalize_strategy_draft(
         exit_logic=exit_logic,
         risk_logic=risk_logic,
         params=params,
+        program=program,
         confidence=confidence,
         tags=tags,
         source=str(change.get("source") or "llm"),

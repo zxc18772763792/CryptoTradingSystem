@@ -12,6 +12,7 @@ from core.ai.proposal_schemas import (
     ResearchMode,
     ResearchSearchBudget,
     StrategyDraft,
+    StrategyProgram,
 )
 
 
@@ -32,6 +33,7 @@ class ExperimentSpec(BaseModel):
     timeframes: List[str] = Field(default_factory=list)
     strategies: List[str] = Field(default_factory=list)
     strategy_drafts: List[StrategyDraft] = Field(default_factory=list)
+    strategy_programs: List[StrategyProgram] = Field(default_factory=list)
     parameter_space: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     days: int = 90
     initial_capital: float = 10000.0

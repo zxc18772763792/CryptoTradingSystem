@@ -11,9 +11,11 @@ import pandas as pd
 from loguru import logger
 
 from config.settings import settings
+from core.ai.proposal_schemas import StrategyProgram
 from core.backtest.funding_provider import FundingRateProvider
 from core.data import data_storage
 from core.news.storage import db as news_db
+from core.research.strategy_program import build_program_positions
 
 SUPPORTED_RESEARCH_TIMEFRAMES = [
     "1s",
@@ -399,8 +401,16 @@ def _attach_research_enrichment(
     return out
 
 
-def _build_positions(strategy: str, df: pd.DataFrame, params: Optional[Dict[str, Any]] = None) -> pd.Series:
+def _build_positions(
+    strategy: str,
+    df: pd.DataFrame,
+    params: Optional[Dict[str, Any]] = None,
+    strategy_programs: Optional[Dict[str, StrategyProgram]] = None,
+) -> pd.Series:
     params = params or {}
+    program = dict(strategy_programs or {}).get(str(strategy))
+    if program is not None:
+        return build_program_positions(program, df, params=params).fillna(0.0)
     close = df["close"]
     position = pd.Series(0.0, index=df.index)
 
@@ -1026,11 +1036,12 @@ def _run_backtest_core(
     params: Optional[Dict[str, Any]] = None,
     commission_rate: float = 0.0004,
     slippage_bps: float = 2.0,
+    strategy_programs: Optional[Dict[str, StrategyProgram]] = None,
 ) -> Dict[str, Any]:
     if len(df) < 50:
         raise ValueError("数据不足，至少需要 50 根 K 线")
 
-    position = _build_positions(strategy, df, params=params)
+    position = _build_positions(strategy, df, params=params, strategy_programs=strategy_programs)
     returns, anomaly_ratio, clip_limit = _safe_bar_returns(df["close"], timeframe)
     gross_returns = position.shift(1).fillna(0.0) * returns
 
@@ -1104,6 +1115,7 @@ class ResearchConfig:
     output_dir: Path = field(default_factory=lambda: Path(settings.DATA_STORAGE_PATH) / ".." / "research")
     # B: parameter space for grid search {strategy_name: {param: [val1, val2, ...]}}
     parameter_space: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    strategy_programs: Dict[str, StrategyProgram] = field(default_factory=dict)
 
 
 def _normalize_symbol(symbol: str) -> str:
@@ -1167,6 +1179,7 @@ def _optimize_params_scipy_lhs(
     slippage_bps: float,
     initial_capital: float,
     max_trials: int = 30,
+    strategy_programs: Optional[Dict[str, StrategyProgram]] = None,
 ) -> tuple:
     """Scipy Latin Hypercube Sampling optimization. Returns (best_params, n_trials, method)."""
     if not param_grid:
@@ -1215,6 +1228,7 @@ def _optimize_params_scipy_lhs(
                 params=combo,
                 commission_rate=commission_rate,
                 slippage_bps=slippage_bps,
+                strategy_programs=strategy_programs,
             )
             n_trials += 1
             if m.get("quality_flag") != "invalid":
@@ -1244,6 +1258,7 @@ def _optimize_params_scipy_lhs(
                             params=ncombo,
                             commission_rate=commission_rate,
                             slippage_bps=slippage_bps,
+                            strategy_programs=strategy_programs,
                         )
                         n_trials += 1
                         if m.get("quality_flag") != "invalid":
@@ -1266,6 +1281,7 @@ def _run_walk_forward(
     commission_rate: float,
     slippage_bps: float,
     initial_capital: float,
+    strategy_programs: Optional[Dict[str, StrategyProgram]] = None,
 ) -> List[float]:
     """C: Expanding-window walk-forward — return list of OOS Sharpe ratios per fold."""
     n = len(df)
@@ -1288,6 +1304,7 @@ def _run_walk_forward(
                 params=params,
                 commission_rate=commission_rate,
                 slippage_bps=slippage_bps,
+                strategy_programs=strategy_programs,
             )
             if m.get("quality_flag") != "invalid":
                 sharpe_list.append(float(m.get("sharpe_ratio", 0.0) or 0.0))
@@ -1306,6 +1323,7 @@ def _run_purged_walk_forward(
     commission_rate: float = 0.0004,
     slippage_bps: float = 2.0,
     initial_capital: float = 10000.0,
+    strategy_programs: Optional[Dict[str, StrategyProgram]] = None,
 ) -> Dict[str, Any]:
     """Purged expanding-window walk-forward with embargo gap to prevent data leakage."""
     n = len(df)
@@ -1333,6 +1351,7 @@ def _run_purged_walk_forward(
                 params=params,
                 commission_rate=commission_rate,
                 slippage_bps=slippage_bps,
+                strategy_programs=strategy_programs,
             )
             if m.get("quality_flag") != "invalid":
                 sr = float(m.get("sharpe_ratio", 0.0) or 0.0)
@@ -1666,6 +1685,7 @@ async def run_strategy_research(config: ResearchConfig) -> Dict[str, Any]:
                         slippage_bps=float(config.slippage_bps),
                         initial_capital=config.initial_capital,
                         max_trials=30,
+                        strategy_programs=config.strategy_programs,
                     )
                     if best_params:
                         try:
@@ -1677,6 +1697,7 @@ async def run_strategy_research(config: ResearchConfig) -> Dict[str, Any]:
                                 params=best_params,
                                 commission_rate=float(config.commission_rate),
                                 slippage_bps=float(config.slippage_bps),
+                                strategy_programs=config.strategy_programs,
                             )
                         except Exception:
                             pass
@@ -1696,6 +1717,7 @@ async def run_strategy_research(config: ResearchConfig) -> Dict[str, Any]:
                     params=best_params if best_params else None,
                     commission_rate=float(config.commission_rate),
                     slippage_bps=float(config.slippage_bps),
+                    strategy_programs=config.strategy_programs,
                 )
                 payload.update(
                     {
@@ -1730,6 +1752,7 @@ async def run_strategy_research(config: ResearchConfig) -> Dict[str, Any]:
                             params=best_params if best_params else None,
                             commission_rate=float(config.commission_rate),
                             slippage_bps=float(config.slippage_bps),
+                            strategy_programs=config.strategy_programs,
                         )
                         if oos_metrics.get("quality_flag") == "invalid":
                             oos_metrics = None
@@ -1754,13 +1777,19 @@ async def run_strategy_research(config: ResearchConfig) -> Dict[str, Any]:
                     commission_rate=float(config.commission_rate),
                     slippage_bps=float(config.slippage_bps),
                     initial_capital=config.initial_capital,
+                    strategy_programs=config.strategy_programs,
                 )
                 payload["wf_stability"] = _compute_wf_stability(wf_result)
                 payload["wf_consistency"] = wf_result.get("consistency")
 
                 # ── Equity curve sample (50 points) ───────────────────
                 try:
-                    _pos = _build_positions(strategy, tf_df, params=best_params if best_params else None)
+                    _pos = _build_positions(
+                        strategy,
+                        tf_df,
+                        params=best_params if best_params else None,
+                        strategy_programs=config.strategy_programs,
+                    )
                     _rets, _, _ = _safe_bar_returns(tf_df["close"], timeframe)
                     _gross = _pos.shift(1).fillna(0.0) * _rets
                     _turnover = _pos.diff().abs().fillna(0.0)

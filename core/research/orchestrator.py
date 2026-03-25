@@ -31,6 +31,7 @@ from core.research.experiment_registry import (
     ProposalRegistry,
 )
 from core.research.experiment_schemas import ExperimentRun, ExperimentSpec, StrategyCandidate
+from core.research.strategy_program import program_strategy_name
 from core.research.strategy_research import ResearchConfig, run_strategy_research
 from core.research.validation_gate import (
     build_promotion_decision,
@@ -457,6 +458,16 @@ def build_research_config_from_proposal(
 ) -> ResearchConfig:
     resolved_symbol = normalize_symbol(symbol or (proposal.target_symbols[0] if proposal.target_symbols else "BTC/USDT"))
     resolved_timeframes = normalize_timeframes(timeframes or proposal.target_timeframes)
+    strategy_programs: Dict[str, Any] = {}
+    program_parameter_space: Dict[str, Dict[str, Any]] = {}
+    for draft in list(getattr(proposal, "strategy_drafts", []) or []):
+        program = getattr(draft, "program", None)
+        if program is None:
+            continue
+        strategy_name = program_strategy_name(program, fallback=str(getattr(draft, "name", "") or "OpenAI Draft Strategy"))
+        strategy_programs[strategy_name] = program
+        if getattr(program, "parameter_space", None):
+            program_parameter_space[strategy_name] = dict(program.parameter_space or {})
     draft_template_hints = _dedupe_keep_order(
         [
             str(getattr(draft, "template_hint", "") or "").strip()
@@ -471,19 +482,21 @@ def build_research_config_from_proposal(
     if not resolved_strategies:
         fallback, _ = _filter_supported_research_strategies(proposal.strategy_templates or draft_template_hints)
         resolved_strategies = fallback
-    if not resolved_strategies:
-        raise ValueError("proposal has no executable strategy templates or draft template hints to research")
+    all_executable = _dedupe_keep_order(list(resolved_strategies) + list(strategy_programs.keys()))
+    if not all_executable:
+        raise ValueError("proposal has no executable strategy templates or strategy programs to research")
     return ResearchConfig(
         exchange=str(exchange or "binance").strip().lower() or "binance",
         symbol=resolved_symbol,
         days=int(days),
         initial_capital=float(initial_capital),
         timeframes=resolved_timeframes,
-        strategies=resolved_strategies,
+        strategies=all_executable,
         commission_rate=float(commission_rate),
         slippage_bps=float(slippage_bps),
         # B: pass parameter_space from proposal so research can do grid search
-        parameter_space=dict(proposal.parameter_space or {}),
+        parameter_space={**dict(proposal.parameter_space or {}), **program_parameter_space},
+        strategy_programs=strategy_programs,
     )
 
 
@@ -580,7 +593,12 @@ def _build_experiment_spec(proposal: ResearchProposal, config: ResearchConfig, a
         timeframes=list(config.timeframes),
         strategies=list(config.strategies),
         strategy_drafts=list(getattr(proposal, "strategy_drafts", []) or []),
-        parameter_space=dict(proposal.parameter_space or {}),
+        strategy_programs=[
+            program
+            for program in dict(getattr(config, "strategy_programs", {}) or {}).values()
+            if program is not None
+        ],
+        parameter_space=dict(config.parameter_space or {}),
         days=int(config.days),
         initial_capital=float(config.initial_capital),
         commission_rate=float(config.commission_rate),
@@ -822,6 +840,14 @@ def _create_candidates_from_result(
         if not strat_best:
             continue
         strategy_meta = get_strategy_registry_entry(str(strat_best.get("strategy") or strat_name))
+        program_lookup = {
+            program_strategy_name(program): program
+            for program in list(getattr(experiment, "strategy_programs", []) or [])
+            if program is not None
+        }
+        strategy_program = program_lookup.get(str(strat_best.get("strategy") or strat_name))
+        strategy_family = "ai_openai" if strategy_program is not None else strategy_meta.get("family")
+        decision_engine = "openai" if strategy_program is not None else strategy_meta.get("decision_engine")
         # Build per-strategy validation using strategy-level run counts
         valid_r = max(int(valid_counts.get(strat_name, 0) or 0), 1)
         error_r = int(error_counts.get(strat_name, 0) or 0)
@@ -890,8 +916,14 @@ def _create_candidates_from_result(
                 "markdown_path": result.get("markdown_path"),
                 "news_events_count": int(result.get("news_events_count", 0) or 0),
                 "funding_available": bool(result.get("funding_available", False)),
-                "decision_engine": strategy_meta.get("decision_engine"),
-                "ai_driven": bool(strategy_meta.get("ai_driven", False)),
+                "decision_engine": decision_engine,
+                "strategy_family": strategy_family,
+                "ai_driven": bool(strategy_meta.get("ai_driven", False) or strategy_program is not None),
+                "strategy_program": (
+                    strategy_program.model_dump(mode="json")
+                    if strategy_program is not None and hasattr(strategy_program, "model_dump")
+                    else None
+                ),
             },
         )
         promo = build_promotion_decision(candidate.candidate_id, strat_summary)
