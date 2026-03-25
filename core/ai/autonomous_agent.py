@@ -16,6 +16,7 @@ import pandas as pd
 from loguru import logger
 
 from config.settings import settings
+from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.ai.signal_aggregator import signal_aggregator
 from core.data import data_storage
 from core.exchanges import exchange_manager
@@ -180,6 +181,7 @@ class AutonomousTradingAgent:
         self._last_run_at: Optional[str] = None
         self._last_decision: Optional[Dict[str, Any]] = None
         self._last_execution: Optional[Dict[str, Any]] = None
+        self._last_research_context: Optional[Dict[str, Any]] = None
         self._tick_count: int = 0
         self._submitted_count: int = 0
         self._last_submit_at: Optional[float] = None
@@ -318,6 +320,7 @@ class AutonomousTradingAgent:
             "submitted_count": int(self._submitted_count),
             "last_decision": self._last_decision,
             "last_execution": self._last_execution,
+            "last_research_context": self._last_research_context,
             "profile": dict(self._profile or _default_profile()),
             "journal_path": str(self._journal_path),
         }
@@ -558,6 +561,12 @@ class AutonomousTradingAgent:
                     "unrealized_pnl": float(getattr(position, "unrealized_pnl", 0.0) or 0.0),
                 }
 
+        research_context = resolve_runtime_research_context(
+            exchange=exchange,
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+
         return {
             "exchange": exchange,
             "symbol": symbol,
@@ -571,6 +580,7 @@ class AutonomousTradingAgent:
             "bars": int(len(market_data) if market_data is not None else 0),
             "aggregated_signal": agg_signal,
             "position": position_payload,
+            "research_context": research_context,
             "profile": dict(self._profile or _default_profile()),
             "trading_mode": execution_engine.get_trading_mode(),
         }, market_data
@@ -595,6 +605,7 @@ class AutonomousTradingAgent:
                 "If uncertain or data quality is low, choose hold.",
                 "Never fabricate certainty.",
                 "Use tighter risk when volatility is high.",
+                "If research_context is available, treat its selected_candidate as the current research champion hypothesis unless real-time risk clearly invalidates it.",
             ],
             "runtime_constraints": {
                 "min_confidence": cfg.get("min_confidence"),
@@ -703,6 +714,24 @@ class AutonomousTradingAgent:
             "agent_confidence": float(decision.get("confidence") or 0.0),
             "agent_reason": str(decision.get("reason") or ""),
         }
+        research_context = context_payload.get("research_context") if isinstance(context_payload, dict) else {}
+        if isinstance(research_context, dict) and research_context.get("available"):
+            selected_candidate = dict(research_context.get("selected_candidate") or {})
+            champion_candidate = dict(research_context.get("research_champion") or {})
+            metadata.update(
+                {
+                    "research_context_available": True,
+                    "research_selection_reason": str(research_context.get("selection_reason") or ""),
+                    "research_candidate_id": str(selected_candidate.get("candidate_id") or ""),
+                    "research_proposal_id": str(selected_candidate.get("proposal_id") or ""),
+                    "research_strategy": str(selected_candidate.get("strategy") or ""),
+                    "research_score": _coerce_float(selected_candidate.get("score", 0.0), 0.0, low=0.0, high=1000000.0),
+                    "research_status": str(selected_candidate.get("status") or ""),
+                    "research_role": str(selected_candidate.get("search_role") or ""),
+                    "research_champion_candidate_id": str(champion_candidate.get("candidate_id") or ""),
+                    "research_champion_strategy": str(champion_candidate.get("strategy") or ""),
+                }
+            )
         return Signal(
             symbol=str(cfg.get("symbol") or "BTC/USDT"),
             signal_type=signal_type,
@@ -834,10 +863,12 @@ class AutonomousTradingAgent:
             self._last_run_at = result["timestamp"]
             self._last_decision = {"action": "hold", "reason": "agent_disabled"}
             self._last_execution = {"submitted": False, "reason": "agent_disabled"}
+            self._last_research_context = None
             return result
 
         started = time.perf_counter()
         context_payload, market_data = await self._build_context(cfg)
+        research_context = context_payload.get("research_context") if isinstance(context_payload, dict) else {}
         if float(context_payload.get("price") or 0.0) <= 0:
             decision = {
                 "action": "hold",
@@ -937,6 +968,7 @@ class AutonomousTradingAgent:
                 "vol": context_payload.get("realized_vol_annualized"),
                 "aggregated_signal": context_payload.get("aggregated_signal"),
                 "position": context_payload.get("position"),
+                "research_context": research_context,
             },
             "decision": decision,
             "execution": execution,
@@ -948,6 +980,7 @@ class AutonomousTradingAgent:
         self._last_error = None
         self._last_decision = decision
         self._last_execution = execution
+        self._last_research_context = research_context if isinstance(research_context, dict) else None
         self._tick_count += 1
 
         return {

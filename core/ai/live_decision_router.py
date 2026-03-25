@@ -13,6 +13,7 @@ import aiohttp
 from loguru import logger
 
 from config.settings import settings
+from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.utils.openai_responses import (
     build_openai_headers,
     build_responses_payload,
@@ -114,6 +115,7 @@ class LiveDecisionOutcome:
     confidence: float
     latency_ms: int
     error: Optional[str] = None
+    research_context: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -128,6 +130,7 @@ class LiveDecisionOutcome:
             "confidence": float(self.confidence),
             "latency_ms": int(self.latency_ms),
             "error": self.error,
+            "research_context": self.research_context or {},
         }
 
 
@@ -381,6 +384,7 @@ class LiveAIDecisionRouter:
             "policy": [
                 "Prefer block when confidence is low with elevated uncertainty.",
                 "Block if signal conflicts with obvious risk context in payload.",
+                "Use research_context as an advisory source of the current champion candidate and active runtime candidate, not as an execution authority.",
                 "If uncertain, output allow with lower confidence, not fabricated certainty.",
             ],
             "input": payload,
@@ -428,7 +432,15 @@ class LiveAIDecisionRouter:
                 reason="ai_live_decision_disabled",
                 confidence=1.0,
                 latency_ms=0,
+                research_context={},
             ).to_dict()
+
+        research_context = resolve_runtime_research_context(
+            exchange=str((metadata or {}).get("exchange") or ""),
+            symbol=str(symbol or ""),
+            timeframe=str(timeframe or ""),
+            strategy_name=str(strategy or ""),
+        )
 
         prompt_payload = {
             "trading_mode": effective_mode,
@@ -444,6 +456,7 @@ class LiveAIDecisionRouter:
             "existing_position": existing_position or {},
             "trade_policy": trade_policy or {},
             "metadata": metadata or {},
+            "research_context": research_context,
         }
         system_prompt, user_prompt = self._build_prompt(prompt_payload)
         started = time.perf_counter()
@@ -478,6 +491,7 @@ class LiveAIDecisionRouter:
                 reason=reason,
                 confidence=confidence,
                 latency_ms=latency_ms,
+                research_context=research_context,
             ).to_dict()
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
@@ -496,6 +510,7 @@ class LiveAIDecisionRouter:
                     confidence=0.0,
                     latency_ms=latency_ms,
                     error=err,
+                    research_context=research_context,
                 ).to_dict()
             blocked = mode == "enforce"
             return LiveDecisionOutcome(
@@ -510,6 +525,7 @@ class LiveAIDecisionRouter:
                 confidence=0.0,
                 latency_ms=latency_ms,
                 error=err,
+                research_context=research_context,
             ).to_dict()
 
 

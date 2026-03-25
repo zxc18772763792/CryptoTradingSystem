@@ -3287,6 +3287,11 @@
     const submitted = Number(status.submitted_count || 0);
     const lastRunAt = status.last_run_at ? status.last_run_at.slice(0, 19) : '--';
     const lastErr   = status.last_error ? `<span style="color:#f87171"> | \u9519\u8bef: ${esc(String(status.last_error))}</span>` : '';
+    const researchCtx = status.last_research_context || {};
+    const selectedResearch = researchCtx.selected_candidate || {};
+    const researchLine = selectedResearch.candidate_id
+      ? `${esc(selectedResearch.strategy || '--')} / ${esc(selectedResearch.candidate_id)}`
+      : '--';
     const allowLive = cfg.allow_live
       ? '<span style="color:#f87171">\u5141\u8bb8\u5b9e\u76d8</span>'
       : '<span style="color:#94a3b8">\u4ec5\u7eb8\u76d8</span>';
@@ -3298,6 +3303,7 @@
         <span style="color:var(--text-muted)">\u6a21\u5f0f</span><span>${allowLive}</span>
         <span style="color:var(--text-muted)">\u8fd0\u884c Tick</span><span>${tickCount}</span>
         <span style="color:var(--text-muted)">\u5df2\u63d0\u4ea4</span><span>${submitted}</span>
+        <span style="color:var(--text-muted)">Research</span><span>${researchLine}</span>
         <span style="color:var(--text-muted)">\u6700\u540e\u8fd0\u884c</span><span>${lastRunAt}${lastErr}</span>
       </div>`;
 
