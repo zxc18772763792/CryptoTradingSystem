@@ -24,6 +24,7 @@ ProposalSource = Literal["ai", "human", "hybrid"]
 ValidationDecision = Literal["reject", "paper", "shadow", "live_candidate"]
 ResearchMode = Literal["template", "hybrid", "autonomous_draft"]
 StrategyDraftMode = Literal["template_seed", "hybrid_seed", "dsl_seed"]
+StrategyDraftSelectionStatus = Literal["seed", "accepted", "rejected", "champion", "challenger"]
 StrategyIndicatorKind = Literal["price", "sma", "ema", "rsi", "zscore", "returns"]
 StrategyConditionOp = Literal["gt", "gte", "lt", "lte", "cross_over", "cross_under"]
 StrategyConditionCombine = Literal["all", "any"]
@@ -75,6 +76,40 @@ class StrategyDraft(BaseModel):
     confidence: float = 0.0
     tags: List[str] = Field(default_factory=list)
     source: str = "llm"
+    parent_draft_id: Optional[str] = None
+    generation: int = 0
+    mutation_notes: List[str] = Field(default_factory=list)
+    critique: List[str] = Field(default_factory=list)
+    heuristic_score: float = 0.0
+    novelty_score: float = 0.0
+    selection_status: StrategyDraftSelectionStatus = "seed"
+    rejection_reason: str = ""
+
+
+class SearchDraftEvaluation(BaseModel):
+    draft_id: str = ""
+    name: str = ""
+    template_hint: str = ""
+    parent_draft_id: Optional[str] = None
+    generation: int = 0
+    heuristic_score: float = 0.0
+    novelty_score: float = 0.0
+    selection_status: StrategyDraftSelectionStatus = "accepted"
+    rejection_reason: str = ""
+    critique: List[str] = Field(default_factory=list)
+    mutation_notes: List[str] = Field(default_factory=list)
+
+
+class ResearchSearchSummary(BaseModel):
+    loop_enabled: bool = False
+    evaluated_drafts: int = 0
+    accepted_drafts: int = 0
+    rejected_drafts: int = 0
+    champion_draft_id: Optional[str] = None
+    challenger_draft_ids: List[str] = Field(default_factory=list)
+    rejected_reason_counts: Dict[str, int] = Field(default_factory=dict)
+    draft_evaluations: List[SearchDraftEvaluation] = Field(default_factory=list)
+    notes: List[str] = Field(default_factory=list)
 
 
 class ResearchSearchBudget(BaseModel):
@@ -140,5 +175,6 @@ class ResearchProposal(BaseModel):
     notes: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     search_budget: ResearchSearchBudget = Field(default_factory=ResearchSearchBudget)
+    search_summary: Optional[ResearchSearchSummary] = None
     lineage: Optional[ResearchLineage] = None
     validation_summary: Optional[ProposalValidationSummary] = None

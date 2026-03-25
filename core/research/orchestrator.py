@@ -599,6 +599,7 @@ def _build_experiment_spec(proposal: ResearchProposal, config: ResearchConfig, a
             if program is not None
         ],
         parameter_space=dict(config.parameter_space or {}),
+        search_summary=getattr(proposal, "search_summary", None),
         days=int(config.days),
         initial_capital=float(config.initial_capital),
         commission_rate=float(config.commission_rate),
@@ -886,6 +887,11 @@ def _create_candidates_from_result(
                     if getattr(proposal, "search_budget", None) is not None
                     else {}
                 ),
+                "search_summary": (
+                    proposal.search_summary.model_dump(mode="json")
+                    if getattr(proposal, "search_summary", None) is not None
+                    else {}
+                ),
                 "lineage": (
                     proposal.lineage.model_dump(mode="json")
                     if getattr(proposal, "lineage", None) is not None
@@ -938,6 +944,16 @@ def _create_candidates_from_result(
         _correlation_filter_candidates_v2(candidates, corr_threshold=0.85, existing_candidates=existing_candidates or [])
 
     best_candidate = next((c for c in candidates if not c.metadata.get("correlation_filtered")), None) or (candidates[0] if candidates else None)
+    if best_candidate is not None:
+        for cand in candidates:
+            if cand.candidate_id == best_candidate.candidate_id and not cand.metadata.get("correlation_filtered"):
+                cand.metadata["search_role"] = "champion"
+                cand.metadata["champion_candidate_id"] = cand.candidate_id
+                cand.metadata["champion_strategy"] = cand.strategy
+            else:
+                cand.metadata["search_role"] = "challenger"
+                cand.metadata["champion_candidate_id"] = best_candidate.candidate_id
+                cand.metadata["champion_strategy"] = best_candidate.strategy
     return overall_summary, candidates, best_candidate
 
 

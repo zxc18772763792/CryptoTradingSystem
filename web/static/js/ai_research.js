@@ -377,6 +377,26 @@
     }[String(mode || '').trim()] || String(mode || '--');
   }
 
+  function searchDraftStatusMeta(status) {
+    const key = String(status || 'seed').trim() || 'seed';
+    return {
+      champion: { label: 'Champion', fg: '#20bf78', bg: '#143224', border: '#245b42' },
+      challenger: { label: 'Challenger', fg: '#7dd3fc', bg: '#10263a', border: '#294d69' },
+      accepted: { label: 'Accepted', fg: '#c2d0e8', bg: '#1d2b3d', border: '#32475f' },
+      rejected: { label: 'Rejected', fg: '#f0b429', bg: '#35210f', border: '#6c431b' },
+      seed: { label: 'Seed', fg: '#9fb1c9', bg: '#1a2436', border: '#32475f' },
+    }[key] || { label: key || 'Seed', fg: '#9fb1c9', bg: '#1a2436', border: '#32475f' };
+  }
+
+  function candidateSearchRoleMeta(role) {
+    const key = String(role || '').trim();
+    if (!key) return null;
+    return {
+      champion: { label: 'Champion', fg: '#20bf78', bg: '#143224', border: '#245b42' },
+      challenger: { label: 'Challenger', fg: '#7dd3fc', bg: '#10263a', border: '#294d69' },
+    }[key] || { label: key, fg: '#9fb1c9', bg: '#1a2436', border: '#32475f' };
+  }
+
   function renderStrategyDraftSummary(drafts, limit = 3) {
     const rows = toArray(drafts).slice(0, limit);
     if (!rows.length) {
@@ -388,6 +408,13 @@
       const exit = toArray(draft?.exit_logic).slice(0, 2).join('；') || '--';
       const risk = toArray(draft?.risk_logic).slice(0, 2).join('；') || '--';
       const templateHint = String(draft?.template_hint || '').trim();
+      const statusMeta = searchDraftStatusMeta(draft?.selection_status);
+      const generation = Number(draft?.generation);
+      const generationText = Number.isFinite(generation) ? `G${Math.max(0, Math.round(generation))}` : 'G0';
+      const mutationNotes = joinText(toArray(draft?.mutation_notes).slice(0, 2));
+      const critique = joinText(toArray(draft?.critique).slice(0, 2));
+      const heuristic = Number(draft?.heuristic_score);
+      const novelty = Number(draft?.novelty_score);
       const params = draft?.params && Object.keys(draft.params).length
         ? Object.entries(draft.params).slice(0, 3).map(([k, v]) => `${k}=${String(v)}`).join('  ')
         : '--';
@@ -396,6 +423,14 @@
           <span style="font-size:12px;font-weight:700;color:#c2d0e8;">${esc(draft?.name || `Draft ${index + 1}`)}</span>
           <span style="font-size:10px;color:#7e92b2;">${esc(researchModeText(draft?.mode))}</span>
         </div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px;">
+          <span style="font-size:10px;padding:1px 6px;border-radius:999px;background:${statusMeta.bg};color:${statusMeta.fg};border:1px solid ${statusMeta.border};">${esc(statusMeta.label)}</span>
+          <span style="font-size:10px;padding:1px 6px;border-radius:999px;background:#1a2436;color:#9fb1c9;border:1px solid #32475f;">${esc(generationText)}</span>
+          ${Number.isFinite(heuristic) && heuristic > 0 ? `<span style="font-size:10px;padding:1px 6px;border-radius:999px;background:#1d2b3d;color:#c2d0e8;border:1px solid #32475f;">H ${esc(fmtNum(heuristic, 1))}</span>` : ''}
+          ${Number.isFinite(novelty) && novelty > 0 ? `<span style="font-size:10px;padding:1px 6px;border-radius:999px;background:#10263a;color:#7dd3fc;border:1px solid #294d69;">N ${(novelty * 100).toFixed(0)}%</span>` : ''}
+        </div>
+        ${mutationNotes !== '--' ? `<div style="font-size:10px;color:#7dd3fc;margin-bottom:4px;">Mutation: ${esc(mutationNotes)}</div>` : ''}
+        ${critique !== '--' ? `<div style="font-size:10px;color:#f0b429;margin-bottom:4px;">Critique: ${esc(critique)}</div>` : ''}
         <div style="font-size:11px;color:#9fb1c9;margin-bottom:4px;">模板种子：${esc(templateHint || '--')}</div>
         <div style="font-size:11px;color:#b7c7e2;line-height:1.55;">${esc(draft?.thesis || draft?.rationale || '--')}</div>
         <div style="font-size:10px;color:#7e92b2;margin-top:6px;">特征：${esc(features)}</div>
@@ -447,6 +482,101 @@
     </div>`;
   }
 
+  function renderSearchLoopSummary(summary, drafts = []) {
+    const info = summary && typeof summary === 'object' ? summary : null;
+    if (!info) {
+      return '<div style="font-size:12px;color:#6b7fa0;">鏆傛棤 Search Loop 淇℃伅</div>';
+    }
+    const evaluations = toArray(info?.draft_evaluations);
+    const evaluated = Number(info?.evaluated_drafts || 0);
+    const accepted = Number(info?.accepted_drafts || 0);
+    const rejected = Number(info?.rejected_drafts || 0);
+    const championId = String(info?.champion_draft_id || '').trim();
+    const challengers = toArray(info?.challenger_draft_ids);
+    const notes = joinText(toArray(info?.notes));
+    const draftNameMap = new Map();
+
+    toArray(drafts).forEach(draft => {
+      const draftId = String(draft?.draft_id || '').trim();
+      const draftName = String(draft?.name || '').trim();
+      if (draftId) draftNameMap.set(draftId, draftName || draftId);
+    });
+    evaluations.forEach(row => {
+      const draftId = String(row?.draft_id || '').trim();
+      const draftName = String(row?.name || '').trim();
+      if (draftId && !draftNameMap.has(draftId)) {
+        draftNameMap.set(draftId, draftName || draftId);
+      }
+    });
+
+    const championLabel = championId ? (draftNameMap.get(championId) || championId) : '--';
+    const reasonEntries = info?.rejected_reason_counts && typeof info.rejected_reason_counts === 'object'
+      ? Object.entries(info.rejected_reason_counts)
+        .filter(([, count]) => Number(count) > 0)
+        .sort((a, b) => Number(b[1]) - Number(a[1]))
+      : [];
+    const rejectedPreview = evaluations
+      .filter(row => String(row?.selection_status || '').trim() === 'rejected')
+      .slice(0, 3)
+      .map(row => {
+        const heuristic = Number(row?.heuristic_score);
+        const novelty = Number(row?.novelty_score);
+        const mutation = joinText(toArray(row?.mutation_notes).slice(0, 1));
+        const critique = joinText(toArray(row?.critique).slice(0, 1));
+        return `<div style="padding:6px 8px;background:#141f2f;border-radius:6px;margin-top:6px;">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;">
+            <span style="font-size:11px;font-weight:700;color:#c2d0e8;">${esc(row?.name || row?.draft_id || '--')}</span>
+            <span style="font-size:10px;color:#f0b429;">${esc(row?.rejection_reason || 'rejected')}</span>
+          </div>
+          <div style="font-size:10px;color:#7e92b2;margin-top:3px;">
+            ${esc(String(row?.draft_id || '--'))} · G${Math.max(0, Math.round(Number(row?.generation || 0) || 0))}
+            ${Number.isFinite(heuristic) && heuristic > 0 ? ` · H ${esc(fmtNum(heuristic, 1))}` : ''}
+            ${Number.isFinite(novelty) && novelty >= 0 ? ` · N ${(novelty * 100).toFixed(0)}%` : ''}
+          </div>
+          ${mutation !== '--' ? `<div style="font-size:10px;color:#7dd3fc;margin-top:3px;">Mutation: ${esc(mutation)}</div>` : ''}
+          ${critique !== '--' ? `<div style="font-size:10px;color:#f0b429;margin-top:3px;">Critique: ${esc(critique)}</div>` : ''}
+        </div>`;
+      }).join('');
+
+    const statusText = info?.loop_enabled ? 'Enabled' : 'Disabled';
+    const statusColor = info?.loop_enabled ? '#20bf78' : '#7e92b2';
+    return `<div style="background:#141f2f;border-radius:6px;padding:8px;">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:8px;">
+        <div style="font-size:12px;color:#c2d0e8;font-weight:700;">Search Loop</div>
+        <span style="font-size:10px;padding:1px 6px;border-radius:999px;background:${info?.loop_enabled ? '#143224' : '#1a2436'};color:${statusColor};border:1px solid ${info?.loop_enabled ? '#245b42' : '#32475f'};">${statusText}</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;">
+        <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
+          <div style="font-size:10px;color:#6b7fa0;">Evaluated</div>
+          <div style="font-size:13px;font-weight:700;color:#c2d0e8;">${evaluated}</div>
+        </div>
+        <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
+          <div style="font-size:10px;color:#6b7fa0;">Accepted</div>
+          <div style="font-size:13px;font-weight:700;color:#20bf78;">${accepted}</div>
+        </div>
+        <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
+          <div style="font-size:10px;color:#6b7fa0;">Rejected</div>
+          <div style="font-size:13px;font-weight:700;color:#f0b429;">${rejected}</div>
+        </div>
+        <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
+          <div style="font-size:10px;color:#6b7fa0;">Challengers</div>
+          <div style="font-size:13px;font-weight:700;color:#7dd3fc;">${challengers.length}</div>
+        </div>
+      </div>
+      <div style="font-size:12px;color:#b7c7e2;line-height:1.6;margin-top:8px;">
+        <div>Champion: <span style="color:#20bf78;font-weight:700;">${esc(championLabel)}</span>${championId ? `<span style="color:#7e92b2;"> (${esc(championId)})</span>` : ''}</div>
+        ${notes !== '--' ? `<div style="margin-top:4px;color:#7e92b2;">Notes: ${esc(notes)}</div>` : ''}
+      </div>
+      ${reasonEntries.length ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:8px;">
+        ${reasonEntries.map(([reason, count]) => `<span style="font-size:10px;padding:1px 6px;border-radius:999px;background:#35210f;color:#f0b429;border:1px solid #6c431b;">${esc(reason)} x${esc(String(count))}</span>`).join('')}
+      </div>` : ''}
+      ${rejectedPreview ? `<div style="margin-top:8px;">
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:2px;">Rejected Drafts</div>
+        ${rejectedPreview}
+      </div>` : ''}
+    </div>`;
+  }
+
   function renderAutonomyContext(proposal, fallback = {}) {
     const proposalInfo = proposal && typeof proposal === 'object' ? proposal : {};
     const llmResearchOutput = proposalInfo?.metadata?.llm_research_output || fallback?.llmResearchOutput || {};
@@ -455,6 +585,10 @@
       ? toArray(proposalInfo?.strategy_drafts)
       : toArray(fallback?.strategyDrafts);
     const searchBudget = proposalInfo?.search_budget || fallback?.searchBudget || {};
+    const searchSummary = proposalInfo?.search_summary
+      || proposalInfo?.metadata?.search_summary
+      || fallback?.searchSummary
+      || {};
     const lineage = proposalInfo?.lineage || fallback?.lineage || null;
     const hypothesis = String(llmResearchOutput?.hypothesis || proposalInfo?.thesis || fallback?.thesis || '').trim();
     const experimentPlan = joinText(llmResearchOutput?.experiment_plan);
@@ -492,6 +626,10 @@
         <div style="margin-top:8px;">
           <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">策略草案</div>
           ${renderStrategyDraftSummary(strategyDrafts, 4)}
+          <div style="margin-top:8px;">
+            <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Search Loop</div>
+            ${renderSearchLoopSummary(searchSummary, strategyDrafts)}
+          </div>
         </div>
         <div style="margin-top:8px;">
           <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Research Lineage</div>
@@ -1192,6 +1330,10 @@
       ? `<span class="cand-category-badge" style="background:${catColor}22;color:${catColor};border:1px solid ${catColor}44;">${esc(category)}</span>`
       : '';
     const familyBadge = `<span class="cand-category-badge" style="background:${familyMeta.accent};color:${familyMeta.color};border:1px solid ${familyMeta.color}44;">${esc(familyMeta.label)}</span>`;
+    const searchRoleMeta = candidateSearchRoleMeta(cand?.metadata?.search_role);
+    const searchRoleBadge = searchRoleMeta
+      ? `<span class="cand-category-badge" style="background:${searchRoleMeta.bg};color:${searchRoleMeta.fg};border:1px solid ${searchRoleMeta.border};">${esc(searchRoleMeta.label)}</span>`
+      : '';
     const hiddenDuplicates = Number(cand?.metadata?.hidden_duplicates_count || 0);
     const enrichmentBadges = [
       `<span class="cand-category-badge" style="background:#1d2b3d;color:#9fb1c9;border:1px solid #32475f;">新闻 ${enrichment.newsCount}</span>`,
@@ -1211,7 +1353,7 @@
       <div class="cand-card-header">
         <div class="cand-card-title">${emoji} ${esc(strat)}</div>
         <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">
-          ${familyBadge}${catBadge}<div class="cand-score-badge ${color}">${score.toFixed(0)}</div>
+          ${familyBadge}${catBadge}${searchRoleBadge}<div class="cand-score-badge ${color}">${score.toFixed(0)}</div>
           <label class="cand-compare-toggle" title="加入对比" data-action="toggle-compare" data-candidate-id="${esc(cid)}">
             <input type="checkbox" data-action="toggle-compare" data-candidate-id="${esc(cid)}" ${compareChecked} />
             <span>对比</span>
@@ -1270,6 +1412,8 @@
     const experimentId = String(cand?.experiment_id || '').trim();
     const familyMeta = getFamilyMeta(cand);
     const enrichment = getCandidateEnrichment(cand);
+    const searchRoleMeta = candidateSearchRoleMeta(cand?.metadata?.search_role);
+    const championStrategy = String(cand?.metadata?.champion_strategy || '').trim();
 
     const proposalSnapshot = state.proposals.find(item => String(item?.proposal_id || '').trim() === proposalId) || null;
     const [proposalResp, proposalLifecycleResp, candidateLifecycleResp, experimentResp, experimentRunsResp] = await Promise.allSettled([
@@ -1293,6 +1437,7 @@
       researchMode: cand?.metadata?.research_mode || experimentInfo?.research_mode || 'template',
       strategyDrafts: cand?.metadata?.strategy_drafts || experimentInfo?.strategy_drafts || [],
       searchBudget: cand?.metadata?.search_budget || experimentInfo?.search_budget || {},
+      searchSummary: cand?.metadata?.search_summary || experimentInfo?.search_summary || proposalSnapshot?.search_summary || proposalSnapshot?.metadata?.search_summary || {},
       lineage: cand?.metadata?.lineage || experimentInfo?.lineage || null,
       llmResearchOutput: proposalSnapshot?.metadata?.llm_research_output || {},
     });
@@ -1431,11 +1576,13 @@
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
           <span style="font-size:15px;font-weight:700;color:#c2d0e8;">${esc(cand?.strategy || '--')}</span>
           <span class="cand-category-badge" style="background:${familyMeta.accent};color:${familyMeta.color};border:1px solid ${familyMeta.color}44;">${esc(familyMeta.label)}</span>
+          ${searchRoleMeta ? `<span class="cand-category-badge" style="background:${searchRoleMeta.bg};color:${searchRoleMeta.fg};border:1px solid ${searchRoleMeta.border};">${esc(searchRoleMeta.label)}</span>` : ''}
           <span class="cand-score-badge ${color}" style="font-size:13px;">${score.toFixed(0)} \u5206</span>
         </div>
         <div style="font-size:12px;color:#7e92b2;">
           ${esc(cand?.symbol || '--')} ? ${esc(cand?.timeframe || '--')} ? ${esc(statusText(cand?.status))}
         </div>
+        ${searchRoleMeta && championStrategy ? `<div style="font-size:11px;color:#7e92b2;margin-top:4px;">Search role: ${esc(searchRoleMeta.label)}${cand?.metadata?.search_role === 'challenger' ? ` 路 champion ${esc(championStrategy)}` : ''}</div>` : ''}
         ${renderLifecycleStepper(cand?.status)}
       </div>
 

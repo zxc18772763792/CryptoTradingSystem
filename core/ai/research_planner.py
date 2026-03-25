@@ -15,6 +15,7 @@ from core.ai.proposal_schemas import (
     ResearchSearchBudget,
     StrategyDraft,
 )
+from core.ai.research_search_loop import run_research_search_loop
 from core.governance.schemas import LLMResearchOutput
 from core.research.strategy_program import build_strategy_program_from_draft
 
@@ -827,6 +828,23 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
     lineage = _build_lineage(constraints, dict(request.metadata or {}))
     if research_mode != "template":
         planner_notes.append(f"research mode: {research_mode}")
+    search_loop_enabled = research_mode in {"hybrid", "autonomous_draft"}
+    strategy_drafts, search_summary = run_research_search_loop(
+        goal=str(request.goal).strip(),
+        selected_templates=selected,
+        base_drafts=strategy_drafts,
+        search_budget=search_budget,
+        enabled=search_loop_enabled,
+    )
+    if search_summary.loop_enabled:
+        planner_notes.append(
+            f"search loop evaluated {search_summary.evaluated_drafts} draft(s), "
+            f"accepted {search_summary.accepted_drafts}, rejected {search_summary.rejected_drafts}"
+        )
+        if search_summary.champion_draft_id:
+            planner_notes.append(f"search champion draft: {search_summary.champion_draft_id}")
+    else:
+        planner_notes.append("search loop disabled for template-only research mode")
 
     required_features = _derive_required_features(selected, constraints.get("required_features") or [])
     if "news_events" in required_features:
@@ -868,16 +886,27 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
             "planner_constraints": constraints,
             "market_context": market_context,
             "llm_research_output": llm_output_validated,
+            "search_summary": (
+                search_summary.model_dump(mode="json")
+                if search_summary is not None and hasattr(search_summary, "model_dump")
+                else {}
+            ),
             "autonomy_summary": {
                 "research_mode": research_mode,
                 "strategy_draft_count": len(strategy_drafts),
                 "template_count": len(selected),
                 "lineage_id": lineage.lineage_id if lineage else None,
                 "search_budget": search_budget.model_dump(mode="json"),
+                "search_loop_enabled": bool(search_summary.loop_enabled if search_summary is not None else False),
+                "evaluated_drafts": int(search_summary.evaluated_drafts if search_summary is not None else 0),
+                "accepted_drafts": int(search_summary.accepted_drafts if search_summary is not None else 0),
+                "rejected_drafts": int(search_summary.rejected_drafts if search_summary is not None else 0),
+                "champion_draft_id": search_summary.champion_draft_id if search_summary is not None else None,
             },
             **dict(request.metadata or {}),
         },
         search_budget=search_budget,
+        search_summary=search_summary,
         lineage=lineage,
     )
     return PlannerOutput(proposal=proposal, planner_notes=planner_notes)

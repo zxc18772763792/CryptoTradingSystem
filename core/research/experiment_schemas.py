@@ -10,6 +10,7 @@ from core.ai.proposal_schemas import (
     ProposalValidationSummary,
     ResearchLineage,
     ResearchMode,
+    ResearchSearchSummary,
     ResearchSearchBudget,
     StrategyDraft,
     StrategyProgram,
@@ -35,6 +36,7 @@ class ExperimentSpec(BaseModel):
     strategy_drafts: List[StrategyDraft] = Field(default_factory=list)
     strategy_programs: List[StrategyProgram] = Field(default_factory=list)
     parameter_space: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    search_summary: Optional[ResearchSearchSummary] = None
     days: int = 90
     initial_capital: float = 10000.0
     commission_rate: float = 0.0004
