@@ -15,7 +15,16 @@ from config.settings import settings
 from core.news.eventizer.rate_limiter import rate_limiter
 from core.news.eventizer.rules import SymbolMapper, extract_events_rules
 from core.news.storage.models import EVENT_TYPES, EventSchema
+from core.utils.openai_responses import (
+    build_openai_headers,
+    build_responses_payload,
+    coerce_responses_to_chat_completions,
+    extract_response_text,
+    responses_endpoint,
+)
 
+DEFAULT_OPENAI_BASE_URL = "https://vpsairobot.com/v1"
+DEFAULT_OPENAI_MODEL = "gpt-5.4"
 DEFAULT_ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 DEFAULT_ZHIPU_MODEL = "GLM-4.5-Air"
 
@@ -37,6 +46,22 @@ def _zhipu_api_key() -> str:
     return str(os.getenv("ZHIPU_API_KEY") or getattr(settings, "ZHIPU_API_KEY", "") or "").strip()
 
 
+def _openai_api_key() -> str:
+    return str(os.getenv("OPENAI_API_KEY") or getattr(settings, "OPENAI_API_KEY", "") or "").strip()
+
+
+def _llm_provider(cfg: Dict[str, Any]) -> str:
+    llm_cfg = cfg.get("llm") or {}
+    raw = str(os.getenv("NEWS_LLM_PROVIDER") or llm_cfg.get("provider") or "").strip().lower()
+    if raw in {"openai", "codex", "responses"}:
+        return "openai"
+    if raw == "glm":
+        return "glm"
+    if _openai_api_key():
+        return "openai"
+    return "glm"
+
+
 def _zhipu_base_url(cfg: Dict[str, Any]) -> str:
     llm_cfg = cfg.get("llm") or {}
     return str(
@@ -55,6 +80,44 @@ def _zhipu_model(cfg: Dict[str, Any]) -> str:
         or getattr(settings, "ZHIPU_MODEL", "")
         or DEFAULT_ZHIPU_MODEL
     )
+
+
+def _openai_base_url(cfg: Dict[str, Any]) -> str:
+    llm_cfg = cfg.get("llm") or {}
+    return str(
+        os.getenv("OPENAI_BASE_URL")
+        or llm_cfg.get("base_url")
+        or getattr(settings, "OPENAI_BASE_URL", "")
+        or DEFAULT_OPENAI_BASE_URL
+    ).rstrip("/")
+
+
+def _openai_model(cfg: Dict[str, Any]) -> str:
+    llm_cfg = cfg.get("llm") or {}
+    return str(
+        os.getenv("OPENAI_MODEL")
+        or llm_cfg.get("model")
+        or getattr(settings, "OPENAI_MODEL", "")
+        or DEFAULT_OPENAI_MODEL
+    )
+
+
+def _llm_api_key(cfg: Dict[str, Any]) -> str:
+    if _llm_provider(cfg) == "openai":
+        return _openai_api_key()
+    return _zhipu_api_key()
+
+
+def _llm_base_url(cfg: Dict[str, Any]) -> str:
+    if _llm_provider(cfg) == "openai":
+        return _openai_base_url(cfg)
+    return _zhipu_base_url(cfg)
+
+
+def _llm_model(cfg: Dict[str, Any]) -> str:
+    if _llm_provider(cfg) == "openai":
+        return _openai_model(cfg)
+    return _zhipu_model(cfg)
 
 
 def _thinking_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -214,9 +277,10 @@ class AsyncGLMClient:
             cfg: Configuration dictionary. If None, uses environment defaults.
         """
         self._cfg = cfg or {}
-        self._api_key = _zhipu_api_key()
-        self._base_url = _zhipu_base_url(self._cfg)
-        self._model = _zhipu_model(self._cfg)
+        self._provider = _llm_provider(self._cfg)
+        self._api_key = _llm_api_key(self._cfg)
+        self._base_url = _llm_base_url(self._cfg)
+        self._model = _llm_model(self._cfg)
 
         llm_cfg = self._cfg.get("llm") or {}
         self._timeout = aiohttp.ClientTimeout(
@@ -236,10 +300,7 @@ class AsyncGLMClient:
 
     def _get_headers(self) -> Dict[str, str]:
         """Get request headers for GLM API."""
-        return {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
+        return build_openai_headers(self._api_key)
 
     async def _request(
         self,
@@ -264,10 +325,10 @@ class AsyncGLMClient:
             RuntimeError: If API key is missing
         """
         if not self._api_key:
-            raise RuntimeError("ZHIPU_API_KEY is missing")
+            raise RuntimeError("OPENAI_API_KEY is missing" if self._provider == "openai" else "ZHIPU_API_KEY is missing")
 
         self._requests_total += 1
-        url = f"{self._base_url}{endpoint}"
+        url = endpoint if str(endpoint or "").startswith("http") else f"{self._base_url}{endpoint}"
         timeout = timeout or self._timeout
 
         # Wait for rate limiter
@@ -344,6 +405,24 @@ class AsyncGLMClient:
         Raises:
             RuntimeError: If API key is missing
         """
+        if self._provider == "openai":
+            payload = build_responses_payload(
+                model=self._model,
+                messages=messages,
+                max_output_tokens=max_tokens,
+                temperature=temperature,
+            )
+            request_timeout = self._timeout if timeout is None else aiohttp.ClientTimeout(total=timeout)
+            response, error_type = await self._request(
+                "POST",
+                responses_endpoint(self._base_url),
+                payload,
+                timeout=request_timeout,
+            )
+            if error_type != "none" or not isinstance(response, dict):
+                return response, error_type
+            return coerce_responses_to_chat_completions(response), error_type
+
         payload = {
             "model": self._model,
             "temperature": temperature,
@@ -388,7 +467,23 @@ class AsyncGLMClient:
             partial response data that can be processed incrementally.
         """
         if not self._api_key:
-            raise RuntimeError("ZHIPU_API_KEY is missing")
+            raise RuntimeError("OPENAI_API_KEY is missing" if self._provider == "openai" else "ZHIPU_API_KEY is missing")
+
+        if self._provider == "openai":
+            response, error_type = await self.chat_completions(
+                messages,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+            if error_type != "none":
+                raise RuntimeError(f"OpenAI-compatible request failed: {error_type}")
+            text = extract_response_text(response)
+            if not text:
+                raise RuntimeError("OpenAI-compatible response missing content")
+            yield {"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]}
+            return
 
         payload = {
             "model": self._model,

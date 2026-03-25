@@ -9,7 +9,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from config.strategy_registry import STRATEGY_REGISTRY, get_backtest_optimization_grid
-from core.ai.proposal_schemas import ResearchProposal
+from core.ai.proposal_schemas import (
+    ResearchLineage,
+    ResearchProposal,
+    ResearchSearchBudget,
+    StrategyDraft,
+)
 from core.governance.schemas import LLMResearchOutput
 
 
@@ -426,6 +431,180 @@ def _apply_llm_guidance(
     return selected[:effective_max], effective_max, _dedupe_keep_order(llm_boost)
 
 
+def _as_text_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return _dedupe_keep_order([str(item or "").strip() for item in value if str(item or "").strip()])
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def _normalize_strategy_draft(
+    change: Dict[str, Any],
+    *,
+    index: int,
+    goal: str,
+    symbols: List[str],
+    timeframes: List[str],
+) -> StrategyDraft:
+    template_hint = str(change.get("strategy") or change.get("strategy_template") or "").strip()
+    title = str(change.get("title") or change.get("name") or template_hint or f"Draft {index + 1}").strip()
+    thesis = str(change.get("thesis") or change.get("hypothesis") or change.get("reason") or goal).strip()
+    rationale = str(change.get("rationale") or change.get("reason") or "").strip()
+    params = dict(change.get("params") or {}) if isinstance(change.get("params"), dict) else {}
+    features = _dedupe_keep_order(
+        _as_text_list(change.get("features"))
+        + _as_text_list(change.get("required_features"))
+        + _as_text_list(change.get("feature_recipes"))
+    )
+    entry_logic = _dedupe_keep_order(_as_text_list(change.get("entry_logic")) + _as_text_list(change.get("entry_rules")))
+    exit_logic = _dedupe_keep_order(_as_text_list(change.get("exit_logic")) + _as_text_list(change.get("exit_rules")))
+    risk_logic = _dedupe_keep_order(_as_text_list(change.get("risk_logic")) + _as_text_list(change.get("risk_rules")))
+    tags = _dedupe_keep_order(
+        _as_text_list(change.get("tags"))
+        + _as_text_list(change.get("archetype"))
+        + _as_text_list(change.get("family"))
+    )
+    try:
+        confidence = max(0.0, min(1.0, float(change.get("confidence", 0.0) or 0.0)))
+    except Exception:
+        confidence = 0.0
+
+    if template_hint and (features or entry_logic or exit_logic or risk_logic or params):
+        mode = "hybrid_seed"
+    elif template_hint:
+        mode = "template_seed"
+    else:
+        mode = "dsl_seed"
+
+    return StrategyDraft(
+        draft_id=str(change.get("draft_id") or f"draft-{index + 1:02d}"),
+        name=title,
+        mode=mode,
+        template_hint=template_hint,
+        thesis=thesis,
+        rationale=rationale,
+        features=features,
+        entry_logic=entry_logic,
+        exit_logic=exit_logic,
+        risk_logic=risk_logic,
+        params=params,
+        confidence=confidence,
+        tags=tags,
+        source=str(change.get("source") or "llm"),
+    )
+
+
+def _build_strategy_drafts(
+    llm_output: Dict[str, Any],
+    *,
+    goal: str,
+    symbols: List[str],
+    timeframes: List[str],
+    planner_notes: List[str],
+) -> List[StrategyDraft]:
+    changes = list(llm_output.get("proposed_strategy_changes") or [])
+    drafts: List[StrategyDraft] = []
+    for idx, change in enumerate(changes):
+        if not isinstance(change, dict):
+            continue
+        draft = _normalize_strategy_draft(
+            change,
+            index=idx,
+            goal=goal,
+            symbols=symbols,
+            timeframes=timeframes,
+        )
+        if draft.name or draft.template_hint or draft.features or draft.entry_logic:
+            drafts.append(draft)
+    if drafts:
+        planner_notes.append(f"captured {len(drafts)} AI strategy draft(s)")
+    return drafts
+
+
+def _resolve_research_mode(constraints: Dict[str, Any], drafts: List[StrategyDraft]) -> str:
+    requested = str(constraints.get("research_mode") or "").strip().lower()
+    if requested in {"template", "hybrid", "autonomous_draft"}:
+        return requested
+    return "hybrid" if drafts else "template"
+
+
+def _build_search_budget(
+    constraints: Dict[str, Any],
+    *,
+    max_templates: int,
+    draft_count: int,
+) -> ResearchSearchBudget:
+    try:
+        exploration_bias = float(constraints.get("exploration_bias", 0.35) or 0.35)
+    except Exception:
+        exploration_bias = 0.35
+    exploration_bias = max(0.0, min(1.0, exploration_bias))
+
+    try:
+        max_backtest_runs = int(
+            constraints.get("max_backtest_runs")
+            or max(max_templates * 12, max(draft_count, 1) * 16, 24)
+        )
+    except Exception:
+        max_backtest_runs = max(max_templates * 12, max(draft_count, 1) * 16, 24)
+
+    try:
+        max_strategy_drafts = int(constraints.get("max_strategy_drafts") or max(draft_count, 3))
+    except Exception:
+        max_strategy_drafts = max(draft_count, 3)
+
+    notes: List[str] = []
+    if draft_count:
+        notes.append("llm_strategy_drafts_present")
+    if str(constraints.get("research_mode") or "").strip():
+        notes.append(f"research_mode={str(constraints.get('research_mode')).strip()}")
+
+    return ResearchSearchBudget(
+        max_templates=max(1, min(int(max_templates), 12)),
+        max_strategy_drafts=max(1, min(max_strategy_drafts, 12)),
+        max_backtest_runs=max(1, min(max_backtest_runs, 500)),
+        exploration_bias=exploration_bias,
+        notes=notes,
+    )
+
+
+def _build_lineage(constraints: Dict[str, Any], metadata: Dict[str, Any]) -> Optional[ResearchLineage]:
+    payload = constraints.get("lineage") or metadata.get("lineage") or {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    parent_proposal_id = str(
+        payload.get("parent_proposal_id")
+        or metadata.get("parent_proposal_id")
+        or ""
+    ).strip() or None
+    parent_candidate_id = str(
+        payload.get("parent_candidate_id")
+        or metadata.get("parent_candidate_id")
+        or ""
+    ).strip() or None
+    if not parent_proposal_id and not parent_candidate_id and not payload:
+        return None
+
+    try:
+        generation = int(payload.get("generation", 1 if (parent_proposal_id or parent_candidate_id) else 0) or 0)
+    except Exception:
+        generation = 0
+
+    return ResearchLineage(
+        lineage_id=str(payload.get("lineage_id") or f"lineage-{secrets.token_hex(4)}"),
+        parent_proposal_id=parent_proposal_id,
+        parent_candidate_id=parent_candidate_id,
+        generation=max(0, generation),
+        mutation_notes=_dedupe_keep_order(
+            _as_text_list(payload.get("mutation_notes"))
+            + _as_text_list(metadata.get("mutation_notes"))
+        ),
+    )
+
+
 def _catalog_candidates(
     market_regime: str,
     exclude_categories: List[str],
@@ -621,6 +800,19 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
         if selected:
             planner_notes.append("replaced by research-supported fallback templates")
 
+    strategy_drafts = _build_strategy_drafts(
+        llm_output_validated,
+        goal=str(request.goal).strip(),
+        symbols=symbols,
+        timeframes=timeframes,
+        planner_notes=planner_notes,
+    )
+    research_mode = _resolve_research_mode(constraints, strategy_drafts)
+    search_budget = _build_search_budget(constraints, max_templates=max_templates, draft_count=len(strategy_drafts))
+    lineage = _build_lineage(constraints, dict(request.metadata or {}))
+    if research_mode != "template":
+        planner_notes.append(f"research mode: {research_mode}")
+
     required_features = _derive_required_features(selected, constraints.get("required_features") or [])
     if "news_events" in required_features:
         planner_notes.append("included event/news-sensitive templates")
@@ -633,11 +825,13 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
         updated_at=now,
         status="draft",
         source="ai",
+        research_mode=research_mode,
         thesis=str(request.goal).strip(),
         market_regime=str(request.market_regime or "mixed").strip() or "mixed",
         target_symbols=symbols,
         target_timeframes=timeframes,
         strategy_templates=selected,
+        strategy_drafts=strategy_drafts,
         # A: store filtered templates so UI can display them
         filtered_templates=filtered_templates,
         filtered_reasons=filtered_reasons,
@@ -659,7 +853,16 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
             "planner_constraints": constraints,
             "market_context": market_context,
             "llm_research_output": llm_output_validated,
+            "autonomy_summary": {
+                "research_mode": research_mode,
+                "strategy_draft_count": len(strategy_drafts),
+                "template_count": len(selected),
+                "lineage_id": lineage.lineage_id if lineage else None,
+                "search_budget": search_budget.model_dump(mode="json"),
+            },
             **dict(request.metadata or {}),
         },
+        search_budget=search_budget,
+        lineage=lineage,
     )
     return PlannerOutput(proposal=proposal, planner_notes=planner_notes)

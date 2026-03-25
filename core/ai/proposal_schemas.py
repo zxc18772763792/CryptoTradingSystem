@@ -22,6 +22,41 @@ ProposalState = Literal[
 
 ProposalSource = Literal["ai", "human", "hybrid"]
 ValidationDecision = Literal["reject", "paper", "shadow", "live_candidate"]
+ResearchMode = Literal["template", "hybrid", "autonomous_draft"]
+StrategyDraftMode = Literal["template_seed", "hybrid_seed", "dsl_seed"]
+
+
+class StrategyDraft(BaseModel):
+    draft_id: str = ""
+    name: str = ""
+    mode: StrategyDraftMode = "dsl_seed"
+    template_hint: str = ""
+    thesis: str = ""
+    rationale: str = ""
+    features: List[str] = Field(default_factory=list)
+    entry_logic: List[str] = Field(default_factory=list)
+    exit_logic: List[str] = Field(default_factory=list)
+    risk_logic: List[str] = Field(default_factory=list)
+    params: Dict[str, Any] = Field(default_factory=dict)
+    confidence: float = 0.0
+    tags: List[str] = Field(default_factory=list)
+    source: str = "llm"
+
+
+class ResearchSearchBudget(BaseModel):
+    max_templates: int = 5
+    max_strategy_drafts: int = 3
+    max_backtest_runs: int = 60
+    exploration_bias: float = 0.35
+    notes: List[str] = Field(default_factory=list)
+
+
+class ResearchLineage(BaseModel):
+    lineage_id: str = ""
+    parent_proposal_id: Optional[str] = None
+    parent_candidate_id: Optional[str] = None
+    generation: int = 0
+    mutation_notes: List[str] = Field(default_factory=list)
 
 
 class ProposalValidationSummary(BaseModel):
@@ -49,11 +84,13 @@ class ResearchProposal(BaseModel):
     updated_at: datetime
     status: ProposalState = "draft"
     source: ProposalSource = "ai"
+    research_mode: ResearchMode = "template"
     thesis: str
     market_regime: str = "mixed"
     target_symbols: List[str] = Field(default_factory=list)
     target_timeframes: List[str] = Field(default_factory=list)
     strategy_templates: List[str] = Field(default_factory=list)
+    strategy_drafts: List[StrategyDraft] = Field(default_factory=list)
     # A requirement: filtered templates (dropped at planning time)
     filtered_templates: List[str] = Field(default_factory=list)
     filtered_reasons: Dict[str, str] = Field(default_factory=dict)
@@ -68,4 +105,6 @@ class ResearchProposal(BaseModel):
     latest_candidate_id: Optional[str] = None
     notes: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    search_budget: ResearchSearchBudget = Field(default_factory=ResearchSearchBudget)
+    lineage: Optional[ResearchLineage] = None
     validation_summary: Optional[ProposalValidationSummary] = None

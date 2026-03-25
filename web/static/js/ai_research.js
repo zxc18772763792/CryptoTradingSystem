@@ -357,6 +357,140 @@
   }
 
   /* 分数对应颜色等级 */
+  function researchModeText(mode) {
+    return {
+      template: '模板研究',
+      hybrid: '混合研究',
+      autonomous_draft: '自主草案',
+      template_seed: '模板种子',
+      hybrid_seed: '混合种子',
+      dsl_seed: 'DSL 草案',
+    }[String(mode || '').trim()] || String(mode || '--');
+  }
+
+  function renderStrategyDraftSummary(drafts, limit = 3) {
+    const rows = toArray(drafts).slice(0, limit);
+    if (!rows.length) {
+      return '<div style="font-size:12px;color:#6b7fa0;">暂无 AI 策略草案</div>';
+    }
+    return rows.map((draft, index) => {
+      const features = toArray(draft?.features).slice(0, 4).join(' / ') || '--';
+      const entry = toArray(draft?.entry_logic).slice(0, 2).join('；') || '--';
+      const exit = toArray(draft?.exit_logic).slice(0, 2).join('；') || '--';
+      const risk = toArray(draft?.risk_logic).slice(0, 2).join('；') || '--';
+      const templateHint = String(draft?.template_hint || '').trim();
+      const params = draft?.params && Object.keys(draft.params).length
+        ? Object.entries(draft.params).slice(0, 3).map(([k, v]) => `${k}=${String(v)}`).join('  ')
+        : '--';
+      return `<div style="padding:8px 10px;background:#141f2f;border-radius:6px;margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:4px;">
+          <span style="font-size:12px;font-weight:700;color:#c2d0e8;">${esc(draft?.name || `Draft ${index + 1}`)}</span>
+          <span style="font-size:10px;color:#7e92b2;">${esc(researchModeText(draft?.mode))}</span>
+        </div>
+        <div style="font-size:11px;color:#9fb1c9;margin-bottom:4px;">模板种子：${esc(templateHint || '--')}</div>
+        <div style="font-size:11px;color:#b7c7e2;line-height:1.55;">${esc(draft?.thesis || draft?.rationale || '--')}</div>
+        <div style="font-size:10px;color:#7e92b2;margin-top:6px;">特征：${esc(features)}</div>
+        <div style="font-size:10px;color:#7e92b2;margin-top:3px;">入场：${esc(entry)}</div>
+        <div style="font-size:10px;color:#7e92b2;margin-top:3px;">出场：${esc(exit)}</div>
+        <div style="font-size:10px;color:#7e92b2;margin-top:3px;">风控：${esc(risk)}</div>
+        <div style="font-size:10px;color:#7e92b2;margin-top:3px;font-family:monospace;">参数：${esc(params)}</div>
+      </div>`;
+    }).join('');
+  }
+
+  function formatAutonomyBudget(budget) {
+    const info = budget && typeof budget === 'object' ? budget : {};
+    const maxTemplates = Number(info?.max_templates || 0);
+    const maxDrafts = Number(info?.max_strategy_drafts || 0);
+    const maxBacktests = Number(info?.max_backtest_runs || 0);
+    const explorationBias = Number(info?.exploration_bias);
+    const rows = [
+      `模板 ${maxTemplates > 0 ? Math.round(maxTemplates) : '--'}`,
+      `草案 ${maxDrafts > 0 ? Math.round(maxDrafts) : '--'}`,
+      `回测 ${maxBacktests > 0 ? Math.round(maxBacktests) : '--'}`,
+    ];
+    if (Number.isFinite(explorationBias)) {
+      rows.push(`探索 ${(explorationBias * 100).toFixed(0)}%`);
+    }
+    return rows.join(' | ');
+  }
+
+  function renderResearchLineage(lineage) {
+    const data = lineage && typeof lineage === 'object' ? lineage : null;
+    if (!data) {
+      return '<div style="font-size:12px;color:#6b7fa0;">暂无 lineage 信息</div>';
+    }
+    const lineageId = String(data?.lineage_id || '').trim();
+    const parentProposalId = String(data?.parent_proposal_id || '').trim();
+    const parentCandidateId = String(data?.parent_candidate_id || '').trim();
+    const mutationNotes = joinText(data?.mutation_notes);
+    const generation = Number(data?.generation);
+    const generationText = Number.isFinite(generation) ? String(Math.max(0, Math.round(generation))) : '--';
+    if (!lineageId && !parentProposalId && !parentCandidateId && mutationNotes === '--') {
+      return '<div style="font-size:12px;color:#6b7fa0;">暂无 lineage 信息</div>';
+    }
+    return `<div style="font-size:12px;color:#b7c7e2;background:#141f2f;border-radius:6px;padding:8px;line-height:1.6;">
+      <div>Lineage ID：${esc(lineageId || '--')}</div>
+      <div style="margin-top:3px;">父方案：${esc(parentProposalId || '--')}</div>
+      <div style="margin-top:3px;">父候选：${esc(parentCandidateId || '--')}</div>
+      <div style="margin-top:3px;">代际：${esc(generationText)}</div>
+      <div style="margin-top:3px;">变异记录：${esc(mutationNotes)}</div>
+    </div>`;
+  }
+
+  function renderAutonomyContext(proposal, fallback = {}) {
+    const proposalInfo = proposal && typeof proposal === 'object' ? proposal : {};
+    const llmResearchOutput = proposalInfo?.metadata?.llm_research_output || fallback?.llmResearchOutput || {};
+    const researchMode = String(proposalInfo?.research_mode || fallback?.researchMode || 'template').trim() || 'template';
+    const strategyDrafts = toArray(proposalInfo?.strategy_drafts).length
+      ? toArray(proposalInfo?.strategy_drafts)
+      : toArray(fallback?.strategyDrafts);
+    const searchBudget = proposalInfo?.search_budget || fallback?.searchBudget || {};
+    const lineage = proposalInfo?.lineage || fallback?.lineage || null;
+    const hypothesis = String(llmResearchOutput?.hypothesis || proposalInfo?.thesis || fallback?.thesis || '').trim();
+    const experimentPlan = joinText(llmResearchOutput?.experiment_plan);
+    const evidenceRefs = joinText(llmResearchOutput?.evidence_refs);
+    const uncertainty = String(llmResearchOutput?.uncertainty || '').trim();
+    const budgetNotes = joinText(searchBudget?.notes);
+
+    return `
+      <div style="margin-bottom:14px;">
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">自主研究上下文</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px;">
+          <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
+            <div style="font-size:10px;color:#6b7fa0;">研究模式</div>
+            <div style="font-size:13px;font-weight:700;color:#c2d0e8;">${esc(researchModeText(researchMode))}</div>
+          </div>
+          <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
+            <div style="font-size:10px;color:#6b7fa0;">草案数量</div>
+            <div style="font-size:13px;font-weight:700;color:#c2d0e8;">${strategyDrafts.length}</div>
+          </div>
+          <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
+            <div style="font-size:10px;color:#6b7fa0;">搜索预算</div>
+            <div style="font-size:13px;font-weight:700;color:#c2d0e8;">${esc(String(searchBudget?.max_backtest_runs || '--'))}</div>
+          </div>
+        </div>
+        <div style="font-size:12px;color:#b7c7e2;background:#141f2f;border-radius:6px;padding:8px;line-height:1.7;">
+          <div style="color:#9fb1c9;margin-bottom:4px;">核心假设</div>
+          <div>${esc(hypothesis || '--')}</div>
+          <div style="margin-top:6px;color:#9fb1c9;">预算分配</div>
+          <div>${esc(formatAutonomyBudget(searchBudget))}</div>
+          ${budgetNotes !== '--' ? `<div style="margin-top:4px;color:#7e92b2;">预算备注：${esc(budgetNotes)}</div>` : ''}
+          ${experimentPlan !== '--' ? `<div style="margin-top:6px;color:#9fb1c9;">实验计划：<span style="color:#b7c7e2;">${esc(experimentPlan)}</span></div>` : ''}
+          ${evidenceRefs !== '--' ? `<div style="margin-top:4px;color:#9fb1c9;">证据引用：<span style="color:#b7c7e2;">${esc(evidenceRefs)}</span></div>` : ''}
+          ${uncertainty ? `<div style="margin-top:4px;color:#9fb1c9;">不确定性：<span style="color:#b7c7e2;">${esc(uncertainty)}</span></div>` : ''}
+        </div>
+        <div style="margin-top:8px;">
+          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">策略草案</div>
+          ${renderStrategyDraftSummary(strategyDrafts, 4)}
+        </div>
+        <div style="margin-top:8px;">
+          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Research Lineage</div>
+          ${renderResearchLineage(lineage)}
+        </div>
+      </div>`;
+  }
+
   function scoreColor(score) {
     const n = Number(score || 0);
     return n >= 70 ? 'green' : n >= 50 ? 'yellow' : 'red';
@@ -542,6 +676,7 @@
 
   function getProposalResearchMeta(item) {
     const templates = toArray(item?.strategy_templates);
+    const drafts = toArray(item?.strategy_drafts);
     const aiTemplateCount = templates.filter(name => getStrategyFamily(name) !== 'traditional').length;
     const lastResearch = item?.metadata?.last_research_result || {};
     const newsCount = Number(lastResearch?.news_events_count || 0);
@@ -550,6 +685,9 @@
     const lastTs = job?.finished_at || job?.started_at || job?.created_at || item?.updated_at || item?.created_at;
     return {
       totalTemplates: templates.length,
+      draftCount: drafts.length,
+      researchMode: String(item?.research_mode || 'template'),
+      searchBudget: item?.search_budget || {},
       aiTemplateCount,
       newsCount: Number.isFinite(newsCount) ? Math.max(0, Math.round(newsCount)) : 0,
       fundingAvailable,
@@ -694,7 +832,8 @@
       const runnable = isRunnableProposalStatus(st);
       const meta = getProposalResearchMeta(item);
       const timeLabel = meta.lastTs ? fmtTs(meta.lastTs) : '--';
-      const aiSummary = meta.totalTemplates ? `AI策略 ${meta.aiTemplateCount}/${meta.totalTemplates}` : 'AI策略 0/0';
+      const aiSummary = `${researchModeText(meta.researchMode)} | 模板 ${meta.totalTemplates}`;
+      const autonomySummary = `草案 ${meta.draftCount} | 预算 ${Number(meta?.searchBudget?.max_backtest_runs || 0) || '--'}`;
       const newsSummary = `新闻 ${meta.newsCount}`;
       const macroSummary = meta.fundingAvailable ? '宏观 已启用' : '宏观 未启用';
       return `<div class="proposal-compact-item${sel}" data-proposal-id="${esc(pid)}" data-proposal-status="${esc(st)}" data-action="select-proposal">
@@ -707,6 +846,7 @@
           </div>
           <div style="font-size:11px;color:#8ea3c2;display:flex;gap:8px;flex-wrap:wrap;margin-top:2px;">
             <span>${esc(aiSummary)}</span>
+            <span>${esc(autonomySummary)}</span>
             <span>${esc(newsSummary)}</span>
             <span>${esc(macroSummary)}</span>
           </div>
@@ -1122,17 +1262,31 @@
     const familyMeta = getFamilyMeta(cand?.strategy || '');
     const enrichment = getCandidateEnrichment(cand);
 
-    const [proposalLifecycleResp, candidateLifecycleResp, experimentResp, experimentRunsResp] = await Promise.allSettled([
+    const proposalSnapshot = state.proposals.find(item => String(item?.proposal_id || '').trim() === proposalId) || null;
+    const [proposalResp, proposalLifecycleResp, candidateLifecycleResp, experimentResp, experimentRunsResp] = await Promise.allSettled([
+      proposalId ? aiApi(`/proposals/${encodeURIComponent(proposalId)}`, { timeoutMs: 12000 }) : Promise.resolve({ proposal: proposalSnapshot }),
       proposalId ? aiApi(`/proposals/${encodeURIComponent(proposalId)}/lifecycle?limit=20`, { timeoutMs: 12000 }) : Promise.resolve({ items: [] }),
       aiApi(`/candidates/${encodeURIComponent(candidateId)}/lifecycle?limit=20`, { timeoutMs: 12000 }),
       experimentId ? aiApi(`/experiments/${encodeURIComponent(experimentId)}`, { timeoutMs: 12000 }) : Promise.resolve({ experiment: null }),
       experimentId ? aiApi(`/experiments/${encodeURIComponent(experimentId)}/runs?limit=20`, { timeoutMs: 12000 }) : Promise.resolve({ items: [] }),
     ]);
+    if (requestSeq !== state.candidateDetailReqSeq) return;
 
+    const proposalInfo = proposalResp.status === 'fulfilled'
+      ? (proposalResp.value?.proposal || proposalSnapshot)
+      : proposalSnapshot;
     const proposalLifecycle = proposalLifecycleResp.status === 'fulfilled' ? toArray(proposalLifecycleResp.value?.items) : [];
     const candidateLifecycle = candidateLifecycleResp.status === 'fulfilled' ? toArray(candidateLifecycleResp.value?.items) : [];
     const experimentInfo = experimentResp.status === 'fulfilled' ? (experimentResp.value?.experiment || null) : null;
     const experimentRuns = experimentRunsResp.status === 'fulfilled' ? toArray(experimentRunsResp.value?.items) : [];
+    const autonomyHtml = renderAutonomyContext(proposalInfo, {
+      thesis: cand?.metadata?.llm_rationale || cand?.strategy || '',
+      researchMode: cand?.metadata?.research_mode || experimentInfo?.research_mode || 'template',
+      strategyDrafts: cand?.metadata?.strategy_drafts || experimentInfo?.strategy_drafts || [],
+      searchBudget: cand?.metadata?.search_budget || experimentInfo?.search_budget || {},
+      lineage: cand?.metadata?.lineage || experimentInfo?.lineage || null,
+      llmResearchOutput: proposalSnapshot?.metadata?.llm_research_output || {},
+    });
 
     const topRows = top.map((r, i) => {
       const ret = Number(r?.total_return || 0);
@@ -1286,6 +1440,7 @@
         ${vs?.reasons?.length ? `<div style="font-size:11px;color:#6b7fa0;margin-top:6px;">\u8bf4\u660e\uff1a${esc(joinText(vs.reasons))}</div>` : ''}
       </div>
 
+      ${autonomyHtml}
       ${validationHtml}
       ${bestParamsHtml}
       ${enrichmentHtml}

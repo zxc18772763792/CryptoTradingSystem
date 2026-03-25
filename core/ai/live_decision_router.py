@@ -13,6 +13,12 @@ import aiohttp
 from loguru import logger
 
 from config.settings import settings
+from core.utils.openai_responses import (
+    build_openai_headers,
+    build_responses_payload,
+    extract_response_text,
+    responses_endpoint,
+)
 
 # Persistent overlay for runtime config — survives service restarts
 _OVERLAY_PATH = Path(os.environ.get("AI_RUNTIME_CONFIG_PATH", "data/ai_runtime_config.json"))
@@ -30,7 +36,7 @@ _PERSISTABLE_KEYS = frozenset({
 })
 
 
-_DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+_DEFAULT_OPENAI_BASE_URL = "https://vpsairobot.com/v1"
 _DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _DEFAULT_GLM_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 _SUPPORTED_PROVIDERS = {"glm", "codex", "claude"}
@@ -39,9 +45,11 @@ _SUPPORTED_ACTIONS = {"allow", "block", "reduce_only"}
 
 
 def _normalize_provider(value: Any) -> str:
-    text = str(value or "glm").strip().lower()
+    text = str(value or "codex").strip().lower()
+    aliases = {"openai": "codex"}
+    text = aliases.get(text, text)
     if text not in _SUPPORTED_PROVIDERS:
-        raise ValueError("provider must be one of: glm/codex/claude")
+        raise ValueError("provider must be one of: glm/codex(openai)/claude")
     return text
 
 
@@ -166,7 +174,7 @@ class LiveAIDecisionRouter:
     def _provider_model(self, provider: str) -> str:
         provider = _normalize_provider(provider)
         if provider == "codex":
-            return str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5-mini")
+            return str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.4")
         if provider == "claude":
             return str(getattr(settings, "ANTHROPIC_MODEL", "") or "claude-3-5-sonnet-latest")
         return str(getattr(settings, "ZHIPU_MODEL", "") or "GLM-4.5-Air")
@@ -185,7 +193,7 @@ class LiveAIDecisionRouter:
         return getattr(settings, name, fallback)
 
     def get_runtime_config(self) -> Dict[str, Any]:
-        provider = _normalize_provider(self._get("AI_LIVE_DECISION_PROVIDER", "glm"))
+        provider = _normalize_provider(self._get("AI_LIVE_DECISION_PROVIDER", "codex"))
         model_override = str(self._get("AI_LIVE_DECISION_MODEL", "") or "").strip()
         model = model_override or self._provider_model(provider)
         mode = _normalize_mode(self._get("AI_LIVE_DECISION_MODE", "shadow"))
@@ -303,8 +311,32 @@ class LiveAIDecisionRouter:
                 raise RuntimeError("claude_empty_content")
             return _extract_json_obj(text)
 
+        if provider == "codex":
+            url = responses_endpoint(base_url)
+            headers = build_openai_headers(api_key)
+            payload = build_responses_payload(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_output_tokens=int(max_tokens),
+                temperature=float(temperature),
+                text_format="json_object",
+            )
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=headers, json=payload) as resp:
+                    if resp.status >= 400:
+                        body = (await resp.text())[:300]
+                        raise RuntimeError(f"{provider}_http_{resp.status}:{body}")
+                    data = await resp.json()
+            text = extract_response_text(data)
+            if not text:
+                raise RuntimeError(f"{provider}_empty_content")
+            return _extract_json_obj(text)
+
         url = f"{base_url}/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        headers = build_openai_headers(api_key)
         payload = {
             "model": model,
             "messages": [
@@ -376,7 +408,7 @@ class LiveAIDecisionRouter:
         enabled = bool(cfg.get("enabled", False))
         apply_in_paper = bool(cfg.get("apply_in_paper", False))
         mode = str(cfg.get("mode") or "shadow")
-        provider = str(cfg.get("provider") or "glm")
+        provider = str(cfg.get("provider") or "codex")
         model = str(cfg.get("model") or "")
         timeout_ms = int(cfg.get("timeout_ms") or 6000)
         max_tokens = int(cfg.get("max_tokens") or 220)

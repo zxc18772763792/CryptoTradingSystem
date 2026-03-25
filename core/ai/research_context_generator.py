@@ -12,6 +12,8 @@ from typing import Any, Dict, Optional
 
 from loguru import logger
 
+from core.utils.openai_responses import extract_response_text
+
 _CONTEXT_PROMPT_TEMPLATE = """\
 你是专业量化研究员。根据以下市场摘要，生成一个量化策略研究方向。
 
@@ -70,7 +72,7 @@ async def generate_research_context(
     goals: str = "",
     timeout: int = 30,
 ) -> Optional[Dict[str, Any]]:
-    """Call GLM to generate an LLMResearchOutput-compatible research context.
+    """Call the configured LLM to generate an LLMResearchOutput-compatible research context.
 
     Parameters
     ----------
@@ -100,10 +102,18 @@ async def generate_research_context(
         )
 
         client = AsyncGLMClient()
-        raw: str = await client.chat_completions(
+        response_data, error_type = await client.chat_completions(
             messages=[{"role": "user", "content": prompt}],
             timeout=timeout,
         )
+        if error_type != "none":
+            logger.debug(f"research_context_generator: llm error={error_type}")
+            return None
+
+        raw = extract_response_text(response_data)
+        if not raw:
+            logger.debug("research_context_generator: empty llm content")
+            return None
 
         # Strip markdown code fences if present
         raw = raw.strip()

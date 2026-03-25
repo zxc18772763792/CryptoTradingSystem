@@ -56,8 +56,8 @@ class Settings(BaseSettings):
     ZHIPU_BASE_URL: str = "https://open.bigmodel.cn/api/coding/paas/v4"
     ZHIPU_MODEL: str = "GLM-4.5-Air"
     OPENAI_API_KEY: str = ""
-    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
-    OPENAI_MODEL: str = "gpt-5-mini"
+    OPENAI_BASE_URL: str = "https://vpsairobot.com/v1"
+    OPENAI_MODEL: str = "gpt-5.4"
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_BASE_URL: str = "https://api.anthropic.com"
     ANTHROPIC_MODEL: str = "claude-3-5-sonnet-latest"
@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     AUDIT_LEVEL: str = "full"  # full/minimal
     AI_LIVE_DECISION_ENABLED: bool = False
     AI_LIVE_DECISION_MODE: str = "shadow"  # shadow/enforce
-    AI_LIVE_DECISION_PROVIDER: str = "glm"  # glm/codex/claude
+    AI_LIVE_DECISION_PROVIDER: str = "codex"  # glm/codex(openai-compatible)/claude
     AI_LIVE_DECISION_MODEL: str = ""  # optional provider-specific override
     AI_LIVE_DECISION_TIMEOUT_MS: int = 6000
     AI_LIVE_DECISION_MAX_TOKENS: int = 220
@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     AI_AUTONOMOUS_AGENT_ENABLED: bool = False
     AI_AUTONOMOUS_AGENT_AUTO_START: bool = False
     AI_AUTONOMOUS_AGENT_MODE: str = "shadow"  # shadow/execute
-    AI_AUTONOMOUS_AGENT_PROVIDER: str = "glm"  # glm/codex/claude
+    AI_AUTONOMOUS_AGENT_PROVIDER: str = "codex"  # glm/codex(openai-compatible)/claude
     AI_AUTONOMOUS_AGENT_MODEL: str = ""
     AI_AUTONOMOUS_AGENT_EXCHANGE: str = "binance"
     AI_AUTONOMOUS_AGENT_SYMBOL: str = "BTC/USDT"
@@ -213,9 +213,11 @@ class Settings(BaseSettings):
     @field_validator("AI_LIVE_DECISION_PROVIDER")
     @classmethod
     def validate_ai_live_decision_provider(cls, v: str) -> str:
-        text = str(v or "glm").strip().lower()
+        text = str(v or "codex").strip().lower()
+        aliases = {"openai": "codex"}
+        text = aliases.get(text, text)
         if text not in {"glm", "codex", "claude"}:
-            raise ValueError("AI_LIVE_DECISION_PROVIDER must be one of: glm/codex/claude")
+            raise ValueError("AI_LIVE_DECISION_PROVIDER must be one of: glm/codex(openai)/claude")
         return text
 
     @field_validator("AI_AUTONOMOUS_AGENT_MODE")
@@ -229,9 +231,11 @@ class Settings(BaseSettings):
     @field_validator("AI_AUTONOMOUS_AGENT_PROVIDER")
     @classmethod
     def validate_ai_autonomous_agent_provider(cls, v: str) -> str:
-        text = str(v or "glm").strip().lower()
+        text = str(v or "codex").strip().lower()
+        aliases = {"openai": "codex"}
+        text = aliases.get(text, text)
         if text not in {"glm", "codex", "claude"}:
-            raise ValueError("AI_AUTONOMOUS_AGENT_PROVIDER must be one of: glm/codex/claude")
+            raise ValueError("AI_AUTONOMOUS_AGENT_PROVIDER must be one of: glm/codex(openai)/claude")
         return text
 
     @field_validator("DATABASE_URL")

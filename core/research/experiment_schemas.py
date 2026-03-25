@@ -6,7 +6,13 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from core.ai.proposal_schemas import ProposalValidationSummary
+from core.ai.proposal_schemas import (
+    ProposalValidationSummary,
+    ResearchLineage,
+    ResearchMode,
+    ResearchSearchBudget,
+    StrategyDraft,
+)
 
 
 ExperimentStatus = Literal["queued", "running", "completed", "failed"]
@@ -22,14 +28,18 @@ class ExperimentSpec(BaseModel):
     created_at: datetime
     exchange: str
     symbol: str
+    research_mode: ResearchMode = "template"
     timeframes: List[str] = Field(default_factory=list)
     strategies: List[str] = Field(default_factory=list)
+    strategy_drafts: List[StrategyDraft] = Field(default_factory=list)
     parameter_space: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     days: int = 90
     initial_capital: float = 10000.0
     commission_rate: float = 0.0004
     slippage_bps: float = 2.0
     research_profile: Literal["fast", "standard", "strict"] = "standard"
+    search_budget: ResearchSearchBudget = Field(default_factory=ResearchSearchBudget)
+    lineage: Optional[ResearchLineage] = None
     status: ExperimentStatus = "queued"
     metadata: Dict[str, Any] = Field(default_factory=dict)
 

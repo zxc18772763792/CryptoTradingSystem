@@ -13,8 +13,16 @@ from loguru import logger
 from config.settings import settings
 from core.news.eventizer.rules import SymbolMapper, extract_events_rules
 from core.news.storage.models import EVENT_TYPES, EventSchema
+from core.utils.openai_responses import (
+    build_openai_headers,
+    build_responses_payload,
+    coerce_responses_to_chat_completions,
+    responses_endpoint,
+)
 
 
+DEFAULT_OPENAI_BASE_URL = "https://vpsairobot.com/v1"
+DEFAULT_OPENAI_MODEL = "gpt-5.4"
 DEFAULT_ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 DEFAULT_ZHIPU_MODEL = "GLM-4.5-Air"
 _SUMMARY_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -36,6 +44,22 @@ def _zhipu_api_key() -> str:
     return str(os.getenv("ZHIPU_API_KEY") or getattr(settings, "ZHIPU_API_KEY", "") or "").strip()
 
 
+def _openai_api_key() -> str:
+    return str(os.getenv("OPENAI_API_KEY") or getattr(settings, "OPENAI_API_KEY", "") or "").strip()
+
+
+def _llm_provider(cfg: Dict[str, Any]) -> str:
+    llm_cfg = cfg.get("llm") or {}
+    raw = str(os.getenv("NEWS_LLM_PROVIDER") or llm_cfg.get("provider") or "").strip().lower()
+    if raw in {"openai", "codex", "responses"}:
+        return "openai"
+    if raw == "glm":
+        return "glm"
+    if _openai_api_key():
+        return "openai"
+    return "glm"
+
+
 def _zhipu_base_url(cfg: Dict[str, Any]) -> str:
     llm_cfg = cfg.get("llm") or {}
     return str(
@@ -54,6 +78,44 @@ def _zhipu_model(cfg: Dict[str, Any]) -> str:
         or getattr(settings, "ZHIPU_MODEL", "")
         or DEFAULT_ZHIPU_MODEL
     )
+
+
+def _openai_base_url(cfg: Dict[str, Any]) -> str:
+    llm_cfg = cfg.get("llm") or {}
+    return str(
+        os.getenv("OPENAI_BASE_URL")
+        or llm_cfg.get("base_url")
+        or getattr(settings, "OPENAI_BASE_URL", "")
+        or DEFAULT_OPENAI_BASE_URL
+    ).rstrip("/")
+
+
+def _openai_model(cfg: Dict[str, Any]) -> str:
+    llm_cfg = cfg.get("llm") or {}
+    return str(
+        os.getenv("OPENAI_MODEL")
+        or llm_cfg.get("model")
+        or getattr(settings, "OPENAI_MODEL", "")
+        or DEFAULT_OPENAI_MODEL
+    )
+
+
+def _llm_api_key(cfg: Dict[str, Any]) -> str:
+    if _llm_provider(cfg) == "openai":
+        return _openai_api_key()
+    return _zhipu_api_key()
+
+
+def _llm_base_url(cfg: Dict[str, Any]) -> str:
+    if _llm_provider(cfg) == "openai":
+        return _openai_base_url(cfg)
+    return _zhipu_base_url(cfg)
+
+
+def _llm_model(cfg: Dict[str, Any]) -> str:
+    if _llm_provider(cfg) == "openai":
+        return _openai_model(cfg)
+    return _zhipu_model(cfg)
 
 
 def _thinking_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -351,13 +413,14 @@ def _call_glm5_once(
     mapper: SymbolMapper,
     feedback: str = "",
 ) -> List[Dict[str, Any]]:
-    api_key = _zhipu_api_key()
+    provider = _llm_provider(cfg)
+    api_key = _llm_api_key(cfg)
     if not api_key:
-        raise RuntimeError("ZHIPU_API_KEY is missing")
+        raise RuntimeError("OPENAI_API_KEY is missing" if provider == "openai" else "ZHIPU_API_KEY is missing")
 
     llm_cfg = cfg.get("llm") or {}
-    base_url = _zhipu_base_url(cfg)
-    model = _zhipu_model(cfg)
+    base_url = _llm_base_url(cfg)
+    model = _llm_model(cfg)
     timeout_sec = int(llm_cfg.get("timeout_sec") or 45)
 
     allowed_symbols = sorted({mapper.normalize_symbol(k) for k in (cfg.get("symbols") or {}).keys()} - {""})
@@ -366,29 +429,38 @@ def _call_glm5_once(
 
     system_prompt, user_prompt = _build_prompt(batch, allowed_symbols, feedback)
 
-    payload = {
-        "model": model,
-        "temperature": 0,
-        "top_p": 0.1,
-        "response_format": {"type": "json_object"},
-        "thinking": _thinking_cfg(cfg),
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
+    if provider == "openai":
+        payload = build_responses_payload(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0,
+        )
+        url = responses_endpoint(base_url)
+    else:
+        payload = {
+            "model": model,
+            "temperature": 0,
+            "top_p": 0.1,
+            "response_format": {"type": "json_object"},
+            "thinking": _thinking_cfg(cfg),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        url = f"{base_url}/chat/completions"
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-    url = f"{base_url}/chat/completions"
+    headers = build_openai_headers(api_key)
     response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
     if response.status_code >= 400:
         raise RuntimeError(f"GLM5 HTTP {response.status_code}: {response.text[:300]}")
 
     data = response.json()
+    if provider == "openai":
+        data = coerce_responses_to_chat_completions(data)
     choices = data.get("choices") if isinstance(data, dict) else None
     if not choices:
         raise ValueError("GLM5 response missing choices")
@@ -413,10 +485,10 @@ def extract_events_glm5_with_meta(news_items: List[Dict[str, Any]], cfg: Dict[st
     errors: List[str] = []
     llm_used = False
 
-    api_key = _zhipu_api_key()
+    api_key = _llm_api_key(cfg)
     if not api_key:
         fallback_events = extract_events_rules(news_items, cfg)
-        return fallback_events, False, ["ZHIPU_API_KEY is missing; fallback to rules"]
+        return fallback_events, False, ["LLM API key is missing; fallback to rules"]
 
     for idx, batch in enumerate(_batched(news_items, batch_size), start=1):
         try:
@@ -485,15 +557,16 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
     if cached:
         return cached
 
-    api_key = _zhipu_api_key()
+    provider = _llm_provider(cfg)
+    api_key = _llm_api_key(cfg)
     if not api_key:
         result = _summarize_fallback(title, max_length)
         _summary_cache_set(title, max_length, result)
         return result
 
     llm_cfg = cfg.get("llm") or {}
-    base_url = _zhipu_base_url(cfg)
-    model = _zhipu_model(cfg)
+    base_url = _llm_base_url(cfg)
+    model = _llm_model(cfg)
     timeout_sec = int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 12)
 
     system_prompt = (
@@ -505,26 +578,36 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
 
     user_prompt = f"请分析这条加密货币新闻标题，翻译成中文并判断利好利空：\n\n{title}"
 
-    payload = {
-        "model": model,
-        "temperature": 0.3,
-        "top_p": 0.9,
-        "max_tokens": max_length + 50,
-        "response_format": {"type": "json_object"},
-        "thinking": _thinking_cfg(cfg),
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    }
+    if provider == "openai":
+        payload = build_responses_payload(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_output_tokens=max_length + 50,
+            temperature=0.3,
+            text_format="json_object",
+        )
+        url = responses_endpoint(base_url)
+    else:
+        payload = {
+            "model": model,
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "max_tokens": max_length + 50,
+            "response_format": {"type": "json_object"},
+            "thinking": _thinking_cfg(cfg),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        url = f"{base_url}/chat/completions"
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = build_openai_headers(api_key)
 
     try:
-        url = f"{base_url}/chat/completions"
         response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
         if response.status_code >= 400:
             logger.warning(f"GLM5 summarize failed: HTTP {response.status_code}")
@@ -533,6 +616,8 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
             return result
 
         data = response.json()
+        if provider == "openai":
+            data = coerce_responses_to_chat_completions(data)
         choices = data.get("choices") if isinstance(data, dict) else None
         if not choices:
             result = _summarize_fallback(title, max_length)
@@ -580,13 +665,14 @@ def _call_glm5_batch_summarize(
     cfg: Dict[str, Any],
     max_length: int = 60,
 ) -> List[Dict[str, Any]]:
-    api_key = _zhipu_api_key()
+    provider = _llm_provider(cfg)
+    api_key = _llm_api_key(cfg)
     if not api_key:
         return [_summarize_fallback(t, max_length) for t in titles]
 
     llm_cfg = cfg.get("llm") or {}
-    base_url = _zhipu_base_url(cfg)
-    model = _zhipu_model(cfg)
+    base_url = _llm_base_url(cfg)
+    model = _llm_model(cfg)
     timeout_sec = int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 12)
 
     compact = [{"idx": i, "title": str(t or "")[:300]} for i, t in enumerate(titles)]
@@ -606,28 +692,40 @@ def _call_glm5_batch_summarize(
         "titles": compact,
     }
 
-    payload = {
-        "model": model,
-        "temperature": 0.2,
-        "top_p": 0.8,
-        "response_format": {"type": "json_object"},
-        "thinking": _thinking_cfg(cfg),
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
-        ],
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    if provider == "openai":
+        payload = build_responses_payload(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
+            ],
+            temperature=0.2,
+            text_format="json_object",
+        )
+        url = responses_endpoint(base_url)
+    else:
+        payload = {
+            "model": model,
+            "temperature": 0.2,
+            "top_p": 0.8,
+            "response_format": {"type": "json_object"},
+            "thinking": _thinking_cfg(cfg),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
+            ],
+        }
+        url = f"{base_url}/chat/completions"
+    headers = build_openai_headers(api_key)
 
     try:
-        response = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=timeout_sec)
+        response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
         if response.status_code >= 400:
             body_preview = (response.text or "")[:200].replace("\n", " ")
             raise RuntimeError(f"GLM5 summarize batch HTTP {response.status_code}: {body_preview}")
         data = response.json()
+        if provider == "openai":
+            data = coerce_responses_to_chat_completions(data)
         choices = data.get("choices") if isinstance(data, dict) else None
         if not choices:
             raise ValueError("GLM5 summarize batch missing choices")

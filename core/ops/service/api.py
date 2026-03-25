@@ -960,10 +960,20 @@ def create_router() -> APIRouter:
             data["risk_error"] = str(exc)
         try:
             queue = await asyncio.wait_for(news_db.get_llm_queue_stats(), timeout=2.0)
-            data["llm_enabled"] = bool(os.getenv("ZHIPU_API_KEY"))
+            data["llm_enabled"] = bool(
+                os.getenv("OPENAI_API_KEY")
+                or os.getenv("ZHIPU_API_KEY")
+                or getattr(settings, "OPENAI_API_KEY", "")
+                or getattr(settings, "ZHIPU_API_KEY", "")
+            )
             data["news_llm_queue_pending"] = int(queue.get("pending_total", 0))
         except Exception as exc:
-            data["llm_enabled"] = bool(os.getenv("ZHIPU_API_KEY"))
+            data["llm_enabled"] = bool(
+                os.getenv("OPENAI_API_KEY")
+                or os.getenv("ZHIPU_API_KEY")
+                or getattr(settings, "OPENAI_API_KEY", "")
+                or getattr(settings, "ZHIPU_API_KEY", "")
+            )
             data["news_error"] = str(exc)
         return _ok(data)
 

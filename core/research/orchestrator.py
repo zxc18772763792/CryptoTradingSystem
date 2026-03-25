@@ -457,15 +457,22 @@ def build_research_config_from_proposal(
 ) -> ResearchConfig:
     resolved_symbol = normalize_symbol(symbol or (proposal.target_symbols[0] if proposal.target_symbols else "BTC/USDT"))
     resolved_timeframes = normalize_timeframes(timeframes or proposal.target_timeframes)
-    requested_strategies = _dedupe_keep_order(strategies or proposal.strategy_templates)
+    draft_template_hints = _dedupe_keep_order(
+        [
+            str(getattr(draft, "template_hint", "") or "").strip()
+            for draft in list(getattr(proposal, "strategy_drafts", []) or [])
+            if str(getattr(draft, "template_hint", "") or "").strip()
+        ]
+    )
+    requested_strategies = _dedupe_keep_order(strategies or proposal.strategy_templates or draft_template_hints)
     resolved_strategies, dropped = _filter_supported_research_strategies(requested_strategies)
     if dropped:
         proposal.metadata["last_dropped_unsupported_strategies"] = dropped
     if not resolved_strategies:
-        fallback, _ = _filter_supported_research_strategies(proposal.strategy_templates)
+        fallback, _ = _filter_supported_research_strategies(proposal.strategy_templates or draft_template_hints)
         resolved_strategies = fallback
     if not resolved_strategies:
-        raise ValueError("proposal has no strategy templates to research")
+        raise ValueError("proposal has no executable strategy templates or draft template hints to research")
     return ResearchConfig(
         exchange=str(exchange or "binance").strip().lower() or "binance",
         symbol=resolved_symbol,
@@ -569,16 +576,24 @@ def _build_experiment_spec(proposal: ResearchProposal, config: ResearchConfig, a
         created_at=now,
         exchange=config.exchange,
         symbol=config.symbol,
+        research_mode=str(getattr(proposal, "research_mode", "template") or "template"),
         timeframes=list(config.timeframes),
         strategies=list(config.strategies),
+        strategy_drafts=list(getattr(proposal, "strategy_drafts", []) or []),
         parameter_space=dict(proposal.parameter_space or {}),
         days=int(config.days),
         initial_capital=float(config.initial_capital),
         commission_rate=float(config.commission_rate),
         slippage_bps=float(config.slippage_bps),
         research_profile="standard",
+        search_budget=getattr(proposal, "search_budget", None),
+        lineage=getattr(proposal, "lineage", None),
         status="queued",
-        metadata={"created_by": actor},
+        metadata={
+            "created_by": actor,
+            "research_mode": str(getattr(proposal, "research_mode", "template") or "template"),
+            "strategy_draft_count": len(list(getattr(proposal, "strategy_drafts", []) or [])),
+        },
     )
 
 
@@ -834,6 +849,22 @@ def _create_candidates_from_result(
             metadata={
                 "exchange": experiment.exchange,
                 "best": strat_best,
+                "research_mode": str(getattr(proposal, "research_mode", "template") or "template"),
+                "strategy_draft_count": len(list(getattr(proposal, "strategy_drafts", []) or [])),
+                "strategy_drafts": [
+                    draft.model_dump(mode="json") if hasattr(draft, "model_dump") else dict(draft or {})
+                    for draft in list(getattr(proposal, "strategy_drafts", []) or [])
+                ],
+                "search_budget": (
+                    proposal.search_budget.model_dump(mode="json")
+                    if getattr(proposal, "search_budget", None) is not None
+                    else {}
+                ),
+                "lineage": (
+                    proposal.lineage.model_dump(mode="json")
+                    if getattr(proposal, "lineage", None) is not None
+                    else None
+                ),
                 "common_pnl": build_common_pnl_summary(
                     source="research_batch_backtest",
                     unit="pct_return",
