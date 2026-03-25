@@ -1709,6 +1709,37 @@
                                 <button class="btn btn-sm" id="ai-compare-btn" style="display:none;">对比选中</button>
                             </div>
                         </div>
+                        <div id="ai-search-overview-card" class="card ai-search-overview-card">
+                            <div class="ai-search-overview-header">
+                                <div>
+                                    <div class="ai-sidebar-title" style="cursor:default;margin-bottom:4px;">🧪 搜索态势总览</div>
+                                    <div id="ai-search-overview-subtitle" class="ai-search-overview-subtitle">等待提案与候选载入...</div>
+                                </div>
+                                <div id="ai-search-overview-badges" class="ai-search-overview-badges">
+                                    <span class="ai-search-badge">等待状态</span>
+                                </div>
+                            </div>
+                            <div id="ai-search-overview-metrics" class="ai-search-overview-metrics">
+                                <div class="ai-search-metric-card">
+                                    <span>Champion</span>
+                                    <strong>--</strong>
+                                </div>
+                            </div>
+                            <div class="ai-search-overview-grid">
+                                <div>
+                                    <div class="ai-search-section-title">候选排行榜</div>
+                                    <div id="ai-search-overview-leaderboard" class="ai-search-overview-leaderboard">
+                                        <div class="ai-search-empty">等待候选结果...</div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <div class="ai-search-section-title">搜索健康度</div>
+                                    <div id="ai-search-overview-health" class="ai-search-overview-health">
+                                        <div class="ai-search-empty">等待搜索摘要...</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                         <div id="ai-candidate-cards" class="ai-candidate-cards">
                             <div class="ai-empty-hint">
                                 暂无候选策略。<br>
@@ -1921,6 +1952,7 @@
     <script charset="utf-8" src="/static/js/ai_research.js?v=26"></script>
     <script charset="utf-8" src="/static/js/ai_research_diagnostics.js?v=1"></script>
     <script charset="utf-8" src="/static/js/ai_research_runtime.js?v=1"></script>
+    <script charset="utf-8" src="/static/js/ai_research_candidates.js?v=1"></script>
     <script charset="utf-8" src="/static/js/ai_research_agent.js?v=1"></script>
     <script charset="utf-8" src="/static/js/news_tab_runtime.js?v=10"></script>
     <script charset="utf-8" src="/static/js/dashboard_unstructured_news.js?v=13"></script>
