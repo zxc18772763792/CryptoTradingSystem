@@ -63,4 +63,6 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert ".ai-oneclick-entry-card" in style_css
     assert ".ai-oneclick-feedback" in style_css
     assert ".ai-review-panel select" in style_css
+    assert "appearance: none" in style_css
+    assert "color-scheme: dark" in style_css
     assert '[data-tone="warn"]' in style_css
