@@ -496,6 +496,32 @@ def test_news_auto_requeue_calls_db_when_queue_idle(monkeypatch):
     assert module._FAILED_REQUEUE_LAST_AT is not None
 
 
+def test_news_auto_requeue_scales_limit_for_large_failed_backlog(monkeypatch):
+    import web.api.news as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+    monkeypatch.setattr(module, "_FAILED_REQUEUE_LAST_AT", None)
+
+    queue_mock = AsyncMock(
+        return_value={
+            "pending_total": 0,
+            "counts": {"pending": 0, "running": 0, "retry": 0, "failed": 500},
+        }
+    )
+    requeue_mock = AsyncMock(return_value={"requeued_count": 8})
+
+    monkeypatch.setattr(module.news_db, "get_llm_queue_stats", queue_mock)
+    monkeypatch.setattr(module.news_db, "auto_requeue_failed_llm_tasks", requeue_mock)
+
+    result = asyncio.run(module.auto_requeue_failed_llm_tasks({}, hours=48))
+
+    assert result["backlog_tier"] == "large"
+    assert result["effective_limit"] == 8
+    assert result["effective_cooldown_sec"] == 30
+    assert requeue_mock.await_args.kwargs["limit"] == 8
+
+
 def test_build_latest_feed_does_not_cross_match_query_only_news_urls(monkeypatch):
     import web.api.news as module
 

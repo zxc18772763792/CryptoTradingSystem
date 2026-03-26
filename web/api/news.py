@@ -314,6 +314,60 @@ def _llm_min_importance() -> int:
     return max(0, min(100, _env_int("NEWS_LLM_MIN_IMPORTANCE", 35)))
 
 
+def _failed_requeue_policy(
+    counts: Dict[str, Any],
+    *,
+    limit: Optional[int] = None,
+    cooldown_sec: Optional[int] = None,
+) -> Dict[str, Any]:
+    failed = max(0, int((counts or {}).get("failed") or 0))
+    base_limit = max(0, min(int(limit if limit is not None else _env_int("NEWS_FAILED_REQUEUE_LIMIT", 2)), 20))
+    base_cooldown = max(
+        0,
+        min(int(cooldown_sec if cooldown_sec is not None else _env_int("NEWS_FAILED_REQUEUE_COOLDOWN_SEC", 90)), 3600),
+    )
+
+    if failed >= 800:
+        suggested_limit = 10
+        suggested_cooldown = 20
+        tier = "xlarge"
+    elif failed >= 400:
+        suggested_limit = 8
+        suggested_cooldown = 30
+        tier = "large"
+    elif failed >= 150:
+        suggested_limit = 6
+        suggested_cooldown = 45
+        tier = "medium"
+    elif failed >= 40:
+        suggested_limit = 4
+        suggested_cooldown = 60
+        tier = "small"
+    else:
+        suggested_limit = 2
+        suggested_cooldown = 90
+        tier = "tiny"
+
+    effective_limit = base_limit if limit is not None else max(base_limit, suggested_limit)
+    if cooldown_sec is not None:
+        effective_cooldown = base_cooldown
+    elif base_cooldown <= 0:
+        effective_cooldown = 0
+    else:
+        effective_cooldown = min(base_cooldown, suggested_cooldown)
+
+    return {
+        "failed_backlog": failed,
+        "backlog_tier": tier,
+        "base_limit": base_limit,
+        "base_cooldown_sec": base_cooldown,
+        "suggested_limit": suggested_limit,
+        "suggested_cooldown_sec": suggested_cooldown,
+        "effective_limit": effective_limit,
+        "effective_cooldown_sec": effective_cooldown,
+    }
+
+
 def _summary_fields_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -1088,22 +1142,36 @@ async def auto_requeue_failed_llm_tasks(
     del cfg  # reserved for future policy hooks
     global _FAILED_REQUEUE_LAST_AT
 
-    max_rows = max(0, min(int(limit if limit is not None else _env_int("NEWS_FAILED_REQUEUE_LIMIT", 2)), 20))
-    if max_rows <= 0:
-        return {"enabled": False, "reason": "disabled", "requeued_count": 0}
-    if not _news_llm_enabled():
-        return {"enabled": False, "reason": "llm_disabled", "requeued_count": 0}
-
-    cooldown = max(0, min(int(cooldown_sec if cooldown_sec is not None else _env_int("NEWS_FAILED_REQUEUE_COOLDOWN_SEC", 90)), 3600))
-    since_hours = max(24, min(int(hours if hours is not None else _env_int("NEWS_FAILED_REQUEUE_HOURS", 24 * 30)), 24 * 365))
     queue = await news_db.get_llm_queue_stats()
     counts = dict(queue.get("counts") or {})
+    policy = _failed_requeue_policy(counts, limit=limit, cooldown_sec=cooldown_sec)
+    max_rows = int(policy.get("effective_limit") or 0)
+    if max_rows <= 0:
+        return {
+            "enabled": False,
+            "reason": "disabled",
+            "requeued_count": 0,
+            "queue_counts": counts,
+            **policy,
+        }
+    if not _news_llm_enabled():
+        return {
+            "enabled": False,
+            "reason": "llm_disabled",
+            "requeued_count": 0,
+            "queue_counts": counts,
+            **policy,
+        }
+
+    cooldown = int(policy.get("effective_cooldown_sec") or 0)
+    since_hours = max(24, min(int(hours if hours is not None else _env_int("NEWS_FAILED_REQUEUE_HOURS", 24 * 30)), 24 * 365))
     if int(queue.get("pending_total") or 0) > 0 or int(counts.get("running") or 0) > 0 or int(counts.get("retry") or 0) > 0:
         return {
             "enabled": True,
             "reason": "queue_busy",
             "requeued_count": 0,
             "queue_counts": counts,
+            **policy,
         }
     if int(counts.get("failed") or 0) <= 0:
         return {
@@ -1111,6 +1179,7 @@ async def auto_requeue_failed_llm_tasks(
             "reason": "no_failed",
             "requeued_count": 0,
             "queue_counts": counts,
+            **policy,
         }
 
     now = _now_utc()
@@ -1121,6 +1190,7 @@ async def auto_requeue_failed_llm_tasks(
             "requeued_count": 0,
             "cooldown_remaining_sec": max(0, cooldown - int((now - _FAILED_REQUEUE_LAST_AT).total_seconds())),
             "queue_counts": counts,
+            **policy,
         }
 
     async with _FAILED_REQUEUE_LOCK:
@@ -1132,6 +1202,7 @@ async def auto_requeue_failed_llm_tasks(
                 "requeued_count": 0,
                 "cooldown_remaining_sec": max(0, cooldown - int((now - _FAILED_REQUEUE_LAST_AT).total_seconds())),
                 "queue_counts": counts,
+                **policy,
             }
         result = await news_db.auto_requeue_failed_llm_tasks(
             limit=max_rows,
@@ -1146,6 +1217,7 @@ async def auto_requeue_failed_llm_tasks(
             "cooldown_sec": cooldown,
             "hours": since_hours,
             "queue_counts": counts,
+            **policy,
             **result,
         }
 
@@ -2282,11 +2354,20 @@ async def worker_requeue_llm_tasks(
 ) -> Dict[str, Any]:
     cfg = _get_cfg(request)
     statuses = [str(x or "").strip().lower() for x in list(payload.statuses or []) if str(x or "").strip()]
-    result = await news_db.requeue_llm_tasks(statuses=statuses or ["failed"], limit=int(payload.limit))
+    failed_only = set(statuses or ["failed"]) == {"failed"}
+    if failed_only:
+        result = await news_db.auto_requeue_failed_llm_tasks(
+            limit=min(int(payload.limit), 200),
+            since=_now_utc() - timedelta(hours=24 * 180),
+        )
+        result["mode"] = "filtered_failed_only"
+    else:
+        result = await news_db.requeue_llm_tasks(statuses=statuses or ["failed"], limit=int(payload.limit))
+        result["mode"] = "force_requeue"
     requeued_count = int(result.get("requeued_count") or 0)
     if requeued_count > 0:
         with contextlib.suppress(Exception):
-            asyncio.create_task(process_llm_batch(cfg, limit=max(4, min(32, requeued_count))))
+            asyncio.create_task(process_llm_batch(cfg, limit=max(8, min(48, requeued_count))))
     _invalidate_news_caches()
     return {
         "timestamp": _now_utc().isoformat(),

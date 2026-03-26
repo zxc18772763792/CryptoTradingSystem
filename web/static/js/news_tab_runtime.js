@@ -68,19 +68,56 @@
         return "中性";
     }
 
-    
+    function summarySourceText(v) {
+        const key = String(v || "").trim().toLowerCase();
+        if (!key || key === "not_summarized") return "未摘要";
+        if (key === "stored") return "已入库摘要";
+        if (key.includes("openai") || key.includes("responses") || key.includes("codex") || key.startsWith("gpt")) {
+            return "GPT摘要";
+        }
+        if (key.includes("fallback")) return "规则回退";
+        if (key.startsWith("llm")) return "LLM摘要";
+        return plainText(key).slice(0, 20) || "未知来源";
+    }
+
     function processingStatusText(v) {
         const key = String(v || "").toLowerCase();
-        if (key === "pending") return "待入模";
-        if (key === "running") return "处理中";
-        if (key === "retry") return "重试中";
-        if (key === "failed") return "处理失败";
-        if (key === "done_no_event") return "已处理无事件";
-        if (key === "summarized_no_event") return "已修补待结构化";
-        if (key === "skipped_low_importance") return "低优先未入队";
-        if (key === "not_queued") return "未入队";
+        if (key === "pending") return "待摘要/抽取";
+        if (key === "running") return "AI处理中";
+        if (key === "retry") return "待补跑";
+        if (key === "failed") return "本轮失败";
+        if (key === "done_no_event") return "已抽取无事件";
+        if (key === "summarized_no_event") return "已补中文摘要";
+        if (key === "skipped_low_importance") return "低优先跳过";
+        if (key === "not_queued") return "尚未入队";
         if (key === "structured_event") return "已结构化";
         return "状态未知";
+    }
+
+    function processingStatusHint(v) {
+        const key = String(v || "").toLowerCase();
+        if (key === "pending") return "已进入待处理队列，等待摘要或事件抽取。";
+        if (key === "running") return "AI 正在处理这条新闻。";
+        if (key === "retry") return "这条新闻会在后续轮次继续补跑。";
+        if (key === "failed") return "本轮抽取失败，后台会按节奏温和补跑。";
+        if (key === "done_no_event") return "AI 已读完，但未识别出可入库的结构化交易事件。";
+        if (key === "summarized_no_event") return "中文摘要已补好，后续仍可继续尝试结构化。";
+        if (key === "skipped_low_importance") return "优先级较低，当前未送入 AI 队列。";
+        if (key === "not_queued") return "尚未进入 AI 队列。";
+        if (key === "structured_event") return "已生成结构化事件，可直接用于后续分析。";
+        return "暂无状态说明。";
+    }
+
+    function requeueReasonText(v) {
+        const key = String(v || "").toLowerCase();
+        if (key === "requeued") return "已温和重排队";
+        if (key === "queue_busy") return "有新任务优先";
+        if (key === "cooldown") return "补跑冷却中";
+        if (key === "no_failed") return "没有失败历史";
+        if (key === "no_candidates") return "没有可补跑候选";
+        if (key === "disabled") return "补跑已关闭";
+        if (key === "llm_disabled") return "LLM未启用";
+        return key || "--";
     }
 
     function notify(msg, isError = false) {
@@ -241,8 +278,9 @@
         const queue = state.health?.llm_queue || state.worker?.llm_queue || state.brief?.llm_queue || {};
         const enabled = Object.entries(state.health?.sources || {}).filter(([, v]) => !!v).length || sourceStates.length;
         const errors = sourceStates.filter((row) => Number(row?.error_count || 0) > 0).length;
-        badge.className = `status-badge ${errors ? "warning" : "connected"}`;
-        badge.textContent = `来源 ${enabled} | 待处理 ${Number(queue?.pending_total || 0)} | 异常 ${errors}`;
+        const failed = Number(queue?.counts?.failed || 0);
+        badge.className = `status-badge ${(errors || failed) ? "warning" : "connected"}`;
+        badge.textContent = `来源 ${enabled} | 待处理 ${Number(queue?.pending_total || 0)} | 失败待修 ${failed} | 异常源 ${errors}`;
         if (el("news-now-time")) {
             el("news-now-time").textContent = fmtTs(state.health?.timestamp || state.worker?.timestamp || new Date().toISOString());
         }
@@ -251,31 +289,60 @@
     function renderQueue() {
         const queue = state.health?.llm_queue || state.worker?.llm_queue || state.brief?.llm_queue || {};
         const counts = queue?.counts || {};
+        const pending = Number(queue?.pending_total || 0);
+        const running = Number(counts?.running || 0);
+        const done = Number(counts?.done || 0);
+        const retry = Number(counts?.retry || 0);
+        const failed = Number(counts?.failed || 0);
         const mapping = [
-            ["news-llm-pending-count", Number(queue?.pending_total || 0)],
-            ["news-llm-running-count", Number(counts?.running || 0)],
-            ["news-llm-done-count", Number(counts?.done || 0)],
-            ["news-llm-retry-count", Number(counts?.retry || 0) + Number(counts?.failed || 0)],
+            ["news-llm-pending-count", pending],
+            ["news-llm-running-count", running],
+            ["news-llm-done-count", done],
+            ["news-llm-retry-count", retry + failed],
         ];
         mapping.forEach(([id, value]) => {
             if (el(id)) el(id).textContent = String(value);
         });
+        const retryMetricLabel = el("news-llm-retry-count")?.parentElement?.querySelector?.(".label");
+        if (retryMetricLabel) retryMetricLabel.textContent = "异常待修补";
         if (!el("news-llm-queue-note")) return;
         const lastPull = state.worker?.last_pull || {};
         const lastLlm = state.worker?.last_llm_batch || state.worker?.manual_llm_job?.latest_result || {};
-        const llmMode = state.worker?.background_llm_enabled
-            ? "后台自动运行"
-            : state.worker?.manual_llm_job?.active_job_id
-                ? "页面已触发补跑"
-                : Number(queue?.pending_total || 0) > 0
-                    ? "后台未开，等待页面补跑"
-                    : "后台未开";
+        const failedRequeue = lastLlm?.failed_requeue || {};
+        const retryResult = lastLlm?.retry_result || {};
+        const summaryRepair = lastLlm?.summary_repair || {};
+        const requeueCount = Number(failedRequeue?.requeued_count || 0);
+        const repairUpdates = Number(summaryRepair?.updated_raw_count || 0) + Number(summaryRepair?.updated_event_count || 0);
+        const backgroundEnabled = Boolean(state.worker?.background_llm_enabled);
+        const manualActive = Boolean(state.worker?.manual_llm_job?.active_job_id);
+        const llmMode = backgroundEnabled
+            ? "后台自动修补"
+            : manualActive
+                ? "页面手动补跑"
+                : pending > 0 || failed > 0
+                    ? "等待页面手动触发"
+                    : "后台未开启";
+        let queuePhase = "队列空闲";
+        if (queue?.backoff_until) queuePhase = "全局退避中";
+        else if (running > 0) queuePhase = "AI处理中";
+        else if (pending > 0) queuePhase = backgroundEnabled ? "新任务待处理" : "新任务待手动触发";
+        else if (failed > 0) queuePhase = backgroundEnabled ? "温和修补失败历史" : "失败历史待手动补跑";
+        const repairPaceText = lastLlm?.timestamp
+            ? `${fmtTs(lastLlm.timestamp)} | ${requeueReasonText(failedRequeue?.reason)} | 重排 ${requeueCount} | 立即补跑 ${Number(retryResult?.claimed || 0)}`
+            : "--";
+        const summaryRepairText = lastLlm?.timestamp
+            ? `${fmtTs(lastLlm.timestamp)} | 原始 ${Number(summaryRepair?.updated_raw_count || 0)} | 事件 ${Number(summaryRepair?.updated_event_count || 0)}`
+            : "--";
         el("news-llm-queue-note").innerHTML = [
             `<div class="list-item"><span>LLM 模式</span><span>${esc(llmMode)}</span></div>`,
-            `<div class="list-item"><span>最高优先级</span><span>${Number(queue?.max_priority || 0)}</span></div>`,
-            `<div class="list-item"><span>下次重试</span><span>${fmtTs(queue?.next_retry_at)}</span></div>`,
+            `<div class="list-item"><span>处理阶段</span><span>${esc(queuePhase)}</span></div>`,
+            `<div class="list-item"><span>新任务待处理 / 失败待修补</span><span>${pending} / ${failed}</span></div>`,
+            `<div class="list-item"><span>重试中 / 已完成</span><span>${retry} / ${done}</span></div>`,
+            `<div class="list-item"><span>失败历史清理节奏</span><span>${esc(repairPaceText)}</span></div>`,
+            `<div class="list-item"><span>最近摘要修补</span><span>${esc(summaryRepairText)}</span></div>`,
+            `<div class="list-item"><span>最高优先级 / 本轮修补数</span><span>${Number(queue?.max_priority || 0)} / ${repairUpdates}</span></div>`,
+            `<div class="list-item"><span>下次重试 / 全局退避</span><span>${fmtTs(queue?.next_retry_at)} / ${fmtTs(queue?.backoff_until)}</span></div>`,
             `<div class="list-item"><span>最近拉取 / LLM</span><span>${fmtTs(lastPull?.timestamp)} / ${fmtTs(lastLlm?.timestamp)}</span></div>`,
-            `<div class="list-item"><span>全局退避截至</span><span>${fmtTs(queue?.backoff_until)}</span></div>`,
         ].join("");
     }
 
@@ -307,18 +374,20 @@
         const latestEventAt = base?.latest_event_at || state.brief?.latest_event_at || null;
         const stats = summaryMetrics();
         const breakdown = latest?.feed_stats?.unstructured_breakdown || stats?.unstructured_breakdown || {};
-        const breakdownText = `待入模 ${Number(breakdown.pending || 0)} | 处理中 ${Number(breakdown.running || 0)} | 重试 ${Number(breakdown.retry || 0)} | 失败 ${Number(breakdown.failed || 0)} | 已修补 ${Number(breakdown.summarized_no_event || 0)} | done无事件 ${Number(breakdown.done_no_event || 0)} | 低优先未入队 ${Number(breakdown.skipped_low_importance || 0)} | 未入队 ${Number(breakdown.not_queued || 0)}`;
         if (el("news-events-count")) el("news-events-count").textContent = String(stats.total);
         if (el("news-positive-count")) el("news-positive-count").textContent = String(stats.sentiment.positive);
         if (el("news-neutral-count")) el("news-neutral-count").textContent = String(stats.sentiment.neutral);
         if (el("news-negative-count")) el("news-negative-count").textContent = String(stats.sentiment.negative);
         if (el("news-summary-gran-meta")) el("news-summary-gran-meta").textContent = `${stats.scope} | ${stats.total} 条`;
         if (!el("news-summary-note")) return;
-        const summaryState = (latest?.fallback_reason || state.summary?.fallback_reason) ? "GLM 超时，已回退" : "正常";
+        const summaryState = (latest?.fallback_reason || state.summary?.fallback_reason) ? "摘要接口较慢，已回退快速列表" : "GPT 摘要正常";
         el("news-summary-note").innerHTML = [
             `<div class="list-item"><span>24h 原始新闻 / 事件</span><span>${Number(base?.raw_count || 0)} / ${Number(base?.events_count || 0)}</span></div>`,
             `<div class="list-item"><span>当前 Feed 结构化 / 未结构化</span><span>${Number(stats.structured || 0)} / ${Number(stats.unstructured || 0)}</span></div>`,
-            `<div class="list-item"><span>未结构化处理状态</span><span>${esc(breakdownText)}</span></div>`,
+            `<div class="list-item"><span>待摘要 / AI处理中</span><span>${Number(breakdown.pending || 0)} / ${Number(breakdown.running || 0)}</span></div>`,
+            `<div class="list-item"><span>待补跑 / 本轮失败</span><span>${Number(breakdown.retry || 0)} / ${Number(breakdown.failed || 0)}</span></div>`,
+            `<div class="list-item"><span>已补中文摘要 / 已抽取无事件</span><span>${Number(breakdown.summarized_no_event || 0)} / ${Number(breakdown.done_no_event || 0)}</span></div>`,
+            `<div class="list-item"><span>低优先跳过 / 尚未入队</span><span>${Number(breakdown.skipped_low_importance || 0)} / ${Number(breakdown.not_queued || 0)}</span></div>`,
             `<div class="list-item"><span>最近原始新闻 / 事件</span><span>${fmtTs(latestRawAt)} / ${fmtTs(latestEventAt)}</span></div>`,
             `<div class="list-item"><span>标题摘要状态</span><span>${esc(summaryState)}</span></div>`,
         ].join("");
@@ -416,7 +485,10 @@
             rawBox.innerHTML = raws.length ? raws.map((item) => {
                 const title = esc(plainText(item.summary_title || item.title || "（无标题）"));
                 const titleHtml = item.url ? `<a class="news-title news-white" href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${title}</a>` : `<span class="news-title news-white">${title}</span>`;
-                return `<div class="list-item news-row"><div class="news-main">${titleHtml}<div class="news-meta"><span>${fmtTs(item.published_at)}</span><span class="news-tag-white">${esc(plainText(item.provider || "-"))}</span><span class="${sentimentClass(item.summary_sentiment === "positive" ? 1 : item.summary_sentiment === "negative" ? -1 : 0)}">${summarySentimentText(item.summary_sentiment)}</span><span>${esc(plainText(item.summary_source || "-"))}</span><span class="news-tag-white">${esc(processingStatusText(item.processing_status))}</span></div></div></div>`;
+                const sourceText = summarySourceText(item.summary_source);
+                const statusText = processingStatusText(item.processing_status);
+                const statusHint = processingStatusHint(item.processing_status);
+                return `<div class="list-item news-row"><div class="news-main">${titleHtml}<div class="news-meta"><span>${fmtTs(item.published_at)}</span><span class="news-tag-white">${esc(plainText(item.provider || "-"))}</span><span class="${sentimentClass(item.summary_sentiment === "positive" ? 1 : item.summary_sentiment === "negative" ? -1 : 0)}">${summarySentimentText(item.summary_sentiment)}</span><span class="news-tag-white" title="${esc(`摘要来源: ${sourceText}`)}">摘要:${esc(sourceText)}</span><span class="news-tag-white" title="${esc(statusHint)}">${esc(statusText)}</span></div></div></div>`;
             }).join("") : '<div class="list-item news-white">暂无未结构化新闻</div>';
         }
         if (structuredBox) {
@@ -676,16 +748,16 @@
         try {
             const result = await request("/worker/requeue", {
                 method: "POST",
-                body: JSON.stringify({ statuses: ["failed"], limit: 500 }),
+                body: JSON.stringify({ statuses: ["failed"], limit: 200 }),
                 timeoutMs: 20000,
             });
             if (el("news-action-output")) el("news-action-output").textContent = JSON.stringify(result, null, 2);
             const n = Number(result?.requeue?.requeued_count || 0);
-            notify(`已重排队失败任务: ${n}`);
+            notify(`已启动失败历史补跑: ${n} 条`);
             await refreshAll(true);
         } catch (err) {
-            if (el("news-action-output")) el("news-action-output").textContent = `重排队失败: ${err.message}`;
-            notify(`重排队失败: ${err.message}`, true);
+            if (el("news-action-output")) el("news-action-output").textContent = `失败历史补跑失败: ${err.message}`;
+            notify(`失败历史补跑失败: ${err.message}`, true);
         } finally {
             state.pulling = false;
         }

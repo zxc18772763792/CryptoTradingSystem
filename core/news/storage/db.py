@@ -761,7 +761,7 @@ async def auto_requeue_failed_llm_tasks(limit: int = 4, since: Optional[datetime
     max_rows = max(1, min(int(limit or 4), 50))
     since_ts = parse_any_datetime(since) if since else None
     now = datetime.now(timezone.utc)
-    scan_limit = max(40, max_rows * 12)
+    scan_limit = min(480, max(80, max_rows * 24))
 
     async with news_session_scope() as session:
         stmt = (
