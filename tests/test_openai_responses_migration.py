@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 from config.settings import settings
 
 
 class _FakeResponse:
-    def __init__(self, payload, status: int = 200):
+    def __init__(self, payload, status: int = 200, *, text_payload: str | None = None, headers: dict | None = None):
         self._payload = payload
         self.status = status
+        self._text_payload = text_payload
+        self.headers = headers or {"content-type": "application/json; charset=utf-8"}
 
     async def __aenter__(self):
         return self
@@ -21,14 +24,20 @@ class _FakeResponse:
         return self._payload
 
     async def text(self):
+        if self._text_payload is not None:
+            return self._text_payload
+        if isinstance(self._payload, (dict, list)):
+            return json.dumps(self._payload, ensure_ascii=False)
         return str(self._payload)
 
 
 class _FakeSession:
-    def __init__(self, *, capture: dict, payload: dict, status: int = 200, **kwargs):
+    def __init__(self, *, capture: dict, payload: dict, status: int = 200, text_payload: str | None = None, headers: dict | None = None, **kwargs):
         self._capture = capture
         self._payload = payload
         self._status = status
+        self._text_payload = text_payload
+        self._headers = headers
         self._capture["session_kwargs"] = kwargs
 
     async def __aenter__(self):
@@ -41,17 +50,63 @@ class _FakeSession:
         self._capture["url"] = url
         self._capture["headers"] = headers
         self._capture["json"] = json
-        return _FakeResponse(self._payload, status=self._status)
+        return _FakeResponse(self._payload, status=self._status, text_payload=self._text_payload, headers=self._headers)
 
 
 class _SyncResponse:
-    def __init__(self, payload, status_code: int = 200):
+    def __init__(self, payload, status_code: int = 200, *, text_payload: str | None = None, headers: dict | None = None):
         self._payload = payload
         self.status_code = status_code
-        self.text = str(payload)
+        self.text = text_payload if text_payload is not None else (
+            json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else str(payload)
+        )
+        self.headers = headers or {"content-type": "application/json; charset=utf-8"}
 
     def json(self):
         return self._payload
+
+
+class _SyncSSELikeResponse(_SyncResponse):
+    def json(self):
+        raise ValueError("not json")
+
+
+def test_openai_responses_parser_supports_event_stream_payload():
+    from core.utils.openai_responses import extract_response_text, parse_responses_body
+
+    event_stream = (
+        'event: response.created\n'
+        'data: {"response":{"id":"resp_1","status":"in_progress"}}\n\n'
+        'event: response.output_text.delta\n'
+        'data: {"delta":"{\\"summary\\":\\"BTC利好\\""}\n\n'
+        'event: response.output_text.delta\n'
+        'data: {"delta":",\\"sentiment\\":\\"positive\\"}"}\n\n'
+        'event: response.completed\n'
+        'data: {"response":{"output":[{"type":"message","content":[{"type":"output_text","text":"{\\"summary\\":\\"BTC利好\\",\\"sentiment\\":\\"positive\\"}"}]}]}}\n\n'
+    )
+
+    parsed = parse_responses_body(event_stream, content_type="text/event-stream")
+
+    assert parsed["output"][0]["content"][0]["text"] == '{"summary":"BTC利好","sentiment":"positive"}'
+    assert extract_response_text(parsed) == '{"summary":"BTC利好","sentiment":"positive"}'
+
+
+def test_openai_requests_reader_falls_back_to_event_stream():
+    from core.utils.openai_responses import extract_response_text, read_requests_responses_json
+
+    event_stream = (
+        'event: response.output_text.delta\n'
+        'data: {"delta":"{\\"summary\\":\\"快讯\\"}"}\n\n'
+    )
+    response = _SyncSSELikeResponse(
+        {},
+        text_payload=event_stream,
+        headers={"content-type": "text/event-stream"},
+    )
+
+    parsed = read_requests_responses_json(response)
+
+    assert extract_response_text(parsed) == '{"summary":"快讯"}'
 
 
 def test_live_decision_router_codex_uses_responses_api(monkeypatch, tmp_path):

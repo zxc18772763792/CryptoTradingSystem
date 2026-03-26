@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Sequence
+import json
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 
 def responses_endpoint(base_url: str) -> str:
@@ -46,6 +47,8 @@ def build_responses_payload(
     max_output_tokens: int | None = None,
     temperature: float | None = None,
     text_format: str | Dict[str, Any] | None = None,
+    stream: bool | None = None,
+    reasoning_effort: str | None = None,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "model": str(model or "").strip(),
@@ -66,8 +69,141 @@ def build_responses_payload(
     if text_format:
         fmt = text_format if isinstance(text_format, dict) else {"type": str(text_format)}
         payload["text"] = {"format": fmt}
+    if stream is not None:
+        payload["stream"] = bool(stream)
+    effort = str(reasoning_effort or "").strip().lower()
+    if effort in {"minimal", "low", "medium", "high"}:
+        payload["reasoning"] = {"effort": effort}
 
     return payload
+
+
+def _iter_sse_events(raw_text: str) -> List[Tuple[str, str]]:
+    events: List[Tuple[str, str]] = []
+    event_name = ""
+    data_lines: List[str] = []
+
+    def _flush() -> None:
+        nonlocal event_name, data_lines
+        if not data_lines:
+            event_name = ""
+            return
+        events.append((event_name, "\n".join(data_lines).strip()))
+        event_name = ""
+        data_lines = []
+
+    for line in str(raw_text or "").splitlines():
+        stripped = line.rstrip("\r")
+        if not stripped:
+            _flush()
+            continue
+        if stripped.startswith(":"):
+            continue
+        if stripped.startswith("event:"):
+            event_name = stripped[6:].strip()
+            continue
+        if stripped.startswith("data:"):
+            data_lines.append(stripped[5:].lstrip())
+    _flush()
+    return events
+
+
+def parse_responses_body(raw_text: str, *, content_type: str = "") -> Dict[str, Any]:
+    raw = str(raw_text or "").strip()
+    if not raw:
+        return {}
+
+    normalized_content_type = str(content_type or "").strip().lower()
+
+    def _load_json(text: str) -> Dict[str, Any]:
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            if isinstance(payload.get("response"), dict):
+                return dict(payload["response"])
+            return payload
+        return {}
+
+    if raw.startswith("{") or raw.startswith("[") or "json" in normalized_content_type:
+        try:
+            parsed = _load_json(raw)
+            if parsed:
+                return parsed
+        except Exception:
+            pass
+
+    if "event-stream" in normalized_content_type or raw.startswith("event:") or raw.startswith("data:"):
+        deltas: List[str] = []
+        last_response: Dict[str, Any] = {}
+        last_payload: Dict[str, Any] = {}
+
+        for event_name, data_text in _iter_sse_events(raw):
+            if not data_text or data_text == "[DONE]":
+                continue
+            try:
+                payload = json.loads(data_text)
+            except Exception:
+                payload = {"text": data_text}
+
+            if isinstance(payload, dict):
+                if isinstance(payload.get("response"), dict):
+                    last_response = dict(payload["response"])
+                elif isinstance(payload.get("output"), list) or payload.get("object") == "response" or "output_text" in payload:
+                    last_response = payload
+                last_payload = payload
+
+            if event_name.endswith("output_text.delta") and isinstance(payload, dict):
+                delta = str(payload.get("delta") or payload.get("text") or payload.get("output_text") or "").strip()
+                if delta:
+                    deltas.append(delta)
+            elif event_name.endswith("output_text.done") and isinstance(payload, dict):
+                done_text = str(payload.get("text") or payload.get("output_text") or "").strip()
+                if done_text and not deltas:
+                    deltas.append(done_text)
+
+        if last_response:
+            return last_response
+        if deltas:
+            return {"output_text": "".join(deltas)}
+        if last_payload:
+            return last_payload
+
+    try:
+        return _load_json(raw)
+    except Exception:
+        return {}
+
+
+async def read_aiohttp_responses_json(response: Any) -> Dict[str, Any]:
+    content_type = str((getattr(response, "headers", {}) or {}).get("content-type") or "").lower()
+    try:
+        data = await response.json()
+    except Exception:
+        body = await response.text()
+        return parse_responses_body(body, content_type=content_type)
+
+    if isinstance(data, dict):
+        if isinstance(data.get("response"), dict):
+            return dict(data["response"])
+        return data
+
+    body = await response.text()
+    return parse_responses_body(body, content_type=content_type)
+
+
+def read_requests_responses_json(response: Any) -> Dict[str, Any]:
+    headers = getattr(response, "headers", {}) or {}
+    content_type = str(headers.get("content-type") or "").lower()
+    try:
+        data = response.json()
+    except Exception:
+        return parse_responses_body(getattr(response, "text", ""), content_type=content_type)
+
+    if isinstance(data, dict):
+        if isinstance(data.get("response"), dict):
+            return dict(data["response"])
+        return data
+
+    return parse_responses_body(getattr(response, "text", ""), content_type=content_type)
 
 
 def _extract_text_from_content(content: Any) -> str:
@@ -89,6 +225,8 @@ def _extract_text_from_content(content: Any) -> str:
 
 
 def extract_response_text(data: Any) -> str:
+    if isinstance(data, dict) and isinstance(data.get("response"), dict):
+        data = data.get("response")
     if not isinstance(data, dict):
         return ""
 

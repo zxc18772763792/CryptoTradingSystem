@@ -200,6 +200,49 @@
     return String(document.getElementById(id)?.value || '').split(',').map(s => s.trim()).filter(Boolean);
   }
 
+  function plannerNumberInput(id, fallback, minValue = null, maxValue = null) {
+    const raw = Number(document.getElementById(id)?.value || fallback);
+    let value = Number.isFinite(raw) ? raw : fallback;
+    if (Number.isFinite(minValue)) value = Math.max(minValue, value);
+    if (Number.isFinite(maxValue)) value = Math.min(maxValue, value);
+    return value;
+  }
+
+  function pendingStrategyDraftCount() {
+    return toArray(state.pendingLlmContext?.proposed_strategy_changes).filter(item => item && typeof item === 'object').length;
+  }
+
+  function resolvePlannerResearchMode() {
+    const selected = String(document.getElementById('ai-planner-research-mode')?.value || 'auto').trim() || 'auto';
+    if (selected !== 'auto') return selected;
+    const pendingDrafts = pendingStrategyDraftCount();
+    if (pendingDrafts > 0) return 'autonomous_draft';
+    if (state.pendingLlmContext && Object.keys(state.pendingLlmContext || {}).length) return 'hybrid';
+    return 'template';
+  }
+
+  function buildPlannerConstraints() {
+    return {
+      max_templates: plannerNumberInput('ai-planner-max-templates', 5, 1, 12),
+      research_mode: resolvePlannerResearchMode(),
+      max_strategy_drafts: plannerNumberInput('ai-planner-max-drafts', 4, 1, 12),
+      max_backtest_runs: plannerNumberInput('ai-planner-max-backtests', 80, 8, 500),
+      exploration_bias: plannerNumberInput('ai-planner-exploration-bias', 0.45, 0.0, 1.0),
+    };
+  }
+
+  function updatePlannerModeHint() {
+    const hintEl = document.getElementById('ai-planner-mode-hint');
+    if (!hintEl) return;
+    const requested = String(document.getElementById('ai-planner-research-mode')?.value || 'auto').trim() || 'auto';
+    const effective = buildPlannerConstraints();
+    const requestedText = requested === 'auto' ? '自动判断' : researchModeText(requested);
+    const effectiveText = researchModeText(effective.research_mode || 'template');
+    const draftCount = pendingStrategyDraftCount();
+    const draftText = draftCount > 0 ? `当前已挂起 ${draftCount} 个 AI 草案，生成提案时会一起进入搜索。` : '当前还没有 AI 草案，系统会先从模板和市场上下文起步。';
+    hintEl.textContent = `当前选择：${requestedText}；实际生成：${effectiveText}；模板上限 ${effective.max_templates}，草案预算 ${effective.max_strategy_drafts}，回测预算 ${effective.max_backtest_runs}，探索强度 ${(effective.exploration_bias * 100).toFixed(0)}%。${draftText}`;
+  }
+
   function parseTs(v) {
     if (!v) return null;
     if (v instanceof Date) {
@@ -595,10 +638,10 @@
     return {
       template: '模板研究',
       hybrid: '混合研究',
-      autonomous_draft: '自主草案',
+      autonomous_draft: '开放式草案研究',
       template_seed: '模板种子',
       hybrid_seed: '混合种子',
-      dsl_seed: 'DSL 草案',
+      dsl_seed: '开放式草案',
     }[String(mode || '').trim()] || String(mode || '--');
   }
 
@@ -2650,7 +2693,7 @@
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
   async function generateAIContext() {
     const btn = document.getElementById('ai-context-btn');
-    if (btn) { btn.textContent = 'AI生成中...'; btn.disabled = true; }
+    if (btn) { btn.textContent = 'OpenAI研究中（约1-3分钟）...'; btn.disabled = true; }
     try {
       const goals = String(document.getElementById('ai-planner-goal')?.value || '').trim();
       if (goals.length < 8) {
@@ -2662,11 +2705,12 @@
       const marketSummary = { signals: state.latestSignals || {}, macro: macroContext || {} };
       const result = await aiApi('/research/generate-context', {
         method: 'POST',
-        body: JSON.stringify({ market_summary: marketSummary, goals, timeout: 30 }),
-        timeoutMs: 40000,
+        body: JSON.stringify({ market_summary: marketSummary, goals, timeout: 180 }),
+        timeoutMs: 240000,
       });
       if (result?.llm_research_output) {
         state.pendingLlmContext = result.llm_research_output;
+        const draftCount = toArray(result.llm_research_output?.proposed_strategy_changes).filter(item => item && typeof item === 'object').length;
         const hypothesis = String(result.llm_research_output.hypothesis || '').trim();
         const uncertainty = String(result.llm_research_output.uncertainty || '').trim().toLowerCase();
         const suggestedMax = ['?', 'high'].includes(uncertainty) ? 3 : (['?', 'low'].includes(uncertainty) ? 6 : 4);
@@ -2677,6 +2721,20 @@
         }
         const maxTemplatesEl = document.getElementById('ai-planner-max-templates');
         if (maxTemplatesEl) maxTemplatesEl.value = String(suggestedMax);
+        const maxDraftsEl = document.getElementById('ai-planner-max-drafts');
+        if (maxDraftsEl) {
+          const nextDraftBudget = Math.max(plannerNumberInput('ai-planner-max-drafts', 4, 1, 12), draftCount || 0, 4);
+          maxDraftsEl.value = String(nextDraftBudget);
+        }
+        const maxBacktestsEl = document.getElementById('ai-planner-max-backtests');
+        if (maxBacktestsEl) {
+          const suggestedBacktests = Math.max(plannerNumberInput('ai-planner-max-backtests', 80, 8, 500), draftCount * 20, 60);
+          maxBacktestsEl.value = String(suggestedBacktests);
+        }
+        const researchModeEl = document.getElementById('ai-planner-research-mode');
+        if (researchModeEl && (researchModeEl.value === 'auto' || !researchModeEl.value)) {
+          researchModeEl.value = draftCount > 0 ? 'autonomous_draft' : 'hybrid';
+        }
         if (btn) { btn.textContent = '研究思路已生成 ✓'; btn.disabled = false; btn.style.color = '#20bf78'; }
         // Show hypothesis in planner notes
         const plannerNotesEl = document.getElementById('ai-planner-notes');
@@ -2685,9 +2743,13 @@
           : '暂无运行中候选';
         if (plannerNotesEl && result.llm_research_output.hypothesis) {
           const existing = plannerNotesEl.innerHTML;
-          plannerNotesEl.innerHTML = `<div style="font-size:11px;color:#20bf78;margin-bottom:3px;">🤖 AI假设：${esc(result.llm_research_output.hypothesis)}</div>` + existing;
+          const draftSummary = draftCount > 0
+            ? `<div style="font-size:11px;color:#7dd3fc;margin-bottom:3px;">OpenAI 草案：${draftCount} 个，生成提案时将优先进入开放式草案研究。</div>`
+            : '<div style="font-size:11px;color:#9fb1c9;margin-bottom:3px;">本轮只生成了研究假设与实验计划，尚未返回可执行草案。</div>';
+          plannerNotesEl.innerHTML = `<div style="font-size:11px;color:#20bf78;margin-bottom:3px;">🤖 AI假设：${esc(result.llm_research_output.hypothesis)}</div>${draftSummary}` + existing;
         }
-        notify('研究思路已生成，假设已写入并刷新工作台。');
+        updatePlannerModeHint();
+        notify(draftCount > 0 ? `研究思路已生成，并附带 ${draftCount} 个 AI 草案。` : '研究思路已生成，假设已写入规划区。');
       } else {
         notify(`生成研究思路失败: ${result?.error || 'LLM不可用'}`, true);
         if (btn) { btn.textContent = '🤖 生成研究思路'; btn.disabled = false; btn.style.color = ''; }
@@ -2895,6 +2957,7 @@
     if (goal.length < 8) { notify('研究目标太短（至少8个字符）', true); return; }
     const symbols   = csvInput('ai-planner-symbols');
     const primarySym = symbols[0] || getCurrentResearchSymbol() || 'BTC/USDT';
+    const plannerConstraints = buildPlannerConstraints();
 
     // ── 自动采集实时市场上下文 ──
     const marketCtxEl = document.getElementById('ai-market-context-hint');
@@ -2923,7 +2986,7 @@
       market_regime: String(document.getElementById('ai-planner-regime')?.value || 'mixed'),
       symbols,
       timeframes:    csvInput('ai-planner-timeframes'),
-      constraints:   { max_templates: Number(document.getElementById('ai-planner-max-templates')?.value || 5) },
+      constraints: plannerConstraints,
       market_context: liveCtx,
     };
     // Attach pending LLM context if available, then clear it
@@ -2948,12 +3011,14 @@
       if (plannerNotes.length) {
         html += `<div style="font-size:11px;color:#9fb1c9;margin-bottom:3px;">规划说明：${plannerNotes.map(n => esc(n)).join(' · ')}</div>`;
       }
+      html += `<div style="font-size:11px;color:#7dd3fc;margin-bottom:3px;">研究方式：${esc(researchModeText(plannerConstraints.research_mode))} · 模板上限 ${esc(String(plannerConstraints.max_templates))} · 草案预算 ${esc(String(plannerConstraints.max_strategy_drafts))} · 回测预算 ${esc(String(plannerConstraints.max_backtest_runs))}</div>`;
       if (filteredTpls.length) {
         html += `<div style="font-size:11px;color:#f59e0b;margin-top:3px;">⚠️ 过滤模板（${filteredTpls.length}）: ${filteredTpls.slice(0,5).map(t => esc(t)).join(', ')}${filteredTpls.length > 5 ? '...' : ''}</div>`;
       }
       plannerNotesEl.innerHTML = html;
     }
-    notify(notifMsg);
+    updatePlannerModeHint();
+    notify(`研究任务已生成：${researchModeText(plannerConstraints.research_mode)}。${filteredTpls.length ? `已过滤 ${filteredTpls.length} 个不支持模板。` : ''}`);
     await refreshWorkbench(result?.proposal?.proposal_id || '', '');
   }
 
@@ -2968,12 +3033,13 @@
     const timeframes = csvInput('ai-planner-timeframes');
     const exchange = String(document.getElementById('run-exchange')?.value || getCurrentResearchExchange() || 'binance');
     const days = Math.max(1, Math.min(3650, parseInt(document.getElementById('run-days')?.value || '3', 10) || 3));
+    const plannerConstraints = buildPlannerConstraints();
     const payload = {
       goal,
       market_regime: String(document.getElementById('ai-planner-regime')?.value || 'mixed'),
       symbols: symbols.length ? symbols : [getCurrentResearchSymbol() || 'BTC/USDT'],
       timeframes: timeframes.length ? timeframes : ['15m', '1h'],
-      constraints: { max_templates: Number(document.getElementById('ai-planner-max-templates')?.value || 5) },
+      constraints: plannerConstraints,
       metadata: { source: 'ai_research_ui_oneclick' },
       origin_context: {},
       market_context: state.pendingMacroContext || {},
@@ -3005,6 +3071,7 @@
       const action = String(result?.deploy?.action || '').trim();
       await refreshWorkbench(proposalId, candidateId);
       if (candidateId) viewCandidate(candidateId).catch(() => {});
+      updatePlannerModeHint();
       notify(`\u4e00\u952e\u7814\u7a76+\u90e8\u7f72\u5b8c\u6210${runtimeStatus ? `: ${runtimeStatus}` : ''}${action ? ` (${action})` : ''}`);
     } catch (err) {
       notify(`\u4e00\u952e\u7814\u7a76+\u90e8\u7f72\u5931\u8d25: ${err.message}`, true);
@@ -3229,6 +3296,19 @@
     document.getElementById('ai-live-decision-model')?.addEventListener('input', () => previewLiveDecisionProviderSelection());
     document.getElementById('ai-planner-symbols')?.addEventListener('change', () =>
       loadDataReadiness().catch(() => {}));
+    [
+      'ai-planner-goal',
+      'ai-planner-regime',
+      'ai-planner-max-templates',
+      'ai-planner-research-mode',
+      'ai-planner-max-drafts',
+      'ai-planner-max-backtests',
+      'ai-planner-exploration-bias',
+      'ai-planner-timeframes',
+    ].forEach((id) => {
+      document.getElementById(id)?.addEventListener('input', () => updatePlannerModeHint());
+      document.getElementById(id)?.addEventListener('change', () => updatePlannerModeHint());
+    });
     document.getElementById('run-exchange')?.addEventListener('change', () =>
       loadDataReadiness().catch(() => {}));
 
@@ -3437,6 +3517,7 @@
     syncHubLayoutHeight();
     bindEvents();
     syncPrimaryActionButtons();
+    updatePlannerModeHint();
     normalizeDomText(document.getElementById('ai-research'));
     refreshWorkbench().catch(err => console.error('AI研究初始化失败:', err));
     if (isAiResearchActive()) startPolling();

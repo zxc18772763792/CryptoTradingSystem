@@ -67,6 +67,10 @@
       goal: String(q('ai-planner-goal')?.value || '').trim(),
       regime: String(q('ai-planner-regime')?.value || 'mixed').trim(),
       maxTemplates: Math.max(1, Number(q('ai-planner-max-templates')?.value || 5)),
+      researchMode: String(q('ai-planner-research-mode')?.value || 'auto').trim() || 'auto',
+      maxDrafts: Math.max(1, Number(q('ai-planner-max-drafts')?.value || 4)),
+      maxBacktests: Math.max(8, Number(q('ai-planner-max-backtests')?.value || 80)),
+      explorationBias: Math.max(0, Math.min(1, Number(q('ai-planner-exploration-bias')?.value || 0.45))),
       symbols: String(q('ai-planner-symbols')?.value || '').split(',').map((item) => item.trim()).filter(Boolean),
       timeframes: String(q('ai-planner-timeframes')?.value || '').split(',').map((item) => item.trim()).filter(Boolean),
     };
@@ -173,6 +177,62 @@
       : `${candidate?.strategy || '--'} / ${status}`;
   }
 
+  function requestedResearchModeText(requestedMode) {
+    return String(requestedMode || '').trim() === 'auto'
+      ? '自动判断'
+      : researchModeText(requestedMode || 'template');
+  }
+
+  function researchStageText(proposal, candidate) {
+    const proposalStatus = String(proposal?.status || '').trim();
+    const candidateStatus = String(candidate?.status || '').trim();
+    if (!proposal) return '待生成提案';
+    if (['research_queued', 'research_running'].includes(proposalStatus)) return '研究运行中';
+    if (!candidate) return '待产出候选';
+    if (['rejected'].includes(candidateStatus) || ['rejected'].includes(proposalStatus)) return '验证未通过';
+    if (['paper_running', 'shadow_running', 'live_candidate', 'live_running'].includes(candidateStatus)) return '已进入运行态';
+    if (candidateStatus === 'validated') return '候选待注册';
+    return statusText(candidateStatus || proposalStatus || '--');
+  }
+
+  function researchOutputText(proposal, candidate, strategyDrafts, proposalCandidates) {
+    if (candidate) {
+      const score = Number(candidate?.score);
+      return Number.isFinite(score)
+        ? `${candidate?.strategy || '--'} / ${Math.round(score)}分`
+        : `${candidate?.strategy || '--'} / ${statusText(candidate?.status || '--')}`;
+    }
+    if (proposal) {
+      const draftCount = Array.isArray(strategyDrafts) ? strategyDrafts.length : 0;
+      const candidateCount = Array.isArray(proposalCandidates) ? proposalCandidates.length : 0;
+      return `${candidateCount} 个候选 / ${draftCount} 个草案`;
+    }
+    return '等待生成研究';
+  }
+
+  function setChainSummaryText(id, value) {
+    const el = q(id);
+    if (!el) return;
+    el.textContent = String(value || '--');
+  }
+
+  function setChainSummaryTag(id, value, tone = '') {
+    const el = q(id);
+    if (!el) return;
+    el.textContent = String(value || '--');
+    el.className = `ai-chain-summary-tag${tone ? ` is-${tone}` : ''}`;
+  }
+
+  function renderChainSummary(model) {
+    const summary = model?.chainSummary || {};
+    const research = summary.research || {};
+    setChainSummaryTag('ai-chain-research-tag', research.tag || '等待研究', research.tone || '');
+    setChainSummaryText('ai-chain-research-mode', research.mode || '等待配置');
+    setChainSummaryText('ai-chain-research-stage', research.stage || '待生成');
+    setChainSummaryText('ai-chain-research-output', research.output || '暂无产物');
+    setChainSummaryText('ai-chain-research-next', research.next || '等待下一步');
+  }
+
   function metric(label, value) {
     return `<div class="ai-flow-metric"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
   }
@@ -204,6 +264,7 @@
     const validation = candidate?.validation_summary || {};
     const proposalCandidates = candidatePoolForProposal(snapshot, proposal);
     const nextAction = nextStepText(snapshot, proposal, candidate);
+    const effectiveResearchMode = String(proposal?.research_mode || meta?.research_mode || '').trim() || (inputs.researchMode === 'auto' ? 'template' : inputs.researchMode);
 
     const hypothesisTone = proposal
       ? (['research_running', 'research_queued'].includes(String(proposal?.status || '')) ? 'active' : 'done')
@@ -233,9 +294,9 @@
         hypothesisTone,
         proposal?.thesis || inputs.goal || '等待输入研究目标',
         [
-          metric('模式', researchModeText(meta?.research_mode || 'template')),
+          metric('模式', researchModeText(effectiveResearchMode)),
           metric('市场', inputs.regime || 'mixed'),
-          metric('模板', inputs.maxTemplates),
+          metric('模板上限', inputs.maxTemplates),
         ],
         proposal ? `当前状态：${statusText(proposal?.status)}` : '目标会先被结构化成研究假设与实验计划。',
       ),
@@ -248,8 +309,8 @@
           : '尚未产出候选',
         [
           metric('草案', strategyDrafts.length || '--'),
-          metric('预算', searchBudget?.max_backtest_runs || '--'),
-          metric('淘汰', searchSummary?.rejected_count || 0),
+          metric('回测预算', searchBudget?.max_backtest_runs || inputs.maxBacktests || '--'),
+          metric('淘汰', searchSummary?.rejected_drafts || 0),
         ],
         proposal ? '系统会保留 champion / challenger 关系与搜索摘要。' : '先生成提案，才能开始 hypothesis -> evaluate -> mutate。',
       ),
@@ -308,6 +369,18 @@
         candidate: focusCandidateText(candidate),
         nextAction,
       },
+      chainSummary: {
+        research: {
+          tag: proposal ? researchModeText(effectiveResearchMode) : requestedResearchModeText(inputs.researchMode),
+          tone: proposal ? (effectiveResearchMode === 'autonomous_draft' ? 'active' : 'on') : 'warn',
+          mode: proposal
+            ? `${researchModeText(effectiveResearchMode)} / 模板上限 ${searchBudget?.max_templates || inputs.maxTemplates || '--'}`
+            : `${requestedResearchModeText(inputs.researchMode)} / 模板上限 ${inputs.maxTemplates}`,
+          stage: researchStageText(proposal, candidate),
+          output: researchOutputText(proposal, candidate, strategyDrafts, proposalCandidates),
+          next: nextAction,
+        },
+      },
     };
   }
 
@@ -335,11 +408,12 @@
       ? model.badges.map((badge) => `<span class="ai-flow-badge is-${esc(badge.tone)}">${esc(badge.text)}</span>`).join('')
       : '<span class="ai-flow-badge">等待研究状态</span>';
     stageEl.innerHTML = model.stages.join('');
+    renderChainSummary(model);
     renderFocus(model);
   }
 
   function bindPlannerInputs() {
-    ['ai-planner-goal', 'ai-planner-regime', 'ai-planner-max-templates', 'ai-planner-symbols', 'ai-planner-timeframes']
+    ['ai-planner-goal', 'ai-planner-regime', 'ai-planner-max-templates', 'ai-planner-research-mode', 'ai-planner-max-drafts', 'ai-planner-max-backtests', 'ai-planner-exploration-bias', 'ai-planner-symbols', 'ai-planner-timeframes']
       .forEach((id) => {
         q(id)?.addEventListener('input', () => renderFlow());
         q(id)?.addEventListener('change', () => renderFlow());

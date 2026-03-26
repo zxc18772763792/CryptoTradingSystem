@@ -1269,15 +1269,17 @@ def test_cusum_watcher_triggers():
 
 
 def test_research_context_generator_returns_none_on_error():
-    """generate_research_context returns None when GLM client is unavailable."""
+    """generate_research_context returns None when the provider call fails."""
     import asyncio
-    from unittest.mock import patch
+    from unittest.mock import AsyncMock, patch
 
     async def _run():
         from core.ai.research_context_generator import generate_research_context
 
-        # Simulate GLM client import failure
-        with patch.dict("sys.modules", {"core.news.eventizer.async_glm_client": None}):
+        with patch(
+            "core.ai.research_context_generator._call_openai_responses_json",
+            new=AsyncMock(return_value=None),
+        ):
             result = await generate_research_context(
                 market_summary={"direction": "FLAT", "confidence": 0.5},
                 goals="测试研究目标",
@@ -1286,4 +1288,53 @@ def test_research_context_generator_returns_none_on_error():
         return result
 
     result = asyncio.run(_run())
-    assert result is None, f"Expected None when GLM unavailable, got {result}"
+    assert result is None, f"Expected None when provider call fails, got {result}"
+
+
+def test_research_context_generator_fills_defaults_for_openai_payload():
+    """generate_research_context should normalize partial OpenAI payloads."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    async def _run():
+        from core.ai.research_context_generator import generate_research_context
+
+        with patch(
+            "core.ai.research_context_generator._call_openai_responses_json",
+            new=AsyncMock(
+                return_value={
+                    "hypothesis": "均线与 RSI 共振可能提升 BTC 短周期研究质量。",
+                    "proposed_strategy_changes": [
+                        {
+                            "draft_id": "draft-openai-01",
+                            "name": "EMA RSI Draft",
+                            "program": {
+                                "name": "EMA RSI Draft",
+                                "entry_conditions": [
+                                    {"left": "ema_fast", "op": "cross_over", "right": "ema_slow"},
+                                ],
+                                "exit_conditions": [
+                                    {"left": "ema_fast", "op": "cross_under", "right": "ema_slow"},
+                                ],
+                            },
+                        }
+                    ],
+                    "uncertainty": "中",
+                }
+            ),
+        ):
+            return await generate_research_context(
+                market_summary={"direction": "LONG", "confidence": 0.68},
+                goals="研究 BTC 短周期开放式草案",
+                timeout=10,
+            )
+
+    result = asyncio.run(_run())
+    assert isinstance(result, dict)
+    assert result["hypothesis"]
+    assert result["experiment_plan"] == []
+    assert result["metrics_to_check"] == []
+    assert result["expected_failure_modes"] == []
+    assert isinstance(result["proposed_strategy_changes"], list)
+    assert result["proposed_strategy_changes"][0]["name"] == "EMA RSI Draft"
+    assert result["evidence_refs"] == []

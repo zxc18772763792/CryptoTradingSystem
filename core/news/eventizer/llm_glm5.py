@@ -17,6 +17,7 @@ from core.utils.openai_responses import (
     build_openai_headers,
     build_responses_payload,
     coerce_responses_to_chat_completions,
+    read_requests_responses_json,
     responses_endpoint,
 )
 
@@ -441,6 +442,7 @@ def _call_glm5_once(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0,
+            stream=False,
         )
         url = responses_endpoint(base_url)
     else:
@@ -462,7 +464,7 @@ def _call_glm5_once(
     if response.status_code >= 400:
         raise RuntimeError(f"LLM HTTP {response.status_code}: {response.text[:300]}")
 
-    data = response.json()
+    data = read_requests_responses_json(response) if provider == "openai" else response.json()
     if provider == "openai":
         data = coerce_responses_to_chat_completions(data)
     choices = data.get("choices") if isinstance(data, dict) else None
@@ -593,6 +595,7 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
             max_output_tokens=max_length + 50,
             temperature=0.3,
             text_format="json_object",
+            stream=False,
         )
         url = responses_endpoint(base_url)
     else:
@@ -620,7 +623,7 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
             _summary_cache_set(title, max_length, result)
             return result
 
-        data = response.json()
+        data = read_requests_responses_json(response) if provider == "openai" else response.json()
         if provider == "openai":
             data = coerce_responses_to_chat_completions(data)
         choices = data.get("choices") if isinstance(data, dict) else None
@@ -707,6 +710,7 @@ def _call_glm5_batch_summarize(
             ],
             temperature=0.2,
             text_format="json_object",
+            stream=False,
         )
         url = responses_endpoint(base_url)
     else:
@@ -729,7 +733,7 @@ def _call_glm5_batch_summarize(
         if response.status_code >= 400:
             body_preview = (response.text or "")[:200].replace("\n", " ")
             raise RuntimeError(f"LLM summarize batch HTTP {response.status_code}: {body_preview}")
-        data = response.json()
+        data = read_requests_responses_json(response) if provider == "openai" else response.json()
         if provider == "openai":
             data = coerce_responses_to_chat_completions(data)
         choices = data.get("choices") if isinstance(data, dict) else None

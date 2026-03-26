@@ -1501,11 +1501,11 @@
                         <div class="ai-top-intro-stack">
                             <div class="ai-top-intro-box">
                                 <div class="ai-top-intro-box-title">负责什么</div>
-                                <div class="ai-top-intro-box-desc">把研究目标转成提案、候选、验证结果和注册建议。</div>
+                                <div class="ai-top-intro-box-desc">把研究目标转成提案、候选、验证结果和注册建议，并在需要时把 AI 草案一起纳入搜索。</div>
                             </div>
                             <div class="ai-top-intro-box">
                                 <div class="ai-top-intro-box-title">怎么用</div>
-                                <div class="ai-top-intro-box-desc">1) 生成研究 → 2) 选择研究任务 → 3) 运行研究 → 4) 人工确认/注册。</div>
+                                <div class="ai-top-intro-box-desc">1) 先定研究方式 → 2) 生成研究 / AI 草案 → 3) 运行研究 → 4) 人工确认或注册。</div>
                             </div>
                             <div class="ai-top-intro-mini-grid">
                                 <div class="ai-top-intro-mini">
@@ -1699,6 +1699,56 @@
                             <span class="ai-flow-badge">等待研究状态</span>
                         </div>
                     </div>
+                    <div id="ai-chain-summary-grid" class="ai-chain-summary-grid">
+                        <article class="ai-chain-summary-card ai-chain-summary-card-research">
+                            <div class="ai-chain-summary-head">
+                                <div class="ai-chain-summary-title">研究链路速览</div>
+                                <span id="ai-chain-research-tag" class="ai-chain-summary-tag">加载中</span>
+                            </div>
+                            <div class="ai-chain-summary-items">
+                                <div class="ai-chain-summary-item">
+                                    <span>当前模式</span>
+                                    <strong id="ai-chain-research-mode">加载中...</strong>
+                                </div>
+                                <div class="ai-chain-summary-item">
+                                    <span>当前阶段</span>
+                                    <strong id="ai-chain-research-stage">加载中...</strong>
+                                </div>
+                                <div class="ai-chain-summary-item">
+                                    <span>当前产物</span>
+                                    <strong id="ai-chain-research-output">加载中...</strong>
+                                </div>
+                                <div class="ai-chain-summary-item">
+                                    <span>下一步</span>
+                                    <strong id="ai-chain-research-next">加载中...</strong>
+                                </div>
+                            </div>
+                        </article>
+                        <article class="ai-chain-summary-card ai-chain-summary-card-trading">
+                            <div class="ai-chain-summary-head">
+                                <div class="ai-chain-summary-title">自治交易链路速览</div>
+                                <span id="ai-chain-trading-tag" class="ai-chain-summary-tag">加载中</span>
+                            </div>
+                            <div class="ai-chain-summary-items">
+                                <div class="ai-chain-summary-item">
+                                    <span>当前模式</span>
+                                    <strong id="ai-chain-trading-mode">加载中...</strong>
+                                </div>
+                                <div class="ai-chain-summary-item">
+                                    <span>运行状态</span>
+                                    <strong id="ai-chain-trading-status">加载中...</strong>
+                                </div>
+                                <div class="ai-chain-summary-item">
+                                    <span>最近决策</span>
+                                    <strong id="ai-chain-trading-decision">加载中...</strong>
+                                </div>
+                                <div class="ai-chain-summary-item">
+                                    <span>最近动作</span>
+                                    <strong id="ai-chain-trading-last-action">加载中...</strong>
+                                </div>
+                            </div>
+                        </article>
+                    </div>
                     <div id="ai-flow-stage-grid" class="ai-flow-stage-grid">
                         <article class="ai-flow-stage">
                             <div class="ai-flow-stage-index">Step 1</div>
@@ -1735,8 +1785,33 @@
                                     </select>
                                 </div>
                                 <div class="form-group">
-                                    <label>策略数</label>
+                                    <label>模板上限</label>
                                     <input type="number" id="ai-planner-max-templates" min="1" max="12" value="5">
+                                </div>
+                            </div>
+                            <div class="form-row ai-planner-advanced-grid">
+                                <div class="form-group">
+                                    <label>研究方式</label>
+                                    <select id="ai-planner-research-mode">
+                                        <option value="auto" selected>自动判断（推荐）</option>
+                                        <option value="template">只跑模板库</option>
+                                        <option value="hybrid">模板 + AI草案</option>
+                                        <option value="autonomous_draft">开放式草案优先</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>草案预算</label>
+                                    <input type="number" id="ai-planner-max-drafts" min="1" max="12" value="4">
+                                </div>
+                            </div>
+                            <div class="form-row ai-planner-advanced-grid">
+                                <div class="form-group">
+                                    <label>回测预算</label>
+                                    <input type="number" id="ai-planner-max-backtests" min="8" max="500" value="80">
+                                </div>
+                                <div class="form-group">
+                                    <label>探索强度</label>
+                                    <input type="number" id="ai-planner-exploration-bias" min="0" max="1" step="0.05" value="0.45">
                                 </div>
                             </div>
                             <div class="form-group">
@@ -1750,11 +1825,14 @@
                             <div class="inline-actions">
                                 <button class="btn btn-primary btn-sm" id="ai-generate-btn">1) 生成研究</button>
                                 <button class="btn btn-sm" id="ai-oneclick-btn" title="生成+运行+自动注册/人工确认">⚡ 自动跑完整流程</button>
-                                <button class="btn btn-sm" id="ai-context-btn" title="调用 AI 生成研究假设与实验计划">🤖 生成研究思路</button>
+                                <button class="btn btn-sm" id="ai-context-btn" title="调用 OpenAI 生成研究假设、实验计划和开放式草案">🤖 生成研究思路</button>
                                 <button class="btn btn-sm" id="ai-refresh-btn">刷新</button>
                             </div>
+                            <div id="ai-planner-mode-hint" class="ai-planner-mode-hint">
+                                当前将按“自动判断”生成提案；若先生成 AI 研究思路，系统会优先进入模板 + AI 草案的混合研究。
+                            </div>
                             <div id="ai-flow-hint" class="ai-flow-hint">
-                                推荐顺序：1) 生成研究 → 2) 运行研究 → 3) 人工确认/注册。只有希望系统自动推进时再用“自动跑完整流程”。
+                                推荐顺序：1) 先定研究方式 → 2) 生成研究或 AI 草案 → 3) 运行研究 → 4) 人工确认/注册。只有希望系统自动推进时再用“自动跑完整流程”。
                             </div>
                             <!-- 实时市场上下文摘要 -->
                             <div id="ai-market-context-hint" style="margin-top:5px;font-size:11px;color:#7a8fa6;min-height:14px;"></div>

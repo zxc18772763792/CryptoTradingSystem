@@ -12,12 +12,15 @@ def test_ai_research_template_loads_phase5_modules():
     template = _read("web/templates/index.html")
 
     assert 'id="ai-flow-console"' in template
+    assert 'id="ai-chain-summary-grid"' in template
     assert 'id="ai-flow-stage-grid"' in template
-    assert 'id="ai-search-overview-card"' in template
+    assert 'id="ai-planner-research-mode"' in template
+    assert 'id="ai-planner-max-drafts"' in template
+    assert 'id="ai-planner-max-backtests"' in template
+    assert 'id="ai-candidate-cards"' in template
     assert "/static/js/ai_research.js" in template
     assert "/static/js/ai_research_diagnostics.js" in template
     assert "/static/js/ai_research_runtime.js" in template
-    assert "/static/js/ai_research_candidates.js" in template
     assert "/static/js/ai_research_agent.js" in template
     assert "/static/js/ai_research_patch.js" not in template
 
@@ -33,12 +36,16 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
 
     assert "modules.diagnostics" in diagnostics_js
     assert "ai-flow-stage-grid" in runtime_js
+    assert "renderChainSummary" in runtime_js
     assert "modules.candidates" in candidates_js
     assert "window.agentStart = agentStart" in agent_js
+    assert "renderAgentChainSummary" in agent_js
     assert "function selectProposal(" in ai_js
+    assert "buildPlannerConstraints" in ai_js
     assert "provider_fallback" in ai_js
     assert 'option value="codex">OpenAI' in template
     assert "先选研究任务，再点击候选策略卡片" in template
     assert ".ai-flow-console" in style_css
+    assert ".ai-chain-summary-grid" in style_css
     assert ".ai-flow-stage-grid" in style_css
-    assert ".ai-search-overview-card" in style_css
+    assert ".ai-candidate-cards" in style_css

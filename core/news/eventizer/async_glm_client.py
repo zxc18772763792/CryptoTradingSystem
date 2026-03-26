@@ -20,6 +20,7 @@ from core.utils.openai_responses import (
     build_responses_payload,
     coerce_responses_to_chat_completions,
     extract_response_text,
+    read_aiohttp_responses_json,
     responses_endpoint,
 )
 
@@ -373,7 +374,10 @@ class AsyncGLMClient:
                             return {}, "timeout"
                         return {}, "other"
 
-                    data = await response.json()
+                    if self._provider == "openai" and url == responses_endpoint(self._base_url):
+                        data = await read_aiohttp_responses_json(response)
+                    else:
+                        data = await response.json()
                     self._requests_success += 1
                     rate_limiter.reset_backoff()
                     return data, "none"
@@ -416,6 +420,7 @@ class AsyncGLMClient:
                 messages=messages,
                 max_output_tokens=max_tokens,
                 temperature=temperature,
+                stream=False,
             )
             request_timeout = self._timeout if timeout is None else aiohttp.ClientTimeout(total=timeout)
             response, error_type = await self._request(

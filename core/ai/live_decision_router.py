@@ -18,6 +18,7 @@ from core.utils.openai_responses import (
     build_openai_headers,
     build_responses_payload,
     extract_response_text,
+    read_aiohttp_responses_json,
     responses_endpoint,
 )
 
@@ -343,13 +344,14 @@ class LiveAIDecisionRouter:
                 max_output_tokens=int(max_tokens),
                 temperature=float(temperature),
                 text_format="json_object",
+                stream=False,
             )
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(url, headers=headers, json=payload) as resp:
                     if resp.status >= 400:
                         body = (await resp.text())[:300]
                         raise RuntimeError(f"{provider}_http_{resp.status}:{body}")
-                    data = await resp.json()
+                    data = await read_aiohttp_responses_json(resp)
             text = extract_response_text(data)
             if not text:
                 raise RuntimeError(f"{provider}_empty_content")

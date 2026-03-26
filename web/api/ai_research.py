@@ -126,7 +126,7 @@ class AIHumanApprovalRequest(BaseModel):
 class AIResearchContextRequest(BaseModel):
     market_summary: Dict[str, Any] = Field(default_factory=dict)
     goals: str = ""
-    timeout: int = Field(default=30, ge=5, le=90)
+    timeout: int = Field(default=180, ge=5, le=1800)
 
 
 class AIRetireRequest(BaseModel):

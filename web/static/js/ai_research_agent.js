@@ -33,6 +33,62 @@
     return String(provider || '-');
   }
 
+  function decisionModeLabel(mode) {
+    const value = String(mode || '').trim().toLowerCase();
+    if (value === 'shadow') return '只提示';
+    if (value === 'enforce') return '可拦截';
+    if (value === 'execute') return '直接执行';
+    return String(mode || '--');
+  }
+
+  function decisionActionText(action) {
+    return {
+      buy: '买入',
+      sell: '卖出',
+      close_long: '平多',
+      close_short: '平空',
+      hold: '观望',
+    }[String(action || '').trim().toLowerCase()] || String(action || '--');
+  }
+
+  function setChainSummaryText(id, value) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = String(value || '--');
+  }
+
+  function setChainSummaryTag(id, value, tone = '') {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = String(value || '--');
+    el.className = `ai-chain-summary-tag${tone ? ` is-${tone}` : ''}`;
+  }
+
+  function renderAgentChainSummary(status = {}, cfg = {}) {
+    const running = Boolean(status.running);
+    const lastDecision = status.last_decision || {};
+    const lastExecution = status.last_execution || {};
+    const intervalSec = Number(cfg.interval_sec || 0);
+    const tickCount = Number(status.tick_count || 0);
+    const confidence = Number(lastDecision.confidence || 0);
+    const latestDecisionText = lastDecision.action
+      ? `${decisionActionText(lastDecision.action)} / ${(confidence * 100).toFixed(0)}%`
+      : '暂无决策';
+    const latestActionText = lastExecution.submitted
+      ? `已提交 / ${decisionActionText(lastDecision.action || '')}`
+      : compactText(lastExecution.reason || '未提交', 42);
+    const modeText = `${decisionModeLabel(cfg.mode || 'execute')} / ${cfg.allow_live ? '允许实盘' : '仅纸盘'}`;
+    const statusText = running
+      ? `运行中 · ${tickCount} 轮${intervalSec > 0 ? ` / ${intervalSec}s` : ''}`
+      : '未启动';
+
+    setChainSummaryTag('ai-chain-trading-tag', running ? '运行中' : '未启动', running ? 'active' : 'warn');
+    setChainSummaryText('ai-chain-trading-mode', modeText);
+    setChainSummaryText('ai-chain-trading-status', statusText);
+    setChainSummaryText('ai-chain-trading-decision', latestDecisionText);
+    setChainSummaryText('ai-chain-trading-last-action', latestActionText);
+  }
+
   function compactText(value, maxLen = 120) {
     if (value == null) return '';
     let text = '';
@@ -103,6 +159,7 @@
     const stopBtn = document.getElementById('ai-agent-stop-btn');
     if (startBtn) startBtn.disabled = running;
     if (stopBtn) stopBtn.disabled = !running;
+    renderAgentChainSummary(status, cfg);
   }
 
   async function loadAgentJournal() {
