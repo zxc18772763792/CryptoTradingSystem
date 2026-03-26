@@ -44,6 +44,16 @@ class _FakeSession:
         return _FakeResponse(self._payload, status=self._status)
 
 
+class _SyncResponse:
+    def __init__(self, payload, status_code: int = 200):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = str(payload)
+
+    def json(self):
+        return self._payload
+
+
 def test_live_decision_router_codex_uses_responses_api(monkeypatch, tmp_path):
     import core.ai.live_decision_router as module
 
@@ -172,3 +182,90 @@ def test_async_glm_client_openai_branch_normalizes_responses(monkeypatch):
     assert error_type == "none"
     assert response["choices"][0]["message"]["content"] == '{"summary":"测试","sentiment":"positive"}'
     assert request_mock.await_args.args[1] == "https://example.test/v1/responses"
+
+
+def test_news_llm_defaults_use_openai_codex_mini(monkeypatch):
+    import core.news.eventizer.async_glm_client as async_module
+    import core.news.eventizer.llm_glm5 as sync_module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    assert sync_module._llm_provider({}) == "openai"
+    assert async_module._llm_provider({}) == "openai"
+    assert sync_module._llm_model({}) == "gpt-5.1-codex-mini"
+    assert async_module._llm_model({}) == "gpt-5.1-codex-mini"
+
+
+def test_news_sync_summary_uses_openai_mini_source(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    capture = {}
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        capture["url"] = url
+        capture["headers"] = headers
+        capture["json"] = json
+        capture["timeout"] = timeout
+        return _SyncResponse(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": '{"summary":"ETF approval positive","sentiment":"positive"}'}],
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    result = module.summarize_title_glm5("BTC ETF approved", {"llm": {"provider": "openai"}}, max_length=60)
+
+    assert result["summary"] == "ETF approval positive"
+    assert result["sentiment"] == "positive"
+    assert result["source"] == "openai_responses"
+    assert capture["url"] == "https://example.test/v1/responses"
+    assert capture["json"]["model"] == "gpt-5.1-codex-mini"
+
+
+def test_async_glm_client_summarize_batch_marks_openai_source(monkeypatch):
+    import core.news.eventizer.async_glm_client as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    client = module.AsyncGLMClient({"llm": {"provider": "openai"}})
+    request_mock = AsyncMock(
+        return_value=(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"items":[{"idx":0,"summary":"headline summary","sentiment":"neutral"}]}',
+                            }
+                        ],
+                    }
+                ]
+            },
+            "none",
+        )
+    )
+    monkeypatch.setattr(client, "_request", request_mock)
+
+    result = asyncio.run(client.summarize_batch(["BTC trades flat"], max_length=60))
+
+    assert result[0]["summary"] == "headline summary"
+    assert result[0]["sentiment"] == "neutral"
+    assert result[0]["source"] == "openai_responses"

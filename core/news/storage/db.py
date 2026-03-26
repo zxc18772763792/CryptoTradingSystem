@@ -171,9 +171,9 @@ def _is_llm_summary_source(source: Any) -> bool:
     text = str(source or "").strip().lower()
     if not text:
         return False
-    if text in {"glm", "glm5", "llm", "llm_cache", "glm_cache", "glm5_cache"}:
+    if text in {"glm", "glm5", "llm", "llm_cache", "glm_cache", "glm5_cache", "openai", "openai_responses", "codex", "responses"}:
         return True
-    return ("glm" in text) or text.startswith("llm")
+    return ("glm" in text) or text.startswith("llm") or text.startswith("openai") or text.startswith("codex") or text.startswith("responses")
 
 
 def _importance_score(source: str, title: str, content: str, payload: Dict[str, Any]) -> int:

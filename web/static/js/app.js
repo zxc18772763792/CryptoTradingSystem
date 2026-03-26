@@ -446,7 +446,7 @@ const byQuery=String(qs.get('tab')||'').trim();
 const byHash=String((window.location.hash||'').replace(/^#/,'')).trim();
 if(byQuery)activateTab(byQuery);else if(byHash)activateTab(byHash);
 window.addEventListener('hashchange',()=>{const t=String((window.location.hash||'').replace(/^#/,'')).trim();if(t)activateTab(t);});
-window.addEventListener('resize',()=>schedulePlotlyResize(document.querySelector('.tab-content.active')||document));
+window.addEventListener('resize',()=>{schedulePlotlyResize(document.querySelector('.tab-content.active')||document);if(equityChart?.type==='fallback')renderEquityFallback(equityChart.rows||[]);});
 }
 function initClock(){const f=()=>{const t=document.getElementById('current-time');if(t)t.textContent=new Date().toLocaleString(TIME_LOCALE,{hour12:false});};f();setInterval(f,1000);}
 async function loadSystemStatus(){
@@ -492,7 +492,24 @@ state._systemStatusInFlight=false;
 function initEquity(){
 const c=document.getElementById('equity-chart');
 if(!c)return;
-if(typeof Chart==='undefined'){const p=c.parentElement;if(p)p.innerHTML='<div class="list-item">图表库未加载，净值图暂不可用</div>';return;}
+if(typeof Chart==='undefined'){
+  c.style.display='none';
+  const p=c.parentElement;
+  if(!p)return;
+  let host=p.querySelector('.equity-chart-fallback');
+  if(!host){
+    host=document.createElement('div');
+    host.className='equity-chart-fallback';
+    host.style.height='260px';
+    host.style.width='100%';
+    p.appendChild(host);
+  }
+  equityChart={type:'fallback',host,rows:[]};
+  renderEquityFallback([]);
+  return;
+}
+c.style.display='';
+try{c.parentElement?.querySelector('.equity-chart-fallback')?.remove();}catch{}
 equityChart=new Chart(c.getContext('2d'),{
 type:'line',
 data:{labels:[],datasets:[{data:[],borderColor:'#3fb950',backgroundColor:'rgba(63,185,80,.15)',fill:true,tension:.2,pointRadius:0}]},
@@ -504,17 +521,48 @@ scales:{x:{ticks:{autoSkip:true,maxTicksLimit:8}},y:{ticks:{callback:v=>`$${Numb
 }
 });
 }
-function drawEquity(hist){
-if(!equityChart)return;
-if(!hist?.length){
-equityChart.data.labels=[];
-equityChart.data.datasets[0].data=[];
-equityChart.update('none');
-return;
-}
+function buildEquityRows(hist){
+if(!hist?.length)return [];
 const max=220;
 const sampled=hist.length>max?hist.filter((_,i)=>i%Math.ceil(hist.length/max)===0):hist;
-const rows=sampled.map(x=>({timestamp:x.timestamp,total:Number(x.total_usd||0)})).filter(x=>Number.isFinite(x.total)&&x.total>0&&toDate(x.timestamp));
+return sampled.map(x=>({timestamp:x.timestamp,total:Number(x.total_usd||0)})).filter(x=>Number.isFinite(x.total)&&x.total>0&&toDate(x.timestamp));
+}
+function renderEquityFallback(rows){
+const host=equityChart?.host||document.querySelector('.equity-chart-fallback');
+if(!host)return;
+if(!rows?.length){host.innerHTML='<div class="list-item">暂无净值数据</div>';return;}
+const width=720,height=260,left=18,right=18,top=18,bottom=34;
+const innerWidth=Math.max(1,width-left-right);
+const innerHeight=Math.max(1,height-top-bottom);
+const totals=rows.map(x=>x.total);
+const minVal=Math.min(...totals);
+const maxVal=Math.max(...totals);
+const spanBase=maxVal-minVal;
+const span=spanBase>0?spanBase:Math.max(Math.abs(maxVal)*0.08,1);
+const yMin=minVal-(spanBase>0?0:span/2);
+const yMax=maxVal+(spanBase>0?0:span/2);
+const mapX=idx=>left+(rows.length===1?innerWidth/2:(idx/(rows.length-1))*innerWidth);
+const mapY=value=>top+((yMax-value)/(yMax-yMin))*innerHeight;
+const points=rows.map((row,idx)=>`${mapX(idx).toFixed(2)},${mapY(row.total).toFixed(2)}`).join(' ');
+const areaPoints=`${left},${height-bottom} ${points} ${width-right},${height-bottom}`;
+const first=rows[0];
+const last=rows[rows.length-1];
+const delta=last.total-first.total;
+const deltaPct=first.total>0?(delta/first.total)*100:0;
+const stroke=delta>=0?'#3fb950':'#f85149';
+const fill=delta>=0?'rgba(63,185,80,.18)':'rgba(248,81,73,.18)';
+const latestX=mapX(rows.length-1).toFixed(2);
+const latestY=mapY(last.total).toFixed(2);
+host.innerHTML=`<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" style="display:block;width:100%;height:260px;border-radius:10px;background:linear-gradient(180deg, rgba(22,34,50,.96), rgba(17,25,37,.92));"><defs><linearGradient id="equity-area-gradient" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stop-color="${fill}" /><stop offset="100%" stop-color="rgba(99,110,123,0.02)" /></linearGradient></defs><line x1="${left}" y1="${top}" x2="${left}" y2="${height-bottom}" stroke="rgba(148,163,184,.18)" stroke-width="1" /><line x1="${left}" y1="${height-bottom}" x2="${width-right}" y2="${height-bottom}" stroke="rgba(148,163,184,.18)" stroke-width="1" /><line x1="${left}" y1="${top}" x2="${width-right}" y2="${top}" stroke="rgba(148,163,184,.08)" stroke-dasharray="4 4" stroke-width="1" /><line x1="${left}" y1="${height-bottom}" x2="${width-right}" y2="${height-bottom}" stroke="rgba(148,163,184,.08)" stroke-dasharray="4 4" stroke-width="1" /><polygon points="${areaPoints}" fill="url(#equity-area-gradient)" /><polyline points="${points}" fill="none" stroke="${stroke}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /><circle cx="${latestX}" cy="${latestY}" r="4.5" fill="${stroke}" /><text x="${left}" y="14" fill="#8ea3ba" font-size="12">${esc(fmtAxisDateTime(first.timestamp))}</text><text x="${width-right}" y="14" text-anchor="end" fill="#8ea3ba" font-size="12">${esc(fmtAxisDateTime(last.timestamp))}</text><text x="${left}" y="${height-10}" fill="#e8eef9" font-size="14">最新净值 $${last.total.toFixed(2)}</text><text x="${width-right}" y="${height-10}" text-anchor="end" fill="${stroke}" font-size="13">${delta>=0?'+':''}${delta.toFixed(2)} (${deltaPct.toFixed(2)}%)</text><text x="${width-right}" y="${top+14}" text-anchor="end" fill="#8ea3ba" font-size="12">高点 $${maxVal.toFixed(2)}</text><text x="${width-right}" y="${height-bottom-6}" text-anchor="end" fill="#8ea3ba" font-size="12">低点 $${minVal.toFixed(2)}</text></svg>`;
+}
+function drawEquity(hist){
+if(!equityChart)return;
+const rows=buildEquityRows(hist);
+if(equityChart.type==='fallback'){
+equityChart.rows=rows;
+renderEquityFallback(rows);
+return;
+}
 if(!rows.length){
 equityChart.data.labels=[];
 equityChart.data.datasets[0].data=[];

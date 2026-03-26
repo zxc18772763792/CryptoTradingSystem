@@ -1,4 +1,4 @@
-"""Async GLM-5 client for event extraction and summarization."""
+"""Async LLM client for event extraction and summarization."""
 from __future__ import annotations
 
 import asyncio
@@ -24,7 +24,7 @@ from core.utils.openai_responses import (
 )
 
 DEFAULT_OPENAI_BASE_URL = "https://vpsairobot.com/v1"
-DEFAULT_OPENAI_MODEL = "gpt-5.4"
+DEFAULT_OPENAI_MODEL = "gpt-5.1-codex-mini"
 DEFAULT_ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 DEFAULT_ZHIPU_MODEL = "GLM-4.5-Air"
 
@@ -118,6 +118,10 @@ def _llm_model(cfg: Dict[str, Any]) -> str:
     if _llm_provider(cfg) == "openai":
         return _openai_model(cfg)
     return _zhipu_model(cfg)
+
+
+def _llm_summary_source(cfg: Dict[str, Any]) -> str:
+    return "openai_responses" if _llm_provider(cfg) == "openai" else "glm5"
 
 
 def _thinking_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -281,6 +285,7 @@ class AsyncGLMClient:
         self._api_key = _llm_api_key(self._cfg)
         self._base_url = _llm_base_url(self._cfg)
         self._model = _llm_model(self._cfg)
+        self._summary_source = _llm_summary_source(self._cfg)
 
         llm_cfg = self._cfg.get("llm") or {}
         self._timeout = aiohttp.ClientTimeout(
@@ -644,7 +649,7 @@ class AsyncGLMClient:
                 "title": str(evidence.get("title") or ""),
                 "url": str(evidence.get("url") or ""),
                 "source": str(evidence.get("source") or ""),
-                "matched_reason": str(evidence.get("matched_reason") or "glm5_event"),
+                "matched_reason": str(evidence.get("matched_reason") or "llm_event"),
             }
 
             validated = EventSchema.model_validate(item).model_dump(mode="json")
@@ -737,7 +742,8 @@ class AsyncGLMClient:
 
         if not self._api_key:
             fallback_events = extract_events_rules(news_batch, effective_cfg)
-            logger.warning("ZHIPU_API_KEY is missing; fallback to rules")
+            missing_key = "OPENAI_API_KEY" if self._provider == "openai" else "ZHIPU_API_KEY"
+            logger.warning(f"{missing_key} is missing; fallback to rules")
             return fallback_events, False, "none"
 
         async def _process_batch(batch: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], str]:
@@ -870,16 +876,18 @@ class AsyncGLMClient:
         ]
 
         try:
-            response = await self.chat_completions(
+            response, error_type = await self.chat_completions(
                 messages,
                 temperature=0.2,
                 top_p=0.8,
                 timeout=self._summarize_timeout.total,
             )
+            if error_type != "none" or not isinstance(response, dict):
+                raise RuntimeError(f"summarize batch request failed: {error_type}")
 
             choices = response.get("choices") if isinstance(response, dict) else None
             if not choices:
-                raise ValueError("GLM5 summarize batch missing choices")
+                raise ValueError("LLM summarize batch missing choices")
 
             message = choices[0].get("message") or {}
             content = _normalize_llm_content(message.get("content")).strip()
@@ -911,11 +919,11 @@ class AsyncGLMClient:
                     sentiment = "neutral"
                 if len(summary) > max_length + 10:
                     summary = summary[: max_length + 10]
-                out[idx] = {"summary": summary, "sentiment": sentiment, "source": "glm5"}
+                out[idx] = {"summary": summary, "sentiment": sentiment, "source": self._summary_source}
             return out
 
         except Exception as e:
-            logger.warning(f"GLM5 summarize batch error: {e}")
+            logger.warning(f"LLM summarize batch error: {e}")
             return [_summarize_fallback(t, max_length) for t in titles]
 
     async def summarize_stream(

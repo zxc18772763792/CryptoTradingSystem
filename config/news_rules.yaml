@@ -64,8 +64,9 @@
   newsapi_query: "(bitcoin OR ethereum OR binance OR crypto OR ETF OR SEC OR hack OR liquidation OR fed)"
 
 llm:
-  model: GLM-4.5-Air
-  base_url: https://open.bigmodel.cn/api/coding/paas/v4
+  provider: openai
+  model: gpt-5.1-codex-mini
+  base_url: https://vpsairobot.com/v1
   timeout_sec: 90
   batch_size: 3
   summarize_limit: 40

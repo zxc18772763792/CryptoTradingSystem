@@ -271,9 +271,9 @@ def _is_llm_summary_source(source: Any) -> bool:
     text = str(source or "").strip().lower()
     if not text:
         return False
-    if text in {"glm", "glm5", "llm", "llm_cache", "glm_cache", "glm5_cache"}:
+    if text in {"glm", "glm5", "llm", "llm_cache", "glm_cache", "glm5_cache", "openai", "openai_responses", "codex", "responses"}:
         return True
-    return ("glm" in text) or text.startswith("llm")
+    return ("glm" in text) or text.startswith("llm") or text.startswith("openai") or text.startswith("codex") or text.startswith("responses")
 
 
 def _is_fallback_summary_source(source: Any) -> bool:
@@ -694,7 +694,7 @@ def _apply_display_summaries(items: List[Dict[str, Any]]) -> List[Dict[str, Any]
         if item.get("summary_title"):
             item["summary_title"] = _display_title_core(item.get("summary_title"))
             item["summary_sentiment"] = str(item.get("summary_sentiment") or "neutral").strip().lower() or "neutral"
-            item["summary_source"] = str(item.get("summary_source") or "glm")
+            item["summary_source"] = str(item.get("summary_source") or "llm")
             continue
         fallback = _summarize_fallback(title or "", 60)
         item["summary_title"] = _display_title_core(title)

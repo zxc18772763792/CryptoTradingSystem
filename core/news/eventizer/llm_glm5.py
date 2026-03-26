@@ -22,7 +22,7 @@ from core.utils.openai_responses import (
 
 
 DEFAULT_OPENAI_BASE_URL = "https://vpsairobot.com/v1"
-DEFAULT_OPENAI_MODEL = "gpt-5.4"
+DEFAULT_OPENAI_MODEL = "gpt-5.1-codex-mini"
 DEFAULT_ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 DEFAULT_ZHIPU_MODEL = "GLM-4.5-Air"
 _SUMMARY_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -116,6 +116,10 @@ def _llm_model(cfg: Dict[str, Any]) -> str:
     if _llm_provider(cfg) == "openai":
         return _openai_model(cfg)
     return _zhipu_model(cfg)
+
+
+def _llm_summary_source(cfg: Dict[str, Any]) -> str:
+    return "openai_responses" if _llm_provider(cfg) == "openai" else "glm5"
 
 
 def _thinking_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -343,7 +347,7 @@ def _validate_events(payload: Any, mapper: SymbolMapper) -> List[Dict[str, Any]]
             "title": str(evidence.get("title") or ""),
             "url": str(evidence.get("url") or ""),
             "source": str(evidence.get("source") or ""),
-            "matched_reason": str(evidence.get("matched_reason") or "glm5_event"),
+            "matched_reason": str(evidence.get("matched_reason") or "llm_event"),
         }
 
         validated = EventSchema.model_validate(item).model_dump(mode="json")
@@ -456,14 +460,14 @@ def _call_glm5_once(
     headers = build_openai_headers(api_key)
     response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
     if response.status_code >= 400:
-        raise RuntimeError(f"GLM5 HTTP {response.status_code}: {response.text[:300]}")
+        raise RuntimeError(f"LLM HTTP {response.status_code}: {response.text[:300]}")
 
     data = response.json()
     if provider == "openai":
         data = coerce_responses_to_chat_completions(data)
     choices = data.get("choices") if isinstance(data, dict) else None
     if not choices:
-        raise ValueError("GLM5 response missing choices")
+        raise ValueError("LLM response missing choices")
 
     message = choices[0].get("message") or {}
     content = _normalize_llm_content(message.get("content"))
@@ -537,7 +541,7 @@ def extract_events_glm5(news_items: List[Dict[str, Any]], cfg: Dict[str, Any]) -
 
 
 def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) -> Dict[str, Any]:
-    """Summarize a news title to a single line using GLM5.
+    """Summarize a news title to a single line using the configured LLM.
 
     Args:
         title: The original news title to summarize
@@ -567,6 +571,7 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
     llm_cfg = cfg.get("llm") or {}
     base_url = _llm_base_url(cfg)
     model = _llm_model(cfg)
+    summary_source = _llm_summary_source(cfg)
     timeout_sec = int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 12)
 
     system_prompt = (
@@ -610,7 +615,7 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
         if response.status_code >= 400:
-            logger.warning(f"GLM5 summarize failed: HTTP {response.status_code}")
+            logger.warning(f"LLM summarize failed: HTTP {response.status_code}")
             result = _summarize_fallback(title, max_length)
             _summary_cache_set(title, max_length, result)
             return result
@@ -634,7 +639,7 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
             sentiment = str(parsed.get("sentiment") or "neutral").lower()
             if sentiment not in ("positive", "negative", "neutral"):
                 sentiment = "neutral"
-            result = {"summary": summary, "sentiment": sentiment, "source": "glm5"}
+            result = {"summary": summary, "sentiment": sentiment, "source": summary_source}
             _summary_cache_set(title, max_length, result)
             return result
 
@@ -643,7 +648,7 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
         return result
 
     except Exception as e:
-        logger.warning(f"GLM5 summarize error: {e}")
+        logger.warning(f"LLM summarize error: {e}")
         result = _summarize_fallback(title, max_length)
         _summary_cache_set(title, max_length, result)
         return result
@@ -673,6 +678,7 @@ def _call_glm5_batch_summarize(
     llm_cfg = cfg.get("llm") or {}
     base_url = _llm_base_url(cfg)
     model = _llm_model(cfg)
+    summary_source = _llm_summary_source(cfg)
     timeout_sec = int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 12)
 
     compact = [{"idx": i, "title": str(t or "")[:300]} for i, t in enumerate(titles)]
@@ -722,13 +728,13 @@ def _call_glm5_batch_summarize(
         response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
         if response.status_code >= 400:
             body_preview = (response.text or "")[:200].replace("\n", " ")
-            raise RuntimeError(f"GLM5 summarize batch HTTP {response.status_code}: {body_preview}")
+            raise RuntimeError(f"LLM summarize batch HTTP {response.status_code}: {body_preview}")
         data = response.json()
         if provider == "openai":
             data = coerce_responses_to_chat_completions(data)
         choices = data.get("choices") if isinstance(data, dict) else None
         if not choices:
-            raise ValueError("GLM5 summarize batch missing choices")
+            raise ValueError("LLM summarize batch missing choices")
         message = choices[0].get("message") or {}
         content = _normalize_llm_content(message.get("content")).strip()
         parsed = _extract_json_block(content)
@@ -757,10 +763,10 @@ def _call_glm5_batch_summarize(
                 sentiment = "neutral"
             if len(summary) > max_length + 10:
                 summary = summary[: max_length + 10]
-            out[idx] = {"summary": summary, "sentiment": sentiment, "source": "glm5"}
+            out[idx] = {"summary": summary, "sentiment": sentiment, "source": summary_source}
         return out
     except Exception as e:
-        logger.warning(f"GLM5 summarize batch error: {e}")
+        logger.warning(f"LLM summarize batch error: {e}")
         return [_summarize_fallback(t, max_length) for t in titles]
 
 
