@@ -364,9 +364,18 @@ async def _news_llm_worker(app: FastAPI, stop_event: asyncio.Event) -> None:
                 cfg = news_api.load_news_cfg()
                 app.state.news_cfg = cfg
             result = await news_api.process_llm_batch(cfg, limit=_NEWS_LLM_BATCH)
+            failed_requeue = await news_api.auto_requeue_failed_llm_tasks(cfg)
+            retry_result = {"claimed": 0, "events_count": 0, "llm_used": False, "errors": []}
+            if int(failed_requeue.get("requeued_count") or 0) > 0:
+                retry_result = await news_api.process_llm_batch(
+                    cfg,
+                    limit=max(1, min(int(_NEWS_LLM_BATCH or 4), int(failed_requeue.get("requeued_count") or 0))),
+                )
             summary_repair = await news_api.repair_recent_news_summaries(cfg)
             app.state.news_last_llm_batch = {
                 **_safe_json(result),
+                "failed_requeue": _safe_json(failed_requeue),
+                "retry_result": _safe_json(retry_result),
                 "summary_repair": _safe_json(summary_repair),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "limit": _NEWS_LLM_BATCH,

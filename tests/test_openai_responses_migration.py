@@ -429,6 +429,145 @@ def test_build_latest_feed_summarize_persists_event_translation(monkeypatch):
     ]
 
 
+def test_news_auto_requeue_skips_when_queue_busy(monkeypatch):
+    import web.api.news as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+    monkeypatch.setattr(module, "_FAILED_REQUEUE_LAST_AT", None)
+
+    queue_mock = AsyncMock(
+        return_value={
+            "pending_total": 1,
+            "counts": {"pending": 1, "running": 0, "retry": 0, "failed": 3},
+        }
+    )
+    requeue_mock = AsyncMock(return_value={"requeued_count": 2})
+
+    monkeypatch.setattr(module.news_db, "get_llm_queue_stats", queue_mock)
+    monkeypatch.setattr(module.news_db, "auto_requeue_failed_llm_tasks", requeue_mock)
+
+    result = asyncio.run(module.auto_requeue_failed_llm_tasks({}, limit=2, cooldown_sec=0))
+
+    assert result["enabled"] is True
+    assert result["reason"] == "queue_busy"
+    assert result["requeued_count"] == 0
+    assert requeue_mock.await_count == 0
+
+
+def test_news_auto_requeue_calls_db_when_queue_idle(monkeypatch):
+    import web.api.news as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+    monkeypatch.setattr(module, "_FAILED_REQUEUE_LAST_AT", None)
+
+    queue_mock = AsyncMock(
+        return_value={
+            "pending_total": 0,
+            "counts": {"pending": 0, "running": 0, "retry": 0, "failed": 4},
+        }
+    )
+    requeue_mock = AsyncMock(
+        return_value={
+            "scanned_count": 8,
+            "candidate_count": 3,
+            "requeued_count": 2,
+            "raw_news_ids_sample": [101, 102],
+            "skipped_summary_repaired_count": 1,
+            "skipped_existing_event_count": 0,
+        }
+    )
+
+    monkeypatch.setattr(module.news_db, "get_llm_queue_stats", queue_mock)
+    monkeypatch.setattr(module.news_db, "auto_requeue_failed_llm_tasks", requeue_mock)
+
+    result = asyncio.run(module.auto_requeue_failed_llm_tasks({}, limit=3, hours=48, cooldown_sec=0))
+
+    assert result["enabled"] is True
+    assert result["reason"] == "requeued"
+    assert result["requeued_count"] == 2
+    assert requeue_mock.await_count == 1
+    assert requeue_mock.await_args.kwargs["limit"] == 3
+
+    since = requeue_mock.await_args.kwargs["since"]
+    delta_hours = (module._now_utc() - since).total_seconds() / 3600
+    assert 47 <= delta_hours <= 49
+    assert module._FAILED_REQUEUE_LAST_AT is not None
+
+
+def test_build_latest_feed_does_not_cross_match_query_only_news_urls(monkeypatch):
+    import web.api.news as module
+
+    raw_row = {
+        "id": 36745,
+        "source": "jin10",
+        "title": "【富国基金宣布降费】金十数据3月26日讯，富国基金将下调港股通互联网ETF费率。",
+        "url": "https://www.jin10.com/flash_newest.jsp?id=20260326111556691800",
+        "content": "港股通互联网ETF富国管理费率和托管费率同步下调。",
+        "published_at": "2026-03-26T03:15:56Z",
+        "payload": {
+            "provider": "jin10",
+            "importance_score": 64,
+            "summary_title": "富国基金自3月27日起大幅降港股通互联网ETF费率",
+            "summary_sentiment": "positive",
+            "summary_source": "openai_responses",
+        },
+    }
+    unrelated_event = {
+        "id": 2238,
+        "event_id": "n2-macro-1",
+        "ts": "2026-03-26T02:25:05Z",
+        "symbol": "BTCUSDT",
+        "event_type": "macro",
+        "sentiment": -1,
+        "impact_score": 0.45,
+        "model_source": "llm",
+        "raw_news_id": 36660,
+        "evidence": {
+            "title": "【伊朗战争余波持续，韩国央行发出金融稳定风险警告】金十数据3月26日讯",
+            "url": "https://www.jin10.com/flash_newest.jsp?id=20260326102505351800",
+            "source": "jin10",
+        },
+        "payload": {
+            "provider": "jin10",
+            "summary_title": "伊朗战争余波下，韩国央行警告金融稳定风险",
+            "summary_sentiment": "negative",
+            "summary_source": "openai_responses",
+        },
+    }
+
+    async def fake_list_news_raw(*, since=None, limit=0):
+        return [raw_row]
+
+    async def fake_list_events(*, symbol=None, since=None, limit=0):
+        return [unrelated_event]
+
+    async def fake_list_llm_task_status(raw_ids):
+        return {36745: "done"}
+
+    monkeypatch.setattr(module.news_db, "list_news_raw", fake_list_news_raw)
+    monkeypatch.setattr(module.news_db, "list_events", fake_list_events)
+    monkeypatch.setattr(module.news_db, "list_llm_task_status", fake_list_llm_task_status)
+
+    result = asyncio.run(
+        module.build_latest_feed(
+            cfg={"symbols": {}, "llm": {"provider": "openai"}},
+            symbol=None,
+            hours=24,
+            limit=10,
+            summarize=False,
+        )
+    )
+
+    raw_item = next(item for item in result["items"] if int(item.get("raw_news_id") or 0) == 36745)
+
+    assert raw_item["has_event"] is False
+    assert raw_item["event_id"] == ""
+    assert raw_item["summary_title"] == "富国基金自3月27日起大幅降港股通互联网ETF费率"
+    assert raw_item["processing_status"] == "done_no_event"
+
+
 def test_clean_news_text_repairs_utf8_mojibake():
     from core.news.text_normalizer import clean_news_text
 

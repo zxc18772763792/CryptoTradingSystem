@@ -749,6 +749,92 @@ async def requeue_llm_tasks(statuses: Optional[List[str]] = None, limit: int = 2
     }
 
 
+async def auto_requeue_failed_llm_tasks(limit: int = 4, since: Optional[datetime] = None) -> Dict[str, Any]:
+    """Gently requeue failed tasks that still need extraction.
+
+    Selection rules:
+    - status must be ``failed``
+    - raw row must still exist
+    - skip rows that already have an LLM summary persisted
+    - skip rows that already produced at least one structured event
+    """
+    max_rows = max(1, min(int(limit or 4), 50))
+    since_ts = parse_any_datetime(since) if since else None
+    now = datetime.now(timezone.utc)
+    scan_limit = max(40, max_rows * 12)
+
+    async with news_session_scope() as session:
+        stmt = (
+            select(NewsLLMTask, NewsRaw)
+            .join(NewsRaw, NewsRaw.id == NewsLLMTask.raw_news_id)
+            .where(NewsLLMTask.status == "failed")
+            .order_by(NewsLLMTask.priority.desc(), NewsLLMTask.updated_at.desc(), NewsRaw.published_at.desc())
+            .limit(scan_limit)
+        )
+        rows = (await session.execute(stmt)).all()
+
+        scanned_count = 0
+        skipped_summary_count = 0
+        skipped_event_count = 0
+        candidate_rows: List[tuple[NewsLLMTask, NewsRaw]] = []
+        candidate_ids: List[int] = []
+        for task_row, raw_row in rows:
+            scanned_count += 1
+            if raw_row is None:
+                continue
+            if since_ts and parse_any_datetime(raw_row.published_at) < since_ts:
+                continue
+            payload = dict(raw_row.payload or {})
+            summary_source = _normalize_summary_source(payload.get("summary_source") or "")
+            if _is_llm_summary_source(summary_source):
+                skipped_summary_count += 1
+                continue
+            candidate_rows.append((task_row, raw_row))
+            candidate_ids.append(int(raw_row.id))
+
+        event_raw_ids: set[int] = set()
+        if candidate_ids:
+            event_rows = (
+                await session.execute(
+                    select(NewsEvent.raw_news_id).where(
+                        and_(
+                            NewsEvent.raw_news_id.is_not(None),
+                            NewsEvent.raw_news_id.in_(candidate_ids),
+                        )
+                    )
+                )
+            ).all()
+            event_raw_ids = {int(row[0]) for row in event_rows if row and row[0] is not None}
+
+        affected_ids: List[int] = []
+        for task_row, raw_row in candidate_rows:
+            raw_id = int(raw_row.id)
+            if raw_id in event_raw_ids:
+                skipped_event_count += 1
+                continue
+            task_row.status = "retry"
+            task_row.next_retry_at = now
+            task_row.started_at = None
+            task_row.finished_at = None
+            task_row.updated_at = now
+            task_row.attempt_count = 0
+            affected_ids.append(raw_id)
+            if len(affected_ids) >= max_rows:
+                break
+
+        await session.flush()
+
+    return {
+        "scanned_count": scanned_count,
+        "candidate_count": len(candidate_rows),
+        "requeued_count": len(affected_ids),
+        "raw_news_ids_sample": affected_ids[:20],
+        "skipped_summary_repaired_count": skipped_summary_count,
+        "skipped_existing_event_count": skipped_event_count,
+        "since": _utc_iso(since_ts),
+    }
+
+
 async def save_news_raw(news_items: List[Dict[str, Any]]) -> Dict[str, Any]:
     pulled_count = len(news_items)
     if pulled_count == 0:

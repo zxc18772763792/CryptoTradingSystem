@@ -9,6 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from loguru import logger
@@ -58,8 +59,22 @@ _AUTO_PULL_LAST_AT: Optional[datetime] = None
 _NEWS_PIPELINE_LOCK = asyncio.Lock()
 _MANUAL_PULL_SEQ = 0
 _MANUAL_LLM_SEQ = 0
+_FAILED_REQUEUE_LOCK = asyncio.Lock()
+_FAILED_REQUEUE_LAST_AT: Optional[datetime] = None
 _NEWS_RESPONSE_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {"latest": {}, "summary": {}, "brief": {}, "health": {}}
 _NEWS_HEALTH_REFRESH_TASK: Optional[asyncio.Task] = None
+_TRACKING_QUERY_KEYS = {
+    "feature",
+    "fbclid",
+    "gclid",
+    "igshid",
+    "mc_cid",
+    "mc_eid",
+    "oc",
+    "ref",
+    "ref_src",
+    "source",
+}
 
 
 class PullNowRequest(BaseModel):
@@ -353,9 +368,31 @@ def _canonical_url(url: Any) -> str:
     text = str(url or "").strip()
     if not text:
         return ""
-    # Drop query/hash to improve raw-event matching across aggregators.
-    text = text.split("#", 1)[0].split("?", 1)[0].strip()
-    return text.rstrip("/")
+    try:
+        parsed = urlsplit(text)
+    except Exception:
+        return text.split("#", 1)[0].strip().rstrip("/")
+
+    query_pairs: List[tuple[str, str]] = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=False):
+        key_norm = str(key or "").strip().lower()
+        if not key_norm:
+            continue
+        if key_norm.startswith("utm_") or key_norm in _TRACKING_QUERY_KEYS:
+            continue
+        query_pairs.append((str(key), str(value)))
+
+    path = parsed.path.rstrip("/") or parsed.path or "/"
+    query = urlencode(query_pairs, doseq=True)
+    return urlunsplit(
+        (
+            str(parsed.scheme or "").lower(),
+            str(parsed.netloc or "").lower(),
+            path,
+            query,
+            "",
+        )
+    )
 
 
 def _clean_display_text(value: Any) -> str:
@@ -1041,6 +1078,78 @@ async def repair_recent_news_summaries(
     }
 
 
+async def auto_requeue_failed_llm_tasks(
+    cfg: Dict[str, Any],
+    *,
+    limit: Optional[int] = None,
+    hours: Optional[int] = None,
+    cooldown_sec: Optional[int] = None,
+) -> Dict[str, Any]:
+    del cfg  # reserved for future policy hooks
+    global _FAILED_REQUEUE_LAST_AT
+
+    max_rows = max(0, min(int(limit if limit is not None else _env_int("NEWS_FAILED_REQUEUE_LIMIT", 2)), 20))
+    if max_rows <= 0:
+        return {"enabled": False, "reason": "disabled", "requeued_count": 0}
+    if not _news_llm_enabled():
+        return {"enabled": False, "reason": "llm_disabled", "requeued_count": 0}
+
+    cooldown = max(0, min(int(cooldown_sec if cooldown_sec is not None else _env_int("NEWS_FAILED_REQUEUE_COOLDOWN_SEC", 90)), 3600))
+    since_hours = max(24, min(int(hours if hours is not None else _env_int("NEWS_FAILED_REQUEUE_HOURS", 24 * 30)), 24 * 365))
+    queue = await news_db.get_llm_queue_stats()
+    counts = dict(queue.get("counts") or {})
+    if int(queue.get("pending_total") or 0) > 0 or int(counts.get("running") or 0) > 0 or int(counts.get("retry") or 0) > 0:
+        return {
+            "enabled": True,
+            "reason": "queue_busy",
+            "requeued_count": 0,
+            "queue_counts": counts,
+        }
+    if int(counts.get("failed") or 0) <= 0:
+        return {
+            "enabled": True,
+            "reason": "no_failed",
+            "requeued_count": 0,
+            "queue_counts": counts,
+        }
+
+    now = _now_utc()
+    if cooldown > 0 and _FAILED_REQUEUE_LAST_AT and (now - _FAILED_REQUEUE_LAST_AT).total_seconds() < cooldown:
+        return {
+            "enabled": True,
+            "reason": "cooldown",
+            "requeued_count": 0,
+            "cooldown_remaining_sec": max(0, cooldown - int((now - _FAILED_REQUEUE_LAST_AT).total_seconds())),
+            "queue_counts": counts,
+        }
+
+    async with _FAILED_REQUEUE_LOCK:
+        now = _now_utc()
+        if cooldown > 0 and _FAILED_REQUEUE_LAST_AT and (now - _FAILED_REQUEUE_LAST_AT).total_seconds() < cooldown:
+            return {
+                "enabled": True,
+                "reason": "cooldown",
+                "requeued_count": 0,
+                "cooldown_remaining_sec": max(0, cooldown - int((now - _FAILED_REQUEUE_LAST_AT).total_seconds())),
+                "queue_counts": counts,
+            }
+        result = await news_db.auto_requeue_failed_llm_tasks(
+            limit=max_rows,
+            since=now - timedelta(hours=since_hours),
+        )
+        requeued = int(result.get("requeued_count") or 0)
+        if requeued > 0:
+            _FAILED_REQUEUE_LAST_AT = now
+        return {
+            "enabled": True,
+            "reason": "requeued" if requeued > 0 else "no_candidates",
+            "cooldown_sec": cooldown,
+            "hours": since_hours,
+            "queue_counts": counts,
+            **result,
+        }
+
+
 async def _auto_pull_if_stale(cfg: Dict[str, Any], latest_items: List[Dict[str, Any]], hours: int) -> bool:
     global _AUTO_PULL_RUNNING, _AUTO_PULL_LAST_AT
     stale_min = max(2, min(_cfg_int(cfg, "news_auto_pull_stale_min", 8), 180))
@@ -1187,9 +1296,18 @@ async def _run_manual_llm_job(request: Request, job_id: str, cfg: Dict[str, Any]
     store["jobs"][job_id] = job
     try:
         result = await process_llm_batch(cfg, limit=max(1, min(int(llm_limit or 8), 50)))
+        failed_requeue = await auto_requeue_failed_llm_tasks(cfg)
+        retry_result = {"claimed": 0, "events_count": 0, "llm_used": False, "errors": []}
+        if int(failed_requeue.get("requeued_count") or 0) > 0:
+            retry_result = await process_llm_batch(
+                cfg,
+                limit=max(1, min(int(llm_limit or 8), int(failed_requeue.get("requeued_count") or 0))),
+            )
         summary_repair = await repair_recent_news_summaries(cfg)
         payload = {
             **result,
+            "failed_requeue": failed_requeue,
+            "retry_result": retry_result,
             "summary_repair": summary_repair,
             "timestamp": _now_utc().isoformat(),
             "source": "manual_run_once",
@@ -2066,10 +2184,19 @@ async def worker_run_once(
             "llm_queue": await news_db.get_llm_queue_stats(),
         }
     result = await process_llm_batch(cfg, limit=llm_limit)
+    failed_requeue = await auto_requeue_failed_llm_tasks(cfg)
+    retry_result = {"claimed": 0, "events_count": 0, "llm_used": False, "errors": []}
+    if int(failed_requeue.get("requeued_count") or 0) > 0:
+        retry_result = await process_llm_batch(
+            cfg,
+            limit=max(1, min(int(llm_limit or 8), int(failed_requeue.get("requeued_count") or 0))),
+        )
     summary_repair = await repair_recent_news_summaries(cfg)
     _invalidate_news_caches()
     request.app.state.news_last_llm_batch = {
         **result,
+        "failed_requeue": failed_requeue,
+        "retry_result": retry_result,
         "summary_repair": summary_repair,
         "timestamp": _now_utc().isoformat(),
         "source": "manual_run_once",
@@ -2077,6 +2204,8 @@ async def worker_run_once(
     return {
         "timestamp": _now_utc().isoformat(),
         "llm": result,
+        "failed_requeue": failed_requeue,
+        "retry_result": retry_result,
         "summary_repair": summary_repair,
         "llm_queue": await news_db.get_llm_queue_stats(),
         "source_states": await news_db.list_source_states(),
