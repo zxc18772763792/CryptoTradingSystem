@@ -269,3 +269,24 @@ def test_async_glm_client_summarize_batch_marks_openai_source(monkeypatch):
     assert result[0]["summary"] == "headline summary"
     assert result[0]["sentiment"] == "neutral"
     assert result[0]["source"] == "openai_responses"
+
+
+def test_news_feed_summarize_cfg_uses_llm_defaults_when_env_absent(monkeypatch):
+    import web.api.news as module
+
+    monkeypatch.delenv("NEWS_API_SUMMARY_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("NEWS_API_SUMMARIZE_TIMEOUT_SEC", raising=False)
+
+    effective = module._feed_summarize_cfg(
+        {
+            "llm": {
+                "provider": "openai",
+                "summarize_batch_size": 6,
+                "summarize_timeout_sec": 60,
+            }
+        },
+        limit=12,
+    )
+
+    assert effective["llm"]["summarize_batch_size"] == 6
+    assert effective["llm"]["summarize_timeout_sec"] == 20
