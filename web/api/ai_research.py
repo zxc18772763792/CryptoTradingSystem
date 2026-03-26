@@ -322,10 +322,13 @@ def _serialize_funding_cache(provider: FundingRateProvider, *, exchange: str, sy
 async def get_ai_runtime_config(request: Request):
     """Expose lightweight runtime switches for the AI research UI."""
     ensure_ai_research_runtime_state(request.app)
+    trading_mode = str(execution_engine.get_trading_mode() or "").strip().lower() or "paper"
+    if trading_mode not in {"paper", "live"}:
+        trading_mode = str(getattr(settings, "TRADING_MODE", "paper") or "paper")
     return {
         "governance_enabled": bool(getattr(settings, "GOVERNANCE_ENABLED", True)),
         "decision_mode": str(getattr(settings, "DECISION_MODE", "shadow") or "shadow"),
-        "trading_mode": str(getattr(settings, "TRADING_MODE", "paper") or "paper"),
+        "trading_mode": trading_mode,
         "ai_live_decision": live_decision_router.get_runtime_config(),
         "ai_autonomous_agent": autonomous_trading_agent.get_runtime_config(),
     }

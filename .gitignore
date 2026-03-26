@@ -41,6 +41,8 @@ MagicMock/
 node_modules/
 tmp_ai_proposals*.json
 web_start*.log
+output/
+.playwright-cli/
 
 # Secrets
 .env
