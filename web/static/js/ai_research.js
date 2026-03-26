@@ -6,7 +6,7 @@
   const REFRESH_INTERVAL_MS = 60000;
   const JOB_POLL_MS         = 3000;
   const PREMIUM_SOURCE_LABEL = '高级数据源';
-  const FLOW_HINT_DEFAULT = '推荐顺序：1) 生成研究 → 2) 运行研究 → 3) 人工确认/注册。只有希望系统自动推进时再用“自动跑完整流程”。';
+  const FLOW_HINT_DEFAULT = '当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。';
   const DEFAULT_SIGNAL_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT'];
 
   /* 策略类别与颜色 */
@@ -78,7 +78,7 @@
     signalLoading: false,
     signalPanelCollapsed: false,
     jobPollingTimers: {},   // proposalId → intervalId
-    actionLocks: { generate: false, run: false, oneclick: false },
+    actionLocks: { generate: false, run: false },
     sortBy: 'score',        // 'score' | 'sharpe' | 'return' | 'drawdown'
     filterCategory: '',     // '' | '趋势' | '震荡' | ...
     compareCandidateIds: new Set(),
@@ -162,6 +162,26 @@
         }
       });
     }
+  }
+
+  function setAIContextButtonState(mode = 'idle') {
+    const btn = document.getElementById('ai-context-btn');
+    if (!btn) return;
+    if (mode === 'working') {
+      btn.textContent = '1) 生成研究思路中...';
+      btn.disabled = true;
+      btn.style.color = '';
+      return;
+    }
+    if (mode === 'ready') {
+      btn.textContent = '1) 研究思路已生成';
+      btn.disabled = false;
+      btn.style.color = '#20bf78';
+      return;
+    }
+    btn.textContent = '1) 生成研究思路';
+    btn.disabled = false;
+    btn.style.color = '';
   }
 
   function providerDisplayName(provider) {
@@ -1332,9 +1352,9 @@
       : '先选研究任务，再点击候选策略卡片';
     const hint = proposal
       ? (candidateCount
-        ? '点击候选策略卡片，查看验证、谱系与注册动作'
+        ? '点击候选策略卡片，在右侧进入第 4 步注册/部署'
         : '先运行该研究任务，产出候选后再查看详情')
-      : '查看详细分析与注册';
+      : '查看详细分析与第 4 步注册/部署';
     return `<div class="ai-detail-placeholder">
       <div style="font-size:36px;opacity:.3;">📊</div>
       <div style="margin-top:10px;color:#6b7fa0;font-size:13px;">${esc(summary)}<br>${esc(hint)}</div>
@@ -1414,7 +1434,6 @@
       const name = proposalDisplayName(item, idx);
       const running = ['research_queued', 'research_running'].includes(st);
       const retirable = ['shadow_running', 'live_candidate', 'paper_running'].includes(st);
-      const runnable = isRunnableProposalStatus(st);
       const meta = getProposalResearchMeta(item);
       const timeLabel = meta.lastTs ? fmtTs(meta.lastTs) : '--';
       const aiSummary = `${researchModeText(meta.researchMode)} | 模板 ${meta.totalTemplates}`;
@@ -1439,9 +1458,7 @@
         <div class="pci-actions">
           ${running
             ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#f0b429;" data-action="cancel-proposal" data-proposal-id="${esc(pid)}" title="取消运行">停</button>`
-            : (runnable
-              ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;" data-action="run-proposal" data-proposal-id="${esc(pid)}" title="运行研究">跑</button>`
-              : '<span style="font-size:10px;color:#7e92b2;">不可运行</span>')}
+            : ''}
           ${retirable ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#f59e0b;" data-action="retire-proposal" data-proposal-id="${esc(pid)}" title="退役">退</button>` : ''}
           <button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#e05260;" data-action="delete-proposal" data-proposal-id="${esc(pid)}" title="删除">删</button>
         </div>
@@ -1495,7 +1512,7 @@
       if (cnt) cnt.textContent = totalCount ? `0/${totalCount}` : '';
       box.innerHTML = state.candidates.length
         ? `<div class="ai-empty-hint">当前类别筛选无结果，请调整筛选条件</div>`
-        : `<div class="ai-empty-hint">暂无候选策略。<br>在左侧填写研究目标，点击 <strong>生成研究</strong>，<br>再选中研究任务并点击 <strong>▶ 运行研究</strong> 开始回测。</div>`;
+        : `<div class="ai-empty-hint">暂无候选策略。<br>先在左侧点击 <strong>2) 生成提案</strong>，<br>再选中研究任务并点击 <strong>3) 运行研究</strong> 开始回测。</div>`;
       emitWorkbenchState('candidate-cards');
       return;
     }
@@ -1770,7 +1787,6 @@
       const dirLabel = { LONG: '看多', SHORT: '看空' }[dir] || dir;
       signalBadge = `<span class="cand-signal-badge">${esc(sym.split('/')[0])} ${dirLabel} ${conf}%</span><br>`;
     }
-    const canRegister = canRegisterCandidate(cand);
     const compareChecked = state.compareCandidateIds.has(cid) ? 'checked' : '';
     const category = STRATEGY_CATEGORIES[strat] || '';
     const catColor = CATEGORY_COLORS[category] || '#64748b';
@@ -1833,7 +1849,6 @@
       <div class="cand-recommendation">AI建议：${esc(promotionText(decision))}</div>
       <div class="cand-card-actions">
         <button class="btn btn-sm" data-action="view-candidate" data-candidate-id="${esc(cid)}" style="font-size:12px;">详情</button>
-        ${canRegister ? `<button class="btn-register-cta" data-action="open-register" data-candidate-id="${esc(cid)}">一键注册策略</button>` : ''}
       </div>
     </div>`;
   }
@@ -2156,7 +2171,7 @@
 
       ${showRegisterButton
         ? `<button class="btn-register-cta full" data-action="open-register" data-candidate-id="${esc(candidateId)}">
-            \u4e00\u952e\u6ce8\u518c\u7b56\u7565 \u2192
+            4) 注册/部署 →
           </button>`
         : (governanceGateHint
           ? `<div style="font-size:12px;color:#f0b429;background:#2b1f06;border:1px solid #5c4310;border-radius:6px;padding:8px 10px;">
@@ -2555,7 +2570,7 @@
       </div>
       <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;padding-top:12px;border-top:1px solid rgba(255,255,255,.07);">
         <button class="btn" id="reg-cancel-btn">取消</button>
-        <button class="btn-register-cta" id="reg-confirm-btn" data-candidate-id="${esc(candidateId)}">确认注册</button>
+        <button class="btn-register-cta" id="reg-confirm-btn" data-candidate-id="${esc(candidateId)}">确认注册/部署</button>
       </div>`;
     body.innerHTML = normalizeUiText(body.innerHTML);
     normalizeDomText(body);
@@ -2591,7 +2606,7 @@
       notify(`策略已注册: ${stratName}`);
       await refreshWorkbench('', candidateId);
     } catch (err) {
-      if (btn) { btn.textContent = '确认注册'; btn.disabled = false; }
+      if (btn) { btn.textContent = '确认注册/部署'; btn.disabled = false; }
       notify(`注册失败: ${err.message}`, true);
     }
   }
@@ -2645,11 +2660,7 @@
         ${_renderApprovalMeta(cand)}
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
           <button class="btn btn-sm" style="font-size:11px;color:#20bf78;border-color:#20bf78;"
-            data-action="human-approve" data-candidate-id="${cid}" data-target="${target}">✓ 批准</button>
-          <button class="btn btn-sm" style="font-size:11px;color:#e05260;border-color:#e05260;"
-            data-action="human-reject" data-candidate-id="${cid}">✗ 拒绝</button>
-          <button class="btn btn-sm" style="font-size:11px;color:#f59e0b;border-color:#f59e0b;"
-            data-action="quick-register" data-candidate-id="${cid}">纸盘 5%</button>
+            data-action="view-candidate" data-candidate-id="${cid}">第 4 步处理</button>
         </div>
       </div>`;
     }).join(''));
@@ -2692,13 +2703,12 @@
      LLM 辅助研究瑙勫垝
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
   async function generateAIContext() {
-    const btn = document.getElementById('ai-context-btn');
-    if (btn) { btn.textContent = 'OpenAI研究中（约1-3分钟）...'; btn.disabled = true; }
+    setAIContextButtonState('working');
     try {
       const goals = String(document.getElementById('ai-planner-goal')?.value || '').trim();
       if (goals.length < 8) {
         notify('请先填写研究目标（至少8个字符）', true);
-        if (btn) { btn.textContent = '🤖 生成研究思路'; btn.disabled = false; btn.style.color = ''; }
+        setAIContextButtonState('idle');
         return;
       }
       const macroContext = await loadPlannerMacroContext().catch(() => null);
@@ -2735,7 +2745,7 @@
         if (researchModeEl && (researchModeEl.value === 'auto' || !researchModeEl.value)) {
           researchModeEl.value = draftCount > 0 ? 'autonomous_draft' : 'hybrid';
         }
-        if (btn) { btn.textContent = '研究思路已生成 ✓'; btn.disabled = false; btn.style.color = '#20bf78'; }
+        setAIContextButtonState('ready');
         // Show hypothesis in planner notes
         const plannerNotesEl = document.getElementById('ai-planner-notes');
         const macroSummary = macroContext
@@ -2752,11 +2762,11 @@
         notify(draftCount > 0 ? `研究思路已生成，并附带 ${draftCount} 个 AI 草案。` : '研究思路已生成，假设已写入规划区。');
       } else {
         notify(`生成研究思路失败: ${result?.error || 'LLM不可用'}`, true);
-        if (btn) { btn.textContent = '🤖 生成研究思路'; btn.disabled = false; btn.style.color = ''; }
+        setAIContextButtonState('idle');
       }
     } catch (err) {
       notify(`生成研究思路失败: ${err.message}`, true);
-      if (btn) { btn.textContent = '🤖 生成研究思路'; btn.disabled = false; btn.style.color = ''; }
+      setAIContextButtonState('idle');
     }
   }
 
@@ -2851,22 +2861,20 @@
 
   function syncPrimaryActionButtons() {
     const generateBtn = document.getElementById('ai-generate-btn');
-    const oneclickBtn = document.getElementById('ai-oneclick-btn');
     const hintEl = document.getElementById('ai-flow-hint');
     const busy = hasActionLock();
     if (generateBtn && !state.actionLocks.generate) generateBtn.disabled = busy;
-    if (oneclickBtn && !state.actionLocks.oneclick) oneclickBtn.disabled = busy;
     if (hintEl) {
       hintEl.textContent = busy
-        ? '正在执行研究任务，请等待当前流程完成后再触发其他主操作。'
-        : FLOW_HINT_DEFAULT;
+        ? '当前有步骤正在执行，请等待当前流程完成后再继续下一步。'
+        : '当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。';
     }
     updateRunBtn();
     emitWorkbenchState('action-locks');
   }
 
   function setActionLock(name, locked) {
-    if (!state.actionLocks) state.actionLocks = { generate: false, run: false, oneclick: false };
+    if (!state.actionLocks) state.actionLocks = { generate: false, run: false };
     state.actionLocks[name] = !!locked;
     syncPrimaryActionButtons();
   }
@@ -2885,12 +2893,26 @@
     if (!btn) return;
     const busy = hasActionLock();
     const has = !!state.selectedProposalId;
-    btn.disabled = !has || busy;
+    const proposal = state.proposals.find((item) => String(item?.proposal_id || '').trim() === String(state.selectedProposalId || '').trim()) || null;
+    const status = String(proposal?.status || '').trim();
+    const runnable = proposal ? isRunnableProposalStatus(status) : has;
+    btn.textContent = ['research_queued', 'research_running'].includes(status) ? '3) 运行中...' : '3) 运行研究';
+    btn.disabled = !has || busy || !runnable;
     if (busy) {
       btn.title = '当前有任务执行中，请等待完成后再运行研究';
       return;
     }
-    btn.title = has ? `运行研究: ${state.selectedProposalId}` : '请先在左侧选择研究任务';
+    if (!has) {
+      btn.title = '请先在左侧选择研究任务';
+      return;
+    }
+    if (!runnable) {
+      btn.title = ['research_queued', 'research_running'].includes(status)
+        ? `当前提案正在运行: ${state.selectedProposalId}`
+        : `当前状态 ${statusText(status)} 不可重复运行`;
+      return;
+    }
+    btn.title = `运行研究: ${state.selectedProposalId}`;
   }
 
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2993,8 +3015,9 @@
     if (state.pendingLlmContext) {
       payload.llm_research_output = state.pendingLlmContext;
       state.pendingLlmContext = null;
+      setAIContextButtonState('idle');
       const btn = document.getElementById('ai-context-btn');
-        if (btn) { btn.textContent = '🤖 生成研究思路'; btn.disabled = false; btn.style.color = ''; }
+        if (btn) { btn.textContent = '1) 生成研究思路'; btn.disabled = false; btn.style.color = ''; }
     }
     const result = await aiApi('/proposals/generate', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 30000 });
     // A: show filtered templates and planner notes
@@ -3062,8 +3085,9 @@
         timeoutMs: 180000,
       });
       state.pendingLlmContext = null;
+      setAIContextButtonState('idle');
       const contextBtn = document.getElementById('ai-context-btn');
-      if (contextBtn) { contextBtn.textContent = 'AI \u8f85\u52a9'; contextBtn.disabled = false; contextBtn.style.color = ''; }
+      if (contextBtn) { contextBtn.textContent = '1) 生成研究思路'; contextBtn.disabled = false; contextBtn.style.color = ''; }
 
       const proposalId = String(result?.proposal_id || result?.run?.proposal?.proposal_id || '').trim();
       const candidateId = String(result?.candidate_id || result?.run?.candidate?.candidate_id || '').trim();
@@ -3253,8 +3277,6 @@
     /* 生成研究 */
     document.getElementById('ai-generate-btn')?.addEventListener('click', () =>
       withActionLock('generate', () => generateProposal()).catch(err => notify(`生成失败: ${err.message}`, true)));
-    document.getElementById('ai-oneclick-btn')?.addEventListener('click', () =>
-      withActionLock('oneclick', () => runOneClickResearchDeploy()).catch(err => notify(`一键执行失败: ${err.message}`, true)));
 
     /* AI生成研究思路 */
     document.getElementById('ai-context-btn')?.addEventListener('click', () =>
@@ -3266,16 +3288,9 @@
       if (!btn) return;
       const cid    = String(btn.dataset.candidateId || '').trim();
       const action = String(btn.dataset.action || '').trim();
-      if (action === 'human-approve' && cid) {
-        const target = String(btn.dataset.target || 'paper');
-        humanApprove(cid, target).catch(err => notify(`批准失败: ${err.message}`, true));
-      }
-      if (action === 'human-reject' && cid) {
-        humanReject(cid).catch(err => notify(`拒绝失败: ${err.message}`, true));
-      }
-      if (action === 'quick-register' && cid) {
+      if (action === 'view-candidate' && cid) {
         e.stopPropagation();
-        quickRegister(cid).catch(err => notify(`快速注册失败: ${err.message}`, true));
+        viewCandidate(cid).catch(err => notify(`加载详情失败: ${err.message}`, true));
       }
     });
 
@@ -3361,12 +3376,6 @@
         const id   = String(item?.dataset?.proposalId || pid || '').trim();
         if (!id) return;
         selectProposal(id);
-        return;
-      }
-      if (action === 'run-proposal' && pid) {
-        e.stopPropagation();
-        selectProposal(pid);
-        withActionLock('run', () => runProposal(pid)).catch(err => notify(`运行失败: ${err.message}`, true));
         return;
       }
       if (action === 'cancel-proposal' && pid) {

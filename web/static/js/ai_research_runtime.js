@@ -156,16 +156,16 @@
 
   function nextStepText(snapshot, proposal, candidate) {
     const pendingApprovals = Array.isArray(snapshot?.pendingApprovals) ? snapshot.pendingApprovals.length : 0;
-    if (!proposal) return '先填写研究目标，再生成研究任务。';
+    if (!proposal) return '建议先做第 1 步“生成研究思路”，再执行第 2 步“生成提案”。';
     if (['research_queued', 'research_running'].includes(String(proposal?.status || ''))) {
-      return '研究正在运行，先观察候选生成与淘汰原因。';
+      return '第 3 步“运行研究”进行中，先等待候选与验证结果。';
     }
-    if (!candidate) return '先运行已选研究任务，让系统产出候选与验证结果。';
-    if (pendingApprovals > 0) return `当前有 ${pendingApprovals} 个候选待人工确认，先确认目标。`;
+    if (!candidate) return '第 2 步提案已就绪，下一步执行第 3 步“运行研究”。';
+    if (pendingApprovals > 0) return `进入第 4 步“注册/部署”，当前有 ${pendingApprovals} 个候选待人工确认。`;
     if (['paper_running', 'shadow_running', 'live_candidate', 'live_running'].includes(String(candidate?.status || ''))) {
-      return '候选已进入运行态，可继续观察自动交易代理表现，并按需要启用下单前AI复核。';
+      return '已进入第 4 步“注册/部署”，可以继续观察运行表现。';
     }
-    return '优先查看候选验证、谱系和注册建议，再决定是否注册。';
+    return '查看候选详情后，在右侧完成第 4 步“注册/部署”。';
   }
 
   function focusCandidateText(candidate) {
@@ -190,8 +190,8 @@
     if (['research_queued', 'research_running'].includes(proposalStatus)) return '研究运行中';
     if (!candidate) return '待产出候选';
     if (['rejected'].includes(candidateStatus) || ['rejected'].includes(proposalStatus)) return '验证未通过';
-    if (['paper_running', 'shadow_running', 'live_candidate', 'live_running'].includes(candidateStatus)) return '已进入运行态';
-    if (candidateStatus === 'validated') return '候选待注册';
+    if (['paper_running', 'shadow_running', 'live_candidate', 'live_running'].includes(candidateStatus)) return '已进入注册/部署';
+    if (candidateStatus === 'validated') return '候选待注册/部署';
     return statusText(candidateStatus || proposalStatus || '--');
   }
 
@@ -290,7 +290,7 @@
     const stages = [
       stageCard(
         1,
-        '假设',
+        '研究思路',
         hypothesisTone,
         proposal?.thesis || inputs.goal || '等待输入研究目标',
         [
@@ -302,7 +302,7 @@
       ),
       stageCard(
         2,
-        '搜索',
+        '生成提案',
         searchTone,
         proposalCandidates.length > 0
           ? `${proposalCandidates.length} 个候选 / champion ${searchSummary?.champion_strategy || candidate?.strategy || '--'}`
@@ -316,7 +316,7 @@
       ),
       stageCard(
         3,
-        '验证',
+        '运行研究',
         validationTone,
         candidate
           ? `${candidate?.strategy || '--'} / ${Number(candidate?.score || 0).toFixed(0)} 分`
@@ -330,7 +330,7 @@
       ),
       stageCard(
         4,
-        '上线保护',
+        '注册前保护',
         reviewTone,
         `${providerDisplayName(liveDecision?.provider || 'codex')} / ${liveDecision?.model || 'default'}`,
         [
@@ -344,7 +344,7 @@
       ),
       stageCard(
         5,
-        '部署',
+        '注册/部署',
         deploymentTone,
         runningCandidates > 0
           ? `${runningCandidates} 个候选处于运行态`

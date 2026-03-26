@@ -1481,7 +1481,7 @@
                 <div id="ai-register-modal" class="modal-overlay" style="display:none;">
                     <div class="modal-box modal-box-md">
                         <div class="modal-header">
-                            <h3 style="font-size:15px;">一键注册策略</h3>
+                            <h3 style="font-size:15px;">第 4 步：注册/部署策略</h3>
                             <button class="modal-close" id="ai-register-close">×</button>
                         </div>
                         <div id="ai-register-body" style="padding:4px 0;">加载中...</div>
@@ -1505,7 +1505,7 @@
                             </div>
                             <div class="ai-top-intro-box">
                                 <div class="ai-top-intro-box-title">怎么用</div>
-                                <div class="ai-top-intro-box-desc">1) 先定研究方式 → 2) 生成研究 / AI 草案 → 3) 运行研究 → 4) 人工确认或注册。</div>
+                                <div class="ai-top-intro-box-desc">1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。</div>
                             </div>
                             <div class="ai-top-intro-mini-grid">
                                 <div class="ai-top-intro-mini">
@@ -1823,16 +1823,15 @@
                                 <input type="text" id="ai-planner-timeframes" value="1m, 5m, 15m, 1h">
                             </div>
                             <div class="inline-actions">
-                                <button class="btn btn-primary btn-sm" id="ai-generate-btn">1) 生成研究</button>
-                                <button class="btn btn-sm" id="ai-oneclick-btn" title="生成+运行+自动注册/人工确认">⚡ 自动跑完整流程</button>
-                                <button class="btn btn-sm" id="ai-context-btn" title="调用 OpenAI 生成研究假设、实验计划和开放式草案">🤖 生成研究思路</button>
+                                <button class="btn btn-sm" id="ai-context-btn" title="调用 OpenAI 生成研究假设、实验计划和开放式草案">1) 生成研究思路</button>
+                                <button class="btn btn-primary btn-sm" id="ai-generate-btn">2) 生成提案</button>
                                 <button class="btn btn-sm" id="ai-refresh-btn">刷新</button>
                             </div>
                             <div id="ai-planner-mode-hint" class="ai-planner-mode-hint">
-                                当前将按“自动判断”生成提案；若先生成 AI 研究思路，系统会优先进入模板 + AI 草案的混合研究。
+                                当前将按“自动判断”生成提案；建议先执行第 1 步生成研究思路，让第 2 步优先纳入 AI 草案。
                             </div>
                             <div id="ai-flow-hint" class="ai-flow-hint">
-                                推荐顺序：1) 先定研究方式 → 2) 生成研究或 AI 草案 → 3) 运行研究 → 4) 人工确认/注册。只有希望系统自动推进时再用“自动跑完整流程”。
+                                当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。
                             </div>
                             <!-- 实时市场上下文摘要 -->
                             <div id="ai-market-context-hint" style="margin-top:5px;font-size:11px;color:#7a8fa6;min-height:14px;"></div>
@@ -1846,7 +1845,7 @@
                                 <span>研究任务</span>
                                 <span id="ai-queue-badge" style="font-size:11px;color:#7e92b2;font-weight:400;text-transform:none;"></span>
                             </div>
-                            <div style="font-size:11px;color:#7e92b2;margin-bottom:8px;">这里负责切换当前提案。选中后去中栏运行研究、查看候选。</div>
+                            <div style="font-size:11px;color:#7e92b2;margin-bottom:8px;">这里负责切换当前提案。选中后去中栏执行第 3 步“运行研究”，再到右侧完成第 4 步“注册/部署”。</div>
                             <div id="ai-proposal-list" class="ai-proposal-compact-list">
                                 <div style="color:#6b7fa0;font-size:12px;padding:8px 0;">暂无研究任务</div>
                             </div>
@@ -1921,15 +1920,15 @@
                                 </select>
                                 <input type="number" id="run-days" value="3" min="1" max="730" style="width:55px;font-size:12px;" title="回测天数（短周期研究默认3天）">
                                 <span style="font-size:11px;color:#7e92b2;">天</span>
-                                <button class="btn btn-primary btn-sm" id="run-selected-btn" disabled title="请先在左侧选择研究任务">2) 运行研究</button>
+                                <button class="btn btn-primary btn-sm" id="run-selected-btn" disabled title="请先在左侧选择研究任务">3) 运行研究</button>
                                 <button class="btn btn-sm" id="ai-compare-btn" style="display:none;">对比选中</button>
                             </div>
                         </div>
                         <div id="ai-candidate-cards" class="ai-candidate-cards">
                             <div class="ai-empty-hint">
                                 暂无候选策略。<br>
-                                在左侧填写研究目标，点击 <strong>生成研究</strong>，<br>
-                                再选中研究任务并点击 <strong>▶ 运行研究</strong> 开始回测。
+                                先在左侧点击 <strong>2) 生成提案</strong>，<br>
+                                再选中研究任务并点击 <strong>3) 运行研究</strong> 开始回测。
                             </div>
                         </div>
                     </div>
@@ -1939,7 +1938,7 @@
                         <div id="ai-detail-panel" class="ai-detail-panel">
                             <div class="ai-detail-placeholder">
                                 <div style="font-size:36px;opacity:.3;">📊</div>
-                                <div style="margin-top:10px;color:#6b7fa0;font-size:13px;">先选研究任务，再点击候选策略卡片<br>查看详细分析与注册</div>
+                                <div style="margin-top:10px;color:#6b7fa0;font-size:13px;">先选研究任务，再点击候选策略卡片<br>查看详细分析与第 4 步注册/部署</div>
                             </div>
                         </div>
                     </aside>
@@ -2124,9 +2123,9 @@
 
     <script charset="utf-8" src="/static/js/app.js?v=117"></script>
     <script charset="utf-8" src="/static/js/research_workbench.js?v=7"></script>
-    <script charset="utf-8" src="/static/js/ai_research.js?v=30"></script>
+    <script charset="utf-8" src="/static/js/ai_research.js?v=31"></script>
     <script charset="utf-8" src="/static/js/ai_research_diagnostics.js?v=1"></script>
-    <script charset="utf-8" src="/static/js/ai_research_runtime.js?v=4"></script>
+    <script charset="utf-8" src="/static/js/ai_research_runtime.js?v=5"></script>
     <script charset="utf-8" src="/static/js/ai_research_agent.js?v=3"></script>
     <script charset="utf-8" src="/static/js/news_tab_runtime.js?v=11"></script>
     <script charset="utf-8" src="/static/js/dashboard_unstructured_news.js?v=13"></script>
