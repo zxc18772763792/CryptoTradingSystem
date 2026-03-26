@@ -172,8 +172,14 @@
 
     const startBtn = document.getElementById('ai-agent-start-btn');
     const stopBtn = document.getElementById('ai-agent-stop-btn');
-    if (startBtn) startBtn.disabled = running;
-    if (stopBtn) stopBtn.disabled = !running;
+    if (startBtn) {
+      startBtn.disabled = running;
+      startBtn.textContent = running ? '运行中' : '启动';
+    }
+    if (stopBtn) {
+      stopBtn.disabled = !running;
+      stopBtn.textContent = '停止';
+    }
     renderAgentChainSummary(status, cfg);
   }
 

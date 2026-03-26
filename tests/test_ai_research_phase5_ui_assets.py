@@ -34,6 +34,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     candidates_js = _read("web/static/js/ai_research_candidates.js")
     agent_js = _read("web/static/js/ai_research_agent.js")
     ai_js = _read("web/static/js/ai_research.js")
+    app_js = _read("web/static/js/app.js")
     template = _read("web/templates/index.html")
     style_css = _read("web/static/css/style.css")
 
@@ -43,6 +44,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "modules.candidates" in candidates_js
     assert "window.agentStart = agentStart" in agent_js
     assert "renderAgentChainSummary" in agent_js
+    assert "startBtn.textContent = running ? '运行中' : '启动'" in agent_js
     assert "function selectProposal(" in ai_js
     assert "buildPlannerConstraints" in ai_js
     assert "withActionLock('oneclick'" in ai_js
@@ -52,6 +54,10 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "FLOW_HINT_QUICK_PATH" in ai_js
     assert "AI_UI_TIMEZONE = 'Asia/Singapore'" in ai_js
     assert "AI_UI_TIMEZONE = 'Asia/Singapore'" in agent_js
+    assert "const TRADING_STATS_TIMEOUT_MS=25000;" in app_js
+    assert "const TRADING_POSITIONS_TIMEOUT_MS=30000;" in app_js
+    assert "const TRADING_OPEN_ORDERS_TIMEOUT_MS=25000;" in app_js
+    assert "else if(tab==='ai-research')refreshAiResearchModules();" in app_js
     assert "先点“3) 运行研究”单独验证" in ai_js
     assert "provider_fallback" in ai_js
     assert 'option value="codex">OpenAI' in template

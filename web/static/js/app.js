@@ -11,6 +11,10 @@ let equityChart=null;
 let plotlyResizeSeq=0;
 let dataReloadTimer=null;
 let summaryLoadPromise=null;
+const TRADING_STATS_TIMEOUT_MS=25000;
+const TRADING_ORDERS_TIMEOUT_MS=20000;
+const TRADING_OPEN_ORDERS_TIMEOUT_MS=25000;
+const TRADING_POSITIONS_TIMEOUT_MS=30000;
 if(typeof globalThis!=='undefined'&&typeof globalThis.sseError==='undefined')globalThis.sseError=null;
 
 const mapOrderStatus=s=>({open:'未成交',closed:'已成交',canceled:'已撤销',expired:'已过期',rejected:'已拒绝',queued:'待触发'}[s]||s);
@@ -600,7 +604,7 @@ const prevStats=(prevSnapshot.stats&&typeof prevSnapshot.stats==='object')?prevS
 const prevBalances=(prevSnapshot.balances&&typeof prevSnapshot.balances==='object')?prevSnapshot.balances:{};
 const prevHistoryByMode=(prevSnapshot.historyByMode&&typeof prevSnapshot.historyByMode==='object')?prevSnapshot.historyByMode:{};
 const [sr,br]=await Promise.allSettled([
-api('/trading/stats',{timeoutMs:8000}),
+api('/trading/stats',{timeoutMs:TRADING_STATS_TIMEOUT_MS}),
 api('/trading/balances',{timeoutMs:65000}),
 ]);
 const statsFresh=(sr.status==='fulfilled'&&sr.value&&typeof sr.value==='object')?sr.value:null;
@@ -834,10 +838,10 @@ try{
   loadPositions().catch(()=>{});
 }
 }
-async function loadPositions(){try{const resp=await api('/trading/positions');state.positions=resp.positions||[];const t=document.getElementById('positions-tbody');if(!t)return;if(!state.positions.length){t.innerHTML='<tr><td colspan="6">暂无持仓</td></tr>';return;}t.innerHTML=state.positions.map(p=>{const source=(p?.metadata?.source||'local');const key=positionCloseKey(p);const busy=!!state.closingPositions[key];const sideText=p.side==='long'?'多':p.side==='short'?'空':(p.side||'-');const sourceTag=source==='exchange_live'?'<span class="status-badge" style="margin-left:6px;background:#2f4f7f;">实盘同步</span>':'';const accountId=String(p.account_id||'');return `<tr><td>${p.exchange||'-'} ${p.symbol}${sourceTag}</td><td>${sideText}</td><td>${Number(p.entry_price||0).toFixed(2)}</td><td>${Number(p.current_price||0).toFixed(2)}</td><td class="${Number(p.unrealized_pnl||0)>=0?'positive':'negative'}">${fmt(p.unrealized_pnl||0)}</td><td><button class="btn btn-danger btn-sm" ${busy?'disabled':''} onclick="closePositionFromRow(this)" data-exchange="${esc(p.exchange||'')}" data-symbol="${esc(p.symbol||'')}" data-side="${esc(p.side||'')}" data-account-id="${esc(accountId)}" data-source="${esc(source)}" data-quantity="${Number(p.quantity||0)}">${busy?'平仓中...':'一键平仓'}</button></td></tr>`;}).join('');}catch(e){console.error(e);}}
+async function loadPositions(){try{const resp=await api('/trading/positions',{timeoutMs:TRADING_POSITIONS_TIMEOUT_MS});state.positions=resp.positions||[];const t=document.getElementById('positions-tbody');if(!t)return;if(!state.positions.length){t.innerHTML='<tr><td colspan="6">暂无持仓</td></tr>';return;}t.innerHTML=state.positions.map(p=>{const source=(p?.metadata?.source||'local');const key=positionCloseKey(p);const busy=!!state.closingPositions[key];const sideText=p.side==='long'?'多':p.side==='short'?'空':(p.side||'-');const sourceTag=source==='exchange_live'?'<span class="status-badge" style="margin-left:6px;background:#2f4f7f;">实盘同步</span>':'';const accountId=String(p.account_id||'');return `<tr><td>${p.exchange||'-'} ${p.symbol}${sourceTag}</td><td>${sideText}</td><td>${Number(p.entry_price||0).toFixed(2)}</td><td>${Number(p.current_price||0).toFixed(2)}</td><td class="${Number(p.unrealized_pnl||0)>=0?'positive':'negative'}">${fmt(p.unrealized_pnl||0)}</td><td><button class="btn btn-danger btn-sm" ${busy?'disabled':''} onclick="closePositionFromRow(this)" data-exchange="${esc(p.exchange||'')}" data-symbol="${esc(p.symbol||'')}" data-side="${esc(p.side||'')}" data-account-id="${esc(accountId)}" data-source="${esc(source)}" data-quantity="${Number(p.quantity||0)}">${busy?'平仓中...':'一键平仓'}</button></td></tr>`;}).join('');}catch(e){console.error(e);}}
 async function loadOrders(){
 try{
-state.orders=(await api('/trading/orders?include_history=true&limit=200')).orders||[];
+state.orders=(await api('/trading/orders?include_history=true&limit=200',{timeoutMs:TRADING_ORDERS_TIMEOUT_MS})).orders||[];
 const t=document.getElementById('orders-tbody');
 if(!t)return;
 const view=document.getElementById('orders-view-filter')?.value||'all';
@@ -876,7 +880,7 @@ return `<tr><td>${o.exchange||'-'} ${o.symbol}</td><td>${sourceBadge}</td><td>${
 }
 async function loadOpenOrders(){
 try{
-const rows=((await api('/trading/orders?include_history=false&limit=200',{timeoutMs:15000})).orders||[]);
+const rows=((await api('/trading/orders?include_history=false&limit=200',{timeoutMs:TRADING_OPEN_ORDERS_TIMEOUT_MS})).orders||[]);
 const t=document.getElementById('open-orders-tbody');
 if(!t)return;
 if(!rows.length){t.innerHTML='<tr><td colspan="8">暂无当前委托</td></tr>';return;}
@@ -3274,7 +3278,17 @@ async function loadAuditLogs(){try{const d=await api('/trading/audit?hours=168&l
 function bindAudit(){const b=document.getElementById('btn-refresh-audit');if(b)b.onclick=loadAuditLogs;}
 
 let wsClient=null,wsRetryTimer=null,softRefreshTimer=null,replaySessionId='',lastTickRenderAt=0;
-function softRefresh(delay=250){if(softRefreshTimer)clearTimeout(softRefreshTimer);softRefreshTimer=setTimeout(()=>{loadSummary();loadPositions();loadOrders();loadOpenOrders();loadStrategies();loadStrategySummary();loadRisk();loadConditionalOrders();loadAccounts();loadModeInfo();if(getActiveTabName()==='trading')loadLiveTradeReview({showLoading:false,minIntervalMs:15000});},delay);}
+function refreshAiResearchModules(){const modules=(window.AI&&window.AI.modules)||{};try{modules.agent?.refresh?.();}catch{}try{modules.runtime?.render?.();}catch{}}
+function softRefresh(delay=250){
+if(softRefreshTimer)clearTimeout(softRefreshTimer);
+softRefreshTimer=setTimeout(()=>{
+  const tab=getActiveTabName();
+  if(tab==='dashboard')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadStrategies(),loadStrategySummary(),loadRisk()]);
+  else if(tab==='trading')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
+  else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
+  else if(tab==='ai-research')refreshAiResearchModules();
+},delay);
+}
 function setWsBadge(connected){state.wsConnected=!!connected;const st=document.getElementById('system-status');if(st)st.textContent=connected?'运行中(WS在线)':'运行中(轮询)';}
 function applyMarketTick(payload){try{const ex=marketDataState.exchange||document.getElementById('data-exchange')?.value,sym=marketDataState.symbol||document.getElementById('data-symbol')?.value,tf=marketDataState.timeframe||document.getElementById('data-timeframe')?.value||'1m';if(!ex||!sym||!marketDataState.bars?.length)return;const t=payload?.[ex]?.[sym];if(!t)return;const px=Number(t.last||0);if(px<=0)return;const tfSec=timeframeSeconds(tf);const nowMs=Date.now();const bucketMs=Math.floor(nowMs/(tfSec*1000))*(tfSec*1000);const bars=marketDataState.bars;const last=bars[bars.length-1];const lastMs=klineToMs(last?.timestamp);if(!Number.isFinite(lastMs))return;const lastBucket=Math.floor(lastMs/(tfSec*1000))*(tfSec*1000);if(lastBucket===bucketMs){last.high=Math.max(Number(last.high||px),px);last.low=Math.min(Number(last.low||px),px);if(!Number.isFinite(last.low))last.low=px;if(!Number.isFinite(last.high))last.high=px;last.close=px;}else if(bucketMs>lastBucket){if(isSubMinuteTf(tf)){return;}const openPx=Number(last.close||px);bars.push({timestamp:klineLocalIso(bucketMs),open:openPx,high:Math.max(openPx,px),low:Math.min(openPx,px),close:px,volume:0});marketDataState.bars=cropBars(mergeBars([],bars));}const renderThrottle=isSubMinuteTf(tf)?900:450;const now=Date.now();if(now-lastTickRenderAt>=renderThrottle){lastTickRenderAt=now;renderKlineChart(true);}}catch(e){console.error(e);}}
 function initWebSocket(){try{if(wsClient)wsClient.close();const proto=location.protocol==='https:'?'wss':'ws';wsClient=new WebSocket(`${proto}://${location.host}/ws`);wsClient.onopen=()=>{setWsBadge(true);};wsClient.onmessage=e=>{try{const m=JSON.parse(e.data||'{}');const ev=m.event||'';if(['order_event','position_event','execution_event','mode_changed','runtime_snapshot','strategy_signal'].includes(ev)){softRefresh(120);}if(ev==='mode_changed'){notify(`交易模式已切换: ${m?.payload?.mode||'-'}`);}if(ev==='order_event'){const o=m?.payload?.order||{};notify(`订单更新: ${o.symbol||''} ${mapOrderStatus(o.status||'')}`);}if(ev==='strategy_signal'){pushRealtimeSignal(m?.payload||{});}if(ev==='market_tick'){applyMarketTick(m?.payload||{});} }catch{}};wsClient.onclose=()=>{setWsBadge(false);if(wsRetryTimer)clearTimeout(wsRetryTimer);wsRetryTimer=setTimeout(initWebSocket,2000);};wsClient.onerror=()=>{setWsBadge(false);};}catch{setWsBadge(false);}}
