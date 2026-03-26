@@ -91,11 +91,14 @@ class ExecutionEngine:
             "skipped_zero_qty": 0,
             "risk_rejected": 0,
             "ai_rejected": 0,
+            "ai_reduce_only_rejected": 0,
+            "ai_review_bypassed": 0,
             "order_failed": 0,
             "order_timeout": 0,
             "exceptions": 0,
             "last_signal": None,
             "last_result": None,
+            "last_ai_review_result": None,
             "last_updated_at": None,
         }
 
@@ -1144,6 +1147,23 @@ class ExecutionEngine:
                 position_payload = {}
 
         metadata = dict(signal.metadata or {})
+        if bool(metadata.get("skip_live_decision_review")) or str(metadata.get("source") or "").strip().lower() == "ai_autonomous_agent":
+            self._signal_diagnostics["ai_review_bypassed"] = int(
+                self._signal_diagnostics.get("ai_review_bypassed", 0)
+            ) + 1
+            return {
+                "enabled": False,
+                "applied": False,
+                "mode": "bypass",
+                "provider": "",
+                "model": "",
+                "action": "allow",
+                "allowed": True,
+                "reason": "ai_live_decision_bypassed_for_autonomous_agent",
+                "confidence": 1.0,
+                "latency_ms": 0,
+                "research_context": {},
+            }
         metadata.update(
             {
                 "exchange": exchange,
@@ -1378,15 +1398,18 @@ class ExecutionEngine:
                     f"AI决策拦截({ai_decision.get('provider')}/{ai_decision.get('model')}): "
                     f"{ai_decision.get('reason')}"
                 )
-                self._signal_diagnostics["last_result"] = {
+                ai_review_result = {
                     "status": "ai_rejected",
                     "strategy": signal.strategy_name,
                     "symbol": signal.symbol,
                     "exchange": exchange,
                     "reason": reason,
                     "ai_decision": ai_decision,
+                    "ts": datetime.now(timezone.utc).isoformat(),
                 }
-                self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                self._signal_diagnostics["last_result"] = dict(ai_review_result)
+                self._signal_diagnostics["last_ai_review_result"] = dict(ai_review_result)
+                self._signal_diagnostics["last_updated_at"] = str(ai_review_result["ts"])
                 rejected = await order_manager.record_rejected_order(
                     request=req,
                     reason=reason,
@@ -1432,15 +1455,18 @@ class ExecutionEngine:
                         f"AI仅允许减仓({ai_decision.get('provider')}/{ai_decision.get('model')}): "
                         f"{ai_decision.get('reason')}"
                     )
-                    self._signal_diagnostics["last_result"] = {
+                    ai_review_result = {
                         "status": "ai_reduce_only_rejected",
                         "strategy": signal.strategy_name,
                         "symbol": signal.symbol,
                         "exchange": exchange,
                         "reason": reason,
                         "ai_decision": ai_decision,
+                        "ts": datetime.now(timezone.utc).isoformat(),
                     }
-                    self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                    self._signal_diagnostics["last_result"] = dict(ai_review_result)
+                    self._signal_diagnostics["last_ai_review_result"] = dict(ai_review_result)
+                    self._signal_diagnostics["last_updated_at"] = str(ai_review_result["ts"])
                     rejected = await order_manager.record_rejected_order(
                         request=req,
                         reason=reason,

@@ -3857,6 +3857,13 @@ input[type="radio"] {
     margin-bottom: 10px;
 }
 
+.ai-review-activity-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
 .ai-review-dynamic-item {
     padding: 8px 10px;
     border-radius: 10px;
@@ -3877,6 +3884,34 @@ input[type="radio"] {
     font-size: 12px;
     color: #e4edf8;
     line-height: 1.55;
+}
+
+.ai-review-activity-item {
+    padding: 9px 10px;
+    border-radius: 10px;
+    border: 1px solid rgba(96, 165, 250, 0.12);
+    background: rgba(10, 18, 30, 0.7);
+    display: grid;
+    gap: 4px;
+}
+
+.ai-review-activity-item span {
+    font-size: 10px;
+    color: #7f9dc0;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.ai-review-activity-item strong {
+    font-size: 12px;
+    color: #e4edf8;
+    line-height: 1.45;
+}
+
+.ai-review-activity-item small {
+    font-size: 11px;
+    color: #7e92b2;
+    line-height: 1.45;
 }
 
 .ai-research-sidekick-grid {
@@ -4835,20 +4870,48 @@ input[type="radio"] {
 }
 .ai-signal-mini-row {
     display: grid;
-    grid-template-columns: 65px 45px 1fr 38px;
-    align-items: center; gap: 6px; font-size: 12px;
+    grid-template-columns: 54px 74px 1fr 34px;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
 }
-.signal-mini-sym { color: #9fb1c9; font-weight: 600; font-size: 11px; }
-.signal-mini-dir { font-weight: 700; font-size: 12px; }
+.signal-mini-sym {
+    color: #9fb1c9;
+    font-weight: 600;
+    font-size: 11px;
+    padding-left: 1px;
+}
+.signal-mini-dir {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 2px;
+    min-width: 0;
+    font-weight: 700;
+    font-size: 12px;
+    white-space: nowrap;
+}
+.signal-mini-dir-label {
+    white-space: nowrap;
+}
 .signal-mini-dir.LONG  { color: #20bf78; }
 .signal-mini-dir.SHORT { color: #e05260; }
-.signal-mini-dir.FLAT  { color: #555f72; }
+.signal-mini-dir.FLAT  { color: #7e92b2; }
+.signal-mini-dir.EMPTY { color: #6b7fa0; }
+.signal-mini-flag {
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
+}
+.signal-mini-flag.is-risk { color: #e05260; }
+.signal-mini-flag.is-wait { color: #f0b429; }
 .signal-mini-bar { height: 4px; background: rgba(255,255,255,.1); border-radius: 2px; overflow: hidden; }
 .signal-mini-bar-fill { height: 100%; border-radius: 2px; }
 .signal-mini-bar-fill.LONG  { background: #20bf78; }
 .signal-mini-bar-fill.SHORT { background: #e05260; }
 .signal-mini-bar-fill.FLAT  { background: #555f72; }
-.signal-mini-conf { font-size: 11px; color: #7e92b2; text-align: right; }
+.signal-mini-conf { font-size: 11px; color: #7e92b2; text-align: right; white-space: nowrap; }
 
 /* ── 一键注册 CTA ── */
 .btn-register-cta {
@@ -6146,6 +6209,7 @@ input[type="radio"] {
     .ai-top-intro-mini-grid,
     .ai-auto-trade-rail,
     .ai-review-dynamic-summary,
+    .ai-review-activity-summary,
     .ai-research-sidekick-grid {
         grid-template-columns: 1fr;
     }

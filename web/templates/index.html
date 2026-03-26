@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=77">
+    <link rel="stylesheet" href="/static/css/style.css?v=78">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
@@ -1525,13 +1525,13 @@
                                 <span class="ai-review-panel-tag">面向已有策略/候选</span>
                             </div>
                             <div class="ai-review-panel-desc">
-                                这一步是给已注册策略、候选策略和人工确认后的策略加一道下单前二次复核。
-                                它不生成新策略，也不属于自动交易代理的一条龙执行。
+                                这一步只给已注册策略、候选策略和人工确认后的策略加一道下单前二次复核。
+                                它不生成新策略，也不会拦截 AI 自动交易自己的直连执行链。
                             </div>
                             <div class="ai-review-scope">
                                 <div class="ai-review-scope-item">已注册策略下单前复核</div>
                                 <div class="ai-review-scope-item">运行中的候选策略复核</div>
-                                <div class="ai-review-scope-item">自动交易代理信号进入执行链后也走这里</div>
+                                <div class="ai-review-scope-item">AI自动交易直连执行，不走这里</div>
                             </div>
                             <div class="ai-review-dynamic-summary">
                                 <div class="ai-review-dynamic-item">
@@ -1541,6 +1541,18 @@
                                 <div class="ai-review-dynamic-item">
                                     <span>当前模式</span>
                                     <strong id="ai-live-decision-effective-mode">加载中...</strong>
+                                </div>
+                            </div>
+                            <div class="ai-review-activity-summary">
+                                <div class="ai-review-activity-item">
+                                    <span>命中记录</span>
+                                    <strong id="ai-live-decision-hit-summary">加载中...</strong>
+                                    <small id="ai-live-decision-hit-detail">仅统计策略库/候选执行链</small>
+                                </div>
+                                <div class="ai-review-activity-item">
+                                    <span>最近拦截结果</span>
+                                    <strong id="ai-live-decision-last-hit">加载中...</strong>
+                                    <small id="ai-live-decision-last-hit-detail">AI自动交易不计入这里</small>
                                 </div>
                             </div>
                             <div class="form-row ai-auto-step-form-row">
@@ -1580,8 +1592,8 @@
                                         <select id="signal-symbol" style="flex:1;min-width:0;font-size:12px;">
                                             <option value="BTC/USDT">BTC/USDT</option>
                                             <option value="ETH/USDT">ETH/USDT</option>
-                                            <option value="SOL/USDT">SOL/USDT</option>
                                             <option value="BNB/USDT">BNB/USDT</option>
+                                            <option value="SOL/USDT">SOL/USDT</option>
                                             <option value="XRP/USDT">XRP/USDT</option>
                                         </select>
                                         <button class="btn btn-sm" id="signal-refresh-btn" style="font-size:12px;">刷新</button>
@@ -1626,7 +1638,7 @@
                             </div>
                         </div>
                         <div class="ai-auto-trade-note">
-                            说明：如果你已经启用“下单前AI复核”，代理发出的信号进入统一执行链后仍会经过同一套复核，所以这里不再重复放第二套复核配置。
+                            说明：AI自动交易走独立决策与下单链，不再经过“下单前AI复核”拦截；这里保留的是单独的代理配置与运行日志。
                         </div>
 
                         <div class="ai-auto-trade-rail">

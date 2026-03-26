@@ -725,6 +725,7 @@ class AutonomousTradingAgent:
             "leverage": float(decision.get("leverage") or cfg.get("default_leverage") or 1.0),
             "timeframe": str(cfg.get("timeframe") or ""),
             "source": "ai_autonomous_agent",
+            "skip_live_decision_review": True,
             "agent_provider": str(cfg.get("provider") or ""),
             "agent_model": str(cfg.get("model") or ""),
             "agent_confidence": float(decision.get("confidence") or 0.0),

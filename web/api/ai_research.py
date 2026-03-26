@@ -18,6 +18,7 @@ from core.backtest.funding_provider import FundingProviderConfig, FundingRatePro
 from core.governance.audit import GovernanceAuditEvent, write_audit
 from core.deployment.promotion_engine import transition_candidate, transition_proposal
 from core.news.storage import db as news_db
+from core.trading import execution_engine
 from core.research.orchestrator import (
     cancel_proposal_job,
     create_manual_proposal,
@@ -347,6 +348,31 @@ async def update_ai_live_decision_runtime_config(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"updated": True, "config": updated}
+
+
+@router.get("/runtime-config/live-decision/summary")
+async def get_ai_live_decision_summary(request: Request):
+    ensure_ai_research_runtime_state(request.app)
+    diagnostics = execution_engine.get_signal_diagnostics()
+    block_count = max(0, int(diagnostics.get("ai_rejected", 0) or 0))
+    reduce_only_count = max(0, int(diagnostics.get("ai_reduce_only_rejected", 0) or 0))
+    bypass_count = max(0, int(diagnostics.get("ai_review_bypassed", 0) or 0))
+    last_hit = diagnostics.get("last_ai_review_result")
+    if not isinstance(last_hit, dict):
+        fallback = diagnostics.get("last_result")
+        if isinstance(fallback, dict) and str(fallback.get("status") or "") in {"ai_rejected", "ai_reduce_only_rejected"}:
+            last_hit = fallback
+        else:
+            last_hit = None
+    return {
+        "hit_count": block_count + reduce_only_count,
+        "block_count": block_count,
+        "reduce_only_count": reduce_only_count,
+        "bypass_count": bypass_count,
+        "last_hit": last_hit if isinstance(last_hit, dict) else None,
+        "last_updated_at": diagnostics.get("last_updated_at"),
+        "scope_note": "仅统计策略库/候选执行链，AI自动交易直连执行，不计入这里。",
+    }
 
 
 @router.get("/runtime-config/autonomous-agent")

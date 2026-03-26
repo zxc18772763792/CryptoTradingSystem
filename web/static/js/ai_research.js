@@ -7,6 +7,7 @@
   const JOB_POLL_MS         = 3000;
   const PREMIUM_SOURCE_LABEL = '高级数据源';
   const FLOW_HINT_DEFAULT = '推荐顺序：1) 生成研究 → 2) 运行研究 → 3) 人工确认/注册。只有希望系统自动推进时再用“自动跑完整流程”。';
+  const DEFAULT_SIGNAL_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT'];
 
   /* 策略类别与颜色 */
   const STRATEGY_CATEGORIES = {
@@ -69,6 +70,8 @@
     selectedProposalId: '',
     selectedCandidateId: '',
     latestSignals: {},
+    liveDecisionActivity: null,
+    liveDecisionActivityRetryTimer: null,
     signalTimer: null,
     refreshTimer: null,
     liveSignalTimer: null,
@@ -344,6 +347,38 @@
     modeEl.textContent = String(summary.mode || '未加载');
   }
 
+  function renderLiveDecisionActivitySummary(summary = {}) {
+    const hitEl = document.getElementById('ai-live-decision-hit-summary');
+    const hitDetailEl = document.getElementById('ai-live-decision-hit-detail');
+    const lastEl = document.getElementById('ai-live-decision-last-hit');
+    const lastDetailEl = document.getElementById('ai-live-decision-last-hit-detail');
+    if (!hitEl || !hitDetailEl || !lastEl || !lastDetailEl) return;
+
+    const hitCount = Math.max(0, Number(summary?.hit_count || 0));
+    const blockCount = Math.max(0, Number(summary?.block_count || 0));
+    const reduceOnlyCount = Math.max(0, Number(summary?.reduce_only_count || 0));
+    const bypassCount = Math.max(0, Number(summary?.bypass_count || 0));
+    const lastHit = summary?.last_hit && typeof summary.last_hit === 'object' ? summary.last_hit : null;
+
+    hitEl.textContent = hitCount > 0 ? `已命中 ${hitCount} 次` : '暂未命中';
+    hitDetailEl.textContent = hitCount > 0
+      ? `直接拦截 ${blockCount} 次 · 减仓拒绝 ${reduceOnlyCount} 次`
+      : String(summary?.scope_note || '仅统计策略库/候选执行链');
+    if (bypassCount > 0) {
+      hitDetailEl.textContent += ` · 自动交易直连 ${bypassCount} 次`;
+    }
+
+    if (lastHit) {
+      const status = String(lastHit.status || '').trim().toLowerCase();
+      const symbolLabel = String(lastHit.symbol || '--').split('/')[0] || '--';
+      lastEl.textContent = `${symbolLabel} ${status === 'ai_reduce_only_rejected' ? '减仓拒绝' : '直接拦截'}`;
+      lastDetailEl.textContent = `${String(lastHit.strategy || '--')} · ${fmtTs(lastHit.ts || summary?.last_updated_at)}`;
+    } else {
+      lastEl.textContent = '最近暂无拦截';
+      lastDetailEl.textContent = 'AI自动交易不计入这里';
+    }
+  }
+
   function buildLiveDecisionEffectiveSummary(cfg, providerState, overrides = {}) {
     const enabled = overrides.enabled != null ? !!overrides.enabled : !!cfg?.enabled;
     const mode = String(overrides.mode || cfg?.mode || 'shadow');
@@ -352,13 +387,13 @@
     const tradingMode = String((state.runtimeConfig && state.runtimeConfig.trading_mode) || '--').trim().toLowerCase();
     const applyInPaper = overrides.applyInPaper != null ? !!overrides.applyInPaper : !!cfg?.apply_in_paper;
 
-    let scopeText = '未启用，当前只走原执行链';
+    let scopeText = '未启用，当前策略下单不做AI复核';
     if (enabled && applyInPaper) {
-      scopeText = '纸盘与实盘统一执行链';
+      scopeText = '纸盘/实盘策略执行链（AI自动交易不经过此处）';
     } else if (enabled && tradingMode === 'live') {
-      scopeText = '当前实盘执行链';
+      scopeText = '当前实盘策略执行链（AI自动交易不经过此处）';
     } else if (enabled) {
-      scopeText = '仅实盘执行链（纸盘先观察）';
+      scopeText = '仅实盘策略执行链（纸盘先观察，AI自动交易不经过此处）';
     }
 
     return {
@@ -460,11 +495,38 @@
       };
       renderRuntimeSummary();
       renderLiveDecisionRuntimeConfig();
+      await loadLiveDecisionActivitySummary();
       notify('下单前AI复核配置已更新');
     } catch (err) {
       notify(`下单前AI复核配置保存失败: ${err.message}`, true);
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = '保存复核配置'; }
+    }
+  }
+
+  async function loadLiveDecisionActivitySummary() {
+    try {
+      clearTimeout(state.liveDecisionActivityRetryTimer);
+      state.liveDecisionActivityRetryTimer = null;
+      const res = await aiApi('/runtime-config/live-decision/summary', { timeoutMs: 10000 });
+      state.liveDecisionActivity = res || {};
+      renderLiveDecisionActivitySummary(state.liveDecisionActivity);
+    } catch (err) {
+      state.liveDecisionActivity = {
+        hit_count: 0,
+        block_count: 0,
+        reduce_only_count: 0,
+        last_hit: null,
+        scope_note: `摘要加载失败: ${err.message}`,
+      };
+      renderLiveDecisionActivitySummary(state.liveDecisionActivity);
+      clearTimeout(state.liveDecisionActivityRetryTimer);
+      state.liveDecisionActivityRetryTimer = setTimeout(() => {
+        state.liveDecisionActivityRetryTimer = null;
+        if (isAiResearchActive()) {
+          loadLiveDecisionActivitySummary().catch(() => {});
+        }
+      }, 3000);
     }
   }
 
@@ -1065,23 +1127,26 @@
   function renderSignalMini() {
     const box = document.getElementById('ai-signal-mini');
     if (!box) return;
-    const entries = Object.entries(state.latestSignals);
-    if (!entries.length) {
-      box.innerHTML = '<div style="color:#6b7fa0;font-size:12px;">暂无数据</div>';
-      return;
-    }
-    box.innerHTML = normalizeUiText(entries.map(([sym, data]) => {
-      const dir   = String(data?.direction || 'FLAT').toUpperCase();
-      const conf  = Math.min(100, Math.round(Number(data?.confidence || 0) * 100));
-      const label = { LONG:'看多', SHORT:'看空', FLAT:'持平' }[dir] || dir;
-      const blocked = data?.blocked_by_risk;
-      const badge  = blocked ? '<span style="color:#e05260;font-size:10px;">风控</span>'
-                             : (data?.requires_approval ? '<span style="color:#f0b429;font-size:10px;">待确认</span>' : '');
+    const selectedSymbol = String(document.getElementById('signal-symbol')?.value || '').trim();
+    const symbols = Array.from(new Set([...DEFAULT_SIGNAL_SYMBOLS, ...(selectedSymbol ? [selectedSymbol] : [])]));
+    box.innerHTML = normalizeUiText(symbols.map((sym) => {
+      const data = state.latestSignals[sym] || null;
+      const hasData = !!(data && (data.timestamp || data.direction || data.confidence != null));
+      const dir = hasData ? String(data?.direction || 'FLAT').toUpperCase() : 'EMPTY';
+      const barDir = hasData ? (['LONG', 'SHORT'].includes(dir) ? dir : 'FLAT') : 'FLAT';
+      const conf = hasData ? Math.min(100, Math.round(Number(data?.confidence || 0) * 100)) : 0;
+      const label = hasData ? ({ LONG:'看多', SHORT:'看空', FLAT:'持平' }[dir] || dir) : '待刷新';
+      const blocked = !!data?.blocked_by_risk;
+      const waitingApproval = !!data?.requires_approval;
+      const badge = blocked
+        ? '<span class="signal-mini-flag is-risk">风控</span>'
+        : (waitingApproval ? '<span class="signal-mini-flag is-wait">待确认</span>' : '');
+      const confText = hasData ? `${conf}%` : '--';
       return `<div class="ai-signal-mini-row">
         <span class="signal-mini-sym">${esc(sym.split('/')[0])}</span>
-        <span class="signal-mini-dir ${dir}">${label}${badge}</span>
-        <div class="signal-mini-bar"><div class="signal-mini-bar-fill ${dir}" style="width:${conf}%;"></div></div>
-        <span class="signal-mini-conf">${conf}%</span>
+        <span class="signal-mini-dir ${dir}"><span class="signal-mini-dir-label">${label}</span>${badge}</span>
+        <div class="signal-mini-bar"><div class="signal-mini-bar-fill ${barDir}" style="width:${conf}%;"></div></div>
+        <span class="signal-mini-conf">${confText}</span>
       </div>`;
     }).join(''));
     normalizeDomText(box);
@@ -1091,15 +1156,56 @@
     if (state.signalLoading) return;
     state.signalLoading = true;
     const statusEl = document.getElementById('signal-status');
-    if (statusEl) statusEl.textContent = '刷新中..';
+    const selectedSymbol = String(symbol || document.getElementById('signal-symbol')?.value || 'BTC/USDT').trim() || 'BTC/USDT';
+    const watchlist = Array.from(new Set([...DEFAULT_SIGNAL_SYMBOLS, selectedSymbol]));
+    if (statusEl) statusEl.textContent = `刷新 ${watchlist.length} 个币种...`;
+    renderSignalMini();
     try {
-      const sym = symbol || String(document.getElementById('signal-symbol')?.value || 'BTC/USDT');
-      const data = await aiApi(`/signals/latest?symbol=${encodeURIComponent(sym)}`, { timeoutMs: 15000 });
-      state.latestSignals[sym] = data;
+      const results = await Promise.all(watchlist.map(async (sym) => {
+        try {
+          const data = await aiApi(`/signals/latest?symbol=${encodeURIComponent(sym)}`, { timeoutMs: 15000 });
+          return { sym, data, error: null };
+        } catch (err) {
+          return { sym, data: null, error: err };
+        }
+      }));
+      let successCount = 0;
+      let latestTs = '';
+      results.forEach(({ sym, data, error }) => {
+        if (error) {
+          state.latestSignals[sym] = {
+            ...(state.latestSignals[sym] || {}),
+            symbol: sym,
+            error: String(error?.message || error || ''),
+          };
+          return;
+        }
+        successCount += 1;
+        state.latestSignals[sym] = {
+          ...(data || {}),
+          symbol: sym,
+          error: '',
+        };
+        const ts = String(data?.timestamp || '').trim();
+        if (!ts) return;
+        if (!latestTs) {
+          latestTs = ts;
+          return;
+        }
+        const currentTs = parseTs(ts);
+        const bestTs = parseTs(latestTs);
+        if (currentTs && (!bestTs || currentTs.getTime() > bestTs.getTime())) {
+          latestTs = ts;
+        }
+      });
       renderSignalMini();
       renderCandidateCards();  // 更新卡片上的信号徽章
-      emitWorkbenchState('signal-mini', { symbol: sym });
-      if (statusEl) statusEl.textContent = `刷新于${fmtTs(data?.timestamp || new Date().toISOString())}`;
+      emitWorkbenchState('signal-mini', { symbol: selectedSymbol, watchlist });
+      if (statusEl) {
+        statusEl.textContent = successCount > 0
+          ? `已刷新 ${successCount}/${watchlist.length} 个，最近 ${fmtTs(latestTs || new Date().toISOString())}`
+          : `信号失败：${watchlist.length} 个币种均未返回`;
+      }
     } catch (err) {
       if (statusEl) statusEl.textContent = `信号失败: ${err.message}`;
     } finally {
@@ -2664,7 +2770,13 @@
 
   async function refreshWorkbench(selectProposalId = '', selectCandidateId = '') {
     await loadRuntimeConfig();
-    await Promise.all([loadProposals(selectProposalId), loadCandidates(selectCandidateId), loadPendingApprovals(), loadDataReadiness().catch(() => null)]);
+    await Promise.all([
+      loadProposals(selectProposalId),
+      loadCandidates(selectCandidateId),
+      loadPendingApprovals(),
+      loadDataReadiness().catch(() => null),
+      loadLiveDecisionActivitySummary().catch(() => null),
+    ]);
     applyWorkbenchSelection(selectProposalId);
     normalizeDomText(document.getElementById('ai-research'));
     emitWorkbenchState('refresh-workbench');
@@ -3265,9 +3377,11 @@
     clearInterval(state.signalTimer);
     clearInterval(state.refreshTimer);
     clearInterval(state.liveSignalTimer);
+    clearTimeout(state.liveDecisionActivityRetryTimer);
     state.signalTimer = null;
     state.refreshTimer = null;
     state.liveSignalTimer = null;
+    state.liveDecisionActivityRetryTimer = null;
   }
 
   function isAiResearchActive() {
