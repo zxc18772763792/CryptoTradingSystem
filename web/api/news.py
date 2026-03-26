@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import html
 import os
 import re
 from collections import defaultdict
@@ -22,6 +21,7 @@ from core.news.eventizer.llm_glm5 import (
     batch_summarize_titles,
     extract_events_glm5_with_meta,
 )
+from core.news.text_normalizer import clean_news_text
 from core.news.eventizer.rules import SymbolMapper, load_news_rule_config
 from core.news.service.worker import process_llm_batch
 from core.news.storage import db as news_db
@@ -327,13 +327,7 @@ def _canonical_url(url: Any) -> str:
 
 
 def _clean_display_text(value: Any) -> str:
-    text = html.unescape(str(value or "").strip())
-    if not text:
-        return ""
-    text = re.sub(r"(?i)<\s*br\s*/?\s*>", " ", text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    return clean_news_text(value)
 
 
 def _display_title_core(value: Any, max_len: int = 96) -> str:

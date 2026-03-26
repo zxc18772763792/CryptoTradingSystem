@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import html
 import math
 import os
 import re
@@ -16,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from config.settings import settings
+from core.news.text_normalizer import clean_news_text
 from core.news.storage.models import (
     EventSchema,
     NewsBase,
@@ -140,13 +140,7 @@ def _canonical_title(value: Any) -> str:
 
 
 def _strip_html_text(value: Any) -> str:
-    text = html.unescape(str(value or "").strip())
-    if not text:
-        return ""
-    text = re.sub(r"(?i)<\s*br\s*/?\s*>", " ", text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    return clean_news_text(value)
 
 
 def _title_bucket_key(title: Any, published_at: datetime) -> str:
@@ -575,6 +569,43 @@ async def save_news_raw_summaries(rows: List[Dict[str, Any]]) -> Dict[str, int]:
         await session.flush()
 
     return {"updated_count": updated_count, "skipped_count": skipped_count}
+
+
+async def repair_news_raw_texts(since: Optional[datetime] = None, limit: int = 5000) -> Dict[str, int]:
+    """Repair mojibake in stored raw news titles and persisted summaries."""
+    max_rows = max(1, min(int(limit or 5000), 20000))
+    since_ts = parse_any_datetime(since) if since else None
+    scanned_count = 0
+    updated_count = 0
+
+    async with news_session_scope() as session:
+        stmt = select(NewsRaw).order_by(NewsRaw.published_at.desc()).limit(max_rows)
+        if since_ts:
+            stmt = stmt.where(NewsRaw.published_at >= since_ts).order_by(NewsRaw.published_at.desc()).limit(max_rows)
+        rows = (await session.execute(stmt)).scalars().all()
+        for row in rows:
+            scanned_count += 1
+            changed = False
+
+            cleaned_title = _strip_html_text(row.title)
+            if cleaned_title and cleaned_title != str(row.title or ""):
+                row.title = cleaned_title
+                changed = True
+
+            payload = dict(row.payload or {})
+            existing_summary = payload.get("summary_title")
+            cleaned_summary = _strip_html_text(existing_summary)
+            if cleaned_summary and cleaned_summary != str(existing_summary or ""):
+                payload["summary_title"] = cleaned_summary[:220]
+                changed = True
+
+            if changed:
+                row.payload = payload
+                updated_count += 1
+
+        await session.flush()
+
+    return {"scanned_count": scanned_count, "updated_count": updated_count}
 
 
 async def list_llm_task_status(raw_ids: List[int]) -> Dict[int, str]:

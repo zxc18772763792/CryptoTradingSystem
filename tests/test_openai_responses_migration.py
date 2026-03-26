@@ -290,3 +290,19 @@ def test_news_feed_summarize_cfg_uses_llm_defaults_when_env_absent(monkeypatch):
 
     assert effective["llm"]["summarize_batch_size"] == 6
     assert effective["llm"]["summarize_timeout_sec"] == 20
+
+
+def test_clean_news_text_repairs_utf8_mojibake():
+    from core.news.text_normalizer import clean_news_text
+
+    text = "ãéæè¯å¸ï¼æ²¹ä»·æ³¢å¨ä¸è¶³ä»¥ä¿ä½¿ç¾èå¨æ¿è¿åºå¯¹ã"
+
+    assert clean_news_text(text) == "【道明证券：油价波动不足以促使美联储激进应对】"
+
+
+def test_clean_news_text_preserves_normal_non_ascii_text():
+    from core.news.text_normalizer import clean_news_text
+
+    text = "Česká advokátní komora podala žalobu na advokáta"
+
+    assert clean_news_text(text) == text
