@@ -76,6 +76,7 @@
         if (key === "retry") return "重试中";
         if (key === "failed") return "处理失败";
         if (key === "done_no_event") return "已处理无事件";
+        if (key === "summarized_no_event") return "已修补待结构化";
         if (key === "skipped_low_importance") return "低优先未入队";
         if (key === "not_queued") return "未入队";
         if (key === "structured_event") return "已结构化";
@@ -142,6 +143,7 @@
                 retry: 0,
                 failed: 0,
                 done_no_event: 0,
+                summarized_no_event: 0,
                 skipped_low_importance: 0,
                 not_queued: 0,
                 unknown_unstructured: 0,
@@ -305,7 +307,7 @@
         const latestEventAt = base?.latest_event_at || state.brief?.latest_event_at || null;
         const stats = summaryMetrics();
         const breakdown = latest?.feed_stats?.unstructured_breakdown || stats?.unstructured_breakdown || {};
-        const breakdownText = `待入模 ${Number(breakdown.pending || 0)} | 处理中 ${Number(breakdown.running || 0)} | 重试 ${Number(breakdown.retry || 0)} | 失败 ${Number(breakdown.failed || 0)} | done无事件 ${Number(breakdown.done_no_event || 0)} | 低优先未入队 ${Number(breakdown.skipped_low_importance || 0)} | 未入队 ${Number(breakdown.not_queued || 0)}`;
+        const breakdownText = `待入模 ${Number(breakdown.pending || 0)} | 处理中 ${Number(breakdown.running || 0)} | 重试 ${Number(breakdown.retry || 0)} | 失败 ${Number(breakdown.failed || 0)} | 已修补 ${Number(breakdown.summarized_no_event || 0)} | done无事件 ${Number(breakdown.done_no_event || 0)} | 低优先未入队 ${Number(breakdown.skipped_low_importance || 0)} | 未入队 ${Number(breakdown.not_queued || 0)}`;
         if (el("news-events-count")) el("news-events-count").textContent = String(stats.total);
         if (el("news-positive-count")) el("news-positive-count").textContent = String(stats.sentiment.positive);
         if (el("news-neutral-count")) el("news-neutral-count").textContent = String(stats.sentiment.neutral);

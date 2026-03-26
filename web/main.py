@@ -30,6 +30,10 @@ if settings.ZHIPU_BASE_URL:
     os.environ["ZHIPU_BASE_URL"] = settings.ZHIPU_BASE_URL
 if settings.ZHIPU_MODEL:
     os.environ["ZHIPU_MODEL"] = settings.ZHIPU_MODEL
+if settings.OPENAI_API_KEY:
+    os.environ["OPENAI_API_KEY"] = settings.OPENAI_API_KEY
+if settings.OPENAI_BASE_URL:
+    os.environ["OPENAI_BASE_URL"] = settings.OPENAI_BASE_URL
 
 from core.data import data_storage, second_level_backfill_manager
 from core.exchanges import exchange_manager
@@ -360,8 +364,10 @@ async def _news_llm_worker(app: FastAPI, stop_event: asyncio.Event) -> None:
                 cfg = news_api.load_news_cfg()
                 app.state.news_cfg = cfg
             result = await news_api.process_llm_batch(cfg, limit=_NEWS_LLM_BATCH)
+            summary_repair = await news_api.repair_recent_news_summaries(cfg)
             app.state.news_last_llm_batch = {
                 **_safe_json(result),
+                "summary_repair": _safe_json(summary_repair),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "limit": _NEWS_LLM_BATCH,
             }

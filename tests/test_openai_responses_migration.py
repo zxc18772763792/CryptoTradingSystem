@@ -292,6 +292,143 @@ def test_news_feed_summarize_cfg_uses_llm_defaults_when_env_absent(monkeypatch):
     assert effective["llm"]["summarize_timeout_sec"] == 20
 
 
+def test_failed_unstructured_with_llm_summary_is_treated_as_repaired():
+    import web.api.news as module
+
+    status = module._derive_unstructured_processing_status(
+        {"payload": {"summary_source": "openai_responses"}},
+        "failed",
+        35,
+    )
+
+    assert status == "summarized_no_event"
+
+
+def test_apply_display_summaries_preserves_persisted_event_translation():
+    import web.api.news as module
+
+    rows = module._apply_display_summaries(
+        [
+            {
+                "has_event": True,
+                "title": "Bitcoin ETF approved by SEC",
+                "sentiment": 1,
+                "summary_title": "比特币 ETF 获批",
+                "summary_sentiment": "positive",
+                "summary_source": "openai_responses",
+            }
+        ]
+    )
+
+    assert rows[0]["summary_title"] == "比特币 ETF 获批"
+    assert rows[0]["summary_sentiment"] == "positive"
+    assert rows[0]["summary_source"] == "openai_responses"
+
+
+def test_build_latest_feed_summarize_persists_event_translation(monkeypatch):
+    import web.api.news as module
+
+    raw_row = {
+        "id": 1,
+        "source": "jin10",
+        "title": "Bitcoin ETF approved by SEC",
+        "url": "https://example.test/news/1",
+        "content": "ETF approval lifts crypto market sentiment.",
+        "published_at": "2026-03-26T00:00:00Z",
+        "payload": {"provider": "jin10", "importance_score": 80},
+    }
+    event_row = {
+        "id": 11,
+        "event_id": "evt-1",
+        "ts": "2026-03-26T00:00:00Z",
+        "symbol": "BTCUSDT",
+        "event_type": "etf",
+        "sentiment": 1,
+        "impact_score": 0.88,
+        "model_source": "llm",
+        "raw_news_id": 1,
+        "evidence": {
+            "title": "Bitcoin ETF approved by SEC",
+            "url": "https://example.test/news/1",
+            "source": "jin10",
+        },
+        "payload": {"provider": "jin10"},
+    }
+    saved = {"raw": None, "event": None}
+
+    async def fake_list_news_raw(*, since=None, limit=0):
+        return [raw_row]
+
+    async def fake_list_events(*, symbol=None, since=None, limit=0):
+        return [event_row]
+
+    async def fake_list_llm_task_status(raw_ids):
+        return {1: "done"}
+
+    async def fake_save_news_raw_summaries(rows):
+        saved["raw"] = list(rows)
+        return {"updated_count": len(rows), "skipped_count": 0}
+
+    async def fake_save_news_event_summaries(rows):
+        saved["event"] = list(rows)
+        return {"updated_count": len(rows), "skipped_count": 0}
+
+    monkeypatch.setattr(module.news_db, "list_news_raw", fake_list_news_raw)
+    monkeypatch.setattr(module.news_db, "list_events", fake_list_events)
+    monkeypatch.setattr(module.news_db, "list_llm_task_status", fake_list_llm_task_status)
+    monkeypatch.setattr(module.news_db, "save_news_raw_summaries", fake_save_news_raw_summaries)
+    monkeypatch.setattr(module.news_db, "save_news_event_summaries", fake_save_news_event_summaries)
+    monkeypatch.setattr(
+        module,
+        "batch_summarize_titles",
+        lambda titles, cfg, max_length=60: [
+            {"summary": "比特币 ETF 获批，市场偏利好", "sentiment": "positive", "source": "openai_responses"}
+            for _ in titles
+        ],
+    )
+
+    result = asyncio.run(
+        module.build_latest_feed(
+            cfg={
+                "llm": {
+                    "provider": "openai",
+                    "model": "gpt-5.1-codex-mini",
+                    "summarize_limit": 4,
+                    "summarize_batch_size": 2,
+                    "summarize_timeout_sec": 10,
+                },
+                "symbols": {
+                    "BTCUSDT": {"canonical": "BTCUSDT", "aliases": ["BTC", "BTCUSDT"]},
+                },
+            },
+            symbol=None,
+            hours=24,
+            limit=10,
+            summarize=True,
+        )
+    )
+
+    assert result["items"][0]["has_event"] is True
+    assert result["items"][0]["summary_title"] == "比特币 ETF 获批，市场偏利好"
+    assert result["items"][0]["summary_source"] == "openai_responses"
+    assert saved["event"] == [
+        {
+            "event_id": "evt-1",
+            "summary_title": "比特币 ETF 获批，市场偏利好",
+            "summary_sentiment": "positive",
+            "summary_source": "openai_responses",
+        }
+    ]
+    assert saved["raw"] == [
+        {
+            "raw_news_id": 1,
+            "summary_title": "比特币 ETF 获批，市场偏利好",
+            "summary_sentiment": "positive",
+            "summary_source": "openai_responses",
+        }
+    ]
+
+
 def test_clean_news_text_repairs_utf8_mojibake():
     from core.news.text_normalizer import clean_news_text
 

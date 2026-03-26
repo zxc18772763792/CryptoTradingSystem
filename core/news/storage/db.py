@@ -186,6 +186,17 @@ def _importance_score(source: str, title: str, content: str, payload: Dict[str, 
     return max(0, min(int(score), 100))
 
 
+def _normalize_summary_sentiment(value: Any) -> str:
+    sentiment = str(value or "neutral").strip().lower()
+    if sentiment not in {"positive", "negative", "neutral"}:
+        return "neutral"
+    return sentiment
+
+
+def _normalize_summary_source(value: Any) -> str:
+    return str(value or "").strip().lower() or "unknown"
+
+
 def _latency_seconds(published_at: datetime, fetched_at: datetime) -> float:
     return max(0.0, round((fetched_at - published_at).total_seconds(), 3))
 
@@ -514,10 +525,8 @@ async def save_news_raw_summaries(rows: List[Dict[str, Any]]) -> Dict[str, int]:
             continue
         summary_title = summary_title[:220]
 
-        sentiment = str(row.get("summary_sentiment") or row.get("sentiment") or "neutral").strip().lower()
-        if sentiment not in {"positive", "negative", "neutral"}:
-            sentiment = "neutral"
-        summary_source = str(row.get("summary_source") or row.get("source") or "").strip().lower() or "unknown"
+        sentiment = _normalize_summary_sentiment(row.get("summary_sentiment") or row.get("sentiment") or "neutral")
+        summary_source = _normalize_summary_source(row.get("summary_source") or row.get("source") or "")
 
         existing = normalized.get(raw_key)
         if existing:
@@ -553,14 +562,91 @@ async def save_news_raw_summaries(rows: List[Dict[str, Any]]) -> Dict[str, int]:
                 continue
 
             payload = dict(db_row.payload or {})
-            existing_source = str(payload.get("summary_source") or "").strip().lower()
-            incoming_source = str(incoming.get("summary_source") or "").strip().lower()
+            existing_source = _normalize_summary_source(payload.get("summary_source") or "")
+            incoming_source = _normalize_summary_source(incoming.get("summary_source") or "")
             if _is_llm_summary_source(existing_source) and not _is_llm_summary_source(incoming_source):
                 skipped_count += 1
                 continue
 
             payload["summary_title"] = incoming.get("summary_title") or ""
-            payload["summary_sentiment"] = incoming.get("summary_sentiment") or "neutral"
+            payload["summary_sentiment"] = _normalize_summary_sentiment(incoming.get("summary_sentiment") or "neutral")
+            payload["summary_source"] = incoming_source or "unknown"
+            payload["summary_updated_at"] = now_iso
+            db_row.payload = payload
+            updated_count += 1
+
+        await session.flush()
+
+    return {"updated_count": updated_count, "skipped_count": skipped_count}
+
+
+async def save_news_event_summaries(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Persist translated summaries into news_events.payload with LLM-priority semantics."""
+    if not rows:
+        return {"updated_count": 0, "skipped_count": 0}
+
+    normalized: Dict[str, Dict[str, Any]] = {}
+    skipped_count = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            skipped_count += 1
+            continue
+        event_id = str(row.get("event_id") or row.get("id") or "").strip()
+        if not event_id:
+            skipped_count += 1
+            continue
+
+        summary_title = _strip_html_text(row.get("summary_title") or row.get("summary"))
+        if not summary_title:
+            skipped_count += 1
+            continue
+        summary_title = summary_title[:220]
+
+        sentiment = _normalize_summary_sentiment(row.get("summary_sentiment") or row.get("sentiment") or "neutral")
+        summary_source = _normalize_summary_source(row.get("summary_source") or row.get("source") or "")
+
+        existing = normalized.get(event_id)
+        if existing:
+            if _is_llm_summary_source(existing.get("summary_source")) and not _is_llm_summary_source(summary_source):
+                continue
+            if _is_llm_summary_source(summary_source) and not _is_llm_summary_source(existing.get("summary_source")):
+                normalized[event_id] = {
+                    "summary_title": summary_title,
+                    "summary_sentiment": sentiment,
+                    "summary_source": summary_source,
+                }
+            continue
+
+        normalized[event_id] = {
+            "summary_title": summary_title,
+            "summary_sentiment": sentiment,
+            "summary_source": summary_source,
+        }
+
+    if not normalized:
+        return {"updated_count": 0, "skipped_count": skipped_count}
+
+    now_iso = _utc_iso(datetime.now(timezone.utc))
+    updated_count = 0
+    async with news_session_scope() as session:
+        db_rows = (
+            await session.execute(select(NewsEvent).where(NewsEvent.event_id.in_(list(normalized.keys()))))
+        ).scalars().all()
+        for db_row in db_rows:
+            incoming = normalized.get(str(db_row.event_id or "").strip())
+            if not incoming:
+                skipped_count += 1
+                continue
+
+            payload = dict(db_row.payload or {})
+            existing_source = _normalize_summary_source(payload.get("summary_source") or "")
+            incoming_source = _normalize_summary_source(incoming.get("summary_source") or "")
+            if _is_llm_summary_source(existing_source) and not _is_llm_summary_source(incoming_source):
+                skipped_count += 1
+                continue
+
+            payload["summary_title"] = incoming.get("summary_title") or ""
+            payload["summary_sentiment"] = _normalize_summary_sentiment(incoming.get("summary_sentiment") or "neutral")
             payload["summary_source"] = incoming_source or "unknown"
             payload["summary_updated_at"] = now_iso
             db_row.payload = payload

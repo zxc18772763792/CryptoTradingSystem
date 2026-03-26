@@ -15,6 +15,7 @@ from loguru import logger
 import pandas as pd
 from pydantic import BaseModel, Field
 
+from config.settings import settings
 from core.news.collectors.manager import MultiSourceNewsCollector
 from core.news.eventizer.llm_glm5 import (
     _summarize_fallback,
@@ -94,6 +95,15 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name) or default)
     except Exception:
         return int(default)
+
+
+def _news_llm_enabled() -> bool:
+    return bool(
+        str(os.environ.get("OPENAI_API_KEY") or "").strip()
+        or str(getattr(settings, "OPENAI_API_KEY", "") or "").strip()
+        or str(os.environ.get("ZHIPU_API_KEY") or "").strip()
+        or str(getattr(settings, "ZHIPU_API_KEY", "") or "").strip()
+    )
 
 
 def _cache_key(*parts: Any) -> str:
@@ -176,7 +186,7 @@ def _news_runtime_snapshot(request: Request) -> Dict[str, Any]:
     return {
         "service": "web_news",
         "timestamp": _now_utc().isoformat(),
-        "llm_enabled": bool(os.environ.get("ZHIPU_API_KEY")),
+        "llm_enabled": _news_llm_enabled(),
         "sync_pull_llm": _env_bool("NEWS_PULL_SYNC_LLM", False),
         "background_pull_enabled": bool(getattr(request.app.state, "news_task", None)),
         "background_llm_enabled": bool(getattr(request.app.state, "news_llm_task", None)),
@@ -289,15 +299,37 @@ def _llm_min_importance() -> int:
     return max(0, min(100, _env_int("NEWS_LLM_MIN_IMPORTANCE", 35)))
 
 
+def _summary_fields_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    summary_title = _clean_display_text(payload.get("summary_title"))
+    if not summary_title:
+        return {}
+    summary_sentiment = str(payload.get("summary_sentiment") or "neutral").strip().lower()
+    if summary_sentiment not in {"positive", "negative", "neutral"}:
+        summary_sentiment = "neutral"
+    summary_source = str(payload.get("summary_source") or "").strip().lower() or "stored"
+    return {
+        "summary_title": summary_title,
+        "summary_sentiment": summary_sentiment,
+        "summary_source": summary_source,
+    }
+
+
 def _derive_unstructured_processing_status(raw_row: Dict[str, Any], llm_task_status: str, min_importance: int) -> str:
+    payload = raw_row.get("payload") if isinstance(raw_row.get("payload"), dict) else {}
+    summary_source = str(payload.get("summary_source") or "").strip().lower()
     status = str(llm_task_status or "").strip().lower()
     if status:
         if status == "done":
             return "done_no_event"
+        if status in {"retry", "failed"} and _is_llm_summary_source(summary_source):
+            return "summarized_no_event"
         if status in {"pending", "running", "retry", "failed"}:
             return status
         return status
-    payload = raw_row.get("payload") if isinstance(raw_row.get("payload"), dict) else {}
+    if _is_llm_summary_source(summary_source):
+        return "summarized_no_event"
     importance = int(payload.get("importance_score") or 0)
     if importance < int(min_importance):
         return "skipped_low_importance"
@@ -476,7 +508,7 @@ def _event_as_feed_item(event: Dict[str, Any]) -> Dict[str, Any]:
     evidence = event.get("evidence") or {}
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
     provider = str(payload.get("provider") or "event")
-    return {
+    out = {
         "id": f"event-{event.get('id')}",
         "raw_news_id": event.get("raw_news_id"),
         "published_at": event.get("ts"),
@@ -499,16 +531,16 @@ def _event_as_feed_item(event: Dict[str, Any]) -> Dict[str, Any]:
         "related_providers": [provider] if provider else [],
         "event_count": 1,
     }
+    persisted_summary = _summary_fields_from_payload(payload)
+    if persisted_summary:
+        out.update(persisted_summary)
+    return out
 
 
 def _raw_as_feed_item(raw: Dict[str, Any], event: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
     provider = str(payload.get("provider") or "raw")
-    persisted_summary = _clean_display_text(payload.get("summary_title"))
-    persisted_sentiment = str(payload.get("summary_sentiment") or "neutral").strip().lower()
-    if persisted_sentiment not in {"positive", "negative", "neutral"}:
-        persisted_sentiment = "neutral"
-    persisted_source = str(payload.get("summary_source") or "").strip().lower()
+    persisted_summary = _summary_fields_from_payload(payload)
     out = {
         "id": f"raw-{raw.get('id')}",
         "raw_news_id": raw.get("id"),
@@ -533,9 +565,7 @@ def _raw_as_feed_item(raw: Dict[str, Any], event: Optional[Dict[str, Any]]) -> D
         "event_count": 0,
     }
     if persisted_summary:
-        out["summary_title"] = persisted_summary
-        out["summary_sentiment"] = persisted_sentiment
-        out["summary_source"] = persisted_source or "stored"
+        out.update(persisted_summary)
     if not event:
         return out
 
@@ -580,6 +610,7 @@ def _feed_sentiment_summary(items: List[Dict[str, Any]]) -> Dict[str, Any]:
         "retry": 0,
         "failed": 0,
         "done_no_event": 0,
+        "summarized_no_event": 0,
         "skipped_low_importance": 0,
         "not_queued": 0,
         "unknown_unstructured": 0,
@@ -672,6 +703,9 @@ def _merge_event_group_into_item(item: Dict[str, Any], events: List[Dict[str, An
     item["related_event_types"] = _sorted_unique_texts([event.get("event_type") for event in rows])
     item["related_providers"] = _sorted_unique_texts(providers or [item.get("provider")])
     item["event_count"] = len(rows)
+    persisted_summary = _summary_fields_from_payload(primary.get("payload") if isinstance(primary.get("payload"), dict) else {})
+    if persisted_summary:
+        item.update(persisted_summary)
     return item
 
 
@@ -681,6 +715,14 @@ def _apply_display_summaries(items: List[Dict[str, Any]]) -> List[Dict[str, Any]
         title = _clean_display_text(item.get("title"))
         if bool(item.get("has_event")):
             sentiment = int(item.get("sentiment") or 0)
+            if item.get("summary_title"):
+                item["summary_title"] = _display_title_core(item.get("summary_title"))
+                summary_sentiment = str(item.get("summary_sentiment") or "").strip().lower()
+                if summary_sentiment not in {"positive", "negative", "neutral"}:
+                    summary_sentiment = "positive" if sentiment > 0 else "negative" if sentiment < 0 else "neutral"
+                item["summary_sentiment"] = summary_sentiment
+                item["summary_source"] = str(item.get("summary_source") or "event")
+                continue
             item["summary_title"] = _display_title_core(title)
             item["summary_sentiment"] = "positive" if sentiment > 0 else "negative" if sentiment < 0 else "neutral"
             item["summary_source"] = str(item.get("summary_source") or "event")
@@ -818,6 +860,185 @@ def _feed_summarize_cfg(cfg: Dict[str, Any], *, limit: int) -> Dict[str, Any]:
     llm_cfg["summarize_timeout_sec"] = max(3, min(int(llm_cfg.get("summarize_timeout_sec") or timeout_sec), timeout_sec))
     effective["llm"] = llm_cfg
     return effective
+
+
+def _needs_llm_summary(item: Dict[str, Any]) -> bool:
+    source = str(item.get("summary_source") or "").strip().lower()
+    summary_title = _clean_display_text(item.get("summary_title"))
+    if summary_title and _is_llm_summary_source(source):
+        return False
+    if summary_title and not _is_fallback_summary_source(source):
+        return False
+    return bool(_clean_display_text(item.get("title")))
+
+
+async def repair_recent_news_summaries(
+    cfg: Dict[str, Any],
+    *,
+    hours: Optional[int] = None,
+    raw_limit: Optional[int] = None,
+    event_limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    hours = max(6, min(int(hours or _env_int("NEWS_SUMMARY_REPAIR_HOURS", 24 * 30)), 24 * 90))
+    raw_limit = max(0, min(int(raw_limit if raw_limit is not None else _env_int("NEWS_SUMMARY_REPAIR_RAW_LIMIT", 10)), 80))
+    event_limit = max(0, min(int(event_limit if event_limit is not None else _env_int("NEWS_SUMMARY_REPAIR_EVENT_LIMIT", 10)), 80))
+    total_limit = raw_limit + event_limit
+    if total_limit <= 0:
+        return {
+            "hours": hours,
+            "raw_candidates": 0,
+            "event_candidates": 0,
+            "requested": 0,
+            "updated_raw_count": 0,
+            "updated_event_count": 0,
+            "skipped_non_llm": 0,
+            "errors": [],
+        }
+
+    since = _now_utc() - timedelta(hours=hours)
+    raw_scan_limit = max(80, raw_limit * max(4, _env_int("NEWS_SUMMARY_REPAIR_SCAN_MULTIPLIER", 8)))
+    event_scan_limit = max(80, event_limit * max(4, _env_int("NEWS_SUMMARY_REPAIR_SCAN_MULTIPLIER", 8)))
+    results = await asyncio.gather(
+        news_db.list_news_raw(since=since, limit=raw_scan_limit),
+        news_db.list_events(since=since, limit=event_scan_limit),
+        return_exceptions=True,
+    )
+    raw_rows_result, event_rows_result = results
+    errors: List[str] = []
+    raw_rows = [] if isinstance(raw_rows_result, Exception) else list(raw_rows_result or [])
+    event_rows = [] if isinstance(event_rows_result, Exception) else list(event_rows_result or [])
+    if isinstance(raw_rows_result, Exception):
+        errors.append(f"list_news_raw={type(raw_rows_result).__name__}")
+    if isinstance(event_rows_result, Exception):
+        errors.append(f"list_events={type(event_rows_result).__name__}")
+
+    keywords = _topic_keywords(cfg)
+    anchor_keywords = _topic_anchor_keywords(cfg)
+    raw_candidates: List[Dict[str, Any]] = []
+    if raw_limit > 0:
+        for raw in raw_rows:
+            if len(raw_candidates) >= raw_limit:
+                break
+            if not _is_relevant_news(raw, keywords, anchor_keywords):
+                continue
+            feed_item = _raw_as_feed_item(raw, None)
+            if not _needs_llm_summary(feed_item):
+                continue
+            title = _clean_display_text(raw.get("title"))
+            if not title:
+                continue
+            raw_candidates.append(
+                {
+                    "raw_news_id": int(raw.get("id")),
+                    "title": title,
+                }
+            )
+
+    event_candidates: List[Dict[str, Any]] = []
+    if event_limit > 0:
+        for event in event_rows:
+            if len(event_candidates) >= event_limit:
+                break
+            feed_item = _event_as_feed_item(event)
+            if not _needs_llm_summary(feed_item):
+                continue
+            title = _clean_display_text(feed_item.get("title"))
+            if not title:
+                continue
+            event_candidates.append(
+                {
+                    "event_id": str(event.get("event_id") or ""),
+                    "raw_news_id": event.get("raw_news_id"),
+                    "title": title,
+                }
+            )
+
+    targets: List[Dict[str, Any]] = []
+    for item in raw_candidates:
+        targets.append({"kind": "raw", **item})
+    for item in event_candidates:
+        targets.append({"kind": "event", **item})
+
+    if not targets:
+        return {
+            "hours": hours,
+            "raw_candidates": len(raw_candidates),
+            "event_candidates": len(event_candidates),
+            "requested": 0,
+            "updated_raw_count": 0,
+            "updated_event_count": 0,
+            "skipped_non_llm": 0,
+            "errors": errors,
+        }
+
+    summary_cfg = dict(cfg or {})
+    llm_cfg = dict(summary_cfg.get("llm") or {})
+    timeout_sec = max(6, min(int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 24), _env_int("NEWS_SUMMARY_REPAIR_TIMEOUT_SEC", 30)))
+    batch_size = max(1, min(int(llm_cfg.get("summarize_batch_size") or 6), _env_int("NEWS_SUMMARY_REPAIR_BATCH_SIZE", 12), len(targets)))
+    llm_cfg["summarize_limit"] = len(targets)
+    llm_cfg["summarize_batch_size"] = batch_size
+    llm_cfg["summarize_timeout_sec"] = timeout_sec
+    summary_cfg["llm"] = llm_cfg
+
+    try:
+        summarized_results = await asyncio.wait_for(
+            asyncio.to_thread(batch_summarize_titles, [item["title"] for item in targets], summary_cfg, 60),
+            timeout=timeout_sec + 2,
+        )
+    except Exception as exc:
+        logger.warning(f"background summary repair failed: {type(exc).__name__}: {exc}")
+        return {
+            "hours": hours,
+            "raw_candidates": len(raw_candidates),
+            "event_candidates": len(event_candidates),
+            "requested": len(targets),
+            "updated_raw_count": 0,
+            "updated_event_count": 0,
+            "skipped_non_llm": len(targets),
+            "errors": errors + [f"summarize={type(exc).__name__}"],
+        }
+
+    raw_updates: List[Dict[str, Any]] = []
+    event_updates: List[Dict[str, Any]] = []
+    skipped_non_llm = 0
+    for target, result in zip(targets, summarized_results):
+        result_source = str((result or {}).get("source") or "").strip().lower()
+        if not _is_llm_summary_source(result_source):
+            skipped_non_llm += 1
+            continue
+        row = {
+            "summary_title": (result or {}).get("summary") or target.get("title") or "",
+            "summary_sentiment": (result or {}).get("sentiment") or "neutral",
+            "summary_source": result_source,
+        }
+        if target.get("kind") == "raw" and target.get("raw_news_id"):
+            raw_updates.append({"raw_news_id": int(target["raw_news_id"]), **row})
+            continue
+        if target.get("kind") == "event" and str(target.get("event_id") or "").strip():
+            event_updates.append({"event_id": str(target["event_id"]), **row})
+            raw_news_id = target.get("raw_news_id")
+            if raw_news_id:
+                raw_updates.append({"raw_news_id": int(raw_news_id), **row})
+
+    raw_result = {"updated_count": 0, "skipped_count": 0}
+    event_result = {"updated_count": 0, "skipped_count": 0}
+    if raw_updates:
+        with contextlib.suppress(Exception):
+            raw_result = await news_db.save_news_raw_summaries(raw_updates)
+    if event_updates:
+        with contextlib.suppress(Exception):
+            event_result = await news_db.save_news_event_summaries(event_updates)
+
+    return {
+        "hours": hours,
+        "raw_candidates": len(raw_candidates),
+        "event_candidates": len(event_candidates),
+        "requested": len(targets),
+        "updated_raw_count": int(raw_result.get("updated_count") or 0),
+        "updated_event_count": int(event_result.get("updated_count") or 0),
+        "skipped_non_llm": skipped_non_llm,
+        "errors": errors,
+    }
 
 
 async def _auto_pull_if_stale(cfg: Dict[str, Any], latest_items: List[Dict[str, Any]], hours: int) -> bool:
@@ -966,8 +1187,10 @@ async def _run_manual_llm_job(request: Request, job_id: str, cfg: Dict[str, Any]
     store["jobs"][job_id] = job
     try:
         result = await process_llm_batch(cfg, limit=max(1, min(int(llm_limit or 8), 50)))
+        summary_repair = await repair_recent_news_summaries(cfg)
         payload = {
             **result,
+            "summary_repair": summary_repair,
             "timestamp": _now_utc().isoformat(),
             "source": "manual_run_once",
             "job_id": job_id,
@@ -1327,17 +1550,9 @@ async def build_latest_feed(
         summarize_timeout_sec = int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 20)
         summarize_timeout_sec = max(3, min(20, summarize_timeout_sec))
 
-        # Only summarize rows that still need summarization.
-        # If an LLM summary is already persisted, skip reprocessing.
         candidates: List[tuple[int, Dict[str, Any]]] = []
         for idx, item in enumerate(sorted_items):
-            if bool(item.get("has_event")):
-                continue
-            source = str(item.get("summary_source") or "").strip().lower()
-            title = _clean_display_text(item.get("summary_title"))
-            if title and _is_llm_summary_source(source):
-                continue
-            if title and not _is_fallback_summary_source(source):
+            if not _needs_llm_summary(item):
                 continue
             candidates.append((idx, item))
 
@@ -1359,7 +1574,8 @@ async def build_latest_feed(
                     item.setdefault("source", "api_timeout_fallback")
                     summarized_results.append(item)
 
-        persist_rows: List[Dict[str, Any]] = []
+        persist_raw_rows: List[Dict[str, Any]] = []
+        persist_event_rows: List[Dict[str, Any]] = []
         for item_idx, result in zip(target_indices, summarized_results):
             item = sorted_items[item_idx]
             existing_source = str(item.get("summary_source") or "").strip().lower()
@@ -1370,9 +1586,12 @@ async def build_latest_feed(
             item["summary_sentiment"] = result.get("sentiment", "neutral")
             item["summary_source"] = result_source or "unknown"
 
+            if not _is_llm_summary_source(result_source):
+                continue
+
             raw_id = item.get("raw_news_id")
-            if raw_id and _is_llm_summary_source(result_source):
-                persist_rows.append(
+            if raw_id:
+                persist_raw_rows.append(
                     {
                         "raw_news_id": int(raw_id),
                         "summary_title": item.get("summary_title"),
@@ -1380,10 +1599,22 @@ async def build_latest_feed(
                         "summary_source": result_source,
                     }
                 )
+            if bool(item.get("has_event")) and str(item.get("event_id") or "").strip():
+                persist_event_rows.append(
+                    {
+                        "event_id": str(item.get("event_id") or ""),
+                        "summary_title": item.get("summary_title"),
+                        "summary_sentiment": item.get("summary_sentiment"),
+                        "summary_source": result_source,
+                    }
+                )
 
-        if persist_rows:
+        if persist_raw_rows:
             with contextlib.suppress(Exception):
-                await news_db.save_news_raw_summaries(persist_rows)
+                await news_db.save_news_raw_summaries(persist_raw_rows)
+        if persist_event_rows:
+            with contextlib.suppress(Exception):
+                await news_db.save_news_event_summaries(persist_event_rows)
         summarized_set = set(target_indices)
         for idx, item in enumerate(sorted_items):
             if idx in summarized_set:
@@ -1590,7 +1821,7 @@ async def health(request: Request) -> Dict[str, Any]:
     base_payload = {
         "service": "web_news",
         "timestamp": _now_utc().isoformat(),
-        "llm_enabled": bool(os.environ.get("ZHIPU_API_KEY")),
+        "llm_enabled": _news_llm_enabled(),
         "sync_pull_llm": _env_bool("NEWS_PULL_SYNC_LLM", False),
         "background_pull_enabled": bool(getattr(request.app.state, "news_task", None)),
         "background_llm_enabled": bool(getattr(request.app.state, "news_llm_task", None)),
@@ -1835,15 +2066,18 @@ async def worker_run_once(
             "llm_queue": await news_db.get_llm_queue_stats(),
         }
     result = await process_llm_batch(cfg, limit=llm_limit)
+    summary_repair = await repair_recent_news_summaries(cfg)
     _invalidate_news_caches()
     request.app.state.news_last_llm_batch = {
         **result,
+        "summary_repair": summary_repair,
         "timestamp": _now_utc().isoformat(),
         "source": "manual_run_once",
     }
     return {
         "timestamp": _now_utc().isoformat(),
         "llm": result,
+        "summary_repair": summary_repair,
         "llm_queue": await news_db.get_llm_queue_stats(),
         "source_states": await news_db.list_source_states(),
     }
