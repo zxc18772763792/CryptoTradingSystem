@@ -6,13 +6,16 @@
   const REFRESH_INTERVAL_MS = 60000;
   const JOB_POLL_MS         = 3000;
   const PREMIUM_SOURCE_LABEL = '高级数据源';
-  const FLOW_HINT_DEFAULT = '当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。';
+  const FLOW_HINT_DEFAULT = '当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。也可以直接点击“⚡ one-click 自动研究+部署”。';
   const DEFAULT_SIGNAL_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT'];
   const AGENT_STATUS_API = '/ai/autonomous-agent/status';
   const AGENT_JOURNAL_API = '/ai/autonomous-agent/journal';
   const AGENT_START_API = '/ai/autonomous-agent/start';
   const AGENT_STOP_API = '/ai/autonomous-agent/stop';
   const AGENT_RUN_ONCE_API = '/ai/autonomous-agent/run-once';
+  const FLOW_HINT_QUICK_PATH = '当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。也可以直接点击“⚡ one-click 自动研究+部署”。';
+  const AI_UI_TIMEZONE = 'Asia/Singapore';
+  const AI_UI_TIMEZONE_LABEL = '新加坡时间 (SGT)';
 
   /* 策略类别与颜色 */
   const STRATEGY_CATEGORIES = {
@@ -83,7 +86,7 @@
     signalLoading: false,
     signalPanelCollapsed: false,
     jobPollingTimers: {},   // proposalId → intervalId
-    actionLocks: { generate: false, run: false },
+    actionLocks: { generate: false, run: false, oneclick: false },
     sortBy: 'score',        // 'score' | 'sharpe' | 'return' | 'drawdown'
     filterCategory: '',     // '' | '趋势' | '震荡' | ...
     compareCandidateIds: new Set(),
@@ -489,7 +492,7 @@
     if (!d) return '--';
     return d.toLocaleString('zh-CN', {
       hour12: false,
-      timeZone: 'Asia/Shanghai',
+      timeZone: AI_UI_TIMEZONE,
     });
   }
 
@@ -565,6 +568,7 @@
       { label: '执行裁决', value: decisionModeLabel(decisionMode), cls: decisionMode === 'enforce' ? 'is-warn' : '' },
       { label: '下单前AI复核', value: liveEnabled ? `已启用（${decisionModeLabel(liveMode)}）` : '已关闭', cls: liveEnabled ? 'is-on' : '' },
       { label: '自动交易代理', value: agentEnabled ? '已启用' : '已关闭', cls: agentEnabled ? 'is-on' : '' },
+      { label: '页面时区', value: AI_UI_TIMEZONE_LABEL, cls: '' },
     ];
     root.innerHTML = chips
       .map((chip) => `<span class="ai-runtime-chip ${chip.cls}">${esc(chip.label)}：${esc(chip.value)}</span>`)
@@ -2307,7 +2311,7 @@
         const triggered = cs?.triggered;
         const nBars = cs?.n_bars || 0;
         const msg   = cs?.message || '';
-        const checkedAt = cs?.checked_at ? new Date(cs.checked_at).toLocaleString() : '';
+        const checkedAt = cs?.checked_at ? fmtTs(cs.checked_at) : '';
         const statusHtml = cs
           ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
               <span style="font-size:12px;font-weight:700;color:${triggered ? '#e05260' : '#20bf78'};">${triggered ? '\u26a0 \u5df2\u89e6\u53d1\u8870\u51cf' : '\u2713 \u8fd0\u884c\u6b63\u5e38'}</span>
@@ -3067,20 +3071,22 @@
 
   function syncPrimaryActionButtons() {
     const generateBtn = document.getElementById('ai-generate-btn');
+    const oneClickBtn = document.getElementById('ai-oneclick-btn');
     const hintEl = document.getElementById('ai-flow-hint');
     const busy = hasActionLock();
     if (generateBtn && !state.actionLocks.generate) generateBtn.disabled = busy;
+    if (oneClickBtn && !state.actionLocks.oneclick) oneClickBtn.disabled = busy;
     if (hintEl) {
       hintEl.textContent = busy
         ? '当前有步骤正在执行，请等待当前流程完成后再继续下一步。'
-        : '当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。';
+        : FLOW_HINT_QUICK_PATH;
     }
     updateRunBtn();
     emitWorkbenchState('action-locks');
   }
 
   function setActionLock(name, locked) {
-    if (!state.actionLocks) state.actionLocks = { generate: false, run: false };
+    if (!state.actionLocks) state.actionLocks = { generate: false, run: false, oneclick: false };
     state.actionLocks[name] = !!locked;
     syncPrimaryActionButtons();
   }
@@ -3579,6 +3585,10 @@
     /* AI生成研究思路 */
     document.getElementById('ai-context-btn')?.addEventListener('click', () =>
       generateAIContext().catch(err => notify(`生成研究思路失败: ${err.message}`, true)));
+
+    /* one-click 自动研究 */
+    document.getElementById('ai-oneclick-btn')?.addEventListener('click', () =>
+      withActionLock('oneclick', () => runOneClickResearchDeploy()).catch(err => notify(`one-click 执行失败: ${err.message}`, true)));
 
     /* 待人工确认队列事件代理 */
     document.getElementById('ai-approval-list')?.addEventListener('click', e => {

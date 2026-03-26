@@ -981,13 +981,13 @@
                                     </div>
                                     
                                     <div class="research-action-group">
-                                        <div class="research-action-group-title">分模块分析</div>
-                                        <div class="inline-actions research-module-btns">
-                                            <button class="btn btn-sm" id="btn-workbench-market-state">📊 市场状态</button>
-                                            <button class="btn btn-sm" id="btn-workbench-factors">📈 因子风格</button>
-                                            <button class="btn btn-sm" id="btn-workbench-cross-asset">🔄 多币种</button>
-                                            <button class="btn btn-sm" id="btn-workbench-onchain">⛓️ 链上数据</button>
-                                            <button class="btn btn-sm" id="btn-workbench-discipline">🛡️ 纪律风控</button>
+                                    <div class="research-action-group-title">分模块分析</div>
+                                    <div class="inline-actions research-module-btns">
+                                            <button class="btn btn-primary btn-sm" id="btn-workbench-market-state">📊 市场状态</button>
+                                            <button class="btn btn-primary btn-sm" id="btn-workbench-factors">📈 因子风格</button>
+                                            <button class="btn btn-primary btn-sm" id="btn-workbench-cross-asset">🔄 多币种</button>
+                                            <button class="btn btn-primary btn-sm" id="btn-workbench-onchain">⛓️ 链上数据</button>
+                                            <button class="btn btn-primary btn-sm" id="btn-workbench-discipline">🛡️ 纪律风控</button>
                                         </div>
                                     </div>
                                 </div>
@@ -1494,6 +1494,7 @@
                     <span class="ai-runtime-chip">执行裁决：加载中</span>
                     <span class="ai-runtime-chip">下单前AI复核：加载中</span>
                     <span class="ai-runtime-chip">自动交易代理：加载中</span>
+                    <span class="ai-runtime-chip">页面时区：新加坡时间 (SGT)</span>
                 </div>
                 <div class="ai-top-intro-grid">
                     <div class="card ai-top-intro-card ai-top-intro-card-research">
@@ -1505,7 +1506,7 @@
                             </div>
                             <div class="ai-top-intro-box">
                                 <div class="ai-top-intro-box-title">怎么用</div>
-                                <div class="ai-top-intro-box-desc">1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。</div>
+                                <div class="ai-top-intro-box-desc">可按 1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署，也可以直接走 one-click 自动研究+部署。</div>
                             </div>
                             <div class="ai-top-intro-mini-grid">
                                 <div class="ai-top-intro-mini">
@@ -1827,11 +1828,30 @@
                                 <button class="btn btn-primary btn-sm" id="ai-generate-btn">2) 生成提案</button>
                                 <button class="btn btn-sm" id="ai-refresh-btn">刷新</button>
                             </div>
+                            <div class="ai-auto-trade-rail ai-oneclick-entry-rail">
+                                <div class="ai-auto-trade-rail-step">1 检查配置</div>
+                                <div class="ai-auto-trade-rail-step">2 一键研究</div>
+                                <div class="ai-auto-trade-rail-step">3 看候选</div>
+                            </div>
+                            <section class="ai-auto-step ai-oneclick-entry-card">
+                                <div class="ai-auto-step-index">⚡</div>
+                                <div class="ai-auto-step-body">
+                                    <div class="ai-auto-step-head">
+                                        <div class="ai-auto-step-title">one-click 自动研究+部署</div>
+                                        <span class="ai-review-panel-tag ai-oneclick-entry-tag">Quick Path</span>
+                                    </div>
+                                    <div class="ai-auto-step-desc">填好上面的研究目标、币种、周期后，可以一次执行生成提案 → 运行研究 → 尝试部署。执行结果和失败原因会直接显示在下面。</div>
+                                    <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
+                                        <button class="btn btn-primary btn-sm" id="ai-oneclick-btn">⚡ one-click 自动研究+部署</button>
+                                        <span class="ai-auto-step-status">适合想快速验证整个研究链路能否跑通的场景</span>
+                                    </div>
+                                </div>
+                            </section>
                             <div id="ai-planner-mode-hint" class="ai-planner-mode-hint">
                                 当前将按“自动判断”生成提案；建议先执行第 1 步生成研究思路，让第 2 步优先纳入 AI 草案。
                             </div>
                             <div id="ai-flow-hint" class="ai-flow-hint">
-                                当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。
+                                当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。也可以直接点击“⚡ one-click 自动研究+部署”。
                             </div>
                             <!-- 实时市场上下文摘要 -->
                             <div id="ai-market-context-hint" style="margin-top:5px;font-size:11px;color:#7a8fa6;min-height:14px;"></div>

@@ -2,6 +2,7 @@
   'use strict';
 
   const POLL_MS = 30000;
+  const AI_UI_TIMEZONE = 'Asia/Singapore';
   let pollTimer = null;
 
   function aiRoot() {
@@ -22,6 +23,20 @@
     }
     if (isError) console.error(message);
     else console.log(message);
+  }
+
+  function fmtAgentTs(value) {
+    if (!value) return '--';
+    try {
+      const date = new Date(value);
+      if (!Number.isFinite(date.getTime())) return String(value || '--');
+      return date.toLocaleString('zh-CN', {
+        hour12: false,
+        timeZone: AI_UI_TIMEZONE,
+      });
+    } catch (_) {
+      return String(value || '--');
+    }
   }
 
   function providerDisplayName(provider) {
@@ -132,7 +147,7 @@
     const researchLine = selectedResearch.candidate_id
       ? `${selectedResearch.strategy || '--'} / ${selectedResearch.candidate_id}`
       : '--';
-    const lastRunAt = status.last_run_at ? String(status.last_run_at).slice(0, 19) : '--';
+    const lastRunAt = fmtAgentTs(status.last_run_at);
     const lastError = String(status.last_error || '').trim();
     const modeText = cfg.allow_live ? '允许实盘' : '仅纸盘';
     const modelText = cfg.model ? `${providerDisplayName(cfg.provider || '-')}/${cfg.model}` : providerDisplayName(cfg.provider || '-');
@@ -173,7 +188,7 @@
         return;
       }
       el.innerHTML = rows.map((row) => {
-        const ts = String(row.ts || row.timestamp || '').slice(0, 19);
+        const ts = fmtAgentTs(row.ts || row.timestamp || '');
         const action = String(row.action || row.trigger || row.event || '?');
         const detail = compactText(row.decision || row.result || row.error || '', 120);
         const color = row.error || action.includes('error') ? '#f87171' : 'var(--text-muted)';
