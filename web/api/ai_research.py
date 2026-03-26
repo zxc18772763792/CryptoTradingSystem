@@ -583,20 +583,23 @@ async def retire_ai_proposal(request: Request, proposal_id: str, payload: AIReti
 @router.post("/proposals/{proposal_id}/run")
 async def run_ai_proposal_endpoint(request: Request, proposal_id: str, payload: AIProposalRunRequest):
     ensure_ai_research_runtime_state(request.app)
-    result = await run_proposal(
-        request.app,
-        proposal_id=proposal_id,
-        actor="web_ui",
-        exchange=payload.exchange,
-        symbol=payload.symbol,
-        days=payload.days,
-        commission_rate=payload.commission_rate,
-        slippage_bps=payload.slippage_bps,
-        initial_capital=payload.initial_capital,
-        background=payload.background,
-        timeframes=payload.timeframes,
-        strategies=payload.strategies,
-    )
+    try:
+        result = await run_proposal(
+            request.app,
+            proposal_id=proposal_id,
+            actor="web_ui",
+            exchange=payload.exchange,
+            symbol=payload.symbol,
+            days=payload.days,
+            commission_rate=payload.commission_rate,
+            slippage_bps=payload.slippage_bps,
+            initial_capital=payload.initial_capital,
+            background=payload.background,
+            timeframes=payload.timeframes,
+            strategies=payload.strategies,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if payload.background:
         return {
             "job": result["job"],
@@ -634,20 +637,23 @@ async def oneclick_ai_research_deploy(request: Request, payload: AIOneClickResea
     )
     proposal = generated["proposal"]
 
-    run_result = await run_proposal(
-        request.app,
-        proposal_id=str(proposal.proposal_id),
-        actor="web_ui_oneclick",
-        exchange=payload.exchange,
-        symbol=payload.symbol,
-        days=payload.days,
-        commission_rate=payload.commission_rate,
-        slippage_bps=payload.slippage_bps,
-        initial_capital=payload.initial_capital,
-        background=False,
-        timeframes=payload.timeframes,
-        strategies=payload.strategies,
-    )
+    try:
+        run_result = await run_proposal(
+            request.app,
+            proposal_id=str(proposal.proposal_id),
+            actor="web_ui_oneclick",
+            exchange=payload.exchange,
+            symbol=payload.symbol,
+            days=payload.days,
+            commission_rate=payload.commission_rate,
+            slippage_bps=payload.slippage_bps,
+            initial_capital=payload.initial_capital,
+            background=False,
+            timeframes=payload.timeframes,
+            strategies=payload.strategies,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     candidate = run_result.get("candidate")
     if candidate is None:

@@ -17,6 +17,7 @@ def test_ai_research_template_loads_phase5_modules():
     assert 'id="ai-planner-research-mode"' in template
     assert 'id="ai-planner-max-drafts"' in template
     assert 'id="ai-planner-max-backtests"' in template
+    assert 'id="ai-oneclick-feedback"' in template
     assert 'id="ai-candidate-cards"' in template
     assert "/static/js/ai_research.js" in template
     assert "/static/js/ai_research_diagnostics.js" in template
@@ -42,6 +43,10 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "renderAgentChainSummary" in agent_js
     assert "function selectProposal(" in ai_js
     assert "buildPlannerConstraints" in ai_js
+    assert "buildOneClickFailureFeedback" in ai_js
+    assert "buildOneClickSuccessFeedback" in ai_js
+    assert "renderOneClickFeedback" in ai_js
+    assert "先点“3) 运行研究”单独验证" in ai_js
     assert "provider_fallback" in ai_js
     assert 'option value="codex">OpenAI' in template
     assert "先选研究任务，再点击候选策略卡片" in template
@@ -49,3 +54,5 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert ".ai-chain-summary-grid" in style_css
     assert ".ai-flow-stage-grid" in style_css
     assert ".ai-candidate-cards" in style_css
+    assert ".ai-oneclick-feedback" in style_css
+    assert '[data-tone="warn"]' in style_css

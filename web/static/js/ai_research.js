@@ -8,6 +8,11 @@
   const PREMIUM_SOURCE_LABEL = '高级数据源';
   const FLOW_HINT_DEFAULT = '当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。';
   const DEFAULT_SIGNAL_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT'];
+  const AGENT_STATUS_API = '/ai/autonomous-agent/status';
+  const AGENT_JOURNAL_API = '/ai/autonomous-agent/journal';
+  const AGENT_START_API = '/ai/autonomous-agent/start';
+  const AGENT_STOP_API = '/ai/autonomous-agent/stop';
+  const AGENT_RUN_ONCE_API = '/ai/autonomous-agent/run-once';
 
   /* 策略类别与颜色 */
   const STRATEGY_CATEGORIES = {
@@ -261,6 +266,207 @@
     const draftCount = pendingStrategyDraftCount();
     const draftText = draftCount > 0 ? `当前已挂起 ${draftCount} 个 AI 草案，生成提案时会一起进入搜索。` : '当前还没有 AI 草案，系统会先从模板和市场上下文起步。';
     hintEl.textContent = `当前选择：${requestedText}；实际生成：${effectiveText}；模板上限 ${effective.max_templates}，草案预算 ${effective.max_strategy_drafts}，回测预算 ${effective.max_backtest_runs}，探索强度 ${(effective.exploration_bias * 100).toFixed(0)}%。${draftText}`;
+  }
+
+  function uniqueTextItems(values, limit = 5) {
+    const seen = new Set();
+    return toArray(values)
+      .map(value => normalizeUiText(String(value ?? '').trim()))
+      .filter(Boolean)
+      .filter((value) => {
+        const key = value.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, Math.max(1, limit));
+  }
+
+  function summarizeOneClickPayload(payload) {
+    const symbols = toArray(payload?.symbols).map(item => String(item || '').trim()).filter(Boolean);
+    const timeframes = toArray(payload?.timeframes).map(item => String(item || '').trim()).filter(Boolean);
+    const symbolText = symbols.length
+      ? `${symbols.slice(0, 2).join(', ')}${symbols.length > 2 ? ` 等 ${symbols.length} 个币种` : ''}`
+      : '未选择币种';
+    const timeframeText = timeframes.length
+      ? `${timeframes.slice(0, 3).join(', ')}${timeframes.length > 3 ? ' 等更多周期' : ''}`
+      : '未选择周期';
+    const exchangeText = String(payload?.exchange || '--').trim() || '--';
+    const days = Number(payload?.days || 0);
+    const daysText = Number.isFinite(days) && days > 0 ? `${Math.round(days)} 天` : '--';
+    return normalizeUiText(`当前设置：${symbolText} · ${timeframeText} · ${exchangeText.toUpperCase()} · ${daysText}`);
+  }
+
+  function renderOneClickFeedback(feedback) {
+    const box = document.getElementById('ai-oneclick-feedback');
+    if (!box) return;
+    if (!feedback) {
+      box.innerHTML = '';
+      box.className = 'ai-oneclick-feedback is-hidden';
+      box.removeAttribute('data-tone');
+      box.removeAttribute('role');
+      return;
+    }
+    const tone = ['working', 'success', 'warn', 'error'].includes(String(feedback.tone || ''))
+      ? String(feedback.tone || '')
+      : 'warn';
+    const badge = normalizeUiText(feedback.badge || '');
+    const title = normalizeUiText(feedback.title || '一键自动研究状态');
+    const summary = normalizeUiText(feedback.summary || '');
+    const details = uniqueTextItems(feedback.details || [], 6);
+    const suggestions = uniqueTextItems(feedback.suggestions || [], 5);
+    box.className = 'ai-oneclick-feedback';
+    box.dataset.tone = tone;
+    box.setAttribute('role', tone === 'error' ? 'alert' : 'status');
+    box.innerHTML = `
+      <div class="ai-oneclick-feedback-head">
+        <div>
+          <div class="ai-oneclick-feedback-title">${esc(title)}</div>
+          ${summary ? `<div class="ai-oneclick-feedback-summary">${esc(summary)}</div>` : ''}
+        </div>
+        ${badge ? `<span class="ai-oneclick-feedback-badge">${esc(badge)}</span>` : ''}
+      </div>
+      ${details.length ? `
+        <div class="ai-oneclick-feedback-section">
+          <div class="ai-oneclick-feedback-label">这次发生了什么</div>
+          <ul class="ai-oneclick-feedback-list">
+            ${details.map(item => `<li>${esc(item)}</li>`).join('')}
+          </ul>
+        </div>
+      ` : ''}
+      ${suggestions.length ? `
+        <div class="ai-oneclick-feedback-section">
+          <div class="ai-oneclick-feedback-label">建议下一步</div>
+          <ul class="ai-oneclick-feedback-list">
+            ${suggestions.map(item => `<li>${esc(item)}</li>`).join('')}
+          </ul>
+        </div>
+      ` : ''}
+    `;
+    normalizeDomText(box);
+  }
+
+  function clearOneClickFeedback() {
+    renderOneClickFeedback(null);
+  }
+
+  function buildOneClickFailureFeedback(err, payload) {
+    const message = normalizeUiText(err?.message || '一键自动研究执行失败，请稍后重试。');
+    const lower = message.toLowerCase();
+    const days = Number(payload?.days || 0);
+    const suggestions = [];
+    let tone = 'error';
+    let badge = '执行失败';
+    let title = '这次 one-click 自动研究没有跑起来';
+
+    if (message.includes('研究目标太短') || message.includes('至少8个字符') || lower.includes('goal')) {
+      tone = 'warn';
+      badge = '目标过短';
+      title = '研究目标太短，one-click 还不能开始';
+      suggestions.push('把研究目标写得更具体一些，例如“寻找 BTC 在趋势行情中的高胜率 15m 策略”。');
+      suggestions.push('最好同时写清楚币种、行情类型和想验证的思路。');
+    } else if (
+      message.includes('没有足够数据')
+      || message.includes('最小样本')
+      || message.includes('历史数据')
+      || lower.includes('insufficient')
+      || lower.includes('not enough data')
+      || lower.includes('sample')
+    ) {
+      tone = 'warn';
+      badge = '数据不足';
+      title = '这次 one-click 没跑起来：研究窗口里没有足够历史数据';
+      if (Number.isFinite(days) && days > 0 && days < 365) {
+        suggestions.push(`把“回测天数”从 ${Math.round(days)} 调大后重试，短周期研究通常更依赖更长历史。`);
+      } else {
+        suggestions.push('缩短研究周期范围，或降低最小样本要求后重试。');
+      }
+      suggestions.push('先只保留数据更完整的周期，例如 15m、1h。');
+    } else if (message.includes('超时') || lower.includes('timeout') || lower.includes('timed out')) {
+      tone = 'warn';
+      badge = '请求超时';
+      title = '一键自动研究超时了';
+      suggestions.push('先减少币种或周期数量，再重试。');
+      suggestions.push('如果只是想确认研究能否跑通，可以先点“3) 运行研究”单独验证。');
+    } else if (
+      lower.includes('network')
+      || lower.includes('failed to fetch')
+      || message.includes('502')
+      || message.includes('503')
+      || message.includes('500')
+      || lower.includes('service unavailable')
+    ) {
+      badge = '服务异常';
+      title = '请求已经发出，但服务端暂时没有正常返回';
+      suggestions.push('稍后重试一次，观察是否为临时服务波动。');
+      suggestions.push('如果连续失败，先检查后端日志或接口状态。');
+    } else {
+      suggestions.push('先点“3) 运行研究”单独验证数据与参数，再决定是否一键部署。');
+      suggestions.push('如果问题稳定复现，再查看后端日志定位具体报错来源。');
+    }
+
+    if (!suggestions.some(item => item.includes('3) 运行研究'))) {
+      suggestions.push('也可以先点“3) 运行研究”单独验证，再决定是否一键部署。');
+    }
+
+    return {
+      tone,
+      badge,
+      title,
+      summary: summarizeOneClickPayload(payload),
+      details: [message],
+      suggestions,
+    };
+  }
+
+  function buildOneClickSuccessFeedback(result, payload) {
+    const proposalId = String(result?.proposal_id || result?.run?.proposal?.proposal_id || '').trim();
+    const candidateId = String(result?.candidate_id || result?.run?.candidate?.candidate_id || '').trim();
+    const runtimeStatus = String(result?.runtime_status || result?.deploy?.runtime_status || '').trim();
+    const action = String(result?.deploy?.action || '').trim();
+    const candidateStatus = String(result?.run?.candidate?.status || '').trim();
+    const validationSummary = result?.run?.candidate?.validation_summary || {};
+    const reasonInputs = [
+      ...toArray(validationSummary?.reasons),
+      ...toArray(result?.deploy?.reasons),
+    ];
+    if (validationSummary?.summary) reasonInputs.push(validationSummary.summary);
+    if (validationSummary?.decision_reason) reasonInputs.push(validationSummary.decision_reason);
+    const reasons = uniqueTextItems(reasonInputs, 4);
+
+    const details = [];
+    if (proposalId) details.push(`提案 ID：${proposalId}`);
+    if (candidateId) details.push(`候选 ID：${candidateId}`);
+    if (runtimeStatus) details.push(`运行状态：${normalizeUiText(statusText(runtimeStatus))}`);
+    if (action) details.push(`部署动作：${action}`);
+
+    let tone = 'success';
+    let badge = '已完成';
+    let title = '一键自动研究已完成';
+    const suggestions = ['右侧候选详情与运行状态已经刷新，可以继续查看表现和验证结果。'];
+
+    if (candidateStatus === 'rejected' || candidateStatus === 'failed' || reasons.length) {
+      tone = 'warn';
+      badge = '已完成待处理';
+      title = '研究已完成，但候选还没有达到部署条件';
+      reasons.forEach((reason) => details.push(`未通过原因：${reason}`));
+      suggestions.length = 0;
+      suggestions.push('先查看右侧候选详情里的验证原因，再决定是否扩大样本或调整研究方式。');
+      suggestions.push('如果只是数据窗口太短，优先调大“回测天数”后再重试。');
+    } else if (!runtimeStatus && !action) {
+      badge = '研究完成';
+      title = '研究已经跑完，部署结果还需要进一步确认';
+      suggestions.push('如果还没有进入运行态，可以继续在右侧执行注册/部署确认。');
+    }
+
+    return {
+      tone,
+      badge,
+      title,
+      summary: summarizeOneClickPayload(payload),
+      details,
+      suggestions,
+    };
   }
 
   function parseTs(v) {
@@ -3050,7 +3256,20 @@
   async function runOneClickResearchDeploy() {
     const btn = document.getElementById('ai-oneclick-btn');
     const goal = String(document.getElementById('ai-planner-goal')?.value || '').trim();
-    if (goal.length < 8) { notify('\u7814\u7a76\u76ee\u6807\u592a\u77ed\uff08\u81f3\u5c118\u4e2a\u5b57\u7b26\uff09', true); return; }
+    if (goal.length < 8) {
+      renderOneClickFeedback(buildOneClickFailureFeedback(
+        new Error('研究目标太短（至少8个字符）'),
+        {
+          goal,
+          symbols: csvInput('ai-planner-symbols'),
+          timeframes: csvInput('ai-planner-timeframes'),
+          exchange: String(document.getElementById('run-exchange')?.value || getCurrentResearchExchange() || 'binance'),
+          days: Math.max(1, Math.min(3650, parseInt(document.getElementById('run-days')?.value || '3', 10) || 3)),
+        },
+      ));
+      notify('\u7814\u7a76\u76ee\u6807\u592a\u77ed\uff08\u81f3\u5c118\u4e2a\u5b57\u7b26\uff09', true);
+      return;
+    }
 
     const symbols = csvInput('ai-planner-symbols');
     const timeframes = csvInput('ai-planner-timeframes');
@@ -3078,6 +3297,14 @@
 
     try {
       if (btn) { btn.disabled = true; btn.textContent = '\u6267\u884c\u4e2d...'; }
+      renderOneClickFeedback({
+        tone: 'working',
+        badge: '执行中',
+        title: 'one-click 自动研究正在执行',
+        summary: summarizeOneClickPayload(payload),
+        details: ['系统正在依次执行：生成提案 → 运行研究 → 尝试部署。'],
+        suggestions: ['这个过程可能需要 1 到 3 分钟，期间先不要重复点击。'],
+      });
       notify('\u6b63\u5728\u6267\u884c\uff1a\u751f\u6210 -> \u8fd0\u884c -> \u90e8\u7f72');
       const result = await aiApi('/oneclick/research-deploy', {
         method: 'POST',
@@ -3093,11 +3320,17 @@
       const candidateId = String(result?.candidate_id || result?.run?.candidate?.candidate_id || '').trim();
       const runtimeStatus = String(result?.runtime_status || result?.deploy?.runtime_status || '').trim();
       const action = String(result?.deploy?.action || '').trim();
-      await refreshWorkbench(proposalId, candidateId);
-      if (candidateId) viewCandidate(candidateId).catch(() => {});
+      try {
+        await refreshWorkbench(proposalId, candidateId);
+        if (candidateId) viewCandidate(candidateId).catch(() => {});
+      } catch (refreshErr) {
+        console.warn('one-click workbench refresh failed', refreshErr);
+      }
       updatePlannerModeHint();
+      renderOneClickFeedback(buildOneClickSuccessFeedback(result, payload));
       notify(`\u4e00\u952e\u7814\u7a76+\u90e8\u7f72\u5b8c\u6210${runtimeStatus ? `: ${runtimeStatus}` : ''}${action ? ` (${action})` : ''}`);
     } catch (err) {
+      renderOneClickFeedback(buildOneClickFailureFeedback(err, payload));
       notify(`\u4e00\u952e\u7814\u7a76+\u90e8\u7f72\u5931\u8d25: ${err.message}`, true);
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = '\u26a1 \u7814\u7a76+\u90e8\u7f72'; }
@@ -3202,11 +3435,76 @@
     throw new Error('diagnostics module unavailable');
   }
 
+  async function loadPremiumDataStatus() {
+    return aiApi('/premium-data/status', { timeoutMs: 12000 });
+  }
+
   async function loadDataReadiness() {
     if (window.AI?.modules?.diagnostics?.refresh) {
       return window.AI.modules.diagnostics.refresh();
     }
-    return null;
+    const [premiumResult, liveSignalsResult] = await Promise.allSettled([
+      loadPremiumDataStatus(),
+      aiApi('/live-signals', { timeoutMs: 20000 }),
+    ]);
+    return {
+      premium_data_status: premiumResult.status === 'fulfilled' ? premiumResult.value : null,
+      live_signals: liveSignalsResult.status === 'fulfilled' ? liveSignalsResult.value : null,
+      fallback: true,
+    };
+  }
+
+  function getAgentModule() {
+    return window.AI?.modules?.agent || null;
+  }
+
+  async function loadAgentStatus() {
+    const agent = getAgentModule();
+    if (agent && typeof agent.refresh === 'function') {
+      return agent.refresh();
+    }
+    return rootApi(AGENT_STATUS_API, { timeoutMs: 15000 });
+  }
+
+  async function agentStart() {
+    const agent = getAgentModule();
+    if (agent && typeof agent.start === 'function') {
+      return agent.start();
+    }
+    await rootApi(AGENT_START_API, {
+      method: 'POST',
+      body: JSON.stringify({ enable: true }),
+      timeoutMs: 15000,
+    });
+    notify('autonomous agent start requested');
+    return loadAgentStatus();
+  }
+
+  async function agentStop() {
+    const agent = getAgentModule();
+    if (agent && typeof agent.stop === 'function') {
+      return agent.stop();
+    }
+    await rootApi(AGENT_STOP_API, {
+      method: 'POST',
+      timeoutMs: 15000,
+    });
+    notify('autonomous agent stop requested');
+    return loadAgentStatus();
+  }
+
+  async function agentRunOnce() {
+    const agent = getAgentModule();
+    if (agent && typeof agent.runOnce === 'function') {
+      return agent.runOnce();
+    }
+    const result = await rootApi(AGENT_RUN_ONCE_API, {
+      method: 'POST',
+      body: JSON.stringify({}),
+      timeoutMs: 20000,
+    });
+    notify('autonomous agent run-once requested');
+    return result;
   }
 
   function startJobPolling(proposalId, jobId) {
@@ -3321,11 +3619,15 @@
       'ai-planner-exploration-bias',
       'ai-planner-timeframes',
     ].forEach((id) => {
-      document.getElementById(id)?.addEventListener('input', () => updatePlannerModeHint());
-      document.getElementById(id)?.addEventListener('change', () => updatePlannerModeHint());
+      document.getElementById(id)?.addEventListener('input', () => { updatePlannerModeHint(); clearOneClickFeedback(); });
+      document.getElementById(id)?.addEventListener('change', () => { updatePlannerModeHint(); clearOneClickFeedback(); });
     });
-    document.getElementById('run-exchange')?.addEventListener('change', () =>
-      loadDataReadiness().catch(() => {}));
+    document.getElementById('run-exchange')?.addEventListener('change', () => {
+      clearOneClickFeedback();
+      loadDataReadiness().catch(() => {});
+    });
+    document.getElementById('run-days')?.addEventListener('input', () => clearOneClickFeedback());
+    document.getElementById('run-days')?.addEventListener('change', () => clearOneClickFeedback());
 
     /* 运行研究 */
     document.getElementById('run-selected-btn')?.addEventListener('click', () =>
@@ -3700,5 +4002,9 @@
     },
     modules: window.AI?.modules || {},
   };
+
+  window.agentStart = agentStart;
+  window.agentStop = agentStop;
+  window.agentRunOnce = agentRunOnce;
 
 })();

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from fastapi import HTTPException
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -155,3 +156,53 @@ def test_oneclick_skip_deploy(monkeypatch):
     assert result["deploy"]["action"] is None
     assert result["runtime_status"] is None
     assert register_mock.await_count == 0
+
+
+def test_oneclick_research_deploy_returns_http_400_on_value_error(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    request = _build_request()
+    proposal = _StubModel(proposal_id="p-5", metadata={}, status="draft")
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "_serialize_proposal", lambda app, p: {"proposal_id": p.proposal_id})
+    monkeypatch.setattr(
+        ai_module,
+        "generate_planned_proposal",
+        lambda *args, **kwargs: {"proposal": proposal, "planner_notes": [], "filtered_templates": []},
+    )
+    monkeypatch.setattr(
+        ai_module,
+        "run_proposal",
+        AsyncMock(side_effect=ValueError("not enough data for research")),
+    )
+
+    payload = ai_module.AIOneClickResearchDeployRequest(goal="oneclick value error flow")
+
+    try:
+        asyncio.run(ai_module.oneclick_ai_research_deploy(request, payload))
+        assert False, "should have raised HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "not enough data" in exc.detail
+
+
+def test_run_proposal_endpoint_returns_http_400_on_value_error(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    request = _build_request()
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(
+        ai_module,
+        "run_proposal",
+        AsyncMock(side_effect=ValueError("not enough data for research")),
+    )
+
+    payload = ai_module.AIProposalRunRequest(background=False)
+
+    try:
+        asyncio.run(ai_module.run_ai_proposal_endpoint(request, "proposal-1", payload))
+        assert False, "should have raised HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "not enough data" in exc.detail
