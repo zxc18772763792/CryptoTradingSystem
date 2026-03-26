@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=78">
+    <link rel="stylesheet" href="/static/css/style.css?v=79">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
@@ -30,6 +30,7 @@
             <button class="tab-btn" data-tab="data">数据</button>
             <button class="tab-btn" data-tab="ai-research">AI研究</button>
             <button class="tab-btn" data-tab="research">研究工坊</button>
+            <button class="tab-btn" data-tab="arbitrage">套利</button>
             <button class="tab-btn" data-tab="backtest">回测</button>
         </nav>
 
@@ -1977,6 +1978,182 @@
                 </div>
             </div>
 
+            <div id="arbitrage" class="tab-content">
+                <div class="arbitrage-workspace">
+                    <aside class="research-sidebar">
+                        <div class="card research-sticky research-control-card arbitrage-control-card">
+                            <h3>套利研究配置</h3>
+                            <div class="research-control-notes">
+                                先选模板，再决定走“自定义回测验证”还是“策略库注册运行”。可回测策略会把完整参数直接带到回测页，实时套利则明确标注仅适合盘口/链上验证。
+                            </div>
+
+                            <div class="research-config-section">
+                                <div class="research-config-title">模板与基本参数</div>
+                                <div class="form-group">
+                                    <label>套利策略</label>
+                                    <select id="arbitrage-strategy">
+                                        <option value="PairsTradingStrategy" selected>PairsTradingStrategy / 配对交易</option>
+                                        <option value="FamaFactorArbitrageStrategy">FamaFactorArbitrageStrategy / 多因子套利</option>
+                                        <option value="CEXArbitrageStrategy">CEXArbitrageStrategy / 跨所套利</option>
+                                        <option value="TriangularArbitrageStrategy">TriangularArbitrageStrategy / 三角套利</option>
+                                        <option value="DEXArbitrageStrategy">DEXArbitrageStrategy / DEX套利</option>
+                                        <option value="FlashLoanArbitrageStrategy">FlashLoanArbitrageStrategy / 闪电贷套利</option>
+                                    </select>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>交易所</label>
+                                        <select id="arbitrage-exchange">
+                                            <option value="binance" selected>Binance</option>
+                                            <option value="okx">OKX</option>
+                                            <option value="gate">Gate.io</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>周期</label>
+                                        <select id="arbitrage-timeframe">
+                                            <option value="1m">1分钟</option>
+                                            <option value="5m">5分钟</option>
+                                            <option value="15m">15分钟</option>
+                                            <option value="1h" selected>1小时</option>
+                                            <option value="4h">4小时</option>
+                                            <option value="1d">日线</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>主交易对</label>
+                                        <select id="arbitrage-primary-symbol">
+                                            <option value="BTC/USDT" selected>BTC/USDT</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>对冲 / 参考腿</label>
+                                        <select id="arbitrage-secondary-symbol">
+                                            <option value="ETH/USDT" selected>ETH/USDT</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>回看条数</label>
+                                        <input type="number" id="arbitrage-lookback" value="720" min="120" max="5000" step="60">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>资金占比</label>
+                                        <input type="number" id="arbitrage-allocation" value="0.15" min="0" max="1" step="0.01">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="research-config-section">
+                                <div class="research-config-title">多币种池与执行场所</div>
+                                <div class="form-group">
+                                    <label>候选币池 <span style="font-weight:400;color:#7e92b2;">(按住Ctrl多选)</span></label>
+                                    <select id="arbitrage-universe" multiple size="10">
+                                        <option value="BTC/USDT" selected>BTC/USDT</option>
+                                        <option value="ETH/USDT" selected>ETH/USDT</option>
+                                        <option value="BNB/USDT" selected>BNB/USDT</option>
+                                        <option value="SOL/USDT" selected>SOL/USDT</option>
+                                        <option value="XRP/USDT" selected>XRP/USDT</option>
+                                        <option value="ADA/USDT" selected>ADA/USDT</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>跨场所 / 路径</label>
+                                    <select id="arbitrage-venues" multiple size="5">
+                                        <option value="binance" selected>Binance</option>
+                                        <option value="okx" selected>OKX</option>
+                                        <option value="gate" selected>Gate.io</option>
+                                        <option value="uniswap">Uniswap</option>
+                                        <option value="sushiswap">Sushiswap</option>
+                                    </select>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>实例后缀</label>
+                                        <input type="text" id="arbitrage-suffix" placeholder="例如 pairs_sg / fama_live">
+                                    </div>
+                                    <div class="form-group checkbox-like">
+                                        <label>
+                                            <input type="checkbox" id="arbitrage-auto-start">
+                                            注册后自动启动
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="inline-actions">
+                                <button class="btn btn-primary btn-sm" id="btn-arbitrage-apply-template">同步模板</button>
+                                <button class="btn btn-primary btn-sm" id="btn-arbitrage-refresh">刷新候选</button>
+                            </div>
+                        </div>
+                    </aside>
+
+                    <div class="research-main">
+                        <div class="research-top-grid arbitrage-top-grid">
+                            <div class="card arbitrage-roadmap-card">
+                                <h3>套利实施路线</h3>
+                                <div id="arbitrage-roadmap-summary" class="research-control-notes">
+                                    正在根据当前模板生成研究路线...
+                                </div>
+                                <div id="arbitrage-plan-steps" class="arbitrage-plan-steps"></div>
+                                <div class="inline-actions">
+                                    <button class="btn btn-primary" id="btn-arbitrage-register">接入策略库并运行</button>
+                                    <button class="btn btn-primary" id="btn-arbitrage-backtest">带配置进入回测</button>
+                                </div>
+                                <pre id="arbitrage-run-output" class="output-box">等待操作：可先加载模板，再决定注册运行或进入回测。</pre>
+                            </div>
+
+                            <div class="card research-status-board">
+                                <h3>套利状态</h3>
+                                <div class="research-status-grid">
+                                    <div class="research-status-item" id="arbitrage-config-snapshot">
+                                        <span class="status-label">配置</span>
+                                        <span class="status-value">等待加载</span>
+                                    </div>
+                                    <div class="research-status-item" id="arbitrage-universe-snapshot">
+                                        <span class="status-label">币池</span>
+                                        <span class="status-value">等待加载</span>
+                                    </div>
+                                    <div class="research-status-item" id="arbitrage-backtest-snapshot">
+                                        <span class="status-label">回测</span>
+                                        <span class="status-value">等待加载</span>
+                                    </div>
+                                    <div class="research-status-item research-status-highlight" id="arbitrage-next-step">
+                                        <span class="status-label">下一步</span>
+                                        <span class="status-value">等待加载</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <h3>套利候选策略</h3>
+                            <div id="arbitrage-strategy-cards" class="arbitrage-strategy-grid">
+                                <div class="list-item"><span>策略目录</span><span>加载中...</span></div>
+                            </div>
+                        </div>
+
+                        <div class="research-bottom-grid">
+                            <div class="card">
+                                <h3>运行参数预览</h3>
+                                <pre id="arbitrage-payload-preview" class="output-box">等待生成参数...</pre>
+                            </div>
+                            <div class="card">
+                                <h3>接入说明</h3>
+                                <div id="arbitrage-integration-notes" class="list">
+                                    <div class="list-item"><span>策略库</span><span>等待加载</span></div>
+                                    <div class="list-item"><span>回测页</span><span>等待加载</span></div>
+                                    <div class="list-item"><span>实时验证</span><span>等待加载</span></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div id="backtest" class="tab-content">
                 <div class="grid">
                     <div class="card">
@@ -2080,6 +2257,14 @@
                                     <option value="pdf">PDF</option>
                                 </select>
                             </div>
+                            <details class="backtest-custom-params" id="backtest-custom-params-panel">
+                                <summary>自定义策略参数（JSON，可选）</summary>
+                                <div class="form-group" style="margin-top:10px;">
+                                    <label>用于“运行回测”与“套利页带配置进入回测”的完整参数</label>
+                                    <textarea id="backtest-custom-params" rows="8" placeholder='例如 {&quot;pair_symbol&quot;:&quot;ETH/USDT&quot;,&quot;lookback_period&quot;:48}'></textarea>
+                                </div>
+                                <div id="backtest-custom-params-hint" class="form-help">留空时使用策略默认参数。多策略对比 / 参数优化暂不读取这里的 JSON。</div>
+                            </details>
                             <details class="backtest-compare-picker" id="backtest-compare-picker">
                                 <summary>多策略对比策略集合（可自选）<span id="backtest-compare-picked-count" style="margin-left:8px;color:#9fb1c9;">已选 0</span></summary>
                                 <div class="inline-actions" style="margin-top:8px;">
@@ -2142,7 +2327,7 @@
 
     <div id="notification" class="notification"></div>
 
-    <script charset="utf-8" src="/static/js/app.js?v=117"></script>
+    <script charset="utf-8" src="/static/js/app.js?v=118"></script>
     <script charset="utf-8" src="/static/js/research_workbench.js?v=7"></script>
     <script charset="utf-8" src="/static/js/ai_research.js?v=31"></script>
     <script charset="utf-8" src="/static/js/ai_research_diagnostics.js?v=1"></script>

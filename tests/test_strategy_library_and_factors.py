@@ -92,6 +92,20 @@ def test_strategy_registry_exposes_single_source_metadata():
     assert fama["backtest_supported"] is True
 
 
+def test_arbitrage_registry_backtest_support_flags_match_ui_routing():
+    pairs = get_backtest_strategy_info("PairsTradingStrategy")
+    fama = get_backtest_strategy_info("FamaFactorArbitrageStrategy")
+    cex = get_backtest_strategy_info("CEXArbitrageStrategy")
+    tri = get_backtest_strategy_info("TriangularArbitrageStrategy")
+
+    assert pairs["backtest_supported"] is True
+    assert fama["backtest_supported"] is True
+    assert cex["backtest_supported"] is False
+    assert tri["backtest_supported"] is False
+    assert cex["reason"]
+    assert tri["reason"]
+
+
 def test_shared_cost_model_helpers_support_flat_and_dynamic_modes():
     flat_cfg = SimpleNamespace(
         fee_model="flat",
