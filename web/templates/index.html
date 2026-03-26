@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=72">
+    <link rel="stylesheet" href="/static/css/style.css?v=74">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
@@ -28,8 +28,8 @@
             <button class="tab-btn" data-tab="trading">交易</button>
             <button class="tab-btn" data-tab="strategies">策略</button>
             <button class="tab-btn" data-tab="data">数据</button>
-            <button class="tab-btn" data-tab="research">高级研究</button>
             <button class="tab-btn" data-tab="ai-research">AI研究</button>
+            <button class="tab-btn" data-tab="research">研究工坊</button>
             <button class="tab-btn" data-tab="backtest">回测</button>
         </nav>
 
@@ -1489,16 +1489,137 @@
                 </div>
 
                 <div id="ai-runtime-summary" class="ai-runtime-summary">
-                    <span class="ai-runtime-chip">治理：加载中</span>
+                    <span class="ai-runtime-chip">人工确认：加载中</span>
                     <span class="ai-runtime-chip">交易模式：加载中</span>
-                    <span class="ai-runtime-chip">决策模式：加载中</span>
-                    <span class="ai-runtime-chip">AI实盘决策：加载中</span>
-                    <span class="ai-runtime-chip">AI自治代理：加载中</span>
+                    <span class="ai-runtime-chip">执行裁决：加载中</span>
+                    <span class="ai-runtime-chip">下单前AI复核：加载中</span>
+                    <span class="ai-runtime-chip">自动交易代理：加载中</span>
+                </div>
+                <div class="ai-top-intro-grid">
+                    <div class="card ai-top-intro-card ai-top-intro-card-research">
+                        <div class="ai-top-intro-title">🧪 AI研究新策略</div>
+                        <div class="ai-top-intro-stack">
+                            <div class="ai-top-intro-box">
+                                <div class="ai-top-intro-box-title">负责什么</div>
+                                <div class="ai-top-intro-box-desc">把研究目标转成提案、候选、验证结果和注册建议。</div>
+                            </div>
+                            <div class="ai-top-intro-box">
+                                <div class="ai-top-intro-box-title">怎么用</div>
+                                <div class="ai-top-intro-box-desc">1) 生成研究 → 2) 选择研究任务 → 3) 运行研究 → 4) 人工确认/注册。</div>
+                            </div>
+                            <div class="ai-top-intro-mini-grid">
+                                <div class="ai-top-intro-mini">
+                                    <div class="ai-top-intro-box-title">研究输入</div>
+                                    <div class="ai-top-intro-mini-desc">目标、行情、币种、周期</div>
+                                </div>
+                                <div class="ai-top-intro-mini">
+                                    <div class="ai-top-intro-box-title">不负责什么</div>
+                                    <div class="ai-top-intro-mini-desc">不直接下单，不替代交易执行</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="ai-review-panel">
+                            <div class="ai-review-panel-head">
+                                <div class="ai-review-panel-title">🛡 策略库增强：下单前AI复核</div>
+                                <span class="ai-review-panel-tag">面向已有策略/候选</span>
+                            </div>
+                            <div class="ai-review-panel-desc">
+                                这一步是给已注册策略、候选策略和人工确认后的策略加一道下单前二次复核。
+                                它不生成新策略，也不属于自动交易代理的一条龙执行。
+                            </div>
+                            <div class="form-row ai-auto-step-form-row">
+                                <label class="ai-auto-inline-check">
+                                    <input type="checkbox" id="ai-live-decision-enabled">
+                                    启用下单前复核
+                                </label>
+                                <select id="ai-live-decision-mode">
+                                    <option value="shadow">只提示（shadow，不拦截）</option>
+                                    <option value="enforce">可拦截（enforce，影响实盘）</option>
+                                </select>
+                            </div>
+                            <div class="form-row ai-auto-step-form-row">
+                                <select id="ai-live-decision-provider">
+                                    <option value="codex">OpenAI</option>
+                                    <option value="claude">Claude</option>
+                                </select>
+                                <input id="ai-live-decision-model" type="text" placeholder="模型名（可留空用默认）">
+                            </div>
+                            <div class="inline-actions ai-auto-step-actions">
+                                <button class="btn btn-sm" id="ai-live-decision-save-btn">保存复核配置</button>
+                                <span id="ai-live-decision-status" class="ai-auto-step-status">未加载</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card ai-top-intro-card ai-top-intro-card-trading">
+                        <div class="ai-top-intro-title">🤖 AI自动交易</div>
+                        <div class="ai-top-intro-stack">
+                            <div class="ai-top-intro-box">
+                                <div class="ai-top-intro-box-title">负责什么</div>
+                                <div class="ai-top-intro-box-desc">对固定交易标的和周期持续盯盘，给出买入、卖出、减仓、平仓等交易动作。</div>
+                            </div>
+                            <div class="ai-top-intro-box">
+                                <div class="ai-top-intro-box-title">怎么工作</div>
+                                <div class="ai-top-intro-box-desc">启动后代理会周期性盯盘，结合实时市场和当前研究冠军，直接给出动作并尝试下单。</div>
+                            </div>
+                            <div class="ai-top-intro-box">
+                                <div class="ai-top-intro-box-title">不负责什么</div>
+                                <div class="ai-top-intro-box-desc">不生成新策略，只使用已有研究结果和当前市场上下文来做交易判断。</div>
+                            </div>
+                        </div>
+
+                        <div class="ai-auto-trade-rail">
+                            <div class="ai-auto-trade-rail-step">1 启动代理</div>
+                            <div class="ai-auto-trade-rail-step">2 单次试跑</div>
+                            <div class="ai-auto-trade-rail-step">3 看日志</div>
+                        </div>
+
+                        <div class="ai-auto-trade-steps">
+                            <section id="ai-agent-card" class="ai-auto-step">
+                                <div class="ai-auto-step-index">1</div>
+                                <div class="ai-auto-step-body">
+                                    <div class="ai-auto-step-head">
+                                        <div class="ai-auto-step-title">启动自动交易代理</div>
+                                        <span id="ai-agent-status-dot" class="agent-dot agent-dot-off" title="未运行"></span>
+                                    </div>
+                                    <div class="ai-auto-step-desc">启动后它会持续盯盘、自动决策，并在满足条件时直接提交买卖动作。</div>
+                                    <div id="ai-agent-info" class="ai-auto-step-info">加载中...</div>
+                                    <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
+                                        <button class="btn btn-sm btn-success" id="ai-agent-start-btn" onclick="agentStart()">启动</button>
+                                        <button class="btn btn-sm btn-danger" id="ai-agent-stop-btn" onclick="agentStop()">停止</button>
+                                    </div>
+                                </div>
+                            </section>
+
+                            <section class="ai-auto-step">
+                                <div class="ai-auto-step-index">2</div>
+                                <div class="ai-auto-step-body">
+                                    <div class="ai-auto-step-title">需要时单次试跑</div>
+                                    <div class="ai-auto-step-desc">先跑一轮看看代理会不会给出合理动作，再决定是否长期开启。</div>
+                                    <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
+                                        <button class="btn btn-sm" id="ai-agent-run-once-btn" onclick="agentRunOnce()">立即跑一轮</button>
+                                    </div>
+                                </div>
+                            </section>
+
+                            <section class="ai-auto-step ai-auto-step-log">
+                                <div class="ai-auto-step-index">3</div>
+                                <div class="ai-auto-step-body">
+                                    <div class="ai-auto-step-head">
+                                        <div class="ai-auto-step-title">最后看最近决策日志</div>
+                                        <button class="btn btn-sm" type="button" onclick="agentRefreshJournal()">刷新日志</button>
+                                    </div>
+                                    <div class="ai-auto-step-desc">先看模型最近给出的动作和异常，再决定继续运行、单次试跑，还是回去调整配置。</div>
+                                    <div id="ai-agent-journal" class="ai-agent-journal-box">加载中...</div>
+                                </div>
+                            </section>
+                        </div>
+                    </div>
                 </div>
                 <div id="ai-flow-console" class="card ai-flow-console">
                     <div class="ai-flow-console-header">
                         <div>
-                            <div class="ai-sidebar-title" style="cursor:default;margin-bottom:4px;">🧠 研究流程控制台</div>
+                            <div class="ai-sidebar-title" style="cursor:default;margin-bottom:4px;">🧠 当前研究进度</div>
                             <div id="ai-flow-console-subtitle" class="ai-flow-console-subtitle">等待载入研究状态...</div>
                         </div>
                         <div id="ai-flow-badges" class="ai-flow-badges">
@@ -1517,7 +1638,7 @@
                 <!-- ── 三栏 Hub 布局 ── -->
                 <div class="ai-hub-layout">
 
-                    <!-- 左侧栏：信号 + 配置 + 研究队列 -->
+                    <!-- 左侧栏：主流程 + 研究诊断 -->
                     <aside class="ai-hub-sidebar">
 
                         <!-- 实时信号面板 (可折叠) -->
@@ -1540,6 +1661,24 @@
                                     <button class="btn btn-sm" id="signal-refresh-btn" style="font-size:12px;">刷新</button>
                                 </div>
                                 <div id="signal-status" style="font-size:11px;color:#6b7fa0;margin-top:4px;">每30秒自动刷新</div>
+                            </div>
+                        </div>
+
+                        <div class="card ai-sidebar-card ai-focus-card">
+                            <div class="ai-sidebar-title">🎯 当前研究焦点</div>
+                            <div class="ai-focus-summary">
+                                <div class="ai-focus-row">
+                                    <span>当前提案</span>
+                                    <strong id="ai-focus-proposal">加载中...</strong>
+                                </div>
+                                <div class="ai-focus-row">
+                                    <span>当前候选</span>
+                                    <strong id="ai-focus-candidate">加载中...</strong>
+                                </div>
+                                <div class="ai-focus-row">
+                                    <span>下一步动作</span>
+                                    <strong id="ai-focus-next-action">加载中...</strong>
+                                </div>
                             </div>
                         </div>
 
@@ -1578,12 +1717,12 @@
                             </div>
                             <div class="inline-actions">
                                 <button class="btn btn-primary btn-sm" id="ai-generate-btn">1) 生成研究</button>
-                                <button class="btn btn-sm" id="ai-oneclick-btn" title="生成+运行+自动注册/审批">⚡ 一键研究+部署（全流程）</button>
-                                <button class="btn btn-sm" id="ai-context-btn" title="调用 AI 生成研究假设与实验计划">🤖 AI辅助</button>
+                                <button class="btn btn-sm" id="ai-oneclick-btn" title="生成+运行+自动注册/人工确认">⚡ 自动跑完整流程</button>
+                                <button class="btn btn-sm" id="ai-context-btn" title="调用 AI 生成研究假设与实验计划">🤖 生成研究思路</button>
                                 <button class="btn btn-sm" id="ai-refresh-btn">刷新</button>
                             </div>
                             <div id="ai-flow-hint" class="ai-flow-hint">
-                                推荐顺序：1) 生成研究 → 2) 运行研究 → 3) 审批/注册。想快可直接用“一键研究+部署”。
+                                推荐顺序：1) 生成研究 → 2) 运行研究 → 3) 人工确认/注册。只有希望系统自动推进时再用“自动跑完整流程”。
                             </div>
                             <!-- 实时市场上下文摘要 -->
                             <div id="ai-market-context-hint" style="margin-top:5px;font-size:11px;color:#7a8fa6;min-height:14px;"></div>
@@ -1591,81 +1730,48 @@
                             <div id="ai-planner-notes" style="margin-top:4px;"></div>
                         </div>
 
-                        <div class="card ai-sidebar-card">
-                            <div class="ai-sidebar-title" style="margin-bottom:4px;">🧭 数据诊断</div>
-                            <div id="ai-data-readiness-panel" style="font-size:12px;color:#9fb1c9;">
-                                <div id="ai-data-readiness-summary" style="margin-bottom:8px;">正在检测新闻与宏观数据...</div>
-                                <div class="inline-actions" style="gap:6px;margin-bottom:8px;">
-                                    <button class="btn btn-sm" id="ai-data-refresh-btn">刷新诊断</button>
-                                    <button class="btn btn-sm" id="ai-news-pull-btn">拉取新闻</button>
-                                    <button class="btn btn-sm" id="ai-funding-warm-btn">预热宏观缓存</button>
-                                </div>
-                                <div style="padding:8px;background:#141f2f;border-radius:6px;margin-bottom:8px;">
-                                    <div style="color:#c2d0e8;font-weight:700;margin-bottom:6px;">AI实盘决策开关</div>
-                                    <div class="form-row" style="grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap:6px; margin-bottom:6px;">
-                                        <label style="font-size:12px;color:#b7c8dd;display:flex;align-items:center;gap:6px;">
-                                            <input type="checkbox" id="ai-live-decision-enabled">
-                                            启用AI决策
-                                        </label>
-                                        <select id="ai-live-decision-mode">
-                                            <option value="shadow">shadow（只提示不拦截）</option>
-                                            <option value="enforce">enforce（可拦截实盘）</option>
-                                        </select>
-                                    </div>
-                                    <div class="form-row" style="grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap:6px; margin-bottom:6px;">
-                                        <select id="ai-live-decision-provider">
-                                            <option value="codex">OpenAI</option>
-                                            <option value="claude">Claude</option>
-                                            <option value="glm">GLM</option>
-                                        </select>
-                                        <input id="ai-live-decision-model" type="text" placeholder="模型名（可留空用默认）">
-                                    </div>
-                                    <div class="inline-actions" style="gap:6px;">
-                                        <button class="btn btn-sm" id="ai-live-decision-save-btn">保存AI决策配置</button>
-                                        <span id="ai-live-decision-status" style="font-size:11px;color:#9fb1c9;">未加载</span>
-                                    </div>
-                                </div>
-                                <div id="ai-data-readiness-details" style="display:flex;flex-direction:column;gap:6px;"></div>
+                        <!-- 研究任务 -->
+                        <div class="card ai-sidebar-card ai-queue-card">
+                            <div class="ai-sidebar-title" style="margin-bottom:4px;">
+                                <span>研究任务</span>
+                                <span id="ai-queue-badge" style="font-size:11px;color:#7e92b2;font-weight:400;text-transform:none;"></span>
+                            </div>
+                            <div style="font-size:11px;color:#7e92b2;margin-bottom:8px;">这里负责切换当前提案。选中后去中栏运行研究、查看候选。</div>
+                            <div id="ai-proposal-list" class="ai-proposal-compact-list">
+                                <div style="color:#6b7fa0;font-size:12px;padding:8px 0;">暂无研究任务</div>
                             </div>
                         </div>
 
-                        <!-- 待审批队列 -->
+                        <!-- 待人工确认队列 -->
                         <div class="card ai-sidebar-card" id="ai-approval-card" style="display:none;">
                             <div class="ai-sidebar-title" style="margin-bottom:4px;">
-                                <span style="color:#f59e0b;">待审批</span>
+                                <span style="color:#f59e0b;">待人工确认</span>
                                 <span id="ai-approval-badge" style="font-size:11px;color:#f59e0b;font-weight:400;text-transform:none;"></span>
                             </div>
                             <div id="ai-approval-list"></div>
                         </div>
 
-                        <!-- AI自治代理控制面板 -->
-                        <div class="card ai-sidebar-card" id="ai-agent-card">
-                            <div class="ai-sidebar-title" style="margin-bottom:8px;">
-                                <span>🤖 AI自治代理</span>
-                                <span id="ai-agent-status-dot" class="agent-dot agent-dot-off" title="未运行"></span>
+                        <details class="card ai-sidebar-card" style="padding:0;overflow:hidden;">
+                            <summary style="list-style:none;cursor:pointer;padding:14px 16px;font-size:13px;font-weight:700;color:#dbe7f5;display:flex;align-items:center;justify-content:space-between;">
+                                <span>🧭 研究数据诊断</span>
+                                <span style="font-size:11px;color:#7e92b2;font-weight:400;">新闻 / 宏观 / 数据准备度</span>
+                            </summary>
+                            <div style="padding:0 16px 16px;">
+                                <div style="font-size:11px;color:#7e92b2;line-height:1.6;margin-bottom:10px;">
+                                    这里只看研究是否具备足够的数据上下文，例如新闻、funding、宏观缓存是否到位。
+                                </div>
+                                <div id="ai-data-readiness-panel" style="font-size:12px;color:#9fb1c9;">
+                                    <div class="ai-sidebar-title" style="margin-bottom:4px;">🧭 数据诊断</div>
+                                    <div id="ai-data-readiness-summary" style="margin-bottom:8px;">正在检测新闻与宏观数据...</div>
+                                    <div class="inline-actions" style="gap:6px;margin-bottom:8px;">
+                                        <button class="btn btn-sm" id="ai-data-refresh-btn">刷新诊断</button>
+                                        <button class="btn btn-sm" id="ai-news-pull-btn">拉取新闻</button>
+                                        <button class="btn btn-sm" id="ai-funding-warm-btn">预热宏观缓存</button>
+                                    </div>
+                                    <div id="ai-data-readiness-details" style="display:flex;flex-direction:column;gap:6px;"></div>
+                                </div>
                             </div>
-                            <div id="ai-agent-info" style="font-size:11px;color:#7e92b2;margin-bottom:8px;">加载中...</div>
-                            <div class="inline-actions" style="gap:6px;flex-wrap:wrap;">
-                                <button class="btn btn-sm btn-success" id="ai-agent-start-btn" onclick="agentStart()">启动</button>
-                                <button class="btn btn-sm btn-danger" id="ai-agent-stop-btn" onclick="agentStop()">停止</button>
-                                <button class="btn btn-sm" id="ai-agent-run-once-btn" onclick="agentRunOnce()">单次运行</button>
-                            </div>
-                            <details style="margin-top:8px;">
-                                <summary style="font-size:11px;cursor:pointer;color:#7e92b2;">查看最近决策日志</summary>
-                                <div id="ai-agent-journal" style="margin-top:6px;max-height:200px;overflow-y:auto;font-size:11px;"></div>
-                            </details>
-                        </div>
-
-                        <!-- 研究队列（Proposal 紧凑列表） -->
-                        <div class="card ai-sidebar-card ai-queue-card">
-                            <div class="ai-sidebar-title" style="margin-bottom:4px;">
-                                <span>研究队列</span>
-                                <span id="ai-queue-badge" style="font-size:11px;color:#7e92b2;font-weight:400;text-transform:none;"></span>
-                            </div>
-                            <div id="ai-proposal-list" class="ai-proposal-compact-list">
-                                <div style="color:#6b7fa0;font-size:12px;padding:8px 0;">暂无研究任务</div>
-                            </div>
-                        </div>
+                        </details>
 
                     </aside>
 
@@ -1709,37 +1815,6 @@
                                 <button class="btn btn-sm" id="ai-compare-btn" style="display:none;">对比选中</button>
                             </div>
                         </div>
-                        <div id="ai-search-overview-card" class="card ai-search-overview-card">
-                            <div class="ai-search-overview-header">
-                                <div>
-                                    <div class="ai-sidebar-title" style="cursor:default;margin-bottom:4px;">🧪 搜索态势总览</div>
-                                    <div id="ai-search-overview-subtitle" class="ai-search-overview-subtitle">等待提案与候选载入...</div>
-                                </div>
-                                <div id="ai-search-overview-badges" class="ai-search-overview-badges">
-                                    <span class="ai-search-badge">等待状态</span>
-                                </div>
-                            </div>
-                            <div id="ai-search-overview-metrics" class="ai-search-overview-metrics">
-                                <div class="ai-search-metric-card">
-                                    <span>Champion</span>
-                                    <strong>--</strong>
-                                </div>
-                            </div>
-                            <div class="ai-search-overview-grid">
-                                <div>
-                                    <div class="ai-search-section-title">候选排行榜</div>
-                                    <div id="ai-search-overview-leaderboard" class="ai-search-overview-leaderboard">
-                                        <div class="ai-search-empty">等待候选结果...</div>
-                                    </div>
-                                </div>
-                                <div>
-                                    <div class="ai-search-section-title">搜索健康度</div>
-                                    <div id="ai-search-overview-health" class="ai-search-overview-health">
-                                        <div class="ai-search-empty">等待搜索摘要...</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
                         <div id="ai-candidate-cards" class="ai-candidate-cards">
                             <div class="ai-empty-hint">
                                 暂无候选策略。<br>
@@ -1751,16 +1826,6 @@
 
                     <!-- 右侧：选中候选详情 + 注册 -->
                     <aside class="ai-hub-detail">
-                        <!-- Phase A: 实时信号面板 -->
-                        <div class="card ai-live-signals-card">
-                            <div class="ai-sidebar-title" style="margin-bottom:6px;">
-                                实时信号
-                                <span style="font-size:10px;color:#6b7fa0;font-weight:400;text-transform:none;margin-left:4px;">30s刷新</span>
-                            </div>
-                            <div id="ai-live-signals-panel">
-                                <div style="font-size:11px;color:#6b7fa0;padding:4px 0;">加载中...</div>
-                            </div>
-                        </div>
                         <div id="ai-detail-panel" class="ai-detail-panel">
                             <div class="ai-detail-placeholder">
                                 <div style="font-size:36px;opacity:.3;">📊</div>
@@ -1949,11 +2014,10 @@
 
     <script charset="utf-8" src="/static/js/app.js?v=117"></script>
     <script charset="utf-8" src="/static/js/research_workbench.js?v=7"></script>
-    <script charset="utf-8" src="/static/js/ai_research.js?v=26"></script>
+    <script charset="utf-8" src="/static/js/ai_research.js?v=29"></script>
     <script charset="utf-8" src="/static/js/ai_research_diagnostics.js?v=1"></script>
-    <script charset="utf-8" src="/static/js/ai_research_runtime.js?v=1"></script>
-    <script charset="utf-8" src="/static/js/ai_research_candidates.js?v=1"></script>
-    <script charset="utf-8" src="/static/js/ai_research_agent.js?v=1"></script>
+    <script charset="utf-8" src="/static/js/ai_research_runtime.js?v=4"></script>
+    <script charset="utf-8" src="/static/js/ai_research_agent.js?v=3"></script>
     <script charset="utf-8" src="/static/js/news_tab_runtime.js?v=11"></script>
     <script charset="utf-8" src="/static/js/dashboard_unstructured_news.js?v=13"></script>
 </body>

@@ -38,6 +38,21 @@
     return String(mode || 'template');
   }
 
+  function tradingModeLabel(mode) {
+    const value = String(mode || '').trim().toLowerCase();
+    if (value === 'live') return '实盘';
+    if (value === 'paper') return '纸盘';
+    return String(mode || '--');
+  }
+
+  function decisionModeLabel(mode) {
+    const value = String(mode || '').trim().toLowerCase();
+    if (value === 'shadow') return '只提示';
+    if (value === 'enforce') return '可拦截';
+    if (value === 'execute') return '直接执行';
+    return String(mode || '--');
+  }
+
   function getSnapshot() {
     if (typeof aiRoot().getSnapshot === 'function') return aiRoot().getSnapshot() || {};
     return {};
@@ -137,16 +152,25 @@
 
   function nextStepText(snapshot, proposal, candidate) {
     const pendingApprovals = Array.isArray(snapshot?.pendingApprovals) ? snapshot.pendingApprovals.length : 0;
-    if (!proposal) return '先填写研究目标，再生成研究假设与计划。';
+    if (!proposal) return '先填写研究目标，再生成研究任务。';
     if (['research_queued', 'research_running'].includes(String(proposal?.status || ''))) {
-      return '研究搜索正在运行，优先观察候选生成和淘汰原因。';
+      return '研究正在运行，先观察候选生成与淘汰原因。';
     }
     if (!candidate) return '先运行已选研究任务，让系统产出候选与验证结果。';
-    if (pendingApprovals > 0) return `有 ${pendingApprovals} 个候选待治理审批，先确认运行目标。`;
+    if (pendingApprovals > 0) return `当前有 ${pendingApprovals} 个候选待人工确认，先确认目标。`;
     if (['paper_running', 'shadow_running', 'live_candidate', 'live_running'].includes(String(candidate?.status || ''))) {
-      return '候选已进入运行态，继续观察自治代理与实盘决策联动。';
+      return '候选已进入运行态，可继续观察自动交易代理表现，并按需要启用下单前AI复核。';
     }
-    return '优先查看候选详情中的验证分数、谱系与部署建议，再决定注册。';
+    return '优先查看候选验证、谱系和注册建议，再决定是否注册。';
+  }
+
+  function focusCandidateText(candidate) {
+    if (!candidate) return '暂无候选';
+    const score = Number(candidate?.score);
+    const status = statusText(candidate?.status || '--');
+    return Number.isFinite(score)
+      ? `${candidate?.strategy || '--'} / ${status} / ${Math.round(score)}分`
+      : `${candidate?.strategy || '--'} / ${status}`;
   }
 
   function metric(label, value) {
@@ -179,6 +203,7 @@
     const topRow = candidateResultTop(candidate);
     const validation = candidate?.validation_summary || {};
     const proposalCandidates = candidatePoolForProposal(snapshot, proposal);
+    const nextAction = nextStepText(snapshot, proposal, candidate);
 
     const hypothesisTone = proposal
       ? (['research_running', 'research_queued'].includes(String(proposal?.status || '')) ? 'active' : 'done')
@@ -189,9 +214,7 @@
     const validationTone = candidate
       ? (String(proposal?.status || '') === 'rejected' || String(candidate?.status || '') === 'rejected' ? 'blocked' : 'done')
       : (proposal ? 'active' : 'pending');
-    const decisionTone = liveDecision?.enabled
-      ? 'active'
-      : (candidate ? 'done' : 'pending');
+    const reviewTone = liveDecision?.enabled ? 'active' : (candidate ? 'done' : 'pending');
     const deploymentTone = pendingApprovals > 0
       ? 'blocked'
       : (runningCandidates > 0 ? 'done' : (candidate ? 'active' : 'pending'));
@@ -199,8 +222,8 @@
     const badges = [
       proposal ? { text: `提案 ${proposalDisplayName(proposal)}`, tone: 'done' } : null,
       candidate ? { text: `候选 ${candidate?.strategy || '--'}`, tone: 'active' } : null,
-      liveDecision?.enabled ? { text: `AI 决策 ${liveDecision?.mode || 'shadow'}`, tone: 'done' } : null,
-      pendingApprovals > 0 ? { text: `待审批 ${pendingApprovals}`, tone: 'warn' } : null,
+      liveDecision?.enabled ? { text: `下单前复核 ${decisionModeLabel(liveDecision?.mode || 'shadow')}`, tone: 'done' } : null,
+      pendingApprovals > 0 ? { text: `待确认 ${pendingApprovals}`, tone: 'warn' } : null,
     ].filter(Boolean);
 
     const stages = [
@@ -214,7 +237,7 @@
           metric('市场', inputs.regime || 'mixed'),
           metric('模板', inputs.maxTemplates),
         ],
-        proposal ? `当前状态：${statusText(proposal?.status)}` : '目标会先被结构化为研究假设与计划。',
+        proposal ? `当前状态：${statusText(proposal?.status)}` : '目标会先被结构化成研究假设与实验计划。',
       ),
       stageCard(
         2,
@@ -228,14 +251,14 @@
           metric('预算', searchBudget?.max_backtest_runs || '--'),
           metric('淘汰', searchSummary?.rejected_count || 0),
         ],
-        proposal ? '系统会保留 champion / challenger 谱系与搜索摘要。' : '先生成提案，才能开始 hypothesis -> evaluate -> mutate。',
+        proposal ? '系统会保留 champion / challenger 关系与搜索摘要。' : '先生成提案，才能开始 hypothesis -> evaluate -> mutate。',
       ),
       stageCard(
         3,
         '验证',
         validationTone,
         candidate
-          ? `${candidate?.strategy || '--'} · ${Number(candidate?.score || 0).toFixed(0)} 分`
+          ? `${candidate?.strategy || '--'} / ${Number(candidate?.score || 0).toFixed(0)} 分`
           : '等待候选进入验证',
         [
           metric('OOS', validation?.oos_score != null ? Number(validation.oos_score).toFixed(2) : '--'),
@@ -246,15 +269,17 @@
       ),
       stageCard(
         4,
-        '决策',
-        decisionTone,
+        '上线保护',
+        reviewTone,
         `${providerDisplayName(liveDecision?.provider || 'codex')} / ${liveDecision?.model || 'default'}`,
         [
-          metric('治理', runtime?.governance_enabled ? '开启' : '关闭'),
-          metric('AI 决策', liveDecision?.enabled ? (liveDecision?.mode || 'shadow') : '关闭'),
-          metric('自治代理', agent?.enabled ? '启用' : '关闭'),
+          metric('人工确认', runtime?.governance_enabled ? '开启' : '关闭'),
+          metric('下单前AI复核', liveDecision?.enabled ? decisionModeLabel(liveDecision?.mode || 'shadow') : '关闭'),
+          metric('自动交易代理', agent?.enabled ? '启用' : '关闭'),
         ],
-        candidate ? `当前聚焦候选：${candidate?.strategy || '--'}` : '没有候选时，运行时只显示配置，不会形成研究闭环。',
+        candidate
+          ? `当前聚焦候选：${candidate?.strategy || '--'}。这一步展示的是研究结果上线前后的保护和增强，不负责生成新策略。`
+          : '没有候选时，这里只显示上线前后的保护配置，不会形成研究闭环。',
       ),
       stageCard(
         5,
@@ -263,22 +288,38 @@
         runningCandidates > 0
           ? `${runningCandidates} 个候选处于运行态`
           : pendingApprovals > 0
-            ? `${pendingApprovals} 个候选待审批`
+            ? `${pendingApprovals} 个候选待人工确认`
             : '尚未进入部署阶段',
         [
-          metric('交易模式', runtime?.trading_mode || '--'),
+          metric('交易模式', tradingModeLabel(runtime?.trading_mode || '--')),
           metric('候选状态', statusText(candidate?.status || proposal?.status || '--')),
           metric('运行中', runningCandidates),
         ],
-        nextStepText(snapshot, proposal, candidate),
+        nextAction,
       ),
     ];
 
     return {
-      subtitle: nextStepText(snapshot, proposal, candidate),
+      subtitle: nextAction,
       badges,
       stages,
+      focus: {
+        proposal: proposal ? proposalDisplayName(proposal) : '未选研究任务',
+        candidate: focusCandidateText(candidate),
+        nextAction,
+      },
     };
+  }
+
+  function renderFocus(model) {
+    const proposalEl = q('ai-focus-proposal');
+    const candidateEl = q('ai-focus-candidate');
+    const nextEl = q('ai-focus-next-action');
+    if (!proposalEl || !candidateEl || !nextEl) return;
+    const focus = model?.focus || {};
+    proposalEl.textContent = String(focus.proposal || '未选研究任务');
+    candidateEl.textContent = String(focus.candidate || '暂无候选');
+    nextEl.textContent = String(focus.nextAction || '等待研究状态');
   }
 
   function renderFlow(detail = {}) {
@@ -294,6 +335,7 @@
       ? model.badges.map((badge) => `<span class="ai-flow-badge is-${esc(badge.tone)}">${esc(badge.text)}</span>`).join('')
       : '<span class="ai-flow-badge">等待研究状态</span>';
     stageEl.innerHTML = model.stages.join('');
+    renderFocus(model);
   }
 
   function bindPlannerInputs() {

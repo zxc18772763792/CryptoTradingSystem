@@ -33,6 +33,21 @@
     return String(provider || '-');
   }
 
+  function compactText(value, maxLen = 120) {
+    if (value == null) return '';
+    let text = '';
+    if (typeof value === 'string') text = value;
+    else if (typeof value === 'number' || typeof value === 'boolean') text = String(value);
+    else {
+      try {
+        text = JSON.stringify(value);
+      } catch (_) {
+        text = String(value);
+      }
+    }
+    return text.length > maxLen ? `${text.slice(0, maxLen - 1)}...` : text;
+  }
+
   async function rootApi(path, options = {}) {
     if (typeof window.api === 'function') return window.api(path, options);
     const response = await fetch(path, {
@@ -72,11 +87,11 @@
         <span>${esc(modelText)}</span>
         <span style="color:var(--text-muted)">模式</span>
         <span>${esc(modeText)}</span>
-        <span style="color:var(--text-muted)">运行 Tick</span>
+        <span style="color:var(--text-muted)">轮询次数</span>
         <span>${esc(Number(status.tick_count || 0))}</span>
-        <span style="color:var(--text-muted)">已提交</span>
+        <span style="color:var(--text-muted)">已提交信号</span>
         <span>${esc(Number(status.submitted_count || 0))}</span>
-        <span style="color:var(--text-muted)">Research</span>
+        <span style="color:var(--text-muted)">参考候选</span>
         <span>${esc(researchLine)}</span>
         <span style="color:var(--text-muted)">最后运行</span>
         <span>${esc(lastRunAt)}</span>
@@ -103,7 +118,7 @@
       el.innerHTML = rows.map((row) => {
         const ts = String(row.ts || row.timestamp || '').slice(0, 19);
         const action = String(row.action || row.trigger || row.event || '?');
-        const detail = String(row.decision || row.result || row.error || '').slice(0, 80);
+        const detail = compactText(row.decision || row.result || row.error || '', 120);
         const color = row.error || action.includes('error') ? '#f87171' : 'var(--text-muted)';
         return `<div class="agent-journal-row">
           <span class="agent-journal-ts">${esc(ts)}</span>
@@ -121,6 +136,9 @@
     try {
       const response = await rootApi('/ai/autonomous-agent/status');
       renderAgentPanel(response?.status || {}, response?.config || {});
+      if (document.getElementById('ai-agent-journal')) {
+        loadAgentJournal().catch(() => {});
+      }
     } catch (_) {
       // best-effort
     }
@@ -138,7 +156,7 @@
         method: 'POST',
         body: JSON.stringify({ enable: true }),
       });
-      notify('AI 自治代理已启动');
+      notify('自动交易代理已启动');
       await loadAgentStatus();
     } catch (err) {
       notify(`启动失败: ${err.message}`, true);
@@ -158,7 +176,7 @@
     }
     try {
       await rootApi('/ai/autonomous-agent/stop', { method: 'POST' });
-      notify('AI 自治代理已停止');
+      notify('自动交易代理已停止');
       await loadAgentStatus();
     } catch (err) {
       notify(`停止失败: ${err.message}`, true);
@@ -208,16 +226,10 @@
     };
     aiRoot().modules = modules;
 
-    const details = document.querySelector('#ai-agent-card details');
-    if (details) {
-      details.addEventListener('toggle', () => {
-        if (details.open) loadAgentJournal().catch(() => {});
-      });
-    }
-
     window.agentStart = agentStart;
     window.agentStop = agentStop;
     window.agentRunOnce = agentRunOnce;
+    window.agentRefreshJournal = () => loadAgentJournal().catch(() => {});
     window.addEventListener('ai-research:state', (event) => {
       const reason = String(event?.detail?.reason || '');
       if (['refresh-workbench', 'runtime-summary', 'candidate-detail'].includes(reason)) {

@@ -6,7 +6,7 @@
   const REFRESH_INTERVAL_MS = 60000;
   const JOB_POLL_MS         = 3000;
   const PREMIUM_SOURCE_LABEL = '高级数据源';
-  const FLOW_HINT_DEFAULT = '推荐顺序：1) 生成研究 → 2) 运行研究 → 3) 审批/注册。想快可直接用“一键研究+部署”。';
+  const FLOW_HINT_DEFAULT = '推荐顺序：1) 生成研究 → 2) 运行研究 → 3) 人工确认/注册。只有希望系统自动推进时再用“自动跑完整流程”。';
 
   /* 策略类别与颜色 */
   const STRATEGY_CATEGORIES = {
@@ -169,6 +169,21 @@
     return String(provider || '-');
   }
 
+  function tradingModeLabel(mode) {
+    const value = String(mode || '').trim().toLowerCase();
+    if (value === 'live') return '实盘';
+    if (value === 'paper') return '纸盘';
+    return String(mode || '--');
+  }
+
+  function decisionModeLabel(mode) {
+    const value = String(mode || '').trim().toLowerCase();
+    if (value === 'shadow') return '只提示';
+    if (value === 'enforce') return '可拦截';
+    if (value === 'execute') return '直接执行';
+    return String(mode || '--');
+  }
+
   function notify(msg, isError = false) {
     if (typeof window.notify === 'function') { window.notify(msg, !!isError); return; }
     const box = document.getElementById('notification');
@@ -273,11 +288,11 @@
     const liveMode = String(liveCfg.mode || 'shadow');
     const agentEnabled = !!agentCfg.enabled;
     const chips = [
-      { label: '治理', value: governanceOn ? '开启' : '关闭', cls: governanceOn ? 'is-warn' : 'is-on' },
-      { label: '交易模式', value: tradingMode, cls: tradingMode === 'live' ? 'is-warn' : 'is-on' },
-      { label: '决策模式', value: decisionMode, cls: decisionMode === 'enforce' ? 'is-warn' : '' },
-      { label: 'AI实盘决策', value: liveEnabled ? `开启(${liveMode})` : '关闭', cls: liveEnabled ? 'is-on' : '' },
-      { label: 'AI自治代理', value: agentEnabled ? '已启用' : '已关闭', cls: agentEnabled ? 'is-on' : '' },
+      { label: '人工确认', value: governanceOn ? '开启' : '关闭', cls: governanceOn ? 'is-warn' : 'is-on' },
+      { label: '交易模式', value: tradingModeLabel(tradingMode), cls: tradingMode === 'live' ? 'is-warn' : 'is-on' },
+      { label: '执行裁决', value: decisionModeLabel(decisionMode), cls: decisionMode === 'enforce' ? 'is-warn' : '' },
+      { label: '下单前AI复核', value: liveEnabled ? `已启用（${decisionModeLabel(liveMode)}）` : '已关闭', cls: liveEnabled ? 'is-on' : '' },
+      { label: '自动交易代理', value: agentEnabled ? '已启用' : '已关闭', cls: agentEnabled ? 'is-on' : '' },
     ];
     root.innerHTML = chips
       .map((chip) => `<span class="ai-runtime-chip ${chip.cls}">${esc(chip.label)}：${esc(chip.value)}</span>`)
@@ -342,7 +357,7 @@
     providerEl.dataset.previousProvider = providerState.provider;
     const selectedProvider = providerState.provider;
     const available = !!providerState.providerMeta.available;
-    const modeText = String(cfg.mode || 'shadow');
+    const modeText = decisionModeLabel(String(cfg.mode || 'shadow'));
     const providerText = `${providerDisplayName(selectedProvider)}/${String(providerState.model || '--')}`;
     const fallbackText = providerState.fallbackUsed
       ? ` | 已从 ${providerDisplayName(providerState.requestedProvider)} 自动切换`
@@ -371,7 +386,7 @@
     providerEl.dataset.previousProvider = nextProvider;
     const available = !!providers[nextProvider]?.available;
     const providerText = `${providerDisplayName(nextProvider)}/${String(modelEl.value || nextDefaultModel || '--')}`;
-    statusEl.textContent = `${enabledEl?.checked ? '已启用' : '未启用'} | ${String(modeEl?.value || cfg.mode || 'shadow')} | ${providerText} | ${available ? 'key就绪' : 'key缺失'}`;
+    statusEl.textContent = `${enabledEl?.checked ? '已启用' : '未启用'} | ${decisionModeLabel(String(modeEl?.value || cfg.mode || 'shadow'))} | ${providerText} | ${available ? 'key就绪' : 'key缺失'}`;
     statusEl.style.color = available ? '#9fb1c9' : '#f0b429';
   }
 
@@ -389,7 +404,7 @@
       model: String(modelEl.value || '').trim(),
     };
     try {
-      if (btn) { btn.disabled = true; btn.textContent = '保存中..'; }
+      if (btn) { btn.disabled = true; btn.textContent = '保存中...'; }
       const res = await aiApi('/runtime-config/live-decision', {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -402,11 +417,11 @@
       };
       renderRuntimeSummary();
       renderLiveDecisionRuntimeConfig();
-      notify('AI实盘决策配置已更新');
+      notify('下单前AI复核配置已更新');
     } catch (err) {
-      notify(`AI实盘决策配置保存失败: ${err.message}`, true);
+      notify(`下单前AI复核配置保存失败: ${err.message}`, true);
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = '保存AI决策配置'; }
+      if (btn) { btn.disabled = false; btn.textContent = '保存复核配置'; }
     }
   }
 
@@ -1018,7 +1033,7 @@
       const label = { LONG:'看多', SHORT:'看空', FLAT:'持平' }[dir] || dir;
       const blocked = data?.blocked_by_risk;
       const badge  = blocked ? '<span style="color:#e05260;font-size:10px;">风控</span>'
-                             : (data?.requires_approval ? '<span style="color:#f0b429;font-size:10px;">审批</span>' : '');
+                             : (data?.requires_approval ? '<span style="color:#f0b429;font-size:10px;">待确认</span>' : '');
       return `<div class="ai-signal-mini-row">
         <span class="signal-mini-sym">${esc(sym.split('/')[0])}</span>
         <span class="signal-mini-dir ${dir}">${label}${badge}</span>
@@ -2012,7 +2027,7 @@
           body: JSON.stringify({ target: 'live_candidate' }),
           timeoutMs: 20000,
         });
-        notify('已升级为实盘候选，等待进一步审批');
+        notify('已升级为实盘候选，等待人工确认');
         await refreshWorkbench('', candidateId);
       } catch (err) {
         if (btn) { btn.textContent = '升级为实盘候选 →'; btn.disabled = false; }
@@ -2025,7 +2040,7 @@
       openRegisterModal(candidateId).catch(err => notify(`\u6253\u5f00\u6ce8\u518c\u5931\u8d25: ${err.message}`, true));
     });
 
-    // 人工审批按钮
+    // 人工确认按钮
     const approvalSelect = panel.querySelector('#approval-target-select');
     if (approvalSelect) {
       approvalSelect.querySelector('option[value="shadow"]')?.remove();
@@ -2368,7 +2383,7 @@
 
   async function confirmRegister(candidateId, mode, name) {
     if (governanceEnabled()) {
-      notify('治理模式已开启，请改用人工审批流程', true);
+      notify('已开启人工确认，请改用人工确认流程', true);
       return;
     }
     const btn = document.getElementById('reg-confirm-btn');
@@ -2390,7 +2405,7 @@
   }
 
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     人工审批队列
+     人工确认队列
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
   async function loadPendingApprovals() {
     try {
@@ -2491,7 +2506,7 @@
       const goals = String(document.getElementById('ai-planner-goal')?.value || '').trim();
       if (goals.length < 8) {
         notify('请先填写研究目标（至少8个字符）', true);
-        if (btn) { btn.textContent = '🤖 AI辅助'; btn.disabled = false; btn.style.color = ''; }
+        if (btn) { btn.textContent = '🤖 生成研究思路'; btn.disabled = false; btn.style.color = ''; }
         return;
       }
       const macroContext = await loadPlannerMacroContext().catch(() => null);
@@ -2513,7 +2528,7 @@
         }
         const maxTemplatesEl = document.getElementById('ai-planner-max-templates');
         if (maxTemplatesEl) maxTemplatesEl.value = String(suggestedMax);
-        if (btn) { btn.textContent = 'AI建议已生成 ✓'; btn.disabled = false; btn.style.color = '#20bf78'; }
+        if (btn) { btn.textContent = '研究思路已生成 ✓'; btn.disabled = false; btn.style.color = '#20bf78'; }
         // Show hypothesis in planner notes
         const plannerNotesEl = document.getElementById('ai-planner-notes');
         const macroSummary = macroContext
@@ -2523,14 +2538,14 @@
           const existing = plannerNotesEl.innerHTML;
           plannerNotesEl.innerHTML = `<div style="font-size:11px;color:#20bf78;margin-bottom:3px;">🤖 AI假设：${esc(result.llm_research_output.hypothesis)}</div>` + existing;
         }
-        notify('AI\u8f85\u52a9\u5df2\u5b8c\u6210\uff0c\u7814\u7a76\u5047\u8bbe\u5df2\u5199\u5165\u5e76\u5237\u65b0\u5de5\u4f5c\u53f0\u3002');
+        notify('研究思路已生成，假设已写入并刷新工作台。');
       } else {
-        notify(`AI辅助失败: ${result?.error || 'LLM不可用'}`, true);
-        if (btn) { btn.textContent = '🤖 AI辅助'; btn.disabled = false; btn.style.color = ''; }
+        notify(`生成研究思路失败: ${result?.error || 'LLM不可用'}`, true);
+        if (btn) { btn.textContent = '🤖 生成研究思路'; btn.disabled = false; btn.style.color = ''; }
       }
     } catch (err) {
-      notify(`AI辅助失败: ${err.message}`, true);
-      if (btn) { btn.textContent = '🤖 AI辅助'; btn.disabled = false; btn.style.color = ''; }
+      notify(`生成研究思路失败: ${err.message}`, true);
+      if (btn) { btn.textContent = '🤖 生成研究思路'; btn.disabled = false; btn.style.color = ''; }
     }
   }
 
@@ -2761,7 +2776,7 @@
       payload.llm_research_output = state.pendingLlmContext;
       state.pendingLlmContext = null;
       const btn = document.getElementById('ai-context-btn');
-      if (btn) { btn.textContent = '🤖 AI辅助'; btn.disabled = false; btn.style.color = ''; }
+        if (btn) { btn.textContent = '🤖 生成研究思路'; btn.disabled = false; btn.style.color = ''; }
     }
     const result = await aiApi('/proposals/generate', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 30000 });
     // A: show filtered templates and planner notes
@@ -3019,11 +3034,11 @@
     document.getElementById('ai-oneclick-btn')?.addEventListener('click', () =>
       withActionLock('oneclick', () => runOneClickResearchDeploy()).catch(err => notify(`一键执行失败: ${err.message}`, true)));
 
-    /* AI辅助研究瑙勫垝 */
+    /* AI生成研究思路 */
     document.getElementById('ai-context-btn')?.addEventListener('click', () =>
-      generateAIContext().catch(err => notify(`AI辅助失败: ${err.message}`, true)));
+      generateAIContext().catch(err => notify(`生成研究思路失败: ${err.message}`, true)));
 
-    /* 待审批队列事件代理 */
+    /* 待人工确认队列事件代理 */
     document.getElementById('ai-approval-list')?.addEventListener('click', e => {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
@@ -3052,7 +3067,7 @@
     document.getElementById('ai-funding-warm-btn')?.addEventListener('click', () =>
       warmFundingForResearch().catch(err => notify(`宏观缓存预热失败: ${err.message}`, true)));
     document.getElementById('ai-live-decision-save-btn')?.addEventListener('click', () =>
-      saveLiveDecisionRuntimeConfig().catch(err => notify(`AI实盘决策保存失败: ${err.message}`, true)));
+      saveLiveDecisionRuntimeConfig().catch(err => notify(`下单前AI复核保存失败: ${err.message}`, true)));
     ['ai-live-decision-enabled', 'ai-live-decision-mode', 'ai-live-decision-provider'].forEach((id) => {
       document.getElementById(id)?.addEventListener('change', () => previewLiveDecisionProviderSelection());
     });
@@ -3281,6 +3296,7 @@
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
   async function loadLiveSignals() {
+    if (!document.getElementById('ai-live-signals-panel')) return;
     try {
       const res = await aiApi('/live-signals', { timeoutMs: 20000 });
       renderLiveSignalPanel(res?.items || [], !!res?.ml_model_loaded);
