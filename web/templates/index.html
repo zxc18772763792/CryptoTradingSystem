@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=74">
+    <link rel="stylesheet" href="/static/css/style.css?v=75">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
@@ -1528,6 +1528,11 @@
                                 这一步是给已注册策略、候选策略和人工确认后的策略加一道下单前二次复核。
                                 它不生成新策略，也不属于自动交易代理的一条龙执行。
                             </div>
+                            <div class="ai-review-scope">
+                                <div class="ai-review-scope-item">已注册策略下单前复核</div>
+                                <div class="ai-review-scope-item">运行中的候选策略复核</div>
+                                <div class="ai-review-scope-item">自动交易代理信号进入执行链后也走这里</div>
+                            </div>
                             <div class="form-row ai-auto-step-form-row">
                                 <label class="ai-auto-inline-check">
                                     <input type="checkbox" id="ai-live-decision-enabled">
@@ -1566,6 +1571,9 @@
                                 <div class="ai-top-intro-box-title">不负责什么</div>
                                 <div class="ai-top-intro-box-desc">不生成新策略，只使用已有研究结果和当前市场上下文来做交易判断。</div>
                             </div>
+                        </div>
+                        <div class="ai-auto-trade-note">
+                            说明：如果你已经启用“下单前AI复核”，代理发出的信号进入统一执行链后仍会经过同一套复核，所以这里不再重复放第二套复核配置。
                         </div>
 
                         <div class="ai-auto-trade-rail">
