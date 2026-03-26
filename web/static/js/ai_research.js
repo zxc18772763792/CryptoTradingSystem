@@ -336,6 +336,37 @@
     providerEl.dataset.previousProvider = String(activeProvider || '');
   }
 
+  function renderLiveDecisionEffectiveSummary(summary = {}) {
+    const scopeEl = document.getElementById('ai-live-decision-effective-scope');
+    const modeEl = document.getElementById('ai-live-decision-effective-mode');
+    if (!scopeEl || !modeEl) return;
+    scopeEl.textContent = String(summary.scope || '未加载');
+    modeEl.textContent = String(summary.mode || '未加载');
+  }
+
+  function buildLiveDecisionEffectiveSummary(cfg, providerState, overrides = {}) {
+    const enabled = overrides.enabled != null ? !!overrides.enabled : !!cfg?.enabled;
+    const mode = String(overrides.mode || cfg?.mode || 'shadow');
+    const provider = String(overrides.provider || providerState?.provider || cfg?.provider || 'codex');
+    const model = String(overrides.model || providerState?.model || cfg?.model || '').trim() || 'default';
+    const tradingMode = String((state.runtimeConfig && state.runtimeConfig.trading_mode) || '--').trim().toLowerCase();
+    const applyInPaper = overrides.applyInPaper != null ? !!overrides.applyInPaper : !!cfg?.apply_in_paper;
+
+    let scopeText = '未启用，当前只走原执行链';
+    if (enabled && applyInPaper) {
+      scopeText = '纸盘与实盘统一执行链';
+    } else if (enabled && tradingMode === 'live') {
+      scopeText = '当前实盘执行链';
+    } else if (enabled) {
+      scopeText = '仅实盘执行链（纸盘先观察）';
+    }
+
+    return {
+      scope: scopeText,
+      mode: enabled ? `${decisionModeLabel(mode)} / ${providerDisplayName(provider)} / ${model}` : '关闭',
+    };
+  }
+
   function renderLiveDecisionRuntimeConfig() {
     const cfg = getLiveDecisionRuntimeConfig();
     const enabledEl = document.getElementById('ai-live-decision-enabled');
@@ -346,6 +377,7 @@
     if (!enabledEl || !modeEl || !providerEl || !modelEl || !statusEl) return;
     if (!cfg) {
       statusEl.textContent = '未加载';
+      renderLiveDecisionEffectiveSummary({ scope: '未加载', mode: '未加载' });
       return;
     }
     const providerState = resolveLiveDecisionProviderState(cfg);
@@ -364,6 +396,7 @@
       : '';
     statusEl.textContent = `${cfg.enabled ? '已启用' : '未启用'} | ${modeText} | ${providerText} | ${available ? 'key就绪' : 'key缺失'}${fallbackText}`;
     statusEl.style.color = available ? '#9fb1c9' : '#f0b429';
+    renderLiveDecisionEffectiveSummary(buildLiveDecisionEffectiveSummary(cfg, providerState));
   }
 
   function previewLiveDecisionProviderSelection() {
@@ -385,9 +418,19 @@
     }
     providerEl.dataset.previousProvider = nextProvider;
     const available = !!providers[nextProvider]?.available;
-    const providerText = `${providerDisplayName(nextProvider)}/${String(modelEl.value || nextDefaultModel || '--')}`;
+    const previewModel = String(modelEl.value || nextDefaultModel || '--');
+    const providerText = `${providerDisplayName(nextProvider)}/${previewModel}`;
     statusEl.textContent = `${enabledEl?.checked ? '已启用' : '未启用'} | ${decisionModeLabel(String(modeEl?.value || cfg.mode || 'shadow'))} | ${providerText} | ${available ? 'key就绪' : 'key缺失'}`;
     statusEl.style.color = available ? '#9fb1c9' : '#f0b429';
+    renderLiveDecisionEffectiveSummary(buildLiveDecisionEffectiveSummary(cfg, {
+      provider: nextProvider,
+      model: previewModel,
+    }, {
+      enabled: !!enabledEl?.checked,
+      mode: String(modeEl?.value || cfg.mode || 'shadow'),
+      provider: nextProvider,
+      model: previewModel,
+    }));
   }
 
   async function saveLiveDecisionRuntimeConfig() {

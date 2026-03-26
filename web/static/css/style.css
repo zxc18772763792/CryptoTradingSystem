@@ -3850,6 +3850,80 @@ input[type="radio"] {
     line-height: 1.55;
 }
 
+.ai-review-dynamic-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.ai-review-dynamic-item {
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid rgba(96, 165, 250, 0.14);
+    background: rgba(9, 20, 34, 0.72);
+    display: grid;
+    gap: 4px;
+}
+
+.ai-review-dynamic-item span {
+    font-size: 10px;
+    color: #7f9dc0;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.ai-review-dynamic-item strong {
+    font-size: 12px;
+    color: #e4edf8;
+    line-height: 1.55;
+}
+
+.ai-research-sidekick-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 12px;
+}
+
+.ai-context-mini-card {
+    min-width: 0;
+    padding: 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(96, 165, 250, 0.12);
+    background: rgba(13, 22, 36, 0.82);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.ai-context-mini-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.ai-context-mini-card .ai-sidebar-title {
+    cursor: default;
+    margin-bottom: 8px;
+}
+
+.ai-context-mini-head.ai-sidebar-title {
+    cursor: pointer;
+    margin-bottom: 8px;
+}
+
+.ai-context-inline-actions {
+    margin-top: 8px;
+    gap: 6px;
+}
+
+.ai-context-status {
+    font-size: 11px;
+    color: #6b7fa0;
+    margin-top: 4px;
+}
+
 .ai-auto-trade-rail {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -6070,7 +6144,9 @@ input[type="radio"] {
 
 @media (max-width: 900px) {
     .ai-top-intro-mini-grid,
-    .ai-auto-trade-rail {
+    .ai-auto-trade-rail,
+    .ai-review-dynamic-summary,
+    .ai-research-sidekick-grid {
         grid-template-columns: 1fr;
     }
 

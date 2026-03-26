@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=75">
+    <link rel="stylesheet" href="/static/css/style.css?v=77">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
@@ -1533,6 +1533,16 @@
                                 <div class="ai-review-scope-item">运行中的候选策略复核</div>
                                 <div class="ai-review-scope-item">自动交易代理信号进入执行链后也走这里</div>
                             </div>
+                            <div class="ai-review-dynamic-summary">
+                                <div class="ai-review-dynamic-item">
+                                    <span>当前生效范围</span>
+                                    <strong id="ai-live-decision-effective-scope">加载中...</strong>
+                                </div>
+                                <div class="ai-review-dynamic-item">
+                                    <span>当前模式</span>
+                                    <strong id="ai-live-decision-effective-mode">加载中...</strong>
+                                </div>
+                            </div>
                             <div class="form-row ai-auto-step-form-row">
                                 <label class="ai-auto-inline-check">
                                     <input type="checkbox" id="ai-live-decision-enabled">
@@ -1553,6 +1563,49 @@
                             <div class="inline-actions ai-auto-step-actions">
                                 <button class="btn btn-sm" id="ai-live-decision-save-btn">保存复核配置</button>
                                 <span id="ai-live-decision-status" class="ai-auto-step-status">未加载</span>
+                            </div>
+                        </div>
+
+                        <div class="ai-research-sidekick-grid">
+                            <div class="ai-context-mini-card ai-signal-card">
+                                <div class="ai-context-mini-head ai-sidebar-title" id="signal-panel-toggle">
+                                    <span>📡 实时信号</span>
+                                    <span class="collapse-arrow">▼</span>
+                                </div>
+                                <div id="signal-panel-body">
+                                    <div class="ai-signal-mini-list" id="ai-signal-mini">
+                                        <div style="color:#6b7fa0;font-size:12px;">加载中...</div>
+                                    </div>
+                                    <div class="inline-actions ai-context-inline-actions">
+                                        <select id="signal-symbol" style="flex:1;min-width:0;font-size:12px;">
+                                            <option value="BTC/USDT">BTC/USDT</option>
+                                            <option value="ETH/USDT">ETH/USDT</option>
+                                            <option value="SOL/USDT">SOL/USDT</option>
+                                            <option value="BNB/USDT">BNB/USDT</option>
+                                            <option value="XRP/USDT">XRP/USDT</option>
+                                        </select>
+                                        <button class="btn btn-sm" id="signal-refresh-btn" style="font-size:12px;">刷新</button>
+                                    </div>
+                                    <div id="signal-status" class="ai-context-status">每30秒自动刷新</div>
+                                </div>
+                            </div>
+
+                            <div class="ai-context-mini-card ai-focus-card">
+                                <div class="ai-sidebar-title">🎯 当前研究焦点</div>
+                                <div class="ai-focus-summary">
+                                    <div class="ai-focus-row">
+                                        <span>当前提案</span>
+                                        <strong id="ai-focus-proposal">加载中...</strong>
+                                    </div>
+                                    <div class="ai-focus-row">
+                                        <span>当前候选</span>
+                                        <strong id="ai-focus-candidate">加载中...</strong>
+                                    </div>
+                                    <div class="ai-focus-row">
+                                        <span>下一步动作</span>
+                                        <strong id="ai-focus-next-action">加载中...</strong>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -1648,47 +1701,6 @@
 
                     <!-- 左侧栏：主流程 + 研究诊断 -->
                     <aside class="ai-hub-sidebar">
-
-                        <!-- 实时信号面板 (可折叠) -->
-                        <div class="card ai-sidebar-card ai-signal-card">
-                            <div class="ai-sidebar-title" id="signal-panel-toggle">
-                                📡 实时信号 <span class="collapse-arrow">▼</span>
-                            </div>
-                            <div id="signal-panel-body">
-                                <div class="ai-signal-mini-list" id="ai-signal-mini">
-                                    <div style="color:#6b7fa0;font-size:12px;">加载中...</div>
-                                </div>
-                                <div class="inline-actions" style="margin-top:8px;gap:6px;">
-                                    <select id="signal-symbol" style="flex:1;min-width:0;font-size:12px;">
-                                        <option value="BTC/USDT">BTC/USDT</option>
-                                        <option value="ETH/USDT">ETH/USDT</option>
-                                        <option value="SOL/USDT">SOL/USDT</option>
-                                        <option value="BNB/USDT">BNB/USDT</option>
-                                        <option value="XRP/USDT">XRP/USDT</option>
-                                    </select>
-                                    <button class="btn btn-sm" id="signal-refresh-btn" style="font-size:12px;">刷新</button>
-                                </div>
-                                <div id="signal-status" style="font-size:11px;color:#6b7fa0;margin-top:4px;">每30秒自动刷新</div>
-                            </div>
-                        </div>
-
-                        <div class="card ai-sidebar-card ai-focus-card">
-                            <div class="ai-sidebar-title">🎯 当前研究焦点</div>
-                            <div class="ai-focus-summary">
-                                <div class="ai-focus-row">
-                                    <span>当前提案</span>
-                                    <strong id="ai-focus-proposal">加载中...</strong>
-                                </div>
-                                <div class="ai-focus-row">
-                                    <span>当前候选</span>
-                                    <strong id="ai-focus-candidate">加载中...</strong>
-                                </div>
-                                <div class="ai-focus-row">
-                                    <span>下一步动作</span>
-                                    <strong id="ai-focus-next-action">加载中...</strong>
-                                </div>
-                            </div>
-                        </div>
 
                         <!-- 研究配置 -->
                         <div class="card ai-sidebar-card">
@@ -2022,7 +2034,7 @@
 
     <script charset="utf-8" src="/static/js/app.js?v=117"></script>
     <script charset="utf-8" src="/static/js/research_workbench.js?v=7"></script>
-    <script charset="utf-8" src="/static/js/ai_research.js?v=29"></script>
+    <script charset="utf-8" src="/static/js/ai_research.js?v=30"></script>
     <script charset="utf-8" src="/static/js/ai_research_diagnostics.js?v=1"></script>
     <script charset="utf-8" src="/static/js/ai_research_runtime.js?v=4"></script>
     <script charset="utf-8" src="/static/js/ai_research_agent.js?v=3"></script>
