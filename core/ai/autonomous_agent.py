@@ -113,6 +113,13 @@ def _extract_json_obj(text: str) -> Dict[str, Any]:
     raise ValueError("invalid json object")
 
 
+def _format_exception_short(exc: Exception) -> str:
+    text = str(exc or "").strip()
+    if text:
+        return text
+    return exc.__class__.__name__
+
+
 def _timeframe_to_seconds(timeframe: str) -> int:
     text = str(timeframe or "15m").strip().lower()
     m = re.fullmatch(r"(\d+)([smhdw])", text)
@@ -260,7 +267,7 @@ class AutonomousTradingAgent:
             "max_leverage": _coerce_float(self._get("AI_AUTONOMOUS_AGENT_MAX_LEVERAGE", 20.0), 20.0, low=1.0, high=125.0),
             "default_stop_loss_pct": _coerce_float(self._get("AI_AUTONOMOUS_AGENT_STOP_LOSS_PCT", 0.02), 0.02, low=0.001, high=0.5),
             "default_take_profit_pct": _coerce_float(self._get("AI_AUTONOMOUS_AGENT_TAKE_PROFIT_PCT", 0.04), 0.04, low=0.001, high=2.0),
-            "timeout_ms": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_TIMEOUT_MS", 12000), 12000, low=1000, high=120000),
+            "timeout_ms": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_TIMEOUT_MS", 30000), 30000, low=1000, high=120000),
             "max_tokens": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_MAX_TOKENS", 420), 420, low=32, high=4096),
             "temperature": _coerce_float(self._get("AI_AUTONOMOUS_AGENT_TEMPERATURE", 0.15), 0.15, low=0.0, high=1.5),
             "cooldown_sec": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_COOLDOWN_SEC", 180), 180, low=0, high=86400),
@@ -303,7 +310,7 @@ class AutonomousTradingAgent:
         if "default_take_profit_pct" in kwargs and kwargs["default_take_profit_pct"] is not None:
             updates["AI_AUTONOMOUS_AGENT_TAKE_PROFIT_PCT"] = _coerce_float(kwargs["default_take_profit_pct"], 0.04, low=0.001, high=2.0)
         if "timeout_ms" in kwargs and kwargs["timeout_ms"] is not None:
-            updates["AI_AUTONOMOUS_AGENT_TIMEOUT_MS"] = _coerce_int(kwargs["timeout_ms"], 12000, low=1000, high=120000)
+            updates["AI_AUTONOMOUS_AGENT_TIMEOUT_MS"] = _coerce_int(kwargs["timeout_ms"], 30000, low=1000, high=120000)
         if "max_tokens" in kwargs and kwargs["max_tokens"] is not None:
             updates["AI_AUTONOMOUS_AGENT_MAX_TOKENS"] = _coerce_int(kwargs["max_tokens"], 420, low=32, high=4096)
         if "temperature" in kwargs and kwargs["temperature"] is not None:
@@ -497,17 +504,60 @@ class AutonomousTradingAgent:
         lookback = int(cfg.get("lookback_bars") or 240)
         span_sec = max(timeframe_sec * lookback, 3600 * 8)
         start_time = now - timedelta(seconds=span_sec + timeframe_sec * 2)
+        exchange = str(cfg.get("exchange") or "binance")
+        symbol = str(cfg.get("symbol") or "BTC/USDT")
+        timeframe = str(cfg.get("timeframe") or "15m")
         df = await data_storage.load_klines_from_parquet(
-            exchange=str(cfg.get("exchange") or "binance"),
-            symbol=str(cfg.get("symbol") or "BTC/USDT"),
-            timeframe=str(cfg.get("timeframe") or "15m"),
+            exchange=exchange,
+            symbol=symbol,
+            timeframe=timeframe,
             start_time=start_time,
             end_time=now,
         )
-        if df is None or df.empty:
+        df = df.copy() if df is not None and not df.empty else pd.DataFrame()
+
+        connector = exchange_manager.get_exchange(exchange)
+        if connector is not None:
+            try:
+                live_klines = await connector.get_klines(symbol, timeframe, limit=max(40, lookback))
+                live_df = self._df_from_klines(live_klines)
+                if not live_df.empty:
+                    if df.empty:
+                        df = live_df
+                    else:
+                        df = pd.concat([df, live_df])
+                        df = df[~df.index.duplicated(keep="last")].sort_index()
+            except Exception as exc:
+                logger.debug(
+                    f"autonomous_agent live klines fallback failed for {exchange} {symbol} {timeframe}: {exc}"
+                )
+
+        if df.empty:
             return pd.DataFrame()
-        df = df.tail(max(40, lookback)).copy()
-        return df
+        return df.tail(max(40, lookback)).copy()
+
+    @staticmethod
+    def _df_from_klines(klines: List[Any]) -> pd.DataFrame:
+        if not klines:
+            return pd.DataFrame()
+        frame = pd.DataFrame(
+            [
+                {
+                    "timestamp": getattr(kline, "timestamp", None),
+                    "open": getattr(kline, "open", None),
+                    "high": getattr(kline, "high", None),
+                    "low": getattr(kline, "low", None),
+                    "close": getattr(kline, "close", None),
+                    "volume": getattr(kline, "volume", None),
+                }
+                for kline in klines
+            ]
+        )
+        if frame.empty:
+            return pd.DataFrame()
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+        frame = frame.dropna(subset=["timestamp"]).set_index("timestamp").sort_index()
+        return frame
 
     async def _resolve_last_price(self, cfg: Dict[str, Any], market_data: pd.DataFrame) -> float:
         if market_data is not None and not market_data.empty and "close" in market_data.columns:
@@ -919,7 +969,7 @@ class AutonomousTradingAgent:
                     "leverage": cfg.get("default_leverage"),
                     "stop_loss_pct": cfg.get("default_stop_loss_pct"),
                     "take_profit_pct": cfg.get("default_take_profit_pct"),
-                    "reason": f"model_error:{exc}",
+                    "reason": f"model_error:{_format_exception_short(exc)}",
                 }
             decision = self._normalize_decision(raw_decision, cfg, context_payload)
 
