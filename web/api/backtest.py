@@ -328,8 +328,9 @@ def _resolve_backtest_protective_settings(
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
 ) -> Dict[str, Any]:
-    merged_params = dict(params or {})
     defaults = get_strategy_defaults(strategy)
+    merged_params = dict(defaults or {})
+    merged_params.update(params or {})
 
     # Explicit switch has top priority: when disabled, force no protective exits.
     if not bool(use_stop_take):
@@ -657,6 +658,327 @@ def _build_fama_backtest_components(
     }
 
 
+def _pairs_hedge_ratio_bounds(params: Optional[Dict[str, Any]] = None) -> tuple[float, float]:
+    cfg = dict(params or {})
+    allow_negative = bool(cfg.get("allow_negative_hedge_ratio", True))
+    min_hr = float(cfg.get("min_hedge_ratio", -5.0) or -5.0)
+    max_hr = float(cfg.get("max_hedge_ratio", 5.0) or 5.0)
+    if min_hr > max_hr:
+        min_hr, max_hr = max_hr, min_hr
+    if allow_negative:
+        if min_hr >= 0 < max_hr:
+            min_hr = -abs(max_hr)
+    else:
+        min_hr = max(0.0, min_hr)
+        max_hr = max(max_hr, min_hr)
+    return min_hr, max_hr
+
+
+def _pairs_hedge_ratio_series(
+    price1: pd.Series,
+    price2: pd.Series,
+    method: str = "ols",
+) -> pd.Series:
+    y = pd.to_numeric(price1, errors="coerce")
+    x = pd.to_numeric(price2, errors="coerce")
+    aligned = pd.DataFrame({"y": y, "x": x}).dropna()
+    out = pd.Series(np.nan, index=price1.index, dtype=float)
+    if aligned.empty:
+        return out
+    if str(method or "ols").strip().lower() != "ols":
+        out.loc[aligned.index] = 1.0
+        return out.ffill().fillna(1.0)
+
+    sample_count = pd.Series(np.arange(1, len(aligned) + 1, dtype=float), index=aligned.index)
+    cum_x = aligned["x"].cumsum()
+    cum_y = aligned["y"].cumsum()
+    cum_xy = (aligned["x"] * aligned["y"]).cumsum()
+    cum_x2 = (aligned["x"] * aligned["x"]).cumsum()
+
+    cov_num = cum_xy - (cum_x * cum_y) / sample_count
+    var_num = cum_x2 - (cum_x * cum_x) / sample_count
+    beta = cov_num / var_num.replace(0, np.nan)
+
+    out.loc[aligned.index] = pd.to_numeric(beta, errors="coerce")
+    return out.ffill().fillna(1.0)
+
+
+def _pairs_signal_bias(current_z: float, entry_z: float, exit_z: float) -> str:
+    if not np.isfinite(current_z):
+        return "neutral"
+    if current_z <= -abs(entry_z):
+        return "long_spread_bias"
+    if current_z >= abs(entry_z):
+        return "short_spread_bias"
+    if abs(current_z) <= abs(exit_z):
+        return "exit_zone"
+    return "neutral"
+
+
+def _build_pairs_backtest_components(
+    primary_df: pd.DataFrame,
+    market_bundle: Dict[str, pd.DataFrame],
+    timeframe: str,
+    params: Optional[Dict[str, Any]] = None,
+    *,
+    use_stop_take: bool = False,
+    stop_loss_pct: Optional[float] = None,
+    take_profit_pct: Optional[float] = None,
+) -> Dict[str, Any]:
+    cfg = dict(params or {})
+    normalized_bundle: Dict[str, pd.DataFrame] = {}
+    for raw_symbol, frame in (market_bundle or {}).items():
+        symbol = _normalize_symbol(raw_symbol)
+        if not symbol or frame is None or frame.empty:
+            continue
+        item = frame.copy()
+        item.index = pd.to_datetime(item.index)
+        item = item[~item.index.duplicated(keep="last")].sort_index()
+        if "close" not in item.columns:
+            continue
+        normalized_bundle[symbol] = item
+
+    primary_symbol = _normalize_symbol(cfg.get("primary_symbol") or cfg.get("symbol"))
+    pair_symbol = _normalize_symbol(cfg.get("pair_symbol"))
+    if not primary_symbol:
+        primary_candidates = [sym for sym in normalized_bundle.keys() if sym != pair_symbol]
+        primary_symbol = primary_candidates[0] if primary_candidates else ""
+    if not pair_symbol:
+        pair_candidates = [sym for sym in normalized_bundle.keys() if sym != primary_symbol]
+        pair_symbol = pair_candidates[0] if pair_candidates else ""
+
+    if not pair_symbol:
+        raise HTTPException(status_code=400, detail="PairsTradingStrategy 缺少 pair_symbol 参数")
+    if not primary_symbol:
+        primary_symbol = _normalize_symbol(primary_df.get("symbol").iloc[-1] if "symbol" in primary_df.columns and len(primary_df) else "")
+    if not primary_symbol:
+        raise HTTPException(status_code=400, detail="PairsTradingStrategy 缺少主腿历史数据")
+    if primary_symbol == pair_symbol:
+        raise HTTPException(status_code=400, detail="PairsTradingStrategy 的主腿和副腿不能相同")
+
+    primary = normalized_bundle.get(primary_symbol)
+    if primary is None or primary.empty:
+        primary = primary_df.copy()
+        primary.index = pd.to_datetime(primary.index)
+        primary = primary[~primary.index.duplicated(keep="last")].sort_index()
+    pair_df = normalized_bundle.get(pair_symbol)
+    if pair_df is None or pair_df.empty:
+        raise HTTPException(status_code=404, detail=f"PairsTradingStrategy 缺少副腿 {pair_symbol} 的历史数据")
+
+    common_index = pd.Index(primary.index).intersection(pd.Index(pair_df.index))
+    common_index = pd.Index(common_index).sort_values()
+    min_bars = _min_required_bars(timeframe)
+    if len(common_index) < min_bars:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PairsTradingStrategy 公共样本不足（主腿 {primary_symbol} / 副腿 {pair_symbol}，仅 {len(common_index)} 根）",
+        )
+
+    primary_close = pd.to_numeric(primary.reindex(common_index)["close"], errors="coerce")
+    pair_close = pd.to_numeric(pair_df.reindex(common_index)["close"], errors="coerce")
+    valid_mask = primary_close.notna() & pair_close.notna()
+    primary_close = primary_close[valid_mask]
+    pair_close = pair_close[valid_mask]
+    common_index = primary_close.index
+    if len(common_index) < min_bars:
+        raise HTTPException(status_code=400, detail="PairsTradingStrategy 有效公共收盘价不足")
+
+    lookback_period = max(10, int(cfg.get("lookback_period", 48) or 48))
+    entry_z = abs(float(cfg.get("entry_z_score", 2.0) or 2.0))
+    exit_z = abs(float(cfg.get("exit_z_score", 0.6) or 0.6))
+    hedge_method = str(cfg.get("hedge_ratio_method") or "ols")
+    min_hr, max_hr = _pairs_hedge_ratio_bounds(cfg)
+
+    hedge_ratio = _pairs_hedge_ratio_series(primary_close, pair_close, method=hedge_method)
+    hedge_ratio = pd.to_numeric(hedge_ratio, errors="coerce").clip(lower=min_hr, upper=max_hr).ffill().fillna(1.0)
+
+    spread = primary_close - hedge_ratio * pair_close
+    spread_mean = spread.rolling(lookback_period, min_periods=lookback_period).mean()
+    spread_std = spread.rolling(lookback_period, min_periods=lookback_period).std().replace(0, np.nan)
+    z_score = (spread - spread_mean) / spread_std
+
+    spread_state = pd.Series(0.0, index=common_index, dtype=float)
+    active_hr = pd.Series(0.0, index=common_index, dtype=float)
+    trade_open_points: List[Dict[str, Any]] = []
+    trade_close_points: List[Dict[str, Any]] = []
+    buy_points: List[Dict[str, Any]] = []
+    sell_points: List[Dict[str, Any]] = []
+
+    sl_pct = _safe_positive_pct(stop_loss_pct) if bool(use_stop_take) else None
+    tp_pct = _safe_positive_pct(take_profit_pct) if bool(use_stop_take) else None
+    forced_stop = 0
+    forced_take = 0
+    entries = 0
+    exits = 0
+    completed = 0
+    wins = 0
+
+    state = 0.0
+    trade_hr = 0.0
+    entry_price1 = 0.0
+    entry_price2 = 0.0
+    entry_notional = 0.0
+
+    for idx, ts in enumerate(common_index):
+        px1 = float(primary_close.iloc[idx])
+        px2 = float(pair_close.iloc[idx])
+        current_hr = float(hedge_ratio.iloc[idx]) if np.isfinite(hedge_ratio.iloc[idx]) else trade_hr
+        current_z = float(z_score.iloc[idx]) if np.isfinite(z_score.iloc[idx]) else float("nan")
+        prev_z = float(z_score.iloc[idx - 1]) if idx > 0 and np.isfinite(z_score.iloc[idx - 1]) else float("nan")
+        valid_signal = np.isfinite(current_z) and np.isfinite(prev_z)
+
+        active_trade_return = None
+        if state != 0 and np.isfinite(px1) and np.isfinite(px2) and entry_notional > 0:
+            active_trade_return = (
+                state * ((px1 - entry_price1) - trade_hr * (px2 - entry_price2)) / entry_notional
+            )
+
+        should_exit = False
+        exit_reason = ""
+        if state != 0:
+            if sl_pct is not None and active_trade_return is not None and active_trade_return <= -sl_pct:
+                should_exit = True
+                exit_reason = "stop_loss"
+                forced_stop += 1
+            elif tp_pct is not None and active_trade_return is not None and active_trade_return >= tp_pct:
+                should_exit = True
+                exit_reason = "take_profit"
+                forced_take += 1
+            elif valid_signal and abs(current_z) <= exit_z < abs(prev_z):
+                should_exit = True
+                exit_reason = "mean_revert_exit"
+
+        if should_exit:
+            exits += 1
+            completed += 1
+            if active_trade_return is not None and active_trade_return > 0:
+                wins += 1
+            close_point = {
+                "timestamp": pd.Timestamp(ts).isoformat(),
+                "price": px1,
+                "pair_price": px2,
+                "spread": float(spread.loc[ts]) if np.isfinite(spread.loc[ts]) else None,
+                "z_score": current_z if np.isfinite(current_z) else None,
+                "direction": "long_spread" if state > 0 else "short_spread",
+                "reason": exit_reason,
+            }
+            trade_close_points.append(close_point)
+            if state > 0:
+                sell_points.append({"timestamp": close_point["timestamp"], "price": px1})
+            else:
+                buy_points.append({"timestamp": close_point["timestamp"], "price": px1})
+            state = 0.0
+            trade_hr = 0.0
+            entry_price1 = 0.0
+            entry_price2 = 0.0
+            entry_notional = 0.0
+
+        elif state == 0 and valid_signal and prev_z > -entry_z >= current_z:
+            proposed_notional = abs(px1) + abs(current_hr) * abs(px2)
+            if np.isfinite(proposed_notional) and proposed_notional > 0:
+                state = 1.0
+                trade_hr = current_hr
+                entry_price1 = px1
+                entry_price2 = px2
+                entry_notional = proposed_notional
+                entries += 1
+                open_point = {
+                    "timestamp": pd.Timestamp(ts).isoformat(),
+                    "price": px1,
+                    "pair_price": px2,
+                    "spread": float(spread.loc[ts]) if np.isfinite(spread.loc[ts]) else None,
+                    "z_score": current_z if np.isfinite(current_z) else None,
+                    "direction": "long_spread",
+                }
+                trade_open_points.append(open_point)
+                buy_points.append({"timestamp": open_point["timestamp"], "price": px1})
+
+        elif state == 0 and valid_signal and prev_z < entry_z <= current_z:
+            proposed_notional = abs(px1) + abs(current_hr) * abs(px2)
+            if np.isfinite(proposed_notional) and proposed_notional > 0:
+                state = -1.0
+                trade_hr = current_hr
+                entry_price1 = px1
+                entry_price2 = px2
+                entry_notional = proposed_notional
+                entries += 1
+                open_point = {
+                    "timestamp": pd.Timestamp(ts).isoformat(),
+                    "price": px1,
+                    "pair_price": px2,
+                    "spread": float(spread.loc[ts]) if np.isfinite(spread.loc[ts]) else None,
+                    "z_score": current_z if np.isfinite(current_z) else None,
+                    "direction": "short_spread",
+                }
+                trade_open_points.append(open_point)
+                sell_points.append({"timestamp": open_point["timestamp"], "price": px1})
+
+        spread_state.iloc[idx] = state
+        active_hr.iloc[idx] = trade_hr if state != 0 else 0.0
+
+    prev_state = spread_state.shift(1).fillna(0.0)
+    prev_hr = active_hr.shift(1).fillna(0.0)
+    delta1 = primary_close.diff().fillna(0.0)
+    delta2 = pair_close.diff().fillna(0.0)
+    prev_gross_notional = (primary_close.shift(1).abs() + prev_hr.abs() * pair_close.shift(1).abs()).replace(0, np.nan)
+    gross_returns = ((prev_state * delta1) - (prev_state * prev_hr * delta2)) / prev_gross_notional
+    gross_returns = gross_returns.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    current_gross_notional = (primary_close.abs() + active_hr.abs() * pair_close.abs()).replace(0, np.nan)
+    weight1 = (spread_state * primary_close.abs() / current_gross_notional).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    weight2 = ((-spread_state * active_hr * pair_close.abs()) / current_gross_notional).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    turnover = weight1.diff().abs().fillna(weight1.abs()) + weight2.diff().abs().fillna(weight2.abs())
+
+    clip_limit = _return_clip_limit(timeframe)
+    anomaly_ratio = float((gross_returns.abs() > clip_limit).mean() or 0.0)
+    win_rate = (wins / completed * 100.0) if completed else 0.0
+    latest_hedge_ratio = float(hedge_ratio.iloc[-1]) if len(hedge_ratio) else 0.0
+    latest_z = float(z_score.iloc[-1]) if len(z_score) and np.isfinite(z_score.iloc[-1]) else float("nan")
+
+    return {
+        "benchmark_close": primary_close.copy(),
+        "primary_symbol": primary_symbol,
+        "pair_symbol": pair_symbol,
+        "primary_close": primary_close,
+        "pair_close": pair_close,
+        "spread": spread,
+        "z_score": z_score,
+        "hedge_ratio": hedge_ratio,
+        "position": spread_state,
+        "position_exposure": spread_state.abs(),
+        "gross_returns": gross_returns,
+        "turnover": turnover.fillna(0.0),
+        "trade_stats": {
+            "entries": int(entries),
+            "exits": int(exits),
+            "completed": int(completed),
+            "win_rate": round(float(win_rate), 2),
+        },
+        "protective_stats": {
+            "forced_stop_exits": int(forced_stop),
+            "forced_take_exits": int(forced_take),
+        },
+        "trade_points": {
+            "buy_points": buy_points,
+            "sell_points": sell_points,
+            "open_points": trade_open_points,
+            "close_points": trade_close_points,
+            "entries": int(entries),
+            "exits": int(exits),
+        },
+        "effective_data_points": int(len(common_index)),
+        "effective_start_date": pd.Timestamp(common_index[0]).isoformat(),
+        "effective_end_date": pd.Timestamp(common_index[-1]).isoformat(),
+        "pair_regime": "negative_corr" if latest_hedge_ratio < 0 else "positive_corr",
+        "hedge_ratio_last": latest_hedge_ratio,
+        "spread_last": float(spread.iloc[-1]) if len(spread) and np.isfinite(spread.iloc[-1]) else None,
+        "z_score_last": latest_z if np.isfinite(latest_z) else None,
+        "signal_bias": _pairs_signal_bias(latest_z, entry_z, exit_z),
+        "return_clip_limit": float(clip_limit),
+        "anomaly_ratio": round(float(anomaly_ratio), 6),
+    }
+
+
 def _optimize_strategy_on_df(
     strategy: str,
     df: pd.DataFrame,
@@ -812,7 +1134,7 @@ def _build_positions(strategy: str, df: pd.DataFrame, params: Optional[Dict[str,
                 in_position = False
             values.append(1.0 if in_position else 0.0)
         position = pd.Series(values, index=df.index)
-    elif strategy in {"MeanReversionStrategy", "BollingerMeanReversionStrategy", "PairsTradingStrategy"}:
+    elif strategy in {"MeanReversionStrategy", "BollingerMeanReversionStrategy"}:
         period = int(params.get("lookback_period", 20))
         z_entry = float(params.get("entry_z_score", 2.0))
 
@@ -1646,6 +1968,8 @@ def _run_backtest_core(
 
     benchmark_close = df["close"]
     protective_stats = {"forced_stop_exits": 0, "forced_take_exits": 0}
+    position_for_diagnostics = pd.Series(0.0, index=df.index, dtype=float)
+    pair_components: Optional[Dict[str, Any]] = None
     if strategy == "FamaFactorArbitrageStrategy":
         components = _build_fama_backtest_components(
             market_bundle=market_bundle or {},
@@ -1661,9 +1985,29 @@ def _run_backtest_core(
         gross_returns = gross_returns.reindex(benchmark_close.index).fillna(0.0)
         exposure = weights.abs().sum(axis=1).reindex(benchmark_close.index).fillna(0.0)
         position = exposure
+        position_for_diagnostics = exposure
         trade_stats = _portfolio_trade_stats(gross_returns, turnover.reindex(benchmark_close.index).fillna(0.0))
         if protective_enabled:
             protective_enabled = False
+    elif strategy == "PairsTradingStrategy":
+        pair_components = _build_pairs_backtest_components(
+            primary_df=df,
+            market_bundle=market_bundle or {},
+            timeframe=timeframe,
+            params=merged_params,
+            use_stop_take=bool(protective_enabled),
+            stop_loss_pct=resolved_stop_loss_pct,
+            take_profit_pct=resolved_take_profit_pct,
+        )
+        benchmark_close = pair_components["benchmark_close"]
+        gross_returns = pd.to_numeric(pair_components["gross_returns"], errors="coerce").fillna(0.0)
+        anomaly_ratio = float(pair_components.get("anomaly_ratio", 0.0) or 0.0)
+        clip_limit = float(pair_components.get("return_clip_limit", _return_clip_limit(timeframe)) or _return_clip_limit(timeframe))
+        position = pair_components["position"]
+        position_for_diagnostics = pair_components["position_exposure"]
+        turnover = pair_components["turnover"].reindex(benchmark_close.index).fillna(0.0)
+        trade_stats = dict(pair_components.get("trade_stats") or {"entries": 0, "exits": 0, "completed": 0, "win_rate": 0.0})
+        protective_stats = dict(pair_components.get("protective_stats") or protective_stats)
     else:
         raw_position = _build_positions(strategy, df, params=merged_params)
         if protective_enabled:
@@ -1682,6 +2026,7 @@ def _run_backtest_core(
         if len(position) > 0:
             turnover.iloc[0] = abs(float(position.iloc[0] or 0.0))
         trade_stats = _trade_stats(df["close"], position)
+        position_for_diagnostics = position.clip(lower=0.0, upper=1.0)
 
     if not protective_enabled:
         resolved_stop_loss_pct = None
@@ -1777,13 +2122,14 @@ def _run_backtest_core(
             "strategy": strategy,
             "decision_engine": result["decision_engine"],
             "funding_available": bool(result["funding_available"]),
+            **({"pair_symbol": result.get("pair_symbol")} if result.get("pair_symbol") else {}),
         },
     )
     if int(trade_stats.get("completed") or 0) == 0:
         result["zero_trade_reason"] = _diagnose_zero_trade_reason(
             strategy=strategy,
             df=df,
-            position=position,
+            position=position_for_diagnostics,
             trade_stats=trade_stats,
             timeframe=timeframe,
             params=merged_params,
@@ -1793,33 +2139,63 @@ def _run_backtest_core(
         result["benchmark_symbol"] = components.get("benchmark_symbol")
         result["universe_size"] = int(components.get("universe_size") or 0)
         result["quantile"] = float(components.get("quantile") or 0.0)
+    elif strategy == "PairsTradingStrategy" and pair_components:
+        result.update(
+            {
+                "portfolio_mode": "pairs_spread_dual_leg",
+                "pair_symbol": str(pair_components.get("pair_symbol") or ""),
+                "pair_regime": str(pair_components.get("pair_regime") or "positive_corr"),
+                "signal_bias": str(pair_components.get("signal_bias") or "neutral"),
+                "pair_data_points": int(pair_components.get("effective_data_points") or 0),
+                "effective_data_points": int(pair_components.get("effective_data_points") or 0),
+                "effective_start_date": pair_components.get("effective_start_date"),
+                "effective_end_date": pair_components.get("effective_end_date"),
+                "hedge_ratio_last": round(float(pair_components.get("hedge_ratio_last") or 0.0), 6),
+                "spread_last": (
+                    round(float(pair_components.get("spread_last")), 8)
+                    if pair_components.get("spread_last") is not None
+                    else None
+                ),
+                "z_score_last": (
+                    round(float(pair_components.get("z_score_last")), 4)
+                    if pair_components.get("z_score_last") is not None
+                    else None
+                ),
+            }
+        )
+        result["common_pnl"]["metadata"]["pair_symbol"] = str(pair_components.get("pair_symbol") or "")
 
     if include_series:
         points = (
             {"buy_points": [], "sell_points": [], "entries": trade_stats["entries"], "exits": trade_stats["exits"]}
             if strategy == "FamaFactorArbitrageStrategy"
-            else _extract_trade_points(df["close"], position)
+            else (pair_components.get("trade_points") if strategy == "PairsTradingStrategy" and pair_components else _extract_trade_points(df["close"], position))
         )
 
         # Downsample for frontend payload size.
         max_points = 1800
-        series_df = pd.DataFrame(
-            {
-                "timestamp": benchmark_close.index,
-                "equity": equity.values,
-                "gross_equity": gross_equity.values,
-                "drawdown": (drawdown.fillna(0) * 100).values,
-                "position": position.values,
-                "close": benchmark_close.values,
-                "cost": trade_cost.values,
-            }
-        )
+        series_payload: Dict[str, Any] = {
+            "timestamp": benchmark_close.index,
+            "equity": equity.values,
+            "gross_equity": gross_equity.values,
+            "drawdown": (drawdown.fillna(0) * 100).values,
+            "position": position.values,
+            "close": benchmark_close.values,
+            "cost": trade_cost.values,
+        }
+        if strategy == "PairsTradingStrategy" and pair_components:
+            series_payload["pair_close"] = pair_components["pair_close"].reindex(benchmark_close.index).values
+            series_payload["spread"] = pair_components["spread"].reindex(benchmark_close.index).values
+            series_payload["z_score"] = pair_components["z_score"].reindex(benchmark_close.index).values
+            series_payload["hedge_ratio"] = pair_components["hedge_ratio"].reindex(benchmark_close.index).values
+        series_df = pd.DataFrame(series_payload)
         if len(series_df) > max_points:
             step = int(np.ceil(len(series_df) / max_points))
             series_df = series_df.iloc[::step]
 
-        result["series"] = [
-            {
+        rendered_series = []
+        for _, row in series_df.iterrows():
+            item = {
                 "timestamp": pd.Timestamp(row["timestamp"]).isoformat(),
                 "equity": round(float(row["equity"]), 4),
                 "drawdown": round(float(row["drawdown"]), 4),
@@ -1828,8 +2204,18 @@ def _run_backtest_core(
                 "gross_equity": round(float(row["gross_equity"]), 4),
                 "cost": round(float(row["cost"]), 8),
             }
-            for _, row in series_df.iterrows()
-        ]
+            if strategy == "PairsTradingStrategy" and pair_components:
+                pair_close = pd.to_numeric(pd.Series([row.get("pair_close")]), errors="coerce").iloc[0]
+                spread_value = pd.to_numeric(pd.Series([row.get("spread")]), errors="coerce").iloc[0]
+                z_value = pd.to_numeric(pd.Series([row.get("z_score")]), errors="coerce").iloc[0]
+                hedge_value = pd.to_numeric(pd.Series([row.get("hedge_ratio")]), errors="coerce").iloc[0]
+                item["pair_close"] = round(float(pair_close), 8) if np.isfinite(pair_close) else None
+                item["spread"] = round(float(spread_value), 8) if np.isfinite(spread_value) else None
+                item["z_score"] = round(float(z_value), 6) if np.isfinite(z_value) else None
+                item["hedge_ratio"] = round(float(hedge_value), 6) if np.isfinite(hedge_value) else None
+            rendered_series.append(item)
+
+        result["series"] = rendered_series
         result["trade_points"] = points
 
     return result
@@ -1939,11 +2325,13 @@ async def _load_backtest_inputs(
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
 ) -> tuple[pd.DataFrame, Optional[Dict[str, pd.DataFrame]], str]:
+    merged_params = dict(get_strategy_defaults(strategy) or {})
+    merged_params.update(params or {})
     if strategy == "FamaFactorArbitrageStrategy":
         bundle = await _load_fama_market_bundle(
             symbol=symbol,
             timeframe=timeframe,
-            params=params,
+            params=merged_params,
             start_time=start_time,
             end_time=end_time,
         )
@@ -1953,6 +2341,22 @@ async def _load_backtest_inputs(
         if resolved_symbol not in bundle:
             resolved_symbol = next(iter(bundle.keys()))
         return bundle[resolved_symbol].copy(), bundle, resolved_symbol
+
+    if strategy == "PairsTradingStrategy":
+        resolved_symbol = _normalize_symbol(symbol) or "BTC/USDT"
+        pair_symbol = _normalize_symbol(merged_params.get("pair_symbol"))
+        if not pair_symbol:
+            raise HTTPException(status_code=400, detail="PairsTradingStrategy 缺少 pair_symbol 参数")
+        primary_df, pair_df = await asyncio.gather(
+            _load_backtest_df(resolved_symbol, timeframe, start_time=start_time, end_time=end_time),
+            _load_backtest_df(pair_symbol, timeframe, start_time=start_time, end_time=end_time),
+        )
+        bundle: Dict[str, pd.DataFrame] = {}
+        if not primary_df.empty:
+            bundle[resolved_symbol] = primary_df.copy()
+        if not pair_df.empty:
+            bundle[pair_symbol] = pair_df.copy()
+        return primary_df, bundle or None, resolved_symbol
 
     df = await _load_backtest_df(symbol, timeframe, start_time=start_time, end_time=end_time)
     return df, None, _normalize_symbol(symbol) or symbol
@@ -2035,9 +2439,9 @@ async def run_backtest(
             "initial_capital": initial_capital,
             "commission_rate": max(0.0, float(commission_rate or 0.0)),
             "slippage_bps": max(0.0, float(slippage_bps or 0.0)),
-            "data_points": int(len(df)),
-            "start_date": df.index[0].isoformat(),
-            "end_date": df.index[-1].isoformat(),
+            "data_points": int(result.get("effective_data_points") or len(df)),
+            "start_date": str(result.get("effective_start_date") or df.index[0].isoformat()),
+            "end_date": str(result.get("effective_end_date") or df.index[-1].isoformat()),
             "auto_expanded_range": auto_expanded_range,
             "min_required_bars": min_bars,
             "use_stop_take": bool(result.get("use_stop_take", False)),
@@ -2104,24 +2508,25 @@ async def compare_backtests(
         try:
             loop_df = common_df
             loop_bundle = None
-            if strategy == "FamaFactorArbitrageStrategy":
-                loop_df, loop_bundle, _ = await _load_backtest_inputs(
+            resolved_loop_symbol = _normalize_symbol(symbol) or symbol
+            if strategy in {"FamaFactorArbitrageStrategy", "PairsTradingStrategy"}:
+                loop_df, loop_bundle, resolved_loop_symbol = await _load_backtest_inputs(
                     strategy=strategy,
                     symbol=symbol,
                     timeframe=timeframe,
+                    params=get_strategy_defaults(strategy),
                     start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
                     end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
                 )
-                if loop_df.empty:
+                if loop_df.empty and strategy == "FamaFactorArbitrageStrategy":
                     raise HTTPException(status_code=404, detail="Fama 回测缺少可用横截面数据")
-            else:
-                loop_df = await _attach_backtest_enrichment_if_needed(
-                    strategy=strategy,
-                    df=loop_df,
-                    symbol=symbol,
-                    start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
-                    end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
-                )
+            loop_df = await _attach_backtest_enrichment_if_needed(
+                strategy=strategy,
+                df=loop_df,
+                symbol=resolved_loop_symbol,
+                start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
+                end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
+            )
             if pre_optimize and strategy in _BACKTEST_OPTIMIZATION_GRIDS:
                 opt = _optimize_strategy_on_df(
                     strategy=strategy,
@@ -2335,9 +2740,9 @@ async def run_backtest_custom(
             "initial_capital": initial_capital,
             "commission_rate": max(0.0, float(commission_rate or 0.0)),
             "slippage_bps": max(0.0, float(slippage_bps or 0.0)),
-            "data_points": int(len(df)),
-            "start_date": df.index[0].isoformat(),
-            "end_date": df.index[-1].isoformat(),
+            "data_points": int(result.get("effective_data_points") or len(df)),
+            "start_date": str(result.get("effective_start_date") or df.index[0].isoformat()),
+            "end_date": str(result.get("effective_end_date") or df.index[-1].isoformat()),
             "custom_params": custom_params or {},
             "use_stop_take": bool(result.get("use_stop_take", False)),
             "stop_loss_pct": result.get("stop_loss_pct"),
@@ -2510,14 +2915,17 @@ async def export_backtest_report(
             {
                 "strategy": strategy,
                 "symbol": resolved_symbol,
+                "pair_symbol": result.get("pair_symbol"),
+                "portfolio_mode": result.get("portfolio_mode"),
                 "timeframe": timeframe,
                 "initial_capital": initial_capital,
                 "commission_rate": max(0.0, float(commission_rate or 0.0)),
                 "slippage_bps": max(0.0, float(slippage_bps or 0.0)),
                 "requested_start_date": start_date,
                 "requested_end_date": end_date,
-                "start_date": df.index[0].isoformat() if len(df) else None,
-                "end_date": df.index[-1].isoformat() if len(df) else None,
+                "start_date": result.get("effective_start_date") or (df.index[0].isoformat() if len(df) else None),
+                "end_date": result.get("effective_end_date") or (df.index[-1].isoformat() if len(df) else None),
+                "data_points": result.get("effective_data_points") or int(len(df)),
                 "final_capital": result.get("final_capital"),
                 "total_return": result.get("total_return"),
                 "gross_total_return": result.get("gross_total_return"),

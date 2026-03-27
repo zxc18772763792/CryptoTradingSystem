@@ -2666,12 +2666,14 @@ if(!box)return;
 backtestUIState.lastRenderedBacktest={
   strategy:String(r?.strategy||'').trim(),
   symbol:String(r?.symbol||'').trim(),
+  pairSymbol:String(r?.pair_symbol||'').trim(),
   timeframe:String(r?.timeframe||'').trim(),
   fromComparePreview:!!r?._from_compare_preview,
   compareRank:Number.isFinite(Number(r?._compare_rank))?Number(r._compare_rank):null,
   updatedAt:Date.now(),
 };
 const c=Number(r.total_return||0)>=0?'#3fb950':'#f85149';
+const isPairsMode=String(r?.portfolio_mode||'').trim()==='pairs_spread_dual_leg';
 box.innerHTML=`
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px;">
 <div class="stat-box"><div class="stat-label">策略</div><div class="stat-value">${r.strategy}</div></div>
@@ -2679,6 +2681,12 @@ box.innerHTML=`
 <div class="stat-box"><div class="stat-label">周期</div><div class="stat-value">${r.timeframe}</div></div>
 <div class="stat-box"><div class="stat-label">样本数</div><div class="stat-value">${r.data_points||0}</div></div>
 </div>
+${isPairsMode?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px;">
+<div class="stat-box"><div class="stat-label">回测模式</div><div class="stat-value">双腿Spread</div></div>
+<div class="stat-box"><div class="stat-label">副腿</div><div class="stat-value">${esc(r.pair_symbol||'--')}</div></div>
+<div class="stat-box"><div class="stat-label">最新对冲比</div><div class="stat-value">${Number.isFinite(Number(r.hedge_ratio_last))?Number(r.hedge_ratio_last).toFixed(4):'--'}</div></div>
+<div class="stat-box"><div class="stat-label">最新Z / 价差</div><div class="stat-value">${Number.isFinite(Number(r.z_score_last))?Number(r.z_score_last).toFixed(2):'--'} / ${Number.isFinite(Number(r.spread_last))?Number(r.spread_last).toFixed(4):'--'}</div></div>
+</div>`:''}
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px;">
 <div class="stat-box"><div class="stat-label">初始资金</div><div class="stat-value">$${Number(r.initial_capital||0).toLocaleString()}</div></div>
 <div class="stat-box"><div class="stat-label">净收益率</div><div class="stat-value" style="color:${c}">${Number(r.total_return||0).toFixed(2)}%</div></div>
@@ -2702,15 +2710,21 @@ ${renderRangeLockIndicatorHtml(r,true)}`;
 const ec=document.getElementById('backtest-equity-chart');
 if(ec&&r.series?.length){
 if(typeof Plotly==='undefined'){ec.innerHTML='<div class="list-item">图表库未加载，回测曲线暂不可用。</div>';return;}
-const rows=(r.series||[]).map(i=>({timestamp:toDate(i.timestamp),equity:+i.equity,gross_equity:+i.gross_equity,drawdown:+i.drawdown,close:+i.close})).filter(i=>i.timestamp&&Number.isFinite(i.equity)&&Number.isFinite(i.gross_equity)&&Number.isFinite(i.drawdown)&&Number.isFinite(i.close));
+const rows=(r.series||[]).map(i=>({timestamp:toDate(i.timestamp),equity:+i.equity,gross_equity:+i.gross_equity,drawdown:+i.drawdown,close:+i.close,pair_close:Number(i?.pair_close),spread:Number(i?.spread),z_score:Number(i?.z_score)})).filter(i=>i.timestamp&&Number.isFinite(i.equity)&&Number.isFinite(i.gross_equity)&&Number.isFinite(i.drawdown)&&Number.isFinite(i.close));
 if(!rows.length){ec.innerHTML='<div class="list-item">回测时间序列为空或时间格式异常。</div>';return;}
-const toTradeRows=list=>(list||[]).map(p=>({timestamp:toDate(p?.timestamp),price:Number(p?.price)})).filter(p=>p.timestamp&&Number.isFinite(p.price));
+const toTradeRows=list=>(list||[]).map(p=>({timestamp:toDate(p?.timestamp),price:Number(p?.price),label:String(p?.direction||p?.reason||'').trim()})).filter(p=>p.timestamp&&Number.isFinite(p.price));
 const x=rows.map(i=>i.timestamp),e=rows.map(i=>i.equity),ge=rows.map(i=>i.gross_equity),dd=rows.map(i=>i.drawdown),cl=rows.map(i=>i.close);
-const tp=r.trade_points||{},buyRows=toTradeRows(tp.buy_points),sellRows=toTradeRows(tp.sell_points);
-const traces=[{type:'scatter',mode:'lines',x,y:e,name:'净值曲线',line:{color:'#3fb950',width:2},yaxis:'y'},{type:'scatter',mode:'lines',x,y:ge,name:'毛净值曲线',line:{color:'#4da3ff',width:1},yaxis:'y'},{type:'scatter',mode:'lines',x,y:dd,name:'回撤(%)',line:{color:'#f85149',width:1},yaxis:'y2'},{type:'scatter',mode:'lines',x,y:cl,name:'价格',line:{color:'#9fb1c9',width:1,dash:'dot'},yaxis:'y3',hovertemplate:'%{x|%Y-%m-%d %H:%M:%S}<br>价格: %{y:.6f}<extra></extra>'}];
+const tp=r.trade_points||{},buyRows=toTradeRows(tp.buy_points),sellRows=toTradeRows(tp.sell_points),openRows=toTradeRows(tp.open_points),closeRows=toTradeRows(tp.close_points);
+const traces=[{type:'scatter',mode:'lines',x,y:e,name:'净值曲线',line:{color:'#3fb950',width:2},yaxis:'y'},{type:'scatter',mode:'lines',x,y:ge,name:'毛净值曲线',line:{color:'#4da3ff',width:1},yaxis:'y'},{type:'scatter',mode:'lines',x,y:dd,name:'回撤(%)',line:{color:'#f85149',width:1},yaxis:'y2'},{type:'scatter',mode:'lines',x,y:cl,name:isPairsMode?'主腿价格':'价格',line:{color:'#9fb1c9',width:1,dash:'dot'},yaxis:'y3',hovertemplate:`%{x|%Y-%m-%d %H:%M:%S}<br>${isPairsMode?'主腿':'价格'}: %{y:.6f}<extra></extra>`}];
+if(isPairsMode&&rows.some(i=>Number.isFinite(i.pair_close)))traces.push({type:'scatter',mode:'lines',x,y:rows.map(i=>i.pair_close),name:'副腿价格',line:{color:'#ffb15f',width:1,dash:'dash'},yaxis:'y3',hovertemplate:'%{x|%Y-%m-%d %H:%M:%S}<br>副腿: %{y:.6f}<extra></extra>'});
+if(openRows.length||closeRows.length){
+if(openRows.length)traces.push({type:'scatter',mode:'markers',x:openRows.map(i=>i.timestamp),y:openRows.map(i=>i.price),name:'开仓点',marker:{symbol:'circle',size:9,color:'#3fb950',line:{color:'#0e1b2a',width:1}},text:openRows.map(i=>i.label||'open'),yaxis:'y3',hovertemplate:'%{x|%Y-%m-%d %H:%M:%S}<br>开仓: %{y:.6f}<br>%{text}<extra></extra>'});
+if(closeRows.length)traces.push({type:'scatter',mode:'markers',x:closeRows.map(i=>i.timestamp),y:closeRows.map(i=>i.price),name:'平仓点',marker:{symbol:'x',size:9,color:'#f85149',line:{color:'#0e1b2a',width:1}},text:closeRows.map(i=>i.label||'close'),yaxis:'y3',hovertemplate:'%{x|%Y-%m-%d %H:%M:%S}<br>平仓: %{y:.6f}<br>%{text}<extra></extra>'});
+}else{
 if(buyRows.length)traces.push({type:'scatter',mode:'markers',x:buyRows.map(i=>i.timestamp),y:buyRows.map(i=>i.price),name:'买点',marker:{symbol:'triangle-up',size:9,color:'#3fb950',line:{color:'#0e1b2a',width:1}},yaxis:'y3',hovertemplate:'%{x|%Y-%m-%d %H:%M:%S}<br>买入: %{y:.6f}<extra></extra>'});
 if(sellRows.length)traces.push({type:'scatter',mode:'markers',x:sellRows.map(i=>i.timestamp),y:sellRows.map(i=>i.price),name:'卖点',marker:{symbol:'triangle-down',size:9,color:'#f85149',line:{color:'#0e1b2a',width:1}},yaxis:'y3',hovertemplate:'%{x|%Y-%m-%d %H:%M:%S}<br>卖出: %{y:.6f}<extra></extra>'});
-Plotly.newPlot(ec,traces,{paper_bgcolor:'#111723',plot_bgcolor:'#111723',font:{color:'#d7dde8'},margin:{l:50,r:72,t:20,b:30},xaxis:plotlyTimeAxis({}),yaxis:{title:'权益',side:'left',showgrid:true,gridcolor:'#283242'},yaxis2:{title:'回撤%',overlaying:'y',side:'right',showgrid:false},yaxis3:{title:'价格',overlaying:'y',side:'right',position:0.9,showgrid:false,tickfont:{color:'#9fb1c9'},titlefont:{color:'#9fb1c9'}},legend:{orientation:'h'}},{responsive:true,displaylogo:false});
+}
+Plotly.newPlot(ec,traces,{paper_bgcolor:'#111723',plot_bgcolor:'#111723',font:{color:'#d7dde8'},margin:{l:50,r:72,t:20,b:30},xaxis:plotlyTimeAxis({}),yaxis:{title:'权益',side:'left',showgrid:true,gridcolor:'#283242'},yaxis2:{title:'回撤%',overlaying:'y',side:'right',showgrid:false},yaxis3:{title:isPairsMode?'主/副腿价格':'价格',overlaying:'y',side:'right',position:0.9,showgrid:false,tickfont:{color:'#9fb1c9'},titlefont:{color:'#9fb1c9'}},legend:{orientation:'h'}},{responsive:true,displaylogo:false});
 }
 }
 function getBacktestStrategyCatalogFromSelect(){
