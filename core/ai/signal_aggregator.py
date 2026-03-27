@@ -312,6 +312,7 @@ class SignalAggregator:
                 symbol=symbol,
                 proposed_signal=direction,
                 market_features=market_features,
+                record_state=False,
             )
             blocked = final_signal == "FLAT" and direction != "FLAT"
             if blocked:

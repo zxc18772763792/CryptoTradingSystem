@@ -570,7 +570,8 @@
       { label: '自动交易代理', value: agentEnabled ? '已启用' : '已关闭', cls: agentEnabled ? 'is-on' : '' },
       { label: '页面时区', value: AI_UI_TIMEZONE_LABEL, cls: '' },
     ];
-    root.innerHTML = chips
+    const visibleChips = chips.filter((chip) => chip.label !== '\u6267\u884c\u88c1\u51b3');
+    root.innerHTML = visibleChips
       .map((chip) => `<span class="ai-runtime-chip ${chip.cls}">${esc(chip.label)}：${esc(chip.value)}</span>`)
       .join('');
     emitWorkbenchState('runtime-summary');

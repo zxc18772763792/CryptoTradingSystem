@@ -71,6 +71,8 @@ class RiskGate:
         proposed_signal: str,
         market_features: Optional[Dict[str, Any]],
         now: Optional[datetime] = None,
+        *,
+        record_state: bool = True,
     ) -> Tuple[str, List[str]]:
         """Return final signal and blocking reasons."""
         symbol = str(symbol or "").upper()
@@ -123,11 +125,17 @@ class RiskGate:
                 and spread > self.config.max_spread
                 and pm_liquidity_score <= self.config.pm_spread_liquidity_min
             ):
-                halt_until = now + timedelta(minutes=max(1, int(self.config.pm_geo_halt_minutes)))
-                self._pm_halt_until[symbol] = halt_until
-                reasons.append(
-                    f"geo shock {pm_geo_shock:.4f} + weak liquidity {pm_liquidity_score:.4f} -> halt until {halt_until.isoformat()}"
-                )
+                halt_minutes = max(1, int(self.config.pm_geo_halt_minutes))
+                if record_state:
+                    halt_until = now + timedelta(minutes=halt_minutes)
+                    self._pm_halt_until[symbol] = halt_until
+                    reasons.append(
+                        f"geo shock {pm_geo_shock:.4f} + weak liquidity {pm_liquidity_score:.4f} -> halt until {halt_until.isoformat()}"
+                    )
+                else:
+                    reasons.append(
+                        f"geo shock {pm_geo_shock:.4f} + weak liquidity {pm_liquidity_score:.4f} -> halt suggested for {halt_minutes}m"
+                    )
 
             if pm_macro_shock > 0:
                 reasons.append(f"pm macro shock {pm_macro_shock:.4f}")
@@ -145,7 +153,7 @@ class RiskGate:
         if reasons and signal != "FLAT":
             return "FLAT", reasons
 
-        if signal != "FLAT":
+        if signal != "FLAT" and record_state:
             self._last_active_signal_at[symbol] = now
 
         return signal, reasons

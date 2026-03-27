@@ -50,3 +50,17 @@ def test_factor_signal_extreme_greed_boosts_short_confidence(monkeypatch):
     assert direction_boost == "SHORT"
     assert conf_boost == pytest.approx(min(1.0, conf_base + 0.08), rel=1e-9)
 
+
+def test_signal_aggregator_preview_risk_check_does_not_consume_cooldown():
+    from core.ai.signal_aggregator import SignalAggregator
+
+    agg = SignalAggregator()
+    df = _build_close_df("up")
+
+    blocked_first, reason_first = agg._apply_risk_gate("BTC/USDT", "LONG", 0.6, df)
+    blocked_second, reason_second = agg._apply_risk_gate("BTC/USDT", "LONG", 0.6, df)
+
+    assert blocked_first is False
+    assert reason_first == ""
+    assert blocked_second is False
+    assert reason_second == ""
