@@ -1,4 +1,5 @@
 ﻿"""Backtest API endpoints."""
+import asyncio
 import io
 import itertools
 import json
@@ -1917,8 +1918,13 @@ async def _load_fama_market_bundle(
 
     bundle: Dict[str, pd.DataFrame] = {}
     min_rows = max(_min_required_bars(timeframe), min(300, max(60, int(params.get("min_symbol_bars", 120) or 120))))
-    for sym in universe:
-        df = await _load_backtest_df(sym, timeframe, start_time=start_time, end_time=end_time)
+    loaded_frames = await asyncio.gather(
+        *[
+            _load_backtest_df(sym, timeframe, start_time=start_time, end_time=end_time)
+            for sym in universe
+        ]
+    )
+    for sym, df in zip(universe, loaded_frames):
         if df.empty or len(df) < min_rows:
             continue
         bundle[sym] = df.copy()

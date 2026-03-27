@@ -1,4 +1,5 @@
 """Strategy library and factor library regression tests."""
+import asyncio
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,6 +9,7 @@ import strategies as strategy_module
 from config.strategy_registry import DEFAULT_START_ALL_STRATEGIES, get_backtest_strategy_info, get_strategy_registry_entry
 from core.backtest.cost_models import fee_rate, slippage_rate
 from strategies import ALL_STRATEGIES
+from strategies.quantitative import fama_factor_arbitrage as fama_factor_module
 from core.data.factor_library import build_factor_library
 from web.api.backtest import _optimize_strategy_on_df, _run_backtest_core, is_strategy_backtest_supported
 
@@ -222,6 +224,59 @@ def test_fama_factor_strategy_is_supported_in_web_backtest():
     assert result["universe_size"] >= 2
     assert result["final_capital"] > 0
     assert "series" in result and result["series"]
+
+
+def test_fama_runtime_rebalance_offloads_cpu_work(monkeypatch):
+    close_df, volume_df = _factor_input(assets=6, rows=720, seed=29)
+    symbols = [f"{col}/USDT" for col in close_df.columns]
+    frames = {}
+    for idx, base_symbol in enumerate(close_df.columns):
+        symbol = symbols[idx]
+        close = close_df[base_symbol]
+        open_ = close.shift(1).fillna(close.iloc[0])
+        high = np.maximum(open_, close) * (1 + 0.002 + idx * 0.0001)
+        low = np.minimum(open_, close) * (1 - 0.002 - idx * 0.0001)
+        frames[symbol] = pd.DataFrame(
+            {
+                "open": open_.values,
+                "high": high.values,
+                "low": low.values,
+                "close": close.values,
+                "volume": volume_df[base_symbol].values,
+                "symbol": [symbol] * len(close_df),
+            },
+            index=close_df.index,
+        )
+
+    strategy = fama_factor_module.FamaFactorArbitrageStrategy(
+        name="test_fama_runtime",
+        params={
+            "universe_symbols": symbols,
+            "min_universe_size": 4,
+            "top_n": 2,
+            "quantile": 0.34,
+            "min_abs_score": 0.0,
+            "rebalance_interval_minutes": 60,
+        },
+    )
+
+    async def fake_load_universe_frames(universe):
+        return {sym: frames[sym] for sym in universe if sym in frames}
+
+    to_thread_calls = []
+
+    async def fake_to_thread(func, *args, **kwargs):
+        to_thread_calls.append(getattr(func, "__name__", "unknown"))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(strategy, "_load_universe_frames", fake_load_universe_frames)
+    monkeypatch.setattr(fama_factor_module.asyncio, "to_thread", fake_to_thread)
+
+    signals = asyncio.run(strategy.generate_signals_async(symbols[0]))
+
+    assert to_thread_calls == ["_build_fama_rebalance_plan"]
+    assert isinstance(signals, list)
+    assert strategy._last_rebalance_at is not None
 
 
 def test_backtest_core_stop_take_switch_forces_protective_exits():

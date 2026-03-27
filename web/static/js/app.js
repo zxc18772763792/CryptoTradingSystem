@@ -298,6 +298,42 @@ if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new Error('自
 return parsed;
 }
 
+function estimateBacktestWindowDays(){
+const startEl=document.getElementById('backtest-start-date');
+const endEl=document.getElementById('backtest-end-date');
+const start=toDate(startEl?.value||'');
+const end=toDate(endEl?.value||'');
+if(!start||!end)return 0;
+const spanMs=end.getTime()-start.getTime();
+if(!Number.isFinite(spanMs)||spanMs<=0)return 0;
+return Math.ceil(spanMs/86400000);
+}
+
+function estimateBacktestRunTimeoutMs(strategyName, customParams=null){
+const strategy=String(strategyName||'').trim();
+if(strategy==='FamaFactorArbitrageStrategy'){
+  const params=(customParams&&typeof customParams==='object'&&!Array.isArray(customParams))?customParams:{};
+  const universeCount=Math.max(
+    8,
+    Math.min(
+      36,
+      Array.isArray(params.universe_symbols)
+        ? params.universe_symbols.filter(v=>String(v||'').trim()).length
+        : (Number(params.max_symbols||0)>0?Number(params.max_symbols):12)
+    )
+  );
+  const lookbackBars=Math.max(240,Math.min(6000,Number(params.lookback_bars||720)||720));
+  const windowDays=Math.max(60,Math.min(3650,estimateBacktestWindowDays()||365));
+  const timeoutMs=
+    18000+
+    universeCount*1800+
+    Math.ceil(lookbackBars/240)*2200+
+    Math.ceil(windowDays/90)*1800;
+  return Math.max(40000,Math.min(120000,timeoutMs));
+}
+return 12000;
+}
+
 function setBacktestCustomParams(params=null, note=''){
 const box=document.getElementById('backtest-custom-params');
 const hint=document.getElementById('backtest-custom-params-hint');
@@ -5164,7 +5200,8 @@ if(sd)u+=`&start_date=${encodeURIComponent(sd)}`;
 if(ed)u+=`&end_date=${encodeURIComponent(ed)}`;
 if(customParams&&Object.keys(customParams).length)u+=`&params_json=${encodeURIComponent(JSON.stringify(customParams))}`;
 u=appendBacktestProtectionParams(u);
-renderBacktest(await api(u,{method:'POST'}));
+const runTimeoutMs=estimateBacktestRunTimeoutMs(st, customParams);
+renderBacktest(await api(u,{method:'POST',timeoutMs:runTimeoutMs}));
 notify('回测完成');
 }catch(err){notify(`回测失败: ${err.message}`,true);}
 };
