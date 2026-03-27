@@ -9,7 +9,11 @@
     recommendations: null,
     lastDebug: null,
     retryTimers: {},
+    autoRefreshTimer: null,
+    overviewRefreshPromise: null,
+    lastOverviewRefreshAt: 0,
   };
+  const WORKBENCH_AUTO_REFRESH_MS = 30 * 60 * 1000;
 
   const MODULE_NAMES = ['market_state', 'factors', 'cross_asset', 'onchain', 'discipline'];
   const MODULE_LABELS = {
@@ -57,6 +61,10 @@
 
   function isResearchActive() {
     return document.querySelector('.tab-content.active')?.id === 'research';
+  }
+
+  function shouldAutoRefreshWorkbench() {
+    return Boolean(state.initialized && isResearchActive() && !document.hidden);
   }
 
   function normalizeUniverse(primarySymbol, universeSymbols) {
@@ -880,6 +888,49 @@
     return state.overview;
   }
 
+  async function runWorkbenchOverviewDirect(quiet = false) {
+    if (state.overviewRefreshPromise) return state.overviewRefreshPromise;
+    state.overviewRefreshPromise = (async () => {
+      state.profile = getProfile();
+      if (typeof window.loadResearchOverview === 'function') await window.loadResearchOverview();
+      state.modules = {};
+      for (const name of MODULE_NAMES) {
+        try {
+          // Run sequentially to keep the page responsive under slow upstream APIs.
+          // eslint-disable-next-line no-await-in-loop
+          await runWorkbenchModuleDirect(name, true);
+        } catch (err) {
+          setDebug(`research.workbench.overview.direct.${name}`, String(err?.message || err));
+        }
+      }
+      state.overview = buildLocalOverviewFromModules();
+      await refreshRecommendations(true);
+      state.lastOverviewRefreshAt = Date.now();
+      setDebug('research.workbench.overview', state.overview);
+      if (!quiet && typeof window.notify === 'function') window.notify('研究总览已更新');
+      return state.overview;
+    })().finally(() => {
+      state.overviewRefreshPromise = null;
+    });
+    return state.overviewRefreshPromise;
+  }
+
+  function maybeAutoRefreshWorkbench(force = false) {
+    if (!shouldAutoRefreshWorkbench()) return;
+    const stale = !state.lastOverviewRefreshAt || (Date.now() - state.lastOverviewRefreshAt) >= WORKBENCH_AUTO_REFRESH_MS;
+    if (!force && !stale) return;
+    runWorkbenchOverviewDirect(true).catch((err) => {
+      setDebug('research.workbench.auto_refresh.error', String(err?.message || err));
+    });
+  }
+
+  function startWorkbenchAutoRefresh() {
+    if (state.autoRefreshTimer) clearInterval(state.autoRefreshTimer);
+    state.autoRefreshTimer = setInterval(() => {
+      maybeAutoRefreshWorkbench(false);
+    }, WORKBENCH_AUTO_REFRESH_MS);
+  }
+
   function bindAsyncButton(id, handler) {
     const el = q(id);
     if (!el) return;
@@ -1020,6 +1071,7 @@
     window.workbenchState = state;
     window.renderResearchStatusCards = renderStatusCards;
     window.renderResearchConclusionCard = renderRecommendations;
+    window.refreshResearchWorkbench = (quiet = true) => runWorkbenchOverviewDirect(Boolean(quiet));
   }
 
   async function lazyInit() {
@@ -1030,6 +1082,7 @@
     bindLegacyButtons();
     bindConfigWatchers();
     applyWorkbenchDefaults();
+    startWorkbenchAutoRefresh();
     state.profile = getProfile();
     renderStatusCards();
     renderOverview();
@@ -1041,11 +1094,16 @@
       renderStatusCards();
       setDebug('research.workbench.context.error', String(err?.message || err));
     });
+    maybeAutoRefreshWorkbench(true);
   }
 
   function watchResearchTab() {
     const trigger = () => {
-      if (isResearchActive()) lazyInit().catch((err) => setDebug('research.workbench.init.error', String(err?.message || err)));
+      if (isResearchActive()) {
+        lazyInit()
+          .then(() => maybeAutoRefreshWorkbench(false))
+          .catch((err) => setDebug('research.workbench.init.error', String(err?.message || err)));
+      }
     };
 
     document.querySelectorAll('.tab-btn[data-tab="research"]').forEach((btn) => {

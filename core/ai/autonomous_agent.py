@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import re
 import time
@@ -18,8 +19,10 @@ from loguru import logger
 from config.settings import settings
 from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.ai.signal_aggregator import signal_aggregator
+from core.backtest.cost_models import microstructure_proxies
 from core.data import data_storage
 from core.exchanges import exchange_manager
+from core.news.storage import db as news_db
 from core.runtime import runtime_state
 from core.strategies import Signal, SignalType
 from core.strategies.strategy_manager import strategy_manager
@@ -895,12 +898,44 @@ class AutonomousTradingAgent:
         except Exception:
             return 0.0
 
+    async def _resolve_account_risk_base(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
+        account_equity = 0.0
+        try:
+            account_equity = float(
+                await asyncio.wait_for(execution_engine.get_account_equity_snapshot(force=False), timeout=12.0)
+            )
+        except Exception:
+            account_equity = 0.0
+
+        strategy_allocation = 0.0
+        with contextlib.suppress(Exception):
+            strategy_allocation = float(strategy_manager.get_strategy_allocation(cfg.get("strategy_name")) or 0.0)
+
+        position_cap_notional = 0.0
+        if account_equity > 0:
+            with contextlib.suppress(Exception):
+                position_cap_notional = float(
+                    execution_engine.get_strategy_position_cap_notional(
+                        account_equity=account_equity,
+                        strategy_allocation=strategy_allocation,
+                    )
+                    or 0.0
+                )
+
+        return {
+            "account_equity": float(max(0.0, account_equity)),
+            "strategy_allocation": float(max(0.0, strategy_allocation)),
+            "position_cap_notional": float(max(0.0, position_cap_notional)),
+            "trading_mode": str(execution_engine.get_trading_mode() or "paper"),
+        }
+
     async def _annotate_position_payload(
         self,
         *,
         cfg: Dict[str, Any],
         position_payload: Dict[str, Any],
         last_price: float,
+        account_risk_base: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         payload = dict(position_payload or {})
         if not payload:
@@ -919,28 +954,8 @@ class AutonomousTradingAgent:
                 break
 
         position_notional = quantity * mark_price if quantity > 0 and mark_price > 0 else 0.0
-        position_cap_notional = 0.0
-        account_equity = 0.0
-        try:
-            account_equity = float(
-                await asyncio.wait_for(execution_engine.get_account_equity_snapshot(force=False), timeout=12.0)
-            )
-        except Exception:
-            account_equity = 0.0
-
-        strategy_allocation = 0.0
-        with contextlib.suppress(Exception):
-            strategy_allocation = float(strategy_manager.get_strategy_allocation(cfg.get("strategy_name")) or 0.0)
-
-        if account_equity > 0:
-            with contextlib.suppress(Exception):
-                position_cap_notional = float(
-                    execution_engine.get_strategy_position_cap_notional(
-                        account_equity=account_equity,
-                        strategy_allocation=strategy_allocation,
-                    )
-                    or 0.0
-                )
+        base = dict(account_risk_base or {})
+        position_cap_notional = _safe_nonnegative_float(base.get("position_cap_notional"), 0.0)
 
         exposure_ratio = 0.0
         remaining_notional = 0.0
@@ -962,26 +977,375 @@ class AutonomousTradingAgent:
         )
         return payload
 
+    def _build_market_structure_payload(
+        self,
+        *,
+        market_data: pd.DataFrame,
+        timeframe_sec: int,
+        last_price: float,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "available": False,
+            "last_bar_at": None,
+            "bar_interval_sec": int(max(1, timeframe_sec)),
+            "returns": {
+                "r_15m": 0.0,
+                "r_1h": 0.0,
+                "r_4h": 0.0,
+                "r_24h": 0.0,
+            },
+            "trend": {
+                "ema_fast": 0.0,
+                "ema_slow": 0.0,
+                "ema_gap_pct": 0.0,
+                "close_vs_ema_slow_pct": 0.0,
+                "label": "unknown",
+            },
+            "microstructure": {
+                "atr_pct": 0.0,
+                "realized_vol": 0.0,
+                "spread_proxy": 0.0,
+            },
+            "volume": {
+                "last": 0.0,
+                "avg_20": 0.0,
+                "ratio_20": 0.0,
+                "zscore_20": 0.0,
+            },
+            "range": {
+                "lookback_bars": 0,
+                "high": 0.0,
+                "low": 0.0,
+                "position_pct": 0.0,
+            },
+        }
+        if market_data is None or market_data.empty:
+            return payload
+
+        window = market_data.tail(240).copy()
+        close = (
+            pd.to_numeric(window["close"], errors="coerce").dropna()
+            if "close" in window.columns
+            else pd.Series(dtype=float)
+        )
+        if close.empty:
+            return payload
+
+        last_close = float(close.iloc[-1])
+        if last_close <= 0:
+            return payload
+
+        index = close.index if isinstance(close.index, pd.DatetimeIndex) else None
+        last_bar_at = None
+        if index is not None and len(index):
+            with contextlib.suppress(Exception):
+                ts = pd.Timestamp(index[-1])
+                last_bar_at = ts.isoformat()
+
+        def _return_for(lookback_sec: int) -> float:
+            if close.empty:
+                return 0.0
+            if index is not None and len(index):
+                target = pd.Timestamp(index[-1]) - pd.Timedelta(seconds=int(max(1, lookback_sec)))
+                pos = index.searchsorted(target, side="right") - 1
+                if 0 <= pos < len(close) - 1:
+                    base = float(close.iloc[pos])
+                    if base > 0:
+                        return float(last_close / base - 1.0)
+            steps = max(1, int(round(float(max(1, lookback_sec)) / max(1.0, float(timeframe_sec)))))
+            if len(close) <= steps:
+                return 0.0
+            base = float(close.iloc[-steps - 1])
+            if base <= 0:
+                return 0.0
+            return float(last_close / base - 1.0)
+
+        ema_fast = float(close.ewm(span=8, adjust=False).mean().iloc[-1])
+        ema_slow = float(close.ewm(span=21, adjust=False).mean().iloc[-1])
+        ema_gap_pct = float(ema_fast / ema_slow - 1.0) if ema_slow > 0 else 0.0
+        close_vs_ema_slow_pct = float(last_close / ema_slow - 1.0) if ema_slow > 0 else 0.0
+        trend_label = "range"
+        if ema_gap_pct >= 0.002 and close_vs_ema_slow_pct >= 0.0:
+            trend_label = "uptrend"
+        elif ema_gap_pct <= -0.002 and close_vs_ema_slow_pct <= 0.0:
+            trend_label = "downtrend"
+
+        volume_series = (
+            pd.to_numeric(window["volume"], errors="coerce").dropna()
+            if "volume" in window.columns
+            else pd.Series(dtype=float)
+        )
+        last_volume = float(volume_series.iloc[-1]) if not volume_series.empty else 0.0
+        volume_tail = volume_series.tail(20)
+        avg_volume = float(volume_tail.mean()) if not volume_tail.empty else 0.0
+        volume_std = float(volume_tail.std(ddof=0)) if len(volume_tail) >= 2 else 0.0
+        volume_ratio = float(last_volume / avg_volume) if avg_volume > 0 else 0.0
+        volume_zscore = float((last_volume - avg_volume) / volume_std) if volume_std > 1e-12 else 0.0
+
+        range_window = window.tail(min(len(window), 96)).copy()
+        high_series = (
+            pd.to_numeric(range_window["high"], errors="coerce").dropna()
+            if "high" in range_window.columns
+            else pd.Series(dtype=float)
+        )
+        low_series = (
+            pd.to_numeric(range_window["low"], errors="coerce").dropna()
+            if "low" in range_window.columns
+            else pd.Series(dtype=float)
+        )
+        range_high = float(high_series.max()) if not high_series.empty else 0.0
+        range_low = float(low_series.min()) if not low_series.empty else 0.0
+        range_position = 0.0
+        if range_high > range_low:
+            price_anchor = float(last_price) if float(last_price or 0.0) > 0 else last_close
+            range_position = float((price_anchor - range_low) / (range_high - range_low))
+            range_position = _coerce_float(range_position, 0.0, low=0.0, high=1.0)
+
+        payload.update(
+            {
+                "available": True,
+                "last_bar_at": last_bar_at,
+                "returns": {
+                    "r_15m": _return_for(15 * 60),
+                    "r_1h": _return_for(60 * 60),
+                    "r_4h": _return_for(4 * 60 * 60),
+                    "r_24h": _return_for(24 * 60 * 60),
+                },
+                "trend": {
+                    "ema_fast": float(ema_fast),
+                    "ema_slow": float(ema_slow),
+                    "ema_gap_pct": float(ema_gap_pct),
+                    "close_vs_ema_slow_pct": float(close_vs_ema_slow_pct),
+                    "label": trend_label,
+                },
+                "microstructure": {
+                    **{
+                        key: float(value)
+                        for key, value in (microstructure_proxies(window) or {}).items()
+                    },
+                },
+                "volume": {
+                    "last": float(last_volume),
+                    "avg_20": float(avg_volume),
+                    "ratio_20": float(volume_ratio),
+                    "zscore_20": float(volume_zscore),
+                },
+                "range": {
+                    "lookback_bars": int(len(range_window)),
+                    "high": float(range_high),
+                    "low": float(range_low),
+                    "position_pct": float(range_position),
+                },
+            }
+        )
+        return payload
+
+    async def _build_event_summary(self, *, symbol: str, timeframe_sec: int) -> Dict[str, Any]:
+        since_minutes = max(240, int(round(max(1.0, float(timeframe_sec)) * 4.0 / 60.0)))
+        event_symbol = _canonical_symbol_key(symbol).replace("/", "")
+        payload: Dict[str, Any] = {
+            "available": True,
+            "symbol": event_symbol,
+            "since_minutes": int(since_minutes),
+            "events_count": 0,
+            "source_diversity": 0,
+            "sentiment_counts": {
+                "positive": 0,
+                "neutral": 0,
+                "negative": 0,
+            },
+            "dominant_sentiment": "neutral",
+            "dominant_sentiment_ratio": 0.0,
+            "net_sentiment": 0.0,
+            "news_alpha_proxy": 0.0,
+            "weighted_half_life_min": 0.0,
+            "event_concentration": 0.0,
+            "top_event_types": [],
+            "top_sources": [],
+            "top_events": [],
+        }
+        if not event_symbol:
+            return payload
+
+        try:
+            events = await news_db.get_recent_events(symbol=event_symbol, since_minutes=since_minutes)
+        except Exception as exc:
+            logger.debug(f"autonomous agent event summary failed for {symbol}: {exc}")
+            payload["available"] = False
+            payload["error"] = _format_exception_short(exc)
+            return payload
+
+        if not events:
+            return payload
+
+        now = _utc_now()
+        sentiment_counts = {"positive": 0, "neutral": 0, "negative": 0}
+        type_counts: Dict[str, int] = {}
+        source_counts: Dict[str, int] = {}
+        weighted_half_numer = 0.0
+        weighted_half_denom = 0.0
+        weighted_alpha = 0.0
+        impact_weight_total = 0.0
+        impact_sentiment_total = 0.0
+        ranked_events: List[Tuple[float, Dict[str, Any]]] = []
+
+        for event in events:
+            event_dict = dict(event or {})
+            evidence = dict(event_dict.get("evidence") or {})
+            ts = pd.to_datetime(event_dict.get("ts"), utc=True, errors="coerce")
+            event_ts = ts.to_pydatetime() if pd.notna(ts) else now
+            age_min = max(0.0, (now - event_ts).total_seconds() / 60.0)
+            impact_score = max(0.0, float(event_dict.get("impact_score") or 0.0))
+            half_life_min = max(1.0, float(event_dict.get("half_life_min") or 180.0))
+            sentiment = int(event_dict.get("sentiment") or 0)
+            sentiment_key = "positive" if sentiment > 0 else "negative" if sentiment < 0 else "neutral"
+            sentiment_counts[sentiment_key] += 1
+
+            event_type = str(event_dict.get("event_type") or "other").strip().lower() or "other"
+            type_counts[event_type] = type_counts.get(event_type, 0) + 1
+
+            source = str(evidence.get("source") or "unknown").strip().lower() or "unknown"
+            source_counts[source] = source_counts.get(source, 0) + 1
+
+            decay = math.exp(-age_min / half_life_min)
+            decayed_alpha = impact_score * sentiment * decay
+            weighted_alpha += decayed_alpha
+            abs_alpha = abs(decayed_alpha)
+            weighted_half_numer += half_life_min * abs_alpha
+            weighted_half_denom += abs_alpha
+            impact_weight_total += impact_score
+            impact_sentiment_total += impact_score * sentiment
+
+            rank_score = abs_alpha if abs_alpha > 0 else impact_score
+            ranked_events.append(
+                (
+                    rank_score,
+                    {
+                        "event_id": str(event_dict.get("event_id") or ""),
+                        "ts": event_ts.isoformat(),
+                        "title": str(evidence.get("title") or evidence.get("matched_reason") or "").strip()[:180],
+                        "source": source,
+                        "event_type": event_type,
+                        "sentiment": int(sentiment),
+                        "impact_score": float(impact_score),
+                        "half_life_min": int(round(half_life_min)),
+                        "age_min": float(round(age_min, 3)),
+                        "decayed_alpha": float(round(decayed_alpha, 6)),
+                    },
+                )
+            )
+
+        ranked_events.sort(key=lambda item: item[0], reverse=True)
+        total_events = int(len(events))
+        dominant_sentiment = "neutral"
+        dominant_count = sentiment_counts["neutral"]
+        for key in ("positive", "negative", "neutral"):
+            if sentiment_counts[key] > dominant_count:
+                dominant_sentiment = key
+                dominant_count = sentiment_counts[key]
+
+        total_abs_rank = sum(score for score, _ in ranked_events)
+        payload.update(
+            {
+                "events_count": total_events,
+                "source_diversity": int(len(source_counts)),
+                "sentiment_counts": sentiment_counts,
+                "dominant_sentiment": dominant_sentiment,
+                "dominant_sentiment_ratio": float(dominant_count / max(1, total_events)),
+                "net_sentiment": float(impact_sentiment_total / max(impact_weight_total, 1e-9)),
+                "news_alpha_proxy": float(weighted_alpha),
+                "weighted_half_life_min": float(
+                    weighted_half_numer / weighted_half_denom if weighted_half_denom > 0 else 0.0
+                ),
+                "event_concentration": float(
+                    sum(score for score, _ in ranked_events[:3]) / max(total_abs_rank, 1e-9)
+                ),
+                "top_event_types": [
+                    {"event_type": key, "count": int(count)}
+                    for key, count in sorted(type_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+                ],
+                "top_sources": [
+                    {"source": key, "count": int(count)}
+                    for key, count in sorted(source_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+                ],
+                "top_events": [item for _, item in ranked_events[:3]],
+            }
+        )
+        return payload
+
+    def _build_account_risk_payload(
+        self,
+        *,
+        cfg: Dict[str, Any],
+        position_payload: Dict[str, Any],
+        account_risk_base: Dict[str, Any],
+        last_price: float,
+    ) -> Dict[str, Any]:
+        position = dict(position_payload or {})
+        account_equity = _safe_nonnegative_float(account_risk_base.get("account_equity"), 0.0)
+        strategy_allocation = _safe_nonnegative_float(account_risk_base.get("strategy_allocation"), 0.0)
+        position_cap_notional = _safe_nonnegative_float(account_risk_base.get("position_cap_notional"), 0.0)
+        same_direction_limit_ratio = _coerce_float(
+            position.get("same_direction_exposure_limit_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO),
+            _SAME_DIRECTION_MAX_EXPOSURE_RATIO,
+            low=0.0,
+            high=1.0,
+        )
+        current_position_side = str(position.get("side") or "").lower()
+        current_position_notional = _safe_nonnegative_float(position.get("position_notional"), 0.0)
+        same_direction_exposure_ratio = (
+            current_position_notional / position_cap_notional if position_cap_notional > 0 else 0.0
+        )
+        same_direction_remaining_notional = max(
+            0.0,
+            position_cap_notional * same_direction_limit_ratio - current_position_notional,
+        ) if position_cap_notional > 0 else 0.0
+        execution_permitted_now = bool(
+            str(cfg.get("mode") or "shadow") == "execute"
+            and not (
+                str(account_risk_base.get("trading_mode") or "paper") == "live"
+                and not bool(cfg.get("allow_live"))
+            )
+        )
+        return {
+            "trading_mode": str(account_risk_base.get("trading_mode") or execution_engine.get_trading_mode()),
+            "agent_mode": str(cfg.get("mode") or "shadow"),
+            "allow_live": bool(cfg.get("allow_live")),
+            "execution_permitted_now": execution_permitted_now,
+            "fixed_leverage": float(_FIXED_AUTONOMOUS_AGENT_LEVERAGE),
+            "min_confidence": float(cfg.get("min_confidence") or 0.0),
+            "default_stop_loss_pct": float(cfg.get("default_stop_loss_pct") or 0.02),
+            "default_take_profit_pct": float(cfg.get("default_take_profit_pct") or 0.04),
+            "account_equity": float(account_equity),
+            "strategy_allocation": float(strategy_allocation),
+            "position_cap_notional": float(position_cap_notional),
+            "last_price": float(last_price or 0.0),
+            "has_position": bool(current_position_side),
+            "current_position_side": current_position_side,
+            "current_position_notional": float(current_position_notional),
+            "same_direction_limit_ratio": float(same_direction_limit_ratio),
+            "same_direction_exposure_ratio": float(same_direction_exposure_ratio),
+            "same_direction_remaining_notional": float(same_direction_remaining_notional),
+            "can_add_same_direction": bool(
+                position_cap_notional > 0 and same_direction_exposure_ratio + 1e-9 < same_direction_limit_ratio
+            ),
+        }
+
     async def _build_context(self, cfg: Dict[str, Any]) -> Tuple[Dict[str, Any], pd.DataFrame]:
         market_data = await self._load_market_data(cfg)
         last_price = await self._resolve_last_price(cfg, market_data)
         timeframe = str(cfg.get("timeframe") or "15m")
         timeframe_sec = _timeframe_to_seconds(timeframe)
+        market_structure = self._build_market_structure_payload(
+            market_data=market_data,
+            timeframe_sec=timeframe_sec,
+            last_price=float(last_price or 0.0),
+        )
+        market_returns = dict((market_structure.get("returns") or {}))
 
         close_series = pd.Series(dtype=float)
         if market_data is not None and not market_data.empty and "close" in market_data.columns:
             close_series = pd.to_numeric(market_data["close"], errors="coerce").dropna()
-
-        def _pct_change(steps: int) -> float:
-            if close_series.empty or len(close_series) <= steps:
-                return 0.0
-            denom = float(close_series.iloc[-steps - 1] or 0.0)
-            if denom <= 0:
-                return 0.0
-            return float(close_series.iloc[-1] / denom - 1.0)
-
-        steps_1h = max(1, int(round(3600 / timeframe_sec)))
-        steps_24h = max(1, int(round(86400 / timeframe_sec)))
 
         returns = close_series.pct_change().dropna()
         annual_factor = max(1.0, (86400.0 * 365.0) / max(1.0, float(timeframe_sec)))
@@ -999,6 +1363,7 @@ class AutonomousTradingAgent:
         account_id = str(cfg.get("account_id") or "main")
         exchange = str(cfg.get("exchange") or "binance")
         symbol = str(cfg.get("symbol") or "BTC/USDT")
+        account_risk_base = await self._resolve_account_risk_base(cfg)
         position_payload = await self._resolve_position_payload(
             exchange=exchange,
             symbol=symbol,
@@ -1007,6 +1372,14 @@ class AutonomousTradingAgent:
         position_payload = await self._annotate_position_payload(
             cfg=cfg,
             position_payload=position_payload,
+            last_price=float(last_price or 0.0),
+            account_risk_base=account_risk_base,
+        )
+        event_summary = await self._build_event_summary(symbol=symbol, timeframe_sec=timeframe_sec)
+        account_risk = self._build_account_risk_payload(
+            cfg=cfg,
+            position_payload=position_payload,
+            account_risk_base=account_risk_base,
             last_price=float(last_price or 0.0),
         )
 
@@ -1022,13 +1395,18 @@ class AutonomousTradingAgent:
             "timeframe": timeframe,
             "price": float(last_price or 0.0),
             "returns": {
-                "r_1h": _pct_change(steps_1h),
-                "r_24h": _pct_change(steps_24h),
+                "r_15m": float(market_returns.get("r_15m") or 0.0),
+                "r_1h": float(market_returns.get("r_1h") or 0.0),
+                "r_4h": float(market_returns.get("r_4h") or 0.0),
+                "r_24h": float(market_returns.get("r_24h") or 0.0),
             },
             "realized_vol_annualized": float(realized_vol),
             "bars": int(len(market_data) if market_data is not None else 0),
+            "market_structure": market_structure,
             "aggregated_signal": agg_signal,
+            "event_summary": event_summary,
             "position": position_payload,
+            "account_risk": account_risk,
             "research_context": research_context,
             "profile": dict(self._profile or _default_profile()),
             "trading_mode": execution_engine.get_trading_mode(),
@@ -1056,6 +1434,10 @@ class AutonomousTradingAgent:
                 "Use tighter risk when volatility is high.",
                 "Leverage is fixed at 1x. Always return leverage=1.0.",
                 "Same-side add-ons are allowed only while same_direction_exposure_ratio is below same_direction_exposure_limit_ratio.",
+                "Use market_structure to judge trend, volatility, volume abnormality, and where price sits inside the recent range.",
+                "Use aggregated_signal.components as decomposed priors; do not rely only on the top-level direction/confidence.",
+                "Use event_summary only when event concentration, news_alpha_proxy, or dominant sentiment are meaningfully non-zero.",
+                "Always respect account_risk, especially min_confidence, fixed_leverage, and same_direction_remaining_notional.",
                 "If research_context is available, treat its selected_candidate as the current research champion hypothesis unless real-time risk clearly invalidates it.",
             ],
             "runtime_constraints": {
@@ -1063,6 +1445,9 @@ class AutonomousTradingAgent:
                 "fixed_leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
                 "default_stop_loss_pct": cfg.get("default_stop_loss_pct"),
                 "default_take_profit_pct": cfg.get("default_take_profit_pct"),
+                "agent_mode": cfg.get("mode"),
+                "allow_live": cfg.get("allow_live"),
+                "trading_mode": context_payload.get("trading_mode"),
             },
             "input": context_payload,
         }
@@ -1866,8 +2251,11 @@ class AutonomousTradingAgent:
                 "bars": context_payload.get("bars"),
                 "returns": context_payload.get("returns"),
                 "vol": context_payload.get("realized_vol_annualized"),
+                "market_structure": context_payload.get("market_structure"),
                 "aggregated_signal": context_payload.get("aggregated_signal"),
+                "event_summary": context_payload.get("event_summary"),
                 "position": context_payload.get("position"),
+                "account_risk": context_payload.get("account_risk"),
                 "research_context": research_context,
             },
             "selection": selection,

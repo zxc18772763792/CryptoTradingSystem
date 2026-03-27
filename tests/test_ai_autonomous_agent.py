@@ -21,6 +21,10 @@ def _isolate_agent_overlay(tmp_path, monkeypatch):
         _mod.autonomous_trading_agent, "_overlay_path",
         tmp_path / "agent_runtime_config.json",
     )
+    monkeypatch.setattr(_mod.news_db, "get_recent_events", AsyncMock(return_value=[]))
+    monkeypatch.setattr(_mod.execution_engine, "get_account_equity_snapshot", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(_mod.execution_engine, "get_strategy_position_cap_notional", lambda **kwargs: 0.0)
+    monkeypatch.setattr(_mod.strategy_manager, "get_strategy_allocation", lambda name: 0.0)
 
 
 def _sample_df() -> pd.DataFrame:
@@ -579,6 +583,153 @@ def test_agent_run_once_exposes_structured_diagnostics(monkeypatch, tmp_path: Pa
     codes = {item.get("code") for item in (result.get("diagnostics", {}).get("items") or [])}
     assert "below_min_confidence" in codes
     assert result["status"]["last_diagnostics"]["primary"]["code"] == "below_min_confidence"
+
+
+def test_build_context_includes_market_event_and_account_risk_payloads(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    now = module._utc_now()
+
+    class _Agg:
+        def to_dict(self):
+            return {
+                "direction": "LONG",
+                "confidence": 0.68,
+                "blocked_by_risk": False,
+                "risk_reason": "",
+                "components": {
+                    "llm": {"direction": "LONG", "confidence": 0.61, "weight": 0.4},
+                    "ml": {"direction": "LONG", "confidence": 0.72, "weight": 0.35},
+                    "factor": {"direction": "LONG", "confidence": 0.66, "weight": 0.25},
+                },
+            }
+
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(module.execution_engine, "get_account_equity_snapshot", AsyncMock(return_value=1500.0))
+    monkeypatch.setattr(module.execution_engine, "get_strategy_position_cap_notional", lambda **kwargs: 150.0)
+    monkeypatch.setattr(module.strategy_manager, "get_strategy_allocation", lambda name: 0.12)
+    monkeypatch.setattr(
+        module.news_db,
+        "get_recent_events",
+        AsyncMock(
+            return_value=[
+                {
+                    "event_id": "evt-1",
+                    "ts": (now - module.timedelta(minutes=12)).isoformat(),
+                    "symbol": "BTCUSDT",
+                    "event_type": "etf",
+                    "sentiment": 1,
+                    "impact_score": 0.9,
+                    "half_life_min": 180,
+                    "evidence": {"title": "ETF inflow accelerates", "source": "coindesk"},
+                },
+                {
+                    "event_id": "evt-2",
+                    "ts": (now - module.timedelta(minutes=35)).isoformat(),
+                    "symbol": "BTCUSDT",
+                    "event_type": "macro",
+                    "sentiment": -1,
+                    "impact_score": 0.3,
+                    "half_life_min": 120,
+                    "evidence": {"title": "Macro headwind", "source": "reuters"},
+                },
+            ]
+        ),
+    )
+
+    asyncio.run(agent.update_runtime_config(symbol="BTC/USDT", timeframe="15m"))
+    context_payload, _ = asyncio.run(agent._build_context(agent.get_runtime_config()))
+
+    assert context_payload["returns"]["r_4h"] > 0
+    assert context_payload["market_structure"]["available"] is True
+    assert context_payload["market_structure"]["trend"]["label"] == "uptrend"
+    assert context_payload["market_structure"]["microstructure"]["atr_pct"] >= 0.0
+    assert context_payload["event_summary"]["events_count"] == 2
+    assert context_payload["event_summary"]["top_events"][0]["event_id"] == "evt-1"
+    assert context_payload["event_summary"]["news_alpha_proxy"] > 0
+    assert context_payload["account_risk"]["account_equity"] == 1500.0
+    assert context_payload["account_risk"]["position_cap_notional"] == 150.0
+    assert context_payload["account_risk"]["fixed_leverage"] == 1.0
+    assert "llm" in context_payload["aggregated_signal"]["components"]
+
+
+def test_agent_run_once_journal_includes_structured_context(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    now = module._utc_now()
+
+    class _Agg:
+        def to_dict(self):
+            return {
+                "direction": "LONG",
+                "confidence": 0.71,
+                "blocked_by_risk": False,
+                "risk_reason": "",
+                "components": {
+                    "llm": {"direction": "LONG", "confidence": 0.71, "weight": 0.4},
+                    "ml": {"direction": "LONG", "confidence": 0.69, "weight": 0.35},
+                    "factor": {"direction": "LONG", "confidence": 0.67, "weight": 0.25},
+                },
+            }
+
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(module.execution_engine, "get_account_equity_snapshot", AsyncMock(return_value=1200.0))
+    monkeypatch.setattr(module.execution_engine, "get_strategy_position_cap_notional", lambda **kwargs: 120.0)
+    monkeypatch.setattr(module.strategy_manager, "get_strategy_allocation", lambda name: 0.1)
+    monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        module.news_db,
+        "get_recent_events",
+        AsyncMock(
+            return_value=[
+                {
+                    "event_id": "evt-journal",
+                    "ts": (now - module.timedelta(minutes=8)).isoformat(),
+                    "symbol": "BTCUSDT",
+                    "event_type": "institution",
+                    "sentiment": 1,
+                    "impact_score": 0.8,
+                    "half_life_min": 180,
+                    "evidence": {"title": "Institutional accumulation", "source": "bloomberg"},
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        AsyncMock(
+            return_value={
+                "action": "buy",
+                "confidence": 0.84,
+                "strength": 0.73,
+                "leverage": 5,
+                "stop_loss_pct": 0.02,
+                "take_profit_pct": 0.05,
+                "reason": "aligned_context",
+            }
+        ),
+    )
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+    rows = agent.read_journal(limit=1)
+
+    assert result["execution"]["submitted"] is True
+    assert rows, "journal should contain at least one row"
+    context = rows[0].get("context") or {}
+    assert "market_structure" in context
+    assert context["event_summary"]["events_count"] == 1
+    assert context["account_risk"]["account_equity"] == 1200.0
+    assert context["market_structure"]["trend"]["label"] == "uptrend"
 
 
 def test_agent_symbol_scan_prefers_trade_ready_symbol(monkeypatch, tmp_path: Path):
