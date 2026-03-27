@@ -40,6 +40,9 @@ _SUPPORTED_PROVIDERS = {"glm", "codex", "claude"}
 _SUPPORTED_MODES = {"shadow", "execute"}
 _SUPPORTED_ACTIONS = {"buy", "sell", "hold", "close_long", "close_short"}
 _SUPPORTED_SYMBOL_MODES = {"manual", "auto"}
+_FIXED_AUTONOMOUS_AGENT_LEVERAGE = 1.0
+_MODEL_FEEDBACK_OUTAGE_ALERT_SEC = 30 * 60
+_MODEL_FEEDBACK_HARD_TIMEOUT_SEC = 30 * 60
 _DEFAULT_AUTO_UNIVERSE = [
     "BTC/USDT",
     "ETH/USDT",
@@ -174,6 +177,27 @@ def _format_exception_short(exc: Exception) -> str:
     return exc.__class__.__name__
 
 
+def _utc_iso_from_unix(value: Optional[float]) -> Optional[str]:
+    if value is None:
+        return None
+    with contextlib.suppress(Exception):
+        return datetime.fromtimestamp(float(value), timezone.utc).isoformat()
+    return None
+
+
+def _classify_model_feedback_error(exc: BaseException) -> Optional[str]:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return "timeout"
+    text = str(exc or "").strip().lower()
+    if not text:
+        return None
+    if "timeout" in text:
+        return "timeout"
+    if "_http_429" in text or "usage_limit_exceeded" in text or "rate limit" in text or "too many requests" in text:
+        return "rate_limit"
+    return None
+
+
 def _timeframe_to_seconds(timeframe: str) -> int:
     text = str(timeframe or "15m").strip().lower()
     m = re.fullmatch(r"(\d+)([smhdw])", text)
@@ -256,6 +280,12 @@ class AutonomousTradingAgent:
         self._tick_count: int = 0
         self._submitted_count: int = 0
         self._last_submit_at: Optional[float] = None
+        self._last_model_feedback_at: Optional[float] = None
+        self._model_feedback_outage_started_at: Optional[float] = None
+        self._model_feedback_failure_streak: int = 0
+        self._model_feedback_last_failure_kind: Optional[str] = None
+        self._model_feedback_last_failure_error: Optional[str] = None
+        self._model_feedback_alert_sent_at: Optional[float] = None
 
     def _provider_base_url(self, provider: str) -> str:
         provider = _normalize_provider(provider)
@@ -337,8 +367,8 @@ class AutonomousTradingAgent:
             "interval_sec": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_INTERVAL_SEC", 120), 120, low=15, high=7200),
             "lookback_bars": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_LOOKBACK_BARS", 240), 240, low=30, high=4000),
             "min_confidence": _coerce_float(self._get("AI_AUTONOMOUS_AGENT_MIN_CONFIDENCE", 0.58), 0.58, low=0.0, high=1.0),
-            "default_leverage": _coerce_float(self._get("AI_AUTONOMOUS_AGENT_DEFAULT_LEVERAGE", 3.0), 3.0, low=1.0, high=125.0),
-            "max_leverage": _coerce_float(self._get("AI_AUTONOMOUS_AGENT_MAX_LEVERAGE", 20.0), 20.0, low=1.0, high=125.0),
+            "default_leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
+            "max_leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
             "default_stop_loss_pct": _coerce_float(self._get("AI_AUTONOMOUS_AGENT_STOP_LOSS_PCT", 0.02), 0.02, low=0.001, high=0.5),
             "default_take_profit_pct": _coerce_float(self._get("AI_AUTONOMOUS_AGENT_TAKE_PROFIT_PCT", 0.04), 0.04, low=0.001, high=2.0),
             "timeout_ms": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_TIMEOUT_MS", 30000), 30000, low=1000, high=120000),
@@ -386,9 +416,9 @@ class AutonomousTradingAgent:
         if "min_confidence" in kwargs and kwargs["min_confidence"] is not None:
             updates["AI_AUTONOMOUS_AGENT_MIN_CONFIDENCE"] = _coerce_float(kwargs["min_confidence"], 0.58, low=0.0, high=1.0)
         if "default_leverage" in kwargs and kwargs["default_leverage"] is not None:
-            updates["AI_AUTONOMOUS_AGENT_DEFAULT_LEVERAGE"] = _coerce_float(kwargs["default_leverage"], 3.0, low=1.0, high=125.0)
+            updates["AI_AUTONOMOUS_AGENT_DEFAULT_LEVERAGE"] = _FIXED_AUTONOMOUS_AGENT_LEVERAGE
         if "max_leverage" in kwargs and kwargs["max_leverage"] is not None:
-            updates["AI_AUTONOMOUS_AGENT_MAX_LEVERAGE"] = _coerce_float(kwargs["max_leverage"], 20.0, low=1.0, high=125.0)
+            updates["AI_AUTONOMOUS_AGENT_MAX_LEVERAGE"] = _FIXED_AUTONOMOUS_AGENT_LEVERAGE
         if "default_stop_loss_pct" in kwargs and kwargs["default_stop_loss_pct"] is not None:
             updates["AI_AUTONOMOUS_AGENT_STOP_LOSS_PCT"] = _coerce_float(kwargs["default_stop_loss_pct"], 0.02, low=0.001, high=0.5)
         if "default_take_profit_pct" in kwargs and kwargs["default_take_profit_pct"] is not None:
@@ -430,9 +460,118 @@ class AutonomousTradingAgent:
             "last_research_context": self._last_research_context,
             "last_diagnostics": self._last_diagnostics,
             "last_symbol_scan": self._last_symbol_scan,
+            "model_feedback_guard": self._model_feedback_guard_status(),
             "profile": dict(self._profile or _default_profile()),
             "journal_path": str(self._journal_path),
         }
+
+    def _model_feedback_guard_status(self) -> Dict[str, Any]:
+        return {
+            "last_success_at": _utc_iso_from_unix(self._last_model_feedback_at),
+            "outage_started_at": _utc_iso_from_unix(self._model_feedback_outage_started_at),
+            "failure_streak": int(self._model_feedback_failure_streak),
+            "last_failure_kind": self._model_feedback_last_failure_kind,
+            "last_failure_error": self._model_feedback_last_failure_error,
+            "alert_sent_at": _utc_iso_from_unix(self._model_feedback_alert_sent_at),
+            "alert_after_sec": _MODEL_FEEDBACK_OUTAGE_ALERT_SEC,
+            "hard_timeout_sec": _MODEL_FEEDBACK_HARD_TIMEOUT_SEC,
+        }
+
+    def _reset_model_feedback_outage(self) -> None:
+        self._model_feedback_outage_started_at = None
+        self._model_feedback_failure_streak = 0
+        self._model_feedback_last_failure_kind = None
+        self._model_feedback_last_failure_error = None
+        self._model_feedback_alert_sent_at = None
+
+    def _record_model_feedback_success(self) -> None:
+        self._last_model_feedback_at = time.time()
+        self._reset_model_feedback_outage()
+
+    def _record_model_feedback_failure(self, exc: BaseException) -> Optional[Dict[str, Any]]:
+        kind = _classify_model_feedback_error(exc)
+        if kind not in {"rate_limit", "timeout"}:
+            self._reset_model_feedback_outage()
+            return None
+
+        now = time.time()
+        if self._model_feedback_failure_streak <= 0:
+            self._model_feedback_outage_started_at = now
+        self._model_feedback_failure_streak += 1
+        self._model_feedback_last_failure_kind = kind
+        self._model_feedback_last_failure_error = _format_exception_short(exc)[:300]
+
+        outage_anchor = self._last_model_feedback_at
+        if outage_anchor is None:
+            outage_anchor = self._model_feedback_outage_started_at or now
+        outage_duration_sec = max(0.0, now - float(outage_anchor))
+        if outage_duration_sec < float(_MODEL_FEEDBACK_OUTAGE_ALERT_SEC):
+            return None
+        if self._model_feedback_alert_sent_at is not None:
+            return None
+
+        return {
+            "kind": kind,
+            "failure_streak": int(self._model_feedback_failure_streak),
+            "outage_duration_sec": outage_duration_sec,
+            "error": self._model_feedback_last_failure_error,
+            "last_success_at": _utc_iso_from_unix(self._last_model_feedback_at),
+            "outage_started_at": _utc_iso_from_unix(self._model_feedback_outage_started_at),
+        }
+
+    async def _send_model_feedback_outage_alert(
+        self,
+        *,
+        provider: str,
+        model: str,
+        cfg: Dict[str, Any],
+        selection: Dict[str, Any],
+        context_payload: Dict[str, Any],
+        failure: Dict[str, Any],
+    ) -> None:
+        try:
+            from core.notifications import notification_manager
+
+            selected_symbol = str(
+                selection.get("selected_symbol")
+                or context_payload.get("symbol")
+                or cfg.get("symbol")
+                or "BTC/USDT"
+            )
+            title = f"AI自动交易模型反馈中断告警: {provider}/{model}"
+            message = (
+                "连续出现模型 429/timeout，且超过 30 分钟没有得到成功模型反馈；"
+                "当前轮次已回退为 hold。\n"
+                f"异常类型: {failure.get('kind')}\n"
+                f"持续时长: {float(failure.get('outage_duration_sec') or 0.0) / 60.0:.1f} 分钟\n"
+                f"连续失败: {int(failure.get('failure_streak') or 0)} 次\n"
+                f"最近错误: {str(failure.get('error') or '')}\n"
+                f"执行模式: {cfg.get('mode')} / allow_live={bool(cfg.get('allow_live'))}\n"
+                f"交易模式: {execution_engine.get_trading_mode()}\n"
+                f"配置币种: {cfg.get('symbol')}\n"
+                f"本轮选中: {selected_symbol}\n"
+                f"时间框架: {cfg.get('timeframe')}\n"
+                f"上次成功反馈: {failure.get('last_success_at') or 'none'}\n"
+                f"本次失联开始: {failure.get('outage_started_at') or 'unknown'}"
+            )
+            result = await notification_manager.send_message(
+                title=title,
+                message=message,
+                channels=["feishu"],
+            )
+            if not bool((result or {}).get("feishu")):
+                logger.warning(
+                    "autonomous agent model feedback outage alert did not reach feishu "
+                    f"(provider={provider}, model={model})"
+                )
+            else:
+                self._model_feedback_alert_sent_at = time.time()
+                logger.warning(
+                    "autonomous agent model feedback outage alert sent to feishu "
+                    f"(provider={provider}, model={model}, symbol={selected_symbol})"
+                )
+        except Exception as exc:
+            logger.warning(f"autonomous agent model feedback outage alert failed: {exc}")
 
     async def start(self) -> Dict[str, Any]:
         if self.is_running():
@@ -749,7 +888,7 @@ class AutonomousTradingAgent:
                 "action": "buy|sell|hold|close_long|close_short",
                 "confidence": "float in [0,1]",
                 "strength": "float in [0.1,1.0]",
-                "leverage": "float in [1,max_leverage]",
+                "leverage": "must be 1.0",
                 "stop_loss_pct": "float > 0, fraction not percent",
                 "take_profit_pct": "float > 0, fraction not percent",
                 "reason": "short reason <= 180 chars",
@@ -758,11 +897,12 @@ class AutonomousTradingAgent:
                 "If uncertain or data quality is low, choose hold.",
                 "Never fabricate certainty.",
                 "Use tighter risk when volatility is high.",
+                "Leverage is fixed at 1x. Always return leverage=1.0.",
                 "If research_context is available, treat its selected_candidate as the current research champion hypothesis unless real-time risk clearly invalidates it.",
             ],
             "runtime_constraints": {
                 "min_confidence": cfg.get("min_confidence"),
-                "max_leverage": cfg.get("max_leverage"),
+                "fixed_leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
                 "default_stop_loss_pct": cfg.get("default_stop_loss_pct"),
                 "default_take_profit_pct": cfg.get("default_take_profit_pct"),
             },
@@ -774,12 +914,7 @@ class AutonomousTradingAgent:
         action = _normalize_action(raw.get("action"))
         confidence = _coerce_float(raw.get("confidence", 0.0), 0.0, low=0.0, high=1.0)
         strength = _coerce_float(raw.get("strength", max(0.2, confidence)), max(0.2, confidence), low=0.1, high=1.0)
-        leverage = _coerce_float(
-            raw.get("leverage", cfg.get("default_leverage", 3.0)),
-            float(cfg.get("default_leverage") or 3.0),
-            low=1.0,
-            high=float(cfg.get("max_leverage") or 20.0),
-        )
+        leverage = _FIXED_AUTONOMOUS_AGENT_LEVERAGE
         stop_loss_pct = _coerce_float(
             raw.get("stop_loss_pct", cfg.get("default_stop_loss_pct", 0.02)),
             float(cfg.get("default_stop_loss_pct") or 0.02),
@@ -859,7 +994,7 @@ class AutonomousTradingAgent:
         metadata = {
             "exchange": str(cfg.get("exchange") or "binance"),
             "account_id": str(cfg.get("account_id") or "main"),
-            "leverage": float(decision.get("leverage") or cfg.get("default_leverage") or 1.0),
+            "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
             "timeframe": str(cfg.get("timeframe") or ""),
             "source": "ai_autonomous_agent",
             "skip_live_decision_review": True,
@@ -1383,7 +1518,7 @@ class AutonomousTradingAgent:
                 "action": "hold",
                 "confidence": 0.0,
                 "strength": 0.1,
-                "leverage": float(cfg.get("default_leverage") or 1.0),
+                "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
                 "stop_loss_pct": float(cfg.get("default_stop_loss_pct") or 0.02),
                 "take_profit_pct": float(cfg.get("default_take_profit_pct") or 0.04),
                 "reason": "no_price",
@@ -1394,24 +1529,43 @@ class AutonomousTradingAgent:
             system_prompt, user_prompt = self._build_prompt(effective_cfg, context_payload)
             raw_decision: Dict[str, Any]
             try:
-                raw_decision = await self._call_provider(
-                    provider=provider,
-                    model=model,
-                    timeout_ms=int(effective_cfg.get("timeout_ms") or 12000),
-                    max_tokens=int(effective_cfg.get("max_tokens") or 420),
-                    temperature=float(effective_cfg.get("temperature") or 0.15),
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
+                raw_decision = await asyncio.wait_for(
+                    self._call_provider(
+                        provider=provider,
+                        model=model,
+                        timeout_ms=int(effective_cfg.get("timeout_ms") or 12000),
+                        max_tokens=int(effective_cfg.get("max_tokens") or 420),
+                        temperature=float(effective_cfg.get("temperature") or 0.15),
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                    ),
+                    timeout=float(_MODEL_FEEDBACK_HARD_TIMEOUT_SEC),
                 )
+                self._record_model_feedback_success()
             except Exception as exc:
+                normalized_exc: Exception = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
+                if isinstance(exc, asyncio.TimeoutError) and "guard_timeout" not in str(exc or "").lower():
+                    normalized_exc = TimeoutError(
+                        f"model_feedback_guard_timeout({int(_MODEL_FEEDBACK_HARD_TIMEOUT_SEC)}s)"
+                    )
+                failure = self._record_model_feedback_failure(normalized_exc)
+                if failure:
+                    await self._send_model_feedback_outage_alert(
+                        provider=provider,
+                        model=model,
+                        cfg=effective_cfg,
+                        selection=selection,
+                        context_payload=context_payload,
+                        failure=failure,
+                    )
                 raw_decision = {
                     "action": "hold",
                     "confidence": 0.0,
                     "strength": 0.1,
-                    "leverage": effective_cfg.get("default_leverage"),
+                    "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
                     "stop_loss_pct": effective_cfg.get("default_stop_loss_pct"),
                     "take_profit_pct": effective_cfg.get("default_take_profit_pct"),
-                    "reason": f"model_error:{_format_exception_short(exc)}",
+                    "reason": f"model_error:{_format_exception_short(normalized_exc)}",
                 }
             decision = self._normalize_decision(raw_decision, effective_cfg, context_payload)
 

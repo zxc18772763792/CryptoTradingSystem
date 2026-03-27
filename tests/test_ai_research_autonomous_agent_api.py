@@ -4,6 +4,9 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+from pydantic import ValidationError
+
 
 def test_runtime_config_contains_ai_autonomous_agent(monkeypatch):
     from web.api import ai_research as ai_module
@@ -50,6 +53,13 @@ def test_update_autonomous_agent_runtime_config_endpoint(monkeypatch):
     assert result["config"]["enabled"] is True
     assert result["config"]["mode"] == "execute"
     assert result["config"]["provider"] == "codex"
+
+
+def test_update_autonomous_agent_runtime_config_payload_rejects_non_one_leverage():
+    from web.api import ai_research as ai_module
+
+    with pytest.raises(ValidationError):
+        ai_module.AIAutonomousAgentConfigUpdateRequest(default_leverage=2.0)
 
 
 def test_autonomous_agent_start_and_run_once_endpoints(monkeypatch):
