@@ -8,6 +8,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
@@ -594,6 +595,49 @@ class ExecutionEngine:
             return float(default)
 
     @staticmethod
+    def _safe_ratio(value: Any, default: float = 0.0) -> float:
+        try:
+            out = float(value)
+        except Exception:
+            return float(default)
+        if not math.isfinite(out):
+            return float(default)
+        return max(0.0, min(out, 1.0))
+
+    def get_strategy_position_cap_notional(
+        self,
+        *,
+        account_equity: Optional[float],
+        strategy_allocation: float,
+    ) -> float:
+        equity = self._safe_nonnegative_float(account_equity, 0.0)
+        if equity <= 0:
+            return 0.0
+        single_cap = equity * float(risk_manager.max_position_size or 0.1)
+        alloc_ratio = self._safe_ratio(strategy_allocation, 0.0)
+        alloc_cap = equity * alloc_ratio if alloc_ratio > 0 else single_cap
+        return max(0.0, min(single_cap, alloc_cap if alloc_ratio > 0 else single_cap))
+
+    def _resolve_position_notional(self, position: Optional[Any], *, fallback_price: Optional[float] = None) -> float:
+        if position is None:
+            return 0.0
+        value = self._safe_nonnegative_float(getattr(position, "value", 0.0), 0.0)
+        if value > 0:
+            return value
+        qty = self._safe_nonnegative_float(getattr(position, "quantity", 0.0), 0.0)
+        if qty <= 0:
+            return 0.0
+        for raw_price in (
+            getattr(position, "current_price", 0.0),
+            getattr(position, "entry_price", 0.0),
+            fallback_price,
+        ):
+            price = self._safe_nonnegative_float(raw_price, 0.0)
+            if price > 0:
+                return qty * price
+        return 0.0
+
+    @staticmethod
     def _safe_positive_float(value: Any, default: Optional[float] = None) -> Optional[float]:
         try:
             out = float(value)
@@ -705,6 +749,25 @@ class ExecutionEngine:
             return 0.0
         configured_min_notional = max(1.0, float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 100.0) or 100.0))
         risk_buffer = 0.998
+        equity = float(account_equity or 0.0)
+        alloc_ratio = self._safe_ratio(strategy_allocation, 0.0)
+        position_cap_notional = self.get_strategy_position_cap_notional(
+            account_equity=account_equity,
+            strategy_allocation=strategy_allocation,
+        )
+        same_direction_limit_ratio = self._safe_ratio(
+            (signal.metadata or {}).get("same_direction_max_exposure_ratio"),
+            0.0,
+        )
+        same_direction_existing_notional = self._safe_nonnegative_float(
+            (signal.metadata or {}).get("same_direction_existing_notional"),
+            0.0,
+        )
+        same_direction_limit_notional = 0.0
+        same_direction_remaining_cap = 0.0
+        if same_direction_limit_ratio > 0 and position_cap_notional > 0:
+            same_direction_limit_notional = position_cap_notional * same_direction_limit_ratio
+            same_direction_remaining_cap = max(0.0, same_direction_limit_notional - same_direction_existing_notional)
 
         if signal.quantity is not None:
             qty = max(0.0, float(signal.quantity))
@@ -713,9 +776,12 @@ class ExecutionEngine:
             # Unless explicitly requested, avoid sending dust-size strategy orders.
             if not bool((signal.metadata or {}).get("respect_quantity", False)):
                 qty = max(qty, configured_min_notional / price)
+            if same_direction_limit_notional > 0:
+                if same_direction_remaining_cap <= 0:
+                    return 0.0
+                qty = min(qty, same_direction_remaining_cap / price)
             return max(0.0, self._floor_to_decimals(qty, 8))
 
-        equity = float(account_equity or 0.0)
         if equity <= 0:
             # Conservative fallback for unknown equity in paper mode.
             return max(0.0, round(max(10.0, configured_min_notional) / price, 8))
@@ -724,7 +790,6 @@ class ExecutionEngine:
         strength = max(0.1, min(strength, 1.0))
 
         single_cap = equity * float(risk_manager.max_position_size or 0.1)
-        alloc_ratio = max(0.0, min(float(strategy_allocation or 0.0), 1.0))
         alloc_cap = equity * alloc_ratio if alloc_ratio > 0 else single_cap
         market_type = str((signal.metadata or {}).get("market_type") or "").strip().lower()
         if not market_type and signal.strategy_name:
@@ -756,6 +821,13 @@ class ExecutionEngine:
                 configured_min_notional,
                 max(exchange_min_notional, single_cap * 0.98),
             )
+        if same_direction_limit_notional > 0:
+            if same_direction_remaining_cap <= 0:
+                return 0.0
+            effective_min_notional = min(
+                effective_min_notional,
+                max(exchange_min_notional, same_direction_remaining_cap * 0.98),
+            )
         effective_min_notional = max(exchange_min_notional, effective_min_notional)
         if alloc_ratio > 0 and remaining_alloc_cap < effective_min_notional:
             logger.debug(
@@ -774,6 +846,11 @@ class ExecutionEngine:
                 return 0.0
             target_notional = min(target_notional, buffered_cap)
         else:
+            target_notional = min(target_notional, buffered_cap)
+        if same_direction_limit_notional > 0:
+            buffered_cap = min(buffered_cap, same_direction_remaining_cap * risk_buffer)
+            if buffered_cap < effective_min_notional:
+                return 0.0
             target_notional = min(target_notional, buffered_cap)
         if target_notional <= 0:
             return 0.0
@@ -978,6 +1055,114 @@ class ExecutionEngine:
         if raw.endswith("USDT") and "/" not in raw and len(raw) > 4:
             raw = f"{raw[:-4]}/USDT"
         return raw
+
+    async def _get_exchange_position_snapshot(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        preferred_side: Optional[PositionSide] = None,
+    ) -> Optional[Any]:
+        if self._paper_trading:
+            return None
+        connector = exchange_manager.get_exchange(exchange)
+        if connector is None:
+            return None
+        default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").strip().lower()
+        if default_type not in {"future", "futures", "swap", "contract", "perp", "perpetual"}:
+            return None
+
+        target_symbol = self._canonical_symbol(symbol)
+        if not target_symbol:
+            return None
+
+        try:
+            positions = await asyncio.wait_for(connector.get_positions(), timeout=8.0)
+        except Exception as e:
+            logger.debug(f"Failed to query exchange position snapshot for {exchange} {symbol}: {e}")
+            return None
+
+        preferred_match: Optional[Any] = None
+        fallback_match: Optional[Any] = None
+        preferred_side_text = str(getattr(preferred_side, "value", "") or "").strip().lower()
+
+        for pos in positions or []:
+            symbol_raw = str((pos.get("symbol") if isinstance(pos, dict) else getattr(pos, "symbol", "")) or "")
+            symbol_key = self._canonical_symbol(symbol_raw)
+            if symbol_key != target_symbol:
+                continue
+
+            amount = float((pos.get("amount") if isinstance(pos, dict) else getattr(pos, "amount", 0.0)) or 0.0)
+            if abs(amount) <= 1e-12:
+                amount = float((pos.get("quantity") if isinstance(pos, dict) else getattr(pos, "quantity", 0.0)) or 0.0)
+            if abs(amount) <= 1e-12:
+                continue
+
+            side_text = str((pos.get("side") if isinstance(pos, dict) else getattr(pos, "side", "")) or "").strip().lower()
+            if side_text not in {"long", "short"}:
+                side_text = "short" if amount < 0 else "long"
+            if side_text not in {"long", "short"}:
+                continue
+
+            entry_price = float((pos.get("entry_price") if isinstance(pos, dict) else getattr(pos, "entry_price", 0.0)) or 0.0)
+            current_price = float((pos.get("current_price") if isinstance(pos, dict) else getattr(pos, "current_price", 0.0)) or 0.0)
+            if current_price <= 0:
+                current_price = float((pos.get("markPrice") if isinstance(pos, dict) else getattr(pos, "markPrice", 0.0)) or 0.0)
+            if current_price <= 0:
+                current_price = entry_price
+            quantity = abs(amount)
+            leverage = float((pos.get("leverage") if isinstance(pos, dict) else getattr(pos, "leverage", 1.0)) or 1.0)
+            unrealized_pnl = float(
+                (pos.get("unrealized_pnl") if isinstance(pos, dict) else getattr(pos, "unrealized_pnl", 0.0))
+                or (pos.get("unrealizedPnl") if isinstance(pos, dict) else getattr(pos, "unrealizedPnl", 0.0))
+                or 0.0
+            )
+
+            snapshot = SimpleNamespace(
+                symbol=target_symbol,
+                exchange=exchange,
+                side=PositionSide.LONG if side_text == "long" else PositionSide.SHORT,
+                entry_price=entry_price,
+                current_price=current_price,
+                quantity=quantity,
+                value=current_price * quantity,
+                unrealized_pnl=unrealized_pnl,
+                realized_pnl=0.0,
+                leverage=leverage,
+                margin=0.0,
+                strategy=None,
+                account_id="exchange_live",
+                stop_loss=None,
+                take_profit=None,
+                trailing_stop_pct=None,
+                trailing_stop_distance=None,
+                metadata={"source": "exchange_live", "synced_from_exchange": exchange},
+                update_price=lambda price: None,
+            )
+            if side_text == preferred_side_text:
+                preferred_match = snapshot
+                break
+            if fallback_match is None:
+                fallback_match = snapshot
+
+        return preferred_match or fallback_match
+
+    async def _resolve_existing_position(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        account_id: str,
+        preferred_side: Optional[PositionSide] = None,
+    ) -> Optional[Any]:
+        exact = position_manager.get_position(exchange, symbol, account_id=account_id)
+        if exact is not None:
+            return exact
+        return await self._get_exchange_position_snapshot(
+            exchange=exchange,
+            symbol=symbol,
+            preferred_side=preferred_side,
+        )
 
     async def _exchange_has_side_position(
         self,
@@ -1209,7 +1394,15 @@ class ExecutionEngine:
             exchange = account_manager.resolve_exchange(account_id, str(signal.metadata.get("exchange", "binance")))
             leverage = float(signal.metadata.get("leverage", 1.0) or 1.0)
             trade_policy = self._resolve_strategy_trade_policy(signal.strategy_name, exchange)
-            existing_position = position_manager.get_position(exchange, signal.symbol, account_id=account_id)
+            existing_position = await self._resolve_existing_position(
+                exchange=exchange,
+                symbol=signal.symbol,
+                account_id=account_id,
+                preferred_side=position_side,
+            )
+            same_direction = False
+            same_direction_source = ""
+            same_direction_limit_ratio = 0.0
 
             if side == OrderSide.BUY and not bool(trade_policy.get("allow_long", True)):
                 if existing_position and existing_position.side == PositionSide.SHORT:
@@ -1251,7 +1444,29 @@ class ExecutionEngine:
                     or (side == OrderSide.SELL and existing_position.side == PositionSide.SHORT)
                 )
                 if same_direction and not bool(trade_policy.get("allow_pyramiding", False)):
-                    return None
+                    same_direction_source = str((getattr(existing_position, "metadata", {}) or {}).get("source") or "local")
+                    same_direction_limit_ratio = self._safe_ratio(
+                        (signal.metadata or {}).get("same_direction_max_exposure_ratio"),
+                        0.0,
+                    )
+                    if same_direction_limit_ratio <= 0:
+                        reason = f"same_direction_existing_position_no_pyramiding(source={same_direction_source})"
+                        self._signal_diagnostics["last_result"] = {
+                            "status": "existing_position_blocked",
+                            "strategy": signal.strategy_name,
+                            "symbol": signal.symbol,
+                            "exchange": exchange,
+                            "reason": reason,
+                            "position_side": str(getattr(existing_position.side, "value", "") or ""),
+                            "position_source": same_direction_source,
+                        }
+                        self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                        logger.info(
+                            f"Skip strategy signal due to existing same-direction position without pyramiding: "
+                            f"strategy={signal.strategy_name} symbol={signal.symbol} exchange={exchange} "
+                            f"side={side.value} source={same_direction_source}"
+                        )
+                        return None
 
             if bool(trade_policy.get("reverse_on_signal", True)) and existing_position:
                 need_reverse = (
@@ -1279,7 +1494,12 @@ class ExecutionEngine:
                         close_signal,
                         PositionSide.SHORT if side == OrderSide.BUY else PositionSide.LONG,
                     )
-                    existing_position = position_manager.get_position(exchange, signal.symbol, account_id=account_id)
+                    existing_position = await self._resolve_existing_position(
+                        exchange=exchange,
+                        symbol=signal.symbol,
+                        account_id=account_id,
+                        preferred_side=position_side,
+                    )
                     if existing_position and existing_position.side != position_side:
                         return None
 
@@ -1301,6 +1521,61 @@ class ExecutionEngine:
                     f"strategy={signal.strategy_name} equity={account_equity:.4f}"
                 )
             strategy_allocation = strategy_manager.get_strategy_allocation(signal.strategy_name)
+            if same_direction and same_direction_limit_ratio > 0 and existing_position is not None:
+                position_cap_notional = self.get_strategy_position_cap_notional(
+                    account_equity=account_equity,
+                    strategy_allocation=strategy_allocation,
+                )
+                if position_cap_notional <= 0:
+                    reason = "same_direction_exposure_cap_unavailable"
+                    self._signal_diagnostics["last_result"] = {
+                        "status": "existing_position_blocked",
+                        "strategy": signal.strategy_name,
+                        "symbol": signal.symbol,
+                        "exchange": exchange,
+                        "reason": reason,
+                        "position_side": str(getattr(existing_position.side, "value", "") or ""),
+                        "position_source": same_direction_source or "local",
+                    }
+                    self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                    logger.info(
+                        f"Skip strategy signal because same-direction exposure cap is unavailable: "
+                        f"strategy={signal.strategy_name} symbol={signal.symbol} exchange={exchange}"
+                    )
+                    return None
+                existing_notional = self._resolve_position_notional(existing_position, fallback_price=signal.price)
+                exposure_limit_notional = position_cap_notional * same_direction_limit_ratio
+                if existing_notional + 1e-9 >= exposure_limit_notional:
+                    reason = (
+                        "same_direction_exposure_limit_reached"
+                        f"(current={existing_notional:.4f},limit={exposure_limit_notional:.4f},"
+                        f"ratio={same_direction_limit_ratio:.3f},source={same_direction_source or 'local'})"
+                    )
+                    self._signal_diagnostics["last_result"] = {
+                        "status": "existing_position_blocked",
+                        "strategy": signal.strategy_name,
+                        "symbol": signal.symbol,
+                        "exchange": exchange,
+                        "reason": reason,
+                        "position_side": str(getattr(existing_position.side, "value", "") or ""),
+                        "position_source": same_direction_source or "local",
+                        "position_notional": float(existing_notional),
+                        "exposure_limit_notional": float(exposure_limit_notional),
+                        "exposure_limit_ratio": float(same_direction_limit_ratio),
+                    }
+                    self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                    logger.info(
+                        f"Skip strategy signal because same-direction exposure limit is reached: "
+                        f"strategy={signal.strategy_name} symbol={signal.symbol} exchange={exchange} "
+                        f"current={existing_notional:.4f} limit={exposure_limit_notional:.4f} "
+                        f"ratio={same_direction_limit_ratio:.3f}"
+                    )
+                    return None
+                signal.metadata = dict(signal.metadata or {})
+                signal.metadata["same_direction_max_exposure_ratio"] = float(same_direction_limit_ratio)
+                signal.metadata["same_direction_existing_notional"] = float(existing_notional)
+                signal.metadata["same_direction_position_cap_notional"] = float(position_cap_notional)
+                signal.metadata["same_direction_limit_notional"] = float(exposure_limit_notional)
 
             qty = await self._calculate_quantity(
                 signal=signal,
@@ -1914,7 +2189,12 @@ class ExecutionEngine:
         account_id = str(signal.metadata.get("account_id", "main"))
         exchange = account_manager.resolve_exchange(account_id, str(signal.metadata.get("exchange", "binance")))
         trade_policy = self._resolve_strategy_trade_policy(signal.strategy_name, exchange)
-        position = position_manager.get_position(exchange, signal.symbol, account_id=account_id)
+        position = await self._resolve_existing_position(
+            exchange=exchange,
+            symbol=signal.symbol,
+            account_id=account_id,
+            preferred_side=position_side,
+        )
         if not position or position.side != position_side:
             return None
 
@@ -2052,7 +2332,17 @@ class ExecutionEngine:
             account_id=account_id,
         )
         if not closed:
-            return None
+            source = str((getattr(position, "metadata", {}) or {}).get("source") or "").strip().lower()
+            if source != "exchange_live":
+                return None
+            gross_pnl = 0.0
+            entry_price = float(getattr(position, "entry_price", 0.0) or 0.0)
+            if entry_price > 0 and close_qty > 0:
+                if position_side == PositionSide.LONG:
+                    gross_pnl = (close_price - entry_price) * close_qty
+                else:
+                    gross_pnl = (entry_price - close_price) * close_qty
+            closed = SimpleNamespace(realized_pnl=gross_pnl)
 
         risk_manager.record_trade(
             {

@@ -22,6 +22,7 @@ from core.data import data_storage
 from core.exchanges import exchange_manager
 from core.runtime import runtime_state
 from core.strategies import Signal, SignalType
+from core.strategies.strategy_manager import strategy_manager
 from core.trading import execution_engine, position_manager
 from core.utils.openai_responses import (
     build_openai_headers,
@@ -41,6 +42,7 @@ _SUPPORTED_MODES = {"shadow", "execute"}
 _SUPPORTED_ACTIONS = {"buy", "sell", "hold", "close_long", "close_short"}
 _SUPPORTED_SYMBOL_MODES = {"manual", "auto"}
 _FIXED_AUTONOMOUS_AGENT_LEVERAGE = 1.0
+_SAME_DIRECTION_MAX_EXPOSURE_RATIO = 0.5
 _MODEL_FEEDBACK_OUTAGE_ALERT_SEC = 30 * 60
 _MODEL_FEEDBACK_HARD_TIMEOUT_SEC = 30 * 60
 _DEFAULT_AUTO_UNIVERSE = [
@@ -108,12 +110,32 @@ def _coerce_int(value: Any, default: int, *, low: int, high: int) -> int:
     return max(low, min(high, parsed))
 
 
+def _safe_nonnegative_float(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        return float(default)
+    if parsed < 0:
+        return float(default)
+    return parsed
+
+
 def _normalize_symbol_text(value: Any) -> str:
     text = str(value or "").strip().upper()
     if not text:
         return ""
     if "/" not in text and text.endswith("USDT") and len(text) > 4:
         return f"{text[:-4]}/USDT"
+    return text
+
+
+def _canonical_symbol_key(value: Any) -> str:
+    text = _normalize_symbol_text(value)
+    if ":" in text:
+        text = text.split(":", 1)[0].strip()
+    if "_" in text and "/" not in text:
+        left, right = text.split("_", 1)
+        text = f"{left}/{right}"
     return text
 
 
@@ -336,6 +358,75 @@ class AutonomousTradingAgent:
         if name in self._override:
             return self._override[name]
         return getattr(settings, name, fallback)
+
+    async def _resolve_position_payload(self, *, exchange: str, symbol: str, account_id: str) -> Dict[str, Any]:
+        position = position_manager.get_position(exchange, symbol, account_id=account_id)
+        if position is not None:
+            with contextlib.suppress(Exception):
+                return {
+                    "side": str(getattr(position.side, "value", "") or ""),
+                    "quantity": float(getattr(position, "quantity", 0.0) or 0.0),
+                    "entry_price": float(getattr(position, "entry_price", 0.0) or 0.0),
+                    "current_price": float(getattr(position, "current_price", 0.0) or 0.0),
+                    "unrealized_pnl": float(getattr(position, "unrealized_pnl", 0.0) or 0.0),
+                    "leverage": float(getattr(position, "leverage", 1.0) or 1.0),
+                }
+
+        if str(execution_engine.get_trading_mode() or "").strip().lower() != "live":
+            return {}
+
+        connector = exchange_manager.get_exchange(exchange)
+        if connector is None:
+            return {}
+        default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").strip().lower()
+        if default_type not in {"future", "futures", "swap", "contract", "perp", "perpetual"}:
+            return {}
+
+        target_symbol = _canonical_symbol_key(symbol)
+        if not target_symbol:
+            return {}
+
+        try:
+            positions = await asyncio.wait_for(connector.get_positions(), timeout=8.0)
+        except Exception as exc:
+            logger.debug(f"autonomous agent live position lookup failed: {exc}")
+            return {}
+
+        for row in positions or []:
+            row_symbol = str((row.get("symbol") if isinstance(row, dict) else getattr(row, "symbol", "")) or "")
+            if _canonical_symbol_key(row_symbol) != target_symbol:
+                continue
+            amount = float((row.get("amount") if isinstance(row, dict) else getattr(row, "amount", 0.0)) or 0.0)
+            if abs(amount) <= 1e-12:
+                amount = float((row.get("quantity") if isinstance(row, dict) else getattr(row, "quantity", 0.0)) or 0.0)
+            if abs(amount) <= 1e-12:
+                continue
+            side = str((row.get("side") if isinstance(row, dict) else getattr(row, "side", "")) or "").strip().lower()
+            if side not in {"long", "short"}:
+                side = "short" if amount < 0 else "long"
+            if side not in {"long", "short"}:
+                continue
+            entry_price = float((row.get("entry_price") if isinstance(row, dict) else getattr(row, "entry_price", 0.0)) or 0.0)
+            current_price = float((row.get("current_price") if isinstance(row, dict) else getattr(row, "current_price", 0.0)) or 0.0)
+            if current_price <= 0:
+                current_price = float((row.get("markPrice") if isinstance(row, dict) else getattr(row, "markPrice", 0.0)) or 0.0)
+            if current_price <= 0:
+                current_price = entry_price
+            unrealized_pnl = float(
+                (row.get("unrealized_pnl") if isinstance(row, dict) else getattr(row, "unrealized_pnl", 0.0))
+                or (row.get("unrealizedPnl") if isinstance(row, dict) else getattr(row, "unrealizedPnl", 0.0))
+                or 0.0
+            )
+            return {
+                "side": side,
+                "quantity": abs(float(amount)),
+                "entry_price": entry_price,
+                "current_price": current_price,
+                "unrealized_pnl": unrealized_pnl,
+                "leverage": float((row.get("leverage") if isinstance(row, dict) else getattr(row, "leverage", 1.0)) or 1.0),
+                "source": "exchange_live",
+            }
+        return {}
 
     def get_runtime_config(self) -> Dict[str, Any]:
         requested_provider = _normalize_provider(self._get("AI_AUTONOMOUS_AGENT_PROVIDER", "codex"))
@@ -804,6 +895,73 @@ class AutonomousTradingAgent:
         except Exception:
             return 0.0
 
+    async def _annotate_position_payload(
+        self,
+        *,
+        cfg: Dict[str, Any],
+        position_payload: Dict[str, Any],
+        last_price: float,
+    ) -> Dict[str, Any]:
+        payload = dict(position_payload or {})
+        if not payload:
+            return payload
+
+        quantity = _safe_nonnegative_float(payload.get("quantity"), 0.0)
+        mark_price = 0.0
+        for raw_price in (
+            payload.get("current_price"),
+            payload.get("entry_price"),
+            last_price,
+        ):
+            price = _safe_nonnegative_float(raw_price, 0.0)
+            if price > 0:
+                mark_price = price
+                break
+
+        position_notional = quantity * mark_price if quantity > 0 and mark_price > 0 else 0.0
+        position_cap_notional = 0.0
+        account_equity = 0.0
+        try:
+            account_equity = float(
+                await asyncio.wait_for(execution_engine.get_account_equity_snapshot(force=False), timeout=12.0)
+            )
+        except Exception:
+            account_equity = 0.0
+
+        strategy_allocation = 0.0
+        with contextlib.suppress(Exception):
+            strategy_allocation = float(strategy_manager.get_strategy_allocation(cfg.get("strategy_name")) or 0.0)
+
+        if account_equity > 0:
+            with contextlib.suppress(Exception):
+                position_cap_notional = float(
+                    execution_engine.get_strategy_position_cap_notional(
+                        account_equity=account_equity,
+                        strategy_allocation=strategy_allocation,
+                    )
+                    or 0.0
+                )
+
+        exposure_ratio = 0.0
+        remaining_notional = 0.0
+        if position_cap_notional > 0:
+            exposure_ratio = position_notional / position_cap_notional
+            remaining_notional = max(
+                0.0,
+                position_cap_notional * _SAME_DIRECTION_MAX_EXPOSURE_RATIO - position_notional,
+            )
+
+        payload.update(
+            {
+                "position_notional": float(position_notional),
+                "position_cap_notional": float(position_cap_notional),
+                "same_direction_exposure_ratio": float(exposure_ratio),
+                "same_direction_exposure_limit_ratio": float(_SAME_DIRECTION_MAX_EXPOSURE_RATIO),
+                "same_direction_remaining_notional": float(remaining_notional),
+            }
+        )
+        return payload
+
     async def _build_context(self, cfg: Dict[str, Any]) -> Tuple[Dict[str, Any], pd.DataFrame]:
         market_data = await self._load_market_data(cfg)
         last_price = await self._resolve_last_price(cfg, market_data)
@@ -841,17 +999,16 @@ class AutonomousTradingAgent:
         account_id = str(cfg.get("account_id") or "main")
         exchange = str(cfg.get("exchange") or "binance")
         symbol = str(cfg.get("symbol") or "BTC/USDT")
-        position = position_manager.get_position(exchange, symbol, account_id=account_id)
-        position_payload: Dict[str, Any] = {}
-        if position is not None:
-            with contextlib.suppress(Exception):
-                position_payload = {
-                    "side": str(getattr(position.side, "value", "") or ""),
-                    "quantity": float(getattr(position, "quantity", 0.0) or 0.0),
-                    "entry_price": float(getattr(position, "entry_price", 0.0) or 0.0),
-                    "current_price": float(getattr(position, "current_price", 0.0) or 0.0),
-                    "unrealized_pnl": float(getattr(position, "unrealized_pnl", 0.0) or 0.0),
-                }
+        position_payload = await self._resolve_position_payload(
+            exchange=exchange,
+            symbol=symbol,
+            account_id=account_id,
+        )
+        position_payload = await self._annotate_position_payload(
+            cfg=cfg,
+            position_payload=position_payload,
+            last_price=float(last_price or 0.0),
+        )
 
         research_context = resolve_runtime_research_context(
             exchange=exchange,
@@ -898,6 +1055,7 @@ class AutonomousTradingAgent:
                 "Never fabricate certainty.",
                 "Use tighter risk when volatility is high.",
                 "Leverage is fixed at 1x. Always return leverage=1.0.",
+                "Same-side add-ons are allowed only while same_direction_exposure_ratio is below same_direction_exposure_limit_ratio.",
                 "If research_context is available, treat its selected_candidate as the current research champion hypothesis unless real-time risk clearly invalidates it.",
             ],
             "runtime_constraints": {
@@ -937,12 +1095,49 @@ class AutonomousTradingAgent:
             reason = f"below_min_confidence({confidence:.3f}<{min_conf:.3f})"
 
         position = context_payload.get("position") if isinstance(context_payload, dict) else {}
+        current_side = str((position or {}).get("side") or "").lower()
+        same_direction_limit_ratio = _coerce_float(
+            (position or {}).get("same_direction_exposure_limit_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO),
+            _SAME_DIRECTION_MAX_EXPOSURE_RATIO,
+            low=0.0,
+            high=1.0,
+        )
+        same_direction_exposure_ratio = _coerce_float(
+            (position or {}).get("same_direction_exposure_ratio", 0.0),
+            0.0,
+            low=0.0,
+            high=1000000.0,
+        )
+        position_cap_notional = _safe_nonnegative_float((position or {}).get("position_cap_notional"), 0.0)
+        allow_same_direction_add = bool(
+            position_cap_notional > 0
+            and same_direction_limit_ratio > 0
+            and same_direction_exposure_ratio + 1e-9 < same_direction_limit_ratio
+        )
         if action == "close_long" and str((position or {}).get("side") or "").lower() != "long":
             action = "hold"
             reason = "no_long_position"
         if action == "close_short" and str((position or {}).get("side") or "").lower() != "short":
             action = "hold"
             reason = "no_short_position"
+        if action == "buy" and current_side == "long":
+            if not allow_same_direction_add:
+                action = "hold"
+                reason = (
+                    f"existing_long_position_limit_reached({same_direction_exposure_ratio:.3f}>="
+                    f"{same_direction_limit_ratio:.3f})"
+                    if position_cap_notional > 0 and same_direction_limit_ratio > 0
+                    else "existing_long_position"
+                )
+        if action == "sell" and current_side == "short":
+            if not allow_same_direction_add:
+                action = "hold"
+                reason = (
+                    f"existing_short_position_limit_reached({same_direction_exposure_ratio:.3f}>="
+                    f"{same_direction_limit_ratio:.3f})"
+                    if position_cap_notional > 0 and same_direction_limit_ratio > 0
+                    else "existing_short_position"
+                )
 
         return {
             "action": action,
@@ -1003,6 +1198,37 @@ class AutonomousTradingAgent:
             "agent_confidence": float(decision.get("confidence") or 0.0),
             "agent_reason": str(decision.get("reason") or ""),
         }
+        position = context_payload.get("position") if isinstance(context_payload, dict) else {}
+        current_side = str((position or {}).get("side") or "").lower()
+        same_direction_add = bool(
+            (action == "buy" and current_side == "long")
+            or (action == "sell" and current_side == "short")
+        )
+        if same_direction_add:
+            metadata.update(
+                {
+                    "same_direction_max_exposure_ratio": _safe_nonnegative_float(
+                        (position or {}).get("same_direction_exposure_limit_ratio"),
+                        _SAME_DIRECTION_MAX_EXPOSURE_RATIO,
+                    ),
+                    "same_direction_existing_notional": _safe_nonnegative_float(
+                        (position or {}).get("position_notional"),
+                        0.0,
+                    ),
+                    "same_direction_exposure_ratio": _safe_nonnegative_float(
+                        (position or {}).get("same_direction_exposure_ratio"),
+                        0.0,
+                    ),
+                    "same_direction_position_cap_notional": _safe_nonnegative_float(
+                        (position or {}).get("position_cap_notional"),
+                        0.0,
+                    ),
+                    "same_direction_remaining_notional": _safe_nonnegative_float(
+                        (position or {}).get("same_direction_remaining_notional"),
+                        0.0,
+                    ),
+                }
+            )
         research_context = context_payload.get("research_context") if isinstance(context_payload, dict) else {}
         if isinstance(research_context, dict) and research_context.get("available"):
             selected_candidate = dict(research_context.get("selected_candidate") or {})

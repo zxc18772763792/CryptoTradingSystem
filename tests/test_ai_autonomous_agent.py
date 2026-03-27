@@ -174,6 +174,153 @@ def test_autonomous_agent_run_once_blocks_live_when_not_allowed(monkeypatch, tmp
     assert submit_mock.await_count == 0
 
 
+def test_autonomous_agent_same_side_signal_allows_add_when_below_half_cap(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "SHORT", "confidence": 0.78}
+
+    fake_connector = SimpleNamespace(
+        config=SimpleNamespace(default_type="future"),
+        get_positions=AsyncMock(
+            return_value=[
+                {
+                    "symbol": "BTCUSDT",
+                    "side": "short",
+                    "amount": -0.3,
+                    "entry_price": 100.0,
+                    "current_price": 100.0,
+                    "unrealizedPnl": 0.03,
+                    "leverage": 2.0,
+                }
+            ]
+        ),
+    )
+
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.exchange_manager, "get_exchange", lambda exchange: fake_connector)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "live")
+    monkeypatch.setattr(module.execution_engine, "get_account_equity_snapshot", AsyncMock(return_value=1000.0))
+    monkeypatch.setattr(module.execution_engine, "get_strategy_position_cap_notional", lambda **kwargs: 100.0)
+    monkeypatch.setattr(module.strategy_manager, "get_strategy_allocation", lambda name: 0.0)
+    submit_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        AsyncMock(
+            return_value={
+                "action": "sell",
+                "confidence": 0.84,
+                "strength": 0.76,
+                "leverage": 1,
+                "reason": "stay_short",
+            }
+        ),
+    )
+
+    asyncio.run(
+        agent.update_runtime_config(
+            enabled=True,
+            mode="execute",
+            symbol="BTC/USDT",
+            symbol_mode="manual",
+            allow_live=True,
+            cooldown_sec=0,
+        )
+    )
+    context_payload, _ = asyncio.run(agent._build_context(agent.get_runtime_config()))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert result["decision"]["action"] == "sell"
+    assert context_payload["position"]["side"] == "short"
+    assert context_payload["position"]["leverage"] == 2.0
+    assert context_payload["position"]["position_notional"] == 30.0
+    assert context_payload["position"]["position_cap_notional"] == 100.0
+    assert context_payload["position"]["same_direction_exposure_ratio"] == 0.3
+    assert result["execution"]["submitted"] is True
+    assert submit_mock.await_count == 1
+    signal = submit_mock.await_args.args[0]
+    assert signal.metadata["same_direction_max_exposure_ratio"] == 0.5
+    assert signal.metadata["same_direction_existing_notional"] == 30.0
+
+
+def test_autonomous_agent_same_side_signal_holds_when_exposure_reaches_half_cap(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "SHORT", "confidence": 0.78}
+
+    fake_connector = SimpleNamespace(
+        config=SimpleNamespace(default_type="future"),
+        get_positions=AsyncMock(
+            return_value=[
+                {
+                    "symbol": "BTCUSDT",
+                    "side": "short",
+                    "amount": -0.6,
+                    "entry_price": 100.0,
+                    "current_price": 100.0,
+                    "unrealizedPnl": 0.06,
+                    "leverage": 2.0,
+                }
+            ]
+        ),
+    )
+
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.exchange_manager, "get_exchange", lambda exchange: fake_connector)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "live")
+    monkeypatch.setattr(module.execution_engine, "get_account_equity_snapshot", AsyncMock(return_value=1000.0))
+    monkeypatch.setattr(module.execution_engine, "get_strategy_position_cap_notional", lambda **kwargs: 100.0)
+    monkeypatch.setattr(module.strategy_manager, "get_strategy_allocation", lambda name: 0.0)
+    submit_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        AsyncMock(
+            return_value={
+                "action": "sell",
+                "confidence": 0.84,
+                "strength": 0.76,
+                "leverage": 1,
+                "reason": "stay_short",
+            }
+        ),
+    )
+
+    asyncio.run(
+        agent.update_runtime_config(
+            enabled=True,
+            mode="execute",
+            symbol="BTC/USDT",
+            symbol_mode="manual",
+            allow_live=True,
+            cooldown_sec=0,
+        )
+    )
+    context_payload, _ = asyncio.run(agent._build_context(agent.get_runtime_config()))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert result["decision"]["action"] == "hold"
+    assert result["decision"]["reason"].startswith("existing_short_position_limit_reached")
+    assert context_payload["position"]["position_notional"] == 60.0
+    assert context_payload["position"]["same_direction_exposure_ratio"] == 0.6
+    assert result["execution"]["submitted"] is False
+    assert submit_mock.await_count == 0
+
+
 def test_agent_runtime_config_leverage_is_fixed_to_one(tmp_path):
     from core.ai.autonomous_agent import AutonomousTradingAgent
 
