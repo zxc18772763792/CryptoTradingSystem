@@ -317,7 +317,7 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "category": "统计套利",
         "risk": "high",
         "usage": "配对价差回归",
-        "defaults": {"lookback_period": 48, "entry_z_score": 2.0, "exit_z_score": 0.6, "hedge_ratio_method": "ols", "min_hedge_ratio": 0.1, "max_hedge_ratio": 5.0, "stop_loss_pct": 0.04, "pair_symbol": "ETH/USDT"},
+        "defaults": {"lookback_period": 48, "entry_z_score": 2.0, "exit_z_score": 0.6, "hedge_ratio_method": "ols", "allow_negative_hedge_ratio": True, "min_hedge_ratio": -5.0, "max_hedge_ratio": 5.0, "stop_loss_pct": 0.04, "pair_symbol": "ETH/USDT"},
         "timeframe": "1h",
         "symbols": ["BTC/USDT", "ETH/USDT"],
         "backtest": {"supported": True, "description": "配对交易策略（近似单腿回测）", "optimization_grid": {"lookback_period": [14, 20, 30, 40], "entry_z_score": [1.5, 2.0, 2.5], "exit_z_score": [0.3, 0.5, 0.8]}},

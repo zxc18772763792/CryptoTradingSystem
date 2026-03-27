@@ -79,6 +79,17 @@ _ONCHAIN_OVERVIEW_CACHE_TTL_SEC = 180.0
 _ONCHAIN_OVERVIEW_CACHE_STALE_SEC = 1800.0
 _FACTOR_CACHE_TTL_SEC = 300.0
 _FACTOR_CACHE_STALE_SEC = 1800.0
+_PAIR_SCAN_ALLOWED_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
+_PAIR_SCAN_DEFAULT_LOOKBACK = {
+    "1m": 1440,
+    "5m": 1440,
+    "15m": 960,
+    "1h": 720,
+    "4h": 540,
+    "1d": 365,
+}
+_PAIR_SCAN_MAX_SYMBOLS = 24
+_PAIR_SCAN_MAX_ROWS = 20
 
 
 class KlineRequest(BaseModel):
@@ -3017,6 +3028,331 @@ async def get_research_symbols(exchange: str = "binance"):
     data["source"] = "research_universe"
     data["default_count"] = min(30, len(data.get("symbols") or []))
     return data
+
+
+def _pair_scan_default_lookback(timeframe: str) -> int:
+    tf = str(timeframe or "1h").strip().lower() or "1h"
+    return int(_PAIR_SCAN_DEFAULT_LOOKBACK.get(tf, 720))
+
+
+def _pair_scan_min_overlap(lookback: int) -> int:
+    return max(80, min(int(max(lookback, 1) // 2), 240))
+
+
+def _pair_scan_score_range(value: float, low: float, high: float) -> float:
+    if not math.isfinite(float(value)):
+        return 0.0
+    if high <= low:
+        return 0.0
+    clipped = max(low, min(float(value), high))
+    return max(0.0, min((clipped - low) / (high - low), 1.0))
+
+
+def _pair_scan_half_life(spread: pd.Series) -> Optional[float]:
+    if spread is None or len(spread) < 20:
+        return None
+    series = pd.to_numeric(spread, errors="coerce").dropna()
+    if len(series) < 20:
+        return None
+    lagged = series.shift(1).dropna()
+    delta = series.diff().dropna()
+    aligned = pd.concat([lagged.rename("lagged"), delta.rename("delta")], axis=1).dropna()
+    if len(aligned) < 20:
+        return None
+    x = (aligned["lagged"] - aligned["lagged"].mean()).values.reshape(-1, 1)
+    y = aligned["delta"].values
+    if len(x) < 20:
+        return None
+    try:
+        coef, *_ = np.linalg.lstsq(x, y, rcond=None)
+        beta = float(coef[0]) if len(coef) else 0.0
+    except Exception:
+        return None
+    if not math.isfinite(beta) or beta >= 0:
+        return None
+    half_life = math.log(2.0) / abs(beta)
+    if not math.isfinite(half_life) or half_life <= 0:
+        return None
+    return float(half_life)
+
+
+def _pair_scan_signal_bias(current_z: float, entry_z: float = 2.0, exit_z: float = 0.6) -> str:
+    if not math.isfinite(current_z):
+        return "unknown"
+    if current_z <= -abs(entry_z):
+        return "long_spread_bias"
+    if current_z >= abs(entry_z):
+        return "short_spread_bias"
+    if abs(current_z) <= abs(exit_z):
+        return "balanced"
+    return "watch"
+
+
+def _pair_scan_relationship(level_corr: float, return_corr: float) -> str:
+    corr = return_corr if math.isfinite(return_corr) else level_corr
+    if not math.isfinite(corr):
+        return "unknown"
+    return "negative_corr" if corr < 0 else "positive_corr"
+
+
+def _pair_scan_pair_metrics(
+    symbol1: str,
+    symbol2: str,
+    close1: pd.Series,
+    close2: pd.Series,
+    lookback: int,
+) -> Optional[Dict[str, Any]]:
+    min_overlap = _pair_scan_min_overlap(lookback)
+    merged = pd.concat(
+        [
+            pd.to_numeric(close1, errors="coerce").rename("close1"),
+            pd.to_numeric(close2, errors="coerce").rename("close2"),
+        ],
+        axis=1,
+    ).dropna()
+    if len(merged) < min_overlap:
+        return None
+
+    merged = merged[~merged.index.duplicated(keep="last")].sort_index().tail(max(lookback, min_overlap))
+    if len(merged) < min_overlap:
+        return None
+
+    price1 = merged["close1"].astype(float)
+    price2 = merged["close2"].astype(float)
+    if (price1 <= 0).any() or (price2 <= 0).any():
+        return None
+
+    log1 = np.log(price1)
+    log2 = np.log(price2)
+    level_corr = float(log1.corr(log2)) if len(log1) >= 3 else float("nan")
+
+    returns = pd.concat(
+        [log1.diff().rename("ret1"), log2.diff().rename("ret2")],
+        axis=1,
+    ).dropna()
+    if len(returns) < max(20, min_overlap // 4):
+        return None
+    return_corr = float(returns["ret1"].corr(returns["ret2"])) if len(returns) >= 3 else float("nan")
+    if not math.isfinite(level_corr) or not math.isfinite(return_corr):
+        return None
+    if abs(level_corr) < 0.55 or abs(return_corr) < 0.15:
+        return None
+    if level_corr * return_corr < 0:
+        return None
+
+    try:
+        centered_x = (price2 - float(price2.mean())).values.reshape(-1, 1)
+        centered_y = (price1 - float(price1.mean())).values
+        coef, *_ = np.linalg.lstsq(centered_x, centered_y, rcond=None)
+        hedge_ratio = float(coef[0]) if len(coef) else 1.0
+    except Exception:
+        hedge_ratio = 1.0
+    if not math.isfinite(hedge_ratio) or abs(hedge_ratio) < 0.05:
+        return None
+    hedge_ratio = max(-5.0, min(hedge_ratio, 5.0))
+
+    spread = price1 - hedge_ratio * price2
+    spread = spread.dropna()
+    if len(spread) < min_overlap:
+        return None
+    spread_std = float(spread.std(ddof=0))
+    if not math.isfinite(spread_std) or spread_std <= 0:
+        return None
+
+    z_window = max(48, min(max(60, int(lookback // 6)), 180, len(spread) - 1))
+    if z_window < 30:
+        return None
+    spread_mean = spread.rolling(z_window, min_periods=z_window).mean()
+    spread_sigma = spread.rolling(z_window, min_periods=z_window).std().replace(0, np.nan)
+    z_score = ((spread - spread_mean) / spread_sigma).dropna()
+    if len(z_score) < 5:
+        return None
+
+    current_z = float(z_score.iloc[-1])
+    current_abs_z = abs(current_z)
+    half_life = _pair_scan_half_life(spread.tail(max(z_window, min_overlap)))
+    zero_crossings = int(((z_score.shift(1) * z_score) < 0).sum())
+    crossing_rate = float(zero_crossings / max(len(z_score), 1))
+    coverage_ratio = min(float(len(merged)) / float(max(lookback, 1)), 1.0)
+
+    corr_score = 0.65 * _pair_scan_score_range(abs(level_corr), 0.55, 0.95) + 0.35 * _pair_scan_score_range(abs(return_corr), 0.15, 0.75)
+    if half_life is None:
+        half_life_score = 0.0
+    else:
+        ideal_cap = max(12.0, min(float(z_window) / 3.0, 96.0))
+        if half_life <= 2.0:
+            half_life_score = max(0.35, half_life / 2.0)
+        elif half_life <= ideal_cap:
+            half_life_score = 1.0
+        else:
+            half_life_score = max(0.0, 1.0 - ((half_life - ideal_cap) / max(ideal_cap * 2.0, 1.0)))
+    crossing_score = _pair_scan_score_range(crossing_rate, 0.01, 0.08)
+    opportunity_score = _pair_scan_score_range(current_abs_z, 0.35, 2.4)
+    hedge_score = max(0.0, 1.0 - min(abs(math.log(max(abs(hedge_ratio), 1e-9))), math.log(5.0)) / math.log(5.0))
+    relationship = _pair_scan_relationship(level_corr, return_corr)
+    total_score = 100.0 * (
+        0.38 * corr_score
+        + 0.22 * half_life_score
+        + 0.15 * crossing_score
+        + 0.15 * opportunity_score
+        + 0.10 * max(coverage_ratio, hedge_score * 0.7)
+    )
+
+    return {
+        "primary_symbol": symbol1,
+        "pair_symbol": symbol2,
+        "score": round(float(total_score), 2),
+        "level_corr": round(float(level_corr), 4),
+        "return_corr": round(float(return_corr), 4),
+        "hedge_ratio": round(float(hedge_ratio), 4),
+        "correlation_regime": relationship,
+        "current_z_score": round(float(current_z), 4),
+        "current_abs_z": round(float(current_abs_z), 4),
+        "half_life_bars": round(float(half_life), 2) if half_life is not None else None,
+        "crossing_rate": round(float(crossing_rate), 4),
+        "overlap_bars": int(len(merged)),
+        "lookback_period": int(lookback),
+        "signal_window_bars": int(z_window),
+        "signal_bias": _pair_scan_signal_bias(current_z),
+    }
+
+
+async def _load_pair_scan_series(
+    exchange: str,
+    timeframe: str,
+    symbols: List[str],
+    lookback: int,
+) -> Dict[str, pd.Series]:
+    tf_seconds = max(1, _timeframe_seconds(timeframe))
+    window_seconds = max(3600, min(int(lookback * tf_seconds * 2.5), 366 * 24 * 3600))
+    min_required = _pair_scan_min_overlap(lookback)
+
+    async def _load_one(symbol: str) -> tuple[str, Optional[pd.Series]]:
+        latest_end = _latest_partition_end_time(exchange=exchange, symbol=symbol, timeframe=timeframe)
+        query_start = (latest_end - timedelta(seconds=window_seconds)) if latest_end else None
+        frame = await _load_symbol_df(
+            exchange=exchange,
+            symbol=symbol,
+            timeframe=timeframe,
+            start_time=query_start,
+            end_time=latest_end,
+        )
+        if frame.empty and timeframe not in _SUB_MINUTE_TIMEFRAMES:
+            frame = await _load_symbol_df(exchange=exchange, symbol=symbol, timeframe=timeframe, end_time=latest_end)
+        if frame.empty:
+            return symbol, None
+        close = pd.to_numeric(frame.get("close"), errors="coerce").dropna()
+        if close.empty:
+            return symbol, None
+        close = close[~close.index.duplicated(keep="last")].sort_index().tail(max(lookback * 2, min_required))
+        if len(close) < min_required:
+            return symbol, None
+        return symbol, close
+
+    results = await asyncio.gather(*[_load_one(symbol) for symbol in symbols], return_exceptions=True)
+    loaded: Dict[str, pd.Series] = {}
+    for item in results:
+        if isinstance(item, Exception):
+            continue
+        symbol, series = item
+        if series is None or series.empty:
+            continue
+        loaded[symbol] = series
+    return loaded
+
+
+@router.get("/research/pairs-ranking")
+async def get_research_pairs_ranking(
+    exchange: str = "binance",
+    timeframe: str = "1h",
+    limit: int = 10,
+    symbols: str = "",
+):
+    exchange_name = str(exchange or "binance").strip().lower() or "binance"
+    tf = str(timeframe or "1h").strip().lower() or "1h"
+    if tf not in _PAIR_SCAN_ALLOWED_TIMEFRAMES:
+        raise HTTPException(status_code=400, detail=f"Unsupported timeframe: {timeframe}")
+
+    row_limit = max(1, min(int(limit or 10), _PAIR_SCAN_MAX_ROWS))
+    lookback = _pair_scan_default_lookback(tf)
+
+    requested_symbols = [
+        normalize_symbol(item)
+        for item in str(symbols or "").split(",")
+        if normalize_symbol(item)
+    ]
+    if not requested_symbols:
+        research_payload = await get_research_symbols(exchange=exchange_name)
+        requested_symbols = list(research_payload.get("symbols") or [])[:30]
+
+    candidate_symbols = _expand_symbols_with_local(
+        exchange=exchange_name,
+        timeframe=tf,
+        requested=requested_symbols,
+        min_symbols=min(12, max(4, len(requested_symbols))),
+        max_symbols=_PAIR_SCAN_MAX_SYMBOLS,
+    )
+    candidate_symbols = candidate_symbols[:_PAIR_SCAN_MAX_SYMBOLS]
+    loaded_series = await _load_pair_scan_series(
+        exchange=exchange_name,
+        timeframe=tf,
+        symbols=candidate_symbols,
+        lookback=lookback,
+    )
+
+    ranked_pairs: List[Dict[str, Any]] = []
+    symbol_list = list(loaded_series.keys())
+    for idx, symbol1 in enumerate(symbol_list):
+        for symbol2 in symbol_list[idx + 1 :]:
+            metrics = _pair_scan_pair_metrics(
+                symbol1=symbol1,
+                symbol2=symbol2,
+                close1=loaded_series[symbol1],
+                close2=loaded_series[symbol2],
+                lookback=lookback,
+            )
+            if metrics:
+                ranked_pairs.append(metrics)
+
+    ranked_pairs.sort(
+        key=lambda row: (
+            float(row.get("score") or 0.0),
+            float(row.get("current_abs_z") or 0.0),
+            float(row.get("level_corr") or 0.0),
+        ),
+        reverse=True,
+    )
+    top_rows = ranked_pairs[:row_limit]
+
+    top_symbols: List[str] = []
+    seen_symbols = set()
+    for row in top_rows:
+        for key in ("primary_symbol", "pair_symbol"):
+            symbol = str(row.get(key) or "").strip()
+            if not symbol or symbol in seen_symbols:
+                continue
+            seen_symbols.add(symbol)
+            top_symbols.append(symbol)
+
+    warnings: List[str] = []
+    if len(loaded_series) < 4:
+        warnings.append("可用本地K线币种不足 4 个，榜单可能不稳定")
+    if not ranked_pairs:
+        warnings.append("未找到满足相关性与价差稳定条件的币对，请先补足该周期本地K线")
+
+    return {
+        "exchange": exchange_name,
+        "timeframe": tf,
+        "lookback_period": int(lookback),
+        "requested_symbol_count": int(len(requested_symbols)),
+        "candidate_symbol_count": int(len(candidate_symbols)),
+        "loaded_symbol_count": int(len(loaded_series)),
+        "eligible_pair_count": int(len(ranked_pairs)),
+        "top_symbols": top_symbols,
+        "pairs": top_rows,
+        "warnings": warnings,
+        "generated_at": _utc_iso(),
+    }
 
 
 @router.get("/collector/tasks")

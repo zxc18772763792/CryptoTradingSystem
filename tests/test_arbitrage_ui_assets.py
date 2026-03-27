@@ -21,6 +21,10 @@ def test_arbitrage_page_assets_and_hooks_exist():
     assert 'id="arbitrage-universe"' in template
     assert 'id="btn-arbitrage-register"' in template
     assert 'id="btn-arbitrage-backtest"' in template
+    assert 'id="btn-arbitrage-scan-pairs"' in template
+    assert 'id="btn-arbitrage-apply-top-pair"' in template
+    assert 'id="arbitrage-pair-scan-summary"' in template
+    assert 'id="arbitrage-pair-ranking-body"' in template
     assert 'id="arbitrage-payload-preview"' in template
     assert 'id="backtest-custom-params"' in template
     assert 'id="backtest-custom-params-panel"' in template
@@ -34,9 +38,14 @@ def test_arbitrage_page_assets_and_hooks_exist():
     assert "function buildArbitrageStrategySpec" in app_js
     assert "async function registerArbitrageStrategy" in app_js
     assert "async function jumpToBacktestFromArbitrage" in app_js
+    assert "async function scanArbitragePairsRanking" in app_js
+    assert "async function applyArbitragePairCandidate" in app_js
+    assert "/data/research/pairs-ranking" in app_js
     assert "window.openBacktestWithSpec=openBacktestWithSpec" in app_js
     assert "window.registerArbitrageStrategy=registerArbitrageStrategy" in app_js
     assert "window.jumpToBacktestFromArbitrage=jumpToBacktestFromArbitrage" in app_js
+    assert "window.scanArbitragePairsRanking=scanArbitragePairsRanking" in app_js
+    assert "window.applyArbitragePairCandidate=applyArbitragePairCandidate" in app_js
     assert "'run_custom':'run'" in app_js
     assert "params_json=" in app_js
 
@@ -44,4 +53,7 @@ def test_arbitrage_page_assets_and_hooks_exist():
     assert ".arbitrage-plan-steps" in style_css
     assert ".arbitrage-strategy-grid" in style_css
     assert '.arbitrage-card[data-selected="true"]' in style_css
+    assert ".arbitrage-pair-scanner-card" in style_css
+    assert ".arbitrage-pair-table" in style_css
+    assert ".arbitrage-pair-empty" in style_css
     assert ".backtest-custom-params" in style_css

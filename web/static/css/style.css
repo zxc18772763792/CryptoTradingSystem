@@ -6715,6 +6715,57 @@ input[type="radio"] {
     gap: 12px;
 }
 
+.arbitrage-pair-scanner-card {
+    background:
+        radial-gradient(circle at top left, rgba(77, 163, 255, 0.10), transparent 32%),
+        linear-gradient(180deg, rgba(17, 28, 43, 0.96), rgba(12, 20, 32, 0.96));
+}
+
+.arbitrage-pair-summary {
+    margin-bottom: 14px;
+}
+
+.arbitrage-pair-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.arbitrage-pair-table th,
+.arbitrage-pair-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    text-align: left;
+    vertical-align: middle;
+}
+
+.arbitrage-pair-table th {
+    color: #d7e4ff;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.arbitrage-pair-table td {
+    color: #b9c8dc;
+}
+
+.arbitrage-pair-name {
+    font-weight: 700;
+    color: #eff6ff;
+}
+
+.arbitrage-pair-sub {
+    margin-top: 3px;
+    font-size: 11px;
+    color: #7e92b2;
+}
+
+.arbitrage-pair-empty {
+    text-align: center !important;
+    color: #7e92b2 !important;
+    padding: 28px 12px !important;
+}
+
 .backtest-custom-params {
     margin-top: 12px;
     border: 1px solid rgba(78, 115, 150, 0.22);
@@ -6759,5 +6810,9 @@ input[type="radio"] {
 
     .arbitrage-top-grid {
         grid-template-columns: 1fr;
+    }
+
+    .arbitrage-pair-table {
+        min-width: 780px;
     }
 }

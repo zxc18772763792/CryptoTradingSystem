@@ -2128,6 +2128,47 @@
                             </div>
                         </div>
 
+                        <div class="card arbitrage-pair-scanner-card">
+                            <div class="research-lab-header">
+                                <div>
+                                    <h3>配对币种扫描榜</h3>
+                                    <div class="research-control-notes">
+                                        只需确认当前交易所与周期，点击“一键筛选前十”即可从本地K线中筛出更适合做配对交易的候选组合。当前支持正相关与负相关 pair；榜单用于挑选组合，不直接替代策略真实入场信号。
+                                    </div>
+                                </div>
+                                <div class="inline-actions">
+                                    <button class="btn btn-primary" id="btn-arbitrage-scan-pairs">一键筛选前十</button>
+                                    <button class="btn btn-primary btn-sm" id="btn-arbitrage-apply-top-pair">回填榜首组合</button>
+                                </div>
+                            </div>
+                            <div id="arbitrage-pair-scan-summary" class="list arbitrage-pair-summary">
+                                <div class="list-item"><span>状态</span><span>等待筛选：确认周期后点击“一键筛选前十”</span></div>
+                                <div class="list-item"><span>范围</span><span>默认扫描研究币池与本地可用K线</span></div>
+                                <div class="list-item"><span>提示</span><span>实际开仓仍以 `PairsTradingStrategy` 的 z-score 穿越规则为准</span></div>
+                            </div>
+                            <div class="table-container">
+                                <table class="arbitrage-pair-table">
+                                    <thead>
+                                        <tr>
+                                            <th>排名</th>
+                                            <th>币对</th>
+                                            <th>总分</th>
+                                            <th>相关性</th>
+                                            <th>Z-Score</th>
+                                            <th>半衰期</th>
+                                            <th>状态</th>
+                                            <th>操作</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="arbitrage-pair-ranking-body">
+                                        <tr>
+                                            <td colspan="8" class="arbitrage-pair-empty">等待筛选结果...</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
                         <div class="card">
                             <h3>套利候选策略</h3>
                             <div id="arbitrage-strategy-cards" class="arbitrage-strategy-grid">

@@ -1,7 +1,7 @@
 ﻿const API_BASE='/api';
 const state={positions:[],orders:[],strategies:[],availableStrategyTypes:[],strategyLibraryRows:[],strategyCatalogRows:[],summary:{running:[],recent_signals:[],runtime:{}},notifyRules:{},wsConnected:false,modeToken:'',bootCompleted:false,bootFailed:false,strategyHealth:null,lastHealthAlertKey:'',selectedStrategyName:'',closingPositions:{},lastSummarySnapshot:null};
 const researchState={lastFactorLibrary:null,lastMultiAsset:null,lastSentiment:null,lastAnalytics:null,lastOnchain:null,lastFama:null,lastOverview:null,pendingTimers:{},lastSentimentReqId:0};
-const arbitrageState={catalog:[],selectedStrategy:'PairsTradingStrategy',initialized:false,lastSpec:null};
+const arbitrageState={catalog:[],selectedStrategy:'PairsTradingStrategy',initialized:false,lastSpec:null,pairRanking:null,pairRankingKey:'',pairRankingNote:'等待筛选：确认周期后点击“一键筛选前十”'};
 const backtestUIState={lastOptimize:null,lastCompare:null,lastRenderedBacktest:null,defaultCompareStrategies:[]};
 const dataHealthState={last:null};
 const dataAnalyticsHealthState={last:null};
@@ -533,12 +533,18 @@ async function loadResearchTabData(){
 async function loadArbitrageTabData(force=false){
   await ensureStrategyCatalog(force);
   await loadArbitrageSymbolOptions(getArbitrageExchange());
+  if(arbitrageState.pairRankingKey&&arbitrageState.pairRankingKey!==getArbitragePairRankingKey()){
+    resetArbitragePairRanking('周期或交易所已变化，请重新点击“一键筛选前十”');
+  }else{
+    renderArbitragePairRanking();
+  }
   if(!arbitrageState.initialized){
     arbitrageState.initialized=true;
     await applyArbitrageTemplate(getArbitrageSelectedStrategy()||'PairsTradingStrategy');
     return;
   }
   renderArbitragePanel();
+  renderArbitragePairRanking();
 }
 async function loadBacktestTabData(){
   loadDataSymbolOptions('binance',['backtest-symbol']);
@@ -3594,6 +3600,138 @@ arbitrageState.catalog=rows;
 return rows;
 }
 function getArbitrageOutputEl(){return document.getElementById('arbitrage-run-output');}
+function getArbitragePairRankingKey(){return `${getArbitrageExchange()}|${getArbitrageTimeframe()}`;}
+function mapArbitragePairBias(bias){
+const key=String(bias||'').trim();
+return({
+  long_spread_bias:'主腿偏弱',
+  short_spread_bias:'主腿偏强',
+  balanced:'接近平衡',
+  watch:'观察中',
+  unknown:'未知',
+}[key]||'观察中');
+}
+function mapArbitragePairRelationship(regime){
+const key=String(regime||'').trim();
+return({
+  positive_corr:'正相关',
+  negative_corr:'负相关',
+  unknown:'未知',
+}[key]||'未知');
+}
+function resetArbitragePairRanking(note='等待筛选：确认周期后点击“一键筛选前十”'){
+arbitrageState.pairRanking=null;
+arbitrageState.pairRankingKey='';
+arbitrageState.pairRankingNote=String(note||'等待筛选：确认周期后点击“一键筛选前十”').trim()||'等待筛选：确认周期后点击“一键筛选前十”';
+renderArbitragePairRanking();
+}
+function renderArbitragePairRanking(){
+const summaryEl=document.getElementById('arbitrage-pair-scan-summary');
+const bodyEl=document.getElementById('arbitrage-pair-ranking-body');
+const applyTopBtn=document.getElementById('btn-arbitrage-apply-top-pair');
+const result=arbitrageState.pairRanking;
+if(applyTopBtn)applyTopBtn.disabled=!(Array.isArray(result?.pairs)&&result.pairs.length);
+if(!summaryEl||!bodyEl)return;
+if(!result||!Array.isArray(result.pairs)||!result.pairs.length){
+  const note=String(arbitrageState.pairRankingNote||'等待筛选：确认周期后点击“一键筛选前十”').trim()||'等待筛选：确认周期后点击“一键筛选前十”';
+  summaryEl.innerHTML=[
+    `<div class="list-item"><span>状态</span><span>${esc(note)}</span></div>`,
+    `<div class="list-item"><span>扫描范围</span><span>交易所 ${esc(getArbitrageExchange())} / 周期 ${esc(getArbitrageTimeframe())}</span></div>`,
+    '<div class="list-item"><span>提示</span><span>榜单用于挑选配对组合，真实开仓仍由 PairsTradingStrategy 的 z-score 穿越触发。</span></div>',
+  ].join('');
+  bodyEl.innerHTML='<tr><td colspan="8" class="arbitrage-pair-empty">等待筛选结果...</td></tr>';
+  return;
+}
+const warnings=Array.isArray(result?.warnings)?result.warnings.filter(Boolean):[];
+const topRow=result.pairs[0]||null;
+  summaryEl.innerHTML=[
+    `<div class="list-item"><span>扫描窗口</span><span>${esc(result.exchange||getArbitrageExchange())} / ${esc(result.timeframe||getArbitrageTimeframe())} / lookback ${Number(result.lookback_period||0)}</span></div>`,
+    `<div class="list-item"><span>覆盖范围</span><span>候选 ${Number(result.candidate_symbol_count||0)} 个 | 成功加载 ${Number(result.loaded_symbol_count||0)} 个 | 可配对 ${Number(result.eligible_pair_count||0)} 组</span></div>`,
+    `<div class="list-item"><span>榜首组合</span><span>${topRow?`${esc(topRow.primary_symbol)} vs ${esc(topRow.pair_symbol)} | ${esc(mapArbitragePairRelationship(topRow.correlation_regime))} | 分数 ${Number(topRow.score||0).toFixed(2)} | ${esc(mapArbitragePairBias(topRow.signal_bias))}`:'暂无'}</span></div>`,
+    `<div class="list-item"><span>提示</span><span>${esc(warnings[0]||'当前已支持正相关与负相关 pair；榜单用于挑选组合，真实开仓仍要满足策略自己的入场阈值与穿越条件。')}</span></div>`,
+  ].join('');
+  bodyEl.innerHTML=result.pairs.map((row,idx)=>{
+    const corrText=`L ${Number(row.level_corr||0).toFixed(2)} / R ${Number(row.return_corr||0).toFixed(2)}`;
+    const zText=Number(row.current_z_score||0).toFixed(2);
+    const halfLife=row.half_life_bars===null||row.half_life_bars===undefined?'--':`${Number(row.half_life_bars).toFixed(1)} bars`;
+    return `<tr>
+      <td>${idx+1}</td>
+    <td><div class="arbitrage-pair-name">${esc(row.primary_symbol||'-')}</div><div class="arbitrage-pair-sub">${esc(row.pair_symbol||'-')} · ${esc(mapArbitragePairRelationship(row.correlation_regime))}</div></td>
+    <td>${Number(row.score||0).toFixed(2)}</td>
+    <td>${esc(corrText)}</td>
+    <td>${esc(zText)}</td>
+    <td>${esc(halfLife)}</td>
+    <td><span class="arbitrage-chip" data-tone="${Math.abs(Number(row.current_z_score||0))>=2?'ok':'warn'}">${esc(mapArbitragePairBias(row.signal_bias))}</span></td>
+    <td><button type="button" class="btn btn-primary btn-sm" data-arbitrage-pair-idx="${idx}">回填</button></td>
+  </tr>`;
+}).join('');
+}
+async function applyArbitragePairCandidate(index=0){
+const result=arbitrageState.pairRanking;
+const rows=Array.isArray(result?.pairs)?result.pairs:[];
+const row=rows[Math.max(0,Number(index||0))];
+if(!row)throw new Error('当前没有可回填的配对组合');
+const primary=String(row.primary_symbol||'').trim();
+const secondary=String(row.pair_symbol||'').trim();
+if(!primary||!secondary)throw new Error('配对组合数据不完整');
+const strategyEl=document.getElementById('arbitrage-strategy');
+const tfEl=document.getElementById('arbitrage-timeframe');
+const lookbackEl=document.getElementById('arbitrage-lookback');
+if(strategyEl)strategyEl.value='PairsTradingStrategy';
+arbitrageState.selectedStrategy='PairsTradingStrategy';
+if(tfEl&&[...tfEl.options].some(opt=>String(opt.value||'').trim()===String(result?.timeframe||'')))tfEl.value=String(result?.timeframe||'1h').trim()||'1h';
+if(lookbackEl)lookbackEl.value=String(Number(row.lookback_period||result?.lookback_period||720)||720);
+await loadArbitrageSymbolOptions(getArbitrageExchange());
+['arbitrage-primary-symbol','arbitrage-secondary-symbol','arbitrage-universe'].forEach(id=>{
+  [primary,secondary,...(Array.isArray(result?.top_symbols)?result.top_symbols:[])].filter(Boolean).forEach(sym=>ensureSelectOption(id,sym));
+});
+setSelectValues('arbitrage-primary-symbol',[primary],primary);
+setSelectValues('arbitrage-secondary-symbol',[secondary],secondary);
+const universe=Array.from(new Set([primary,secondary,...(Array.isArray(result?.top_symbols)?result.top_symbols:[])].filter(Boolean))).slice(0,8);
+setSelectValues('arbitrage-universe',universe,primary);
+renderArbitragePanel();
+const out=getArbitrageOutputEl();
+if(out)out.textContent=`已从配对扫描榜回填: ${primary} / ${secondary}\n周期: ${getArbitrageTimeframe()}\nlookback: ${getArbitrageLookback()}\n说明: 榜单用于筛 pair，实际开仓仍以策略实时 z-score 穿越为准。`;
+notify(`已回填配对组合: ${primary} / ${secondary}`);
+}
+async function scanArbitragePairsRanking(){
+const exchange=getArbitrageExchange();
+const timeframe=getArbitrageTimeframe();
+const btn=document.getElementById('btn-arbitrage-scan-pairs');
+const prevText=btn?.textContent||'一键筛选前十';
+if(btn){
+  btn.disabled=true;
+  btn.textContent='筛选中...';
+}
+arbitrageState.pairRankingNote=`正在扫描 ${exchange} / ${timeframe} 的候选币种...`;
+renderArbitragePairRanking();
+try{
+  const resp=await api(`/data/research/pairs-ranking?exchange=${encodeURIComponent(exchange)}&timeframe=${encodeURIComponent(timeframe)}&limit=10`,{timeoutMs:45000});
+  arbitrageState.pairRanking=resp||null;
+  arbitrageState.pairRankingKey=getArbitragePairRankingKey();
+  arbitrageState.pairRankingNote=Array.isArray(resp?.pairs)&&resp.pairs.length?'':'当前周期暂无合格配对';
+  renderArbitragePairRanking();
+  const out=getArbitrageOutputEl();
+  if(out){
+    const top=Array.isArray(resp?.pairs)&&resp.pairs.length?resp.pairs[0]:null;
+    out.textContent=top
+      ? `配对扫描完成\n榜首: ${top.primary_symbol} / ${top.pair_symbol} (${mapArbitragePairRelationship(top.correlation_regime)})\n分数: ${Number(top.score||0).toFixed(2)} | 当前Z: ${Number(top.current_z_score||0).toFixed(2)}\n说明: 可点击“回填榜首组合”直接带入 PairsTradingStrategy。`
+      : `配对扫描完成\n当前周期 ${timeframe} 暂无满足条件的 pair。\n建议: 补足该周期本地K线，或切换到更高一级周期再试。`;
+  }
+  return resp;
+}catch(e){
+  arbitrageState.pairRanking=null;
+  arbitrageState.pairRankingKey='';
+  arbitrageState.pairRankingNote=`筛选失败: ${e.message}`;
+  renderArbitragePairRanking();
+  throw e;
+}finally{
+  if(btn){
+    btn.disabled=false;
+    btn.textContent=prevText;
+  }
+}
+}
 
 async function loadArbitrageSymbolOptions(exchange){
 const renderArbitrageSelects=symbols=>{
@@ -3700,6 +3838,11 @@ setSelectValues('arbitrage-secondary-symbol',[template.secondary],template.secon
 setSelectValues('arbitrage-universe',template.universe,template.primary);
 setSelectValues('arbitrage-venues',template.venues,template.venues[0]||'binance');
 renderArbitragePanel();
+if(arbitrageState.pairRankingKey&&arbitrageState.pairRankingKey!==getArbitragePairRankingKey()){
+  resetArbitragePairRanking('模板已更新，请重新点击“一键筛选前十”');
+}else{
+  renderArbitragePairRanking();
+}
 }
 
 function buildArbitrageStrategySpec(strategyType=getArbitrageSelectedStrategy()){
@@ -3882,6 +4025,7 @@ renderArbitragePlanSteps(row,spec);
 renderArbitrageStatusCards();
 renderArbitrageIntegrationNotes(row,spec);
 renderArbitrageStrategyCards();
+renderArbitragePairRanking();
 }
 
 async function registerArbitrageStrategy(strategyType=null){
@@ -3916,25 +4060,49 @@ function bindArbitragePage(){
 if(arbitrageState._bound)return;
 arbitrageState._bound=true;
 const rerender=()=>renderArbitragePanel();
+const maybeResetPairRanking=(reason='周期或交易所已变化，请重新点击“一键筛选前十”')=>{
+  if(arbitrageState.pairRankingKey&&arbitrageState.pairRankingKey!==getArbitragePairRankingKey()){
+    resetArbitragePairRanking(reason);
+  }else{
+    renderArbitragePairRanking();
+  }
+};
 const bindChange=(id,handler='change')=>{
   const el=document.getElementById(id);
   if(!el)return;
-  el.addEventListener(handler,()=>{rerender();});
+  el.addEventListener(handler,()=>{rerender();if(id==='arbitrage-timeframe')maybeResetPairRanking();});
 };
 const strategyEl=document.getElementById('arbitrage-strategy');
 if(strategyEl)strategyEl.addEventListener('change',()=>applyArbitrageTemplate(strategyEl.value).catch(e=>notify(`套利模板加载失败: ${e.message}`,true)));
 const exchangeEl=document.getElementById('arbitrage-exchange');
-if(exchangeEl)exchangeEl.addEventListener('change',()=>loadArbitrageSymbolOptions(exchangeEl.value).then(()=>renderArbitragePanel()).catch(e=>notify(`套利币池刷新失败: ${e.message}`,true)));
+if(exchangeEl)exchangeEl.addEventListener('change',()=>loadArbitrageSymbolOptions(exchangeEl.value).then(()=>{renderArbitragePanel();maybeResetPairRanking();}).catch(e=>notify(`套利币池刷新失败: ${e.message}`,true)));
 ['arbitrage-timeframe','arbitrage-primary-symbol','arbitrage-secondary-symbol','arbitrage-universe','arbitrage-venues','arbitrage-allocation','arbitrage-auto-start'].forEach(id=>bindChange(id,'change'));
 ['arbitrage-lookback','arbitrage-suffix'].forEach(id=>bindChange(id,'input'));
 const applyBtn=document.getElementById('btn-arbitrage-apply-template');
 if(applyBtn)applyBtn.onclick=()=>applyArbitrageTemplate(getArbitrageSelectedStrategy()).catch(e=>notify(`套利模板同步失败: ${e.message}`,true));
 const refreshBtn=document.getElementById('btn-arbitrage-refresh');
 if(refreshBtn)refreshBtn.onclick=()=>loadArbitrageTabData(true).catch(e=>notify(`套利页刷新失败: ${e.message}`,true));
+const scanPairsBtn=document.getElementById('btn-arbitrage-scan-pairs');
+if(scanPairsBtn)scanPairsBtn.onclick=()=>scanArbitragePairsRanking().catch(e=>notify(`配对筛选失败: ${e.message}`,true));
+const applyTopPairBtn=document.getElementById('btn-arbitrage-apply-top-pair');
+if(applyTopPairBtn)applyTopPairBtn.onclick=()=>applyArbitragePairCandidate(0).catch(e=>notify(`配对回填失败: ${e.message}`,true));
 const registerBtn=document.getElementById('btn-arbitrage-register');
 if(registerBtn)registerBtn.onclick=()=>registerArbitrageStrategy().catch(e=>notify(`套利策略注册失败: ${e.message}`,true));
 const backtestBtn=document.getElementById('btn-arbitrage-backtest');
 if(backtestBtn)backtestBtn.onclick=()=>jumpToBacktestFromArbitrage().catch(e=>notify(`套利页跳转回测失败: ${e.message}`,true));
+const pairBody=document.getElementById('arbitrage-pair-ranking-body');
+if(pairBody)pairBody.addEventListener('click',e=>{
+  const btn=e.target.closest('[data-arbitrage-pair-idx]');
+  if(!btn)return;
+  const idx=Number(btn.getAttribute('data-arbitrage-pair-idx')||0);
+  const prevText=btn.textContent;
+  btn.disabled=true;
+  btn.textContent='回填中...';
+  applyArbitragePairCandidate(idx).catch(err=>notify(`配对回填失败: ${err.message}`,true)).finally(()=>{
+    btn.disabled=false;
+    btn.textContent=prevText;
+  });
+});
 const cards=document.getElementById('arbitrage-strategy-cards');
 if(cards)cards.addEventListener('click',e=>{
   const btn=e.target.closest('[data-arbitrage-action]');
@@ -5335,7 +5503,7 @@ setInterval(()=>{
   else if(tab==='strategies')Promise.allSettled([loadStrategyHealth()]);
 },20000);}
 
-window.cancelOrder=cancelOrder;window.cancelConditional=cancelConditional;window.registerStrategy=registerStrategy;window.toggleStrategy=toggleStrategy;window.saveAllocation=saveAllocation;window.openEditor=openEditor;window.compareLive=compareLive;window.openStrategyEditor=openEditor;window.compareStrategyLive=compareLive;window.previewCompareStrategyByRank=previewCompareStrategyByRank;window.registerCompareStrategyByRank=registerCompareStrategyByRank;window.registerOptimizeBestAsNewStrategyInstance=registerOptimizeBestAsNewStrategyInstance;window.editNotifyRule=editNotifyRule;window.toggleNotifyRule=toggleNotifyRule;window.deleteNotifyRule=deleteNotifyRule;window.openBacktestWithSpec=openBacktestWithSpec;window.registerArbitrageStrategy=registerArbitrageStrategy;window.jumpToBacktestFromArbitrage=jumpToBacktestFromArbitrage;
+window.cancelOrder=cancelOrder;window.cancelConditional=cancelConditional;window.registerStrategy=registerStrategy;window.toggleStrategy=toggleStrategy;window.saveAllocation=saveAllocation;window.openEditor=openEditor;window.compareLive=compareLive;window.openStrategyEditor=openEditor;window.compareStrategyLive=compareLive;window.previewCompareStrategyByRank=previewCompareStrategyByRank;window.registerCompareStrategyByRank=registerCompareStrategyByRank;window.registerOptimizeBestAsNewStrategyInstance=registerOptimizeBestAsNewStrategyInstance;window.editNotifyRule=editNotifyRule;window.toggleNotifyRule=toggleNotifyRule;window.deleteNotifyRule=deleteNotifyRule;window.openBacktestWithSpec=openBacktestWithSpec;window.registerArbitrageStrategy=registerArbitrageStrategy;window.jumpToBacktestFromArbitrage=jumpToBacktestFromArbitrage;window.scanArbitragePairsRanking=scanArbitragePairsRanking;window.applyArbitragePairCandidate=applyArbitragePairCandidate;
 window.addEventListener('error',e=>{
 const runtimeErr=e?.error;
 if(!runtimeErr){
