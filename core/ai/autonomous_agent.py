@@ -39,6 +39,19 @@ _DEFAULT_GLM_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 _SUPPORTED_PROVIDERS = {"glm", "codex", "claude"}
 _SUPPORTED_MODES = {"shadow", "execute"}
 _SUPPORTED_ACTIONS = {"buy", "sell", "hold", "close_long", "close_short"}
+_SUPPORTED_SYMBOL_MODES = {"manual", "auto"}
+_DEFAULT_AUTO_UNIVERSE = [
+    "BTC/USDT",
+    "ETH/USDT",
+    "BNB/USDT",
+    "SOL/USDT",
+    "XRP/USDT",
+    "DOGE/USDT",
+    "ADA/USDT",
+    "LINK/USDT",
+    "AVAX/USDT",
+    "DOT/USDT",
+]
 
 
 def _utc_now() -> datetime:
@@ -90,6 +103,46 @@ def _coerce_int(value: Any, default: int, *, low: int, high: int) -> int:
     except Exception:
         parsed = int(default)
     return max(low, min(high, parsed))
+
+
+def _normalize_symbol_text(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    if "/" not in text and text.endswith("USDT") and len(text) > 4:
+        return f"{text[:-4]}/USDT"
+    return text
+
+
+def _normalize_symbol_mode(value: Any) -> str:
+    text = str(value or "manual").strip().lower()
+    if text not in _SUPPORTED_SYMBOL_MODES:
+        return "manual"
+    return text
+
+
+def _normalize_symbol_list(value: Any, *, default: Optional[List[str]] = None, max_items: int = 30) -> List[str]:
+    raw_items: List[Any]
+    if value is None:
+        raw_items = list(default or [])
+    elif isinstance(value, str):
+        raw_items = [item for item in re.split(r"[\s,;\n\r\t]+", value) if item.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = list(default or [])
+
+    items: List[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        symbol = _normalize_symbol_text(item)
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        items.append(symbol)
+        if len(items) >= max(1, int(max_items or 30)):
+            break
+    return items or list(default or ["BTC/USDT"])
 
 
 def _extract_json_obj(text: str) -> Dict[str, Any]:
@@ -163,6 +216,14 @@ _AGENT_PERSISTABLE_KEYS = frozenset({
     "AI_AUTONOMOUS_AGENT_ALLOW_LIVE",
     "AI_AUTONOMOUS_AGENT_ACCOUNT_ID",
     "AI_AUTONOMOUS_AGENT_STRATEGY_NAME",
+    "AI_AUTONOMOUS_AGENT_EXCHANGE",
+    "AI_AUTONOMOUS_AGENT_SYMBOL",
+    "AI_AUTONOMOUS_AGENT_TIMEFRAME",
+    "AI_AUTONOMOUS_AGENT_LOOKBACK_BARS",
+    "AI_AUTONOMOUS_AGENT_MIN_CONFIDENCE",
+    "AI_AUTONOMOUS_AGENT_SYMBOL_MODE",
+    "AI_AUTONOMOUS_AGENT_UNIVERSE_SYMBOLS",
+    "AI_AUTONOMOUS_AGENT_SELECTION_TOP_N",
 })
 
 
@@ -190,6 +251,8 @@ class AutonomousTradingAgent:
         self._last_decision: Optional[Dict[str, Any]] = None
         self._last_execution: Optional[Dict[str, Any]] = None
         self._last_research_context: Optional[Dict[str, Any]] = None
+        self._last_diagnostics: Optional[Dict[str, Any]] = None
+        self._last_symbol_scan: Optional[Dict[str, Any]] = None
         self._tick_count: int = 0
         self._submitted_count: int = 0
         self._last_submit_at: Optional[float] = None
@@ -250,6 +313,13 @@ class AutonomousTradingAgent:
         providers = self._provider_catalog()
         provider, provider_fallback = self._resolve_provider(requested_provider, providers)
         model = ("" if provider_fallback else model_override) or self._provider_model(provider)
+        symbol_mode = _normalize_symbol_mode(self._get("AI_AUTONOMOUS_AGENT_SYMBOL_MODE", "manual"))
+        configured_symbol = _normalize_symbol_text(self._get("AI_AUTONOMOUS_AGENT_SYMBOL", "BTC/USDT") or "BTC/USDT")
+        universe_symbols = _normalize_symbol_list(
+            self._get("AI_AUTONOMOUS_AGENT_UNIVERSE_SYMBOLS", None),
+            default=_DEFAULT_AUTO_UNIVERSE if symbol_mode == "auto" else [configured_symbol],
+            max_items=30,
+        )
         return {
             "enabled": bool(self._get("AI_AUTONOMOUS_AGENT_ENABLED", False)),
             "auto_start": bool(self._get("AI_AUTONOMOUS_AGENT_AUTO_START", False)),
@@ -259,7 +329,10 @@ class AutonomousTradingAgent:
             "provider_requested": requested_provider,
             "provider_fallback": provider_fallback,
             "exchange": str(self._get("AI_AUTONOMOUS_AGENT_EXCHANGE", "binance") or "binance").strip().lower(),
-            "symbol": str(self._get("AI_AUTONOMOUS_AGENT_SYMBOL", "BTC/USDT") or "BTC/USDT").strip().upper(),
+            "symbol": configured_symbol,
+            "symbol_mode": symbol_mode,
+            "universe_symbols": universe_symbols,
+            "selection_top_n": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_SELECTION_TOP_N", 10), 10, low=3, high=20),
             "timeframe": str(self._get("AI_AUTONOMOUS_AGENT_TIMEFRAME", "15m") or "15m").strip(),
             "interval_sec": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_INTERVAL_SEC", 120), 120, low=15, high=7200),
             "lookback_bars": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_LOOKBACK_BARS", 240), 240, low=30, high=4000),
@@ -293,7 +366,17 @@ class AutonomousTradingAgent:
         if "exchange" in kwargs and kwargs["exchange"] is not None:
             updates["AI_AUTONOMOUS_AGENT_EXCHANGE"] = str(kwargs["exchange"]).strip().lower() or "binance"
         if "symbol" in kwargs and kwargs["symbol"] is not None:
-            updates["AI_AUTONOMOUS_AGENT_SYMBOL"] = str(kwargs["symbol"]).strip().upper() or "BTC/USDT"
+            updates["AI_AUTONOMOUS_AGENT_SYMBOL"] = _normalize_symbol_text(kwargs["symbol"]) or "BTC/USDT"
+        if "symbol_mode" in kwargs and kwargs["symbol_mode"] is not None:
+            updates["AI_AUTONOMOUS_AGENT_SYMBOL_MODE"] = _normalize_symbol_mode(kwargs["symbol_mode"])
+        if "universe_symbols" in kwargs and kwargs["universe_symbols"] is not None:
+            updates["AI_AUTONOMOUS_AGENT_UNIVERSE_SYMBOLS"] = _normalize_symbol_list(
+                kwargs["universe_symbols"],
+                default=_DEFAULT_AUTO_UNIVERSE,
+                max_items=30,
+            )
+        if "selection_top_n" in kwargs and kwargs["selection_top_n"] is not None:
+            updates["AI_AUTONOMOUS_AGENT_SELECTION_TOP_N"] = _coerce_int(kwargs["selection_top_n"], 10, low=3, high=20)
         if "timeframe" in kwargs and kwargs["timeframe"] is not None:
             updates["AI_AUTONOMOUS_AGENT_TIMEFRAME"] = str(kwargs["timeframe"]).strip() or "15m"
         if "interval_sec" in kwargs and kwargs["interval_sec"] is not None:
@@ -345,6 +428,8 @@ class AutonomousTradingAgent:
             "last_decision": self._last_decision,
             "last_execution": self._last_execution,
             "last_research_context": self._last_research_context,
+            "last_diagnostics": self._last_diagnostics,
+            "last_symbol_scan": self._last_symbol_scan,
             "profile": dict(self._profile or _default_profile()),
             "journal_path": str(self._journal_path),
         }
@@ -814,6 +899,319 @@ class AutonomousTradingAgent:
             metadata=metadata,
         )
 
+    def _score_symbol_candidate(self, cfg: Dict[str, Any], context_payload: Dict[str, Any]) -> Dict[str, Any]:
+        agg = dict(context_payload.get("aggregated_signal") or {})
+        research_context = dict(context_payload.get("research_context") or {})
+        selected_candidate = dict(research_context.get("selected_candidate") or {})
+        validation = dict(selected_candidate.get("validation") or {})
+        validation_reasons = [
+            str(item).strip()
+            for item in (validation.get("reasons") or [])
+            if str(item).strip()
+        ]
+
+        direction = str(agg.get("direction") or "FLAT").upper()
+        confidence = _coerce_float(agg.get("confidence", 0.0), 0.0, low=0.0, high=1.0)
+        blocked = bool(agg.get("blocked_by_risk"))
+        risk_reason = str(agg.get("risk_reason") or "").strip()
+        min_confidence = float(cfg.get("min_confidence") or 0.0)
+        bars = max(0, int(context_payload.get("bars") or 0))
+        lookback = max(1, int(cfg.get("lookback_bars") or 240))
+        vol = abs(float(context_payload.get("realized_vol_annualized") or 0.0))
+        promotion_target = str(selected_candidate.get("promotion_target") or "").strip().lower()
+        candidate_status = str(selected_candidate.get("status") or "").strip().lower()
+
+        score = confidence
+        score += 0.18 if direction in {"LONG", "SHORT"} else -0.08
+        if direction in {"LONG", "SHORT"} and confidence >= min_confidence:
+            score += 0.18
+        if blocked:
+            score -= 0.30
+        score += min(1.0, bars / float(lookback)) * 0.05
+        score -= min(vol, 1.0) * 0.08
+        if selected_candidate:
+            score += 0.04
+        if promotion_target == "paper" or candidate_status in {"paper_running", "paper_ready", "new"}:
+            score -= 0.04
+        if any("trade count too low" in item.lower() for item in validation_reasons):
+            score -= 0.05
+        score = round(score, 6)
+
+        tradable_now = bool(
+            direction in {"LONG", "SHORT"}
+            and not blocked
+            and confidence >= min_confidence
+            and float(context_payload.get("price") or 0.0) > 0
+        )
+
+        summary_parts: List[str] = [f"{direction} {confidence:.3f}"]
+        if blocked and risk_reason:
+            summary_parts.append(risk_reason)
+        elif direction in {"LONG", "SHORT"} and confidence < min_confidence:
+            summary_parts.append(f"below threshold {confidence:.3f} < {min_confidence:.3f}")
+        if candidate_status:
+            summary_parts.append(f"research {candidate_status}")
+        if any("trade count too low" in item.lower() for item in validation_reasons):
+            summary_parts.append("research trade count low")
+
+        return {
+            "symbol": str(context_payload.get("symbol") or cfg.get("symbol") or "BTC/USDT"),
+            "price": float(context_payload.get("price") or 0.0),
+            "direction": direction,
+            "confidence": confidence,
+            "score": score,
+            "tradable_now": tradable_now,
+            "blocked_by_risk": blocked,
+            "risk_reason": risk_reason,
+            "bars": bars,
+            "realized_vol_annualized": vol,
+            "threshold_gap": round(confidence - min_confidence, 6),
+            "summary": "; ".join(part for part in summary_parts if part),
+            "research": {
+                "candidate_id": str(selected_candidate.get("candidate_id") or ""),
+                "strategy": str(selected_candidate.get("strategy") or ""),
+                "status": str(selected_candidate.get("status") or ""),
+                "promotion_target": str(selected_candidate.get("promotion_target") or ""),
+                "validation_reasons": validation_reasons[:3],
+            },
+        }
+
+    async def get_symbol_scan(self, *, limit: Optional[int] = None, force: bool = False) -> Dict[str, Any]:
+        cfg = self.get_runtime_config()
+        symbol_mode = _normalize_symbol_mode(cfg.get("symbol_mode"))
+        configured_symbol = _normalize_symbol_text(cfg.get("symbol") or "BTC/USDT") or "BTC/USDT"
+        selection_top_n = _coerce_int(limit or cfg.get("selection_top_n") or 10, 10, low=3, high=20)
+        default_universe = _DEFAULT_AUTO_UNIVERSE if symbol_mode == "auto" else [configured_symbol]
+        universe_symbols = _normalize_symbol_list(cfg.get("universe_symbols"), default=default_universe, max_items=30)
+        if configured_symbol and configured_symbol not in universe_symbols:
+            universe_symbols = [configured_symbol, *[item for item in universe_symbols if item != configured_symbol]]
+
+        if symbol_mode != "auto":
+            universe_symbols = [configured_symbol]
+
+        rows: List[Dict[str, Any]] = []
+        for symbol in universe_symbols:
+            local_cfg = dict(cfg)
+            local_cfg["symbol"] = symbol
+            try:
+                context_payload, _ = await self._build_context(local_cfg)
+                rows.append(self._score_symbol_candidate(local_cfg, context_payload))
+            except Exception as exc:
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "price": 0.0,
+                        "direction": "FLAT",
+                        "confidence": 0.0,
+                        "score": -1.0,
+                        "tradable_now": False,
+                        "blocked_by_risk": False,
+                        "risk_reason": "",
+                        "bars": 0,
+                        "realized_vol_annualized": 0.0,
+                        "threshold_gap": round(0.0 - float(cfg.get("min_confidence") or 0.0), 6),
+                        "summary": f"scan_error:{_format_exception_short(exc)}",
+                        "research": {
+                            "candidate_id": "",
+                            "strategy": "",
+                            "status": "",
+                            "promotion_target": "",
+                            "validation_reasons": [],
+                        },
+                    }
+                )
+
+        rows = sorted(
+            rows,
+            key=lambda item: (
+                1 if item.get("tradable_now") else 0,
+                float(item.get("score") or -999.0),
+                float(item.get("confidence") or 0.0),
+                1 if str(item.get("direction") or "") in {"LONG", "SHORT"} else 0,
+            ),
+            reverse=True,
+        )
+
+        selected_row = rows[0] if rows else {
+            "symbol": configured_symbol,
+            "price": 0.0,
+            "direction": "FLAT",
+            "confidence": 0.0,
+            "score": 0.0,
+            "tradable_now": False,
+            "blocked_by_risk": False,
+            "risk_reason": "",
+            "bars": 0,
+            "realized_vol_annualized": 0.0,
+            "threshold_gap": 0.0,
+            "summary": "no_candidates",
+            "research": {
+                "candidate_id": "",
+                "strategy": "",
+                "status": "",
+                "promotion_target": "",
+                "validation_reasons": [],
+            },
+        }
+        selection_reason = "manual_symbol" if symbol_mode != "auto" else (
+            "top_ranked_tradable_symbol" if bool(selected_row.get("tradable_now")) else "top_ranked_watchlist_symbol"
+        )
+
+        for index, row in enumerate(rows, start=1):
+            row["rank"] = index
+            row["selected"] = bool(row.get("symbol") == selected_row.get("symbol"))
+
+        payload = {
+            "generated_at": _utc_now().isoformat(),
+            "symbol_mode": symbol_mode,
+            "configured_symbol": configured_symbol,
+            "selected_symbol": str(selected_row.get("symbol") or configured_symbol),
+            "selection_reason": selection_reason,
+            "candidate_count": len(rows),
+            "top_n": selection_top_n,
+            "top_candidates": rows[:selection_top_n],
+        }
+        if force or symbol_mode == "manual" or rows:
+            self._last_symbol_scan = payload
+        return payload
+
+    def _build_decision_diagnostics(
+        self,
+        *,
+        cfg: Dict[str, Any],
+        context_payload: Dict[str, Any],
+        decision: Dict[str, Any],
+        execution: Dict[str, Any],
+        selection: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        items: List[Dict[str, Any]] = []
+
+        def add_item(code: str, label: str, detail: str = "", tone: str = "warn", priority: int = 50) -> None:
+            items.append(
+                {
+                    "code": code,
+                    "label": label,
+                    "detail": detail,
+                    "tone": tone,
+                    "priority": int(priority),
+                }
+            )
+
+        action = str(decision.get("action") or "hold").strip().lower() or "hold"
+        decision_reason = str(decision.get("reason") or "").strip()
+        execution_reason = str(execution.get("reason") or "").strip()
+        min_confidence = float(cfg.get("min_confidence") or 0.0)
+
+        if decision_reason.startswith("model_error:"):
+            add_item("model_error", "模型接口异常", decision_reason.replace("model_error:", "", 1), "danger", 5)
+        elif decision_reason == "no_price":
+            add_item("no_price", "当前价格不可用", "缺少可用行情，代理只能观望", "danger", 8)
+        elif decision_reason.startswith("below_min_confidence"):
+            add_item(
+                "below_min_confidence",
+                "模型信号低于开仓阈值",
+                f"当前最小阈值 {min_confidence:.3f}",
+                "warn",
+                15,
+            )
+        elif decision_reason.startswith("cooldown("):
+            add_item("local_cooldown", "代理本地下单冷却中", decision_reason, "warn", 18)
+        elif decision_reason == "no_long_position":
+            add_item("no_long_position", "没有多头可平", "模型想平多，但当前没有多头仓位", "warn", 20)
+        elif decision_reason == "no_short_position":
+            add_item("no_short_position", "没有空头可平", "模型想平空，但当前没有空头仓位", "warn", 20)
+
+        agg = dict(context_payload.get("aggregated_signal") or {})
+        agg_direction = str(agg.get("direction") or "FLAT").upper()
+        agg_confidence = _coerce_float(agg.get("confidence", 0.0), 0.0, low=0.0, high=1.0)
+        agg_risk_reason = str(agg.get("risk_reason") or "").strip()
+        if bool(agg.get("blocked_by_risk")):
+            add_item("aggregated_risk_blocked", "聚合信号被风险门拦截", agg_risk_reason or "risk gate blocked", "warn", 25)
+        if agg_direction == "FLAT":
+            add_item("aggregated_signal_flat", "聚合信号为空仓", f"聚合置信度 {agg_confidence:.3f}", "info", 40)
+        elif agg_confidence < min_confidence:
+            add_item(
+                "aggregated_signal_below_threshold",
+                "聚合信号低于阈值",
+                f"{agg_direction} {agg_confidence:.3f} < {min_confidence:.3f}",
+                "info",
+                30,
+            )
+
+        research_context = dict(context_payload.get("research_context") or {})
+        selected_candidate = dict(research_context.get("selected_candidate") or {})
+        validation = dict(selected_candidate.get("validation") or {})
+        validation_reasons = [
+            str(item).strip()
+            for item in (validation.get("reasons") or [])
+            if str(item).strip()
+        ]
+        candidate_status = str(selected_candidate.get("status") or "").strip().lower()
+        promotion_target = str(selected_candidate.get("promotion_target") or "").strip().lower()
+        if selected_candidate and (candidate_status in {"paper_running", "paper_ready", "new"} or promotion_target == "paper"):
+            add_item(
+                "research_not_live_ready",
+                "研究候选仍偏纸盘阶段",
+                f"{selected_candidate.get('strategy') or '--'} / {selected_candidate.get('status') or '--'}",
+                "info",
+                45,
+            )
+        if any("trade count too low" in item.lower() for item in validation_reasons):
+            add_item("research_low_trade_count", "研究候选样本过少", validation_reasons[0], "info", 48)
+
+        if execution_reason == "shadow_mode":
+            add_item("shadow_mode", "当前只提示不执行", "运行模式是 shadow", "warn", 10)
+        elif execution_reason == "live_mode_blocked":
+            add_item("live_mode_blocked", "实盘执行被禁止", "交易引擎在 live，但 agent 未允许 live", "danger", 9)
+        elif execution_reason == "submit_rejected":
+            add_item("submit_rejected", "执行引擎拒绝了信号", "submit_signal returned false", "danger", 12)
+
+        if not items and action == "hold":
+            add_item("model_hold", "模型主动选择观望", decision_reason or "no explicit hold reason", "info", 60)
+
+        items = sorted(items, key=lambda item: int(item.get("priority") or 99))
+        primary = items[0] if items else {
+            "code": "none",
+            "label": "无结构化原因",
+            "detail": "",
+            "tone": "info",
+            "priority": 99,
+        }
+
+        summary_parts = [str(primary.get("label") or "")]
+        if primary.get("detail"):
+            summary_parts.append(str(primary.get("detail") or ""))
+        summary = " | ".join(part for part in summary_parts if part)
+
+        selected_symbol = str((selection or {}).get("selected_symbol") or cfg.get("symbol") or "")
+        configured_symbol = str((selection or {}).get("configured_symbol") or cfg.get("symbol") or "")
+
+        return {
+            "outcome": "submitted" if bool(execution.get("submitted")) else ("hold" if action == "hold" else "blocked"),
+            "primary": primary,
+            "summary": summary,
+            "items": items,
+            "action": action,
+            "decision_reason_raw": decision_reason,
+            "execution_reason": execution_reason,
+            "symbol_mode": str(cfg.get("symbol_mode") or "manual"),
+            "configured_symbol": configured_symbol,
+            "selected_symbol": selected_symbol,
+            "aggregated_signal": {
+                "direction": agg_direction,
+                "confidence": agg_confidence,
+                "blocked_by_risk": bool(agg.get("blocked_by_risk")),
+                "risk_reason": agg_risk_reason,
+            },
+            "research": {
+                "candidate_id": str(selected_candidate.get("candidate_id") or ""),
+                "strategy": str(selected_candidate.get("strategy") or ""),
+                "status": str(selected_candidate.get("status") or ""),
+                "promotion_target": str(selected_candidate.get("promotion_target") or ""),
+                "validation_reasons": validation_reasons[:3],
+            },
+        }
+
     def _load_overlay(self) -> None:
         """Load persisted agent config from JSON overlay on startup."""
         try:
@@ -933,10 +1331,52 @@ class AutonomousTradingAgent:
             self._last_decision = {"action": "hold", "reason": "agent_disabled"}
             self._last_execution = {"submitted": False, "reason": "agent_disabled"}
             self._last_research_context = None
+            self._last_diagnostics = {
+                "outcome": "blocked",
+                "primary": {
+                    "code": "agent_disabled",
+                    "label": "代理未启用",
+                    "detail": "enabled=false",
+                    "tone": "danger",
+                    "priority": 1,
+                },
+                "summary": "代理未启用 | enabled=false",
+                "items": [
+                    {
+                        "code": "agent_disabled",
+                        "label": "代理未启用",
+                        "detail": "enabled=false",
+                        "tone": "danger",
+                        "priority": 1,
+                    }
+                ],
+                "action": "hold",
+                "decision_reason_raw": "agent_disabled",
+                "execution_reason": "agent_disabled",
+                "symbol_mode": str(cfg.get("symbol_mode") or "manual"),
+                "configured_symbol": str(cfg.get("symbol") or ""),
+                "selected_symbol": str(cfg.get("symbol") or ""),
+                "aggregated_signal": {
+                    "direction": "FLAT",
+                    "confidence": 0.0,
+                    "blocked_by_risk": False,
+                    "risk_reason": "",
+                },
+                "research": {
+                    "candidate_id": "",
+                    "strategy": "",
+                    "status": "",
+                    "promotion_target": "",
+                    "validation_reasons": [],
+                },
+            }
             return result
 
         started = time.perf_counter()
-        context_payload, market_data = await self._build_context(cfg)
+        selection = await self.get_symbol_scan(limit=int(cfg.get("selection_top_n") or 10), force=True)
+        effective_cfg = dict(cfg)
+        effective_cfg["symbol"] = str(selection.get("selected_symbol") or cfg.get("symbol") or "BTC/USDT")
+        context_payload, market_data = await self._build_context(effective_cfg)
         research_context = context_payload.get("research_context") if isinstance(context_payload, dict) else {}
         if float(context_payload.get("price") or 0.0) <= 0:
             decision = {
@@ -949,17 +1389,17 @@ class AutonomousTradingAgent:
                 "reason": "no_price",
             }
         else:
-            provider = str(cfg.get("provider") or "codex")
-            model = str(cfg.get("model") or self._provider_model(provider))
-            system_prompt, user_prompt = self._build_prompt(cfg, context_payload)
+            provider = str(effective_cfg.get("provider") or "codex")
+            model = str(effective_cfg.get("model") or self._provider_model(provider))
+            system_prompt, user_prompt = self._build_prompt(effective_cfg, context_payload)
             raw_decision: Dict[str, Any]
             try:
                 raw_decision = await self._call_provider(
                     provider=provider,
                     model=model,
-                    timeout_ms=int(cfg.get("timeout_ms") or 12000),
-                    max_tokens=int(cfg.get("max_tokens") or 420),
-                    temperature=float(cfg.get("temperature") or 0.15),
+                    timeout_ms=int(effective_cfg.get("timeout_ms") or 12000),
+                    max_tokens=int(effective_cfg.get("max_tokens") or 420),
+                    temperature=float(effective_cfg.get("temperature") or 0.15),
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                 )
@@ -968,14 +1408,14 @@ class AutonomousTradingAgent:
                     "action": "hold",
                     "confidence": 0.0,
                     "strength": 0.1,
-                    "leverage": cfg.get("default_leverage"),
-                    "stop_loss_pct": cfg.get("default_stop_loss_pct"),
-                    "take_profit_pct": cfg.get("default_take_profit_pct"),
+                    "leverage": effective_cfg.get("default_leverage"),
+                    "stop_loss_pct": effective_cfg.get("default_stop_loss_pct"),
+                    "take_profit_pct": effective_cfg.get("default_take_profit_pct"),
                     "reason": f"model_error:{_format_exception_short(exc)}",
                 }
-            decision = self._normalize_decision(raw_decision, cfg, context_payload)
+            decision = self._normalize_decision(raw_decision, effective_cfg, context_payload)
 
-        cooldown_sec = int(cfg.get("cooldown_sec") or 0)
+        cooldown_sec = int(effective_cfg.get("cooldown_sec") or 0)
         if (
             decision["action"] in {"buy", "sell", "close_long", "close_short"}
             and cooldown_sec > 0
@@ -986,19 +1426,19 @@ class AutonomousTradingAgent:
                 decision["action"] = "hold"
                 decision["reason"] = f"cooldown({elapsed:.1f}s<{cooldown_sec}s)"
 
-        signal = self._build_signal(decision=decision, cfg=cfg, context_payload=context_payload)
+        signal = self._build_signal(decision=decision, cfg=effective_cfg, context_payload=context_payload)
         execution = {
-            "mode": str(cfg.get("mode") or "shadow"),
+            "mode": str(effective_cfg.get("mode") or "shadow"),
             "submitted": False,
             "reason": "hold",
             "signal": signal.to_dict() if signal is not None else None,
         }
         if signal is not None:
-            if str(cfg.get("mode") or "shadow") != "execute":
+            if str(effective_cfg.get("mode") or "shadow") != "execute":
                 execution["reason"] = "shadow_mode"
             else:
                 trading_mode = execution_engine.get_trading_mode()
-                if trading_mode == "live" and not bool(cfg.get("allow_live")):
+                if trading_mode == "live" and not bool(effective_cfg.get("allow_live")):
                     execution["reason"] = "live_mode_blocked"
                 else:
                     accepted = await execution_engine.submit_signal(signal)
@@ -1007,6 +1447,14 @@ class AutonomousTradingAgent:
                     if accepted:
                         self._submitted_count += 1
                         self._last_submit_at = time.time()
+
+        diagnostics = self._build_decision_diagnostics(
+            cfg=effective_cfg,
+            context_payload=context_payload,
+            decision=decision,
+            execution=execution,
+            selection=selection,
+        )
 
         latency_ms = int((time.perf_counter() - started) * 1000)
         now_iso = _utc_now().isoformat()
@@ -1022,13 +1470,16 @@ class AutonomousTradingAgent:
             "execution_allowed": bool(execution.get("submitted")),
             "rejection_reason": rejection_reason,
             "config": {
-                "provider": cfg.get("provider"),
-                "model": cfg.get("model"),
-                "mode": cfg.get("mode"),
-                "exchange": cfg.get("exchange"),
-                "symbol": cfg.get("symbol"),
-                "timeframe": cfg.get("timeframe"),
-                "allow_live": cfg.get("allow_live"),
+                "provider": effective_cfg.get("provider"),
+                "model": effective_cfg.get("model"),
+                "mode": effective_cfg.get("mode"),
+                "exchange": effective_cfg.get("exchange"),
+                "symbol_mode": cfg.get("symbol_mode"),
+                "configured_symbol": cfg.get("symbol"),
+                "symbol": effective_cfg.get("symbol"),
+                "universe_size": len(cfg.get("universe_symbols") or []),
+                "timeframe": effective_cfg.get("timeframe"),
+                "allow_live": effective_cfg.get("allow_live"),
             },
             "context": {
                 "price": context_payload.get("price"),
@@ -1039,7 +1490,9 @@ class AutonomousTradingAgent:
                 "position": context_payload.get("position"),
                 "research_context": research_context,
             },
+            "selection": selection,
             "decision": decision,
+            "diagnostics": diagnostics,
             "execution": execution,
         }
         self._append_journal(journal_row)
@@ -1050,6 +1503,8 @@ class AutonomousTradingAgent:
         self._last_decision = decision
         self._last_execution = execution
         self._last_research_context = research_context if isinstance(research_context, dict) else None
+        self._last_diagnostics = diagnostics
+        self._last_symbol_scan = selection
         self._tick_count += 1
 
         return {
@@ -1057,7 +1512,10 @@ class AutonomousTradingAgent:
             "trigger": str(trigger or "manual"),
             "latency_ms": latency_ms,
             "market_bars": int(len(market_data) if market_data is not None else 0),
+            "effective_symbol": effective_cfg.get("symbol"),
+            "selection": selection,
             "decision": decision,
+            "diagnostics": diagnostics,
             "execution": execution,
             "status": self.get_status(),
         }

@@ -41,6 +41,9 @@ def test_update_autonomous_agent_runtime_config_endpoint(monkeypatch):
         enabled=True,
         mode="execute",
         provider="codex",
+        symbol_mode="auto",
+        universe_symbols=["BTC/USDT", "ETH/USDT"],
+        selection_top_n=8,
     )
     result = asyncio.run(ai_module.update_ai_autonomous_agent_runtime_config(request, payload))
     assert result["updated"] is True
@@ -84,3 +87,30 @@ def test_autonomous_agent_start_and_run_once_endpoints(monkeypatch):
     )
     assert once_result["result"]["decision"]["action"] == "hold"
     assert run_once_mock.await_count == 1
+
+
+def test_autonomous_agent_symbol_ranking_endpoint(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    scan_mock = AsyncMock(
+        return_value={
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "symbol_mode": "auto",
+            "configured_symbol": "BTC/USDT",
+            "selected_symbol": "ETH/USDT",
+            "selection_reason": "top_ranked_tradable_symbol",
+            "candidate_count": 2,
+            "top_n": 10,
+            "top_candidates": [
+                {"rank": 1, "symbol": "ETH/USDT", "score": 0.88},
+                {"rank": 2, "symbol": "BTC/USDT", "score": 0.51},
+            ],
+        }
+    )
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_symbol_scan", scan_mock)
+
+    result = asyncio.run(ai_module.get_ai_autonomous_agent_symbol_ranking(request, limit=10, refresh=True))
+    assert result["selected_symbol"] == "ETH/USDT"
+    assert scan_mock.await_count == 1

@@ -160,6 +160,9 @@ class AIAutonomousAgentConfigUpdateRequest(BaseModel):
     model: Optional[str] = None
     exchange: Optional[str] = None
     symbol: Optional[str] = None
+    symbol_mode: Optional[str] = None
+    universe_symbols: Optional[List[str] | str] = None
+    selection_top_n: Optional[int] = Field(default=None, ge=3, le=20)
     timeframe: Optional[str] = None
     interval_sec: Optional[int] = Field(default=None, ge=15, le=7200)
     lookback_bars: Optional[int] = Field(default=None, ge=30, le=4000)
@@ -440,6 +443,13 @@ async def get_ai_autonomous_agent_journal(request: Request, limit: int = 50):
     ensure_ai_research_runtime_state(request.app)
     rows = autonomous_trading_agent.read_journal(limit=limit)
     return {"items": rows, "count": len(rows)}
+
+
+@router.get("/autonomous-agent/symbol-ranking")
+async def get_ai_autonomous_agent_symbol_ranking(request: Request, limit: int = 10, refresh: bool = False):
+    ensure_ai_research_runtime_state(request.app)
+    payload = await autonomous_trading_agent.get_symbol_scan(limit=limit, force=bool(refresh))
+    return payload
 
 
 @router.post("/proposals/generate")

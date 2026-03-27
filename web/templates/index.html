@@ -1679,6 +1679,39 @@
                                     </div>
                                     <div class="ai-auto-step-desc">启动后它会持续盯盘、自动决策，并在满足条件时直接提交买卖动作。</div>
                                     <div id="ai-agent-info" class="ai-auto-step-info">加载中...</div>
+                                    <div class="ai-agent-section">
+                                        <div class="ai-agent-section-title">为什么现在是 Hold</div>
+                                        <div id="ai-agent-reasons" class="ai-agent-reasons-box">加载中...</div>
+                                    </div>
+                                    <div class="ai-agent-section">
+                                        <div class="ai-agent-section-head">
+                                            <div class="ai-agent-section-title">币种模式与自动选币</div>
+                                            <button class="btn btn-sm" type="button" onclick="agentRefreshRanking()">刷新排行榜</button>
+                                        </div>
+                                        <div class="ai-auto-step-desc">固定币种时只盯一个 symbol；自动模式会先扫描币池，再选当前最值得跟踪的币种。</div>
+                                        <div class="ai-agent-config-grid">
+                                            <label id="ai-agent-symbol-mode-wrap" class="ai-agent-field">
+                                                <span>币种模式</span>
+                                                <select id="ai-agent-symbol-mode" onchange="agentToggleSymbolMode()">
+                                                    <option value="manual">固定币种</option>
+                                                    <option value="auto">自动选币</option>
+                                                </select>
+                                            </label>
+                                            <label id="ai-agent-manual-symbol-wrap" class="ai-agent-field">
+                                                <span>固定 symbol</span>
+                                                <input id="ai-agent-manual-symbol" type="text" value="BTC/USDT" />
+                                            </label>
+                                        </div>
+                                        <label id="ai-agent-universe-symbols-wrap" class="ai-agent-field ai-agent-field-block">
+                                            <span>候选币池</span>
+                                            <textarea id="ai-agent-universe-symbols" rows="3" placeholder="BTC/USDT, ETH/USDT, SOL/USDT"></textarea>
+                                        </label>
+                                        <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
+                                            <button class="btn btn-sm" type="button" onclick="agentSaveConfig()">保存配置</button>
+                                        </div>
+                                        <div id="ai-agent-ranking-summary" class="ai-agent-ranking-summary">加载中...</div>
+                                        <div id="ai-agent-ranking" class="ai-agent-ranking-box">加载中...</div>
+                                    </div>
                                     <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
                                         <button class="btn btn-sm btn-success" id="ai-agent-start-btn" onclick="agentStart()">启动</button>
                                         <button class="btn btn-sm btn-danger" id="ai-agent-stop-btn" onclick="agentStop()">停止</button>

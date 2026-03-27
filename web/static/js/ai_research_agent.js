@@ -2,7 +2,15 @@
   'use strict';
 
   const POLL_MS = 30000;
-  const AI_UI_TIMEZONE = 'Asia/Singapore';
+  const AI_UI_TIMEZONE = 'Asia/Shanghai';
+  const AGENT_STATUS_API = '/ai/autonomous-agent/status';
+  const AGENT_JOURNAL_API = '/ai/autonomous-agent/journal';
+  const AGENT_START_API = '/ai/autonomous-agent/start';
+  const AGENT_STOP_API = '/ai/autonomous-agent/stop';
+  const AGENT_RUN_ONCE_API = '/ai/autonomous-agent/run-once';
+  const AGENT_CONFIG_API = '/ai/runtime-config/autonomous-agent';
+  const AGENT_SYMBOL_RANKING_API = '/ai/autonomous-agent/symbol-ranking';
+
   let pollTimer = null;
 
   function aiRoot() {
@@ -25,6 +33,21 @@
     else console.log(message);
   }
 
+  function compactText(value, maxLen = 120) {
+    if (value == null) return '';
+    let text = '';
+    if (typeof value === 'string') text = value;
+    else if (typeof value === 'number' || typeof value === 'boolean') text = String(value);
+    else {
+      try {
+        text = JSON.stringify(value);
+      } catch (_) {
+        text = String(value);
+      }
+    }
+    return text.length > maxLen ? `${text.slice(0, maxLen - 1)}...` : text;
+  }
+
   function fmtAgentTs(value) {
     if (!value) return '--';
     try {
@@ -45,14 +68,16 @@
     }
     const value = String(provider || '').trim().toLowerCase();
     if (value === 'codex' || value === 'openai') return 'OpenAI';
+    if (value === 'claude') return 'Claude';
+    if (value === 'glm') return 'GLM';
     return String(provider || '-');
   }
 
   function decisionModeLabel(mode) {
     const value = String(mode || '').trim().toLowerCase();
     if (value === 'shadow') return '只提示';
-    if (value === 'enforce') return '可拦截';
     if (value === 'execute') return '直接执行';
+    if (value === 'enforce') return '可拦截';
     return String(mode || '--');
   }
 
@@ -64,6 +89,24 @@
       close_short: '平空',
       hold: '观望',
     }[String(action || '').trim().toLowerCase()] || String(action || '--');
+  }
+
+  function symbolModeLabel(mode) {
+    return String(mode || '').trim().toLowerCase() === 'auto' ? '自动选币' : '固定币种';
+  }
+
+  function toneClass(tone) {
+    const value = String(tone || '').trim().toLowerCase();
+    if (value === 'danger' || value === 'error') return 'is-danger';
+    if (value === 'warn' || value === 'warning') return 'is-warn';
+    if (value === 'good' || value === 'success') return 'is-good';
+    return 'is-info';
+  }
+
+  function formatRatio(value, digits = 3) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return '--';
+    return num.toFixed(digits);
   }
 
   function setChainSummaryText(id, value) {
@@ -104,21 +147,6 @@
     setChainSummaryText('ai-chain-trading-last-action', latestActionText);
   }
 
-  function compactText(value, maxLen = 120) {
-    if (value == null) return '';
-    let text = '';
-    if (typeof value === 'string') text = value;
-    else if (typeof value === 'number' || typeof value === 'boolean') text = String(value);
-    else {
-      try {
-        text = JSON.stringify(value);
-      } catch (_) {
-        text = String(value);
-      }
-    }
-    return text.length > maxLen ? `${text.slice(0, maxLen - 1)}...` : text;
-  }
-
   async function rootApi(path, options = {}) {
     if (typeof window.api === 'function') return window.api(path, options);
     const response = await fetch(path, {
@@ -133,6 +161,162 @@
     return payload;
   }
 
+  function parseSymbolList(value) {
+    return String(value || '')
+      .split(/[\s,;\n\r\t]+/)
+      .map((item) => item.trim().toUpperCase())
+      .filter(Boolean);
+  }
+
+  function syncAgentConfigForm(cfg = {}) {
+    const modeEl = document.getElementById('ai-agent-symbol-mode');
+    const manualEl = document.getElementById('ai-agent-manual-symbol');
+    const universeEl = document.getElementById('ai-agent-universe-symbols');
+    if (modeEl) modeEl.value = String(cfg.symbol_mode || 'manual').toLowerCase();
+    if (manualEl) manualEl.value = String(cfg.symbol || 'BTC/USDT');
+    if (universeEl) universeEl.value = Array.isArray(cfg.universe_symbols) ? cfg.universe_symbols.join(', ') : '';
+    updateAgentSymbolModeVisibility();
+  }
+
+  function updateAgentSymbolModeVisibility() {
+    const mode = String(document.getElementById('ai-agent-symbol-mode')?.value || 'manual').toLowerCase();
+    const manualWrap = document.getElementById('ai-agent-manual-symbol-wrap');
+    const universeWrap = document.getElementById('ai-agent-universe-symbols-wrap');
+    if (manualWrap) manualWrap.style.display = mode === 'manual' ? '' : 'none';
+    if (universeWrap) universeWrap.style.display = mode === 'auto' ? '' : 'none';
+  }
+
+  function buildRuntimeReason(status = {}, cfg = {}) {
+    if (Boolean(status.running)) return null;
+    if (status.last_run_at) {
+      return {
+        code: 'agent_stopped',
+        label: '代理当前未运行',
+        detail: '当前进程里的 autonomous agent 已停止；重新启动后才会持续 tick。',
+        tone: 'warn',
+      };
+    }
+    if (!cfg.enabled) {
+      return {
+        code: 'agent_disabled',
+        label: '代理未启用',
+        detail: 'enabled=false，当前不会自动决策。',
+        tone: 'danger',
+      };
+    }
+    return {
+      code: 'agent_not_started',
+      label: '代理还没启动',
+      detail: '配置已启用，但本次进程里还没有 start。',
+      tone: 'warn',
+    };
+  }
+
+  function renderAgentDiagnostics(status = {}, cfg = {}) {
+    const el = document.getElementById('ai-agent-reasons');
+    if (!el) return;
+
+    const diagnostics = status.last_diagnostics || {};
+    const items = Array.isArray(diagnostics.items) ? diagnostics.items.slice() : [];
+    const runtimeReason = buildRuntimeReason(status, cfg);
+    if (runtimeReason) items.unshift(runtimeReason);
+
+    const primary = runtimeReason || diagnostics.primary || null;
+    const agg = diagnostics.aggregated_signal || {};
+    const research = diagnostics.research || {};
+
+    if (!primary && !items.length) {
+      el.innerHTML = '<div class="ai-agent-empty">暂无结构化原因，先跑一轮就会生成。</div>';
+      return;
+    }
+
+    const primarySummary = primary
+      ? `<div class="ai-agent-reason-primary ${toneClass(primary.tone)}">
+          <div class="ai-agent-reason-primary-label">${esc(primary.label || '当前状态')}</div>
+          <div class="ai-agent-reason-primary-detail">${esc(primary.detail || diagnostics.summary || '--')}</div>
+        </div>`
+      : '';
+
+    const meta = `
+      <div class="ai-agent-diagnostic-meta">
+        <div class="ai-agent-diagnostic-item">
+          <span>聚合信号</span>
+          <strong>${esc(String(agg.direction || '--'))} / ${esc(formatRatio(agg.confidence, 3))}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>当前币种</span>
+          <strong>${esc(String(diagnostics.selected_symbol || cfg.symbol || '--'))}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>研究候选</span>
+          <strong>${esc(String(research.strategy || '--'))}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>研究状态</span>
+          <strong>${esc(String(research.status || '--'))}</strong>
+        </div>
+      </div>
+    `;
+
+    const detailList = items.length
+      ? `<div class="ai-agent-reason-list">${items.map((item) => `
+          <div class="ai-agent-reason-chip ${toneClass(item.tone)}">
+            <div class="ai-agent-reason-chip-label">${esc(item.label || item.code || '--')}</div>
+            <div class="ai-agent-reason-chip-detail">${esc(item.detail || '--')}</div>
+          </div>
+        `).join('')}</div>`
+      : '';
+
+    el.innerHTML = `${primarySummary}${meta}${detailList}`;
+  }
+
+  function renderAgentRanking(scan = null, cfg = {}) {
+    const summaryEl = document.getElementById('ai-agent-ranking-summary');
+    const listEl = document.getElementById('ai-agent-ranking');
+    if (!summaryEl || !listEl) return;
+
+    const mode = String(cfg.symbol_mode || 'manual').toLowerCase();
+    if (!scan) {
+      summaryEl.textContent = mode === 'auto'
+        ? '还没有自动选币结果，点“刷新排行榜”即可看当前前十。'
+        : '当前是固定币种模式，不会在币池里轮换。';
+      listEl.innerHTML = mode === 'auto'
+        ? '<div class="ai-agent-empty">等待生成排行榜...</div>'
+        : '<div class="ai-agent-empty">固定币种模式下只会盯住单一 symbol。</div>';
+      return;
+    }
+
+    const selected = String(scan.selected_symbol || cfg.symbol || '--');
+    const selectionReason = String(scan.selection_reason || '--');
+    const count = Number(scan.candidate_count || 0);
+    summaryEl.textContent = `模式：${symbolModeLabel(scan.symbol_mode || cfg.symbol_mode)}，当前选中 ${selected}，候选 ${count} 个，原因：${selectionReason}`;
+
+    const rows = Array.isArray(scan.top_candidates) ? scan.top_candidates : [];
+    if (!rows.length) {
+      listEl.innerHTML = '<div class="ai-agent-empty">这次没有拿到可用的选币结果。</div>';
+      return;
+    }
+
+    listEl.innerHTML = rows.map((row) => {
+      const tradableText = row.tradable_now ? '可直接交易' : (row.blocked_by_risk ? '被风险拦截' : '暂不达标');
+      const tone = row.tradable_now ? 'is-good' : (row.blocked_by_risk ? 'is-warn' : 'is-info');
+      return `
+        <div class="ai-agent-ranking-row ${row.selected ? 'is-selected' : ''}">
+          <div class="ai-agent-ranking-head">
+            <span class="ai-agent-ranking-rank">#${esc(row.rank || '--')}</span>
+            <span class="ai-agent-ranking-symbol">${esc(row.symbol || '--')}</span>
+            <span class="ai-agent-ranking-score">${esc(formatRatio(row.score, 3))}</span>
+          </div>
+          <div class="ai-agent-ranking-meta">
+            <span>${esc(String(row.direction || '--'))} / ${esc(formatRatio(row.confidence, 3))}</span>
+            <span class="ai-agent-mini-tag ${tone}">${esc(tradableText)}</span>
+          </div>
+          <div class="ai-agent-ranking-detail">${esc(row.summary || '--')}</div>
+        </div>
+      `;
+    }).join('');
+  }
+
   function renderAgentPanel(status = {}, cfg = {}) {
     const dot = document.getElementById('ai-agent-status-dot');
     const info = document.getElementById('ai-agent-info');
@@ -144,30 +328,35 @@
 
     const researchCtx = status.last_research_context || {};
     const selectedResearch = researchCtx.selected_candidate || {};
+    const lastScan = status.last_symbol_scan || {};
+    const activeSymbol = String(lastScan.selected_symbol || cfg.symbol || '--');
     const researchLine = selectedResearch.candidate_id
       ? `${selectedResearch.strategy || '--'} / ${selectedResearch.candidate_id}`
       : '--';
     const lastRunAt = fmtAgentTs(status.last_run_at);
     const lastError = String(status.last_error || '').trim();
-    const modeText = cfg.allow_live ? '允许实盘' : '仅纸盘';
     const modelText = cfg.model ? `${providerDisplayName(cfg.provider || '-')}/${cfg.model}` : providerDisplayName(cfg.provider || '-');
 
     info.innerHTML = `
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 8px;font-size:11px;">
-        <span style="color:var(--text-muted)">模型</span>
+      <div class="ai-agent-info-grid">
+        <span>模型</span>
         <span>${esc(modelText)}</span>
-        <span style="color:var(--text-muted)">模式</span>
-        <span>${esc(modeText)}</span>
-        <span style="color:var(--text-muted)">轮询次数</span>
+        <span>执行模式</span>
+        <span>${esc(decisionModeLabel(cfg.mode || 'execute'))} / ${esc(cfg.allow_live ? '允许实盘' : '仅纸盘')}</span>
+        <span>币种模式</span>
+        <span>${esc(symbolModeLabel(cfg.symbol_mode || 'manual'))}</span>
+        <span>当前盯盘</span>
+        <span>${esc(activeSymbol)}</span>
+        <span>轮询次数</span>
         <span>${esc(Number(status.tick_count || 0))}</span>
-        <span style="color:var(--text-muted)">已提交信号</span>
+        <span>已提交信号</span>
         <span>${esc(Number(status.submitted_count || 0))}</span>
-        <span style="color:var(--text-muted)">参考候选</span>
+        <span>参考候选</span>
         <span>${esc(researchLine)}</span>
-        <span style="color:var(--text-muted)">最后运行</span>
+        <span>最后运行</span>
         <span>${esc(lastRunAt)}</span>
       </div>
-      ${lastError ? `<div style="margin-top:6px;font-size:11px;color:#f87171;">错误：${esc(lastError)}</div>` : ''}
+      ${lastError ? `<div class="ai-agent-error">错误：${esc(lastError)}</div>` : ''}
     `;
 
     const startBtn = document.getElementById('ai-agent-start-btn');
@@ -180,45 +369,104 @@
       stopBtn.disabled = !running;
       stopBtn.textContent = '停止';
     }
+
     renderAgentChainSummary(status, cfg);
+    renderAgentDiagnostics(status, cfg);
+    renderAgentRanking(status.last_symbol_scan || null, cfg);
+    syncAgentConfigForm(cfg);
   }
 
   async function loadAgentJournal() {
     const el = document.getElementById('ai-agent-journal');
     if (!el) return;
     try {
-      const response = await rootApi('/ai/autonomous-agent/journal?limit=15');
+      const response = await rootApi(`${AGENT_JOURNAL_API}?limit=15`);
       const rows = Array.isArray(response?.items) ? response.items.slice().reverse() : [];
       if (!rows.length) {
-        el.innerHTML = '<div style="color:var(--text-muted)">暂无日志</div>';
+        el.innerHTML = '<div class="ai-agent-empty">暂无日志</div>';
         return;
       }
       el.innerHTML = rows.map((row) => {
-        const ts = fmtAgentTs(row.ts || row.timestamp || '');
-        const action = String(row.action || row.trigger || row.event || '?');
-        const detail = compactText(row.decision || row.result || row.error || '', 120);
-        const color = row.error || action.includes('error') ? '#f87171' : 'var(--text-muted)';
-        return `<div class="agent-journal-row">
-          <span class="agent-journal-ts">${esc(ts)}</span>
-          <span class="agent-journal-action" style="color:${color}">${esc(action)}</span>
-          <span class="agent-journal-detail">${esc(detail)}</span>
-        </div>`;
+        const ts = fmtAgentTs(row.timestamp || row.ts || '');
+        const decision = row.decision || {};
+        const diagnostics = row.diagnostics || {};
+        const primary = diagnostics.primary || {};
+        const tone = toneClass(primary.tone || (row.execution?.submitted ? 'good' : 'info'));
+        const actionText = decisionActionText(decision.action || row.action || row.trigger || '?');
+        const symbolText = row.config?.symbol || diagnostics.selected_symbol || '--';
+        const detailText = primary.label
+          ? `${primary.label}${primary.detail ? `：${primary.detail}` : ''}`
+          : compactText(decision.reason || diagnostics.summary || row.execution?.reason || '--', 120);
+        return `
+          <div class="agent-journal-row">
+            <span class="agent-journal-ts">${esc(ts)}</span>
+            <span class="agent-journal-action ${tone}">${esc(actionText)}</span>
+            <span class="agent-journal-symbol">${esc(symbolText)}</span>
+            <span class="agent-journal-detail">${esc(detailText)}</span>
+          </div>
+        `;
       }).join('');
     } catch (_) {
-      el.innerHTML = '<div style="color:var(--text-muted)">日志加载失败</div>';
+      el.innerHTML = '<div class="ai-agent-empty">日志加载失败</div>';
+    }
+  }
+
+  async function loadAgentSymbolRanking(force = false) {
+    try {
+      const response = await rootApi(`${AGENT_SYMBOL_RANKING_API}?limit=10${force ? '&refresh=1' : ''}`);
+      const cfg = {
+        symbol_mode: response?.symbol_mode || document.getElementById('ai-agent-symbol-mode')?.value || 'manual',
+        symbol: response?.configured_symbol || document.getElementById('ai-agent-manual-symbol')?.value || 'BTC/USDT',
+      };
+      renderAgentRanking(response || null, cfg);
+      return response;
+    } catch (err) {
+      notify(`刷新选币排行失败: ${err.message}`, true);
+      renderAgentRanking(null, {
+        symbol_mode: document.getElementById('ai-agent-symbol-mode')?.value || 'manual',
+        symbol: document.getElementById('ai-agent-manual-symbol')?.value || 'BTC/USDT',
+      });
+      return null;
+    }
+  }
+
+  async function saveAgentConfig() {
+    const symbolMode = String(document.getElementById('ai-agent-symbol-mode')?.value || 'manual').toLowerCase();
+    const symbol = String(document.getElementById('ai-agent-manual-symbol')?.value || 'BTC/USDT').trim().toUpperCase();
+    const universeSymbols = parseSymbolList(document.getElementById('ai-agent-universe-symbols')?.value || '');
+
+    try {
+      const payload = {
+        symbol_mode: symbolMode,
+        symbol,
+        universe_symbols: universeSymbols,
+        selection_top_n: 10,
+      };
+      const response = await rootApi(AGENT_CONFIG_API, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      const cfg = response?.config || {};
+      syncAgentConfigForm(cfg);
+      notify('自动交易代理配置已保存');
+      await loadAgentStatus();
+      if (symbolMode === 'auto') await loadAgentSymbolRanking(true);
+    } catch (err) {
+      notify(`保存代理配置失败: ${err.message}`, true);
     }
   }
 
   async function loadAgentStatus() {
-    if (!document.getElementById('ai-agent-card')) return;
+    if (!document.getElementById('ai-agent-card')) return null;
     try {
-      const response = await rootApi('/ai/autonomous-agent/status');
+      const response = await rootApi(AGENT_STATUS_API);
       renderAgentPanel(response?.status || {}, response?.config || {});
       if (document.getElementById('ai-agent-journal')) {
         loadAgentJournal().catch(() => {});
       }
+      return response;
     } catch (_) {
-      // best-effort
+      return null;
     }
   }
 
@@ -230,7 +478,7 @@
       btn.textContent = '启动中...';
     }
     try {
-      await rootApi('/ai/autonomous-agent/start', {
+      await rootApi(AGENT_START_API, {
         method: 'POST',
         body: JSON.stringify({ enable: true }),
       });
@@ -253,7 +501,7 @@
       btn.textContent = '停止中...';
     }
     try {
-      await rootApi('/ai/autonomous-agent/stop', { method: 'POST' });
+      await rootApi(AGENT_STOP_API, { method: 'POST' });
       notify('自动交易代理已停止');
       await loadAgentStatus();
     } catch (err) {
@@ -267,18 +515,20 @@
 
   async function agentRunOnce() {
     const btn = document.getElementById('ai-agent-run-once-btn');
-    const label = btn ? btn.textContent : '单次运行';
+    const label = btn ? btn.textContent : '立即跑一轮';
     if (btn) {
       btn.disabled = true;
       btn.textContent = '运行中...';
     }
     try {
-      const response = await rootApi('/ai/autonomous-agent/run-once', {
+      const response = await rootApi(AGENT_RUN_ONCE_API, {
         method: 'POST',
         body: JSON.stringify({}),
       });
-      const decision = response?.result?.decision || response?.result?.action || 'done';
-      notify(`单次运行结果：${decision}`);
+      const result = response?.result || {};
+      const action = decisionActionText(result?.decision?.action || 'hold');
+      const symbol = String(result?.effective_symbol || result?.selection?.selected_symbol || '--');
+      notify(`单次试跑完成：${symbol} / ${action}`);
       await loadAgentStatus();
     } catch (err) {
       notify(`运行失败: ${err.message}`, true);
@@ -297,10 +547,16 @@
 
   function init() {
     if (!document.getElementById('ai-agent-card')) return;
+
     const modules = aiRoot().modules || {};
     modules.agent = {
       refresh: () => loadAgentStatus(),
       refreshJournal: () => loadAgentJournal(),
+      refreshRanking: () => loadAgentSymbolRanking(true),
+      saveConfig: () => saveAgentConfig(),
+      start: () => agentStart(),
+      stop: () => agentStop(),
+      runOnce: () => agentRunOnce(),
     };
     aiRoot().modules = modules;
 
@@ -308,6 +564,10 @@
     window.agentStop = agentStop;
     window.agentRunOnce = agentRunOnce;
     window.agentRefreshJournal = () => loadAgentJournal().catch(() => {});
+    window.agentRefreshRanking = () => loadAgentSymbolRanking(true);
+    window.agentSaveConfig = () => saveAgentConfig();
+    window.agentToggleSymbolMode = () => updateAgentSymbolModeVisibility();
+
     window.addEventListener('ai-research:state', (event) => {
       const reason = String(event?.detail?.reason || '');
       if (['refresh-workbench', 'runtime-summary', 'candidate-detail'].includes(reason)) {
@@ -315,7 +575,12 @@
       }
     });
 
-    loadAgentStatus().catch(() => {});
+    loadAgentStatus().then((response) => {
+      const cfg = response?.config || {};
+      if (String(cfg.symbol_mode || 'manual').toLowerCase() === 'auto') {
+        loadAgentSymbolRanking(false).catch(() => {});
+      }
+    }).catch(() => {});
     startPolling();
   }
 
