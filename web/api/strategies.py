@@ -1,6 +1,6 @@
 ﻿"""Strategy API endpoints."""
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -40,6 +40,37 @@ from web.api.backtest import (
 )
 
 router = APIRouter()
+
+
+_MONITOR_RESAMPLE_RULES: Dict[str, str] = {
+    "1m": "1min",
+    "3m": "3min",
+    "5m": "5min",
+    "15m": "15min",
+    "30m": "30min",
+    "1h": "1h",
+    "2h": "2h",
+    "4h": "4h",
+    "6h": "6h",
+    "8h": "8h",
+    "12h": "12h",
+    "1d": "1D",
+    "1w": "1W",
+}
+
+_MONITOR_TIMEFRAME_FALLBACKS: List[str] = [
+    "1m",
+    "3m",
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "2h",
+    "4h",
+    "6h",
+    "12h",
+    "1d",
+]
 
 
 def _recommended_symbols(strategy_type: str) -> List[str]:
@@ -107,6 +138,114 @@ def _json_safe_value(value: Any) -> Any:
         except Exception:
             pass
     return str(value)
+
+
+def _monitor_timeframe_candidates(timeframe: str) -> List[str]:
+    target = str(timeframe or "1h").strip().lower() or "1h"
+    target_sec = max(1, _timeframe_to_seconds(target))
+    finer: List[str] = []
+    coarser: List[str] = []
+    same: List[str] = []
+    seen = {target}
+    for tf in _MONITOR_TIMEFRAME_FALLBACKS:
+        if tf in seen:
+            continue
+        seen.add(tf)
+        cur_sec = max(1, _timeframe_to_seconds(tf))
+        if cur_sec < target_sec:
+            finer.append(tf)
+        elif cur_sec > target_sec:
+            coarser.append(tf)
+        else:
+            same.append(tf)
+    finer.sort(key=_timeframe_to_seconds, reverse=True)
+    coarser.sort(key=_timeframe_to_seconds)
+    return [target, *same, *finer, *coarser]
+
+
+def _monitor_resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    rule = _MONITOR_RESAMPLE_RULES.get(str(timeframe or "").strip().lower())
+    if not rule:
+        return pd.DataFrame()
+    src = df.copy()
+    src.index = pd.to_datetime(src.index)
+    src = src.sort_index()
+    out = pd.concat(
+        [
+            src[["open", "high", "low", "close"]].resample(rule).agg(
+                {"open": "first", "high": "max", "low": "min", "close": "last"}
+            ),
+            src[["volume"]].resample(rule).sum(),
+        ],
+        axis=1,
+    )
+    return out.dropna(subset=["open", "high", "low", "close"])
+
+
+async def _load_monitor_ohlcv_with_fallback(
+    *,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    end_time: datetime,
+    bars: int,
+) -> tuple[pd.DataFrame, str]:
+    target_tf = str(timeframe or "1h").strip().lower() or "1h"
+    target_sec = max(60, _timeframe_to_seconds(target_tf))
+    start_time = end_time - timedelta(seconds=target_sec * (bars + 50))
+    local_end = end_time.astimezone().replace(tzinfo=None)
+    fresh_cutoff = local_end - timedelta(seconds=max(target_sec * 3, 1800))
+
+    best_df = pd.DataFrame()
+    best_source = target_tf
+    best_latest: Optional[pd.Timestamp] = None
+
+    for source_tf in _monitor_timeframe_candidates(target_tf):
+        raw_df = await data_storage.load_klines_from_parquet(
+            exchange=exchange,
+            symbol=symbol,
+            timeframe=source_tf,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        if raw_df is None or raw_df.empty:
+            continue
+
+        candidate_df = raw_df.copy()
+        candidate_df.index = pd.to_datetime(candidate_df.index)
+        candidate_df = candidate_df.sort_index()
+
+        if source_tf != target_tf:
+            source_sec = max(60, _timeframe_to_seconds(source_tf))
+            if source_sec < target_sec:
+                candidate_df = _monitor_resample_ohlcv(candidate_df, target_tf)
+        if candidate_df.empty:
+            continue
+
+        latest = pd.Timestamp(candidate_df.index.max())
+        if best_latest is None or latest > best_latest:
+            best_df = candidate_df
+            best_source = source_tf
+            best_latest = latest
+        if latest >= fresh_cutoff:
+            return candidate_df.tail(bars), source_tf
+
+    if best_latest is not None:
+        return best_df.tail(bars), best_source
+    return pd.DataFrame(), target_tf
+
+
+def _shift_iso_timestamp(ts_raw: Optional[str], seconds: int) -> Optional[str]:
+    text = str(ts_raw or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return text
+    return (dt + timedelta(seconds=int(seconds or 0))).isoformat()
 
 
 def _normalize_strategy_specific_params(strategy_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -1352,16 +1491,11 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     """Return combined OHLCV + signals + equity curve for the strategy monitor panel.
 
     Data sources (all read-only, no side effects):
-      - OHLCV: data_storage.load_klines_from_parquet (local parquet cache)
-      - Signals: strategy.get_recent_signals(200) (in-memory, last 1000 max)
-      - Equity curve: risk_manager.get_trade_history filtered by strategy name,
-                      reconstructed with per-trade timestamps
+      - OHLCV: local parquet cache, with timeframe fallback when the target file is stale
+      - Signals: executed live trade journal first, fallback to strategy.get_recent_signals(200)
+      - Equity curve: executed live trade journal first, fallback to risk_manager history
       - Positions: position_manager.get_positions_by_strategy(name)
     """
-    from datetime import timedelta
-    from core.data.data_storage import data_storage
-    from core.trading.position_manager import position_manager
-
     bars = max(50, min(int(bars), 500))
 
     # ── 1. Strategy info ─────────────────────────────────────────────────────
@@ -1373,20 +1507,33 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     symbol = (info.get("symbols") or ["BTC/USDT"])[0]
     timeframe = str(info.get("timeframe") or "1h")
     is_running = bool(info.get("state") == "running")
+    exchange = str(info.get("exchange") or "binance").strip().lower() or "binance"
+
+    live_review_items: list = []
+    try:
+        live_review = execution_engine.get_live_trade_review(
+            limit=2000,
+            strategy=name,
+            hours=24 * 365,
+        )
+        live_review_items = [
+            row for row in (live_review.get("items") or [])
+            if isinstance(row, dict)
+        ]
+    except Exception as exc:
+        logger.debug(f"monitor-data: live review load failed for {name}: {exc}")
 
     # ── 2. OHLCV bars ────────────────────────────────────────────────────────
     ohlcv: list = []
+    ohlcv_source_timeframe = timeframe
     try:
         end_time = datetime.now(timezone.utc)
-        start_time = end_time - timedelta(
-            seconds=_timeframe_to_seconds(timeframe) * (bars + 50)
-        )
-        df = await data_storage.load_klines_from_parquet(
-            exchange=str(info.get("exchange") or "binance"),
+        df, ohlcv_source_timeframe = await _load_monitor_ohlcv_with_fallback(
+            exchange=exchange,
             symbol=symbol,
             timeframe=timeframe,
-            start_time=start_time,
             end_time=end_time,
+            bars=bars,
         )
         if df is not None and not df.empty:
             df = df.tail(bars)
@@ -1405,14 +1552,14 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
         logger.debug(f"monitor-data: OHLCV load failed for {name}: {exc}")
 
     # ── 3. Signals ───────────────────────────────────────────────────────────
-    signals: list = []
+    recent_signals: list = []
     if strategy:
         try:
             for sig in (strategy.get_recent_signals(200) or []):
                 sig_ts = getattr(sig, "timestamp", None)
                 sig_type = getattr(sig, "signal_type", None)
                 sig_type_value = sig_type.value if hasattr(sig_type, "value") else str(sig_type or "")
-                signals.append({
+                recent_signals.append({
                     "t":           sig_ts.isoformat() if hasattr(sig_ts, "isoformat") else str(sig_ts),
                     "type":        sig_type_value,
                     "price":       _safe_float(getattr(sig, "price", 0.0), 0.0),
@@ -1422,6 +1569,20 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
                 })
         except Exception as exc:
             logger.debug(f"monitor-data: signals failed for {name}: {exc}")
+
+    executed_signals: list = []
+    for row in live_review_items:
+        signal_payload = row.get("signal") if isinstance(row.get("signal"), dict) else {}
+        executed_signals.append({
+            "t":           str(row.get("timestamp") or "").strip(),
+            "type":        str(row.get("signal_type") or row.get("side") or "").strip().lower(),
+            "price":       _safe_float(row.get("fill_price") or signal_payload.get("price") or 0.0, 0.0),
+            "strength":    _safe_float(signal_payload.get("strength"), 1.0),
+            "stop_loss":   _safe_optional_float(signal_payload.get("stop_loss")),
+            "take_profit": _safe_optional_float(signal_payload.get("take_profit")),
+        })
+
+    signals = executed_signals or recent_signals
 
     # ── 4. Equity curve with timestamps ──────────────────────────────────────
     equity: list = []
@@ -1436,28 +1597,45 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
             current_equity * float((config.allocation if config else 0) or 0),
         )
 
+        history_trades = [
+            r for r in risk_manager.get_trade_history(limit=5000)
+            if isinstance(r, dict) and str(r.get("strategy") or "").strip() == name
+        ]
         trades = sorted(
-            [r for r in risk_manager.get_trade_history(limit=5000)
-             if isinstance(r, dict) and str(r.get("strategy") or "").strip() == name],
+            live_review_items or history_trades,
             key=lambda r: str(r.get("timestamp") or ""),
         )
 
         mark = equity_base
         realized = 0.0
-        equity.append({"t": None, "v": round(mark, 4)})
+        timeframe_sec = max(60, _timeframe_to_seconds(timeframe))
+        now_ts = datetime.now(timezone.utc).isoformat()
+        base_ts = ohlcv[0]["t"] if ohlcv else None
+        end_ts = ohlcv[-1]["t"] if ohlcv else now_ts
+        if not base_ts and trades:
+            base_ts = _shift_iso_timestamp(str(trades[0].get("timestamp") or "").strip(), -timeframe_sec)
+        if not base_ts:
+            base_ts = _shift_iso_timestamp(end_ts, -timeframe_sec) or end_ts
+        equity.append({"t": base_ts, "v": round(mark, 4)})
         for trade in trades:
             pnl = float(trade.get("pnl") or 0.0)
             ts_raw = str(trade.get("timestamp") or "").strip()
             mark += pnl
             realized += pnl
-            equity.append({"t": ts_raw or None, "v": round(mark, 4)})
+            equity.append({"t": ts_raw or end_ts, "v": round(mark, 4)})
 
         unrealized = sum(
             float(p.unrealized_pnl or 0.0)
             for p in position_manager.get_positions_by_strategy(name)
         )
+        final_value = round(mark + unrealized, 4)
         if equity:
-            equity[-1]["v"] = round(mark + unrealized, 4)
+            last_ts = str((equity[-1] or {}).get("t") or "").strip()
+            last_val = _safe_float((equity[-1] or {}).get("v"), mark)
+            if end_ts and (last_ts != str(end_ts) or abs(last_val - final_value) > 1e-9):
+                equity.append({"t": end_ts, "v": final_value})
+            else:
+                equity[-1]["v"] = final_value
 
         win_count = sum(1 for t in trades if float(t.get("pnl") or 0) > 0)
         metrics = {
@@ -1497,6 +1675,7 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
         "name":       name,
         "symbol":     symbol,
         "timeframe":  timeframe,
+        "ohlcv_source_timeframe": ohlcv_source_timeframe,
         "is_running": is_running,
         "ohlcv":      ohlcv,
         "signals":    signals,
