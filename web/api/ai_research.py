@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, HTTPException, Request
 from loguru import logger
@@ -161,7 +161,7 @@ class AIAutonomousAgentConfigUpdateRequest(BaseModel):
     exchange: Optional[str] = None
     symbol: Optional[str] = None
     symbol_mode: Optional[str] = None
-    universe_symbols: Optional[List[str] | str] = None
+    universe_symbols: Optional[Union[List[str], str]] = None
     selection_top_n: Optional[int] = Field(default=None, ge=3, le=20)
     timeframe: Optional[str] = None
     interval_sec: Optional[int] = Field(default=None, ge=15, le=7200)
