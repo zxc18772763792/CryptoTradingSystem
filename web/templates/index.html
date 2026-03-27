@@ -764,9 +764,30 @@
                             <div class="form-group">
                                 <label>回溯天数</label>
                                 <input type="number" id="download-days" value="30" min="1" max="365">
+                                <div class="form-help">未填写开始/结束日期时，按回溯天数下载。</div>
                             </div>
-                            <button type="submit" class="btn btn-primary">开始下载</button>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>开始日期</label>
+                                    <input type="date" id="download-start-date">
+                                </div>
+                                <div class="form-group">
+                                    <label>结束日期</label>
+                                    <input type="date" id="download-end-date">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label>批量币种（可选）</label>
+                                <textarea id="download-symbols-batch" rows="4" placeholder="留空时只下载上面的交易对。支持逗号、空格或换行分隔，例如：&#10;BTC/USDT, ETH/USDT, SOL/USDT"></textarea>
+                                <div class="form-help">填写后会批量排队下载这些币种；适合提前准备研究用历史数据。</div>
+                            </div>
+                            <div class="inline-actions">
+                                <button type="button" class="btn btn-primary btn-sm" id="btn-download-fill-research">填入研究币池</button>
+                                <button type="button" class="btn btn-primary btn-sm" id="btn-download-clear-batch">清空批量币种</button>
+                                <button type="submit" class="btn btn-primary">开始下载</button>
+                            </div>
                         </form>
+                        <pre id="download-output" class="output-box">下载说明：可选单个交易对快速下载，也可指定开始日期并批量补充多币种历史数据。</pre>
                     </div>
 
                     <div class="card wide data-health-card">

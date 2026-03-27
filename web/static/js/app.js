@@ -1906,6 +1906,61 @@ await new Promise(r=>setTimeout(r,intervalMs));
 }
 throw new Error(`后台下载超时: ${taskId}`);
 }
+async function pollBatchDownloadTasks(taskIds,{timeoutMs=25*60*1000,intervalMs=3000}={}){
+const ids=Array.from(new Set((Array.isArray(taskIds)?taskIds:[]).map(v=>String(v||'').trim()).filter(Boolean)));
+if(!ids.length)return[];
+const wanted=new Set(ids);
+const start=Date.now();
+while(Date.now()-start<timeoutMs){
+  const resp=await api('/data/download/tasks',{timeoutMs:15000});
+  const tasks=Array.isArray(resp?.tasks)?resp.tasks:[];
+  const matched=tasks.filter(task=>wanted.has(String(task?.task_id||'').trim()));
+  if(matched.length===ids.length&&matched.every(task=>['completed','failed'].includes(String(task?.status||'')))){
+    return matched;
+  }
+  await new Promise(r=>setTimeout(r,intervalMs));
+}
+throw new Error(`批量下载超时: ${ids.length} 个任务`);
+}
+function getDownloadOutputEl(){return document.getElementById('download-output');}
+function parseDownloadBatchSymbols(raw,fallback=''){
+const text=String(raw||'').trim();
+const source=text||String(fallback||'').trim();
+if(!source)return[];
+return Array.from(new Set(source.split(/[\s,;，、]+/).map(item=>String(item||'').trim().toUpperCase()).filter(Boolean).map(item=>item.includes('/')?item:`${item}/USDT`)));
+}
+function getDownloadDateRange(){
+const startRaw=String(document.getElementById('download-start-date')?.value||'').trim();
+const endRaw=String(document.getElementById('download-end-date')?.value||'').trim();
+return{
+  start_time:startRaw?`${startRaw}T00:00:00`:null,
+  end_time:endRaw?`${endRaw}T23:59:59`:null,
+};
+}
+function getDownloadRequestedDays(tf,range={}){
+const inputEl=document.getElementById('download-days');
+const rawValue=Number(inputEl?.value||0);
+const fallback=guessDataDownloadDays(tf);
+const manualDays=Number.isFinite(rawValue)&&rawValue>0?Math.round(rawValue):fallback;
+if(range?.start_time&&range?.end_time)return guessDataDownloadDays(tf,range.start_time,range.end_time);
+return Math.max(1,Math.min(1200,manualDays));
+}
+function formatDownloadBatchSummary(payload,tasks=[]){
+const symbols=Array.isArray(payload?.symbols)?payload.symbols:[];
+const taskRows=Array.isArray(tasks)?tasks:[];
+const completed=taskRows.filter(task=>String(task?.status||'')==='completed');
+const failed=taskRows.filter(task=>String(task?.status||'')==='failed');
+const totalCount=completed.reduce((sum,task)=>sum+Number(task?.result?.count||0),0);
+return [
+  `批量下载: ${payload?.exchange||'-'} / ${payload?.timeframe||'-'}`,
+  `时间范围: ${(payload?.start_time||'未指定')} -> ${(payload?.end_time||'现在')}`,
+  `币种数量: ${symbols.length}`,
+  `任务结果: 完成 ${completed.length} / 失败 ${failed.length}`,
+  `累计K线: ${Number(totalCount||0).toLocaleString('zh-CN')}`,
+  `${symbols.length?`Symbols: ${symbols.join(', ')}`:'Symbols: -'}`,
+  `${failed.length?`失败详情: ${failed.map(task=>`${task.symbol||task.task_id}: ${task.error||'unknown error'}`).join(' | ')}`:'失败详情: 无'}`,
+].join('\n');
+}
 function scheduleDataChartReload(delay=180){
 if(dataReloadTimer)clearTimeout(dataReloadTimer);
 dataReloadTimer=setTimeout(()=>{
@@ -2419,7 +2474,95 @@ function bindData(){
 const f=document.getElementById('data-form');
 if(f)f.onsubmit=async e=>{e.preventDefault();try{await loadKlinesByForm();notify('行情加载完成（可拖动自动加载历史）');}catch(err){marketDataState.isLoading=false;notify(`行情加载失败: ${err.message}`,true);}};
 const d=document.getElementById('download-form');
-if(d)d.onsubmit=async e=>{e.preventDefault();try{notify('正在创建历史下载任务...');const ex=document.getElementById('download-exchange').value,s=document.getElementById('download-symbol').value,tf=document.getElementById('download-timeframe').value,days=document.getElementById('download-days').value;const r=await api(`/data/download?exchange=${ex}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&days=${days}&background=true`,{method:'POST',timeoutMs:20000});if(r?.task_id){notify(`后台下载已启动: ${r.task_id}`);const task=await pollDownloadTask(r.task_id);const count=Number(task?.result?.count||0);notify(`下载完成: ${count} 根K线`);if(document.getElementById('data-exchange')?.value===ex&&document.getElementById('data-symbol')?.value===s&&document.getElementById('data-timeframe')?.value===tf){loadKlinesByForm().catch(()=>{});}return;}notify(`下载完成: ${r.count||0} 根K线`);}catch(err){notify(`下载失败: ${err.message}`,true);}};
+if(d)d.onsubmit=async e=>{
+  e.preventDefault();
+  const downloadOut=getDownloadOutputEl();
+  try{
+    const ex=String(document.getElementById('download-exchange')?.value||'binance').trim()||'binance';
+    const s=String(document.getElementById('download-symbol')?.value||'BTC/USDT').trim()||'BTC/USDT';
+    const tf=String(document.getElementById('download-timeframe')?.value||'1h').trim()||'1h';
+    const range=getDownloadDateRange();
+    const days=getDownloadRequestedDays(tf,range);
+    const batchSymbols=parseDownloadBatchSymbols(document.getElementById('download-symbols-batch')?.value||'',s);
+    if(downloadOut)downloadOut.textContent=`正在创建历史下载任务...\n交易所: ${ex}\n周期: ${tf}\n币种数: ${batchSymbols.length}\n时间范围: ${range.start_time||'未指定'} -> ${range.end_time||'现在'}`;
+    notify(batchSymbols.length>1?'正在创建批量历史下载任务...':'正在创建历史下载任务...');
+    if(batchSymbols.length<=1){
+      const parts=[
+        `exchange=${encodeURIComponent(ex)}`,
+        `symbol=${encodeURIComponent(batchSymbols[0]||s)}`,
+        `timeframe=${encodeURIComponent(tf)}`,
+        `days=${encodeURIComponent(days)}`,
+        'background=true',
+      ];
+      if(range.start_time)parts.push(`start_time=${encodeURIComponent(range.start_time)}`);
+      if(range.end_time)parts.push(`end_time=${encodeURIComponent(range.end_time)}`);
+      const r=await api(`/data/download?${parts.join('&')}`,{method:'POST',timeoutMs:20000});
+      if(r?.task_id){
+        if(downloadOut)downloadOut.textContent=`后台下载已启动\nTask: ${r.task_id}\n交易对: ${batchSymbols[0]||s}\n时间范围: ${range.start_time||'未指定'} -> ${range.end_time||'现在'}`;
+        notify(`后台下载已启动: ${r.task_id}`);
+        const task=await pollDownloadTask(r.task_id);
+        const count=Number(task?.result?.count||0);
+        if(downloadOut)downloadOut.textContent=`下载完成\n交易对: ${task?.symbol||batchSymbols[0]||s}\n周期: ${task?.timeframe||tf}\nK线数量: ${count.toLocaleString('zh-CN')}\n范围: ${task?.result?.start||range.start_time||'-'} -> ${task?.result?.end||range.end_time||'现在'}`;
+        notify(`下载完成: ${count} 根K线`);
+        if(document.getElementById('data-exchange')?.value===ex&&document.getElementById('data-symbol')?.value===(batchSymbols[0]||s)&&document.getElementById('data-timeframe')?.value===tf){loadKlinesByForm().catch(()=>{});}
+        return;
+      }
+      if(downloadOut)downloadOut.textContent=`下载完成\n交易对: ${batchSymbols[0]||s}\nK线数量: ${Number(r?.count||0).toLocaleString('zh-CN')}`;
+      notify(`下载完成: ${r.count||0} 根K线`);
+      return;
+    }
+    const payload={
+      exchange:ex,
+      symbols:batchSymbols,
+      timeframe:tf,
+      days,
+      start_time:range.start_time,
+      end_time:range.end_time,
+      background:true,
+    };
+    const r=await api('/data/download/batch',{method:'POST',body:JSON.stringify(payload),timeoutMs:30000});
+    if(downloadOut)downloadOut.textContent=[
+      `批量下载任务已创建`,
+      `交易所: ${ex}`,
+      `周期: ${tf}`,
+      `币种数: ${batchSymbols.length}`,
+      `时间范围: ${range.start_time||'未指定'} -> ${range.end_time||'现在'}`,
+      `Task IDs: ${(Array.isArray(r?.task_ids)?r.task_ids:[]).join(', ')}`
+    ].join('\n');
+    notify(`批量下载已排队: ${Number(r?.task_count||0)} 个任务`);
+    const tasks=await pollBatchDownloadTasks(Array.isArray(r?.task_ids)?r.task_ids:[]);
+    if(downloadOut)downloadOut.textContent=formatDownloadBatchSummary(r,tasks);
+    const completed=tasks.filter(task=>String(task?.status||'')==='completed').length;
+    const failed=tasks.filter(task=>String(task?.status||'')==='failed').length;
+    notify(`批量下载完成: ${completed} 成功 / ${failed} 失败${failed?`，详见下载输出`:''}`,failed>0);
+  }catch(err){
+    if(downloadOut)downloadOut.textContent=`下载失败: ${err.message}`;
+    notify(`下载失败: ${err.message}`,true);
+  }
+};
+const fillResearchBtn=document.getElementById('btn-download-fill-research');
+if(fillResearchBtn)fillResearchBtn.onclick=async()=>{
+  const ex=String(document.getElementById('download-exchange')?.value||'binance').trim()||'binance';
+  const textarea=document.getElementById('download-symbols-batch');
+  const downloadOut=getDownloadOutputEl();
+  try{
+    const resp=await api(`/data/research/symbols?exchange=${encodeURIComponent(ex)}`,{timeoutMs:15000});
+    const symbols=(Array.isArray(resp?.symbols)?resp.symbols:[]).slice(0,30);
+    if(textarea)textarea.value=symbols.join('\n');
+    if(downloadOut)downloadOut.textContent=`已填入研究币池\n交易所: ${ex}\n币种数: ${symbols.length}\nSymbols: ${symbols.join(', ')}`;
+    notify(`已填入研究币池: ${symbols.length} 个币种`);
+  }catch(err){
+    if(downloadOut)downloadOut.textContent=`填入研究币池失败: ${err.message}`;
+    notify(`填入研究币池失败: ${err.message}`,true);
+  }
+};
+  const clearBatchBtn=document.getElementById('btn-download-clear-batch');
+if(clearBatchBtn)clearBatchBtn.onclick=()=>{
+  const textarea=document.getElementById('download-symbols-batch');
+  if(textarea)textarea.value='';
+  const downloadOut=getDownloadOutputEl();
+  if(downloadOut)downloadOut.textContent='批量币种已清空。留空时将只下载上面的单个交易对。';
+};
 const out=document.getElementById('data-integrity-output');
 const formatIntegrityOutput=(action,payload)=>{
   if(!payload)return'无结果';

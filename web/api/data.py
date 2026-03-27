@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from loguru import logger
 
 from config.settings import settings
@@ -109,6 +109,16 @@ class ReplayStartRequest(BaseModel):
     end_time: Optional[datetime] = None
     window: int = 300
     speed: float = 1.0
+
+
+class BatchDownloadRequest(BaseModel):
+    exchange: str = "binance"
+    symbols: List[str] = Field(default_factory=list)
+    timeframe: str = "1h"
+    days: int = 365
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    background: bool = True
 
 
 def _timeframe_seconds(timeframe: str) -> int:
@@ -2453,6 +2463,42 @@ async def _run_download_task(task_id: str, payload: Dict[str, Any]) -> None:
         task["finished_at"] = datetime.now(timezone.utc).isoformat()
 
 
+def _normalize_download_symbol_list(symbols: List[str]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for raw in symbols or []:
+        normalized = normalize_symbol(str(raw or "").strip())
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+
+def _queue_download_task(payload: Dict[str, Any]) -> Dict[str, Any]:
+    task_id = _new_download_task_id(payload)
+    start_time = payload.get("start_time")
+    end_time = payload.get("end_time")
+    task_record = {
+        "task_id": task_id,
+        "status": "pending",
+        "exchange": str(payload.get("exchange") or "binance"),
+        "symbol": str(payload.get("symbol") or "BTC/USDT"),
+        "timeframe": str(payload.get("timeframe") or "1h"),
+        "days": int(payload.get("days") or 0),
+        "start_time": start_time.isoformat() if isinstance(start_time, datetime) else (str(start_time) if start_time else None),
+        "end_time": end_time.isoformat() if isinstance(end_time, datetime) else (str(end_time) if end_time else None),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": None,
+        "finished_at": None,
+        "result": None,
+        "error": None,
+    }
+    _DOWNLOAD_TASKS[task_id] = task_record
+    asyncio.create_task(_run_download_task(task_id, payload))
+    return task_record
+
+
 @router.post("/download")
 async def download_historical_data(
     exchange: str,
@@ -2487,31 +2533,78 @@ async def download_historical_data(
             end_time=end_time,
         )
 
-    task_id = _new_download_task_id(payload)
-    task_record = {
-        "task_id": task_id,
-        "status": "pending",
-        "exchange": exchange,
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "days": int(days or 0),
-        "start_time": start_time.isoformat() if start_time else None,
-        "end_time": end_time.isoformat() if end_time else None,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "started_at": None,
-        "finished_at": None,
-        "result": None,
-        "error": None,
-    }
-    _DOWNLOAD_TASKS[task_id] = task_record
-    asyncio.create_task(_run_download_task(task_id, payload))
+    task_record = _queue_download_task(payload)
     return {
         "queued": True,
-        "task_id": task_id,
+        "task_id": task_record["task_id"],
         "status": "pending",
         "message": "历史数据下载已转为后台任务",
         "async_task": task_record,
         "task": task_record,
+    }
+
+
+@router.post("/download/batch")
+async def download_historical_data_batch(req: BatchDownloadRequest):
+    exchange = str(req.exchange or "binance").strip().lower() or "binance"
+    timeframe = str(req.timeframe or "1h").strip() or "1h"
+    symbols = _normalize_download_symbol_list(list(req.symbols or []))
+    if not symbols:
+        raise HTTPException(status_code=400, detail="symbols 不能为空")
+    if len(symbols) > 100:
+        raise HTTPException(status_code=400, detail="单次批量下载最多支持 100 个 symbols")
+
+    start_time = _normalize_query_datetime(req.start_time)
+    end_time = _normalize_query_datetime(req.end_time)
+    days = max(1, int(req.days or 365))
+    if not bool(req.background) and len(symbols) == 1:
+        result = await run_download_historical_data(
+            exchange=exchange,
+            symbol=symbols[0],
+            timeframe=timeframe,
+            days=days,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        return {
+            "queued": False,
+            "message": "单个历史下载已直接执行",
+            "exchange": exchange,
+            "timeframe": timeframe,
+            "days": days,
+            "start_time": start_time.isoformat() if start_time else None,
+            "end_time": end_time.isoformat() if end_time else None,
+            "symbols": symbols,
+            "task_count": 0,
+            "task_ids": [],
+            "tasks": [],
+            "results": [result],
+        }
+
+    tasks: List[Dict[str, Any]] = []
+    for symbol in symbols:
+        payload = {
+            "exchange": exchange,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "days": days,
+            "start_time": start_time,
+            "end_time": end_time,
+        }
+        tasks.append(_queue_download_task(payload))
+
+    return {
+        "queued": True,
+        "message": f"已创建 {len(tasks)} 个历史下载任务",
+        "exchange": exchange,
+        "timeframe": timeframe,
+        "days": days,
+        "start_time": start_time.isoformat() if start_time else None,
+        "end_time": end_time.isoformat() if end_time else None,
+        "symbols": symbols,
+        "task_count": len(tasks),
+        "task_ids": [str(item.get("task_id") or "") for item in tasks],
+        "tasks": tasks,
     }
 
 
