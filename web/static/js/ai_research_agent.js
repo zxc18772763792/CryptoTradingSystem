@@ -109,6 +109,49 @@
     return num.toFixed(digits);
   }
 
+  function formatDurationMinutes(seconds) {
+    const value = Number(seconds);
+    if (!Number.isFinite(value) || value <= 0) return '--';
+    if (value < 60) return `${Math.round(value)}s`;
+    return `${(value / 60).toFixed(value >= 600 ? 0 : 1)} min`;
+  }
+
+  function describeModelFeedback(status = {}, diagnostics = {}) {
+    const feedback = diagnostics.model_feedback || {};
+    const guard = feedback.guard || status.model_feedback_guard || {};
+    const activeKind = String(guard.last_failure_kind || feedback.kind || '').trim();
+    const activeLabel = String(guard.last_failure_label || feedback.label || '').trim();
+    const activeError = String(guard.last_failure_error || feedback.raw_error || '').trim();
+    const activeHttpStatus = Number(guard.last_failure_http_status || feedback.http_status || 0);
+    const lastSuccessAt = fmtAgentTs(guard.last_success_at);
+    const failureStreak = Number(guard.failure_streak || 0);
+
+    if (activeKind) {
+      const statusSuffix = Number.isFinite(activeHttpStatus) && activeHttpStatus > 0 ? ` / HTTP ${activeHttpStatus}` : '';
+      const streakSuffix = failureStreak > 0 ? ` / 连续 ${failureStreak} 次` : '';
+      const successSuffix = lastSuccessAt !== '--' ? ` / 最近成功 ${lastSuccessAt}` : '';
+      return {
+        summary: `${activeLabel || '模型反馈异常'}${statusSuffix}`,
+        detail: `${compactText(activeError || feedback.detail || '模型服务当前未稳定返回', 180)}${streakSuffix}${successSuffix}`,
+        tone: 'danger',
+      };
+    }
+
+    if (lastSuccessAt !== '--') {
+      return {
+        summary: '模型反馈正常',
+        detail: `最近成功 ${lastSuccessAt}`,
+        tone: 'good',
+      };
+    }
+
+    return {
+      summary: '模型反馈待建立',
+      detail: `本进程里还没有成功模型返回，超时阈值 ${formatDurationMinutes(guard.hard_timeout_sec)}`,
+      tone: 'info',
+    };
+  }
+
   function setChainSummaryText(id, value) {
     const el = document.getElementById(id);
     if (!el) return;
@@ -219,6 +262,7 @@
     const diagnostics = status.last_diagnostics || {};
     const items = Array.isArray(diagnostics.items) ? diagnostics.items.slice() : [];
     const runtimeReason = buildRuntimeReason(status, cfg);
+    const modelFeedback = describeModelFeedback(status, diagnostics);
     if (runtimeReason) items.unshift(runtimeReason);
 
     const primary = runtimeReason || diagnostics.primary || null;
@@ -254,6 +298,10 @@
         <div class="ai-agent-diagnostic-item">
           <span>研究状态</span>
           <strong>${esc(String(research.status || '--'))}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>模型反馈</span>
+          <strong class="${toneClass(modelFeedback.tone)}">${esc(modelFeedback.summary)}</strong>
         </div>
       </div>
     `;
@@ -336,6 +384,7 @@
     const lastRunAt = fmtAgentTs(status.last_run_at);
     const lastError = String(status.last_error || '').trim();
     const modelText = cfg.model ? `${providerDisplayName(cfg.provider || '-')}/${cfg.model}` : providerDisplayName(cfg.provider || '-');
+    const modelFeedback = describeModelFeedback(status, status.last_diagnostics || {});
 
     info.innerHTML = `
       <div class="ai-agent-info-grid">
@@ -353,9 +402,12 @@
         <span>${esc(Number(status.submitted_count || 0))}</span>
         <span>参考候选</span>
         <span>${esc(researchLine)}</span>
+        <span>模型反馈</span>
+        <span class="${toneClass(modelFeedback.tone)}">${esc(modelFeedback.summary)}</span>
         <span>最后运行</span>
         <span>${esc(lastRunAt)}</span>
       </div>
+      <div class="ai-agent-muted">${esc(modelFeedback.detail)}</div>
       ${lastError ? `<div class="ai-agent-error">错误：${esc(lastError)}</div>` : ''}
     `;
 

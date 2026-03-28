@@ -376,6 +376,38 @@ def test_agent_model_feedback_outage_alerts_feishu_after_prolonged_429(monkeypat
     assert agent.get_status()["model_feedback_guard"]["last_failure_kind"] == "rate_limit"
 
 
+def test_agent_model_feedback_classifies_503_service_unavailable(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "SHORT", "confidence": 0.79}
+
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        AsyncMock(side_effect=RuntimeError('codex_http_503:{"error":{"message":"Service temporarily unavailable","type":"api_error"}}')),
+    )
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    diagnostics = result["diagnostics"]
+    assert result["decision"]["action"] == "hold"
+    assert diagnostics["primary"]["code"] == "model_service_unavailable"
+    assert "503" in diagnostics["primary"]["label"]
+    assert diagnostics["model_feedback"]["kind"] == "service_unavailable"
+    assert diagnostics["model_feedback"]["http_status"] == 503
+    assert result["status"]["model_feedback_guard"]["last_failure_kind"] == "service_unavailable"
+
+
 def test_agent_model_feedback_guard_hard_timeout_alerts_and_ends_round(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
     from core.notifications import notification_manager

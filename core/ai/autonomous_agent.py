@@ -216,11 +216,64 @@ def _classify_model_feedback_error(exc: BaseException) -> Optional[str]:
     text = str(exc or "").strip().lower()
     if not text:
         return None
+    status = _extract_model_feedback_http_status(text)
     if "timeout" in text:
         return "timeout"
-    if "_http_429" in text or "usage_limit_exceeded" in text or "rate limit" in text or "too many requests" in text:
+    if status == 429 or "_http_429" in text or "usage_limit_exceeded" in text or "rate limit" in text or "too many requests" in text:
         return "rate_limit"
+    if status in {502, 503, 504} or "service temporarily unavailable" in text or "service unavailable" in text:
+        return "service_unavailable"
     return None
+
+
+def _extract_model_feedback_http_status(exc: Any) -> Optional[int]:
+    text = str(exc or "").strip().lower()
+    if not text:
+        return None
+    match = re.search(r"_http_(\d{3})", text)
+    if not match:
+        return None
+    with contextlib.suppress(Exception):
+        return int(match.group(1))
+    return None
+
+
+def _describe_model_feedback_issue(raw_error: Any) -> Dict[str, Any]:
+    normalized = str(raw_error or "").strip()
+    if normalized.startswith("model_error:"):
+        normalized = normalized.split("model_error:", 1)[1].strip()
+
+    kind = _classify_model_feedback_error(RuntimeError(normalized or ""))
+    http_status = _extract_model_feedback_http_status(normalized)
+    if kind == "rate_limit":
+        label = "模型限流或额度受限 (429)"
+        detail = "上游模型接口触发了频率或额度限制，本轮已回退为 hold。"
+        code = "model_rate_limit"
+    elif kind == "service_unavailable":
+        status_suffix = f" ({http_status})" if http_status else ""
+        label = f"模型服务暂时不可用{status_suffix}"
+        detail = "上游模型服务或代理网关暂时不可用，本轮已回退为 hold，稍后会自动重试。"
+        code = "model_service_unavailable"
+    elif kind == "timeout":
+        label = "模型响应超时"
+        detail = "等待模型返回超过超时阈值，本轮已回退为 hold。"
+        code = "model_timeout"
+    else:
+        label = "模型接口异常"
+        detail = "模型接口返回了未分类异常，本轮已回退为 hold。"
+        code = "model_error"
+
+    if normalized:
+        detail = f"{detail} 原始错误: {normalized[:220]}"
+
+    return {
+        "kind": kind,
+        "http_status": http_status,
+        "label": label,
+        "detail": detail,
+        "code": code,
+        "raw_error": normalized[:300],
+    }
 
 
 def _timeframe_to_seconds(timeframe: str) -> int:
@@ -560,12 +613,15 @@ class AutonomousTradingAgent:
         }
 
     def _model_feedback_guard_status(self) -> Dict[str, Any]:
+        last_failure_issue = _describe_model_feedback_issue(self._model_feedback_last_failure_error or "")
         return {
             "last_success_at": _utc_iso_from_unix(self._last_model_feedback_at),
             "outage_started_at": _utc_iso_from_unix(self._model_feedback_outage_started_at),
             "failure_streak": int(self._model_feedback_failure_streak),
             "last_failure_kind": self._model_feedback_last_failure_kind,
             "last_failure_error": self._model_feedback_last_failure_error,
+            "last_failure_http_status": last_failure_issue.get("http_status"),
+            "last_failure_label": last_failure_issue.get("label") if self._model_feedback_last_failure_kind else None,
             "alert_sent_at": _utc_iso_from_unix(self._model_feedback_alert_sent_at),
             "alert_after_sec": _MODEL_FEEDBACK_OUTAGE_ALERT_SEC,
             "hard_timeout_sec": _MODEL_FEEDBACK_HARD_TIMEOUT_SEC,
@@ -584,7 +640,7 @@ class AutonomousTradingAgent:
 
     def _record_model_feedback_failure(self, exc: BaseException) -> Optional[Dict[str, Any]]:
         kind = _classify_model_feedback_error(exc)
-        if kind not in {"rate_limit", "timeout"}:
+        if kind not in {"rate_limit", "service_unavailable", "timeout"}:
             self._reset_model_feedback_outage()
             return None
 
@@ -634,7 +690,7 @@ class AutonomousTradingAgent:
             )
             title = f"AI自动交易模型反馈中断告警: {provider}/{model}"
             message = (
-                "连续出现模型 429/timeout，且超过 30 分钟没有得到成功模型反馈；"
+                "连续出现模型 429/503/timeout，且超过 30 分钟没有得到成功模型反馈；"
                 "当前轮次已回退为 hold。\n"
                 f"异常类型: {failure.get('kind')}\n"
                 f"持续时长: {float(failure.get('outage_duration_sec') or 0.0) / 60.0:.1f} 分钟\n"
@@ -1847,9 +1903,23 @@ class AutonomousTradingAgent:
         decision_reason = str(decision.get("reason") or "").strip()
         execution_reason = str(execution.get("reason") or "").strip()
         min_confidence = float(cfg.get("min_confidence") or 0.0)
+        model_feedback_issue = _describe_model_feedback_issue(decision_reason) if decision_reason.startswith("model_error:") else {
+            "kind": None,
+            "http_status": None,
+            "label": "",
+            "detail": "",
+            "code": "",
+            "raw_error": "",
+        }
 
         if decision_reason.startswith("model_error:"):
-            add_item("model_error", "模型接口异常", decision_reason.replace("model_error:", "", 1), "danger", 5)
+            add_item(
+                str(model_feedback_issue.get("code") or "model_error"),
+                str(model_feedback_issue.get("label") or "模型接口异常"),
+                str(model_feedback_issue.get("detail") or decision_reason.replace("model_error:", "", 1)),
+                "danger",
+                5,
+            )
         elif decision_reason == "no_price":
             add_item("no_price", "当前价格不可用", "缺少可用行情，代理只能观望", "danger", 8)
         elif decision_reason.startswith("below_min_confidence"):
@@ -1955,6 +2025,14 @@ class AutonomousTradingAgent:
                 "status": str(selected_candidate.get("status") or ""),
                 "promotion_target": str(selected_candidate.get("promotion_target") or ""),
                 "validation_reasons": validation_reasons[:3],
+            },
+            "model_feedback": {
+                "kind": model_feedback_issue.get("kind"),
+                "http_status": model_feedback_issue.get("http_status"),
+                "label": model_feedback_issue.get("label"),
+                "detail": model_feedback_issue.get("detail"),
+                "raw_error": model_feedback_issue.get("raw_error"),
+                "guard": self._model_feedback_guard_status(),
             },
         }
 
@@ -2159,6 +2237,15 @@ class AutonomousTradingAgent:
                     normalized_exc = TimeoutError(
                         f"model_feedback_guard_timeout({int(_MODEL_FEEDBACK_HARD_TIMEOUT_SEC)}s)"
                     )
+                model_feedback_issue = _describe_model_feedback_issue(normalized_exc)
+                logger.warning(
+                    "autonomous agent model decision failed "
+                    f"kind={model_feedback_issue.get('kind') or 'unknown'} "
+                    f"http_status={model_feedback_issue.get('http_status') or 'na'} "
+                    f"provider={provider} model={model} symbol={effective_cfg.get('symbol')} "
+                    f"base_url={self._provider_base_url(provider)} "
+                    f"error={model_feedback_issue.get('raw_error') or _format_exception_short(normalized_exc)}"
+                )
                 failure = self._record_model_feedback_failure(normalized_exc)
                 if failure:
                     await self._send_model_feedback_outage_alert(
