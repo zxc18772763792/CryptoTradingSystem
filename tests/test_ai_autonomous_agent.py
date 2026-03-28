@@ -728,6 +728,11 @@ def test_build_context_includes_market_event_and_account_risk_payloads(monkeypat
     assert context_payload["account_risk"]["account_equity"] == 1500.0
     assert context_payload["account_risk"]["position_cap_notional"] == 150.0
     assert context_payload["account_risk"]["fixed_leverage"] == 1.0
+    assert context_payload["execution_cost"]["fee_bps"] > 0
+    assert context_payload["execution_cost"]["estimated_slippage_bps"] >= 2.0
+    assert context_payload["execution_cost"]["estimated_round_trip_cost_bps"] >= (
+        context_payload["execution_cost"]["estimated_one_way_cost_bps"] * 2.0 - 1e-9
+    )
     assert "llm" in context_payload["aggregated_signal"]["components"]
 
 
@@ -803,6 +808,8 @@ def test_agent_run_once_journal_includes_structured_context(monkeypatch, tmp_pat
     assert "market_structure" in context
     assert context["event_summary"]["events_count"] == 1
     assert context["account_risk"]["account_equity"] == 1200.0
+    assert context["execution_cost"]["fee_bps"] > 0
+    assert context["execution_cost"]["estimated_one_way_cost_bps"] >= context["execution_cost"]["fee_bps"]
     assert context["market_structure"]["trend"]["label"] == "uptrend"
 
 

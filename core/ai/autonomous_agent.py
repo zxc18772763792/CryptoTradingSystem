@@ -19,7 +19,7 @@ from loguru import logger
 from config.settings import settings
 from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.ai.signal_aggregator import signal_aggregator
-from core.backtest.cost_models import microstructure_proxies
+from core.backtest.cost_models import dynamic_slippage_rate, microstructure_proxies
 from core.data import data_storage
 from core.exchanges import exchange_manager
 from core.news.storage import db as news_db
@@ -60,6 +60,12 @@ _DEFAULT_AUTO_UNIVERSE = [
     "AVAX/USDT",
     "DOT/USDT",
 ]
+_AI_EXECUTION_DYNAMIC_SLIP_PARAMS = {
+    "min_slip": 0.00005,
+    "k_atr": 0.15,
+    "k_rv": 0.80,
+    "k_spread": 0.50,
+}
 
 
 def _utc_now() -> datetime:
@@ -1474,6 +1480,70 @@ class AutonomousTradingAgent:
             ),
         }
 
+    def _build_execution_cost_payload(
+        self,
+        *,
+        cfg: Dict[str, Any],
+        market_structure: Dict[str, Any],
+        account_risk: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        fee_rate = _safe_nonnegative_float(getattr(settings, "PAPER_FEE_RATE", 0.0), 0.0)
+        configured_slippage_bps = _safe_nonnegative_float(getattr(settings, "PAPER_SLIPPAGE_BPS", 0.0), 0.0)
+        configured_slippage_rate = configured_slippage_bps / 10000.0
+        micro = dict(market_structure.get("microstructure") or {})
+        dynamic_slip_rate = max(
+            0.0,
+            float(
+                dynamic_slippage_rate(
+                    atr_pct=float(micro.get("atr_pct") or 0.0),
+                    realized_vol=float(micro.get("realized_vol") or 0.0),
+                    spread_proxy=float(micro.get("spread_proxy") or 0.0),
+                    params=_AI_EXECUTION_DYNAMIC_SLIP_PARAMS,
+                )
+            ),
+        )
+        estimated_slippage_rate = max(configured_slippage_rate, dynamic_slip_rate)
+        one_way_cost_rate = fee_rate + estimated_slippage_rate
+        round_trip_cost_rate = one_way_cost_rate * 2.0
+        position_cap_notional = _safe_nonnegative_float(account_risk.get("position_cap_notional"), 0.0)
+        same_direction_remaining_notional = _safe_nonnegative_float(
+            account_risk.get("same_direction_remaining_notional"),
+            0.0,
+        )
+        notional_reference = (
+            same_direction_remaining_notional
+            if same_direction_remaining_notional > 0
+            else position_cap_notional
+        )
+        min_order_usd = _safe_nonnegative_float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 0.0), 0.0)
+        return {
+            "trading_mode": str(account_risk.get("trading_mode") or execution_engine.get_trading_mode()),
+            "fee_source": "paper_default_fee_rate",
+            "slippage_source": "paper_floor_or_dynamic_microstructure_max",
+            "fee_rate": float(fee_rate),
+            "fee_bps": float(fee_rate * 10000.0),
+            "configured_slippage_bps": float(configured_slippage_bps),
+            "dynamic_slippage_bps": float(dynamic_slip_rate * 10000.0),
+            "estimated_slippage_bps": float(estimated_slippage_rate * 10000.0),
+            "estimated_one_way_cost_bps": float(one_way_cost_rate * 10000.0),
+            "estimated_round_trip_cost_bps": float(round_trip_cost_rate * 10000.0),
+            "position_cap_notional": float(position_cap_notional),
+            "same_direction_remaining_notional": float(same_direction_remaining_notional),
+            "notional_reference": float(notional_reference),
+            "estimated_one_way_cost_usd_at_reference": float(notional_reference * one_way_cost_rate),
+            "estimated_round_trip_cost_usd_at_reference": float(notional_reference * round_trip_cost_rate),
+            "min_strategy_order_usd": float(min_order_usd),
+            "microstructure": {
+                "atr_pct": float(micro.get("atr_pct") or 0.0),
+                "realized_vol": float(micro.get("realized_vol") or 0.0),
+                "spread_proxy": float(micro.get("spread_proxy") or 0.0),
+            },
+            "notes": [
+                "fee_rate and configured_slippage_bps follow current paper/live execution defaults",
+                "estimated_slippage_bps uses max(configured floor, dynamic microstructure estimate)",
+            ],
+        }
+
     async def _build_context(self, cfg: Dict[str, Any]) -> Tuple[Dict[str, Any], pd.DataFrame]:
         market_data = await self._load_market_data(cfg)
         last_price = await self._resolve_last_price(cfg, market_data)
@@ -1525,6 +1595,11 @@ class AutonomousTradingAgent:
             account_risk_base=account_risk_base,
             last_price=float(last_price or 0.0),
         )
+        execution_cost = self._build_execution_cost_payload(
+            cfg=cfg,
+            market_structure=market_structure,
+            account_risk=account_risk,
+        )
 
         research_context = resolve_runtime_research_context(
             exchange=exchange,
@@ -1550,6 +1625,7 @@ class AutonomousTradingAgent:
             "event_summary": event_summary,
             "position": position_payload,
             "account_risk": account_risk,
+            "execution_cost": execution_cost,
             "research_context": research_context,
             "profile": dict(self._profile or _default_profile()),
             "trading_mode": execution_engine.get_trading_mode(),
@@ -1581,6 +1657,7 @@ class AutonomousTradingAgent:
                 "Use aggregated_signal.components as decomposed priors; do not rely only on the top-level direction/confidence.",
                 "Use event_summary only when event concentration, news_alpha_proxy, or dominant sentiment are meaningfully non-zero.",
                 "Always respect account_risk, especially min_confidence, fixed_leverage, and same_direction_remaining_notional.",
+                "Use execution_cost to avoid marginal trades whose expected edge is smaller than estimated fees and slippage.",
                 "If research_context is available, treat its selected_candidate as the current research champion hypothesis unless real-time risk clearly invalidates it.",
             ],
             "runtime_constraints": {
@@ -2085,6 +2162,7 @@ class AutonomousTradingAgent:
                 30,
             )
 
+        execution_cost = dict(context_payload.get("execution_cost") or {})
         research_context = dict(context_payload.get("research_context") or {})
         selected_candidate = dict(research_context.get("selected_candidate") or {})
         validation = dict(selected_candidate.get("validation") or {})
@@ -2158,6 +2236,27 @@ class AutonomousTradingAgent:
                 "confidence": agg_confidence,
                 "blocked_by_risk": bool(agg.get("blocked_by_risk")),
                 "risk_reason": agg_risk_reason,
+            },
+            "execution_cost": {
+                "fee_bps": _safe_nonnegative_float(execution_cost.get("fee_bps"), 0.0),
+                "estimated_slippage_bps": _safe_nonnegative_float(execution_cost.get("estimated_slippage_bps"), 0.0),
+                "estimated_one_way_cost_bps": _safe_nonnegative_float(
+                    execution_cost.get("estimated_one_way_cost_bps"),
+                    0.0,
+                ),
+                "estimated_round_trip_cost_bps": _safe_nonnegative_float(
+                    execution_cost.get("estimated_round_trip_cost_bps"),
+                    0.0,
+                ),
+                "notional_reference": _safe_nonnegative_float(execution_cost.get("notional_reference"), 0.0),
+                "estimated_one_way_cost_usd_at_reference": _safe_nonnegative_float(
+                    execution_cost.get("estimated_one_way_cost_usd_at_reference"),
+                    0.0,
+                ),
+                "estimated_round_trip_cost_usd_at_reference": _safe_nonnegative_float(
+                    execution_cost.get("estimated_round_trip_cost_usd_at_reference"),
+                    0.0,
+                ),
             },
             "research": {
                 "candidate_id": str(selected_candidate.get("candidate_id") or ""),
@@ -2327,6 +2426,15 @@ class AutonomousTradingAgent:
                     "blocked_by_risk": False,
                     "risk_reason": "",
                 },
+                "execution_cost": {
+                    "fee_bps": 0.0,
+                    "estimated_slippage_bps": 0.0,
+                    "estimated_one_way_cost_bps": 0.0,
+                    "estimated_round_trip_cost_bps": 0.0,
+                    "notional_reference": 0.0,
+                    "estimated_one_way_cost_usd_at_reference": 0.0,
+                    "estimated_round_trip_cost_usd_at_reference": 0.0,
+                },
                 "research": {
                     "candidate_id": "",
                     "strategy": "",
@@ -2495,6 +2603,7 @@ class AutonomousTradingAgent:
                 "event_summary": context_payload.get("event_summary"),
                 "position": context_payload.get("position"),
                 "account_risk": context_payload.get("account_risk"),
+                "execution_cost": context_payload.get("execution_cost"),
                 "research_context": research_context,
             },
             "selection": selection,
