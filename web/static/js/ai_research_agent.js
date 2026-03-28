@@ -2,7 +2,7 @@
   'use strict';
 
   const POLL_MS = 30000;
-  const AI_UI_TIMEZONE = 'Asia/Shanghai';
+  const AI_UI_TIMEZONE = 'Asia/Singapore';
   const AGENT_STATUS_API = '/ai/autonomous-agent/status';
   const AGENT_JOURNAL_API = '/ai/autonomous-agent/journal';
   const AGENT_START_API = '/ai/autonomous-agent/start';

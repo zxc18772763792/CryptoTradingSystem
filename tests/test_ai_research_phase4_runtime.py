@@ -188,9 +188,11 @@ def test_autonomous_agent_run_once_attaches_research_refs(monkeypatch, tmp_path:
 
 
 def test_live_decision_router_includes_research_context(monkeypatch, tmp_path: Path):
+    import core.ai.live_decision_router as live_module
     from core.ai.live_decision_router import LiveAIDecisionRouter
 
     _, champion = _seed_runtime_research(monkeypatch, tmp_path)
+    monkeypatch.setattr(live_module, "_OVERLAY_PATH", tmp_path / "ai_runtime_config.json")
     router = LiveAIDecisionRouter()
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_ENABLED", True, raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODE", "enforce", raising=False)
