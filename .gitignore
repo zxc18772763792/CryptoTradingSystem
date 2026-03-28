@@ -46,7 +46,19 @@ output/
 
 # Secrets
 .env
+.env.*
+!.env.example
+.envrc
 keys.txt
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+secrets/
+config/secrets/
 config/*_api_key.txt
 config/fred_api_key.txt
 

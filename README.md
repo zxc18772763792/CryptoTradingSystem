@@ -1,257 +1,147 @@
 # CryptoTradingSystem
 
-???????????????????????????????? Binance USDT-M ?????????? `1m/5m/15m`???????????AI ?????????Ops ????????? Polymarket ???????
+CryptoTradingSystem is a FastAPI-based crypto trading and research workspace for paper trading, guarded live trading, AI-assisted decision review, news ingestion, and quantitative strategy iteration.
 
-## ????
-- Python: `3.11`
-- Windows PowerShell ? Conda
-- ???? conda ???`crypto_trading`
+The current repository is organized for local development first: source code and documentation are tracked, while runtime data, logs, databases, caches, and real credentials stay out of Git.
 
-## ??
+## What This Repository Includes
+
+- Web dashboard and REST API for trading, research, data download, and monitoring
+- Paper trading by default, with explicit guard rails around live trading
+- AI research and autonomous-agent workflows with configurable providers
+- News collection, enrichment, and LLM-assisted triage
+- Backtesting, factor research, and pairs/relative-value strategy tooling
+- Optional Ops and OpenClaw integration for operational control flows
+- Optional prediction-market workflows under `prediction_markets/`
+
+## Repository Layout
+
+- `config/`: settings, database models, exchange definitions, and registries
+- `core/`: trading engine, AI modules, data pipelines, risk controls, news services, and runtime orchestration
+- `web/`: FastAPI app, API routes, templates, and static assets
+- `strategies/`: strategy implementations grouped by style
+- `scripts/`: startup helpers, self-checks, data download, and research utilities
+- `tests/`: web, ops, governance, and prediction-market coverage
+- `docs/`: architecture notes, governance docs, integration plans, and changelog
+- `prediction_markets/`: optional prediction-market integrations and workers
+
+See [docs/REPOSITORY_OVERVIEW.md](docs/REPOSITORY_OVERVIEW.md) for a more detailed guide.
+
+## Quick Start
+
+### 1. Create a Python environment
+
 ```powershell
 conda create -n crypto_trading python=3.11 -y
 conda activate crypto_trading
 pip install -r requirements.txt
 ```
 
-## ????
-Web ????
+### 2. Configure local secrets
+
+Create a local `.env` from the tracked template:
+
 ```powershell
-python main.py --mode web --trading-mode paper
+Copy-Item .env.example .env
 ```
 
-?????
-```powershell
-python main.py --mode web --trading-mode live
-```
+Fill in only the credentials you actually use. Keep real API keys, broker secrets, and tokens in `.env` or your shell environment. Do not commit them to Git.
 
-?????
-- ???: `http://127.0.0.1:8000`
-- ???: `http://127.0.0.1:8000/news`
-- FastAPI ??: `http://127.0.0.1:8000/docs`
+### 3. Start the web application
 
-?????
-```powershell
-.\_once.ps1
-```
-
-## ????
-- `core/trading/*`: ??/????????????????
-- `core/risk/*`: ??????????
-- `core/news/*`: ??????????worker?LLM ??
-- `core/ai/*`: ?????????
-- `core/research/*`: ???????
-- `core/ops/*`: Ops ??? API
-- `prediction_markets/polymarket/*`: Polymarket ?????????????worker?Ops ??
-- `web/*`: ????????
-
-## ????
-???
-- `jin10`
-- `rss`
-- `gdelt`
-- `cryptocompare_news`
-- `chaincatcher_flash`
-- `binance_announcements`
-- `okx_announcements`
-- `bybit_announcements`
-
-???? worker?
-```powershell
-python -m core.news.service.worker
-python -m core.news.service.llm_worker
-```
-
-???????
-- `ZHIPU_API_KEY`
-- `ZHIPU_MODEL=GLM-4.5-Air`
-- `ZHIPU_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4`
-- `NEWS_LLM_MIN_IMPORTANCE=35`
-- `START_NEWS_WORKER=1`
-- `START_NEWS_LLM_WORKER=1`
-
-## OpenClaw / Ops ???
-???????????????
-- `http://127.0.0.1:8000/ops`
-
-??????????
-```powershell
-$env:OPS_TOKEN = 'your-token'
-uvicorn core.ops.service.api:app --host 127.0.0.1 --port 8711
-```
-
-?? OpenClaw `baseUrl`?
-- `http://127.0.0.1:8000/ops`
-
-OpenClaw ?????
-- `.openclaw/extensions/tradingops`
-
-?? Ops ???
-- `tradingops_status`
-- `tradingops_news_pull`
-- `tradingops_worker_run_once`
-- `tradingops_research_run`
-- `tradingops_trading_start_paper`
-- `tradingops_trading_arm_live`
-- `tradingops_trading_start_live`
-- `tradingops_trading_stop`
-- `tradingops_kill_switch`
-- `tradingops_risk_reset_halt`
-
-OpenClaw ?????
-```json
-{
-  "plugins": {
-    "entries": {
-      "tradingops": {
-        "enabled": true,
-        "config": {
-          "baseUrl": "http://127.0.0.1:8000/ops",
-          "token": "YOUR_OPS_TOKEN",
-          "timeoutMs": 15000
-        }
-      }
-    }
-  }
-}
-```
-
-## Polymarket ??
-?????
-- `prediction_markets/polymarket/`
-
-?????
-- Gamma ????
-- CLOB ??/????
-- `PRICE / MACRO / REG_ETF / ELECTION_GEO` ??????
-- 1m/5m ????
-- ? `risk_gate` / `signal_engine` / `ops` ??
-- ?? trader skeleton?????
-
-???????
-- `config/polymarket.yaml`
-
-???????
-- `PM_ENABLE=false`
-- `PM_FEATURES_ENABLE=false`
-- `PM_SIGNAL_ALPHA=0.35`
-- `PM_RISK_BETA=0.40`
-- `PM_GAMMA_REFRESH_SEC=1200`
-- `PM_QUOTE_LOOP_SEC=10`
-- `PM_RAW_RETENTION_DAYS=14`
-- `PM_LIQUIDITY_MIN=3000`
-- `PM_MAX_SPREAD=0.10`
-- `POLY_ENABLE_TRADING=false`
-- `POLY_REQUIRE_APPROVAL=true`
-- `POLY_CHAIN_ID=137`
-
-### ?? Polymarket worker
-?????
-```powershell
-python -m prediction_markets.polymarket.worker
-```
-
-?????
-```powershell
-python -m prediction_markets.polymarket.worker --once
-```
-
-??? markets?
-```powershell
-python -m prediction_markets.polymarket.worker --pull-only
-```
-
-??? quotes?
-```powershell
-python -m prediction_markets.polymarket.worker --quotes-only
-```
-
-?????
-```powershell
-python scripts/run_polymarket_worker.py
-```
-
-????????????????
-```powershell
-$env:START_PM_WORKER = '1'
-.\_once.ps1
-```
-
-### ??
-```powershell
-python scripts/selfcheck_polymarket.py --minutes 2 --markets-per-category 3 --symbol BTCUSDT
-```
-
-?????
-- ????????
-- quotes ?? P95
-- top shocks
-- `BTCUSDT` ? `1m/5m` Polymarket features ??
-
-### ????
-```powershell
-python scripts/research/event_study_polymarket.py --symbol BTCUSDT --days 30 --timeframe 5m
-```
-
-### ????
-```powershell
-python scripts/research/feature_ablation_polymarket.py --symbol BTCUSDT --days 30 --timeframes 1m,5m
-```
-
-### Ops API ??
-?????
-- `GET /ops/polymarket/status`
-- `POST /ops/polymarket/subscribe`
-- `POST /ops/polymarket/unsubscribe`
-- `POST /ops/polymarket/worker_run_once`
-- `GET /ops/polymarket/alerts`
-- `GET /ops/polymarket/features`
-- `POST /ops/polymarket/arm_trading`
-- `POST /ops/polymarket/enable_trading`
-
-?? OpenClaw ???
-- `polymarket_status`
-- `polymarket_subscribe`
-- `polymarket_alerts`
-- `polymarket_features`
-
-### ??????
-- ??? Polymarket ????? skeleton?????????
-- `PM_FEATURES_ENABLE=false` ??????????????
-- ??????????? `gamma-api.polymarket.com` ? `clob.polymarket.com` ???????????????????/??????????????
-
-## ??
-```powershell
-pytest -q tests/ops tests/polymarket
-```
-
-?????????
-- Ops ???
-- Polymarket resolver
-- feature ??
-- risk_gate ??
-- signal_engine ??
-- worker ??
-- event study ??
-
-## ????
-- `.env` ????? GitHub
-- `OPS_TOKEN` ???????? Ops ???
-- `live` ????? approval code ????
-- `POLY_ENABLE_TRADING=false` ??????????? Polymarket ??
-- OpenClaw ??? Ops token???????? Polymarket ??
-
-## One-click Startup (Recommended)
-Use the root script to start web service with stable defaults (PowerShell policy bypass + health wait):
+Recommended one-click startup:
 
 ```bat
 start_web_oneclick.bat
 ```
 
-Optional args (passed through to `scripts/start_web_ps.ps1`):
+PowerShell entry point:
 
-```bat
-start_web_oneclick.bat -Port 8000 -HealthWaitSec 150 -StartNewsLlmWorker
+```powershell
+.\scripts\start_web_ps.ps1 -OpenBrowser
 ```
 
-If startup fails, check log file: `logs/web_ps.log`.
+Direct launcher:
+
+```powershell
+python main.py --mode web --trading-mode paper
+```
+
+Open:
+
+- Dashboard: `http://127.0.0.1:8000`
+- News page: `http://127.0.0.1:8000/news`
+- FastAPI docs: `http://127.0.0.1:8000/docs`
+
+### 4. Switch modes carefully
+
+Paper mode is the default:
+
+```powershell
+python main.py --mode web --trading-mode paper
+```
+
+Live mode should only be used after local validation, explicit approvals, and a full credential review:
+
+```powershell
+python main.py --mode web --trading-mode live
+```
+
+## Common Commands
+
+Run the web service:
+
+```powershell
+python main.py --mode web --trading-mode paper
+```
+
+Run startup helper with optional workers:
+
+```powershell
+.\scripts\start_web_ps.ps1 -StartNewsWorker -StartNewsLlmWorker -StartPmWorker
+```
+
+Run focused tests:
+
+```powershell
+pytest -q tests/ops tests/polymarket tests/web
+```
+
+Run the Polymarket worker once:
+
+```powershell
+python scripts/run_polymarket_worker.py
+```
+
+Run the OpenClaw/Ops self-check:
+
+```powershell
+python scripts/selfcheck_openclaw_ops.py --base-url http://127.0.0.1:8000/ops
+```
+
+## Secret Handling
+
+- `.env`, `keys.txt`, local certificate files, and `config/*_api_key.txt` are intentionally ignored by Git
+- `.env.example` must remain a placeholder-only template
+- Runtime artifacts under `data/`, `logs/`, `runtime/`, and `output/` stay local and are not part of the repository history
+- If a credential is ever exposed, rotate it immediately before pushing or sharing the repository
+
+See [SECURITY.md](SECURITY.md) for the full pre-push checklist and incident response guidance.
+
+## Documentation
+
+- [STARTUP.md](STARTUP.md): startup commands and log locations
+- [SECURITY.md](SECURITY.md): secret management and safe sharing rules
+- [docs/REPOSITORY_OVERVIEW.md](docs/REPOSITORY_OVERVIEW.md): directory-by-directory repository guide
+- [docs/GOVERNANCE.md](docs/GOVERNANCE.md): governance model and approval flows
+- [docs/INTEGRATION.md](docs/INTEGRATION.md): system integration notes
+- [docs/CHANGELOG.md](docs/CHANGELOG.md): tracked repository milestones
+
+## Git Hygiene
+
+Before pushing to GitHub:
+
+1. Verify `git status` is clean except for the files you intend to publish.
+2. Confirm `.env`, `keys.txt`, local DB files, logs, and caches are not staged.
+3. Review `git diff --cached` for accidental tokens, webhook URLs, or account identifiers.
+4. Push only the project repository under `crypto_trading_system/`, not outer workspace scratch files.

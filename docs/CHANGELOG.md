@@ -1,5 +1,17 @@
 # Changelog (Governance + AI Decision Integration)
 
+## 2026-03-28
+
+### Added
+
+- `SECURITY.md`: repository-specific secret handling, pre-push checks, and leak response guidance.
+- `docs/REPOSITORY_OVERVIEW.md`: source tree walkthrough and runtime-vs-tracked file boundaries.
+
+### Changed
+
+- `README.md`: refreshed project overview, quick start, documentation links, and GitHub publishing guidance.
+- `.gitignore`: expanded local secret and certificate patterns while keeping `.env.example` tracked.
+
 ## 2026-03-06
 
 ### Added
