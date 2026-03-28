@@ -132,6 +132,48 @@ def test_autonomous_agent_run_once_low_confidence_forces_hold(monkeypatch, tmp_p
     assert submit_mock.await_count == 0
 
 
+def test_autonomous_agent_exposes_raw_model_action_rewrite(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "LONG", "confidence": 0.81}
+
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    submit_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        AsyncMock(
+            return_value={
+                "action": "exit",
+                "confidence": 0.81,
+                "strength": 0.6,
+                "reason": "take_profit_hit",
+            }
+        ),
+    )
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    model_output = result["diagnostics"]["model_output"]
+    codes = {item.get("code") for item in (result["diagnostics"].get("items") or [])}
+    assert result["decision"]["action"] == "hold"
+    assert model_output["source"] == "provider"
+    assert model_output["raw_action"] == "exit"
+    assert model_output["normalized_action"] == "hold"
+    assert model_output["action_changed"] is True
+    assert "model_action_rewritten" in codes
+    assert submit_mock.await_count == 0
+
+
 def test_autonomous_agent_run_once_blocks_live_when_not_allowed(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
 
@@ -823,3 +865,84 @@ def test_agent_symbol_scan_prefers_trade_ready_symbol(monkeypatch, tmp_path: Pat
 
     assert scan["selected_symbol"] == "ETH/USDT"
     assert scan["top_candidates"][0]["symbol"] == "ETH/USDT"
+
+
+def test_agent_symbol_scan_prioritizes_existing_positions(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    async def _fake_build_context(cfg):
+        symbol = str(cfg.get("symbol") or "BTC/USDT")
+        has_position = symbol == "BTC/USDT"
+        if has_position:
+            confidence = 0.18
+            direction = "FLAT"
+            position = {
+                "side": "short",
+                "quantity": 1.0,
+                "entry_price": 100.0,
+                "current_price": 98.0,
+                "unrealized_pnl": 2.0,
+                "source": "local",
+            }
+        else:
+            confidence = 0.79
+            direction = "LONG"
+            position = {}
+        return (
+            {
+                "exchange": "binance",
+                "symbol": symbol,
+                "timeframe": "15m",
+                "price": 100.0,
+                "returns": {"r_1h": 0.0, "r_24h": 0.0},
+                "realized_vol_annualized": 0.25,
+                "bars": 240,
+                "aggregated_signal": {
+                    "direction": direction,
+                    "confidence": confidence,
+                    "blocked_by_risk": False,
+                    "risk_reason": "",
+                },
+                "position": position,
+                "research_context": {
+                    "selected_candidate": {
+                        "candidate_id": f"candidate-{symbol}",
+                        "strategy": "MAStrategy",
+                        "status": "paper_running",
+                        "promotion_target": "paper",
+                        "validation": {"reasons": []},
+                    }
+                },
+                "profile": {},
+                "trading_mode": "paper",
+            },
+            pd.DataFrame(),
+        )
+
+    monkeypatch.setattr(agent, "_build_context", _fake_build_context)
+    monkeypatch.setattr(
+        module.position_manager,
+        "get_all_positions",
+        lambda: [SimpleNamespace(exchange="binance", account_id="main", quantity=1.0, symbol="BTC/USDT")],
+    )
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+
+    asyncio.run(
+        agent.update_runtime_config(
+            enabled=True,
+            symbol="ETH/USDT",
+            symbol_mode="auto",
+            universe_symbols=["ETH/USDT"],
+            min_confidence=0.58,
+            selection_top_n=5,
+        )
+    )
+
+    scan = asyncio.run(agent.get_symbol_scan(limit=5, force=True))
+
+    assert scan["selected_symbol"] == "BTC/USDT"
+    assert scan["selection_reason"] == "existing_position_priority"
+    assert [row["symbol"] for row in scan["top_candidates"][:2]] == ["BTC/USDT", "ETH/USDT"]
+    assert scan["top_candidates"][0]["has_position"] is True

@@ -97,6 +97,22 @@ def _normalize_action(value: Any) -> str:
     return text
 
 
+def _merge_symbol_sequence(*groups: List[Any], max_items: int = 30) -> List[str]:
+    items: List[str] = []
+    seen: set[str] = set()
+    limit = max(1, int(max_items or 30))
+    for group in groups:
+        for value in group or []:
+            symbol = _normalize_symbol_text(value)
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            items.append(symbol)
+            if len(items) >= limit:
+                return items
+    return items
+
+
 def _coerce_float(value: Any, default: float, *, low: float, high: float) -> float:
     try:
         parsed = float(value)
@@ -276,6 +292,39 @@ def _describe_model_feedback_issue(raw_error: Any) -> Dict[str, Any]:
     }
 
 
+def _build_model_output_debug(
+    raw_decision: Optional[Dict[str, Any]],
+    normalized_decision: Optional[Dict[str, Any]],
+    *,
+    source: str,
+) -> Dict[str, Any]:
+    raw_payload = dict(raw_decision or {}) if isinstance(raw_decision, dict) else {}
+    normalized_payload = dict(normalized_decision or {}) if isinstance(normalized_decision, dict) else {}
+    raw_action = str(raw_payload.get("action") or "").strip().lower()
+    normalized_action = str(normalized_payload.get("action") or "").strip().lower()
+    raw_reason = str(raw_payload.get("reason") or "").strip()
+    normalized_reason = str(normalized_payload.get("reason") or "").strip()
+    raw_confidence = _safe_nonnegative_float(raw_payload.get("confidence"), 0.0)
+    normalized_confidence = _safe_nonnegative_float(normalized_payload.get("confidence"), 0.0)
+    action_changed = bool(raw_action != normalized_action)
+    reason_changed = bool(raw_reason != normalized_reason)
+    confidence_changed = abs(raw_confidence - normalized_confidence) > 1e-9
+    changed = bool(action_changed or reason_changed or confidence_changed)
+    return {
+        "source": str(source or "synthetic"),
+        "raw_action": raw_action,
+        "normalized_action": normalized_action,
+        "raw_reason": raw_reason,
+        "normalized_reason": normalized_reason,
+        "raw_confidence": float(raw_confidence),
+        "normalized_confidence": float(normalized_confidence),
+        "action_changed": action_changed,
+        "reason_changed": reason_changed,
+        "confidence_changed": confidence_changed,
+        "changed": changed,
+    }
+
+
 def _timeframe_to_seconds(timeframe: str) -> int:
     text = str(timeframe or "15m").strip().lower()
     m = re.fullmatch(r"(\d+)([smhdw])", text)
@@ -415,6 +464,88 @@ class AutonomousTradingAgent:
             return self._override[name]
         return getattr(settings, name, fallback)
 
+    @staticmethod
+    def _extract_live_position_snapshot(row: Any) -> Optional[Dict[str, Any]]:
+        row_symbol = str((row.get("symbol") if isinstance(row, dict) else getattr(row, "symbol", "")) or "")
+        symbol = _normalize_symbol_text(_canonical_symbol_key(row_symbol))
+        if not symbol:
+            return None
+
+        amount = float((row.get("amount") if isinstance(row, dict) else getattr(row, "amount", 0.0)) or 0.0)
+        if abs(amount) <= 1e-12:
+            amount = float((row.get("quantity") if isinstance(row, dict) else getattr(row, "quantity", 0.0)) or 0.0)
+        if abs(amount) <= 1e-12:
+            return None
+
+        side = str((row.get("side") if isinstance(row, dict) else getattr(row, "side", "")) or "").strip().lower()
+        if side not in {"long", "short"}:
+            side = "short" if amount < 0 else "long"
+        if side not in {"long", "short"}:
+            return None
+
+        entry_price = float((row.get("entry_price") if isinstance(row, dict) else getattr(row, "entry_price", 0.0)) or 0.0)
+        current_price = float((row.get("current_price") if isinstance(row, dict) else getattr(row, "current_price", 0.0)) or 0.0)
+        if current_price <= 0:
+            current_price = float((row.get("markPrice") if isinstance(row, dict) else getattr(row, "markPrice", 0.0)) or 0.0)
+        if current_price <= 0:
+            current_price = entry_price
+        unrealized_pnl = float(
+            (row.get("unrealized_pnl") if isinstance(row, dict) else getattr(row, "unrealized_pnl", 0.0))
+            or (row.get("unrealizedPnl") if isinstance(row, dict) else getattr(row, "unrealizedPnl", 0.0))
+            or 0.0
+        )
+        return {
+            "symbol": symbol,
+            "side": side,
+            "quantity": abs(float(amount)),
+            "entry_price": entry_price,
+            "current_price": current_price,
+            "unrealized_pnl": unrealized_pnl,
+            "leverage": float((row.get("leverage") if isinstance(row, dict) else getattr(row, "leverage", 1.0)) or 1.0),
+            "source": "exchange_live",
+        }
+
+    async def _load_live_position_snapshots(self, *, exchange: str) -> List[Dict[str, Any]]:
+        if str(execution_engine.get_trading_mode() or "").strip().lower() != "live":
+            return []
+
+        connector = exchange_manager.get_exchange(exchange)
+        if connector is None:
+            return []
+        default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").strip().lower()
+        if default_type not in {"future", "futures", "swap", "contract", "perp", "perpetual"}:
+            return []
+
+        try:
+            positions = await asyncio.wait_for(connector.get_positions(), timeout=8.0)
+        except Exception as exc:
+            logger.debug(f"autonomous agent live position lookup failed: {exc}")
+            return []
+
+        snapshots: List[Dict[str, Any]] = []
+        for row in positions or []:
+            snapshot = self._extract_live_position_snapshot(row)
+            if snapshot:
+                snapshots.append(snapshot)
+        return snapshots
+
+    async def _tracked_position_symbols(self, *, exchange: str, account_id: str) -> List[str]:
+        local_symbols: List[str] = []
+        for position in position_manager.get_all_positions():
+            try:
+                if str(getattr(position, "exchange", "") or "").strip().lower() != str(exchange or "").strip().lower():
+                    continue
+                if str(getattr(position, "account_id", "main") or "main") != str(account_id or "main"):
+                    continue
+                if abs(float(getattr(position, "quantity", 0.0) or 0.0)) <= 1e-12:
+                    continue
+                local_symbols.append(str(getattr(position, "symbol", "") or ""))
+            except Exception:
+                continue
+
+        live_symbols = [str(item.get("symbol") or "") for item in await self._load_live_position_snapshots(exchange=exchange)]
+        return _merge_symbol_sequence(local_symbols, live_symbols, max_items=30)
+
     async def _resolve_position_payload(self, *, exchange: str, symbol: str, account_id: str) -> Dict[str, Any]:
         position = position_manager.get_position(exchange, symbol, account_id=account_id)
         if position is not None:
@@ -428,60 +559,16 @@ class AutonomousTradingAgent:
                     "leverage": float(getattr(position, "leverage", 1.0) or 1.0),
                 }
 
-        if str(execution_engine.get_trading_mode() or "").strip().lower() != "live":
-            return {}
-
-        connector = exchange_manager.get_exchange(exchange)
-        if connector is None:
-            return {}
-        default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").strip().lower()
-        if default_type not in {"future", "futures", "swap", "contract", "perp", "perpetual"}:
-            return {}
-
         target_symbol = _canonical_symbol_key(symbol)
         if not target_symbol:
             return {}
 
-        try:
-            positions = await asyncio.wait_for(connector.get_positions(), timeout=8.0)
-        except Exception as exc:
-            logger.debug(f"autonomous agent live position lookup failed: {exc}")
-            return {}
-
-        for row in positions or []:
-            row_symbol = str((row.get("symbol") if isinstance(row, dict) else getattr(row, "symbol", "")) or "")
-            if _canonical_symbol_key(row_symbol) != target_symbol:
+        for snapshot in await self._load_live_position_snapshots(exchange=exchange):
+            if _canonical_symbol_key(snapshot.get("symbol")) != target_symbol:
                 continue
-            amount = float((row.get("amount") if isinstance(row, dict) else getattr(row, "amount", 0.0)) or 0.0)
-            if abs(amount) <= 1e-12:
-                amount = float((row.get("quantity") if isinstance(row, dict) else getattr(row, "quantity", 0.0)) or 0.0)
-            if abs(amount) <= 1e-12:
-                continue
-            side = str((row.get("side") if isinstance(row, dict) else getattr(row, "side", "")) or "").strip().lower()
-            if side not in {"long", "short"}:
-                side = "short" if amount < 0 else "long"
-            if side not in {"long", "short"}:
-                continue
-            entry_price = float((row.get("entry_price") if isinstance(row, dict) else getattr(row, "entry_price", 0.0)) or 0.0)
-            current_price = float((row.get("current_price") if isinstance(row, dict) else getattr(row, "current_price", 0.0)) or 0.0)
-            if current_price <= 0:
-                current_price = float((row.get("markPrice") if isinstance(row, dict) else getattr(row, "markPrice", 0.0)) or 0.0)
-            if current_price <= 0:
-                current_price = entry_price
-            unrealized_pnl = float(
-                (row.get("unrealized_pnl") if isinstance(row, dict) else getattr(row, "unrealized_pnl", 0.0))
-                or (row.get("unrealizedPnl") if isinstance(row, dict) else getattr(row, "unrealizedPnl", 0.0))
-                or 0.0
-            )
-            return {
-                "side": side,
-                "quantity": abs(float(amount)),
-                "entry_price": entry_price,
-                "current_price": current_price,
-                "unrealized_pnl": unrealized_pnl,
-                "leverage": float((row.get("leverage") if isinstance(row, dict) else getattr(row, "leverage", 1.0)) or 1.0),
-                "source": "exchange_live",
-            }
+            payload = dict(snapshot)
+            payload.pop("symbol", None)
+            return payload
         return {}
 
     def get_runtime_config(self) -> Dict[str, Any]:
@@ -1705,6 +1792,7 @@ class AutonomousTradingAgent:
         agg = dict(context_payload.get("aggregated_signal") or {})
         research_context = dict(context_payload.get("research_context") or {})
         selected_candidate = dict(research_context.get("selected_candidate") or {})
+        position = dict(context_payload.get("position") or {})
         validation = dict(selected_candidate.get("validation") or {})
         validation_reasons = [
             str(item).strip()
@@ -1722,6 +1810,18 @@ class AutonomousTradingAgent:
         vol = abs(float(context_payload.get("realized_vol_annualized") or 0.0))
         promotion_target = str(selected_candidate.get("promotion_target") or "").strip().lower()
         candidate_status = str(selected_candidate.get("status") or "").strip().lower()
+        position_side = str(position.get("side") or "").strip().lower()
+        has_position = bool(position_side)
+        position_source = str(position.get("source") or ("local" if has_position else "")).strip().lower()
+        position_unrealized_pnl = float(position.get("unrealized_pnl") or 0.0)
+        entry_price = _safe_nonnegative_float(position.get("entry_price"), 0.0)
+        current_price = _safe_nonnegative_float(position.get("current_price"), 0.0)
+        position_unrealized_pnl_pct = 0.0
+        if has_position and entry_price > 0 and current_price > 0:
+            if position_side == "short":
+                position_unrealized_pnl_pct = float((entry_price - current_price) / entry_price)
+            else:
+                position_unrealized_pnl_pct = float((current_price - entry_price) / entry_price)
 
         score = confidence
         score += 0.18 if direction in {"LONG", "SHORT"} else -0.08
@@ -1737,6 +1837,8 @@ class AutonomousTradingAgent:
             score -= 0.04
         if any("trade count too low" in item.lower() for item in validation_reasons):
             score -= 0.05
+        if has_position:
+            score += 0.03
         score = round(score, 6)
 
         tradable_now = bool(
@@ -1751,6 +1853,9 @@ class AutonomousTradingAgent:
             summary_parts.append(risk_reason)
         elif direction in {"LONG", "SHORT"} and confidence < min_confidence:
             summary_parts.append(f"below threshold {confidence:.3f} < {min_confidence:.3f}")
+        if has_position:
+            pnl_text = f"{position_unrealized_pnl_pct:+.2%}" if abs(position_unrealized_pnl_pct) > 1e-9 else f"{position_unrealized_pnl:+.4f}"
+            summary_parts.append(f"holding {position_side} ({position_source or 'local'}) {pnl_text}")
         if candidate_status:
             summary_parts.append(f"research {candidate_status}")
         if any("trade count too low" in item.lower() for item in validation_reasons):
@@ -1769,6 +1874,11 @@ class AutonomousTradingAgent:
             "realized_vol_annualized": vol,
             "threshold_gap": round(confidence - min_confidence, 6),
             "summary": "; ".join(part for part in summary_parts if part),
+            "has_position": has_position,
+            "position_side": position_side,
+            "position_source": position_source,
+            "position_unrealized_pnl": float(position_unrealized_pnl),
+            "position_unrealized_pnl_pct": float(position_unrealized_pnl_pct),
             "research": {
                 "candidate_id": str(selected_candidate.get("candidate_id") or ""),
                 "strategy": str(selected_candidate.get("strategy") or ""),
@@ -1785,11 +1895,14 @@ class AutonomousTradingAgent:
         selection_top_n = _coerce_int(limit or cfg.get("selection_top_n") or 10, 10, low=3, high=20)
         default_universe = _DEFAULT_AUTO_UNIVERSE if symbol_mode == "auto" else [configured_symbol]
         universe_symbols = _normalize_symbol_list(cfg.get("universe_symbols"), default=default_universe, max_items=30)
-        if configured_symbol and configured_symbol not in universe_symbols:
-            universe_symbols = [configured_symbol, *[item for item in universe_symbols if item != configured_symbol]]
-
         if symbol_mode != "auto":
             universe_symbols = [configured_symbol]
+        else:
+            tracked_symbols = await self._tracked_position_symbols(
+                exchange=str(cfg.get("exchange") or "binance"),
+                account_id=str(cfg.get("account_id") or "main"),
+            )
+            universe_symbols = _merge_symbol_sequence(tracked_symbols, [configured_symbol], universe_symbols, max_items=30)
 
         rows: List[Dict[str, Any]] = []
         for symbol in universe_symbols:
@@ -1813,6 +1926,11 @@ class AutonomousTradingAgent:
                         "realized_vol_annualized": 0.0,
                         "threshold_gap": round(0.0 - float(cfg.get("min_confidence") or 0.0), 6),
                         "summary": f"scan_error:{_format_exception_short(exc)}",
+                        "has_position": False,
+                        "position_side": "",
+                        "position_source": "",
+                        "position_unrealized_pnl": 0.0,
+                        "position_unrealized_pnl_pct": 0.0,
                         "research": {
                             "candidate_id": "",
                             "strategy": "",
@@ -1826,8 +1944,10 @@ class AutonomousTradingAgent:
         rows = sorted(
             rows,
             key=lambda item: (
+                1 if item.get("has_position") else 0,
                 1 if item.get("tradable_now") else 0,
                 float(item.get("score") or -999.0),
+                abs(float(item.get("position_unrealized_pnl_pct") or 0.0)),
                 float(item.get("confidence") or 0.0),
                 1 if str(item.get("direction") or "") in {"LONG", "SHORT"} else 0,
             ),
@@ -1847,6 +1967,11 @@ class AutonomousTradingAgent:
             "realized_vol_annualized": 0.0,
             "threshold_gap": 0.0,
             "summary": "no_candidates",
+            "has_position": False,
+            "position_side": "",
+            "position_source": "",
+            "position_unrealized_pnl": 0.0,
+            "position_unrealized_pnl_pct": 0.0,
             "research": {
                 "candidate_id": "",
                 "strategy": "",
@@ -1855,9 +1980,12 @@ class AutonomousTradingAgent:
                 "validation_reasons": [],
             },
         }
-        selection_reason = "manual_symbol" if symbol_mode != "auto" else (
-            "top_ranked_tradable_symbol" if bool(selected_row.get("tradable_now")) else "top_ranked_watchlist_symbol"
-        )
+        if symbol_mode != "auto":
+            selection_reason = "manual_symbol"
+        elif bool(selected_row.get("has_position")):
+            selection_reason = "existing_position_priority"
+        else:
+            selection_reason = "top_ranked_tradable_symbol" if bool(selected_row.get("tradable_now")) else "top_ranked_watchlist_symbol"
 
         for index, row in enumerate(rows, start=1):
             row["rank"] = index
@@ -1882,6 +2010,8 @@ class AutonomousTradingAgent:
         *,
         cfg: Dict[str, Any],
         context_payload: Dict[str, Any],
+        raw_decision: Optional[Dict[str, Any]],
+        raw_decision_source: str,
         decision: Dict[str, Any],
         execution: Dict[str, Any],
         selection: Optional[Dict[str, Any]] = None,
@@ -1903,6 +2033,7 @@ class AutonomousTradingAgent:
         decision_reason = str(decision.get("reason") or "").strip()
         execution_reason = str(execution.get("reason") or "").strip()
         min_confidence = float(cfg.get("min_confidence") or 0.0)
+        model_output = _build_model_output_debug(raw_decision, decision, source=raw_decision_source)
         model_feedback_issue = _describe_model_feedback_issue(decision_reason) if decision_reason.startswith("model_error:") else {
             "kind": None,
             "http_status": None,
@@ -1982,6 +2113,15 @@ class AutonomousTradingAgent:
         elif execution_reason == "submit_rejected":
             add_item("submit_rejected", "执行引擎拒绝了信号", "submit_signal returned false", "danger", 12)
 
+        if model_output.get("source") == "provider" and bool(model_output.get("action_changed")):
+            raw_action = str(model_output.get("raw_action") or "--")
+            normalized_action = str(model_output.get("normalized_action") or "--")
+            normalized_reason = str(model_output.get("normalized_reason") or "").strip()
+            detail = f"{raw_action} -> {normalized_action}"
+            if normalized_reason:
+                detail = f"{detail} | {normalized_reason}"
+            add_item("model_action_rewritten", "模型原始动作被本地规则改写", detail, "warn", 35)
+
         if not items and action == "hold":
             add_item("model_hold", "模型主动选择观望", decision_reason or "no explicit hold reason", "info", 60)
 
@@ -2034,6 +2174,7 @@ class AutonomousTradingAgent:
                 "raw_error": model_feedback_issue.get("raw_error"),
                 "guard": self._model_feedback_guard_status(),
             },
+            "model_output": model_output,
         }
 
     def _load_overlay(self) -> None:
@@ -2193,6 +2334,11 @@ class AutonomousTradingAgent:
                     "promotion_target": "",
                     "validation_reasons": [],
                 },
+                "model_output": _build_model_output_debug(
+                    {"action": "hold", "reason": "agent_disabled"},
+                    {"action": "hold", "reason": "agent_disabled"},
+                    source="synthetic",
+                ),
             }
             return result
 
@@ -2202,8 +2348,9 @@ class AutonomousTradingAgent:
         effective_cfg["symbol"] = str(selection.get("selected_symbol") or cfg.get("symbol") or "BTC/USDT")
         context_payload, market_data = await self._build_context(effective_cfg)
         research_context = context_payload.get("research_context") if isinstance(context_payload, dict) else {}
+        raw_decision_source = "synthetic"
         if float(context_payload.get("price") or 0.0) <= 0:
-            decision = {
+            raw_decision = {
                 "action": "hold",
                 "confidence": 0.0,
                 "strength": 0.1,
@@ -2212,6 +2359,7 @@ class AutonomousTradingAgent:
                 "take_profit_pct": float(cfg.get("default_take_profit_pct") or 0.04),
                 "reason": "no_price",
             }
+            decision = self._normalize_decision(raw_decision, effective_cfg, context_payload)
         else:
             provider = str(effective_cfg.get("provider") or "codex")
             model = str(effective_cfg.get("model") or self._provider_model(provider))
@@ -2230,6 +2378,7 @@ class AutonomousTradingAgent:
                     ),
                     timeout=float(_MODEL_FEEDBACK_HARD_TIMEOUT_SEC),
                 )
+                raw_decision_source = "provider"
                 self._record_model_feedback_success()
             except Exception as exc:
                 normalized_exc: Exception = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
@@ -2265,6 +2414,7 @@ class AutonomousTradingAgent:
                     "take_profit_pct": effective_cfg.get("default_take_profit_pct"),
                     "reason": f"model_error:{_format_exception_short(normalized_exc)}",
                 }
+                raw_decision_source = "fallback"
             decision = self._normalize_decision(raw_decision, effective_cfg, context_payload)
 
         cooldown_sec = int(effective_cfg.get("cooldown_sec") or 0)
@@ -2303,6 +2453,8 @@ class AutonomousTradingAgent:
         diagnostics = self._build_decision_diagnostics(
             cfg=effective_cfg,
             context_payload=context_payload,
+            raw_decision=raw_decision,
+            raw_decision_source=raw_decision_source,
             decision=decision,
             execution=execution,
             selection=selection,

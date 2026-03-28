@@ -91,6 +91,22 @@
     }[String(action || '').trim().toLowerCase()] || String(action || '--');
   }
 
+  function modelOutputSourceText(source) {
+    const value = String(source || '').trim().toLowerCase();
+    if (value === 'provider') return '模型原始输出';
+    if (value === 'fallback') return '本地兜底输出';
+    return '本地合成输出';
+  }
+
+  function symbolSelectionReasonText(reason) {
+    return {
+      manual_symbol: '固定币种',
+      existing_position_priority: '优先处理已有持仓',
+      top_ranked_tradable_symbol: '当前最优可交易币种',
+      top_ranked_watchlist_symbol: '当前最高分观察币种',
+    }[String(reason || '').trim().toLowerCase()] || String(reason || '--');
+  }
+
   function symbolModeLabel(mode) {
     return String(mode || '').trim().toLowerCase() === 'auto' ? '自动选币' : '固定币种';
   }
@@ -149,6 +165,37 @@
       summary: '模型反馈待建立',
       detail: `本进程里还没有成功模型返回，超时阈值 ${formatDurationMinutes(guard.hard_timeout_sec)}`,
       tone: 'info',
+    };
+  }
+
+  function describeModelOutput(diagnostics = {}) {
+    const output = diagnostics.model_output || {};
+    const source = String(output.source || 'synthetic').trim().toLowerCase();
+    const rawActionText = decisionActionText(output.raw_action || '--');
+    const normalizedActionText = decisionActionText(output.normalized_action || diagnostics.action || '--');
+    const changed = Boolean(output.changed);
+    const reasonChanged = Boolean(output.reason_changed);
+    const sourceText = modelOutputSourceText(source);
+
+    let summary = normalizedActionText;
+    if (source === 'provider') {
+      summary = output.action_changed ? `${rawActionText} -> ${normalizedActionText}` : rawActionText;
+    } else {
+      summary = `${sourceText} / ${normalizedActionText}`;
+    }
+
+    const detailParts = [`来源：${sourceText}`];
+    const rawReason = compactText(output.raw_reason || '', 96);
+    const normalizedReason = compactText(output.normalized_reason || diagnostics.decision_reason_raw || '', 96);
+    if (rawReason) detailParts.push(`原始理由：${rawReason}`);
+    if (reasonChanged && normalizedReason && normalizedReason !== rawReason) {
+      detailParts.push(`落地理由：${normalizedReason}`);
+    }
+
+    return {
+      summary,
+      detail: detailParts.join('；'),
+      tone: changed ? 'warn' : 'info',
     };
   }
 
@@ -268,6 +315,7 @@
     const primary = runtimeReason || diagnostics.primary || null;
     const agg = diagnostics.aggregated_signal || {};
     const research = diagnostics.research || {};
+    const modelOutput = describeModelOutput(diagnostics);
 
     if (!primary && !items.length) {
       el.innerHTML = '<div class="ai-agent-empty">暂无结构化原因，先跑一轮就会生成。</div>';
@@ -303,6 +351,10 @@
           <span>模型反馈</span>
           <strong class="${toneClass(modelFeedback.tone)}">${esc(modelFeedback.summary)}</strong>
         </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>模型动作</span>
+          <strong class="${toneClass(modelOutput.tone)}">${esc(modelOutput.summary)}</strong>
+        </div>
       </div>
     `;
 
@@ -315,7 +367,11 @@
         `).join('')}</div>`
       : '';
 
-    el.innerHTML = `${primarySummary}${meta}${detailList}`;
+    const debugNote = modelOutput.detail
+      ? `<div class="ai-agent-muted">${esc(modelOutput.detail)}</div>`
+      : '';
+
+    el.innerHTML = `${primarySummary}${meta}${debugNote}${detailList}`;
   }
 
   function renderAgentRanking(scan = null, cfg = {}) {
@@ -337,7 +393,7 @@
     const selected = String(scan.selected_symbol || cfg.symbol || '--');
     const selectionReason = String(scan.selection_reason || '--');
     const count = Number(scan.candidate_count || 0);
-    summaryEl.textContent = `模式：${symbolModeLabel(scan.symbol_mode || cfg.symbol_mode)}，当前选中 ${selected}，候选 ${count} 个，原因：${selectionReason}`;
+    summaryEl.textContent = `模式：${symbolModeLabel(scan.symbol_mode || cfg.symbol_mode)}，当前选中 ${selected}，候选 ${count} 个，原因：${symbolSelectionReasonText(selectionReason)}`;
 
     const rows = Array.isArray(scan.top_candidates) ? scan.top_candidates : [];
     if (!rows.length) {
@@ -348,6 +404,9 @@
     listEl.innerHTML = rows.map((row) => {
       const tradableText = row.tradable_now ? '可直接交易' : (row.blocked_by_risk ? '被风险拦截' : '暂不达标');
       const tone = row.tradable_now ? 'is-good' : (row.blocked_by_risk ? 'is-warn' : 'is-info');
+      const holdingText = row.has_position
+        ? `持仓中 / ${row.position_side === 'short' ? '空头' : row.position_side === 'long' ? '多头' : row.position_side || '--'}`
+        : '';
       return `
         <div class="ai-agent-ranking-row ${row.selected ? 'is-selected' : ''}">
           <div class="ai-agent-ranking-head">
@@ -358,6 +417,7 @@
           <div class="ai-agent-ranking-meta">
             <span>${esc(String(row.direction || '--'))} / ${esc(formatRatio(row.confidence, 3))}</span>
             <span class="ai-agent-mini-tag ${tone}">${esc(tradableText)}</span>
+            ${holdingText ? `<span class="ai-agent-mini-tag is-warn">${esc(holdingText)}</span>` : ''}
           </div>
           <div class="ai-agent-ranking-detail">${esc(row.summary || '--')}</div>
         </div>
@@ -385,6 +445,7 @@
     const lastError = String(status.last_error || '').trim();
     const modelText = cfg.model ? `${providerDisplayName(cfg.provider || '-')}/${cfg.model}` : providerDisplayName(cfg.provider || '-');
     const modelFeedback = describeModelFeedback(status, status.last_diagnostics || {});
+    const modelOutput = describeModelOutput(status.last_diagnostics || {});
 
     info.innerHTML = `
       <div class="ai-agent-info-grid">
@@ -404,10 +465,13 @@
         <span>${esc(researchLine)}</span>
         <span>模型反馈</span>
         <span class="${toneClass(modelFeedback.tone)}">${esc(modelFeedback.summary)}</span>
+        <span>模型动作</span>
+        <span class="${toneClass(modelOutput.tone)}">${esc(modelOutput.summary)}</span>
         <span>最后运行</span>
         <span>${esc(lastRunAt)}</span>
       </div>
       <div class="ai-agent-muted">${esc(modelFeedback.detail)}</div>
+      <div class="ai-agent-muted">${esc(modelOutput.detail)}</div>
       ${lastError ? `<div class="ai-agent-error">错误：${esc(lastError)}</div>` : ''}
     `;
 
@@ -443,12 +507,17 @@
         const decision = row.decision || {};
         const diagnostics = row.diagnostics || {};
         const primary = diagnostics.primary || {};
+        const modelOutput = diagnostics.model_output || {};
         const tone = toneClass(primary.tone || (row.execution?.submitted ? 'good' : 'info'));
         const actionText = decisionActionText(decision.action || row.action || row.trigger || '?');
         const symbolText = row.config?.symbol || diagnostics.selected_symbol || '--';
-        const detailText = primary.label
+        const rewriteText = modelOutput.source === 'provider' && modelOutput.action_changed
+          ? `原始 ${decisionActionText(modelOutput.raw_action || '--')} -> ${decisionActionText(modelOutput.normalized_action || decision.action || '--')}`
+          : '';
+        const baseDetailText = primary.label
           ? `${primary.label}${primary.detail ? `：${primary.detail}` : ''}`
           : compactText(decision.reason || diagnostics.summary || row.execution?.reason || '--', 120);
+        const detailText = rewriteText ? `${rewriteText}；${baseDetailText}` : baseDetailText;
         return `
           <div class="agent-journal-row">
             <span class="agent-journal-ts">${esc(ts)}</span>
