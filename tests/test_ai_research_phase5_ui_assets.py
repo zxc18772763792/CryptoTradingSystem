@@ -44,6 +44,8 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "modules.candidates" in candidates_js
     assert "window.agentStart = agentStart" in agent_js
     assert "renderAgentChainSummary" in agent_js
+    assert "function describeExecutionCost" in agent_js
+    assert "执行成本" in agent_js
     assert "startBtn.textContent = running ? '运行中' : '启动'" in agent_js
     assert "function selectProposal(" in ai_js
     assert "buildPlannerConstraints" in ai_js
@@ -51,6 +53,8 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "buildOneClickFailureFeedback" in ai_js
     assert "buildOneClickSuccessFeedback" in ai_js
     assert "renderOneClickFeedback" in ai_js
+    assert "liveDecisionActivityLastGood" in ai_js
+    assert "沿用上次快照" in ai_js
     assert "FLOW_HINT_QUICK_PATH" in ai_js
     assert "AI_UI_TIMEZONE = 'Asia/Singapore'" in ai_js
     assert "AI_UI_TIMEZONE = 'Asia/Singapore'" in agent_js

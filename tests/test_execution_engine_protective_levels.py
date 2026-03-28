@@ -1,12 +1,15 @@
 from datetime import datetime, timezone
 import sys
 from types import ModuleType, SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from config.settings import settings
 
-if "pandas" not in sys.modules:
+try:
+    import pandas  # noqa: F401
+except ImportError:
     pd_stub = ModuleType("pandas")
 
     class _DummyDataFrame:
@@ -24,6 +27,14 @@ if "pandas" not in sys.modules:
 
 from core.trading.execution_engine import ExecutionEngine
 from core.trading.order_manager import OrderSide
+from core.trading.position_manager import PositionSide, position_manager
+
+
+@pytest.fixture(autouse=True)
+def _clear_positions():
+    position_manager.clear_all()
+    yield
+    position_manager.clear_all()
 
 
 def _make_signal(
@@ -126,3 +137,117 @@ def test_fallback_to_global_default_pct(monkeypatch):
 
     assert stop_loss == pytest.approx(96.0)
     assert take_profit == pytest.approx(108.0)
+
+
+def test_execution_engine_profit_protect_raises_stop_loss_for_long():
+    engine = ExecutionEngine()
+    position_manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=100.0,
+        quantity=2.0,
+        strategy="AI_AutonomousAgent",
+        account_id="main",
+        metadata={
+            "source": "ai_autonomous_agent",
+            "profit_protect_enabled": True,
+            "profit_protect_trigger_pct": 0.0035,
+            "profit_protect_lock_pct": 0.0012,
+        },
+    )
+    engine._resolve_price = AsyncMock(return_value=100.7)
+
+    import asyncio
+
+    asyncio.run(engine._check_protective_orders())
+
+    position = position_manager.get_position("binance", "BTC/USDT", account_id="main")
+    assert position is not None
+    assert position.stop_loss == pytest.approx(100.12)
+
+
+def test_execution_engine_partial_take_profit_reduces_position_and_arms_trailing():
+    engine = ExecutionEngine()
+    position_manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=100.0,
+        quantity=2.0,
+        strategy="AI_AutonomousAgent",
+        account_id="main",
+        metadata={
+            "source": "ai_autonomous_agent",
+            "profit_protect_enabled": True,
+            "profit_protect_trigger_pct": 0.0035,
+            "profit_protect_lock_pct": 0.0012,
+            "partial_take_profit_enabled": True,
+            "partial_take_profit_trigger_pct": 0.006,
+            "partial_take_profit_fraction": 0.5,
+            "post_partial_trailing_stop_pct": 0.0025,
+        },
+    )
+    engine._resolve_price = AsyncMock(return_value=101.0)
+
+    async def _fake_execute_manual_order_single(**kwargs):
+        position_manager.close_position(
+            exchange=kwargs["exchange"],
+            symbol=kwargs["symbol"],
+            close_price=kwargs["price"],
+            quantity=kwargs["amount"],
+            account_id=kwargs["account_id"],
+        )
+        return {"order_id": "partial-1", "filled": kwargs["amount"], "price": kwargs["price"]}
+
+    engine._execute_manual_order_single = _fake_execute_manual_order_single
+
+    import asyncio
+
+    asyncio.run(engine._check_protective_orders())
+
+    position = position_manager.get_position("binance", "BTC/USDT", account_id="main")
+    assert position is not None
+    assert position.quantity == pytest.approx(1.0)
+    assert position.metadata["partial_take_profit_done"] is True
+    assert position.trailing_stop_pct == pytest.approx(0.0025)
+    assert position.trailing_stop_price is not None
+    assert position.take_profit is None
+    assert position.stop_loss == pytest.approx(100.12)
+
+
+def test_execution_engine_partial_take_profit_skips_when_below_min_notional():
+    engine = ExecutionEngine()
+    position_manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=100.0,
+        quantity=1.2,
+        strategy="AI_AutonomousAgent",
+        account_id="main",
+        metadata={
+            "source": "ai_autonomous_agent",
+            "profit_protect_enabled": True,
+            "profit_protect_trigger_pct": 0.0035,
+            "profit_protect_lock_pct": 0.0012,
+            "partial_take_profit_enabled": True,
+            "partial_take_profit_trigger_pct": 0.006,
+            "partial_take_profit_fraction": 0.5,
+            "post_partial_trailing_stop_pct": 0.0025,
+        },
+    )
+    engine._resolve_price = AsyncMock(return_value=101.0)
+    execute_mock = AsyncMock(return_value={"order_id": "should-not-run"})
+    engine._execute_manual_order_single = execute_mock
+
+    import asyncio
+
+    asyncio.run(engine._check_protective_orders())
+
+    position = position_manager.get_position("binance", "BTC/USDT", account_id="main")
+    assert position is not None
+    assert position.quantity == pytest.approx(1.2)
+    assert position.stop_loss == pytest.approx(100.12)
+    assert position.metadata["partial_take_profit_skip_reason"] == "partial_notional_below_min"
+    assert execute_mock.await_count == 0

@@ -199,6 +199,45 @@
     };
   }
 
+  function describeExecutionCost(diagnostics = {}) {
+    const cost = diagnostics.execution_cost || {};
+    const oneWayBps = Number(cost.estimated_one_way_cost_bps || 0);
+    const roundTripBps = Number(cost.estimated_round_trip_cost_bps || 0);
+    const feeBps = Number(cost.fee_bps || 0);
+    const slipBps = Number(cost.estimated_slippage_bps || 0);
+    const refUsd = Number(cost.notional_reference || 0);
+    const oneWayUsd = Number(cost.estimated_one_way_cost_usd_at_reference || 0);
+    const roundTripUsd = Number(cost.estimated_round_trip_cost_usd_at_reference || 0);
+
+    if (!Number.isFinite(oneWayBps) || oneWayBps <= 0) {
+      return {
+        summary: '成本估算待建立',
+        detail: '本轮诊断里还没有拿到手续费/滑点估算。',
+        tone: 'info',
+      };
+    }
+
+    const summary = `单边 ${oneWayBps.toFixed(2)} bps / 往返 ${roundTripBps.toFixed(2)} bps`;
+    const detailParts = [
+      `手续费 ${feeBps.toFixed(2)} bps`,
+      `滑点 ${slipBps.toFixed(2)} bps`,
+    ];
+    if (Number.isFinite(refUsd) && refUsd > 0) {
+      detailParts.push(`参考名义 ${refUsd.toFixed(refUsd >= 100 ? 2 : 4)} USD`);
+    }
+    if (Number.isFinite(oneWayUsd) && oneWayUsd > 0) {
+      detailParts.push(`单边约 ${oneWayUsd.toFixed(4)} USD`);
+    }
+    if (Number.isFinite(roundTripUsd) && roundTripUsd > 0) {
+      detailParts.push(`往返约 ${roundTripUsd.toFixed(4)} USD`);
+    }
+    return {
+      summary,
+      detail: detailParts.join(' / '),
+      tone: oneWayBps >= 12 ? 'warn' : 'info',
+    };
+  }
+
   function setChainSummaryText(id, value) {
     const el = document.getElementById(id);
     if (!el) return;
@@ -316,6 +355,7 @@
     const agg = diagnostics.aggregated_signal || {};
     const research = diagnostics.research || {};
     const modelOutput = describeModelOutput(diagnostics);
+    const executionCost = describeExecutionCost(diagnostics);
 
     if (!primary && !items.length) {
       el.innerHTML = '<div class="ai-agent-empty">暂无结构化原因，先跑一轮就会生成。</div>';
@@ -355,6 +395,10 @@
           <span>模型动作</span>
           <strong class="${toneClass(modelOutput.tone)}">${esc(modelOutput.summary)}</strong>
         </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>执行成本</span>
+          <strong class="${toneClass(executionCost.tone)}">${esc(executionCost.summary)}</strong>
+        </div>
       </div>
     `;
 
@@ -370,8 +414,11 @@
     const debugNote = modelOutput.detail
       ? `<div class="ai-agent-muted">${esc(modelOutput.detail)}</div>`
       : '';
+    const costNote = executionCost.detail
+      ? `<div class="ai-agent-muted">${esc(executionCost.detail)}</div>`
+      : '';
 
-    el.innerHTML = `${primarySummary}${meta}${debugNote}${detailList}`;
+    el.innerHTML = `${primarySummary}${meta}${debugNote}${costNote}${detailList}`;
   }
 
   function renderAgentRanking(scan = null, cfg = {}) {
@@ -446,6 +493,7 @@
     const modelText = cfg.model ? `${providerDisplayName(cfg.provider || '-')}/${cfg.model}` : providerDisplayName(cfg.provider || '-');
     const modelFeedback = describeModelFeedback(status, status.last_diagnostics || {});
     const modelOutput = describeModelOutput(status.last_diagnostics || {});
+    const executionCost = describeExecutionCost(status.last_diagnostics || {});
 
     info.innerHTML = `
       <div class="ai-agent-info-grid">
@@ -467,11 +515,14 @@
         <span class="${toneClass(modelFeedback.tone)}">${esc(modelFeedback.summary)}</span>
         <span>模型动作</span>
         <span class="${toneClass(modelOutput.tone)}">${esc(modelOutput.summary)}</span>
+        <span>执行成本</span>
+        <span class="${toneClass(executionCost.tone)}">${esc(executionCost.summary)}</span>
         <span>最后运行</span>
         <span>${esc(lastRunAt)}</span>
       </div>
       <div class="ai-agent-muted">${esc(modelFeedback.detail)}</div>
       <div class="ai-agent-muted">${esc(modelOutput.detail)}</div>
+      <div class="ai-agent-muted">${esc(executionCost.detail)}</div>
       ${lastError ? `<div class="ai-agent-error">错误：${esc(lastError)}</div>` : ''}
     `;
 
@@ -518,6 +569,51 @@
           ? `${primary.label}${primary.detail ? `：${primary.detail}` : ''}`
           : compactText(decision.reason || diagnostics.summary || row.execution?.reason || '--', 120);
         const detailText = rewriteText ? `${rewriteText}；${baseDetailText}` : baseDetailText;
+        return `
+          <div class="agent-journal-row">
+            <span class="agent-journal-ts">${esc(ts)}</span>
+            <span class="agent-journal-action ${tone}">${esc(actionText)}</span>
+            <span class="agent-journal-symbol">${esc(symbolText)}</span>
+            <span class="agent-journal-detail">${esc(detailText)}</span>
+          </div>
+        `;
+      }).join('');
+    } catch (_) {
+      el.innerHTML = '<div class="ai-agent-empty">日志加载失败</div>';
+    }
+  }
+
+  async function loadAgentJournal() {
+    const el = document.getElementById('ai-agent-journal');
+    if (!el) return;
+    try {
+      const response = await rootApi(`${AGENT_JOURNAL_API}?limit=15`);
+      const rows = Array.isArray(response?.items) ? response.items.slice().reverse() : [];
+      if (!rows.length) {
+        el.innerHTML = '<div class="ai-agent-empty">暂无日志</div>';
+        return;
+      }
+      el.innerHTML = rows.map((row) => {
+        const ts = fmtAgentTs(row.timestamp || row.ts || '');
+        const decision = row.decision || {};
+        const diagnostics = row.diagnostics || {};
+        const primary = diagnostics.primary || {};
+        const modelOutput = diagnostics.model_output || {};
+        const executionCost = describeExecutionCost(diagnostics);
+        const tone = toneClass(primary.tone || (row.execution?.submitted ? 'good' : 'info'));
+        const actionText = decisionActionText(decision.action || row.action || row.trigger || '?');
+        const symbolText = row.config?.symbol || diagnostics.selected_symbol || '--';
+        const rewriteText = modelOutput.source === 'provider' && modelOutput.action_changed
+          ? `原始 ${decisionActionText(modelOutput.raw_action || '--')} -> ${decisionActionText(modelOutput.normalized_action || decision.action || '--')}`
+          : '';
+        const baseDetailText = primary.label
+          ? `${primary.label}${primary.detail ? `：${primary.detail}` : ''}`
+          : compactText(decision.reason || diagnostics.summary || row.execution?.reason || '--', 120);
+        const detailParts = [rewriteText, baseDetailText];
+        if (Number(diagnostics?.execution_cost?.estimated_one_way_cost_bps || 0) > 0) {
+          detailParts.push(`执行成本 ${executionCost.summary}`);
+        }
+        const detailText = detailParts.filter(Boolean).join('；');
         return `
           <div class="agent-journal-row">
             <span class="agent-journal-ts">${esc(ts)}</span>

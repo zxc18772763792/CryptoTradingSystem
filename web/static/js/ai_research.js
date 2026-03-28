@@ -79,6 +79,7 @@
     selectedCandidateId: '',
     latestSignals: {},
     liveDecisionActivity: null,
+    liveDecisionActivityLastGood: null,
     liveDecisionActivityRetryTimer: null,
     signalTimer: null,
     refreshTimer: null,
@@ -793,6 +794,95 @@
         last_hit: null,
         scope_note: `摘要加载失败: ${err.message}`,
       };
+      renderLiveDecisionActivitySummary(state.liveDecisionActivity);
+      clearTimeout(state.liveDecisionActivityRetryTimer);
+      state.liveDecisionActivityRetryTimer = setTimeout(() => {
+        state.liveDecisionActivityRetryTimer = null;
+        if (isAiResearchActive()) {
+          loadLiveDecisionActivitySummary().catch(() => {});
+        }
+      }, 3000);
+    }
+  }
+
+  function renderLiveDecisionActivitySummary(summary = {}) {
+    const hitEl = document.getElementById('ai-live-decision-hit-summary');
+    const hitDetailEl = document.getElementById('ai-live-decision-hit-detail');
+    const lastEl = document.getElementById('ai-live-decision-last-hit');
+    const lastDetailEl = document.getElementById('ai-live-decision-last-hit-detail');
+    if (!hitEl || !hitDetailEl || !lastEl || !lastDetailEl) return;
+
+    const hitCount = Math.max(0, Number(summary?.hit_count || 0));
+    const blockCount = Math.max(0, Number(summary?.block_count || 0));
+    const reduceOnlyCount = Math.max(0, Number(summary?.reduce_only_count || 0));
+    const bypassCount = Math.max(0, Number(summary?.bypass_count || 0));
+    const lastHit = summary?.last_hit && typeof summary.last_hit === 'object' ? summary.last_hit : null;
+    const refreshState = String(summary?.refresh_state || '').trim().toLowerCase();
+    const refreshNote = refreshState === 'stale'
+      ? `沿用上次快照，刷新失败：${String(summary?.refresh_error || '稍后自动重试')}`
+      : refreshState === 'retrying'
+        ? `摘要刷新中：${String(summary?.refresh_error || '稍后自动重试')}`
+        : '';
+    const baseScopeNote = String(summary?.scope_note || '仅统计策略库/候选执行链');
+    const detailParts = [];
+
+    hitEl.textContent = hitCount > 0 ? `已命中 ${hitCount} 次` : '暂未命中';
+    if (refreshState === 'retrying' && hitCount === 0) {
+      detailParts.push(refreshNote || '摘要刷新中，稍后自动重试');
+    } else {
+      if (hitCount > 0) {
+        detailParts.push(`直接拦截 ${blockCount} 次 · 减仓拒绝 ${reduceOnlyCount} 次`);
+      } else {
+        detailParts.push(baseScopeNote);
+      }
+      if (bypassCount > 0) detailParts.push(`自动交易直连 ${bypassCount} 次`);
+      if (refreshNote) detailParts.push(refreshNote);
+    }
+    hitDetailEl.textContent = detailParts.join(' · ');
+
+    if (lastHit) {
+      const status = String(lastHit.status || '').trim().toLowerCase();
+      const symbolLabel = String(lastHit.symbol || '--').split('/')[0] || '--';
+      lastEl.textContent = `${symbolLabel} ${status === 'ai_reduce_only_rejected' ? '减仓拒绝' : '直接拦截'}`;
+      lastDetailEl.textContent = `${String(lastHit.strategy || '--')} · ${fmtTs(lastHit.ts || summary?.last_updated_at)}${refreshState === 'stale' ? ' · 非实时快照' : ''}`;
+    } else {
+      lastEl.textContent = refreshState === 'retrying' ? '摘要刷新中' : '最近暂无拦截';
+      lastDetailEl.textContent = refreshState === 'retrying'
+        ? '正在重试拉取复核摘要'
+        : `AI自动交易不计入这里${refreshState === 'stale' ? ' · 当前显示为上次快照' : ''}`;
+    }
+  }
+
+  async function loadLiveDecisionActivitySummary() {
+    try {
+      clearTimeout(state.liveDecisionActivityRetryTimer);
+      state.liveDecisionActivityRetryTimer = null;
+      const res = await aiApi('/runtime-config/live-decision/summary', { timeoutMs: 10000 });
+      state.liveDecisionActivity = {
+        ...(res || {}),
+        refresh_state: 'fresh',
+        refresh_error: '',
+      };
+      state.liveDecisionActivityLastGood = state.liveDecisionActivity;
+      renderLiveDecisionActivitySummary(state.liveDecisionActivity);
+    } catch (err) {
+      const errorMessage = String(err?.message || '稍后自动重试');
+      state.liveDecisionActivity = state.liveDecisionActivityLastGood && typeof state.liveDecisionActivityLastGood === 'object'
+        ? {
+            ...state.liveDecisionActivityLastGood,
+            refresh_state: 'stale',
+            refresh_error: errorMessage,
+          }
+        : {
+            hit_count: 0,
+            block_count: 0,
+            reduce_only_count: 0,
+            bypass_count: 0,
+            last_hit: null,
+            scope_note: '摘要刷新中，稍后自动重试',
+            refresh_state: 'retrying',
+            refresh_error: errorMessage,
+          };
       renderLiveDecisionActivitySummary(state.liveDecisionActivity);
       clearTimeout(state.liveDecisionActivityRetryTimer);
       state.liveDecisionActivityRetryTimer = setTimeout(() => {

@@ -82,6 +82,8 @@ class Settings(BaseSettings):
     PAPER_INITIAL_EQUITY: float = 10000.0
     PAPER_FEE_RATE: float = 0.001
     PAPER_SLIPPAGE_BPS: float = 2.0
+    LIVE_FEE_RATE: float = 0.0004
+    LIVE_SLIPPAGE_BPS: float = 2.0
     RISK_FREE_RATE: float = 0.02
     GOVERNANCE_ENABLED: bool = False
     DECISION_MODE: str = "shadow"  # shadow/paper/live

@@ -813,6 +813,130 @@ def test_agent_run_once_journal_includes_structured_context(monkeypatch, tmp_pat
     assert context["market_structure"]["trend"]["label"] == "uptrend"
 
 
+def test_execution_cost_payload_uses_live_defaults_and_liquidity_adjustment(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    payload = agent._build_execution_cost_payload(
+        cfg={"exchange": "binance"},
+        market_structure={
+            "microstructure": {
+                "atr_pct": 0.0026,
+                "realized_vol": 0.0019,
+                "spread_proxy": 0.0013,
+            },
+            "volume": {
+                "last": 150000.0,
+                "avg_20": 3000000.0,
+            },
+        },
+        account_risk={
+            "trading_mode": "live",
+            "position_cap_notional": 800.0,
+            "same_direction_remaining_notional": 400.0,
+            "current_position_notional": 0.0,
+            "last_price": 1.33,
+        },
+    )
+
+    assert payload["trading_mode"] == "live"
+    assert payload["fee_source"] == "live_default_fee_rate"
+    assert payload["fee_bps"] == pytest.approx(4.0)
+    assert payload["dynamic_slippage_raw_bps"] > payload["dynamic_slippage_bps"]
+    assert payload["liquidity_reference_notional"] > 0.0
+    assert payload["liquidity_adjustment_factor"] < 1.0
+    assert payload["estimated_slippage_bps"] >= 2.0
+    assert payload["estimated_one_way_cost_bps"] < (payload["dynamic_slippage_raw_bps"] + 4.0)
+
+
+def test_build_signal_embeds_profit_management_metadata(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    signal = agent._build_signal(
+        decision={
+            "action": "buy",
+            "confidence": 0.84,
+            "strength": 0.73,
+            "stop_loss_pct": 0.02,
+            "take_profit_pct": 0.05,
+            "reason": "trend_following",
+        },
+        cfg={
+            "exchange": "binance",
+            "account_id": "main",
+            "timeframe": "15m",
+            "provider": "codex",
+            "model": "gpt-test",
+            "strategy_name": "AI_AutonomousAgent",
+        },
+        context_payload={
+            "price": 100.0,
+            "execution_cost": {
+                "estimated_one_way_cost_bps": 6.0,
+                "estimated_round_trip_cost_bps": 12.0,
+            },
+            "market_structure": {
+                "microstructure": {
+                    "atr_pct": 0.0028,
+                }
+            },
+        },
+    )
+
+    assert signal is not None
+    metadata = signal.metadata
+    assert metadata["profit_protect_enabled"] is True
+    assert metadata["profit_protect_trigger_pct"] >= module._AI_PROFIT_PROTECT_TRIGGER_PCT_MIN
+    assert metadata["profit_protect_lock_pct"] > 0.0
+    assert metadata["partial_take_profit_enabled"] is True
+    assert metadata["partial_take_profit_trigger_pct"] > metadata["profit_protect_trigger_pct"]
+    assert metadata["partial_take_profit_fraction"] == pytest.approx(0.5)
+    assert metadata["post_partial_trailing_stop_pct"] > 0.0
+    assert metadata["outage_tight_trailing_stop_pct"] > 0.0
+    assert metadata["outage_tight_trailing_stop_pct"] <= metadata["post_partial_trailing_stop_pct"]
+
+
+def test_agent_model_outage_tightens_profitable_local_position(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "LONG", "confidence": 0.76}
+
+    local_position = SimpleNamespace(
+        side=SimpleNamespace(value="long"),
+        quantity=1.0,
+        entry_price=100.0,
+        current_price=101.2,
+        unrealized_pnl=1.2,
+        leverage=1.0,
+    )
+
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: local_position)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=True))
+    tighten_mock = AsyncMock(return_value={"applied": True, "reason": "outage_protection_armed"})
+    monkeypatch.setattr(module.execution_engine, "tighten_profitable_position_protection", tighten_mock)
+    agent._last_model_feedback_at = time.time() - 3600.0
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        AsyncMock(side_effect=RuntimeError('codex_http_429:{"code":"USAGE_LIMIT_EXCEEDED"}')),
+    )
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert result["decision"]["action"] == "hold"
+    assert "profit_protection_armed" in result["decision"]["reason"]
+    assert tighten_mock.await_count == 1
+
+
 def test_agent_symbol_scan_prefers_trade_ready_symbol(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
 

@@ -66,6 +66,13 @@ _AI_EXECUTION_DYNAMIC_SLIP_PARAMS = {
     "k_rv": 0.80,
     "k_spread": 0.50,
 }
+_AI_EXECUTION_LIQUIDITY_TARGET_PARTICIPATION = 0.001
+_AI_PROFIT_PROTECT_TRIGGER_PCT_MIN = 0.0035
+_AI_PROFIT_PROTECT_LOCK_BUFFER_PCT = 0.0004
+_AI_PARTIAL_TAKE_PROFIT_TRIGGER_PCT_MIN = 0.0060
+_AI_PARTIAL_TAKE_PROFIT_FRACTION = 0.5
+_AI_POST_PARTIAL_TRAILING_STOP_PCT_MIN = 0.0025
+_AI_OUTAGE_TIGHT_TRAILING_STOP_PCT_MIN = 0.0015
 
 
 def _utc_now() -> datetime:
@@ -761,6 +768,47 @@ class AutonomousTradingAgent:
             "last_success_at": _utc_iso_from_unix(self._last_model_feedback_at),
             "outage_started_at": _utc_iso_from_unix(self._model_feedback_outage_started_at),
         }
+
+    def _current_model_feedback_outage_duration_sec(self) -> float:
+        if self._model_feedback_failure_streak <= 0:
+            return 0.0
+        if self._model_feedback_last_failure_kind not in {"rate_limit", "service_unavailable", "timeout"}:
+            return 0.0
+        now = time.time()
+        outage_anchor = self._last_model_feedback_at
+        if outage_anchor is None:
+            outage_anchor = self._model_feedback_outage_started_at or now
+        return max(0.0, now - float(outage_anchor))
+
+    async def _protect_profitable_local_position_during_model_outage(
+        self,
+        *,
+        cfg: Dict[str, Any],
+        context_payload: Dict[str, Any],
+        outage_duration_sec: float,
+        model_feedback_issue: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        exchange = str(cfg.get("exchange") or context_payload.get("exchange") or "binance")
+        symbol = str(cfg.get("symbol") or context_payload.get("symbol") or "BTC/USDT")
+        account_id = str(cfg.get("account_id") or "main")
+        local_position = position_manager.get_position(exchange, symbol, account_id=account_id)
+        if local_position is None:
+            return {"applied": False, "reason": "no_local_position"}
+        result = await execution_engine.tighten_profitable_position_protection(
+            exchange=exchange,
+            symbol=symbol,
+            account_id=account_id,
+            current_price=_safe_nonnegative_float(context_payload.get("price"), 0.0),
+            reason=f"model_feedback_outage:{model_feedback_issue.get('kind') or 'unknown'}",
+        )
+        if bool(result.get("applied")):
+            logger.warning(
+                "autonomous agent armed outage profit protection "
+                f"symbol={symbol} exchange={exchange} account_id={account_id} "
+                f"duration_min={float(outage_duration_sec) / 60.0:.1f} "
+                f"kind={model_feedback_issue.get('kind') or 'unknown'}"
+            )
+        return result
 
     async def _send_model_feedback_outage_alert(
         self,
@@ -1487,11 +1535,21 @@ class AutonomousTradingAgent:
         market_structure: Dict[str, Any],
         account_risk: Dict[str, Any],
     ) -> Dict[str, Any]:
-        fee_rate = _safe_nonnegative_float(getattr(settings, "PAPER_FEE_RATE", 0.0), 0.0)
-        configured_slippage_bps = _safe_nonnegative_float(getattr(settings, "PAPER_SLIPPAGE_BPS", 0.0), 0.0)
+        trading_mode = str(account_risk.get("trading_mode") or execution_engine.get_trading_mode()).strip().lower()
+        is_live_mode = trading_mode == "live"
+        fee_rate = _safe_nonnegative_float(
+            getattr(settings, "LIVE_FEE_RATE", 0.0004) if is_live_mode else getattr(settings, "PAPER_FEE_RATE", 0.0),
+            0.0004 if is_live_mode else 0.0,
+        )
+        configured_slippage_bps = _safe_nonnegative_float(
+            getattr(settings, "LIVE_SLIPPAGE_BPS", getattr(settings, "PAPER_SLIPPAGE_BPS", 0.0))
+            if is_live_mode
+            else getattr(settings, "PAPER_SLIPPAGE_BPS", 0.0),
+            0.0,
+        )
         configured_slippage_rate = configured_slippage_bps / 10000.0
         micro = dict(market_structure.get("microstructure") or {})
-        dynamic_slip_rate = max(
+        dynamic_slip_rate_raw = max(
             0.0,
             float(
                 dynamic_slippage_rate(
@@ -1502,34 +1560,68 @@ class AutonomousTradingAgent:
                 )
             ),
         )
-        estimated_slippage_rate = max(configured_slippage_rate, dynamic_slip_rate)
-        one_way_cost_rate = fee_rate + estimated_slippage_rate
-        round_trip_cost_rate = one_way_cost_rate * 2.0
         position_cap_notional = _safe_nonnegative_float(account_risk.get("position_cap_notional"), 0.0)
         same_direction_remaining_notional = _safe_nonnegative_float(
             account_risk.get("same_direction_remaining_notional"),
             0.0,
         )
-        notional_reference = (
+        current_position_notional = _safe_nonnegative_float(account_risk.get("current_position_notional"), 0.0)
+        open_notional_reference = (
             same_direction_remaining_notional
             if same_direction_remaining_notional > 0
             else position_cap_notional
         )
+        close_notional_reference = current_position_notional if current_position_notional > 0 else 0.0
+        notional_reference = close_notional_reference if close_notional_reference > 0 else open_notional_reference
+        volume = dict(market_structure.get("volume") or {})
+        liquidity_volume_reference = max(
+            _safe_nonnegative_float(volume.get("avg_20"), 0.0),
+            _safe_nonnegative_float(volume.get("last"), 0.0),
+        )
+        last_price = _safe_nonnegative_float(account_risk.get("last_price"), 0.0)
+        liquidity_reference_notional = max(0.0, liquidity_volume_reference * last_price)
+        notional_participation_rate = 0.0
+        liquidity_adjustment = 1.0
+        dynamic_slip_rate = dynamic_slip_rate_raw
+        if liquidity_reference_notional > 0.0 and notional_reference > 0.0:
+            notional_participation_rate = min(1.0, notional_reference / liquidity_reference_notional)
+            liquidity_adjustment = min(
+                1.0,
+                math.sqrt(
+                    max(0.0, notional_participation_rate)
+                    / max(_AI_EXECUTION_LIQUIDITY_TARGET_PARTICIPATION, 1e-9)
+                ),
+            )
+            dynamic_slip_rate = max(0.0, dynamic_slip_rate_raw * liquidity_adjustment)
         min_order_usd = _safe_nonnegative_float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 0.0), 0.0)
+        estimated_slippage_rate = max(configured_slippage_rate, dynamic_slip_rate)
+        one_way_cost_rate = fee_rate + estimated_slippage_rate
+        round_trip_cost_rate = one_way_cost_rate * 2.0
         return {
-            "trading_mode": str(account_risk.get("trading_mode") or execution_engine.get_trading_mode()),
-            "fee_source": "paper_default_fee_rate",
-            "slippage_source": "paper_floor_or_dynamic_microstructure_max",
+            "trading_mode": trading_mode,
+            "fee_source": "live_default_fee_rate" if is_live_mode else "paper_default_fee_rate",
+            "slippage_source": (
+                "live_floor_or_dynamic_microstructure_max"
+                if is_live_mode
+                else "paper_floor_or_dynamic_microstructure_max"
+            ),
             "fee_rate": float(fee_rate),
             "fee_bps": float(fee_rate * 10000.0),
             "configured_slippage_bps": float(configured_slippage_bps),
+            "dynamic_slippage_raw_bps": float(dynamic_slip_rate_raw * 10000.0),
             "dynamic_slippage_bps": float(dynamic_slip_rate * 10000.0),
             "estimated_slippage_bps": float(estimated_slippage_rate * 10000.0),
             "estimated_one_way_cost_bps": float(one_way_cost_rate * 10000.0),
             "estimated_round_trip_cost_bps": float(round_trip_cost_rate * 10000.0),
             "position_cap_notional": float(position_cap_notional),
             "same_direction_remaining_notional": float(same_direction_remaining_notional),
+            "current_position_notional": float(current_position_notional),
+            "open_notional_reference": float(open_notional_reference),
+            "close_notional_reference": float(close_notional_reference),
             "notional_reference": float(notional_reference),
+            "liquidity_reference_notional": float(liquidity_reference_notional),
+            "notional_participation_rate": float(notional_participation_rate),
+            "liquidity_adjustment_factor": float(liquidity_adjustment),
             "estimated_one_way_cost_usd_at_reference": float(notional_reference * one_way_cost_rate),
             "estimated_round_trip_cost_usd_at_reference": float(notional_reference * round_trip_cost_rate),
             "min_strategy_order_usd": float(min_order_usd),
@@ -1540,8 +1632,85 @@ class AutonomousTradingAgent:
             },
             "notes": [
                 "fee_rate and configured_slippage_bps follow current paper/live execution defaults",
-                "estimated_slippage_bps uses max(configured floor, dynamic microstructure estimate)",
+                "dynamic slippage is liquidity-adjusted before applying the configured floor",
+                "estimated_slippage_bps uses max(configured floor, liquidity-adjusted dynamic estimate)",
             ],
+        }
+
+    def _build_trade_management_metadata(
+        self,
+        *,
+        decision: Dict[str, Any],
+        context_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        action = str(decision.get("action") or "").strip().lower()
+        if action not in {"buy", "sell"}:
+            return {}
+
+        execution_cost = dict(context_payload.get("execution_cost") or {})
+        market_structure = dict(context_payload.get("market_structure") or {})
+        microstructure = dict(market_structure.get("microstructure") or {})
+
+        one_way_cost_pct = _safe_nonnegative_float(
+            execution_cost.get("estimated_one_way_cost_bps"),
+            0.0,
+        ) / 10000.0
+        round_trip_cost_pct = _safe_nonnegative_float(
+            execution_cost.get("estimated_round_trip_cost_bps"),
+            0.0,
+        ) / 10000.0
+        atr_pct = _safe_nonnegative_float(microstructure.get("atr_pct"), 0.0)
+
+        profit_protect_trigger_pct = max(
+            _AI_PROFIT_PROTECT_TRIGGER_PCT_MIN,
+            round_trip_cost_pct,
+            atr_pct * 0.8,
+        )
+        profit_protect_lock_pct = max(
+            round_trip_cost_pct,
+            one_way_cost_pct + _AI_PROFIT_PROTECT_LOCK_BUFFER_PCT,
+        )
+        profit_protect_lock_pct = min(
+            profit_protect_lock_pct,
+            max(_AI_PROFIT_PROTECT_LOCK_BUFFER_PCT, profit_protect_trigger_pct * 0.85),
+        )
+
+        partial_take_profit_trigger_pct = max(
+            _AI_PARTIAL_TAKE_PROFIT_TRIGGER_PCT_MIN,
+            profit_protect_trigger_pct * 1.6,
+            atr_pct * 1.35,
+        )
+        post_partial_trailing_stop_pct = max(
+            _AI_POST_PARTIAL_TRAILING_STOP_PCT_MIN,
+            atr_pct * 0.9,
+        )
+        post_partial_trailing_stop_pct = min(
+            post_partial_trailing_stop_pct,
+            max(_AI_POST_PARTIAL_TRAILING_STOP_PCT_MIN, partial_take_profit_trigger_pct * 0.7),
+        )
+
+        outage_tight_trailing_stop_pct = max(
+            _AI_OUTAGE_TIGHT_TRAILING_STOP_PCT_MIN,
+            round_trip_cost_pct * 0.6,
+        )
+        outage_tight_trailing_stop_pct = min(
+            outage_tight_trailing_stop_pct,
+            max(_AI_OUTAGE_TIGHT_TRAILING_STOP_PCT_MIN, post_partial_trailing_stop_pct * 0.75),
+        )
+
+        return {
+            "profit_management_profile": "cost_aware_dynamic",
+            "profit_management_cost_basis_bps": float(round_trip_cost_pct * 10000.0),
+            "profit_management_atr_pct": float(atr_pct),
+            "profit_protect_enabled": True,
+            "profit_protect_trigger_pct": float(profit_protect_trigger_pct),
+            "profit_protect_lock_pct": float(profit_protect_lock_pct),
+            "partial_take_profit_enabled": True,
+            "partial_take_profit_trigger_pct": float(partial_take_profit_trigger_pct),
+            "partial_take_profit_fraction": float(_AI_PARTIAL_TAKE_PROFIT_FRACTION),
+            "post_partial_trailing_stop_pct": float(post_partial_trailing_stop_pct),
+            "outage_protection_enabled": True,
+            "outage_tight_trailing_stop_pct": float(outage_tight_trailing_stop_pct),
         }
 
     async def _build_context(self, cfg: Dict[str, Any]) -> Tuple[Dict[str, Any], pd.DataFrame]:
@@ -1803,6 +1972,12 @@ class AutonomousTradingAgent:
             "agent_confidence": float(decision.get("confidence") or 0.0),
             "agent_reason": str(decision.get("reason") or ""),
         }
+        metadata.update(
+            self._build_trade_management_metadata(
+                decision=decision,
+                context_payload=context_payload,
+            )
+        )
         position = context_payload.get("position") if isinstance(context_payload, dict) else {}
         current_side = str((position or {}).get("side") or "").lower()
         same_direction_add = bool(
@@ -2504,6 +2679,15 @@ class AutonomousTradingAgent:
                     f"error={model_feedback_issue.get('raw_error') or _format_exception_short(normalized_exc)}"
                 )
                 failure = self._record_model_feedback_failure(normalized_exc)
+                outage_duration_sec = self._current_model_feedback_outage_duration_sec()
+                outage_protection_result: Optional[Dict[str, Any]] = None
+                if outage_duration_sec >= float(_MODEL_FEEDBACK_OUTAGE_ALERT_SEC):
+                    outage_protection_result = await self._protect_profitable_local_position_during_model_outage(
+                        cfg=effective_cfg,
+                        context_payload=context_payload,
+                        outage_duration_sec=outage_duration_sec,
+                        model_feedback_issue=model_feedback_issue,
+                    )
                 if failure:
                     await self._send_model_feedback_outage_alert(
                         provider=provider,
@@ -2513,6 +2697,9 @@ class AutonomousTradingAgent:
                         context_payload=context_payload,
                         failure=failure,
                     )
+                fallback_reason = f"model_error:{_format_exception_short(normalized_exc)}"
+                if bool((outage_protection_result or {}).get("applied")):
+                    fallback_reason = f"{fallback_reason};profit_protection_armed"
                 raw_decision = {
                     "action": "hold",
                     "confidence": 0.0,
@@ -2520,7 +2707,7 @@ class AutonomousTradingAgent:
                     "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
                     "stop_loss_pct": effective_cfg.get("default_stop_loss_pct"),
                     "take_profit_pct": effective_cfg.get("default_take_profit_pct"),
-                    "reason": f"model_error:{_format_exception_short(normalized_exc)}",
+                    "reason": fallback_reason,
                 }
                 raw_decision_source = "fallback"
             decision = self._normalize_decision(raw_decision, effective_cfg, context_payload)

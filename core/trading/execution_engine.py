@@ -28,6 +28,32 @@ from core.trading.order_manager import OrderRequest, OrderSide, OrderType, order
 from core.trading.position_manager import PositionSide, position_manager
 from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
 
+_AUTONOMOUS_PROFIT_MANAGEMENT_DEFAULTS = {
+    "profit_protect_enabled": True,
+    "profit_protect_trigger_pct": 0.0035,
+    "profit_protect_lock_pct": 0.0012,
+    "partial_take_profit_enabled": True,
+    "partial_take_profit_trigger_pct": 0.0060,
+    "partial_take_profit_fraction": 0.5,
+    "post_partial_trailing_stop_pct": 0.0025,
+    "outage_protection_enabled": True,
+    "outage_tight_trailing_stop_pct": 0.0015,
+}
+_PROFIT_MANAGEMENT_STATE_KEYS = (
+    "profit_protect_armed",
+    "profit_protect_armed_at",
+    "partial_take_profit_done",
+    "partial_take_profit_done_at",
+    "partial_take_profit_order_id",
+    "partial_take_profit_price",
+    "partial_take_profit_skip_reason",
+    "outage_protection_armed",
+    "outage_protection_armed_at",
+    "outage_protection_last_applied_at",
+    "outage_protection_reason",
+    "profit_management_last_event",
+)
+
 
 @dataclass
 class ConditionalManualOrder:
@@ -656,6 +682,325 @@ class ExecutionEngine:
             return None
         except Exception:
             return None
+
+    @staticmethod
+    def _merge_position_metadata(
+        current: Optional[Dict[str, Any]],
+        updates: Optional[Dict[str, Any]],
+        *,
+        source: Optional[str] = None,
+        reduce_only: Optional[bool] = None,
+        reset_profit_management_state: bool = False,
+    ) -> Dict[str, Any]:
+        merged: Dict[str, Any] = {}
+        if isinstance(current, dict):
+            merged.update(current)
+        if reset_profit_management_state:
+            for key in _PROFIT_MANAGEMENT_STATE_KEYS:
+                merged.pop(key, None)
+        if isinstance(updates, dict):
+            merged.update(dict(updates))
+        if source is not None:
+            merged["source"] = source
+        if reduce_only is not None:
+            merged["reduce_only"] = bool(reduce_only)
+        return merged
+
+    def _effective_profit_management_metadata(self, position: Any) -> Dict[str, Any]:
+        metadata = dict(getattr(position, "metadata", {}) or {})
+        source = str(metadata.get("source") or "").strip().lower()
+        strategy = str(getattr(position, "strategy", "") or "").strip().lower()
+        is_autonomous_position = bool(
+            metadata.get("agent_provider")
+            or metadata.get("agent_model")
+            or source == "ai_autonomous_agent"
+            or strategy == "ai_autonomousagent"
+        )
+        if not is_autonomous_position:
+            return metadata
+        changed = False
+        for key, value in _AUTONOMOUS_PROFIT_MANAGEMENT_DEFAULTS.items():
+            if metadata.get(key) is None:
+                metadata[key] = value
+                changed = True
+        if changed:
+            position.metadata = metadata
+        return metadata
+
+    @staticmethod
+    def _position_profit_pct(position: Any) -> float:
+        try:
+            return float(getattr(position, "unrealized_pnl_pct", 0.0) or 0.0)
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _is_more_protective_stop(
+        side: Any,
+        candidate_stop: Optional[float],
+        current_stop: Optional[float],
+    ) -> bool:
+        if candidate_stop is None or float(candidate_stop) <= 0:
+            return False
+        if current_stop is None or float(current_stop) <= 0:
+            return True
+        if side == PositionSide.SHORT:
+            return float(candidate_stop) < float(current_stop) - 1e-12
+        return float(candidate_stop) > float(current_stop) + 1e-12
+
+    @staticmethod
+    def _is_tighter_trailing_pct(
+        candidate_pct: Optional[float],
+        current_pct: Optional[float],
+    ) -> bool:
+        if candidate_pct is None or float(candidate_pct) <= 0:
+            return False
+        if current_pct is None or float(current_pct) <= 0:
+            return True
+        return float(candidate_pct) < float(current_pct) - 1e-12
+
+    def _entry_lock_stop_price(self, position: Any, lock_pct: Any) -> Optional[float]:
+        pct = self._safe_protective_pct(lock_pct)
+        entry_price = self._safe_positive_float(getattr(position, "entry_price", None))
+        if pct is None or entry_price is None:
+            return None
+        if getattr(position, "side", None) == PositionSide.SHORT:
+            return entry_price * (1.0 - pct)
+        return entry_price * (1.0 + pct)
+
+    def _apply_position_stop_loss(
+        self,
+        position: Any,
+        *,
+        stop_price: Optional[float],
+        metadata_flag: Optional[str] = None,
+        event: Optional[str] = None,
+    ) -> bool:
+        if not self._is_more_protective_stop(
+            getattr(position, "side", None),
+            stop_price,
+            getattr(position, "stop_loss", None),
+        ):
+            return False
+        position.stop_loss = float(stop_price)
+        metadata = dict(getattr(position, "metadata", {}) or {})
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if metadata_flag:
+            metadata[metadata_flag] = True
+            metadata[f"{metadata_flag}_at"] = now_iso
+        if event:
+            metadata["profit_management_last_event"] = event
+        position.metadata = metadata
+        return True
+
+    def _apply_position_trailing_pct(
+        self,
+        position: Any,
+        *,
+        trailing_pct: Any,
+        current_price: Optional[float] = None,
+        event: Optional[str] = None,
+    ) -> bool:
+        pct = self._safe_protective_pct(trailing_pct)
+        current_pct = self._safe_protective_pct(getattr(position, "trailing_stop_pct", None))
+        if pct is None or not self._is_tighter_trailing_pct(pct, current_pct):
+            return False
+        position.trailing_stop_pct = float(pct)
+        position.trailing_stop_distance = None
+        refresh_price = self._safe_positive_float(
+            current_price,
+            self._safe_positive_float(getattr(position, "current_price", None)),
+        )
+        if refresh_price is not None:
+            position.update_price(refresh_price)
+        metadata = dict(getattr(position, "metadata", {}) or {})
+        if event:
+            metadata["profit_management_last_event"] = event
+        position.metadata = metadata
+        return True
+
+    def _calculate_partial_take_profit_quantity(
+        self,
+        position: Any,
+        *,
+        current_price: float,
+        fraction: Any,
+    ) -> Tuple[float, str]:
+        quantity = self._safe_nonnegative_float(getattr(position, "quantity", 0.0), 0.0)
+        price = self._safe_nonnegative_float(current_price, 0.0)
+        if quantity <= 0 or price <= 0:
+            return 0.0, "invalid_position"
+        raw_fraction = self._safe_nonnegative_float(fraction, 0.5)
+        partial_fraction = min(0.95, max(0.05, float(raw_fraction or 0.5)))
+        close_qty = quantity * partial_fraction
+        remaining_qty = max(0.0, quantity - close_qty)
+        if close_qty <= 0 or remaining_qty <= 0:
+            return 0.0, "invalid_partial_fraction"
+        min_notional = max(1.0, float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 100.0) or 100.0))
+        close_notional = close_qty * price
+        remaining_notional = remaining_qty * price
+        if close_notional + 1e-9 < min_notional:
+            return 0.0, "partial_notional_below_min"
+        if remaining_notional + 1e-9 < min_notional:
+            return 0.0, "remaining_notional_below_min"
+        return float(close_qty), ""
+
+    async def _execute_position_partial_take_profit(
+        self,
+        position: Any,
+        *,
+        current_price: float,
+    ) -> Dict[str, Any]:
+        metadata = self._effective_profit_management_metadata(position)
+        close_qty, skip_reason = self._calculate_partial_take_profit_quantity(
+            position,
+            current_price=current_price,
+            fraction=metadata.get("partial_take_profit_fraction"),
+        )
+        if close_qty <= 0:
+            metadata["partial_take_profit_skip_reason"] = skip_reason or "partial_unavailable"
+            position.metadata = metadata
+            return {"applied": False, "reason": metadata["partial_take_profit_skip_reason"]}
+
+        close_side = "sell" if getattr(position, "side", None) == PositionSide.LONG else "buy"
+        result = await self._execute_manual_order_single(
+            exchange=str(getattr(position, "exchange", "") or ""),
+            symbol=str(getattr(position, "symbol", "") or ""),
+            side=close_side,
+            order_type="market",
+            amount=float(close_qty),
+            price=float(current_price),
+            leverage=float(getattr(position, "leverage", 1.0) or 1.0),
+            stop_loss=None,
+            take_profit=None,
+            trailing_stop_pct=None,
+            trailing_stop_distance=None,
+            trigger_price=None,
+            order_mode="normal",
+            iceberg_parts=1,
+            algo_slices=1,
+            algo_interval_sec=0,
+            account_id=str(getattr(position, "account_id", "main") or "main"),
+            reduce_only=True,
+            strategy=str(getattr(position, "strategy", "") or "risk"),
+            params={"close_reason": "partial_take_profit", "profit_management": True},
+        )
+        if not result:
+            metadata["partial_take_profit_skip_reason"] = "execution_rejected"
+            position.metadata = metadata
+            return {"applied": False, "reason": "execution_rejected"}
+
+        refreshed = position_manager.get_position(
+            str(getattr(position, "exchange", "") or ""),
+            str(getattr(position, "symbol", "") or ""),
+            account_id=str(getattr(position, "account_id", "main") or "main"),
+        )
+        if refreshed is None:
+            return {"applied": False, "reason": "position_closed"}
+        refreshed.update_price(float(current_price))
+        refreshed_metadata = self._effective_profit_management_metadata(refreshed)
+        refreshed_metadata["partial_take_profit_done"] = True
+        refreshed_metadata["partial_take_profit_done_at"] = datetime.now(timezone.utc).isoformat()
+        refreshed_metadata["partial_take_profit_order_id"] = str(result.get("order_id") or "")
+        refreshed_metadata["partial_take_profit_price"] = float(current_price)
+        refreshed_metadata.pop("partial_take_profit_skip_reason", None)
+        refreshed_metadata["profit_management_last_event"] = "partial_take_profit"
+        refreshed.metadata = refreshed_metadata
+        refreshed.take_profit = None
+        trailing_pct = self._safe_protective_pct(refreshed_metadata.get("post_partial_trailing_stop_pct"))
+        if trailing_pct is not None:
+            self._apply_position_trailing_pct(
+                refreshed,
+                trailing_pct=trailing_pct,
+                current_price=current_price,
+                event="post_partial_trailing",
+            )
+        logger.info(
+            "Profit management partial take profit executed "
+            f"symbol={refreshed.symbol} exchange={refreshed.exchange} "
+            f"account_id={refreshed.account_id} qty={close_qty:.8f} price={float(current_price):.8f}"
+        )
+        await self._notify_callbacks(
+            "profit_management_partial_take_profit",
+            {
+                "symbol": refreshed.symbol,
+                "exchange": refreshed.exchange,
+                "account_id": refreshed.account_id,
+                "price": float(current_price),
+                "close_qty": float(close_qty),
+                "order_id": result.get("order_id"),
+            },
+        )
+        return {
+            "applied": True,
+            "order_id": result.get("order_id"),
+            "position": refreshed,
+        }
+
+    async def _apply_position_profit_management(self, position: Any, current_price: float) -> Any:
+        metadata = self._effective_profit_management_metadata(position)
+        if not metadata:
+            return position
+
+        profit_pct = self._position_profit_pct(position)
+        if profit_pct <= 0:
+            return position
+
+        partial_trigger_pct = self._safe_protective_pct(metadata.get("partial_take_profit_trigger_pct"))
+        if (
+            bool(metadata.get("partial_take_profit_enabled"))
+            and not bool(metadata.get("partial_take_profit_done"))
+            and partial_trigger_pct is not None
+            and profit_pct >= partial_trigger_pct
+        ):
+            partial_result = await self._execute_position_partial_take_profit(
+                position,
+                current_price=current_price,
+            )
+            refreshed_position = partial_result.get("position")
+            if refreshed_position is not None:
+                position = refreshed_position
+                metadata = self._effective_profit_management_metadata(position)
+                profit_pct = self._position_profit_pct(position)
+
+        profit_trigger_pct = self._safe_protective_pct(metadata.get("profit_protect_trigger_pct"))
+        if (
+            bool(metadata.get("profit_protect_enabled"))
+            and profit_trigger_pct is not None
+            and profit_pct >= profit_trigger_pct
+        ):
+            lock_stop = self._entry_lock_stop_price(position, metadata.get("profit_protect_lock_pct"))
+            if self._apply_position_stop_loss(
+                position,
+                stop_price=lock_stop,
+                metadata_flag="profit_protect_armed",
+                event="profit_protect",
+            ):
+                logger.info(
+                    "Profit protect armed "
+                    f"symbol={position.symbol} exchange={position.exchange} "
+                    f"account_id={position.account_id} stop_loss={float(position.stop_loss or 0.0):.8f}"
+                )
+
+        if bool(metadata.get("partial_take_profit_done")):
+            trailing_pct = self._safe_protective_pct(metadata.get("post_partial_trailing_stop_pct"))
+            if self._apply_position_trailing_pct(
+                position,
+                trailing_pct=trailing_pct,
+                current_price=current_price,
+                event="post_partial_trailing",
+            ):
+                logger.info(
+                    "Post-partial trailing armed "
+                    f"symbol={position.symbol} exchange={position.exchange} "
+                    f"account_id={position.account_id} trailing_stop_pct={float(position.trailing_stop_pct or 0.0):.6f}"
+                )
+
+        return position_manager.get_position(
+            str(getattr(position, "exchange", "") or ""),
+            str(getattr(position, "symbol", "") or ""),
+            account_id=str(getattr(position, "account_id", "main") or "main"),
+        ) or position
 
     @staticmethod
     def _floor_to_decimals(value: float, decimals: int = 8) -> float:
@@ -1970,6 +2315,13 @@ class ExecutionEngine:
                     current_position.trailing_stop_distance = dist if dist > 0 else None
                     if dist > 0:
                         current_position.trailing_stop_pct = None
+                current_position.metadata = self._merge_position_metadata(
+                    getattr(current_position, "metadata", {}) or {},
+                    dict(signal.metadata or {}),
+                    source="strategy",
+                    reduce_only=bool(req.reduce_only),
+                    reset_profit_management_state=not bool(req.reduce_only),
+                )
 
             exec_amount = float(order.filled or qty or 0.0)
             if side == OrderSide.BUY:
@@ -2013,7 +2365,13 @@ class ExecutionEngine:
                             take_profit=req.take_profit,
                             trailing_stop_pct=req.trailing_stop_pct,
                             trailing_stop_distance=req.trailing_stop_distance,
-                            metadata={"source": "strategy", "reduce_only": bool(req.reduce_only)},
+                            metadata=self._merge_position_metadata(
+                                None,
+                                dict(signal.metadata or {}),
+                                source="strategy",
+                                reduce_only=bool(req.reduce_only),
+                                reset_profit_management_state=True,
+                            ),
                         )
                 else:
                     position_manager.open_position(
@@ -2029,7 +2387,13 @@ class ExecutionEngine:
                         take_profit=req.take_profit,
                         trailing_stop_pct=req.trailing_stop_pct,
                         trailing_stop_distance=req.trailing_stop_distance,
-                        metadata={"source": "strategy", "reduce_only": bool(req.reduce_only)},
+                        metadata=self._merge_position_metadata(
+                            None,
+                            dict(signal.metadata or {}),
+                            source="strategy",
+                            reduce_only=bool(req.reduce_only),
+                            reset_profit_management_state=True,
+                        ),
                     )
             else:
                 if current_position and current_position.side == PositionSide.LONG:
@@ -2059,7 +2423,13 @@ class ExecutionEngine:
                             take_profit=req.take_profit,
                             trailing_stop_pct=req.trailing_stop_pct,
                             trailing_stop_distance=req.trailing_stop_distance,
-                            metadata={"source": "strategy", "reduce_only": bool(req.reduce_only)},
+                            metadata=self._merge_position_metadata(
+                                None,
+                                dict(signal.metadata or {}),
+                                source="strategy",
+                                reduce_only=bool(req.reduce_only),
+                                reset_profit_management_state=True,
+                            ),
                         )
                 elif current_position and current_position.side == PositionSide.SHORT:
                     total_qty = current_position.quantity + exec_amount
@@ -2088,7 +2458,13 @@ class ExecutionEngine:
                         take_profit=req.take_profit,
                         trailing_stop_pct=req.trailing_stop_pct,
                         trailing_stop_distance=req.trailing_stop_distance,
-                        metadata={"source": "strategy", "reduce_only": bool(req.reduce_only)},
+                        metadata=self._merge_position_metadata(
+                            None,
+                            dict(signal.metadata or {}),
+                            source="strategy",
+                            reduce_only=bool(req.reduce_only),
+                            reset_profit_management_state=True,
+                        ),
                     )
 
             trade_pnl -= fee_usd
@@ -2595,6 +2971,13 @@ class ExecutionEngine:
                 existing_position.trailing_stop_distance = dist if dist > 0 else None
                 if dist > 0:
                     existing_position.trailing_stop_pct = None
+            existing_position.metadata = self._merge_position_metadata(
+                getattr(existing_position, "metadata", {}) or {},
+                None,
+                source="manual",
+                reduce_only=reduce_only,
+                reset_profit_management_state=not bool(reduce_only),
+            )
 
         if side_lower == "buy":
             if existing_position and existing_position.side == PositionSide.LONG:
@@ -2637,7 +3020,13 @@ class ExecutionEngine:
                         take_profit=take_profit,
                         trailing_stop_pct=trailing_stop_pct,
                         trailing_stop_distance=trailing_stop_distance,
-                        metadata={"source": "manual", "reduce_only": reduce_only},
+                        metadata=self._merge_position_metadata(
+                            None,
+                            None,
+                            source="manual",
+                            reduce_only=reduce_only,
+                            reset_profit_management_state=True,
+                        ),
                     )
             else:
                 position_manager.open_position(
@@ -2653,7 +3042,13 @@ class ExecutionEngine:
                     take_profit=take_profit,
                     trailing_stop_pct=trailing_stop_pct,
                     trailing_stop_distance=trailing_stop_distance,
-                    metadata={"source": "manual", "reduce_only": reduce_only},
+                    metadata=self._merge_position_metadata(
+                        None,
+                        None,
+                        source="manual",
+                        reduce_only=reduce_only,
+                        reset_profit_management_state=True,
+                    ),
                 )
         else:
             if existing_position and existing_position.side == PositionSide.LONG:
@@ -2683,7 +3078,13 @@ class ExecutionEngine:
                         take_profit=take_profit,
                         trailing_stop_pct=trailing_stop_pct,
                         trailing_stop_distance=trailing_stop_distance,
-                        metadata={"source": "manual", "reduce_only": reduce_only},
+                        metadata=self._merge_position_metadata(
+                            None,
+                            None,
+                            source="manual",
+                            reduce_only=reduce_only,
+                            reset_profit_management_state=True,
+                        ),
                     )
             elif existing_position and existing_position.side == PositionSide.SHORT:
                 total_qty = existing_position.quantity + exec_amount
@@ -2712,7 +3113,13 @@ class ExecutionEngine:
                     take_profit=take_profit,
                     trailing_stop_pct=trailing_stop_pct,
                     trailing_stop_distance=trailing_stop_distance,
-                    metadata={"source": "manual", "reduce_only": reduce_only},
+                    metadata=self._merge_position_metadata(
+                        None,
+                        None,
+                        source="manual",
+                        reduce_only=reduce_only,
+                        reset_profit_management_state=True,
+                    ),
                 )
 
         trade_pnl -= fee_usd
@@ -2953,6 +3360,116 @@ class ExecutionEngine:
                 },
             )
 
+    async def tighten_profitable_position_protection(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        account_id: str = "main",
+        current_price: Optional[float] = None,
+        reason: str = "model_feedback_outage",
+    ) -> Dict[str, Any]:
+        position = position_manager.get_position(exchange, symbol, account_id=account_id)
+        if position is None:
+            return {"applied": False, "reason": "no_local_position"}
+
+        price = self._safe_nonnegative_float(current_price, 0.0)
+        if price <= 0:
+            price = await self._resolve_price(exchange, symbol, getattr(position, "current_price", None))
+        if price <= 0:
+            price = self._safe_nonnegative_float(getattr(position, "current_price", 0.0), 0.0)
+        if price <= 0:
+            return {"applied": False, "reason": "price_unavailable"}
+
+        position_manager.update_position_price(
+            exchange=exchange,
+            symbol=symbol,
+            current_price=price,
+            account_id=account_id,
+        )
+        position = position_manager.get_position(exchange, symbol, account_id=account_id) or position
+        profit_pct = self._position_profit_pct(position)
+        if profit_pct <= 0:
+            return {"applied": False, "reason": "position_not_profitable", "profit_pct": float(profit_pct)}
+
+        metadata = self._effective_profit_management_metadata(position)
+        if metadata.get("outage_protection_enabled") is False:
+            return {"applied": False, "reason": "outage_protection_disabled", "profit_pct": float(profit_pct)}
+
+        base_lock_pct = self._safe_protective_pct(metadata.get("profit_protect_lock_pct"))
+        if base_lock_pct is None:
+            base_lock_pct = min(0.01, max(0.0005, profit_pct * 0.6))
+        dynamic_lock_pct = min(float(base_lock_pct), max(0.0002, profit_pct * 0.75))
+
+        base_trailing_pct = self._safe_protective_pct(metadata.get("outage_tight_trailing_stop_pct"))
+        if base_trailing_pct is None:
+            base_trailing_pct = self._safe_protective_pct(metadata.get("post_partial_trailing_stop_pct"))
+        if base_trailing_pct is None:
+            base_trailing_pct = min(0.01, max(0.001, profit_pct * 0.5))
+        dynamic_trailing_pct = min(float(base_trailing_pct), max(0.0005, profit_pct * 0.5))
+
+        applied_fields: List[str] = []
+        lock_stop = self._entry_lock_stop_price(position, dynamic_lock_pct)
+        if self._apply_position_stop_loss(
+            position,
+            stop_price=lock_stop,
+            metadata_flag="outage_protection_armed",
+            event=reason,
+        ):
+            applied_fields.append("stop_loss")
+        if self._apply_position_trailing_pct(
+            position,
+            trailing_pct=dynamic_trailing_pct,
+            current_price=price,
+            event=reason,
+        ):
+            applied_fields.append("trailing_stop_pct")
+
+        if applied_fields:
+            metadata = dict(getattr(position, "metadata", {}) or {})
+            now_iso = datetime.now(timezone.utc).isoformat()
+            metadata["outage_protection_armed"] = True
+            metadata["outage_protection_armed_at"] = metadata.get("outage_protection_armed_at") or now_iso
+            metadata["outage_protection_last_applied_at"] = now_iso
+            metadata["outage_protection_reason"] = reason
+            position.metadata = metadata
+            logger.warning(
+                "Outage protection tightened profitable position "
+                f"symbol={symbol} exchange={exchange} account_id={account_id} "
+                f"profit_pct={profit_pct:.4%} fields={','.join(applied_fields)}"
+            )
+            await self._notify_callbacks(
+                "profit_management_outage_protection",
+                {
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "account_id": account_id,
+                    "profit_pct": float(profit_pct),
+                    "applied_fields": list(applied_fields),
+                    "reason": reason,
+                },
+            )
+            return {
+                "applied": True,
+                "reason": "outage_protection_armed",
+                "profit_pct": float(profit_pct),
+                "applied_fields": list(applied_fields),
+                "stop_loss": float(position.stop_loss or 0.0) if position.stop_loss is not None else None,
+                "trailing_stop_pct": float(position.trailing_stop_pct or 0.0)
+                if position.trailing_stop_pct is not None
+                else None,
+            }
+
+        return {
+            "applied": False,
+            "reason": "already_protected",
+            "profit_pct": float(profit_pct),
+            "stop_loss": float(position.stop_loss or 0.0) if position.stop_loss is not None else None,
+            "trailing_stop_pct": float(position.trailing_stop_pct or 0.0)
+            if position.trailing_stop_pct is not None
+            else None,
+        }
+
     async def _check_protective_orders(self) -> None:
         positions = position_manager.get_all_positions()
         if not positions:
@@ -2970,12 +3487,15 @@ class ExecutionEngine:
             px = prices.get((pos.exchange, pos.symbol))
             if not px:
                 continue
-            position_manager.update_position_price(
+            updated_position = position_manager.update_position_price(
                 exchange=pos.exchange,
                 symbol=pos.symbol,
                 current_price=px,
                 account_id=pos.account_id,
             )
+            pos = updated_position or pos
+            pos = await self._apply_position_profit_management(pos, px)
+            pos = position_manager.get_position(pos.exchange, pos.symbol, account_id=pos.account_id) or pos
 
             reason = None
             if pos.side == PositionSide.LONG:
