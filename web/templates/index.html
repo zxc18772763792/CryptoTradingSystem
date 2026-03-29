@@ -1643,6 +1643,14 @@
                                     </div>
                                 </div>
                             </div>
+
+                            <div class="ai-context-mini-card ai-research-live-signals-card">
+                                <div class="ai-sidebar-title">📈 研究候选运行信号</div>
+                                <div class="ai-agent-runtime-card-desc">这里只看 AI 研究链路里已进入运行状态的候选策略，不混入自治代理 watchlist。会按 symbol + timeframe + strategy + params 去重；若最近行情为空或过旧，会直接标注“缺数据 / 数据旧”。</div>
+                                <div id="ai-research-live-signals-panel">
+                                    <div style="font-size:11px;color:#6b7fa0;padding:6px 0;">加载中...</div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1983,7 +1991,7 @@
                                                     <div class="ai-agent-section-title">币种模式与自动选币</div>
                                                     <button class="btn btn-sm" type="button" onclick="agentRefreshRanking()">刷新排行榜</button>
                                                 </div>
-                                                <div class="ai-auto-step-desc">固定币种时只盯一个 symbol；自动模式会先扫描币池，再选当前最值得跟踪的币种。</div>
+                                                <div class="ai-auto-step-desc">固定币种时只盯一个 symbol；自动模式会先扫描更大的主流币池，再选当前最值得跟踪的币种。</div>
                                                 <div class="ai-agent-config-grid">
                                                     <label id="ai-agent-symbol-mode-wrap" class="ai-agent-field">
                                                         <span>币种模式</span>
@@ -1999,7 +2007,7 @@
                                                 </div>
                                                 <label id="ai-agent-universe-symbols-wrap" class="ai-agent-field ai-agent-field-block">
                                                     <span>候选币池</span>
-                                                    <textarea id="ai-agent-universe-symbols" rows="3" placeholder="BTC/USDT, ETH/USDT, SOL/USDT"></textarea>
+                                                    <textarea id="ai-agent-universe-symbols" rows="3" placeholder="留空使用默认主流币池；或手动填写 BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT ..."></textarea>
                                                 </label>
                                                 <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
                                                     <button class="btn btn-sm" type="button" onclick="agentSaveConfig()">保存配置</button>
@@ -2031,10 +2039,10 @@
                                         <div class="ai-auto-step-index">3</div>
                                         <div class="ai-auto-step-body">
                                             <div class="ai-auto-step-head">
-                                                <div class="ai-auto-step-title">最后看最近决策日志</div>
+                                                <div class="ai-auto-step-title">最后看最近决策日志与聚合信号快照</div>
                                                 <button class="btn btn-sm" type="button" onclick="agentRefreshJournal()">刷新日志</button>
                                             </div>
-                                            <div class="ai-auto-step-desc">先看模型最近给出的动作和异常，再决定继续运行、单次试跑，还是回去调整配置。</div>
+                                            <div class="ai-auto-step-desc">这里会先展示当前周期的聚合信号快照、下一轮计划时间和上次耗时，再往下看最近每轮决策日志，避免只看到 120s 一次的落库结果。</div>
                                             <div id="ai-agent-journal" class="ai-agent-journal-box">加载中...</div>
                                             <div class="ai-auto-step-head ai-auto-step-head-subsection">
                                                 <div class="ai-auto-step-title">最近放行交易复盘</div>
@@ -2081,9 +2089,9 @@
                                 </div>
 
                                 <div class="card ai-live-signals-card">
-                                    <div class="ai-sidebar-title">📈 自治代理实时信号</div>
-                                    <div class="ai-agent-runtime-card-desc">这里展示运行中候选或自治代理关注对象的聚合信号。若最近行情为空或过旧，会直接标注“缺数据 / 数据旧”。</div>
-                                    <div id="ai-live-signals-panel">
+                                    <div class="ai-sidebar-title">📈 自治代理聚合信号</div>
+                                    <div class="ai-agent-runtime-card-desc">这里只看自治代理当前 watchlist / 选中币种的聚合信号，不再混入 AI 研究候选。研究候选运行信号已经单独放到 AI 研究页；若最近行情为空或过旧，会直接标注“缺数据 / 数据旧”。</div>
+                                    <div id="ai-agent-live-signals-panel">
                                         <div style="font-size:11px;color:#6b7fa0;padding:6px 0;">加载中...</div>
                                     </div>
                                 </div>

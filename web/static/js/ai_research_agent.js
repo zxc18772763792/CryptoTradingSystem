@@ -13,6 +13,8 @@
   const AGENT_SYMBOL_RANKING_API = '/ai/autonomous-agent/symbol-ranking';
 
   let pollTimer = null;
+  let lastStatusSnapshot = null;
+  let lastConfigSnapshot = null;
 
   function aiRoot() {
     return window.AI || {};
@@ -150,6 +152,59 @@
     if (!Number.isFinite(number)) return '--';
     const prefix = number > 0 ? '+' : '';
     return `${prefix}${number.toFixed(digits)}${suffix}`;
+  }
+
+  function formatPct(value, digits = 0) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return '--';
+    return `${(number * 100).toFixed(digits)}%`;
+  }
+
+  function formatLatencyMs(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return '--';
+    return number >= 10000 ? `${(number / 1000).toFixed(1)}s` : `${number.toFixed(0)}ms`;
+  }
+
+  function summarizeAggregatedSignal(signal = {}) {
+    const direction = String(signal.direction || 'FLAT').trim().toUpperCase() || 'FLAT';
+    const parts = [`聚合 ${direction} ${formatPct(signal.confidence, 0)}`];
+    const components = signal.components && typeof signal.components === 'object' ? signal.components : {};
+    const componentParts = ['llm', 'ml', 'factor']
+      .map((key) => {
+        const item = components[key] || {};
+        const itemDirection = String(item.direction || 'FLAT').trim().toUpperCase() || 'FLAT';
+        const itemConfidence = Number(item.confidence);
+        if (!Number.isFinite(itemConfidence)) return '';
+        return `${key.toUpperCase()} ${itemDirection} ${formatPct(itemConfidence, 0)}`;
+      })
+      .filter(Boolean);
+    if (componentParts.length) parts.push(componentParts.join(' / '));
+    if (signal.blocked_by_risk) {
+      parts.push(`风控 ${compactText(signal.risk_reason || 'blocked', 48)}`);
+    }
+    return parts.join(' · ');
+  }
+
+  function buildAgentJournalCurrentSummary(status = {}, cfg = {}) {
+    const diagnostics = status.last_diagnostics || {};
+    const aggregatedSignal = diagnostics.aggregated_signal || status.last_execution?.signal || {};
+    const summaryParts = [];
+    if (aggregatedSignal && Object.keys(aggregatedSignal).length) {
+      summaryParts.push(summarizeAggregatedSignal(aggregatedSignal));
+    }
+    const latencyText = formatLatencyMs(status.last_latency_ms);
+    if (latencyText !== '--') summaryParts.push(`上次耗时 ${latencyText}`);
+    const intervalSec = Number(cfg.interval_sec || 0);
+    if (intervalSec > 0) summaryParts.push(`目标周期 ${intervalSec}s`);
+    if (status.next_run_at) summaryParts.push(`下次计划 ${fmtAgentTs(status.next_run_at)}`);
+    const subtitle = summaryParts.length ? summaryParts.join(' · ') : '等待首轮决策后显示聚合信号快照';
+    return `
+      <div class="agent-journal-current">
+        <div class="agent-journal-current-title">当前周期快照</div>
+        <div class="agent-journal-current-body">${esc(subtitle)}</div>
+      </div>
+    `;
   }
 
   function reviewToneClass(tone) {
@@ -292,6 +347,8 @@
     const lastExecution = status.last_execution || {};
     const intervalSec = Number(cfg.interval_sec || 0);
     const tickCount = Number(status.tick_count || 0);
+    const nextRunAt = fmtAgentTs(status.next_run_at);
+    const lastLatencyText = formatLatencyMs(status.last_latency_ms);
     const confidence = Number(lastDecision.confidence || 0);
     const latestDecisionText = lastDecision.action
       ? `${decisionActionText(lastDecision.action)} / ${(confidence * 100).toFixed(0)}%`
@@ -301,14 +358,17 @@
       : compactText(lastExecution.reason || '未提交', 42);
     const modeText = `${decisionModeLabel(cfg.mode || 'execute')} / ${cfg.allow_live ? '允许实盘' : '仅纸盘'}`;
     const statusText = running
-      ? `运行中 · ${tickCount} 轮${intervalSec > 0 ? ` / ${intervalSec}s` : ''}`
+      ? `运行中 · ${tickCount} 轮${intervalSec > 0 ? ` / ${intervalSec}s` : ''}${nextRunAt !== '--' ? ` · 下次 ${nextRunAt}` : ''}`
       : '未启动';
+    const lastActionSummary = lastLatencyText !== '--'
+      ? `${latestActionText} · 上次耗时 ${lastLatencyText}`
+      : latestActionText;
 
     setChainSummaryTag('ai-chain-trading-tag', running ? '运行中' : '未启动', running ? 'active' : 'warn');
     setChainSummaryText('ai-chain-trading-mode', modeText);
     setChainSummaryText('ai-chain-trading-status', statusText);
     setChainSummaryText('ai-chain-trading-decision', latestDecisionText);
-    setChainSummaryText('ai-chain-trading-last-action', latestActionText);
+    setChainSummaryText('ai-chain-trading-last-action', lastActionSummary);
   }
 
   async function rootApi(path, options = {}) {
@@ -612,6 +672,8 @@
       ? `${selectedResearch.strategy || '--'} / ${selectedResearch.candidate_id}`
       : '--';
     const lastRunAt = fmtAgentTs(status.last_run_at);
+    const nextRunAt = fmtAgentTs(status.next_run_at);
+    const latencyText = formatLatencyMs(status.last_latency_ms);
     const lastError = String(status.last_error || '').trim();
     const modelText = cfg.model ? `${providerDisplayName(cfg.provider || '-')}/${cfg.model}` : providerDisplayName(cfg.provider || '-');
     const modelFeedback = describeModelFeedback(status, status.last_diagnostics || {});
@@ -642,6 +704,10 @@
         <span class="${toneClass(executionCost.tone)}">${esc(executionCost.summary)}</span>
         <span>最后运行</span>
         <span>${esc(lastRunAt)}</span>
+        <span>下次计划</span>
+        <span>${esc(nextRunAt)}</span>
+        <span>上次耗时</span>
+        <span>${esc(latencyText)}</span>
       </div>
       <div class="ai-agent-muted">${esc(modelFeedback.detail)}</div>
       <div class="ai-agent-muted">${esc(modelOutput.detail)}</div>
@@ -667,66 +733,29 @@
     emitAgentStatus(status, cfg);
   }
 
-  async function loadAgentJournalLegacy() {
-    const el = document.getElementById('ai-agent-journal');
-    if (!el) return;
-    try {
-      const response = await rootApi(`${AGENT_JOURNAL_API}?limit=15`);
-      const rows = Array.isArray(response?.items) ? response.items.slice().reverse() : [];
-      if (!rows.length) {
-        el.innerHTML = '<div class="ai-agent-empty">暂无日志</div>';
-        return;
-      }
-      el.innerHTML = rows.map((row) => {
-        const ts = fmtAgentTs(row.timestamp || row.ts || '');
-        const decision = row.decision || {};
-        const diagnostics = row.diagnostics || {};
-        const primary = diagnostics.primary || {};
-        const modelOutput = diagnostics.model_output || {};
-        const tone = toneClass(primary.tone || (row.execution?.submitted ? 'good' : 'info'));
-        const actionText = decisionActionText(decision.action || row.action || row.trigger || '?');
-        const symbolText = row.config?.symbol || diagnostics.selected_symbol || '--';
-        const rewriteText = modelOutput.source === 'provider' && modelOutput.action_changed
-          ? `原始 ${decisionActionText(modelOutput.raw_action || '--')} -> ${decisionActionText(modelOutput.normalized_action || decision.action || '--')}`
-          : '';
-        const baseDetailText = primary.label
-          ? `${primary.label}${primary.detail ? `：${primary.detail}` : ''}`
-          : compactText(decision.reason || diagnostics.summary || row.execution?.reason || '--', 120);
-        const detailText = rewriteText ? `${rewriteText}；${baseDetailText}` : baseDetailText;
-        return `
-          <div class="agent-journal-row">
-            <span class="agent-journal-ts">${esc(ts)}</span>
-            <span class="agent-journal-action ${tone}">${esc(actionText)}</span>
-            <span class="agent-journal-symbol">${esc(symbolText)}</span>
-            <span class="agent-journal-detail">${esc(detailText)}</span>
-          </div>
-        `;
-      }).join('');
-    } catch (_) {
-      el.innerHTML = '<div class="ai-agent-empty">日志加载失败</div>';
-    }
-  }
-
   async function loadAgentJournal() {
     const el = document.getElementById('ai-agent-journal');
     if (!el) return;
     try {
       const response = await rootApi(`${AGENT_JOURNAL_API}?limit=15`);
       const rows = Array.isArray(response?.items) ? response.items.slice().reverse() : [];
+      const summaryHtml = buildAgentJournalCurrentSummary(lastStatusSnapshot || {}, lastConfigSnapshot || {});
       if (!rows.length) {
-        el.innerHTML = '<div class="ai-agent-empty">暂无日志</div>';
+        el.innerHTML = `${summaryHtml}<div class="ai-agent-empty">暂无日志</div>`;
         return;
       }
-      el.innerHTML = rows.map((row) => {
+      el.innerHTML = summaryHtml + rows.map((row) => {
         const ts = fmtAgentTs(row.timestamp || row.ts || '');
         const decision = row.decision || {};
         const diagnostics = row.diagnostics || {};
+        const context = row.context || {};
         const primary = diagnostics.primary || {};
         const modelOutput = diagnostics.model_output || {};
         const executionCost = describeExecutionCost(diagnostics);
         const tone = toneClass(primary.tone || (row.execution?.submitted ? 'good' : 'info'));
         const actionText = decisionActionText(decision.action || row.action || row.trigger || '?');
         const symbolText = row.config?.symbol || diagnostics.selected_symbol || '--';
+        const aggregatedSignal = context.aggregated_signal || diagnostics.aggregated_signal || row.execution?.signal || {};
         const rewriteText = modelOutput.source === 'provider' && modelOutput.action_changed
           ? `原始 ${decisionActionText(modelOutput.raw_action || '--')} -> ${decisionActionText(modelOutput.normalized_action || decision.action || '--')}`
           : '';
@@ -738,12 +767,18 @@
           detailParts.push(`执行成本 ${executionCost.summary}`);
         }
         const detailText = detailParts.filter(Boolean).join('；');
+        const signalText = aggregatedSignal && Object.keys(aggregatedSignal).length
+          ? summarizeAggregatedSignal(aggregatedSignal)
+          : '';
         return `
           <div class="agent-journal-row">
-            <span class="agent-journal-ts">${esc(ts)}</span>
-            <span class="agent-journal-action ${tone}">${esc(actionText)}</span>
-            <span class="agent-journal-symbol">${esc(symbolText)}</span>
-            <span class="agent-journal-detail">${esc(detailText)}</span>
+            <div class="agent-journal-main">
+              <span class="agent-journal-ts">${esc(ts)}</span>
+              <span class="agent-journal-action ${tone}">${esc(actionText)}</span>
+              <span class="agent-journal-symbol">${esc(symbolText)}</span>
+            </div>
+            <div class="agent-journal-detail">${esc(detailText)}</div>
+            ${signalText ? `<div class="agent-journal-signal">${esc(signalText)}</div>` : ''}
           </div>
         `;
       }).join('');
@@ -1028,6 +1063,8 @@
     const notifyOnError = options.notifyOnError === true;
     try {
       const response = await rootApi(AGENT_STATUS_API);
+      lastStatusSnapshot = response?.status || {};
+      lastConfigSnapshot = response?.config || {};
       renderAgentPanel(response?.status || {}, response?.config || {});
       if (includeDetails && document.getElementById('ai-agent-journal')) {
         loadAgentJournal().catch(() => {});
@@ -1140,7 +1177,7 @@
     const modules = aiRoot().modules || {};
     modules.agent = {
       refresh: (options = {}) => loadAgentStatus(options),
-      refreshJournal: () => loadAgentJournal(),
+      refreshJournal: () => loadAgentStatus({ includeDetails: true, notifyOnError: true }),
       refreshReview: () => loadAgentReview(),
       refreshRanking: () => loadAgentSymbolRanking(true, { timeoutMs: 90000, notifyOnError: true, preserveExisting: false }),
       saveConfig: () => saveAgentConfig(),
@@ -1153,7 +1190,7 @@
     window.agentStart = agentStart;
     window.agentStop = agentStop;
     window.agentRunOnce = agentRunOnce;
-    window.agentRefreshJournal = () => loadAgentJournal().catch(() => {});
+    window.agentRefreshJournal = () => loadAgentStatus({ includeDetails: true, notifyOnError: true }).catch(() => {});
     window.agentRefreshReview = () => loadAgentReview().catch(() => {});
     window.agentRefreshRanking = () => loadAgentSymbolRanking(true, { timeoutMs: 90000, notifyOnError: true, preserveExisting: false });
     window.agentSaveConfig = () => saveAgentConfig();

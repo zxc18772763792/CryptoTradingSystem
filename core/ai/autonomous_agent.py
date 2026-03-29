@@ -60,6 +60,7 @@ _FIXED_AUTONOMOUS_AGENT_LEVERAGE = 1.0
 _SAME_DIRECTION_MAX_EXPOSURE_RATIO = 0.5
 _MODEL_FEEDBACK_OUTAGE_ALERT_SEC = 30 * 60
 _MODEL_FEEDBACK_HARD_TIMEOUT_SEC = 30 * 60
+_AUTO_SYMBOL_SCAN_MAX_ITEMS = 48
 _DEFAULT_AUTO_UNIVERSE = [
     "BTC/USDT",
     "ETH/USDT",
@@ -71,6 +72,26 @@ _DEFAULT_AUTO_UNIVERSE = [
     "LINK/USDT",
     "AVAX/USDT",
     "DOT/USDT",
+    "LTC/USDT",
+    "BCH/USDT",
+    "TRX/USDT",
+    "UNI/USDT",
+    "ATOM/USDT",
+    "FIL/USDT",
+    "ETC/USDT",
+    "ICP/USDT",
+    "APT/USDT",
+    "NEAR/USDT",
+    "ARB/USDT",
+    "OP/USDT",
+    "SUI/USDT",
+    "INJ/USDT",
+    "AAVE/USDT",
+    "RUNE/USDT",
+    "SEI/USDT",
+    "TIA/USDT",
+    "SHIB/USDT",
+    "PEPE/USDT",
 ]
 _AI_EXECUTION_DYNAMIC_SLIP_PARAMS = {
     "min_slip": 0.00005,
@@ -90,6 +111,27 @@ _SYMBOL_SCAN_CACHE_MAX_AGE_SEC = 30 * 60
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _compute_next_loop_sleep(
+    cycle_started_monotonic: float,
+    interval_sec: int,
+    *,
+    now_monotonic: Optional[float] = None,
+    now_utc: Optional[datetime] = None,
+) -> Tuple[float, Optional[str]]:
+    """Return remaining sleep and next scheduled run time for a fixed-rate loop."""
+    current_monotonic = float(now_monotonic if now_monotonic is not None else time.monotonic())
+    interval = max(1, int(interval_sec or 0))
+    remaining = max(0.0, float(cycle_started_monotonic) + float(interval) - current_monotonic)
+    if remaining <= 0:
+        return 0.0, None
+    current_utc = now_utc if isinstance(now_utc, datetime) else _utc_now()
+    if current_utc.tzinfo is None:
+        current_utc = current_utc.replace(tzinfo=timezone.utc)
+    else:
+        current_utc = current_utc.astimezone(timezone.utc)
+    return remaining, (current_utc + timedelta(seconds=remaining)).isoformat()
 
 
 def _normalize_provider(value: Any) -> str:
@@ -123,10 +165,10 @@ def _normalize_action(value: Any) -> str:
     return text
 
 
-def _merge_symbol_sequence(*groups: List[Any], max_items: int = 30) -> List[str]:
+def _merge_symbol_sequence(*groups: List[Any], max_items: int = _AUTO_SYMBOL_SCAN_MAX_ITEMS) -> List[str]:
     items: List[str] = []
     seen: set[str] = set()
-    limit = max(1, int(max_items or 30))
+    limit = max(1, int(max_items or _AUTO_SYMBOL_SCAN_MAX_ITEMS))
     for group in groups:
         for value in group or []:
             symbol = _normalize_symbol_text(value)
@@ -191,7 +233,12 @@ def _normalize_symbol_mode(value: Any) -> str:
     return text
 
 
-def _normalize_symbol_list(value: Any, *, default: Optional[List[str]] = None, max_items: int = 30) -> List[str]:
+def _normalize_symbol_list(
+    value: Any,
+    *,
+    default: Optional[List[str]] = None,
+    max_items: int = _AUTO_SYMBOL_SCAN_MAX_ITEMS,
+) -> List[str]:
     raw_items: List[Any]
     if value is None:
         raw_items = list(default or [])
@@ -210,7 +257,7 @@ def _normalize_symbol_list(value: Any, *, default: Optional[List[str]] = None, m
             continue
         seen.add(symbol)
         items.append(symbol)
-        if len(items) >= max(1, int(max_items or 30)):
+        if len(items) >= max(1, int(max_items or _AUTO_SYMBOL_SCAN_MAX_ITEMS)):
             break
     return items or list(default or ["BTC/USDT"])
 
@@ -438,6 +485,8 @@ class AutonomousTradingAgent:
         self._learning_memory = self._load_learning_memory()
         self._last_error: Optional[str] = None
         self._last_run_at: Optional[str] = None
+        self._next_run_at: Optional[str] = None
+        self._last_latency_ms: Optional[int] = None
         self._last_decision: Optional[Dict[str, Any]] = None
         self._last_execution: Optional[Dict[str, Any]] = None
         self._last_research_context: Optional[Dict[str, Any]] = None
@@ -610,7 +659,7 @@ class AutonomousTradingAgent:
                 continue
 
         live_symbols = [str(item.get("symbol") or "") for item in await self._load_live_position_snapshots(exchange=exchange)]
-        return _merge_symbol_sequence(local_symbols, live_symbols, max_items=30)
+        return _merge_symbol_sequence(local_symbols, live_symbols, max_items=_AUTO_SYMBOL_SCAN_MAX_ITEMS)
 
     async def _resolve_position_payload(self, *, exchange: str, symbol: str, account_id: str) -> Dict[str, Any]:
         position = position_manager.get_position(exchange, symbol, account_id=account_id)
@@ -648,7 +697,7 @@ class AutonomousTradingAgent:
         universe_symbols = _normalize_symbol_list(
             self._get("AI_AUTONOMOUS_AGENT_UNIVERSE_SYMBOLS", None),
             default=_DEFAULT_AUTO_UNIVERSE if symbol_mode == "auto" else [configured_symbol],
-            max_items=30,
+            max_items=_AUTO_SYMBOL_SCAN_MAX_ITEMS,
         )
         return {
             "enabled": bool(self._get("AI_AUTONOMOUS_AGENT_ENABLED", False)),
@@ -703,7 +752,7 @@ class AutonomousTradingAgent:
             updates["AI_AUTONOMOUS_AGENT_UNIVERSE_SYMBOLS"] = _normalize_symbol_list(
                 kwargs["universe_symbols"],
                 default=_DEFAULT_AUTO_UNIVERSE,
-                max_items=30,
+                max_items=_AUTO_SYMBOL_SCAN_MAX_ITEMS,
             )
         if "selection_top_n" in kwargs and kwargs["selection_top_n"] is not None:
             updates["AI_AUTONOMOUS_AGENT_SELECTION_TOP_N"] = _coerce_int(kwargs["selection_top_n"], 10, low=3, high=20)
@@ -766,6 +815,8 @@ class AutonomousTradingAgent:
         return {
             "running": self.is_running(),
             "last_run_at": self._last_run_at,
+            "next_run_at": self._next_run_at,
+            "last_latency_ms": self._last_latency_ms,
             "last_error": self._last_error,
             "tick_count": int(self._tick_count),
             "submitted_count": int(self._submitted_count),
@@ -952,6 +1003,7 @@ class AutonomousTradingAgent:
                 await self._task
         self._task = None
         self._stop_event = None
+        self._next_run_at = None
         runtime_state.mark_task_stopped("ai_autonomous_agent")
         logger.info("AutonomousTradingAgent stopped")
         return self.get_status()
@@ -959,6 +1011,8 @@ class AutonomousTradingAgent:
     async def _loop(self) -> None:
         await asyncio.sleep(2)
         while self._stop_event is not None and not self._stop_event.is_set():
+            cycle_started_monotonic = time.monotonic()
+            self._next_run_at = None
             try:
                 await self.run_once(trigger="loop")
                 runtime_state.touch_task("ai_autonomous_agent", success=True)
@@ -967,10 +1021,20 @@ class AutonomousTradingAgent:
                 runtime_state.mark_task_failed("ai_autonomous_agent", str(exc), will_restart=False)
                 logger.warning(f"autonomous agent tick failed: {exc}")
             interval = int(self.get_runtime_config().get("interval_sec") or 120)
-            for _ in range(max(1, interval)):
-                if self._stop_event is None or self._stop_event.is_set():
+            while self._stop_event is not None and not self._stop_event.is_set():
+                remaining_sec, next_run_at = _compute_next_loop_sleep(
+                    cycle_started_monotonic,
+                    interval,
+                )
+                self._next_run_at = next_run_at
+                if remaining_sec <= 0:
                     break
-                await asyncio.sleep(1)
+                await asyncio.sleep(min(1.0, remaining_sec))
+            if self._stop_event is None or self._stop_event.is_set():
+                break
+            if self._next_run_at is not None:
+                # Clear stale schedule right before the next cycle begins.
+                self._next_run_at = None
 
     async def _call_provider(
         self,
@@ -2481,7 +2545,7 @@ class AutonomousTradingAgent:
             cached_universe = _normalize_symbol_list(
                 scan_cfg.get("universe_symbols"),
                 default=expected_universe,
-                max_items=30,
+                max_items=_AUTO_SYMBOL_SCAN_MAX_ITEMS,
             )
             if cached_universe != expected_universe:
                 return None
@@ -2504,7 +2568,11 @@ class AutonomousTradingAgent:
         configured_symbol = _normalize_symbol_text(cfg.get("symbol") or "BTC/USDT") or "BTC/USDT"
         selection_top_n = _coerce_int(limit or cfg.get("selection_top_n") or 10, 10, low=3, high=20)
         default_universe = _DEFAULT_AUTO_UNIVERSE if symbol_mode == "auto" else [configured_symbol]
-        universe_symbols = _normalize_symbol_list(cfg.get("universe_symbols"), default=default_universe, max_items=30)
+        universe_symbols = _normalize_symbol_list(
+            cfg.get("universe_symbols"),
+            default=default_universe,
+            max_items=_AUTO_SYMBOL_SCAN_MAX_ITEMS,
+        )
         if symbol_mode != "auto":
             universe_symbols = [configured_symbol]
         else:
@@ -2512,7 +2580,12 @@ class AutonomousTradingAgent:
                 exchange=str(cfg.get("exchange") or "binance"),
                 account_id=str(cfg.get("account_id") or "main"),
             )
-            universe_symbols = _merge_symbol_sequence(tracked_symbols, [configured_symbol], universe_symbols, max_items=30)
+            universe_symbols = _merge_symbol_sequence(
+                tracked_symbols,
+                [configured_symbol],
+                universe_symbols,
+                max_items=_AUTO_SYMBOL_SCAN_MAX_ITEMS,
+            )
 
         if not force:
             cached = self._cached_symbol_scan(
@@ -3063,6 +3136,7 @@ class AutonomousTradingAgent:
                 "timestamp": _utc_now().isoformat(),
             }
             self._last_run_at = result["timestamp"]
+            self._last_latency_ms = 0
             self._last_decision = {"action": "hold", "reason": "agent_disabled"}
             self._last_execution = {"submitted": False, "reason": "agent_disabled"}
             self._last_research_context = None
@@ -3321,6 +3395,7 @@ class AutonomousTradingAgent:
         self._update_profile(decision, submitted=bool(execution.get("submitted")))
 
         self._last_run_at = now_iso
+        self._last_latency_ms = latency_ms
         self._last_error = None
         self._last_decision = decision
         self._last_execution = execution

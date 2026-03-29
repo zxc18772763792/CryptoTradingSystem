@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pandas as pd
 import pytest
@@ -73,13 +74,17 @@ def test_autonomous_agent_run_once_submit_signal(monkeypatch, tmp_path: Path):
             }
         ),
     )
+    monkeypatch.setattr(module.time, "perf_counter", Mock(side_effect=[100.0, 100.25]))
 
     asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
     result = asyncio.run(agent.run_once(trigger="test", force=True))
+    status = agent.get_status()
 
     assert result["decision"]["action"] == "buy"
     assert result["execution"]["submitted"] is True
     assert submit_mock.await_count == 1
+    assert status["last_latency_ms"] == 250
+    assert status["last_run_at"] == result["timestamp"]
     signal = submit_mock.await_args.args[0]
     assert signal.strategy_name == "AI_AutonomousAgent"
     assert result["decision"]["leverage"] == 1.0
@@ -183,6 +188,22 @@ def test_autonomous_agent_auto_start_is_env_controlled(monkeypatch, tmp_path: Pa
     assert initial["auto_start"] is True
     assert updated["auto_start"] is True
     assert not agent._overlay_path.exists()
+
+
+def test_autonomous_agent_auto_mode_uses_expanded_default_universe(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    monkeypatch.setattr(module.settings, "AI_AUTONOMOUS_AGENT_SYMBOL_MODE", "auto", raising=False)
+    monkeypatch.setattr(module.settings, "AI_AUTONOMOUS_AGENT_UNIVERSE_SYMBOLS", "", raising=False)
+
+    cfg = agent.get_runtime_config()
+
+    assert cfg["symbol_mode"] == "auto"
+    assert len(cfg["universe_symbols"]) == 30
+    assert "TRX/USDT" in cfg["universe_symbols"]
+    assert "SUI/USDT" in cfg["universe_symbols"]
+    assert "PEPE/USDT" in cfg["universe_symbols"]
 
 
 def test_autonomous_agent_exposes_raw_model_action_rewrite(monkeypatch, tmp_path: Path):
@@ -699,6 +720,45 @@ def test_agent_journal_contains_request_id(tmp_path, monkeypatch):
     rows = agent.read_journal(limit=5)
     assert any(r.get("request_id") for r in rows)
     assert any("rejection_reason" in r for r in rows)
+
+
+def test_compute_next_loop_sleep_uses_fixed_cycle_start():
+    from core.ai.autonomous_agent import _compute_next_loop_sleep
+
+    remaining, next_run_at = _compute_next_loop_sleep(
+        100.0,
+        120,
+        now_monotonic=145.0,
+        now_utc=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    assert remaining == pytest.approx(75.0)
+    assert next_run_at == "2026-01-01T00:01:15+00:00"
+
+    remaining_overdue, next_run_at_overdue = _compute_next_loop_sleep(
+        100.0,
+        120,
+        now_monotonic=235.0,
+        now_utc=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    assert remaining_overdue == 0.0
+    assert next_run_at_overdue is None
+
+
+def test_agent_run_once_disabled_reports_zero_latency(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    asyncio.run(agent.update_runtime_config(enabled=False))
+    result = asyncio.run(agent.run_once(trigger="test"))
+    status = agent.get_status()
+
+    assert result["skipped"] is True
+    assert result["reason"] == "agent_disabled"
+    assert status["last_latency_ms"] == 0
+    assert status["last_run_at"] == result["timestamp"]
+    assert status["next_run_at"] is None
 
 
 def test_agent_run_once_exposes_structured_diagnostics(monkeypatch, tmp_path: Path):

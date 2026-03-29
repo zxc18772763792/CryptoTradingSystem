@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import math
 from typing import Any, Dict, List, Optional, Union
@@ -257,6 +258,14 @@ def _normalize_deploy_target(value: str) -> str:
     return text
 
 
+def _register_mode_conflict_detail(current_mode: str) -> str:
+    mode = str(current_mode or "unknown").strip().lower() or "unknown"
+    return (
+        f"当前系统处于 {mode} 模式，不能直接注册为纸盘。"
+        "请先切换到 paper 模式，或改选“实盘候选（live_candidate）”。"
+    )
+
+
 def _news_key(symbol: str) -> str:
     raw = _normalize_symbol(symbol).split(":")[0]
     if "/" in raw:
@@ -311,6 +320,209 @@ def _candidate_registered_strategy_name(candidate: Any) -> Optional[str]:
         if text:
             return text
     return None
+
+
+def _candidate_timeframe(candidate: Any, default: str = "1h") -> str:
+    timeframe_value = getattr(candidate, "timeframe", None)
+    if isinstance(timeframe_value, str) and timeframe_value.strip():
+        return timeframe_value.strip()
+    meta = getattr(candidate, "metadata", None) or {}
+    meta_timeframe = meta.get("timeframe") if isinstance(meta, dict) else None
+    if isinstance(meta_timeframe, str) and meta_timeframe.strip():
+        return meta_timeframe.strip()
+    return str(default or "1h").strip() or "1h"
+
+
+def _params_fingerprint(params: Any) -> str:
+    try:
+        payload = json.dumps(
+            dict(params or {}),
+            sort_keys=True,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            default=str,
+        )
+    except Exception:
+        payload = str(params or "")
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _candidate_id_suffix(candidate_id: Any, size: int = 6) -> str:
+    text = str(candidate_id or "").strip()
+    if not text:
+        return ""
+    return text[-max(1, int(size or 6)) :]
+
+
+def _live_signal_status_rank(status: str) -> int:
+    return {
+        "live_running": 40,
+        "live_candidate": 30,
+        "paper_running": 20,
+        "shadow_running": 10,
+    }.get(str(status or "").strip().lower(), 0)
+
+
+def _candidate_created_sort_value(candidate: Any) -> float:
+    value = getattr(candidate, "created_at", None)
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return float(dt.timestamp())
+    try:
+        ts = pd.Timestamp(value)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize(timezone.utc)
+        else:
+            ts = ts.tz_convert(timezone.utc)
+        return float(ts.timestamp())
+    except Exception:
+        return 0.0
+
+
+def _candidate_live_signal_group_key(candidate: Any) -> tuple[str, str, str, str]:
+    return (
+        _candidate_primary_symbol(candidate),
+        _candidate_timeframe(candidate),
+        _candidate_strategy_name(candidate),
+        _params_fingerprint(getattr(candidate, "params", {}) or {}),
+    )
+
+
+def _pick_preferred_candidate(candidates: List[Any]) -> Any:
+    ranked = sorted(
+        list(candidates or []),
+        key=lambda cand: (
+            _live_signal_status_rank(str(getattr(cand, "status", "") or "")),
+            _candidate_created_sort_value(cand),
+            str(getattr(cand, "candidate_id", "") or ""),
+        ),
+        reverse=True,
+    )
+    return ranked[0] if ranked else None
+
+
+def _group_candidates_for_live_signals(candidates: List[Any]) -> List[Dict[str, Any]]:
+    groups: Dict[tuple[str, str, str, str], List[Any]] = {}
+    order: List[tuple[str, str, str, str]] = []
+    for cand in candidates or []:
+        key = _candidate_live_signal_group_key(cand)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(cand)
+    return [
+        {
+            "key": key,
+            "candidates": groups[key],
+            "preferred": _pick_preferred_candidate(groups[key]),
+        }
+        for key in order
+        if groups.get(key)
+    ]
+
+
+def _build_live_signal_candidate_item(
+    *,
+    preferred: Any,
+    grouped_candidates: List[Any],
+    signal_payload: Optional[Dict[str, Any]],
+    error: str = "",
+) -> Dict[str, Any]:
+    preferred_candidate = preferred or _pick_preferred_candidate(grouped_candidates)
+    candidate_ids = [
+        str(getattr(cand, "candidate_id", "") or "").strip()
+        for cand in grouped_candidates or []
+        if str(getattr(cand, "candidate_id", "") or "").strip()
+    ]
+    suffixes = [_candidate_id_suffix(candidate_id) for candidate_id in candidate_ids if candidate_id]
+    statuses: List[str] = []
+    for cand in grouped_candidates or []:
+        status = str(getattr(cand, "status", "") or "").strip()
+        if status and status not in statuses:
+            statuses.append(status)
+
+    return {
+        "source": "candidate",
+        "group_type": "candidate",
+        "candidate_id": str(getattr(preferred_candidate, "candidate_id", "") or "").strip(),
+        "candidate_id_suffix": _candidate_id_suffix(getattr(preferred_candidate, "candidate_id", "")),
+        "candidate_ids": candidate_ids,
+        "candidate_suffixes": suffixes,
+        "duplicate_count": len(grouped_candidates or []),
+        "strategy": _candidate_strategy_name(preferred_candidate),
+        "symbol": _candidate_primary_symbol(preferred_candidate),
+        "timeframe": _candidate_timeframe(preferred_candidate),
+        "status": str(getattr(preferred_candidate, "status", "unknown") or "unknown"),
+        "statuses": statuses,
+        "params_fingerprint": _params_fingerprint(getattr(preferred_candidate, "params", {}) or {}),
+        "signal": signal_payload,
+        "error": str(error or "").strip(),
+    }
+
+
+def _build_live_signal_watchlist_symbols(
+    *,
+    runtime_cfg: Dict[str, Any],
+    selection: Dict[str, Any],
+) -> List[str]:
+    symbols: List[str] = []
+    selected_symbol = _normalize_symbol(str(selection.get("selected_symbol") or runtime_cfg.get("symbol") or ""))
+    if selected_symbol:
+        symbols.append(selected_symbol)
+
+    top_candidates = list(selection.get("top_candidates") or [])
+    for row in top_candidates:
+        symbol = _normalize_symbol(str((row or {}).get("symbol") or ""))
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+
+    configured_symbols = list((selection.get("scan_config") or {}).get("universe_symbols") or runtime_cfg.get("universe_symbols") or [])
+    for raw in configured_symbols:
+        symbol = _normalize_symbol(str(raw or ""))
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+    return symbols
+
+
+def _build_live_signal_watchlist_item(
+    *,
+    symbol: str,
+    runtime_cfg: Dict[str, Any],
+    selection: Dict[str, Any],
+    signal_payload: Optional[Dict[str, Any]],
+    error: str = "",
+) -> Dict[str, Any]:
+    top_candidates = list(selection.get("top_candidates") or [])
+    matched_row = next(
+        (row for row in top_candidates if _normalize_symbol(str((row or {}).get("symbol") or "")) == _normalize_symbol(symbol)),
+        {},
+    )
+    research = dict((matched_row or {}).get("research") or {})
+    selected_symbol = _normalize_symbol(str(selection.get("selected_symbol") or runtime_cfg.get("symbol") or ""))
+    is_selected = bool(selected_symbol and _normalize_symbol(symbol) == selected_symbol)
+    watch_status = "selected" if is_selected else "watchlist"
+    watch_status_display = "当前关注" if is_selected else (
+        f"候选 #{int((matched_row or {}).get('rank') or 0)}" if int((matched_row or {}).get("rank") or 0) > 0 else "观察列表"
+    )
+
+    return {
+        "source": "agent_watchlist",
+        "group_type": "watchlist",
+        "strategy": str(runtime_cfg.get("strategy_name") or "AI_AutonomousAgent"),
+        "symbol": _normalize_symbol(symbol),
+        "timeframe": str((selection.get("scan_config") or {}).get("timeframe") or runtime_cfg.get("timeframe") or "15m").strip() or "15m",
+        "status": watch_status,
+        "status_display": watch_status_display,
+        "selected": is_selected,
+        "rank": int((matched_row or {}).get("rank") or 0),
+        "candidate_id": str(research.get("candidate_id") or "").strip(),
+        "candidate_id_suffix": _candidate_id_suffix(research.get("candidate_id")),
+        "linked_candidate_status": str(research.get("status") or "").strip(),
+        "linked_candidate_strategy": str(research.get("strategy") or "").strip(),
+        "params_fingerprint": "",
+        "signal": signal_payload,
+        "error": str(error or "").strip(),
+    }
 
 
 def _safe_strategy_name_fragment(value: str, default: str = "strategy") -> str:
@@ -2094,9 +2306,15 @@ async def register_ai_candidate(request: Request, candidate_id: str, payload: AI
     target = "paper" if payload.mode == "shadow" else payload.mode
     valid_modes = {"paper", "live_candidate"}
     target = target if target in valid_modes else "paper"
-    result = await promote_existing_candidate(
-        request.app, candidate_id=candidate_id, actor="web_ui_register", target=target
-    )
+    current_mode = str(execution_engine.get_trading_mode() or "").strip().lower() or "paper"
+    if target == "paper" and current_mode != "paper":
+        raise HTTPException(status_code=400, detail=_register_mode_conflict_detail(current_mode))
+    try:
+        result = await promote_existing_candidate(
+            request.app, candidate_id=candidate_id, actor="web_ui_register", target=target
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "candidate registration failed") from exc
     return {
         "candidate_id": candidate_id,
         "candidate": result["candidate"].model_dump(mode="json"),
@@ -2631,11 +2849,7 @@ async def list_performance_snapshots(
 @router.get("/live-signals")
 @router.get("/candidates/live-signals")
 async def get_live_signals(request: Request, symbol: Optional[str] = None):
-    """Return SignalAggregator output for all paper_running/live_running candidates.
-
-    Uses the module-level signal_aggregator singleton (same one used by /signals/latest).
-    Market data loaded from local parquet cache — no live network calls.
-    """
+    """Return live signal snapshots for active candidates and agent watchlist."""
     from core.ai.signal_aggregator import signal_aggregator
 
     ensure_ai_research_runtime_state(request.app)
@@ -2649,40 +2863,105 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
         sym_norm = _normalize_symbol(symbol)
         active = [c for c in active if _candidate_primary_symbol(c) == sym_norm]
 
-    results = []
-    for cand in active:
-        cand_symbol = _candidate_primary_symbol(cand)
-        cand_strategy = _candidate_strategy_name(cand)
-        cand_status = str(getattr(cand, "status", "unknown"))
+    candidate_items: List[Dict[str, Any]] = []
+    for grouped in _group_candidates_for_live_signals(active):
+        grouped_candidates = list(grouped.get("candidates") or [])
+        preferred = grouped.get("preferred") or _pick_preferred_candidate(grouped_candidates)
+        if preferred is None:
+            continue
+        cand_symbol = _candidate_primary_symbol(preferred)
+        cand_timeframe = _candidate_timeframe(preferred)
+        cand_exchange = _candidate_exchange(preferred)
+        signal_payload: Optional[Dict[str, Any]] = None
+        error = ""
         try:
-            cand_exchange = _candidate_exchange(cand)
             df, market_meta = await _load_signal_market_data(
                 exchange=cand_exchange,
                 symbol=cand_symbol,
-                timeframe="1h",
+                timeframe=cand_timeframe,
                 limit=120,
             )
             sig = await signal_aggregator.aggregate(cand_symbol, df)
-            results.append({
-                "candidate_id": cand.candidate_id,
-                "strategy": cand_strategy,
-                "symbol": cand_symbol,
-                "status": cand_status,
-                "signal": {
-                    **sig.to_dict(),
-                    **market_meta,
-                },
-            })
+            signal_payload = {
+                **(sig.to_dict() if callable(getattr(sig, "to_dict", None)) else dict(sig or {})),
+                **market_meta,
+            }
         except Exception as exc:
-            logger.debug(f"live-signals: error for {cand.candidate_id}: {exc}")
-            results.append({
-                "candidate_id": cand.candidate_id,
-                "strategy": cand_strategy,
-                "symbol": cand_symbol,
-                "status": cand_status,
-                "signal": None,
-                "error": str(exc),
-            })
+            candidate_id = str(getattr(preferred, "candidate_id", "") or "unknown")
+            logger.debug(f"live-signals: candidate error for {candidate_id}: {exc}")
+            error = str(exc)
+        candidate_items.append(
+            _build_live_signal_candidate_item(
+                preferred=preferred,
+                grouped_candidates=grouped_candidates,
+                signal_payload=signal_payload,
+                error=error,
+            )
+        )
+
+    runtime_cfg: Dict[str, Any] = {}
+    selection: Dict[str, Any] = {}
+    try:
+        runtime_cfg = dict(autonomous_trading_agent.get_runtime_config() or {})
+    except Exception as exc:
+        logger.debug(f"live-signals: runtime config unavailable: {exc}")
+        runtime_cfg = {}
+
+    try:
+        selection_payload = await autonomous_trading_agent.get_symbol_scan(force=False)
+        selection = dict(selection_payload or {}) if isinstance(selection_payload, dict) else {}
+    except Exception as exc:
+        logger.debug(f"live-signals: watchlist scan unavailable: {exc}")
+        selection = {}
+
+    watchlist_symbols = _build_live_signal_watchlist_symbols(
+        runtime_cfg=runtime_cfg,
+        selection=selection,
+    )
+    if symbol:
+        sym_norm = _normalize_symbol(symbol)
+        watchlist_symbols = [sym for sym in watchlist_symbols if _normalize_symbol(sym) == sym_norm]
+
+    watchlist_items: List[Dict[str, Any]] = []
+    watchlist_timeframe = str(
+        (selection.get("scan_config") or {}).get("timeframe")
+        or runtime_cfg.get("timeframe")
+        or "15m"
+    ).strip() or "15m"
+    watchlist_exchange = _normalize_exchange(
+        str(
+            (selection.get("scan_config") or {}).get("exchange")
+            or runtime_cfg.get("exchange")
+            or "binance"
+        )
+    )
+    for watch_symbol in watchlist_symbols:
+        signal_payload = None
+        error = ""
+        try:
+            df, market_meta = await _load_signal_market_data(
+                exchange=watchlist_exchange,
+                symbol=watch_symbol,
+                timeframe=watchlist_timeframe,
+                limit=120,
+            )
+            sig = await signal_aggregator.aggregate(watch_symbol, df)
+            signal_payload = {
+                **(sig.to_dict() if callable(getattr(sig, "to_dict", None)) else dict(sig or {})),
+                **market_meta,
+            }
+        except Exception as exc:
+            logger.debug(f"live-signals: watchlist error for {watch_symbol}: {exc}")
+            error = str(exc)
+        watchlist_items.append(
+            _build_live_signal_watchlist_item(
+                symbol=watch_symbol,
+                runtime_cfg=runtime_cfg,
+                selection=selection,
+                signal_payload=signal_payload,
+                error=error,
+            )
+        )
 
     # Safe ml_model check: aggregator may be a test stub or lightweight singleton
     ml_model_loaded = False
@@ -2692,9 +2971,32 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
             ml_model_loaded = bool(ml_model.is_loaded())
     except Exception:
         pass
+
+    sections = [
+        {
+            "id": "candidates",
+            "title": "\u8fd0\u884c\u4e2d\u5019\u9009",
+            "count": len(candidate_items),
+            "empty_text": "\u6682\u65e0\u8fd0\u884c\u4e2d\u5019\u9009",
+            "items": candidate_items,
+        },
+        {
+            "id": "watchlist",
+            "title": "\u81ea\u6cbb\u4ee3\u7406 watchlist",
+            "count": len(watchlist_items),
+            "empty_text": "\u6682\u65e0\u81ea\u6cbb\u4ee3\u7406 watchlist",
+            "items": watchlist_items,
+        },
+    ]
+    items = [*candidate_items, *watchlist_items]
     return {
-        "items": results,
-        "count": len(results),
+        "sections": sections,
+        "candidate_items": candidate_items,
+        "watchlist_items": watchlist_items,
+        "items": items,
+        "candidate_count": len(candidate_items),
+        "watchlist_count": len(watchlist_items),
+        "count": len(items),
         "ml_model_loaded": ml_model_loaded,
         "ts": datetime.now(timezone.utc).isoformat(),
     }

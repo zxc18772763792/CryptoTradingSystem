@@ -44,11 +44,16 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "modules.candidates" in candidates_js
     assert "window.agentStart = agentStart" in agent_js
     assert "renderAgentChainSummary" in agent_js
+    assert "buildAgentJournalCurrentSummary" in agent_js
+    assert "summarizeAggregatedSignal" in agent_js
     assert "function describeExecutionCost" in agent_js
     assert "body: JSON.stringify({ force: true })" in agent_js
     assert agent_js.count("async function loadAgentJournal()") == 1
     assert "function renderAgentStatusLoadError" in agent_js
     assert "执行成本" in agent_js
+    assert "next_run_at" in agent_js
+    assert "last_latency_ms" in agent_js
+    assert "当前周期快照" in agent_js
     assert "startBtn.textContent = running ? '运行中' : '启动'" in agent_js
     assert "function selectProposal(" in ai_js
     assert "buildPlannerConstraints" in ai_js
@@ -70,6 +75,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "provider_fallback" in ai_js
     assert 'option value="codex">OpenAI' in template
     assert "先选研究任务，再点击候选策略卡片" in template
+    assert "最后看最近决策日志与聚合信号快照" in template
     assert ".ai-flow-console" in style_css
     assert ".ai-chain-summary-grid" in style_css
     assert ".ai-flow-stage-grid" in style_css
@@ -77,6 +83,8 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert ".ai-oneclick-entry-card" in style_css
     assert ".ai-oneclick-feedback" in style_css
     assert ".ai-review-panel select" in style_css
+    assert ".agent-journal-current" in style_css
+    assert ".agent-journal-signal" in style_css
     assert "appearance: none" in style_css
     assert "color-scheme: dark" in style_css
     assert '[data-tone="warn"]' in style_css

@@ -537,6 +537,10 @@
     return !!(state.runtimeConfig && state.runtimeConfig.governance_enabled);
   }
 
+  function currentTradingMode() {
+    return String((state.runtimeConfig && state.runtimeConfig.trading_mode) || '').trim().toLowerCase();
+  }
+
   function getLiveDecisionRuntimeConfig() {
     return (state.runtimeConfig && state.runtimeConfig.ai_live_decision) || null;
   }
@@ -1430,6 +1434,8 @@
       shadow_running: '影子跟踪（未运行）',
       live_candidate: '实盘候选',
       live_running: '实盘运行',
+      selected: '当前关注',
+      watchlist: '观察列表',
       retired: '已退役',
       new: '新建',
     }[String(s || '')] || String(s || '--');
@@ -2959,6 +2965,10 @@
     const cand   = resp?.candidate || {};
     const top    = candidateTopResults(cand)[0] || {};
     const decision = cand?.promotion?.decision || cand?.promotion_target || 'paper';
+    const runtimeTradingMode = currentTradingMode();
+    const defaultRegisterMode = runtimeTradingMode === 'live'
+      ? 'live_candidate'
+      : (decision === 'live_candidate' ? 'live_candidate' : 'paper');
     const sym    = String(cand?.symbol || '');
     const tf     = String(cand?.timeframe || '');
     const strat  = String(cand?.strategy || 'AI');
@@ -2977,6 +2987,10 @@
         <div class="ai-rm-value ${cls}">${value}</div>
       </div>`;
     }
+
+    const liveModeHint = runtimeTradingMode === 'live'
+      ? '当前系统运行在 live 模式，默认改为“实盘候选”，避免直接触发纸盘注册失败。'
+      : '';
 
     body.innerHTML = `
       <div class="form-group" style="margin-bottom:10px;">
@@ -3010,13 +3024,29 @@
     normalizeDomText(body);
 
     document.getElementById('reg-cancel-btn').onclick  = () => { modal.style.display = 'none'; };
+    const paperMode = body.querySelector('input[name="reg-mode"][value="paper"]');
+    const liveCandidateMode = body.querySelector('input[name="reg-mode"][value="live_candidate"]');
     const regModeShadow = body.querySelector('input[name="reg-mode"][value="shadow"]');
+    if (paperMode) paperMode.checked = defaultRegisterMode === 'paper';
+    if (liveCandidateMode) liveCandidateMode.checked = defaultRegisterMode === 'live_candidate';
     if (regModeShadow) {
       regModeShadow.closest('label')?.remove();
     }
+    if (runtimeTradingMode === 'live') {
+      const modeGroup = body.querySelector('.ai-mode-radio-group');
+      if (modeGroup && !body.querySelector('[data-register-live-hint="true"]')) {
+        const hint = document.createElement('div');
+        hint.setAttribute('data-register-live-hint', 'true');
+        hint.style.marginTop = '10px';
+        hint.style.color = '#fcd34d';
+        hint.style.fontSize = '12px';
+        hint.textContent = liveModeHint;
+        modeGroup.insertAdjacentElement('afterend', hint);
+      }
+    }
     document.getElementById('reg-confirm-btn').onclick = () => {
       const name = String(document.getElementById('reg-name')?.value || '').trim();
-      let mode = document.querySelector('input[name="reg-mode"]:checked')?.value || 'paper';
+      let mode = document.querySelector('input[name="reg-mode"]:checked')?.value || defaultRegisterMode;
       if (mode === 'shadow') mode = 'paper';
       confirmRegister(candidateId, mode, name);
     };
@@ -4146,10 +4176,10 @@
       }, REFRESH_INTERVAL_MS);
     }
 
-    if (isAiAgentActive()) {
+    if (isAiWorkspaceActive()) {
       loadLiveSignals().catch(() => {});
       state.liveSignalTimer = setInterval(() => {
-        if (!isAiAgentActive() || document.hidden) return;
+        if (!isAiWorkspaceActive() || document.hidden) return;
         loadLiveSignals().catch(() => {});
       }, 30000);
     }
@@ -4252,58 +4282,122 @@
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
   async function loadLiveSignals() {
-    if (!document.getElementById('ai-live-signals-panel')) return;
+    if (!document.getElementById('ai-research-live-signals-panel') && !document.getElementById('ai-agent-live-signals-panel')) return;
     try {
       const res = await aiApi('/live-signals', { timeoutMs: 20000 });
-      renderLiveSignalPanel(res?.items || [], !!res?.ml_model_loaded);
+      renderLiveSignalPanels(res || {}, !!res?.ml_model_loaded);
     } catch (e) {
       /* silent — non-critical */
     }
   }
 
-  function renderLiveSignalPanel(items, mlLoaded) {
-    const el = document.getElementById('ai-live-signals-panel');
-    if (!el) return;
+  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     Phase B — 快速注册
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
-    // ML 未激活提示（仅在有运行候选时显示）
-    const mlNote = (items.length > 0 && !mlLoaded)
-      ? '<div style="font-size:10px;color:#78350f;background:#451a03;border-radius:4px;padding:2px 6px;margin-bottom:4px;">ML组件未激活（需训练模型），信号仅用 LLM+Factor</div>'
-      : '';
+  function liveSignalSections(payload) {
+    const sections = Array.isArray(payload?.sections) ? payload.sections.filter(Boolean) : [];
+    if (sections.length) return sections;
+    return [
+      {
+        id: 'candidates',
+        title: '运行中候选',
+        empty_text: '暂无运行中候选',
+        items: Array.isArray(payload?.candidate_items) ? payload.candidate_items : [],
+      },
+      {
+        id: 'watchlist',
+        title: '自治代理 watchlist',
+        empty_text: '暂无自治代理 watchlist',
+        items: Array.isArray(payload?.watchlist_items) ? payload.watchlist_items : [],
+      },
+    ];
+  }
 
-    if (!items.length) {
-      el.innerHTML = '<div style="font-size:11px;color:#6b7fa0;padding:6px 0;">暂无运行中候选</div>';
-      return;
+  function liveSignalDirIcon(direction) {
+    return direction === 'LONG' ? '▲' : direction === 'SHORT' ? '▼' : '•';
+  }
+
+  function liveSignalDirColor(direction) {
+    return direction === 'LONG' ? '#4ade80' : direction === 'SHORT' ? '#f87171' : '#6b7fa0';
+  }
+
+  function liveSignalPct(value) {
+    return `${((Number(value) || 0) * 100).toFixed(0)}%`;
+  }
+
+  function liveSignalPrimaryTitle(item) {
+    const parts = [];
+    if (item?.source === 'candidate') {
+      parts.push(`<span class="live-sig-name">${esc(item?.strategy || '--')}</span>`);
+      if (item?.candidate_id_suffix) parts.push(`<span class="live-sig-pill">#${esc(item.candidate_id_suffix)}</span>`);
+      parts.push(`<span class="live-sig-pill">${esc(item?.timeframe || '--')}</span>`);
+      parts.push(`<span class="live-sig-pill">${esc(statusText(item?.status || 'unknown'))}</span>`);
+      return parts.join('');
     }
+    parts.push(`<span class="live-sig-name">${esc(item?.symbol || '--')}</span>`);
+    parts.push(`<span class="live-sig-pill">${esc(item?.timeframe || '--')}</span>`);
+    parts.push(`<span class="live-sig-pill">${esc(item?.status_display || (item?.selected ? '当前关注' : '观察列表'))}</span>`);
+    return parts.join('');
+  }
 
-    const dirIcon  = d => d === 'LONG' ? '▲' : d === 'SHORT' ? '▼' : '─';
-    const dirColor = d => d === 'LONG' ? '#4ade80' : d === 'SHORT' ? '#f87171' : '#6b7fa0';
-    const pct      = v => ((v || 0) * 100).toFixed(0) + '%';
+  function liveSignalSecondaryMeta(item) {
+    const parts = [];
+    if (item?.source === 'candidate') {
+      if (item?.symbol) parts.push(item.symbol);
+      if (Number(item?.duplicate_count || 0) > 1) parts.push(`去重 ${Number(item.duplicate_count)}`);
+      if (Array.isArray(item?.statuses) && item.statuses.length > 1) {
+        parts.push(item.statuses.map(status => statusText(status)).join('/'));
+      }
+      return parts.join(' · ');
+    }
+    if (item?.strategy) parts.push(item.strategy);
+    if (Number(item?.rank || 0) > 0) parts.push(`排名 #${Number(item.rank)}`);
+    if (item?.candidate_id_suffix) parts.push(`关联 #${item.candidate_id_suffix}`);
+    if (item?.linked_candidate_status) parts.push(statusText(item.linked_candidate_status));
+    return parts.join(' · ');
+  }
 
-    el.innerHTML = mlNote + items.map(item => {
-      const sig  = item.signal;
-      if (!sig) return `<div class="live-sig-row"><span style="color:#6b7fa0;font-size:11px">${esc(item.strategy)} - 信号错误</span></div>`;
-      const comp = sig.components || {};
-      const signalDir = String(sig.direction || 'FLAT').toUpperCase();
-      const noMarketData = Number(sig.market_data_rows || 0) <= 0;
-      const isStale = !!sig.market_data_stale;
-      const blockedBadge   = sig.blocked_by_risk
-        ? `<span class="live-sig-badge" style="background:#7f1d1d;color:#fca5a5;" title="${esc(sig.risk_reason)}">风控</span>` : '';
-      const approvalBadge  = (sig.requires_approval && !sig.blocked_by_risk && !noMarketData && ['LONG', 'SHORT'].includes(signalDir))
-        ? `<span class="live-sig-badge" style="background:#78350f;color:#fcd34d;">待审</span>` : '';
-      const dataBadge = noMarketData
-        ? '<span class="live-sig-badge" style="background:#243447;color:#9fb1c9;">缺数据</span>'
-        : (isStale ? '<span class="live-sig-badge" style="background:#2a2330;color:#c4b5fd;">数据旧</span>' : '');
-      const footerNote = noMarketData
-        ? '最近可用 K 线为空，当前仅展示空信号回退。'
-        : (sig.market_data_last_bar_at
-          ? `行情截至 ${fmtTs(sig.market_data_last_bar_at)}${isStale ? ' · 不是最新快照' : ''}`
-          : '');
-
+  function renderLiveSignalRow(item, mlLoaded) {
+    const sig = item?.signal;
+    const metaText = liveSignalSecondaryMeta(item);
+    if (!sig) {
       return `<div class="live-sig-row">
   <div class="live-sig-header">
-    <span class="live-sig-name">${esc(item.strategy)}</span>
-    <span style="font-size:10px;color:#6b7fa0;">${esc(item.symbol)}</span>
-    <span style="font-weight:700;font-size:13px;margin-left:auto;color:${dirColor(signalDir)}">${dirIcon(signalDir)} ${signalDir}</span>
+    <div class="live-sig-title-wrap">
+      <div class="live-sig-title-row">${liveSignalPrimaryTitle(item)}</div>
+      ${metaText ? `<div class="live-sig-meta">${esc(metaText)}</div>` : ''}
+    </div>
+    <span style="font-weight:700;font-size:12px;margin-left:auto;color:#94a3b8;">ERR</span>
+  </div>
+  <div class="live-sig-meta">${esc(item?.error || '信号计算失败')}</div>
+</div>`;
+    }
+
+    const comp = sig.components || {};
+    const signalDir = String(sig.direction || 'FLAT').toUpperCase();
+    const noMarketData = Number(sig.market_data_rows || 0) <= 0;
+    const isStale = !!sig.market_data_stale;
+    const blockedBadge = sig.blocked_by_risk
+      ? `<span class="live-sig-badge" style="background:#7f1d1d;color:#fca5a5;" title="${esc(sig.risk_reason)}">风控</span>` : '';
+    const approvalBadge = (sig.requires_approval && !sig.blocked_by_risk && !noMarketData && ['LONG', 'SHORT'].includes(signalDir))
+      ? '<span class="live-sig-badge" style="background:#78350f;color:#fcd34d;">待审</span>' : '';
+    const dataBadge = noMarketData
+      ? '<span class="live-sig-badge" style="background:#243447;color:#9fb1c9;">缺数据</span>'
+      : (isStale ? '<span class="live-sig-badge" style="background:#2a2330;color:#c4b5fd;">数据旧</span>' : '');
+    const footerNote = noMarketData
+      ? '最近可用 K 线为空，当前仅展示空信号回退。'
+      : (sig.market_data_last_bar_at
+        ? `行情截至 ${fmtTs(sig.market_data_last_bar_at)}${isStale ? ' · 不是最新快照' : ''}`
+        : '');
+
+    return `<div class="live-sig-row">
+  <div class="live-sig-header">
+    <div class="live-sig-title-wrap">
+      <div class="live-sig-title-row">${liveSignalPrimaryTitle(item)}</div>
+      ${metaText ? `<div class="live-sig-meta">${esc(metaText)}</div>` : ''}
+    </div>
+    <span style="font-weight:700;font-size:13px;margin-left:auto;color:${liveSignalDirColor(signalDir)}">${liveSignalDirIcon(signalDir)} ${signalDir}</span>
     ${blockedBadge}${approvalBadge}${dataBadge}
   </div>
   <div class="live-sig-bars">
@@ -4311,20 +4405,58 @@
       const c = comp[k] || {};
       const mlOffline = k === 'ml' && !mlLoaded;
       return `<span class="live-sig-bar-label"${mlOffline ? ' style="opacity:.45"' : ''}>${k.toUpperCase()}${mlOffline ? '?' : ''}</span>`
-           + `<span style="color:${mlOffline ? '#6b7fa0' : dirColor(c.direction)};font-size:10px">${mlOffline ? '─' : dirIcon(c.direction || 'FLAT')}</span>`
-           + `<span style="font-size:10px;min-width:26px;text-align:right;${mlOffline ? 'opacity:.45' : ''}">${mlOffline ? '--' : pct(c.confidence)}</span>`;
+           + `<span style="color:${mlOffline ? '#6b7fa0' : liveSignalDirColor(c.direction)};font-size:10px">${mlOffline ? '•' : liveSignalDirIcon(c.direction || 'FLAT')}</span>`
+           + `<span style="font-size:10px;min-width:26px;text-align:right;${mlOffline ? 'opacity:.45' : ''}">${mlOffline ? '--' : liveSignalPct(c.confidence)}</span>`;
     }).join('')}
     <span style="font-size:10px;color:#6b7fa0;margin-left:4px">合计</span>
-    <span style="font-size:11px;font-weight:600">${pct(sig.confidence)}</span>
+    <span style="font-size:11px;font-weight:600">${liveSignalPct(sig.confidence)}</span>
   </div>
   ${footerNote ? `<div style="margin-top:6px;font-size:10px;color:#7e92b2;">${esc(footerNote)}</div>` : ''}
 </div>`;
-    }).join('');
   }
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     Phase B — 快速注册
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  function renderLiveSignalSection(section, mlLoaded) {
+    const items = Array.isArray(section?.items) ? section.items : [];
+    return `<div class="live-sig-section">
+  <div class="live-sig-section-title">
+    <span>${esc(section?.title || '--')}</span>
+    <span>${items.length}</span>
+  </div>
+  ${items.length
+    ? items.map(item => renderLiveSignalRow(item, mlLoaded)).join('')
+    : `<div class="live-sig-empty">${esc(section?.empty_text || '暂无数据')}</div>`}
+</div>`;
+  }
+
+  function liveSignalSectionById(payload, sectionId) {
+    return liveSignalSections(payload).find(section => section?.id === sectionId) || null;
+  }
+
+  function renderLiveSignalPanel(targetId, section, mlLoaded) {
+    const el = document.getElementById(targetId);
+    if (!el) return;
+
+    const resolvedSection = section || { title: '--', empty_text: '暂无数据', items: [] };
+    const itemCount = Array.isArray(resolvedSection?.items) ? resolvedSection.items.length : 0;
+    const mlNote = (itemCount > 0 && !mlLoaded)
+      ? '<div style="font-size:10px;color:#78350f;background:#451a03;border-radius:4px;padding:2px 6px;margin-bottom:4px;">ML 组件未激活，当前信号仅使用 LLM + Factor。</div>'
+      : '';
+
+    el.innerHTML = mlNote + renderLiveSignalSection(resolvedSection, mlLoaded);
+  }
+
+  function renderLiveSignalPanels(payload, mlLoaded) {
+    renderLiveSignalPanel(
+      'ai-research-live-signals-panel',
+      liveSignalSectionById(payload, 'candidates'),
+      mlLoaded,
+    );
+    renderLiveSignalPanel(
+      'ai-agent-live-signals-panel',
+      liveSignalSectionById(payload, 'watchlist'),
+      mlLoaded,
+    );
+  }
 
   async function quickRegister(candidateId, allocationPct = 0.05) {
     if (!confirm(`确认将候选 ${candidateId.slice(0, 8)} 快速注册为纸盘交易，分配 ${(allocationPct * 100).toFixed(0)}% 仓位？`)) return;

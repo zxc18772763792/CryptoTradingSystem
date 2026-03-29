@@ -4259,6 +4259,10 @@ input[type="radio"] {
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
+.ai-research-live-signals-card {
+    grid-column: 1 / -1;
+}
+
 .ai-context-mini-head {
     display: flex;
     align-items: center;
@@ -6717,6 +6721,29 @@ input[type="radio"] {
     padding: 10px 12px;
     flex-shrink: 0;
 }
+.live-sig-section + .live-sig-section {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255,255,255,.06);
+}
+.live-sig-section-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #8fa5c7;
+    margin-bottom: 4px;
+}
+.live-sig-empty,
+.live-sig-meta {
+    font-size: 10px;
+    color: #7e92b2;
+}
+.live-sig-empty {
+    padding: 4px 0 2px;
+}
 .live-sig-row {
     padding: 6px 0;
     border-bottom: 1px solid rgba(255,255,255,.05);
@@ -6724,12 +6751,29 @@ input[type="radio"] {
 .live-sig-row:last-child { border-bottom: none; }
 .live-sig-header {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 6px;
     font-size: 12px;
     margin-bottom: 3px;
 }
+.live-sig-title-wrap {
+    min-width: 0;
+}
+.live-sig-title-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
 .live-sig-name { font-weight: 600; color: #c2d0e8; }
+.live-sig-pill {
+    background: rgba(255,255,255,.06);
+    border-radius: 999px;
+    padding: 1px 6px;
+    font-size: 10px;
+    color: #a8bbd8;
+    white-space: nowrap;
+}
 .live-sig-bars {
     display: flex;
     align-items: center;
@@ -6824,7 +6868,27 @@ input[type="radio"] {
 @keyframes agent-pulse { 0%,100% { opacity:1; } 50% { opacity:.5; } }
 
 /* AI自治代理日志表格 */
-.agent-journal-row { padding: 3px 0; border-bottom: 1px solid var(--border); line-height: 1.4; }
+.agent-journal-current {
+    margin-bottom: 8px;
+    padding: 8px 10px;
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    border-radius: 10px;
+    background: rgba(15, 23, 42, 0.32);
+}
+.agent-journal-current-title {
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: #8fa6c5;
+    margin-bottom: 4px;
+}
+.agent-journal-current-body {
+    color: #d8e4f4;
+    font-size: 11px;
+    line-height: 1.55;
+}
+.agent-journal-row { padding: 6px 0; border-bottom: 1px solid var(--border); line-height: 1.4; }
+.agent-journal-main { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; }
 .agent-journal-ts  { color: var(--text-muted); font-size: 10px; }
 .agent-journal-action { font-weight: 600; margin: 0 4px; }
 .agent-journal-action.is-good { color: #4ade80; }
@@ -6832,7 +6896,12 @@ input[type="radio"] {
 .agent-journal-action.is-danger { color: #f87171; }
 .agent-journal-action.is-info { color: #93c5fd; }
 .agent-journal-symbol { color: #cbd5e1; margin-right: 6px; }
-.agent-journal-detail { color: var(--text-muted); }
+.agent-journal-detail { color: var(--text-muted); margin-top: 3px; }
+.agent-journal-signal {
+    color: #9fd5ff;
+    margin-top: 3px;
+    font-size: 11px;
+}
 
 .ai-agent-review-card {
     display: grid;

@@ -627,6 +627,19 @@ def test_ai_research_readiness_mentions_premium_sources():
     assert "/live-signals" in js_text
 
 
+def test_ai_research_and_agent_live_signal_panels_are_separated():
+    repo_root = Path(__file__).resolve().parents[1]
+    html_text = (repo_root / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    js_text = (repo_root / "web" / "static" / "js" / "ai_research.js").read_text(encoding="utf-8")
+
+    assert "ai-research-live-signals-panel" in html_text
+    assert "ai-agent-live-signals-panel" in html_text
+    assert "研究候选运行信号" in html_text
+    assert "自治代理聚合信号" in html_text
+    assert "ai-live-signals-panel" not in html_text
+    assert "renderLiveSignalPanels" in js_text
+
+
 def test_ai_research_live_activation_flow_hooks_present():
     repo_root = Path(__file__).resolve().parents[1]
     js_text = (repo_root / "web" / "static" / "js" / "ai_research.js").read_text(encoding="utf-8")
@@ -665,6 +678,21 @@ def test_candidate_symbol_and_strategy_helpers_support_legacy_fields():
     assert ai_module._candidate_strategy_name(missing) == "unknown"
 
 
+def _patch_live_signals_watchlist(monkeypatch, ai_module, *, runtime_cfg=None, selection=None):
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_runtime_config",
+        lambda: dict(runtime_cfg or {}),
+    )
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_symbol_scan",
+        AsyncMock(return_value=dict(selection or {})),
+    )
+    if not runtime_cfg and not selection:
+        monkeypatch.setattr(ai_module, "_build_live_signal_watchlist_symbols", lambda **kwargs: [])
+
+
 def test_live_signals_works_with_symbol_field_candidates(monkeypatch):
     from web.api import ai_research as ai_module
 
@@ -682,6 +710,7 @@ def test_live_signals_works_with_symbol_field_candidates(monkeypatch):
 
     monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
     monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=200: [candidate])
+    _patch_live_signals_watchlist(monkeypatch, ai_module)
     monkeypatch.setattr(
         "core.data.data_storage.load_klines_from_parquet",
         AsyncMock(return_value=pd.DataFrame({"close": [1.0, 1.1, 1.2]})),
@@ -693,10 +722,15 @@ def test_live_signals_works_with_symbol_field_candidates(monkeypatch):
 
     result = asyncio.run(ai_module.get_live_signals(request))
     assert result["count"] == 1
-    item = result["items"][0]
+    assert result["candidate_count"] == 1
+    assert result["watchlist_count"] == 0
+    assert [section["id"] for section in result["sections"]] == ["candidates", "watchlist"]
+    item = result["candidate_items"][0]
     assert item["candidate_id"] == "cand-live-signals"
     assert item["strategy"] == "MAStrategy"
     assert item["symbol"] == "BTC/USDT"
+    assert item["timeframe"] == "1h"
+    assert item["source"] == "candidate"
     assert item["signal"]["direction"] == "LONG"
 
 
@@ -761,6 +795,7 @@ def test_live_signals_ml_model_unavailable(monkeypatch):
 
     monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
     monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=200: [])
+    _patch_live_signals_watchlist(monkeypatch, ai_module)
     monkeypatch.setattr("core.ai.signal_aggregator.signal_aggregator", stub_aggregator)
 
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
@@ -781,6 +816,7 @@ def test_live_signals_ml_model_loaded_true(monkeypatch):
 
     monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
     monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=200: [])
+    _patch_live_signals_watchlist(monkeypatch, ai_module)
     monkeypatch.setattr("core.ai.signal_aggregator.signal_aggregator", stub_aggregator)
 
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
@@ -800,6 +836,7 @@ def test_live_signals_ml_model_loaded_false(monkeypatch):
 
     monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
     monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=200: [])
+    _patch_live_signals_watchlist(monkeypatch, ai_module)
     monkeypatch.setattr("core.ai.signal_aggregator.signal_aggregator", stub_aggregator)
 
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
@@ -858,6 +895,7 @@ def test_live_signals_uses_candidate_exchange(monkeypatch):
 
     monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
     monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=200: [candidate])
+    _patch_live_signals_watchlist(monkeypatch, ai_module)
     monkeypatch.setattr("core.data.data_storage.load_klines_from_parquet", _fake_load)
     monkeypatch.setattr(
         "core.ai.signal_aggregator.signal_aggregator",
@@ -870,6 +908,205 @@ def test_live_signals_uses_candidate_exchange(monkeypatch):
 
 
 # ── Step 5 回归：注册状态机语义 ───────────────────────────────────────────────
+
+def test_live_signals_uses_candidate_timeframe(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    candidate = SimpleNamespace(
+        candidate_id="cand-4h",
+        strategy="MomentumStrategy",
+        symbol="BTC/USDT",
+        timeframe="4h",
+        status="paper_running",
+        metadata={},
+    )
+    captured_timeframes = []
+
+    class _Signal:
+        def to_dict(self):
+            return {"direction": "LONG", "confidence": 0.61, "components": {}}
+
+    async def _fake_load_signal_market_data(*, exchange, symbol, timeframe="1h", limit=120):
+        captured_timeframes.append(timeframe)
+        return pd.DataFrame({"close": [1.0, 1.1, 1.2]}), {
+            "market_data_exchange": exchange,
+            "market_data_symbol": symbol,
+            "market_data_timeframe": timeframe,
+            "market_data_rows": 3,
+            "market_data_last_bar_at": None,
+            "market_data_age_sec": None,
+            "market_data_stale": False,
+            "market_data_source": "unit_test",
+            "market_data_load_error": None,
+        }
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=200: [candidate])
+    _patch_live_signals_watchlist(monkeypatch, ai_module)
+    monkeypatch.setattr(ai_module, "_load_signal_market_data", _fake_load_signal_market_data)
+    monkeypatch.setattr(
+        "core.ai.signal_aggregator.signal_aggregator",
+        SimpleNamespace(aggregate=AsyncMock(return_value=_Signal())),
+    )
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    result = asyncio.run(ai_module.get_live_signals(request))
+    assert result["candidate_items"][0]["timeframe"] == "4h"
+    assert captured_timeframes == ["4h"]
+
+
+def test_live_signals_dedupes_duplicate_candidates(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    older = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    newer = datetime(2025, 1, 2, tzinfo=timezone.utc)
+    candidates = [
+        SimpleNamespace(
+            candidate_id="cand-paper-01",
+            strategy="Breakout",
+            symbol="ETH/USDT",
+            timeframe="30m",
+            params={"fast": 20, "slow": 50},
+            status="paper_running",
+            created_at=older,
+            metadata={},
+        ),
+        SimpleNamespace(
+            candidate_id="cand-live-02",
+            strategy="Breakout",
+            symbol="ETH/USDT",
+            timeframe="30m",
+            params={"slow": 50, "fast": 20},
+            status="live_running",
+            created_at=newer,
+            metadata={},
+        ),
+    ]
+
+    class _Signal:
+        def to_dict(self):
+            return {"direction": "SHORT", "confidence": 0.58, "components": {}}
+
+    load_calls = []
+
+    async def _fake_load_signal_market_data(*, exchange, symbol, timeframe="1h", limit=120):
+        load_calls.append((exchange, symbol, timeframe))
+        return pd.DataFrame({"close": [1.0, 0.9, 0.8]}), {
+            "market_data_exchange": exchange,
+            "market_data_symbol": symbol,
+            "market_data_timeframe": timeframe,
+            "market_data_rows": 3,
+            "market_data_last_bar_at": None,
+            "market_data_age_sec": None,
+            "market_data_stale": False,
+            "market_data_source": "unit_test",
+            "market_data_load_error": None,
+        }
+
+    aggregate = AsyncMock(return_value=_Signal())
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=200: candidates)
+    _patch_live_signals_watchlist(monkeypatch, ai_module)
+    monkeypatch.setattr(ai_module, "_load_signal_market_data", _fake_load_signal_market_data)
+    monkeypatch.setattr(
+        "core.ai.signal_aggregator.signal_aggregator",
+        SimpleNamespace(aggregate=aggregate),
+    )
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    result = asyncio.run(ai_module.get_live_signals(request))
+    assert result["candidate_count"] == 1
+    assert result["count"] == 1
+    item = result["candidate_items"][0]
+    assert item["candidate_id"] == "cand-live-02"
+    assert item["status"] == "live_running"
+    assert item["duplicate_count"] == 2
+    assert set(item["candidate_ids"]) == {"cand-paper-01", "cand-live-02"}
+    assert load_calls == [("binance", "ETH/USDT", "30m")]
+    assert aggregate.await_count == 1
+
+
+def test_live_signals_includes_watchlist_section(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    class _Signal:
+        def to_dict(self):
+            return {"direction": "FLAT", "confidence": 0.31, "components": {}}
+
+    captured_calls = []
+
+    async def _fake_load_signal_market_data(*, exchange, symbol, timeframe="1h", limit=120):
+        captured_calls.append((exchange, symbol, timeframe))
+        return pd.DataFrame({"close": [1.0, 1.0, 1.0]}), {
+            "market_data_exchange": exchange,
+            "market_data_symbol": symbol,
+            "market_data_timeframe": timeframe,
+            "market_data_rows": 3,
+            "market_data_last_bar_at": None,
+            "market_data_age_sec": None,
+            "market_data_stale": False,
+            "market_data_source": "unit_test",
+            "market_data_load_error": None,
+        }
+
+    selection = {
+        "selected_symbol": "ETH/USDT",
+        "top_candidates": [
+            {
+                "rank": 1,
+                "symbol": "ETH/USDT",
+                "research": {
+                    "candidate_id": "cand-eth-01",
+                    "strategy": "TrendHunter",
+                    "status": "live_candidate",
+                },
+            },
+            {
+                "rank": 2,
+                "symbol": "BTC/USDT",
+                "research": {
+                    "candidate_id": "cand-btc-02",
+                    "strategy": "TrendHunter",
+                    "status": "paper_running",
+                },
+            },
+        ],
+        "scan_config": {
+            "exchange": "okx",
+            "timeframe": "15m",
+            "universe_symbols": ["ETH/USDT", "BTC/USDT", "SOL/USDT"],
+        },
+    }
+    runtime_cfg = {
+        "strategy_name": "AI_AutonomousAgent",
+        "exchange": "binance",
+        "timeframe": "5m",
+        "universe_symbols": ["SOL/USDT"],
+    }
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=200: [])
+    _patch_live_signals_watchlist(monkeypatch, ai_module, runtime_cfg=runtime_cfg, selection=selection)
+    monkeypatch.setattr(ai_module, "_load_signal_market_data", _fake_load_signal_market_data)
+    monkeypatch.setattr(
+        "core.ai.signal_aggregator.signal_aggregator",
+        SimpleNamespace(aggregate=AsyncMock(return_value=_Signal())),
+    )
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    result = asyncio.run(ai_module.get_live_signals(request))
+    assert result["candidate_count"] == 0
+    assert result["watchlist_count"] == 3
+    assert [item["symbol"] for item in result["watchlist_items"]] == ["ETH/USDT", "BTC/USDT", "SOL/USDT"]
+    assert result["watchlist_items"][0]["selected"] is True
+    assert result["watchlist_items"][0]["status"] == "selected"
+    assert all(item["timeframe"] == "15m" for item in result["watchlist_items"])
+    assert captured_calls == [
+        ("okx", "ETH/USDT", "15m"),
+        ("okx", "BTC/USDT", "15m"),
+        ("okx", "SOL/USDT", "15m"),
+    ]
+
 
 def test_promote_candidate_paper_in_live_mode_raises_http_400(monkeypatch):
     """Human approve / quick-register must return 400 (not 500) when system is in live mode."""
@@ -911,6 +1148,53 @@ def test_promote_candidate_paper_in_live_mode_raises_http_400(monkeypatch):
     except HTTPException as exc:
         assert exc.status_code == 400
         assert "模式" in exc.detail or "paper" in exc.detail.lower()
+
+
+def test_register_ai_candidate_returns_http_400_when_live_mode_blocks_paper(monkeypatch):
+    from fastapi import HTTPException
+    from web.api import ai_research as ai_module
+
+    request = _build_ai_research_request()
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module.settings, "GOVERNANCE_ENABLED", False, raising=False)
+    monkeypatch.setattr(ai_module.execution_engine, "get_trading_mode", lambda: "live")
+
+    promote_mock = AsyncMock(return_value={})
+    monkeypatch.setattr(ai_module, "promote_existing_candidate", promote_mock)
+
+    payload = ai_module.AICandidateRegisterRequest(mode="paper", name=None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(ai_module.register_ai_candidate(request, "cand-live-register", payload))
+
+    assert exc_info.value.status_code == 400
+    assert "live" in str(exc_info.value.detail).lower()
+    assert "paper" in str(exc_info.value.detail).lower()
+    assert "live_candidate" in str(exc_info.value.detail)
+    assert promote_mock.await_count == 0
+
+
+def test_register_ai_candidate_maps_runtime_error_to_http_400(monkeypatch):
+    from fastapi import HTTPException
+    from web.api import ai_research as ai_module
+
+    request = _build_ai_research_request()
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module.settings, "GOVERNANCE_ENABLED", False, raising=False)
+    monkeypatch.setattr(ai_module.execution_engine, "get_trading_mode", lambda: "paper")
+
+    async def _mock_promote(*args, **kwargs):
+        raise RuntimeError("strategy start failed during paper promotion")
+
+    monkeypatch.setattr(ai_module, "promote_existing_candidate", _mock_promote)
+
+    payload = ai_module.AICandidateRegisterRequest(mode="paper", name=None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(ai_module.register_ai_candidate(request, "cand-runtime-error", payload))
+
+    assert exc_info.value.status_code == 400
+    assert "strategy start failed" in str(exc_info.value.detail)
 
 
 def test_step6_autonomous_agent_ui_present():
