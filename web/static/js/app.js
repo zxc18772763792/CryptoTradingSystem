@@ -16,7 +16,15 @@ const TRADING_STATS_TIMEOUT_MS=25000;
 const TRADING_ORDERS_TIMEOUT_MS=20000;
 const TRADING_OPEN_ORDERS_TIMEOUT_MS=25000;
 const TRADING_POSITIONS_TIMEOUT_MS=30000;
-if(typeof globalThis!=='undefined'&&typeof globalThis.sseError==='undefined')globalThis.sseError=null;
+if(typeof globalThis!=='undefined'&&typeof globalThis.sseError!=='function'){
+globalThis.sseError=function sseError(event){
+try{
+const message=event&&event.message?event.message:event;
+if(typeof console!=='undefined'&&typeof console.warn==='function')console.warn('sseError fallback invoked',message);
+}catch{}
+return false;
+};
+}
 
 const mapOrderStatus=s=>({open:'未成交',closed:'已成交',canceled:'已撤销',expired:'已过期',rejected:'已拒绝',queued:'待触发'}[s]||s);
 const mapSide=s=>s==='buy'?'买':s==='sell'?'卖':s;

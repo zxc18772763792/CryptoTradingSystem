@@ -89,6 +89,14 @@ class BackfillRecentRequest(BaseModel):
     force_reprocess_done: bool = False
 
 
+class BackfillHistoryRequest(BaseModel):
+    hours: int = Field(default=24 * 7, ge=1, le=24 * 90)
+    max_records: int = Field(default=320, ge=20, le=800)
+    query: Optional[str] = None
+    source_names: List[str] = Field(default_factory=list)
+    enqueue_llm: bool = False
+
+
 class RequeueLLMTasksRequest(BaseModel):
     statuses: List[str] = Field(default_factory=lambda: ["failed"])
     limit: int = Field(default=200, ge=1, le=2000)
@@ -560,6 +568,26 @@ def _is_relevant_news(item: Dict[str, Any], keywords: List[str], anchor_keywords
         if not _contains_anchor(text, anchor_keywords):
             return False
     return True
+
+
+def _normalize_source_names(values: Optional[List[str]]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = str(value or "").strip().lower()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _news_archive_contract() -> Dict[str, Any]:
+    return {
+        "stores_all_pulled_raw_news": True,
+        "guarantees_full_upstream_history": False,
+        "note": "新闻库会保留已经成功拉到并去重后的原始新闻；若某段历史当时未拉到，默认不会天然补全，需要额外执行历史补拉，且最终仍受上游源是否提供历史窗口限制。",
+    }
 
 
 def _raw_related_symbols(raw: Dict[str, Any], cfg: Dict[str, Any]) -> List[str]:
@@ -1976,6 +2004,81 @@ async def pull_and_store_news(cfg: Dict[str, Any], payload: PullNowRequest) -> D
         }
 
 
+async def backfill_and_store_news_history(cfg: Dict[str, Any], payload: BackfillHistoryRequest) -> Dict[str, Any]:
+    async with _NEWS_PIPELINE_LOCK:
+        collector = MultiSourceNewsCollector(cfg)
+        errors: List[str] = []
+        source_names = _normalize_source_names(payload.source_names)
+        requested_at = _now_utc()
+
+        try:
+            pulled_bundle = await asyncio.to_thread(
+                collector.pull_latest,
+                payload.query,
+                int(payload.max_records),
+                int(payload.hours) * 60,
+                source_names or None,
+            )
+            pulled_all = list(pulled_bundle.get("items") or [])
+            source_stats = dict(pulled_bundle.get("source_stats") or {})
+            errors.extend([str(x) for x in (pulled_bundle.get("errors") or []) if str(x).strip()])
+        except Exception as exc:
+            pulled_all = []
+            source_stats = {}
+            errors.append(f"history backfill pull failed: {exc}")
+
+        keywords = _topic_keywords(cfg)
+        anchor_keywords = _topic_anchor_keywords(cfg)
+        pulled = [item for item in pulled_all if _is_relevant_news(item, keywords, anchor_keywords)]
+        filtered_out_count = max(0, len(pulled_all) - len(pulled))
+        if not pulled and pulled_all:
+            pulled = pulled_all[: min(40, len(pulled_all))]
+            filtered_out_count = max(0, len(pulled_all) - len(pulled))
+
+        raw_stats = await news_db.save_news_raw(
+            pulled,
+            ingest_meta={
+                "mode": "history_backfill",
+                "requested_at": requested_at,
+                "lookback_hours": int(payload.hours),
+                "query": str(payload.query or "").strip() or None,
+                "source_names": source_names,
+            },
+        )
+        inserted_rows = list(raw_stats.get("inserted") or [])
+
+        queue_stats = {"queued_count": 0, "skipped_count": 0}
+        if inserted_rows and bool(payload.enqueue_llm):
+            queue_stats = await news_db.enqueue_llm_tasks(inserted_rows, min_importance=_llm_min_importance())
+
+        inserted_by_provider = _count_by_provider(inserted_rows)
+        topic_matched_by_provider = _count_by_provider(pulled)
+        for provider, stat in source_stats.items():
+            if not isinstance(stat, dict):
+                continue
+            stat["topic_matched_count"] = int(topic_matched_by_provider.get(provider, 0))
+            stat["raw_inserted_count"] = int(inserted_by_provider.get(provider, 0))
+
+        coverage = await news_db.summarize_news_raw_coverage()
+        return {
+            "mode": "history_backfill",
+            "requested_at": requested_at.isoformat(),
+            "lookback_hours": int(payload.hours),
+            "requested_sources": source_names,
+            "query": str(payload.query or "").strip() or None,
+            "pulled_count": int(raw_stats.get("pulled_count") or 0),
+            "pulled_all_count": len(pulled_all),
+            "deduped_count": int(raw_stats.get("deduped_count") or 0),
+            "raw_inserted_count": len(inserted_rows),
+            "filtered_out_count": int(filtered_out_count),
+            "queued_count": int(queue_stats.get("queued_count") or 0),
+            "source_stats": source_stats,
+            "coverage": coverage,
+            "archive_contract": _news_archive_contract(),
+            "errors": errors,
+        }
+
+
 @router.get("/health")
 async def health(request: Request) -> Dict[str, Any]:
     cache_key = "default"
@@ -2374,6 +2477,71 @@ async def worker_requeue_llm_tasks(
         "requeue": result,
         "llm_queue": await news_db.get_llm_queue_stats(),
         "source_states": await news_db.list_source_states(),
+    }
+
+
+@router.post("/ingest/backfill_history")
+async def ingest_backfill_history(
+    request: Request,
+    payload: BackfillHistoryRequest = Body(default_factory=BackfillHistoryRequest),
+) -> Dict[str, Any]:
+    cfg = _get_cfg(request)
+    result = await backfill_and_store_news_history(cfg, payload)
+    request.app.state.news_last_pull = {
+        **result,
+        "timestamp": _now_utc().isoformat(),
+        "source": "manual_history_backfill",
+    }
+    _invalidate_news_caches(clear_feed=True)
+    return request.app.state.news_last_pull
+
+
+@router.get("/raw/history")
+async def raw_history(
+    request: Request,
+    source: Optional[str] = Query(default=None),
+    since: Optional[str] = Query(default=None),
+    until: Optional[str] = Query(default=None),
+    q: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0, le=50000),
+) -> Dict[str, Any]:
+    del request
+    try:
+        since_ts = parse_any_datetime(since) if since else None
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid since value: {exc}") from exc
+    try:
+        until_ts = parse_any_datetime(until) if until else None
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid until value: {exc}") from exc
+
+    result = await news_db.list_news_raw_history(
+        since=since_ts,
+        until=until_ts,
+        source=source,
+        text_query=q,
+        limit=limit,
+        offset=offset,
+    )
+    return {
+        **result,
+        "source": str(source or "").strip().lower() or None,
+        "since": since_ts.isoformat() if since_ts else None,
+        "until": until_ts.isoformat() if until_ts else None,
+        "query": str(q or "").strip() or None,
+        "archive_contract": _news_archive_contract(),
+    }
+
+
+@router.get("/raw/coverage")
+async def raw_coverage(request: Request) -> Dict[str, Any]:
+    del request
+    coverage = await news_db.summarize_news_raw_coverage()
+    return {
+        **coverage,
+        "archive_contract": _news_archive_contract(),
+        "timestamp": _now_utc().isoformat(),
     }
 
 

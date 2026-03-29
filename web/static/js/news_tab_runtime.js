@@ -8,6 +8,7 @@
         latest: null,
         brief: null,
         summary: null,
+        coverage: null,
         summaryLoading: false,
         health: null,
         worker: null,
@@ -367,6 +368,26 @@
         }).join("");
     }
 
+    function renderArchiveCoverage() {
+        const box = el("news-archive-note");
+        if (!box) return;
+        const coverage = state.coverage || {};
+        const contract = coverage?.archive_contract || {};
+        const topSources = Array.isArray(coverage?.top_sources) ? coverage.top_sources.slice(0, 3) : [];
+        const topText = topSources.length
+            ? topSources.map((row) => `${plainText(row.source || "-")}:${Number(row.count || 0)}`).join(" | ")
+            : "--";
+        box.innerHTML = [
+            `<div class="list-item"><span>历史原文总量 / 活跃源(7d)</span><span>${Number(coverage?.total_count || 0)} / ${Number(coverage?.active_sources_7d || 0)}</span></div>`,
+            `<div class="list-item"><span>历史跨度 / 最近入库</span><span>${Number(coverage?.history_span_days || 0).toFixed(1)} 天 / ${fmtTs(coverage?.latest_fetched_at)}</span></div>`,
+            `<div class="list-item"><span>最早新闻 / 最新新闻</span><span>${fmtTs(coverage?.earliest_published_at)} / ${fmtTs(coverage?.latest_published_at)}</span></div>`,
+            `<div class="list-item"><span>近24h / 7d / 30d</span><span>${Number(coverage?.count_24h || 0)} / ${Number(coverage?.count_7d || 0)} / ${Number(coverage?.count_30d || 0)}</span></div>`,
+            `<div class="list-item"><span>最近写入模式样本</span><span>${esc(Object.entries(coverage?.recent_ingest_mode_counts || {}).map(([name, count]) => `${name}:${count}`).join(" | ") || "--")}</span></div>`,
+            `<div class="list-item"><span>样本Top源</span><span>${esc(topText)}</span></div>`,
+            `<div class="list-item"><span>归档说明</span><span>${esc(contract?.guarantees_full_upstream_history ? "已保证全历史" : "保存已拉到原文，可额外补拉历史")}</span></div>`,
+        ].join("");
+    }
+
     function renderSummary() {
         const latest = state.latest || {};
         const base = state.summary || state.brief || {};
@@ -508,6 +529,7 @@
         renderHealth();
         renderQueue();
         renderProviders();
+        renderArchiveCoverage();
         renderSummary();
         renderBuckets();
         renderFeed();
@@ -527,6 +549,10 @@
 
     async function loadSummary() {
         return request(`/summary?${params({ hours: getVal("news-hours", "24"), feed_limit: String(Math.min(80, Number(getVal("news-max-records", "120")) || 120)) }).toString()}`, { timeoutMs: 18000 });
+    }
+
+    async function loadCoverage() {
+        return request("/raw/coverage", { timeoutMs: 15000 });
     }
 
     function mergeSummaries(summaryFeed) {
@@ -603,16 +629,18 @@
         state.needsRefresh = false;
         state.refreshPromise = (async () => {
             try {
-                const [briefRes, latestRes, healthRes, workerRes] = await Promise.allSettled([
+                const [briefRes, latestRes, healthRes, workerRes, coverageRes] = await Promise.allSettled([
                     loadBrief(),
                     loadLatestFast(),
                     request("/health", { timeoutMs: 15000 }).catch(() => null),
                     request("/worker_status", { timeoutMs: 15000 }).catch(() => null),
+                    loadCoverage().catch(() => null),
                 ]);
                 if (briefRes.status === "fulfilled") state.brief = briefRes.value || state.brief || null;
                 if (latestRes.status === "fulfilled") state.latest = latestRes.value || state.latest || null;
                 if (healthRes.status === "fulfilled") state.health = healthRes.value || state.health || null;
                 if (workerRes.status === "fulfilled") state.worker = workerRes.value || state.worker || null;
+                if (coverageRes.status === "fulfilled") state.coverage = coverageRes.value || state.coverage || null;
                 if (!state.latest) {
                     const latestErr = latestRes.status === "rejected" ? latestRes.reason : new Error("新闻列表不可用");
                     throw latestErr;
@@ -710,6 +738,31 @@
         }
     }
 
+    async function backfillArchiveNow() {
+        if (state.pulling) return;
+        state.pulling = true;
+        try {
+            const result = await request("/ingest/backfill_history", {
+                method: "POST",
+                body: JSON.stringify({
+                    hours: Math.max(24, Math.min(24 * 30, Number(getVal("news-hours", "24")) || 24)),
+                    max_records: Math.max(120, Math.min(800, Number(getVal("news-max-records", "120")) || 120)),
+                    source_names: [],
+                    enqueue_llm: false,
+                }),
+                timeoutMs: 90000,
+            });
+            if (el("news-action-output")) el("news-action-output").textContent = JSON.stringify(result, null, 2);
+            notify(`历史原文补拉完成: 新增 ${Number(result?.raw_inserted_count || 0)} 条，当前总库 ${Number(result?.coverage?.total_count || 0)} 条`);
+            await refreshAll(true);
+        } catch (err) {
+            if (el("news-action-output")) el("news-action-output").textContent = `历史原文补拉失败: ${err.message}`;
+            notify(`历史原文补拉失败: ${err.message}`, true);
+        } finally {
+            state.pulling = false;
+        }
+    }
+
     async function backfillNow() {
         if (state.pulling) return;
         state.pulling = true;
@@ -790,6 +843,7 @@
     function bind() {
         el("news-refresh-btn")?.addEventListener("click", () => refreshAll(true));
         el("news-pull-btn")?.addEventListener("click", pullNow);
+        el("news-archive-backfill-btn")?.addEventListener("click", backfillArchiveNow);
         el("news-backfill-btn")?.addEventListener("click", backfillNow);
         el("news-requeue-btn")?.addEventListener("click", requeueFailedTasks);
         ["news-hours", "news-symbol", "news-max-records"].forEach((id) => el(id)?.addEventListener("change", () => refreshAll(true)));

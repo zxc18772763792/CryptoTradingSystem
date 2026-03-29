@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
-from sqlalchemy import and_, event, func, insert, or_, select, text
+from sqlalchemy import and_, case, event, func, insert, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -299,6 +299,40 @@ def _row_to_state_dict(row: NewsSourceState) -> Dict[str, Any]:
         "success_count": int(row.success_count or 0),
         "failure_count": int(row.failure_count or 0),
     }
+
+
+def _normalize_ingest_meta(ingest_meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(ingest_meta, dict):
+        return {}
+    normalized: Dict[str, Any] = {}
+    for key, value in ingest_meta.items():
+        text_key = str(key or "").strip()
+        if not text_key or value is None:
+            continue
+        if isinstance(value, datetime):
+            normalized[text_key] = _utc_iso(value)
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            normalized[text_key] = value
+            continue
+        if isinstance(value, list):
+            normalized[text_key] = [item for item in value if item is not None]
+            continue
+        if isinstance(value, dict):
+            normalized[text_key] = {str(k): v for k, v in value.items() if k is not None and v is not None}
+    return normalized
+
+
+def _apply_ingest_meta(payload: Dict[str, Any], ingest_meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    out = dict(payload or {})
+    meta = _normalize_ingest_meta(ingest_meta)
+    if not meta:
+        return out
+    existing = out.get("ingest") if isinstance(out.get("ingest"), dict) else {}
+    merged = dict(existing)
+    merged.update(meta)
+    out["ingest"] = merged
+    return out
 
 
 async def init_news_db() -> None:
@@ -835,7 +869,7 @@ async def auto_requeue_failed_llm_tasks(limit: int = 4, since: Optional[datetime
     }
 
 
-async def save_news_raw(news_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+async def save_news_raw(news_items: List[Dict[str, Any]], ingest_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     pulled_count = len(news_items)
     if pulled_count == 0:
         return {"inserted": [], "pulled_count": 0, "deduped_count": 0}
@@ -846,6 +880,7 @@ async def save_news_raw(news_items: List[Dict[str, Any]]) -> Dict[str, Any]:
     local_dup = 0
     for item in news_items:
         row = _normalize_news_item(item)
+        row["payload"] = _apply_ingest_meta(row.get("payload") if isinstance(row.get("payload"), dict) else {}, ingest_meta)
         if not row["url"]:
             local_dup += 1
             continue
@@ -1194,6 +1229,194 @@ async def list_news_raw(since: Optional[datetime] = None, limit: int = 200) -> L
         stmt = stmt.order_by(NewsRaw.published_at.desc()).limit(limit)
         rows = (await session.execute(stmt)).scalars().all()
     return [_row_to_news_dict(row) for row in rows]
+
+
+async def list_news_raw_history(
+    *,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    source: Optional[str] = None,
+    text_query: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    limit = max(1, min(int(limit or 100), 500))
+    offset = max(0, min(int(offset or 0), 50000))
+    since_ts = parse_any_datetime(since) if since else None
+    until_ts = parse_any_datetime(until) if until else None
+    source_name = str(source or "").strip().lower()
+    query_text = str(text_query or "").strip()
+
+    async with news_session_scope() as session:
+        base_stmt = select(NewsRaw)
+        count_stmt = select(func.count(NewsRaw.id))
+        if since_ts is not None:
+            base_stmt = base_stmt.where(NewsRaw.published_at >= since_ts)
+            count_stmt = count_stmt.where(NewsRaw.published_at >= since_ts)
+        if until_ts is not None:
+            base_stmt = base_stmt.where(NewsRaw.published_at <= until_ts)
+            count_stmt = count_stmt.where(NewsRaw.published_at <= until_ts)
+        if source_name:
+            base_stmt = base_stmt.where(func.lower(NewsRaw.source) == source_name)
+            count_stmt = count_stmt.where(func.lower(NewsRaw.source) == source_name)
+        if query_text:
+            pattern = f"%{query_text}%"
+            matcher = or_(
+                NewsRaw.title.ilike(pattern),
+                NewsRaw.content.ilike(pattern),
+                NewsRaw.url.ilike(pattern),
+            )
+            base_stmt = base_stmt.where(matcher)
+            count_stmt = count_stmt.where(matcher)
+
+        total_count = int((await session.execute(count_stmt)).scalar_one() or 0)
+        rows = (
+            await session.execute(
+                base_stmt.order_by(NewsRaw.published_at.desc(), NewsRaw.id.desc()).offset(offset).limit(limit)
+            )
+        ).scalars().all()
+
+    items = [_row_to_news_dict(row) for row in rows]
+    next_offset = offset + len(items)
+    return {
+        "items": items,
+        "count": len(items),
+        "total_count": total_count,
+        "offset": offset,
+        "limit": limit,
+        "has_more": next_offset < total_count,
+        "next_offset": next_offset if next_offset < total_count else None,
+    }
+
+
+async def summarize_news_raw_coverage(max_sources: int = 20) -> Dict[str, Any]:
+    source_limit = max(1, min(int(max_sources or 20), 100))
+    now = datetime.now(timezone.utc)
+    last_24h = now - timedelta(hours=24)
+    last_7d = now - timedelta(days=7)
+    last_30d = now - timedelta(days=30)
+    last_14d = now - timedelta(days=14)
+
+    async with news_session_scope() as session:
+        totals_row = (
+            await session.execute(
+                select(
+                    func.count(NewsRaw.id),
+                    func.min(NewsRaw.published_at),
+                    func.max(NewsRaw.published_at),
+                    func.min(NewsRaw.fetched_at),
+                    func.max(NewsRaw.fetched_at),
+                )
+            )
+        ).one()
+        total_count = int(totals_row[0] or 0)
+        earliest_published_at = totals_row[1]
+        latest_published_at = totals_row[2]
+        earliest_fetched_at = totals_row[3]
+        latest_fetched_at = totals_row[4]
+
+        recent_counts_rows = (
+            await session.execute(
+                select(
+                    func.sum(case((NewsRaw.published_at >= last_24h, 1), else_=0)),
+                    func.sum(case((NewsRaw.published_at >= last_7d, 1), else_=0)),
+                    func.sum(case((NewsRaw.published_at >= last_30d, 1), else_=0)),
+                    func.count(func.distinct(case((NewsRaw.published_at >= last_7d, NewsRaw.source), else_=None))),
+                )
+            )
+        ).one()
+
+        source_rows = (
+            await session.execute(
+                select(
+                    NewsRaw.source,
+                    func.count(NewsRaw.id),
+                    func.min(NewsRaw.published_at),
+                    func.max(NewsRaw.published_at),
+                    func.max(NewsRaw.fetched_at),
+                )
+                .group_by(NewsRaw.source)
+                .order_by(func.count(NewsRaw.id).desc(), NewsRaw.source.asc())
+                .limit(source_limit)
+            )
+        ).all()
+
+        daily_rows = (
+            await session.execute(
+                select(func.date(NewsRaw.published_at), func.count(NewsRaw.id))
+                .where(NewsRaw.published_at >= last_14d)
+                .group_by(func.date(NewsRaw.published_at))
+                .order_by(func.date(NewsRaw.published_at).asc())
+            )
+        ).all()
+
+        sample_rows = (
+            await session.execute(
+                select(NewsRaw.payload)
+                .order_by(NewsRaw.fetched_at.desc(), NewsRaw.id.desc())
+                .limit(1000)
+            )
+        ).all()
+
+    history_span_days = 0.0
+    if earliest_published_at and latest_published_at:
+        try:
+            history_span_days = round(
+                max(0.0, (parse_any_datetime(latest_published_at) - parse_any_datetime(earliest_published_at)).total_seconds())
+                / 86400.0,
+                2,
+            )
+        except Exception:
+            history_span_days = 0.0
+
+    ingest_mode_counts: Dict[str, int] = {}
+    provider_counts: Dict[str, int] = {}
+    for row in sample_rows:
+        payload = row[0] if row else {}
+        if not isinstance(payload, dict):
+            continue
+        ingest = payload.get("ingest") if isinstance(payload.get("ingest"), dict) else {}
+        mode = str(ingest.get("mode") or "incremental").strip().lower() or "incremental"
+        ingest_mode_counts[mode] = ingest_mode_counts.get(mode, 0) + 1
+        provider = str(payload.get("provider") or "").strip().lower()
+        if provider:
+            provider_counts[provider] = provider_counts.get(provider, 0) + 1
+
+    by_source = [
+        {
+            "source": str(source or ""),
+            "count": int(count or 0),
+            "earliest_published_at": _utc_iso(earliest),
+            "latest_published_at": _utc_iso(latest),
+            "latest_fetched_at": _utc_iso(last_fetch),
+        }
+        for source, count, earliest, latest, last_fetch in source_rows
+    ]
+    daily_counts = [
+        {
+            "day": str(day or ""),
+            "count": int(count or 0),
+        }
+        for day, count in daily_rows
+    ]
+
+    return {
+        "total_count": total_count,
+        "history_span_days": history_span_days,
+        "earliest_published_at": _utc_iso(earliest_published_at),
+        "latest_published_at": _utc_iso(latest_published_at),
+        "earliest_fetched_at": _utc_iso(earliest_fetched_at),
+        "latest_fetched_at": _utc_iso(latest_fetched_at),
+        "count_24h": int(recent_counts_rows[0] or 0) if recent_counts_rows else 0,
+        "count_7d": int(recent_counts_rows[1] or 0) if recent_counts_rows else 0,
+        "count_30d": int(recent_counts_rows[2] or 0) if recent_counts_rows else 0,
+        "active_sources_7d": int(recent_counts_rows[3] or 0) if recent_counts_rows else 0,
+        "top_sources": by_source,
+        "recent_daily_counts": daily_counts,
+        "sampled_provider_counts": dict(sorted(provider_counts.items(), key=lambda item: item[1], reverse=True)[:12]),
+        "recent_ingest_mode_counts": dict(sorted(ingest_mode_counts.items(), key=lambda item: item[1], reverse=True)),
+        "sample_size": len(sample_rows),
+    }
 
 
 async def list_events(symbol: Optional[str] = None, since: Optional[datetime] = None, limit: int = 200) -> List[Dict[str, Any]]:

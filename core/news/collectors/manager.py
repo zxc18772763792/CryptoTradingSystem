@@ -198,10 +198,16 @@ class MultiSourceNewsCollector:
             errors.append("all configured sources unavailable; fallback to jin10/rss/gdelt")
         return specs, errors
 
-    def pull_latest(self, query: Optional[str] = None, max_records: Optional[int] = None, since_minutes: int = 240) -> Dict[str, Any]:
+    def pull_latest(
+        self,
+        query: Optional[str] = None,
+        max_records: Optional[int] = None,
+        since_minutes: int = 240,
+        source_names: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         max_records = max(10, min(_safe_int(max_records, 120), 500))
         since_minutes = max(15, min(_safe_int(since_minutes, 240), 24 * 60))
-        specs, setup_errors = self._build_collectors()
+        specs, setup_errors = self._build_collectors(source_names=source_names)
         source_stats: Dict[str, Dict[str, Any]] = {}
         errors: List[str] = list(setup_errors)
         all_items: List[Dict[str, Any]] = []

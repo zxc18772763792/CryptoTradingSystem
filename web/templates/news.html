@@ -57,6 +57,7 @@
                         </div>
                     </div>
                     <div id="news-summary-note" class="list" style="margin-top: 8px; max-height: 130px;">统计说明加载中...</div>
+                    <div id="news-archive-note" class="list" style="margin-top: 8px; max-height: 130px;">历史库覆盖加载中...</div>
                     <div id="news-source-stats" class="list" style="margin-top: 8px; max-height: 180px;">来源统计加载中...</div>
                 </div>
 
@@ -96,6 +97,7 @@
                     <div class="inline-actions">
                         <button class="btn btn-primary btn-sm" id="news-refresh-btn">刷新列表</button>
                         <button class="btn btn-primary btn-sm" id="news-pull-btn">立即拉取新闻</button>
+                        <button class="btn btn-sm" id="news-archive-backfill-btn">补拉历史原文</button>
                         <button class="btn btn-sm" id="news-backfill-btn">回补历史结构化</button>
                         <button class="btn btn-sm" id="news-requeue-btn">补跑失败历史</button>
                     </div>
@@ -162,6 +164,6 @@
     </div>
 
     <div id="notification" class="notification"></div>
-    <script charset="utf-8" src="/static/js/news_tab_runtime.js?v=11"></script>
+    <script charset="utf-8" src="/static/js/news_tab_runtime.js?v=12"></script>
 </body>
 </html>

@@ -5,6 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
     <link rel="stylesheet" href="/static/css/style.css?v=82">
+    <script>
+        (function (root) {
+            if (!root) return;
+            if (typeof root.sseError === "function") return;
+            root.sseError = function sseError(event) {
+                try {
+                    const message = event && event.message ? event.message : event;
+                    if (typeof console !== "undefined" && typeof console.warn === "function") {
+                        console.warn("sseError fallback invoked", message);
+                    }
+                } catch (_) {}
+                return false;
+            };
+        })(typeof globalThis !== "undefined" ? globalThis : window);
+    </script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
@@ -1399,6 +1414,7 @@
                             </div>
                         </div>
                         <div id="news-summary-note" class="list news-scroll news-scroll-compact">统计说明加载中...</div>
+                        <div id="news-archive-note" class="list news-scroll news-scroll-compact">历史库覆盖加载中...</div>
                         <div id="news-source-stats" class="list news-scroll news-scroll-fill">来源统计加载中...</div>
                     </div>
 
@@ -1438,6 +1454,7 @@
                         <div class="inline-actions">
                             <button class="btn btn-primary btn-sm" id="news-refresh-btn">刷新列表</button>
                             <button class="btn btn-primary btn-sm" id="news-pull-btn">立即拉取新闻</button>
+                            <button class="btn btn-sm" id="news-archive-backfill-btn">补拉历史原文</button>
                         </div>
                         <pre id="news-action-output" class="output-box">等待操作...</pre>
                     </div>
@@ -2506,13 +2523,13 @@
 
     <div id="notification" class="notification"></div>
 
-    <script charset="utf-8" src="/static/js/app.js?v=120"></script>
+    <script charset="utf-8" src="/static/js/app.js?v=121"></script>
     <script charset="utf-8" src="/static/js/research_workbench.js?v=7"></script>
     <script charset="utf-8" src="/static/js/ai_research.js?v=34"></script>
     <script charset="utf-8" src="/static/js/ai_research_diagnostics.js?v=2"></script>
     <script charset="utf-8" src="/static/js/ai_research_runtime.js?v=7"></script>
     <script charset="utf-8" src="/static/js/ai_research_agent.js?v=6"></script>
-    <script charset="utf-8" src="/static/js/news_tab_runtime.js?v=11"></script>
+    <script charset="utf-8" src="/static/js/news_tab_runtime.js?v=12"></script>
     <script charset="utf-8" src="/static/js/dashboard_unstructured_news.js?v=13"></script>
 </body>
 </html>

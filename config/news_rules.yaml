@@ -3,8 +3,8 @@
   default_impact_score: 0.35
   default_half_life_min: 240
   gdelt_timeout_sec: 30
-  gdelt_max_records: 120
-  gdelt_query: "(bitcoin OR ethereum OR binance OR crypto OR ETF OR SEC OR hack OR liquidation OR fed)"
+  gdelt_max_records: 160
+  gdelt_query: "(bitcoin OR ethereum OR solana OR xrp OR stablecoin OR binance OR crypto OR ETF OR SEC OR hack OR liquidation OR fed OR fomc OR treasury OR staking OR onchain)"
   news_sources:
     [
       chaincatcher_flash,
@@ -26,14 +26,14 @@
   chaincatcher_flash_max_records: 80
   chaincatcher_flash_min_interval_sec: 15
   okx_announcements_timeout_sec: 20
-  okx_announcements_max_records: 60
+  okx_announcements_max_records: 80
   bybit_announcements_timeout_sec: 20
-  bybit_announcements_max_records: 60
+  bybit_announcements_max_records: 80
   binance_announcements_timeout_sec: 20
-  binance_announcements_max_records: 80
+  binance_announcements_max_records: 120
   binance_announcements_categories: [listing, delisting, api, maintenance]
   cryptocompare_news_timeout_sec: 20
-  cryptocompare_news_max_records: 80
+  cryptocompare_news_max_records: 120
   jin10_timeout_sec: 18
   jin10_max_records: 120
   jin10_endpoint: "https://flash-api.jin10.com/get_flash_list"
@@ -41,7 +41,7 @@
   jin10_version: "1.0.0"
   jin10_referer: "https://www.jin10.com/"
   rss_timeout_sec: 20
-  rss_max_records: 120
+  rss_max_records: 180
   rss_query_template: "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
   rss_feeds:
     - name: coindesk
@@ -54,14 +54,24 @@
       url: "https://news.google.com/rss/search?q=bitcoin%20OR%20ethereum%20OR%20crypto%20OR%20etf&hl=en-US&gl=US&ceid=US:en"
     - name: google_macro
       url: "https://news.google.com/rss/search?q=fed%20OR%20interest%20rate%20OR%20inflation%20crypto&hl=en-US&gl=US&ceid=US:en"
+    - name: google_regulation
+      url: "https://news.google.com/rss/search?q=crypto%20regulation%20OR%20SEC%20OR%20stablecoin%20bill%20OR%20ETF&hl=en-US&gl=US&ceid=US:en"
+    - name: google_solana
+      url: "https://news.google.com/rss/search?q=solana%20OR%20xrp%20OR%20altcoin%20crypto&hl=en-US&gl=US&ceid=US:en"
+    - name: google_stablecoin
+      url: "https://news.google.com/rss/search?q=stablecoin%20OR%20tether%20OR%20usdc%20crypto&hl=en-US&gl=US&ceid=US:en"
+    - name: google_exchange
+      url: "https://news.google.com/rss/search?q=binance%20OR%20coinbase%20OR%20okx%20OR%20bybit%20crypto&hl=en-US&gl=US&ceid=US:en"
+    - name: google_onchain
+      url: "https://news.google.com/rss/search?q=onchain%20OR%20defi%20OR%20staking%20crypto&hl=en-US&gl=US&ceid=US:en"
   cryptopanic_timeout_sec: 30
-  cryptopanic_max_records: 80
+  cryptopanic_max_records: 120
   cryptopanic_filter: hot
-  cryptopanic_currencies: "BTC,ETH,BNB,SOL,XRP,ADA,DOGE"
+  cryptopanic_currencies: "BTC,ETH,BNB,SOL,XRP,ADA,DOGE,TRX,LTC,LINK,AVAX,TON,SUI,ARB,OP,APT,SEI,NEAR"
   newsapi_timeout_sec: 30
-  newsapi_max_records: 80
+  newsapi_max_records: 100
   newsapi_language: en
-  newsapi_query: "(bitcoin OR ethereum OR binance OR crypto OR ETF OR SEC OR hack OR liquidation OR fed)"
+  newsapi_query: "(bitcoin OR ethereum OR solana OR xrp OR stablecoin OR binance OR crypto OR ETF OR SEC OR hack OR liquidation OR fed OR fomc OR treasury OR staking OR onchain)"
 
 llm:
   provider: openai
