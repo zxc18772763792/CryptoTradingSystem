@@ -8362,3 +8362,186 @@ input[type="radio"] {
         padding: 12px 13px !important;
     }
 }
+
+/* ===== Final AI workspace polish ===== */
+#ai-research .ai-top-intro-subtitle,
+#ai-agent .ai-top-intro-subtitle {
+    margin: -2px 0 2px;
+    font-size: 12px;
+    line-height: 1.7;
+    color: #96b1d2;
+    max-width: 56ch;
+}
+
+#ai-research .ai-top-intro-card-research .ai-top-intro-stack {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+#ai-research .ai-top-intro-card-research .ai-top-intro-mini-grid {
+    grid-column: 1 / -1;
+}
+
+#ai-research .ai-review-scope {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+#ai-research .ai-review-scope-item {
+    min-height: 100%;
+    display: flex;
+    align-items: flex-start;
+}
+
+#ai-research #ai-research-live-signals-panel,
+#ai-agent #ai-agent-live-signals-panel {
+    display: grid;
+    gap: 8px;
+    max-height: clamp(200px, 32vh, 360px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 2px;
+    scrollbar-gutter: stable;
+}
+
+#ai-research #ai-research-live-signals-panel > *,
+#ai-agent #ai-agent-live-signals-panel > * {
+    min-width: 0;
+}
+
+#ai-research .ai-signal-card #signal-panel-body {
+    display: grid;
+    gap: 8px;
+}
+
+#ai-research .ai-context-mini-head.ai-sidebar-title {
+    margin-bottom: 0;
+}
+
+#ai-research .ai-context-inline-actions {
+    margin-top: 0;
+}
+
+#ai-research .ai-context-status {
+    margin-top: 0;
+}
+
+#ai-agent .ai-auto-trade-rail-step {
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1.45;
+}
+
+#ai-agent .ai-agent-runtime-card-desc,
+#ai-research .ai-agent-runtime-card-desc {
+    line-height: 1.7;
+}
+
+#research .research-quick-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+#research .research-action-group {
+    display: grid;
+    align-content: start;
+    gap: 10px;
+    min-height: 100%;
+    padding: 16px !important;
+    border-radius: 16px !important;
+    background:
+        radial-gradient(circle at top right, rgba(58, 166, 255, 0.08), transparent 34%),
+        linear-gradient(180deg, rgba(13, 27, 43, 0.92), rgba(9, 18, 29, 0.94));
+}
+
+#research .research-action-group-title {
+    margin-bottom: 0 !important;
+}
+
+#research .research-action-group-desc {
+    font-size: 12px;
+    line-height: 1.65;
+    color: #98b0cc;
+}
+
+#research .research-action-group .inline-actions,
+#research .research-module-btns {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    align-items: stretch;
+}
+
+#research .research-module-btns {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+#research .research-action-group .btn,
+#research .research-module-btns .btn {
+    width: 100%;
+    min-height: 38px;
+    justify-content: center;
+}
+
+#research .research-filter-bar {
+    align-items: end;
+}
+
+#research .research-filter-bar label {
+    margin-bottom: 0;
+}
+
+#research .research-filter-bar .form-group {
+    display: grid;
+    gap: 6px;
+    align-content: start;
+}
+
+#research .research-lab-header {
+    align-items: flex-end;
+}
+
+#research .research-lab-header .inline-actions {
+    justify-content: flex-end;
+}
+
+#research #factor-library-summary {
+    margin-top: 2px;
+}
+
+@media (max-width: 1280px) {
+    #ai-research .ai-top-intro-card-research .ai-top-intro-stack,
+    #ai-research .ai-review-scope,
+    #research .research-quick-actions {
+        grid-template-columns: 1fr;
+    }
+
+    #research .research-module-btns {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 900px) {
+    #ai-research #ai-research-live-signals-panel,
+    #ai-agent #ai-agent-live-signals-panel {
+        max-height: none;
+        overflow: visible;
+        padding-right: 0;
+    }
+
+    #research .research-action-group .inline-actions,
+    #research .research-module-btns {
+        grid-template-columns: 1fr;
+    }
+
+    #research .research-lab-header {
+        align-items: flex-start;
+    }
+
+    #research .research-lab-header .inline-actions {
+        justify-content: flex-start;
+    }
+}
