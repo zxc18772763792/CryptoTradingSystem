@@ -12,7 +12,7 @@ def test_backtest_pairs_dual_leg_ui_hooks_exist():
     template = _read("web/templates/index.html")
     app_js = _read("web/static/js/app.js")
 
-    assert '/static/js/app.js?v=119' in template
+    assert '/static/js/app.js?v=120' in template
     assert "pairs_spread_dual_leg" in app_js
     assert "pair_symbol" in app_js
     assert "开仓点" in app_js

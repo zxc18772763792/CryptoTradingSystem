@@ -136,6 +136,10 @@ class AIRetireRequest(BaseModel):
     notes: str = ""
 
 
+class AICandidateActivateLiveRequest(BaseModel):
+    notes: str = ""
+
+
 class AIFundingWarmRequest(BaseModel):
     exchange: str = "binance"
     symbol: str = "BTC/USDT"
@@ -292,6 +296,267 @@ def _candidate_exchange(candidate: Any, default: str = "binance") -> str:
     if isinstance(meta_exchange, str) and meta_exchange.strip():
         return _normalize_exchange(meta_exchange)
     return default
+
+
+def _candidate_registered_strategy_name(candidate: Any) -> Optional[str]:
+    meta = getattr(candidate, "metadata", None) or {}
+    runtime_meta = meta.get("promotion_runtime") if isinstance(meta, dict) else None
+    if not isinstance(runtime_meta, dict):
+        runtime_meta = {}
+    for value in (
+        meta.get("registered_strategy_name") if isinstance(meta, dict) else None,
+        runtime_meta.get("registered_strategy_name"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _safe_strategy_name_fragment(value: str, default: str = "strategy") -> str:
+    text = "".join(
+        ch if (str(ch).isascii() and str(ch).isalnum()) else "_"
+        for ch in str(value or "").strip()
+    )
+    while "__" in text:
+        text = text.replace("__", "_")
+    text = text.strip("_")
+    return text or default
+
+
+def _build_candidate_strategy_name(candidate: Any) -> str:
+    meta = getattr(candidate, "metadata", None) or {}
+    custom_name = meta.get("display_name") if isinstance(meta, dict) else None
+    symbol = _candidate_primary_symbol(candidate).replace("/", "")
+    timeframe = str(getattr(candidate, "timeframe", "") or "1h").strip() or "1h"
+    hint = (
+        str(custom_name).strip()
+        if isinstance(custom_name, str) and custom_name.strip()
+        else f"{_candidate_strategy_name(candidate)}_{symbol}_{timeframe}"
+    )
+    safe_hint = _safe_strategy_name_fragment(hint, default="ai_strategy")
+    candidate_suffix = _safe_strategy_name_fragment(str(getattr(candidate, "candidate_id", "") or "")[:6], default="cand")
+    return f"{safe_hint}_{int(datetime.now(timezone.utc).timestamp())}_{candidate_suffix}"
+
+
+async def _ensure_candidate_runtime_strategy(
+    app: Any,
+    candidate: Any,
+    *,
+    target_mode: str = "live",
+) -> Dict[str, Any]:
+    from config.strategy_registry import get_strategy_defaults  # noqa: PLC0415
+    from core.deployment.promotion_engine import (  # noqa: PLC0415
+        _resolve_observed_trades_per_day,
+        _resolve_strategy_class,
+    )
+    from core.strategies import strategy_manager  # noqa: PLC0415
+    from core.strategies.persistence import persist_strategy_snapshot  # noqa: PLC0415
+    from core.strategies.runtime_policy import build_runtime_limit_policy  # noqa: PLC0415
+
+    resolved_mode = str(target_mode or "live").strip().lower() or "live"
+    if resolved_mode not in {"live", "paper"}:
+        raise RuntimeError(f"unsupported runtime mode: {resolved_mode}")
+
+    strategy_name = _candidate_registered_strategy_name(candidate) or _build_candidate_strategy_name(candidate)
+    strategy_class = _resolve_strategy_class(_candidate_strategy_name(candidate))
+    if strategy_class is None:
+        raise RuntimeError(f"unknown strategy class for candidate: {_candidate_strategy_name(candidate)}")
+
+    params = dict(get_strategy_defaults(_candidate_strategy_name(candidate)))
+    params.update(dict(getattr(candidate, "params", {}) or {}))
+    params.setdefault("exchange", _candidate_exchange(candidate))
+    params.setdefault("account_id", f"ai_{_safe_strategy_name_fragment(strategy_name.lower(), default='strategy')}")
+
+    promotion = getattr(candidate, "promotion", None)
+    constraints = dict(getattr(promotion, "constraints", {}) or {})
+    default_allocation = max(
+        0.0,
+        min(float(getattr(settings, "DEFAULT_STRATEGY_ALLOCATION", 0.15) or 0.15), 1.0),
+    )
+    allocation = constraints.get("allocation_cap")
+    if allocation is None:
+        allocation = (getattr(candidate, "metadata", {}) or {}).get("allocation_pct")
+    allocation = max(0.0, min(float(allocation or default_allocation), 1.0))
+
+    runtime_override = constraints.get("runtime_limit_minutes")
+    if runtime_override is None:
+        runtime_override = ((getattr(candidate, "metadata", {}) or {}).get("promotion_runtime") or {}).get("runtime_limit_minutes")
+    runtime_limit_minutes: Optional[int]
+    runtime_policy: Dict[str, Any]
+    if runtime_override is not None:
+        runtime_limit_minutes = max(0, int(float(runtime_override))) or None
+        runtime_policy = {
+            "runtime_limit_minutes": runtime_limit_minutes,
+            "source": "promotion_constraint",
+        }
+    else:
+        observed_tpd = _resolve_observed_trades_per_day(app, candidate)
+        runtime_policy = build_runtime_limit_policy(
+            timeframe=str(getattr(candidate, "timeframe", "") or "1h"),
+            params=params,
+            observed_trades_per_day=observed_tpd,
+        )
+        runtime_limit_minutes = int(runtime_policy["runtime_limit_minutes"])
+
+    strategy = strategy_manager.get_strategy(strategy_name)
+    if strategy is None:
+        ok = strategy_manager.register_strategy(
+            name=strategy_name,
+            strategy_class=strategy_class,
+            params=params,
+            symbols=[_candidate_primary_symbol(candidate)],
+            timeframe=str(getattr(candidate, "timeframe", "") or "1h"),
+            allocation=allocation,
+            runtime_limit_minutes=runtime_limit_minutes,
+        )
+        if not ok:
+            raise RuntimeError("strategy registration failed during live activation")
+    else:
+        strategy_manager.update_strategy_params(strategy_name, params)
+        strategy_manager.update_strategy_allocation(strategy_name, allocation)
+        strategy_manager.update_strategy_runtime_config(
+            strategy_name,
+            timeframe=str(getattr(candidate, "timeframe", "") or "1h"),
+            symbols=[_candidate_primary_symbol(candidate)],
+            runtime_limit_minutes=runtime_limit_minutes,
+        )
+
+    started = await strategy_manager.start_strategy(strategy_name)
+    if not started:
+        raise RuntimeError("strategy start failed during live activation")
+    await persist_strategy_snapshot(strategy_name, state_override="running")
+
+    meta = getattr(candidate, "metadata", None)
+    if not isinstance(meta, dict):
+        meta = {}
+        candidate.metadata = meta
+    meta["registered_strategy_name"] = strategy_name
+    meta["promotion_runtime"] = {
+        "mode": resolved_mode,
+        "registered_strategy_name": strategy_name,
+        "started": True,
+        "runtime_limit_minutes": runtime_limit_minutes,
+        "runtime_policy": runtime_policy,
+        "promoted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return {
+        "registered_strategy_name": strategy_name,
+        "allocation": allocation,
+        "runtime_limit_minutes": runtime_limit_minutes,
+        "runtime_policy": runtime_policy,
+    }
+
+
+def _signal_timeframe_seconds(timeframe: str) -> int:
+    text = str(timeframe or "1h").strip()
+    if not text:
+        return 3600
+    try:
+        unit = text[-1]
+        value = int(text[:-1])
+    except Exception:
+        return 3600
+    if unit == "s":
+        return max(1, value)
+    if unit == "m":
+        return max(60, value * 60)
+    if unit == "h":
+        return max(3600, value * 3600)
+    if unit == "d":
+        return max(86400, value * 86400)
+    return 3600
+
+
+async def _load_signal_market_data(
+    *,
+    exchange: str,
+    symbol: str,
+    timeframe: str = "1h",
+    limit: int = 120,
+) -> tuple[pd.DataFrame, Dict[str, Any]]:
+    """Load the best available market data for signal generation.
+
+    Prefer the strategy manager loader because it can reuse shared cache and
+    opportunistically refresh from the exchange when local parquet is stale.
+    """
+    from core.data import data_storage
+
+    resolved_exchange = _normalize_exchange(exchange or "binance")
+    resolved_symbol = _normalize_symbol(symbol or "BTC/USDT")
+    resolved_timeframe = str(timeframe or "1h").strip() or "1h"
+    source = "empty"
+    load_error: Optional[str] = None
+    df = pd.DataFrame()
+
+    try:
+        from core.strategies import strategy_manager as sm  # noqa: PLC0415
+
+        df = await sm._load_market_data(
+            resolved_exchange,
+            resolved_symbol,
+            resolved_timeframe,
+            limit=max(60, int(limit or 120)),
+        )
+        source = "strategy_manager"
+    except Exception as exc:
+        load_error = str(exc)
+        logger.debug(
+            f"signal market-data load via strategy_manager failed for "
+            f"{resolved_exchange} {resolved_symbol} {resolved_timeframe}: {exc}"
+        )
+
+    if df is None or df.empty:
+        try:
+            df = await data_storage.load_klines_from_parquet(
+                exchange=resolved_exchange,
+                symbol=resolved_symbol,
+                timeframe=resolved_timeframe,
+            )
+            source = "parquet"
+        except Exception as exc:
+            if not load_error:
+                load_error = str(exc)
+            logger.debug(
+                f"signal market-data parquet fallback failed for "
+                f"{resolved_exchange} {resolved_symbol} {resolved_timeframe}: {exc}"
+            )
+            df = pd.DataFrame()
+
+    rows = int(len(df)) if df is not None else 0
+    last_bar_at: Optional[str] = None
+    age_sec: Optional[float] = None
+    stale = rows <= 0
+    if rows > 0:
+        try:
+            last_ts = pd.Timestamp(df.index[-1])
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.tz_localize(timezone.utc)
+            else:
+                last_ts = last_ts.tz_convert(timezone.utc)
+            last_bar_at = last_ts.isoformat()
+            age_sec = max(
+                0.0,
+                (pd.Timestamp.now(tz=timezone.utc) - last_ts).total_seconds(),
+            )
+            stale = age_sec > max(3 * 3600, _signal_timeframe_seconds(resolved_timeframe) * 6)
+        except Exception as exc:
+            stale = True
+            if not load_error:
+                load_error = f"freshness_check_failed: {exc}"
+
+    meta = {
+        "market_data_exchange": resolved_exchange,
+        "market_data_symbol": resolved_symbol,
+        "market_data_timeframe": resolved_timeframe,
+        "market_data_source": source,
+        "market_data_rows": rows,
+        "market_data_last_bar_at": last_bar_at,
+        "market_data_age_sec": round(float(age_sec), 3) if age_sec is not None else None,
+        "market_data_stale": bool(stale),
+        "market_data_load_error": load_error,
+    }
+    return (df.copy() if rows > 0 else pd.DataFrame()), meta
 
 
 def _serialize_funding_cache(provider: FundingRateProvider, *, exchange: str, symbol: str, series) -> Dict[str, Any]:
@@ -1240,7 +1505,7 @@ async def retire_ai_proposal(request: Request, proposal_id: str, payload: AIReti
     ensure_ai_research_runtime_state(request.app)
     proposal = get_proposal(request.app, proposal_id)
     proposal_status = str(proposal.status or "")
-    if proposal_status in {"research_queued", "research_running", "paper_running"}:
+    if proposal_status in {"research_queued", "research_running", "paper_running", "live_running"}:
         raise HTTPException(status_code=409, detail=f"proposal in state {proposal_status}, retire is not allowed")
 
     retired_candidates = 0
@@ -1249,8 +1514,8 @@ async def retire_ai_proposal(request: Request, proposal_id: str, payload: AIReti
         if str(cand.proposal_id) != str(proposal_id):
             continue
         status = str(cand.status or "")
-        if status == "paper_running":
-            raise HTTPException(status_code=409, detail="paper_running candidate must be stopped before retire")
+        if status in {"paper_running", "live_running"}:
+            raise HTTPException(status_code=409, detail=f"{status} candidate must be stopped before retire")
         if status != "retired":
             transition_candidate(
                 cand,
@@ -1362,23 +1627,94 @@ async def oneclick_ai_research_deploy(request: Request, payload: AIOneClickResea
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    governance_enabled = bool(getattr(settings, "GOVERNANCE_ENABLED", True))
     candidate = run_result.get("candidate")
     if candidate is None:
-        status = str(getattr(run_result.get("proposal"), "status", "unknown"))
-        raise HTTPException(
-            status_code=409,
-            detail=f"research completed without deployable candidate (proposal_status={status})",
-        )
+        completed_proposal = run_result.get("proposal")
+        status = str(getattr(completed_proposal, "status", "unknown"))
+        reason_items = []
+        validation_summary = getattr(completed_proposal, "validation_summary", None)
+        if validation_summary is not None:
+            reason_items.extend(list(getattr(validation_summary, "reasons", []) or []))
+        proposal_reason = str(reason_items[0] or "").strip() if reason_items else None
+        return {
+            "proposal_id": str(proposal.proposal_id),
+            "candidate_id": None,
+            "governance_enabled": governance_enabled,
+            "target": None,
+            "deploy": {
+                "performed": False,
+                "action": None,
+                "result": None,
+                "runtime_status": None,
+            },
+            "generated": {
+                "proposal": _serialize_proposal(request, proposal),
+                "planner_notes": generated.get("planner_notes", []),
+                "filtered_templates": generated.get("filtered_templates", []),
+            },
+            "run": {
+                "proposal": _serialize_proposal(request, run_result["proposal"]),
+                "experiment": run_result["experiment"].model_dump(mode="json"),
+                "run": run_result["run"].model_dump(mode="json"),
+                "candidate": None,
+                "promotion": None,
+            },
+            "outcome": "completed_without_candidate",
+            "proposal_status": status,
+            "proposal_reason": proposal_reason,
+            "runtime_status": status,
+            "registered_strategy_name": None,
+        }
 
     raw_target = _normalize_deploy_target(payload.target)
-    resolved_target = raw_target
+    resolved_target: Optional[str] = raw_target
+    promotion_decision = str(getattr(run_result.get("promotion"), "decision", "") or "").strip().lower()
     if raw_target == "auto":
-        decision = str(getattr(run_result.get("promotion"), "decision", "") or "").strip().lower()
-        if decision == "shadow":
-            decision = "paper"
-        resolved_target = decision if decision in {"paper", "live_candidate"} else "paper"
+        if promotion_decision == "shadow":
+            promotion_decision = "paper"
+        resolved_target = (
+            promotion_decision if promotion_decision in {"paper", "live_candidate"} else None
+        )
 
-    governance_enabled = bool(getattr(settings, "GOVERNANCE_ENABLED", True))
+    if resolved_target is None:
+        completed_proposal = run_result.get("proposal")
+        proposal_reason = None
+        validation_summary = getattr(candidate, "validation_summary", None)
+        if validation_summary is not None:
+            proposal_reason = str((list(getattr(validation_summary, "reasons", []) or []) or [""])[0] or "").strip() or None
+        if not proposal_reason and completed_proposal is not None:
+            proposal_reason = str((getattr(completed_proposal, "metadata", {}) or {}).get("last_research_error") or "").strip() or None
+        return {
+            "proposal_id": str(proposal.proposal_id),
+            "candidate_id": str(getattr(candidate, "candidate_id", "") or ""),
+            "governance_enabled": governance_enabled,
+            "target": None,
+            "deploy": {
+                "performed": False,
+                "action": None,
+                "result": None,
+                "runtime_status": None,
+            },
+            "generated": {
+                "proposal": _serialize_proposal(request, proposal),
+                "planner_notes": generated.get("planner_notes", []),
+                "filtered_templates": generated.get("filtered_templates", []),
+            },
+            "run": {
+                "proposal": _serialize_proposal(request, run_result["proposal"]),
+                "experiment": run_result["experiment"].model_dump(mode="json"),
+                "run": run_result["run"].model_dump(mode="json"),
+                "candidate": candidate.model_dump(mode="json"),
+                "promotion": run_result["promotion"].model_dump(mode="json") if run_result.get("promotion") else None,
+            },
+            "outcome": "completed_without_deployable_candidate",
+            "proposal_status": str(getattr(completed_proposal, "status", "unknown")),
+            "proposal_reason": proposal_reason,
+            "runtime_status": str(getattr(completed_proposal, "status", "unknown")),
+            "registered_strategy_name": None,
+        }
+
     deploy_action: Optional[str] = None
     deploy_result: Optional[Dict[str, Any]] = None
 
@@ -1891,6 +2227,144 @@ async def human_reject_candidate(request: Request, candidate_id: str, payload: A
     }
 
 
+@router.post("/candidates/{candidate_id}/activate-live")
+async def activate_ai_candidate_live(
+    request: Request,
+    candidate_id: str,
+    payload: AICandidateActivateLiveRequest = AICandidateActivateLiveRequest(),
+):
+    ensure_ai_research_runtime_state(request.app)
+    cand = get_candidate(request.app, candidate_id)
+    proposal = get_proposal(request.app, cand.proposal_id)
+    cand_meta = cand.metadata if isinstance(getattr(cand, "metadata", None), dict) else {}
+    if not isinstance(getattr(cand, "metadata", None), dict):
+        cand.metadata = cand_meta
+    proposal_meta = proposal.metadata if isinstance(getattr(proposal, "metadata", None), dict) else {}
+    if not isinstance(getattr(proposal, "metadata", None), dict):
+        proposal.metadata = proposal_meta
+
+    governance_enabled = bool(getattr(settings, "GOVERNANCE_ENABLED", True))
+    cand_status = str(getattr(cand, "status", "") or "")
+    pending_human_gate = bool(
+        cand_meta.get("promotion_pending_human_gate")
+        or proposal_meta.get("promotion_pending_human_gate")
+    )
+
+    def _audit_denied(reason: str) -> None:
+        asyncio.create_task(write_audit(
+            GovernanceAuditEvent(
+                module="ai.research",
+                action="activate_live",
+                status="denied",
+                actor="web_ui",
+                role="HUMAN",
+                input_payload={
+                    "candidate_id": candidate_id,
+                    "notes": payload.notes,
+                    "candidate_status": cand_status,
+                    "governance_enabled": governance_enabled,
+                },
+                output_payload={"reason": reason},
+            )
+        ))
+
+    if pending_human_gate:
+        detail = "candidate is pending human approval; complete /human-approve before live activation"
+        _audit_denied(detail)
+        raise HTTPException(status_code=400, detail=detail)
+
+    current_mode = str(execution_engine.get_trading_mode() or "").strip().lower() or "paper"
+    if current_mode != "live":
+        _audit_denied("trading mode is not live; switch to live mode first")
+        raise HTTPException(status_code=400, detail="trading mode is not live; switch to live mode first")
+
+    allowed_statuses = {"paper_running", "live_candidate", "live_running"}
+    if cand_status not in allowed_statuses:
+        detail = f"candidate in state {cand_status or 'unknown'}, live activation is not allowed"
+        _audit_denied(detail)
+        raise HTTPException(
+            status_code=400,
+            detail=detail,
+        )
+
+    if governance_enabled and cand_status != "live_running":
+        approved_target = str(cand_meta.get("human_approved_target") or "").strip().lower()
+        approved_at = str(cand_meta.get("human_approved_at") or "").strip()
+        if cand_status != "live_candidate" or approved_target != "live_candidate" or not approved_at:
+            detail = (
+                "governance enabled: candidate is not human-approved for live activation; "
+                "use pending-approval + /human-approve target=live_candidate first"
+            )
+            _audit_denied(detail)
+            raise HTTPException(status_code=400, detail=detail)
+
+    try:
+        strategy_result = await _ensure_candidate_runtime_strategy(
+            request.app,
+            cand,
+            target_mode="live",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    transition_reason = payload.notes or "activated live from AI research page"
+    if cand_status != "live_running":
+        transition_candidate(
+            cand,
+            to_state="live_running",
+            lifecycle_registry=request.app.state.ai_lifecycle_registry,
+            actor="web_ui_live_activate",
+            reason=transition_reason,
+            metadata={
+                "strategy_name": strategy_result["registered_strategy_name"],
+                "source": "ai_research_live_activate",
+            },
+        )
+    if str(getattr(proposal, "status", "") or "") != "live_running":
+        transition_proposal(
+            proposal,
+            to_state="live_running",
+            lifecycle_registry=request.app.state.ai_lifecycle_registry,
+            actor="web_ui_live_activate",
+            reason=transition_reason,
+            metadata={
+                "strategy_name": strategy_result["registered_strategy_name"],
+                "source": "ai_research_live_activate",
+            },
+        )
+
+    cand_meta["live_activated_at"] = datetime.now(timezone.utc).isoformat()
+    cand_meta["live_activation_notes"] = payload.notes
+    cand_meta["live_activation_source"] = "ai_research"
+
+    request.app.state.ai_candidate_registry.save(cand)
+    save_proposal(request.app, proposal)
+
+    asyncio.create_task(write_audit(
+        GovernanceAuditEvent(
+            module="ai.research",
+            action="activate_live",
+            status="approved",
+            actor="web_ui",
+            role="HUMAN",
+            input_payload={"candidate_id": candidate_id, "notes": payload.notes},
+            output_payload={
+                "runtime_status": "live_running",
+                "registered_strategy_name": strategy_result["registered_strategy_name"],
+            },
+        )
+    ))
+
+    return {
+        "candidate_id": candidate_id,
+        "candidate": cand.model_dump(mode="json"),
+        "proposal": proposal.model_dump(mode="json"),
+        "runtime_status": "live_running",
+        "registered_strategy_name": strategy_result["registered_strategy_name"],
+        "activation": strategy_result,
+    }
+
+
 def _trades_to_returns(trades: list) -> List[float]:
     """Convert trade dicts to a per-trade return fraction for CUSUM analysis."""
     returns: List[float] = []
@@ -2002,43 +2476,31 @@ async def get_latest_signals(
     signal into a single weighted vote.  Falls back gracefully when the ML
     model is not yet trained or the news DB is empty.
     """
-    import pandas as pd
-
     from core.ai.signal_aggregator import signal_aggregator
-    from core.data import data_storage
-
-    market_data: Optional[pd.DataFrame] = None
-    try:
-        from datetime import datetime, timedelta, timezone
-
-        end_time = datetime.now(timezone.utc)
-        start_time = end_time - timedelta(hours=48)
-        market_data = await data_storage.load_klines_from_parquet(
-            exchange="binance",
-            symbol=symbol,
-            timeframe="1h",
-            start_time=start_time,
-            end_time=end_time,
-        )
-    except Exception:
-        pass
-
-    if market_data is None:
-        market_data = pd.DataFrame()
+    market_data, market_meta = await _load_signal_market_data(
+        exchange="binance",
+        symbol=symbol,
+        timeframe="1h",
+        limit=max(120, int(since_minutes / 60) * 6 if since_minutes > 0 else 120),
+    )
 
     try:
         agg = await signal_aggregator.aggregate(symbol=symbol, market_data=market_data)
-        return agg.to_dict()
+        return {
+            **agg.to_dict(),
+            **market_meta,
+        }
     except Exception as exc:
         return {
             "symbol": symbol,
             "direction": "FLAT",
             "confidence": 0.0,
-            "requires_approval": True,
+            "requires_approval": False,
             "blocked_by_risk": False,
             "risk_reason": "",
             "components": {},
             "error": str(exc),
+            **market_meta,
         }
 
 
@@ -2174,9 +2636,7 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
     Uses the module-level signal_aggregator singleton (same one used by /signals/latest).
     Market data loaded from local parquet cache — no live network calls.
     """
-    import pandas as pd
     from core.ai.signal_aggregator import signal_aggregator
-    from core.data import data_storage
 
     ensure_ai_research_runtime_state(request.app)
 
@@ -2195,26 +2655,23 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
         cand_strategy = _candidate_strategy_name(cand)
         cand_status = str(getattr(cand, "status", "unknown"))
         try:
-            df = pd.DataFrame()
-            try:
-                end_time = datetime.now(timezone.utc)
-                start_time = end_time - timedelta(hours=48)
-                cand_exchange = _candidate_exchange(cand)
-                loaded = await data_storage.load_klines_from_parquet(
-                    exchange=cand_exchange, symbol=cand_symbol,
-                    timeframe="1h", start_time=start_time, end_time=end_time,
-                )
-                if loaded is not None:
-                    df = loaded
-            except Exception:
-                pass
+            cand_exchange = _candidate_exchange(cand)
+            df, market_meta = await _load_signal_market_data(
+                exchange=cand_exchange,
+                symbol=cand_symbol,
+                timeframe="1h",
+                limit=120,
+            )
             sig = await signal_aggregator.aggregate(cand_symbol, df)
             results.append({
                 "candidate_id": cand.candidate_id,
                 "strategy": cand_strategy,
                 "symbol": cand_symbol,
                 "status": cand_status,
-                "signal": sig.to_dict(),
+                "signal": {
+                    **sig.to_dict(),
+                    **market_meta,
+                },
             })
         except Exception as exc:
             logger.debug(f"live-signals: error for {cand.candidate_id}: {exc}")
@@ -2364,8 +2821,6 @@ async def generate_order_preview(request: Request, candidate_id: str):
     Returns direction, estimated size, stop/take levels, and component breakdown.
     The candidate must be in validated/paper_running/shadow_running/live_candidate/live_running.
     """
-    import pandas as pd
-
     ensure_ai_research_runtime_state(request.app)
     cand = get_candidate(request.app, candidate_id)
 
@@ -2385,13 +2840,12 @@ async def generate_order_preview(request: Request, candidate_id: str):
         request.app.state._signal_aggregator = SignalAggregator()
     aggregator = request.app.state._signal_aggregator
 
-    # Load market data from strategy_manager cache (non-blocking, 30s TTL)
-    df = pd.DataFrame()
-    try:
-        from core.strategies import strategy_manager as sm  # noqa: PLC0415
-        df = sm._load_market_data(cand_symbol, "1h")
-    except Exception:
-        pass
+    df, market_meta = await _load_signal_market_data(
+        exchange=_candidate_exchange(cand),
+        symbol=cand_symbol,
+        timeframe="1h",
+        limit=120,
+    )
 
     sig = await aggregator.aggregate(cand_symbol, df)
 
@@ -2432,6 +2886,7 @@ async def generate_order_preview(request: Request, candidate_id: str):
         "stop_loss_pct": stop_loss_pct,
         "take_profit_pct": take_profit_pct,
         "components": sig.components,
+        "market_data": market_meta,
         "note": "此为预览，不会自动下单。确认后请在交易面板手动执行。",
         "ts": sig.timestamp.isoformat(),
     }

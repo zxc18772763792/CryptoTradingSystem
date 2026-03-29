@@ -139,14 +139,15 @@ class SignalAggregator:
 
         # ---- 5. Risk-gate filter ----
         blocked, risk_reason = self._apply_risk_gate(symbol, direction, confidence, market_data)
+        final_direction = "FLAT" if blocked else direction
 
-        requires_approval = (
-            blocked or confidence < self._high_conf_threshold
+        requires_approval = blocked or (
+            final_direction in {"LONG", "SHORT"} and confidence < self._high_conf_threshold
         )
 
         return AggregatedSignal(
             symbol=symbol,
-            direction="FLAT" if blocked else direction,
+            direction=final_direction,
             confidence=round(confidence, 6),
             components=components,
             requires_approval=requires_approval,
@@ -288,6 +289,9 @@ class SignalAggregator:
                 continue
             key = direction if direction in {"LONG", "SHORT"} else "FLAT"
             score[key] += weight * confidence
+
+        if max(score.values()) <= 0:
+            return "FLAT", 0.0
 
         winner = max(score, key=lambda k: score[k])
         raw_confidence = score[winner] / total_weight

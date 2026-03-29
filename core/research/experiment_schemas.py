@@ -18,7 +18,7 @@ from core.ai.proposal_schemas import (
 
 
 ExperimentStatus = Literal["queued", "running", "completed", "failed"]
-CandidateStatus = Literal["new", "paper_running", "shadow_running", "live_candidate", "retired"]
+CandidateStatus = Literal["new", "paper_running", "shadow_running", "live_candidate", "live_running", "retired"]
 PromotionTarget = Literal["paper", "shadow", "live_candidate"]
 PromotionDecisionType = Literal["reject", "paper", "shadow", "live_candidate"]
 LifecycleObjectType = Literal["proposal", "experiment", "candidate"]

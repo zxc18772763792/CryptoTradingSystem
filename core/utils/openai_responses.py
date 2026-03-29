@@ -9,6 +9,9 @@ _RETRYABLE_OPENAI_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 
 _FAILOVER_OPENAI_HTTP_STATUSES = frozenset(set(_RETRYABLE_OPENAI_HTTP_STATUSES) | {401, 403})
 _OPENAI_TARGET_STATE_LOCK = threading.Lock()
 _OPENAI_TARGET_PREFERRED: Dict[Tuple[str, ...], str] = {}
+# Keep failover ordering request-local by default. This avoids global sticky
+# state leaking across independent requests/tests.
+_ENABLE_CROSS_REQUEST_FAILOVER_CACHE = False
 
 
 def responses_endpoint(base_url: str) -> str:
@@ -122,6 +125,8 @@ def prioritize_openai_targets(targets: Sequence[Mapping[str, Any]] | None) -> Li
     canonical = _canonical_openai_targets(targets)
     if len(canonical) <= 1:
         return canonical
+    if not _ENABLE_CROSS_REQUEST_FAILOVER_CACHE:
+        return canonical
 
     key = _openai_target_state_key(canonical)
     with _OPENAI_TARGET_STATE_LOCK:
@@ -141,6 +146,9 @@ def remember_openai_target_success(
     targets: Sequence[Mapping[str, Any]] | None,
     base_url: Any,
 ) -> None:
+    if not _ENABLE_CROSS_REQUEST_FAILOVER_CACHE:
+        return
+
     canonical = _canonical_openai_targets(targets)
     if len(canonical) <= 1:
         return
@@ -161,6 +169,9 @@ def remember_openai_target_failure(
     targets: Sequence[Mapping[str, Any]] | None,
     failed_base_url: Any,
 ) -> None:
+    if not _ENABLE_CROSS_REQUEST_FAILOVER_CACHE:
+        return
+
     canonical = _canonical_openai_targets(targets)
     if len(canonical) <= 1:
         return
@@ -179,6 +190,12 @@ def remember_openai_target_failure(
 
     with _OPENAI_TARGET_STATE_LOCK:
         _OPENAI_TARGET_PREFERRED[key] = next_base_url
+
+
+def reset_openai_target_preferences() -> None:
+    """Clear relay preference cache used by cross-request failover mode."""
+    with _OPENAI_TARGET_STATE_LOCK:
+        _OPENAI_TARGET_PREFERRED.clear()
 
 
 def _normalize_content_parts(content: Any) -> List[Dict[str, str]]:

@@ -937,7 +937,13 @@
     if (!cand) return false;
     if (governanceEnabled()) return false;
     const status = String(cand?.status || '').trim();
-    return !new Set(['retired', 'paper_running', 'shadow_running']).has(status);
+    return !new Set(['retired', 'paper_running', 'shadow_running', 'live_candidate', 'live_running']).has(status);
+  }
+
+  function canActivateLiveCandidate(cand) {
+    if (!cand) return false;
+    const status = String(cand?.status || '').trim();
+    return new Set(['paper_running', 'live_candidate']).has(status);
   }
   function isRunnableProposalStatus(status) {
     return new Set(['draft', 'rejected', 'validated']).has(String(status || '').trim());
@@ -1374,7 +1380,7 @@
 
     const aStatus = String(a?.status || '');
     const bStatus = String(b?.status || '');
-    const activeStatuses = new Set(['paper_running', 'live_candidate']);
+    const activeStatuses = new Set(['paper_running', 'live_candidate', 'live_running']);
     const aActive = activeStatuses.has(aStatus);
     const bActive = activeStatuses.has(bStatus);
     if (aActive !== bActive) return aActive ? a : b;
@@ -1782,7 +1788,7 @@
       const dotCls = { research_running: 'running', research_queued: 'queued', validated: 'validated', rejected: 'rejected' }[st] || '';
       const name = proposalDisplayName(item, idx);
       const running = ['research_queued', 'research_running'].includes(st);
-      const retirable = ['shadow_running', 'live_candidate', 'paper_running'].includes(st);
+      const retirable = ['shadow_running', 'live_candidate', 'paper_running', 'live_running'].includes(st);
       const meta = getProposalResearchMeta(item);
       const timeLabel = meta.lastTs ? fmtTs(meta.lastTs) : '--';
       const aiSummary = `${researchModeText(meta.researchMode)} | 模板 ${meta.totalTemplates}`;
@@ -2398,6 +2404,20 @@
         <summary>\u53c2\u6570\u654f\u611f\u6027\u5206\u6790</summary>
         <div id="ai-param-sensitivity" class="ai-param-sensitivity-panel">\u6b63\u5728\u52a0\u8f7d\u53c2\u6570\u654f\u611f\u6027\u5206\u6790...</div>
       </details>`;
+    const liveActivateLabel = String(cand?.status || '') === 'live_candidate'
+      ? '\u542f\u52a8\u5b9e\u76d8\u8fd0\u884c ->'
+      : '\u5347\u7ea7\u4e3a\u5b9e\u76d8\u8fd0\u884c ->';
+    const liveActivateHtml = canActivateLiveCandidate(cand)
+      ? `<div style="margin-top:8px;">
+          <button class="btn btn-sm" id="btn-activate-live" data-default-label="${esc(liveActivateLabel)}"
+            style="font-size:12px;width:100%;color:#f0b429;border-color:#f0b429;">
+            ${esc(liveActivateLabel)}
+          </button>
+          <div style="font-size:10px;color:#6b7fa0;margin-top:3px;">
+            \u5c06\u5148\u5207\u6362\u7cfb\u7edf\u5230 live \u6a21\u5f0f\u5e76\u8981\u6c42\u8f93\u5165\u786e\u8ba4\u6587\u672c\uff0c\u786e\u8ba4\u540e\u624d\u4f1a\u771f\u6b63\u542f\u52a8\u8be5\u5019\u9009\u7684\u5b9e\u76d8\u8fd0\u884c\u3002
+          </div>
+         </div>`
+      : '';
 
     panel.innerHTML = `
       <div style="margin-bottom:14px;">
@@ -2534,16 +2554,21 @@
         </button>
         <div id="ai-order-preview-result" style="display:none;margin-top:10px;padding:12px;background:#0d1a2a;border:1px solid #1e3a5a;border-radius:8px;"></div>
       </div>
-      ${String(cand?.status || '') === 'paper_running' && !governanceEnabled()
-        ? `<div style="margin-top:8px;">
-            <button class="btn btn-sm" id="btn-escalate-live"
+      ${canActivateLiveCandidate(cand)
+        ? (() => { /*
+          const activateLabel = String(cand?.status || '') === 'live_candidate'
+            ? '启动实盘运行 →'
+            : '升级为实盘运行 →';
+          return `<div style="margin-top:8px;">
+            <button class="btn btn-sm" id="btn-activate-live" data-default-label="${esc(activateLabel)}"
               style="font-size:12px;width:100%;color:#f0b429;border-color:#f0b429;">
-              \u5347\u7ea7\u4e3a\u5b9e\u76d8\u5019\u9009 \u2192
+              ${esc(activateLabel)}
             </button>
             <div style="font-size:10px;color:#6b7fa0;margin-top:3px;">
-              \u4ec5\u4f1a\u53d8\u66f4\u8fd0\u884c\u76ee\u6807\uff0c\u4e0d\u4f1a\u81ea\u52a8\u4e0b\u5355\uff1b\u540e\u7eed\u4ecd\u9700\u4eba\u5de5\u5ba1\u6279\u540e\u624d\u80fd\u5b9e\u9645\u542f\u52a8\u5b9e\u76d8\u3002
+              将先切换系统到 live 模式并要求输入确认文本，确认后才会真正启动该候选的实盘运行。
             </div>
-           </div>`
+           </div>`;
+        */ return liveActivateHtml; })()
         : ''}
       `;
     panel.innerHTML = normalizeUiText(panel.innerHTML)
@@ -2588,6 +2613,66 @@
       } catch (err) {
         if (btn) { btn.textContent = '升级为实盘候选 →'; btn.disabled = false; }
         notify(`\u5347\u7ea7\u5931\u8d25: ${err.message}`, true);
+      }
+    });
+
+    /* panel.querySelector('#btn-activate-live')?.addEventListener('click', async () => {
+      const btn = panel.querySelector('#btn-activate-live');
+      const defaultLabel = String(btn?.dataset?.defaultLabel || btn?.textContent || '启动实盘运行 →');
+      if (btn) {
+        btn.textContent = '正在启动实盘...';
+        btn.disabled = true;
+      }
+      try {
+        const result = await activateCandidateLive(candidateId);
+        if (!result || result.cancelled) {
+          if (btn) {
+            btn.textContent = defaultLabel;
+            btn.disabled = false;
+          }
+          return;
+        }
+        const strategyName = String(result?.registered_strategy_name || result?.runtime_status || 'live_running');
+        notify(`候选已启动实盘运行: ${strategyName}`);
+        await refreshWorkbench('', candidateId);
+      } catch (err) {
+        if (btn) {
+          btn.textContent = defaultLabel;
+          btn.disabled = false;
+        }
+        notify(`启动实盘失败: ${err.message}`, true);
+      }
+    }); */
+
+    panel.querySelector('#btn-activate-live')?.addEventListener('click', async () => {
+      const btn = panel.querySelector('#btn-activate-live');
+      const defaultLabel = String(
+        btn?.dataset?.defaultLabel
+        || btn?.textContent
+        || '\u542f\u52a8\u5b9e\u76d8\u8fd0\u884c ->'
+      );
+      if (btn) {
+        btn.textContent = '\u6b63\u5728\u542f\u52a8\u5b9e\u76d8...';
+        btn.disabled = true;
+      }
+      try {
+        const result = await activateCandidateLive(candidateId);
+        if (!result || result.cancelled) {
+          if (btn) {
+            btn.textContent = defaultLabel;
+            btn.disabled = false;
+          }
+          return;
+        }
+        const strategyName = String(result?.registered_strategy_name || result?.runtime_status || 'live_running');
+        notify(`\u5019\u9009\u5df2\u542f\u52a8\u5b9e\u76d8\u8fd0\u884c: ${strategyName}`);
+        await refreshWorkbench('', candidateId);
+      } catch (err) {
+        if (btn) {
+          btn.textContent = defaultLabel;
+          btn.disabled = false;
+        }
+        notify(`\u542f\u52a8\u5b9e\u76d8\u5931\u8d25: ${err.message}`, true);
       }
     });
 
@@ -2963,6 +3048,139 @@
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
      人工确认队列
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  async function cancelModeSwitchToken(token) {
+    const safeToken = String(token || '').trim();
+    if (!safeToken) return false;
+    try {
+      await rootApi(`/trading/mode/cancel?token=${encodeURIComponent(safeToken)}`, {
+        method: 'POST',
+        timeoutMs: 10000,
+      });
+      return true;
+    } catch (err) {
+      console.debug('cancelModeSwitchToken failed:', err);
+      return false;
+    }
+  }
+
+  /* async function activateCandidateLive(candidateId) {
+    const safeCandidateId = String(candidateId || '').trim();
+    if (!safeCandidateId) throw new Error('缺少 candidate_id');
+    const candidate = state.candidates.find(item => String(item?.candidate_id || '') === safeCandidateId) || null;
+    const notePrompt = candidate
+      ? `确认将候选 ${safeCandidateId.slice(0, 8)} 启动为实盘运行？\n策略：${candidate.strategy || '--'} / ${candidate.symbol || '--'} / ${candidate.timeframe || '--'}\n\n请输入备注（可留空，点取消则终止本次操作）：`
+      : `确认将候选 ${safeCandidateId.slice(0, 8)} 启动为实盘运行？\n\n请输入备注（可留空，点取消则终止本次操作）：`;
+    const notes = window.prompt(notePrompt, '');
+    if (notes === null) return { cancelled: true };
+
+    const modeSnapshot = await rootApi('/trading/mode', { timeoutMs: 15000 });
+    const currentMode = String(modeSnapshot?.mode || 'paper').trim().toLowerCase();
+    if (currentMode !== 'live') {
+      const switchRequest = await rootApi('/trading/mode/request', {
+        method: 'POST',
+        body: JSON.stringify({
+          target_mode: 'live',
+          reason: `activate AI research candidate ${safeCandidateId} for live trading`,
+        }),
+        timeoutMs: 15000,
+      });
+      const token = String(switchRequest?.token || '').trim();
+      const confirmHint = String(
+        switchRequest?.confirm_text
+        || modeSnapshot?.confirm_hint
+        || 'CONFIRM LIVE TRADING'
+      ).trim();
+      if (!token) throw new Error('切换到实盘时未返回确认令牌');
+      const confirmInput = window.prompt(
+        `系统当前仍在纸盘模式，必须先切换到实盘模式。\n请输入确认文本以继续：\n${confirmHint}`,
+        confirmHint,
+      );
+      if (confirmInput === null) {
+        await cancelModeSwitchToken(token);
+        return { cancelled: true };
+      }
+      if (String(confirmInput).trim() !== confirmHint) {
+        await cancelModeSwitchToken(token);
+        throw new Error('确认文本不匹配，已取消切换到实盘');
+      }
+      try {
+        await rootApi('/trading/mode/confirm', {
+          method: 'POST',
+          body: JSON.stringify({ token, confirm_text: confirmHint }),
+          timeoutMs: 45000,
+        });
+      } catch (err) {
+        await cancelModeSwitchToken(token);
+        throw err;
+      }
+    }
+
+    return aiApi(`/candidates/${encodeURIComponent(safeCandidateId)}/activate-live`, {
+      method: 'POST',
+      body: JSON.stringify({ notes: String(notes || '') }),
+      timeoutMs: 45000,
+    });
+  } */
+
+  async function activateCandidateLive(candidateId) {
+    const safeCandidateId = String(candidateId || '').trim();
+    if (!safeCandidateId) throw new Error('\u7f3a\u5c11 candidate_id');
+    const candidate = state.candidates.find(item => String(item?.candidate_id || '') === safeCandidateId) || null;
+    const notePrompt = candidate
+      ? `\u786e\u8ba4\u5c06\u5019\u9009 ${safeCandidateId.slice(0, 8)} \u542f\u52a8\u4e3a\u5b9e\u76d8\u8fd0\u884c\uff1f\n\u7b56\u7565\uff1a${candidate.strategy || '--'} / ${candidate.symbol || '--'} / ${candidate.timeframe || '--'}\n\n\u8bf7\u8f93\u5165\u5907\u6ce8\uff08\u53ef\u7559\u7a7a\uff0c\u70b9\u53d6\u6d88\u5219\u7ec8\u6b62\u672c\u6b21\u64cd\u4f5c\uff09\uff1a`
+      : `\u786e\u8ba4\u5c06\u5019\u9009 ${safeCandidateId.slice(0, 8)} \u542f\u52a8\u4e3a\u5b9e\u76d8\u8fd0\u884c\uff1f\n\n\u8bf7\u8f93\u5165\u5907\u6ce8\uff08\u53ef\u7559\u7a7a\uff0c\u70b9\u53d6\u6d88\u5219\u7ec8\u6b62\u672c\u6b21\u64cd\u4f5c\uff09\uff1a`;
+    const notes = window.prompt(notePrompt, '');
+    if (notes === null) return { cancelled: true };
+
+    const modeSnapshot = await rootApi('/trading/mode', { timeoutMs: 15000 });
+    const currentMode = String(modeSnapshot?.mode || 'paper').trim().toLowerCase();
+    if (currentMode !== 'live') {
+      const switchRequest = await rootApi('/trading/mode/request', {
+        method: 'POST',
+        body: JSON.stringify({
+          target_mode: 'live',
+          reason: `activate AI research candidate ${safeCandidateId} for live trading`,
+        }),
+        timeoutMs: 15000,
+      });
+      const token = String(switchRequest?.token || '').trim();
+      const confirmHint = String(
+        switchRequest?.confirm_text
+        || modeSnapshot?.confirm_hint
+        || 'CONFIRM LIVE TRADING'
+      ).trim();
+      if (!token) throw new Error('\u5207\u6362\u5230\u5b9e\u76d8\u65f6\u672a\u8fd4\u56de\u786e\u8ba4\u4ee4\u724c');
+      const confirmInput = window.prompt(
+        `\u7cfb\u7edf\u5f53\u524d\u4ecd\u5728\u7eb8\u76d8\u6a21\u5f0f\uff0c\u5fc5\u987b\u5148\u5207\u6362\u5230\u5b9e\u76d8\u6a21\u5f0f\u3002\n\u8bf7\u8f93\u5165\u786e\u8ba4\u6587\u672c\u4ee5\u7ee7\u7eed\uff1a\n${confirmHint}`,
+        confirmHint,
+      );
+      if (confirmInput === null) {
+        await cancelModeSwitchToken(token);
+        return { cancelled: true };
+      }
+      if (String(confirmInput).trim() !== confirmHint) {
+        await cancelModeSwitchToken(token);
+        throw new Error('\u786e\u8ba4\u6587\u672c\u4e0d\u5339\u914d\uff0c\u5df2\u53d6\u6d88\u5207\u6362\u5230\u5b9e\u76d8');
+      }
+      try {
+        await rootApi('/trading/mode/confirm', {
+          method: 'POST',
+          body: JSON.stringify({ token, confirm_text: confirmHint }),
+          timeoutMs: 45000,
+        });
+      } catch (err) {
+        await cancelModeSwitchToken(token);
+        throw err;
+      }
+    }
+
+    return aiApi(`/candidates/${encodeURIComponent(safeCandidateId)}/activate-live`, {
+      method: 'POST',
+      body: JSON.stringify({ notes: String(notes || '') }),
+      timeoutMs: 45000,
+    });
+  }
+
   async function loadPendingApprovals() {
     try {
       const res = await aiApi('/candidates/pending-approvals', { timeoutMs: 15000 });
@@ -3555,7 +3773,7 @@
       notify('缺少 proposal_id，无法退役', true);
       return;
     }
-    if (!['shadow_running', 'live_candidate', 'paper_running'].includes(status)) {
+    if (!['shadow_running', 'live_candidate', 'paper_running', 'live_running'].includes(status)) {
       notify(`当前状态 ${statusText(status)} 不支持退役`, true);
       return;
     }

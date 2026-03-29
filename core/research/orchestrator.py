@@ -307,7 +307,14 @@ def list_promotions(app: FastAPI, limit: int = 50) -> List[Dict[str, Any]]:
 
 def get_deployment_status(app: FastAPI) -> Dict[str, Any]:
     rows = list_candidates(app, limit=200)
-    counts = {"new": 0, "paper_running": 0, "shadow_running": 0, "live_candidate": 0, "retired": 0}
+    counts = {
+        "new": 0,
+        "paper_running": 0,
+        "shadow_running": 0,
+        "live_candidate": 0,
+        "live_running": 0,
+        "retired": 0,
+    }
     for row in rows:
         counts[str(row.status)] = counts.get(str(row.status), 0) + 1
     return {"counts": counts, "total_candidates": len(rows)}
@@ -998,7 +1005,7 @@ async def _finalize_research_run(
     # Fetch existing active candidates for cross-batch correlation check
     existing_active: List[StrategyCandidate] = []
     try:
-        active_statuses = {"new", "paper_running", "shadow_running", "live_candidate"}
+        active_statuses = {"new", "paper_running", "shadow_running", "live_candidate", "live_running"}
         for _c in app.state.ai_candidate_registry.list(limit=None):
             if str(_c.status) in active_statuses:
                 existing_active.append(_c)

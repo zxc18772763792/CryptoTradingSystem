@@ -14,6 +14,20 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _build_ai_research_request(candidate_save=None):
+    registry = SimpleNamespace(save=MagicMock(side_effect=candidate_save))
+    lifecycle_registry = MagicMock()
+    lifecycle_registry.append = MagicMock()
+    return SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                ai_candidate_registry=registry,
+                ai_lifecycle_registry=lifecycle_registry,
+            )
+        )
+    )
+
+
 def test_transition_proposal_allows_validated_to_rejected():
     from core.ai.proposal_schemas import ResearchProposal
     from core.deployment.promotion_engine import transition_proposal
@@ -242,6 +256,318 @@ def test_quick_register_uses_correct_promote_signature(monkeypatch):
     assert kwargs["promotion"] is candidate.promotion
 
 
+def test_activate_ai_candidate_live_requires_live_mode(monkeypatch):
+    from fastapi import HTTPException
+
+    from core.ai.proposal_schemas import ResearchProposal
+    from core.research.experiment_schemas import StrategyCandidate
+    from web.api import ai_research as ai_module
+
+    now = _now()
+    proposal = ResearchProposal(
+        proposal_id="proposal-live-mode-check",
+        created_at=now,
+        updated_at=now,
+        thesis="live mode gate",
+        status="paper_running",
+    )
+    candidate = StrategyCandidate(
+        candidate_id="cand-live-mode-check",
+        proposal_id=proposal.proposal_id,
+        experiment_id="exp-live-mode-check",
+        created_at=now,
+        strategy="MAStrategy",
+        timeframe="1h",
+        symbol="BTC/USDT",
+        params={"fast_period": 8, "slow_period": 26},
+        status="paper_running",
+        metadata={"exchange": "binance"},
+    )
+    request = _build_ai_research_request()
+    ensure_mock = AsyncMock(return_value={"registered_strategy_name": "unused"})
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "get_candidate", lambda app, cid: candidate)
+    monkeypatch.setattr(ai_module, "get_proposal", lambda app, pid: proposal)
+    monkeypatch.setattr(ai_module, "_ensure_candidate_runtime_strategy", ensure_mock)
+    monkeypatch.setattr(ai_module.execution_engine, "get_trading_mode", lambda: "paper")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            ai_module.activate_ai_candidate_live(
+                request,
+                candidate.candidate_id,
+                ai_module.AICandidateActivateLiveRequest(notes="should fail outside live mode"),
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert "switch to live mode first" in exc.value.detail
+    assert ensure_mock.await_count == 0
+
+
+def test_activate_ai_candidate_live_governance_rejects_unapproved_candidate(monkeypatch):
+    from fastapi import HTTPException
+
+    from core.ai.proposal_schemas import ResearchProposal
+    from core.research.experiment_schemas import StrategyCandidate
+    from web.api import ai_research as ai_module
+
+    now = _now()
+    proposal = ResearchProposal(
+        proposal_id="proposal-live-governance-denied",
+        created_at=now,
+        updated_at=now,
+        thesis="governance gate deny",
+        status="paper_running",
+    )
+    candidate = StrategyCandidate(
+        candidate_id="cand-live-governance-denied",
+        proposal_id=proposal.proposal_id,
+        experiment_id="exp-live-governance-denied",
+        created_at=now,
+        strategy="MAStrategy",
+        timeframe="1h",
+        symbol="BTC/USDT",
+        params={"fast_period": 8, "slow_period": 26},
+        status="paper_running",
+        metadata={"exchange": "binance"},
+    )
+    request = _build_ai_research_request()
+    ensure_mock = AsyncMock(return_value={"registered_strategy_name": "unused"})
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "get_candidate", lambda app, cid: candidate)
+    monkeypatch.setattr(ai_module, "get_proposal", lambda app, pid: proposal)
+    monkeypatch.setattr(ai_module, "_ensure_candidate_runtime_strategy", ensure_mock)
+    monkeypatch.setattr(ai_module.execution_engine, "get_trading_mode", lambda: "live")
+    monkeypatch.setattr(ai_module, "write_audit", AsyncMock(return_value=None))
+    monkeypatch.setattr(ai_module.asyncio, "create_task", lambda coro: coro.close())
+    monkeypatch.setattr(ai_module.settings, "GOVERNANCE_ENABLED", True, raising=False)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            ai_module.activate_ai_candidate_live(
+                request,
+                candidate.candidate_id,
+                ai_module.AICandidateActivateLiveRequest(notes="should fail under governance"),
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert "human-approved for live activation" in exc.value.detail
+    assert ensure_mock.await_count == 0
+
+
+def test_activate_ai_candidate_live_rejects_pending_human_gate(monkeypatch):
+    from fastapi import HTTPException
+
+    from core.ai.proposal_schemas import ResearchProposal
+    from core.research.experiment_schemas import StrategyCandidate
+    from web.api import ai_research as ai_module
+
+    now = _now()
+    proposal = ResearchProposal(
+        proposal_id="proposal-live-pending-gate",
+        created_at=now,
+        updated_at=now,
+        thesis="pending approval gate",
+        status="live_candidate",
+        metadata={"promotion_pending_human_gate": True},
+    )
+    candidate = StrategyCandidate(
+        candidate_id="cand-live-pending-gate",
+        proposal_id=proposal.proposal_id,
+        experiment_id="exp-live-pending-gate",
+        created_at=now,
+        strategy="MAStrategy",
+        timeframe="1h",
+        symbol="BTC/USDT",
+        params={"fast_period": 8, "slow_period": 26},
+        status="live_candidate",
+        metadata={
+            "exchange": "binance",
+            "promotion_pending_human_gate": True,
+            "human_approved_at": now.isoformat(),
+            "human_approved_target": "live_candidate",
+        },
+    )
+    request = _build_ai_research_request()
+    ensure_mock = AsyncMock(return_value={"registered_strategy_name": "unused"})
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "get_candidate", lambda app, cid: candidate)
+    monkeypatch.setattr(ai_module, "get_proposal", lambda app, pid: proposal)
+    monkeypatch.setattr(ai_module, "_ensure_candidate_runtime_strategy", ensure_mock)
+    monkeypatch.setattr(ai_module.execution_engine, "get_trading_mode", lambda: "live")
+    monkeypatch.setattr(ai_module, "write_audit", AsyncMock(return_value=None))
+    monkeypatch.setattr(ai_module.asyncio, "create_task", lambda coro: coro.close())
+    monkeypatch.setattr(ai_module.settings, "GOVERNANCE_ENABLED", True, raising=False)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            ai_module.activate_ai_candidate_live(
+                request,
+                candidate.candidate_id,
+                ai_module.AICandidateActivateLiveRequest(notes="pending gate should block"),
+            )
+        )
+
+    assert exc.value.status_code == 400
+    assert "pending human approval" in exc.value.detail
+    assert ensure_mock.await_count == 0
+
+
+def test_activate_ai_candidate_live_transitions_live_candidate(monkeypatch):
+    from core.ai.proposal_schemas import ResearchProposal
+    from core.research.experiment_schemas import StrategyCandidate
+    from web.api import ai_research as ai_module
+
+    now = _now()
+    proposal = ResearchProposal(
+        proposal_id="proposal-live-candidate",
+        created_at=now,
+        updated_at=now,
+        thesis="live candidate activate",
+        status="live_candidate",
+    )
+    candidate = StrategyCandidate(
+        candidate_id="cand-live-candidate",
+        proposal_id=proposal.proposal_id,
+        experiment_id="exp-live-candidate",
+        created_at=now,
+        strategy="MAStrategy",
+        timeframe="15m",
+        symbol="ETH/USDT",
+        params={"fast_period": 5, "slow_period": 20},
+        status="live_candidate",
+        metadata={
+            "exchange": "binance",
+            "human_approved_at": now.isoformat(),
+            "human_approved_target": "live_candidate",
+        },
+    )
+    request = _build_ai_research_request()
+    save_proposal_mock = MagicMock()
+
+    async def _fake_ensure(app, cand, target_mode="live"):
+        cand.metadata["registered_strategy_name"] = "cand_live_strategy"
+        cand.metadata["promotion_runtime"] = {
+            "mode": target_mode,
+            "registered_strategy_name": "cand_live_strategy",
+            "started": True,
+        }
+        return {
+            "registered_strategy_name": "cand_live_strategy",
+            "allocation": 0.15,
+            "runtime_limit_minutes": 720,
+            "runtime_policy": {"runtime_limit_minutes": 720, "source": "unit_test"},
+        }
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "get_candidate", lambda app, cid: candidate)
+    monkeypatch.setattr(ai_module, "get_proposal", lambda app, pid: proposal)
+    monkeypatch.setattr(ai_module, "_ensure_candidate_runtime_strategy", _fake_ensure)
+    monkeypatch.setattr(ai_module, "save_proposal", save_proposal_mock)
+    monkeypatch.setattr(ai_module, "write_audit", AsyncMock(return_value=None))
+    monkeypatch.setattr(ai_module.asyncio, "create_task", lambda coro: coro.close())
+    monkeypatch.setattr(ai_module.execution_engine, "get_trading_mode", lambda: "live")
+    monkeypatch.setattr(ai_module.settings, "GOVERNANCE_ENABLED", True, raising=False)
+
+    result = asyncio.run(
+        ai_module.activate_ai_candidate_live(
+            request,
+            candidate.candidate_id,
+            ai_module.AICandidateActivateLiveRequest(notes="human confirmed from AI research"),
+        )
+    )
+
+    assert result["runtime_status"] == "live_running"
+    assert result["registered_strategy_name"] == "cand_live_strategy"
+    assert candidate.status == "live_running"
+    assert proposal.status == "live_running"
+    assert candidate.metadata["live_activation_source"] == "ai_research"
+    assert candidate.metadata["registered_strategy_name"] == "cand_live_strategy"
+    assert request.app.state.ai_candidate_registry.save.call_count == 1
+    assert save_proposal_mock.call_count == 1
+
+
+def test_activate_ai_candidate_live_promotes_paper_running_candidate(monkeypatch):
+    from core.ai.proposal_schemas import ResearchProposal
+    from core.research.experiment_schemas import StrategyCandidate
+    from web.api import ai_research as ai_module
+
+    now = _now()
+    proposal = ResearchProposal(
+        proposal_id="proposal-paper-running-live",
+        created_at=now,
+        updated_at=now,
+        thesis="paper running to live",
+        status="paper_running",
+    )
+    candidate = StrategyCandidate(
+        candidate_id="cand-paper-running-live",
+        proposal_id=proposal.proposal_id,
+        experiment_id="exp-paper-running-live",
+        created_at=now,
+        strategy="MAStrategy",
+        timeframe="1h",
+        symbol="BTC/USDT",
+        params={"fast_period": 12, "slow_period": 48},
+        status="paper_running",
+        metadata={
+            "exchange": "binance",
+            "registered_strategy_name": "paper_runtime_strategy",
+            "promotion_runtime": {
+                "mode": "paper",
+                "registered_strategy_name": "paper_runtime_strategy",
+            },
+        },
+    )
+    request = _build_ai_research_request()
+    save_proposal_mock = MagicMock()
+
+    async def _fake_ensure(app, cand, target_mode="live"):
+        assert cand.metadata["registered_strategy_name"] == "paper_runtime_strategy"
+        cand.metadata["promotion_runtime"] = {
+            "mode": target_mode,
+            "registered_strategy_name": "paper_runtime_strategy",
+            "started": True,
+        }
+        return {
+            "registered_strategy_name": "paper_runtime_strategy",
+            "allocation": 0.1,
+            "runtime_limit_minutes": 1440,
+            "runtime_policy": {"runtime_limit_minutes": 1440, "source": "existing_strategy"},
+        }
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "get_candidate", lambda app, cid: candidate)
+    monkeypatch.setattr(ai_module, "get_proposal", lambda app, pid: proposal)
+    monkeypatch.setattr(ai_module, "_ensure_candidate_runtime_strategy", _fake_ensure)
+    monkeypatch.setattr(ai_module, "save_proposal", save_proposal_mock)
+    monkeypatch.setattr(ai_module, "write_audit", AsyncMock(return_value=None))
+    monkeypatch.setattr(ai_module.asyncio, "create_task", lambda coro: coro.close())
+    monkeypatch.setattr(ai_module.execution_engine, "get_trading_mode", lambda: "live")
+    monkeypatch.setattr(ai_module.settings, "GOVERNANCE_ENABLED", False, raising=False)
+
+    result = asyncio.run(
+        ai_module.activate_ai_candidate_live(
+            request,
+            candidate.candidate_id,
+            ai_module.AICandidateActivateLiveRequest(notes="upgrade paper runtime into live"),
+        )
+    )
+
+    assert result["runtime_status"] == "live_running"
+    assert result["registered_strategy_name"] == "paper_runtime_strategy"
+    assert candidate.status == "live_running"
+    assert proposal.status == "live_running"
+    assert candidate.metadata["promotion_runtime"]["mode"] == "live"
+    assert request.app.state.ai_candidate_registry.save.call_count == 1
+    assert save_proposal_mock.call_count == 1
+
+
 def test_param_sensitivity_endpoint(monkeypatch):
     from core.research.experiment_schemas import StrategyCandidate
     from web.api import ai_research as ai_module
@@ -299,6 +625,16 @@ def test_ai_research_readiness_mentions_premium_sources():
     assert "/premium-data/status" in js_text
     assert "高级数据源" in js_text
     assert "/live-signals" in js_text
+
+
+def test_ai_research_live_activation_flow_hooks_present():
+    repo_root = Path(__file__).resolve().parents[1]
+    js_text = (repo_root / "web" / "static" / "js" / "ai_research.js").read_text(encoding="utf-8")
+    assert "function activateCandidateLive" in js_text
+    assert "/trading/mode/request" in js_text
+    assert "/trading/mode/confirm" in js_text
+    assert "/candidates/${encodeURIComponent(safeCandidateId)}/activate-live" in js_text
+    assert "btn-activate-live" in js_text
 
 
 def test_premium_data_status_treats_cached_data_as_available(monkeypatch):
@@ -513,7 +849,10 @@ def test_live_signals_uses_candidate_exchange(monkeypatch):
 
     captured_exchange = []
 
-    async def _fake_load(exchange, symbol, timeframe, start_time, end_time):
+    async def _fake_load(*args, **kwargs):
+        exchange = kwargs.get("exchange")
+        if exchange is None and args:
+            exchange = args[0]
         captured_exchange.append(exchange)
         return pd.DataFrame({"close": [1.0, 1.1]})
 

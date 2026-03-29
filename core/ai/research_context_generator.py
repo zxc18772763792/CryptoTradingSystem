@@ -32,49 +32,50 @@ from core.utils.openai_responses import (
 _DEFAULT_OPENAI_BASE_URL = "https://vpsairobot.com/v1"
 _DEFAULT_OPENAI_MODEL = "gpt-5.4"
 
-_CONTEXT_SYSTEM_PROMPT = """你是专业的量化研究规划器。
+_CONTEXT_SYSTEM_PROMPT = """You are a quantitative research planner.
+Your goal is not to emit direct trading instructions. Your goal is to produce
+testable hypotheses, an experiment plan, and executable strategy research drafts.
 
-你的目标不是给出直接交易指令，而是生成可验证的研究假设、实验计划，以及可执行的策略研究草案。
-
-约束：
-1. 只返回 JSON，不要返回任何额外说明。
-2. proposed_strategy_changes 尽量给出 2-4 个候选草案；如果信息不足，至少给出 1 个。
-3. 草案里的 program 必须尽量可执行，并只使用以下指标类型：
+Constraints:
+1. Return JSON only, without markdown or extra commentary.
+2. In `proposed_strategy_changes`, provide 2-4 drafts when possible; provide at least 1 draft when context is limited.
+3. `program` should be executable and only use indicator kinds:
    price / sma / ema / rsi / zscore / returns
-4. program.entry_conditions / exit_conditions 只使用以下操作：
+4. `program.entry_conditions` and `program.exit_conditions` can only use:
    gt / gte / lt / lte / cross_over / cross_under
-5. 不要包含直接下单、杠杆、市价、限价、long、short 等交易指令词。
-6. 如果某个草案接近现有模板，可在 strategy 字段填写模板名；如果是开放式草案，可留空并仅给 program。
+5. Do not include direct order placement instructions, leverage commands, or explicit long/short execution wording.
+6. If a draft is close to an existing template, set `strategy` to the template name.
+   If it is open-ended, leave `strategy` empty and rely on `program`.
 """
 
-_CONTEXT_PROMPT_TEMPLATE = """根据以下市场摘要和研究目标，生成一个结构化量化研究方案。
+_CONTEXT_PROMPT_TEMPLATE = """Based on the market summary and goals below, produce a structured quant research plan.
 
-市场摘要：
+Market summary:
 {market_summary}
 
-研究目标：
+Research goals:
 {goals}
 
-请返回 JSON，字段必须完整：
+Return JSON with these required fields:
 {{
-  "hypothesis": "一句话研究假设",
-  "experiment_plan": ["步骤1", "步骤2", "步骤3"],
-  "metrics_to_check": ["指标1", "指标2", "指标3"],
-  "expected_failure_modes": ["失效场景1", "失效场景2"],
+  "hypothesis": "single-sentence research hypothesis",
+  "experiment_plan": ["step 1", "step 2", "step 3"],
+  "metrics_to_check": ["metric 1", "metric 2", "metric 3"],
+  "expected_failure_modes": ["failure mode 1", "failure mode 2"],
   "proposed_strategy_changes": [
     {{
       "draft_id": "draft-01",
-      "name": "草案名称",
-      "strategy": "可选，接近的模板名；否则留空",
-      "thesis": "该草案的核心假设",
-      "rationale": "为什么值得研究",
+      "name": "draft name",
+      "strategy": "optional template name, or empty string",
+      "thesis": "core idea",
+      "rationale": "why this is worth testing",
       "features": ["ema_fast", "ema_slow", "rsi"],
       "entry_logic": ["cross_over(ema_fast, ema_slow)", "rsi <= 35"],
       "exit_logic": ["cross_under(ema_fast, ema_slow)", "rsi >= 60"],
-      "risk_logic": ["波动放大时收紧研究优先级"],
+      "risk_logic": ["reduce priority under volatility expansion"],
       "params": {{"fast_period": 8, "slow_period": 21, "rsi_period": 14}},
       "program": {{
-        "name": "草案名称",
+        "name": "draft name",
         "indicators": [
           {{"name": "ema_fast", "kind": "ema", "period": 8}},
           {{"name": "ema_slow", "kind": "ema", "period": 21}},
@@ -97,16 +98,16 @@ _CONTEXT_PROMPT_TEMPLATE = """根据以下市场摘要和研究目标，生成�
       "source": "openai_context"
     }}
   ],
-  "uncertainty": "高|中|低",
-  "evidence_refs": ["证据1", "证据2"]
+  "uncertainty": "low|medium|high",
+  "evidence_refs": ["evidence 1", "evidence 2"]
 }}
 
-要求：
-1. experiment_plan 保持 3-5 条。
-2. metrics_to_check 保持 3-5 项。
-3. expected_failure_modes 保持 1-3 条。
-4. proposed_strategy_changes 中至少 1 个草案必须带 program。
-5. 如果目标更适合开放式草案研究，请优先让 proposed_strategy_changes 不完全依赖固定模板。
+Requirements:
+1. Keep `experiment_plan` to 3-5 items.
+2. Keep `metrics_to_check` to 3-5 items.
+3. Keep `expected_failure_modes` to 1-3 items.
+4. At least one item in `proposed_strategy_changes` must include `program`.
+5. If open-ended exploration is more suitable than a fixed template, prioritize open-ended drafts in `proposed_strategy_changes`.
 """
 
 _REQUIRED_KEYS = {
@@ -125,14 +126,14 @@ _DEFAULTS: Dict[str, Any] = {
     "metrics_to_check": [],
     "expected_failure_modes": [],
     "proposed_strategy_changes": [],
-    "uncertainty": "中",
+    "uncertainty": "medium",
     "evidence_refs": [],
 }
 
 
 def _format_market_summary(market_summary: Dict[str, Any]) -> str:
     if not market_summary:
-        return "（无市场数据）"
+        return "(no market data)"
     lines = []
     for key, val in market_summary.items():
         if isinstance(val, dict):
@@ -143,7 +144,7 @@ def _format_market_summary(market_summary: Dict[str, Any]) -> str:
             lines.append(f"  {key}: {preview}")
         else:
             lines.append(f"  {key}: {val}")
-    return "\n".join(lines) if lines else "（无市场数据）"
+    return "\n".join(lines) if lines else "(no market data)"
 
 
 def _strip_code_fences(raw: str) -> str:
@@ -183,17 +184,19 @@ def _fill_defaults(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(out.get("proposed_strategy_changes"), list):
         out["proposed_strategy_changes"] = []
     out["hypothesis"] = str(out.get("hypothesis") or "").strip()
-    out["uncertainty"] = str(out.get("uncertainty") or "中").strip() or "中"
+    out["uncertainty"] = str(out.get("uncertainty") or "medium").strip() or "medium"
     return out
 
 
 async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[Dict[str, Any]]:
-    targets = prioritize_openai_targets(openai_endpoint_targets(
-        primary_base_url=str(getattr(settings, "OPENAI_BASE_URL", "") or _DEFAULT_OPENAI_BASE_URL),
-        backup_base_urls=getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "",
-        primary_api_key=str(getattr(settings, "OPENAI_API_KEY", "") or "").strip(),
-        backup_api_key=str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip(),
-    ))
+    targets = prioritize_openai_targets(
+        openai_endpoint_targets(
+            primary_base_url=str(getattr(settings, "OPENAI_BASE_URL", "") or _DEFAULT_OPENAI_BASE_URL),
+            backup_base_urls=getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "",
+            primary_api_key=str(getattr(settings, "OPENAI_API_KEY", "") or "").strip(),
+            backup_api_key=str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip(),
+        )
+    )
     if not any(bool(str(target.get("api_key") or "").strip()) for target in targets):
         logger.debug("research_context_generator: OPENAI_API_KEY missing")
         return None
@@ -274,7 +277,7 @@ async def generate_research_context(
 
     try:
         market_str = _format_market_summary(market_summary)
-        goals_str = str(goals).strip() or "提升策略收益风险比，降低最大回撤"
+        goals_str = str(goals).strip() or "Improve risk-adjusted returns while reducing max drawdown."
         prompt = _CONTEXT_PROMPT_TEMPLATE.format(
             market_summary=market_str,
             goals=goals_str,

@@ -247,12 +247,18 @@
     </article>`;
   }
 
+  function autonomousAgentRuntimeText(agentConfig = {}, agentStatus = {}) {
+    if (Boolean(agentStatus?.running)) return '运行中';
+    if (Boolean(agentConfig?.enabled) && agentStatus?.last_run_at) return '已停止';
+    if (Boolean(agentConfig?.enabled)) return '待启动';
+    return '关闭';
+  }
+
   function buildFlowModel(snapshot) {
     const proposal = findSelectedProposal(snapshot);
     const candidate = findSelectedCandidate(snapshot, proposal);
     const runtime = snapshot?.runtimeConfig || {};
     const liveDecision = runtime?.ai_live_decision || {};
-    const agent = runtime?.ai_autonomous_agent || {};
     const pendingApprovals = Array.isArray(snapshot?.pendingApprovals) ? snapshot.pendingApprovals.length : 0;
     const runningCandidates = countRunningCandidates(snapshot);
     const inputs = plannerInputs();
@@ -336,7 +342,7 @@
         [
           metric('人工确认', runtime?.governance_enabled ? '开启' : '关闭'),
           metric('下单前AI复核', liveDecision?.enabled ? decisionModeLabel(liveDecision?.mode || 'shadow') : '关闭'),
-          metric('自动交易代理', agent?.enabled ? '启用' : '关闭'),
+          metric('保护范围', liveDecision?.enabled ? '策略库/候选' : '未启用'),
         ],
         candidate
           ? `当前聚焦候选：${candidate?.strategy || '--'}。这一步展示的是研究结果上线前后的保护和增强，不负责生成新策略。`
