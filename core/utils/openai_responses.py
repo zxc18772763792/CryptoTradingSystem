@@ -4,6 +4,9 @@ import json
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 
+_RETRYABLE_OPENAI_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+
+
 def responses_endpoint(base_url: str) -> str:
     base = str(base_url or "").rstrip("/")
     if base.endswith("/v1"):
@@ -16,6 +19,70 @@ def build_openai_headers(api_key: str) -> Dict[str, str]:
         "Authorization": f"Bearer {str(api_key or '').strip()}",
         "Content-Type": "application/json",
     }
+
+
+def _split_endpoint_candidates(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return []
+        raw_items = (
+            text.replace("\r", ",")
+            .replace("\n", ",")
+            .replace(";", ",")
+            .split(",")
+        )
+
+    items: List[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        base_url = str(item or "").strip().rstrip("/")
+        if not base_url or base_url in seen:
+            continue
+        seen.add(base_url)
+        items.append(base_url)
+    return items
+
+
+def openai_endpoint_targets(
+    *,
+    primary_base_url: Any,
+    backup_base_urls: Any = None,
+    primary_api_key: Any = "",
+    backup_api_key: Any = "",
+) -> List[Dict[str, Any]]:
+    base_urls = _split_endpoint_candidates(primary_base_url)
+    for item in _split_endpoint_candidates(backup_base_urls):
+        if item not in base_urls:
+            base_urls.append(item)
+
+    primary_key = str(primary_api_key or "").strip()
+    backup_key = str(backup_api_key or "").strip()
+    targets: List[Dict[str, Any]] = []
+    for idx, base_url in enumerate(base_urls):
+        api_key = primary_key if idx == 0 else (backup_key or primary_key)
+        if not api_key and backup_key:
+            api_key = backup_key
+        targets.append(
+            {
+                "index": idx,
+                "base_url": base_url,
+                "api_key": api_key,
+                "is_backup": idx > 0,
+            }
+        )
+    return targets
+
+
+def is_retryable_openai_status(status: Any) -> bool:
+    try:
+        return int(status) in _RETRYABLE_OPENAI_HTTP_STATUSES
+    except Exception:
+        return False
 
 
 def _normalize_content_parts(content: Any) -> List[Dict[str, str]]:

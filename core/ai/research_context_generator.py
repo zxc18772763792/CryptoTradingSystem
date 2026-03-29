@@ -7,6 +7,7 @@ autonomous-draft research instead of staying template-only.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Dict, Optional
 
@@ -18,6 +19,8 @@ from core.utils.openai_responses import (
     build_openai_headers,
     build_responses_payload,
     extract_response_text,
+    is_retryable_openai_status,
+    openai_endpoint_targets,
     read_aiohttp_responses_json,
     responses_endpoint,
 )
@@ -182,12 +185,16 @@ def _fill_defaults(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[Dict[str, Any]]:
-    api_key = str(getattr(settings, "OPENAI_API_KEY", "") or "").strip()
-    if not api_key:
+    targets = openai_endpoint_targets(
+        primary_base_url=str(getattr(settings, "OPENAI_BASE_URL", "") or _DEFAULT_OPENAI_BASE_URL),
+        backup_base_urls=getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "",
+        primary_api_key=str(getattr(settings, "OPENAI_API_KEY", "") or "").strip(),
+        backup_api_key=str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip(),
+    )
+    if not any(bool(str(target.get("api_key") or "").strip()) for target in targets):
         logger.debug("research_context_generator: OPENAI_API_KEY missing")
         return None
 
-    base_url = str(getattr(settings, "OPENAI_BASE_URL", "") or _DEFAULT_OPENAI_BASE_URL).rstrip("/")
     model = str(getattr(settings, "OPENAI_MODEL", "") or _DEFAULT_OPENAI_MODEL).strip() or _DEFAULT_OPENAI_MODEL
     payload = build_responses_payload(
         model=model,
@@ -201,25 +208,52 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
         stream=False,
     )
     timeout_cfg = aiohttp.ClientTimeout(total=max(5, int(timeout)))
-    url = responses_endpoint(base_url)
 
     async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
-        async with session.post(url, headers=build_openai_headers(api_key), json=payload) as resp:
-            if resp.status >= 400:
-                body = (await resp.text())[:400]
-                logger.debug(f"research_context_generator: openai_http_{resp.status}:{body}")
+        total_targets = len(targets)
+        for idx, target in enumerate(targets):
+            base_url = str(target.get("base_url") or "").rstrip("/")
+            api_key = str(target.get("api_key") or "").strip()
+            if not base_url or not api_key:
+                continue
+            url = responses_endpoint(base_url)
+            try:
+                async with session.post(url, headers=build_openai_headers(api_key), json=payload) as resp:
+                    if resp.status >= 400:
+                        body = (await resp.text())[:400]
+                        logger.debug(f"research_context_generator: openai_http_{resp.status}:{body}")
+                        if idx + 1 < total_targets and is_retryable_openai_status(resp.status):
+                            logger.warning(
+                                f"research_context_generator: primary relay failed with {resp.status}; "
+                                f"trying backup {idx + 2}/{total_targets}"
+                            )
+                            continue
+                        return None
+                    data = await read_aiohttp_responses_json(resp)
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                logger.debug(f"research_context_generator: openai transport error: {exc}")
+                if idx + 1 < total_targets:
+                    logger.warning(
+                        f"research_context_generator: primary relay transport failure; "
+                        f"trying backup {idx + 2}/{total_targets}"
+                    )
+                    continue
                 return None
-            data = await read_aiohttp_responses_json(resp)
 
-    raw = extract_response_text(data)
-    if not raw:
-        logger.debug("research_context_generator: empty OpenAI content")
-        return None
-    try:
-        return _parse_json_payload(raw)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(f"research_context_generator: JSON parse error: {exc}")
-        return None
+            raw = extract_response_text(data)
+            if not raw:
+                logger.debug("research_context_generator: empty OpenAI content")
+                if idx + 1 < total_targets:
+                    continue
+                return None
+            try:
+                return _parse_json_payload(raw)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"research_context_generator: JSON parse error: {exc}")
+                if idx + 1 < total_targets:
+                    continue
+                return None
+    return None
 
 
 async def generate_research_context(

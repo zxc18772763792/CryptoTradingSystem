@@ -18,6 +18,8 @@ from core.utils.openai_responses import (
     build_openai_headers,
     build_responses_payload,
     extract_response_text,
+    is_retryable_openai_status,
+    openai_endpoint_targets,
     read_aiohttp_responses_json,
     responses_endpoint,
 )
@@ -186,19 +188,45 @@ class LiveAIDecisionRouter:
     def _provider_api_key(self, provider: str) -> str:
         provider = _normalize_provider(provider)
         if provider == "codex":
-            return str(getattr(settings, "OPENAI_API_KEY", "") or "").strip()
+            primary = str(getattr(settings, "OPENAI_API_KEY", "") or "").strip()
+            if primary:
+                return primary
+            return str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip()
         if provider == "claude":
             return str(getattr(settings, "ANTHROPIC_API_KEY", "") or "").strip()
         return str(getattr(settings, "ZHIPU_API_KEY", "") or "").strip()
 
+    def _provider_endpoint_targets(self, provider: str) -> list[Dict[str, Any]]:
+        provider = _normalize_provider(provider)
+        if provider == "codex":
+            return openai_endpoint_targets(
+                primary_base_url=str(getattr(settings, "OPENAI_BASE_URL", "") or _DEFAULT_OPENAI_BASE_URL),
+                backup_base_urls=getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "",
+                primary_api_key=str(getattr(settings, "OPENAI_API_KEY", "") or "").strip(),
+                backup_api_key=str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip(),
+            )
+        return [
+            {
+                "index": 0,
+                "base_url": self._provider_base_url(provider),
+                "api_key": self._provider_api_key(provider),
+                "is_backup": False,
+            }
+        ]
+
     def _provider_catalog(self) -> Dict[str, Dict[str, Any]]:
         providers: Dict[str, Dict[str, Any]] = {}
         for item in sorted(_SUPPORTED_PROVIDERS):
+            targets = self._provider_endpoint_targets(item)
+            base_urls = [str(target.get("base_url") or "").rstrip("/") for target in targets if str(target.get("base_url") or "").strip()]
             providers[item] = {
-                "available": bool(self._provider_api_key(item)),
+                "available": any(bool(str(target.get("api_key") or "").strip()) for target in targets),
                 "default_model": self._provider_model(item),
-                "base_url": self._provider_base_url(item),
+                "base_url": (base_urls[0] if base_urls else self._provider_base_url(item)),
             }
+            if item == "codex" and len(base_urls) > 1:
+                providers[item]["backup_base_urls"] = base_urls[1:]
+                providers[item]["failover_enabled"] = True
         return providers
 
     def _resolve_provider(self, provider: str, providers: Dict[str, Dict[str, Any]]) -> tuple[str, bool]:
@@ -293,14 +321,13 @@ class LiveAIDecisionRouter:
         user_prompt: str,
     ) -> Dict[str, Any]:
         provider = _normalize_provider(provider)
-        api_key = self._provider_api_key(provider)
-        if not api_key:
-            raise RuntimeError(f"{provider}_api_key_missing")
-
         timeout = aiohttp.ClientTimeout(total=max(1, int(timeout_ms)) / 1000.0)
         base_url = self._provider_base_url(provider)
 
         if provider == "claude":
+            api_key = self._provider_api_key(provider)
+            if not api_key:
+                raise RuntimeError(f"{provider}_api_key_missing")
             url = f"{base_url}/v1/messages" if not base_url.endswith("/v1") else f"{base_url}/messages"
             headers = {
                 "x-api-key": api_key,
@@ -333,8 +360,9 @@ class LiveAIDecisionRouter:
             return _extract_json_obj(text)
 
         if provider == "codex":
-            url = responses_endpoint(base_url)
-            headers = build_openai_headers(api_key)
+            targets = self._provider_endpoint_targets(provider)
+            if not any(bool(str(target.get("api_key") or "").strip()) for target in targets):
+                raise RuntimeError(f"{provider}_api_key_missing")
             payload = build_responses_payload(
                 model=model,
                 messages=[
@@ -347,16 +375,57 @@ class LiveAIDecisionRouter:
                 stream=False,
             )
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
-                    if resp.status >= 400:
-                        body = (await resp.text())[:300]
-                        raise RuntimeError(f"{provider}_http_{resp.status}:{body}")
-                    data = await read_aiohttp_responses_json(resp)
-            text = extract_response_text(data)
-            if not text:
-                raise RuntimeError(f"{provider}_empty_content")
-            return _extract_json_obj(text)
+                last_exc: Optional[BaseException] = None
+                total_targets = len(targets)
+                for idx, target in enumerate(targets):
+                    target_base_url = str(target.get("base_url") or "").rstrip("/")
+                    target_api_key = str(target.get("api_key") or "").strip()
+                    if not target_base_url or not target_api_key:
+                        continue
+                    url = responses_endpoint(target_base_url)
+                    headers = build_openai_headers(target_api_key)
+                    try:
+                        async with session.post(url, headers=headers, json=payload) as resp:
+                            if resp.status >= 400:
+                                body = (await resp.text())[:300]
+                                err = RuntimeError(f"{provider}_http_{resp.status}:{body}")
+                                if idx + 1 < total_targets and is_retryable_openai_status(resp.status):
+                                    last_exc = err
+                                    logger.warning(
+                                        f"live_decision_router codex endpoint failed with {resp.status}; "
+                                        f"trying backup {idx + 2}/{total_targets}"
+                                    )
+                                    continue
+                                raise err
+                            data = await read_aiohttp_responses_json(resp)
+                        text = extract_response_text(data)
+                        if not text:
+                            err = RuntimeError(f"{provider}_empty_content")
+                            if idx + 1 < total_targets:
+                                last_exc = err
+                                logger.warning(
+                                    f"live_decision_router codex endpoint returned empty content; "
+                                    f"trying backup {idx + 2}/{total_targets}"
+                                )
+                                continue
+                            raise err
+                        return _extract_json_obj(text)
+                    except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                        if idx + 1 < total_targets:
+                            last_exc = exc
+                            logger.warning(
+                                f"live_decision_router codex endpoint transport failure; "
+                                f"trying backup {idx + 2}/{total_targets}: {exc}"
+                            )
+                            continue
+                        raise
+                if last_exc is not None:
+                    raise last_exc
+                raise RuntimeError(f"{provider}_base_url_missing")
 
+        api_key = self._provider_api_key(provider)
+        if not api_key:
+            raise RuntimeError(f"{provider}_api_key_missing")
         url = f"{base_url}/chat/completions"
         headers = build_openai_headers(api_key)
         payload = {

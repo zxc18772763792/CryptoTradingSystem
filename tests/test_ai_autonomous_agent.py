@@ -24,6 +24,7 @@ def _isolate_agent_overlay(tmp_path, monkeypatch):
     monkeypatch.setattr(_mod.news_db, "get_recent_events", AsyncMock(return_value=[]))
     monkeypatch.setattr(_mod.execution_engine, "get_account_equity_snapshot", AsyncMock(return_value=0.0))
     monkeypatch.setattr(_mod.execution_engine, "get_strategy_position_cap_notional", lambda **kwargs: 0.0)
+    monkeypatch.setattr(_mod.execution_engine, "get_live_trade_review", lambda **kwargs: {"items": []})
     monkeypatch.setattr(_mod.strategy_manager, "get_strategy_allocation", lambda name: 0.0)
 
 
@@ -1077,3 +1078,178 @@ def test_agent_symbol_scan_prioritizes_existing_positions(monkeypatch, tmp_path:
     assert scan["selection_reason"] == "existing_position_priority"
     assert [row["symbol"] for row in scan["top_candidates"][:2]] == ["BTC/USDT", "ETH/USDT"]
     assert scan["top_candidates"][0]["has_position"] is True
+
+
+def test_agent_no_price_closes_losing_position_when_learning_memory_requires(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    monkeypatch.setattr(
+        agent,
+        "_refresh_learning_memory",
+        lambda cfg=None, force=False: {
+            "adaptive_risk": {
+                "effective_min_confidence": 0.62,
+                "same_direction_max_exposure_ratio": 0.35,
+                "entry_size_scale": 0.7,
+                "force_close_on_data_outage_losing_position": True,
+            },
+            "guardrails": ["close losing positions when market data is unavailable"],
+            "lessons": ["近期价格缺失时不再继续被动 hold。"],
+            "blocked_symbol_sides": [],
+        },
+    )
+    monkeypatch.setattr(
+        agent,
+        "get_symbol_scan",
+        AsyncMock(
+            return_value={
+                "selected_symbol": "BTC/USDT",
+                "selection_reason": "manual_symbol",
+                "top_candidates": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_build_context",
+        AsyncMock(
+            return_value=(
+                {
+                    "exchange": "binance",
+                    "symbol": "BTC/USDT",
+                    "timeframe": "15m",
+                    "price": 0.0,
+                    "bars": 0,
+                    "returns": {"r_1h": 0.0, "r_24h": 0.0},
+                    "realized_vol_annualized": 0.0,
+                    "market_structure": {"available": False},
+                    "aggregated_signal": {"direction": "SHORT", "confidence": 0.61, "blocked_by_risk": False, "risk_reason": ""},
+                    "event_summary": {"available": False},
+                    "position": {
+                        "side": "short",
+                        "quantity": 1.0,
+                        "entry_price": 100.0,
+                        "current_price": 101.5,
+                        "unrealized_pnl": -1.5,
+                        "position_notional": 101.5,
+                        "position_cap_notional": 400.0,
+                        "same_direction_exposure_ratio": 0.25375,
+                        "same_direction_exposure_limit_ratio": 0.35,
+                        "same_direction_remaining_notional": 38.5,
+                    },
+                    "account_risk": {
+                        "trading_mode": "paper",
+                        "min_confidence": 0.58,
+                        "position_cap_notional": 400.0,
+                    },
+                    "execution_cost": {"estimated_one_way_cost_bps": 5.0, "estimated_round_trip_cost_bps": 10.0},
+                    "research_context": {"available": False},
+                    "profile": {},
+                    "learning_memory": {},
+                    "trading_mode": "paper",
+                },
+                pd.DataFrame(),
+            )
+        ),
+    )
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    submit_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert result["decision"]["action"] == "close_short"
+    assert result["execution"]["submitted"] is True
+    assert submit_mock.await_count == 1
+
+
+def test_agent_learning_guard_requires_research_for_fresh_entry(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    monkeypatch.setattr(
+        agent,
+        "_refresh_learning_memory",
+        lambda cfg=None, force=False: {
+            "adaptive_risk": {
+                "effective_min_confidence": 0.64,
+                "same_direction_max_exposure_ratio": 0.4,
+                "entry_size_scale": 0.8,
+                "require_research_for_new_entries": True,
+            },
+            "guardrails": ["require research context before fresh entries"],
+            "lessons": ["近期无研究支撑的新单表现偏弱。"],
+            "blocked_symbol_sides": [],
+        },
+    )
+    monkeypatch.setattr(
+        agent,
+        "get_symbol_scan",
+        AsyncMock(
+            return_value={
+                "selected_symbol": "ETH/USDT",
+                "selection_reason": "top_ranked_tradable_symbol",
+                "top_candidates": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_build_context",
+        AsyncMock(
+            return_value=(
+                {
+                    "exchange": "binance",
+                    "symbol": "ETH/USDT",
+                    "timeframe": "15m",
+                    "price": 2000.0,
+                    "bars": 240,
+                    "returns": {"r_1h": 0.01, "r_24h": 0.03},
+                    "realized_vol_annualized": 0.2,
+                    "market_structure": {"available": True, "microstructure": {"atr_pct": 0.003}},
+                    "aggregated_signal": {"direction": "LONG", "confidence": 0.74, "blocked_by_risk": False, "risk_reason": ""},
+                    "event_summary": {"available": False},
+                    "position": {},
+                    "account_risk": {
+                        "trading_mode": "paper",
+                        "min_confidence": 0.58,
+                        "position_cap_notional": 400.0,
+                    },
+                    "execution_cost": {"estimated_one_way_cost_bps": 4.0, "estimated_round_trip_cost_bps": 8.0},
+                    "research_context": {"available": False},
+                    "profile": {},
+                    "learning_memory": {},
+                    "trading_mode": "paper",
+                },
+                pd.DataFrame(),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        AsyncMock(
+            return_value={
+                "action": "buy",
+                "confidence": 0.88,
+                "strength": 0.72,
+                "leverage": 1.0,
+                "stop_loss_pct": 0.02,
+                "take_profit_pct": 0.04,
+                "reason": "trend_following",
+            }
+        ),
+    )
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    submit_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert result["decision"]["action"] == "hold"
+    assert result["decision"]["reason"] == "review_requires_research"
+    assert result["execution"]["submitted"] is False
+    assert submit_mock.await_count == 0

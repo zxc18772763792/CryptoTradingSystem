@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from datetime import datetime, timedelta, timezone
+import json
+import math
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, HTTPException, Request
@@ -18,7 +21,7 @@ from core.backtest.funding_provider import FundingProviderConfig, FundingRatePro
 from core.governance.audit import GovernanceAuditEvent, write_audit
 from core.deployment.promotion_engine import transition_candidate, transition_proposal
 from core.news.storage import db as news_db
-from core.trading import execution_engine
+from core.trading import execution_engine, order_manager, position_manager
 from core.research.orchestrator import (
     cancel_proposal_job,
     create_manual_proposal,
@@ -321,6 +324,692 @@ def _serialize_funding_cache(provider: FundingRateProvider, *, exchange: str, sy
     }
 
 
+_AUTONOMOUS_AGENT_STRATEGY = "AI_AutonomousAgent"
+_AUTONOMOUS_ENTRY_ACTIONS = {"buy", "sell"}
+_AUTONOMOUS_EXIT_ACTIONS = {"close_long", "close_short"}
+
+
+def _review_safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    try:
+        number = float(value)
+    except Exception:
+        return default
+    if math.isnan(number) or math.isinf(number):
+        return default
+    return number
+
+
+def _review_safe_dt(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _normalize_review_symbol(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if ":" in text:
+        text = text.split(":", 1)[0].strip()
+    return text
+
+
+def _review_symbol_matches(left: Any, right: Any) -> bool:
+    normalized_left = _normalize_review_symbol(left)
+    normalized_right = _normalize_review_symbol(right)
+    return bool(normalized_left and normalized_right and normalized_left == normalized_right)
+
+
+def _review_action_side(action: Any) -> str:
+    value = str(action or "").strip().lower()
+    if value in {"buy", "close_long"}:
+        return "long"
+    if value in {"sell", "close_short"}:
+        return "short"
+    return ""
+
+
+def _review_action_order_side(action: Any) -> str:
+    value = str(action or "").strip().lower()
+    if value in {"buy", "close_short"}:
+        return "buy"
+    if value in {"sell", "close_long"}:
+        return "sell"
+    return ""
+
+
+def _review_action_label(action: Any) -> str:
+    mapping = {
+        "buy": "开多",
+        "sell": "开空",
+        "close_long": "平多",
+        "close_short": "平空",
+        "hold": "观望",
+    }
+    value = str(action or "").strip().lower()
+    return mapping.get(value, str(action or "--"))
+
+
+def _review_status_label(status: str) -> str:
+    return {
+        "open_gain": "持仓浮盈",
+        "open_loss": "持仓浮亏",
+        "closed_gain": "平仓盈利",
+        "closed_loss": "平仓亏损",
+        "closed_flat": "平仓打平",
+        "stacked_entry": "同向连续加码",
+        "pending": "等待后续",
+        "profit_exit": "盈利离场",
+        "loss_exit": "亏损离场",
+        "flat_exit": "中性离场",
+        "orphan_exit": "缺少对应开仓",
+    }.get(str(status or "").strip().lower(), "待观察")
+
+
+def _review_status_tone(status: str) -> str:
+    value = str(status or "").strip().lower()
+    if value in {"open_gain", "closed_gain", "profit_exit"}:
+        return "good"
+    if value in {"open_loss", "closed_loss", "loss_exit", "stacked_entry", "orphan_exit"}:
+        return "danger"
+    if value in {"pending", "closed_flat", "flat_exit"}:
+        return "warn"
+    return "info"
+
+
+def _review_position_payload(position: Any) -> Optional[Dict[str, Any]]:
+    if position is None:
+        return None
+    try:
+        payload = position.to_dict() if hasattr(position, "to_dict") else dict(position)
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        return None
+    side_value = payload.get("side")
+    if hasattr(side_value, "value"):
+        side_value = side_value.value
+    return {
+        "symbol": payload.get("symbol"),
+        "symbol_norm": _normalize_review_symbol(payload.get("symbol")),
+        "exchange": payload.get("exchange"),
+        "side": str(side_value or "").strip().lower(),
+        "entry_price": _review_safe_float(payload.get("entry_price")),
+        "current_price": _review_safe_float(payload.get("current_price")),
+        "quantity": _review_safe_float(payload.get("quantity")),
+        "value": _review_safe_float(payload.get("value")),
+        "unrealized_pnl": _review_safe_float(payload.get("unrealized_pnl")),
+        "unrealized_pnl_pct": _review_safe_float(payload.get("unrealized_pnl_pct")),
+        "realized_pnl": _review_safe_float(payload.get("realized_pnl")),
+        "opened_at": payload.get("opened_at"),
+        "updated_at": payload.get("updated_at"),
+        "strategy": payload.get("strategy"),
+        "account_id": payload.get("account_id"),
+        "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+        "stop_loss": _review_safe_float(payload.get("stop_loss")),
+        "take_profit": _review_safe_float(payload.get("take_profit")),
+    }
+
+
+def _review_price_markout_bps(entry_price: Any, current_price: Any, side: str) -> Optional[float]:
+    entry = _review_safe_float(entry_price)
+    current = _review_safe_float(current_price)
+    if entry is None or current is None or entry <= 0:
+        return None
+    side_value = str(side or "").strip().lower()
+    if side_value == "short":
+        return (entry - current) / entry * 10000.0
+    if side_value == "long":
+        return (current - entry) / entry * 10000.0
+    return None
+
+
+def _review_is_model_issue(row: Dict[str, Any]) -> bool:
+    diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
+    primary = diagnostics.get("primary") if isinstance(diagnostics.get("primary"), dict) else {}
+    code = str(primary.get("code") or "").strip().lower()
+    label = str(primary.get("label") or "").strip().lower()
+    reason = str(((row.get("decision") or {}) if isinstance(row.get("decision"), dict) else {}).get("reason") or "").strip().lower()
+    return (
+        code.startswith("model_")
+        or "503" in label
+        or "超时" in label
+        or reason.startswith("model_error:")
+    )
+
+
+def _serialize_autonomy_order(order: Any) -> Dict[str, Any]:
+    meta = order_manager.get_order_metadata(order.id)
+    order_type = getattr(getattr(order, "type", None), "value", getattr(order, "type", "")) or ""
+    order_side = getattr(getattr(order, "side", None), "value", getattr(order, "side", "")) or ""
+    order_status = getattr(getattr(order, "status", None), "value", getattr(order, "status", "")) or ""
+    return {
+        "id": order.id,
+        "exchange": getattr(order, "exchange", ""),
+        "symbol": getattr(order, "symbol", ""),
+        "symbol_norm": _normalize_review_symbol(getattr(order, "symbol", "")),
+        "side": str(order_side).strip().lower(),
+        "type": str(order_type).strip().lower(),
+        "status": str(order_status).strip().lower(),
+        "price": _review_safe_float(getattr(order, "price", None)),
+        "amount": _review_safe_float(getattr(order, "amount", None)),
+        "filled": _review_safe_float(getattr(order, "filled", None)),
+        "timestamp": getattr(getattr(order, "timestamp", None), "isoformat", lambda: None)(),
+        "strategy": meta.get("strategy"),
+        "account_id": meta.get("account_id"),
+        "stop_loss": _review_safe_float(meta.get("stop_loss")),
+        "take_profit": _review_safe_float(meta.get("take_profit")),
+        "reduce_only": bool(meta.get("reduce_only", False)),
+    }
+
+
+def _match_autonomy_order(
+    *,
+    timestamp: Any,
+    symbol: Any,
+    action: Any,
+    orders: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    target_dt = _review_safe_dt(timestamp)
+    desired_order_side = _review_action_order_side(action)
+    candidates: List[tuple[int, float, Dict[str, Any]]] = []
+    for order in orders:
+        if not _review_symbol_matches(order.get("symbol"), symbol):
+            continue
+        if desired_order_side and str(order.get("side") or "").strip().lower() != desired_order_side:
+            continue
+        order_dt = _review_safe_dt(order.get("timestamp"))
+        if target_dt and order_dt:
+            delta_seconds = abs((order_dt - target_dt).total_seconds())
+        else:
+            delta_seconds = 0.0
+        strategy_rank = 0 if str(order.get("strategy") or "").strip() == _AUTONOMOUS_AGENT_STRATEGY else 1
+        if target_dt and delta_seconds > 6 * 3600:
+            continue
+        candidates.append((strategy_rank, delta_seconds, order))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return candidates[0][2]
+
+
+def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
+    review_limit = max(1, min(int(limit or 12), 30))
+    journal_rows: List[Dict[str, Any]] = []
+    journal_path = getattr(autonomous_trading_agent, "_journal_path", None)
+    try:
+        if journal_path is not None and journal_path.exists():
+            for line in journal_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                item = json.loads(line)
+                if isinstance(item, dict):
+                    journal_rows.append(item)
+    except Exception:
+        journal_rows = autonomous_trading_agent.read_journal(limit=500)
+    if not journal_rows:
+        return {
+            "summary": {
+                "submitted_count": 0,
+                "entry_count": 0,
+                "close_count": 0,
+                "losing_close_count": 0,
+                "entries_without_research_count": 0,
+                "repeated_same_direction_entries": 0,
+                "outage_after_entry_count": 0,
+                "unmatched_entry_count": 0,
+                "current_open_count": 0,
+                "current_open_unrealized_pnl": 0.0,
+                "dominant_symbol": None,
+                "dominant_entry_side": None,
+                "latest_entry_symbol": None,
+                "latest_entry_at": None,
+            },
+            "insights": ["当前还没有自治代理放行记录，先运行几轮后这里会自动生成复盘摘要。"],
+            "items": [],
+        }
+
+    serialized_orders = [
+        _serialize_autonomy_order(order)
+        for order in order_manager.get_recent_orders(limit=5000)
+    ]
+
+    submitted_indices: List[int] = []
+    events_by_row_index: Dict[int, Dict[str, Any]] = {}
+    events: List[Dict[str, Any]] = []
+    entry_events: List[Dict[str, Any]] = []
+    exit_events: List[Dict[str, Any]] = []
+    symbol_counter: Counter[str] = Counter()
+    entry_side_counter: Counter[str] = Counter()
+    primary_counter: Counter[str] = Counter()
+    repeated_same_direction_entries = 0
+    entries_without_research_count = 0
+    losing_close_count = 0
+
+    for row_index, row in enumerate(journal_rows):
+        execution = row.get("execution") if isinstance(row.get("execution"), dict) else {}
+        if not bool(execution.get("submitted")):
+            diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
+            primary = diagnostics.get("primary") if isinstance(diagnostics.get("primary"), dict) else {}
+            primary_label = str(primary.get("label") or "").strip()
+            if primary_label:
+                primary_counter[primary_label] += 1
+            continue
+
+        decision = row.get("decision") if isinstance(row.get("decision"), dict) else {}
+        diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
+        primary = diagnostics.get("primary") if isinstance(diagnostics.get("primary"), dict) else {}
+        selection = row.get("selection") if isinstance(row.get("selection"), dict) else {}
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        execution_signal = execution.get("signal") if isinstance(execution.get("signal"), dict) else {}
+        research = context.get("research_context") if isinstance(context.get("research_context"), dict) else {}
+        position_before = context.get("position") if isinstance(context.get("position"), dict) else {}
+        cost = context.get("execution_cost") if isinstance(context.get("execution_cost"), dict) else {}
+        aggregated_signal = context.get("aggregated_signal") if isinstance(context.get("aggregated_signal"), dict) else {}
+        action = str(decision.get("action") or execution_signal.get("signal_type") or "").strip().lower()
+        phase = "entry" if action in _AUTONOMOUS_ENTRY_ACTIONS else ("exit" if action in _AUTONOMOUS_EXIT_ACTIONS else "other")
+        symbol = (
+            execution_signal.get("symbol")
+            or (row.get("config") or {}).get("symbol")
+            or selection.get("selected_symbol")
+            or ""
+        )
+        position_side = _review_action_side(action)
+        repeat_open_rank = 1
+        if phase == "entry":
+            repeat_open_rank = 1
+
+        event = {
+            "id": f"agent-review-{len(events) + 1}",
+            "timestamp": row.get("timestamp"),
+            "phase": phase,
+            "symbol": symbol,
+            "symbol_norm": _normalize_review_symbol(symbol),
+            "action": action,
+            "action_label": _review_action_label(action),
+            "position_side": position_side,
+            "price": _review_safe_float(execution_signal.get("price") or context.get("price")),
+            "decision_confidence": _review_safe_float(decision.get("confidence")),
+            "reason": str(decision.get("reason") or execution.get("reason") or "").strip(),
+            "primary": {
+                "label": str(primary.get("label") or "无结构化原因"),
+                "detail": str(primary.get("detail") or "").strip(),
+                "tone": str(primary.get("tone") or "info").strip().lower(),
+            },
+            "aggregated_signal": {
+                "direction": aggregated_signal.get("direction"),
+                "confidence": _review_safe_float(aggregated_signal.get("confidence")),
+            },
+            "research": {
+                "available": bool(research.get("available")),
+                "strategy": research.get("strategy"),
+                "status": research.get("status"),
+                "selection_reason": research.get("selection_reason"),
+                "candidate_count": int(research.get("candidate_count") or 0),
+            },
+            "cost": {
+                "one_way_bps": _review_safe_float(cost.get("estimated_one_way_cost_bps")),
+                "round_trip_bps": _review_safe_float(cost.get("estimated_round_trip_cost_bps")),
+                "fee_bps": _review_safe_float(cost.get("fee_bps")),
+                "slippage_bps": _review_safe_float(cost.get("estimated_slippage_bps")),
+            },
+            "position_before": {
+                "side": str(position_before.get("side") or "").strip().lower(),
+                "quantity": _review_safe_float(position_before.get("quantity")),
+                "entry_price": _review_safe_float(position_before.get("entry_price")),
+                "current_price": _review_safe_float(position_before.get("current_price")),
+                "unrealized_pnl": _review_safe_float(position_before.get("unrealized_pnl")),
+                "source": position_before.get("source"),
+            },
+            "order": _match_autonomy_order(
+                timestamp=row.get("timestamp"),
+                symbol=symbol,
+                action=action,
+                orders=serialized_orders,
+            ),
+            "pair": {
+                "matched": False,
+                "entry_id": None,
+                "exit_id": None,
+                "holding_minutes": None,
+                "repeat_open_rank": repeat_open_rank,
+                "close_unrealized_pnl": None,
+            },
+            "follow_up": {
+                "observed_count": 0,
+                "latest_timestamp": None,
+                "latest_price": None,
+                "latest_unrealized_pnl": None,
+                "latest_primary_label": None,
+                "favorable_markout_bps": None,
+                "adverse_markout_bps": None,
+                "outage_hold_count": 0,
+                "blockers": [],
+            },
+            "review_status": "pending",
+            "review_status_text": _review_status_label("pending"),
+            "review_status_tone": _review_status_tone("pending"),
+            "summary_lines": [],
+            "_row_index": row_index,
+        }
+
+        if phase == "entry":
+            entry_events.append(event)
+            symbol_counter[event["symbol"]] += 1
+            entry_side_counter[position_side] += 1
+            if not bool(event["research"]["available"]):
+                entries_without_research_count += 1
+        elif phase == "exit":
+            exit_events.append(event)
+            pre_close_pnl = _review_safe_float(event["position_before"].get("unrealized_pnl"))
+            if pre_close_pnl is not None and pre_close_pnl < 0:
+                losing_close_count += 1
+
+        events.append(event)
+        events_by_row_index[row_index] = event
+        submitted_indices.append(row_index)
+
+    submitted_index_set = set(submitted_indices)
+    for idx, row_index in enumerate(submitted_indices):
+        event = events_by_row_index[row_index]
+        next_row_index = submitted_indices[idx + 1] if idx + 1 < len(submitted_indices) else len(journal_rows)
+        follow_rows = journal_rows[row_index + 1:next_row_index]
+        blocker_counter: Counter[str] = Counter()
+        markouts: List[float] = []
+        latest_price: Optional[float] = None
+        latest_unrealized_pnl: Optional[float] = None
+        latest_primary_label: Optional[str] = None
+        latest_timestamp: Optional[str] = None
+        outage_hold_count = 0
+        for follow_row in follow_rows:
+            follow_context = follow_row.get("context") if isinstance(follow_row.get("context"), dict) else {}
+            follow_position = follow_context.get("position") if isinstance(follow_context.get("position"), dict) else {}
+            follow_diagnostics = follow_row.get("diagnostics") if isinstance(follow_row.get("diagnostics"), dict) else {}
+            follow_primary = follow_diagnostics.get("primary") if isinstance(follow_diagnostics.get("primary"), dict) else {}
+            latest_timestamp = follow_row.get("timestamp")
+            latest_price = _review_safe_float(follow_context.get("price"), latest_price)
+            latest_unrealized_pnl = _review_safe_float(follow_position.get("unrealized_pnl"), latest_unrealized_pnl)
+            latest_primary_label = str(follow_primary.get("label") or "").strip() or latest_primary_label
+            if _review_is_model_issue(follow_row):
+                outage_hold_count += 1
+            blocker_label = str(follow_primary.get("label") or "").strip()
+            if blocker_label and blocker_label != "无结构化原因":
+                blocker_counter[blocker_label] += 1
+            if event["phase"] == "entry":
+                markout_bps = _review_price_markout_bps(event.get("price"), follow_context.get("price"), event.get("position_side"))
+                if markout_bps is not None:
+                    markouts.append(markout_bps)
+        event["follow_up"] = {
+            "observed_count": len(follow_rows),
+            "latest_timestamp": latest_timestamp,
+            "latest_price": latest_price,
+            "latest_unrealized_pnl": latest_unrealized_pnl,
+            "latest_primary_label": latest_primary_label,
+            "favorable_markout_bps": max(markouts) if markouts else None,
+            "adverse_markout_bps": min(markouts) if markouts else None,
+            "outage_hold_count": outage_hold_count,
+            "blockers": [
+                {"label": label, "count": count}
+                for label, count in blocker_counter.most_common(3)
+            ],
+        }
+
+    open_stacks: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+    for event in events:
+        if event["phase"] == "entry":
+            key = (event["symbol_norm"], event["position_side"])
+            stack = open_stacks.setdefault(key, [])
+            repeat_rank = len(stack) + 1
+            event["pair"]["repeat_open_rank"] = repeat_rank
+            if repeat_rank > 1:
+                repeated_same_direction_entries += 1
+            stack.append(event)
+            continue
+
+        if event["phase"] != "exit":
+            continue
+
+        key = (event["symbol_norm"], event["position_side"])
+        stack = open_stacks.setdefault(key, [])
+        if not stack:
+            event["review_status"] = "orphan_exit"
+            event["review_status_text"] = _review_status_label("orphan_exit")
+            event["review_status_tone"] = _review_status_tone("orphan_exit")
+            continue
+
+        entry_event = stack.pop()
+        opened_at = _review_safe_dt(entry_event.get("timestamp"))
+        closed_at = _review_safe_dt(event.get("timestamp"))
+        holding_minutes = None
+        if opened_at and closed_at:
+            holding_minutes = round(max(0.0, (closed_at - opened_at).total_seconds()) / 60.0, 1)
+        close_unrealized_pnl = _review_safe_float(event["position_before"].get("unrealized_pnl"))
+        entry_event["pair"].update(
+            {
+                "matched": True,
+                "entry_id": entry_event["id"],
+                "exit_id": event["id"],
+                "holding_minutes": holding_minutes,
+                "close_unrealized_pnl": close_unrealized_pnl,
+                "closed_at": event.get("timestamp"),
+                "exit_action": event.get("action"),
+                "exit_action_label": event.get("action_label"),
+            }
+        )
+        event["pair"].update(
+            {
+                "matched": True,
+                "entry_id": entry_event["id"],
+                "exit_id": event["id"],
+                "holding_minutes": holding_minutes,
+                "opened_at": entry_event.get("timestamp"),
+                "entry_action": entry_event.get("action"),
+                "entry_action_label": entry_event.get("action_label"),
+            }
+        )
+
+    unmatched_entries: List[Dict[str, Any]] = []
+    for stack in open_stacks.values():
+        unmatched_entries.extend(stack)
+
+    current_positions = [_review_position_payload(position) for position in position_manager.get_all_positions()]
+    current_positions = [position for position in current_positions if position]
+    matched_current_positions: List[Dict[str, Any]] = []
+    for position in current_positions:
+        if not isinstance(position, dict):
+            continue
+        matching_unmatched = [
+            entry
+            for entry in unmatched_entries
+            if _review_symbol_matches(entry.get("symbol"), position.get("symbol"))
+            and str(entry.get("position_side") or "").strip().lower() == str(position.get("side") or "").strip().lower()
+        ]
+        strategy_name = str(position.get("strategy") or "").strip()
+        if not matching_unmatched and strategy_name != _AUTONOMOUS_AGENT_STRATEGY:
+            continue
+        matched_current_positions.append(position)
+        if matching_unmatched:
+            latest_entry = matching_unmatched[-1]
+            latest_entry["current_position"] = position
+
+    outage_after_entry_count = sum(
+        1
+        for event in entry_events
+        if int((event.get("follow_up") or {}).get("outage_hold_count") or 0) > 0
+    )
+
+    total_current_unrealized = sum(
+        float(position.get("unrealized_pnl") or 0.0)
+        for position in matched_current_positions
+    )
+
+    for event in events:
+        current_position = event.get("current_position") if isinstance(event.get("current_position"), dict) else None
+        close_unrealized_pnl = _review_safe_float((event.get("pair") or {}).get("close_unrealized_pnl"))
+        latest_unrealized = _review_safe_float((event.get("follow_up") or {}).get("latest_unrealized_pnl"))
+        summary_lines: List[str] = []
+        if event["phase"] == "entry":
+            if current_position:
+                live_unrealized = _review_safe_float(current_position.get("unrealized_pnl"), 0.0) or 0.0
+                event["review_status"] = "open_gain" if live_unrealized > 0 else ("open_loss" if live_unrealized < 0 else "pending")
+                summary_lines.append(
+                    f"当前仍持有 {event['symbol']} {event['action_label']}，最新浮盈亏约 {live_unrealized:.4f} USDT。"
+                )
+            elif close_unrealized_pnl is not None:
+                if close_unrealized_pnl > 0:
+                    event["review_status"] = "closed_gain"
+                elif close_unrealized_pnl < 0:
+                    event["review_status"] = "closed_loss"
+                else:
+                    event["review_status"] = "closed_flat"
+                action_text = "盈利" if close_unrealized_pnl > 0 else ("亏损" if close_unrealized_pnl < 0 else "打平")
+                summary_lines.append(
+                    f"后续已通过 {event['pair'].get('exit_action_label') or '平仓'} 结束，平仓前浮盈亏约 {close_unrealized_pnl:.4f} USDT（{action_text}）。"
+                )
+            elif latest_unrealized is not None:
+                event["review_status"] = "open_gain" if latest_unrealized > 0 else ("open_loss" if latest_unrealized < 0 else "pending")
+                summary_lines.append(
+                    f"日志最近一次跟踪显示，这笔 {event['symbol']} {event['action_label']} 浮盈亏约 {latest_unrealized:.4f} USDT。"
+                )
+            elif int((event.get("pair") or {}).get("repeat_open_rank") or 1) > 1:
+                event["review_status"] = "stacked_entry"
+                summary_lines.append(
+                    f"这是同币种同方向第 {int(event['pair']['repeat_open_rank'])} 次连续放行，仓位连续叠加风险偏高。"
+                )
+            else:
+                event["review_status"] = "pending"
+                summary_lines.append("这笔开仓之后还没有看到明确的平仓动作，继续观察后续管理质量。")
+
+            if not bool((event.get("research") or {}).get("available")):
+                summary_lines.append("开仓时没有可用研究候选，这笔决定主要依赖行情与聚合信号。")
+            adverse_markout = _review_safe_float((event.get("follow_up") or {}).get("adverse_markout_bps"))
+            favorable_markout = _review_safe_float((event.get("follow_up") or {}).get("favorable_markout_bps"))
+            if favorable_markout is not None or adverse_markout is not None:
+                pieces = []
+                if favorable_markout is not None:
+                    pieces.append(f"最好走出 {favorable_markout:.1f} bps")
+                if adverse_markout is not None:
+                    pieces.append(f"最差回撤到 {adverse_markout:.1f} bps")
+                summary_lines.append("后续观测里，" + "，".join(pieces) + "。")
+            outage_hold_count = int((event.get("follow_up") or {}).get("outage_hold_count") or 0)
+            if outage_hold_count > 0:
+                summary_lines.append(f"开仓后的管理阶段又遇到 {outage_hold_count} 次模型 503/超时回退为 hold。")
+            if (
+                latest_unrealized is not None
+                and current_position is None
+                and close_unrealized_pnl is None
+                and event["review_status"] == "pending"
+            ):
+                summary_lines.append(f"最近一次跟踪时，这笔仓位相关浮盈亏约 {latest_unrealized:.4f} USDT。")
+        elif event["phase"] == "exit":
+            pre_close_pnl = _review_safe_float(event["position_before"].get("unrealized_pnl"))
+            if pre_close_pnl is None or abs(pre_close_pnl) < 1e-9:
+                event["review_status"] = "flat_exit"
+                summary_lines.append("平仓前盈亏接近打平，这更像一次中性降风险处理。")
+            elif pre_close_pnl > 0:
+                event["review_status"] = "profit_exit"
+                summary_lines.append(f"平仓前这笔仓位处于浮盈，约 {pre_close_pnl:.4f} USDT。")
+            else:
+                event["review_status"] = "loss_exit"
+                summary_lines.append(f"平仓前这笔仓位处于浮亏，约 {pre_close_pnl:.4f} USDT。")
+            holding_minutes = _review_safe_float((event.get("pair") or {}).get("holding_minutes"))
+            if holding_minutes is not None:
+                summary_lines.append(f"对应开仓大约持有了 {holding_minutes:.1f} 分钟。")
+        else:
+            event["review_status"] = "pending"
+            summary_lines.append("这条记录暂时无法归类到标准开仓或平仓动作。")
+
+        blockers = (event.get("follow_up") or {}).get("blockers") or []
+        if blockers:
+            blocker_text = "，".join(
+                f"{item.get('label')} x{int(item.get('count') or 0)}"
+                for item in blockers[:3]
+            )
+            summary_lines.append(f"后续阻塞原因主要是：{blocker_text}。")
+        if event.get("cost", {}).get("one_way_bps") is not None:
+            summary_lines.append(f"估算单边执行成本约 {float(event['cost']['one_way_bps']):.2f} bps。")
+
+        event["review_status_text"] = _review_status_label(event["review_status"])
+        event["review_status_tone"] = _review_status_tone(event["review_status"])
+        event["summary_lines"] = summary_lines[:5]
+        event.pop("_row_index", None)
+
+    dominant_symbol = symbol_counter.most_common(1)[0][0] if symbol_counter else None
+    dominant_entry_side = entry_side_counter.most_common(1)[0][0] if entry_side_counter else None
+    latest_entry = entry_events[-1] if entry_events else None
+
+    insights: List[str] = []
+    if matched_current_positions:
+        if total_current_unrealized < 0:
+            insights.append(
+                f"当前仍有 {len(matched_current_positions)} 笔自治仓位处于浮亏，合计约 {total_current_unrealized:.4f} USDT。"
+            )
+        else:
+            insights.append(
+                f"当前仍有 {len(matched_current_positions)} 笔自治仓位在跟踪中，合计浮盈亏约 {total_current_unrealized:.4f} USDT。"
+            )
+    elif latest_entry:
+        latest_entry_unrealized = _review_safe_float((latest_entry.get("follow_up") or {}).get("latest_unrealized_pnl"))
+        if latest_entry_unrealized is not None:
+            insights.append(
+                f"最近一笔放行是 {latest_entry.get('symbol') or '--'} {latest_entry.get('action_label') or ''}，日志最新跟踪浮盈亏约 {latest_entry_unrealized:.4f} USDT。"
+            )
+    if exit_events:
+        insights.append(
+            f"最近 {len(exit_events)} 次平仓里，有 {losing_close_count} 次是在浮亏状态下触发的。"
+        )
+    if entry_events and entries_without_research_count == len(entry_events):
+        insights.append("最近所有开仓都没有研究候选可用，自治代理基本只靠行情和聚合信号直接下决定。")
+    elif entries_without_research_count > 0:
+        insights.append(
+            f"最近 {entries_without_research_count}/{len(entry_events)} 次开仓没有研究候选支撑。"
+        )
+    if repeated_same_direction_entries > 0:
+        symbol_text = dominant_symbol or "同一币种"
+        insights.append(
+            f"最近出现 {repeated_same_direction_entries} 次同币种同方向连续放行，{symbol_text} 最明显，需要重点检查仓位感知与事件配对。"
+        )
+    if outage_after_entry_count > 0:
+        insights.append(
+            f"最近有 {outage_after_entry_count} 次开仓后，后续管理阶段又遇到模型 503/超时回退为 hold。"
+        )
+    if dominant_entry_side == "short" and entry_events:
+        insights.append(f"最近开仓以做空为主，占 {entry_side_counter['short']}/{len(entry_events)}。")
+    if not insights:
+        insights.append("最近没有足够多的放行记录，复盘结果偏样本不足，建议继续积累交易样本。")
+
+    return {
+        "summary": {
+            "submitted_count": len(events),
+            "entry_count": len(entry_events),
+            "close_count": len(exit_events),
+            "losing_close_count": losing_close_count,
+            "entries_without_research_count": entries_without_research_count,
+            "repeated_same_direction_entries": repeated_same_direction_entries,
+            "outage_after_entry_count": outage_after_entry_count,
+            "unmatched_entry_count": len(unmatched_entries),
+            "current_open_count": len(matched_current_positions),
+            "current_open_unrealized_pnl": round(total_current_unrealized, 6),
+            "dominant_symbol": dominant_symbol,
+            "dominant_entry_side": dominant_entry_side,
+            "latest_entry_symbol": latest_entry.get("symbol") if latest_entry else None,
+            "latest_entry_at": latest_entry.get("timestamp") if latest_entry else None,
+            "top_rejection_reasons": [
+                {"label": label, "count": count}
+                for label, count in primary_counter.most_common(5)
+            ],
+        },
+        "insights": insights[:6],
+        "items": list(reversed(events[-review_limit:])),
+    }
+
+
 @router.get("/runtime-config")
 async def get_ai_runtime_config(request: Request):
     """Expose lightweight runtime switches for the AI research UI."""
@@ -443,6 +1132,14 @@ async def get_ai_autonomous_agent_journal(request: Request, limit: int = 50):
     ensure_ai_research_runtime_state(request.app)
     rows = autonomous_trading_agent.read_journal(limit=limit)
     return {"items": rows, "count": len(rows)}
+
+
+@router.get("/autonomous-agent/review")
+async def get_ai_autonomous_agent_review(request: Request, limit: int = 12):
+    ensure_ai_research_runtime_state(request.app)
+    payload = _build_autonomous_agent_review(limit=limit)
+    payload["learning_memory"] = autonomous_trading_agent.get_learning_memory(force=True)
+    return payload
 
 
 @router.get("/autonomous-agent/symbol-ranking")

@@ -17,6 +17,13 @@ import pandas as pd
 from loguru import logger
 
 from config.settings import settings
+from core.ai.autonomous_learning import (
+    build_blocked_symbol_side_map,
+    build_learning_memory,
+    coerce_learning_memory,
+    default_learning_memory,
+    normalize_symbol,
+)
 from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.ai.signal_aggregator import signal_aggregator
 from core.backtest.cost_models import dynamic_slippage_rate, microstructure_proxies
@@ -31,6 +38,8 @@ from core.utils.openai_responses import (
     build_openai_headers,
     build_responses_payload,
     extract_response_text,
+    is_retryable_openai_status,
+    openai_endpoint_targets,
     read_aiohttp_responses_json,
     responses_endpoint,
 )
@@ -404,12 +413,14 @@ class AutonomousTradingAgent:
         self._cache_root = root
         self._journal_path = self._cache_root / "autonomous_agent_journal.jsonl"
         self._profile_path = self._cache_root / "autonomous_agent_profile.json"
+        self._learning_memory_path = self._cache_root / "autonomous_agent_learning_memory.json"
         self._overlay_path = Path(
             os.environ.get("AI_AGENT_CONFIG_PATH", str(self._cache_root / "agent_runtime_config.json"))
         )
 
         self._load_overlay()
         self._profile = self._load_profile()
+        self._learning_memory = self._load_learning_memory()
         self._last_error: Optional[str] = None
         self._last_run_at: Optional[str] = None
         self._last_decision: Optional[Dict[str, Any]] = None
@@ -426,6 +437,7 @@ class AutonomousTradingAgent:
         self._model_feedback_last_failure_kind: Optional[str] = None
         self._model_feedback_last_failure_error: Optional[str] = None
         self._model_feedback_alert_sent_at: Optional[float] = None
+        self._last_learning_refresh_at: Optional[float] = None
 
     def _provider_base_url(self, provider: str) -> str:
         provider = _normalize_provider(provider)
@@ -446,19 +458,45 @@ class AutonomousTradingAgent:
     def _provider_api_key(self, provider: str) -> str:
         provider = _normalize_provider(provider)
         if provider == "codex":
-            return str(getattr(settings, "OPENAI_API_KEY", "") or "").strip()
+            primary = str(getattr(settings, "OPENAI_API_KEY", "") or "").strip()
+            if primary:
+                return primary
+            return str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip()
         if provider == "claude":
             return str(getattr(settings, "ANTHROPIC_API_KEY", "") or "").strip()
         return str(getattr(settings, "ZHIPU_API_KEY", "") or "").strip()
 
+    def _provider_endpoint_targets(self, provider: str) -> List[Dict[str, Any]]:
+        provider = _normalize_provider(provider)
+        if provider == "codex":
+            return openai_endpoint_targets(
+                primary_base_url=str(getattr(settings, "OPENAI_BASE_URL", "") or _DEFAULT_OPENAI_BASE_URL),
+                backup_base_urls=getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "",
+                primary_api_key=str(getattr(settings, "OPENAI_API_KEY", "") or "").strip(),
+                backup_api_key=str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip(),
+            )
+        return [
+            {
+                "index": 0,
+                "base_url": self._provider_base_url(provider),
+                "api_key": self._provider_api_key(provider),
+                "is_backup": False,
+            }
+        ]
+
     def _provider_catalog(self) -> Dict[str, Dict[str, Any]]:
         providers: Dict[str, Dict[str, Any]] = {}
         for item in sorted(_SUPPORTED_PROVIDERS):
+            targets = self._provider_endpoint_targets(item)
+            base_urls = [str(target.get("base_url") or "").rstrip("/") for target in targets if str(target.get("base_url") or "").strip()]
             providers[item] = {
-                "available": bool(self._provider_api_key(item)),
+                "available": any(bool(str(target.get("api_key") or "").strip()) for target in targets),
                 "default_model": self._provider_model(item),
-                "base_url": self._provider_base_url(item),
+                "base_url": (base_urls[0] if base_urls else self._provider_base_url(item)),
             }
+            if item == "codex" and len(base_urls) > 1:
+                providers[item]["backup_base_urls"] = base_urls[1:]
+                providers[item]["failover_enabled"] = True
         return providers
 
     def _resolve_provider(self, provider: str, providers: Dict[str, Dict[str, Any]]) -> tuple[str, bool]:
@@ -709,7 +747,9 @@ class AutonomousTradingAgent:
             "last_symbol_scan": self._last_symbol_scan,
             "model_feedback_guard": self._model_feedback_guard_status(),
             "profile": dict(self._profile or _default_profile()),
+            "learning_memory": dict(self._learning_memory or {}),
             "journal_path": str(self._journal_path),
+            "learning_memory_path": str(self._learning_memory_path),
         }
 
     def _model_feedback_guard_status(self) -> Dict[str, Any]:
@@ -915,14 +955,13 @@ class AutonomousTradingAgent:
         user_prompt: str,
     ) -> Dict[str, Any]:
         provider = _normalize_provider(provider)
-        api_key = self._provider_api_key(provider)
-        if not api_key:
-            raise RuntimeError(f"{provider}_api_key_missing")
-
         timeout = aiohttp.ClientTimeout(total=max(1, int(timeout_ms)) / 1000.0)
         base_url = self._provider_base_url(provider)
 
         if provider == "claude":
+            api_key = self._provider_api_key(provider)
+            if not api_key:
+                raise RuntimeError(f"{provider}_api_key_missing")
             url = f"{base_url}/v1/messages" if not base_url.endswith("/v1") else f"{base_url}/messages"
             headers = {
                 "x-api-key": api_key,
@@ -955,8 +994,9 @@ class AutonomousTradingAgent:
             return _extract_json_obj(text)
 
         if provider == "codex":
-            url = responses_endpoint(base_url)
-            headers = build_openai_headers(api_key)
+            targets = self._provider_endpoint_targets(provider)
+            if not any(bool(str(target.get("api_key") or "").strip()) for target in targets):
+                raise RuntimeError(f"{provider}_api_key_missing")
             payload = build_responses_payload(
                 model=model,
                 messages=[
@@ -969,16 +1009,57 @@ class AutonomousTradingAgent:
                 stream=False,
             )
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
-                    if resp.status >= 400:
-                        body = (await resp.text())[:300]
-                        raise RuntimeError(f"{provider}_http_{resp.status}:{body}")
-                    data = await read_aiohttp_responses_json(resp)
-            text = extract_response_text(data)
-            if not text:
-                raise RuntimeError(f"{provider}_empty_content")
-            return _extract_json_obj(text)
+                last_exc: Optional[BaseException] = None
+                total_targets = len(targets)
+                for idx, target in enumerate(targets):
+                    target_base_url = str(target.get("base_url") or "").rstrip("/")
+                    target_api_key = str(target.get("api_key") or "").strip()
+                    if not target_base_url or not target_api_key:
+                        continue
+                    url = responses_endpoint(target_base_url)
+                    headers = build_openai_headers(target_api_key)
+                    try:
+                        async with session.post(url, headers=headers, json=payload) as resp:
+                            if resp.status >= 400:
+                                body = (await resp.text())[:300]
+                                err = RuntimeError(f"{provider}_http_{resp.status}:{body}")
+                                if idx + 1 < total_targets and is_retryable_openai_status(resp.status):
+                                    last_exc = err
+                                    logger.warning(
+                                        f"autonomous_agent codex primary endpoint failed with {resp.status}; "
+                                        f"trying backup {idx + 2}/{total_targets}"
+                                    )
+                                    continue
+                                raise err
+                            data = await read_aiohttp_responses_json(resp)
+                        text = extract_response_text(data)
+                        if not text:
+                            err = RuntimeError(f"{provider}_empty_content")
+                            if idx + 1 < total_targets:
+                                last_exc = err
+                                logger.warning(
+                                    f"autonomous_agent codex endpoint returned empty content; "
+                                    f"trying backup {idx + 2}/{total_targets}"
+                                )
+                                continue
+                            raise err
+                        return _extract_json_obj(text)
+                    except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                        if idx + 1 < total_targets:
+                            last_exc = exc
+                            logger.warning(
+                                f"autonomous_agent codex endpoint transport failure; "
+                                f"trying backup {idx + 2}/{total_targets}: {exc}"
+                            )
+                            continue
+                        raise
+                if last_exc is not None:
+                    raise last_exc
+                raise RuntimeError(f"{provider}_base_url_missing")
 
+        api_key = self._provider_api_key(provider)
+        if not api_key:
+            raise RuntimeError(f"{provider}_api_key_missing")
         url = f"{base_url}/chat/completions"
         headers = build_openai_headers(api_key)
         payload = {
@@ -1153,6 +1234,12 @@ class AutonomousTradingAgent:
         position_notional = quantity * mark_price if quantity > 0 and mark_price > 0 else 0.0
         base = dict(account_risk_base or {})
         position_cap_notional = _safe_nonnegative_float(base.get("position_cap_notional"), 0.0)
+        same_direction_limit_ratio = _coerce_float(
+            cfg.get("same_direction_max_exposure_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO),
+            _SAME_DIRECTION_MAX_EXPOSURE_RATIO,
+            low=0.2,
+            high=1.0,
+        )
 
         exposure_ratio = 0.0
         remaining_notional = 0.0
@@ -1160,7 +1247,7 @@ class AutonomousTradingAgent:
             exposure_ratio = position_notional / position_cap_notional
             remaining_notional = max(
                 0.0,
-                position_cap_notional * _SAME_DIRECTION_MAX_EXPOSURE_RATIO - position_notional,
+                position_cap_notional * same_direction_limit_ratio - position_notional,
             )
 
         payload.update(
@@ -1168,7 +1255,7 @@ class AutonomousTradingAgent:
                 "position_notional": float(position_notional),
                 "position_cap_notional": float(position_cap_notional),
                 "same_direction_exposure_ratio": float(exposure_ratio),
-                "same_direction_exposure_limit_ratio": float(_SAME_DIRECTION_MAX_EXPOSURE_RATIO),
+                "same_direction_exposure_limit_ratio": float(same_direction_limit_ratio),
                 "same_direction_remaining_notional": float(remaining_notional),
             }
         )
@@ -1483,8 +1570,13 @@ class AutonomousTradingAgent:
         strategy_allocation = _safe_nonnegative_float(account_risk_base.get("strategy_allocation"), 0.0)
         position_cap_notional = _safe_nonnegative_float(account_risk_base.get("position_cap_notional"), 0.0)
         same_direction_limit_ratio = _coerce_float(
-            position.get("same_direction_exposure_limit_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO),
-            _SAME_DIRECTION_MAX_EXPOSURE_RATIO,
+            position.get("same_direction_exposure_limit_ratio", cfg.get("same_direction_max_exposure_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO)),
+            _coerce_float(
+                cfg.get("same_direction_max_exposure_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO),
+                _SAME_DIRECTION_MAX_EXPOSURE_RATIO,
+                low=0.2,
+                high=1.0,
+            ),
             low=0.0,
             high=1.0,
         )
@@ -1713,6 +1805,152 @@ class AutonomousTradingAgent:
             "outage_tight_trailing_stop_pct": float(outage_tight_trailing_stop_pct),
         }
 
+    def _apply_learning_score_adjustments(
+        self,
+        *,
+        row: Dict[str, Any],
+        cfg: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        adjusted = dict(row or {})
+        learning_memory = cfg.get("learning_memory") if isinstance(cfg, dict) else {}
+        adaptive_risk = dict((learning_memory or {}).get("adaptive_risk") or {})
+        blocked_map = build_blocked_symbol_side_map(
+            learning_memory,
+            base_min_confidence=float(cfg.get("min_confidence") or 0.58),
+        )
+        symbol = normalize_symbol(adjusted.get("symbol"))
+        direction = str(adjusted.get("direction") or "").strip().upper()
+        pair_side = "long" if direction == "LONG" else ("short" if direction == "SHORT" else "")
+
+        score = float(adjusted.get("score") or 0.0)
+        tradable_now = bool(adjusted.get("tradable_now"))
+        notes: List[str] = []
+
+        if symbol and pair_side:
+            blocked = blocked_map.get((symbol, pair_side))
+            if blocked:
+                score -= 0.35
+                tradable_now = False
+                notes.append(f"review cooldown {pair_side}")
+
+        require_research = bool(adaptive_risk.get("require_research_for_new_entries"))
+        research = adjusted.get("research") if isinstance(adjusted.get("research"), dict) else {}
+        if require_research and not bool(research.get("candidate_id")) and not bool(adjusted.get("has_position")):
+            score -= 0.12
+            tradable_now = False
+            notes.append("review requires research")
+
+        if bool(adaptive_risk.get("avoid_new_entries_during_service_instability")) and not bool(adjusted.get("has_position")):
+            score -= 0.10
+            if pair_side:
+                tradable_now = False
+            notes.append("service instability")
+
+        if notes:
+            summary = str(adjusted.get("summary") or "").strip()
+            extra = ", ".join(notes)
+            adjusted["summary"] = f"{summary}; {extra}" if summary else extra
+        adjusted["score"] = round(score, 6)
+        adjusted["tradable_now"] = tradable_now
+        return adjusted
+
+    def _apply_learning_entry_guards(
+        self,
+        *,
+        decision: Dict[str, Any],
+        cfg: Dict[str, Any],
+        context_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        updated = dict(decision or {})
+        action = str(updated.get("action") or "").strip().lower()
+        if action not in {"buy", "sell"}:
+            return updated
+
+        learning_memory = cfg.get("learning_memory") if isinstance(cfg, dict) else {}
+        adaptive_risk = dict((learning_memory or {}).get("adaptive_risk") or {})
+        blocked_map = build_blocked_symbol_side_map(
+            learning_memory,
+            base_min_confidence=float(cfg.get("min_confidence") or 0.58),
+        )
+        symbol = normalize_symbol(context_payload.get("symbol") or cfg.get("symbol"))
+        side = "long" if action == "buy" else "short"
+        blocked = blocked_map.get((symbol, side))
+        if blocked:
+            updated["action"] = "hold"
+            updated["reason"] = f"review_cooldown({symbol}:{side})"
+            return updated
+
+        position = context_payload.get("position") if isinstance(context_payload, dict) else {}
+        has_position = bool(str((position or {}).get("side") or "").strip().lower())
+        research = context_payload.get("research_context") if isinstance(context_payload, dict) else {}
+        if (
+            bool(adaptive_risk.get("require_research_for_new_entries"))
+            and not has_position
+            and not bool((research or {}).get("available"))
+        ):
+            updated["action"] = "hold"
+            updated["reason"] = "review_requires_research"
+            return updated
+
+        if (
+            bool(adaptive_risk.get("avoid_new_entries_during_service_instability"))
+            and not has_position
+            and self._current_model_feedback_outage_duration_sec() > 0
+        ):
+            updated["action"] = "hold"
+            updated["reason"] = "review_service_instability"
+            return updated
+        return updated
+
+    async def _handle_market_data_outage(
+        self,
+        *,
+        cfg: Dict[str, Any],
+        context_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        learning_memory = cfg.get("learning_memory") if isinstance(cfg, dict) else {}
+        adaptive_risk = dict((learning_memory or {}).get("adaptive_risk") or {})
+        position = context_payload.get("position") if isinstance(context_payload, dict) else {}
+        position_side = str((position or {}).get("side") or "").strip().lower()
+        unrealized_pnl = float((position or {}).get("unrealized_pnl") or 0.0)
+        fallback_reason = "no_price"
+
+        if position_side in {"long", "short"}:
+            if unrealized_pnl > 0:
+                with contextlib.suppress(Exception):
+                    protection = await execution_engine.tighten_profitable_position_protection(
+                        exchange=str(cfg.get("exchange") or context_payload.get("exchange") or "binance"),
+                        symbol=str(cfg.get("symbol") or context_payload.get("symbol") or "BTC/USDT"),
+                        account_id=str(cfg.get("account_id") or "main"),
+                        current_price=_safe_nonnegative_float((position or {}).get("current_price"), 0.0),
+                        reason="market_data_unavailable",
+                    )
+                    if bool((protection or {}).get("applied")):
+                        fallback_reason = "no_price;profit_protection_armed"
+            elif bool(adaptive_risk.get("force_close_on_data_outage_losing_position")) and unrealized_pnl < 0:
+                close_action = "close_long" if position_side == "long" else "close_short"
+                return {
+                    "action": close_action,
+                    "confidence": 1.0,
+                    "strength": 0.2,
+                    "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
+                    "stop_loss_pct": float(cfg.get("default_stop_loss_pct") or 0.02),
+                    "take_profit_pct": float(cfg.get("default_take_profit_pct") or 0.04),
+                    "reason": f"no_price_exit_{position_side}",
+                }
+            else:
+                fallback_reason = "no_price_with_position"
+
+        return {
+            "action": "hold",
+            "confidence": 0.0,
+            "strength": 0.1,
+            "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
+            "stop_loss_pct": float(cfg.get("default_stop_loss_pct") or 0.02),
+            "take_profit_pct": float(cfg.get("default_take_profit_pct") or 0.04),
+            "reason": fallback_reason,
+        }
+
     async def _build_context(self, cfg: Dict[str, Any]) -> Tuple[Dict[str, Any], pd.DataFrame]:
         market_data = await self._load_market_data(cfg)
         last_price = await self._resolve_last_price(cfg, market_data)
@@ -1797,6 +2035,7 @@ class AutonomousTradingAgent:
             "execution_cost": execution_cost,
             "research_context": research_context,
             "profile": dict(self._profile or _default_profile()),
+            "learning_memory": dict(cfg.get("learning_memory") or self._learning_memory or {}),
             "trading_mode": execution_engine.get_trading_mode(),
         }, market_data
 
@@ -1828,15 +2067,19 @@ class AutonomousTradingAgent:
                 "Always respect account_risk, especially min_confidence, fixed_leverage, and same_direction_remaining_notional.",
                 "Use execution_cost to avoid marginal trades whose expected edge is smaller than estimated fees and slippage.",
                 "If research_context is available, treat its selected_candidate as the current research champion hypothesis unless real-time risk clearly invalidates it.",
+                "Treat learning_memory.adaptive_risk as the realized-trading guardrail layer built from recent outcomes.",
+                "If learning_memory blocks a symbol-side or requires research for fresh entries, default to hold rather than forcing a trade.",
             ],
             "runtime_constraints": {
-                "min_confidence": cfg.get("min_confidence"),
+                "min_confidence": cfg.get("effective_min_confidence", cfg.get("min_confidence")),
                 "fixed_leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
                 "default_stop_loss_pct": cfg.get("default_stop_loss_pct"),
                 "default_take_profit_pct": cfg.get("default_take_profit_pct"),
                 "agent_mode": cfg.get("mode"),
                 "allow_live": cfg.get("allow_live"),
                 "trading_mode": context_payload.get("trading_mode"),
+                "same_direction_max_exposure_ratio": cfg.get("same_direction_max_exposure_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO),
+                "entry_size_scale": cfg.get("entry_size_scale", 1.0),
             },
             "input": context_payload,
         }
@@ -1863,7 +2106,7 @@ class AutonomousTradingAgent:
             take_profit_pct = min(2.0, max(stop_loss_pct * 1.6, float(cfg.get("default_take_profit_pct") or 0.04)))
         reason = str(raw.get("reason") or "model_decision").strip()[:180] or "model_decision"
 
-        min_conf = float(cfg.get("min_confidence") or 0.0)
+        min_conf = float(cfg.get("effective_min_confidence") or cfg.get("min_confidence") or 0.0)
         if action in {"buy", "sell"} and confidence < min_conf:
             action = "hold"
             reason = f"below_min_confidence({confidence:.3f}<{min_conf:.3f})"
@@ -1971,7 +2214,21 @@ class AutonomousTradingAgent:
             "agent_model": str(cfg.get("model") or ""),
             "agent_confidence": float(decision.get("confidence") or 0.0),
             "agent_reason": str(decision.get("reason") or ""),
+            "review_effective_min_confidence": float(
+                cfg.get("effective_min_confidence") or cfg.get("min_confidence") or 0.0
+            ),
+            "review_same_direction_limit_ratio": float(
+                cfg.get("same_direction_max_exposure_ratio") or _SAME_DIRECTION_MAX_EXPOSURE_RATIO
+            ),
+            "review_entry_size_scale": float(cfg.get("entry_size_scale") or 1.0),
         }
+        learning_memory = cfg.get("learning_memory") if isinstance(cfg, dict) else {}
+        lessons = list((learning_memory or {}).get("lessons") or [])
+        if lessons:
+            metadata["review_lessons"] = lessons[:3]
+        guardrails = list((learning_memory or {}).get("guardrails") or [])
+        if guardrails:
+            metadata["review_guardrails"] = guardrails[:3]
         metadata.update(
             self._build_trade_management_metadata(
                 decision=decision,
@@ -2033,7 +2290,13 @@ class AutonomousTradingAgent:
             price=float(price or 0.0),
             timestamp=_utc_now(),
             strategy_name=str(cfg.get("strategy_name") or "AI_AutonomousAgent"),
-            strength=float(decision.get("strength") or 0.5),
+            strength=max(
+                0.1,
+                min(
+                    1.0,
+                    float(decision.get("strength") or 0.5) * float(cfg.get("entry_size_scale") or 1.0),
+                ),
+            ),
             quantity=None,
             stop_loss=stop_loss if stop_loss and stop_loss > 0 else None,
             take_profit=take_profit if take_profit and take_profit > 0 else None,
@@ -2056,7 +2319,7 @@ class AutonomousTradingAgent:
         confidence = _coerce_float(agg.get("confidence", 0.0), 0.0, low=0.0, high=1.0)
         blocked = bool(agg.get("blocked_by_risk"))
         risk_reason = str(agg.get("risk_reason") or "").strip()
-        min_confidence = float(cfg.get("min_confidence") or 0.0)
+        min_confidence = float(cfg.get("effective_min_confidence") or cfg.get("min_confidence") or 0.0)
         bars = max(0, int(context_payload.get("bars") or 0))
         lookback = max(1, int(cfg.get("lookback_bars") or 240))
         vol = abs(float(context_payload.get("realized_vol_annualized") or 0.0))
@@ -2113,7 +2376,7 @@ class AutonomousTradingAgent:
         if any("trade count too low" in item.lower() for item in validation_reasons):
             summary_parts.append("research trade count low")
 
-        return {
+        row = {
             "symbol": str(context_payload.get("symbol") or cfg.get("symbol") or "BTC/USDT"),
             "price": float(context_payload.get("price") or 0.0),
             "direction": direction,
@@ -2139,9 +2402,10 @@ class AutonomousTradingAgent:
                 "validation_reasons": validation_reasons[:3],
             },
         }
+        return self._apply_learning_score_adjustments(row=row, cfg=cfg)
 
     async def get_symbol_scan(self, *, limit: Optional[int] = None, force: bool = False) -> Dict[str, Any]:
-        cfg = self.get_runtime_config()
+        cfg = self._cfg_with_learning_overlays(self.get_runtime_config(), force_learning_refresh=force)
         symbol_mode = _normalize_symbol_mode(cfg.get("symbol_mode"))
         configured_symbol = _normalize_symbol_text(cfg.get("symbol") or "BTC/USDT") or "BTC/USDT"
         selection_top_n = _coerce_int(limit or cfg.get("selection_top_n") or 10, 10, low=3, high=20)
@@ -2176,7 +2440,7 @@ class AutonomousTradingAgent:
                         "risk_reason": "",
                         "bars": 0,
                         "realized_vol_annualized": 0.0,
-                        "threshold_gap": round(0.0 - float(cfg.get("min_confidence") or 0.0), 6),
+                        "threshold_gap": round(0.0 - float(cfg.get("effective_min_confidence") or cfg.get("min_confidence") or 0.0), 6),
                         "summary": f"scan_error:{_format_exception_short(exc)}",
                         "has_position": False,
                         "position_side": "",
@@ -2440,6 +2704,20 @@ class AutonomousTradingAgent:
                 "promotion_target": str(selected_candidate.get("promotion_target") or ""),
                 "validation_reasons": validation_reasons[:3],
             },
+            "learning_memory": {
+                "effective_min_confidence": _safe_nonnegative_float(
+                    cfg.get("effective_min_confidence", cfg.get("min_confidence")),
+                    0.0,
+                ),
+                "same_direction_max_exposure_ratio": _safe_nonnegative_float(
+                    cfg.get("same_direction_max_exposure_ratio"),
+                    _SAME_DIRECTION_MAX_EXPOSURE_RATIO,
+                ),
+                "entry_size_scale": _safe_nonnegative_float(cfg.get("entry_size_scale"), 1.0),
+                "guardrails": list(((cfg.get("learning_memory") or {}).get("guardrails") or []))[:4],
+                "blocked_symbol_sides": list(((cfg.get("learning_memory") or {}).get("blocked_symbol_sides") or []))[:4],
+                "lessons": list(((cfg.get("learning_memory") or {}).get("lessons") or []))[:4],
+            },
             "model_feedback": {
                 "kind": model_feedback_issue.get("kind"),
                 "http_status": model_feedback_issue.get("http_status"),
@@ -2500,6 +2778,108 @@ class AutonomousTradingAgent:
         except Exception as exc:
             logger.warning(f"save autonomous profile failed: {exc}")
 
+    def _load_learning_memory(self) -> Dict[str, Any]:
+        base_min_confidence = float(getattr(settings, "AI_AUTONOMOUS_AGENT_MIN_CONFIDENCE", 0.58) or 0.58)
+        try:
+            if not self._learning_memory_path.exists():
+                return default_learning_memory(base_min_confidence=base_min_confidence)
+            raw = json.loads(self._learning_memory_path.read_text(encoding="utf-8"))
+            return coerce_learning_memory(raw, base_min_confidence=base_min_confidence)
+        except Exception as exc:
+            logger.debug(f"load autonomous learning memory failed: {exc}")
+            return default_learning_memory(base_min_confidence=base_min_confidence)
+
+    def _save_learning_memory(self) -> None:
+        try:
+            self._cache_root.mkdir(parents=True, exist_ok=True)
+            tmp = self._learning_memory_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._learning_memory, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self._learning_memory_path)
+        except Exception as exc:
+            logger.warning(f"save autonomous learning memory failed: {exc}")
+
+    def _positions_for_learning_memory(self, strategy_name: str) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        target_strategy = str(strategy_name or "").strip()
+        for position in position_manager.get_all_positions():
+            try:
+                payload = position.to_dict() if hasattr(position, "to_dict") else dict(position)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            strategy = str(payload.get("strategy") or "").strip()
+            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            source = str(metadata.get("source") or "").strip().lower()
+            if target_strategy and strategy != target_strategy and source != "ai_autonomous_agent":
+                continue
+            rows.append(payload)
+        return rows
+
+    def _refresh_learning_memory(self, *, cfg: Optional[Dict[str, Any]] = None, force: bool = False) -> Dict[str, Any]:
+        runtime_cfg = dict(cfg or self.get_runtime_config())
+        now_ts = time.time()
+        refresh_ttl_sec = 300.0
+        if (
+            not force
+            and self._last_learning_refresh_at is not None
+            and now_ts - float(self._last_learning_refresh_at) < refresh_ttl_sec
+        ):
+            return dict(self._learning_memory or {})
+
+        strategy_name = str(runtime_cfg.get("strategy_name") or "AI_AutonomousAgent")
+        journal_rows = self.read_journal(limit=800)
+        live_review = execution_engine.get_live_trade_review(
+            limit=500,
+            strategy=strategy_name,
+            hours=24 * 14,
+        )
+        positions = self._positions_for_learning_memory(strategy_name)
+        memory = build_learning_memory(
+            journal_rows=journal_rows,
+            live_review=live_review,
+            positions=positions,
+            base_min_confidence=float(runtime_cfg.get("min_confidence") or 0.58),
+        )
+        self._learning_memory = coerce_learning_memory(
+            memory,
+            base_min_confidence=float(runtime_cfg.get("min_confidence") or 0.58),
+        )
+        self._last_learning_refresh_at = now_ts
+        self._save_learning_memory()
+        return dict(self._learning_memory)
+
+    def get_learning_memory(self, *, force: bool = False) -> Dict[str, Any]:
+        return self._refresh_learning_memory(force=force)
+
+    def _cfg_with_learning_overlays(self, cfg: Dict[str, Any], *, force_learning_refresh: bool = False) -> Dict[str, Any]:
+        base_cfg = dict(cfg or {})
+        learning_memory = self._refresh_learning_memory(cfg=base_cfg, force=force_learning_refresh)
+        adaptive_risk = dict(learning_memory.get("adaptive_risk") or {})
+        effective_min_confidence = _coerce_float(
+            adaptive_risk.get("effective_min_confidence", base_cfg.get("min_confidence", 0.58)),
+            float(base_cfg.get("min_confidence") or 0.58),
+            low=0.0,
+            high=1.0,
+        )
+        same_direction_ratio = _coerce_float(
+            adaptive_risk.get("same_direction_max_exposure_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO),
+            _SAME_DIRECTION_MAX_EXPOSURE_RATIO,
+            low=0.2,
+            high=1.0,
+        )
+        entry_size_scale = _coerce_float(
+            adaptive_risk.get("entry_size_scale", 1.0),
+            1.0,
+            low=0.25,
+            high=1.0,
+        )
+        base_cfg["learning_memory"] = learning_memory
+        base_cfg["effective_min_confidence"] = float(max(float(base_cfg.get("min_confidence") or 0.0), effective_min_confidence))
+        base_cfg["same_direction_max_exposure_ratio"] = float(same_direction_ratio)
+        base_cfg["entry_size_scale"] = float(entry_size_scale)
+        return base_cfg
+
     def _update_profile(self, decision: Dict[str, Any], *, submitted: bool) -> None:
         profile = dict(self._profile or _default_profile())
         action = str(decision.get("action") or "hold")
@@ -2555,7 +2935,10 @@ class AutonomousTradingAgent:
         return rows
 
     async def run_once(self, *, trigger: str = "manual", force: bool = False) -> Dict[str, Any]:
-        cfg = self.get_runtime_config()
+        cfg = self._cfg_with_learning_overlays(
+            self.get_runtime_config(),
+            force_learning_refresh=bool(force),
+        )
         if not bool(cfg.get("enabled")) and not force:
             result = {
                 "request_id": str(uuid.uuid4())[:8],
@@ -2633,15 +3016,10 @@ class AutonomousTradingAgent:
         research_context = context_payload.get("research_context") if isinstance(context_payload, dict) else {}
         raw_decision_source = "synthetic"
         if float(context_payload.get("price") or 0.0) <= 0:
-            raw_decision = {
-                "action": "hold",
-                "confidence": 0.0,
-                "strength": 0.1,
-                "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
-                "stop_loss_pct": float(cfg.get("default_stop_loss_pct") or 0.02),
-                "take_profit_pct": float(cfg.get("default_take_profit_pct") or 0.04),
-                "reason": "no_price",
-            }
+            raw_decision = await self._handle_market_data_outage(
+                cfg=effective_cfg,
+                context_payload=context_payload,
+            )
             decision = self._normalize_decision(raw_decision, effective_cfg, context_payload)
         else:
             provider = str(effective_cfg.get("provider") or "codex")
@@ -2681,6 +3059,7 @@ class AutonomousTradingAgent:
                 failure = self._record_model_feedback_failure(normalized_exc)
                 outage_duration_sec = self._current_model_feedback_outage_duration_sec()
                 outage_protection_result: Optional[Dict[str, Any]] = None
+                forced_outage_close = False
                 if outage_duration_sec >= float(_MODEL_FEEDBACK_OUTAGE_ALERT_SEC):
                     outage_protection_result = await self._protect_profitable_local_position_during_model_outage(
                         cfg=effective_cfg,
@@ -2688,6 +3067,26 @@ class AutonomousTradingAgent:
                         outage_duration_sec=outage_duration_sec,
                         model_feedback_issue=model_feedback_issue,
                     )
+                    position_payload = context_payload.get("position") if isinstance(context_payload, dict) else {}
+                    position_side = str((position_payload or {}).get("side") or "").strip().lower()
+                    unrealized_pnl = float((position_payload or {}).get("unrealized_pnl") or 0.0)
+                    adaptive_risk = dict((effective_cfg.get("learning_memory") or {}).get("adaptive_risk") or {})
+                    if (
+                        position_side in {"long", "short"}
+                        and unrealized_pnl < 0
+                        and bool(adaptive_risk.get("force_close_on_data_outage_losing_position"))
+                    ):
+                        raw_decision = {
+                            "action": "close_long" if position_side == "long" else "close_short",
+                            "confidence": 1.0,
+                            "strength": 0.2,
+                            "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
+                            "stop_loss_pct": effective_cfg.get("default_stop_loss_pct"),
+                            "take_profit_pct": effective_cfg.get("default_take_profit_pct"),
+                            "reason": f"model_outage_exit_{position_side}",
+                        }
+                        raw_decision_source = "fallback"
+                        forced_outage_close = True
                 if failure:
                     await self._send_model_feedback_outage_alert(
                         provider=provider,
@@ -2697,20 +3096,27 @@ class AutonomousTradingAgent:
                         context_payload=context_payload,
                         failure=failure,
                     )
-                fallback_reason = f"model_error:{_format_exception_short(normalized_exc)}"
-                if bool((outage_protection_result or {}).get("applied")):
-                    fallback_reason = f"{fallback_reason};profit_protection_armed"
-                raw_decision = {
-                    "action": "hold",
-                    "confidence": 0.0,
-                    "strength": 0.1,
-                    "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
-                    "stop_loss_pct": effective_cfg.get("default_stop_loss_pct"),
-                    "take_profit_pct": effective_cfg.get("default_take_profit_pct"),
-                    "reason": fallback_reason,
-                }
-                raw_decision_source = "fallback"
+                if not forced_outage_close:
+                    fallback_reason = f"model_error:{_format_exception_short(normalized_exc)}"
+                    if bool((outage_protection_result or {}).get("applied")):
+                        fallback_reason = f"{fallback_reason};profit_protection_armed"
+                    raw_decision = {
+                        "action": "hold",
+                        "confidence": 0.0,
+                        "strength": 0.1,
+                        "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
+                        "stop_loss_pct": effective_cfg.get("default_stop_loss_pct"),
+                        "take_profit_pct": effective_cfg.get("default_take_profit_pct"),
+                        "reason": fallback_reason,
+                    }
+                    raw_decision_source = "fallback"
             decision = self._normalize_decision(raw_decision, effective_cfg, context_payload)
+
+        decision = self._apply_learning_entry_guards(
+            decision=decision,
+            cfg=effective_cfg,
+            context_payload=context_payload,
+        )
 
         cooldown_sec = int(effective_cfg.get("cooldown_sec") or 0)
         if (
@@ -2809,6 +3215,8 @@ class AutonomousTradingAgent:
         self._last_diagnostics = diagnostics
         self._last_symbol_scan = selection
         self._tick_count += 1
+        if bool(execution.get("submitted")):
+            self._refresh_learning_memory(cfg=effective_cfg, force=True)
 
         return {
             "timestamp": now_iso,

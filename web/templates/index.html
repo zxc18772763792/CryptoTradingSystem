@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
-    <link rel="stylesheet" href="/static/css/style.css?v=79">
+    <link rel="stylesheet" href="/static/css/style.css?v=81">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
@@ -1680,7 +1680,13 @@
                                     <div class="ai-auto-step-desc">启动后它会持续盯盘、自动决策，并在满足条件时直接提交买卖动作。</div>
                                     <div id="ai-agent-info" class="ai-auto-step-info">加载中...</div>
                                     <div class="ai-agent-section">
-                                        <div class="ai-agent-section-title">为什么现在是 Hold</div>
+                                        <div class="ai-agent-section-head">
+                                            <div>
+                                                <div class="ai-agent-section-title">为什么现在是 Hold / 观望</div>
+                                                <div class="ai-agent-section-subtitle">把当前不下单的主因、关键状态和补充说明拆开看。</div>
+                                            </div>
+                                            <div id="ai-agent-hold-badge" class="ai-agent-section-badge">等待诊断</div>
+                                        </div>
                                         <div id="ai-agent-reasons" class="ai-agent-reasons-box">加载中...</div>
                                     </div>
                                     <div class="ai-agent-section">
@@ -1739,6 +1745,13 @@
                                     </div>
                                     <div class="ai-auto-step-desc">先看模型最近给出的动作和异常，再决定继续运行、单次试跑，还是回去调整配置。</div>
                                     <div id="ai-agent-journal" class="ai-agent-journal-box">加载中...</div>
+                                    <div class="ai-auto-step-head ai-auto-step-head-subsection">
+                                        <div class="ai-auto-step-title">最近放行交易复盘</div>
+                                        <button class="btn btn-sm" type="button" onclick="agentRefreshReview()">刷新复盘</button>
+                                    </div>
+                                    <div class="ai-auto-step-desc">把真正放行的开仓和平仓单独拎出来，快速看最近亏损是来自方向错误、平仓过慢，还是模型服务异常导致管理失灵。</div>
+                                    <div id="ai-agent-review-summary" class="ai-agent-review-summary">加载中...</div>
+                                    <div id="ai-agent-review" class="ai-agent-review-box">加载中...</div>
                                 </div>
                             </section>
                         </div>
@@ -2426,7 +2439,7 @@
     <script charset="utf-8" src="/static/js/ai_research.js?v=31"></script>
     <script charset="utf-8" src="/static/js/ai_research_diagnostics.js?v=1"></script>
     <script charset="utf-8" src="/static/js/ai_research_runtime.js?v=5"></script>
-    <script charset="utf-8" src="/static/js/ai_research_agent.js?v=3"></script>
+    <script charset="utf-8" src="/static/js/ai_research_agent.js?v=5"></script>
     <script charset="utf-8" src="/static/js/news_tab_runtime.js?v=11"></script>
     <script charset="utf-8" src="/static/js/dashboard_unstructured_news.js?v=13"></script>
 </body>

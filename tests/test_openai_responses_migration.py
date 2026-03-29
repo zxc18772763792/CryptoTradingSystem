@@ -53,6 +53,32 @@ class _FakeSession:
         return _FakeResponse(self._payload, status=self._status, text_payload=self._text_payload, headers=self._headers)
 
 
+class _FakeSequenceSession:
+    def __init__(self, *, capture: dict, responses: list[_FakeResponse], **kwargs):
+        self._capture = capture
+        self._responses = list(responses)
+        self._capture["session_kwargs"] = kwargs
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def post(self, url, *, headers=None, json=None):
+        self._capture.setdefault("urls", []).append(url)
+        self._capture.setdefault("requests", []).append(
+            {
+                "url": url,
+                "headers": headers,
+                "json": json,
+            }
+        )
+        if not self._responses:
+            raise AssertionError("unexpected extra request")
+        return self._responses.pop(0)
+
+
 class _SyncResponse:
     def __init__(self, payload, status_code: int = 200, *, text_payload: str | None = None, headers: dict | None = None):
         self._payload = payload
@@ -202,6 +228,103 @@ def test_autonomous_agent_codex_uses_responses_api(monkeypatch, tmp_path):
     assert capture["url"] == "https://example.test/v1/responses"
     assert capture["json"]["text"]["format"]["type"] == "json_object"
     assert capture["json"]["max_output_tokens"] == 256
+
+
+def test_autonomous_agent_codex_fails_over_to_backup_relay(monkeypatch, tmp_path):
+    import core.ai.autonomous_agent as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://primary.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "https://backup.test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+
+    capture = {}
+    response_payload = {
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": (
+                            '{"action":"buy","confidence":0.81,"strength":0.7,'
+                            '"leverage":1,"stop_loss_pct":0.02,"take_profit_pct":0.04,'
+                            '"reason":"backup_relay"}'
+                        ),
+                    }
+                ],
+            }
+        ]
+    }
+    responses = [
+        _FakeResponse({"error": {"message": "Service temporarily unavailable"}}, status=503),
+        _FakeResponse(response_payload, status=200),
+    ]
+    monkeypatch.setattr(
+        module.aiohttp,
+        "ClientSession",
+        lambda **kwargs: _FakeSequenceSession(capture=capture, responses=responses, **kwargs),
+    )
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent")
+    result = asyncio.run(
+        agent._call_provider(
+            provider="codex",
+            model="gpt-5.4",
+            timeout_ms=8000,
+            max_tokens=256,
+            temperature=0.1,
+            system_prompt="sys",
+            user_prompt="usr",
+        )
+    )
+
+    assert result["reason"] == "backup_relay"
+    assert capture["urls"] == [
+        "https://primary.test/v1/responses",
+        "https://backup.test/v1/responses",
+    ]
+
+
+def test_research_context_generator_fails_over_to_backup_relay(monkeypatch):
+    import core.ai.research_context_generator as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://primary.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "https://backup.test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+
+    capture = {}
+    response_payload = {
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": '{"hypothesis":"backup relay ok"}',
+                    }
+                ],
+            }
+        ]
+    }
+    responses = [
+        _FakeResponse({"error": {"message": "Service temporarily unavailable"}}, status=503),
+        _FakeResponse(response_payload, status=200),
+    ]
+    monkeypatch.setattr(
+        module.aiohttp,
+        "ClientSession",
+        lambda **kwargs: _FakeSequenceSession(capture=capture, responses=responses, **kwargs),
+    )
+
+    result = asyncio.run(module._call_openai_responses_json("prompt", timeout=10))
+
+    assert result == {"hypothesis": "backup relay ok"}
+    assert capture["urls"] == [
+        "https://primary.test/v1/responses",
+        "https://backup.test/v1/responses",
+    ]
 
 
 def test_async_glm_client_openai_branch_normalizes_responses(monkeypatch):

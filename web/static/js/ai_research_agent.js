@@ -5,6 +5,7 @@
   const AI_UI_TIMEZONE = 'Asia/Singapore';
   const AGENT_STATUS_API = '/ai/autonomous-agent/status';
   const AGENT_JOURNAL_API = '/ai/autonomous-agent/journal';
+  const AGENT_REVIEW_API = '/ai/autonomous-agent/review';
   const AGENT_START_API = '/ai/autonomous-agent/start';
   const AGENT_STOP_API = '/ai/autonomous-agent/stop';
   const AGENT_RUN_ONCE_API = '/ai/autonomous-agent/run-once';
@@ -119,6 +120,12 @@
     return 'is-info';
   }
 
+  function reasonKey(item = {}) {
+    const label = String(item.label || item.code || '').trim().toLowerCase();
+    const detail = String(item.detail || '').trim().toLowerCase();
+    return `${label}::${detail}`;
+  }
+
   function formatRatio(value, digits = 3) {
     const num = Number(value);
     if (!Number.isFinite(num)) return '--';
@@ -130,6 +137,23 @@
     if (!Number.isFinite(value) || value <= 0) return '--';
     if (value < 60) return `${Math.round(value)}s`;
     return `${(value / 60).toFixed(value >= 600 ? 0 : 1)} min`;
+  }
+
+  function formatNumber(value, digits = 2) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return '--';
+    return number.toFixed(digits);
+  }
+
+  function formatSigned(value, digits = 2, suffix = '') {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return '--';
+    const prefix = number > 0 ? '+' : '';
+    return `${prefix}${number.toFixed(digits)}${suffix}`;
+  }
+
+  function reviewToneClass(tone) {
+    return toneClass(tone || 'info');
   }
 
   function describeModelFeedback(status = {}, diagnostics = {}) {
@@ -343,6 +367,7 @@
 
   function renderAgentDiagnostics(status = {}, cfg = {}) {
     const el = document.getElementById('ai-agent-reasons');
+    const badgeEl = document.getElementById('ai-agent-hold-badge');
     if (!el) return;
 
     const diagnostics = status.last_diagnostics || {};
@@ -356,14 +381,34 @@
     const research = diagnostics.research || {};
     const modelOutput = describeModelOutput(diagnostics);
     const executionCost = describeExecutionCost(diagnostics);
+    const currentAction = String(status.last_decision?.action || diagnostics.action || 'hold').trim().toLowerCase();
+    const badgeTone = primary?.tone || (currentAction === 'hold' ? 'warn' : 'info');
+    const badgeText = currentAction === 'hold'
+      ? '当前动作: Hold / 观望'
+      : `当前动作: ${decisionActionText(currentAction)}`;
+
+    if (badgeEl) {
+      badgeEl.className = `ai-agent-section-badge ${toneClass(badgeTone)}`;
+      badgeEl.textContent = badgeText;
+    }
 
     if (!primary && !items.length) {
+      if (badgeEl) {
+        badgeEl.className = 'ai-agent-section-badge';
+        badgeEl.textContent = '等待诊断';
+      }
       el.innerHTML = '<div class="ai-agent-empty">暂无结构化原因，先跑一轮就会生成。</div>';
       return;
     }
 
+    const secondaryItems = items.filter((item) => {
+      if (!primary) return true;
+      return reasonKey(item) !== reasonKey(primary);
+    });
+
     const primarySummary = primary
       ? `<div class="ai-agent-reason-primary ${toneClass(primary.tone)}">
+          <div class="ai-agent-reason-primary-kicker">主因</div>
           <div class="ai-agent-reason-primary-label">${esc(primary.label || '当前状态')}</div>
           <div class="ai-agent-reason-primary-detail">${esc(primary.detail || diagnostics.summary || '--')}</div>
         </div>`
@@ -402,23 +447,36 @@
       </div>
     `;
 
-    const detailList = items.length
-      ? `<div class="ai-agent-reason-list">${items.map((item) => `
+    const noteGrid = (modelOutput.detail || executionCost.detail)
+      ? `<div class="ai-agent-note-grid">
+          ${modelOutput.detail
+            ? `<div class="ai-agent-note-card">
+                <div class="ai-agent-note-label">模型补充说明</div>
+                <div class="ai-agent-note-body">${esc(modelOutput.detail)}</div>
+              </div>`
+            : ''}
+          ${executionCost.detail
+            ? `<div class="ai-agent-note-card">
+                <div class="ai-agent-note-label">成本补充说明</div>
+                <div class="ai-agent-note-body">${esc(executionCost.detail)}</div>
+              </div>`
+            : ''}
+        </div>`
+      : '';
+
+    const detailList = secondaryItems.length
+      ? `<div class="ai-agent-reason-section">
+          <div class="ai-agent-reason-section-title">仍在限制下单的因素</div>
+          <div class="ai-agent-reason-list">${secondaryItems.map((item) => `
           <div class="ai-agent-reason-chip ${toneClass(item.tone)}">
             <div class="ai-agent-reason-chip-label">${esc(item.label || item.code || '--')}</div>
             <div class="ai-agent-reason-chip-detail">${esc(item.detail || '--')}</div>
           </div>
-        `).join('')}</div>`
+        `).join('')}</div>
+        </div>`
       : '';
 
-    const debugNote = modelOutput.detail
-      ? `<div class="ai-agent-muted">${esc(modelOutput.detail)}</div>`
-      : '';
-    const costNote = executionCost.detail
-      ? `<div class="ai-agent-muted">${esc(executionCost.detail)}</div>`
-      : '';
-
-    el.innerHTML = `${primarySummary}${meta}${debugNote}${costNote}${detailList}`;
+    el.innerHTML = `${primarySummary}${meta}${noteGrid}${detailList}`;
   }
 
   function renderAgentRanking(scan = null, cfg = {}) {
@@ -628,6 +686,218 @@
     }
   }
 
+  function renderAgentReview(payload = {}) {
+    const summaryEl = document.getElementById('ai-agent-review-summary');
+    const listEl = document.getElementById('ai-agent-review');
+    if (!summaryEl || !listEl) return;
+
+    const summary = payload?.summary || {};
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    const insights = Array.isArray(payload?.insights) ? payload.insights : [];
+    const learningMemory = payload?.learning_memory || {};
+    const adaptiveRisk = learningMemory?.adaptive_risk || {};
+    const learningLessons = Array.isArray(learningMemory?.lessons) ? learningMemory.lessons : [];
+    const blockedPairs = Array.isArray(learningMemory?.blocked_symbol_sides) ? learningMemory.blocked_symbol_sides : [];
+    const guardrails = Array.isArray(learningMemory?.guardrails) ? learningMemory.guardrails : [];
+    const rejectionReasons = Array.isArray(summary?.top_rejection_reasons) ? summary.top_rejection_reasons : [];
+    const dominantSide = String(summary?.dominant_entry_side || '').trim().toLowerCase();
+    const dominantSideText = dominantSide === 'short' ? '做空为主' : (dominantSide === 'long' ? '做多为主' : '--');
+    const rejectionText = rejectionReasons.length
+      ? rejectionReasons.slice(0, 3).map((item) => `${item.label} x${item.count}`).join(' / ')
+      : '暂无明显阻塞';
+    const blockedText = blockedPairs.length
+      ? blockedPairs.slice(0, 3).map((item) => `${item.symbol} ${item.side}`).join(' / ')
+      : '暂无冷静期币种';
+    const requireResearch = Boolean(adaptiveRisk?.require_research_for_new_entries);
+    const dataOutageExit = Boolean(adaptiveRisk?.force_close_on_data_outage_losing_position);
+    const serviceInstabilityGuard = Boolean(adaptiveRisk?.avoid_new_entries_during_service_instability);
+    const learningGeneratedAt = fmtAgentTs(learningMemory?.generated_at);
+
+    summaryEl.innerHTML = `
+      <div class="ai-agent-review-kpis">
+        <article class="ai-agent-review-kpi">
+          <span class="ai-agent-review-kpi-label">放行次数</span>
+          <strong class="ai-agent-review-kpi-value">${esc(summary?.submitted_count ?? '--')}</strong>
+          <span class="ai-agent-review-kpi-note">开仓 ${esc(summary?.entry_count ?? '--')} / 平仓 ${esc(summary?.close_count ?? '--')}</span>
+        </article>
+        <article class="ai-agent-review-kpi">
+          <span class="ai-agent-review-kpi-label">亏损平仓</span>
+          <strong class="ai-agent-review-kpi-value">${esc(summary?.losing_close_count ?? '--')}</strong>
+          <span class="ai-agent-review-kpi-note">平仓前处于浮亏的次数</span>
+        </article>
+        <article class="ai-agent-review-kpi">
+          <span class="ai-agent-review-kpi-label">研究缺口</span>
+          <strong class="ai-agent-review-kpi-value">${esc(summary?.entries_without_research_count ?? '--')}</strong>
+          <span class="ai-agent-review-kpi-note">开仓时没有研究候选</span>
+        </article>
+        <article class="ai-agent-review-kpi">
+          <span class="ai-agent-review-kpi-label">同向重复</span>
+          <strong class="ai-agent-review-kpi-value">${esc(summary?.repeated_same_direction_entries ?? '--')}</strong>
+          <span class="ai-agent-review-kpi-note">同币种同方向连续放行</span>
+        </article>
+      </div>
+      <div class="ai-agent-review-meta">
+        <span>最近主做币种：${esc(summary?.dominant_symbol || '--')}</span>
+        <span>方向偏好：${esc(dominantSideText)}</span>
+        <span>最近一笔：${esc(summary?.latest_entry_symbol || '--')} / ${esc(fmtAgentTs(summary?.latest_entry_at))}</span>
+      </div>
+      <div class="ai-agent-review-meta ai-agent-review-meta-secondary">
+        <span>模型阻塞最多：${esc(rejectionText)}</span>
+        <span>异常 hold：${esc(summary?.outage_after_entry_count ?? 0)} 次</span>
+        <span>未配对开仓：${esc(summary?.unmatched_entry_count ?? 0)} 笔</span>
+      </div>
+      <div class="ai-agent-review-insights">
+        ${insights.length ? insights.map((item) => `<div class="ai-agent-review-insight">${esc(item)}</div>`).join('') : '<div class="ai-agent-empty">暂无复盘洞察</div>'}
+      </div>
+      <section class="ai-agent-learning-panel">
+        <div class="ai-agent-learning-head">
+          <div class="ai-agent-learning-title">AI 复盘记忆</div>
+          <div class="ai-agent-learning-subtitle">生成时间：${esc(learningGeneratedAt)}</div>
+        </div>
+        <div class="ai-agent-learning-grid">
+          <article class="ai-agent-learning-card">
+            <span class="ai-agent-learning-label">有效开仓阈值</span>
+            <strong>${esc(formatRatio(adaptiveRisk?.effective_min_confidence, 3))}</strong>
+            <span class="ai-agent-learning-note">高于配置阈值时，说明复盘在主动收紧新单门槛</span>
+          </article>
+          <article class="ai-agent-learning-card">
+            <span class="ai-agent-learning-label">同向加仓上限</span>
+            <strong>${esc(formatRatio(adaptiveRisk?.same_direction_max_exposure_ratio, 3))}</strong>
+            <span class="ai-agent-learning-note">最近连续亏损或异常越多，这个比例会越保守</span>
+          </article>
+          <article class="ai-agent-learning-card">
+            <span class="ai-agent-learning-label">新单仓位缩放</span>
+            <strong>${esc(formatRatio(adaptiveRisk?.entry_size_scale, 3))}</strong>
+            <span class="ai-agent-learning-note">会直接压低 agent 新开仓的 signal strength</span>
+          </article>
+          <article class="ai-agent-learning-card">
+            <span class="ai-agent-learning-label">关键防守</span>
+            <strong>${esc(blockedText)}</strong>
+            <span class="ai-agent-learning-note">${esc(requireResearch ? '无研究候选不开新仓；' : '研究候选非强制；')}${esc(dataOutageExit ? '价格缺失且浮亏会优先平仓；' : '数据缺失时优先观望；')}${esc(serviceInstabilityGuard ? '模型异常期不鼓励新开仓。' : '模型异常期仍以常规规则处理。')}</span>
+          </article>
+        </div>
+        <div class="ai-agent-learning-tags">
+          ${guardrails.length ? guardrails.map((item) => `<span class="ai-agent-learning-tag">${esc(item)}</span>`).join('') : '<span class="ai-agent-learning-tag">暂无额外 guardrail</span>'}
+        </div>
+        <div class="ai-agent-review-insights">
+          ${learningLessons.length ? learningLessons.slice(0, 4).map((item) => `<div class="ai-agent-review-insight">${esc(item)}</div>`).join('') : '<div class="ai-agent-empty">复盘记忆还在积累中</div>'}
+        </div>
+      </section>
+    `;
+
+    if (!items.length) {
+      listEl.innerHTML = '<div class="ai-agent-empty">暂无放行交易复盘</div>';
+      return;
+    }
+
+    listEl.innerHTML = items.map((item) => {
+      const phaseText = item.phase === 'entry' ? '开仓复盘' : (item.phase === 'exit' ? '平仓复盘' : '事件复盘');
+      const statusTone = reviewToneClass(item.review_status_tone);
+      const summaryLines = Array.isArray(item.summary_lines) ? item.summary_lines : [];
+      const blockers = Array.isArray(item?.follow_up?.blockers) ? item.follow_up.blockers : [];
+      const followParts = [];
+      if (Number.isFinite(Number(item?.follow_up?.latest_unrealized_pnl))) {
+        followParts.push(`最近跟踪盈亏 ${formatSigned(item.follow_up.latest_unrealized_pnl, 4, ' USDT')}`);
+      }
+      if (Number.isFinite(Number(item?.follow_up?.favorable_markout_bps))) {
+        followParts.push(`最好 ${formatSigned(item.follow_up.favorable_markout_bps, 1, ' bps')}`);
+      }
+      if (Number.isFinite(Number(item?.follow_up?.adverse_markout_bps))) {
+        followParts.push(`最差 ${formatSigned(item.follow_up.adverse_markout_bps, 1, ' bps')}`);
+      }
+      if (Number(item?.follow_up?.outage_hold_count || 0) > 0) {
+        followParts.push(`异常 hold ${Number(item.follow_up.outage_hold_count)} 次`);
+      }
+      if (Number.isFinite(Number(item?.pair?.holding_minutes))) {
+        followParts.push(`持有 ${formatNumber(item.pair.holding_minutes, 1)} 分钟`);
+      }
+      if (Number(item?.pair?.repeat_open_rank || 1) > 1 && item.phase === 'entry') {
+        followParts.push(`同向第 ${Number(item.pair.repeat_open_rank)} 次放行`);
+      }
+
+      const researchText = item?.research?.available
+        ? `${item.research.strategy || '研究候选'} / ${item.research.status || '已关联'}`
+        : '无研究候选';
+      const signalText = item?.aggregated_signal?.direction
+        ? `${item.aggregated_signal.direction} / ${formatNumber(item.aggregated_signal.confidence, 3)}`
+        : '--';
+      const costText = Number.isFinite(Number(item?.cost?.one_way_bps))
+        ? `单边 ${formatNumber(item.cost.one_way_bps, 2)} bps`
+        : '成本待补充';
+      const signalPrice = formatNumber(item.price, Number(item.price || 0) >= 100 ? 2 : 4);
+      const orderText = item?.order
+        ? `${String(item.order.side || '--').toUpperCase()} / ${formatNumber(item.order.price, Number(item.order.price || 0) >= 100 ? 2 : 4)}`
+        : '未匹配到本进程订单';
+      const blockerText = blockers.length
+        ? blockers.map((entry) => `${entry.label} x${entry.count}`).join(' / ')
+        : '暂无额外阻塞';
+
+      return `
+        <article class="ai-agent-review-card">
+          <div class="ai-agent-review-card-head">
+            <div>
+              <div class="ai-agent-review-card-title">${esc(item.action_label || '--')} · ${esc(item.symbol || '--')}</div>
+              <div class="ai-agent-review-card-subtitle">${esc(phaseText)} · ${esc(fmtAgentTs(item.timestamp))}</div>
+            </div>
+            <div class="ai-agent-review-badges">
+              <span class="ai-agent-review-badge ${statusTone}">${esc(item.review_status_text || '待观察')}</span>
+              <span class="ai-agent-review-badge is-info">${esc(`${formatNumber(Number(item.decision_confidence || 0) * 100, 0)}% 置信度`)}</span>
+            </div>
+          </div>
+          <div class="ai-agent-review-grid">
+            <div class="ai-agent-review-cell">
+              <span class="ai-agent-review-cell-label">动作原因</span>
+              <strong>${esc(compactText(item.reason || item?.primary?.label || '--', 180))}</strong>
+            </div>
+            <div class="ai-agent-review-cell">
+              <span class="ai-agent-review-cell-label">聚合信号</span>
+              <strong>${esc(signalText)}</strong>
+            </div>
+            <div class="ai-agent-review-cell">
+              <span class="ai-agent-review-cell-label">研究支撑</span>
+              <strong>${esc(researchText)}</strong>
+            </div>
+            <div class="ai-agent-review-cell">
+              <span class="ai-agent-review-cell-label">执行成本</span>
+              <strong>${esc(costText)}</strong>
+            </div>
+            <div class="ai-agent-review-cell">
+              <span class="ai-agent-review-cell-label">信号价格</span>
+              <strong>${esc(signalPrice)}</strong>
+            </div>
+            <div class="ai-agent-review-cell">
+              <span class="ai-agent-review-cell-label">订单匹配</span>
+              <strong>${esc(orderText)}</strong>
+            </div>
+          </div>
+          <div class="ai-agent-review-lines">
+            ${summaryLines.length ? summaryLines.map((line) => `<div class="ai-agent-review-line">${esc(line)}</div>`).join('') : '<div class="ai-agent-empty">暂无摘要</div>'}
+          </div>
+          <div class="ai-agent-review-foot">
+            <span>主因：${esc(item?.primary?.label || '--')}</span>
+            <span>后续观察：${esc(followParts.length ? followParts.join(' / ') : '暂无')}</span>
+            <span>后续阻塞：${esc(blockerText)}</span>
+          </div>
+        </article>
+      `;
+    }).join('');
+  }
+
+  async function loadAgentReview() {
+    const summaryEl = document.getElementById('ai-agent-review-summary');
+    const listEl = document.getElementById('ai-agent-review');
+    if (!summaryEl || !listEl) return null;
+    try {
+      const response = await rootApi(`${AGENT_REVIEW_API}?limit=12`);
+      renderAgentReview(response || {});
+      return response;
+    } catch (_) {
+      summaryEl.innerHTML = '<div class="ai-agent-empty">复盘摘要加载失败</div>';
+      listEl.innerHTML = '<div class="ai-agent-empty">复盘列表加载失败</div>';
+      return null;
+    }
+  }
+
   async function loadAgentSymbolRanking(force = false) {
     try {
       const response = await rootApi(`${AGENT_SYMBOL_RANKING_API}?limit=10${force ? '&refresh=1' : ''}`);
@@ -680,6 +950,9 @@
       renderAgentPanel(response?.status || {}, response?.config || {});
       if (document.getElementById('ai-agent-journal')) {
         loadAgentJournal().catch(() => {});
+      }
+      if (document.getElementById('ai-agent-review')) {
+        loadAgentReview().catch(() => {});
       }
       return response;
     } catch (_) {
@@ -769,6 +1042,7 @@
     modules.agent = {
       refresh: () => loadAgentStatus(),
       refreshJournal: () => loadAgentJournal(),
+      refreshReview: () => loadAgentReview(),
       refreshRanking: () => loadAgentSymbolRanking(true),
       saveConfig: () => saveAgentConfig(),
       start: () => agentStart(),
@@ -781,6 +1055,7 @@
     window.agentStop = agentStop;
     window.agentRunOnce = agentRunOnce;
     window.agentRefreshJournal = () => loadAgentJournal().catch(() => {});
+    window.agentRefreshReview = () => loadAgentReview().catch(() => {});
     window.agentRefreshRanking = () => loadAgentSymbolRanking(true);
     window.agentSaveConfig = () => saveAgentConfig();
     window.agentToggleSymbolMode = () => updateAgentSymbolModeVisibility();

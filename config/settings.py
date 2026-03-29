@@ -28,7 +28,10 @@ class Settings(BaseSettings):
     """Application settings loaded from environment and .env."""
 
     model_config = SettingsConfigDict(
-        env_file=str(_PROJECT_ROOT / ".env"),
+        env_file=(
+            str(_PROJECT_ROOT / ".env"),
+            str(_PROJECT_ROOT / ".env.local"),
+        ),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -57,6 +60,8 @@ class Settings(BaseSettings):
     ZHIPU_MODEL: str = "GLM-4.5-Air"
     OPENAI_API_KEY: str = ""
     OPENAI_BASE_URL: str = "https://vpsairobot.com/v1"
+    OPENAI_BACKUP_BASE_URL: str = ""
+    OPENAI_BACKUP_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-5.4"
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_BASE_URL: str = "https://api.anthropic.com"

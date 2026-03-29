@@ -124,3 +124,27 @@ def test_autonomous_agent_symbol_ranking_endpoint(monkeypatch):
     result = asyncio.run(ai_module.get_ai_autonomous_agent_symbol_ranking(request, limit=10, refresh=True))
     assert result["selected_symbol"] == "ETH/USDT"
     assert scan_mock.await_count == 1
+
+
+def test_autonomous_agent_review_endpoint_includes_learning_memory(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(
+        ai_module,
+        "_build_autonomous_agent_review",
+        lambda limit=12: {"summary": {"submitted_count": 0}, "insights": [], "items": []},
+    )
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_learning_memory",
+        lambda force=False: {
+            "adaptive_risk": {"effective_min_confidence": 0.66},
+            "lessons": ["近期样本偏弱，抬高开仓门槛。"],
+        },
+    )
+
+    result = asyncio.run(ai_module.get_ai_autonomous_agent_review(request, limit=8))
+    assert result["summary"]["submitted_count"] == 0
+    assert result["learning_memory"]["adaptive_risk"]["effective_min_confidence"] == 0.66
