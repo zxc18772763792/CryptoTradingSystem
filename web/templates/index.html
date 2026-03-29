@@ -1520,6 +1520,7 @@
                             </div>
                             <div class="ai-workspace-section-note">这里负责研究与增强，不直接替代自治代理下单。</div>
                         </div>
+                    <div class="ai-research-overview-grid">
                     <div class="card ai-top-intro-card ai-top-intro-card-research">
                         <div class="ai-top-intro-title">🧪 AI研究新策略</div>
                         <div class="ai-top-intro-stack">
@@ -1542,7 +1543,9 @@
                                 </div>
                             </div>
                         </div>
+                    </div>
 
+                    <div class="ai-research-command-stack">
                         <div class="ai-review-panel">
                             <div class="ai-review-panel-head">
                                 <div class="ai-review-panel-title">🛡 策略库增强：下单前AI复核</div>
@@ -1603,6 +1606,24 @@
                         </div>
 
                         <div class="ai-research-sidekick-grid">
+                            <div class="ai-context-mini-card ai-focus-card">
+                                <div class="ai-sidebar-title">🎯 当前研究焦点</div>
+                                <div class="ai-focus-summary">
+                                    <div class="ai-focus-row">
+                                        <span>当前提案</span>
+                                        <strong id="ai-focus-proposal">加载中...</strong>
+                                    </div>
+                                    <div class="ai-focus-row">
+                                        <span>当前候选</span>
+                                        <strong id="ai-focus-candidate">加载中...</strong>
+                                    </div>
+                                    <div class="ai-focus-row">
+                                        <span>下一步动作</span>
+                                        <strong id="ai-focus-next-action">加载中...</strong>
+                                    </div>
+                                </div>
+                            </div>
+
                             <div class="ai-context-mini-card ai-signal-card">
                                 <div class="ai-context-mini-head ai-sidebar-title" id="signal-panel-toggle">
                                     <span>📡 实时信号</span>
@@ -1626,24 +1647,6 @@
                                 </div>
                             </div>
 
-                            <div class="ai-context-mini-card ai-focus-card">
-                                <div class="ai-sidebar-title">🎯 当前研究焦点</div>
-                                <div class="ai-focus-summary">
-                                    <div class="ai-focus-row">
-                                        <span>当前提案</span>
-                                        <strong id="ai-focus-proposal">加载中...</strong>
-                                    </div>
-                                    <div class="ai-focus-row">
-                                        <span>当前候选</span>
-                                        <strong id="ai-focus-candidate">加载中...</strong>
-                                    </div>
-                                    <div class="ai-focus-row">
-                                        <span>下一步动作</span>
-                                        <strong id="ai-focus-next-action">加载中...</strong>
-                                    </div>
-                                </div>
-                            </div>
-
                             <div class="ai-context-mini-card ai-research-live-signals-card">
                                 <div class="ai-sidebar-title">📈 研究候选运行信号</div>
                                 <div class="ai-agent-runtime-card-desc">这里只看 AI 研究链路里已进入运行状态的候选策略，不混入自治代理 watchlist。会按 symbol + timeframe + strategy + params 去重；若最近行情为空或过旧，会直接标注“缺数据 / 数据旧”。</div>
@@ -1652,6 +1655,7 @@
                                 </div>
                             </div>
                         </div>
+                    </div>
                     </div>
                 </div>
                 <div id="ai-flow-console" class="card ai-flow-console">
@@ -1848,9 +1852,12 @@
                     <!-- 中栏：候选策略卡片 -->
                     <div class="ai-hub-main">
                         <div class="ai-hub-main-header">
-                            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                                <span class="ai-hub-title">候选策略</span>
-                                <span id="ai-candidate-count" style="font-size:12px;color:#7e92b2;"></span>
+                            <div class="ai-hub-heading">
+                                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                                    <span class="ai-hub-title">候选策略工作区</span>
+                                    <span id="ai-candidate-count" style="font-size:12px;color:#7e92b2;"></span>
+                                </div>
+                                <div class="ai-hub-subtitle">这里专注比较研究结果本身：先选研究任务，再运行研究；右侧继续看验证结论与注册建议。</div>
                             </div>
                             <div class="inline-actions" style="gap:6px;flex-wrap:wrap;">
                                 <!-- 筛选 & 排序 -->
@@ -1896,6 +1903,10 @@
 
                     <!-- 右侧：选中候选详情 + 注册 -->
                     <aside class="ai-hub-detail">
+                        <div class="ai-hub-detail-header">
+                            <div class="ai-hub-title">候选详情与注册</div>
+                            <div class="ai-hub-subtitle">选中候选后，在这里看验证、对比、部署模式和第 4 步注册/部署动作。</div>
+                        </div>
                         <div id="ai-detail-panel" class="ai-detail-panel">
                             <div class="ai-detail-placeholder">
                                 <div style="font-size:36px;opacity:.3;">📊</div>
@@ -1940,7 +1951,7 @@
                         </div>
 
                         <div class="ai-agent-workspace-grid">
-                            <div class="card ai-top-intro-card ai-top-intro-card-trading">
+                            <div class="card ai-top-intro-card ai-top-intro-card-trading ai-agent-command-card">
                                 <div class="ai-top-intro-title">🤖 AI自动交易</div>
                                 <div class="ai-top-intro-stack">
                                     <div class="ai-top-intro-box">
