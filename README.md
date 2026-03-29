@@ -49,23 +49,22 @@ Fill in only the credentials you actually use. Keep real API keys, broker secret
 
 ### 3. Start the web application
 
-Recommended one-click startup:
+Use the canonical root command:
 
 ```bat
-start_web_oneclick.bat
+.\web.bat start
 ```
 
-PowerShell entry point:
+Useful variants:
 
-```powershell
-.\scripts\start_web_ps.ps1 -OpenBrowser
+```bat
+.\web.bat start -OpenBrowser
+.\web.bat start -StartNewsWorker -StartNewsLlmWorker
+.\web.bat status
+.\web.bat stop -IncludeWorkers
 ```
 
-Direct launcher:
-
-```powershell
-python main.py --mode web --trading-mode paper
-```
+Legacy wrappers still work, but `.\web.bat ...` is now the command family to remember.
 
 Open:
 
@@ -91,14 +90,14 @@ python main.py --mode web --trading-mode live
 
 Run the web service:
 
-```powershell
-python main.py --mode web --trading-mode paper
+```bat
+.\web.bat start
 ```
 
 Run startup helper with optional workers:
 
-```powershell
-.\scripts\start_web_ps.ps1 -StartNewsWorker -StartNewsLlmWorker -StartPmWorker
+```bat
+.\web.bat start -StartNewsWorker -StartNewsLlmWorker -StartPmWorker
 ```
 
 Run focused tests:
@@ -130,7 +129,7 @@ See [SECURITY.md](SECURITY.md) for the full pre-push checklist and incident resp
 
 ## Documentation
 
-- [STARTUP.md](STARTUP.md): startup commands and log locations
+- [STARTUP.md](STARTUP.md): single startup/status/stop reference for new sessions
 - [SECURITY.md](SECURITY.md): secret management and safe sharing rules
 - [docs/REPOSITORY_OVERVIEW.md](docs/REPOSITORY_OVERVIEW.md): directory-by-directory repository guide
 - [docs/GOVERNANCE.md](docs/GOVERNANCE.md): governance model and approval flows

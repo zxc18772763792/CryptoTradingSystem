@@ -2,17 +2,18 @@
 setlocal
 
 set "ROOT=%~dp0"
-set "PS1=%ROOT%scripts\start_web_ps.ps1"
+set "ENTRY=%ROOT%web.bat"
 
-if not exist "%PS1%" (
-  echo [ERROR] Script not found: "%PS1%"
+if not exist "%ENTRY%" (
+  echo [ERROR] Script not found: "%ENTRY%"
   exit /b 1
 )
 
+echo [INFO] Preferred command: ".\web.bat start"
 echo [INFO] Starting web service...
 echo [INFO] Log file: "%ROOT%logs\web_ps.log"
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" %*
+call "%ENTRY%" start %*
 set "CODE=%ERRORLEVEL%"
 
 if not "%CODE%"=="0" (

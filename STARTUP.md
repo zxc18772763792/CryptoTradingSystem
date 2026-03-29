@@ -1,52 +1,81 @@
-# Startup Commands
+# Startup Quick Reference
 
-This file is the single reference for starting the web service.
-
-## Recommended (one-click)
-
-Use this from project root:
+If you only remember one command in a new session, remember this:
 
 ```bat
-start_web_oneclick.bat
+.\web.bat start
 ```
 
-Pass-through examples:
+This file is the single reference for day-to-day web service control.
+
+## Canonical Commands
+
+Run these from project root:
 
 ```bat
-start_web_oneclick.bat -Port 8000 -HealthWaitSec 150
-start_web_oneclick.bat -StartNewsWorker -StartNewsLlmWorker -StartPmWorker
-start_web_oneclick.bat -TestDataSources
+.\web.bat help
+.\web.bat start
+.\web.bat status
+.\web.bat stop -IncludeWorkers
 ```
 
-## PowerShell entry
+## Most Common Uses
 
-```powershell
-.\scripts\start_web_ps.ps1
+Start the web service:
+
+```bat
+.\web.bat start
 ```
 
-Examples:
+Start and open the browser:
 
-```powershell
-.\scripts\start_web_ps.ps1 -Port 8000 -OpenBrowser
-.\scripts\start_web_ps.ps1 -StartNewsWorker -StartNewsLlmWorker
+```bat
+.\web.bat start -OpenBrowser
 ```
 
-## Core launcher (advanced)
+Start with news workers:
 
-```powershell
-.\_once.ps1
+```bat
+.\web.bat start -StartNewsWorker -StartNewsLlmWorker
 ```
 
-Use this only when you need direct control of low-level startup behavior.
+Start with all common workers:
 
-## Compatibility wrapper
+```bat
+.\web.bat start -StartNewsWorker -StartNewsLlmWorker -StartPmWorker
+```
 
-`start_once.bat` is kept for compatibility and now forwards to `start_web_oneclick.bat`.
+Check whether the service is already running:
+
+```bat
+.\web.bat status
+```
+
+Stop the web service and related workers:
+
+```bat
+.\web.bat stop -IncludeWorkers
+```
+
+## Daily Rule
+
+- Use `.\web.bat start` as the default entry point.
+- Use `.\web.bat status` before starting if you are unsure whether something is already running.
+- Use `.\web.bat stop -IncludeWorkers` before restarting if you want a clean reset.
+
+## Advanced Or Legacy Entrypoints
+
+These still exist, but they are no longer the primary commands to remember:
+
+- `start_web_oneclick.bat`: compatibility wrapper that now forwards to `.\web.bat start`
+- `start_once.bat`: deprecated compatibility wrapper
+- `.\scripts\start_web_ps.ps1`: internal PowerShell startup entry
+- `.\_once.ps1`: low-level launcher for direct control
 
 ## Logs
 
 - Main startup transcript: `logs/web_ps.log`
-- Runtime output files are under `logs/` and `runtime/`
+- Runtime output files: `logs/` and `runtime/`
 - Clean empty logs:
 
 ```powershell
