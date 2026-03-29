@@ -171,7 +171,7 @@ def _cache_set(namespace: str, key: str, payload: Dict[str, Any]) -> Dict[str, A
 def _invalidate_news_caches(*, clear_feed: bool = False) -> None:
     # Keep latest/brief/summary as stale fallback snapshots by default.
     # This prevents "sudden empty feed" when DB is momentarily contended.
-    namespaces = ["health", "pull_status", "worker_status"]
+    namespaces = ["health", "pull_status", "worker_status", "coverage"]
     if clear_feed:
         namespaces.extend(["latest", "summary", "brief"])
     for namespace in namespaces:
@@ -2537,12 +2537,53 @@ async def raw_history(
 @router.get("/raw/coverage")
 async def raw_coverage(request: Request) -> Dict[str, Any]:
     del request
-    coverage = await news_db.summarize_news_raw_coverage()
-    return {
-        **coverage,
-        "archive_contract": _news_archive_contract(),
-        "timestamp": _now_utc().isoformat(),
-    }
+    cache_key = "default"
+    ttl_sec = _env_int("NEWS_API_COVERAGE_CACHE_TTL_SEC", 120)
+    cached = _cache_get("coverage", cache_key, ttl_sec)
+    if cached:
+        return cached
+
+    timeout_sec = max(2.0, min(8.0, float(_env_int("NEWS_API_COVERAGE_DB_TIMEOUT_SEC", 5))))
+    try:
+        coverage = await asyncio.wait_for(
+            asyncio.shield(news_db.summarize_news_raw_coverage()),
+            timeout=timeout_sec,
+        )
+        payload = {
+            **coverage,
+            "archive_contract": _news_archive_contract(),
+            "timestamp": _now_utc().isoformat(),
+        }
+        return _cache_set("coverage", cache_key, payload)
+    except Exception as exc:
+        stale = _cache_get_stale("coverage", cache_key)
+        if stale:
+            stale["degraded"] = True
+            stale["fallback_reason"] = str(exc)
+            return stale
+
+        fallback = {
+            "total_count": 0,
+            "history_span_days": 0.0,
+            "earliest_published_at": None,
+            "latest_published_at": None,
+            "earliest_fetched_at": None,
+            "latest_fetched_at": None,
+            "count_24h": 0,
+            "count_7d": 0,
+            "count_30d": 0,
+            "active_sources_7d": 0,
+            "top_sources": [],
+            "recent_daily_counts": [],
+            "sampled_provider_counts": {},
+            "recent_ingest_mode_counts": {},
+            "sample_size": 0,
+            "archive_contract": _news_archive_contract(),
+            "timestamp": _now_utc().isoformat(),
+            "degraded": True,
+            "fallback_reason": str(exc),
+        }
+        return fallback
 
 
 @router.get("/latest")
