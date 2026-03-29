@@ -350,6 +350,60 @@
     if (universeWrap) universeWrap.style.display = mode === 'auto' ? '' : 'none';
   }
 
+  function activeTabName() {
+    return String(
+      document.querySelector('.tab-btn.active')?.dataset?.tab
+      || document.querySelector('.tab-content.active')?.id
+      || ''
+    ).trim().toLowerCase();
+  }
+
+  function isAgentTabActive() {
+    return activeTabName() === 'ai-agent';
+  }
+
+  function stopPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
+  function syncPollingState() {
+    if (document.hidden || !isAgentTabActive()) {
+      stopPolling();
+      return;
+    }
+    startPolling();
+  }
+
+  function renderAgentStatusLoadError(message) {
+    const statusText = compactText(message || '状态加载失败', 160) || '状态加载失败';
+    const info = document.getElementById('ai-agent-info');
+    const reasons = document.getElementById('ai-agent-reasons');
+    const badge = document.getElementById('ai-agent-hold-badge');
+    const dot = document.getElementById('ai-agent-status-dot');
+
+    if (dot) {
+      dot.className = 'agent-dot agent-dot-off';
+      dot.title = statusText;
+    }
+    if (info) {
+      info.innerHTML = `<div class="ai-agent-error">${esc(statusText)}</div>`;
+    }
+    if (reasons) {
+      reasons.innerHTML = `<div class="ai-agent-empty">${esc(statusText)}</div>`;
+    }
+    if (badge) {
+      badge.className = 'ai-agent-section-badge is-danger';
+      badge.textContent = '状态加载失败';
+    }
+
+    setChainSummaryTag('ai-chain-trading-tag', '加载失败', 'warn');
+    setChainSummaryText('ai-chain-trading-mode', '--');
+    setChainSummaryText('ai-chain-trading-status', statusText);
+    setChainSummaryText('ai-chain-trading-decision', '--');
+    setChainSummaryText('ai-chain-trading-last-action', '--');
+  }
+
   function buildRuntimeReason(status = {}, cfg = {}) {
     if (Boolean(status.running)) return null;
     if (status.last_run_at) {
@@ -613,7 +667,7 @@
     emitAgentStatus(status, cfg);
   }
 
-  async function loadAgentJournal() {
+  async function loadAgentJournalLegacy() {
     const el = document.getElementById('ai-agent-journal');
     if (!el) return;
     try {
@@ -955,7 +1009,7 @@
       const cfg = response?.config || {};
       syncAgentConfigForm(cfg);
       notify('自动交易代理配置已保存');
-      await loadAgentStatus();
+      await loadAgentStatus({ includeDetails: isAgentTabActive(), notifyOnError: true });
       if (symbolMode === 'auto') {
         loadAgentSymbolRanking(true, {
           timeoutMs: 90000,
@@ -968,19 +1022,27 @@
     }
   }
 
-  async function loadAgentStatus() {
+  async function loadAgentStatus(options = {}) {
     if (!document.getElementById('ai-agent-card')) return null;
+    const includeDetails = options.includeDetails !== false && isAgentTabActive();
+    const notifyOnError = options.notifyOnError === true;
     try {
       const response = await rootApi(AGENT_STATUS_API);
       renderAgentPanel(response?.status || {}, response?.config || {});
-      if (document.getElementById('ai-agent-journal')) {
+      if (includeDetails && document.getElementById('ai-agent-journal')) {
         loadAgentJournal().catch(() => {});
       }
-      if (document.getElementById('ai-agent-review')) {
+      if (includeDetails && document.getElementById('ai-agent-review')) {
         loadAgentReview().catch(() => {});
       }
       return response;
-    } catch (_) {
+    } catch (err) {
+      if (includeDetails) {
+        renderAgentStatusLoadError(err?.message || '状态加载失败');
+      }
+      if (notifyOnError) {
+        notify(`加载自治代理状态失败: ${err?.message || '未知错误'}`, true);
+      }
       return null;
     }
   }
@@ -998,7 +1060,7 @@
         body: JSON.stringify({ enable: true }),
       });
       notify('自动交易代理已启动');
-      await loadAgentStatus();
+      await loadAgentStatus({ includeDetails: isAgentTabActive(), notifyOnError: true });
     } catch (err) {
       notify(`启动失败: ${err.message}`, true);
       if (btn) {
@@ -1018,7 +1080,7 @@
     try {
       await rootApi(AGENT_STOP_API, { method: 'POST' });
       notify('自动交易代理已停止');
-      await loadAgentStatus();
+      await loadAgentStatus({ includeDetails: isAgentTabActive(), notifyOnError: true });
     } catch (err) {
       notify(`停止失败: ${err.message}`, true);
       if (btn) {
@@ -1038,13 +1100,19 @@
     try {
       const response = await rootApi(AGENT_RUN_ONCE_API, {
         method: 'POST',
-        body: JSON.stringify({}),
+        body: JSON.stringify({ force: true }),
       });
       const result = response?.result || {};
+      if (result?.skipped) {
+        const reason = compactText(result?.reason || result?.rejection_reason || 'unknown', 80);
+        notify(`单次试跑已跳过: ${reason}`, true);
+        await loadAgentStatus({ includeDetails: isAgentTabActive(), notifyOnError: true });
+        return;
+      }
       const action = decisionActionText(result?.decision?.action || 'hold');
       const symbol = String(result?.effective_symbol || result?.selection?.selected_symbol || '--');
       notify(`单次试跑完成：${symbol} / ${action}`);
-      await loadAgentStatus();
+      await loadAgentStatus({ includeDetails: isAgentTabActive(), notifyOnError: true });
     } catch (err) {
       notify(`运行失败: ${err.message}`, true);
     } finally {
@@ -1056,8 +1124,14 @@
   }
 
   function startPolling() {
-    clearInterval(pollTimer);
-    pollTimer = setInterval(() => loadAgentStatus().catch(() => {}), POLL_MS);
+    if (pollTimer) return;
+    pollTimer = setInterval(() => {
+      if (document.hidden || !isAgentTabActive()) {
+        stopPolling();
+        return;
+      }
+      loadAgentStatus({ includeDetails: true }).catch(() => {});
+    }, POLL_MS);
   }
 
   function init() {
@@ -1065,7 +1139,7 @@
 
     const modules = aiRoot().modules || {};
     modules.agent = {
-      refresh: () => loadAgentStatus(),
+      refresh: (options = {}) => loadAgentStatus(options),
       refreshJournal: () => loadAgentJournal(),
       refreshReview: () => loadAgentReview(),
       refreshRanking: () => loadAgentSymbolRanking(true, { timeoutMs: 90000, notifyOnError: true, preserveExisting: false }),
@@ -1088,12 +1162,22 @@
     window.addEventListener('ai-research:state', (event) => {
       const reason = String(event?.detail?.reason || '');
       if (['refresh-workbench', 'runtime-summary', 'candidate-detail'].includes(reason)) {
-        loadAgentStatus().catch(() => {});
+        loadAgentStatus({ includeDetails: isAgentTabActive() }).catch(() => {});
       }
     });
 
-    loadAgentStatus().catch(() => {});
-    startPolling();
+    document.addEventListener('click', (event) => {
+      if (event.target instanceof Element && event.target.closest('.tab-btn')) {
+        syncPollingState();
+      }
+    });
+    document.addEventListener('visibilitychange', syncPollingState);
+    window.addEventListener('hashchange', syncPollingState);
+
+    syncPollingState();
+    if (isAgentTabActive()) {
+      loadAgentStatus({ includeDetails: true }).catch(() => {});
+    }
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

@@ -3606,7 +3606,7 @@ if(activeTab==='ai-research'&&typeof ai.refreshWorkbench==='function'&&!aiResear
     .finally(()=>{if(aiResearchRefreshPromise===task)aiResearchRefreshPromise=null;});
   aiResearchRefreshPromise=task;
 }
-try{modules.agent?.refresh?.();}catch{}
+try{modules.agent?.refresh?.({includeDetails:activeTab==='ai-agent'});}catch{}
 try{modules.runtime?.render?.();}catch{}
 return aiResearchRefreshPromise||Promise.resolve();
 }

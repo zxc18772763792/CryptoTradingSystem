@@ -396,7 +396,6 @@ def _default_profile() -> Dict[str, Any]:
 
 _AGENT_PERSISTABLE_KEYS = frozenset({
     "AI_AUTONOMOUS_AGENT_ENABLED",
-    "AI_AUTONOMOUS_AGENT_AUTO_START",
     "AI_AUTONOMOUS_AGENT_PROVIDER",
     "AI_AUTONOMOUS_AGENT_MODEL",
     "AI_AUTONOMOUS_AGENT_INTERVAL_SEC",
@@ -653,7 +652,9 @@ class AutonomousTradingAgent:
         )
         return {
             "enabled": bool(self._get("AI_AUTONOMOUS_AGENT_ENABLED", False)),
-            "auto_start": bool(self._get("AI_AUTONOMOUS_AGENT_AUTO_START", False)),
+            # auto_start remains environment-controlled so runtime config
+            # overlays cannot change process boot behavior.
+            "auto_start": bool(getattr(settings, "AI_AUTONOMOUS_AGENT_AUTO_START", False)),
             "mode": _normalize_mode(self._get("AI_AUTONOMOUS_AGENT_MODE", "shadow")),
             "provider": provider,
             "model": model,
@@ -686,8 +687,6 @@ class AutonomousTradingAgent:
         updates: Dict[str, Any] = {}
         if "enabled" in kwargs and kwargs["enabled"] is not None:
             updates["AI_AUTONOMOUS_AGENT_ENABLED"] = bool(kwargs["enabled"])
-        if "auto_start" in kwargs and kwargs["auto_start"] is not None:
-            updates["AI_AUTONOMOUS_AGENT_AUTO_START"] = bool(kwargs["auto_start"])
         if "mode" in kwargs and kwargs["mode"] is not None:
             updates["AI_AUTONOMOUS_AGENT_MODE"] = _normalize_mode(kwargs["mode"])
         if "provider" in kwargs and kwargs["provider"] is not None:

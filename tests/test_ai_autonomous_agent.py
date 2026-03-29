@@ -133,6 +133,58 @@ def test_autonomous_agent_run_once_low_confidence_forces_hold(monkeypatch, tmp_p
     assert submit_mock.await_count == 0
 
 
+def test_autonomous_agent_run_once_force_bypasses_disabled_guard(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "LONG", "confidence": 0.79}
+
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        AsyncMock(
+            return_value={
+                "action": "buy",
+                "confidence": 0.82,
+                "strength": 0.7,
+                "leverage": 3,
+                "reason": "force_run_smoke_test",
+            }
+        ),
+    )
+
+    asyncio.run(agent.update_runtime_config(enabled=False, mode="shadow", cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="manual_smoke", force=True))
+
+    assert result.get("skipped") is not True
+    assert result["decision"]["action"] == "buy"
+    assert result["execution"]["reason"] == "shadow_mode"
+
+
+def test_autonomous_agent_auto_start_is_env_controlled(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    monkeypatch.setattr(module.settings, "AI_AUTONOMOUS_AGENT_AUTO_START", True, raising=False)
+    agent._override["AI_AUTONOMOUS_AGENT_AUTO_START"] = False
+
+    initial = agent.get_runtime_config()
+    asyncio.run(agent.update_runtime_config(auto_start=False))
+    updated = agent.get_runtime_config()
+
+    assert initial["auto_start"] is True
+    assert updated["auto_start"] is True
+    assert not agent._overlay_path.exists()
+
+
 def test_autonomous_agent_exposes_raw_model_action_rewrite(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
 

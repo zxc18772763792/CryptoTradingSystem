@@ -45,6 +45,9 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "window.agentStart = agentStart" in agent_js
     assert "renderAgentChainSummary" in agent_js
     assert "function describeExecutionCost" in agent_js
+    assert "body: JSON.stringify({ force: true })" in agent_js
+    assert agent_js.count("async function loadAgentJournal()") == 1
+    assert "function renderAgentStatusLoadError" in agent_js
     assert "执行成本" in agent_js
     assert "startBtn.textContent = running ? '运行中' : '启动'" in agent_js
     assert "function selectProposal(" in ai_js
@@ -61,6 +64,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "const TRADING_STATS_TIMEOUT_MS=25000;" in app_js
     assert "const TRADING_POSITIONS_TIMEOUT_MS=30000;" in app_js
     assert "const TRADING_OPEN_ORDERS_TIMEOUT_MS=25000;" in app_js
+    assert "modules.agent?.refresh?.({includeDetails:activeTab==='ai-agent'})" in app_js
     assert "else if(tab==='ai-research')refreshAiResearchModules();" in app_js
     assert "先点“3) 运行研究”单独验证" in ai_js
     assert "provider_fallback" in ai_js
