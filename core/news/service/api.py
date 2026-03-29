@@ -10,10 +10,11 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from config.settings import settings
 from core.ai.risk_gate import RiskGate
 from core.ai.signal_engine import generate_signal
 from core.news.collectors.manager import MultiSourceNewsCollector
-from core.news.eventizer.llm_glm5 import extract_events_glm5_with_meta
+from core.news.eventizer.llm_glm5 import extract_events_llm_with_meta
 from core.news.eventizer.rules import load_news_rule_config
 from core.news.service.worker import process_llm_batch, run_pull_cycle
 from core.news.storage import db as news_db
@@ -95,7 +96,7 @@ async def run_ingest_pull_now(cfg: Dict[str, Any], payload: IngestRequest) -> Di
     sync_llm = _env_bool("NEWS_PULL_SYNC_LLM", True)
     if new_news and sync_llm:
         try:
-            events, llm_used, llm_errors = extract_events_glm5_with_meta(new_news, cfg)
+            events, llm_used, llm_errors = extract_events_llm_with_meta(new_news, cfg)
             event_stats = await news_db.save_events(events, model_source="mixed")
             await news_db.finish_llm_tasks([int(item["id"]) for item in new_news if item.get("id")], success=True)
         except Exception as exc:
@@ -161,7 +162,12 @@ def create_app() -> FastAPI:
             "status": "ok",
             "service": "news_signal",
             "ts": datetime.now(timezone.utc).isoformat(),
-            "llm_enabled": bool(os.environ.get("ZHIPU_API_KEY")),
+            "llm_enabled": bool(
+                str(os.environ.get("OPENAI_API_KEY") or "").strip()
+                or str(getattr(settings, "OPENAI_API_KEY", "") or "").strip()
+                or str(os.environ.get("OPENAI_BACKUP_API_KEY") or "").strip()
+                or str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip()
+            ),
             "sync_pull_llm": _env_bool("NEWS_PULL_SYNC_LLM", True),
             "thresholds": cfg.get("thresholds") or {},
             "sources": (cfg.get("defaults") or {}).get("news_sources") or [],

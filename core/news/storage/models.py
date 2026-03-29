@@ -197,7 +197,7 @@ class SignalSchema(BaseModel):
     risk: SignalRisk
     explain: List[str] = Field(default_factory=list)
     used_events: List[str] = Field(default_factory=list)
-    model_version: str = "glm5_event_rules_v1"
+    model_version: str = "news_llm_event_rules_v2"
 
     @field_validator("ts", mode="before")
     @classmethod

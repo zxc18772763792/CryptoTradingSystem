@@ -426,6 +426,30 @@ def test_news_llm_defaults_use_openai_codex_mini(monkeypatch):
     assert async_module._llm_model({}) == "gpt-5.1-codex-mini"
 
 
+def test_news_legacy_glm_provider_is_normalized_to_openai(monkeypatch):
+    import core.news.eventizer.async_glm_client as async_module
+    import core.news.eventizer.llm_glm5 as sync_module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "", raising=False)
+
+    legacy_cfg = {
+        "llm": {
+            "provider": "glm",
+            "model": "GLM-4.5-Air",
+            "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+        }
+    }
+
+    assert sync_module._llm_provider(legacy_cfg) == "openai"
+    assert async_module._llm_provider(legacy_cfg) == "openai"
+    assert sync_module._llm_model(legacy_cfg) == "gpt-5.1-codex-mini"
+    assert async_module._llm_model(legacy_cfg) == "gpt-5.1-codex-mini"
+    assert sync_module._llm_base_url(legacy_cfg) == "https://vpsairobot.com/v1"
+    assert async_module._llm_base_url(legacy_cfg) == "https://vpsairobot.com/v1"
+
+
 def test_news_sync_summary_uses_openai_mini_source(monkeypatch):
     import core.news.eventizer.llm_glm5 as module
 
@@ -461,6 +485,53 @@ def test_news_sync_summary_uses_openai_mini_source(monkeypatch):
     assert result["source"] == "openai_responses"
     assert capture["url"] == "https://example.test/v1/responses"
     assert capture["json"]["model"] == "gpt-5.1-codex-mini"
+
+
+def test_news_batch_summary_prefers_new_llm_cap_key(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setattr(
+        module,
+        "_call_llm_batch_summarize",
+        lambda titles, cfg, max_length=60: [
+            {"summary": f"llm:{title}", "sentiment": "neutral", "source": "openai_responses"}
+            for title in titles
+        ],
+    )
+
+    result = module.batch_summarize_titles(
+        ["headline-a", "headline-b"],
+        {"llm": {"summarize_batch_size": 2, "summarize_max_llm_items": 1}},
+        max_length=60,
+    )
+
+    assert result[0]["source"] == "openai_responses"
+    assert result[0]["summary"] == "llm:headline-a"
+    assert result[1]["source"] == "fallback_rule"
+
+
+def test_news_batch_summary_keeps_legacy_glm_cap_key_compatible(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setattr(
+        module,
+        "_call_llm_batch_summarize",
+        lambda titles, cfg, max_length=60: [
+            {"summary": f"llm:{title}", "sentiment": "neutral", "source": "openai_responses"}
+            for title in titles
+        ],
+    )
+
+    result = module.batch_summarize_titles(
+        ["headline-a", "headline-b"],
+        {"llm": {"summarize_batch_size": 2, "summarize_max_glm_items": 1}},
+        max_length=60,
+    )
+
+    assert result[0]["source"] == "openai_responses"
+    assert result[1]["source"] == "fallback_rule"
 
 
 def test_news_sync_summary_fails_over_to_backup_relay(monkeypatch):

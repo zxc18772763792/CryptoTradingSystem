@@ -72,7 +72,7 @@ llm:
   summarize_limit: 40
   summarize_timeout_sec: 60
   summarize_batch_size: 6
-  summarize_max_glm_items: 40
+  summarize_max_llm_items: 40
 
 thresholds:
   alpha_threshold: 0.08

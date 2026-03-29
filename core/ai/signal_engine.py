@@ -13,7 +13,7 @@ from core.news.storage.models import SignalSchema, parse_any_datetime
 from prediction_markets.polymarket import db as pm_db
 
 
-MODEL_VERSION = "glm5_event_rules_v1"
+MODEL_VERSION = "news_llm_event_rules_v2"
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:

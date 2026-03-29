@@ -26,8 +26,8 @@ from core.utils.openai_responses import (
 
 DEFAULT_OPENAI_BASE_URL = "https://vpsairobot.com/v1"
 DEFAULT_OPENAI_MODEL = "gpt-5.1-codex-mini"
-DEFAULT_ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
-DEFAULT_ZHIPU_MODEL = "GLM-4.5-Air"
+_LEGACY_PROVIDER_ALIASES = {"glm", "glm5", "zhipu"}
+_LEGACY_BASE_URL_HINTS = ("bigmodel.cn", "zhipu")
 _SUMMARY_CACHE: Dict[str, Dict[str, Any]] = {}
 _SUMMARY_CACHE_MAX = 4000
 _POS_SENTIMENT_HINTS = {
@@ -43,8 +43,34 @@ _NEG_SENTIMENT_HINTS = {
 }
 
 
-def _zhipu_api_key() -> str:
-    return str(os.getenv("ZHIPU_API_KEY") or getattr(settings, "ZHIPU_API_KEY", "") or "").strip()
+def _normalize_openai_base_urls(value: Any) -> str:
+    if isinstance(value, (list, tuple, set)):
+        parts = [_normalize_openai_base_urls(item) for item in value]
+        return ",".join([part for part in parts if part])
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    cleaned: List[str] = []
+    for raw_part in text.split(","):
+        part = str(raw_part or "").strip().rstrip("/")
+        if not part:
+            continue
+        lowered = part.lower()
+        if any(hint in lowered for hint in _LEGACY_BASE_URL_HINTS):
+            continue
+        cleaned.append(part)
+    return ",".join(cleaned)
+
+
+def _normalize_openai_model(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return DEFAULT_OPENAI_MODEL
+    if text.lower().startswith("glm"):
+        return DEFAULT_OPENAI_MODEL
+    return text
 
 
 def _openai_primary_api_key() -> str:
@@ -65,48 +91,28 @@ def _openai_api_key() -> str:
 def _llm_provider(cfg: Dict[str, Any]) -> str:
     llm_cfg = cfg.get("llm") or {}
     raw = str(os.getenv("NEWS_LLM_PROVIDER") or llm_cfg.get("provider") or "").strip().lower()
-    if raw in {"openai", "codex", "responses"}:
+    if raw in {"openai", "codex", "responses"} or raw in _LEGACY_PROVIDER_ALIASES:
         return "openai"
-    if raw == "glm":
-        return "glm"
-    if _openai_api_key() or _openai_backup_api_key():
-        return "openai"
-    return "glm"
-
-
-def _zhipu_base_url(cfg: Dict[str, Any]) -> str:
-    llm_cfg = cfg.get("llm") or {}
-    return str(
-        os.getenv("ZHIPU_BASE_URL")
-        or llm_cfg.get("base_url")
-        or getattr(settings, "ZHIPU_BASE_URL", "")
-        or DEFAULT_ZHIPU_BASE_URL
-    ).rstrip("/")
-
-
-def _zhipu_model(cfg: Dict[str, Any]) -> str:
-    llm_cfg = cfg.get("llm") or {}
-    return str(
-        os.getenv("ZHIPU_MODEL")
-        or llm_cfg.get("model")
-        or getattr(settings, "ZHIPU_MODEL", "")
-        or DEFAULT_ZHIPU_MODEL
-    )
+    return "openai"
 
 
 def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     llm_cfg = cfg.get("llm") or {}
     return openai_endpoint_targets(
         primary_base_url=(
-            os.getenv("OPENAI_BASE_URL")
-            or llm_cfg.get("base_url")
-            or getattr(settings, "OPENAI_BASE_URL", "")
+            _normalize_openai_base_urls(
+                os.getenv("OPENAI_BASE_URL")
+                or llm_cfg.get("base_url")
+                or getattr(settings, "OPENAI_BASE_URL", "")
+            )
             or DEFAULT_OPENAI_BASE_URL
         ),
         backup_base_urls=(
-            os.getenv("OPENAI_BACKUP_BASE_URL")
-            or llm_cfg.get("backup_base_url")
-            or getattr(settings, "OPENAI_BACKUP_BASE_URL", "")
+            _normalize_openai_base_urls(
+                os.getenv("OPENAI_BACKUP_BASE_URL")
+                or llm_cfg.get("backup_base_url")
+                or getattr(settings, "OPENAI_BACKUP_BASE_URL", "")
+            )
             or ""
         ),
         primary_api_key=_openai_primary_api_key(),
@@ -125,34 +131,35 @@ def _openai_base_url(cfg: Dict[str, Any]) -> str:
 
 def _openai_model(cfg: Dict[str, Any]) -> str:
     llm_cfg = cfg.get("llm") or {}
-    return str(
+    return _normalize_openai_model(
         os.getenv("OPENAI_MODEL")
         or llm_cfg.get("model")
         or getattr(settings, "OPENAI_MODEL", "")
-        or DEFAULT_OPENAI_MODEL
     )
 
 
 def _llm_api_key(cfg: Dict[str, Any]) -> str:
-    if _llm_provider(cfg) == "openai":
-        return _openai_api_key()
-    return _zhipu_api_key()
+    return _openai_api_key()
 
 
 def _llm_base_url(cfg: Dict[str, Any]) -> str:
-    if _llm_provider(cfg) == "openai":
-        return _openai_base_url(cfg)
-    return _zhipu_base_url(cfg)
+    return _openai_base_url(cfg)
 
 
 def _llm_model(cfg: Dict[str, Any]) -> str:
-    if _llm_provider(cfg) == "openai":
-        return _openai_model(cfg)
-    return _zhipu_model(cfg)
+    return _openai_model(cfg)
 
 
 def _llm_summary_source(cfg: Dict[str, Any]) -> str:
-    return "openai_responses" if _llm_provider(cfg) == "openai" else "glm5"
+    return "openai_responses"
+
+
+def _summarize_item_cap(llm_cfg: Dict[str, Any], total_titles: int) -> int:
+    raw_limit = llm_cfg.get("summarize_max_llm_items")
+    if raw_limit is None:
+        raw_limit = llm_cfg.get("summarize_max_glm_items")
+    max_llm_items = int(raw_limit or max(12, total_titles))
+    return max(0, min(120, max_llm_items))
 
 
 def _openai_post_with_failover(
@@ -498,19 +505,17 @@ def _build_prompt(batch: List[Dict[str, Any]], allowed_symbols: List[str], feedb
     return system_prompt, json.dumps(user_prompt, ensure_ascii=False)
 
 
-def _call_glm5_once(
+def _call_llm_once(
     batch: List[Dict[str, Any]],
     cfg: Dict[str, Any],
     mapper: SymbolMapper,
     feedback: str = "",
 ) -> List[Dict[str, Any]]:
-    provider = _llm_provider(cfg)
     api_key = _llm_api_key(cfg)
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is missing" if provider == "openai" else "ZHIPU_API_KEY is missing")
+        raise RuntimeError("OPENAI_API_KEY is missing")
 
     llm_cfg = cfg.get("llm") or {}
-    base_url = _llm_base_url(cfg)
     model = _llm_model(cfg)
     timeout_sec = int(llm_cfg.get("timeout_sec") or 45)
 
@@ -520,46 +525,22 @@ def _call_glm5_once(
 
     system_prompt, user_prompt = _build_prompt(batch, allowed_symbols, feedback)
 
-    if provider == "openai":
-        payload = build_responses_payload(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0,
-            stream=False,
-        )
-    else:
-        payload = {
-            "model": model,
-            "temperature": 0,
-            "top_p": 0.1,
-            "response_format": {"type": "json_object"},
-            "thinking": _thinking_cfg(cfg),
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
-        url = f"{base_url}/chat/completions"
-
-    if provider == "openai":
-        data = _openai_post_with_failover(
-            cfg=cfg,
-            payload=payload,
-            timeout_sec=timeout_sec,
-            log_prefix="llm_glm5.extract",
-        )
-    else:
-        headers = build_openai_headers(api_key)
-        response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
-        if response.status_code >= 400:
-            raise RuntimeError(f"LLM HTTP {response.status_code}: {response.text[:300]}")
-        data = response.json()
-
-    if provider == "openai":
-        data = coerce_responses_to_chat_completions(data)
+    payload = build_responses_payload(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0,
+        stream=False,
+    )
+    data = _openai_post_with_failover(
+        cfg=cfg,
+        payload=payload,
+        timeout_sec=timeout_sec,
+        log_prefix="news_llm.extract",
+    )
+    data = coerce_responses_to_chat_completions(data)
     choices = data.get("choices") if isinstance(data, dict) else None
     if not choices:
         raise ValueError("LLM response missing choices")
@@ -571,7 +552,7 @@ def _call_glm5_once(
     return _validate_events(parsed, mapper)
 
 
-def extract_events_glm5_with_meta(news_items: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool, List[str]]:
+def extract_events_llm_with_meta(news_items: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool, List[str]]:
     """Extract events with LLM; retry once then fallback to rules per batch."""
     if not news_items:
         return [], False, []
@@ -591,7 +572,7 @@ def extract_events_glm5_with_meta(news_items: List[Dict[str, Any]], cfg: Dict[st
 
     for idx, batch in enumerate(_batched(news_items, batch_size), start=1):
         try:
-            events = _call_glm5_once(batch=batch, cfg=cfg, mapper=mapper, feedback="")
+            events = _call_llm_once(batch=batch, cfg=cfg, mapper=mapper, feedback="")
             llm_used = True
             # LLM success (including empty events) is authoritative.
             # Rules fallback is only for LLM failures.
@@ -601,7 +582,7 @@ def extract_events_glm5_with_meta(news_items: List[Dict[str, Any]], cfg: Dict[st
             feedback = f"Validation or parsing error: {first_exc}"
 
         try:
-            events = _call_glm5_once(batch=batch, cfg=cfg, mapper=mapper, feedback=feedback)
+            events = _call_llm_once(batch=batch, cfg=cfg, mapper=mapper, feedback=feedback)
             llm_used = True
             all_events.extend(events)
             continue
@@ -629,13 +610,13 @@ def extract_events_glm5_with_meta(news_items: List[Dict[str, Any]], cfg: Dict[st
     return deduped, llm_used, errors
 
 
-def extract_events_glm5(news_items: List[Dict[str, Any]], cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+def extract_events_llm(news_items: List[Dict[str, Any]], cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Required API: return event list only."""
-    events, _, _ = extract_events_glm5_with_meta(news_items, cfg)
+    events, _, _ = extract_events_llm_with_meta(news_items, cfg)
     return events
 
 
-def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) -> Dict[str, Any]:
+def summarize_title_llm(title: str, cfg: Dict[str, Any], max_length: int = 60) -> Dict[str, Any]:
     """Summarize a news title to a single line using the configured LLM.
 
     Args:
@@ -656,7 +637,6 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
     if cached:
         return cached
 
-    provider = _llm_provider(cfg)
     api_key = _llm_api_key(cfg)
     if not api_key:
         result = _summarize_fallback(title, max_length)
@@ -664,7 +644,6 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
         return result
 
     llm_cfg = cfg.get("llm") or {}
-    base_url = _llm_base_url(cfg)
     model = _llm_model(cfg)
     summary_source = _llm_summary_source(cfg)
     timeout_sec = int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 12)
@@ -678,52 +657,26 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
 
     user_prompt = f"请分析这条加密货币新闻标题，翻译成中文并判断利好利空：\n\n{title}"
 
-    if provider == "openai":
-        payload = build_responses_payload(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_output_tokens=max_length + 50,
-            temperature=0.3,
-            text_format="json_object",
-            stream=False,
-        )
-    else:
-        payload = {
-            "model": model,
-            "temperature": 0.3,
-            "top_p": 0.9,
-            "max_tokens": max_length + 50,
-            "response_format": {"type": "json_object"},
-            "thinking": _thinking_cfg(cfg),
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
-        url = f"{base_url}/chat/completions"
+    payload = build_responses_payload(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_output_tokens=max_length + 50,
+        temperature=0.3,
+        text_format="json_object",
+        stream=False,
+    )
 
     try:
-        if provider == "openai":
-            data = _openai_post_with_failover(
-                cfg=cfg,
-                payload=payload,
-                timeout_sec=timeout_sec,
-                log_prefix="llm_glm5.summarize",
-            )
-        else:
-            headers = build_openai_headers(api_key)
-            response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
-            if response.status_code >= 400:
-                logger.warning(f"LLM summarize failed: HTTP {response.status_code}")
-                result = _summarize_fallback(title, max_length)
-                _summary_cache_set(title, max_length, result)
-                return result
-            data = response.json()
-        if provider == "openai":
-            data = coerce_responses_to_chat_completions(data)
+        data = _openai_post_with_failover(
+            cfg=cfg,
+            payload=payload,
+            timeout_sec=timeout_sec,
+            log_prefix="news_llm.summarize",
+        )
+        data = coerce_responses_to_chat_completions(data)
         choices = data.get("choices") if isinstance(data, dict) else None
         if not choices:
             result = _summarize_fallback(title, max_length)
@@ -766,18 +719,16 @@ def _summarize_fallback(title: str, max_length: int) -> Dict[str, Any]:
     }
 
 
-def _call_glm5_batch_summarize(
+def _call_llm_batch_summarize(
     titles: List[str],
     cfg: Dict[str, Any],
     max_length: int = 60,
 ) -> List[Dict[str, Any]]:
-    provider = _llm_provider(cfg)
     api_key = _llm_api_key(cfg)
     if not api_key:
         return [_summarize_fallback(t, max_length) for t in titles]
 
     llm_cfg = cfg.get("llm") or {}
-    base_url = _llm_base_url(cfg)
     model = _llm_model(cfg)
     summary_source = _llm_summary_source(cfg)
     timeout_sec = int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 12)
@@ -799,48 +750,25 @@ def _call_glm5_batch_summarize(
         "titles": compact,
     }
 
-    if provider == "openai":
-        payload = build_responses_payload(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
-            ],
-            temperature=0.2,
-            text_format="json_object",
-            stream=False,
-        )
-    else:
-        payload = {
-            "model": model,
-            "temperature": 0.2,
-            "top_p": 0.8,
-            "response_format": {"type": "json_object"},
-            "thinking": _thinking_cfg(cfg),
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
-            ],
-        }
-        url = f"{base_url}/chat/completions"
+    payload = build_responses_payload(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
+        ],
+        temperature=0.2,
+        text_format="json_object",
+        stream=False,
+    )
 
     try:
-        if provider == "openai":
-            data = _openai_post_with_failover(
-                cfg=cfg,
-                payload=payload,
-                timeout_sec=timeout_sec,
-                log_prefix="llm_glm5.batch_summarize",
-            )
-        else:
-            headers = build_openai_headers(api_key)
-            response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
-            if response.status_code >= 400:
-                body_preview = (response.text or "")[:200].replace("\n", " ")
-                raise RuntimeError(f"LLM summarize batch HTTP {response.status_code}: {body_preview}")
-            data = response.json()
-        if provider == "openai":
-            data = coerce_responses_to_chat_completions(data)
+        data = _openai_post_with_failover(
+            cfg=cfg,
+            payload=payload,
+            timeout_sec=timeout_sec,
+            log_prefix="news_llm.batch_summarize",
+        )
+        data = coerce_responses_to_chat_completions(data)
         choices = data.get("choices") if isinstance(data, dict) else None
         if not choices:
             raise ValueError("LLM summarize batch missing choices")
@@ -896,8 +824,7 @@ def batch_summarize_titles(titles: List[str], cfg: Dict[str, Any], max_length: i
     llm_cfg = cfg.get("llm") or {}
     batch_size = int(llm_cfg.get("summarize_batch_size") or 20)
     batch_size = max(1, min(40, batch_size))
-    max_glm_items = int(llm_cfg.get("summarize_max_glm_items") or max(12, len(titles)))
-    max_glm_items = max(0, min(120, max_glm_items))
+    max_llm_items = _summarize_item_cap(llm_cfg, len(titles))
 
     results: List[Optional[Dict[str, Any]]] = [None] * len(titles)
     uncached_idx: List[int] = []
@@ -908,17 +835,17 @@ def batch_summarize_titles(titles: List[str], cfg: Dict[str, Any], max_length: i
         else:
             uncached_idx.append(idx)
 
-    glm_targets = uncached_idx[:max_glm_items]
-    fallback_targets = uncached_idx[max_glm_items:]
+    llm_targets = uncached_idx[:max_llm_items]
+    fallback_targets = uncached_idx[max_llm_items:]
     for idx in fallback_targets:
         fallback = _summarize_fallback(titles[idx], max_length)
         results[idx] = fallback
         _summary_cache_set(titles[idx], max_length, fallback)
 
-    for i in range(0, len(glm_targets), batch_size):
-        chunk_idx = glm_targets[i : i + batch_size]
+    for i in range(0, len(llm_targets), batch_size):
+        chunk_idx = llm_targets[i : i + batch_size]
         chunk_titles = [titles[idx] for idx in chunk_idx]
-        chunk_res = _call_glm5_batch_summarize(chunk_titles, cfg, max_length)
+        chunk_res = _call_llm_batch_summarize(chunk_titles, cfg, max_length)
         for idx, res in zip(chunk_idx, chunk_res):
             results[idx] = res
             _summary_cache_set(titles[idx], max_length, res)
@@ -930,3 +857,19 @@ def batch_summarize_titles(titles: List[str], cfg: Dict[str, Any], max_length: i
             _summary_cache_set(titles[idx], max_length, item)
         final.append(item)
     return final
+
+
+def extract_events_glm5_with_meta(news_items: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool, List[str]]:
+    return extract_events_llm_with_meta(news_items, cfg)
+
+
+def extract_events_glm5(news_items: List[Dict[str, Any]], cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return extract_events_llm(news_items, cfg)
+
+
+def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) -> Dict[str, Any]:
+    return summarize_title_llm(title, cfg, max_length)
+
+
+def batch_summarize_titles_llm(titles: List[str], cfg: Dict[str, Any], max_length: int = 60) -> List[Dict[str, Any]]:
+    return batch_summarize_titles(titles, cfg, max_length)

@@ -20,8 +20,8 @@ from config.settings import settings
 from core.news.collectors.manager import MultiSourceNewsCollector
 from core.news.eventizer.llm_glm5 import (
     _summarize_fallback,
-    batch_summarize_titles,
-    extract_events_glm5_with_meta,
+    batch_summarize_titles_llm as batch_summarize_titles,
+    extract_events_llm_with_meta,
 )
 from core.news.text_normalizer import clean_news_text
 from core.news.eventizer.rules import SymbolMapper, load_news_rule_config
@@ -116,8 +116,8 @@ def _news_llm_enabled() -> bool:
     return bool(
         str(os.environ.get("OPENAI_API_KEY") or "").strip()
         or str(getattr(settings, "OPENAI_API_KEY", "") or "").strip()
-        or str(os.environ.get("ZHIPU_API_KEY") or "").strip()
-        or str(getattr(settings, "ZHIPU_API_KEY", "") or "").strip()
+        or str(os.environ.get("OPENAI_BACKUP_API_KEY") or "").strip()
+        or str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip()
     )
 
 
@@ -1540,7 +1540,7 @@ async def _backfill_recent_events(
             "skipped_by_task_status": skipped_by_task_status,
         }
 
-    extracted, llm_used, errors = await asyncio.to_thread(extract_events_glm5_with_meta, candidates, cfg)
+    extracted, llm_used, errors = await asyncio.to_thread(extract_events_llm_with_meta, candidates, cfg)
     url_to_provider: Dict[str, str] = {}
     title_to_provider: Dict[str, str] = {}
     for raw in candidates:
@@ -1908,7 +1908,7 @@ async def pull_and_store_news(cfg: Dict[str, Any], payload: PullNowRequest) -> D
         llm_used = False
         if new_news:
             if sync_llm:
-                events, llm_used, llm_errors = await asyncio.to_thread(extract_events_glm5_with_meta, new_news, cfg)
+                events, llm_used, llm_errors = await asyncio.to_thread(extract_events_llm_with_meta, new_news, cfg)
                 errors.extend(llm_errors)
                 url_to_provider: Dict[str, str] = {}
                 for raw in new_news:

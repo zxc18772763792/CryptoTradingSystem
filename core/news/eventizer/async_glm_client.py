@@ -1,4 +1,8 @@
-"""Async LLM client for event extraction and summarization."""
+"""Async news LLM client for event extraction and summarization.
+
+Legacy module/class names are preserved for import compatibility after
+removing the deprecated GLM news path.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +10,7 @@ import hashlib
 import json
 import os
 import re
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import aiohttp
 from loguru import logger
@@ -28,8 +32,8 @@ from core.utils.openai_responses import (
 
 DEFAULT_OPENAI_BASE_URL = "https://vpsairobot.com/v1"
 DEFAULT_OPENAI_MODEL = "gpt-5.1-codex-mini"
-DEFAULT_ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
-DEFAULT_ZHIPU_MODEL = "GLM-4.5-Air"
+_LEGACY_PROVIDER_ALIASES = {"glm", "glm5", "zhipu"}
+_LEGACY_BASE_URL_HINTS = ("bigmodel.cn", "zhipu")
 
 _POS_SENTIMENT_HINTS = {
     "approved", "approval", "approve", "etf inflow", "net inflow", "listing", "listed", "partnership",
@@ -45,8 +49,34 @@ _NEG_SENTIMENT_HINTS = {
 }
 
 
-def _zhipu_api_key() -> str:
-    return str(os.getenv("ZHIPU_API_KEY") or getattr(settings, "ZHIPU_API_KEY", "") or "").strip()
+def _normalize_openai_base_urls(value: Any) -> str:
+    if isinstance(value, (list, tuple, set)):
+        parts = [_normalize_openai_base_urls(item) for item in value]
+        return ",".join([part for part in parts if part])
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    cleaned: List[str] = []
+    for raw_part in text.split(","):
+        part = str(raw_part or "").strip().rstrip("/")
+        if not part:
+            continue
+        lowered = part.lower()
+        if any(hint in lowered for hint in _LEGACY_BASE_URL_HINTS):
+            continue
+        cleaned.append(part)
+    return ",".join(cleaned)
+
+
+def _normalize_openai_model(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return DEFAULT_OPENAI_MODEL
+    if text.lower().startswith("glm"):
+        return DEFAULT_OPENAI_MODEL
+    return text
 
 
 def _openai_primary_api_key() -> str:
@@ -67,48 +97,28 @@ def _openai_api_key() -> str:
 def _llm_provider(cfg: Dict[str, Any]) -> str:
     llm_cfg = cfg.get("llm") or {}
     raw = str(os.getenv("NEWS_LLM_PROVIDER") or llm_cfg.get("provider") or "").strip().lower()
-    if raw in {"openai", "codex", "responses"}:
+    if raw in {"openai", "codex", "responses"} or raw in _LEGACY_PROVIDER_ALIASES:
         return "openai"
-    if raw == "glm":
-        return "glm"
-    if _openai_api_key() or _openai_backup_api_key():
-        return "openai"
-    return "glm"
-
-
-def _zhipu_base_url(cfg: Dict[str, Any]) -> str:
-    llm_cfg = cfg.get("llm") or {}
-    return str(
-        os.getenv("ZHIPU_BASE_URL")
-        or llm_cfg.get("base_url")
-        or getattr(settings, "ZHIPU_BASE_URL", "")
-        or DEFAULT_ZHIPU_BASE_URL
-    ).rstrip("/")
-
-
-def _zhipu_model(cfg: Dict[str, Any]) -> str:
-    llm_cfg = cfg.get("llm") or {}
-    return str(
-        os.getenv("ZHIPU_MODEL")
-        or llm_cfg.get("model")
-        or getattr(settings, "ZHIPU_MODEL", "")
-        or DEFAULT_ZHIPU_MODEL
-    )
+    return "openai"
 
 
 def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     llm_cfg = cfg.get("llm") or {}
     return openai_endpoint_targets(
         primary_base_url=(
-            os.getenv("OPENAI_BASE_URL")
-            or llm_cfg.get("base_url")
-            or getattr(settings, "OPENAI_BASE_URL", "")
+            _normalize_openai_base_urls(
+                os.getenv("OPENAI_BASE_URL")
+                or llm_cfg.get("base_url")
+                or getattr(settings, "OPENAI_BASE_URL", "")
+            )
             or DEFAULT_OPENAI_BASE_URL
         ),
         backup_base_urls=(
-            os.getenv("OPENAI_BACKUP_BASE_URL")
-            or llm_cfg.get("backup_base_url")
-            or getattr(settings, "OPENAI_BACKUP_BASE_URL", "")
+            _normalize_openai_base_urls(
+                os.getenv("OPENAI_BACKUP_BASE_URL")
+                or llm_cfg.get("backup_base_url")
+                or getattr(settings, "OPENAI_BACKUP_BASE_URL", "")
+            )
             or ""
         ),
         primary_api_key=_openai_primary_api_key(),
@@ -127,34 +137,35 @@ def _openai_base_url(cfg: Dict[str, Any]) -> str:
 
 def _openai_model(cfg: Dict[str, Any]) -> str:
     llm_cfg = cfg.get("llm") or {}
-    return str(
+    return _normalize_openai_model(
         os.getenv("OPENAI_MODEL")
         or llm_cfg.get("model")
         or getattr(settings, "OPENAI_MODEL", "")
-        or DEFAULT_OPENAI_MODEL
     )
 
 
 def _llm_api_key(cfg: Dict[str, Any]) -> str:
-    if _llm_provider(cfg) == "openai":
-        return _openai_api_key()
-    return _zhipu_api_key()
+    return _openai_api_key()
 
 
 def _llm_base_url(cfg: Dict[str, Any]) -> str:
-    if _llm_provider(cfg) == "openai":
-        return _openai_base_url(cfg)
-    return _zhipu_base_url(cfg)
+    return _openai_base_url(cfg)
 
 
 def _llm_model(cfg: Dict[str, Any]) -> str:
-    if _llm_provider(cfg) == "openai":
-        return _openai_model(cfg)
-    return _zhipu_model(cfg)
+    return _openai_model(cfg)
 
 
 def _llm_summary_source(cfg: Dict[str, Any]) -> str:
-    return "openai_responses" if _llm_provider(cfg) == "openai" else "glm5"
+    return "openai_responses"
+
+
+def _summarize_item_cap(llm_cfg: Dict[str, Any], total_titles: int) -> int:
+    raw_limit = llm_cfg.get("summarize_max_llm_items")
+    if raw_limit is None:
+        raw_limit = llm_cfg.get("summarize_max_glm_items")
+    max_llm_items = int(raw_limit or max(12, total_titles))
+    return max(0, min(120, max_llm_items))
 
 
 def _thinking_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -305,21 +316,17 @@ def _summarize_fallback(title: str, max_length: int) -> Dict[str, Any]:
 
 
 class AsyncGLMClient:
-    """Async GLM-5 client with timeout, rate limiting, and error handling."""
+    """Async news LLM client with timeout, rate limiting, and relay failover."""
 
     def __init__(self, cfg: Optional[Dict[str, Any]] = None):
-        """Initialize the async GLM client.
+        """Initialize the async news LLM client.
 
         Args:
             cfg: Configuration dictionary. If None, uses environment defaults.
         """
         self._cfg = cfg or {}
         self._provider = _llm_provider(self._cfg)
-        self._endpoint_targets: List[Dict[str, Any]] = (
-            _openai_endpoint_targets(self._cfg)
-            if self._provider == "openai"
-            else []
-        )
+        self._endpoint_targets: List[Dict[str, Any]] = _openai_endpoint_targets(self._cfg)
         self._api_key = _llm_api_key(self._cfg)
         self._base_url = _llm_base_url(self._cfg)
         self._model = _llm_model(self._cfg)
@@ -342,21 +349,11 @@ class AsyncGLMClient:
         self._requests_rate_limited = 0
 
     def _get_headers(self) -> Dict[str, str]:
-        """Get request headers for GLM API."""
+        """Get request headers for the OpenAI-compatible relay."""
         return build_openai_headers(self._api_key)
 
     def _available_endpoint_targets(self) -> List[Dict[str, Any]]:
-        if self._provider == "openai":
-            candidates = self._endpoint_targets
-        else:
-            candidates = [
-                {
-                    "index": 0,
-                    "base_url": self._base_url,
-                    "api_key": self._api_key,
-                    "is_backup": False,
-                }
-            ]
+        candidates = self._endpoint_targets
         return [
             dict(target)
             for target in candidates
@@ -370,7 +367,7 @@ class AsyncGLMClient:
         payload: Dict[str, Any],
         timeout: Optional[aiohttp.ClientTimeout] = None,
     ) -> Tuple[Dict[str, Any], str]:
-        """Make an async HTTP request to GLM API with rate limiting.
+        """Make an async HTTP request to the news LLM relay with rate limiting.
 
         Args:
             method: HTTP method (GET, POST)
@@ -383,11 +380,11 @@ class AsyncGLMClient:
             error_type: "none", "rate_limit", "timeout", "other"
 
         Raises:
-            RuntimeError: If API key is missing
+            RuntimeError: If the OpenAI-compatible API key is missing
         """
         targets = self._available_endpoint_targets()
         if not targets:
-            raise RuntimeError("OPENAI_API_KEY is missing" if self._provider == "openai" else "ZHIPU_API_KEY is missing")
+            raise RuntimeError("OPENAI_API_KEY is missing")
 
         self._requests_total += 1
         timeout = timeout or self._timeout
@@ -401,12 +398,8 @@ class AsyncGLMClient:
             for idx, target in enumerate(targets):
                 base_url = str(target.get("base_url") or "").rstrip("/")
                 api_key = str(target.get("api_key") or "").strip()
-                is_openai_responses = self._provider == "openai"
-                url = (
-                    responses_endpoint(base_url)
-                    if is_openai_responses
-                    else (endpoint if str(endpoint or "").startswith("http") else f"{base_url}{endpoint}")
-                )
+                is_openai_responses = True
+                url = responses_endpoint(base_url)
                 try:
                     async with session.request(
                         method=method,
@@ -426,11 +419,11 @@ class AsyncGLMClient:
                                     pass
 
                             error_text = await response.text()
-                            logger.warning(f"GLM rate limited (429): {error_text[:200]}")
+                            logger.warning(f"news llm rate limited (429): {error_text[:200]}")
                             last_error_type = "rate_limit"
-                            if idx + 1 < total_targets and self._provider == "openai":
+                            if idx + 1 < total_targets:
                                 logger.warning(
-                                    f"async_glm_client openai relay rate limited; trying backup {idx + 2}/{total_targets}"
+                                    f"async_glm_client news relay rate limited; trying backup {idx + 2}/{total_targets}"
                                 )
                                 continue
                             rate_limiter.on_rate_limit(retry_after=retry_after)
@@ -439,15 +432,11 @@ class AsyncGLMClient:
                         if response.status >= 400:
                             self._requests_failed += 1
                             error_text = await response.text()
-                            logger.warning(f"GLM API HTTP {response.status}: {error_text[:300]}")
+                            logger.warning(f"news llm HTTP {response.status}: {error_text[:300]}")
                             last_error_type = "timeout" if response.status in (408, 504) else "other"
-                            if (
-                                idx + 1 < total_targets
-                                and self._provider == "openai"
-                                and is_retryable_openai_status(response.status)
-                            ):
+                            if idx + 1 < total_targets and is_retryable_openai_status(response.status):
                                 logger.warning(
-                                    f"async_glm_client openai relay HTTP {response.status}; "
+                                    f"async_glm_client news relay HTTP {response.status}; "
                                     f"trying backup {idx + 2}/{total_targets}"
                                 )
                                 continue
@@ -462,21 +451,21 @@ class AsyncGLMClient:
                         return data, "none"
                 except asyncio.TimeoutError:
                     self._requests_failed += 1
-                    logger.warning("GLM request timed out")
+                    logger.warning("news llm request timed out")
                     last_error_type = "timeout"
-                    if idx + 1 < total_targets and self._provider == "openai":
+                    if idx + 1 < total_targets:
                         logger.warning(
-                            f"async_glm_client openai relay timeout; trying backup {idx + 2}/{total_targets}"
+                            f"async_glm_client news relay timeout; trying backup {idx + 2}/{total_targets}"
                         )
                         continue
                     return {}, "timeout"
                 except aiohttp.ClientError as exc:
                     self._requests_failed += 1
-                    logger.warning(f"GLM client error: {exc!r}")
+                    logger.warning(f"news llm transport error: {exc!r}")
                     last_error_type = "other"
-                    if idx + 1 < total_targets and self._provider == "openai":
+                    if idx + 1 < total_targets:
                         logger.warning(
-                            f"async_glm_client openai relay transport failure; "
+                            f"async_glm_client news relay transport failure; "
                             f"trying backup {idx + 2}/{total_targets}: {exc!r}"
                         )
                         continue
@@ -491,7 +480,7 @@ class AsyncGLMClient:
         max_tokens: Optional[int] = None,
         timeout: Optional[int] = None,
     ) -> Tuple[Dict[str, Any], str]:
-        """Call GLM chat completions API asynchronously with rate limiting.
+        """Call the OpenAI-compatible chat API asynchronously with rate limiting.
 
         Args:
             messages: List of message dicts with 'role' and 'content'
@@ -507,40 +496,23 @@ class AsyncGLMClient:
         Raises:
             RuntimeError: If API key is missing
         """
-        if self._provider == "openai":
-            payload = build_responses_payload(
-                model=self._model,
-                messages=messages,
-                max_output_tokens=max_tokens,
-                temperature=temperature,
-                stream=False,
-            )
-            request_timeout = self._timeout if timeout is None else aiohttp.ClientTimeout(total=timeout)
-            response, error_type = await self._request(
-                "POST",
-                responses_endpoint(self._base_url),
-                payload,
-                timeout=request_timeout,
-            )
-            if error_type != "none" or not isinstance(response, dict):
-                return response, error_type
-            return coerce_responses_to_chat_completions(response), error_type
-
-        payload = {
-            "model": self._model,
-            "temperature": temperature,
-            "top_p": top_p,
-            "response_format": {"type": "json_object"},
-            "thinking": _thinking_cfg(self._cfg),
-            "messages": messages,
-        }
-
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
-
+        payload = build_responses_payload(
+            model=self._model,
+            messages=messages,
+            max_output_tokens=max_tokens,
+            temperature=temperature,
+            stream=False,
+        )
         request_timeout = self._timeout if timeout is None else aiohttp.ClientTimeout(total=timeout)
-
-        return await self._request("POST", "/chat/completions", payload, timeout=request_timeout)
+        response, error_type = await self._request(
+            "POST",
+            responses_endpoint(self._base_url),
+            payload,
+            timeout=request_timeout,
+        )
+        if error_type != "none" or not isinstance(response, dict):
+            return response, error_type
+        return coerce_responses_to_chat_completions(response), error_type
 
     async def chat_completions_stream(
         self,
@@ -550,7 +522,7 @@ class AsyncGLMClient:
         max_tokens: Optional[int] = None,
         timeout: Optional[int] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """Call GLM chat completions API with streaming response.
+        """Call the news LLM with a streaming-like interface.
 
         Args:
             messages: List of message dicts with 'role' and 'content'
@@ -564,73 +536,23 @@ class AsyncGLMClient:
 
         Raises:
             RuntimeError: If API call fails or times out
-
-        Note:
-            Uses SSE (Server-Sent Events) format. Each chunk contains
-            partial response data that can be processed incrementally.
         """
         if not self._api_key:
-            raise RuntimeError("OPENAI_API_KEY is missing" if self._provider == "openai" else "ZHIPU_API_KEY is missing")
+            raise RuntimeError("OPENAI_API_KEY is missing")
 
-        if self._provider == "openai":
-            response, error_type = await self.chat_completions(
-                messages,
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=max_tokens,
-                timeout=timeout,
-            )
-            if error_type != "none":
-                raise RuntimeError(f"OpenAI-compatible request failed: {error_type}")
-            text = extract_response_text(response)
-            if not text:
-                raise RuntimeError("OpenAI-compatible response missing content")
-            yield {"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]}
-            return
-
-        payload = {
-            "model": self._model,
-            "temperature": temperature,
-            "top_p": top_p,
-            "stream": True,
-            "thinking": _thinking_cfg(self._cfg),
-            "messages": messages,
-        }
-
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
-
-        request_timeout = self._timeout if timeout is None else aiohttp.ClientTimeout(total=timeout)
-        url = f"{self._base_url}/chat/completions"
-
-        try:
-            async with aiohttp.ClientSession(timeout=request_timeout) as session:
-                async with session.post(
-                    url=url,
-                    headers=self._get_headers(),
-                    json=payload,
-                ) as response:
-                    if response.status >= 400:
-                        error_text = await response.text()
-                        raise RuntimeError(f"GLM API HTTP {response.status}: {error_text[:300]}")
-
-                    async for line in response.content:
-                        line_text = line.decode("utf-8").strip()
-                        if not line_text or line_text.startswith(":"):
-                            continue
-                        if line_text.startswith("data: "):
-                            data = line_text[6:].strip()
-                            if data == "[DONE]":
-                                break
-                            try:
-                                yield json.loads(data)
-                            except json.JSONDecodeError:
-                                continue
-        except asyncio.CancelledError:
-            logger.debug("Stream request cancelled by caller")
-            raise
-        except Exception as e:
-            raise RuntimeError(f"Stream request failed: {e}") from e
+        response, error_type = await self.chat_completions(
+            messages,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            timeout=timeout,
+        )
+        if error_type != "none":
+            raise RuntimeError(f"OpenAI-compatible request failed: {error_type}")
+        text = extract_response_text(response)
+        if not text:
+            raise RuntimeError("OpenAI-compatible response missing content")
+        yield {"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]}
 
     def _build_prompt(
         self,
@@ -840,8 +762,7 @@ class AsyncGLMClient:
 
         if not self._api_key:
             fallback_events = extract_events_rules(news_batch, effective_cfg)
-            missing_key = "OPENAI_API_KEY" if self._provider == "openai" else "ZHIPU_API_KEY"
-            logger.warning(f"{missing_key} is missing; fallback to rules")
+            logger.warning("OPENAI_API_KEY is missing; fallback to rules")
             return fallback_events, False, "none"
 
         async def _process_batch(batch: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], str]:
@@ -941,7 +862,7 @@ class AsyncGLMClient:
         titles: List[str],
         max_length: int = 60,
     ) -> List[Dict[str, Any]]:
-        """Call GLM API to summarize a batch of titles.
+        """Call the news LLM relay to summarize a batch of titles.
 
         Args:
             titles: List of titles to summarize
@@ -1111,8 +1032,7 @@ class AsyncGLMClient:
         llm_cfg = effective_cfg.get("llm") or {}
         batch_size = int(llm_cfg.get("summarize_batch_size") or 20)
         batch_size = max(1, min(40, batch_size))
-        max_glm_items = int(llm_cfg.get("summarize_max_glm_items") or max(12, len(titles)))
-        max_glm_items = max(0, min(120, max_glm_items))
+        max_llm_items = _summarize_item_cap(llm_cfg, len(titles))
 
         results: List[Optional[Dict[str, Any]]] = [None] * len(titles)
         uncached_idx: List[int] = []
@@ -1124,16 +1044,16 @@ class AsyncGLMClient:
             else:
                 uncached_idx.append(idx)
 
-        glm_targets = uncached_idx[:max_glm_items]
-        fallback_targets = uncached_idx[max_glm_items:]
+        llm_targets = uncached_idx[:max_llm_items]
+        fallback_targets = uncached_idx[max_llm_items:]
 
         for idx in fallback_targets:
             fallback = _summarize_fallback(titles[idx], max_length)
             results[idx] = fallback
             self._summary_cache_set(titles[idx], max_length, fallback)
 
-        for i in range(0, len(glm_targets), batch_size):
-            chunk_idx = glm_targets[i : i + batch_size]
+        for i in range(0, len(llm_targets), batch_size):
+            chunk_idx = llm_targets[i : i + batch_size]
             chunk_titles = [titles[idx] for idx in chunk_idx]
             chunk_res = await self._call_summarize_batch(chunk_titles, max_length)
             for idx, res in zip(chunk_idx, chunk_res):
@@ -1211,3 +1131,6 @@ async def summarize_batch_async(
     """
     client = AsyncGLMClient(cfg)
     return await client.summarize_batch(titles, cfg, max_length)
+
+
+AsyncNewsLLMClient = AsyncGLMClient
