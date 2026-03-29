@@ -152,6 +152,7 @@ if (Enable-CondaEnv -Name $EnvName) {
 }
 
 Import-DotEnvFile -Path (Join-Path $PSScriptRoot ".env")
+Import-DotEnvFile -Path (Join-Path $PSScriptRoot ".env.local")
 
 $pythonExe = Resolve-PythonExecutable
 Write-Host "Python executable: $pythonExe"

@@ -17,10 +17,13 @@ from core.utils.openai_responses import (
     build_openai_headers,
     build_responses_payload,
     coerce_responses_to_chat_completions,
-    is_retryable_openai_status,
     openai_endpoint_targets,
+    prioritize_openai_targets,
     read_requests_responses_json,
+    remember_openai_target_failure,
+    remember_openai_target_success,
     responses_endpoint,
+    should_failover_openai_status,
 )
 
 
@@ -169,7 +172,7 @@ def _openai_post_with_failover(
     timeout_sec: int,
     log_prefix: str,
 ) -> Dict[str, Any]:
-    targets = _openai_endpoint_targets(cfg)
+    targets = prioritize_openai_targets(_openai_endpoint_targets(cfg))
     available = [
         dict(target)
         for target in targets
@@ -193,7 +196,9 @@ def _openai_post_with_failover(
             )
             if response.status_code >= 400:
                 err = RuntimeError(f"LLM HTTP {response.status_code}: {response.text[:300]}")
-                if idx + 1 < total_targets and is_retryable_openai_status(response.status_code):
+                if should_failover_openai_status(response.status_code):
+                    remember_openai_target_failure(targets, base_url)
+                if idx + 1 < total_targets and should_failover_openai_status(response.status_code):
                     last_exc = err
                     logger.warning(
                         f"{log_prefix}: openai relay HTTP {response.status_code}; "
@@ -201,8 +206,10 @@ def _openai_post_with_failover(
                     )
                     continue
                 raise err
+            remember_openai_target_success(targets, base_url)
             return read_requests_responses_json(response)
         except requests.RequestException as exc:
+            remember_openai_target_failure(targets, base_url)
             if idx + 1 < total_targets:
                 last_exc = exc
                 logger.warning(

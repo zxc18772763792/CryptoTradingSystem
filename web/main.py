@@ -34,6 +34,12 @@ if settings.OPENAI_API_KEY:
     os.environ["OPENAI_API_KEY"] = settings.OPENAI_API_KEY
 if settings.OPENAI_BASE_URL:
     os.environ["OPENAI_BASE_URL"] = settings.OPENAI_BASE_URL
+if settings.OPENAI_BACKUP_API_KEY:
+    os.environ["OPENAI_BACKUP_API_KEY"] = settings.OPENAI_BACKUP_API_KEY
+if settings.OPENAI_BACKUP_BASE_URL:
+    os.environ["OPENAI_BACKUP_BASE_URL"] = settings.OPENAI_BACKUP_BASE_URL
+if settings.OPENAI_MODEL:
+    os.environ["OPENAI_MODEL"] = settings.OPENAI_MODEL
 
 from core.data import data_storage, second_level_backfill_manager
 from core.exchanges import exchange_manager

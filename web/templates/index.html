@@ -1715,8 +1715,10 @@
                                         <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
                                             <button class="btn btn-sm" type="button" onclick="agentSaveConfig()">保存配置</button>
                                         </div>
-                                        <div id="ai-agent-ranking-summary" class="ai-agent-ranking-summary">加载中...</div>
-                                        <div id="ai-agent-ranking" class="ai-agent-ranking-box">加载中...</div>
+                                        <div class="ai-agent-scroll-shell ai-agent-scroll-shell-ranking">
+                                            <div id="ai-agent-ranking-summary" class="ai-agent-ranking-summary">加载中...</div>
+                                            <div id="ai-agent-ranking" class="ai-agent-ranking-box">加载中...</div>
+                                        </div>
                                     </div>
                                     <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
                                         <button class="btn btn-sm btn-success" id="ai-agent-start-btn" onclick="agentStart()">启动</button>
@@ -1750,8 +1752,10 @@
                                         <button class="btn btn-sm" type="button" onclick="agentRefreshReview()">刷新复盘</button>
                                     </div>
                                     <div class="ai-auto-step-desc">把真正放行的开仓和平仓单独拎出来，快速看最近亏损是来自方向错误、平仓过慢，还是模型服务异常导致管理失灵。</div>
-                                    <div id="ai-agent-review-summary" class="ai-agent-review-summary">加载中...</div>
-                                    <div id="ai-agent-review" class="ai-agent-review-box">加载中...</div>
+                                    <div class="ai-agent-scroll-shell ai-agent-scroll-shell-review">
+                                        <div id="ai-agent-review-summary" class="ai-agent-review-summary">加载中...</div>
+                                        <div id="ai-agent-review" class="ai-agent-review-box">加载中...</div>
+                                    </div>
                                 </div>
                             </section>
                         </div>

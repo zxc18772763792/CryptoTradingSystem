@@ -24,10 +24,13 @@ from core.utils.openai_responses import (
     build_responses_payload,
     coerce_responses_to_chat_completions,
     extract_response_text,
-    is_retryable_openai_status,
     openai_endpoint_targets,
+    prioritize_openai_targets,
     read_aiohttp_responses_json,
+    remember_openai_target_failure,
+    remember_openai_target_success,
     responses_endpoint,
+    should_failover_openai_status,
 )
 
 DEFAULT_OPENAI_BASE_URL = "https://vpsairobot.com/v1"
@@ -382,7 +385,7 @@ class AsyncGLMClient:
         Raises:
             RuntimeError: If the OpenAI-compatible API key is missing
         """
-        targets = self._available_endpoint_targets()
+        targets = prioritize_openai_targets(self._available_endpoint_targets())
         if not targets:
             raise RuntimeError("OPENAI_API_KEY is missing")
 
@@ -421,6 +424,7 @@ class AsyncGLMClient:
                             error_text = await response.text()
                             logger.warning(f"news llm rate limited (429): {error_text[:200]}")
                             last_error_type = "rate_limit"
+                            remember_openai_target_failure(targets, base_url)
                             if idx + 1 < total_targets:
                                 logger.warning(
                                     f"async_glm_client news relay rate limited; trying backup {idx + 2}/{total_targets}"
@@ -434,7 +438,9 @@ class AsyncGLMClient:
                             error_text = await response.text()
                             logger.warning(f"news llm HTTP {response.status}: {error_text[:300]}")
                             last_error_type = "timeout" if response.status in (408, 504) else "other"
-                            if idx + 1 < total_targets and is_retryable_openai_status(response.status):
+                            if should_failover_openai_status(response.status):
+                                remember_openai_target_failure(targets, base_url)
+                            if idx + 1 < total_targets and should_failover_openai_status(response.status):
                                 logger.warning(
                                     f"async_glm_client news relay HTTP {response.status}; "
                                     f"trying backup {idx + 2}/{total_targets}"
@@ -447,12 +453,14 @@ class AsyncGLMClient:
                         else:
                             data = await response.json()
                         self._requests_success += 1
+                        remember_openai_target_success(targets, base_url)
                         rate_limiter.reset_backoff()
                         return data, "none"
                 except asyncio.TimeoutError:
                     self._requests_failed += 1
                     logger.warning("news llm request timed out")
                     last_error_type = "timeout"
+                    remember_openai_target_failure(targets, base_url)
                     if idx + 1 < total_targets:
                         logger.warning(
                             f"async_glm_client news relay timeout; trying backup {idx + 2}/{total_targets}"
@@ -463,6 +471,7 @@ class AsyncGLMClient:
                     self._requests_failed += 1
                     logger.warning(f"news llm transport error: {exc!r}")
                     last_error_type = "other"
+                    remember_openai_target_failure(targets, base_url)
                     if idx + 1 < total_targets:
                         logger.warning(
                             f"async_glm_client news relay transport failure; "

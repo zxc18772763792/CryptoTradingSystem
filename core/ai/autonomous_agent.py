@@ -38,10 +38,13 @@ from core.utils.openai_responses import (
     build_openai_headers,
     build_responses_payload,
     extract_response_text,
-    is_retryable_openai_status,
     openai_endpoint_targets,
+    prioritize_openai_targets,
     read_aiohttp_responses_json,
+    remember_openai_target_failure,
+    remember_openai_target_success,
     responses_endpoint,
+    should_failover_openai_status,
 )
 
 
@@ -994,7 +997,7 @@ class AutonomousTradingAgent:
             return _extract_json_obj(text)
 
         if provider == "codex":
-            targets = self._provider_endpoint_targets(provider)
+            targets = prioritize_openai_targets(self._provider_endpoint_targets(provider))
             if not any(bool(str(target.get("api_key") or "").strip()) for target in targets):
                 raise RuntimeError(f"{provider}_api_key_missing")
             payload = build_responses_payload(
@@ -1023,7 +1026,9 @@ class AutonomousTradingAgent:
                             if resp.status >= 400:
                                 body = (await resp.text())[:300]
                                 err = RuntimeError(f"{provider}_http_{resp.status}:{body}")
-                                if idx + 1 < total_targets and is_retryable_openai_status(resp.status):
+                                if should_failover_openai_status(resp.status):
+                                    remember_openai_target_failure(targets, target_base_url)
+                                if idx + 1 < total_targets and should_failover_openai_status(resp.status):
                                     last_exc = err
                                     logger.warning(
                                         f"autonomous_agent codex primary endpoint failed with {resp.status}; "
@@ -1037,14 +1042,17 @@ class AutonomousTradingAgent:
                             err = RuntimeError(f"{provider}_empty_content")
                             if idx + 1 < total_targets:
                                 last_exc = err
+                                remember_openai_target_failure(targets, target_base_url)
                                 logger.warning(
                                     f"autonomous_agent codex endpoint returned empty content; "
                                     f"trying backup {idx + 2}/{total_targets}"
                                 )
                                 continue
                             raise err
+                        remember_openai_target_success(targets, target_base_url)
                         return _extract_json_obj(text)
                     except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                        remember_openai_target_failure(targets, target_base_url)
                         if idx + 1 < total_targets:
                             last_exc = exc
                             logger.warning(

@@ -19,10 +19,13 @@ from core.utils.openai_responses import (
     build_openai_headers,
     build_responses_payload,
     extract_response_text,
-    is_retryable_openai_status,
     openai_endpoint_targets,
+    prioritize_openai_targets,
     read_aiohttp_responses_json,
+    remember_openai_target_failure,
+    remember_openai_target_success,
     responses_endpoint,
+    should_failover_openai_status,
 )
 
 
@@ -185,12 +188,12 @@ def _fill_defaults(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[Dict[str, Any]]:
-    targets = openai_endpoint_targets(
+    targets = prioritize_openai_targets(openai_endpoint_targets(
         primary_base_url=str(getattr(settings, "OPENAI_BASE_URL", "") or _DEFAULT_OPENAI_BASE_URL),
         backup_base_urls=getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "",
         primary_api_key=str(getattr(settings, "OPENAI_API_KEY", "") or "").strip(),
         backup_api_key=str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip(),
-    )
+    ))
     if not any(bool(str(target.get("api_key") or "").strip()) for target in targets):
         logger.debug("research_context_generator: OPENAI_API_KEY missing")
         return None
@@ -222,7 +225,9 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                     if resp.status >= 400:
                         body = (await resp.text())[:400]
                         logger.debug(f"research_context_generator: openai_http_{resp.status}:{body}")
-                        if idx + 1 < total_targets and is_retryable_openai_status(resp.status):
+                        if should_failover_openai_status(resp.status):
+                            remember_openai_target_failure(targets, base_url)
+                        if idx + 1 < total_targets and should_failover_openai_status(resp.status):
                             logger.warning(
                                 f"research_context_generator: primary relay failed with {resp.status}; "
                                 f"trying backup {idx + 2}/{total_targets}"
@@ -230,8 +235,10 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                             continue
                         return None
                     data = await read_aiohttp_responses_json(resp)
+                    remember_openai_target_success(targets, base_url)
             except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                 logger.debug(f"research_context_generator: openai transport error: {exc}")
+                remember_openai_target_failure(targets, base_url)
                 if idx + 1 < total_targets:
                     logger.warning(
                         f"research_context_generator: primary relay transport failure; "
@@ -243,6 +250,7 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
             raw = extract_response_text(data)
             if not raw:
                 logger.debug("research_context_generator: empty OpenAI content")
+                remember_openai_target_failure(targets, base_url)
                 if idx + 1 < total_targets:
                     continue
                 return None
@@ -250,6 +258,7 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                 return _parse_json_payload(raw)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"research_context_generator: JSON parse error: {exc}")
+                remember_openai_target_failure(targets, base_url)
                 if idx + 1 < total_targets:
                     continue
                 return None

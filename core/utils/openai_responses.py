@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 
 _RETRYABLE_OPENAI_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+_FAILOVER_OPENAI_HTTP_STATUSES = frozenset(set(_RETRYABLE_OPENAI_HTTP_STATUSES) | {401, 403})
+_OPENAI_TARGET_STATE_LOCK = threading.Lock()
+_OPENAI_TARGET_PREFERRED: Dict[Tuple[str, ...], str] = {}
 
 
 def responses_endpoint(base_url: str) -> str:
@@ -83,6 +87,98 @@ def is_retryable_openai_status(status: Any) -> bool:
         return int(status) in _RETRYABLE_OPENAI_HTTP_STATUSES
     except Exception:
         return False
+
+
+def should_failover_openai_status(status: Any) -> bool:
+    try:
+        return int(status) in _FAILOVER_OPENAI_HTTP_STATUSES
+    except Exception:
+        return False
+
+
+def _canonical_openai_targets(targets: Sequence[Mapping[str, Any]] | None) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for pos, target in enumerate(targets or []):
+        item = dict(target or {})
+        base_url = str(item.get("base_url") or "").strip().rstrip("/")
+        if not base_url:
+            continue
+        try:
+            index = int(item.get("index"))
+        except Exception:
+            index = pos
+        item["index"] = index
+        item["base_url"] = base_url
+        items.append(item)
+    items.sort(key=lambda item: int(item.get("index", 0)))
+    return items
+
+
+def _openai_target_state_key(targets: Sequence[Mapping[str, Any]] | None) -> Tuple[str, ...]:
+    return tuple(str(item.get("base_url") or "").rstrip("/") for item in _canonical_openai_targets(targets))
+
+
+def prioritize_openai_targets(targets: Sequence[Mapping[str, Any]] | None) -> List[Dict[str, Any]]:
+    canonical = _canonical_openai_targets(targets)
+    if len(canonical) <= 1:
+        return canonical
+
+    key = _openai_target_state_key(canonical)
+    with _OPENAI_TARGET_STATE_LOCK:
+        preferred_base_url = _OPENAI_TARGET_PREFERRED.get(key, "")
+
+    if not preferred_base_url:
+        return canonical
+
+    start_idx = next(
+        (idx for idx, item in enumerate(canonical) if str(item.get("base_url") or "").rstrip("/") == preferred_base_url),
+        0,
+    )
+    return canonical[start_idx:] + canonical[:start_idx]
+
+
+def remember_openai_target_success(
+    targets: Sequence[Mapping[str, Any]] | None,
+    base_url: Any,
+) -> None:
+    canonical = _canonical_openai_targets(targets)
+    if len(canonical) <= 1:
+        return
+
+    normalized = str(base_url or "").strip().rstrip("/")
+    if not normalized:
+        return
+
+    key = _openai_target_state_key(canonical)
+    if not key or normalized not in key:
+        return
+
+    with _OPENAI_TARGET_STATE_LOCK:
+        _OPENAI_TARGET_PREFERRED[key] = normalized
+
+
+def remember_openai_target_failure(
+    targets: Sequence[Mapping[str, Any]] | None,
+    failed_base_url: Any,
+) -> None:
+    canonical = _canonical_openai_targets(targets)
+    if len(canonical) <= 1:
+        return
+
+    normalized = str(failed_base_url or "").strip().rstrip("/")
+    if not normalized:
+        return
+
+    base_urls = [str(item.get("base_url") or "").rstrip("/") for item in canonical]
+    if normalized not in base_urls:
+        return
+
+    failed_idx = base_urls.index(normalized)
+    next_base_url = base_urls[(failed_idx + 1) % len(base_urls)]
+    key = tuple(base_urls)
+
+    with _OPENAI_TARGET_STATE_LOCK:
+        _OPENAI_TARGET_PREFERRED[key] = next_base_url
 
 
 def _normalize_content_parts(content: Any) -> List[Dict[str, str]]:
