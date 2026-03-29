@@ -530,6 +530,12 @@ async function loadResearchTabData(){
   await loadResearchSymbolOptions(getResearchExchange());
   renderResearchStatusCards();
 }
+async function loadAiResearchTabData(){
+  await refreshAiResearchModules();
+}
+async function loadAiAgentTabData(){
+  await refreshAiResearchModules();
+}
 async function loadArbitrageTabData(force=false){
   await ensureStrategyCatalog(force);
   await loadArbitrageSymbolOptions(getArbitrageExchange());
@@ -560,6 +566,8 @@ const loaders={
   trading:loadTradingTabData,
   strategies:loadStrategiesTabData,
   data:loadDataTabData,
+  'ai-research':loadAiResearchTabData,
+  'ai-agent':loadAiAgentTabData,
   research:loadResearchTabData,
   arbitrage:()=>loadArbitrageTabData(false),
   backtest:loadBacktestTabData,
@@ -588,6 +596,9 @@ b.classList.add('active');
 const panel=document.getElementById(b.dataset.tab);
 panel?.classList.add('active');
 if(panel)schedulePlotlyResize(panel);
+if(tabName==='ai-research'||tabName==='ai-agent'){
+  setTimeout(()=>{refreshAiResearchModules();},0);
+}
 ensureTabLoaded(tabName).catch(err=>console.error(`tab load failed: ${tabName}`,err));
 }
 function initTabs(){
@@ -3584,7 +3595,21 @@ async function loadAuditLogs(){try{const d=await api('/trading/audit?hours=168&l
 function bindAudit(){const b=document.getElementById('btn-refresh-audit');if(b)b.onclick=loadAuditLogs;}
 
 let wsClient=null,wsRetryTimer=null,softRefreshTimer=null,replaySessionId='',lastTickRenderAt=0;
-function refreshAiResearchModules(){const modules=(window.AI&&window.AI.modules)||{};try{modules.agent?.refresh?.();}catch{}try{modules.runtime?.render?.();}catch{}}
+let aiResearchRefreshPromise=null;
+function refreshAiResearchModules(){
+const ai=window.AI||{};
+const modules=ai.modules||{};
+const activeTab=getActiveTabName();
+if(activeTab==='ai-research'&&typeof ai.refreshWorkbench==='function'&&!aiResearchRefreshPromise){
+  const task=Promise.resolve(ai.refreshWorkbench())
+    .catch(err=>console.warn('refreshAiResearchModules failed:',err?.message||err))
+    .finally(()=>{if(aiResearchRefreshPromise===task)aiResearchRefreshPromise=null;});
+  aiResearchRefreshPromise=task;
+}
+try{modules.agent?.refresh?.();}catch{}
+try{modules.runtime?.render?.();}catch{}
+return aiResearchRefreshPromise||Promise.resolve();
+}
 function softRefresh(delay=250){
 if(softRefreshTimer)clearTimeout(softRefreshTimer);
 softRefreshTimer=setTimeout(()=>{
@@ -3593,6 +3618,7 @@ softRefreshTimer=setTimeout(()=>{
   else if(tab==='trading')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
   else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
   else if(tab==='ai-research')refreshAiResearchModules();
+  else if(tab==='ai-agent')refreshAiResearchModules();
 },delay);
 }
 function setWsBadge(connected){state.wsConnected=!!connected;const st=document.getElementById('system-status');if(st)st.textContent=connected?'运行中(WS在线)':'运行中(轮询)';}
@@ -5645,6 +5671,8 @@ setInterval(()=>{
   if(tab==='dashboard')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary()]);
   else if(tab==='trading')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
   else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
+  else if(tab==='ai-research')refreshAiResearchModules();
+  else if(tab==='ai-agent')refreshAiResearchModules();
 },8000);
 setInterval(()=>{
   if(document.hidden)return;
@@ -5652,6 +5680,8 @@ setInterval(()=>{
   if(tab==='dashboard')Promise.allSettled([loadPositions(),loadBalances(),loadOrders(),loadOpenOrders(),loadRisk()]);
   else if(tab==='trading')Promise.allSettled([loadPositions(),loadBalances(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
   else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary()]);
+  else if(tab==='ai-research')refreshAiResearchModules();
+  else if(tab==='ai-agent')refreshAiResearchModules();
 },10000);
 setInterval(()=>{
   if(document.hidden)return;

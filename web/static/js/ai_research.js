@@ -75,6 +75,7 @@
     pendingMacroContext: null,
     runtimeConfig: null,    // { governance_enabled, decision_mode, trading_mode, ai_live_decision, ai_autonomous_agent }
     runtimeConfigLoaded: false,
+    agentStatus: null,
     selectedProposalId: '',
     selectedCandidateId: '',
     latestSignals: {},
@@ -94,6 +95,7 @@
     candidateDetailReqSeq: 0,
     perfHistoryCache: {},
   };
+  let initialized = false;
 
   /* ── 工具函数 ── */
   function esc(v) {
@@ -393,6 +395,16 @@
       suggestions.push('先减少币种或周期数量，再重试。');
       suggestions.push('如果只是想确认研究能否跑通，可以先点“3) 运行研究”单独验证。');
     } else if (
+      lower.includes('research completed without deployable candidate')
+      || lower.includes('proposal_status=rejected')
+      || lower.includes('completed_without_deployable_candidate')
+    ) {
+      tone = 'warn';
+      badge = '研究已完成';
+      title = '研究已经跑完，但这次没有生成可部署候选';
+      suggestions.push('这更像是验证层筛掉了当前结果，不是接口本身崩了。');
+      suggestions.push('先查看提案和候选详情里的验证原因，再决定是扩大样本、调目标还是换研究方式。');
+    } else if (
       lower.includes('network')
       || lower.includes('failed to fetch')
       || message.includes('502')
@@ -426,11 +438,16 @@
   function buildOneClickSuccessFeedback(result, payload) {
     const proposalId = String(result?.proposal_id || result?.run?.proposal?.proposal_id || '').trim();
     const candidateId = String(result?.candidate_id || result?.run?.candidate?.candidate_id || '').trim();
+    const outcome = String(result?.outcome || '').trim();
+    const proposalStatus = String(result?.proposal_status || result?.run?.proposal?.status || '').trim();
+    const proposalReason = String(result?.proposal_reason || '').trim();
     const runtimeStatus = String(result?.runtime_status || result?.deploy?.runtime_status || '').trim();
     const action = String(result?.deploy?.action || '').trim();
     const candidateStatus = String(result?.run?.candidate?.status || '').trim();
     const validationSummary = result?.run?.candidate?.validation_summary || {};
     const reasonInputs = [
+      proposalReason,
+      ...toArray(result?.run?.proposal?.validation_summary?.reasons),
       ...toArray(validationSummary?.reasons),
       ...toArray(result?.deploy?.reasons),
     ];
@@ -449,7 +466,19 @@
     let title = '一键自动研究已完成';
     const suggestions = ['右侧候选详情与运行状态已经刷新，可以继续查看表现和验证结果。'];
 
-    if (candidateStatus === 'rejected' || candidateStatus === 'failed' || reasons.length) {
+    if (
+      (outcome.startsWith('completed_without') || !candidateId)
+      && (proposalStatus === 'rejected' || proposalReason || reasons.length)
+    ) {
+      tone = 'warn';
+      badge = '研究已完成';
+      title = '研究已完成，但未生成可部署候选';
+      details.push(`提案状态：${normalizeUiText(statusText(proposalStatus || 'rejected'))}`);
+      reasons.forEach((reason) => details.push(`未通过原因：${reason}`));
+      suggestions.length = 0;
+      suggestions.push('这次更像是研究结果被验证层筛掉，而不是 one-click 执行失败。');
+      suggestions.push('先看右侧候选详情和验证原因，再决定是否扩大样本、改周期或调整研究目标。');
+    } else if (candidateStatus === 'rejected' || candidateStatus === 'failed' || reasons.length) {
       tone = 'warn';
       badge = '已完成待处理';
       title = '研究已完成，但候选还没有达到部署条件';
@@ -527,6 +556,7 @@
       pendingApprovals: safeJsonClone(state.pendingApprovals, []),
       runtimeConfig: safeJsonClone(state.runtimeConfig, null),
       runtimeConfigLoaded: !!state.runtimeConfigLoaded,
+      agentStatus: safeJsonClone(state.agentStatus, null),
       selectedProposalId: String(state.selectedProposalId || ''),
       selectedCandidateId: String(state.selectedCandidateId || ''),
       latestSignals: safeJsonClone(state.latestSignals, {}),
@@ -551,7 +581,16 @@
     }
   }
 
-  function renderRuntimeSummary() {
+  function autonomousAgentRuntimeText(agentCfg = {}, agentStatus = {}) {
+    const running = !!agentStatus?.running;
+    const enabled = !!agentCfg?.enabled;
+    if (running) return { value: '运行中', cls: 'is-on' };
+    if (enabled && agentStatus?.last_run_at) return { value: '已停止', cls: 'is-warn' };
+    if (enabled) return { value: '待启动', cls: 'is-warn' };
+    return { value: '已关闭', cls: '' };
+  }
+
+  function renderRuntimeSummary(options = {}) {
     const root = document.getElementById('ai-runtime-summary');
     if (!root) return;
     const cfg = state.runtimeConfig || {};
@@ -562,20 +601,20 @@
     const decisionMode = String(cfg.decision_mode || '--');
     const liveEnabled = !!liveCfg.enabled;
     const liveMode = String(liveCfg.mode || 'shadow');
-    const agentEnabled = !!agentCfg.enabled;
+    const agentRuntime = autonomousAgentRuntimeText(agentCfg, state.agentStatus || {});
     const chips = [
       { label: '人工确认', value: governanceOn ? '开启' : '关闭', cls: governanceOn ? 'is-warn' : 'is-on' },
       { label: '交易模式', value: tradingModeLabel(tradingMode), cls: tradingMode === 'live' ? 'is-warn' : 'is-on' },
       { label: '执行裁决', value: decisionModeLabel(decisionMode), cls: decisionMode === 'enforce' ? 'is-warn' : '' },
       { label: '下单前AI复核', value: liveEnabled ? `已启用（${decisionModeLabel(liveMode)}）` : '已关闭', cls: liveEnabled ? 'is-on' : '' },
-      { label: '自动交易代理', value: agentEnabled ? '已启用' : '已关闭', cls: agentEnabled ? 'is-on' : '' },
+      { label: '自动交易代理', value: agentRuntime.value, cls: agentRuntime.cls },
       { label: '页面时区', value: AI_UI_TIMEZONE_LABEL, cls: '' },
     ];
     const visibleChips = chips.filter((chip) => chip.label !== '\u6267\u884c\u88c1\u51b3');
     root.innerHTML = visibleChips
       .map((chip) => `<span class="ai-runtime-chip ${chip.cls}">${esc(chip.label)}：${esc(chip.value)}</span>`)
       .join('');
-    emitWorkbenchState('runtime-summary');
+    if (!options.silent) emitWorkbenchState('runtime-summary');
   }
 
   function resolveLiveDecisionProviderState(cfg) {
@@ -1499,16 +1538,25 @@
       const dir = hasData ? String(data?.direction || 'FLAT').toUpperCase() : 'EMPTY';
       const barDir = hasData ? (['LONG', 'SHORT'].includes(dir) ? dir : 'FLAT') : 'FLAT';
       const conf = hasData ? Math.min(100, Math.round(Number(data?.confidence || 0) * 100)) : 0;
-      const label = hasData ? ({ LONG:'看多', SHORT:'看空', FLAT:'持平' }[dir] || dir) : '待刷新';
+      const noMarketData = hasData && Number(data?.market_data_rows || 0) <= 0;
+      const isStale = !!data?.market_data_stale;
       const blocked = !!data?.blocked_by_risk;
-      const waitingApproval = !!data?.requires_approval;
-      const badge = blocked
-        ? '<span class="signal-mini-flag is-risk">风控</span>'
-        : (waitingApproval ? '<span class="signal-mini-flag is-wait">待确认</span>' : '');
-      const confText = hasData ? `${conf}%` : '--';
+      const hasActionableSignal = dir === 'LONG' || dir === 'SHORT';
+      const waitingApproval = !!data?.requires_approval && hasActionableSignal && !noMarketData;
+      const displayLabel = !hasData
+        ? '待刷新'
+        : noMarketData
+          ? '缺数据'
+          : ({ LONG: '看多', SHORT: '看空', FLAT: '观望' }[dir] || dir);
+      const signalFlags = [
+        blocked ? '<span class="signal-mini-flag is-risk">风控</span>' : '',
+        waitingApproval ? '<span class="signal-mini-flag is-wait">待确认</span>' : '',
+        isStale ? '<span class="signal-mini-flag is-stale">数据旧</span>' : '',
+      ].filter(Boolean).join('');
+      const confText = (hasData && !noMarketData && (hasActionableSignal || conf > 0)) ? `${conf}%` : '--';
       return `<div class="ai-signal-mini-row">
         <span class="signal-mini-sym">${esc(sym.split('/')[0])}</span>
-        <span class="signal-mini-dir ${dir}"><span class="signal-mini-dir-label">${label}</span>${badge}</span>
+        <span class="signal-mini-dir ${dir}"><span class="signal-mini-dir-label">${displayLabel}</span>${signalFlags}</span>
         <div class="signal-mini-bar"><div class="signal-mini-bar-fill ${barDir}" style="width:${conf}%;"></div></div>
         <span class="signal-mini-conf">${confText}</span>
       </div>`;
@@ -3147,6 +3195,7 @@
       loadProposals(selectProposalId),
       loadCandidates(selectCandidateId),
       loadPendingApprovals(),
+      loadAgentStatus().catch(() => null),
       loadDataReadiness().catch(() => null),
       loadLiveDecisionActivitySummary().catch(() => null),
     ]);
@@ -3425,7 +3474,12 @@
       }
       updatePlannerModeHint();
       renderOneClickFeedback(buildOneClickSuccessFeedback(result, payload));
-      notify(`\u4e00\u952e\u7814\u7a76+\u90e8\u7f72\u5b8c\u6210${runtimeStatus ? `: ${runtimeStatus}` : ''}${action ? ` (${action})` : ''}`);
+      const completedWithoutDeployable = String(result?.outcome || '').startsWith('completed_without');
+      if (completedWithoutDeployable) {
+        notify(`一键研究已完成，但未生成可部署候选${runtimeStatus ? `: ${normalizeUiText(statusText(runtimeStatus))}` : ''}`);
+      } else {
+        notify(`\u4e00\u952e\u7814\u7a76+\u90e8\u7f72\u5b8c\u6210${runtimeStatus ? `: ${runtimeStatus}` : ''}${action ? ` (${action})` : ''}`);
+      }
     } catch (err) {
       renderOneClickFeedback(buildOneClickFailureFeedback(err, payload));
       notify(`\u4e00\u952e\u7814\u7a76+\u90e8\u7f72\u5931\u8d25: ${err.message}`, true);
@@ -3557,10 +3611,15 @@
 
   async function loadAgentStatus() {
     const agent = getAgentModule();
-    if (agent && typeof agent.refresh === 'function') {
-      return agent.refresh();
+    const response = agent && typeof agent.refresh === 'function'
+      ? await agent.refresh()
+      : await rootApi(AGENT_STATUS_API, { timeoutMs: 15000 });
+    if (response?.status) {
+      state.agentStatus = safeJsonClone(response.status, null);
+      renderRuntimeSummary({ silent: true });
+      emitWorkbenchState('agent-status');
     }
-    return rootApi(AGENT_STATUS_API, { timeoutMs: 15000 });
+    return response;
   }
 
   async function agentStart() {
@@ -3729,6 +3788,13 @@
     });
     document.getElementById('run-days')?.addEventListener('input', () => clearOneClickFeedback());
     document.getElementById('run-days')?.addEventListener('change', () => clearOneClickFeedback());
+    window.addEventListener('ai-agent:status', (event) => {
+      const nextStatus = event?.detail?.status || null;
+      if (!nextStatus) return;
+      state.agentStatus = safeJsonClone(nextStatus, null);
+      renderRuntimeSummary({ silent: true });
+      emitWorkbenchState('agent-status');
+    });
 
     /* 运行研究 */
     document.getElementById('run-selected-btn')?.addEventListener('click', () =>
@@ -3848,21 +3914,27 @@
     clearInterval(state.signalTimer);
     clearInterval(state.refreshTimer);
     clearInterval(state.liveSignalTimer);
-    if (!isAiResearchActive() || document.hidden) return;
-    loadSignal().catch(() => {});
-    loadLiveSignals().catch(() => {});
-    state.signalTimer = setInterval(() => {
-      if (!isAiResearchActive() || document.hidden) return;
+    if (document.hidden || !isAiWorkspaceActive()) return;
+
+    if (isAiResearchActive()) {
       loadSignal().catch(() => {});
-    }, SIGNAL_INTERVAL_MS);
-    state.refreshTimer = setInterval(() => {
-      if (!isAiResearchActive() || document.hidden) return;
-      refreshWorkbench().catch(() => {});
-    }, REFRESH_INTERVAL_MS);
-    state.liveSignalTimer = setInterval(() => {
-      if (!isAiResearchActive() || document.hidden) return;
+      state.signalTimer = setInterval(() => {
+        if (!isAiResearchActive() || document.hidden) return;
+        loadSignal().catch(() => {});
+      }, SIGNAL_INTERVAL_MS);
+      state.refreshTimer = setInterval(() => {
+        if (!isAiResearchActive() || document.hidden) return;
+        refreshWorkbench().catch(() => {});
+      }, REFRESH_INTERVAL_MS);
+    }
+
+    if (isAiAgentActive()) {
       loadLiveSignals().catch(() => {});
-    }, 30000);
+      state.liveSignalTimer = setInterval(() => {
+        if (!isAiAgentActive() || document.hidden) return;
+        loadLiveSignals().catch(() => {});
+      }, 30000);
+    }
   }
 
   function stopPolling() {
@@ -3876,9 +3948,18 @@
     state.liveDecisionActivityRetryTimer = null;
   }
 
+  function isAiAgentActive() {
+    const tab = document.getElementById('ai-agent');
+    return !!(tab && tab.classList.contains('active'));
+  }
+
   function isAiResearchActive() {
     const tab = document.getElementById('ai-research');
     return !!(tab && tab.classList.contains('active'));
+  }
+
+  function isAiWorkspaceActive() {
+    return isAiResearchActive() || isAiAgentActive();
   }
 
   function syncHubLayoutHeight() {
@@ -3906,7 +3987,7 @@
     document.querySelectorAll('.tab-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         setTimeout(() => {
-          if (isAiResearchActive()) startPolling();
+          if (isAiWorkspaceActive()) startPolling();
           else stopPolling();
         }, 0);
       });
@@ -3914,7 +3995,7 @@
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
         stopPolling();
-      } else if (isAiResearchActive()) {
+      } else if (isAiWorkspaceActive()) {
         startPolling();
       }
     });
@@ -3924,7 +4005,9 @@
      初始化
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
   function init() {
+    if (initialized) return;
     if (!document.getElementById('ai-candidate-cards')) return;  // tab 未激活时跳过
+    initialized = true;
     bindLayoutSync();
     syncHubLayoutHeight();
     bindEvents();
@@ -3932,10 +4015,15 @@
     updatePlannerModeHint();
     normalizeDomText(document.getElementById('ai-research'));
     refreshWorkbench().catch(err => console.error('AI研究初始化失败:', err));
-    if (isAiResearchActive()) startPolling();
+    if (isAiWorkspaceActive()) startPolling();
   }
 
-  window.addEventListener('load', init);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+    window.addEventListener('load', init);
+  } else {
+    init();
+  }
   window.addEventListener('beforeunload', () => {
     stopPolling();
     Object.values(state.jobPollingTimers).forEach(t => clearInterval(t));
@@ -3977,17 +4065,28 @@
       const sig  = item.signal;
       if (!sig) return `<div class="live-sig-row"><span style="color:#6b7fa0;font-size:11px">${esc(item.strategy)} - 信号错误</span></div>`;
       const comp = sig.components || {};
+      const signalDir = String(sig.direction || 'FLAT').toUpperCase();
+      const noMarketData = Number(sig.market_data_rows || 0) <= 0;
+      const isStale = !!sig.market_data_stale;
       const blockedBadge   = sig.blocked_by_risk
         ? `<span class="live-sig-badge" style="background:#7f1d1d;color:#fca5a5;" title="${esc(sig.risk_reason)}">风控</span>` : '';
-      const approvalBadge  = (sig.requires_approval && !sig.blocked_by_risk)
+      const approvalBadge  = (sig.requires_approval && !sig.blocked_by_risk && !noMarketData && ['LONG', 'SHORT'].includes(signalDir))
         ? `<span class="live-sig-badge" style="background:#78350f;color:#fcd34d;">待审</span>` : '';
+      const dataBadge = noMarketData
+        ? '<span class="live-sig-badge" style="background:#243447;color:#9fb1c9;">缺数据</span>'
+        : (isStale ? '<span class="live-sig-badge" style="background:#2a2330;color:#c4b5fd;">数据旧</span>' : '');
+      const footerNote = noMarketData
+        ? '最近可用 K 线为空，当前仅展示空信号回退。'
+        : (sig.market_data_last_bar_at
+          ? `行情截至 ${fmtTs(sig.market_data_last_bar_at)}${isStale ? ' · 不是最新快照' : ''}`
+          : '');
 
       return `<div class="live-sig-row">
   <div class="live-sig-header">
     <span class="live-sig-name">${esc(item.strategy)}</span>
     <span style="font-size:10px;color:#6b7fa0;">${esc(item.symbol)}</span>
-    <span style="font-weight:700;font-size:13px;margin-left:auto;color:${dirColor(sig.direction)}">${dirIcon(sig.direction)} ${sig.direction}</span>
-    ${blockedBadge}${approvalBadge}
+    <span style="font-weight:700;font-size:13px;margin-left:auto;color:${dirColor(signalDir)}">${dirIcon(signalDir)} ${signalDir}</span>
+    ${blockedBadge}${approvalBadge}${dataBadge}
   </div>
   <div class="live-sig-bars">
     ${['llm', 'ml', 'factor'].map(k => {
@@ -4000,6 +4099,7 @@
     <span style="font-size:10px;color:#6b7fa0;margin-left:4px">合计</span>
     <span style="font-size:11px;font-weight:600">${pct(sig.confidence)}</span>
   </div>
+  ${footerNote ? `<div style="margin-top:6px;font-size:10px;color:#7e92b2;">${esc(footerNote)}</div>` : ''}
 </div>`;
     }).join('');
   }
