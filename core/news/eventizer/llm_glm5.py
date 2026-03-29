@@ -17,6 +17,8 @@ from core.utils.openai_responses import (
     build_openai_headers,
     build_responses_payload,
     coerce_responses_to_chat_completions,
+    is_retryable_openai_status,
+    openai_endpoint_targets,
     read_requests_responses_json,
     responses_endpoint,
 )
@@ -45,8 +47,19 @@ def _zhipu_api_key() -> str:
     return str(os.getenv("ZHIPU_API_KEY") or getattr(settings, "ZHIPU_API_KEY", "") or "").strip()
 
 
-def _openai_api_key() -> str:
+def _openai_primary_api_key() -> str:
     return str(os.getenv("OPENAI_API_KEY") or getattr(settings, "OPENAI_API_KEY", "") or "").strip()
+
+
+def _openai_backup_api_key() -> str:
+    return str(os.getenv("OPENAI_BACKUP_API_KEY") or getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip()
+
+
+def _openai_api_key() -> str:
+    primary = _openai_primary_api_key()
+    if primary:
+        return primary
+    return _openai_backup_api_key()
 
 
 def _llm_provider(cfg: Dict[str, Any]) -> str:
@@ -56,7 +69,7 @@ def _llm_provider(cfg: Dict[str, Any]) -> str:
         return "openai"
     if raw == "glm":
         return "glm"
-    if _openai_api_key():
+    if _openai_api_key() or _openai_backup_api_key():
         return "openai"
     return "glm"
 
@@ -81,14 +94,33 @@ def _zhipu_model(cfg: Dict[str, Any]) -> str:
     )
 
 
-def _openai_base_url(cfg: Dict[str, Any]) -> str:
+def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     llm_cfg = cfg.get("llm") or {}
-    return str(
-        os.getenv("OPENAI_BASE_URL")
-        or llm_cfg.get("base_url")
-        or getattr(settings, "OPENAI_BASE_URL", "")
-        or DEFAULT_OPENAI_BASE_URL
-    ).rstrip("/")
+    return openai_endpoint_targets(
+        primary_base_url=(
+            os.getenv("OPENAI_BASE_URL")
+            or llm_cfg.get("base_url")
+            or getattr(settings, "OPENAI_BASE_URL", "")
+            or DEFAULT_OPENAI_BASE_URL
+        ),
+        backup_base_urls=(
+            os.getenv("OPENAI_BACKUP_BASE_URL")
+            or llm_cfg.get("backup_base_url")
+            or getattr(settings, "OPENAI_BACKUP_BASE_URL", "")
+            or ""
+        ),
+        primary_api_key=_openai_primary_api_key(),
+        backup_api_key=_openai_backup_api_key(),
+    )
+
+
+def _openai_base_url(cfg: Dict[str, Any]) -> str:
+    targets = _openai_endpoint_targets(cfg)
+    for target in targets:
+        base_url = str(target.get("base_url") or "").rstrip("/")
+        if base_url:
+            return base_url
+    return DEFAULT_OPENAI_BASE_URL.rstrip("/")
 
 
 def _openai_model(cfg: Dict[str, Any]) -> str:
@@ -121,6 +153,60 @@ def _llm_model(cfg: Dict[str, Any]) -> str:
 
 def _llm_summary_source(cfg: Dict[str, Any]) -> str:
     return "openai_responses" if _llm_provider(cfg) == "openai" else "glm5"
+
+
+def _openai_post_with_failover(
+    *,
+    cfg: Dict[str, Any],
+    payload: Dict[str, Any],
+    timeout_sec: int,
+    log_prefix: str,
+) -> Dict[str, Any]:
+    targets = _openai_endpoint_targets(cfg)
+    available = [
+        dict(target)
+        for target in targets
+        if str(target.get("base_url") or "").strip() and str(target.get("api_key") or "").strip()
+    ]
+    if not available:
+        raise RuntimeError("OPENAI_API_KEY is missing")
+
+    last_exc: Optional[BaseException] = None
+    total_targets = len(available)
+    for idx, target in enumerate(available):
+        base_url = str(target.get("base_url") or "").rstrip("/")
+        api_key = str(target.get("api_key") or "").strip()
+        url = responses_endpoint(base_url)
+        try:
+            response = requests.post(
+                url,
+                headers=build_openai_headers(api_key),
+                json=payload,
+                timeout=timeout_sec,
+            )
+            if response.status_code >= 400:
+                err = RuntimeError(f"LLM HTTP {response.status_code}: {response.text[:300]}")
+                if idx + 1 < total_targets and is_retryable_openai_status(response.status_code):
+                    last_exc = err
+                    logger.warning(
+                        f"{log_prefix}: openai relay HTTP {response.status_code}; "
+                        f"trying backup {idx + 2}/{total_targets}"
+                    )
+                    continue
+                raise err
+            return read_requests_responses_json(response)
+        except requests.RequestException as exc:
+            if idx + 1 < total_targets:
+                last_exc = exc
+                logger.warning(
+                    f"{log_prefix}: openai relay transport failure; "
+                    f"trying backup {idx + 2}/{total_targets}: {exc}"
+                )
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("OPENAI_BASE_URL is missing")
 
 
 def _thinking_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -444,7 +530,6 @@ def _call_glm5_once(
             temperature=0,
             stream=False,
         )
-        url = responses_endpoint(base_url)
     else:
         payload = {
             "model": model,
@@ -459,12 +544,20 @@ def _call_glm5_once(
         }
         url = f"{base_url}/chat/completions"
 
-    headers = build_openai_headers(api_key)
-    response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
-    if response.status_code >= 400:
-        raise RuntimeError(f"LLM HTTP {response.status_code}: {response.text[:300]}")
+    if provider == "openai":
+        data = _openai_post_with_failover(
+            cfg=cfg,
+            payload=payload,
+            timeout_sec=timeout_sec,
+            log_prefix="llm_glm5.extract",
+        )
+    else:
+        headers = build_openai_headers(api_key)
+        response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
+        if response.status_code >= 400:
+            raise RuntimeError(f"LLM HTTP {response.status_code}: {response.text[:300]}")
+        data = response.json()
 
-    data = read_requests_responses_json(response) if provider == "openai" else response.json()
     if provider == "openai":
         data = coerce_responses_to_chat_completions(data)
     choices = data.get("choices") if isinstance(data, dict) else None
@@ -597,7 +690,6 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
             text_format="json_object",
             stream=False,
         )
-        url = responses_endpoint(base_url)
     else:
         payload = {
             "model": model,
@@ -613,17 +705,23 @@ def summarize_title_glm5(title: str, cfg: Dict[str, Any], max_length: int = 60) 
         }
         url = f"{base_url}/chat/completions"
 
-    headers = build_openai_headers(api_key)
-
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
-        if response.status_code >= 400:
-            logger.warning(f"LLM summarize failed: HTTP {response.status_code}")
-            result = _summarize_fallback(title, max_length)
-            _summary_cache_set(title, max_length, result)
-            return result
-
-        data = read_requests_responses_json(response) if provider == "openai" else response.json()
+        if provider == "openai":
+            data = _openai_post_with_failover(
+                cfg=cfg,
+                payload=payload,
+                timeout_sec=timeout_sec,
+                log_prefix="llm_glm5.summarize",
+            )
+        else:
+            headers = build_openai_headers(api_key)
+            response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
+            if response.status_code >= 400:
+                logger.warning(f"LLM summarize failed: HTTP {response.status_code}")
+                result = _summarize_fallback(title, max_length)
+                _summary_cache_set(title, max_length, result)
+                return result
+            data = response.json()
         if provider == "openai":
             data = coerce_responses_to_chat_completions(data)
         choices = data.get("choices") if isinstance(data, dict) else None
@@ -712,7 +810,6 @@ def _call_glm5_batch_summarize(
             text_format="json_object",
             stream=False,
         )
-        url = responses_endpoint(base_url)
     else:
         payload = {
             "model": model,
@@ -726,14 +823,22 @@ def _call_glm5_batch_summarize(
             ],
         }
         url = f"{base_url}/chat/completions"
-    headers = build_openai_headers(api_key)
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
-        if response.status_code >= 400:
-            body_preview = (response.text or "")[:200].replace("\n", " ")
-            raise RuntimeError(f"LLM summarize batch HTTP {response.status_code}: {body_preview}")
-        data = read_requests_responses_json(response) if provider == "openai" else response.json()
+        if provider == "openai":
+            data = _openai_post_with_failover(
+                cfg=cfg,
+                payload=payload,
+                timeout_sec=timeout_sec,
+                log_prefix="llm_glm5.batch_summarize",
+            )
+        else:
+            headers = build_openai_headers(api_key)
+            response = requests.post(url, headers=headers, json=payload, timeout=timeout_sec)
+            if response.status_code >= 400:
+                body_preview = (response.text or "")[:200].replace("\n", " ")
+                raise RuntimeError(f"LLM summarize batch HTTP {response.status_code}: {body_preview}")
+            data = response.json()
         if provider == "openai":
             data = coerce_responses_to_chat_completions(data)
         choices = data.get("choices") if isinstance(data, dict) else None

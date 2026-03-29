@@ -65,10 +65,11 @@ class _FakeSequenceSession:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    def post(self, url, *, headers=None, json=None):
+    def request(self, method, url, *, headers=None, json=None):
         self._capture.setdefault("urls", []).append(url)
         self._capture.setdefault("requests", []).append(
             {
+                "method": method,
                 "url": url,
                 "headers": headers,
                 "json": json,
@@ -77,6 +78,9 @@ class _FakeSequenceSession:
         if not self._responses:
             raise AssertionError("unexpected extra request")
         return self._responses.pop(0)
+
+    def post(self, url, *, headers=None, json=None):
+        return self.request("POST", url, headers=headers, json=json)
 
 
 class _SyncResponse:
@@ -362,6 +366,52 @@ def test_async_glm_client_openai_branch_normalizes_responses(monkeypatch):
     assert request_mock.await_args.args[1] == "https://example.test/v1/responses"
 
 
+def test_async_glm_client_openai_fails_over_to_backup_relay(monkeypatch):
+    import core.news.eventizer.async_glm_client as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://primary.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "https://backup.test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    capture = {}
+    responses = [
+        _FakeResponse({"error": {"message": "Service temporarily unavailable"}}, status=503),
+        _FakeResponse(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": '{"summary":"切到备用站","sentiment":"positive"}'}],
+                    }
+                ]
+            },
+            status=200,
+        ),
+    ]
+    monkeypatch.setattr(
+        module.aiohttp,
+        "ClientSession",
+        lambda **kwargs: _FakeSequenceSession(capture=capture, responses=list(responses), **kwargs),
+    )
+
+    client = module.AsyncGLMClient({})
+    response, error_type = asyncio.run(
+        client.chat_completions(
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=64,
+        )
+    )
+
+    assert error_type == "none"
+    assert response["choices"][0]["message"]["content"] == '{"summary":"切到备用站","sentiment":"positive"}'
+    assert capture["urls"] == [
+        "https://primary.test/v1/responses",
+        "https://backup.test/v1/responses",
+    ]
+
+
 def test_news_llm_defaults_use_openai_codex_mini(monkeypatch):
     import core.news.eventizer.async_glm_client as async_module
     import core.news.eventizer.llm_glm5 as sync_module
@@ -411,6 +461,135 @@ def test_news_sync_summary_uses_openai_mini_source(monkeypatch):
     assert result["source"] == "openai_responses"
     assert capture["url"] == "https://example.test/v1/responses"
     assert capture["json"]["model"] == "gpt-5.1-codex-mini"
+
+
+def test_news_sync_summary_fails_over_to_backup_relay(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://primary.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "https://backup.test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    capture = {"urls": []}
+    responses = iter(
+        [
+            _SyncResponse({"error": {"message": "temporary unavailable"}}, status_code=503),
+            _SyncResponse(
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": '{"summary":"备用站摘要","sentiment":"positive"}'}],
+                        }
+                    ]
+                }
+            ),
+        ]
+    )
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        capture["urls"].append(url)
+        return next(responses)
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    result = module.summarize_title_glm5("ETH staking inflow rises", {"llm": {"provider": "openai"}}, max_length=60)
+
+    assert result["summary"] == "备用站摘要"
+    assert result["sentiment"] == "positive"
+    assert result["source"] == "openai_responses"
+    assert capture["urls"] == [
+        "https://primary.test/v1/responses",
+        "https://backup.test/v1/responses",
+    ]
+
+
+def test_news_extract_events_fails_over_to_backup_relay(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://primary.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "https://backup.test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    capture = {"urls": []}
+    responses = iter(
+        [
+            _SyncResponse({"error": {"message": "temporary unavailable"}}, status_code=503),
+            _SyncResponse(
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": json.dumps(
+                                        {
+                                            "events": [
+                                                {
+                                                    "event_id": "evt-1",
+                                                    "ts": "2026-03-29T00:00:00Z",
+                                                    "symbol": "BTCUSDT",
+                                                    "event_type": "etf",
+                                                    "sentiment": 1,
+                                                    "impact_score": 0.88,
+                                                    "half_life_min": 180,
+                                                    "evidence": {
+                                                        "title": "Bitcoin ETF approved",
+                                                        "url": "https://example.test/news/1",
+                                                        "source": "jin10",
+                                                        "matched_reason": "approval",
+                                                    },
+                                                }
+                                            ]
+                                        },
+                                        ensure_ascii=False,
+                                    ),
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ),
+        ]
+    )
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        capture["urls"].append(url)
+        return next(responses)
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    events = module.extract_events_glm5(
+        [
+            {
+                "title": "Bitcoin ETF approved",
+                "content": "ETF approval boosts sentiment",
+                "url": "https://example.test/news/1",
+                "source": "jin10",
+                "published_at": "2026-03-29T00:00:00Z",
+            }
+        ],
+        {
+            "llm": {"provider": "openai", "batch_size": 1},
+            "symbols": {"BTCUSDT": {"canonical": "BTCUSDT", "aliases": ["BTC", "BTCUSDT"]}},
+        },
+    )
+
+    assert len(events) == 1
+    assert events[0]["symbol"] == "BTCUSDT"
+    assert events[0]["event_type"] == "etf"
+    assert capture["urls"] == [
+        "https://primary.test/v1/responses",
+        "https://backup.test/v1/responses",
+    ]
 
 
 def test_async_glm_client_summarize_batch_marks_openai_source(monkeypatch):

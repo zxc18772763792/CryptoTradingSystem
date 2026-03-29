@@ -20,6 +20,8 @@ from core.utils.openai_responses import (
     build_responses_payload,
     coerce_responses_to_chat_completions,
     extract_response_text,
+    is_retryable_openai_status,
+    openai_endpoint_targets,
     read_aiohttp_responses_json,
     responses_endpoint,
 )
@@ -47,8 +49,19 @@ def _zhipu_api_key() -> str:
     return str(os.getenv("ZHIPU_API_KEY") or getattr(settings, "ZHIPU_API_KEY", "") or "").strip()
 
 
-def _openai_api_key() -> str:
+def _openai_primary_api_key() -> str:
     return str(os.getenv("OPENAI_API_KEY") or getattr(settings, "OPENAI_API_KEY", "") or "").strip()
+
+
+def _openai_backup_api_key() -> str:
+    return str(os.getenv("OPENAI_BACKUP_API_KEY") or getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip()
+
+
+def _openai_api_key() -> str:
+    primary = _openai_primary_api_key()
+    if primary:
+        return primary
+    return _openai_backup_api_key()
 
 
 def _llm_provider(cfg: Dict[str, Any]) -> str:
@@ -58,7 +71,7 @@ def _llm_provider(cfg: Dict[str, Any]) -> str:
         return "openai"
     if raw == "glm":
         return "glm"
-    if _openai_api_key():
+    if _openai_api_key() or _openai_backup_api_key():
         return "openai"
     return "glm"
 
@@ -83,14 +96,33 @@ def _zhipu_model(cfg: Dict[str, Any]) -> str:
     )
 
 
-def _openai_base_url(cfg: Dict[str, Any]) -> str:
+def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     llm_cfg = cfg.get("llm") or {}
-    return str(
-        os.getenv("OPENAI_BASE_URL")
-        or llm_cfg.get("base_url")
-        or getattr(settings, "OPENAI_BASE_URL", "")
-        or DEFAULT_OPENAI_BASE_URL
-    ).rstrip("/")
+    return openai_endpoint_targets(
+        primary_base_url=(
+            os.getenv("OPENAI_BASE_URL")
+            or llm_cfg.get("base_url")
+            or getattr(settings, "OPENAI_BASE_URL", "")
+            or DEFAULT_OPENAI_BASE_URL
+        ),
+        backup_base_urls=(
+            os.getenv("OPENAI_BACKUP_BASE_URL")
+            or llm_cfg.get("backup_base_url")
+            or getattr(settings, "OPENAI_BACKUP_BASE_URL", "")
+            or ""
+        ),
+        primary_api_key=_openai_primary_api_key(),
+        backup_api_key=_openai_backup_api_key(),
+    )
+
+
+def _openai_base_url(cfg: Dict[str, Any]) -> str:
+    targets = _openai_endpoint_targets(cfg)
+    for target in targets:
+        base_url = str(target.get("base_url") or "").rstrip("/")
+        if base_url:
+            return base_url
+    return DEFAULT_OPENAI_BASE_URL.rstrip("/")
 
 
 def _openai_model(cfg: Dict[str, Any]) -> str:
@@ -283,6 +315,11 @@ class AsyncGLMClient:
         """
         self._cfg = cfg or {}
         self._provider = _llm_provider(self._cfg)
+        self._endpoint_targets: List[Dict[str, Any]] = (
+            _openai_endpoint_targets(self._cfg)
+            if self._provider == "openai"
+            else []
+        )
         self._api_key = _llm_api_key(self._cfg)
         self._base_url = _llm_base_url(self._cfg)
         self._model = _llm_model(self._cfg)
@@ -308,6 +345,24 @@ class AsyncGLMClient:
         """Get request headers for GLM API."""
         return build_openai_headers(self._api_key)
 
+    def _available_endpoint_targets(self) -> List[Dict[str, Any]]:
+        if self._provider == "openai":
+            candidates = self._endpoint_targets
+        else:
+            candidates = [
+                {
+                    "index": 0,
+                    "base_url": self._base_url,
+                    "api_key": self._api_key,
+                    "is_backup": False,
+                }
+            ]
+        return [
+            dict(target)
+            for target in candidates
+            if str(target.get("base_url") or "").strip() and str(target.get("api_key") or "").strip()
+        ]
+
     async def _request(
         self,
         method: str,
@@ -330,65 +385,103 @@ class AsyncGLMClient:
         Raises:
             RuntimeError: If API key is missing
         """
-        if not self._api_key:
+        targets = self._available_endpoint_targets()
+        if not targets:
             raise RuntimeError("OPENAI_API_KEY is missing" if self._provider == "openai" else "ZHIPU_API_KEY is missing")
 
         self._requests_total += 1
-        url = endpoint if str(endpoint or "").startswith("http") else f"{self._base_url}{endpoint}"
         timeout = timeout or self._timeout
 
         # Wait for rate limiter
         await rate_limiter.wait_for_token(timeout=30.0)
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            try:
-                async with session.request(
-                    method=method,
-                    url=url,
-                    headers=self._get_headers(),
-                    json=payload,
-                ) as response:
-                    # Handle rate limiting (429)
-                    if response.status == 429:
-                        self._requests_rate_limited += 1
+            total_targets = len(targets)
+            last_error_type = "other"
+            for idx, target in enumerate(targets):
+                base_url = str(target.get("base_url") or "").rstrip("/")
+                api_key = str(target.get("api_key") or "").strip()
+                is_openai_responses = self._provider == "openai"
+                url = (
+                    responses_endpoint(base_url)
+                    if is_openai_responses
+                    else (endpoint if str(endpoint or "").startswith("http") else f"{base_url}{endpoint}")
+                )
+                try:
+                    async with session.request(
+                        method=method,
+                        url=url,
+                        headers=build_openai_headers(api_key),
+                        json=payload,
+                    ) as response:
+                        if response.status == 429:
+                            self._requests_rate_limited += 1
 
-                        retry_after = None
-                        retry_after_header = response.headers.get("Retry-After")
-                        if retry_after_header:
-                            try:
-                                retry_after = int(retry_after_header)
-                            except ValueError:
-                                pass
+                            retry_after = None
+                            retry_after_header = response.headers.get("Retry-After")
+                            if retry_after_header:
+                                try:
+                                    retry_after = int(retry_after_header)
+                                except ValueError:
+                                    pass
 
-                        error_text = await response.text()
-                        logger.warning(f"GLM rate limited (429): {error_text[:200]}")
-                        rate_limiter.on_rate_limit(retry_after=retry_after)
-                        return {}, "rate_limit"
+                            error_text = await response.text()
+                            logger.warning(f"GLM rate limited (429): {error_text[:200]}")
+                            last_error_type = "rate_limit"
+                            if idx + 1 < total_targets and self._provider == "openai":
+                                logger.warning(
+                                    f"async_glm_client openai relay rate limited; trying backup {idx + 2}/{total_targets}"
+                                )
+                                continue
+                            rate_limiter.on_rate_limit(retry_after=retry_after)
+                            return {}, "rate_limit"
 
-                    if response.status >= 400:
-                        self._requests_failed += 1
-                        error_text = await response.text()
-                        logger.warning(f"GLM API HTTP {response.status}: {error_text[:300]}")
+                        if response.status >= 400:
+                            self._requests_failed += 1
+                            error_text = await response.text()
+                            logger.warning(f"GLM API HTTP {response.status}: {error_text[:300]}")
+                            last_error_type = "timeout" if response.status in (408, 504) else "other"
+                            if (
+                                idx + 1 < total_targets
+                                and self._provider == "openai"
+                                and is_retryable_openai_status(response.status)
+                            ):
+                                logger.warning(
+                                    f"async_glm_client openai relay HTTP {response.status}; "
+                                    f"trying backup {idx + 2}/{total_targets}"
+                                )
+                                continue
+                            return {}, last_error_type
 
-                        if response.status in (408, 504):
-                            return {}, "timeout"
-                        return {}, "other"
-
-                    if self._provider == "openai" and url == responses_endpoint(self._base_url):
-                        data = await read_aiohttp_responses_json(response)
-                    else:
-                        data = await response.json()
-                    self._requests_success += 1
-                    rate_limiter.reset_backoff()
-                    return data, "none"
-            except asyncio.TimeoutError:
-                self._requests_failed += 1
-                logger.warning("GLM request timed out")
-                return {}, "timeout"
-            except aiohttp.ClientError as exc:
-                self._requests_failed += 1
-                logger.warning(f"GLM client error: {exc!r}")
-                return {}, "other"
+                        if is_openai_responses:
+                            data = await read_aiohttp_responses_json(response)
+                        else:
+                            data = await response.json()
+                        self._requests_success += 1
+                        rate_limiter.reset_backoff()
+                        return data, "none"
+                except asyncio.TimeoutError:
+                    self._requests_failed += 1
+                    logger.warning("GLM request timed out")
+                    last_error_type = "timeout"
+                    if idx + 1 < total_targets and self._provider == "openai":
+                        logger.warning(
+                            f"async_glm_client openai relay timeout; trying backup {idx + 2}/{total_targets}"
+                        )
+                        continue
+                    return {}, "timeout"
+                except aiohttp.ClientError as exc:
+                    self._requests_failed += 1
+                    logger.warning(f"GLM client error: {exc!r}")
+                    last_error_type = "other"
+                    if idx + 1 < total_targets and self._provider == "openai":
+                        logger.warning(
+                            f"async_glm_client openai relay transport failure; "
+                            f"trying backup {idx + 2}/{total_targets}: {exc!r}"
+                        )
+                        continue
+                    return {}, "other"
+            return {}, last_error_type
 
     async def chat_completions(
         self,
