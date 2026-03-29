@@ -275,6 +275,17 @@
     el.className = `ai-chain-summary-tag${tone ? ` is-${tone}` : ''}`;
   }
 
+  function emitAgentStatus(status = {}, cfg = {}) {
+    if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
+    try {
+      window.dispatchEvent(new CustomEvent('ai-agent:status', {
+        detail: { status, config: cfg },
+      }));
+    } catch (_) {
+      // no-op
+    }
+  }
+
   function renderAgentChainSummary(status = {}, cfg = {}) {
     const running = Boolean(status.running);
     const lastDecision = status.last_decision || {};
@@ -599,6 +610,7 @@
     renderAgentDiagnostics(status, cfg);
     renderAgentRanking(status.last_symbol_scan || null, cfg);
     syncAgentConfigForm(cfg);
+    emitAgentStatus(status, cfg);
   }
 
   async function loadAgentJournal() {
@@ -898,9 +910,12 @@
     }
   }
 
-  async function loadAgentSymbolRanking(force = false) {
+  async function loadAgentSymbolRanking(force = false, options = {}) {
+    const timeoutMs = Math.max(5000, Number(options.timeoutMs || (force ? 90000 : 20000)));
+    const notifyOnError = options.notifyOnError !== false;
+    const preserveExisting = options.preserveExisting !== false;
     try {
-      const response = await rootApi(`${AGENT_SYMBOL_RANKING_API}?limit=10${force ? '&refresh=1' : ''}`);
+      const response = await rootApi(`${AGENT_SYMBOL_RANKING_API}?limit=10${force ? '&refresh=1' : ''}`, { timeoutMs });
       const cfg = {
         symbol_mode: response?.symbol_mode || document.getElementById('ai-agent-symbol-mode')?.value || 'manual',
         symbol: response?.configured_symbol || document.getElementById('ai-agent-manual-symbol')?.value || 'BTC/USDT',
@@ -908,11 +923,15 @@
       renderAgentRanking(response || null, cfg);
       return response;
     } catch (err) {
-      notify(`刷新选币排行失败: ${err.message}`, true);
-      renderAgentRanking(null, {
-        symbol_mode: document.getElementById('ai-agent-symbol-mode')?.value || 'manual',
-        symbol: document.getElementById('ai-agent-manual-symbol')?.value || 'BTC/USDT',
-      });
+      if (notifyOnError) {
+        notify(`刷新选币排行失败: ${err.message}`, true);
+      }
+      if (!preserveExisting) {
+        renderAgentRanking(null, {
+          symbol_mode: document.getElementById('ai-agent-symbol-mode')?.value || 'manual',
+          symbol: document.getElementById('ai-agent-manual-symbol')?.value || 'BTC/USDT',
+        });
+      }
       return null;
     }
   }
@@ -937,7 +956,13 @@
       syncAgentConfigForm(cfg);
       notify('自动交易代理配置已保存');
       await loadAgentStatus();
-      if (symbolMode === 'auto') await loadAgentSymbolRanking(true);
+      if (symbolMode === 'auto') {
+        loadAgentSymbolRanking(true, {
+          timeoutMs: 90000,
+          notifyOnError: true,
+          preserveExisting: false,
+        }).catch(() => {});
+      }
     } catch (err) {
       notify(`保存代理配置失败: ${err.message}`, true);
     }
@@ -1043,7 +1068,7 @@
       refresh: () => loadAgentStatus(),
       refreshJournal: () => loadAgentJournal(),
       refreshReview: () => loadAgentReview(),
-      refreshRanking: () => loadAgentSymbolRanking(true),
+      refreshRanking: () => loadAgentSymbolRanking(true, { timeoutMs: 90000, notifyOnError: true, preserveExisting: false }),
       saveConfig: () => saveAgentConfig(),
       start: () => agentStart(),
       stop: () => agentStop(),
@@ -1056,7 +1081,7 @@
     window.agentRunOnce = agentRunOnce;
     window.agentRefreshJournal = () => loadAgentJournal().catch(() => {});
     window.agentRefreshReview = () => loadAgentReview().catch(() => {});
-    window.agentRefreshRanking = () => loadAgentSymbolRanking(true);
+    window.agentRefreshRanking = () => loadAgentSymbolRanking(true, { timeoutMs: 90000, notifyOnError: true, preserveExisting: false });
     window.agentSaveConfig = () => saveAgentConfig();
     window.agentToggleSymbolMode = () => updateAgentSymbolModeVisibility();
 
@@ -1067,12 +1092,7 @@
       }
     });
 
-    loadAgentStatus().then((response) => {
-      const cfg = response?.config || {};
-      if (String(cfg.symbol_mode || 'manual').toLowerCase() === 'auto') {
-        loadAgentSymbolRanking(false).catch(() => {});
-      }
-    }).catch(() => {});
+    loadAgentStatus().catch(() => {});
     startPolling();
   }
 

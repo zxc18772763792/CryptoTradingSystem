@@ -494,6 +494,72 @@ def test_agent_model_feedback_guard_hard_timeout_alerts_and_ends_round(monkeypat
 
 # ── Overlay persistence ───────────────────────────────────────────────────────
 
+def test_symbol_scan_reuses_recent_cached_snapshot(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_scan_cache")
+    monkeypatch.setattr(
+        agent,
+        "get_runtime_config",
+        lambda: {
+            "exchange": "binance",
+            "symbol": "BTC/USDT",
+            "symbol_mode": "auto",
+            "universe_symbols": ["BTC/USDT", "ETH/USDT"],
+            "selection_top_n": 10,
+            "timeframe": "15m",
+            "lookback_bars": 240,
+            "account_id": "main",
+        },
+    )
+    monkeypatch.setattr(agent, "_cfg_with_learning_overlays", lambda cfg, force_learning_refresh=False: dict(cfg))
+    tracked_mock = AsyncMock(return_value=[])
+    build_context_mock = AsyncMock(side_effect=AssertionError("cached scan should not rebuild contexts"))
+    monkeypatch.setattr(agent, "_tracked_position_symbols", tracked_mock)
+    monkeypatch.setattr(agent, "_build_context", build_context_mock)
+
+    agent._last_symbol_scan = {
+        "generated_at": module._utc_now().isoformat(),
+        "symbol_mode": "auto",
+        "configured_symbol": "BTC/USDT",
+        "selected_symbol": "ETH/USDT",
+        "selection_reason": "top_ranked_tradable_symbol",
+        "candidate_count": 2,
+        "top_n": 10,
+        "top_candidates": [
+            {"rank": 1, "symbol": "ETH/USDT", "score": 0.88},
+            {"rank": 2, "symbol": "BTC/USDT", "score": 0.51},
+        ],
+    }
+
+    result = asyncio.run(agent.get_symbol_scan(limit=10, force=False))
+
+    assert result["selected_symbol"] == "ETH/USDT"
+    assert tracked_mock.await_count == 1
+    assert build_context_mock.await_count == 0
+
+
+def test_update_runtime_config_clears_cached_symbol_scan(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_scan_reset")
+    monkeypatch.setattr(agent, "_save_overlay", lambda: None)
+    agent._last_symbol_scan = {
+        "generated_at": module._utc_now().isoformat(),
+        "symbol_mode": "manual",
+        "configured_symbol": "BTC/USDT",
+        "selected_symbol": "BTC/USDT",
+        "selection_reason": "manual_symbol",
+        "candidate_count": 1,
+        "top_n": 10,
+        "top_candidates": [{"rank": 1, "symbol": "BTC/USDT", "score": 0.5}],
+    }
+
+    asyncio.run(agent.update_runtime_config(symbol="ETH/USDT"))
+
+    assert agent.get_status()["last_symbol_scan"] is None
+
+
 def test_agent_config_persists_to_overlay(tmp_path):
     """update_runtime_config writes overlay that is reloaded by a new agent instance."""
     from core.ai.autonomous_agent import AutonomousTradingAgent

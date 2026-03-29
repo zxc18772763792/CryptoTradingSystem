@@ -85,6 +85,7 @@ _AI_PARTIAL_TAKE_PROFIT_TRIGGER_PCT_MIN = 0.0060
 _AI_PARTIAL_TAKE_PROFIT_FRACTION = 0.5
 _AI_POST_PARTIAL_TRAILING_STOP_PCT_MIN = 0.0025
 _AI_OUTAGE_TIGHT_TRAILING_STOP_PCT_MIN = 0.0015
+_SYMBOL_SCAN_CACHE_MAX_AGE_SEC = 30 * 60
 
 
 def _utc_now() -> datetime:
@@ -248,6 +249,18 @@ def _utc_iso_from_unix(value: Optional[float]) -> Optional[str]:
         return None
     with contextlib.suppress(Exception):
         return datetime.fromtimestamp(float(value), timezone.utc).isoformat()
+    return None
+
+
+def _utc_from_iso(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    with contextlib.suppress(Exception):
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     return None
 
 
@@ -728,8 +741,22 @@ class AutonomousTradingAgent:
 
         if not updates:
             return self.get_runtime_config()
+        scan_config_keys = {
+            "AI_AUTONOMOUS_AGENT_EXCHANGE",
+            "AI_AUTONOMOUS_AGENT_SYMBOL",
+            "AI_AUTONOMOUS_AGENT_SYMBOL_MODE",
+            "AI_AUTONOMOUS_AGENT_UNIVERSE_SYMBOLS",
+            "AI_AUTONOMOUS_AGENT_SELECTION_TOP_N",
+            "AI_AUTONOMOUS_AGENT_TIMEFRAME",
+            "AI_AUTONOMOUS_AGENT_LOOKBACK_BARS",
+            "AI_AUTONOMOUS_AGENT_MIN_CONFIDENCE",
+            "AI_AUTONOMOUS_AGENT_ACCOUNT_ID",
+            "AI_AUTONOMOUS_AGENT_STRATEGY_NAME",
+        }
         async with self._lock:
             self._override.update(updates)
+            if scan_config_keys.intersection(updates):
+                self._last_symbol_scan = None
         self._save_overlay()
         return self.get_runtime_config()
 
@@ -2412,6 +2439,66 @@ class AutonomousTradingAgent:
         }
         return self._apply_learning_score_adjustments(row=row, cfg=cfg)
 
+    def _cached_symbol_scan(
+        self,
+        *,
+        cfg: Dict[str, Any],
+        symbol_mode: str,
+        configured_symbol: str,
+        selection_top_n: int,
+        universe_symbols: List[str],
+    ) -> Optional[Dict[str, Any]]:
+        cached = self._last_symbol_scan
+        if not isinstance(cached, dict) or not cached:
+            return None
+
+        cached_mode = _normalize_symbol_mode(cached.get("symbol_mode") or symbol_mode)
+        cached_symbol = _normalize_symbol_text(cached.get("configured_symbol") or configured_symbol) or configured_symbol
+        if cached_mode != symbol_mode or cached_symbol != configured_symbol:
+            return None
+
+        generated_at = _utc_from_iso(cached.get("generated_at"))
+        if generated_at is None:
+            return None
+        if (_utc_now() - generated_at).total_seconds() > float(_SYMBOL_SCAN_CACHE_MAX_AGE_SEC):
+            return None
+
+        scan_cfg = dict(cached.get("scan_config") or {})
+        expected_exchange = str(cfg.get("exchange") or "binance").strip().lower() or "binance"
+        expected_timeframe = str(cfg.get("timeframe") or "15m").strip() or "15m"
+        expected_account_id = str(cfg.get("account_id") or "main").strip() or "main"
+        expected_lookback = int(cfg.get("lookback_bars") or 240)
+        expected_universe = list(universe_symbols or [])
+
+        if scan_cfg:
+            if str(scan_cfg.get("exchange") or expected_exchange).strip().lower() != expected_exchange:
+                return None
+            if str(scan_cfg.get("timeframe") or expected_timeframe).strip() != expected_timeframe:
+                return None
+            if str(scan_cfg.get("account_id") or expected_account_id).strip() != expected_account_id:
+                return None
+            if int(scan_cfg.get("lookback_bars") or expected_lookback) != expected_lookback:
+                return None
+            cached_universe = _normalize_symbol_list(
+                scan_cfg.get("universe_symbols"),
+                default=expected_universe,
+                max_items=30,
+            )
+            if cached_universe != expected_universe:
+                return None
+
+        rows = list(cached.get("top_candidates") or [])
+        requested_count = max(0, int(selection_top_n or 0))
+        available_count = len(rows)
+        candidate_count = max(0, int(cached.get("candidate_count") or available_count))
+        if requested_count > 0 and available_count < min(requested_count, candidate_count):
+            return None
+
+        payload = dict(cached)
+        payload["top_n"] = selection_top_n
+        payload["top_candidates"] = rows[:selection_top_n]
+        return payload
+
     async def get_symbol_scan(self, *, limit: Optional[int] = None, force: bool = False) -> Dict[str, Any]:
         cfg = self._cfg_with_learning_overlays(self.get_runtime_config(), force_learning_refresh=force)
         symbol_mode = _normalize_symbol_mode(cfg.get("symbol_mode"))
@@ -2427,6 +2514,17 @@ class AutonomousTradingAgent:
                 account_id=str(cfg.get("account_id") or "main"),
             )
             universe_symbols = _merge_symbol_sequence(tracked_symbols, [configured_symbol], universe_symbols, max_items=30)
+
+        if not force:
+            cached = self._cached_symbol_scan(
+                cfg=cfg,
+                symbol_mode=symbol_mode,
+                configured_symbol=configured_symbol,
+                selection_top_n=selection_top_n,
+                universe_symbols=universe_symbols,
+            )
+            if cached is not None:
+                return cached
 
         rows: List[Dict[str, Any]] = []
         for symbol in universe_symbols:
@@ -2524,6 +2622,14 @@ class AutonomousTradingAgent:
             "candidate_count": len(rows),
             "top_n": selection_top_n,
             "top_candidates": rows[:selection_top_n],
+            "scan_config": {
+                "exchange": str(cfg.get("exchange") or "binance").strip().lower() or "binance",
+                "timeframe": str(cfg.get("timeframe") or "15m").strip() or "15m",
+                "account_id": str(cfg.get("account_id") or "main").strip() or "main",
+                "lookback_bars": int(cfg.get("lookback_bars") or 240),
+                "selection_top_n": selection_top_n,
+                "universe_symbols": list(universe_symbols),
+            },
         }
         if force or symbol_mode == "manual" or rows:
             self._last_symbol_scan = payload
