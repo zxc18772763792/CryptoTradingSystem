@@ -525,6 +525,37 @@ def _build_live_signal_watchlist_item(
     }
 
 
+async def _load_live_signal_snapshot(
+    *,
+    symbol: str,
+    exchange: str,
+    timeframe: str,
+    signal_aggregator: Any,
+    limit: int = 120,
+    timeout_sec: float = 10.0,
+    log_label: str,
+) -> tuple[Optional[Dict[str, Any]], str]:
+    async def _work() -> Dict[str, Any]:
+        df, market_meta = await _load_signal_market_data(
+            exchange=exchange,
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=limit,
+        )
+        sig = await signal_aggregator.aggregate(symbol, df)
+        return {
+            **(sig.to_dict() if callable(getattr(sig, "to_dict", None)) else dict(sig or {})),
+            **market_meta,
+        }
+
+    try:
+        payload = await asyncio.wait_for(_work(), timeout=timeout_sec)
+        return payload, ""
+    except Exception as exc:
+        logger.debug(f"live-signals: {log_label}: {exc}")
+        return None, str(exc)
+
+
 def _safe_strategy_name_fragment(value: str, default: str = "strategy") -> str:
     text = "".join(
         ch if (str(ch).isascii() and str(ch).isalnum()) else "_"
@@ -704,11 +735,14 @@ async def _load_signal_market_data(
     try:
         from core.strategies import strategy_manager as sm  # noqa: PLC0415
 
-        df = await sm._load_market_data(
-            resolved_exchange,
-            resolved_symbol,
-            resolved_timeframe,
-            limit=max(60, int(limit or 120)),
+        df = await asyncio.wait_for(
+            sm._load_market_data(
+                resolved_exchange,
+                resolved_symbol,
+                resolved_timeframe,
+                limit=max(60, int(limit or 120)),
+            ),
+            timeout=5.0,
         )
         source = "strategy_manager"
     except Exception as exc:
@@ -2863,7 +2897,8 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
         sym_norm = _normalize_symbol(symbol)
         active = [c for c in active if _candidate_primary_symbol(c) == sym_norm]
 
-    candidate_items: List[Dict[str, Any]] = []
+    candidate_specs: List[Dict[str, Any]] = []
+    candidate_tasks: List[Any] = []
     for grouped in _group_candidates_for_live_signals(active):
         grouped_candidates = list(grouped.get("candidates") or [])
         preferred = grouped.get("preferred") or _pick_preferred_candidate(grouped_candidates)
@@ -2872,28 +2907,33 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
         cand_symbol = _candidate_primary_symbol(preferred)
         cand_timeframe = _candidate_timeframe(preferred)
         cand_exchange = _candidate_exchange(preferred)
-        signal_payload: Optional[Dict[str, Any]] = None
-        error = ""
-        try:
-            df, market_meta = await _load_signal_market_data(
-                exchange=cand_exchange,
-                symbol=cand_symbol,
-                timeframe=cand_timeframe,
-                limit=120,
-            )
-            sig = await signal_aggregator.aggregate(cand_symbol, df)
-            signal_payload = {
-                **(sig.to_dict() if callable(getattr(sig, "to_dict", None)) else dict(sig or {})),
-                **market_meta,
+        candidate_id = str(getattr(preferred, "candidate_id", "") or "unknown")
+        candidate_specs.append(
+            {
+                "preferred": preferred,
+                "grouped_candidates": grouped_candidates,
             }
-        except Exception as exc:
-            candidate_id = str(getattr(preferred, "candidate_id", "") or "unknown")
-            logger.debug(f"live-signals: candidate error for {candidate_id}: {exc}")
-            error = str(exc)
+        )
+        candidate_tasks.append(
+            _load_live_signal_snapshot(
+                symbol=cand_symbol,
+                exchange=cand_exchange,
+                timeframe=cand_timeframe,
+                signal_aggregator=signal_aggregator,
+                limit=120,
+                timeout_sec=10.0,
+                log_label=f"candidate error for {candidate_id}",
+            )
+        )
+
+    candidate_items: List[Dict[str, Any]] = []
+    candidate_results = await asyncio.gather(*candidate_tasks) if candidate_tasks else []
+    for spec, result in zip(candidate_specs, candidate_results):
+        signal_payload, error = result
         candidate_items.append(
             _build_live_signal_candidate_item(
-                preferred=preferred,
-                grouped_candidates=grouped_candidates,
+                preferred=spec["preferred"],
+                grouped_candidates=spec["grouped_candidates"],
                 signal_payload=signal_payload,
                 error=error,
             )
@@ -2908,7 +2948,10 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
         runtime_cfg = {}
 
     try:
-        selection_payload = await autonomous_trading_agent.get_symbol_scan(force=False)
+        selection_payload = await asyncio.wait_for(
+            autonomous_trading_agent.get_symbol_scan(force=False),
+            timeout=10.0,
+        )
         selection = dict(selection_payload or {}) if isinstance(selection_payload, dict) else {}
     except Exception as exc:
         logger.debug(f"live-signals: watchlist scan unavailable: {exc}")
@@ -2921,6 +2964,15 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
     if symbol:
         sym_norm = _normalize_symbol(symbol)
         watchlist_symbols = [sym for sym in watchlist_symbols if _normalize_symbol(sym) == sym_norm]
+    else:
+        watchlist_limit = max(
+            1,
+            min(
+                int((selection.get("top_n") or runtime_cfg.get("selection_top_n") or 8)),
+                8,
+            ),
+        )
+        watchlist_symbols = watchlist_symbols[:watchlist_limit]
 
     watchlist_items: List[Dict[str, Any]] = []
     watchlist_timeframe = str(
@@ -2935,24 +2987,21 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
             or "binance"
         )
     )
-    for watch_symbol in watchlist_symbols:
-        signal_payload = None
-        error = ""
-        try:
-            df, market_meta = await _load_signal_market_data(
-                exchange=watchlist_exchange,
-                symbol=watch_symbol,
-                timeframe=watchlist_timeframe,
-                limit=120,
-            )
-            sig = await signal_aggregator.aggregate(watch_symbol, df)
-            signal_payload = {
-                **(sig.to_dict() if callable(getattr(sig, "to_dict", None)) else dict(sig or {})),
-                **market_meta,
-            }
-        except Exception as exc:
-            logger.debug(f"live-signals: watchlist error for {watch_symbol}: {exc}")
-            error = str(exc)
+    watchlist_tasks = [
+        _load_live_signal_snapshot(
+            symbol=watch_symbol,
+            exchange=watchlist_exchange,
+            timeframe=watchlist_timeframe,
+            signal_aggregator=signal_aggregator,
+            limit=120,
+            timeout_sec=10.0,
+            log_label=f"watchlist error for {watch_symbol}",
+        )
+        for watch_symbol in watchlist_symbols
+    ]
+    watchlist_results = await asyncio.gather(*watchlist_tasks) if watchlist_tasks else []
+    for watch_symbol, result in zip(watchlist_symbols, watchlist_results):
+        signal_payload, error = result
         watchlist_items.append(
             _build_live_signal_watchlist_item(
                 symbol=watch_symbol,

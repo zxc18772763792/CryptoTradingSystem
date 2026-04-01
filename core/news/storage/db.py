@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from sqlalchemy import and_, case, event, func, insert, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from config.settings import settings
 from core.news.text_normalizer import clean_news_text
@@ -37,6 +38,7 @@ except Exception:
     _NEWS_SQLITE_BUSY_TIMEOUT_SEC = 8.0
 if str(settings.DATABASE_URL).startswith("sqlite"):
     _news_engine_kwargs["connect_args"] = {"timeout": _NEWS_SQLITE_BUSY_TIMEOUT_SEC}
+    _news_engine_kwargs["poolclass"] = NullPool
 
 news_engine = create_async_engine(settings.DATABASE_URL, **_news_engine_kwargs)
 NewsSessionLocal = async_sessionmaker(news_engine, class_=AsyncSession, expire_on_commit=False)

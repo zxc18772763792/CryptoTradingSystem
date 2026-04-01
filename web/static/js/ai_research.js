@@ -16,6 +16,9 @@
   const FLOW_HINT_QUICK_PATH = '当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。也可以直接点击“⚡ one-click 自动研究+部署”。';
   const AI_UI_TIMEZONE = 'Asia/Singapore';
   const AI_UI_TIMEZONE_LABEL = '新加坡时间 (SGT)';
+  const AI_SHARED_POLL_TAB = 'ai-research';
+  const AI_SHARED_POLL_GROUP_FALLBACK = 'ai';
+  const AI_SHARED_POLL_SYNC_MS = 5000;
 
   /* 策略类别与颜色 */
   const STRATEGY_CATEGORIES = {
@@ -76,26 +79,106 @@
     runtimeConfig: null,    // { governance_enabled, decision_mode, trading_mode, ai_live_decision, ai_autonomous_agent }
     runtimeConfigLoaded: false,
     agentStatus: null,
+    agentStatusInFlight: null,
     selectedProposalId: '',
     selectedCandidateId: '',
     latestSignals: {},
     liveDecisionActivity: null,
     liveDecisionActivityLastGood: null,
     liveDecisionActivityRetryTimer: null,
+    refreshWorkbenchInFlight: null,
+    liveSignalsInFlight: null,
     signalTimer: null,
     refreshTimer: null,
     liveSignalTimer: null,
     signalLoading: false,
     signalPanelCollapsed: false,
     jobPollingTimers: {},   // proposalId → intervalId
+    jobPollingConfigs: {},  // proposalId -> { jobId }
     actionLocks: { generate: false, run: false, oneclick: false },
     sortBy: 'score',        // 'score' | 'sharpe' | 'return' | 'drawdown'
     filterCategory: '',     // '' | '趋势' | '震荡' | ...
     compareCandidateIds: new Set(),
     candidateDetailReqSeq: 0,
     perfHistoryCache: {},
+    pollingOwnershipTimer: null,
+    sharedPollingActive: false,
   };
   let initialized = false;
+
+  function sharedPollingRoot() {
+    return (typeof window !== 'undefined' && window.__ctsSharedPolling) || null;
+  }
+
+  function aiSharedPollGroup() {
+    const sharedPolling = sharedPollingRoot();
+    const group = typeof sharedPolling?.groupForTab === 'function'
+      ? sharedPolling.groupForTab(AI_SHARED_POLL_TAB)
+      : AI_SHARED_POLL_GROUP_FALLBACK;
+    return String(group || AI_SHARED_POLL_GROUP_FALLBACK).trim() || AI_SHARED_POLL_GROUP_FALLBACK;
+  }
+
+  function canRunAiSharedPolling({ requireWorkspace = true, requireResearch = false } = {}) {
+    if (typeof document === 'undefined' || document.hidden) return false;
+    if (requireResearch && !isAiResearchActive()) return false;
+    if (requireWorkspace && !isAiWorkspaceActive()) return false;
+    const sharedPolling = sharedPollingRoot();
+    if (typeof sharedPolling?.canRun === 'function') return !!sharedPolling.canRun(aiSharedPollGroup());
+    return true;
+  }
+
+  function hasAiPollingWork() {
+    return !!(
+      state.signalTimer
+      || state.refreshTimer
+      || state.liveSignalTimer
+      || state.liveDecisionActivityRetryTimer
+      || Object.keys(state.jobPollingTimers || {}).length
+    );
+  }
+
+  function emitAiPollingState(reason, active) {
+    const nextActive = !!active;
+    if (state.sharedPollingActive === nextActive) return;
+    state.sharedPollingActive = nextActive;
+    if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
+    try {
+      window.dispatchEvent(new CustomEvent('ai-research:polling', {
+        detail: {
+          reason: String(reason || 'sync'),
+          active: nextActive,
+          hidden: !!document.hidden,
+          workspaceActive: isAiWorkspaceActive(),
+          researchActive: isAiResearchActive(),
+          group: aiSharedPollGroup(),
+        },
+      }));
+    } catch (err) {
+      console.debug('emitAiPollingState failed:', err);
+    }
+  }
+
+  function stopPollingOwnershipMonitor() {
+    if (!state.pollingOwnershipTimer) return;
+    clearInterval(state.pollingOwnershipTimer);
+    state.pollingOwnershipTimer = null;
+  }
+
+  function startPollingOwnershipMonitor() {
+    if (state.pollingOwnershipTimer || typeof window === 'undefined') return;
+    state.pollingOwnershipTimer = window.setInterval(() => {
+      syncPollingState({ immediate: false, reason: 'ownership-heartbeat' });
+    }, AI_SHARED_POLL_SYNC_MS);
+  }
+
+  function runStateSingleFlight(slot, taskFactory) {
+    if (state[slot]) return state[slot];
+    const task = Promise.resolve().then(taskFactory).finally(() => {
+      if (state[slot] === task) state[slot] = null;
+    });
+    state[slot] = task;
+    return task;
+  }
 
   /* ── 工具函数 ── */
   function esc(v) {
@@ -3438,18 +3521,20 @@
   }
 
   async function refreshWorkbench(selectProposalId = '', selectCandidateId = '') {
-    await loadRuntimeConfig();
-    await Promise.all([
-      loadProposals(selectProposalId),
-      loadCandidates(selectCandidateId),
-      loadPendingApprovals(),
-      loadAgentStatus().catch(() => null),
-      loadDataReadiness().catch(() => null),
-      loadLiveDecisionActivitySummary().catch(() => null),
-    ]);
-    applyWorkbenchSelection(selectProposalId);
-    normalizeDomText(document.getElementById('ai-research'));
-    emitWorkbenchState('refresh-workbench');
+    return runStateSingleFlight('refreshWorkbenchInFlight', async () => {
+      await loadRuntimeConfig();
+      await Promise.all([
+        loadProposals(selectProposalId),
+        loadCandidates(selectCandidateId),
+        loadPendingApprovals(),
+        loadAgentStatus().catch(() => null),
+        loadDataReadiness().catch(() => null),
+        loadLiveDecisionActivitySummary().catch(() => null),
+      ]);
+      applyWorkbenchSelection(selectProposalId);
+      normalizeDomText(document.getElementById('ai-research'));
+      emitWorkbenchState('refresh-workbench');
+    });
   }
 
   function hasActionLock() {
@@ -3858,16 +3943,18 @@
   }
 
   async function loadAgentStatus() {
-    const agent = getAgentModule();
-    const response = agent && typeof agent.refresh === 'function'
-      ? await agent.refresh()
-      : await rootApi(AGENT_STATUS_API, { timeoutMs: 15000 });
-    if (response?.status) {
-      state.agentStatus = safeJsonClone(response.status, null);
-      renderRuntimeSummary({ silent: true });
-      emitWorkbenchState('agent-status');
-    }
-    return response;
+    return runStateSingleFlight('agentStatusInFlight', async () => {
+      const agent = getAgentModule();
+      const response = agent && typeof agent.refresh === 'function'
+        ? await agent.refresh()
+        : await rootApi(AGENT_STATUS_API, { timeoutMs: 15000 });
+      if (response?.status) {
+        state.agentStatus = safeJsonClone(response.status, null);
+        renderRuntimeSummary({ silent: true });
+        emitWorkbenchState('agent-status');
+      }
+      return response;
+    });
   }
 
   async function agentStart() {
@@ -4163,15 +4250,16 @@
     clearInterval(state.refreshTimer);
     clearInterval(state.liveSignalTimer);
     if (document.hidden || !isAiWorkspaceActive()) return;
+    if (!canRunAiPolling()) return;
 
     if (isAiResearchActive()) {
       loadSignal().catch(() => {});
       state.signalTimer = setInterval(() => {
-        if (!isAiResearchActive() || document.hidden) return;
+        if (!isAiResearchActive() || document.hidden || !canRunAiPolling()) return;
         loadSignal().catch(() => {});
       }, SIGNAL_INTERVAL_MS);
       state.refreshTimer = setInterval(() => {
-        if (!isAiResearchActive() || document.hidden) return;
+        if (!isAiResearchActive() || document.hidden || !canRunAiPolling()) return;
         refreshWorkbench().catch(() => {});
       }, REFRESH_INTERVAL_MS);
     }
@@ -4179,7 +4267,7 @@
     if (isAiWorkspaceActive()) {
       loadLiveSignals().catch(() => {});
       state.liveSignalTimer = setInterval(() => {
-        if (!isAiWorkspaceActive() || document.hidden) return;
+        if (!isAiWorkspaceActive() || document.hidden || !canRunAiPolling()) return;
         loadLiveSignals().catch(() => {});
       }, 30000);
     }
@@ -4210,6 +4298,11 @@
     return isAiResearchActive() || isAiAgentActive();
   }
 
+  function canRunAiPolling() {
+    if (typeof window === 'undefined' || typeof window.__ctsSharedPolling?.canRun !== 'function') return true;
+    return window.__ctsSharedPolling.canRun('ai');
+  }
+
   function syncHubLayoutHeight() {
     const hub = document.querySelector('#ai-research .ai-hub-layout');
     if (!hub) return;
@@ -4230,6 +4323,7 @@
     aiTabBtn?.addEventListener('click', () => {
       setTimeout(syncHubLayoutHeight, 0);
       setTimeout(syncHubLayoutHeight, 120);
+      canRunAiPolling();
       startPolling();
     });
     document.querySelectorAll('.tab-btn').forEach((btn) => {
@@ -4244,6 +4338,7 @@
       if (document.hidden) {
         stopPolling();
       } else if (isAiWorkspaceActive()) {
+        canRunAiPolling();
         startPolling();
       }
     });
@@ -4262,7 +4357,9 @@
     syncPrimaryActionButtons();
     updatePlannerModeHint();
     normalizeDomText(document.getElementById('ai-research'));
-    refreshWorkbench().catch(err => console.error('AI研究初始化失败:', err));
+    if (isAiResearchActive() && canRunAiPolling()) {
+      refreshWorkbench().catch(err => console.error('AI研究初始化失败:', err));
+    }
     if (isAiWorkspaceActive()) startPolling();
   }
 
@@ -4294,6 +4391,25 @@
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
      Phase B — 快速注册
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+  async function loadLiveSignals() {
+    if (!document.getElementById('ai-research-live-signals-panel') && !document.getElementById('ai-agent-live-signals-panel')) return;
+    if (state.liveSignalsInFlight) return state.liveSignalsInFlight;
+    const task = (async () => {
+      try {
+        const res = await aiApi('/live-signals', { timeoutMs: 20000 });
+        renderLiveSignalPanels(res || {}, !!res?.ml_model_loaded);
+      } catch (e) {
+        /* silent non-critical */
+      }
+    })();
+    state.liveSignalsInFlight = task;
+    try {
+      return await task;
+    } finally {
+      if (state.liveSignalsInFlight === task) state.liveSignalsInFlight = null;
+    }
+  }
 
   function liveSignalSections(payload) {
     const sections = Array.isArray(payload?.sections) ? payload.sections.filter(Boolean) : [];

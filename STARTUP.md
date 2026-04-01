@@ -15,6 +15,7 @@ Run these from project root:
 ```bat
 .\web.bat help
 .\web.bat start
+.\web.bat start -EnableAnalyticsHistory
 .\web.bat status
 .\web.bat stop -IncludeWorkers
 ```
@@ -27,10 +28,23 @@ Start the web service:
 .\web.bat start
 ```
 
+This is the recommended safe start path. By default it:
+
+- starts the web service only
+- ignores `.env` auto-start worker flags such as `START_NEWS_WORKER=1`
+- disables analytics-history background collectors unless you explicitly opt in
+- keeps persisted trading-mode restore behavior, so the service may still come up in `live`
+
 Start and open the browser:
 
 ```bat
 .\web.bat start -OpenBrowser
+```
+
+Start with analytics-history collectors enabled:
+
+```bat
+.\web.bat start -EnableAnalyticsHistory
 ```
 
 Start with news workers:
@@ -60,8 +74,17 @@ Stop the web service and related workers:
 ## Daily Rule
 
 - Use `.\web.bat start` as the default entry point.
+- Treat `.\web.bat start` as a recovery-friendly safe start: web-only plus analytics-history off.
 - Use `.\web.bat status` before starting if you are unsure whether something is already running.
+- Use `.\web.bat status` after starting to confirm both health and trading mode.
 - Use `.\web.bat stop -IncludeWorkers` before restarting if you want a clean reset.
+- Add `-EnableAnalyticsHistory` only when you intentionally want the history collectors running.
+
+## Mode Warning
+
+- `.\web.bat start` does not currently force `paper` mode.
+- The application may restore the last persisted account mode during startup.
+- Always check `.\web.bat status` after startup and look for the `mode=` / live warning before taking any trading action.
 
 ## Advanced Or Legacy Entrypoints
 

@@ -7,6 +7,7 @@ param(
     [switch]$StartNewsWorker,
     [switch]$StartNewsLlmWorker,
     [switch]$StartPmWorker,
+    [switch]$EnableAnalyticsHistory,
     [switch]$TestDataSources
 )
 
@@ -36,6 +37,7 @@ try {
         StartNewsWorker = $StartNewsWorker.IsPresent
         StartNewsLlmWorker = $StartNewsLlmWorker.IsPresent
         StartPmWorker = $StartPmWorker.IsPresent
+        EnableAnalyticsHistory = $EnableAnalyticsHistory.IsPresent
         TestDataSources = $TestDataSources.IsPresent
     }
     & $onceScript @onceParams

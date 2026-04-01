@@ -2,8 +2,11 @@
 交易所管理器
 统一管理所有交易所连接
 """
+import asyncio
+import contextlib
+import time
 from dataclasses import replace
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 from loguru import logger
 
 from config.exchanges import ExchangeConfig, EXCHANGE_CONFIGS, ExchangeType
@@ -51,6 +54,16 @@ class ExchangeManager:
             return str(fallback or "spot").strip().lower() or "spot"
         return resolved
 
+    @staticmethod
+    def _startup_connect_timeout_sec() -> Optional[float]:
+        try:
+            timeout = float(getattr(settings, "EXCHANGE_STARTUP_CONNECT_TIMEOUT_SEC", 18.0) or 0.0)
+        except Exception:
+            timeout = 18.0
+        if timeout <= 0:
+            return None
+        return timeout
+
     async def initialize(self, exchange_names: Optional[List[str]] = None) -> bool:
         """
         初始化交易所连接
@@ -68,7 +81,7 @@ class ExchangeManager:
             if settings.BYBIT_API_KEY and settings.BYBIT_API_SECRET:
                 exchange_names.append("bybit")
 
-        success_count = 0
+        exchange_specs: List[Tuple[str, ExchangeConfig]] = []
 
         for name in exchange_names:
             base_config = EXCHANGE_CONFIGS.get(name)
@@ -77,23 +90,44 @@ class ExchangeManager:
                 continue
             runtime_default_type = self._resolve_default_type(name, base_config.default_type)
             config = replace(base_config, default_type=runtime_default_type)
+            exchange_specs.append((name, config))
 
-            try:
-                connector = await self._create_connector(name, config)
-                if connector:
-                    self._exchanges[name] = connector
-                    success_count += 1
-            except Exception as e:
-                logger.error(f"Failed to initialize {name}: {e}")
+        connect_timeout_sec = self._startup_connect_timeout_sec()
+        started_at = time.perf_counter()
+        results: List[Optional[BaseExchange] | BaseException] = []
+        if exchange_specs:
+            tasks = [
+                asyncio.create_task(
+                    self._create_connector(name, config, timeout_sec=connect_timeout_sec),
+                    name=f"exchange_init::{name}",
+                )
+                for name, config in exchange_specs
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        self._connected = success_count > 0
-        logger.info(f"Exchange manager initialized: {success_count}/{len(exchange_names)} exchanges connected")
+        success_count = 0
+        for (name, _), result in zip(exchange_specs, results):
+            if isinstance(result, BaseException):
+                logger.error(f"Failed to initialize {name}: {result}")
+                continue
+            if result:
+                self._exchanges[name] = result
+                success_count += 1
+
+        self._connected = any(exchange.is_connected for exchange in self._exchanges.values())
+        elapsed_sec = time.perf_counter() - started_at
+        logger.info(
+            f"Exchange manager initialized: {success_count}/{len(exchange_names)} exchanges connected "
+            f"in {elapsed_sec:.2f}s"
+        )
         return self._connected
 
     async def _create_connector(
         self,
         name: str,
         config: ExchangeConfig,
+        *,
+        timeout_sec: Optional[float] = None,
     ) -> Optional[BaseExchange]:
         """创建交易所连接器"""
         connectors = {
@@ -109,22 +143,42 @@ class ExchangeManager:
             return None
 
         connector = connector_class(config)
+        started_at = time.perf_counter()
         try:
-            if await connector.connect():
+            connect_coro = connector.connect()
+            connected = (
+                await asyncio.wait_for(connect_coro, timeout=timeout_sec)
+                if timeout_sec is not None
+                else await connect_coro
+            )
+            if connected:
+                logger.info(
+                    f"Connector {name} connected in {time.perf_counter() - started_at:.2f}s"
+                )
                 return connector
+            logger.warning(
+                f"Connector {name} unavailable after {time.perf_counter() - started_at:.2f}s"
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                f"Connector {name} connect timed out after {time.perf_counter() - started_at:.2f}s"
+                + (
+                    f" (limit={float(timeout_sec):.1f}s)"
+                    if timeout_sec is not None
+                    else ""
+                )
+            )
         except Exception as e:
             logger.error(f"Connector {name} connect error: {e}")
-            try:
-                await connector.disconnect()
-            except Exception:
-                pass
-            return None
 
         # Best-effort cleanup for partially initialized async clients.
         try:
             await connector.disconnect()
         except Exception:
-            pass
+            with contextlib.suppress(Exception):
+                client = getattr(connector, "_client", None)
+                if client and hasattr(client, "close"):
+                    await client.close()
         return None
 
     async def add_dex(self, dex_name: str, chain: str = "ethereum") -> bool:

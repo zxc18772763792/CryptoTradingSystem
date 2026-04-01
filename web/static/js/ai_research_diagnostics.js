@@ -52,6 +52,16 @@
     return api(path, options);
   }
 
+  function isAiResearchActive() {
+    const tab = document.getElementById('ai-research');
+    return !!(tab && tab.classList.contains('active'));
+  }
+
+  function canRunAiPolling() {
+    if (typeof window === 'undefined' || typeof window.__ctsSharedPolling?.canRun !== 'function') return true;
+    return window.__ctsSharedPolling.canRun('ai');
+  }
+
   function currentExchange() {
     return String(
       document.getElementById('run-exchange')?.value
@@ -235,10 +245,34 @@
     return result;
   }
 
+  function stopDiagnosticsPolling() {
+    if (diagnosticsTimer) clearInterval(diagnosticsTimer);
+    diagnosticsTimer = null;
+  }
+
   function scheduleDiagnosticsRefresh(delayMs = 0) {
+    if (document.hidden || !isAiResearchActive() || !canRunAiPolling()) return;
     window.setTimeout(() => {
+      if (document.hidden || !isAiResearchActive() || !canRunAiPolling()) return;
       refreshDiagnostics().catch((err) => notify(`数据诊断刷新失败: ${err.message}`, true));
     }, Math.max(0, Number(delayMs || 0)));
+  }
+
+  function syncDiagnosticsPollingState({ immediate = false } = {}) {
+    if (document.hidden || !isAiResearchActive() || !canRunAiPolling()) {
+      stopDiagnosticsPolling();
+      return;
+    }
+    if (!diagnosticsTimer) {
+      diagnosticsTimer = window.setInterval(() => {
+        if (document.hidden || !isAiResearchActive() || !canRunAiPolling()) {
+          stopDiagnosticsPolling();
+          return;
+        }
+        refreshDiagnostics().catch(() => {});
+      }, DIAGNOSTICS_REFRESH_MS);
+    }
+    if (immediate) scheduleDiagnosticsRefresh(150);
   }
 
   function init() {
@@ -262,12 +296,25 @@
         scheduleDiagnosticsRefresh(120);
       }
     });
-
-    clearInterval(diagnosticsTimer);
-    diagnosticsTimer = window.setInterval(() => {
-      refreshDiagnostics().catch(() => {});
-    }, DIAGNOSTICS_REFRESH_MS);
-    scheduleDiagnosticsRefresh(150);
+    document.querySelector('.tab-btn[data-tab="ai-research"]')?.addEventListener('click', () => {
+      window.setTimeout(() => {
+        canRunAiPolling();
+        syncDiagnosticsPollingState({ immediate: true });
+      }, 120);
+    });
+    document.addEventListener('click', (event) => {
+      if (!(event.target instanceof Element) || !event.target.closest('.tab-btn')) return;
+      window.setTimeout(() => syncDiagnosticsPollingState(), 0);
+    });
+    document.addEventListener('visibilitychange', () => syncDiagnosticsPollingState({
+      immediate: !document.hidden && isAiResearchActive() && canRunAiPolling(),
+    }));
+    window.addEventListener('hashchange', () => {
+      window.setTimeout(() => syncDiagnosticsPollingState({
+        immediate: !document.hidden && isAiResearchActive() && canRunAiPolling(),
+      }), 0);
+    });
+    syncDiagnosticsPollingState({ immediate: isAiResearchActive() && canRunAiPolling() });
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

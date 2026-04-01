@@ -39,11 +39,14 @@ This document explains how the repository is organized today and which directori
 
 ## Key Entry Points
 
+- `web.bat`
+  Canonical Windows-friendly entry point for startup, status, and stop operations. The default `start` path is now a safe profile: web-only, external workers opt-in, analytics-history disabled unless explicitly enabled.
+
 - `start_web_oneclick.bat`
   Simplest Windows-friendly way to start the web application.
 
 - `scripts/start_web_ps.ps1`
-  PowerShell launcher used by the batch wrapper and useful for passing worker flags.
+  PowerShell launcher used by the batch wrapper and useful for passing worker or analytics-history flags.
 
 - `web/main.py`
   FastAPI application startup, background task registration, route mounting, websocket wiring, and runtime snapshot publication.

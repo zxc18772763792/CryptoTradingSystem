@@ -148,3 +148,31 @@ def test_autonomous_agent_review_endpoint_includes_learning_memory(monkeypatch):
     result = asyncio.run(ai_module.get_ai_autonomous_agent_review(request, limit=8))
     assert result["summary"]["submitted_count"] == 0
     assert result["learning_memory"]["adaptive_risk"]["effective_min_confidence"] == 0.66
+
+
+def test_live_signals_gracefully_degrades_when_symbol_scan_times_out(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=200: [])
+    monkeypatch.setattr(ai_module, "_build_live_signal_watchlist_symbols", lambda runtime_cfg, selection: [])
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_runtime_config", lambda: {"exchange": "binance"})
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_symbol_scan",
+        AsyncMock(return_value={"selected_symbol": "BTC/USDT"}),
+    )
+
+    async def fake_wait_for(awaitable, timeout):
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        raise asyncio.TimeoutError("scan timed out")
+
+    monkeypatch.setattr(ai_module.asyncio, "wait_for", fake_wait_for)
+
+    result = asyncio.run(ai_module.get_live_signals(request, symbol="BTC/USDT"))
+
+    assert result["count"] == 0
+    assert result["watchlist_count"] == 0

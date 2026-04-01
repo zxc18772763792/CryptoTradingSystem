@@ -15,6 +15,7 @@
   let pollTimer = null;
   let lastStatusSnapshot = null;
   let lastConfigSnapshot = null;
+  let statusInFlight = null;
 
   function aiRoot() {
     return window.AI || {};
@@ -1061,26 +1062,44 @@
     if (!document.getElementById('ai-agent-card')) return null;
     const includeDetails = options.includeDetails !== false && isAgentTabActive();
     const notifyOnError = options.notifyOnError === true;
-    try {
-      const response = await rootApi(AGENT_STATUS_API);
-      lastStatusSnapshot = response?.status || {};
-      lastConfigSnapshot = response?.config || {};
-      renderAgentPanel(response?.status || {}, response?.config || {});
-      if (includeDetails && document.getElementById('ai-agent-journal')) {
-        loadAgentJournal().catch(() => {});
-      }
-      if (includeDetails && document.getElementById('ai-agent-review')) {
-        loadAgentReview().catch(() => {});
-      }
-      return response;
-    } catch (err) {
+    if (statusInFlight) {
       if (includeDetails) {
-        renderAgentStatusLoadError(err?.message || '状态加载失败');
+        return statusInFlight.then((response) => {
+          if (document.getElementById('ai-agent-journal')) loadAgentJournal().catch(() => {});
+          if (document.getElementById('ai-agent-review')) loadAgentReview().catch(() => {});
+          return response;
+        });
       }
-      if (notifyOnError) {
-        notify(`加载自治代理状态失败: ${err?.message || '未知错误'}`, true);
+      return statusInFlight;
+    }
+    const task = (async () => {
+      try {
+        const response = await rootApi(AGENT_STATUS_API);
+        lastStatusSnapshot = response?.status || {};
+        lastConfigSnapshot = response?.config || {};
+        renderAgentPanel(response?.status || {}, response?.config || {});
+        if (includeDetails && document.getElementById('ai-agent-journal')) {
+          loadAgentJournal().catch(() => {});
+        }
+        if (includeDetails && document.getElementById('ai-agent-review')) {
+          loadAgentReview().catch(() => {});
+        }
+        return response;
+      } catch (err) {
+        if (includeDetails) {
+          renderAgentStatusLoadError(err?.message || '状态加载失败');
+        }
+        if (notifyOnError) {
+          notify(`加载自治代理状态失败: ${err?.message || '未知错误'}`, true);
+        }
+        return null;
       }
-      return null;
+    })();
+    statusInFlight = task;
+    try {
+      return await task;
+    } finally {
+      if (statusInFlight === task) statusInFlight = null;
     }
   }
 

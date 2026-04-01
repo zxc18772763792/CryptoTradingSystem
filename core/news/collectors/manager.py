@@ -128,6 +128,17 @@ class MultiSourceNewsCollector:
         if not self.sources:
             self.sources = ["jin10", "rss", "gdelt"]
 
+    @staticmethod
+    def _close_collectors(specs: List[_CollectorSpec]) -> None:
+        for spec in specs or []:
+            collector = getattr(spec, "collector", None)
+            close = getattr(collector, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:
+                    logger.debug(f"close collector session failed for {spec.name}: {exc}")
+
     def _build_collectors(self, source_names: Optional[List[str]] = None) -> Tuple[List[_CollectorSpec], List[str]]:
         specs: List[_CollectorSpec] = []
         errors: List[str] = []
@@ -208,43 +219,46 @@ class MultiSourceNewsCollector:
         max_records = max(10, min(_safe_int(max_records, 120), 500))
         since_minutes = max(15, min(_safe_int(since_minutes, 240), 24 * 60))
         specs, setup_errors = self._build_collectors(source_names=source_names)
-        source_stats: Dict[str, Dict[str, Any]] = {}
-        errors: List[str] = list(setup_errors)
-        all_items: List[Dict[str, Any]] = []
-        source_count = max(1, len(specs))
-        per_source = max(10, min(250, int(math.ceil(max_records / source_count * 1.6))))
-        for spec in specs:
-            source_stats[spec.name] = {"enabled": True, "pulled_count": 0, "kept_count": 0, "errors": []}
+        try:
+            source_stats: Dict[str, Dict[str, Any]] = {}
+            errors: List[str] = list(setup_errors)
+            all_items: List[Dict[str, Any]] = []
+            source_count = max(1, len(specs))
+            per_source = max(10, min(250, int(math.ceil(max_records / source_count * 1.6))))
+            for spec in specs:
+                source_stats[spec.name] = {"enabled": True, "pulled_count": 0, "kept_count": 0, "errors": []}
 
-        worker_count = max(1, min(len(specs), _safe_int(os.getenv("NEWS_PULL_WORKERS"), 6)))
-        with ThreadPoolExecutor(max_workers=worker_count) as pool:
-            futures = {
-                pool.submit(spec.collector.pull_latest, query=query, max_records=per_source, since_minutes=since_minutes): spec
-                for spec in specs
-            }
-            for future in as_completed(futures):
-                spec = futures[future]
-                try:
-                    items = future.result()
-                    source_stats[spec.name]["pulled_count"] = len(items)
-                except Exception as exc:
-                    err_msg = f"{spec.name} pull failed: {exc}"
-                    logger.warning(err_msg)
-                    errors.append(err_msg)
-                    source_stats[spec.name]["errors"].append(str(exc))
-                    continue
-                for item in items:
-                    if not isinstance(item, dict):
+            worker_count = max(1, min(len(specs), _safe_int(os.getenv("NEWS_PULL_WORKERS"), 6)))
+            with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                futures = {
+                    pool.submit(spec.collector.pull_latest, query=query, max_records=per_source, since_minutes=since_minutes): spec
+                    for spec in specs
+                }
+                for future in as_completed(futures):
+                    spec = futures[future]
+                    try:
+                        items = future.result()
+                        source_stats[spec.name]["pulled_count"] = len(items)
+                    except Exception as exc:
+                        err_msg = f"{spec.name} pull failed: {exc}"
+                        logger.warning(err_msg)
+                        errors.append(err_msg)
+                        source_stats[spec.name]["errors"].append(str(exc))
                         continue
-                    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-                    payload["provider"] = spec.name
-                    item["payload"] = payload
-                    item["provider"] = spec.name
-                    if not str(item.get("source") or "").strip():
-                        item["source"] = spec.name
-                    all_items.append(item)
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+                        payload["provider"] = spec.name
+                        item["payload"] = payload
+                        item["provider"] = spec.name
+                        if not str(item.get("source") or "").strip():
+                            item["source"] = spec.name
+                        all_items.append(item)
 
-        return self._merge_results(all_items, source_stats, errors, max_records)
+            return self._merge_results(all_items, source_stats, errors, max_records)
+        finally:
+            self._close_collectors(specs)
 
     async def pull_latest_incremental(
         self,
@@ -256,100 +270,103 @@ class MultiSourceNewsCollector:
         max_records = max(10, min(_safe_int(max_records, 120), 500))
         since_minutes = max(15, min(_safe_int(since_minutes, 240), 24 * 60))
         specs, setup_errors = self._build_collectors(source_names=source_names)
-        source_stats: Dict[str, Dict[str, Any]] = {}
-        errors: List[str] = list(setup_errors)
-        all_items: List[Dict[str, Any]] = []
-        source_count = max(1, len(specs))
-        per_source = max(10, min(250, int(math.ceil(max_records / source_count * 1.6))))
+        try:
+            source_stats: Dict[str, Dict[str, Any]] = {}
+            errors: List[str] = list(setup_errors)
+            all_items: List[Dict[str, Any]] = []
+            source_count = max(1, len(specs))
+            per_source = max(10, min(250, int(math.ceil(max_records / source_count * 1.6))))
 
-        pending_jobs: List[Tuple[_CollectorSpec, asyncio.Task]] = []
-        for spec in specs:
-            source_stats[spec.name] = {
-                "enabled": True,
-                "mode": "incremental",
-                "pulled_count": 0,
-                "kept_count": 0,
-                "cursor_before": None,
-                "cursor_after": None,
-                "errors": [],
-            }
-            state = await news_db.get_source_state(spec.name)
-            paused_until = None
-            if state and state.get("paused_until"):
-                try:
-                    paused_until = dt_parser.parse(str(state.get("paused_until")))
-                    if paused_until.tzinfo is None:
-                        paused_until = paused_until.replace(tzinfo=timezone.utc)
-                    else:
-                        paused_until = paused_until.astimezone(timezone.utc)
-                except Exception:
-                    paused_until = None
-            if paused_until and paused_until > datetime.now(timezone.utc):
-                source_stats[spec.name]["errors"].append(f"paused until {paused_until.isoformat()}")
-                source_stats[spec.name]["cursor_before"] = state.get("cursor_value") if state else None
-                source_stats[spec.name]["cursor_after"] = state.get("cursor_value") if state else None
-                continue
-            cursor = state.get("cursor_value") if state else None
-            source_stats[spec.name]["cursor_before"] = cursor
-            pending_jobs.append(
-                (
-                    spec,
-                    asyncio.create_task(
-                        self._run_incremental_source_pull(
-                            spec=spec,
-                            query=query,
-                            per_source=per_source,
-                            since_minutes=since_minutes,
-                            cursor=cursor,
-                        )
-                    ),
-                )
-            )
-
-        for spec, task in pending_jobs:
-            try:
-                items, new_cursor = await task
-                source_stats[spec.name]["pulled_count"] = len(items)
-                source_stats[spec.name]["cursor_after"] = new_cursor
-                await news_db.set_source_state(
-                    spec.name,
-                    cursor_type="ts",
-                    cursor_value=new_cursor,
-                    clear_error=True,
-                    mark_success=True,
-                )
-            except Exception as exc:
-                err_msg = f"{spec.name} incremental pull failed: {exc}"
-                logger.warning(err_msg)
-                errors.append(err_msg)
-                source_stats[spec.name]["errors"].append(str(exc))
-                pause_until = None
-                if "429" in str(exc) or "Too Many Requests" in str(exc):
-                    cooldown = max(180, _safe_int(self.defaults.get("news_source_429_cooldown_sec"), 900))
-                    pause_until = datetime.now(timezone.utc) + timedelta(seconds=cooldown)
-                state_after = await news_db.set_source_state(
-                    spec.name,
-                    last_error=str(exc),
-                    mark_failure=True,
-                    paused_until=pause_until,
-                )
-                source_stats[spec.name]["cursor_after"] = state_after.get("cursor_value")
-                if pause_until is not None:
-                    source_stats[spec.name]["errors"].append(f"paused until {pause_until.isoformat()}")
-                continue
-
-            for item in items:
-                if not isinstance(item, dict):
+            pending_jobs: List[Tuple[_CollectorSpec, asyncio.Task]] = []
+            for spec in specs:
+                source_stats[spec.name] = {
+                    "enabled": True,
+                    "mode": "incremental",
+                    "pulled_count": 0,
+                    "kept_count": 0,
+                    "cursor_before": None,
+                    "cursor_after": None,
+                    "errors": [],
+                }
+                state = await news_db.get_source_state(spec.name)
+                paused_until = None
+                if state and state.get("paused_until"):
+                    try:
+                        paused_until = dt_parser.parse(str(state.get("paused_until")))
+                        if paused_until.tzinfo is None:
+                            paused_until = paused_until.replace(tzinfo=timezone.utc)
+                        else:
+                            paused_until = paused_until.astimezone(timezone.utc)
+                    except Exception:
+                        paused_until = None
+                if paused_until and paused_until > datetime.now(timezone.utc):
+                    source_stats[spec.name]["errors"].append(f"paused until {paused_until.isoformat()}")
+                    source_stats[spec.name]["cursor_before"] = state.get("cursor_value") if state else None
+                    source_stats[spec.name]["cursor_after"] = state.get("cursor_value") if state else None
                     continue
-                payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
-                payload["provider"] = spec.name
-                item["payload"] = payload
-                item["provider"] = spec.name
-                if not str(item.get("source") or "").strip():
-                    item["source"] = spec.name
-                all_items.append(item)
+                cursor = state.get("cursor_value") if state else None
+                source_stats[spec.name]["cursor_before"] = cursor
+                pending_jobs.append(
+                    (
+                        spec,
+                        asyncio.create_task(
+                            self._run_incremental_source_pull(
+                                spec=spec,
+                                query=query,
+                                per_source=per_source,
+                                since_minutes=since_minutes,
+                                cursor=cursor,
+                            )
+                        ),
+                    )
+                )
 
-        return self._merge_results(all_items, source_stats, errors, max_records)
+            for spec, task in pending_jobs:
+                try:
+                    items, new_cursor = await task
+                    source_stats[spec.name]["pulled_count"] = len(items)
+                    source_stats[spec.name]["cursor_after"] = new_cursor
+                    await news_db.set_source_state(
+                        spec.name,
+                        cursor_type="ts",
+                        cursor_value=new_cursor,
+                        clear_error=True,
+                        mark_success=True,
+                    )
+                except Exception as exc:
+                    err_msg = f"{spec.name} incremental pull failed: {exc}"
+                    logger.warning(err_msg)
+                    errors.append(err_msg)
+                    source_stats[spec.name]["errors"].append(str(exc))
+                    pause_until = None
+                    if "429" in str(exc) or "Too Many Requests" in str(exc):
+                        cooldown = max(180, _safe_int(self.defaults.get("news_source_429_cooldown_sec"), 900))
+                        pause_until = datetime.now(timezone.utc) + timedelta(seconds=cooldown)
+                    state_after = await news_db.set_source_state(
+                        spec.name,
+                        last_error=str(exc),
+                        mark_failure=True,
+                        paused_until=pause_until,
+                    )
+                    source_stats[spec.name]["cursor_after"] = state_after.get("cursor_value")
+                    if pause_until is not None:
+                        source_stats[spec.name]["errors"].append(f"paused until {pause_until.isoformat()}")
+                    continue
+
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+                    payload["provider"] = spec.name
+                    item["payload"] = payload
+                    item["provider"] = spec.name
+                    if not str(item.get("source") or "").strip():
+                        item["source"] = spec.name
+                    all_items.append(item)
+
+            return self._merge_results(all_items, source_stats, errors, max_records)
+        finally:
+            self._close_collectors(specs)
 
     async def _run_incremental_source_pull(
         self,

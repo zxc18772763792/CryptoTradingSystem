@@ -139,6 +139,7 @@ class Settings(BaseSettings):
     OKX_DEFAULT_TYPE: str = "spot"
     GATE_DEFAULT_TYPE: str = "spot"
     BYBIT_DEFAULT_TYPE: str = "spot"
+    EXCHANGE_STARTUP_CONNECT_TIMEOUT_SEC: float = 18.0
 
     # Web server
     WEB_HOST: str = "0.0.0.0"
@@ -276,6 +277,14 @@ class Settings(BaseSettings):
         if text not in {"spot", "future", "swap", "margin"}:
             raise ValueError("exchange default type must be one of: spot/future/swap/margin")
         return text
+
+    @field_validator("EXCHANGE_STARTUP_CONNECT_TIMEOUT_SEC")
+    @classmethod
+    def validate_exchange_startup_connect_timeout_sec(cls, v: float) -> float:
+        value = float(v or 0.0)
+        if value < 0:
+            raise ValueError("EXCHANGE_STARTUP_CONNECT_TIMEOUT_SEC must be >= 0")
+        return value
 
     @field_validator("DATA_STORAGE_PATH", "CACHE_PATH", "LOG_PATH", mode="before")
     @classmethod

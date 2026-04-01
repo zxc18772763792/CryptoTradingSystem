@@ -1,5 +1,23 @@
 # Changelog (Governance + AI Decision Integration)
 
+## 2026-04-01
+
+### Added
+
+- `docs/STARTUP_STABILIZATION_PLAN_2026-04-01.md`: startup recovery plan, work tracks, and acceptance criteria captured during the stabilization pass.
+
+### Changed
+
+- `web.bat`, `scripts/web.ps1`, `scripts/start_web_ps.ps1`, and `_once.ps1`:
+  - default startup now uses a safe web-only profile
+  - `.env` `START_*` worker toggles are no longer auto-applied during default startup
+  - analytics-history is disabled by default unless `-EnableAnalyticsHistory` is passed
+  - status output now reports observed worker processes and startup policy more clearly.
+- `web/main.py` and `core/realtime/event_bus.py`:
+  - runtime websocket fanout now skips heavy snapshot/ticker/news preview work when there are no subscribers.
+- `STARTUP.md`, `README.md`, and `docs/REPOSITORY_OVERVIEW.md`:
+  - refreshed startup guidance to match the current safe-start behavior and mode verification workflow.
+
 ## 2026-03-28
 
 ### Added

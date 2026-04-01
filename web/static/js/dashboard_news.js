@@ -6,6 +6,7 @@
     const SOURCES_ID = "dashboard-news-sources";
     const REFRESH_MS = 15000;
     let loading = false;
+    let needsRefresh = false;
 
     function esc(value) {
         return String(value ?? "").replace(/[&<>"']/g, (m) => ({
@@ -48,6 +49,18 @@
         if (Number(sentiment) > 0) return "正面";
         if (Number(sentiment) < 0) return "负面";
         return "中性";
+    }
+
+    function isDashboardVisible() {
+        const host = document.getElementById(LIST_ID);
+        if (!host) return false;
+        const tab = document.getElementById("dashboard");
+        return !!tab && tab.classList.contains("active");
+    }
+
+    function canRunDashboardPolling() {
+        if (typeof window === "undefined" || typeof window.__ctsSharedPolling?.canRun !== "function") return true;
+        return window.__ctsSharedPolling.canRun("dashboard");
     }
 
     async function request(path, options = {}) {
@@ -145,9 +158,21 @@
         el.textContent = `最近更新：${fmtTs(value || new Date().toISOString())}`;
     }
 
-    async function loadNews() {
-        if (loading) return;
+    async function loadNews(force = false) {
+        if (!force && (document.hidden || !isDashboardVisible())) {
+            needsRefresh = true;
+            return;
+        }
+        if (!force && !canRunDashboardPolling()) {
+            needsRefresh = true;
+            return;
+        }
+        if (loading) {
+            if (force) needsRefresh = true;
+            return;
+        }
         loading = true;
+        needsRefresh = false;
         try {
             let data;
             try {
@@ -163,6 +188,10 @@
             if (box) box.innerHTML = `<div class="list-item">新闻加载失败: ${esc(err.message)}</div>`;
         } finally {
             loading = false;
+            if (needsRefresh && !document.hidden && isDashboardVisible()) {
+                needsRefresh = false;
+                setTimeout(() => { loadNews(false); }, 80);
+            }
         }
     }
 
@@ -198,13 +227,32 @@
     function bindActions() {
         const btn = document.getElementById(PULL_BTN_ID);
         if (btn) btn.addEventListener("click", pullNow);
+        document.querySelectorAll('.tab-btn[data-tab="dashboard"]').forEach((tabBtn) => tabBtn.addEventListener("click", () => {
+            setTimeout(() => {
+                if (isDashboardVisible()) loadNews(true);
+            }, 120);
+        }));
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) {
+                needsRefresh = true;
+                return;
+            }
+            if (isDashboardVisible()) loadNews(false);
+        });
     }
 
     function start() {
         if (!document.getElementById(LIST_ID)) return;
         bindActions();
-        loadNews();
-        setInterval(loadNews, REFRESH_MS);
+        if (isDashboardVisible()) loadNews(true);
+        else needsRefresh = true;
+        setInterval(() => {
+            if (document.hidden || !isDashboardVisible()) {
+                needsRefresh = true;
+                return;
+            }
+            loadNews(false);
+        }, REFRESH_MS);
     }
 
     if (document.readyState === "loading") {

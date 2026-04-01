@@ -556,11 +556,8 @@ async def _safe_exchange_call(
                 f"[{exchange}] {method_name} failed (attempt {attempt + 1}/{retries + 1}): {e}"
             )
 
-            # reconnect and retry
-            try:
-                await connector.disconnect()
-            except Exception:
-                pass
+            # Refresh the shared connector in place without first tearing it down,
+            # so concurrent readers keep their current client until a new one is ready.
             try:
                 await connector.connect()
             except Exception:
@@ -2154,10 +2151,6 @@ async def get_klines(
                         try:
                             connector = exchange_manager.get_exchange(actual_exchange)
                             if connector:
-                                try:
-                                    await connector.disconnect()
-                                except Exception:
-                                    pass
                                 await connector.connect()
                             retry_df = await asyncio.wait_for(
                                 _fetch_live_df(actual_exchange, live_limit=live_limit),

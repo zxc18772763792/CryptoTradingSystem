@@ -7,7 +7,7 @@ The current repository is organized for local development first: source code and
 ## What This Repository Includes
 
 - Web dashboard and REST API for trading, research, data download, and monitoring
-- Paper trading by default, with explicit guard rails around live trading
+- Paper and guarded live trading workflows, with explicit guard rails around live execution
 - AI research and autonomous-agent workflows with configurable providers
 - News collection, enrichment, and LLM-assisted triage
 - Backtesting, factor research, and pairs/relative-value strategy tooling
@@ -55,16 +55,27 @@ Use the canonical root command:
 .\web.bat start
 ```
 
+`.\web.bat start` is the recommended safe start path. By default it starts the web app only, ignores `.env` worker auto-start flags, and keeps analytics-history collectors off unless you explicitly opt in.
+
 Useful variants:
 
 ```bat
 .\web.bat start -OpenBrowser
+.\web.bat start -EnableAnalyticsHistory
 .\web.bat start -StartNewsWorker -StartNewsLlmWorker
 .\web.bat status
 .\web.bat stop -IncludeWorkers
 ```
 
 Legacy wrappers still work, but `.\web.bat ...` is now the command family to remember.
+
+After startup, always verify the runtime mode with:
+
+```bat
+.\web.bat status
+```
+
+The service may restore the persisted account mode on boot, so a safe start can still come up in `live` if that was the last saved mode.
 
 Open:
 
@@ -74,7 +85,7 @@ Open:
 
 ### 4. Switch modes carefully
 
-Paper mode is the default:
+Direct CLI startup can force paper mode:
 
 ```powershell
 python main.py --mode web --trading-mode paper
@@ -94,9 +105,10 @@ Run the web service:
 .\web.bat start
 ```
 
-Run startup helper with optional workers:
+Run startup helper with optional collectors or workers:
 
 ```bat
+.\web.bat start -EnableAnalyticsHistory
 .\web.bat start -StartNewsWorker -StartNewsLlmWorker -StartPmWorker
 ```
 

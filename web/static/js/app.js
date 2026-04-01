@@ -1,11 +1,11 @@
 ﻿const API_BASE='/api';
-const state={positions:[],orders:[],strategies:[],availableStrategyTypes:[],strategyLibraryRows:[],strategyCatalogRows:[],summary:{running:[],recent_signals:[],runtime:{}},notifyRules:{},wsConnected:false,modeToken:'',bootCompleted:false,bootFailed:false,strategyHealth:null,lastHealthAlertKey:'',selectedStrategyName:'',closingPositions:{},lastSummarySnapshot:null};
+const state={positions:[],orders:[],strategies:[],availableStrategyTypes:[],strategyLibraryRows:[],strategyCatalogRows:[],summary:{running:[],recent_signals:[],runtime:{}},notifyRules:{},wsConnected:false,modeToken:'',bootCompleted:false,bootFailed:false,strategyHealth:null,lastHealthAlertKey:'',selectedStrategyName:'',closingPositions:{},lastSummarySnapshot:null,lastWsBackfillAtByTab:{}};
 const researchState={lastFactorLibrary:null,lastMultiAsset:null,lastSentiment:null,lastAnalytics:null,lastOnchain:null,lastFama:null,lastOverview:null,pendingTimers:{},lastSentimentReqId:0};
 const arbitrageState={catalog:[],selectedStrategy:'PairsTradingStrategy',initialized:false,lastSpec:null,pairRanking:null,pairRankingKey:'',pairRankingNote:'等待筛选：确认周期后点击“一键筛选前十”'};
 const backtestUIState={lastOptimize:null,lastCompare:null,lastRenderedBacktest:null,defaultCompareStrategies:[]};
 const dataHealthState={last:null};
 const dataAnalyticsHealthState={last:null};
-const uiLoadState={tabs:{},inFlight:{},dataInitialized:false};
+const uiLoadState={tabs:{},inFlight:{},requests:{},dataInitialized:false};
 const RESEARCH_DEFAULT_SYMBOLS=['BTC/USDT','ETH/USDT','BNB/USDT','SOL/USDT','XRP/USDT','ADA/USDT','DOGE/USDT','TRX/USDT','LINK/USDT','AVAX/USDT','DOT/USDT','POL/USDT','LTC/USDT','BCH/USDT','ETC/USDT','ATOM/USDT','NEAR/USDT','APT/USDT','ARB/USDT','OP/USDT','SUI/USDT','INJ/USDT','RUNE/USDT','AAVE/USDT','MKR/USDT','UNI/USDT','FIL/USDT','HBAR/USDT','ICP/USDT','TON/USDT'];
 const DEFAULT_STRATEGY_ALLOCATION=0.15;
 let equityChart=null;
@@ -16,6 +16,91 @@ const TRADING_STATS_TIMEOUT_MS=25000;
 const TRADING_ORDERS_TIMEOUT_MS=20000;
 const TRADING_OPEN_ORDERS_TIMEOUT_MS=25000;
 const TRADING_POSITIONS_TIMEOUT_MS=30000;
+const SHARED_POLL_KEY_PREFIX='cts_shared_poll_v1:';
+const SHARED_POLL_TTL_MS=15000;
+const SHARED_POLL_HEARTBEAT_MS=5000;
+const sharedPollState={
+tabId:`${Date.now().toString(36)}_${Math.random().toString(36).slice(2,10)}`,
+ownedGroups:new Set(),
+heartbeatTimer:null,
+};
+
+function sharedPollStorageKey(group){return `${SHARED_POLL_KEY_PREFIX}${String(group||'default').trim()||'default'}`;}
+function readSharedPollLeader(group){
+try{
+  if(typeof window==='undefined'||!window.localStorage)return null;
+  const raw=window.localStorage.getItem(sharedPollStorageKey(group));
+  if(!raw)return null;
+  const parsed=JSON.parse(raw);
+  return parsed&&typeof parsed==='object'?parsed:null;
+}catch{return null;}
+}
+function writeSharedPollLeader(group,payload){
+try{
+  if(typeof window==='undefined'||!window.localStorage)return;
+  window.localStorage.setItem(sharedPollStorageKey(group),JSON.stringify(payload));
+}catch{}
+}
+function releaseSharedPollGroup(group){
+const normalized=String(group||'').trim();
+if(!normalized)return;
+try{
+  const current=readSharedPollLeader(normalized);
+  if(current&&String(current.id||'')===sharedPollState.tabId&&typeof window!=='undefined'&&window.localStorage){
+    window.localStorage.removeItem(sharedPollStorageKey(normalized));
+  }
+}catch{}
+sharedPollState.ownedGroups.delete(normalized);
+}
+function releaseAllSharedPollGroups(){
+Array.from(sharedPollState.ownedGroups).forEach(group=>releaseSharedPollGroup(group));
+}
+function sharedPollGroupForTab(tabName){
+const tab=String(tabName||'').trim();
+if(!tab)return'';
+if(tab==='dashboard'||tab==='trading'||tab==='strategies')return tab;
+if(tab==='ai-research'||tab==='ai-agent')return'ai';
+return'';
+}
+function canRunSharedPolling(group='default'){
+const normalized=String(group||'').trim();
+if(!normalized)return true;
+if(typeof window==='undefined'||!window.localStorage)return true;
+if(document.hidden)return false;
+const now=Date.now();
+const leader=readSharedPollLeader(normalized);
+const leaderId=String(leader?.id||'').trim();
+const leaderUpdatedAt=Number(leader?.updatedAt||0);
+if(!leaderId||now-leaderUpdatedAt>SHARED_POLL_TTL_MS||leaderId===sharedPollState.tabId){
+  writeSharedPollLeader(normalized,{id:sharedPollState.tabId,updatedAt:now});
+  sharedPollState.ownedGroups.add(normalized);
+  return true;
+}
+sharedPollState.ownedGroups.delete(normalized);
+return false;
+}
+function ensureSharedPollHeartbeat(){
+if(typeof window==='undefined'||sharedPollState.heartbeatTimer)return;
+sharedPollState.heartbeatTimer=window.setInterval(()=>{
+  if(document.hidden){
+    releaseAllSharedPollGroups();
+    return;
+  }
+  canRunSharedPolling('status');
+  const group=sharedPollGroupForTab(getActiveTabName());
+  if(group)canRunSharedPolling(group);
+},SHARED_POLL_HEARTBEAT_MS);
+}
+if(typeof window!=='undefined'){
+window.__ctsSharedPolling={
+  canRun:canRunSharedPolling,
+  groupForTab:sharedPollGroupForTab,
+  releaseAll:releaseAllSharedPollGroups,
+};
+window.addEventListener('beforeunload',releaseAllSharedPollGroups);
+window.addEventListener('pagehide',releaseAllSharedPollGroups);
+ensureSharedPollHeartbeat();
+}
 if(typeof globalThis!=='undefined'&&typeof globalThis.sseError!=='function'){
 globalThis.sseError=function sseError(event){
 try{
@@ -594,6 +679,14 @@ uiLoadState.inFlight[tab]=task;
 return task;
 }
 
+function runRequestSingleFlight(key,taskFactory){
+const requests=uiLoadState.requests||(uiLoadState.requests={});
+if(requests[key])return requests[key];
+const task=Promise.resolve().then(taskFactory).finally(()=>{if(requests[key]===task)delete requests[key];});
+requests[key]=task;
+return task;
+}
+
 function activateTab(tabName){
 if(!tabName)return;
 const b=document.querySelector(`.tab-btn[data-tab="${tabName}"]`);
@@ -1004,9 +1097,8 @@ try{
   loadPositions().catch(()=>{});
 }
 }
-async function loadPositions(){try{const resp=await api('/trading/positions',{timeoutMs:TRADING_POSITIONS_TIMEOUT_MS});state.positions=resp.positions||[];const t=document.getElementById('positions-tbody');if(!t)return;if(!state.positions.length){t.innerHTML='<tr><td colspan="6">暂无持仓</td></tr>';return;}t.innerHTML=state.positions.map(p=>{const source=(p?.metadata?.source||'local');const key=positionCloseKey(p);const busy=!!state.closingPositions[key];const sideText=p.side==='long'?'多':p.side==='short'?'空':(p.side||'-');const sourceTag=source==='exchange_live'?'<span class="status-badge" style="margin-left:6px;background:#2f4f7f;">实盘同步</span>':'';const accountId=String(p.account_id||'');return `<tr><td>${p.exchange||'-'} ${p.symbol}${sourceTag}</td><td>${sideText}</td><td>${Number(p.entry_price||0).toFixed(2)}</td><td>${Number(p.current_price||0).toFixed(2)}</td><td class="${Number(p.unrealized_pnl||0)>=0?'positive':'negative'}">${fmt(p.unrealized_pnl||0)}</td><td><button class="btn btn-danger btn-sm" ${busy?'disabled':''} onclick="closePositionFromRow(this)" data-exchange="${esc(p.exchange||'')}" data-symbol="${esc(p.symbol||'')}" data-side="${esc(p.side||'')}" data-account-id="${esc(accountId)}" data-source="${esc(source)}" data-quantity="${Number(p.quantity||0)}">${busy?'平仓中...':'一键平仓'}</button></td></tr>`;}).join('');}catch(e){console.error(e);}}
-async function loadOrders(){
-try{
+async function loadPositions(){return runRequestSingleFlight('positions',async()=>{try{const resp=await api('/trading/positions',{timeoutMs:TRADING_POSITIONS_TIMEOUT_MS});state.positions=resp.positions||[];const t=document.getElementById('positions-tbody');if(!t)return;if(!state.positions.length){t.innerHTML='<tr><td colspan="6">暂无持仓</td></tr>';return;}t.innerHTML=state.positions.map(p=>{const source=(p?.metadata?.source||'local');const key=positionCloseKey(p);const busy=!!state.closingPositions[key];const sideText=p.side==='long'?'多':p.side==='short'?'空':(p.side||'-');const sourceTag=source==='exchange_live'?'<span class="status-badge" style="margin-left:6px;background:#2f4f7f;">实盘同步</span>':'';const accountId=String(p.account_id||'');return `<tr><td>${p.exchange||'-'} ${p.symbol}${sourceTag}</td><td>${sideText}</td><td>${Number(p.entry_price||0).toFixed(2)}</td><td>${Number(p.current_price||0).toFixed(2)}</td><td class="${Number(p.unrealized_pnl||0)>=0?'positive':'negative'}">${fmt(p.unrealized_pnl||0)}</td><td><button class="btn btn-danger btn-sm" ${busy?'disabled':''} onclick="closePositionFromRow(this)" data-exchange="${esc(p.exchange||'')}" data-symbol="${esc(p.symbol||'')}" data-side="${esc(p.side||'')}" data-account-id="${esc(accountId)}" data-source="${esc(source)}" data-quantity="${Number(p.quantity||0)}">${busy?'平仓中...':'一键平仓'}</button></td></tr>`;}).join('');}catch(e){console.error(e);}});}
+async function loadOrders(){return runRequestSingleFlight('orders',async()=>{try{
 state.orders=(await api('/trading/orders?include_history=true&limit=200',{timeoutMs:TRADING_ORDERS_TIMEOUT_MS})).orders||[];
 const t=document.getElementById('orders-tbody');
 if(!t)return;
@@ -1042,10 +1134,8 @@ const memo=[reason,costMemo,protectMemo].filter(Boolean).join(' | ');
 const statusCell=`${mapSide(o.side)}/${mapOrderStatus(o.status)}${reason?`<div class="order-reject-reason">${reason}</div>`:''}`;
 return `<tr><td>${o.exchange||'-'} ${o.symbol}</td><td>${sourceBadge}</td><td>${esc(o.account_id||'main')}</td><td>${statusCell}</td><td>${Number(o.price||0).toFixed(2)}</td><td>${Number(o.amount||0)}</td><td>${o.status==='open'?`<button class="btn btn-danger btn-sm" onclick="cancelOrder('${o.id}','${o.symbol}','${o.exchange||'binance'}')">撤销</button>`:'<span style="color:#8b949e">--</span>'}</td><td>${memo||'--'}</td></tr>`;
 }).join('');
-}catch(e){console.error(e);}
-}
-async function loadOpenOrders(){
-try{
+}catch(e){console.error(e);}});}
+async function loadOpenOrders(){return runRequestSingleFlight('openOrders',async()=>{try{
 const rows=((await api('/trading/orders?include_history=false&limit=200',{timeoutMs:TRADING_OPEN_ORDERS_TIMEOUT_MS})).orders||[]);
 const t=document.getElementById('open-orders-tbody');
 if(!t)return;
@@ -1071,8 +1161,7 @@ return `<tr><td>${o.exchange||'-'} ${o.symbol}</td><td>${sourceBadge}</td><td>${
 console.error(e);
 const t=document.getElementById('open-orders-tbody');
 if(t)t.innerHTML=`<tr><td colspan="8">当前委托加载失败：${esc(e.message||'未知错误')}</td></tr>`;
-}
-}
+}});}
 function bindOrderView(){
 const v=document.getElementById('orders-view-filter'),b=document.getElementById('btn-refresh-orders');
 if(v)v.onchange=()=>loadOrders();
@@ -1095,8 +1184,7 @@ if(strategy)strategy.addEventListener('keydown',e=>{
 }
 async function cancelOrder(id,symbol,exchange){try{await api(`/trading/order/${id}?symbol=${encodeURIComponent(symbol)}&exchange=${exchange}`,{method:'DELETE'});notify('订单已撤销');await Promise.allSettled([loadOrders(),loadOpenOrders()]);}catch(e){notify(`撤销失败: ${e.message}`,true);}}
 
-async function loadStrategies(){
-try{
+async function loadStrategies(){return runRequestSingleFlight('strategies',async()=>{try{
 await Promise.allSettled([ensureStrategyCatalog(),ensureBacktestStrategySelect()]);
 const d=await api('/strategies/list');
 const availableTypes=Array.isArray(d?.strategies)?d.strategies:[];
@@ -1219,8 +1307,7 @@ if(document.getElementById('backtest-compare-strategy-list') && typeof loadBackt
   }
 }
 renderStrategyConsolePanel();
-}catch(e){console.error(e);}
-}
+}catch(e){console.error(e);}});}
 function renderStrategyConsolePanel(){
 const cards=document.getElementById('strategy-console-cards');
 const notes=document.getElementById('strategy-console-notes');
@@ -1357,8 +1444,7 @@ await loadStrategies();
 async function saveAllocation(name){const i=document.querySelector(`input[data-alloc='${name}']`);if(!i)return;try{await api(`/strategies/${name}/allocation`,{method:'PUT',body:JSON.stringify({allocation:Number(i.value||0)})});notify(`策略 ${name} 资金占比已更新`);await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`更新资金占比失败: ${e.message}`,true);}}
 async function toggleStrategy(name,st){const act=st==='running'?'stop':'start';try{await api(`/strategies/${encodeURIComponent(name)}/${act}`,{method:'POST',timeoutMs:15000});notify(`策略已${act==='start'?'启动':'停止'}`);await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`策略${act}失败: ${e.message}`,true);}}
 
-async function loadStrategySummary(){
-try{
+async function loadStrategySummary(){return runRequestSingleFlight('strategySummary',async()=>{try{
 const d=await api('/strategies/summary?limit=20');
 state.summary=d;
 const running=d.running||[],signals=(d.recent_signals||[]).slice(0,12),stale=(d.stale_running||[]);
@@ -1379,8 +1465,7 @@ rt.innerHTML=running.length?running.map(s=>{const p=perf[s.name]||{},ri=s.runtim
 }
 renderStrategyHealthAlerts(d,state.strategyHealth);
 renderStrategyConsolePanel();
-}catch(e){console.error(e);}
-}
+}catch(e){console.error(e);}});}
 function renderStrategyHealthAlerts(summary,health){
 const box=document.getElementById('strategy-health-alerts');if(!box)return;
 const stale=(summary?.stale_running||[]);const staleCount=Number(summary?.stale_running_count||stale.length||0);const runningCount=Number(summary?.running_count||0);
@@ -3622,6 +3707,8 @@ function softRefresh(delay=250){
 if(softRefreshTimer)clearTimeout(softRefreshTimer);
 softRefreshTimer=setTimeout(()=>{
   const tab=getActiveTabName();
+  const group=sharedPollGroupForTab(tab);
+  if(group&&!canRunSharedPolling(group))return;
   if(tab==='dashboard')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadStrategies(),loadStrategySummary(),loadRisk()]);
   else if(tab==='trading')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
   else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
@@ -3631,15 +3718,41 @@ softRefreshTimer=setTimeout(()=>{
 }
 function setWsBadge(connected){state.wsConnected=!!connected;const st=document.getElementById('system-status');if(st)st.textContent=connected?'运行中(WS在线)':'运行中(轮询)';}
 function applyMarketTick(payload){try{const ex=marketDataState.exchange||document.getElementById('data-exchange')?.value,sym=marketDataState.symbol||document.getElementById('data-symbol')?.value,tf=marketDataState.timeframe||document.getElementById('data-timeframe')?.value||'1m';if(!ex||!sym||!marketDataState.bars?.length)return;const t=payload?.[ex]?.[sym];if(!t)return;const px=Number(t.last||0);if(px<=0)return;const tfSec=timeframeSeconds(tf);const nowMs=Date.now();const bucketMs=Math.floor(nowMs/(tfSec*1000))*(tfSec*1000);const bars=marketDataState.bars;const last=bars[bars.length-1];const lastMs=klineToMs(last?.timestamp);if(!Number.isFinite(lastMs))return;const lastBucket=Math.floor(lastMs/(tfSec*1000))*(tfSec*1000);if(lastBucket===bucketMs){last.high=Math.max(Number(last.high||px),px);last.low=Math.min(Number(last.low||px),px);if(!Number.isFinite(last.low))last.low=px;if(!Number.isFinite(last.high))last.high=px;last.close=px;}else if(bucketMs>lastBucket){if(isSubMinuteTf(tf)){return;}const openPx=Number(last.close||px);bars.push({timestamp:klineLocalIso(bucketMs),open:openPx,high:Math.max(openPx,px),low:Math.min(openPx,px),close:px,volume:0});marketDataState.bars=cropBars(mergeBars([],bars));}const renderThrottle=isSubMinuteTf(tf)?900:450;const now=Date.now();if(now-lastTickRenderAt>=renderThrottle){lastTickRenderAt=now;renderKlineChart(true);}}catch(e){console.error(e);}}
-function initWebSocket(){try{if(wsClient)wsClient.close();const proto=location.protocol==='https:'?'wss':'ws';wsClient=new WebSocket(`${proto}://${location.host}/ws`);wsClient.onopen=()=>{setWsBadge(true);};wsClient.onmessage=e=>{try{const m=JSON.parse(e.data||'{}');const ev=m.event||'';if(['order_event','position_event','execution_event','mode_changed','runtime_snapshot','strategy_signal'].includes(ev)){softRefresh(120);}if(ev==='mode_changed'){notify(`交易模式已切换: ${m?.payload?.mode||'-'}`);}if(ev==='order_event'){const o=m?.payload?.order||{};notify(`订单更新: ${o.symbol||''} ${mapOrderStatus(o.status||'')}`);}if(ev==='strategy_signal'){pushRealtimeSignal(m?.payload||{});}if(ev==='market_tick'){applyMarketTick(m?.payload||{});} }catch{}};wsClient.onclose=()=>{setWsBadge(false);if(wsRetryTimer)clearTimeout(wsRetryTimer);wsRetryTimer=setTimeout(initWebSocket,2000);};wsClient.onerror=()=>{setWsBadge(false);};}catch{setWsBadge(false);}}
+function closeWebSocketClient(){
+if(wsRetryTimer){clearTimeout(wsRetryTimer);wsRetryTimer=null;}
+if(!wsClient){setWsBadge(false);return;}
+try{
+  wsClient.onopen=null;
+  wsClient.onmessage=null;
+  wsClient.onclose=null;
+  wsClient.onerror=null;
+  wsClient.close();
+}catch{}
+wsClient=null;
+setWsBadge(false);
+}
+function initWebSocket(){
+try{
+if(document.hidden){closeWebSocketClient();return;}
+if(wsClient&&(wsClient.readyState===WebSocket.OPEN||wsClient.readyState===WebSocket.CONNECTING))return;
+if(wsClient)closeWebSocketClient();
+const proto=location.protocol==='https:'?'wss':'ws';
+const socket=new WebSocket(`${proto}://${location.host}/ws`);
+wsClient=socket;
+socket.onopen=()=>{if(wsClient===socket)setWsBadge(true);};
+socket.onmessage=e=>{try{const m=JSON.parse(e.data||'{}');const ev=m.event||'';if(['order_event','position_event','execution_event','mode_changed','runtime_snapshot','strategy_signal'].includes(ev)){softRefresh(120);}if(ev==='mode_changed'){notify(`交易模式已切换: ${m?.payload?.mode||'-'}`);}if(ev==='order_event'){const o=m?.payload?.order||{};notify(`订单更新: ${o.symbol||''} ${mapOrderStatus(o.status||'')}`);}if(ev==='strategy_signal'){pushRealtimeSignal(m?.payload||{});}if(ev==='market_tick'){applyMarketTick(m?.payload||{});} }catch{}};
+socket.onclose=()=>{if(wsClient===socket)wsClient=null;setWsBadge(false);if(document.hidden)return;if(wsRetryTimer)clearTimeout(wsRetryTimer);wsRetryTimer=setTimeout(()=>initWebSocket(),2000);};
+socket.onerror=()=>{setWsBadge(false);};
+}catch{setWsBadge(false);}
+}
 
-async function loadConditionalOrders(){try{const d=await api('/trading/orders/conditional');const t=document.getElementById('conditional-orders-tbody');if(!t)return;const rows=d.orders||[];if(!rows.length){t.innerHTML='<tr><td colspan=\"7\">暂无条件单</td></tr>';return;}t.innerHTML=rows.map(o=>`<tr><td>${o.conditional_id}</td><td>${o.exchange} ${o.symbol}</td><td>${mapSide(o.side)}</td><td>${Number(o.trigger_price||0).toFixed(4)}</td><td>${Number(o.amount||0)}</td><td>${o.account_id||'main'}</td><td><button class=\"btn btn-danger btn-sm\" onclick=\"cancelConditional('${o.conditional_id}')\">取消</button></td></tr>`).join('');}catch(e){console.error(e);}}
+async function loadConditionalOrders(){return runRequestSingleFlight('conditionalOrders',async()=>{try{const d=await api('/trading/orders/conditional');const t=document.getElementById('conditional-orders-tbody');if(!t)return;const rows=d.orders||[];if(!rows.length){t.innerHTML='<tr><td colspan=\"7\">暂无条件单</td></tr>';return;}t.innerHTML=rows.map(o=>`<tr><td>${o.conditional_id}</td><td>${o.exchange} ${o.symbol}</td><td>${mapSide(o.side)}</td><td>${Number(o.trigger_price||0).toFixed(4)}</td><td>${Number(o.amount||0)}</td><td>${o.account_id||'main'}</td><td><button class=\"btn btn-danger btn-sm\" onclick=\"cancelConditional('${o.conditional_id}')\">取消</button></td></tr>`).join('');}catch(e){console.error(e);}});}
 async function cancelConditional(id){try{await api(`/trading/orders/conditional/${encodeURIComponent(id)}`,{method:'DELETE'});notify('条件单已取消');await loadConditionalOrders();}catch(e){notify(`取消条件单失败: ${e.message}`,true);}}
 
-async function loadAccounts(){try{const d=await api('/trading/accounts/summary');const out=document.getElementById('accounts-output');if(out)out.textContent=JSON.stringify(d,null,2);}catch(e){const out=document.getElementById('accounts-output');if(out)out.textContent=`账户加载失败: ${e.message}`;}}
+async function loadAccounts(){return runRequestSingleFlight('accounts',async()=>{try{const d=await api('/trading/accounts/summary');const out=document.getElementById('accounts-output');if(out)out.textContent=JSON.stringify(d,null,2);}catch(e){const out=document.getElementById('accounts-output');if(out)out.textContent=`账户加载失败: ${e.message}`;}});}
 async function createAccount(){try{const payload={account_id:document.getElementById('account-id').value.trim(),name:document.getElementById('account-name').value.trim(),exchange:document.getElementById('account-exchange').value,mode:document.getElementById('account-mode').value,parent_account_id:null,enabled:true,metadata:{}};const r=await api('/trading/accounts',{method:'POST',body:JSON.stringify(payload)});notify(`账户 ${r?.account?.account_id||payload.account_id} 已创建`);await loadAccounts();}catch(e){notify(`创建账户失败: ${e.message}`,true);}}
 
-async function loadModeInfo(){try{const d=await api('/trading/mode');const cur=document.getElementById('mode-current-text'),pend=document.getElementById('mode-pending-text');if(cur)cur.textContent=d.mode||'-';if(pend)pend.textContent=(d.pending_switches||[]).length?`待确认 ${d.pending_switches[0].target_mode}`:'无待确认切换';if(d.pending_switches?.length)state.modeToken=d.pending_switches[0].token;const out=document.getElementById('mode-output');if(out)out.textContent=JSON.stringify(d,null,2);}catch(e){const out=document.getElementById('mode-output');if(out)out.textContent=`加载模式失败: ${e.message}`;}}
+async function loadModeInfo(){return runRequestSingleFlight('modeInfo',async()=>{try{const d=await api('/trading/mode');const cur=document.getElementById('mode-current-text'),pend=document.getElementById('mode-pending-text');if(cur)cur.textContent=d.mode||'-';if(pend)pend.textContent=(d.pending_switches||[]).length?`待确认 ${d.pending_switches[0].target_mode}`:'无待确认切换';if(d.pending_switches?.length)state.modeToken=d.pending_switches[0].token;const out=document.getElementById('mode-output');if(out)out.textContent=JSON.stringify(d,null,2);}catch(e){const out=document.getElementById('mode-output');if(out)out.textContent=`加载模式失败: ${e.message}`;}});}
 async function requestModeSwitch(){try{const payload={target_mode:document.getElementById('mode-target').value,reason:document.getElementById('mode-reason').value||''};const r=await api('/trading/mode/request',{method:'POST',body:JSON.stringify(payload)});state.modeToken=r.token||'';const out=document.getElementById('mode-output');if(out)out.textContent=JSON.stringify(r,null,2);notify('模式切换申请已创建，请二次确认');await loadModeInfo();}catch(e){notify(`申请切换失败: ${e.message}`,true);}}
 async function confirmModeSwitch(){try{if(!state.modeToken){await loadModeInfo();}if(!state.modeToken){notify('没有待确认切换令牌',true);return;}const text=prompt('请输入确认文本：CONFIRM LIVE TRADING','');if(text===null)return;const r=await api('/trading/mode/confirm',{method:'POST',body:JSON.stringify({token:state.modeToken,confirm_text:text})});const out=document.getElementById('mode-output');if(out)out.textContent=JSON.stringify(r,null,2);notify(`交易模式已切换为 ${r.mode}`);state.modeToken='';await loadModeInfo();await loadSystemStatus();}catch(e){notify(`确认切换失败: ${e.message}`,true);}}
 
@@ -5669,13 +5782,15 @@ await Promise.all([loadOrders(),loadPositions(),loadSummary(),loadRisk(),loadCon
 };
 }
 
-async function init(){initTabs();initClock();initEquity();bindTrade();bindOrderView();bindLiveTradeReview();bindData();bindDataAdvanced();bindBacktest();bindArbitragePage();bindNotificationCenter();bindAudit();bindStrategyOps();bindStrategyAdvanced();bindResearchPanel();bindResearchPresets();bindResearchSentiment();bindModeControls();bindAccountControls();initWebSocket();renderStrategyConsolePanel();renderResearchStatusCards();await loadSystemStatus();await ensureTabLoaded(getActiveTabName(),{force:true});state.bootCompleted=true;state.bootFailed=false;
+async function init(){initTabs();initClock();initEquity();bindTrade();bindOrderView();bindLiveTradeReview();bindData();bindDataAdvanced();bindBacktest();bindArbitragePage();bindNotificationCenter();bindAudit();bindStrategyOps();bindStrategyAdvanced();bindResearchPanel();bindResearchPresets();bindResearchSentiment();bindModeControls();bindAccountControls();initWebSocket();document.addEventListener('visibilitychange',()=>{if(document.hidden){releaseAllSharedPollGroups();closeWebSocketClient();}else{canRunSharedPolling('status');const group=sharedPollGroupForTab(getActiveTabName());if(group)canRunSharedPolling(group);initWebSocket();}});renderStrategyConsolePanel();renderResearchStatusCards();await loadSystemStatus();await ensureTabLoaded(getActiveTabName(),{force:true});state.bootCompleted=true;state.bootFailed=false;
 // Status polling is lightweight but user-visible; keep it independent from heavier dashboard batches
-setInterval(()=>{if(document.hidden)return;loadSystemStatus();},20000);
+setInterval(()=>{if(document.hidden)return;if(!canRunSharedPolling('status'))return;loadSystemStatus();},20000);
 setInterval(()=>{
   if(document.hidden)return;
   if(state.wsConnected)return;
   const tab=getActiveTabName();
+  const group=sharedPollGroupForTab(tab);
+  if(group&&!canRunSharedPolling(group))return;
   if(tab==='dashboard')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary()]);
   else if(tab==='trading')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
   else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
@@ -5685,6 +5800,15 @@ setInterval(()=>{
 setInterval(()=>{
   if(document.hidden)return;
   const tab=getActiveTabName();
+  const group=sharedPollGroupForTab(tab);
+  if(group&&!canRunSharedPolling(group))return;
+  if(state.wsConnected&&(tab==='dashboard'||tab==='trading')){
+    const now=Date.now();
+    const lastByTab=state.lastWsBackfillAtByTab||(state.lastWsBackfillAtByTab={});
+    const last=Number(lastByTab[tab]||0);
+    if(now-last<30000)return;
+    lastByTab[tab]=now;
+  }
   if(tab==='dashboard')Promise.allSettled([loadPositions(),loadBalances(),loadOrders(),loadOpenOrders(),loadRisk()]);
   else if(tab==='trading')Promise.allSettled([loadPositions(),loadBalances(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
   else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary()]);
@@ -5694,9 +5818,11 @@ setInterval(()=>{
 setInterval(()=>{
   if(document.hidden)return;
   const tab=getActiveTabName();
+  const group=sharedPollGroupForTab(tab);
+  if(group&&!canRunSharedPolling(group))return;
   if(tab==='dashboard')Promise.allSettled([loadPnlHeatmap(),loadNotificationCenter(),loadAuditLogs()]);
   else if(tab==='strategies')Promise.allSettled([loadStrategyHealth()]);
-},20000);}
+},45000);}
 
 window.cancelOrder=cancelOrder;window.cancelConditional=cancelConditional;window.registerStrategy=registerStrategy;window.toggleStrategy=toggleStrategy;window.saveAllocation=saveAllocation;window.openEditor=openEditor;window.compareLive=compareLive;window.openStrategyEditor=openEditor;window.compareStrategyLive=compareLive;window.previewCompareStrategyByRank=previewCompareStrategyByRank;window.registerCompareStrategyByRank=registerCompareStrategyByRank;window.registerOptimizeBestAsNewStrategyInstance=registerOptimizeBestAsNewStrategyInstance;window.editNotifyRule=editNotifyRule;window.toggleNotifyRule=toggleNotifyRule;window.deleteNotifyRule=deleteNotifyRule;window.openBacktestWithSpec=openBacktestWithSpec;window.registerArbitrageStrategy=registerArbitrageStrategy;window.jumpToBacktestFromArbitrage=jumpToBacktestFromArbitrage;window.scanArbitragePairsRanking=scanArbitragePairsRanking;window.applyArbitragePairCandidate=applyArbitragePairCandidate;
 window.addEventListener('error',e=>{

@@ -7,6 +7,7 @@ param(
     [bool]$StartNewsWorker = $false,
     [bool]$StartNewsLlmWorker = $false,
     [bool]$StartPmWorker = $false,
+    [bool]$EnableAnalyticsHistory = $false,
     [bool]$TestDataSources = $false
 )
 
@@ -132,11 +133,72 @@ function Import-DotEnvFile {
     }
 }
 
+function Test-TruthyText {
+    param([AllowNull()][string]$Value)
+    if ($null -eq $Value) { return $false }
+    return $Value.Trim().ToLower() -in @("1", "true", "yes", "on")
+}
+
+function Get-RequestedWorkerLabels {
+    param(
+        [bool]$NewsWorker,
+        [bool]$NewsLlmWorker,
+        [bool]$PmWorker
+    )
+
+    $labels = @()
+    if ($NewsWorker) { $labels += "news-worker" }
+    if ($NewsLlmWorker) { $labels += "news-llm-worker" }
+    if ($PmWorker) { $labels += "pm-worker" }
+    return $labels
+}
+
+Import-DotEnvFile -Path (Join-Path $PSScriptRoot ".env")
+Import-DotEnvFile -Path (Join-Path $PSScriptRoot ".env.local")
+
+$ignoredEnvWorkerFlags = @()
+if ((Test-TruthyText ([string]$env:START_NEWS_WORKER)) -and (-not $StartNewsWorker)) {
+    $ignoredEnvWorkerFlags += "START_NEWS_WORKER"
+}
+if ((Test-TruthyText ([string]$env:START_NEWS_LLM_WORKER)) -and (-not $StartNewsLlmWorker)) {
+    $ignoredEnvWorkerFlags += "START_NEWS_LLM_WORKER"
+}
+if ((Test-TruthyText ([string]$env:START_PM_WORKER)) -and (-not $StartPmWorker)) {
+    $ignoredEnvWorkerFlags += "START_PM_WORKER"
+}
+
+$requestedWorkerLabels = Get-RequestedWorkerLabels `
+    -NewsWorker $StartNewsWorker `
+    -NewsLlmWorker $StartNewsLlmWorker `
+    -PmWorker $StartPmWorker
+$startupProfile = if ($requestedWorkerLabels.Count) {
+    "web + " + ($requestedWorkerLabels -join ", ")
+} else {
+    "safe web-only"
+}
+if (-not $EnableAnalyticsHistory) {
+    $startupProfile += " + analytics-history off"
+    Set-Item -Path Env:ANALYTICS_HISTORY_ENABLED -Value "0"
+}
+
 $pidOnPort = Get-ListeningPid -PortNumber $Port
 if ($pidOnPort) {
     $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pidOnPort" -ErrorAction SilentlyContinue
     if ($proc -and ($proc.CommandLine -like "*uvicorn*web.main:app*" -or $proc.CommandLine -like "*main.py --mode web*")) {
         Write-Host "Service already listening on 0.0.0.0:$Port (PID=$pidOnPort)."
+        Write-Host "Requested startup profile: $startupProfile"
+        if ($ignoredEnvWorkerFlags.Count) {
+            Write-Host ("Safe start ignored .env worker flags: {0}" -f ($ignoredEnvWorkerFlags -join ", ")) -ForegroundColor Yellow
+            Write-Host "Use explicit flags such as '.\web.bat start -StartNewsWorker -StartNewsLlmWorker' to opt in." -ForegroundColor Yellow
+        }
+        if (-not $EnableAnalyticsHistory) {
+            Write-Host "Safe start forces ANALYTICS_HISTORY_ENABLED=0." -ForegroundColor Yellow
+            Write-Host "Use '.\web.bat start -EnableAnalyticsHistory' to opt into analytics history collectors." -ForegroundColor Yellow
+        }
+        if ($requestedWorkerLabels.Count) {
+            Write-Host "Worker mix was not changed because the web service is already running." -ForegroundColor Yellow
+            Write-Host "Use '.\web.bat stop -IncludeWorkers' and then start again with the desired worker flags." -ForegroundColor Yellow
+        }
         if ($OpenBrowser) {
             Open-WebConsole -WebPort $Port
         }
@@ -151,11 +213,17 @@ if (Enable-CondaEnv -Name $EnvName) {
     Write-Host "Conda env '$EnvName' not found from common paths/PATH. Falling back to .venv or system python."
 }
 
-Import-DotEnvFile -Path (Join-Path $PSScriptRoot ".env")
-Import-DotEnvFile -Path (Join-Path $PSScriptRoot ".env.local")
-
 $pythonExe = Resolve-PythonExecutable
 Write-Host "Python executable: $pythonExe"
+Write-Host "Startup profile: $startupProfile"
+if ($ignoredEnvWorkerFlags.Count) {
+    Write-Host ("Safe start ignored .env worker flags: {0}" -f ($ignoredEnvWorkerFlags -join ", ")) -ForegroundColor Yellow
+    Write-Host "Use explicit worker flags on '.\web.bat start' when you want external workers." -ForegroundColor Yellow
+}
+if (-not $EnableAnalyticsHistory) {
+    Write-Host "Safe start forces ANALYTICS_HISTORY_ENABLED=0." -ForegroundColor Yellow
+    Write-Host "Use '.\web.bat start -EnableAnalyticsHistory' when you want analytics history collectors." -ForegroundColor Yellow
+}
 
 $proc = Start-Process `
     -FilePath $pythonExe `
@@ -164,28 +232,8 @@ $proc = Start-Process `
     -PassThru
 
 $shouldStartWorker = $StartNewsWorker
-if (-not $shouldStartWorker) {
-    $rawToggle = [string]($env:START_NEWS_WORKER)
-    if ($rawToggle) {
-        $shouldStartWorker = $rawToggle.Trim().ToLower() -in @("1", "true", "yes", "on")
-    }
-}
-
 $shouldStartLlmWorker = $StartNewsLlmWorker
-if (-not $shouldStartLlmWorker) {
-    $rawLlmToggle = [string]($env:START_NEWS_LLM_WORKER)
-    if ($rawLlmToggle) {
-        $shouldStartLlmWorker = $rawLlmToggle.Trim().ToLower() -in @("1", "true", "yes", "on")
-    }
-}
-
 $shouldStartPmWorker = $StartPmWorker
-if (-not $shouldStartPmWorker) {
-    $rawPmToggle = [string]($env:START_PM_WORKER)
-    if ($rawPmToggle) {
-        $shouldStartPmWorker = $rawPmToggle.Trim().ToLower() -in @("1", "true", "yes", "on")
-    }
-}
 
 if ($shouldStartWorker) {
     $workerPid = Get-WorkerPid
@@ -243,12 +291,12 @@ while ((Get-Date) -lt $deadline) {
 }
 
 if ($status) {
-    Write-Host "Started PID=$($proc.Id), status=$($status.status), mode=$($status.trading_mode), url=http://127.0.0.1:$Port"
+    Write-Host "Started PID=$($proc.Id), status=$($status.status), mode=$($status.trading_mode), profile=$startupProfile, url=http://127.0.0.1:$Port"
     if ($OpenBrowser) {
         Open-WebConsole -WebPort $Port
     }
 } else {
-    Write-Host "Process started (PID=$($proc.Id)) but status endpoint not ready within ${HealthWaitSec}s."
+    Write-Host "Process started (PID=$($proc.Id)) but status endpoint not ready within ${HealthWaitSec}s. Startup profile: $startupProfile."
 }
 
 # 测试数据源 (可选)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import random
@@ -152,6 +153,14 @@ class BaseNewsCollector:
         self._last_request_ts = 0.0
         self._session = requests.Session()
         self._session.headers.update(DEFAULT_HEADERS)
+
+    def close(self) -> None:
+        session = getattr(self, "_session", None)
+        self._session = None
+        if session is None:
+            return
+        with contextlib.suppress(Exception):
+            session.close()
 
     def _respect_rate_limit(self) -> None:
         wait = 0.0

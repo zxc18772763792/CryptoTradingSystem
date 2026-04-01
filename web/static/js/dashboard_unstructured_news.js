@@ -11,6 +11,8 @@
     let latestSummary = null;
     let latestSummaryAt = 0;
     let needsRefresh = false;
+    let wsClient = null;
+    let wsReconnectTimer = null;
 
     function esc(value) {
         return String(value ?? "").replace(/[&<>"']/g, (m) => ({
@@ -60,6 +62,31 @@
         if (!host) return false;
         const tab = document.getElementById("dashboard");
         return !!tab && tab.classList.contains("active");
+    }
+
+    function canRunDashboardPolling() {
+        if (typeof window === "undefined" || typeof window.__ctsSharedPolling?.canRun !== "function") return true;
+        return window.__ctsSharedPolling.canRun("dashboard");
+    }
+
+    function shouldKeepWsAlive() {
+        return !document.hidden && isDashboardVisible() && canRunDashboardPolling();
+    }
+
+    function clearReconnectTimer() {
+        if (!wsReconnectTimer) return;
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+    }
+
+    function disconnectWs() {
+        clearReconnectTimer();
+        if (!wsClient) return;
+        try {
+            wsClient.onclose = null;
+            wsClient.close();
+        } catch (_) {}
+        wsClient = null;
     }
 
     async function request(path, options = {}) {
@@ -187,7 +214,11 @@
     }
 
     async function loadNews(forceSummary = false) {
-        if (!isDashboardVisible()) {
+        if (document.hidden || !isDashboardVisible()) {
+            needsRefresh = true;
+            return;
+        }
+        if (!canRunDashboardPolling()) {
             needsRefresh = true;
             return;
         }
@@ -212,7 +243,7 @@
             if (box) box.innerHTML = `<div class="list-item">加载失败: ${esc(err.message)}</div>`;
         } finally {
             loading = false;
-            if (needsRefresh && isDashboardVisible()) {
+            if (needsRefresh && !document.hidden && isDashboardVisible()) {
                 needsRefresh = false;
                 setTimeout(() => loadNews(false), 80);
             }
@@ -224,18 +255,34 @@
         document.getElementById(BUCKET_GRAN_ID)?.addEventListener("change", () => loadNews(true));
         document.querySelectorAll('.tab-btn[data-tab="dashboard"]').forEach((btn) => btn.addEventListener("click", () => {
             setTimeout(() => {
+                connectWs();
                 if (needsRefresh) loadNews(true);
             }, 120);
         }));
         document.addEventListener("visibilitychange", () => {
-            if (!document.hidden && isDashboardVisible() && needsRefresh) loadNews(false);
+            if (document.hidden || !isDashboardVisible()) {
+                disconnectWs();
+                needsRefresh = true;
+                return;
+            }
+            connectWs();
+            if (needsRefresh) loadNews(false);
         });
+        window.addEventListener("beforeunload", disconnectWs);
     }
 
     function connectWs() {
+        if (!shouldKeepWsAlive()) {
+            disconnectWs();
+            needsRefresh = true;
+            return;
+        }
+        if (wsClient && (wsClient.readyState === WebSocket.OPEN || wsClient.readyState === WebSocket.CONNECTING)) return;
+        clearReconnectTimer();
         try {
             const proto = location.protocol === "https:" ? "wss" : "ws";
             const ws = new WebSocket(`${proto}://${location.host}/ws`);
+            wsClient = ws;
             ws.onmessage = (evt) => {
                 try {
                     const msg = JSON.parse(evt.data || "{}");
@@ -245,8 +292,19 @@
                     }
                 } catch (_) {}
             };
-            ws.onclose = () => setTimeout(connectWs, 2000);
-        } catch (_) {}
+            ws.onclose = () => {
+                if (wsClient === ws) wsClient = null;
+                if (!shouldKeepWsAlive()) return;
+                clearReconnectTimer();
+                wsReconnectTimer = setTimeout(connectWs, 2000);
+            };
+            ws.onerror = () => {
+                try { ws.close(); } catch (_) {}
+            };
+        } catch (_) {
+            clearReconnectTimer();
+            wsReconnectTimer = setTimeout(connectWs, 2000);
+        }
     }
 
     async function start() {
@@ -256,7 +314,12 @@
         if (isDashboardVisible()) await loadNews(true);
         else needsRefresh = true;
         setInterval(() => {
-            if (document.hidden || !isDashboardVisible()) return;
+            if (document.hidden || !isDashboardVisible()) {
+                needsRefresh = true;
+                disconnectWs();
+                return;
+            }
+            connectWs();
             loadNews(false);
         }, REFRESH_MS);
     }

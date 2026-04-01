@@ -26,6 +26,12 @@ class RealtimeEventBus:
         self._subscribers: List[asyncio.Queue] = []
         self._lock = asyncio.Lock()
 
+    def subscriber_count(self) -> int:
+        return len(self._subscribers)
+
+    def has_subscribers(self) -> bool:
+        return bool(self._subscribers)
+
     async def subscribe(self, maxsize: int = 200) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
         async with self._lock:

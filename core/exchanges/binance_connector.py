@@ -110,81 +110,110 @@ class BinanceConnector(BaseExchange):
         self._funding_cache_ts: float = 0.0
         self._balance_cache: List[Balance] = []
         self._balance_cache_ts: float = 0.0
+        self._connection_lock = asyncio.Lock()
+
+    def _build_client_config(self) -> Dict[str, Any]:
+        client_config: Dict[str, Any] = {
+            "apiKey": settings.BINANCE_API_KEY or self.config.api_key,
+            "secret": settings.BINANCE_API_SECRET or self.config.api_secret,
+            "enableRateLimit": self.config.enable_rate_limit,
+            "rateLimit": self.config.rate_limit,
+            "timeout": self.config.timeout,
+            "sandbox": self.config.sandbox,
+            "defaultType": self.config.default_type,
+            "options": {
+                "defaultType": self.config.default_type,
+                "recvWindow": 59000,
+                "adjustForTimeDifference": True,
+            },
+        }
+
+        if settings.HTTP_PROXY:
+            client_config["aiohttp_proxy"] = settings.HTTP_PROXY
+            client_config["proxies"] = {
+                "http": settings.HTTP_PROXY,
+                "https": settings.HTTPS_PROXY or settings.HTTP_PROXY,
+            }
+        return client_config
+
+    async def _prepare_client(self, client: Any) -> int:
+        time_offset = 0
+        try:
+            load_diff = getattr(client, "load_time_difference", None)
+            if callable(load_diff):
+                diff = await load_diff()
+                if isinstance(diff, (int, float)):
+                    time_offset = int(diff)
+            if time_offset == 0:
+                server_time = int(await client.fetch_time())
+                local_time = int(time.time() * 1000)
+                # CCXT expects local - server as timeDifference.
+                time_offset = int(local_time - server_time)
+            client.options["adjustForTimeDifference"] = True
+            client.options["timeDifference"] = int(time_offset)
+            logger.info(f"[{self.name}] Time synced, offset: {time_offset}ms")
+        except Exception as e:
+            logger.warning(f"[{self.name}] Time sync failed: {e}")
+            time_offset = 0
+        client.options["warnOnFetchOpenOrdersWithoutSymbol"] = False
+        await client.load_markets()
+        return time_offset
+
+    async def _ensure_client(self) -> Any:
+        client = self._client
+        if client is not None and self._connected:
+            return client
+        await self.connect()
+        client = self._client
+        if client is None or not self._connected:
+            raise RuntimeError(f"[{self.name}] client unavailable")
+        return client
 
     async def connect(self) -> bool:
-        try:
-            client_config = {
-                "apiKey": settings.BINANCE_API_KEY or self.config.api_key,
-                "secret": settings.BINANCE_API_SECRET or self.config.api_secret,
-                "enableRateLimit": self.config.enable_rate_limit,
-                "rateLimit": self.config.rate_limit,
-                "timeout": self.config.timeout,
-                "sandbox": self.config.sandbox,
-                "defaultType": self.config.default_type,
-                "options": {
-                    "defaultType": self.config.default_type,
-                    "recvWindow": 59000,
-                    "adjustForTimeDifference": True,
-                },
-            }
-
-            if settings.HTTP_PROXY:
-                client_config["aiohttp_proxy"] = settings.HTTP_PROXY
-                client_config["proxies"] = {
-                    "http": settings.HTTP_PROXY,
-                    "https": settings.HTTPS_PROXY or settings.HTTP_PROXY,
-                }
-
-            self._client = ccxt.binance(client_config)
-
+        async with self._connection_lock:
+            existing_client = self._client
+            existing_connected = bool(existing_client is not None and self._connected)
+            candidate_client = None
             try:
-                self._time_offset = 0
-                load_diff = getattr(self._client, "load_time_difference", None)
-                if callable(load_diff):
-                    diff = await load_diff()
-                    if isinstance(diff, (int, float)):
-                        self._time_offset = int(diff)
-                if self._time_offset == 0:
-                    server_time = int(await self._client.fetch_time())
-                    local_time = int(time.time() * 1000)
-                    # CCXT expects local - server as timeDifference.
-                    self._time_offset = int(local_time - server_time)
-                self._client.options["adjustForTimeDifference"] = True
-                self._client.options["timeDifference"] = int(self._time_offset)
-                self._client.options["warnOnFetchOpenOrdersWithoutSymbol"] = False
-                logger.info(f"[{self.name}] Time synced, offset: {self._time_offset}ms")
-            except Exception as e:
-                logger.warning(f"[{self.name}] Time sync failed: {e}")
-                self._time_offset = 0
-
-            await self._client.load_markets()
-            self._connected = True
-            logger.info(f"[{self.name}] Connected successfully")
-            return True
-        except BaseException as e:
-            try:
-                if self._client:
-                    await self._client.close()
-            except Exception:
-                pass
-            self._client = None
-            self._connected = False
-            if isinstance(e, asyncio.CancelledError):
-                raise
-            self._handle_error(e, "connect")
-            return False
+                candidate_client = ccxt.binance(self._build_client_config())
+                self._time_offset = await self._prepare_client(candidate_client)
+                self._client = candidate_client
+                self._connected = True
+                if existing_client is not None and existing_client is not candidate_client:
+                    with contextlib.suppress(Exception):
+                        await existing_client.close()
+                logger.info(f"[{self.name}] Connected successfully")
+                return True
+            except BaseException as e:
+                if candidate_client is not None and candidate_client is not existing_client:
+                    with contextlib.suppress(Exception):
+                        await candidate_client.close()
+                if existing_connected:
+                    self._client = existing_client
+                    self._connected = True
+                else:
+                    self._client = None
+                    self._connected = False
+                if isinstance(e, asyncio.CancelledError):
+                    raise
+                self._handle_error(e, "connect")
+                return False
 
     async def disconnect(self) -> None:
-        if self._client:
-            with contextlib.suppress(Exception):
-                await self._client.close()
-        self._connected = False
+        async with self._connection_lock:
+            client = self._client
+            self._client = None
+            self._connected = False
+            if client:
+                with contextlib.suppress(Exception):
+                    await client.close()
         logger.info(f"[{self.name}] Disconnected")
 
     async def get_ticker(self, symbol: str) -> Ticker:
         try:
+            client = await self._ensure_client()
             mapped_symbol = _map_futures_symbol(symbol, self.config.default_type)
-            ticker = await self._client.fetch_ticker(mapped_symbol)
+            ticker = await client.fetch_ticker(mapped_symbol)
             divisor = _futures_price_divisor(symbol, mapped_symbol, self.config.default_type)
             def _norm_price(v: Any) -> float:
                 px = float(v or 0)
@@ -213,10 +242,11 @@ class BinanceConnector(BaseExchange):
         limit: Optional[int] = None,
     ) -> List[Kline]:
         try:
+            client = await self._ensure_client()
             mapped_symbol = _map_futures_symbol(symbol, self.config.default_type)
             divisor = _futures_price_divisor(symbol, mapped_symbol, self.config.default_type)
             since_ms = int(since.timestamp() * 1000) if since else None
-            ohlcv = await self._client.fetch_ohlcv(
+            ohlcv = await client.fetch_ohlcv(
                 mapped_symbol,
                 timeframe,
                 since=since_ms,
@@ -241,7 +271,8 @@ class BinanceConnector(BaseExchange):
 
     async def get_order_book(self, symbol: str, limit: int = 20) -> dict:
         try:
-            orderbook = await self._client.fetch_order_book(symbol, limit)
+            client = await self._ensure_client()
+            orderbook = await client.fetch_order_book(symbol, limit)
             return {
                 "bids": orderbook.get("bids", []),
                 "asks": orderbook.get("asks", []),
@@ -303,6 +334,7 @@ class BinanceConnector(BaseExchange):
                     _merge_amount(snapshot_bucket, ccy, free, used, total)
 
         try:
+            client = await self._ensure_client()
             merged: Dict[str, Dict[str, float]] = {}
             funding_loaded = False
             funding_timed_out = False
@@ -319,7 +351,7 @@ class BinanceConnector(BaseExchange):
             funding_fetch = None
             funding_method_name = ""
             for method_name in funding_methods:
-                candidate = getattr(self._client, method_name, None)
+                candidate = getattr(client, method_name, None)
                 if callable(candidate):
                     funding_fetch = candidate
                     funding_method_name = method_name
@@ -368,7 +400,7 @@ class BinanceConnector(BaseExchange):
             if not funding_loaded and not funding_timed_out:
                 try:
                     funding_balance = await asyncio.wait_for(
-                        self._client.fetch_balance({"type": "funding"}),
+                        client.fetch_balance({"type": "funding"}),
                         timeout=_FUNDING_FETCH_TIMEOUT_SEC,
                     )
                     _merge_ccxt_balance_payload(
@@ -404,12 +436,12 @@ class BinanceConnector(BaseExchange):
                 # double counting between spot and futures balances.
                 if default_type in {"future", "swap"}:
                     spot = await asyncio.wait_for(
-                        self._client.fetch_balance({"type": "spot"}),
+                        client.fetch_balance({"type": "spot"}),
                         timeout=_BALANCE_SPOT_TIMEOUT_SEC,
                     )
                 else:
                     spot = await asyncio.wait_for(
-                        self._client.fetch_balance(),
+                        client.fetch_balance(),
                         timeout=_BALANCE_SPOT_TIMEOUT_SEC,
                     )
                 _merge_ccxt_balance_payload(spot, merged)
@@ -436,7 +468,7 @@ class BinanceConnector(BaseExchange):
                 tried_future_types.add(account_type)
                 try:
                     future_balance = await asyncio.wait_for(
-                        self._client.fetch_balance({"type": account_type}),
+                        client.fetch_balance({"type": account_type}),
                         timeout=_BALANCE_SPOT_TIMEOUT_SEC,
                     )
                     current_snapshot: Dict[str, Dict[str, float]] = {}
@@ -493,7 +525,8 @@ class BinanceConnector(BaseExchange):
         params: Optional[dict] = None,
     ) -> Order:
         try:
-            ccxt_order = await self._client.create_order(
+            client = await self._ensure_client()
+            ccxt_order = await client.create_order(
                 symbol=symbol,
                 type=order_type.value,
                 side=side.value,
@@ -507,7 +540,8 @@ class BinanceConnector(BaseExchange):
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
         try:
-            await self._client.cancel_order(order_id, symbol)
+            client = await self._ensure_client()
+            await client.cancel_order(order_id, symbol)
             logger.info(f"[{self.name}] Order {order_id} cancelled")
             return True
         except Exception as e:
@@ -516,39 +550,42 @@ class BinanceConnector(BaseExchange):
 
     async def get_order(self, order_id: str, symbol: str) -> Order:
         try:
-            ccxt_order = await self._client.fetch_order(order_id, symbol)
+            client = await self._ensure_client()
+            ccxt_order = await client.fetch_order(order_id, symbol)
             return self._parse_order(ccxt_order)
         except Exception as e:
             self._handle_error(e, f"get_order({order_id})")
 
     async def get_open_orders(self, symbol: Optional[str] = None) -> List[Order]:
         try:
-            ccxt_orders = await self._client.fetch_open_orders(symbol)
+            client = await self._ensure_client()
+            ccxt_orders = await client.fetch_open_orders(symbol)
             return [self._parse_order(order) for order in ccxt_orders]
         except Exception as e:
             self._handle_error(e, "get_open_orders")
 
     async def get_positions(self) -> List[Position]:
         try:
+            client = await self._ensure_client()
             default_type = str(getattr(self.config, "default_type", "") or "").lower()
             positions: List[dict] = []
             if default_type in ["future", "swap"]:
-                positions = await self._client.fetch_positions()
+                positions = await client.fetch_positions()
             else:
-                original_default_type = self._client.options.get("defaultType")
+                original_default_type = client.options.get("defaultType")
                 for account_type in ("future", "swap"):
                     try:
-                        self._client.options["defaultType"] = account_type
-                        positions = await self._client.fetch_positions()
+                        client.options["defaultType"] = account_type
+                        positions = await client.fetch_positions()
                         if positions:
                             break
                     except Exception as inner:
                         logger.debug(f"[{self.name}] fetch_positions fallback {account_type} failed: {inner}")
                     finally:
                         if original_default_type is None:
-                            self._client.options.pop("defaultType", None)
+                            client.options.pop("defaultType", None)
                         else:
-                            self._client.options["defaultType"] = original_default_type
+                            client.options["defaultType"] = original_default_type
 
             result = []
             for pos in positions:
@@ -580,8 +617,9 @@ class BinanceConnector(BaseExchange):
         limit: Optional[int] = None,
     ) -> List[dict]:
         try:
+            client = await self._ensure_client()
             since_ms = int(since.timestamp() * 1000) if since else None
-            return await self._client.fetch_my_trades(symbol, since=since_ms, limit=limit or 100)
+            return await client.fetch_my_trades(symbol, since=since_ms, limit=limit or 100)
         except Exception as e:
             self._handle_error(e, f"get_trades({symbol})")
 
@@ -613,7 +651,8 @@ class BinanceConnector(BaseExchange):
 
     async def get_deposit_address(self, currency: str) -> str:
         try:
-            address = await self._client.fetch_deposit_address(currency)
+            client = await self._ensure_client()
+            address = await client.fetch_deposit_address(currency)
             return address.get("address", "")
         except Exception as e:
             self._handle_error(e, f"get_deposit_address({currency})")
@@ -626,7 +665,8 @@ class BinanceConnector(BaseExchange):
         params: Optional[dict] = None,
     ) -> dict:
         try:
-            result = await self._client.withdraw(currency, amount, address, params or {})
+            client = await self._ensure_client()
+            result = await client.withdraw(currency, amount, address, params or {})
             logger.info(f"[{self.name}] Withdrawal initiated: {amount} {currency} to {address}")
             return result
         except Exception as e:

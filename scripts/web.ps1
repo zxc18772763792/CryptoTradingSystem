@@ -9,6 +9,7 @@ param(
     [switch]$StartNewsWorker,
     [switch]$StartNewsLlmWorker,
     [switch]$StartPmWorker,
+    [switch]$EnableAnalyticsHistory,
     [switch]$TestDataSources,
     [switch]$IncludeWorkers
 )
@@ -17,6 +18,27 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
+
+$script:WorkerDefinitions = @(
+    [pscustomobject]@{
+        Label = "News worker"
+        Token = "core.news.service.worker"
+        EnvName = "START_NEWS_WORKER"
+        StartFlag = "-StartNewsWorker"
+    },
+    [pscustomobject]@{
+        Label = "LLM worker"
+        Token = "core.news.service.llm_worker"
+        EnvName = "START_NEWS_LLM_WORKER"
+        StartFlag = "-StartNewsLlmWorker"
+    },
+    [pscustomobject]@{
+        Label = "PM worker"
+        Token = "prediction_markets.polymarket.worker"
+        EnvName = "START_PM_WORKER"
+        StartFlag = "-StartPmWorker"
+    }
+)
 
 function Get-ListeningPid {
     param([int]$PortNumber)
@@ -48,13 +70,112 @@ function Get-ProcessRecord {
     return Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
 }
 
-function Get-MatchingProcesses {
-    param([string]$Pattern)
+function Test-TruthyText {
+    param([AllowNull()][string]$Value)
 
+    if ($null -eq $Value) {
+        return $false
+    }
+
+    return $Value.Trim().ToLower() -in @("1", "true", "yes", "on")
+}
+
+function Get-EnvFileValues {
+    $values = @{}
+    foreach ($path in @(
+        (Join-Path $projectRoot ".env"),
+        (Join-Path $projectRoot ".env.local")
+    )) {
+        if (-not (Test-Path $path)) {
+            continue
+        }
+        foreach ($line in Get-Content $path) {
+            $text = [string]$line
+            if (-not $text) {
+                continue
+            }
+            $trimmed = $text.Trim()
+            if (-not $trimmed -or $trimmed.StartsWith("#")) {
+                continue
+            }
+            $eq = $trimmed.IndexOf("=")
+            if ($eq -lt 1) {
+                continue
+            }
+            $name = $trimmed.Substring(0, $eq).Trim()
+            $value = $trimmed.Substring($eq + 1).Trim()
+            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+            $values[$name] = $value
+        }
+    }
+    return $values
+}
+
+function Format-ConfigValue {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return "unset"
+    }
+    return $Value
+}
+
+function Get-ObservedWorkerProcesses {
+    param([string]$CommandToken)
+
+    $token = [string]$CommandToken
     return @(
         Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -like $Pattern }
+            Where-Object {
+                $name = [string]$_.Name
+                if ($name -and $name.ToLowerInvariant() -notin @("python.exe", "pythonw.exe")) {
+                    return $false
+                }
+                $cmd = [string]$_.CommandLine
+                if (-not $cmd) {
+                    return $false
+                }
+                if ([int]$_.ProcessId -eq [int]$PID) {
+                    return $false
+                }
+                return $cmd.ToLowerInvariant().Contains($token.ToLowerInvariant())
+            }
     )
+}
+
+function Format-ObservedWorkerState {
+    param(
+        [string]$EnvName,
+        [object[]]$Processes,
+        [hashtable]$EnvValues
+    )
+
+    $envValue = $null
+    if ($EnvValues.ContainsKey($EnvName)) {
+        $envValue = [string]$EnvValues[$EnvName]
+    }
+
+    $baseText = if ($Processes.Count) {
+        "running (PID=" + (($Processes | Select-Object -ExpandProperty ProcessId) -join ", ") + ")"
+    } else {
+        "not observed"
+    }
+
+    $note = if (Test-TruthyText $envValue) {
+        "[env $EnvName=$envValue, safe start ignores by default]"
+    } elseif (-not [string]::IsNullOrWhiteSpace($envValue)) {
+        "[env $EnvName=$envValue]"
+    } else {
+        "[env $EnvName=unset]"
+    }
+
+    if ($Processes.Count) {
+        return "$baseText $note"
+    }
+
+    return "$baseText $note"
 }
 
 function Test-IsManagedWebProcess {
@@ -102,12 +223,17 @@ function Show-Help {
     Write-Host ""
     Write-Host "Common examples:"
     Write-Host "  .\web.bat start -OpenBrowser"
+    Write-Host "  .\web.bat start -EnableAnalyticsHistory"
+    Write-Host "  .\web.bat start -StartNewsWorker"
     Write-Host "  .\web.bat start -StartNewsWorker -StartNewsLlmWorker"
     Write-Host "  .\web.bat start -StartPmWorker"
     Write-Host "  .\web.bat start -Port 8000 -HealthWaitSec 150"
     Write-Host ""
     Write-Host "Notes:"
-    Write-Host "  - Use '.\web.bat start' as the default entry point in new sessions."
+    Write-Host "  - Use '.\web.bat start' as the safe default entry point."
+    Write-Host "  - Default start is web-only; .env START_* worker flags are not auto-applied."
+    Write-Host "  - Default start also disables analytics history; opt in with -EnableAnalyticsHistory."
+    Write-Host "  - Opt into external workers explicitly with -StartNewsWorker / -StartNewsLlmWorker / -StartPmWorker."
     Write-Host "  - 'start_web_oneclick.bat' and 'start_once.bat' remain as compatibility wrappers."
     Write-Host "  - Logs: logs\web_ps.log"
     Write-Host ""
@@ -119,14 +245,16 @@ function Show-Status {
     $webPid = Get-ListeningPid -PortNumber $PortNumber
     $webProc = Get-ProcessRecord -ProcessId $webPid
     $health = Get-HealthSummary -PortNumber $PortNumber
-    $newsWorkers = Get-MatchingProcesses -Pattern "*core.news.service.worker*"
-    $llmWorkers = Get-MatchingProcesses -Pattern "*core.news.service.llm_worker*"
-    $pmWorkers = Get-MatchingProcesses -Pattern "*prediction_markets.polymarket.worker*"
+    $envValues = Get-EnvFileValues
 
     Write-Host ""
     Write-Host "Web service status" -ForegroundColor Cyan
     Write-Host ("  Project root : {0}" -f $projectRoot)
     Write-Host ("  Port         : {0}" -f $PortNumber)
+    Write-Host "  Start policy : safe web-only by default (analytics-history disabled)"
+    Write-Host "  Worker start : use explicit start flags to opt into external workers"
+    $analyticsEnvValue = if ($envValues.ContainsKey("ANALYTICS_HISTORY_ENABLED")) { [string]$envValues["ANALYTICS_HISTORY_ENABLED"] } else { $null }
+    Write-Host ("  Analytics    : default off unless -EnableAnalyticsHistory is used [env ANALYTICS_HISTORY_ENABLED={0}]" -f (Format-ConfigValue -Value $analyticsEnvValue))
 
     if (-not $webPid) {
         Write-Host "  Web          : stopped"
@@ -148,12 +276,14 @@ function Show-Status {
         Write-Host ("  Web          : port occupied by unmanaged PID={0}" -f $webPid) -ForegroundColor Yellow
     }
 
-    Write-Host ("  News worker  : {0}" -f ($(if ($newsWorkers.Count) { ($newsWorkers | ForEach-Object { $_.ProcessId }) -join ", " } else { "stopped" })))
-    Write-Host ("  LLM worker   : {0}" -f ($(if ($llmWorkers.Count) { ($llmWorkers | ForEach-Object { $_.ProcessId }) -join ", " } else { "stopped" })))
-    Write-Host ("  PM worker    : {0}" -f ($(if ($pmWorkers.Count) { ($pmWorkers | ForEach-Object { $_.ProcessId }) -join ", " } else { "stopped" })))
+    foreach ($worker in $script:WorkerDefinitions) {
+        $observed = Get-ObservedWorkerProcesses -CommandToken $worker.Token
+        Write-Host ("  {0,-12}: {1}" -f $worker.Label, (Format-ObservedWorkerState -EnvName $worker.EnvName -Processes $observed -EnvValues $envValues))
+    }
     Write-Host ""
     Write-Host "Quick commands:"
     Write-Host "  .\web.bat start"
+    Write-Host "  .\web.bat start -EnableAnalyticsHistory"
     Write-Host "  .\web.bat stop -IncludeWorkers"
     Write-Host ""
 }
@@ -168,6 +298,10 @@ function Stop-ManagedProcesses {
     $webPid = Get-ListeningPid -PortNumber $PortNumber
     $webProc = Get-ProcessRecord -ProcessId $webPid
 
+    Write-Host ""
+    Write-Host "Stop request" -ForegroundColor Cyan
+    Write-Host ("  Scope        : {0}" -f ($(if ($StopWorkers) { "web + observed external workers" } else { "web only" })))
+
     if ($webPid -and (Test-IsManagedWebProcess -ProcessRecord $webProc)) {
         Stop-Process -Id $webPid -Force
         Write-Host ("Stopped web service PID={0}" -f $webPid)
@@ -181,23 +315,34 @@ function Stop-ManagedProcesses {
     }
 
     if ($StopWorkers) {
-        $patterns = @(
-            @{ Label = "news worker"; Pattern = "*core.news.service.worker*" },
-            @{ Label = "news LLM worker"; Pattern = "*core.news.service.llm_worker*" },
-            @{ Label = "Polymarket worker"; Pattern = "*prediction_markets.polymarket.worker*" }
-        )
-
-        foreach ($item in $patterns) {
-            $matched = Get-MatchingProcesses -Pattern $item.Pattern
+        foreach ($worker in $script:WorkerDefinitions) {
+            $matched = Get-ObservedWorkerProcesses -CommandToken $worker.Token
             if (-not $matched.Count) {
-                Write-Host ("{0} already stopped." -f $item.Label)
+                Write-Host ("{0} already stopped." -f $worker.Label)
                 continue
             }
             foreach ($proc in $matched) {
                 Stop-Process -Id $proc.ProcessId -Force
-                Write-Host ("Stopped {0} PID={1}" -f $item.Label, $proc.ProcessId)
+                Write-Host ("Stopped {0} PID={1}" -f $worker.Label, $proc.ProcessId)
                 $stopped = $true
             }
+        }
+    } else {
+        $observedWorkers = @(
+            foreach ($worker in $script:WorkerDefinitions) {
+                $matched = Get-ObservedWorkerProcesses -CommandToken $worker.Token
+                if ($matched.Count) {
+                    [pscustomobject]@{
+                        Label = $worker.Label
+                        Pids = (($matched | Select-Object -ExpandProperty ProcessId) -join ", ")
+                    }
+                }
+            }
+        )
+        if ($observedWorkers.Count) {
+            $summary = $observedWorkers | ForEach-Object { "$($_.Label) PID=$($_.Pids)" }
+            Write-Host ("Observed external workers still running: {0}" -f ($summary -join "; ")) -ForegroundColor Yellow
+            Write-Host "Use '.\web.bat stop -IncludeWorkers' to stop them as well." -ForegroundColor Yellow
         }
     }
 
@@ -228,6 +373,7 @@ switch ($Action) {
             -StartNewsWorker:$StartNewsWorker.IsPresent `
             -StartNewsLlmWorker:$StartNewsLlmWorker.IsPresent `
             -StartPmWorker:$StartPmWorker.IsPresent `
+            -EnableAnalyticsHistory:$EnableAnalyticsHistory.IsPresent `
             -TestDataSources:$TestDataSources.IsPresent
     }
     "stop" {

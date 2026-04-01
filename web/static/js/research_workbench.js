@@ -156,27 +156,262 @@
     };
   }
 
+  function deriveRecommendationTimeframes(baseTimeframe) {
+    const presets = {
+      '1m': ['1m', '5m', '15m'],
+      '5m': ['5m', '15m', '1h'],
+      '15m': ['5m', '15m', '1h', '4h'],
+      '1h': ['15m', '1h', '4h'],
+      '4h': ['1h', '4h', '1d'],
+      '1d': ['4h', '1d'],
+    };
+    const selected = presets[String(baseTimeframe || '5m').trim().toLowerCase()] || ['5m', '15m', '1h'];
+    return Array.from(new Set(selected.filter((item) => item)));
+  }
+
+  function derivePlannerRegime(directionBias, headline = '') {
+    const title = String(headline || '');
+    const lower = title.toLowerCase();
+    if (lower.includes('news') || title.includes('事件') || title.includes('新闻')) return 'news_event';
+    if (lower.includes('breakout') || title.includes('突破')) return 'breakout';
+    if (directionBias === 'bullish') return 'trend_up';
+    if (directionBias === 'bearish') return 'trend_down';
+    if (lower.includes('mean') || title.includes('回归') || title.includes('震荡')) return 'mean_reversion';
+    return 'mixed';
+  }
+
+  function deriveBacktestStrategy(directionBias, headline = '') {
+    const title = String(headline || '');
+    const lower = title.toLowerCase();
+    if (lower.includes('breakout') || title.includes('突破')) return { strategy_type: 'DonchianBreakoutStrategy', label: '突破' };
+    if (directionBias === 'bullish') return { strategy_type: 'TrendFollowingStrategy', label: '趋势' };
+    if (directionBias === 'bearish') return { strategy_type: 'MeanReversionStrategy', label: '防守' };
+    return { strategy_type: 'MeanReversionStrategy', label: '均值回归' };
+  }
+
+  function formatRecommendationBias(value) {
+    const bias = String(value || '').trim().toLowerCase();
+    if (bias === 'bullish') return '看多';
+    if (bias === 'bearish') return '看空';
+    if (bias === 'neutral') return '中性';
+    return String(value || '-');
+  }
+
+  function getFactorFocusItems(rec = state.recommendations) {
+    if (Array.isArray(rec?.factor_focus) && rec.factor_focus.length) {
+      return rec.factor_focus
+        .map((item) => ({
+          symbol: String(item?.symbol || '').trim(),
+          score: Number(item?.score || 0),
+          momentum: Number(item?.momentum || 0),
+          quality: Number(item?.quality || 0),
+        }))
+        .filter((item) => item.symbol);
+    }
+    const assetScores = Array.isArray(state.modules?.factors?.payload?.factor_library?.asset_scores)
+      ? state.modules.factors.payload.factor_library.asset_scores
+      : [];
+    return assetScores.slice(0, 3).map((item) => ({
+      symbol: String(item?.symbol || '').trim(),
+      score: Number(item?.score || 0),
+      momentum: Number(item?.momentum || 0),
+      quality: Number(item?.quality || 0),
+    })).filter((item) => item.symbol);
+  }
+
+  function formatFactorFocusSummary(items = getFactorFocusItems()) {
+    if (!items.length) return '待生成';
+    return items.map((item) => `${item.symbol} (${Number(item.score || 0).toFixed(2)})`).join(' / ');
+  }
+
+  function getRecommendationSourceMeta(rec = state.recommendations) {
+    const factorLibrary = state.modules?.factors?.payload?.factor_library || {};
+    const sourceMeta = rec?.source_meta || {};
+    const sourceGeneratedAt = String(sourceMeta.generated_at || '').trim();
+    const factorGeneratedAt = String(state.modules?.factors?.generated_at || '').trim();
+    const recommendationGeneratedAt = String(rec?.generated_at || '').trim();
+    return {
+      served_mode: String(sourceMeta.served_mode || factorLibrary.served_mode || 'unknown').trim(),
+      cached: sourceMeta.cached != null ? !!sourceMeta.cached : !!factorLibrary.cached,
+      cache_age_sec: Number(sourceMeta.cache_age_sec != null ? sourceMeta.cache_age_sec : (factorLibrary.cache_age_sec || 0)),
+      generated_at: recommendationGeneratedAt || sourceGeneratedAt || factorGeneratedAt,
+      universe_size: Number(sourceMeta.universe_size != null ? sourceMeta.universe_size : (factorLibrary.universe_size || 0)),
+      symbols_used: Number(sourceMeta.symbols_used != null ? sourceMeta.symbols_used : ((factorLibrary.symbols_used || []).length || 0)),
+    };
+  }
+
+  function describeRecommendationSource(meta = getRecommendationSourceMeta()) {
+    const mode = String(meta?.served_mode || 'unknown').trim();
+    const age = Number(meta?.cache_age_sec || 0);
+    const modeLabel = mode === 'live'
+      ? '实时计算'
+      : mode === 'cache_refresh'
+        ? '缓存返回，后台刷新'
+        : mode === 'cache'
+          ? '缓存返回'
+          : mode === 'fallback'
+            ? '降级占位'
+            : mode === 'bootstrap'
+              ? '启动快照'
+              : '未知来源';
+    if (meta?.cached && Number.isFinite(age) && age > 0) return `${modeLabel} · ${age.toFixed(1)}s`;
+    return modeLabel;
+  }
+
+  function buildRecommendationConclusion(rec = state.recommendations, overview = state.overview) {
+    const headline = String(rec?.headline || overview?.market_regime || '待生成').trim() || '待生成';
+    const biasText = formatRecommendationBias(rec?.direction_bias || overview?.direction_bias || '-');
+    return `${headline} / ${biasText}`;
+  }
+
   function buildLocalRecommendations() {
+    const profile = state.profile || getProfile();
     const overview = state.overview || buildLocalOverviewFromModules();
     const factors = state.modules?.factors?.summary || {};
+    const factorLibrary = state.modules?.factors?.payload?.factor_library || {};
     const cross = state.modules?.cross_asset?.summary || {};
     const onchain = state.modules?.onchain?.summary || {};
+    const directionBias = overview.direction_bias || 'neutral';
+    const headline = overview.market_regime || '研究建议待生成';
+    const preferred = directionBias === 'bullish'
+      ? ['趋势跟随', '动量轮动']
+      : directionBias === 'bearish'
+        ? ['防守对冲', '回撤控制']
+        : ['均值回归', '轻仓观察'];
+    const factorFocus = (Array.isArray(factorLibrary.asset_scores) ? factorLibrary.asset_scores : []).slice(0, 3).map((item) => ({
+      symbol: String(item?.symbol || '').trim(),
+      score: Number(item?.score || 0),
+      momentum: Number(item?.momentum || 0),
+      quality: Number(item?.quality || 0),
+    })).filter((item) => item.symbol);
+    const focusSymbols = factorFocus.length ? factorFocus.map((item) => item.symbol) : (factors.top_symbols || []).filter(Boolean).slice(0, 3);
     const nextActions = [];
-    if ((factors.top_symbols || []).length) nextActions.push(`优先观察 ${(factors.top_symbols || []).join(' / ')}`);
-    if (cross.leader_symbol) nextActions.push(`确认多币种龙头 ${cross.leader_symbol} 的持续性`);
-    if (Number(onchain.whale_count || 0) > 0) nextActions.push(`链上巨鲸 ${onchain.whale_count} 笔，防止外生扰动`);
-    if (!nextActions.length) nextActions.push('先补齐因子、多币种和链上模块，再决定执行方向');
+    if (cross.leader_symbol) nextActions.push(`确认多币种龙头 ${cross.leader_symbol} 的持续性。`);
+    if (Number(onchain.whale_count || 0) > 0) nextActions.push(`链上巨鲸 ${onchain.whale_count} 笔，防止外生扰动放大波动。`);
+    if (!nextActions.length) nextActions.push('先补齐因子、多币种和链上模块，再决定执行方向。');
+
+    const avoidConditions = (state.modules?.market_state?.warnings || []).slice(0, 3);
+    const researchTimeframes = deriveRecommendationTimeframes(profile.timeframe || '5m');
+    const plannerRegime = derivePlannerRegime(directionBias, headline);
+    const strategy = deriveBacktestStrategy(directionBias, headline);
+    const thesis = [];
+    if (factorFocus.length) thesis.push(`因子面当前靠前：${factorFocus.map((item) => `${item.symbol}(${item.score.toFixed(2)})`).join(' / ')}。`);
+    if (cross.leader_symbol) thesis.push(`横截面轮动由 ${cross.leader_symbol} 领跑，可作为强弱锚点。`);
+    if (Number(onchain.whale_count || 0) > 0) thesis.push(`链上巨鲸活跃 ${Number(onchain.whale_count || 0)} 笔，短期波动可能被放大。`);
+    if (!thesis.length) thesis.push('当前结论主要来自页面已加载摘要，建议补齐模块后再下结论。');
+
+    const sourceMeta = {
+      served_mode: String(factorLibrary.served_mode || 'unknown').trim(),
+      cached: !!factorLibrary.cached,
+      cache_age_sec: Number(factorLibrary.cache_age_sec || 0),
+      generated_at: String(state.modules?.factors?.generated_at || new Date().toISOString()),
+      universe_size: Number(factorLibrary.universe_size || 0),
+      symbols_used: Array.isArray(factorLibrary.symbols_used) ? factorLibrary.symbols_used.length : 0,
+    };
+
+    const aiBrief = {
+      headline,
+      goal: `围绕 ${(focusSymbols.length ? focusSymbols : [profile.primary_symbol || 'BTC/USDT']).join('、')} 在 ${headline} 环境下，优先验证 ${preferred.join(' / ')} 方案，并明确触发条件、失效条件与风险控制。`,
+      planner_regime: plannerRegime,
+      market_regime: headline,
+      direction_bias: directionBias,
+      symbols: focusSymbols.length ? focusSymbols : [profile.primary_symbol || 'BTC/USDT'],
+      timeframes: researchTimeframes,
+      preferred_strategy_families: preferred,
+      thesis,
+      risk_notes: avoidConditions.length ? avoidConditions : ['暂无明显额外风险，但仍需先做回测与成交质量验证。'],
+      next_steps: nextActions.slice(0, 4),
+      factor_focus: factorFocus,
+    };
+    aiBrief.prompt_context = [
+      `研究任务：${aiBrief.goal}`,
+      `市场状态：${aiBrief.market_regime} / ${aiBrief.direction_bias}`,
+      `关注标的：${aiBrief.symbols.join(' / ')}`,
+      `观察周期：${aiBrief.timeframes.join(' / ')}`,
+      `优先策略：${aiBrief.preferred_strategy_families.join(' / ')}`,
+      `研究观察：${aiBrief.thesis.join('；')}`,
+      `风险提示：${aiBrief.risk_notes.join('；')}`,
+      `下一步：${aiBrief.next_steps.join('；')}`,
+    ].join('\n');
+
+    const actionItems = [
+      {
+        id: 'prefill_ai_research',
+        kind: 'ai_prefill',
+        label: '填入 AI 研究器',
+        description: '把市场状态、币种、周期和风险约束写入 AI 研究页面。',
+        tone: 'primary',
+        params: {
+          goal: aiBrief.prompt_context,
+          regime: plannerRegime,
+          symbols: aiBrief.symbols,
+          timeframes: aiBrief.timeframes,
+          brief: aiBrief,
+        },
+      },
+      {
+        id: 'open_backtest_focus_symbol',
+        kind: 'backtest',
+        label: `回测 ${aiBrief.symbols[0]} ${strategy.label}策略`,
+        description: `跳转到回测页并预填 ${aiBrief.symbols[0]} / ${profile.timeframe || '5m'}。`,
+        tone: 'positive',
+        params: {
+          exchange: profile.exchange || 'binance',
+          symbol: aiBrief.symbols[0],
+          symbols: aiBrief.symbols,
+          timeframe: profile.timeframe || '5m',
+          strategy_type: strategy.strategy_type,
+        },
+      },
+    ];
+    if (!focusSymbols.length) {
+      actionItems.push({
+        id: 'refresh_factor_module',
+        kind: 'module',
+        label: '刷新因子面',
+        description: '当前还没有清晰的优先币种，先补齐因子排序。',
+        tone: 'neutral',
+        module: 'factors',
+      });
+    }
+    if (!cross.leader_symbol) {
+      actionItems.push({
+        id: 'refresh_cross_asset_module',
+        kind: 'module',
+        label: '补齐横截面覆盖',
+        description: '当前横截面线索偏少，先刷新多币种轮动面板。',
+        tone: 'neutral',
+        module: 'cross_asset',
+      });
+    }
+
+    const insightCards = [
+      ...(factorFocus.length ? [{
+        title: '因子观察',
+        tone: 'neutral',
+        body: factorFocus.map((item) => `${item.symbol} 评分 ${item.score.toFixed(2)}`).join(' / '),
+      }] : []),
+      ...nextActions.slice(0, 4).map((body) => ({ title: '下一步', tone: 'positive', body })),
+      ...avoidConditions.slice(0, 4).map((body) => ({ title: '风险提示', tone: 'warn', body })),
+      ...thesis.slice(0, 4).map((body) => ({ title: '研究观察', tone: 'neutral', body })),
+    ];
+
     return {
-      headline: overview.market_regime || '研究建议待生成',
-      direction_bias: overview.direction_bias || 'neutral',
-      preferred_strategy_families: overview.direction_bias === 'bullish'
-        ? ['趋势跟随', '动量轮动']
-        : overview.direction_bias === 'bearish'
-          ? ['防守对冲', '回撤控制']
-          : ['均值回归', '轻仓观察'],
+      headline,
+      direction_bias: directionBias,
+      preferred_strategy_families: preferred,
       next_actions: nextActions,
-      avoid_conditions: (state.modules?.market_state?.warnings || []).slice(0, 3),
-      backtest_jump_targets: [],
+      avoid_conditions: avoidConditions,
+      backtest_jump_targets: actionItems
+        .filter((item) => item.kind === 'backtest')
+        .map((item) => ({ label: item.label, target: item.kind, params: item.params })),
+      action_items: actionItems.slice(0, 4),
+      insight_cards: insightCards.slice(0, 8),
+      ai_brief: aiBrief,
+      factor_focus: factorFocus,
+      source_meta: sourceMeta,
+      focus_symbols: aiBrief.symbols,
+      source: 'local_fallback',
     };
   }
 
@@ -230,8 +465,13 @@
     setStatusItemValue(moduleEl, chips);
 
     let nextHtml = '先运行研究总览';
-    if (state.recommendations?.next_actions?.length) nextHtml = escSafe(state.recommendations.next_actions[0]);
-    else if (state.overview && !state.recommendations) nextHtml = '刷新研究建议';
+    if (state.recommendations) {
+      const conclusion = buildRecommendationConclusion(state.recommendations, state.overview);
+      const actionText = state.recommendations?.action_items?.[0]?.label
+        || state.recommendations?.next_actions?.[0]
+        || '查看研究建议';
+      nextHtml = `${escSafe(conclusion)}<div style="color:#7a8fa6;font-size:11px;margin-top:4px;">动作 ${escSafe(actionText)}</div>`;
+    } else if (state.overview) nextHtml = '刷新研究建议';
     else if (errorCount > 0) nextHtml = '先修复失败模块，再看综合结论';
     setStatusItemValue(nextEl, nextHtml);
   }
@@ -248,23 +488,212 @@
     }
 
     const overview = state.overview;
-    const jumpText = Array.isArray(state.recommendations?.backtest_jump_targets) && state.recommendations.backtest_jump_targets.length
-      ? state.recommendations.backtest_jump_targets.map((item) => item.label).join(' / ')
-      : '等待生成';
+    const jumpText = Array.isArray(state.recommendations?.action_items) && state.recommendations.action_items.length
+      ? state.recommendations.action_items.slice(0, 2).map((item) => item.label).join(' / ')
+      : Array.isArray(state.recommendations?.backtest_jump_targets) && state.recommendations.backtest_jump_targets.length
+        ? state.recommendations.backtest_jump_targets.map((item) => item.label).join(' / ')
+        : '等待生成';
+    const factorText = formatFactorFocusSummary(getFactorFocusItems(state.recommendations));
+    const conclusionText = buildRecommendationConclusion(state.recommendations, overview);
 
     summaryEl.innerHTML = [
       listItem('市场状态', overview.market_regime || '-'),
-      listItem('方向偏向', overview.direction_bias || '-'),
+      listItem('方向偏向', formatRecommendationBias(overview.direction_bias || '-')),
       listItem('研究可信度', Number(overview.confidence || 0).toFixed(2)),
       listItem('模块覆盖', `${Number(overview.coverage?.ok_count || 0)}/${Number(overview.coverage?.total || 0)}`),
       listItem('降级模块', Number(overview.coverage?.degraded_count || 0)),
     ].join('');
 
     actionEl.innerHTML = [
-      listItem('研究结论', state.recommendations?.headline || overview.market_regime || '-'),
-      listItem('推荐方向', state.recommendations?.direction_bias || overview.direction_bias || '-'),
-      listItem('推荐跳转', jumpText),
+      listItem('研究结论', conclusionText),
+      listItem('因子观察', factorText),
+      listItem('建议动作', jumpText),
     ].join('');
+  }
+
+  function buildFallbackInsightCards(rec) {
+    const items = [];
+    const factorFocus = getFactorFocusItems(rec);
+    if (factorFocus.length) {
+      items.push({
+        title: '因子观察',
+        tone: 'neutral',
+        body: factorFocus.map((item) => `${item.symbol} 评分 ${Number(item.score || 0).toFixed(2)}`).join(' / '),
+      });
+    }
+    (rec?.next_actions || []).slice(0, 4).forEach((body) => items.push({ title: '下一步', tone: 'positive', body }));
+    (rec?.avoid_conditions || []).slice(0, 4).forEach((body) => items.push({ title: '风险提示', tone: 'warn', body }));
+    return items;
+  }
+
+  function renderRecommendationActions(actionItems) {
+    if (!actionItems.length) {
+      return '<div class="research-conclusion-empty">暂无可执行动作，先运行研究总览补齐上下文。</div>';
+    }
+    return `
+      <section class="research-conclusion-section">
+        <div class="research-conclusion-section-head">
+          <h4>可执行动作</h4>
+          <span>${actionItems.length} 项</span>
+        </div>
+        <div class="research-conclusion-actions">
+          ${actionItems.map((action) => `
+            <button
+              type="button"
+              class="btn btn-sm research-conclusion-action-btn"
+              data-action-id="${escSafe(String(action.id || ''))}"
+              data-tone="${escSafe(String(action.tone || 'neutral'))}"
+            >
+              <span class="action-label">${escSafe(action.label || '执行动作')}</span>
+              <span class="action-desc">${escSafe(action.description || '')}</span>
+            </button>
+          `).join('')}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderRecommendationBrief(brief) {
+    if (!brief || !String(brief.goal || '').trim()) return '';
+    const factorFocus = getFactorFocusItems({ factor_focus: brief.factor_focus || [] });
+    const rows = [
+      { label: '研究任务', value: brief.goal || '-' },
+      { label: '市场状态', value: `${brief.market_regime || '-'} / ${brief.direction_bias || '-'}` },
+      { label: '关注标的', value: (brief.symbols || []).join(' / ') || '-' },
+      { label: '观察周期', value: (brief.timeframes || []).join(' / ') || '-' },
+      { label: '因子观察', value: factorFocus.length ? factorFocus.map((item) => `${item.symbol}(${item.score.toFixed(2)})`).join(' / ') : '-' },
+      { label: '优先策略', value: (brief.preferred_strategy_families || []).join(' / ') || '-' },
+      { label: '研究观察', value: (brief.thesis || []).join('；') || '-' },
+      { label: '风险提示', value: (brief.risk_notes || []).join('；') || '暂无明显额外风险' },
+      { label: '下一步', value: (brief.next_steps || []).join('；') || '-' },
+    ];
+    return `
+      <section class="research-conclusion-section">
+        <div class="research-conclusion-section-head">
+          <h4>AI 摘要</h4>
+          <span>结构化上下文</span>
+        </div>
+        <div class="research-brief-grid">
+          ${rows.map((row) => `
+            <div class="research-brief-item">
+              <div class="research-brief-label">${escSafe(row.label)}</div>
+              <div class="research-brief-value">${escSafe(row.value)}</div>
+            </div>
+          `).join('')}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderRecommendationInsights(rec) {
+    const cards = Array.isArray(rec?.insight_cards) && rec.insight_cards.length
+      ? rec.insight_cards
+      : buildFallbackInsightCards(rec);
+    if (!cards.length) return '';
+    return `
+      <section class="research-conclusion-section">
+        <div class="research-conclusion-section-head">
+          <h4>研究观察与风险</h4>
+          <span>${cards.length} 条</span>
+        </div>
+        <div class="research-conclusion-insights">
+          ${cards.map((item) => {
+            const tone = String(item.tone || 'neutral');
+            const tag = tone === 'warn' ? '风险' : tone === 'positive' ? '建议' : '观察';
+            return `
+              <div class="research-conclusion-item" data-tone="${escSafe(tone)}">
+                <div class="title">
+                  <span>${escSafe(item.title || '研究观察')}</span>
+                  <span class="research-conclusion-tag" data-tone="${escSafe(tone)}">${escSafe(tag)}</span>
+                </div>
+                <div class="body">${escSafe(item.body || '-')}</div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </section>
+    `;
+  }
+
+  function setPlannerFieldValue(id, value) {
+    const el = q(id);
+    if (!el) return;
+    if (el instanceof HTMLSelectElement) {
+      const target = String(value || '').trim();
+      const hasOption = [...el.options].some((opt) => String(opt.value || '').trim() === target);
+      el.value = hasOption ? target : (el.options[0]?.value || '');
+    } else {
+      el.value = value;
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function applyRecommendationToAi(action) {
+    const params = action?.params || {};
+    const brief = params.brief || state.recommendations?.ai_brief || {};
+    const goal = String(params.goal || brief.prompt_context || brief.goal || '').trim();
+    const regime = String(params.regime || brief.planner_regime || 'mixed').trim();
+    const symbols = Array.isArray(params.symbols) ? params.symbols : (brief.symbols || []);
+    const timeframes = Array.isArray(params.timeframes) ? params.timeframes : (brief.timeframes || []);
+
+    setPlannerFieldValue('ai-planner-goal', goal);
+    setPlannerFieldValue('ai-planner-regime', regime);
+    setPlannerFieldValue('ai-planner-symbols', symbols.join(', '));
+    setPlannerFieldValue('ai-planner-timeframes', timeframes.join(', '));
+
+    const plannerNotesEl = q('ai-planner-notes');
+    if (plannerNotesEl) {
+      const notes = [];
+      if ((brief.preferred_strategy_families || []).length) notes.push(`优先策略：${brief.preferred_strategy_families.join(' / ')}`);
+      if ((brief.risk_notes || []).length) notes.push(`风险：${brief.risk_notes.slice(0, 2).join('；')}`);
+      plannerNotesEl.innerHTML = notes.length
+        ? `<div style="font-size:11px;color:#7dd3fc;margin-bottom:3px;">已从研究总览填入：${escSafe(notes.join(' · '))}</div>`
+        : '';
+    }
+
+    if (typeof window.activateTab === 'function') window.activateTab('ai-research');
+    if (typeof window.notify === 'function') window.notify('已将研究建议填入 AI 研究器');
+  }
+
+  async function executeRecommendationAction(action) {
+    const kind = String(action?.kind || '').trim();
+    if (kind === 'backtest') {
+      if (typeof window.openBacktestWithSpec !== 'function') throw new Error('回测跳转能力未就绪');
+      await window.openBacktestWithSpec(action.params || {});
+      return;
+    }
+    if (kind === 'ai_prefill') {
+      applyRecommendationToAi(action);
+      return;
+    }
+    if (kind === 'module') {
+      const moduleName = String(action?.module || '').trim();
+      if (!moduleName) throw new Error('缺少需要刷新的模块');
+      await runWorkbenchModuleDirect(moduleName, false);
+      return;
+    }
+    throw new Error(`未知建议动作: ${kind || 'unknown'}`);
+  }
+
+  async function handleRecommendationActionClick(event) {
+    const button = event.target.closest('[data-action-id]');
+    if (!button) return;
+    const actionId = String(button.dataset.actionId || '').trim();
+    const action = (state.recommendations?.action_items || []).find((item) => String(item.id || '').trim() === actionId);
+    if (!action) return;
+
+    button.disabled = true;
+    button.classList.add('is-loading');
+    try {
+      await executeRecommendationAction(action);
+    } catch (err) {
+      setDebug('research.workbench.recommendation_action.error', String(err?.message || err));
+      if (typeof window.notify === 'function') window.notify(`执行建议失败: ${String(err?.message || err)}`, true);
+    } finally {
+      button.disabled = false;
+      button.classList.remove('is-loading');
+    }
   }
 
   function renderRecommendations() {
@@ -279,30 +708,26 @@
     }
 
     const rec = state.recommendations;
+    const brief = rec.ai_brief || {};
+    const focusSymbols = (brief.symbols || rec.focus_symbols || []).join(' / ');
+    const factorFocusText = formatFactorFocusSummary(getFactorFocusItems(rec));
+    const sourceMeta = getRecommendationSourceMeta(rec);
     summaryEl.innerHTML = [
-      listItem('研究结论', rec.headline || '-'),
-      listItem('方向偏向', rec.direction_bias || '-'),
+      listItem('研究结论', buildRecommendationConclusion(rec, state.overview)),
+      listItem('方向偏向', formatRecommendationBias(rec.direction_bias || '-')),
+      listItem('关注标的', focusSymbols || '-'),
+      listItem('因子观察', factorFocusText),
       listItem('策略家族', (rec.preferred_strategy_families || []).join(' / ') || '-'),
+      listItem('因子来源', describeRecommendationSource(sourceMeta)),
+      listItem('建议生成', sourceMeta.generated_at ? fmtTime(sourceMeta.generated_at) : '-'),
     ].join('');
 
-    const rows = [];
-    (rec.next_actions || []).slice(0, 4).forEach((text) => rows.push({ title: '下一步动作', badge: '执行', body: text }));
-    (rec.avoid_conditions || []).slice(0, 4).forEach((text) => rows.push({ title: '回避条件', badge: '风险', body: text }));
-    (rec.backtest_jump_targets || []).slice(0, 4).forEach((item) => rows.push({
-      title: item.label || '跳转',
-      badge: item.target || '页面',
-      body: JSON.stringify(item.params || {}),
-    }));
-
-    bulletEl.innerHTML = rows.length ? rows.map((item) => `
-      <div class="research-conclusion-item">
-        <div class="title">
-          <span>${escSafe(item.title)}</span>
-          <span class="status-badge">${escSafe(item.badge)}</span>
-        </div>
-        <div class="body">${escSafe(item.body)}</div>
-      </div>
-    `).join('') : '<div class="research-conclusion-empty">暂无可执行建议。</div>';
+    const actionItems = Array.isArray(rec.action_items) ? rec.action_items : [];
+    bulletEl.innerHTML = [
+      renderRecommendationActions(actionItems),
+      renderRecommendationBrief(brief),
+      renderRecommendationInsights(rec),
+    ].filter(Boolean).join('');
   }
 
   function renderExternalInfo(module) {
@@ -432,7 +857,22 @@
   }
 
   async function refreshRecommendations(quiet = false) {
-    const rec = buildLocalRecommendations();
+    state.profile = getProfile();
+    let rec;
+    try {
+      rec = await apiResearch('/recommendations', {
+        method: 'POST',
+        body: JSON.stringify({
+          profile: state.profile,
+          overview: state.overview || null,
+          modules: state.modules || {},
+        }),
+        timeoutMs: 20000,
+      });
+    } catch (err) {
+      rec = buildLocalRecommendations();
+      setDebug('research.workbench.recommendations.fallback', String(err?.message || err));
+    }
     state.recommendations = rec;
     renderRecommendations();
     renderOverview();
@@ -1046,6 +1486,15 @@
     bindAsyncButton('btn-load-regime-calendar', loadRegimeCalendar);
     const calDaysEl = q('regime-calendar-days');
     if (calDaysEl) calDaysEl.addEventListener('change', () => loadRegimeCalendar().catch(() => {}));
+    const recommendationEl = q('research-conclusion-bullets');
+    if (recommendationEl && recommendationEl.dataset.bound !== '1') {
+      recommendationEl.dataset.bound = '1';
+      recommendationEl.addEventListener('click', (event) => {
+        handleRecommendationActionClick(event).catch((err) => {
+          setDebug('research.workbench.recommendation_action.bind_error', String(err?.message || err));
+        });
+      });
+    }
   }
 
   function bindConfigWatchers() {

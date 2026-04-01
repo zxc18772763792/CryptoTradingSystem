@@ -839,7 +839,7 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
 
 
 async def _build_factors_module(profile: ResearchProfile) -> Dict[str, Any]:
-    symbols = ",".join(_profile_symbol_window(profile, 16))
+    symbols = ",".join(_profile_symbol_window(profile, 30))
     factor_task = _wait_or_none(
         get_factor_library(
             exchange=profile.exchange,
@@ -1202,6 +1202,287 @@ def _build_recommendations(
     }
 
 
+def _build_structured_recommendations(
+    profile: ResearchProfile,
+    modules: Dict[str, Any],
+    overview: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    def _derive_research_timeframes(base_timeframe: str) -> List[str]:
+        presets = {
+            "1m": ["1m", "5m", "15m"],
+            "5m": ["5m", "15m", "1h"],
+            "15m": ["5m", "15m", "1h", "4h"],
+            "1h": ["15m", "1h", "4h"],
+            "4h": ["1h", "4h", "1d"],
+            "1d": ["4h", "1d"],
+        }
+        selected = presets.get(str(base_timeframe or "5m").lower(), ["5m", "15m", "1h"])
+        normalized: List[str] = []
+        for timeframe in selected:
+            tf = str(timeframe or "").lower()
+            if tf in _VALID_TIMEFRAMES and tf not in normalized:
+                normalized.append(tf)
+        return normalized or ["5m", "15m", "1h"]
+
+    def _pick_backtest_strategy(bias: str, title: str) -> Dict[str, str]:
+        headline_text = str(title or "")
+        headline_lower = headline_text.lower()
+        if "breakout" in headline_lower or "突破" in headline_text:
+            return {"strategy_type": "DonchianBreakoutStrategy", "label": "突破"}
+        if bias == "bullish":
+            return {"strategy_type": "TrendFollowingStrategy", "label": "趋势"}
+        if bias == "bearish":
+            return {"strategy_type": "MeanReversionStrategy", "label": "防守"}
+        return {"strategy_type": "MeanReversionStrategy", "label": "均值回归"}
+
+    def _map_planner_regime(bias: str, title: str) -> str:
+        headline_text = str(title or "")
+        headline_lower = headline_text.lower()
+        if "news" in headline_lower or "事件" in headline_text or "新闻" in headline_text:
+            return "news_event"
+        if "breakout" in headline_lower or "突破" in headline_text:
+            return "breakout"
+        if bias == "bullish":
+            return "trend_up"
+        if bias == "bearish":
+            return "trend_down"
+        if "mean" in headline_lower or "回归" in headline_text or "震荡" in headline_text:
+            return "mean_reversion"
+        return "mixed"
+
+    market_payload = _extract_module_payload(modules.get("market_state"))
+    factors_payload = _extract_module_payload(modules.get("factors"))
+    cross_payload = _extract_module_payload(modules.get("cross_asset"))
+    onchain_payload = _extract_module_payload(modules.get("onchain"))
+    discipline_payload = _extract_module_payload(modules.get("discipline"))
+
+    regime = dict(market_payload.get("regime") or {})
+    factor_library = dict(factors_payload.get("factor_library") or {})
+    cross_asset = dict(cross_payload.get("cross_asset") or {})
+    onchain = dict(onchain_payload.get("onchain") or {})
+    sentiment_dashboard = dict(market_payload.get("sentiment_dashboard") or {})
+    news_summary = dict(onchain_payload.get("news_summary") or sentiment_dashboard.get("news") or {})
+    behavior = dict(discipline_payload.get("behavior_report") or {})
+
+    direction_bias = str(regime.get("bias") or "neutral")
+    if direction_bias == "bullish":
+        preferred = ["趋势跟随", "动量突破", "低杠杆顺势"]
+    elif direction_bias == "bearish":
+        preferred = ["防守型均值回归", "反弹做空", "事件驱动快进快出"]
+    else:
+        preferred = ["均值回归", "低频震荡", "轻仓事件跟踪"]
+
+    avoid: List[str] = []
+    next_actions: List[str] = []
+    jump_targets: List[Dict[str, Any]] = []
+
+    asset_scores = list(factor_library.get("asset_scores") or [])
+    factor_focus = [
+        {
+            "symbol": str(item.get("symbol") or "").strip(),
+            "score": round(float(item.get("score") or 0.0), 4),
+            "momentum": round(float(item.get("momentum") or 0.0), 4),
+            "quality": round(float(item.get("quality") or 0.0), 4),
+        }
+        for item in asset_scores[:3]
+        if str(item.get("symbol") or "").strip()
+    ]
+    top_symbols = [item["symbol"] for item in factor_focus]
+    focus_symbols = top_symbols or [profile.primary_symbol]
+
+    if bool(onchain.get("degraded")):
+        avoid.append("链上与外生信息当前包含降级样本，不适合作为单独开仓依据。")
+    if int(news_summary.get("events_count") or 0) == 0:
+        avoid.append("当前标的新闻事件覆盖不足，不要过度依赖事件驱动判断。")
+    if bool(behavior.get("overtrading_warning")):
+        avoid.append("当前存在过度交易风险，建议减少试错频率。")
+    if float(behavior.get("impulsive_ratio") or 0.0) >= 0.3:
+        avoid.append("近期执行纪律偏弱，避免同时追多个币。")
+
+    if direction_bias == "bullish":
+        next_actions.append("先验证顺势策略在 5m / 15m 上的连续性，再决定是否放大仓位。")
+    elif direction_bias == "bearish":
+        next_actions.append("优先评估防守型与回撤控制策略，不建议直接追单边。")
+    else:
+        next_actions.append("先在回测页验证均值回归或震荡策略，不要直接扩到过多币种。")
+
+    if int(cross_asset.get("count") or 0) < 3:
+        next_actions.append("先补足多币种覆盖，再做横截面轮动判断。")
+
+    headline = str((overview or {}).get("market_regime") or regime.get("regime") or "短周期研究建议")
+    planner_regime = _map_planner_regime(direction_bias, headline)
+    research_timeframes = _derive_research_timeframes(profile.timeframe)
+    backtest_strategy = _pick_backtest_strategy(direction_bias, headline)
+    factor_source_meta = {
+        "served_mode": str(factor_library.get("served_mode") or "unknown"),
+        "cached": bool(factor_library.get("cached")),
+        "cache_age_sec": round(float(factor_library.get("cache_age_sec") or 0.0), 3),
+        "universe_size": int(factor_library.get("universe_size") or 0),
+        "symbols_used": int(len(factor_library.get("symbols_used") or [])),
+        "generated_at": str(modules.get("factors", {}).get("generated_at") or ""),
+    }
+    cross_leader = str(
+        cross_asset.get("leader_symbol")
+        or ((cross_asset.get("assets") or [{}])[0].get("symbol") if isinstance(cross_asset.get("assets"), list) else "")
+        or ""
+    )
+    whale_count = int((onchain.get("whale_activity") or {}).get("count") or 0)
+
+    thesis_points: List[str] = []
+    if factor_focus:
+        thesis_points.append(
+            "因子面当前靠前："
+            + " / ".join(f"{item['symbol']}({item['score']:.2f})" for item in factor_focus)
+            + "。"
+        )
+    if cross_leader:
+        thesis_points.append(f"横截面轮动当前由 {cross_leader} 领涨领跌，可作为强弱锚点。")
+    if whale_count > 0:
+        thesis_points.append(f"链上巨鲸活跃 {whale_count} 笔，短期波动可能被放大。")
+    if int(news_summary.get("events_count") or 0) > 0:
+        thesis_points.append(f"近 24h 新闻事件 {int(news_summary.get('events_count') or 0)} 条，可作为事件风向参考。")
+    if not thesis_points:
+        thesis_points.append("当前结论主要来自研究总览摘要，建议补齐模块后再下结论。")
+
+    ai_goal = (
+        f"围绕 {'、'.join(focus_symbols)} 在 {headline} 环境下，"
+        f"优先验证 {' / '.join(preferred[:2])} 策略，明确触发条件、失效条件与仓位约束。"
+    )
+    ai_brief = {
+        "headline": headline,
+        "goal": ai_goal,
+        "planner_regime": planner_regime,
+        "market_regime": headline,
+        "direction_bias": direction_bias,
+        "symbols": focus_symbols,
+        "timeframes": research_timeframes,
+        "preferred_strategy_families": preferred,
+        "thesis": thesis_points[:4],
+        "risk_notes": (avoid or ["暂无明显额外风险，但仍需先做回测与成交质量验证。"])[:4],
+        "next_steps": next_actions[:4],
+        "factor_focus": factor_focus,
+    }
+    ai_brief["prompt_context"] = "\n".join(
+        [
+            f"研究任务：{ai_goal}",
+            f"市场状态：{headline} / {direction_bias}",
+            f"关注标的：{' / '.join(ai_brief['symbols'])}",
+            f"观察周期：{' / '.join(ai_brief['timeframes'])}",
+            f"优先策略：{' / '.join(preferred)}",
+            f"研究观察：{'；'.join(ai_brief['thesis'])}",
+            f"风险提示：{'；'.join(ai_brief['risk_notes'])}",
+            f"下一步：{'；'.join(ai_brief['next_steps'])}",
+        ]
+    )
+
+    action_items: List[Dict[str, Any]] = [
+        {
+            "id": "prefill_ai_research",
+            "kind": "ai_prefill",
+            "label": "填入 AI 研究器",
+            "description": "把市场状态、币种、周期和风险约束写入 AI 研究页面。",
+            "tone": "primary",
+            "params": {
+                "goal": ai_brief["prompt_context"],
+                "regime": planner_regime,
+                "symbols": focus_symbols,
+                "timeframes": research_timeframes,
+                "brief": ai_brief,
+            },
+        }
+    ]
+    if focus_symbols:
+        backtest_params = {
+            "exchange": profile.exchange,
+            "symbol": focus_symbols[0],
+            "symbols": focus_symbols,
+            "timeframe": profile.timeframe,
+            "strategy_type": backtest_strategy["strategy_type"],
+        }
+        action_items.append(
+            {
+                "id": "open_backtest_focus_symbol",
+                "kind": "backtest",
+                "label": f"回测 {focus_symbols[0]} {backtest_strategy['label']}策略",
+                "description": f"跳转到回测页并预填 {focus_symbols[0]} / {profile.timeframe}。",
+                "tone": "positive",
+                "params": backtest_params,
+            }
+        )
+        jump_targets.append(
+            {
+                "label": f"回测 {focus_symbols[0]} {backtest_strategy['label']}策略",
+                "target": "backtest",
+                "params": backtest_params,
+            }
+        )
+    if not top_symbols:
+        action_items.append(
+            {
+                "id": "refresh_factor_module",
+                "kind": "module",
+                "label": "刷新因子面",
+                "description": "当前还没有清晰的优先币种，先补齐因子排序。",
+                "tone": "neutral",
+                "module": "factors",
+            }
+        )
+    if int(cross_asset.get("count") or 0) < 3:
+        action_items.append(
+            {
+                "id": "refresh_cross_asset_module",
+                "kind": "module",
+                "label": "补齐横截面覆盖",
+                "description": "可用币种不足，先刷新多币种轮动面板。",
+                "tone": "neutral",
+                "module": "cross_asset",
+            }
+        )
+    if bool(onchain.get("degraded")) or int(news_summary.get("events_count") or 0) == 0:
+        action_items.append(
+            {
+                "id": "refresh_onchain_module",
+                "kind": "module",
+                "label": "刷新链上与外生",
+                "description": "链上或新闻覆盖偏弱，先补齐外部上下文。",
+                "tone": "warn",
+                "module": "onchain",
+            }
+        )
+
+    insight_cards: List[Dict[str, Any]] = []
+    if factor_focus:
+        insight_cards.append(
+            {
+                "title": "因子观察",
+                "tone": "neutral",
+                "body": " / ".join(
+                    f"{item['symbol']} 评分 {item['score']:.2f}"
+                    + (f" | 动量 {item['momentum']:.2f}" if item["momentum"] else "")
+                    for item in factor_focus
+                ),
+            }
+        )
+    insight_cards.extend({"title": "下一步", "tone": "positive", "body": text} for text in next_actions[:4])
+    insight_cards.extend({"title": "风险提示", "tone": "warn", "body": text} for text in avoid[:4])
+    insight_cards.extend({"title": "研究观察", "tone": "neutral", "body": text} for text in thesis_points[:4])
+    return {
+        "direction_bias": direction_bias,
+        "preferred_strategy_families": preferred,
+        "avoid_conditions": avoid,
+        "next_actions": next_actions,
+        "backtest_jump_targets": jump_targets,
+        "action_items": action_items[:4],
+        "insight_cards": insight_cards[:8],
+        "ai_brief": ai_brief,
+        "factor_focus": factor_focus,
+        "source_meta": factor_source_meta,
+        "focus_symbols": focus_symbols,
+        "headline": headline,
+        "generated_at": _now_iso(),
+    }
+
+
 async def _get_research_workbench_context(exchange: str = "binance") -> Dict[str, Any]:
     symbols = await get_research_symbols(exchange=exchange)
     analytics_history_status = await _load_analytics_ingest_status_map()
@@ -1281,7 +1562,7 @@ async def _get_research_workbench_recommendations(payload: ResearchRecommendatio
     profile = _normalize_profile(payload.profile)
     modules = dict(payload.modules or {})
     overview = dict(payload.overview or {})
-    return _build_recommendations(profile, modules, overview)
+    return _build_structured_recommendations(profile, modules, overview)
 
 
 @router.get("/workbench/context")

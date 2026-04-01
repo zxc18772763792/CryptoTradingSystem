@@ -100,7 +100,8 @@ class ConditionalManualOrder:
 class ExecutionEngine:
     def __init__(self):
         self._running: bool = False
-        self._signal_queue: asyncio.Queue = asyncio.Queue()
+        self._signal_queue: Optional[asyncio.Queue] = None
+        self._signal_queue_loop: Optional[asyncio.AbstractEventLoop] = None
         self._queue_task: Optional[asyncio.Task] = None
         self._execution_callbacks: List[callable] = []
         self._paper_trading: bool = True
@@ -354,6 +355,25 @@ class ExecutionEngine:
             except Exception as e:
                 logger.error(f"Execution callback error: {e}")
 
+    def _ensure_signal_queue(self) -> asyncio.Queue:
+        loop = asyncio.get_running_loop()
+        if self._signal_queue is not None and self._signal_queue_loop is loop:
+            return self._signal_queue
+
+        dropped = 0
+        if self._signal_queue is not None:
+            with contextlib.suppress(Exception):
+                dropped = int(self._signal_queue.qsize())
+        if dropped > 0:
+            logger.warning(
+                "Execution signal queue rebound to current event loop; "
+                f"dropped {dropped} pending signal(s)"
+            )
+
+        self._signal_queue = asyncio.Queue()
+        self._signal_queue_loop = loop
+        return self._signal_queue
+
     async def submit_signal(self, signal: Signal) -> bool:
         self._signal_diagnostics["submitted"] = int(self._signal_diagnostics.get("submitted", 0)) + 1
         self._signal_diagnostics["last_signal"] = {
@@ -367,11 +387,12 @@ class ExecutionEngine:
         self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
         if self._running:
             await self._ensure_queue_worker()
+        queue = self._ensure_signal_queue()
         if self._queue_task and not self._queue_task.done():
-            await self._signal_queue.put(signal)
+            await queue.put(signal)
             logger.debug(
                 f"Signal queued: {signal.signal_type.value} {signal.symbol} "
-                f"(queue_size={self._signal_queue.qsize()})"
+                f"(queue_size={queue.qsize()})"
             )
             return True
 
@@ -385,8 +406,15 @@ class ExecutionEngine:
     async def _ensure_queue_worker(self) -> None:
         if not self._running:
             return
+        queue = self._ensure_signal_queue()
         if self._queue_task and not self._queue_task.done():
-            return
+            task_loop = getattr(self._queue_task, "_loop", None)
+            if task_loop is self._signal_queue_loop:
+                return
+            with contextlib.suppress(Exception):
+                self._queue_task.cancel()
+            self._queue_task = None
+            logger.warning("Execution signal queue worker rebound to current event loop")
         self._queue_task = asyncio.create_task(
             self._process_signal_queue(),
             name="execution_signal_queue",
@@ -3577,9 +3605,10 @@ class ExecutionEngine:
         await self._check_protective_orders()
 
     async def _process_signal_queue(self) -> None:
+        queue = self._ensure_signal_queue()
         while self._running:
             try:
-                signal = await asyncio.wait_for(self._signal_queue.get(), timeout=1.0)
+                signal = await asyncio.wait_for(queue.get(), timeout=1.0)
                 await self.execute_signal(signal)
             except asyncio.TimeoutError:
                 await self._background_tick()
@@ -3637,12 +3666,14 @@ class ExecutionEngine:
         fee_total = float(self._paper_total_fees_usd or 0.0)
         self._conditional_orders.clear()
         queue_cleared = 0
-        while not self._signal_queue.empty():
-            try:
-                self._signal_queue.get_nowait()
-                queue_cleared += 1
-            except Exception:
-                break
+        queue = self._signal_queue
+        if queue is not None:
+            while not queue.empty():
+                try:
+                    queue.get_nowait()
+                    queue_cleared += 1
+                except Exception:
+                    break
         self._last_bg_check_at = None
         self._last_live_reconcile_at = None
         self._paper_total_fees_usd = 0.0
@@ -3666,7 +3697,10 @@ class ExecutionEngine:
         return self._running
 
     def get_queue_size(self) -> int:
-        return self._signal_queue.qsize()
+        queue = self._signal_queue
+        if queue is None:
+            return 0
+        return queue.qsize()
 
     def get_signal_diagnostics(self) -> Dict[str, Any]:
         return dict(self._signal_diagnostics or {})
