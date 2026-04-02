@@ -79,9 +79,13 @@ class StrategyManager:
         # symbol -> most recent Signal, used for conflict detection
         self._recent_signal_by_symbol: Dict[str, Signal] = {}
         # Shared market data cache: (exchange, symbol, timeframe, limit) -> (df, timestamp)
-        # TTL = 30s to avoid redundant loads when multiple strategies share same symbol/timeframe
+        # TTL is dynamic per timeframe to keep sub-minute strategies responsive while
+        # still avoiding redundant loads when multiple strategies share the same feed.
         self._market_data_cache: Dict[Tuple, Tuple[pd.DataFrame, float]] = {}
-        self._market_data_cache_ttl: float = 30.0
+        self._market_data_cache_max_ttl: float = 30.0
+        # Strategy runtime should behave like an event-driven backtest: process each
+        # completed bar once instead of re-running on the same forming candle.
+        self._last_processed_bar_at: Dict[Tuple[str, str, str], pd.Timestamp] = {}
 
     def _ensure_strategy_account(self, name: str, params: Dict[str, Any]) -> None:
         from core.trading.account_manager import account_manager
@@ -131,6 +135,101 @@ class StrategyManager:
         except Exception:
             return 60
 
+    def _bar_timeframe_to_seconds(self, timeframe: str) -> int:
+        if not timeframe:
+            return 60
+        try:
+            unit = timeframe[-1]
+            value = max(1, int(timeframe[:-1]))
+            if unit == "s":
+                return value
+            if unit == "m":
+                return value * 60
+            if unit == "h":
+                return value * 3600
+            if unit == "d":
+                return value * 86400
+            if unit == "w":
+                return value * 7 * 86400
+            if unit == "M":
+                return value * 30 * 86400
+            return 60
+        except Exception:
+            return 60
+
+    def _market_data_cache_ttl_for_timeframe(self, timeframe: str) -> float:
+        tf_seconds = max(1, int(self._bar_timeframe_to_seconds(timeframe)))
+        # Use at most one-sixth of the bar size, capped at 30s and floored at 1s.
+        return float(max(1.0, min(self._market_data_cache_max_ttl, tf_seconds / 6.0)))
+
+    @staticmethod
+    def _naive_timestamp(value: Any) -> pd.Timestamp:
+        ts = pd.Timestamp(value)
+        if ts.tzinfo is not None:
+            ts = ts.tz_localize(None)
+        return ts
+
+    def _drop_incomplete_last_bar(
+        self,
+        df: pd.DataFrame,
+        timeframe: str,
+        *,
+        now: Optional[datetime] = None,
+    ) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame() if df is None else df
+
+        out = df.copy()
+        out.index = pd.to_datetime(out.index)
+        out = out[~out.index.duplicated(keep="last")].sort_index()
+        if out.empty:
+            return out
+
+        tf_seconds = max(1, int(self._bar_timeframe_to_seconds(timeframe)))
+        anchor = self._naive_timestamp(now or datetime.now())
+        last_ts = self._naive_timestamp(out.index[-1])
+        bar_close_at = last_ts + pd.Timedelta(seconds=tf_seconds)
+        if anchor < bar_close_at:
+            return out.iloc[:-1].copy()
+        return out
+
+    def _bar_state_key(self, strategy_name: str, symbol: str, timeframe: str) -> Tuple[str, str, str]:
+        return (
+            str(strategy_name or "").strip(),
+            str(symbol or "").strip().upper(),
+            str(timeframe or "").strip(),
+        )
+
+    def _has_new_completed_bar(
+        self,
+        strategy_name: str,
+        symbol: str,
+        timeframe: str,
+        bar_timestamp: Any,
+    ) -> bool:
+        key = self._bar_state_key(strategy_name, symbol, timeframe)
+        current = self._naive_timestamp(bar_timestamp)
+        previous = self._last_processed_bar_at.get(key)
+        if previous is None:
+            return True
+        return bool(current > self._naive_timestamp(previous))
+
+    def _mark_bar_processed(
+        self,
+        strategy_name: str,
+        symbol: str,
+        timeframe: str,
+        bar_timestamp: Any,
+    ) -> None:
+        key = self._bar_state_key(strategy_name, symbol, timeframe)
+        self._last_processed_bar_at[key] = self._naive_timestamp(bar_timestamp)
+
+    def _clear_bar_runtime_state(self, strategy_name: str) -> None:
+        prefix = str(strategy_name or "").strip()
+        stale_keys = [key for key in self._last_processed_bar_at.keys() if key[0] == prefix]
+        for key in stale_keys:
+            self._last_processed_bar_at.pop(key, None)
+
     async def _load_market_data(
         self,
         exchange: str,
@@ -141,9 +240,10 @@ class StrategyManager:
         cache_key = (exchange, symbol, timeframe, limit)
         now = time.monotonic()
         cached = self._market_data_cache.get(cache_key)
+        cache_ttl = self._market_data_cache_ttl_for_timeframe(timeframe)
         if cached is not None:
             df_cached, ts = cached
-            if now - ts < self._market_data_cache_ttl:
+            if now - ts < cache_ttl:
                 return df_cached.copy()
 
         local_df = await data_storage.load_klines_from_parquet(
@@ -190,12 +290,16 @@ class StrategyManager:
         if df.empty:
             return pd.DataFrame()
 
+        df = self._drop_incomplete_last_bar(df, timeframe)
+        if df.empty:
+            return pd.DataFrame()
+
         result = df.tail(limit).copy()
         result["symbol"] = symbol
         self._market_data_cache[cache_key] = (result, time.monotonic())
         # Evict cache entries older than 2x TTL to prevent unbounded growth
         if len(self._market_data_cache) > 200:
-            cutoff = time.monotonic() - self._market_data_cache_ttl * 2
+            cutoff = time.monotonic() - self._market_data_cache_max_ttl * 2
             stale = [k for k, (_, t) in self._market_data_cache.items() if t < cutoff]
             for k in stale:
                 del self._market_data_cache[k]
@@ -544,6 +648,9 @@ class StrategyManager:
                 )
                 if df.empty:
                     continue
+                latest_bar_at = pd.Timestamp(df.index[-1])
+                if not self._has_new_completed_bar(name, symbol, config.timeframe, latest_bar_at):
+                    continue
 
                 if requires_pair:
                     pair_symbol = str(config.params.get("pair_symbol", "")).strip().upper()
@@ -577,9 +684,11 @@ class StrategyManager:
                             f"Strategy {name} generated {len(signals)} signal(s) for pair "
                             f"{symbol} vs {pair_symbol}"
                         )
+                    self._mark_bar_processed(name, symbol, config.timeframe, latest_bar_at)
                     continue
 
                 signals = await self.process_data(name, df)
+                self._mark_bar_processed(name, symbol, config.timeframe, latest_bar_at)
                 if signals:
                     logger.info(
                         f"Strategy {name} generated {len(signals)} signal(s) for {symbol}"
@@ -708,6 +817,7 @@ class StrategyManager:
         self._last_run_at.pop(name, None)
         self._running_since.pop(name, None)
         self._runtime_deadlines.pop(name, None)
+        self._clear_bar_runtime_state(name)
 
         logger.info(f"Strategy {name} unregistered")
         return True
@@ -731,6 +841,7 @@ class StrategyManager:
             logger.warning(f"Strategy {name} already running")
             return True
 
+        self._clear_bar_runtime_state(name)
         strategy.initialize()
         strategy.start()
         self._running_since[name] = datetime.now(timezone.utc)
@@ -753,6 +864,7 @@ class StrategyManager:
         await self._stop_task_for_strategy(name)
         self._running_since.pop(name, None)
         self._runtime_deadlines.pop(name, None)
+        self._clear_bar_runtime_state(name)
         logger.info(f"Strategy {name} stopped")
         return True
 

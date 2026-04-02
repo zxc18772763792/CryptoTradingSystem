@@ -266,6 +266,43 @@ def _resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     return out
 
 
+def _drop_incomplete_last_bar(
+    df: pd.DataFrame,
+    timeframe: str,
+    *,
+    anchor_time: Optional[datetime] = None,
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    unit = str(timeframe or "1h")[-1]
+    value = int(str(timeframe or "1h")[:-1] or 1)
+    tf_seconds = {
+        "s": value,
+        "m": value * 60,
+        "h": value * 3600,
+        "d": value * 86400,
+        "w": value * 7 * 86400,
+        "M": value * 30 * 86400,
+    }.get(unit, 3600)
+
+    out = df.copy()
+    out.index = pd.to_datetime(out.index)
+    out = out[~out.index.duplicated(keep="last")].sort_index()
+    if out.empty:
+        return out
+
+    anchor = pd.Timestamp(anchor_time or datetime.now())
+    last_ts = pd.Timestamp(out.index[-1])
+    if anchor.tzinfo is not None:
+        anchor = anchor.tz_localize(None)
+    if last_ts.tzinfo is not None:
+        last_ts = last_ts.tz_localize(None)
+    if anchor < last_ts + pd.Timedelta(seconds=max(1, int(tf_seconds))):
+        return out.iloc[:-1].copy()
+    return out
+
+
 def _min_required_bars(timeframe: str) -> int:
     tf = str(timeframe or "").strip()
     if tf in _SUB_MINUTE_TIMEFRAMES:
@@ -2255,7 +2292,7 @@ async def _load_backtest_df(
             best = df
     if len(best) >= target_min:
         best.index = pd.to_datetime(best.index)
-        return best.sort_index()
+        return _drop_incomplete_last_bar(best.sort_index(), tf, anchor_time=end_dt)
 
     # 2) Aggregate from finer base timeframe when exact file is missing or insufficient.
     for base_tf in _candidate_base_timeframes(tf):
@@ -2278,6 +2315,7 @@ async def _load_backtest_df(
     if not best.empty:
         best.index = pd.to_datetime(best.index)
         best = best[~best.index.duplicated(keep="last")].sort_index()
+        best = _drop_incomplete_last_bar(best, tf, anchor_time=end_dt)
     return best
 
 
