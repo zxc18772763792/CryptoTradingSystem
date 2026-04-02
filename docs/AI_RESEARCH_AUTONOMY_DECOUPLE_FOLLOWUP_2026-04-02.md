@@ -1,188 +1,194 @@
-# AI 研究 / AI 自治代理后续修复计划
+# AI 研究 / AI 自治代理解耦收口说明
 
 日期：2026-04-02
 
-## 目标
+## 目的
 
-在已完成“AI 研究”和“AI 自治代理”运行信号与执行链路解耦的基础上，继续清理残留耦合、启动语义不一致、文档偏差和兼容壳字段，避免后续出现“页面看起来分开了，但运行链路仍然互相牵连”的问题。
+这份文档用于给当前“AI 研究”和“AI 自治代理”解耦工作做一次阶段性收口，明确三件事：
 
-## 当前结论
+1. 现在代码里哪些边界已经真正拆开了。
+2. 还有哪些地方只是“语义上分开”，但实现上仍有残留耦合或兼容壳。
+3. 下一轮如果继续清理，应该按什么顺序做，避免把已经拆开的边界重新混回去。
 
-- 已完成：
-  - AI 研究候选实时信号与自治代理 watchlist 实时信号分离
-  - 自治代理不再消费研究候选/champion 作为实时执行前提
-  - 新闻引擎已纳入 `.\web.bat start` 默认启动链路
-- 仍有后续工作：
-  - 启动链路上，自治代理 `auto_start` 语义与 API/运行时配置不一致
-  - API 层面，自治代理控制接口仍挂在 `ai_research` 路由下，并依赖 `ensure_ai_research_runtime_state`
-  - 代码和文档里还保留部分旧时代的研究耦合兼容壳和描述
+## 结论摘要
 
-## 优先级与待修项
+- 这轮解耦的核心目标已经达到：AI 自治代理不再以 AI 研究候选、champion 或研究 runtime 作为实时执行前提。
+- 当前剩余问题主要属于“物理代码拆分不彻底、命名与文档仍有历史包袱、少量运行时上下文字段仍保留兼容壳”，而不是“执行链路仍然强耦合”。
+- 因此，当前阶段应把这项工作定义为：
+  - 逻辑边界：已完成
+  - 运行链路解耦：已完成
+  - 代码物理拆分与历史字段清理：未完全完成
 
-### P0: 自治代理 auto_start 语义不一致
+## 当前真实边界
 
-现状：
-- `web/main.py` 只读取 `settings.AI_AUTONOMOUS_AGENT_AUTO_START`
-- `core/ai/autonomous_agent.py` 返回的 `config.auto_start` 也是环境变量值
-- `web/api/ai_research.py` 的 `AIAutonomousAgentConfigUpdateRequest` 却仍暴露 `auto_start`
-- 但 `update_runtime_config()` 并不会持久化或应用 `auto_start`
+截至 2026-04-02，建议统一按下面的边界理解系统：
 
-风险：
-- API/调用方会误以为 `POST /runtime-config/autonomous-agent` 可以改启动自启行为
-- 实际重启后不生效，形成“保存成功但没有效果”的假象
+- AI 研究：
+  - 负责 proposal、experiment、candidate、回测、评估、注册和研究态 live signals。
+  - 负责“研究产物”的生成和管理，不直接代表自治代理的实时执行依据。
+- AI 自治代理：
+  - 负责 watchlist/universe 选择、聚合信号、运行时决策、journal 和执行提交。
+  - 不再以研究候选或 champion 作为实时执行前置条件。
+- live decision router：
+  - 属于独立的运行时守门层。
+  - 目前仍可读取 research context 作为 advisory/veto 输入。
+  - 它不是自治代理本体，也不应被继续描述为“研究页的附属能力”。
+- 启动链路：
+  - `.\web.bat start` 负责服务和新闻引擎的默认启动。
+  - AI 自治代理是否随服务启动，仍只由 `AI_AUTONOMOUS_AGENT_AUTO_START` 决定。
+  - 运行时配置保存不会改变进程重启时的自启动规则。
 
-建议：
-- 二选一，必须统一：
-  - 方案 A：明确 `auto_start` 仅由环境变量控制，从 API schema 中移除，并在文档中写清楚
-  - 方案 B：允许 `auto_start` 进入 overlay 持久化，并让 `web/main.py` 启动时优先读取持久化值
+## 本轮已完成项
 
-建议文件：
-- `E:\9_Crypto\crypto_trading_system\web\api\ai_research.py`
-- `E:\9_Crypto\crypto_trading_system\core\ai\autonomous_agent.py`
-- `E:\9_Crypto\crypto_trading_system\web\main.py`
-- `E:\9_Crypto\crypto_trading_system\STARTUP.md`
-- `E:\9_Crypto\crypto_trading_system\.env.example`
+### 1. 自治代理已从研究候选执行链路中拆出
 
-### P1: 自治代理控制接口仍依赖 AI 研究运行态初始化
+- 自治代理的运行逻辑已经基于自身的 watchlist、聚合信号和运行时上下文工作。
+- `core/ai/autonomous_agent.py` 中保留的 `research_context` 已经退化为 decoupled stub，而不是研究候选输入。
+- 这意味着“研究结果可以影响观察与治理说明”，但不再是“自治代理必须消费研究候选后才能运行”。
 
-现状：
-- `web/api/ai_research.py` 中的自治代理接口（status/start/stop/run-once 等）都先调用 `ensure_ai_research_runtime_state(request.app)`
-- 这说明自治代理控制 API 仍然挂在研究路由的初始化假设之下
+### 2. 自治代理 API 路由已经独立挂载
 
-风险：
-- 研究 registry 初始化失败、路径异常、文件损坏时，自治代理控制接口也可能被连带影响
-- 架构语义不清，后续维护者容易继续把“自治代理 = 研究子功能”理解成默认前提
+- `web/api/ai_agent.py` 已存在，并在 `web/main.py` 中单独挂载。
+- 对外语义上，自治代理已不再要求通过研究路由来暴露接口。
+- `status/start/stop/run-once/journal/review/symbol-ranking/live-signals` 等接口均有独立 agent 路由入口。
 
-建议：
-- 将自治代理接口拆到独立 router，例如 `web/api/ai_agent.py`
-- 或至少把自治代理接口对 `ensure_ai_research_runtime_state` 的依赖移除
+结论：
 
-建议文件：
-- `E:\9_Crypto\crypto_trading_system\web\api\ai_research.py`
-- `E:\9_Crypto\crypto_trading_system\web\main.py`
-- `E:\9_Crypto\crypto_trading_system\core\research\orchestrator.py`
+- “自治代理控制接口仍必须依赖研究页面入口”这一判断已经过时。
+- 现在的问题不是“没有独立路由”，而是“独立路由背后的处理函数仍复用旧模块实现”。
 
-### P1: live decision router 仍保留研究上下文耦合
+### 3. `auto_start` 的运行时配置语义已经基本对齐
 
-现状：
-- `core/ai/live_decision_router.py` 仍显式调用 `resolve_runtime_research_context`
-- 这条链路不属于自治代理，但仍属于 AI 运行时决策体系的一部分
+- `AIAutonomousAgentConfigUpdateRequest` 中已经不再暴露 `auto_start`。
+- `core/ai/autonomous_agent.py` 里返回的 `config.auto_start` 已明确只是环境层面的启动信息。
+- `web/main.py` 仍只根据 `settings.AI_AUTONOMOUS_AGENT_AUTO_START` 决定服务启动时是否自动拉起自治代理。
 
-风险：
-- 如果最终目标是“AI 研究”和所有运行时 AI 决策链路彻底分层”，这里仍是残留耦合点
-- 容易让后续改动再次把研究输出直接塞回实时决策
+结论：
 
-建议：
-- 先明确边界：
-  - 若 `live_decision_router` 被定义为“研究辅助 veto 层”，则文档明确，不急于改
-  - 若目标是“运行时 AI 决策完全独立于研究 runtime”，则需要继续拆
+- 当前代码实际上已经选择了“方案 A”：
+  - `auto_start` 由环境变量控制；
+  - runtime config 不负责修改进程级启动行为。
+- 因此，之前“API 仍可改 auto_start”的担忧已不再成立。
 
-建议文件：
-- `E:\9_Crypto\crypto_trading_system\core\ai\live_decision_router.py`
-- `E:\9_Crypto\crypto_trading_system\docs\AI_AUTONOMY_IMPLEMENTATION_PLAN.md`
+### 4. 启动文档已覆盖自治代理真实启动规则
 
-### P2: 自治代理内部仍保留 research_context 兼容壳
+- `STARTUP.md` 已单独说明：
+  - 新闻引擎是默认启动链路的一部分；
+  - 自治代理不会因为 `.\web.bat start` 自动启动，除非环境变量 `AI_AUTONOMOUS_AGENT_AUTO_START=true`；
+  - 若服务已启动但 agent 未运行，应单独检查并手动调用启动接口。
 
-现状：
-- `core/ai/autonomous_agent.py` 仍在 context/journal/debug payload 中保留 `research_context`
-- 当前内容已经是 decoupled stub，不再承载研究候选信息
+结论：
 
-风险：
-- 新调用方会误以为这个字段仍然是有效业务输入
-- 兼容壳长期保留会拖慢后续 schema 清理
+- “服务起来了等于自治代理也起来了”这种隐含假设，已经在文档层面被纠正。
 
-建议：
-- 先确认前端/API/审计面板是否仍需要该字段占位
-- 若无必须依赖，逐步移除或重命名为更中性的 runtime annotation 字段
+## 仍未完全收尾的部分
 
-建议文件：
-- `E:\9_Crypto\crypto_trading_system\core\ai\autonomous_agent.py`
-- `E:\9_Crypto\crypto_trading_system\web\api\ai_research.py`
-- `E:\9_Crypto\crypto_trading_system\tests\test_ai_autonomous_agent.py`
-
-### P2: 启动文档没有覆盖自治代理随服务启动的真实规则
+### P1: 独立路由已存在，但物理实现仍未完全拆开
 
 现状：
-- `STARTUP.md` 已清楚写了新闻引擎默认启动
-- 但没有写自治代理是否会随服务自动拉起、由谁控制、如何查看、如何手动启动
+
+- `web/api/ai_agent.py` 目前本质上仍是一个薄包装层。
+- 具体处理逻辑、请求模型和部分响应构造仍复用 `web/api/ai_research.py` 中的实现。
 
 风险：
-- 操作人员会默认认为“服务起来了，自治代理也起来了”
-- 实际当前逻辑是：只有 `AI_AUTONOMOUS_AGENT_AUTO_START=true` 时才会在服务启动时自动拉起
+
+- 代码组织仍会给维护者造成“agent 还是 research 子模块”的心理暗示。
+- 后续如果继续在 `ai_research.py` 中堆自治代理逻辑，容易让边界再次变模糊。
 
 建议：
-- 在 `STARTUP.md` 单独增加“AI 自治代理启动规则”章节
-- 明确区分：
-  - 服务启动
-  - 新闻引擎启动
-  - 自治代理启动
-  - 手动 API 启动
 
-建议文件：
-- `E:\9_Crypto\crypto_trading_system\STARTUP.md`
-- `E:\9_Crypto\crypto_trading_system\.env.example`
+- 将自治代理相关的 request model、handler、helper 逐步迁移到独立模块。
+- 可以保守地按下面的拆法推进：
+  - `web/api/ai_agent.py` 只保留路由定义；
+  - 新建独立 handler 模块承接 agent 逻辑；
+  - 最后再把 `ai_research.py` 中对应实现删除或仅保留兼容别名。
 
-### P2: 前端和文档还有少量残留/死代码
+### P1: `live_decision_router` 仍保留 research context 依赖
 
 现状：
-- `web/static/js/ai_research.js` 中存在重复定义的 `loadLiveSignals()`，前者是旧逻辑，后者是新逻辑
-- `docs/AI_AUTONOMY_IMPLEMENTATION_PLAN.md` 仍保留“自治代理消费研究结果”的旧目标表述
+
+- `core/ai/live_decision_router.py` 仍显式依赖 `resolve_runtime_research_context`。
+- prompt 中也仍把 `research_context` 作为 advisory source 输入。
 
 风险：
-- 前端存在阅读歧义和二次修改误用风险
-- 文档继续强化旧架构，容易把后续开发带偏
+
+- 如果项目长期目标是“运行时 AI 决策体系完全独立于研究 runtime”，这里仍然是剩余耦合点。
+- 如果边界不先讲清楚，后续很容易再次把研究 candidate/champion 直接回灌到实时执行判断里。
 
 建议：
-- 删除死代码和旧注释
-- 更新文档边界：AI 研究负责研究、候选、回测、注册；AI 自治代理负责 watchlist、聚合信号、执行决策
 
-建议文件：
-- `E:\9_Crypto\crypto_trading_system\web\static\js\ai_research.js`
-- `E:\9_Crypto\crypto_trading_system\docs\AI_AUTONOMY_IMPLEMENTATION_PLAN.md`
+- 先做边界决策，再决定是否继续拆：
+  - 如果将 `live_decision_router` 定义为“研究辅助 veto 层”，则保留该依赖，并把角色写清楚；
+  - 如果目标是“运行时 AI 守门完全独立”，则需要把这部分 research context 替换成更中性的 runtime evidence。
 
-## 推荐修复顺序
+### P2: `research_context` 兼容壳仍在自治代理内部保留
 
-1. 统一自治代理 `auto_start` 语义
-2. 补全 `STARTUP.md` 与 `.env.example`
-3. 清理前端死代码与旧文档表述
-4. 将自治代理接口从研究初始化依赖中拆出
-5. 评估是否继续拆 `live_decision_router`
-6. 收尾移除 `research_context` 兼容壳
+现状：
 
-## 团队并行分工建议
+- `core/ai/autonomous_agent.py` 仍在 context、journal、status payload 中保留 `research_context` 字段。
+- 当前该字段已经不是研究候选载体，而是 decoupled stub / 兼容占位。
 
-### Workstream A: 启动链路与配置语义
+风险：
 
-- 负责人方向：后端 / 运维
-- 处理：
-  - `auto_start` 语义统一
-  - `STARTUP.md`、`.env.example`、启动命令说明
+- 新调用方仍可能误判该字段是有效研究输入。
+- 长期保留会拖慢 schema 和前端说明的进一步清理。
 
-### Workstream B: API 与路由解耦
+建议：
 
-- 负责人方向：后端
-- 处理：
-  - 自治代理接口从研究初始化依赖中拆离
-  - 保证 agent API 在研究 runtime 异常时仍可工作
+- 先确认前端、日志、诊断面板是否还依赖这个字段形状。
+- 若没有强依赖，下一轮可考虑：
+  - 改名为更中性的 `runtime_annotation` 或 `advisory_context`；
+  - 或在 API 输出层直接移除，仅在内部调试保留。
 
-### Workstream C: 前端与文档收尾
+### P2: 历史文档仍有旧叙述，需要统一口径
 
-- 负责人方向：前端 / 文档
-- 处理：
-  - 删除重复 `loadLiveSignals()` 旧逻辑
-  - 更新页面说明与架构文档
+现状：
 
-### Workstream D: 运行时 AI 边界复核
+- 一些较早的设计文档仍会出现“自治代理消费研究结果”的旧表述。
+- 虽然 `docs/AI_AUTONOMY_IMPLEMENTATION_PLAN.md` 已加状态说明，但正文仍保留历史方向文字。
 
-- 负责人方向：架构 / 策略
-- 处理：
-  - 评估 `live_decision_router` 是否继续依赖研究上下文
-  - 决定是否进入下一轮彻底拆分
+风险：
+
+- 后续阅读者可能把“历史计划”当成“当前实现目标”。
+- 容易导致下一轮改动再次偏回旧架构。
+
+建议：
+
+- 统一给历史设计文档加明显的 status note。
+- 在后续架构说明中固定采用下面的口径：
+  - AI 研究负责研究产物；
+  - AI 自治代理负责实时观察与执行；
+  - live decision router 负责守门；
+  - 三者允许共享市场数据和治理约束，但不应重新形成执行强依赖。
+
+## 不应回退的边界
+
+后续继续迭代时，建议把下面几条当成硬边界：
+
+- 不要重新让自治代理以 research candidate/champion 作为执行前提。
+- 不要把 agent API 再挂回“必须先初始化 research runtime 才能使用”的路径。
+- 不要让 UI 的 runtime config 保存行为暗示“它会改变进程下次启动方式”。
+- 不要把 live decision router 描述成“自治代理的一部分”或“研究页附属功能”，除非先重新定义架构边界。
+
+## 推荐收尾顺序
+
+1. 完成自治代理 handler 与 request model 的物理拆分。
+2. 对 `live_decision_router` 做一次边界决策：保留 advisory research context，还是继续去研究化。
+3. 清理自治代理中的 `research_context` 兼容壳。
+4. 给所有历史文档统一补上“历史方向 / 当前真实边界”状态说明。
 
 ## 验收标准
 
-- 服务重启后，自治代理启动行为与配置/文档完全一致
-- API 层不存在“保存成功但启动行为不生效”的假配置
-- 新闻引擎、自主代理、研究调度三条链路的启动说明清晰分离
-- 自治代理相关接口在研究 runtime 初始化异常时不被无关阻塞
-- 前端与文档不再出现“自治代理依赖研究候选运行”的旧叙述
+- 新维护者只看路由和文档，就能清楚区分 AI 研究、AI 自治代理和 live decision router 三条链路。
+- 自治代理接口的实现位置不再继续向 `ai_research.py` 回流。
+- 服务重启后的自治代理启动行为，与 `AI_AUTONOMOUS_AGENT_AUTO_START` 和 `STARTUP.md` 说明完全一致。
+- 自治代理对外 payload 中不再保留会误导调用方的历史研究字段，或这些字段已被明确重命名并注明用途。
+- 历史文档不会再把“自治代理消费研究候选”描述成当前系统目标。
+
+## 最终判断
+
+截至 2026-04-02，这项工作最准确的描述应为：
+
+- “AI 研究”和“AI 自治代理”的运行链路解耦已经完成。
+- 剩余工作属于架构收尾，而不是核心逻辑尚未拆开。
+- 下一轮重点不应再是证明两者能否分离，而应是把已经分离的边界在代码组织、命名、文档和诊断字段上彻底固化。
