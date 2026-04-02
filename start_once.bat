@@ -14,4 +14,8 @@ echo [INFO] Forwarding to ".\web.bat start" ...
 call "%ENTRY%" start %*
 set "CODE=%ERRORLEVEL%"
 
+if "%CODE%"=="0" (
+  echo [INFO] Use ".\web.bat status" to verify mode and worker state.
+)
+
 endlocal & exit /b %CODE%

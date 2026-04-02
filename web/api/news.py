@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import re
+import subprocess
+import sys
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -63,6 +67,9 @@ _FAILED_REQUEUE_LOCK = asyncio.Lock()
 _FAILED_REQUEUE_LAST_AT: Optional[datetime] = None
 _NEWS_RESPONSE_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {"latest": {}, "summary": {}, "brief": {}, "health": {}}
 _NEWS_HEALTH_REFRESH_TASK: Optional[asyncio.Task] = None
+_NEWS_PROCESS_CACHE_TTL_SEC = 5.0
+_NEWS_PROCESS_CACHE_AT = 0.0
+_NEWS_PROCESS_CACHE_PAYLOAD: Dict[str, Any] = {}
 _TRACKING_QUERY_KEYS = {
     "feature",
     "fbclid",
@@ -205,14 +212,170 @@ def _news_source_flags() -> Dict[str, bool]:
     }
 
 
+def _task_running(task: Any) -> bool:
+    return isinstance(task, asyncio.Task) and not task.done()
+
+
+def _scan_external_news_processes() -> Dict[str, Any]:
+    snapshot: Dict[str, Any] = {
+        "worker_running": False,
+        "llm_running": False,
+        "worker_pids": [],
+        "llm_pids": [],
+        "detector": "none",
+        "error": None,
+    }
+    worker_token = "core.news.service.worker"
+    llm_token = "core.news.service.llm_worker"
+    try:
+        if sys.platform.startswith("win"):
+            command = (
+                "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
+                "Where-Object { "
+                "$n=[string]$_.Name; "
+                "if ($n -and $n.ToLowerInvariant() -notin @('python.exe','pythonw.exe')) { return $false }; "
+                "$cmd=[string]$_.CommandLine; "
+                "if (-not $cmd) { return $false }; "
+                "$lower=$cmd.ToLowerInvariant(); "
+                f"return $lower.Contains('{worker_token}') -or $lower.Contains('{llm_token}') "
+                "} | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
+            )
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+            )
+            snapshot["detector"] = "powershell:Get-CimInstance"
+            if proc.returncode != 0:
+                snapshot["error"] = (proc.stderr or proc.stdout or f"exit={proc.returncode}").strip()[:240] or None
+                return snapshot
+            raw_text = str(proc.stdout or "").strip()
+            if not raw_text:
+                return snapshot
+            payload = json.loads(raw_text)
+            rows = payload if isinstance(payload, list) else [payload]
+        else:
+            proc = subprocess.run(
+                ["ps", "-eo", "pid=,args="],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+            )
+            snapshot["detector"] = "ps"
+            if proc.returncode != 0:
+                snapshot["error"] = (proc.stderr or proc.stdout or f"exit={proc.returncode}").strip()[:240] or None
+                return snapshot
+            rows = []
+            for line in str(proc.stdout or "").splitlines():
+                text = str(line or "").strip()
+                if not text:
+                    continue
+                parts = text.split(None, 1)
+                if not parts:
+                    continue
+                pid_text = parts[0]
+                command_line = parts[1] if len(parts) > 1 else ""
+                rows.append({"ProcessId": pid_text, "CommandLine": command_line})
+    except Exception as exc:
+        snapshot["error"] = str(exc)[:240]
+        return snapshot
+
+    worker_pids: List[int] = []
+    llm_pids: List[int] = []
+    for row in rows:
+        command_line = str((row or {}).get("CommandLine") or "").strip()
+        if not command_line:
+            continue
+        lower_cmd = command_line.lower()
+        try:
+            pid = int((row or {}).get("ProcessId") or 0)
+        except Exception:
+            pid = 0
+        if llm_token in lower_cmd:
+            snapshot["llm_running"] = True
+            if pid > 0:
+                llm_pids.append(pid)
+        if worker_token in lower_cmd:
+            snapshot["worker_running"] = True
+            if pid > 0:
+                worker_pids.append(pid)
+
+    snapshot["worker_pids"] = sorted(set(worker_pids))
+    snapshot["llm_pids"] = sorted(set(llm_pids))
+    return snapshot
+
+
+def _external_news_process_snapshot() -> Dict[str, Any]:
+    global _NEWS_PROCESS_CACHE_AT, _NEWS_PROCESS_CACHE_PAYLOAD
+    now = time.monotonic()
+    if _NEWS_PROCESS_CACHE_PAYLOAD and (now - _NEWS_PROCESS_CACHE_AT) <= _NEWS_PROCESS_CACHE_TTL_SEC:
+        return dict(_NEWS_PROCESS_CACHE_PAYLOAD)
+    payload = _scan_external_news_processes()
+    _NEWS_PROCESS_CACHE_AT = now
+    _NEWS_PROCESS_CACHE_PAYLOAD = dict(payload)
+    return dict(payload)
+
+
+def _news_background_state(request: Request) -> Dict[str, Any]:
+    internal_pull_running = _task_running(getattr(request.app.state, "news_task", None))
+    internal_llm_running = _task_running(getattr(request.app.state, "news_llm_task", None))
+
+    external_pull_requested = _env_bool("START_NEWS_WORKER", False)
+    external_llm_requested = _env_bool("START_NEWS_LLM_WORKER", False)
+    internal_pull_requested = _env_bool("NEWS_BACKGROUND_ENABLED", True) and not external_pull_requested
+    internal_llm_requested = _env_bool("NEWS_LLM_BACKGROUND_ENABLED", True) and not external_llm_requested
+
+    external_snapshot = _external_news_process_snapshot()
+    external_pull_running = bool(external_snapshot.get("worker_running"))
+    external_llm_running = bool(external_snapshot.get("llm_running"))
+
+    background_pull_enabled = internal_pull_requested or external_pull_requested or internal_pull_running or external_pull_running
+    background_llm_enabled = internal_llm_requested or external_llm_requested or internal_llm_running or external_llm_running
+
+    if internal_pull_running:
+        background_pull_mode = "internal"
+    elif external_pull_running or external_pull_requested:
+        background_pull_mode = "external"
+    elif internal_pull_requested:
+        background_pull_mode = "internal"
+    else:
+        background_pull_mode = "disabled"
+
+    if internal_llm_running:
+        background_llm_mode = "internal"
+    elif external_llm_running or external_llm_requested:
+        background_llm_mode = "external"
+    elif internal_llm_requested:
+        background_llm_mode = "internal"
+    else:
+        background_llm_mode = "disabled"
+
+    return {
+        "background_pull_enabled": bool(background_pull_enabled),
+        "background_llm_enabled": bool(background_llm_enabled),
+        "background_pull_running": bool(internal_pull_running or external_pull_running),
+        "background_llm_running": bool(internal_llm_running or external_llm_running),
+        "background_pull_mode": background_pull_mode,
+        "background_llm_mode": background_llm_mode,
+        "background_pull_pids": list(external_snapshot.get("worker_pids") or []),
+        "background_llm_pids": list(external_snapshot.get("llm_pids") or []),
+        "background_process_detector": external_snapshot.get("detector") or "none",
+        "background_process_scan_error": external_snapshot.get("error"),
+    }
+
+
 def _news_runtime_snapshot(request: Request) -> Dict[str, Any]:
     return {
         "service": "web_news",
         "timestamp": _now_utc().isoformat(),
         "llm_enabled": _news_llm_enabled(),
         "sync_pull_llm": _env_bool("NEWS_PULL_SYNC_LLM", False),
-        "background_pull_enabled": bool(getattr(request.app.state, "news_task", None)),
-        "background_llm_enabled": bool(getattr(request.app.state, "news_llm_task", None)),
+        **_news_background_state(request),
         "last_pull": getattr(request.app.state, "news_last_pull", None),
         "last_llm_batch": getattr(request.app.state, "news_last_llm_batch", None),
         "sources": _news_source_flags(),
@@ -2087,43 +2250,7 @@ async def health(request: Request) -> Dict[str, Any]:
     if cached:
         return cached
 
-    def _enabled(name: str, default: bool = True) -> bool:
-        return str(os.environ.get(name, "1" if default else "0")).strip().lower() not in {"0", "false", "no", "off"}
-
-    gdelt_enabled = str(os.environ.get("NEWS_ENABLE_GDELT", "1")).strip().lower() not in {"0", "false", "no", "off"}
-    jin10_enabled = str(os.environ.get("NEWS_ENABLE_JIN10", "1")).strip().lower() not in {"0", "false", "no", "off"}
-    rss_enabled = str(os.environ.get("NEWS_ENABLE_RSS", "1")).strip().lower() not in {"0", "false", "no", "off"}
-    newsapi_enabled = bool(os.environ.get("NEWSAPI_KEY"))
-    if str(os.environ.get("NEWS_ENABLE_NEWSAPI", "1")).strip().lower() in {"0", "false", "no", "off"}:
-        newsapi_enabled = False
-    cryptopanic_enabled = bool(os.environ.get("CRYPTOPANIC_TOKEN") or os.environ.get("CRYPTOPANIC_API_KEY"))
-    if str(os.environ.get("NEWS_ENABLE_CRYPTOPANIC", "1")).strip().lower() in {"0", "false", "no", "off"}:
-        cryptopanic_enabled = False
-    sources = {
-        "jin10": jin10_enabled,
-        "rss": rss_enabled,
-        "gdelt": gdelt_enabled,
-        "newsapi": newsapi_enabled,
-        "cryptopanic": cryptopanic_enabled,
-        "chaincatcher_flash": _enabled("NEWS_ENABLE_CHAINCATCHER_FLASH", True),
-        "binance_announcements": _enabled("NEWS_ENABLE_BINANCE_ANNOUNCEMENTS", True),
-        "okx_announcements": _enabled("NEWS_ENABLE_OKX_ANNOUNCEMENTS", True),
-        "bybit_announcements": _enabled("NEWS_ENABLE_BYBIT_ANNOUNCEMENTS", True),
-        "cryptocompare_news": _enabled("NEWS_ENABLE_CRYPTOCOMPARE_NEWS", True),
-    }
-    base_payload = {
-        "service": "web_news",
-        "timestamp": _now_utc().isoformat(),
-        "llm_enabled": _news_llm_enabled(),
-        "sync_pull_llm": _env_bool("NEWS_PULL_SYNC_LLM", False),
-        "background_pull_enabled": bool(getattr(request.app.state, "news_task", None)),
-        "background_llm_enabled": bool(getattr(request.app.state, "news_llm_task", None)),
-        "last_pull": getattr(request.app.state, "news_last_pull", None),
-        "last_llm_batch": getattr(request.app.state, "news_last_llm_batch", None),
-        "sources": sources,
-        "source_states": [],
-        "llm_queue": {},
-    }
+    base_payload = _news_runtime_snapshot(request)
     stale = _cache_get_stale("health", cache_key)
     if stale:
         base_payload["source_states"] = list(stale.get("source_states") or [])
@@ -2285,8 +2412,7 @@ async def worker_status(request: Request) -> Dict[str, Any]:
             "active_job_id": llm_store.get("active"),
             "latest_result": llm_store.get("latest"),
         },
-        "background_pull_enabled": bool(getattr(request.app.state, "news_task", None)),
-        "background_llm_enabled": bool(getattr(request.app.state, "news_llm_task", None)),
+        **_news_background_state(request),
         "last_pull": getattr(request.app.state, "news_last_pull", None),
         "last_llm_batch": getattr(request.app.state, "news_last_llm_batch", None),
         "source_states": [],

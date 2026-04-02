@@ -57,6 +57,12 @@ Use the canonical root command:
 
 `.\web.bat start` is the recommended default start path. By default it starts the web app plus the news worker and news LLM worker, ignores `.env` worker auto-start flags, and keeps analytics-history collectors off unless you explicitly opt in.
 
+If you prefer the old one-click batch name, this compatibility alias forwards to the same managed startup path:
+
+```bat
+.\start_web_oneclick.bat
+```
+
 Useful variants:
 
 ```bat
@@ -70,6 +76,14 @@ Useful variants:
 ```
 
 Legacy wrappers still work, but `.\web.bat ...` is now the command family to remember.
+
+Managed startup stack:
+
+- `web.bat`: canonical entry
+- `start_web_oneclick.bat`: compatibility alias to `web.bat start`
+- `scripts\web.ps1`: command router
+- `scripts\start_web_ps.ps1`: transcript wrapper
+- `_once.ps1`: low-level launcher
 
 After startup, always verify the runtime mode with:
 
@@ -105,6 +119,12 @@ Run the web service:
 
 ```bat
 .\web.bat start
+```
+
+Or use the compatibility one-click alias:
+
+```bat
+.\start_web_oneclick.bat
 ```
 
 Run startup helper with optional collectors or workers:

@@ -10,7 +10,7 @@ if not exist "%ENTRY%" (
 )
 
 echo [INFO] Preferred command: ".\web.bat start"
-echo [INFO] Starting web service...
+echo [INFO] Starting managed profile: web + news worker + news LLM worker
 echo [INFO] Log file: "%ROOT%logs\web_ps.log"
 
 call "%ENTRY%" start %*
@@ -22,5 +22,11 @@ if not "%CODE%"=="0" (
   echo [HINT] Check log: "%ROOT%logs\web_ps.log"
   exit /b %CODE%
 )
+
+echo.
+echo [INFO] Dashboard: http://127.0.0.1:8000
+echo [INFO] News:      http://127.0.0.1:8000/news
+echo [INFO] Status:    .\web.bat status
+echo [INFO] Stop:      .\web.bat stop -IncludeWorkers
 
 exit /b 0

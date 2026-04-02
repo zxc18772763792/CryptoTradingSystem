@@ -316,9 +316,13 @@
         const requeueCount = Number(failedRequeue?.requeued_count || 0);
         const repairUpdates = Number(summaryRepair?.updated_raw_count || 0) + Number(summaryRepair?.updated_event_count || 0);
         const backgroundEnabled = Boolean(state.worker?.background_llm_enabled);
+        const backgroundRunning = Boolean(state.worker?.background_llm_running ?? backgroundEnabled);
+        const backgroundMode = String(state.worker?.background_llm_mode || "").trim();
         const manualActive = Boolean(state.worker?.manual_llm_job?.active_job_id);
         const llmMode = backgroundEnabled
-            ? "后台自动修补"
+            ? backgroundRunning
+                ? (backgroundMode === "external" ? "后台自动修补（独立引擎）" : "后台自动修补")
+                : "后台自动修补（启动中）"
             : manualActive
                 ? "页面手动补跑"
                 : pending > 0 || failed > 0
@@ -327,8 +331,8 @@
         let queuePhase = "队列空闲";
         if (queue?.backoff_until) queuePhase = "全局退避中";
         else if (running > 0) queuePhase = "AI处理中";
-        else if (pending > 0) queuePhase = backgroundEnabled ? "新任务待处理" : "新任务待手动触发";
-        else if (failed > 0) queuePhase = backgroundEnabled ? "温和修补失败历史" : "失败历史待手动补跑";
+        else if (pending > 0) queuePhase = backgroundEnabled ? (backgroundRunning ? "新任务待处理" : "后台已启用，等待进程拉起") : "新任务待手动触发";
+        else if (failed > 0) queuePhase = backgroundEnabled ? (backgroundRunning ? "温和修补失败历史" : "后台已启用，等待进程拉起") : "失败历史待手动补跑";
         const repairPaceText = lastLlm?.timestamp
             ? `${fmtTs(lastLlm.timestamp)} | ${requeueReasonText(failedRequeue?.reason)} | 重排 ${requeueCount} | 立即补跑 ${Number(retryResult?.claimed || 0)}`
             : "--";
