@@ -3400,7 +3400,7 @@ return `<tr class="bt-optimize-row ${Number(backtestUIState?.lastOptimizePreview
 <td title="入场/出场 = ${entrySignals}/${exitSignals}">${esc(tradePointText)}</td>
 <td>${zeroTradeHtml}</td>
 <td>${esc(Object.entries(t.params||{}).map(([k,v])=>`${k}=${v}`).join(', '))}</td>
-<td><button type="button" class="btn btn-primary btn-sm" onclick="event.stopPropagation();previewOptimizeTrialByRank(${i})">预览</button></td>
+<td><div class="inline-actions" style="justify-content:flex-end;gap:6px;flex-wrap:wrap;"><button type="button" class="btn btn-primary btn-sm" onclick="event.stopPropagation();previewOptimizeTrialByRank(${i})">预览</button><button type="button" class="btn btn-primary btn-sm" onclick="event.stopPropagation();registerOptimizeTrialByRank(${i}, this)">注册</button></div></td>
 </tr>`;}).join('') || '<tr><td colspan="13">无优化结果</td></tr>'}
 </tbody></table></div>
 <div id="backtest-extra-chart" class="backtest-chart"></div>
@@ -3608,6 +3608,27 @@ await registerStrategyInstanceFromBacktestSpec({
   const btn=document.getElementById('btn-register-opt-best');
   if(btn){btn.disabled=false;btn.textContent='按最佳参数注册新实例';}
 }
+}
+async function registerOptimizeTrialByRank(rankIndex,btn=null){
+const opt=backtestUIState?.lastOptimize||{};
+const top=Array.isArray(opt?.top)?opt.top:[];
+const row=top[Number(rankIndex)||0];
+if(!row){notify('未找到该参数组合',true);return null;}
+const prevText=btn?String(btn.textContent||'注册'):'';
+if(btn){btn.disabled=true;btn.textContent='注册中...';}
+try{
+return await registerStrategyInstanceFromBacktestSpec({
+  strategy_type: String(opt.strategy_type||opt.strategy||'').trim(),
+  symbol: opt.symbol||document.getElementById('backtest-symbol')?.value||'BTC/USDT',
+  timeframe: opt.timeframe||document.getElementById('backtest-timeframe')?.value||'1h',
+  params: (row.params&&typeof row.params==='object')?row.params:{},
+  exchange: String(opt.exchange||'binance').toLowerCase(),
+});
+}catch(e){notify(`注册参数组合失败: ${e.message}`,true);}
+finally{
+  if(btn){btn.disabled=false;btn.textContent=prevText||'注册';}
+}
+return null;
 }
 async function registerCompareStrategyByRank(rankIndex){
 const ranked=Array.isArray(backtestUIState?.lastCompare?.ranked)?backtestUIState.lastCompare.ranked:[];
@@ -5895,7 +5916,7 @@ setInterval(()=>{
   else if(tab==='strategies')Promise.allSettled([loadStrategyHealth()]);
 },45000);}
 
-window.cancelOrder=cancelOrder;window.cancelConditional=cancelConditional;window.registerStrategy=registerStrategy;window.toggleStrategy=toggleStrategy;window.saveAllocation=saveAllocation;window.openEditor=openEditor;window.compareLive=compareLive;window.openStrategyEditor=openEditor;window.compareStrategyLive=compareLive;window.previewCompareStrategyByRank=previewCompareStrategyByRank;window.registerCompareStrategyByRank=registerCompareStrategyByRank;window.registerOptimizeBestAsNewStrategyInstance=registerOptimizeBestAsNewStrategyInstance;window.editNotifyRule=editNotifyRule;window.toggleNotifyRule=toggleNotifyRule;window.deleteNotifyRule=deleteNotifyRule;window.openBacktestWithSpec=openBacktestWithSpec;window.registerArbitrageStrategy=registerArbitrageStrategy;window.jumpToBacktestFromArbitrage=jumpToBacktestFromArbitrage;window.scanArbitragePairsRanking=scanArbitragePairsRanking;window.applyArbitragePairCandidate=applyArbitragePairCandidate;
+window.cancelOrder=cancelOrder;window.cancelConditional=cancelConditional;window.registerStrategy=registerStrategy;window.toggleStrategy=toggleStrategy;window.saveAllocation=saveAllocation;window.openEditor=openEditor;window.compareLive=compareLive;window.openStrategyEditor=openEditor;window.compareStrategyLive=compareLive;window.previewCompareStrategyByRank=previewCompareStrategyByRank;window.registerCompareStrategyByRank=registerCompareStrategyByRank;window.registerOptimizeBestAsNewStrategyInstance=registerOptimizeBestAsNewStrategyInstance;window.registerOptimizeTrialByRank=registerOptimizeTrialByRank;window.editNotifyRule=editNotifyRule;window.toggleNotifyRule=toggleNotifyRule;window.deleteNotifyRule=deleteNotifyRule;window.openBacktestWithSpec=openBacktestWithSpec;window.registerArbitrageStrategy=registerArbitrageStrategy;window.jumpToBacktestFromArbitrage=jumpToBacktestFromArbitrage;window.scanArbitragePairsRanking=scanArbitragePairsRanking;window.applyArbitragePairCandidate=applyArbitragePairCandidate;
 window.addEventListener('error',e=>{
 const runtimeErr=e?.error;
 if(!runtimeErr){
