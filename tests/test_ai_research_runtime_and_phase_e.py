@@ -638,7 +638,11 @@ def test_ai_research_and_agent_live_signal_panels_are_separated():
     assert "自治代理聚合信号" in html_text
     assert "ai-live-signals-panel" not in html_text
     assert "renderLiveSignalPanels" in js_text
+    assert js_text.count("async function loadLiveSignals()") == 1
     assert "/autonomous-agent/live-signals" in js_text
+    assert "当前研究冠军" not in html_text
+    assert "只使用已有研究结果" not in html_text
+    assert "基于实时行情、聚合信号、风控和执行状态独立给出动作并尝试下单。" in html_text
 
 
 def test_ai_research_live_activation_flow_hooks_present():

@@ -1,3 +1,14 @@
+> Status note (2026-04-02)
+>
+> This document contains historical design directions. It does not fully match the current runtime boundary anymore.
+>
+> Current boundary:
+> - AI research: candidate generation, evaluation, and runtime observation
+> - AI autonomous agent: independent aggregated-signal execution loop
+> - live decision router: separate runtime guard
+>
+> Any older wording in this file about the autonomous agent consuming research results should be treated as historical context, not current behavior.
+
 # AI 研究页与自主研究/决策改造计划
 
 ## 目标

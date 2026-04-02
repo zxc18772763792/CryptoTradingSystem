@@ -1,3 +1,12 @@
+> Status note (2026-04-02)
+>
+> This handoff file contains historical audit items. Several items have already been resolved, including:
+> - AI autonomous-agent frontend wiring
+> - split live-signals panels for research vs autonomous-agent watchlist
+> - removal of hard runtime dependency from autonomous-agent endpoints to AI research runtime bootstrap
+>
+> Treat unresolved items in this file as historical leads that require re-validation before action.
+
 # AI研究与决策链路审计 TODO
 
 ## 目的

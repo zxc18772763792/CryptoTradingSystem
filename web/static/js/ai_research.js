@@ -4378,16 +4378,6 @@
      Phase A — 实时信号面板（30s 轮询）
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
-  async function loadLiveSignals() {
-    if (!document.getElementById('ai-research-live-signals-panel') && !document.getElementById('ai-agent-live-signals-panel')) return;
-    try {
-      const res = await aiApi('/live-signals', { timeoutMs: 20000 });
-      renderLiveSignalPanels(res || {}, !!res?.ml_model_loaded);
-    } catch (e) {
-      /* silent — non-critical */
-    }
-  }
-
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
      Phase B — 快速注册
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
@@ -4472,8 +4462,6 @@
     }
     if (item?.strategy) parts.push(item.strategy);
     if (Number(item?.rank || 0) > 0) parts.push(`排名 #${Number(item.rank)}`);
-    if (item?.candidate_id_suffix) parts.push(`关联 #${item.candidate_id_suffix}`);
-    if (item?.linked_candidate_status) parts.push(statusText(item.linked_candidate_status));
     return parts.join(' · ');
   }
 

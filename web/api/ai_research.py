@@ -1761,7 +1761,6 @@ async def get_ai_live_decision_summary(request: Request):
 
 @router.get("/runtime-config/autonomous-agent")
 async def get_ai_autonomous_agent_runtime_config(request: Request):
-    ensure_ai_research_runtime_state(request.app)
     return autonomous_trading_agent.get_runtime_config()
 
 
@@ -1770,7 +1769,6 @@ async def update_ai_autonomous_agent_runtime_config(
     request: Request,
     payload: AIAutonomousAgentConfigUpdateRequest,
 ):
-    ensure_ai_research_runtime_state(request.app)
     try:
         updated = await autonomous_trading_agent.update_runtime_config(**payload.model_dump(exclude_none=True))
     except ValueError as exc:
@@ -1780,7 +1778,6 @@ async def update_ai_autonomous_agent_runtime_config(
 
 @router.get("/autonomous-agent/status")
 async def get_ai_autonomous_agent_status(request: Request):
-    ensure_ai_research_runtime_state(request.app)
     cfg = autonomous_trading_agent.get_runtime_config()
     if str(cfg.get("symbol_mode") or "manual").strip().lower() == "auto":
         autonomous_trading_agent.ensure_symbol_scan_preview_warm(
@@ -1798,7 +1795,6 @@ async def start_ai_autonomous_agent(
     request: Request,
     payload: AIAutonomousAgentStartRequest = AIAutonomousAgentStartRequest(),
 ):
-    ensure_ai_research_runtime_state(request.app)
     if payload.enable:
         await autonomous_trading_agent.update_runtime_config(enabled=True)
     status = await autonomous_trading_agent.start()
@@ -1807,7 +1803,6 @@ async def start_ai_autonomous_agent(
 
 @router.post("/autonomous-agent/stop")
 async def stop_ai_autonomous_agent(request: Request):
-    ensure_ai_research_runtime_state(request.app)
     status = await autonomous_trading_agent.stop()
     return {"stopped": True, "status": status, "config": autonomous_trading_agent.get_runtime_config()}
 
@@ -1817,7 +1812,6 @@ async def run_ai_autonomous_agent_once(
     request: Request,
     payload: AIAutonomousAgentRunOnceRequest = AIAutonomousAgentRunOnceRequest(),
 ):
-    ensure_ai_research_runtime_state(request.app)
     return await autonomous_trading_agent.trigger_run_once(
         trigger="api_manual",
         force=bool(payload.force),
@@ -1826,14 +1820,12 @@ async def run_ai_autonomous_agent_once(
 
 @router.get("/autonomous-agent/journal")
 async def get_ai_autonomous_agent_journal(request: Request, limit: int = 50):
-    ensure_ai_research_runtime_state(request.app)
     rows = autonomous_trading_agent.read_journal(limit=limit)
     return {"items": rows, "count": len(rows)}
 
 
 @router.get("/autonomous-agent/review")
 async def get_ai_autonomous_agent_review(request: Request, limit: int = 12):
-    ensure_ai_research_runtime_state(request.app)
     payload = _build_autonomous_agent_review(limit=limit)
     payload["learning_memory"] = autonomous_trading_agent.get_learning_memory(force=True)
     return payload
@@ -1841,7 +1833,6 @@ async def get_ai_autonomous_agent_review(request: Request, limit: int = 12):
 
 @router.get("/autonomous-agent/symbol-ranking")
 async def get_ai_autonomous_agent_symbol_ranking(request: Request, limit: int = 10, refresh: bool = False):
-    ensure_ai_research_runtime_state(request.app)
     try:
         payload = await asyncio.wait_for(
             autonomous_trading_agent.get_symbol_scan_preview(limit=limit, force=bool(refresh)),
@@ -3091,7 +3082,6 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
 @router.get("/autonomous-agent/live-signals")
 async def get_autonomous_agent_live_signals(request: Request, symbol: Optional[str] = None):
     """Return live signal snapshots for the autonomous agent watchlist only."""
-    ensure_ai_research_runtime_state(request.app)
     return await _build_autonomous_watchlist_live_signals_payload(symbol=symbol)
 
 

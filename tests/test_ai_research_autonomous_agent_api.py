@@ -75,7 +75,7 @@ def test_autonomous_agent_start_and_run_once_endpoints(monkeypatch):
 
     monkeypatch.setattr(ai_module.autonomous_trading_agent, "update_runtime_config", update_mock)
     monkeypatch.setattr(ai_module.autonomous_trading_agent, "start", start_mock)
-    monkeypatch.setattr(ai_module.autonomous_trading_agent, "run_once", run_once_mock)
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "trigger_run_once", run_once_mock)
     monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_status", status_mock)
     monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_runtime_config", lambda: {"enabled": True})
 
@@ -95,7 +95,7 @@ def test_autonomous_agent_start_and_run_once_endpoints(monkeypatch):
             ai_module.AIAutonomousAgentRunOnceRequest(force=True),
         )
     )
-    assert once_result["result"]["decision"]["action"] == "hold"
+    assert once_result["decision"]["action"] == "hold"
     assert run_once_mock.await_count == 1
 
 
@@ -119,11 +119,59 @@ def test_autonomous_agent_symbol_ranking_endpoint(monkeypatch):
             ],
         }
     )
-    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_symbol_scan", scan_mock)
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_symbol_scan_preview", scan_mock)
 
     result = asyncio.run(ai_module.get_ai_autonomous_agent_symbol_ranking(request, limit=10, refresh=True))
     assert result["selected_symbol"] == "ETH/USDT"
     assert scan_mock.await_count == 1
+
+
+def test_autonomous_agent_status_endpoint_does_not_require_ai_research_runtime(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    def _unexpected_ensure(app):
+        raise AssertionError("autonomous-agent status should not require ai research runtime")
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", _unexpected_ensure)
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_runtime_config", lambda: {"symbol_mode": "manual"})
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_status", lambda: {"running": True})
+
+    result = asyncio.run(ai_module.get_ai_autonomous_agent_status(request))
+    assert result["status"]["running"] is True
+
+
+def test_autonomous_agent_live_signals_endpoint_does_not_require_ai_research_runtime(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    def _unexpected_ensure(app):
+        raise AssertionError("autonomous-agent live signals should not require ai research runtime")
+
+    payload = {
+        "sections": [],
+        "candidate_items": [],
+        "watchlist_items": [],
+        "items": [],
+        "candidate_count": 0,
+        "watchlist_count": 0,
+        "count": 0,
+        "ml_model_loaded": False,
+        "ts": "2026-04-02T00:00:00+00:00",
+    }
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", _unexpected_ensure)
+    monkeypatch.setattr(
+        ai_module,
+        "_build_autonomous_watchlist_live_signals_payload",
+        AsyncMock(return_value=payload),
+    )
+
+    result = asyncio.run(ai_module.get_autonomous_agent_live_signals(request))
+    assert result["watchlist_count"] == 0
+    assert result["count"] == 0
 
 
 def test_autonomous_agent_review_endpoint_includes_learning_memory(monkeypatch):

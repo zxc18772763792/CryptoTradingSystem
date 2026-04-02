@@ -37,6 +37,20 @@ Both commands lead to the same managed startup flow. The project should now be t
 - leaves the PM worker opt-in
 - restores the persisted trading mode, so the service may still come up in `live`
 
+## AI Autonomous Agent Startup Rule
+
+- The news engine is part of the managed default startup flow.
+- The AI autonomous agent is not automatically started by `.\web.bat start` unless `AI_AUTONOMOUS_AGENT_AUTO_START=true` is set in the environment that launches the service.
+- Saving the autonomous-agent runtime config in the UI does not currently change this startup rule.
+- After startup, verify the agent separately through:
+  - `.\web.bat status`
+  - `http://127.0.0.1:8000/api/ai/autonomous-agent/status`
+- If the service is up but the agent is not running, start it manually from the UI or with:
+
+```powershell
+Invoke-WebRequest -Method POST http://127.0.0.1:8000/api/ai/autonomous-agent/start
+```
+
 ## Daily Commands
 
 Run these from project root:
