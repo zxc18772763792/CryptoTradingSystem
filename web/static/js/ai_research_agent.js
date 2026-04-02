@@ -3,6 +3,8 @@
 
   const POLL_MS = 30000;
   const AI_UI_TIMEZONE = 'Asia/Singapore';
+  const SYMBOL_SCAN_MAX_AGE_SEC = 10 * 60;
+  const AUTO_RANKING_REFRESH_COOLDOWN_MS = 45000;
   const AGENT_STATUS_API = '/ai/autonomous-agent/status';
   const AGENT_JOURNAL_API = '/ai/autonomous-agent/journal';
   const AGENT_REVIEW_API = '/ai/autonomous-agent/review';
@@ -16,9 +18,41 @@
   let lastStatusSnapshot = null;
   let lastConfigSnapshot = null;
   let statusInFlight = null;
+  let rankingInFlight = null;
+  let lastRankingAutoRefreshAt = 0;
+  let rankingPendingRetryTimer = null;
 
   function aiRoot() {
     return window.AI || {};
+  }
+
+  function normalizeUiText(value) {
+    if (typeof aiRoot().util?.normalizeUiText === 'function') {
+      try {
+        return aiRoot().util.normalizeUiText(value);
+      } catch (_) {
+        // Fall through to the local repair path below.
+      }
+    }
+    const text = String(value ?? '');
+    if (!/[鑴欒剹鑴滆劃鑴熻劏鑴╄劗鑴拌劥鑴佃劮鑴硅労鑴昏劶鑴借効璋╄姃鑼洸姘撳繖鑾界尗鑼呴敋姣涚煕閾嗗嵂鑼傚啋甯借矊璐镐箞鐜灇閰堕湁鐓ゆ病鐪夊獟闀佹瘡]/.test(text)) {
+      return text;
+    }
+    try {
+      return decodeURIComponent(escape(text));
+    } catch (_) {
+      return text;
+    }
+  }
+
+  function normalizeElementText(el) {
+    if (!el) return;
+    el.textContent = normalizeUiText(el.textContent || '');
+  }
+
+  function normalizeElementHtml(el) {
+    if (!el) return;
+    el.innerHTML = normalizeUiText(el.innerHTML || '');
   }
 
   function esc(value) {
@@ -29,12 +63,13 @@
   }
 
   function notify(message, isError = false) {
+    const normalizedMessage = normalizeUiText(message);
     if (typeof aiRoot().util?.notify === 'function') {
-      aiRoot().util.notify(message, isError);
+      aiRoot().util.notify(normalizedMessage, isError);
       return;
     }
-    if (isError) console.error(message);
-    else console.log(message);
+    if (isError) console.error(normalizedMessage);
+    else console.log(normalizedMessage);
   }
 
   function compactText(value, maxLen = 120) {
@@ -49,7 +84,8 @@
         text = String(value);
       }
     }
-    return text.length > maxLen ? `${text.slice(0, maxLen - 1)}...` : text;
+    const compacted = text.length > maxLen ? `${text.slice(0, maxLen - 1)}...` : text;
+    return normalizeUiText(compacted);
   }
 
   function fmtAgentTs(value) {
@@ -140,6 +176,60 @@
     if (!Number.isFinite(value) || value <= 0) return '--';
     if (value < 60) return `${Math.round(value)}s`;
     return `${(value / 60).toFixed(value >= 600 ? 0 : 1)} min`;
+  }
+
+  function buildScanMeta(scan = null, meta = null) {
+    const payload = meta && typeof meta === 'object' ? { ...meta } : {};
+    const generatedAt = String(payload.generated_at || scan?.generated_at || '').trim();
+    let ageSec = Number(payload.age_sec);
+    if ((!Number.isFinite(ageSec) || ageSec < 0) && generatedAt) {
+      const generatedMs = new Date(generatedAt).getTime();
+      if (Number.isFinite(generatedMs)) {
+        ageSec = Math.max(0, (Date.now() - generatedMs) / 1000);
+      }
+    }
+    const maxAgeSec = Math.max(30, Number(payload.max_age_sec || SYMBOL_SCAN_MAX_AGE_SEC));
+    const available = Boolean(scan && typeof scan === 'object' && Object.keys(scan).length);
+    return {
+      available,
+      generated_at: generatedAt || null,
+      age_sec: Number.isFinite(ageSec) ? ageSec : null,
+      max_age_sec: maxAgeSec,
+      stale: Boolean(payload.stale) || !available || !Number.isFinite(ageSec) || ageSec > maxAgeSec,
+      pending: Boolean(payload.pending),
+      busy_reuse: Boolean(payload.busy_reuse),
+      actual_scan_fallback: Boolean(payload.actual_scan_fallback),
+      fallback_used: Boolean(payload.fallback_used),
+      fallback_reason: String(payload.fallback_reason || '').trim(),
+    };
+  }
+
+  function resolveAgentRankingState(status = {}, cfg = {}) {
+    const actualScan = status.last_symbol_scan || null;
+    const actualMeta = buildScanMeta(actualScan, status.last_symbol_scan_meta || null);
+    const previewScan = status.preview_symbol_scan || null;
+    const previewMeta = buildScanMeta(previewScan, status.preview_symbol_scan_meta || null);
+    const previewTs = previewMeta.generated_at ? new Date(previewMeta.generated_at).getTime() : 0;
+    const actualTs = actualMeta.generated_at ? new Date(actualMeta.generated_at).getTime() : 0;
+
+    if (previewMeta.available && (!actualMeta.available || actualMeta.stale || previewTs >= actualTs)) {
+      return { scan: previewScan, meta: previewMeta };
+    }
+    if (actualMeta.available) {
+      return { scan: actualScan, meta: actualMeta };
+    }
+    if (previewMeta.available || previewMeta.pending) {
+      return { scan: previewScan, meta: previewMeta };
+    }
+    return { scan: null, meta: previewMeta.available ? previewMeta : actualMeta };
+  }
+
+  function formatAgeSeconds(value) {
+    const ageSec = Number(value);
+    if (!Number.isFinite(ageSec) || ageSec < 0) return '--';
+    if (ageSec < 60) return `${Math.round(ageSec)}s`;
+    if (ageSec < 3600) return `${(ageSec / 60).toFixed(ageSec >= 600 ? 0 : 1)} min`;
+    return `${(ageSec / 3600).toFixed(ageSec >= 36000 ? 0 : 1)} h`;
   }
 
   function formatNumber(value, digits = 2) {
@@ -321,13 +411,13 @@
   function setChainSummaryText(id, value) {
     const el = document.getElementById(id);
     if (!el) return;
-    el.textContent = String(value || '--');
+    el.textContent = normalizeUiText(String(value || '--'));
   }
 
   function setChainSummaryTag(id, value, tone = '') {
     const el = document.getElementById(id);
     if (!el) return;
-    el.textContent = String(value || '--');
+    el.textContent = normalizeUiText(String(value || '--'));
     el.className = `ai-chain-summary-tag${tone ? ` is-${tone}` : ''}`;
   }
 
@@ -426,6 +516,10 @@
   function stopPolling() {
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = null;
+    if (rankingPendingRetryTimer) {
+      window.clearTimeout(rankingPendingRetryTimer);
+      rankingPendingRetryTimer = null;
+    }
   }
 
   function syncPollingState() {
@@ -446,12 +540,15 @@
     if (dot) {
       dot.className = 'agent-dot agent-dot-off';
       dot.title = statusText;
+      dot.title = normalizeUiText(dot.title);
     }
     if (info) {
       info.innerHTML = `<div class="ai-agent-error">${esc(statusText)}</div>`;
+      normalizeElementHtml(info);
     }
     if (reasons) {
       reasons.innerHTML = `<div class="ai-agent-empty">${esc(statusText)}</div>`;
+      normalizeElementHtml(reasons);
     }
     if (badge) {
       badge.className = 'ai-agent-section-badge is-danger';
@@ -459,6 +556,7 @@
     }
 
     setChainSummaryTag('ai-chain-trading-tag', '加载失败', 'warn');
+    normalizeElementText(badge);
     setChainSummaryText('ai-chain-trading-mode', '--');
     setChainSummaryText('ai-chain-trading-status', statusText);
     setChainSummaryText('ai-chain-trading-decision', '--');
@@ -516,6 +614,7 @@
     if (badgeEl) {
       badgeEl.className = `ai-agent-section-badge ${toneClass(badgeTone)}`;
       badgeEl.textContent = badgeText;
+      normalizeElementText(badgeEl);
     }
 
     if (!primary && !items.length) {
@@ -603,9 +702,10 @@
       : '';
 
     el.innerHTML = `${primarySummary}${meta}${noteGrid}${detailList}`;
+    normalizeElementHtml(el);
   }
 
-  function renderAgentRanking(scan = null, cfg = {}) {
+  function renderAgentRanking(scan = null, cfg = {}, meta = null) {
     const summaryEl = document.getElementById('ai-agent-ranking-summary');
     const listEl = document.getElementById('ai-agent-ranking');
     if (!summaryEl || !listEl) return;
@@ -624,10 +724,21 @@
     const selected = String(scan.selected_symbol || cfg.symbol || '--');
     const selectionReason = String(scan.selection_reason || '--');
     const count = Number(scan.candidate_count || 0);
+    const scanMeta = buildScanMeta(scan, meta || scan.scan_meta);
+    const freshnessText = scanMeta.generated_at
+      ? `锛屾壂鎻忔椂闂?${fmtAgentTs(scanMeta.generated_at)}${scanMeta.age_sec != null ? `锛屽凡杩?${formatAgeSeconds(scanMeta.age_sec)}` : ''}`
+      : '';
     summaryEl.textContent = `模式：${symbolModeLabel(scan.symbol_mode || cfg.symbol_mode)}，当前选中 ${selected}，候选 ${count} 个，原因：${symbolSelectionReasonText(selectionReason)}`;
 
+    summaryEl.textContent += freshnessText;
+
+    normalizeElementText(summaryEl);
     const rows = Array.isArray(scan.top_candidates) ? scan.top_candidates : [];
     if (!rows.length) {
+      if (scanMeta.pending) {
+        listEl.innerHTML = '<div class="ai-agent-empty">最新榜单正在预热中，页面会自动刷新。</div>';
+        return;
+      }
       listEl.innerHTML = '<div class="ai-agent-empty">这次没有拿到可用的选币结果。</div>';
       return;
     }
@@ -637,6 +748,9 @@
       const tone = row.tradable_now ? 'is-good' : (row.blocked_by_risk ? 'is-warn' : 'is-info');
       const holdingText = row.has_position
         ? `持仓中 / ${row.position_side === 'short' ? '空头' : row.position_side === 'long' ? '多头' : row.position_side || '--'}`
+        : '';
+      const dataFreshness = row.market_data_last_bar_at
+        ? `鏈€鍚巄bar ${fmtAgentTs(row.market_data_last_bar_at)}${row.market_data_age_sec != null ? ` / 宸茶繃 ${formatAgeSeconds(row.market_data_age_sec)}` : ''}`
         : '';
       return `
         <div class="ai-agent-ranking-row ${row.selected ? 'is-selected' : ''}">
@@ -651,9 +765,77 @@
             ${holdingText ? `<span class="ai-agent-mini-tag is-warn">${esc(holdingText)}</span>` : ''}
           </div>
           <div class="ai-agent-ranking-detail">${esc(row.summary || '--')}</div>
+          ${dataFreshness ? `<div class="ai-agent-ranking-detail">${esc(dataFreshness)}</div>` : ''}
         </div>
       `;
     }).join('');
+  }
+
+  function renderAgentRanking(scan = null, cfg = {}, meta = null) {
+    const summaryEl = document.getElementById('ai-agent-ranking-summary');
+    const listEl = document.getElementById('ai-agent-ranking');
+    if (!summaryEl || !listEl) return;
+
+    const mode = String(cfg.symbol_mode || 'manual').toLowerCase();
+    if (!scan) {
+      summaryEl.textContent = mode === 'auto'
+        ? '还没有自动选币结果，点“刷新排行榜”即可查看当前前十。'
+        : '当前是固定币种模式，不会在币池里轮换。';
+      listEl.innerHTML = mode === 'auto'
+        ? '<div class="ai-agent-empty">等待生成排行榜...</div>'
+        : '<div class="ai-agent-empty">固定币种模式下只会盯住单一 symbol。</div>';
+      return;
+    }
+
+    const selected = String(scan.selected_symbol || cfg.symbol || '--');
+    const selectionReason = String(scan.selection_reason || '--');
+    const count = Number(scan.candidate_count || 0);
+    const scanMeta = buildScanMeta(scan, meta || scan.scan_meta);
+    const freshnessText = scanMeta.generated_at
+      ? `更新时间 ${fmtAgentTs(scanMeta.generated_at)}${scanMeta.age_sec != null ? ` / 已过 ${formatAgeSeconds(scanMeta.age_sec)}` : ''}`
+      : '';
+    summaryEl.textContent = `模式：${symbolModeLabel(scan.symbol_mode || cfg.symbol_mode)}，当前选中 ${selected}，候选 ${count} 个，原因：${symbolSelectionReasonText(selectionReason)}`;
+    if (freshnessText) {
+      summaryEl.textContent += `，${freshnessText}`;
+    }
+
+    const rows = Array.isArray(scan.top_candidates) ? scan.top_candidates : [];
+    if (!rows.length) {
+      if (scanMeta.pending) {
+        listEl.innerHTML = '<div class="ai-agent-empty">最新榜单正在预热中，页面会自动刷新。</div>';
+        return;
+      }
+      listEl.innerHTML = '<div class="ai-agent-empty">这次没有拿到可用的选币结果。</div>';
+      return;
+    }
+
+    listEl.innerHTML = rows.map((row) => {
+      const tradableText = row.tradable_now ? '可直接交易' : (row.blocked_by_risk ? '被风险拦截' : '暂不达标');
+      const tone = row.tradable_now ? 'is-good' : (row.blocked_by_risk ? 'is-warn' : 'is-info');
+      const holdingText = row.has_position
+        ? `持仓中 / ${row.position_side === 'short' ? '空头' : row.position_side === 'long' ? '多头' : row.position_side || '--'}`
+        : '';
+      const dataFreshness = row.market_data_last_bar_at
+        ? `最新 bar ${fmtAgentTs(row.market_data_last_bar_at)}${row.market_data_age_sec != null ? ` / 已过 ${formatAgeSeconds(row.market_data_age_sec)}` : ''}`
+        : '';
+      return `
+        <div class="ai-agent-ranking-row ${row.selected ? 'is-selected' : ''}">
+          <div class="ai-agent-ranking-head">
+            <span class="ai-agent-ranking-rank">#${esc(row.rank || '--')}</span>
+            <span class="ai-agent-ranking-symbol">${esc(row.symbol || '--')}</span>
+            <span class="ai-agent-ranking-score">${esc(formatRatio(row.score, 3))}</span>
+          </div>
+          <div class="ai-agent-ranking-meta">
+            <span>${esc(String(row.direction || '--'))} / ${esc(formatRatio(row.confidence, 3))}</span>
+            <span class="ai-agent-mini-tag ${tone}">${esc(tradableText)}</span>
+            ${holdingText ? `<span class="ai-agent-mini-tag is-warn">${esc(holdingText)}</span>` : ''}
+          </div>
+          <div class="ai-agent-ranking-detail">${esc(row.summary || '--')}</div>
+          ${dataFreshness ? `<div class="ai-agent-ranking-detail">${esc(dataFreshness)}</div>` : ''}
+        </div>
+      `;
+    }).join('');
+    normalizeElementHtml(listEl);
   }
 
   function renderAgentPanel(status = {}, cfg = {}) {
@@ -665,10 +847,11 @@
     dot.className = `agent-dot ${running ? 'agent-dot-on' : 'agent-dot-off'}`;
     dot.title = running ? '运行中' : '已停止';
 
+    const rankingState = resolveAgentRankingState(status, cfg);
     const researchCtx = status.last_research_context || {};
     const selectedResearch = researchCtx.selected_candidate || {};
     const lastScan = status.last_symbol_scan || {};
-    const activeSymbol = String(lastScan.selected_symbol || cfg.symbol || '--');
+    const activeSymbol = String(lastScan.selected_symbol || rankingState.scan?.selected_symbol || cfg.symbol || '--');
     const researchLine = selectedResearch.candidate_id
       ? `${selectedResearch.strategy || '--'} / ${selectedResearch.candidate_id}`
       : '--';
@@ -716,6 +899,7 @@
       ${lastError ? `<div class="ai-agent-error">错误：${esc(lastError)}</div>` : ''}
     `;
 
+    normalizeElementHtml(info);
     const startBtn = document.getElementById('ai-agent-start-btn');
     const stopBtn = document.getElementById('ai-agent-stop-btn');
     if (startBtn) {
@@ -727,9 +911,11 @@
       stopBtn.textContent = '停止';
     }
 
+    normalizeElementText(startBtn);
+    normalizeElementText(stopBtn);
     renderAgentChainSummary(status, cfg);
     renderAgentDiagnostics(status, cfg);
-    renderAgentRanking(status.last_symbol_scan || null, cfg);
+    renderAgentRanking(rankingState.scan, cfg, rankingState.meta || null);
     syncAgentConfigForm(cfg);
     emitAgentStatus(status, cfg);
   }
@@ -887,6 +1073,7 @@
       </section>
     `;
 
+    normalizeElementHtml(summaryEl);
     if (!items.length) {
       listEl.innerHTML = '<div class="ai-agent-empty">暂无放行交易复盘</div>';
       return;
@@ -983,6 +1170,7 @@
         </article>
       `;
     }).join('');
+    normalizeElementHtml(listEl);
   }
 
   async function loadAgentReview() {
@@ -1000,6 +1188,16 @@
     }
   }
 
+  function shouldAutoRefreshAgentRanking(status = {}, cfg = {}) {
+    const mode = String(cfg.symbol_mode || 'manual').toLowerCase();
+    if (mode !== 'auto' || !isAgentTabActive()) return false;
+    if (rankingInFlight) return false;
+    const meta = buildScanMeta(status.preview_symbol_scan || null, status.preview_symbol_scan_meta || null);
+    if (meta.available && !meta.stale && !meta.actual_scan_fallback) return false;
+    if (Date.now() - lastRankingAutoRefreshAt < AUTO_RANKING_REFRESH_COOLDOWN_MS) return false;
+    return true;
+  }
+
   async function loadAgentSymbolRanking(force = false, options = {}) {
     const timeoutMs = Math.max(5000, Number(options.timeoutMs || (force ? 90000 : 20000)));
     const notifyOnError = options.notifyOnError !== false;
@@ -1010,7 +1208,26 @@
         symbol_mode: response?.symbol_mode || document.getElementById('ai-agent-symbol-mode')?.value || 'manual',
         symbol: response?.configured_symbol || document.getElementById('ai-agent-manual-symbol')?.value || 'BTC/USDT',
       };
-      renderAgentRanking(response || null, cfg);
+      const scanMeta = buildScanMeta(response || null, response?.scan_meta || null);
+      lastRankingAutoRefreshAt = Date.now();
+      if (rankingPendingRetryTimer) {
+        window.clearTimeout(rankingPendingRetryTimer);
+        rankingPendingRetryTimer = null;
+      }
+      if (scanMeta.pending && isAgentTabActive()) {
+        rankingPendingRetryTimer = window.setTimeout(() => {
+          rankingPendingRetryTimer = null;
+          loadAgentStatus({ includeDetails: isAgentTabActive(), notifyOnError: false }).catch(() => {});
+        }, 12000);
+      }
+      if (lastStatusSnapshot && typeof lastStatusSnapshot === 'object') {
+        lastStatusSnapshot = {
+          ...lastStatusSnapshot,
+          preview_symbol_scan: response || null,
+          preview_symbol_scan_meta: scanMeta,
+        };
+      }
+      renderAgentRanking(response || null, cfg, scanMeta);
       return response;
     } catch (err) {
       if (notifyOnError) {
@@ -1046,6 +1263,14 @@
       syncAgentConfigForm(cfg);
       notify('自动交易代理配置已保存');
       await loadAgentStatus({ includeDetails: isAgentTabActive(), notifyOnError: true });
+      if (String(document.getElementById('ai-agent-symbol-mode')?.value || 'manual').toLowerCase() === 'auto') {
+        lastRankingAutoRefreshAt = Date.now();
+        loadAgentSymbolRanking(true, {
+          timeoutMs: 90000,
+          notifyOnError: false,
+          preserveExisting: true,
+        }).catch(() => {});
+      }
       if (symbolMode === 'auto') {
         loadAgentSymbolRanking(true, {
           timeoutMs: 90000,
@@ -1078,6 +1303,14 @@
         lastStatusSnapshot = response?.status || {};
         lastConfigSnapshot = response?.config || {};
         renderAgentPanel(response?.status || {}, response?.config || {});
+        if (shouldAutoRefreshAgentRanking(response?.status || {}, response?.config || {})) {
+          lastRankingAutoRefreshAt = Date.now();
+          loadAgentSymbolRanking(true, {
+            timeoutMs: 90000,
+            notifyOnError: false,
+            preserveExisting: true,
+          }).catch(() => {});
+        }
         if (includeDetails && document.getElementById('ai-agent-journal')) {
           loadAgentJournal().catch(() => {});
         }
@@ -1110,6 +1343,7 @@
       btn.disabled = true;
       btn.textContent = '启动中...';
     }
+    normalizeElementText(btn);
     try {
       await rootApi(AGENT_START_API, {
         method: 'POST',
@@ -1133,6 +1367,7 @@
       btn.disabled = true;
       btn.textContent = '停止中...';
     }
+    normalizeElementText(btn);
     try {
       await rootApi(AGENT_STOP_API, { method: 'POST' });
       notify('自动交易代理已停止');
@@ -1153,11 +1388,26 @@
       btn.disabled = true;
       btn.textContent = '运行中...';
     }
+    normalizeElementText(btn);
     try {
       const response = await rootApi(AGENT_RUN_ONCE_API, {
         method: 'POST',
         body: JSON.stringify({ force: true }),
       });
+      if (response?.busy) {
+        const manualRun = response?.request || response?.status?.manual_run || {};
+        const stateText = compactText(manualRun?.state || response?.reason || 'running', 40);
+        notify(`宸叉湁涓€杞湪杩愯锛屾墜鍔ㄨЕ鍙戝凡鎺掗槦 / ${stateText}`);
+        await loadAgentStatus({ includeDetails: isAgentTabActive(), notifyOnError: true });
+        return;
+      }
+      if (response?.accepted) {
+        const manualRun = response?.request || response?.status?.manual_run || {};
+        const stateText = manualRun?.state === 'queued' ? '宸叉帓闃?' : '宸插湪鍚庡彴鍚姩';
+        notify(`鍗曟璇曡窇宸茶Е鍙戯紝${stateText}锛屽彲鍦ㄧ姸鎬佷笌鏃ュ織閲屾煡鐪嬬粨鏋?`);
+        await loadAgentStatus({ includeDetails: isAgentTabActive(), notifyOnError: true });
+        return;
+      }
       const result = response?.result || {};
       if (result?.skipped) {
         const reason = compactText(result?.reason || result?.rejection_reason || 'unknown', 80);

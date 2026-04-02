@@ -4662,6 +4662,7 @@
       esc,
       fmtTs,
       notify,
+      normalizeUiText,
       providerDisplayName,
       researchModeText,
       statusText,

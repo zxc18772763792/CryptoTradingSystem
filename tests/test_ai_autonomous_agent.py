@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -136,6 +136,200 @@ def test_autonomous_agent_run_once_low_confidence_forces_hold(monkeypatch, tmp_p
     assert result["decision"]["leverage"] == 1.0
     assert result["execution"]["submitted"] is False
     assert submit_mock.await_count == 0
+
+
+def test_load_market_data_persists_live_bars_when_local_cache_is_stale(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_live_refresh")
+    stale_df = _sample_df().copy()
+    stale_df.index = pd.date_range("2026-01-01", periods=len(stale_df), freq="15min")
+    live_start = datetime.now(timezone.utc).replace(second=0, microsecond=0) - pd.Timedelta(minutes=15 * 5)
+    live_klines = [
+        SimpleNamespace(
+            timestamp=(live_start + pd.Timedelta(minutes=15 * idx)).isoformat(),
+            open=100.0 + idx,
+            high=100.2 + idx,
+            low=99.8 + idx,
+            close=100.1 + idx,
+            volume=10.0 + idx,
+        )
+        for idx in range(6)
+    ]
+    save_mock = AsyncMock(return_value="saved")
+    connector = SimpleNamespace(get_klines=AsyncMock(return_value=live_klines))
+
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=stale_df))
+    monkeypatch.setattr(module.data_storage, "save_klines_to_parquet", save_mock)
+    monkeypatch.setattr(module.exchange_manager, "get_exchange", lambda name: connector)
+
+    result = asyncio.run(
+        agent._load_market_data(
+            {
+                "exchange": "binance",
+                "symbol": "BTC/USDT",
+                "timeframe": "15m",
+                "lookback_bars": 60,
+            }
+        )
+    )
+
+    assert not result.empty
+    assert save_mock.await_count == 1
+
+
+def test_load_market_data_skips_live_fetch_when_local_cache_is_fresh(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_fresh_cache")
+    fresh_end = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    fresh_df = _sample_df().copy()
+    fresh_df.index = pd.date_range(end=fresh_end, periods=len(fresh_df), freq="15min")
+    connector = SimpleNamespace(get_klines=AsyncMock(return_value=[]))
+
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=fresh_df))
+    monkeypatch.setattr(module.exchange_manager, "get_exchange", lambda name: connector)
+
+    result = asyncio.run(
+        agent._load_market_data(
+            {
+                "exchange": "binance",
+                "symbol": "BTC/USDT",
+                "timeframe": "15m",
+                "lookback_bars": 60,
+            }
+        )
+    )
+
+    assert not result.empty
+    assert connector.get_klines.await_count == 0
+
+
+def test_load_market_data_live_timeout_falls_back_to_local(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_live_timeout")
+    stale_df = _sample_df().copy()
+    stale_df.index = pd.date_range("2026-01-01", periods=len(stale_df), freq="15min")
+
+    async def _slow_klines(symbol, timeframe, limit):
+        await asyncio.sleep(0.05)
+        return []
+
+    connector = SimpleNamespace(get_klines=AsyncMock(side_effect=_slow_klines))
+
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=stale_df))
+    monkeypatch.setattr(module.exchange_manager, "get_exchange", lambda name: connector)
+
+    result = asyncio.run(
+        agent._load_market_data(
+            {
+                "exchange": "binance",
+                "symbol": "BTC/USDT",
+                "timeframe": "15m",
+                "lookback_bars": 60,
+                "_live_market_timeout_sec": 0.01,
+            }
+        )
+    )
+
+    assert not result.empty
+    assert result.index.max() == stale_df.index.max()
+    assert connector.get_klines.await_count == 1
+
+
+def test_build_context_light_symbol_scan_skips_expensive_runtime_calls(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_light_scan")
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "LONG", "confidence": 0.64, "blocked_by_risk": False, "risk_reason": ""}
+
+    def _unexpected_research_context(**kwargs):
+        raise AssertionError("light scan should not resolve research context")
+
+    monkeypatch.setattr(agent, "_load_market_data", AsyncMock(return_value=_sample_df().tail(60)))
+    monkeypatch.setattr(agent, "_resolve_last_price", AsyncMock(return_value=123.0))
+    monkeypatch.setattr(agent, "_resolve_account_risk_base", AsyncMock(side_effect=AssertionError("skip account risk base")))
+    monkeypatch.setattr(agent, "_resolve_position_payload", AsyncMock(side_effect=AssertionError("use prefetched scan position map")))
+    monkeypatch.setattr(module, "resolve_runtime_research_context", _unexpected_research_context)
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+
+    context, market_data = asyncio.run(
+        agent._build_context(
+            {
+                "exchange": "binance",
+                "symbol": "BTC/USDT",
+                "timeframe": "15m",
+                "account_id": "main",
+                "mode": "execute",
+                "min_confidence": 0.58,
+                "default_stop_loss_pct": 0.02,
+                "default_take_profit_pct": 0.04,
+                "_light_symbol_scan": True,
+                "_skip_event_summary": True,
+                "_skip_research_context": True,
+                "_scan_position_map": {
+                    "BTC/USDT": {
+                        "side": "long",
+                        "quantity": 1.0,
+                        "entry_price": 120.0,
+                        "current_price": 123.0,
+                        "unrealized_pnl": 3.0,
+                        "source": "prefetched_live",
+                    }
+                },
+            }
+        )
+    )
+
+    assert not market_data.empty
+    assert context["position"]["side"] == "long"
+    assert context["position"]["source"] == "prefetched_live"
+    assert context["research_context"]["available"] is False
+    assert context["research_context"]["selection_reason"] == "light_scan_skipped"
+    assert context["account_risk"]["trading_mode"] == "paper"
+
+
+def test_build_context_coarse_scan_uses_fast_aggregate(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_fast_aggregate")
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "LONG", "confidence": 0.64, "blocked_by_risk": False, "risk_reason": ""}
+
+    aggregate_mock = AsyncMock(return_value=_Agg())
+    monkeypatch.setattr(agent, "_load_market_data", AsyncMock(return_value=_sample_df().tail(60)))
+    monkeypatch.setattr(agent, "_resolve_last_price", AsyncMock(return_value=123.0))
+    monkeypatch.setattr(agent, "_resolve_position_payload", AsyncMock(return_value={}))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=aggregate_mock))
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+
+    asyncio.run(
+        agent._build_context(
+            {
+                "exchange": "binance",
+                "symbol": "BTC/USDT",
+                "timeframe": "15m",
+                "account_id": "main",
+                "mode": "execute",
+                "min_confidence": 0.58,
+                "_light_symbol_scan": True,
+                "_scan_skip_live_market": True,
+                "_skip_event_summary": True,
+                "_skip_research_context": True,
+            }
+        )
+    )
+
+    kwargs = aggregate_mock.await_args.kwargs
+    assert kwargs["include_llm"] is False
+    assert kwargs["include_ml"] is False
 
 
 def test_autonomous_agent_run_once_force_bypasses_disabled_guard(monkeypatch, tmp_path: Path):
@@ -518,6 +712,8 @@ def test_agent_model_feedback_classifies_503_service_unavailable(monkeypatch, tm
     diagnostics = result["diagnostics"]
     assert result["decision"]["action"] == "hold"
     assert diagnostics["primary"]["code"] == "model_service_unavailable"
+    assert diagnostics["primary"]["label"] == "模型服务暂时不可用 (503)"
+    assert "本轮已回退为 hold" in diagnostics["primary"]["detail"]
     assert "503" in diagnostics["primary"]["label"]
     assert diagnostics["model_feedback"]["kind"] == "service_unavailable"
     assert diagnostics["model_feedback"]["http_status"] == 503
@@ -586,9 +782,9 @@ def test_symbol_scan_reuses_recent_cached_snapshot(monkeypatch, tmp_path: Path):
         },
     )
     monkeypatch.setattr(agent, "_cfg_with_learning_overlays", lambda cfg, force_learning_refresh=False: dict(cfg))
-    tracked_mock = AsyncMock(return_value=[])
+    scan_position_map_mock = AsyncMock(return_value={})
     build_context_mock = AsyncMock(side_effect=AssertionError("cached scan should not rebuild contexts"))
-    monkeypatch.setattr(agent, "_tracked_position_symbols", tracked_mock)
+    monkeypatch.setattr(agent, "_scan_position_map", scan_position_map_mock)
     monkeypatch.setattr(agent, "_build_context", build_context_mock)
 
     agent._last_symbol_scan = {
@@ -608,8 +804,532 @@ def test_symbol_scan_reuses_recent_cached_snapshot(monkeypatch, tmp_path: Path):
     result = asyncio.run(agent.get_symbol_scan(limit=10, force=False))
 
     assert result["selected_symbol"] == "ETH/USDT"
-    assert tracked_mock.await_count == 1
+    assert scan_position_map_mock.await_count == 1
     assert build_context_mock.await_count == 0
+
+
+def test_run_once_loop_uses_non_forced_symbol_scan(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_loop_scan")
+    get_symbol_scan_mock = AsyncMock(
+        return_value={
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "symbol_mode": "manual",
+            "configured_symbol": "BTC/USDT",
+            "selected_symbol": "BTC/USDT",
+            "selection_reason": "manual_symbol",
+            "candidate_count": 1,
+            "top_n": 10,
+            "top_candidates": [],
+        }
+    )
+    monkeypatch.setattr(agent, "get_symbol_scan", get_symbol_scan_mock)
+    monkeypatch.setattr(
+        agent,
+        "_build_context",
+        AsyncMock(
+            return_value=(
+                {
+                    "exchange": "binance",
+                    "symbol": "BTC/USDT",
+                    "timeframe": "15m",
+                    "price": 100.0,
+                    "bars": 240,
+                    "returns": {"r_1h": 0.0, "r_24h": 0.0},
+                    "realized_vol_annualized": 0.1,
+                    "market_structure": {"available": True},
+                    "aggregated_signal": {"direction": "LONG", "confidence": 0.82, "blocked_by_risk": False, "risk_reason": ""},
+                    "event_summary": {"available": False},
+                    "position": {},
+                    "account_risk": {"trading_mode": "paper", "min_confidence": 0.58},
+                    "execution_cost": {"estimated_one_way_cost_bps": 2.0, "estimated_round_trip_cost_bps": 4.0},
+                    "research_context": {"available": False},
+                    "profile": {},
+                    "learning_memory": {},
+                    "trading_mode": "paper",
+                },
+                pd.DataFrame(),
+            )
+        ),
+    )
+    monkeypatch.setattr(agent, "_build_event_summary", AsyncMock(return_value={"available": True, "events_count": 0}))
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        AsyncMock(
+            return_value={
+                "action": "hold",
+                "confidence": 0.6,
+                "strength": 0.2,
+                "leverage": 1.0,
+                "stop_loss_pct": 0.02,
+                "take_profit_pct": 0.04,
+                "reason": "wait",
+            }
+        ),
+    )
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=True))
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    asyncio.run(agent.run_once(trigger="loop", force=False))
+
+    assert get_symbol_scan_mock.await_args.kwargs["force"] is False
+
+
+def test_build_context_light_scan_reuses_empty_position_map_without_live_lookup(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_light_scan_positions")
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "FLAT", "confidence": 0.0}
+
+    monkeypatch.setattr(agent, "_load_market_data", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(agent, "_resolve_last_price", AsyncMock(return_value=100.0))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    resolve_position_mock = AsyncMock(side_effect=AssertionError("light scan should reuse empty position map"))
+    monkeypatch.setattr(agent, "_resolve_position_payload", resolve_position_mock)
+
+    context, market_data = asyncio.run(
+        agent._build_context(
+            {
+                "exchange": "binance",
+                "symbol": "BTC/USDT",
+                "timeframe": "15m",
+                "mode": "execute",
+                "allow_live": True,
+                "min_confidence": 0.58,
+                "default_stop_loss_pct": 0.02,
+                "default_take_profit_pct": 0.04,
+                "strategy_name": "AI_AutonomousAgent",
+                "_light_symbol_scan": True,
+                "_scan_position_map": {},
+                "_skip_event_summary": True,
+            }
+        )
+    )
+
+    assert market_data is not None
+    assert context["position"] == {}
+    assert resolve_position_mock.await_count == 0
+
+
+def test_get_symbol_scan_auto_uses_two_stage_refresh(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_two_stage_scan")
+    symbols = [f"SYM{i}/USDT" for i in range(20)]
+    call_log = []
+
+    monkeypatch.setattr(
+        agent,
+        "get_runtime_config",
+        lambda: {
+            "exchange": "binance",
+            "symbol": "SYM0/USDT",
+            "symbol_mode": "auto",
+            "universe_symbols": symbols,
+            "selection_top_n": 3,
+            "timeframe": "15m",
+            "lookback_bars": 240,
+            "account_id": "main",
+            "min_confidence": 0.58,
+        },
+    )
+    monkeypatch.setattr(agent, "_cfg_with_learning_overlays", lambda cfg, force_learning_refresh=False: dict(cfg))
+    monkeypatch.setattr(agent, "_scan_position_map", AsyncMock(return_value={}))
+
+    async def _fake_build_context(local_cfg):
+        call_log.append((str(local_cfg.get("symbol")), bool(local_cfg.get("_scan_skip_live_market"))))
+        return {"symbol": str(local_cfg.get("symbol") or "")}, pd.DataFrame()
+
+    def _fake_score(local_cfg, context_payload):
+        symbol = str(context_payload.get("symbol") or "")
+        idx = int(symbol.split("/", 1)[0].replace("SYM", ""))
+        return {
+            "symbol": symbol,
+            "price": 1.0 + idx,
+            "direction": "LONG",
+            "confidence": round(0.9 - idx * 0.01, 6),
+            "score": float(100 - idx),
+            "tradable_now": True,
+            "blocked_by_risk": False,
+            "risk_reason": "",
+            "bars": 240,
+            "realized_vol_annualized": 0.2,
+            "threshold_gap": 0.1,
+            "summary": f"rank {idx}",
+            "has_position": False,
+            "position_side": "",
+            "position_source": "",
+            "position_unrealized_pnl": 0.0,
+            "position_unrealized_pnl_pct": 0.0,
+            "research": {
+                "candidate_id": "",
+                "strategy": "",
+                "status": "",
+                "promotion_target": "",
+                "validation_reasons": [],
+            },
+        }
+
+    monkeypatch.setattr(agent, "_build_context", _fake_build_context)
+    monkeypatch.setattr(agent, "_score_symbol_candidate", _fake_score)
+
+    result = asyncio.run(agent.get_symbol_scan(limit=3, force=True))
+
+    prescan_calls = [symbol for symbol, skip_live in call_log if skip_live]
+    rerank_calls = [symbol for symbol, skip_live in call_log if not skip_live]
+
+    assert result["selected_symbol"] == "SYM0/USDT"
+    assert len(prescan_calls) == len(symbols)
+    assert len(rerank_calls) == 8
+    assert prescan_calls.count("SYM0/USDT") == 1
+    assert rerank_calls.count("SYM0/USDT") == 1
+    assert rerank_calls.count("SYM19/USDT") == 0
+
+
+def test_get_symbol_scan_preview_uses_fast_mode_without_caching(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_preview_scan")
+    call_log = []
+
+    monkeypatch.setattr(
+        agent,
+        "get_runtime_config",
+        lambda: {
+            "exchange": "binance",
+            "symbol": "BTC/USDT",
+            "symbol_mode": "manual",
+            "timeframe": "15m",
+            "lookback_bars": 240,
+            "account_id": "main",
+            "min_confidence": 0.58,
+            "selection_top_n": 5,
+        },
+    )
+    monkeypatch.setattr(agent, "_cfg_with_learning_overlays", lambda cfg, force_learning_refresh=False: dict(cfg))
+
+    async def _fake_build_context(local_cfg):
+        call_log.append(
+            (
+                bool(local_cfg.get("_preview_symbol_scan")),
+                bool(local_cfg.get("_scan_skip_live_market")),
+            )
+        )
+        return {"symbol": str(local_cfg.get("symbol") or "BTC/USDT")}, pd.DataFrame()
+
+    monkeypatch.setattr(agent, "_build_context", _fake_build_context)
+    monkeypatch.setattr(
+        agent,
+        "_score_symbol_candidate",
+        lambda local_cfg, context_payload: {
+            "symbol": "BTC/USDT",
+            "price": 1.0,
+            "direction": "LONG",
+            "confidence": 0.7,
+            "score": 0.7,
+            "tradable_now": True,
+            "blocked_by_risk": False,
+            "risk_reason": "",
+            "bars": 240,
+            "realized_vol_annualized": 0.2,
+            "threshold_gap": 0.1,
+            "summary": "preview",
+            "has_position": False,
+            "position_side": "",
+            "position_source": "",
+            "position_unrealized_pnl": 0.0,
+            "position_unrealized_pnl_pct": 0.0,
+            "research": {
+                "candidate_id": "",
+                "strategy": "",
+                "status": "",
+                "promotion_target": "",
+                "validation_reasons": [],
+            },
+        },
+    )
+
+    result = asyncio.run(agent.get_symbol_scan_preview(limit=5, force=True))
+
+    assert result["selected_symbol"] == "BTC/USDT"
+    assert call_log == [(True, True)]
+    assert agent._last_symbol_scan is None
+    assert agent._last_preview_symbol_scan is not None
+
+
+def test_get_symbol_scan_preview_auto_mode_uses_single_pass_scan(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_preview_auto_scan")
+    symbols = [f"SYM{i}/USDT" for i in range(12)]
+    call_log = []
+
+    monkeypatch.setattr(
+        agent,
+        "get_runtime_config",
+        lambda: {
+            "exchange": "binance",
+            "symbol": "BTC/USDT",
+            "symbol_mode": "auto",
+            "universe_symbols": symbols,
+            "selection_top_n": 5,
+            "timeframe": "15m",
+            "lookback_bars": 240,
+            "account_id": "main",
+            "min_confidence": 0.58,
+        },
+    )
+    monkeypatch.setattr(agent, "_cfg_with_learning_overlays", lambda cfg, force_learning_refresh=False: dict(cfg))
+    monkeypatch.setattr(agent, "_scan_position_map", AsyncMock(return_value={}))
+
+    async def _fake_build_context(local_cfg):
+        call_log.append((str(local_cfg.get("symbol") or ""), bool(local_cfg.get("_scan_skip_live_market"))))
+        return {"symbol": str(local_cfg.get("symbol") or "")}, pd.DataFrame()
+
+    def _fake_score(local_cfg, context_payload):
+        symbol = str(context_payload.get("symbol") or "")
+        idx = int(symbol.split("/", 1)[0].replace("SYM", ""))
+        return {
+            "symbol": symbol,
+            "price": 1.0 + idx,
+            "direction": "LONG",
+            "confidence": round(0.9 - idx * 0.01, 6),
+            "score": float(100 - idx),
+            "tradable_now": True,
+            "blocked_by_risk": False,
+            "risk_reason": "",
+            "bars": 240,
+            "realized_vol_annualized": 0.2,
+            "threshold_gap": 0.1,
+            "summary": f"rank {idx}",
+            "has_position": False,
+            "position_side": "",
+            "position_source": "",
+            "position_unrealized_pnl": 0.0,
+            "position_unrealized_pnl_pct": 0.0,
+            "research": {
+                "candidate_id": "",
+                "strategy": "",
+                "status": "",
+                "promotion_target": "",
+                "validation_reasons": [],
+            },
+        }
+
+    monkeypatch.setattr(agent, "_build_context", _fake_build_context)
+    monkeypatch.setattr(agent, "_score_symbol_candidate", _fake_score)
+
+    result = asyncio.run(agent.get_symbol_scan_preview(limit=5, force=True))
+
+    assert result["selected_symbol"] == "SYM0/USDT"
+    assert len(call_log) == len(symbols) + 1
+    assert call_log[0][0] == "BTC/USDT"
+    assert all(skip_live for _, skip_live in call_log)
+    assert agent._last_preview_symbol_scan is not None
+
+
+def test_get_symbol_scan_preview_reuses_recent_cache_during_force_refresh(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_preview_cache")
+    agent._last_preview_symbol_scan = {
+        "generated_at": module._utc_now().isoformat(),
+        "symbol_mode": "manual",
+        "configured_symbol": "BTC/USDT",
+        "selected_symbol": "BTC/USDT",
+        "selection_reason": "manual_symbol",
+        "candidate_count": 1,
+        "top_n": 5,
+        "top_candidates": [
+            {
+                "rank": 1,
+                "symbol": "BTC/USDT",
+                "score": 0.8,
+            }
+        ],
+    }
+
+    result = asyncio.run(agent.get_symbol_scan_preview(limit=5, force=True))
+
+    assert result["selected_symbol"] == "BTC/USDT"
+    assert result["scan_meta"]["stale"] is False
+    assert result["scan_meta"]["max_age_sec"] == float(module._PREVIEW_SYMBOL_SCAN_CACHE_MAX_AGE_SEC)
+
+
+def test_get_symbol_scan_preview_snapshot_falls_back_to_last_symbol_scan(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_preview_snapshot")
+    agent._last_symbol_scan = {
+        "generated_at": module._utc_now().isoformat(),
+        "symbol_mode": "manual",
+        "configured_symbol": "BTC/USDT",
+        "selected_symbol": "BTC/USDT",
+        "selection_reason": "manual_symbol",
+        "candidate_count": 1,
+        "top_n": 5,
+        "top_candidates": [{"rank": 1, "symbol": "BTC/USDT", "score": 0.9}],
+    }
+
+    result = agent.get_symbol_scan_preview_snapshot(limit=5)
+
+    assert result is not None
+    assert result["selected_symbol"] == "BTC/USDT"
+    assert result["scan_meta"]["actual_scan_fallback"] is True
+    assert result["scan_meta"]["max_age_sec"] == float(module._PREVIEW_SYMBOL_SCAN_CACHE_MAX_AGE_SEC)
+
+
+def test_get_symbol_scan_preview_snapshot_reuses_recent_stale_preview(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_preview_stale_snapshot")
+    stale_generated_at = (module._utc_now() - timedelta(seconds=25)).isoformat()
+    agent._last_preview_symbol_scan = {
+        "generated_at": stale_generated_at,
+        "symbol_mode": "auto",
+        "configured_symbol": "BTC/USDT",
+        "selected_symbol": "ETH/USDT",
+        "selection_reason": "top_ranked_tradable_symbol",
+        "candidate_count": 2,
+        "top_n": 5,
+        "top_candidates": [
+            {"rank": 1, "symbol": "ETH/USDT", "score": 0.9},
+            {"rank": 2, "symbol": "BTC/USDT", "score": 0.8},
+        ],
+    }
+
+    result = agent.get_symbol_scan_preview_snapshot(limit=5)
+
+    assert result is not None
+    assert result["selected_symbol"] == "ETH/USDT"
+    assert result["scan_meta"]["stale"] is True
+    assert result["scan_meta"]["stale_preview_fallback"] is True
+
+
+def test_get_status_exposes_preview_symbol_scan(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_preview_status")
+    agent._last_preview_symbol_scan = {
+        "generated_at": module._utc_now().isoformat(),
+        "symbol_mode": "auto",
+        "configured_symbol": "BTC/USDT",
+        "selected_symbol": "ETH/USDT",
+        "selection_reason": "top_ranked_tradable_symbol",
+        "candidate_count": 2,
+        "top_n": 5,
+        "top_candidates": [
+            {"rank": 1, "symbol": "ETH/USDT", "score": 0.9},
+            {"rank": 2, "symbol": "BTC/USDT", "score": 0.8},
+        ],
+    }
+
+    status = agent.get_status()
+
+    assert status["preview_symbol_scan"] is not None
+    assert status["preview_symbol_scan"]["selected_symbol"] == "ETH/USDT"
+    assert status["preview_symbol_scan_meta"]["stale"] is False
+    assert status["preview_symbol_scan_meta"]["max_age_sec"] == float(module._PREVIEW_SYMBOL_SCAN_CACHE_MAX_AGE_SEC)
+
+
+def test_ensure_symbol_scan_preview_warm_deduplicates_background_task(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_preview_warm")
+    started = 0
+    release = asyncio.Event()
+
+    async def _fake_preview(*, limit=None, force=False):
+        nonlocal started
+        started += 1
+        await release.wait()
+        return {"selected_symbol": "BTC/USDT"}
+
+    monkeypatch.setattr(agent, "get_symbol_scan_preview", _fake_preview)
+
+    async def _exercise():
+        assert agent.ensure_symbol_scan_preview_warm(limit=5) is True
+        assert agent.ensure_symbol_scan_preview_warm(limit=5) is False
+        release.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(_exercise())
+
+    assert started == 1
+    assert agent._preview_symbol_scan_task is None
+
+
+def test_build_symbol_scan_preview_pending_payload_marks_pending(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_preview_pending")
+
+    payload = agent.build_symbol_scan_preview_pending_payload(limit=5, reason="preview timeout")
+
+    assert payload["selection_reason"] == "preview_pending"
+    assert payload["top_n"] == 5
+    assert payload["top_candidates"] == []
+    assert payload["scan_meta"]["pending"] is True
+    assert "preview timeout" in payload["scan_meta"]["fallback_reason"]
+
+
+def test_run_once_holds_when_market_data_is_stale_with_live_connector(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_stale_guard")
+    stale_ts = "2026-01-01T00:00:00+00:00"
+    submit_mock = AsyncMock(return_value=False)
+
+    monkeypatch.setattr(agent, "get_symbol_scan", AsyncMock(return_value={"selected_symbol": "BTC/USDT"}))
+    monkeypatch.setattr(
+        agent,
+        "_build_context",
+        AsyncMock(
+            return_value=(
+                {
+                    "exchange": "binance",
+                    "symbol": "BTC/USDT",
+                    "price": 123.0,
+                    "market_structure": {
+                        "available": True,
+                        "last_bar_at": stale_ts,
+                    },
+                    "position": {},
+                    "aggregated_signal": {
+                        "direction": "LONG",
+                        "confidence": 0.9,
+                        "blocked_by_risk": False,
+                        "risk_reason": "",
+                    },
+                    "research_context": {"available": False},
+                    "execution_cost": {},
+                },
+                pd.DataFrame(),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        module.exchange_manager,
+        "get_exchange",
+        lambda name: SimpleNamespace(get_klines=AsyncMock(return_value=[])),
+    )
+    monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(agent, "_call_provider", AsyncMock(side_effect=AssertionError("stale-data guard should skip provider")))
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert result["decision"]["action"] == "hold"
+    assert "stale_market_data" in str(result["decision"]["reason"] or "")
+    assert submit_mock.await_count == 0
 
 
 def test_update_runtime_config_clears_cached_symbol_scan(monkeypatch, tmp_path: Path):
@@ -627,10 +1347,119 @@ def test_update_runtime_config_clears_cached_symbol_scan(monkeypatch, tmp_path: 
         "top_n": 10,
         "top_candidates": [{"rank": 1, "symbol": "BTC/USDT", "score": 0.5}],
     }
+    agent._last_preview_symbol_scan = {
+        "generated_at": module._utc_now().isoformat(),
+        "symbol_mode": "manual",
+        "configured_symbol": "BTC/USDT",
+        "selected_symbol": "BTC/USDT",
+        "selection_reason": "manual_symbol",
+        "candidate_count": 1,
+        "top_n": 10,
+        "top_candidates": [{"rank": 1, "symbol": "BTC/USDT", "score": 0.5}],
+    }
 
     asyncio.run(agent.update_runtime_config(symbol="ETH/USDT"))
 
     assert agent.get_status()["last_symbol_scan"] is None
+    assert agent.get_status()["preview_symbol_scan"] is None
+
+
+def test_get_status_hides_stale_symbol_scan(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_stale_scan")
+    agent._last_symbol_scan = {
+        "generated_at": "2026-01-01T00:00:00+00:00",
+        "symbol_mode": "auto",
+        "configured_symbol": "BTC/USDT",
+        "selected_symbol": "BTC/USDT",
+        "selection_reason": "top_ranked_watchlist_symbol",
+        "candidate_count": 1,
+        "top_n": 10,
+        "top_candidates": [{"rank": 1, "symbol": "BTC/USDT", "score": 0.5}],
+    }
+
+    status = agent.get_status()
+
+    assert status["last_symbol_scan"] is None
+    assert status["last_symbol_scan_meta"]["stale"] is True
+    assert status["last_symbol_scan_meta"]["available"] is True
+
+
+def test_trigger_run_once_queues_background_run_and_exposes_manual_status(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_manual_trigger")
+    release_run = asyncio.Event()
+
+    async def _fake_run_once_impl(*, trigger: str = "manual", force: bool = False, request_id: str):
+        await release_run.wait()
+        return {
+            "request_id": request_id,
+            "timestamp": module._utc_now().isoformat(),
+            "trigger": trigger,
+            "decision": {"action": "hold", "reason": "queued_test"},
+            "execution": {"submitted": False, "reason": "hold"},
+            "selection": {"selected_symbol": "BTC/USDT", "selection_reason": "manual_symbol"},
+        }
+
+    monkeypatch.setattr(agent, "_run_once_impl", _fake_run_once_impl)
+
+    async def _exercise():
+        response = await agent.trigger_run_once(trigger="api_manual", force=True)
+        assert response["accepted"] is True
+        assert response["request"]["request_id"]
+        assert response["status"]["manual_run"]["request_id"] == response["request"]["request_id"]
+
+        await asyncio.sleep(0)
+        status_running = agent.get_status()
+        assert status_running["manual_run"]["active"] is True
+        assert status_running["manual_run"]["state"] == "running"
+        assert status_running["run_cycle"]["active"] is True
+
+        release_run.set()
+        await asyncio.wait_for(agent._manual_run_task, timeout=1.0)
+
+        status_done = agent.get_status()
+        assert status_done["manual_run"]["active"] is False
+        assert status_done["manual_run"]["state"] == "completed"
+        assert status_done["last_manual_run_result"]["request_id"] == response["request"]["request_id"]
+        assert status_done["last_manual_run_result"]["selection"]["selected_symbol"] == "BTC/USDT"
+
+    asyncio.run(_exercise())
+
+
+def test_trigger_run_once_returns_pending_when_manual_run_already_exists(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_manual_pending")
+    gate = asyncio.Event()
+
+    async def _fake_run_once_impl(*, trigger: str = "manual", force: bool = False, request_id: str):
+        await gate.wait()
+        return {
+            "request_id": request_id,
+            "timestamp": module._utc_now().isoformat(),
+            "trigger": trigger,
+            "decision": {"action": "hold", "reason": "pending_test"},
+            "execution": {"submitted": False, "reason": "hold"},
+            "selection": {"selected_symbol": "BTC/USDT", "selection_reason": "manual_symbol"},
+        }
+
+    monkeypatch.setattr(agent, "_run_once_impl", _fake_run_once_impl)
+
+    async def _exercise():
+        first = await agent.trigger_run_once(trigger="api_manual", force=True)
+        await asyncio.sleep(0)
+        second = await agent.trigger_run_once(trigger="api_manual", force=True)
+        assert first["accepted"] is True
+        assert second["accepted"] is False
+        assert second["busy"] is True
+        assert second["reason"] == "manual_run_pending"
+        gate.set()
+        await asyncio.wait_for(agent._manual_run_task, timeout=1.0)
+
+    asyncio.run(_exercise())
 
 
 def test_agent_config_persists_to_overlay(tmp_path):
@@ -836,6 +1665,74 @@ def test_agent_run_once_exposes_structured_diagnostics(monkeypatch, tmp_path: Pa
     codes = {item.get("code") for item in (result.get("diagnostics", {}).get("items") or [])}
     assert "below_min_confidence" in codes
     assert result["status"]["last_diagnostics"]["primary"]["code"] == "below_min_confidence"
+
+
+def test_agent_run_once_fast_path_hold_skips_provider(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    monkeypatch.setattr(
+        agent,
+        "get_symbol_scan",
+        AsyncMock(
+            return_value={
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "symbol_mode": "manual",
+                "configured_symbol": "BTC/USDT",
+                "selected_symbol": "BTC/USDT",
+                "selection_reason": "manual_symbol",
+                "candidate_count": 1,
+                "top_n": 10,
+                "top_candidates": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_build_context",
+        AsyncMock(
+            return_value=(
+                {
+                    "exchange": "binance",
+                    "symbol": "BTC/USDT",
+                    "timeframe": "15m",
+                    "price": 100.0,
+                    "bars": 240,
+                    "returns": {"r_1h": 0.0, "r_24h": 0.0},
+                    "realized_vol_annualized": 0.15,
+                    "market_structure": {"available": True},
+                    "aggregated_signal": {"direction": "LONG", "confidence": 0.62, "blocked_by_risk": False, "risk_reason": ""},
+                    "event_summary": {"available": False},
+                    "position": {},
+                    "account_risk": {"trading_mode": "paper", "min_confidence": 0.7},
+                    "execution_cost": {"estimated_one_way_cost_bps": 3.0, "estimated_round_trip_cost_bps": 6.0},
+                    "research_context": {"available": False},
+                    "profile": {},
+                    "learning_memory": {},
+                    "trading_mode": "paper",
+                },
+                pd.DataFrame(),
+            )
+        ),
+    )
+    provider_mock = AsyncMock(side_effect=AssertionError("fast-path hold should skip provider"))
+    monkeypatch.setattr(agent, "_call_provider", provider_mock)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=True))
+
+    asyncio.run(
+        agent.update_runtime_config(
+            enabled=True,
+            mode="execute",
+            min_confidence=0.7,
+            cooldown_sec=0,
+        )
+    )
+    result = asyncio.run(agent.run_once(trigger="loop", force=False))
+
+    assert result["decision"]["action"] == "hold"
+    assert str(result["decision"]["reason"]).startswith("below_min_confidence(")
+    assert provider_mock.await_count == 0
 
 
 def test_build_context_includes_market_event_and_account_risk_payloads(monkeypatch, tmp_path: Path):

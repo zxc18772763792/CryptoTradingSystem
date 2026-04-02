@@ -290,6 +290,65 @@ def test_autonomous_agent_codex_fails_over_to_backup_relay(monkeypatch, tmp_path
     ]
 
 
+def test_autonomous_agent_codex_retries_responses_token_param_variant(monkeypatch, tmp_path):
+    import core.ai.autonomous_agent as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+
+    capture = {}
+    response_payload = {
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": (
+                            '{"action":"buy","confidence":0.78,"strength":0.66,'
+                            '"leverage":1,"stop_loss_pct":0.02,"take_profit_pct":0.04,'
+                            '"reason":"token_param_variant_ok"}'
+                        ),
+                    }
+                ],
+            }
+        ]
+    }
+    responses = [
+        _FakeResponse({"detail": "Unsupported parameter: max_output_tokens"}, status=400),
+        _FakeResponse(response_payload, status=200),
+    ]
+    monkeypatch.setattr(
+        module.aiohttp,
+        "ClientSession",
+        lambda **kwargs: _FakeSequenceSession(capture=capture, responses=responses, **kwargs),
+    )
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent")
+    result = asyncio.run(
+        agent._call_provider(
+            provider="codex",
+            model="gpt-5.4",
+            timeout_ms=8000,
+            max_tokens=256,
+            temperature=0.1,
+            system_prompt="sys",
+            user_prompt="usr",
+        )
+    )
+
+    assert result["reason"] == "token_param_variant_ok"
+    assert capture["urls"] == [
+        "https://example.test/v1/responses",
+        "https://example.test/v1/responses",
+    ]
+    assert capture["requests"][0]["json"]["max_output_tokens"] == 256
+    assert "max_output_tokens" not in capture["requests"][1]["json"]
+    assert capture["requests"][1]["json"]["max_completion_tokens"] == 256
+
+
 def test_research_context_generator_fails_over_to_backup_relay(monkeypatch):
     import core.ai.research_context_generator as module
 

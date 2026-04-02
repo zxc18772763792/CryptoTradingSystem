@@ -36,7 +36,7 @@ from core.strategies.strategy_manager import strategy_manager
 from core.trading import execution_engine, position_manager
 from core.utils.openai_responses import (
     build_openai_headers,
-    build_responses_payload,
+    build_responses_payload_variants,
     extract_response_text,
     openai_endpoint_targets,
     prioritize_openai_targets,
@@ -45,6 +45,7 @@ from core.utils.openai_responses import (
     remember_openai_target_success,
     responses_endpoint,
     should_failover_openai_status,
+    unsupported_responses_parameter,
 )
 
 
@@ -59,8 +60,11 @@ _SUPPORTED_SYMBOL_MODES = {"manual", "auto"}
 _FIXED_AUTONOMOUS_AGENT_LEVERAGE = 1.0
 _SAME_DIRECTION_MAX_EXPOSURE_RATIO = 0.5
 _MODEL_FEEDBACK_OUTAGE_ALERT_SEC = 30 * 60
-_MODEL_FEEDBACK_HARD_TIMEOUT_SEC = 30 * 60
+# Keep a hard ceiling on per-round model time so one bad provider hop
+# cannot monopolize the agent for several minutes.
+_MODEL_FEEDBACK_HARD_TIMEOUT_SEC = 45.0
 _AUTO_SYMBOL_SCAN_MAX_ITEMS = 48
+_AUTO_SYMBOL_SCAN_CONCURRENCY = 4
 _DEFAULT_AUTO_UNIVERSE = [
     "BTC/USDT",
     "ETH/USDT",
@@ -106,7 +110,13 @@ _AI_PARTIAL_TAKE_PROFIT_TRIGGER_PCT_MIN = 0.0060
 _AI_PARTIAL_TAKE_PROFIT_FRACTION = 0.5
 _AI_POST_PARTIAL_TRAILING_STOP_PCT_MIN = 0.0025
 _AI_OUTAGE_TIGHT_TRAILING_STOP_PCT_MIN = 0.0015
-_SYMBOL_SCAN_CACHE_MAX_AGE_SEC = 30 * 60
+_SYMBOL_SCAN_CACHE_MAX_AGE_SEC = 10 * 60
+_PREVIEW_SYMBOL_SCAN_CACHE_MAX_AGE_SEC = 20.0
+_PREVIEW_SYMBOL_SCAN_FORCE_REUSE_MAX_AGE_SEC = 8.0
+_PREVIEW_SYMBOL_SCAN_STALE_FALLBACK_MAX_AGE_SEC = 3 * 60
+_MARKET_DATA_LIVE_FETCH_TIMEOUT_SEC = 8.0
+_MARKET_DATA_LIVE_FETCH_SCAN_TIMEOUT_SEC = 4.0
+_DECISION_LIVE_MARKET_TIMEOUT_SEC = 3.0
 
 
 def _utc_now() -> datetime:
@@ -311,6 +321,15 @@ def _utc_from_iso(value: Any) -> Optional[datetime]:
     return None
 
 
+def _age_sec_from_iso(value: Any) -> Optional[float]:
+    parsed = _utc_from_iso(value)
+    if parsed is None:
+        return None
+    with contextlib.suppress(Exception):
+        return max(0.0, (_utc_now() - parsed).total_seconds())
+    return None
+
+
 def _classify_model_feedback_error(exc: BaseException) -> Optional[str]:
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
         return "timeout"
@@ -337,6 +356,44 @@ def _extract_model_feedback_http_status(exc: Any) -> Optional[int]:
     with contextlib.suppress(Exception):
         return int(match.group(1))
     return None
+
+
+def _describe_model_feedback_issue_legacy(raw_error: Any) -> Dict[str, Any]:
+    normalized = str(raw_error or "").strip()
+    if normalized.startswith("model_error:"):
+        normalized = normalized.split("model_error:", 1)[1].strip()
+
+    kind = _classify_model_feedback_error(RuntimeError(normalized or ""))
+    http_status = _extract_model_feedback_http_status(normalized)
+    if kind == "rate_limit":
+        label = "模型限流或额度受限 (429)"
+        detail = "上游模型接口触发了频率或额度限制，本轮已回退为 hold。"
+        code = "model_rate_limit"
+    elif kind == "service_unavailable":
+        status_suffix = f" ({http_status})" if http_status else ""
+        label = f"模型服务暂时不可用{status_suffix}"
+        detail = "上游模型服务或代理网关暂时不可用，本轮已回退为 hold，稍后会自动重试。"
+        code = "model_service_unavailable"
+    elif kind == "timeout":
+        label = "模型响应超时"
+        detail = "等待模型返回超过超时阈值，本轮已回退为 hold。"
+        code = "model_timeout"
+    else:
+        label = "模型接口异常"
+        detail = "模型接口返回了未分类异常，本轮已回退为 hold。"
+        code = "model_error"
+
+    if normalized:
+        detail = f"{detail} 原始错误: {normalized[:220]}"
+
+    return {
+        "kind": kind,
+        "http_status": http_status,
+        "label": label,
+        "detail": detail,
+        "code": code,
+        "raw_error": normalized[:300],
+    }
 
 
 def _describe_model_feedback_issue(raw_error: Any) -> Dict[str, Any]:
@@ -468,6 +525,8 @@ class AutonomousTradingAgent:
     def __init__(self, cache_root: Optional[Path] = None) -> None:
         self._override: Dict[str, Any] = {}
         self._lock = asyncio.Lock()
+        self._run_once_lock = asyncio.Lock()
+        self._symbol_scan_lock = asyncio.Lock()
         self._task: Optional[asyncio.Task] = None
         self._stop_event: Optional[asyncio.Event] = None
 
@@ -492,6 +551,12 @@ class AutonomousTradingAgent:
         self._last_research_context: Optional[Dict[str, Any]] = None
         self._last_diagnostics: Optional[Dict[str, Any]] = None
         self._last_symbol_scan: Optional[Dict[str, Any]] = None
+        self._last_preview_symbol_scan: Optional[Dict[str, Any]] = None
+        self._active_run: Optional[Dict[str, Any]] = None
+        self._manual_run_task: Optional[asyncio.Task[Any]] = None
+        self._manual_run_request: Optional[Dict[str, Any]] = None
+        self._last_manual_run_result: Optional[Dict[str, Any]] = None
+        self._preview_symbol_scan_task: Optional[asyncio.Task[Any]] = None
         self._tick_count: int = 0
         self._submitted_count: int = 0
         self._last_submit_at: Optional[float] = None
@@ -645,6 +710,11 @@ class AutonomousTradingAgent:
         return snapshots
 
     async def _tracked_position_symbols(self, *, exchange: str, account_id: str) -> List[str]:
+        position_map = await self._scan_position_map(exchange=exchange, account_id=account_id)
+        return [str(symbol) for symbol in position_map.keys() if str(symbol).strip()]
+
+    async def _scan_position_map(self, *, exchange: str, account_id: str) -> Dict[str, Dict[str, Any]]:
+        symbol_map: Dict[str, Dict[str, Any]] = {}
         local_symbols: List[str] = []
         for position in position_manager.get_all_positions():
             try:
@@ -654,12 +724,49 @@ class AutonomousTradingAgent:
                     continue
                 if abs(float(getattr(position, "quantity", 0.0) or 0.0)) <= 1e-12:
                     continue
-                local_symbols.append(str(getattr(position, "symbol", "") or ""))
+                symbol_text = _normalize_symbol_text(str(getattr(position, "symbol", "") or ""))
+                symbol_key = _canonical_symbol_key(symbol_text)
+                if not symbol_key:
+                    continue
+                local_symbols.append(symbol_text)
+                symbol_map[symbol_key] = {
+                    "side": str(getattr(getattr(position, "side", None), "value", "") or ""),
+                    "quantity": float(getattr(position, "quantity", 0.0) or 0.0),
+                    "entry_price": float(getattr(position, "entry_price", 0.0) or 0.0),
+                    "current_price": float(getattr(position, "current_price", 0.0) or 0.0),
+                    "unrealized_pnl": float(getattr(position, "unrealized_pnl", 0.0) or 0.0),
+                    "leverage": float(getattr(position, "leverage", 1.0) or 1.0),
+                    "source": "local",
+                }
             except Exception:
                 continue
 
-        live_symbols = [str(item.get("symbol") or "") for item in await self._load_live_position_snapshots(exchange=exchange)]
-        return _merge_symbol_sequence(local_symbols, live_symbols, max_items=_AUTO_SYMBOL_SCAN_MAX_ITEMS)
+        live_symbols: List[str] = []
+        for snapshot in await self._load_live_position_snapshots(exchange=exchange):
+            symbol_text = _normalize_symbol_text(str(snapshot.get("symbol") or ""))
+            symbol_key = _canonical_symbol_key(symbol_text)
+            if not symbol_key:
+                continue
+            live_symbols.append(symbol_text)
+            if symbol_key in symbol_map:
+                continue
+            payload = dict(snapshot)
+            payload.pop("symbol", None)
+            symbol_map[symbol_key] = payload
+
+        ordered = _merge_symbol_sequence(local_symbols, live_symbols, max_items=_AUTO_SYMBOL_SCAN_MAX_ITEMS)
+        if not ordered:
+            return symbol_map
+
+        ordered_map: Dict[str, Dict[str, Any]] = {}
+        for symbol in ordered:
+            symbol_key = _canonical_symbol_key(symbol)
+            if symbol_key and symbol_key in symbol_map:
+                ordered_map[symbol_key] = dict(symbol_map[symbol_key])
+        for symbol_key, payload in symbol_map.items():
+            if symbol_key not in ordered_map:
+                ordered_map[symbol_key] = dict(payload)
+        return ordered_map
 
     async def _resolve_position_payload(self, *, exchange: str, symbol: str, account_id: str) -> Dict[str, Any]:
         position = position_manager.get_position(exchange, symbol, account_id=account_id)
@@ -805,15 +912,96 @@ class AutonomousTradingAgent:
             self._override.update(updates)
             if scan_config_keys.intersection(updates):
                 self._last_symbol_scan = None
+                self._last_preview_symbol_scan = None
+                if self._preview_symbol_scan_task and not self._preview_symbol_scan_task.done():
+                    self._preview_symbol_scan_task.cancel()
+                    self._preview_symbol_scan_task = None
         self._save_overlay()
         return self.get_runtime_config()
 
     def is_running(self) -> bool:
         return bool(self._task and not self._task.done())
 
+    def _symbol_scan_meta(
+        self,
+        scan: Optional[Dict[str, Any]],
+        *,
+        max_age_sec: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        payload = dict(scan or {}) if isinstance(scan, dict) else {}
+        age_sec = _age_sec_from_iso(payload.get("generated_at"))
+        cache_max_age_sec = float(max_age_sec if max_age_sec is not None else _SYMBOL_SCAN_CACHE_MAX_AGE_SEC)
+        return {
+            "available": bool(payload),
+            "generated_at": str(payload.get("generated_at") or "") or None,
+            "age_sec": round(float(age_sec), 3) if age_sec is not None else None,
+            "max_age_sec": cache_max_age_sec,
+            "stale": age_sec is None or age_sec > cache_max_age_sec,
+        }
+
+    def _status_symbol_scan(self) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+        scan = dict(self._last_symbol_scan or {}) if isinstance(self._last_symbol_scan, dict) else None
+        meta = self._symbol_scan_meta(scan)
+        if not scan or bool(meta.get("stale")):
+            return None, meta
+        if "scan_meta" not in scan:
+            scan["scan_meta"] = meta
+        return scan, meta
+
+    def _status_preview_symbol_scan(self) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+        cfg = self.get_runtime_config()
+        preview_limit = _coerce_int(cfg.get("selection_top_n") or 10, 10, low=3, high=20)
+        scan = self.get_symbol_scan_preview_snapshot(limit=preview_limit)
+        if not isinstance(scan, dict) or not scan:
+            return None, {
+                "available": False,
+                "generated_at": None,
+                "age_sec": None,
+                "max_age_sec": float(_PREVIEW_SYMBOL_SCAN_CACHE_MAX_AGE_SEC),
+                "stale": True,
+            }
+        meta = dict(
+            scan.get("scan_meta")
+            or self._symbol_scan_meta(scan, max_age_sec=float(_PREVIEW_SYMBOL_SCAN_CACHE_MAX_AGE_SEC))
+        )
+        payload = dict(scan)
+        payload["scan_meta"] = meta
+        return payload, meta
+
+    def is_run_active(self) -> bool:
+        return bool(self._active_run) or self._run_once_lock.locked()
+
+    def _run_cycle_status(self) -> Dict[str, Any]:
+        payload = dict(self._active_run or {})
+        started_at = payload.get("started_at")
+        age_sec = _age_sec_from_iso(started_at)
+        return {
+            "active": bool(payload),
+            "request_id": str(payload.get("request_id") or "") or None,
+            "trigger": str(payload.get("trigger") or "") or None,
+            "force": bool(payload.get("force")) if payload else False,
+            "started_at": str(started_at or "") or None,
+            "age_sec": round(float(age_sec), 3) if age_sec is not None else None,
+        }
+
+    def _manual_run_status(self) -> Optional[Dict[str, Any]]:
+        if not isinstance(self._manual_run_request, dict) or not self._manual_run_request:
+            return None
+        payload = dict(self._manual_run_request)
+        age_anchor = payload.get("started_at") or payload.get("submitted_at")
+        age_sec = _age_sec_from_iso(age_anchor)
+        payload["active"] = bool(self._manual_run_task and not self._manual_run_task.done())
+        payload["age_sec"] = round(float(age_sec), 3) if age_sec is not None else None
+        return payload
+
     def get_status(self) -> Dict[str, Any]:
+        last_symbol_scan, last_symbol_scan_meta = self._status_symbol_scan()
+        preview_symbol_scan, preview_symbol_scan_meta = self._status_preview_symbol_scan()
         return {
             "running": self.is_running(),
+            "run_cycle": self._run_cycle_status(),
+            "manual_run": self._manual_run_status(),
+            "last_manual_run_result": dict(self._last_manual_run_result or {}) if isinstance(self._last_manual_run_result, dict) else None,
             "last_run_at": self._last_run_at,
             "next_run_at": self._next_run_at,
             "last_latency_ms": self._last_latency_ms,
@@ -824,7 +1012,11 @@ class AutonomousTradingAgent:
             "last_execution": self._last_execution,
             "last_research_context": self._last_research_context,
             "last_diagnostics": self._last_diagnostics,
-            "last_symbol_scan": self._last_symbol_scan,
+            "last_symbol_scan": last_symbol_scan,
+            "last_symbol_scan_meta": last_symbol_scan_meta,
+            "preview_symbol_scan": preview_symbol_scan,
+            "preview_symbol_scan_meta": preview_symbol_scan_meta,
+            "preview_symbol_scan_running": bool(self._preview_symbol_scan_task and not self._preview_symbol_scan_task.done()),
             "model_feedback_guard": self._model_feedback_guard_status(),
             "profile": dict(self._profile or _default_profile()),
             "learning_memory": dict(self._learning_memory or {}),
@@ -1004,9 +1196,128 @@ class AutonomousTradingAgent:
         self._task = None
         self._stop_event = None
         self._next_run_at = None
+        if self._manual_run_task is not None:
+            self._manual_run_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._manual_run_task
+        self._manual_run_task = None
         runtime_state.mark_task_stopped("ai_autonomous_agent")
         logger.info("AutonomousTradingAgent stopped")
         return self.get_status()
+
+    async def trigger_run_once(self, *, trigger: str = "manual", force: bool = False) -> Dict[str, Any]:
+        manual_status = self._manual_run_status()
+        if self._manual_run_task is not None and not self._manual_run_task.done():
+            return {
+                "accepted": False,
+                "queued": True,
+                "busy": True,
+                "reason": "manual_run_pending",
+                "request": manual_status,
+                "status": self.get_status(),
+            }
+
+        request_id = str(uuid.uuid4())[:8]
+        submitted_at = _utc_now().isoformat()
+        queued = self.is_run_active()
+        self._manual_run_request = {
+            "request_id": request_id,
+            "trigger": str(trigger or "manual"),
+            "force": bool(force),
+            "submitted_at": submitted_at,
+            "started_at": None,
+            "completed_at": None,
+            "state": "queued" if queued else "starting",
+            "error": None,
+        }
+
+        async def _runner() -> Dict[str, Any]:
+            if isinstance(self._manual_run_request, dict) and self._manual_run_request.get("request_id") == request_id:
+                self._manual_run_request["state"] = "queued" if self.is_run_active() else "starting"
+            try:
+                result = await self.run_once(trigger=trigger, force=force, request_id=request_id)
+            except asyncio.CancelledError:
+                completed_at = _utc_now().isoformat()
+                if isinstance(self._manual_run_request, dict) and self._manual_run_request.get("request_id") == request_id:
+                    self._manual_run_request["state"] = "cancelled"
+                    self._manual_run_request["completed_at"] = completed_at
+                    self._manual_run_request["error"] = "cancelled"
+                self._last_manual_run_result = {
+                    "request_id": request_id,
+                    "trigger": str(trigger or "manual"),
+                    "force": bool(force),
+                    "submitted_at": submitted_at,
+                    "completed_at": completed_at,
+                    "success": False,
+                    "error": "cancelled",
+                }
+                raise
+            except Exception as exc:
+                completed_at = _utc_now().isoformat()
+                error_text = _format_exception_short(exc)
+                self._last_error = error_text
+                if isinstance(self._manual_run_request, dict) and self._manual_run_request.get("request_id") == request_id:
+                    self._manual_run_request["state"] = "failed"
+                    self._manual_run_request["completed_at"] = completed_at
+                    self._manual_run_request["error"] = error_text
+                self._last_manual_run_result = {
+                    "request_id": request_id,
+                    "trigger": str(trigger or "manual"),
+                    "force": bool(force),
+                    "submitted_at": submitted_at,
+                    "completed_at": completed_at,
+                    "success": False,
+                    "error": error_text,
+                }
+                raise
+
+            completed_at = _utc_now().isoformat()
+            if isinstance(self._manual_run_request, dict) and self._manual_run_request.get("request_id") == request_id:
+                self._manual_run_request["state"] = "completed"
+                self._manual_run_request["completed_at"] = completed_at
+                self._manual_run_request["error"] = None
+            self._last_manual_run_result = {
+                "request_id": request_id,
+                "trigger": str(trigger or "manual"),
+                "force": bool(force),
+                "submitted_at": submitted_at,
+                "completed_at": completed_at,
+                "success": True,
+                "result_timestamp": result.get("timestamp"),
+                "decision": dict(result.get("decision") or {}) if isinstance(result, dict) else {},
+                "execution": dict(result.get("execution") or {}) if isinstance(result, dict) else {},
+                "selection": {
+                    "selected_symbol": str(((result.get("selection") or {}).get("selected_symbol") or "")) if isinstance(result, dict) else "",
+                    "selection_reason": str(((result.get("selection") or {}).get("selection_reason") or "")) if isinstance(result, dict) else "",
+                },
+                "skipped": bool(result.get("skipped")) if isinstance(result, dict) else False,
+                "reason": (
+                    str(result.get("reason") or result.get("rejection_reason") or "")
+                    if isinstance(result, dict)
+                    else ""
+                ),
+            }
+            return result
+
+        task = asyncio.create_task(_runner(), name=f"ai_autonomous_agent_manual_{request_id}")
+        self._manual_run_task = task
+
+        def _finalize(done_task: asyncio.Task[Any]) -> None:
+            if self._manual_run_task is done_task:
+                self._manual_run_task = None
+            with contextlib.suppress(asyncio.CancelledError):
+                exc = done_task.exception()
+                if exc is not None:
+                    logger.warning(f"autonomous agent manual run failed: {exc}")
+
+        task.add_done_callback(_finalize)
+        return {
+            "accepted": True,
+            "queued": bool(queued),
+            "busy": False,
+            "request": self._manual_run_status(),
+            "status": self.get_status(),
+        }
 
     async def _loop(self) -> None:
         await asyncio.sleep(2)
@@ -1090,10 +1401,9 @@ class AutonomousTradingAgent:
             targets = prioritize_openai_targets(self._provider_endpoint_targets(provider))
             if not any(bool(str(target.get("api_key") or "").strip()) for target in targets):
                 raise RuntimeError(f"{provider}_api_key_missing")
-            payload = build_responses_payload(
+            payload_variants = build_responses_payload_variants(
                 model=model,
                 messages=[
-                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
                 max_output_tokens=int(max_tokens),
@@ -1101,6 +1411,10 @@ class AutonomousTradingAgent:
                 text_format="json_object",
                 stream=False,
             )
+            if str(system_prompt or "").strip():
+                instructions = str(system_prompt or "").strip()
+                for payload in payload_variants:
+                    payload["instructions"] = instructions
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 last_exc: Optional[BaseException] = None
                 total_targets = len(targets)
@@ -1111,36 +1425,64 @@ class AutonomousTradingAgent:
                         continue
                     url = responses_endpoint(target_base_url)
                     headers = build_openai_headers(target_api_key)
+                    advance_to_next_target = False
                     try:
-                        async with session.post(url, headers=headers, json=payload) as resp:
-                            if resp.status >= 400:
-                                body = (await resp.text())[:300]
-                                err = RuntimeError(f"{provider}_http_{resp.status}:{body}")
-                                if should_failover_openai_status(resp.status):
-                                    remember_openai_target_failure(targets, target_base_url)
-                                if idx + 1 < total_targets and should_failover_openai_status(resp.status):
+                        for payload_index, payload in enumerate(payload_variants):
+                            async with session.post(url, headers=headers, json=payload) as resp:
+                                if resp.status >= 400:
+                                    body = (await resp.text())[:300]
+                                    err = RuntimeError(f"{provider}_http_{resp.status}:{body}")
+                                    unsupported_param = unsupported_responses_parameter(body)
+                                    if resp.status == 400 and unsupported_param in {
+                                        "max_output_tokens",
+                                        "max_completion_tokens",
+                                        "max_tokens",
+                                    }:
+                                        if payload_index + 1 < len(payload_variants):
+                                            last_exc = err
+                                            logger.warning(
+                                                "autonomous_agent codex relay rejected token parameter "
+                                                f"{unsupported_param}; retrying payload variant "
+                                                f"{payload_index + 2}/{len(payload_variants)} on the same relay"
+                                            )
+                                            continue
+                                        if idx + 1 < total_targets:
+                                            last_exc = err
+                                            remember_openai_target_failure(targets, target_base_url)
+                                            logger.warning(
+                                                "autonomous_agent codex relay rejected all token parameter variants; "
+                                                f"trying backup {idx + 2}/{total_targets}"
+                                            )
+                                            advance_to_next_target = True
+                                            break
+                                        raise err
+                                    if should_failover_openai_status(resp.status):
+                                        remember_openai_target_failure(targets, target_base_url)
+                                    if idx + 1 < total_targets and should_failover_openai_status(resp.status):
+                                        last_exc = err
+                                        logger.warning(
+                                            f"autonomous_agent codex primary endpoint failed with {resp.status}; "
+                                            f"trying backup {idx + 2}/{total_targets}"
+                                        )
+                                        advance_to_next_target = True
+                                        break
+                                    raise err
+                                data = await read_aiohttp_responses_json(resp)
+                            text = extract_response_text(data)
+                            if not text:
+                                err = RuntimeError(f"{provider}_empty_content")
+                                if idx + 1 < total_targets:
                                     last_exc = err
+                                    remember_openai_target_failure(targets, target_base_url)
                                     logger.warning(
-                                        f"autonomous_agent codex primary endpoint failed with {resp.status}; "
+                                        f"autonomous_agent codex endpoint returned empty content; "
                                         f"trying backup {idx + 2}/{total_targets}"
                                     )
-                                    continue
+                                    advance_to_next_target = True
+                                    break
                                 raise err
-                            data = await read_aiohttp_responses_json(resp)
-                        text = extract_response_text(data)
-                        if not text:
-                            err = RuntimeError(f"{provider}_empty_content")
-                            if idx + 1 < total_targets:
-                                last_exc = err
-                                remember_openai_target_failure(targets, target_base_url)
-                                logger.warning(
-                                    f"autonomous_agent codex endpoint returned empty content; "
-                                    f"trying backup {idx + 2}/{total_targets}"
-                                )
-                                continue
-                            raise err
-                        remember_openai_target_success(targets, target_base_url)
-                        return _extract_json_obj(text)
+                            remember_openai_target_success(targets, target_base_url)
+                            return _extract_json_obj(text)
                     except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                         remember_openai_target_failure(targets, target_base_url)
                         if idx + 1 < total_targets:
@@ -1151,6 +1493,8 @@ class AutonomousTradingAgent:
                             )
                             continue
                         raise
+                    if advance_to_next_target:
+                        continue
                 if last_exc is not None:
                     raise last_exc
                 raise RuntimeError(f"{provider}_base_url_missing")
@@ -1203,6 +1547,9 @@ class AutonomousTradingAgent:
         exchange = str(cfg.get("exchange") or "binance")
         symbol = str(cfg.get("symbol") or "BTC/USDT")
         timeframe = str(cfg.get("timeframe") or "15m")
+        skip_live_market = bool(cfg.get("_scan_skip_live_market"))
+        light_symbol_scan = bool(cfg.get("_light_symbol_scan"))
+        force_live_market = bool(cfg.get("_force_live_market"))
         df = await data_storage.load_klines_from_parquet(
             exchange=exchange,
             symbol=symbol,
@@ -1211,18 +1558,62 @@ class AutonomousTradingAgent:
             end_time=now,
         )
         df = df.copy() if df is not None and not df.empty else pd.DataFrame()
+        local_last_bar_age_sec: Optional[float] = None
+        if not df.empty:
+            with contextlib.suppress(Exception):
+                local_last_bar_age_sec = _age_sec_from_iso(pd.Timestamp(df.index[-1]).isoformat())
 
         connector = exchange_manager.get_exchange(exchange)
-        if connector is not None:
+        live_refresh_age_sec_default = max(
+            float(timeframe_sec * (3 if light_symbol_scan else 2)),
+            900.0 if light_symbol_scan else 600.0,
+        )
+        live_refresh_age_sec = _coerce_float(
+            cfg.get("_live_market_refresh_age_sec"),
+            live_refresh_age_sec_default,
+            low=60.0,
+            high=float(7 * 86400),
+        )
+        live_fetch_timeout_sec = _coerce_float(
+            cfg.get("_live_market_timeout_sec"),
+            _MARKET_DATA_LIVE_FETCH_SCAN_TIMEOUT_SEC if light_symbol_scan else _MARKET_DATA_LIVE_FETCH_TIMEOUT_SEC,
+            low=0.01,
+            high=60.0,
+        )
+        should_fetch_live = bool(connector is not None and not skip_live_market)
+        if should_fetch_live and (not force_live_market) and not df.empty and local_last_bar_age_sec is not None:
+            should_fetch_live = bool(local_last_bar_age_sec > live_refresh_age_sec)
+        if should_fetch_live and connector is not None:
             try:
-                live_klines = await connector.get_klines(symbol, timeframe, limit=max(40, lookback))
+                live_klines = await asyncio.wait_for(
+                    connector.get_klines(symbol, timeframe, limit=max(40, lookback)),
+                    timeout=live_fetch_timeout_sec,
+                )
                 live_df = self._df_from_klines(live_klines)
                 if not live_df.empty:
+                    should_persist_live = (
+                        df.empty
+                        or local_last_bar_age_sec is None
+                        or local_last_bar_age_sec > max(float(timeframe_sec * 2), 900.0)
+                    )
+                    if should_persist_live:
+                        with contextlib.suppress(Exception):
+                            await data_storage.save_klines_to_parquet(
+                                klines=live_klines,
+                                exchange=exchange,
+                                symbol=symbol,
+                                timeframe=timeframe,
+                            )
                     if df.empty:
                         df = live_df
                     else:
                         df = pd.concat([df, live_df])
                         df = df[~df.index.duplicated(keep="last")].sort_index()
+            except asyncio.TimeoutError:
+                logger.debug(
+                    f"autonomous_agent live klines timed out for {exchange} {symbol} {timeframe}"
+                    f" after {live_fetch_timeout_sec:.2f}s; using local parquet fallback"
+                )
             except Exception as exc:
                 logger.debug(
                     f"autonomous_agent live klines fallback failed for {exchange} {symbol} {timeframe}: {exc}"
@@ -1655,6 +2046,30 @@ class AutonomousTradingAgent:
         )
         return payload
 
+    def _build_hold_decision(
+        self,
+        *,
+        cfg: Dict[str, Any],
+        reason: str,
+        confidence: float = 0.0,
+        strength: float = 0.1,
+    ) -> Dict[str, Any]:
+        return {
+            "action": "hold",
+            "confidence": _coerce_float(confidence, 0.0, low=0.0, high=1.0),
+            "strength": _coerce_float(strength, 0.1, low=0.1, high=1.0),
+            "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
+            "stop_loss_pct": float(cfg.get("default_stop_loss_pct") or 0.02),
+            "take_profit_pct": float(cfg.get("default_take_profit_pct") or 0.04),
+            "reason": str(reason or "hold").strip()[:180] or "hold",
+        }
+
+    def _context_market_data_age_sec(self, context_payload: Dict[str, Any]) -> Optional[float]:
+        if not isinstance(context_payload, dict):
+            return None
+        market_structure = dict(context_payload.get("market_structure") or {})
+        return _age_sec_from_iso(market_structure.get("last_bar_at"))
+
     def _build_account_risk_payload(
         self,
         *,
@@ -2000,6 +2415,83 @@ class AutonomousTradingAgent:
             return updated
         return updated
 
+    def _maybe_build_fast_path_hold(
+        self,
+        *,
+        cfg: Dict[str, Any],
+        context_payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        position = context_payload.get("position") if isinstance(context_payload, dict) else {}
+        has_position = bool(str((position or {}).get("side") or "").strip().lower())
+        if has_position:
+            return None
+
+        agg = dict(context_payload.get("aggregated_signal") or {})
+        direction = str(agg.get("direction") or "FLAT").strip().upper() or "FLAT"
+        confidence = _coerce_float(agg.get("confidence", 0.0), 0.0, low=0.0, high=1.0)
+        risk_reason = str(agg.get("risk_reason") or "").strip()
+        min_confidence = float(cfg.get("effective_min_confidence") or cfg.get("min_confidence") or 0.0)
+
+        if bool(agg.get("blocked_by_risk")):
+            return self._build_hold_decision(
+                cfg=cfg,
+                reason=risk_reason or "aggregated_risk_blocked",
+                confidence=confidence,
+            )
+
+        if direction not in {"LONG", "SHORT"}:
+            return self._build_hold_decision(
+                cfg=cfg,
+                reason="aggregated_signal_flat",
+                confidence=confidence,
+            )
+
+        if confidence < min_confidence:
+            return self._build_hold_decision(
+                cfg=cfg,
+                reason=f"below_min_confidence({confidence:.3f}<{min_confidence:.3f})",
+                confidence=confidence,
+            )
+
+        learning_memory = cfg.get("learning_memory") if isinstance(cfg, dict) else {}
+        adaptive_risk = dict((learning_memory or {}).get("adaptive_risk") or {})
+        blocked_map = build_blocked_symbol_side_map(
+            learning_memory,
+            base_min_confidence=float(cfg.get("min_confidence") or 0.58),
+        )
+        symbol = normalize_symbol(context_payload.get("symbol") or cfg.get("symbol"))
+        side = "long" if direction == "LONG" else "short"
+        blocked = blocked_map.get((symbol, side))
+        if blocked:
+            return self._build_hold_decision(
+                cfg=cfg,
+                reason=f"review_cooldown({symbol}:{side})",
+                confidence=confidence,
+            )
+
+        research = context_payload.get("research_context") if isinstance(context_payload, dict) else {}
+        if (
+            bool(adaptive_risk.get("require_research_for_new_entries"))
+            and not bool((research or {}).get("available"))
+        ):
+            return self._build_hold_decision(
+                cfg=cfg,
+                reason="review_requires_research",
+                confidence=confidence,
+            )
+
+        if (
+            bool(adaptive_risk.get("avoid_new_entries_during_service_instability"))
+            and self._current_model_feedback_outage_duration_sec() > 0
+        ):
+            return self._build_hold_decision(
+                cfg=cfg,
+                reason="review_service_instability",
+                confidence=confidence,
+            )
+
+        return None
+
     async def _handle_market_data_outage(
         self,
         *,
@@ -2054,6 +2546,7 @@ class AutonomousTradingAgent:
         last_price = await self._resolve_last_price(cfg, market_data)
         timeframe = str(cfg.get("timeframe") or "15m")
         timeframe_sec = _timeframe_to_seconds(timeframe)
+        light_symbol_scan = bool(cfg.get("_light_symbol_scan"))
         market_structure = self._build_market_structure_payload(
             market_data=market_data,
             timeframe_sec=timeframe_sec,
@@ -2073,7 +2566,16 @@ class AutonomousTradingAgent:
 
         agg_signal: Dict[str, Any] = {}
         try:
-            agg = await signal_aggregator.aggregate(symbol=str(cfg["symbol"]), market_data=market_data)
+            aggregate_kwargs: Dict[str, Any] = {}
+            if bool(cfg.get("_preview_symbol_scan")) or (light_symbol_scan and bool(cfg.get("_scan_skip_live_market"))):
+                # Coarse prescan only needs a cheap directional prior. The shortlist
+                # still gets the full aggregate before final selection.
+                aggregate_kwargs = {"include_llm": False, "include_ml": False}
+            agg = await signal_aggregator.aggregate(
+                symbol=str(cfg["symbol"]),
+                market_data=market_data,
+                **aggregate_kwargs,
+            )
             agg_signal = agg.to_dict() if hasattr(agg, "to_dict") else {}
         except Exception as exc:
             logger.debug(f"autonomous agent aggregate signal failed: {exc}")
@@ -2081,19 +2583,61 @@ class AutonomousTradingAgent:
         account_id = str(cfg.get("account_id") or "main")
         exchange = str(cfg.get("exchange") or "binance")
         symbol = str(cfg.get("symbol") or "BTC/USDT")
-        account_risk_base = await self._resolve_account_risk_base(cfg)
-        position_payload = await self._resolve_position_payload(
-            exchange=exchange,
-            symbol=symbol,
-            account_id=account_id,
-        )
-        position_payload = await self._annotate_position_payload(
-            cfg=cfg,
-            position_payload=position_payload,
-            last_price=float(last_price or 0.0),
-            account_risk_base=account_risk_base,
-        )
-        event_summary = await self._build_event_summary(symbol=symbol, timeframe_sec=timeframe_sec)
+        if light_symbol_scan:
+            account_risk_base = {
+                "account_equity": 0.0,
+                "strategy_allocation": 0.0,
+                "position_cap_notional": 0.0,
+                "trading_mode": str(execution_engine.get_trading_mode() or "paper"),
+            }
+            scan_position_map = cfg.get("_scan_position_map")
+            position_payload = {}
+            if isinstance(scan_position_map, dict):
+                position_payload = dict(scan_position_map.get(_canonical_symbol_key(symbol)) or {})
+            else:
+                position_payload = await self._resolve_position_payload(
+                    exchange=exchange,
+                    symbol=symbol,
+                    account_id=account_id,
+                )
+        else:
+            account_risk_base = await self._resolve_account_risk_base(cfg)
+            position_payload = await self._resolve_position_payload(
+                exchange=exchange,
+                symbol=symbol,
+                account_id=account_id,
+            )
+            position_payload = await self._annotate_position_payload(
+                cfg=cfg,
+                position_payload=position_payload,
+                last_price=float(last_price or 0.0),
+                account_risk_base=account_risk_base,
+            )
+        if bool(cfg.get("_skip_event_summary")):
+            event_summary = {
+                "available": False,
+                "symbol": _canonical_symbol_key(symbol).replace("/", ""),
+                "since_minutes": max(240, int(round(max(1.0, float(timeframe_sec)) * 4.0 / 60.0))),
+                "events_count": 0,
+                "source_diversity": 0,
+                "sentiment_counts": {
+                    "positive": 0,
+                    "neutral": 0,
+                    "negative": 0,
+                },
+                "dominant_sentiment": "neutral",
+                "dominant_sentiment_ratio": 0.0,
+                "net_sentiment": 0.0,
+                "news_alpha_proxy": 0.0,
+                "weighted_half_life_min": 0.0,
+                "event_concentration": 0.0,
+                "top_event_types": [],
+                "top_sources": [],
+                "top_events": [],
+                "skipped": "light_scan",
+            }
+        else:
+            event_summary = await self._build_event_summary(symbol=symbol, timeframe_sec=timeframe_sec)
         account_risk = self._build_account_risk_payload(
             cfg=cfg,
             position_payload=position_payload,
@@ -2106,11 +2650,22 @@ class AutonomousTradingAgent:
             account_risk=account_risk,
         )
 
-        research_context = resolve_runtime_research_context(
-            exchange=exchange,
-            symbol=symbol,
-            timeframe=timeframe,
-        )
+        if light_symbol_scan or bool(cfg.get("_skip_research_context")):
+            research_context = {
+                "available": False,
+                "exchange": exchange,
+                "symbol": normalize_symbol(symbol),
+                "timeframe": timeframe,
+                "strategy": str(cfg.get("strategy_name") or ""),
+                "candidate_count": 0,
+                "selection_reason": "light_scan_skipped",
+            }
+        else:
+            research_context = resolve_runtime_research_context(
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=timeframe,
+            )
 
         return {
             "exchange": exchange,
@@ -2406,6 +2961,7 @@ class AutonomousTradingAgent:
         research_context = dict(context_payload.get("research_context") or {})
         selected_candidate = dict(research_context.get("selected_candidate") or {})
         position = dict(context_payload.get("position") or {})
+        market_structure = dict(context_payload.get("market_structure") or {})
         validation = dict(selected_candidate.get("validation") or {})
         validation_reasons = [
             str(item).strip()
@@ -2429,6 +2985,8 @@ class AutonomousTradingAgent:
         position_unrealized_pnl = float(position.get("unrealized_pnl") or 0.0)
         entry_price = _safe_nonnegative_float(position.get("entry_price"), 0.0)
         current_price = _safe_nonnegative_float(position.get("current_price"), 0.0)
+        market_data_last_bar_at = str(market_structure.get("last_bar_at") or "").strip() or None
+        market_data_age_sec = _age_sec_from_iso(market_data_last_bar_at)
         position_unrealized_pnl_pct = 0.0
         if has_position and entry_price > 0 and current_price > 0:
             if position_side == "short":
@@ -2492,6 +3050,8 @@ class AutonomousTradingAgent:
             "position_source": position_source,
             "position_unrealized_pnl": float(position_unrealized_pnl),
             "position_unrealized_pnl_pct": float(position_unrealized_pnl_pct),
+            "market_data_last_bar_at": market_data_last_bar_at,
+            "market_data_age_sec": round(float(market_data_age_sec), 3) if market_data_age_sec is not None else None,
             "research": {
                 "candidate_id": str(selected_candidate.get("candidate_id") or ""),
                 "strategy": str(selected_candidate.get("strategy") or ""),
@@ -2511,7 +3071,28 @@ class AutonomousTradingAgent:
         selection_top_n: int,
         universe_symbols: List[str],
     ) -> Optional[Dict[str, Any]]:
-        cached = self._last_symbol_scan
+        return self._cached_scan_payload(
+            cached_payload=self._last_symbol_scan,
+            cfg=cfg,
+            symbol_mode=symbol_mode,
+            configured_symbol=configured_symbol,
+            selection_top_n=selection_top_n,
+            universe_symbols=universe_symbols,
+            max_age_sec=float(_SYMBOL_SCAN_CACHE_MAX_AGE_SEC),
+        )
+
+    def _cached_scan_payload(
+        self,
+        *,
+        cached_payload: Optional[Dict[str, Any]],
+        cfg: Dict[str, Any],
+        symbol_mode: str,
+        configured_symbol: str,
+        selection_top_n: int,
+        universe_symbols: List[str],
+        max_age_sec: float,
+    ) -> Optional[Dict[str, Any]]:
+        cached = cached_payload
         if not isinstance(cached, dict) or not cached:
             return None
 
@@ -2523,7 +3104,7 @@ class AutonomousTradingAgent:
         generated_at = _utc_from_iso(cached.get("generated_at"))
         if generated_at is None:
             return None
-        if (_utc_now() - generated_at).total_seconds() > float(_SYMBOL_SCAN_CACHE_MAX_AGE_SEC):
+        if (_utc_now() - generated_at).total_seconds() > float(max_age_sec):
             return None
 
         scan_cfg = dict(cached.get("scan_config") or {})
@@ -2560,9 +3141,188 @@ class AutonomousTradingAgent:
         payload = dict(cached)
         payload["top_n"] = selection_top_n
         payload["top_candidates"] = rows[:selection_top_n]
+        payload["scan_meta"] = self._symbol_scan_meta(payload, max_age_sec=float(max_age_sec))
+        return payload
+
+    def _fast_cached_preview_symbol_scan(
+        self,
+        *,
+        limit: Optional[int],
+        max_age_sec: float,
+        mark_busy_reuse: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        cached = self._last_preview_symbol_scan
+        if not isinstance(cached, dict) or not cached:
+            return None
+        generated_at = _utc_from_iso(cached.get("generated_at"))
+        if generated_at is None:
+            return None
+        if (_utc_now() - generated_at).total_seconds() > float(max_age_sec):
+            return None
+        selection_top_n = _coerce_int(limit or cached.get("top_n") or 10, 10, low=3, high=20)
+        rows = list(cached.get("top_candidates") or [])
+        payload = dict(cached)
+        payload["top_n"] = selection_top_n
+        payload["top_candidates"] = rows[:selection_top_n]
+        meta = self._symbol_scan_meta(payload, max_age_sec=float(_PREVIEW_SYMBOL_SCAN_CACHE_MAX_AGE_SEC))
+        if mark_busy_reuse:
+            meta["busy_reuse"] = True
+        payload["scan_meta"] = meta
+        return payload
+
+    def get_symbol_scan_preview_snapshot(self, *, limit: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        preview_payload = self._fast_cached_preview_symbol_scan(
+            limit=limit,
+            max_age_sec=float(_PREVIEW_SYMBOL_SCAN_CACHE_MAX_AGE_SEC),
+        )
+        if preview_payload is not None:
+            return preview_payload
+
+        cached_preview = self._last_preview_symbol_scan
+        if isinstance(cached_preview, dict) and cached_preview:
+            generated_at = _utc_from_iso(cached_preview.get("generated_at"))
+            if (
+                generated_at is not None
+                and (_utc_now() - generated_at).total_seconds()
+                <= float(_PREVIEW_SYMBOL_SCAN_STALE_FALLBACK_MAX_AGE_SEC)
+            ):
+                selection_top_n = _coerce_int(limit or cached_preview.get("top_n") or 10, 10, low=3, high=20)
+                rows = list(cached_preview.get("top_candidates") or [])
+                payload = dict(cached_preview)
+                payload["top_n"] = selection_top_n
+                payload["top_candidates"] = rows[:selection_top_n]
+                meta = self._symbol_scan_meta(payload, max_age_sec=float(_PREVIEW_SYMBOL_SCAN_CACHE_MAX_AGE_SEC))
+                meta["stale_preview_fallback"] = True
+                payload["scan_meta"] = meta
+                return payload
+
+        cached = self._last_symbol_scan
+        if not isinstance(cached, dict) or not cached:
+            return None
+
+        selection_top_n = _coerce_int(limit or cached.get("top_n") or 10, 10, low=3, high=20)
+        rows = list(cached.get("top_candidates") or [])
+        payload = dict(cached)
+        payload["top_n"] = selection_top_n
+        payload["top_candidates"] = rows[:selection_top_n]
+        meta = self._symbol_scan_meta(payload, max_age_sec=float(_PREVIEW_SYMBOL_SCAN_CACHE_MAX_AGE_SEC))
+        meta["actual_scan_fallback"] = True
+        payload["scan_meta"] = meta
+        return payload
+
+    def ensure_symbol_scan_preview_warm(self, *, limit: Optional[int] = None, force: bool = False) -> bool:
+        if not force:
+            cached = self._fast_cached_preview_symbol_scan(
+                limit=limit,
+                max_age_sec=float(_PREVIEW_SYMBOL_SCAN_CACHE_MAX_AGE_SEC),
+            )
+            if cached is not None:
+                return False
+        if self._preview_symbol_scan_task and not self._preview_symbol_scan_task.done():
+            return False
+
+        task: Optional[asyncio.Task[Any]] = None
+
+        async def _runner() -> None:
+            try:
+                await self.get_symbol_scan_preview(limit=limit, force=force)
+            except Exception as exc:
+                logger.debug("autonomous agent preview warm-up failed: {}", exc)
+            finally:
+                if self._preview_symbol_scan_task is task:
+                    self._preview_symbol_scan_task = None
+
+        task = asyncio.create_task(_runner(), name="autonomous-agent-preview-scan")
+        self._preview_symbol_scan_task = task
+        return True
+
+    def build_symbol_scan_preview_pending_payload(
+        self,
+        *,
+        limit: Optional[int] = None,
+        reason: str = "",
+    ) -> Dict[str, Any]:
+        cfg = self.get_runtime_config()
+        symbol_mode = _normalize_symbol_mode(cfg.get("symbol_mode"))
+        configured_symbol = _normalize_symbol_text(cfg.get("symbol") or "BTC/USDT") or "BTC/USDT"
+        selection_top_n = _coerce_int(limit or cfg.get("selection_top_n") or 10, 10, low=3, high=20)
+        default_universe = _DEFAULT_AUTO_UNIVERSE if symbol_mode == "auto" else [configured_symbol]
+        universe_symbols = _normalize_symbol_list(
+            cfg.get("universe_symbols"),
+            default=default_universe,
+            max_items=_AUTO_SYMBOL_SCAN_MAX_ITEMS,
+        )
+        payload = {
+            "generated_at": None,
+            "symbol_mode": symbol_mode,
+            "configured_symbol": configured_symbol,
+            "selected_symbol": configured_symbol,
+            "selection_reason": "preview_pending",
+            "candidate_count": 0,
+            "top_n": selection_top_n,
+            "top_candidates": [],
+            "scan_config": {
+                "exchange": str(cfg.get("exchange") or "binance").strip().lower() or "binance",
+                "timeframe": str(cfg.get("timeframe") or "15m").strip() or "15m",
+                "account_id": str(cfg.get("account_id") or "main").strip() or "main",
+                "lookback_bars": int(cfg.get("lookback_bars") or 240),
+                "selection_top_n": selection_top_n,
+                "universe_symbols": list(universe_symbols),
+            },
+        }
+        payload["scan_meta"] = {
+            "available": False,
+            "generated_at": None,
+            "age_sec": None,
+            "max_age_sec": float(_PREVIEW_SYMBOL_SCAN_CACHE_MAX_AGE_SEC),
+            "stale": True,
+            "pending": True,
+            "fallback_reason": str(reason or "").strip()[:200],
+        }
         return payload
 
     async def get_symbol_scan(self, *, limit: Optional[int] = None, force: bool = False) -> Dict[str, Any]:
+        async with self._symbol_scan_lock:
+            return await self._get_symbol_scan_impl(limit=limit, force=force)
+
+    async def get_symbol_scan_preview(self, *, limit: Optional[int] = None, force: bool = False) -> Dict[str, Any]:
+        cache_max_age_sec = (
+            float(_PREVIEW_SYMBOL_SCAN_FORCE_REUSE_MAX_AGE_SEC)
+            if force
+            else float(_PREVIEW_SYMBOL_SCAN_CACHE_MAX_AGE_SEC)
+        )
+        if self._symbol_scan_lock.locked():
+            cached_busy = self._fast_cached_preview_symbol_scan(
+                limit=limit,
+                max_age_sec=cache_max_age_sec,
+                mark_busy_reuse=True,
+            )
+            if cached_busy is not None:
+                return cached_busy
+        async with self._symbol_scan_lock:
+            cached = self._fast_cached_preview_symbol_scan(
+                limit=limit,
+                max_age_sec=cache_max_age_sec,
+            )
+            if cached is not None:
+                return cached
+            return await self._get_symbol_scan_impl(
+                limit=limit,
+                force=force,
+                preview_only=True,
+                cache_result=False,
+                cache_preview_result=True,
+            )
+
+    async def _get_symbol_scan_impl(
+        self,
+        *,
+        limit: Optional[int] = None,
+        force: bool = False,
+        preview_only: bool = False,
+        cache_result: bool = True,
+        cache_preview_result: bool = False,
+    ) -> Dict[str, Any]:
         cfg = self._cfg_with_learning_overlays(self.get_runtime_config(), force_learning_refresh=force)
         symbol_mode = _normalize_symbol_mode(cfg.get("symbol_mode"))
         configured_symbol = _normalize_symbol_text(cfg.get("symbol") or "BTC/USDT") or "BTC/USDT"
@@ -2573,13 +3333,16 @@ class AutonomousTradingAgent:
             default=default_universe,
             max_items=_AUTO_SYMBOL_SCAN_MAX_ITEMS,
         )
+        scan_position_map: Dict[str, Dict[str, Any]] = {}
+        tracked_symbols: List[str] = []
         if symbol_mode != "auto":
             universe_symbols = [configured_symbol]
         else:
-            tracked_symbols = await self._tracked_position_symbols(
+            scan_position_map = await self._scan_position_map(
                 exchange=str(cfg.get("exchange") or "binance"),
                 account_id=str(cfg.get("account_id") or "main"),
             )
+            tracked_symbols = [str(symbol) for symbol in scan_position_map.keys() if str(symbol).strip()]
             universe_symbols = _merge_symbol_sequence(
                 tracked_symbols,
                 [configured_symbol],
@@ -2598,16 +3361,40 @@ class AutonomousTradingAgent:
             if cached is not None:
                 return cached
 
-        rows: List[Dict[str, Any]] = []
-        for symbol in universe_symbols:
-            local_cfg = dict(cfg)
-            local_cfg["symbol"] = symbol
-            try:
-                context_payload, _ = await self._build_context(local_cfg)
-                rows.append(self._score_symbol_candidate(local_cfg, context_payload))
-            except Exception as exc:
-                rows.append(
-                    {
+        def _sort_rows(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            return sorted(
+                items,
+                key=lambda item: (
+                    1 if item.get("has_position") else 0,
+                    1 if item.get("tradable_now") else 0,
+                    float(item.get("score") or -999.0),
+                    abs(float(item.get("position_unrealized_pnl_pct") or 0.0)),
+                    float(item.get("confidence") or 0.0),
+                    1 if str(item.get("direction") or "") in {"LONG", "SHORT"} else 0,
+                ),
+                reverse=True,
+            )
+
+        async def _scan_rows(symbols: List[str], *, skip_live_market: bool) -> List[Dict[str, Any]]:
+            async def _scan_symbol(symbol: str, semaphore: asyncio.Semaphore) -> Dict[str, Any]:
+                local_cfg = dict(cfg)
+                local_cfg["symbol"] = symbol
+                local_cfg["_skip_event_summary"] = True
+                local_cfg["_light_symbol_scan"] = True
+                local_cfg["_skip_research_context"] = True
+                if skip_live_market:
+                    local_cfg["_scan_skip_live_market"] = True
+                if preview_only:
+                    local_cfg["_preview_symbol_scan"] = True
+                    local_cfg["_scan_skip_live_market"] = True
+                if scan_position_map:
+                    local_cfg["_scan_position_map"] = scan_position_map
+                try:
+                    async with semaphore:
+                        context_payload, _ = await self._build_context(local_cfg)
+                    return self._score_symbol_candidate(local_cfg, context_payload)
+                except Exception as exc:
+                    return {
                         "symbol": symbol,
                         "price": 0.0,
                         "direction": "FLAT",
@@ -2633,20 +3420,40 @@ class AutonomousTradingAgent:
                             "validation_reasons": [],
                         },
                     }
-                )
 
-        rows = sorted(
-            rows,
-            key=lambda item: (
-                1 if item.get("has_position") else 0,
-                1 if item.get("tradable_now") else 0,
-                float(item.get("score") or -999.0),
-                abs(float(item.get("position_unrealized_pnl_pct") or 0.0)),
-                float(item.get("confidence") or 0.0),
-                1 if str(item.get("direction") or "") in {"LONG", "SHORT"} else 0,
-            ),
-            reverse=True,
-        )
+            concurrency = max(1, min(int(_AUTO_SYMBOL_SCAN_CONCURRENCY), len(symbols) or 1))
+            semaphore = asyncio.Semaphore(concurrency)
+            return list(await asyncio.gather(*(_scan_symbol(symbol, semaphore) for symbol in symbols)))
+
+        if symbol_mode == "auto" and len(universe_symbols) > max(selection_top_n, 6):
+            coarse_rows = _sort_rows(await _scan_rows(universe_symbols, skip_live_market=True))
+            if preview_only:
+                rows = coarse_rows
+            else:
+                shortlist_size = min(
+                    len(universe_symbols),
+                    max(selection_top_n + 2, min(len(universe_symbols), max(selection_top_n * 2, 8))),
+                )
+                shortlist_capacity = min(
+                    len(universe_symbols),
+                    max(shortlist_size, len(tracked_symbols) + selection_top_n),
+                )
+                shortlist_symbols = [
+                    str(row.get("symbol") or "")
+                    for row in coarse_rows[:shortlist_size]
+                    if str(row.get("symbol") or "").strip()
+                ]
+                shortlist_symbols = _merge_symbol_sequence(
+                    tracked_symbols,
+                    shortlist_symbols,
+                    [configured_symbol],
+                    max_items=shortlist_capacity,
+                )
+                rows = await _scan_rows(shortlist_symbols or universe_symbols, skip_live_market=False)
+        else:
+            rows = await _scan_rows(universe_symbols, skip_live_market=False)
+
+        rows = _sort_rows(rows)
 
         selected_row = rows[0] if rows else {
             "symbol": configured_symbol,
@@ -2703,7 +3510,17 @@ class AutonomousTradingAgent:
                 "universe_symbols": list(universe_symbols),
             },
         }
-        if force or symbol_mode == "manual" or rows:
+        payload["scan_meta"] = self._symbol_scan_meta(
+            payload,
+            max_age_sec=(
+                float(_PREVIEW_SYMBOL_SCAN_CACHE_MAX_AGE_SEC)
+                if preview_only
+                else float(_SYMBOL_SCAN_CACHE_MAX_AGE_SEC)
+            ),
+        )
+        if preview_only and cache_preview_result:
+            self._last_preview_symbol_scan = payload
+        if cache_result and (force or symbol_mode == "manual" or rows):
             self._last_symbol_scan = payload
         return payload
 
@@ -3120,14 +3937,49 @@ class AutonomousTradingAgent:
             logger.debug(f"read autonomous journal failed: {exc}")
         return rows
 
-    async def run_once(self, *, trigger: str = "manual", force: bool = False) -> Dict[str, Any]:
+    async def run_once(
+        self,
+        *,
+        trigger: str = "manual",
+        force: bool = False,
+        request_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        request_id_text = str(request_id or str(uuid.uuid4())[:8])[:8]
+        started_at = _utc_now().isoformat()
+        async with self._run_once_lock:
+            self._active_run = {
+                "request_id": request_id_text,
+                "trigger": str(trigger or "manual"),
+                "force": bool(force),
+                "started_at": started_at,
+            }
+            if isinstance(self._manual_run_request, dict) and self._manual_run_request.get("request_id") == request_id_text:
+                self._manual_run_request["started_at"] = started_at
+                self._manual_run_request["state"] = "running"
+            try:
+                return await self._run_once_impl(
+                    trigger=trigger,
+                    force=force,
+                    request_id=request_id_text,
+                )
+            finally:
+                if isinstance(self._active_run, dict) and self._active_run.get("request_id") == request_id_text:
+                    self._active_run = None
+
+    async def _run_once_impl(
+        self,
+        *,
+        trigger: str = "manual",
+        force: bool = False,
+        request_id: str,
+    ) -> Dict[str, Any]:
         cfg = self._cfg_with_learning_overlays(
             self.get_runtime_config(),
             force_learning_refresh=bool(force),
         )
         if not bool(cfg.get("enabled")) and not force:
             result = {
-                "request_id": str(uuid.uuid4())[:8],
+                "request_id": request_id,
                 "skipped": True,
                 "reason": "agent_disabled",
                 "rejection_reason": "agent_disabled",
@@ -3196,107 +4048,157 @@ class AutonomousTradingAgent:
             return result
 
         started = time.perf_counter()
-        selection = await self.get_symbol_scan(limit=int(cfg.get("selection_top_n") or 10), force=True)
+        selection = await self.get_symbol_scan(limit=int(cfg.get("selection_top_n") or 10), force=force)
         effective_cfg = dict(cfg)
         effective_cfg["symbol"] = str(selection.get("selected_symbol") or cfg.get("symbol") or "BTC/USDT")
-        context_payload, market_data = await self._build_context(effective_cfg)
+        timeframe_sec = _timeframe_to_seconds(str(effective_cfg.get("timeframe") or cfg.get("timeframe") or "15m"))
+        context_cfg = dict(effective_cfg)
+        context_cfg["_skip_event_summary"] = True
+        context_cfg["_force_live_market"] = True
+        context_cfg["_live_market_timeout_sec"] = _coerce_float(
+            context_cfg.get("_live_market_timeout_sec"),
+            _DECISION_LIVE_MARKET_TIMEOUT_SEC,
+            low=0.5,
+            high=30.0,
+        )
+        context_cfg["_market_data_max_age_sec"] = _coerce_float(
+            context_cfg.get("_market_data_max_age_sec"),
+            max(120.0, min(float(timeframe_sec), 900.0)),
+            low=30.0,
+            high=float(7 * 86400),
+        )
+        context_cfg["_require_fresh_market_data"] = True
+        context_payload, market_data = await self._build_context(context_cfg)
         research_context = context_payload.get("research_context") if isinstance(context_payload, dict) else {}
         raw_decision_source = "synthetic"
-        if float(context_payload.get("price") or 0.0) <= 0:
+        market_structure = dict(context_payload.get("market_structure") or {}) if isinstance(context_payload, dict) else {}
+        live_connector = exchange_manager.get_exchange(
+            str(context_payload.get("exchange") or effective_cfg.get("exchange") or "binance")
+        )
+        can_refresh_live_market = bool(callable(getattr(live_connector, "get_klines", None)))
+        market_data_age_sec = self._context_market_data_age_sec(context_payload)
+        market_data_max_age_sec = float(context_cfg.get("_market_data_max_age_sec") or 0.0)
+        if (
+            bool(context_cfg.get("_require_fresh_market_data"))
+            and can_refresh_live_market
+            and bool(market_structure.get("available"))
+            and (market_data_age_sec is None or market_data_age_sec > market_data_max_age_sec)
+        ):
+            age_text = "unknown" if market_data_age_sec is None else f"{market_data_age_sec:.1f}s"
+            raw_decision_source = "freshness_guard"
+            raw_decision = self._build_hold_decision(
+                cfg=effective_cfg,
+                reason=f"stale_market_data({age_text}>{market_data_max_age_sec:.1f}s)",
+                confidence=0.0,
+            )
+            decision = self._normalize_decision(raw_decision, effective_cfg, context_payload)
+        elif float(context_payload.get("price") or 0.0) <= 0:
             raw_decision = await self._handle_market_data_outage(
                 cfg=effective_cfg,
                 context_payload=context_payload,
             )
             decision = self._normalize_decision(raw_decision, effective_cfg, context_payload)
         else:
-            provider = str(effective_cfg.get("provider") or "codex")
-            model = str(effective_cfg.get("model") or self._provider_model(provider))
-            system_prompt, user_prompt = self._build_prompt(effective_cfg, context_payload)
-            raw_decision: Dict[str, Any]
-            try:
-                raw_decision = await asyncio.wait_for(
-                    self._call_provider(
-                        provider=provider,
-                        model=model,
-                        timeout_ms=int(effective_cfg.get("timeout_ms") or 12000),
-                        max_tokens=int(effective_cfg.get("max_tokens") or 420),
-                        temperature=float(effective_cfg.get("temperature") or 0.15),
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
+            raw_decision = self._maybe_build_fast_path_hold(
+                cfg=effective_cfg,
+                context_payload=context_payload,
+            )
+            if raw_decision is not None:
+                raw_decision_source = "rule_based"
+            else:
+                context_payload["event_summary"] = await self._build_event_summary(
+                    symbol=str(effective_cfg.get("symbol") or context_payload.get("symbol") or "BTC/USDT"),
+                    timeframe_sec=_timeframe_to_seconds(
+                        str(effective_cfg.get("timeframe") or context_payload.get("timeframe") or "15m")
                     ),
-                    timeout=float(_MODEL_FEEDBACK_HARD_TIMEOUT_SEC),
                 )
-                raw_decision_source = "provider"
-                self._record_model_feedback_success()
-            except Exception as exc:
-                normalized_exc: Exception = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
-                if isinstance(exc, asyncio.TimeoutError) and "guard_timeout" not in str(exc or "").lower():
-                    normalized_exc = TimeoutError(
-                        f"model_feedback_guard_timeout({int(_MODEL_FEEDBACK_HARD_TIMEOUT_SEC)}s)"
+                provider = str(effective_cfg.get("provider") or "codex")
+                model = str(effective_cfg.get("model") or self._provider_model(provider))
+                system_prompt, user_prompt = self._build_prompt(effective_cfg, context_payload)
+                try:
+                    raw_decision = await asyncio.wait_for(
+                        self._call_provider(
+                            provider=provider,
+                            model=model,
+                            timeout_ms=int(effective_cfg.get("timeout_ms") or 12000),
+                            max_tokens=int(effective_cfg.get("max_tokens") or 420),
+                            temperature=float(effective_cfg.get("temperature") or 0.15),
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                        ),
+                        timeout=float(_MODEL_FEEDBACK_HARD_TIMEOUT_SEC),
                     )
-                model_feedback_issue = _describe_model_feedback_issue(normalized_exc)
-                logger.warning(
-                    "autonomous agent model decision failed "
-                    f"kind={model_feedback_issue.get('kind') or 'unknown'} "
-                    f"http_status={model_feedback_issue.get('http_status') or 'na'} "
-                    f"provider={provider} model={model} symbol={effective_cfg.get('symbol')} "
-                    f"base_url={self._provider_base_url(provider)} "
-                    f"error={model_feedback_issue.get('raw_error') or _format_exception_short(normalized_exc)}"
-                )
-                failure = self._record_model_feedback_failure(normalized_exc)
-                outage_duration_sec = self._current_model_feedback_outage_duration_sec()
-                outage_protection_result: Optional[Dict[str, Any]] = None
-                forced_outage_close = False
-                if outage_duration_sec >= float(_MODEL_FEEDBACK_OUTAGE_ALERT_SEC):
-                    outage_protection_result = await self._protect_profitable_local_position_during_model_outage(
-                        cfg=effective_cfg,
-                        context_payload=context_payload,
-                        outage_duration_sec=outage_duration_sec,
-                        model_feedback_issue=model_feedback_issue,
+                    raw_decision_source = "provider"
+                    self._record_model_feedback_success()
+                except Exception as exc:
+                    normalized_exc: Exception = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
+                    if isinstance(exc, asyncio.TimeoutError) and "guard_timeout" not in str(exc or "").lower():
+                        normalized_exc = TimeoutError(
+                            f"model_feedback_guard_timeout({int(_MODEL_FEEDBACK_HARD_TIMEOUT_SEC)}s)"
+                        )
+                    model_feedback_issue = _describe_model_feedback_issue(normalized_exc)
+                    logger.warning(
+                        "autonomous agent model decision failed "
+                        f"kind={model_feedback_issue.get('kind') or 'unknown'} "
+                        f"http_status={model_feedback_issue.get('http_status') or 'na'} "
+                        f"provider={provider} model={model} symbol={effective_cfg.get('symbol')} "
+                        f"base_url={self._provider_base_url(provider)} "
+                        f"error={model_feedback_issue.get('raw_error') or _format_exception_short(normalized_exc)}"
                     )
-                    position_payload = context_payload.get("position") if isinstance(context_payload, dict) else {}
-                    position_side = str((position_payload or {}).get("side") or "").strip().lower()
-                    unrealized_pnl = float((position_payload or {}).get("unrealized_pnl") or 0.0)
-                    adaptive_risk = dict((effective_cfg.get("learning_memory") or {}).get("adaptive_risk") or {})
-                    if (
-                        position_side in {"long", "short"}
-                        and unrealized_pnl < 0
-                        and bool(adaptive_risk.get("force_close_on_data_outage_losing_position"))
-                    ):
+                    failure = self._record_model_feedback_failure(normalized_exc)
+                    outage_duration_sec = self._current_model_feedback_outage_duration_sec()
+                    outage_protection_result: Optional[Dict[str, Any]] = None
+                    forced_outage_close = False
+                    if outage_duration_sec >= float(_MODEL_FEEDBACK_OUTAGE_ALERT_SEC):
+                        outage_protection_result = await self._protect_profitable_local_position_during_model_outage(
+                            cfg=effective_cfg,
+                            context_payload=context_payload,
+                            outage_duration_sec=outage_duration_sec,
+                            model_feedback_issue=model_feedback_issue,
+                        )
+                        position_payload = context_payload.get("position") if isinstance(context_payload, dict) else {}
+                        position_side = str((position_payload or {}).get("side") or "").strip().lower()
+                        unrealized_pnl = float((position_payload or {}).get("unrealized_pnl") or 0.0)
+                        adaptive_risk = dict((effective_cfg.get("learning_memory") or {}).get("adaptive_risk") or {})
+                        if (
+                            position_side in {"long", "short"}
+                            and unrealized_pnl < 0
+                            and bool(adaptive_risk.get("force_close_on_data_outage_losing_position"))
+                        ):
+                            raw_decision = {
+                                "action": "close_long" if position_side == "long" else "close_short",
+                                "confidence": 1.0,
+                                "strength": 0.2,
+                                "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
+                                "stop_loss_pct": effective_cfg.get("default_stop_loss_pct"),
+                                "take_profit_pct": effective_cfg.get("default_take_profit_pct"),
+                                "reason": f"model_outage_exit_{position_side}",
+                            }
+                            raw_decision_source = "fallback"
+                            forced_outage_close = True
+                    if failure:
+                        await self._send_model_feedback_outage_alert(
+                            provider=provider,
+                            model=model,
+                            cfg=effective_cfg,
+                            selection=selection,
+                            context_payload=context_payload,
+                            failure=failure,
+                        )
+                    if not forced_outage_close:
+                        fallback_reason = f"model_error:{_format_exception_short(normalized_exc)}"
+                        if bool((outage_protection_result or {}).get("applied")):
+                            fallback_reason = f"{fallback_reason};profit_protection_armed"
                         raw_decision = {
-                            "action": "close_long" if position_side == "long" else "close_short",
-                            "confidence": 1.0,
-                            "strength": 0.2,
+                            "action": "hold",
+                            "confidence": 0.0,
+                            "strength": 0.1,
                             "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
                             "stop_loss_pct": effective_cfg.get("default_stop_loss_pct"),
                             "take_profit_pct": effective_cfg.get("default_take_profit_pct"),
-                            "reason": f"model_outage_exit_{position_side}",
+                            "reason": fallback_reason,
                         }
                         raw_decision_source = "fallback"
-                        forced_outage_close = True
-                if failure:
-                    await self._send_model_feedback_outage_alert(
-                        provider=provider,
-                        model=model,
-                        cfg=effective_cfg,
-                        selection=selection,
-                        context_payload=context_payload,
-                        failure=failure,
-                    )
-                if not forced_outage_close:
-                    fallback_reason = f"model_error:{_format_exception_short(normalized_exc)}"
-                    if bool((outage_protection_result or {}).get("applied")):
-                        fallback_reason = f"{fallback_reason};profit_protection_armed"
-                    raw_decision = {
-                        "action": "hold",
-                        "confidence": 0.0,
-                        "strength": 0.1,
-                        "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
-                        "stop_loss_pct": effective_cfg.get("default_stop_loss_pct"),
-                        "take_profit_pct": effective_cfg.get("default_take_profit_pct"),
-                        "reason": fallback_reason,
-                    }
-                    raw_decision_source = "fallback"
             decision = self._normalize_decision(raw_decision, effective_cfg, context_payload)
 
         decision = self._apply_learning_entry_guards(
@@ -3355,7 +4257,7 @@ class AutonomousTradingAgent:
         exec_reason = str(execution.get("reason") or "hold")
         rejection_reason = None if execution.get("submitted") else exec_reason
         journal_row = {
-            "request_id": str(uuid.uuid4())[:8],
+            "request_id": request_id,
             "timestamp": now_iso,
             "trigger": str(trigger or "manual"),
             "latency_ms": latency_ms,
