@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pandas as pd
@@ -64,3 +65,75 @@ def test_signal_aggregator_preview_risk_check_does_not_consume_cooldown():
     assert reason_first == ""
     assert blocked_second is False
     assert reason_second == ""
+
+
+def test_signal_aggregator_excludes_unavailable_component_weights(monkeypatch):
+    from core.ai.signal_aggregator import SignalAggregator
+
+    agg = SignalAggregator()
+    df = _build_close_df("down")
+
+    async def _fake_llm_signal(symbol, market_data):
+        return "FLAT", 0.0
+
+    monkeypatch.setattr(agg, "_get_llm_signal", _fake_llm_signal)
+    monkeypatch.setattr(agg, "_get_ml_signal", lambda symbol, market_data: ("FLAT", 0.0))
+    monkeypatch.setattr(agg, "_get_factor_signal", lambda market_data: ("SHORT", 0.64))
+    monkeypatch.setattr(agg, "_apply_risk_gate", lambda symbol, direction, confidence, market_data: (False, ""))
+    agg._ml_model = SimpleNamespace(is_loaded=lambda: False)
+
+    result = asyncio.run(agg.aggregate("BTC/USDT", df))
+
+    assert result.direction == "SHORT"
+    assert result.confidence == pytest.approx(0.64, rel=1e-9)
+    assert result.components["llm"]["available"] is False
+    assert result.components["llm"]["effective_weight"] == pytest.approx(0.0, rel=1e-9)
+    assert result.components["ml"]["available"] is False
+    assert result.components["ml"]["effective_weight"] == pytest.approx(0.0, rel=1e-9)
+    assert result.components["factor"]["available"] is True
+    assert result.components["factor"]["effective_weight"] == pytest.approx(0.25, rel=1e-9)
+
+
+def test_signal_aggregator_keeps_neutral_available_component_weight(monkeypatch):
+    from core.ai.signal_aggregator import SignalAggregator
+
+    agg = SignalAggregator()
+    df = _build_close_df("down")
+
+    async def _fake_llm_signal(symbol, market_data):
+        return "FLAT", 0.55
+
+    monkeypatch.setattr(agg, "_get_llm_signal", _fake_llm_signal)
+    monkeypatch.setattr(agg, "_get_ml_signal", lambda symbol, market_data: ("FLAT", 0.0))
+    monkeypatch.setattr(agg, "_get_factor_signal", lambda market_data: ("SHORT", 0.64))
+    monkeypatch.setattr(agg, "_apply_risk_gate", lambda symbol, direction, confidence, market_data: (False, ""))
+    agg._ml_model = SimpleNamespace(is_loaded=lambda: False)
+
+    result = asyncio.run(agg.aggregate("BTC/USDT", df))
+
+    assert result.direction == "FLAT"
+    assert result.components["llm"]["available"] is True
+    assert result.components["llm"]["status"] == "neutral"
+    assert result.components["llm"]["effective_weight"] == pytest.approx(0.4, rel=1e-9)
+
+
+def test_signal_aggregator_fast_scan_disables_llm_and_ml(monkeypatch):
+    from core.ai.signal_aggregator import SignalAggregator
+
+    agg = SignalAggregator()
+    df = _build_close_df("up")
+
+    async def _unexpected_llm(symbol, market_data):
+        raise AssertionError("fast scan should not call llm signal")
+
+    monkeypatch.setattr(agg, "_get_llm_signal", _unexpected_llm)
+    monkeypatch.setattr(agg, "_get_ml_signal", lambda symbol, market_data: (_ for _ in ()).throw(AssertionError("fast scan should not call ml signal")))
+    monkeypatch.setattr(agg, "_apply_risk_gate", lambda symbol, direction, confidence, market_data: (False, ""))
+
+    result = asyncio.run(agg.aggregate("BTC/USDT", df, include_llm=False, include_ml=False))
+
+    assert result.components["llm"]["available"] is False
+    assert result.components["llm"]["reason"] == "disabled_for_fast_scan"
+    assert result.components["ml"]["available"] is False
+    assert result.components["ml"]["reason"] == "disabled_for_fast_scan"
+    assert result.components["factor"]["available"] is True

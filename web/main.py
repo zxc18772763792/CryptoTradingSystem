@@ -86,9 +86,11 @@ def _env_bool(name: str, default: bool) -> bool:
 _NEWS_PULL_INTERVAL_SEC = max(20, _env_int("NEWS_PULL_INTERVAL_SEC", 60))
 _NEWS_PULL_SINCE_MINUTES = max(30, _env_int("NEWS_PULL_SINCE_MINUTES", 180))
 _NEWS_PULL_MAX_RECORDS = max(20, _env_int("NEWS_PULL_MAX_RECORDS", 80))
+_NEWS_STARTUP_DELAY_SEC = max(0, _env_int("NEWS_STARTUP_DELAY_SEC", 0))
 _NEWS_BACKGROUND_ENABLED = _env_bool("NEWS_BACKGROUND_ENABLED", True)
 _NEWS_LLM_INTERVAL_SEC = max(15, _env_int("NEWS_LLM_INTERVAL_SEC", 60))
 _NEWS_LLM_BATCH = max(1, min(12, _env_int("NEWS_LLM_BATCH", 4)))
+_NEWS_LLM_STARTUP_DELAY_SEC = max(0, _env_int("NEWS_LLM_STARTUP_DELAY_SEC", 0))
 _NEWS_LLM_BACKGROUND_ENABLED = _env_bool("NEWS_LLM_BACKGROUND_ENABLED", True)
 _EXTERNAL_NEWS_WORKER_ENABLED = _env_bool("START_NEWS_WORKER", False)
 _EXTERNAL_NEWS_LLM_WORKER_ENABLED = _env_bool("START_NEWS_LLM_WORKER", False)
@@ -318,7 +320,8 @@ async def _emit_news_preview(app: FastAPI, limit: int = 10, hours: int = 24) -> 
 async def _news_refresh_worker(app: FastAPI, stop_event: asyncio.Event) -> None:
     from web.api import news as news_api
 
-    await asyncio.sleep(5)
+    if _NEWS_STARTUP_DELAY_SEC > 0:
+        await asyncio.sleep(_NEWS_STARTUP_DELAY_SEC)
     emit_counter = 0
     sleep_seconds = _NEWS_PULL_INTERVAL_SEC
     while not stop_event.is_set():
@@ -373,7 +376,8 @@ async def _news_refresh_worker(app: FastAPI, stop_event: asyncio.Event) -> None:
 async def _news_llm_worker(app: FastAPI, stop_event: asyncio.Event) -> None:
     from web.api import news as news_api
 
-    await asyncio.sleep(8)
+    if _NEWS_LLM_STARTUP_DELAY_SEC > 0:
+        await asyncio.sleep(_NEWS_LLM_STARTUP_DELAY_SEC)
     while not stop_event.is_set():
         try:
             cfg = getattr(app.state, "news_cfg", None)
@@ -1049,6 +1053,13 @@ async def lifespan(app: FastAPI):
         with contextlib.suppress(Exception):
             await autonomous_trading_agent.update_runtime_config(enabled=True)
             await autonomous_trading_agent.start()
+    with contextlib.suppress(Exception):
+        agent_cfg = autonomous_trading_agent.get_runtime_config()
+        if str(agent_cfg.get("symbol_mode") or "manual").strip().lower() == "auto":
+            autonomous_trading_agent.ensure_symbol_scan_preview_warm(
+                limit=int(agent_cfg.get("selection_top_n") or 10),
+                force=False,
+            )
     with contextlib.suppress(Exception):
         await _emit_news_preview(app=app, limit=10, hours=24)
 

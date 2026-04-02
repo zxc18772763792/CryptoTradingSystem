@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 
 _RETRYABLE_OPENAI_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _FAILOVER_OPENAI_HTTP_STATUSES = frozenset(set(_RETRYABLE_OPENAI_HTTP_STATUSES) | {401, 403})
+_RESPONSES_TOKEN_PARAM_CANDIDATES = ("max_output_tokens", "max_completion_tokens", "max_tokens", "")
+_UNSUPPORTED_PARAMETER_RE = re.compile(r"unsupported parameter:\s*([A-Za-z0-9_]+)", re.IGNORECASE)
 _OPENAI_TARGET_STATE_LOCK = threading.Lock()
 _OPENAI_TARGET_PREFERRED: Dict[Tuple[str, ...], str] = {}
 # Keep failover ordering request-local by default. This avoids global sticky
@@ -225,6 +228,7 @@ def build_responses_payload(
     model: str,
     messages: Sequence[Mapping[str, Any]],
     max_output_tokens: int | None = None,
+    output_token_param: str | None = "max_output_tokens",
     temperature: float | None = None,
     text_format: str | Dict[str, Any] | None = None,
     stream: bool | None = None,
@@ -242,8 +246,9 @@ def build_responses_payload(
             continue
         payload["input"].append({"role": role, "content": parts})
 
-    if max_output_tokens is not None:
-        payload["max_output_tokens"] = int(max_output_tokens)
+    token_param = str(output_token_param or "").strip()
+    if max_output_tokens is not None and token_param:
+        payload[token_param] = int(max_output_tokens)
     if temperature is not None:
         payload["temperature"] = float(temperature)
     if text_format:
@@ -256,6 +261,51 @@ def build_responses_payload(
         payload["reasoning"] = {"effort": effort}
 
     return payload
+
+
+def build_responses_payload_variants(
+    *,
+    model: str,
+    messages: Sequence[Mapping[str, Any]],
+    max_output_tokens: int | None = None,
+    temperature: float | None = None,
+    text_format: str | Dict[str, Any] | None = None,
+    stream: bool | None = None,
+    reasoning_effort: str | None = None,
+) -> List[Dict[str, Any]]:
+    variants: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for output_token_param in _RESPONSES_TOKEN_PARAM_CANDIDATES:
+        payload = build_responses_payload(
+            model=model,
+            messages=messages,
+            max_output_tokens=max_output_tokens,
+            output_token_param=output_token_param or None,
+            temperature=temperature,
+            text_format=text_format,
+            stream=stream,
+            reasoning_effort=reasoning_effort,
+        )
+        key = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        variants.append(payload)
+    return variants
+
+
+def unsupported_responses_parameter(error_text: Any) -> str | None:
+    text = str(error_text or "").strip()
+    if not text:
+        return None
+    match = _UNSUPPORTED_PARAMETER_RE.search(text)
+    if match:
+        return str(match.group(1) or "").strip() or None
+    lowered = text.lower()
+    for candidate in ("max_output_tokens", "max_completion_tokens", "max_tokens"):
+        if candidate in lowered and "unsupported" in lowered:
+            return candidate
+    return None
 
 
 def _iter_sse_events(raw_text: str) -> List[Tuple[str, str]]:

@@ -542,7 +542,12 @@ async def _load_live_signal_snapshot(
             timeframe=timeframe,
             limit=limit,
         )
-        sig = await signal_aggregator.aggregate(symbol, df)
+        sig = await signal_aggregator.aggregate(
+            symbol,
+            df,
+            include_llm=False,
+            include_ml=False,
+        )
         return {
             **(sig.to_dict() if callable(getattr(sig, "to_dict", None)) else dict(sig or {})),
             **market_meta,
@@ -1603,9 +1608,15 @@ async def update_ai_autonomous_agent_runtime_config(
 @router.get("/autonomous-agent/status")
 async def get_ai_autonomous_agent_status(request: Request):
     ensure_ai_research_runtime_state(request.app)
+    cfg = autonomous_trading_agent.get_runtime_config()
+    if str(cfg.get("symbol_mode") or "manual").strip().lower() == "auto":
+        autonomous_trading_agent.ensure_symbol_scan_preview_warm(
+            limit=int(cfg.get("selection_top_n") or 10),
+            force=False,
+        )
     return {
         "status": autonomous_trading_agent.get_status(),
-        "config": autonomous_trading_agent.get_runtime_config(),
+        "config": cfg,
     }
 
 
@@ -1634,8 +1645,10 @@ async def run_ai_autonomous_agent_once(
     payload: AIAutonomousAgentRunOnceRequest = AIAutonomousAgentRunOnceRequest(),
 ):
     ensure_ai_research_runtime_state(request.app)
-    result = await autonomous_trading_agent.run_once(trigger="api_manual", force=bool(payload.force))
-    return {"result": result, "status": autonomous_trading_agent.get_status()}
+    return await autonomous_trading_agent.trigger_run_once(
+        trigger="api_manual",
+        force=bool(payload.force),
+    )
 
 
 @router.get("/autonomous-agent/journal")
@@ -1656,8 +1669,22 @@ async def get_ai_autonomous_agent_review(request: Request, limit: int = 12):
 @router.get("/autonomous-agent/symbol-ranking")
 async def get_ai_autonomous_agent_symbol_ranking(request: Request, limit: int = 10, refresh: bool = False):
     ensure_ai_research_runtime_state(request.app)
-    payload = await autonomous_trading_agent.get_symbol_scan(limit=limit, force=bool(refresh))
-    return payload
+    try:
+        payload = await asyncio.wait_for(
+            autonomous_trading_agent.get_symbol_scan_preview(limit=limit, force=bool(refresh)),
+            timeout=4.0 if bool(refresh) else 2.0,
+        )
+        return payload
+    except Exception as exc:
+        fallback = autonomous_trading_agent.get_symbol_scan_preview_snapshot(limit=limit)
+        if fallback is not None:
+            meta = dict(fallback.get("scan_meta") or {})
+            meta["fallback_reason"] = str(exc)
+            meta["fallback_used"] = True
+            fallback["scan_meta"] = meta
+            return fallback
+        autonomous_trading_agent.ensure_symbol_scan_preview_warm(limit=limit, force=False)
+        return autonomous_trading_agent.build_symbol_scan_preview_pending_payload(limit=limit, reason=str(exc))
 
 
 @router.post("/proposals/generate")
@@ -2949,7 +2976,7 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
 
     try:
         selection_payload = await asyncio.wait_for(
-            autonomous_trading_agent.get_symbol_scan(force=False),
+            autonomous_trading_agent.get_symbol_scan_preview(force=False),
             timeout=10.0,
         )
         selection = dict(selection_payload or {}) if isinstance(selection_payload, dict) else {}

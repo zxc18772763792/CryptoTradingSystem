@@ -2,7 +2,9 @@
 import asyncio
 import copy
 import hashlib
+import json
 import math
+import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -63,6 +65,8 @@ _RESAMPLE_RULES = {
 _REPLAY_SESSIONS: Dict[str, Dict[str, Any]] = {}
 _RESEARCH_COVERAGE_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "df": None}
 _DOWNLOAD_TASKS: Dict[str, Dict[str, Any]] = {}
+_DOWNLOAD_TASK_SEMAPHORE: Optional[asyncio.Semaphore] = None
+_DOWNLOAD_TASK_SEMAPHORE_LOOP_ID: Optional[int] = None
 _ONCHAIN_OVERVIEW_CACHE: Dict[str, Dict[str, Any]] = {}
 _ONCHAIN_OVERVIEW_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
 _FACTOR_LIBRARY_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -90,6 +94,10 @@ _PAIR_SCAN_DEFAULT_LOOKBACK = {
 }
 _PAIR_SCAN_MAX_SYMBOLS = 24
 _PAIR_SCAN_MAX_ROWS = 20
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_RESEARCH_UNIVERSE_TASK_NAME = "CryptoTradingSystem_ResearchUniverseRefresh"
+_RESEARCH_UNIVERSE_SUMMARY_PATH = _PROJECT_ROOT / "data" / "research" / "research_universe_incremental_latest.json"
+_RESEARCH_UNIVERSE_LOG_PATH = _PROJECT_ROOT / "logs" / "research_universe_refresh.log"
 
 
 class KlineRequest(BaseModel):
@@ -867,6 +875,207 @@ def _new_download_task_id(payload: Dict[str, Any]) -> str:
         f"{payload.get('start_time')}|{payload.get('end_time')}|{time.time()}|{len(_DOWNLOAD_TASKS)}"
     )
     return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _run_local_command(args: List[str], timeout_sec: int = 30) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        cwd=str(_PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_sec,
+    )
+
+
+def _run_powershell_json(command: str, timeout_sec: int = 30) -> Dict[str, Any]:
+    result = _run_local_command(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        timeout_sec=timeout_sec,
+    )
+    stdout = str(result.stdout or "").strip()
+    stderr = str(result.stderr or "").strip()
+    if result.returncode != 0:
+        raise RuntimeError(stderr or stdout or "PowerShell command failed")
+    if not stdout:
+        return {}
+    return dict(json.loads(stdout))
+
+
+def _read_research_universe_summary() -> Dict[str, Any]:
+    path = _RESEARCH_UNIVERSE_SUMMARY_PATH
+    if not path.exists():
+        return {"exists": False, "path": str(path)}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "exists": True,
+            "path": str(path),
+            "updated_at": _safe_iso_timestamp(datetime.fromtimestamp(path.stat().st_mtime)),
+            "error": str(exc),
+        }
+    return {
+        "exists": True,
+        "path": str(path),
+        "updated_at": _safe_iso_timestamp(datetime.fromtimestamp(path.stat().st_mtime)),
+        "status": payload.get("status") or "unknown",
+        "timestamp": payload.get("timestamp"),
+        "timeframes": payload.get("timeframes") or [],
+        "seconds_symbols": payload.get("seconds_symbols") or [],
+        "seconds_days": int(payload.get("seconds_days") or 0),
+        "selected_symbol_count": len(payload.get("selected_symbols") or []),
+        "failures_count": int(payload.get("failures_count") or 0),
+        "downloaded_rows_total": int(payload.get("downloaded_rows_total") or 0),
+        "idle_seconds": payload.get("idle_seconds") or {},
+    }
+
+
+def _map_research_task_state_label(state: str) -> str:
+    key = str(state or "").strip().lower()
+    return {
+        "running": "运行中",
+        "ready": "待命",
+        "queued": "排队中",
+        "disabled": "已禁用",
+        "unknown": "未知",
+    }.get(key, state or "未知")
+
+
+def _get_research_universe_refresh_status_sync() -> Dict[str, Any]:
+    task_name = _RESEARCH_UNIVERSE_TASK_NAME
+    try:
+        task_payload = _run_powershell_json(
+            (
+                "$task = Get-ScheduledTask -TaskName '{0}' -ErrorAction SilentlyContinue;"
+                "if (-not $task) {{ [pscustomobject]@{{exists=$false; task_name='{0}'}} | ConvertTo-Json -Compress; exit 0 }};"
+                "$info = Get-ScheduledTaskInfo -TaskName '{0}' -ErrorAction SilentlyContinue;"
+                "$nextRun = $null; if ($info -and $info.NextRunTime -and $info.NextRunTime.Year -gt 1900) {{ $nextRun = $info.NextRunTime.ToString('o') }};"
+                "$lastRun = $null; if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 1900) {{ $lastRun = $info.LastRunTime.ToString('o') }};"
+                "[pscustomobject]@{{"
+                "exists=$true;"
+                "task_name='{0}';"
+                "state=[string]$task.State;"
+                "next_run_time=$nextRun;"
+                "last_run_time=$lastRun;"
+                "last_task_result=if($info){{$info.LastTaskResult}}else{{$null}}"
+                "}} | ConvertTo-Json -Compress"
+            ).format(task_name),
+            timeout_sec=20,
+        )
+    except Exception as exc:
+        task_payload = {
+            "exists": False,
+            "task_name": task_name,
+            "error": str(exc),
+        }
+
+    state = str(task_payload.get("state") or "unknown")
+    task_payload["state_label"] = _map_research_task_state_label(state)
+    task_payload["log_path"] = str(_RESEARCH_UNIVERSE_LOG_PATH)
+    if _RESEARCH_UNIVERSE_LOG_PATH.exists():
+        task_payload["log_updated_at"] = _safe_iso_timestamp(
+            datetime.fromtimestamp(_RESEARCH_UNIVERSE_LOG_PATH.stat().st_mtime)
+        )
+
+    return {
+        "task": task_payload,
+        "summary": _read_research_universe_summary(),
+    }
+
+
+async def _trigger_research_universe_refresh_start(
+    exchange: str = "binance",
+    timeframes: str = "1m,5m,15m",
+    days: int = 90,
+    overlap_bars: int = 48,
+) -> Dict[str, Any]:
+    ensure_script = _PROJECT_ROOT / "scripts" / "ensure_research_universe_refresh_task.ps1"
+    if not ensure_script.exists():
+        raise RuntimeError(f"Ensure script not found: {ensure_script}")
+
+    result = await asyncio.to_thread(
+        _run_local_command,
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ensure_script),
+            "-EnvName",
+            "crypto_trading",
+            "-Exchange",
+            str(exchange or "binance").strip() or "binance",
+            "-Timeframes",
+            str(timeframes or "1m,5m,15m").strip() or "1m,5m,15m",
+            "-Days",
+            str(max(7, int(days or 90))),
+            "-OverlapBars",
+            str(max(8, int(overlap_bars or 48))),
+            "-StartNow",
+            "-Quiet",
+        ],
+        90,
+    )
+    if result.returncode != 0:
+        message = str(result.stderr or result.stdout or "").strip() or "研究币池增量刷新启动失败"
+        raise RuntimeError(message)
+    payload = _get_research_universe_refresh_status_sync()
+    payload["accepted"] = True
+    payload["message"] = "研究币池增量追平已触发"
+    return payload
+
+
+def _new_download_batch_id(
+    exchange: str,
+    timeframe: str,
+    symbols: List[str],
+    start_time: Optional[datetime],
+    end_time: Optional[datetime],
+) -> str:
+    raw = (
+        f"{exchange}|{timeframe}|{','.join(symbols)}|{start_time}|{end_time}|"
+        f"{datetime.now(timezone.utc).isoformat()}"
+    )
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _download_task_concurrency() -> int:
+    raw_value = int(getattr(settings, "DATA_DOWNLOAD_MAX_CONCURRENT_TASKS", 2) or 2)
+    return max(1, min(raw_value, 8))
+
+
+def _download_task_retention() -> int:
+    raw_value = int(getattr(settings, "DATA_DOWNLOAD_TASK_RETENTION", 400) or 400)
+    return max(100, min(raw_value, 2000))
+
+
+def _get_download_task_semaphore() -> asyncio.Semaphore:
+    global _DOWNLOAD_TASK_SEMAPHORE
+    global _DOWNLOAD_TASK_SEMAPHORE_LOOP_ID
+    loop = asyncio.get_running_loop()
+    loop_id = id(loop)
+    if _DOWNLOAD_TASK_SEMAPHORE is None or _DOWNLOAD_TASK_SEMAPHORE_LOOP_ID != loop_id:
+        _DOWNLOAD_TASK_SEMAPHORE = asyncio.Semaphore(_download_task_concurrency())
+        _DOWNLOAD_TASK_SEMAPHORE_LOOP_ID = loop_id
+    return _DOWNLOAD_TASK_SEMAPHORE
+
+
+def _prune_download_tasks() -> None:
+    keep_limit = _download_task_retention()
+    if len(_DOWNLOAD_TASKS) <= keep_limit:
+        return
+    removable: List[tuple[str, str]] = []
+    for task_id, task in _DOWNLOAD_TASKS.items():
+        status = str(task.get("status") or "").strip().lower()
+        if status not in {"completed", "failed", "cancelled"}:
+            continue
+        removable.append((str(task.get("created_at") or ""), task_id))
+    removable.sort()
+    for _, task_id in removable[: max(0, len(_DOWNLOAD_TASKS) - keep_limit)]:
+        _DOWNLOAD_TASKS.pop(task_id, None)
 
 
 async def _load_symbol_df(
@@ -2436,24 +2645,35 @@ async def _run_download_task(task_id: str, payload: Dict[str, Any]) -> None:
     task = _DOWNLOAD_TASKS.get(task_id)
     if not task:
         return
-    task["status"] = "running"
-    task["started_at"] = datetime.now(timezone.utc).isoformat()
+    semaphore = _get_download_task_semaphore()
     try:
-        result = await run_download_historical_data(
-            exchange=str(payload.get("exchange") or "binance"),
-            symbol=str(payload.get("symbol") or "BTC/USDT"),
-            timeframe=str(payload.get("timeframe") or "1h"),
-            days=int(payload.get("days") or 365),
-            start_time=payload.get("start_time"),
-            end_time=payload.get("end_time"),
-        )
-        task["status"] = "completed"
-        task["result"] = result
+        async with semaphore:
+            task["status"] = "running"
+            task["started_at"] = datetime.now(timezone.utc).isoformat()
+            result = await run_download_historical_data(
+                exchange=str(payload.get("exchange") or "binance"),
+                symbol=str(payload.get("symbol") or "BTC/USDT"),
+                timeframe=str(payload.get("timeframe") or "1h"),
+                days=int(payload.get("days") or 365),
+                start_time=payload.get("start_time"),
+                end_time=payload.get("end_time"),
+            )
+            task["result"] = result
+            result_error = ""
+            if isinstance(result, dict):
+                result_error = str(result.get("error") or "").strip()
+            if result_error:
+                task["status"] = "failed"
+                task["error"] = result_error
+            else:
+                task["status"] = "completed"
+                task["error"] = None
     except Exception as e:
         task["status"] = "failed"
         task["error"] = str(e)
     finally:
         task["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _prune_download_tasks()
 
 
 def _normalize_download_symbol_list(symbols: List[str]) -> List[str]:
@@ -2469,12 +2689,14 @@ def _normalize_download_symbol_list(symbols: List[str]) -> List[str]:
 
 
 def _queue_download_task(payload: Dict[str, Any]) -> Dict[str, Any]:
+    _prune_download_tasks()
     task_id = _new_download_task_id(payload)
     start_time = payload.get("start_time")
     end_time = payload.get("end_time")
     task_record = {
         "task_id": task_id,
         "status": "pending",
+        "batch_id": str(payload.get("batch_id") or ""),
         "exchange": str(payload.get("exchange") or "binance"),
         "symbol": str(payload.get("symbol") or "BTC/USDT"),
         "timeframe": str(payload.get("timeframe") or "1h"),
@@ -2574,6 +2796,7 @@ async def download_historical_data_batch(req: BatchDownloadRequest):
             "results": [result],
         }
 
+    batch_id = _new_download_batch_id(exchange, timeframe, symbols, start_time, end_time)
     tasks: List[Dict[str, Any]] = []
     for symbol in symbols:
         payload = {
@@ -2583,12 +2806,14 @@ async def download_historical_data_batch(req: BatchDownloadRequest):
             "days": days,
             "start_time": start_time,
             "end_time": end_time,
+            "batch_id": batch_id,
         }
         tasks.append(_queue_download_task(payload))
 
     return {
         "queued": True,
         "message": f"已创建 {len(tasks)} 个历史下载任务",
+        "batch_id": batch_id,
         "exchange": exchange,
         "timeframe": timeframe,
         "days": days,
@@ -3116,6 +3341,29 @@ async def get_research_symbols(exchange: str = "binance"):
     return data
 
 
+@router.get("/research/refresh/status")
+async def get_research_refresh_status():
+    return await asyncio.to_thread(_get_research_universe_refresh_status_sync)
+
+
+@router.post("/research/refresh/start")
+async def start_research_refresh(
+    exchange: str = "binance",
+    timeframes: str = "1m,5m,15m",
+    days: int = 90,
+    overlap_bars: int = 48,
+):
+    try:
+        return await _trigger_research_universe_refresh_start(
+            exchange=exchange,
+            timeframes=timeframes,
+            days=days,
+            overlap_bars=overlap_bars,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 def _pair_scan_default_lookback(timeframe: str) -> int:
     tf = str(timeframe or "1h").strip().lower() or "1h"
     return int(_PAIR_SCAN_DEFAULT_LOOKBACK.get(tf, 720))
@@ -3451,13 +3699,39 @@ async def get_collector_tasks():
 
 
 @router.get("/download/tasks")
-async def list_download_tasks():
+async def list_download_tasks(
+    task_ids: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    limit: int = 100,
+):
+    requested_ids = {
+        str(raw or "").strip()
+        for raw in str(task_ids or "").split(",")
+        if str(raw or "").strip()
+    }
+    tasks = list(_DOWNLOAD_TASKS.values())
+    if requested_ids:
+        tasks = [item for item in tasks if str(item.get("task_id") or "") in requested_ids]
+    if batch_id:
+        tasks = [item for item in tasks if str(item.get("batch_id") or "") == str(batch_id)]
     tasks = sorted(
-        _DOWNLOAD_TASKS.values(),
+        tasks,
         key=lambda item: str(item.get("created_at") or ""),
         reverse=True,
     )
-    return {"count": len(tasks), "tasks": tasks[:100]}
+    if not requested_ids and not batch_id:
+        safe_limit = max(1, min(int(limit or 100), 500))
+        tasks = tasks[:safe_limit]
+    return {
+        "count": len(tasks),
+        "tasks": tasks,
+        "summary": {
+            "pending": sum(1 for item in tasks if str(item.get("status") or "") == "pending"),
+            "running": sum(1 for item in tasks if str(item.get("status") or "") == "running"),
+            "completed": sum(1 for item in tasks if str(item.get("status") or "") == "completed"),
+            "failed": sum(1 for item in tasks if str(item.get("status") or "") == "failed"),
+        },
+    }
 
 
 @router.get("/download/tasks/{task_id}")

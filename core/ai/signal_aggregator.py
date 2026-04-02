@@ -100,40 +100,86 @@ class SignalAggregator:
         self,
         symbol: str,
         market_data: pd.DataFrame,
+        *,
+        include_llm: bool = True,
+        include_ml: bool = True,
+        include_factor: bool = True,
     ) -> AggregatedSignal:
         """Compute weighted signal for *symbol* using latest *market_data*."""
         components: Dict[str, Any] = {}
 
         # ---- 1. LLM signal ----
-        llm_direction, llm_conf = await self._get_llm_signal(symbol, market_data)
+        llm_reason = ""
+        if include_llm:
+            llm_direction, llm_conf = await self._get_llm_signal(symbol, market_data)
+            llm_available = bool(llm_direction in {"LONG", "SHORT"} or llm_conf > 0.0)
+            if not llm_available:
+                llm_reason = "no_recent_events_or_signal_unavailable"
+        else:
+            llm_direction, llm_conf = "FLAT", 0.0
+            llm_available = False
+            llm_reason = "disabled_for_fast_scan"
+        llm_effective_weight = self.WEIGHTS["llm"] if llm_available else 0.0
         components["llm"] = {
             "direction": llm_direction,
             "confidence": round(llm_conf, 6),
             "weight": self.WEIGHTS["llm"],
+            "effective_weight": round(llm_effective_weight, 6),
+            "available": llm_available,
+            "status": self._component_status(direction=llm_direction, confidence=llm_conf, available=llm_available),
+            "reason": llm_reason,
         }
 
         # ---- 2. ML signal ----
-        ml_direction, ml_conf = self._get_ml_signal(symbol, market_data)
+        ml_reason = ""
+        if include_ml:
+            ml_direction, ml_conf = self._get_ml_signal(symbol, market_data)
+            ml_available = bool(self._ml_model.is_loaded() and market_data is not None and not market_data.empty)
+            if not ml_available:
+                ml_reason = "ml_model_unavailable"
+        else:
+            ml_direction, ml_conf = "FLAT", 0.0
+            ml_available = False
+            ml_reason = "disabled_for_fast_scan"
+        ml_effective_weight = self.WEIGHTS["ml"] if ml_available else 0.0
         components["ml"] = {
             "direction": ml_direction,
             "confidence": round(ml_conf, 6),
             "weight": self.WEIGHTS["ml"],
+            "effective_weight": round(ml_effective_weight, 6),
+            "available": ml_available,
+            "status": self._component_status(direction=ml_direction, confidence=ml_conf, available=ml_available),
+            "reason": ml_reason,
         }
 
         # ---- 3. Factor signal ----
-        factor_direction, factor_conf = self._get_factor_signal(market_data)
+        factor_reason = ""
+        if include_factor:
+            factor_direction, factor_conf = self._get_factor_signal(market_data)
+            factor_available = bool(market_data is not None and not market_data.empty and len(market_data) >= 30)
+            if not factor_available:
+                factor_reason = "insufficient_market_data"
+        else:
+            factor_direction, factor_conf = "FLAT", 0.0
+            factor_available = False
+            factor_reason = "disabled_for_fast_scan"
+        factor_effective_weight = self.WEIGHTS["factor"] if factor_available else 0.0
         components["factor"] = {
             "direction": factor_direction,
             "confidence": round(factor_conf, 6),
             "weight": self.WEIGHTS["factor"],
+            "effective_weight": round(factor_effective_weight, 6),
+            "available": factor_available,
+            "status": self._component_status(direction=factor_direction, confidence=factor_conf, available=factor_available),
+            "reason": factor_reason,
         }
 
         # ---- 4. Weighted vote ----
         direction, confidence = self._weighted_vote(
             [
-                (llm_direction, llm_conf, self.WEIGHTS["llm"]),
-                (ml_direction, ml_conf, self.WEIGHTS["ml"] if self._ml_model.is_loaded() else 0.0),
-                (factor_direction, factor_conf, self.WEIGHTS["factor"]),
+                (llm_direction, llm_conf, llm_effective_weight),
+                (ml_direction, ml_conf, ml_effective_weight),
+                (factor_direction, factor_conf, factor_effective_weight),
             ]
         )
 
@@ -154,6 +200,16 @@ class SignalAggregator:
             blocked_by_risk=blocked,
             risk_reason=risk_reason,
         )
+
+    @staticmethod
+    def _component_status(*, direction: str, confidence: float, available: bool) -> str:
+        if not available:
+            return "unavailable"
+        if str(direction or "").upper() in {"LONG", "SHORT"}:
+            return "active"
+        if float(confidence or 0.0) > 0.0:
+            return "neutral"
+        return "idle"
 
     # ------------------------------------------------------------------
     # Sub-signals
