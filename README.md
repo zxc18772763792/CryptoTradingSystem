@@ -55,14 +55,16 @@ Use the canonical root command:
 .\web.bat start
 ```
 
-`.\web.bat start` is the recommended safe start path. By default it starts the web app only, ignores `.env` worker auto-start flags, and keeps analytics-history collectors off unless you explicitly opt in.
+`.\web.bat start` is the recommended default start path. By default it starts the web app plus the news worker and news LLM worker, ignores `.env` worker auto-start flags, and keeps analytics-history collectors off unless you explicitly opt in.
 
 Useful variants:
 
 ```bat
 .\web.bat start -OpenBrowser
+.\web.bat start -NoNewsWorkers
+.\web.bat start -NoNewsLlmWorker
 .\web.bat start -EnableAnalyticsHistory
-.\web.bat start -StartNewsWorker -StartNewsLlmWorker
+.\web.bat start -StartPmWorker
 .\web.bat status
 .\web.bat stop -IncludeWorkers
 ```
@@ -75,7 +77,7 @@ After startup, always verify the runtime mode with:
 .\web.bat status
 ```
 
-The service may restore the persisted account mode on boot, so a safe start can still come up in `live` if that was the last saved mode.
+The service may restore the persisted account mode on boot, so the default start can still come up in `live` if that was the last saved mode.
 
 Open:
 
@@ -108,7 +110,10 @@ Run the web service:
 Run startup helper with optional collectors or workers:
 
 ```bat
+.\web.bat start -NoNewsWorkers
+.\web.bat start -NoNewsLlmWorker
 .\web.bat start -EnableAnalyticsHistory
+.\web.bat start -StartPmWorker
 .\web.bat start -StartNewsWorker -StartNewsLlmWorker -StartPmWorker
 ```
 

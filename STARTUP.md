@@ -15,6 +15,8 @@ Run these from project root:
 ```bat
 .\web.bat help
 .\web.bat start
+.\web.bat start -NoNewsWorkers
+.\web.bat start -NoNewsLlmWorker
 .\web.bat start -EnableAnalyticsHistory
 .\web.bat status
 .\web.bat stop -IncludeWorkers
@@ -28,9 +30,9 @@ Start the web service:
 .\web.bat start
 ```
 
-This is the recommended safe start path. By default it:
+This is the recommended default start path. By default it:
 
-- starts the web service only
+- starts the web service plus the news worker and news LLM worker
 - ignores `.env` auto-start worker flags such as `START_NEWS_WORKER=1`
 - disables analytics-history background collectors unless you explicitly opt in
 - keeps persisted trading-mode restore behavior, so the service may still come up in `live`
@@ -45,6 +47,18 @@ Start with analytics-history collectors enabled:
 
 ```bat
 .\web.bat start -EnableAnalyticsHistory
+```
+
+Start web only without the news engine:
+
+```bat
+.\web.bat start -NoNewsWorkers
+```
+
+Start with the pull worker but without the LLM worker:
+
+```bat
+.\web.bat start -NoNewsLlmWorker
 ```
 
 Start with news workers:
@@ -74,7 +88,8 @@ Stop the web service and related workers:
 ## Daily Rule
 
 - Use `.\web.bat start` as the default entry point.
-- Treat `.\web.bat start` as a recovery-friendly safe start: web-only plus analytics-history off.
+- Treat `.\web.bat start` as the managed default: web + news engine, analytics-history off.
+- Use `.\web.bat start -NoNewsWorkers` when you intentionally want a web-only session.
 - Use `.\web.bat status` before starting if you are unsure whether something is already running.
 - Use `.\web.bat status` after starting to confirm both health and trading mode.
 - Use `.\web.bat stop -IncludeWorkers` before restarting if you want a clean reset.

@@ -8,6 +8,8 @@ param(
     [switch]$OpenBrowser,
     [switch]$StartNewsWorker,
     [switch]$StartNewsLlmWorker,
+    [switch]$NoNewsWorkers,
+    [switch]$NoNewsLlmWorker,
     [switch]$StartPmWorker,
     [switch]$EnableAnalyticsHistory,
     [switch]$TestDataSources,
@@ -39,6 +41,7 @@ $script:WorkerDefinitions = @(
         StartFlag = "-StartPmWorker"
     }
 )
+$script:ResearchUniverseTaskName = "CryptoTradingSystem_ResearchUniverseRefresh"
 
 function Get-ListeningPid {
     param([int]$PortNumber)
@@ -164,7 +167,7 @@ function Format-ObservedWorkerState {
     }
 
     $note = if (Test-TruthyText $envValue) {
-        "[env $EnvName=$envValue, safe start ignores by default]"
+        "[env $EnvName=$envValue, managed start ignores env flags]"
     } elseif (-not [string]::IsNullOrWhiteSpace($envValue)) {
         "[env $EnvName=$envValue]"
     } else {
@@ -212,6 +215,20 @@ function Get-HealthSummary {
     }
 }
 
+function Get-ResearchUniverseTaskSummary {
+    try {
+        $task = Get-ScheduledTask -TaskName $script:ResearchUniverseTaskName -ErrorAction Stop
+        $info = Get-ScheduledTaskInfo -TaskName $script:ResearchUniverseTaskName -ErrorAction SilentlyContinue
+        $nextRun = if ($info -and $info.NextRunTime) { $info.NextRunTime } else { $null }
+        if ($nextRun) {
+            return ("{0} (next {1})" -f $task.State, $nextRun)
+        }
+        return [string]$task.State
+    } catch {
+        return "not registered"
+    }
+}
+
 function Show-Help {
     Write-Host ""
     Write-Host "CryptoTradingSystem web control" -ForegroundColor Cyan
@@ -223,6 +240,8 @@ function Show-Help {
     Write-Host ""
     Write-Host "Common examples:"
     Write-Host "  .\web.bat start -OpenBrowser"
+    Write-Host "  .\web.bat start -NoNewsWorkers"
+    Write-Host "  .\web.bat start -NoNewsLlmWorker"
     Write-Host "  .\web.bat start -EnableAnalyticsHistory"
     Write-Host "  .\web.bat start -StartNewsWorker"
     Write-Host "  .\web.bat start -StartNewsWorker -StartNewsLlmWorker"
@@ -230,10 +249,13 @@ function Show-Help {
     Write-Host "  .\web.bat start -Port 8000 -HealthWaitSec 150"
     Write-Host ""
     Write-Host "Notes:"
-    Write-Host "  - Use '.\web.bat start' as the safe default entry point."
-    Write-Host "  - Default start is web-only; .env START_* worker flags are not auto-applied."
-    Write-Host "  - Default start also disables analytics history; opt in with -EnableAnalyticsHistory."
-    Write-Host "  - Opt into external workers explicitly with -StartNewsWorker / -StartNewsLlmWorker / -StartPmWorker."
+    Write-Host "  - Use '.\web.bat start' as the default entry point."
+    Write-Host "  - Default start launches web + news worker + news LLM worker."
+    Write-Host "  - Use -NoNewsWorkers for a web-only start, or -NoNewsLlmWorker to skip only the LLM worker."
+    Write-Host "  - Managed startup ignores .env START_* worker flags and uses command-line policy instead."
+    Write-Host "  - Default start disables analytics history; opt in with -EnableAnalyticsHistory."
+    Write-Host "  - PM worker remains opt-in via -StartPmWorker."
+    Write-Host "  - Research universe incremental refresh task is auto-ensured on start."
     Write-Host "  - 'start_web_oneclick.bat' and 'start_once.bat' remain as compatibility wrappers."
     Write-Host "  - Logs: logs\web_ps.log"
     Write-Host ""
@@ -251,10 +273,11 @@ function Show-Status {
     Write-Host "Web service status" -ForegroundColor Cyan
     Write-Host ("  Project root : {0}" -f $projectRoot)
     Write-Host ("  Port         : {0}" -f $PortNumber)
-    Write-Host "  Start policy : safe web-only by default (analytics-history disabled)"
-    Write-Host "  Worker start : use explicit start flags to opt into external workers"
+    Write-Host "  Start policy : default web + news engine (analytics-history disabled)"
+    Write-Host "  Worker start : news workers auto-start by default; PM worker stays opt-in"
     $analyticsEnvValue = if ($envValues.ContainsKey("ANALYTICS_HISTORY_ENABLED")) { [string]$envValues["ANALYTICS_HISTORY_ENABLED"] } else { $null }
     Write-Host ("  Analytics    : default off unless -EnableAnalyticsHistory is used [env ANALYTICS_HISTORY_ENABLED={0}]" -f (Format-ConfigValue -Value $analyticsEnvValue))
+    Write-Host ("  Research job : {0}" -f (Get-ResearchUniverseTaskSummary))
 
     if (-not $webPid) {
         Write-Host "  Web          : stopped"
@@ -283,6 +306,7 @@ function Show-Status {
     Write-Host ""
     Write-Host "Quick commands:"
     Write-Host "  .\web.bat start"
+    Write-Host "  .\web.bat start -NoNewsWorkers"
     Write-Host "  .\web.bat start -EnableAnalyticsHistory"
     Write-Host "  .\web.bat stop -IncludeWorkers"
     Write-Host ""
@@ -364,14 +388,30 @@ switch ($Action) {
             throw "Startup script not found: $startScript"
         }
 
+        $effectiveStartNewsWorker = $false
+        $effectiveStartNewsLlmWorker = $false
+
+        if (-not $NoNewsWorkers.IsPresent) {
+            $effectiveStartNewsWorker = $true
+        }
+        if ((-not $NoNewsWorkers.IsPresent) -and (-not $NoNewsLlmWorker.IsPresent)) {
+            $effectiveStartNewsLlmWorker = $true
+        }
+        if ($StartNewsWorker.IsPresent) {
+            $effectiveStartNewsWorker = $true
+        }
+        if ($StartNewsLlmWorker.IsPresent) {
+            $effectiveStartNewsLlmWorker = $true
+        }
+
         & $startScript `
             -EnvName $EnvName `
             -BindHost $BindHost `
             -Port $Port `
             -HealthWaitSec $HealthWaitSec `
             -OpenBrowser:$OpenBrowser.IsPresent `
-            -StartNewsWorker:$StartNewsWorker.IsPresent `
-            -StartNewsLlmWorker:$StartNewsLlmWorker.IsPresent `
+            -StartNewsWorker:$effectiveStartNewsWorker `
+            -StartNewsLlmWorker:$effectiveStartNewsLlmWorker `
             -StartPmWorker:$StartPmWorker.IsPresent `
             -EnableAnalyticsHistory:$EnableAnalyticsHistory.IsPresent `
             -TestDataSources:$TestDataSources.IsPresent

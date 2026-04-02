@@ -153,6 +153,39 @@ function Get-RequestedWorkerLabels {
     return $labels
 }
 
+function Set-EffectiveWorkerEnvFlags {
+    param(
+        [bool]$NewsWorker,
+        [bool]$NewsLlmWorker,
+        [bool]$PmWorker
+    )
+
+    Set-Item -Path Env:START_NEWS_WORKER -Value $(if ($NewsWorker) { "1" } else { "0" })
+    Set-Item -Path Env:START_NEWS_LLM_WORKER -Value $(if ($NewsLlmWorker) { "1" } else { "0" })
+    Set-Item -Path Env:START_PM_WORKER -Value $(if ($PmWorker) { "1" } else { "0" })
+}
+
+function Ensure-ResearchUniverseRefreshTask {
+    param([string]$EnvName)
+
+    $ensureScript = Join-Path $PSScriptRoot "scripts\ensure_research_universe_refresh_task.ps1"
+    if (-not (Test-Path $ensureScript)) {
+        return
+    }
+
+    try {
+        $result = & $ensureScript -EnvName $EnvName -StartNowIfCreated -Quiet
+        if ($result -and $result.created) {
+            Write-Host "Research universe refresh scheduled task was missing and has been created." -ForegroundColor Green
+            if ($result.started_now) {
+                Write-Host "Research universe refresh scheduled task was started immediately." -ForegroundColor Green
+            }
+        }
+    } catch {
+        Write-Host "Research universe refresh task ensure skipped: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 Import-DotEnvFile -Path (Join-Path $PSScriptRoot ".env")
 Import-DotEnvFile -Path (Join-Path $PSScriptRoot ".env.local")
 
@@ -174,12 +207,17 @@ $requestedWorkerLabels = Get-RequestedWorkerLabels `
 $startupProfile = if ($requestedWorkerLabels.Count) {
     "web + " + ($requestedWorkerLabels -join ", ")
 } else {
-    "safe web-only"
+    "web-only"
 }
 if (-not $EnableAnalyticsHistory) {
     $startupProfile += " + analytics-history off"
     Set-Item -Path Env:ANALYTICS_HISTORY_ENABLED -Value "0"
 }
+Set-EffectiveWorkerEnvFlags `
+    -NewsWorker $StartNewsWorker `
+    -NewsLlmWorker $StartNewsLlmWorker `
+    -PmWorker $StartPmWorker
+Ensure-ResearchUniverseRefreshTask -EnvName $EnvName
 
 $pidOnPort = Get-ListeningPid -PortNumber $Port
 if ($pidOnPort) {
@@ -188,11 +226,11 @@ if ($pidOnPort) {
         Write-Host "Service already listening on 0.0.0.0:$Port (PID=$pidOnPort)."
         Write-Host "Requested startup profile: $startupProfile"
         if ($ignoredEnvWorkerFlags.Count) {
-            Write-Host ("Safe start ignored .env worker flags: {0}" -f ($ignoredEnvWorkerFlags -join ", ")) -ForegroundColor Yellow
-            Write-Host "Use explicit flags such as '.\web.bat start -StartNewsWorker -StartNewsLlmWorker' to opt in." -ForegroundColor Yellow
+            Write-Host ("Managed start ignored .env worker flags: {0}" -f ($ignoredEnvWorkerFlags -join ", ")) -ForegroundColor Yellow
+            Write-Host "Worker mix is controlled by '.\web.bat start' flags, not by .env START_* values." -ForegroundColor Yellow
         }
         if (-not $EnableAnalyticsHistory) {
-            Write-Host "Safe start forces ANALYTICS_HISTORY_ENABLED=0." -ForegroundColor Yellow
+            Write-Host "Default start forces ANALYTICS_HISTORY_ENABLED=0." -ForegroundColor Yellow
             Write-Host "Use '.\web.bat start -EnableAnalyticsHistory' to opt into analytics history collectors." -ForegroundColor Yellow
         }
         if ($requestedWorkerLabels.Count) {
@@ -217,11 +255,11 @@ $pythonExe = Resolve-PythonExecutable
 Write-Host "Python executable: $pythonExe"
 Write-Host "Startup profile: $startupProfile"
 if ($ignoredEnvWorkerFlags.Count) {
-    Write-Host ("Safe start ignored .env worker flags: {0}" -f ($ignoredEnvWorkerFlags -join ", ")) -ForegroundColor Yellow
-    Write-Host "Use explicit worker flags on '.\web.bat start' when you want external workers." -ForegroundColor Yellow
+    Write-Host ("Managed start ignored .env worker flags: {0}" -f ($ignoredEnvWorkerFlags -join ", ")) -ForegroundColor Yellow
+    Write-Host "Worker mix is controlled by '.\web.bat start' flags, not by .env START_* values." -ForegroundColor Yellow
 }
 if (-not $EnableAnalyticsHistory) {
-    Write-Host "Safe start forces ANALYTICS_HISTORY_ENABLED=0." -ForegroundColor Yellow
+    Write-Host "Default start forces ANALYTICS_HISTORY_ENABLED=0." -ForegroundColor Yellow
     Write-Host "Use '.\web.bat start -EnableAnalyticsHistory' when you want analytics history collectors." -ForegroundColor Yellow
 }
 
