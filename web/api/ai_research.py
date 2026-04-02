@@ -497,7 +497,6 @@ def _build_live_signal_watchlist_item(
         (row for row in top_candidates if _normalize_symbol(str((row or {}).get("symbol") or "")) == _normalize_symbol(symbol)),
         {},
     )
-    research = dict((matched_row or {}).get("research") or {})
     selected_symbol = _normalize_symbol(str(selection.get("selected_symbol") or runtime_cfg.get("symbol") or ""))
     is_selected = bool(selected_symbol and _normalize_symbol(symbol) == selected_symbol)
     watch_status = "selected" if is_selected else "watchlist"
@@ -515,10 +514,6 @@ def _build_live_signal_watchlist_item(
         "status_display": watch_status_display,
         "selected": is_selected,
         "rank": int((matched_row or {}).get("rank") or 0),
-        "candidate_id": str(research.get("candidate_id") or "").strip(),
-        "candidate_id_suffix": _candidate_id_suffix(research.get("candidate_id")),
-        "linked_candidate_status": str(research.get("status") or "").strip(),
-        "linked_candidate_strategy": str(research.get("strategy") or "").strip(),
         "params_fingerprint": "",
         "signal": signal_payload,
         "error": str(error or "").strip(),
@@ -559,6 +554,206 @@ async def _load_live_signal_snapshot(
     except Exception as exc:
         logger.debug(f"live-signals: {log_label}: {exc}")
         return None, str(exc)
+
+
+def _live_signal_ml_model_loaded(signal_aggregator: Any) -> bool:
+    try:
+        ml_model = getattr(signal_aggregator, "_ml_model", None)
+        if ml_model is not None and callable(getattr(ml_model, "is_loaded", None)):
+            return bool(ml_model.is_loaded())
+    except Exception:
+        return False
+    return False
+
+
+async def _load_autonomous_watchlist_runtime() -> tuple[Dict[str, Any], Dict[str, Any]]:
+    runtime_cfg: Dict[str, Any] = {}
+    selection: Dict[str, Any] = {}
+    try:
+        runtime_cfg = dict(autonomous_trading_agent.get_runtime_config() or {})
+    except Exception as exc:
+        logger.debug(f"live-signals: runtime config unavailable: {exc}")
+        runtime_cfg = {}
+
+    async def _load_selection(method_name: str) -> Dict[str, Any]:
+        method = getattr(autonomous_trading_agent, method_name, None)
+        if not callable(method):
+            return {}
+        payload = await asyncio.wait_for(method(force=False), timeout=10.0)
+        return dict(payload or {}) if isinstance(payload, dict) else {}
+
+    for method_name in ("get_symbol_scan_preview", "get_symbol_scan"):
+        if selection:
+            break
+        try:
+            selection = await _load_selection(method_name)
+        except Exception as exc:
+            logger.debug(f"live-signals: {method_name} unavailable: {exc}")
+            selection = {}
+    return runtime_cfg, selection
+
+
+async def _build_candidate_live_signals_payload(
+    request: Request,
+    *,
+    symbol: Optional[str] = None,
+) -> Dict[str, Any]:
+    from core.ai.signal_aggregator import signal_aggregator
+
+    all_candidates = list_candidates(request.app, limit=200)
+    active = [
+        c for c in all_candidates
+        if str(c.status) in {"paper_running", "shadow_running", "live_running", "live_candidate"}
+    ]
+    if symbol:
+        sym_norm = _normalize_symbol(symbol)
+        active = [c for c in active if _candidate_primary_symbol(c) == sym_norm]
+
+    candidate_specs: List[Dict[str, Any]] = []
+    candidate_tasks: List[Any] = []
+    for grouped in _group_candidates_for_live_signals(active):
+        grouped_candidates = list(grouped.get("candidates") or [])
+        preferred = grouped.get("preferred") or _pick_preferred_candidate(grouped_candidates)
+        if preferred is None:
+            continue
+        cand_symbol = _candidate_primary_symbol(preferred)
+        cand_timeframe = _candidate_timeframe(preferred)
+        cand_exchange = _candidate_exchange(preferred)
+        candidate_id = str(getattr(preferred, "candidate_id", "") or "unknown")
+        candidate_specs.append(
+            {
+                "preferred": preferred,
+                "grouped_candidates": grouped_candidates,
+            }
+        )
+        candidate_tasks.append(
+            _load_live_signal_snapshot(
+                symbol=cand_symbol,
+                exchange=cand_exchange,
+                timeframe=cand_timeframe,
+                signal_aggregator=signal_aggregator,
+                limit=120,
+                timeout_sec=10.0,
+                log_label=f"candidate error for {candidate_id}",
+            )
+        )
+
+    candidate_items: List[Dict[str, Any]] = []
+    candidate_results = await asyncio.gather(*candidate_tasks) if candidate_tasks else []
+    for spec, result in zip(candidate_specs, candidate_results):
+        signal_payload, error = result
+        candidate_items.append(
+            _build_live_signal_candidate_item(
+                preferred=spec["preferred"],
+                grouped_candidates=spec["grouped_candidates"],
+                signal_payload=signal_payload,
+                error=error,
+            )
+        )
+
+    return {
+        "sections": [
+            {
+                "id": "candidates",
+                "title": "运行中候选",
+                "count": len(candidate_items),
+                "empty_text": "暂无运行中候选",
+                "items": candidate_items,
+            }
+        ],
+        "candidate_items": candidate_items,
+        "watchlist_items": [],
+        "items": candidate_items,
+        "candidate_count": len(candidate_items),
+        "watchlist_count": 0,
+        "count": len(candidate_items),
+        "ml_model_loaded": _live_signal_ml_model_loaded(signal_aggregator),
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _build_autonomous_watchlist_live_signals_payload(
+    *,
+    symbol: Optional[str] = None,
+) -> Dict[str, Any]:
+    from core.ai.signal_aggregator import signal_aggregator
+
+    runtime_cfg, selection = await _load_autonomous_watchlist_runtime()
+    watchlist_symbols = _build_live_signal_watchlist_symbols(
+        runtime_cfg=runtime_cfg,
+        selection=selection,
+    )
+    if symbol:
+        sym_norm = _normalize_symbol(symbol)
+        watchlist_symbols = [sym for sym in watchlist_symbols if _normalize_symbol(sym) == sym_norm]
+    else:
+        watchlist_limit = max(
+            1,
+            min(
+                int((selection.get("top_n") or runtime_cfg.get("selection_top_n") or 8)),
+                8,
+            ),
+        )
+        watchlist_symbols = watchlist_symbols[:watchlist_limit]
+
+    watchlist_timeframe = str(
+        (selection.get("scan_config") or {}).get("timeframe")
+        or runtime_cfg.get("timeframe")
+        or "15m"
+    ).strip() or "15m"
+    watchlist_exchange = _normalize_exchange(
+        str(
+            (selection.get("scan_config") or {}).get("exchange")
+            or runtime_cfg.get("exchange")
+            or "binance"
+        )
+    )
+    watchlist_tasks = [
+        _load_live_signal_snapshot(
+            symbol=watch_symbol,
+            exchange=watchlist_exchange,
+            timeframe=watchlist_timeframe,
+            signal_aggregator=signal_aggregator,
+            limit=120,
+            timeout_sec=10.0,
+            log_label=f"watchlist error for {watch_symbol}",
+        )
+        for watch_symbol in watchlist_symbols
+    ]
+    watchlist_results = await asyncio.gather(*watchlist_tasks) if watchlist_tasks else []
+
+    watchlist_items: List[Dict[str, Any]] = []
+    for watch_symbol, result in zip(watchlist_symbols, watchlist_results):
+        signal_payload, error = result
+        watchlist_items.append(
+            _build_live_signal_watchlist_item(
+                symbol=watch_symbol,
+                runtime_cfg=runtime_cfg,
+                selection=selection,
+                signal_payload=signal_payload,
+                error=error,
+            )
+        )
+
+    return {
+        "sections": [
+            {
+                "id": "watchlist",
+                "title": "自治代理 watchlist",
+                "count": len(watchlist_items),
+                "empty_text": "暂无自治代理 watchlist",
+                "items": watchlist_items,
+            }
+        ],
+        "candidate_items": [],
+        "watchlist_items": watchlist_items,
+        "items": watchlist_items,
+        "candidate_count": 0,
+        "watchlist_count": len(watchlist_items),
+        "count": len(watchlist_items),
+        "ml_model_loaded": _live_signal_ml_model_loaded(signal_aggregator),
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _safe_strategy_name_fragment(value: str, default: str = "strategy") -> str:
@@ -1076,7 +1271,6 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
                 "entry_count": 0,
                 "close_count": 0,
                 "losing_close_count": 0,
-                "entries_without_research_count": 0,
                 "repeated_same_direction_entries": 0,
                 "outage_after_entry_count": 0,
                 "unmatched_entry_count": 0,
@@ -1105,7 +1299,6 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
     entry_side_counter: Counter[str] = Counter()
     primary_counter: Counter[str] = Counter()
     repeated_same_direction_entries = 0
-    entries_without_research_count = 0
     losing_close_count = 0
 
     for row_index, row in enumerate(journal_rows):
@@ -1124,7 +1317,6 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
         selection = row.get("selection") if isinstance(row.get("selection"), dict) else {}
         context = row.get("context") if isinstance(row.get("context"), dict) else {}
         execution_signal = execution.get("signal") if isinstance(execution.get("signal"), dict) else {}
-        research = context.get("research_context") if isinstance(context.get("research_context"), dict) else {}
         position_before = context.get("position") if isinstance(context.get("position"), dict) else {}
         cost = context.get("execution_cost") if isinstance(context.get("execution_cost"), dict) else {}
         aggregated_signal = context.get("aggregated_signal") if isinstance(context.get("aggregated_signal"), dict) else {}
@@ -1161,13 +1353,6 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
             "aggregated_signal": {
                 "direction": aggregated_signal.get("direction"),
                 "confidence": _review_safe_float(aggregated_signal.get("confidence")),
-            },
-            "research": {
-                "available": bool(research.get("available")),
-                "strategy": research.get("strategy"),
-                "status": research.get("status"),
-                "selection_reason": research.get("selection_reason"),
-                "candidate_count": int(research.get("candidate_count") or 0),
             },
             "cost": {
                 "one_way_bps": _review_safe_float(cost.get("estimated_one_way_cost_bps")),
@@ -1219,8 +1404,6 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
             entry_events.append(event)
             symbol_counter[event["symbol"]] += 1
             entry_side_counter[position_side] += 1
-            if not bool(event["research"]["available"]):
-                entries_without_research_count += 1
         elif phase == "exit":
             exit_events.append(event)
             pre_close_pnl = _review_safe_float(event["position_before"].get("unrealized_pnl"))
@@ -1401,9 +1584,6 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
             else:
                 event["review_status"] = "pending"
                 summary_lines.append("这笔开仓之后还没有看到明确的平仓动作，继续观察后续管理质量。")
-
-            if not bool((event.get("research") or {}).get("available")):
-                summary_lines.append("开仓时没有可用研究候选，这笔决定主要依赖行情与聚合信号。")
             adverse_markout = _review_safe_float((event.get("follow_up") or {}).get("adverse_markout_bps"))
             favorable_markout = _review_safe_float((event.get("follow_up") or {}).get("favorable_markout_bps"))
             if favorable_markout is not None or adverse_markout is not None:
@@ -1480,12 +1660,6 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
         insights.append(
             f"最近 {len(exit_events)} 次平仓里，有 {losing_close_count} 次是在浮亏状态下触发的。"
         )
-    if entry_events and entries_without_research_count == len(entry_events):
-        insights.append("最近所有开仓都没有研究候选可用，自治代理基本只靠行情和聚合信号直接下决定。")
-    elif entries_without_research_count > 0:
-        insights.append(
-            f"最近 {entries_without_research_count}/{len(entry_events)} 次开仓没有研究候选支撑。"
-        )
     if repeated_same_direction_entries > 0:
         symbol_text = dominant_symbol or "同一币种"
         insights.append(
@@ -1506,7 +1680,6 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
             "entry_count": len(entry_events),
             "close_count": len(exit_events),
             "losing_close_count": losing_close_count,
-            "entries_without_research_count": entries_without_research_count,
             "repeated_same_direction_entries": repeated_same_direction_entries,
             "outage_after_entry_count": outage_after_entry_count,
             "unmatched_entry_count": len(unmatched_entries),
@@ -2910,172 +3083,16 @@ async def list_performance_snapshots(
 @router.get("/live-signals")
 @router.get("/candidates/live-signals")
 async def get_live_signals(request: Request, symbol: Optional[str] = None):
-    """Return live signal snapshots for active candidates and agent watchlist."""
-    from core.ai.signal_aggregator import signal_aggregator
-
+    """Return live signal snapshots for active AI research candidates only."""
     ensure_ai_research_runtime_state(request.app)
+    return await _build_candidate_live_signals_payload(request, symbol=symbol)
 
-    all_candidates = list_candidates(request.app, limit=200)
-    active = [
-        c for c in all_candidates
-        if str(c.status) in {"paper_running", "shadow_running", "live_running", "live_candidate"}
-    ]
-    if symbol:
-        sym_norm = _normalize_symbol(symbol)
-        active = [c for c in active if _candidate_primary_symbol(c) == sym_norm]
 
-    candidate_specs: List[Dict[str, Any]] = []
-    candidate_tasks: List[Any] = []
-    for grouped in _group_candidates_for_live_signals(active):
-        grouped_candidates = list(grouped.get("candidates") or [])
-        preferred = grouped.get("preferred") or _pick_preferred_candidate(grouped_candidates)
-        if preferred is None:
-            continue
-        cand_symbol = _candidate_primary_symbol(preferred)
-        cand_timeframe = _candidate_timeframe(preferred)
-        cand_exchange = _candidate_exchange(preferred)
-        candidate_id = str(getattr(preferred, "candidate_id", "") or "unknown")
-        candidate_specs.append(
-            {
-                "preferred": preferred,
-                "grouped_candidates": grouped_candidates,
-            }
-        )
-        candidate_tasks.append(
-            _load_live_signal_snapshot(
-                symbol=cand_symbol,
-                exchange=cand_exchange,
-                timeframe=cand_timeframe,
-                signal_aggregator=signal_aggregator,
-                limit=120,
-                timeout_sec=10.0,
-                log_label=f"candidate error for {candidate_id}",
-            )
-        )
-
-    candidate_items: List[Dict[str, Any]] = []
-    candidate_results = await asyncio.gather(*candidate_tasks) if candidate_tasks else []
-    for spec, result in zip(candidate_specs, candidate_results):
-        signal_payload, error = result
-        candidate_items.append(
-            _build_live_signal_candidate_item(
-                preferred=spec["preferred"],
-                grouped_candidates=spec["grouped_candidates"],
-                signal_payload=signal_payload,
-                error=error,
-            )
-        )
-
-    runtime_cfg: Dict[str, Any] = {}
-    selection: Dict[str, Any] = {}
-    try:
-        runtime_cfg = dict(autonomous_trading_agent.get_runtime_config() or {})
-    except Exception as exc:
-        logger.debug(f"live-signals: runtime config unavailable: {exc}")
-        runtime_cfg = {}
-
-    try:
-        selection_payload = await asyncio.wait_for(
-            autonomous_trading_agent.get_symbol_scan_preview(force=False),
-            timeout=10.0,
-        )
-        selection = dict(selection_payload or {}) if isinstance(selection_payload, dict) else {}
-    except Exception as exc:
-        logger.debug(f"live-signals: watchlist scan unavailable: {exc}")
-        selection = {}
-
-    watchlist_symbols = _build_live_signal_watchlist_symbols(
-        runtime_cfg=runtime_cfg,
-        selection=selection,
-    )
-    if symbol:
-        sym_norm = _normalize_symbol(symbol)
-        watchlist_symbols = [sym for sym in watchlist_symbols if _normalize_symbol(sym) == sym_norm]
-    else:
-        watchlist_limit = max(
-            1,
-            min(
-                int((selection.get("top_n") or runtime_cfg.get("selection_top_n") or 8)),
-                8,
-            ),
-        )
-        watchlist_symbols = watchlist_symbols[:watchlist_limit]
-
-    watchlist_items: List[Dict[str, Any]] = []
-    watchlist_timeframe = str(
-        (selection.get("scan_config") or {}).get("timeframe")
-        or runtime_cfg.get("timeframe")
-        or "15m"
-    ).strip() or "15m"
-    watchlist_exchange = _normalize_exchange(
-        str(
-            (selection.get("scan_config") or {}).get("exchange")
-            or runtime_cfg.get("exchange")
-            or "binance"
-        )
-    )
-    watchlist_tasks = [
-        _load_live_signal_snapshot(
-            symbol=watch_symbol,
-            exchange=watchlist_exchange,
-            timeframe=watchlist_timeframe,
-            signal_aggregator=signal_aggregator,
-            limit=120,
-            timeout_sec=10.0,
-            log_label=f"watchlist error for {watch_symbol}",
-        )
-        for watch_symbol in watchlist_symbols
-    ]
-    watchlist_results = await asyncio.gather(*watchlist_tasks) if watchlist_tasks else []
-    for watch_symbol, result in zip(watchlist_symbols, watchlist_results):
-        signal_payload, error = result
-        watchlist_items.append(
-            _build_live_signal_watchlist_item(
-                symbol=watch_symbol,
-                runtime_cfg=runtime_cfg,
-                selection=selection,
-                signal_payload=signal_payload,
-                error=error,
-            )
-        )
-
-    # Safe ml_model check: aggregator may be a test stub or lightweight singleton
-    ml_model_loaded = False
-    try:
-        ml_model = getattr(signal_aggregator, "_ml_model", None)
-        if ml_model is not None and callable(getattr(ml_model, "is_loaded", None)):
-            ml_model_loaded = bool(ml_model.is_loaded())
-    except Exception:
-        pass
-
-    sections = [
-        {
-            "id": "candidates",
-            "title": "\u8fd0\u884c\u4e2d\u5019\u9009",
-            "count": len(candidate_items),
-            "empty_text": "\u6682\u65e0\u8fd0\u884c\u4e2d\u5019\u9009",
-            "items": candidate_items,
-        },
-        {
-            "id": "watchlist",
-            "title": "\u81ea\u6cbb\u4ee3\u7406 watchlist",
-            "count": len(watchlist_items),
-            "empty_text": "\u6682\u65e0\u81ea\u6cbb\u4ee3\u7406 watchlist",
-            "items": watchlist_items,
-        },
-    ]
-    items = [*candidate_items, *watchlist_items]
-    return {
-        "sections": sections,
-        "candidate_items": candidate_items,
-        "watchlist_items": watchlist_items,
-        "items": items,
-        "candidate_count": len(candidate_items),
-        "watchlist_count": len(watchlist_items),
-        "count": len(items),
-        "ml_model_loaded": ml_model_loaded,
-        "ts": datetime.now(timezone.utc).isoformat(),
-    }
+@router.get("/autonomous-agent/live-signals")
+async def get_autonomous_agent_live_signals(request: Request, symbol: Optional[str] = None):
+    """Return live signal snapshots for the autonomous agent watchlist only."""
+    ensure_ai_research_runtime_state(request.app)
+    return await _build_autonomous_watchlist_live_signals_payload(symbol=symbol)
 
 
 # ── Phase B: Quick register (human-approve shortcut with allocation_pct) ─────

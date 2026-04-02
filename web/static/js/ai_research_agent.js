@@ -602,7 +602,6 @@
 
     const primary = runtimeReason || diagnostics.primary || null;
     const agg = diagnostics.aggregated_signal || {};
-    const research = diagnostics.research || {};
     const modelOutput = describeModelOutput(diagnostics);
     const executionCost = describeExecutionCost(diagnostics);
     const currentAction = String(status.last_decision?.action || diagnostics.action || 'hold').trim().toLowerCase();
@@ -648,14 +647,6 @@
         <div class="ai-agent-diagnostic-item">
           <span>当前币种</span>
           <strong>${esc(String(diagnostics.selected_symbol || cfg.symbol || '--'))}</strong>
-        </div>
-        <div class="ai-agent-diagnostic-item">
-          <span>研究候选</span>
-          <strong>${esc(String(research.strategy || '--'))}</strong>
-        </div>
-        <div class="ai-agent-diagnostic-item">
-          <span>研究状态</span>
-          <strong>${esc(String(research.status || '--'))}</strong>
         </div>
         <div class="ai-agent-diagnostic-item">
           <span>模型反馈</span>
@@ -782,13 +773,11 @@
     dot.title = running ? '运行中' : '已停止';
 
     const rankingState = resolveAgentRankingState(status, cfg);
-    const researchCtx = status.last_research_context || {};
-    const selectedResearch = researchCtx.selected_candidate || {};
     const lastScan = status.last_symbol_scan || {};
     const activeSymbol = String(lastScan.selected_symbol || rankingState.scan?.selected_symbol || cfg.symbol || '--');
-    const researchLine = selectedResearch.candidate_id
-      ? `${selectedResearch.strategy || '--'} / ${selectedResearch.candidate_id}`
-      : '--';
+    const selectionReason = symbolSelectionReasonText(
+      String(lastScan.selection_reason || rankingState.scan?.selection_reason || 'manual_symbol')
+    );
     const lastRunAt = fmtAgentTs(status.last_run_at);
     const nextRunAt = fmtAgentTs(status.next_run_at);
     const latencyText = formatLatencyMs(status.last_latency_ms);
@@ -812,8 +801,8 @@
         <span>${esc(Number(status.tick_count || 0))}</span>
         <span>已提交信号</span>
         <span>${esc(Number(status.submitted_count || 0))}</span>
-        <span>参考候选</span>
-        <span>${esc(researchLine)}</span>
+        <span>选币原因</span>
+        <span>${esc(selectionReason)}</span>
         <span>模型反馈</span>
         <span class="${toneClass(modelFeedback.tone)}">${esc(modelFeedback.summary)}</span>
         <span>模型动作</span>
@@ -930,7 +919,6 @@
     const blockedText = blockedPairs.length
       ? blockedPairs.slice(0, 3).map((item) => `${item.symbol} ${item.side}`).join(' / ')
       : '暂无冷静期币种';
-    const requireResearch = Boolean(adaptiveRisk?.require_research_for_new_entries);
     const dataOutageExit = Boolean(adaptiveRisk?.force_close_on_data_outage_losing_position);
     const serviceInstabilityGuard = Boolean(adaptiveRisk?.avoid_new_entries_during_service_instability);
     const learningGeneratedAt = fmtAgentTs(learningMemory?.generated_at);
@@ -948,9 +936,9 @@
           <span class="ai-agent-review-kpi-note">平仓前处于浮亏的次数</span>
         </article>
         <article class="ai-agent-review-kpi">
-          <span class="ai-agent-review-kpi-label">研究缺口</span>
-          <strong class="ai-agent-review-kpi-value">${esc(summary?.entries_without_research_count ?? '--')}</strong>
-          <span class="ai-agent-review-kpi-note">开仓时没有研究候选</span>
+          <span class="ai-agent-review-kpi-label">当前持仓</span>
+          <strong class="ai-agent-review-kpi-value">${esc(summary?.current_open_count ?? '--')}</strong>
+          <span class="ai-agent-review-kpi-note">当前仍由自治代理跟踪的仓位数量</span>
         </article>
         <article class="ai-agent-review-kpi">
           <span class="ai-agent-review-kpi-label">同向重复</span>
@@ -995,7 +983,7 @@
           <article class="ai-agent-learning-card">
             <span class="ai-agent-learning-label">关键防守</span>
             <strong>${esc(blockedText)}</strong>
-            <span class="ai-agent-learning-note">${esc(requireResearch ? '无研究候选不开新仓；' : '研究候选非强制；')}${esc(dataOutageExit ? '价格缺失且浮亏会优先平仓；' : '数据缺失时优先观望；')}${esc(serviceInstabilityGuard ? '模型异常期不鼓励新开仓。' : '模型异常期仍以常规规则处理。')}</span>
+            <span class="ai-agent-learning-note">新单由实时行情与聚合信号驱动；${esc(dataOutageExit ? '价格缺失且浮亏会优先平仓；' : '数据缺失时优先观望；')}${esc(serviceInstabilityGuard ? '模型异常期不鼓励新开仓。' : '模型异常期仍以常规规则处理。')}</span>
           </article>
         </div>
         <div class="ai-agent-learning-tags">
@@ -1038,9 +1026,6 @@
         followParts.push(`同向第 ${Number(item.pair.repeat_open_rank)} 次放行`);
       }
 
-      const researchText = item?.research?.available
-        ? `${item.research.strategy || '研究候选'} / ${item.research.status || '已关联'}`
-        : '无研究候选';
       const signalText = item?.aggregated_signal?.direction
         ? `${item.aggregated_signal.direction} / ${formatNumber(item.aggregated_signal.confidence, 3)}`
         : '--';
@@ -1077,8 +1062,8 @@
               <strong>${esc(signalText)}</strong>
             </div>
             <div class="ai-agent-review-cell">
-              <span class="ai-agent-review-cell-label">研究支撑</span>
-              <strong>${esc(researchText)}</strong>
+              <span class="ai-agent-review-cell-label">后续阻塞</span>
+              <strong>${esc(blockerText)}</strong>
             </div>
             <div class="ai-agent-review-cell">
               <span class="ai-agent-review-cell-label">执行成本</span>

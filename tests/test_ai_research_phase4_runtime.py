@@ -144,7 +144,7 @@ def test_resolve_runtime_research_context_prefers_active_champion(monkeypatch, t
     assert context["selected_candidate"]["proposal_id"] == "proposal-phase4-runtime"
 
 
-def test_autonomous_agent_run_once_attaches_research_refs(monkeypatch, tmp_path: Path):
+def test_autonomous_agent_run_once_does_not_attach_research_refs(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
 
     _, champion = _seed_runtime_research(monkeypatch, tmp_path)
@@ -180,11 +180,12 @@ def test_autonomous_agent_run_once_attaches_research_refs(monkeypatch, tmp_path:
     result = asyncio.run(agent.run_once(trigger="test", force=True))
 
     signal = submit_mock.await_args.args[0]
-    assert signal.metadata["research_context_available"] is True
-    assert signal.metadata["research_candidate_id"] == champion.candidate_id
-    assert signal.metadata["research_proposal_id"] == champion.proposal_id
-    assert signal.metadata["research_champion_candidate_id"] == champion.candidate_id
-    assert result["status"]["last_research_context"]["selected_candidate"]["candidate_id"] == champion.candidate_id
+    assert champion.candidate_id == "cand-phase4-champion"
+    assert "research_context_available" not in signal.metadata
+    assert "research_candidate_id" not in signal.metadata
+    assert "research_proposal_id" not in signal.metadata
+    assert "research_champion_candidate_id" not in signal.metadata
+    assert result["status"]["last_research_context"] is None
 
 
 def test_live_decision_router_includes_research_context(monkeypatch, tmp_path: Path):

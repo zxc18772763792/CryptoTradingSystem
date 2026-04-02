@@ -24,7 +24,6 @@ from core.ai.autonomous_learning import (
     default_learning_memory,
     normalize_symbol,
 )
-from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.ai.signal_aggregator import signal_aggregator
 from core.backtest.cost_models import dynamic_slippage_rate, microstructure_proxies
 from core.data import data_storage
@@ -495,6 +494,24 @@ def _default_profile() -> Dict[str, Any]:
         "avg_leverage": 1.0,
         "avg_stop_loss_pct": 0.02,
         "avg_take_profit_pct": 0.04,
+    }
+
+
+def _decoupled_research_context(
+    *,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    reason: str = "agent_research_decoupled",
+) -> Dict[str, Any]:
+    return {
+        "available": False,
+        "exchange": str(exchange or "").strip().lower() or "binance",
+        "symbol": normalize_symbol(symbol),
+        "timeframe": str(timeframe or "").strip() or "15m",
+        "strategy": "",
+        "candidate_count": 0,
+        "selection_reason": str(reason or "agent_research_decoupled"),
     }
 
 
@@ -2346,13 +2363,6 @@ class AutonomousTradingAgent:
                 tradable_now = False
                 notes.append(f"review cooldown {pair_side}")
 
-        require_research = bool(adaptive_risk.get("require_research_for_new_entries"))
-        research = adjusted.get("research") if isinstance(adjusted.get("research"), dict) else {}
-        if require_research and not bool(research.get("candidate_id")) and not bool(adjusted.get("has_position")):
-            score -= 0.12
-            tradable_now = False
-            notes.append("review requires research")
-
         if bool(adaptive_risk.get("avoid_new_entries_during_service_instability")) and not bool(adjusted.get("has_position")):
             score -= 0.10
             if pair_side:
@@ -2395,15 +2405,6 @@ class AutonomousTradingAgent:
 
         position = context_payload.get("position") if isinstance(context_payload, dict) else {}
         has_position = bool(str((position or {}).get("side") or "").strip().lower())
-        research = context_payload.get("research_context") if isinstance(context_payload, dict) else {}
-        if (
-            bool(adaptive_risk.get("require_research_for_new_entries"))
-            and not has_position
-            and not bool((research or {}).get("available"))
-        ):
-            updated["action"] = "hold"
-            updated["reason"] = "review_requires_research"
-            return updated
 
         if (
             bool(adaptive_risk.get("avoid_new_entries_during_service_instability"))
@@ -2466,17 +2467,6 @@ class AutonomousTradingAgent:
             return self._build_hold_decision(
                 cfg=cfg,
                 reason=f"review_cooldown({symbol}:{side})",
-                confidence=confidence,
-            )
-
-        research = context_payload.get("research_context") if isinstance(context_payload, dict) else {}
-        if (
-            bool(adaptive_risk.get("require_research_for_new_entries"))
-            and not bool((research or {}).get("available"))
-        ):
-            return self._build_hold_decision(
-                cfg=cfg,
-                reason="review_requires_research",
                 confidence=confidence,
             )
 
@@ -2650,22 +2640,14 @@ class AutonomousTradingAgent:
             account_risk=account_risk,
         )
 
-        if light_symbol_scan or bool(cfg.get("_skip_research_context")):
-            research_context = {
-                "available": False,
-                "exchange": exchange,
-                "symbol": normalize_symbol(symbol),
-                "timeframe": timeframe,
-                "strategy": str(cfg.get("strategy_name") or ""),
-                "candidate_count": 0,
-                "selection_reason": "light_scan_skipped",
-            }
-        else:
-            research_context = resolve_runtime_research_context(
-                exchange=exchange,
-                symbol=symbol,
-                timeframe=timeframe,
-            )
+        research_context = _decoupled_research_context(
+            exchange=exchange,
+            symbol=symbol,
+            timeframe=timeframe,
+            reason="agent_research_decoupled_scan"
+            if light_symbol_scan or bool(cfg.get("_skip_research_context"))
+            else "agent_research_decoupled",
+        )
 
         return {
             "exchange": exchange,
@@ -2719,9 +2701,8 @@ class AutonomousTradingAgent:
                 "Use event_summary only when event concentration, news_alpha_proxy, or dominant sentiment are meaningfully non-zero.",
                 "Always respect account_risk, especially min_confidence, fixed_leverage, and same_direction_remaining_notional.",
                 "Use execution_cost to avoid marginal trades whose expected edge is smaller than estimated fees and slippage.",
-                "If research_context is available, treat its selected_candidate as the current research champion hypothesis unless real-time risk clearly invalidates it.",
                 "Treat learning_memory.adaptive_risk as the realized-trading guardrail layer built from recent outcomes.",
-                "If learning_memory blocks a symbol-side or requires research for fresh entries, default to hold rather than forcing a trade.",
+                "If learning_memory blocks a symbol-side, default to hold rather than forcing a trade.",
             ],
             "runtime_constraints": {
                 "min_confidence": cfg.get("effective_min_confidence", cfg.get("min_confidence")),
@@ -2919,24 +2900,6 @@ class AutonomousTradingAgent:
                     ),
                 }
             )
-        research_context = context_payload.get("research_context") if isinstance(context_payload, dict) else {}
-        if isinstance(research_context, dict) and research_context.get("available"):
-            selected_candidate = dict(research_context.get("selected_candidate") or {})
-            champion_candidate = dict(research_context.get("research_champion") or {})
-            metadata.update(
-                {
-                    "research_context_available": True,
-                    "research_selection_reason": str(research_context.get("selection_reason") or ""),
-                    "research_candidate_id": str(selected_candidate.get("candidate_id") or ""),
-                    "research_proposal_id": str(selected_candidate.get("proposal_id") or ""),
-                    "research_strategy": str(selected_candidate.get("strategy") or ""),
-                    "research_score": _coerce_float(selected_candidate.get("score", 0.0), 0.0, low=0.0, high=1000000.0),
-                    "research_status": str(selected_candidate.get("status") or ""),
-                    "research_role": str(selected_candidate.get("search_role") or ""),
-                    "research_champion_candidate_id": str(champion_candidate.get("candidate_id") or ""),
-                    "research_champion_strategy": str(champion_candidate.get("strategy") or ""),
-                }
-            )
         return Signal(
             symbol=str(cfg.get("symbol") or "BTC/USDT"),
             signal_type=signal_type,
@@ -2958,16 +2921,8 @@ class AutonomousTradingAgent:
 
     def _score_symbol_candidate(self, cfg: Dict[str, Any], context_payload: Dict[str, Any]) -> Dict[str, Any]:
         agg = dict(context_payload.get("aggregated_signal") or {})
-        research_context = dict(context_payload.get("research_context") or {})
-        selected_candidate = dict(research_context.get("selected_candidate") or {})
         position = dict(context_payload.get("position") or {})
         market_structure = dict(context_payload.get("market_structure") or {})
-        validation = dict(selected_candidate.get("validation") or {})
-        validation_reasons = [
-            str(item).strip()
-            for item in (validation.get("reasons") or [])
-            if str(item).strip()
-        ]
 
         direction = str(agg.get("direction") or "FLAT").upper()
         confidence = _coerce_float(agg.get("confidence", 0.0), 0.0, low=0.0, high=1.0)
@@ -2977,8 +2932,6 @@ class AutonomousTradingAgent:
         bars = max(0, int(context_payload.get("bars") or 0))
         lookback = max(1, int(cfg.get("lookback_bars") or 240))
         vol = abs(float(context_payload.get("realized_vol_annualized") or 0.0))
-        promotion_target = str(selected_candidate.get("promotion_target") or "").strip().lower()
-        candidate_status = str(selected_candidate.get("status") or "").strip().lower()
         position_side = str(position.get("side") or "").strip().lower()
         has_position = bool(position_side)
         position_source = str(position.get("source") or ("local" if has_position else "")).strip().lower()
@@ -3002,12 +2955,6 @@ class AutonomousTradingAgent:
             score -= 0.30
         score += min(1.0, bars / float(lookback)) * 0.05
         score -= min(vol, 1.0) * 0.08
-        if selected_candidate:
-            score += 0.04
-        if promotion_target == "paper" or candidate_status in {"paper_running", "paper_ready", "new"}:
-            score -= 0.04
-        if any("trade count too low" in item.lower() for item in validation_reasons):
-            score -= 0.05
         if has_position:
             score += 0.03
         score = round(score, 6)
@@ -3027,10 +2974,6 @@ class AutonomousTradingAgent:
         if has_position:
             pnl_text = f"{position_unrealized_pnl_pct:+.2%}" if abs(position_unrealized_pnl_pct) > 1e-9 else f"{position_unrealized_pnl:+.4f}"
             summary_parts.append(f"holding {position_side} ({position_source or 'local'}) {pnl_text}")
-        if candidate_status:
-            summary_parts.append(f"research {candidate_status}")
-        if any("trade count too low" in item.lower() for item in validation_reasons):
-            summary_parts.append("research trade count low")
 
         row = {
             "symbol": str(context_payload.get("symbol") or cfg.get("symbol") or "BTC/USDT"),
@@ -3052,13 +2995,6 @@ class AutonomousTradingAgent:
             "position_unrealized_pnl_pct": float(position_unrealized_pnl_pct),
             "market_data_last_bar_at": market_data_last_bar_at,
             "market_data_age_sec": round(float(market_data_age_sec), 3) if market_data_age_sec is not None else None,
-            "research": {
-                "candidate_id": str(selected_candidate.get("candidate_id") or ""),
-                "strategy": str(selected_candidate.get("strategy") or ""),
-                "status": str(selected_candidate.get("status") or ""),
-                "promotion_target": str(selected_candidate.get("promotion_target") or ""),
-                "validation_reasons": validation_reasons[:3],
-            },
         }
         return self._apply_learning_score_adjustments(row=row, cfg=cfg)
 
@@ -3412,13 +3348,6 @@ class AutonomousTradingAgent:
                         "position_source": "",
                         "position_unrealized_pnl": 0.0,
                         "position_unrealized_pnl_pct": 0.0,
-                        "research": {
-                            "candidate_id": "",
-                            "strategy": "",
-                            "status": "",
-                            "promotion_target": "",
-                            "validation_reasons": [],
-                        },
                     }
 
             concurrency = max(1, min(int(_AUTO_SYMBOL_SCAN_CONCURRENCY), len(symbols) or 1))
@@ -3473,13 +3402,6 @@ class AutonomousTradingAgent:
             "position_source": "",
             "position_unrealized_pnl": 0.0,
             "position_unrealized_pnl_pct": 0.0,
-            "research": {
-                "candidate_id": "",
-                "strategy": "",
-                "status": "",
-                "promotion_target": "",
-                "validation_reasons": [],
-            },
         }
         if symbol_mode != "auto":
             selection_reason = "manual_symbol"
@@ -3605,26 +3527,6 @@ class AutonomousTradingAgent:
             )
 
         execution_cost = dict(context_payload.get("execution_cost") or {})
-        research_context = dict(context_payload.get("research_context") or {})
-        selected_candidate = dict(research_context.get("selected_candidate") or {})
-        validation = dict(selected_candidate.get("validation") or {})
-        validation_reasons = [
-            str(item).strip()
-            for item in (validation.get("reasons") or [])
-            if str(item).strip()
-        ]
-        candidate_status = str(selected_candidate.get("status") or "").strip().lower()
-        promotion_target = str(selected_candidate.get("promotion_target") or "").strip().lower()
-        if selected_candidate and (candidate_status in {"paper_running", "paper_ready", "new"} or promotion_target == "paper"):
-            add_item(
-                "research_not_live_ready",
-                "研究候选仍偏纸盘阶段",
-                f"{selected_candidate.get('strategy') or '--'} / {selected_candidate.get('status') or '--'}",
-                "info",
-                45,
-            )
-        if any("trade count too low" in item.lower() for item in validation_reasons):
-            add_item("research_low_trade_count", "研究候选样本过少", validation_reasons[0], "info", 48)
 
         if execution_reason == "shadow_mode":
             add_item("shadow_mode", "当前只提示不执行", "运行模式是 shadow", "warn", 10)
@@ -3699,13 +3601,6 @@ class AutonomousTradingAgent:
                     execution_cost.get("estimated_round_trip_cost_usd_at_reference"),
                     0.0,
                 ),
-            },
-            "research": {
-                "candidate_id": str(selected_candidate.get("candidate_id") or ""),
-                "strategy": str(selected_candidate.get("strategy") or ""),
-                "status": str(selected_candidate.get("status") or ""),
-                "promotion_target": str(selected_candidate.get("promotion_target") or ""),
-                "validation_reasons": validation_reasons[:3],
             },
             "learning_memory": {
                 "effective_min_confidence": _safe_nonnegative_float(
@@ -4032,13 +3927,6 @@ class AutonomousTradingAgent:
                     "estimated_one_way_cost_usd_at_reference": 0.0,
                     "estimated_round_trip_cost_usd_at_reference": 0.0,
                 },
-                "research": {
-                    "candidate_id": "",
-                    "strategy": "",
-                    "status": "",
-                    "promotion_target": "",
-                    "validation_reasons": [],
-                },
                 "model_output": _build_model_output_debug(
                     {"action": "hold", "reason": "agent_disabled"},
                     {"action": "hold", "reason": "agent_disabled"},
@@ -4301,7 +4189,7 @@ class AutonomousTradingAgent:
         self._last_error = None
         self._last_decision = decision
         self._last_execution = execution
-        self._last_research_context = research_context if isinstance(research_context, dict) else None
+        self._last_research_context = None
         self._last_diagnostics = diagnostics
         self._last_symbol_scan = selection
         self._tick_count += 1

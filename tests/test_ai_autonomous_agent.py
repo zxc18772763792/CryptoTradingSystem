@@ -247,14 +247,10 @@ def test_build_context_light_symbol_scan_skips_expensive_runtime_calls(monkeypat
         def to_dict(self):
             return {"direction": "LONG", "confidence": 0.64, "blocked_by_risk": False, "risk_reason": ""}
 
-    def _unexpected_research_context(**kwargs):
-        raise AssertionError("light scan should not resolve research context")
-
     monkeypatch.setattr(agent, "_load_market_data", AsyncMock(return_value=_sample_df().tail(60)))
     monkeypatch.setattr(agent, "_resolve_last_price", AsyncMock(return_value=123.0))
     monkeypatch.setattr(agent, "_resolve_account_risk_base", AsyncMock(side_effect=AssertionError("skip account risk base")))
     monkeypatch.setattr(agent, "_resolve_position_payload", AsyncMock(side_effect=AssertionError("use prefetched scan position map")))
-    monkeypatch.setattr(module, "resolve_runtime_research_context", _unexpected_research_context)
     monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
     monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
 
@@ -290,7 +286,7 @@ def test_build_context_light_symbol_scan_skips_expensive_runtime_calls(monkeypat
     assert context["position"]["side"] == "long"
     assert context["position"]["source"] == "prefetched_live"
     assert context["research_context"]["available"] is False
-    assert context["research_context"]["selection_reason"] == "light_scan_skipped"
+    assert context["research_context"]["selection_reason"] == "agent_research_decoupled_scan"
     assert context["account_risk"]["trading_mode"] == "paper"
 
 
@@ -2240,7 +2236,7 @@ def test_agent_no_price_closes_losing_position_when_learning_memory_requires(mon
     assert submit_mock.await_count == 1
 
 
-def test_agent_learning_guard_requires_research_for_fresh_entry(monkeypatch, tmp_path: Path):
+def test_agent_learning_guard_no_longer_requires_research_for_fresh_entry(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
 
     agent = module.AutonomousTradingAgent(cache_root=tmp_path)
@@ -2324,7 +2320,6 @@ def test_agent_learning_guard_requires_research_for_fresh_entry(monkeypatch, tmp
     asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
     result = asyncio.run(agent.run_once(trigger="test", force=True))
 
-    assert result["decision"]["action"] == "hold"
-    assert result["decision"]["reason"] == "review_requires_research"
-    assert result["execution"]["submitted"] is False
-    assert submit_mock.await_count == 0
+    assert result["decision"]["action"] == "buy"
+    assert result["execution"]["submitted"] is True
+    assert submit_mock.await_count == 1

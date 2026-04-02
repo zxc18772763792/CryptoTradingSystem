@@ -4397,8 +4397,11 @@
     if (state.liveSignalsInFlight) return state.liveSignalsInFlight;
     const task = (async () => {
       try {
-        const res = await aiApi('/live-signals', { timeoutMs: 20000 });
-        renderLiveSignalPanels(res || {}, !!res?.ml_model_loaded);
+        const [researchRes, agentRes] = await Promise.all([
+          aiApi('/live-signals', { timeoutMs: 20000 }),
+          aiApi('/autonomous-agent/live-signals', { timeoutMs: 20000 }),
+        ]);
+        renderLiveSignalPanels(researchRes || {}, agentRes || {});
       } catch (e) {
         /* silent non-critical */
       }
@@ -4561,16 +4564,16 @@
     el.innerHTML = mlNote + renderLiveSignalSection(resolvedSection, mlLoaded);
   }
 
-  function renderLiveSignalPanels(payload, mlLoaded) {
+  function renderLiveSignalPanels(researchPayload, agentPayload) {
     renderLiveSignalPanel(
       'ai-research-live-signals-panel',
-      liveSignalSectionById(payload, 'candidates'),
-      mlLoaded,
+      liveSignalSectionById(researchPayload, 'candidates'),
+      !!researchPayload?.ml_model_loaded,
     );
     renderLiveSignalPanel(
       'ai-agent-live-signals-panel',
-      liveSignalSectionById(payload, 'watchlist'),
-      mlLoaded,
+      liveSignalSectionById(agentPayload, 'watchlist'),
+      !!agentPayload?.ml_model_loaded,
     );
   }
 

@@ -92,10 +92,10 @@ def test_build_learning_memory_raises_guards_after_losses_and_outages():
     assert adaptive["same_direction_max_exposure_ratio"] < 0.5
     assert adaptive["entry_size_scale"] < 1.0
     assert adaptive["force_close_on_data_outage_losing_position"] is True
-    assert adaptive["require_research_for_new_entries"] is True
+    assert adaptive["require_research_for_new_entries"] is False
     assert memory["summary"]["recent_model_issue_count"] == 1
     assert memory["summary"]["recent_no_price_count"] == 1
+    assert memory["summary"]["recent_researchless_entry_count"] == 0
     assert memory["summary"]["current_open_losing_count"] == 1
     blocked = build_blocked_symbol_side_map(memory, base_min_confidence=0.58)
     assert ("LINK/USDT", "short") in blocked
-

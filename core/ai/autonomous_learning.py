@@ -282,7 +282,6 @@ def build_learning_memory(
     latency_values: List[float] = []
     model_issue_count = 0
     no_price_count = 0
-    researchless_entry_count = 0
     recent_executed_entry_count = 0
     recent_issue_labels: defaultdict[str, int] = defaultdict(int)
 
@@ -294,7 +293,6 @@ def build_learning_memory(
         decision = row.get("decision") if isinstance(row.get("decision"), dict) else {}
         execution = row.get("execution") if isinstance(row.get("execution"), dict) else {}
         context = row.get("context") if isinstance(row.get("context"), dict) else {}
-        research = context.get("research_context") if isinstance(context.get("research_context"), dict) else {}
         diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
         primary = diagnostics.get("primary") if isinstance(diagnostics.get("primary"), dict) else {}
 
@@ -313,8 +311,6 @@ def build_learning_memory(
             action = str(decision.get("action") or "").strip().lower()
             if action in {"buy", "sell"}:
                 recent_executed_entry_count += 1
-                if not bool(research.get("available")):
-                    researchless_entry_count += 1
 
     symbol_side_stats: defaultdict[Tuple[str, str], Dict[str, Any]] = defaultdict(
         lambda: {
@@ -492,10 +488,6 @@ def build_learning_memory(
         lessons.append(
             f"最近 {recent_hours} 小时模型异常 {model_issue_count} 次，平均链路耗时 {avg_latency_ms:.0f} ms。"
         )
-    if researchless_entry_count > 0 and recent_executed_entry_count > 0:
-        lessons.append(
-            f"最近新开仓里有 {researchless_entry_count}/{recent_executed_entry_count} 笔没有研究候选支撑。"
-        )
     if current_open_unrealized_pnl < 0:
         lessons.append(
             f"当前自治持仓浮盈亏合计 {current_open_unrealized_pnl:+.4f}，应优先处理已持仓风险。"
@@ -512,8 +504,6 @@ def build_learning_memory(
         f"fresh entry min confidence >= {effective_min_confidence:.2f}",
         f"same-side exposure ratio <= {same_direction_ratio:.2f}",
     ]
-    if researchless_entry_count > 0 and recent_close_loss_count > 0:
-        guardrails.append("require research context before fresh entries")
     if no_price_count > 0:
         guardrails.append("close losing positions when market data is unavailable")
     if model_issue_rate >= 0.25:
@@ -540,9 +530,7 @@ def build_learning_memory(
             "effective_min_confidence": float(effective_min_confidence),
             "same_direction_max_exposure_ratio": float(same_direction_ratio),
             "entry_size_scale": float(entry_size_scale),
-            "require_research_for_new_entries": bool(
-                researchless_entry_count > 0 and recent_close_loss_count > 0
-            ),
+            "require_research_for_new_entries": False,
             "force_close_on_data_outage_losing_position": bool(no_price_count > 0),
             "avoid_new_entries_during_service_instability": bool(model_issue_rate >= 0.25),
             "data_quality_hold_bias": bool(no_price_count > 0 or model_issue_rate >= 0.35),
@@ -564,7 +552,7 @@ def build_learning_memory(
         "recent_close_net_pnl": round(float(recent_close_net_pnl), 6),
         "recent_model_issue_count": int(model_issue_count),
         "recent_no_price_count": int(no_price_count),
-        "recent_researchless_entry_count": int(researchless_entry_count),
+        "recent_researchless_entry_count": 0,
         "recent_same_direction_reentry_count": int(recent_same_direction_reentry_count),
         "recent_latency_avg_ms": round(float(avg_latency_ms), 3),
         "current_open_position_count": int(len(current_positions)),

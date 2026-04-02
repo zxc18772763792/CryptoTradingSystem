@@ -638,6 +638,7 @@ def test_ai_research_and_agent_live_signal_panels_are_separated():
     assert "自治代理聚合信号" in html_text
     assert "ai-live-signals-panel" not in html_text
     assert "renderLiveSignalPanels" in js_text
+    assert "/autonomous-agent/live-signals" in js_text
 
 
 def test_ai_research_live_activation_flow_hooks_present():
@@ -686,6 +687,11 @@ def _patch_live_signals_watchlist(monkeypatch, ai_module, *, runtime_cfg=None, s
     )
     monkeypatch.setattr(
         ai_module.autonomous_trading_agent,
+        "get_symbol_scan_preview",
+        AsyncMock(return_value=dict(selection or {})),
+    )
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
         "get_symbol_scan",
         AsyncMock(return_value=dict(selection or {})),
     )
@@ -724,7 +730,7 @@ def test_live_signals_works_with_symbol_field_candidates(monkeypatch):
     assert result["count"] == 1
     assert result["candidate_count"] == 1
     assert result["watchlist_count"] == 0
-    assert [section["id"] for section in result["sections"]] == ["candidates", "watchlist"]
+    assert [section["id"] for section in result["sections"]] == ["candidates"]
     item = result["candidate_items"][0]
     assert item["candidate_id"] == "cand-live-signals"
     assert item["strategy"] == "MAStrategy"
@@ -1094,9 +1100,10 @@ def test_live_signals_includes_watchlist_section(monkeypatch):
     )
 
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
-    result = asyncio.run(ai_module.get_live_signals(request))
+    result = asyncio.run(ai_module.get_autonomous_agent_live_signals(request))
     assert result["candidate_count"] == 0
     assert result["watchlist_count"] == 3
+    assert [section["id"] for section in result["sections"]] == ["watchlist"]
     assert [item["symbol"] for item in result["watchlist_items"]] == ["ETH/USDT", "BTC/USDT", "SOL/USDT"]
     assert result["watchlist_items"][0]["selected"] is True
     assert result["watchlist_items"][0]["status"] == "selected"
