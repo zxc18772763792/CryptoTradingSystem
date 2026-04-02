@@ -1,5 +1,6 @@
 (function () {
     const API_BASE = "/api/news";
+    const UI_TIMEZONE = (typeof window !== "undefined" && window.CTS_UI_TIMEZONE) || "Asia/Shanghai";
     const LIST_ID = "dashboard-news-list";
     const PULL_BTN_ID = "dashboard-news-pull-btn";
     const UPDATED_ID = "dashboard-news-updated";
@@ -36,7 +37,7 @@
 
     function fmtTs(value) {
         const d = parseTs(value);
-        return d ? d.toLocaleString("zh-CN", { hour12: false }) : "--";
+        return d ? d.toLocaleString("zh-CN", { hour12: false, timeZone: UI_TIMEZONE }) : "--";
     }
 
     function sentimentClass(sentiment) {

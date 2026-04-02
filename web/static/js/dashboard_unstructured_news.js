@@ -7,6 +7,7 @@
     const BUCKET_CHART_ID = "dashboard-news-bucket-chart";
     const REFRESH_MS = 30000;
     const SUMMARY_STALE_MS = 2 * 60 * 1000;
+    const UI_TIMEZONE = (typeof window !== "undefined" && window.CTS_UI_TIMEZONE) || "Asia/Shanghai";
     let loading = false;
     let latestSummary = null;
     let latestSummaryAt = 0;
@@ -42,7 +43,7 @@
 
     function fmtTs(value) {
         const d = parseTs(value);
-        return d ? d.toLocaleString("zh-CN", { hour12: false }) : "--";
+        return d ? d.toLocaleString("zh-CN", { hour12: false, timeZone: UI_TIMEZONE }) : "--";
     }
 
     function summarySentimentClass(sentiment) {

@@ -1,5 +1,6 @@
 ﻿(function () {
     const API_BASE = "/api/news";
+    const UI_TIMEZONE = (typeof window !== "undefined" && window.CTS_UI_TIMEZONE) || "Asia/Shanghai";
     const state = { timer: null, ws: null, summary: null, latest: null, health: null, pulling: false, queueSamples: [] };
 
     function esc(v) {
@@ -42,7 +43,7 @@
 
     function fmtTs(value) {
         const d = parseTs(value);
-        return d ? d.toLocaleString("zh-CN", { hour12: false }) : "--";
+        return d ? d.toLocaleString("zh-CN", { hour12: false, timeZone: UI_TIMEZONE }) : "--";
     }
 
     function fmtLatency(sec) {

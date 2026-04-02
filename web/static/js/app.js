@@ -120,6 +120,13 @@ const fmtCompactUsd=v=>(v===null||v===undefined||Number.isNaN(Number(v)))?'--':n
 function fmtDurationSec(v){const sec=Math.max(0,Math.floor(Number(v||0)));const d=Math.floor(sec/86400),h=Math.floor((sec%86400)/3600),m=Math.floor((sec%3600)/60),s=sec%60;const out=[];if(d>0)out.push(`${d}d`);if(h>0||d>0)out.push(`${h}h`);if(m>0||h>0||d>0)out.push(`${m}m`);out.push(`${s}s`);return out.join(' ');}
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
 const TIME_LOCALE='zh-CN';
+const TIME_ZONE='Asia/Shanghai';
+const TIME_ZONE_LABEL='上海时间 (UTC+8)';
+if(typeof window!=='undefined'){
+window.CTS_UI_LOCALE=TIME_LOCALE;
+window.CTS_UI_TIMEZONE=TIME_ZONE;
+window.CTS_UI_TIMEZONE_LABEL=TIME_ZONE_LABEL;
+}
 const BACKTEST_COMPARE_PRESET_KEY='cts_backtest_compare_presets_v1';
 const TS_TZ_SUFFIX_RE=/(?:[zZ]|[+-]\d{2}:?\d{2})$/;
 function normalizeTimestampInput(value){
@@ -136,9 +143,10 @@ return text;
 }
 function toDate(value){const text=normalizeTimestampInput(value);if(!text)return null;const d=new Date(text);return Number.isFinite(d.getTime())?d:null;}
 function toMs(value){const d=toDate(value);return d?d.getTime():NaN;}
-function fmtDateTime(value){const d=toDate(value);return d?d.toLocaleString(TIME_LOCALE,{hour12:false}):'--';}
-function fmtTime(value){const d=toDate(value);return d?d.toLocaleTimeString(TIME_LOCALE,{hour12:false}):'--';}
-function fmtAxisDateTime(value){const d=toDate(value);return d?d.toLocaleString(TIME_LOCALE,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'';}
+function fmtDateTimeOptions(d,options={}){return d.toLocaleString(TIME_LOCALE,{hour12:false,timeZone:TIME_ZONE,...options});}
+function fmtDateTime(value){const d=toDate(value);return d?fmtDateTimeOptions(d):'--';}
+function fmtTime(value){const d=toDate(value);return d?d.toLocaleTimeString(TIME_LOCALE,{hour12:false,timeZone:TIME_ZONE}):'--';}
+function fmtAxisDateTime(value){const d=toDate(value);return d?fmtDateTimeOptions(d,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'';}
 function parseHeatmapBucketDate(value,bucket){
 const text=String(value??'').trim();
 if(!text)return null;
@@ -150,8 +158,8 @@ function fmtHeatmapBucket(value,bucket){
 const d=parseHeatmapBucketDate(value,bucket);
 if(!d)return String(value??'');
 return bucket==='hour'
-?d.toLocaleString(TIME_LOCALE,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false})
-:d.toLocaleDateString(TIME_LOCALE,{year:'2-digit',month:'2-digit',day:'2-digit'});
+?fmtDateTimeOptions(d,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})
+:d.toLocaleDateString(TIME_LOCALE,{year:'2-digit',month:'2-digit',day:'2-digit',timeZone:TIME_ZONE});
 }
 function plotlyTimeAxis(extra={}){
 return{
@@ -711,7 +719,7 @@ if(byQuery)activateTab(byQuery);else if(byHash)activateTab(byHash);
 window.addEventListener('hashchange',()=>{const t=String((window.location.hash||'').replace(/^#/,'')).trim();if(t)activateTab(t);});
 window.addEventListener('resize',()=>{schedulePlotlyResize(document.querySelector('.tab-content.active')||document);if(equityChart?.type==='fallback')renderEquityFallback(equityChart.rows||[]);});
 }
-function initClock(){const f=()=>{const t=document.getElementById('current-time');if(t)t.textContent=new Date().toLocaleString(TIME_LOCALE,{hour12:false});};f();setInterval(f,1000);}
+function initClock(){const f=()=>{const t=document.getElementById('current-time');if(t)t.textContent=fmtDateTime(new Date());};f();setInterval(f,1000);}
 async function loadSystemStatus(){
 if(state._systemStatusInFlight)return;
 state._systemStatusInFlight=true;
@@ -1457,11 +1465,11 @@ meta.innerHTML=`<span>已注册 ${registered} | 运行中 ${runningCount} | 空�
 }
 if(a){
 const staleTip=stale.length?`<div class="list-item"><span style="color:#ffb15f;">运行异常: ${stale.map(x=>x.strategy).join(', ')}</span><span>建议检查数据/连接</span></div>`:'';
-a.innerHTML=(running.map(s=>{const p=perf[s.name]||{},rt=s.runtime||{};const rp=Number(p.return_pct),dd=Number(p.max_drawdown_pct),vv=Number(p.variance),up=fmtDurationSec(rt.uptime_seconds||0);const rpTxt=Number.isFinite(rp)?`${rp.toFixed(2)}%`:'--';const ddTxt=Number.isFinite(dd)?`${dd.toFixed(2)}%`:'--';const varTxt=Number.isFinite(vv)?vv.toExponential(2):'--';const acct=esc(rt.account_id||s.account_id||'main');const modeTxt=rt.isolated_account?'独立':'共享';return `<div class="list-item"><span>${s.name} (${s.strategy_type}) | 收益率 ${rpTxt} | 回撤 ${ddTxt} | 方差 ${varTxt} | 运行 ${up} | ${modeTxt}:${acct} ${s.last_run_at?`· ${new Date(s.last_run_at).toLocaleTimeString('zh-CN')}`:''}</span><span class="status-badge connected">运行中</span></div>`;}).join('')||'<div class="list-item">暂无运行中策略</div>')+staleTip;
+a.innerHTML=(running.map(s=>{const p=perf[s.name]||{},rt=s.runtime||{};const rp=Number(p.return_pct),dd=Number(p.max_drawdown_pct),vv=Number(p.variance),up=fmtDurationSec(rt.uptime_seconds||0);const rpTxt=Number.isFinite(rp)?`${rp.toFixed(2)}%`:'--';const ddTxt=Number.isFinite(dd)?`${dd.toFixed(2)}%`:'--';const varTxt=Number.isFinite(vv)?vv.toExponential(2):'--';const acct=esc(rt.account_id||s.account_id||'main');const modeTxt=rt.isolated_account?'独立':'共享';return `<div class="list-item"><span>${s.name} (${s.strategy_type}) | 收益率 ${rpTxt} | 回撤 ${ddTxt} | 方差 ${varTxt} | 运行 ${up} | ${modeTxt}:${acct} ${s.last_run_at?`· ${fmtTime(s.last_run_at)}`:''}</span><span class="status-badge connected">运行中</span></div>`;}).join('')||'<div class="list-item">暂无运行中策略</div>')+staleTip;
 }
-if(r)r.innerHTML=signals.length?signals.map(s=>`<div class="list-item"><span>${s.strategy} | ${s.symbol} | ${s.signal_type.toUpperCase()}</span><span>${new Date(s.timestamp).toLocaleTimeString('zh-CN')}</span></div>`).join(''):`<div class="list-item"><span>${running.length?`实时刷新中（${d.refresh_hint_seconds||5}秒）暂无新信号，可能是策略条件未触发`:'暂无近期信号'}</span><span>${new Date().toLocaleTimeString('zh-CN')}</span></div>`;
+if(r)r.innerHTML=signals.length?signals.map(s=>`<div class="list-item"><span>${s.strategy} | ${s.symbol} | ${s.signal_type.toUpperCase()}</span><span>${fmtTime(s.timestamp)}</span></div>`).join(''):`<div class="list-item"><span>${running.length?`实时刷新中（${d.refresh_hint_seconds||5}秒）暂无新信号，可能是策略条件未触发`:'暂无近期信号'}</span><span>${fmtTime(new Date())}</span></div>`;
 if(rt){
-rt.innerHTML=running.length?running.map(s=>{const p=perf[s.name]||{},ri=s.runtime||{};const rp=Number(p.return_pct),dd=Number(p.max_drawdown_pct),realized=Number(p.realized_pnl),unrealized=Number(p.unrealized_pnl),absPnl=(Number.isFinite(realized)?realized:0)+(Number.isFinite(unrealized)?unrealized:0),lu=p.last_update;const runtimeTxt=fmtDurationSec(ri.uptime_seconds||0);const lastRunTxt=s.last_run_at?new Date(s.last_run_at).toLocaleString('zh-CN'):'-';const rpTxt=Number.isFinite(rp)?`${rp.toFixed(2)}%`:'--';const ddTxt=Number.isFinite(dd)?`${dd.toFixed(2)}%`:'--';const absTxt=Number.isFinite(absPnl)?fmt(absPnl):'--';const rpCls=Number.isFinite(rp)?(rp>=0?'positive':'negative'):'';const absCls=Number.isFinite(absPnl)?(absPnl>=0?'positive':'negative'):'';const stype=s.strategy_type||s.name;const meta=getStrategyMeta(stype);const desc=meta.desc||s.description||stype;const cat=meta.cat||'';return`<tr><td>${s.name}</td><td style="font-size:12px;color:#9fb1c9;max-width:200px;">${cat?`[${cat}] `:''}${esc(desc)}</td><td class="${rpCls}">${rpTxt}</td><td>${ddTxt}</td><td class="${absCls}">${absTxt}</td><td>${runtimeTxt}</td><td>${lastRunTxt}</td><td>${lu?new Date(lu).toLocaleString('zh-CN'):'-'}</td></tr>`;}).join(''):'<tr><td colspan="8">暂无运行中策略数据</td></tr>';
+rt.innerHTML=running.length?running.map(s=>{const p=perf[s.name]||{},ri=s.runtime||{};const rp=Number(p.return_pct),dd=Number(p.max_drawdown_pct),realized=Number(p.realized_pnl),unrealized=Number(p.unrealized_pnl),absPnl=(Number.isFinite(realized)?realized:0)+(Number.isFinite(unrealized)?unrealized:0),lu=p.last_update;const runtimeTxt=fmtDurationSec(ri.uptime_seconds||0);const lastRunTxt=s.last_run_at?fmtDateTime(s.last_run_at):'-';const rpTxt=Number.isFinite(rp)?`${rp.toFixed(2)}%`:'--';const ddTxt=Number.isFinite(dd)?`${dd.toFixed(2)}%`:'--';const absTxt=Number.isFinite(absPnl)?fmt(absPnl):'--';const rpCls=Number.isFinite(rp)?(rp>=0?'positive':'negative'):'';const absCls=Number.isFinite(absPnl)?(absPnl>=0?'positive':'negative'):'';const stype=s.strategy_type||s.name;const meta=getStrategyMeta(stype);const desc=meta.desc||s.description||stype;const cat=meta.cat||'';return`<tr><td>${s.name}</td><td style="font-size:12px;color:#9fb1c9;max-width:200px;">${cat?`[${cat}] `:''}${esc(desc)}</td><td class="${rpCls}">${rpTxt}</td><td>${ddTxt}</td><td class="${absCls}">${absTxt}</td><td>${runtimeTxt}</td><td>${lastRunTxt}</td><td>${lu?fmtDateTime(lu):'-'}</td></tr>`;}).join(''):'<tr><td colspan="8">暂无运行中策略数据</td></tr>';
 }
 renderStrategyHealthAlerts(d,state.strategyHealth);
 renderStrategyConsolePanel();
@@ -1471,16 +1479,16 @@ const box=document.getElementById('strategy-health-alerts');if(!box)return;
 const stale=(summary?.stale_running||[]);const staleCount=Number(summary?.stale_running_count||stale.length||0);const runningCount=Number(summary?.running_count||0);
 const monitor=health||{};const lastCheck=monitor?.last_check_at;const lastAlert=monitor?.last_alert_at;const lastErr=monitor?.last_error;
 if(staleCount<=0){
-box.innerHTML=`<div class="list-item"><span>状态</span><span class="status-badge connected">健康</span></div><div class="list-item"><span>运行中策略</span><span>${runningCount}</span></div><div class="list-item"><span>最近检查</span><span>${lastCheck?new Date(lastCheck).toLocaleTimeString('zh-CN'):'--'}</span></div>`;
+box.innerHTML=`<div class="list-item"><span>状态</span><span class="status-badge connected">健康</span></div><div class="list-item"><span>运行中策略</span><span>${runningCount}</span></div><div class="list-item"><span>最近检查</span><span>${lastCheck?fmtTime(lastCheck):'--'}</span></div>`;
 state.lastHealthAlertKey='';
 return;
 }
 const staleRows=stale.slice(0,6).map(x=>{const lag=(x&&x.lag_seconds!==undefined&&x.lag_seconds!==null)?`${x.lag_seconds}s`:'--';return `<div class="list-item"><span>${x.strategy||'未知策略'} (${x.timeframe||'-'})</span><span style="color:#ffb15f;">延迟 ${lag}</span></div>`;}).join('');
-box.innerHTML=`<div class="list-item"><span>状态</span><span class="status-badge" style="background:rgba(255,177,95,.15);color:#ffb15f;border-color:rgba(255,177,95,.35);">告警</span></div><div class="list-item"><span>异常策略数</span><span>${staleCount}</span></div>${staleRows||''}<div class="list-item"><span>最近告警</span><span>${lastAlert?new Date(lastAlert).toLocaleTimeString('zh-CN'):'--'}</span></div>${lastErr?`<div class="list-item"><span>监控错误</span><span style="color:#ff9b9b;">${esc(lastErr)}</span></div>`:''}`;
+box.innerHTML=`<div class="list-item"><span>状态</span><span class="status-badge" style="background:rgba(255,177,95,.15);color:#ffb15f;border-color:rgba(255,177,95,.35);">告警</span></div><div class="list-item"><span>异常策略数</span><span>${staleCount}</span></div>${staleRows||''}<div class="list-item"><span>最近告警</span><span>${lastAlert?fmtTime(lastAlert):'--'}</span></div>${lastErr?`<div class="list-item"><span>监控错误</span><span style="color:#ff9b9b;">${esc(lastErr)}</span></div>`:''}`;
 const alertKey=`${staleCount}|${stale.map(x=>x.strategy).join(',')}`;
 if(alertKey!==state.lastHealthAlertKey){state.lastHealthAlertKey=alertKey;notify(`【策略健康告警】异常策略 ${staleCount} 个`,true);}
 }
-function pushRealtimeSignal(sig){try{if(!sig)return;const item={strategy:sig.strategy_name||sig.strategy||'未知策略',symbol:sig.symbol||'-',signal_type:String(sig.signal_type||'').toLowerCase(),timestamp:sig.timestamp||new Date().toISOString()};const cur=state.summary?.recent_signals||[];const key=`${item.strategy}|${item.symbol}|${item.signal_type}|${item.timestamp}`;const map=new Map();[item,...cur].forEach(x=>{const k=`${x.strategy||x.strategy_name}|${x.symbol}|${String(x.signal_type||'').toLowerCase()}|${x.timestamp}`;if(!map.has(k))map.set(k,x);});state.summary.recent_signals=[...map.values()].slice(0,20);const r=document.getElementById('recent-signals');if(r){r.innerHTML=state.summary.recent_signals.slice(0,12).map(s=>`<div class=\"list-item\"><span>${s.strategy||s.strategy_name} | ${s.symbol} | ${String(s.signal_type||'').toUpperCase()}</span><span>${new Date(s.timestamp).toLocaleTimeString('zh-CN')}</span></div>`).join('');}}catch(e){console.error(e);}}
+function pushRealtimeSignal(sig){try{if(!sig)return;const item={strategy:sig.strategy_name||sig.strategy||'未知策略',symbol:sig.symbol||'-',signal_type:String(sig.signal_type||'').toLowerCase(),timestamp:sig.timestamp||new Date().toISOString()};const cur=state.summary?.recent_signals||[];const key=`${item.strategy}|${item.symbol}|${item.signal_type}|${item.timestamp}`;const map=new Map();[item,...cur].forEach(x=>{const k=`${x.strategy||x.strategy_name}|${x.symbol}|${String(x.signal_type||'').toLowerCase()}|${x.timestamp}`;if(!map.has(k))map.set(k,x);});state.summary.recent_signals=[...map.values()].slice(0,20);const r=document.getElementById('recent-signals');if(r){r.innerHTML=state.summary.recent_signals.slice(0,12).map(s=>`<div class=\"list-item\"><span>${s.strategy||s.strategy_name} | ${s.symbol} | ${String(s.signal_type||'').toUpperCase()}</span><span>${fmtTime(s.timestamp)}</span></div>`).join('');}}catch(e){console.error(e);}}
 async function loadStrategyHealth(){
 const out=document.getElementById('strategy-health-output');
 if(!out)return;
@@ -1559,7 +1567,7 @@ const sizingStatus=String(sizing?.status||'');
 const sizingColor=sizingStatus==='ok'?'#3fb950':(sizingStatus==='blocked'?'#f85149':'#f0b429');
 const sizingResult=sizingStatus==='ok'?'当前可正常下单':(sizingStatus==='blocked'?'当前会被最小下单门槛拦截':'当前预估数据不足，暂无法判断');
 const sizingHtml=sizing?`<div class="form-group" style="margin-top:10px;"><label>下单预估</label><div class="list-item"><span>当前价格 / 账户权益</span><span>${Number(sizing.price||0).toFixed(4)} / ${Number(sizing.account_equity||0).toFixed(2)} USDT</span></div><div class="list-item"><span>价格来源</span><span>${esc(String(sizing.price_source||'unavailable'))}</span></div><div class="list-item"><span>分配资金 / 单笔上限</span><span>${Number(sizing.allocation_cap||0).toFixed(2)} / ${Number(sizing.risk_single_cap||0).toFixed(2)} USDT</span></div><div class="list-item"><span>当前可用名义金额</span><span>${Number(sizing.available_notional||0).toFixed(2)} USDT</span></div><div class="list-item"><span>最小合法数量 / 名义金额</span><span>${fmtQtyPreview(sizing.min_legal_qty||0)} / ${Number(sizing.min_legal_notional||0).toFixed(2)} USDT</span></div><div class="list-item"><span>结果</span><span style="color:${sizingColor};">${sizingResult}</span></div><div class="list-item"><span>说明</span><span>${esc(sizing.note||'-')}</span></div></div>`:'';
-panel.innerHTML=`<div class="form-group"><label>策略: ${info.name} (${info.strategy_type})</label><div class="list-item"><span>状态</span><span>${mapState(info.state)}</span></div><div class="list-item"><span>周期</span><span>${esc(info.timeframe||'-')}</span></div><div class="list-item"><span>交易对</span><span>${esc(currentSymbols.join(', '))}</span></div><div class="list-item"><span>最近运行</span><span>${info.last_run_at?new Date(info.last_run_at).toLocaleString('zh-CN'):'-'}</span></div><div class="list-item"><span>运行时长限制</span><span>${runtime.runtime_limit_minutes?`${runtime.runtime_limit_minutes} 分钟`:'不限时'}${runtime.remaining_seconds!==undefined&&runtime.remaining_seconds!==null?` | 剩余 ${fmtDurationSec(runtime.remaining_seconds)}`:''}</span></div></div>${sizingHtml}<div class="inline-actions" style="margin-top:4px;"><button class="btn btn-primary btn-sm" id="edit-toggle">${info.state==='running'?'停止策略':'启动策略'}</button><button class="btn btn-primary btn-sm" id="edit-clone">复制新实例</button><button class="btn btn-danger btn-sm" id="edit-delete">删除实例</button><button class="btn btn-primary btn-sm" id="edit-cmp">刷新对比</button>${canApplyBestOpt?'<button class="btn btn-primary btn-sm" id="edit-apply-best-opt">应用最近优化最佳参数</button>':''}</div><div class="param-grid"><div class="form-group"><label>策略周期（timeframe）</label><select id="edit-timeframe">${tfHtml}</select></div><div class="form-group"><label>交易对（逗号分隔，可多币）</label><input id="edit-symbols" type="text" value="${esc(currentSymbols.join(', '))}" placeholder="例如 ETH/USDT 或 BTC/USDT,ETH/USDT"></div><div class="form-group"><label>策略运行时长（分钟，0=不限）</label><input id="edit-runtime-min" type="number" min="0" max="10080" step="1" value="${Number(runtime.runtime_limit_minutes||0)}"></div><div class="form-group"><label>资金占比 (0~1)</label><input id="edit-alloc" type="number" min="0" max="1" step="0.01" value="${Number(info.allocation||0).toFixed(2)}"></div></div><div class="param-grid">${fields||'<div class="list-item">该策略无可编辑参数</div>'}</div><div class="inline-actions" style="margin-top:10px;"><button class="btn btn-primary btn-sm" id="edit-save">保存参数</button><button class="btn btn-primary btn-sm" id="edit-save-as">另存为新实例（当前编辑值）</button></div><pre id="editor-compare-output" class="output-box">点击“刷新对比”查看实盘与回测差异</pre>`;
+panel.innerHTML=`<div class="form-group"><label>策略: ${info.name} (${info.strategy_type})</label><div class="list-item"><span>状态</span><span>${mapState(info.state)}</span></div><div class="list-item"><span>周期</span><span>${esc(info.timeframe||'-')}</span></div><div class="list-item"><span>交易对</span><span>${esc(currentSymbols.join(', '))}</span></div><div class="list-item"><span>最近运行</span><span>${info.last_run_at?fmtDateTime(info.last_run_at):'-'}</span></div><div class="list-item"><span>运行时长限制</span><span>${runtime.runtime_limit_minutes?`${runtime.runtime_limit_minutes} 分钟`:'不限时'}${runtime.remaining_seconds!==undefined&&runtime.remaining_seconds!==null?` | 剩余 ${fmtDurationSec(runtime.remaining_seconds)}`:''}</span></div></div>${sizingHtml}<div class="inline-actions" style="margin-top:4px;"><button class="btn btn-primary btn-sm" id="edit-toggle">${info.state==='running'?'停止策略':'启动策略'}</button><button class="btn btn-primary btn-sm" id="edit-clone">复制新实例</button><button class="btn btn-danger btn-sm" id="edit-delete">删除实例</button><button class="btn btn-primary btn-sm" id="edit-cmp">刷新对比</button>${canApplyBestOpt?'<button class="btn btn-primary btn-sm" id="edit-apply-best-opt">应用最近优化最佳参数</button>':''}</div><div class="param-grid"><div class="form-group"><label>策略周期（timeframe）</label><select id="edit-timeframe">${tfHtml}</select></div><div class="form-group"><label>交易对（逗号分隔，可多币）</label><input id="edit-symbols" type="text" value="${esc(currentSymbols.join(', '))}" placeholder="例如 ETH/USDT 或 BTC/USDT,ETH/USDT"></div><div class="form-group"><label>策略运行时长（分钟，0=不限）</label><input id="edit-runtime-min" type="number" min="0" max="10080" step="1" value="${Number(runtime.runtime_limit_minutes||0)}"></div><div class="form-group"><label>资金占比 (0~1)</label><input id="edit-alloc" type="number" min="0" max="1" step="0.01" value="${Number(info.allocation||0).toFixed(2)}"></div></div><div class="param-grid">${fields||'<div class="list-item">该策略无可编辑参数</div>'}</div><div class="inline-actions" style="margin-top:10px;"><button class="btn btn-primary btn-sm" id="edit-save">保存参数</button><button class="btn btn-primary btn-sm" id="edit-save-as">另存为新实例（当前编辑值）</button></div><pre id="editor-compare-output" class="output-box">点击“刷新对比”查看实盘与回测差异</pre>`;
 panel.classList.add('strategy-edit-active');
 openStrategyMonitor(name).catch(() => {});
 panel.dataset.strategyName=String(info.name||name||'');
@@ -2013,20 +2021,78 @@ throw new Error(`后台下载超时: ${taskId}`);
 async function pollBatchDownloadTasks(taskIds,{timeoutMs=25*60*1000,intervalMs=3000}={}){
 const ids=Array.from(new Set((Array.isArray(taskIds)?taskIds:[]).map(v=>String(v||'').trim()).filter(Boolean)));
 if(!ids.length)return[];
-const wanted=new Set(ids);
 const start=Date.now();
 while(Date.now()-start<timeoutMs){
-  const resp=await api('/data/download/tasks',{timeoutMs:15000});
+  const resp=await api(`/data/download/tasks?task_ids=${encodeURIComponent(ids.join(','))}`,{timeoutMs:15000});
   const tasks=Array.isArray(resp?.tasks)?resp.tasks:[];
-  const matched=tasks.filter(task=>wanted.has(String(task?.task_id||'').trim()));
+  const taskMap=new Map(tasks.map(task=>[String(task?.task_id||'').trim(),task]));
+  const matched=ids.map(id=>taskMap.get(id)).filter(Boolean);
   if(matched.length===ids.length&&matched.every(task=>['completed','failed'].includes(String(task?.status||'')))){
-    return matched;
+    return ids.map(id=>taskMap.get(id)).filter(Boolean);
   }
   await new Promise(r=>setTimeout(r,intervalMs));
 }
 throw new Error(`批量下载超时: ${ids.length} 个任务`);
 }
 function getDownloadOutputEl(){return document.getElementById('download-output');}
+function getResearchRefreshStatusEl(){return document.getElementById('download-research-refresh-status');}
+function formatResearchRefreshStatus(payload,{multiline=false}={}){
+const task=payload?.task||{};
+const summary=payload?.summary||{};
+const state=String(task?.state_label||task?.state||'未注册').trim()||'未注册';
+const lastRun=task?.last_run_time?fmtDateTime(task.last_run_time):'--';
+const nextRun=task?.next_run_time?fmtDateTime(task.next_run_time):'--';
+const summaryUpdated=summary?.updated_at?fmtDateTime(summary.updated_at):(summary?.timestamp?fmtDateTime(summary.timestamp):'--');
+const summaryState=String(summary?.status||'').trim();
+const timeframes=(Array.isArray(summary?.timeframes)?summary.timeframes:[]).filter(Boolean);
+const secondsSymbols=(Array.isArray(summary?.seconds_symbols)?summary.seconds_symbols:[]).filter(Boolean);
+const lines=[
+  `研究币池增量追平: ${state}`,
+  `最近执行: ${lastRun} / 下次执行: ${nextRun}`,
+  `最近摘要: ${summaryUpdated} / rows ${Number(summary?.downloaded_rows_total||0).toLocaleString('zh-CN')} / failures ${Number(summary?.failures_count||0)}`
+];
+if(summaryState)lines.push(`摘要状态: ${summaryState}`);
+if(timeframes.length||secondsSymbols.length){
+  lines.push(`当前配置: ${timeframes.length?timeframes.join(' / '):'--'}${secondsSymbols.length?` / 空闲 1s ${secondsSymbols.join(', ')}`:''}`);
+}
+if(task?.error)lines.push(`任务错误: ${task.error}`);
+if(summary?.error)lines.push(`摘要错误: ${summary.error}`);
+return multiline?lines.join('\n'):lines.slice(0,4).join(' ｜ ');
+}
+async function loadResearchUniverseRefreshStatus({silent=false}={}){
+const statusEl=getResearchRefreshStatusEl();
+try{
+  const payload=await api('/data/research/refresh/status',{timeoutMs:15000});
+  if(statusEl)statusEl.textContent=`研究币池增量追平状态：${formatResearchRefreshStatus(payload)}`;
+  return payload;
+}catch(err){
+  if(statusEl)statusEl.textContent=`研究币池增量追平状态读取失败: ${err.message}`;
+  if(!silent)notify(`研究币池增量追平状态读取失败: ${err.message}`,true);
+  throw err;
+}
+}
+async function triggerResearchUniverseRefresh(btn){
+const downloadOut=getDownloadOutputEl();
+const statusEl=getResearchRefreshStatusEl();
+const prevText=btn?btn.textContent:'';
+try{
+  if(btn){btn.disabled=true;btn.textContent='启动中...';}
+  if(statusEl)statusEl.textContent='研究币池增量追平状态：正在启动...';
+  const payload=await api('/data/research/refresh/start',{method:'POST',timeoutMs:90000});
+  if(downloadOut)downloadOut.textContent=formatResearchRefreshStatus(payload,{multiline:true});
+  if(statusEl)statusEl.textContent=`研究币池增量追平状态：${formatResearchRefreshStatus(payload)}`;
+  notify(payload?.message||'研究币池增量追平已触发');
+  setTimeout(()=>{loadResearchUniverseRefreshStatus({silent:true}).catch(()=>{});},3000);
+  return payload;
+}catch(err){
+  if(downloadOut)downloadOut.textContent=`研究币池增量追平启动失败: ${err.message}`;
+  if(statusEl)statusEl.textContent=`研究币池增量追平状态：启动失败 - ${err.message}`;
+  notify(`研究币池增量追平启动失败: ${err.message}`,true);
+  throw err;
+}finally{
+  if(btn){btn.disabled=false;btn.textContent=prevText;}
+}
+}
 function parseDownloadBatchSymbols(raw,fallback=''){
 const text=String(raw||'').trim();
 const source=text||String(fallback||'').trim();
@@ -2283,6 +2349,7 @@ if(notesEl){
   const lines=[
     `生成时间: ${data?.generated_at?fmtDateTime(data.generated_at):'--'}`,
     `说明: 非秒级且数据量较小的数据集会做精确缺口扫描；其余使用快速估算。秒级快扫在覆盖率过低时会抑制缺口告警，避免误报。`,
+    `按钮说明: 刷新体检=重扫并重新生成问题清单；批量补全问题项=对缺口或重复时间轴做本地修复；批量重拉损坏项=对损坏或明显异常的数据重新回源下载。`,
     `重复目录: ${duplicates.length?duplicates.map(item=>`${item.exchange} ${item.symbol} -> ${item.directories.join(', ')}`).join(' | '):'无'}`,
     `最近备份: ${backups.length?backups.map(item=>`${item.batch} (${Number(item.symbol_dirs||0)}个symbol目录)`).join(' | '):'无'}`,
   ];
@@ -2627,6 +2694,7 @@ if(d)d.onsubmit=async e=>{
     const r=await api('/data/download/batch',{method:'POST',body:JSON.stringify(payload),timeoutMs:30000});
     if(downloadOut)downloadOut.textContent=[
       `批量下载任务已创建`,
+      `Batch: ${r?.batch_id||'-'}`,
       `交易所: ${ex}`,
       `周期: ${tf}`,
       `币种数: ${batchSymbols.length}`,
@@ -2660,6 +2728,8 @@ if(fillResearchBtn)fillResearchBtn.onclick=async()=>{
     notify(`填入研究币池失败: ${err.message}`,true);
   }
 };
+const refreshResearchBtn=document.getElementById('btn-download-refresh-research');
+if(refreshResearchBtn)refreshResearchBtn.onclick=()=>triggerResearchUniverseRefresh(refreshResearchBtn);
   const clearBatchBtn=document.getElementById('btn-download-clear-batch');
 if(clearBatchBtn)clearBatchBtn.onclick=()=>{
   const textarea=document.getElementById('download-symbols-batch');
@@ -2761,6 +2831,7 @@ const dataSymbol=document.getElementById('data-symbol');
 if(dataSymbol)dataSymbol.onchange=()=>{resetKlineChartForSwitch('正在切换币种并加载新行情...');scheduleDataChartReload(120);};
 const dataTimeframe=document.getElementById('data-timeframe');
 if(dataTimeframe)dataTimeframe.onchange=()=>{resetKlineChartForSwitch('正在切换周期并加载新行情...');scheduleDataChartReload(120);};
+loadResearchUniverseRefreshStatus({silent:true}).catch(()=>{});
 setInterval(()=>{if(isDataTabActive()&&!marketDataState.isLoading&&!(marketDataState.bars||[]).length){loadKlinesByForm().catch(()=>{});}},7000);
 }
 
@@ -5177,7 +5248,7 @@ return;
 const corrKeys=(data?.factors||[]);const topRows=getFilteredSortedFactorRows(data).slice(0,20);
 const lines=[
 `# 因子库报告`,
-`生成时间: ${new Date().toLocaleString('zh-CN',{hour12:false})}`,
+`生成时间: ${fmtDateTime(new Date())}`,
 `交易所/周期: ${data.exchange||'-'} / ${data.timeframe||'-'}`,
 `覆盖币种: ${(data.symbols_used||[]).length}`,
 `样本点: ${Number(data.points||0)}`,
@@ -5374,7 +5445,7 @@ const okCount=entries.filter(([,v])=>v?.ok!==false).length,totalCount=entries.le
 if(summary){
 summary.innerHTML=`
 <div class="list-item"><span>模块状态</span><span>${okCount}/${totalCount} 正常</span></div>
-<div class="list-item"><span>更新时间</span><span>${new Date(data.timestamp||Date.now()).toLocaleString('zh-CN')}</span></div>
+<div class="list-item"><span>更新时间</span><span>${fmtDateTime(data.timestamp||Date.now())}</span></div>
 <div class="list-item"><span>总览来源</span><span>${data.all_ok!==undefined?'系统聚合':'模块回落聚合'}</span></div>
 <div class="list-item"><span>异常模块</span><span>${entries.filter(([,v])=>v?.ok===false).map(([k])=>analyticsModuleNameZh(k)).join('、')||'无'}</span></div>`;
 }
@@ -5654,8 +5725,8 @@ if(m3)m3.onclick=()=>loadOnchainOverviewPanel({refresh:true,quiet:false,showLoad
 renderResearchConclusionCard();
 }
 
-function formatReplayText(d){if(!d)return'无回放数据';const now=new Date().toLocaleString('zh-CN');const first=(d.data&&d.data.length)?new Date(d.data[0].timestamp).toLocaleString('zh-CN'):'-';const last=(d.data&&d.data.length)?new Date(d.data[d.data.length-1].timestamp).toLocaleString('zh-CN'):'-';return[`更新时间: ${now}`,`回放ID: ${d.replay_id||replaySessionId||'-'}`,`进度: ${Number(d.cursor||0)} / ${Number(d.total||0)} ${d.done?'(已结束)':'(进行中)'}`,`本次推进K线: ${(d.data||[]).length}`,`窗口范围: ${first} -> ${last}`].join('\n');}
-function bindDataAdvanced(){const rout=document.getElementById('replay-output');const rs=document.getElementById('btn-replay-start'),rn=document.getElementById('btn-replay-next'),rp=document.getElementById('btn-replay-stop');if(rs)rs.onclick=async()=>{try{const ex=document.getElementById('data-exchange').value,s=document.getElementById('data-symbol').value,tf=document.getElementById('data-timeframe').value,st=document.getElementById('replay-start-time').value,et=document.getElementById('replay-end-time').value,w=Number(document.getElementById('replay-window').value||300);const payload={exchange:ex,symbol:s,timeframe:tf,start_time:st?new Date(st).toISOString():null,end_time:et?new Date(et).toISOString():null,window:w,speed:1};const d=await api('/data/replay/start',{method:'POST',body:JSON.stringify(payload)});replaySessionId=d.replay_id||'';if(rout)rout.textContent=formatReplayText({...d,data:d.data||[]});notify('回放会话已启动');}catch(e){if(rout)rout.textContent=`回放启动失败: ${e.message}`;}};if(rn)rn.onclick=async()=>{try{if(!replaySessionId){notify('请先启动回放',true);return;}const steps=Number(document.getElementById('replay-steps').value||60);const d=await api(`/data/replay/${encodeURIComponent(replaySessionId)}/next?steps=${steps}`);if(rout)rout.textContent=formatReplayText({...d,replay_id:replaySessionId});if(d.data?.length){marketDataState.bars=cropBars(mergeBars([],d.data));renderKlineChart(false);} }catch(e){if(rout)rout.textContent=`回放推进失败: ${e.message}`;}};if(rp)rp.onclick=async()=>{try{if(!replaySessionId)return;const d=await api(`/data/replay/${encodeURIComponent(replaySessionId)}`,{method:'DELETE'});if(rout)rout.textContent=`回放已停止\n会话: ${d.replay_id||replaySessionId}\n时间: ${new Date().toLocaleString('zh-CN')}`;replaySessionId='';notify('回放已停止');}catch(e){if(rout)rout.textContent=`回放停止失败: ${e.message}`;}};}
+function formatReplayText(d){if(!d)return'无回放数据';const now=fmtDateTime(new Date());const first=(d.data&&d.data.length)?fmtDateTime(d.data[0].timestamp):'-';const last=(d.data&&d.data.length)?fmtDateTime(d.data[d.data.length-1].timestamp):'-';return[`更新时间: ${now}`,`回放ID: ${d.replay_id||replaySessionId||'-'}`,`进度: ${Number(d.cursor||0)} / ${Number(d.total||0)} ${d.done?'(已结束)':'(进行中)'}`,`本次推进K线: ${(d.data||[]).length}`,`窗口范围: ${first} -> ${last}`].join('\n');}
+function bindDataAdvanced(){const rout=document.getElementById('replay-output');const rs=document.getElementById('btn-replay-start'),rn=document.getElementById('btn-replay-next'),rp=document.getElementById('btn-replay-stop');if(rs)rs.onclick=async()=>{try{const ex=document.getElementById('data-exchange').value,s=document.getElementById('data-symbol').value,tf=document.getElementById('data-timeframe').value,st=document.getElementById('replay-start-time').value,et=document.getElementById('replay-end-time').value,w=Number(document.getElementById('replay-window').value||300);const payload={exchange:ex,symbol:s,timeframe:tf,start_time:st?new Date(st).toISOString():null,end_time:et?new Date(et).toISOString():null,window:w,speed:1};const d=await api('/data/replay/start',{method:'POST',body:JSON.stringify(payload)});replaySessionId=d.replay_id||'';if(rout)rout.textContent=formatReplayText({...d,data:d.data||[]});notify('回放会话已启动');}catch(e){if(rout)rout.textContent=`回放启动失败: ${e.message}`;}};if(rn)rn.onclick=async()=>{try{if(!replaySessionId){notify('请先启动回放',true);return;}const steps=Number(document.getElementById('replay-steps').value||60);const d=await api(`/data/replay/${encodeURIComponent(replaySessionId)}/next?steps=${steps}`);if(rout)rout.textContent=formatReplayText({...d,replay_id:replaySessionId});if(d.data?.length){marketDataState.bars=cropBars(mergeBars([],d.data));renderKlineChart(false);} }catch(e){if(rout)rout.textContent=`回放推进失败: ${e.message}`;}};if(rp)rp.onclick=async()=>{try{if(!replaySessionId)return;const d=await api(`/data/replay/${encodeURIComponent(replaySessionId)}`,{method:'DELETE'});if(rout)rout.textContent=`回放已停止\n会话: ${d.replay_id||replaySessionId}\n时间: ${fmtDateTime(new Date())}`;replaySessionId='';notify('回放已停止');}catch(e){if(rout)rout.textContent=`回放停止失败: ${e.message}`;}};}
 
 function bindBacktest(){
 initBacktestComparePicker();

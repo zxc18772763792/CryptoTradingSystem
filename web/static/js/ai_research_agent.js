@@ -2,7 +2,7 @@
   'use strict';
 
   const POLL_MS = 30000;
-  const AI_UI_TIMEZONE = 'Asia/Singapore';
+  const AI_UI_TIMEZONE = (typeof window !== 'undefined' && window.CTS_UI_TIMEZONE) || 'Asia/Shanghai';
   const SYMBOL_SCAN_MAX_AGE_SEC = 10 * 60;
   const AUTO_RANKING_REFRESH_COOLDOWN_MS = 45000;
   const AGENT_STATUS_API = '/ai/autonomous-agent/status';
@@ -713,72 +713,6 @@
     const mode = String(cfg.symbol_mode || 'manual').toLowerCase();
     if (!scan) {
       summaryEl.textContent = mode === 'auto'
-        ? '还没有自动选币结果，点“刷新排行榜”即可看当前前十。'
-        : '当前是固定币种模式，不会在币池里轮换。';
-      listEl.innerHTML = mode === 'auto'
-        ? '<div class="ai-agent-empty">等待生成排行榜...</div>'
-        : '<div class="ai-agent-empty">固定币种模式下只会盯住单一 symbol。</div>';
-      return;
-    }
-
-    const selected = String(scan.selected_symbol || cfg.symbol || '--');
-    const selectionReason = String(scan.selection_reason || '--');
-    const count = Number(scan.candidate_count || 0);
-    const scanMeta = buildScanMeta(scan, meta || scan.scan_meta);
-    const freshnessText = scanMeta.generated_at
-      ? `锛屾壂鎻忔椂闂?${fmtAgentTs(scanMeta.generated_at)}${scanMeta.age_sec != null ? `锛屽凡杩?${formatAgeSeconds(scanMeta.age_sec)}` : ''}`
-      : '';
-    summaryEl.textContent = `模式：${symbolModeLabel(scan.symbol_mode || cfg.symbol_mode)}，当前选中 ${selected}，候选 ${count} 个，原因：${symbolSelectionReasonText(selectionReason)}`;
-
-    summaryEl.textContent += freshnessText;
-
-    normalizeElementText(summaryEl);
-    const rows = Array.isArray(scan.top_candidates) ? scan.top_candidates : [];
-    if (!rows.length) {
-      if (scanMeta.pending) {
-        listEl.innerHTML = '<div class="ai-agent-empty">最新榜单正在预热中，页面会自动刷新。</div>';
-        return;
-      }
-      listEl.innerHTML = '<div class="ai-agent-empty">这次没有拿到可用的选币结果。</div>';
-      return;
-    }
-
-    listEl.innerHTML = rows.map((row) => {
-      const tradableText = row.tradable_now ? '可直接交易' : (row.blocked_by_risk ? '被风险拦截' : '暂不达标');
-      const tone = row.tradable_now ? 'is-good' : (row.blocked_by_risk ? 'is-warn' : 'is-info');
-      const holdingText = row.has_position
-        ? `持仓中 / ${row.position_side === 'short' ? '空头' : row.position_side === 'long' ? '多头' : row.position_side || '--'}`
-        : '';
-      const dataFreshness = row.market_data_last_bar_at
-        ? `鏈€鍚巄bar ${fmtAgentTs(row.market_data_last_bar_at)}${row.market_data_age_sec != null ? ` / 宸茶繃 ${formatAgeSeconds(row.market_data_age_sec)}` : ''}`
-        : '';
-      return `
-        <div class="ai-agent-ranking-row ${row.selected ? 'is-selected' : ''}">
-          <div class="ai-agent-ranking-head">
-            <span class="ai-agent-ranking-rank">#${esc(row.rank || '--')}</span>
-            <span class="ai-agent-ranking-symbol">${esc(row.symbol || '--')}</span>
-            <span class="ai-agent-ranking-score">${esc(formatRatio(row.score, 3))}</span>
-          </div>
-          <div class="ai-agent-ranking-meta">
-            <span>${esc(String(row.direction || '--'))} / ${esc(formatRatio(row.confidence, 3))}</span>
-            <span class="ai-agent-mini-tag ${tone}">${esc(tradableText)}</span>
-            ${holdingText ? `<span class="ai-agent-mini-tag is-warn">${esc(holdingText)}</span>` : ''}
-          </div>
-          <div class="ai-agent-ranking-detail">${esc(row.summary || '--')}</div>
-          ${dataFreshness ? `<div class="ai-agent-ranking-detail">${esc(dataFreshness)}</div>` : ''}
-        </div>
-      `;
-    }).join('');
-  }
-
-  function renderAgentRanking(scan = null, cfg = {}, meta = null) {
-    const summaryEl = document.getElementById('ai-agent-ranking-summary');
-    const listEl = document.getElementById('ai-agent-ranking');
-    if (!summaryEl || !listEl) return;
-
-    const mode = String(cfg.symbol_mode || 'manual').toLowerCase();
-    if (!scan) {
-      summaryEl.textContent = mode === 'auto'
         ? '还没有自动选币结果，点“刷新排行榜”即可查看当前前十。'
         : '当前是固定币种模式，不会在币池里轮换。';
       listEl.innerHTML = mode === 'auto'
@@ -1397,14 +1331,14 @@
       if (response?.busy) {
         const manualRun = response?.request || response?.status?.manual_run || {};
         const stateText = compactText(manualRun?.state || response?.reason || 'running', 40);
-        notify(`宸叉湁涓€杞湪杩愯锛屾墜鍔ㄨЕ鍙戝凡鎺掗槦 / ${stateText}`);
+        notify(`已有一轮在运行，手动触发已排队 / ${stateText}`);
         await loadAgentStatus({ includeDetails: isAgentTabActive(), notifyOnError: true });
         return;
       }
       if (response?.accepted) {
         const manualRun = response?.request || response?.status?.manual_run || {};
-        const stateText = manualRun?.state === 'queued' ? '宸叉帓闃?' : '宸插湪鍚庡彴鍚姩';
-        notify(`鍗曟璇曡窇宸茶Е鍙戯紝${stateText}锛屽彲鍦ㄧ姸鎬佷笌鏃ュ織閲屾煡鐪嬬粨鏋?`);
+        const stateText = manualRun?.state === 'queued' ? '已排队' : '开始执行';
+        notify(`单次试跑已触发，${stateText}，可在状态与日志里查看结果`);
         await loadAgentStatus({ includeDetails: isAgentTabActive(), notifyOnError: true });
         return;
       }

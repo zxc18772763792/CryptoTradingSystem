@@ -1,5 +1,6 @@
 (function () {
     const API = "/api";
+    const UI_TIMEZONE = (typeof window !== "undefined" && window.CTS_UI_TIMEZONE) || "Asia/Shanghai";
     const state = { timer: null };
 
     const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
@@ -20,7 +21,7 @@
 
     function fmtTs(value) {
         const date = parseTs(value);
-        return date ? date.toLocaleString("zh-CN", { hour12: false }) : "--";
+        return date ? date.toLocaleString("zh-CN", { hour12: false, timeZone: UI_TIMEZONE }) : "--";
     }
 
     async function api(path, options = {}) {

@@ -2,6 +2,7 @@
     const API = "/api/news";
     const SUMMARY_STALE_MS = 90 * 1000;
     const SUMMARY_LIMIT = 24;
+    const UI_TIMEZONE = (typeof window !== "undefined" && window.CTS_UI_TIMEZONE) || "Asia/Shanghai";
     const state = {
         timer: null,
         bucketRenderTimer: null,
@@ -35,7 +36,7 @@
 
     function fmtTs(v) {
         const d = parseTs(v);
-        return d ? d.toLocaleString("zh-CN", { hour12: false }) : "--";
+        return d ? d.toLocaleString("zh-CN", { hour12: false, timeZone: UI_TIMEZONE }) : "--";
     }
 
     function isStandalonePage() {

@@ -1,5 +1,6 @@
 (function () {
     const API_BASE = "/api/news";
+    const UI_TIMEZONE = (typeof window !== "undefined" && window.CTS_UI_TIMEZONE) || "Asia/Shanghai";
     const state = {
         timer: null,
         ws: null,
@@ -36,7 +37,7 @@
 
     function fmtTs(value) {
         const d = parseTs(value);
-        return d ? d.toLocaleString("zh-CN", { hour12: false }) : "--";
+        return d ? d.toLocaleString("zh-CN", { hour12: false, timeZone: UI_TIMEZONE }) : "--";
     }
 
     function sentimentClass(sentiment) {
@@ -66,7 +67,7 @@
     function setNowTime() {
         const el = document.getElementById("news-now-time");
         if (!el) return;
-        el.textContent = new Date().toLocaleString("zh-CN", { hour12: false });
+        el.textContent = new Date().toLocaleString("zh-CN", { hour12: false, timeZone: UI_TIMEZONE });
     }
 
     function setHealth(ok, text) {

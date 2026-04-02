@@ -14,8 +14,8 @@
   const AGENT_STOP_API = '/ai/autonomous-agent/stop';
   const AGENT_RUN_ONCE_API = '/ai/autonomous-agent/run-once';
   const FLOW_HINT_QUICK_PATH = '当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。也可以直接点击“⚡ one-click 自动研究+部署”。';
-  const AI_UI_TIMEZONE = 'Asia/Singapore';
-  const AI_UI_TIMEZONE_LABEL = '新加坡时间 (SGT)';
+  const AI_UI_TIMEZONE = (typeof window !== 'undefined' && window.CTS_UI_TIMEZONE) || 'Asia/Shanghai';
+  const AI_UI_TIMEZONE_LABEL = (typeof window !== 'undefined' && window.CTS_UI_TIMEZONE_LABEL) || '上海时间 (UTC+8)';
   const AI_SHARED_POLL_TAB = 'ai-research';
   const AI_SHARED_POLL_GROUP_FALLBACK = 'ai';
   const AI_SHARED_POLL_SYNC_MS = 5000;

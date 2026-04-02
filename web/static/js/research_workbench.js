@@ -14,6 +14,7 @@
     lastOverviewRefreshAt: 0,
   };
   const WORKBENCH_AUTO_REFRESH_MS = 30 * 60 * 1000;
+  const UI_TIMEZONE = (typeof window !== 'undefined' && window.CTS_UI_TIMEZONE) || 'Asia/Shanghai';
 
   const MODULE_NAMES = ['market_state', 'factors', 'cross_asset', 'onchain', 'discipline'];
   const MODULE_LABELS = {
@@ -44,7 +45,7 @@
 
   function fmtTime(value) {
     try {
-      return new Date(value).toLocaleString('zh-CN', { hour12: false });
+      return new Date(value).toLocaleString('zh-CN', { hour12: false, timeZone: UI_TIMEZONE });
     } catch {
       return String(value || '-');
     }
@@ -457,7 +458,7 @@
       const st = mod?.status || 'idle';
       const color = MODULE_STATUS_COLORS[st] || '#6b7fa0';
       const t = state.moduleTimes?.[name];
-      const timeStr = t ? new Date(t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
+      const timeStr = t ? new Date(t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', timeZone: UI_TIMEZONE }) : '';
       const label = MODULE_LABELS[name] || name;
       const title = `${label}：${STATUS_LABELS[st] || st}${timeStr ? ' · ' + timeStr : ''}`;
       return `<span class="module-chip" style="color:${color};border-color:${color}40;" title="${escSafe(title)}"><span class="chip-dot" style="background:${color};"></span>${escSafe(label.slice(0, 2))}${timeStr ? `<span class="chip-time">${escSafe(timeStr)}</span>` : ''}</span>`;
