@@ -230,7 +230,7 @@ def test_autonomous_agent_codex_uses_responses_api(monkeypatch, tmp_path):
 
     assert result["action"] == "buy"
     assert capture["url"] == "https://example.test/v1/responses"
-    assert capture["json"]["text"]["format"]["type"] == "json_object"
+    assert "text" not in capture["json"]
     assert capture["json"]["max_output_tokens"] == 256
 
 
@@ -505,8 +505,8 @@ def test_news_legacy_glm_provider_is_normalized_to_openai(monkeypatch):
     assert async_module._llm_provider(legacy_cfg) == "openai"
     assert sync_module._llm_model(legacy_cfg) == "gpt-5.1-codex-mini"
     assert async_module._llm_model(legacy_cfg) == "gpt-5.1-codex-mini"
-    assert sync_module._llm_base_url(legacy_cfg) == "https://vpsairobot.com/v1"
-    assert async_module._llm_base_url(legacy_cfg) == "https://vpsairobot.com/v1"
+    assert sync_module._llm_base_url(legacy_cfg) == "https://sub.a-j.app/v1"
+    assert async_module._llm_base_url(legacy_cfg) == "https://sub.a-j.app/v1"
 
 
 def test_news_sync_summary_uses_openai_mini_source(monkeypatch):

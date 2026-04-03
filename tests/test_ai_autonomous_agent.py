@@ -2323,3 +2323,177 @@ def test_agent_learning_guard_no_longer_requires_research_for_fresh_entry(monkey
     assert result["decision"]["action"] == "buy"
     assert result["execution"]["submitted"] is True
     assert submit_mock.await_count == 1
+
+
+def test_build_prompt_compacts_runtime_context(tmp_path: Path):
+    from core.ai.autonomous_agent import AutonomousTradingAgent
+
+    agent = AutonomousTradingAgent(cache_root=tmp_path)
+    context_payload = {
+        "exchange": "binance",
+        "symbol": "ETH/USDT",
+        "timeframe": "15m",
+        "trading_mode": "live",
+        "price": 2012.5,
+        "bars": 240,
+        "returns": {"r_15m": 0.001, "r_1h": 0.012, "r_4h": 0.021, "r_24h": 0.055},
+        "realized_vol_annualized": 0.42,
+        "market_structure": {
+            "available": True,
+            "last_bar_at": "2026-04-03T18:30:00",
+            "trend": {
+                "label": "uptrend",
+                "ema_gap_pct": 0.004,
+                "close_vs_ema_slow_pct": 0.009,
+                "ema_fast": 2001.0,
+                "ema_slow": 1993.0,
+            },
+            "microstructure": {
+                "atr_pct": 0.0042,
+                "realized_vol": 0.0021,
+                "spread_proxy": 0.0014,
+            },
+            "volume": {"ratio_20": 1.3, "zscore_20": 1.1, "last": 999999.0},
+            "range": {"position_pct": 0.84, "high": 2020.0, "low": 1900.0},
+        },
+        "aggregated_signal": {
+            "direction": "LONG",
+            "confidence": 0.71,
+            "blocked_by_risk": False,
+            "risk_reason": "",
+            "components": {
+                "llm": {
+                    "direction": "LONG",
+                    "confidence": 0.75,
+                    "effective_weight": 0.4,
+                    "available": True,
+                    "status": "active",
+                    "reason": "macro_tailwind",
+                    "weight": 0.4,
+                },
+                "factor": {
+                    "direction": "LONG",
+                    "confidence": 0.66,
+                    "effective_weight": 0.25,
+                    "available": True,
+                    "status": "active",
+                    "reason": "",
+                },
+            },
+        },
+        "event_summary": {
+            "available": True,
+            "events_count": 5,
+            "source_diversity": 3,
+            "dominant_sentiment": "positive",
+            "dominant_sentiment_ratio": 0.66,
+            "net_sentiment": 0.42,
+            "news_alpha_proxy": 0.38,
+            "event_concentration": 0.51,
+            "top_event_types": ["macro", "etf", "institution", "listing", "hack", "extra"],
+            "top_sources": ["jin10", "rss", "gdelt", "newsapi", "extra"],
+            "top_events": [
+                {
+                    "title": "ETF inflow remains strong",
+                    "sentiment": 1,
+                    "impact_score": 0.82,
+                    "event_type": "etf",
+                    "source": "rss",
+                    "body": "very long body that should not survive prompt compaction",
+                }
+            ],
+        },
+        "position": {
+            "side": "long",
+            "quantity": 0.8,
+            "entry_price": 1988.0,
+            "current_price": 2012.5,
+            "unrealized_pnl": 19.6,
+            "unrealized_pnl_pct": 0.012,
+            "source": "exchange_live",
+            "position_notional": 1610.0,
+            "same_direction_exposure_ratio": 0.18,
+            "same_direction_exposure_limit_ratio": 0.3,
+            "position_cap_notional": 3000.0,
+        },
+        "account_risk": {
+            "allow_live": True,
+            "execution_permitted_now": True,
+            "min_confidence": 0.58,
+            "default_stop_loss_pct": 0.02,
+            "default_take_profit_pct": 0.04,
+            "account_equity": 5000.0,
+            "position_cap_notional": 2500.0,
+            "has_position": True,
+            "current_position_side": "long",
+            "current_position_notional": 1610.0,
+            "same_direction_limit_ratio": 0.3,
+            "same_direction_exposure_ratio": 0.18,
+            "same_direction_remaining_notional": 890.0,
+            "can_add_same_direction": True,
+        },
+        "execution_cost": {
+            "fee_bps": 4.0,
+            "estimated_slippage_bps": 12.0,
+            "estimated_one_way_cost_bps": 16.0,
+            "estimated_round_trip_cost_bps": 32.0,
+            "notional_reference": 1000.0,
+            "min_strategy_order_usd": 100.0,
+            "notes": ["large verbose explanation that should not stay in compact prompt"],
+        },
+        "research_context": {
+            "available": False,
+            "candidate_count": 0,
+            "selection_reason": "agent_research_decoupled",
+            "references": [{"id": "abc", "title": "should not remain"}],
+        },
+        "profile": {
+            "decision_count": 1200,
+            "executed_count": 18,
+            "action_counts": {"hold": 1000},
+            "avg_confidence": 0.4,
+        },
+        "learning_memory": {
+            "summary": {
+                "recent_model_issue_count": 17,
+                "recent_latency_avg_ms": 21535.0,
+                "current_open_position_count": 1,
+            },
+            "adaptive_risk": {
+                "effective_min_confidence": 0.61,
+                "same_direction_max_exposure_ratio": 0.3,
+                "entry_size_scale": 0.7,
+                "avoid_new_entries_during_service_instability": True,
+                "force_close_on_data_outage_losing_position": False,
+            },
+            "blocked_symbol_sides": ["BTC/USDT:long", "ETH/USDT:short"],
+            "guardrails": ["fresh entry min confidence >= 0.61", "avoid fresh entries while model service is unstable"],
+            "lessons": ["recent model outages were frequent"],
+        },
+    }
+    cfg = {
+        "min_confidence": 0.58,
+        "effective_min_confidence": 0.61,
+        "default_stop_loss_pct": 0.02,
+        "default_take_profit_pct": 0.04,
+        "mode": "execute",
+        "allow_live": True,
+        "same_direction_max_exposure_ratio": 0.3,
+        "entry_size_scale": 0.7,
+    }
+
+    _, user_prompt = agent._build_prompt(cfg, context_payload)
+    parsed = json.loads(user_prompt)
+    compact_input = parsed["input"]
+
+    assert compact_input["scope"] == "compact_runtime_v1"
+    assert compact_input["aggregated_signal"]["direction"] == "LONG"
+    assert compact_input["account_risk"]["min_confidence"] == 0.58
+    assert compact_input["learning_memory"]["adaptive_risk"]["effective_min_confidence"] == 0.61
+    assert compact_input["event_summary"]["top_event_types"] == ["macro", "etf", "institution", "listing", "hack"]
+    assert compact_input["event_summary"]["top_events"][0]["title"] == "ETF inflow remains strong"
+    assert "body" not in compact_input["event_summary"]["top_events"][0]
+    assert "profile" not in compact_input
+    assert "references" not in compact_input["research_context"]
+    assert "notes" not in compact_input["execution_cost"]
+    assert len(json.dumps(compact_input, ensure_ascii=False)) < len(json.dumps(context_payload, ensure_ascii=False))

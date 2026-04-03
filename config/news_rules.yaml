@@ -76,7 +76,8 @@
 llm:
   provider: openai
   model: gpt-5.1-codex-mini
-  base_url: https://vpsairobot.com/v1
+  base_url: https://sub.a-j.app/v1
+  backup_base_url: https://vpsairobot.com/v1
   timeout_sec: 90
   batch_size: 3
   summarize_limit: 40

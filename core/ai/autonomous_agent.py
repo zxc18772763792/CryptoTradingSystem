@@ -48,7 +48,7 @@ from core.utils.openai_responses import (
 )
 
 
-_DEFAULT_OPENAI_BASE_URL = "https://vpsairobot.com/v1"
+_DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
 _DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _DEFAULT_GLM_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 
@@ -1425,7 +1425,11 @@ class AutonomousTradingAgent:
                 ],
                 max_output_tokens=int(max_tokens),
                 temperature=float(temperature),
-                text_format="json_object",
+                # Some OpenAI-compatible relays return intermittent 502s for
+                # Responses API `text.format=json_object` payloads even when
+                # the same prompt succeeds without that field. We keep strict
+                # JSON enforcement in the prompt and parse locally instead.
+                text_format=None,
                 stream=False,
             )
             if str(system_prompt or "").strip():
@@ -2674,11 +2678,233 @@ class AutonomousTradingAgent:
             "trading_mode": execution_engine.get_trading_mode(),
         }, market_data
 
+    def _compact_prompt_context(self, context_payload: Dict[str, Any]) -> Dict[str, Any]:
+        def _float_or_default(value: Any, default: float = 0.0) -> float:
+            with contextlib.suppress(Exception):
+                return float(value)
+            return float(default)
+
+        def _compact_value(value: Any) -> Any:
+            if isinstance(value, dict):
+                compacted: Dict[str, Any] = {}
+                for key, item in value.items():
+                    child = _compact_value(item)
+                    if child is None:
+                        continue
+                    if isinstance(child, (dict, list)) and not child:
+                        continue
+                    if isinstance(child, str) and not child.strip():
+                        continue
+                    compacted[str(key)] = child
+                return compacted
+            if isinstance(value, list):
+                compacted_list = []
+                for item in value:
+                    child = _compact_value(item)
+                    if child is None:
+                        continue
+                    if isinstance(child, (dict, list)) and not child:
+                        continue
+                    if isinstance(child, str) and not child.strip():
+                        continue
+                    compacted_list.append(child)
+                return compacted_list
+            return value
+
+        def _slice_text_list(value: Any, limit: int) -> List[str]:
+            items: List[str] = []
+            if isinstance(value, list):
+                for item in value[: max(0, int(limit))]:
+                    text = str(item or "").strip()
+                    if text:
+                        items.append(text[:160])
+            return items
+
+        def _slice_dict_list(value: Any, limit: int) -> List[Dict[str, Any]]:
+            items: List[Dict[str, Any]] = []
+            if isinstance(value, list):
+                for item in value[: max(0, int(limit))]:
+                    if not isinstance(item, dict):
+                        continue
+                    items.append(
+                        {
+                            "title": str(item.get("title") or "")[:160],
+                            "sentiment": int(item.get("sentiment") or 0),
+                            "impact_score": _float_or_default(item.get("impact_score"), 0.0),
+                            "event_type": str(item.get("event_type") or "")[:48],
+                            "source": str(item.get("source") or "")[:64],
+                        }
+                    )
+            return items
+
+        market_structure = dict(context_payload.get("market_structure") or {})
+        trend = dict(market_structure.get("trend") or {})
+        microstructure = dict(market_structure.get("microstructure") or {})
+        volume = dict(market_structure.get("volume") or {})
+        range_info = dict(market_structure.get("range") or {})
+
+        aggregated_signal = dict(context_payload.get("aggregated_signal") or {})
+        components = dict(aggregated_signal.get("components") or {})
+        compact_components: Dict[str, Any] = {}
+        for name, payload in components.items():
+            if not isinstance(payload, dict):
+                continue
+            compact_components[str(name)] = _compact_value(
+                {
+                    "direction": payload.get("direction"),
+                    "confidence": _float_or_default(payload.get("confidence"), 0.0),
+                    "effective_weight": _float_or_default(payload.get("effective_weight"), 0.0),
+                    "available": bool(payload.get("available")),
+                    "status": payload.get("status"),
+                    "reason": payload.get("reason"),
+                }
+            )
+
+        event_summary = dict(context_payload.get("event_summary") or {})
+        position = dict(context_payload.get("position") or {})
+        account_risk = dict(context_payload.get("account_risk") or {})
+        execution_cost = dict(context_payload.get("execution_cost") or {})
+        research_context = dict(context_payload.get("research_context") or {})
+        learning_memory = dict(context_payload.get("learning_memory") or {})
+        adaptive_risk = dict(learning_memory.get("adaptive_risk") or {})
+        summary = dict(learning_memory.get("summary") or {})
+
+        compact_context = {
+            "scope": "compact_runtime_v1",
+            "exchange": context_payload.get("exchange"),
+            "symbol": context_payload.get("symbol"),
+            "timeframe": context_payload.get("timeframe"),
+            "trading_mode": context_payload.get("trading_mode"),
+            "price": _float_or_default(context_payload.get("price"), 0.0),
+            "bars": int(context_payload.get("bars") or 0),
+            "returns": _compact_value(context_payload.get("returns") or {}),
+            "realized_vol_annualized": _float_or_default(context_payload.get("realized_vol_annualized"), 0.0),
+            "market_structure": _compact_value(
+                {
+                    "available": bool(market_structure.get("available")),
+                    "last_bar_at": market_structure.get("last_bar_at"),
+                    "trend": {
+                        "label": trend.get("label"),
+                        "ema_gap_pct": _float_or_default(trend.get("ema_gap_pct"), 0.0),
+                        "close_vs_ema_slow_pct": _float_or_default(trend.get("close_vs_ema_slow_pct"), 0.0),
+                    },
+                    "microstructure": {
+                        "atr_pct": _float_or_default(microstructure.get("atr_pct"), 0.0),
+                        "realized_vol": _float_or_default(microstructure.get("realized_vol"), 0.0),
+                        "spread_proxy": _float_or_default(microstructure.get("spread_proxy"), 0.0),
+                    },
+                    "volume": {
+                        "ratio_20": _float_or_default(volume.get("ratio_20"), 0.0),
+                        "zscore_20": _float_or_default(volume.get("zscore_20"), 0.0),
+                    },
+                    "range": {
+                        "position_pct": _float_or_default(range_info.get("position_pct"), 0.0),
+                    },
+                }
+            ),
+            "aggregated_signal": _compact_value(
+                {
+                    "direction": aggregated_signal.get("direction"),
+                    "confidence": _float_or_default(aggregated_signal.get("confidence"), 0.0),
+                    "blocked_by_risk": bool(aggregated_signal.get("blocked_by_risk")),
+                    "risk_reason": aggregated_signal.get("risk_reason"),
+                    "components": compact_components,
+                }
+            ),
+            "event_summary": _compact_value(
+                {
+                    "available": bool(event_summary.get("available")),
+                    "events_count": int(event_summary.get("events_count") or 0),
+                    "source_diversity": int(event_summary.get("source_diversity") or 0),
+                    "dominant_sentiment": event_summary.get("dominant_sentiment"),
+                    "dominant_sentiment_ratio": _float_or_default(event_summary.get("dominant_sentiment_ratio"), 0.0),
+                    "net_sentiment": _float_or_default(event_summary.get("net_sentiment"), 0.0),
+                    "news_alpha_proxy": _float_or_default(event_summary.get("news_alpha_proxy"), 0.0),
+                    "event_concentration": _float_or_default(event_summary.get("event_concentration"), 0.0),
+                    "top_event_types": _slice_text_list(event_summary.get("top_event_types"), 5),
+                    "top_sources": _slice_text_list(event_summary.get("top_sources"), 5),
+                    "top_events": _slice_dict_list(event_summary.get("top_events"), 3),
+                }
+            ),
+            "position": _compact_value(
+                {
+                    "side": position.get("side"),
+                    "quantity": _float_or_default(position.get("quantity"), 0.0),
+                    "entry_price": _float_or_default(position.get("entry_price"), 0.0),
+                    "current_price": _float_or_default(position.get("current_price"), 0.0),
+                    "unrealized_pnl": _float_or_default(position.get("unrealized_pnl"), 0.0),
+                    "unrealized_pnl_pct": _float_or_default(position.get("unrealized_pnl_pct"), 0.0),
+                    "source": position.get("source"),
+                    "position_notional": _float_or_default(position.get("position_notional"), 0.0),
+                    "same_direction_exposure_ratio": _float_or_default(position.get("same_direction_exposure_ratio"), 0.0),
+                    "same_direction_exposure_limit_ratio": _float_or_default(position.get("same_direction_exposure_limit_ratio"), 0.0),
+                }
+            ),
+            "account_risk": _compact_value(
+                {
+                    "allow_live": bool(account_risk.get("allow_live")),
+                    "execution_permitted_now": bool(account_risk.get("execution_permitted_now")),
+                    "min_confidence": _float_or_default(account_risk.get("min_confidence"), 0.0),
+                    "default_stop_loss_pct": _float_or_default(account_risk.get("default_stop_loss_pct"), 0.0),
+                    "default_take_profit_pct": _float_or_default(account_risk.get("default_take_profit_pct"), 0.0),
+                    "account_equity": _float_or_default(account_risk.get("account_equity"), 0.0),
+                    "position_cap_notional": _float_or_default(account_risk.get("position_cap_notional"), 0.0),
+                    "has_position": bool(account_risk.get("has_position")),
+                    "current_position_side": account_risk.get("current_position_side"),
+                    "current_position_notional": _float_or_default(account_risk.get("current_position_notional"), 0.0),
+                    "same_direction_limit_ratio": _float_or_default(account_risk.get("same_direction_limit_ratio"), 0.0),
+                    "same_direction_exposure_ratio": _float_or_default(account_risk.get("same_direction_exposure_ratio"), 0.0),
+                    "same_direction_remaining_notional": _float_or_default(account_risk.get("same_direction_remaining_notional"), 0.0),
+                    "can_add_same_direction": bool(account_risk.get("can_add_same_direction")),
+                }
+            ),
+            "execution_cost": _compact_value(
+                {
+                    "fee_bps": _float_or_default(execution_cost.get("fee_bps"), 0.0),
+                    "estimated_slippage_bps": _float_or_default(execution_cost.get("estimated_slippage_bps"), 0.0),
+                    "estimated_one_way_cost_bps": _float_or_default(execution_cost.get("estimated_one_way_cost_bps"), 0.0),
+                    "estimated_round_trip_cost_bps": _float_or_default(execution_cost.get("estimated_round_trip_cost_bps"), 0.0),
+                    "notional_reference": _float_or_default(execution_cost.get("notional_reference"), 0.0),
+                    "min_strategy_order_usd": _float_or_default(execution_cost.get("min_strategy_order_usd"), 0.0),
+                }
+            ),
+            "research_context": _compact_value(
+                {
+                    "available": bool(research_context.get("available")),
+                    "candidate_count": int(research_context.get("candidate_count") or 0),
+                    "selection_reason": research_context.get("selection_reason"),
+                }
+            ),
+            "learning_memory": _compact_value(
+                {
+                    "adaptive_risk": {
+                        "effective_min_confidence": _float_or_default(adaptive_risk.get("effective_min_confidence"), 0.0),
+                        "same_direction_max_exposure_ratio": _float_or_default(adaptive_risk.get("same_direction_max_exposure_ratio"), 0.0),
+                        "entry_size_scale": _float_or_default(adaptive_risk.get("entry_size_scale"), 1.0),
+                        "avoid_new_entries_during_service_instability": bool(
+                            adaptive_risk.get("avoid_new_entries_during_service_instability")
+                        ),
+                        "force_close_on_data_outage_losing_position": bool(
+                            adaptive_risk.get("force_close_on_data_outage_losing_position")
+                        ),
+                    },
+                    "recent_model_issue_count": int(summary.get("recent_model_issue_count") or 0),
+                    "recent_latency_avg_ms": _float_or_default(summary.get("recent_latency_avg_ms"), 0.0),
+                    "current_open_position_count": int(summary.get("current_open_position_count") or 0),
+                    "blocked_symbol_sides": _slice_text_list(learning_memory.get("blocked_symbol_sides"), 6),
+                    "guardrails": _slice_text_list(learning_memory.get("guardrails"), 6),
+                    "lessons": _slice_text_list(learning_memory.get("lessons"), 4),
+                }
+            ),
+        }
+        return _compact_value(compact_context)
+
     def _build_prompt(self, cfg: Dict[str, Any], context_payload: Dict[str, Any]) -> Tuple[str, str]:
         system_prompt = (
             "You are an autonomous crypto trading agent. "
             "Return strict JSON only. Never output markdown."
         )
+        prompt_context = self._compact_prompt_context(context_payload)
         user_payload = {
             "task": "Decide the next single trading action for current market context.",
             "output_schema": {
@@ -2715,7 +2941,7 @@ class AutonomousTradingAgent:
                 "same_direction_max_exposure_ratio": cfg.get("same_direction_max_exposure_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO),
                 "entry_size_scale": cfg.get("entry_size_scale", 1.0),
             },
-            "input": context_payload,
+            "input": prompt_context,
         }
         return system_prompt, json.dumps(user_payload, ensure_ascii=False)
 
