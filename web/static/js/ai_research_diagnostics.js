@@ -100,7 +100,17 @@
 
     summaryEl.textContent = '正在检查新闻、宏观与微观数据...';
     try {
-      const [newsHealthRes, newsSymbolRes, newsGlobalRes, newsPullRes, newsWorkerRes, fundingDiagRes, microRes, communityRes, premiumRes] = await Promise.allSettled([
+      const [
+        newsHealthRes,
+        newsSymbolRes,
+        newsGlobalRes,
+        newsPullRes,
+        newsWorkerRes,
+        fundingDiagRes,
+        microRes,
+        communityRes,
+        premiumRes,
+      ] = await Promise.allSettled([
         rootApi('/news/health', { timeoutMs: 12000 }),
         rootApi(`/news/summary?symbol=${encodeURIComponent(newsSymbol)}&hours=24`, { timeoutMs: 12000 }),
         rootApi('/news/summary?hours=24', { timeoutMs: 12000 }),
@@ -148,15 +158,16 @@
       const basisPct = microData?.spot_futures_basis?.basis_pct;
       const whaleCount = Number(communityData?.whale_transfers?.count || 0);
       const announcementCount = Array.isArray(communityData?.announcements) ? communityData.announcements.length : 0;
+
       const issues = [];
       if (!rawCount && !feedCount) issues.push('新闻摘要为空');
       if (pendingNewsTasks > 0 && !Number(health?.sync_pull_llm)) issues.push(`LLM 队列积压 ${pendingNewsTasks} 条`);
       if (!fundingRows) issues.push('资金费率缓存为空，建议人工确认');
       if (!Number.isFinite(Number(fundingRate))) issues.push('实时 funding 不可用');
       if (!whaleCount && !announcementCount) issues.push('社区/巨鲸数据较弱');
-      if (premiumConfiguredCount > 0 && premiumCachedCount === 0) issues.push('高级数据源已配置但暂未形成缓存');
+      if (premiumConfiguredCount > 0 && premiumCachedCount === 0) issues.push('高级数据源已配置，但暂未形成缓存');
 
-      summaryEl.textContent = issues.length ? `待处理: ${issues.join(' / ')}` : '新闻、宏观与微观数据已就绪';
+      summaryEl.textContent = issues.length ? `待处理：${issues.join(' / ')}` : '新闻、宏观与微观数据已就绪';
 
       const fundingPath = String(funding?.cache_path || '--');
       const coverage = funding?.coverage || {};
@@ -173,7 +184,7 @@
           <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">宏观 / 资金费率</div>
           <div>缓存行数 ${fundingRows} / Funding ${Number.isFinite(Number(fundingRate)) ? Number(fundingRate).toFixed(6) : '--'} / Basis ${Number.isFinite(Number(basisPct)) ? `${Number(basisPct).toFixed(3)}%` : '--'}</div>
           <div>覆盖区间 ${esc(coverage?.start || '--')} ~ ${esc(coverage?.end || '--')}</div>
-          <div style="margin-top:4px;color:#7e92b2;">Funding 缓存路径: ${esc(fundingPath)}</div>
+          <div style="margin-top:4px;color:#7e92b2;">Funding 缓存路径：${esc(fundingPath)}</div>
         </div>
         <div style="padding:8px;background:#141f2f;border-radius:6px;">
           <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">社区 / 巨鲸 / 公告</div>
@@ -186,10 +197,10 @@
         </div>
         <div style="padding:8px;background:#141f2f;border-radius:6px;">
           <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">存储说明</div>
-          <div style="margin-top:3px;color:#9fb1c9;">新闻库: ./data/crypto_trading.db</div>
-          <div style="margin-top:3px;color:#9fb1c9;">资金费率缓存: ${esc(fundingPath)}</div>
-          <div style="margin-top:3px;color:#9fb1c9;">高级源缓存: ./data/premium/*</div>
-          <div style="margin-top:3px;color:#9fb1c9;">当币种新闻过少时会自动回退到全市场摘要，避免诊断全 0。</div>
+          <div style="margin-top:3px;color:#9fb1c9;">新闻库：./data/crypto_trading.db</div>
+          <div style="margin-top:3px;color:#9fb1c9;">资金费率缓存：${esc(fundingPath)}</div>
+          <div style="margin-top:3px;color:#9fb1c9;">高级源缓存：./data/premium/*</div>
+          <div style="margin-top:3px;color:#9fb1c9;">当前币种新闻过少时会自动回退到全市场摘要，避免诊断全 0。</div>
         </div>
       `;
 
@@ -240,7 +251,7 @@
       timeoutMs: 30000,
     });
     const path = String(result?.funding?.cache_path || '');
-    notify(path ? `宏观缓存已预热: ${path}` : '宏观缓存已预热');
+    notify(path ? `宏观缓存已预热：${path}` : '宏观缓存已预热');
     await refreshDiagnostics().catch(() => {});
     return result;
   }

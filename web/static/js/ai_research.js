@@ -19,6 +19,8 @@
   const AI_SHARED_POLL_TAB = 'ai-research';
   const AI_SHARED_POLL_GROUP_FALLBACK = 'ai';
   const AI_SHARED_POLL_SYNC_MS = 5000;
+  const LIVE_SIGNALS_TIMEOUT_MS = 45000;
+  const AGENT_LIVE_SIGNALS_TIMEOUT_MS = 90000;
 
   /* 策略类别与颜色 */
   const STRATEGY_CATEGORIES = {
@@ -105,6 +107,27 @@
     sharedPollingActive: false,
   };
   let initialized = false;
+  let initRetryBound = false;
+
+  function scheduleInitRetry() {
+    if (typeof window === 'undefined') return;
+    window.setTimeout(() => init(), 0);
+    window.setTimeout(() => init(), 120);
+  }
+
+  function bindInitRetry() {
+    if (initRetryBound || typeof document === 'undefined') return;
+    initRetryBound = true;
+    document.addEventListener('click', (event) => {
+      if (event.target instanceof Element && event.target.closest('.tab-btn')) {
+        scheduleInitRetry();
+      }
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) scheduleInitRetry();
+    });
+    window.addEventListener('load', scheduleInitRetry);
+  }
 
   function sharedPollingRoot() {
     return (typeof window !== 'undefined' && window.__ctsSharedPolling) || null;
@@ -230,6 +253,22 @@
       ['Macro On', '宏观开启'],
       ['Macro Off', '宏观关闭'],
       ['News ', '新闻 '],
+      ['鍔犲叆瀵规瘮', '加入对比'],
+      ['瀵规瘮', '对比'],
+      ['鏀剁泭', '收益'],
+      ['鍥炴挙', '回撤'],
+      ['鑳滅巼', '胜率'],
+      ['澶忔櫘', '夏普'],
+      ['鏂伴椈', '新闻'],
+      ['瀹忚', '宏观'],
+      ['鍘婚噸闅愯棌', '去重隐藏'],
+      ['鍥炴斁妯″紡', '回放模式'],
+      ['AI寤鸿', 'AI建议'],
+      ['璇︽儏', '详情'],
+      ['鎼滅储瑙掕壊', '搜索角色'],
+      ['鐮旂┒瀹屾垚锛屼絾鏈€氳繃楠岃瘉', '研究完成，但未通过验证'],
+      ['鐮旂┒浠诲姟宸插畬鎴愶紝宸ヤ綔鍙扮姸鎬佸凡鏇存柊', '研究任务已完成，工作台状态已更新'],
+      ['杩愯鐮旂┒', '运行研究'],
     ];
     replacements.forEach(([from, to]) => {
       value = value.split(from).join(to);
@@ -909,7 +948,7 @@
     try {
       clearTimeout(state.liveDecisionActivityRetryTimer);
       state.liveDecisionActivityRetryTimer = null;
-      const res = await aiApi('/runtime-config/live-decision/summary', { timeoutMs: 10000 });
+      const res = await aiApi('/runtime-config/live-decision/summary', { timeoutMs: 20000 });
       state.liveDecisionActivity = res || {};
       renderLiveDecisionActivitySummary(state.liveDecisionActivity);
     } catch (err) {
@@ -918,7 +957,7 @@
         block_count: 0,
         reduce_only_count: 0,
         last_hit: null,
-        scope_note: `摘要加载失败: ${err.message}`,
+        scope_note: `鎽樿鍔犺浇澶辫触: ${err.message}`,
       };
       renderLiveDecisionActivitySummary(state.liveDecisionActivity);
       clearTimeout(state.liveDecisionActivityRetryTimer);
@@ -983,7 +1022,7 @@
     try {
       clearTimeout(state.liveDecisionActivityRetryTimer);
       state.liveDecisionActivityRetryTimer = null;
-      const res = await aiApi('/runtime-config/live-decision/summary', { timeoutMs: 10000 });
+      const res = await aiApi('/runtime-config/live-decision/summary', { timeoutMs: 20000 });
       state.liveDecisionActivity = {
         ...(res || {}),
         refresh_state: 'fresh',
@@ -992,7 +1031,7 @@
       state.liveDecisionActivityLastGood = state.liveDecisionActivity;
       renderLiveDecisionActivitySummary(state.liveDecisionActivity);
     } catch (err) {
-      const errorMessage = String(err?.message || '稍后自动重试');
+      const errorMessage = String(err?.message || '绋嶅悗鑷姩閲嶈瘯');
       state.liveDecisionActivity = state.liveDecisionActivityLastGood && typeof state.liveDecisionActivityLastGood === 'object'
         ? {
             ...state.liveDecisionActivityLastGood,
@@ -1005,7 +1044,7 @@
             reduce_only_count: 0,
             bypass_count: 0,
             last_hit: null,
-            scope_note: '摘要刷新中，稍后自动重试',
+            scope_note: '鎽樿鍒锋柊涓紝绋嶅悗鑷姩閲嶈瘯',
             refresh_state: 'retrying',
             refresh_error: errorMessage,
           };
@@ -1206,7 +1245,7 @@
   function renderSearchLoopSummary(summary, drafts = []) {
     const info = summary && typeof summary === 'object' ? summary : null;
     if (!info) {
-      return '<div style="font-size:12px;color:#6b7fa0;">鏆傛棤 Search Loop 淇℃伅</div>';
+      return '<div style="font-size:12px;color:#6b7fa0;">暂无 Search Loop 信息</div>';
     }
     const evaluations = toArray(info?.draft_evaluations);
     const evaluated = Number(info?.evaluated_drafts || 0);
@@ -1365,7 +1404,7 @@
   }
 
   function scoreEmoji(score) {
-    return Number(score || 0) >= 70 ? '●' : Number(score || 0) >= 50 ? '◐' : '○';
+    return Number(score || 0) >= 70 ? '🟢' : Number(score || 0) >= 50 ? '🟡' : '🔴';
   }
 
   /* ── API 请求 ── */
@@ -1589,10 +1628,10 @@
       });
       const ct = String(resp.headers.get('content-type') || '').toLowerCase();
       const data = ct.includes('application/json') ? await resp.json() : { detail: await resp.text() };
-      if (!resp.ok) throw new Error(data.detail || data.error || `请求失败(${resp.status})`);
+      if (!resp.ok) throw new Error(data.detail || data.error || `璇锋眰澶辫触(${resp.status})`);
       return data;
     } catch (err) {
-      if (err?.name === 'AbortError') throw new Error(`接口超时(${timeoutMs}ms): ${p}`);
+      if (err?.name === 'AbortError') throw new Error(`鎺ュ彛瓒呮椂(${timeoutMs}ms): ${p}`);
       throw err;
     } finally {
       clearTimeout(timer);
@@ -1612,16 +1651,16 @@
       });
       const ct = String(resp.headers.get('content-type') || '').toLowerCase();
       const data = ct.includes('application/json') ? await resp.json() : { detail: await resp.text() };
-      if (!resp.ok) throw new Error(data.detail || data.error || `请求失败(${resp.status})`);
+      if (!resp.ok) throw new Error(data.detail || data.error || `璇锋眰澶辫触(${resp.status})`);
       return data;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     信号迷你面板
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
+     淇″彿杩蜂綘闈㈡澘
+  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function renderSignalMini() {
     const box = document.getElementById('ai-signal-mini');
     if (!box) return;
@@ -1670,7 +1709,7 @@
     try {
       const results = await Promise.all(watchlist.map(async (sym) => {
         try {
-          const data = await aiApi(`/signals/latest?symbol=${encodeURIComponent(sym)}`, { timeoutMs: 15000 });
+          const data = await aiApi(`/signals/latest?symbol=${encodeURIComponent(sym)}`, { timeoutMs: 30000 });
           return { sym, data, error: null };
         } catch (err) {
           return { sym, data: null, error: err };
@@ -1720,9 +1759,9 @@
     }
   }
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     候选策略卡片
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
+     鍊欓€夌瓥鐣ュ崱鐗?
+  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function proposalDisplayName(item, index) {
     const metaName = String(item?.metadata?.display_name || '').trim();
     if (metaName) return metaName;
@@ -1770,6 +1809,25 @@
     };
   }
 
+  function mergeCandidateFallbackProposals() {
+    const existingIds = new Set(
+      state.proposals
+        .map((item) => String(item?.proposal_id || '').trim())
+        .filter(Boolean)
+    );
+    const fallbackProposals = [];
+    state.candidates.forEach((candidate) => {
+      const fallback = proposalFallbackFromCandidate(candidate);
+      const proposalId = String(fallback?.proposal_id || '').trim();
+      if (!proposalId || existingIds.has(proposalId)) return;
+      existingIds.add(proposalId);
+      fallbackProposals.push(fallback);
+    });
+    if (!fallbackProposals.length) return 0;
+    state.proposals = [...fallbackProposals, ...state.proposals];
+    return fallbackProposals.length;
+  }
+
   function findCandidateById(candidateId) {
     const target = String(candidateId || '').trim();
     if (!target) return null;
@@ -1791,6 +1849,19 @@
     const proposal = findProposalById(activeProposalId);
     const proposalName = proposal ? proposalDisplayName(proposal, Math.max(0, state.proposals.findIndex((item) => item === proposal))) : '';
     const candidateCount = activeProposalId ? candidateCountForProposal(activeProposalId) : 0;
+    /*
+      ? `当前研究任务：${proposalName}${candidateCount ? ` · ${candidateCount} 个候选` : ' · 暂无候选'}`
+      : '鍏堥€夌爺绌朵换鍔★紝鍐嶇偣鍑诲€欓€夌瓥鐣ュ崱鐗?;
+    const hint = proposal
+      ? (candidateCount
+        ? '鐐瑰嚮鍊欓€夌瓥鐣ュ崱鐗囷紝鍦ㄥ彸渚ц繘鍏ョ 4 姝ユ敞鍐?閮ㄧ讲'
+        : '鍏堣繍琛岃鐮旂┒浠诲姟锛屼骇鍑哄€欓€夊悗鍐嶆煡鐪嬭鎯?)
+      : '鏌ョ湅璇︾粏鍒嗘瀽涓庣 4 姝ユ敞鍐?閮ㄧ讲';
+    return `<div class="ai-detail-placeholder">
+      <div style="font-size:36px;opacity:.3;">馃搳</div>
+      <div style="margin-top:10px;color:#6b7fa0;font-size:13px;">${esc(summary)}<br>${esc(hint)}</div>
+    </div>`;
+    */
     const summary = proposal
       ? `当前研究任务：${proposalName}${candidateCount ? ` · ${candidateCount} 个候选` : ' · 暂无候选'}`
       : '先选研究任务，再点击候选策略卡片';
@@ -1856,9 +1927,9 @@
     emitWorkbenchState('proposal-selection', { proposalId: nextProposalId });
   }
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     候选策略卡片
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
+     鍊欓€夌瓥鐣ュ崱鐗?
+  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function renderProposalList() {
     const box = document.getElementById('ai-proposal-list');
     const badge = document.getElementById('ai-queue-badge');
@@ -1955,7 +2026,7 @@
       refreshCompareToolbar();
       if (cnt) cnt.textContent = totalCount ? `0/${totalCount}` : '';
       box.innerHTML = state.candidates.length
-        ? `<div class="ai-empty-hint">当前类别筛选无结果，请调整筛选条件</div>`
+        ? `<div class="ai-empty-hint">当前类别筛选无结果，请调整筛选条件。</div>`
         : `<div class="ai-empty-hint">暂无候选策略。<br>先在左侧点击 <strong>2) 生成提案</strong>，<br>再选中研究任务并点击 <strong>3) 运行研究</strong> 开始回测。</div>`;
       emitWorkbenchState('candidate-cards');
       return;
@@ -1968,9 +2039,9 @@
     emitWorkbenchState('candidate-cards');
   }
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     右侧详情面板
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
+     鍙充晶璇︽儏闈㈡澘
+  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function scoreBar(label, value, max = 100) {
     const n   = Number(value || 0);
     const pct = Math.min(100, (n / max) * 100).toFixed(0);
@@ -2215,9 +2286,9 @@
     const corrWith = cand?.metadata?.correlated_with || '';
     const corrVal = cand?.metadata?.correlation_value;
     const corrIsCross = cand?.metadata?.correlation_is_cross_batch;
-    const corrLabel = corrIsCross ? '跨批相关' : '相关';
+    const corrLabel = corrIsCross ? '璺ㄦ壒鐩稿叧' : '鐩稿叧';
     const corrBadge = corrFiltered
-      ? `<span class="cand-badge" style="background:#7a3a2a;color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;" title="与 ${esc(corrWith)} 相关 ρ=${corrVal}">${corrLabel}</span>`
+      ? `<span class="cand-badge" style="background:#7a3a2a;color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;" title="涓?${esc(corrWith)} 鐩稿叧 蟻=${corrVal}">${corrLabel}</span>`
       : '';
     const trials = cand?.metadata?.best?.optimization_trials;
     const paramsBadge = trials > 0
@@ -2225,11 +2296,15 @@
       : '';
     let signalBadge = '';
     const sigData = state.latestSignals[sym];
-    if (sigData && String(sigData.direction || '') !== 'FLAT') {
-      const dir = String(sigData.direction).toUpperCase();
+    if (sigData) {
+      const dir = String(sigData.direction || '').toUpperCase();
+      if (!['LONG', 'SHORT'].includes(dir)) {
+        signalBadge = '';
+      } else {
       const conf = Math.round(Number(sigData.confidence || 0) * 100);
       const dirLabel = { LONG: '看多', SHORT: '看空' }[dir] || dir;
       signalBadge = `<span class="cand-signal-badge">${esc(sym.split('/')[0])} ${dirLabel} ${conf}%</span><br>`;
+      }
     }
     const compareChecked = state.compareCandidateIds.has(cid) ? 'checked' : '';
     const category = STRATEGY_CATEGORIES[strat] || '';
@@ -2303,7 +2378,7 @@
     const panel = document.getElementById('ai-detail-panel');
     const keepContent = !!options.keepContent;
     if (panel && !(keepContent && panel.dataset.candidateId === String(candidateId))) {
-      panel.innerHTML = '<div style="padding:20px;color:#7e92b2;font-size:13px;">加载中...</div>';
+      panel.innerHTML = '<div style="padding:20px;color:#7e92b2;font-size:13px;">鍔犺浇涓?..</div>';
     }
     const resp  = await aiApi(`/candidates/${encodeURIComponent(candidateId)}`, { timeoutMs: 20000 });
     if (requestSeq !== state.candidateDetailReqSeq) return;
@@ -2314,7 +2389,7 @@
       state.selectedProposalId = linkedProposalId;
     }
     renderProposalList();
-    renderCandidateCards();   // 更新选中高亮
+    renderCandidateCards();   // 鏇存柊閫変腑楂樹寒
     updateRunBtn();
 
     if (!panel) return;
@@ -2334,9 +2409,14 @@
     const championStrategy = String(cand?.metadata?.champion_strategy || '').trim();
 
     const proposalSnapshot = state.proposals.find(item => String(item?.proposal_id || '').trim() === proposalId) || null;
+    const hasVirtualProposalSnapshot = !!proposalSnapshot?.metadata?.virtual_context;
     const [proposalResp, proposalLifecycleResp, candidateLifecycleResp, experimentResp, experimentRunsResp] = await Promise.allSettled([
-      proposalId ? aiApi(`/proposals/${encodeURIComponent(proposalId)}`, { timeoutMs: 12000 }) : Promise.resolve({ proposal: proposalSnapshot }),
-      proposalId ? aiApi(`/proposals/${encodeURIComponent(proposalId)}/lifecycle?limit=20`, { timeoutMs: 12000 }) : Promise.resolve({ items: [] }),
+      proposalId && !hasVirtualProposalSnapshot
+        ? aiApi(`/proposals/${encodeURIComponent(proposalId)}`, { timeoutMs: 12000 })
+        : Promise.resolve({ proposal: proposalSnapshot }),
+      proposalId && !hasVirtualProposalSnapshot
+        ? aiApi(`/proposals/${encodeURIComponent(proposalId)}/lifecycle?limit=20`, { timeoutMs: 12000 })
+        : Promise.resolve({ items: [] }),
       aiApi(`/candidates/${encodeURIComponent(candidateId)}/lifecycle?limit=20`, { timeoutMs: 12000 }),
       experimentId ? aiApi(`/experiments/${encodeURIComponent(experimentId)}`, { timeoutMs: 12000 }) : Promise.resolve({ experiment: null }),
       experimentId ? aiApi(`/experiments/${encodeURIComponent(experimentId)}/runs?limit=20`, { timeoutMs: 12000 }) : Promise.resolve({ items: [] }),
@@ -2382,11 +2462,11 @@
     const bestParamsKeys = Object.keys(bestParams);
     const bestParamsHtml = bestParamsKeys.length
       ? `<div style="margin-bottom:14px;">
-          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">最优参数 (Best Params)</div>
+          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">鏈€浼樺弬鏁?(Best Params)</div>
           <div style="font-size:12px;color:#c2d0e8;background:#1a2436;border-radius:4px;padding:8px;font-family:monospace;">
             ${bestParamsKeys.map(k => `<span style="color:#a78bfa">${esc(k)}</span>=<span style="color:#20bf78">${esc(String(bestParams[k]))}</span>`).join('  ')}
           </div>
-          ${(cand?.metadata?.best?.optimization_trials > 0) ? `<div style="font-size:11px;color:#6b7fa0;margin-top:3px;">共试验 ${cand.metadata.best.optimization_trials} 组参数组合</div>` : ''}
+          ${(cand?.metadata?.best?.optimization_trials > 0) ? `<div style="font-size:11px;color:#6b7fa0;margin-top:3px;">鍏辫瘯楠?${cand.metadata.best.optimization_trials} 缁勫弬鏁扮粍鍚?/div>` : ''}
         </div>`
       : '';
 
@@ -2517,7 +2597,7 @@
           <span class="cand-score-badge ${color}" style="font-size:13px;">${score.toFixed(0)} \u5206</span>
         </div>
         <div style="font-size:12px;color:#7e92b2;">
-          ${esc(cand?.symbol || '--')} · ${esc(cand?.timeframe || '--')} · ${esc(statusText(cand?.status))}
+          ${esc(cand?.symbol || '--')} / ${esc(cand?.timeframe || '--')} / ${esc(statusText(cand?.status))}
         </div>
         ${searchRoleMeta && championStrategy ? `<div style="font-size:11px;color:#7e92b2;margin-top:4px;">搜索角色：${esc(searchRoleMeta.label)}${cand?.metadata?.search_role === 'challenger' ? ` · 对照 champion ${esc(championStrategy)}` : ''}</div>` : ''}
         ${renderLifecycleStepper(cand?.status)}
@@ -2644,7 +2724,7 @@
         <div id="ai-order-preview-result" style="display:none;margin-top:10px;padding:12px;background:#0d1a2a;border:1px solid #1e3a5a;border-radius:8px;"></div>
       </div>
       ${canActivateLiveCandidate(cand)
-        ? (() => { /*
+          ? (() => { /*
           const activateLabel = String(cand?.status || '') === 'live_candidate'
             ? '启动实盘运行 →'
             : '升级为实盘运行 →';
@@ -2654,7 +2734,7 @@
               ${esc(activateLabel)}
             </button>
             <div style="font-size:10px;color:#6b7fa0;margin-top:3px;">
-              将先切换系统到 live 模式并要求输入确认文本，确认后才会真正启动该候选的实盘运行。
+              灏嗗厛鍒囨崲绯荤粺鍒?live 妯″紡骞惰姹傝緭鍏ョ‘璁ゆ枃鏈紝纭鍚庢墠浼氱湡姝ｅ惎鍔ㄨ鍊欓€夌殑瀹炵洏杩愯銆?
             </div>
            </div>`;
         */ return liveActivateHtml; })()
@@ -2666,7 +2746,7 @@
       .replace('Markdown:', 'Markdown 报告：')
       .replace('DSR Score', 'DSR 分数')
       .replace('WF Consistency', 'WF 一致性')
-      .replace('folds+', '折以上');
+      .replace('folds+', '折叠中');
     panel.dataset.candidateId = String(candidateId);
     normalizeDomText(panel);
     const cachedPerf = state.perfHistoryCache[String(candidateId)];
@@ -2686,7 +2766,7 @@
       showOrderPreview(candidateId);
     });
 
-    // 纸盘 → 实盘候选升级按钮
+    // 纸盘 -> 实盘候选升级按钮
     panel.querySelector('#btn-escalate-live')?.addEventListener('click', async () => {
       if (!confirm(`确认将纸盘候选 ${candidateId.slice(0, 8)} 升级为实盘候选？\n（不会自动下单，后续需要人工确认才能实际启动实盘）`)) return;
       const btn = panel.querySelector('#btn-escalate-live');
@@ -2707,9 +2787,9 @@
 
     /* panel.querySelector('#btn-activate-live')?.addEventListener('click', async () => {
       const btn = panel.querySelector('#btn-activate-live');
-      const defaultLabel = String(btn?.dataset?.defaultLabel || btn?.textContent || '启动实盘运行 →');
+      const defaultLabel = String(btn?.dataset?.defaultLabel || btn?.textContent || '鍚姩瀹炵洏杩愯 鈫?);
       if (btn) {
-        btn.textContent = '正在启动实盘...';
+        btn.textContent = '姝ｅ湪鍚姩瀹炵洏...';
         btn.disabled = true;
       }
       try {
@@ -2722,14 +2802,14 @@
           return;
         }
         const strategyName = String(result?.registered_strategy_name || result?.runtime_status || 'live_running');
-        notify(`候选已启动实盘运行: ${strategyName}`);
+        notify(`鍊欓€夊凡鍚姩瀹炵洏杩愯: ${strategyName}`);
         await refreshWorkbench('', candidateId);
       } catch (err) {
         if (btn) {
           btn.textContent = defaultLabel;
           btn.disabled = false;
         }
-        notify(`启动实盘失败: ${err.message}`, true);
+        notify(`鍚姩瀹炵洏澶辫触: ${err.message}`, true);
       }
     }); */
 
@@ -2770,7 +2850,7 @@
       openRegisterModal(candidateId).catch(err => notify(`\u6253\u5f00\u6ce8\u518c\u5931\u8d25: ${err.message}`, true));
     });
 
-    // 人工确认按钮
+    // 浜哄伐纭鎸夐挳
     const approvalSelect = panel.querySelector('#approval-target-select');
     if (approvalSelect) {
       approvalSelect.querySelector('option[value="shadow"]')?.remove();
@@ -2781,13 +2861,13 @@
       approveBtn.addEventListener('click', async () => {
         const target = document.getElementById('approval-target-select')?.value || 'paper';
         const notes  = document.getElementById('approval-notes-input')?.value || '';
-        approveBtn.textContent = '批准中...';
+        approveBtn.textContent = '鎵瑰噯涓?..';
         approveBtn.disabled = true;
         try {
           await aiApi(`/candidates/${encodeURIComponent(candidateId)}/human-approve`, {
             method: 'POST', body: JSON.stringify({ target, notes }), timeoutMs: 30000,
           });
-          notify(`已批准策略候选 (${target})`);
+          notify(`已批准策略候选（${target}）`);
           await refreshWorkbench('', candidateId);
         } catch (err) {
           notify(`批准失败: ${err.message}`, true);
@@ -2891,9 +2971,9 @@
     });
   }
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     一键注册 Modal
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
+     涓€閿敞鍐?Modal
+  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function refreshCompareToolbar() {
     const btn = document.getElementById('ai-compare-btn');
     if (!btn) return;
@@ -3089,13 +3169,13 @@
         ${metricBox('年化收益', ret != null ? `${ret >= 0 ? '+' : ''}${ret.toFixed(1)}%` : '--', ret != null && ret >= 0 ? 'positive' : 'negative')}
         ${metricBox('最大回撤', dd != null ? `${dd.toFixed(1)}%` : '--', 'negative')}
         ${metricBox('胜率', wr != null ? `${wr.toFixed(0)}%` : '--')}
-        ${metricBox('夏普姣旂巼', sr != null ? sr.toFixed(2) : '--')}
+        ${metricBox('夏普偏斜', sr != null ? sr.toFixed(2) : '--')}
       </div>
       <div class="form-group">
         <label>运行模式</label>
         <div class="ai-mode-radio-group">
           <label><input type="radio" name="reg-mode" value="paper" ${decision === 'paper' || !['shadow','live_candidate'].includes(decision) ? 'checked' : ''}> 纸盘（推荐，低风险模拟）</label>
-          <label><input type="radio" name="reg-mode" value="shadow" ${decision === 'shadow' ? 'checked' : ''}> 影子追踪（虚拟跟踪）</label>
+          <label><input type="radio" name="reg-mode" value="shadow" ${decision === 'shadow' ? 'checked' : ''}> 影子跟踪（虚拟跟踪）</label>
           <label><input type="radio" name="reg-mode" value="live_candidate" ${decision === 'live_candidate' ? 'checked' : ''}> 实盘候选（待人工确认）</label>
         </div>
       </div>
@@ -3158,9 +3238,9 @@
     }
   }
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     人工确认队列
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
+     浜哄伐纭闃熷垪
+  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   async function cancelModeSwitchToken(token) {
     const safeToken = String(token || '').trim();
     if (!safeToken) return false;
@@ -3178,11 +3258,11 @@
 
   /* async function activateCandidateLive(candidateId) {
     const safeCandidateId = String(candidateId || '').trim();
-    if (!safeCandidateId) throw new Error('缺少 candidate_id');
+    if (!safeCandidateId) throw new Error('缂哄皯 candidate_id');
     const candidate = state.candidates.find(item => String(item?.candidate_id || '') === safeCandidateId) || null;
     const notePrompt = candidate
-      ? `确认将候选 ${safeCandidateId.slice(0, 8)} 启动为实盘运行？\n策略：${candidate.strategy || '--'} / ${candidate.symbol || '--'} / ${candidate.timeframe || '--'}\n\n请输入备注（可留空，点取消则终止本次操作）：`
-      : `确认将候选 ${safeCandidateId.slice(0, 8)} 启动为实盘运行？\n\n请输入备注（可留空，点取消则终止本次操作）：`;
+      ? `纭灏嗗€欓€?${safeCandidateId.slice(0, 8)} 鍚姩涓哄疄鐩樿繍琛岋紵\n绛栫暐锛?{candidate.strategy || '--'} / ${candidate.symbol || '--'} / ${candidate.timeframe || '--'}\n\n璇疯緭鍏ュ娉紙鍙暀绌猴紝鐐瑰彇娑堝垯缁堟鏈鎿嶄綔锛夛細`
+      : `纭灏嗗€欓€?${safeCandidateId.slice(0, 8)} 鍚姩涓哄疄鐩樿繍琛岋紵\n\n璇疯緭鍏ュ娉紙鍙暀绌猴紝鐐瑰彇娑堝垯缁堟鏈鎿嶄綔锛夛細`;
     const notes = window.prompt(notePrompt, '');
     if (notes === null) return { cancelled: true };
 
@@ -3203,9 +3283,9 @@
         || modeSnapshot?.confirm_hint
         || 'CONFIRM LIVE TRADING'
       ).trim();
-      if (!token) throw new Error('切换到实盘时未返回确认令牌');
+      if (!token) throw new Error('鍒囨崲鍒板疄鐩樻椂鏈繑鍥炵‘璁や护鐗?);
       const confirmInput = window.prompt(
-        `系统当前仍在纸盘模式，必须先切换到实盘模式。\n请输入确认文本以继续：\n${confirmHint}`,
+        `绯荤粺褰撳墠浠嶅湪绾哥洏妯″紡锛屽繀椤诲厛鍒囨崲鍒板疄鐩樻ā寮忋€俓n璇疯緭鍏ョ‘璁ゆ枃鏈互缁х画锛歕n${confirmHint}`,
         confirmHint,
       );
       if (confirmInput === null) {
@@ -3214,7 +3294,7 @@
       }
       if (String(confirmInput).trim() !== confirmHint) {
         await cancelModeSwitchToken(token);
-        throw new Error('确认文本不匹配，已取消切换到实盘');
+        throw new Error('纭鏂囨湰涓嶅尮閰嶏紝宸插彇娑堝垏鎹㈠埌瀹炵洏');
       }
       try {
         await rootApi('/trading/mode/confirm', {
@@ -3296,12 +3376,12 @@
 
   async function loadPendingApprovals() {
     try {
-      const res = await aiApi('/candidates/pending-approvals', { timeoutMs: 15000 });
+      const res = await aiApi('/candidates/pending-approvals', { timeoutMs: 30000 });
       state.pendingApprovals = toArray(res?.items);
       renderApprovalQueue();
       emitWorkbenchState('pending-approvals');
     } catch (err) {
-      // Non-fatal — approval queue is best-effort
+      // Non-fatal 鈥?approval queue is best-effort
       console.debug('loadPendingApprovals failed:', err);
     }
   }
@@ -3348,7 +3428,7 @@
   }
 
   async function humanApprove(candidateId, target) {
-    const notes = window.prompt(`批准候选 ${candidateId.slice(0, 8)} 运行为 [${target}]？\n请输入备注（可留空）：`, '') ?? '';
+    const notes = window.prompt(`批准候选 ${candidateId.slice(0, 8)} 运行至 [${target}]？\n请输入备注（可留空）：`, '') ?? '';
     if (notes === null) return; // user cancelled
     try {
       await aiApi(`/candidates/${encodeURIComponent(candidateId)}/human-approve`, {
@@ -3379,9 +3459,9 @@
     }
   }
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     LLM 辅助研究瑙勫垝
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
+     LLM 杈呭姪鐮旂┒鐟欏嫬鍨?
+  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   async function generateAIContext() {
     setAIContextButtonState('working');
     try {
@@ -3403,7 +3483,7 @@
         const draftCount = toArray(result.llm_research_output?.proposed_strategy_changes).filter(item => item && typeof item === 'object').length;
         const hypothesis = String(result.llm_research_output.hypothesis || '').trim();
         const uncertainty = String(result.llm_research_output.uncertainty || '').trim().toLowerCase();
-        const suggestedMax = ['?', 'high'].includes(uncertainty) ? 3 : (['?', 'low'].includes(uncertainty) ? 6 : 4);
+        const suggestedMax = ['high'].includes(uncertainty) ? 3 : (['low'].includes(uncertainty) ? 6 : 4);
         if (macroContext) state.pendingMacroContext = macroContext;
         const goalInput = document.getElementById('ai-planner-goal');
         if (goalInput && hypothesis) {
@@ -3436,7 +3516,7 @@
           const draftSummary = draftCount > 0
             ? `<div style="font-size:11px;color:#7dd3fc;margin-bottom:3px;">OpenAI 草案：${draftCount} 个，生成提案时将优先进入开放式草案研究。</div>`
             : '<div style="font-size:11px;color:#9fb1c9;margin-bottom:3px;">本轮只生成了研究假设与实验计划，尚未返回可执行草案。</div>';
-          plannerNotesEl.innerHTML = `<div style="font-size:11px;color:#20bf78;margin-bottom:3px;">🤖 AI假设：${esc(result.llm_research_output.hypothesis)}</div>${draftSummary}` + existing;
+          plannerNotesEl.innerHTML = `<div style="font-size:11px;color:#20bf78;margin-bottom:3px;">AI假设：${esc(result.llm_research_output.hypothesis)}</div>${draftSummary}` + existing;
         }
         updatePlannerModeHint();
         notify(draftCount > 0 ? `研究思路已生成，并附带 ${draftCount} 个 AI 草案。` : '研究思路已生成，假设已写入规划区。');
@@ -3450,14 +3530,14 @@
     }
   }
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  /* ──────────────────────────────
      数据加载
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  ────────────────────────────── */
   async function loadRuntimeConfig(force = false) {
     if (!force && state.runtimeConfigLoaded && state.runtimeConfig) return;
     const prevGovernance = !!(state.runtimeConfig && state.runtimeConfig.governance_enabled);
     try {
-      const res = await aiApi('/runtime-config', { timeoutMs: 10000 });
+      const res = await aiApi('/runtime-config', { timeoutMs: 30000 });
       state.runtimeConfig = {
         governance_enabled: !!res?.governance_enabled,
         decision_mode: String(res?.decision_mode || ''),
@@ -3498,7 +3578,7 @@
   async function loadProposals(selectId = '') {
     const preservedProposalId = String(selectId || state.selectedProposalId || proposalIdForCandidate(state.selectedCandidateId) || '').trim();
     const preservedProposal = findProposalById(preservedProposalId);
-    const res = await aiApi('/proposals?limit=50', { timeoutMs: 20000 });
+    const res = await aiApi('/proposals?limit=50', { timeoutMs: 60000 });
     state.proposals = toArray(res?.items);
     if (preservedProposal && !findProposalById(preservedProposalId)) {
       state.proposals = [preservedProposal, ...state.proposals];
@@ -3510,7 +3590,7 @@
   }
 
   async function loadCandidates(selectId = '') {
-    const res = await aiApi('/candidates?limit=50', { timeoutMs: 20000 });
+    const res = await aiApi('/candidates?limit=50', { timeoutMs: 60000 });
     state.candidates = toArray(res?.items);
     if (selectId) state.selectedCandidateId = selectId;
     if (state.selectedCandidateId && !findCandidateById(state.selectedCandidateId)) {
@@ -3528,9 +3608,9 @@
         loadCandidates(selectCandidateId),
         loadPendingApprovals(),
         loadAgentStatus().catch(() => null),
-        loadDataReadiness().catch(() => null),
         loadLiveDecisionActivitySummary().catch(() => null),
       ]);
+      mergeCandidateFallbackProposals();
       applyWorkbenchSelection(selectProposalId);
       normalizeDomText(document.getElementById('ai-research'));
       emitWorkbenchState('refresh-workbench');
@@ -3593,16 +3673,16 @@
     }
     if (!runnable) {
       btn.title = ['research_queued', 'research_running'].includes(status)
-        ? `当前提案正在运行: ${state.selectedProposalId}`
+        ? `当前提案正在运行：${state.selectedProposalId}`
         : `当前状态 ${statusText(status)} 不可重复运行`;
       return;
     }
-    btn.title = `运行研究: ${state.selectedProposalId}`;
+    btn.title = `运行研究：${state.selectedProposalId}`;
   }
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     操作函数
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
+     鎿嶄綔鍑芥暟
+  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   /* -- \u56de\u653e\u5e02\u573a\u4e0a\u4e0b\u6587\u91c7\u96c6\uff08\u751f\u6210\u7814\u7a76\u524d\u81ea\u52a8\u6267\u884c\uff09 -- */
   async function _collectLiveMarketContext(primarySymbol) {
     const sym = primarySymbol || getCurrentResearchSymbol() || 'BTC/USDT';
@@ -3661,14 +3741,14 @@
 
   async function generateProposal() {
     const goal = String(document.getElementById('ai-planner-goal')?.value || '').trim();
-    if (goal.length < 8) { notify('研究目标太短（至少8个字符）', true); return; }
+    if (goal.length < 8) { notify('鐮旂┒鐩爣澶煭锛堣嚦灏?涓瓧绗︼級', true); return; }
     const symbols   = csvInput('ai-planner-symbols');
     const primarySym = symbols[0] || getCurrentResearchSymbol() || 'BTC/USDT';
     const plannerConstraints = buildPlannerConstraints();
 
-    // ── 自动采集实时市场上下文 ──
+    // 鈹€鈹€ 鑷姩閲囬泦瀹炴椂甯傚満涓婁笅鏂?鈹€鈹€
     const marketCtxEl = document.getElementById('ai-market-context-hint');
-    if (marketCtxEl) marketCtxEl.textContent = '正在采集市场上下文..';
+    if (marketCtxEl) marketCtxEl.textContent = '姝ｅ湪閲囬泦甯傚満涓婁笅鏂?.';
     const liveCtx = await _collectLiveMarketContext(primarySym).catch(() => ({}));
     if (marketCtxEl) {
       const dir   = String(liveCtx.sentiment || 'FLAT');
@@ -3685,7 +3765,7 @@
       const optTxt  = optSkew != null
         ? `${Number(optSkew).toFixed(3)}(${optSig || '?'})`
         : '--';
-      marketCtxEl.innerHTML = `<span style="color:${dir==='LONG'?'#20bf78':dir==='SHORT'?'#e05260':'#9fb1c9'}">方向 ${dir} ${conf}%</span> · Funding ${frTxt} · OFI ${ofiTxt} · OI ${oiTxt} · 期权偏斜 ${optTxt} · 新闻事件 ${ne}`;
+      marketCtxEl.innerHTML = `<span style="color:${dir==='LONG'?'#20bf78':dir==='SHORT'?'#e05260':'#9fb1c9'}">鏂瑰悜 ${dir} ${conf}%</span> 路 Funding ${frTxt} 路 OFI ${ofiTxt} 路 OI ${oiTxt} 路 鏈熸潈鍋忔枩 ${optTxt} 路 鏂伴椈浜嬩欢 ${ne}`;
     }
 
     const payload = {
@@ -3721,7 +3801,7 @@
       }
       html += `<div style="font-size:11px;color:#7dd3fc;margin-bottom:3px;">研究方式：${esc(researchModeText(plannerConstraints.research_mode))} · 模板上限 ${esc(String(plannerConstraints.max_templates))} · 草案预算 ${esc(String(plannerConstraints.max_strategy_drafts))} · 回测预算 ${esc(String(plannerConstraints.max_backtest_runs))}</div>`;
       if (filteredTpls.length) {
-        html += `<div style="font-size:11px;color:#f59e0b;margin-top:3px;">⚠️ 过滤模板（${filteredTpls.length}）: ${filteredTpls.slice(0,5).map(t => esc(t)).join(', ')}${filteredTpls.length > 5 ? '...' : ''}</div>`;
+        html += `<div style="font-size:11px;color:#f59e0b;margin-top:3px;">过滤模板：${filteredTpls.length}，${filteredTpls.slice(0,5).map(t => esc(t)).join(', ')}${filteredTpls.length > 5 ? '...' : ''}</div>`;
       }
       plannerNotesEl.innerHTML = html;
     }
@@ -3730,7 +3810,7 @@
     await refreshWorkbench(result?.proposal?.proposal_id || '', '');
   }
 
-  // generateAIContext / generateProposal 使用上方唯一实现，避免重复覆盖。
+  // generateAIContext / generateProposal 浣跨敤涓婃柟鍞竴瀹炵幇锛岄伩鍏嶉噸澶嶈鐩栥€?
 
   async function runOneClickResearchDeploy() {
     const btn = document.getElementById('ai-oneclick-btn');
@@ -3920,20 +4000,28 @@
   }
 
   async function loadPremiumDataStatus() {
-    return aiApi('/premium-data/status', { timeoutMs: 12000 });
+    return aiApi('/premium-data/status', { timeoutMs: 20000 });
   }
 
   async function loadDataReadiness() {
     if (window.AI?.modules?.diagnostics?.refresh) {
       return window.AI.modules.diagnostics.refresh();
     }
-    const [premiumResult, liveSignalsResult] = await Promise.allSettled([
-      loadPremiumDataStatus(),
-      aiApi('/live-signals', { timeoutMs: 20000 }),
-    ]);
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      if (window.AI?.modules?.diagnostics?.refresh) {
+        return window.AI.modules.diagnostics.refresh();
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 60));
+    }
+    const premiumResult = await loadPremiumDataStatus().catch(() => null);
+    const summaryEl = document.getElementById('ai-data-readiness-summary');
+    const detailsEl = document.getElementById('ai-data-readiness-details');
+    if (summaryEl) summaryEl.textContent = '数据诊断模块初始化中，请稍后重试。';
+    if (detailsEl) {
+      detailsEl.innerHTML = '<div style="padding:8px;background:#141f2f;border-radius:6px;">当前先跳过首屏数据诊断，避免与实时信号面板重复占用重接口。稍后再次打开研究页，或手动点击“刷新诊断”即可获取完整诊断。</div>';
+    }
     return {
-      premium_data_status: premiumResult.status === 'fulfilled' ? premiumResult.value : null,
-      live_signals: liveSignalsResult.status === 'fulfilled' ? liveSignalsResult.value : null,
+      premium_data_status: premiumResult,
       fallback: true,
     };
   }
@@ -3947,7 +4035,7 @@
       const agent = getAgentModule();
       const response = agent && typeof agent.refresh === 'function'
         ? await agent.refresh()
-        : await rootApi(AGENT_STATUS_API, { timeoutMs: 15000 });
+        : await rootApi(AGENT_STATUS_API, { timeoutMs: 30000 });
       if (response?.status) {
         state.agentStatus = safeJsonClone(response.status, null);
         renderRuntimeSummary({ silent: true });
@@ -4051,7 +4139,7 @@
     }
     if (!window.confirm(`确认删除此研究任务？\n${proposalId}\n将级联删除相关候选记录。`)) return;
     await aiApi(`/proposals/${encodeURIComponent(proposalId)}`, { method: 'DELETE', timeoutMs: 20000 });
-    notify(`研究任务已删除`);
+    notify('研究任务已删除');
     if (state.selectedProposalId === proposalId) {
       state.selectedProposalId = '';
     }
@@ -4059,23 +4147,23 @@
     await refreshWorkbench('', '');
   }
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     事件绑定
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
+     浜嬩欢缁戝畾
+  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function bindEvents() {
-    /* 生成研究 */
+    /* 鐢熸垚鐮旂┒ */
     document.getElementById('ai-generate-btn')?.addEventListener('click', () =>
-      withActionLock('generate', () => generateProposal()).catch(err => notify(`生成失败: ${err.message}`, true)));
+      withActionLock('generate', () => generateProposal()).catch(err => notify(`鐢熸垚澶辫触: ${err.message}`, true)));
 
-    /* AI生成研究思路 */
+    /* AI鐢熸垚鐮旂┒鎬濊矾 */
     document.getElementById('ai-context-btn')?.addEventListener('click', () =>
-      generateAIContext().catch(err => notify(`生成研究思路失败: ${err.message}`, true)));
+      generateAIContext().catch(err => notify(`鐢熸垚鐮旂┒鎬濊矾澶辫触: ${err.message}`, true)));
 
-    /* one-click 自动研究 */
+    /* one-click 鑷姩鐮旂┒ */
     document.getElementById('ai-oneclick-btn')?.addEventListener('click', () =>
-      withActionLock('oneclick', () => runOneClickResearchDeploy()).catch(err => notify(`one-click 执行失败: ${err.message}`, true)));
+      withActionLock('oneclick', () => runOneClickResearchDeploy()).catch(err => notify(`one-click 鎵ц澶辫触: ${err.message}`, true)));
 
-    /* 待人工确认队列事件代理 */
+    /* 寰呬汉宸ョ‘璁ら槦鍒椾簨浠朵唬鐞?*/
     document.getElementById('ai-approval-list')?.addEventListener('click', e => {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
@@ -4083,21 +4171,21 @@
       const action = String(btn.dataset.action || '').trim();
       if (action === 'view-candidate' && cid) {
         e.stopPropagation();
-        viewCandidate(cid).catch(err => notify(`加载详情失败: ${err.message}`, true));
+        viewCandidate(cid).catch(err => notify(`鍔犺浇璇︽儏澶辫触: ${err.message}`, true));
       }
     });
 
-    /* 刷新 */
+    /* 鍒锋柊 */
     document.getElementById('ai-refresh-btn')?.addEventListener('click', () =>
-      refreshWorkbench().catch(err => notify(`刷新失败: ${err.message}`, true)));
+      refreshWorkbench().catch(err => notify(`鍒锋柊澶辫触: ${err.message}`, true)));
     document.getElementById('ai-data-refresh-btn')?.addEventListener('click', () =>
-      loadDataReadiness().catch(err => notify(`数据诊断失败: ${err.message}`, true)));
+      loadDataReadiness().catch(err => notify(`鏁版嵁璇婃柇澶辫触: ${err.message}`, true)));
     document.getElementById('ai-news-pull-btn')?.addEventListener('click', () =>
-      pullNewsForResearch().catch(err => notify(`新闻拉取失败: ${err.message}`, true)));
+      pullNewsForResearch().catch(err => notify(`鏂伴椈鎷夊彇澶辫触: ${err.message}`, true)));
     document.getElementById('ai-funding-warm-btn')?.addEventListener('click', () =>
-      warmFundingForResearch().catch(err => notify(`宏观缓存预热失败: ${err.message}`, true)));
+      warmFundingForResearch().catch(err => notify(`瀹忚缂撳瓨棰勭儹澶辫触: ${err.message}`, true)));
     document.getElementById('ai-live-decision-save-btn')?.addEventListener('click', () =>
-      saveLiveDecisionRuntimeConfig().catch(err => notify(`下单前AI复核保存失败: ${err.message}`, true)));
+      saveLiveDecisionRuntimeConfig().catch(err => notify(`涓嬪崟鍓岮I澶嶆牳淇濆瓨澶辫触: ${err.message}`, true)));
     ['ai-live-decision-enabled', 'ai-live-decision-mode', 'ai-live-decision-provider'].forEach((id) => {
       document.getElementById(id)?.addEventListener('change', () => previewLiveDecisionProviderSelection());
     });
@@ -4131,12 +4219,12 @@
       emitWorkbenchState('agent-status');
     });
 
-    /* 运行研究 */
+    /* 杩愯鐮旂┒ */
     document.getElementById('run-selected-btn')?.addEventListener('click', () =>
-      withActionLock('run', () => runProposal(state.selectedProposalId)).catch(err => notify(`运行失败: ${err.message}`, true)));
+      withActionLock('run', () => runProposal(state.selectedProposalId)).catch(err => notify(`杩愯澶辫触: ${err.message}`, true)));
     document.getElementById('ai-compare-btn')?.addEventListener('click', () => openCompareModal());
 
-    /* 信号刷新 */
+    /* 淇″彿鍒锋柊 */
     document.getElementById('signal-refresh-btn')?.addEventListener('click', () =>
       loadSignal().catch(err => notify(`\u4fe1\u53f7\u5931\u8d25: ${err.message}`, true)));
     document.getElementById('signal-symbol')?.addEventListener('change', (e) =>
@@ -4151,7 +4239,7 @@
       if (toggle) toggle.classList.toggle('collapsed', state.signalPanelCollapsed);
     });
 
-    /* 注册 Modal 关闭 */
+    /* 娉ㄥ唽 Modal 鍏抽棴 */
     document.getElementById('ai-register-close')?.addEventListener('click', () => {
       document.getElementById('ai-register-modal').style.display = 'none';
     });
@@ -4168,7 +4256,7 @@
       if (modal && e.target === modal) modal.style.display = 'none';
     });
 
-    /* 研究队列点击代理 */
+    /* 鐮旂┒闃熷垪鐐瑰嚮浠ｇ悊 */
     document.getElementById('ai-proposal-list')?.addEventListener('click', e => {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
@@ -4185,7 +4273,7 @@
       if (action === 'cancel-proposal' && pid) {
         e.stopPropagation();
         selectProposal(pid);
-        cancelProposal(pid).catch(err => notify(`取消失败: ${err.message}`, true));
+        cancelProposal(pid).catch(err => notify(`鍙栨秷澶辫触: ${err.message}`, true));
         return;
       }
       if (action === 'delete-proposal' && pid) {
@@ -4199,19 +4287,19 @@
       }
     });
 
-    /* 排序 */
+    /* 鎺掑簭 */
     document.getElementById('cand-sort-select')?.addEventListener('change', e => {
       state.sortBy = String(e.target.value || 'score');
       renderCandidateCards();
     });
 
-    /* 类别筛选 */
+    /* 绫诲埆绛涢€?*/
     document.getElementById('cand-filter-category')?.addEventListener('change', e => {
       state.filterCategory = String(e.target.value || '');
       renderCandidateCards();
     });
 
-    /* 候选卡片点击代理 */
+    /* 鍊欓€夊崱鐗囩偣鍑讳唬鐞?*/
     document.getElementById('ai-candidate-cards')?.addEventListener('click', e => {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
@@ -4222,12 +4310,12 @@
         const card = e.target.closest('.research-candidate-card');
         const id   = String(card?.dataset?.candidateId || cid || '').trim();
         if (!id) return;
-        viewCandidate(id).catch(err => notify(`加载详情失败: ${err.message}`, true));
+        viewCandidate(id).catch(err => notify(`鍔犺浇璇︽儏澶辫触: ${err.message}`, true));
         return;
       }
       if (action === 'view-candidate' && cid) {
         e.stopPropagation();
-        viewCandidate(cid).catch(err => notify(`加载详情失败: ${err.message}`, true));
+        viewCandidate(cid).catch(err => notify(`鍔犺浇璇︽儏澶辫触: ${err.message}`, true));
         return;
       }
       if (action === 'toggle-compare' && cid) {
@@ -4237,14 +4325,14 @@
       }
       if (action === 'open-register' && cid) {
         e.stopPropagation();
-        openRegisterModal(cid).catch(err => notify(`打开注册失败: ${err.message}`, true));
+        openRegisterModal(cid).catch(err => notify(`鎵撳紑娉ㄥ唽澶辫触: ${err.message}`, true));
       }
     });
   }
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     轮询
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
+     杞
+  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function startPolling() {
     clearInterval(state.signalTimer);
     clearInterval(state.refreshTimer);
@@ -4323,14 +4411,14 @@
     aiTabBtn?.addEventListener('click', () => {
       setTimeout(syncHubLayoutHeight, 0);
       setTimeout(syncHubLayoutHeight, 120);
-      canRunAiPolling();
-      startPolling();
     });
     document.querySelectorAll('.tab-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         setTimeout(() => {
-          if (isAiWorkspaceActive()) startPolling();
-          else stopPolling();
+          if (isAiWorkspaceActive()) {
+            startPolling();
+            if (isAiResearchActive()) refreshWorkbench().catch(() => {});
+          } else stopPolling();
         }, 0);
       });
     });
@@ -4340,16 +4428,25 @@
       } else if (isAiWorkspaceActive()) {
         canRunAiPolling();
         startPolling();
+        if (isAiResearchActive()) refreshWorkbench().catch(() => {});
       }
     });
   }
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     初始化
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
+     鍒濆鍖?
+  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function init() {
-    if (initialized) return;
+    bindInitRetry();
     if (!document.getElementById('ai-candidate-cards')) return;  // tab 未激活时跳过
+    if (initialized) {
+      syncHubLayoutHeight();
+      if (isAiWorkspaceActive()) {
+        startPolling();
+        if (isAiResearchActive()) refreshWorkbench().catch(() => {});
+      }
+      return;
+    }
     initialized = true;
     bindLayoutSync();
     syncHubLayoutHeight();
@@ -4358,7 +4455,7 @@
     updatePlannerModeHint();
     normalizeDomText(document.getElementById('ai-research'));
     if (isAiResearchActive() && canRunAiPolling()) {
-      refreshWorkbench().catch(err => console.error('AI研究初始化失败:', err));
+      refreshWorkbench().catch(err => console.error('AI鐮旂┒鍒濆鍖栧け璐?', err));
     }
     if (isAiWorkspaceActive()) startPolling();
   }
@@ -4374,27 +4471,53 @@
     Object.values(state.jobPollingTimers).forEach(t => clearInterval(t));
   });
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     Phase A — 实时信号面板（30s 轮询）
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
+     Phase A 鈥?瀹炴椂淇″彿闈㈡澘锛?0s 杞锛?
+  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
 
-  /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     Phase B — 快速注册
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
+     Phase B 鈥?蹇€熸敞鍐?
+  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
 
   async function loadLiveSignals() {
     if (!document.getElementById('ai-research-live-signals-panel') && !document.getElementById('ai-agent-live-signals-panel')) return;
     if (state.liveSignalsInFlight) return state.liveSignalsInFlight;
     const task = (async () => {
-      try {
-        const [researchRes, agentRes] = await Promise.all([
-          aiApi('/live-signals', { timeoutMs: 20000 }),
-          aiApi('/autonomous-agent/live-signals', { timeoutMs: 20000 }),
-        ]);
-        renderLiveSignalPanels(researchRes || {}, agentRes || {});
-      } catch (e) {
-        /* silent non-critical */
-      }
+      let researchPayload = {};
+      let agentPayload = {};
+
+      const researchTask = aiApi('/live-signals', { timeoutMs: LIVE_SIGNALS_TIMEOUT_MS })
+        .then((payload) => {
+          researchPayload = payload || {};
+          renderLiveSignalPanel(
+            'ai-research-live-signals-panel',
+            liveSignalSectionById(researchPayload, 'candidates'),
+            !!researchPayload?.ml_model_loaded,
+          );
+          return researchPayload;
+        })
+        .catch((err) => {
+          renderLiveSignalPanelError('ai-research-live-signals-panel', err?.message || 'Live candidate signals failed to load');
+          return null;
+        });
+
+      const agentTask = aiApi('/autonomous-agent/live-signals', { timeoutMs: AGENT_LIVE_SIGNALS_TIMEOUT_MS })
+        .then((payload) => {
+          agentPayload = payload || {};
+          renderLiveSignalPanel(
+            'ai-agent-live-signals-panel',
+            liveSignalSectionById(agentPayload, 'watchlist'),
+            !!agentPayload?.ml_model_loaded,
+          );
+          return agentPayload;
+        })
+        .catch((err) => {
+          renderLiveSignalPanelError('ai-agent-live-signals-panel', err?.message || 'Agent watchlist signals failed to load');
+          return null;
+        });
+
+      await Promise.all([researchTask, agentTask]);
+      return { researchPayload, agentPayload };
     })();
     state.liveSignalsInFlight = task;
     try {
@@ -4552,6 +4675,13 @@
     el.innerHTML = mlNote + renderLiveSignalSection(resolvedSection, mlLoaded);
   }
 
+  function renderLiveSignalPanelError(targetId, message) {
+    const el = document.getElementById(targetId);
+    if (!el) return;
+    const detail = normalizeUiText(compactText(message || 'Signals failed to load', 160));
+    el.innerHTML = `<div class="live-sig-empty">${esc(detail)}</div>`;
+  }
+
   function renderLiveSignalPanels(researchPayload, agentPayload) {
     renderLiveSignalPanel(
       'ai-research-live-signals-panel',
@@ -4639,11 +4769,11 @@
     }
   }
 
-  /* 暴露给外部调用（兼容旧代码） */
+  /* 鏆撮湶缁欏閮ㄨ皟鐢紙鍏煎鏃т唬鐮侊級 */
   window.AI = {
-    viewCandidate:   id => viewCandidate(id).catch(err => notify(`加载详情失败: ${err.message}`, true)),
-    openRegister:    id => openRegisterModal(id).catch(err => notify(`打开注册失败: ${err.message}`, true)),
-    runProposal:     id => withActionLock('run', () => runProposal(id)).catch(err => notify(`运行失败: ${err.message}`, true)),
+    viewCandidate:   id => viewCandidate(id).catch(err => notify(`鍔犺浇璇︽儏澶辫触: ${err.message}`, true)),
+    openRegister:    id => openRegisterModal(id).catch(err => notify(`鎵撳紑娉ㄥ唽澶辫触: ${err.message}`, true)),
+    runProposal:     id => withActionLock('run', () => runProposal(id)).catch(err => notify(`杩愯澶辫触: ${err.message}`, true)),
     toggleCompare:   id => toggleCandidateCompare(id),
     showComparePanel: () => openCompareModal(),
     refreshWorkbench,
