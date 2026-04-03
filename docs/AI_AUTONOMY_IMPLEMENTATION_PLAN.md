@@ -152,7 +152,7 @@
 ## 2026-03-25 Runtime Note
 
 1. The default LLM runtime has been switched from GLM to an OpenAI-compatible `gpt-5.4` endpoint.
-2. Base URL default: `https://vpsairobot.com/v1`.
+2. Base URL default: `https://sub.a-j.app/v1` (with `https://vpsairobot.com/v1` kept as backup relay).
 3. The current codebase keeps the internal provider name `codex` as the OpenAI-compatible adapter to avoid breaking existing API/UI contracts.
 4. OpenAI-compatible paths should use the Responses API (`/v1/responses`) instead of `chat/completions`.
 5. Real-time trading loops keep short local timeouts; do not blindly expand them to the model vendor's 1800s server timeout.
