@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="stylesheet" href="/static/css/style.css?v=82">
     <script>
         (function (root) {
@@ -1830,10 +1831,10 @@
                         <!-- 研究任务 -->
                         <div class="card ai-sidebar-card ai-queue-card">
                             <div class="ai-sidebar-title" style="margin-bottom:4px;">
-                                <span>研究任务</span>
+                                <span id="ai-queue-title">研究任务</span>
                                 <span id="ai-queue-badge" style="font-size:11px;color:#7e92b2;font-weight:400;text-transform:none;"></span>
                             </div>
-                            <div style="font-size:11px;color:#7e92b2;margin-bottom:8px;">这里负责切换当前提案。选中后去中栏执行第 3 步“运行研究”，再到右侧完成第 4 步“注册/部署”。</div>
+                            <div id="ai-queue-hint" style="font-size:11px;color:#7e92b2;margin-bottom:8px;">这里负责切换当前提案。选中后去中栏执行第 3 步“运行研究”，再到右侧完成第 4 步“注册/部署”。</div>
                             <div id="ai-proposal-list" class="ai-proposal-compact-list">
                                 <div style="color:#6b7fa0;font-size:12px;padding:8px 0;">暂无研究任务</div>
                             </div>
@@ -2528,7 +2529,7 @@
 
     <script charset="utf-8" src="/static/js/app.js?v=124"></script>
     <script charset="utf-8" src="/static/js/research_workbench.js?v=8"></script>
-    <script charset="utf-8" src="/static/js/ai_research.js?v=41"></script>
+    <script charset="utf-8" src="/static/js/ai_research.js?v=42"></script>
     <script charset="utf-8" src="/static/js/ai_research_diagnostics.js?v=5"></script>
     <script charset="utf-8" src="/static/js/ai_research_runtime.js?v=7"></script>
     <script charset="utf-8" src="/static/js/ai_research_agent.js?v=7"></script>

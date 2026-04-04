@@ -1776,6 +1776,10 @@
     return `${mark} ${head || String(item?.proposal_id || '').slice(-6)}`.trim();
   }
 
+  function isVirtualProposal(item) {
+    return !!item?.metadata?.virtual_context;
+  }
+
   function findProposalById(proposalId) {
     const target = String(proposalId || '').trim();
     if (!target) return null;
@@ -1849,9 +1853,26 @@
     return state.candidates.filter((item) => String(item?.proposal_id || '').trim() === target).length;
   }
 
+  function candidatesForProposal(proposalId) {
+    const target = String(proposalId || '').trim();
+    if (!target) return [];
+    return state.candidates.filter((item) => String(item?.proposal_id || '').trim() === target);
+  }
+
+  function autoSelectCandidateForProposal() {
+    if (state.selectedCandidateId) return '';
+    const scoped = dedupeCandidatesForDisplay(candidatesForProposal(state.selectedProposalId));
+    if (scoped.length !== 1) return '';
+    const candidateId = String(scoped[0]?.candidate_id || '').trim();
+    if (!candidateId) return '';
+    state.selectedCandidateId = candidateId;
+    return candidateId;
+  }
+
   function candidateDetailPlaceholderHtml(proposalId = '') {
     const activeProposalId = String(proposalId || '').trim();
     const proposal = findProposalById(activeProposalId);
+    const virtualProposal = isVirtualProposal(proposal);
     const proposalName = proposal ? proposalDisplayName(proposal, Math.max(0, state.proposals.findIndex((item) => item === proposal))) : '';
     const candidateCount = activeProposalId ? candidateCountForProposal(activeProposalId) : 0;
     /*
@@ -1868,12 +1889,16 @@
     </div>`;
     */
     const summary = proposal
-      ? `当前研究任务：${proposalName}${candidateCount ? ` · ${candidateCount} 个候选` : ' · 暂无候选'}`
+      ? `当前${virtualProposal ? '候选回填' : '研究任务'}：${proposalName}${candidateCount ? ` · ${candidateCount} 个候选` : ' · 暂无候选'}`
       : '先选研究任务，再点击候选策略卡片';
     const hint = proposal
       ? (candidateCount
-        ? '点击候选策略卡片，在右侧进入第 4 步注册/部署'
-        : '先运行该研究任务，产出候选后再查看详情')
+        ? (virtualProposal
+          ? '该条目由候选结果回填，只支持查看候选详情与注册/部署，不支持重新运行研究任务'
+          : '点击候选策略卡片，在右侧进入第 4 步注册/部署')
+        : (virtualProposal
+          ? '当前没有可展示的候选记录，请回到研究链路重新生成提案后再运行'
+          : '先运行该研究任务，产出候选后再查看详情'))
       : '查看详细分析与第 4 步注册/部署';
     return `<div class="ai-detail-placeholder">
       <div style="font-size:36px;opacity:.3;">📊</div>
@@ -1912,12 +1937,14 @@
 
   function applyWorkbenchSelection(preferredProposalId = '') {
     syncSelectedProposal(preferredProposalId);
+    const autoSelectedCandidateId = autoSelectCandidateForProposal();
     renderProposalList();
     updateRunBtn();
     renderCandidateCards();
     if (!state.selectedCandidateId) {
       renderCandidateDetailPlaceholder(state.selectedProposalId);
     }
+    return autoSelectedCandidateId;
   }
 
   function selectProposal(proposalId) {
@@ -1928,7 +1955,10 @@
     if (selectedCandidateProposalId && selectedCandidateProposalId !== nextProposalId) {
       state.selectedCandidateId = '';
     }
-    applyWorkbenchSelection(nextProposalId);
+    const autoSelectedCandidateId = applyWorkbenchSelection(nextProposalId);
+    if (autoSelectedCandidateId) {
+      viewCandidate(autoSelectedCandidateId, { keepContent: true }).catch(err => notify(`加载详情失败: ${err.message}`, true));
+    }
     emitWorkbenchState('proposal-selection', { proposalId: nextProposalId });
   }
 
@@ -1938,8 +1968,26 @@
   function renderProposalList() {
     const box = document.getElementById('ai-proposal-list');
     const badge = document.getElementById('ai-queue-badge');
+    const titleEl = document.getElementById('ai-queue-title');
+    const hintEl = document.getElementById('ai-queue-hint');
     if (!box) return;
-    if (badge) badge.textContent = state.proposals.length ? `${state.proposals.length} 项` : '';
+    const realCount = state.proposals.filter((item) => !isVirtualProposal(item)).length;
+    const virtualCount = state.proposals.filter((item) => isVirtualProposal(item)).length;
+    if (badge) {
+      if (realCount && virtualCount) badge.textContent = `${realCount} 项 + ${virtualCount} 条回填`;
+      else if (realCount) badge.textContent = `${realCount} 项`;
+      else badge.textContent = virtualCount ? `${virtualCount} 条回填` : '';
+    }
+    if (titleEl) titleEl.textContent = realCount ? '研究任务' : (virtualCount ? '候选回填' : '研究任务');
+    if (hintEl) {
+      if (realCount && virtualCount) {
+        hintEl.textContent = '这里负责切换当前提案。候选回填条目仅支持查看候选详情/注册，不支持重新运行或删除提案。';
+      } else if (virtualCount) {
+        hintEl.textContent = '当前没有原始研究提案，以下条目由候选记录回填，只支持查看候选详情/注册，不支持重新运行或删除提案。';
+      } else {
+        hintEl.textContent = '这里负责切换当前提案。选中后去中栏执行第 3 步“运行研究”，再到右侧完成第 4 步“注册/部署”。';
+      }
+    }
     if (!state.proposals.length) {
       box.innerHTML = '<div style="color:#6b7fa0;font-size:12px;padding:8px 0;">暂无研究任务</div>';
       normalizeDomText(box);
@@ -1950,16 +1998,20 @@
       const pid = String(item?.proposal_id || '');
       const sel = pid === state.selectedProposalId ? ' selected' : '';
       const st = String(item?.status || 'draft');
+      const virtual = isVirtualProposal(item);
       const dotCls = { research_running: 'running', research_queued: 'queued', validated: 'validated', rejected: 'rejected' }[st] || '';
       const name = proposalDisplayName(item, idx);
-      const running = ['research_queued', 'research_running'].includes(st);
-      const retirable = ['shadow_running', 'live_candidate', 'paper_running', 'live_running'].includes(st);
+      const running = !virtual && ['research_queued', 'research_running'].includes(st);
+      const retirable = !virtual && ['shadow_running', 'live_candidate', 'paper_running', 'live_running'].includes(st);
       const meta = getProposalResearchMeta(item);
       const timeLabel = meta.lastTs ? fmtTs(meta.lastTs) : '--';
       const aiSummary = `${researchModeText(meta.researchMode)} | 模板 ${meta.totalTemplates}`;
       const autonomySummary = `草案 ${meta.draftCount} | 预算 ${Number(meta?.searchBudget?.max_backtest_runs || 0) || '--'}`;
       const newsSummary = `新闻 ${meta.newsCount}`;
       const macroSummary = meta.fundingAvailable ? '宏观 已启用' : '宏观 未启用';
+      const virtualSummary = virtual
+        ? '<span style="color:#f0b429;">候选回填</span><span>只读</span>'
+        : '';
       return `<div class="proposal-compact-item${sel}" data-proposal-id="${esc(pid)}" data-proposal-status="${esc(st)}" data-action="select-proposal">
         <div class="pci-dot ${dotCls}" title="${esc(statusText(st))}"></div>
         <div style="min-width:0;flex:1;">
@@ -1969,6 +2021,7 @@
             <span>${esc(timeLabel)}</span>
           </div>
           <div style="font-size:11px;color:#8ea3c2;display:flex;gap:8px;flex-wrap:wrap;margin-top:2px;">
+            ${virtualSummary}
             <span>${esc(aiSummary)}</span>
             <span>${esc(autonomySummary)}</span>
             <span>${esc(newsSummary)}</span>
@@ -1980,7 +2033,7 @@
             ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#f0b429;" data-action="cancel-proposal" data-proposal-id="${esc(pid)}" title="取消运行">停</button>`
             : ''}
           ${retirable ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#f59e0b;" data-action="retire-proposal" data-proposal-id="${esc(pid)}" title="退役">退</button>` : ''}
-          <button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#e05260;" data-action="delete-proposal" data-proposal-id="${esc(pid)}" title="删除">删</button>
+          ${virtual ? '' : `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#e05260;" data-action="delete-proposal" data-proposal-id="${esc(pid)}" title="删除">删</button>`}
         </div>
       </div>`;
     }).join('');
@@ -3625,7 +3678,12 @@
         loadCandidates(selectCandidateId),
       ]);
       mergeCandidateFallbackProposals();
-      applyWorkbenchSelection(selectProposalId);
+      const autoSelectedCandidateId = applyWorkbenchSelection(selectProposalId);
+      if (autoSelectedCandidateId) {
+        await viewCandidate(autoSelectedCandidateId, { keepContent: true }).catch(() => {
+          renderCandidateDetailPlaceholder(state.selectedProposalId);
+        });
+      }
       normalizeDomText(document.getElementById('ai-research'));
       emitWorkbenchState('refresh-workbench');
       await Promise.allSettled(ancillaryTasks);
@@ -3677,15 +3735,20 @@
     const has = !!state.selectedProposalId;
     const proposal = state.proposals.find((item) => String(item?.proposal_id || '').trim() === String(state.selectedProposalId || '').trim()) || null;
     const status = String(proposal?.status || '').trim();
+    const virtualProposal = isVirtualProposal(proposal);
     const runnable = proposal ? isRunnableProposalStatus(status) : has;
     btn.textContent = ['research_queued', 'research_running'].includes(status) ? '3) 运行中...' : '3) 运行研究';
-    btn.disabled = !has || busy || !runnable;
+    btn.disabled = !has || busy || !runnable || virtualProposal;
     if (busy) {
       btn.title = '当前有任务执行中，请等待完成后再运行研究';
       return;
     }
     if (!has) {
       btn.title = '请先在左侧选择研究任务';
+      return;
+    }
+    if (virtualProposal) {
+      btn.title = '该条目由候选结果回填，缺少原始研究任务，不能直接运行；请查看候选详情或重新生成提案';
       return;
     }
     if (!runnable) {
@@ -3921,6 +3984,10 @@
   async function runProposal(proposalId) {
     if (!proposalId) { notify('请先选择研究任务', true); return; }
     const proposal = state.proposals.find(p => String(p?.proposal_id || '') === String(proposalId));
+    if (isVirtualProposal(proposal)) {
+      notify('该条目由候选结果回填，不能直接运行；请重新生成提案后再运行研究', true);
+      return;
+    }
     const proposalStatus = String(proposal?.status || '');
     if (proposal && !isRunnableProposalStatus(proposalStatus)) {
       notify(`当前状态「${statusText(proposalStatus)}」不可运行`, true);
@@ -3945,6 +4012,10 @@
   async function cancelProposal(proposalId) {
     if (!proposalId) return;
     const proposal = state.proposals.find(p => String(p?.proposal_id || '') === String(proposalId));
+    if (isVirtualProposal(proposal)) {
+      notify('候选回填条目没有可取消的原始研究任务', true);
+      return;
+    }
     const status = String(proposal?.status || '');
     if (!['research_queued', 'research_running'].includes(status)) {
       notify(`当前状态「${statusText(status)}」无需取消`, true);
@@ -3980,6 +4051,10 @@
   /* ── 任务进度轮询 ── */
   async function retireProposal(proposalId) {
     const item = state.proposals.find(p => String(p?.proposal_id || '') === proposalId);
+    if (isVirtualProposal(item)) {
+      notify('候选回填条目没有可退役的原始研究任务', true);
+      return;
+    }
     const status = String(item?.status || '');
     if (!proposalId) {
       notify('缺少 proposal_id，无法退役', true);
@@ -4149,6 +4224,10 @@
   async function deleteProposal(proposalId) {
     if (!proposalId) return;
     const item = state.proposals.find(p => String(p?.proposal_id || '') === proposalId);
+    if (isVirtualProposal(item)) {
+      notify('候选回填条目没有可删除的原始研究任务；如需清理，请删除对应候选记录', true);
+      return;
+    }
     const blocked = new Set(['paper_running','shadow_running','live_running']);
     if (item && blocked.has(String(item?.status || ''))) {
       notify(`当前状态「${statusText(item.status)}」不可删除，请先停止后再删除。`, true);

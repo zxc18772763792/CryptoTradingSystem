@@ -21,14 +21,18 @@ def test_ai_research_template_loads_phase5_modules():
     assert 'id="ai-oneclick-btn"' in template
     assert 'id="ai-oneclick-feedback"' in template
     assert 'id="ai-candidate-cards"' in template
+    assert 'id="ai-queue-title"' in template
+    assert 'id="ai-queue-hint"' in template
     assert '页面时区：上海时间 (UTC+8)' in template
     assert '页面时区：上海时间 (UTC+8)' in news_template
+    assert '/static/favicon.svg' in template
+    assert '/static/favicon.svg' in news_template
     assert "/static/js/ai_research.js" in template
     assert "/static/js/ai_research_diagnostics.js" in template
     assert "/static/js/ai_research_runtime.js" in template
     assert "/static/js/ai_research_agent.js" in template
     assert "/static/js/ai_research_patch.js" not in template
-    assert '/static/js/news_tab_runtime.js?v=13' in news_template
+    assert '/static/js/news_tab_runtime.js?v=14' in news_template
 
 
 def test_ai_research_phase5_assets_exist_and_define_flow_styles():
@@ -59,6 +63,8 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "单次试跑已触发" in agent_js
     assert "已有一轮在运行，手动触发已排队" in agent_js
     assert "function selectProposal(" in ai_js
+    assert "function isVirtualProposal(" in ai_js
+    assert "function autoSelectCandidateForProposal(" in ai_js
     assert "buildPlannerConstraints" in ai_js
     assert "withActionLock('oneclick'" in ai_js
     assert "buildOneClickFailureFeedback" in ai_js
@@ -66,6 +72,8 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "renderOneClickFeedback" in ai_js
     assert "liveDecisionActivityLastGood" in ai_js
     assert "FLOW_HINT_QUICK_PATH" in ai_js
+    assert "候选回填" in ai_js
+    assert "该条目由候选结果回填" in ai_js
     assert "Asia/Shanghai" in ai_js
     assert "Asia/Shanghai" in agent_js
     assert "window.CTS_UI_TIMEZONE" in ai_js
