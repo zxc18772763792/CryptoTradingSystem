@@ -1593,7 +1593,11 @@
     const newsCount = Number(lastResearch?.news_events_count || 0);
     const fundingAvailable = !!lastResearch?.funding_available;
     const job = item?.job || {};
-    const lastTs = job?.finished_at || job?.started_at || job?.created_at || item?.updated_at || item?.created_at;
+    const fallbackCandidateTs =
+      item?.metadata?.fallback_candidate_updated_at
+      || item?.metadata?.fallback_candidate_created_at
+      || '';
+    const lastTs = job?.finished_at || job?.started_at || job?.created_at || item?.updated_at || item?.created_at || fallbackCandidateTs;
     return {
       totalTemplates: templates.length,
       draftCount: drafts.length,
@@ -1780,6 +1784,47 @@
     return !!item?.metadata?.virtual_context;
   }
 
+  function proposalStatusPriority(status) {
+    return {
+      research_running: 0,
+      research_queued: 1,
+      paper_running: 2,
+      live_running: 3,
+      live_candidate: 4,
+      shadow_running: 5,
+      validated: 6,
+      new: 7,
+      draft: 8,
+      rejected: 9,
+      retired: 10,
+    }[String(status || '').trim()] ?? 50;
+  }
+
+  function sortProposalsForWorkbench(items, activeProposalId = '') {
+    const activeId = String(activeProposalId || '').trim();
+    return toArray(items)
+      .map((item, index) => {
+        const meta = getProposalResearchMeta(item);
+        const tsMs = new Date(String(meta?.lastTs || '')).getTime() || 0;
+        return {
+          item,
+          index,
+          tsMs,
+          active: !!(activeId && String(item?.proposal_id || '').trim() === activeId),
+          virtual: isVirtualProposal(item),
+          statusPriority: proposalStatusPriority(item?.status),
+        };
+      })
+      .sort((a, b) => {
+        if (a.active !== b.active) return a.active ? -1 : 1;
+        if (a.virtual !== b.virtual) return a.virtual ? 1 : -1;
+        if (a.tsMs !== b.tsMs) return b.tsMs - a.tsMs;
+        if (a.statusPriority !== b.statusPriority) return a.statusPriority - b.statusPriority;
+        return a.index - b.index;
+      })
+      .map((entry) => entry.item);
+  }
+
   function findProposalById(proposalId) {
     const target = String(proposalId || '').trim();
     if (!target) return null;
@@ -1803,16 +1848,23 @@
     if (!proposalId) return null;
     const displayName = String(candidate?.metadata?.proposal_display_name || '').trim()
       || `候选链路 · ${String(candidate?.strategy || '--')} @ ${String(candidate?.symbol || '--')} ${String(candidate?.timeframe || '--')}`;
+    const candidateCreatedAt = String(candidate?.created_at || '').trim();
+    const candidateUpdatedAt = String(candidate?.updated_at || candidate?.created_at || '').trim();
     return {
       proposal_id: proposalId,
       thesis: String(candidate?.metadata?.thesis || candidate?.strategy || displayName).trim(),
       research_mode: String(candidate?.metadata?.research_mode || 'template').trim() || 'template',
       status: String(candidate?.status || 'validated').trim() || 'validated',
+      created_at: candidateCreatedAt,
+      updated_at: candidateUpdatedAt,
       metadata: {
         display_name: displayName,
         search_summary: candidate?.metadata?.search_summary || {},
         search_budget: candidate?.metadata?.search_budget || {},
         strategy_drafts: candidate?.metadata?.strategy_drafts || [],
+        fallback_candidate_id: String(candidate?.candidate_id || '').trim(),
+        fallback_candidate_created_at: candidateCreatedAt,
+        fallback_candidate_updated_at: candidateUpdatedAt,
         virtual_context: true,
       },
     };
@@ -1833,7 +1885,7 @@
       fallbackProposals.push(fallback);
     });
     if (!fallbackProposals.length) return 0;
-    state.proposals = [...fallbackProposals, ...state.proposals];
+    state.proposals = sortProposalsForWorkbench([...fallbackProposals, ...state.proposals], state.selectedProposalId);
     return fallbackProposals.length;
   }
 
@@ -1971,8 +2023,9 @@
     const titleEl = document.getElementById('ai-queue-title');
     const hintEl = document.getElementById('ai-queue-hint');
     if (!box) return;
-    const realCount = state.proposals.filter((item) => !isVirtualProposal(item)).length;
-    const virtualCount = state.proposals.filter((item) => isVirtualProposal(item)).length;
+    const visibleProposals = sortProposalsForWorkbench(state.proposals, state.selectedProposalId);
+    const realCount = visibleProposals.filter((item) => !isVirtualProposal(item)).length;
+    const virtualCount = visibleProposals.filter((item) => isVirtualProposal(item)).length;
     if (badge) {
       if (realCount && virtualCount) badge.textContent = `${realCount} 项 + ${virtualCount} 条回填`;
       else if (realCount) badge.textContent = `${realCount} 项`;
@@ -1988,13 +2041,13 @@
         hintEl.textContent = '这里负责切换当前提案。选中后去中栏执行第 3 步“运行研究”，再到右侧完成第 4 步“注册/部署”。';
       }
     }
-    if (!state.proposals.length) {
+    if (!visibleProposals.length) {
       box.innerHTML = '<div style="color:#6b7fa0;font-size:12px;padding:8px 0;">暂无研究任务</div>';
       normalizeDomText(box);
       emitWorkbenchState('proposal-list');
       return;
     }
-    box.innerHTML = state.proposals.map((item, idx) => {
+    box.innerHTML = visibleProposals.map((item, idx) => {
       const pid = String(item?.proposal_id || '');
       const sel = pid === state.selectedProposalId ? ' selected' : '';
       const st = String(item?.status || 'draft');
@@ -3637,9 +3690,9 @@
     const preservedProposalId = String(selectId || state.selectedProposalId || proposalIdForCandidate(state.selectedCandidateId) || '').trim();
     const preservedProposal = findProposalById(preservedProposalId);
     const res = await aiApi('/proposals?limit=50', { timeoutMs: 60000 });
-    state.proposals = toArray(res?.items);
+    state.proposals = sortProposalsForWorkbench(toArray(res?.items));
     if (preservedProposal && !findProposalById(preservedProposalId)) {
-      state.proposals = [preservedProposal, ...state.proposals];
+      state.proposals = sortProposalsForWorkbench([preservedProposal, ...state.proposals], preservedProposalId);
     }
     if (selectId) state.selectedProposalId = selectId;
     syncSelectedProposal(selectId);

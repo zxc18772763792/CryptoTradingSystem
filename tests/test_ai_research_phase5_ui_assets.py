@@ -65,6 +65,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "function selectProposal(" in ai_js
     assert "function isVirtualProposal(" in ai_js
     assert "function autoSelectCandidateForProposal(" in ai_js
+    assert "function sortProposalsForWorkbench(" in ai_js
     assert "buildPlannerConstraints" in ai_js
     assert "withActionLock('oneclick'" in ai_js
     assert "buildOneClickFailureFeedback" in ai_js
@@ -74,6 +75,10 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "FLOW_HINT_QUICK_PATH" in ai_js
     assert "候选回填" in ai_js
     assert "该条目由候选结果回填" in ai_js
+    assert "fallback_candidate_created_at" in ai_js
+    assert "fallback_candidate_updated_at" in ai_js
+    assert "const visibleProposals = sortProposalsForWorkbench(state.proposals, state.selectedProposalId);" in ai_js
+    assert "state.proposals = sortProposalsForWorkbench(toArray(res?.items));" in ai_js
     assert "Asia/Shanghai" in ai_js
     assert "Asia/Shanghai" in agent_js
     assert "window.CTS_UI_TIMEZONE" in ai_js
