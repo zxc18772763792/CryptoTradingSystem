@@ -93,6 +93,8 @@
     signalTimer: null,
     refreshTimer: null,
     liveSignalTimer: null,
+    signalKickoffTimer: null,
+    liveSignalKickoffTimer: null,
     signalLoading: false,
     signalPanelCollapsed: false,
     jobPollingTimers: {},   // proposalId → intervalId
@@ -1698,18 +1700,21 @@
     normalizeDomText(box);
   }
 
-  async function loadSignal(symbol) {
+  async function loadSignal(symbol, options = {}) {
     if (state.signalLoading) return;
     state.signalLoading = true;
     const statusEl = document.getElementById('signal-status');
     const selectedSymbol = String(symbol || document.getElementById('signal-symbol')?.value || 'BTC/USDT').trim() || 'BTC/USDT';
-    const watchlist = Array.from(new Set([...DEFAULT_SIGNAL_SYMBOLS, selectedSymbol]));
+    const compact = !!options.compact;
+    const watchlist = compact
+      ? [selectedSymbol]
+      : Array.from(new Set([...DEFAULT_SIGNAL_SYMBOLS, selectedSymbol]));
     if (statusEl) statusEl.textContent = `刷新 ${watchlist.length} 个币种...`;
     renderSignalMini();
     try {
       const results = await Promise.all(watchlist.map(async (sym) => {
         try {
-          const data = await aiApi(`/signals/latest?symbol=${encodeURIComponent(sym)}`, { timeoutMs: 30000 });
+          const data = await aiApi(`/signals/latest?symbol=${encodeURIComponent(sym)}`, { timeoutMs: 12000 });
           return { sym, data, error: null };
         } catch (err) {
           return { sym, data: null, error: err };
@@ -3602,18 +3607,30 @@
 
   async function refreshWorkbench(selectProposalId = '', selectCandidateId = '') {
     return runStateSingleFlight('refreshWorkbenchInFlight', async () => {
-      await loadRuntimeConfig();
-      await Promise.all([
-        loadProposals(selectProposalId),
-        loadCandidates(selectCandidateId),
-        loadPendingApprovals(),
+      const ancillaryTasks = [
+        loadRuntimeConfig().catch((err) => {
+          console.debug('loadRuntimeConfig(refreshWorkbench) failed:', err);
+          return null;
+        }),
+        loadPendingApprovals().catch((err) => {
+          console.debug('loadPendingApprovals(refreshWorkbench) failed:', err);
+          return null;
+        }),
         loadAgentStatus().catch(() => null),
         loadLiveDecisionActivitySummary().catch(() => null),
+      ];
+
+      await Promise.allSettled([
+        loadProposals(selectProposalId),
+        loadCandidates(selectCandidateId),
       ]);
       mergeCandidateFallbackProposals();
       applyWorkbenchSelection(selectProposalId);
       normalizeDomText(document.getElementById('ai-research'));
       emitWorkbenchState('refresh-workbench');
+      await Promise.allSettled(ancillaryTasks);
+      normalizeDomText(document.getElementById('ai-research'));
+      emitWorkbenchState('refresh-workbench-meta');
     });
   }
 
@@ -4337,14 +4354,20 @@
     clearInterval(state.signalTimer);
     clearInterval(state.refreshTimer);
     clearInterval(state.liveSignalTimer);
+    clearTimeout(state.signalKickoffTimer);
+    clearTimeout(state.liveSignalKickoffTimer);
     if (document.hidden || !isAiWorkspaceActive()) return;
     if (!canRunAiPolling()) return;
 
     if (isAiResearchActive()) {
-      loadSignal().catch(() => {});
+      state.signalKickoffTimer = window.setTimeout(() => {
+        state.signalKickoffTimer = null;
+        if (!isAiResearchActive() || document.hidden || !canRunAiPolling()) return;
+        loadSignal(undefined, { compact: true }).catch(() => {});
+      }, 1200);
       state.signalTimer = setInterval(() => {
         if (!isAiResearchActive() || document.hidden || !canRunAiPolling()) return;
-        loadSignal().catch(() => {});
+        loadSignal(undefined, { compact: true }).catch(() => {});
       }, SIGNAL_INTERVAL_MS);
       state.refreshTimer = setInterval(() => {
         if (!isAiResearchActive() || document.hidden || !canRunAiPolling()) return;
@@ -4353,7 +4376,11 @@
     }
 
     if (isAiWorkspaceActive()) {
-      loadLiveSignals().catch(() => {});
+      state.liveSignalKickoffTimer = window.setTimeout(() => {
+        state.liveSignalKickoffTimer = null;
+        if (!isAiWorkspaceActive() || document.hidden || !canRunAiPolling()) return;
+        loadLiveSignals().catch(() => {});
+      }, isAiResearchActive() ? 1800 : 600);
       state.liveSignalTimer = setInterval(() => {
         if (!isAiWorkspaceActive() || document.hidden || !canRunAiPolling()) return;
         loadLiveSignals().catch(() => {});
@@ -4366,10 +4393,14 @@
     clearInterval(state.refreshTimer);
     clearInterval(state.liveSignalTimer);
     clearTimeout(state.liveDecisionActivityRetryTimer);
+    clearTimeout(state.signalKickoffTimer);
+    clearTimeout(state.liveSignalKickoffTimer);
     state.signalTimer = null;
     state.refreshTimer = null;
     state.liveSignalTimer = null;
     state.liveDecisionActivityRetryTimer = null;
+    state.signalKickoffTimer = null;
+    state.liveSignalKickoffTimer = null;
   }
 
   function isAiAgentActive() {
