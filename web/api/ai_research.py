@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Union
 from fastapi import APIRouter, HTTPException, Request
 from loguru import logger
 import pandas as pd
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from config.database import StrategyPerformanceSnapshot, async_session_maker
 from config.settings import settings
@@ -161,8 +161,9 @@ class AILiveDecisionConfigUpdateRequest(BaseModel):
 
 
 class AIAutonomousAgentConfigUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: Optional[bool] = None
-    auto_start: Optional[bool] = None
     mode: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
@@ -1759,12 +1760,10 @@ async def get_ai_live_decision_summary(request: Request):
     }
 
 
-@router.get("/runtime-config/autonomous-agent")
 async def get_ai_autonomous_agent_runtime_config(request: Request):
     return autonomous_trading_agent.get_runtime_config()
 
 
-@router.post("/runtime-config/autonomous-agent")
 async def update_ai_autonomous_agent_runtime_config(
     request: Request,
     payload: AIAutonomousAgentConfigUpdateRequest,
@@ -1776,7 +1775,6 @@ async def update_ai_autonomous_agent_runtime_config(
     return {"updated": True, "config": updated}
 
 
-@router.get("/autonomous-agent/status")
 async def get_ai_autonomous_agent_status(request: Request):
     cfg = autonomous_trading_agent.get_runtime_config()
     if str(cfg.get("symbol_mode") or "manual").strip().lower() == "auto":
@@ -1790,7 +1788,6 @@ async def get_ai_autonomous_agent_status(request: Request):
     }
 
 
-@router.post("/autonomous-agent/start")
 async def start_ai_autonomous_agent(
     request: Request,
     payload: AIAutonomousAgentStartRequest = AIAutonomousAgentStartRequest(),
@@ -1801,13 +1798,11 @@ async def start_ai_autonomous_agent(
     return {"started": True, "status": status, "config": autonomous_trading_agent.get_runtime_config()}
 
 
-@router.post("/autonomous-agent/stop")
 async def stop_ai_autonomous_agent(request: Request):
     status = await autonomous_trading_agent.stop()
     return {"stopped": True, "status": status, "config": autonomous_trading_agent.get_runtime_config()}
 
 
-@router.post("/autonomous-agent/run-once")
 async def run_ai_autonomous_agent_once(
     request: Request,
     payload: AIAutonomousAgentRunOnceRequest = AIAutonomousAgentRunOnceRequest(),
@@ -1818,20 +1813,17 @@ async def run_ai_autonomous_agent_once(
     )
 
 
-@router.get("/autonomous-agent/journal")
 async def get_ai_autonomous_agent_journal(request: Request, limit: int = 50):
     rows = autonomous_trading_agent.read_journal(limit=limit)
     return {"items": rows, "count": len(rows)}
 
 
-@router.get("/autonomous-agent/review")
 async def get_ai_autonomous_agent_review(request: Request, limit: int = 12):
     payload = _build_autonomous_agent_review(limit=limit)
     payload["learning_memory"] = autonomous_trading_agent.get_learning_memory(force=True)
     return payload
 
 
-@router.get("/autonomous-agent/symbol-ranking")
 async def get_ai_autonomous_agent_symbol_ranking(request: Request, limit: int = 10, refresh: bool = False):
     try:
         payload = await asyncio.wait_for(
@@ -3079,7 +3071,6 @@ async def get_live_signals(request: Request, symbol: Optional[str] = None):
     return await _build_candidate_live_signals_payload(request, symbol=symbol)
 
 
-@router.get("/autonomous-agent/live-signals")
 async def get_autonomous_agent_live_signals(request: Request, symbol: Optional[str] = None):
     """Return live signal snapshots for the autonomous agent watchlist only."""
     return await _build_autonomous_watchlist_live_signals_payload(symbol=symbol)

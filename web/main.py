@@ -1109,6 +1109,7 @@ templates_path.mkdir(parents=True, exist_ok=True)
 templates = Jinja2Templates(directory=str(templates_path))
 
 from web.api import (
+    ai_agent,
     backtest,
     data,
     news,
@@ -1132,6 +1133,7 @@ app.include_router(trading_runtime.router, prefix="/api/trading", tags=["trading
 app.include_router(data.router, prefix="/api/data", tags=["data"])
 app.include_router(research.router, prefix="/api/research", tags=["research"])
 app.include_router(ai_research.router, prefix="/api/ai", tags=["ai_research"])
+app.include_router(ai_agent.router, prefix="/api/ai", tags=["ai_agent"])
 app.include_router(strategies.router, prefix="/api/strategies", tags=["strategies"])
 app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["notifications"])

@@ -13,11 +13,35 @@
   const AGENT_RUN_ONCE_API = '/ai/autonomous-agent/run-once';
   const AGENT_CONFIG_API = '/ai/runtime-config/autonomous-agent';
   const AGENT_SYMBOL_RANKING_API = '/ai/autonomous-agent/symbol-ranking';
+  const AGENT_STATUS_TIMEOUT_MS = 60000;
+  const AGENT_DETAIL_TIMEOUT_MS = 60000;
 
   let pollTimer = null;
+  let initialized = false;
+  let initRetryBound = false;
   let lastStatusSnapshot = null;
   let lastConfigSnapshot = null;
   let statusInFlight = null;
+
+  function scheduleInitRetry() {
+    if (typeof window === 'undefined') return;
+    window.setTimeout(() => init(), 0);
+    window.setTimeout(() => init(), 120);
+  }
+
+  function bindInitRetry() {
+    if (initRetryBound || typeof document === 'undefined') return;
+    initRetryBound = true;
+    document.addEventListener('click', (event) => {
+      if (event.target instanceof Element && event.target.closest('.tab-btn')) {
+        scheduleInitRetry();
+      }
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) scheduleInitRetry();
+    });
+    window.addEventListener('load', scheduleInitRetry);
+  }
   let rankingInFlight = null;
   let lastRankingAutoRefreshAt = 0;
   let rankingPendingRetryTimer = null;
@@ -527,6 +551,7 @@
       stopPolling();
       return;
     }
+    loadAgentStatus({ includeDetails: true, notifyOnError: false }).catch(() => {});
     startPolling();
   }
 
@@ -847,7 +872,7 @@
     const el = document.getElementById('ai-agent-journal');
     if (!el) return;
     try {
-      const response = await rootApi(`${AGENT_JOURNAL_API}?limit=15`);
+      const response = await rootApi(`${AGENT_JOURNAL_API}?limit=15`, { timeoutMs: AGENT_DETAIL_TIMEOUT_MS });
       const rows = Array.isArray(response?.items) ? response.items.slice().reverse() : [];
       const summaryHtml = buildAgentJournalCurrentSummary(lastStatusSnapshot || {}, lastConfigSnapshot || {});
       if (!rows.length) {
@@ -1097,7 +1122,7 @@
     const listEl = document.getElementById('ai-agent-review');
     if (!summaryEl || !listEl) return null;
     try {
-      const response = await rootApi(`${AGENT_REVIEW_API}?limit=12`);
+      const response = await rootApi(`${AGENT_REVIEW_API}?limit=12`, { timeoutMs: AGENT_DETAIL_TIMEOUT_MS });
       renderAgentReview(response || {});
       return response;
     } catch (_) {
@@ -1206,6 +1231,7 @@
     if (!document.getElementById('ai-agent-card')) return null;
     const includeDetails = options.includeDetails !== false && isAgentTabActive();
     const notifyOnError = options.notifyOnError === true;
+    const timeoutMs = Math.max(5000, Number(options.timeoutMs || AGENT_STATUS_TIMEOUT_MS));
     if (statusInFlight) {
       if (includeDetails) {
         return statusInFlight.then((response) => {
@@ -1218,7 +1244,7 @@
     }
     const task = (async () => {
       try {
-        const response = await rootApi(AGENT_STATUS_API);
+        const response = await rootApi(AGENT_STATUS_API, { timeoutMs });
         lastStatusSnapshot = response?.status || {};
         lastConfigSnapshot = response?.config || {};
         renderAgentPanel(response?.status || {}, response?.config || {});
@@ -1360,7 +1386,16 @@
   }
 
   function init() {
+    bindInitRetry();
     if (!document.getElementById('ai-agent-card')) return;
+    if (initialized) {
+      syncPollingState();
+      if (isAgentTabActive()) {
+        loadAgentStatus({ includeDetails: true }).catch(() => {});
+      }
+      return;
+    }
+    initialized = true;
 
     const modules = aiRoot().modules || {};
     modules.agent = {
@@ -1393,7 +1428,7 @@
 
     document.addEventListener('click', (event) => {
       if (event.target instanceof Element && event.target.closest('.tab-btn')) {
-        syncPollingState();
+        window.setTimeout(() => syncPollingState(), 0);
       }
     });
     document.addEventListener('visibilitychange', syncPollingState);
