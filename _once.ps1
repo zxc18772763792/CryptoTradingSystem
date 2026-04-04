@@ -318,23 +318,35 @@ if ($shouldStartPmWorker) {
 Start-Sleep -Seconds 2
 
 $status = $null
+$health = $null
 $deadline = (Get-Date).AddSeconds([Math]::Max(3, $HealthWaitSec))
 while ((Get-Date) -lt $deadline) {
     try {
-        $status = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/status" -TimeoutSec 4
-        break
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 12
+        if ($health) {
+            try {
+                $status = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/status" -TimeoutSec 8
+            } catch {
+            }
+            break
+        }
     } catch {
         Start-Sleep -Milliseconds 800
     }
 }
 
-if ($status) {
-    Write-Host "Started PID=$($proc.Id), status=$($status.status), mode=$($status.trading_mode), profile=$startupProfile, url=http://127.0.0.1:$Port"
+if ($health) {
+    $runtimeStatus = if ($status) { $status.status } else { $health.status }
+    $tradingMode = if ($status -and $status.trading_mode) { $status.trading_mode } else { "unknown" }
+    Write-Host "Started PID=$($proc.Id), status=$runtimeStatus, mode=$tradingMode, profile=$startupProfile, url=http://127.0.0.1:$Port"
+    if (-not $status) {
+        Write-Host "Status endpoint is slower than the startup probe window, but the health endpoint is already responding." -ForegroundColor Yellow
+    }
     if ($OpenBrowser) {
         Open-WebConsole -WebPort $Port
     }
 } else {
-    Write-Host "Process started (PID=$($proc.Id)) but status endpoint not ready within ${HealthWaitSec}s. Startup profile: $startupProfile."
+    Write-Host "Process started (PID=$($proc.Id)) but health endpoint not ready within ${HealthWaitSec}s. Startup profile: $startupProfile."
 }
 
 # 测试数据源 (可选)

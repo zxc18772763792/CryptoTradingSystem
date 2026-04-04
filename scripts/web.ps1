@@ -195,8 +195,11 @@ function Test-IsManagedWebProcess {
 function Get-HealthSummary {
     param([int]$PortNumber)
 
+    $healthTimeoutSec = 12
+    $statusTimeoutSec = 8
+
     try {
-        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/health" -TimeoutSec 4
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/health" -TimeoutSec $healthTimeoutSec
     }
     catch {
         return $null
@@ -204,7 +207,7 @@ function Get-HealthSummary {
 
     $status = $null
     try {
-        $status = Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/api/status" -TimeoutSec 4
+        $status = Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/api/status" -TimeoutSec $statusTimeoutSec
     }
     catch {
     }
