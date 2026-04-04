@@ -24,6 +24,7 @@ class RSIStrategy(StrategyBase):
         if params:
             default_params.update(params)
         super().__init__(name, default_params)
+        self._regime_bias: Dict[str, int] = {}
 
     def _calculate_rsi(self, data: pd.DataFrame, period: int) -> pd.Series:
         delta = data["close"].diff()
@@ -47,10 +48,13 @@ class RSIStrategy(StrategyBase):
 
         oversold = float(self.params["oversold"])
         overbought = float(self.params["overbought"])
+        exit_oversold = float(self.params.get("exit_oversold", 40))
+        exit_overbought = float(self.params.get("exit_overbought", 60))
         signals: List[Signal] = []
 
         if prev_rsi < oversold <= current_rsi:
             strength = min(1.0, max(0.1, (oversold - prev_rsi) / max(oversold, 1e-9) * 1.5 + 0.3))
+            self._regime_bias[symbol] = 1
             signals.append(
                 Signal(
                     symbol=symbol,
@@ -67,6 +71,7 @@ class RSIStrategy(StrategyBase):
             logger.info(f"RSI oversold bounce for {symbol}: RSI={current_rsi:.2f}")
         elif prev_rsi > overbought >= current_rsi:
             strength = min(1.0, max(0.1, (prev_rsi - overbought) / max(100 - overbought, 1e-9) * 1.5 + 0.3))
+            self._regime_bias[symbol] = -1
             signals.append(
                 Signal(
                     symbol=symbol,
@@ -81,6 +86,42 @@ class RSIStrategy(StrategyBase):
                 )
             )
             logger.info(f"RSI overbought decline for {symbol}: RSI={current_rsi:.2f}")
+        elif int(self._regime_bias.get(symbol, 0) or 0) > 0 and prev_rsi < exit_oversold <= current_rsi:
+            signals.append(
+                Signal(
+                    symbol=symbol,
+                    signal_type=SignalType.CLOSE_LONG,
+                    price=current_price,
+                    timestamp=timestamp,
+                    strategy_name=self.name,
+                    strength=0.6,
+                    metadata={
+                        "rsi": current_rsi,
+                        "exit_threshold": exit_oversold,
+                        "reason": "rsi_long_exit",
+                    },
+                )
+            )
+            self._regime_bias.pop(symbol, None)
+            logger.info(f"RSI long exit for {symbol}: RSI={current_rsi:.2f}")
+        elif int(self._regime_bias.get(symbol, 0) or 0) < 0 and prev_rsi > exit_overbought >= current_rsi:
+            signals.append(
+                Signal(
+                    symbol=symbol,
+                    signal_type=SignalType.CLOSE_SHORT,
+                    price=current_price,
+                    timestamp=timestamp,
+                    strategy_name=self.name,
+                    strength=0.6,
+                    metadata={
+                        "rsi": current_rsi,
+                        "exit_threshold": exit_overbought,
+                        "reason": "rsi_short_exit",
+                    },
+                )
+            )
+            self._regime_bias.pop(symbol, None)
+            logger.info(f"RSI short exit for {symbol}: RSI={current_rsi:.2f}")
 
         return signals
 

@@ -122,7 +122,7 @@ class MACDStrategy(StrategyBase):
 
 
 class MACDHistogramStrategy(StrategyBase):
-    """MACD柱状图策略"""
+    """MACD histogram crossover strategy."""
 
     def __init__(
         self,
@@ -133,7 +133,7 @@ class MACDHistogramStrategy(StrategyBase):
             "fast_period": 12,
             "slow_period": 26,
             "signal_period": 9,
-            "min_histogram": 0.0001,  # 最小柱状图阈值
+            "min_histogram": 0.0001,  # ????????????
             "stop_loss_pct": 0.02,
             "take_profit_pct": 0.05,
         }
@@ -143,7 +143,7 @@ class MACDHistogramStrategy(StrategyBase):
         super().__init__(name, default_params)
 
     def _calculate_macd(self, data: pd.DataFrame) -> tuple:
-        """计算MACD"""
+        """Compute MACD values."""
         fast = self.params["fast_period"]
         slow = self.params["slow_period"]
         signal = self.params["signal_period"]
@@ -158,55 +158,65 @@ class MACDHistogramStrategy(StrategyBase):
         return macd, signal_line, histogram
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
-        """生成交易信号"""
+        """Generate trading signals."""
         if data.empty or len(data) < self.params["slow_period"] + self.params["signal_period"]:
             return []
 
         signals = []
 
-        macd, signal_line, histogram = self._calculate_macd(data)
+        _, _, histogram = self._calculate_macd(data)
 
-        current_hist = histogram.iloc[-1]
-        prev_hist = histogram.iloc[-2]
+        current_hist = float(histogram.iloc[-1])
+        prev_hist = float(histogram.iloc[-2])
+        min_histogram = max(0.0, float(self.params.get("min_histogram", 0.0) or 0.0))
+        hist_scale = max(min_histogram, 1e-9)
 
         current_price = data["close"].iloc[-1]
         timestamp = datetime.now()
         symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
 
-        # 柱状图由负转正（多头动能增强）
-        if prev_hist < 0 and current_hist > 0:
+        # Bullish crossover with enough histogram expansion to avoid noise.
+        if prev_hist <= -min_histogram and current_hist >= min_histogram:
             signal = Signal(
                 symbol=symbol,
                 signal_type=SignalType.BUY,
                 price=current_price,
                 timestamp=timestamp,
                 strategy_name=self.name,
-                strength=min(abs(current_hist) * 100, 1.0),
+                strength=min(abs(current_hist) / hist_scale, 1.0),
                 stop_loss=current_price * (1 - self.params["stop_loss_pct"]),
                 take_profit=current_price * (1 + self.params["take_profit_pct"]),
-                metadata={"histogram": current_hist}
+                metadata={
+                    "histogram": current_hist,
+                    "prev_histogram": prev_hist,
+                    "min_histogram": min_histogram,
+                }
             )
             signals.append(signal)
 
-        # 柱状图由正转负（空头动能增强）
-        elif prev_hist > 0 and current_hist < 0:
+        # Bearish crossover with enough histogram expansion to avoid noise.
+        elif prev_hist >= min_histogram and current_hist <= -min_histogram:
             signal = Signal(
                 symbol=symbol,
                 signal_type=SignalType.SELL,
                 price=current_price,
                 timestamp=timestamp,
                 strategy_name=self.name,
-                strength=min(abs(current_hist) * 100, 1.0),
+                strength=min(abs(current_hist) / hist_scale, 1.0),
                 stop_loss=current_price * (1 + self.params["stop_loss_pct"]),
                 take_profit=current_price * (1 - self.params["take_profit_pct"]),
-                metadata={"histogram": current_hist}
+                metadata={
+                    "histogram": current_hist,
+                    "prev_histogram": prev_hist,
+                    "min_histogram": min_histogram,
+                }
             )
             signals.append(signal)
 
         return signals
 
     def get_required_data(self) -> Dict[str, Any]:
-        """获取所需数据"""
+        """Describe required market data."""
         return {
             "type": "kline",
             "columns": ["close"],

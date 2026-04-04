@@ -1009,28 +1009,39 @@ class VaRBreakoutStrategy(FactorStrategyBase):
 
         var = returns.rolling(n).apply(calc_var, raw=False)
 
-        current_ret = returns.iloc[-1]
-        current_var = var.iloc[-1]
+        current_ret = float(returns.iloc[-1])
+        current_var = float(var.iloc[-1])
+        var_threshold = abs(current_var) * float(self.params["multiplier"])
 
         # Breakout: return exceeds VaR significantly
         if current_var != 0 and not np.isnan(current_var):
             # Positive breakout
-            if current_ret < current_var * self.params["multiplier"]:
+            if current_ret >= var_threshold:
                 signal = self._create_signal(
                     symbol, SignalType.BUY, current_price,
                     strength=0.8,
-                    metadata={"return": current_ret, "var": current_var, "breakout": "positive"}
+                    metadata={
+                        "return": current_ret,
+                        "var": current_var,
+                        "var_threshold": var_threshold,
+                        "breakout": "positive",
+                    }
                 )
                 signal.stop_loss = current_price * (1 - self.params["stop_loss_pct"])
                 signal.take_profit = current_price * (1 + self.params["take_profit_pct"])
                 signals.append(signal)
 
             # Negative breakout
-            elif current_ret > -current_var * self.params["multiplier"]:
+            elif current_ret <= -var_threshold:
                 signal = self._create_signal(
                     symbol, SignalType.SELL, current_price,
                     strength=0.8,
-                    metadata={"return": current_ret, "var": current_var, "breakout": "negative"}
+                    metadata={
+                        "return": current_ret,
+                        "var": current_var,
+                        "var_threshold": var_threshold,
+                        "breakout": "negative",
+                    }
                 )
                 signal.stop_loss = current_price * (1 + self.params["stop_loss_pct"])
                 signal.take_profit = current_price * (1 - self.params["take_profit_pct"])

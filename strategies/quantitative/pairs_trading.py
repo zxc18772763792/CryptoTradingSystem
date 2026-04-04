@@ -29,6 +29,36 @@ class PairsTradingStrategy(StrategyBase):
         self._hedge_ratio: Optional[float] = None
         self._spread: Optional[pd.Series] = None
 
+    def _pair_sizing_metadata(
+        self,
+        *,
+        own_symbol: str,
+        pair_symbol: str,
+        hedge_ratio: float,
+        z_score: float,
+        direction: str,
+        pair_regime: str,
+        pair_group_id: str,
+        quantity_scale: float,
+        unit_notional: float,
+        leg_fraction: float,
+        min_leg_fraction: float,
+    ) -> Dict[str, Any]:
+        scale = max(0.001, float(quantity_scale or 0.0))
+        return {
+            "pair": pair_symbol,
+            "hedge_ratio": hedge_ratio,
+            "z_score": z_score,
+            "direction": direction,
+            "pair_regime": pair_regime,
+            "pair_group_id": pair_group_id,
+            "pair_leg_symbol": own_symbol,
+            "pair_quantity_scale": scale,
+            "pair_unit_notional": unit_notional,
+            "pair_leg_notional_fraction": max(1e-6, float(leg_fraction or 0.0)),
+            "pair_min_leg_notional_fraction": max(1e-6, float(min_leg_fraction or 0.0)),
+        }
+
     @staticmethod
     def _safe_symbol(data: pd.DataFrame) -> str:
         if "symbol" in data.columns and len(data["symbol"]) > 0:
@@ -136,6 +166,11 @@ class PairsTradingStrategy(StrategyBase):
         symbol1 = self._safe_symbol(data)
         symbol2 = self._safe_symbol(data2)
         pair_regime = "positive_corr" if hedge_ratio >= 0 else "negative_corr"
+        secondary_scale = self._secondary_quantity(hedge_ratio)
+        unit_notional = max(abs(current_price1) + secondary_scale * abs(current_price2), 1e-9)
+        primary_fraction = max(1e-6, abs(current_price1) / unit_notional)
+        secondary_fraction = max(1e-6, secondary_scale * abs(current_price2) / unit_notional)
+        min_leg_fraction = max(1e-6, min(primary_fraction, secondary_fraction))
 
         signals: List[Signal] = []
 
@@ -143,6 +178,7 @@ class PairsTradingStrategy(StrategyBase):
         if prev_z > -entry_z >= current_z:
             strength = max(0.1, min(abs(current_z) / max(entry_z, 1e-9), 1.0))
             side2 = self._secondary_entry_side("long_spread", hedge_ratio)
+            pair_group_id = f"{self.name}:{timestamp.isoformat()}:{symbol1}:{symbol2}:long_spread"
             signals.append(
                 Signal(
                     symbol=symbol1,
@@ -152,13 +188,19 @@ class PairsTradingStrategy(StrategyBase):
                     strategy_name=self.name,
                     strength=strength,
                     stop_loss=current_price1 * (1 - float(self.params["stop_loss_pct"])),
-                    metadata={
-                        "pair": symbol2,
-                        "hedge_ratio": hedge_ratio,
-                        "z_score": current_z,
-                        "direction": "long_spread",
-                        "pair_regime": pair_regime,
-                    },
+                    metadata=self._pair_sizing_metadata(
+                        own_symbol=symbol1,
+                        pair_symbol=symbol2,
+                        hedge_ratio=hedge_ratio,
+                        z_score=current_z,
+                        direction="long_spread",
+                        pair_regime=pair_regime,
+                        pair_group_id=pair_group_id,
+                        quantity_scale=1.0,
+                        unit_notional=unit_notional,
+                        leg_fraction=primary_fraction,
+                        min_leg_fraction=min_leg_fraction,
+                    ),
                 )
             )
             signals.append(
@@ -169,14 +211,19 @@ class PairsTradingStrategy(StrategyBase):
                     timestamp=timestamp,
                     strategy_name=self.name,
                     strength=strength,
-                    quantity=self._secondary_quantity(hedge_ratio),
-                    metadata={
-                        "pair": symbol1,
-                        "hedge_ratio": hedge_ratio,
-                        "z_score": current_z,
-                        "direction": "long_spread",
-                        "pair_regime": pair_regime,
-                    },
+                    metadata=self._pair_sizing_metadata(
+                        own_symbol=symbol2,
+                        pair_symbol=symbol1,
+                        hedge_ratio=hedge_ratio,
+                        z_score=current_z,
+                        direction="long_spread",
+                        pair_regime=pair_regime,
+                        pair_group_id=pair_group_id,
+                        quantity_scale=secondary_scale,
+                        unit_notional=unit_notional,
+                        leg_fraction=secondary_fraction,
+                        min_leg_fraction=min_leg_fraction,
+                    ),
                 )
             )
             logger.info(f"{self.name} LONG spread {symbol1}/{symbol2}, z={current_z:.2f}, hr={hedge_ratio:.3f}")
@@ -185,6 +232,7 @@ class PairsTradingStrategy(StrategyBase):
         elif prev_z < entry_z <= current_z:
             strength = max(0.1, min(abs(current_z) / max(entry_z, 1e-9), 1.0))
             side2 = self._secondary_entry_side("short_spread", hedge_ratio)
+            pair_group_id = f"{self.name}:{timestamp.isoformat()}:{symbol1}:{symbol2}:short_spread"
             signals.append(
                 Signal(
                     symbol=symbol1,
@@ -194,13 +242,19 @@ class PairsTradingStrategy(StrategyBase):
                     strategy_name=self.name,
                     strength=strength,
                     stop_loss=current_price1 * (1 + float(self.params["stop_loss_pct"])),
-                    metadata={
-                        "pair": symbol2,
-                        "hedge_ratio": hedge_ratio,
-                        "z_score": current_z,
-                        "direction": "short_spread",
-                        "pair_regime": pair_regime,
-                    },
+                    metadata=self._pair_sizing_metadata(
+                        own_symbol=symbol1,
+                        pair_symbol=symbol2,
+                        hedge_ratio=hedge_ratio,
+                        z_score=current_z,
+                        direction="short_spread",
+                        pair_regime=pair_regime,
+                        pair_group_id=pair_group_id,
+                        quantity_scale=1.0,
+                        unit_notional=unit_notional,
+                        leg_fraction=primary_fraction,
+                        min_leg_fraction=min_leg_fraction,
+                    ),
                 )
             )
             signals.append(
@@ -211,14 +265,19 @@ class PairsTradingStrategy(StrategyBase):
                     timestamp=timestamp,
                     strategy_name=self.name,
                     strength=strength,
-                    quantity=self._secondary_quantity(hedge_ratio),
-                    metadata={
-                        "pair": symbol1,
-                        "hedge_ratio": hedge_ratio,
-                        "z_score": current_z,
-                        "direction": "short_spread",
-                        "pair_regime": pair_regime,
-                    },
+                    metadata=self._pair_sizing_metadata(
+                        own_symbol=symbol2,
+                        pair_symbol=symbol1,
+                        hedge_ratio=hedge_ratio,
+                        z_score=current_z,
+                        direction="short_spread",
+                        pair_regime=pair_regime,
+                        pair_group_id=pair_group_id,
+                        quantity_scale=secondary_scale,
+                        unit_notional=unit_notional,
+                        leg_fraction=secondary_fraction,
+                        min_leg_fraction=min_leg_fraction,
+                    ),
                 )
             )
             logger.info(f"{self.name} SHORT spread {symbol1}/{symbol2}, z={current_z:.2f}, hr={hedge_ratio:.3f}")
@@ -242,6 +301,7 @@ class PairsTradingStrategy(StrategyBase):
                         "z_score": current_z,
                         "direction": "mean_revert_exit",
                         "pair_regime": pair_regime,
+                        "close_only": True,
                     },
                 )
             )
@@ -253,13 +313,13 @@ class PairsTradingStrategy(StrategyBase):
                     timestamp=timestamp,
                     strategy_name=self.name,
                     strength=0.3,
-                    quantity=self._secondary_quantity(hedge_ratio),
                     metadata={
                         "pair": symbol1,
                         "hedge_ratio": hedge_ratio,
                         "z_score": current_z,
                         "direction": "mean_revert_exit",
                         "pair_regime": pair_regime,
+                        "close_only": True,
                     },
                 )
             )

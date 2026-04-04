@@ -691,6 +691,31 @@ class ExecutionEngine:
                 return qty * price
         return 0.0
 
+    def _pair_group_exposure(
+        self,
+        *,
+        strategy_name: Optional[str],
+        pair_group_id: str,
+        symbol: str,
+        fallback_price: Optional[float] = None,
+    ) -> Tuple[float, float]:
+        if not strategy_name or not pair_group_id:
+            return 0.0, 0.0
+        target_symbol = str(symbol or "").strip().upper()
+        group_exposure = 0.0
+        leg_exposure = 0.0
+        for position in position_manager.get_positions_by_strategy(strategy_name):
+            metadata = dict(getattr(position, "metadata", {}) or {})
+            if str(metadata.get("pair_group_id") or "").strip() != pair_group_id:
+                continue
+            notional = self._resolve_position_notional(position, fallback_price=fallback_price)
+            if notional <= 0:
+                continue
+            group_exposure += notional
+            if str(getattr(position, "symbol", "") or "").strip().upper() == target_symbol:
+                leg_exposure += notional
+        return float(group_exposure), float(leg_exposure)
+
     @staticmethod
     def _safe_positive_float(value: Any, default: Optional[float] = None) -> Optional[float]:
         try:
@@ -1180,6 +1205,33 @@ class ExecutionEngine:
                 for p in position_manager.get_positions_by_strategy(signal.strategy_name)
             )
 
+        pair_group_id = str((signal.metadata or {}).get("pair_group_id") or "").strip()
+        pair_quantity_scale = self._safe_nonnegative_float(
+            (signal.metadata or {}).get("pair_quantity_scale"),
+            0.0,
+        )
+        pair_unit_notional = self._safe_nonnegative_float(
+            (signal.metadata or {}).get("pair_unit_notional"),
+            0.0,
+        )
+        pair_leg_fraction = self._safe_ratio(
+            (signal.metadata or {}).get("pair_leg_notional_fraction"),
+            0.0,
+        )
+        pair_min_leg_fraction = self._safe_ratio(
+            (signal.metadata or {}).get("pair_min_leg_notional_fraction"),
+            0.0,
+        )
+        current_pair_group_exposure = 0.0
+        current_pair_leg_exposure = 0.0
+        if pair_group_id and pair_quantity_scale > 0 and pair_unit_notional > 0 and pair_leg_fraction > 0:
+            current_pair_group_exposure, current_pair_leg_exposure = self._pair_group_exposure(
+                strategy_name=signal.strategy_name,
+                pair_group_id=pair_group_id,
+                symbol=signal.symbol,
+                fallback_price=price,
+            )
+
         remaining_alloc_cap = max(0.0, alloc_cap - current_strategy_exposure)
         if alloc_ratio > 0 and remaining_alloc_cap <= 0:
             return 0.0
@@ -1208,6 +1260,68 @@ class ExecutionEngine:
                 f"remaining allocation {remaining_alloc_cap:.4f} < min_notional {effective_min_notional:.4f}"
             )
             return 0.0
+
+        if pair_group_id and pair_quantity_scale > 0 and pair_unit_notional > 0 and pair_leg_fraction > 0:
+            group_other_exposure = max(0.0, current_strategy_exposure - current_pair_group_exposure)
+            pair_effective_cap = single_cap
+            if alloc_ratio > 0:
+                pair_effective_cap = min(pair_effective_cap, max(0.0, alloc_cap - group_other_exposure))
+            pair_min_fraction = max(1e-6, float(pair_min_leg_fraction or pair_leg_fraction))
+            pair_effective_min_notional = max(
+                configured_min_notional,
+                exchange_min_notional / pair_min_fraction,
+            )
+            pair_buffered_cap = pair_effective_cap * risk_buffer
+            if same_direction_limit_notional > 0:
+                pair_buffered_cap = min(pair_buffered_cap, current_pair_leg_exposure + same_direction_remaining_cap)
+            if pair_buffered_cap < pair_effective_min_notional:
+                logger.info(
+                    f"Skip pair leg due to insufficient pair notional cap: strategy={signal.strategy_name} "
+                    f"symbol={signal.symbol} pair_group={pair_group_id} cap={pair_buffered_cap:.4f} "
+                    f"required={pair_effective_min_notional:.4f}"
+                )
+                return 0.0
+
+            target_pair_notional = max(pair_effective_min_notional, pair_effective_cap * strength)
+            target_pair_notional = min(target_pair_notional, pair_buffered_cap)
+            desired_leg_notional = target_pair_notional * pair_leg_fraction
+            remaining_leg_notional = max(0.0, desired_leg_notional - current_pair_leg_exposure)
+            if remaining_leg_notional <= 0:
+                return 0.0
+
+            qty = remaining_leg_notional / price
+            min_amount, amount_decimals = await self._get_exchange_amount_rules(exchange, signal.symbol)
+            if min_amount > 0 and qty < min_amount:
+                required_leg_notional = min_amount * price
+                required_pair_notional = required_leg_notional / max(pair_leg_fraction, 1e-6)
+                if required_pair_notional > pair_effective_cap + max(0.05, pair_effective_cap * 0.01):
+                    logger.info(
+                        f"Skip pair leg below exchange min amount: strategy={signal.strategy_name} "
+                        f"symbol={signal.symbol} qty={qty:.8f} min_amount={min_amount:.8f} "
+                        f"pair_cap={pair_effective_cap:.4f}"
+                    )
+                    return 0.0
+                qty = float(min_amount)
+
+            floored_qty = max(0.0, self._floor_to_decimals(qty, amount_decimals))
+            if floored_qty <= 0:
+                return 0.0
+
+            floored_notional = floored_qty * price
+            if floored_notional + 1e-9 < exchange_min_notional:
+                required_qty = self._ceil_to_decimals(exchange_min_notional / price, amount_decimals)
+                required_leg_notional = required_qty * price
+                required_pair_notional = required_leg_notional / max(pair_leg_fraction, 1e-6)
+                if required_pair_notional > pair_effective_cap + max(0.05, pair_effective_cap * 0.01):
+                    logger.info(
+                        f"Skip pair leg after precision floor broke exchange min notional: "
+                        f"strategy={signal.strategy_name} symbol={signal.symbol} "
+                        f"floored_qty={floored_qty:.8f} required_qty={required_qty:.8f} "
+                        f"pair_cap={pair_effective_cap:.4f}"
+                    )
+                    return 0.0
+                floored_qty = required_qty
+            return floored_qty
 
         target_notional = min(single_cap, remaining_alloc_cap if alloc_ratio > 0 else single_cap)
         target_notional *= strength
@@ -1285,8 +1399,11 @@ class ExecutionEngine:
     ) -> Dict[str, Any]:
         strategy = strategy_manager.get_strategy(strategy_name) if strategy_name else None
         params = dict(getattr(strategy, "params", {}) or {})
+        strategy_type = str(getattr(getattr(strategy, "__class__", None), "__name__", "") or "")
 
         market_type = str(params.get("market_type") or "").strip().lower()
+        if not market_type and strategy_type == "PairsTradingStrategy":
+            market_type = "future"
         if not market_type:
             connector = exchange_manager.get_exchange(exchange)
             market_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").strip().lower()
@@ -1295,6 +1412,8 @@ class ExecutionEngine:
 
         is_derivatives = market_type in {"future", "futures", "swap", "contract", "perp", "perpetual"}
         default_allow_short = True if self._paper_trading else is_derivatives
+        if strategy_type == "PairsTradingStrategy":
+            default_allow_short = True
 
         allow_long = bool(params.get("allow_long", True))
         allow_short = bool(params.get("allow_short", default_allow_short))
@@ -1773,6 +1892,36 @@ class ExecutionEngine:
                 account_id=account_id,
                 preferred_side=position_side,
             )
+            if bool((signal.metadata or {}).get("close_only")):
+                if not existing_position:
+                    return None
+                if side == OrderSide.BUY and existing_position.side == PositionSide.SHORT:
+                    close_signal = Signal(
+                        symbol=signal.symbol,
+                        signal_type=SignalType.CLOSE_SHORT,
+                        price=signal.price,
+                        timestamp=signal.timestamp,
+                        strategy_name=signal.strategy_name,
+                        strength=signal.strength,
+                        stop_loss=signal.stop_loss,
+                        take_profit=signal.take_profit,
+                        metadata=dict(signal.metadata or {}),
+                    )
+                    return await self._close_position(close_signal, PositionSide.SHORT)
+                if side == OrderSide.SELL and existing_position.side == PositionSide.LONG:
+                    close_signal = Signal(
+                        symbol=signal.symbol,
+                        signal_type=SignalType.CLOSE_LONG,
+                        price=signal.price,
+                        timestamp=signal.timestamp,
+                        strategy_name=signal.strategy_name,
+                        strength=signal.strength,
+                        stop_loss=signal.stop_loss,
+                        take_profit=signal.take_profit,
+                        metadata=dict(signal.metadata or {}),
+                    )
+                    return await self._close_position(close_signal, PositionSide.LONG)
+                return None
             same_direction = False
             same_direction_source = ""
             same_direction_limit_ratio = 0.0
@@ -1988,10 +2137,15 @@ class ExecutionEngine:
             signal.stop_loss = resolved_stop_loss
             signal.take_profit = resolved_take_profit
 
+            requested_order_type = str((signal.metadata or {}).get("order_type") or "").strip().lower()
+            strategy_order_type = OrderType.MARKET
+            if requested_order_type == OrderType.LIMIT.value:
+                strategy_order_type = OrderType.LIMIT
+
             req = OrderRequest(
                 symbol=signal.symbol,
                 side=side,
-                order_type=OrderType.MARKET if signal.quantity is None else OrderType.LIMIT,
+                order_type=strategy_order_type,
                 amount=qty,
                 price=signal.price,
                 exchange=exchange,

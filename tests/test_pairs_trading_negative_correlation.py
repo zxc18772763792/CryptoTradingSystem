@@ -48,6 +48,11 @@ def test_negative_correlation_pair_long_spread_buys_both_legs():
     assert signals[1].symbol == "BBB/USDT"
     assert signals[1].signal_type == SignalType.BUY
     assert signals[1].metadata["pair_regime"] == "negative_corr"
+    assert signals[0].metadata["pair_group_id"] == signals[1].metadata["pair_group_id"]
+    assert signals[0].metadata["pair_leg_notional_fraction"] > 0
+    assert signals[1].metadata["pair_leg_notional_fraction"] > 0
+    assert signals[0].metadata["pair_quantity_scale"] == 1.0
+    assert signals[1].metadata["pair_quantity_scale"] > 0
 
 
 def test_negative_correlation_pair_short_spread_sells_both_legs():
@@ -63,3 +68,15 @@ def test_negative_correlation_pair_short_spread_sells_both_legs():
     assert signals[1].symbol == "BBB/USDT"
     assert signals[1].signal_type == SignalType.SELL
     assert signals[1].metadata["pair_regime"] == "negative_corr"
+
+
+def test_exit_guidance_marks_pair_signals_close_only():
+    strategy = _strategy()
+    data1, data2 = _inverse_pair_frames(prev_spread=-2.5, current_spread=-0.1)
+
+    signals = strategy.generate_signals(data1, data2)
+
+    assert len(signals) == 2
+    assert signals[0].metadata["direction"] == "mean_revert_exit"
+    assert signals[0].metadata["close_only"] is True
+    assert signals[1].metadata["close_only"] is True

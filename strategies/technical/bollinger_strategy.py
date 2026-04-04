@@ -124,7 +124,7 @@ class BollingerBandsStrategy(StrategyBase):
 
 
 class BollingerSqueezeStrategy(StrategyBase):
-    """布林带挤压策略（突破策略）"""
+    """Bollinger squeeze breakout strategy."""
 
     def __init__(
         self,
@@ -134,8 +134,8 @@ class BollingerSqueezeStrategy(StrategyBase):
         default_params = {
             "period": 20,
             "num_std": 2.0,
-            "squeeze_threshold": 0.02,  # 挤压阈值（带宽比例）
-            "breakout_threshold": 0.01,  # 突破阈值
+            "squeeze_threshold": 0.02,  # Bandwidth threshold used to define a squeeze.
+            "breakout_threshold": 0.01,  # Minimum breakout distance beyond the band.
             "stop_loss_pct": 0.03,
             "take_profit_pct": 0.08,
         }
@@ -145,7 +145,7 @@ class BollingerSqueezeStrategy(StrategyBase):
         super().__init__(name, default_params)
 
     def _calculate_bollinger_bands(self, data: pd.DataFrame) -> tuple:
-        """计算布林带"""
+        """Compute Bollinger Bands and bandwidth."""
         period = self.params["period"]
         num_std = self.params["num_std"]
 
@@ -159,7 +159,7 @@ class BollingerSqueezeStrategy(StrategyBase):
         return upper, middle, lower, bandwidth
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
-        """生成交易信号"""
+        """Generate trading signals."""
         if data.empty or len(data) < self.params["period"] + 5:
             return []
 
@@ -167,24 +167,31 @@ class BollingerSqueezeStrategy(StrategyBase):
 
         upper, middle, lower, bandwidth = self._calculate_bollinger_bands(data)
 
-        current_close = data["close"].iloc[-1]
-        current_bandwidth = bandwidth.iloc[-1]
-        prev_bandwidth = bandwidth.iloc[-2]
+        current_close = float(data["close"].iloc[-1])
+        current_bandwidth = float(bandwidth.iloc[-1])
+        prev_bandwidth = float(bandwidth.iloc[-2])
 
-        current_upper = upper.iloc[-1]
-        current_lower = lower.iloc[-1]
-        current_middle = middle.iloc[-1]
+        current_upper = float(upper.iloc[-1])
+        current_lower = float(lower.iloc[-1])
+        current_middle = float(middle.iloc[-1])
+        breakout_threshold = max(0.0, float(self.params.get("breakout_threshold", 0.0) or 0.0))
+        stop_loss_pct = max(0.0, float(self.params.get("stop_loss_pct", 0.0) or 0.0))
 
         timestamp = datetime.now()
         symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
 
-        # 检测挤压后的突破
-        # 首先检查是否处于挤压状态（带宽很窄）
-        was_squeezed = prev_bandwidth < self.params["squeeze_threshold"]
+        # Detect a breakout only after the previous bar was in a squeeze regime.
+        # This keeps the strategy aligned with the configured squeeze threshold.
+        was_squeezed = prev_bandwidth <= self.params["squeeze_threshold"] and current_bandwidth >= prev_bandwidth
+        breakout_up = 0.0
+        breakout_down = 0.0
+        if current_middle != 0.0:
+            breakout_up = max(0.0, float((current_close - current_upper) / current_middle))
+            breakout_down = max(0.0, float((current_lower - current_close) / current_middle))
 
         if was_squeezed:
-            # 向上突破
-            if current_close > current_middle + (current_upper - current_middle) * 0.5:
+            # Upside breakout.
+            if breakout_up >= breakout_threshold:
                 signal = Signal(
                     symbol=symbol,
                     signal_type=SignalType.BUY,
@@ -192,18 +199,23 @@ class BollingerSqueezeStrategy(StrategyBase):
                     timestamp=timestamp,
                     strategy_name=self.name,
                     strength=0.8,
-                    stop_loss=current_lower * 0.99,
+                    stop_loss=current_close * (1 - stop_loss_pct),
                     take_profit=current_close * (1 + self.params["take_profit_pct"]),
                     metadata={
                         "bandwidth": current_bandwidth,
                         "breakout": "up",
+                        "breakout_pct": breakout_up,
+                        "breakout_threshold": breakout_threshold,
+                        "upper": current_upper,
+                        "middle": current_middle,
+                        "lower": current_lower,
                     }
                 )
                 signals.append(signal)
                 logger.info(f"Bollinger squeeze breakout UP for {symbol}")
 
-            # 向下突破
-            elif current_close < current_middle - (current_middle - current_lower) * 0.5:
+            # Downside breakout.
+            elif breakout_down >= breakout_threshold:
                 signal = Signal(
                     symbol=symbol,
                     signal_type=SignalType.SELL,
@@ -211,11 +223,16 @@ class BollingerSqueezeStrategy(StrategyBase):
                     timestamp=timestamp,
                     strategy_name=self.name,
                     strength=0.8,
-                    stop_loss=current_upper * 1.01,
+                    stop_loss=current_close * (1 + stop_loss_pct),
                     take_profit=current_close * (1 - self.params["take_profit_pct"]),
                     metadata={
                         "bandwidth": current_bandwidth,
                         "breakout": "down",
+                        "breakout_pct": breakout_down,
+                        "breakout_threshold": breakout_threshold,
+                        "upper": current_upper,
+                        "middle": current_middle,
+                        "lower": current_lower,
                     }
                 )
                 signals.append(signal)
@@ -224,7 +241,7 @@ class BollingerSqueezeStrategy(StrategyBase):
         return signals
 
     def get_required_data(self) -> Dict[str, Any]:
-        """获取所需数据"""
+        """Describe required market data."""
         return {
             "type": "kline",
             "columns": ["close"],

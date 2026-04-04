@@ -6,10 +6,12 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from core.exchanges.base_exchange import OrderStatus
+import pytest
+
+from core.exchanges.base_exchange import OrderStatus, OrderType
 from core.strategies import Signal, SignalType
 from core.trading.execution_engine import ExecutionEngine
-from core.trading.position_manager import PositionSide
+from core.trading.position_manager import PositionSide, position_manager
 
 
 execution_engine_module = importlib.import_module("core.trading.execution_engine")
@@ -396,3 +398,238 @@ def test_close_signal_uses_exchange_live_position_when_local_missing(monkeypatch
     assert result["order"]["id"] == "ord-close-live"
     assert trade_records[-1]["side"] == "close_short"
     assert trade_records[-1]["notional"] == 2.0
+
+
+def test_execute_signal_keeps_market_order_with_explicit_quantity(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+
+    signal = _make_signal(signal_type=SignalType.SELL)
+    signal.symbol = "ETH/USDT"
+    signal.price = 2000.0
+    signal.quantity = 0.05
+    captured_requests = []
+
+    async def _create_order(request):
+        captured_requests.append(request)
+        return SimpleNamespace(
+            id="ord-secondary-market",
+            price=2000.0,
+            amount=request.amount,
+            filled=request.amount,
+            status=OrderStatus.CLOSED,
+        )
+
+    monkeypatch.setattr(execution_engine_module.account_manager, "resolve_exchange", lambda account_id, exchange: "binance")
+    monkeypatch.setattr(
+        engine,
+        "_resolve_strategy_trade_policy",
+        lambda strategy_name, exchange: {
+            "allow_long": True,
+            "allow_short": True,
+            "reverse_on_signal": True,
+            "allow_pyramiding": False,
+            "market_type": "future",
+        },
+    )
+    monkeypatch.setattr(execution_engine_module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(engine, "_get_account_equity", AsyncMock(return_value=5000.0))
+    monkeypatch.setattr(execution_engine_module.strategy_manager, "get_strategy_allocation", lambda name: 0.3)
+    monkeypatch.setattr(engine, "_resolve_order_context", AsyncMock(return_value=(2000.0, 100.0)))
+    monkeypatch.setattr(engine, "_ensure_signal_protection_levels", lambda **kwargs: (2020.0, 1940.0))
+    monkeypatch.setattr(
+        engine,
+        "_evaluate_live_ai_decision",
+        AsyncMock(return_value={"action": "allow", "applied": False, "reason": ""}),
+    )
+    monkeypatch.setattr(
+        execution_engine_module.decision_engine,
+        "evaluate_order_intent",
+        AsyncMock(return_value=SimpleNamespace(allowed=True, reason="", trace_id="trace-secondary-market")),
+    )
+    monkeypatch.setattr(execution_engine_module.risk_manager, "pre_trade_check", lambda **kwargs: True)
+    monkeypatch.setattr(execution_engine_module.risk_manager, "record_trade", lambda payload: None)
+    monkeypatch.setattr(execution_engine_module.order_manager, "create_order", AsyncMock(side_effect=_create_order))
+    monkeypatch.setattr(engine, "_record_live_strategy_trade", AsyncMock(return_value=None))
+    monkeypatch.setattr(engine, "_notify_callbacks", AsyncMock(return_value=None))
+    monkeypatch.setattr(execution_engine_module, "write_audit", AsyncMock(return_value=None))
+
+    result = asyncio.run(engine.execute_signal(signal))
+
+    assert result is not None
+    assert len(captured_requests) == 1
+    assert captured_requests[0].amount == 0.05
+    assert captured_requests[0].order_type == OrderType.MARKET
+
+
+def test_execute_signal_can_still_request_explicit_limit_order(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+
+    signal = _make_signal(signal_type=SignalType.BUY)
+    signal.symbol = "ETH/USDT"
+    signal.price = 1995.0
+    signal.quantity = 0.08
+    signal.metadata["order_type"] = "limit"
+    captured_requests = []
+
+    async def _create_order(request):
+        captured_requests.append(request)
+        return SimpleNamespace(
+            id="ord-explicit-limit",
+            price=1995.0,
+            amount=request.amount,
+            filled=request.amount,
+            status=OrderStatus.CLOSED,
+        )
+
+    monkeypatch.setattr(execution_engine_module.account_manager, "resolve_exchange", lambda account_id, exchange: "binance")
+    monkeypatch.setattr(
+        engine,
+        "_resolve_strategy_trade_policy",
+        lambda strategy_name, exchange: {
+            "allow_long": True,
+            "allow_short": True,
+            "reverse_on_signal": True,
+            "allow_pyramiding": False,
+            "market_type": "future",
+        },
+    )
+    monkeypatch.setattr(execution_engine_module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(engine, "_get_account_equity", AsyncMock(return_value=5000.0))
+    monkeypatch.setattr(execution_engine_module.strategy_manager, "get_strategy_allocation", lambda name: 0.3)
+    monkeypatch.setattr(engine, "_resolve_order_context", AsyncMock(return_value=(1995.0, 159.6)))
+    monkeypatch.setattr(engine, "_ensure_signal_protection_levels", lambda **kwargs: (1970.0, 2050.0))
+    monkeypatch.setattr(
+        engine,
+        "_evaluate_live_ai_decision",
+        AsyncMock(return_value={"action": "allow", "applied": False, "reason": ""}),
+    )
+    monkeypatch.setattr(
+        execution_engine_module.decision_engine,
+        "evaluate_order_intent",
+        AsyncMock(return_value=SimpleNamespace(allowed=True, reason="", trace_id="trace-explicit-limit")),
+    )
+    monkeypatch.setattr(execution_engine_module.risk_manager, "pre_trade_check", lambda **kwargs: True)
+    monkeypatch.setattr(execution_engine_module.risk_manager, "record_trade", lambda payload: None)
+    monkeypatch.setattr(execution_engine_module.order_manager, "create_order", AsyncMock(side_effect=_create_order))
+    monkeypatch.setattr(engine, "_record_live_strategy_trade", AsyncMock(return_value=None))
+    monkeypatch.setattr(engine, "_notify_callbacks", AsyncMock(return_value=None))
+    monkeypatch.setattr(execution_engine_module, "write_audit", AsyncMock(return_value=None))
+
+    result = asyncio.run(engine.execute_signal(signal))
+
+    assert result is not None
+    assert len(captured_requests) == 1
+    assert captured_requests[0].order_type == OrderType.LIMIT
+    assert captured_requests[0].price == 1995.0
+
+
+def test_execute_signal_sizes_pair_legs_with_shared_hedge_ratio(monkeypatch):
+    position_manager.clear_all()
+    try:
+        engine = ExecutionEngine()
+        engine._paper_trading = False
+
+        common_metadata = {
+            "account_id": "main",
+            "exchange": "binance",
+            "pair_group_id": "pair-balance-1",
+            "pair_unit_notional": 200.0,
+            "pair_min_leg_notional_fraction": 0.5,
+        }
+        primary_signal = Signal(
+            symbol="AAA/USDT",
+            signal_type=SignalType.BUY,
+            price=100.0,
+            timestamp=datetime.now(timezone.utc),
+            strategy_name="pairs_balance_strategy",
+            strength=1.0,
+            metadata={**common_metadata, "pair_quantity_scale": 1.0, "pair_leg_notional_fraction": 0.5},
+        )
+        secondary_signal = Signal(
+            symbol="BBB/USDT",
+            signal_type=SignalType.SELL,
+            price=200.0,
+            timestamp=datetime.now(timezone.utc),
+            strategy_name="pairs_balance_strategy",
+            strength=1.0,
+            metadata={**common_metadata, "pair_quantity_scale": 0.5, "pair_leg_notional_fraction": 0.5},
+        )
+
+        captured_requests = []
+        trade_records = []
+
+        async def _create_order(request):
+            captured_requests.append(request)
+            return SimpleNamespace(
+                id=f"ord-{request.symbol}",
+                price=float(request.price or (100.0 if request.symbol == "AAA/USDT" else 200.0)),
+                amount=request.amount,
+                filled=request.amount,
+                status=OrderStatus.CLOSED,
+            )
+
+        async def _resolve_order_context(exchange, symbol, quantity, preferred_price):
+            price = float(preferred_price or (100.0 if symbol == "AAA/USDT" else 200.0))
+            return price, float(quantity or 0.0) * price
+
+        async def _resolve_price(exchange, symbol, preferred_price=None):
+            return float(preferred_price or (100.0 if symbol == "AAA/USDT" else 200.0))
+
+        monkeypatch.setattr(execution_engine_module.account_manager, "resolve_exchange", lambda account_id, exchange: "binance")
+        monkeypatch.setattr(
+            engine,
+            "_resolve_strategy_trade_policy",
+            lambda strategy_name, exchange: {
+                "allow_long": True,
+                "allow_short": True,
+                "reverse_on_signal": True,
+                "allow_pyramiding": False,
+                "market_type": "future",
+            },
+        )
+        monkeypatch.setattr(engine, "_get_account_equity", AsyncMock(return_value=1000.0))
+        monkeypatch.setattr(execution_engine_module.strategy_manager, "get_strategy_allocation", lambda name: 0.1)
+        monkeypatch.setattr(execution_engine_module.settings, "MIN_STRATEGY_ORDER_USD", 50.0, raising=False)
+        monkeypatch.setattr(engine, "_resolve_price", AsyncMock(side_effect=_resolve_price))
+        monkeypatch.setattr(engine, "_get_exchange_amount_rules", AsyncMock(return_value=(0.0, 8)))
+        monkeypatch.setattr(engine, "_resolve_order_context", AsyncMock(side_effect=_resolve_order_context))
+        monkeypatch.setattr(engine, "_ensure_signal_protection_levels", lambda **kwargs: (None, None))
+        monkeypatch.setattr(
+            engine,
+            "_evaluate_live_ai_decision",
+            AsyncMock(return_value={"action": "allow", "applied": False, "reason": ""}),
+        )
+        monkeypatch.setattr(
+            execution_engine_module.decision_engine,
+            "evaluate_order_intent",
+            AsyncMock(return_value=SimpleNamespace(allowed=True, reason="", trace_id="trace-pair-balance")),
+        )
+        monkeypatch.setattr(execution_engine_module.risk_manager, "max_position_size", 0.1)
+        monkeypatch.setattr(execution_engine_module.risk_manager, "pre_trade_check", lambda **kwargs: True)
+        monkeypatch.setattr(execution_engine_module.risk_manager, "record_trade", lambda payload: trade_records.append(payload))
+        monkeypatch.setattr(execution_engine_module.order_manager, "create_order", AsyncMock(side_effect=_create_order))
+        monkeypatch.setattr(engine, "_record_live_strategy_trade", AsyncMock(return_value=None))
+        monkeypatch.setattr(engine, "_notify_callbacks", AsyncMock(return_value=None))
+        monkeypatch.setattr(execution_engine_module, "write_audit", AsyncMock(return_value=None))
+
+        primary_result = asyncio.run(engine.execute_signal(primary_signal))
+        secondary_result = asyncio.run(engine.execute_signal(secondary_signal))
+
+        assert primary_result is not None
+        assert secondary_result is not None
+        assert len(captured_requests) == 2
+        assert captured_requests[0].amount == pytest.approx(0.499)
+        assert captured_requests[1].amount == pytest.approx(0.2495)
+
+        pos_primary = position_manager.get_position("binance", "AAA/USDT", account_id="main")
+        pos_secondary = position_manager.get_position("binance", "BBB/USDT", account_id="main")
+        assert pos_primary is not None
+        assert pos_secondary is not None
+        assert pos_primary.value == pytest.approx(49.9)
+        assert pos_secondary.value == pytest.approx(49.9)
+        assert trade_records[-2]["notional"] == pytest.approx(49.9)
+        assert trade_records[-1]["notional"] == pytest.approx(49.9)
+    finally:
+        position_manager.clear_all()
