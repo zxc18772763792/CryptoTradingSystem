@@ -43,6 +43,7 @@ def test_raw_coverage_exposes_archive_contract(monkeypatch):
     assert payload["total_count"] == 321
     assert payload["archive_contract"]["stores_all_pulled_raw_news"] is True
     assert payload["archive_contract"]["guarantees_full_upstream_history"] is False
+    assert "原始新闻" in payload["archive_contract"]["note"]
 
 
 def test_raw_history_rejects_invalid_since():
@@ -51,6 +52,73 @@ def test_raw_history_rejects_invalid_since():
 
     assert response.status_code == 400
     assert "invalid since value" in response.json()["detail"]
+
+
+def test_summary_uses_exact_window_counts(monkeypatch):
+    async def fake_list_events(symbol=None, since=None, limit=0):
+        del symbol, since, limit
+        return [
+            {"id": 1, "event_id": "evt-1", "symbol": "BTCUSDT", "event_type": "etf", "sentiment": 1, "ts": "2026-04-04T01:00:00+00:00"},
+            {"id": 2, "event_id": "evt-2", "symbol": "ETHUSDT", "event_type": "macro", "sentiment": -1, "ts": "2026-04-04T02:00:00+00:00"},
+        ]
+
+    async def fake_list_news_raw(since=None, limit=0):
+        del since, limit
+        return [
+            {"id": 11, "source": "jin10", "title": "row-1", "published_at": "2026-04-04T02:00:00+00:00", "payload": {}},
+            {"id": 12, "source": "rss", "title": "row-2", "published_at": "2026-04-04T01:30:00+00:00", "payload": {}},
+        ]
+
+    async def fake_source_states():
+        return []
+
+    async def fake_llm_queue():
+        return {}
+
+    async def fake_build_latest_feed(cfg=None, symbol=None, hours=24, limit=60, summarize=False):
+        del cfg, symbol, hours, limit, summarize
+        return {
+            "count": 5,
+            "feed_stats": {"total": 5, "structured": 2, "unstructured": 3, "unstructured_breakdown": {}, "sentiment": {"positive": 2, "neutral": 2, "negative": 1}},
+            "source_stats": {"by_provider": {"rss": 3}, "by_source": {"jin10": 2, "rss": 3}},
+            "items": [],
+        }
+
+    async def fake_count_events(symbol=None, since=None):
+        del symbol, since
+        return 9
+
+    async def fake_latest_event(symbol=None, since=None):
+        del symbol, since
+        return "2026-04-04T03:00:00+00:00"
+
+    async def fake_count_raw(since=None):
+        del since
+        return 3456
+
+    async def fake_latest_raw(since=None):
+        del since
+        return "2026-04-04T04:00:00+00:00"
+
+    monkeypatch.setattr(news_api.news_db, "list_events", fake_list_events)
+    monkeypatch.setattr(news_api.news_db, "list_news_raw", fake_list_news_raw)
+    monkeypatch.setattr(news_api.news_db, "list_source_states", fake_source_states)
+    monkeypatch.setattr(news_api.news_db, "get_llm_queue_stats", fake_llm_queue)
+    monkeypatch.setattr(news_api, "build_latest_feed", fake_build_latest_feed)
+    monkeypatch.setattr(news_api.news_db, "count_events", fake_count_events)
+    monkeypatch.setattr(news_api.news_db, "latest_event_timestamp", fake_latest_event)
+    monkeypatch.setattr(news_api.news_db, "count_news_raw", fake_count_raw)
+    monkeypatch.setattr(news_api.news_db, "latest_news_raw_timestamp", fake_latest_raw)
+
+    with TestClient(_build_app()) as client:
+        response = client.get("/api/news/summary?hours=24&feed_limit=80")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["raw_count"] == 3456
+    assert payload["events_count"] == 9
+    assert payload["latest_raw_at"] == "2026-04-04T04:00:00+00:00"
+    assert payload["latest_event_at"] == "2026-04-04T03:00:00+00:00"
 
 
 def test_ingest_backfill_history_updates_last_pull(monkeypatch):

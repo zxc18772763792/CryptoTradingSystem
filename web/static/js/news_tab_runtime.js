@@ -25,6 +25,7 @@
     const getVal = (id, def = "") => String(el(id)?.value || def);
     const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
     const plainText = (v) => String(v ?? "").replace(/<\s*br\s*\/?>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const getActiveSymbol = () => getVal("news-symbol").trim().toUpperCase();
 
     function parseTs(v) {
         if (!v) return null;
@@ -49,6 +50,18 @@
         if (isStandalonePage()) return true;
         const tab = el("news");
         return !!tab && tab.classList.contains("active");
+    }
+
+    function summaryGranularityLabel(gran) {
+        const key = String(gran || "feed").trim().toLowerCase();
+        if (key === "feed") return "当前列表";
+        return `最近${key}桶`;
+    }
+
+    function latestFilteredPublishedAt() {
+        const rows = Array.isArray(state.latest?.items) ? state.latest.items : [];
+        const rawItem = rows.find((item) => !item?.has_event && item?.published_at);
+        return rawItem?.published_at || rows[0]?.published_at || null;
     }
 
     function sentimentClass(v) {
@@ -355,6 +368,22 @@
     function renderProviders() {
         const box = el("news-source-stats");
         if (!box) return;
+        const activeSymbol = getActiveSymbol();
+        if (activeSymbol) {
+            const bySource = state.latest?.source_stats?.by_source || {};
+            const names = Object.keys(bySource).filter(Boolean).sort((a, b) => Number(bySource[b] || 0) - Number(bySource[a] || 0));
+            if (!names.length) {
+                box.innerHTML = `<div class="list-item"><span>来源统计口径</span><span>按 ${esc(activeSymbol)} 的当前列表暂无来源分布</span></div>`;
+                return;
+            }
+            box.innerHTML = [
+                `<div class="list-item"><span>来源统计口径</span><span>按 ${esc(activeSymbol)} 的当前列表预览</span></div>`,
+                ...names.slice(0, 12).map((name) => (
+                    `<div class="list-item"><span>${esc(plainText(name))}</span><span>当前列表 ${Number(bySource[name] || 0)}</span></div>`
+                )),
+            ].join("");
+            return;
+        }
         const sourceSummary = state.summary?.source_summary || {};
         const byProvider = state.summary?.by_provider || state.brief?.by_provider || {};
         const bySource = state.latest?.source_stats?.by_source || {};
@@ -363,19 +392,24 @@
             box.innerHTML = '<div class="list-item">暂无来源统计</div>';
             return;
         }
+        const insertedLabel = state.summary ? "样本" : "预览";
         names.sort((a, b) => Number(sourceSummary[b]?.inserted_count || byProvider[b] || bySource[b] || 0) - Number(sourceSummary[a]?.inserted_count || byProvider[a] || bySource[a] || 0));
         box.innerHTML = names.slice(0, 12).map((name) => {
             const inserted = Number(sourceSummary[name]?.inserted_count || byProvider[name] || 0);
             const live = Number(bySource[name] || 0);
             const lastErr = plainText(sourceSummary[name]?.last_error || "");
             const tail = lastErr ? ` | 最近错误 ${esc(lastErr.slice(0, 32))}` : "";
-            return `<div class="list-item"><span>${esc(plainText(name))}</span><span>24h ${inserted} | 当前 ${live}${tail}</span></div>`;
+            return `<div class="list-item"><span>${esc(plainText(name))}</span><span>${insertedLabel} ${inserted} | 当前 ${live}${tail}</span></div>`;
         }).join("");
     }
 
     function renderArchiveCoverage() {
         const box = el("news-archive-note");
         if (!box) return;
+        if (!state.coverage) {
+            box.innerHTML = '<div class="list-item">历史库覆盖加载中...</div>';
+            return;
+        }
         const coverage = state.coverage || {};
         const contract = coverage?.archive_contract || {};
         const topSources = Array.isArray(coverage?.top_sources) ? coverage.top_sources.slice(0, 3) : [];
@@ -396,27 +430,48 @@
     function renderSummary() {
         const latest = state.latest || {};
         const base = state.summary || state.brief || {};
-        const latestRawAt = base?.latest_raw_at || state.brief?.latest_raw_at || null;
+        const activeSymbol = getActiveSymbol();
+        const latestRawAt = activeSymbol ? (latestFilteredPublishedAt() || state.brief?.latest_raw_at || null) : (base?.latest_raw_at || state.brief?.latest_raw_at || null);
         const latestEventAt = base?.latest_event_at || state.brief?.latest_event_at || null;
         const stats = summaryMetrics();
         const breakdown = latest?.feed_stats?.unstructured_breakdown || stats?.unstructured_breakdown || {};
+        const granLabel = summaryGranularityLabel(getVal("news-summary-granularity", "feed"));
+        const labelScope = granLabel === "当前列表" ? "当前列表" : granLabel;
+        if (el("news-events-label")) el("news-events-label").textContent = `${labelScope}总条数`;
+        if (el("news-positive-label")) el("news-positive-label").textContent = `利好（${labelScope}）`;
+        if (el("news-neutral-label")) el("news-neutral-label").textContent = `中性（${labelScope}）`;
+        if (el("news-negative-label")) el("news-negative-label").textContent = `利空（${labelScope}）`;
         if (el("news-events-count")) el("news-events-count").textContent = String(stats.total);
         if (el("news-positive-count")) el("news-positive-count").textContent = String(stats.sentiment.positive);
         if (el("news-neutral-count")) el("news-neutral-count").textContent = String(stats.sentiment.neutral);
         if (el("news-negative-count")) el("news-negative-count").textContent = String(stats.sentiment.negative);
         if (el("news-summary-gran-meta")) el("news-summary-gran-meta").textContent = `${stats.scope} | ${stats.total} 条`;
         if (!el("news-summary-note")) return;
-        const summaryState = (latest?.fallback_reason || state.summary?.fallback_reason) ? "摘要接口较慢，已回退快速列表" : "GPT 摘要正常";
-        el("news-summary-note").innerHTML = [
-            `<div class="list-item"><span>24h 原始新闻 / 事件</span><span>${Number(base?.raw_count || 0)} / ${Number(base?.events_count || 0)}</span></div>`,
+        let summaryState = (latest?.fallback_reason || state.summary?.fallback_reason) ? "摘要接口较慢，已回退快速列表" : "GPT 摘要正常";
+        const rows = [];
+        if (activeSymbol) {
+            const latestCount = Number(latest?.count || (latest?.items || []).length || 0);
+            const eventCount = Number(base?.events_count || 0);
+            summaryState = state.summary
+                ? `按 ${activeSymbol} 筛选统计已就绪`
+                : state.summaryLoading
+                    ? `按 ${activeSymbol} 筛选统计加载中，列表已先刷新`
+                    : `按 ${activeSymbol} 展示当前列表预览`;
+            rows.push(`<div class="list-item"><span>筛选模式</span><span>${esc(summaryState)}</span></div>`);
+            rows.push(`<div class="list-item"><span>当前列表总数 / 24h事件</span><span>${latestCount} / ${eventCount}</span></div>`);
+        } else {
+            rows.push(`<div class="list-item"><span>24h 原始新闻 / 事件</span><span>${Number(base?.raw_count || 0)} / ${Number(base?.events_count || 0)}</span></div>`);
+        }
+        rows.push(
             `<div class="list-item"><span>当前 Feed 结构化 / 未结构化</span><span>${Number(stats.structured || 0)} / ${Number(stats.unstructured || 0)}</span></div>`,
             `<div class="list-item"><span>待摘要 / AI处理中</span><span>${Number(breakdown.pending || 0)} / ${Number(breakdown.running || 0)}</span></div>`,
             `<div class="list-item"><span>待补跑 / 本轮失败</span><span>${Number(breakdown.retry || 0)} / ${Number(breakdown.failed || 0)}</span></div>`,
             `<div class="list-item"><span>已补中文摘要 / 已抽取无事件</span><span>${Number(breakdown.summarized_no_event || 0)} / ${Number(breakdown.done_no_event || 0)}</span></div>`,
             `<div class="list-item"><span>低优先跳过 / 尚未入队</span><span>${Number(breakdown.skipped_low_importance || 0)} / ${Number(breakdown.not_queued || 0)}</span></div>`,
             `<div class="list-item"><span>最近原始新闻 / 事件</span><span>${fmtTs(latestRawAt)} / ${fmtTs(latestEventAt)}</span></div>`,
-            `<div class="list-item"><span>标题摘要状态</span><span>${esc(summaryState)}</span></div>`,
-        ].join("");
+            `<div class="list-item"><span>标题摘要状态</span><span>${esc((latest?.fallback_reason || state.summary?.fallback_reason) ? "摘要接口较慢，已回退快速列表" : "GPT 摘要正常")}</span></div>`,
+        );
+        el("news-summary-note").innerHTML = rows.join("");
     }
 
     function renderBuckets() {

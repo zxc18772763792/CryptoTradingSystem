@@ -695,12 +695,12 @@ def _topic_anchor_keywords(cfg: Dict[str, Any]) -> List[str]:
         "xrp",
         "ada",
         "doge",
-        "比特币",
-        "以太坊",
-        "加密",
-        "区块链",
-        "币安",
-        "山寨币",
+        "\u6bd4\u7279\u5e01",
+        "\u4ee5\u592a\u574a",
+        "\u52a0\u5bc6",
+        "\u533a\u5757\u94fe",
+        "\u5e01\u5b89",
+        "\u5c71\u5be8\u5e01",
     }
     for item in (cfg.get("symbols") or {}).values():
         if not isinstance(item, dict):
@@ -713,7 +713,6 @@ def _topic_anchor_keywords(cfg: Dict[str, Any]) -> List[str]:
                 if base in {"btc", "eth", "bnb", "sol", "xrp", "ada", "doge", "trx", "ltc", "bch"}:
                     anchors.add(base)
     return sorted(anchors)
-
 
 def _is_relevant_news(item: Dict[str, Any], keywords: List[str], anchor_keywords: Optional[List[str]] = None) -> bool:
     title = str(item.get("title") or "").strip().lower()
@@ -749,9 +748,8 @@ def _news_archive_contract() -> Dict[str, Any]:
     return {
         "stores_all_pulled_raw_news": True,
         "guarantees_full_upstream_history": False,
-        "note": "新闻库会保留已经成功拉到并去重后的原始新闻；若某段历史当时未拉到，默认不会天然补全，需要额外执行历史补拉，且最终仍受上游源是否提供历史窗口限制。",
+        "note": "\u65b0\u95fb\u5e93\u4f1a\u4fdd\u7559\u5df2\u7ecf\u6210\u529f\u62c9\u5230\u5e76\u53bb\u91cd\u540e\u7684\u539f\u59cb\u65b0\u95fb\uff1b\u82e5\u67d0\u6bb5\u5386\u53f2\u5f53\u65f6\u672a\u62c9\u5230\uff0c\u9ed8\u8ba4\u4e0d\u4f1a\u5929\u7136\u8865\u5168\uff0c\u9700\u8981\u989d\u5916\u6267\u884c\u5386\u53f2\u8865\u62c9\uff0c\u4e14\u6700\u7ec8\u4ecd\u53d7\u4e0a\u6e38\u6e90\u662f\u5426\u63d0\u4f9b\u5386\u53f2\u7a97\u53e3\u9650\u5236\u3002",
     }
-
 
 def _raw_related_symbols(raw: Dict[str, Any], cfg: Dict[str, Any]) -> List[str]:
     mapper = _get_mapper(cfg)
@@ -2920,14 +2918,32 @@ async def summary(
                 build_latest_feed(cfg=cfg, symbol=symbol_norm, hours=hours, limit=min(feed_limit, 60), summarize=False),
                 timeout=max(db_timeout + 1.0, 5.5),
             ),
+            asyncio.wait_for(asyncio.shield(news_db.count_events(symbol=symbol_norm, since=since)), timeout=db_timeout),
+            asyncio.wait_for(asyncio.shield(news_db.latest_event_timestamp(symbol=symbol_norm, since=since)), timeout=db_timeout),
+            asyncio.wait_for(asyncio.shield(news_db.count_news_raw(since=since)), timeout=db_timeout),
+            asyncio.wait_for(asyncio.shield(news_db.latest_news_raw_timestamp(since=since)), timeout=db_timeout),
             return_exceptions=True,
         )
         failures: List[str] = []
-        events_raw, raw_rows_raw, source_states_raw, llm_queue_raw, feed_preview_raw = results
+        (
+            events_raw,
+            raw_rows_raw,
+            source_states_raw,
+            llm_queue_raw,
+            feed_preview_raw,
+            events_count_raw,
+            latest_event_at_raw,
+            raw_count_raw,
+            latest_raw_at_raw,
+        ) = results
         events = [] if isinstance(events_raw, Exception) else list(events_raw or [])
         raw_rows = [] if isinstance(raw_rows_raw, Exception) else list(raw_rows_raw or [])
         source_states = [] if isinstance(source_states_raw, Exception) else list(source_states_raw or [])
         llm_queue = {} if isinstance(llm_queue_raw, Exception) else dict(llm_queue_raw or {})
+        events_count = len(events) if isinstance(events_count_raw, Exception) else int(events_count_raw or 0)
+        latest_event_at = _first_iso_ts(events) if isinstance(latest_event_at_raw, Exception) else latest_event_at_raw
+        raw_count = len(raw_rows) if (symbol_norm or isinstance(raw_count_raw, Exception)) else int(raw_count_raw or 0)
+        latest_raw_at = _first_iso_ts(raw_rows) if (symbol_norm or isinstance(latest_raw_at_raw, Exception)) else latest_raw_at_raw
         if isinstance(feed_preview_raw, Exception):
             feed_preview = {
                 "count": 0,
@@ -2949,6 +2965,14 @@ async def summary(
             failures.append(f"llm_queue={type(llm_queue_raw).__name__}")
         if isinstance(feed_preview_raw, Exception):
             failures.append(f"feed={type(feed_preview_raw).__name__}")
+        if isinstance(events_count_raw, Exception):
+            failures.append(f"events_count={type(events_count_raw).__name__}")
+        if isinstance(latest_event_at_raw, Exception):
+            failures.append(f"latest_event_at={type(latest_event_at_raw).__name__}")
+        if isinstance(raw_count_raw, Exception) and not symbol_norm:
+            failures.append(f"raw_count={type(raw_count_raw).__name__}")
+        if isinstance(latest_raw_at_raw, Exception) and not symbol_norm:
+            failures.append(f"latest_raw_at={type(latest_raw_at_raw).__name__}")
 
         sentiment = {"positive": 0, "neutral": 0, "negative": 0}
         by_type: Dict[str, int] = {}
@@ -2992,10 +3016,10 @@ async def summary(
             "symbol": symbol_norm,
             "hours": hours,
             "since": since.isoformat(),
-            "raw_count": len(raw_rows),
-            "events_count": len(events),
-            "latest_raw_at": _first_iso_ts(raw_rows),
-            "latest_event_at": _first_iso_ts(events),
+            "raw_count": raw_count,
+            "events_count": events_count,
+            "latest_raw_at": latest_raw_at,
+            "latest_event_at": latest_event_at,
             "sentiment": sentiment,
             "feed_count": int(feed_preview.get("count") or 0),
             "feed_stats": feed_preview.get("feed_stats") or _feed_sentiment_summary([]),
