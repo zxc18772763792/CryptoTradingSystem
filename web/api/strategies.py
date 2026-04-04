@@ -1621,6 +1621,10 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     pair_ohlcv_source_timeframe: Optional[str] = None
     pair_monitor: Optional[Dict[str, Any]] = None
     monitor_df = pd.DataFrame()
+    monitor_load_bars = bars
+    if strategy_type == "PairsTradingStrategy":
+        lookback_period = max(10, int(_safe_float(strategy_params.get("lookback_period"), 48)))
+        monitor_load_bars = min(500, bars + max(50, lookback_period * 2))
     try:
         end_time = datetime.now(timezone.utc)
         df, ohlcv_source_timeframe = await _load_monitor_ohlcv_with_fallback(
@@ -1628,7 +1632,7 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
             symbol=symbol,
             timeframe=timeframe,
             end_time=end_time,
-            bars=bars,
+            bars=monitor_load_bars,
         )
         if df is not None and not df.empty:
             monitor_df = df.copy()
@@ -1642,7 +1646,7 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
                             symbol=pair_symbol,
                             timeframe=timeframe,
                             end_time=end_time,
-                            bars=bars,
+                            bars=monitor_load_bars,
                         )
                         pair_monitor = _build_pairs_monitor_enrichment(
                             primary_df=monitor_df,
