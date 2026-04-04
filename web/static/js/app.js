@@ -5985,16 +5985,27 @@ async function _loadMonitorData(name) {
     const metricsEl = document.getElementById('monitor-metrics-row');
     if (metricsEl) {
         const m = data.metrics || {};
+        const pairMetrics = (data && typeof data.pair_metrics === 'object' && data.pair_metrics) ? data.pair_metrics : null;
         const pnlColor = c => (c || 0) >= 0 ? '#4ade80' : '#f87171';
         const pct = v => v != null ? (v > 0 ? '+' : '') + v.toFixed(2) + '%' : 'N/A';
-        metricsEl.innerHTML = [
+        const monitorCards = [
             ['资本基数',   m.equity_base    != null ? m.equity_base.toFixed(2) + ' U' : '--'],
             ['已实现盈亏', m.realized_pnl   != null ? `<span style="color:${pnlColor(m.realized_pnl)}">${m.realized_pnl.toFixed(2)} U</span>` : '--'],
             ['浮动盈亏',   m.unrealized_pnl != null ? `<span style="color:${pnlColor(m.unrealized_pnl)}">${m.unrealized_pnl.toFixed(2)} U</span>` : '--'],
             ['总收益',     m.total_pnl      != null ? `<span style="color:${pnlColor(m.total_pnl)}">${m.total_pnl.toFixed(2)} U (${pct(m.return_pct)})</span>` : '--'],
             ['交易次数',   m.trade_count    != null ? m.trade_count : '--'],
             ['胜率',       m.win_rate       != null ? m.win_rate.toFixed(1) + '%' : '--'],
-        ].map(([label, val]) =>
+        ];
+        if (String(data?.portfolio_mode || '').trim() === 'pairs_spread_dual_leg' && pairMetrics) {
+            const fmtMaybe = (value, digits = 4) => Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : '--';
+            monitorCards.push(
+                ['副腿', esc(String(data?.pair_symbol || '--'))],
+                ['对冲比', fmtMaybe(pairMetrics.hedge_ratio_last, 4)],
+                ['Z-Score / 偏置', `${fmtMaybe(pairMetrics.z_score_last, 2)} / ${esc(String(pairMetrics.signal_bias || '--'))}`],
+                ['价差 / 相关', `${fmtMaybe(pairMetrics.spread_last, 4)} / ${esc(String(pairMetrics.pair_regime || '--'))}`],
+            );
+        }
+        metricsEl.innerHTML = monitorCards.map(([label, val]) =>
             `<div class="monitor-metric"><div class="monitor-metric-label">${label}</div><div class="monitor-metric-val">${val}</div></div>`
         ).join('');
     }
@@ -6028,21 +6039,28 @@ function _renderMonitorChart(data) {
     const ohlcvRaw = Array.isArray(data?.ohlcv) ? data.ohlcv : [];
     const signals  = Array.isArray(data?.signals) ? data.signals : [];
     const equityRaw = Array.isArray(data?.equity) ? data.equity : [];
+    const pairMetrics = (data && typeof data.pair_metrics === 'object' && data.pair_metrics) ? data.pair_metrics : {};
     const ohlcv = ohlcvRaw.filter((b) => b && b.t != null && [b.o, b.h, b.l, b.c].every((v) => Number.isFinite(Number(v))));
     const equityPts = equityRaw
         .filter((e) => e && e.t != null && Number.isFinite(Number(e.v)))
         .map((e) => ({ t: e.t, v: Number(e.v) }));
     const hasPrice = ohlcv.length > 0;
     const hasEquity = equityPts.length > 0;
+    const isPairsMonitor =
+        String(data?.portfolio_mode || '').trim() === 'pairs_spread_dual_leg' ||
+        ohlcv.some((b) => Number.isFinite(Number(b?.pair_close)) || Number.isFinite(Number(b?.spread)) || Number.isFinite(Number(b?.z_score)));
 
     if (!hasPrice && !hasEquity) {
         showChartMessage('暂无可绘制的监控数据');
         return;
     }
-    const nextMode = !hasPrice ? 'equity-only' : (hasEquity ? 'price-equity' : 'price-only');
+    const nextMode = !hasPrice
+        ? 'equity-only'
+        : (isPairsMonitor ? (hasEquity ? 'pairs-price-equity' : 'pairs-price-only') : (hasEquity ? 'price-equity' : 'price-only'));
     const prevMode = chartEl.dataset.monitorPlotMode || '';
     if (prevMode && prevMode !== nextMode) clearPlotlyHost(chartEl);
     preparePlotlyHost(chartEl);
+    chartEl.style.height = isPairsMonitor ? '640px' : '520px';
 
     // Equity-only fallback: avoid constructing multi-axis candlestick layout when price bars are absent.
     if (!hasPrice && hasEquity) {
@@ -6122,6 +6140,174 @@ function _renderMonitorChart(data) {
         hovertemplate: '权益: %{y:.2f} U<br>时间: %{x}<extra></extra>',
         xaxis: 'x', yaxis: 'y2',
     };
+
+    if (isPairsMonitor) {
+        const pairPoints = ohlcv
+            .map((b) => ({ t: b.t, v: Number(b.pair_close) }))
+            .filter((p) => Number.isFinite(p.v));
+        const spreadPoints = ohlcv
+            .map((b) => ({ t: b.t, v: Number(b.spread) }))
+            .filter((p) => Number.isFinite(p.v));
+        const zScorePoints = ohlcv
+            .map((b) => ({ t: b.t, v: Number(b.z_score) }))
+            .filter((p) => Number.isFinite(p.v));
+        const hedgeRatioPoints = ohlcv
+            .map((b) => ({ t: b.t, v: Number(b.hedge_ratio) }))
+            .filter((p) => Number.isFinite(p.v));
+        const hasPairPrice = pairPoints.length > 0;
+        const hasSpread = spreadPoints.length > 0;
+        const hasZScore = zScorePoints.length > 0;
+        const hasHedgeRatio = hedgeRatioPoints.length > 0;
+        const entryZ = Math.abs(Number(pairMetrics?.entry_z_score));
+        const exitZ = Math.abs(Number(pairMetrics?.exit_z_score));
+
+        const traces = [candleTrace, buyMarker, sellMarker];
+        if (hasPairPrice) {
+            traces.push({
+                type: 'scatter',
+                mode: 'lines',
+                name: `副腿价格${data?.pair_symbol ? ` (${data.pair_symbol})` : ''}`,
+                x: pairPoints.map((p) => p.t),
+                y: pairPoints.map((p) => p.v),
+                line: { color: '#ffb15f', width: 1.35, dash: 'dash' },
+                xaxis: 'x',
+                yaxis: 'y4',
+                hovertemplate: '副腿: %{y:.6f}<br>时间: %{x}<extra></extra>',
+            });
+        }
+        if (hasSpread) {
+            traces.push({
+                type: 'scatter',
+                mode: 'lines',
+                name: '价差',
+                x: spreadPoints.map((p) => p.t),
+                y: spreadPoints.map((p) => p.v),
+                line: { color: '#34d399', width: 1.5 },
+                xaxis: 'x',
+                yaxis: 'y2',
+                hovertemplate: '价差: %{y:.6f}<br>时间: %{x}<extra></extra>',
+            });
+        }
+        if (hasZScore) {
+            traces.push({
+                type: 'scatter',
+                mode: 'lines',
+                name: 'Z-Score',
+                x: zScorePoints.map((p) => p.t),
+                y: zScorePoints.map((p) => p.v),
+                line: { color: '#a78bfa', width: 1.5 },
+                xaxis: 'x',
+                yaxis: 'y3',
+                hovertemplate: 'Z-Score: %{y:.4f}<br>时间: %{x}<extra></extra>',
+            });
+            if (Number.isFinite(entryZ) && entryZ > 0) {
+                const zX = zScorePoints.map((p) => p.t);
+                traces.push({
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: '+入场阈值',
+                    x: zX,
+                    y: zX.map(() => entryZ),
+                    line: { color: '#f59e0b', width: 1, dash: 'dot' },
+                    xaxis: 'x',
+                    yaxis: 'y3',
+                    hoverinfo: 'skip',
+                });
+                traces.push({
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: '-入场阈值',
+                    x: zX,
+                    y: zX.map(() => -entryZ),
+                    line: { color: '#f59e0b', width: 1, dash: 'dot' },
+                    xaxis: 'x',
+                    yaxis: 'y3',
+                    hoverinfo: 'skip',
+                });
+            }
+            if (Number.isFinite(exitZ) && exitZ >= 0) {
+                const zX = zScorePoints.map((p) => p.t);
+                traces.push({
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: '+离场阈值',
+                    x: zX,
+                    y: zX.map(() => exitZ),
+                    line: { color: '#94a3b8', width: 1, dash: 'dash' },
+                    xaxis: 'x',
+                    yaxis: 'y3',
+                    hoverinfo: 'skip',
+                });
+                traces.push({
+                    type: 'scatter',
+                    mode: 'lines',
+                    name: '-离场阈值',
+                    x: zX,
+                    y: zX.map(() => -exitZ),
+                    line: { color: '#94a3b8', width: 1, dash: 'dash' },
+                    xaxis: 'x',
+                    yaxis: 'y3',
+                    hoverinfo: 'skip',
+                });
+            }
+        }
+        if (hasEquity) {
+            traces.push({
+                ...equityTrace,
+                yaxis: 'y5',
+            });
+        }
+        if (hasHedgeRatio) {
+            traces.push({
+                type: 'scatter',
+                mode: 'lines',
+                name: '对冲比',
+                x: hedgeRatioPoints.map((p) => p.t),
+                y: hedgeRatioPoints.map((p) => p.v),
+                line: { color: '#f97316', width: 1.4 },
+                xaxis: 'x',
+                yaxis: hasEquity ? 'y6' : 'y5',
+                hovertemplate: '对冲比: %{y:.6f}<br>时间: %{x}<extra></extra>',
+            });
+        }
+
+        const layout = {
+            paper_bgcolor: 'transparent',
+            plot_bgcolor: 'transparent',
+            font: { color: '#dfe9f7', size: 11 },
+            margin: { t: 16, b: 40, l: 60, r: 68 },
+            xaxis: { ...plotlyTimeAxis(), domain: [0, 1], rangeslider: { visible: false } },
+            yaxis: { domain: [0.56, 1], gridcolor: '#283242', title: { text: '主腿价格', font: { size: 10 } } },
+            yaxis2: { domain: [0.28, 0.50], anchor: 'x', gridcolor: '#283242', title: { text: '价差', font: { size: 10 } } },
+            yaxis3: { overlaying: 'y2', side: 'right', position: 0.98, showgrid: false, title: { text: 'Z-Score', font: { size: 10 } } },
+            yaxis4: { overlaying: 'y', side: 'right', position: 0.92, showgrid: false, title: { text: '副腿价格', font: { size: 10 } } },
+            yaxis5: { domain: [0, 0.22], anchor: 'x', gridcolor: '#283242', title: { text: hasEquity ? '权益(U)' : '对冲比', font: { size: 10 } } },
+            showlegend: true,
+            legend: { orientation: 'h', y: 1.06, x: 0, font: { size: 10 } },
+        };
+        if (hasEquity && hasHedgeRatio) {
+            layout.yaxis6 = {
+                overlaying: 'y5',
+                side: 'right',
+                position: 0.98,
+                showgrid: false,
+                title: { text: '对冲比', font: { size: 10 } },
+            };
+        }
+
+        try {
+            Plotly.react(chartEl, traces, layout, {
+                responsive: true,
+                displayModeBar: true,
+                modeBarButtonsToRemove: ['select2d', 'lasso2d'],
+                displaylogo: false,
+            });
+            chartEl.dataset.monitorPlotMode = nextMode;
+        } catch (e) {
+            showChartMessage(`图表渲染失败: ${e.message}`);
+        }
+        return;
+    }
 
     const layout = {
         paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',

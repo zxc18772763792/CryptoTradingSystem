@@ -34,6 +34,9 @@ from core.trading.position_manager import PositionSide, position_manager
 from strategies import ALL_STRATEGIES
 from web.api.backtest import (
     _load_backtest_inputs,
+    _pairs_hedge_ratio_bounds,
+    _pairs_hedge_ratio_series,
+    _pairs_signal_bias,
     _run_backtest_core,
     get_backtest_strategy_info,
     is_strategy_backtest_supported,
@@ -235,6 +238,92 @@ async def _load_monitor_ohlcv_with_fallback(
     if best_latest is not None:
         return best_df.tail(bars), best_source
     return pd.DataFrame(), target_tf
+
+
+def _build_pairs_monitor_enrichment(
+    primary_df: pd.DataFrame,
+    pair_df: pd.DataFrame,
+    params: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    if primary_df is None or primary_df.empty or pair_df is None or pair_df.empty:
+        return None
+
+    cfg = dict(params or {})
+    lookback_period = max(10, int(_safe_float(cfg.get("lookback_period"), 48)))
+    entry_z = abs(_safe_float(cfg.get("entry_z_score"), 2.0))
+    exit_z = abs(_safe_float(cfg.get("exit_z_score"), 0.6))
+    hedge_method = str(cfg.get("hedge_ratio_method") or "ols")
+    min_hr, max_hr = _pairs_hedge_ratio_bounds(cfg)
+
+    primary = primary_df.copy()
+    primary.index = pd.to_datetime(primary.index)
+    primary = primary[~primary.index.duplicated(keep="last")].sort_index()
+
+    pair = pair_df.copy()
+    pair.index = pd.to_datetime(pair.index)
+    pair = pair[~pair.index.duplicated(keep="last")].sort_index()
+
+    primary_close = pd.to_numeric(primary.get("close"), errors="coerce")
+    pair_close = pd.to_numeric(pair.get("close"), errors="coerce")
+    aligned = pd.concat(
+        [primary_close.rename("close"), pair_close.rename("pair_close")],
+        axis=1,
+    ).sort_index()
+    aligned["pair_close"] = aligned["pair_close"].ffill()
+    aligned = aligned.dropna(subset=["close", "pair_close"])
+    if aligned.empty:
+        return None
+
+    hedge_ratio = _pairs_hedge_ratio_series(
+        aligned["close"],
+        aligned["pair_close"],
+        method=hedge_method,
+    )
+    hedge_ratio = (
+        pd.to_numeric(hedge_ratio, errors="coerce")
+        .clip(lower=min_hr, upper=max_hr)
+        .ffill()
+        .fillna(1.0)
+    )
+    spread = aligned["close"] - hedge_ratio * aligned["pair_close"]
+    spread_mean = spread.rolling(lookback_period, min_periods=lookback_period).mean()
+    spread_std = spread.rolling(lookback_period, min_periods=lookback_period).std().replace(0, np.nan)
+    z_score = (spread - spread_mean) / spread_std
+
+    enriched = primary.copy()
+    enriched["pair_close"] = aligned["pair_close"].reindex(enriched.index).ffill()
+    enriched["spread"] = spread.reindex(enriched.index)
+    enriched["z_score"] = z_score.reindex(enriched.index)
+    enriched["hedge_ratio"] = hedge_ratio.reindex(enriched.index).ffill().fillna(1.0)
+
+    latest_hedge = pd.to_numeric(enriched["hedge_ratio"], errors="coerce")
+    latest_z_series = pd.to_numeric(enriched["z_score"], errors="coerce")
+    latest_spread_series = pd.to_numeric(enriched["spread"], errors="coerce")
+
+    latest_hedge_value = latest_hedge.dropna().iloc[-1] if latest_hedge.notna().any() else np.nan
+    latest_z_value = latest_z_series.dropna().iloc[-1] if latest_z_series.notna().any() else np.nan
+    latest_spread_value = latest_spread_series.dropna().iloc[-1] if latest_spread_series.notna().any() else np.nan
+
+    metrics = {
+        "lookback_period": int(lookback_period),
+        "entry_z_score": float(entry_z),
+        "exit_z_score": float(exit_z),
+        "hedge_ratio_last": _safe_optional_float(latest_hedge_value),
+        "spread_last": _safe_optional_float(latest_spread_value),
+        "z_score_last": _safe_optional_float(latest_z_value),
+        "pair_regime": "negative_corr" if np.isfinite(latest_hedge_value) and latest_hedge_value < 0 else "positive_corr",
+        "signal_bias": _pairs_signal_bias(
+            float(latest_z_value) if np.isfinite(latest_z_value) else float("nan"),
+            float(entry_z),
+            float(exit_z),
+        ),
+    }
+
+    return {
+        "frame": enriched,
+        "metrics": metrics,
+        "portfolio_mode": "pairs_spread_dual_leg",
+    }
 
 
 def _shift_iso_timestamp(ts_raw: Optional[str], seconds: int) -> Optional[str]:
@@ -1508,6 +1597,8 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     timeframe = str(info.get("timeframe") or "1h")
     is_running = bool(info.get("state") == "running")
     exchange = str(info.get("exchange") or "binance").strip().lower() or "binance"
+    strategy_type = str(info.get("strategy_type") or info.get("name") or "").strip()
+    strategy_params = dict(info.get("params") or {})
 
     live_review_items: list = []
     try:
@@ -1526,6 +1617,10 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     # ── 2. OHLCV bars ────────────────────────────────────────────────────────
     ohlcv: list = []
     ohlcv_source_timeframe = timeframe
+    pair_symbol = ""
+    pair_ohlcv_source_timeframe: Optional[str] = None
+    pair_monitor: Optional[Dict[str, Any]] = None
+    monitor_df = pd.DataFrame()
     try:
         end_time = datetime.now(timezone.utc)
         df, ohlcv_source_timeframe = await _load_monitor_ohlcv_with_fallback(
@@ -1536,18 +1631,54 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
             bars=bars,
         )
         if df is not None and not df.empty:
-            df = df.tail(bars)
-            for row in df.itertuples():
+            monitor_df = df.copy()
+
+            if strategy_type == "PairsTradingStrategy":
+                pair_symbol = str(strategy_params.get("pair_symbol") or "").strip()
+                if pair_symbol:
+                    try:
+                        pair_df, pair_ohlcv_source_timeframe = await _load_monitor_ohlcv_with_fallback(
+                            exchange=exchange,
+                            symbol=pair_symbol,
+                            timeframe=timeframe,
+                            end_time=end_time,
+                            bars=bars,
+                        )
+                        pair_monitor = _build_pairs_monitor_enrichment(
+                            primary_df=monitor_df,
+                            pair_df=pair_df,
+                            params=strategy_params,
+                        )
+                        if pair_monitor and isinstance(pair_monitor.get("frame"), pd.DataFrame):
+                            monitor_df = pair_monitor["frame"]
+                    except Exception as exc:
+                        logger.debug(f"monitor-data: pairs enrichment failed for {name}: {exc}")
+
+            display_df = monitor_df.tail(bars).copy()
+            for row in display_df.itertuples():
                 ts = row.Index
                 ts_str = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-                ohlcv.append({
+                item = {
                     "t": ts_str,
                     "o": _safe_optional_float(getattr(row, "open", None)),
                     "h": _safe_optional_float(getattr(row, "high", None)),
                     "l": _safe_optional_float(getattr(row, "low", None)),
                     "c": _safe_optional_float(getattr(row, "close", None)),
                     "v": _safe_optional_float(getattr(row, "volume", None)),
-                })
+                }
+                pair_close = _safe_optional_float(getattr(row, "pair_close", None))
+                spread = _safe_optional_float(getattr(row, "spread", None))
+                z_score = _safe_optional_float(getattr(row, "z_score", None))
+                hedge_ratio = _safe_optional_float(getattr(row, "hedge_ratio", None))
+                if pair_close is not None:
+                    item["pair_close"] = pair_close
+                if spread is not None:
+                    item["spread"] = spread
+                if z_score is not None:
+                    item["z_score"] = z_score
+                if hedge_ratio is not None:
+                    item["hedge_ratio"] = hedge_ratio
+                ohlcv.append(item)
     except Exception as exc:
         logger.debug(f"monitor-data: OHLCV load failed for {name}: {exc}")
 
@@ -1673,9 +1804,14 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
 
     payload = {
         "name":       name,
+        "strategy_type": strategy_type,
         "symbol":     symbol,
         "timeframe":  timeframe,
         "ohlcv_source_timeframe": ohlcv_source_timeframe,
+        "portfolio_mode": pair_monitor.get("portfolio_mode") if pair_monitor else None,
+        "pair_symbol": pair_symbol or None,
+        "pair_ohlcv_source_timeframe": pair_ohlcv_source_timeframe,
+        "pair_metrics": (pair_monitor.get("metrics") if pair_monitor else None),
         "is_running": is_running,
         "ohlcv":      ohlcv,
         "signals":    signals,
