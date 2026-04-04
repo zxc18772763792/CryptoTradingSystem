@@ -1,5 +1,6 @@
 ﻿"""Strategy API endpoints."""
 import asyncio
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -94,6 +95,21 @@ def _recommended_crypto_defaults(strategy_type: str, exchange: str) -> Dict[str,
     }:
         out["exchange"] = str(exchange or out.get("exchange") or "binance").lower()
     return out
+
+
+def _effective_strategy_defaults(strategy_type: str, exchange: str, klass: Any = None) -> Dict[str, Any]:
+    recommended = deepcopy(_recommended_crypto_defaults(strategy_type, exchange))
+    runtime_defaults: Dict[str, Any] = {}
+    strategy_class = klass or _get_strategy_classes().get(str(strategy_type))
+    if strategy_class is not None:
+        try:
+            inst = strategy_class(name=f"defaults_{strategy_type}", params={})
+            runtime_defaults = deepcopy(dict(getattr(inst, "params", {}) or {}))
+        except Exception:
+            runtime_defaults = {}
+    merged = dict(runtime_defaults)
+    merged.update(recommended)
+    return merged if merged else recommended
 
 
 def _safe_float(value: Any, fallback: float = 0.0) -> float:
@@ -832,7 +848,7 @@ async def get_strategy_catalog():
                 "default_start": name in DEFAULT_START_ALL_STRATEGIES,
                 "recommended_timeframe": _recommended_timeframe(name),
                 "recommended_symbols": _recommended_symbols(name),
-                "defaults": _recommended_crypto_defaults(name, "binance"),
+                "defaults": _effective_strategy_defaults(name, "binance", classes.get(name)),
                 "backtest_supported": is_strategy_backtest_supported(name),
                 "backtest_reason": get_backtest_strategy_info(name).get("reason"),
             }
@@ -860,11 +876,10 @@ async def get_strategy_library():
         meta = get_strategy_library_meta(name)
         required_data: Dict[str, Any] = {}
         param_schema: List[Dict[str, Any]] = []
-        sample_params: Dict[str, Any] = {}
+        sample_params: Dict[str, Any] = _effective_strategy_defaults(name, "binance", klass)
         init_error: Optional[str] = None
         try:
-            inst = klass(name=f"lib_{name}", params={})
-            sample_params = dict(getattr(inst, "params", {}) or {})
+            inst = klass(name=f"lib_{name}", params=sample_params)
             required_data = dict(inst.get_required_data() or {})
             param_schema = strategy_manager._infer_param_schema_from_params(sample_params)  # type: ignore[attr-defined]
         except Exception as e:

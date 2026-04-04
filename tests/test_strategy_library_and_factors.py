@@ -94,6 +94,30 @@ def test_strategy_registry_exposes_single_source_metadata():
     assert fama["backtest_supported"] is True
 
 
+def test_strategy_catalog_and_library_use_same_effective_defaults():
+    from web.api import strategies as strategies_api
+
+    catalog = asyncio.run(strategies_api.get_strategy_catalog())
+    library = asyncio.run(strategies_api.get_strategy_library())
+
+    catalog_by_name = {row["name"]: row for row in catalog["strategies"]}
+    library_by_name = {row["name"]: row for row in library["library"]}
+
+    for name in ["MAStrategy", "PairsTradingStrategy", "MultiFactorHFStrategy", "MLXGBoostStrategy"]:
+        assert library_by_name[name]["sample_params"] == catalog_by_name[name]["defaults"]
+
+    ma = catalog_by_name["MAStrategy"]["defaults"]
+    pairs = catalog_by_name["PairsTradingStrategy"]["defaults"]
+    multi = catalog_by_name["MultiFactorHFStrategy"]["defaults"]
+    ml = catalog_by_name["MLXGBoostStrategy"]["defaults"]
+
+    assert ma["fast_period"] == 20
+    assert pairs["market_type"] == "future"
+    assert pairs["allow_short"] is True
+    assert "factors" in multi and "gates" in multi and "risk" in multi
+    assert ml["model_path"].endswith("models\\ml_signal_xgb.json")
+
+
 def test_arbitrage_registry_backtest_support_flags_match_ui_routing():
     pairs = get_backtest_strategy_info("PairsTradingStrategy")
     fama = get_backtest_strategy_info("FamaFactorArbitrageStrategy")
