@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -422,6 +422,55 @@ def test_close_signal_uses_exchange_live_position_when_local_missing(monkeypatch
     assert result["order"]["id"] == "ord-close-live"
     assert trade_records[-1]["side"] == "close_short"
     assert trade_records[-1]["notional"] == 2.0
+
+
+def test_reconcile_local_positions_requires_repeated_absence_before_closing(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+    engine._live_reconcile_interval_seconds = 0.0
+    engine._live_reconcile_grace_seconds = 0.0
+    engine._live_reconcile_absence_min_age_seconds = 60.0
+    engine._live_reconcile_absence_threshold = 2
+
+    local_position = SimpleNamespace(
+        symbol="BTC/USDT",
+        exchange="binance",
+        side=PositionSide.LONG,
+        quantity=0.02,
+        current_price=100.0,
+        entry_price=100.0,
+        account_id="main",
+        metadata={"source": "strategy"},
+        updated_at=datetime.now(timezone.utc) - timedelta(seconds=61),
+    )
+    closed_positions = []
+    fake_connector = SimpleNamespace(
+        config=SimpleNamespace(default_type="future"),
+        get_positions=AsyncMock(return_value=[]),
+    )
+
+    monkeypatch.setattr(execution_engine_module.position_manager, "get_all_positions", lambda: [local_position])
+    monkeypatch.setattr(
+        execution_engine_module.position_manager,
+        "close_position",
+        lambda **kwargs: closed_positions.append(kwargs) or SimpleNamespace(
+            symbol=kwargs["symbol"],
+            side=PositionSide.LONG,
+            account_id=kwargs["account_id"],
+        ),
+    )
+    monkeypatch.setattr(execution_engine_module.exchange_manager, "get_exchange", lambda exchange: fake_connector)
+    monkeypatch.setattr(engine, "_notify_callbacks", AsyncMock(return_value=None))
+
+    asyncio.run(engine._reconcile_local_positions_with_exchange())
+
+    assert closed_positions == []
+    assert engine._live_reconcile_absence_counts[("main", "binance", "BTC/USDT", "long")] == 1
+
+    asyncio.run(engine._reconcile_local_positions_with_exchange())
+
+    assert len(closed_positions) == 1
+    assert engine._live_reconcile_absence_counts == {}
 
 
 def test_execute_signal_keeps_market_order_with_explicit_quantity(monkeypatch):

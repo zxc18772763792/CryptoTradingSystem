@@ -40,10 +40,7 @@ This document explains how the repository is organized today and which directori
 ## Key Entry Points
 
 - `web.bat`
-  Canonical Windows-friendly entry point for startup, status, and stop operations. The default `start` path is now a safe profile: web-only, external workers opt-in, analytics-history disabled unless explicitly enabled.
-
-- `start_web_oneclick.bat`
-  Simplest Windows-friendly way to start the web application.
+  The only user-facing Windows-friendly entry point for one-click startup, status, and stop operations. Running it with no args starts the web app, the news worker, and the news LLM worker, and opens the browser.
 
 - `scripts/start_web_ps.ps1`
   PowerShell launcher used by the batch wrapper and useful for passing worker or analytics-history flags.

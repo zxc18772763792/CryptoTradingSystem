@@ -93,8 +93,8 @@ _NEWS_LLM_INTERVAL_SEC = max(15, _env_int("NEWS_LLM_INTERVAL_SEC", 60))
 _NEWS_LLM_BATCH = max(1, min(12, _env_int("NEWS_LLM_BATCH", 4)))
 _NEWS_LLM_STARTUP_DELAY_SEC = max(0, _env_int("NEWS_LLM_STARTUP_DELAY_SEC", 0))
 _NEWS_LLM_BACKGROUND_ENABLED = _env_bool("NEWS_LLM_BACKGROUND_ENABLED", True)
+_NEWS_LLM_EXTERNAL_ONLY = _env_bool("NEWS_LLM_EXTERNAL_ONLY", False)
 _EXTERNAL_NEWS_WORKER_ENABLED = _env_bool("START_NEWS_WORKER", False)
-_EXTERNAL_NEWS_LLM_WORKER_ENABLED = _env_bool("START_NEWS_LLM_WORKER", False)
 _DATA_MAINTENANCE_ENABLED = _env_bool("DATA_MAINTENANCE_ENABLED", False)
 _ANALYTICS_HISTORY_ENABLED = _env_bool(
     "ANALYTICS_HISTORY_ENABLED",
@@ -1070,7 +1070,7 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
             "factory": lambda stop_event: _news_refresh_worker(app, stop_event),
             "restart_on_failure": True,
         }
-    if _NEWS_LLM_BACKGROUND_ENABLED and not _EXTERNAL_NEWS_LLM_WORKER_ENABLED:
+    if _NEWS_LLM_BACKGROUND_ENABLED and not _NEWS_LLM_EXTERNAL_ONLY:
         factories["news_llm"] = {
             "factory": lambda stop_event: _news_llm_worker(app, stop_event),
             "restart_on_failure": True,

@@ -1033,6 +1033,53 @@ def test_autonomous_agent_holds_when_total_exposure_reaches_ratio_cap(monkeypatc
     assert submit_mock.await_count == 0
 
 
+def test_resolve_account_risk_base_uses_observed_position_map_as_exposure_floor(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    monkeypatch.setattr(module.execution_engine, "get_account_equity_snapshot", AsyncMock(return_value=1000.0))
+    monkeypatch.setattr(module.execution_engine, "get_strategy_position_cap_notional", lambda **kwargs: 100.0)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "live")
+    monkeypatch.setattr(module.strategy_manager, "get_strategy_allocation", lambda name: 0.0)
+    monkeypatch.setattr(agent, "_positions_for_learning_memory", lambda strategy_name: [])
+    monkeypatch.setattr(
+        agent,
+        "_scan_position_map",
+        AsyncMock(
+            return_value={
+                "BTC/USDT": {
+                    "side": "long",
+                    "quantity": 1.5,
+                    "current_price": 100.0,
+                },
+                "ETH/USDT": {
+                    "side": "short",
+                    "quantity": 1.0,
+                    "entry_price": 250.0,
+                },
+            }
+        ),
+    )
+
+    payload = asyncio.run(
+        agent._resolve_account_risk_base(
+            {
+                "strategy_name": "AI_AutonomousAgent",
+                "exchange": "binance",
+                "account_id": "main",
+                "max_total_exposure_ratio": 0.4,
+            }
+        )
+    )
+
+    assert payload["account_equity"] == 1000.0
+    assert payload["position_cap_notional"] == 100.0
+    assert payload["observed_account_open_notional"] == 400.0
+    assert payload["total_strategy_open_notional"] == 400.0
+    assert payload["total_exposure_limit_notional"] == 400.0
+
+
 def test_agent_runtime_config_leverage_is_fixed_to_one(tmp_path):
     from core.ai.autonomous_agent import AutonomousTradingAgent
 

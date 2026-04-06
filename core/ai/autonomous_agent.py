@@ -2169,6 +2169,19 @@ class AutonomousTradingAgent:
             total += self._position_payload_notional(payload)
         return float(max(0.0, total))
 
+    def _position_map_total_notional(self, position_map: Optional[Dict[str, Dict[str, Any]]]) -> float:
+        total = 0.0
+        if not isinstance(position_map, dict):
+            return 0.0
+        for payload in position_map.values():
+            if not isinstance(payload, dict):
+                continue
+            quantity = abs(float(payload.get("quantity") or 0.0))
+            if quantity <= 1e-12:
+                continue
+            total += self._position_payload_notional(payload)
+        return float(max(0.0, total))
+
     async def _resolve_account_risk_base(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         account_equity = 0.0
         try:
@@ -2199,11 +2212,19 @@ class AutonomousTradingAgent:
                     or 0.0
                 )
 
-        total_strategy_open_notional = self._total_strategy_open_notional(
+        strategy_open_notional = self._total_strategy_open_notional(
             strategy_name=str(cfg.get("strategy_name") or "AI_AutonomousAgent"),
             exchange=str(cfg.get("exchange") or "binance"),
             account_id=str(cfg.get("account_id") or "main"),
         )
+        observed_position_map: Dict[str, Dict[str, Any]] = {}
+        with contextlib.suppress(Exception):
+            observed_position_map = await self._scan_position_map(
+                exchange=str(cfg.get("exchange") or "binance"),
+                account_id=str(cfg.get("account_id") or "main"),
+            )
+        observed_account_open_notional = self._position_map_total_notional(observed_position_map)
+        total_strategy_open_notional = max(strategy_open_notional, observed_account_open_notional)
         total_exposure_limit_notional = (
             float(account_equity * max_total_exposure_ratio)
             if account_equity > 0 and max_total_exposure_ratio > 0
@@ -2215,6 +2236,7 @@ class AutonomousTradingAgent:
             "position_cap_notional": float(max(0.0, position_cap_notional)),
             "max_total_exposure_ratio": float(max_total_exposure_ratio),
             "total_strategy_open_notional": float(max(0.0, total_strategy_open_notional)),
+            "observed_account_open_notional": float(max(0.0, observed_account_open_notional)),
             "total_exposure_limit_notional": float(max(0.0, total_exposure_limit_notional)),
             "trading_mode": str(execution_engine.get_trading_mode() or "paper"),
         }
@@ -2976,16 +2998,31 @@ class AutonomousTradingAgent:
         cfg: Dict[str, Any],
         context_payload: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
-        position = context_payload.get("position") if isinstance(context_payload, dict) else {}
-        has_position = bool(str((position or {}).get("side") or "").strip().lower())
-        if has_position:
-            return None
-
         agg = dict(context_payload.get("aggregated_signal") or {})
         direction = str(agg.get("direction") or "FLAT").strip().upper() or "FLAT"
         confidence = _coerce_float(agg.get("confidence", 0.0), 0.0, low=0.0, high=1.0)
         risk_reason = str(agg.get("risk_reason") or "").strip()
         min_confidence = float(cfg.get("effective_min_confidence") or cfg.get("min_confidence") or 0.0)
+
+        # Guard: refuse to trade when ALL signal components have zero effective weight.
+        # This means no LLM, ML, or factor data is actually available — the LLM model
+        # would be making a blind directional call with no quantitative prior.
+        components = agg.get("components") or {}
+        total_effective_weight = sum(
+            float((components.get(k) or {}).get("effective_weight") or 0.0)
+            for k in ("llm", "ml", "factor")
+        )
+        if total_effective_weight <= 0:
+            return self._build_hold_decision(
+                cfg=cfg,
+                reason="all_signal_components_unavailable",
+                confidence=0.0,
+            )
+
+        position = context_payload.get("position") if isinstance(context_payload, dict) else {}
+        has_position = bool(str((position or {}).get("side") or "").strip().lower())
+        if has_position:
+            return None
 
         if bool(agg.get("blocked_by_risk")):
             return self._build_hold_decision(

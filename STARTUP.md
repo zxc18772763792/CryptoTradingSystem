@@ -1,35 +1,25 @@
 # Startup Quick Reference
 
-This repository now has one canonical control entry, one convenience alias, and one deprecated wrapper:
+This repository now exposes one user-facing startup/control script:
 
 ```bat
-.\web.bat help
-.\web.bat start
-.\start_web_oneclick.bat
+.\web.bat
 ```
 
-## Which Command To Use
-
-| Use case | Command | Notes |
-| --- | --- | --- |
-| Canonical control entry | `.\web.bat ...` | Use this for `help`, `start`, `status`, and `stop`. |
-| Daily one-click start | `.\start_web_oneclick.bat` | Equivalent to `.\web.bat start -OpenBrowser`. |
-| Deprecated compatibility wrapper | `.\start_once.bat` | Still works, but only forwards to `start_web_oneclick.bat`. |
-
-If you only remember one entry point, remember `.\web.bat`.
+If you only remember one command, remember `.\web.bat`.
 
 ## The Commands To Remember
-
-Daily managed start:
-
-```bat
-.\web.bat start
-```
 
 Daily one-click start with browser:
 
 ```bat
-.\start_web_oneclick.bat
+.\web.bat
+```
+
+Daily managed start without forcing the browser:
+
+```bat
+.\web.bat start
 ```
 
 Check what is actually running:
@@ -52,7 +42,7 @@ Show the built-in help summary:
 
 ## Default Managed Startup Profile
 
-`.\web.bat start` is the managed default. It starts:
+`.\web.bat` and `.\web.bat start` both use the managed default profile. It starts:
 
 - web service
 - news worker
@@ -83,12 +73,6 @@ If you want the service and the agent started together from the CLI, use:
 
 ```bat
 .\web.bat start -StartAutonomousAgent
-```
-
-If you want the browser too:
-
-```bat
-.\start_web_oneclick.bat -StartAutonomousAgent
 ```
 
 `.\web.bat status` shows both web status and autonomous-agent state when the service is reachable.
@@ -182,7 +166,7 @@ If the service comes up in `live` unexpectedly:
 
 The startup chain is layered like this:
 
-- `web.bat`: canonical user entry
+- `web.bat`: the only user-facing entry; no args mean one-click startup with browser
 - `scripts\web.ps1`: command router for `help`, `start`, `status`, and `stop`
 - `scripts\start_web_ps.ps1`: transcript wrapper that writes `logs\web_ps.log`
 - `_once.ps1`: low-level launcher that boots web and optional workers, waits for readiness, and can optionally start the autonomous agent through the API

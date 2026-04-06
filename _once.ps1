@@ -166,6 +166,7 @@ function Set-EffectiveWorkerEnvFlags {
     Set-Item -Path Env:START_NEWS_WORKER -Value $(if ($NewsWorker) { "1" } else { "0" })
     Set-Item -Path Env:START_NEWS_LLM_WORKER -Value $(if ($NewsLlmWorker) { "1" } else { "0" })
     Set-Item -Path Env:START_PM_WORKER -Value $(if ($PmWorker) { "1" } else { "0" })
+    Set-Item -Path Env:NEWS_LLM_EXTERNAL_ONLY -Value $(if ($NewsLlmWorker) { "1" } else { "0" })
 }
 
 function Start-AutonomousAgent {
@@ -234,6 +235,9 @@ if ((Test-TruthyText ([string]$env:START_NEWS_WORKER)) -and (-not $StartNewsWork
 }
 if ((Test-TruthyText ([string]$env:START_NEWS_LLM_WORKER)) -and (-not $StartNewsLlmWorker)) {
     $ignoredEnvWorkerFlags += "START_NEWS_LLM_WORKER"
+}
+if ((Test-TruthyText ([string]$env:NEWS_LLM_EXTERNAL_ONLY)) -and (-not $StartNewsLlmWorker)) {
+    $ignoredEnvWorkerFlags += "NEWS_LLM_EXTERNAL_ONLY"
 }
 if ((Test-TruthyText ([string]$env:START_PM_WORKER)) -and (-not $StartPmWorker)) {
     $ignoredEnvWorkerFlags += "START_PM_WORKER"

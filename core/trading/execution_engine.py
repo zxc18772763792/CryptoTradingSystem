@@ -137,6 +137,9 @@ class ExecutionEngine:
         self._last_live_reconcile_at: Optional[datetime] = None
         self._live_reconcile_interval_seconds = 12.0
         self._live_reconcile_grace_seconds = 20.0
+        self._live_reconcile_absence_counts: Dict[Tuple[str, str, str, str], int] = {}
+        self._live_reconcile_absence_threshold = 3
+        self._live_reconcile_absence_min_age_seconds = 10.0 * 60.0
         self._real_order_timeout_seconds = 30.0
         self._live_review_root = Path("./data/cache/live_review")
         self._live_trade_journal_path = self._live_review_root / "strategy_trade_journal.jsonl"
@@ -1721,10 +1724,16 @@ class ExecutionEngine:
 
         now_ts = datetime.now().timestamp()
         grouped: Dict[str, List[Any]] = {}
+        active_local_keys: set[Tuple[str, str, str, str]] = set()
         for pos in local_positions:
             exchange_name = str(getattr(pos, "exchange", "") or "").strip().lower()
             if not exchange_name:
                 continue
+            local_symbol = self._canonical_symbol(str(getattr(pos, "symbol", "") or ""))
+            local_side = str(getattr(getattr(pos, "side", None), "value", "") or "").strip().lower()
+            account_id = str(getattr(pos, "account_id", "main") or "main")
+            if local_symbol and local_side in {"long", "short"}:
+                active_local_keys.add((account_id, exchange_name, local_symbol, local_side))
             grouped.setdefault(exchange_name, []).append(pos)
 
         for exchange_name, positions in grouped.items():
@@ -1741,7 +1750,7 @@ class ExecutionEngine:
                 logger.debug(f"Skip local position reconcile for {exchange_name}: {e}")
                 continue
 
-            exchange_side_keys: set[Tuple[str, str, str]] = set()
+            exchange_side_keys: set[Tuple[str, str]] = set()
             for ex_pos in exchange_positions or []:
                 symbol_raw = str((ex_pos.get("symbol") if isinstance(ex_pos, dict) else getattr(ex_pos, "symbol", "")) or "")
                 symbol_key = self._canonical_symbol(symbol_raw)
@@ -1755,24 +1764,41 @@ class ExecutionEngine:
                     side = "short" if amount < 0 else "long"
                 if side not in {"long", "short"}:
                     continue
-                exchange_side_keys.add((exchange_name, symbol_key, side))
+                exchange_side_keys.add((symbol_key, side))
 
             for local_pos in positions:
                 metadata = getattr(local_pos, "metadata", {}) or {}
                 source = str(metadata.get("source") or "").strip().lower()
-                if source == "exchange_live":
-                    continue
-                local_updated_at = getattr(local_pos, "updated_at", None)
-                if isinstance(local_updated_at, datetime):
-                    age = max(0.0, now_ts - float(local_updated_at.timestamp()))
-                    if age < self._live_reconcile_grace_seconds:
-                        continue
-
+                account_id = str(getattr(local_pos, "account_id", "main") or "main")
                 local_symbol = self._canonical_symbol(str(getattr(local_pos, "symbol", "") or ""))
                 local_side = str(getattr(getattr(local_pos, "side", None), "value", "") or "").strip().lower()
                 if not local_symbol or local_side not in {"long", "short"}:
                     continue
-                if (exchange_name, local_symbol, local_side) in exchange_side_keys:
+                position_key = (account_id, exchange_name, local_symbol, local_side)
+                if source == "exchange_live":
+                    self._live_reconcile_absence_counts.pop(position_key, None)
+                    continue
+                age: Optional[float] = None
+                local_updated_at = getattr(local_pos, "updated_at", None)
+                if isinstance(local_updated_at, datetime):
+                    age = max(0.0, now_ts - float(local_updated_at.timestamp()))
+                    if age < self._live_reconcile_grace_seconds:
+                        self._live_reconcile_absence_counts.pop(position_key, None)
+                        continue
+
+                if (local_symbol, local_side) in exchange_side_keys:
+                    self._live_reconcile_absence_counts.pop(position_key, None)
+                    continue
+
+                absence_count = int(self._live_reconcile_absence_counts.get(position_key, 0) or 0) + 1
+                self._live_reconcile_absence_counts[position_key] = absence_count
+                min_age = max(
+                    float(self._live_reconcile_grace_seconds),
+                    float(self._live_reconcile_absence_min_age_seconds),
+                )
+                if age is not None and age < min_age:
+                    continue
+                if absence_count < max(1, int(self._live_reconcile_absence_threshold)):
                     continue
 
                 close_price = float(
@@ -1792,10 +1818,11 @@ class ExecutionEngine:
                 )
                 if not closed:
                     continue
+                self._live_reconcile_absence_counts.pop(position_key, None)
                 logger.warning(
                     "Reconciled stale local position from exchange snapshot: "
                     f"exchange={exchange_name} symbol={closed.symbol} side={closed.side.value} "
-                    f"account_id={closed.account_id}"
+                    f"account_id={closed.account_id} misses={absence_count} age_sec={age if age is not None else 'na'}"
                 )
                 await self._notify_callbacks(
                     "position_reconciled",
@@ -1808,6 +1835,14 @@ class ExecutionEngine:
                         "reason": "exchange_flat_manual_close",
                     },
                 )
+
+        stale_keys = [
+            key
+            for key in list(self._live_reconcile_absence_counts.keys())
+            if key not in active_local_keys
+        ]
+        for key in stale_keys:
+            self._live_reconcile_absence_counts.pop(key, None)
 
     async def _evaluate_live_ai_decision(
         self,

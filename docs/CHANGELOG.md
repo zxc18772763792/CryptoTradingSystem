@@ -1,5 +1,20 @@
 # Changelog (Governance + AI Decision Integration)
 
+## 2026-04-07
+
+### Changed
+
+- Startup entrypoints:
+  - `web.bat` is now the only user-facing startup/control script
+  - running `.\web.bat` with no args now performs one-click startup with browser
+  - the managed default startup profile now starts web + news worker + news LLM worker
+  - removed the extra top-level wrappers `start_web_oneclick.bat` and `start_once.bat` to reduce operator confusion.
+- `web/main.py` and `_once.ps1`:
+  - news LLM startup now has an internal fallback when the service is started directly
+  - managed startup explicitly marks external-news-LLM-only mode when it launches the dedicated external LLM worker.
+- `STARTUP.md`, `README.md`, and `docs/REPOSITORY_OVERVIEW.md`:
+  - refreshed the startup documentation around the single-script workflow and default news-engine boot behavior.
+
 ## 2026-04-01
 
 ### Added
