@@ -9,7 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,6 +44,7 @@ if settings.OPENAI_MODEL:
 from core.data import data_storage, second_level_backfill_manager
 from core.exchanges import exchange_manager
 from core.news.storage import db as news_db
+from core.notifications import notification_manager
 from core.ops.service import create_router as create_ops_router, initialize_ops_runtime, shutdown_ops_runtime
 from core.realtime import event_bus
 from core.runtime import RuntimeTaskSupervisor, runtime_state
@@ -171,6 +172,129 @@ def _safe_json(obj: Any) -> Dict[str, Any]:
         return {"raw": str(obj)}
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value or 0.0)
+    except Exception:
+        return float(default)
+
+
+def _format_number(value: Any, *, digits: int = 6, signed: bool = False) -> str:
+    number = _safe_float(value, 0.0)
+    magnitude = f"{abs(number):.{digits}f}".rstrip("0").rstrip(".") or "0"
+    if signed:
+        if number > 0:
+            return f"+{magnitude}"
+        if number < 0:
+            return f"-{magnitude}"
+        return "0"
+    return f"-{magnitude}" if number < 0 else magnitude
+
+
+def _autonomous_trade_action_label(signal_type: str, metadata: Dict[str, Any]) -> str:
+    same_direction_existing_notional = _safe_float(metadata.get("same_direction_existing_notional"), 0.0)
+    normalized = str(signal_type or "").strip().lower()
+    if normalized == "buy":
+        return "加多" if same_direction_existing_notional > 0 else "开多"
+    if normalized == "sell":
+        return "加空" if same_direction_existing_notional > 0 else "开空"
+    if normalized == "close_long":
+        return "平多"
+    if normalized == "close_short":
+        return "平空"
+    return ""
+
+
+def _build_ai_trade_execution_notification(event: str, data: Any) -> Optional[Dict[str, str]]:
+    if str(event or "").strip() != "order_executed":
+        return None
+
+    payload = dict(data or {}) if isinstance(data, dict) else {}
+    signal = dict(payload.get("signal") or {})
+    metadata = dict(signal.get("metadata") or {})
+    strategy_name = str(signal.get("strategy_name") or payload.get("strategy") or "").strip()
+    source = str(metadata.get("source") or "").strip().lower()
+    if strategy_name != "AI_AutonomousAgent" and source != "ai_autonomous_agent":
+        return None
+
+    signal_type = str(signal.get("signal_type") or "").strip().lower()
+    action_label = _autonomous_trade_action_label(signal_type, metadata)
+    if not action_label:
+        return None
+
+    symbol = str(signal.get("symbol") or payload.get("symbol") or "").strip() or "unknown"
+    exchange = str(metadata.get("exchange") or payload.get("exchange") or "").strip().lower() or "-"
+    account_id = str(metadata.get("account_id") or payload.get("account_id") or "main").strip() or "main"
+    timeframe = str(metadata.get("timeframe") or "").strip() or "-"
+    provider = str(metadata.get("agent_provider") or "").strip() or "-"
+    model = str(metadata.get("agent_model") or "").strip() or "-"
+    reason = str(metadata.get("agent_reason") or payload.get("reason") or "").strip() or "-"
+    confidence = _safe_float(metadata.get("agent_confidence"), 0.0)
+    strength = _safe_float(signal.get("strength"), 0.0)
+    order = dict(payload.get("order") or {})
+    filled = max(
+        _safe_float(order.get("filled"), 0.0),
+        _safe_float(order.get("amount"), 0.0),
+        _safe_float(payload.get("quantity"), 0.0),
+    )
+    price = max(
+        _safe_float(order.get("price"), 0.0),
+        _safe_float(payload.get("close_price"), 0.0),
+        _safe_float(signal.get("price"), 0.0),
+    )
+    notional = filled * price if filled > 0 and price > 0 else 0.0
+    order_id = str(order.get("id") or "").strip()
+    trading_mode = str(execution_engine.get_trading_mode() or "-")
+
+    lines = [
+        f"动作: {action_label}",
+        f"交易模式: {trading_mode}",
+        f"交易所/账户: {exchange}/{account_id}",
+        f"币种: {symbol}",
+        f"时间框架: {timeframe}",
+    ]
+    if price > 0:
+        lines.append(f"成交价格: {_format_number(price, digits=8)}")
+    if filled > 0:
+        lines.append(f"成交数量: {_format_number(filled, digits=8)}")
+    if notional > 0:
+        lines.append(f"成交名义金额: {_format_number(notional, digits=4)}")
+    if signal_type in {"close_long", "close_short"} and "pnl" in payload:
+        lines.append(f"平仓盈亏: {_format_number(payload.get('pnl'), digits=4, signed=True)}")
+    if confidence > 0:
+        lines.append(f"模型置信度: {_format_number(confidence, digits=3)}")
+    if strength > 0:
+        lines.append(f"信号强度: {_format_number(strength, digits=3)}")
+    lines.append(f"模型: {provider}/{model}")
+    if order_id:
+        lines.append(f"订单ID: {order_id}")
+    lines.append(f"理由: {reason}")
+
+    return {
+        "title": f"AI自治代理{action_label}提醒: {symbol}",
+        "message": "\n".join(lines),
+    }
+
+
+async def _send_ai_trade_execution_notification(event: str, data: Any) -> None:
+    notification = _build_ai_trade_execution_notification(event, data)
+    if not notification:
+        return
+    try:
+        result = await notification_manager.send_message(
+            title=str(notification.get("title") or "AI自治代理成交提醒"),
+            message=str(notification.get("message") or ""),
+            channels=["feishu"],
+        )
+        if not bool((result or {}).get("feishu")):
+            logger.warning(
+                "AI autonomous trade notification did not reach feishu "
+                f"(event={event}, title={notification.get('title')})"
+            )
+    except Exception as exc:
+        logger.warning(f"AI autonomous trade notification failed: {exc}")
+
+
 async def _emit_runtime_snapshot() -> None:
     if not event_bus.has_subscribers():
         return
@@ -188,10 +312,12 @@ async def _emit_runtime_snapshot() -> None:
 
 
 async def _on_execution_event(event: str, data: Any) -> None:
+    payload = _safe_json(data)
     await event_bus.publish_nowait_safe(
         event="execution_event",
-        payload={"event": event, "data": _safe_json(data)},
+        payload={"event": event, "data": payload},
     )
+    await _send_ai_trade_execution_notification(event, payload)
 
 
 async def _on_strategy_signal(signal: Any) -> None:

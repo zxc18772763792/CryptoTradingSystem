@@ -2863,12 +2863,17 @@ class ExecutionEngine:
                             "symbol": signal.symbol,
                             "side": position_side.value,
                             "close_price": close_price,
+                            "quantity": float(close_qty or 0.0),
                             "pnl": float(closed.realized_pnl or 0.0),
                             "fee_usd": 0.0,
                             "slippage_cost_usd": 0.0,
+                            "exchange": exchange,
                             "account_id": account_id,
+                            "strategy": signal.strategy_name,
+                            "signal": signal.to_dict(),
                             "order": None,
                             "reason": "exchange_no_position_reduce_only_rejected",
+                            "timestamp": datetime.now().isoformat(),
                         }
                         self._signal_diagnostics["last_result"] = {
                             "status": "reconciled",
@@ -2947,10 +2952,14 @@ class ExecutionEngine:
             "symbol": signal.symbol,
             "side": position_side.value,
             "close_price": close_price,
+            "quantity": float(close_qty or 0.0),
             "pnl": close_pnl,
             "fee_usd": fee_usd,
             "slippage_cost_usd": slippage_cost_usd,
+            "exchange": exchange,
             "account_id": account_id,
+            "strategy": signal.strategy_name,
+            "signal": signal.to_dict(),
             "order": {
                 "id": close_order.id,
                 "status": close_order.status.value,
@@ -2960,6 +2969,7 @@ class ExecutionEngine:
                 "fee_usd": fee_usd,
                 "slippage_cost_usd": slippage_cost_usd,
             },
+            "timestamp": datetime.now().isoformat(),
         }
         try:
             await audit_logger.log(
