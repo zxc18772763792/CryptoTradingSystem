@@ -21,7 +21,9 @@ from core.news.eventizer.rules import SymbolMapper, extract_events_rules
 from core.news.storage.models import EVENT_TYPES, EventSchema
 from core.utils.openai_responses import (
     build_openai_headers,
+    build_chat_completions_payload,
     build_responses_payload,
+    chat_completions_endpoint,
     coerce_responses_to_chat_completions,
     extract_response_text,
     openai_endpoint_targets,
@@ -30,11 +32,12 @@ from core.utils.openai_responses import (
     remember_openai_target_failure,
     remember_openai_target_success,
     responses_endpoint,
+    responses_api_unavailable,
     should_failover_openai_status,
 )
 
 DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
-DEFAULT_OPENAI_MODEL = "gpt-5.1-codex-mini"
+DEFAULT_OPENAI_MODEL = "gpt6.4"
 _LEGACY_PROVIDER_ALIASES = {"glm", "glm5", "zhipu"}
 _LEGACY_BASE_URL_HINTS = ("bigmodel.cn", "zhipu")
 
@@ -369,6 +372,7 @@ class AsyncGLMClient:
         endpoint: str,
         payload: Dict[str, Any],
         timeout: Optional[aiohttp.ClientTimeout] = None,
+        chat_fallback_payload: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], str]:
         """Make an async HTTP request to the news LLM relay with rate limiting.
 
@@ -434,8 +438,65 @@ class AsyncGLMClient:
                             return {}, "rate_limit"
 
                         if response.status >= 400:
-                            self._requests_failed += 1
                             error_text = await response.text()
+                            if chat_fallback_payload and responses_api_unavailable(response.status, error_text):
+                                chat_url = chat_completions_endpoint(base_url)
+                                logger.warning(
+                                    "async_glm_client news relay does not support Responses API; "
+                                    "retrying via chat/completions"
+                                )
+                                async with session.request(
+                                    method=method,
+                                    url=chat_url,
+                                    headers=build_openai_headers(api_key),
+                                    json=chat_fallback_payload,
+                                ) as chat_response:
+                                    if chat_response.status == 429:
+                                        self._requests_rate_limited += 1
+                                        retry_after = None
+                                        retry_after_header = chat_response.headers.get("Retry-After")
+                                        if retry_after_header:
+                                            try:
+                                                retry_after = int(retry_after_header)
+                                            except ValueError:
+                                                pass
+                                        chat_error_text = await chat_response.text()
+                                        logger.warning(f"news llm chat/completions rate limited (429): {chat_error_text[:200]}")
+                                        last_error_type = "rate_limit"
+                                        remember_openai_target_failure(targets, base_url)
+                                        if idx + 1 < total_targets:
+                                            logger.warning(
+                                                "async_glm_client news chat/completions rate limited; "
+                                                f"trying backup {idx + 2}/{total_targets}"
+                                            )
+                                            continue
+                                        rate_limiter.on_rate_limit(retry_after=retry_after)
+                                        return {}, "rate_limit"
+
+                                    if chat_response.status >= 400:
+                                        self._requests_failed += 1
+                                        chat_error_text = await chat_response.text()
+                                        logger.warning(
+                                            f"news llm chat/completions HTTP {chat_response.status}: {chat_error_text[:300]}"
+                                        )
+                                        last_error_type = "timeout" if chat_response.status in (408, 504) else "other"
+                                        if should_failover_openai_status(chat_response.status):
+                                            remember_openai_target_failure(targets, base_url)
+                                        if idx + 1 < total_targets and should_failover_openai_status(chat_response.status):
+                                            logger.warning(
+                                                "async_glm_client news chat/completions HTTP "
+                                                f"{chat_response.status}; trying backup {idx + 2}/{total_targets}"
+                                            )
+                                            continue
+                                        return {}, last_error_type
+
+                                    data = await read_aiohttp_responses_json(chat_response)
+                                self._requests_success += 1
+                                remember_openai_target_success(targets, base_url)
+                                rate_limiter.reset_backoff()
+                                return data, "none"
+
+                            self._requests_failed += 1
                             logger.warning(f"news llm HTTP {response.status}: {error_text[:300]}")
                             last_error_type = "timeout" if response.status in (408, 504) else "other"
                             if should_failover_openai_status(response.status):
@@ -512,12 +573,21 @@ class AsyncGLMClient:
             temperature=temperature,
             stream=False,
         )
+        chat_payload = build_chat_completions_payload(
+            model=self._model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format={"type": "json_object"},
+            stream=False,
+        )
         request_timeout = self._timeout if timeout is None else aiohttp.ClientTimeout(total=timeout)
         response, error_type = await self._request(
             "POST",
             responses_endpoint(self._base_url),
             payload,
             timeout=request_timeout,
+            chat_fallback_payload=chat_payload,
         )
         if error_type != "none" or not isinstance(response, dict):
             return response, error_type

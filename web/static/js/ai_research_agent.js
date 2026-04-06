@@ -285,6 +285,8 @@
     const direction = String(signal.direction || 'FLAT').trim().toUpperCase() || 'FLAT';
     const parts = [`聚合 ${direction} ${formatPct(signal.confidence, 0)}`];
     const components = signal.components && typeof signal.components === 'object' ? signal.components : {};
+    const aggregatedAt = String(signal.aggregated_at || signal.timestamp || '').trim();
+    const marketDataAt = String(signal.market_data_last_bar_at || signal.last_bar_at || '').trim();
     const componentParts = ['llm', 'ml', 'factor']
       .map((key) => {
         const item = components[key] || {};
@@ -295,6 +297,8 @@
       })
       .filter(Boolean);
     if (componentParts.length) parts.push(componentParts.join(' / '));
+    if (aggregatedAt) parts.push(`聚合 ${fmtAgentTs(aggregatedAt)}`);
+    if (marketDataAt) parts.push(`行情 ${fmtAgentTs(marketDataAt)}`);
     if (signal.blocked_by_risk) {
       parts.push(`风控 ${compactText(signal.risk_reason || 'blocked', 48)}`);
     }
@@ -875,6 +879,8 @@
       const response = await rootApi(`${AGENT_JOURNAL_API}?limit=15`, { timeoutMs: AGENT_DETAIL_TIMEOUT_MS });
       const rows = Array.isArray(response?.items) ? response.items.slice().reverse() : [];
       const summaryHtml = buildAgentJournalCurrentSummary(lastStatusSnapshot || {}, lastConfigSnapshot || {});
+    const aggTimestampText = fmtAgentTs(agg.timestamp || agg.aggregated_at || '');
+    const aggMarketTimestampText = fmtAgentTs(agg.market_data_last_bar_at || agg.last_bar_at || '');
       if (!rows.length) {
         el.innerHTML = `${summaryHtml}<div class="ai-agent-empty">暂无日志</div>`;
         return;
@@ -917,6 +923,14 @@
           </div>
         `;
       }).join('');
+        <div class="ai-agent-diagnostic-item">
+          <span>聚合时间</span>
+          <strong>${esc(aggTimestampText)}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>行情截至</span>
+          <strong>${esc(aggMarketTimestampText)}</strong>
+        </div>
     } catch (_) {
       el.innerHTML = '<div class="ai-agent-empty">日志加载失败</div>';
     }

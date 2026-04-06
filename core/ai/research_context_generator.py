@@ -17,7 +17,9 @@ from loguru import logger
 from config.settings import settings
 from core.utils.openai_responses import (
     build_openai_headers,
+    build_chat_completions_payload,
     build_responses_payload,
+    chat_completions_endpoint,
     extract_response_text,
     openai_endpoint_targets,
     prioritize_openai_targets,
@@ -25,12 +27,13 @@ from core.utils.openai_responses import (
     remember_openai_target_failure,
     remember_openai_target_success,
     responses_endpoint,
+    responses_api_unavailable,
     should_failover_openai_status,
 )
 
 
 _DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
-_DEFAULT_OPENAI_MODEL = "gpt-5.4"
+_DEFAULT_OPENAI_MODEL = "gpt6.4"
 
 _CONTEXT_SYSTEM_PROMPT = """You are a quantitative research planner.
 Your goal is not to emit direct trading instructions. Your goal is to produce
@@ -213,6 +216,17 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
         text_format="json_object",
         stream=False,
     )
+    chat_payload = build_chat_completions_payload(
+        model=model,
+        messages=[
+            {"role": "system", "content": _CONTEXT_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=2400,
+        temperature=0.2,
+        response_format={"type": "json_object"},
+        stream=False,
+    )
     timeout_cfg = aiohttp.ClientTimeout(total=max(5, int(timeout)))
 
     async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
@@ -227,6 +241,46 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                 async with session.post(url, headers=build_openai_headers(api_key), json=payload) as resp:
                     if resp.status >= 400:
                         body = (await resp.text())[:400]
+                        if responses_api_unavailable(resp.status, body):
+                            logger.warning(
+                                "research_context_generator: relay does not support Responses API; "
+                                "retrying via chat/completions"
+                            )
+                            chat_url = chat_completions_endpoint(base_url)
+                            async with session.post(
+                                chat_url,
+                                headers=build_openai_headers(api_key),
+                                json=chat_payload,
+                            ) as chat_resp:
+                                if chat_resp.status >= 400:
+                                    chat_body = (await chat_resp.text())[:400]
+                                    logger.debug(
+                                        "research_context_generator: "
+                                        f"openai_chat_http_{chat_resp.status}:{chat_body}"
+                                    )
+                                    if should_failover_openai_status(chat_resp.status):
+                                        remember_openai_target_failure(targets, base_url)
+                                    if idx + 1 < total_targets and should_failover_openai_status(chat_resp.status):
+                                        logger.warning(
+                                            "research_context_generator: chat/completions relay failed with "
+                                            f"{chat_resp.status}; trying backup {idx + 2}/{total_targets}"
+                                        )
+                                        continue
+                                    return None
+                                data = await read_aiohttp_responses_json(chat_resp)
+                            raw = extract_response_text(data)
+                            if not raw:
+                                logger.debug("research_context_generator: empty OpenAI chat/completions content")
+                                remember_openai_target_failure(targets, base_url)
+                                if idx + 1 < total_targets:
+                                    continue
+                                return None
+                            remember_openai_target_success(targets, base_url)
+                            try:
+                                return _parse_json_payload(raw)
+                            except Exception as exc:
+                                logger.debug(f"research_context_generator: failed to parse chat payload: {exc}")
+                                return None
                         logger.debug(f"research_context_generator: openai_http_{resp.status}:{body}")
                         if should_failover_openai_status(resp.status):
                             remember_openai_target_failure(targets, base_url)

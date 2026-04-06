@@ -183,6 +183,58 @@ def test_live_decision_router_codex_uses_responses_api(monkeypatch, tmp_path):
     assert capture["url"] == "https://example.test/v1/responses"
     assert capture["json"]["text"]["format"]["type"] == "json_object"
     assert capture["json"]["max_output_tokens"] == 180
+    assert "temperature" not in capture["json"]
+
+
+def test_live_decision_router_codex_falls_back_to_chat_completions(monkeypatch, tmp_path):
+    import core.ai.live_decision_router as module
+
+    monkeypatch.setattr(module, "_OVERLAY_PATH", tmp_path / "ai_runtime_config.json")
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
+
+    capture = {}
+    responses = [
+        _FakeResponse({"error": {"message": "not found"}}, status=404),
+        _FakeResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"action":"block","reason":"chat_fallback","confidence":0.81}',
+                            "role": "assistant",
+                        }
+                    }
+                ]
+            },
+            status=200,
+        ),
+    ]
+    monkeypatch.setattr(
+        module.aiohttp,
+        "ClientSession",
+        lambda **kwargs: _FakeSequenceSession(capture=capture, responses=responses, **kwargs),
+    )
+
+    router = module.LiveAIDecisionRouter()
+    result = asyncio.run(
+        router._call_provider(
+            provider="codex",
+            model="mimo-v2-flash",
+            timeout_ms=5000,
+            max_tokens=180,
+            temperature=0.0,
+            system_prompt="sys",
+            user_prompt="usr",
+        )
+    )
+
+    assert result["reason"] == "chat_fallback"
+    assert capture["urls"] == [
+        "https://example.test/v1/responses",
+        "https://example.test/v1/chat/completions",
+    ]
+    assert capture["requests"][1]["json"]["response_format"]["type"] == "json_object"
 
 
 def test_autonomous_agent_codex_uses_responses_api(monkeypatch, tmp_path):
@@ -232,6 +284,63 @@ def test_autonomous_agent_codex_uses_responses_api(monkeypatch, tmp_path):
     assert capture["url"] == "https://example.test/v1/responses"
     assert "text" not in capture["json"]
     assert capture["json"]["max_output_tokens"] == 256
+    assert "temperature" not in capture["json"]
+
+
+def test_autonomous_agent_codex_falls_back_to_chat_completions(monkeypatch, tmp_path):
+    import core.ai.autonomous_agent as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+
+    capture = {}
+    responses = [
+        _FakeResponse({"error": {"message": "not found"}}, status=404),
+        _FakeResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"action":"buy","confidence":0.74,"strength":0.61,'
+                                '"leverage":1,"stop_loss_pct":0.02,"take_profit_pct":0.04,'
+                                '"reason":"chat_fallback"}'
+                            ),
+                            "role": "assistant",
+                        }
+                    }
+                ]
+            },
+            status=200,
+        ),
+    ]
+    monkeypatch.setattr(
+        module.aiohttp,
+        "ClientSession",
+        lambda **kwargs: _FakeSequenceSession(capture=capture, responses=responses, **kwargs),
+    )
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent")
+    result = asyncio.run(
+        agent._call_provider(
+            provider="codex",
+            model="mimo-v2-flash",
+            timeout_ms=8000,
+            max_tokens=256,
+            temperature=0.1,
+            system_prompt="sys",
+            user_prompt="usr",
+        )
+    )
+
+    assert result["reason"] == "chat_fallback"
+    assert capture["urls"] == [
+        "https://example.test/v1/responses",
+        "https://example.test/v1/chat/completions",
+    ]
+    assert capture["requests"][1]["json"]["response_format"]["type"] == "json_object"
 
 
 def test_autonomous_agent_codex_fails_over_to_backup_relay(monkeypatch, tmp_path):
@@ -390,6 +499,47 @@ def test_research_context_generator_fails_over_to_backup_relay(monkeypatch):
     ]
 
 
+def test_research_context_generator_falls_back_to_chat_completions(monkeypatch):
+    import core.ai.research_context_generator as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "mimo-v2-flash", raising=False)
+
+    capture = {}
+    responses = [
+        _FakeResponse({"error": {"message": "not found"}}, status=404),
+        _FakeResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"hypothesis":"chat fallback ok"}',
+                            "role": "assistant",
+                        }
+                    }
+                ]
+            },
+            status=200,
+        ),
+    ]
+    monkeypatch.setattr(
+        module.aiohttp,
+        "ClientSession",
+        lambda **kwargs: _FakeSequenceSession(capture=capture, responses=responses, **kwargs),
+    )
+
+    result = asyncio.run(module._call_openai_responses_json("prompt", timeout=10))
+
+    assert result == {"hypothesis": "chat fallback ok"}
+    assert capture["urls"] == [
+        "https://example.test/v1/responses",
+        "https://example.test/v1/chat/completions",
+    ]
+
+
 def test_async_glm_client_openai_branch_normalizes_responses(monkeypatch):
     import core.news.eventizer.async_glm_client as module
 
@@ -471,6 +621,55 @@ def test_async_glm_client_openai_fails_over_to_backup_relay(monkeypatch):
     ]
 
 
+def test_async_glm_client_openai_falls_back_to_chat_completions(monkeypatch):
+    import core.news.eventizer.async_glm_client as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "mimo-v2-flash", raising=False)
+
+    capture = {}
+    responses = [
+        _FakeResponse({"error": {"message": "not found"}}, status=404),
+        _FakeResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"summary":"切到 chat","sentiment":"positive"}',
+                            "role": "assistant",
+                        }
+                    }
+                ]
+            },
+            status=200,
+        ),
+    ]
+    monkeypatch.setattr(
+        module.aiohttp,
+        "ClientSession",
+        lambda **kwargs: _FakeSequenceSession(capture=capture, responses=list(responses), **kwargs),
+    )
+
+    client = module.AsyncGLMClient({})
+    response, error_type = asyncio.run(
+        client.chat_completions(
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=64,
+        )
+    )
+
+    assert error_type == "none"
+    assert response["choices"][0]["message"]["content"] == '{"summary":"切到 chat","sentiment":"positive"}'
+    assert capture["urls"] == [
+        "https://example.test/v1/responses",
+        "https://example.test/v1/chat/completions",
+    ]
+
+
 def test_news_llm_defaults_use_openai_codex_mini(monkeypatch):
     import core.news.eventizer.async_glm_client as async_module
     import core.news.eventizer.llm_glm5 as sync_module
@@ -481,8 +680,8 @@ def test_news_llm_defaults_use_openai_codex_mini(monkeypatch):
 
     assert sync_module._llm_provider({}) == "openai"
     assert async_module._llm_provider({}) == "openai"
-    assert sync_module._llm_model({}) == "gpt-5.1-codex-mini"
-    assert async_module._llm_model({}) == "gpt-5.1-codex-mini"
+    assert sync_module._llm_model({}) == "gpt6.4"
+    assert async_module._llm_model({}) == "gpt6.4"
 
 
 def test_news_legacy_glm_provider_is_normalized_to_openai(monkeypatch):
@@ -503,8 +702,8 @@ def test_news_legacy_glm_provider_is_normalized_to_openai(monkeypatch):
 
     assert sync_module._llm_provider(legacy_cfg) == "openai"
     assert async_module._llm_provider(legacy_cfg) == "openai"
-    assert sync_module._llm_model(legacy_cfg) == "gpt-5.1-codex-mini"
-    assert async_module._llm_model(legacy_cfg) == "gpt-5.1-codex-mini"
+    assert sync_module._llm_model(legacy_cfg) == "gpt6.4"
+    assert async_module._llm_model(legacy_cfg) == "gpt6.4"
     assert sync_module._llm_base_url(legacy_cfg) == "https://sub.a-j.app/v1"
     assert async_module._llm_base_url(legacy_cfg) == "https://sub.a-j.app/v1"
 
@@ -543,7 +742,53 @@ def test_news_sync_summary_uses_openai_mini_source(monkeypatch):
     assert result["sentiment"] == "positive"
     assert result["source"] == "openai_responses"
     assert capture["url"] == "https://example.test/v1/responses"
-    assert capture["json"]["model"] == "gpt-5.1-codex-mini"
+    assert capture["json"]["model"] == "gpt6.4"
+
+
+def test_news_sync_summary_falls_back_to_chat_completions(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "mimo-v2-flash", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    capture = {"urls": []}
+    responses = iter(
+        [
+            _SyncResponse({"error": {"message": "not found"}}, status_code=404),
+            _SyncResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"summary":"chat 摘要","sentiment":"positive"}',
+                                "role": "assistant",
+                            }
+                        }
+                    ]
+                }
+            ),
+        ]
+    )
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        capture["urls"].append(url)
+        return next(responses)
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    result = module.summarize_title_glm5("Bitcoin ETF approved", {"llm": {"provider": "openai"}}, max_length=60)
+
+    assert result["summary"] == "chat 摘要"
+    assert result["sentiment"] == "positive"
+    assert capture["urls"] == [
+        "https://example.test/v1/responses",
+        "https://example.test/v1/chat/completions",
+    ]
 
 
 def test_news_batch_summary_prefers_new_llm_cap_key(monkeypatch):
@@ -716,9 +961,85 @@ def test_news_extract_events_fails_over_to_backup_relay(monkeypatch):
     assert len(events) == 1
     assert events[0]["symbol"] == "BTCUSDT"
     assert events[0]["event_type"] == "etf"
+
+
+def test_news_extract_events_falls_back_to_chat_completions(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "mimo-v2-flash", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    capture = {"urls": []}
+    responses = iter(
+        [
+            _SyncResponse({"error": {"message": "not found"}}, status_code=404),
+            _SyncResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "events": [
+                                            {
+                                                "event_id": "evt-chat-1",
+                                                "ts": "2026-03-29T00:00:00Z",
+                                                "symbol": "BTCUSDT",
+                                                "event_type": "etf",
+                                                "sentiment": 1,
+                                                "impact_score": 0.9,
+                                                "half_life_min": 180,
+                                                "evidence": {
+                                                    "title": "Bitcoin ETF approved",
+                                                    "url": "https://example.test/news/1",
+                                                    "source": "jin10",
+                                                    "matched_reason": "approval",
+                                                },
+                                            }
+                                        ]
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                                "role": "assistant",
+                            }
+                        }
+                    ]
+                }
+            ),
+        ]
+    )
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        capture["urls"].append(url)
+        return next(responses)
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    events = module.extract_events_glm5(
+        [
+            {
+                "title": "Bitcoin ETF approved",
+                "content": "ETF approval boosts sentiment",
+                "url": "https://example.test/news/1",
+                "source": "jin10",
+                "published_at": "2026-03-29T00:00:00Z",
+            }
+        ],
+        {
+            "llm": {"provider": "openai", "batch_size": 1},
+            "symbols": {"BTCUSDT": {"canonical": "BTCUSDT", "aliases": ["BTC", "BTCUSDT"]}},
+        },
+    )
+
+    assert len(events) == 1
+    assert events[0]["symbol"] == "BTCUSDT"
     assert capture["urls"] == [
-        "https://primary.test/v1/responses",
-        "https://backup.test/v1/responses",
+        "https://example.test/v1/responses",
+        "https://example.test/v1/chat/completions",
     ]
 
 

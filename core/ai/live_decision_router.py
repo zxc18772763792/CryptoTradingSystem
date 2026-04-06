@@ -16,7 +16,9 @@ from config.settings import settings
 from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.utils.openai_responses import (
     build_openai_headers,
+    build_chat_completions_payload,
     build_responses_payload,
+    chat_completions_endpoint,
     extract_response_text,
     openai_endpoint_targets,
     prioritize_openai_targets,
@@ -24,6 +26,7 @@ from core.utils.openai_responses import (
     remember_openai_target_failure,
     remember_openai_target_success,
     responses_endpoint,
+    responses_api_unavailable,
     should_failover_openai_status,
 )
 
@@ -43,7 +46,7 @@ _PERSISTABLE_KEYS = frozenset({
 })
 
 
-_DEFAULT_OPENAI_BASE_URL = "https://vpsairobot.com/v1"
+_DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
 _DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _DEFAULT_GLM_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 _SUPPORTED_PROVIDERS = {"glm", "codex", "claude"}
@@ -183,7 +186,7 @@ class LiveAIDecisionRouter:
     def _provider_model(self, provider: str) -> str:
         provider = _normalize_provider(provider)
         if provider == "codex":
-            return str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.4")
+            return str(getattr(settings, "OPENAI_MODEL", "") or "gpt6.4")
         if provider == "claude":
             return str(getattr(settings, "ANTHROPIC_MODEL", "") or "claude-3-5-sonnet-latest")
         return str(getattr(settings, "ZHIPU_MODEL", "") or "GLM-4.5-Air")
@@ -319,13 +322,14 @@ class LiveAIDecisionRouter:
         model: str,
         timeout_ms: int,
         max_tokens: int,
-        temperature: float,
+        temperature: Optional[float],
         system_prompt: str,
         user_prompt: str,
     ) -> Dict[str, Any]:
         provider = _normalize_provider(provider)
         timeout = aiohttp.ClientTimeout(total=max(1, int(timeout_ms)) / 1000.0)
         base_url = self._provider_base_url(provider)
+        temperature_value = None if temperature is None else float(temperature)
 
         if provider == "claude":
             api_key = self._provider_api_key(provider)
@@ -340,7 +344,7 @@ class LiveAIDecisionRouter:
             payload = {
                 "model": model,
                 "max_tokens": int(max_tokens),
-                "temperature": float(temperature),
+                "temperature": temperature_value if temperature_value is not None else 0.0,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": user_prompt}],
             }
@@ -366,6 +370,17 @@ class LiveAIDecisionRouter:
             targets = prioritize_openai_targets(self._provider_endpoint_targets(provider))
             if not any(bool(str(target.get("api_key") or "").strip()) for target in targets):
                 raise RuntimeError(f"{provider}_api_key_missing")
+            chat_payload = build_chat_completions_payload(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=int(max_tokens),
+                temperature=temperature_value if temperature_value is not None else 0.0,
+                response_format={"type": "json_object"},
+                stream=False,
+            )
             payload = build_responses_payload(
                 model=model,
                 messages=[
@@ -373,7 +388,7 @@ class LiveAIDecisionRouter:
                     {"role": "user", "content": user_prompt},
                 ],
                 max_output_tokens=int(max_tokens),
-                temperature=float(temperature),
+                temperature=None,
                 text_format="json_object",
                 stream=False,
             )
@@ -391,6 +406,41 @@ class LiveAIDecisionRouter:
                         async with session.post(url, headers=headers, json=payload) as resp:
                             if resp.status >= 400:
                                 body = (await resp.text())[:300]
+                                if responses_api_unavailable(resp.status, body):
+                                    chat_url = chat_completions_endpoint(target_base_url)
+                                    logger.warning(
+                                        "live_decision_router codex relay does not support Responses API; "
+                                        "retrying via chat/completions"
+                                    )
+                                    async with session.post(chat_url, headers=headers, json=chat_payload) as chat_resp:
+                                        if chat_resp.status >= 400:
+                                            chat_body = (await chat_resp.text())[:300]
+                                            err = RuntimeError(f"{provider}_chat_http_{chat_resp.status}:{chat_body}")
+                                            if should_failover_openai_status(chat_resp.status):
+                                                remember_openai_target_failure(targets, target_base_url)
+                                            if idx + 1 < total_targets and should_failover_openai_status(chat_resp.status):
+                                                last_exc = err
+                                                logger.warning(
+                                                    f"live_decision_router codex chat/completions failed with "
+                                                    f"{chat_resp.status}; trying backup {idx + 2}/{total_targets}"
+                                                )
+                                                continue
+                                            raise err
+                                        data = await read_aiohttp_responses_json(chat_resp)
+                                    text = extract_response_text(data)
+                                    if not text:
+                                        err = RuntimeError(f"{provider}_chat_empty_content")
+                                        if idx + 1 < total_targets:
+                                            last_exc = err
+                                            remember_openai_target_failure(targets, target_base_url)
+                                            logger.warning(
+                                                "live_decision_router codex chat/completions returned empty content; "
+                                                f"trying backup {idx + 2}/{total_targets}"
+                                            )
+                                            continue
+                                        raise err
+                                    remember_openai_target_success(targets, target_base_url)
+                                    return _extract_json_obj(text)
                                 err = RuntimeError(f"{provider}_http_{resp.status}:{body}")
                                 if should_failover_openai_status(resp.status):
                                     remember_openai_target_failure(targets, target_base_url)
@@ -442,7 +492,7 @@ class LiveAIDecisionRouter:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": float(temperature),
+            "temperature": temperature_value if temperature_value is not None else 0.0,
             "max_tokens": int(max_tokens),
             "response_format": {"type": "json_object"},
         }

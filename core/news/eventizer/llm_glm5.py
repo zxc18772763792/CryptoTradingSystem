@@ -15,7 +15,9 @@ from core.news.eventizer.rules import SymbolMapper, extract_events_rules
 from core.news.storage.models import EVENT_TYPES, EventSchema
 from core.utils.openai_responses import (
     build_openai_headers,
+    build_chat_completions_payload,
     build_responses_payload,
+    chat_completions_endpoint,
     coerce_responses_to_chat_completions,
     openai_endpoint_targets,
     prioritize_openai_targets,
@@ -23,12 +25,13 @@ from core.utils.openai_responses import (
     remember_openai_target_failure,
     remember_openai_target_success,
     responses_endpoint,
+    responses_api_unavailable,
     should_failover_openai_status,
 )
 
 
 DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
-DEFAULT_OPENAI_MODEL = "gpt-5.1-codex-mini"
+DEFAULT_OPENAI_MODEL = "gpt6.4"
 _LEGACY_PROVIDER_ALIASES = {"glm", "glm5", "zhipu"}
 _LEGACY_BASE_URL_HINTS = ("bigmodel.cn", "zhipu")
 _SUMMARY_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -169,6 +172,7 @@ def _openai_post_with_failover(
     *,
     cfg: Dict[str, Any],
     payload: Dict[str, Any],
+    chat_fallback_payload: Optional[Dict[str, Any]] = None,
     timeout_sec: int,
     log_prefix: str,
 ) -> Dict[str, Any]:
@@ -195,6 +199,31 @@ def _openai_post_with_failover(
                 timeout=timeout_sec,
             )
             if response.status_code >= 400:
+                if chat_fallback_payload and responses_api_unavailable(response.status_code, response.text):
+                    chat_url = chat_completions_endpoint(base_url)
+                    logger.warning(
+                        f"{log_prefix}: relay does not support Responses API; retrying via chat/completions"
+                    )
+                    chat_response = requests.post(
+                        chat_url,
+                        headers=build_openai_headers(api_key),
+                        json=chat_fallback_payload,
+                        timeout=timeout_sec,
+                    )
+                    if chat_response.status_code >= 400:
+                        err = RuntimeError(f"LLM chat HTTP {chat_response.status_code}: {chat_response.text[:300]}")
+                        if should_failover_openai_status(chat_response.status_code):
+                            remember_openai_target_failure(targets, base_url)
+                        if idx + 1 < total_targets and should_failover_openai_status(chat_response.status_code):
+                            last_exc = err
+                            logger.warning(
+                                f"{log_prefix}: openai chat/completions HTTP {chat_response.status_code}; "
+                                f"trying backup {idx + 2}/{total_targets}"
+                            )
+                            continue
+                        raise err
+                    remember_openai_target_success(targets, base_url)
+                    return read_requests_responses_json(chat_response)
                 err = RuntimeError(f"LLM HTTP {response.status_code}: {response.text[:300]}")
                 if should_failover_openai_status(response.status_code):
                     remember_openai_target_failure(targets, base_url)
@@ -541,9 +570,20 @@ def _call_llm_once(
         temperature=0,
         stream=False,
     )
+    chat_payload = build_chat_completions_payload(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0,
+        response_format={"type": "json_object"},
+        stream=False,
+    )
     data = _openai_post_with_failover(
         cfg=cfg,
         payload=payload,
+        chat_fallback_payload=chat_payload,
         timeout_sec=timeout_sec,
         log_prefix="news_llm.extract",
     )
@@ -675,11 +715,23 @@ def summarize_title_llm(title: str, cfg: Dict[str, Any], max_length: int = 60) -
         text_format="json_object",
         stream=False,
     )
+    chat_payload = build_chat_completions_payload(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_tokens=max_length + 50,
+        temperature=0.3,
+        response_format={"type": "json_object"},
+        stream=False,
+    )
 
     try:
         data = _openai_post_with_failover(
             cfg=cfg,
             payload=payload,
+            chat_fallback_payload=chat_payload,
             timeout_sec=timeout_sec,
             log_prefix="news_llm.summarize",
         )
@@ -767,11 +819,22 @@ def _call_llm_batch_summarize(
         text_format="json_object",
         stream=False,
     )
+    chat_payload = build_chat_completions_payload(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
+        ],
+        temperature=0.2,
+        response_format={"type": "json_object"},
+        stream=False,
+    )
 
     try:
         data = _openai_post_with_failover(
             cfg=cfg,
             payload=payload,
+            chat_fallback_payload=chat_payload,
             timeout_sec=timeout_sec,
             log_prefix="news_llm.batch_summarize",
         )

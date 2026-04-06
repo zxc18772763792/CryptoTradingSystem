@@ -35,7 +35,9 @@ from core.strategies.strategy_manager import strategy_manager
 from core.trading import execution_engine, position_manager
 from core.utils.openai_responses import (
     build_openai_headers,
+    build_chat_completions_payload,
     build_responses_payload_variants,
+    chat_completions_endpoint,
     extract_response_text,
     openai_endpoint_targets,
     prioritize_openai_targets,
@@ -43,6 +45,7 @@ from core.utils.openai_responses import (
     remember_openai_target_failure,
     remember_openai_target_success,
     responses_endpoint,
+    responses_api_unavailable,
     should_failover_openai_status,
     unsupported_responses_parameter,
 )
@@ -596,7 +599,7 @@ class AutonomousTradingAgent:
     def _provider_model(self, provider: str) -> str:
         provider = _normalize_provider(provider)
         if provider == "codex":
-            return str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.4")
+            return str(getattr(settings, "OPENAI_MODEL", "") or "gpt6.4")
         if provider == "claude":
             return str(getattr(settings, "ANTHROPIC_MODEL", "") or "claude-3-5-sonnet-latest")
         return str(getattr(settings, "ZHIPU_MODEL", "") or "GLM-4.5-Air")
@@ -1371,13 +1374,14 @@ class AutonomousTradingAgent:
         model: str,
         timeout_ms: int,
         max_tokens: int,
-        temperature: float,
+        temperature: Optional[float],
         system_prompt: str,
         user_prompt: str,
     ) -> Dict[str, Any]:
         provider = _normalize_provider(provider)
         timeout = aiohttp.ClientTimeout(total=max(1, int(timeout_ms)) / 1000.0)
         base_url = self._provider_base_url(provider)
+        temperature_value = None if temperature is None else float(temperature)
 
         if provider == "claude":
             api_key = self._provider_api_key(provider)
@@ -1392,7 +1396,7 @@ class AutonomousTradingAgent:
             payload = {
                 "model": model,
                 "max_tokens": int(max_tokens),
-                "temperature": float(temperature),
+                "temperature": temperature_value if temperature_value is not None else 0.0,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": user_prompt}],
             }
@@ -1418,13 +1422,24 @@ class AutonomousTradingAgent:
             targets = prioritize_openai_targets(self._provider_endpoint_targets(provider))
             if not any(bool(str(target.get("api_key") or "").strip()) for target in targets):
                 raise RuntimeError(f"{provider}_api_key_missing")
+            chat_payload = build_chat_completions_payload(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=int(max_tokens),
+                temperature=temperature_value if temperature_value is not None else 0.0,
+                response_format={"type": "json_object"},
+                stream=False,
+            )
             payload_variants = build_responses_payload_variants(
                 model=model,
                 messages=[
                     {"role": "user", "content": user_prompt},
                 ],
                 max_output_tokens=int(max_tokens),
-                temperature=float(temperature),
+                temperature=None,
                 # Some OpenAI-compatible relays return intermittent 502s for
                 # Responses API `text.format=json_object` payloads even when
                 # the same prompt succeeds without that field. We keep strict
@@ -1452,6 +1467,43 @@ class AutonomousTradingAgent:
                             async with session.post(url, headers=headers, json=payload) as resp:
                                 if resp.status >= 400:
                                     body = (await resp.text())[:300]
+                                    if responses_api_unavailable(resp.status, body):
+                                        chat_url = chat_completions_endpoint(target_base_url)
+                                        logger.warning(
+                                            "autonomous_agent codex relay does not support Responses API; "
+                                            "retrying via chat/completions"
+                                        )
+                                        async with session.post(chat_url, headers=headers, json=chat_payload) as chat_resp:
+                                            if chat_resp.status >= 400:
+                                                chat_body = (await chat_resp.text())[:300]
+                                                err = RuntimeError(f"{provider}_chat_http_{chat_resp.status}:{chat_body}")
+                                                if should_failover_openai_status(chat_resp.status):
+                                                    remember_openai_target_failure(targets, target_base_url)
+                                                if idx + 1 < total_targets and should_failover_openai_status(chat_resp.status):
+                                                    last_exc = err
+                                                    logger.warning(
+                                                        f"autonomous_agent codex chat/completions failed with "
+                                                        f"{chat_resp.status}; trying backup {idx + 2}/{total_targets}"
+                                                    )
+                                                    advance_to_next_target = True
+                                                    break
+                                                raise err
+                                            data = await read_aiohttp_responses_json(chat_resp)
+                                        text = extract_response_text(data)
+                                        if not text:
+                                            err = RuntimeError(f"{provider}_chat_empty_content")
+                                            if idx + 1 < total_targets:
+                                                last_exc = err
+                                                remember_openai_target_failure(targets, target_base_url)
+                                                logger.warning(
+                                                    "autonomous_agent codex chat/completions returned empty content; "
+                                                    f"trying backup {idx + 2}/{total_targets}"
+                                                )
+                                                advance_to_next_target = True
+                                                break
+                                            raise err
+                                        remember_openai_target_success(targets, target_base_url)
+                                        return _extract_json_obj(text)
                                     err = RuntimeError(f"{provider}_http_{resp.status}:{body}")
                                     unsupported_param = unsupported_responses_parameter(body)
                                     if resp.status == 400 and unsupported_param in {
@@ -1531,7 +1583,7 @@ class AutonomousTradingAgent:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": float(temperature),
+            "temperature": temperature_value if temperature_value is not None else 0.0,
             "max_tokens": int(max_tokens),
             "response_format": {"type": "json_object"},
         }
@@ -2808,6 +2860,11 @@ class AutonomousTradingAgent:
                     "confidence": _float_or_default(aggregated_signal.get("confidence"), 0.0),
                     "blocked_by_risk": bool(aggregated_signal.get("blocked_by_risk")),
                     "risk_reason": aggregated_signal.get("risk_reason"),
+                    "timestamp": aggregated_signal.get("timestamp"),
+                    "market_data_last_bar_at": (
+                        aggregated_signal.get("market_data_last_bar_at")
+                        or market_structure.get("last_bar_at")
+                    ),
                     "components": compact_components,
                 }
             ),
@@ -3739,6 +3796,25 @@ class AutonomousTradingAgent:
         agg_direction = str(agg.get("direction") or "FLAT").upper()
         agg_confidence = _coerce_float(agg.get("confidence", 0.0), 0.0, low=0.0, high=1.0)
         agg_risk_reason = str(agg.get("risk_reason") or "").strip()
+        agg_timestamp = str(agg.get("timestamp") or "").strip() or None
+        agg_market_data_last_bar_at = (
+            str(agg.get("market_data_last_bar_at") or "").strip()
+            or str((context_payload.get("market_structure") or {}).get("last_bar_at") or "").strip()
+            or None
+        )
+        agg_components = dict(agg.get("components") or {})
+        compact_agg_components: Dict[str, Any] = {}
+        for name, payload in agg_components.items():
+            if not isinstance(payload, dict):
+                continue
+            compact_agg_components[str(name)] = {
+                "direction": str(payload.get("direction") or "FLAT").upper(),
+                "confidence": _coerce_float(payload.get("confidence", 0.0), 0.0, low=0.0, high=1.0),
+                "available": bool(payload.get("available")),
+                "status": str(payload.get("status") or "").strip(),
+                "reason": str(payload.get("reason") or "").strip(),
+                "effective_weight": _coerce_float(payload.get("effective_weight", 0.0), 0.0, low=0.0, high=1.0),
+            }
         if bool(agg.get("blocked_by_risk")):
             add_item("aggregated_risk_blocked", "聚合信号被风险门拦截", agg_risk_reason or "risk gate blocked", "warn", 25)
         if agg_direction == "FLAT":
@@ -3806,6 +3882,9 @@ class AutonomousTradingAgent:
                 "confidence": agg_confidence,
                 "blocked_by_risk": bool(agg.get("blocked_by_risk")),
                 "risk_reason": agg_risk_reason,
+                "timestamp": agg_timestamp,
+                "market_data_last_bar_at": agg_market_data_last_bar_at,
+                "components": compact_agg_components,
             },
             "execution_cost": {
                 "fee_bps": _safe_nonnegative_float(execution_cost.get("fee_bps"), 0.0),

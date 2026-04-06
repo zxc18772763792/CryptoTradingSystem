@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 from typing import Any, Dict, List, Optional, Union
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request
 from loguru import logger
@@ -46,6 +47,7 @@ from core.research.orchestrator import (
 
 
 router = APIRouter()
+SIGNAL_MARKET_DATA_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 class AIPlannerGenerateRequest(BaseModel):
@@ -380,6 +382,16 @@ def _candidate_created_sort_value(candidate: Any) -> float:
         return 0.0
 
 
+def _normalize_signal_market_timestamp(value: Any) -> Optional[pd.Timestamp]:
+    try:
+        ts = pd.Timestamp(value)
+    except Exception:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.tz_localize(SIGNAL_MARKET_DATA_TIMEZONE)
+    return ts
+
+
 def _candidate_live_signal_group_key(candidate: Any) -> tuple[str, str, str, str]:
     return (
         _candidate_primary_symbol(candidate),
@@ -544,9 +556,11 @@ async def _load_live_signal_snapshot(
             include_llm=False,
             include_ml=False,
         )
+        signal_payload = sig.to_dict() if callable(getattr(sig, "to_dict", None)) else dict(sig or {})
         return {
-            **(sig.to_dict() if callable(getattr(sig, "to_dict", None)) else dict(sig or {})),
+            **signal_payload,
             **market_meta,
+            "aggregated_at": signal_payload.get("timestamp"),
         }
 
     try:
@@ -976,15 +990,14 @@ async def _load_signal_market_data(
     stale = rows <= 0
     if rows > 0:
         try:
-            last_ts = pd.Timestamp(df.index[-1])
-            if last_ts.tzinfo is None:
-                last_ts = last_ts.tz_localize(timezone.utc)
-            else:
-                last_ts = last_ts.tz_convert(timezone.utc)
+            last_ts = _normalize_signal_market_timestamp(df.index[-1])
+            if last_ts is None:
+                raise ValueError("invalid_last_bar_timestamp")
             last_bar_at = last_ts.isoformat()
+            last_ts_utc = last_ts.tz_convert(timezone.utc)
             age_sec = max(
                 0.0,
-                (pd.Timestamp.now(tz=timezone.utc) - last_ts).total_seconds(),
+                (pd.Timestamp.now(tz=timezone.utc) - last_ts_utc).total_seconds(),
             )
             stale = age_sec > max(3 * 3600, _signal_timeframe_seconds(resolved_timeframe) * 6)
         except Exception as exc:

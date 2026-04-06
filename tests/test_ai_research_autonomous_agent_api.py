@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import pandas as pd
 from pydantic import ValidationError
 
 
@@ -243,3 +244,83 @@ def test_live_signals_gracefully_degrades_when_symbol_scan_times_out(monkeypatch
 
     assert result["count"] == 0
     assert result["watchlist_count"] == 0
+
+
+def test_live_signal_snapshot_exposes_aggregated_timestamp(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    async def fake_load_signal_market_data(**kwargs):
+        df = pd.DataFrame(
+            {"close": [1.0, 1.1]},
+            index=pd.to_datetime(["2026-04-06T00:00:00Z", "2026-04-06T00:15:00Z"], utc=True),
+        )
+        return df, {
+            "market_data_exchange": "binance",
+            "market_data_symbol": "BTC/USDT",
+            "market_data_timeframe": "15m",
+            "market_data_source": "test",
+            "market_data_rows": 2,
+            "market_data_last_bar_at": "2026-04-06T00:15:00+00:00",
+            "market_data_age_sec": 12.0,
+            "market_data_stale": False,
+            "market_data_load_error": None,
+        }
+
+    class FakeSignal:
+        def to_dict(self):
+            return {
+                "symbol": "BTC/USDT",
+                "direction": "LONG",
+                "confidence": 0.73,
+                "components": {},
+                "timestamp": "2026-04-06T00:16:00+00:00",
+            }
+
+    class FakeSignalAggregator:
+        async def aggregate(self, symbol, df, include_llm=False, include_ml=False):
+            return FakeSignal()
+
+    monkeypatch.setattr(ai_module, "_load_signal_market_data", fake_load_signal_market_data)
+
+    payload, error = asyncio.run(
+        ai_module._load_live_signal_snapshot(
+            symbol="BTC/USDT",
+            exchange="binance",
+            timeframe="15m",
+            signal_aggregator=FakeSignalAggregator(),
+            limit=120,
+            timeout_sec=1.0,
+            log_label="unit-test",
+        )
+    )
+
+    assert error == ""
+    assert payload["timestamp"] == "2026-04-06T00:16:00+00:00"
+    assert payload["aggregated_at"] == "2026-04-06T00:16:00+00:00"
+    assert payload["market_data_last_bar_at"] == "2026-04-06T00:15:00+00:00"
+
+
+def test_load_signal_market_data_localizes_naive_bar_timestamp_to_shanghai(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    frame = pd.DataFrame(
+        {"close": [1.0, 1.1]},
+        index=pd.to_datetime(["2026-04-06 11:00:00", "2026-04-06 11:15:00"]),
+    )
+
+    monkeypatch.setattr(
+        "core.strategies.strategy_manager._load_market_data",
+        AsyncMock(return_value=frame),
+    )
+
+    _, meta = asyncio.run(
+        ai_module._load_signal_market_data(
+            exchange="binance",
+            symbol="BTC/USDT",
+            timeframe="15m",
+            limit=120,
+        )
+    )
+
+    assert meta["market_data_last_bar_at"] == "2026-04-06T11:15:00+08:00"
+    assert meta["market_data_age_sec"] is not None

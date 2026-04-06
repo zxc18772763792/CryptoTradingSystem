@@ -1525,6 +1525,48 @@ def test_agent_runtime_config_falls_back_to_openai_when_glm_unavailable(tmp_path
     assert cfg["provider_fallback"] is True
 
 
+def test_agent_decision_diagnostics_keep_aggregated_signal_timestamps(tmp_path):
+    """Diagnostics should preserve aggregated signal timing for the UI."""
+    from core.ai.autonomous_agent import AutonomousTradingAgent
+
+    agent = AutonomousTradingAgent(cache_root=tmp_path / "agent_diag_ts")
+    diagnostics = agent._build_decision_diagnostics(
+        cfg={"symbol_mode": "manual", "symbol": "BTC/USDT", "min_confidence": 0.58},
+        context_payload={
+            "aggregated_signal": {
+                "direction": "LONG",
+                "confidence": 0.73,
+                "blocked_by_risk": False,
+                "risk_reason": "",
+                "timestamp": "2026-04-06T00:16:00+00:00",
+                "components": {
+                    "llm": {
+                        "direction": "LONG",
+                        "confidence": 0.81,
+                        "available": True,
+                        "status": "active",
+                        "reason": "",
+                        "effective_weight": 0.4,
+                    }
+                },
+            },
+            "market_structure": {
+                "last_bar_at": "2026-04-06T00:15:00+00:00",
+            },
+            "execution_cost": {},
+        },
+        raw_decision=None,
+        raw_decision_source="fallback",
+        decision={"action": "hold", "reason": "below_min_confidence(0.58)"},
+        execution={"submitted": False, "reason": "hold"},
+        selection={"selected_symbol": "BTC/USDT", "configured_symbol": "BTC/USDT"},
+    )
+
+    assert diagnostics["aggregated_signal"]["timestamp"] == "2026-04-06T00:16:00+00:00"
+    assert diagnostics["aggregated_signal"]["market_data_last_bar_at"] == "2026-04-06T00:15:00+00:00"
+    assert diagnostics["aggregated_signal"]["components"]["llm"]["direction"] == "LONG"
+
+
 def test_agent_journal_contains_request_id(tmp_path, monkeypatch):
     """Journal rows must have request_id, execution_allowed, and rejection_reason fields."""
     from core.ai.autonomous_agent import AutonomousTradingAgent

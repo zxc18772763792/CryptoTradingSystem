@@ -4778,11 +4778,21 @@
     const dataBadge = noMarketData
       ? '<span class="live-sig-badge" style="background:#243447;color:#9fb1c9;">缺数据</span>'
       : (isStale ? '<span class="live-sig-badge" style="background:#2a2330;color:#c4b5fd;">数据旧</span>' : '');
-    const footerNote = noMarketData
+    let footerNote = noMarketData
       ? '最近可用 K 线为空，当前仅展示空信号回退。'
       : (sig.market_data_last_bar_at
         ? `行情截至 ${fmtTs(sig.market_data_last_bar_at)}${isStale ? ' · 不是最新快照' : ''}`
         : '');
+
+    const aggregatedAt = String(sig.aggregated_at || sig.timestamp || '').trim();
+    const footerParts = [];
+    if (aggregatedAt) footerParts.push(`聚合时间 ${fmtTs(aggregatedAt)}`);
+    if (noMarketData) {
+      footerParts.push('最近可用 K 线为空，当前仅展示聚合信号回退结果。');
+    } else if (sig.market_data_last_bar_at) {
+      footerParts.push(`行情截至 ${fmtTs(sig.market_data_last_bar_at)}${isStale ? ' / 数据偏旧' : ''}`);
+    }
+    footerNote = footerParts.join(' · ');
 
     return `<div class="live-sig-row">
   <div class="live-sig-header">

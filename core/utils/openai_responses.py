@@ -24,6 +24,13 @@ def responses_endpoint(base_url: str) -> str:
     return f"{base}/v1/responses"
 
 
+def chat_completions_endpoint(base_url: str) -> str:
+    base = str(base_url or "").rstrip("/")
+    if base.endswith("/v1"):
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
+
+
 def build_openai_headers(api_key: str) -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {str(api_key or '').strip()}",
@@ -58,6 +65,30 @@ def _split_endpoint_candidates(value: Any) -> List[str]:
     return items
 
 
+def _split_api_key_candidates(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return []
+        raw_items = (
+            text.replace("\r", ",")
+            .replace("\n", ",")
+            .replace(";", ",")
+            .split(",")
+        )
+
+    items: List[str] = []
+    for item in raw_items:
+        api_key = str(item or "").strip()
+        if api_key:
+            items.append(api_key)
+    return items
+
+
 def openai_endpoint_targets(
     *,
     primary_base_url: Any,
@@ -70,13 +101,24 @@ def openai_endpoint_targets(
         if item not in base_urls:
             base_urls.append(item)
 
-    primary_key = str(primary_api_key or "").strip()
-    backup_key = str(backup_api_key or "").strip()
+    primary_keys = _split_api_key_candidates(primary_api_key)
+    backup_keys = _split_api_key_candidates(backup_api_key)
+    primary_key = primary_keys[0] if primary_keys else str(primary_api_key or "").strip()
     targets: List[Dict[str, Any]] = []
     for idx, base_url in enumerate(base_urls):
-        api_key = primary_key if idx == 0 else (backup_key or primary_key)
-        if not api_key and backup_key:
-            api_key = backup_key
+        if idx == 0:
+            api_key = primary_key
+        else:
+            backup_idx = idx - 1
+            if backup_keys:
+                key_idx = backup_idx if backup_idx < len(backup_keys) else (len(backup_keys) - 1)
+                api_key = backup_keys[key_idx]
+            else:
+                api_key = primary_key
+        if not api_key and backup_keys:
+            api_key = backup_keys[-1]
+        if not api_key and primary_key:
+            api_key = primary_key
         targets.append(
             {
                 "index": idx,
@@ -100,6 +142,29 @@ def should_failover_openai_status(status: Any) -> bool:
         return int(status) in _FAILOVER_OPENAI_HTTP_STATUSES
     except Exception:
         return False
+
+
+def responses_api_unavailable(status: Any, error_text: Any = "") -> bool:
+    try:
+        status_code = int(status)
+    except Exception:
+        status_code = 0
+
+    text = str(error_text or "").strip().lower()
+    if status_code in {404, 405, 501}:
+        return True
+    if "responses" not in text:
+        return False
+    return any(
+        hint in text
+        for hint in (
+            "not found",
+            "unsupported",
+            "not support",
+            "unknown route",
+            "invalid path",
+        )
+    )
 
 
 def _canonical_openai_targets(targets: Sequence[Mapping[str, Any]] | None) -> List[Dict[str, Any]]:
@@ -223,6 +288,26 @@ def _normalize_content_parts(content: Any) -> List[Dict[str, str]]:
     return [{"type": "input_text", "text": text}] if text else []
 
 
+def _normalize_chat_message_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = str(item.get("text") or item.get("content") or "").strip()
+                if text:
+                    parts.append(text)
+            else:
+                text = str(item or "").strip()
+                if text:
+                    parts.append(text)
+        return "\n".join(parts).strip()
+
+    return str(content or "").strip()
+
+
 def build_responses_payload(
     *,
     model: str,
@@ -259,6 +344,40 @@ def build_responses_payload(
     effort = str(reasoning_effort or "").strip().lower()
     if effort in {"minimal", "low", "medium", "high"}:
         payload["reasoning"] = {"effort": effort}
+
+    return payload
+
+
+def build_chat_completions_payload(
+    *,
+    model: str,
+    messages: Sequence[Mapping[str, Any]],
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    response_format: str | Dict[str, Any] | None = None,
+    stream: bool | None = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "model": str(model or "").strip(),
+        "messages": [],
+    }
+
+    for message in messages or []:
+        role = str(message.get("role") or "user").strip().lower() or "user"
+        content = _normalize_chat_message_content(message.get("content"))
+        if not content:
+            continue
+        payload["messages"].append({"role": role, "content": content})
+
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max_tokens)
+    if temperature is not None:
+        payload["temperature"] = float(temperature)
+    if response_format:
+        fmt = response_format if isinstance(response_format, dict) else {"type": str(response_format)}
+        payload["response_format"] = fmt
+    if stream is not None:
+        payload["stream"] = bool(stream)
 
     return payload
 
