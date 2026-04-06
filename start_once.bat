@@ -10,12 +10,14 @@ if not exist "%ENTRY%" (
 )
 
 echo [WARN] start_once.bat is deprecated.
+echo [INFO] Preferred entries: ".\web.bat ..." or ".\start_web_oneclick.bat"
 echo [INFO] Forwarding to ".\start_web_oneclick.bat" ...
 call "%ENTRY%" %*
 set "CODE=%ERRORLEVEL%"
 
 if "%CODE%"=="0" (
   echo [INFO] Use ".\web.bat status" to verify mode and worker state.
+  echo [INFO] See "STARTUP.md" for the startup matrix and troubleshooting steps.
 )
 
 endlocal & exit /b %CODE%

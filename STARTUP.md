@@ -1,6 +1,6 @@
 # Startup Quick Reference
 
-This project now has one control entry and one convenience alias:
+This repository now has one canonical control entry, one convenience alias, and one deprecated wrapper:
 
 ```bat
 .\web.bat help
@@ -8,12 +8,19 @@ This project now has one control entry and one convenience alias:
 .\start_web_oneclick.bat
 ```
 
-- `.\web.bat ...` is the canonical control surface for help, start, status, and stop.
-- `.\start_web_oneclick.bat` is the daily one-click launcher. It starts the managed default profile and opens the browser for you.
+## Which Command To Use
+
+| Use case | Command | Notes |
+| --- | --- | --- |
+| Canonical control entry | `.\web.bat ...` | Use this for `help`, `start`, `status`, and `stop`. |
+| Daily one-click start | `.\start_web_oneclick.bat` | Equivalent to `.\web.bat start -OpenBrowser`. |
+| Deprecated compatibility wrapper | `.\start_once.bat` | Still works, but only forwards to `start_web_oneclick.bat`. |
+
+If you only remember one entry point, remember `.\web.bat`.
 
 ## The Commands To Remember
 
-Daily default start:
+Daily managed start:
 
 ```bat
 .\web.bat start
@@ -25,7 +32,7 @@ Daily one-click start with browser:
 .\start_web_oneclick.bat
 ```
 
-Check what is really running:
+Check what is actually running:
 
 ```bat
 .\web.bat status
@@ -37,7 +44,13 @@ Stop web and observed workers cleanly:
 .\web.bat stop -IncludeWorkers
 ```
 
-## Default Startup Behavior
+Show the built-in help summary:
+
+```bat
+.\web.bat help
+```
+
+## Default Managed Startup Profile
 
 `.\web.bat start` is the managed default. It starts:
 
@@ -47,32 +60,24 @@ Stop web and observed workers cleanly:
 
 And it also:
 
-- keeps analytics-history collectors off unless you explicitly opt in
-- keeps the PM worker opt-in
+- keeps analytics-history collectors off unless you explicitly pass `-EnableAnalyticsHistory`
+- keeps the PM worker opt-in via `-StartPmWorker`
 - ignores `.env` `START_*` worker flags for managed startup decisions
 - restores the persisted trading mode, so the service can still come up in `live`
+- keeps the AI autonomous agent separate from the default boot path
 
-## One-Click Script Roles
+Important behavior while the service is already running:
 
-- `web.bat`
-  The canonical control entry. Use this for normal operations and all scripted calls.
-- `start_web_oneclick.bat`
-  Convenience launcher for interactive use. It is equivalent to:
-
-  ```bat
-  .\web.bat start -OpenBrowser
-  ```
-
-- `start_once.bat`
-  Deprecated wrapper kept only for compatibility. It forwards to `start_web_oneclick.bat`.
+- `start` does not rewire the worker mix for an already-running service
+- if you need a different worker profile, run `.\web.bat stop -IncludeWorkers` first, then start again with the flags you want
 
 ## AI Autonomous Agent Rule
 
 The AI autonomous agent is intentionally separate from the default startup profile.
 
-- `.\web.bat start` does not automatically start the autonomous agent.
-- The agent only starts automatically on service boot if `AI_AUTONOMOUS_AGENT_AUTO_START=true` is set in the launching environment.
-- Saving runtime config in the UI does not change this boot rule by itself.
+- `.\web.bat start` does not automatically start the autonomous agent
+- the agent only auto-starts on service boot if `AI_AUTONOMOUS_AGENT_AUTO_START=true` is present in the launching environment
+- saving runtime config in the UI does not change this boot rule by itself
 
 If you want the service and the agent started together from the CLI, use:
 
@@ -86,26 +91,14 @@ If you want the browser too:
 .\start_web_oneclick.bat -StartAutonomousAgent
 ```
 
-`.\web.bat status` now shows both web status and the current autonomous-agent state when the service is reachable.
+`.\web.bat status` shows both web status and autonomous-agent state when the service is reachable.
 
-## Most Common Flows
+## Common Start Variants
 
-Standard managed start:
-
-```bat
-.\web.bat start
-```
-
-Start and open the browser:
+Open the browser too:
 
 ```bat
 .\web.bat start -OpenBrowser
-```
-
-Start web plus autonomous agent:
-
-```bat
-.\web.bat start -StartAutonomousAgent
 ```
 
 Start web only without the news engine:
@@ -132,6 +125,12 @@ Start with the PM worker:
 .\web.bat start -StartPmWorker
 ```
 
+Start with explicit worker flags:
+
+```bat
+.\web.bat start -StartNewsWorker -StartNewsLlmWorker -StartPmWorker
+```
+
 Clean restart:
 
 ```bat
@@ -154,17 +153,39 @@ Check these fields before doing anything sensitive:
 - AI Agent `running/stopped`
 - AI Agent `mode`
 - AI Agent `symbol_mode`
+- observed worker state for news, LLM, and PM workers
 
 If the service comes up in `live`, treat that as an explicit warning, not as a harmless default.
+
+## Troubleshooting
+
+If startup looks stuck:
+
+1. Run `.\web.bat status`
+2. Check whether the web service is listening but health is not ready yet
+3. Check the startup transcript at `logs\web_ps.log`
+4. If needed, run `.\web.bat stop -IncludeWorkers`
+5. Start again with `.\web.bat start`
+
+If the service is already running but the worker mix is wrong:
+
+1. Run `.\web.bat stop -IncludeWorkers`
+2. Start again with the flags you actually want
+
+If the service comes up in `live` unexpectedly:
+
+1. Treat that as real state, not a display bug
+2. Review the persisted runtime mode and credentials
+3. Do not assume default startup forces `paper`
 
 ## Script Stack
 
 The startup chain is layered like this:
 
 - `web.bat`: canonical user entry
-- `scripts\web.ps1`: command router for help, start, status, and stop
+- `scripts\web.ps1`: command router for `help`, `start`, `status`, and `stop`
 - `scripts\start_web_ps.ps1`: transcript wrapper that writes `logs\web_ps.log`
-- `_once.ps1`: low-level launcher that boots web and optional workers, then can optionally start the autonomous agent through the API
+- `_once.ps1`: low-level launcher that boots web and optional workers, waits for readiness, and can optionally start the autonomous agent through the API
 
 ## URLs And Logs
 
@@ -177,7 +198,7 @@ Common local URLs:
 
 Useful local files:
 
-- startup transcript: `logs/web_ps.log`
+- startup transcript: `logs\web_ps.log`
 - runtime files: `logs/` and `runtime/`
 
 Clean empty logs:

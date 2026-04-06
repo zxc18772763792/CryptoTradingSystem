@@ -49,15 +49,23 @@ Fill in only the credentials you actually use. Keep real API keys, broker secret
 
 ### 3. Start the web application
 
-Use the canonical root command:
+Use the canonical control entry from the project root:
 
 ```bat
 .\web.bat start
 ```
 
+For daily use, remember this command family:
+
+```bat
+.\web.bat start
+.\web.bat status
+.\web.bat stop -IncludeWorkers
+```
+
 `.\web.bat start` is the recommended default start path. By default it starts the web app plus the news worker and news LLM worker, ignores `.env` worker auto-start flags, and keeps analytics-history collectors off unless you explicitly opt in.
 
-If you want the daily one-click launcher that also opens the browser, use:
+If you want the interactive one-click launcher that also opens the browser, use:
 
 ```bat
 .\start_web_oneclick.bat
@@ -72,6 +80,7 @@ To start the service and explicitly request the AI autonomous agent too:
 Useful variants:
 
 ```bat
+.\web.bat help
 .\web.bat start -OpenBrowser
 .\web.bat start -StartAutonomousAgent
 .\web.bat start -NoNewsWorkers
@@ -84,13 +93,14 @@ Useful variants:
 
 Legacy wrappers still work, but `.\web.bat ...` is the command family to remember.
 
-Managed startup stack:
+Startup entry roles:
 
-- `web.bat`: canonical entry
-- `start_web_oneclick.bat`: compatibility alias to `web.bat start`
-- `scripts\web.ps1`: command router
-- `scripts\start_web_ps.ps1`: transcript wrapper
-- `_once.ps1`: low-level launcher
+- `web.bat`: canonical control entry for `help`, `start`, `status`, and `stop`
+- `start_web_oneclick.bat`: interactive alias for `web.bat start -OpenBrowser`
+- `start_once.bat`: deprecated compatibility wrapper
+- `scripts\web.ps1`: PowerShell command router
+- `scripts\start_web_ps.ps1`: transcript wrapper for startup logs
+- `_once.ps1`: low-level process launcher and startup waiter
 
 After startup, always verify the runtime mode and agent state with:
 
@@ -99,6 +109,8 @@ After startup, always verify the runtime mode and agent state with:
 ```
 
 The service may restore the persisted account mode on boot, so the default start can still come up in `live` if that was the last saved mode. The autonomous agent does not start with the default boot path unless `AI_AUTONOMOUS_AGENT_AUTO_START=true` is present in the launching environment or you pass `-StartAutonomousAgent`.
+
+For the full startup matrix, script responsibilities, and troubleshooting flow, see [STARTUP.md](STARTUP.md).
 
 Open:
 
@@ -122,21 +134,15 @@ python main.py --mode web --trading-mode live
 
 ## Common Commands
 
-Run the web service:
+Startup and control:
 
 ```bat
+.\web.bat help
 .\web.bat start
-```
-
-Or use the compatibility one-click alias:
-
-```bat
+.\web.bat status
+.\web.bat stop -IncludeWorkers
 .\start_web_oneclick.bat
-```
-
-Run startup helper with optional collectors or workers:
-
-```bat
+.\web.bat start -StartAutonomousAgent
 .\web.bat start -NoNewsWorkers
 .\web.bat start -NoNewsLlmWorker
 .\web.bat start -EnableAnalyticsHistory
