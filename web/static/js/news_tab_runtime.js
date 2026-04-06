@@ -256,7 +256,7 @@
                 ...feedStats(state.latest?.items || []),
             };
         }
-        const buckets = getBucketRows(gran);
+        const buckets = padBucketRowsToLatest(getBucketRows(gran), gran);
         const latestBucket = buckets.length ? buckets[buckets.length - 1] : null;
         if (!latestBucket) {
             return {
@@ -299,6 +299,83 @@
             return ta - tb;
         });
         return rows;
+    }
+
+    function bucketGranularityMs(gran) {
+        const key = String(gran || "").trim().toLowerCase();
+        if (key === "5m") return 5 * 60 * 1000;
+        if (key === "15m") return 15 * 60 * 1000;
+        if (key === "1h") return 60 * 60 * 1000;
+        if (key === "4h") return 4 * 60 * 60 * 1000;
+        if (key === "1d") return 24 * 60 * 60 * 1000;
+        return 0;
+    }
+
+    function floorBucketStart(date, gran) {
+        if (!(date instanceof Date) || !Number.isFinite(date.getTime())) return null;
+        const key = String(gran || "").trim().toLowerCase();
+        const out = new Date(date.getTime());
+        out.setUTCSeconds(0, 0);
+        if (key === "5m") {
+            out.setUTCMinutes(Math.floor(out.getUTCMinutes() / 5) * 5);
+            return out;
+        }
+        if (key === "15m") {
+            out.setUTCMinutes(Math.floor(out.getUTCMinutes() / 15) * 15);
+            return out;
+        }
+        if (key === "1h") {
+            out.setUTCMinutes(0);
+            return out;
+        }
+        if (key === "4h") {
+            out.setUTCMinutes(0);
+            out.setUTCHours(Math.floor(out.getUTCHours() / 4) * 4);
+            return out;
+        }
+        if (key === "1d") {
+            out.setUTCMinutes(0);
+            out.setUTCHours(0);
+            return out;
+        }
+        return null;
+    }
+
+    function latestBucketAnchorTs() {
+        return (
+            latestFilteredPublishedAt()
+            || state.summary?.latest_raw_at
+            || state.summary?.latest_event_at
+            || state.brief?.latest_raw_at
+            || state.brief?.latest_event_at
+            || null
+        );
+    }
+
+    function padBucketRowsToLatest(rows, gran) {
+        const normalized = normalizeBuckets(rows);
+        const stepMs = bucketGranularityMs(gran);
+        if (!normalized.length || !stepMs) return normalized;
+        const latestBucket = parseTs(normalized[normalized.length - 1]?.bucket_start);
+        const anchorTs = parseTs(latestBucketAnchorTs());
+        if (!latestBucket || !anchorTs) return normalized;
+        const anchorBucket = floorBucketStart(anchorTs, gran);
+        if (!anchorBucket) return normalized;
+        let cursor = latestBucket.getTime() + stepMs;
+        const endTime = anchorBucket.getTime();
+        if (!Number.isFinite(endTime) || cursor > endTime) return normalized;
+        const padded = normalized.slice();
+        while (cursor <= endTime) {
+            padded.push({
+                bucket_start: new Date(cursor).toISOString(),
+                count: 0,
+                positive: 0,
+                neutral: 0,
+                negative: 0,
+            });
+            cursor += stepMs;
+        }
+        return padded;
     }
 
     function getBucketRows(gran) {
@@ -464,6 +541,7 @@
         const breakdown = latest?.feed_stats?.unstructured_breakdown || stats?.unstructured_breakdown || {};
         const granLabel = summaryGranularityLabel(getVal("news-summary-granularity", "feed"));
         const labelScope = granLabel === "当前列表" ? "当前列表" : granLabel;
+        const structuredScopeLabel = granLabel === "当前列表" ? "当前 Feed" : `${labelScope}`;
         if (el("news-events-label")) el("news-events-label").textContent = `${labelScope}总条数`;
         if (el("news-positive-label")) el("news-positive-label").textContent = `利好（${labelScope}）`;
         if (el("news-neutral-label")) el("news-neutral-label").textContent = `中性（${labelScope}）`;
@@ -490,7 +568,7 @@
             rows.push(`<div class="list-item"><span>24h 原始新闻 / 事件</span><span>${Number(base?.raw_count || 0)} / ${Number(base?.events_count || 0)}</span></div>`);
         }
         rows.push(
-            `<div class="list-item"><span>当前 Feed 结构化 / 未结构化</span><span>${Number(stats.structured || 0)} / ${Number(stats.unstructured || 0)}</span></div>`,
+            `<div class="list-item"><span>${esc(structuredScopeLabel)} 结构化 / 未结构化</span><span>${Number(stats.structured || 0)} / ${Number(stats.unstructured || 0)}</span></div>`,
             `<div class="list-item"><span>待摘要 / AI处理中</span><span>${Number(breakdown.pending || 0)} / ${Number(breakdown.running || 0)}</span></div>`,
             `<div class="list-item"><span>待补跑 / 本轮失败</span><span>${Number(breakdown.retry || 0)} / ${Number(breakdown.failed || 0)}</span></div>`,
             `<div class="list-item"><span>已补中文摘要 / 已抽取无事件</span><span>${Number(breakdown.summarized_no_event || 0)} / ${Number(breakdown.done_no_event || 0)}</span></div>`,
@@ -507,14 +585,15 @@
         const meta = el("news-bucket-meta");
         const gran = getVal("news-bucket-granularity", "1h");
         const buckets = getBucketRows(gran);
+        const chartBuckets = padBucketRowsToLatest(buckets, gran);
         if (chart && isNewsVisible() && ((chart.clientWidth || 0) < 64 || (chart.clientHeight || 0) < 64)) {
             if (meta) meta.textContent = "结构化统计面板切换中，正在重绘...";
             scheduleBucketRender(260);
             return;
         }
         if (meta) {
-            if (buckets.length) {
-                meta.textContent = `结构化事件统计（${gran}）| 桶数 ${buckets.length}`;
+            if (chartBuckets.length) {
+                meta.textContent = `结构化事件统计（${gran}）| 桶数 ${chartBuckets.length} | 最新覆盖 ${fmtTs(chartBuckets[chartBuckets.length - 1]?.bucket_start)}`;
             } else if (state.summary?.fallback_reason) {
                 meta.textContent = `结构化统计降级：${state.summary.fallback_reason}`;
             } else if (state.summary) {
@@ -523,7 +602,7 @@
                 meta.textContent = "结构化统计暂不可用，自动重试中...";
             }
         }
-        if (!buckets.length) {
+        if (!chartBuckets.length) {
             const emptyText = state.summary ? "暂无结构化事件统计" : "结构化统计暂不可用，正在自动重试";
             if (chart) {
                 if (typeof Plotly !== "undefined") {
@@ -534,7 +613,7 @@
             if (list) list.innerHTML = `<div class="list-item">${emptyText}</div>`;
             return;
         }
-        const recent = buckets.slice(-36);
+        const recent = chartBuckets.slice(-36);
         if (chart && typeof Plotly !== "undefined") {
             try {
                 chart.querySelectorAll(".news-bucket-fallback").forEach((node) => node.remove());
@@ -571,7 +650,8 @@
             if (typeof Plotly === "undefined") scheduleBucketRender(300);
         }
         if (list) {
-            list.innerHTML = recent.slice().reverse().map((row) => {
+            const recentList = buckets.slice(-36);
+            list.innerHTML = recentList.slice().reverse().map((row) => {
                 const total = Number(row.count || 0);
                 const positive = Number(row.positive || 0);
                 const neutral = Number(row.neutral || 0);
