@@ -34,6 +34,7 @@ from core.utils.openai_responses import (
 
 _DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
 _DEFAULT_OPENAI_MODEL = "gpt-5.4"
+_OPENAI_FAILOVER_SCOPE = "ai_research"
 
 _CONTEXT_SYSTEM_PROMPT = """You are a quantitative research planner.
 Your goal is not to emit direct trading instructions. Your goal is to produce
@@ -198,7 +199,8 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
             backup_base_urls=getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "",
             primary_api_key=str(getattr(settings, "OPENAI_API_KEY", "") or "").strip(),
             backup_api_key=str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip(),
-        )
+        ),
+        scope=_OPENAI_FAILOVER_SCOPE,
     )
     if not any(bool(str(target.get("api_key") or "").strip()) for target in targets):
         logger.debug("research_context_generator: OPENAI_API_KEY missing")
@@ -259,7 +261,11 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                                         f"openai_chat_http_{chat_resp.status}:{chat_body}"
                                     )
                                     if should_failover_openai_status(chat_resp.status):
-                                        remember_openai_target_failure(targets, base_url)
+                                        remember_openai_target_failure(
+                                            targets,
+                                            base_url,
+                                            scope=_OPENAI_FAILOVER_SCOPE,
+                                        )
                                     if idx + 1 < total_targets and should_failover_openai_status(chat_resp.status):
                                         logger.warning(
                                             "research_context_generator: chat/completions relay failed with "
@@ -271,11 +277,19 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                             raw = extract_response_text(data)
                             if not raw:
                                 logger.debug("research_context_generator: empty OpenAI chat/completions content")
-                                remember_openai_target_failure(targets, base_url)
+                                remember_openai_target_failure(
+                                    targets,
+                                    base_url,
+                                    scope=_OPENAI_FAILOVER_SCOPE,
+                                )
                                 if idx + 1 < total_targets:
                                     continue
                                 return None
-                            remember_openai_target_success(targets, base_url)
+                            remember_openai_target_success(
+                                targets,
+                                base_url,
+                                scope=_OPENAI_FAILOVER_SCOPE,
+                            )
                             try:
                                 return _parse_json_payload(raw)
                             except Exception as exc:
@@ -283,7 +297,11 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                                 return None
                         logger.debug(f"research_context_generator: openai_http_{resp.status}:{body}")
                         if should_failover_openai_status(resp.status):
-                            remember_openai_target_failure(targets, base_url)
+                            remember_openai_target_failure(
+                                targets,
+                                base_url,
+                                scope=_OPENAI_FAILOVER_SCOPE,
+                            )
                         if idx + 1 < total_targets and should_failover_openai_status(resp.status):
                             logger.warning(
                                 f"research_context_generator: primary relay failed with {resp.status}; "
@@ -292,10 +310,18 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                             continue
                         return None
                     data = await read_aiohttp_responses_json(resp)
-                    remember_openai_target_success(targets, base_url)
+                    remember_openai_target_success(
+                        targets,
+                        base_url,
+                        scope=_OPENAI_FAILOVER_SCOPE,
+                    )
             except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                 logger.debug(f"research_context_generator: openai transport error: {exc}")
-                remember_openai_target_failure(targets, base_url)
+                remember_openai_target_failure(
+                    targets,
+                    base_url,
+                    scope=_OPENAI_FAILOVER_SCOPE,
+                )
                 if idx + 1 < total_targets:
                     logger.warning(
                         f"research_context_generator: primary relay transport failure; "
@@ -307,7 +333,11 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
             raw = extract_response_text(data)
             if not raw:
                 logger.debug("research_context_generator: empty OpenAI content")
-                remember_openai_target_failure(targets, base_url)
+                remember_openai_target_failure(
+                    targets,
+                    base_url,
+                    scope=_OPENAI_FAILOVER_SCOPE,
+                )
                 if idx + 1 < total_targets:
                     continue
                 return None
@@ -315,7 +345,11 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                 return _parse_json_payload(raw)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"research_context_generator: JSON parse error: {exc}")
-                remember_openai_target_failure(targets, base_url)
+                remember_openai_target_failure(
+                    targets,
+                    base_url,
+                    scope=_OPENAI_FAILOVER_SCOPE,
+                )
                 if idx + 1 < total_targets:
                     continue
                 return None

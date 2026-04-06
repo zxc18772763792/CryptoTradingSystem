@@ -54,6 +54,7 @@ from core.utils.openai_responses import (
 _DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
 _DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _DEFAULT_GLM_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
+_OPENAI_FAILOVER_SCOPE = "ai_autonomous_agent"
 
 _SUPPORTED_PROVIDERS = {"glm", "codex", "claude"}
 _SUPPORTED_MODES = {"shadow", "execute"}
@@ -1487,7 +1488,10 @@ class AutonomousTradingAgent:
             return _extract_json_obj(text)
 
         if provider == "codex":
-            targets = prioritize_openai_targets(self._provider_endpoint_targets(provider))
+            targets = prioritize_openai_targets(
+                self._provider_endpoint_targets(provider),
+                scope=_OPENAI_FAILOVER_SCOPE,
+            )
             if not any(bool(str(target.get("api_key") or "").strip()) for target in targets):
                 raise RuntimeError(f"{provider}_api_key_missing")
             chat_payload = build_chat_completions_payload(
@@ -1546,7 +1550,11 @@ class AutonomousTradingAgent:
                                                 chat_body = (await chat_resp.text())[:300]
                                                 err = RuntimeError(f"{provider}_chat_http_{chat_resp.status}:{chat_body}")
                                                 if should_failover_openai_status(chat_resp.status):
-                                                    remember_openai_target_failure(targets, target_base_url)
+                                                    remember_openai_target_failure(
+                                                        targets,
+                                                        target_base_url,
+                                                        scope=_OPENAI_FAILOVER_SCOPE,
+                                                    )
                                                 if idx + 1 < total_targets and should_failover_openai_status(chat_resp.status):
                                                     last_exc = err
                                                     logger.warning(
@@ -1562,7 +1570,11 @@ class AutonomousTradingAgent:
                                             err = RuntimeError(f"{provider}_chat_empty_content")
                                             if idx + 1 < total_targets:
                                                 last_exc = err
-                                                remember_openai_target_failure(targets, target_base_url)
+                                                remember_openai_target_failure(
+                                                    targets,
+                                                    target_base_url,
+                                                    scope=_OPENAI_FAILOVER_SCOPE,
+                                                )
                                                 logger.warning(
                                                     "autonomous_agent codex chat/completions returned empty content; "
                                                     f"trying backup {idx + 2}/{total_targets}"
@@ -1570,7 +1582,11 @@ class AutonomousTradingAgent:
                                                 advance_to_next_target = True
                                                 break
                                             raise err
-                                        remember_openai_target_success(targets, target_base_url)
+                                        remember_openai_target_success(
+                                            targets,
+                                            target_base_url,
+                                            scope=_OPENAI_FAILOVER_SCOPE,
+                                        )
                                         return _extract_json_obj(text)
                                     err = RuntimeError(f"{provider}_http_{resp.status}:{body}")
                                     unsupported_param = unsupported_responses_parameter(body)
@@ -1589,7 +1605,11 @@ class AutonomousTradingAgent:
                                             continue
                                         if idx + 1 < total_targets:
                                             last_exc = err
-                                            remember_openai_target_failure(targets, target_base_url)
+                                            remember_openai_target_failure(
+                                                targets,
+                                                target_base_url,
+                                                scope=_OPENAI_FAILOVER_SCOPE,
+                                            )
                                             logger.warning(
                                                 "autonomous_agent codex relay rejected all token parameter variants; "
                                                 f"trying backup {idx + 2}/{total_targets}"
@@ -1598,7 +1618,11 @@ class AutonomousTradingAgent:
                                             break
                                         raise err
                                     if should_failover_openai_status(resp.status):
-                                        remember_openai_target_failure(targets, target_base_url)
+                                        remember_openai_target_failure(
+                                            targets,
+                                            target_base_url,
+                                            scope=_OPENAI_FAILOVER_SCOPE,
+                                        )
                                     if idx + 1 < total_targets and should_failover_openai_status(resp.status):
                                         last_exc = err
                                         logger.warning(
@@ -1614,7 +1638,11 @@ class AutonomousTradingAgent:
                                 err = RuntimeError(f"{provider}_empty_content")
                                 if idx + 1 < total_targets:
                                     last_exc = err
-                                    remember_openai_target_failure(targets, target_base_url)
+                                    remember_openai_target_failure(
+                                        targets,
+                                        target_base_url,
+                                        scope=_OPENAI_FAILOVER_SCOPE,
+                                    )
                                     logger.warning(
                                         f"autonomous_agent codex endpoint returned empty content; "
                                         f"trying backup {idx + 2}/{total_targets}"
@@ -1622,10 +1650,18 @@ class AutonomousTradingAgent:
                                     advance_to_next_target = True
                                     break
                                 raise err
-                            remember_openai_target_success(targets, target_base_url)
+                            remember_openai_target_success(
+                                targets,
+                                target_base_url,
+                                scope=_OPENAI_FAILOVER_SCOPE,
+                            )
                             return _extract_json_obj(text)
                     except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
-                        remember_openai_target_failure(targets, target_base_url)
+                        remember_openai_target_failure(
+                            targets,
+                            target_base_url,
+                            scope=_OPENAI_FAILOVER_SCOPE,
+                        )
                         if idx + 1 < total_targets:
                             last_exc = exc
                             logger.warning(

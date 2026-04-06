@@ -66,8 +66,9 @@ async def _execute_llm_batch(
 
         event_stats = await news_db.save_events(events, model_source="mixed")
 
-        is_success = error_type == "none"
         is_rate_limited = error_type == "rate_limit"
+        is_transient_failure = error_type in {"rate_limit", "timeout"}
+        is_success = not is_transient_failure
 
         if is_rate_limited:
             from core.news.eventizer.rate_limiter import rate_limiter
@@ -100,6 +101,52 @@ async def _execute_llm_batch(
             is_rate_limited=False,
         )
         raise
+
+
+async def _process_llm_task_batches(
+    batch: List[Dict[str, Any]],
+    cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Process claimed news rows in worker-sized chunks so task status stays accurate."""
+    if not batch:
+        return {"claimed": 0, "events_count": 0, "llm_used": False, "errors": []}
+
+    effective_cfg = _worker_cfg(cfg, limit=len(batch))
+    llm_cfg = effective_cfg.get("llm") or {}
+    chunk_size = max(1, min(int(llm_cfg.get("batch_size") or len(batch)), len(batch)))
+    total_events_count = 0
+    llm_used = False
+    errors: List[str] = []
+
+    for offset in range(0, len(batch), chunk_size):
+        subbatch = batch[offset : offset + chunk_size]
+        raw_ids = [int(item.get("id")) for item in subbatch if item.get("id")]
+        url_to_raw_id = {
+            _norm_url(item.get("url", "")): item.get("id")
+            for item in subbatch
+            if item.get("url") and item.get("id")
+        }
+        try:
+            _, sub_llm_used, error_type, events_count = await _execute_llm_batch(
+                subbatch,
+                effective_cfg,
+                raw_ids,
+                url_to_raw_id=url_to_raw_id,
+            )
+            total_events_count += int(events_count or 0)
+            llm_used = llm_used or bool(sub_llm_used)
+            if error_type in {"rate_limit", "timeout"}:
+                errors.append(str(error_type))
+        except Exception as exc:
+            errors.append(str(exc))
+
+    return {
+        "claimed": len(batch),
+        "events_count": total_events_count,
+        "llm_used": llm_used,
+        "errors": errors,
+        "error_type": errors[0] if len(errors) == 1 else ("mixed" if errors else "none"),
+    }
 
 
 def _config_paths() -> Dict[str, Path]:
@@ -206,28 +253,13 @@ async def process_llm_batch(cfg: Dict[str, Any], limit: int = 8) -> Dict[str, An
     if not filtered_batch:
         return {"claimed": len(batch), "events_count": 0, "llm_used": False, "errors": ["provider_backoff"]}
 
-    batch = filtered_batch
-    raw_ids = [int(item.get("id")) for item in batch if item.get("id")]
-    effective_cfg = _worker_cfg(cfg, limit=len(batch))
-
-    url_to_raw_id = {_norm_url(item.get("url", "")): item.get("id") for item in batch if item.get("url") and item.get("id")}
-
-    try:
-        events, llm_used, error_type, events_count = await _execute_llm_batch(
-            batch, effective_cfg, raw_ids, url_to_raw_id=url_to_raw_id
+    result = await _process_llm_task_batches(filtered_batch, cfg)
+    if int(result.get("events_count") or 0) <= 0:
+        logger.debug(
+            f"LLM batch processed {len(filtered_batch)} items, 0 events extracted "
+            "(normal for non-market-moving news)"
         )
-        if not events:
-            logger.debug(f"LLM batch processed {len(batch)} items, 0 events extracted (normal for non-market-moving news)")
-        is_success = error_type == "none"
-        return {
-            "claimed": len(batch),
-            "events_count": events_count,
-            "llm_used": bool(llm_used),
-            "errors": [] if is_success else [error_type],
-            "error_type": error_type,
-        }
-    except Exception as exc:
-        return {"claimed": len(batch), "events_count": 0, "llm_used": False, "errors": [str(exc)]}
+    return result
 
 
 # Event queue for non-blocking news processing
@@ -328,12 +360,11 @@ async def _event_processor_loop() -> None:
 
 async def _process_event_batch(batch: List[Dict[str, Any]], cfg: Dict[str, Any]) -> None:
     """Process a batch of news items with LLM extraction (called from background event processor)."""
-    raw_ids = [item.get("id") for item in batch if item.get("id")]
     try:
-        events, llm_used, error_type, _ = await _execute_llm_batch(batch, cfg, raw_ids)
+        result = await _process_llm_task_batches(batch, cfg)
         logger.debug(
             f"Event processor processed batch: {len(batch)} items, "
-            f"{len(events)} events, llm_used={llm_used}"
+            f"{int(result.get('events_count') or 0)} events, llm_used={bool(result.get('llm_used'))}"
         )
     except Exception as e:
         logger.error(f"Error processing event batch: {e}")

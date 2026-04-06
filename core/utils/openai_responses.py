@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from zoneinfo import ZoneInfo
 
 
 _RETRYABLE_OPENAI_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
@@ -12,6 +17,8 @@ _RESPONSES_TOKEN_PARAM_CANDIDATES = ("max_output_tokens", "max_completion_tokens
 _UNSUPPORTED_PARAMETER_RE = re.compile(r"unsupported parameter:\s*([A-Za-z0-9_]+)", re.IGNORECASE)
 _OPENAI_TARGET_STATE_LOCK = threading.Lock()
 _OPENAI_TARGET_PREFERRED: Dict[Tuple[str, ...], str] = {}
+_OPENAI_FAILOVER_STATE_VERSION = 1
+_OPENAI_FAILOVER_DEFAULT_TZ = "Asia/Shanghai"
 # Keep failover ordering request-local by default. This avoids global sticky
 # state leaking across independent requests/tests.
 _ENABLE_CROSS_REQUEST_FAILOVER_CACHE = False
@@ -189,10 +196,271 @@ def _openai_target_state_key(targets: Sequence[Mapping[str, Any]] | None) -> Tup
     return tuple(str(item.get("base_url") or "").rstrip("/") for item in _canonical_openai_targets(targets))
 
 
-def prioritize_openai_targets(targets: Sequence[Mapping[str, Any]] | None) -> List[Dict[str, Any]]:
+def _normalize_openai_failover_scope(scope: Any) -> str:
+    return str(scope or "").strip().lower()
+
+
+def _openai_failover_state_path() -> Path:
+    raw = str(os.getenv("OPENAI_FAILOVER_STATE_PATH") or "").strip()
+    if raw:
+        return Path(raw)
+    return Path(__file__).resolve().parents[2] / "runtime" / "openai_failover_state.json"
+
+
+def _openai_failover_now() -> datetime:
+    tz_name = str(os.getenv("OPENAI_FAILOVER_TZ") or _OPENAI_FAILOVER_DEFAULT_TZ).strip() or _OPENAI_FAILOVER_DEFAULT_TZ
+    try:
+        return datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        return datetime.now(timezone.utc)
+
+
+def _openai_failover_today() -> str:
+    return _openai_failover_now().date().isoformat()
+
+
+@contextmanager
+def _openai_failover_file_lock(path: Path):
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            handle.write(b"0")
+            handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _load_openai_failover_state(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": {}}
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": {}}
+
+    if not isinstance(payload, dict):
+        return {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": {}}
+    scopes = payload.get("scopes")
+    if not isinstance(scopes, dict):
+        scopes = {}
+    return {
+        "version": int(payload.get("version") or _OPENAI_FAILOVER_STATE_VERSION),
+        "scopes": scopes,
+    }
+
+
+def _save_openai_failover_state(path: Path, state: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    os.replace(tmp_path, path)
+
+
+def _build_scope_failover_entry(
+    base_urls: Sequence[str],
+    *,
+    day: str,
+    mode: str = "primary",
+    preferred_base_url: str = "",
+) -> Dict[str, Any]:
+    normalized_base_urls = [str(item or "").rstrip("/") for item in base_urls if str(item or "").strip()]
+    primary_base_url = normalized_base_urls[0] if normalized_base_urls else ""
+    backup_base_urls = normalized_base_urls[1:]
+    normalized_mode = str(mode or "primary").strip().lower()
+    if normalized_mode != "backup" or not backup_base_urls:
+        normalized_mode = "primary"
+        preferred = primary_base_url
+    else:
+        preferred = str(preferred_base_url or "").rstrip("/")
+        if preferred not in backup_base_urls:
+            preferred = backup_base_urls[0]
+    return {
+        "day": str(day or ""),
+        "mode": normalized_mode,
+        "preferred_base_url": preferred,
+        "base_urls": normalized_base_urls,
+        "updated_at": _openai_failover_now().isoformat(),
+    }
+
+
+def _load_scope_failover_entry(
+    scope: str,
+    canonical: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    normalized_scope = _normalize_openai_failover_scope(scope)
+    base_urls = [str(item.get("base_url") or "").rstrip("/") for item in canonical]
+    today = _openai_failover_today()
+    default_entry = _build_scope_failover_entry(base_urls, day=today)
+    if not normalized_scope or len(base_urls) <= 1:
+        return default_entry
+
+    path = _openai_failover_state_path()
+    with _OPENAI_TARGET_STATE_LOCK:
+        with _openai_failover_file_lock(path):
+            state = _load_openai_failover_state(path)
+            scopes = dict(state.get("scopes") or {})
+            raw_entry = scopes.get(normalized_scope)
+            if not isinstance(raw_entry, dict):
+                raw_entry = {}
+            raw_day = str(raw_entry.get("day") or "")
+            if raw_day != today:
+                raw_mode = "primary"
+                raw_preferred = ""
+            else:
+                raw_mode = str(raw_entry.get("mode") or "primary").strip().lower()
+                raw_preferred = str(raw_entry.get("preferred_base_url") or "").rstrip("/")
+            entry = _build_scope_failover_entry(
+                base_urls,
+                day=today,
+                mode=raw_mode,
+                preferred_base_url=raw_preferred,
+            )
+            if raw_entry != entry:
+                scopes[normalized_scope] = entry
+                _save_openai_failover_state(
+                    path,
+                    {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": scopes},
+                )
+            return entry
+
+
+def _remember_scope_failover_state(
+    scope: str,
+    canonical: Sequence[Mapping[str, Any]],
+    *,
+    success_base_url: str = "",
+    failed_base_url: str = "",
+) -> None:
+    normalized_scope = _normalize_openai_failover_scope(scope)
+    base_urls = [str(item.get("base_url") or "").rstrip("/") for item in canonical]
+    if not normalized_scope or len(base_urls) <= 1:
+        return
+
+    normalized_success = str(success_base_url or "").rstrip("/")
+    normalized_failure = str(failed_base_url or "").rstrip("/")
+    if normalized_success and normalized_success not in base_urls:
+        return
+    if normalized_failure and normalized_failure not in base_urls:
+        return
+
+    today = _openai_failover_today()
+    primary_base_url = base_urls[0]
+    backup_base_urls = base_urls[1:]
+    path = _openai_failover_state_path()
+    with _OPENAI_TARGET_STATE_LOCK:
+        with _openai_failover_file_lock(path):
+            state = _load_openai_failover_state(path)
+            scopes = dict(state.get("scopes") or {})
+            raw_entry = scopes.get(normalized_scope)
+            if not isinstance(raw_entry, dict):
+                raw_entry = {}
+            raw_day = str(raw_entry.get("day") or "")
+            if raw_day != today:
+                raw_mode = "primary"
+                raw_preferred = ""
+            else:
+                raw_mode = str(raw_entry.get("mode") or "primary")
+                raw_preferred = str(raw_entry.get("preferred_base_url") or "")
+            entry = _build_scope_failover_entry(
+                base_urls,
+                day=today,
+                mode=raw_mode,
+                preferred_base_url=raw_preferred,
+            )
+
+            if normalized_success:
+                if normalized_success == primary_base_url or not backup_base_urls:
+                    entry = _build_scope_failover_entry(base_urls, day=today, mode="primary")
+                else:
+                    entry = _build_scope_failover_entry(
+                        base_urls,
+                        day=today,
+                        mode="backup",
+                        preferred_base_url=normalized_success,
+                    )
+            elif normalized_failure:
+                if not backup_base_urls:
+                    entry = _build_scope_failover_entry(base_urls, day=today, mode="primary")
+                elif normalized_failure == primary_base_url:
+                    entry = _build_scope_failover_entry(
+                        base_urls,
+                        day=today,
+                        mode="backup",
+                        preferred_base_url=backup_base_urls[0],
+                    )
+                else:
+                    failed_backup_idx = backup_base_urls.index(normalized_failure)
+                    next_backup = backup_base_urls[(failed_backup_idx + 1) % len(backup_base_urls)]
+                    entry = _build_scope_failover_entry(
+                        base_urls,
+                        day=today,
+                        mode="backup",
+                        preferred_base_url=next_backup,
+                    )
+
+            scopes[normalized_scope] = entry
+            _save_openai_failover_state(
+                path,
+                {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": scopes},
+            )
+
+
+def _rotate_targets(
+    targets: Sequence[Mapping[str, Any]],
+    preferred_base_url: str = "",
+) -> List[Dict[str, Any]]:
     canonical = _canonical_openai_targets(targets)
     if len(canonical) <= 1:
         return canonical
+    normalized_preferred = str(preferred_base_url or "").rstrip("/")
+    if not normalized_preferred:
+        return canonical
+    start_idx = next(
+        (idx for idx, item in enumerate(canonical) if str(item.get("base_url") or "").rstrip("/") == normalized_preferred),
+        0,
+    )
+    return canonical[start_idx:] + canonical[:start_idx]
+
+
+def prioritize_openai_targets(
+    targets: Sequence[Mapping[str, Any]] | None,
+    *,
+    scope: Any = None,
+) -> List[Dict[str, Any]]:
+    canonical = _canonical_openai_targets(targets)
+    if len(canonical) <= 1:
+        return canonical
+    normalized_scope = _normalize_openai_failover_scope(scope)
+    if normalized_scope:
+        entry = _load_scope_failover_entry(normalized_scope, canonical)
+        if entry.get("mode") == "backup":
+            backup_targets = canonical[1:]
+            if backup_targets:
+                preferred_base_url = str(entry.get("preferred_base_url") or "").rstrip("/")
+                return _rotate_targets(backup_targets, preferred_base_url)
+        preferred_base_url = str(entry.get("preferred_base_url") or "").rstrip("/")
+        return _rotate_targets(canonical, preferred_base_url)
     if not _ENABLE_CROSS_REQUEST_FAILOVER_CACHE:
         return canonical
 
@@ -213,11 +481,21 @@ def prioritize_openai_targets(targets: Sequence[Mapping[str, Any]] | None) -> Li
 def remember_openai_target_success(
     targets: Sequence[Mapping[str, Any]] | None,
     base_url: Any,
+    *,
+    scope: Any = None,
 ) -> None:
+    canonical = _canonical_openai_targets(targets)
+    normalized_scope = _normalize_openai_failover_scope(scope)
+    if normalized_scope and len(canonical) > 1:
+        _remember_scope_failover_state(
+            normalized_scope,
+            canonical,
+            success_base_url=str(base_url or "").strip().rstrip("/"),
+        )
+        return
     if not _ENABLE_CROSS_REQUEST_FAILOVER_CACHE:
         return
 
-    canonical = _canonical_openai_targets(targets)
     if len(canonical) <= 1:
         return
 
@@ -236,11 +514,21 @@ def remember_openai_target_success(
 def remember_openai_target_failure(
     targets: Sequence[Mapping[str, Any]] | None,
     failed_base_url: Any,
+    *,
+    scope: Any = None,
 ) -> None:
+    canonical = _canonical_openai_targets(targets)
+    normalized_scope = _normalize_openai_failover_scope(scope)
+    if normalized_scope and len(canonical) > 1:
+        _remember_scope_failover_state(
+            normalized_scope,
+            canonical,
+            failed_base_url=str(failed_base_url or "").strip().rstrip("/"),
+        )
+        return
     if not _ENABLE_CROSS_REQUEST_FAILOVER_CACHE:
         return
 
-    canonical = _canonical_openai_targets(targets)
     if len(canonical) <= 1:
         return
 
@@ -260,10 +548,30 @@ def remember_openai_target_failure(
         _OPENAI_TARGET_PREFERRED[key] = next_base_url
 
 
-def reset_openai_target_preferences() -> None:
+def reset_openai_target_preferences(scope: Any = None) -> None:
     """Clear relay preference cache used by cross-request failover mode."""
     with _OPENAI_TARGET_STATE_LOCK:
         _OPENAI_TARGET_PREFERRED.clear()
+    path = _openai_failover_state_path()
+    normalized_scope = _normalize_openai_failover_scope(scope)
+    try:
+        with _OPENAI_TARGET_STATE_LOCK:
+            with _openai_failover_file_lock(path):
+                state = _load_openai_failover_state(path)
+                scopes = dict(state.get("scopes") or {})
+                if normalized_scope:
+                    scopes.pop(normalized_scope, None)
+                else:
+                    scopes.clear()
+                if scopes:
+                    _save_openai_failover_state(
+                        path,
+                        {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": scopes},
+                    )
+                elif path.exists():
+                    path.unlink()
+    except Exception:
+        return
 
 
 def _normalize_content_parts(content: Any) -> List[Dict[str, str]]:

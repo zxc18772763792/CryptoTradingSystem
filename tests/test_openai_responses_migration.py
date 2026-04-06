@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 from config.settings import settings
 
@@ -399,6 +401,112 @@ def test_autonomous_agent_codex_fails_over_to_backup_relay(monkeypatch, tmp_path
     ]
 
 
+def test_autonomous_agent_codex_sticks_to_backup_until_next_day(monkeypatch, tmp_path):
+    import core.ai.autonomous_agent as module
+    import core.utils.openai_responses as response_helpers
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://primary.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "https://backup.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setenv("OPENAI_FAILOVER_STATE_PATH", str(tmp_path / "openai_failover_state.json"))
+    monkeypatch.setenv("OPENAI_FAILOVER_TZ", "Asia/Shanghai")
+    response_helpers.reset_openai_target_preferences()
+
+    day_one = datetime(2026, 4, 6, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    day_two = datetime(2026, 4, 7, 0, 1, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    response_payload = {
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": (
+                            '{"action":"buy","confidence":0.81,"strength":0.7,'
+                            '"leverage":1,"stop_loss_pct":0.02,"take_profit_pct":0.04,'
+                            '"reason":"sticky_backup"}'
+                        ),
+                    }
+                ],
+            }
+        ]
+    }
+    session_plans = [
+        [
+            _FakeResponse({"error": {"message": "Service temporarily unavailable"}}, status=503),
+            _FakeResponse(response_payload, status=200),
+        ],
+        [
+            _FakeResponse(response_payload, status=200),
+        ],
+        [
+            _FakeResponse(response_payload, status=200),
+        ],
+    ]
+    captures: list[dict] = []
+
+    def _session_factory(**kwargs):
+        capture = {}
+        captures.append(capture)
+        responses = session_plans[len(captures) - 1]
+        return _FakeSequenceSession(capture=capture, responses=list(responses), **kwargs)
+
+    monkeypatch.setattr(module.aiohttp, "ClientSession", _session_factory)
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent")
+
+    monkeypatch.setattr(response_helpers, "_openai_failover_now", lambda: day_one)
+    first = asyncio.run(
+        agent._call_provider(
+            provider="codex",
+            model="gpt-5.4",
+            timeout_ms=8000,
+            max_tokens=256,
+            temperature=0.1,
+            system_prompt="sys",
+            user_prompt="usr",
+        )
+    )
+    second = asyncio.run(
+        agent._call_provider(
+            provider="codex",
+            model="gpt-5.4",
+            timeout_ms=8000,
+            max_tokens=256,
+            temperature=0.1,
+            system_prompt="sys",
+            user_prompt="usr",
+        )
+    )
+    monkeypatch.setattr(response_helpers, "_openai_failover_now", lambda: day_two)
+    third = asyncio.run(
+        agent._call_provider(
+            provider="codex",
+            model="gpt-5.4",
+            timeout_ms=8000,
+            max_tokens=256,
+            temperature=0.1,
+            system_prompt="sys",
+            user_prompt="usr",
+        )
+    )
+
+    assert first["reason"] == "sticky_backup"
+    assert second["reason"] == "sticky_backup"
+    assert third["reason"] == "sticky_backup"
+    assert captures[0]["urls"] == [
+        "https://primary.test/v1/responses",
+        "https://backup.test/v1/responses",
+    ]
+    assert captures[1]["urls"] == [
+        "https://backup.test/v1/responses",
+    ]
+    assert captures[2]["urls"] == [
+        "https://primary.test/v1/responses",
+    ]
+
+
 def test_autonomous_agent_codex_retries_responses_token_param_variant(monkeypatch, tmp_path):
     import core.ai.autonomous_agent as module
 
@@ -496,6 +604,76 @@ def test_research_context_generator_fails_over_to_backup_relay(monkeypatch):
     assert capture["urls"] == [
         "https://primary.test/v1/responses",
         "https://backup.test/v1/responses",
+    ]
+
+
+def test_research_context_generator_sticks_to_backup_until_next_day(monkeypatch, tmp_path):
+    import core.ai.research_context_generator as module
+    import core.utils.openai_responses as response_helpers
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://primary.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "https://backup.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setenv("OPENAI_FAILOVER_STATE_PATH", str(tmp_path / "openai_failover_state.json"))
+    monkeypatch.setenv("OPENAI_FAILOVER_TZ", "Asia/Shanghai")
+    response_helpers.reset_openai_target_preferences()
+
+    day_one = datetime(2026, 4, 6, 11, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    day_two = datetime(2026, 4, 7, 0, 2, tzinfo=ZoneInfo("Asia/Shanghai"))
+    response_payload = {
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": '{"hypothesis":"sticky backup ok"}',
+                    }
+                ],
+            }
+        ]
+    }
+    session_plans = [
+        [
+            _FakeResponse({"error": {"message": "Service temporarily unavailable"}}, status=503),
+            _FakeResponse(response_payload, status=200),
+        ],
+        [
+            _FakeResponse(response_payload, status=200),
+        ],
+        [
+            _FakeResponse(response_payload, status=200),
+        ],
+    ]
+    captures: list[dict] = []
+
+    def _session_factory(**kwargs):
+        capture = {}
+        captures.append(capture)
+        responses = session_plans[len(captures) - 1]
+        return _FakeSequenceSession(capture=capture, responses=list(responses), **kwargs)
+
+    monkeypatch.setattr(module.aiohttp, "ClientSession", _session_factory)
+
+    monkeypatch.setattr(response_helpers, "_openai_failover_now", lambda: day_one)
+    first = asyncio.run(module._call_openai_responses_json("prompt", timeout=10))
+    second = asyncio.run(module._call_openai_responses_json("prompt", timeout=10))
+    monkeypatch.setattr(response_helpers, "_openai_failover_now", lambda: day_two)
+    third = asyncio.run(module._call_openai_responses_json("prompt", timeout=10))
+
+    assert first == {"hypothesis": "sticky backup ok"}
+    assert second == {"hypothesis": "sticky backup ok"}
+    assert third == {"hypothesis": "sticky backup ok"}
+    assert captures[0]["urls"] == [
+        "https://primary.test/v1/responses",
+        "https://backup.test/v1/responses",
+    ]
+    assert captures[1]["urls"] == [
+        "https://backup.test/v1/responses",
+    ]
+    assert captures[2]["urls"] == [
+        "https://primary.test/v1/responses",
     ]
 
 
@@ -619,6 +797,132 @@ def test_async_glm_client_openai_fails_over_to_backup_relay(monkeypatch):
         "https://primary.test/v1/responses",
         "https://backup.test/v1/responses",
     ]
+
+
+def test_async_glm_client_openai_sticks_to_backup_until_next_day(monkeypatch, tmp_path):
+    import core.news.eventizer.async_glm_client as module
+    import core.utils.openai_responses as response_helpers
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://primary.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "https://backup.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+    monkeypatch.setenv("OPENAI_FAILOVER_STATE_PATH", str(tmp_path / "openai_failover_state.json"))
+    monkeypatch.setenv("OPENAI_FAILOVER_TZ", "Asia/Shanghai")
+    response_helpers.reset_openai_target_preferences()
+
+    day_one = datetime(2026, 4, 6, 12, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    day_two = datetime(2026, 4, 7, 0, 3, tzinfo=ZoneInfo("Asia/Shanghai"))
+    response_payload = {
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": '{"summary":"sticky","sentiment":"positive"}'}],
+            }
+        ]
+    }
+    session_plans = [
+        [
+            _FakeResponse({"error": {"message": "Service temporarily unavailable"}}, status=503),
+            _FakeResponse(response_payload, status=200),
+        ],
+        [
+            _FakeResponse(response_payload, status=200),
+        ],
+        [
+            _FakeResponse(response_payload, status=200),
+        ],
+    ]
+    captures: list[dict] = []
+
+    def _session_factory(**kwargs):
+        capture = {}
+        captures.append(capture)
+        responses = session_plans[len(captures) - 1]
+        return _FakeSequenceSession(capture=capture, responses=list(responses), **kwargs)
+
+    monkeypatch.setattr(module.aiohttp, "ClientSession", _session_factory)
+    client = module.AsyncGLMClient({})
+
+    monkeypatch.setattr(response_helpers, "_openai_failover_now", lambda: day_one)
+    first, first_error = asyncio.run(
+        client.chat_completions(
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=64,
+        )
+    )
+    second, second_error = asyncio.run(
+        client.chat_completions(
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=64,
+        )
+    )
+    monkeypatch.setattr(response_helpers, "_openai_failover_now", lambda: day_two)
+    third, third_error = asyncio.run(
+        client.chat_completions(
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=64,
+        )
+    )
+
+    assert first_error == "none"
+    assert second_error == "none"
+    assert third_error == "none"
+    assert first["choices"][0]["message"]["content"] == '{"summary":"sticky","sentiment":"positive"}'
+    assert second["choices"][0]["message"]["content"] == '{"summary":"sticky","sentiment":"positive"}'
+    assert third["choices"][0]["message"]["content"] == '{"summary":"sticky","sentiment":"positive"}'
+    assert captures[0]["urls"] == [
+        "https://primary.test/v1/responses",
+        "https://backup.test/v1/responses",
+    ]
+    assert captures[1]["urls"] == [
+        "https://backup.test/v1/responses",
+    ]
+    assert captures[2]["urls"] == [
+        "https://primary.test/v1/responses",
+    ]
+
+
+def test_news_worker_marks_rules_fallback_with_saved_events_as_done(monkeypatch):
+    import core.news.service.worker as module
+
+    finish_mock = AsyncMock()
+    monkeypatch.setattr(
+        module,
+        "extract_events_async_with_meta",
+        AsyncMock(
+            return_value=(
+                [
+                    {
+                        "event_id": "evt-1",
+                        "symbol": "BTC/USDT",
+                        "evidence": {"url": "https://example.test/news/1"},
+                    }
+                ],
+                False,
+                "other",
+            )
+        ),
+    )
+    monkeypatch.setattr(module.news_db, "save_events", AsyncMock(return_value={"events_count": 1}))
+    monkeypatch.setattr(module.news_db, "finish_llm_tasks", finish_mock)
+
+    events, llm_used, error_type, events_count = asyncio.run(
+        module._execute_llm_batch(
+            [{"id": 1, "url": "https://example.test/news/1", "source": "jin10"}],
+            {"llm": {}},
+            [1],
+            url_to_raw_id={"https://example.test/news/1": 1},
+        )
+    )
+
+    assert llm_used is False
+    assert error_type == "other"
+    assert events_count == 1
+    assert events[0]["raw_news_id"] == 1
+    assert finish_mock.await_args.kwargs["success"] is True
+    assert finish_mock.await_args.kwargs["error"] is None
 
 
 def test_async_glm_client_openai_falls_back_to_chat_completions(monkeypatch):

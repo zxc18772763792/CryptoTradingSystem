@@ -32,6 +32,7 @@ from core.utils.openai_responses import (
 
 DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
+_OPENAI_FAILOVER_SCOPE = "news"
 _LEGACY_PROVIDER_ALIASES = {"glm", "glm5", "zhipu"}
 _LEGACY_BASE_URL_HINTS = ("bigmodel.cn", "zhipu")
 _SUMMARY_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -176,7 +177,10 @@ def _openai_post_with_failover(
     timeout_sec: int,
     log_prefix: str,
 ) -> Dict[str, Any]:
-    targets = prioritize_openai_targets(_openai_endpoint_targets(cfg))
+    targets = prioritize_openai_targets(
+        _openai_endpoint_targets(cfg),
+        scope=_OPENAI_FAILOVER_SCOPE,
+    )
     available = [
         dict(target)
         for target in targets
@@ -213,7 +217,7 @@ def _openai_post_with_failover(
                     if chat_response.status_code >= 400:
                         err = RuntimeError(f"LLM chat HTTP {chat_response.status_code}: {chat_response.text[:300]}")
                         if should_failover_openai_status(chat_response.status_code):
-                            remember_openai_target_failure(targets, base_url)
+                            remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         if idx + 1 < total_targets and should_failover_openai_status(chat_response.status_code):
                             last_exc = err
                             logger.warning(
@@ -222,11 +226,11 @@ def _openai_post_with_failover(
                             )
                             continue
                         raise err
-                    remember_openai_target_success(targets, base_url)
+                    remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                     return read_requests_responses_json(chat_response)
                 err = RuntimeError(f"LLM HTTP {response.status_code}: {response.text[:300]}")
                 if should_failover_openai_status(response.status_code):
-                    remember_openai_target_failure(targets, base_url)
+                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                 if idx + 1 < total_targets and should_failover_openai_status(response.status_code):
                     last_exc = err
                     logger.warning(
@@ -235,10 +239,10 @@ def _openai_post_with_failover(
                     )
                     continue
                 raise err
-            remember_openai_target_success(targets, base_url)
+            remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
             return read_requests_responses_json(response)
         except requests.RequestException as exc:
-            remember_openai_target_failure(targets, base_url)
+            remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
             if idx + 1 < total_targets:
                 last_exc = exc
                 logger.warning(

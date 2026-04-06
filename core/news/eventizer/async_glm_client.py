@@ -38,6 +38,7 @@ from core.utils.openai_responses import (
 
 DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
+_OPENAI_FAILOVER_SCOPE = "news"
 _LEGACY_PROVIDER_ALIASES = {"glm", "glm5", "zhipu"}
 _LEGACY_BASE_URL_HINTS = ("bigmodel.cn", "zhipu")
 
@@ -53,6 +54,11 @@ _NEG_SENTIMENT_HINTS = {
     "crash", "crashes", "plunge", "plunges", "slump", "slumps", "drop", "drops", "falls",
     "黑客", "被盗", "攻击", "漏洞", "宕机", "暂停提现", "暂停交易", "诉讼", "起诉", "打击", "封禁", "下架", "爆仓", "清算", "利空", "暴跌",
 }
+
+_WEAK_EVENT_ID_RE = re.compile(
+    r"^(?:(?:n|event|evt|item|row|news)[-_]?)?\d+(?:[-_][a-z0-9]{1,16}){0,2}$",
+    re.IGNORECASE,
+)
 
 
 def _normalize_openai_base_urls(value: Any) -> str:
@@ -389,7 +395,10 @@ class AsyncGLMClient:
         Raises:
             RuntimeError: If the OpenAI-compatible API key is missing
         """
-        targets = prioritize_openai_targets(self._available_endpoint_targets())
+        targets = prioritize_openai_targets(
+            self._available_endpoint_targets(),
+            scope=_OPENAI_FAILOVER_SCOPE,
+        )
         if not targets:
             raise RuntimeError("OPENAI_API_KEY is missing")
 
@@ -428,7 +437,7 @@ class AsyncGLMClient:
                             error_text = await response.text()
                             logger.warning(f"news llm rate limited (429): {error_text[:200]}")
                             last_error_type = "rate_limit"
-                            remember_openai_target_failure(targets, base_url)
+                            remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                             if idx + 1 < total_targets:
                                 logger.warning(
                                     f"async_glm_client news relay rate limited; trying backup {idx + 2}/{total_targets}"
@@ -463,7 +472,7 @@ class AsyncGLMClient:
                                         chat_error_text = await chat_response.text()
                                         logger.warning(f"news llm chat/completions rate limited (429): {chat_error_text[:200]}")
                                         last_error_type = "rate_limit"
-                                        remember_openai_target_failure(targets, base_url)
+                                        remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                         if idx + 1 < total_targets:
                                             logger.warning(
                                                 "async_glm_client news chat/completions rate limited; "
@@ -481,7 +490,7 @@ class AsyncGLMClient:
                                         )
                                         last_error_type = "timeout" if chat_response.status in (408, 504) else "other"
                                         if should_failover_openai_status(chat_response.status):
-                                            remember_openai_target_failure(targets, base_url)
+                                            remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                         if idx + 1 < total_targets and should_failover_openai_status(chat_response.status):
                                             logger.warning(
                                                 "async_glm_client news chat/completions HTTP "
@@ -492,7 +501,7 @@ class AsyncGLMClient:
 
                                     data = await read_aiohttp_responses_json(chat_response)
                                 self._requests_success += 1
-                                remember_openai_target_success(targets, base_url)
+                                remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                 rate_limiter.reset_backoff()
                                 return data, "none"
 
@@ -500,7 +509,7 @@ class AsyncGLMClient:
                             logger.warning(f"news llm HTTP {response.status}: {error_text[:300]}")
                             last_error_type = "timeout" if response.status in (408, 504) else "other"
                             if should_failover_openai_status(response.status):
-                                remember_openai_target_failure(targets, base_url)
+                                remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                             if idx + 1 < total_targets and should_failover_openai_status(response.status):
                                 logger.warning(
                                     f"async_glm_client news relay HTTP {response.status}; "
@@ -514,14 +523,14 @@ class AsyncGLMClient:
                         else:
                             data = await response.json()
                         self._requests_success += 1
-                        remember_openai_target_success(targets, base_url)
+                        remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         rate_limiter.reset_backoff()
                         return data, "none"
                 except asyncio.TimeoutError:
                     self._requests_failed += 1
                     logger.warning("news llm request timed out")
                     last_error_type = "timeout"
-                    remember_openai_target_failure(targets, base_url)
+                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                     if idx + 1 < total_targets:
                         logger.warning(
                             f"async_glm_client news relay timeout; trying backup {idx + 2}/{total_targets}"
@@ -532,7 +541,7 @@ class AsyncGLMClient:
                     self._requests_failed += 1
                     logger.warning(f"news llm transport error: {exc!r}")
                     last_error_type = "other"
-                    remember_openai_target_failure(targets, base_url)
+                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                     if idx + 1 < total_targets:
                         logger.warning(
                             f"async_glm_client news relay transport failure; "
@@ -698,8 +707,24 @@ class AsyncGLMClient:
 
     def _hash_event_fallback(self, item: Dict[str, Any]) -> str:
         """Generate a fallback event ID hash."""
-        seed = f"{item.get('symbol')}|{item.get('event_type')}|{item.get('ts')}|{item.get('evidence', {}).get('url', '')}"
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        seed = (
+            f"{item.get('symbol')}|{item.get('event_type')}|{item.get('ts')}|"
+            f"{evidence.get('url', '')}|{evidence.get('title', '')}"
+        )
         return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:24]
+
+    @staticmethod
+    def _event_id_needs_fallback(value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return True
+        lowered = text.lower()
+        if len(text) < 10:
+            return True
+        if _WEAK_EVENT_ID_RE.fullmatch(lowered):
+            return True
+        return False
 
     def _validate_events(self, payload: Any, mapper: SymbolMapper) -> List[Dict[str, Any]]:
         """Validate and normalize events from LLM response.
@@ -738,7 +763,7 @@ class AsyncGLMClient:
             if event_type not in EVENT_TYPES:
                 raise ValueError(f"invalid event_type: {event_type}")
 
-            if not item.get("event_id"):
+            if self._event_id_needs_fallback(item.get("event_id")):
                 item["event_id"] = self._hash_event_fallback(item)
 
             evidence = item.get("evidence")
