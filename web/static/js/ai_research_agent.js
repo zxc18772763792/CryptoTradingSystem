@@ -112,11 +112,25 @@
     return normalizeUiText(compacted);
   }
 
+  function parseAgentDate(value) {
+    if (!value) return null;
+    if (value instanceof Date) {
+      return Number.isFinite(value.getTime()) ? value : null;
+    }
+    const text = String(value || '').trim();
+    if (!text) return null;
+    const normalized = (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(text) && !/(Z|[+-]\d{2}:\d{2})$/i.test(text))
+      ? `${text.replace(' ', 'T')}Z`
+      : text;
+    const date = new Date(normalized);
+    return Number.isFinite(date.getTime()) ? date : null;
+  }
+
   function fmtAgentTs(value, options = {}) {
     if (!value) return '--';
     try {
-      const date = value instanceof Date ? value : new Date(value);
-      if (!Number.isFinite(date.getTime())) return String(value || '--');
+      const date = parseAgentDate(value);
+      if (!date) return String(value || '--');
       return date.toLocaleString('zh-CN', {
         hour12: false,
         timeZone: AI_UI_TIMEZONE,
@@ -129,8 +143,8 @@
 
   function getAgentPlotAxisTimestamp(value) {
     try {
-      const date = value instanceof Date ? value : new Date(value);
-      if (!Number.isFinite(date.getTime()) || typeof Intl === 'undefined' || typeof Intl.DateTimeFormat !== 'function') {
+      const date = parseAgentDate(value);
+      if (!date || typeof Intl === 'undefined' || typeof Intl.DateTimeFormat !== 'function') {
         return null;
       }
       const formatter = new Intl.DateTimeFormat('en-CA', {
@@ -243,7 +257,8 @@
     const generatedAt = String(payload.generated_at || scan?.generated_at || '').trim();
     let ageSec = Number(payload.age_sec);
     if ((!Number.isFinite(ageSec) || ageSec < 0) && generatedAt) {
-      const generatedMs = new Date(generatedAt).getTime();
+      const generatedDate = parseAgentDate(generatedAt);
+      const generatedMs = generatedDate ? generatedDate.getTime() : Number.NaN;
       if (Number.isFinite(generatedMs)) {
         ageSec = Math.max(0, (Date.now() - generatedMs) / 1000);
       }
@@ -269,8 +284,8 @@
     const actualMeta = buildScanMeta(actualScan, status.last_symbol_scan_meta || null);
     const previewScan = status.preview_symbol_scan || null;
     const previewMeta = buildScanMeta(previewScan, status.preview_symbol_scan_meta || null);
-    const previewTs = previewMeta.generated_at ? new Date(previewMeta.generated_at).getTime() : 0;
-    const actualTs = actualMeta.generated_at ? new Date(actualMeta.generated_at).getTime() : 0;
+    const previewTs = previewMeta.generated_at ? (parseAgentDate(previewMeta.generated_at)?.getTime() || 0) : 0;
+    const actualTs = actualMeta.generated_at ? (parseAgentDate(actualMeta.generated_at)?.getTime() || 0) : 0;
 
     if (previewMeta.available && (!actualMeta.available || actualMeta.stale || previewTs >= actualTs)) {
       return { scan: previewScan, meta: previewMeta };
