@@ -1803,6 +1803,67 @@ def test_run_once_holds_when_market_data_is_stale_with_live_connector(monkeypatc
     assert submit_mock.await_count == 0
 
 
+def test_run_once_allows_small_close_latency_before_stale_guard(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_stale_grace")
+    provider_mock = AsyncMock(
+        return_value={
+            "action": "hold",
+            "confidence": 0.61,
+            "strength": 0.2,
+            "leverage": 1.0,
+            "reason": "provider_called",
+        }
+    )
+
+    monkeypatch.setattr(agent, "get_symbol_scan", AsyncMock(return_value={"selected_symbol": "BTC/USDT"}))
+    monkeypatch.setattr(
+        agent,
+        "_build_context",
+        AsyncMock(
+            return_value=(
+                {
+                    "exchange": "binance",
+                    "symbol": "BTC/USDT",
+                    "timeframe": "15m",
+                    "price": 123.0,
+                    "market_structure": {
+                        "available": True,
+                        "last_bar_at": "2026-01-01T11:45:00+00:00",
+                        "bar_interval_sec": 900,
+                    },
+                    "position": {},
+                    "aggregated_signal": {
+                        "direction": "LONG",
+                        "confidence": 0.9,
+                        "blocked_by_risk": False,
+                        "risk_reason": "",
+                    },
+                    "research_context": {"available": False},
+                    "execution_cost": {},
+                },
+                pd.DataFrame(),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        module.exchange_manager,
+        "get_exchange",
+        lambda name: SimpleNamespace(get_klines=AsyncMock(return_value=[])),
+    )
+    monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=False))
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(agent, "_call_provider", provider_mock)
+    monkeypatch.setattr(module, "_utc_now", lambda: datetime(2026, 1, 1, 12, 15, 6, tzinfo=timezone.utc))
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert provider_mock.await_count == 1
+    assert result["decision"]["reason"] == "provider_called"
+
+
 def test_context_market_data_age_sec_uses_closed_bar_time(tmp_path: Path):
     import core.ai.autonomous_agent as module
 

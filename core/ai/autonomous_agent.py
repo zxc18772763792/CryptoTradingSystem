@@ -4871,7 +4871,7 @@ class AutonomousTradingAgent:
         context_cfg["_include_multi_scale_context"] = True
         context_cfg["_market_data_max_age_sec"] = _coerce_float(
             context_cfg.get("_market_data_max_age_sec"),
-            max(120.0, min(float(timeframe_sec), 900.0)),
+            max(120.0, float(timeframe_sec) + 60.0),
             low=30.0,
             high=float(7 * 86400),
         )
