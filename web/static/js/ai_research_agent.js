@@ -1399,8 +1399,11 @@
         ? `单边 ${formatNumber(item.cost.one_way_bps, 2)} bps`
         : '成本待补充';
       const signalPrice = formatNumber(item.price, Number(item.price || 0) >= 100 ? 2 : 4);
+      const orderSuffix = item?.order?.match_label
+        ? ` [${String(item.order.match_label)}]`
+        : '';
       const orderText = item?.order
-        ? `${String(item.order.side || '--').toUpperCase()} / ${formatNumber(item.order.price, Number(item.order.price || 0) >= 100 ? 2 : 4)}`
+        ? `${String(item.order.side || '--').toUpperCase()} / ${formatNumber(item.order.price, Number(item.order.price || 0) >= 100 ? 2 : 4)}${orderSuffix}`
         : '未匹配到本进程订单';
       const blockerText = blockers.length
         ? blockers.map((entry) => `${entry.label} x${entry.count}`).join(' / ')

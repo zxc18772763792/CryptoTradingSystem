@@ -1363,6 +1363,8 @@ def _serialize_autonomy_order(order: Any) -> Dict[str, Any]:
         "stop_loss": _review_safe_float(meta.get("stop_loss")),
         "take_profit": _review_safe_float(meta.get("take_profit")),
         "reduce_only": bool(meta.get("reduce_only", False)),
+        "match_source": "order_record",
+        "match_label": "",
     }
 
 
@@ -1394,6 +1396,71 @@ def _match_autonomy_order(
         return None
     candidates.sort(key=lambda item: (item[0], item[1]))
     return candidates[0][2]
+
+
+def _build_autonomy_order_fallback(
+    *,
+    timestamp: Any,
+    symbol: Any,
+    action: Any,
+    execution_signal: Dict[str, Any],
+    config: Dict[str, Any],
+    position_before: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(execution_signal, dict) or not execution_signal:
+        return None
+    signal_meta = execution_signal.get("metadata") if isinstance(execution_signal.get("metadata"), dict) else {}
+    strategy_name = str(execution_signal.get("strategy_name") or signal_meta.get("strategy") or "").strip()
+    signal_source = str(signal_meta.get("source") or "").strip().lower()
+    if strategy_name != _AUTONOMOUS_AGENT_STRATEGY and signal_source != "ai_autonomous_agent":
+        return None
+
+    action_value = str(action or execution_signal.get("signal_type") or "").strip().lower()
+    order_side = _review_action_order_side(action_value)
+    order_price = _review_safe_float(execution_signal.get("price"))
+    if order_price is None:
+        order_price = _review_safe_float((position_before or {}).get("current_price"))
+    if order_price is None:
+        order_price = _review_safe_float((position_before or {}).get("entry_price"))
+    order_amount = _review_safe_float(execution_signal.get("quantity"))
+    if order_amount is None and action_value in _AUTONOMOUS_EXIT_ACTIONS:
+        order_amount = _review_safe_float((position_before or {}).get("quantity"))
+    if not order_side and order_price is None and order_amount is None:
+        return None
+
+    exchange = str(signal_meta.get("exchange") or config.get("exchange") or "").strip().lower()
+    position_source = str((position_before or {}).get("source") or "").strip().lower()
+    match_source = "journal_signal"
+    match_label = "journal signal"
+    if exchange == "binance" and position_source == "exchange_live" and action_value in _AUTONOMOUS_EXIT_ACTIONS:
+        match_source = "merged_position"
+        match_label = "binance merged position"
+
+    fallback_symbol = execution_signal.get("symbol") or symbol or config.get("symbol") or ""
+    fallback_timestamp = execution_signal.get("timestamp") or timestamp
+    fallback_key = f"{fallback_timestamp}|{fallback_symbol}|{action_value}|{match_source}"
+    fallback_id = f"review-fallback-{hashlib.sha1(fallback_key.encode('utf-8')).hexdigest()[:12]}"
+
+    return {
+        "id": fallback_id,
+        "exchange": exchange,
+        "symbol": fallback_symbol,
+        "symbol_norm": _normalize_review_symbol(fallback_symbol),
+        "side": order_side,
+        "type": "market",
+        "status": "submitted" if match_source == "journal_signal" else "merged_position",
+        "price": order_price,
+        "amount": order_amount,
+        "filled": order_amount,
+        "timestamp": fallback_timestamp,
+        "strategy": strategy_name or _AUTONOMOUS_AGENT_STRATEGY,
+        "account_id": signal_meta.get("account_id"),
+        "stop_loss": _review_safe_float(execution_signal.get("stop_loss")),
+        "take_profit": _review_safe_float(execution_signal.get("take_profit")),
+        "reduce_only": bool(signal_meta.get("reduce_only")) or action_value in _AUTONOMOUS_EXIT_ACTIONS,
+        "match_source": match_source,
+        "match_label": match_label,
+    }
 
 
 def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
@@ -1462,6 +1529,7 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
         diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
         primary = diagnostics.get("primary") if isinstance(diagnostics.get("primary"), dict) else {}
         selection = row.get("selection") if isinstance(row.get("selection"), dict) else {}
+        config = row.get("config") if isinstance(row.get("config"), dict) else {}
         context = row.get("context") if isinstance(row.get("context"), dict) else {}
         execution_signal = execution.get("signal") if isinstance(execution.get("signal"), dict) else {}
         position_before = context.get("position") if isinstance(context.get("position"), dict) else {}
@@ -1471,7 +1539,7 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
         phase = "entry" if action in _AUTONOMOUS_ENTRY_ACTIONS else ("exit" if action in _AUTONOMOUS_EXIT_ACTIONS else "other")
         symbol = (
             execution_signal.get("symbol")
-            or (row.get("config") or {}).get("symbol")
+            or config.get("symbol")
             or selection.get("selected_symbol")
             or ""
         )
@@ -1479,6 +1547,21 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
         repeat_open_rank = 1
         if phase == "entry":
             repeat_open_rank = 1
+        matched_order = _match_autonomy_order(
+            timestamp=row.get("timestamp"),
+            symbol=symbol,
+            action=action,
+            orders=serialized_orders,
+        )
+        if matched_order is None:
+            matched_order = _build_autonomy_order_fallback(
+                timestamp=row.get("timestamp"),
+                symbol=symbol,
+                action=action,
+                execution_signal=execution_signal,
+                config=config,
+                position_before=position_before,
+            )
 
         event = {
             "id": f"agent-review-{len(events) + 1}",
@@ -1515,12 +1598,7 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
                 "unrealized_pnl": _review_safe_float(position_before.get("unrealized_pnl")),
                 "source": position_before.get("source"),
             },
-            "order": _match_autonomy_order(
-                timestamp=row.get("timestamp"),
-                symbol=symbol,
-                action=action,
-                orders=serialized_orders,
-            ),
+            "order": matched_order,
             "pair": {
                 "matched": False,
                 "entry_id": None,

@@ -298,6 +298,139 @@ def test_build_autonomous_agent_review_includes_profit_curve(monkeypatch, tmp_pa
     assert [point["pnl"] for point in curve["points"]] == [0.0, 1.25, 0.8]
 
 
+def test_build_autonomous_agent_review_falls_back_to_journal_signal_order(monkeypatch, tmp_path):
+    from web.api import ai_research as ai_module
+
+    journal_rows = [
+        {
+            "timestamp": "2026-04-06T06:16:50.768697+00:00",
+            "config": {"symbol": "XRP/USDT", "exchange": "binance", "allow_live": True},
+            "decision": {
+                "action": "buy",
+                "reason": "trend",
+                "confidence": 0.69,
+            },
+            "diagnostics": {"primary": {"label": "trend", "detail": "", "tone": "good"}},
+            "context": {
+                "price": 1.3462,
+                "position": {},
+                "execution_cost": {},
+                "aggregated_signal": {"direction": "LONG", "confidence": 0.69},
+            },
+            "execution": {
+                "mode": "execute",
+                "submitted": True,
+                "reason": "submitted",
+                "signal": {
+                    "symbol": "XRP/USDT",
+                    "signal_type": "buy",
+                    "price": 1.3462,
+                    "timestamp": "2026-04-06T06:16:50.767697+00:00",
+                    "strategy_name": "AI_AutonomousAgent",
+                    "quantity": None,
+                    "stop_loss": 1.3300456,
+                    "take_profit": 1.3785088,
+                    "metadata": {
+                        "exchange": "binance",
+                        "account_id": "main",
+                        "source": "ai_autonomous_agent",
+                    },
+                },
+            },
+        }
+    ]
+    journal_path = tmp_path / "autonomous_agent_journal.jsonl"
+    journal_path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in journal_rows),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "_journal_path", journal_path)
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "read_journal", lambda limit=500: [])
+    monkeypatch.setattr(ai_module.order_manager, "get_recent_orders", lambda limit=5000: [])
+    monkeypatch.setattr(ai_module.position_manager, "get_all_positions", lambda: [])
+
+    payload = ai_module._build_autonomous_agent_review(limit=12)
+
+    item = payload["items"][0]
+    assert item["order"]["match_source"] == "journal_signal"
+    assert item["order"]["match_label"] == "journal signal"
+    assert item["order"]["side"] == "buy"
+    assert item["order"]["price"] == 1.3462
+    assert item["order"]["account_id"] == "main"
+    assert item["order"]["reduce_only"] is False
+
+
+def test_build_autonomous_agent_review_marks_binance_merged_position_fallback(monkeypatch, tmp_path):
+    from web.api import ai_research as ai_module
+
+    journal_rows = [
+        {
+            "timestamp": "2026-04-06T06:42:53.052434+00:00",
+            "config": {"symbol": "ETH/USDT", "exchange": "binance", "allow_live": True},
+            "decision": {
+                "action": "close_long",
+                "reason": "reduce risk",
+                "confidence": 0.82,
+            },
+            "diagnostics": {"primary": {"label": "risk", "detail": "", "tone": "warn"}},
+            "context": {
+                "price": 2054.15,
+                "position": {
+                    "side": "long",
+                    "quantity": 1.333,
+                    "entry_price": 2131.406054014,
+                    "current_price": 2123.5,
+                    "unrealized_pnl": -10.53876999,
+                    "source": "exchange_live",
+                },
+                "execution_cost": {},
+                "aggregated_signal": {"direction": "SHORT", "confidence": 0.82},
+            },
+            "execution": {
+                "mode": "execute",
+                "submitted": True,
+                "reason": "submitted",
+                "signal": {
+                    "symbol": "ETH/USDT",
+                    "signal_type": "close_long",
+                    "price": 2054.15,
+                    "timestamp": "2026-04-06T06:42:53.052434+00:00",
+                    "strategy_name": "AI_AutonomousAgent",
+                    "quantity": None,
+                    "stop_loss": None,
+                    "take_profit": None,
+                    "metadata": {
+                        "exchange": "binance",
+                        "account_id": "main",
+                        "source": "ai_autonomous_agent",
+                    },
+                },
+            },
+        }
+    ]
+    journal_path = tmp_path / "autonomous_agent_journal.jsonl"
+    journal_path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in journal_rows),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "_journal_path", journal_path)
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "read_journal", lambda limit=500: [])
+    monkeypatch.setattr(ai_module.order_manager, "get_recent_orders", lambda limit=5000: [])
+    monkeypatch.setattr(ai_module.position_manager, "get_all_positions", lambda: [])
+
+    payload = ai_module._build_autonomous_agent_review(limit=12)
+
+    item = payload["items"][0]
+    assert item["order"]["match_source"] == "merged_position"
+    assert item["order"]["match_label"] == "binance merged position"
+    assert item["order"]["side"] == "sell"
+    assert item["order"]["price"] == 2054.15
+    assert item["order"]["amount"] == 1.333
+    assert item["order"]["reduce_only"] is True
+
+
 def test_live_signals_gracefully_degrades_when_symbol_scan_times_out(monkeypatch):
     from web.api import ai_research as ai_module
 
