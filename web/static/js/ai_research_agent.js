@@ -112,17 +112,53 @@
     return normalizeUiText(compacted);
   }
 
-  function fmtAgentTs(value) {
+  function fmtAgentTs(value, options = {}) {
     if (!value) return '--';
     try {
-      const date = new Date(value);
+      const date = value instanceof Date ? value : new Date(value);
       if (!Number.isFinite(date.getTime())) return String(value || '--');
       return date.toLocaleString('zh-CN', {
         hour12: false,
         timeZone: AI_UI_TIMEZONE,
+        ...options,
       });
     } catch (_) {
       return String(value || '--');
+    }
+  }
+
+  function getAgentPlotAxisTimestamp(value) {
+    try {
+      const date = value instanceof Date ? value : new Date(value);
+      if (!Number.isFinite(date.getTime()) || typeof Intl === 'undefined' || typeof Intl.DateTimeFormat !== 'function') {
+        return null;
+      }
+      const formatter = new Intl.DateTimeFormat('en-CA', {
+        timeZone: AI_UI_TIMEZONE,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+      });
+      const partMap = {};
+      formatter.formatToParts(date).forEach((part) => {
+        if (part.type !== 'literal') partMap[part.type] = part.value;
+      });
+      const shiftedTime = Date.UTC(
+        Number(partMap.year),
+        Number(partMap.month) - 1,
+        Number(partMap.day),
+        Number(partMap.hour),
+        Number(partMap.minute),
+        Number(partMap.second),
+        date.getUTCMilliseconds(),
+      );
+      return Number.isFinite(shiftedTime) ? new Date(shiftedTime).toISOString() : null;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -342,16 +378,30 @@
         const pnl = Number(point?.pnl);
         const timestamp = String(point?.timestamp || '').trim();
         if (!Number.isFinite(pnl) || !timestamp) return null;
+        const plotTimestamp = getAgentPlotAxisTimestamp(timestamp);
+        const sortTime = Date.parse(timestamp);
+        if (!plotTimestamp || !Number.isFinite(sortTime)) return null;
         const price = Number(point?.price);
         return {
           timestamp,
+          plotTimestamp,
+          displayTimestamp: fmtAgentTs(timestamp, {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          }),
+          sortTime,
           pnl,
           price: Number.isFinite(price) ? price : null,
           kind: String(point?.kind || 'mark').trim().toLowerCase() || 'mark',
           label: String(point?.label || '').trim(),
         };
       })
-      .filter(Boolean);
+      .filter(Boolean)
+      .sort((left, right) => left.sortTime - right.sortTime);
   }
 
   function shouldShowAgentProfitCurve(item = {}) {
@@ -384,7 +434,9 @@
       type: 'scatter',
       mode: 'lines',
       name: '收益曲线',
-      x: points.map((point) => point.timestamp),
+      // Plotly renders date axes in UTC; pre-shifting into the UI timezone keeps the
+      // chart axis aligned with the rest of the dashboard's local-time timestamps.
+      x: points.map((point) => point.plotTimestamp),
       y: points.map((point) => point.pnl),
       line: { color: lineColor, width: 2.2 },
       fill: 'tozeroy',
@@ -392,7 +444,7 @@
       hovertemplate: points.map((point) => {
         const priceText = Number.isFinite(point.price) ? `<br>价格: ${point.price.toFixed(point.price >= 100 ? 2 : 4)}` : '';
         const labelText = point.label ? `<br>节点: ${esc(point.label)}` : '';
-        return `收益: ${point.pnl.toFixed(4)} USDT${priceText}${labelText}<extra></extra>`;
+        return `时间: ${point.displayTimestamp}<br>收益: ${point.pnl.toFixed(4)} USDT${priceText}${labelText}<extra></extra>`;
       }),
     };
     const buildMarkerTrace = (kind, name, color, symbol) => {
@@ -402,7 +454,7 @@
         type: 'scatter',
         mode: 'markers',
         name,
-        x: subset.map((point) => point.timestamp),
+        x: subset.map((point) => point.plotTimestamp),
         y: subset.map((point) => point.pnl),
         marker: {
           color,
@@ -412,7 +464,7 @@
         },
         hovertemplate: subset.map((point) => {
           const priceText = Number.isFinite(point.price) ? `<br>价格: ${point.price.toFixed(point.price >= 100 ? 2 : 4)}` : '';
-          return `${esc(name)}<br>收益: ${point.pnl.toFixed(4)} USDT${priceText}<extra></extra>`;
+          return `${esc(name)}<br>时间: ${point.displayTimestamp}<br>收益: ${point.pnl.toFixed(4)} USDT${priceText}<extra></extra>`;
         }),
       };
     };
