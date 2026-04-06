@@ -1091,15 +1091,13 @@ class AutonomousTradingAgent:
             return None
 
         now = time.time()
-        if self._model_feedback_failure_streak <= 0:
+        if self._model_feedback_failure_streak <= 0 or self._model_feedback_outage_started_at is None:
             self._model_feedback_outage_started_at = now
         self._model_feedback_failure_streak += 1
         self._model_feedback_last_failure_kind = kind
         self._model_feedback_last_failure_error = _format_exception_short(exc)[:300]
 
-        outage_anchor = self._last_model_feedback_at
-        if outage_anchor is None:
-            outage_anchor = self._model_feedback_outage_started_at or now
+        outage_anchor = self._model_feedback_outage_started_at or now
         outage_duration_sec = max(0.0, now - float(outage_anchor))
         if outage_duration_sec < float(_MODEL_FEEDBACK_OUTAGE_ALERT_SEC):
             return None
@@ -1121,10 +1119,25 @@ class AutonomousTradingAgent:
         if self._model_feedback_last_failure_kind not in {"rate_limit", "service_unavailable", "timeout"}:
             return 0.0
         now = time.time()
-        outage_anchor = self._last_model_feedback_at
-        if outage_anchor is None:
-            outage_anchor = self._model_feedback_outage_started_at or now
+        outage_anchor = self._model_feedback_outage_started_at or now
         return max(0.0, now - float(outage_anchor))
+
+    def _should_send_model_feedback_outage_alert(
+        self,
+        *,
+        cfg: Dict[str, Any],
+        context_payload: Dict[str, Any],
+    ) -> bool:
+        trading_mode = str(execution_engine.get_trading_mode() or "").strip().lower()
+        if trading_mode != "live":
+            return False
+
+        mode = str(cfg.get("mode") or "").strip().lower()
+        allow_live = bool(cfg.get("allow_live"))
+        position_payload = context_payload.get("position") if isinstance(context_payload, dict) else {}
+        has_open_position = str((position_payload or {}).get("side") or "").strip().lower() in {"long", "short"}
+
+        return bool(mode == "execute" and (allow_live or has_open_position))
 
     async def _protect_profitable_local_position_during_model_outage(
         self,
@@ -4567,7 +4580,10 @@ class AutonomousTradingAgent:
                             }
                             raw_decision_source = "fallback"
                             forced_outage_close = True
-                    if failure:
+                    if failure and self._should_send_model_feedback_outage_alert(
+                        cfg=effective_cfg,
+                        context_payload=context_payload,
+                    ):
                         await self._send_model_feedback_outage_alert(
                             provider=provider,
                             model=model,

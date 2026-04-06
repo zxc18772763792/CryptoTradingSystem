@@ -57,7 +57,7 @@ def test_autonomous_agent_run_once_submit_signal(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
     monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
     monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "live")
     submit_mock = AsyncMock(return_value=True)
     monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
     monkeypatch.setattr(
@@ -77,7 +77,7 @@ def test_autonomous_agent_run_once_submit_signal(monkeypatch, tmp_path: Path):
     )
     monkeypatch.setattr(module.time, "perf_counter", Mock(side_effect=[100.0, 100.25]))
 
-    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", allow_live=True, cooldown_sec=0))
     result = asyncio.run(agent.run_once(trigger="test", force=True))
     status = agent.get_status()
 
@@ -106,7 +106,7 @@ def test_autonomous_agent_run_once_low_confidence_forces_hold(monkeypatch, tmp_p
     monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
     monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
     monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "live")
     submit_mock = AsyncMock(return_value=True)
     monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
     monkeypatch.setattr(
@@ -425,7 +425,7 @@ def test_autonomous_agent_exposes_raw_model_action_rewrite(monkeypatch, tmp_path
         ),
     )
 
-    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", allow_live=True, cooldown_sec=0))
     result = asyncio.run(agent.run_once(trigger="test", force=True))
 
     model_output = result["diagnostics"]["model_output"]
@@ -749,24 +749,97 @@ def test_agent_model_feedback_outage_alerts_feishu_after_prolonged_429(monkeypat
     monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
     monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
     monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "live")
     monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=True))
     send_mock = AsyncMock(return_value={"feishu": True})
     monkeypatch.setattr(notification_manager, "send_message", send_mock)
-    agent._last_model_feedback_at = time.time() - (module._MODEL_FEEDBACK_OUTAGE_ALERT_SEC + 5)
+    agent._last_model_feedback_at = time.time() - (module._MODEL_FEEDBACK_OUTAGE_ALERT_SEC + 65)
+    agent._model_feedback_outage_started_at = time.time() - (module._MODEL_FEEDBACK_OUTAGE_ALERT_SEC + 5)
+    agent._model_feedback_failure_streak = 1
     monkeypatch.setattr(
         agent,
         "_call_provider",
         AsyncMock(side_effect=RuntimeError('codex_http_429:{"code":"USAGE_LIMIT_EXCEEDED"}')),
     )
 
-    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", allow_live=True, cooldown_sec=0))
     result = asyncio.run(agent.run_once(trigger="test", force=True))
 
     assert result["decision"]["action"] == "hold"
     assert "model_error:codex_http_429" in result["decision"]["reason"]
     assert send_mock.await_count == 1
     assert agent.get_status()["model_feedback_guard"]["last_failure_kind"] == "rate_limit"
+
+
+def test_agent_model_feedback_first_failure_after_idle_does_not_alert_immediately(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+    from core.notifications import notification_manager
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "LONG", "confidence": 0.72}
+
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "live")
+    monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=True))
+    send_mock = AsyncMock(return_value={"feishu": True})
+    monkeypatch.setattr(notification_manager, "send_message", send_mock)
+    agent._last_model_feedback_at = time.time() - (module._MODEL_FEEDBACK_OUTAGE_ALERT_SEC + 65)
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        AsyncMock(side_effect=RuntimeError('codex_http_429:{"code":"USAGE_LIMIT_EXCEEDED"}')),
+    )
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", allow_live=True, cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert result["decision"]["action"] == "hold"
+    assert send_mock.await_count == 0
+    guard = agent.get_status()["model_feedback_guard"]
+    assert guard["last_failure_kind"] == "rate_limit"
+    assert guard["failure_streak"] == 1
+    assert guard["alert_sent_at"] is None
+
+
+def test_agent_model_feedback_outage_alert_is_suppressed_in_paper_mode(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+    from core.notifications import notification_manager
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "LONG", "confidence": 0.72}
+
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=True))
+    send_mock = AsyncMock(return_value={"feishu": True})
+    monkeypatch.setattr(notification_manager, "send_message", send_mock)
+    agent._last_model_feedback_at = time.time() - (module._MODEL_FEEDBACK_OUTAGE_ALERT_SEC + 65)
+    agent._model_feedback_outage_started_at = time.time() - (module._MODEL_FEEDBACK_OUTAGE_ALERT_SEC + 5)
+    agent._model_feedback_failure_streak = 1
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        AsyncMock(side_effect=RuntimeError('codex_http_429:{"code":"USAGE_LIMIT_EXCEEDED"}')),
+    )
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", allow_live=False, cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert result["decision"]["action"] == "hold"
+    assert send_mock.await_count == 0
+    guard = agent.get_status()["model_feedback_guard"]
+    assert guard["last_failure_kind"] == "rate_limit"
+    assert guard["alert_sent_at"] is None
 
 
 def test_agent_model_feedback_classifies_503_service_unavailable(monkeypatch, tmp_path: Path):
@@ -816,7 +889,7 @@ def test_agent_model_feedback_guard_hard_timeout_alerts_and_ends_round(monkeypat
     monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
     monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
     monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "live")
     monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=True))
     monkeypatch.setattr(module, "_MODEL_FEEDBACK_HARD_TIMEOUT_SEC", 0.01)
     monkeypatch.setattr(module, "_MODEL_FEEDBACK_OUTAGE_ALERT_SEC", 0.0)
@@ -835,7 +908,7 @@ def test_agent_model_feedback_guard_hard_timeout_alerts_and_ends_round(monkeypat
 
     monkeypatch.setattr(agent, "_call_provider", _slow_call_provider)
 
-    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", allow_live=True, cooldown_sec=0))
     result = asyncio.run(agent.run_once(trigger="test", force=True))
 
     assert result["decision"]["action"] == "hold"
@@ -2126,6 +2199,8 @@ def test_agent_model_outage_tightens_profitable_local_position(monkeypatch, tmp_
     tighten_mock = AsyncMock(return_value={"applied": True, "reason": "outage_protection_armed"})
     monkeypatch.setattr(module.execution_engine, "tighten_profitable_position_protection", tighten_mock)
     agent._last_model_feedback_at = time.time() - 3600.0
+    agent._model_feedback_outage_started_at = time.time() - (module._MODEL_FEEDBACK_OUTAGE_ALERT_SEC + 5)
+    agent._model_feedback_failure_streak = 1
     monkeypatch.setattr(
         agent,
         "_call_provider",
