@@ -4,6 +4,7 @@ param(
     [int]$Port = 8000,
     [bool]$OpenBrowser = $true,
     [int]$HealthWaitSec = 20,
+    [bool]$StartAutonomousAgent = $false,
     [bool]$StartNewsWorker = $false,
     [bool]$StartNewsLlmWorker = $false,
     [bool]$StartPmWorker = $false,
@@ -143,13 +144,15 @@ function Get-RequestedWorkerLabels {
     param(
         [bool]$NewsWorker,
         [bool]$NewsLlmWorker,
-        [bool]$PmWorker
+        [bool]$PmWorker,
+        [bool]$AutonomousAgent
     )
 
     $labels = @()
     if ($NewsWorker) { $labels += "news-worker" }
     if ($NewsLlmWorker) { $labels += "news-llm-worker" }
     if ($PmWorker) { $labels += "pm-worker" }
+    if ($AutonomousAgent) { $labels += "autonomous-agent" }
     return $labels
 }
 
@@ -163,6 +166,42 @@ function Set-EffectiveWorkerEnvFlags {
     Set-Item -Path Env:START_NEWS_WORKER -Value $(if ($NewsWorker) { "1" } else { "0" })
     Set-Item -Path Env:START_NEWS_LLM_WORKER -Value $(if ($NewsLlmWorker) { "1" } else { "0" })
     Set-Item -Path Env:START_PM_WORKER -Value $(if ($PmWorker) { "1" } else { "0" })
+}
+
+function Start-AutonomousAgent {
+    param([int]$WebPort)
+
+    $response = Invoke-RestMethod `
+        -Method POST `
+        -Uri "http://127.0.0.1:$WebPort/api/ai/autonomous-agent/start" `
+        -TimeoutSec 20
+
+    if (-not $response) {
+        throw "Autonomous agent start request returned an empty response."
+    }
+
+    return $response
+}
+
+function Show-AutonomousAgentStartSummary {
+    param($Response)
+
+    $status = if ($Response) { $Response.status } else { $null }
+    $config = if ($Response) { $Response.config } else { $null }
+    $running = if ($status) { [bool]$status.running } else { $false }
+    $mode = if ($config -and $config.mode) { [string]$config.mode } else { "unknown" }
+    $symbolMode = if ($config -and $config.symbol_mode) { [string]$config.symbol_mode } else { "unknown" }
+    $symbol = if ($status -and $status.last_selected_symbol) {
+        [string]$status.last_selected_symbol
+    } elseif ($config -and $config.symbol) {
+        [string]$config.symbol
+    } else {
+        "n/a"
+    }
+    Write-Host (
+        "Autonomous agent start requested: running={0}, mode={1}, symbol_mode={2}, symbol={3}" -f
+        $running, $mode, $symbolMode, $symbol
+    ) -ForegroundColor Green
 }
 
 function Ensure-ResearchUniverseRefreshTask {
@@ -200,12 +239,18 @@ if ((Test-TruthyText ([string]$env:START_PM_WORKER)) -and (-not $StartPmWorker))
     $ignoredEnvWorkerFlags += "START_PM_WORKER"
 }
 
-$requestedWorkerLabels = Get-RequestedWorkerLabels `
+$requestedExternalWorkerLabels = Get-RequestedWorkerLabels `
     -NewsWorker $StartNewsWorker `
     -NewsLlmWorker $StartNewsLlmWorker `
-    -PmWorker $StartPmWorker
-$startupProfile = if ($requestedWorkerLabels.Count) {
-    "web + " + ($requestedWorkerLabels -join ", ")
+    -PmWorker $StartPmWorker `
+    -AutonomousAgent $false
+$requestedStartupLabels = Get-RequestedWorkerLabels `
+    -NewsWorker $StartNewsWorker `
+    -NewsLlmWorker $StartNewsLlmWorker `
+    -PmWorker $StartPmWorker `
+    -AutonomousAgent $StartAutonomousAgent
+$startupProfile = if ($requestedStartupLabels.Count) {
+    "web + " + ($requestedStartupLabels -join ", ")
 } else {
     "web-only"
 }
@@ -233,9 +278,13 @@ if ($pidOnPort) {
             Write-Host "Default start forces ANALYTICS_HISTORY_ENABLED=0." -ForegroundColor Yellow
             Write-Host "Use '.\web.bat start -EnableAnalyticsHistory' to opt into analytics history collectors." -ForegroundColor Yellow
         }
-        if ($requestedWorkerLabels.Count) {
+        if ($requestedExternalWorkerLabels.Count) {
             Write-Host "Worker mix was not changed because the web service is already running." -ForegroundColor Yellow
             Write-Host "Use '.\web.bat stop -IncludeWorkers' and then start again with the desired worker flags." -ForegroundColor Yellow
+        }
+        if ($StartAutonomousAgent) {
+            $agentResponse = Start-AutonomousAgent -WebPort $Port
+            Show-AutonomousAgentStartSummary -Response $agentResponse
         }
         if ($OpenBrowser) {
             Open-WebConsole -WebPort $Port
@@ -326,27 +375,42 @@ while ((Get-Date) -lt $deadline) {
         if ($health) {
             try {
                 $status = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/status" -TimeoutSec 8
-            } catch {
             }
-            break
+            catch {
+                Start-Sleep -Milliseconds 800
+                continue
+            }
+            if ($status) {
+                break
+            }
         }
-    } catch {
+    }
+    catch {
         Start-Sleep -Milliseconds 800
     }
 }
 
-if ($health) {
+if ($health -and $status) {
     $runtimeStatus = if ($status) { $status.status } else { $health.status }
     $tradingMode = if ($status -and $status.trading_mode) { $status.trading_mode } else { "unknown" }
     Write-Host "Started PID=$($proc.Id), status=$runtimeStatus, mode=$tradingMode, profile=$startupProfile, url=http://127.0.0.1:$Port"
-    if (-not $status) {
-        Write-Host "Status endpoint is slower than the startup probe window, but the health endpoint is already responding." -ForegroundColor Yellow
+    if ($StartAutonomousAgent) {
+        $agentResponse = Start-AutonomousAgent -WebPort $Port
+        Show-AutonomousAgentStartSummary -Response $agentResponse
     }
     if ($OpenBrowser) {
         Open-WebConsole -WebPort $Port
     }
+} elseif ($health) {
+    Write-Host "Process started (PID=$($proc.Id)) and /health is responding, but /api/status did not become ready within ${HealthWaitSec}s. Startup profile: $startupProfile." -ForegroundColor Yellow
+    if ($StartAutonomousAgent) {
+        Write-Host "Autonomous agent start skipped because the full runtime status endpoint was not ready yet." -ForegroundColor Yellow
+    }
 } else {
     Write-Host "Process started (PID=$($proc.Id)) but health endpoint not ready within ${HealthWaitSec}s. Startup profile: $startupProfile."
+    if ($StartAutonomousAgent) {
+        Write-Host "Autonomous agent start skipped because the web health endpoint was not ready yet." -ForegroundColor Yellow
+    }
 }
 
 # 测试数据源 (可选)

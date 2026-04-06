@@ -4,6 +4,7 @@ param(
     [int]$Port = 8000,
     [int]$HealthWaitSec = 150,
     [switch]$OpenBrowser,
+    [switch]$StartAutonomousAgent,
     [switch]$StartNewsWorker,
     [switch]$StartNewsLlmWorker,
     [switch]$StartPmWorker,
@@ -34,6 +35,7 @@ try {
         Port = $Port
         HealthWaitSec = $HealthWaitSec
         OpenBrowser = $OpenBrowser.IsPresent
+        StartAutonomousAgent = $StartAutonomousAgent.IsPresent
         StartNewsWorker = $StartNewsWorker.IsPresent
         StartNewsLlmWorker = $StartNewsLlmWorker.IsPresent
         StartPmWorker = $StartPmWorker.IsPresent

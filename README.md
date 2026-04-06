@@ -57,16 +57,23 @@ Use the canonical root command:
 
 `.\web.bat start` is the recommended default start path. By default it starts the web app plus the news worker and news LLM worker, ignores `.env` worker auto-start flags, and keeps analytics-history collectors off unless you explicitly opt in.
 
-If you prefer the old one-click batch name, this compatibility alias forwards to the same managed startup path:
+If you want the daily one-click launcher that also opens the browser, use:
 
 ```bat
 .\start_web_oneclick.bat
+```
+
+To start the service and explicitly request the AI autonomous agent too:
+
+```bat
+.\web.bat start -StartAutonomousAgent
 ```
 
 Useful variants:
 
 ```bat
 .\web.bat start -OpenBrowser
+.\web.bat start -StartAutonomousAgent
 .\web.bat start -NoNewsWorkers
 .\web.bat start -NoNewsLlmWorker
 .\web.bat start -EnableAnalyticsHistory
@@ -75,7 +82,7 @@ Useful variants:
 .\web.bat stop -IncludeWorkers
 ```
 
-Legacy wrappers still work, but `.\web.bat ...` is now the command family to remember.
+Legacy wrappers still work, but `.\web.bat ...` is the command family to remember.
 
 Managed startup stack:
 
@@ -85,13 +92,13 @@ Managed startup stack:
 - `scripts\start_web_ps.ps1`: transcript wrapper
 - `_once.ps1`: low-level launcher
 
-After startup, always verify the runtime mode with:
+After startup, always verify the runtime mode and agent state with:
 
 ```bat
 .\web.bat status
 ```
 
-The service may restore the persisted account mode on boot, so the default start can still come up in `live` if that was the last saved mode.
+The service may restore the persisted account mode on boot, so the default start can still come up in `live` if that was the last saved mode. The autonomous agent does not start with the default boot path unless `AI_AUTONOMOUS_AGENT_AUTO_START=true` is present in the launching environment or you pass `-StartAutonomousAgent`.
 
 Open:
 
@@ -166,7 +173,7 @@ See [SECURITY.md](SECURITY.md) for the full pre-push checklist and incident resp
 
 ## Documentation
 
-- [STARTUP.md](STARTUP.md): single startup/status/stop reference for new sessions
+- [STARTUP.md](STARTUP.md): single startup/status/stop reference for new sessions, including one-click and autonomous-agent startup rules
 - [SECURITY.md](SECURITY.md): secret management and safe sharing rules
 - [docs/REPOSITORY_OVERVIEW.md](docs/REPOSITORY_OVERVIEW.md): directory-by-directory repository guide
 - [docs/GOVERNANCE.md](docs/GOVERNANCE.md): governance model and approval flows

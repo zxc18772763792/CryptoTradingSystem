@@ -6,6 +6,7 @@ param(
     [int]$Port = 8000,
     [int]$HealthWaitSec = 150,
     [switch]$OpenBrowser,
+    [switch]$StartAutonomousAgent,
     [switch]$StartNewsWorker,
     [switch]$StartNewsLlmWorker,
     [switch]$NoNewsWorkers,
@@ -129,23 +130,41 @@ function Get-ObservedWorkerProcesses {
     param([string]$CommandToken)
 
     $token = [string]$CommandToken
-    return @(
+    $matches = @(
         Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
             Where-Object {
                 $name = [string]$_.Name
-                if ($name -and $name.ToLowerInvariant() -notin @("python.exe", "pythonw.exe")) {
-                    return $false
-                }
                 $cmd = [string]$_.CommandLine
-                if (-not $cmd) {
-                    return $false
-                }
-                if ([int]$_.ProcessId -eq [int]$PID) {
-                    return $false
-                }
-                return $cmd.ToLowerInvariant().Contains($token.ToLowerInvariant())
+                (
+                    $name -and
+                    $name.ToLowerInvariant() -in @("python.exe", "pythonw.exe") -and
+                    $cmd -and
+                    [int]$_.ProcessId -ne [int]$PID -and
+                    $cmd.ToLowerInvariant().Contains($token.ToLowerInvariant())
+                )
             }
     )
+    return $matches
+}
+
+function Get-ManagedWebProcesses {
+    $matches = @(
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                $name = [string]$_.Name
+                $cmd = [string]$_.CommandLine
+                (
+                    $name -and
+                    $name.ToLowerInvariant() -in @("python.exe", "pythonw.exe") -and
+                    $cmd -and
+                    (
+                        $cmd -like "*uvicorn*web.main:app*" -or
+                        $cmd -like "*main.py --mode web*"
+                    )
+                )
+            }
+    )
+    return $matches
 }
 
 function Format-ObservedWorkerState {
@@ -218,6 +237,17 @@ function Get-HealthSummary {
     }
 }
 
+function Get-AutonomousAgentSummary {
+    param([int]$PortNumber)
+
+    try {
+        return Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/api/ai/autonomous-agent/status" -TimeoutSec 8
+    }
+    catch {
+        return $null
+    }
+}
+
 function Get-ResearchUniverseTaskSummary {
     try {
         $task = Get-ScheduledTask -TaskName $script:ResearchUniverseTaskName -ErrorAction Stop
@@ -246,6 +276,7 @@ function Show-Help {
     Write-Host ""
     Write-Host "Common examples:"
     Write-Host "  .\web.bat start -OpenBrowser"
+    Write-Host "  .\web.bat start -StartAutonomousAgent"
     Write-Host "  .\web.bat start -NoNewsWorkers"
     Write-Host "  .\web.bat start -NoNewsLlmWorker"
     Write-Host "  .\web.bat start -EnableAnalyticsHistory"
@@ -256,9 +287,11 @@ function Show-Help {
     Write-Host ""
     Write-Host "Notes:"
     Write-Host "  - Use '.\web.bat start' as the default entry point."
+    Write-Host "  - Use '.\start_web_oneclick.bat' when you want a daily one-click start that also opens the browser."
     Write-Host "  - Default start launches web + news worker + news LLM worker."
     Write-Host "  - News page should stay in automatic background mode when those workers are observed."
     Write-Host "  - Use -NoNewsWorkers for a web-only start, or -NoNewsLlmWorker to skip only the LLM worker."
+    Write-Host "  - AI autonomous agent does not start with '.\web.bat start' unless the env auto-start flag is true or you pass -StartAutonomousAgent."
     Write-Host "  - Managed startup ignores .env START_* worker flags and uses command-line policy instead."
     Write-Host "  - Default start disables analytics history; opt in with -EnableAnalyticsHistory."
     Write-Host "  - PM worker remains opt-in via -StartPmWorker."
@@ -274,6 +307,11 @@ function Show-Status {
     $webPid = Get-ListeningPid -PortNumber $PortNumber
     $webProc = Get-ProcessRecord -ProcessId $webPid
     $health = Get-HealthSummary -PortNumber $PortNumber
+    $agentSummary = if ($health -and $health.Health) {
+        Get-AutonomousAgentSummary -PortNumber $PortNumber
+    } else {
+        $null
+    }
     $envValues = Get-EnvFileValues
 
     Write-Host ""
@@ -301,18 +339,44 @@ function Show-Status {
         elseif ($mode -eq "live") {
             Write-Host "  Warning      : service is currently running in live mode." -ForegroundColor Yellow
         }
+        if ($agentSummary -and $agentSummary.status) {
+            $agentRunning = [bool]$agentSummary.status.running
+            $agentConfig = if ($agentSummary.config) { $agentSummary.config } else { @{} }
+            $agentMode = [string]($agentConfig.mode)
+            $agentSymbolMode = [string]($agentConfig.symbol_mode)
+            $agentAutoStart = if ([bool]$agentConfig.auto_start) { "true" } else { "false" }
+            $selectedSymbol = [string]($agentSummary.status.last_selected_symbol)
+            if ([string]::IsNullOrWhiteSpace($selectedSymbol)) {
+                $selectedSymbol = [string]($agentConfig.symbol)
+            }
+            if ([string]::IsNullOrWhiteSpace($selectedSymbol)) {
+                $selectedSymbol = "n/a"
+            }
+            Write-Host (
+                "  AI Agent     : {0} (mode={1}, auto_start={2}, symbol_mode={3}, symbol={4})" -f
+                $(if ($agentRunning) { "running" } else { "stopped" }),
+                $(if ([string]::IsNullOrWhiteSpace($agentMode)) { "unknown" } else { $agentMode }),
+                $agentAutoStart,
+                $(if ([string]::IsNullOrWhiteSpace($agentSymbolMode)) { "unknown" } else { $agentSymbolMode }),
+                $selectedSymbol
+            )
+        }
+        else {
+            Write-Host "  AI Agent     : status unavailable" -ForegroundColor Yellow
+        }
     }
     else {
         Write-Host ("  Web          : port occupied by unmanaged PID={0}" -f $webPid) -ForegroundColor Yellow
     }
 
     foreach ($worker in $script:WorkerDefinitions) {
-        $observed = Get-ObservedWorkerProcesses -CommandToken $worker.Token
+        $observed = @(Get-ObservedWorkerProcesses -CommandToken $worker.Token)
         Write-Host ("  {0,-12}: {1}" -f $worker.Label, (Format-ObservedWorkerState -EnvName $worker.EnvName -Processes $observed -EnvValues $envValues))
     }
     Write-Host ""
     Write-Host "Quick commands:"
     Write-Host "  .\web.bat start"
+    Write-Host "  .\web.bat start -StartAutonomousAgent"
     Write-Host "  .\web.bat start -NoNewsWorkers"
     Write-Host "  .\web.bat start -EnableAnalyticsHistory"
     Write-Host "  .\web.bat stop -IncludeWorkers"
@@ -328,26 +392,32 @@ function Stop-ManagedProcesses {
     $stopped = $false
     $webPid = Get-ListeningPid -PortNumber $PortNumber
     $webProc = Get-ProcessRecord -ProcessId $webPid
+    $managedWebProcesses = @(Get-ManagedWebProcesses | Sort-Object ProcessId -Unique)
 
     Write-Host ""
     Write-Host "Stop request" -ForegroundColor Cyan
     Write-Host ("  Scope        : {0}" -f ($(if ($StopWorkers) { "web + observed external workers" } else { "web only" })))
 
-    if ($webPid -and (Test-IsManagedWebProcess -ProcessRecord $webProc)) {
-        Stop-Process -Id $webPid -Force
-        Write-Host ("Stopped web service PID={0}" -f $webPid)
-        $stopped = $true
-    }
-    elseif ($webPid) {
+    if ($webPid -and (-not (Test-IsManagedWebProcess -ProcessRecord $webProc))) {
         throw "Port $PortNumber is occupied by PID $webPid, but it does not look like the managed web process."
     }
-    else {
+    if ($managedWebProcesses.Count) {
+        foreach ($proc in $managedWebProcesses) {
+            Stop-Process -Id $proc.ProcessId -Force
+            if ([int]$proc.ProcessId -eq [int]$webPid) {
+                Write-Host ("Stopped web service PID={0}" -f $proc.ProcessId)
+            } else {
+                Write-Host ("Stopped stale managed web PID={0}" -f $proc.ProcessId)
+            }
+            $stopped = $true
+        }
+    } else {
         Write-Host "Web service is already stopped."
     }
 
     if ($StopWorkers) {
         foreach ($worker in $script:WorkerDefinitions) {
-            $matched = Get-ObservedWorkerProcesses -CommandToken $worker.Token
+            $matched = @(Get-ObservedWorkerProcesses -CommandToken $worker.Token)
             if (-not $matched.Count) {
                 Write-Host ("{0} already stopped." -f $worker.Label)
                 continue
@@ -361,7 +431,7 @@ function Stop-ManagedProcesses {
     } else {
         $observedWorkers = @(
             foreach ($worker in $script:WorkerDefinitions) {
-                $matched = Get-ObservedWorkerProcesses -CommandToken $worker.Token
+                $matched = @(Get-ObservedWorkerProcesses -CommandToken $worker.Token)
                 if ($matched.Count) {
                     [pscustomobject]@{
                         Label = $worker.Label
@@ -417,6 +487,7 @@ switch ($Action) {
             -Port $Port `
             -HealthWaitSec $HealthWaitSec `
             -OpenBrowser:$OpenBrowser.IsPresent `
+            -StartAutonomousAgent:$StartAutonomousAgent.IsPresent `
             -StartNewsWorker:$effectiveStartNewsWorker `
             -StartNewsLlmWorker:$effectiveStartNewsLlmWorker `
             -StartPmWorker:$StartPmWorker.IsPresent `

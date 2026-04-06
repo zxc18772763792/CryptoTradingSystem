@@ -4,6 +4,7 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, JSON, UniqueConstraint, event
+from sqlalchemy.pool import NullPool
 from datetime import datetime
 from typing import AsyncGenerator
 import os
@@ -396,11 +397,19 @@ try:
 except Exception:
     _SQLITE_BUSY_TIMEOUT_SEC = 8.0
 _SQLITE_CONNECT_ARGS = {"timeout": _SQLITE_BUSY_TIMEOUT_SEC}
+_ENGINE_KWARGS = {
+    "echo": False,
+    "future": True,
+    "connect_args": _SQLITE_CONNECT_ARGS,
+}
+if str(settings.DATABASE_URL).startswith("sqlite"):
+    # SQLite plus the default queue pool is a poor fit for this app's bursty
+    # background jobs and dashboard polling. Create short-lived connections
+    # instead of letting requests pile up behind an exhausted pool.
+    _ENGINE_KWARGS["poolclass"] = NullPool
 engine = create_async_engine(
     settings.DATABASE_URL,
-    echo=False,
-    future=True,
-    connect_args=_SQLITE_CONNECT_ARGS,
+    **_ENGINE_KWARGS,
 )
 
 
