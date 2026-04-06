@@ -30,8 +30,8 @@ def _isolate_agent_overlay(tmp_path, monkeypatch):
     monkeypatch.setattr(_mod.position_manager, "get_all_positions", lambda: [])
 
 
-def _sample_df() -> pd.DataFrame:
-    idx = pd.date_range("2025-01-01", periods=120, freq="15min")
+def _sample_df(*, freq: str = "15min", periods: int = 120, start: str = "2025-01-01") -> pd.DataFrame:
+    idx = pd.date_range(start, periods=periods, freq=freq)
     close = [100.0 + i * 0.2 for i in range(len(idx))]
     return pd.DataFrame(
         {
@@ -43,6 +43,15 @@ def _sample_df() -> pd.DataFrame:
         },
         index=idx,
     )
+
+
+def _sample_df_for_timeframe(timeframe: str, *, periods: int = 240, start: str = "2025-01-01") -> pd.DataFrame:
+    freq_map = {
+        "5m": "5min",
+        "15m": "15min",
+        "1h": "1h",
+    }
+    return _sample_df(freq=freq_map.get(str(timeframe or "").strip(), "15min"), periods=periods, start=start)
 
 
 def test_autonomous_agent_run_once_submit_signal(monkeypatch, tmp_path: Path):
@@ -206,6 +215,48 @@ def test_load_market_data_skips_live_fetch_when_local_cache_is_fresh(monkeypatch
     assert connector.get_klines.await_count == 0
 
 
+def test_load_market_data_fetches_live_when_recent_cache_is_incomplete(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_recent_incomplete")
+    fixed_now = datetime(2026, 1, 2, 12, 5, tzinfo=timezone.utc)
+    local_df = _sample_df(freq="15min", periods=40, start="2026-01-02 02:00").copy()
+    live_start = datetime(2026, 1, 1, 20, 45, tzinfo=timezone.utc)
+    live_klines = [
+        SimpleNamespace(
+            timestamp=(live_start + pd.Timedelta(minutes=15 * idx)).isoformat(),
+            open=100.0 + idx,
+            high=100.2 + idx,
+            low=99.8 + idx,
+            close=100.1 + idx,
+            volume=10.0 + idx,
+        )
+        for idx in range(61)
+    ]
+    save_mock = AsyncMock(return_value="saved")
+    connector = SimpleNamespace(get_klines=AsyncMock(return_value=live_klines))
+
+    monkeypatch.setattr(module, "_utc_now", lambda: fixed_now)
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=local_df))
+    monkeypatch.setattr(module.data_storage, "save_klines_to_parquet", save_mock)
+    monkeypatch.setattr(module.exchange_manager, "get_exchange", lambda name: connector)
+
+    result = asyncio.run(
+        agent._load_market_data(
+            {
+                "exchange": "binance",
+                "symbol": "BTC/USDT",
+                "timeframe": "15m",
+                "lookback_bars": 60,
+            }
+        )
+    )
+
+    assert len(result) == 60
+    assert connector.get_klines.await_count == 1
+    assert save_mock.await_count == 1
+
+
 def test_load_market_data_live_timeout_falls_back_to_local(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
 
@@ -237,6 +288,270 @@ def test_load_market_data_live_timeout_falls_back_to_local(monkeypatch, tmp_path
     assert not result.empty
     assert result.index.max() == stale_df.index.max()
     assert connector.get_klines.await_count == 1
+
+
+def test_load_market_data_drops_incomplete_latest_live_bar(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_drop_incomplete")
+    fixed_now = datetime(2026, 1, 1, 14, 5, tzinfo=timezone.utc)
+    live_klines = [
+        SimpleNamespace(
+            timestamp=(fixed_now - pd.Timedelta(minutes=45)).isoformat(),
+            open=100.0,
+            high=100.2,
+            low=99.8,
+            close=100.1,
+            volume=10.0,
+        ),
+        SimpleNamespace(
+            timestamp=(fixed_now - pd.Timedelta(minutes=30)).isoformat(),
+            open=101.0,
+            high=101.2,
+            low=100.8,
+            close=101.1,
+            volume=11.0,
+        ),
+        SimpleNamespace(
+            timestamp=(fixed_now - pd.Timedelta(minutes=15)).isoformat(),
+            open=102.0,
+            high=102.2,
+            low=101.8,
+            close=102.1,
+            volume=12.0,
+        ),
+        # This is the currently forming 15m bar and should be dropped.
+        SimpleNamespace(
+            timestamp=fixed_now.replace(minute=0, second=0, microsecond=0).isoformat(),
+            open=103.0,
+            high=103.2,
+            low=102.8,
+            close=103.1,
+            volume=13.0,
+        ),
+    ]
+    connector = SimpleNamespace(get_klines=AsyncMock(return_value=live_klines))
+
+    monkeypatch.setattr(module, "_utc_now", lambda: fixed_now)
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=pd.DataFrame()))
+    monkeypatch.setattr(module.data_storage, "save_klines_to_parquet", AsyncMock(return_value="saved"))
+    monkeypatch.setattr(module.exchange_manager, "get_exchange", lambda name: connector)
+
+    result = asyncio.run(
+        agent._load_market_data_for_timeframe(
+            {
+                "exchange": "binance",
+                "symbol": "BTC/USDT",
+                "_force_live_market": True,
+            },
+            timeframe="15m",
+            lookback_bars=4,
+        )
+    )
+
+    assert not result.empty
+    assert pd.Timestamp("2026-01-01T14:00:00+00:00") not in result.index
+    assert result.index.max() == pd.Timestamp("2026-01-01T13:50:00+00:00")
+
+
+def test_build_context_includes_multi_scale_features(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_multiscale")
+
+    class _Agg:
+        def __init__(self, direction: str, confidence: float):
+            self._payload = {
+                "direction": direction,
+                "confidence": confidence,
+                "blocked_by_risk": False,
+                "risk_reason": "",
+                "components": {
+                    "factor": {
+                        "direction": direction,
+                        "confidence": confidence,
+                        "effective_weight": 0.25,
+                        "available": True,
+                        "status": "active",
+                        "reason": "",
+                    }
+                },
+            }
+
+        def to_dict(self):
+            return dict(self._payload)
+
+    async def _load_for_timeframe(cfg, *, timeframe, lookback_bars):
+        return _sample_df_for_timeframe(timeframe, periods=max(lookback_bars, 240), start="2026-01-01")
+
+    aggregate_mock = AsyncMock(
+        side_effect=[
+            _Agg("LONG", 0.81),
+            _Agg("LONG", 0.74),
+            _Agg("SHORT", 0.67),
+        ]
+    )
+
+    monkeypatch.setattr(agent, "_load_market_data", AsyncMock(return_value=_sample_df_for_timeframe("15m", periods=240, start="2026-01-01")))
+    monkeypatch.setattr(agent, "_load_market_data_for_timeframe", AsyncMock(side_effect=_load_for_timeframe))
+    monkeypatch.setattr(agent, "_resolve_last_price", AsyncMock(return_value=123.0))
+    monkeypatch.setattr(agent, "_resolve_account_risk_base", AsyncMock(return_value={
+        "account_equity": 1000.0,
+        "strategy_allocation": 0.0,
+        "position_cap_notional": 100.0,
+        "max_total_exposure_ratio": 0.4,
+        "total_strategy_open_notional": 0.0,
+        "total_exposure_limit_notional": 400.0,
+        "trading_mode": "paper",
+    }))
+    monkeypatch.setattr(agent, "_resolve_position_payload", AsyncMock(return_value={}))
+    monkeypatch.setattr(agent, "_annotate_position_payload", AsyncMock(return_value={}))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=aggregate_mock))
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+
+    context, market_data = asyncio.run(
+        agent._build_context(
+            {
+                "exchange": "binance",
+                "symbol": "BTC/USDT",
+                "timeframe": "15m",
+                "lookback_bars": 240,
+                "account_id": "main",
+                "mode": "execute",
+                "min_confidence": 0.58,
+                "_skip_event_summary": True,
+                "_skip_research_context": True,
+                "_include_multi_scale_context": True,
+            }
+        )
+    )
+
+    assert not market_data.empty
+    assert context["decision_timeframes"] == {
+        "trigger": "5m",
+        "setup": "15m",
+        "regime": "1h",
+    }
+    assert set(context["multi_scale_features"]) == {"5m", "15m", "1h"}
+    assert context["multi_scale_features"]["5m"]["bars"] == 240
+    assert context["multi_scale_features"]["15m"]["aggregated_signal"]["direction"] == "LONG"
+    assert context["multi_scale_features"]["1h"]["aggregated_signal"]["direction"] == "SHORT"
+    assert context["multi_scale_features"]["1h"]["data_quality"]["requested_bars"] == 240
+
+
+def test_market_data_quality_uses_bar_close_time_for_freshness(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_market_quality")
+    fixed_now = datetime(2026, 1, 1, 12, 5, tzinfo=timezone.utc)
+    market_data = _sample_df(freq="15min", periods=4, start="2026-01-01 11:00").copy()
+
+    monkeypatch.setattr(module, "_utc_now", lambda: fixed_now)
+
+    payload = agent._build_market_data_quality_payload(
+        timeframe="15m",
+        timeframe_sec=900,
+        lookback_bars=4,
+        market_data=market_data,
+    )
+
+    assert payload["last_bar_at"] == "2026-01-01T11:45:00"
+    assert payload["last_bar_closed_at"] == "2026-01-01T12:00:00+00:00"
+    assert payload["freshness_age_sec"] == 300.0
+    assert payload["fresh"] is True
+    assert payload["realtime_ready"] is True
+
+
+def test_build_prompt_includes_multi_scale_features(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_prompt_multiscale")
+    system_prompt, user_prompt = agent._build_prompt(
+        {
+            "mode": "execute",
+            "allow_live": True,
+            "min_confidence": 0.58,
+            "default_stop_loss_pct": 0.02,
+            "default_take_profit_pct": 0.04,
+            "same_direction_max_exposure_ratio": 0.35,
+            "max_total_exposure_ratio": 0.4,
+            "entry_size_scale": 0.8,
+        },
+        {
+            "exchange": "binance",
+            "symbol": "BTC/USDT",
+            "timeframe": "15m",
+            "trading_mode": "paper",
+            "price": 123.0,
+            "bars": 240,
+            "returns": {"r_15m": 0.01},
+            "realized_vol_annualized": 0.25,
+            "market_structure": {
+                "available": True,
+                "last_bar_at": "2026-01-01T13:45:00+00:00",
+                "trend": {"label": "uptrend", "ema_gap_pct": 0.01, "close_vs_ema_slow_pct": 0.02},
+                "microstructure": {"atr_pct": 0.01, "realized_vol": 0.02, "spread_proxy": 0.001},
+                "volume": {"ratio_20": 1.2, "zscore_20": 0.6},
+                "range": {"position_pct": 0.75},
+            },
+            "aggregated_signal": {
+                "direction": "LONG",
+                "confidence": 0.8,
+                "components": {
+                    "factor": {
+                        "direction": "LONG",
+                        "confidence": 0.8,
+                        "effective_weight": 0.25,
+                        "available": True,
+                        "status": "active",
+                        "reason": "",
+                    }
+                },
+            },
+            "event_summary": {},
+            "position": {},
+            "account_risk": {},
+            "execution_cost": {},
+            "research_context": {},
+            "decision_timeframes": {"trigger": "5m", "setup": "15m", "regime": "1h"},
+            "multi_scale_features": {
+                "5m": {
+                    "bars": 240,
+                    "returns": {"r_15m": 0.005},
+                    "realized_vol_annualized": 0.3,
+                    "market_structure": {
+                        "available": True,
+                        "last_bar_at": "2026-01-01T14:00:00+00:00",
+                        "trend": {"label": "uptrend", "ema_gap_pct": 0.006, "close_vs_ema_slow_pct": 0.008},
+                        "microstructure": {"atr_pct": 0.008, "realized_vol": 0.03, "spread_proxy": 0.0012},
+                        "volume": {"ratio_20": 1.1, "zscore_20": 0.4},
+                        "range": {"position_pct": 0.8},
+                    },
+                    "data_quality": {
+                        "status": "ready",
+                        "realtime_ready": True,
+                        "fresh": True,
+                        "complete_bars": True,
+                        "bars": 240,
+                        "requested_bars": 240,
+                        "missing_bar_count": 0,
+                        "freshness_age_sec": 120.0,
+                        "freshness_limit_sec": 660.0,
+                        "last_bar_at": "2026-01-01T14:00:00+00:00",
+                    },
+                    "aggregated_signal": {"direction": "LONG", "confidence": 0.72, "components": {}},
+                }
+            },
+            "learning_memory": {},
+        },
+    )
+
+    payload = json.loads(user_prompt)
+
+    assert "autonomous crypto trading agent" in system_prompt.lower()
+    assert payload["runtime_constraints"]["decision_timeframes"]["trigger"] == "5m"
+    assert payload["input"]["multi_scale_features"]["5m"]["data_quality"]["realtime_ready"] is True
+    assert payload["input"]["decision_timeframes"]["regime"] == "1h"
 
 
 def test_build_context_light_symbol_scan_skips_expensive_runtime_calls(monkeypatch, tmp_path: Path):
@@ -1488,6 +1803,27 @@ def test_run_once_holds_when_market_data_is_stale_with_live_connector(monkeypatc
     assert submit_mock.await_count == 0
 
 
+def test_context_market_data_age_sec_uses_closed_bar_time(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_age_guard")
+    context_payload = {
+        "timeframe": "15m",
+        "market_structure": {
+            "available": True,
+            "last_bar_at": "2026-01-01T11:45:00+00:00",
+            "bar_interval_sec": 900,
+        },
+    }
+
+    original_now = module._utc_now
+    try:
+        module._utc_now = lambda: datetime(2026, 1, 1, 12, 5, tzinfo=timezone.utc)
+        assert agent._context_market_data_age_sec(context_payload) == 300.0
+    finally:
+        module._utc_now = original_now
+
+
 def test_update_runtime_config_clears_cached_symbol_scan(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
 
@@ -2692,7 +3028,7 @@ def test_build_prompt_compacts_runtime_context(tmp_path: Path):
     parsed = json.loads(user_prompt)
     compact_input = parsed["input"]
 
-    assert compact_input["scope"] == "compact_runtime_v1"
+    assert compact_input["scope"] == "compact_runtime_v2"
     assert compact_input["aggregated_signal"]["direction"] == "LONG"
     assert compact_input["account_risk"]["min_confidence"] == 0.58
     assert compact_input["learning_memory"]["adaptive_risk"]["effective_min_confidence"] == 0.61

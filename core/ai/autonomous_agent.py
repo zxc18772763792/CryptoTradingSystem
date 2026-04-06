@@ -120,6 +120,8 @@ _PREVIEW_SYMBOL_SCAN_STALE_FALLBACK_MAX_AGE_SEC = 3 * 60
 _MARKET_DATA_LIVE_FETCH_TIMEOUT_SEC = 8.0
 _MARKET_DATA_LIVE_FETCH_SCAN_TIMEOUT_SEC = 4.0
 _DECISION_LIVE_MARKET_TIMEOUT_SEC = 3.0
+_MULTI_SCALE_TRIGGER_TIMEFRAME = "5m"
+_MULTI_SCALE_REGIME_TIMEFRAME = "1h"
 
 
 def _utc_now() -> datetime:
@@ -333,6 +335,36 @@ def _age_sec_from_iso(value: Any) -> Optional[float]:
     return None
 
 
+def _bar_closed_at_iso(value: Any, timeframe_sec: int) -> Optional[str]:
+    parsed = _utc_from_iso(value)
+    if parsed is None:
+        return None
+    with contextlib.suppress(Exception):
+        return (parsed + timedelta(seconds=max(1, int(timeframe_sec or 0)))).isoformat()
+    return None
+
+
+def _bar_closed_age_sec(value: Any, timeframe_sec: int) -> Optional[float]:
+    closed_at = _bar_closed_at_iso(value, timeframe_sec)
+    if closed_at is None:
+        return None
+    return _age_sec_from_iso(closed_at)
+
+
+def _missing_market_bar_count(index: Any, timeframe_sec: int) -> int:
+    if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
+        return 0
+    expected_step = max(1.0, float(timeframe_sec or 0))
+    missing_bar_count = 0
+    diffs = index.to_series().diff().dropna()
+    for diff in diffs:
+        with contextlib.suppress(Exception):
+            gap_steps = int(round(float(diff.total_seconds()) / expected_step))
+            if gap_steps > 1:
+                missing_bar_count += gap_steps - 1
+    return int(max(0, missing_bar_count))
+
+
 def _classify_model_feedback_error(exc: BaseException) -> Optional[str]:
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
         return "timeout"
@@ -485,6 +517,15 @@ def _timeframe_to_seconds(timeframe: str) -> int:
     unit = m.group(2)
     mul = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 86400 * 7}[unit]
     return max(1, value * mul)
+
+
+def _prompt_feature_timeframes(base_timeframe: Any) -> List[str]:
+    base = str(base_timeframe or "15m").strip() or "15m"
+    ordered: List[str] = []
+    for timeframe in (_MULTI_SCALE_TRIGGER_TIMEFRAME, base, _MULTI_SCALE_REGIME_TIMEFRAME):
+        if timeframe and timeframe not in ordered:
+            ordered.append(timeframe)
+    return ordered
 
 
 def _default_profile() -> Dict[str, Any]:
@@ -1639,29 +1680,47 @@ class AutonomousTradingAgent:
         return _extract_json_obj(text)
 
     async def _load_market_data(self, cfg: Dict[str, Any]) -> pd.DataFrame:
+        return await self._load_market_data_for_timeframe(
+            cfg,
+            timeframe=str(cfg.get("timeframe") or "15m"),
+            lookback_bars=int(cfg.get("lookback_bars") or 240),
+        )
+
+    async def _load_market_data_for_timeframe(
+        self,
+        cfg: Dict[str, Any],
+        *,
+        timeframe: str,
+        lookback_bars: int,
+    ) -> pd.DataFrame:
         now = _utc_now()
-        timeframe_sec = _timeframe_to_seconds(str(cfg.get("timeframe") or "15m"))
-        lookback = int(cfg.get("lookback_bars") or 240)
+        normalized_timeframe = str(timeframe or cfg.get("timeframe") or "15m").strip() or "15m"
+        timeframe_sec = _timeframe_to_seconds(normalized_timeframe)
+        lookback = max(30, int(lookback_bars or cfg.get("lookback_bars") or 240))
         span_sec = max(timeframe_sec * lookback, 3600 * 8)
         start_time = now - timedelta(seconds=span_sec + timeframe_sec * 2)
         exchange = str(cfg.get("exchange") or "binance")
         symbol = str(cfg.get("symbol") or "BTC/USDT")
-        timeframe = str(cfg.get("timeframe") or "15m")
         skip_live_market = bool(cfg.get("_scan_skip_live_market"))
         light_symbol_scan = bool(cfg.get("_light_symbol_scan"))
         force_live_market = bool(cfg.get("_force_live_market"))
         df = await data_storage.load_klines_from_parquet(
             exchange=exchange,
             symbol=symbol,
-            timeframe=timeframe,
+            timeframe=normalized_timeframe,
             start_time=start_time,
             end_time=now,
         )
         df = df.copy() if df is not None and not df.empty else pd.DataFrame()
+        local_bar_count = int(len(df))
         local_last_bar_age_sec: Optional[float] = None
+        local_missing_bar_count = 0
         if not df.empty:
             with contextlib.suppress(Exception):
-                local_last_bar_age_sec = _age_sec_from_iso(pd.Timestamp(df.index[-1]).isoformat())
+                local_last_bar_at = pd.Timestamp(df.index[-1]).isoformat()
+                local_last_bar_age_sec = _bar_closed_age_sec(local_last_bar_at, timeframe_sec)
+            local_missing_bar_count = _missing_market_bar_count(df.index, timeframe_sec)
+        local_history_complete = bool(local_bar_count >= lookback and local_missing_bar_count == 0)
 
         connector = exchange_manager.get_exchange(exchange)
         live_refresh_age_sec_default = max(
@@ -1681,20 +1740,25 @@ class AutonomousTradingAgent:
             high=60.0,
         )
         should_fetch_live = bool(connector is not None and not skip_live_market)
-        if should_fetch_live and (not force_live_market) and not df.empty and local_last_bar_age_sec is not None:
-            should_fetch_live = bool(local_last_bar_age_sec > live_refresh_age_sec)
+        if should_fetch_live and (not force_live_market) and not df.empty:
+            should_fetch_live = bool(
+                not local_history_complete
+                or local_last_bar_age_sec is None
+                or local_last_bar_age_sec > live_refresh_age_sec
+            )
         if should_fetch_live and connector is not None:
             try:
                 live_klines = await asyncio.wait_for(
-                    connector.get_klines(symbol, timeframe, limit=max(40, lookback)),
+                    connector.get_klines(symbol, normalized_timeframe, limit=max(42, lookback + 2)),
                     timeout=live_fetch_timeout_sec,
                 )
                 live_df = self._df_from_klines(live_klines)
                 if not live_df.empty:
                     should_persist_live = (
                         df.empty
+                        or (not local_history_complete)
                         or local_last_bar_age_sec is None
-                        or local_last_bar_age_sec > max(float(timeframe_sec * 2), 900.0)
+                        or local_last_bar_age_sec > max(float(timeframe_sec) + 60.0, 300.0)
                     )
                     if should_persist_live:
                         with contextlib.suppress(Exception):
@@ -1702,7 +1766,7 @@ class AutonomousTradingAgent:
                                 klines=live_klines,
                                 exchange=exchange,
                                 symbol=symbol,
-                                timeframe=timeframe,
+                                timeframe=normalized_timeframe,
                             )
                     if df.empty:
                         df = live_df
@@ -1711,14 +1775,18 @@ class AutonomousTradingAgent:
                         df = df[~df.index.duplicated(keep="last")].sort_index()
             except asyncio.TimeoutError:
                 logger.debug(
-                    f"autonomous_agent live klines timed out for {exchange} {symbol} {timeframe}"
+                    f"autonomous_agent live klines timed out for {exchange} {symbol} {normalized_timeframe}"
                     f" after {live_fetch_timeout_sec:.2f}s; using local parquet fallback"
                 )
             except Exception as exc:
                 logger.debug(
-                    f"autonomous_agent live klines fallback failed for {exchange} {symbol} {timeframe}: {exc}"
+                    "autonomous_agent live klines fallback failed for "
+                    f"{exchange} {symbol} {normalized_timeframe}: {exc}"
                 )
 
+        if df.empty:
+            return pd.DataFrame()
+        df = self._drop_incomplete_market_bars(df, timeframe_sec=timeframe_sec, now=now)
         if df.empty:
             return pd.DataFrame()
         return df.tail(max(40, lookback)).copy()
@@ -1745,6 +1813,251 @@ class AutonomousTradingAgent:
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
         frame = frame.dropna(subset=["timestamp"]).set_index("timestamp").sort_index()
         return frame
+
+    @staticmethod
+    def _align_now_to_index(now: datetime, index: pd.DatetimeIndex) -> pd.Timestamp:
+        now_ts = pd.Timestamp(now)
+        if index.tz is None:
+            if now_ts.tzinfo is not None:
+                return now_ts.tz_convert(timezone.utc).tz_localize(None)
+            return now_ts
+        if now_ts.tzinfo is None:
+            return now_ts.tz_localize(index.tz)
+        return now_ts.tz_convert(index.tz)
+
+    def _drop_incomplete_market_bars(
+        self,
+        market_data: pd.DataFrame,
+        *,
+        timeframe_sec: int,
+        now: datetime,
+    ) -> pd.DataFrame:
+        if market_data is None or market_data.empty:
+            return pd.DataFrame()
+        if not isinstance(market_data.index, pd.DatetimeIndex):
+            return market_data.copy()
+
+        cleaned = market_data.copy()
+        cleaned = cleaned[~cleaned.index.duplicated(keep="last")].sort_index()
+        if cleaned.empty:
+            return cleaned
+
+        now_ts = self._align_now_to_index(now, cleaned.index)
+        bar_interval = pd.Timedelta(seconds=int(max(1, timeframe_sec)))
+        while not cleaned.empty:
+            last_bar_ts = pd.Timestamp(cleaned.index[-1])
+            if last_bar_ts + bar_interval <= now_ts:
+                break
+            cleaned = cleaned.iloc[:-1].copy()
+        return cleaned
+
+    def _compute_realized_vol_annualized(self, market_data: pd.DataFrame, *, timeframe_sec: int) -> float:
+        close_series = pd.Series(dtype=float)
+        if market_data is not None and not market_data.empty and "close" in market_data.columns:
+            close_series = pd.to_numeric(market_data["close"], errors="coerce").dropna()
+        returns = close_series.pct_change().dropna()
+        annual_factor = max(1.0, (86400.0 * 365.0) / max(1.0, float(timeframe_sec)))
+        if returns.empty:
+            return 0.0
+        return float(returns.tail(120).std() * (annual_factor ** 0.5))
+
+    def _build_market_data_quality_payload(
+        self,
+        *,
+        timeframe: str,
+        timeframe_sec: int,
+        lookback_bars: int,
+        market_data: pd.DataFrame,
+    ) -> Dict[str, Any]:
+        requested_bars = max(1, int(lookback_bars or 0))
+        payload: Dict[str, Any] = {
+            "timeframe": str(timeframe or "15m"),
+            "expected_interval_sec": int(max(1, timeframe_sec)),
+            "requested_bars": int(requested_bars),
+            "bars": 0,
+            "last_bar_at": None,
+            "last_bar_closed_at": None,
+            "freshness_age_sec": None,
+            "freshness_limit_sec": float(max(60, int(timeframe_sec or 0)) + 60),
+            "missing_bar_count": 0,
+            "fresh": False,
+            "complete_bars": False,
+            "realtime_ready": False,
+            "status": "missing",
+            "issues": ["no_market_data"],
+        }
+        if market_data is None or market_data.empty:
+            return payload
+
+        bars = int(len(market_data))
+        missing_bar_count = _missing_market_bar_count(market_data.index, timeframe_sec)
+        last_bar_at: Optional[str] = None
+        last_bar_closed_at: Optional[str] = None
+        freshness_age_sec: Optional[float] = None
+        if isinstance(market_data.index, pd.DatetimeIndex) and len(market_data.index):
+            with contextlib.suppress(Exception):
+                last_bar_at = pd.Timestamp(market_data.index[-1]).isoformat()
+                last_bar_closed_at = _bar_closed_at_iso(last_bar_at, timeframe_sec)
+                freshness_age_sec = _bar_closed_age_sec(last_bar_at, timeframe_sec)
+
+        fresh_limit_sec = float(payload["freshness_limit_sec"])
+        fresh = freshness_age_sec is not None and freshness_age_sec <= fresh_limit_sec
+        complete_bars = bool(bars >= requested_bars and missing_bar_count == 0)
+        realtime_ready = bool(fresh and complete_bars)
+        issues: List[str] = []
+        if bars < requested_bars:
+            issues.append(f"insufficient_bars({bars}/{requested_bars})")
+        if missing_bar_count > 0:
+            issues.append(f"missing_bars({missing_bar_count})")
+        if freshness_age_sec is None:
+            issues.append("unknown_last_bar_age")
+        elif freshness_age_sec > fresh_limit_sec:
+            issues.append(f"stale({freshness_age_sec:.1f}s>{fresh_limit_sec:.1f}s)")
+
+        status = "ready" if realtime_ready else "stale" if (not fresh and bars > 0) else "incomplete"
+        payload.update(
+            {
+                "bars": bars,
+                "last_bar_at": last_bar_at,
+                "last_bar_closed_at": last_bar_closed_at,
+                "freshness_age_sec": (
+                    round(float(freshness_age_sec), 3) if freshness_age_sec is not None else None
+                ),
+                "missing_bar_count": int(missing_bar_count),
+                "fresh": bool(fresh),
+                "complete_bars": bool(complete_bars),
+                "realtime_ready": bool(realtime_ready),
+                "status": status,
+                "issues": issues,
+            }
+        )
+        return payload
+
+    def _build_timeframe_feature_payload(
+        self,
+        *,
+        timeframe: str,
+        market_data: pd.DataFrame,
+        last_price: float,
+        lookback_bars: int,
+        precomputed_market_structure: Optional[Dict[str, Any]] = None,
+        precomputed_realized_vol: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        timeframe_text = str(timeframe or "15m").strip() or "15m"
+        timeframe_sec = _timeframe_to_seconds(timeframe_text)
+        market_structure = dict(
+            precomputed_market_structure
+            or self._build_market_structure_payload(
+                market_data=market_data,
+                timeframe_sec=timeframe_sec,
+                last_price=float(last_price or 0.0),
+            )
+        )
+        market_returns = dict((market_structure.get("returns") or {}))
+        realized_vol = (
+            float(precomputed_realized_vol)
+            if precomputed_realized_vol is not None
+            else self._compute_realized_vol_annualized(market_data, timeframe_sec=timeframe_sec)
+        )
+        return {
+            "timeframe": timeframe_text,
+            "bars": int(len(market_data) if market_data is not None else 0),
+            "returns": {
+                "r_15m": float(market_returns.get("r_15m") or 0.0),
+                "r_1h": float(market_returns.get("r_1h") or 0.0),
+                "r_4h": float(market_returns.get("r_4h") or 0.0),
+                "r_24h": float(market_returns.get("r_24h") or 0.0),
+            },
+            "realized_vol_annualized": float(realized_vol),
+            "market_structure": market_structure,
+            "data_quality": self._build_market_data_quality_payload(
+                timeframe=timeframe_text,
+                timeframe_sec=timeframe_sec,
+                lookback_bars=int(lookback_bars or 240),
+                market_data=market_data,
+            ),
+        }
+
+    async def _build_multi_scale_features(
+        self,
+        cfg: Dict[str, Any],
+        *,
+        base_timeframe: str,
+        base_market_data: pd.DataFrame,
+        base_market_structure: Dict[str, Any],
+        base_aggregated_signal: Dict[str, Any],
+        base_realized_vol: float,
+        last_price: float,
+    ) -> Dict[str, Any]:
+        lookback = int(cfg.get("lookback_bars") or 240)
+        ordered_timeframes = _prompt_feature_timeframes(base_timeframe)
+        payloads: Dict[str, Any] = {}
+        base_payload = self._build_timeframe_feature_payload(
+            timeframe=base_timeframe,
+            market_data=base_market_data,
+            last_price=float(last_price or 0.0),
+            lookback_bars=lookback,
+            precomputed_market_structure=base_market_structure,
+            precomputed_realized_vol=base_realized_vol,
+        )
+        base_signal = dict(base_aggregated_signal or {})
+        if base_signal and not base_signal.get("market_data_last_bar_at"):
+            base_signal["market_data_last_bar_at"] = base_payload["market_structure"].get("last_bar_at")
+        base_payload["aggregated_signal"] = base_signal
+        payloads[str(base_timeframe)] = base_payload
+
+        aggregate_fast = bool(cfg.get("_preview_symbol_scan")) or (
+            bool(cfg.get("_light_symbol_scan")) and bool(cfg.get("_scan_skip_live_market"))
+        )
+        symbol = str(cfg.get("symbol") or "BTC/USDT")
+
+        async def _build_one(timeframe_name: str) -> Tuple[str, Dict[str, Any]]:
+            local_market_data = await self._load_market_data_for_timeframe(
+                cfg,
+                timeframe=timeframe_name,
+                lookback_bars=lookback,
+            )
+            timeframe_payload = self._build_timeframe_feature_payload(
+                timeframe=timeframe_name,
+                market_data=local_market_data,
+                last_price=float(last_price or 0.0),
+                lookback_bars=lookback,
+            )
+            aggregate_kwargs: Dict[str, Any]
+            if aggregate_fast:
+                aggregate_kwargs = {"include_llm": False, "include_ml": False}
+            else:
+                aggregate_kwargs = {"include_llm": False}
+            agg_signal: Dict[str, Any] = {}
+            try:
+                agg = await signal_aggregator.aggregate(
+                    symbol=symbol,
+                    market_data=local_market_data,
+                    **aggregate_kwargs,
+                )
+                agg_signal = agg.to_dict() if hasattr(agg, "to_dict") else {}
+            except Exception as exc:
+                logger.debug(f"autonomous agent multi-scale aggregate failed tf={timeframe_name}: {exc}")
+            if agg_signal and not agg_signal.get("market_data_last_bar_at"):
+                agg_signal["market_data_last_bar_at"] = timeframe_payload["market_structure"].get("last_bar_at")
+            timeframe_payload["aggregated_signal"] = agg_signal
+            return timeframe_name, timeframe_payload
+
+        pending = [timeframe_name for timeframe_name in ordered_timeframes if timeframe_name != str(base_timeframe)]
+        if pending:
+            results = await asyncio.gather(*(_build_one(timeframe_name) for timeframe_name in pending), return_exceptions=True)
+            for item in results:
+                if isinstance(item, Exception):
+                    logger.debug(f"autonomous agent multi-scale feature build failed: {item}")
+                    continue
+                timeframe_name, timeframe_payload = item
+                payloads[str(timeframe_name)] = timeframe_payload
+
+        return {
+            timeframe_name: payloads[timeframe_name]
+            for timeframe_name in ordered_timeframes
+            if timeframe_name in payloads
+        }
 
     async def _resolve_last_price(self, cfg: Dict[str, Any], market_data: pd.DataFrame) -> float:
         if market_data is not None and not market_data.empty and "close" in market_data.columns:
@@ -1929,6 +2242,7 @@ class AutonomousTradingAgent:
         payload: Dict[str, Any] = {
             "available": False,
             "last_bar_at": None,
+            "last_bar_closed_at": None,
             "bar_interval_sec": int(max(1, timeframe_sec)),
             "returns": {
                 "r_15m": 0.0,
@@ -1979,10 +2293,12 @@ class AutonomousTradingAgent:
 
         index = close.index if isinstance(close.index, pd.DatetimeIndex) else None
         last_bar_at = None
+        last_bar_closed_at = None
         if index is not None and len(index):
             with contextlib.suppress(Exception):
                 ts = pd.Timestamp(index[-1])
                 last_bar_at = ts.isoformat()
+                last_bar_closed_at = _bar_closed_at_iso(last_bar_at, timeframe_sec)
 
         def _return_for(lookback_sec: int) -> float:
             if close.empty:
@@ -2047,6 +2363,7 @@ class AutonomousTradingAgent:
             {
                 "available": True,
                 "last_bar_at": last_bar_at,
+                "last_bar_closed_at": last_bar_closed_at,
                 "returns": {
                     "r_15m": _return_for(15 * 60),
                     "r_1h": _return_for(60 * 60),
@@ -2237,7 +2554,14 @@ class AutonomousTradingAgent:
         if not isinstance(context_payload, dict):
             return None
         market_structure = dict(context_payload.get("market_structure") or {})
-        return _age_sec_from_iso(market_structure.get("last_bar_at"))
+        timeframe_sec = max(
+            1,
+            int(
+                market_structure.get("bar_interval_sec")
+                or _timeframe_to_seconds(str(context_payload.get("timeframe") or "15m"))
+            ),
+        )
+        return _bar_closed_age_sec(market_structure.get("last_bar_at"), timeframe_sec)
 
     def _build_account_risk_payload(
         self,
@@ -2732,16 +3056,7 @@ class AutonomousTradingAgent:
             last_price=float(last_price or 0.0),
         )
         market_returns = dict((market_structure.get("returns") or {}))
-
-        close_series = pd.Series(dtype=float)
-        if market_data is not None and not market_data.empty and "close" in market_data.columns:
-            close_series = pd.to_numeric(market_data["close"], errors="coerce").dropna()
-
-        returns = close_series.pct_change().dropna()
-        annual_factor = max(1.0, (86400.0 * 365.0) / max(1.0, float(timeframe_sec)))
-        realized_vol = 0.0
-        if not returns.empty:
-            realized_vol = float(returns.tail(120).std() * (annual_factor ** 0.5))
+        realized_vol = self._compute_realized_vol_annualized(market_data, timeframe_sec=timeframe_sec)
 
         agg_signal: Dict[str, Any] = {}
         try:
@@ -2845,6 +3160,22 @@ class AutonomousTradingAgent:
             if light_symbol_scan or bool(cfg.get("_skip_research_context"))
             else "agent_research_decoupled",
         )
+        decision_timeframes = {
+            "trigger": _MULTI_SCALE_TRIGGER_TIMEFRAME,
+            "setup": timeframe,
+            "regime": _MULTI_SCALE_REGIME_TIMEFRAME,
+        }
+        multi_scale_features: Dict[str, Any] = {}
+        if bool(cfg.get("_include_multi_scale_context")) and not light_symbol_scan:
+            multi_scale_features = await self._build_multi_scale_features(
+                cfg=cfg,
+                base_timeframe=timeframe,
+                base_market_data=market_data,
+                base_market_structure=market_structure,
+                base_aggregated_signal=agg_signal,
+                base_realized_vol=realized_vol,
+                last_price=float(last_price or 0.0),
+            )
 
         return {
             "exchange": exchange,
@@ -2866,6 +3197,8 @@ class AutonomousTradingAgent:
             "account_risk": account_risk,
             "execution_cost": execution_cost,
             "research_context": research_context,
+            "decision_timeframes": decision_timeframes,
+            "multi_scale_features": multi_scale_features,
             "profile": dict(self._profile or _default_profile()),
             "learning_memory": dict(cfg.get("learning_memory") or self._learning_memory or {}),
             "trading_mode": execution_engine.get_trading_mode(),
@@ -2930,49 +3263,13 @@ class AutonomousTradingAgent:
                     )
             return items
 
-        market_structure = dict(context_payload.get("market_structure") or {})
-        trend = dict(market_structure.get("trend") or {})
-        microstructure = dict(market_structure.get("microstructure") or {})
-        volume = dict(market_structure.get("volume") or {})
-        range_info = dict(market_structure.get("range") or {})
-
-        aggregated_signal = dict(context_payload.get("aggregated_signal") or {})
-        components = dict(aggregated_signal.get("components") or {})
-        compact_components: Dict[str, Any] = {}
-        for name, payload in components.items():
-            if not isinstance(payload, dict):
-                continue
-            compact_components[str(name)] = _compact_value(
-                {
-                    "direction": payload.get("direction"),
-                    "confidence": _float_or_default(payload.get("confidence"), 0.0),
-                    "effective_weight": _float_or_default(payload.get("effective_weight"), 0.0),
-                    "available": bool(payload.get("available")),
-                    "status": payload.get("status"),
-                    "reason": payload.get("reason"),
-                }
-            )
-
-        event_summary = dict(context_payload.get("event_summary") or {})
-        position = dict(context_payload.get("position") or {})
-        account_risk = dict(context_payload.get("account_risk") or {})
-        execution_cost = dict(context_payload.get("execution_cost") or {})
-        research_context = dict(context_payload.get("research_context") or {})
-        learning_memory = dict(context_payload.get("learning_memory") or {})
-        adaptive_risk = dict(learning_memory.get("adaptive_risk") or {})
-        summary = dict(learning_memory.get("summary") or {})
-
-        compact_context = {
-            "scope": "compact_runtime_v1",
-            "exchange": context_payload.get("exchange"),
-            "symbol": context_payload.get("symbol"),
-            "timeframe": context_payload.get("timeframe"),
-            "trading_mode": context_payload.get("trading_mode"),
-            "price": _float_or_default(context_payload.get("price"), 0.0),
-            "bars": int(context_payload.get("bars") or 0),
-            "returns": _compact_value(context_payload.get("returns") or {}),
-            "realized_vol_annualized": _float_or_default(context_payload.get("realized_vol_annualized"), 0.0),
-            "market_structure": _compact_value(
+        def _compact_market_structure_payload(payload: Any) -> Dict[str, Any]:
+            market_structure = dict(payload or {})
+            trend = dict(market_structure.get("trend") or {})
+            microstructure = dict(market_structure.get("microstructure") or {})
+            volume = dict(market_structure.get("volume") or {})
+            range_info = dict(market_structure.get("range") or {})
+            return _compact_value(
                 {
                     "available": bool(market_structure.get("available")),
                     "last_bar_at": market_structure.get("last_bar_at"),
@@ -2994,21 +3291,120 @@ class AutonomousTradingAgent:
                         "position_pct": _float_or_default(range_info.get("position_pct"), 0.0),
                     },
                 }
-            ),
-            "aggregated_signal": _compact_value(
+            )
+
+        def _compact_aggregated_signal_payload(payload: Any, *, fallback_last_bar_at: Any = None) -> Dict[str, Any]:
+            aggregated_signal = dict(payload or {})
+            components = dict(aggregated_signal.get("components") or {})
+            compact_components: Dict[str, Any] = {}
+            for name, component_payload in components.items():
+                if not isinstance(component_payload, dict):
+                    continue
+                compact_components[str(name)] = _compact_value(
+                    {
+                        "direction": component_payload.get("direction"),
+                        "confidence": _float_or_default(component_payload.get("confidence"), 0.0),
+                        "effective_weight": _float_or_default(component_payload.get("effective_weight"), 0.0),
+                        "available": bool(component_payload.get("available")),
+                        "status": component_payload.get("status"),
+                        "reason": component_payload.get("reason"),
+                    }
+                )
+            return _compact_value(
                 {
                     "direction": aggregated_signal.get("direction"),
                     "confidence": _float_or_default(aggregated_signal.get("confidence"), 0.0),
                     "blocked_by_risk": bool(aggregated_signal.get("blocked_by_risk")),
                     "risk_reason": aggregated_signal.get("risk_reason"),
                     "timestamp": aggregated_signal.get("timestamp"),
-                    "market_data_last_bar_at": (
-                        aggregated_signal.get("market_data_last_bar_at")
-                        or market_structure.get("last_bar_at")
-                    ),
+                    "market_data_last_bar_at": aggregated_signal.get("market_data_last_bar_at") or fallback_last_bar_at,
                     "components": compact_components,
                 }
+            )
+
+        def _compact_data_quality_payload(payload: Any) -> Dict[str, Any]:
+            quality = dict(payload or {})
+            return _compact_value(
+                {
+                    "status": quality.get("status"),
+                    "realtime_ready": bool(quality.get("realtime_ready")),
+                    "fresh": bool(quality.get("fresh")),
+                    "complete_bars": bool(quality.get("complete_bars")),
+                    "bars": int(quality.get("bars") or 0),
+                    "requested_bars": int(quality.get("requested_bars") or 0),
+                    "missing_bar_count": int(quality.get("missing_bar_count") or 0),
+                    "freshness_age_sec": _float_or_default(quality.get("freshness_age_sec"), 0.0),
+                    "freshness_limit_sec": _float_or_default(quality.get("freshness_limit_sec"), 0.0),
+                    "last_bar_at": quality.get("last_bar_at"),
+                    "issues": _slice_text_list(quality.get("issues"), 4),
+                }
+            )
+
+        market_structure = dict(context_payload.get("market_structure") or {})
+        aggregated_signal = dict(context_payload.get("aggregated_signal") or {})
+        event_summary = dict(context_payload.get("event_summary") or {})
+        position = dict(context_payload.get("position") or {})
+        account_risk = dict(context_payload.get("account_risk") or {})
+        execution_cost = dict(context_payload.get("execution_cost") or {})
+        research_context = dict(context_payload.get("research_context") or {})
+        decision_timeframes = dict(context_payload.get("decision_timeframes") or {})
+        multi_scale_features = dict(context_payload.get("multi_scale_features") or {})
+        learning_memory = dict(context_payload.get("learning_memory") or {})
+        adaptive_risk = dict(learning_memory.get("adaptive_risk") or {})
+        summary = dict(learning_memory.get("summary") or {})
+        compact_multi_scale: Dict[str, Any] = {}
+        ordered_timeframes = _prompt_feature_timeframes(context_payload.get("timeframe"))
+        ordered_feature_items = []
+        for timeframe_name in ordered_timeframes:
+            ordered_feature_items.append((timeframe_name, multi_scale_features.get(timeframe_name)))
+        for timeframe_name, payload in multi_scale_features.items():
+            if timeframe_name not in {name for name, _ in ordered_feature_items}:
+                ordered_feature_items.append((timeframe_name, payload))
+        for timeframe_name, payload in ordered_feature_items:
+            feature_payload = dict(payload or {})
+            if not feature_payload:
+                continue
+            feature_market_structure = dict(feature_payload.get("market_structure") or {})
+            compact_multi_scale[str(timeframe_name)] = _compact_value(
+                {
+                    "bars": int(feature_payload.get("bars") or 0),
+                    "returns": _compact_value(feature_payload.get("returns") or {}),
+                    "realized_vol_annualized": _float_or_default(
+                        feature_payload.get("realized_vol_annualized"),
+                        0.0,
+                    ),
+                    "data_quality": _compact_data_quality_payload(feature_payload.get("data_quality") or {}),
+                    "market_structure": _compact_market_structure_payload(feature_market_structure),
+                    "aggregated_signal": _compact_aggregated_signal_payload(
+                        feature_payload.get("aggregated_signal") or {},
+                        fallback_last_bar_at=feature_market_structure.get("last_bar_at"),
+                    ),
+                }
+            )
+
+        compact_context = {
+            "scope": "compact_runtime_v2",
+            "exchange": context_payload.get("exchange"),
+            "symbol": context_payload.get("symbol"),
+            "timeframe": context_payload.get("timeframe"),
+            "trading_mode": context_payload.get("trading_mode"),
+            "price": _float_or_default(context_payload.get("price"), 0.0),
+            "bars": int(context_payload.get("bars") or 0),
+            "returns": _compact_value(context_payload.get("returns") or {}),
+            "realized_vol_annualized": _float_or_default(context_payload.get("realized_vol_annualized"), 0.0),
+            "decision_timeframes": _compact_value(
+                {
+                    "trigger": decision_timeframes.get("trigger"),
+                    "setup": decision_timeframes.get("setup"),
+                    "regime": decision_timeframes.get("regime"),
+                }
             ),
+            "market_structure": _compact_market_structure_payload(market_structure),
+            "aggregated_signal": _compact_aggregated_signal_payload(
+                aggregated_signal,
+                fallback_last_bar_at=market_structure.get("last_bar_at"),
+            ),
+            "multi_scale_features": _compact_value(compact_multi_scale),
             "event_summary": _compact_value(
                 {
                     "available": bool(event_summary.get("available")),
@@ -3126,8 +3522,11 @@ class AutonomousTradingAgent:
                 "Use tighter risk when volatility is high.",
                 "Leverage is fixed at 1x. Always return leverage=1.0.",
                 "Same-side add-ons are allowed only while same_direction_exposure_ratio is below same_direction_exposure_limit_ratio.",
+                "Use multi_scale_features together with decision_timeframes: regime for higher-timeframe bias, setup for trade structure, trigger for execution timing.",
+                "If any required multi_scale_features timeframe is not realtime_ready or complete_bars is false, prefer hold over opening a new position.",
                 "Use market_structure to judge trend, volatility, volume abnormality, and where price sits inside the recent range.",
                 "Use aggregated_signal.components as decomposed priors; do not rely only on the top-level direction/confidence.",
+                "Use multi_scale_features.*.aggregated_signal to confirm cross-timeframe alignment before entering.",
                 "Use event_summary only when event concentration, news_alpha_proxy, or dominant sentiment are meaningfully non-zero.",
                 "Always respect account_risk, especially min_confidence, fixed_leverage, and same_direction_remaining_notional.",
                 "Use execution_cost to avoid marginal trades whose expected edge is smaller than estimated fees and slippage.",
@@ -3142,6 +3541,7 @@ class AutonomousTradingAgent:
                 "agent_mode": cfg.get("mode"),
                 "allow_live": cfg.get("allow_live"),
                 "trading_mode": context_payload.get("trading_mode"),
+                "decision_timeframes": context_payload.get("decision_timeframes"),
                 "same_direction_max_exposure_ratio": cfg.get("same_direction_max_exposure_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO),
                 "max_total_exposure_ratio": cfg.get("max_total_exposure_ratio", _MAX_TOTAL_EXPOSURE_RATIO),
                 "entry_size_scale": cfg.get("entry_size_scale", 1.0),
@@ -3433,7 +3833,10 @@ class AutonomousTradingAgent:
         entry_price = _safe_nonnegative_float(position.get("entry_price"), 0.0)
         current_price = _safe_nonnegative_float(position.get("current_price"), 0.0)
         market_data_last_bar_at = str(market_structure.get("last_bar_at") or "").strip() or None
-        market_data_age_sec = _age_sec_from_iso(market_data_last_bar_at)
+        market_data_age_sec = _bar_closed_age_sec(
+            market_data_last_bar_at,
+            int(market_structure.get("bar_interval_sec") or _timeframe_to_seconds(str(cfg.get("timeframe") or "15m"))),
+        )
         position_unrealized_pnl_pct = 0.0
         if has_position and entry_price > 0 and current_price > 0:
             if position_side == "short":
@@ -4465,6 +4868,7 @@ class AutonomousTradingAgent:
             low=0.5,
             high=30.0,
         )
+        context_cfg["_include_multi_scale_context"] = True
         context_cfg["_market_data_max_age_sec"] = _coerce_float(
             context_cfg.get("_market_data_max_age_sec"),
             max(120.0, min(float(timeframe_sec), 900.0)),
@@ -4687,8 +5091,10 @@ class AutonomousTradingAgent:
                 "bars": context_payload.get("bars"),
                 "returns": context_payload.get("returns"),
                 "vol": context_payload.get("realized_vol_annualized"),
+                "decision_timeframes": context_payload.get("decision_timeframes"),
                 "market_structure": context_payload.get("market_structure"),
                 "aggregated_signal": context_payload.get("aggregated_signal"),
+                "multi_scale_features": context_payload.get("multi_scale_features"),
                 "event_summary": context_payload.get("event_summary"),
                 "position": context_payload.get("position"),
                 "account_risk": context_payload.get("account_risk"),
