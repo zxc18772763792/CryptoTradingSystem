@@ -199,6 +199,8 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
             backup_base_urls=getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "",
             primary_api_key=str(getattr(settings, "OPENAI_API_KEY", "") or "").strip(),
             backup_api_key=str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip(),
+            primary_model=str(getattr(settings, "OPENAI_MODEL", "") or _DEFAULT_OPENAI_MODEL).strip() or _DEFAULT_OPENAI_MODEL,
+            backup_model=str(getattr(settings, "OPENAI_BACKUP_MODEL", "") or "").strip(),
         ),
         scope=_OPENAI_FAILOVER_SCOPE,
     )
@@ -236,11 +238,14 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
         for idx, target in enumerate(targets):
             base_url = str(target.get("base_url") or "").rstrip("/")
             api_key = str(target.get("api_key") or "").strip()
+            target_model = str(target.get("model") or model or "").strip() or model
             if not base_url or not api_key:
                 continue
             url = responses_endpoint(base_url)
+            request_payload = dict(payload, model=target_model)
+            request_chat_payload = dict(chat_payload, model=target_model)
             try:
-                async with session.post(url, headers=build_openai_headers(api_key), json=payload) as resp:
+                async with session.post(url, headers=build_openai_headers(api_key), json=request_payload) as resp:
                     if resp.status >= 400:
                         body = (await resp.text())[:400]
                         if responses_api_unavailable(resp.status, body):
@@ -252,7 +257,7 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                             async with session.post(
                                 chat_url,
                                 headers=build_openai_headers(api_key),
-                                json=chat_payload,
+                                json=request_chat_payload,
                             ) as chat_resp:
                                 if chat_resp.status >= 400:
                                     chat_body = (await chat_resp.text())[:400]

@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     OPENAI_BACKUP_BASE_URL: str = "https://sub2api.czl.net/v1,https://api.xiaomimimo.com/v1"
     OPENAI_BACKUP_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-5.4"
+    OPENAI_BACKUP_MODEL: str = "gpt-5.4,mimo-v2-flash"
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_BASE_URL: str = "https://api.anthropic.com"
     ANTHROPIC_MODEL: str = "claude-3-5-sonnet-latest"

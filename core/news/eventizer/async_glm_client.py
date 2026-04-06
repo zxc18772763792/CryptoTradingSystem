@@ -135,6 +135,15 @@ def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         ),
         primary_api_key=_openai_primary_api_key(),
         backup_api_key=_openai_backup_api_key(),
+        primary_model=_openai_model(cfg),
+        backup_model=(
+            str(
+                os.getenv("OPENAI_BACKUP_MODEL")
+                or llm_cfg.get("backup_model")
+                or getattr(settings, "OPENAI_BACKUP_MODEL", "")
+                or ""
+            ).strip()
+        ),
     )
 
 
@@ -414,14 +423,23 @@ class AsyncGLMClient:
             for idx, target in enumerate(targets):
                 base_url = str(target.get("base_url") or "").rstrip("/")
                 api_key = str(target.get("api_key") or "").strip()
+                target_model = str(target.get("model") or "").strip()
                 is_openai_responses = True
                 url = responses_endpoint(base_url)
+                request_payload = dict(payload)
+                if target_model:
+                    request_payload["model"] = target_model
+                request_chat_payload = None
+                if chat_fallback_payload is not None:
+                    request_chat_payload = dict(chat_fallback_payload)
+                    if target_model:
+                        request_chat_payload["model"] = target_model
                 try:
                     async with session.request(
                         method=method,
                         url=url,
                         headers=build_openai_headers(api_key),
-                        json=payload,
+                        json=request_payload,
                     ) as response:
                         if response.status == 429:
                             self._requests_rate_limited += 1
@@ -448,7 +466,7 @@ class AsyncGLMClient:
 
                         if response.status >= 400:
                             error_text = await response.text()
-                            if chat_fallback_payload and responses_api_unavailable(response.status, error_text):
+                            if request_chat_payload and responses_api_unavailable(response.status, error_text):
                                 chat_url = chat_completions_endpoint(base_url)
                                 logger.warning(
                                     "async_glm_client news relay does not support Responses API; "
@@ -458,7 +476,7 @@ class AsyncGLMClient:
                                     method=method,
                                     url=chat_url,
                                     headers=build_openai_headers(api_key),
-                                    json=chat_fallback_payload,
+                                    json=request_chat_payload,
                                 ) as chat_response:
                                     if chat_response.status == 429:
                                         self._requests_rate_limited += 1

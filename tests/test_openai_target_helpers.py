@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -22,6 +23,94 @@ def test_openai_endpoint_targets_support_multiple_backup_api_keys():
         "primary-key",
         "secondary-key",
         "tertiary-key",
+    ]
+
+
+def test_openai_endpoint_targets_support_per_source_models():
+    targets = openai_endpoint_targets(
+        primary_base_url="https://primary.test/v1",
+        backup_base_urls="https://secondary.test/v1,https://tertiary.test/v1",
+        primary_api_key="primary-key",
+        backup_api_key="secondary-key,tertiary-key",
+        primary_model="gpt-5.4",
+        backup_model="gpt-5.4,mimo-v2-flash",
+    )
+
+    assert [target["model"] for target in targets] == [
+        "gpt-5.4",
+        "gpt-5.4",
+        "mimo-v2-flash",
+    ]
+
+
+class _SyncResponse:
+    def __init__(self, payload, *, status_code=200, headers=None):
+        self._payload = payload
+        self.status_code = status_code
+        self.headers = headers or {"content-type": "application/json"}
+        self.text = json.dumps(payload, ensure_ascii=False)
+
+    def json(self):
+        return self._payload
+
+
+def test_news_failover_uses_per_source_models(monkeypatch, tmp_path):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setenv("OPENAI_FAILOVER_STATE_PATH", str(tmp_path / "openai_failover_state.json"))
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://primary.test/v1")
+    monkeypatch.setenv("OPENAI_BACKUP_BASE_URL", "https://secondary.test/v1,https://tertiary.test/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "primary-key")
+    monkeypatch.setenv("OPENAI_BACKUP_API_KEY", "secondary-key,tertiary-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
+    monkeypatch.setenv("OPENAI_BACKUP_MODEL", "gpt-5.4,mimo-v2-flash")
+    monkeypatch.setenv("ZHIPU_API_KEY", "")
+    openai_responses.reset_openai_target_preferences(scope="news")
+
+    calls = []
+    responses = iter(
+        [
+            _SyncResponse({"error": {"message": "primary failed"}}, status_code=500),
+            _SyncResponse({"error": {"message": "secondary failed"}}, status_code=500),
+            _SyncResponse(
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": '{"summary":"ETF approval positive","sentiment":"positive"}',
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ),
+        ]
+    )
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        calls.append({"url": url, "headers": headers, "json": dict(json or {}), "timeout": timeout})
+        return next(responses)
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    result = module.summarize_title_glm5("BTC ETF approved", {"llm": {"provider": "openai"}}, max_length=60)
+
+    assert result["summary"] == "ETF approval positive"
+    assert result["sentiment"] == "positive"
+    assert result["source"] == "openai_responses"
+    assert [call["url"] for call in calls] == [
+        "https://primary.test/v1/responses",
+        "https://secondary.test/v1/responses",
+        "https://tertiary.test/v1/responses",
+    ]
+    assert [call["json"]["model"] for call in calls] == [
+        "gpt-5.4",
+        "gpt-5.4",
+        "mimo-v2-flash",
     ]
 
 

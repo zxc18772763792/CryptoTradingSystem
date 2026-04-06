@@ -210,6 +210,8 @@ class LiveAIDecisionRouter:
                 backup_base_urls=getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "",
                 primary_api_key=str(getattr(settings, "OPENAI_API_KEY", "") or "").strip(),
                 backup_api_key=str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip(),
+                primary_model=str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.4").strip() or "gpt-5.4",
+                backup_model=str(getattr(settings, "OPENAI_BACKUP_MODEL", "") or "").strip(),
             )
         return [
             {
@@ -398,12 +400,15 @@ class LiveAIDecisionRouter:
                 for idx, target in enumerate(targets):
                     target_base_url = str(target.get("base_url") or "").rstrip("/")
                     target_api_key = str(target.get("api_key") or "").strip()
+                    target_model = str(target.get("model") or model or "").strip() or model
                     if not target_base_url or not target_api_key:
                         continue
                     url = responses_endpoint(target_base_url)
                     headers = build_openai_headers(target_api_key)
                     try:
-                        async with session.post(url, headers=headers, json=payload) as resp:
+                        request_payload = dict(payload, model=target_model)
+                        request_chat_payload = dict(chat_payload, model=target_model)
+                        async with session.post(url, headers=headers, json=request_payload) as resp:
                             if resp.status >= 400:
                                 body = (await resp.text())[:300]
                                 if responses_api_unavailable(resp.status, body):
@@ -412,7 +417,7 @@ class LiveAIDecisionRouter:
                                         "live_decision_router codex relay does not support Responses API; "
                                         "retrying via chat/completions"
                                     )
-                                    async with session.post(chat_url, headers=headers, json=chat_payload) as chat_resp:
+                                    async with session.post(chat_url, headers=headers, json=request_chat_payload) as chat_resp:
                                         if chat_resp.status >= 400:
                                             chat_body = (await chat_resp.text())[:300]
                                             err = RuntimeError(f"{provider}_chat_http_{chat_resp.status}:{chat_body}")

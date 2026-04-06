@@ -96,12 +96,38 @@ def _split_api_key_candidates(value: Any) -> List[str]:
     return items
 
 
+def _split_model_candidates(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return []
+        raw_items = (
+            text.replace("\r", ",")
+            .replace("\n", ",")
+            .replace(";", ",")
+            .split(",")
+        )
+
+    items: List[str] = []
+    for item in raw_items:
+        model = str(item or "").strip()
+        if model:
+            items.append(model)
+    return items
+
+
 def openai_endpoint_targets(
     *,
     primary_base_url: Any,
     backup_base_urls: Any = None,
     primary_api_key: Any = "",
     backup_api_key: Any = "",
+    primary_model: Any = "",
+    backup_model: Any = "",
 ) -> List[Dict[str, Any]]:
     base_urls = _split_endpoint_candidates(primary_base_url)
     for item in _split_endpoint_candidates(backup_base_urls):
@@ -110,11 +136,15 @@ def openai_endpoint_targets(
 
     primary_keys = _split_api_key_candidates(primary_api_key)
     backup_keys = _split_api_key_candidates(backup_api_key)
+    primary_models = _split_model_candidates(primary_model)
+    backup_models = _split_model_candidates(backup_model)
     primary_key = primary_keys[0] if primary_keys else str(primary_api_key or "").strip()
+    primary_model_name = primary_models[0] if primary_models else str(primary_model or "").strip()
     targets: List[Dict[str, Any]] = []
     for idx, base_url in enumerate(base_urls):
         if idx == 0:
             api_key = primary_key
+            model_name = primary_model_name
         else:
             backup_idx = idx - 1
             if backup_keys:
@@ -122,15 +152,25 @@ def openai_endpoint_targets(
                 api_key = backup_keys[key_idx]
             else:
                 api_key = primary_key
+            if backup_models:
+                model_idx = backup_idx if backup_idx < len(backup_models) else (len(backup_models) - 1)
+                model_name = backup_models[model_idx]
+            else:
+                model_name = primary_model_name
         if not api_key and backup_keys:
             api_key = backup_keys[-1]
         if not api_key and primary_key:
             api_key = primary_key
+        if not model_name and backup_models:
+            model_name = backup_models[-1]
+        if not model_name and primary_model_name:
+            model_name = primary_model_name
         targets.append(
             {
                 "index": idx,
                 "base_url": base_url,
                 "api_key": api_key,
+                "model": model_name,
                 "is_backup": idx > 0,
             }
         )

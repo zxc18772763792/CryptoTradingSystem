@@ -124,6 +124,15 @@ def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         ),
         primary_api_key=_openai_primary_api_key(),
         backup_api_key=_openai_backup_api_key(),
+        primary_model=_openai_model(cfg),
+        backup_model=(
+            str(
+                os.getenv("OPENAI_BACKUP_MODEL")
+                or llm_cfg.get("backup_model")
+                or getattr(settings, "OPENAI_BACKUP_MODEL", "")
+                or ""
+            ).strip()
+        ),
     )
 
 
@@ -194,16 +203,25 @@ def _openai_post_with_failover(
     for idx, target in enumerate(available):
         base_url = str(target.get("base_url") or "").rstrip("/")
         api_key = str(target.get("api_key") or "").strip()
+        target_model = str(target.get("model") or "").strip()
         url = responses_endpoint(base_url)
+        request_payload = dict(payload)
+        if target_model:
+            request_payload["model"] = target_model
+        request_chat_payload = None
+        if chat_fallback_payload is not None:
+            request_chat_payload = dict(chat_fallback_payload)
+            if target_model:
+                request_chat_payload["model"] = target_model
         try:
             response = requests.post(
                 url,
                 headers=build_openai_headers(api_key),
-                json=payload,
+                json=request_payload,
                 timeout=timeout_sec,
             )
             if response.status_code >= 400:
-                if chat_fallback_payload and responses_api_unavailable(response.status_code, response.text):
+                if request_chat_payload and responses_api_unavailable(response.status_code, response.text):
                     chat_url = chat_completions_endpoint(base_url)
                     logger.warning(
                         f"{log_prefix}: relay does not support Responses API; retrying via chat/completions"
@@ -211,7 +229,7 @@ def _openai_post_with_failover(
                     chat_response = requests.post(
                         chat_url,
                         headers=build_openai_headers(api_key),
-                        json=chat_fallback_payload,
+                        json=request_chat_payload,
                         timeout=timeout_sec,
                     )
                     if chat_response.status_code >= 400:
