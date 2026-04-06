@@ -670,7 +670,7 @@ def test_async_glm_client_openai_falls_back_to_chat_completions(monkeypatch):
     ]
 
 
-def test_news_llm_defaults_use_openai_codex_mini(monkeypatch):
+def test_news_llm_defaults_use_openai_gpt_5_4(monkeypatch):
     import core.news.eventizer.async_glm_client as async_module
     import core.news.eventizer.llm_glm5 as sync_module
 
@@ -680,8 +680,8 @@ def test_news_llm_defaults_use_openai_codex_mini(monkeypatch):
 
     assert sync_module._llm_provider({}) == "openai"
     assert async_module._llm_provider({}) == "openai"
-    assert sync_module._llm_model({}) == "gpt6.4"
-    assert async_module._llm_model({}) == "gpt6.4"
+    assert sync_module._llm_model({}) == "gpt-5.4"
+    assert async_module._llm_model({}) == "gpt-5.4"
 
 
 def test_news_legacy_glm_provider_is_normalized_to_openai(monkeypatch):
@@ -702,8 +702,8 @@ def test_news_legacy_glm_provider_is_normalized_to_openai(monkeypatch):
 
     assert sync_module._llm_provider(legacy_cfg) == "openai"
     assert async_module._llm_provider(legacy_cfg) == "openai"
-    assert sync_module._llm_model(legacy_cfg) == "gpt6.4"
-    assert async_module._llm_model(legacy_cfg) == "gpt6.4"
+    assert sync_module._llm_model(legacy_cfg) == "gpt-5.4"
+    assert async_module._llm_model(legacy_cfg) == "gpt-5.4"
     assert sync_module._llm_base_url(legacy_cfg) == "https://sub.a-j.app/v1"
     assert async_module._llm_base_url(legacy_cfg) == "https://sub.a-j.app/v1"
 
@@ -742,7 +742,7 @@ def test_news_sync_summary_uses_openai_mini_source(monkeypatch):
     assert result["sentiment"] == "positive"
     assert result["source"] == "openai_responses"
     assert capture["url"] == "https://example.test/v1/responses"
-    assert capture["json"]["model"] == "gpt6.4"
+    assert capture["json"]["model"] == "gpt-5.4"
 
 
 def test_news_sync_summary_falls_back_to_chat_completions(monkeypatch):

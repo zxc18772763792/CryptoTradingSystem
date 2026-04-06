@@ -37,7 +37,7 @@ from core.utils.openai_responses import (
 )
 
 DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
-DEFAULT_OPENAI_MODEL = "gpt6.4"
+DEFAULT_OPENAI_MODEL = "gpt-5.4"
 _LEGACY_PROVIDER_ALIASES = {"glm", "glm5", "zhipu"}
 _LEGACY_BASE_URL_HINTS = ("bigmodel.cn", "zhipu")
 

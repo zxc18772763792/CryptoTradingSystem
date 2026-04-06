@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = "https://sub.a-j.app/v1"
     OPENAI_BACKUP_BASE_URL: str = "https://sub2api.czl.net/v1,https://api.xiaomimimo.com/v1"
     OPENAI_BACKUP_API_KEY: str = ""
-    OPENAI_MODEL: str = "gpt6.4"
+    OPENAI_MODEL: str = "gpt-5.4"
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_BASE_URL: str = "https://api.anthropic.com"
     ANTHROPIC_MODEL: str = "claude-3-5-sonnet-latest"
@@ -130,6 +130,7 @@ class Settings(BaseSettings):
     AI_AUTONOMOUS_AGENT_MAX_TOKENS: int = 420
     AI_AUTONOMOUS_AGENT_TEMPERATURE: float = 0.15
     AI_AUTONOMOUS_AGENT_COOLDOWN_SEC: int = 180
+    AI_AUTONOMOUS_AGENT_MAX_TOTAL_EXPOSURE_RATIO: float = 0.4
     AI_AUTONOMOUS_AGENT_ALLOW_LIVE: bool = False
     AI_AUTONOMOUS_AGENT_ACCOUNT_ID: str = "main"
     AI_AUTONOMOUS_AGENT_STRATEGY_NAME: str = "AI_AutonomousAgent"

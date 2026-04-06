@@ -1149,6 +1149,18 @@ class ExecutionEngine:
         risk_buffer = 0.998
         equity = float(account_equity or 0.0)
         alloc_ratio = self._safe_ratio(strategy_allocation, 0.0)
+        apply_total_exposure_cap = bool((signal.metadata or {}).get("apply_total_exposure_cap"))
+        signal_total_exposure_ratio = self._safe_ratio(
+            (signal.metadata or {}).get("max_total_exposure_ratio"),
+            0.0,
+        )
+        effective_alloc_ratio = alloc_ratio
+        if apply_total_exposure_cap and signal_total_exposure_ratio > 0:
+            effective_alloc_ratio = (
+                min(alloc_ratio, signal_total_exposure_ratio)
+                if alloc_ratio > 0
+                else signal_total_exposure_ratio
+            )
         position_cap_notional = self.get_strategy_position_cap_notional(
             account_equity=account_equity,
             strategy_allocation=strategy_allocation,
@@ -1188,7 +1200,7 @@ class ExecutionEngine:
         strength = max(0.1, min(strength, 1.0))
 
         single_cap = equity * float(risk_manager.max_position_size or 0.1)
-        alloc_cap = equity * alloc_ratio if alloc_ratio > 0 else single_cap
+        alloc_cap = equity * effective_alloc_ratio if effective_alloc_ratio > 0 else single_cap
         market_type = str((signal.metadata or {}).get("market_type") or "").strip().lower()
         if not market_type and signal.strategy_name:
             strategy = strategy_manager.get_strategy(signal.strategy_name)
@@ -1233,10 +1245,10 @@ class ExecutionEngine:
             )
 
         remaining_alloc_cap = max(0.0, alloc_cap - current_strategy_exposure)
-        if alloc_ratio > 0 and remaining_alloc_cap <= 0:
+        if effective_alloc_ratio > 0 and remaining_alloc_cap <= 0:
             return 0.0
         effective_min_notional = configured_min_notional
-        if alloc_ratio > 0:
+        if effective_alloc_ratio > 0:
             effective_min_notional = min(
                 configured_min_notional,
                 max(exchange_min_notional, remaining_alloc_cap * 0.98),
@@ -1254,7 +1266,7 @@ class ExecutionEngine:
                 max(exchange_min_notional, same_direction_remaining_cap * 0.98),
             )
         effective_min_notional = max(exchange_min_notional, effective_min_notional)
-        if alloc_ratio > 0 and remaining_alloc_cap < effective_min_notional:
+        if effective_alloc_ratio > 0 and remaining_alloc_cap < effective_min_notional:
             logger.debug(
                 f"Skip tiny order for {signal.strategy_name or 'unknown'}: "
                 f"remaining allocation {remaining_alloc_cap:.4f} < min_notional {effective_min_notional:.4f}"
@@ -1264,7 +1276,7 @@ class ExecutionEngine:
         if pair_group_id and pair_quantity_scale > 0 and pair_unit_notional > 0 and pair_leg_fraction > 0:
             group_other_exposure = max(0.0, current_strategy_exposure - current_pair_group_exposure)
             pair_effective_cap = single_cap
-            if alloc_ratio > 0:
+            if effective_alloc_ratio > 0:
                 pair_effective_cap = min(pair_effective_cap, max(0.0, alloc_cap - group_other_exposure))
             pair_min_fraction = max(1e-6, float(pair_min_leg_fraction or pair_leg_fraction))
             pair_effective_min_notional = max(

@@ -61,6 +61,7 @@ _SUPPORTED_ACTIONS = {"buy", "sell", "hold", "close_long", "close_short"}
 _SUPPORTED_SYMBOL_MODES = {"manual", "auto"}
 _FIXED_AUTONOMOUS_AGENT_LEVERAGE = 1.0
 _SAME_DIRECTION_MAX_EXPOSURE_RATIO = 0.5
+_MAX_TOTAL_EXPOSURE_RATIO = 0.4
 _MODEL_FEEDBACK_OUTAGE_ALERT_SEC = 30 * 60
 # Keep a hard ceiling on per-round model time so one bad provider hop
 # cannot monopolize the agent for several minutes.
@@ -599,7 +600,7 @@ class AutonomousTradingAgent:
     def _provider_model(self, provider: str) -> str:
         provider = _normalize_provider(provider)
         if provider == "codex":
-            return str(getattr(settings, "OPENAI_MODEL", "") or "gpt6.4")
+            return str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.4")
         if provider == "claude":
             return str(getattr(settings, "ANTHROPIC_MODEL", "") or "claude-3-5-sonnet-latest")
         return str(getattr(settings, "ZHIPU_MODEL", "") or "GLM-4.5-Air")
@@ -853,6 +854,12 @@ class AutonomousTradingAgent:
             "max_tokens": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_MAX_TOKENS", 420), 420, low=32, high=4096),
             "temperature": _coerce_float(self._get("AI_AUTONOMOUS_AGENT_TEMPERATURE", 0.15), 0.15, low=0.0, high=1.5),
             "cooldown_sec": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_COOLDOWN_SEC", 180), 180, low=0, high=86400),
+            "max_total_exposure_ratio": _coerce_float(
+                self._get("AI_AUTONOMOUS_AGENT_MAX_TOTAL_EXPOSURE_RATIO", _MAX_TOTAL_EXPOSURE_RATIO),
+                _MAX_TOTAL_EXPOSURE_RATIO,
+                low=0.05,
+                high=_MAX_TOTAL_EXPOSURE_RATIO,
+            ),
             "allow_live": bool(self._get("AI_AUTONOMOUS_AGENT_ALLOW_LIVE", False)),
             "account_id": str(self._get("AI_AUTONOMOUS_AGENT_ACCOUNT_ID", "main") or "main").strip() or "main",
             "strategy_name": str(self._get("AI_AUTONOMOUS_AGENT_STRATEGY_NAME", "AI_AutonomousAgent") or "AI_AutonomousAgent").strip() or "AI_AutonomousAgent",
@@ -907,6 +914,13 @@ class AutonomousTradingAgent:
             updates["AI_AUTONOMOUS_AGENT_TEMPERATURE"] = _coerce_float(kwargs["temperature"], 0.15, low=0.0, high=1.5)
         if "cooldown_sec" in kwargs and kwargs["cooldown_sec"] is not None:
             updates["AI_AUTONOMOUS_AGENT_COOLDOWN_SEC"] = _coerce_int(kwargs["cooldown_sec"], 180, low=0, high=86400)
+        if "max_total_exposure_ratio" in kwargs and kwargs["max_total_exposure_ratio"] is not None:
+            updates["AI_AUTONOMOUS_AGENT_MAX_TOTAL_EXPOSURE_RATIO"] = _coerce_float(
+                kwargs["max_total_exposure_ratio"],
+                _MAX_TOTAL_EXPOSURE_RATIO,
+                low=0.05,
+                high=_MAX_TOTAL_EXPOSURE_RATIO,
+            )
         if "allow_live" in kwargs and kwargs["allow_live"] is not None:
             updates["AI_AUTONOMOUS_AGENT_ALLOW_LIVE"] = bool(kwargs["allow_live"])
         if "account_id" in kwargs and kwargs["account_id"] is not None:
@@ -1738,6 +1752,56 @@ class AutonomousTradingAgent:
         except Exception:
             return 0.0
 
+    @staticmethod
+    def _position_payload_notional(payload: Dict[str, Any], *, fallback_price: float = 0.0) -> float:
+        if not isinstance(payload, dict):
+            return 0.0
+        for raw_notional in (
+            payload.get("position_notional"),
+            payload.get("value"),
+        ):
+            notional = _safe_nonnegative_float(raw_notional, 0.0)
+            if notional > 0:
+                return float(notional)
+        try:
+            quantity = abs(float(payload.get("quantity") or 0.0))
+        except Exception:
+            quantity = 0.0
+        if quantity <= 0:
+            return 0.0
+        for raw_price in (
+            payload.get("current_price"),
+            payload.get("entry_price"),
+            fallback_price,
+        ):
+            price = _safe_nonnegative_float(raw_price, 0.0)
+            if price > 0:
+                return float(quantity * price)
+        return 0.0
+
+    def _total_strategy_open_notional(
+        self,
+        *,
+        strategy_name: str,
+        exchange: str,
+        account_id: str,
+    ) -> float:
+        total = 0.0
+        target_exchange = str(exchange or "").strip().lower()
+        target_account = str(account_id or "main").strip() or "main"
+        for payload in self._positions_for_learning_memory(strategy_name):
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("exchange") or "").strip().lower() != target_exchange:
+                continue
+            if str(payload.get("account_id") or "main").strip() != target_account:
+                continue
+            quantity = abs(float(payload.get("quantity") or 0.0))
+            if quantity <= 1e-12:
+                continue
+            total += self._position_payload_notional(payload)
+        return float(max(0.0, total))
+
     async def _resolve_account_risk_base(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         account_equity = 0.0
         try:
@@ -1752,6 +1816,12 @@ class AutonomousTradingAgent:
             strategy_allocation = float(strategy_manager.get_strategy_allocation(cfg.get("strategy_name")) or 0.0)
 
         position_cap_notional = 0.0
+        max_total_exposure_ratio = _coerce_float(
+            cfg.get("max_total_exposure_ratio", _MAX_TOTAL_EXPOSURE_RATIO),
+            _MAX_TOTAL_EXPOSURE_RATIO,
+            low=0.05,
+            high=_MAX_TOTAL_EXPOSURE_RATIO,
+        )
         if account_equity > 0:
             with contextlib.suppress(Exception):
                 position_cap_notional = float(
@@ -1762,10 +1832,23 @@ class AutonomousTradingAgent:
                     or 0.0
                 )
 
+        total_strategy_open_notional = self._total_strategy_open_notional(
+            strategy_name=str(cfg.get("strategy_name") or "AI_AutonomousAgent"),
+            exchange=str(cfg.get("exchange") or "binance"),
+            account_id=str(cfg.get("account_id") or "main"),
+        )
+        total_exposure_limit_notional = (
+            float(account_equity * max_total_exposure_ratio)
+            if account_equity > 0 and max_total_exposure_ratio > 0
+            else 0.0
+        )
         return {
             "account_equity": float(max(0.0, account_equity)),
             "strategy_allocation": float(max(0.0, strategy_allocation)),
             "position_cap_notional": float(max(0.0, position_cap_notional)),
+            "max_total_exposure_ratio": float(max_total_exposure_ratio),
+            "total_strategy_open_notional": float(max(0.0, total_strategy_open_notional)),
+            "total_exposure_limit_notional": float(max(0.0, total_exposure_limit_notional)),
             "trading_mode": str(execution_engine.get_trading_mode() or "paper"),
         }
 
@@ -2155,6 +2238,20 @@ class AutonomousTradingAgent:
         account_equity = _safe_nonnegative_float(account_risk_base.get("account_equity"), 0.0)
         strategy_allocation = _safe_nonnegative_float(account_risk_base.get("strategy_allocation"), 0.0)
         position_cap_notional = _safe_nonnegative_float(account_risk_base.get("position_cap_notional"), 0.0)
+        max_total_exposure_ratio = _coerce_float(
+            account_risk_base.get("max_total_exposure_ratio", cfg.get("max_total_exposure_ratio", _MAX_TOTAL_EXPOSURE_RATIO)),
+            _MAX_TOTAL_EXPOSURE_RATIO,
+            low=0.05,
+            high=_MAX_TOTAL_EXPOSURE_RATIO,
+        )
+        total_strategy_open_notional = _safe_nonnegative_float(
+            account_risk_base.get("total_strategy_open_notional"),
+            0.0,
+        )
+        total_exposure_limit_notional = _safe_nonnegative_float(
+            account_risk_base.get("total_exposure_limit_notional"),
+            account_equity * max_total_exposure_ratio if account_equity > 0 else 0.0,
+        )
         same_direction_limit_ratio = _coerce_float(
             position.get("same_direction_exposure_limit_ratio", cfg.get("same_direction_max_exposure_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO)),
             _coerce_float(
@@ -2175,6 +2272,15 @@ class AutonomousTradingAgent:
             0.0,
             position_cap_notional * same_direction_limit_ratio - current_position_notional,
         ) if position_cap_notional > 0 else 0.0
+        total_exposure_ratio = (
+            total_strategy_open_notional / account_equity
+            if account_equity > 0
+            else 0.0
+        )
+        total_remaining_notional = max(
+            0.0,
+            total_exposure_limit_notional - total_strategy_open_notional,
+        ) if total_exposure_limit_notional > 0 else 0.0
         execution_permitted_now = bool(
             str(cfg.get("mode") or "shadow") == "execute"
             and not (
@@ -2194,6 +2300,11 @@ class AutonomousTradingAgent:
             "account_equity": float(account_equity),
             "strategy_allocation": float(strategy_allocation),
             "position_cap_notional": float(position_cap_notional),
+            "max_total_exposure_ratio": float(max_total_exposure_ratio),
+            "total_strategy_open_notional": float(total_strategy_open_notional),
+            "total_exposure_ratio": float(total_exposure_ratio),
+            "total_exposure_limit_notional": float(total_exposure_limit_notional),
+            "total_remaining_notional": float(total_remaining_notional),
             "last_price": float(last_price or 0.0),
             "has_position": bool(current_position_side),
             "current_position_side": current_position_side,
@@ -2201,6 +2312,10 @@ class AutonomousTradingAgent:
             "same_direction_limit_ratio": float(same_direction_limit_ratio),
             "same_direction_exposure_ratio": float(same_direction_exposure_ratio),
             "same_direction_remaining_notional": float(same_direction_remaining_notional),
+            "can_open_more_total": bool(
+                total_exposure_limit_notional <= 0
+                or total_strategy_open_notional + 1e-9 < total_exposure_limit_notional
+            ),
             "can_add_same_direction": bool(
                 position_cap_notional > 0 and same_direction_exposure_ratio + 1e-9 < same_direction_limit_ratio
             ),
@@ -2243,12 +2358,17 @@ class AutonomousTradingAgent:
             account_risk.get("same_direction_remaining_notional"),
             0.0,
         )
-        current_position_notional = _safe_nonnegative_float(account_risk.get("current_position_notional"), 0.0)
-        open_notional_reference = (
-            same_direction_remaining_notional
-            if same_direction_remaining_notional > 0
-            else position_cap_notional
+        total_remaining_notional = _safe_nonnegative_float(
+            account_risk.get("total_remaining_notional"),
+            0.0,
         )
+        current_position_notional = _safe_nonnegative_float(account_risk.get("current_position_notional"), 0.0)
+        open_notional_candidates = [
+            value
+            for value in (same_direction_remaining_notional, total_remaining_notional, position_cap_notional)
+            if value > 0
+        ]
+        open_notional_reference = min(open_notional_candidates) if open_notional_candidates else 0.0
         close_notional_reference = current_position_notional if current_position_notional > 0 else 0.0
         notional_reference = close_notional_reference if close_notional_reference > 0 else open_notional_reference
         volume = dict(market_structure.get("volume") or {})
@@ -2634,6 +2754,14 @@ class AutonomousTradingAgent:
                 "account_equity": 0.0,
                 "strategy_allocation": 0.0,
                 "position_cap_notional": 0.0,
+                "max_total_exposure_ratio": _coerce_float(
+                    cfg.get("max_total_exposure_ratio", _MAX_TOTAL_EXPOSURE_RATIO),
+                    _MAX_TOTAL_EXPOSURE_RATIO,
+                    low=0.05,
+                    high=_MAX_TOTAL_EXPOSURE_RATIO,
+                ),
+                "total_strategy_open_notional": 0.0,
+                "total_exposure_limit_notional": 0.0,
                 "trading_mode": str(execution_engine.get_trading_mode() or "paper"),
             }
             scan_position_map = cfg.get("_scan_position_map")
@@ -2906,6 +3034,12 @@ class AutonomousTradingAgent:
                     "default_take_profit_pct": _float_or_default(account_risk.get("default_take_profit_pct"), 0.0),
                     "account_equity": _float_or_default(account_risk.get("account_equity"), 0.0),
                     "position_cap_notional": _float_or_default(account_risk.get("position_cap_notional"), 0.0),
+                    "max_total_exposure_ratio": _float_or_default(account_risk.get("max_total_exposure_ratio"), 0.0),
+                    "total_strategy_open_notional": _float_or_default(account_risk.get("total_strategy_open_notional"), 0.0),
+                    "total_exposure_ratio": _float_or_default(account_risk.get("total_exposure_ratio"), 0.0),
+                    "total_exposure_limit_notional": _float_or_default(account_risk.get("total_exposure_limit_notional"), 0.0),
+                    "total_remaining_notional": _float_or_default(account_risk.get("total_remaining_notional"), 0.0),
+                    "can_open_more_total": bool(account_risk.get("can_open_more_total")),
                     "has_position": bool(account_risk.get("has_position")),
                     "current_position_side": account_risk.get("current_position_side"),
                     "current_position_notional": _float_or_default(account_risk.get("current_position_notional"), 0.0),
@@ -2996,6 +3130,7 @@ class AutonomousTradingAgent:
                 "allow_live": cfg.get("allow_live"),
                 "trading_mode": context_payload.get("trading_mode"),
                 "same_direction_max_exposure_ratio": cfg.get("same_direction_max_exposure_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO),
+                "max_total_exposure_ratio": cfg.get("max_total_exposure_ratio", _MAX_TOTAL_EXPOSURE_RATIO),
                 "entry_size_scale": cfg.get("entry_size_scale", 1.0),
             },
             "input": prompt_context,
@@ -3029,6 +3164,7 @@ class AutonomousTradingAgent:
             reason = f"below_min_confidence({confidence:.3f}<{min_conf:.3f})"
 
         position = context_payload.get("position") if isinstance(context_payload, dict) else {}
+        account_risk = context_payload.get("account_risk") if isinstance(context_payload, dict) else {}
         current_side = str((position or {}).get("side") or "").lower()
         same_direction_limit_ratio = _coerce_float(
             (position or {}).get("same_direction_exposure_limit_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO),
@@ -3048,6 +3184,27 @@ class AutonomousTradingAgent:
             and same_direction_limit_ratio > 0
             and same_direction_exposure_ratio + 1e-9 < same_direction_limit_ratio
         )
+        max_total_exposure_ratio = _coerce_float(
+            (account_risk or {}).get("max_total_exposure_ratio", cfg.get("max_total_exposure_ratio", _MAX_TOTAL_EXPOSURE_RATIO)),
+            _MAX_TOTAL_EXPOSURE_RATIO,
+            low=0.05,
+            high=_MAX_TOTAL_EXPOSURE_RATIO,
+        )
+        total_exposure_ratio = _coerce_float(
+            (account_risk or {}).get("total_exposure_ratio", 0.0),
+            0.0,
+            low=0.0,
+            high=1000000.0,
+        )
+        total_exposure_limit_notional = _safe_nonnegative_float(
+            (account_risk or {}).get("total_exposure_limit_notional"),
+            0.0,
+        )
+        total_remaining_notional = _safe_nonnegative_float(
+            (account_risk or {}).get("total_remaining_notional"),
+            0.0,
+        )
+        allow_total_add = bool(total_exposure_limit_notional <= 0 or total_remaining_notional > 1e-9)
         if action == "close_long" and str((position or {}).get("side") or "").lower() != "long":
             action = "hold"
             reason = "no_long_position"
@@ -3072,6 +3229,17 @@ class AutonomousTradingAgent:
                     if position_cap_notional > 0 and same_direction_limit_ratio > 0
                     else "existing_short_position"
                 )
+        increases_total_exposure = bool(
+            (action == "buy" and current_side != "short")
+            or (action == "sell" and current_side != "long")
+        )
+        if action in {"buy", "sell"} and increases_total_exposure and not allow_total_add:
+            action = "hold"
+            reason = (
+                f"total_exposure_limit_reached({total_exposure_ratio:.3f}>={max_total_exposure_ratio:.3f})"
+                if total_exposure_limit_notional > 0 and max_total_exposure_ratio > 0
+                else "total_exposure_limit_reached"
+            )
 
         return {
             "action": action,
@@ -3137,6 +3305,9 @@ class AutonomousTradingAgent:
             "review_same_direction_limit_ratio": float(
                 cfg.get("same_direction_max_exposure_ratio") or _SAME_DIRECTION_MAX_EXPOSURE_RATIO
             ),
+            "review_total_exposure_limit_ratio": float(
+                cfg.get("max_total_exposure_ratio") or _MAX_TOTAL_EXPOSURE_RATIO
+            ),
             "review_entry_size_scale": float(cfg.get("entry_size_scale") or 1.0),
         }
         learning_memory = cfg.get("learning_memory") if isinstance(cfg, dict) else {}
@@ -3153,11 +3324,38 @@ class AutonomousTradingAgent:
             )
         )
         position = context_payload.get("position") if isinstance(context_payload, dict) else {}
+        account_risk = context_payload.get("account_risk") if isinstance(context_payload, dict) else {}
         current_side = str((position or {}).get("side") or "").lower()
         same_direction_add = bool(
             (action == "buy" and current_side == "long")
             or (action == "sell" and current_side == "short")
         )
+        increases_total_exposure = bool(
+            (action == "buy" and current_side != "short")
+            or (action == "sell" and current_side != "long")
+        )
+        if action in {"buy", "sell"}:
+            metadata.update(
+                {
+                    "max_total_exposure_ratio": _safe_nonnegative_float(
+                        (account_risk or {}).get("max_total_exposure_ratio"),
+                        _MAX_TOTAL_EXPOSURE_RATIO,
+                    ),
+                    "total_strategy_existing_notional": _safe_nonnegative_float(
+                        (account_risk or {}).get("total_strategy_open_notional"),
+                        0.0,
+                    ),
+                    "total_exposure_limit_notional": _safe_nonnegative_float(
+                        (account_risk or {}).get("total_exposure_limit_notional"),
+                        0.0,
+                    ),
+                    "total_remaining_notional": _safe_nonnegative_float(
+                        (account_risk or {}).get("total_remaining_notional"),
+                        0.0,
+                    ),
+                    "apply_total_exposure_cap": bool(increases_total_exposure),
+                }
+            )
         if same_direction_add:
             metadata.update(
                 {

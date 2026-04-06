@@ -186,7 +186,7 @@ class LiveAIDecisionRouter:
     def _provider_model(self, provider: str) -> str:
         provider = _normalize_provider(provider)
         if provider == "codex":
-            return str(getattr(settings, "OPENAI_MODEL", "") or "gpt6.4")
+            return str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.4")
         if provider == "claude":
             return str(getattr(settings, "ANTHROPIC_MODEL", "") or "claude-3-5-sonnet-latest")
         return str(getattr(settings, "ZHIPU_MODEL", "") or "GLM-4.5-Air")

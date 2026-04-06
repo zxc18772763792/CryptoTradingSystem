@@ -33,7 +33,7 @@ from core.utils.openai_responses import (
 
 
 _DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
-_DEFAULT_OPENAI_MODEL = "gpt6.4"
+_DEFAULT_OPENAI_MODEL = "gpt-5.4"
 
 _CONTEXT_SYSTEM_PROMPT = """You are a quantitative research planner.
 Your goal is not to emit direct trading instructions. Your goal is to produce

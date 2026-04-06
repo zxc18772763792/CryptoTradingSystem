@@ -344,6 +344,30 @@ def test_execute_signal_allows_same_direction_add_below_half_cap_and_caps_quanti
     assert engine.get_signal_diagnostics()["last_result"]["status"] == "executed"
 
 
+def test_calculate_quantity_respects_total_exposure_cap_from_signal_metadata(monkeypatch):
+    engine = ExecutionEngine()
+
+    signal = _make_signal(signal_type=SignalType.BUY)
+    signal.strategy_name = "AI_AutonomousAgent"
+    signal.metadata["apply_total_exposure_cap"] = True
+    signal.metadata["max_total_exposure_ratio"] = 0.4
+
+    monkeypatch.setattr(engine, "_resolve_price", AsyncMock(return_value=100.0))
+    monkeypatch.setattr(execution_engine_module.position_manager, "get_positions_by_strategy", lambda name: [SimpleNamespace(value=400.0)])
+    monkeypatch.setattr(execution_engine_module.risk_manager, "max_position_size", 0.1)
+
+    qty = asyncio.run(
+        engine._calculate_quantity(
+            signal=signal,
+            exchange="binance",
+            account_equity=1000.0,
+            strategy_allocation=0.0,
+        )
+    )
+
+    assert qty == 0.0
+
+
 def test_close_signal_uses_exchange_live_position_when_local_missing(monkeypatch):
     engine = ExecutionEngine()
     engine._paper_trading = False

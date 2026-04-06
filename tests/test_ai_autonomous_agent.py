@@ -27,6 +27,7 @@ def _isolate_agent_overlay(tmp_path, monkeypatch):
     monkeypatch.setattr(_mod.execution_engine, "get_strategy_position_cap_notional", lambda **kwargs: 0.0)
     monkeypatch.setattr(_mod.execution_engine, "get_live_trade_review", lambda **kwargs: {"items": []})
     monkeypatch.setattr(_mod.strategy_manager, "get_strategy_allocation", lambda name: 0.0)
+    monkeypatch.setattr(_mod.position_manager, "get_all_positions", lambda: [])
 
 
 def _sample_df() -> pd.DataFrame:
@@ -627,6 +628,92 @@ def test_autonomous_agent_same_side_signal_holds_when_exposure_reaches_half_cap(
     assert result["decision"]["reason"].startswith("existing_short_position_limit_reached")
     assert context_payload["position"]["position_notional"] == 60.0
     assert context_payload["position"]["same_direction_exposure_ratio"] == 0.6
+    assert result["execution"]["submitted"] is False
+    assert submit_mock.await_count == 0
+
+
+def test_autonomous_agent_holds_when_total_exposure_reaches_ratio_cap(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    submit_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
+    monkeypatch.setattr(
+        agent,
+        "get_symbol_scan",
+        AsyncMock(
+            return_value={
+                "selected_symbol": "BTC/USDT",
+                "selection_reason": "manual_symbol",
+                "top_candidates": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_build_context",
+        AsyncMock(
+            return_value=(
+                {
+                    "exchange": "binance",
+                    "symbol": "BTC/USDT",
+                    "timeframe": "15m",
+                    "price": 100.0,
+                    "bars": 120,
+                    "returns": {"r_1h": 0.01, "r_24h": 0.03},
+                    "realized_vol_annualized": 0.25,
+                    "market_structure": {"available": True},
+                    "aggregated_signal": {
+                        "direction": "LONG",
+                        "confidence": 0.82,
+                        "blocked_by_risk": False,
+                        "risk_reason": "",
+                    },
+                    "event_summary": {"available": False},
+                    "position": {},
+                    "account_risk": {
+                        "trading_mode": "live",
+                        "allow_live": True,
+                        "execution_permitted_now": True,
+                        "min_confidence": 0.58,
+                        "account_equity": 1000.0,
+                        "position_cap_notional": 100.0,
+                        "max_total_exposure_ratio": 0.4,
+                        "total_strategy_open_notional": 400.0,
+                        "total_exposure_ratio": 0.4,
+                        "total_exposure_limit_notional": 400.0,
+                        "total_remaining_notional": 0.0,
+                        "can_open_more_total": False,
+                    },
+                    "execution_cost": {"estimated_one_way_cost_bps": 5.0, "estimated_round_trip_cost_bps": 10.0},
+                    "research_context": {"available": False},
+                    "profile": {},
+                    "learning_memory": {},
+                    "trading_mode": "live",
+                },
+                pd.DataFrame(),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        AsyncMock(
+            return_value={
+                "action": "buy",
+                "confidence": 0.82,
+                "strength": 0.7,
+                "leverage": 1,
+                "reason": "fresh_long",
+            }
+        ),
+    )
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", allow_live=True, cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert result["decision"]["action"] == "hold"
+    assert str(result["decision"]["reason"]).startswith("total_exposure_limit_reached(")
     assert result["execution"]["submitted"] is False
     assert submit_mock.await_count == 0
 
@@ -1841,6 +1928,8 @@ def test_build_context_includes_market_event_and_account_risk_payloads(monkeypat
     assert context_payload["event_summary"]["news_alpha_proxy"] > 0
     assert context_payload["account_risk"]["account_equity"] == 1500.0
     assert context_payload["account_risk"]["position_cap_notional"] == 150.0
+    assert context_payload["account_risk"]["max_total_exposure_ratio"] == 0.4
+    assert context_payload["account_risk"]["total_exposure_limit_notional"] == 600.0
     assert context_payload["account_risk"]["fixed_leverage"] == 1.0
     assert context_payload["execution_cost"]["fee_bps"] > 0
     assert context_payload["execution_cost"]["estimated_slippage_bps"] >= 2.0

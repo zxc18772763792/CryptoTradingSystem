@@ -186,6 +186,7 @@ class AIAutonomousAgentConfigUpdateRequest(BaseModel):
     max_tokens: Optional[int] = Field(default=None, ge=32, le=4096)
     temperature: Optional[float] = Field(default=None, ge=0.0, le=1.5)
     cooldown_sec: Optional[int] = Field(default=None, ge=0, le=86400)
+    max_total_exposure_ratio: Optional[float] = Field(default=None, ge=0.05, le=0.4)
     allow_live: Optional[bool] = None
     account_id: Optional[str] = None
     strategy_name: Optional[str] = None
