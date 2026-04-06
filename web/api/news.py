@@ -70,6 +70,10 @@ _NEWS_HEALTH_REFRESH_TASK: Optional[asyncio.Task] = None
 _NEWS_PROCESS_CACHE_TTL_SEC = 5.0
 _NEWS_PROCESS_CACHE_AT = 0.0
 _NEWS_PROCESS_CACHE_PAYLOAD: Dict[str, Any] = {}
+_NEWS_DB_SNAPSHOT_CACHE_TTL_SEC = 4.0
+_NEWS_DB_SNAPSHOT_CACHE_AT = 0.0
+_NEWS_DB_SNAPSHOT_CACHE_PAYLOAD: Dict[str, Any] = {}
+_NEWS_DB_SNAPSHOT_TASK: Optional[asyncio.Task] = None
 _TRACKING_QUERY_KEYS = {
     "feature",
     "fbclid",
@@ -176,6 +180,7 @@ def _cache_set(namespace: str, key: str, payload: Dict[str, Any]) -> Dict[str, A
 
 
 def _invalidate_news_caches(*, clear_feed: bool = False) -> None:
+    global _NEWS_DB_SNAPSHOT_CACHE_AT, _NEWS_DB_SNAPSHOT_CACHE_PAYLOAD
     # Keep latest/brief/summary as stale fallback snapshots by default.
     # This prevents "sudden empty feed" when DB is momentarily contended.
     namespaces = ["health", "pull_status", "worker_status", "coverage"]
@@ -183,6 +188,8 @@ def _invalidate_news_caches(*, clear_feed: bool = False) -> None:
         namespaces.extend(["latest", "summary", "brief"])
     for namespace in namespaces:
         _NEWS_RESPONSE_CACHE.setdefault(namespace, {}).clear()
+    _NEWS_DB_SNAPSHOT_CACHE_AT = 0.0
+    _NEWS_DB_SNAPSHOT_CACHE_PAYLOAD = {}
 
 
 def _news_source_flags() -> Dict[str, bool]:
@@ -384,23 +391,40 @@ def _news_runtime_snapshot(request: Request) -> Dict[str, Any]:
     }
 
 
-async def _collect_news_db_snapshot(timeout_sec: int) -> Dict[str, Any]:
-    results = await asyncio.gather(
-        asyncio.wait_for(asyncio.shield(news_db.list_source_states()), timeout=timeout_sec),
-        asyncio.wait_for(asyncio.shield(news_db.get_llm_queue_stats()), timeout=timeout_sec),
-        return_exceptions=True,
-    )
-    source_states_result, llm_queue_result = results
+async def _collect_news_db_snapshot_uncached(timeout_sec: int) -> Dict[str, Any]:
     payload = {"source_states": [], "llm_queue": {}, "failures": []}
-    if not isinstance(source_states_result, Exception):
-        payload["source_states"] = source_states_result
-    else:
-        payload["failures"].append(f"source_states={type(source_states_result).__name__}")
-    if not isinstance(llm_queue_result, Exception):
-        payload["llm_queue"] = llm_queue_result
-    else:
-        payload["failures"].append(f"llm_queue={type(llm_queue_result).__name__}")
+    try:
+        payload["source_states"] = await asyncio.wait_for(asyncio.shield(news_db.list_source_states()), timeout=timeout_sec)
+    except Exception as exc:
+        payload["failures"].append(f"source_states={type(exc).__name__}")
+    try:
+        payload["llm_queue"] = await asyncio.wait_for(asyncio.shield(news_db.get_llm_queue_stats()), timeout=timeout_sec)
+    except Exception as exc:
+        payload["failures"].append(f"llm_queue={type(exc).__name__}")
     return payload
+
+
+async def _collect_news_db_snapshot(timeout_sec: int) -> Dict[str, Any]:
+    global _NEWS_DB_SNAPSHOT_CACHE_AT, _NEWS_DB_SNAPSHOT_CACHE_PAYLOAD, _NEWS_DB_SNAPSHOT_TASK
+
+    now = time.monotonic()
+    if _NEWS_DB_SNAPSHOT_CACHE_PAYLOAD and (now - _NEWS_DB_SNAPSHOT_CACHE_AT) <= _NEWS_DB_SNAPSHOT_CACHE_TTL_SEC:
+        return dict(_NEWS_DB_SNAPSHOT_CACHE_PAYLOAD)
+
+    active_task = _NEWS_DB_SNAPSHOT_TASK
+    if active_task is not None and not active_task.done():
+        return dict(await asyncio.shield(active_task))
+
+    task = asyncio.create_task(_collect_news_db_snapshot_uncached(timeout_sec))
+    _NEWS_DB_SNAPSHOT_TASK = task
+    try:
+        payload = dict(await asyncio.shield(task))
+        _NEWS_DB_SNAPSHOT_CACHE_PAYLOAD = dict(payload)
+        _NEWS_DB_SNAPSHOT_CACHE_AT = time.monotonic()
+        return dict(payload)
+    finally:
+        if _NEWS_DB_SNAPSHOT_TASK is task:
+            _NEWS_DB_SNAPSHOT_TASK = None
 
 
 async def _refresh_news_health_cache(request: Request, cache_key: str) -> None:
@@ -2254,21 +2278,10 @@ async def health(request: Request) -> Dict[str, Any]:
         base_payload["source_states"] = list(stale.get("source_states") or [])
         base_payload["llm_queue"] = dict(stale.get("llm_queue") or {})
     db_timeout = max(2, _env_int("NEWS_API_HEALTH_DB_TIMEOUT_SEC", 4))
-    results = await asyncio.gather(
-        asyncio.wait_for(asyncio.shield(news_db.list_source_states()), timeout=db_timeout),
-        asyncio.wait_for(asyncio.shield(news_db.get_llm_queue_stats()), timeout=db_timeout),
-        return_exceptions=True,
-    )
-    source_states_result, llm_queue_result = results
-    failures: List[str] = []
-    if not isinstance(source_states_result, Exception):
-        base_payload["source_states"] = source_states_result
-    else:
-        failures.append(f"source_states={type(source_states_result).__name__}")
-    if not isinstance(llm_queue_result, Exception):
-        base_payload["llm_queue"] = llm_queue_result
-    else:
-        failures.append(f"llm_queue={type(llm_queue_result).__name__}")
+    db_snapshot = await _collect_news_db_snapshot(db_timeout)
+    base_payload["source_states"] = list(db_snapshot.get("source_states") or [])
+    base_payload["llm_queue"] = dict(db_snapshot.get("llm_queue") or {})
+    failures = list(db_snapshot.get("failures") or [])
 
     if not failures:
         base_payload["status"] = "ok"
@@ -2905,74 +2918,102 @@ async def summary(
     if cached:
         return cached
     since = _now_utc() - timedelta(hours=hours)
-    db_timeout = max(2.0, min(5.0, float(_env_int("NEWS_API_SUMMARY_DB_TIMEOUT_SEC", 6))))
+    db_timeout = max(3.0, min(10.0, float(_env_int("NEWS_API_SUMMARY_DB_TIMEOUT_SEC", 8))))
     raw_limit = max(1000, min(3000, feed_limit * 24))
     event_limit = max(1000, min(3000, feed_limit * 24))
     try:
-        results = await asyncio.gather(
-            asyncio.wait_for(asyncio.shield(news_db.list_events(symbol=symbol_norm, since=since, limit=event_limit)), timeout=db_timeout),
-            asyncio.wait_for(asyncio.shield(news_db.list_news_raw(since=since, limit=raw_limit)), timeout=db_timeout),
-            asyncio.wait_for(asyncio.shield(news_db.list_source_states()), timeout=db_timeout),
-            asyncio.wait_for(asyncio.shield(news_db.get_llm_queue_stats()), timeout=db_timeout),
-            asyncio.wait_for(
-                build_latest_feed(cfg=cfg, symbol=symbol_norm, hours=hours, limit=min(feed_limit, 60), summarize=False),
-                timeout=max(db_timeout + 1.0, 5.5),
-            ),
-            asyncio.wait_for(asyncio.shield(news_db.count_events(symbol=symbol_norm, since=since)), timeout=db_timeout),
-            asyncio.wait_for(asyncio.shield(news_db.latest_event_timestamp(symbol=symbol_norm, since=since)), timeout=db_timeout),
-            asyncio.wait_for(asyncio.shield(news_db.count_news_raw(since=since)), timeout=db_timeout),
-            asyncio.wait_for(asyncio.shield(news_db.latest_news_raw_timestamp(since=since)), timeout=db_timeout),
-            return_exceptions=True,
-        )
         failures: List[str] = []
-        (
-            events_raw,
-            raw_rows_raw,
-            source_states_raw,
-            llm_queue_raw,
-            feed_preview_raw,
-            events_count_raw,
-            latest_event_at_raw,
-            raw_count_raw,
-            latest_raw_at_raw,
-        ) = results
-        events = [] if isinstance(events_raw, Exception) else list(events_raw or [])
-        raw_rows = [] if isinstance(raw_rows_raw, Exception) else list(raw_rows_raw or [])
-        source_states = [] if isinstance(source_states_raw, Exception) else list(source_states_raw or [])
-        llm_queue = {} if isinstance(llm_queue_raw, Exception) else dict(llm_queue_raw or {})
-        events_count = len(events) if isinstance(events_count_raw, Exception) else int(events_count_raw or 0)
-        latest_event_at = _first_iso_ts(events) if isinstance(latest_event_at_raw, Exception) else latest_event_at_raw
-        raw_count = len(raw_rows) if (symbol_norm or isinstance(raw_count_raw, Exception)) else int(raw_count_raw or 0)
-        latest_raw_at = _first_iso_ts(raw_rows) if (symbol_norm or isinstance(latest_raw_at_raw, Exception)) else latest_raw_at_raw
-        if isinstance(feed_preview_raw, Exception):
-            feed_preview = {
-                "count": 0,
-                "feed_stats": _feed_sentiment_summary([]),
-                "source_stats": {"by_provider": _count_by_provider(raw_rows), "by_source": {}},
-                "items": [],
-            }
-        else:
+        try:
+            events = list(
+                await asyncio.wait_for(
+                    asyncio.shield(news_db.list_events(symbol=symbol_norm, since=since, limit=event_limit)),
+                    timeout=db_timeout,
+                )
+                or []
+            )
+        except Exception as exc:
+            failures.append(f"events={type(exc).__name__}")
+            events = []
+
+        try:
+            raw_rows = list(
+                await asyncio.wait_for(
+                    asyncio.shield(news_db.list_news_raw(since=since, limit=raw_limit)),
+                    timeout=db_timeout,
+                )
+                or []
+            )
+        except Exception as exc:
+            failures.append(f"raw_rows={type(exc).__name__}")
+            raw_rows = []
+
+        try:
+            source_states = list(await asyncio.wait_for(asyncio.shield(news_db.list_source_states()), timeout=db_timeout) or [])
+        except Exception as exc:
+            failures.append(f"source_states={type(exc).__name__}")
+            source_states = []
+
+        try:
+            llm_queue = dict(await asyncio.wait_for(asyncio.shield(news_db.get_llm_queue_stats()), timeout=db_timeout) or {})
+        except Exception as exc:
+            failures.append(f"llm_queue={type(exc).__name__}")
+            llm_queue = {}
+
+        feed_preview = {
+            "count": 0,
+            "feed_stats": _feed_sentiment_summary([]),
+            "source_stats": {"by_provider": _count_by_provider(raw_rows), "by_source": {}},
+            "items": [],
+        }
+        try:
+            feed_preview_raw = await asyncio.wait_for(
+                asyncio.shield(
+                    build_latest_feed(cfg=cfg, symbol=symbol_norm, hours=hours, limit=min(feed_limit, 60), summarize=False)
+                ),
+                timeout=max(db_timeout + 1.0, 5.5),
+            )
             feed_preview = dict(feed_preview_raw or {})
             if not isinstance(feed_preview.get("items"), list):
                 feed_preview["items"] = []
-        if isinstance(events_raw, Exception):
-            failures.append(f"events={type(events_raw).__name__}")
-        if isinstance(raw_rows_raw, Exception):
-            failures.append(f"raw_rows={type(raw_rows_raw).__name__}")
-        if isinstance(source_states_raw, Exception):
-            failures.append(f"source_states={type(source_states_raw).__name__}")
-        if isinstance(llm_queue_raw, Exception):
-            failures.append(f"llm_queue={type(llm_queue_raw).__name__}")
-        if isinstance(feed_preview_raw, Exception):
-            failures.append(f"feed={type(feed_preview_raw).__name__}")
-        if isinstance(events_count_raw, Exception):
-            failures.append(f"events_count={type(events_count_raw).__name__}")
-        if isinstance(latest_event_at_raw, Exception):
-            failures.append(f"latest_event_at={type(latest_event_at_raw).__name__}")
-        if isinstance(raw_count_raw, Exception) and not symbol_norm:
-            failures.append(f"raw_count={type(raw_count_raw).__name__}")
-        if isinstance(latest_raw_at_raw, Exception) and not symbol_norm:
-            failures.append(f"latest_raw_at={type(latest_raw_at_raw).__name__}")
+        except Exception as exc:
+            failures.append(f"feed={type(exc).__name__}")
+
+        try:
+            events_count = int(
+                await asyncio.wait_for(asyncio.shield(news_db.count_events(symbol=symbol_norm, since=since)), timeout=db_timeout)
+                or 0
+            )
+        except Exception as exc:
+            failures.append(f"events_count={type(exc).__name__}")
+            events_count = len(events)
+
+        try:
+            latest_event_at = await asyncio.wait_for(
+                asyncio.shield(news_db.latest_event_timestamp(symbol=symbol_norm, since=since)),
+                timeout=db_timeout,
+            )
+        except Exception as exc:
+            failures.append(f"latest_event_at={type(exc).__name__}")
+            latest_event_at = _first_iso_ts(events)
+
+        try:
+            raw_count_value = await asyncio.wait_for(asyncio.shield(news_db.count_news_raw(since=since)), timeout=db_timeout)
+        except Exception as exc:
+            if not symbol_norm:
+                failures.append(f"raw_count={type(exc).__name__}")
+            raw_count_value = None
+        raw_count = len(raw_rows) if (symbol_norm or raw_count_value is None) else int(raw_count_value or 0)
+
+        try:
+            latest_raw_at_value = await asyncio.wait_for(
+                asyncio.shield(news_db.latest_news_raw_timestamp(since=since)),
+                timeout=db_timeout,
+            )
+        except Exception as exc:
+            if not symbol_norm:
+                failures.append(f"latest_raw_at={type(exc).__name__}")
+            latest_raw_at_value = None
+        latest_raw_at = _first_iso_ts(raw_rows) if (symbol_norm or latest_raw_at_value is None) else latest_raw_at_value
 
         sentiment = {"positive": 0, "neutral": 0, "negative": 0}
         by_type: Dict[str, int] = {}

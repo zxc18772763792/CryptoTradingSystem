@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-    <link rel="stylesheet" href="/static/css/style.css?v=82">
+    <link rel="stylesheet" href="/static/css/style.css?v=84">
     <script>
         (function (root) {
             if (!root) return;
@@ -1964,6 +1964,50 @@
                     <span class="ai-runtime-chip">页面时区：上海时间 (UTC+8)</span>
                 </div>
 
+                <section class="card ai-agent-cockpit">
+                    <div class="ai-agent-cockpit-main">
+                        <div class="ai-agent-cockpit-kicker">AI自治代理运行驾驶舱</div>
+                        <div class="ai-agent-cockpit-title">先看状态，再看动作、风险、复盘</div>
+                        <div class="ai-agent-cockpit-desc">这一页只负责自治代理的实时盯盘、执行与复盘，不再和 AI 研究提案混在一起。把“是否在跑、盯哪个币、最近做了什么、当前成本是否可接受”拆开看，读起来会更快。</div>
+                        <div class="ai-agent-cockpit-meta">
+                            <span id="ai-agent-cockpit-state-badge" class="ai-agent-cockpit-badge">等待状态</span>
+                            <span id="ai-agent-cockpit-state-note" class="ai-agent-cockpit-note">加载中...</span>
+                        </div>
+                    </div>
+                    <div class="ai-agent-cockpit-grid">
+                        <article id="ai-agent-cockpit-status-card" class="ai-agent-cockpit-stat">
+                            <span class="ai-agent-cockpit-stat-label">代理状态</span>
+                            <strong id="ai-agent-cockpit-status">加载中...</strong>
+                            <span id="ai-agent-cockpit-status-sub" class="ai-agent-cockpit-stat-sub">等待状态同步</span>
+                        </article>
+                        <article id="ai-agent-cockpit-symbol-card" class="ai-agent-cockpit-stat">
+                            <span class="ai-agent-cockpit-stat-label">当前盯盘</span>
+                            <strong id="ai-agent-cockpit-symbol">加载中...</strong>
+                            <span id="ai-agent-cockpit-symbol-sub" class="ai-agent-cockpit-stat-sub">等待选币结果</span>
+                        </article>
+                        <article id="ai-agent-cockpit-mode-card" class="ai-agent-cockpit-stat">
+                            <span class="ai-agent-cockpit-stat-label">执行模式</span>
+                            <strong id="ai-agent-cockpit-mode">加载中...</strong>
+                            <span id="ai-agent-cockpit-mode-sub" class="ai-agent-cockpit-stat-sub">等待模式同步</span>
+                        </article>
+                        <article id="ai-agent-cockpit-decision-card" class="ai-agent-cockpit-stat">
+                            <span class="ai-agent-cockpit-stat-label">最近决策</span>
+                            <strong id="ai-agent-cockpit-decision">加载中...</strong>
+                            <span id="ai-agent-cockpit-decision-sub" class="ai-agent-cockpit-stat-sub">等待最新动作</span>
+                        </article>
+                        <article id="ai-agent-cockpit-cycle-card" class="ai-agent-cockpit-stat">
+                            <span class="ai-agent-cockpit-stat-label">下一轮计划</span>
+                            <strong id="ai-agent-cockpit-cycle">加载中...</strong>
+                            <span id="ai-agent-cockpit-cycle-sub" class="ai-agent-cockpit-stat-sub">等待调度信息</span>
+                        </article>
+                        <article id="ai-agent-cockpit-model-card" class="ai-agent-cockpit-stat">
+                            <span class="ai-agent-cockpit-stat-label">模型与成本</span>
+                            <strong id="ai-agent-cockpit-model">加载中...</strong>
+                            <span id="ai-agent-cockpit-model-sub" class="ai-agent-cockpit-stat-sub">等待模型反馈</span>
+                        </article>
+                    </div>
+                </section>
+
                 <div class="ai-workspace-stack">
                     <section class="ai-workspace-section ai-workspace-section-agent">
                         <div class="ai-workspace-section-head">
@@ -1976,83 +2020,43 @@
 
                         <div class="ai-agent-workspace-grid">
                             <div class="card ai-top-intro-card ai-top-intro-card-trading ai-agent-command-card">
-                                <div class="ai-top-intro-title">🤖 AI自动交易</div>
-                                <div class="ai-top-intro-subtitle">这里只负责实时盯盘、动作判断和执行观察，和研究页面的候选生成完全分离。</div>
-                                <div class="ai-top-intro-stack">
+                                <div class="ai-agent-command-hero">
+                                    <div>
+                                        <div class="ai-top-intro-title">🤖 AI自动交易面板</div>
+                                        <div class="ai-top-intro-subtitle">启动、试跑、诊断、选币、日志和复盘按任务拆开排版，减少上下跳读。</div>
+                                    </div>
+                                    <div class="ai-agent-command-tags">
+                                        <span class="ai-agent-command-tag">独立执行链路</span>
+                                        <span class="ai-agent-command-tag">实时盯盘</span>
+                                        <span class="ai-agent-command-tag">交易后复盘</span>
+                                    </div>
+                                </div>
+
+                                <div class="ai-top-intro-stack ai-agent-intent-grid">
                                     <div class="ai-top-intro-box">
                                         <div class="ai-top-intro-box-title">负责什么</div>
-                                        <div class="ai-top-intro-box-desc">对固定交易标的和周期持续盯盘，给出买入、卖出、减仓、平仓等交易动作。</div>
+                                        <div class="ai-top-intro-box-desc">对固定标的或自动选币池持续盯盘，给出买入、卖出、减仓、平仓等动作。</div>
                                     </div>
                                     <div class="ai-top-intro-box">
-                                        <div class="ai-top-intro-box-title">怎么工作</div>
-                                        <div class="ai-top-intro-box-desc">启动后代理会周期性盯盘，基于实时行情、聚合信号、风控和执行状态独立给出动作并尝试下单。</div>
+                                        <div class="ai-top-intro-box-title">如何阅读</div>
+                                        <div class="ai-top-intro-box-desc">先看运行状态和最近动作，再看观望原因、选币结果，最后下沉到日志和放行复盘。</div>
                                     </div>
                                     <div class="ai-top-intro-box">
-                                        <div class="ai-top-intro-box-title">不负责什么</div>
-                                        <div class="ai-top-intro-box-desc">不生成新策略，也不依赖 AI 研究候选来驱动下单；这里负责独立的运行时交易判断。</div>
+                                        <div class="ai-top-intro-box-title">和研究页区别</div>
+                                        <div class="ai-top-intro-box-desc">这里不生成新策略，只负责运行时交易判断和执行观察，研究候选仍留在 AI 研究页。</div>
                                     </div>
                                 </div>
-                                <div class="ai-auto-trade-note">
-                                    说明：AI自动交易走独立决策与下单链，不再经过“下单前AI复核”拦截；这里保留的是单独的代理配置与运行日志。
-                                </div>
 
-                                <div class="ai-auto-trade-rail">
-                                    <div class="ai-auto-trade-rail-step">1 启动代理</div>
-                                    <div class="ai-auto-trade-rail-step">2 单次试跑</div>
-                                    <div class="ai-auto-trade-rail-step">3 看日志</div>
-                                </div>
-
-                                <div class="ai-auto-trade-steps">
-                                    <section id="ai-agent-card" class="ai-auto-step">
+                                <div class="ai-agent-control-grid">
+                                    <section id="ai-agent-card" class="ai-auto-step ai-agent-panel ai-agent-panel-status">
                                         <div class="ai-auto-step-index">1</div>
                                         <div class="ai-auto-step-body">
                                             <div class="ai-auto-step-head">
-                                                <div class="ai-auto-step-title">启动自动交易代理</div>
+                                                <div class="ai-auto-step-title">运行状态与开关</div>
                                                 <span id="ai-agent-status-dot" class="agent-dot agent-dot-off" title="未运行"></span>
                                             </div>
-                                            <div class="ai-auto-step-desc">启动后它会持续盯盘、自动决策，并在满足条件时直接提交买卖动作。</div>
+                                            <div class="ai-auto-step-desc">先确认代理是否在跑、当前盯哪个币、模式是否允许实盘，再决定是否启动或停止。</div>
                                             <div id="ai-agent-info" class="ai-auto-step-info">加载中...</div>
-                                            <div class="ai-agent-section">
-                                                <div class="ai-agent-section-head">
-                                                    <div>
-                                                        <div class="ai-agent-section-title">为什么现在是 Hold / 观望</div>
-                                                        <div class="ai-agent-section-subtitle">把当前不下单的主因、关键状态和补充说明拆开看。</div>
-                                                    </div>
-                                                    <div id="ai-agent-hold-badge" class="ai-agent-section-badge">等待诊断</div>
-                                                </div>
-                                                <div id="ai-agent-reasons" class="ai-agent-reasons-box">加载中...</div>
-                                            </div>
-                                            <div class="ai-agent-section">
-                                                <div class="ai-agent-section-head">
-                                                    <div class="ai-agent-section-title">币种模式与自动选币</div>
-                                                    <button class="btn btn-sm" type="button" onclick="agentRefreshRanking()">刷新排行榜</button>
-                                                </div>
-                                                <div class="ai-auto-step-desc">固定币种时只盯一个 symbol；自动模式会先扫描更大的主流币池，再选当前最值得跟踪的币种。</div>
-                                                <div class="ai-agent-config-grid">
-                                                    <label id="ai-agent-symbol-mode-wrap" class="ai-agent-field">
-                                                        <span>币种模式</span>
-                                                        <select id="ai-agent-symbol-mode" onchange="agentToggleSymbolMode()">
-                                                            <option value="manual">固定币种</option>
-                                                            <option value="auto">自动选币</option>
-                                                        </select>
-                                                    </label>
-                                                    <label id="ai-agent-manual-symbol-wrap" class="ai-agent-field">
-                                                        <span>固定 symbol</span>
-                                                        <input id="ai-agent-manual-symbol" type="text" value="BTC/USDT" />
-                                                    </label>
-                                                </div>
-                                                <label id="ai-agent-universe-symbols-wrap" class="ai-agent-field ai-agent-field-block">
-                                                    <span>候选币池</span>
-                                                    <textarea id="ai-agent-universe-symbols" rows="3" placeholder="留空使用默认主流币池；或手动填写 BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT ..."></textarea>
-                                                </label>
-                                                <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
-                                                    <button class="btn btn-sm" type="button" onclick="agentSaveConfig()">保存配置</button>
-                                                </div>
-                                                <div class="ai-agent-scroll-shell ai-agent-scroll-shell-ranking">
-                                                    <div id="ai-agent-ranking-summary" class="ai-agent-ranking-summary">加载中...</div>
-                                                    <div id="ai-agent-ranking" class="ai-agent-ranking-box">加载中...</div>
-                                                </div>
-                                            </div>
                                             <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
                                                 <button class="btn btn-sm btn-success" id="ai-agent-start-btn" onclick="agentStart()">启动</button>
                                                 <button class="btn btn-sm btn-danger" id="ai-agent-stop-btn" onclick="agentStop()">停止</button>
@@ -2060,38 +2064,90 @@
                                         </div>
                                     </section>
 
-                                    <section class="ai-auto-step">
+                                    <section class="ai-auto-step ai-agent-panel ai-agent-panel-single">
                                         <div class="ai-auto-step-index">2</div>
                                         <div class="ai-auto-step-body">
-                                            <div class="ai-auto-step-title">需要时单次试跑</div>
-                                            <div class="ai-auto-step-desc">先跑一轮看看代理会不会给出合理动作，再决定是否长期开启。</div>
+                                            <div class="ai-auto-step-title">单次试跑</div>
+                                            <div class="ai-auto-step-desc">当你只想抽检一次自治判断时，用这一张卡就够了，避免直接长期开启。</div>
+                                            <div class="ai-agent-action-note">
+                                                推荐场景：刚改完提示词、风控、模型参数，或者想快速确认当前会不会继续观望。
+                                            </div>
                                             <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
                                                 <button class="btn btn-sm" id="ai-agent-run-once-btn" onclick="agentRunOnce()">立即跑一轮</button>
                                             </div>
                                         </div>
                                     </section>
 
-                                    <section class="ai-auto-step ai-auto-step-log">
-                                        <div class="ai-auto-step-index">3</div>
-                                        <div class="ai-auto-step-body">
-                                            <div class="ai-auto-step-head">
-                                                <div class="ai-auto-step-title">最后看最近决策日志与聚合信号快照</div>
-                                                <button class="btn btn-sm" type="button" onclick="agentRefreshJournal()">刷新日志</button>
+                                    <section class="ai-agent-section ai-agent-panel ai-agent-panel-diagnostics">
+                                        <div class="ai-agent-section-head">
+                                            <div>
+                                                <div class="ai-agent-section-title">为什么现在是 Hold / 观望</div>
+                                                <div class="ai-agent-section-subtitle">把当前不下单的主因、模型反馈、执行成本和补充说明拆开看，不再埋在运行信息里。</div>
                                             </div>
-                                            <div class="ai-auto-step-desc">这里会先展示当前周期的聚合信号快照、下一轮计划时间和上次耗时，再往下看最近每轮决策日志，避免只看到 120s 一次的落库结果。</div>
-                                            <div id="ai-agent-journal" class="ai-agent-journal-box">加载中...</div>
-                                            <div class="ai-auto-step-head ai-auto-step-head-subsection">
-                                                <div class="ai-auto-step-title">最近放行交易复盘</div>
-                                                <button class="btn btn-sm" type="button" onclick="agentRefreshReview()">刷新复盘</button>
+                                            <div id="ai-agent-hold-badge" class="ai-agent-section-badge">等待诊断</div>
+                                        </div>
+                                        <div id="ai-agent-reasons" class="ai-agent-reasons-box">加载中...</div>
+                                    </section>
+
+                                    <section class="ai-agent-section ai-agent-panel ai-agent-panel-ranking">
+                                        <div class="ai-agent-section-head">
+                                            <div>
+                                                <div class="ai-agent-section-title">币种模式与自动选币</div>
+                                                <div class="ai-agent-section-subtitle">固定币种时只盯一个 symbol；自动模式会扫描候选币池，优先选当前最值得跟踪的标的。</div>
                                             </div>
-                                            <div class="ai-auto-step-desc">把真正放行的开仓和平仓单独拎出来，快速看最近亏损是来自方向错误、平仓过慢，还是模型服务异常导致管理失灵。</div>
-                                            <div class="ai-agent-scroll-shell ai-agent-scroll-shell-review">
-                                                <div id="ai-agent-review-summary" class="ai-agent-review-summary">加载中...</div>
-                                                <div id="ai-agent-review" class="ai-agent-review-box">加载中...</div>
-                                            </div>
+                                            <button class="btn btn-sm" type="button" onclick="agentRefreshRanking()">刷新排行榜</button>
+                                        </div>
+                                        <div class="ai-agent-config-grid">
+                                            <label id="ai-agent-symbol-mode-wrap" class="ai-agent-field">
+                                                <span>币种模式</span>
+                                                <select id="ai-agent-symbol-mode" onchange="agentToggleSymbolMode()">
+                                                    <option value="manual">固定币种</option>
+                                                    <option value="auto">自动选币</option>
+                                                </select>
+                                            </label>
+                                            <label id="ai-agent-manual-symbol-wrap" class="ai-agent-field">
+                                                <span>固定 symbol</span>
+                                                <input id="ai-agent-manual-symbol" type="text" value="BTC/USDT" />
+                                            </label>
+                                        </div>
+                                        <label id="ai-agent-universe-symbols-wrap" class="ai-agent-field ai-agent-field-block">
+                                            <span>候选币池</span>
+                                            <textarea id="ai-agent-universe-symbols" rows="3" placeholder="留空使用默认主流币池；或手动填写 BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT ..."></textarea>
+                                        </label>
+                                        <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
+                                            <button class="btn btn-sm" type="button" onclick="agentSaveConfig()">保存配置</button>
+                                        </div>
+                                        <div class="ai-agent-scroll-shell ai-agent-scroll-shell-ranking">
+                                            <div id="ai-agent-ranking-summary" class="ai-agent-ranking-summary">加载中...</div>
+                                            <div id="ai-agent-ranking" class="ai-agent-ranking-box">加载中...</div>
                                         </div>
                                     </section>
                                 </div>
+
+                                <section class="ai-agent-panel ai-agent-panel-journal">
+                                    <div class="ai-auto-step-head">
+                                        <div>
+                                            <div class="ai-auto-step-title">最近决策日志与聚合信号快照</div>
+                                            <div class="ai-auto-step-desc">先看当前周期快照，再看最近每轮决策日志，避免只盯着最终提交结果。</div>
+                                        </div>
+                                        <button class="btn btn-sm" type="button" onclick="agentRefreshJournal()">刷新日志</button>
+                                    </div>
+                                    <div id="ai-agent-journal" class="ai-agent-journal-box">加载中...</div>
+                                </section>
+
+                                <section class="ai-agent-panel ai-agent-panel-review">
+                                    <div class="ai-auto-step-head">
+                                        <div>
+                                            <div class="ai-auto-step-title">最近放行交易复盘</div>
+                                            <div class="ai-auto-step-desc">把真正放行的开仓和平仓单独拎出来，看亏损是来自方向错误、平仓过慢，还是模型服务异常导致管理失灵。</div>
+                                        </div>
+                                        <button class="btn btn-sm" type="button" onclick="agentRefreshReview()">刷新复盘</button>
+                                    </div>
+                                    <div class="ai-agent-review-workspace">
+                                        <div id="ai-agent-review-summary" class="ai-agent-review-summary">加载中...</div>
+                                        <div id="ai-agent-review" class="ai-agent-review-box">加载中...</div>
+                                    </div>
+                                </section>
                             </div>
 
                             <div class="ai-agent-runtime-stack">
@@ -2527,13 +2583,13 @@
 
     <div id="notification" class="notification"></div>
 
-    <script charset="utf-8" src="/static/js/app.js?v=124"></script>
+    <script charset="utf-8" src="/static/js/app.js?v=128"></script>
     <script charset="utf-8" src="/static/js/research_workbench.js?v=8"></script>
     <script charset="utf-8" src="/static/js/ai_research.js?v=42"></script>
     <script charset="utf-8" src="/static/js/ai_research_diagnostics.js?v=5"></script>
     <script charset="utf-8" src="/static/js/ai_research_runtime.js?v=7"></script>
-    <script charset="utf-8" src="/static/js/ai_research_agent.js?v=7"></script>
-    <script charset="utf-8" src="/static/js/news_tab_runtime.js?v=14"></script>
-    <script charset="utf-8" src="/static/js/dashboard_unstructured_news.js?v=14"></script>
+    <script charset="utf-8" src="/static/js/ai_research_agent.js?v=9"></script>
+    <script charset="utf-8" src="/static/js/news_tab_runtime.js?v=16"></script>
+    <script charset="utf-8" src="/static/js/dashboard_unstructured_news.js?v=16"></script>
 </body>
 </html>

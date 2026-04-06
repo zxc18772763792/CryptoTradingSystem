@@ -6,6 +6,8 @@
     const state = {
         timer: null,
         bucketRenderTimer: null,
+        ws: null,
+        wsReconnectTimer: null,
         latest: null,
         brief: null,
         summary: null,
@@ -50,6 +52,31 @@
         if (isStandalonePage()) return true;
         const tab = el("news");
         return !!tab && tab.classList.contains("active");
+    }
+
+    function shouldRunLiveUpdates() {
+        return !document.hidden && isNewsVisible();
+    }
+
+    function stopTimer() {
+        if (state.timer) clearInterval(state.timer);
+        state.timer = null;
+    }
+
+    function clearReconnectTimer() {
+        if (state.wsReconnectTimer) clearTimeout(state.wsReconnectTimer);
+        state.wsReconnectTimer = null;
+    }
+
+    function disconnectWs() {
+        clearReconnectTimer();
+        const ws = state.ws;
+        state.ws = null;
+        if (!ws) return;
+        ws.onclose = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        try { ws.close(); } catch (_) {}
     }
 
     function summaryGranularityLabel(gran) {
@@ -689,39 +716,72 @@
         state.needsRefresh = false;
         state.refreshPromise = (async () => {
             try {
-                const [briefRes, latestRes, healthRes, workerRes, coverageRes] = await Promise.allSettled([
-                    loadBrief(),
-                    loadLatestFast(),
-                    request("/health", { timeoutMs: 15000 }).catch(() => null),
-                    request("/worker_status", { timeoutMs: 15000 }).catch(() => null),
-                    loadCoverage().catch(() => null),
-                ]);
-                if (briefRes.status === "fulfilled") state.brief = briefRes.value || state.brief || null;
-                if (latestRes.status === "fulfilled") state.latest = latestRes.value || state.latest || null;
-                if (healthRes.status === "fulfilled") state.health = healthRes.value || state.health || null;
-                if (workerRes.status === "fulfilled") state.worker = workerRes.value || state.worker || null;
-                if (coverageRes.status === "fulfilled") state.coverage = coverageRes.value || state.coverage || null;
+                let latestErr = null;
+                try {
+                    state.latest = await loadLatestFast() || state.latest || null;
+                } catch (err) {
+                    latestErr = err;
+                }
                 if (!state.latest) {
-                    const latestErr = latestRes.status === "rejected" ? latestRes.reason : new Error("新闻列表不可用");
-                    throw latestErr;
+                    throw latestErr || new Error("新闻列表不可用");
                 }
                 renderAll();
-                ensureLlmKickoff().catch(() => {});
-                if (shouldLoadSummary) {
-                    state.summaryLoading = true;
-                    loadSummary().then((summary) => {
-                        state.summary = summary || null;
-                        state.summaryLoadedAt = Date.now();
-                        renderAll();
-                    }).catch(() => {
-                        // Keep the page responsive when summary endpoint is slow/failing.
-                        state.summary = state.summary || null;
-                        renderBuckets();
-                        renderProviders();
-                    }).finally(() => {
-                        state.summaryLoading = false;
-                    });
-                }
+
+                void (async () => {
+                    try {
+                        const healthValue = await request("/health", { timeoutMs: 15000 }).catch(() => null);
+                        if (healthValue) {
+                            state.health = healthValue || state.health || null;
+                            renderAll();
+                        }
+                    } catch (_) {}
+
+                    try {
+                        const workerValue = await request("/worker_status", { timeoutMs: 15000 }).catch(() => null);
+                        if (workerValue) {
+                            state.worker = workerValue || state.worker || null;
+                            renderAll();
+                        }
+                    } catch (_) {}
+
+                    const secondaryTasks = [
+                        loadBrief()
+                            .then((value) => {
+                                if (value) {
+                                    state.brief = value || state.brief || null;
+                                    renderAll();
+                                }
+                            })
+                            .catch(() => null),
+                        loadCoverage()
+                            .then((value) => {
+                                if (value) {
+                                    state.coverage = value || state.coverage || null;
+                                    renderAll();
+                                }
+                            })
+                            .catch(() => null),
+                    ];
+                    if (shouldLoadSummary) {
+                        state.summaryLoading = true;
+                        secondaryTasks.push(
+                            loadSummary()
+                                .then((value) => {
+                                    state.summary = value || null;
+                                    state.summaryLoadedAt = Date.now();
+                                })
+                                .catch(() => {
+                                    state.summary = state.summary || null;
+                                })
+                                .finally(() => {
+                                    state.summaryLoading = false;
+                                    renderAll();
+                                })
+                        );
+                    }
+                    await Promise.allSettled(secondaryTasks);
+                    ensureLlmKickoff().catch(() => {});
+                })();
                 enrichHeadlines();
             } catch (err) {
                 notify(`新闻刷新失败: ${err.message}`, true);
@@ -877,17 +937,28 @@
     }
 
     function restartTimer() {
-        if (state.timer) clearInterval(state.timer);
+        stopTimer();
+        if (!shouldRunLiveUpdates()) return;
         state.timer = setInterval(() => {
-            if (document.hidden || !isNewsVisible()) return;
+            if (!shouldRunLiveUpdates()) {
+                stopTimer();
+                return;
+            }
             refreshAll(false).catch(() => {});
         }, Math.max(5, Number(getVal("news-auto-refresh-sec", "15")) || 15) * 1000);
     }
 
     function connectWs() {
+        if (!shouldRunLiveUpdates()) {
+            disconnectWs();
+            return;
+        }
+        if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) return;
+        clearReconnectTimer();
         try {
             const protocol = location.protocol === "https:" ? "wss" : "ws";
             const ws = new WebSocket(`${protocol}://${location.host}/ws`);
+            state.ws = ws;
             ws.onmessage = (evt) => {
                 try {
                     const msg = JSON.parse(evt.data || "{}");
@@ -896,8 +967,26 @@
                     else state.needsRefresh = true;
                 } catch (_) {}
             };
-            ws.onclose = () => setTimeout(connectWs, 2000);
+            ws.onclose = () => {
+                if (state.ws === ws) state.ws = null;
+                if (!shouldRunLiveUpdates()) return;
+                clearReconnectTimer();
+                state.wsReconnectTimer = setTimeout(connectWs, 2000);
+            };
+            ws.onerror = () => {
+                try { ws.close(); } catch (_) {}
+            };
         } catch (_) {}
+    }
+
+    function ensureLiveUpdates() {
+        if (!shouldRunLiveUpdates()) {
+            stopTimer();
+            disconnectWs();
+            return;
+        }
+        restartTimer();
+        connectWs();
     }
 
     function bind() {
@@ -925,30 +1014,37 @@
         el("news-summary-granularity")?.addEventListener("change", renderSummary);
         document.querySelectorAll('.tab-btn[data-tab="news"]').forEach((btn) => btn.addEventListener("click", () => {
             setTimeout(() => {
-                restartTimer();
+                ensureLiveUpdates();
                 if (state.needsRefresh || !state.latest) refreshAll(true).catch(() => {});
                 else scheduleBucketRender(220);
             }, 120);
         }));
         document.addEventListener("visibilitychange", () => {
+            ensureLiveUpdates();
             if (!document.hidden && isNewsVisible()) {
                 refreshAll(false).catch(() => {});
                 scheduleBucketRender(200);
             }
         });
         window.addEventListener("resize", () => scheduleBucketRender(180));
+        window.addEventListener("beforeunload", () => {
+            stopTimer();
+            disconnectWs();
+        });
     }
 
     async function init() {
         if (!el("news-unstructured-list")) return;
         bind();
-        restartTimer();
-        connectWs();
         if (isNewsVisible()) {
+            ensureLiveUpdates();
             await refreshAll(true);
             scheduleBucketRender(220);
         }
-        else state.needsRefresh = true;
+        else {
+            state.needsRefresh = true;
+            ensureLiveUpdates();
+        }
     }
 
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);

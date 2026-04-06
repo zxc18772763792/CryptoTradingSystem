@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
@@ -84,11 +85,20 @@ async def reset_paper_trading_state(clear_snapshots: bool = True):
 
 @router.get("/stats")
 async def get_trading_stats():
-    risk_report = await _build_effective_risk_report(force_live_refresh=False)
+    degraded = False
+    try:
+        risk_report = await asyncio.wait_for(
+            _build_effective_risk_report(force_live_refresh=False),
+            timeout=6.0,
+        )
+    except Exception:
+        risk_report = risk_manager.get_risk_report()
+        degraded = True
     return {
         "orders": order_manager.get_stats(),
         "positions": position_manager.get_stats(),
         "risk": risk_report,
+        "risk_degraded": degraded,
         "trading_mode": execution_engine.get_trading_mode(),
     }
 

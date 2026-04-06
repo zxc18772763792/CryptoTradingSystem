@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import copy
 import time
 from typing import Any, Dict, List, Optional
 
@@ -9,6 +12,85 @@ from web.api import trading as trading_api
 
 
 router = APIRouter()
+_BALANCE_RESPONSE_CACHE_TTL_SEC = 10.0
+_BALANCE_RESPONSE_STALE_TTL_SEC = 90.0
+_BALANCE_RESPONSE_TIMEOUT_SEC = 18.0
+_BALANCE_RESPONSE_CACHE: Dict[str, Dict[str, Any]] = {}
+_BALANCE_RESPONSE_TASKS: Dict[str, asyncio.Task] = {}
+
+
+def _clone_balance_payload(mode_name: str, *, max_age_sec: float, stale_note: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    cached = _BALANCE_RESPONSE_CACHE.get(str(mode_name or "").strip().lower())
+    if not cached:
+        return None
+    age_sec = max(0.0, time.time() - float(cached.get("ts") or 0.0))
+    if age_sec > max(0.0, float(max_age_sec or 0.0)):
+        return None
+    payload = copy.deepcopy(cached.get("payload") or {})
+    payload["from_cache"] = True
+    payload["cache_age_sec"] = round(age_sec, 2)
+    if stale_note:
+        payload["stale"] = True
+        payload["warning"] = stale_note
+    return payload
+
+
+def _minimal_balance_payload(mode_name: str, note: str) -> Dict[str, Any]:
+    resolved_mode = str(mode_name or ("paper" if trading_api.execution_engine.is_paper_mode() else "live")).strip().lower()
+    is_paper_mode = resolved_mode == "paper"
+    risk_report = trading_api.risk_manager.get_risk_report()
+    exchanges = {}
+    for exchange_name in ["gate", "binance", "okx"]:
+        connector = trading_api.exchange_manager.get_exchange(exchange_name)
+        exchanges[exchange_name] = {
+            "connected": bool(getattr(connector, "is_connected", False)),
+            "balances": [],
+            "total_usd": 0.0,
+            "error": note,
+            "from_cache": False,
+        }
+    return {
+        "exchanges": exchanges,
+        "distribution": [],
+        "total_usd_estimate": 0.0,
+        "market_total_usd_estimate": 0.0,
+        "binance_total_usd_estimate": 0.0,
+        "paper_equity_estimate": 0.0 if is_paper_mode else None,
+        "real_account_usd_estimate": 0.0,
+        "virtual_account_usd_estimate": 0.0 if is_paper_mode else None,
+        "active_account_type": "paper" if is_paper_mode else "live",
+        "active_account_usd_estimate": 0.0,
+        "inactive_account_usd_estimate": None,
+        "paper_account": None,
+        "risk_equity_input": 0.0,
+        "live_day_start_equity": None,
+        "live_daily_total_pnl_usd": None,
+        "live_unrealized_pnl_usd": 0.0,
+        "live_position_count": int(trading_api.position_manager.get_position_count() or 0) if is_paper_mode else 0,
+        "unpriced_assets": 0,
+        "connected_exchanges": trading_api.exchange_manager.get_connected_exchanges(),
+        "mode": resolved_mode,
+        "risk_report": risk_report,
+        "risk": {
+            "trading_halted": risk_report.get("trading_halted", False),
+            "risk_level": risk_report.get("risk_level", "low"),
+        },
+        "notifications": {"triggered_count": 0},
+        "warning": note,
+        "stale": True,
+        "from_cache": False,
+    }
+
+
+def _balance_response_fallback(mode_name: str, note: str) -> Dict[str, Any]:
+    stale_payload = _clone_balance_payload(
+        mode_name,
+        max_age_sec=_BALANCE_RESPONSE_STALE_TTL_SEC,
+        stale_note=note,
+    )
+    if stale_payload is not None:
+        return stale_payload
+    return _minimal_balance_payload(mode_name, note)
 
 
 @router.get("/balance")
@@ -43,8 +125,7 @@ async def get_balance(exchange: str = "gate"):
         }
 
 
-@router.get("/balances")
-async def get_all_balances():
+async def _build_all_balances_payload():
     results: Dict[str, Dict[str, Any]] = {}
     total_usd = 0.0
     distribution_map: Dict[str, float] = {}
@@ -635,6 +716,61 @@ async def get_all_balances():
             "triggered_count": rule_eval.get("triggered_count", 0),
         },
     }
+
+
+@router.get("/balances")
+async def get_all_balances(force_refresh: bool = False):
+    mode_name = str(trading_api.execution_engine.get_trading_mode() or "paper").strip().lower()
+    if mode_name not in {"paper", "live"}:
+        mode_name = "paper" if trading_api.execution_engine.is_paper_mode() else "live"
+
+    if not force_refresh:
+        fresh_payload = _clone_balance_payload(mode_name, max_age_sec=_BALANCE_RESPONSE_CACHE_TTL_SEC)
+        if fresh_payload is not None:
+            return fresh_payload
+
+        in_flight = _BALANCE_RESPONSE_TASKS.get(mode_name)
+        if in_flight and not in_flight.done():
+            stale_payload = _clone_balance_payload(
+                mode_name,
+                max_age_sec=_BALANCE_RESPONSE_STALE_TTL_SEC,
+                stale_note="资产快照刷新中，已先返回最近缓存。",
+            )
+            if stale_payload is not None:
+                return stale_payload
+            try:
+                return copy.deepcopy(
+                    await asyncio.wait_for(asyncio.shield(in_flight), timeout=_BALANCE_RESPONSE_TIMEOUT_SEC)
+                )
+            except asyncio.CancelledError:
+                if not in_flight.cancelled():
+                    raise
+            except Exception:
+                pass
+
+    task = asyncio.create_task(_build_all_balances_payload())
+    _BALANCE_RESPONSE_TASKS[mode_name] = task
+    try:
+        payload = await asyncio.wait_for(asyncio.shield(task), timeout=_BALANCE_RESPONSE_TIMEOUT_SEC)
+        _BALANCE_RESPONSE_CACHE[mode_name] = {
+            "ts": time.time(),
+            "payload": copy.deepcopy(payload),
+        }
+        return payload
+    except asyncio.TimeoutError:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        return _balance_response_fallback(mode_name, "资产快照刷新超时，正在后台重试。")
+    except asyncio.CancelledError:
+        if not task.cancelled():
+            raise
+        return _balance_response_fallback(mode_name, "资产快照刷新任务已取消，已返回最近缓存。")
+    except Exception as exc:
+        return _balance_response_fallback(mode_name, f"资产快照刷新失败: {exc}")
+    finally:
+        if _BALANCE_RESPONSE_TASKS.get(mode_name) is task:
+            _BALANCE_RESPONSE_TASKS.pop(mode_name, None)
 
 
 @router.get("/balances/history")

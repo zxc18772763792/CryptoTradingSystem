@@ -1194,6 +1194,138 @@ def _review_price_markout_bps(entry_price: Any, current_price: Any, side: str) -
     return None
 
 
+def _review_curve_row_symbol(row: Dict[str, Any]) -> str:
+    config = row.get("config") if isinstance(row.get("config"), dict) else {}
+    if config.get("symbol"):
+        return str(config.get("symbol") or "")
+    execution = row.get("execution") if isinstance(row.get("execution"), dict) else {}
+    signal = execution.get("signal") if isinstance(execution.get("signal"), dict) else {}
+    return str(signal.get("symbol") or "")
+
+
+def _review_append_curve_point(
+    points: List[Dict[str, Any]],
+    *,
+    timestamp: Any,
+    pnl: Any,
+    price: Any = None,
+    kind: str = "mark",
+    label: Optional[str] = None,
+) -> None:
+    ts = str(timestamp or "").strip()
+    pnl_value = _review_safe_float(pnl)
+    if not ts or pnl_value is None:
+        return
+    point: Dict[str, Any] = {
+        "timestamp": ts,
+        "pnl": round(float(pnl_value), 6),
+        "kind": str(kind or "mark").strip().lower() or "mark",
+    }
+    price_value = _review_safe_float(price)
+    if price_value is not None:
+        point["price"] = round(float(price_value), 8)
+    if label:
+        point["label"] = str(label)
+    if points and str(points[-1].get("timestamp") or "") == ts:
+        points[-1].update(point)
+    else:
+        points.append(point)
+
+
+def _build_autonomous_review_profit_curve(
+    *,
+    entry_event: Dict[str, Any],
+    journal_rows: List[Dict[str, Any]],
+    exit_event: Optional[Dict[str, Any]] = None,
+    current_position: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(entry_event, dict) or not journal_rows:
+        return None
+    entry_row_index = entry_event.get("_row_index")
+    if not isinstance(entry_row_index, int) or entry_row_index < 0 or entry_row_index >= len(journal_rows):
+        return None
+    entry_symbol = entry_event.get("symbol")
+    entry_side = str(entry_event.get("position_side") or "").strip().lower()
+    if entry_side not in {"long", "short"}:
+        return None
+
+    points: List[Dict[str, Any]] = []
+    _review_append_curve_point(
+        points,
+        timestamp=entry_event.get("timestamp"),
+        pnl=0.0,
+        price=entry_event.get("price"),
+        kind="entry",
+        label="entry",
+    )
+
+    end_row_index = len(journal_rows) - 1
+    if isinstance(exit_event, dict) and isinstance(exit_event.get("_row_index"), int):
+        end_row_index = min(end_row_index, int(exit_event["_row_index"]))
+
+    for row_index in range(entry_row_index + 1, end_row_index + 1):
+        row = journal_rows[row_index]
+        if row_index == end_row_index and isinstance(exit_event, dict):
+            exit_context = row.get("context") if isinstance(row.get("context"), dict) else {}
+            exit_position = exit_context.get("position") if isinstance(exit_context.get("position"), dict) else {}
+            close_price = _review_safe_float(exit_event.get("price"))
+            if close_price is None:
+                close_price = _review_safe_float((exit_position or {}).get("current_price"))
+            if close_price is None:
+                close_price = _review_safe_float(exit_context.get("price"))
+            _review_append_curve_point(
+                points,
+                timestamp=exit_event.get("timestamp"),
+                pnl=(exit_event.get("position_before") or {}).get("unrealized_pnl"),
+                price=close_price,
+                kind="exit",
+                label="exit",
+            )
+            continue
+
+        row_symbol = _review_curve_row_symbol(row)
+        if not _review_symbol_matches(row_symbol, entry_symbol):
+            continue
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        position = context.get("position") if isinstance(context.get("position"), dict) else {}
+        if not position:
+            continue
+        if str(position.get("side") or "").strip().lower() != entry_side:
+            continue
+        _review_append_curve_point(
+            points,
+            timestamp=row.get("timestamp"),
+            pnl=position.get("unrealized_pnl"),
+            price=position.get("current_price") or context.get("price"),
+            kind="mark",
+        )
+
+    if exit_event is None and isinstance(current_position, dict):
+        _review_append_curve_point(
+            points,
+            timestamp=current_position.get("updated_at") or current_position.get("opened_at") or datetime.now(timezone.utc).isoformat(),
+            pnl=current_position.get("unrealized_pnl"),
+            price=current_position.get("current_price"),
+            kind="current",
+            label="current",
+        )
+
+    if len(points) < 2:
+        return None
+
+    pnl_series = [float(point.get("pnl") or 0.0) for point in points]
+    return {
+        "points": points,
+        "closed": bool(exit_event),
+        "entry_timestamp": entry_event.get("timestamp"),
+        "close_timestamp": (exit_event or {}).get("timestamp") if isinstance(exit_event, dict) else None,
+        "point_count": len(points),
+        "final_pnl": round(float(pnl_series[-1]), 6),
+        "max_pnl": round(float(max(pnl_series)), 6),
+        "min_pnl": round(float(min(pnl_series)), 6),
+    }
+
+
 def _review_is_model_issue(row: Dict[str, Any]) -> bool:
     diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), dict) else {}
     primary = diagnostics.get("primary") if isinstance(diagnostics.get("primary"), dict) else {}
@@ -1410,6 +1542,7 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
             "review_status": "pending",
             "review_status_text": _review_status_label("pending"),
             "review_status_tone": _review_status_tone("pending"),
+            "profit_curve": None,
             "summary_lines": [],
             "_row_index": row_index,
         }
@@ -1513,6 +1646,7 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
                 "closed_at": event.get("timestamp"),
                 "exit_action": event.get("action"),
                 "exit_action_label": event.get("action_label"),
+                "exit_row_index": event.get("_row_index"),
             }
         )
         event["pair"].update(
@@ -1524,6 +1658,7 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
                 "opened_at": entry_event.get("timestamp"),
                 "entry_action": entry_event.get("action"),
                 "entry_action_label": entry_event.get("action_label"),
+                "entry_row_index": entry_event.get("_row_index"),
             }
         )
 
@@ -1550,6 +1685,21 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
         if matching_unmatched:
             latest_entry = matching_unmatched[-1]
             latest_entry["current_position"] = position
+
+    events_by_id = {str(event.get("id") or ""): event for event in events}
+    for event in entry_events:
+        pair = event.get("pair") if isinstance(event.get("pair"), dict) else {}
+        exit_event = events_by_id.get(str(pair.get("exit_id") or "")) if pair.get("matched") else None
+        curve = _build_autonomous_review_profit_curve(
+            entry_event=event,
+            exit_event=exit_event if isinstance(exit_event, dict) else None,
+            current_position=event.get("current_position") if isinstance(event.get("current_position"), dict) else None,
+            journal_rows=journal_rows,
+        )
+        if curve is not None:
+            event["profit_curve"] = curve
+            if isinstance(exit_event, dict):
+                exit_event["profit_curve"] = curve
 
     outage_after_entry_count = sum(
         1

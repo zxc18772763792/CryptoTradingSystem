@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import pytest
 import pandas as pd
+import pytest
 from pydantic import ValidationError
 
 
@@ -216,6 +217,85 @@ def test_autonomous_agent_review_endpoint_includes_learning_memory(monkeypatch):
     result = asyncio.run(ai_module.get_ai_autonomous_agent_review(request, limit=8))
     assert result["summary"]["submitted_count"] == 0
     assert result["learning_memory"]["adaptive_risk"]["effective_min_confidence"] == 0.66
+
+
+def test_build_autonomous_agent_review_includes_profit_curve(monkeypatch, tmp_path):
+    from web.api import ai_research as ai_module
+
+    journal_rows = [
+        {
+            "timestamp": "2026-04-04T09:00:00+00:00",
+            "config": {"symbol": "BTC/USDT"},
+            "decision": {"action": "buy", "reason": "trend", "confidence": 0.71},
+            "diagnostics": {"primary": {"label": "趋势共振", "detail": "", "tone": "good"}},
+            "context": {
+                "price": 68000.0,
+                "position": {},
+                "execution_cost": {},
+                "aggregated_signal": {"direction": "LONG", "confidence": 0.71},
+            },
+            "execution": {
+                "submitted": True,
+                "signal": {"symbol": "BTC/USDT", "signal_type": "buy", "price": 68000.0},
+            },
+        },
+        {
+            "timestamp": "2026-04-04T09:15:00+00:00",
+            "config": {"symbol": "BTC/USDT"},
+            "diagnostics": {"primary": {"label": "管理中", "detail": "", "tone": "info"}},
+            "context": {
+                "price": 68120.0,
+                "position": {
+                    "side": "long",
+                    "quantity": 0.1,
+                    "entry_price": 68000.0,
+                    "current_price": 68125.0,
+                    "unrealized_pnl": 1.25,
+                },
+            },
+            "execution": {"submitted": False},
+        },
+        {
+            "timestamp": "2026-04-04T09:30:00+00:00",
+            "config": {"symbol": "BTC/USDT"},
+            "decision": {"action": "close_long", "reason": "take_profit", "confidence": 0.64},
+            "diagnostics": {"primary": {"label": "止盈离场", "detail": "", "tone": "good"}},
+            "context": {
+                "price": 68080.0,
+                "position": {
+                    "side": "long",
+                    "quantity": 0.1,
+                    "entry_price": 68000.0,
+                    "current_price": 68080.0,
+                    "unrealized_pnl": 0.8,
+                },
+                "execution_cost": {},
+                "aggregated_signal": {"direction": "LONG", "confidence": 0.64},
+            },
+            "execution": {
+                "submitted": True,
+                "signal": {"symbol": "BTC/USDT", "signal_type": "close_long", "price": 68080.0},
+            },
+        },
+    ]
+    journal_path = tmp_path / "autonomous_agent_journal.jsonl"
+    journal_path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in journal_rows),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "_journal_path", journal_path)
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "read_journal", lambda limit=500: [])
+    monkeypatch.setattr(ai_module.order_manager, "get_recent_orders", lambda limit=5000: [])
+    monkeypatch.setattr(ai_module.position_manager, "get_all_positions", lambda: [])
+
+    payload = ai_module._build_autonomous_agent_review(limit=12)
+
+    exit_item = next(item for item in payload["items"] if item["phase"] == "exit")
+    curve = exit_item["profit_curve"]
+    assert curve["closed"] is True
+    assert [point["kind"] for point in curve["points"]] == ["entry", "mark", "exit"]
+    assert [point["pnl"] for point in curve["points"]] == [0.0, 1.25, 0.8]
 
 
 def test_live_signals_gracefully_degrades_when_symbol_scan_times_out(monkeypatch):

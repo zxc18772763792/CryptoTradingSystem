@@ -330,6 +330,127 @@
     return toneClass(tone || 'info');
   }
 
+  function buildAgentProfitCurveHostId(index) {
+    return `ai-agent-review-curve-${index}`;
+  }
+
+  function getAgentProfitCurvePoints(item = {}) {
+    const curve = item?.profit_curve && typeof item.profit_curve === 'object' ? item.profit_curve : {};
+    const rawPoints = Array.isArray(curve.points) ? curve.points : [];
+    return rawPoints
+      .map((point) => {
+        const pnl = Number(point?.pnl);
+        const timestamp = String(point?.timestamp || '').trim();
+        if (!Number.isFinite(pnl) || !timestamp) return null;
+        const price = Number(point?.price);
+        return {
+          timestamp,
+          pnl,
+          price: Number.isFinite(price) ? price : null,
+          kind: String(point?.kind || 'mark').trim().toLowerCase() || 'mark',
+          label: String(point?.label || '').trim(),
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function shouldShowAgentProfitCurve(item = {}) {
+    const points = getAgentProfitCurvePoints(item);
+    if (points.length < 2) return false;
+    if (String(item?.phase || '').trim().toLowerCase() === 'exit') return true;
+    return !Boolean(item?.pair?.matched);
+  }
+
+  function renderAgentProfitCurveChart(hostEl, item = {}) {
+    if (!hostEl) return;
+    const points = getAgentProfitCurvePoints(item);
+    if (points.length < 2) {
+      hostEl.innerHTML = '<div class="ai-agent-review-curve-empty">暂无足够收益轨迹</div>';
+      return;
+    }
+    if (typeof Plotly === 'undefined') {
+      hostEl.innerHTML = '<div class="ai-agent-review-curve-empty">图表库未加载，暂时无法显示收益曲线</div>';
+      return;
+    }
+    if (typeof window.clearPlotlyHost === 'function') window.clearPlotlyHost(hostEl);
+    else hostEl.replaceChildren();
+    if (typeof window.preparePlotlyHost === 'function') window.preparePlotlyHost(hostEl);
+
+    const curve = item?.profit_curve && typeof item.profit_curve === 'object' ? item.profit_curve : {};
+    const finalPnl = Number(curve.final_pnl || points[points.length - 1]?.pnl || 0);
+    const lineColor = finalPnl >= 0 ? '#4ade80' : '#f87171';
+    const fillColor = finalPnl >= 0 ? 'rgba(74,222,128,0.14)' : 'rgba(248,113,113,0.14)';
+    const baseTrace = {
+      type: 'scatter',
+      mode: 'lines',
+      name: '收益曲线',
+      x: points.map((point) => point.timestamp),
+      y: points.map((point) => point.pnl),
+      line: { color: lineColor, width: 2.2 },
+      fill: 'tozeroy',
+      fillcolor: fillColor,
+      hovertemplate: points.map((point) => {
+        const priceText = Number.isFinite(point.price) ? `<br>价格: ${point.price.toFixed(point.price >= 100 ? 2 : 4)}` : '';
+        const labelText = point.label ? `<br>节点: ${esc(point.label)}` : '';
+        return `收益: ${point.pnl.toFixed(4)} USDT${priceText}${labelText}<extra></extra>`;
+      }),
+    };
+    const buildMarkerTrace = (kind, name, color, symbol) => {
+      const subset = points.filter((point) => point.kind === kind);
+      if (!subset.length) return null;
+      return {
+        type: 'scatter',
+        mode: 'markers',
+        name,
+        x: subset.map((point) => point.timestamp),
+        y: subset.map((point) => point.pnl),
+        marker: {
+          color,
+          size: kind === 'current' ? 11 : 9,
+          symbol,
+          line: { color: '#0b1220', width: 1.2 },
+        },
+        hovertemplate: subset.map((point) => {
+          const priceText = Number.isFinite(point.price) ? `<br>价格: ${point.price.toFixed(point.price >= 100 ? 2 : 4)}` : '';
+          return `${esc(name)}<br>收益: ${point.pnl.toFixed(4)} USDT${priceText}<extra></extra>`;
+        }),
+      };
+    };
+    const traces = [
+      baseTrace,
+      buildMarkerTrace('entry', '开仓', '#93c5fd', 'diamond'),
+      buildMarkerTrace('exit', '平仓', '#fbbf24', 'x'),
+      buildMarkerTrace('current', '当前', '#c084fc', 'circle'),
+    ].filter(Boolean);
+
+    Plotly.react(hostEl, traces, {
+      paper_bgcolor: 'transparent',
+      plot_bgcolor: 'transparent',
+      font: { color: '#dfe9f7', size: 11 },
+      margin: { t: 18, b: 36, l: 58, r: 22 },
+      xaxis: {
+        type: 'date',
+        showgrid: true,
+        gridcolor: '#223047',
+        tickformat: '%m-%d %H:%M',
+        hoverformat: '%Y-%m-%d %H:%M:%S',
+        rangeslider: { visible: false },
+      },
+      yaxis: {
+        showgrid: true,
+        gridcolor: '#223047',
+        zeroline: true,
+        zerolinecolor: 'rgba(148,163,184,0.35)',
+        title: { text: 'PnL (USDT)', font: { size: 10, color: '#8ea6c4' } },
+      },
+      legend: { orientation: 'h', y: 1.13, x: 0, font: { size: 10 } },
+    }, {
+      responsive: true,
+      displayModeBar: false,
+      displaylogo: false,
+    });
+  }
+
   function describeModelFeedback(status = {}, diagnostics = {}) {
     const feedback = diagnostics.model_feedback || {};
     const guard = feedback.guard || status.model_feedback_guard || {};
@@ -447,6 +568,124 @@
     if (!el) return;
     el.textContent = normalizeUiText(String(value || '--'));
     el.className = `ai-chain-summary-tag${tone ? ` is-${tone}` : ''}`;
+  }
+
+  function setAgentCockpitBadge(id, value, tone = '') {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = normalizeUiText(String(value || '--'));
+    el.className = `ai-agent-cockpit-badge${tone ? ` ${toneClass(tone)}` : ''}`;
+  }
+
+  function setAgentCockpitStat(cardId, valueId, subId, value, subValue = '--', tone = '') {
+    const card = document.getElementById(cardId);
+    const valueEl = document.getElementById(valueId);
+    const subEl = document.getElementById(subId);
+    if (card) card.className = `ai-agent-cockpit-stat${tone ? ` ${toneClass(tone)}` : ''}`;
+    if (valueEl) valueEl.textContent = normalizeUiText(String(value || '--'));
+    if (subEl) subEl.textContent = normalizeUiText(String(subValue || '--'));
+  }
+
+  function renderAgentCockpit(status = {}, cfg = {}, rankingState = null) {
+    const running = Boolean(status.running);
+    const lastDecision = status.last_decision || {};
+    const lastExecution = status.last_execution || {};
+    const diagnostics = status.last_diagnostics || {};
+    const ranking = rankingState || resolveAgentRankingState(status, cfg);
+    const scan = ranking?.scan || {};
+    const selectedSymbol = String(scan.selected_symbol || cfg.symbol || '--');
+    const selectionReason = symbolSelectionReasonText(scan.selection_reason || 'manual_symbol');
+    const nextRunText = fmtAgentTs(status.next_run_at);
+    const latencyText = formatLatencyMs(status.last_latency_ms);
+    const intervalSec = Number(cfg.interval_sec || 0);
+    const decisionConfidence = Number(lastDecision.confidence || 0);
+    const modelFeedback = describeModelFeedback(status, diagnostics);
+    const executionCost = describeExecutionCost(diagnostics);
+    const currentAction = String(lastDecision.action || 'hold').trim().toLowerCase();
+    const actionText = lastDecision.action
+      ? `${decisionActionText(lastDecision.action)} / ${formatNumber(decisionConfidence * 100, 0)}%`
+      : '暂无决策';
+    const latestActionText = lastExecution.submitted
+      ? `已提交 / ${decisionActionText(lastDecision.action || '')}`
+      : compactText(lastExecution.reason || '最近未提交', 56);
+    const cycleText = nextRunText !== '--'
+      ? nextRunText
+      : (intervalSec > 0 ? `${intervalSec}s 轮询` : '等待调度');
+    const cycleSubText = latencyText !== '--'
+      ? `上次耗时 ${latencyText}${intervalSec > 0 ? ` / 周期 ${intervalSec}s` : ''}`
+      : (intervalSec > 0 ? `轮询周期 ${intervalSec}s` : '等待耗时数据');
+    const stateTone = running ? 'good' : (status.last_error ? 'danger' : 'warn');
+    const decisionTone = currentAction === 'hold'
+      ? (modelFeedback.tone || 'warn')
+      : 'good';
+    const modelTone = modelFeedback.tone || executionCost.tone || 'info';
+    const modeText = `${decisionModeLabel(cfg.mode || 'execute')} / ${cfg.allow_live ? '允许实盘' : '仅纸盘'}`;
+    const modeSubText = `${symbolModeLabel(cfg.symbol_mode || 'manual')} / ${providerDisplayName(cfg.provider || '-')}`;
+    const stateText = running ? '运行中' : '未启动';
+    const stateSubText = running
+      ? `${Number(status.tick_count || 0)} 轮决策 / 已提交 ${Number(status.submitted_count || 0)} 次`
+      : (status.last_run_at ? `最后运行 ${fmtAgentTs(status.last_run_at)}` : '等待首次运行');
+    const cockpitNote = running
+      ? `${selectedSymbol} 正在被持续盯盘，最近动作 ${latestActionText}`
+      : (status.last_error ? compactText(status.last_error, 120) : '代理当前未运行，可以先单次试跑再决定是否长期开启。');
+
+    setAgentCockpitBadge(
+      'ai-agent-cockpit-state-badge',
+      running ? '代理运行中' : '代理未启动',
+      stateTone
+    );
+
+    const noteEl = document.getElementById('ai-agent-cockpit-state-note');
+    if (noteEl) noteEl.textContent = normalizeUiText(cockpitNote);
+
+    setAgentCockpitStat(
+      'ai-agent-cockpit-status-card',
+      'ai-agent-cockpit-status',
+      'ai-agent-cockpit-status-sub',
+      stateText,
+      stateSubText,
+      stateTone
+    );
+    setAgentCockpitStat(
+      'ai-agent-cockpit-symbol-card',
+      'ai-agent-cockpit-symbol',
+      'ai-agent-cockpit-symbol-sub',
+      selectedSymbol,
+      `选币方式：${selectionReason}`,
+      scan.selected_symbol ? 'info' : 'warn'
+    );
+    setAgentCockpitStat(
+      'ai-agent-cockpit-mode-card',
+      'ai-agent-cockpit-mode',
+      'ai-agent-cockpit-mode-sub',
+      modeText,
+      modeSubText,
+      cfg.allow_live ? 'warn' : 'info'
+    );
+    setAgentCockpitStat(
+      'ai-agent-cockpit-decision-card',
+      'ai-agent-cockpit-decision',
+      'ai-agent-cockpit-decision-sub',
+      actionText,
+      latestActionText,
+      decisionTone
+    );
+    setAgentCockpitStat(
+      'ai-agent-cockpit-cycle-card',
+      'ai-agent-cockpit-cycle',
+      'ai-agent-cockpit-cycle-sub',
+      cycleText,
+      cycleSubText,
+      running ? 'info' : 'warn'
+    );
+    setAgentCockpitStat(
+      'ai-agent-cockpit-model-card',
+      'ai-agent-cockpit-model',
+      'ai-agent-cockpit-model-sub',
+      `${providerDisplayName(cfg.provider || '-')}/${cfg.model || '--'}`,
+      `${modelFeedback.summary} / ${executionCost.summary}`,
+      modelTone
+    );
   }
 
   function emitAgentStatus(status = {}, cfg = {}) {
@@ -590,6 +829,15 @@
     setChainSummaryText('ai-chain-trading-status', statusText);
     setChainSummaryText('ai-chain-trading-decision', '--');
     setChainSummaryText('ai-chain-trading-last-action', '--');
+    setAgentCockpitBadge('ai-agent-cockpit-state-badge', '状态加载失败', 'danger');
+    setAgentCockpitStat('ai-agent-cockpit-status-card', 'ai-agent-cockpit-status', 'ai-agent-cockpit-status-sub', '加载失败', statusText, 'danger');
+    setAgentCockpitStat('ai-agent-cockpit-symbol-card', 'ai-agent-cockpit-symbol', 'ai-agent-cockpit-symbol-sub', '--', '等待状态恢复', 'warn');
+    setAgentCockpitStat('ai-agent-cockpit-mode-card', 'ai-agent-cockpit-mode', 'ai-agent-cockpit-mode-sub', '--', '等待模式恢复', 'warn');
+    setAgentCockpitStat('ai-agent-cockpit-decision-card', 'ai-agent-cockpit-decision', 'ai-agent-cockpit-decision-sub', '--', '等待最新动作', 'warn');
+    setAgentCockpitStat('ai-agent-cockpit-cycle-card', 'ai-agent-cockpit-cycle', 'ai-agent-cockpit-cycle-sub', '--', '等待调度恢复', 'warn');
+    setAgentCockpitStat('ai-agent-cockpit-model-card', 'ai-agent-cockpit-model', 'ai-agent-cockpit-model-sub', '--', statusText, 'danger');
+    const cockpitNote = document.getElementById('ai-agent-cockpit-state-note');
+    if (cockpitNote) cockpitNote.textContent = normalizeUiText(statusText);
   }
 
   function buildRuntimeReason(status = {}, cfg = {}) {
@@ -631,6 +879,8 @@
 
     const primary = runtimeReason || diagnostics.primary || null;
     const agg = diagnostics.aggregated_signal || {};
+    const aggTimestampText = fmtAgentTs(agg.timestamp || agg.aggregated_at || '');
+    const aggMarketTimestampText = fmtAgentTs(agg.market_data_last_bar_at || agg.last_bar_at || '');
     const modelOutput = describeModelOutput(diagnostics);
     const executionCost = describeExecutionCost(diagnostics);
     const currentAction = String(status.last_decision?.action || diagnostics.action || 'hold').trim().toLowerCase();
@@ -672,6 +922,14 @@
         <div class="ai-agent-diagnostic-item">
           <span>聚合信号</span>
           <strong>${esc(String(agg.direction || '--'))} / ${esc(formatRatio(agg.confidence, 3))}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>聚合时间</span>
+          <strong>${esc(aggTimestampText)}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>行情截至</span>
+          <strong>${esc(aggMarketTimestampText)}</strong>
         </div>
         <div class="ai-agent-diagnostic-item">
           <span>当前币种</span>
@@ -865,6 +1123,7 @@
 
     normalizeElementText(startBtn);
     normalizeElementText(stopBtn);
+    renderAgentCockpit(status, cfg, rankingState);
     renderAgentChainSummary(status, cfg);
     renderAgentDiagnostics(status, cfg);
     renderAgentRanking(rankingState.scan, cfg, rankingState.meta || null);
@@ -879,8 +1138,6 @@
       const response = await rootApi(`${AGENT_JOURNAL_API}?limit=15`, { timeoutMs: AGENT_DETAIL_TIMEOUT_MS });
       const rows = Array.isArray(response?.items) ? response.items.slice().reverse() : [];
       const summaryHtml = buildAgentJournalCurrentSummary(lastStatusSnapshot || {}, lastConfigSnapshot || {});
-    const aggTimestampText = fmtAgentTs(agg.timestamp || agg.aggregated_at || '');
-    const aggMarketTimestampText = fmtAgentTs(agg.market_data_last_bar_at || agg.last_bar_at || '');
       if (!rows.length) {
         el.innerHTML = `${summaryHtml}<div class="ai-agent-empty">暂无日志</div>`;
         return;
@@ -923,14 +1180,6 @@
           </div>
         `;
       }).join('');
-        <div class="ai-agent-diagnostic-item">
-          <span>聚合时间</span>
-          <strong>${esc(aggTimestampText)}</strong>
-        </div>
-        <div class="ai-agent-diagnostic-item">
-          <span>行情截至</span>
-          <strong>${esc(aggMarketTimestampText)}</strong>
-        </div>
     } catch (_) {
       el.innerHTML = '<div class="ai-agent-empty">日志加载失败</div>';
     }
@@ -1040,11 +1289,22 @@
       return;
     }
 
-    listEl.innerHTML = items.map((item) => {
+    listEl.innerHTML = items.map((item, index) => {
       const phaseText = item.phase === 'entry' ? '开仓复盘' : (item.phase === 'exit' ? '平仓复盘' : '事件复盘');
       const statusTone = reviewToneClass(item.review_status_tone);
       const summaryLines = Array.isArray(item.summary_lines) ? item.summary_lines : [];
       const blockers = Array.isArray(item?.follow_up?.blockers) ? item.follow_up.blockers : [];
+      const curve = item?.profit_curve && typeof item.profit_curve === 'object' ? item.profit_curve : {};
+      const showCurve = shouldShowAgentProfitCurve(item);
+      const curveHostId = buildAgentProfitCurveHostId(index);
+      const curveDurationText = Number.isFinite(Number(item?.pair?.holding_minutes))
+        ? `${formatNumber(item.pair.holding_minutes, 1)} min`
+        : (curve.closed ? '--' : '进行中');
+      const curvePointText = Number.isFinite(Number(curve.point_count)) ? `${Number(curve.point_count)} points` : '--';
+      const curveFinalText = Number.isFinite(Number(curve.final_pnl)) ? formatSigned(curve.final_pnl, 4, ' USDT') : '--';
+      const curvePeakText = Number.isFinite(Number(curve.max_pnl)) ? formatSigned(curve.max_pnl, 4, ' USDT') : '--';
+      const curveDrawdownText = Number.isFinite(Number(curve.min_pnl)) ? formatSigned(curve.min_pnl, 4, ' USDT') : '--';
+      const curveFinalTone = Number(curve.final_pnl || 0) >= 0 ? 'is-good' : 'is-danger';
       const followParts = [];
       if (Number.isFinite(Number(item?.follow_up?.latest_unrealized_pnl))) {
         followParts.push(`最近跟踪盈亏 ${formatSigned(item.follow_up.latest_unrealized_pnl, 4, ' USDT')}`);
@@ -1120,6 +1380,22 @@
           <div class="ai-agent-review-lines">
             ${summaryLines.length ? summaryLines.map((line) => `<div class="ai-agent-review-line">${esc(line)}</div>`).join('') : '<div class="ai-agent-empty">暂无摘要</div>'}
           </div>
+          ${showCurve ? `
+            <div class="ai-agent-review-curve">
+              <div class="ai-agent-review-curve-head">
+                <div>
+                  <div class="ai-agent-review-curve-title">${esc(curve.closed ? '下单到平仓收益曲线' : '下单到当前收益曲线')}</div>
+                  <div class="ai-agent-review-curve-subtitle">${esc(`${curvePointText} / ${curveDurationText}`)}</div>
+                </div>
+                <div class="ai-agent-review-curve-metrics">
+                  <span class="ai-agent-review-curve-chip ${curveFinalTone}">终值 ${esc(curveFinalText)}</span>
+                  <span class="ai-agent-review-curve-chip">峰值 ${esc(curvePeakText)}</span>
+                  <span class="ai-agent-review-curve-chip">低点 ${esc(curveDrawdownText)}</span>
+                </div>
+              </div>
+              <div id="${curveHostId}" class="ai-agent-review-curve-plot"></div>
+            </div>
+          ` : ''}
           <div class="ai-agent-review-foot">
             <span>主因：${esc(item?.primary?.label || '--')}</span>
             <span>后续观察：${esc(followParts.length ? followParts.join(' / ') : '暂无')}</span>
@@ -1129,6 +1405,13 @@
       `;
     }).join('');
     normalizeElementHtml(listEl);
+    items.forEach((item, index) => {
+      if (!shouldShowAgentProfitCurve(item)) return;
+      renderAgentProfitCurveChart(document.getElementById(buildAgentProfitCurveHostId(index)), item);
+    });
+    if (typeof window.schedulePlotlyResize === 'function') {
+      window.schedulePlotlyResize(document.getElementById('ai-agent-card') || document);
+    }
   }
 
   async function loadAgentReview() {

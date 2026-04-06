@@ -72,6 +72,10 @@ _LIVE_POSITION_FETCH_TIMEOUT_SEC = 8.5
 _LIVE_POSITION_DETAILS_CACHE_TTL_SEC = 12.0
 _LIVE_POSITION_DETAILS_CACHE: Dict[str, Any] = {"ts": 0.0, "positions": [], "diagnostics": None}
 _LIVE_ORDER_DETAILS_CACHE: Dict[str, Any] = {"ts": 0.0, "orders": []}
+_RULE_PRICE_CACHE_TTL_SEC = 10.0
+_RULE_PRICE_FETCH_TIMEOUT_SEC = 1.5
+_RULE_PRICE_CACHE: Dict[str, Any] = {"ts": 0.0, "prices": {}}
+_RULE_PRICE_IN_FLIGHT: Optional[asyncio.Task] = None
 _MICROSTRUCTURE_SNAPSHOT_CACHE: Dict[str, Any] = {}
 _MICROSTRUCTURE_SNAPSHOT_CACHE_TTL_SEC = 6.0
 _ANALYTICS_ROOT = Path("./data/cache/analytics")
@@ -2743,21 +2747,74 @@ async def _fetch_trade_imbalance(exchange: str, symbol: str, limit: int = 600) -
 
 
 async def _load_rule_prices() -> Dict[str, float]:
-    symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-    prices: Dict[str, float] = {}
-    for exchange_name in ["gate", "binance", "okx"]:
-        connector = exchange_manager.get_exchange(exchange_name)
-        if not connector:
-            continue
-        for symbol in symbols:
-            if symbol in prices:
+    global _RULE_PRICE_IN_FLIGHT
+
+    now_ts = time.time()
+    cached_prices = dict(_RULE_PRICE_CACHE.get("prices") or {})
+    cached_ts = float(_RULE_PRICE_CACHE.get("ts") or 0.0)
+    if cached_prices and (now_ts - cached_ts) <= _RULE_PRICE_CACHE_TTL_SEC:
+        return cached_prices
+
+    in_flight = _RULE_PRICE_IN_FLIGHT
+    if in_flight and not in_flight.done():
+        try:
+            return dict(await asyncio.shield(in_flight))
+        except Exception:
+            pass
+
+    async def _fetch_prices() -> Dict[str, float]:
+        symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+        tasks: List[asyncio.Task] = []
+        for exchange_name in ["gate", "binance", "okx"]:
+            connector = exchange_manager.get_exchange(exchange_name)
+            if not connector:
                 continue
-            try:
-                ticker = await connector.get_ticker(symbol)
-                prices[symbol] = float(ticker.last or 0.0)
-            except Exception:
-                continue
-    return prices
+            for symbol in symbols:
+                async def _fetch_one(
+                    *,
+                    _exchange_name: str = exchange_name,
+                    _connector: Any = connector,
+                    _symbol: str = symbol,
+                ) -> tuple[str, str, float]:
+                    try:
+                        ticker = await asyncio.wait_for(
+                            _connector.get_ticker(_symbol),
+                            timeout=_RULE_PRICE_FETCH_TIMEOUT_SEC,
+                        )
+                        return _exchange_name, _symbol, float(ticker.last or 0.0)
+                    except Exception as exc:
+                        logger.debug(
+                            f"rule price fetch failed: exchange={_exchange_name} symbol={_symbol} error={exc}"
+                        )
+                        return _exchange_name, _symbol, 0.0
+
+                tasks.append(asyncio.create_task(_fetch_one()))
+
+        prices: Dict[str, float] = {}
+        if tasks:
+            rows = await asyncio.gather(*tasks, return_exceptions=False)
+            for _exchange_name, symbol, price in rows:
+                if symbol in prices or price <= 0:
+                    continue
+                prices[symbol] = price
+
+        if cached_prices:
+            for symbol, price in cached_prices.items():
+                if symbol not in prices and float(price or 0.0) > 0:
+                    prices[symbol] = float(price)
+        return prices
+
+    task = asyncio.create_task(_fetch_prices())
+    _RULE_PRICE_IN_FLIGHT = task
+    try:
+        prices = dict(await asyncio.shield(task))
+        if prices:
+            _RULE_PRICE_CACHE["ts"] = time.time()
+            _RULE_PRICE_CACHE["prices"] = dict(prices)
+        return prices
+    finally:
+        if _RULE_PRICE_IN_FLIGHT is task:
+            _RULE_PRICE_IN_FLIGHT = None
 
 
 async def _precheck_binance_futures_order(request: OrderRequest) -> None:

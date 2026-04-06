@@ -7169,6 +7169,84 @@ input[type="radio"] {
     line-height: 1.6;
 }
 
+.ai-agent-review-curve {
+    display: grid;
+    gap: 10px;
+    padding: 10px 12px 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(126, 146, 178, 0.16);
+    background: rgba(8, 15, 27, 0.58);
+}
+
+.ai-agent-review-curve-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.ai-agent-review-curve-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #cfe0f4;
+}
+
+.ai-agent-review-curve-subtitle {
+    margin-top: 4px;
+    font-size: 11px;
+    color: #8ea6c4;
+}
+
+.ai-agent-review-curve-metrics {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.ai-agent-review-curve-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding: 0 9px;
+    border-radius: 999px;
+    border: 1px solid rgba(126, 146, 178, 0.16);
+    background: rgba(15, 23, 42, 0.46);
+    color: #cbd8e6;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.ai-agent-review-curve-chip.is-good {
+    color: #4ade80;
+    border-color: rgba(74, 222, 128, 0.22);
+    background: rgba(18, 52, 34, 0.45);
+}
+
+.ai-agent-review-curve-chip.is-danger {
+    color: #fca5a5;
+    border-color: rgba(248, 113, 113, 0.24);
+    background: rgba(60, 18, 18, 0.45);
+}
+
+.ai-agent-review-curve-plot {
+    min-height: 190px;
+}
+
+.ai-agent-review-curve-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 160px;
+    border-radius: 10px;
+    border: 1px dashed rgba(126, 146, 178, 0.18);
+    color: #93a8c4;
+    font-size: 11px;
+    background: rgba(11, 18, 30, 0.42);
+}
+
 .ai-agent-review-foot {
     display: grid;
     gap: 6px;
@@ -8239,6 +8317,352 @@ input[type="radio"] {
     border-color: rgba(45, 212, 191, 0.18);
 }
 
+/* ===== AI autonomous agent cockpit refresh ===== */
+#ai-agent .ai-runtime-summary {
+    gap: 10px;
+    margin-bottom: 14px;
+}
+
+#ai-agent .ai-runtime-chip {
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: rgba(10, 18, 30, 0.88);
+    border-color: rgba(121, 199, 186, 0.18);
+    color: #a8c5d6;
+    box-shadow: inset 0 1px 0 rgba(148, 163, 184, 0.05);
+}
+
+#ai-agent .ai-agent-cockpit {
+    margin-bottom: 16px;
+    padding: 18px 20px;
+    border-radius: 24px;
+    border: 1px solid rgba(45, 212, 191, 0.18);
+    background:
+        radial-gradient(circle at top left, rgba(45, 212, 191, 0.14), transparent 30%),
+        radial-gradient(circle at 85% 12%, rgba(59, 130, 246, 0.16), transparent 28%),
+        linear-gradient(135deg, rgba(8, 18, 27, 0.98), rgba(10, 18, 30, 0.98));
+    box-shadow: 0 20px 42px rgba(3, 9, 18, 0.2);
+    display: grid;
+    grid-template-columns: minmax(280px, 1.1fr) minmax(0, 1.3fr);
+    gap: 18px;
+    overflow: hidden;
+}
+
+#ai-agent .ai-agent-cockpit-main {
+    display: grid;
+    gap: 10px;
+    align-content: start;
+}
+
+#ai-agent .ai-agent-cockpit-kicker {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #82f2d6;
+}
+
+#ai-agent .ai-agent-cockpit-title {
+    font-size: clamp(24px, 2.2vw, 30px);
+    line-height: 1.15;
+    font-weight: 800;
+    color: #f4fbff;
+    max-width: 12ch;
+}
+
+#ai-agent .ai-agent-cockpit-desc {
+    max-width: 62ch;
+    color: #b3c7d8;
+    font-size: 13px;
+    line-height: 1.75;
+}
+
+#ai-agent .ai-agent-cockpit-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin-top: 2px;
+}
+
+#ai-agent .ai-agent-cockpit-badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 0 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    background: rgba(15, 23, 42, 0.55);
+    color: #dce9f7;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+#ai-agent .ai-agent-cockpit-badge.is-good {
+    color: #bbf7d0;
+    border-color: rgba(74, 222, 128, 0.3);
+    background: rgba(20, 83, 45, 0.24);
+}
+
+#ai-agent .ai-agent-cockpit-badge.is-warn {
+    color: #fde68a;
+    border-color: rgba(251, 191, 36, 0.3);
+    background: rgba(120, 53, 15, 0.22);
+}
+
+#ai-agent .ai-agent-cockpit-badge.is-danger {
+    color: #fecaca;
+    border-color: rgba(248, 113, 113, 0.3);
+    background: rgba(127, 29, 29, 0.24);
+}
+
+#ai-agent .ai-agent-cockpit-badge.is-info {
+    color: #bfdbfe;
+    border-color: rgba(96, 165, 250, 0.3);
+    background: rgba(30, 64, 175, 0.22);
+}
+
+#ai-agent .ai-agent-cockpit-note {
+    color: #8fb0c6;
+    font-size: 12px;
+    line-height: 1.65;
+}
+
+#ai-agent .ai-agent-cockpit-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+}
+
+#ai-agent .ai-agent-cockpit-stat {
+    display: grid;
+    gap: 8px;
+    padding: 14px 14px 13px;
+    border-radius: 16px;
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    background: linear-gradient(180deg, rgba(13, 24, 37, 0.88), rgba(9, 16, 28, 0.92));
+    box-shadow: inset 0 1px 0 rgba(148, 163, 184, 0.04);
+    min-height: 118px;
+}
+
+#ai-agent .ai-agent-cockpit-stat.is-good {
+    border-color: rgba(74, 222, 128, 0.24);
+    background: linear-gradient(180deg, rgba(14, 42, 33, 0.8), rgba(10, 18, 28, 0.92));
+}
+
+#ai-agent .ai-agent-cockpit-stat.is-warn {
+    border-color: rgba(251, 191, 36, 0.24);
+    background: linear-gradient(180deg, rgba(53, 34, 13, 0.78), rgba(10, 18, 28, 0.92));
+}
+
+#ai-agent .ai-agent-cockpit-stat.is-danger {
+    border-color: rgba(248, 113, 113, 0.24);
+    background: linear-gradient(180deg, rgba(59, 22, 22, 0.78), rgba(10, 18, 28, 0.92));
+}
+
+#ai-agent .ai-agent-cockpit-stat.is-info {
+    border-color: rgba(96, 165, 250, 0.24);
+}
+
+#ai-agent .ai-agent-cockpit-stat-label {
+    font-size: 11px;
+    color: #7fa3bc;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+#ai-agent .ai-agent-cockpit-stat strong {
+    font-size: 19px;
+    line-height: 1.2;
+    color: #f4fbff;
+}
+
+#ai-agent .ai-agent-cockpit-stat-sub {
+    color: #9eb7cb;
+    font-size: 11px;
+    line-height: 1.55;
+}
+
+#ai-agent .ai-agent-command-card {
+    gap: 16px;
+}
+
+#ai-agent .ai-agent-command-hero {
+    display: flex;
+    justify-content: space-between;
+    gap: 14px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+}
+
+#ai-agent .ai-agent-command-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+#ai-agent .ai-agent-command-tag {
+    display: inline-flex;
+    align-items: center;
+    min-height: 30px;
+    padding: 0 11px;
+    border-radius: 999px;
+    background: rgba(7, 22, 27, 0.62);
+    border: 1px solid rgba(45, 212, 191, 0.18);
+    color: #c4f6ea;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+#ai-agent .ai-agent-intent-grid {
+    display: grid !important;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px !important;
+}
+
+#ai-agent .ai-agent-control-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+    gap: 14px;
+    align-items: start;
+}
+
+#ai-agent .ai-agent-panel {
+    min-width: 0;
+    border-radius: 18px;
+    border: 1px solid rgba(126, 146, 178, 0.16);
+    background:
+        radial-gradient(circle at top right, rgba(45, 212, 191, 0.05), transparent 28%),
+        linear-gradient(180deg, rgba(14, 24, 39, 0.98), rgba(9, 17, 28, 0.99));
+    box-shadow: inset 0 1px 0 rgba(148, 163, 184, 0.04);
+}
+
+#ai-agent .ai-agent-panel-status {
+    padding: 16px;
+}
+
+#ai-agent .ai-agent-panel-status .ai-auto-step-body,
+#ai-agent .ai-agent-panel-single .ai-auto-step-body {
+    padding-left: 42px;
+    gap: 12px;
+}
+
+#ai-agent .ai-agent-panel-single {
+    padding: 16px;
+}
+
+#ai-agent .ai-agent-panel-single .ai-auto-step-title {
+    margin-bottom: 2px;
+}
+
+#ai-agent .ai-agent-action-note {
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid rgba(45, 212, 191, 0.14);
+    background: rgba(7, 23, 29, 0.6);
+    color: #a8d9cf;
+    font-size: 12px;
+    line-height: 1.7;
+}
+
+#ai-agent .ai-agent-panel-diagnostics,
+#ai-agent .ai-agent-panel-ranking,
+#ai-agent .ai-agent-panel-journal,
+#ai-agent .ai-agent-panel-review {
+    padding: 16px 18px;
+}
+
+#ai-agent .ai-agent-panel-journal,
+#ai-agent .ai-agent-panel-review {
+    display: grid;
+    gap: 12px;
+}
+
+#ai-agent .ai-agent-panel-journal .ai-auto-step-head,
+#ai-agent .ai-agent-panel-review .ai-auto-step-head {
+    align-items: flex-start;
+}
+
+#ai-agent .ai-agent-panel-journal .ai-auto-step-desc,
+#ai-agent .ai-agent-panel-review .ai-auto-step-desc {
+    margin-top: 4px;
+    margin-bottom: 0;
+}
+
+#ai-agent .ai-agent-panel-journal .ai-agent-journal-box {
+    max-height: 340px;
+    background: rgba(8, 15, 25, 0.72);
+    border-color: rgba(126, 146, 178, 0.14);
+}
+
+#ai-agent .ai-agent-panel-review .ai-agent-review-workspace {
+    display: grid;
+    grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
+    gap: 14px;
+    align-items: start;
+}
+
+#ai-agent .ai-agent-panel-review .ai-agent-review-summary {
+    margin-top: 0;
+    padding: 14px;
+    border-radius: 16px;
+    border: 1px solid rgba(126, 146, 178, 0.14);
+    background: rgba(8, 15, 25, 0.74);
+    align-self: stretch;
+}
+
+#ai-agent .ai-agent-panel-review .ai-agent-review-box {
+    margin-top: 0;
+}
+
+#ai-agent .ai-agent-panel-review .ai-agent-review-box {
+    display: grid;
+    gap: 12px;
+}
+
+#ai-agent .ai-agent-panel-review .ai-agent-review-card {
+    margin-top: 0;
+    box-shadow: 0 12px 28px rgba(3, 9, 18, 0.1);
+}
+
+#ai-agent .ai-agent-panel-review .ai-agent-review-lines {
+    background: rgba(9, 15, 24, 0.46);
+    border-radius: 12px;
+    padding: 10px 12px;
+}
+
+#ai-agent .ai-agent-info-grid {
+    grid-template-columns: 108px minmax(0, 1fr);
+    gap: 6px 12px;
+}
+
+#ai-agent .ai-agent-info-grid > span:nth-child(even),
+#ai-agent .ai-agent-review-card strong,
+#ai-agent .ai-agent-diagnostic-item strong {
+    overflow-wrap: anywhere;
+}
+
+#ai-agent .ai-agent-section {
+    margin-top: 0;
+}
+
+#ai-agent .ai-agent-scroll-shell-ranking {
+    max-height: 360px;
+}
+
+#ai-agent .ai-agent-review-summary .ai-agent-review-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+#ai-agent .ai-agent-review-summary .ai-agent-learning-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+#ai-agent .ai-agent-review-summary .ai-agent-learning-panel {
+    margin-top: 10px;
+}
+
 /* ===== Research workshop readability refinement ===== */
 #research .research-workspace {
     grid-template-columns: minmax(290px, 330px) minmax(0, 1fr) !important;
@@ -8416,6 +8840,11 @@ input[type="radio"] {
 }
 
 @media (max-width: 1500px) {
+    #ai-agent .ai-agent-cockpit {
+        grid-template-columns: 1fr;
+    }
+
+    #ai-agent .ai-agent-cockpit-grid,
     #ai-research .ai-research-overview-grid,
     #ai-agent .ai-agent-workspace-grid {
         grid-template-columns: 1fr;
@@ -8442,12 +8871,14 @@ input[type="radio"] {
         padding-right: 0;
     }
 
-    #ai-agent .ai-auto-trade-steps {
+    #ai-agent .ai-agent-control-grid,
+    #ai-agent .ai-agent-panel-review .ai-agent-review-workspace {
         grid-template-columns: 1fr;
     }
 
-    #ai-agent #ai-agent-card {
-        grid-row: auto;
+    #ai-agent .ai-agent-review-summary .ai-agent-review-kpis,
+    #ai-agent .ai-agent-review-summary .ai-agent-learning-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
     #research .research-workspace {
@@ -8470,11 +8901,34 @@ input[type="radio"] {
 
     #ai-research .ai-research-sidekick-grid,
     #ai-agent .ai-agent-command-card .ai-top-intro-stack,
-    #ai-agent .ai-auto-trade-rail,
+    #ai-agent .ai-agent-cockpit-grid,
     #research .research-grid-2,
     #research .research-mini-grid,
     #research .research-bottom-grid {
         grid-template-columns: 1fr !important;
+    }
+
+    #ai-agent .ai-agent-command-hero,
+    #ai-agent .ai-agent-panel-journal .ai-auto-step-head,
+    #ai-agent .ai-agent-panel-review .ai-auto-step-head {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    #ai-agent .ai-agent-cockpit,
+    #ai-agent .ai-agent-panel-status,
+    #ai-agent .ai-agent-panel-single,
+    #ai-agent .ai-agent-panel-diagnostics,
+    #ai-agent .ai-agent-panel-ranking,
+    #ai-agent .ai-agent-panel-journal,
+    #ai-agent .ai-agent-panel-review {
+        padding: 16px;
+    }
+
+    #ai-agent .ai-agent-info-grid,
+    #ai-agent .ai-agent-review-summary .ai-agent-review-kpis,
+    #ai-agent .ai-agent-review-summary .ai-agent-learning-grid {
+        grid-template-columns: 1fr;
     }
 
     #ai-research .cand-metrics {

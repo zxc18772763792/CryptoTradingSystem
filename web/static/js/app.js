@@ -6,16 +6,27 @@ const backtestUIState={lastOptimize:null,lastCompare:null,lastRenderedBacktest:n
 const dataHealthState={last:null};
 const dataAnalyticsHealthState={last:null};
 const uiLoadState={tabs:{},inFlight:{},requests:{},dataInitialized:false};
+const summaryFetchState={statsTask:null,balancesTask:null};
 const RESEARCH_DEFAULT_SYMBOLS=['BTC/USDT','ETH/USDT','BNB/USDT','SOL/USDT','XRP/USDT','ADA/USDT','DOGE/USDT','TRX/USDT','LINK/USDT','AVAX/USDT','DOT/USDT','POL/USDT','LTC/USDT','BCH/USDT','ETC/USDT','ATOM/USDT','NEAR/USDT','APT/USDT','ARB/USDT','OP/USDT','SUI/USDT','INJ/USDT','RUNE/USDT','AAVE/USDT','MKR/USDT','UNI/USDT','FIL/USDT','HBAR/USDT','ICP/USDT','TON/USDT'];
 const DEFAULT_STRATEGY_ALLOCATION=0.15;
 let equityChart=null;
 let plotlyResizeSeq=0;
 let dataReloadTimer=null;
 let summaryLoadPromise=null;
+let dashboardSecondaryTimer=null;
+let dashboardSlowHintTimer=null;
+let tradingSecondaryTimer=null;
 const TRADING_STATS_TIMEOUT_MS=25000;
 const TRADING_ORDERS_TIMEOUT_MS=20000;
 const TRADING_OPEN_ORDERS_TIMEOUT_MS=25000;
 const TRADING_POSITIONS_TIMEOUT_MS=30000;
+const TAB_BOOTSTRAP_GRACE_MS=12000;
+const DASHBOARD_SECONDARY_LOAD_DELAY_MS=4500;
+const TRADING_SECONDARY_LOAD_DELAY_MS=2500;
+const CORE_TAB_POLL_INTERVAL_MS=12000;
+const WS_BACKFILL_INTERVAL_MS=10000;
+const SECONDARY_TAB_POLL_INTERVAL_MS=60000;
+const tabBootstrapState={startedAt:{}};
 const SHARED_POLL_KEY_PREFIX='cts_shared_poll_v1:';
 const SHARED_POLL_TTL_MS=15000;
 const SHARED_POLL_HEARTBEAT_MS=5000;
@@ -615,11 +626,73 @@ scheduleKlineRealtime();
 setTimeout(()=>{loadDataStorageHealth(null,{skipStorage:true}).catch(err=>console.warn('loadDataStorageHealth failed',err?.message||err));},900);
 setTimeout(()=>{if(document.getElementById('candlestick-chart')&&!marketDataState.bars.length){loadKlinesByForm().catch(()=>{});}},500);
 }
+function markTabBootstrap(tabName){
+const tab=String(tabName||'').trim();
+if(!tab)return;
+tabBootstrapState.startedAt[tab]=Date.now();
+}
+function isTabBootstrapping(tabName,windowMs=TAB_BOOTSTRAP_GRACE_MS){
+const tab=String(tabName||'').trim();
+if(!tab)return false;
+const startedAt=Number(tabBootstrapState.startedAt[tab]||0);
+return startedAt>0&&(Date.now()-startedAt)<Math.max(0,Number(windowMs||0));
+}
+function refreshDashboardCore(){
+return Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary()]);
+}
+function refreshTradingCore(){
+return Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk()]);
+}
+function refreshTradingSecondary(){
+return Promise.allSettled([loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
+}
+function replaceStuckLoading(containerId,message){
+const box=document.getElementById(containerId);
+if(!box)return;
+const text=String(box.textContent||'').trim();
+if(!text||!/(加载中|获取中|显示在这里|请稍候)/.test(text))return;
+box.innerHTML=`<div class="list-item">${esc(message)}</div>`;
+}
+function scheduleDashboardSecondaryLoads(delayMs=DASHBOARD_SECONDARY_LOAD_DELAY_MS){
+if(dashboardSecondaryTimer)clearTimeout(dashboardSecondaryTimer);
+dashboardSecondaryTimer=setTimeout(()=>{
+  dashboardSecondaryTimer=null;
+  if(document.hidden||getActiveTabName()!=='dashboard')return;
+  const group=sharedPollGroupForTab('dashboard');
+  if(group&&!canRunSharedPolling(group))return;
+  Promise.allSettled([loadPnlHeatmap(),loadNotificationCenter(),loadAuditLogs()]).catch(()=>{});
+},Math.max(0,Number(delayMs||0)));
+}
+function scheduleDashboardSlowHints(delayMs=18000){
+if(dashboardSlowHintTimer)clearTimeout(dashboardSlowHintTimer);
+dashboardSlowHintTimer=setTimeout(()=>{
+  dashboardSlowHintTimer=null;
+  if(document.hidden||getActiveTabName()!=='dashboard')return;
+  replaceStuckLoading('risk-panel','风控快照响应较慢，后台稍后重试...');
+  replaceStuckLoading('exchanges-list','资产快照响应较慢，后台稍后重试...');
+  replaceStuckLoading('holdings-pie','资产分布暂未返回，后台稍后重试...');
+  replaceStuckLoading('dashboard-unstructured-list','新闻整理较慢，后台稍后重试...');
+  replaceStuckLoading('audit-log-list','审计日志响应较慢，后台稍后重试...');
+},Math.max(0,Number(delayMs||0)));
+}
+function scheduleTradingSecondaryLoads(delayMs=TRADING_SECONDARY_LOAD_DELAY_MS){
+if(tradingSecondaryTimer)clearTimeout(tradingSecondaryTimer);
+tradingSecondaryTimer=setTimeout(()=>{
+  tradingSecondaryTimer=null;
+  if(document.hidden||getActiveTabName()!=='trading')return;
+  const group=sharedPollGroupForTab('trading');
+  if(group&&!canRunSharedPolling(group))return;
+  refreshTradingSecondary().catch(()=>{});
+},Math.max(0,Number(delayMs||0)));
+}
 async function loadDashboardTabData(){
-await Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary(),loadPnlHeatmap(),loadNotificationCenter(),loadAuditLogs()]);
+await refreshDashboardCore();
+scheduleDashboardSecondaryLoads();
+scheduleDashboardSlowHints();
 }
 async function loadTradingTabData(){
-await Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk(),loadLiveTradeReview()]);
+await refreshTradingCore();
+scheduleTradingSecondaryLoads();
 }
 async function loadStrategiesTabData(){
 await Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
@@ -632,10 +705,10 @@ async function loadResearchTabData(){
   renderResearchStatusCards();
 }
 async function loadAiResearchTabData(){
-  await refreshAiResearchModules();
+  setTimeout(()=>{refreshAiResearchModules().catch(err=>console.warn('loadAiResearchTabData failed:',err?.message||err));},0);
 }
 async function loadAiAgentTabData(){
-  await refreshAiResearchModules();
+  setTimeout(()=>{refreshAiResearchModules().catch(err=>console.warn('loadAiAgentTabData failed:',err?.message||err));},0);
 }
 async function loadArbitrageTabData(force=false){
   await ensureStrategyCatalog(force);
@@ -677,6 +750,7 @@ const loader=loaders[tab];
 if(!loader){uiLoadState.tabs[tab]=true;return;}
 const task=(async()=>{
   try{
+    markTabBootstrap(tab);
     await loader();
     uiLoadState.tabs[tab]=true;
   }finally{
@@ -693,6 +767,23 @@ if(requests[key])return requests[key];
 const task=Promise.resolve().then(taskFactory).finally(()=>{if(requests[key]===task)delete requests[key];});
 requests[key]=task;
 return task;
+}
+function runSummaryTaskSingleFlight(slot,taskFactory){
+if(summaryFetchState[slot])return summaryFetchState[slot];
+const task=Promise.resolve().then(taskFactory).finally(()=>{if(summaryFetchState[slot]===task)summaryFetchState[slot]=null;});
+summaryFetchState[slot]=task;
+return task;
+}
+async function settleWithin(promise,timeoutMs){
+let timer=null;
+try{
+  return await Promise.race([
+    Promise.resolve(promise).then(value=>({status:'fulfilled',value}),reason=>({status:'rejected',reason})),
+    new Promise(resolve=>{timer=setTimeout(()=>resolve({status:'pending'}),Math.max(0,Number(timeoutMs||0)));}),
+  ]);
+}finally{
+  if(timer)clearTimeout(timer);
+}
 }
 
 function activateTab(tabName){
@@ -846,9 +937,9 @@ equityChart.$rawTs=rows.map(x=>x.timestamp);
 equityChart.options.plugins.tooltip={callbacks:{title:items=>{const idx=items?.[0]?.dataIndex;return idx===undefined?'':fmtDateTime(equityChart.$rawTs?.[idx]);}}};
 equityChart.update('none');
 }
-function drawPie(dist,mode){const box=document.getElementById('holdings-pie');if(!box)return;if(!dist?.length){box.innerHTML='<div class="list-item">暂无可视化资产分布</div>';return;}if(typeof Plotly==='undefined'){box.innerHTML='<div class="list-item">图表库未加载，饼图暂不可用</div>';return;}const top=dist.slice(0,10);Plotly.newPlot(box,[{type:'pie',labels:top.map(x=>x.currency),values:top.map(x=>Number(x.usd_value||0)),hole:.45,textinfo:'label+percent'}],{margin:{l:5,r:5,t:5,b:5},paper_bgcolor:'#162232',plot_bgcolor:'#162232',font:{color:'#e8eef9'},showlegend:false},{displaylogo:false,responsive:true});schedulePlotlyResize(document.getElementById('dashboard')||document);}
+function drawPie(dist,mode){const box=document.getElementById('holdings-pie');if(!box)return;if(!dist?.length){box.innerHTML='<div class="list-item">暂无可视化资产分布</div>';return;}if(typeof Plotly==='undefined'){box.innerHTML='<div class="list-item">图表库未加载，饼图暂不可用</div>';return;}box.innerHTML='';const top=dist.slice(0,10);Plotly.newPlot(box,[{type:'pie',labels:top.map(x=>x.currency),values:top.map(x=>Number(x.usd_value||0)),hole:.45,textinfo:'label+percent'}],{margin:{l:5,r:5,t:5,b:5},paper_bgcolor:'#162232',plot_bgcolor:'#162232',font:{color:'#e8eef9'},showlegend:false},{displaylogo:false,responsive:true});schedulePlotlyResize(document.getElementById('dashboard')||document);}
 
-function renderRisk(r){const p=document.getElementById('risk-panel');if(!p||!r)return;const e=r.equity||{},a=r.alerts||[],c=`risk-${r.risk_level||'low'}`;const dailyTotalRatio=Number((e.daily_total_pnl_ratio??e.daily_pnl_ratio)??0);const stopBasis=Number((e.daily_stop_basis_usd??e.daily_total_pnl_usd??e.daily_pnl_usd)??0);const stopBasisRatio=Number((e.daily_stop_basis_ratio??e.daily_pnl_ratio)??0);p.innerHTML=`
+function renderRisk(r){const p=document.getElementById('risk-panel');if(!p)return;if(!r){p.innerHTML='<div class="list-item">风控快照暂未返回，稍后自动刷新...</div>';return;}const e=r.equity||{},a=r.alerts||[],c=`risk-${r.risk_level||'low'}`;const dailyTotalRatio=Number((e.daily_total_pnl_ratio??e.daily_pnl_ratio)??0);const stopBasis=Number((e.daily_stop_basis_usd??e.daily_total_pnl_usd??e.daily_pnl_usd)??0);const stopBasisRatio=Number((e.daily_stop_basis_ratio??e.daily_pnl_ratio)??0);p.innerHTML=`
 <div class="list-item"><span>风险等级</span><span class="${c}">${(r.risk_level||'low').toUpperCase()}</span></div>
 <div class="list-item"><span>风控熔断</span><span>${r.trading_halted?'已触发':'未触发'}</span></div>
 <div class="list-item"><span>日内总盈亏</span><span>${Number((e.daily_total_pnl_usd??e.daily_pnl_usd)||0).toFixed(2)} USDT (${(dailyTotalRatio*100).toFixed(2)}%)</span></div>
@@ -870,9 +961,11 @@ const prevSnapshot=(state.lastSummarySnapshot&&typeof state.lastSummarySnapshot=
 const prevStats=(prevSnapshot.stats&&typeof prevSnapshot.stats==='object')?prevSnapshot.stats:{};
 const prevBalances=(prevSnapshot.balances&&typeof prevSnapshot.balances==='object')?prevSnapshot.balances:{};
 const prevHistoryByMode=(prevSnapshot.historyByMode&&typeof prevSnapshot.historyByMode==='object')?prevSnapshot.historyByMode:{};
-const [sr,br]=await Promise.allSettled([
-api('/trading/stats',{timeoutMs:TRADING_STATS_TIMEOUT_MS}),
-api('/trading/balances',{timeoutMs:65000}),
+const statsTask=runSummaryTaskSingleFlight('statsTask',()=>api('/trading/stats',{timeoutMs:TRADING_STATS_TIMEOUT_MS}));
+const balancesTask=runSummaryTaskSingleFlight('balancesTask',()=>api('/trading/balances',{timeoutMs:65000}));
+const [sr,br]=await Promise.all([
+  settleWithin(statsTask,5000),
+  settleWithin(balancesTask,5000),
 ]);
 const statsFresh=(sr.status==='fulfilled'&&sr.value&&typeof sr.value==='object')?sr.value:null;
 const balancesFresh=(br.status==='fulfilled'&&br.value&&typeof br.value==='object')?br.value:null;
@@ -881,30 +974,46 @@ const b=balancesFresh||prevBalances||{};
 const statusMode=String(state?._systemStatusLast?.trading_mode||'').toLowerCase();
 const activeType=String(b?.active_account_type??b?.mode??statusMode??'paper').toLowerCase();
 const historyMode=activeType==='live'?'live':'paper';
-const historyFresh=await api(`/trading/balances/history?hours=72&exchange=all&limit=500&mode=${encodeURIComponent(historyMode)}`,{timeoutMs:8000}).catch(()=>null);
+const historyFresh=(statsFresh||balancesFresh||Object.keys(prevHistoryByMode).length)
+  ?await api(`/trading/balances/history?hours=72&exchange=all&limit=500&mode=${encodeURIComponent(historyMode)}`,{timeoutMs:5000}).catch(()=>null)
+  :null;
 const historyByMode={...prevHistoryByMode};
 if(Array.isArray(historyFresh?.history))historyByMode[historyMode]=historyFresh.history;
 const historyRows=Array.isArray(historyByMode?.[historyMode])?historyByMode[historyMode]:[];
 if(statsFresh||balancesFresh||Array.isArray(historyFresh?.history)){
   state.lastSummarySnapshot={stats:s,balances:b,historyByMode};
 }
-const activeUsd=Number(b?.active_account_usd_estimate??b?.total_usd_estimate??0);
+const hasBalanceSnapshot=!!(b&&typeof b==='object'&&(Object.keys(b?.exchanges||{}).length||b?.paper_account||b?.active_account_type||b?.total_usd_estimate!==undefined));
+const hasStatsSnapshot=!!(s&&typeof s==='object'&&Object.keys(s).length);
+const activeUsd=Number(b?.active_account_usd_estimate??b?.total_usd_estimate??NaN);
 const mergedRisk=(b?.risk_report||s?.risk||null);
 const mergedEquity=(mergedRisk?.equity||{});
 const livePosCount=Number(b?.live_position_count||0);
 const statPosCount=Number(s?.positions?.position_count||0);
-document.getElementById('open-positions').textContent=(activeType==='live'?livePosCount:statPosCount)||0;
-document.getElementById('open-orders').textContent=s?.orders?.total_orders||0;
+document.getElementById('open-positions').textContent=hasStatsSnapshot||hasBalanceSnapshot?((activeType==='live'?livePosCount:statPosCount)||0):'--';
+document.getElementById('open-orders').textContent=hasStatsSnapshot?(s?.orders?.total_orders||0):'--';
 const exObj=b?.exchanges||{},exKeys=Object.keys(exObj),exConnected=exKeys.filter(k=>Boolean(exObj[k]?.connected)).length;
 const exCountEl=document.getElementById('exchange-status-count');
 if(exCountEl)exCountEl.textContent=`${exConnected}/${exKeys.length||0}`;
 const modeEl=document.getElementById('active-account-mode');
 if(modeEl)modeEl.textContent=activeType==='paper'?'虚拟仓(PAPER)':'实仓(LIVE)';
 const activeEl=document.getElementById('active-account-value');
-if(activeEl)activeEl.textContent=fmtMaybe(activeUsd);
-const pnl=Number((mergedEquity?.current_unrealized_pnl_usd ?? s?.positions?.total_unrealized_pnl) || 0),p=document.getElementById('total-pnl');
-p.textContent=fmt(pnl);p.className=`value ${pnl>=0?'positive':'negative'}`;
-renderExchanges(b);drawEquity(historyRows);drawPie(b?.distribution||[],activeType);renderRisk(mergedRisk);
+if(activeEl)activeEl.textContent=Number.isFinite(activeUsd)?fmtMaybe(activeUsd):'--';
+const pnlSource=(mergedEquity?.current_unrealized_pnl_usd ?? s?.positions?.total_unrealized_pnl);
+const pnlKnown=hasStatsSnapshot||hasBalanceSnapshot;
+const pnl=Number(pnlSource||0),p=document.getElementById('total-pnl');
+if(p){p.textContent=pnlKnown?fmt(pnl):'--';p.className=`value ${pnlKnown&&pnl>=0?'positive':pnlKnown?'negative':''}`.trim();}
+if(hasBalanceSnapshot){
+  renderExchanges(b);
+  drawPie(b?.distribution||[],activeType);
+}else{
+  const ex=document.getElementById('exchanges-list');
+  if(ex)ex.innerHTML='<div class=\"list-item\">资产快照暂未返回，稍后自动刷新...</div>';
+  const pie=document.getElementById('holdings-pie');
+  if(pie)pie.innerHTML='<div class=\"list-item\">资产分布暂未返回，稍后自动刷新...</div>';
+}
+drawEquity(historyRows);
+renderRisk(mergedRisk);
 if(sr.status==='rejected'&&br.status==='rejected'){const ex=document.getElementById('exchanges-list');if(ex)ex.innerHTML='<div class=\"list-item\">资产接口暂时不可用，系统正在自动重试...</div>';}
 }catch(e){console.error(e);const ex=document.getElementById('exchanges-list');if(ex)ex.innerHTML='<div class=\"list-item\">资产加载失败，正在重试...</div>';}
 finally{summaryLoadPromise=null;}
@@ -956,7 +1065,7 @@ xaxis:{title:'币种',tickangle:-40,automargin:true,tickfont:{size:10}},
 yaxis:{title:bucket==='hour'?'时间(本地时区)':'日期(本地时区)',automargin:true,tickfont:{size:11}},
 },{responsive:true,displaylogo:false,scrollZoom:true});
 }
-async function loadPnlHeatmap(){try{const d=Number(document.getElementById('pnl-heatmap-days')?.value||30),b=document.getElementById('pnl-heatmap-bucket')?.value||'day';const r=await api(`/trading/pnl/heatmap?days=${Math.max(1,d)}&bucket=${encodeURIComponent(b)}`,{timeoutMs:8000});renderPnlHeatmap(r);}catch(e){const box=document.getElementById('pnl-heatmap');if(box)box.innerHTML=`<div class="list-item">热力图加载失败: ${esc(e.message)}</div>`;}}
+async function loadPnlHeatmap(){return runRequestSingleFlight('pnlHeatmap',async()=>{try{const d=Number(document.getElementById('pnl-heatmap-days')?.value||30),b=document.getElementById('pnl-heatmap-bucket')?.value||'day';const r=await api(`/trading/pnl/heatmap?days=${Math.max(1,d)}&bucket=${encodeURIComponent(b)}`,{timeoutMs:12000});renderPnlHeatmap(r);}catch(e){const box=document.getElementById('pnl-heatmap');if(box)box.innerHTML=`<div class="list-item">热力图加载失败: ${esc(e.message)}</div>`;}});}
 
 function fmtNum(v,digits=4){
 const n=Number(v);
@@ -1105,7 +1214,7 @@ try{
   loadPositions().catch(()=>{});
 }
 }
-async function loadPositions(){return runRequestSingleFlight('positions',async()=>{try{const resp=await api('/trading/positions',{timeoutMs:TRADING_POSITIONS_TIMEOUT_MS});state.positions=resp.positions||[];const t=document.getElementById('positions-tbody');if(!t)return;if(!state.positions.length){t.innerHTML='<tr><td colspan="6">暂无持仓</td></tr>';return;}t.innerHTML=state.positions.map(p=>{const source=(p?.metadata?.source||'local');const key=positionCloseKey(p);const busy=!!state.closingPositions[key];const sideText=p.side==='long'?'多':p.side==='short'?'空':(p.side||'-');const sourceTag=source==='exchange_live'?'<span class="status-badge" style="margin-left:6px;background:#2f4f7f;">实盘同步</span>':'';const accountId=String(p.account_id||'');return `<tr><td>${p.exchange||'-'} ${p.symbol}${sourceTag}</td><td>${sideText}</td><td>${Number(p.entry_price||0).toFixed(2)}</td><td>${Number(p.current_price||0).toFixed(2)}</td><td class="${Number(p.unrealized_pnl||0)>=0?'positive':'negative'}">${fmt(p.unrealized_pnl||0)}</td><td><button class="btn btn-danger btn-sm" ${busy?'disabled':''} onclick="closePositionFromRow(this)" data-exchange="${esc(p.exchange||'')}" data-symbol="${esc(p.symbol||'')}" data-side="${esc(p.side||'')}" data-account-id="${esc(accountId)}" data-source="${esc(source)}" data-quantity="${Number(p.quantity||0)}">${busy?'平仓中...':'一键平仓'}</button></td></tr>`;}).join('');}catch(e){console.error(e);}});}
+async function loadPositions(){return runRequestSingleFlight('positions',async()=>{try{const resp=await api('/trading/positions',{timeoutMs:TRADING_POSITIONS_TIMEOUT_MS});state.positions=resp.positions||[];const t=document.getElementById('positions-tbody');if(!t)return;if(!state.positions.length){t.innerHTML='<tr><td colspan="6">暂无持仓</td></tr>';return;}t.innerHTML=state.positions.map(p=>{const source=(p?.metadata?.source||'local');const key=positionCloseKey(p);const busy=!!state.closingPositions[key];const sideText=p.side==='long'?'多':p.side==='short'?'空':(p.side||'-');const sourceTag=source==='exchange_live'?'<span class="status-badge" style="margin-left:6px;background:#2f4f7f;">实盘同步</span>':'';const accountId=String(p.account_id||'');return `<tr><td>${p.exchange||'-'} ${p.symbol}${sourceTag}</td><td>${sideText}</td><td>${Number(p.entry_price||0).toFixed(2)}</td><td>${Number(p.current_price||0).toFixed(2)}</td><td class="${Number(p.unrealized_pnl||0)>=0?'positive':'negative'}">${fmt(p.unrealized_pnl||0)}</td><td><button class="btn btn-danger btn-sm" ${busy?'disabled':''} onclick="closePositionFromRow(this)" data-exchange="${esc(p.exchange||'')}" data-symbol="${esc(p.symbol||'')}" data-side="${esc(p.side||'')}" data-account-id="${esc(accountId)}" data-source="${esc(source)}" data-quantity="${Number(p.quantity||0)}">${busy?'平仓中...':'一键平仓'}</button></td></tr>`;}).join('');}catch(e){console.error(e);const t=document.getElementById('positions-tbody');if(t)t.innerHTML=`<tr><td colspan="6">持仓加载失败：${esc(e.message||'未知错误')}</td></tr>`;}});}
 async function loadOrders(){return runRequestSingleFlight('orders',async()=>{try{
 state.orders=(await api('/trading/orders?include_history=true&limit=200',{timeoutMs:TRADING_ORDERS_TIMEOUT_MS})).orders||[];
 const t=document.getElementById('orders-tbody');
@@ -1142,7 +1251,7 @@ const memo=[reason,costMemo,protectMemo].filter(Boolean).join(' | ');
 const statusCell=`${mapSide(o.side)}/${mapOrderStatus(o.status)}${reason?`<div class="order-reject-reason">${reason}</div>`:''}`;
 return `<tr><td>${o.exchange||'-'} ${o.symbol}</td><td>${sourceBadge}</td><td>${esc(o.account_id||'main')}</td><td>${statusCell}</td><td>${Number(o.price||0).toFixed(2)}</td><td>${Number(o.amount||0)}</td><td>${o.status==='open'?`<button class="btn btn-danger btn-sm" onclick="cancelOrder('${o.id}','${o.symbol}','${o.exchange||'binance'}')">撤销</button>`:'<span style="color:#8b949e">--</span>'}</td><td>${memo||'--'}</td></tr>`;
 }).join('');
-}catch(e){console.error(e);}});}
+}catch(e){console.error(e);const t=document.getElementById('orders-tbody');if(t)t.innerHTML=`<tr><td colspan="8">订单加载失败：${esc(e.message||'未知错误')}</td></tr>`;}});}
 async function loadOpenOrders(){return runRequestSingleFlight('openOrders',async()=>{try{
 const rows=((await api('/trading/orders?include_history=false&limit=200',{timeoutMs:TRADING_OPEN_ORDERS_TIMEOUT_MS})).orders||[]);
 const t=document.getElementById('open-orders-tbody');
@@ -1315,7 +1424,7 @@ if(document.getElementById('backtest-compare-strategy-list') && typeof loadBackt
   }
 }
 renderStrategyConsolePanel();
-}catch(e){console.error(e);}});}
+}catch(e){console.error(e);const pool=document.getElementById('strategies-list');if(pool&&/加载中/.test(String(pool.textContent||'')))pool.innerHTML=`<div class="list-item">策略目录加载失败：${esc(e.message||'未知错误')}</div>`;const grid=document.getElementById('registered-strategies-grid');if(grid&&/加载中/.test(String(grid.textContent||'')))grid.innerHTML=`<div class="list-item">已注册策略加载失败：${esc(e.message||'未知错误')}</div>`;const metaEl=document.getElementById('registered-strategy-meta');if(metaEl&&/加载中/.test(String(metaEl.textContent||'')))metaEl.textContent='策略列表加载失败，稍后自动重试';renderStrategyConsolePanel();}});}
 function renderStrategyConsolePanel(){
 const cards=document.getElementById('strategy-console-cards');
 const notes=document.getElementById('strategy-console-notes');
@@ -1473,7 +1582,7 @@ rt.innerHTML=running.length?running.map(s=>{const p=perf[s.name]||{},ri=s.runtim
 }
 renderStrategyHealthAlerts(d,state.strategyHealth);
 renderStrategyConsolePanel();
-}catch(e){console.error(e);}});}
+}catch(e){console.error(e);const msg=esc(e.message||'未知错误');const a=document.getElementById('active-strategies');if(a&&(/加载中/.test(String(a.textContent||''))||!String(a.innerHTML||'').trim()))a.innerHTML=`<div class="list-item"><span>策略摘要加载失败</span><span>${msg}</span></div>`;const r=document.getElementById('recent-signals');if(r&&(/加载中/.test(String(r.textContent||''))||!String(r.innerHTML||'').trim()))r.innerHTML=`<div class="list-item"><span>近期信号加载失败</span><span>${msg}</span></div>`;const rt=document.getElementById('strategy-runtime-tbody');if(rt&&(/加载中/.test(String(rt.textContent||''))||!String(rt.innerHTML||'').trim()))rt.innerHTML=`<tr><td colspan="8">运行中策略摘要加载失败：${msg}</td></tr>`;const box=document.getElementById('strategy-health-alerts');if(box&&/加载中/.test(String(box.textContent||'')))box.innerHTML=`<div class="list-item"><span>策略健康摘要加载失败</span><span>${msg}</span></div>`;renderStrategyConsolePanel();}});}
 function renderStrategyHealthAlerts(summary,health){
 const box=document.getElementById('strategy-health-alerts');if(!box)return;
 const stale=(summary?.stale_running||[]);const staleCount=Number(summary?.stale_running_count||stale.length||0);const runningCount=Number(summary?.running_count||0);
@@ -1489,7 +1598,7 @@ const alertKey=`${staleCount}|${stale.map(x=>x.strategy).join(',')}`;
 if(alertKey!==state.lastHealthAlertKey){state.lastHealthAlertKey=alertKey;notify(`【策略健康告警】异常策略 ${staleCount} 个`,true);}
 }
 function pushRealtimeSignal(sig){try{if(!sig)return;const item={strategy:sig.strategy_name||sig.strategy||'未知策略',symbol:sig.symbol||'-',signal_type:String(sig.signal_type||'').toLowerCase(),timestamp:sig.timestamp||new Date().toISOString()};const cur=state.summary?.recent_signals||[];const key=`${item.strategy}|${item.symbol}|${item.signal_type}|${item.timestamp}`;const map=new Map();[item,...cur].forEach(x=>{const k=`${x.strategy||x.strategy_name}|${x.symbol}|${String(x.signal_type||'').toLowerCase()}|${x.timestamp}`;if(!map.has(k))map.set(k,x);});state.summary.recent_signals=[...map.values()].slice(0,20);const r=document.getElementById('recent-signals');if(r){r.innerHTML=state.summary.recent_signals.slice(0,12).map(s=>`<div class=\"list-item\"><span>${s.strategy||s.strategy_name} | ${s.symbol} | ${String(s.signal_type||'').toUpperCase()}</span><span>${fmtTime(s.timestamp)}</span></div>`).join('');}}catch(e){console.error(e);}}
-async function loadStrategyHealth(){
+async function loadStrategyHealth(){return runRequestSingleFlight('strategyHealth',async()=>{
 const out=document.getElementById('strategy-health-output');
 if(!out)return;
 const paths=['/strategies/health/monitor','/strategies/health','/strategies/health-monitor','/strategies/runtime'];
@@ -1519,7 +1628,7 @@ out.textContent=JSON.stringify({fallback:'summary',running_count:(s.running||[])
 }catch{
 out.textContent=`加载策略健康状态失败: ${lastErr}`;
 }
-}
+});}
 function bindStrategyOps(){
 const sAll=document.getElementById('btn-strategy-start-all'),pAll=document.getElementById('btn-strategy-stop-all'),chk=document.getElementById('btn-strategy-health-check'),out=document.getElementById('strategy-health-output');
 const rr=document.getElementById('btn-registered-refresh'),rs=document.getElementById('btn-registered-stop-all'),rc=document.getElementById('btn-registered-clear-all');
@@ -3766,7 +3875,7 @@ try{
 }
 function buildNotifyRulePayload(){const name=(document.getElementById('notify-rule-name')?.value||'自定义规则').trim(),rule_type=(document.getElementById('notify-rule-type')?.value||'price_above').trim(),symbol=(document.getElementById('notify-rule-symbol')?.value||'BTC/USDT').trim(),thresholdRaw=document.getElementById('notify-rule-threshold')?.value||'0',threshold=Number(thresholdRaw||0);let params={channels:['feishu']};if(rule_type==='price_above'||rule_type==='price_below'){params={...params,symbol,threshold};}if(rule_type==='daily_pnl_below_pct'){params={...params,threshold_pct:threshold||-2};}if(rule_type==='position_count_above'){params={...params,threshold:Math.max(1,parseInt(String(threshold||1),10))};}if(rule_type==='exchange_disconnected'){params={...params,exchanges:symbol.split(',').map(x=>x.trim().toLowerCase()).filter(Boolean)};}if(rule_type==='stale_strategy_count_above'||rule_type==='running_strategy_count_below'){params={...params,threshold:Math.max(1,parseInt(String(threshold||1),10))};}if(rule_type==='strategy_not_running'){params={...params,strategies:symbol.split(',').map(x=>x.trim()).filter(Boolean)};}return{name,rule_type,params,enabled:true,cooldown_seconds:300};}
 function renderNotifyRules(rules){const box=document.getElementById('notify-rules-list');if(!box)return;if(!rules?.length){box.innerHTML='<div class="list-item">暂无规则</div>';return;}box.innerHTML=rules.map(r=>`<div class="list-item"><span>${esc(r.name)} | ${esc(r.rule_type)} | ${r.enabled?'启用':'停用'}</span><span class="inline-actions"><button class="btn btn-primary btn-sm" onclick="editNotifyRule('${esc(r.id)}')">编辑</button><button class="btn btn-primary btn-sm" onclick="toggleNotifyRule('${esc(r.id)}')">${r.enabled?'停用':'启用'}</button><button class="btn btn-danger btn-sm" onclick="deleteNotifyRule('${esc(r.id)}')">删除</button></span></div>`).join('');}
-async function loadNotificationCenter(){const out=document.getElementById('notify-output');if(!out)return;try{const [ch,rules,events]=await Promise.all([api('/notifications/channels'),api('/notifications/rules'),api('/notifications/events?limit=20')]);const list=rules.rules||[];state.notifyRules=Object.fromEntries(list.map(x=>[x.id,x]));renderNotifyRules(list);out.textContent=JSON.stringify({channels:ch.channels||{},rules:list.slice(-20),recent_events:(events.events||[]).slice(-20)},null,2);}catch(e){out.textContent=`加载通知中心失败: ${e.message}`;}}
+async function loadNotificationCenter(){return runRequestSingleFlight('notificationCenter',async()=>{const out=document.getElementById('notify-output');if(!out)return;try{const [ch,rules,events]=await Promise.all([api('/notifications/channels'),api('/notifications/rules'),api('/notifications/events?limit=20')]);const list=rules.rules||[];state.notifyRules=Object.fromEntries(list.map(x=>[x.id,x]));renderNotifyRules(list);out.textContent=JSON.stringify({channels:ch.channels||{},rules:list.slice(-20),recent_events:(events.events||[]).slice(-20)},null,2);}catch(e){out.textContent=`加载通知中心失败: ${e.message}`;}});}
 async function sendTestNotification(channel){const msg=(document.getElementById('notify-test-msg')?.value||'系统测试通知').trim();const out=document.getElementById('notify-output');try{const r=await api('/notifications/test',{method:'POST',body:JSON.stringify({title:'交易系统测试通知',message:msg,channels:[channel]})});if(out)out.textContent=JSON.stringify(r,null,2);notify(`${channel} 测试通知已发送`);await loadNotificationCenter();}catch(e){if(out)out.textContent=`测试通知失败: ${e.message}`;notify(`测试通知失败: ${e.message}`,true);}}
 async function createNotifyRule(){const out=document.getElementById('notify-output');try{const payload=buildNotifyRulePayload();const r=await api('/notifications/rules',{method:'POST',body:JSON.stringify(payload)});if(out)out.textContent=JSON.stringify(r,null,2);notify('通知规则创建成功');await loadNotificationCenter();}catch(e){if(out)out.textContent=`创建规则失败: ${e.message}`;notify(`创建规则失败: ${e.message}`,true);}}
 async function runNotifyRules(){const out=document.getElementById('notify-output');try{const r=await api('/notifications/evaluate',{method:'POST',body:JSON.stringify({exchange:'gate',symbols:['BTC/USDT','ETH/USDT','SOL/USDT']})});if(out)out.textContent=JSON.stringify(r,null,2);notify(`规则评估完成，触发 ${r?.result?.triggered_count||0} 条`);await Promise.all([loadNotificationCenter(),loadAuditLogs()]);}catch(e){if(out)out.textContent=`规则评估失败: ${e.message}`;notify(`规则评估失败: ${e.message}`,true);}}
@@ -3776,7 +3885,7 @@ async function deleteNotifyRule(id){if(!confirm('确认删除该规则吗？'))r
 function bindNotificationCenter(){const f=document.getElementById('btn-test-feishu'),b1=document.getElementById('btn-test-telegram'),b2=document.getElementById('btn-test-email'),b3=document.getElementById('btn-create-rule'),b4=document.getElementById('btn-run-rules'),b5=document.getElementById('btn-refresh-heatmap');if(f)f.onclick=()=>sendTestNotification('feishu');if(b1)b1.onclick=()=>sendTestNotification('telegram');if(b2)b2.onclick=()=>sendTestNotification('email');if(b3)b3.onclick=createNotifyRule;if(b4)b4.onclick=runNotifyRules;if(b5)b5.onclick=loadPnlHeatmap;}
 
 function renderAuditLogs(logs){const box=document.getElementById('audit-log-list');if(!box)return;if(!logs?.length){box.innerHTML='<div class="list-item">暂无审计日志</div>';return;}box.innerHTML=logs.slice(0,100).map(i=>`<div class="list-item"><span>${esc(i.timestamp||'').replace('T',' ').substring(0,19)} | ${esc(i.module)}/${esc(i.action)} | ${esc(i.status)}</span><span>${esc((i.message||'-').substring(0,72))}</span></div>`).join('');}
-async function loadAuditLogs(){try{const d=await api('/trading/audit?hours=168&limit=100',{timeoutMs:12000});renderAuditLogs(d.logs||[]);}catch(e){const box=document.getElementById('audit-log-list');if(box)box.innerHTML=`<div class="list-item">审计日志加载失败: ${esc(e.message)}</div>`;}}
+async function loadAuditLogs(){return runRequestSingleFlight('auditLogs',async()=>{try{const d=await api('/trading/audit?hours=168&limit=100',{timeoutMs:12000});renderAuditLogs(d.logs||[]);}catch(e){const box=document.getElementById('audit-log-list');if(box)box.innerHTML=`<div class="list-item">审计日志加载失败: ${esc(e.message)}</div>`;}});}
 function bindAudit(){const b=document.getElementById('btn-refresh-audit');if(b)b.onclick=loadAuditLogs;}
 
 let wsClient=null,wsRetryTimer=null,softRefreshTimer=null,replaySessionId='',lastTickRenderAt=0;
@@ -3803,7 +3912,7 @@ softRefreshTimer=setTimeout(()=>{
   if(group&&!canRunSharedPolling(group))return;
   if(tab==='dashboard')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadStrategies(),loadStrategySummary(),loadRisk()]);
   else if(tab==='trading')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
-  else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
+  else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary()]);
   else if(tab==='ai-research')refreshAiResearchModules();
   else if(tab==='ai-agent')refreshAiResearchModules();
 },delay);
@@ -5874,7 +5983,7 @@ await Promise.all([loadOrders(),loadPositions(),loadSummary(),loadRisk(),loadCon
 };
 }
 
-async function init(){initTabs();initClock();initEquity();bindTrade();bindOrderView();bindLiveTradeReview();bindData();bindDataAdvanced();bindBacktest();bindArbitragePage();bindNotificationCenter();bindAudit();bindStrategyOps();bindStrategyAdvanced();bindResearchPanel();bindResearchPresets();bindResearchSentiment();bindModeControls();bindAccountControls();initWebSocket();document.addEventListener('visibilitychange',()=>{if(document.hidden){releaseAllSharedPollGroups();closeWebSocketClient();}else{canRunSharedPolling('status');const group=sharedPollGroupForTab(getActiveTabName());if(group)canRunSharedPolling(group);initWebSocket();}});renderStrategyConsolePanel();renderResearchStatusCards();await loadSystemStatus();await ensureTabLoaded(getActiveTabName(),{force:true});state.bootCompleted=true;state.bootFailed=false;
+async function init(){initTabs();initClock();initEquity();bindTrade();bindOrderView();bindLiveTradeReview();bindData();bindDataAdvanced();bindBacktest();bindArbitragePage();bindNotificationCenter();bindAudit();bindStrategyOps();bindStrategyAdvanced();bindResearchPanel();bindResearchPresets();bindResearchSentiment();bindModeControls();bindAccountControls();initWebSocket();document.addEventListener('visibilitychange',()=>{if(document.hidden){releaseAllSharedPollGroups();closeWebSocketClient();}else{canRunSharedPolling('status');const group=sharedPollGroupForTab(getActiveTabName());if(group)canRunSharedPolling(group);initWebSocket();}});renderStrategyConsolePanel();renderResearchStatusCards();state.bootCompleted=true;state.bootFailed=false;loadSystemStatus().catch(err=>console.warn('initial loadSystemStatus failed:',err?.message||err));setTimeout(()=>{ensureTabLoaded(getActiveTabName(),{force:true}).catch(err=>console.error('initial tab load failed:',err));},0);
 // Status polling is lightweight but user-visible; keep it independent from heavier dashboard batches
 setInterval(()=>{if(document.hidden)return;if(!canRunSharedPolling('status'))return;loadSystemStatus();},20000);
 setInterval(()=>{
@@ -5883,38 +5992,38 @@ setInterval(()=>{
   const tab=getActiveTabName();
   const group=sharedPollGroupForTab(tab);
   if(group&&!canRunSharedPolling(group))return;
-  if(tab==='dashboard')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary()]);
-  else if(tab==='trading')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
-  else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
-  else if(tab==='ai-research')refreshAiResearchModules();
-  else if(tab==='ai-agent')refreshAiResearchModules();
-},8000);
-setInterval(()=>{
-  if(document.hidden)return;
-  const tab=getActiveTabName();
-  const group=sharedPollGroupForTab(tab);
-  if(group&&!canRunSharedPolling(group))return;
-  if(state.wsConnected&&(tab==='dashboard'||tab==='trading')){
-    const now=Date.now();
-    const lastByTab=state.lastWsBackfillAtByTab||(state.lastWsBackfillAtByTab={});
-    const last=Number(lastByTab[tab]||0);
-    if(now-last<30000)return;
-    lastByTab[tab]=now;
-  }
-  if(tab==='dashboard')Promise.allSettled([loadPositions(),loadBalances(),loadOrders(),loadOpenOrders(),loadRisk()]);
-  else if(tab==='trading')Promise.allSettled([loadPositions(),loadBalances(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
+  if(isTabBootstrapping(tab))return;
+  if(tab==='dashboard')refreshDashboardCore();
+  else if(tab==='trading')refreshTradingCore();
   else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary()]);
   else if(tab==='ai-research')refreshAiResearchModules();
   else if(tab==='ai-agent')refreshAiResearchModules();
-},10000);
+},CORE_TAB_POLL_INTERVAL_MS);
+setInterval(()=>{
+  if(document.hidden)return;
+  const tab=getActiveTabName();
+  if(tab!=='dashboard'&&tab!=='trading')return;
+  const group=sharedPollGroupForTab(tab);
+  if(group&&!canRunSharedPolling(group))return;
+  if(!state.wsConnected||isTabBootstrapping(tab,18000))return;
+  const now=Date.now();
+  const lastByTab=state.lastWsBackfillAtByTab||(state.lastWsBackfillAtByTab={});
+  const last=Number(lastByTab[tab]||0);
+  if(now-last<30000)return;
+  lastByTab[tab]=now;
+  if(tab==='dashboard')refreshDashboardCore();
+  else if(tab==='trading')refreshTradingCore();
+},WS_BACKFILL_INTERVAL_MS);
 setInterval(()=>{
   if(document.hidden)return;
   const tab=getActiveTabName();
   const group=sharedPollGroupForTab(tab);
   if(group&&!canRunSharedPolling(group))return;
-  if(tab==='dashboard')Promise.allSettled([loadPnlHeatmap(),loadNotificationCenter(),loadAuditLogs()]);
+  if(isTabBootstrapping(tab,18000))return;
+  if(tab==='dashboard')scheduleDashboardSecondaryLoads(0);
+  else if(tab==='trading')scheduleTradingSecondaryLoads(0);
   else if(tab==='strategies')Promise.allSettled([loadStrategyHealth()]);
-},45000);}
+},SECONDARY_TAB_POLL_INTERVAL_MS);}
 
 window.cancelOrder=cancelOrder;window.cancelConditional=cancelConditional;window.registerStrategy=registerStrategy;window.toggleStrategy=toggleStrategy;window.saveAllocation=saveAllocation;window.openEditor=openEditor;window.compareLive=compareLive;window.openStrategyEditor=openEditor;window.compareStrategyLive=compareLive;window.previewCompareStrategyByRank=previewCompareStrategyByRank;window.registerCompareStrategyByRank=registerCompareStrategyByRank;window.registerOptimizeBestAsNewStrategyInstance=registerOptimizeBestAsNewStrategyInstance;window.registerOptimizeTrialByRank=registerOptimizeTrialByRank;window.editNotifyRule=editNotifyRule;window.toggleNotifyRule=toggleNotifyRule;window.deleteNotifyRule=deleteNotifyRule;window.openBacktestWithSpec=openBacktestWithSpec;window.registerArbitrageStrategy=registerArbitrageStrategy;window.jumpToBacktestFromArbitrage=jumpToBacktestFromArbitrage;window.scanArbitragePairsRanking=scanArbitragePairsRanking;window.applyArbitragePairCandidate=applyArbitragePairCandidate;
 window.addEventListener('error',e=>{

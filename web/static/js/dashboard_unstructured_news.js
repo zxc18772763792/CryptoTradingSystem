@@ -5,7 +5,7 @@
     const REFRESH_BTN_ID = "dashboard-unstructured-refresh";
     const BUCKET_GRAN_ID = "dashboard-news-bucket-granularity";
     const BUCKET_CHART_ID = "dashboard-news-bucket-chart";
-    const REFRESH_MS = 30000;
+    const REFRESH_MS = 60000;
     const SUMMARY_STALE_MS = 2 * 60 * 1000;
     const UI_TIMEZONE = (typeof window !== "undefined" && window.CTS_UI_TIMEZONE) || "Asia/Shanghai";
     let loading = false;
@@ -92,7 +92,7 @@
 
     async function request(path, options = {}) {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), Math.max(5000, Number(options.timeoutMs || 25000)));
+        const timer = setTimeout(() => controller.abort(), Math.max(5000, Number(options.timeoutMs || 15000)));
         const sep = path.includes("?") ? "&" : "?";
         const finalPath = `${path}${sep}_ts=${Date.now()}`;
         try {
@@ -211,7 +211,7 @@
     }
 
     async function loadSummary() {
-        return request("/summary?hours=24&feed_limit=60", { timeoutMs: 25000 });
+        return request("/summary?hours=24&feed_limit=60", { timeoutMs: 15000 });
     }
 
     async function loadNews(forceSummary = false) {
@@ -228,7 +228,7 @@
         needsRefresh = false;
         try {
             let data;
-            data = await request("/latest?limit=40&hours=24&summarize=false", { timeoutMs: 25000 });
+            data = await request("/latest?limit=40&hours=24&summarize=false", { timeoutMs: 15000 });
             let summary = latestSummary;
             if (forceSummary || !latestSummary || (Date.now() - latestSummaryAt) >= SUMMARY_STALE_MS) {
                 summary = await loadSummary().catch(() => latestSummary);

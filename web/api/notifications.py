@@ -1,4 +1,5 @@
 ﻿"""Notification API endpoints."""
+import asyncio
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -49,7 +50,7 @@ async def _load_prices(exchange: str, symbols: List[str]) -> Dict[str, float]:
 
     for symbol in symbols:
         try:
-            ticker = await connector.get_ticker(symbol)
+            ticker = await asyncio.wait_for(connector.get_ticker(symbol), timeout=1.5)
             prices[symbol] = float(ticker.last or 0.0)
         except Exception:
             continue
