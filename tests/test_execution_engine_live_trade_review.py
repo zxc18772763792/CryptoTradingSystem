@@ -79,6 +79,15 @@ def test_record_live_strategy_trade_persists_journal_and_counts(tmp_path: Path, 
     summary = engine.get_live_trade_review(limit=10, strategy="alpha", hours=24 * 30)
     assert summary["count"] == 2
     assert summary["strategy_trade_counts"]["alpha"] == 2
+    assert summary["summary"]["trade_count"] == 2
+    assert summary["summary"]["entry_count"] == 2
+    assert summary["summary"]["close_count"] == 0
+    assert summary["summary"]["gross_pnl_usd"] == 1.78
+    assert summary["summary"]["fee_usd"] == 0.08
+    assert summary["summary"]["slippage_cost_usd"] == 0.02
+    assert summary["summary"]["cost_usd"] == 0.1
+    assert summary["summary"]["net_pnl_usd"] == 1.68
+    assert summary["summary"]["dominant_symbol"] == "BTC/USDT"
 
 
 def test_record_live_strategy_trade_skips_when_paper_mode(tmp_path: Path, monkeypatch):

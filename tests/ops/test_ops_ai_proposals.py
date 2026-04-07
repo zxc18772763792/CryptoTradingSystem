@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+from pathlib import Path
 
+from config.settings import settings
 from core.ops.service import api as ops_api
 from core.research import orchestrator as ai_orchestrator
+
+
+def _runtime_snapshot_path() -> Path:
+    return (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "runtime" / "eligibility_snapshot.json").resolve()
 
 
 def test_create_ai_proposal_generates_templates_and_registry_entry(client, ops_headers):
@@ -70,6 +77,8 @@ def test_run_ai_proposal_sync_updates_status_and_result(client, ops_headers, mon
                 "total_return": 18.5,
                 "sharpe_ratio": 1.6,
                 "max_drawdown": 7.2,
+                "win_rate": 58.0,
+                "total_trades": 48,
             },
             "csv_path": "research_out.csv",
             "markdown_path": "research_out.md",
@@ -110,6 +119,17 @@ def test_run_ai_proposal_sync_updates_status_and_result(client, ops_headers, mon
     validation_body = validation_resp.json()
     assert validation_body["ok"] is True
     assert validation_body["data"]["validation_summary"]["deployment_score"] == validation["deployment_score"]
+
+    snapshot_path = _runtime_snapshot_path()
+    assert snapshot_path.exists()
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    records = list(snapshot.get("records") or [])
+    candidate_id = body["data"]["candidate"]["candidate_id"]
+    selected = next(item for item in records if item["candidate_id"] == candidate_id)
+    assert snapshot["schema_version"] == "runtime_eligibility.v1"
+    assert selected["proposal_id"] == proposal_id
+    assert selected["symbol"] == "BTC/USDT"
+    assert selected["timeframe"] == "15m"
 
 
 def test_run_ai_proposal_background_sets_queued_job(client, ops_headers, monkeypatch):
@@ -172,6 +192,8 @@ def test_ai_candidate_and_lifecycle_endpoints(client, ops_headers, monkeypatch):
                 "total_return": 9.5,
                 "sharpe_ratio": 1.05,
                 "max_drawdown": 8.0,
+                "win_rate": 54.0,
+                "total_trades": 24,
                 "score": 22.5,
             },
             "quality_counts": {"ok": 3},
@@ -216,3 +238,14 @@ def test_ai_candidate_and_lifecycle_endpoints(client, ops_headers, monkeypatch):
     assert promote["ok"] is True
     assert promote["data"]["candidate_id"] == candidate_id
     assert promote["data"]["promotion"]["decision"] in {"paper", "shadow", "live_candidate"}
+
+    snapshot_path = _runtime_snapshot_path()
+    assert snapshot_path.exists()
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    promoted = next(item for item in snapshot.get("records", []) if item["candidate_id"] == candidate_id)
+    assert promoted["proposal_id"] == proposal_id
+    assert promoted["status"] in {"paper_running", "live_candidate"}
+    if promoted["status"] == "paper_running":
+        assert promoted["runtime_mode_cap"] == "paper_execute"
+    else:
+        assert promoted["runtime_mode_cap"] == "live_candidate_only"

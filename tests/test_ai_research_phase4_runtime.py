@@ -11,6 +11,10 @@ import pandas as pd
 
 from config.settings import settings
 from core.ai.proposal_schemas import ProposalValidationSummary, ResearchProposal
+from core.ai.runtime_eligibility import (
+    refresh_runtime_eligibility_snapshot,
+    resolve_runtime_eligibility_context,
+)
 from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.research.experiment_registry import CandidateRegistry, ProposalRegistry
 from core.research.experiment_schemas import StrategyCandidate
@@ -142,6 +146,143 @@ def test_resolve_runtime_research_context_prefers_active_champion(monkeypatch, t
     assert context["selected_candidate"]["candidate_id"] == champion.candidate_id
     assert context["research_champion"]["candidate_id"] == champion.candidate_id
     assert context["selected_candidate"]["proposal_id"] == "proposal-phase4-runtime"
+    assert str(context.get("data_source") or "").startswith("runtime_eligibility_snapshot")
+    assert isinstance(context.get("reason_codes"), list)
+    assert context.get("snapshot_path")
+    assert context["selected_eligibility"]["candidate_id"] == champion.candidate_id
+
+
+def test_refresh_runtime_eligibility_snapshot_builds_contract(monkeypatch, tmp_path: Path):
+    _seed_runtime_research(monkeypatch, tmp_path)
+    snapshot = refresh_runtime_eligibility_snapshot()
+    snapshot_path = (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "runtime" / "eligibility_snapshot.json").resolve()
+
+    assert snapshot["schema_version"] == "runtime_eligibility.v1"
+    assert snapshot["total_records"] >= 2
+    assert snapshot_path.exists()
+    first = dict(snapshot["records"][0])
+    assert "reason_codes" in first
+    assert "expires_at" in first
+    assert "eligible_for_autonomy" in first
+
+
+def test_runtime_eligibility_context_marks_expired_records(monkeypatch, tmp_path: Path):
+    data_storage_path = tmp_path / "storage" / "klines"
+    monkeypatch.setattr(settings, "DATA_STORAGE_PATH", str(data_storage_path), raising=False)
+    snapshot_path = (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "runtime" / "eligibility_snapshot.json").resolve()
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "runtime_eligibility.v1",
+                "generated_at": "2026-01-01T00:00:00Z",
+                "source": "test_fixture",
+                "total_records": 1,
+                "records": [
+                    {
+                        "exchange": "binance",
+                        "symbol": "BTC/USDT",
+                        "timeframe": "1h",
+                        "strategy": "OpenAI EMA Draft",
+                        "candidate_id": "cand-expired",
+                        "proposal_id": "proposal-expired",
+                        "experiment_id": "exp-expired",
+                        "status": "paper_running",
+                        "score": 88.0,
+                        "promotion_target": "paper",
+                        "runtime_mode_cap": "paper_execute",
+                        "eligible_for_autonomy": True,
+                        "require_live_review": True,
+                        "max_age_minutes": 60,
+                        "generated_at": "2026-01-01T00:00:00Z",
+                        "expires_at": "2026-01-01T01:00:00Z",
+                        "validation": {"decision": "paper", "deployment_score": 78.0},
+                        "search_role": "champion",
+                        "champion_candidate_id": "cand-expired",
+                        "champion_strategy": "OpenAI EMA Draft",
+                        "decision_engine": "openai",
+                        "strategy_family": "ai_openai",
+                        "research_mode": "hybrid",
+                        "thesis": "expired fixture",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "reason_codes": [],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    context = resolve_runtime_eligibility_context(
+        exchange="binance",
+        symbol="BTC/USDT",
+        timeframe="1h",
+        strategy_name="OpenAI EMA Draft",
+        auto_refresh_if_missing=False,
+    )
+
+    assert context["available"] is True
+    assert context["selected_candidate"]["candidate_id"] == "cand-expired"
+    assert context["selected_eligibility"]["eligible_for_autonomy"] is False
+    assert "ELIGIBILITY_EXPIRED" in context["selected_eligibility"]["reason_codes"]
+    assert "ELIGIBILITY_EXPIRED" in context["reason_codes"]
+    assert context["data_source"] == "test_fixture"
+
+
+def test_runtime_eligibility_context_reports_snapshot_missing(monkeypatch, tmp_path: Path):
+    data_storage_path = tmp_path / "storage" / "klines"
+    monkeypatch.setattr(settings, "DATA_STORAGE_PATH", str(data_storage_path), raising=False)
+
+    context = resolve_runtime_eligibility_context(
+        exchange="binance",
+        symbol="BTC/USDT",
+        timeframe="1h",
+        auto_refresh_if_missing=False,
+    )
+
+    assert context["available"] is False
+    assert context["data_source"] == "runtime_eligibility_snapshot_missing"
+    assert "SNAPSHOT_MISSING" in context["reason_codes"]
+    assert "NO_MATCHING_ELIGIBILITY" in context["reason_codes"]
+    assert context["eligibility_contract"]["schema_version"] == "runtime_eligibility.v1"
+
+
+def test_runtime_research_context_fallback_to_registry_when_eligibility_unavailable(monkeypatch, tmp_path: Path):
+    import core.ai.research_runtime_context as context_module
+
+    _, champion = _seed_runtime_research(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        context_module,
+        "resolve_runtime_eligibility_context",
+        lambda **kwargs: {
+            "available": False,
+            "reason_codes": ["SNAPSHOT_REFRESH_FAILED"],
+            "data_source": "runtime_eligibility_snapshot",
+            "eligibility_contract": {
+                "schema_version": "runtime_eligibility.v1",
+                "source": "runtime_eligibility_snapshot",
+                "generated_at": None,
+            },
+            "snapshot_generated_at": None,
+            "snapshot_path": "missing.json",
+        },
+    )
+
+    context = resolve_runtime_research_context(
+        exchange="binance",
+        symbol="BTC/USDT",
+        timeframe="1h",
+        strategy_name="OpenAI EMA Draft",
+    )
+
+    assert context["available"] is True
+    assert context["data_source"] == "research_registry_fallback"
+    assert context["selected_candidate"]["candidate_id"] == champion.candidate_id
+    assert "SNAPSHOT_REFRESH_FAILED" in context["reason_codes"]
+    assert "FALLBACK_RESEARCH_REGISTRY" in context["reason_codes"]
 
 
 def test_autonomous_agent_run_once_does_not_attach_research_refs(monkeypatch, tmp_path: Path):
@@ -179,12 +320,20 @@ def test_autonomous_agent_run_once_does_not_attach_research_refs(monkeypatch, tm
     asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", timeframe="1h", cooldown_sec=0))
     result = asyncio.run(agent.run_once(trigger="test", force=True))
 
-    signal = submit_mock.await_args.args[0]
+    signal_metadata = {}
+    if submit_mock.await_args is not None:
+        signal = submit_mock.await_args.args[0]
+        signal_metadata = dict(getattr(signal, "metadata", {}) or {})
+    else:
+        signal_payload = (result.get("execution") or {}).get("signal")
+        if isinstance(signal_payload, dict):
+            signal_metadata = dict(signal_payload.get("metadata") or {})
+
     assert champion.candidate_id == "cand-phase4-champion"
-    assert "research_context_available" not in signal.metadata
-    assert "research_candidate_id" not in signal.metadata
-    assert "research_proposal_id" not in signal.metadata
-    assert "research_champion_candidate_id" not in signal.metadata
+    assert "research_context_available" not in signal_metadata
+    assert "research_candidate_id" not in signal_metadata
+    assert "research_proposal_id" not in signal_metadata
+    assert "research_champion_candidate_id" not in signal_metadata
     assert result["status"]["last_research_context"] is None
 
 
@@ -206,6 +355,8 @@ def test_live_decision_router_includes_research_context(monkeypatch, tmp_path: P
         assert research_context["available"] is True
         assert research_context["selected_candidate"]["candidate_id"] == champion.candidate_id
         assert research_context["research_champion"]["candidate_id"] == champion.candidate_id
+        assert str(research_context.get("data_source") or "").startswith("runtime_eligibility_snapshot")
+        assert isinstance(research_context.get("reason_codes"), list)
         return {"action": "allow", "reason": "aligned_with_research_context", "confidence": 0.77}
 
     monkeypatch.setattr(router, "_call_provider", _fake_call_provider)

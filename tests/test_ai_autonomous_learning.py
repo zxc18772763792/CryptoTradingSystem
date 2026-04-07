@@ -99,3 +99,69 @@ def test_build_learning_memory_raises_guards_after_losses_and_outages():
     assert memory["summary"]["current_open_losing_count"] == 1
     blocked = build_blocked_symbol_side_map(memory, base_min_confidence=0.58)
     assert ("LINK/USDT", "short") in blocked
+
+
+def test_build_learning_memory_blocks_fresh_entries_during_recent_loss_streak():
+    live_review = {
+        "items": [
+            {
+                "timestamp": _iso(9),
+                "action": "open_or_add",
+                "symbol": "BTC/USDT",
+                "side": "buy",
+                "signal": {"signal_type": "buy"},
+                "pnl": 0.0,
+            },
+            {
+                "timestamp": _iso(8),
+                "action": "close",
+                "symbol": "BTC/USDT",
+                "side": "sell",
+                "signal": {"signal_type": "close_long"},
+                "pnl": -0.8,
+            },
+            {
+                "timestamp": _iso(6),
+                "action": "open_or_add",
+                "symbol": "ETH/USDT",
+                "side": "sell",
+                "signal": {"signal_type": "sell"},
+                "pnl": 0.0,
+            },
+            {
+                "timestamp": _iso(5),
+                "action": "close",
+                "symbol": "ETH/USDT",
+                "side": "buy",
+                "signal": {"signal_type": "close_short"},
+                "pnl": -1.1,
+            },
+            {
+                "timestamp": _iso(3),
+                "action": "open_or_add",
+                "symbol": "SOL/USDT",
+                "side": "buy",
+                "signal": {"signal_type": "buy"},
+                "pnl": 0.0,
+            },
+            {
+                "timestamp": _iso(2),
+                "action": "close",
+                "symbol": "SOL/USDT",
+                "side": "sell",
+                "signal": {"signal_type": "close_long"},
+                "pnl": -0.6,
+            },
+        ]
+    }
+
+    memory = build_learning_memory(
+        journal_rows=[],
+        live_review=live_review,
+        positions=[],
+        base_min_confidence=0.58,
+    )
+
+    assert memory["summary"]["recent_close_loss_streak_count"] == 3
+    assert memory["adaptive_risk"]["avoid_new_entries_during_loss_streak"] is True
+    assert "block fresh entries during active loss streak" in memory["guardrails"]

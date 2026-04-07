@@ -2115,8 +2115,29 @@
                                             <span>候选币池</span>
                                             <textarea id="ai-agent-universe-symbols" rows="3" placeholder="留空使用默认主流币池；或手动填写 BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT ..."></textarea>
                                         </label>
+                                        <div class="ai-agent-config-divider">自治风险纪律阈值</div>
+                                        <div class="ai-agent-risk-config-note">这组阈值只作用于自治代理的新单纪律，不直接改动全局账户风控上限。</div>
+                                        <div class="ai-agent-config-grid ai-agent-risk-config-grid">
+                                            <label class="ai-agent-field">
+                                                <span>日内止损缓冲</span>
+                                                <input id="ai-agent-risk-daily-stop" type="number" min="0" max="1" step="0.001" placeholder="0.010" />
+                                            </label>
+                                            <label class="ai-agent-field">
+                                                <span>最大回撤 close-only</span>
+                                                <input id="ai-agent-risk-max-dd" type="number" min="0" max="1" step="0.001" placeholder="0.030" />
+                                            </label>
+                                            <label class="ai-agent-field">
+                                                <span>3日滚动回撤 close-only</span>
+                                                <input id="ai-agent-risk-rolling-3d" type="number" min="0" max="1" step="0.001" placeholder="0.050" />
+                                            </label>
+                                            <label class="ai-agent-field">
+                                                <span>7日滚动回撤 close-only</span>
+                                                <input id="ai-agent-risk-rolling-7d" type="number" min="0" max="1" step="0.001" placeholder="0.080" />
+                                            </label>
+                                        </div>
                                         <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
-                                            <button class="btn btn-sm" type="button" onclick="agentSaveConfig()">保存配置</button>
+                                            <button class="btn btn-sm" type="button" onclick="agentSaveConfig()">保存选币配置</button>
+                                            <button class="btn btn-sm" type="button" onclick="agentSaveRiskConfig()">保存风险纪律</button>
                                         </div>
                                         <div class="ai-agent-scroll-shell ai-agent-scroll-shell-ranking">
                                             <div id="ai-agent-ranking-summary" class="ai-agent-ranking-summary">加载中...</div>
@@ -2179,6 +2200,22 @@
                                             </div>
                                         </div>
                                     </article>
+                                </div>
+
+                                <div class="card ai-agent-runtime-card">
+                                    <div class="ai-sidebar-title">🛡 风险纪律状态</div>
+                                    <div class="ai-agent-runtime-card-desc">把“能不能开新单、是否已经 close-only、为什么被挡住、阈值设在哪里”单独拆开看。</div>
+                                    <div id="ai-agent-risk-status-panel" class="ai-agent-runtime-panel">
+                                        <div style="font-size:11px;color:#6b7fa0;padding:6px 0;">加载中...</div>
+                                    </div>
+                                </div>
+
+                                <div class="card ai-agent-runtime-card">
+                                    <div class="ai-sidebar-title">📊 交易记分卡</div>
+                                    <div class="ai-agent-runtime-card-desc">把收益、成本、胜率、持仓时长和复盘一致性压成一张短表，方便判断系统是否真的在变好。</div>
+                                    <div id="ai-agent-scorecard-panel" class="ai-agent-runtime-panel">
+                                        <div style="font-size:11px;color:#6b7fa0;padding:6px 0;">加载中...</div>
+                                    </div>
                                 </div>
 
                                 <div class="card ai-live-signals-card">
@@ -2589,7 +2626,7 @@
     <script charset="utf-8" src="/static/js/ai_research.js?v=42"></script>
     <script charset="utf-8" src="/static/js/ai_research_diagnostics.js?v=5"></script>
     <script charset="utf-8" src="/static/js/ai_research_runtime.js?v=7"></script>
-    <script charset="utf-8" src="/static/js/ai_research_agent.js?v=11"></script>
+    <script charset="utf-8" src="/static/js/ai_research_agent.js?v=12"></script>
     <script charset="utf-8" src="/static/js/news_tab_runtime.js?v=17"></script>
     <script charset="utf-8" src="/static/js/dashboard_unstructured_news.js?v=16"></script>
 </body>

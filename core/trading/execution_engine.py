@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -220,6 +222,8 @@ class ExecutionEngine:
         fee_usd: float,
         slippage_cost_usd: float,
         action: str,
+        gross_pnl_usd: Optional[float] = None,
+        net_pnl_usd: Optional[float] = None,
     ) -> None:
         if self._paper_trading:
             return
@@ -229,6 +233,17 @@ class ExecutionEngine:
         ts = datetime.now(timezone.utc)
         signal_payload = self._signal_to_dict_safe(signal)
         signal_type = str(signal_payload.get("signal_type") or side or "").strip().lower()
+        resolved_fee_usd = self._safe_nonnegative_float(fee_usd, 0.0)
+        resolved_slippage_cost_usd = self._safe_nonnegative_float(slippage_cost_usd, 0.0)
+        resolved_gross_pnl_usd = self._safe_float(
+            gross_pnl_usd,
+            self._safe_float(pnl, 0.0) + resolved_fee_usd,
+        )
+        resolved_net_pnl_usd = self._safe_float(
+            net_pnl_usd,
+            self._safe_float(pnl, 0.0),
+        )
+        resolved_cost_usd = resolved_fee_usd + resolved_slippage_cost_usd
 
         entry: Dict[str, Any]
         async with self._live_review_lock:
@@ -252,11 +267,15 @@ class ExecutionEngine:
                 "notional": float(quantity or 0.0) * float(fill_price or 0.0),
                 "order_id": str(order_id or ""),
                 "order_status": str(order_status or ""),
-                "pnl": float(pnl or 0.0),
-                "fee_usd": float(fee_usd or 0.0),
-                "slippage_cost_usd": float(slippage_cost_usd or 0.0),
+                "pnl": float(resolved_net_pnl_usd),
+                "gross_pnl_usd": float(resolved_gross_pnl_usd),
+                "fee_usd": float(resolved_fee_usd),
+                "slippage_cost_usd": float(resolved_slippage_cost_usd),
+                "cost_usd": float(resolved_cost_usd),
                 "signal": signal_payload,
             }
+            if net_pnl_usd is not None:
+                entry["net_pnl_usd"] = float(resolved_net_pnl_usd)
             with self._live_trade_journal_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
@@ -317,6 +336,7 @@ class ExecutionEngine:
         if strategy_filter:
             strategy_counts = {strategy_filter: int(strategy_counts.get(strategy_filter, 0))}
 
+        summary = self._build_live_trade_review_summary(items)
         return {
             "mode": "live",
             "hours": lookback_hours,
@@ -324,6 +344,7 @@ class ExecutionEngine:
             "strategy": strategy_filter or None,
             "count": len(items),
             "strategy_trade_counts": strategy_counts,
+            "summary": summary,
             "items": items,
         }
 
@@ -652,6 +673,16 @@ class ExecutionEngine:
             return float(default)
 
     @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            out = float(value)
+        except Exception:
+            return float(default)
+        if not math.isfinite(out):
+            return float(default)
+        return out
+
+    @staticmethod
     def _safe_ratio(value: Any, default: float = 0.0) -> float:
         try:
             out = float(value)
@@ -660,6 +691,123 @@ class ExecutionEngine:
         if not math.isfinite(out):
             return float(default)
         return max(0.0, min(out, 1.0))
+
+    @classmethod
+    def _live_trade_row_net_pnl_usd(cls, row: Dict[str, Any]) -> float:
+        if row.get("net_pnl_usd") is not None:
+            return cls._safe_float(row.get("net_pnl_usd"), 0.0)
+        recorded = cls._safe_float(row.get("pnl"), 0.0)
+        slippage_cost_usd = cls._safe_nonnegative_float(row.get("slippage_cost_usd"), 0.0)
+        return recorded - slippage_cost_usd
+
+    @classmethod
+    def _live_trade_row_gross_pnl_usd(cls, row: Dict[str, Any]) -> float:
+        if row.get("gross_pnl_usd") is not None:
+            return cls._safe_float(row.get("gross_pnl_usd"), 0.0)
+        if row.get("net_pnl_usd") is not None:
+            return (
+                cls._safe_float(row.get("net_pnl_usd"), 0.0)
+                + cls._safe_nonnegative_float(row.get("fee_usd"), 0.0)
+                + cls._safe_nonnegative_float(row.get("slippage_cost_usd"), 0.0)
+            )
+        return cls._safe_float(row.get("pnl"), 0.0) + cls._safe_nonnegative_float(row.get("fee_usd"), 0.0)
+
+    @classmethod
+    def _live_trade_row_position_side(cls, row: Dict[str, Any]) -> str:
+        action = str(row.get("action") or "").strip().lower()
+        side = str(row.get("side") or "").strip().lower()
+        if action == "close":
+            return "long" if side in {"sell", "short"} else "short"
+        return "long" if side in {"buy", "long"} else "short"
+
+    @classmethod
+    def _build_live_trade_review_summary(cls, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        summary: Dict[str, Any] = {
+            "trade_count": len(items),
+            "entry_count": 0,
+            "close_count": 0,
+            "winning_close_count": 0,
+            "losing_close_count": 0,
+            "gross_pnl_usd": 0.0,
+            "fee_usd": 0.0,
+            "slippage_cost_usd": 0.0,
+            "cost_usd": 0.0,
+            "net_pnl_usd": 0.0,
+            "win_rate": None,
+            "profit_factor": None,
+            "avg_holding_minutes": None,
+            "latest_trade_at": None,
+            "dominant_symbol": None,
+        }
+        if not items:
+            return summary
+
+        symbol_counter: Counter[str] = Counter()
+        holding_minutes: List[float] = []
+        open_stacks: Dict[Tuple[str, str], List[datetime]] = {}
+        positive_close_pnl = 0.0
+        negative_close_pnl = 0.0
+
+        for row in items:
+            symbol = str(row.get("symbol") or "").strip()
+            action = str(row.get("action") or "").strip().lower()
+            symbol_counter[symbol] += 1
+            summary["latest_trade_at"] = row.get("timestamp") or summary["latest_trade_at"]
+
+            fee_usd = cls._safe_nonnegative_float(row.get("fee_usd"), 0.0)
+            slippage_cost_usd = cls._safe_nonnegative_float(row.get("slippage_cost_usd"), 0.0)
+            gross_pnl_usd = cls._live_trade_row_gross_pnl_usd(row)
+            net_pnl_usd = cls._live_trade_row_net_pnl_usd(row)
+            summary["gross_pnl_usd"] += gross_pnl_usd
+            summary["fee_usd"] += fee_usd
+            summary["slippage_cost_usd"] += slippage_cost_usd
+            summary["cost_usd"] += fee_usd + slippage_cost_usd
+            summary["net_pnl_usd"] += net_pnl_usd
+
+            position_side = cls._live_trade_row_position_side(row)
+            stack_key = (str(symbol or "").strip().upper().replace("-", "/"), position_side)
+            trade_dt: Optional[datetime] = None
+            ts_raw = str(row.get("timestamp") or "").strip()
+            if ts_raw:
+                with contextlib.suppress(Exception):
+                    trade_dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                    if trade_dt.tzinfo is None:
+                        trade_dt = trade_dt.replace(tzinfo=timezone.utc)
+
+            if action == "close":
+                summary["close_count"] += 1
+                if net_pnl_usd > 0:
+                    summary["winning_close_count"] += 1
+                    positive_close_pnl += net_pnl_usd
+                elif net_pnl_usd < 0:
+                    summary["losing_close_count"] += 1
+                    negative_close_pnl += abs(net_pnl_usd)
+                stack = open_stacks.get(stack_key) or []
+                if stack and trade_dt is not None:
+                    opened_at = stack.pop()
+                    holding_minutes.append(max(0.0, (trade_dt - opened_at).total_seconds()) / 60.0)
+            else:
+                summary["entry_count"] += 1
+                if trade_dt is not None:
+                    open_stacks.setdefault(stack_key, []).append(trade_dt)
+
+        if summary["close_count"] > 0:
+            summary["win_rate"] = round(
+                float(summary["winning_close_count"]) / float(summary["close_count"]),
+                6,
+            )
+        if positive_close_pnl > 0 and negative_close_pnl > 0:
+            summary["profit_factor"] = round(positive_close_pnl / negative_close_pnl, 6)
+        elif positive_close_pnl > 0 and negative_close_pnl <= 0:
+            summary["profit_factor"] = None
+        if holding_minutes:
+            summary["avg_holding_minutes"] = round(sum(holding_minutes) / len(holding_minutes), 4)
+        if symbol_counter:
+            summary["dominant_symbol"] = symbol_counter.most_common(1)[0][0]
+
+        for key in ("gross_pnl_usd", "fee_usd", "slippage_cost_usd", "cost_usd", "net_pnl_usd"):
+            summary[key] = round(float(summary[key]), 4)
+        return summary
 
     def get_strategy_position_cap_notional(
         self,
@@ -1113,8 +1261,9 @@ class ExecutionEngine:
         fee_usd = self._safe_nonnegative_float(meta.get("paper_fee_usd"), 0.0)
         slippage_cost_usd = self._safe_nonnegative_float(meta.get("paper_slippage_cost_usd"), 0.0)
         self._paper_fee_applied_orders.add(oid)
-        if fee_usd > 0:
-            self._paper_total_fees_usd += float(fee_usd)
+        total_cost_usd = fee_usd + slippage_cost_usd
+        if total_cost_usd > 0:
+            self._paper_total_fees_usd += float(total_cost_usd)
         return {
             "fee_usd": float(fee_usd),
             "slippage_cost_usd": float(slippage_cost_usd),
@@ -1871,7 +2020,8 @@ class ExecutionEngine:
                 position_payload = {}
 
         metadata = dict(signal.metadata or {})
-        if bool(metadata.get("skip_live_decision_review")) or str(metadata.get("source") or "").strip().lower() == "ai_autonomous_agent":
+        source = str(metadata.get("source") or "").strip().lower()
+        if bool(metadata.get("skip_live_decision_review")):
             self._signal_diagnostics["ai_review_bypassed"] = int(
                 self._signal_diagnostics.get("ai_review_bypassed", 0)
             ) + 1
@@ -1883,7 +2033,9 @@ class ExecutionEngine:
                 "model": "",
                 "action": "allow",
                 "allowed": True,
-                "reason": "ai_live_decision_bypassed_for_autonomous_agent",
+                "reason": "ai_live_decision_bypassed_by_metadata_flag",
+                "bypass_reason": "metadata_skip_live_decision_review",
+                "bypass_source": source,
                 "confidence": 1.0,
                 "latency_ms": 0,
                 "research_context": {},
@@ -2510,6 +2662,11 @@ class ExecutionEngine:
             paper_cost = self._consume_paper_order_cost(order.id)
             fee_usd = float(paper_cost.get("fee_usd", 0.0) or 0.0)
             slippage_cost_usd = float(paper_cost.get("slippage_cost_usd", 0.0) or 0.0)
+            # For live orders, read fee from the exchange order object
+            if not self._paper_trading and fee_usd <= 0:
+                order_fee = float(getattr(order, "fee", 0.0) or 0.0)
+                if order_fee > 0:
+                    fee_usd = order_fee
             fill_price = float(order.price or signal.price or quote_price or 0.0)
             trade_pnl = 0.0
             current_position = position_manager.get_position(exchange, signal.symbol, account_id=account_id)
@@ -2696,7 +2853,8 @@ class ExecutionEngine:
                         ),
                     )
 
-            trade_pnl -= fee_usd
+            gross_trade_pnl = float(trade_pnl or 0.0)
+            net_trade_pnl = gross_trade_pnl - fee_usd - slippage_cost_usd
             risk_manager.record_trade(
                 {
                     "symbol": signal.symbol,
@@ -2704,7 +2862,7 @@ class ExecutionEngine:
                     "strategy": signal.strategy_name,
                     "side": side.value,
                     "notional": float(exec_amount * fill_price),
-                    "pnl": trade_pnl,
+                    "pnl": net_trade_pnl,
                     "fee_usd": fee_usd,
                     "slippage_cost_usd": slippage_cost_usd,
                 }
@@ -2718,9 +2876,11 @@ class ExecutionEngine:
                 fill_price=float(fill_price or 0.0),
                 order_id=order.id,
                 order_status=order.status.value,
-                pnl=float(trade_pnl or 0.0),
+                pnl=float(net_trade_pnl or 0.0),
                 fee_usd=fee_usd,
                 slippage_cost_usd=slippage_cost_usd,
+                gross_pnl_usd=float(gross_trade_pnl or 0.0),
+                net_pnl_usd=float(net_trade_pnl or 0.0),
                 action="open_or_add",
             )
 
@@ -2933,6 +3093,11 @@ class ExecutionEngine:
         paper_cost = self._consume_paper_order_cost(close_order.id)
         fee_usd = float(paper_cost.get("fee_usd", 0.0) or 0.0)
         slippage_cost_usd = float(paper_cost.get("slippage_cost_usd", 0.0) or 0.0)
+        # For live orders, read fee from the exchange order object
+        if not self._paper_trading and fee_usd <= 0:
+            order_fee = float(getattr(close_order, "fee", 0.0) or 0.0)
+            if order_fee > 0:
+                fee_usd = order_fee
         close_price = float(close_order.price or signal.price or quote_price or 0.0)
         closed = position_manager.close_position(
             exchange=exchange,
@@ -2960,13 +3125,14 @@ class ExecutionEngine:
                 "exchange": exchange,
                 "strategy": signal.strategy_name,
                 "side": signal.signal_type.value,
-                "pnl": float(closed.realized_pnl or 0.0) - fee_usd,
+                "pnl": float(closed.realized_pnl or 0.0) - fee_usd - slippage_cost_usd,
                 "notional": float(close_price * close_qty),
                 "fee_usd": fee_usd,
                 "slippage_cost_usd": slippage_cost_usd,
             }
         )
-        close_pnl = float(closed.realized_pnl or 0.0) - fee_usd
+        gross_close_pnl = float(closed.realized_pnl or 0.0)
+        close_pnl = gross_close_pnl - fee_usd - slippage_cost_usd
         await self._record_live_strategy_trade(
             signal=signal,
             exchange=exchange,
@@ -2979,6 +3145,8 @@ class ExecutionEngine:
             pnl=close_pnl,
             fee_usd=fee_usd,
             slippage_cost_usd=slippage_cost_usd,
+            gross_pnl_usd=gross_close_pnl,
+            net_pnl_usd=close_pnl,
             action="close",
         )
 
@@ -3190,6 +3358,11 @@ class ExecutionEngine:
         paper_cost = self._consume_paper_order_cost(order.id)
         fee_usd = float(paper_cost.get("fee_usd", 0.0) or 0.0)
         slippage_cost_usd = float(paper_cost.get("slippage_cost_usd", 0.0) or 0.0)
+        # For live orders, read fee from the exchange order object
+        if not self._paper_trading and fee_usd <= 0:
+            order_fee = float(getattr(order, "fee", 0.0) or 0.0)
+            if order_fee > 0:
+                fee_usd = order_fee
         fill_price = float(order.price or price or quote_price or 0.0)
         trade_pnl = 0.0
 
@@ -3361,7 +3534,8 @@ class ExecutionEngine:
                     ),
                 )
 
-        trade_pnl -= fee_usd
+        gross_trade_pnl = float(trade_pnl or 0.0)
+        net_trade_pnl = gross_trade_pnl - fee_usd - slippage_cost_usd
         risk_manager.record_trade(
             {
                 "symbol": symbol,
@@ -3369,7 +3543,7 @@ class ExecutionEngine:
                 "strategy": strategy,
                 "side": side_lower,
                 "notional": float(exec_amount * fill_price),
-                "pnl": trade_pnl,
+                "pnl": net_trade_pnl,
                 "fee_usd": fee_usd,
                 "slippage_cost_usd": slippage_cost_usd,
             }

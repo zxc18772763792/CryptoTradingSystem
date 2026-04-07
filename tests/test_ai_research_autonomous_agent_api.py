@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -217,6 +218,509 @@ def test_autonomous_agent_review_endpoint_includes_learning_memory(monkeypatch):
     result = asyncio.run(ai_module.get_ai_autonomous_agent_review(request, limit=8))
     assert result["summary"]["submitted_count"] == 0
     assert result["learning_memory"]["adaptive_risk"]["effective_min_confidence"] == 0.66
+
+
+def test_build_autonomous_agent_scorecard_aggregates_live_trade_metrics(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    snapshot_generated_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    captured = {}
+
+    monkeypatch.setattr(
+        ai_module.execution_engine,
+        "get_live_trade_review",
+        lambda limit=200, strategy=None, hours=24 * 7: {
+            "mode": "live",
+            "hours": hours,
+            "limit": limit,
+            "strategy": strategy,
+            "count": 3,
+            "strategy_trade_counts": {"AI_AutonomousAgent": 3},
+            "items": [
+                {
+                    "action": "open_or_add",
+                    "signal_type": "buy",
+                    "pnl": -0.2,
+                    "fee_usd": 0.2,
+                    "slippage_cost_usd": 0.05,
+                },
+                {
+                    "action": "close",
+                    "signal_type": "close_long",
+                    "pnl": 3.8,
+                    "fee_usd": 0.2,
+                    "slippage_cost_usd": 0.2,
+                },
+                {
+                    "action": "close",
+                    "signal_type": "close_short",
+                    "pnl": -1.2,
+                    "fee_usd": 0.1,
+                    "slippage_cost_usd": 0.1,
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        ai_module,
+        "_build_autonomous_agent_review",
+        lambda limit=30: {
+            "summary": {
+                "submitted_count": 3,
+                "entry_count": 1,
+                "close_count": 2,
+                "losing_close_count": 1,
+                "repeated_same_direction_entries": 0,
+                "outage_after_entry_count": 0,
+                "unmatched_entry_count": 0,
+                "current_open_count": 1,
+                "current_open_unrealized_pnl": 1.25,
+            },
+            "items": [
+                {"phase": "exit", "pair": {"holding_minutes": 45.0}},
+                {"phase": "exit", "pair": {"holding_minutes": 75.0}},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        ai_module,
+        "_get_autonomous_agent_learning_memory",
+        lambda: {
+            "adaptive_risk": {
+                "effective_min_confidence": 0.66,
+                "recent_close_loss_streak_count": 2,
+                "avoid_new_entries_during_loss_streak": True,
+            },
+            "lessons": ["raise confidence"],
+        },
+    )
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_runtime_config",
+        lambda: {
+            "enabled": True,
+            "mode": "execute",
+            "allow_live": False,
+            "symbol_mode": "auto",
+            "exchange": "binance",
+            "symbol": "BTC/USDT",
+            "timeframe": "15m",
+            "strategy_name": "AI_AutonomousAgent",
+        },
+    )
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_status",
+        lambda: {
+            "running": True,
+            "last_symbol_scan": {
+                "selected_symbol": "SOL/USDT",
+                "scan_config": {"timeframe": "15m"},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        ai_module,
+        "resolve_runtime_research_context",
+        lambda **kwargs: captured.update(kwargs)
+        or {
+            "available": True,
+            "candidate_count": 2,
+            "selection_reason": "active_runtime_candidate",
+            "reason_codes": ["ELIGIBILITY_OK"],
+            "data_source": "runtime_eligibility_snapshot",
+            "snapshot_generated_at": snapshot_generated_at.isoformat(),
+            "snapshot_path": "runtime/eligibility_snapshot.json",
+            "eligibility_contract": {
+                "schema_version": "runtime_eligibility.v1",
+                "source": "runtime_eligibility_snapshot",
+                "generated_at": snapshot_generated_at.isoformat(),
+            },
+            "selected_eligibility": {
+                "candidate_id": "cand-sol",
+                "proposal_id": "proposal-sol",
+                "strategy": "AI_AutonomousAgent",
+                "status": "paper_running",
+                "promotion_target": "paper",
+                "runtime_mode_cap": "paper_execute",
+                "eligible_for_autonomy": True,
+                "is_expired": False,
+                "expires_at": (snapshot_generated_at + timedelta(minutes=30)).isoformat(),
+                "reason_codes": [],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        ai_module,
+        "_get_autonomous_agent_risk_report",
+        lambda: {
+            "trading_halted": False,
+            "halt_reason": "",
+            "risk_level": "medium",
+            "discipline": {
+                "fresh_entry_allowed": False,
+                "reduce_only": True,
+                "degrade_mode": "reduce_only",
+                "reasons": ["rolling_3d_drawdown_limit_exceeded(0.080000>=0.060000)"],
+                "thresholds": {
+                    "rolling_3d_drawdown_reduce_only": 0.06,
+                },
+            },
+            "equity": {
+                "daily_pnl_ratio": -0.012,
+                "daily_stop_basis_ratio": 0.05,
+                "max_drawdown": 0.08,
+                "rolling_3d_drawdown": 0.08,
+                "rolling_7d_drawdown": 0.11,
+            },
+            "drawdown": {
+                "max_drawdown": 0.08,
+                "rolling_3d": {"drawdown": 0.08, "point_count": 12},
+                "rolling_7d": {"drawdown": 0.11, "point_count": 24},
+            },
+        },
+    )
+
+    payload = ai_module._build_autonomous_agent_scorecard(limit=50, hours=72)
+
+    assert payload["metrics"]["trades"] == 3
+    assert payload["metrics"]["entries"] == 1
+    assert payload["metrics"]["closes"] == 2
+    assert payload["metrics"]["gross_pnl_usd"] == pytest.approx(2.9)
+    assert payload["metrics"]["fee_usd"] == pytest.approx(0.5)
+    assert payload["metrics"]["slippage_cost_usd"] == pytest.approx(0.35)
+    assert payload["metrics"]["net_pnl_usd"] == pytest.approx(2.05)
+    assert payload["metrics"]["win_rate"] == pytest.approx(0.5)
+    assert payload["metrics"]["profit_factor"] == pytest.approx(3.6 / 1.3, rel=1e-6)
+    assert payload["metrics"]["avg_holding_minutes"] == pytest.approx(60.0)
+    assert payload["metrics"]["current_open_unrealized_pnl"] == pytest.approx(1.25)
+    assert payload["review_summary"]["close_count"] == 2
+    assert payload["learning_summary"]["effective_min_confidence"] == pytest.approx(0.66)
+    assert payload["risk"]["risk_level"] == "medium"
+    assert payload["risk"]["discipline"]["degrade_mode"] == "reduce_only"
+    assert payload["risk"]["rolling_3d_drawdown"] == pytest.approx(0.08)
+    assert payload["risk"]["rolling_7d_drawdown"] == pytest.approx(0.11)
+    assert payload["eligibility"]["symbol"] == "SOL/USDT"
+    assert payload["eligibility"]["data_source"] == "runtime_eligibility_snapshot"
+    assert payload["eligibility"]["selected"]["candidate_id"] == "cand-sol"
+    assert payload["eligibility"]["refresh_age_sec"] == pytest.approx(300, abs=5)
+    assert payload["consistency"]["entry_count_delta"] == 0
+    assert payload["window"]["hours"] == 72
+    assert captured == {
+        "exchange": "binance",
+        "symbol": "SOL/USDT",
+        "timeframe": "15m",
+        "strategy_name": "AI_AutonomousAgent",
+    }
+
+
+def test_autonomous_agent_scorecard_endpoint_proxies_payload(monkeypatch):
+    from web.api import ai_agent as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(
+        ai_module.ai_research_module,
+        "_build_autonomous_agent_scorecard",
+        lambda limit=200, hours=24 * 7: {
+            "metrics": {"trades": 4, "net_pnl_usd": 1.23},
+            "window": {"hours": hours, "trade_limit": limit},
+        },
+    )
+
+    result = asyncio.run(ai_module.get_ai_autonomous_agent_scorecard(request, limit=120, hours=48))
+
+    assert result["metrics"]["trades"] == 4
+    assert result["metrics"]["net_pnl_usd"] == pytest.approx(1.23)
+    assert result["window"]["hours"] == 48
+    assert result["window"]["trade_limit"] == 120
+
+
+def test_build_autonomous_agent_risk_status_merges_risk_and_learning_guards(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    snapshot_generated_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    captured = {}
+
+    monkeypatch.setattr(
+        ai_module,
+        "_get_autonomous_agent_learning_memory",
+        lambda: {
+            "summary": {"recent_close_loss_streak_count": 3},
+            "adaptive_risk": {
+                "effective_min_confidence": 0.64,
+                "avoid_new_entries_during_service_instability": True,
+                "avoid_new_entries_during_loss_streak": True,
+            },
+            "lessons": ["stay defensive"],
+        },
+    )
+    monkeypatch.setattr(
+        ai_module,
+        "_get_autonomous_agent_risk_report",
+        lambda: {
+            "trading_halted": False,
+            "halt_reason": "",
+            "risk_level": "high",
+            "discipline": {
+                "fresh_entry_allowed": False,
+                "reduce_only": True,
+                "degrade_mode": "reduce_only",
+                "reasons": ["rolling_3d_drawdown_limit_exceeded(0.080000>=0.060000)"],
+                "thresholds": {"rolling_3d_drawdown_reduce_only": 0.06},
+            },
+            "equity": {
+                "current": 9800.0,
+                "day_start": 10000.0,
+                "daily_total_pnl_usd": -200.0,
+                "daily_realized_pnl_usd": -120.0,
+                "current_unrealized_pnl_usd": -80.0,
+                "daily_pnl_ratio": -0.02,
+                "daily_stop_basis_ratio": -0.018,
+                "max_drawdown": 0.08,
+                "rolling_3d_drawdown": 0.08,
+                "rolling_7d_drawdown": 0.11,
+            },
+            "drawdown": {
+                "max_drawdown": 0.08,
+                "rolling_3d": {"drawdown": 0.08, "point_count": 12},
+                "rolling_7d": {"drawdown": 0.11, "point_count": 24},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_runtime_config",
+        lambda: {
+            "enabled": True,
+            "mode": "execute",
+            "allow_live": False,
+            "symbol_mode": "auto",
+            "exchange": "binance",
+            "symbol": "BTC/USDT",
+            "timeframe": "1h",
+            "strategy_name": "AI_AutonomousAgent",
+        },
+    )
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_status",
+        lambda: {
+            "running": True,
+            "last_run_at": "2026-04-07T10:00:00+00:00",
+            "last_symbol_scan": {
+                "selected_symbol": "ETH/USDT",
+                "scan_config": {"timeframe": "1h"},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        ai_module,
+        "resolve_runtime_research_context",
+        lambda **kwargs: captured.update(kwargs)
+        or {
+            "available": True,
+            "candidate_count": 1,
+            "selection_reason": "strategy_match",
+            "reason_codes": ["ELIGIBILITY_OK"],
+            "data_source": "runtime_eligibility_snapshot",
+            "snapshot_generated_at": snapshot_generated_at.isoformat(),
+            "snapshot_path": "runtime/eligibility_snapshot.json",
+            "eligibility_contract": {
+                "schema_version": "runtime_eligibility.v1",
+                "source": "runtime_eligibility_snapshot",
+                "generated_at": snapshot_generated_at.isoformat(),
+            },
+            "selected_eligibility": {
+                "candidate_id": "cand-eth",
+                "proposal_id": "proposal-eth",
+                "strategy": "AI_AutonomousAgent",
+                "status": "paper_running",
+                "promotion_target": "paper",
+                "runtime_mode_cap": "paper_execute",
+                "eligible_for_autonomy": True,
+                "is_expired": False,
+                "expires_at": (snapshot_generated_at + timedelta(minutes=45)).isoformat(),
+                "reason_codes": [],
+            },
+        },
+    )
+
+    payload = ai_module._build_autonomous_agent_risk_status()
+
+    assert payload["runtime"]["mode"] == "execute"
+    assert payload["risk"]["discipline"]["reduce_only"] is True
+    assert payload["risk"]["rolling_3d_drawdown"] == pytest.approx(0.08)
+    assert payload["learning"]["recent_close_loss_streak_count"] == 3
+    assert payload["effective_fresh_entry_allowed"] is False
+    assert payload["eligibility"]["symbol"] == "ETH/USDT"
+    assert payload["eligibility"]["data_source"] == "runtime_eligibility_snapshot"
+    assert payload["eligibility"]["selected"]["candidate_id"] == "cand-eth"
+    assert payload["eligibility"]["refresh_age_sec"] == pytest.approx(600, abs=5)
+    blocker_codes = {item["code"] for item in payload["fresh_entry_blockers"]}
+    assert "reduce_only" in blocker_codes
+    assert "learning_service_instability_guard" in blocker_codes
+    assert "learning_loss_streak_guard" in blocker_codes
+    assert captured == {
+        "exchange": "binance",
+        "symbol": "ETH/USDT",
+        "timeframe": "1h",
+        "strategy_name": "AI_AutonomousAgent",
+    }
+
+
+def test_autonomous_agent_risk_status_endpoint_proxies_payload(monkeypatch):
+    from web.api import ai_agent as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(
+        ai_module.ai_research_module,
+        "_build_autonomous_agent_risk_status",
+        lambda: {
+            "risk": {"risk_level": "high"},
+            "effective_fresh_entry_allowed": False,
+        },
+    )
+
+    result = asyncio.run(ai_module.get_ai_autonomous_agent_risk_status(request))
+
+    assert result["risk"]["risk_level"] == "high"
+    assert result["effective_fresh_entry_allowed"] is False
+
+
+def test_autonomous_agent_risk_config_endpoint_proxies_payload(monkeypatch):
+    from web.api import ai_agent as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(
+        ai_module.ai_research_module,
+        "get_ai_autonomous_agent_risk_config",
+        AsyncMock(
+            return_value={
+                "config": {"autonomy_daily_stop_buffer_ratio": 0.01},
+                "effective_thresholds": {"daily_stop_buffer_ratio": -0.01},
+            }
+        ),
+    )
+
+    result = asyncio.run(ai_module.get_ai_autonomous_agent_risk_config(request))
+
+    assert result["config"]["autonomy_daily_stop_buffer_ratio"] == pytest.approx(0.01)
+    assert result["effective_thresholds"]["daily_stop_buffer_ratio"] == pytest.approx(-0.01)
+
+
+def test_build_autonomous_agent_risk_config_exposes_config_and_effective_thresholds(monkeypatch):
+    from web.api import ai_research as ai_module
+    from core.risk.risk_manager import risk_manager
+
+    monkeypatch.setattr(
+        ai_module,
+        "_get_autonomous_agent_risk_report",
+        lambda: {
+            "timestamp": "2026-04-07T10:00:00+00:00",
+            "risk_level": "medium",
+            "trading_halted": False,
+            "halt_reason": "",
+            "discipline": {
+                "fresh_entry_allowed": False,
+                "reduce_only": True,
+                "degrade_mode": "reduce_only",
+                "reasons": ["rolling_3d_drawdown_limit_exceeded(0.055000>=0.050000)"],
+                "thresholds": {
+                    "daily_stop_buffer_ratio": -0.01,
+                    "max_drawdown_reduce_only": 0.03,
+                    "rolling_3d_drawdown_reduce_only": 0.05,
+                    "rolling_7d_drawdown_reduce_only": 0.08,
+                },
+            },
+            "equity": {
+                "current": 9950.0,
+                "day_start": 10000.0,
+                "daily_total_pnl_usd": -50.0,
+                "daily_realized_pnl_usd": -20.0,
+                "current_unrealized_pnl_usd": -30.0,
+                "daily_pnl_ratio": -0.005,
+                "daily_stop_basis_ratio": -0.004,
+                "max_drawdown": 0.04,
+                "rolling_3d_drawdown": 0.055,
+                "rolling_7d_drawdown": 0.055,
+            },
+            "drawdown": {
+                "max_drawdown": 0.04,
+                "rolling_3d": {"drawdown": 0.055, "point_count": 8},
+                "rolling_7d": {"drawdown": 0.055, "point_count": 14},
+            },
+            "limits": {
+                "max_daily_loss_ratio": 0.02,
+                "autonomy_daily_stop_buffer_ratio": 0.01,
+                "autonomy_max_drawdown_reduce_only": 0.03,
+                "autonomy_rolling_3d_drawdown_reduce_only": 0.05,
+                "autonomy_rolling_7d_drawdown_reduce_only": 0.08,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        risk_manager,
+        "get_autonomy_risk_config",
+        lambda: {
+            "autonomy_daily_stop_buffer_ratio": 0.01,
+            "autonomy_max_drawdown_reduce_only": 0.03,
+            "autonomy_rolling_3d_drawdown_reduce_only": 0.05,
+            "autonomy_rolling_7d_drawdown_reduce_only": 0.08,
+        },
+    )
+
+    payload = ai_module._build_autonomous_agent_risk_config()
+
+    assert payload["config"]["autonomy_daily_stop_buffer_ratio"] == pytest.approx(0.01)
+    assert payload["effective_thresholds"]["daily_stop_buffer_ratio"] == pytest.approx(-0.01)
+    assert payload["risk"]["discipline"]["reduce_only"] is True
+    assert payload["base_limits"]["max_daily_loss_ratio"] == pytest.approx(0.02)
+    assert payload["updated_at"] == "2026-04-07T10:00:00+00:00"
+
+
+def test_update_autonomous_agent_risk_config_endpoint(monkeypatch):
+    from web.api import ai_research as ai_module
+    from core.risk.risk_manager import risk_manager
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    captured = {}
+
+    def _fake_update_parameters(payload):
+        captured.update(payload)
+
+    monkeypatch.setattr(risk_manager, "update_parameters", _fake_update_parameters)
+    monkeypatch.setattr(
+        ai_module,
+        "_build_autonomous_agent_risk_config",
+        lambda: {
+            "config": {
+                "autonomy_daily_stop_buffer_ratio": 0.01,
+                "autonomy_max_drawdown_reduce_only": 0.03,
+                "autonomy_rolling_3d_drawdown_reduce_only": 0.05,
+                "autonomy_rolling_7d_drawdown_reduce_only": 0.08,
+            },
+            "effective_thresholds": {"daily_stop_buffer_ratio": -0.01},
+            "risk": {"discipline": {"reduce_only": True}},
+        },
+    )
+
+    payload = ai_module.AIAutonomousAgentRiskConfigUpdateRequest(
+        autonomy_daily_stop_buffer_ratio=0.01,
+        autonomy_max_drawdown_reduce_only=0.03,
+        autonomy_rolling_3d_drawdown_reduce_only=0.05,
+        autonomy_rolling_7d_drawdown_reduce_only=0.08,
+    )
+    result = asyncio.run(ai_module.update_ai_autonomous_agent_risk_config(request, payload))
+
+    assert captured == {
+        "autonomy_daily_stop_buffer_ratio": 0.01,
+        "autonomy_max_drawdown_reduce_only": 0.03,
+        "autonomy_rolling_3d_drawdown_reduce_only": 0.05,
+        "autonomy_rolling_7d_drawdown_reduce_only": 0.08,
+    }
+    assert result["updated"] is True
+    assert result["config"]["config"]["autonomy_daily_stop_buffer_ratio"] == pytest.approx(0.01)
+    assert result["config"]["risk"]["discipline"]["reduce_only"] is True
 
 
 def test_build_autonomous_agent_review_includes_profit_curve(monkeypatch, tmp_path):

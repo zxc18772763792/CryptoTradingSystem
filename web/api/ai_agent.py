@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request
 import web.api.ai_research as ai_research_module
 from web.api.ai_research import (
     AIAutonomousAgentConfigUpdateRequest,
+    AIAutonomousAgentRiskConfigUpdateRequest,
     AIAutonomousAgentRunOnceRequest,
     AIAutonomousAgentStartRequest,
 )
@@ -27,6 +28,19 @@ async def update_ai_autonomous_agent_runtime_config(
     payload: AIAutonomousAgentConfigUpdateRequest,
 ):
     return await ai_research_module.update_ai_autonomous_agent_runtime_config(request, payload)
+
+
+@router.get("/autonomous-agent/risk-config")
+async def get_ai_autonomous_agent_risk_config(request: Request):
+    return await ai_research_module.get_ai_autonomous_agent_risk_config(request)
+
+
+@router.post("/autonomous-agent/risk-config")
+async def update_ai_autonomous_agent_risk_config(
+    request: Request,
+    payload: AIAutonomousAgentRiskConfigUpdateRequest,
+):
+    return await ai_research_module.update_ai_autonomous_agent_risk_config(request, payload)
 
 
 @router.get("/autonomous-agent/status")
@@ -63,6 +77,20 @@ async def get_ai_autonomous_agent_journal(request: Request, limit: int = 50):
 @router.get("/autonomous-agent/review")
 async def get_ai_autonomous_agent_review(request: Request, limit: int = 12):
     return await ai_research_module.get_ai_autonomous_agent_review(request, limit=limit)
+
+
+@router.get("/autonomous-agent/scorecard")
+async def get_ai_autonomous_agent_scorecard(request: Request, limit: int = 200, hours: int = 24 * 7):
+    return await ai_research_module.get_ai_autonomous_agent_scorecard(
+        request,
+        limit=limit,
+        hours=hours,
+    )
+
+
+@router.get("/autonomous-agent/risk-status")
+async def get_ai_autonomous_agent_risk_status(request: Request):
+    return await ai_research_module.get_ai_autonomous_agent_risk_status(request)
 
 
 @router.get("/autonomous-agent/symbol-ranking")

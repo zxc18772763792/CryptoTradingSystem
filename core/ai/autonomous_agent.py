@@ -29,6 +29,7 @@ from core.backtest.cost_models import dynamic_slippage_rate, microstructure_prox
 from core.data import data_storage
 from core.exchanges import exchange_manager
 from core.news.storage import db as news_db
+from core.risk.risk_manager import risk_manager
 from core.runtime import runtime_state
 from core.strategies import Signal, SignalType
 from core.strategies.strategy_manager import strategy_manager
@@ -213,6 +214,13 @@ def _coerce_int(value: Any, default: int, *, low: int, high: int) -> int:
     except Exception:
         parsed = int(default)
     return max(low, min(high, parsed))
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
 
 
 def _safe_nonnegative_float(value: Any, default: float = 0.0) -> float:
@@ -2266,6 +2274,36 @@ class AutonomousTradingAgent:
             if account_equity > 0 and max_total_exposure_ratio > 0
             else 0.0
         )
+        risk_report: Dict[str, Any] = {}
+        with contextlib.suppress(Exception):
+            raw_risk_report = risk_manager.get_risk_report()
+            if isinstance(raw_risk_report, dict):
+                risk_report = dict(raw_risk_report)
+        risk_equity = dict(risk_report.get("equity") or {})
+        risk_discipline = dict(risk_report.get("discipline") or {})
+        risk_drawdown = dict(risk_report.get("drawdown") or {})
+        risk_trading_halted = bool(risk_report.get("trading_halted"))
+        risk_reduce_only = bool(risk_discipline.get("reduce_only", risk_trading_halted))
+        risk_fresh_entry_allowed_raw = risk_discipline.get("fresh_entry_allowed")
+        if risk_fresh_entry_allowed_raw is None:
+            risk_fresh_entry_allowed = not (risk_trading_halted or risk_reduce_only)
+        else:
+            risk_fresh_entry_allowed = bool(risk_fresh_entry_allowed_raw)
+        risk_degrade_mode = str(risk_discipline.get("degrade_mode") or "").strip().lower()
+        if risk_trading_halted:
+            risk_reduce_only = True
+            risk_fresh_entry_allowed = False
+            risk_degrade_mode = "halted"
+        elif risk_reduce_only or not risk_fresh_entry_allowed:
+            risk_fresh_entry_allowed = False
+            risk_degrade_mode = risk_degrade_mode if risk_degrade_mode else "reduce_only"
+        else:
+            risk_degrade_mode = risk_degrade_mode if risk_degrade_mode else "normal"
+        risk_discipline_reasons = [
+            str(item).strip()
+            for item in list(risk_discipline.get("reasons") or [])
+            if str(item or "").strip()
+        ]
         return {
             "account_equity": float(max(0.0, account_equity)),
             "strategy_allocation": float(max(0.0, strategy_allocation)),
@@ -2275,6 +2313,33 @@ class AutonomousTradingAgent:
             "observed_account_open_notional": float(max(0.0, observed_account_open_notional)),
             "total_exposure_limit_notional": float(max(0.0, total_exposure_limit_notional)),
             "trading_mode": str(execution_engine.get_trading_mode() or "paper"),
+            "risk_level": str(risk_report.get("risk_level") or "low"),
+            "risk_trading_halted": risk_trading_halted,
+            "risk_halt_reason": str(risk_report.get("halt_reason") or ""),
+            "risk_fresh_entry_allowed": bool(risk_fresh_entry_allowed),
+            "risk_reduce_only": bool(risk_reduce_only),
+            "risk_degrade_mode": str(risk_degrade_mode),
+            "risk_discipline_reasons": risk_discipline_reasons,
+            "risk_daily_pnl_ratio": float(_safe_float(risk_equity.get("daily_pnl_ratio"), 0.0)),
+            "risk_daily_stop_basis_ratio": float(
+                _safe_float(
+                    risk_equity.get("daily_stop_basis_ratio", risk_equity.get("daily_pnl_ratio")),
+                    0.0,
+                )
+            ),
+            "risk_max_drawdown": float(_safe_nonnegative_float(risk_equity.get("max_drawdown"), 0.0)),
+            "risk_rolling_3d_drawdown": float(
+                _safe_nonnegative_float(
+                    risk_equity.get("rolling_3d_drawdown", (risk_drawdown.get("rolling_3d") or {}).get("drawdown")),
+                    0.0,
+                )
+            ),
+            "risk_rolling_7d_drawdown": float(
+                _safe_nonnegative_float(
+                    risk_equity.get("rolling_7d_drawdown", (risk_drawdown.get("rolling_7d") or {}).get("drawdown")),
+                    0.0,
+                )
+            ),
         }
 
     async def _annotate_position_payload(
@@ -2708,6 +2773,31 @@ class AutonomousTradingAgent:
                 and not bool(cfg.get("allow_live"))
             )
         )
+        risk_level = str(account_risk_base.get("risk_level") or "low").strip().lower() or "low"
+        risk_trading_halted = bool(account_risk_base.get("risk_trading_halted"))
+        risk_halt_reason = str(account_risk_base.get("risk_halt_reason") or "").strip()
+        risk_fresh_entry_allowed = bool(account_risk_base.get("risk_fresh_entry_allowed", not risk_trading_halted))
+        risk_reduce_only = bool(account_risk_base.get("risk_reduce_only", risk_trading_halted))
+        risk_degrade_mode = str(account_risk_base.get("risk_degrade_mode") or "").strip().lower()
+        risk_discipline_reasons = [
+            str(item).strip()
+            for item in list(account_risk_base.get("risk_discipline_reasons") or [])
+            if str(item or "").strip()
+        ]
+        if risk_trading_halted:
+            risk_reduce_only = True
+            risk_fresh_entry_allowed = False
+            risk_degrade_mode = "halted"
+        elif risk_reduce_only or not risk_fresh_entry_allowed:
+            risk_fresh_entry_allowed = False
+            risk_degrade_mode = risk_degrade_mode if risk_degrade_mode else "reduce_only"
+        else:
+            risk_degrade_mode = risk_degrade_mode if risk_degrade_mode else "normal"
+        risk_daily_pnl_ratio = _safe_float(account_risk_base.get("risk_daily_pnl_ratio"), 0.0)
+        risk_daily_stop_basis_ratio = _safe_float(account_risk_base.get("risk_daily_stop_basis_ratio"), 0.0)
+        risk_max_drawdown = _safe_nonnegative_float(account_risk_base.get("risk_max_drawdown"), 0.0)
+        risk_rolling_3d_drawdown = _safe_nonnegative_float(account_risk_base.get("risk_rolling_3d_drawdown"), 0.0)
+        risk_rolling_7d_drawdown = _safe_nonnegative_float(account_risk_base.get("risk_rolling_7d_drawdown"), 0.0)
         return {
             "trading_mode": str(account_risk_base.get("trading_mode") or execution_engine.get_trading_mode()),
             "agent_mode": str(cfg.get("mode") or "shadow"),
@@ -2725,6 +2815,18 @@ class AutonomousTradingAgent:
             "total_exposure_ratio": float(total_exposure_ratio),
             "total_exposure_limit_notional": float(total_exposure_limit_notional),
             "total_remaining_notional": float(total_remaining_notional),
+            "risk_level": risk_level,
+            "risk_trading_halted": risk_trading_halted,
+            "risk_halt_reason": risk_halt_reason,
+            "risk_fresh_entry_allowed": bool(risk_fresh_entry_allowed),
+            "risk_reduce_only": bool(risk_reduce_only),
+            "risk_degrade_mode": str(risk_degrade_mode),
+            "risk_discipline_reasons": risk_discipline_reasons,
+            "risk_daily_pnl_ratio": float(risk_daily_pnl_ratio),
+            "risk_daily_stop_basis_ratio": float(risk_daily_stop_basis_ratio),
+            "risk_max_drawdown": float(risk_max_drawdown),
+            "risk_rolling_3d_drawdown": float(risk_rolling_3d_drawdown),
+            "risk_rolling_7d_drawdown": float(risk_rolling_7d_drawdown),
             "last_price": float(last_price or 0.0),
             "has_position": bool(current_position_side),
             "current_position_side": current_position_side,
@@ -2940,6 +3042,7 @@ class AutonomousTradingAgent:
         adjusted = dict(row or {})
         learning_memory = cfg.get("learning_memory") if isinstance(cfg, dict) else {}
         adaptive_risk = dict((learning_memory or {}).get("adaptive_risk") or {})
+        summary = dict((learning_memory or {}).get("summary") or {})
         blocked_map = build_blocked_symbol_side_map(
             learning_memory,
             base_min_confidence=float(cfg.get("min_confidence") or 0.58),
@@ -2959,11 +3062,27 @@ class AutonomousTradingAgent:
                 tradable_now = False
                 notes.append(f"review cooldown {pair_side}")
 
-        if bool(adaptive_risk.get("avoid_new_entries_during_service_instability")) and not bool(adjusted.get("has_position")):
+        if (
+            self._service_instability_guard_active(
+                learning_memory=learning_memory,
+                adaptive_risk=adaptive_risk,
+            )
+            and not bool(adjusted.get("has_position"))
+        ):
             score -= 0.10
             if pair_side:
                 tradable_now = False
             notes.append("service instability")
+
+        if (
+            bool(adaptive_risk.get("avoid_new_entries_during_loss_streak"))
+            and not bool(adjusted.get("has_position"))
+        ):
+            score -= 0.12
+            if pair_side:
+                tradable_now = False
+            streak = max(0, int(summary.get("recent_close_loss_streak_count") or 0))
+            notes.append(f"loss streak {streak}" if streak > 0 else "loss streak")
 
         if notes:
             summary = str(adjusted.get("summary") or "").strip()
@@ -2972,6 +3091,78 @@ class AutonomousTradingAgent:
         adjusted["score"] = round(score, 6)
         adjusted["tradable_now"] = tradable_now
         return adjusted
+
+    def _service_instability_guard_active(
+        self,
+        *,
+        learning_memory: Optional[Dict[str, Any]] = None,
+        adaptive_risk: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        if self._current_model_feedback_outage_duration_sec() > 0:
+            return True
+        memory = learning_memory if isinstance(learning_memory, dict) else {}
+        adaptive = dict(adaptive_risk or {})
+        if not adaptive:
+            adaptive = dict((memory or {}).get("adaptive_risk") or {})
+        # Treat the learned instability flag as a hard guardrail for fresh entries.
+        # It is derived from recent journal issue-rate/latency statistics and should
+        # continue to block opening risk even after a transient outage has just recovered.
+        return bool(adaptive.get("avoid_new_entries_during_service_instability"))
+
+    def _fresh_entry_guard_reason(
+        self,
+        *,
+        cfg: Dict[str, Any],
+        context_payload: Dict[str, Any],
+        side: str,
+    ) -> Optional[str]:
+        learning_memory = cfg.get("learning_memory") if isinstance(cfg, dict) else {}
+        adaptive_risk = dict((learning_memory or {}).get("adaptive_risk") or {})
+        summary = dict((learning_memory or {}).get("summary") or {})
+        blocked_map = build_blocked_symbol_side_map(
+            learning_memory,
+            base_min_confidence=float(cfg.get("min_confidence") or 0.58),
+        )
+        symbol = normalize_symbol(context_payload.get("symbol") or cfg.get("symbol"))
+        normalized_side = str(side or "").strip().lower()
+        account_risk = dict(context_payload.get("account_risk") or {})
+        position = context_payload.get("position") if isinstance(context_payload, dict) else {}
+        has_position = bool(str((position or {}).get("side") or "").strip().lower())
+
+        if has_position:
+            return None
+
+        blocked = blocked_map.get((symbol, normalized_side))
+        if blocked:
+            return f"review_cooldown({symbol}:{normalized_side})"
+
+        risk_trading_halted = bool(account_risk.get("risk_trading_halted"))
+        risk_reduce_only = bool(account_risk.get("risk_reduce_only"))
+        risk_fresh_entry_allowed_raw = account_risk.get("risk_fresh_entry_allowed")
+        if risk_fresh_entry_allowed_raw is None:
+            risk_fresh_entry_allowed = not (risk_trading_halted or risk_reduce_only)
+        else:
+            risk_fresh_entry_allowed = bool(risk_fresh_entry_allowed_raw)
+        risk_degrade_mode = str(account_risk.get("risk_degrade_mode") or "").strip().lower()
+        if (
+            risk_trading_halted
+            or not risk_fresh_entry_allowed
+            or risk_reduce_only
+            or risk_degrade_mode in {"reduce_only", "halted"}
+        ):
+            return "review_risk_halt"
+
+        if self._service_instability_guard_active(
+            learning_memory=learning_memory,
+            adaptive_risk=adaptive_risk,
+        ):
+            return "review_service_instability"
+
+        if bool(adaptive_risk.get("avoid_new_entries_during_loss_streak")):
+            streak = max(0, int(summary.get("recent_close_loss_streak_count") or 0))
+            return f"review_loss_streak({streak})" if streak > 0 else "review_loss_streak"
+
+        return None
 
     def _apply_learning_entry_guards(
         self,
@@ -2985,30 +3176,15 @@ class AutonomousTradingAgent:
         if action not in {"buy", "sell"}:
             return updated
 
-        learning_memory = cfg.get("learning_memory") if isinstance(cfg, dict) else {}
-        adaptive_risk = dict((learning_memory or {}).get("adaptive_risk") or {})
-        blocked_map = build_blocked_symbol_side_map(
-            learning_memory,
-            base_min_confidence=float(cfg.get("min_confidence") or 0.58),
-        )
-        symbol = normalize_symbol(context_payload.get("symbol") or cfg.get("symbol"))
         side = "long" if action == "buy" else "short"
-        blocked = blocked_map.get((symbol, side))
-        if blocked:
+        guard_reason = self._fresh_entry_guard_reason(
+            cfg=cfg,
+            context_payload=context_payload,
+            side=side,
+        )
+        if guard_reason:
             updated["action"] = "hold"
-            updated["reason"] = f"review_cooldown({symbol}:{side})"
-            return updated
-
-        position = context_payload.get("position") if isinstance(context_payload, dict) else {}
-        has_position = bool(str((position or {}).get("side") or "").strip().lower())
-
-        if (
-            bool(adaptive_risk.get("avoid_new_entries_during_service_instability"))
-            and not has_position
-            and self._current_model_feedback_outage_duration_sec() > 0
-        ):
-            updated["action"] = "hold"
-            updated["reason"] = "review_service_instability"
+            updated["reason"] = guard_reason
             return updated
         return updated
 
@@ -3024,15 +3200,17 @@ class AutonomousTradingAgent:
         risk_reason = str(agg.get("risk_reason") or "").strip()
         min_confidence = float(cfg.get("effective_min_confidence") or cfg.get("min_confidence") or 0.0)
 
-        # Guard: refuse to trade when ALL signal components have zero effective weight.
-        # This means no LLM, ML, or factor data is actually available — the LLM model
-        # would be making a blind directional call with no quantitative prior.
+        # Guard: refuse to trade only when component weights are explicitly present
+        # and all of them are effectively zero. Missing component metadata is treated
+        # as unknown rather than as proof that every upstream signal is unavailable.
         components = agg.get("components") or {}
-        total_effective_weight = sum(
-            float((components.get(k) or {}).get("effective_weight") or 0.0)
+        component_weights = [
+            float((components.get(k) or {}).get("effective_weight", (components.get(k) or {}).get("weight", 0.0)) or 0.0)
             for k in ("llm", "ml", "factor")
-        )
-        if total_effective_weight <= 0:
+            if isinstance(components.get(k), dict)
+        ]
+        total_effective_weight = sum(component_weights)
+        if component_weights and total_effective_weight <= 0:
             return self._build_hold_decision(
                 cfg=cfg,
                 reason="all_signal_components_unavailable",
@@ -3065,29 +3243,16 @@ class AutonomousTradingAgent:
                 confidence=confidence,
             )
 
-        learning_memory = cfg.get("learning_memory") if isinstance(cfg, dict) else {}
-        adaptive_risk = dict((learning_memory or {}).get("adaptive_risk") or {})
-        blocked_map = build_blocked_symbol_side_map(
-            learning_memory,
-            base_min_confidence=float(cfg.get("min_confidence") or 0.58),
-        )
-        symbol = normalize_symbol(context_payload.get("symbol") or cfg.get("symbol"))
         side = "long" if direction == "LONG" else "short"
-        blocked = blocked_map.get((symbol, side))
-        if blocked:
+        guard_reason = self._fresh_entry_guard_reason(
+            cfg=cfg,
+            context_payload=context_payload,
+            side=side,
+        )
+        if guard_reason:
             return self._build_hold_decision(
                 cfg=cfg,
-                reason=f"review_cooldown({symbol}:{side})",
-                confidence=confidence,
-            )
-
-        if (
-            bool(adaptive_risk.get("avoid_new_entries_during_service_instability"))
-            and self._current_model_feedback_outage_duration_sec() > 0
-        ):
-            return self._build_hold_decision(
-                cfg=cfg,
-                reason="review_service_instability",
+                reason=guard_reason,
                 confidence=confidence,
             )
 
@@ -3386,7 +3551,10 @@ class AutonomousTradingAgent:
                     {
                         "direction": component_payload.get("direction"),
                         "confidence": _float_or_default(component_payload.get("confidence"), 0.0),
-                        "effective_weight": _float_or_default(component_payload.get("effective_weight"), 0.0),
+                        "effective_weight": _float_or_default(
+                            component_payload.get("effective_weight", component_payload.get("weight")),
+                            0.0,
+                        ),
                         "available": bool(component_payload.get("available")),
                         "status": component_payload.get("status"),
                         "reason": component_payload.get("reason"),
@@ -3497,6 +3665,11 @@ class AutonomousTradingAgent:
                     "net_sentiment": _float_or_default(event_summary.get("net_sentiment"), 0.0),
                     "news_alpha_proxy": _float_or_default(event_summary.get("news_alpha_proxy"), 0.0),
                     "event_concentration": _float_or_default(event_summary.get("event_concentration"), 0.0),
+                    "generated_at_utc": event_summary.get("generated_at_utc"),
+                    "window_since_utc": event_summary.get("window_since_utc"),
+                    "latest_event_at_utc": event_summary.get("latest_event_at_utc"),
+                    "ui_timezone": event_summary.get("ui_timezone"),
+                    "timezone_basis": event_summary.get("timezone_basis"),
                     "top_event_types": _slice_text_list(event_summary.get("top_event_types"), 5),
                     "top_sources": _slice_text_list(event_summary.get("top_sources"), 5),
                     "top_events": _slice_dict_list(event_summary.get("top_events"), 3),
@@ -3524,17 +3697,33 @@ class AutonomousTradingAgent:
                     "default_stop_loss_pct": _float_or_default(account_risk.get("default_stop_loss_pct"), 0.0),
                     "default_take_profit_pct": _float_or_default(account_risk.get("default_take_profit_pct"), 0.0),
                     "account_equity": _float_or_default(account_risk.get("account_equity"), 0.0),
-                    "generated_at_utc": event_summary.get("generated_at_utc"),
-                    "window_since_utc": event_summary.get("window_since_utc"),
-                    "latest_event_at_utc": event_summary.get("latest_event_at_utc"),
-                    "ui_timezone": event_summary.get("ui_timezone"),
-                    "timezone_basis": event_summary.get("timezone_basis"),
                     "position_cap_notional": _float_or_default(account_risk.get("position_cap_notional"), 0.0),
                     "max_total_exposure_ratio": _float_or_default(account_risk.get("max_total_exposure_ratio"), 0.0),
                     "total_strategy_open_notional": _float_or_default(account_risk.get("total_strategy_open_notional"), 0.0),
                     "total_exposure_ratio": _float_or_default(account_risk.get("total_exposure_ratio"), 0.0),
                     "total_exposure_limit_notional": _float_or_default(account_risk.get("total_exposure_limit_notional"), 0.0),
                     "total_remaining_notional": _float_or_default(account_risk.get("total_remaining_notional"), 0.0),
+                    "risk_level": account_risk.get("risk_level"),
+                    "risk_trading_halted": bool(account_risk.get("risk_trading_halted")),
+                    "risk_halt_reason": account_risk.get("risk_halt_reason"),
+                    "risk_fresh_entry_allowed": bool(account_risk.get("risk_fresh_entry_allowed", True)),
+                    "risk_reduce_only": bool(account_risk.get("risk_reduce_only")),
+                    "risk_degrade_mode": account_risk.get("risk_degrade_mode"),
+                    "risk_discipline_reasons": list(account_risk.get("risk_discipline_reasons") or [])[:3],
+                    "risk_daily_pnl_ratio": _float_or_default(account_risk.get("risk_daily_pnl_ratio"), 0.0),
+                    "risk_daily_stop_basis_ratio": _float_or_default(
+                        account_risk.get("risk_daily_stop_basis_ratio"),
+                        0.0,
+                    ),
+                    "risk_max_drawdown": _float_or_default(account_risk.get("risk_max_drawdown"), 0.0),
+                    "risk_rolling_3d_drawdown": _float_or_default(
+                        account_risk.get("risk_rolling_3d_drawdown"),
+                        0.0,
+                    ),
+                    "risk_rolling_7d_drawdown": _float_or_default(
+                        account_risk.get("risk_rolling_7d_drawdown"),
+                        0.0,
+                    ),
                     "can_open_more_total": bool(account_risk.get("can_open_more_total")),
                     "has_position": bool(account_risk.get("has_position")),
                     "current_position_side": account_risk.get("current_position_side"),
@@ -3571,11 +3760,15 @@ class AutonomousTradingAgent:
                         "avoid_new_entries_during_service_instability": bool(
                             adaptive_risk.get("avoid_new_entries_during_service_instability")
                         ),
+                        "avoid_new_entries_during_loss_streak": bool(
+                            adaptive_risk.get("avoid_new_entries_during_loss_streak")
+                        ),
                         "force_close_on_data_outage_losing_position": bool(
                             adaptive_risk.get("force_close_on_data_outage_losing_position")
                         ),
                     },
                     "recent_model_issue_count": int(summary.get("recent_model_issue_count") or 0),
+                    "recent_close_loss_streak_count": int(summary.get("recent_close_loss_streak_count") or 0),
                     "recent_latency_avg_ms": _float_or_default(summary.get("recent_latency_avg_ms"), 0.0),
                     "current_open_position_count": int(summary.get("current_open_position_count") or 0),
                     "blocked_symbol_sides": _slice_text_list(learning_memory.get("blocked_symbol_sides"), 6),
@@ -4458,6 +4651,10 @@ class AutonomousTradingAgent:
         decision_reason = str(decision.get("reason") or "").strip()
         execution_reason = str(execution.get("reason") or "").strip()
         min_confidence = float(cfg.get("min_confidence") or 0.0)
+        account_risk = dict(context_payload.get("account_risk") or {})
+        learning_memory = dict((cfg.get("learning_memory") or {}) if isinstance(cfg, dict) else {})
+        learning_adaptive_risk = dict(learning_memory.get("adaptive_risk") or {})
+        learning_summary = dict(learning_memory.get("summary") or {})
         model_output = _build_model_output_debug(raw_decision, decision, source=raw_decision_source)
         model_feedback_issue = _describe_model_feedback_issue(decision_reason) if decision_reason.startswith("model_error:") else {
             "kind": None,
@@ -4488,6 +4685,43 @@ class AutonomousTradingAgent:
             )
         elif decision_reason.startswith("cooldown("):
             add_item("local_cooldown", "代理本地下单冷却中", decision_reason, "warn", 18)
+        elif decision_reason.startswith("review_cooldown("):
+            add_item("review_cooldown", "同方向信号仍在复核冷却", decision_reason, "warn", 16)
+        elif decision_reason == "review_risk_halt":
+            add_item(
+                "review_risk_halt",
+                "账户风控熔断中",
+                (
+                    str(account_risk.get("risk_halt_reason") or "").strip()
+                    or "; ".join(
+                        [
+                            str(item).strip()
+                            for item in list(account_risk.get("risk_discipline_reasons") or [])
+                            if str(item or "").strip()
+                        ][:2]
+                    )
+                    or "risk halt active"
+                ),
+                "danger",
+                7,
+            )
+        elif decision_reason == "review_service_instability":
+            add_item(
+                "review_service_instability",
+                "模型服务稳定性不足，暂停新开仓",
+                "learning memory instability guard active",
+                "warn",
+                14,
+            )
+        elif decision_reason.startswith("review_loss_streak"):
+            streak = max(0, int(learning_summary.get("recent_close_loss_streak_count") or 0))
+            add_item(
+                "review_loss_streak",
+                "连续亏损保护中，暂停新开仓",
+                f"recent_close_loss_streak_count={streak}" if streak > 0 else decision_reason,
+                "warn",
+                17,
+            )
         elif decision_reason == "no_long_position":
             add_item("no_long_position", "没有多头可平", "模型想平多，但当前没有多头仓位", "warn", 20)
         elif decision_reason == "no_short_position":
@@ -4514,7 +4748,12 @@ class AutonomousTradingAgent:
                 "available": bool(payload.get("available")),
                 "status": str(payload.get("status") or "").strip(),
                 "reason": str(payload.get("reason") or "").strip(),
-                "effective_weight": _coerce_float(payload.get("effective_weight", 0.0), 0.0, low=0.0, high=1.0),
+                "effective_weight": _coerce_float(
+                    payload.get("effective_weight", payload.get("weight", 0.0)),
+                    0.0,
+                    low=0.0,
+                    high=1.0,
+                ),
             }
         if bool(agg.get("blocked_by_risk")):
             add_item("aggregated_risk_blocked", "聚合信号被风险门拦截", agg_risk_reason or "risk gate blocked", "warn", 25)
@@ -4618,9 +4857,39 @@ class AutonomousTradingAgent:
                     _SAME_DIRECTION_MAX_EXPOSURE_RATIO,
                 ),
                 "entry_size_scale": _safe_nonnegative_float(cfg.get("entry_size_scale"), 1.0),
-                "guardrails": list(((cfg.get("learning_memory") or {}).get("guardrails") or []))[:4],
-                "blocked_symbol_sides": list(((cfg.get("learning_memory") or {}).get("blocked_symbol_sides") or []))[:4],
-                "lessons": list(((cfg.get("learning_memory") or {}).get("lessons") or []))[:4],
+                "avoid_new_entries_during_service_instability": bool(
+                    learning_adaptive_risk.get("avoid_new_entries_during_service_instability")
+                ),
+                "avoid_new_entries_during_loss_streak": bool(
+                    learning_adaptive_risk.get("avoid_new_entries_during_loss_streak")
+                ),
+                "recent_close_loss_streak_count": int(learning_summary.get("recent_close_loss_streak_count") or 0),
+                "guardrails": list((learning_memory.get("guardrails") or []))[:4],
+                "blocked_symbol_sides": list((learning_memory.get("blocked_symbol_sides") or []))[:4],
+                "lessons": list((learning_memory.get("lessons") or []))[:4],
+            },
+            "account_risk": {
+                "risk_level": str(account_risk.get("risk_level") or ""),
+                "risk_trading_halted": bool(account_risk.get("risk_trading_halted")),
+                "risk_halt_reason": str(account_risk.get("risk_halt_reason") or ""),
+                "risk_fresh_entry_allowed": bool(account_risk.get("risk_fresh_entry_allowed", True)),
+                "risk_reduce_only": bool(account_risk.get("risk_reduce_only")),
+                "risk_degrade_mode": str(account_risk.get("risk_degrade_mode") or ""),
+                "risk_discipline_reasons": list(account_risk.get("risk_discipline_reasons") or [])[:3],
+                "risk_daily_pnl_ratio": _safe_float(account_risk.get("risk_daily_pnl_ratio"), 0.0),
+                "risk_daily_stop_basis_ratio": _safe_float(
+                    account_risk.get("risk_daily_stop_basis_ratio"),
+                    0.0,
+                ),
+                "risk_max_drawdown": _safe_nonnegative_float(account_risk.get("risk_max_drawdown"), 0.0),
+                "risk_rolling_3d_drawdown": _safe_nonnegative_float(
+                    account_risk.get("risk_rolling_3d_drawdown"),
+                    0.0,
+                ),
+                "risk_rolling_7d_drawdown": _safe_nonnegative_float(
+                    account_risk.get("risk_rolling_7d_drawdown"),
+                    0.0,
+                ),
             },
             "model_feedback": {
                 "kind": model_feedback_issue.get("kind"),
@@ -5001,12 +5270,19 @@ class AutonomousTradingAgent:
             if raw_decision is not None:
                 raw_decision_source = "rule_based"
             else:
-                context_payload["event_summary"] = await self._build_event_summary(
-                    symbol=str(effective_cfg.get("symbol") or context_payload.get("symbol") or "BTC/USDT"),
-                    timeframe_sec=_timeframe_to_seconds(
-                        str(effective_cfg.get("timeframe") or context_payload.get("timeframe") or "15m")
-                    ),
-                )
+                try:
+                    context_payload["event_summary"] = await asyncio.wait_for(
+                        self._build_event_summary(
+                            symbol=str(effective_cfg.get("symbol") or context_payload.get("symbol") or "BTC/USDT"),
+                            timeframe_sec=_timeframe_to_seconds(
+                                str(effective_cfg.get("timeframe") or context_payload.get("timeframe") or "15m")
+                            ),
+                        ),
+                        timeout=5.0,
+                    )
+                except Exception as _evt_exc:
+                    logger.debug(f"event_summary fetch failed (non-fatal): {_evt_exc}")
+                    context_payload["event_summary"] = {}
                 provider = str(effective_cfg.get("provider") or "codex")
                 model = str(effective_cfg.get("model") or self._provider_model(provider))
                 system_prompt, user_prompt = self._build_prompt(effective_cfg, context_payload)
@@ -5107,7 +5383,7 @@ class AutonomousTradingAgent:
 
         cooldown_sec = int(effective_cfg.get("cooldown_sec") or 0)
         if (
-            decision["action"] in {"buy", "sell", "close_long", "close_short"}
+            decision["action"] in {"buy", "sell"}
             and cooldown_sec > 0
             and self._last_submit_at is not None
         ):

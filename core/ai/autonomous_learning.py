@@ -138,6 +138,7 @@ def default_learning_memory(base_min_confidence: float = 0.58) -> Dict[str, Any]
             "recent_close_count": 0,
             "recent_close_loss_count": 0,
             "recent_close_win_count": 0,
+            "recent_close_loss_streak_count": 0,
             "recent_close_net_pnl": 0.0,
             "recent_model_issue_count": 0,
             "recent_no_price_count": 0,
@@ -155,6 +156,7 @@ def default_learning_memory(base_min_confidence: float = 0.58) -> Dict[str, Any]
             "require_research_for_new_entries": False,
             "force_close_on_data_outage_losing_position": False,
             "avoid_new_entries_during_service_instability": False,
+            "avoid_new_entries_during_loss_streak": False,
             "data_quality_hold_bias": False,
         },
         "blocked_symbol_sides": [],
@@ -332,6 +334,7 @@ def build_learning_memory(
     recent_close_count = 0
     recent_close_loss_count = 0
     recent_close_win_count = 0
+    recent_close_loss_streak_count = 0
     recent_close_net_pnl = 0.0
     entry_sequence: List[Tuple[datetime, str, str]] = []
 
@@ -364,6 +367,15 @@ def build_learning_memory(
                 stat["loss_count"] += 1
                 stat["last_loss_at"] = ts.isoformat() if ts else stat.get("last_loss_at")
                 recent_close_loss_count += 1
+
+    for item in sorted(recent_live_items, key=lambda row: _trade_item_timestamp(row) or anchor, reverse=True):
+        if str(item.get("action") or "").strip().lower() != "close":
+            continue
+        pnl = safe_float(item.get("pnl"), 0.0)
+        if pnl < 0:
+            recent_close_loss_streak_count += 1
+            continue
+        break
 
     last_entry_by_pair: Dict[Tuple[str, str], datetime] = {}
     recent_same_direction_reentry_count = 0
@@ -398,6 +410,10 @@ def build_learning_memory(
     effective_min_confidence = float(base_min_confidence or 0.58)
     if recent_close_count > 0 and recent_close_loss_count > recent_close_win_count:
         effective_min_confidence += 0.04
+    if recent_close_loss_streak_count >= 2:
+        effective_min_confidence += 0.03
+    if recent_close_loss_streak_count >= 3:
+        effective_min_confidence += 0.02
     if current_open_unrealized_pnl < 0:
         effective_min_confidence += 0.02
     if model_issue_rate >= 0.25:
@@ -413,6 +429,8 @@ def build_learning_memory(
         same_direction_ratio = min(same_direction_ratio, 0.4)
     if recent_close_loss_count > 0 or current_open_losing_count > 0:
         same_direction_ratio = min(same_direction_ratio, 0.35)
+    if recent_close_loss_streak_count >= 2:
+        same_direction_ratio = min(same_direction_ratio, 0.25)
     if no_price_count > 0 or model_issue_rate >= 0.35:
         same_direction_ratio = min(same_direction_ratio, 0.3)
     same_direction_ratio = round(max(0.2, same_direction_ratio), 4)
@@ -420,6 +438,10 @@ def build_learning_memory(
     entry_size_scale = 1.0
     if recent_close_count > 0 and recent_close_loss_count > recent_close_win_count:
         entry_size_scale = min(entry_size_scale, 0.8)
+    if recent_close_loss_streak_count >= 2:
+        entry_size_scale = min(entry_size_scale, 0.55)
+    if recent_close_loss_streak_count >= 3:
+        entry_size_scale = min(entry_size_scale, 0.4)
     if no_price_count > 0 or model_issue_rate >= 0.25:
         entry_size_scale = min(entry_size_scale, 0.7)
     if current_open_losing_count > 0:
@@ -500,10 +522,17 @@ def build_learning_memory(
     if not lessons:
         lessons.append("近期样本量有限，先维持基础阈值并继续积累交易与复盘样本。")
 
+    if recent_close_loss_streak_count >= 2:
+        lessons.append(
+            f"recent loss streak is {recent_close_loss_streak_count}; keep fresh entries in defensive mode"
+        )
+
     guardrails: List[str] = [
         f"fresh entry min confidence >= {effective_min_confidence:.2f}",
         f"same-side exposure ratio <= {same_direction_ratio:.2f}",
     ]
+    if recent_close_loss_streak_count >= 3:
+        guardrails.append("block fresh entries during active loss streak")
     if no_price_count > 0:
         guardrails.append("close losing positions when market data is unavailable")
     if model_issue_rate >= 0.25:
@@ -533,6 +562,7 @@ def build_learning_memory(
             "require_research_for_new_entries": False,
             "force_close_on_data_outage_losing_position": bool(no_price_count > 0),
             "avoid_new_entries_during_service_instability": bool(model_issue_rate >= 0.25),
+            "avoid_new_entries_during_loss_streak": bool(recent_close_loss_streak_count >= 3),
             "data_quality_hold_bias": bool(no_price_count > 0 or model_issue_rate >= 0.35),
         }
     )
@@ -549,6 +579,7 @@ def build_learning_memory(
         "recent_close_count": int(recent_close_count),
         "recent_close_loss_count": int(recent_close_loss_count),
         "recent_close_win_count": int(recent_close_win_count),
+        "recent_close_loss_streak_count": int(recent_close_loss_streak_count),
         "recent_close_net_pnl": round(float(recent_close_net_pnl), 6),
         "recent_model_issue_count": int(model_issue_count),
         "recent_no_price_count": int(no_price_count),

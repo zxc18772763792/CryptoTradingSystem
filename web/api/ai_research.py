@@ -19,6 +19,7 @@ from config.database import StrategyPerformanceSnapshot, async_session_maker
 from config.settings import settings
 from core.ai.autonomous_agent import autonomous_trading_agent
 from core.ai.live_decision_router import live_decision_router
+from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.backtest.funding_provider import FundingProviderConfig, FundingRateProvider
 from core.governance.audit import GovernanceAuditEvent, write_audit
 from core.deployment.promotion_engine import transition_candidate, transition_proposal
@@ -190,6 +191,15 @@ class AIAutonomousAgentConfigUpdateRequest(BaseModel):
     allow_live: Optional[bool] = None
     account_id: Optional[str] = None
     strategy_name: Optional[str] = None
+
+
+class AIAutonomousAgentRiskConfigUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    autonomy_daily_stop_buffer_ratio: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    autonomy_max_drawdown_reduce_only: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    autonomy_rolling_3d_drawdown_reduce_only: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    autonomy_rolling_7d_drawdown_reduce_only: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class AIAutonomousAgentStartRequest(BaseModel):
@@ -1942,6 +1952,536 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
     }
 
 
+def _get_autonomous_agent_learning_memory() -> Dict[str, Any]:
+    try:
+        payload = autonomous_trading_agent.get_learning_memory(force=True)
+    except Exception as exc:
+        logger.debug(f"autonomous-agent scorecard learning memory unavailable: {exc}")
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _get_autonomous_agent_risk_report() -> Dict[str, Any]:
+    try:
+        from core.risk.risk_manager import risk_manager  # noqa: PLC0415
+
+        payload = risk_manager.get_risk_report()
+    except Exception as exc:
+        logger.debug(f"autonomous-agent scorecard risk report unavailable: {exc}")
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _autonomous_agent_selected_symbol(runtime_config: Dict[str, Any], agent_status: Dict[str, Any]) -> str:
+    status_payload = dict(agent_status or {})
+    for key in ("last_symbol_scan", "preview_symbol_scan"):
+        selection = status_payload.get(key)
+        if not isinstance(selection, dict):
+            continue
+        selected_symbol = _normalize_symbol(str(selection.get("selected_symbol") or ""))
+        if selected_symbol:
+            return selected_symbol
+    return _normalize_symbol(str((runtime_config or {}).get("symbol") or ""))
+
+
+def _build_autonomous_agent_eligibility_summary(
+    *,
+    runtime_config: Optional[Dict[str, Any]] = None,
+    agent_status: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    runtime_cfg = dict(runtime_config or {})
+    status_payload = dict(agent_status or {})
+    exchange = str(runtime_cfg.get("exchange") or "binance").strip().lower() or "binance"
+    symbol = _autonomous_agent_selected_symbol(runtime_cfg, status_payload)
+
+    selection = {}
+    for key in ("last_symbol_scan", "preview_symbol_scan"):
+        payload = status_payload.get(key)
+        if isinstance(payload, dict) and payload:
+            selection = dict(payload)
+            break
+
+    selection_config = dict(selection.get("scan_config") or {}) if isinstance(selection.get("scan_config"), dict) else {}
+    timeframe = str(selection_config.get("timeframe") or runtime_cfg.get("timeframe") or "").strip()
+    strategy_name = (
+        str(runtime_cfg.get("strategy_name") or _AUTONOMOUS_AGENT_STRATEGY).strip() or _AUTONOMOUS_AGENT_STRATEGY
+    )
+    try:
+        context = resolve_runtime_research_context(
+            exchange=exchange,
+            symbol=symbol,
+            timeframe=timeframe,
+            strategy_name=strategy_name,
+        )
+    except Exception as exc:
+        logger.debug(f"autonomous-agent eligibility summary unavailable: {exc}")
+        context = {}
+
+    context_payload = dict(context or {})
+    contract = (
+        dict(context_payload.get("eligibility_contract") or {})
+        if isinstance(context_payload.get("eligibility_contract"), dict)
+        else {}
+    )
+    selected = (
+        dict(context_payload.get("selected_eligibility") or {})
+        if isinstance(context_payload.get("selected_eligibility"), dict)
+        else {}
+    )
+    generated_at = (
+        context_payload.get("snapshot_generated_at")
+        or contract.get("generated_at")
+        or selected.get("generated_at")
+    )
+    refresh_age_sec: Optional[float] = None
+    generated_dt = _review_safe_dt(generated_at)
+    if generated_dt is not None:
+        refresh_age_sec = max(0.0, (datetime.now(timezone.utc) - generated_dt).total_seconds())
+
+    reason_codes = [
+        str(item).strip()
+        for item in list(context_payload.get("reason_codes") or [])
+        if str(item or "").strip()
+    ]
+    selected_reason_codes = [
+        str(item).strip()
+        for item in list(selected.get("reason_codes") or [])
+        if str(item or "").strip()
+    ]
+    return {
+        "available": bool(context_payload.get("available")),
+        "exchange": exchange,
+        "symbol": symbol,
+        "timeframe": timeframe or None,
+        "strategy_name": strategy_name,
+        "candidate_count": int(context_payload.get("candidate_count") or 0),
+        "selection_reason": str(context_payload.get("selection_reason") or "").strip() or None,
+        "data_source": str(context_payload.get("data_source") or contract.get("source") or "").strip() or None,
+        "generated_at": generated_at,
+        "refresh_age_sec": round(float(refresh_age_sec), 3) if refresh_age_sec is not None else None,
+        "reason_codes": reason_codes,
+        "snapshot_path": str(context_payload.get("snapshot_path") or "").strip() or None,
+        "contract": {
+            "schema_version": str(contract.get("schema_version") or "").strip() or None,
+            "source": str(contract.get("source") or "").strip() or None,
+            "generated_at": contract.get("generated_at"),
+        },
+        "selected": {
+            "candidate_id": str(selected.get("candidate_id") or "").strip() or None,
+            "proposal_id": str(selected.get("proposal_id") or "").strip() or None,
+            "strategy": str(selected.get("strategy") or "").strip() or None,
+            "status": str(selected.get("status") or "").strip() or None,
+            "promotion_target": str(selected.get("promotion_target") or "").strip() or None,
+            "runtime_mode_cap": str(selected.get("runtime_mode_cap") or "").strip() or None,
+            "eligible_for_autonomy": bool(selected.get("eligible_for_autonomy")),
+            "is_expired": bool(selected.get("is_expired")),
+            "expires_at": selected.get("expires_at"),
+            "reason_codes": selected_reason_codes,
+        },
+    }
+
+
+def _build_autonomous_agent_risk_view(risk_report: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(risk_report or {})
+    risk_equity = dict(payload.get("equity") or {})
+    risk_discipline = dict(payload.get("discipline") or {})
+    risk_drawdown = dict(payload.get("drawdown") or {})
+    rolling_3d = dict(risk_drawdown.get("rolling_3d") or {})
+    rolling_7d = dict(risk_drawdown.get("rolling_7d") or {})
+
+    discipline_view = {
+        "fresh_entry_allowed": bool(risk_discipline.get("fresh_entry_allowed", True)),
+        "reduce_only": bool(risk_discipline.get("reduce_only", False)),
+        "degrade_mode": str(risk_discipline.get("degrade_mode") or "").strip() or None,
+        "reasons": [
+            str(item).strip()
+            for item in list(risk_discipline.get("reasons") or [])
+            if str(item or "").strip()
+        ],
+        "thresholds": dict(risk_discipline.get("thresholds") or {})
+        if isinstance(risk_discipline.get("thresholds"), dict)
+        else {},
+    }
+    return {
+        "trading_halted": bool(
+            payload.get("trading_halted")
+            if payload.get("trading_halted") is not None
+            else payload.get("risk_trading_halted")
+        ),
+        "halt_reason": str(
+            payload.get("halt_reason")
+            or payload.get("risk_halt_reason")
+            or ""
+        ).strip() or None,
+        "risk_level": str(payload.get("risk_level") or "").strip() or None,
+        "daily_pnl_ratio": _review_safe_float(
+            payload.get("daily_pnl_ratio", risk_equity.get("daily_pnl_ratio")),
+            _review_safe_float(payload.get("risk_daily_pnl_ratio")),
+        ),
+        "daily_stop_basis_ratio": _review_safe_float(
+            payload.get("daily_stop_basis_ratio", risk_equity.get("daily_stop_basis_ratio")),
+            _review_safe_float(payload.get("risk_daily_stop_basis_ratio")),
+        ),
+        "max_drawdown": _review_safe_float(
+            payload.get("max_drawdown", risk_equity.get("max_drawdown", risk_drawdown.get("max_drawdown"))),
+            _review_safe_float(payload.get("risk_max_drawdown")),
+        ),
+        "rolling_3d_drawdown": _review_safe_float(
+            risk_equity.get("rolling_3d_drawdown", rolling_3d.get("drawdown")),
+            0.0,
+        ),
+        "rolling_7d_drawdown": _review_safe_float(
+            risk_equity.get("rolling_7d_drawdown", rolling_7d.get("drawdown")),
+            0.0,
+        ),
+        "fresh_entry_allowed": bool(discipline_view.get("fresh_entry_allowed")),
+        "reduce_only": bool(discipline_view.get("reduce_only")),
+        "degrade_mode": discipline_view.get("degrade_mode"),
+        "reasons": list(discipline_view.get("reasons") or []),
+        "thresholds": dict(discipline_view.get("thresholds") or {}),
+        "discipline": discipline_view,
+        "equity": {
+            "current": _review_safe_float(risk_equity.get("current")),
+            "day_start": _review_safe_float(risk_equity.get("day_start")),
+            "daily_total_pnl_usd": _review_safe_float(risk_equity.get("daily_total_pnl_usd")),
+            "daily_realized_pnl_usd": _review_safe_float(risk_equity.get("daily_realized_pnl_usd")),
+            "current_unrealized_pnl_usd": _review_safe_float(risk_equity.get("current_unrealized_pnl_usd")),
+        },
+        "drawdown": {
+            "max_drawdown": _review_safe_float(risk_drawdown.get("max_drawdown"), _review_safe_float(risk_equity.get("max_drawdown"))),
+            "rolling_3d": rolling_3d,
+            "rolling_7d": rolling_7d,
+        },
+    }
+
+
+def _build_autonomous_agent_risk_config() -> Dict[str, Any]:
+    risk_report = _get_autonomous_agent_risk_report()
+    risk_view = _build_autonomous_agent_risk_view(risk_report)
+    limits = dict(risk_report.get("limits") or {}) if isinstance(risk_report.get("limits"), dict) else {}
+    try:
+        from core.risk.risk_manager import risk_manager  # noqa: PLC0415
+
+        config = risk_manager.get_autonomy_risk_config()
+    except Exception as exc:
+        logger.debug(f"autonomous-agent risk config unavailable: {exc}")
+        config = {}
+
+    if not config:
+        for key in (
+            "autonomy_daily_stop_buffer_ratio",
+            "autonomy_max_drawdown_reduce_only",
+            "autonomy_rolling_3d_drawdown_reduce_only",
+            "autonomy_rolling_7d_drawdown_reduce_only",
+        ):
+            if key in limits:
+                config[key] = limits.get(key)
+
+    return {
+        "config": config,
+        "effective_thresholds": dict((risk_view.get("discipline") or {}).get("thresholds") or {}),
+        "base_limits": limits,
+        "risk": risk_view,
+        "updated_at": risk_report.get("timestamp"),
+    }
+
+
+def _build_autonomous_agent_risk_status() -> Dict[str, Any]:
+    learning_memory = _get_autonomous_agent_learning_memory()
+    learning_summary = dict(learning_memory.get("summary") or {}) if isinstance(learning_memory.get("summary"), dict) else {}
+    adaptive_risk = dict(learning_memory.get("adaptive_risk") or {}) if isinstance(learning_memory.get("adaptive_risk"), dict) else {}
+    risk_report = _get_autonomous_agent_risk_report()
+    risk_view = _build_autonomous_agent_risk_view(risk_report)
+
+    runtime_config = autonomous_trading_agent.get_runtime_config()
+    try:
+        agent_status = autonomous_trading_agent.get_status()
+    except Exception as exc:
+        logger.debug(f"autonomous-agent risk status get_status failed: {exc}")
+        agent_status = {}
+    eligibility = _build_autonomous_agent_eligibility_summary(
+        runtime_config=runtime_config,
+        agent_status=agent_status if isinstance(agent_status, dict) else {},
+    )
+
+    blockers: List[Dict[str, Any]] = []
+    discipline = dict(risk_view.get("discipline") or {})
+    if not bool(discipline.get("fresh_entry_allowed", True)) or bool(risk_view.get("trading_halted")):
+        reasons = list(discipline.get("reasons") or [])
+        blockers.append(
+            {
+                "code": str(discipline.get("degrade_mode") or "risk_discipline_active"),
+                "source": "risk_discipline",
+                "detail": reasons[0] if reasons else (risk_view.get("halt_reason") or "risk discipline active"),
+            }
+        )
+
+    loss_streak = int(
+        learning_summary.get(
+            "recent_close_loss_streak_count",
+            adaptive_risk.get("recent_close_loss_streak_count"),
+        )
+        or 0
+    )
+    if bool(adaptive_risk.get("avoid_new_entries_during_service_instability")):
+        blockers.append(
+            {
+                "code": "learning_service_instability_guard",
+                "source": "learning_memory",
+                "detail": "avoid_new_entries_during_service_instability",
+            }
+        )
+    if bool(adaptive_risk.get("avoid_new_entries_during_loss_streak")):
+        blockers.append(
+            {
+                "code": "learning_loss_streak_guard",
+                "source": "learning_memory",
+                "detail": f"recent_close_loss_streak_count={loss_streak}",
+            }
+        )
+
+    effective_fresh_entry_allowed = bool(discipline.get("fresh_entry_allowed", True)) and not any(
+        str(item.get("source") or "") == "learning_memory" for item in blockers
+    )
+    if bool(risk_view.get("trading_halted")):
+        effective_fresh_entry_allowed = False
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "runtime": {
+            "enabled": bool(runtime_config.get("enabled")),
+            "mode": str(runtime_config.get("mode") or "").strip() or None,
+            "allow_live": bool(runtime_config.get("allow_live")),
+            "symbol_mode": str(runtime_config.get("symbol_mode") or "").strip() or None,
+            "status": agent_status if isinstance(agent_status, dict) else {},
+        },
+        "risk": risk_view,
+        "learning": {
+            "effective_min_confidence": _review_safe_float(adaptive_risk.get("effective_min_confidence")),
+            "avoid_new_entries_during_service_instability": bool(
+                adaptive_risk.get("avoid_new_entries_during_service_instability")
+            ),
+            "avoid_new_entries_during_loss_streak": bool(
+                adaptive_risk.get("avoid_new_entries_during_loss_streak")
+            ),
+            "recent_close_loss_streak_count": loss_streak,
+            "lesson_count": len(learning_memory.get("lessons") or [])
+            if isinstance(learning_memory.get("lessons"), list)
+            else 0,
+        },
+        "eligibility": eligibility,
+        "effective_fresh_entry_allowed": bool(effective_fresh_entry_allowed),
+        "close_only_effective": bool(
+            risk_view.get("trading_halted")
+            or ((risk_view.get("discipline") or {}).get("reduce_only"))
+        ),
+        "fresh_entry_blockers": blockers,
+    }
+
+
+def _autonomous_scorecard_trade_phase(row: Dict[str, Any]) -> str:
+    signal_payload = row.get("signal") if isinstance(row.get("signal"), dict) else {}
+    signal_type = str(
+        row.get("signal_type")
+        or signal_payload.get("signal_type")
+        or ""
+    ).strip().lower()
+    action = str(row.get("action") or "").strip().lower()
+    if signal_type in _AUTONOMOUS_EXIT_ACTIONS or action == "close":
+        return "close"
+    if signal_type in _AUTONOMOUS_ENTRY_ACTIONS or action == "open_or_add":
+        return "entry"
+    return "other"
+
+
+def _autonomous_scorecard_row_net_pnl_usd(row: Dict[str, Any]) -> float:
+    explicit_net = _review_safe_float(row.get("net_pnl_usd"))
+    if explicit_net is not None:
+        return float(explicit_net)
+    recorded_pnl = float(_review_safe_float(row.get("pnl"), 0.0) or 0.0)
+    slippage_cost_usd = float(_review_safe_float(row.get("slippage_cost_usd"), 0.0) or 0.0)
+    return recorded_pnl - slippage_cost_usd
+
+
+def _autonomous_scorecard_row_gross_pnl_usd(row: Dict[str, Any]) -> float:
+    explicit_gross = _review_safe_float(row.get("gross_pnl_usd"))
+    if explicit_gross is not None:
+        return float(explicit_gross)
+    explicit_net = _review_safe_float(row.get("net_pnl_usd"))
+    fee_usd = float(_review_safe_float(row.get("fee_usd"), 0.0) or 0.0)
+    slippage_cost_usd = float(_review_safe_float(row.get("slippage_cost_usd"), 0.0) or 0.0)
+    if explicit_net is not None:
+        return float(explicit_net) + fee_usd + slippage_cost_usd
+    recorded_pnl = float(_review_safe_float(row.get("pnl"), 0.0) or 0.0)
+    return recorded_pnl + fee_usd
+
+
+def _build_autonomous_agent_scorecard(limit: int = 200, hours: int = 24 * 7) -> Dict[str, Any]:
+    trade_limit = max(1, min(int(limit or 200), 2000))
+    lookback_hours = max(1, min(int(hours or 24 * 7), 24 * 365))
+
+    live_review = execution_engine.get_live_trade_review(
+        limit=trade_limit,
+        strategy=_AUTONOMOUS_AGENT_STRATEGY,
+        hours=lookback_hours,
+    )
+    trade_rows = list(live_review.get("items") or []) if isinstance(live_review, dict) else []
+    trade_rows = [row for row in trade_rows if isinstance(row, dict)]
+    live_review_summary = (
+        dict(live_review.get("summary") or {})
+        if isinstance(live_review, dict)
+        else {}
+    )
+
+    review_payload = _build_autonomous_agent_review(limit=min(max(trade_limit, 12), 30))
+    review_summary = (
+        dict(review_payload.get("summary") or {})
+        if isinstance(review_payload, dict)
+        else {}
+    )
+    review_items = list(review_payload.get("items") or []) if isinstance(review_payload, dict) else []
+
+    learning_memory = _get_autonomous_agent_learning_memory()
+    adaptive_risk = (
+        dict(learning_memory.get("adaptive_risk") or {})
+        if isinstance(learning_memory.get("adaptive_risk"), dict)
+        else {}
+    )
+    risk_report = _get_autonomous_agent_risk_report()
+    risk_view = _build_autonomous_agent_risk_view(risk_report)
+    runtime_config = autonomous_trading_agent.get_runtime_config()
+    try:
+        agent_status = autonomous_trading_agent.get_status()
+    except Exception as exc:
+        logger.debug(f"autonomous-agent scorecard get_status failed: {exc}")
+        agent_status = {}
+    eligibility = _build_autonomous_agent_eligibility_summary(
+        runtime_config=runtime_config,
+        agent_status=agent_status if isinstance(agent_status, dict) else {},
+    )
+
+    entry_count = 0
+    close_count = 0
+    gross_pnl_usd = 0.0
+    fee_usd_total = 0.0
+    slippage_cost_usd_total = 0.0
+    net_pnl_usd = 0.0
+    close_net_pnls: List[float] = []
+
+    for row in trade_rows:
+        fee_usd = float(_review_safe_float(row.get("fee_usd"), 0.0) or 0.0)
+        slippage_cost_usd = float(_review_safe_float(row.get("slippage_cost_usd"), 0.0) or 0.0)
+        row_gross_pnl = _autonomous_scorecard_row_gross_pnl_usd(row)
+        row_net_pnl = _autonomous_scorecard_row_net_pnl_usd(row)
+
+        phase = _autonomous_scorecard_trade_phase(row)
+        if phase == "entry":
+            entry_count += 1
+        elif phase == "close":
+            close_count += 1
+            close_net_pnls.append(row_net_pnl)
+
+        gross_pnl_usd += row_gross_pnl
+        fee_usd_total += fee_usd
+        slippage_cost_usd_total += slippage_cost_usd
+        net_pnl_usd += row_net_pnl
+
+    avg_holding_minutes: Optional[float] = None
+    if _review_safe_float(live_review_summary.get("avg_holding_minutes")) is not None:
+        avg_holding_minutes = float(_review_safe_float(live_review_summary.get("avg_holding_minutes"), 0.0) or 0.0)
+    holding_values = [
+        float(value)
+        for value in (
+            _review_safe_float((item.get("pair") or {}).get("holding_minutes"))
+            for item in review_items
+            if isinstance(item, dict) and str(item.get("phase") or "").strip().lower() == "exit"
+        )
+        if value is not None
+    ]
+    if avg_holding_minutes is None and holding_values:
+        avg_holding_minutes = sum(holding_values) / len(holding_values)
+
+    win_rate: Optional[float] = None
+    profit_factor: Optional[float] = None
+    if close_net_pnls:
+        win_count = sum(1 for value in close_net_pnls if value > 0)
+        gross_wins = sum(value for value in close_net_pnls if value > 0)
+        gross_losses = abs(sum(value for value in close_net_pnls if value < 0))
+        win_rate = win_count / len(close_net_pnls)
+        if gross_losses > 1e-12:
+            profit_factor = gross_wins / gross_losses
+
+    current_open_unrealized_pnl = _review_safe_float(review_summary.get("current_open_unrealized_pnl"), 0.0)
+    submitted_count = int(review_summary.get("submitted_count") or 0)
+    review_entry_count = int(review_summary.get("entry_count") or 0)
+    review_close_count = int(review_summary.get("close_count") or 0)
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "strategy": _AUTONOMOUS_AGENT_STRATEGY,
+        "mode": "live",
+        "window": {
+            "hours": lookback_hours,
+            "trade_limit": trade_limit,
+            "review_limit": min(max(trade_limit, 12), 30),
+        },
+        "metrics": {
+            "trades": int(live_review_summary.get("trade_count") or len(trade_rows)),
+            "entries": int(live_review_summary.get("entry_count") or entry_count),
+            "closes": int(live_review_summary.get("close_count") or close_count),
+            "gross_pnl_usd": round(gross_pnl_usd, 6),
+            "fee_usd": round(fee_usd_total, 6),
+            "slippage_cost_usd": round(slippage_cost_usd_total, 6),
+            "cost_drag_usd": round(fee_usd_total + slippage_cost_usd_total, 6),
+            "net_pnl_usd": round(net_pnl_usd, 6),
+            "win_rate": round(win_rate, 6) if win_rate is not None else None,
+            "profit_factor": round(profit_factor, 6) if profit_factor is not None else None,
+            "avg_holding_minutes": round(avg_holding_minutes, 3) if avg_holding_minutes is not None else None,
+            "current_open_unrealized_pnl": round(float(current_open_unrealized_pnl or 0.0), 6),
+        },
+        "review_summary": {
+            "submitted_count": submitted_count,
+            "entry_count": review_entry_count,
+            "close_count": review_close_count,
+            "losing_close_count": int(review_summary.get("losing_close_count") or 0),
+            "repeated_same_direction_entries": int(review_summary.get("repeated_same_direction_entries") or 0),
+            "outage_after_entry_count": int(review_summary.get("outage_after_entry_count") or 0),
+            "unmatched_entry_count": int(review_summary.get("unmatched_entry_count") or 0),
+            "current_open_count": int(review_summary.get("current_open_count") or 0),
+        },
+        "consistency": {
+            "live_trade_count": len(trade_rows),
+            "review_submitted_count": submitted_count,
+            "entry_count_delta": entry_count - review_entry_count,
+            "close_count_delta": close_count - review_close_count,
+        },
+        "learning_memory": learning_memory,
+        "learning_summary": {
+            "effective_min_confidence": _review_safe_float(adaptive_risk.get("effective_min_confidence")),
+            "recent_close_loss_streak_count": int(
+                ((learning_memory.get("summary") or {}) if isinstance(learning_memory.get("summary"), dict) else {}).get(
+                    "recent_close_loss_streak_count",
+                    adaptive_risk.get("recent_close_loss_streak_count"),
+                )
+                or 0
+            ),
+            "avoid_new_entries_during_loss_streak": bool(
+                adaptive_risk.get("avoid_new_entries_during_loss_streak", False)
+            ),
+            "lesson_count": len(learning_memory.get("lessons") or [])
+            if isinstance(learning_memory.get("lessons"), list)
+            else 0,
+        },
+        "risk": risk_view,
+        "eligibility": eligibility,
+        "metric_notes": {
+            "journal_pnl_basis": "prefer explicit gross_pnl_usd/net_pnl_usd; fallback to legacy pnl semantics when absent",
+            "gross_pnl_formula": "sum(gross_pnl_usd) or fallback sum(pnl + fee_usd)",
+            "net_pnl_formula": "sum(net_pnl_usd) or fallback sum(pnl - slippage_cost_usd)",
+        },
+    }
+
+
 @router.get("/runtime-config")
 async def get_ai_runtime_config(request: Request):
     """Expose lightweight runtime switches for the AI research UI."""
@@ -2017,6 +2557,23 @@ async def update_ai_autonomous_agent_runtime_config(
     return {"updated": True, "config": updated}
 
 
+async def get_ai_autonomous_agent_risk_config(request: Request):
+    return _build_autonomous_agent_risk_config()
+
+
+async def update_ai_autonomous_agent_risk_config(
+    request: Request,
+    payload: AIAutonomousAgentRiskConfigUpdateRequest,
+):
+    try:
+        from core.risk.risk_manager import risk_manager  # noqa: PLC0415
+
+        risk_manager.update_parameters(payload.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"updated": True, "config": _build_autonomous_agent_risk_config()}
+
+
 async def get_ai_autonomous_agent_status(request: Request):
     cfg = autonomous_trading_agent.get_runtime_config()
     if str(cfg.get("symbol_mode") or "manual").strip().lower() == "auto":
@@ -2062,8 +2619,16 @@ async def get_ai_autonomous_agent_journal(request: Request, limit: int = 50):
 
 async def get_ai_autonomous_agent_review(request: Request, limit: int = 12):
     payload = _build_autonomous_agent_review(limit=limit)
-    payload["learning_memory"] = autonomous_trading_agent.get_learning_memory(force=True)
+    payload["learning_memory"] = _get_autonomous_agent_learning_memory()
     return payload
+
+
+async def get_ai_autonomous_agent_scorecard(request: Request, limit: int = 200, hours: int = 24 * 7):
+    return _build_autonomous_agent_scorecard(limit=limit, hours=hours)
+
+
+async def get_ai_autonomous_agent_risk_status(request: Request):
+    return _build_autonomous_agent_risk_status()
 
 
 async def get_ai_autonomous_agent_symbol_ranking(request: Request, limit: int = 10, refresh: bool = False):

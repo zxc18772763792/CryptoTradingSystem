@@ -13,6 +13,7 @@ import aiohttp
 from loguru import logger
 
 from config.settings import settings
+from core.ai.runtime_eligibility import resolve_runtime_eligibility_context
 from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.utils.openai_responses import (
     build_openai_headers,
@@ -586,12 +587,24 @@ class LiveAIDecisionRouter:
                 research_context={},
             ).to_dict()
 
-        research_context = resolve_runtime_research_context(
+        research_context = resolve_runtime_eligibility_context(
             exchange=str((metadata or {}).get("exchange") or ""),
             symbol=str(symbol or ""),
             timeframe=str(timeframe or ""),
             strategy_name=str(strategy or ""),
         )
+        if not bool(research_context.get("available")):
+            reason_codes = list(research_context.get("reason_codes") or [])
+            if any(
+                code in {"SNAPSHOT_MISSING", "SNAPSHOT_PARSE_FAILED", "SNAPSHOT_REFRESH_FAILED"}
+                for code in reason_codes
+            ):
+                research_context = resolve_runtime_research_context(
+                    exchange=str((metadata or {}).get("exchange") or ""),
+                    symbol=str(symbol or ""),
+                    timeframe=str(timeframe or ""),
+                    strategy_name=str(strategy or ""),
+                )
 
         prompt_payload = {
             "trading_mode": effective_mode,

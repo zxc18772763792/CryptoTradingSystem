@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from config.settings import settings
+from core.ai.runtime_eligibility import resolve_runtime_eligibility_context
 
 
 _ACTIVE_CANDIDATE_STATUSES = frozenset({"paper_running", "shadow_running", "live_candidate", "live_running"})
@@ -192,7 +193,7 @@ def _pick_best(candidates: List[Dict[str, Any]], *, prefer_active_first: bool) -
     return sorted(candidates, key=lambda item: _candidate_rank(item, prefer_active_first=prefer_active_first), reverse=True)[0]
 
 
-def resolve_runtime_research_context(
+def _resolve_from_research_registry(
     *,
     exchange: str = "",
     symbol: str = "",
@@ -218,6 +219,8 @@ def resolve_runtime_research_context(
             "strategy": strategy_text,
             "candidate_count": 0,
             "selection_reason": "no_matching_candidates",
+            "reason_codes": ["NO_MATCHING_CANDIDATES"],
+            "data_source": "research_registry",
         }
 
     proposal_map = _load_proposal_map([str(item.get("proposal_id") or "").strip() for item in matching])
@@ -251,6 +254,8 @@ def resolve_runtime_research_context(
         "strategy": strategy_text,
         "candidate_count": len(matching),
         "selection_reason": selection_reason,
+        "reason_codes": [],
+        "data_source": "research_registry",
         "selected_candidate": _candidate_payload(selected_candidate, proposal_map) if selected_candidate is not None else {},
         "research_champion": _candidate_payload(research_champion, proposal_map) if research_champion is not None else {},
         "active_runtime_candidate": (
@@ -262,3 +267,55 @@ def resolve_runtime_research_context(
             for item in sorted(matching, key=lambda row: _candidate_rank(row, prefer_active_first=False), reverse=True)[:5]
         ],
     }
+
+
+def resolve_runtime_research_context(
+    *,
+    exchange: str = "",
+    symbol: str = "",
+    timeframe: str = "",
+    strategy_name: str = "",
+) -> Dict[str, Any]:
+    # Preferred path: stable runtime eligibility contract snapshot.
+    eligibility_context = resolve_runtime_eligibility_context(
+        exchange=exchange,
+        symbol=symbol,
+        timeframe=timeframe,
+        strategy_name=strategy_name,
+        auto_refresh_if_missing=True,
+    )
+    if bool(eligibility_context.get("available")):
+        return eligibility_context
+
+    reason_codes = list(eligibility_context.get("reason_codes") or [])
+    allow_registry_fallback = any(
+        code in {"SNAPSHOT_MISSING", "SNAPSHOT_PARSE_FAILED", "SNAPSHOT_REFRESH_FAILED"}
+        for code in reason_codes
+    )
+    if not allow_registry_fallback:
+        return eligibility_context
+
+    legacy = _resolve_from_research_registry(
+        exchange=exchange,
+        symbol=symbol,
+        timeframe=timeframe,
+        strategy_name=strategy_name,
+    )
+    merged_codes = []
+    for code in [*reason_codes, "FALLBACK_RESEARCH_REGISTRY"]:
+        text = str(code or "").strip()
+        if text and text not in merged_codes:
+            merged_codes.append(text)
+    legacy["reason_codes"] = merged_codes
+    legacy["data_source"] = "research_registry_fallback"
+    legacy["eligibility_contract"] = {
+        "schema_version": str(
+            (eligibility_context.get("eligibility_contract") or {}).get("schema_version")
+            or "runtime_eligibility.v1"
+        ),
+        "source": str((eligibility_context.get("eligibility_contract") or {}).get("source") or ""),
+        "generated_at": (eligibility_context.get("eligibility_contract") or {}).get("generated_at"),
+    }
+    legacy["snapshot_generated_at"] = eligibility_context.get("snapshot_generated_at")
+    legacy["snapshot_path"] = eligibility_context.get("snapshot_path")
+    return legacy

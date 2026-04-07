@@ -13,6 +13,9 @@
   const AGENT_RUN_ONCE_API = '/ai/autonomous-agent/run-once';
   const AGENT_CONFIG_API = '/ai/runtime-config/autonomous-agent';
   const AGENT_SYMBOL_RANKING_API = '/ai/autonomous-agent/symbol-ranking';
+  const AGENT_RISK_STATUS_API = '/ai/autonomous-agent/risk-status';
+  const AGENT_RISK_CONFIG_API = '/ai/autonomous-agent/risk-config';
+  const AGENT_SCORECARD_API = '/ai/autonomous-agent/scorecard';
   const AGENT_STATUS_TIMEOUT_MS = 60000;
   const AGENT_DETAIL_TIMEOUT_MS = 60000;
 
@@ -21,7 +24,11 @@
   let initRetryBound = false;
   let lastStatusSnapshot = null;
   let lastConfigSnapshot = null;
+  let lastRiskStatusSnapshot = null;
+  let lastRiskConfigSnapshot = null;
+  let lastScorecardSnapshot = null;
   let statusInFlight = null;
+  let governanceInFlight = null;
 
   function scheduleInitRetry() {
     if (typeof window === 'undefined') return;
@@ -827,6 +834,58 @@
     updateAgentSymbolModeVisibility();
   }
 
+  function syncAgentRiskConfigForm(payload = {}) {
+    const cfg = payload?.config && typeof payload.config === 'object' ? payload.config : payload;
+    [
+      ['ai-agent-risk-daily-stop', 'autonomy_daily_stop_buffer_ratio'],
+      ['ai-agent-risk-max-dd', 'autonomy_max_drawdown_reduce_only'],
+      ['ai-agent-risk-rolling-3d', 'autonomy_rolling_3d_drawdown_reduce_only'],
+      ['ai-agent-risk-rolling-7d', 'autonomy_rolling_7d_drawdown_reduce_only'],
+    ].forEach(([id, key]) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const value = Number(cfg?.[key]);
+      el.value = Number.isFinite(value) ? String(value) : '';
+    });
+  }
+
+  function readRiskInputValue(id) {
+    const raw = String(document.getElementById(id)?.value || '').trim();
+    if (!raw) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function blockerDisplayLabel(item = {}) {
+    const code = String(item.code || '').trim().toLowerCase();
+    const source = String(item.source || '').trim().toLowerCase();
+    if (code === 'halted') return '账户熔断已触发';
+    if (code === 'reduce_only') return '纪律闸门切到 reduce-only';
+    if (code === 'learning_service_instability_guard') return '模型服务异常期暂停新单';
+    if (code === 'learning_loss_streak_guard') return '连亏保护暂停新单';
+    if (source === 'risk_discipline') return '账户纪律阻止新单';
+    if (source === 'learning_memory') return '复盘记忆阻止新单';
+    return String(item.code || item.source || '--');
+  }
+
+  function buildEligibilityRefreshText(eligibility = {}) {
+    const generatedAt = eligibility?.generated_at ? fmtAgentTs(eligibility.generated_at) : '--';
+    const refreshAge = eligibility?.refresh_age_sec != null ? formatAgeSeconds(eligibility.refresh_age_sec) : '--';
+    const dataSource = String(eligibility?.data_source || eligibility?.contract?.source || '--').trim() || '--';
+    return `快照 ${generatedAt} / 已过 ${refreshAge} / ${dataSource}`;
+  }
+
+  function buildEligibilityReasonText(eligibility = {}) {
+    const topLevelCodes = Array.isArray(eligibility?.reason_codes)
+      ? eligibility.reason_codes.map((item) => String(item || '').trim()).filter(Boolean)
+      : [];
+    if (topLevelCodes.length) return topLevelCodes.slice(0, 4).join(' / ');
+    const selectedCodes = Array.isArray(eligibility?.selected?.reason_codes)
+      ? eligibility.selected.reason_codes.map((item) => String(item || '').trim()).filter(Boolean)
+      : [];
+    return selectedCodes.length ? selectedCodes.slice(0, 4).join(' / ') : '当前没有 eligibility reason code';
+  }
+
   function updateAgentSymbolModeVisibility() {
     const mode = String(document.getElementById('ai-agent-symbol-mode')?.value || 'manual').toLowerCase();
     const manualWrap = document.getElementById('ai-agent-manual-symbol-wrap');
@@ -905,6 +964,7 @@
     setAgentCockpitStat('ai-agent-cockpit-model-card', 'ai-agent-cockpit-model', 'ai-agent-cockpit-model-sub', '--', statusText, 'danger');
     const cockpitNote = document.getElementById('ai-agent-cockpit-state-note');
     if (cockpitNote) cockpitNote.textContent = normalizeUiText(statusText);
+    renderAgentGovernanceError(statusText);
   }
 
   function buildRuntimeReason(status = {}, cfg = {}) {
@@ -1047,6 +1107,246 @@
       : '';
 
     el.innerHTML = `${primarySummary}${meta}${noteGrid}${detailList}`;
+    normalizeElementHtml(el);
+  }
+
+  function renderAgentGovernanceError(message) {
+    const riskEl = document.getElementById('ai-agent-risk-status-panel');
+    const scorecardEl = document.getElementById('ai-agent-scorecard-panel');
+    const text = compactText(message || '自治纪律数据加载失败', 160) || '自治纪律数据加载失败';
+    if (riskEl) {
+      riskEl.innerHTML = `<div class="ai-agent-empty">${esc(text)}</div>`;
+      normalizeElementHtml(riskEl);
+    }
+    if (scorecardEl) {
+      scorecardEl.innerHTML = `<div class="ai-agent-empty">${esc(text)}</div>`;
+      normalizeElementHtml(scorecardEl);
+    }
+  }
+
+  function renderAgentRiskGovernance(riskStatus = {}, riskConfigPayload = {}) {
+    const el = document.getElementById('ai-agent-risk-status-panel');
+    if (!el) return;
+
+    const risk = riskStatus?.risk && typeof riskStatus.risk === 'object' ? riskStatus.risk : {};
+    const discipline = risk?.discipline && typeof risk.discipline === 'object' ? risk.discipline : {};
+    const blockers = Array.isArray(riskStatus?.fresh_entry_blockers) ? riskStatus.fresh_entry_blockers : [];
+    const config = riskConfigPayload?.config && typeof riskConfigPayload.config === 'object'
+      ? riskConfigPayload.config
+      : {};
+    const thresholds = riskConfigPayload?.effective_thresholds && typeof riskConfigPayload.effective_thresholds === 'object'
+      ? riskConfigPayload.effective_thresholds
+      : (discipline?.thresholds || {});
+    const baseLimits = riskConfigPayload?.base_limits && typeof riskConfigPayload.base_limits === 'object'
+      ? riskConfigPayload.base_limits
+      : {};
+    const eligibility = riskStatus?.eligibility && typeof riskStatus.eligibility === 'object'
+      ? riskStatus.eligibility
+      : {};
+    const eligibilitySelected = eligibility?.selected && typeof eligibility.selected === 'object'
+      ? eligibility.selected
+      : {};
+    const primaryBlocker = blockers[0] || null;
+    const closeOnly = Boolean(riskStatus?.close_only_effective);
+    const freshEntryAllowed = Boolean(riskStatus?.effective_fresh_entry_allowed);
+    const primaryTone = closeOnly ? (risk?.trading_halted ? 'danger' : 'warn') : (freshEntryAllowed ? 'good' : 'warn');
+    const primaryLabel = closeOnly
+      ? (risk?.trading_halted ? '当前只允许平仓 / 熔断中' : '当前处于 reduce-only')
+      : (freshEntryAllowed ? '当前允许新开仓' : '当前禁止新开仓');
+    const primaryDetail = primaryBlocker?.detail
+      || (discipline?.reasons && discipline.reasons[0])
+      || (freshEntryAllowed ? '账户纪律与复盘记忆都没有阻止新单。' : '当前有纪律闸门正在阻止新单。');
+    const blockerList = blockers.length
+      ? `<div class="ai-agent-reason-section">
+          <div class="ai-agent-reason-section-title">当前阻止新单的来源</div>
+          <div class="ai-agent-reason-list">${blockers.map((item) => {
+            const tone = item?.source === 'learning_memory' ? 'is-warn' : 'is-danger';
+            return `
+              <div class="ai-agent-reason-chip ${tone}">
+                <div class="ai-agent-reason-chip-label">${esc(blockerDisplayLabel(item))}</div>
+                <div class="ai-agent-reason-chip-detail">${esc(item?.detail || '--')}</div>
+              </div>
+            `;
+          }).join('')}</div>
+        </div>`
+      : '';
+    const thresholdText = [
+      `日内缓冲 ${formatPct(config?.autonomy_daily_stop_buffer_ratio, 2)}`,
+      `最大回撤 ${formatPct(config?.autonomy_max_drawdown_reduce_only, 2)}`,
+      `3日滚动 ${formatPct(config?.autonomy_rolling_3d_drawdown_reduce_only, 2)}`,
+      `7日滚动 ${formatPct(config?.autonomy_rolling_7d_drawdown_reduce_only, 2)}`,
+    ].join(' / ');
+    const effectiveText = [
+      `stop basis ${formatPct(thresholds?.daily_stop_buffer_ratio, 2)}`,
+      `max DD ${formatPct(thresholds?.max_drawdown_reduce_only, 2)}`,
+      `3d ${formatPct(thresholds?.rolling_3d_drawdown_reduce_only, 2)}`,
+      `7d ${formatPct(thresholds?.rolling_7d_drawdown_reduce_only, 2)}`,
+    ].join(' / ');
+    const eligibilityState = !eligibility?.available
+      ? '不可用'
+      : (eligibilitySelected?.eligible_for_autonomy ? '可自治' : '不可自治');
+    const eligibilityCandidateText = eligibilitySelected?.candidate_id
+      ? `candidate ${eligibilitySelected.candidate_id} / ${eligibilitySelected.status || '--'}`
+      : '当前没有匹配到 runtime eligibility candidate';
+    const eligibilityExpiryText = eligibilitySelected?.expires_at
+      ? `到期 ${fmtAgentTs(eligibilitySelected.expires_at)}${eligibilitySelected?.is_expired ? ' / 已过期' : ''}`
+      : (eligibilitySelected?.is_expired ? '当前 eligibility 已过期' : '未提供 expires_at');
+
+    el.innerHTML = `
+      <div class="ai-agent-reason-primary ${toneClass(primaryTone)}">
+        <div class="ai-agent-reason-primary-kicker">自治纪律</div>
+        <div class="ai-agent-reason-primary-label">${esc(primaryLabel)}</div>
+        <div class="ai-agent-reason-primary-detail">${esc(primaryDetail)}</div>
+      </div>
+      <div class="ai-agent-diagnostic-meta">
+        <div class="ai-agent-diagnostic-item">
+          <span>风险级别</span>
+          <strong>${esc(String(risk?.risk_level || '--').toUpperCase())}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>新单权限</span>
+          <strong class="${toneClass(freshEntryAllowed ? 'good' : 'warn')}">${esc(freshEntryAllowed ? '允许' : '禁止')}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>执行约束</span>
+          <strong class="${toneClass(closeOnly ? 'warn' : 'info')}">${esc(closeOnly ? 'Reduce-only / Close-first' : '正常')}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>日内 stop basis</span>
+          <strong>${esc(formatPct(risk?.daily_stop_basis_ratio, 2))}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>最大回撤</span>
+          <strong>${esc(formatPct(risk?.max_drawdown, 2))}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>3日 / 7日回撤</span>
+          <strong>${esc(`${formatPct(risk?.rolling_3d_drawdown, 2)} / ${formatPct(risk?.rolling_7d_drawdown, 2)}`)}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>学习阈值</span>
+          <strong>${esc(formatRatio(riskStatus?.learning?.effective_min_confidence, 3))}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>最近连亏</span>
+          <strong>${esc(Number(riskStatus?.learning?.recent_close_loss_streak_count || 0))}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>Eligibility</span>
+          <strong class="${toneClass(eligibility?.available && eligibilitySelected?.eligible_for_autonomy ? 'good' : 'warn')}">${esc(eligibilityState)}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>快照刷新</span>
+          <strong>${esc(eligibility?.refresh_age_sec != null ? formatAgeSeconds(eligibility.refresh_age_sec) : '--')}</strong>
+        </div>
+      </div>
+      <div class="ai-agent-note-grid">
+        <div class="ai-agent-note-card">
+          <div class="ai-agent-note-label">当前配置阈值</div>
+          <div class="ai-agent-note-body">${esc(thresholdText)}</div>
+        </div>
+        <div class="ai-agent-note-card">
+          <div class="ai-agent-note-label">实际生效阈值</div>
+          <div class="ai-agent-note-body">${esc(effectiveText)}</div>
+        </div>
+        <div class="ai-agent-note-card">
+          <div class="ai-agent-note-label">基础账户止损上限</div>
+          <div class="ai-agent-note-body">${esc(`总日亏损上限 ${formatPct(baseLimits?.max_daily_loss_ratio, 2)}`)}</div>
+        </div>
+        <div class="ai-agent-note-card">
+          <div class="ai-agent-note-label">Runtime Eligibility</div>
+          <div class="ai-agent-note-body">${esc(`${buildEligibilityRefreshText(eligibility)} / ${eligibilityCandidateText} / ${eligibilityExpiryText}`)}</div>
+        </div>
+      </div>
+      <div class="ai-agent-empty">${esc(buildEligibilityReasonText(eligibility))}</div>
+      ${blockerList || '<div class="ai-agent-empty">当前没有 fresh-entry blocker，新单纪律正常。</div>'}
+    `;
+    normalizeElementHtml(el);
+    syncAgentRiskConfigForm(riskConfigPayload);
+  }
+
+  function renderAgentScorecard(scorecard = {}) {
+    const el = document.getElementById('ai-agent-scorecard-panel');
+    if (!el) return;
+
+    const metrics = scorecard?.metrics && typeof scorecard.metrics === 'object' ? scorecard.metrics : {};
+    const reviewSummary = scorecard?.review_summary && typeof scorecard.review_summary === 'object'
+      ? scorecard.review_summary
+      : {};
+    const learningSummary = scorecard?.learning_summary && typeof scorecard.learning_summary === 'object'
+      ? scorecard.learning_summary
+      : {};
+    const risk = scorecard?.risk && typeof scorecard.risk === 'object' ? scorecard.risk : {};
+    const discipline = risk?.discipline && typeof risk.discipline === 'object' ? risk.discipline : {};
+    const eligibility = scorecard?.eligibility && typeof scorecard.eligibility === 'object' ? scorecard.eligibility : {};
+    const eligibilitySelected = eligibility?.selected && typeof eligibility.selected === 'object'
+      ? eligibility.selected
+      : {};
+    const windowInfo = scorecard?.window && typeof scorecard.window === 'object' ? scorecard.window : {};
+    const netPnl = Number(metrics?.net_pnl_usd);
+    const costDrag = Number(metrics?.cost_drag_usd);
+    const insights = [];
+    if (Number.isFinite(netPnl) && netPnl < 0) insights.push('最近净收益仍为负，先不要把“有动作”误读成“策略恢复”。');
+    if (Number.isFinite(costDrag) && costDrag > 0 && Number.isFinite(netPnl) && Math.abs(netPnl) <= costDrag) {
+      insights.push('成本拖累已经接近或超过净收益，说明执行效率正在吃掉 alpha。');
+    }
+    if (Number(reviewSummary?.repeated_same_direction_entries || 0) > 0) {
+      insights.push('最近存在同币种同方向连续放行，仓位叠加是回撤放大的高危信号。');
+    }
+    if (Number(learningSummary?.recent_close_loss_streak_count || 0) > 0) {
+      insights.push(`复盘记忆记录到 ${Number(learningSummary.recent_close_loss_streak_count)} 次连续亏损平仓，说明系统仍在防守区。`);
+    }
+    if (!eligibility?.available) {
+      insights.push(`runtime eligibility 当前不可用：${buildEligibilityReasonText(eligibility)}。`);
+    } else if (eligibilitySelected?.is_expired) {
+      insights.push(`当前 runtime eligibility 已过期：${buildEligibilityReasonText(eligibility)}。`);
+    }
+    if (!insights.length) {
+      insights.push('收益、成本、回撤和纪律目前至少能在一个面板里同时观察，不会再只盯单次决策。');
+    }
+
+    el.innerHTML = `
+      <div class="ai-agent-review-kpis">
+        <article class="ai-agent-review-kpi">
+          <span class="ai-agent-review-kpi-label">最近净收益</span>
+          <strong class="ai-agent-review-kpi-value ${toneClass(Number.isFinite(netPnl) && netPnl >= 0 ? 'good' : 'danger')}">${esc(formatSigned(netPnl, 2, ' USDT'))}</strong>
+          <span class="ai-agent-review-kpi-note">${esc(`${Number(metrics?.trades || 0)} 笔交易 / ${Number(metrics?.closes || 0)} 笔平仓`)}</span>
+        </article>
+        <article class="ai-agent-review-kpi">
+          <span class="ai-agent-review-kpi-label">成本拖累</span>
+          <strong class="ai-agent-review-kpi-value">${esc(formatNumber(costDrag, 2))} USDT</strong>
+          <span class="ai-agent-review-kpi-note">${esc(`手续费 ${formatNumber(metrics?.fee_usd, 2)} / 滑点 ${formatNumber(metrics?.slippage_cost_usd, 2)}`)}</span>
+        </article>
+        <article class="ai-agent-review-kpi">
+          <span class="ai-agent-review-kpi-label">胜率 / Profit Factor</span>
+          <strong class="ai-agent-review-kpi-value">${esc(`${formatPct(metrics?.win_rate, 0)} / ${formatNumber(metrics?.profit_factor, 2)}`)}</strong>
+          <span class="ai-agent-review-kpi-note">只统计完成平仓的净收益</span>
+        </article>
+        <article class="ai-agent-review-kpi">
+          <span class="ai-agent-review-kpi-label">未平仓浮盈亏</span>
+          <strong class="ai-agent-review-kpi-value">${esc(formatSigned(metrics?.current_open_unrealized_pnl, 2, ' USDT'))}</strong>
+          <span class="ai-agent-review-kpi-note">${esc(`平均持有 ${formatNumber(metrics?.avg_holding_minutes, 1)} 分钟`)}</span>
+        </article>
+      </div>
+      <div class="ai-agent-review-meta">
+        <span>${esc(`观察窗口 ${Number(windowInfo?.hours || 0)}h / trade limit ${Number(windowInfo?.trade_limit || 0)}`)}</span>
+        <span>${esc(`放行 ${Number(reviewSummary?.submitted_count || 0)} 次 / 亏损平仓 ${Number(reviewSummary?.losing_close_count || 0)} 次`)}</span>
+        <span>${esc(`当前纪律 ${discipline?.reduce_only ? 'Reduce-only' : (discipline?.fresh_entry_allowed ? '允许新单' : '暂停新单')}`)}</span>
+      </div>
+      <div class="ai-agent-review-meta ai-agent-review-meta-secondary">
+        <span>${esc(`3日回撤 ${formatPct(risk?.rolling_3d_drawdown, 2)} / 7日回撤 ${formatPct(risk?.rolling_7d_drawdown, 2)}`)}</span>
+        <span>${esc(`有效阈值 ${formatRatio(learningSummary?.effective_min_confidence, 3)} / 连亏 ${Number(learningSummary?.recent_close_loss_streak_count || 0)} 次`)}</span>
+        <span>${esc(`同向重复 ${Number(reviewSummary?.repeated_same_direction_entries || 0)} 次 / 异常 hold ${Number(reviewSummary?.outage_after_entry_count || 0)} 次`)}</span>
+      </div>
+      <div class="ai-agent-review-meta ai-agent-review-meta-secondary">
+        <span>${esc(`Eligibility ${eligibility?.available ? 'available' : 'missing'} / ${buildEligibilityRefreshText(eligibility)}`)}</span>
+        <span>${esc(`候选 ${eligibilitySelected?.candidate_id || '--'} / ${eligibilitySelected?.status || '--'} / ${eligibilitySelected?.is_expired ? '已过期' : '未过期'}`)}</span>
+        <span>${esc(buildEligibilityReasonText(eligibility))}</span>
+      </div>
+      <div class="ai-agent-review-insights">
+        ${insights.map((item) => `<div class="ai-agent-review-insight">${esc(item)}</div>`).join('')}
+      </div>
+    `;
     normalizeElementHtml(el);
   }
 
@@ -1554,6 +1854,60 @@
     }
   }
 
+  async function loadAgentGovernance(options = {}) {
+    if (!document.getElementById('ai-agent-risk-status-panel') && !document.getElementById('ai-agent-scorecard-panel')) {
+      return null;
+    }
+    if (governanceInFlight) return governanceInFlight;
+    const timeoutMs = Math.max(5000, Number(options.timeoutMs || AGENT_DETAIL_TIMEOUT_MS));
+    const notifyOnError = options.notifyOnError === true;
+    const task = (async () => {
+      const [riskStatusResult, riskConfigResult, scorecardResult] = await Promise.all([
+        rootApi(AGENT_RISK_STATUS_API, { timeoutMs }).then((payload) => ({ payload })).catch((error) => ({ error })),
+        rootApi(AGENT_RISK_CONFIG_API, { timeoutMs }).then((payload) => ({ payload })).catch((error) => ({ error })),
+        rootApi(`${AGENT_SCORECARD_API}?limit=200&hours=168`, { timeoutMs }).then((payload) => ({ payload })).catch((error) => ({ error })),
+      ]);
+
+      if (riskStatusResult.payload) lastRiskStatusSnapshot = riskStatusResult.payload || {};
+      if (riskConfigResult.payload) lastRiskConfigSnapshot = riskConfigResult.payload || {};
+      if (scorecardResult.payload) lastScorecardSnapshot = scorecardResult.payload || {};
+
+      if (lastRiskStatusSnapshot || lastRiskConfigSnapshot) {
+        renderAgentRiskGovernance(lastRiskStatusSnapshot || {}, lastRiskConfigSnapshot || {});
+      } else if (riskStatusResult.error || riskConfigResult.error) {
+        renderAgentGovernanceError(
+          riskStatusResult.error?.message
+          || riskConfigResult.error?.message
+          || '自治纪律数据加载失败'
+        );
+      }
+
+      if (lastScorecardSnapshot) {
+        renderAgentScorecard(lastScorecardSnapshot || {});
+      } else if (scorecardResult.error) {
+        renderAgentGovernanceError(scorecardResult.error?.message || '自治记分牌加载失败');
+      }
+
+      if (notifyOnError) {
+        if (riskStatusResult.error) notify(`自治纪律状态加载失败: ${riskStatusResult.error.message}`, true);
+        if (riskConfigResult.error) notify(`自治纪律配置加载失败: ${riskConfigResult.error.message}`, true);
+        if (scorecardResult.error) notify(`自治记分牌加载失败: ${scorecardResult.error.message}`, true);
+      }
+
+      return {
+        riskStatus: lastRiskStatusSnapshot,
+        riskConfig: lastRiskConfigSnapshot,
+        scorecard: lastScorecardSnapshot,
+      };
+    })();
+    governanceInFlight = task;
+    try {
+      return await task;
+    } finally {
+      if (governanceInFlight === task) governanceInFlight = null;
+    }
+  }
+
   async function saveAgentConfig() {
     const symbolMode = String(document.getElementById('ai-agent-symbol-mode')?.value || 'manual').toLowerCase();
     const symbol = String(document.getElementById('ai-agent-manual-symbol')?.value || 'BTC/USDT').trim().toUpperCase();
@@ -1594,6 +1948,45 @@
     }
   }
 
+  async function saveAgentRiskConfig() {
+    const payload = {};
+    const dailyStopBuffer = readRiskInputValue('ai-agent-risk-daily-stop');
+    const maxDrawdown = readRiskInputValue('ai-agent-risk-max-dd');
+    const rolling3d = readRiskInputValue('ai-agent-risk-rolling-3d');
+    const rolling7d = readRiskInputValue('ai-agent-risk-rolling-7d');
+
+    if (dailyStopBuffer != null) payload.autonomy_daily_stop_buffer_ratio = dailyStopBuffer;
+    if (maxDrawdown != null) payload.autonomy_max_drawdown_reduce_only = maxDrawdown;
+    if (rolling3d != null) payload.autonomy_rolling_3d_drawdown_reduce_only = rolling3d;
+    if (rolling7d != null) payload.autonomy_rolling_7d_drawdown_reduce_only = rolling7d;
+
+    if (!Object.keys(payload).length) {
+      notify('请至少填写一个自治纪律阈值后再保存', true);
+      return;
+    }
+
+    try {
+      const response = await rootApi(AGENT_RISK_CONFIG_API, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      const snapshot = response?.config || response || {};
+      lastRiskConfigSnapshot = snapshot;
+      syncAgentRiskConfigForm(snapshot);
+      if (lastRiskStatusSnapshot || snapshot) {
+        renderAgentRiskGovernance(lastRiskStatusSnapshot || {}, snapshot);
+      }
+      notify('自治代理纪律阈值已保存');
+      await loadAgentGovernance({ notifyOnError: true });
+    } catch (err) {
+      notify(`保存自治纪律阈值失败: ${err.message}`, true);
+    }
+  }
+
+  async function agentRefreshRisk() {
+    await loadAgentGovernance({ notifyOnError: true, timeoutMs: AGENT_DETAIL_TIMEOUT_MS });
+  }
+
   async function loadAgentStatus(options = {}) {
     if (!document.getElementById('ai-agent-card')) return null;
     const includeDetails = options.includeDetails !== false && isAgentTabActive();
@@ -1623,6 +2016,10 @@
             preserveExisting: true,
           }).catch(() => {});
         }
+        loadAgentGovernance({
+          notifyOnError,
+          timeoutMs: Math.min(timeoutMs, AGENT_DETAIL_TIMEOUT_MS),
+        }).catch(() => {});
         if (includeDetails && document.getElementById('ai-agent-journal')) {
           loadAgentJournal().catch(() => {});
         }
@@ -1770,7 +2167,9 @@
       refreshJournal: () => loadAgentStatus({ includeDetails: true, notifyOnError: true }),
       refreshReview: () => loadAgentReview(),
       refreshRanking: () => loadAgentSymbolRanking(true, { timeoutMs: 90000, notifyOnError: true, preserveExisting: false }),
+      refreshRisk: () => loadAgentGovernance({ notifyOnError: true, timeoutMs: AGENT_DETAIL_TIMEOUT_MS }),
       saveConfig: () => saveAgentConfig(),
+      saveRiskConfig: () => saveAgentRiskConfig(),
       start: () => agentStart(),
       stop: () => agentStop(),
       runOnce: () => agentRunOnce(),
@@ -1784,6 +2183,8 @@
     window.agentRefreshReview = () => loadAgentReview().catch(() => {});
     window.agentRefreshRanking = () => loadAgentSymbolRanking(true, { timeoutMs: 90000, notifyOnError: true, preserveExisting: false });
     window.agentSaveConfig = () => saveAgentConfig();
+    window.agentRefreshRisk = () => loadAgentGovernance({ notifyOnError: true, timeoutMs: AGENT_DETAIL_TIMEOUT_MS }).catch(() => {});
+    window.agentSaveRiskConfig = () => saveAgentRiskConfig();
     window.agentToggleSymbolMode = () => updateAgentSymbolModeVisibility();
 
     window.addEventListener('ai-research:state', (event) => {

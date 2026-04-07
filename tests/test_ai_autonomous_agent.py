@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import time
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,26 @@ def _isolate_agent_overlay(tmp_path, monkeypatch):
     monkeypatch.setattr(_mod.execution_engine, "get_live_trade_review", lambda **kwargs: {"items": []})
     monkeypatch.setattr(_mod.strategy_manager, "get_strategy_allocation", lambda name: 0.0)
     monkeypatch.setattr(_mod.position_manager, "get_all_positions", lambda: [])
+    monkeypatch.setattr(
+        _mod.risk_manager,
+        "get_risk_report",
+        lambda: {
+            "risk_level": "low",
+            "trading_halted": False,
+            "halt_reason": "",
+            "discipline": {
+                "fresh_entry_allowed": True,
+                "reduce_only": False,
+                "degrade_mode": "normal",
+                "reasons": [],
+            },
+            "equity": {
+                "daily_pnl_ratio": 0.0,
+                "daily_stop_basis_ratio": 0.0,
+                "max_drawdown": 0.0,
+            },
+        },
+    )
 
 
 def _sample_df(*, freq: str = "15min", periods: int = 120, start: str = "2025-01-01") -> pd.DataFrame:
@@ -52,6 +73,206 @@ def _sample_df_for_timeframe(timeframe: str, *, periods: int = 240, start: str =
         "1h": "1h",
     }
     return _sample_df(freq=freq_map.get(str(timeframe or "").strip(), "15min"), periods=periods, start=start)
+
+
+def test_risk_report_exposes_reduce_only_discipline_contract(monkeypatch):
+    risk_module = importlib.import_module("core.risk.risk_manager")
+
+    manager = risk_module.RiskManager()
+    manager.max_daily_loss_ratio = 0.02
+    manager._day_start_equity = 1000.0
+    manager._current_equity = 985.0
+    manager._daily_realized_pnl = -10.0
+    manager._current_unrealized_pnl = -5.0
+    manager._equity_curve = [1000.0, 985.0]
+
+    monkeypatch.setattr(
+        risk_module,
+        "_position_manager",
+        lambda: SimpleNamespace(
+            get_total_pnl=lambda: -5.0,
+            get_total_exposure=lambda: 0.0,
+            get_position_count=lambda: 0,
+            get_all_positions=lambda: [],
+        ),
+    )
+
+    report = manager.get_risk_report()
+
+    assert report["discipline"]["fresh_entry_allowed"] is False
+    assert report["discipline"]["reduce_only"] is True
+    assert report["discipline"]["degrade_mode"] == "reduce_only"
+    assert report["discipline"]["reasons"]
+    assert report["discipline"]["reasons"][0].startswith("daily_stop_buffer_reached(")
+
+
+def test_risk_report_exposes_drawdown_reduce_only_discipline_contract(monkeypatch):
+    risk_module = importlib.import_module("core.risk.risk_manager")
+
+    manager = risk_module.RiskManager()
+    manager.max_daily_loss_ratio = 0.02
+    manager._day_start_equity = 1000.0
+    manager._current_equity = 940.0
+    manager._daily_realized_pnl = -5.0
+    manager._current_unrealized_pnl = 0.0
+    manager._equity_curve = [1000.0, 980.0, 950.0, 940.0]
+
+    monkeypatch.setattr(
+        risk_module,
+        "_position_manager",
+        lambda: SimpleNamespace(
+            get_total_pnl=lambda: 0.0,
+            get_total_exposure=lambda: 0.0,
+            get_position_count=lambda: 0,
+            get_all_positions=lambda: [],
+        ),
+    )
+
+    report = manager.get_risk_report()
+
+    assert report["discipline"]["fresh_entry_allowed"] is False
+    assert report["discipline"]["reduce_only"] is True
+    assert report["discipline"]["degrade_mode"] == "reduce_only"
+    assert "max_drawdown_limit_exceeded(0.060000>=0.050000)" in report["discipline"]["reasons"]
+    assert report["discipline"]["thresholds"]["max_drawdown_reduce_only"] == pytest.approx(0.05)
+
+
+def test_risk_report_exposes_rolling_drawdown_reduce_only_contract(monkeypatch):
+    risk_module = importlib.import_module("core.risk.risk_manager")
+
+    manager = risk_module.RiskManager()
+    manager.max_daily_loss_ratio = 0.02
+    manager._day_start_equity = 1000.0
+    manager._current_equity = 990.0
+    manager._daily_realized_pnl = -2.0
+    manager._current_unrealized_pnl = 0.0
+    manager._equity_curve = [1000.0, 995.0, 990.0]
+    now = datetime.now(timezone.utc)
+    manager._equity_timeline = [
+        {"timestamp": (now - timedelta(hours=60)).isoformat(), "equity": 1000.0},
+        {"timestamp": (now - timedelta(hours=36)).isoformat(), "equity": 940.0},
+        {"timestamp": (now - timedelta(hours=6)).isoformat(), "equity": 930.0},
+        {"timestamp": (now - timedelta(hours=2)).isoformat(), "equity": 990.0},
+    ]
+
+    monkeypatch.setattr(
+        risk_module,
+        "_position_manager",
+        lambda: SimpleNamespace(
+            get_total_pnl=lambda: 0.0,
+            get_total_exposure=lambda: 0.0,
+            get_position_count=lambda: 0,
+            get_all_positions=lambda: [],
+        ),
+    )
+
+    report = manager.get_risk_report()
+
+    assert report["drawdown"]["rolling_3d"]["drawdown"] == pytest.approx(0.07)
+    assert report["drawdown"]["rolling_7d"]["drawdown"] == pytest.approx(0.07)
+    assert report["equity"]["rolling_3d_drawdown"] == pytest.approx(0.07)
+    assert report["equity"]["rolling_7d_drawdown"] == pytest.approx(0.07)
+    assert report["discipline"]["reduce_only"] is True
+    assert "rolling_3d_drawdown_limit_exceeded(0.070000>=0.060000)" in report["discipline"]["reasons"]
+    assert report["discipline"]["thresholds"]["rolling_3d_drawdown_reduce_only"] == pytest.approx(0.06)
+    assert report["discipline"]["thresholds"]["rolling_7d_drawdown_reduce_only"] == pytest.approx(0.09)
+
+
+def test_risk_report_uses_configurable_autonomy_thresholds(monkeypatch):
+    risk_module = importlib.import_module("core.risk.risk_manager")
+
+    manager = risk_module.RiskManager()
+    manager.update_parameters(
+        {
+            "max_daily_loss_ratio": 0.02,
+            "autonomy_daily_stop_buffer_ratio": 0.01,
+            "autonomy_max_drawdown_reduce_only": 0.03,
+            "autonomy_rolling_3d_drawdown_reduce_only": 0.05,
+            "autonomy_rolling_7d_drawdown_reduce_only": 0.08,
+        }
+    )
+    manager._day_start_equity = 1000.0
+    manager._current_equity = 995.0
+    manager._daily_realized_pnl = -2.0
+    manager._current_unrealized_pnl = 0.0
+    manager._equity_curve = [1000.0, 960.0]
+    now = datetime.now(timezone.utc)
+    manager._equity_timeline = [
+        {"timestamp": (now - timedelta(hours=60)).isoformat(), "equity": 1000.0},
+        {"timestamp": (now - timedelta(hours=24)).isoformat(), "equity": 945.0},
+        {"timestamp": (now - timedelta(hours=2)).isoformat(), "equity": 995.0},
+    ]
+
+    monkeypatch.setattr(
+        risk_module,
+        "_position_manager",
+        lambda: SimpleNamespace(
+            get_total_pnl=lambda: 0.0,
+            get_total_exposure=lambda: 0.0,
+            get_position_count=lambda: 0,
+            get_all_positions=lambda: [],
+        ),
+    )
+
+    report = manager.get_risk_report()
+
+    assert report["discipline"]["reduce_only"] is True
+    assert "max_drawdown_limit_exceeded(0.040000>=0.030000)" in report["discipline"]["reasons"]
+    assert "rolling_3d_drawdown_limit_exceeded(0.055000>=0.050000)" in report["discipline"]["reasons"]
+    assert report["discipline"]["thresholds"]["daily_stop_buffer_ratio"] == pytest.approx(-0.01)
+    assert report["discipline"]["thresholds"]["max_drawdown_reduce_only"] == pytest.approx(0.03)
+    assert report["discipline"]["thresholds"]["rolling_3d_drawdown_reduce_only"] == pytest.approx(0.05)
+    assert report["discipline"]["thresholds"]["rolling_7d_drawdown_reduce_only"] == pytest.approx(0.08)
+    assert report["limits"]["autonomy_daily_stop_buffer_ratio"] == pytest.approx(0.01)
+    assert report["limits"]["autonomy_thresholds"]["autonomy_max_drawdown_reduce_only"] == pytest.approx(0.03)
+
+
+def test_risk_manager_clamps_autonomy_daily_stop_buffer_to_daily_loss_limit():
+    risk_module = importlib.import_module("core.risk.risk_manager")
+
+    manager = risk_module.RiskManager()
+    manager.update_parameters(
+        {
+            "max_daily_loss_ratio": 0.02,
+            "autonomy_daily_stop_buffer_ratio": 0.08,
+        }
+    )
+
+    assert manager.get_autonomy_risk_config()["autonomy_daily_stop_buffer_ratio"] == pytest.approx(0.02)
+
+
+def test_risk_manager_persists_autonomy_threshold_overlay(monkeypatch, tmp_path: Path):
+    risk_module = importlib.import_module("core.risk.risk_manager")
+    overlay_path = tmp_path / "autonomous_agent_risk_config.json"
+    monkeypatch.setenv("AI_AGENT_RISK_CONFIG_PATH", str(overlay_path))
+
+    manager = risk_module.RiskManager()
+    manager.update_parameters(
+        {
+            "autonomy_daily_stop_buffer_ratio": 0.011,
+            "autonomy_max_drawdown_reduce_only": 0.032,
+            "autonomy_rolling_3d_drawdown_reduce_only": 0.054,
+            "autonomy_rolling_7d_drawdown_reduce_only": 0.081,
+        }
+    )
+
+    persisted = json.loads(overlay_path.read_text(encoding="utf-8"))
+    assert set(persisted) == {
+        "autonomy_daily_stop_buffer_ratio",
+        "autonomy_max_drawdown_reduce_only",
+        "autonomy_rolling_3d_drawdown_reduce_only",
+        "autonomy_rolling_7d_drawdown_reduce_only",
+    }
+    assert persisted["autonomy_daily_stop_buffer_ratio"] == pytest.approx(0.011)
+    assert persisted["autonomy_max_drawdown_reduce_only"] == pytest.approx(0.032)
+    assert persisted["autonomy_rolling_3d_drawdown_reduce_only"] == pytest.approx(0.054)
+    assert persisted["autonomy_rolling_7d_drawdown_reduce_only"] == pytest.approx(0.081)
+
+    reloaded = risk_module.RiskManager()
+    assert reloaded.get_autonomy_risk_config()["autonomy_daily_stop_buffer_ratio"] == pytest.approx(0.011)
+    assert reloaded.get_autonomy_risk_config()["autonomy_max_drawdown_reduce_only"] == pytest.approx(0.032)
+    assert reloaded.get_autonomy_risk_config()["autonomy_rolling_3d_drawdown_reduce_only"] == pytest.approx(0.054)
+    assert reloaded.get_autonomy_risk_config()["autonomy_rolling_7d_drawdown_reduce_only"] == pytest.approx(0.081)
 
 
 def test_autonomous_agent_run_once_submit_signal(monkeypatch, tmp_path: Path):
@@ -1042,6 +1263,28 @@ def test_resolve_account_risk_base_uses_observed_position_map_as_exposure_floor(
     monkeypatch.setattr(module.execution_engine, "get_strategy_position_cap_notional", lambda **kwargs: 100.0)
     monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "live")
     monkeypatch.setattr(module.strategy_manager, "get_strategy_allocation", lambda name: 0.0)
+    monkeypatch.setattr(
+        module.risk_manager,
+        "get_risk_report",
+        lambda: {
+            "risk_level": "high",
+            "trading_halted": True,
+            "halt_reason": "daily stop triggered",
+            "discipline": {
+                "fresh_entry_allowed": False,
+                "reduce_only": True,
+                "degrade_mode": "halted",
+                "reasons": ["daily stop triggered"],
+            },
+            "equity": {
+                "daily_pnl_ratio": -0.014,
+                "daily_stop_basis_ratio": -0.011,
+                "max_drawdown": 0.083,
+                "rolling_3d_drawdown": 0.061,
+                "rolling_7d_drawdown": 0.094,
+            },
+        },
+    )
     monkeypatch.setattr(agent, "_positions_for_learning_memory", lambda strategy_name: [])
     monkeypatch.setattr(
         agent,
@@ -1078,6 +1321,18 @@ def test_resolve_account_risk_base_uses_observed_position_map_as_exposure_floor(
     assert payload["observed_account_open_notional"] == 400.0
     assert payload["total_strategy_open_notional"] == 400.0
     assert payload["total_exposure_limit_notional"] == 400.0
+    assert payload["risk_level"] == "high"
+    assert payload["risk_trading_halted"] is True
+    assert payload["risk_halt_reason"] == "daily stop triggered"
+    assert payload["risk_fresh_entry_allowed"] is False
+    assert payload["risk_reduce_only"] is True
+    assert payload["risk_degrade_mode"] == "halted"
+    assert payload["risk_discipline_reasons"] == ["daily stop triggered"]
+    assert payload["risk_daily_pnl_ratio"] == pytest.approx(-0.014)
+    assert payload["risk_daily_stop_basis_ratio"] == pytest.approx(-0.011)
+    assert payload["risk_max_drawdown"] == pytest.approx(0.083)
+    assert payload["risk_rolling_3d_drawdown"] == pytest.approx(0.061)
+    assert payload["risk_rolling_7d_drawdown"] == pytest.approx(0.094)
 
 
 def test_agent_runtime_config_leverage_is_fixed_to_one(tmp_path):
@@ -2339,16 +2594,26 @@ def test_agent_run_once_fast_path_hold_skips_provider(monkeypatch, tmp_path: Pat
                     "symbol": "BTC/USDT",
                     "timeframe": "15m",
                     "price": 100.0,
-                    "bars": 240,
-                    "returns": {"r_1h": 0.0, "r_24h": 0.0},
-                    "realized_vol_annualized": 0.15,
-                    "market_structure": {"available": True},
-                    "aggregated_signal": {"direction": "LONG", "confidence": 0.62, "blocked_by_risk": False, "risk_reason": ""},
-                    "event_summary": {"available": False},
-                    "position": {},
-                    "account_risk": {"trading_mode": "paper", "min_confidence": 0.7},
-                    "execution_cost": {"estimated_one_way_cost_bps": 3.0, "estimated_round_trip_cost_bps": 6.0},
-                    "research_context": {"available": False},
+                        "bars": 240,
+                        "returns": {"r_1h": 0.0, "r_24h": 0.0},
+                        "realized_vol_annualized": 0.15,
+                        "market_structure": {"available": True},
+                        "aggregated_signal": {
+                            "direction": "LONG",
+                            "confidence": 0.62,
+                            "blocked_by_risk": False,
+                            "risk_reason": "",
+                            "components": {
+                                "llm": {"effective_weight": 0.4},
+                                "ml": {"effective_weight": 0.3},
+                                "factor": {"effective_weight": 0.3},
+                            },
+                        },
+                        "event_summary": {"available": False},
+                        "position": {},
+                        "account_risk": {"trading_mode": "paper", "min_confidence": 0.7},
+                        "execution_cost": {"estimated_one_way_cost_bps": 3.0, "estimated_round_trip_cost_bps": 6.0},
+                        "research_context": {"available": False},
                     "profile": {},
                     "learning_memory": {},
                     "trading_mode": "paper",
@@ -2405,6 +2670,28 @@ def test_build_context_includes_market_event_and_account_risk_payloads(monkeypat
     monkeypatch.setattr(module.execution_engine, "get_strategy_position_cap_notional", lambda **kwargs: 150.0)
     monkeypatch.setattr(module.strategy_manager, "get_strategy_allocation", lambda name: 0.12)
     monkeypatch.setattr(
+        module.risk_manager,
+        "get_risk_report",
+        lambda: {
+            "risk_level": "medium",
+            "trading_halted": False,
+            "halt_reason": "",
+            "discipline": {
+                "fresh_entry_allowed": False,
+                "reduce_only": True,
+                "degrade_mode": "reduce_only",
+                "reasons": ["daily_stop_buffer_reached(-0.007000<=-0.007000)"],
+            },
+            "equity": {
+                "daily_pnl_ratio": -0.009,
+                "daily_stop_basis_ratio": -0.007,
+                "max_drawdown": 0.052,
+                "rolling_3d_drawdown": 0.041,
+                "rolling_7d_drawdown": 0.067,
+            },
+        },
+    )
+    monkeypatch.setattr(
         module.news_db,
         "get_recent_events",
         AsyncMock(
@@ -2453,6 +2740,19 @@ def test_build_context_includes_market_event_and_account_risk_payloads(monkeypat
     assert context_payload["account_risk"]["max_total_exposure_ratio"] == 0.4
     assert context_payload["account_risk"]["total_exposure_limit_notional"] == 600.0
     assert context_payload["account_risk"]["fixed_leverage"] == 1.0
+    assert context_payload["account_risk"]["risk_level"] == "medium"
+    assert context_payload["account_risk"]["risk_trading_halted"] is False
+    assert context_payload["account_risk"]["risk_fresh_entry_allowed"] is False
+    assert context_payload["account_risk"]["risk_reduce_only"] is True
+    assert context_payload["account_risk"]["risk_degrade_mode"] == "reduce_only"
+    assert context_payload["account_risk"]["risk_discipline_reasons"] == [
+        "daily_stop_buffer_reached(-0.007000<=-0.007000)"
+    ]
+    assert context_payload["account_risk"]["risk_daily_pnl_ratio"] == pytest.approx(-0.009)
+    assert context_payload["account_risk"]["risk_daily_stop_basis_ratio"] == pytest.approx(-0.007)
+    assert context_payload["account_risk"]["risk_max_drawdown"] == pytest.approx(0.052)
+    assert context_payload["account_risk"]["risk_rolling_3d_drawdown"] == pytest.approx(0.041)
+    assert context_payload["account_risk"]["risk_rolling_7d_drawdown"] == pytest.approx(0.067)
     assert context_payload["execution_cost"]["fee_bps"] > 0
     assert context_payload["execution_cost"]["estimated_slippage_bps"] >= 2.0
     assert context_payload["execution_cost"]["estimated_round_trip_cost_bps"] >= (
@@ -2891,6 +3191,399 @@ def test_agent_no_price_closes_losing_position_when_learning_memory_requires(mon
     assert submit_mock.await_count == 1
 
 
+def test_agent_learning_guard_blocks_fresh_entry_when_service_instability_flag_active(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    monkeypatch.setattr(
+        agent,
+        "_refresh_learning_memory",
+        lambda cfg=None, force=False: {
+            "window": {"recent_journal_rows": 120},
+            "summary": {
+                "recent_model_issue_count": 36,
+                "recent_latency_avg_ms": 28450.0,
+            },
+            "adaptive_risk": {
+                "effective_min_confidence": 0.64,
+                "same_direction_max_exposure_ratio": 0.35,
+                "entry_size_scale": 0.7,
+                "avoid_new_entries_during_service_instability": True,
+            },
+            "guardrails": ["avoid fresh entries while model service is unstable"],
+            "lessons": ["recent model instability should block new entries"],
+            "blocked_symbol_sides": [],
+        },
+    )
+    monkeypatch.setattr(
+        agent,
+        "get_symbol_scan",
+        AsyncMock(
+            return_value={
+                "selected_symbol": "ETH/USDT",
+                "selection_reason": "top_ranked_tradable_symbol",
+                "top_candidates": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_build_context",
+        AsyncMock(
+            return_value=(
+                {
+                    "exchange": "binance",
+                    "symbol": "ETH/USDT",
+                    "timeframe": "15m",
+                    "price": 2000.0,
+                    "bars": 240,
+                    "returns": {"r_1h": 0.01, "r_24h": 0.03},
+                    "realized_vol_annualized": 0.2,
+                    "market_structure": {"available": True, "microstructure": {"atr_pct": 0.003}},
+                    "aggregated_signal": {
+                        "direction": "LONG",
+                        "confidence": 0.74,
+                        "blocked_by_risk": False,
+                        "risk_reason": "",
+                        "components": {
+                            "llm": {"effective_weight": 0.4},
+                            "ml": {"effective_weight": 0.3},
+                            "factor": {"effective_weight": 0.3},
+                        },
+                    },
+                    "event_summary": {"available": False},
+                    "position": {},
+                    "account_risk": {
+                        "trading_mode": "paper",
+                        "min_confidence": 0.58,
+                        "position_cap_notional": 400.0,
+                    },
+                    "execution_cost": {"estimated_one_way_cost_bps": 4.0, "estimated_round_trip_cost_bps": 8.0},
+                    "research_context": {"available": False},
+                    "profile": {},
+                    "learning_memory": {},
+                    "trading_mode": "paper",
+                },
+                pd.DataFrame(),
+            )
+        ),
+    )
+    provider_mock = AsyncMock(
+        side_effect=AssertionError("service instability fast-path hold should skip provider")
+    )
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        provider_mock,
+    )
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    submit_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert result["decision"]["action"] == "hold"
+    assert result["decision"]["reason"] == "review_service_instability"
+    assert result["execution"]["submitted"] is False
+    assert provider_mock.await_count == 0
+    assert submit_mock.await_count == 0
+
+
+def test_agent_learning_guard_blocks_fresh_entry_when_loss_streak_flag_active(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    monkeypatch.setattr(
+        agent,
+        "_refresh_learning_memory",
+        lambda cfg=None, force=False: {
+            "window": {"recent_live_trades": 8},
+            "summary": {
+                "recent_close_loss_count": 3,
+                "recent_close_loss_streak_count": 3,
+            },
+            "adaptive_risk": {
+                "effective_min_confidence": 0.63,
+                "same_direction_max_exposure_ratio": 0.25,
+                "entry_size_scale": 0.4,
+                "avoid_new_entries_during_loss_streak": True,
+            },
+            "guardrails": ["block fresh entries during active loss streak"],
+            "lessons": ["recent loss streak is 3; keep fresh entries in defensive mode"],
+            "blocked_symbol_sides": [],
+        },
+    )
+    monkeypatch.setattr(
+        agent,
+        "get_symbol_scan",
+        AsyncMock(
+            return_value={
+                "selected_symbol": "ETH/USDT",
+                "selection_reason": "top_ranked_tradable_symbol",
+                "top_candidates": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_build_context",
+        AsyncMock(
+            return_value=(
+                {
+                    "exchange": "binance",
+                    "symbol": "ETH/USDT",
+                    "timeframe": "15m",
+                    "price": 2010.0,
+                    "bars": 240,
+                    "returns": {"r_1h": 0.01, "r_24h": 0.02},
+                    "realized_vol_annualized": 0.19,
+                    "market_structure": {"available": True, "microstructure": {"atr_pct": 0.0032}},
+                    "aggregated_signal": {
+                        "direction": "LONG",
+                        "confidence": 0.76,
+                        "blocked_by_risk": False,
+                        "risk_reason": "",
+                        "components": {
+                            "llm": {"effective_weight": 0.4},
+                            "ml": {"effective_weight": 0.3},
+                            "factor": {"effective_weight": 0.3},
+                        },
+                    },
+                    "event_summary": {"available": False},
+                    "position": {},
+                    "account_risk": {
+                        "trading_mode": "paper",
+                        "min_confidence": 0.58,
+                        "position_cap_notional": 400.0,
+                        "risk_trading_halted": False,
+                    },
+                    "execution_cost": {"estimated_one_way_cost_bps": 4.0, "estimated_round_trip_cost_bps": 8.0},
+                    "research_context": {"available": False},
+                    "profile": {},
+                    "learning_memory": {},
+                    "trading_mode": "paper",
+                },
+                pd.DataFrame(),
+            )
+        ),
+    )
+    provider_mock = AsyncMock(side_effect=AssertionError("loss streak fast-path hold should skip provider"))
+    monkeypatch.setattr(agent, "_call_provider", provider_mock)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    submit_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    codes = {item.get("code") for item in (result.get("diagnostics", {}).get("items") or [])}
+    assert result["decision"]["action"] == "hold"
+    assert result["decision"]["reason"] == "review_loss_streak(3)"
+    assert result["execution"]["submitted"] is False
+    assert "review_loss_streak" in codes
+    assert provider_mock.await_count == 0
+    assert submit_mock.await_count == 0
+
+
+def test_agent_learning_guard_blocks_fresh_entry_when_account_risk_halted(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    monkeypatch.setattr(
+        agent,
+        "_refresh_learning_memory",
+        lambda cfg=None, force=False: {
+            "summary": {},
+            "adaptive_risk": {
+                "effective_min_confidence": 0.58,
+                "same_direction_max_exposure_ratio": 0.5,
+                "entry_size_scale": 1.0,
+            },
+            "guardrails": [],
+            "lessons": [],
+            "blocked_symbol_sides": [],
+        },
+    )
+    monkeypatch.setattr(
+        agent,
+        "get_symbol_scan",
+        AsyncMock(
+            return_value={
+                "selected_symbol": "ETH/USDT",
+                "selection_reason": "top_ranked_tradable_symbol",
+                "top_candidates": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_build_context",
+        AsyncMock(
+            return_value=(
+                {
+                    "exchange": "binance",
+                    "symbol": "ETH/USDT",
+                    "timeframe": "15m",
+                    "price": 1995.0,
+                    "bars": 240,
+                    "returns": {"r_1h": -0.01, "r_24h": -0.02},
+                    "realized_vol_annualized": 0.22,
+                    "market_structure": {"available": True},
+                    "aggregated_signal": {
+                        "direction": "SHORT",
+                        "confidence": 0.75,
+                        "blocked_by_risk": False,
+                        "risk_reason": "",
+                        "components": {
+                            "llm": {"effective_weight": 0.4},
+                            "ml": {"effective_weight": 0.3},
+                            "factor": {"effective_weight": 0.3},
+                        },
+                    },
+                    "event_summary": {"available": False},
+                    "position": {},
+                    "account_risk": {
+                        "trading_mode": "paper",
+                        "min_confidence": 0.58,
+                        "position_cap_notional": 400.0,
+                        "risk_level": "critical",
+                        "risk_trading_halted": True,
+                        "risk_halt_reason": "daily stop triggered",
+                    },
+                    "execution_cost": {"estimated_one_way_cost_bps": 4.0, "estimated_round_trip_cost_bps": 8.0},
+                    "research_context": {"available": False},
+                    "profile": {},
+                    "learning_memory": {},
+                    "trading_mode": "paper",
+                },
+                pd.DataFrame(),
+            )
+        ),
+    )
+    provider_mock = AsyncMock(side_effect=AssertionError("risk halt fast-path hold should skip provider"))
+    monkeypatch.setattr(agent, "_call_provider", provider_mock)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    submit_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    codes = {item.get("code") for item in (result.get("diagnostics", {}).get("items") or [])}
+    assert result["decision"]["action"] == "hold"
+    assert result["decision"]["reason"] == "review_risk_halt"
+    assert result["execution"]["submitted"] is False
+    assert "review_risk_halt" in codes
+    assert provider_mock.await_count == 0
+    assert submit_mock.await_count == 0
+
+
+def test_apply_learning_entry_guards_blocks_provider_entry_when_risk_halt_active(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    guarded = agent._apply_learning_entry_guards(
+        decision={
+            "action": "buy",
+            "confidence": 0.81,
+            "strength": 0.65,
+            "reason": "provider_signal",
+        },
+        cfg={
+            "min_confidence": 0.58,
+            "learning_memory": {
+                "summary": {},
+                "adaptive_risk": {},
+                "blocked_symbol_sides": [],
+            },
+        },
+        context_payload={
+            "symbol": "BTC/USDT",
+            "position": {},
+            "account_risk": {
+                "risk_trading_halted": True,
+                "risk_halt_reason": "daily stop triggered",
+            },
+        },
+    )
+
+    assert guarded["action"] == "hold"
+    assert guarded["reason"] == "review_risk_halt"
+
+
+def test_apply_learning_entry_guards_blocks_provider_entry_when_reduce_only_contract_active(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    guarded = agent._apply_learning_entry_guards(
+        decision={
+            "action": "buy",
+            "confidence": 0.81,
+            "strength": 0.65,
+            "reason": "provider_signal",
+        },
+        cfg={
+            "min_confidence": 0.58,
+            "learning_memory": {
+                "summary": {},
+                "adaptive_risk": {},
+                "blocked_symbol_sides": [],
+            },
+        },
+        context_payload={
+            "symbol": "BTC/USDT",
+            "position": {},
+            "account_risk": {
+                "risk_trading_halted": False,
+                "risk_fresh_entry_allowed": False,
+                "risk_reduce_only": True,
+                "risk_degrade_mode": "reduce_only",
+                "risk_discipline_reasons": ["daily_stop_buffer_reached(-0.014500<=-0.014000)"],
+            },
+        },
+    )
+
+    assert guarded["action"] == "hold"
+    assert guarded["reason"] == "review_risk_halt"
+
+
+def test_apply_learning_entry_guards_allows_close_when_reduce_only_contract_active(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    guarded = agent._apply_learning_entry_guards(
+        decision={
+            "action": "close_long",
+            "confidence": 0.74,
+            "strength": 0.51,
+            "reason": "take_profit",
+        },
+        cfg={
+            "min_confidence": 0.58,
+            "learning_memory": {
+                "summary": {},
+                "adaptive_risk": {},
+                "blocked_symbol_sides": [],
+            },
+        },
+        context_payload={
+            "symbol": "BTC/USDT",
+            "position": {"side": "long"},
+            "account_risk": {
+                "risk_trading_halted": False,
+                "risk_fresh_entry_allowed": False,
+                "risk_reduce_only": True,
+                "risk_degrade_mode": "reduce_only",
+                "risk_discipline_reasons": ["daily_stop_buffer_reached(-0.014500<=-0.014000)"],
+            },
+        },
+    )
+
+    assert guarded["action"] == "close_long"
+    assert guarded["reason"] == "take_profit"
+
+
 def test_agent_learning_guard_no_longer_requires_research_for_fresh_entry(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
 
@@ -3045,6 +3738,11 @@ def test_build_prompt_compacts_runtime_context(tmp_path: Path):
             "net_sentiment": 0.42,
             "news_alpha_proxy": 0.38,
             "event_concentration": 0.51,
+            "generated_at_utc": "2026-04-06T10:00:00+00:00",
+            "window_since_utc": "2026-04-06T06:00:00+00:00",
+            "latest_event_at_utc": "2026-04-06T09:52:00+00:00",
+            "ui_timezone": "Asia/Shanghai",
+            "timezone_basis": "UTC storage, Asia/Shanghai display",
             "top_event_types": ["macro", "etf", "institution", "listing", "hack", "extra"],
             "top_sources": ["jin10", "rss", "gdelt", "newsapi", "extra"],
             "top_events": [
@@ -3079,6 +3777,12 @@ def test_build_prompt_compacts_runtime_context(tmp_path: Path):
             "default_take_profit_pct": 0.04,
             "account_equity": 5000.0,
             "position_cap_notional": 2500.0,
+            "risk_level": "high",
+            "risk_trading_halted": True,
+            "risk_halt_reason": "daily stop triggered",
+            "risk_daily_pnl_ratio": -0.015,
+            "risk_daily_stop_basis_ratio": -0.012,
+            "risk_max_drawdown": 0.09,
             "has_position": True,
             "current_position_side": "long",
             "current_position_notional": 1610.0,
@@ -3110,6 +3814,7 @@ def test_build_prompt_compacts_runtime_context(tmp_path: Path):
         },
         "learning_memory": {
             "summary": {
+                "recent_close_loss_streak_count": 3,
                 "recent_model_issue_count": 17,
                 "recent_latency_avg_ms": 21535.0,
                 "current_open_position_count": 1,
@@ -3119,6 +3824,7 @@ def test_build_prompt_compacts_runtime_context(tmp_path: Path):
                 "same_direction_max_exposure_ratio": 0.3,
                 "entry_size_scale": 0.7,
                 "avoid_new_entries_during_service_instability": True,
+                "avoid_new_entries_during_loss_streak": True,
                 "force_close_on_data_outage_losing_position": False,
             },
             "blocked_symbol_sides": ["BTC/USDT:long", "ETH/USDT:short"],
@@ -3144,20 +3850,21 @@ def test_build_prompt_compacts_runtime_context(tmp_path: Path):
     assert compact_input["scope"] == "compact_runtime_v2"
     assert compact_input["aggregated_signal"]["direction"] == "LONG"
     assert compact_input["account_risk"]["min_confidence"] == 0.58
+    assert compact_input["account_risk"]["risk_level"] == "high"
+    assert compact_input["account_risk"]["risk_trading_halted"] is True
+    assert compact_input["account_risk"]["risk_halt_reason"] == "daily stop triggered"
+    assert compact_input["account_risk"]["risk_max_drawdown"] == 0.09
     assert compact_input["learning_memory"]["adaptive_risk"]["effective_min_confidence"] == 0.61
+    assert compact_input["learning_memory"]["adaptive_risk"]["avoid_new_entries_during_loss_streak"] is True
+    assert compact_input["learning_memory"]["recent_close_loss_streak_count"] == 3
+    assert compact_input["event_summary"]["generated_at_utc"] == "2026-04-06T10:00:00+00:00"
+    assert compact_input["event_summary"]["window_since_utc"] == "2026-04-06T06:00:00+00:00"
+    assert compact_input["event_summary"]["latest_event_at_utc"] == "2026-04-06T09:52:00+00:00"
+    assert compact_input["event_summary"]["ui_timezone"] == "Asia/Shanghai"
     assert compact_input["event_summary"]["top_event_types"] == ["macro", "etf", "institution", "listing", "hack"]
     assert compact_input["event_summary"]["top_events"][0]["title"] == "ETF inflow remains strong"
     assert "body" not in compact_input["event_summary"]["top_events"][0]
     assert "profile" not in compact_input
     assert "references" not in compact_input["research_context"]
-            "generated_at_utc": "2026-04-06T10:00:00+00:00",
-            "window_since_utc": "2026-04-06T06:00:00+00:00",
-            "latest_event_at_utc": "2026-04-06T09:52:00+00:00",
-            "ui_timezone": "Asia/Shanghai",
-            "timezone_basis": "UTC storage, Asia/Shanghai display",
     assert "notes" not in compact_input["execution_cost"]
     assert len(json.dumps(compact_input, ensure_ascii=False)) < len(json.dumps(context_payload, ensure_ascii=False))
-    assert compact_input["event_summary"]["generated_at_utc"] == "2026-04-06T10:00:00+00:00"
-    assert compact_input["event_summary"]["window_since_utc"] == "2026-04-06T06:00:00+00:00"
-    assert compact_input["event_summary"]["latest_event_at_utc"] == "2026-04-06T09:52:00+00:00"
-    assert compact_input["event_summary"]["ui_timezone"] == "Asia/Shanghai"

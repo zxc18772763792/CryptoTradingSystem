@@ -55,6 +55,81 @@ def _make_position(side: PositionSide, quantity: float, entry_price: float = 100
     return position
 
 
+def test_live_ai_decision_does_not_bypass_autonomous_source_without_skip_flag(monkeypatch):
+    engine = ExecutionEngine()
+    signal = _make_signal()
+    signal.metadata["source"] = "ai_autonomous_agent"
+    evaluate_mock = AsyncMock(
+        return_value={
+            "enabled": True,
+            "applied": False,
+            "mode": "shadow",
+            "provider": "codex",
+            "model": "gpt-5.4",
+            "action": "allow",
+            "allowed": True,
+            "reason": "reviewed",
+            "confidence": 0.7,
+            "latency_ms": 12,
+            "research_context": {},
+        }
+    )
+    monkeypatch.setattr(execution_engine_module.live_decision_router, "evaluate_signal", evaluate_mock)
+
+    result = asyncio.run(
+        engine._evaluate_live_ai_decision(
+            signal=signal,
+            side=execution_engine_module.OrderSide.BUY,
+            exchange="binance",
+            account_id="main",
+            leverage=2.0,
+            account_equity=10000.0,
+            order_value=500.0,
+            quote_price=100.0,
+            existing_position=None,
+            trade_policy={"allow_long": True, "allow_short": True},
+        )
+    )
+
+    assert evaluate_mock.await_count == 1
+    assert result["reason"] == "reviewed"
+    assert int(engine.get_signal_diagnostics().get("ai_review_bypassed") or 0) == 0
+
+
+def test_live_ai_decision_bypass_requires_explicit_metadata_flag(monkeypatch):
+    engine = ExecutionEngine()
+    signal = _make_signal()
+    signal.metadata.update(
+        {
+            "source": "ai_autonomous_agent",
+            "skip_live_decision_review": True,
+        }
+    )
+    evaluate_mock = AsyncMock(return_value={"action": "allow"})
+    monkeypatch.setattr(execution_engine_module.live_decision_router, "evaluate_signal", evaluate_mock)
+
+    result = asyncio.run(
+        engine._evaluate_live_ai_decision(
+            signal=signal,
+            side=execution_engine_module.OrderSide.BUY,
+            exchange="binance",
+            account_id="main",
+            leverage=2.0,
+            account_equity=10000.0,
+            order_value=500.0,
+            quote_price=100.0,
+            existing_position=None,
+            trade_policy={"allow_long": True, "allow_short": True},
+        )
+    )
+
+    assert evaluate_mock.await_count == 0
+    assert result["reason"] == "ai_live_decision_bypassed_by_metadata_flag"
+    assert result["bypass_reason"] == "metadata_skip_live_decision_review"
+    assert result["bypass_source"] == "ai_autonomous_agent"
+    assert int(engine.get_signal_diagnostics().get("ai_review_bypassed") or 0) == 1
+
+
 def test_execute_signal_respects_ai_live_decision_block(monkeypatch):
     engine = ExecutionEngine()
     engine._paper_trading = False

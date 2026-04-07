@@ -11,6 +11,10 @@ from config.settings import settings
 from core.ai.proposal_schemas import ProposalValidationSummary
 from core.research.experiment_schemas import PromotionDecision
 
+_MIN_TRADES_FOR_SHADOW = 1
+_MIN_TRADES_FOR_PAPER = 10
+_MIN_TRADES_FOR_LIVE_CANDIDATE = 30
+
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -230,6 +234,25 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
         elif decision == "paper":
             decision = "shadow"
             reasons.append("downgraded paper→shadow: OOS Sharpe below threshold")
+
+    # Promotion must respect minimum realized sample size. Thin trading samples are
+    # too noisy to treat as paper/live-ready even when return and Sharpe look good.
+    trade_count_int = int(total_trades)
+    if trade_count_int < _MIN_TRADES_FOR_SHADOW:
+        decision = "reject"
+        reasons.append(
+            f"rejected: completed trades {trade_count_int} < {_MIN_TRADES_FOR_SHADOW}"
+        )
+    elif decision == "live_candidate" and trade_count_int < _MIN_TRADES_FOR_LIVE_CANDIDATE:
+        decision = "paper" if trade_count_int >= _MIN_TRADES_FOR_PAPER else "shadow"
+        reasons.append(
+            f"downgraded live_candidate due to trade count ({trade_count_int} < {_MIN_TRADES_FOR_LIVE_CANDIDATE})"
+        )
+    elif decision == "paper" and trade_count_int < _MIN_TRADES_FOR_PAPER:
+        decision = "shadow"
+        reasons.append(
+            f"downgraded paper due to trade count ({trade_count_int} < {_MIN_TRADES_FOR_PAPER})"
+        )
 
     if decision != "reject":
         reasons.insert(0, f"recommended for {decision}")

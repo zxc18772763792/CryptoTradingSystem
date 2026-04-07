@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -38,6 +41,16 @@ class RiskMetrics:
     trading_halted: bool = False
 
 
+_AUTONOMY_PERSISTABLE_KEYS = frozenset(
+    {
+        "autonomy_daily_stop_buffer_ratio",
+        "autonomy_max_drawdown_reduce_only",
+        "autonomy_rolling_3d_drawdown_reduce_only",
+        "autonomy_rolling_7d_drawdown_reduce_only",
+    }
+)
+
+
 class RiskManager:
     """Centralized risk checks for signal/manual execution."""
 
@@ -50,6 +63,26 @@ class RiskManager:
         self.max_open_positions = max(1, int(getattr(settings, "MAX_OPEN_POSITIONS", 100) or 100))
         self.max_leverage = 3.0
         self.balance_volatility_alert_pct = 0.12
+        autonomy_thresholds = self._default_autonomy_threshold_values()
+        self.autonomy_daily_stop_buffer_ratio = float(
+            autonomy_thresholds["autonomy_daily_stop_buffer_ratio"]
+        )
+        self.autonomy_max_drawdown_reduce_only = float(
+            autonomy_thresholds["autonomy_max_drawdown_reduce_only"]
+        )
+        self.autonomy_rolling_3d_drawdown_reduce_only = float(
+            autonomy_thresholds["autonomy_rolling_3d_drawdown_reduce_only"]
+        )
+        self.autonomy_rolling_7d_drawdown_reduce_only = float(
+            autonomy_thresholds["autonomy_rolling_7d_drawdown_reduce_only"]
+        )
+        self._autonomy_overlay_path = Path(
+            os.environ.get(
+                "AI_AGENT_RISK_CONFIG_PATH",
+                str(Path(getattr(settings, "CACHE_PATH", "cache")) / "ai" / "autonomous_agent_risk_config.json"),
+            )
+        )
+        self._load_autonomy_threshold_overlay()
 
         # Runtime state
         self._daily_trades = 0
@@ -60,6 +93,7 @@ class RiskManager:
         self._last_equity: Optional[float] = None
         self._current_unrealized_pnl: float = 0.0
         self._equity_curve: List[float] = []
+        self._equity_timeline: List[Dict[str, Any]] = []
         self._trade_history: List[Dict[str, Any]] = []
         self._alerts: List[Dict[str, Any]] = []
         self._trading_halted = False
@@ -76,6 +110,100 @@ class RiskManager:
     def _day_start(ts: datetime) -> datetime:
         return ts.replace(hour=0, minute=0, second=0, microsecond=0)
 
+    def _default_autonomy_threshold_values(self) -> Dict[str, float]:
+        daily_loss_ratio = abs(float(self.max_daily_loss_ratio or 0.0))
+        return {
+            "autonomy_daily_stop_buffer_ratio": daily_loss_ratio * 0.7 if daily_loss_ratio > 0 else 0.0,
+            "autonomy_max_drawdown_reduce_only": max(daily_loss_ratio * 2.5, 0.05),
+            "autonomy_rolling_3d_drawdown_reduce_only": max(daily_loss_ratio * 3.0, 0.06),
+            "autonomy_rolling_7d_drawdown_reduce_only": max(daily_loss_ratio * 4.5, 0.09),
+        }
+
+    def _load_autonomy_threshold_overlay(self) -> None:
+        """Load persisted autonomy thresholds without restoring runtime risk state."""
+        try:
+            if not self._autonomy_overlay_path.exists():
+                return
+            raw = self._autonomy_overlay_path.read_text(encoding="utf-8")
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                return
+            safe = {key: payload[key] for key in _AUTONOMY_PERSISTABLE_KEYS if key in payload}
+            for key, value in safe.items():
+                setattr(self, key, float(value))
+            self._normalize_autonomy_thresholds()
+            logger.info(f"risk_manager: loaded {len(safe)} persisted autonomy thresholds")
+        except Exception as exc:
+            logger.warning(f"risk_manager: failed to load autonomy threshold overlay: {exc}")
+
+    def _save_autonomy_threshold_overlay(self) -> None:
+        """Atomically persist autonomy thresholds so risk governance survives restart."""
+        try:
+            self._autonomy_overlay_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                key: value
+                for key, value in self.get_autonomy_risk_config().items()
+                if key in _AUTONOMY_PERSISTABLE_KEYS
+            }
+            tmp = self._autonomy_overlay_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self._autonomy_overlay_path)
+        except Exception as exc:
+            logger.warning(f"risk_manager: failed to save autonomy threshold overlay: {exc}")
+
+    def _normalize_autonomy_thresholds(self) -> None:
+        self.autonomy_daily_stop_buffer_ratio = max(
+            0.0,
+            min(float(self.autonomy_daily_stop_buffer_ratio or 0.0), 1.0),
+        )
+        daily_loss_ratio = abs(float(self.max_daily_loss_ratio or 0.0))
+        if daily_loss_ratio > 0:
+            self.autonomy_daily_stop_buffer_ratio = min(self.autonomy_daily_stop_buffer_ratio, daily_loss_ratio)
+        self.autonomy_max_drawdown_reduce_only = max(
+            0.0,
+            min(float(self.autonomy_max_drawdown_reduce_only or 0.0), 1.0),
+        )
+        self.autonomy_rolling_3d_drawdown_reduce_only = max(
+            0.0,
+            min(float(self.autonomy_rolling_3d_drawdown_reduce_only or 0.0), 1.0),
+        )
+        self.autonomy_rolling_7d_drawdown_reduce_only = max(
+            0.0,
+            min(float(self.autonomy_rolling_7d_drawdown_reduce_only or 0.0), 1.0),
+        )
+
+    def get_autonomy_risk_config(self) -> Dict[str, float]:
+        return {
+            "autonomy_daily_stop_buffer_ratio": round(float(self.autonomy_daily_stop_buffer_ratio or 0.0), 6),
+            "autonomy_max_drawdown_reduce_only": round(float(self.autonomy_max_drawdown_reduce_only or 0.0), 6),
+            "autonomy_rolling_3d_drawdown_reduce_only": round(
+                float(self.autonomy_rolling_3d_drawdown_reduce_only or 0.0),
+                6,
+            ),
+            "autonomy_rolling_7d_drawdown_reduce_only": round(
+                float(self.autonomy_rolling_7d_drawdown_reduce_only or 0.0),
+                6,
+            ),
+        }
+
+    def _get_autonomy_discipline_thresholds(self) -> Dict[str, float]:
+        config = self.get_autonomy_risk_config()
+        return {
+            "daily_stop_buffer_ratio": round(-abs(float(config.get("autonomy_daily_stop_buffer_ratio") or 0.0)), 6),
+            "max_drawdown_reduce_only": round(
+                float(config.get("autonomy_max_drawdown_reduce_only") or 0.0),
+                6,
+            ),
+            "rolling_3d_drawdown_reduce_only": round(
+                float(config.get("autonomy_rolling_3d_drawdown_reduce_only") or 0.0),
+                6,
+            ),
+            "rolling_7d_drawdown_reduce_only": round(
+                float(config.get("autonomy_rolling_7d_drawdown_reduce_only") or 0.0),
+                6,
+            ),
+        }
+
     def _snapshot_runtime_state(self) -> Dict[str, Any]:
         return {
             "daily_trades": int(self._daily_trades),
@@ -86,6 +214,7 @@ class RiskManager:
             "last_equity": self._last_equity,
             "current_unrealized_pnl": float(self._current_unrealized_pnl or 0.0),
             "equity_curve": list(self._equity_curve),
+            "equity_timeline": copy.deepcopy(self._equity_timeline),
             "trade_history": copy.deepcopy(self._trade_history),
             "alerts": copy.deepcopy(self._alerts),
             "trading_halted": bool(self._trading_halted),
@@ -104,6 +233,7 @@ class RiskManager:
         self._last_equity = s.get("last_equity")
         self._current_unrealized_pnl = float(s.get("current_unrealized_pnl", 0.0) or 0.0)
         self._equity_curve = list(s.get("equity_curve") or [])
+        self._equity_timeline = list(s.get("equity_timeline") or [])
         self._trade_history = list(s.get("trade_history") or [])
         self._alerts = list(s.get("alerts") or [])
         self._trading_halted = bool(s.get("trading_halted", False))
@@ -227,6 +357,13 @@ class RiskManager:
         self._current_equity = equity
         self._equity_curve.append(equity)
         self._equity_curve = self._equity_curve[-5000:]
+        self._equity_timeline.append(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "equity": float(equity),
+            }
+        )
+        self._equity_timeline = self._equity_timeline[-5000:]
 
         self._evaluate_daily_stop()
 
@@ -337,6 +474,7 @@ class RiskManager:
         self._trade_history.clear()
         self._alerts.clear()
         self._equity_curve.clear()
+        self._equity_timeline.clear()
         self._daily_trades = 0
         self._daily_realized_pnl = 0.0
         self._daily_start = self._day_start(datetime.now(timezone.utc))
@@ -490,6 +628,87 @@ class RiskManager:
                 max_drawdown = dd
         return max_drawdown
 
+    @staticmethod
+    def _parse_equity_point_timestamp(raw_value: Any) -> Optional[datetime]:
+        text = str(raw_value or "").strip()
+        if not text:
+            return None
+        try:
+            ts = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+
+    def _equity_window_points(self, *, hours: int) -> List[Dict[str, Any]]:
+        if not self._equity_timeline:
+            return []
+        window_hours = max(1, int(hours or 1))
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+        points: List[Dict[str, Any]] = []
+        for row in self._equity_timeline:
+            if not isinstance(row, dict):
+                continue
+            ts = self._parse_equity_point_timestamp(row.get("timestamp"))
+            if ts is None or ts < cutoff:
+                continue
+            try:
+                equity = float(row.get("equity") or 0.0)
+            except Exception:
+                continue
+            if equity <= 0:
+                continue
+            points.append(
+                {
+                    "timestamp": ts.isoformat(),
+                    "equity": equity,
+                }
+            )
+        return points
+
+    def _drawdown_snapshot_for_points(self, points: List[Dict[str, Any]], *, hours: int) -> Dict[str, Any]:
+        equities = [float(row.get("equity") or 0.0) for row in points if float(row.get("equity") or 0.0) > 0]
+        if not equities:
+            return {
+                "hours": int(hours),
+                "drawdown": 0.0,
+                "peak_equity": None,
+                "trough_equity": None,
+                "point_count": 0,
+                "window_start": None,
+                "window_end": None,
+            }
+        peak = equities[0]
+        trough = equities[0]
+        max_drawdown = 0.0
+        peak_at = peak
+        trough_at = trough
+        for equity in equities:
+            if equity > peak:
+                peak = equity
+                trough = equity
+            if equity < trough:
+                trough = equity
+            drawdown = (peak - equity) / peak if peak > 0 else 0.0
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+                peak_at = peak
+                trough_at = equity
+        return {
+            "hours": int(hours),
+            "drawdown": round(float(max_drawdown), 6),
+            "peak_equity": round(float(peak_at), 4),
+            "trough_equity": round(float(trough_at), 4),
+            "point_count": len(equities),
+            "window_start": str(points[0].get("timestamp") or "") if points else None,
+            "window_end": str(points[-1].get("timestamp") or "") if points else None,
+        }
+
+    def get_rolling_drawdown_snapshot(self, *, hours: int) -> Dict[str, Any]:
+        points = self._equity_window_points(hours=hours)
+        return self._drawdown_snapshot_for_points(points, hours=hours)
+
     def get_risk_metrics(self) -> RiskMetrics:
         self._check_new_day()
 
@@ -524,6 +743,67 @@ class RiskManager:
             trading_halted=self._trading_halted,
         )
 
+    def _build_autonomy_discipline_contract(
+        self,
+        *,
+        daily_stop_basis_ratio: float,
+        max_drawdown: float,
+        rolling_3d_drawdown: float,
+        rolling_7d_drawdown: float,
+    ) -> Dict[str, Any]:
+        reasons: List[str] = []
+        degrade_mode = "normal"
+        fresh_entry_allowed = True
+        reduce_only = False
+
+        thresholds = self._get_autonomy_discipline_thresholds()
+        warning_ratio = float(thresholds.get("daily_stop_buffer_ratio") or 0.0)
+        drawdown_reduce_only_threshold = float(thresholds.get("max_drawdown_reduce_only") or 0.0)
+        rolling_3d_reduce_only_threshold = float(thresholds.get("rolling_3d_drawdown_reduce_only") or 0.0)
+        rolling_7d_reduce_only_threshold = float(thresholds.get("rolling_7d_drawdown_reduce_only") or 0.0)
+        if self._trading_halted:
+            fresh_entry_allowed = False
+            reduce_only = True
+            degrade_mode = "halted"
+            reasons.append(str(self._halt_reason or "risk_trading_halted"))
+        else:
+            if warning_ratio < 0 and float(daily_stop_basis_ratio) <= warning_ratio:
+                fresh_entry_allowed = False
+                reduce_only = True
+                degrade_mode = "reduce_only"
+                reasons.append(
+                    f"daily_stop_buffer_reached({float(daily_stop_basis_ratio):.6f}<={warning_ratio:.6f})"
+                )
+            if drawdown_reduce_only_threshold > 0 and float(max_drawdown) >= drawdown_reduce_only_threshold:
+                fresh_entry_allowed = False
+                reduce_only = True
+                degrade_mode = "reduce_only"
+                reasons.append(
+                    f"max_drawdown_limit_exceeded({float(max_drawdown):.6f}>={drawdown_reduce_only_threshold:.6f})"
+                )
+            if rolling_3d_reduce_only_threshold > 0 and float(rolling_3d_drawdown) >= rolling_3d_reduce_only_threshold:
+                fresh_entry_allowed = False
+                reduce_only = True
+                degrade_mode = "reduce_only"
+                reasons.append(
+                    f"rolling_3d_drawdown_limit_exceeded({float(rolling_3d_drawdown):.6f}>={rolling_3d_reduce_only_threshold:.6f})"
+                )
+            if rolling_7d_reduce_only_threshold > 0 and float(rolling_7d_drawdown) >= rolling_7d_reduce_only_threshold:
+                fresh_entry_allowed = False
+                reduce_only = True
+                degrade_mode = "reduce_only"
+                reasons.append(
+                    f"rolling_7d_drawdown_limit_exceeded({float(rolling_7d_drawdown):.6f}>={rolling_7d_reduce_only_threshold:.6f})"
+                )
+
+        return {
+            "fresh_entry_allowed": bool(fresh_entry_allowed),
+            "reduce_only": bool(reduce_only),
+            "degrade_mode": str(degrade_mode),
+            "reasons": [item for item in reasons if str(item or "").strip()],
+            "thresholds": thresholds,
+        }
+
     def get_recent_alerts(self, limit: int = 20) -> List[Dict[str, Any]]:
         limit = max(1, min(limit, 200))
         return list(self._alerts[-limit:])
@@ -534,6 +814,7 @@ class RiskManager:
 
     def get_risk_report(self) -> Dict[str, Any]:
         metrics = self.get_risk_metrics()
+        autonomy_thresholds = self.get_autonomy_risk_config()
         position_manager = _position_manager()
         current_unrealized_pnl = float(position_manager.get_total_pnl() or 0.0)
         if abs(float(self._current_unrealized_pnl or 0.0)) > 0:
@@ -551,11 +832,25 @@ class RiskManager:
         daily_stop_basis_ratio = (daily_stop_basis / day_start_equity) if day_start_equity > 0 else 0.0
         # `daily_total_pnl` is equity-based, so the residual may include funding/fees/transfers.
         daily_unrealized_component = daily_total_pnl - daily_realized_pnl
+        rolling_3d = self.get_rolling_drawdown_snapshot(hours=24 * 3)
+        rolling_7d = self.get_rolling_drawdown_snapshot(hours=24 * 7)
+        discipline = self._build_autonomy_discipline_contract(
+            daily_stop_basis_ratio=daily_stop_basis_ratio,
+            max_drawdown=float(metrics.max_drawdown or 0.0),
+            rolling_3d_drawdown=float(rolling_3d.get("drawdown") or 0.0),
+            rolling_7d_drawdown=float(rolling_7d.get("drawdown") or 0.0),
+        )
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "risk_level": metrics.risk_level.value,
             "trading_halted": metrics.trading_halted,
             "halt_reason": self._halt_reason,
+            "discipline": discipline,
+            "drawdown": {
+                "max_drawdown": round(float(metrics.max_drawdown), 6),
+                "rolling_3d": rolling_3d,
+                "rolling_7d": rolling_7d,
+            },
             "daily_stop_guard_seconds": max(
                 0,
                 int((self._daily_stop_guard_until - datetime.now(timezone.utc)).total_seconds()),
@@ -575,6 +870,8 @@ class RiskManager:
                 "daily_stop_basis_ratio": round(daily_stop_basis_ratio, 6),
                 "daily_pnl_ratio": round(daily_stop_basis_ratio, 6),
                 "max_drawdown": round(float(metrics.max_drawdown), 6),
+                "rolling_3d_drawdown": round(float(rolling_3d.get("drawdown") or 0.0), 6),
+                "rolling_7d_drawdown": round(float(rolling_7d.get("drawdown") or 0.0), 6),
                 "pnl_scope_note": "daily_total_pnl_usd为今日权益变化；daily_stop_basis_usd=已实现盈亏+当前浮亏，仅该值用于熔断",
             },
             "limits": {
@@ -585,6 +882,15 @@ class RiskManager:
                 "max_open_positions": self.max_open_positions,
                 "max_leverage": self.max_leverage,
                 "balance_volatility_alert_pct": self.balance_volatility_alert_pct,
+                "autonomy_daily_stop_buffer_ratio": autonomy_thresholds["autonomy_daily_stop_buffer_ratio"],
+                "autonomy_max_drawdown_reduce_only": autonomy_thresholds["autonomy_max_drawdown_reduce_only"],
+                "autonomy_rolling_3d_drawdown_reduce_only": autonomy_thresholds[
+                    "autonomy_rolling_3d_drawdown_reduce_only"
+                ],
+                "autonomy_rolling_7d_drawdown_reduce_only": autonomy_thresholds[
+                    "autonomy_rolling_7d_drawdown_reduce_only"
+                ],
+                "autonomy_thresholds": autonomy_thresholds,
             },
             "utilization": {
                 "daily_trade_utilization": (
@@ -606,9 +912,23 @@ class RiskManager:
             "max_open_positions": "max_open_positions",
             "max_leverage": "max_leverage",
             "balance_volatility_alert_pct": "balance_volatility_alert_pct",
+            "autonomy_daily_stop_buffer_ratio": "autonomy_daily_stop_buffer_ratio",
+            "autonomy_max_drawdown_reduce_only": "autonomy_max_drawdown_reduce_only",
+            "autonomy_rolling_3d_drawdown_reduce_only": "autonomy_rolling_3d_drawdown_reduce_only",
+            "autonomy_rolling_7d_drawdown_reduce_only": "autonomy_rolling_7d_drawdown_reduce_only",
         }
 
         for key, attr in mapping.items():
+            if key in params and params[key] is not None:
+                setattr(self, attr, float(params[key]))
+
+        autonomy_aliases = {
+            "daily_stop_buffer_ratio": "autonomy_daily_stop_buffer_ratio",
+            "max_drawdown_reduce_only": "autonomy_max_drawdown_reduce_only",
+            "rolling_3d_drawdown_reduce_only": "autonomy_rolling_3d_drawdown_reduce_only",
+            "rolling_7d_drawdown_reduce_only": "autonomy_rolling_7d_drawdown_reduce_only",
+        }
+        for key, attr in autonomy_aliases.items():
             if key in params and params[key] is not None:
                 setattr(self, attr, float(params[key]))
 
@@ -628,6 +948,8 @@ class RiskManager:
         self.max_open_positions = max(1, int(self.max_open_positions))
         self.max_leverage = max(1.0, float(self.max_leverage))
         self.balance_volatility_alert_pct = max(0.01, min(float(self.balance_volatility_alert_pct), 1.0))
+        self._normalize_autonomy_thresholds()
+        self._save_autonomy_threshold_overlay()
 
         logger.info(f"Risk parameters updated: {params}")
 

@@ -10,10 +10,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
+from loguru import logger
 
 from config.settings import settings
 from config.strategy_registry import get_strategy_registry_entry
 from core.ai.proposal_schemas import ResearchProposal
+from core.ai.runtime_eligibility import refresh_runtime_eligibility_snapshot
 from core.backtest.common_pnl import build_common_pnl_summary
 from core.ai.research_planner import PlannerGenerateRequest, generate_research_proposal
 from core.deployment.promotion_engine import (
@@ -97,6 +99,14 @@ def _persist_research_jobs(app: FastAPI) -> None:
     except Exception:
         # best-effort: do not break the main research flow
         pass
+
+
+def _refresh_runtime_eligibility_snapshot_safe(*, reason: str) -> Optional[Dict[str, Any]]:
+    try:
+        return refresh_runtime_eligibility_snapshot()
+    except Exception as exc:
+        logger.warning(f"runtime eligibility snapshot refresh failed ({reason}): {exc}")
+        return None
 
 
 def _compact_thesis(text: str, max_len: int = 24) -> str:
@@ -572,6 +582,9 @@ def delete_proposal(
         app.state.research_job_tasks.pop(job_id, None)
     if removed_jobs > 0:
         _persist_research_jobs(app)
+
+    if removed_candidates > 0 or removed_proposal > 0:
+        _refresh_runtime_eligibility_snapshot_safe(reason="delete_proposal")
 
     return {
         "proposal_id": str(proposal_id),
@@ -1095,6 +1108,7 @@ async def _finalize_research_run(
     if candidate is None:
         transition_proposal(proposal, to_state="rejected", lifecycle_registry=app.state.ai_lifecycle_registry, actor=actor, reason="no valid candidate produced")
         save_proposal(app, proposal)
+        _refresh_runtime_eligibility_snapshot_safe(reason="finalize_research_no_candidate")
         return {
             "proposal": proposal,
             "experiment": experiment,
@@ -1186,6 +1200,7 @@ async def _finalize_research_run(
     latest_path = (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "latest.json").resolve()
     latest_path.parent.mkdir(parents=True, exist_ok=True)
     latest_path.write_text(json.dumps(latest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _refresh_runtime_eligibility_snapshot_safe(reason="finalize_research_saved")
 
     return {
         "proposal": proposal,
@@ -1576,4 +1591,5 @@ async def promote_existing_candidate(
     result = await promote_candidate(app, proposal=proposal, candidate=candidate, promotion=promotion, actor=actor)
     app.state.ai_candidate_registry.save(candidate)
     save_proposal(app, proposal)
+    _refresh_runtime_eligibility_snapshot_safe(reason="promote_existing_candidate_saved")
     return result
