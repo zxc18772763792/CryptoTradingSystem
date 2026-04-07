@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException
@@ -36,6 +38,12 @@ from web.api.trading import (
 )
 
 router = APIRouter()
+_UI_TIMEZONE = str(os.environ.get("CTS_UI_TIMEZONE") or os.environ.get("UI_TIMEZONE") or "Asia/Shanghai").strip() or "Asia/Shanghai"
+try:
+    _UI_ZONEINFO = ZoneInfo(_UI_TIMEZONE)
+except Exception:
+    _UI_ZONEINFO = timezone.utc
+_TIMEZONE_BASIS = f"UTC storage, {_UI_TIMEZONE} display"
 
 _VALID_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
 _DEFAULT_UNIVERSE = [
@@ -125,11 +133,34 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _coerce_utc_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _utc_iso(value: Any) -> Optional[str]:
-    if not isinstance(value, datetime):
+    dt = _coerce_utc_datetime(value)
+    if dt is None:
         return None
-    dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _local_iso(value: Any) -> Optional[str]:
+    dt = _coerce_utc_datetime(value)
+    if dt is None:
+        return None
+    return dt.astimezone(_UI_ZONEINFO).isoformat()
 
 
 def _symbol_to_news_key(symbol: str) -> str:
@@ -343,6 +374,7 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
     if feed_count <= 0 and raw_rows:
         feed_count = max(1, min(len(raw_rows), len(active_providers) or 0))
 
+    generated_at = _now_iso()
     return {
         "symbol": symbol_key,
         "hours": int(hours),
@@ -355,7 +387,13 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
         "by_type": dict(sorted(by_type.items(), key=lambda item: item[1], reverse=True)[:8]),
         "source_states": source_states,
         "llm_queue": llm_queue,
-        "timestamp": _now_iso(),
+        "timestamp": generated_at,
+        "generated_at_utc": generated_at,
+        "generated_at_local": _local_iso(generated_at),
+        "window_since_utc": _utc_iso(since),
+        "window_since_local": _local_iso(since),
+        "ui_timezone": _UI_TIMEZONE,
+        "timezone_basis": _TIMEZONE_BASIS,
     }
 
 

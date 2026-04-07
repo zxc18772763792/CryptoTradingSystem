@@ -6,10 +6,13 @@ import hashlib
 import math
 import os
 import re
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from loguru import logger
 from sqlalchemy import and_, case, event, func, insert, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -36,14 +39,23 @@ try:
     )
 except Exception:
     _NEWS_SQLITE_BUSY_TIMEOUT_SEC = 8.0
-if str(settings.DATABASE_URL).startswith("sqlite"):
+_NEWS_DATABASE_URL = str(settings.NEWS_DATABASE_URL)
+_LEGACY_DATABASE_URL = str(settings.DATABASE_URL)
+_NEWS_BOOTSTRAP_TABLES = (
+    "news_raw",
+    "news_events",
+    "news_source_state",
+    "news_llm_tasks",
+)
+
+if _NEWS_DATABASE_URL.startswith("sqlite"):
     _news_engine_kwargs["connect_args"] = {"timeout": _NEWS_SQLITE_BUSY_TIMEOUT_SEC}
     _news_engine_kwargs["poolclass"] = NullPool
 
-news_engine = create_async_engine(settings.DATABASE_URL, **_news_engine_kwargs)
+news_engine = create_async_engine(_NEWS_DATABASE_URL, **_news_engine_kwargs)
 NewsSessionLocal = async_sessionmaker(news_engine, class_=AsyncSession, expire_on_commit=False)
 
-if str(settings.DATABASE_URL).startswith("sqlite"):
+if _NEWS_DATABASE_URL.startswith("sqlite"):
     @event.listens_for(news_engine.sync_engine, "connect")
     def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
         cursor = dbapi_connection.cursor()
@@ -337,11 +349,139 @@ def _apply_ingest_meta(payload: Dict[str, Any], ingest_meta: Optional[Dict[str, 
     return out
 
 
+def _sqlite_url_to_path(value: Any) -> Optional[Path]:
+    text = str(value or "").strip()
+    for prefix in ("sqlite+aiosqlite:///", "sqlite:///"):
+        if not text.startswith(prefix):
+            continue
+        raw_path = text[len(prefix):].split("?", 1)[0].strip()
+        if not raw_path:
+            return None
+        return Path(raw_path).resolve()
+    return None
+
+
+def _sqlite_table_columns(conn: sqlite3.Connection, schema_name: str, table_name: str) -> List[str]:
+    rows = conn.execute(f"PRAGMA {schema_name}.table_info('{table_name}')").fetchall()
+    return [str(row[1]) for row in rows]
+
+
+def _sqlite_table_row_count(conn: sqlite3.Connection, schema_name: str, table_name: str) -> int:
+    columns = _sqlite_table_columns(conn, schema_name, table_name)
+    if not columns:
+        return 0
+    row = conn.execute(f'SELECT COUNT(*) FROM {schema_name}."{table_name}"').fetchone()
+    return int((row or [0])[0] or 0)
+
+
+def _copy_sqlite_table_rows(conn: sqlite3.Connection, table_name: str) -> int:
+    target_columns = _sqlite_table_columns(conn, "main", table_name)
+    source_columns = set(_sqlite_table_columns(conn, "legacy", table_name))
+    common_columns = [column for column in target_columns if column in source_columns]
+    if not common_columns:
+        return 0
+    quoted_columns = ", ".join(f'"{column}"' for column in common_columns)
+    before = int(conn.total_changes)
+    conn.execute(
+        f'INSERT OR IGNORE INTO main."{table_name}" ({quoted_columns}) '
+        f'SELECT {quoted_columns} FROM legacy."{table_name}"'
+    )
+    return max(0, int(conn.total_changes) - before)
+
+
+def _bootstrap_sqlite_news_history(*, target_path: Path, legacy_path: Path) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "target_path": str(target_path),
+        "legacy_path": str(legacy_path),
+        "copied_rows": {},
+        "copied_total": 0,
+        "source_total": 0,
+        "target_total_before": 0,
+        "target_total_after": 0,
+        "skipped": None,
+    }
+    target_resolved = Path(target_path).resolve()
+    legacy_resolved = Path(legacy_path).resolve()
+    if target_resolved == legacy_resolved:
+        result["skipped"] = "shared_database"
+        return result
+    if not legacy_resolved.exists():
+        result["skipped"] = "legacy_missing"
+        return result
+
+    timeout_sec = max(3.0, float(_NEWS_SQLITE_BUSY_TIMEOUT_SEC))
+    escaped_legacy = legacy_resolved.as_posix().replace("'", "''")
+    with sqlite3.connect(str(target_resolved), timeout=timeout_sec) as conn:
+        conn.execute(f"PRAGMA busy_timeout={int(timeout_sec * 1000)}")
+        conn.execute("PRAGMA journal_mode=WAL")
+        result["target_total_before"] = sum(_sqlite_table_row_count(conn, "main", table_name) for table_name in _NEWS_BOOTSTRAP_TABLES)
+        if result["target_total_before"] > 0:
+            result["skipped"] = "target_not_empty"
+            result["target_total_after"] = result["target_total_before"]
+            return result
+
+        conn.execute(f"ATTACH DATABASE '{escaped_legacy}' AS legacy")
+        try:
+            result["source_total"] = sum(
+                _sqlite_table_row_count(conn, "legacy", table_name) for table_name in _NEWS_BOOTSTRAP_TABLES
+            )
+            if result["source_total"] <= 0:
+                result["skipped"] = "legacy_empty"
+                return result
+
+            try:
+                conn.execute("BEGIN")
+                copied_rows: Dict[str, int] = {}
+                for table_name in _NEWS_BOOTSTRAP_TABLES:
+                    copied_rows[table_name] = _copy_sqlite_table_rows(conn, table_name)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+            result["copied_rows"] = copied_rows
+            result["copied_total"] = int(sum(copied_rows.values()))
+            result["target_total_after"] = sum(
+                _sqlite_table_row_count(conn, "main", table_name) for table_name in _NEWS_BOOTSTRAP_TABLES
+            )
+            return result
+        finally:
+            conn.execute("DETACH DATABASE legacy")
+
+
+def _bootstrap_news_sqlite_from_legacy() -> Dict[str, Any]:
+    target_path = _sqlite_url_to_path(_NEWS_DATABASE_URL)
+    legacy_path = _sqlite_url_to_path(_LEGACY_DATABASE_URL)
+    if target_path is None or legacy_path is None:
+        return {"skipped": "non_sqlite"}
+    result = _bootstrap_sqlite_news_history(target_path=target_path, legacy_path=legacy_path)
+    skipped = str(result.get("skipped") or "").strip().lower()
+    copied_total = int(result.get("copied_total") or 0)
+    if copied_total > 0:
+        logger.info(
+            "bootstrapped news sqlite history copied_total={} source_total={} target_path={} legacy_path={}",
+            copied_total,
+            int(result.get("source_total") or 0),
+            result.get("target_path"),
+            result.get("legacy_path"),
+        )
+    elif skipped not in {"", "target_not_empty", "legacy_empty", "shared_database", "legacy_missing", "non_sqlite"}:
+        logger.info(
+            "news sqlite bootstrap skipped={} target_path={} legacy_path={}",
+            skipped,
+            result.get("target_path"),
+            result.get("legacy_path"),
+        )
+    return result
+
+
 async def init_news_db() -> None:
     async with news_engine.begin() as conn:
         await conn.run_sync(NewsBase.metadata.create_all)
         if news_engine.dialect.name == "sqlite":
             await _ensure_sqlite_news_schema(conn)
+    if news_engine.dialect.name == "sqlite":
+        _bootstrap_news_sqlite_from_legacy()
 
 
 async def _ensure_sqlite_news_schema(conn) -> None:

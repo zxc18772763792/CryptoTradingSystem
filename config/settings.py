@@ -14,6 +14,10 @@ def _default_database_url() -> str:
     return f"{_SQLITE_ASYNC_PREFIX}{(_PROJECT_ROOT / 'data' / 'crypto_trading.db').resolve().as_posix()}"
 
 
+def _default_news_database_url() -> str:
+    return f"{_SQLITE_ASYNC_PREFIX}{(_PROJECT_ROOT / 'data' / 'news.db').resolve().as_posix()}"
+
+
 def _normalize_sqlite_database_url(value: str) -> str:
     text = str(value or "").strip()
     if not text.startswith(_SQLITE_ASYNC_PREFIX):
@@ -70,6 +74,7 @@ class Settings(BaseSettings):
 
     # Storage
     DATABASE_URL: str = Field(default_factory=_default_database_url)
+    NEWS_DATABASE_URL: str = Field(default_factory=_default_news_database_url)
     REDIS_URL: str = "redis://localhost:6379/0"
 
     # Network proxy
@@ -258,7 +263,7 @@ class Settings(BaseSettings):
             raise ValueError("AI_AUTONOMOUS_AGENT_PROVIDER must be one of: glm/codex(openai)/claude")
         return text
 
-    @field_validator("DATABASE_URL")
+    @field_validator("DATABASE_URL", "NEWS_DATABASE_URL")
     @classmethod
     def normalize_database_url(cls, v: str) -> str:
         return _normalize_sqlite_database_url(v)

@@ -123,6 +123,8 @@ _MARKET_DATA_LIVE_FETCH_SCAN_TIMEOUT_SEC = 4.0
 _DECISION_LIVE_MARKET_TIMEOUT_SEC = 3.0
 _MULTI_SCALE_TRIGGER_TIMEFRAME = "5m"
 _MULTI_SCALE_REGIME_TIMEFRAME = "1h"
+_EVENT_SUMMARY_UI_TIMEZONE = str(os.environ.get("CTS_UI_TIMEZONE") or os.environ.get("UI_TIMEZONE") or "Asia/Shanghai").strip() or "Asia/Shanghai"
+_EVENT_SUMMARY_TIMEZONE_BASIS = f"UTC storage, {_EVENT_SUMMARY_UI_TIMEZONE} display"
 
 
 def _utc_now() -> datetime:
@@ -350,6 +352,40 @@ def _bar_closed_age_sec(value: Any, timeframe_sec: int) -> Optional[float]:
     if closed_at is None:
         return None
     return _age_sec_from_iso(closed_at)
+
+
+def _default_event_summary_payload(*, symbol: str, timeframe_sec: int, available: bool = True, skipped: Optional[str] = None) -> Dict[str, Any]:
+    since_minutes = max(240, int(round(max(1.0, float(timeframe_sec)) * 4.0 / 60.0)))
+    generated_at = _utc_now()
+    payload: Dict[str, Any] = {
+        "available": bool(available),
+        "symbol": str(symbol or "").strip().upper(),
+        "since_minutes": int(since_minutes),
+        "events_count": 0,
+        "source_diversity": 0,
+        "sentiment_counts": {
+            "positive": 0,
+            "neutral": 0,
+            "negative": 0,
+        },
+        "dominant_sentiment": "neutral",
+        "dominant_sentiment_ratio": 0.0,
+        "net_sentiment": 0.0,
+        "news_alpha_proxy": 0.0,
+        "weighted_half_life_min": 0.0,
+        "event_concentration": 0.0,
+        "top_event_types": [],
+        "top_sources": [],
+        "top_events": [],
+        "generated_at_utc": generated_at.isoformat(),
+        "window_since_utc": (generated_at - timedelta(minutes=since_minutes)).isoformat(),
+        "latest_event_at_utc": None,
+        "ui_timezone": _EVENT_SUMMARY_UI_TIMEZONE,
+        "timezone_basis": _EVENT_SUMMARY_TIMEZONE_BASIS,
+    }
+    if skipped:
+        payload["skipped"] = str(skipped)
+    return payload
 
 
 def _missing_market_bar_count(index: Any, timeframe_sec: int) -> int:
@@ -2463,29 +2499,9 @@ class AutonomousTradingAgent:
         return payload
 
     async def _build_event_summary(self, *, symbol: str, timeframe_sec: int) -> Dict[str, Any]:
-        since_minutes = max(240, int(round(max(1.0, float(timeframe_sec)) * 4.0 / 60.0)))
         event_symbol = _canonical_symbol_key(symbol).replace("/", "")
-        payload: Dict[str, Any] = {
-            "available": True,
-            "symbol": event_symbol,
-            "since_minutes": int(since_minutes),
-            "events_count": 0,
-            "source_diversity": 0,
-            "sentiment_counts": {
-                "positive": 0,
-                "neutral": 0,
-                "negative": 0,
-            },
-            "dominant_sentiment": "neutral",
-            "dominant_sentiment_ratio": 0.0,
-            "net_sentiment": 0.0,
-            "news_alpha_proxy": 0.0,
-            "weighted_half_life_min": 0.0,
-            "event_concentration": 0.0,
-            "top_event_types": [],
-            "top_sources": [],
-            "top_events": [],
-        }
+        payload = _default_event_summary_payload(symbol=event_symbol, timeframe_sec=timeframe_sec, available=True)
+        since_minutes = int(payload.get("since_minutes") or 0)
         if not event_symbol:
             return payload
 
@@ -2510,12 +2526,15 @@ class AutonomousTradingAgent:
         impact_weight_total = 0.0
         impact_sentiment_total = 0.0
         ranked_events: List[Tuple[float, Dict[str, Any]]] = []
+        latest_event_at: Optional[datetime] = None
 
         for event in events:
             event_dict = dict(event or {})
             evidence = dict(event_dict.get("evidence") or {})
             ts = pd.to_datetime(event_dict.get("ts"), utc=True, errors="coerce")
             event_ts = ts.to_pydatetime() if pd.notna(ts) else now
+            if latest_event_at is None or event_ts > latest_event_at:
+                latest_event_at = event_ts
             age_min = max(0.0, (now - event_ts).total_seconds() / 60.0)
             impact_score = max(0.0, float(event_dict.get("impact_score") or 0.0))
             half_life_min = max(1.0, float(event_dict.get("half_life_min") or 180.0))
@@ -2582,6 +2601,7 @@ class AutonomousTradingAgent:
                 "event_concentration": float(
                     sum(score for score, _ in ranked_events[:3]) / max(total_abs_rank, 1e-9)
                 ),
+                "latest_event_at_utc": latest_event_at.isoformat() if latest_event_at is not None else None,
                 "top_event_types": [
                     {"event_type": key, "count": int(count)}
                     for key, count in sorted(type_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
@@ -3194,28 +3214,12 @@ class AutonomousTradingAgent:
                 account_risk_base=account_risk_base,
             )
         if bool(cfg.get("_skip_event_summary")):
-            event_summary = {
-                "available": False,
-                "symbol": _canonical_symbol_key(symbol).replace("/", ""),
-                "since_minutes": max(240, int(round(max(1.0, float(timeframe_sec)) * 4.0 / 60.0))),
-                "events_count": 0,
-                "source_diversity": 0,
-                "sentiment_counts": {
-                    "positive": 0,
-                    "neutral": 0,
-                    "negative": 0,
-                },
-                "dominant_sentiment": "neutral",
-                "dominant_sentiment_ratio": 0.0,
-                "net_sentiment": 0.0,
-                "news_alpha_proxy": 0.0,
-                "weighted_half_life_min": 0.0,
-                "event_concentration": 0.0,
-                "top_event_types": [],
-                "top_sources": [],
-                "top_events": [],
-                "skipped": "light_scan",
-            }
+            event_summary = _default_event_summary_payload(
+                symbol=_canonical_symbol_key(symbol).replace("/", ""),
+                timeframe_sec=timeframe_sec,
+                available=False,
+                skipped="light_scan",
+            )
         else:
             event_summary = await self._build_event_summary(symbol=symbol, timeframe_sec=timeframe_sec)
         account_risk = self._build_account_risk_payload(
@@ -3520,6 +3524,11 @@ class AutonomousTradingAgent:
                     "default_stop_loss_pct": _float_or_default(account_risk.get("default_stop_loss_pct"), 0.0),
                     "default_take_profit_pct": _float_or_default(account_risk.get("default_take_profit_pct"), 0.0),
                     "account_equity": _float_or_default(account_risk.get("account_equity"), 0.0),
+                    "generated_at_utc": event_summary.get("generated_at_utc"),
+                    "window_since_utc": event_summary.get("window_since_utc"),
+                    "latest_event_at_utc": event_summary.get("latest_event_at_utc"),
+                    "ui_timezone": event_summary.get("ui_timezone"),
+                    "timezone_basis": event_summary.get("timezone_basis"),
                     "position_cap_notional": _float_or_default(account_risk.get("position_cap_notional"), 0.0),
                     "max_total_exposure_ratio": _float_or_default(account_risk.get("max_total_exposure_ratio"), 0.0),
                     "total_strategy_open_notional": _float_or_default(account_risk.get("total_strategy_open_notional"), 0.0),

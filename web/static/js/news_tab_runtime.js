@@ -16,6 +16,7 @@
         health: null,
         worker: null,
         pulling: false,
+        startingEngine: false,
         refreshPromise: null,
         summarizePromise: null,
         llmKickoffPromise: null,
@@ -417,13 +418,13 @@
             ["news-llm-pending-count", pending],
             ["news-llm-running-count", running],
             ["news-llm-done-count", done],
-            ["news-llm-retry-count", retry + failed],
+            ["news-llm-retry-count", failed],
         ];
         mapping.forEach(([id, value]) => {
             if (el(id)) el(id).textContent = String(value);
         });
         const retryMetricLabel = el("news-llm-retry-count")?.parentElement?.querySelector?.(".label");
-        if (retryMetricLabel) retryMetricLabel.textContent = "异常待修补";
+        if (retryMetricLabel) retryMetricLabel.textContent = "失败待修";
         if (!el("news-llm-queue-note")) return;
         const lastPull = state.worker?.last_pull || {};
         const lastLlm = state.worker?.last_llm_batch || state.worker?.manual_llm_job?.latest_result || {};
@@ -938,6 +939,38 @@
         }
     }
 
+    async function startNewsEngine() {
+        if (state.startingEngine) return;
+        state.startingEngine = true;
+        try {
+            const result = await request("/engine/start", {
+                method: "POST",
+                timeoutMs: 20000,
+            });
+            if (el("news-action-output")) el("news-action-output").textContent = JSON.stringify(result, null, 2);
+            const message = String(result?.message || "").trim();
+            const started = Array.isArray(result?.started) ? result.started : [];
+            const alreadyRunning = Array.isArray(result?.already_running) ? result.already_running : [];
+            const errors = Array.isArray(result?.errors) ? result.errors : [];
+            notify(
+                message || (
+                    started.length
+                        ? `新闻引擎已启动: ${started.map((item) => item?.label || item?.role || "worker").join(" / ")}`
+                        : alreadyRunning.length
+                            ? `新闻引擎已在运行: ${alreadyRunning.map((item) => item?.label || item?.role || "worker").join(" / ")}`
+                            : "新闻引擎启动请求已发送"
+                ),
+                errors.length > 0 && started.length === 0 && alreadyRunning.length === 0,
+            );
+            await refreshAll(true);
+        } catch (err) {
+            if (el("news-action-output")) el("news-action-output").textContent = `新闻引擎启动失败: ${err.message}`;
+            notify(`新闻引擎启动失败: ${err.message}`, true);
+        } finally {
+            state.startingEngine = false;
+        }
+    }
+
     async function backfillArchiveNow() {
         if (state.pulling) return;
         state.pulling = true;
@@ -1071,6 +1104,7 @@
 
     function bind() {
         el("news-refresh-btn")?.addEventListener("click", () => refreshAll(true));
+        el("news-start-engine-btn")?.addEventListener("click", startNewsEngine);
         el("news-pull-btn")?.addEventListener("click", pullNow);
         el("news-archive-backfill-btn")?.addEventListener("click", backfillArchiveNow);
         el("news-backfill-btn")?.addEventListener("click", backfillNow);

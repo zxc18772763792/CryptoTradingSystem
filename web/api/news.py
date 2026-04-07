@@ -65,6 +65,7 @@ _MANUAL_PULL_SEQ = 0
 _MANUAL_LLM_SEQ = 0
 _FAILED_REQUEUE_LOCK = asyncio.Lock()
 _FAILED_REQUEUE_LAST_AT: Optional[datetime] = None
+_NEWS_ENGINE_START_LOCK = asyncio.Lock()
 _NEWS_RESPONSE_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {"latest": {}, "summary": {}, "brief": {}, "health": {}}
 _NEWS_HEALTH_REFRESH_TASK: Optional[asyncio.Task] = None
 _NEWS_PROCESS_CACHE_TTL_SEC = 5.0
@@ -326,6 +327,171 @@ def _external_news_process_snapshot() -> Dict[str, Any]:
     _NEWS_PROCESS_CACHE_AT = now
     _NEWS_PROCESS_CACHE_PAYLOAD = dict(payload)
     return dict(payload)
+
+
+def _invalidate_news_process_cache() -> None:
+    global _NEWS_PROCESS_CACHE_AT, _NEWS_PROCESS_CACHE_PAYLOAD
+    _NEWS_PROCESS_CACHE_AT = 0.0
+    _NEWS_PROCESS_CACHE_PAYLOAD = {}
+
+
+def _news_process_role_label(role: str) -> str:
+    mapping = {
+        "worker": "新闻采集引擎",
+        "llm_worker": "新闻LLM修补引擎",
+    }
+    return mapping.get(str(role or "").strip().lower(), str(role or "news_engine"))
+
+
+def _spawn_detached_news_process(module_name: str) -> Dict[str, Any]:
+    command = [sys.executable, "-m", module_name]
+    kwargs: Dict[str, Any] = {
+        "cwd": str(Path(getattr(settings, "BASE_DIR", Path(__file__).resolve().parents[2])).resolve()),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+        "env": {**os.environ, "PYTHONIOENCODING": "utf-8"},
+    }
+    if sys.platform.startswith("win"):
+        creationflags = (
+            int(getattr(subprocess, "DETACHED_PROCESS", 0))
+            | int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+            | int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        )
+        proc = subprocess.Popen(command, creationflags=creationflags, **kwargs)
+    else:
+        proc = subprocess.Popen(command, start_new_session=True, **kwargs)
+    return {
+        "module": module_name,
+        "command": list(command),
+        "pid": int(proc.pid or 0),
+    }
+
+
+async def _start_news_engine_processes(request: Request) -> Dict[str, Any]:
+    async with _NEWS_ENGINE_START_LOCK:
+        before = _external_news_process_snapshot()
+        started: List[Dict[str, Any]] = []
+        already_running: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, Any]] = []
+        errors: List[Dict[str, Any]] = []
+
+        internal_pull_running = _task_running(getattr(request.app.state, "news_task", None))
+        internal_llm_running = _task_running(getattr(request.app.state, "news_llm_task", None))
+
+        def _mark_running(role: str, pids: Optional[List[int]] = None) -> None:
+            already_running.append(
+                {
+                    "role": role,
+                    "label": _news_process_role_label(role),
+                    "pids": list(pids or []),
+                }
+            )
+
+        def _mark_skipped(role: str, reason: str) -> None:
+            skipped.append(
+                {
+                    "role": role,
+                    "label": _news_process_role_label(role),
+                    "reason": reason,
+                }
+            )
+
+        if bool(before.get("worker_running")):
+            _mark_running("worker", before.get("worker_pids") or [])
+        elif internal_pull_running:
+            _mark_skipped("worker", "internal_worker_running")
+        else:
+            try:
+                started.append(
+                    {
+                        "role": "worker",
+                        "label": _news_process_role_label("worker"),
+                        **_spawn_detached_news_process("core.news.service.worker"),
+                    }
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "role": "worker",
+                        "label": _news_process_role_label("worker"),
+                        "error": str(exc)[:240],
+                    }
+                )
+
+        if not _news_llm_enabled():
+            _mark_skipped("llm_worker", "llm_disabled")
+        elif bool(before.get("llm_running")):
+            _mark_running("llm_worker", before.get("llm_pids") or [])
+        elif internal_llm_running:
+            _mark_skipped("llm_worker", "internal_worker_running")
+        else:
+            try:
+                started.append(
+                    {
+                        "role": "llm_worker",
+                        "label": _news_process_role_label("llm_worker"),
+                        **_spawn_detached_news_process("core.news.service.llm_worker"),
+                    }
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "role": "llm_worker",
+                        "label": _news_process_role_label("llm_worker"),
+                        "error": str(exc)[:240],
+                    }
+                )
+
+        _invalidate_news_process_cache()
+        _invalidate_news_caches()
+        if started:
+            await asyncio.sleep(0.25)
+        runtime = _news_background_state(request)
+
+        message_parts: List[str] = []
+        if started:
+            message_parts.append("已启动 " + " / ".join(item["label"] for item in started))
+        if already_running:
+            message_parts.append("已在运行 " + " / ".join(item["label"] for item in already_running))
+        if skipped:
+            reason_map = {
+                "internal_worker_running": "站内后台已在运行",
+                "llm_disabled": "未配置可用 LLM，跳过 LLM 修补引擎",
+            }
+            message_parts.append(
+                "跳过 "
+                + " / ".join(
+                    f'{item["label"]}({reason_map.get(str(item.get("reason") or ""), item.get("reason") or "skip")})'
+                    for item in skipped
+                )
+            )
+        if errors:
+            message_parts.append(
+                "失败 "
+                + " / ".join(f'{item["label"]}: {item.get("error") or "unknown"}' for item in errors)
+            )
+
+        if started and not errors:
+            status = "started"
+        elif errors and (started or already_running or skipped):
+            status = "partial"
+        elif errors:
+            status = "error"
+        else:
+            status = "already_running"
+
+        return {
+            "timestamp": _now_utc().isoformat(),
+            "status": status,
+            "message": "；".join(message_parts) if message_parts else "新闻引擎无需额外启动",
+            "started": started,
+            "already_running": already_running,
+            "skipped": skipped,
+            "errors": errors,
+            **runtime,
+        }
 
 
 def _news_background_state(request: Request) -> Dict[str, Any]:
@@ -2451,6 +2617,14 @@ async def worker_status(request: Request) -> Dict[str, Any]:
     if has_active_llm_job:
         return payload
     return _cache_set("worker_status", cache_key, payload)
+
+
+@router.post("/engine/start")
+async def start_news_engine(request: Request) -> Dict[str, Any]:
+    payload = await _start_news_engine_processes(request)
+    if payload.get("status") == "error":
+        raise HTTPException(status_code=500, detail=payload.get("message") or "新闻引擎启动失败")
+    return payload
 
 
 @router.post("/worker/run_once")

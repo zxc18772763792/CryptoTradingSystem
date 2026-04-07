@@ -2443,6 +2443,11 @@ def test_build_context_includes_market_event_and_account_risk_payloads(monkeypat
     assert context_payload["event_summary"]["events_count"] == 2
     assert context_payload["event_summary"]["top_events"][0]["event_id"] == "evt-1"
     assert context_payload["event_summary"]["news_alpha_proxy"] > 0
+    assert context_payload["event_summary"]["generated_at_utc"].endswith("+00:00")
+    assert context_payload["event_summary"]["window_since_utc"].endswith("+00:00")
+    assert context_payload["event_summary"]["latest_event_at_utc"].endswith("+00:00")
+    assert context_payload["event_summary"]["ui_timezone"] == "Asia/Shanghai"
+    assert "UTC storage" in context_payload["event_summary"]["timezone_basis"]
     assert context_payload["account_risk"]["account_equity"] == 1500.0
     assert context_payload["account_risk"]["position_cap_notional"] == 150.0
     assert context_payload["account_risk"]["max_total_exposure_ratio"] == 0.4
@@ -3145,5 +3150,14 @@ def test_build_prompt_compacts_runtime_context(tmp_path: Path):
     assert "body" not in compact_input["event_summary"]["top_events"][0]
     assert "profile" not in compact_input
     assert "references" not in compact_input["research_context"]
+            "generated_at_utc": "2026-04-06T10:00:00+00:00",
+            "window_since_utc": "2026-04-06T06:00:00+00:00",
+            "latest_event_at_utc": "2026-04-06T09:52:00+00:00",
+            "ui_timezone": "Asia/Shanghai",
+            "timezone_basis": "UTC storage, Asia/Shanghai display",
     assert "notes" not in compact_input["execution_cost"]
     assert len(json.dumps(compact_input, ensure_ascii=False)) < len(json.dumps(context_payload, ensure_ascii=False))
+    assert compact_input["event_summary"]["generated_at_utc"] == "2026-04-06T10:00:00+00:00"
+    assert compact_input["event_summary"]["window_since_utc"] == "2026-04-06T06:00:00+00:00"
+    assert compact_input["event_summary"]["latest_event_at_utc"] == "2026-04-06T09:52:00+00:00"
+    assert compact_input["event_summary"]["ui_timezone"] == "Asia/Shanghai"

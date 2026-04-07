@@ -143,3 +143,51 @@ def test_ingest_backfill_history_updates_last_pull(monkeypatch):
     assert payload["raw_inserted_count"] == 17
     assert payload["source"] == "manual_history_backfill"
     assert app.state.news_last_pull["coverage"]["total_count"] == 88
+
+
+def test_start_news_engine_launches_missing_workers(monkeypatch):
+    snapshots = [
+        {
+            "worker_running": False,
+            "llm_running": False,
+            "worker_pids": [],
+            "llm_pids": [],
+            "detector": "test",
+            "error": None,
+        },
+        {
+            "worker_running": True,
+            "llm_running": True,
+            "worker_pids": [41001],
+            "llm_pids": [41002],
+            "detector": "test",
+            "error": None,
+        },
+    ]
+    launched_modules = []
+
+    def fake_scan():
+        if len(snapshots) > 1:
+            return dict(snapshots.pop(0))
+        return dict(snapshots[0])
+
+    def fake_spawn(module_name: str):
+        launched_modules.append(module_name)
+        pid = 41001 if module_name.endswith("worker") and not module_name.endswith("llm_worker") else 41002
+        return {"module": module_name, "command": ["python", "-m", module_name], "pid": pid}
+
+    monkeypatch.setattr(news_api, "_scan_external_news_processes", fake_scan)
+    monkeypatch.setattr(news_api, "_spawn_detached_news_process", fake_spawn)
+    monkeypatch.setattr(news_api, "_news_llm_enabled", lambda: True)
+    news_api._invalidate_news_process_cache()
+
+    with TestClient(_build_app()) as client:
+        response = client.post("/api/news/engine/start")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "started"
+    assert launched_modules == ["core.news.service.worker", "core.news.service.llm_worker"]
+    assert [item["role"] for item in payload["started"]] == ["worker", "llm_worker"]
+    assert payload["background_pull_running"] is True
+    assert payload["background_llm_running"] is True
