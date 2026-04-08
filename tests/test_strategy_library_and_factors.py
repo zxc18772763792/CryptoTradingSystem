@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 import strategies as strategy_module
+from config import strategy_registry
 from config.strategy_registry import DEFAULT_START_ALL_STRATEGIES, get_backtest_strategy_info, get_strategy_registry_entry
 from core.backtest.cost_models import fee_rate, slippage_rate
 from strategies import ALL_STRATEGIES
@@ -130,6 +131,23 @@ def test_arbitrage_registry_backtest_support_flags_match_ui_routing():
     assert tri["backtest_supported"] is False
     assert cex["reason"]
     assert tri["reason"]
+
+
+def test_mlxgboost_backtest_support_reflects_runtime_dependencies(monkeypatch):
+    monkeypatch.setattr(
+        strategy_registry,
+        "_mlxgboost_backtest_support_status",
+        lambda: (False, "runtime missing"),
+    )
+
+    info = strategy_registry.get_backtest_strategy_info("MLXGBoostStrategy")
+    catalog = strategy_registry.get_backtest_strategy_catalog(["MLXGBoostStrategy"])
+
+    assert info["backtest_supported"] is False
+    assert info["reason"] == "runtime missing"
+    assert catalog[0]["backtest_supported"] is False
+    assert catalog[0]["reason"] == "runtime missing"
+    assert strategy_registry.is_strategy_backtest_supported("MLXGBoostStrategy") is False
 
 
 def test_shared_cost_model_helpers_support_flat_and_dynamic_modes():

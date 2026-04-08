@@ -22,6 +22,7 @@ from config.strategy_registry import (
     get_backtest_strategy_catalog as registry_backtest_strategy_catalog,
     get_backtest_strategy_info as registry_backtest_strategy_info,
     get_strategy_defaults,
+    get_strategy_recommended_symbols,
     is_strategy_backtest_supported as registry_is_strategy_backtest_supported,
 )
 from core.backtest.common_pnl import build_common_pnl_summary
@@ -33,6 +34,9 @@ from core.research.strategy_research import (
     _attach_research_enrichment as attach_research_enrichment,
     _build_research_enrichment as build_research_enrichment,
 )
+from core.strategies.strategy_base import SignalType
+from strategies.factor_based.factor_strategies import CCIStrategy, StochRSIStrategy, WilliamsRStrategy
+from strategies.quantitative.multi_factor_hf import MultiFactorHFStrategy
 
 router = APIRouter()
 
@@ -82,6 +86,54 @@ _BACKTEST_COMPARE_DEFAULT_TRIALS = 48
 _BACKTEST_COMPARE_MAX_TRIALS = 512
 _BACKTEST_OPTIMIZE_DEFAULT_TRIALS = 96
 _BACKTEST_OPTIMIZE_MAX_TRIALS = 1024
+_BACKTEST_BIDIRECTIONAL_OHLCV_STRATEGIES = {
+    "MAStrategy",
+    "EMAStrategy",
+    "MACDStrategy",
+    "MACDHistogramStrategy",
+    "ADXTrendStrategy",
+    "TrendFollowingStrategy",
+    "AroonStrategy",
+    "RSIStrategy",
+    "RSIDivergenceStrategy",
+    "StochasticStrategy",
+    "BollingerBandsStrategy",
+    "WilliamsRStrategy",
+    "CCIStrategy",
+    "StochRSIStrategy",
+    "MomentumStrategy",
+    "ROCStrategy",
+    "PriceAccelerationStrategy",
+    "MeanReversionStrategy",
+    "BollingerMeanReversionStrategy",
+    "VWAPReversionStrategy",
+    "VWAPStrategy",
+    "MeanReversionHalfLifeStrategy",
+    "BollingerSqueezeStrategy",
+    "DonchianBreakoutStrategy",
+    "MFIStrategy",
+    "OBVStrategy",
+    "TradeIntensityStrategy",
+    "ParkinsonVolStrategy",
+    "UlcerIndexStrategy",
+    "VaRBreakoutStrategy",
+    "MaxDrawdownStrategy",
+    "SortinoRatioStrategy",
+    "HurstExponentStrategy",
+    "OrderFlowImbalanceStrategy",
+    "MultiFactorHFStrategy",
+    "MLXGBoostStrategy",
+    "MarketSentimentStrategy",
+    "SocialSentimentStrategy",
+    "FundFlowStrategy",
+    "WhaleActivityStrategy",
+}
+_BACKTEST_SIGNAL_REPLAY_CLASSES = {
+    "WilliamsRStrategy": WilliamsRStrategy,
+    "CCIStrategy": CCIStrategy,
+    "StochRSIStrategy": StochRSIStrategy,
+    "MultiFactorHFStrategy": MultiFactorHFStrategy,
+}
 
 
 def get_backtest_strategy_catalog() -> List[Dict[str, Any]]:
@@ -129,6 +181,155 @@ def _data_column_or_default(df: pd.DataFrame, column: str, default: float = 0.0)
 
 def _clamp_series(series: pd.Series, lower: float = -1.0, upper: float = 1.0) -> pd.Series:
     return pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(lower, upper)
+
+
+def _signed_state(value: Any) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return 0.0
+    if out > 0:
+        return 1.0
+    if out < 0:
+        return -1.0
+    return 0.0
+
+
+def _bool_series(value: Any, index: pd.Index) -> pd.Series:
+    if isinstance(value, pd.Series):
+        series = value.reindex(index)
+    else:
+        series = pd.Series(value, index=index)
+    return series.fillna(False).astype(bool)
+
+
+def _apply_backtest_trade_policy_defaults(strategy: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    out = dict(params or {})
+    out.setdefault("allow_long", True)
+    out.setdefault(
+        "allow_short",
+        bool(registry_is_strategy_backtest_supported(str(strategy or "").strip())),
+    )
+    out.setdefault("reverse_on_signal", True)
+    return out
+
+
+def _resolve_backtest_trade_policy(strategy: str, params: Optional[Dict[str, Any]] = None) -> tuple[bool, bool, bool]:
+    cfg = _apply_backtest_trade_policy_defaults(strategy, params=params)
+    return (
+        bool(cfg.get("allow_long", True)),
+        bool(cfg.get("allow_short", False)),
+        bool(cfg.get("reverse_on_signal", True)),
+    )
+
+
+def _stateful_directional_position(
+    index: pd.Index,
+    *,
+    long_entry: Any = None,
+    long_exit: Any = None,
+    short_entry: Any = None,
+    short_exit: Any = None,
+    allow_long: bool = True,
+    allow_short: bool = False,
+    reverse_on_signal: bool = True,
+) -> pd.Series:
+    le = _bool_series(False if long_entry is None else long_entry, index)
+    lx = _bool_series(False if long_exit is None else long_exit, index)
+    se = _bool_series(False if short_entry is None else short_entry, index)
+    sx = _bool_series(False if short_exit is None else short_exit, index)
+
+    state = 0.0
+    values: List[float] = []
+    for le_i, lx_i, se_i, sx_i in zip(le, lx, se, sx):
+        if state > 0:
+            if allow_short and reverse_on_signal and se_i:
+                state = -1.0
+            elif lx_i or not allow_long:
+                state = 0.0
+        elif state < 0:
+            if allow_long and reverse_on_signal and le_i:
+                state = 1.0
+            elif sx_i or not allow_short:
+                state = 0.0
+        else:
+            if allow_long and le_i and not (allow_short and se_i):
+                state = 1.0
+            elif allow_short and se_i and not (allow_long and le_i):
+                state = -1.0
+            else:
+                state = 0.0
+        values.append(state)
+
+    return pd.Series(values, index=index, dtype=float)
+
+
+def _apply_signal_to_position_state(
+    current_state: float,
+    signal_type: Any,
+    *,
+    allow_long: bool,
+    allow_short: bool,
+    reverse_on_signal: bool,
+) -> float:
+    state = _signed_state(current_state)
+    signal_name = str(getattr(signal_type, "value", signal_type) or "").strip().lower()
+
+    if signal_name == SignalType.BUY.value:
+        if state < 0:
+            if allow_long and reverse_on_signal:
+                return 1.0
+            return 0.0
+        return 1.0 if allow_long else state
+
+    if signal_name == SignalType.SELL.value:
+        if state > 0:
+            if allow_short and reverse_on_signal:
+                return -1.0
+            return 0.0
+        return -1.0 if allow_short else state
+
+    if signal_name == SignalType.CLOSE_LONG.value and state > 0:
+        return 0.0
+    if signal_name == SignalType.CLOSE_SHORT.value and state < 0:
+        return 0.0
+    return state
+
+
+def _replay_signal_strategy_position(
+    strategy_class: Any,
+    df: pd.DataFrame,
+    params: Optional[Dict[str, Any]] = None,
+    *,
+    allow_long: bool,
+    allow_short: bool,
+    reverse_on_signal: bool,
+) -> pd.Series:
+    inst = strategy_class(name=f"bt_{getattr(strategy_class, '__name__', 'strategy')}", params=dict(params or {}))
+    try:
+        inst.initialize()
+    except Exception:
+        pass
+
+    state = 0.0
+    values: List[float] = []
+    for end_idx in range(len(df)):
+        window = df.iloc[: end_idx + 1].copy()
+        try:
+            signals = inst.generate_signals(window) or []
+        except Exception:
+            signals = []
+        for signal in signals:
+            state = _apply_signal_to_position_state(
+                state,
+                getattr(signal, "signal_type", ""),
+                allow_long=allow_long,
+                allow_short=allow_short,
+                reverse_on_signal=reverse_on_signal,
+            )
+        values.append(state)
+
+    return pd.Series(values, index=df.index, dtype=float)
 
 
 async def _attach_backtest_enrichment_if_needed(
@@ -752,6 +953,30 @@ def _pairs_signal_bias(current_z: float, entry_z: float, exit_z: float) -> str:
     return "neutral"
 
 
+def _pairs_candidate_symbols(
+    primary_symbol: str,
+    requested_pair_symbol: Any = None,
+    *,
+    bundle_symbols: Optional[List[str]] = None,
+) -> List[str]:
+    primary = _normalize_symbol(primary_symbol)
+    candidates: List[str] = []
+
+    def _append(raw_symbol: Any) -> None:
+        symbol = _normalize_symbol(raw_symbol)
+        if symbol and symbol != primary and symbol not in candidates:
+            candidates.append(symbol)
+
+    _append(requested_pair_symbol)
+    defaults = get_strategy_defaults("PairsTradingStrategy")
+    _append(defaults.get("pair_symbol"))
+    for symbol in get_strategy_recommended_symbols("PairsTradingStrategy"):
+        _append(symbol)
+    for symbol in bundle_symbols or []:
+        _append(symbol)
+    return candidates
+
+
 def _build_pairs_backtest_components(
     primary_df: pd.DataFrame,
     market_bundle: Dict[str, pd.DataFrame],
@@ -776,22 +1001,25 @@ def _build_pairs_backtest_components(
         normalized_bundle[symbol] = item
 
     primary_symbol = _normalize_symbol(cfg.get("primary_symbol") or cfg.get("symbol"))
-    pair_symbol = _normalize_symbol(cfg.get("pair_symbol"))
-    if not primary_symbol:
-        primary_candidates = [sym for sym in normalized_bundle.keys() if sym != pair_symbol]
-        primary_symbol = primary_candidates[0] if primary_candidates else ""
-    if not pair_symbol:
-        pair_candidates = [sym for sym in normalized_bundle.keys() if sym != primary_symbol]
-        pair_symbol = pair_candidates[0] if pair_candidates else ""
-
-    if not pair_symbol:
-        raise HTTPException(status_code=400, detail="PairsTradingStrategy 缺少 pair_symbol 参数")
     if not primary_symbol:
         primary_symbol = _normalize_symbol(primary_df.get("symbol").iloc[-1] if "symbol" in primary_df.columns and len(primary_df) else "")
     if not primary_symbol:
+        requested_pair_symbol = _normalize_symbol(cfg.get("pair_symbol"))
+        primary_candidates = [sym for sym in normalized_bundle.keys() if sym != requested_pair_symbol]
+        primary_symbol = primary_candidates[0] if primary_candidates else ""
+    if not primary_symbol:
         raise HTTPException(status_code=400, detail="PairsTradingStrategy 缺少主腿历史数据")
-    if primary_symbol == pair_symbol:
-        raise HTTPException(status_code=400, detail="PairsTradingStrategy 的主腿和副腿不能相同")
+
+    pair_candidates = _pairs_candidate_symbols(
+        primary_symbol,
+        cfg.get("pair_symbol"),
+        bundle_symbols=list(normalized_bundle.keys()),
+    )
+    pair_symbol = next((sym for sym in pair_candidates if sym in normalized_bundle), "")
+    if not pair_symbol and pair_candidates:
+        pair_symbol = pair_candidates[0]
+    if not pair_symbol:
+        raise HTTPException(status_code=400, detail="PairsTradingStrategy 缺少可用的副腿交易对")
 
     primary = normalized_bundle.get(primary_symbol)
     if primary is None or primary.empty:
@@ -1106,7 +1334,769 @@ def _optimize_strategy_on_df(
     }
 
 
+def _build_positions_v2(strategy: str, df: pd.DataFrame, params: Optional[Dict[str, Any]] = None) -> pd.Series:
+    params = _apply_backtest_trade_policy_defaults(strategy, params or {})
+    allow_long, allow_short, reverse_on_signal = _resolve_backtest_trade_policy(strategy, params=params)
+    close = pd.to_numeric(df["close"], errors="coerce")
+    position = pd.Series(0.0, index=df.index, dtype=float)
+
+    if not allow_long and not allow_short:
+        return position
+
+    replay_strategy_class = _BACKTEST_SIGNAL_REPLAY_CLASSES.get(strategy)
+    if replay_strategy_class is not None:
+        return _replay_signal_strategy_position(
+            replay_strategy_class,
+            df,
+            params=params,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        ).fillna(0.0)
+
+    if strategy == "MAStrategy":
+        fast_n = int(params.get("fast_period", 20))
+        slow_n = int(params.get("slow_period", 60))
+        fast = close.rolling(fast_n, min_periods=fast_n).mean()
+        slow = close.rolling(slow_n, min_periods=slow_n).mean()
+        bull = fast > slow
+        bear = fast < slow
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=bull,
+            long_exit=bear,
+            short_entry=bear,
+            short_exit=bull,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "EMAStrategy":
+        ema_fast = close.ewm(span=int(params.get("fast_period", 12)), adjust=False).mean()
+        ema_slow = close.ewm(span=int(params.get("slow_period", 26)), adjust=False).mean()
+        bull = ema_fast > ema_slow
+        bear = ema_fast < ema_slow
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=bull,
+            long_exit=bear,
+            short_entry=bear,
+            short_exit=bull,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy in {"RSIStrategy", "RSIDivergenceStrategy"}:
+        period = int(params.get("period", 14))
+        oversold = float(params.get("oversold", 30))
+        overbought = float(params.get("overbought", 70))
+        exit_oversold = max(
+            oversold,
+            min(50.0, float(params.get("exit_oversold", (oversold + 50.0) / 2.0))),
+        )
+        exit_overbought = min(
+            overbought,
+            max(50.0, float(params.get("exit_overbought", (overbought + 50.0) / 2.0))),
+        )
+        delta = close.diff()
+        gain = delta.clip(lower=0)
+        loss = (-delta).clip(lower=0)
+        avg_gain = gain.rolling(period, min_periods=period).mean()
+        avg_loss = loss.rolling(period, min_periods=period).mean()
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs))
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=rsi <= oversold,
+            long_exit=rsi >= exit_oversold,
+            short_entry=rsi >= overbought,
+            short_exit=rsi <= exit_overbought,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy in {"MACDStrategy", "MACDHistogramStrategy"}:
+        fast_n = int(params.get("fast_period", 12))
+        slow_n = int(params.get("slow_period", 26))
+        signal_n = int(params.get("signal_period", 9))
+        ema_fast = close.ewm(span=fast_n, adjust=False).mean()
+        ema_slow = close.ewm(span=slow_n, adjust=False).mean()
+        macd = ema_fast - ema_slow
+        signal = macd.ewm(span=signal_n, adjust=False).mean()
+        bull = macd > signal
+        bear = macd < signal
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=bull,
+            long_exit=bear,
+            short_entry=bear,
+            short_exit=bull,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy in {"BollingerBandsStrategy", "BollingerSqueezeStrategy"}:
+        period = int(params.get("period", 20))
+        num_std = float(params.get("num_std", 2.0))
+        ma = close.rolling(period, min_periods=period).mean()
+        std = close.rolling(period, min_periods=period).std()
+        upper = ma + num_std * std
+        lower = ma - num_std * std
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=close <= lower,
+            long_exit=close >= upper,
+            short_entry=close >= upper,
+            short_exit=close <= lower,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "MeanReversionStrategy":
+        period = int(params.get("lookback_period", 20))
+        z_entry = abs(float(params.get("entry_z_score", 2.0)))
+        mean = close.rolling(period, min_periods=period).mean()
+        std = close.rolling(period, min_periods=period).std()
+        z = (close - mean) / std.replace(0, np.nan)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=z <= -z_entry,
+            long_exit=z >= 0.0,
+            short_entry=z >= z_entry,
+            short_exit=z <= 0.0,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "BollingerMeanReversionStrategy":
+        period = int(params.get("period", 20))
+        num_std = float(params.get("num_std", 2.2))
+        mean = close.rolling(period, min_periods=period).mean()
+        std = close.rolling(period, min_periods=period).std()
+        upper = mean + num_std * std
+        lower = mean - num_std * std
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=close <= lower,
+            long_exit=close >= mean,
+            short_entry=close >= upper,
+            short_exit=close <= mean,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "MomentumStrategy":
+        lookback = int(params.get("lookback_period", 20))
+        threshold = abs(float(params.get("momentum_threshold", 0.015)))
+        momentum = close / close.shift(lookback) - 1
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=momentum >= threshold,
+            long_exit=momentum <= -threshold * 0.5,
+            short_entry=momentum <= -threshold,
+            short_exit=momentum >= threshold * 0.5,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "TrendFollowingStrategy":
+        short_n = int(params.get("short_period", 20))
+        long_n = int(params.get("long_period", 55))
+        adx_threshold = float(params.get("adx_threshold", 23))
+        short_ma = close.rolling(short_n, min_periods=short_n).mean()
+        long_ma = close.rolling(long_n, min_periods=long_n).mean()
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce")
+        adx_period = int(params.get("adx_period", 14))
+        up_move = high.diff()
+        down_move = -low.diff()
+        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+        tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1 / adx_period, adjust=False).mean()
+        plus_di = 100 * (plus_dm.ewm(alpha=1 / adx_period, adjust=False).mean() / atr.replace(0, np.nan))
+        minus_di = 100 * (minus_dm.ewm(alpha=1 / adx_period, adjust=False).mean() / atr.replace(0, np.nan))
+        dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
+        adx = dx.ewm(alpha=1 / adx_period, adjust=False).mean()
+        bull = (short_ma > long_ma) & (adx >= adx_threshold)
+        bear = (short_ma < long_ma) & (adx >= adx_threshold)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=bull,
+            long_exit=short_ma < long_ma,
+            short_entry=bear,
+            short_exit=short_ma > long_ma,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "DonchianBreakoutStrategy":
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce")
+        lookback = int(params.get("lookback", 20))
+        exit_lookback = int(params.get("exit_lookback", 10))
+        upper = high.rolling(lookback, min_periods=lookback).max().shift(1)
+        lower = low.rolling(lookback, min_periods=lookback).min().shift(1)
+        exit_low = low.rolling(exit_lookback, min_periods=exit_lookback).min().shift(1)
+        exit_high = high.rolling(exit_lookback, min_periods=exit_lookback).max().shift(1)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=close > upper,
+            long_exit=close < exit_low,
+            short_entry=close < lower,
+            short_exit=close > exit_high,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "StochasticStrategy":
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce")
+        k_period = int(params.get("k_period", 14))
+        d_period = int(params.get("d_period", 3))
+        smooth_k = int(params.get("smooth_k", 3))
+        oversold = float(params.get("oversold", 20))
+        overbought = float(params.get("overbought", 80))
+        lowest = low.rolling(k_period, min_periods=k_period).min()
+        highest = high.rolling(k_period, min_periods=k_period).max()
+        raw_k = (close - lowest) / (highest - lowest).replace(0, np.nan) * 100
+        k_line = raw_k.rolling(smooth_k, min_periods=smooth_k).mean()
+        d_line = k_line.rolling(d_period, min_periods=d_period).mean()
+        cross_up = (k_line.shift(1) <= d_line.shift(1)) & (k_line > d_line)
+        cross_down = (k_line.shift(1) >= d_line.shift(1)) & (k_line < d_line)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=cross_up & (k_line <= oversold),
+            long_exit=cross_down & (k_line >= overbought),
+            short_entry=cross_down & (k_line >= overbought),
+            short_exit=cross_up & (k_line <= oversold),
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "ADXTrendStrategy":
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce")
+        period = int(params.get("period", 14))
+        adx_threshold = float(params.get("adx_threshold", 25))
+        up_move = high.diff()
+        down_move = -low.diff()
+        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+        tr1 = high - low
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1 / period, adjust=False).mean()
+        plus_di = 100 * (plus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr.replace(0, np.nan))
+        minus_di = 100 * (minus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr.replace(0, np.nan))
+        dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
+        adx = dx.ewm(alpha=1 / period, adjust=False).mean()
+        cross_up = (plus_di.shift(1) <= minus_di.shift(1)) & (plus_di > minus_di)
+        cross_down = (plus_di.shift(1) >= minus_di.shift(1)) & (plus_di < minus_di)
+        strong = adx >= adx_threshold
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=cross_up & strong,
+            long_exit=cross_down,
+            short_entry=cross_down & strong,
+            short_exit=cross_up,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "VWAPReversionStrategy":
+        window = int(params.get("window", 48))
+        entry_dev = abs(float(params.get("entry_deviation_pct", 0.01)))
+        exit_dev = abs(float(params.get("exit_deviation_pct", 0.002)))
+        typical = (pd.to_numeric(df["high"], errors="coerce") + pd.to_numeric(df["low"], errors="coerce") + close) / 3.0
+        vol = pd.to_numeric(df["volume"], errors="coerce").replace(0, np.nan)
+        vwap = (typical * vol).rolling(window, min_periods=window).sum() / vol.rolling(window, min_periods=window).sum()
+        dev = (close - vwap) / vwap.replace(0, np.nan)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=dev <= -entry_dev,
+            long_exit=dev >= -exit_dev,
+            short_entry=dev >= entry_dev,
+            short_exit=dev <= exit_dev,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "MarketSentimentStrategy":
+        lookback = max(5, int(params.get("lookback_period", 7)))
+        fear_th = float(params.get("fear_threshold", 25))
+        greed_th = float(params.get("greed_threshold", 75))
+        regime_window = max(lookback * 6, 24)
+        regime_ret = close.pct_change(lookback).clip(-0.20, 0.20)
+        mood = (
+            (
+                regime_ret - regime_ret.rolling(regime_window, min_periods=max(3, regime_window // 3)).min()
+            )
+            / (
+                regime_ret.rolling(regime_window, min_periods=max(3, regime_window // 3)).max()
+                - regime_ret.rolling(regime_window, min_periods=max(3, regime_window // 3)).min()
+            ).replace(0, np.nan)
+            * 100.0
+        ).clip(0.0, 100.0).fillna(50.0)
+        news_sentiment = _clamp_series(_data_column_or_default(df, "news_sentiment_score"), -3.0, 3.0)
+        macro_score = _clamp_series(_data_column_or_default(df, "news_macro_score"), -3.0, 3.0)
+        funding_rate = _clamp_series(_data_column_or_default(df, "funding_rate"), -0.02, 0.02)
+        sentiment_component = (
+            50.0 + 28.0 * np.tanh(news_sentiment * 0.65 + macro_score * 0.90 - funding_rate * 180.0)
+        ).clip(0.0, 100.0)
+        fear_greed_score = (mood * 0.55 + sentiment_component * 0.45).clip(0.0, 100.0)
+        long_exit = max(50.0, greed_th - 15.0)
+        short_exit = min(50.0, fear_th + 15.0)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=fear_greed_score <= fear_th,
+            long_exit=fear_greed_score >= long_exit,
+            short_entry=fear_greed_score >= greed_th,
+            short_exit=fear_greed_score <= short_exit,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "SocialSentimentStrategy":
+        pos_th = float(params.get("positive_threshold", 0.2))
+        neg_th = float(params.get("negative_threshold", -0.2))
+        momentum = close.pct_change(6).clip(-0.15, 0.15)
+        volume_ratio = pd.to_numeric(df["volume"], errors="coerce") / pd.to_numeric(df["volume"], errors="coerce").rolling(24, min_periods=12).mean().replace(0, np.nan)
+        news_sentiment = _clamp_series(_data_column_or_default(df, "news_sentiment_score"), -3.0, 3.0)
+        event_intensity = _clamp_series(_data_column_or_default(df, "news_event_intensity"), 0.0, 3.0)
+        social_score = np.tanh(
+            news_sentiment * 0.85
+            + event_intensity * 0.30
+            + momentum * 6.5
+            + (volume_ratio.fillna(1.0) - 1.0) * 0.8
+        )
+        long_exit = max(0.0, neg_th + 0.1)
+        short_exit = min(0.0, pos_th - 0.1)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=social_score >= pos_th,
+            long_exit=social_score <= long_exit,
+            short_entry=social_score <= neg_th,
+            short_exit=social_score >= short_exit,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "FundFlowStrategy":
+        flow_window = max(6, int(params.get("lookback_period", 7)) * 3)
+        min_ratio = abs(float(params.get("min_imbalance_ratio", 0.03)))
+        volume = pd.to_numeric(df["volume"], errors="coerce")
+        signed_flow = (close.pct_change().clip(-0.05, 0.05) * close * volume).fillna(0.0)
+        flow_sum = signed_flow.rolling(flow_window, min_periods=max(4, flow_window // 3)).sum()
+        flow_abs = signed_flow.abs().rolling(flow_window, min_periods=max(4, flow_window // 3)).sum().replace(0, np.nan)
+        imbalance = (flow_sum / flow_abs).fillna(0.0)
+        news_flow = _clamp_series(_data_column_or_default(df, "news_flow_score"), -3.0, 3.0)
+        funding_rate = _clamp_series(_data_column_or_default(df, "funding_rate"), -0.02, 0.02)
+        flow_score = (
+            imbalance * 0.75
+            + np.tanh(news_flow * 0.70) * 0.20
+            - np.tanh(funding_rate * 160.0) * 0.10
+        ).clip(-1.0, 1.0)
+        neutral_ratio = max(min_ratio * 0.5, 0.01)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=flow_score >= min_ratio,
+            long_exit=flow_score <= neutral_ratio,
+            short_entry=flow_score <= -min_ratio,
+            short_exit=flow_score >= -neutral_ratio,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "WhaleActivityStrategy":
+        lookback = max(6, int(params.get("lookback_hours", 24)))
+        accumulation = max(1, int(params.get("accumulation_threshold", 2)))
+        distribution = max(1, int(params.get("distribution_threshold", 2)))
+        volume = pd.to_numeric(df["volume"], errors="coerce")
+        notional = (close * volume).fillna(0.0)
+        baseline = notional.rolling(lookback, min_periods=max(4, lookback // 3)).mean().replace(0, np.nan)
+        whale_bar = (notional >= baseline * 1.8).fillna(False)
+        price_return = close.pct_change().fillna(0.0)
+        buy_spikes = (whale_bar & (price_return > 0)).rolling(lookback, min_periods=1).sum()
+        sell_spikes = (whale_bar & (price_return < 0)).rolling(lookback, min_periods=1).sum()
+        news_whale = _clamp_series(_data_column_or_default(df, "news_whale_score"), -3.0, 3.0)
+        event_intensity = _clamp_series(_data_column_or_default(df, "news_event_intensity"), 0.0, 3.0)
+        whale_signal = np.tanh(news_whale * 0.90 + event_intensity * 0.15)
+        buy_pressure = buy_spikes.fillna(0.0) + whale_signal.clip(lower=0.0) * float(accumulation)
+        sell_pressure = sell_spikes.fillna(0.0) + (-whale_signal.clip(upper=0.0)) * float(distribution)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=(buy_pressure >= accumulation) & (buy_pressure > sell_pressure),
+            long_exit=sell_pressure >= distribution,
+            short_entry=(sell_pressure >= distribution) & (sell_pressure > buy_pressure),
+            short_exit=buy_pressure >= accumulation,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "MLXGBoostStrategy":
+        try:
+            import xgboost as xgb  # noqa: F401
+        except ImportError:
+            raise HTTPException(status_code=400, detail="MLXGBoostStrategy 需要安装 xgboost")
+
+        model_path = str(params.get("model_path", ""))
+        if not model_path or not Path(model_path).exists():
+            candidates = [
+                Path(model_path) if model_path else None,
+                Path("models/ml_signal_xgb.json"),
+                Path(__file__).resolve().parents[2] / "models" / "ml_signal_xgb.json",
+            ]
+            model_path = next((str(p) for p in candidates if p and p.exists()), "")
+        if not model_path:
+            raise HTTPException(status_code=400, detail="MLXGBoostStrategy 模型文件不存在")
+
+        model = xgb.Booster()
+        model.load_model(model_path)
+        feat_df = build_feature_frame(df)
+        proba = model.predict(xgb.DMatrix(feat_df.values, feature_names=list(feat_df.columns)))
+        proba = pd.Series(proba, index=df.index).clip(0.0, 1.0)
+        threshold_ml = float(params.get("threshold", 0.55))
+        short_threshold = float(params.get("short_threshold", max(0.0, 1.0 - threshold_ml)))
+        neutral_exit_enabled = bool(params.get("neutral_exit_enabled", True))
+        long_exit = (proba < threshold_ml) if neutral_exit_enabled else (proba <= short_threshold)
+        short_exit = (proba > short_threshold) if neutral_exit_enabled else (proba >= threshold_ml)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=proba >= threshold_ml,
+            long_exit=long_exit,
+            short_entry=proba <= short_threshold,
+            short_exit=short_exit,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "AroonStrategy":
+        period = int(params.get("period", 25))
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce")
+        aroon_up = high.rolling(period + 1).apply(lambda x: (period - np.argmax(x)) / period * 100, raw=True)
+        aroon_down = low.rolling(period + 1).apply(lambda x: (period - np.argmin(x)) / period * 100, raw=True)
+        aroon = aroon_up - aroon_down
+        buy_th = float(params.get("buy_threshold", 50))
+        sell_th = float(params.get("sell_threshold", -50))
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=aroon >= buy_th,
+            long_exit=aroon <= sell_th,
+            short_entry=aroon <= sell_th,
+            short_exit=aroon >= buy_th,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "ROCStrategy":
+        period = int(params.get("period", 14))
+        buy_th = float(params.get("buy_threshold", 5.0))
+        sell_th = float(params.get("sell_threshold", -5.0))
+        roc = (close / close.shift(period) - 1) * 100
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=roc >= buy_th,
+            long_exit=roc <= sell_th,
+            short_entry=roc <= sell_th,
+            short_exit=roc >= buy_th,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "PriceAccelerationStrategy":
+        fast = int(params.get("fast", 5))
+        slow = int(params.get("slow", 15))
+        threshold = abs(float(params.get("accel_threshold", 0.1)))
+        fast_mom = close.pct_change(fast)
+        slow_mom = close.pct_change(slow)
+        accel = (fast_mom - slow_mom) / slow_mom.abs().replace(0, np.nan)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=accel >= threshold,
+            long_exit=accel <= -threshold,
+            short_entry=accel <= -threshold,
+            short_exit=accel >= threshold,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "MFIStrategy":
+        period = int(params.get("period", 14))
+        oversold = float(params.get("oversold", 20))
+        overbought = float(params.get("overbought", 80))
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce")
+        vol = pd.to_numeric(df["volume"], errors="coerce")
+        tp = (high + low + close) / 3
+        mf = tp * vol
+        pos_mf = mf.where(tp > tp.shift(1), 0.0)
+        neg_mf = mf.where(tp < tp.shift(1), 0.0)
+        pos_sum = pos_mf.rolling(period).sum()
+        neg_sum = neg_mf.rolling(period).sum()
+        mfi = 100 - (100 / (1 + pos_sum / neg_sum.replace(0, np.nan)))
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=mfi <= oversold,
+            long_exit=mfi >= overbought,
+            short_entry=mfi >= overbought,
+            short_exit=mfi <= oversold,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "OBVStrategy":
+        smooth = int(params.get("smooth", 20))
+        div_th = abs(float(params.get("divergence_threshold", 1.5)))
+        vol = pd.to_numeric(df["volume"], errors="coerce")
+        direction = np.sign(close.diff()).fillna(0.0)
+        obv = (direction * vol.fillna(0.0)).cumsum()
+        obv_z = (obv - obv.rolling(smooth).mean()) / obv.rolling(smooth).std().replace(0, np.nan)
+        price_falling = close < close.shift(5)
+        price_rising = close > close.shift(5)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=price_falling & (obv_z >= div_th),
+            long_exit=price_rising & (obv_z <= -div_th),
+            short_entry=price_rising & (obv_z <= -div_th),
+            short_exit=price_falling & (obv_z >= div_th),
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "VWAPStrategy":
+        period = int(params.get("period", 20))
+        buy_th = float(params.get("buy_threshold", -0.02))
+        sell_th = float(params.get("sell_threshold", 0.02))
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce")
+        vol = pd.to_numeric(df["volume"], errors="coerce")
+        tp = (high + low + close) / 3
+        vwap = (tp * vol).rolling(period).sum() / vol.rolling(period).sum().replace(0, np.nan)
+        dev = (close - vwap) / vwap.replace(0, np.nan)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=dev <= buy_th,
+            long_exit=dev >= sell_th,
+            short_entry=dev >= sell_th,
+            short_exit=dev <= buy_th,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "TradeIntensityStrategy":
+        fast = int(params.get("fast", 5))
+        slow = int(params.get("slow", 20))
+        threshold = float(params.get("intensity_threshold", 1.5)) - 1
+        vol = pd.to_numeric(df["volume"], errors="coerce")
+        fast_vol = vol.rolling(fast).mean()
+        slow_vol = vol.rolling(slow).mean()
+        intensity = fast_vol / slow_vol.replace(0, np.nan) - 1
+        price_chg = close.pct_change(fast)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=(intensity >= threshold) & (price_chg > 0),
+            long_exit=(intensity >= threshold) & (price_chg < 0),
+            short_entry=(intensity >= threshold) & (price_chg < 0),
+            short_exit=(intensity >= threshold) & (price_chg > 0),
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "ParkinsonVolStrategy":
+        period = int(params.get("period", 20))
+        vol_low = float(params.get("vol_percentile_low", 20))
+        vol_high = float(params.get("vol_percentile_high", 80))
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce")
+        hl_log = np.log(high / low.replace(0, np.nan))
+        variance = (hl_log ** 2) / (4 * np.log(2))
+        park_vol = np.sqrt(variance.rolling(period).mean())
+        vol_pct = park_vol.rolling(period * 2).rank(pct=True) * 100
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=vol_pct <= vol_low,
+            long_exit=vol_pct >= vol_high,
+            short_entry=vol_pct >= vol_high,
+            short_exit=vol_pct <= vol_low,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "UlcerIndexStrategy":
+        period = int(params.get("period", 14))
+        high_th = float(params.get("high_risk_threshold", 10))
+        low_th = float(params.get("low_risk_threshold", 3))
+        rolling_max = close.rolling(period).max()
+        drawdown_pct = ((close - rolling_max) / rolling_max.replace(0, np.nan)) * 100
+        ulcer = np.sqrt((drawdown_pct ** 2).rolling(period).mean())
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=ulcer <= low_th,
+            long_exit=ulcer >= high_th,
+            short_entry=ulcer >= high_th,
+            short_exit=ulcer <= low_th,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "VaRBreakoutStrategy":
+        var_period = int(params.get("var_period", 20))
+        conf = float(params.get("confidence", 0.95))
+        mult = float(params.get("multiplier", 1.5))
+        returns = close.pct_change()
+
+        def calc_var(series: pd.Series) -> float:
+            sample = series.dropna()
+            if len(sample) < var_period // 2:
+                return np.nan
+            return float(np.percentile(sample, (1 - conf) * 100))
+
+        var = returns.rolling(var_period).apply(calc_var, raw=False)
+        bar_ret = returns.fillna(0.0)
+        lower_trigger = var * mult
+        upper_trigger = var.abs() * mult
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=(lower_trigger < 0) & (bar_ret < lower_trigger),
+            long_exit=(upper_trigger > 0) & (bar_ret > upper_trigger),
+            short_entry=(upper_trigger > 0) & (bar_ret > upper_trigger),
+            short_exit=(lower_trigger < 0) & (bar_ret < lower_trigger),
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "MaxDrawdownStrategy":
+        lookback = int(params.get("lookback", 30))
+        dd_th = float(params.get("dd_threshold", -0.10))
+        recovery_th = float(params.get("recovery_threshold", 0.3))
+        rolling_max = close.rolling(lookback).max()
+        rolling_min = close.rolling(lookback).min()
+        drawdown = (close - rolling_max) / rolling_max.replace(0, np.nan)
+        drawup = (close - rolling_min) / rolling_min.replace(0, np.nan)
+        recovery = (close - rolling_min) / (rolling_max - rolling_min).replace(0, np.nan)
+        pullback = (rolling_max - close) / (rolling_max - rolling_min).replace(0, np.nan)
+        prev_price = close.shift(1).fillna(close)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=(drawdown.shift(1) <= dd_th) & (recovery > recovery_th) & (close > prev_price),
+            long_exit=recovery >= 0.8,
+            short_entry=(drawup.shift(1) >= abs(dd_th)) & (pullback > recovery_th) & (close < prev_price),
+            short_exit=pullback >= 0.8,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "SortinoRatioStrategy":
+        period = int(params.get("period", 30))
+        threshold = abs(float(params.get("sortino_threshold", 1.0)))
+        returns = close.pct_change()
+
+        def calc_sortino(series: pd.Series) -> float:
+            sample = series.dropna()
+            if len(sample) < period // 2:
+                return np.nan
+            mean_ret = float(sample.mean())
+            downside = sample[sample < 0]
+            if len(downside) < 2:
+                return np.nan
+            downside_std = float(np.sqrt((downside ** 2).mean()) or 0.0)
+            return mean_ret / downside_std if downside_std > 0 else np.nan
+
+        sortino = returns.rolling(period).apply(calc_sortino, raw=False)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=sortino >= threshold,
+            long_exit=sortino <= -threshold,
+            short_entry=sortino <= -threshold,
+            short_exit=sortino >= threshold,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "HurstExponentStrategy":
+        hurst_period = int(params.get("hurst_period", 100))
+        zscore_period = int(params.get("zscore_period", 20))
+        z_th = abs(float(params.get("zscore_threshold", 1.5)))
+        returns = close.pct_change()
+
+        def calc_vr(series: pd.Series) -> float:
+            sample = series.dropna()
+            if len(sample) < 20:
+                return np.nan
+            var_1 = float(np.var(sample))
+            lag_ret = sample[::5]
+            if len(lag_ret) < 5:
+                return np.nan
+            var_lag = float(np.var(lag_ret) * 5)
+            return var_lag / var_1 if var_1 > 0 else np.nan
+
+        vr = returns.rolling(hurst_period).apply(calc_vr, raw=False)
+        mean = close.rolling(zscore_period).mean()
+        std = close.rolling(zscore_period).std().replace(0, np.nan)
+        zscore = (close - mean) / std
+        long_signal = ((vr > 1.1) & (zscore >= z_th)) | ((vr < 0.9) & (zscore <= -z_th))
+        short_signal = ((vr > 1.1) & (zscore <= -z_th)) | ((vr < 0.9) & (zscore >= z_th))
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=long_signal,
+            long_exit=short_signal,
+            short_entry=short_signal,
+            short_exit=long_signal,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "MeanReversionHalfLifeStrategy":
+        lookback = int(params.get("lookback", 60))
+        z_entry = abs(float(params.get("zscore_entry", 2.0)))
+        mean = close.rolling(lookback).mean()
+        std = close.rolling(lookback).std().replace(0, np.nan)
+        zscore = (close - mean) / std
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=zscore <= -z_entry,
+            long_exit=zscore >= z_entry,
+            short_entry=zscore >= z_entry,
+            short_exit=zscore <= -z_entry,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "OrderFlowImbalanceStrategy":
+        period = int(params.get("period", 10))
+        imbalance_th = abs(float(params.get("imbalance_threshold", 1.0)))
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce")
+        vol = pd.to_numeric(df["volume"], errors="coerce")
+        mid = (high + low) / 2
+        rng = (high - low).replace(0, np.nan)
+        imbalance = ((close - mid) / rng * vol).fillna(0.0)
+        cum_imbal = imbalance.rolling(period).sum()
+        ofi_z = (cum_imbal - cum_imbal.rolling(period).mean()) / cum_imbal.rolling(period).std().replace(0, np.nan)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=ofi_z >= imbalance_th,
+            long_exit=ofi_z <= -imbalance_th,
+            short_entry=ofi_z <= -imbalance_th,
+            short_exit=ofi_z >= imbalance_th,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    else:
+        raise ValueError(f"Unsupported strategy for OHLCV backtest: {strategy}")
+
+    return position.fillna(0.0)
+
+
 def _build_positions(strategy: str, df: pd.DataFrame, params: Optional[Dict[str, Any]] = None) -> pd.Series:
+    return _build_positions_v2(strategy, df, params=params)
+
+
+def _build_positions_legacy(strategy: str, df: pd.DataFrame, params: Optional[Dict[str, Any]] = None) -> pd.Series:
     params = params or {}
     close = df["close"]
     position = pd.Series(0.0, index=df.index)
@@ -1747,54 +2737,86 @@ def _build_positions(strategy: str, df: pd.DataFrame, params: Optional[Dict[str,
 
 
 def _extract_trade_points(close: pd.Series, position: pd.Series) -> Dict[str, List[Dict[str, Any]]]:
-    entries = (position.diff().fillna(0) > 0)
-    exits = (position.diff().fillna(0) < 0)
+    buy_points: List[Dict[str, Any]] = []
+    sell_points: List[Dict[str, Any]] = []
+    open_points: List[Dict[str, Any]] = []
+    close_points: List[Dict[str, Any]] = []
 
-    buy_points = [
-        {"timestamp": ts.isoformat(), "price": float(px)}
-        for ts, px in close[entries].items()
-    ]
-    sell_points = [
-        {"timestamp": ts.isoformat(), "price": float(px)}
-        for ts, px in close[exits].items()
-    ]
+    prev_state = 0.0
+    for ts, px in pd.to_numeric(close, errors="coerce").items():
+        if not np.isfinite(px):
+            continue
+        curr_state = _signed_state(position.loc[ts]) if ts in position.index else 0.0
+        if curr_state == prev_state:
+            continue
+
+        iso_ts = pd.Timestamp(ts).isoformat()
+        price = float(px)
+        if prev_state > 0:
+            sell_points.append({"timestamp": iso_ts, "price": price})
+            close_points.append({"timestamp": iso_ts, "price": price, "direction": "long"})
+        elif prev_state < 0:
+            buy_points.append({"timestamp": iso_ts, "price": price})
+            close_points.append({"timestamp": iso_ts, "price": price, "direction": "short"})
+
+        if curr_state > 0:
+            buy_points.append({"timestamp": iso_ts, "price": price})
+            open_points.append({"timestamp": iso_ts, "price": price, "direction": "long"})
+        elif curr_state < 0:
+            sell_points.append({"timestamp": iso_ts, "price": price})
+            open_points.append({"timestamp": iso_ts, "price": price, "direction": "short"})
+        prev_state = curr_state
 
     return {
         "buy_points": buy_points,
         "sell_points": sell_points,
-        "entries": len(buy_points),
-        "exits": len(sell_points),
+        "open_points": open_points,
+        "close_points": close_points,
+        "entries": len(open_points),
+        "exits": len(close_points),
     }
 
 
 def _trade_stats(close: pd.Series, position: pd.Series) -> Dict[str, Any]:
-    entries = (position.diff().fillna(0) > 0).astype(int)
-    exits = (position.diff().fillna(0) < 0).astype(int)
+    entries = 0
+    exits = 0
+    completed = 0
+    wins = 0
+    state = 0.0
+    entry_price = 0.0
 
-    entry_points = list(close[entries == 1].items())
-    exit_points = list(close[exits == 1].items())
+    close_series = pd.to_numeric(close, errors="coerce")
+    for ts, px in close_series.items():
+        if not np.isfinite(px) or px <= 0:
+            continue
+        desired = _signed_state(position.loc[ts]) if ts in position.index else 0.0
+        if state == desired:
+            continue
 
-    trade_returns = []
-    exit_idx = 0
-    for entry_time, entry_price in entry_points:
-        while exit_idx < len(exit_points) and exit_points[exit_idx][0] <= entry_time:
-            exit_idx += 1
-        if exit_idx >= len(exit_points):
-            break
-        _, exit_price = exit_points[exit_idx]
-        if entry_price > 0:
-            trade_returns.append((exit_price - entry_price) / entry_price)
-        exit_idx += 1
+        if state != 0.0:
+            exits += 1
+            completed += 1
+            trade_return = (
+                (float(px) - entry_price) / entry_price
+                if state > 0
+                else (entry_price - float(px)) / entry_price
+            ) if entry_price > 0 else 0.0
+            if trade_return > 0:
+                wins += 1
 
-    completed = len(trade_returns)
-    wins = sum(1 for r in trade_returns if r > 0)
-    win_rate = (wins / completed * 100) if completed else 0.0
+        if desired != 0.0:
+            entries += 1
+            entry_price = float(px)
+        else:
+            entry_price = 0.0
+        state = desired
 
+    win_rate = (wins / completed * 100.0) if completed else 0.0
     return {
-        "entries": int(entries.sum()),
-        "exits": int(exits.sum()),
-        "completed": completed,
-        "win_rate": round(win_rate, 2),
+        "entries": int(entries),
+        "exits": int(exits),
+        "completed": int(completed),
+        "win_rate": round(float(win_rate), 2),
     }
 
 
@@ -1805,7 +2827,7 @@ def _apply_protective_position_rules(
     stop_loss_pct: Optional[float],
     take_profit_pct: Optional[float],
 ) -> tuple[pd.Series, Dict[str, int]]:
-    effective = position.fillna(0.0).astype(float).clip(lower=0.0, upper=1.0).copy()
+    effective = pd.to_numeric(position, errors="coerce").fillna(0.0).map(_signed_state).astype(float).copy()
     if effective.empty:
         return effective, {"forced_stop_exits": 0, "forced_take_exits": 0}
 
@@ -1818,40 +2840,44 @@ def _apply_protective_position_rules(
     high = pd.to_numeric(df.get("high", close), errors="coerce")
     low = pd.to_numeric(df.get("low", close), errors="coerce")
 
-    in_position = False
+    state = 0.0
     entry_price = 0.0
     forced_stop = 0
     forced_take = 0
 
     for idx, ts in enumerate(effective.index):
-        desired = bool(float(effective.iloc[idx]) > 0.0)
+        desired = _signed_state(effective.iloc[idx])
         px = float(close.loc[ts]) if pd.notna(close.loc[ts]) else float("nan")
         hi = float(high.loc[ts]) if pd.notna(high.loc[ts]) else px
         lo = float(low.loc[ts]) if pd.notna(low.loc[ts]) else px
 
         if (not np.isfinite(px)) or px <= 0:
-            effective.iloc[idx] = 1.0 if in_position else 0.0
+            effective.iloc[idx] = state
             continue
 
-        if (not in_position) and desired:
-            in_position = True
+        if state == 0.0 and desired != 0.0:
+            state = desired
             entry_price = px
-            effective.iloc[idx] = 1.0
+            effective.iloc[idx] = state
             continue
 
-        if not in_position:
+        if state == 0.0:
             effective.iloc[idx] = 0.0
             continue
 
         hit_stop = False
         hit_take = False
         if sl_pct is not None:
-            stop_price = entry_price * (1.0 - sl_pct)
-            if np.isfinite(lo) and lo <= stop_price:
+            stop_price = entry_price * (1.0 - sl_pct if state > 0 else 1.0 + sl_pct)
+            if state > 0 and np.isfinite(lo) and lo <= stop_price:
+                hit_stop = True
+            if state < 0 and np.isfinite(hi) and hi >= stop_price:
                 hit_stop = True
         if tp_pct is not None:
-            take_price = entry_price * (1.0 + tp_pct)
-            if np.isfinite(hi) and hi >= take_price:
+            take_price = entry_price * (1.0 + tp_pct if state > 0 else 1.0 - tp_pct)
+            if state > 0 and np.isfinite(hi) and hi >= take_price:
+                hit_take = True
+            if state < 0 and np.isfinite(lo) and lo <= take_price:
                 hit_take = True
 
         if hit_stop or hit_take:
@@ -1859,18 +2885,21 @@ def _apply_protective_position_rules(
                 forced_stop += 1
             else:
                 forced_take += 1
-            in_position = False
+            state = 0.0
             entry_price = 0.0
             effective.iloc[idx] = 0.0
             continue
 
-        if not desired:
-            in_position = False
+        if desired == 0.0:
+            state = 0.0
             entry_price = 0.0
             effective.iloc[idx] = 0.0
             continue
 
-        effective.iloc[idx] = 1.0
+        if desired != state:
+            state = desired
+            entry_price = px
+        effective.iloc[idx] = state
 
     return effective, {"forced_stop_exits": int(forced_stop), "forced_take_exits": int(forced_take)}
 
@@ -1947,7 +2976,7 @@ def _diagnose_zero_trade_reason(
     exits = int(trade_stats.get("exits") or 0)
     completed = int(trade_stats.get("completed") or 0)
     last_pos = float(position.iloc[-1]) if len(position) else 0.0
-    active_ratio = float((position > 0).mean()) if len(position) else 0.0
+    active_ratio = float((position.abs() > 0).mean()) if len(position) else 0.0
 
     if entries == 0 and exits == 0:
         if active_ratio >= 0.98:
@@ -1955,7 +2984,7 @@ def _diagnose_zero_trade_reason(
         return "当前区间未触发入场条件，阈值可能过严或行情不匹配"
 
     if completed == 0 and entries > 0:
-        if last_pos > 0:
+        if abs(last_pos) > 0:
             return "触发了入场，但直到区间结束仍未满足平仓条件"
         return "出现零散入场/出场信号，但未配对成完整交易"
 
@@ -1998,10 +3027,16 @@ def _run_backtest_core(
         stop_loss_pct=stop_loss_pct,
         take_profit_pct=take_profit_pct,
     )
-    merged_params = dict(resolved_protection.get("params") or {})
+    merged_params = _apply_backtest_trade_policy_defaults(
+        strategy,
+        params=dict(resolved_protection.get("params") or {}),
+    )
     protective_enabled = bool(resolved_protection.get("enabled"))
     resolved_stop_loss_pct = _safe_positive_pct(resolved_protection.get("stop_loss_pct"))
     resolved_take_profit_pct = _safe_positive_pct(resolved_protection.get("take_profit_pct"))
+    allow_long = bool(merged_params.get("allow_long", True))
+    allow_short = bool(merged_params.get("allow_short", False))
+    reverse_on_signal = bool(merged_params.get("reverse_on_signal", True))
 
     benchmark_close = df["close"]
     protective_stats = {"forced_stop_exits": 0, "forced_take_exits": 0}
@@ -2063,7 +3098,7 @@ def _run_backtest_core(
         if len(position) > 0:
             turnover.iloc[0] = abs(float(position.iloc[0] or 0.0))
         trade_stats = _trade_stats(df["close"], position)
-        position_for_diagnostics = position.clip(lower=0.0, upper=1.0)
+        position_for_diagnostics = position.abs().clip(lower=0.0, upper=1.0)
 
     if not protective_enabled:
         resolved_stop_loss_pct = None
@@ -2123,6 +3158,9 @@ def _run_backtest_core(
         "use_stop_take": bool(protective_enabled),
         "stop_loss_pct": resolved_stop_loss_pct,
         "take_profit_pct": resolved_take_profit_pct,
+        "allow_long": allow_long,
+        "allow_short": allow_short,
+        "reverse_on_signal": reverse_on_signal,
         "forced_stop_exits": int(protective_stats.get("forced_stop_exits") or 0),
         "forced_take_exits": int(protective_stats.get("forced_take_exits") or 0),
         "forced_protective_exits": int(
@@ -2382,18 +3420,29 @@ async def _load_backtest_inputs(
 
     if strategy == "PairsTradingStrategy":
         resolved_symbol = _normalize_symbol(symbol) or "BTC/USDT"
-        pair_symbol = _normalize_symbol(merged_params.get("pair_symbol"))
-        if not pair_symbol:
-            raise HTTPException(status_code=400, detail="PairsTradingStrategy 缺少 pair_symbol 参数")
-        primary_df, pair_df = await asyncio.gather(
-            _load_backtest_df(resolved_symbol, timeframe, start_time=start_time, end_time=end_time),
-            _load_backtest_df(pair_symbol, timeframe, start_time=start_time, end_time=end_time),
+        pair_candidates = _pairs_candidate_symbols(resolved_symbol, merged_params.get("pair_symbol"))
+        if not pair_candidates:
+            raise HTTPException(status_code=400, detail="PairsTradingStrategy 缺少可用的副腿交易对")
+        primary_df = await _load_backtest_df(
+            resolved_symbol,
+            timeframe,
+            start_time=start_time,
+            end_time=end_time,
         )
         bundle: Dict[str, pd.DataFrame] = {}
         if not primary_df.empty:
             bundle[resolved_symbol] = primary_df.copy()
-        if not pair_df.empty:
+        for pair_symbol in pair_candidates:
+            pair_df = await _load_backtest_df(
+                pair_symbol,
+                timeframe,
+                start_time=start_time,
+                end_time=end_time,
+            )
+            if pair_df.empty:
+                continue
             bundle[pair_symbol] = pair_df.copy()
+            break
         return primary_df, bundle or None, resolved_symbol
 
     df = await _load_backtest_df(symbol, timeframe, start_time=start_time, end_time=end_time)

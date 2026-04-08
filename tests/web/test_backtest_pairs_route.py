@@ -40,6 +40,12 @@ def _mean_reverting_pair_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
     return _pair_frame(primary, "AAA/USDT"), _pair_frame(secondary, "BBB/USDT")
 
 
+def _rename_symbol(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    renamed = df.copy()
+    renamed["symbol"] = symbol
+    return renamed
+
+
 def test_run_backtest_custom_pairs_strategy_uses_dual_leg_spread(monkeypatch):
     from web.api import backtest as backtest_api
 
@@ -94,6 +100,46 @@ def test_run_backtest_custom_pairs_strategy_uses_dual_leg_spread(monkeypatch):
     assert payload["common_pnl"]["metadata"]["pair_symbol"] == "BBB/USDT"
 
 
+def test_run_backtest_custom_pairs_strategy_auto_switches_counter_leg(monkeypatch):
+    from web.api import backtest as backtest_api
+
+    primary_df, pair_df = _mean_reverting_pair_frames()
+    primary_df = _rename_symbol(primary_df, "ETH/USDT")
+    pair_df = _rename_symbol(pair_df, "BTC/USDT")
+
+    async def fake_load_backtest_df(symbol: str, timeframe: str, start_time=None, end_time=None):
+        mapping = {
+            "ETH/USDT": primary_df,
+            "BTC/USDT": pair_df,
+        }
+        return mapping.get(str(symbol), pd.DataFrame()).copy()
+
+    monkeypatch.setattr(backtest_api, "_load_backtest_df", fake_load_backtest_df)
+
+    payload = asyncio.run(
+        backtest_api.run_backtest_custom(
+            strategy="PairsTradingStrategy",
+            symbol="ETH/USDT",
+            timeframe="1h",
+            initial_capital=10000,
+            include_series=False,
+            params_json=json.dumps(
+                {
+                    "lookback_period": 30,
+                    "entry_z_score": 1.5,
+                    "exit_z_score": 0.5,
+                    "hedge_ratio_method": "ols",
+                }
+            ),
+        )
+    )
+
+    assert payload["portfolio_mode"] == "pairs_spread_dual_leg"
+    assert payload["symbol"] == "ETH/USDT"
+    assert payload["pair_symbol"] == "BTC/USDT"
+    assert payload["total_trades"] >= 1
+
+
 def test_compare_backtests_supports_pairs_strategy_dual_leg_mode(monkeypatch):
     from web.api import backtest as backtest_api
 
@@ -133,3 +179,35 @@ def test_compare_backtests_supports_pairs_strategy_dual_leg_mode(monkeypatch):
     assert row["strategy"] == "PairsTradingStrategy"
     assert row["portfolio_mode"] == "pairs_spread_dual_leg"
     assert row["pair_symbol"] == "BBB/USDT"
+
+
+def test_compare_backtests_keeps_pairs_strategy_when_primary_matches_default_pair(monkeypatch):
+    from web.api import backtest as backtest_api
+
+    primary_df, pair_df = _mean_reverting_pair_frames()
+    primary_df = _rename_symbol(primary_df, "ETH/USDT")
+    pair_df = _rename_symbol(pair_df, "BTC/USDT")
+
+    async def fake_load_backtest_df(symbol: str, timeframe: str, start_time=None, end_time=None):
+        mapping = {
+            "ETH/USDT": primary_df,
+            "BTC/USDT": pair_df,
+        }
+        return mapping.get(str(symbol), pd.DataFrame()).copy()
+
+    monkeypatch.setattr(backtest_api, "_load_backtest_df", fake_load_backtest_df)
+
+    payload = asyncio.run(
+        backtest_api.compare_backtests(
+            strategies="PairsTradingStrategy,MAStrategy",
+            symbol="ETH/USDT",
+            timeframe="1h",
+            initial_capital=10000,
+            pre_optimize=False,
+        )
+    )
+
+    rows = {row["strategy"]: row for row in payload["results"]}
+    assert "error" not in rows["PairsTradingStrategy"]
+    assert rows["PairsTradingStrategy"]["portfolio_mode"] == "pairs_spread_dual_leg"
+    assert rows["PairsTradingStrategy"]["pair_symbol"] == "BTC/USDT"

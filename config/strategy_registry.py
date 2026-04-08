@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from importlib import util as importlib_util
+from pathlib import Path
 from typing import Any, Dict, List
 
 
@@ -513,18 +515,56 @@ def get_strategy_recommended_symbols(name: str) -> List[str]:
     return list(syms) if syms else ["BTC/USDT"]
 
 
+def _mlxgboost_model_candidates() -> List[Path]:
+    defaults = STRATEGY_REGISTRY.get("MLXGBoostStrategy", {}).get("defaults", {})
+    configured_path = str(defaults.get("model_path") or "").strip()
+    repo_model = Path(__file__).resolve().parents[1] / "models" / "ml_signal_xgb.json"
+    raw_candidates = [configured_path, "models/ml_signal_xgb.json", str(repo_model)]
+
+    candidates: List[Path] = []
+    for raw in raw_candidates:
+        if not raw:
+            continue
+        path = Path(raw)
+        if path not in candidates:
+            candidates.append(path)
+    return candidates
+
+
+def _mlxgboost_backtest_support_status() -> tuple[bool, str | None]:
+    if importlib_util.find_spec("xgboost") is None:
+        return False, "当前环境缺少 xgboost，MLXGBoostStrategy 暂不可回测"
+    if not any(path.exists() for path in _mlxgboost_model_candidates()):
+        return False, "当前环境缺少 MLXGBoostStrategy 模型文件，暂不可回测"
+    return True, None
+
+
+def _resolve_backtest_support(name: str) -> tuple[bool, str | None]:
+    item = STRATEGY_REGISTRY.get(str(name), {})
+    bt = dict(item.get("backtest") or {})
+    if not bool(bt.get("supported", False)):
+        reason = str(bt.get("reason") or "").strip() or None
+        return False, reason
+
+    if str(name) == "MLXGBoostStrategy":
+        return _mlxgboost_backtest_support_status()
+
+    return True, None
+
+
 def get_backtest_strategy_catalog(names: List[str] | None = None) -> List[Dict[str, Any]]:
     selected = list(names or STRATEGY_REGISTRY.keys())
     rows: List[Dict[str, Any]] = []
     for name in selected:
         item = STRATEGY_REGISTRY.get(str(name), {})
         bt = dict(item.get("backtest") or {})
+        supported, reason = _resolve_backtest_support(name)
         rows.append(
             {
                 "name": str(name),
                 "description": str(bt.get("description") or item.get("usage") or name),
-                "backtest_supported": bool(bt.get("supported", False)),
-                **({"reason": bt.get("reason")} if bt.get("reason") else {}),
+                "backtest_supported": supported,
+                **({"reason": reason} if reason else {}),
             }
         )
     return rows
@@ -535,16 +575,18 @@ def get_backtest_strategy_info(name: str) -> Dict[str, Any]:
     bt = dict(item.get("backtest") or {})
     if not item:
         return {}
+    supported, reason = _resolve_backtest_support(name)
     return {
         "name": str(name),
         "description": str(bt.get("description") or item.get("usage") or name),
-        "backtest_supported": bool(bt.get("supported", False)),
-        **({"reason": bt.get("reason")} if bt.get("reason") else {}),
+        "backtest_supported": supported,
+        **({"reason": reason} if reason else {}),
     }
 
 
 def is_strategy_backtest_supported(name: str) -> bool:
-    return bool(STRATEGY_REGISTRY.get(str(name), {}).get("backtest", {}).get("supported", False))
+    supported, _ = _resolve_backtest_support(name)
+    return supported
 
 
 def get_backtest_optimization_grid(name: str) -> Dict[str, List[Any]]:
