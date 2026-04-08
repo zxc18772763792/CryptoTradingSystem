@@ -1071,7 +1071,7 @@
         block_count: 0,
         reduce_only_count: 0,
         last_hit: null,
-        scope_note: `鎽樿鍔犺浇澶辫触: ${err.message}`,
+        scope_note: `摘要加载失败: ${err.message}`,
       };
       renderLiveDecisionActivitySummary(state.liveDecisionActivity);
       clearTimeout(state.liveDecisionActivityRetryTimer);
@@ -1158,7 +1158,7 @@
             reduce_only_count: 0,
             bypass_count: 0,
             last_hit: null,
-            scope_note: '鎽樿鍒锋柊涓紝绋嶅悗鑷姩閲嶈瘯',
+            scope_note: '摘要刷新中，稍后自动重试',
             refresh_state: 'retrying',
             refresh_error: errorMessage,
           };
@@ -2509,9 +2509,9 @@
     const corrWith = cand?.metadata?.correlated_with || '';
     const corrVal = cand?.metadata?.correlation_value;
     const corrIsCross = cand?.metadata?.correlation_is_cross_batch;
-    const corrLabel = corrIsCross ? '璺ㄦ壒鐩稿叧' : '鐩稿叧';
+    const corrLabel = corrIsCross ? '跨批相关' : '相关';
     const corrBadge = corrFiltered
-      ? `<span class="cand-badge" style="background:#7a3a2a;color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;" title="涓?${esc(corrWith)} 鐩稿叧 蟻=${corrVal}">${corrLabel}</span>`
+      ? `<span class="cand-badge" style="background:#7a3a2a;color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;" title="与 ${esc(corrWith)}${corrIsCross ? '（已运行策略）' : ''} 高度相关 ρ=${corrVal}">${corrLabel}</span>`
       : '';
     const trials = cand?.metadata?.best?.optimization_trials;
     const paramsBadge = trials > 0
@@ -2972,6 +2972,9 @@
       .replace('folds+', '折叠中');
     panel.dataset.candidateId = String(candidateId);
     normalizeDomText(panel);
+    if (window.innerWidth <= 1280) {
+      panel.closest('.ai-hub-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
     const cachedPerf = state.perfHistoryCache[String(candidateId)];
     if (cachedPerf) {
       const perfPanel = panel.querySelector('#perf-history-panel');
@@ -3084,7 +3087,7 @@
       approveBtn.addEventListener('click', async () => {
         const target = document.getElementById('approval-target-select')?.value || 'paper';
         const notes  = document.getElementById('approval-notes-input')?.value || '';
-        approveBtn.textContent = '鎵瑰噯涓?..';
+        approveBtn.textContent = '批准中...';
         approveBtn.disabled = true;
         try {
           await aiApi(`/candidates/${encodeURIComponent(candidateId)}/human-approve`, {
@@ -3986,14 +3989,14 @@
 
   async function generateProposal() {
     const goal = String(document.getElementById('ai-planner-goal')?.value || '').trim();
-    if (goal.length < 8) { notify('鐮旂┒鐩爣澶煭锛堣嚦灏?涓瓧绗︼級', true); return; }
+    if (goal.length < 8) { notify('研究目标太短（至少8个字符）', true); return; }
     const symbols   = csvInput('ai-planner-symbols');
     const primarySym = symbols[0] || getCurrentResearchSymbol() || 'BTC/USDT';
     const plannerConstraints = buildPlannerConstraints();
 
     // 鈹€鈹€ 鑷姩閲囬泦瀹炴椂甯傚満涓婁笅鏂?鈹€鈹€
     const marketCtxEl = document.getElementById('ai-market-context-hint');
-    if (marketCtxEl) marketCtxEl.textContent = '姝ｅ湪閲囬泦甯傚満涓婁笅鏂?.';
+    if (marketCtxEl) marketCtxEl.textContent = '正在采集市场上下文...';
     const liveCtx = await _collectLiveMarketContext(primarySym).catch(() => ({}));
     if (marketCtxEl) {
       const dir   = String(liveCtx.sentiment || 'FLAT');
@@ -4507,15 +4510,15 @@
   function bindEvents() {
     /* 鐢熸垚鐮旂┒ */
     document.getElementById('ai-generate-btn')?.addEventListener('click', () =>
-      withActionLock('generate', () => generateProposal()).catch(err => notify(`鐢熸垚澶辫触: ${err.message}`, true)));
+      withActionLock('generate', () => generateProposal()).catch(err => notify(`生成失败: ${err.message}`, true)));
 
     /* AI鐢熸垚鐮旂┒鎬濊矾 */
     document.getElementById('ai-context-btn')?.addEventListener('click', () =>
-      generateAIContext().catch(err => notify(`鐢熸垚鐮旂┒鎬濊矾澶辫触: ${err.message}`, true)));
+      generateAIContext().catch(err => notify(`生成研究思路失败: ${err.message}`, true)));
 
     /* one-click 鑷姩鐮旂┒ */
     document.getElementById('ai-oneclick-btn')?.addEventListener('click', () =>
-      withActionLock('oneclick', () => runOneClickResearchDeploy()).catch(err => notify(`one-click 鎵ц澶辫触: ${err.message}`, true)));
+      withActionLock('oneclick', () => runOneClickResearchDeploy()).catch(err => notify(`one-click 执行失败: ${err.message}`, true)));
 
     /* 寰呬汉宸ョ‘璁ら槦鍒椾簨浠朵唬鐞?*/
     document.getElementById('ai-approval-list')?.addEventListener('click', e => {
@@ -4533,13 +4536,13 @@
     document.getElementById('ai-refresh-btn')?.addEventListener('click', () =>
       refreshWorkbench().catch(err => notify(`鍒锋柊澶辫触: ${err.message}`, true)));
     document.getElementById('ai-data-refresh-btn')?.addEventListener('click', () =>
-      loadDataReadiness().catch(err => notify(`鏁版嵁璇婃柇澶辫触: ${err.message}`, true)));
+      loadDataReadiness().catch(err => notify(`数据诊断失败: ${err.message}`, true)));
     document.getElementById('ai-news-pull-btn')?.addEventListener('click', () =>
-      pullNewsForResearch().catch(err => notify(`鏂伴椈鎷夊彇澶辫触: ${err.message}`, true)));
+      pullNewsForResearch().catch(err => notify(`新闻拉取失败: ${err.message}`, true)));
     document.getElementById('ai-funding-warm-btn')?.addEventListener('click', () =>
-      warmFundingForResearch().catch(err => notify(`瀹忚缂撳瓨棰勭儹澶辫触: ${err.message}`, true)));
+      warmFundingForResearch().catch(err => notify(`宏观缓存预热失败: ${err.message}`, true)));
     document.getElementById('ai-live-decision-save-btn')?.addEventListener('click', () =>
-      saveLiveDecisionRuntimeConfig().catch(err => notify(`涓嬪崟鍓岮I澶嶆牳淇濆瓨澶辫触: ${err.message}`, true)));
+      saveLiveDecisionRuntimeConfig().catch(err => notify(`下单前AI复核保存失败: ${err.message}`, true)));
     ['ai-live-decision-enabled', 'ai-live-decision-mode', 'ai-live-decision-provider'].forEach((id) => {
       document.getElementById(id)?.addEventListener('change', () => previewLiveDecisionProviderSelection());
     });
@@ -4764,7 +4767,7 @@
   function syncHubLayoutHeight() {
     const hub = document.querySelector('#ai-research .ai-hub-layout');
     if (!hub) return;
-    if (window.innerWidth <= 1100) {
+    if (window.innerWidth <= 1280) {
       hub.style.height = 'auto';
       return;
     }
@@ -4825,7 +4828,7 @@
     updatePlannerModeHint();
     normalizeDomText(document.getElementById('ai-research'));
     if (isAiResearchActive() && canRunAiPolling()) {
-      refreshWorkbench().catch(err => console.error('AI鐮旂┒鍒濆鍖栧け璐?', err));
+      refreshWorkbench().catch(err => console.error('AI研究初始化失败', err));
     }
     if (isAiWorkspaceActive()) startPolling();
   }

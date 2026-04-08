@@ -11,6 +11,7 @@ import strategies as strategy_module
 from config.settings import settings
 from config.strategy_registry import get_strategy_defaults
 from core.ai.proposal_schemas import ResearchProposal
+from core.ai.runtime_strategy_metadata import build_ai_research_strategy_metadata
 from core.research.experiment_registry import LifecycleRegistry
 from core.research.experiment_schemas import LifecycleRecord, PromotionDecision, StrategyCandidate
 from core.strategies.runtime_policy import build_runtime_limit_policy
@@ -199,6 +200,11 @@ async def promote_candidate(
     params.update(dict(candidate.params or {}))
     params.setdefault("exchange", str(candidate.metadata.get("exchange") or "binance"))
     params.setdefault("account_id", f"ai_{strategy_name.lower()}")
+    strategy_metadata = build_ai_research_strategy_metadata(
+        candidate,
+        strategy_name=strategy_name,
+        target_mode=decision,
+    )
 
     if decision == "paper" and execution_engine.get_trading_mode() != "paper":
         current_mode = execution_engine.get_trading_mode()
@@ -236,6 +242,7 @@ async def promote_candidate(
             timeframe=candidate.timeframe,
             allocation=float(constraints.get("allocation_cap", default_allocation) or default_allocation),
             runtime_limit_minutes=runtime_limit_minutes,
+            metadata=strategy_metadata,
         )
         if not ok:
             raise RuntimeError("strategy registration failed during paper promotion")

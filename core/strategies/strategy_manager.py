@@ -47,6 +47,7 @@ class StrategyConfig:
     exchange: str = "gate"
     allocation: float = settings.DEFAULT_STRATEGY_ALLOCATION
     runtime_limit_minutes: Optional[int] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -764,6 +765,7 @@ class StrategyManager:
         timeframe: str = "1h",
         allocation: float = settings.DEFAULT_STRATEGY_ALLOCATION,
         runtime_limit_minutes: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
         if name in self._strategies:
             logger.warning(f"Strategy {name} already registered")
@@ -788,6 +790,7 @@ class StrategyManager:
                     if runtime_limit_minutes is not None
                     else None
                 ),
+                metadata=dict(metadata or {}),
             )
 
             self._strategies[name] = strategy
@@ -964,6 +967,23 @@ class StrategyManager:
         if name not in self._configs:
             return False
         self._configs[name].allocation = max(0.0, min(float(allocation), 1.0))
+        return True
+
+    def update_strategy_metadata(
+        self,
+        name: str,
+        metadata: Optional[Dict[str, Any]],
+        *,
+        replace: bool = False,
+    ) -> bool:
+        cfg = self._configs.get(name)
+        if not cfg:
+            return False
+        next_metadata = dict(metadata or {})
+        if replace:
+            cfg.metadata = next_metadata
+        else:
+            cfg.metadata.update(next_metadata)
         return True
 
     def update_strategy_runtime_config(
@@ -1197,6 +1217,7 @@ class StrategyManager:
             "enabled": config.enabled,
             "allocation": config.allocation,
             "params": editable_params,
+            "metadata": self._sanitize_params_for_api(dict(config.metadata or {})),
             "account_id": self._strategy_account_id(name),
             "last_run_at": self._last_run_at.get(name).isoformat() if self._last_run_at.get(name) else None,
             "runtime": self.get_strategy_runtime(name),

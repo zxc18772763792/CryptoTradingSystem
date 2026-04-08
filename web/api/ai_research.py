@@ -20,6 +20,7 @@ from config.settings import settings
 from core.ai.autonomous_agent import autonomous_trading_agent
 from core.ai.live_decision_router import live_decision_router
 from core.ai.research_runtime_context import resolve_runtime_research_context
+from core.ai.runtime_strategy_metadata import build_ai_research_strategy_metadata
 from core.backtest.funding_provider import FundingProviderConfig, FundingRateProvider
 from core.governance.audit import GovernanceAuditEvent, write_audit
 from core.deployment.promotion_engine import transition_candidate, transition_proposal
@@ -1030,6 +1031,11 @@ async def _ensure_candidate_runtime_strategy(
         runtime_limit_minutes = int(runtime_policy["runtime_limit_minutes"])
 
     strategy = strategy_manager.get_strategy(strategy_name)
+    strategy_metadata = build_ai_research_strategy_metadata(
+        candidate,
+        strategy_name=strategy_name,
+        target_mode=resolved_mode,
+    )
     if strategy is None:
         ok = strategy_manager.register_strategy(
             name=strategy_name,
@@ -1039,12 +1045,14 @@ async def _ensure_candidate_runtime_strategy(
             timeframe=str(getattr(candidate, "timeframe", "") or "1h"),
             allocation=allocation,
             runtime_limit_minutes=runtime_limit_minutes,
+            metadata=strategy_metadata,
         )
         if not ok:
             raise RuntimeError("strategy registration failed during live activation")
     else:
         strategy_manager.update_strategy_params(strategy_name, params)
         strategy_manager.update_strategy_allocation(strategy_name, allocation)
+        strategy_manager.update_strategy_metadata(strategy_name, strategy_metadata)
         strategy_manager.update_strategy_runtime_config(
             strategy_name,
             timeframe=str(getattr(candidate, "timeframe", "") or "1h"),

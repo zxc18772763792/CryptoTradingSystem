@@ -31,6 +31,7 @@ def _get_strategy_classes() -> Dict[str, Any]:
 def _build_payload(info: Dict[str, Any]) -> Dict[str, Any]:
     params = dict(info.get("params") or {})
     runtime = dict(info.get("runtime") or {})
+    metadata = dict(info.get("metadata") or {}) if isinstance(info.get("metadata"), dict) else {}
     return {
         "user_params": params,
         "symbols": list(info.get("symbols") or []),
@@ -40,6 +41,7 @@ def _build_payload(info: Dict[str, Any]) -> Dict[str, Any]:
         "runtime_limit_minutes": runtime.get("runtime_limit_minutes"),
         "runtime_started_at": runtime.get("started_at"),
         "state": str(info.get("state") or "idle"),
+        "metadata": metadata,
     }
 
 
@@ -145,6 +147,7 @@ async def restore_strategies_from_db() -> Dict[str, Any]:
         runtime_limit_minutes = payload.get("runtime_limit_minutes")
         runtime_started_at = _parse_runtime_anchor(payload.get("runtime_started_at"))
         state = str(payload.get("state") or ("running" if row.is_active else "stopped")).lower()
+        metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
 
         if strategy_manager.get_strategy(name) is None:
             ok = strategy_manager.register_strategy(
@@ -155,6 +158,7 @@ async def restore_strategies_from_db() -> Dict[str, Any]:
                 timeframe=timeframe,
                 allocation=allocation,
                 runtime_limit_minutes=runtime_limit_minutes,
+                metadata=metadata,
             )
             if not ok:
                 skipped.append({"name": name, "reason": "register_failed"})

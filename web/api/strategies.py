@@ -19,6 +19,7 @@ from config.strategy_registry import (
     get_strategy_recommended_symbols,
     get_strategy_recommended_timeframe,
 )
+from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.audit import audit_logger
 from core.data import data_storage
 from core.exchanges import exchange_manager
@@ -110,6 +111,292 @@ def _effective_strategy_defaults(strategy_type: str, exchange: str, klass: Any =
     merged = dict(runtime_defaults)
     merged.update(recommended)
     return merged if merged else recommended
+
+
+def _clean_strategy_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _strategy_metadata(info: Dict[str, Any]) -> Dict[str, Any]:
+    raw = info.get("metadata")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _strategy_ownership_label(source: str) -> str:
+    mapping = {
+        "ai_research": "AI研究",
+        "ai_autonomous_agent": "AI自治代理",
+        "backtest_import": "回测导入",
+        "manual": "手动注册",
+    }
+    return mapping.get(str(source or "").strip().lower(), "手动注册")
+
+
+def _strategy_ownership_tone(source: str) -> str:
+    mapping = {
+        "ai_research": "ai-research",
+        "ai_autonomous_agent": "ai-agent",
+        "backtest_import": "backtest",
+        "manual": "manual",
+    }
+    return mapping.get(str(source or "").strip().lower(), "manual")
+
+
+def _compose_strategy_ownership_detail(parts: List[str]) -> str:
+    return " · ".join([str(item).strip() for item in parts if str(item or "").strip()])
+
+
+def _make_strategy_ownership(
+    *,
+    source: str,
+    detail: str = "",
+    candidate_id: str = "",
+    proposal_id: str = "",
+    runtime_mode: str = "",
+    search_role: str = "",
+    promotion_target: str = "",
+    inferred: bool = False,
+    matched_from: str = "",
+    label: str = "",
+) -> Dict[str, Any]:
+    resolved_source = str(source or "manual").strip().lower() or "manual"
+    payload: Dict[str, Any] = {
+        "source": resolved_source,
+        "label": str(label or _strategy_ownership_label(resolved_source)).strip() or _strategy_ownership_label(resolved_source),
+        "badge_tone": _strategy_ownership_tone(resolved_source),
+        "detail": str(detail or "").strip(),
+        "candidate_id": str(candidate_id or "").strip(),
+        "proposal_id": str(proposal_id or "").strip(),
+        "runtime_mode": str(runtime_mode or "").strip(),
+        "search_role": str(search_role or "").strip(),
+        "promotion_target": str(promotion_target or "").strip(),
+        "inferred": bool(inferred),
+        "matched_from": str(matched_from or "").strip(),
+    }
+    return {key: value for key, value in payload.items() if value not in ("", None)}
+
+
+def _build_ai_research_context_ownership(context: Dict[str, Any], *, matched_from: str) -> Optional[Dict[str, Any]]:
+    payload = dict(context or {})
+    candidate = payload.get("selected_candidate")
+    if not isinstance(candidate, dict) or not candidate:
+        candidate = payload.get("selected_eligibility")
+    candidate = dict(candidate or {}) if isinstance(candidate, dict) else {}
+    if not candidate:
+        return None
+
+    detail = _compose_strategy_ownership_detail(
+        [
+            f"模式 {candidate.get('runtime_mode_cap') or candidate.get('runtime_mode')}" if candidate.get("runtime_mode_cap") or candidate.get("runtime_mode") else "",
+            f"候选 {candidate.get('candidate_id')}" if candidate.get("candidate_id") else "",
+            f"提案 {candidate.get('proposal_id')}" if candidate.get("proposal_id") else "",
+            f"角色 {candidate.get('search_role')}" if candidate.get("search_role") else "",
+            f"目标 {candidate.get('promotion_target')}" if candidate.get("promotion_target") else "",
+        ]
+    )
+    return _make_strategy_ownership(
+        source="ai_research",
+        detail=detail,
+        candidate_id=_clean_strategy_text(candidate.get("candidate_id")),
+        proposal_id=_clean_strategy_text(candidate.get("proposal_id")),
+        runtime_mode=_clean_strategy_text(candidate.get("runtime_mode_cap") or candidate.get("runtime_mode")),
+        search_role=_clean_strategy_text(candidate.get("search_role")),
+        promotion_target=_clean_strategy_text(candidate.get("promotion_target")),
+        inferred=True,
+        matched_from=matched_from,
+    )
+
+
+def _build_metadata_ownership(info: Dict[str, Any], metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    source_hint = _clean_strategy_text(
+        metadata.get("source")
+        or metadata.get("owner_group")
+        or metadata.get("live_activation_source")
+    ).lower()
+    candidate_id = _clean_strategy_text(metadata.get("candidate_id"))
+    proposal_id = _clean_strategy_text(metadata.get("proposal_id"))
+    runtime_mode = _clean_strategy_text(metadata.get("runtime_mode"))
+    search_role = _clean_strategy_text(metadata.get("search_role"))
+    promotion_target = _clean_strategy_text(metadata.get("promotion_target"))
+    custom_label = _clean_strategy_text(metadata.get("source_label"))
+
+    if source_hint in {"ai_research", "ai_research_live_activate"} or candidate_id or proposal_id:
+        return _make_strategy_ownership(
+            source="ai_research",
+            label=custom_label,
+            detail=_compose_strategy_ownership_detail(
+                [
+                    f"模式 {runtime_mode}" if runtime_mode else "",
+                    f"候选 {candidate_id}" if candidate_id else "",
+                    f"提案 {proposal_id}" if proposal_id else "",
+                    f"角色 {search_role}" if search_role else "",
+                    f"目标 {promotion_target}" if promotion_target else "",
+                ]
+            ),
+            candidate_id=candidate_id,
+            proposal_id=proposal_id,
+            runtime_mode=runtime_mode,
+            search_role=search_role,
+            promotion_target=promotion_target,
+            inferred=False,
+            matched_from="metadata",
+        )
+
+    strategy_type = _clean_strategy_text(info.get("strategy_type"))
+    name = _clean_strategy_text(info.get("name"))
+    if source_hint in {"ai_autonomous_agent", "autonomous_agent"} or strategy_type == "AI_AutonomousAgent" or name == "AI_AutonomousAgent":
+        return _make_strategy_ownership(
+            source="ai_autonomous_agent",
+            label=custom_label,
+            detail="由 AI 自治代理运行与执行链路托管",
+            inferred=False,
+            matched_from="metadata",
+        )
+
+    if source_hint in {"backtest", "backtest_import"}:
+        return _make_strategy_ownership(
+            source="backtest_import",
+            label=custom_label,
+            detail="由回测/批量导入生成的策略实例",
+            inferred=False,
+            matched_from="metadata",
+        )
+
+    if source_hint in {"manual", "user"}:
+        return _make_strategy_ownership(
+            source="manual",
+            label=custom_label,
+            detail="页面手动注册或编辑生成的策略实例",
+            inferred=False,
+            matched_from="metadata",
+        )
+    return None
+
+
+def _looks_like_ai_research_runtime(info: Dict[str, Any], metadata: Dict[str, Any]) -> bool:
+    if _build_metadata_ownership(info, metadata):
+        ownership = _build_metadata_ownership(info, metadata) or {}
+        if ownership.get("source") == "ai_research":
+            return True
+    name = _clean_strategy_text(info.get("name")).lower()
+    account_id = _clean_strategy_text(info.get("account_id") or (info.get("params") or {}).get("account_id")).lower()
+    return any(
+        (
+            candidate
+            for candidate in (
+                "_ai_" in name,
+                name.startswith("ai_"),
+                "_ai_" in account_id,
+                account_id.startswith("ai_"),
+                bool(metadata.get("registered_from") == "candidate_runtime"),
+            )
+            if candidate
+        )
+    )
+
+
+def _looks_like_backtest_runtime(info: Dict[str, Any]) -> bool:
+    name = _clean_strategy_text(info.get("name")).lower()
+    account_id = _clean_strategy_text(info.get("account_id") or (info.get("params") or {}).get("account_id")).lower()
+    return (
+        name.startswith("bt_")
+        or name.startswith("backtest_")
+        or account_id.startswith("strategy_bt_")
+        or account_id.startswith("bt_")
+    )
+
+
+def _resolve_strategy_ownership(info: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = _strategy_metadata(info)
+    explicit = _build_metadata_ownership(info, metadata)
+    if explicit is not None:
+        if explicit.get("source") == "ai_research" and (not explicit.get("candidate_id") or not explicit.get("proposal_id")):
+            try:
+                context = resolve_runtime_research_context(
+                    exchange=_clean_strategy_text(info.get("exchange")),
+                    symbol=str((info.get("symbols") or [""])[0] or ""),
+                    timeframe=_clean_strategy_text(info.get("timeframe")),
+                    strategy_name=_clean_strategy_text(info.get("strategy_type") or info.get("name")),
+                )
+            except Exception:
+                context = {}
+            context_ownership = _build_ai_research_context_ownership(context, matched_from="metadata+context")
+            if context_ownership is not None:
+                merged = dict(context_ownership)
+                merged.update(
+                    {
+                        "label": explicit.get("label"),
+                        "badge_tone": explicit.get("badge_tone"),
+                        "source": explicit.get("source"),
+                        "inferred": False,
+                        "matched_from": "metadata+context",
+                    }
+                )
+                merged["detail"] = explicit.get("detail") or context_ownership.get("detail") or ""
+                if explicit.get("candidate_id"):
+                    merged["candidate_id"] = explicit.get("candidate_id")
+                if explicit.get("proposal_id"):
+                    merged["proposal_id"] = explicit.get("proposal_id")
+                if explicit.get("runtime_mode"):
+                    merged["runtime_mode"] = explicit.get("runtime_mode")
+                if explicit.get("search_role"):
+                    merged["search_role"] = explicit.get("search_role")
+                if explicit.get("promotion_target"):
+                    merged["promotion_target"] = explicit.get("promotion_target")
+                return merged
+        return explicit
+
+    strategy_type = _clean_strategy_text(info.get("strategy_type"))
+    name = _clean_strategy_text(info.get("name"))
+    if strategy_type == "AI_AutonomousAgent" or name == "AI_AutonomousAgent":
+        return _make_strategy_ownership(
+            source="ai_autonomous_agent",
+            detail="由 AI 自治代理运行与执行链路托管",
+            inferred=True,
+            matched_from="heuristic_strategy_name",
+        )
+
+    if _looks_like_ai_research_runtime(info, metadata):
+        try:
+            context = resolve_runtime_research_context(
+                exchange=_clean_strategy_text(info.get("exchange")),
+                symbol=str((info.get("symbols") or [""])[0] or ""),
+                timeframe=_clean_strategy_text(info.get("timeframe")),
+                strategy_name=_clean_strategy_text(info.get("strategy_type") or info.get("name")),
+            )
+        except Exception:
+            context = {}
+        context_ownership = _build_ai_research_context_ownership(context, matched_from="heuristic+context")
+        if context_ownership is not None:
+            return context_ownership
+        return _make_strategy_ownership(
+            source="ai_research",
+            detail="AI研究运行实例（按策略命名/账户自动识别）",
+            inferred=True,
+            matched_from="heuristic_ai_account",
+        )
+
+    if _looks_like_backtest_runtime(info):
+        return _make_strategy_ownership(
+            source="backtest_import",
+            detail="由回测/批量导入生成的策略实例",
+            inferred=True,
+            matched_from="heuristic_backtest",
+        )
+
+    return _make_strategy_ownership(
+        source="manual",
+        detail="页面手动注册或编辑生成的策略实例",
+        inferred=True,
+        matched_from="default_manual",
+    )
+
+
+def _enrich_strategy_info(info: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(info or {})
+    payload["metadata"] = _strategy_metadata(payload)
+    payload["ownership"] = _resolve_strategy_ownership(payload)
+    return payload
 
 
 def _safe_float(value: Any, fallback: float = 0.0) -> float:
@@ -417,6 +704,7 @@ class StrategyRegisterRequest(BaseModel):
     exchange: str = "gate"
     allocation: float = Field(default=settings.DEFAULT_STRATEGY_ALLOCATION, ge=0.0, le=1.0)
     runtime_limit_minutes: Optional[int] = Field(default=None, ge=0, le=10080)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class StrategyUpdateRequest(BaseModel):
@@ -446,6 +734,7 @@ class StrategyImportItem(BaseModel):
     exchange: str = "gate"
     allocation: float = Field(default=settings.DEFAULT_STRATEGY_ALLOCATION, ge=0.0, le=1.0)
     state: str = "idle"
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class StrategyImportRequest(BaseModel):
@@ -824,9 +1113,10 @@ async def _auto_register_defaults_for_start_all() -> List[str]:
 @router.get("/list")
 async def list_strategies():
     available_map = _get_strategy_classes()
+    registered = [_enrich_strategy_info(item) for item in strategy_manager.list_strategies()]
     return {
         "strategies": list(available_map.keys()),
-        "registered": strategy_manager.list_strategies(),
+        "registered": registered,
     }
 
 
@@ -1039,6 +1329,7 @@ async def export_strategy(name: str):
             "exchange": info.get("exchange", "gate"),
             "allocation": info.get("allocation", settings.DEFAULT_STRATEGY_ALLOCATION),
             "state": info.get("state", "idle"),
+            "metadata": info.get("metadata", {}),
         },
         "exported_at": info.get("last_run_at"),
     }
@@ -1058,6 +1349,7 @@ async def export_all_strategies():
                 "exchange": info.get("exchange", "gate"),
                 "allocation": info.get("allocation", settings.DEFAULT_STRATEGY_ALLOCATION),
                 "state": info.get("state", "idle"),
+                "metadata": info.get("metadata", {}),
             }
         )
     return {"strategies": items, "count": len(items)}
@@ -1104,6 +1396,7 @@ async def import_strategies(payload: StrategyImportRequest):
             timeframe=item.timeframe,
             allocation=item.allocation,
             runtime_limit_minutes=runtime_policy["runtime_limit_minutes"],
+            metadata=item.metadata,
         )
         if not ok:
             skipped.append({"name": name, "reason": "register_failed"})
@@ -1302,6 +1595,7 @@ async def register_strategy(request: StrategyRegisterRequest):
         timeframe=request.timeframe,
         allocation=request.allocation,
         runtime_limit_minutes=runtime_limit_minutes,
+        metadata=request.metadata,
     )
 
     if not success:
@@ -1382,7 +1676,7 @@ async def get_strategy(name: str):
 
     info = strategy_manager.get_strategy_info(name)
     if info:
-        return info
+        return _enrich_strategy_info(info)
     raise HTTPException(status_code=404, detail="Strategy not found")
 
 

@@ -559,6 +559,40 @@ const multiSym=syms.length>1?`+${syms.length-1}`:'';
 const instanceTag=typeCount>1?`#${typeIndex}`:`#${strategyInstanceSuffix(s?.name)}`;
 return `${shortType}${instanceTag} · ${tf} · ${symTxt}${multiSym}`;
 }
+function normalizeStrategyOwnership(strategy){
+const own=(strategy&&typeof strategy.ownership==='object'&&strategy.ownership)?strategy.ownership:{};
+const source=String(own.source||'').trim().toLowerCase()||'manual';
+const label=String(own.label||'').trim()||({ai_research:'AI研究',ai_autonomous_agent:'AI自治代理',backtest_import:'回测导入',manual:'手动注册'}[source]||'手动注册');
+const tone=String(own.badge_tone||'').trim()||({ai_research:'ai-research',ai_autonomous_agent:'ai-agent',backtest_import:'backtest',manual:'manual'}[source]||'manual');
+let detail=String(own.detail||'').trim();
+if(!detail){
+  const parts=[];
+  if(own.runtime_mode)parts.push(`模式 ${own.runtime_mode}`);
+  if(own.candidate_id)parts.push(`候选 ${own.candidate_id}`);
+  if(own.proposal_id)parts.push(`提案 ${own.proposal_id}`);
+  if(own.search_role)parts.push(`角色 ${own.search_role}`);
+  if(own.promotion_target)parts.push(`目标 ${own.promotion_target}`);
+  detail=parts.join(' · ');
+}
+if(!detail){
+  detail=({
+    ai_research: own.inferred?'AI研究运行实例（自动识别）':'来自 AI 研究候选运行链路',
+    ai_autonomous_agent:'由 AI 自治代理运行与执行链路托管',
+    backtest_import:'由回测/批量导入生成的策略实例',
+    manual:'页面手动注册或编辑生成的策略实例',
+  }[source]||'页面手动注册或编辑生成的策略实例');
+}
+return{source,label,tone,detail,inferred:!!own.inferred};
+}
+function summarizeStrategyOwnershipCounts(items){
+const counts={};
+const order=['AI研究','AI自治代理','回测导入','手动注册'];
+(Array.isArray(items)?items:[]).forEach(item=>{
+  const label=normalizeStrategyOwnership(item).label;
+  counts[label]=(counts[label]||0)+1;
+});
+return order.filter(label=>counts[label]).map(label=>`${label} ${counts[label]}`).join(' | ');
+}
 function getRegisteredStrategyFilters(){
 return{
 search:String(document.getElementById('registered-strategy-search')?.value||'').trim().toLowerCase(),
@@ -1344,12 +1378,15 @@ const filteredStrategies=(state.strategies||[]).filter(s=>{
   if(filters.state && sState!==filters.state)return false;
   if(filters.search){
     const symbols=Array.isArray(s?.symbols)?s.symbols:[];
+    const ownership=normalizeStrategyOwnership(s);
     const searchBlob=[
       s?.name,
       stype,
       strategyTypeShortName(stype),
       cat,
       s?.timeframe,
+      ownership.label,
+      ownership.detail,
       ...symbols,
       buildStrategyShortDisplayLabel(s),
     ].map(x=>String(x||'').toLowerCase()).join(' | ');
@@ -1359,7 +1396,8 @@ const filteredStrategies=(state.strategies||[]).filter(s=>{
 });
 if(metaEl){
   const runningCount=(state.strategies||[]).filter(x=>String(x?.state||'')==='running').length;
-  metaEl.textContent=`已注册 ${state.strategies.length} | 运行中 ${runningCount} | 当前显示 ${filteredStrategies.length} | 点击卡片在右侧编辑`;
+  const ownershipSummary=summarizeStrategyOwnershipCounts(state.strategies||[]);
+  metaEl.textContent=`已注册 ${state.strategies.length} | 运行中 ${runningCount}${ownershipSummary?` | ${ownershipSummary}`:''} | 当前显示 ${filteredStrategies.length} | 点击卡片在右侧编辑`;
 }
 if(!state.strategies.length){grid.innerHTML='<div class="list-item">暂无已注册策略</div>';return;}
 if(!filteredStrategies.length){grid.innerHTML='<div class="list-item">没有匹配筛选条件的策略实例</div>';return;}
@@ -1382,6 +1420,7 @@ const symbolsArr=Array.isArray(s.symbols)?s.symbols:[];
 const symbolFull=symbolsArr.length?symbolsArr.join(', '):'全部';
 const symbolMain=symbolsArr.length?String(symbolsArr[0]).replace('/USDT','').replace('/USD',''):'全部';
 const symbolText=symbolsArr.length>1?`${symbolMain} +${symbolsArr.length-1}`:symbolMain;
+const ownership=normalizeStrategyOwnership(s);
 const active=String(state.selectedStrategyName||'')===String(s.name||'');
 const pnlPerf=(state.summary?.strategy_performance||{})[s.name]||{};
 const rp=Number(pnlPerf.return_pct);
@@ -1391,7 +1430,11 @@ return `<div class="registered-strategy-card ${active?'active':''}" onclick="sel
     <div class="name" title="${esc(String(s.name||''))}">${esc(shortLabel)}</div>
     <span class="status-badge ${String(s.state||'')==='running'?'connected':''}">${mapState(s.state)}</span>
   </div>
-  <div class="sub" title="${esc(String(s.name||''))}">${esc(shortType)} · 实例 ${esc(shortInstanceId(s.name))}</div>
+  <div class="subline">
+    <div class="sub" title="${esc(String(s.name||''))}">${esc(shortType)} · 实例 ${esc(shortInstanceId(s.name))}</div>
+    <span class="strategy-owner-badge ${ownership.tone}" title="${esc(ownership.detail)}">${esc(ownership.label)}</span>
+  </div>
+  <div class="owner-note" title="${esc(ownership.detail)}">${esc(ownership.detail)}</div>
   <div class="meta-grid">
     <div class="meta-chip"><span class="k">交易对</span><span class="v" title="${esc(symbolFull)}">${esc(symbolText)}</span></div>
     <div class="meta-chip"><span class="k">资金占比</span><span class="v">${a.toFixed(2)}</span></div>
@@ -1663,6 +1706,7 @@ const [info,schema,sizing]=await Promise.all([
   api(`/strategies/${name}/sizing-preview`,{timeoutMs:8000}).catch(()=>null),
 ]);
 const runtime=info.runtime||{};
+const ownership=normalizeStrategyOwnership(info);
 const currentSymbols=Array.isArray(info.symbols)&&info.symbols.length?info.symbols:['BTC/USDT'];
 const tfOpts=['1s','5s','10s','30s','1m','5m','15m','30m','1h','4h','1d'];
 const tfHtml=tfOpts.map(tf=>`<option value="${tf}" ${String(info.timeframe||'')===tf?'selected':''}>${tf}</option>`).join('');
@@ -1676,7 +1720,7 @@ const sizingStatus=String(sizing?.status||'');
 const sizingColor=sizingStatus==='ok'?'#3fb950':(sizingStatus==='blocked'?'#f85149':'#f0b429');
 const sizingResult=sizingStatus==='ok'?'当前可正常下单':(sizingStatus==='blocked'?'当前会被最小下单门槛拦截':'当前预估数据不足，暂无法判断');
 const sizingHtml=sizing?`<div class="form-group" style="margin-top:10px;"><label>下单预估</label><div class="list-item"><span>当前价格 / 账户权益</span><span>${Number(sizing.price||0).toFixed(4)} / ${Number(sizing.account_equity||0).toFixed(2)} USDT</span></div><div class="list-item"><span>价格来源</span><span>${esc(String(sizing.price_source||'unavailable'))}</span></div><div class="list-item"><span>分配资金 / 单笔上限</span><span>${Number(sizing.allocation_cap||0).toFixed(2)} / ${Number(sizing.risk_single_cap||0).toFixed(2)} USDT</span></div><div class="list-item"><span>当前可用名义金额</span><span>${Number(sizing.available_notional||0).toFixed(2)} USDT</span></div><div class="list-item"><span>最小合法数量 / 名义金额</span><span>${fmtQtyPreview(sizing.min_legal_qty||0)} / ${Number(sizing.min_legal_notional||0).toFixed(2)} USDT</span></div><div class="list-item"><span>结果</span><span style="color:${sizingColor};">${sizingResult}</span></div><div class="list-item"><span>说明</span><span>${esc(sizing.note||'-')}</span></div></div>`:'';
-panel.innerHTML=`<div class="form-group"><label>策略: ${info.name} (${info.strategy_type})</label><div class="list-item"><span>状态</span><span>${mapState(info.state)}</span></div><div class="list-item"><span>周期</span><span>${esc(info.timeframe||'-')}</span></div><div class="list-item"><span>交易对</span><span>${esc(currentSymbols.join(', '))}</span></div><div class="list-item"><span>最近运行</span><span>${info.last_run_at?fmtDateTime(info.last_run_at):'-'}</span></div><div class="list-item"><span>运行时长限制</span><span>${runtime.runtime_limit_minutes?`${runtime.runtime_limit_minutes} 分钟`:'不限时'}${runtime.remaining_seconds!==undefined&&runtime.remaining_seconds!==null?` | 剩余 ${fmtDurationSec(runtime.remaining_seconds)}`:''}</span></div></div>${sizingHtml}<div class="inline-actions" style="margin-top:4px;"><button class="btn btn-primary btn-sm" id="edit-toggle">${info.state==='running'?'停止策略':'启动策略'}</button><button class="btn btn-primary btn-sm" id="edit-clone">复制新实例</button><button class="btn btn-danger btn-sm" id="edit-delete">删除实例</button><button class="btn btn-primary btn-sm" id="edit-cmp">刷新对比</button>${canApplyBestOpt?'<button class="btn btn-primary btn-sm" id="edit-apply-best-opt">应用最近优化最佳参数</button>':''}</div><div class="param-grid"><div class="form-group"><label>策略周期（timeframe）</label><select id="edit-timeframe">${tfHtml}</select></div><div class="form-group"><label>交易对（逗号分隔，可多币）</label><input id="edit-symbols" type="text" value="${esc(currentSymbols.join(', '))}" placeholder="例如 ETH/USDT 或 BTC/USDT,ETH/USDT"></div><div class="form-group"><label>策略运行时长（分钟，0=不限）</label><input id="edit-runtime-min" type="number" min="0" max="10080" step="1" value="${Number(runtime.runtime_limit_minutes||0)}"></div><div class="form-group"><label>资金占比 (0~1)</label><input id="edit-alloc" type="number" min="0" max="1" step="0.01" value="${Number(info.allocation||0).toFixed(2)}"></div></div><div class="param-grid">${fields||'<div class="list-item">该策略无可编辑参数</div>'}</div><div class="inline-actions" style="margin-top:10px;"><button class="btn btn-primary btn-sm" id="edit-save">保存参数</button><button class="btn btn-primary btn-sm" id="edit-save-as">另存为新实例（当前编辑值）</button></div><pre id="editor-compare-output" class="output-box">点击“刷新对比”查看实盘与回测差异</pre>`;
+panel.innerHTML=`<div class="form-group"><label>策略: ${info.name} (${info.strategy_type})</label><div class="list-item"><span>归属</span><span class="strategy-owner-inline"><span class="strategy-owner-badge ${ownership.tone}">${esc(ownership.label)}</span><span class="strategy-owner-note" title="${esc(ownership.detail)}">${esc(ownership.detail)}</span></span></div><div class="list-item"><span>状态</span><span>${mapState(info.state)}</span></div><div class="list-item"><span>周期</span><span>${esc(info.timeframe||'-')}</span></div><div class="list-item"><span>交易对</span><span>${esc(currentSymbols.join(', '))}</span></div><div class="list-item"><span>最近运行</span><span>${info.last_run_at?fmtDateTime(info.last_run_at):'-'}</span></div><div class="list-item"><span>运行时长限制</span><span>${runtime.runtime_limit_minutes?`${runtime.runtime_limit_minutes} 分钟`:'不限时'}${runtime.remaining_seconds!==undefined&&runtime.remaining_seconds!==null?` | 剩余 ${fmtDurationSec(runtime.remaining_seconds)}`:''}</span></div></div>${sizingHtml}<div class="inline-actions" style="margin-top:4px;"><button class="btn btn-primary btn-sm" id="edit-toggle">${info.state==='running'?'停止策略':'启动策略'}</button><button class="btn btn-primary btn-sm" id="edit-clone">复制新实例</button><button class="btn btn-danger btn-sm" id="edit-delete">删除实例</button><button class="btn btn-primary btn-sm" id="edit-cmp">刷新对比</button>${canApplyBestOpt?'<button class="btn btn-primary btn-sm" id="edit-apply-best-opt">应用最近优化最佳参数</button>':''}</div><div class="param-grid"><div class="form-group"><label>策略周期（timeframe）</label><select id="edit-timeframe">${tfHtml}</select></div><div class="form-group"><label>交易对（逗号分隔，可多币）</label><input id="edit-symbols" type="text" value="${esc(currentSymbols.join(', '))}" placeholder="例如 ETH/USDT 或 BTC/USDT,ETH/USDT"></div><div class="form-group"><label>策略运行时长（分钟，0=不限）</label><input id="edit-runtime-min" type="number" min="0" max="10080" step="1" value="${Number(runtime.runtime_limit_minutes||0)}"></div><div class="form-group"><label>资金占比 (0~1)</label><input id="edit-alloc" type="number" min="0" max="1" step="0.01" value="${Number(info.allocation||0).toFixed(2)}"></div></div><div class="param-grid">${fields||'<div class="list-item">该策略无可编辑参数</div>'}</div><div class="inline-actions" style="margin-top:10px;"><button class="btn btn-primary btn-sm" id="edit-save">保存参数</button><button class="btn btn-primary btn-sm" id="edit-save-as">另存为新实例（当前编辑值）</button></div><pre id="editor-compare-output" class="output-box">点击“刷新对比”查看实盘与回测差异</pre>`;
 panel.classList.add('strategy-edit-active');
 openStrategyMonitor(name).catch(() => {});
 panel.dataset.strategyName=String(info.name||name||'');
