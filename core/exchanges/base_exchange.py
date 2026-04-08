@@ -80,6 +80,8 @@ class Order:
     filled: float = 0.0
     remaining: float = 0.0
     cost: float = 0.0
+    fee: float = 0.0
+    fee_currency: str = ""
     status: OrderStatus = OrderStatus.OPEN
     timestamp: Optional[datetime] = None
     exchange: str = ""

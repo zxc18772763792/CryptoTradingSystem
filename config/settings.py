@@ -140,6 +140,10 @@ class Settings(BaseSettings):
     AI_AUTONOMOUS_AGENT_ALLOW_LIVE: bool = False
     AI_AUTONOMOUS_AGENT_ACCOUNT_ID: str = "main"
     AI_AUTONOMOUS_AGENT_STRATEGY_NAME: str = "AI_AutonomousAgent"
+    AI_AUTONOMOUS_AGENT_DAILY_STOP_BUFFER_RATIO: Optional[float] = None
+    AI_AUTONOMOUS_AGENT_MAX_DRAWDOWN_REDUCE_ONLY: Optional[float] = None
+    AI_AUTONOMOUS_AGENT_ROLLING_3D_DRAWDOWN_REDUCE_ONLY: Optional[float] = None
+    AI_AUTONOMOUS_AGENT_ROLLING_7D_DRAWDOWN_REDUCE_ONLY: Optional[float] = None
 
     # Exchange market type (spot/future/swap/margin)
     BINANCE_DEFAULT_TYPE: str = "spot"

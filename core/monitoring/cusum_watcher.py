@@ -33,7 +33,7 @@ async def run_cusum_checks_for_all_candidates(app: FastAPI) -> List[Dict[str, An
         logger.warning(f"cusum_watcher: could not list candidates: {exc}")
         return triggered_reports
 
-    active = [c for c in all_candidates if str(c.status) in {"paper_running", "shadow_running"}]
+    active = [c for c in all_candidates if str(c.status) in {"paper_running", "shadow_running", "live_candidate", "live_running"}]
     if not active:
         return triggered_reports
 

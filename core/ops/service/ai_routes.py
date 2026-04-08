@@ -100,6 +100,7 @@ async def _run_ai_proposal_job(app, *, job_id: str, proposal_id: str, config, ac
             ),
             encoding="utf-8",
         )
+        ai_orchestrator._refresh_runtime_eligibility_snapshot_safe(reason="ops_ai_background_research_saved")
         job.update(
             {
                 "status": "completed",
@@ -340,6 +341,8 @@ async def run_ai_proposal(request: Request, proposal_id: str, payload: ops_api.A
                     reason="candidate created from research result",
                     metadata={"proposal_id": proposal_id, "run_id": run.run_id},
                 )
+
+            ai_orchestrator._refresh_runtime_eligibility_snapshot_safe(reason="ops_ai_sync_research_saved")
 
             if payload.background:
                 return ops_api._err("background branch should have returned earlier")

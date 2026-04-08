@@ -266,6 +266,10 @@ class OKXConnector(BaseExchange):
             "rejected": OrderStatus.REJECTED,
         }
 
+        fee_info = ccxt_order.get("fee") or {}
+        fee_cost = float(fee_info.get("cost", 0) or 0)
+        fee_currency = str(fee_info.get("currency", "") or "")
+
         return Order(
             id=str(ccxt_order.get("id", "")),
             symbol=ccxt_order.get("symbol", ""),
@@ -276,6 +280,8 @@ class OKXConnector(BaseExchange):
             filled=float(ccxt_order.get("filled", 0) or 0),
             remaining=float(ccxt_order.get("remaining", 0) or 0),
             cost=float(ccxt_order.get("cost", 0) or 0),
+            fee=fee_cost,
+            fee_currency=fee_currency,
             status=status_map.get(ccxt_order.get("status", "open"), OrderStatus.OPEN),
             timestamp=datetime.fromtimestamp(ccxt_order.get("timestamp", 0) / 1000) if ccxt_order.get("timestamp") else None,
             exchange=self.name,
