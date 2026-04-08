@@ -86,6 +86,16 @@ _BACKTEST_COMPARE_DEFAULT_TRIALS = 48
 _BACKTEST_COMPARE_MAX_TRIALS = 512
 _BACKTEST_OPTIMIZE_DEFAULT_TRIALS = 96
 _BACKTEST_OPTIMIZE_MAX_TRIALS = 1024
+_BACKTEST_COMPARE_FAST_MAX_CANDIDATES = {
+    "intraday": 8,
+    "short": 10,
+    "default": 12,
+}
+_BACKTEST_COMPARE_FAST_MAX_TRIALS = {
+    "intraday": 24,
+    "short": 32,
+    "default": 48,
+}
 _BACKTEST_BIDIRECTIONAL_OHLCV_STRATEGIES = {
     "MAStrategy",
     "EMAStrategy",
@@ -1331,6 +1341,97 @@ def _optimize_strategy_on_df(
         "top": trials[: min(10, len(trials))],
         "all_trials": all_trials_summary,
         "failures": failures[: min(5, len(failures))],
+    }
+
+
+def _compare_baseline_rank_key(metrics: Dict[str, Any]) -> tuple[float, float, float, float]:
+    quality_flag = str(metrics.get("quality_flag") or "").strip().lower()
+    valid_score = 0.0 if quality_flag == "invalid" else 1.0
+    return (
+        valid_score,
+        float(metrics.get("total_return") or 0.0),
+        float(metrics.get("sharpe_ratio") or 0.0),
+        -abs(float(metrics.get("max_drawdown") or 0.0)),
+    )
+
+
+def _compare_optimization_tier(timeframe: str) -> str:
+    tf_seconds = _timeframe_to_seconds(timeframe)
+    if tf_seconds <= 5 * 60:
+        return "intraday"
+    if tf_seconds <= 15 * 60:
+        return "short"
+    return "default"
+
+
+def _build_compare_optimization_plan(
+    *,
+    strategy_count: int,
+    eligible_count: int,
+    timeframe: str,
+    data_points: int,
+    requested_trials: int,
+    pre_optimize: bool,
+) -> Dict[str, Any]:
+    requested = max(
+        1,
+        min(int(requested_trials or _BACKTEST_COMPARE_DEFAULT_TRIALS), _BACKTEST_COMPARE_MAX_TRIALS),
+    )
+    if not pre_optimize or eligible_count <= 0:
+        return {
+            "requested_trials": requested,
+            "effective_trials": 0,
+            "eligible_count": int(eligible_count),
+            "selected_count": 0,
+            "adaptive_capped": False,
+            "summary": "未启用预优化",
+            "skip_reason": "未启用预优化",
+        }
+
+    tier = _compare_optimization_tier(timeframe)
+    selected_count = min(
+        int(eligible_count),
+        int(_BACKTEST_COMPARE_FAST_MAX_CANDIDATES[tier]),
+    )
+    effective_trials = min(
+        requested,
+        int(_BACKTEST_COMPARE_FAST_MAX_TRIALS[tier]),
+    )
+
+    dense_compare = int(strategy_count) >= 24
+    if dense_compare:
+        selected_count = min(selected_count, 6)
+        effective_trials = min(effective_trials, 16)
+
+    sample_floor = max(int(_min_required_bars(timeframe) * 4), 240)
+    if int(data_points or 0) <= sample_floor:
+        selected_count = min(selected_count, 6)
+        effective_trials = min(effective_trials, 16)
+
+    selected_count = max(1, min(int(selected_count), int(eligible_count)))
+    effective_trials = max(4, int(effective_trials))
+    adaptive_capped = bool(selected_count < int(eligible_count) or effective_trials < requested)
+
+    if adaptive_capped:
+        summary = (
+            f"已切换为快速预优化：仅优化前 {selected_count}/{eligible_count} 个候选，"
+            f"每个最多 {effective_trials} 次，以控制 {timeframe} 多策略对比耗时"
+        )
+        skip_reason = (
+            f"多策略对比已启用快速预优化，仅对前 {selected_count} 个候选执行限量优化"
+        )
+    else:
+        summary = f"已对 {eligible_count} 个候选执行预优化，每个最多 {effective_trials} 次"
+        skip_reason = ""
+
+    return {
+        "requested_trials": requested,
+        "effective_trials": effective_trials,
+        "eligible_count": int(eligible_count),
+        "selected_count": selected_count,
+        "adaptive_capped": adaptive_capped,
+        "summary": summary,
+        "skip_reason": skip_reason,
     }
 
 
@@ -3566,6 +3667,14 @@ async def compare_backtests(
     if not strategy_list:
         raise HTTPException(status_code=400, detail="至少需要一个策略")
 
+    resolved_compare_trials = max(
+        1,
+        min(
+            int(optimize_max_trials or _BACKTEST_COMPARE_DEFAULT_TRIALS),
+            _BACKTEST_COMPARE_MAX_TRIALS,
+        ),
+    )
+
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
     parsed_end = _parse_backtest_bound(end_date, bound="end_date")
 
@@ -3590,8 +3699,48 @@ async def compare_backtests(
             detail=f"该时间范围内K线不足（{len(common_df)} 根），{timeframe} 至少需要 {min_bars} 根",
         )
 
-    results = []
+    def _decorate_compare_metrics(
+        metrics: Dict[str, Any],
+        *,
+        strategy: str,
+        loop_df: pd.DataFrame,
+        optimization_applied: bool,
+        optimization_reason: Optional[str],
+        optimized_params: Optional[Dict[str, Any]] = None,
+        optimization_score: Optional[float] = None,
+        optimization_trials_value: Optional[int] = None,
+        optimization_failed_trials: Optional[int] = None,
+        optimization_objective_value: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        out = dict(metrics or {})
+        out.update(
+            {
+                "strategy": strategy,
+                "optimization_applied": bool(optimization_applied),
+                "optimization_reason": optimization_reason,
+                "optimized_params": dict(optimized_params or {}),
+                "optimization_score": float(optimization_score or 0.0),
+                "optimization_trials": int(optimization_trials_value or 0),
+                "optimization_failed_trials": int(optimization_failed_trials or 0),
+                "optimization_objective": optimization_objective_value,
+                "news_events_count": int(loop_df.attrs.get("news_events_count", 0) or 0),
+                "funding_available": bool(loop_df.attrs.get("funding_available", False)),
+                "data_mode": str(loop_df.attrs.get("data_mode") or _strategy_data_mode(strategy)),
+                "decision_engine": str(loop_df.attrs.get("decision_engine") or _strategy_decision_engine(strategy)),
+                "strategy_family": str(loop_df.attrs.get("strategy_family") or _strategy_family(strategy)),
+            }
+        )
+        return out
+
+    compare_entries: List[Dict[str, Any]] = []
     for strategy in strategy_list:
+        entry: Dict[str, Any] = {
+            "strategy": strategy,
+            "metrics": None,
+            "error": None,
+            "df": None,
+            "market_bundle": None,
+        }
         try:
             loop_df = common_df
             loop_bundle = None
@@ -3614,107 +3763,142 @@ async def compare_backtests(
                 start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
                 end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
             )
+            baseline_metrics = _run_backtest_core(
+                strategy=strategy,
+                df=loop_df,
+                timeframe=timeframe,
+                initial_capital=initial_capital,
+                include_series=False,
+                commission_rate=max(0.0, float(commission_rate or 0.0)),
+                slippage_bps=max(0.0, float(slippage_bps or 0.0)),
+                market_bundle=loop_bundle,
+                params=get_strategy_defaults(strategy),
+                use_stop_take=bool(use_stop_take),
+                stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct,
+            )
             if pre_optimize and strategy in _BACKTEST_OPTIMIZATION_GRIDS:
+                baseline_reason = "候选等待预优化"
+            else:
+                baseline_reason = (
+                    "未启用预优化" if not pre_optimize else "该策略暂不支持参数优化"
+                )
+            entry["metrics"] = _decorate_compare_metrics(
+                baseline_metrics,
+                strategy=strategy,
+                loop_df=loop_df,
+                optimization_applied=False,
+                optimization_reason=baseline_reason,
+            )
+            entry["df"] = loop_df
+            entry["market_bundle"] = loop_bundle
+        except Exception as e:
+            entry["error"] = str(e)
+        compare_entries.append(entry)
+
+    eligible_entries = [
+        entry
+        for entry in compare_entries
+        if entry.get("error") is None and entry["strategy"] in _BACKTEST_OPTIMIZATION_GRIDS
+    ]
+    compare_plan = _build_compare_optimization_plan(
+        strategy_count=len(strategy_list),
+        eligible_count=len(eligible_entries),
+        timeframe=timeframe,
+        data_points=int(len(common_df)),
+        requested_trials=resolved_compare_trials,
+        pre_optimize=bool(pre_optimize),
+    )
+
+    optimized_count = 0
+    if pre_optimize and eligible_entries:
+        shortlisted = sorted(
+            eligible_entries,
+            key=lambda item: _compare_baseline_rank_key(item.get("metrics") or {}),
+            reverse=True,
+        )[: int(compare_plan.get("selected_count") or 0)]
+        shortlisted_ids = {id(item) for item in shortlisted}
+        for entry in eligible_entries:
+            if id(entry) not in shortlisted_ids:
+                metrics = dict(entry.get("metrics") or {})
+                if compare_plan.get("adaptive_capped"):
+                    metrics["optimization_reason"] = str(compare_plan.get("skip_reason") or "")
+                    metrics["optimization_skipped_for_budget"] = True
+                entry["metrics"] = metrics
+                continue
+
+            try:
                 opt = _optimize_strategy_on_df(
-                    strategy=strategy,
-                    df=loop_df,
+                    strategy=entry["strategy"],
+                    df=entry["df"],
                     timeframe=timeframe,
                     initial_capital=initial_capital,
                     commission_rate=max(0.0, float(commission_rate or 0.0)),
                     slippage_bps=max(0.0, float(slippage_bps or 0.0)),
                     objective=optimize_objective,
-                    max_trials=max(
-                        1,
-                        min(
-                            int(optimize_max_trials or _BACKTEST_COMPARE_DEFAULT_TRIALS),
-                            _BACKTEST_COMPARE_MAX_TRIALS,
-                        ),
-                    ),
-                    market_bundle=loop_bundle,
+                    max_trials=int(compare_plan.get("effective_trials") or resolved_compare_trials),
+                    market_bundle=entry.get("market_bundle"),
                     use_stop_take=bool(use_stop_take),
                     stop_loss_pct=stop_loss_pct,
                     take_profit_pct=take_profit_pct,
                 )
                 if opt.get("best"):
-                    metrics = dict(opt["best"]["metrics"])
-                    metrics.update(
-                        {
-                            "strategy": strategy,
-                            "optimization_applied": True,
-                            "optimized_params": dict(opt["best"].get("params") or {}),
-                            "optimization_score": float(opt["best"].get("score") or 0.0),
-                            "optimization_trials": int(opt.get("trials") or 0),
-                            "optimization_failed_trials": int(opt.get("failed_trials") or 0),
-                            "optimization_objective": opt.get("objective"),
-                            "news_events_count": int(loop_df.attrs.get("news_events_count", 0) or 0),
-                            "funding_available": bool(loop_df.attrs.get("funding_available", False)),
-                            "data_mode": str(loop_df.attrs.get("data_mode") or _strategy_data_mode(strategy)),
-                            "decision_engine": str(loop_df.attrs.get("decision_engine") or _strategy_decision_engine(strategy)),
-                            "strategy_family": str(loop_df.attrs.get("strategy_family") or _strategy_family(strategy)),
-                        }
+                    entry["metrics"] = _decorate_compare_metrics(
+                        dict(opt["best"]["metrics"]),
+                        strategy=entry["strategy"],
+                        loop_df=entry["df"],
+                        optimization_applied=True,
+                        optimization_reason=None,
+                        optimized_params=dict(opt["best"].get("params") or {}),
+                        optimization_score=float(opt["best"].get("score") or 0.0),
+                        optimization_trials_value=int(opt.get("trials") or 0),
+                        optimization_failed_trials=int(opt.get("failed_trials") or 0),
+                        optimization_objective_value=opt.get("objective"),
                     )
+                    optimized_count += 1
                 else:
-                    metrics = _run_backtest_core(
-                        strategy=strategy,
-                        df=loop_df,
-                        timeframe=timeframe,
-                        initial_capital=initial_capital,
-                        include_series=False,
-                        commission_rate=max(0.0, float(commission_rate or 0.0)),
-                        slippage_bps=max(0.0, float(slippage_bps or 0.0)),
-                        market_bundle=loop_bundle,
-                        params=get_strategy_defaults(strategy),
-                        use_stop_take=bool(use_stop_take),
-                        stop_loss_pct=stop_loss_pct,
-                        take_profit_pct=take_profit_pct,
-                    )
+                    metrics = dict(entry.get("metrics") or {})
                     metrics.update(
                         {
-                            "strategy": strategy,
                             "optimization_applied": False,
                             "optimization_reason": "优化无有效结果，已回退默认参数",
                             "optimization_trials": int(opt.get("trials") or 0),
                             "optimization_failed_trials": int(opt.get("failed_trials") or 0),
                             "optimization_objective": opt.get("objective"),
-                            "news_events_count": int(loop_df.attrs.get("news_events_count", 0) or 0),
-                            "funding_available": bool(loop_df.attrs.get("funding_available", False)),
-                            "data_mode": str(loop_df.attrs.get("data_mode") or _strategy_data_mode(strategy)),
-                            "decision_engine": str(loop_df.attrs.get("decision_engine") or _strategy_decision_engine(strategy)),
-                            "strategy_family": str(loop_df.attrs.get("strategy_family") or _strategy_family(strategy)),
                         }
                     )
-            else:
-                metrics = _run_backtest_core(
-                    strategy=strategy,
-                    df=loop_df,
-                    timeframe=timeframe,
-                    initial_capital=initial_capital,
-                    include_series=False,
-                    commission_rate=max(0.0, float(commission_rate or 0.0)),
-                    slippage_bps=max(0.0, float(slippage_bps or 0.0)),
-                    market_bundle=loop_bundle,
-                    params=get_strategy_defaults(strategy),
-                    use_stop_take=bool(use_stop_take),
-                    stop_loss_pct=stop_loss_pct,
-                    take_profit_pct=take_profit_pct,
-                )
+                    entry["metrics"] = metrics
+            except Exception as exc:
+                metrics = dict(entry.get("metrics") or {})
                 metrics.update(
                     {
-                        "strategy": strategy,
                         "optimization_applied": False,
-                        "optimization_reason": (
-                            "未启用预优化" if not pre_optimize else "该策略暂不支持参数优化"
-                        ),
-                        "news_events_count": int(loop_df.attrs.get("news_events_count", 0) or 0),
-                        "funding_available": bool(loop_df.attrs.get("funding_available", False)),
-                        "data_mode": str(loop_df.attrs.get("data_mode") or _strategy_data_mode(strategy)),
-                        "decision_engine": str(loop_df.attrs.get("decision_engine") or _strategy_decision_engine(strategy)),
-                        "strategy_family": str(loop_df.attrs.get("strategy_family") or _strategy_family(strategy)),
+                        "optimization_reason": f"预优化失败，已回退默认参数: {exc}",
+                        "optimization_error": str(exc),
                     }
                 )
-            results.append(metrics)
-        except Exception as e:
-            results.append({"strategy": strategy, "error": str(e)})
+                entry["metrics"] = metrics
+
+    compare_plan.update(
+        {
+            "enabled": bool(pre_optimize and eligible_entries),
+            "optimized_count": int(optimized_count),
+            "skipped_count": (
+                max(
+                    0,
+                    int(compare_plan.get("eligible_count") or 0)
+                    - int(compare_plan.get("selected_count") or 0),
+                )
+                if pre_optimize and eligible_entries
+                else 0
+            ),
+        }
+    )
+
+    results = [
+        entry["metrics"] if entry.get("error") is None else {"strategy": entry["strategy"], "error": entry["error"]}
+        for entry in compare_entries
+    ]
 
     ranked = sorted(
         [r for r in results if "error" not in r],
@@ -3735,13 +3919,8 @@ async def compare_backtests(
         "end_date": common_df.index[-1].isoformat(),
         "pre_optimize": bool(pre_optimize),
         "optimize_objective": _normalize_optimize_objective(optimize_objective),
-        "optimize_max_trials": max(
-            1,
-            min(
-                int(optimize_max_trials or _BACKTEST_COMPARE_DEFAULT_TRIALS),
-                _BACKTEST_COMPARE_MAX_TRIALS,
-            ),
-        ),
+        "optimize_max_trials": resolved_compare_trials,
+        "compare_optimization": compare_plan,
         "use_stop_take": bool(use_stop_take),
         "stop_loss_pct": _safe_positive_pct(stop_loss_pct),
         "take_profit_pct": _safe_positive_pct(take_profit_pct),

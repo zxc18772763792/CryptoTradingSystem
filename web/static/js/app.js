@@ -3339,6 +3339,10 @@ const bestBalanced=stable[0]||null;
 const avgRet=okRows.length?okRows.reduce((s,x)=>s+Number(x.total_return||0),0)/okRows.length:0;
 const avgSharpe=okRows.length?okRows.reduce((s,x)=>s+Number(x.sharpe_ratio||0),0)/okRows.length:0;
 const optimizedCount=okRows.filter(r=>r.optimization_applied).length;
+const compareOpt=(data&&typeof data.compare_optimization==='object'&&data.compare_optimization)?data.compare_optimization:{};
+const compareOptSummary=data?.pre_optimize
+  ? String(compareOpt?.summary||`已预优化 ${optimizedCount}/${okRows.length} 个策略（目标: ${esc(data?.optimize_objective||'total_return')}, trials=${Number(data?.optimize_max_trials||0)})`)
+  : (bestBalanced?`建议下一步用 ${bestBalanced.strategy} 做参数优化`: '暂无可推荐策略');
 backtestUIState.lastCompare={...(data||{}), ranked:[...ranked]};
 out.innerHTML=`
 <div class="list-item"><span>多策略对比（${esc(data.symbol||'-')} / ${esc(data.timeframe||'-')}）</span><span>成功 ${okRows.length} / 总计 ${rows.length}</span></div>
@@ -3347,7 +3351,7 @@ ${renderRangeLockIndicatorHtml(data,false)}
   <div class="stat-box"><div class="stat-label">最佳收益策略</div><div class="stat-value">${esc(best?.strategy||'-')}</div><div class="stat-label">${best?`${btPct(best.total_return)} / 夏普 ${btNum(best.sharpe_ratio)}`:'--'}</div></div>
   <div class="stat-box"><div class="stat-label">均衡推荐（收益-回撤）</div><div class="stat-value">${esc(bestBalanced?.strategy||'-')}</div><div class="stat-label">${bestBalanced?`${btPct(bestBalanced.total_return)} / 回撤 ${btPct(bestBalanced.max_drawdown)}`:'--'}</div></div>
   <div class="stat-box"><div class="stat-label">平均收益 / 平均夏普</div><div class="stat-value">${btPct(avgRet)} / ${btNum(avgSharpe)}</div><div class="stat-label">成本: 手续费 ${(Number(data?.commission_rate||0)*100).toFixed(4)}% + 滑点 ${btNum(data?.slippage_bps||0)}bps</div></div>
-  <div class="stat-box"><div class="stat-label">结论建议</div><div class="stat-value">${best&&best.total_return>0?'优先回测前3名细化参数':'先降低周期/成本或换策略组'}</div><div class="stat-label">${data?.pre_optimize?`已预优化 ${optimizedCount}/${okRows.length} 个策略（目标: ${esc(data?.optimize_objective||'total_return')}, trials=${Number(data?.optimize_max_trials||0)})`:(bestBalanced?`建议下一步用 ${bestBalanced.strategy} 做参数优化`: '暂无可推荐策略')}</div></div>
+  <div class="stat-box"><div class="stat-label">结论建议</div><div class="stat-value">${best&&best.total_return>0?'优先回测前3名细化参数':'先降低周期/成本或换策略组'}</div><div class="stat-label">${esc(compareOptSummary)}</div></div>
 </div>
 <div class="inline-actions" style="margin-top:10px;">
   <button type="button" class="btn btn-primary btn-sm" id="btn-backtest-register-best">注册收益第一策略（新实例）</button>
