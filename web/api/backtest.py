@@ -2837,120 +2837,80 @@ def _build_positions_legacy(strategy: str, df: pd.DataFrame, params: Optional[Di
     return position.fillna(0.0)
 
 
-def _extract_trade_points(close: pd.Series, position: pd.Series) -> Dict[str, List[Dict[str, Any]]]:
+def _simulate_execution_summary(
+    df: pd.DataFrame,
+    position: pd.Series,
+    *,
+    stop_loss_pct: Optional[float] = None,
+    take_profit_pct: Optional[float] = None,
+) -> Dict[str, Any]:
+    base_index = df.index
+    effective = pd.Series(0.0, index=base_index, dtype=float)
+    target = (
+        pd.to_numeric(position.reindex(base_index), errors="coerce")
+        .fillna(0.0)
+        .map(_signed_state)
+        .astype(float)
+    )
+    close = pd.to_numeric(df.get("close"), errors="coerce").reindex(base_index)
+    high = pd.to_numeric(df.get("high", close), errors="coerce").reindex(base_index)
+    low = pd.to_numeric(df.get("low", close), errors="coerce").reindex(base_index)
+
     buy_points: List[Dict[str, Any]] = []
     sell_points: List[Dict[str, Any]] = []
     open_points: List[Dict[str, Any]] = []
     close_points: List[Dict[str, Any]] = []
 
-    prev_state = 0.0
-    for ts, px in pd.to_numeric(close, errors="coerce").items():
-        if not np.isfinite(px):
-            continue
-        curr_state = _signed_state(position.loc[ts]) if ts in position.index else 0.0
-        if curr_state == prev_state:
-            continue
+    sl_pct = _safe_positive_pct(stop_loss_pct)
+    tp_pct = _safe_positive_pct(take_profit_pct)
 
-        iso_ts = pd.Timestamp(ts).isoformat()
-        price = float(px)
-        if prev_state > 0:
-            sell_points.append({"timestamp": iso_ts, "price": price})
-            close_points.append({"timestamp": iso_ts, "price": price, "direction": "long"})
-        elif prev_state < 0:
-            buy_points.append({"timestamp": iso_ts, "price": price})
-            close_points.append({"timestamp": iso_ts, "price": price, "direction": "short"})
-
-        if curr_state > 0:
-            buy_points.append({"timestamp": iso_ts, "price": price})
-            open_points.append({"timestamp": iso_ts, "price": price, "direction": "long"})
-        elif curr_state < 0:
-            sell_points.append({"timestamp": iso_ts, "price": price})
-            open_points.append({"timestamp": iso_ts, "price": price, "direction": "short"})
-        prev_state = curr_state
-
-    return {
-        "buy_points": buy_points,
-        "sell_points": sell_points,
-        "open_points": open_points,
-        "close_points": close_points,
-        "entries": len(open_points),
-        "exits": len(close_points),
-    }
-
-
-def _trade_stats(close: pd.Series, position: pd.Series) -> Dict[str, Any]:
+    state = 0.0
+    entry_price = 0.0
     entries = 0
     exits = 0
     completed = 0
     wins = 0
-    state = 0.0
-    entry_price = 0.0
-
-    close_series = pd.to_numeric(close, errors="coerce")
-    for ts, px in close_series.items():
-        if not np.isfinite(px) or px <= 0:
-            continue
-        desired = _signed_state(position.loc[ts]) if ts in position.index else 0.0
-        if state == desired:
-            continue
-
-        if state != 0.0:
-            exits += 1
-            completed += 1
-            trade_return = (
-                (float(px) - entry_price) / entry_price
-                if state > 0
-                else (entry_price - float(px)) / entry_price
-            ) if entry_price > 0 else 0.0
-            if trade_return > 0:
-                wins += 1
-
-        if desired != 0.0:
-            entries += 1
-            entry_price = float(px)
-        else:
-            entry_price = 0.0
-        state = desired
-
-    win_rate = (wins / completed * 100.0) if completed else 0.0
-    return {
-        "entries": int(entries),
-        "exits": int(exits),
-        "completed": int(completed),
-        "win_rate": round(float(win_rate), 2),
-    }
-
-
-def _apply_protective_position_rules(
-    df: pd.DataFrame,
-    position: pd.Series,
-    *,
-    stop_loss_pct: Optional[float],
-    take_profit_pct: Optional[float],
-) -> tuple[pd.Series, Dict[str, int]]:
-    effective = pd.to_numeric(position, errors="coerce").fillna(0.0).map(_signed_state).astype(float).copy()
-    if effective.empty:
-        return effective, {"forced_stop_exits": 0, "forced_take_exits": 0}
-
-    sl_pct = _safe_positive_pct(stop_loss_pct)
-    tp_pct = _safe_positive_pct(take_profit_pct)
-    if sl_pct is None and tp_pct is None:
-        return effective, {"forced_stop_exits": 0, "forced_take_exits": 0}
-
-    close = pd.to_numeric(df.get("close"), errors="coerce")
-    high = pd.to_numeric(df.get("high", close), errors="coerce")
-    low = pd.to_numeric(df.get("low", close), errors="coerce")
-
-    state = 0.0
-    entry_price = 0.0
     forced_stop = 0
     forced_take = 0
 
-    for idx, ts in enumerate(effective.index):
-        desired = _signed_state(effective.iloc[idx])
-        px = float(close.loc[ts]) if pd.notna(close.loc[ts]) else float("nan")
-        hi = float(high.loc[ts]) if pd.notna(high.loc[ts]) else px
-        lo = float(low.loc[ts]) if pd.notna(low.loc[ts]) else px
+    def _record_open(ts: Any, price: float, direction: str) -> None:
+        point = {
+            "timestamp": pd.Timestamp(ts).isoformat(),
+            "price": float(price),
+            "direction": direction,
+        }
+        open_points.append(point)
+        if direction == "long":
+            buy_points.append({"timestamp": point["timestamp"], "price": point["price"]})
+        else:
+            sell_points.append({"timestamp": point["timestamp"], "price": point["price"]})
+
+    def _record_close(ts: Any, price: float, direction: str, *, reason: str = "") -> None:
+        point = {
+            "timestamp": pd.Timestamp(ts).isoformat(),
+            "price": float(price),
+            "direction": direction,
+        }
+        if reason:
+            point["reason"] = reason
+        close_points.append(point)
+        if direction == "long":
+            sell_points.append({"timestamp": point["timestamp"], "price": point["price"]})
+        else:
+            buy_points.append({"timestamp": point["timestamp"], "price": point["price"]})
+
+    def _trade_return(direction_state: float, exit_price: float) -> float:
+        if entry_price <= 0:
+            return 0.0
+        if direction_state > 0:
+            return (float(exit_price) - entry_price) / entry_price
+        return (entry_price - float(exit_price)) / entry_price
+
+    for idx, ts in enumerate(base_index):
+        desired = _signed_state(target.iloc[idx])
+        px = float(close.iloc[idx]) if pd.notna(close.iloc[idx]) else float("nan")
+        hi = float(high.iloc[idx]) if pd.notna(high.iloc[idx]) else px
+        lo = float(low.iloc[idx]) if pd.notna(low.iloc[idx]) else px
 
         if (not np.isfinite(px)) or px <= 0:
             effective.iloc[idx] = state
@@ -2960,6 +2920,8 @@ def _apply_protective_position_rules(
             state = desired
             entry_price = px
             effective.iloc[idx] = state
+            entries += 1
+            _record_open(ts, px, "long" if state > 0 else "short")
             continue
 
         if state == 0.0:
@@ -2968,6 +2930,8 @@ def _apply_protective_position_rules(
 
         hit_stop = False
         hit_take = False
+        stop_price = float("nan")
+        take_price = float("nan")
         if sl_pct is not None:
             stop_price = entry_price * (1.0 - sl_pct if state > 0 else 1.0 + sl_pct)
             if state > 0 and np.isfinite(lo) and lo <= stop_price:
@@ -2982,27 +2946,98 @@ def _apply_protective_position_rules(
                 hit_take = True
 
         if hit_stop or hit_take:
+            exits += 1
+            completed += 1
             if hit_stop:
                 forced_stop += 1
+                exit_price = stop_price
+                exit_reason = "stop_loss"
             else:
                 forced_take += 1
+                exit_price = take_price
+                exit_reason = "take_profit"
+            if _trade_return(state, exit_price) > 0:
+                wins += 1
+            _record_close(ts, exit_price, "long" if state > 0 else "short", reason=exit_reason)
             state = 0.0
             entry_price = 0.0
             effective.iloc[idx] = 0.0
             continue
 
         if desired == 0.0:
+            exits += 1
+            completed += 1
+            if _trade_return(state, px) > 0:
+                wins += 1
+            _record_close(ts, px, "long" if state > 0 else "short", reason="signal_exit")
             state = 0.0
             entry_price = 0.0
             effective.iloc[idx] = 0.0
             continue
 
         if desired != state:
+            exits += 1
+            completed += 1
+            if _trade_return(state, px) > 0:
+                wins += 1
+            _record_close(ts, px, "long" if state > 0 else "short", reason="reverse")
             state = desired
             entry_price = px
+            entries += 1
+            _record_open(ts, px, "long" if state > 0 else "short")
+            effective.iloc[idx] = state
+            continue
+
         effective.iloc[idx] = state
 
-    return effective, {"forced_stop_exits": int(forced_stop), "forced_take_exits": int(forced_take)}
+    win_rate = (wins / completed * 100.0) if completed else 0.0
+    return {
+        "effective_position": effective,
+        "trade_points": {
+            "buy_points": buy_points,
+            "sell_points": sell_points,
+            "open_points": open_points,
+            "close_points": close_points,
+            "entries": int(entries),
+            "exits": int(exits),
+        },
+        "trade_stats": {
+            "entries": int(entries),
+            "exits": int(exits),
+            "completed": int(completed),
+            "win_rate": round(float(win_rate), 2),
+        },
+        "protective_stats": {
+            "forced_stop_exits": int(forced_stop),
+            "forced_take_exits": int(forced_take),
+        },
+    }
+
+
+def _extract_trade_points(close: pd.Series, position: pd.Series) -> Dict[str, List[Dict[str, Any]]]:
+    frame = pd.DataFrame({"close": close, "high": close, "low": close})
+    return dict(_simulate_execution_summary(frame, position)["trade_points"])
+
+
+def _trade_stats(close: pd.Series, position: pd.Series) -> Dict[str, Any]:
+    frame = pd.DataFrame({"close": close, "high": close, "low": close})
+    return dict(_simulate_execution_summary(frame, position)["trade_stats"])
+
+
+def _apply_protective_position_rules(
+    df: pd.DataFrame,
+    position: pd.Series,
+    *,
+    stop_loss_pct: Optional[float],
+    take_profit_pct: Optional[float],
+) -> tuple[pd.Series, Dict[str, int]]:
+    summary = _simulate_execution_summary(
+        df,
+        position,
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+    )
+    return summary["effective_position"], dict(summary["protective_stats"])
 
 
 def _strategy_recommended_min_bars(
@@ -3141,6 +3176,7 @@ def _run_backtest_core(
 
     benchmark_close = df["close"]
     protective_stats = {"forced_stop_exits": 0, "forced_take_exits": 0}
+    rendered_trade_points: Optional[Dict[str, Any]] = None
     position_for_diagnostics = pd.Series(0.0, index=df.index, dtype=float)
     pair_components: Optional[Dict[str, Any]] = None
     if strategy == "FamaFactorArbitrageStrategy":
@@ -3181,24 +3217,25 @@ def _run_backtest_core(
         turnover = pair_components["turnover"].reindex(benchmark_close.index).fillna(0.0)
         trade_stats = dict(pair_components.get("trade_stats") or {"entries": 0, "exits": 0, "completed": 0, "win_rate": 0.0})
         protective_stats = dict(pair_components.get("protective_stats") or protective_stats)
+        rendered_trade_points = dict(pair_components.get("trade_points") or {})
     else:
         raw_position = _build_positions(strategy, df, params=merged_params)
-        if protective_enabled:
-            position, protective_stats = _apply_protective_position_rules(
-                df,
-                raw_position,
-                stop_loss_pct=resolved_stop_loss_pct,
-                take_profit_pct=resolved_take_profit_pct,
-            )
-        else:
-            position = raw_position
+        execution_summary = _simulate_execution_summary(
+            df,
+            raw_position,
+            stop_loss_pct=resolved_stop_loss_pct if protective_enabled else None,
+            take_profit_pct=resolved_take_profit_pct if protective_enabled else None,
+        )
+        position = execution_summary["effective_position"]
+        protective_stats = dict(execution_summary["protective_stats"])
+        rendered_trade_points = dict(execution_summary["trade_points"])
         returns, anomaly_ratio, clip_limit = _safe_bar_returns(df["close"], timeframe)
         gross_returns = position.shift(1).fillna(0.0) * returns
 
         turnover = position.diff().abs().fillna(0.0)
         if len(position) > 0:
             turnover.iloc[0] = abs(float(position.iloc[0] or 0.0))
-        trade_stats = _trade_stats(df["close"], position)
+        trade_stats = dict(execution_summary["trade_stats"])
         position_for_diagnostics = position.abs().clip(lower=0.0, upper=1.0)
 
     if not protective_enabled:
@@ -3345,7 +3382,7 @@ def _run_backtest_core(
         points = (
             {"buy_points": [], "sell_points": [], "entries": trade_stats["entries"], "exits": trade_stats["exits"]}
             if strategy == "FamaFactorArbitrageStrategy"
-            else (pair_components.get("trade_points") if strategy == "PairsTradingStrategy" and pair_components else _extract_trade_points(df["close"], position))
+            else dict(rendered_trade_points or {"buy_points": [], "sell_points": [], "open_points": [], "close_points": [], "entries": 0, "exits": 0})
         )
 
         # Downsample for frontend payload size.

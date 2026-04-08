@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import web.api.backtest as backtest_api
 from web.api.backtest import (
     _apply_protective_position_rules,
     _build_positions,
@@ -63,6 +64,24 @@ def test_trade_points_and_stats_track_short_round_trip():
     assert stats == {"entries": 1, "exits": 1, "completed": 1, "win_rate": 100.0}
 
 
+def test_trade_points_keep_same_bar_reversal_as_close_then_open():
+    index = pd.date_range("2024-01-01", periods=3, freq="1h")
+    close = pd.Series([100.0, 101.0, 99.0], index=index)
+    position = pd.Series([0.0, 1.0, -1.0], index=index)
+
+    trade_points = _extract_trade_points(close, position)
+    stats = _trade_stats(close, position)
+
+    assert trade_points["entries"] == 2
+    assert trade_points["exits"] == 1
+    assert trade_points["close_points"][0]["timestamp"] == index[2].isoformat()
+    assert trade_points["close_points"][0]["direction"] == "long"
+    assert trade_points["close_points"][0]["reason"] == "reverse"
+    assert trade_points["open_points"][1]["timestamp"] == index[2].isoformat()
+    assert trade_points["open_points"][1]["direction"] == "short"
+    assert stats == {"entries": 2, "exits": 1, "completed": 1, "win_rate": 0.0}
+
+
 def test_protective_rules_take_profit_short_position():
     index = pd.date_range("2024-01-01", periods=4, freq="1h")
     df = pd.DataFrame(
@@ -85,6 +104,42 @@ def test_protective_rules_take_profit_short_position():
     assert stats["forced_take_exits"] == 1
     assert stats["forced_stop_exits"] == 0
     assert float(effective.iloc[2]) == 0.0
+
+
+def test_run_backtest_core_uses_protective_execution_price_for_trade_points(monkeypatch: pytest.MonkeyPatch):
+    index = pd.date_range("2024-01-01", periods=4, freq="1h")
+    df = pd.DataFrame(
+        {
+            "open": [100.0, 100.0, 100.0, 97.0],
+            "high": [100.5, 100.5, 100.2, 97.5],
+            "low": [99.5, 99.5, 97.5, 96.5],
+            "close": [100.0, 100.0, 97.0, 97.0],
+            "volume": [100.0, 100.0, 100.0, 100.0],
+        },
+        index=index,
+    )
+    raw_position = pd.Series([0.0, -1.0, -1.0, 0.0], index=index)
+
+    monkeypatch.setattr(backtest_api, "_min_required_bars", lambda timeframe: 2)
+    monkeypatch.setattr(backtest_api, "_build_positions", lambda strategy, frame, params=None: raw_position)
+
+    result = backtest_api._run_backtest_core(
+        strategy="MAStrategy",
+        df=df,
+        timeframe="1h",
+        initial_capital=10000.0,
+        params={"fast_period": 3, "slow_period": 8},
+        include_series=True,
+        use_stop_take=True,
+        stop_loss_pct=0.02,
+        take_profit_pct=0.02,
+    )
+
+    assert result["forced_take_exits"] == 1
+    assert result["trade_points"]["open_points"][0]["timestamp"] == index[1].isoformat()
+    assert result["trade_points"]["close_points"][0]["timestamp"] == index[2].isoformat()
+    assert result["trade_points"]["close_points"][0]["reason"] == "take_profit"
+    assert result["trade_points"]["close_points"][0]["price"] == pytest.approx(98.0)
 
 
 @pytest.mark.parametrize(
