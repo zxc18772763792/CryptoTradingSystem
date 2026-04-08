@@ -1809,10 +1809,18 @@
                                         <div class="ai-auto-step-title">one-click 自动研究+部署</div>
                                         <span class="ai-review-panel-tag ai-oneclick-entry-tag">Quick Path</span>
                                     </div>
-                                    <div class="ai-auto-step-desc">填好上面的研究目标、币种、周期后，可以一次执行生成提案 → 运行研究 → 尝试部署。执行结果和失败原因会直接显示在下面。</div>
+                                    <div class="ai-auto-step-desc">填好上面的研究目标、币种、周期后，可以一次执行生成提案 → 提交后台研究 → 尝试部署。执行结果和失败原因会直接显示在下面。</div>
                                     <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
                                         <button class="btn btn-primary btn-sm" id="ai-oneclick-btn">⚡ one-click 自动研究+部署</button>
                                         <span class="ai-auto-step-status">适合想快速验证整个研究链路能否跑通的场景</span>
+                                    </div>
+                                    <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap" style="margin-top:6px;align-items:center;">
+                                        <span style="font-size:12px;color:#8ea7c5;">一键研究天数</span>
+                                        <input type="number" id="ai-oneclick-days" value="30" min="7" max="3650" style="width:72px;font-size:12px;" title="一键研究专用回测天数（建议 30-90 天）">
+                                        <span style="font-size:11px;color:#7e92b2;">仅影响 one-click，不改下方手动“运行研究”天数</span>
+                                    </div>
+                                    <div style="margin-top:6px;font-size:11px;color:#7e92b2;line-height:1.5;">
+                                        职责边界：这里负责“研究与候选”链路；自治代理的实时盯盘与执行请在“AI自治代理”页操作。
                                     </div>
                                 </div>
                             </section>
@@ -1911,7 +1919,7 @@
                                     <option value="bybit">Bybit</option>
                                     <option value="okx">OKX</option>
                                 </select>
-                                <input type="number" id="run-days" value="3" min="1" max="730" style="width:55px;font-size:12px;" title="回测天数（短周期研究默认3天）">
+                                <input type="number" id="run-days" value="30" min="1" max="730" style="width:55px;font-size:12px;" title="回测天数（默认30天）">
                                 <span style="font-size:11px;color:#7e92b2;">天</span>
                                 <button class="btn btn-primary btn-sm" id="run-selected-btn" disabled title="请先在左侧选择研究任务">3) 运行研究</button>
                                 <button class="btn btn-sm" id="ai-compare-btn" style="display:none;">对比选中</button>

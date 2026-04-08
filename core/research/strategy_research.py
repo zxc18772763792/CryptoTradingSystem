@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -1327,6 +1327,18 @@ def _run_purged_walk_forward(
 ) -> Dict[str, Any]:
     """Purged expanding-window walk-forward with embargo gap to prevent data leakage."""
     n = len(df)
+    min_required = max(50 * int(n_splits), 100)
+    if n < min_required:
+        logger.debug(
+            f"walk-forward skipped: rows={n} < min_required={min_required}, "
+            f"strategy={strategy}, timeframe={timeframe}, splits={n_splits}"
+        )
+        return {
+            "sharpe_list": [],
+            "consistency": None,
+            "n_folds": 0,
+            "positive_folds": 0,
+        }
     embargo_bars = max(1, int(n * embargo_pct))
     min_is = max(50, n // (n_splits + 2))
 
@@ -1362,10 +1374,10 @@ def _run_purged_walk_forward(
             pass
 
     n_folds = len(sharpe_list)
-    consistency = positive_folds / max(n_folds, 1) if n_folds > 0 else 0.0
+    consistency = (positive_folds / max(n_folds, 1)) if n_folds > 0 else None
     return {
         "sharpe_list": sharpe_list,
-        "consistency": round(consistency, 4),
+        "consistency": round(consistency, 4) if consistency is not None else None,
         "n_folds": n_folds,
         "positive_folds": positive_folds,
     }
@@ -1541,7 +1553,10 @@ def _build_markdown_report(
     return "\n".join(lines)
 
 
-async def run_strategy_research(config: ResearchConfig) -> Dict[str, Any]:
+async def run_strategy_research(
+    config: ResearchConfig,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> Dict[str, Any]:
     config.symbol = _normalize_symbol(config.symbol)
     config.exchange = (config.exchange or "binance").lower().strip()
     config.days = max(1, int(config.days))
@@ -1589,7 +1604,9 @@ async def run_strategy_research(config: ResearchConfig) -> Dict[str, Any]:
     else:
         if _requires_second_level_data(config.timeframes):
             raise ValueError(
-                f"未找到 {config.exchange} {config.symbol} 1s 数据，当前包含子分钟周期，请先执行秒级回填。"
+                f"未找到 {config.exchange} {config.symbol} 的 1 秒级数据，"
+                f"当前时间框架 {config.timeframes} 包含子分钟周期（<1m）。"
+                "请先在“数据管理”页面回填 1s 数据，或改用 15m/1h 等标准周期。"
             )
 
         logger.warning(
@@ -1621,11 +1638,17 @@ async def run_strategy_research(config: ResearchConfig) -> Dict[str, Any]:
             base_df = frames[data_source_timeframe]
 
     if not frames:
-        raise ValueError("没有足够数据可用于研究，请缩短周期或降低最小样本要求。")
+        timeframe_text = ", ".join(list(config.timeframes or [])) or "--"
+        raise ValueError(
+            f"找不到 {config.exchange} {config.symbol} 的历史数据（时间框架: {timeframe_text}，天数: {config.days}）。"
+            "请先在“数据管理”页面回填 K 线数据，或切换到有数据的交易对。"
+        )
 
     # B: IS split at 65% for parameter optimization
     is_split = 0.65
     rows: List[Dict[str, Any]] = []
+    total_tasks = max(1, len(frames) * len(config.strategies))
+    completed_tasks = 0
     for timeframe, tf_df in frames.items():
         is_end_idx = max(50, int(len(tf_df) * is_split))
         is_df = tf_df.iloc[:is_end_idx]
@@ -1633,6 +1656,19 @@ async def run_strategy_research(config: ResearchConfig) -> Dict[str, Any]:
         can_split = len(is_df) >= 50 and len(oos_df) >= 50
 
         for strategy in config.strategies:
+            if progress_callback is not None:
+                try:
+                    progress_callback(
+                        {
+                            "stage": "running",
+                            "strategy": str(strategy),
+                            "timeframe": str(timeframe),
+                            "completed": completed_tasks,
+                            "total": total_tasks,
+                        }
+                    )
+                except Exception:
+                    pass
             payload: Dict[str, Any] = {
                 "exchange": config.exchange,
                 "symbol": config.symbol,
@@ -1767,20 +1803,28 @@ async def run_strategy_research(config: ResearchConfig) -> Dict[str, Any]:
                     payload["is_sharpe"] = float(metrics.get("sharpe_ratio", 0.0))
 
                 # ── C: Purged walk-forward stability ──────────────────────
-                wf_result = _run_purged_walk_forward(
-                    strategy=strategy,
-                    df=tf_df,
-                    timeframe=timeframe,
-                    params=best_params if best_params else {},
-                    n_splits=5,
-                    embargo_pct=0.01,
-                    commission_rate=float(config.commission_rate),
-                    slippage_bps=float(config.slippage_bps),
-                    initial_capital=config.initial_capital,
-                    strategy_programs=config.strategy_programs,
-                )
-                payload["wf_stability"] = _compute_wf_stability(wf_result)
-                payload["wf_consistency"] = wf_result.get("consistency")
+                if can_split:
+                    wf_result = _run_purged_walk_forward(
+                        strategy=strategy,
+                        df=tf_df,
+                        timeframe=timeframe,
+                        params=best_params if best_params else {},
+                        n_splits=5,
+                        embargo_pct=0.01,
+                        commission_rate=float(config.commission_rate),
+                        slippage_bps=float(config.slippage_bps),
+                        initial_capital=config.initial_capital,
+                        strategy_programs=config.strategy_programs,
+                    )
+                    payload["wf_stability"] = _compute_wf_stability(wf_result)
+                    payload["wf_consistency"] = wf_result.get("consistency")
+                else:
+                    payload["wf_stability"] = None
+                    payload["wf_consistency"] = None
+                    logger.debug(
+                        f"Skipped walk-forward for {strategy}/{timeframe}: "
+                        f"insufficient split data (is={len(is_df)}, oos={len(oos_df)})"
+                    )
 
                 # ── Equity curve sample (50 points) ───────────────────
                 try:
@@ -1813,6 +1857,20 @@ async def run_strategy_research(config: ResearchConfig) -> Dict[str, Any]:
             except Exception as e:
                 payload["error"] = str(e)
             rows.append(payload)
+            completed_tasks += 1
+            if progress_callback is not None:
+                try:
+                    progress_callback(
+                        {
+                            "stage": "running",
+                            "strategy": str(strategy),
+                            "timeframe": str(timeframe),
+                            "completed": completed_tasks,
+                            "total": total_tasks,
+                        }
+                    )
+                except Exception:
+                    pass
 
     result_df = pd.DataFrame(rows)
     valid_df = result_df[(result_df["error"] == "") & (result_df["quality_flag"] != "invalid")].copy()

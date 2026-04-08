@@ -485,6 +485,28 @@
     const lower = message.toLowerCase();
     const days = Number(payload?.days || 0);
     const suggestions = [];
+    const isDataError = (
+      message.includes('没有足够数据')
+      || message.includes('最小样本')
+      || message.includes('历史数据')
+      || message.includes('秒级数据')
+      || lower.includes('insufficient')
+      || lower.includes('not enough data')
+      || lower.includes('sample')
+      || lower.includes('parquet')
+      || lower.includes('data')
+    );
+    const isTimeoutError = (
+      err?.name === 'AbortError'
+      || message.includes('超时')
+      || lower.includes('timeout')
+      || lower.includes('timed out')
+    );
+    const isNoStrategy = (
+      lower.includes('strategy templates')
+      || lower.includes('executable strategy')
+      || lower.includes('no executable')
+    );
     let tone = 'error';
     let badge = '执行失败';
     let title = '这次 one-click 自动研究没有跑起来';
@@ -495,14 +517,7 @@
       title = '研究目标太短，one-click 还不能开始';
       suggestions.push('把研究目标写得更具体一些，例如“寻找 BTC 在趋势行情中的高胜率 15m 策略”。');
       suggestions.push('最好同时写清楚币种、行情类型和想验证的思路。');
-    } else if (
-      message.includes('没有足够数据')
-      || message.includes('最小样本')
-      || message.includes('历史数据')
-      || lower.includes('insufficient')
-      || lower.includes('not enough data')
-      || lower.includes('sample')
-    ) {
+    } else if (isDataError) {
       tone = 'warn';
       badge = '数据不足';
       title = '这次 one-click 没跑起来：研究窗口里没有足够历史数据';
@@ -512,12 +527,13 @@
         suggestions.push('缩短研究周期范围，或降低最小样本要求后重试。');
       }
       suggestions.push('先只保留数据更完整的周期，例如 15m、1h。');
-    } else if (message.includes('超时') || lower.includes('timeout') || lower.includes('timed out')) {
+      suggestions.push('如果涉及子分钟周期，请先在“数据管理”补齐秒级数据。');
+    } else if (isTimeoutError) {
       tone = 'warn';
       badge = '请求超时';
-      title = '一键自动研究超时了';
-      suggestions.push('先减少币种或周期数量，再重试。');
-      suggestions.push('如果只是想确认研究能否跑通，可以先点“3) 运行研究”单独验证。');
+      title = '一键自动研究仍在后台执行';
+      suggestions.push('研究任务一般需要数分钟，请先在“研究任务队列”观察状态。');
+      suggestions.push('下一次可减少币种或周期数量，让结果更快返回。');
     } else if (
       lower.includes('research completed without deployable candidate')
       || lower.includes('proposal_status=rejected')
@@ -528,6 +544,12 @@
       title = '研究已经跑完，但这次没有生成可部署候选';
       suggestions.push('这更像是验证层筛掉了当前结果，不是接口本身崩了。');
       suggestions.push('先查看提案和候选详情里的验证原因，再决定是扩大样本、调目标还是换研究方式。');
+    } else if (isNoStrategy) {
+      tone = 'warn';
+      badge = '策略不可执行';
+      title = '研究任务已创建，但策略集合不可执行';
+      suggestions.push('先改成更通用的研究目标，避免过窄导致模板被全部过滤。');
+      suggestions.push('尝试把研究方式切为“模板 + AI草案”或“只跑模板”再重试。');
     } else if (
       lower.includes('network')
       || lower.includes('failed to fetch')
@@ -567,6 +589,9 @@
     const proposalReason = String(result?.proposal_reason || '').trim();
     const runtimeStatus = String(result?.runtime_status || result?.deploy?.runtime_status || '').trim();
     const action = String(result?.deploy?.action || '').trim();
+    const currentTradingMode = String(result?.current_trading_mode || '').trim();
+    const resolvedTarget = String(result?.target || '').trim();
+    const manualActionRequired = Boolean(result?.manual_action_required);
     const candidateStatus = String(result?.run?.candidate?.status || '').trim();
     const validationSummary = result?.run?.candidate?.validation_summary || {};
     const reasonInputs = [
@@ -590,7 +615,20 @@
     let title = '一键自动研究已完成';
     const suggestions = ['右侧候选详情与运行状态已经刷新，可以继续查看表现和验证结果。'];
 
-    if (
+    if (candidateId && outcome === 'completed_without_compatible_runtime_target' && manualActionRequired) {
+      tone = 'warn';
+      badge = '需要手动部署';
+      title = '研究已完成，但当前模式下未自动部署';
+      if (currentTradingMode) details.push(`当前系统模式：${normalizeUiText(currentTradingMode)}`);
+      if (resolvedTarget) details.push(`自动推荐目标：${normalizeUiText(resolvedTarget)}`);
+      reasons.forEach((reason) => details.push(`阻塞原因：${reason}`));
+      suggestions.length = 0;
+      suggestions.push('候选已经生成，但自动推荐目标与当前系统模式不兼容，所以本次没有自动注册。');
+      suggestions.push('如果要继续实盘链路，可以在右侧候选详情里手动选择 live_candidate。');
+      if (resolvedTarget === 'paper') {
+        suggestions.push('如果要按 AI 推荐目标部署，需要先将系统切换到 paper 模式。');
+      }
+    } else if (
       (outcome.startsWith('completed_without') || !candidateId)
       && (proposalStatus === 'rejected' || proposalReason || reasons.length)
     ) {
@@ -624,6 +662,80 @@
       details,
       suggestions,
     };
+  }
+
+  function extractOneClickJobStatus(snapshot) {
+    const jobStatus = String(snapshot?.job_status || snapshot?.job?.status || '').trim();
+    const proposalStatus = String(snapshot?.proposal_status || snapshot?.proposal?.status || '').trim();
+    const proposalReason = String(snapshot?.proposal_reason || snapshot?.job?.result?.proposal_reason || '').trim();
+    const progress = snapshot?.job?.progress || {};
+    const candidateId = String(
+      snapshot?.job?.result?.candidate?.candidate_id
+      || snapshot?.job?.result?.candidate_id
+      || snapshot?.candidate_id
+      || '',
+    ).trim();
+    return { jobStatus, proposalStatus, proposalReason, progress, candidateId };
+  }
+
+  async function pollOneClickJob(proposalId, jobId, btn, payload) {
+    const MAX_WAIT_MS = 20 * 60 * 1000;
+    const POLL_INTERVAL_MS = 5000;
+    const startAt = Date.now();
+    let latest = { proposalReason: '', candidateId: '', proposalStatus: '' };
+    while ((Date.now() - startAt) < MAX_WAIT_MS) {
+      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+      let statusSnapshot = null;
+      try {
+        statusSnapshot = await aiApi(`/proposals/${encodeURIComponent(proposalId)}/job-status`, {
+          timeoutMs: 10000,
+        });
+      } catch (networkErr) {
+        const message = String(networkErr?.message || '').toLowerCase();
+        const isTransient = (
+          message.includes('timeout')
+          || message.includes('failed to fetch')
+          || message.includes('network')
+          || message.includes('无法连接')
+        );
+        if (isTransient) continue;
+        throw networkErr;
+      }
+      const parsed = extractOneClickJobStatus(statusSnapshot || {});
+      latest = {
+        proposalReason: parsed.proposalReason,
+        candidateId: parsed.candidateId,
+        proposalStatus: parsed.proposalStatus,
+      };
+      const elapsedSec = Math.max(1, Math.round((Date.now() - startAt) / 1000));
+      if (btn) btn.textContent = `研究中 ${elapsedSec}s...`;
+
+      if (parsed.jobStatus === 'completed') return latest;
+      if (parsed.jobStatus === 'failed' || parsed.jobStatus === 'cancelled') {
+        const reason = parsed.proposalReason || String(statusSnapshot?.error || statusSnapshot?.job?.error || '').trim() || '未知原因';
+        throw new Error(`研究任务${parsed.jobStatus === 'failed' ? '失败' : '已取消'}: ${reason}`);
+      }
+
+      const progressMessage = normalizeUiText(
+        parsed.progress?.message
+        || parsed.progress?.phase
+        || `后台任务运行中（已 ${elapsedSec}s）`,
+      );
+      const progressTimeframes = toArray(parsed.progress?.timeframes).map(tf => String(tf || '').trim()).filter(Boolean);
+      renderOneClickFeedback({
+        tone: 'working',
+        badge: `阶段 2/3 · ${elapsedSec}s`,
+        title: '研究任务运行中',
+        summary: summarizeOneClickPayload(payload),
+        details: [
+          `任务 ID：${jobId}`,
+          progressMessage,
+          progressTimeframes.length ? `时间框架：${progressTimeframes.join(', ')}` : '',
+        ].filter(Boolean),
+        suggestions: ['可切到“研究任务队列”继续操作，后台会持续执行。'],
+      });
+    }
+    throw new Error('研究任务等待超时（20 分钟），请在研究任务队列里继续查看进度。');
   }
 
   function parseTs(v) {
@@ -3947,7 +4059,12 @@
 
   async function runOneClickResearchDeploy() {
     const btn = document.getElementById('ai-oneclick-btn');
+    const daysInput = document.getElementById('ai-oneclick-days');
     const goal = String(document.getElementById('ai-planner-goal')?.value || '').trim();
+    const exchange = String(document.getElementById('run-exchange')?.value || getCurrentResearchExchange() || 'binance');
+    const days = daysInput
+      ? Math.max(7, Math.min(3650, parseInt(daysInput.value || '30', 10) || 30))
+      : 30;
     if (goal.length < 8) {
       renderOneClickFeedback(buildOneClickFailureFeedback(
         new Error('研究目标太短（至少8个字符）'),
@@ -3955,8 +4072,8 @@
           goal,
           symbols: csvInput('ai-planner-symbols'),
           timeframes: csvInput('ai-planner-timeframes'),
-          exchange: String(document.getElementById('run-exchange')?.value || getCurrentResearchExchange() || 'binance'),
-          days: Math.max(1, Math.min(3650, parseInt(document.getElementById('run-days')?.value || '3', 10) || 3)),
+          exchange,
+          days,
         },
       ));
       notify('\u7814\u7a76\u76ee\u6807\u592a\u77ed\uff08\u81f3\u5c118\u4e2a\u5b57\u7b26\uff09', true);
@@ -3965,8 +4082,6 @@
 
     const symbols = csvInput('ai-planner-symbols');
     const timeframes = csvInput('ai-planner-timeframes');
-    const exchange = String(document.getElementById('run-exchange')?.value || getCurrentResearchExchange() || 'binance');
-    const days = Math.max(1, Math.min(3650, parseInt(document.getElementById('run-days')?.value || '3', 10) || 3));
     const plannerConstraints = buildPlannerConstraints();
     const payload = {
       goal,
@@ -3988,43 +4103,133 @@
     };
 
     try {
-      if (btn) { btn.disabled = true; btn.textContent = '\u6267\u884c\u4e2d...'; }
+      if (btn) { btn.disabled = true; btn.textContent = '提交中...'; }
       renderOneClickFeedback({
         tone: 'working',
-        badge: '执行中',
-        title: 'one-click 自动研究正在执行',
+        badge: '阶段 1/3',
+        title: '正在生成提案并提交后台研究任务',
         summary: summarizeOneClickPayload(payload),
-        details: ['系统正在依次执行：生成提案 → 运行研究 → 尝试部署。'],
-        suggestions: ['这个过程可能需要 1 到 3 分钟，期间先不要重复点击。'],
+        details: [
+          '系统将先创建提案，再把研究任务放入后台队列。',
+          '此页面负责研究与候选，不会直接启动自治代理下单。',
+        ],
+        suggestions: ['提案提交成功后会自动轮询状态，完成后再进入部署阶段。'],
       });
-      notify('\u6b63\u5728\u6267\u884c\uff1a\u751f\u6210 -> \u8fd0\u884c -> \u90e8\u7f72');
-      const result = await aiApi('/oneclick/research-deploy', {
+      notify('正在执行：提交后台研究任务');
+      const queueResult = await aiApi('/oneclick/research-deploy', {
         method: 'POST',
         body: JSON.stringify(payload),
-        timeoutMs: 180000,
+        timeoutMs: 30000,
       });
       state.pendingLlmContext = null;
       setAIContextButtonState('idle');
       const contextBtn = document.getElementById('ai-context-btn');
       if (contextBtn) { contextBtn.textContent = '1) 生成研究思路'; contextBtn.disabled = false; contextBtn.style.color = ''; }
 
-      const proposalId = String(result?.proposal_id || result?.run?.proposal?.proposal_id || '').trim();
-      const candidateId = String(result?.candidate_id || result?.run?.candidate?.candidate_id || '').trim();
-      const runtimeStatus = String(result?.runtime_status || result?.deploy?.runtime_status || '').trim();
-      const action = String(result?.deploy?.action || '').trim();
-      try {
-        await refreshWorkbench(proposalId, candidateId);
-        if (candidateId) viewCandidate(candidateId).catch(() => {});
-      } catch (refreshErr) {
-        console.warn('one-click workbench refresh failed', refreshErr);
+      const proposalId = String(queueResult?.proposal_id || queueResult?.run?.proposal?.proposal_id || '').trim();
+      const jobId = String(queueResult?.job_id || queueResult?.job?.job_id || '').trim();
+      if (!jobId) {
+        const fallbackCandidate = String(queueResult?.candidate_id || queueResult?.run?.candidate?.candidate_id || '').trim();
+        if (proposalId) await refreshWorkbench(proposalId, fallbackCandidate || '');
+        if (fallbackCandidate) viewCandidate(fallbackCandidate).catch(() => {});
+        updatePlannerModeHint();
+        renderOneClickFeedback(buildOneClickSuccessFeedback(queueResult, payload));
+        notify('一键研究已完成');
+        return;
       }
+      if (btn) btn.textContent = '研究中...';
+      renderOneClickFeedback({
+        tone: 'working',
+        badge: '阶段 2/3',
+        title: '研究任务已入队，后台运行中',
+        summary: summarizeOneClickPayload(payload),
+        details: [
+          `提案 ID：${proposalId || '--'}`,
+          `任务 ID：${jobId}`,
+          '正在进行参数搜索、回测与验证，请耐心等待。',
+        ],
+        suggestions: ['你可以继续浏览研究页其他信息，结果会自动刷新。'],
+      });
+      notify('研究任务已入队，正在后台运行');
+      await refreshWorkbench(proposalId, '');
+
+      const completed = await pollOneClickJob(proposalId, jobId, btn, payload);
+      const candidateId = String(completed?.candidateId || '').trim();
+      if (!candidateId) {
+        await refreshWorkbench(proposalId, '');
+        renderOneClickFeedback({
+          tone: 'warn',
+          badge: '研究完成',
+          title: '研究已完成，但未产出可部署候选',
+          summary: summarizeOneClickPayload(payload),
+          details: [
+            `提案状态：${normalizeUiText(statusText(completed?.proposalStatus || 'rejected'))}`,
+            completed?.proposalReason || '当前候选未通过验证门槛。',
+          ],
+          suggestions: [
+            '先查看候选列表与验证原因，再决定是否调整目标或周期。',
+            '这一步只影响研究候选，不会影响自治代理的实时执行。',
+          ],
+        });
+        notify('研究完成，未生成可部署候选');
+        return;
+      }
+
+      if (btn) btn.textContent = '部署中...';
+      renderOneClickFeedback({
+        tone: 'working',
+        badge: '阶段 3/3',
+        title: '研究完成，正在执行候选部署',
+        summary: summarizeOneClickPayload(payload),
+        details: [
+          `候选 ID：${candidateId}`,
+          '系统正在根据 promotion 结果自动选择部署目标。',
+        ],
+        suggestions: ['部署完成后会自动跳转候选详情。'],
+      });
+
+      let deployResult = null;
+      try {
+        deployResult = await aiApi('/oneclick/deploy-candidate', {
+          method: 'POST',
+          body: JSON.stringify({
+            candidate_id: candidateId,
+            target: 'auto',
+            allocation_pct: 0.05,
+            approval_notes: 'oneclick approve from ui',
+          }),
+          timeoutMs: 30000,
+        });
+      } catch (deployErr) {
+        const deployMsg = String(deployErr?.message || '');
+        if (!/404|not found/i.test(deployMsg)) throw deployErr;
+        deployResult = {
+          proposal_id: proposalId,
+          candidate_id: candidateId,
+          deploy: { performed: false, action: null, result: null, runtime_status: null },
+          outcome: 'completed_no_deploy',
+        };
+      }
+
+      const finalResult = {
+        ...deployResult,
+        proposal_id: proposalId || deployResult?.proposal_id,
+        candidate_id: candidateId,
+      };
+      await refreshWorkbench(proposalId, candidateId);
+      viewCandidate(candidateId).catch(() => {});
       updatePlannerModeHint();
-      renderOneClickFeedback(buildOneClickSuccessFeedback(result, payload));
-      const completedWithoutDeployable = String(result?.outcome || '').startsWith('completed_without');
-      if (completedWithoutDeployable) {
-        notify(`一键研究已完成，但未生成可部署候选${runtimeStatus ? `: ${normalizeUiText(statusText(runtimeStatus))}` : ''}`);
+      renderOneClickFeedback(buildOneClickSuccessFeedback(finalResult, payload));
+      const finalAction = String(finalResult?.deploy?.action || '').trim();
+      const finalStatus = String(finalResult?.runtime_status || finalResult?.deploy?.runtime_status || '').trim();
+      const finalOutcome = String(finalResult?.outcome || '').trim();
+      if (finalOutcome === 'completed_without_compatible_runtime_target') {
+        const modeHint = String(finalResult?.current_trading_mode || '').trim();
+        notify(`一键研究已完成，但${modeHint || '当前'}模式下未自动部署；请手动选择 live_candidate 或切换到 paper`);
+      } else if (finalOutcome.startsWith('completed_without')) {
+        notify(`一键研究已完成，但未生成可部署候选${finalStatus ? `：${normalizeUiText(statusText(finalStatus))}` : ''}`);
       } else {
-        notify(`\u4e00\u952e\u7814\u7a76+\u90e8\u7f72\u5b8c\u6210${runtimeStatus ? `: ${runtimeStatus}` : ''}${action ? ` (${action})` : ''}`);
+        notify(`一键研究+部署完成${finalStatus ? `：${finalStatus}` : ''}${finalAction ? ` (${finalAction})` : ''}`);
       }
     } catch (err) {
       renderOneClickFeedback(buildOneClickFailureFeedback(err, payload));
@@ -4047,7 +4252,7 @@
       return;
     }
     const exchange = String(document.getElementById('run-exchange')?.value || 'binance');
-    const days     = Math.max(1, Math.min(3650, parseInt(document.getElementById('run-days')?.value || '3', 10) || 3));
+    const days     = Math.max(1, Math.min(3650, parseInt(document.getElementById('run-days')?.value || '30', 10) || 30));
     notify('研究任务已提交，后台运行中...');
     const result = await aiApi(`/proposals/${encodeURIComponent(proposalId)}/run`, {
       method: 'POST',
@@ -4360,6 +4565,8 @@
     });
     document.getElementById('run-days')?.addEventListener('input', () => clearOneClickFeedback());
     document.getElementById('run-days')?.addEventListener('change', () => clearOneClickFeedback());
+    document.getElementById('ai-oneclick-days')?.addEventListener('input', () => clearOneClickFeedback());
+    document.getElementById('ai-oneclick-days')?.addEventListener('change', () => clearOneClickFeedback());
     window.addEventListener('ai-agent:status', (event) => {
       const nextStatus = event?.detail?.status || null;
       if (!nextStatus) return;

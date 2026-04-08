@@ -116,6 +116,15 @@ class AIOneClickResearchDeployRequest(BaseModel):
     skip_deploy: bool = False
 
 
+class AIOneClickDeployRequest(BaseModel):
+    candidate_id: str
+    target: str = "auto"  # auto | paper | live_candidate
+    allocation_pct: float = Field(default=0.05, ge=0.001, le=1.0)
+    strategy_name: str = ""
+    approval_notes: str = "oneclick approve"
+    skip_deploy: bool = False
+
+
 class AICandidatePromotionRequest(BaseModel):
     target: Optional[str] = None
 
@@ -211,7 +220,8 @@ class AIAutonomousAgentRunOnceRequest(BaseModel):
 
 
 def _proposal_job_summary(app: Request | Any, proposal_id: str, preferred_job_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    jobs = dict(getattr(app.state, "research_jobs", {}) or {})
+    state_owner = getattr(app, "app", app)
+    jobs = dict(getattr(getattr(state_owner, "state", None), "research_jobs", {}) or {})
     job_id = str(preferred_job_id or "").strip()
     chosen: Optional[Dict[str, Any]] = None
     if job_id:
@@ -236,6 +246,7 @@ def _proposal_job_summary(app: Request | Any, proposal_id: str, preferred_job_id
         "started_at": chosen.get("started_at"),
         "finished_at": chosen.get("finished_at"),
         "error": chosen.get("error"),
+        "progress": chosen.get("progress"),
     }
 
 
@@ -270,6 +281,156 @@ def _normalize_deploy_target(value: str) -> str:
     if text not in {"auto", "paper", "live_candidate"}:
         return "auto"
     return text
+
+
+def _extract_first_validation_reason(item: Any) -> Optional[str]:
+    summary = getattr(item, "validation_summary", None)
+    reasons = list(getattr(summary, "reasons", []) or [])
+    if reasons:
+        return str(reasons[0] or "").strip() or None
+    metadata = getattr(item, "metadata", None) or {}
+    if isinstance(metadata, dict):
+        return str(metadata.get("last_research_error") or "").strip() or None
+    return None
+
+
+def _serialize_research_job_result(raw_result: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw_result, dict):
+        return None
+    proposal = raw_result.get("proposal")
+    candidate = raw_result.get("candidate")
+    promotion = raw_result.get("promotion")
+    payload: Dict[str, Any] = {
+        "proposal": proposal.model_dump(mode="json") if hasattr(proposal, "model_dump") else proposal,
+        "candidate": candidate.model_dump(mode="json") if hasattr(candidate, "model_dump") else candidate,
+        "promotion": promotion.model_dump(mode="json") if hasattr(promotion, "model_dump") else promotion,
+        "proposal_reason": None,
+    }
+    if payload["candidate"] is None:
+        payload["proposal_reason"] = _extract_first_validation_reason(proposal)
+    return payload
+
+
+def _resolve_oneclick_target(raw_target: str, promotion_decision: str) -> Optional[str]:
+    resolved_target: Optional[str] = raw_target
+    normalized_decision = str(promotion_decision or "").strip().lower()
+    if raw_target == "auto":
+        if normalized_decision == "shadow":
+            normalized_decision = "paper"
+        resolved_target = (
+            normalized_decision if normalized_decision in {"paper", "live_candidate"} else None
+        )
+    return resolved_target
+
+
+def _oneclick_generated_payload(request: Request, proposal: Any, generated: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "proposal": _serialize_proposal(request, proposal),
+        "planner_notes": generated.get("planner_notes", []),
+        "filtered_templates": generated.get("filtered_templates", []),
+    }
+
+
+async def _execute_oneclick_candidate_deploy(
+    request: Request,
+    *,
+    payload: AIOneClickDeployRequest,
+) -> Dict[str, Any]:
+    ensure_ai_research_runtime_state(request.app)
+    candidate = get_candidate(request.app, payload.candidate_id)
+    governance_enabled = bool(getattr(settings, "GOVERNANCE_ENABLED", True))
+    raw_target = _normalize_deploy_target(payload.target)
+    promotion_decision = str(
+        getattr(candidate.promotion, "decision", "")
+        or (getattr(candidate, "metadata", {}) or {}).get("recommended_runtime_target")
+        or ""
+    ).strip().lower()
+    resolved_target = _resolve_oneclick_target(raw_target, promotion_decision)
+    current_mode = str(execution_engine.get_trading_mode() or "").strip().lower() or "paper"
+    if current_mode not in {"paper", "live"}:
+        current_mode = str(getattr(settings, "TRADING_MODE", "paper") or "paper").strip().lower() or "paper"
+    auto_mode_conflict_detail: Optional[str] = None
+    if raw_target == "auto" and resolved_target == "paper" and current_mode != "paper":
+        auto_mode_conflict_detail = _register_mode_conflict_detail(current_mode)
+
+    if payload.skip_deploy or resolved_target is None or auto_mode_conflict_detail:
+        deploy_payload: Dict[str, Any] = {
+            "performed": False,
+            "action": None,
+            "result": None,
+            "runtime_status": None,
+        }
+        outcome = "completed_no_deploy" if payload.skip_deploy else "completed_without_deployable_candidate"
+        manual_action_required = False
+        manual_target_options: List[str] = []
+        if auto_mode_conflict_detail:
+            deploy_payload["reasons"] = [auto_mode_conflict_detail]
+            deploy_payload["blockers"] = [
+                {
+                    "code": "paper_target_conflicts_with_runtime_mode",
+                    "detail": auto_mode_conflict_detail,
+                    "resolved_target": resolved_target,
+                    "current_trading_mode": current_mode,
+                }
+            ]
+            outcome = "completed_without_compatible_runtime_target"
+            manual_action_required = True
+            if current_mode == "live":
+                manual_target_options = ["live_candidate"]
+        return {
+            "candidate_id": payload.candidate_id,
+            "governance_enabled": governance_enabled,
+            "target": resolved_target,
+            "deploy": deploy_payload,
+            "outcome": outcome,
+            "runtime_status": None,
+            "registered_strategy_name": None,
+            "current_trading_mode": current_mode,
+            "manual_action_required": manual_action_required,
+            "manual_target_options": manual_target_options,
+            "candidate": candidate.model_dump(mode="json"),
+        }
+
+    deploy_action: Optional[str] = None
+    deploy_result: Optional[Dict[str, Any]] = None
+    if governance_enabled:
+        if resolved_target == "paper":
+            deploy_action = "quick_register"
+            deploy_result = await quick_register_candidate(
+                request,
+                payload.candidate_id,
+                AIQuickRegisterRequest(allocation_pct=float(payload.allocation_pct)),
+            )
+        else:
+            deploy_action = "human_approve"
+            deploy_result = await human_approve_candidate(
+                request,
+                payload.candidate_id,
+                AIHumanApprovalRequest(target="live_candidate", notes=payload.approval_notes),
+            )
+    else:
+        deploy_action = "register"
+        deploy_result = await register_ai_candidate(
+            request,
+            payload.candidate_id,
+            AICandidateRegisterRequest(mode=resolved_target, name=(payload.strategy_name or None)),
+        )
+
+    return {
+        "candidate_id": payload.candidate_id,
+        "governance_enabled": governance_enabled,
+        "target": resolved_target,
+        "deploy": {
+            "performed": True,
+            "action": deploy_action,
+            "result": deploy_result,
+            "runtime_status": (deploy_result or {}).get("runtime_status"),
+        },
+        "outcome": f"deployed_{resolved_target}",
+        "runtime_status": (deploy_result or {}).get("runtime_status"),
+        "registered_strategy_name": (deploy_result or {}).get("registered_strategy_name"),
+        "candidate": candidate.model_dump(mode="json"),
+    }
 
 
 def _register_mode_conflict_detail(current_mode: str) -> str:
@@ -2827,7 +2988,7 @@ async def run_ai_proposal_endpoint(request: Request, proposal_id: str, payload: 
 
 @router.post("/oneclick/research-deploy")
 async def oneclick_ai_research_deploy(request: Request, payload: AIOneClickResearchDeployRequest):
-    """One-click orchestration: generate -> run -> deploy/approve."""
+    """One-click orchestration stage 1: generate -> queue research job."""
     ensure_ai_research_runtime_state(request.app)
 
     generated = generate_planned_proposal(
@@ -2844,6 +3005,7 @@ async def oneclick_ai_research_deploy(request: Request, payload: AIOneClickResea
         llm_research_output=payload.llm_research_output,
     )
     proposal = generated["proposal"]
+    generated_payload = _oneclick_generated_payload(request, proposal, generated)
 
     try:
         run_result = await run_proposal(
@@ -2856,158 +3018,46 @@ async def oneclick_ai_research_deploy(request: Request, payload: AIOneClickResea
             commission_rate=payload.commission_rate,
             slippage_bps=payload.slippage_bps,
             initial_capital=payload.initial_capital,
-            background=False,
+            background=True,
             timeframes=payload.timeframes,
             strategies=payload.strategies,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    governance_enabled = bool(getattr(settings, "GOVERNANCE_ENABLED", True))
-    candidate = run_result.get("candidate")
-    if candidate is None:
-        completed_proposal = run_result.get("proposal")
-        status = str(getattr(completed_proposal, "status", "unknown"))
-        reason_items = []
-        validation_summary = getattr(completed_proposal, "validation_summary", None)
-        if validation_summary is not None:
-            reason_items.extend(list(getattr(validation_summary, "reasons", []) or []))
-        proposal_reason = str(reason_items[0] or "").strip() if reason_items else None
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            raise
+        existing_job = _proposal_job_summary(
+            request,
+            proposal_id=str(proposal.proposal_id),
+            preferred_job_id=str((proposal.metadata or {}).get("last_research_job_id") or ""),
+        ) or {}
         return {
             "proposal_id": str(proposal.proposal_id),
-            "candidate_id": None,
-            "governance_enabled": governance_enabled,
-            "target": None,
-            "deploy": {
-                "performed": False,
-                "action": None,
-                "result": None,
-                "runtime_status": None,
-            },
-            "generated": {
-                "proposal": _serialize_proposal(request, proposal),
-                "planner_notes": generated.get("planner_notes", []),
-                "filtered_templates": generated.get("filtered_templates", []),
-            },
-            "run": {
-                "proposal": _serialize_proposal(request, run_result["proposal"]),
-                "experiment": run_result["experiment"].model_dump(mode="json"),
-                "run": run_result["run"].model_dump(mode="json"),
-                "candidate": None,
-                "promotion": None,
-            },
-            "outcome": "completed_without_candidate",
-            "proposal_status": status,
-            "proposal_reason": proposal_reason,
-            "runtime_status": status,
-            "registered_strategy_name": None,
+            "job_id": existing_job.get("job_id"),
+            "job": existing_job or None,
+            "status": "already_running",
+            "generated": generated_payload,
+            "outcome": "queued",
+            "message": "该提案已有研究任务在运行，请等待完成后查看候选结果。",
         }
 
-    raw_target = _normalize_deploy_target(payload.target)
-    resolved_target: Optional[str] = raw_target
-    promotion_decision = str(getattr(run_result.get("promotion"), "decision", "") or "").strip().lower()
-    if raw_target == "auto":
-        if promotion_decision == "shadow":
-            promotion_decision = "paper"
-        resolved_target = (
-            promotion_decision if promotion_decision in {"paper", "live_candidate"} else None
-        )
-
-    if resolved_target is None:
-        completed_proposal = run_result.get("proposal")
-        proposal_reason = None
-        validation_summary = getattr(candidate, "validation_summary", None)
-        if validation_summary is not None:
-            proposal_reason = str((list(getattr(validation_summary, "reasons", []) or []) or [""])[0] or "").strip() or None
-        if not proposal_reason and completed_proposal is not None:
-            proposal_reason = str((getattr(completed_proposal, "metadata", {}) or {}).get("last_research_error") or "").strip() or None
-        return {
-            "proposal_id": str(proposal.proposal_id),
-            "candidate_id": str(getattr(candidate, "candidate_id", "") or ""),
-            "governance_enabled": governance_enabled,
-            "target": None,
-            "deploy": {
-                "performed": False,
-                "action": None,
-                "result": None,
-                "runtime_status": None,
-            },
-            "generated": {
-                "proposal": _serialize_proposal(request, proposal),
-                "planner_notes": generated.get("planner_notes", []),
-                "filtered_templates": generated.get("filtered_templates", []),
-            },
-            "run": {
-                "proposal": _serialize_proposal(request, run_result["proposal"]),
-                "experiment": run_result["experiment"].model_dump(mode="json"),
-                "run": run_result["run"].model_dump(mode="json"),
-                "candidate": candidate.model_dump(mode="json"),
-                "promotion": run_result["promotion"].model_dump(mode="json") if run_result.get("promotion") else None,
-            },
-            "outcome": "completed_without_deployable_candidate",
-            "proposal_status": str(getattr(completed_proposal, "status", "unknown")),
-            "proposal_reason": proposal_reason,
-            "runtime_status": str(getattr(completed_proposal, "status", "unknown")),
-            "registered_strategy_name": None,
-        }
-
-    deploy_action: Optional[str] = None
-    deploy_result: Optional[Dict[str, Any]] = None
-
-    candidate_id = str(getattr(candidate, "candidate_id", "") or "")
-    if not candidate_id:
-        raise HTTPException(status_code=500, detail="candidate_id missing from run result")
-
-    if not payload.skip_deploy:
-        if governance_enabled:
-            if resolved_target == "paper":
-                deploy_action = "quick_register"
-                deploy_result = await quick_register_candidate(
-                    request,
-                    candidate_id,
-                    AIQuickRegisterRequest(allocation_pct=float(payload.allocation_pct)),
-                )
-            else:
-                deploy_action = "human_approve"
-                deploy_result = await human_approve_candidate(
-                    request,
-                    candidate_id,
-                    AIHumanApprovalRequest(target="live_candidate", notes=payload.approval_notes),
-                )
-        else:
-            deploy_action = "register"
-            deploy_result = await register_ai_candidate(
-                request,
-                candidate_id,
-                AICandidateRegisterRequest(mode=resolved_target, name=(payload.strategy_name or None)),
-            )
-
+    job = dict(run_result.get("job") or {})
     return {
         "proposal_id": str(proposal.proposal_id),
-        "candidate_id": candidate_id,
-        "governance_enabled": governance_enabled,
-        "target": resolved_target,
-        "deploy": {
-            "performed": bool(not payload.skip_deploy),
-            "action": deploy_action,
-            "result": deploy_result,
-            "runtime_status": (deploy_result or {}).get("runtime_status"),
-        },
-        "generated": {
-            "proposal": _serialize_proposal(request, proposal),
-            "planner_notes": generated.get("planner_notes", []),
-            "filtered_templates": generated.get("filtered_templates", []),
-        },
-        "run": {
-            "proposal": _serialize_proposal(request, run_result["proposal"]),
-            "experiment": run_result["experiment"].model_dump(mode="json"),
-            "run": run_result["run"].model_dump(mode="json"),
-            "candidate": candidate.model_dump(mode="json"),
-            "promotion": run_result["promotion"].model_dump(mode="json") if run_result.get("promotion") else None,
-        },
-        "runtime_status": (deploy_result or {}).get("runtime_status"),
-        "registered_strategy_name": (deploy_result or {}).get("registered_strategy_name"),
+        "job_id": job.get("job_id"),
+        "job": job or None,
+        "status": str(job.get("status") or "queued"),
+        "generated": generated_payload,
+        "outcome": "queued",
     }
+
+
+@router.post("/oneclick/deploy-candidate")
+async def oneclick_deploy_candidate(request: Request, payload: AIOneClickDeployRequest):
+    """One-click orchestration stage 2: deploy a completed research candidate."""
+    result = await _execute_oneclick_candidate_deploy(request, payload=payload)
+    return result
 
 
 @router.get("/diagnostics/funding-cache")
@@ -3091,23 +3141,31 @@ async def get_ai_proposal_job_status(request: Request, proposal_id: str):
     ensure_ai_research_runtime_state(request.app)
     item = get_proposal(request.app, proposal_id)
     job_id = item.metadata.get("last_research_job_id")
-    job: dict = {}
+    job: Dict[str, Any] = {}
     if job_id:
         raw = request.app.state.research_jobs.get(job_id) or {}
-        job = {k: v for k, v in raw.items() if k != "result"}
+        job = {
+            "job_id": raw.get("job_id"),
+            "proposal_id": raw.get("proposal_id"),
+            "experiment_id": raw.get("experiment_id"),
+            "run_id": raw.get("run_id"),
+            "status": raw.get("status"),
+            "created_at": raw.get("created_at"),
+            "started_at": raw.get("started_at"),
+            "finished_at": raw.get("finished_at"),
+            "error": raw.get("error"),
+            "progress": raw.get("progress"),
+            "result": _serialize_research_job_result(raw.get("result")),
+        }
     proposal_reason = None
     if str(item.status) == "rejected":
-        summary = getattr(item, "validation_summary", None)
-        reasons = list(getattr(summary, "reasons", []) or [])
-        if reasons:
-            proposal_reason = str(reasons[0] or "").strip() or None
-        if not proposal_reason:
-            proposal_reason = str((item.metadata or {}).get("last_research_error") or "").strip() or None
+        proposal_reason = _extract_first_validation_reason(item)
     return {
         "proposal_id": proposal_id,
         "proposal_status": item.status,
         "proposal_reason": proposal_reason,
         "job_id": job_id,
+        "job": job or None,
         "job_status": job.get("status"),
         "started_at": job.get("started_at"),
         "finished_at": job.get("finished_at"),

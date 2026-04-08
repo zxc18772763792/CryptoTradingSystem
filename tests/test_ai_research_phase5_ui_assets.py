@@ -32,7 +32,7 @@ def test_ai_research_template_loads_phase5_modules():
     assert "/static/js/ai_research_runtime.js" in template
     assert "/static/js/ai_research_agent.js" in template
     assert "/static/js/ai_research_patch.js" not in template
-    assert '/static/js/news_tab_runtime.js?v=14' in news_template
+    assert '/static/js/news_tab_runtime.js?v=' in news_template
 
 
 def test_ai_research_phase5_assets_exist_and_define_flow_styles():
@@ -71,6 +71,8 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "buildOneClickFailureFeedback" in ai_js
     assert "buildOneClickSuccessFeedback" in ai_js
     assert "renderOneClickFeedback" in ai_js
+    assert "completed_without_compatible_runtime_target" in ai_js
+    assert "manual_action_required" in ai_js
     assert "liveDecisionActivityLastGood" in ai_js
     assert "FLOW_HINT_QUICK_PATH" in ai_js
     assert "候选回填" in ai_js

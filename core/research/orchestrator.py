@@ -101,6 +101,74 @@ def _persist_research_jobs(app: FastAPI) -> None:
         pass
 
 
+def _update_research_job_progress(
+    app: FastAPI,
+    *,
+    job_id: Optional[str],
+    phase: str,
+    message: str,
+    extra: Optional[Dict[str, Any]] = None,
+    persist: bool = False,
+) -> None:
+    if not job_id:
+        return
+    jobs = getattr(app.state, "research_jobs", None)
+    if not isinstance(jobs, dict):
+        return
+    job = jobs.get(job_id)
+    if not isinstance(job, dict):
+        return
+    progress: Dict[str, Any] = {
+        "phase": str(phase or "").strip() or "running",
+        "message": str(message or "").strip() or "研究任务进行中",
+        "updated_at": _now_utc().isoformat(),
+    }
+    if extra:
+        progress.update(dict(extra))
+    job["progress"] = progress
+    jobs[job_id] = job
+    if persist:
+        _persist_research_jobs(app)
+
+
+def _job_result_summary(result: Dict[str, Any]) -> Dict[str, Any]:
+    proposal = result.get("proposal")
+    candidate = result.get("candidate")
+    promotion = result.get("promotion")
+    proposal_reason: Optional[str] = None
+
+    if candidate is not None:
+        validation_summary = getattr(candidate, "validation_summary", None)
+        reasons = list(getattr(validation_summary, "reasons", []) or [])
+        if reasons:
+            proposal_reason = str(reasons[0] or "").strip() or None
+    if proposal_reason is None and proposal is not None:
+        validation_summary = getattr(proposal, "validation_summary", None)
+        reasons = list(getattr(validation_summary, "reasons", []) or [])
+        if reasons:
+            proposal_reason = str(reasons[0] or "").strip() or None
+        if not proposal_reason:
+            proposal_reason = str((getattr(proposal, "metadata", {}) or {}).get("last_research_error") or "").strip() or None
+
+    return {
+        "proposal": {
+            "proposal_id": str(getattr(proposal, "proposal_id", "") or ""),
+            "status": str(getattr(proposal, "status", "") or ""),
+            "latest_candidate_id": str(getattr(proposal, "latest_candidate_id", "") or ""),
+        } if proposal is not None else None,
+        "candidate": {
+            "candidate_id": str(getattr(candidate, "candidate_id", "") or ""),
+            "status": str(getattr(candidate, "status", "") or ""),
+            "proposal_id": str(getattr(candidate, "proposal_id", "") or ""),
+        } if candidate is not None else None,
+        "candidate_id": str(getattr(candidate, "candidate_id", "") or "") if candidate is not None else "",
+        "promotion": {
+            "decision": str(getattr(promotion, "decision", "") or ""),
+        } if promotion is not None else None,
+        "proposal_reason": proposal_reason,
+    }
+
+
 def _refresh_runtime_eligibility_snapshot_safe(*, reason: str) -> Optional[Dict[str, Any]]:
     try:
         return refresh_runtime_eligibility_snapshot()
@@ -501,7 +569,21 @@ def build_research_config_from_proposal(
         resolved_strategies = fallback
     all_executable = _dedupe_keep_order(list(resolved_strategies) + list(strategy_programs.keys()))
     if not all_executable:
-        raise ValueError("proposal has no executable strategy templates or strategy programs to research")
+        emergency_fallback = ["BollingerBandsStrategy", "RSIStrategy", "MACDStrategy"]
+        emergency_resolved, _ = _filter_supported_research_strategies(emergency_fallback)
+        if emergency_resolved:
+            logger.warning(
+                "build_research_config: all requested strategies filtered out for "
+                f"proposal={proposal.proposal_id}; fallback={emergency_resolved}"
+            )
+            proposal.metadata["emergency_fallback_strategies"] = list(emergency_resolved)
+            all_executable = emergency_resolved
+        else:
+            dropped_strategies = list(proposal.metadata.get("last_dropped_unsupported_strategies", []) or [])
+            raise ValueError(
+                "proposal has no executable strategy templates or strategy programs to research. "
+                f"dropped={dropped_strategies}"
+            )
     return ResearchConfig(
         exchange=str(exchange or "binance").strip().lower() or "binance",
         symbol=resolved_symbol,
@@ -1014,6 +1096,18 @@ async def _finalize_research_run(
     run.status = "running"
     run.started_at = _now_utc()
     app.state.ai_experiment_run_registry.save(run)
+    _update_research_job_progress(
+        app,
+        job_id=job_id,
+        phase="research_running",
+        message=f"正在回测 {config.symbol}，共 {len(config.strategies)} 个策略 × {len(config.timeframes)} 个周期",
+        extra={
+            "symbol": config.symbol,
+            "exchange": config.exchange,
+            "strategies_total": len(config.strategies),
+            "timeframes": list(config.timeframes),
+        },
+    )
 
     # Fetch existing active candidates for cross-batch correlation check
     existing_active: List[StrategyCandidate] = []
@@ -1025,7 +1119,29 @@ async def _finalize_research_run(
     except Exception:
         pass
 
-    result = await run_strategy_research(config)
+    progress_total = max(1, len(config.strategies) * len(config.timeframes))
+
+    def _on_research_progress(payload: Dict[str, Any]) -> None:
+        completed = int(payload.get("completed", 0) or 0)
+        total = int(payload.get("total", progress_total) or progress_total)
+        strategy = str(payload.get("strategy") or "").strip()
+        timeframe = str(payload.get("timeframe") or "").strip()
+        _update_research_job_progress(
+            app,
+            job_id=job_id,
+            phase="research_running",
+            message=f"研究进度 {completed}/{total}：{strategy or '--'} @ {timeframe or '--'}",
+            extra={
+                "completed": completed,
+                "total": total,
+                "strategy": strategy,
+                "timeframe": timeframe,
+                "symbol": config.symbol,
+                "exchange": config.exchange,
+            },
+        )
+
+    result = await run_strategy_research(config, progress_callback=_on_research_progress)
     summary, candidates, candidate = _create_candidates_from_result(proposal, experiment, result, existing_candidates=existing_active)
     promotion = candidate.promotion if candidate else None
 
@@ -1049,7 +1165,23 @@ async def _finalize_research_run(
                   not c.metadata.get("correlation_filtered") and
                   c.promotion and c.promotion.decision != "reject"][:3]
         if worthy:
-            await _asyncio.gather(*[_add_rationale(c) for c in worthy], return_exceptions=True)
+            _update_research_job_progress(
+                app,
+                job_id=job_id,
+                phase="llm_rationale",
+                message=f"正在生成候选解释（{len(worthy)} 个）",
+            )
+            results = await _asyncio.wait_for(
+                _asyncio.gather(*[_add_rationale(c) for c in worthy], return_exceptions=True),
+                timeout=30.0,
+            )
+            for idx, llm_result in enumerate(results):
+                if isinstance(llm_result, Exception):
+                    logger.debug(
+                        f"LLM rationale failed for candidate={worthy[idx].candidate_id}: {llm_result}"
+                    )
+    except asyncio.TimeoutError:
+        logger.warning("LLM rationale generation timed out after 30s; skipped remaining candidates")
     except Exception as _llm_err:
         logger.warning(f"LLM rationale generation failed: {_llm_err}")
 
@@ -1057,6 +1189,12 @@ async def _finalize_research_run(
     run.finished_at = _now_utc()
     run.result = result
     app.state.ai_experiment_run_registry.save(run)
+    _update_research_job_progress(
+        app,
+        job_id=job_id,
+        phase="finalizing",
+        message="研究计算完成，正在写入结果与候选状态",
+    )
 
     experiment.status = "completed"
     app.state.ai_experiment_registry.save(experiment)
@@ -1228,6 +1366,15 @@ async def _run_proposal_background_job(
     job = app.state.research_jobs.get(job_id) or {}
     job["status"] = "running"
     job["started_at"] = _now_utc().isoformat()
+    job["progress"] = {
+        "phase": "research_running",
+        "message": "研究任务已启动，等待首批结果",
+        "updated_at": _now_utc().isoformat(),
+        "symbol": config.symbol,
+        "exchange": config.exchange,
+        "strategies_total": len(config.strategies),
+        "timeframes": list(config.timeframes),
+    }
     app.state.research_jobs[job_id] = job
     _persist_research_jobs(app)
     try:
@@ -1249,9 +1396,14 @@ async def _run_proposal_background_job(
                     "proposal_id": proposal_id,
                     "experiment_id": experiment_id,
                     "run_id": run_id,
-                    "status": result["proposal"].status,
+                    **_job_result_summary(result),
                 },
                 "error": None,
+                "progress": {
+                    "phase": "completed",
+                    "message": "研究任务已完成",
+                    "updated_at": _now_utc().isoformat(),
+                },
             }
         )
     except asyncio.CancelledError:
@@ -1263,6 +1415,11 @@ async def _run_proposal_background_job(
                     "finished_at": _now_utc().isoformat(),
                     "result": None,
                     "error": "cancelled",
+                    "progress": {
+                        "phase": "cancelled",
+                        "message": "研究任务已取消",
+                        "updated_at": _now_utc().isoformat(),
+                    },
                 }
             )
     except Exception as exc:
@@ -1289,6 +1446,11 @@ async def _run_proposal_background_job(
                 "finished_at": _now_utc().isoformat(),
                 "result": None,
                 "error": str(exc),
+                "progress": {
+                    "phase": "failed",
+                    "message": f"研究任务失败: {exc}",
+                    "updated_at": _now_utc().isoformat(),
+                },
             }
         )
     finally:
@@ -1399,6 +1561,15 @@ async def run_proposal(
         "request": request_payload,
         "result": None,
         "error": None,
+        "progress": {
+            "phase": "queued",
+            "message": "研究任务已排队，等待执行",
+            "updated_at": _now_utc().isoformat(),
+            "symbol": config.symbol,
+            "exchange": config.exchange,
+            "strategies_total": len(config.strategies),
+            "timeframes": list(config.timeframes),
+        },
     }
     app.state.research_jobs[job_id] = job
     _persist_research_jobs(app)
