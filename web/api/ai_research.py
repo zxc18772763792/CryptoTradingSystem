@@ -3457,7 +3457,7 @@ async def human_approve_candidate(request: Request, candidate_id: str, payload: 
     request.app.state.ai_candidate_registry.save(cand)
     save_proposal(request.app, proposal)
 
-    asyncio.create_task(write_audit(
+    await write_audit(
         GovernanceAuditEvent(
             module="ai.research",
             action="human_approve",
@@ -3467,7 +3467,7 @@ async def human_approve_candidate(request: Request, candidate_id: str, payload: 
             input_payload={"candidate_id": candidate_id, "target": target, "notes": payload.notes},
             output_payload={"runtime_status": result.get("runtime_status")},
         )
-    ))
+    )
     return {
         "candidate_id": candidate_id,
         "candidate": result["candidate"].model_dump(mode="json"),
@@ -3509,7 +3509,7 @@ async def human_reject_candidate(request: Request, candidate_id: str, payload: A
     request.app.state.ai_candidate_registry.save(cand)
     save_proposal(request.app, proposal)
 
-    asyncio.create_task(write_audit(
+    await write_audit(
         GovernanceAuditEvent(
             module="ai.research",
             action="human_reject",
@@ -3519,7 +3519,7 @@ async def human_reject_candidate(request: Request, candidate_id: str, payload: A
             input_payload={"candidate_id": candidate_id, "reason": payload.notes},
             output_payload={"status": "retired"},
         )
-    ))
+    )
     return {
         "candidate_id": candidate_id,
         "status": "retired",
@@ -3550,8 +3550,8 @@ async def activate_ai_candidate_live(
         or proposal_meta.get("promotion_pending_human_gate")
     )
 
-    def _audit_denied(reason: str) -> None:
-        asyncio.create_task(write_audit(
+    async def _audit_denied(reason: str) -> None:
+        await write_audit(
             GovernanceAuditEvent(
                 module="ai.research",
                 action="activate_live",
@@ -3566,22 +3566,22 @@ async def activate_ai_candidate_live(
                 },
                 output_payload={"reason": reason},
             )
-        ))
+        )
 
     if pending_human_gate:
         detail = "candidate is pending human approval; complete /human-approve before live activation"
-        _audit_denied(detail)
+        await _audit_denied(detail)
         raise HTTPException(status_code=400, detail=detail)
 
     current_mode = str(execution_engine.get_trading_mode() or "").strip().lower() or "paper"
     if current_mode != "live":
-        _audit_denied("trading mode is not live; switch to live mode first")
+        await _audit_denied("trading mode is not live; switch to live mode first")
         raise HTTPException(status_code=400, detail="trading mode is not live; switch to live mode first")
 
     allowed_statuses = {"paper_running", "live_candidate", "live_running"}
     if cand_status not in allowed_statuses:
         detail = f"candidate in state {cand_status or 'unknown'}, live activation is not allowed"
-        _audit_denied(detail)
+        await _audit_denied(detail)
         raise HTTPException(
             status_code=400,
             detail=detail,
@@ -3595,7 +3595,7 @@ async def activate_ai_candidate_live(
                 "governance enabled: candidate is not human-approved for live activation; "
                 "use pending-approval + /human-approve target=live_candidate first"
             )
-            _audit_denied(detail)
+            await _audit_denied(detail)
             raise HTTPException(status_code=400, detail=detail)
 
     try:
@@ -3640,7 +3640,7 @@ async def activate_ai_candidate_live(
     request.app.state.ai_candidate_registry.save(cand)
     save_proposal(request.app, proposal)
 
-    asyncio.create_task(write_audit(
+    await write_audit(
         GovernanceAuditEvent(
             module="ai.research",
             action="activate_live",
@@ -3653,7 +3653,7 @@ async def activate_ai_candidate_live(
                 "registered_strategy_name": strategy_result["registered_strategy_name"],
             },
         )
-    ))
+    )
 
     return {
         "candidate_id": candidate_id,
@@ -3978,7 +3978,7 @@ async def quick_register_candidate(
         result = await promote_existing_candidate(
             request.app, candidate_id=candidate_id, actor="quick_register", target="paper"
         )
-        asyncio.create_task(write_audit(
+        await write_audit(
             GovernanceAuditEvent(
                 module="ai.research",
                 action="quick_register_no_gate",
@@ -3988,7 +3988,7 @@ async def quick_register_candidate(
                 input_payload={"candidate_id": candidate_id, "allocation_pct": payload.allocation_pct},
                 output_payload={"runtime_status": result.get("runtime_status")},
             )
-        ))
+        )
         return {
             "candidate_id": candidate_id,
             "allocation_pct": payload.allocation_pct,
@@ -4032,7 +4032,7 @@ async def quick_register_candidate(
     request.app.state.ai_candidate_registry.save(result["candidate"])
     save_proposal(request.app, result["proposal"])
 
-    asyncio.create_task(write_audit(
+    await write_audit(
         GovernanceAuditEvent(
             module="ai.research",
             action="quick_register",
@@ -4042,7 +4042,7 @@ async def quick_register_candidate(
             input_payload={"candidate_id": candidate_id, "allocation_pct": payload.allocation_pct},
             output_payload={"runtime_status": result.get("runtime_status")},
         )
-    ))
+    )
     return {
         "candidate_id": candidate_id,
         "allocation_pct": payload.allocation_pct,
