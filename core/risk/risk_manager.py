@@ -54,7 +54,7 @@ _AUTONOMY_PERSISTABLE_KEYS = frozenset(
 class RiskManager:
     """Centralized risk checks for signal/manual execution."""
 
-    def __init__(self):
+    def __init__(self, *, use_persisted_overlay: Optional[bool] = None):
         # Limits
         self.max_position_size = float(settings.MAX_POSITION_SIZE or 0.1)  # ratio of equity
         self.max_daily_loss_ratio = float(settings.MAX_DAILY_LOSS or 0.02)
@@ -76,13 +76,20 @@ class RiskManager:
         self.autonomy_rolling_7d_drawdown_reduce_only = float(
             autonomy_thresholds["autonomy_rolling_7d_drawdown_reduce_only"]
         )
+        overlay_env_path = str(os.environ.get("AI_AGENT_RISK_CONFIG_PATH") or "").strip()
+        if use_persisted_overlay is None:
+            self._use_persisted_overlay = bool(overlay_env_path)
+        else:
+            self._use_persisted_overlay = bool(use_persisted_overlay)
         self._autonomy_overlay_path = Path(
-            os.environ.get(
+            overlay_env_path
+            or os.environ.get(
                 "AI_AGENT_RISK_CONFIG_PATH",
                 str(Path(getattr(settings, "CACHE_PATH", "cache")) / "ai" / "autonomous_agent_risk_config.json"),
             )
         )
-        self._load_autonomy_threshold_overlay()
+        if self._use_persisted_overlay:
+            self._load_autonomy_threshold_overlay()
 
         # Runtime state
         self._daily_trades = 0
@@ -138,6 +145,8 @@ class RiskManager:
 
     def _save_autonomy_threshold_overlay(self) -> None:
         """Atomically persist autonomy thresholds so risk governance survives restart."""
+        if not self._use_persisted_overlay:
+            return
         try:
             self._autonomy_overlay_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {

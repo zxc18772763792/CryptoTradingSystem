@@ -247,6 +247,10 @@ def _openai_failover_state_path() -> Path:
     return Path(__file__).resolve().parents[2] / "runtime" / "openai_failover_state.json"
 
 
+def _scoped_failover_enabled() -> bool:
+    return bool(str(os.getenv("OPENAI_FAILOVER_STATE_PATH") or "").strip())
+
+
 def _openai_failover_now() -> datetime:
     tz_name = str(os.getenv("OPENAI_FAILOVER_TZ") or _OPENAI_FAILOVER_DEFAULT_TZ).strip() or _OPENAI_FAILOVER_DEFAULT_TZ
     try:
@@ -352,7 +356,7 @@ def _load_scope_failover_entry(
     base_urls = [str(item.get("base_url") or "").rstrip("/") for item in canonical]
     today = _openai_failover_today()
     default_entry = _build_scope_failover_entry(base_urls, day=today)
-    if not normalized_scope or len(base_urls) <= 1:
+    if not _scoped_failover_enabled() or not normalized_scope or len(base_urls) <= 1:
         return default_entry
 
     path = _openai_failover_state_path()
@@ -394,7 +398,7 @@ def _remember_scope_failover_state(
 ) -> None:
     normalized_scope = _normalize_openai_failover_scope(scope)
     base_urls = [str(item.get("base_url") or "").rstrip("/") for item in canonical]
-    if not normalized_scope or len(base_urls) <= 1:
+    if not _scoped_failover_enabled() or not normalized_scope or len(base_urls) <= 1:
         return
 
     normalized_success = str(success_base_url or "").rstrip("/")
@@ -492,7 +496,7 @@ def prioritize_openai_targets(
     if len(canonical) <= 1:
         return canonical
     normalized_scope = _normalize_openai_failover_scope(scope)
-    if normalized_scope:
+    if normalized_scope and _scoped_failover_enabled():
         entry = _load_scope_failover_entry(normalized_scope, canonical)
         if entry.get("mode") == "backup":
             backup_targets = canonical[1:]
@@ -526,7 +530,7 @@ def remember_openai_target_success(
 ) -> None:
     canonical = _canonical_openai_targets(targets)
     normalized_scope = _normalize_openai_failover_scope(scope)
-    if normalized_scope and len(canonical) > 1:
+    if normalized_scope and len(canonical) > 1 and _scoped_failover_enabled():
         _remember_scope_failover_state(
             normalized_scope,
             canonical,
@@ -559,7 +563,7 @@ def remember_openai_target_failure(
 ) -> None:
     canonical = _canonical_openai_targets(targets)
     normalized_scope = _normalize_openai_failover_scope(scope)
-    if normalized_scope and len(canonical) > 1:
+    if normalized_scope and len(canonical) > 1 and _scoped_failover_enabled():
         _remember_scope_failover_state(
             normalized_scope,
             canonical,

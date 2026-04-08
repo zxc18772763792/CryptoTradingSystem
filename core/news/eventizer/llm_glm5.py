@@ -35,6 +35,18 @@ DEFAULT_OPENAI_MODEL = "gpt-5.4"
 _OPENAI_FAILOVER_SCOPE = "news"
 _LEGACY_PROVIDER_ALIASES = {"glm", "glm5", "zhipu"}
 _LEGACY_BASE_URL_HINTS = ("bigmodel.cn", "zhipu")
+_RUNTIME_SETTING_NAMES = (
+    "OPENAI_API_KEY",
+    "OPENAI_BACKUP_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_BACKUP_BASE_URL",
+    "OPENAI_MODEL",
+    "OPENAI_BACKUP_MODEL",
+)
+_INITIAL_RUNTIME_SETTINGS = {
+    name: str(getattr(settings, name, "") or "").strip()
+    for name in _RUNTIME_SETTING_NAMES
+}
 _SUMMARY_CACHE: Dict[str, Dict[str, Any]] = {}
 _SUMMARY_CACHE_MAX = 4000
 _POS_SENTIMENT_HINTS = {
@@ -80,12 +92,19 @@ def _normalize_openai_model(value: Any) -> str:
     return text
 
 
+def _runtime_setting(name: str) -> str:
+    current = str(getattr(settings, name, "") or "").strip()
+    if current != _INITIAL_RUNTIME_SETTINGS.get(name, ""):
+        return current
+    return str(os.getenv(name) or current or "").strip()
+
+
 def _openai_primary_api_key() -> str:
-    return str(os.getenv("OPENAI_API_KEY") or getattr(settings, "OPENAI_API_KEY", "") or "").strip()
+    return _runtime_setting("OPENAI_API_KEY")
 
 
 def _openai_backup_api_key() -> str:
-    return str(os.getenv("OPENAI_BACKUP_API_KEY") or getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip()
+    return _runtime_setting("OPENAI_BACKUP_API_KEY")
 
 
 def _openai_api_key() -> str:
@@ -108,17 +127,15 @@ def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return openai_endpoint_targets(
         primary_base_url=(
             _normalize_openai_base_urls(
-                os.getenv("OPENAI_BASE_URL")
-                or llm_cfg.get("base_url")
-                or getattr(settings, "OPENAI_BASE_URL", "")
+                llm_cfg.get("base_url")
+                or _runtime_setting("OPENAI_BASE_URL")
             )
             or DEFAULT_OPENAI_BASE_URL
         ),
         backup_base_urls=(
             _normalize_openai_base_urls(
-                os.getenv("OPENAI_BACKUP_BASE_URL")
-                or llm_cfg.get("backup_base_url")
-                or getattr(settings, "OPENAI_BACKUP_BASE_URL", "")
+                llm_cfg.get("backup_base_url")
+                or _runtime_setting("OPENAI_BACKUP_BASE_URL")
             )
             or ""
         ),
@@ -127,9 +144,8 @@ def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         primary_model=_openai_model(cfg),
         backup_model=(
             str(
-                os.getenv("OPENAI_BACKUP_MODEL")
-                or llm_cfg.get("backup_model")
-                or getattr(settings, "OPENAI_BACKUP_MODEL", "")
+                llm_cfg.get("backup_model")
+                or _runtime_setting("OPENAI_BACKUP_MODEL")
                 or ""
             ).strip()
         ),
@@ -148,9 +164,8 @@ def _openai_base_url(cfg: Dict[str, Any]) -> str:
 def _openai_model(cfg: Dict[str, Any]) -> str:
     llm_cfg = cfg.get("llm") or {}
     return _normalize_openai_model(
-        os.getenv("OPENAI_MODEL")
-        or llm_cfg.get("model")
-        or getattr(settings, "OPENAI_MODEL", "")
+        llm_cfg.get("model")
+        or _runtime_setting("OPENAI_MODEL")
     )
 
 
