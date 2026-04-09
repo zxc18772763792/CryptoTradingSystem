@@ -401,7 +401,7 @@ async def _refresh_idle_seconds_if_allowed(
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Incrementally maintain the default 30-symbol research universe.")
     parser.add_argument("--exchange", default="binance", help="Exchange name for local parquet storage.")
-    parser.add_argument("--timeframes", default="1m,5m,15m", help="Comma-separated timeframes to refresh.")
+    parser.add_argument("--timeframes", default="1m,5m,15m,1h", help="Comma-separated timeframes to refresh.")
     parser.add_argument("--days", type=int, default=90, help="Initial lookback days when local data is missing.")
     parser.add_argument("--overlap-bars", type=int, default=48, help="Overlap bars for safe incremental refresh.")
     parser.add_argument(
@@ -429,9 +429,9 @@ async def main() -> None:
     args = parser.parse_args()
 
     exchange_name = str(args.exchange or "binance").strip().lower() or "binance"
-    timeframes = [item.strip().lower() for item in str(args.timeframes or "1m,5m,15m").split(",") if item.strip()]
+    timeframes = [item.strip().lower() for item in str(args.timeframes or "1m,5m,15m,1h").split(",") if item.strip()]
     if not timeframes:
-        timeframes = ["1m", "5m", "15m"]
+        timeframes = ["1m", "5m", "15m", "1h"]
     days = max(7, int(args.days or 90))
     overlap_bars = max(8, int(args.overlap_bars or 48))
     seconds_symbols = _normalize_symbol_list(

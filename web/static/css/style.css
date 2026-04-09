@@ -7505,6 +7505,21 @@ input[type="radio"] {
     gap: 10px;
 }
 
+.ai-agent-config-divider {
+    margin-top: 14px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #dbe7f5;
+    letter-spacing: 0.3px;
+}
+
+.ai-agent-risk-config-note {
+    margin-top: 6px;
+    font-size: 10px;
+    color: #8ea6c4;
+    line-height: 1.5;
+}
+
 .ai-agent-field {
     display: grid;
     gap: 6px;
@@ -7514,6 +7529,12 @@ input[type="radio"] {
 
 .ai-agent-field span {
     color: var(--text-muted);
+}
+
+.ai-agent-field-hint {
+    font-size: 10px;
+    color: #8ea6c4;
+    line-height: 1.45;
 }
 
 .ai-agent-field input,

@@ -68,3 +68,30 @@ def test_research_refresh_start_route_bridges_to_trigger(monkeypatch):
         "days": 120,
         "overlap_bars": 64,
     }
+
+
+def test_research_refresh_start_route_defaults_include_1h(monkeypatch):
+    async def fake_trigger(exchange: str = "binance", timeframes: str = "1m,5m,15m,1h", days: int = 90, overlap_bars: int = 48):
+        return {
+            "accepted": True,
+            "task": {"exists": True, "state": "Running", "state_label": "运行中"},
+            "summary": {"exists": True},
+            "echo": {
+                "exchange": exchange,
+                "timeframes": timeframes,
+                "days": days,
+                "overlap_bars": overlap_bars,
+            },
+        }
+
+    monkeypatch.setattr(data_api, "_trigger_research_universe_refresh_start", fake_trigger)
+
+    with TestClient(_build_app()) as client:
+        response = client.post("/api/data/research/refresh/start")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["echo"]["exchange"] == "binance"
+    assert payload["echo"]["timeframes"] == "1m,5m,15m,1h"
+    assert payload["echo"]["days"] == 90
+    assert payload["echo"]["overlap_bars"] == 48

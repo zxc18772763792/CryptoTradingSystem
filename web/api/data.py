@@ -987,7 +987,7 @@ def _get_research_universe_refresh_status_sync() -> Dict[str, Any]:
 
 async def _trigger_research_universe_refresh_start(
     exchange: str = "binance",
-    timeframes: str = "1m,5m,15m",
+    timeframes: str = "1m,5m,15m,1h",
     days: int = 90,
     overlap_bars: int = 48,
 ) -> Dict[str, Any]:
@@ -1009,7 +1009,7 @@ async def _trigger_research_universe_refresh_start(
             "-Exchange",
             str(exchange or "binance").strip() or "binance",
             "-Timeframes",
-            str(timeframes or "1m,5m,15m").strip() or "1m,5m,15m",
+            str(timeframes or "1m,5m,15m,1h").strip() or "1m,5m,15m,1h",
             "-Days",
             str(max(7, int(days or 90))),
             "-OverlapBars",
@@ -3349,7 +3349,7 @@ async def get_research_refresh_status():
 @router.post("/research/refresh/start")
 async def start_research_refresh(
     exchange: str = "binance",
-    timeframes: str = "1m,5m,15m",
+    timeframes: str = "1m,5m,15m,1h",
     days: int = 90,
     overlap_bars: int = 48,
 ):

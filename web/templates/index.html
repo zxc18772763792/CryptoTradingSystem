@@ -804,7 +804,7 @@
                                 <button type="button" class="btn btn-primary btn-sm" id="btn-download-clear-batch">清空批量币种</button>
                                 <button type="submit" class="btn btn-primary">开始下载</button>
                             </div>
-                            <div class="form-help" id="download-research-refresh-status">研究币池增量追平状态：正在读取... 默认追平 1m / 5m / 15m；机器空闲时会额外为 BTC / ETH 补 1s。</div>
+                            <div class="form-help" id="download-research-refresh-status">研究币池增量追平状态：正在读取... 默认追平 1m / 5m / 15m / 1h；机器空闲时会额外为 BTC / ETH 补 1s。</div>
                         </form>
                         <pre id="download-output" class="output-box">下载说明：可选单个交易对快速下载，也可指定开始日期并批量补充多币种历史数据。</pre>
                     </div>
@@ -2207,6 +2207,20 @@
                                             <span>候选币池</span>
                                             <textarea id="ai-agent-universe-symbols" rows="3" placeholder="留空使用默认主流币池；或手动填写 BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT ..."></textarea>
                                         </label>
+                                        <div class="ai-agent-config-divider">AI 资金预算</div>
+                                        <div class="ai-agent-risk-config-note">默认按总资金比例限制 AI 可用仓位；如果填写固定总金额，就会直接覆盖比例上限。</div>
+                                        <div class="ai-agent-config-grid">
+                                            <label class="ai-agent-field">
+                                                <span>总资金比例</span>
+                                                <input id="ai-agent-max-total-exposure-ratio" type="number" min="0.05" max="0.4" step="0.01" placeholder="0.40" />
+                                                <div class="ai-agent-field-hint">默认生效。0.40 代表 AI 最多可使用账户权益的 40%。</div>
+                                            </label>
+                                            <label class="ai-agent-field">
+                                                <span>固定总金额（USDT，可选）</span>
+                                                <input id="ai-agent-max-total-exposure-usdt" type="number" min="0" step="10" placeholder="留空则按比例" />
+                                                <div class="ai-agent-field-hint">填写后优先按固定金额生效，例如 500 表示 AI 总持仓上限约 500 USDT。</div>
+                                            </label>
+                                        </div>
                                         <div class="ai-agent-config-divider">自治风险纪律阈值</div>
                                         <div class="ai-agent-risk-config-note">这组阈值只作用于自治代理的新单纪律，不直接改动全局账户风控上限。</div>
                                         <div class="ai-agent-config-grid ai-agent-risk-config-grid">
@@ -2228,7 +2242,7 @@
                                             </label>
                                         </div>
                                         <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
-                                            <button class="btn btn-sm" type="button" onclick="agentSaveConfig()">保存选币配置</button>
+                                            <button class="btn btn-sm" type="button" onclick="agentSaveConfig()">保存 AI 配置</button>
                                             <button class="btn btn-sm" type="button" onclick="agentSaveRiskConfig()">保存风险纪律</button>
                                         </div>
                                         <div class="ai-agent-scroll-shell ai-agent-scroll-shell-ranking">

@@ -1816,15 +1816,12 @@
     normalizeDomText(box);
   }
 
-  async function loadSignal(symbol, options = {}) {
+  async function loadSignal(symbol) {
     if (state.signalLoading) return;
     state.signalLoading = true;
     const statusEl = document.getElementById('signal-status');
     const selectedSymbol = String(symbol || document.getElementById('signal-symbol')?.value || 'BTC/USDT').trim() || 'BTC/USDT';
-    const compact = !!options.compact;
-    const watchlist = compact
-      ? [selectedSymbol]
-      : Array.from(new Set([...DEFAULT_SIGNAL_SYMBOLS, selectedSymbol]));
+    const watchlist = Array.from(new Set([...DEFAULT_SIGNAL_SYMBOLS, selectedSymbol]));
     if (statusEl) statusEl.textContent = `刷新 ${watchlist.length} 个币种...`;
     renderSignalMini();
     try {
@@ -4705,11 +4702,11 @@
       state.signalKickoffTimer = window.setTimeout(() => {
         state.signalKickoffTimer = null;
         if (!isAiResearchActive() || document.hidden || !canRunAiPolling()) return;
-        loadSignal(undefined, { compact: true }).catch(() => {});
+        loadSignal().catch(() => {});
       }, 1200);
       state.signalTimer = setInterval(() => {
         if (!isAiResearchActive() || document.hidden || !canRunAiPolling()) return;
-        loadSignal(undefined, { compact: true }).catch(() => {});
+        loadSignal().catch(() => {});
       }, SIGNAL_INTERVAL_MS);
       state.refreshTimer = setInterval(() => {
         if (!isAiResearchActive() || document.hidden || !canRunAiPolling()) return;

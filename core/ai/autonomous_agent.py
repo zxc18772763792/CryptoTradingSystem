@@ -233,6 +233,22 @@ def _safe_nonnegative_float(value: Any, default: float = 0.0) -> float:
     return parsed
 
 
+def _coerce_optional_positive_float(value: Any, *, high: Optional[float] = None) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(parsed) or parsed <= 0:
+        return None
+    if high is not None:
+        parsed = min(parsed, float(high))
+    return float(parsed)
+
+
 def _normalize_symbol_text(value: Any) -> str:
     text = str(value or "").strip().upper()
     if not text:
@@ -620,6 +636,8 @@ _AGENT_PERSISTABLE_KEYS = frozenset({
     "AI_AUTONOMOUS_AGENT_TIMEFRAME",
     "AI_AUTONOMOUS_AGENT_LOOKBACK_BARS",
     "AI_AUTONOMOUS_AGENT_MIN_CONFIDENCE",
+    "AI_AUTONOMOUS_AGENT_MAX_TOTAL_EXPOSURE_RATIO",
+    "AI_AUTONOMOUS_AGENT_MAX_TOTAL_EXPOSURE_USDT",
     "AI_AUTONOMOUS_AGENT_SYMBOL_MODE",
     "AI_AUTONOMOUS_AGENT_UNIVERSE_SYMBOLS",
     "AI_AUTONOMOUS_AGENT_SELECTION_TOP_N",
@@ -915,6 +933,16 @@ class AutonomousTradingAgent:
             default=_DEFAULT_AUTO_UNIVERSE if symbol_mode == "auto" else [configured_symbol],
             max_items=_AUTO_SYMBOL_SCAN_MAX_ITEMS,
         )
+        max_total_exposure_ratio = _coerce_float(
+            self._get("AI_AUTONOMOUS_AGENT_MAX_TOTAL_EXPOSURE_RATIO", _MAX_TOTAL_EXPOSURE_RATIO),
+            _MAX_TOTAL_EXPOSURE_RATIO,
+            low=0.05,
+            high=_MAX_TOTAL_EXPOSURE_RATIO,
+        )
+        max_total_exposure_usdt = _coerce_optional_positive_float(
+            self._get("AI_AUTONOMOUS_AGENT_MAX_TOTAL_EXPOSURE_USDT", None)
+        )
+        total_exposure_limit_mode = "fixed_amount" if max_total_exposure_usdt is not None else "ratio"
         return {
             "enabled": bool(self._get("AI_AUTONOMOUS_AGENT_ENABLED", False)),
             # auto_start remains environment-controlled so runtime config
@@ -942,12 +970,9 @@ class AutonomousTradingAgent:
             "max_tokens": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_MAX_TOKENS", 420), 420, low=32, high=4096),
             "temperature": _coerce_float(self._get("AI_AUTONOMOUS_AGENT_TEMPERATURE", 0.15), 0.15, low=0.0, high=1.5),
             "cooldown_sec": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_COOLDOWN_SEC", 180), 180, low=0, high=86400),
-            "max_total_exposure_ratio": _coerce_float(
-                self._get("AI_AUTONOMOUS_AGENT_MAX_TOTAL_EXPOSURE_RATIO", _MAX_TOTAL_EXPOSURE_RATIO),
-                _MAX_TOTAL_EXPOSURE_RATIO,
-                low=0.05,
-                high=_MAX_TOTAL_EXPOSURE_RATIO,
-            ),
+            "max_total_exposure_ratio": max_total_exposure_ratio,
+            "max_total_exposure_usdt": max_total_exposure_usdt,
+            "total_exposure_limit_mode": total_exposure_limit_mode,
             "allow_live": bool(self._get("AI_AUTONOMOUS_AGENT_ALLOW_LIVE", False)),
             "account_id": str(self._get("AI_AUTONOMOUS_AGENT_ACCOUNT_ID", "main") or "main").strip() or "main",
             "strategy_name": str(self._get("AI_AUTONOMOUS_AGENT_STRATEGY_NAME", "AI_AutonomousAgent") or "AI_AutonomousAgent").strip() or "AI_AutonomousAgent",
@@ -1008,6 +1033,10 @@ class AutonomousTradingAgent:
                 _MAX_TOTAL_EXPOSURE_RATIO,
                 low=0.05,
                 high=_MAX_TOTAL_EXPOSURE_RATIO,
+            )
+        if "max_total_exposure_usdt" in kwargs:
+            updates["AI_AUTONOMOUS_AGENT_MAX_TOTAL_EXPOSURE_USDT"] = _coerce_optional_positive_float(
+                kwargs["max_total_exposure_usdt"]
             )
         if "allow_live" in kwargs and kwargs["allow_live"] is not None:
             updates["AI_AUTONOMOUS_AGENT_ALLOW_LIVE"] = bool(kwargs["allow_live"])
@@ -2246,6 +2275,8 @@ class AutonomousTradingAgent:
             low=0.05,
             high=_MAX_TOTAL_EXPOSURE_RATIO,
         )
+        max_total_exposure_usdt = _coerce_optional_positive_float(cfg.get("max_total_exposure_usdt"))
+        total_exposure_limit_mode = "fixed_amount" if max_total_exposure_usdt is not None else "ratio"
         if account_equity > 0:
             with contextlib.suppress(Exception):
                 position_cap_notional = float(
@@ -2269,11 +2300,12 @@ class AutonomousTradingAgent:
             )
         observed_account_open_notional = self._position_map_total_notional(observed_position_map)
         total_strategy_open_notional = max(strategy_open_notional, observed_account_open_notional)
-        total_exposure_limit_notional = (
-            float(account_equity * max_total_exposure_ratio)
-            if account_equity > 0 and max_total_exposure_ratio > 0
-            else 0.0
-        )
+        if max_total_exposure_usdt is not None:
+            total_exposure_limit_notional = float(max_total_exposure_usdt)
+        elif account_equity > 0 and max_total_exposure_ratio > 0:
+            total_exposure_limit_notional = float(account_equity * max_total_exposure_ratio)
+        else:
+            total_exposure_limit_notional = 0.0
         risk_report: Dict[str, Any] = {}
         with contextlib.suppress(Exception):
             raw_risk_report = risk_manager.get_risk_report()
@@ -2309,6 +2341,8 @@ class AutonomousTradingAgent:
             "strategy_allocation": float(max(0.0, strategy_allocation)),
             "position_cap_notional": float(max(0.0, position_cap_notional)),
             "max_total_exposure_ratio": float(max_total_exposure_ratio),
+            "max_total_exposure_usdt": float(max_total_exposure_usdt) if max_total_exposure_usdt is not None else None,
+            "total_exposure_limit_mode": total_exposure_limit_mode,
             "total_strategy_open_notional": float(max(0.0, total_strategy_open_notional)),
             "observed_account_open_notional": float(max(0.0, observed_account_open_notional)),
             "total_exposure_limit_notional": float(max(0.0, total_exposure_limit_notional)),
@@ -2729,13 +2763,24 @@ class AutonomousTradingAgent:
             low=0.05,
             high=_MAX_TOTAL_EXPOSURE_RATIO,
         )
+        max_total_exposure_usdt = _coerce_optional_positive_float(
+            account_risk_base.get("max_total_exposure_usdt", cfg.get("max_total_exposure_usdt"))
+        )
+        total_exposure_limit_mode = str(
+            account_risk_base.get("total_exposure_limit_mode")
+            or ("fixed_amount" if max_total_exposure_usdt is not None else "ratio")
+        ).strip().lower() or "ratio"
         total_strategy_open_notional = _safe_nonnegative_float(
             account_risk_base.get("total_strategy_open_notional"),
             0.0,
         )
         total_exposure_limit_notional = _safe_nonnegative_float(
             account_risk_base.get("total_exposure_limit_notional"),
-            account_equity * max_total_exposure_ratio if account_equity > 0 else 0.0,
+            (
+                max_total_exposure_usdt
+                if max_total_exposure_usdt is not None
+                else (account_equity * max_total_exposure_ratio if account_equity > 0 else 0.0)
+            ),
         )
         same_direction_limit_ratio = _coerce_float(
             position.get("same_direction_exposure_limit_ratio", cfg.get("same_direction_max_exposure_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO)),
@@ -2811,6 +2856,8 @@ class AutonomousTradingAgent:
             "strategy_allocation": float(strategy_allocation),
             "position_cap_notional": float(position_cap_notional),
             "max_total_exposure_ratio": float(max_total_exposure_ratio),
+            "max_total_exposure_usdt": float(max_total_exposure_usdt) if max_total_exposure_usdt is not None else None,
+            "total_exposure_limit_mode": total_exposure_limit_mode,
             "total_strategy_open_notional": float(total_strategy_open_notional),
             "total_exposure_ratio": float(total_exposure_ratio),
             "total_exposure_limit_notional": float(total_exposure_limit_notional),
@@ -3341,6 +3388,7 @@ class AutonomousTradingAgent:
         exchange = str(cfg.get("exchange") or "binance")
         symbol = str(cfg.get("symbol") or "BTC/USDT")
         if light_symbol_scan:
+            scan_max_total_exposure_usdt = _coerce_optional_positive_float(cfg.get("max_total_exposure_usdt"))
             account_risk_base = {
                 "account_equity": 0.0,
                 "strategy_allocation": 0.0,
@@ -3351,8 +3399,10 @@ class AutonomousTradingAgent:
                     low=0.05,
                     high=_MAX_TOTAL_EXPOSURE_RATIO,
                 ),
+                "max_total_exposure_usdt": scan_max_total_exposure_usdt,
+                "total_exposure_limit_mode": "fixed_amount" if scan_max_total_exposure_usdt is not None else "ratio",
                 "total_strategy_open_notional": 0.0,
-                "total_exposure_limit_notional": 0.0,
+                "total_exposure_limit_notional": float(scan_max_total_exposure_usdt or 0.0),
                 "trading_mode": str(execution_engine.get_trading_mode() or "paper"),
             }
             scan_position_map = cfg.get("_scan_position_map")
@@ -3699,6 +3749,8 @@ class AutonomousTradingAgent:
                     "account_equity": _float_or_default(account_risk.get("account_equity"), 0.0),
                     "position_cap_notional": _float_or_default(account_risk.get("position_cap_notional"), 0.0),
                     "max_total_exposure_ratio": _float_or_default(account_risk.get("max_total_exposure_ratio"), 0.0),
+                    "max_total_exposure_usdt": _float_or_default(account_risk.get("max_total_exposure_usdt"), 0.0),
+                    "total_exposure_limit_mode": account_risk.get("total_exposure_limit_mode"),
                     "total_strategy_open_notional": _float_or_default(account_risk.get("total_strategy_open_notional"), 0.0),
                     "total_exposure_ratio": _float_or_default(account_risk.get("total_exposure_ratio"), 0.0),
                     "total_exposure_limit_notional": _float_or_default(account_risk.get("total_exposure_limit_notional"), 0.0),
@@ -3824,6 +3876,8 @@ class AutonomousTradingAgent:
                 "decision_timeframes": context_payload.get("decision_timeframes"),
                 "same_direction_max_exposure_ratio": cfg.get("same_direction_max_exposure_ratio", _SAME_DIRECTION_MAX_EXPOSURE_RATIO),
                 "max_total_exposure_ratio": cfg.get("max_total_exposure_ratio", _MAX_TOTAL_EXPOSURE_RATIO),
+                "max_total_exposure_usdt": cfg.get("max_total_exposure_usdt"),
+                "total_exposure_limit_mode": cfg.get("total_exposure_limit_mode", "ratio"),
                 "entry_size_scale": cfg.get("entry_size_scale", 1.0),
             },
             "input": prompt_context,
@@ -3883,11 +3937,22 @@ class AutonomousTradingAgent:
             low=0.05,
             high=_MAX_TOTAL_EXPOSURE_RATIO,
         )
+        max_total_exposure_usdt = _coerce_optional_positive_float(
+            (account_risk or {}).get("max_total_exposure_usdt", cfg.get("max_total_exposure_usdt"))
+        )
+        total_exposure_limit_mode = str(
+            (account_risk or {}).get("total_exposure_limit_mode")
+            or ("fixed_amount" if max_total_exposure_usdt is not None else "ratio")
+        ).strip().lower() or "ratio"
         total_exposure_ratio = _coerce_float(
             (account_risk or {}).get("total_exposure_ratio", 0.0),
             0.0,
             low=0.0,
             high=1000000.0,
+        )
+        total_strategy_open_notional = _safe_nonnegative_float(
+            (account_risk or {}).get("total_strategy_open_notional"),
+            0.0,
         )
         total_exposure_limit_notional = _safe_nonnegative_float(
             (account_risk or {}).get("total_exposure_limit_notional"),
@@ -3929,7 +3994,12 @@ class AutonomousTradingAgent:
         if action in {"buy", "sell"} and increases_total_exposure and not allow_total_add:
             action = "hold"
             reason = (
-                f"total_exposure_limit_reached({total_exposure_ratio:.3f}>={max_total_exposure_ratio:.3f})"
+                (
+                    f"total_exposure_limit_reached({total_strategy_open_notional:.3f}>="
+                    f"fixed_{max_total_exposure_usdt:.3f}_usdt)"
+                )
+                if total_exposure_limit_mode == "fixed_amount" and max_total_exposure_usdt is not None
+                else f"total_exposure_limit_reached({total_exposure_ratio:.3f}>={max_total_exposure_ratio:.3f})"
                 if total_exposure_limit_notional > 0 and max_total_exposure_ratio > 0
                 else "total_exposure_limit_reached"
             )
@@ -4001,6 +4071,11 @@ class AutonomousTradingAgent:
             "review_total_exposure_limit_ratio": float(
                 cfg.get("max_total_exposure_ratio") or _MAX_TOTAL_EXPOSURE_RATIO
             ),
+            "review_total_exposure_limit_usdt": _safe_nonnegative_float(
+                cfg.get("max_total_exposure_usdt"),
+                0.0,
+            ),
+            "review_total_exposure_limit_mode": str(cfg.get("total_exposure_limit_mode") or "ratio"),
             "review_entry_size_scale": float(cfg.get("entry_size_scale") or 1.0),
         }
         learning_memory = cfg.get("learning_memory") if isinstance(cfg, dict) else {}
@@ -4034,6 +4109,11 @@ class AutonomousTradingAgent:
                         (account_risk or {}).get("max_total_exposure_ratio"),
                         _MAX_TOTAL_EXPOSURE_RATIO,
                     ),
+                    "max_total_exposure_usdt": _safe_nonnegative_float(
+                        (account_risk or {}).get("max_total_exposure_usdt"),
+                        0.0,
+                    ),
+                    "total_exposure_limit_mode": str((account_risk or {}).get("total_exposure_limit_mode") or "ratio"),
                     "total_strategy_existing_notional": _safe_nonnegative_float(
                         (account_risk or {}).get("total_strategy_open_notional"),
                         0.0,

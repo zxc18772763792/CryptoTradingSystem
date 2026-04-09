@@ -1254,6 +1254,94 @@ def test_autonomous_agent_holds_when_total_exposure_reaches_ratio_cap(monkeypatc
     assert submit_mock.await_count == 0
 
 
+def test_autonomous_agent_holds_when_total_exposure_reaches_fixed_budget(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    submit_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
+    monkeypatch.setattr(
+        agent,
+        "get_symbol_scan",
+        AsyncMock(
+            return_value={
+                "selected_symbol": "BTC/USDT",
+                "selection_reason": "manual_symbol",
+                "top_candidates": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_build_context",
+        AsyncMock(
+            return_value=(
+                {
+                    "exchange": "binance",
+                    "symbol": "BTC/USDT",
+                    "timeframe": "15m",
+                    "price": 100.0,
+                    "bars": 120,
+                    "returns": {"r_1h": 0.01, "r_24h": 0.03},
+                    "realized_vol_annualized": 0.25,
+                    "market_structure": {"available": True},
+                    "aggregated_signal": {
+                        "direction": "LONG",
+                        "confidence": 0.82,
+                        "blocked_by_risk": False,
+                        "risk_reason": "",
+                    },
+                    "event_summary": {"available": False},
+                    "position": {},
+                    "account_risk": {
+                        "trading_mode": "live",
+                        "allow_live": True,
+                        "execution_permitted_now": True,
+                        "min_confidence": 0.58,
+                        "account_equity": 1000.0,
+                        "position_cap_notional": 100.0,
+                        "max_total_exposure_ratio": 0.4,
+                        "max_total_exposure_usdt": 300.0,
+                        "total_exposure_limit_mode": "fixed_amount",
+                        "total_strategy_open_notional": 300.0,
+                        "total_exposure_ratio": 0.3,
+                        "total_exposure_limit_notional": 300.0,
+                        "total_remaining_notional": 0.0,
+                        "can_open_more_total": False,
+                    },
+                    "execution_cost": {"estimated_one_way_cost_bps": 5.0, "estimated_round_trip_cost_bps": 10.0},
+                    "research_context": {"available": False},
+                    "profile": {},
+                    "learning_memory": {},
+                    "trading_mode": "live",
+                },
+                pd.DataFrame(),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        AsyncMock(
+            return_value={
+                "action": "buy",
+                "confidence": 0.82,
+                "strength": 0.7,
+                "leverage": 1,
+                "reason": "fresh_long",
+            }
+        ),
+    )
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", allow_live=True, cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert result["decision"]["action"] == "hold"
+    assert "fixed_300.000_usdt" in str(result["decision"]["reason"])
+    assert result["execution"]["submitted"] is False
+    assert submit_mock.await_count == 0
+
+
 def test_resolve_account_risk_base_uses_observed_position_map_as_exposure_floor(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
 
@@ -1333,6 +1421,49 @@ def test_resolve_account_risk_base_uses_observed_position_map_as_exposure_floor(
     assert payload["risk_max_drawdown"] == pytest.approx(0.083)
     assert payload["risk_rolling_3d_drawdown"] == pytest.approx(0.061)
     assert payload["risk_rolling_7d_drawdown"] == pytest.approx(0.094)
+
+
+def test_resolve_account_risk_base_prefers_fixed_budget_over_ratio(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    monkeypatch.setattr(module.execution_engine, "get_account_equity_snapshot", AsyncMock(return_value=1000.0))
+    monkeypatch.setattr(module.execution_engine, "get_strategy_position_cap_notional", lambda **kwargs: 100.0)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "live")
+    monkeypatch.setattr(module.strategy_manager, "get_strategy_allocation", lambda name: 0.0)
+    monkeypatch.setattr(agent, "_positions_for_learning_memory", lambda strategy_name: [])
+    monkeypatch.setattr(
+        agent,
+        "_scan_position_map",
+        AsyncMock(
+            return_value={
+                "BTC/USDT": {
+                    "side": "long",
+                    "quantity": 2.0,
+                    "current_price": 100.0,
+                },
+            }
+        ),
+    )
+
+    payload = asyncio.run(
+        agent._resolve_account_risk_base(
+            {
+                "strategy_name": "AI_AutonomousAgent",
+                "exchange": "binance",
+                "account_id": "main",
+                "max_total_exposure_ratio": 0.4,
+                "max_total_exposure_usdt": 250.0,
+            }
+        )
+    )
+
+    assert payload["account_equity"] == 1000.0
+    assert payload["max_total_exposure_ratio"] == pytest.approx(0.4)
+    assert payload["max_total_exposure_usdt"] == pytest.approx(250.0)
+    assert payload["total_exposure_limit_mode"] == "fixed_amount"
+    assert payload["total_exposure_limit_notional"] == pytest.approx(250.0)
 
 
 def test_agent_runtime_config_leverage_is_fixed_to_one(tmp_path):
@@ -2322,7 +2453,15 @@ def test_agent_config_persists_to_overlay(tmp_path):
     from core.ai.autonomous_agent import AutonomousTradingAgent
 
     agent = AutonomousTradingAgent(cache_root=tmp_path / "agent_a")
-    asyncio.run(agent.update_runtime_config(enabled=True, allow_live=True, cooldown_sec=60))
+    asyncio.run(
+        agent.update_runtime_config(
+            enabled=True,
+            allow_live=True,
+            cooldown_sec=60,
+            max_total_exposure_ratio=0.35,
+            max_total_exposure_usdt=250.0,
+        )
+    )
 
     overlay_path = agent._overlay_path
     assert overlay_path.exists(), "overlay file should have been written"
@@ -2330,6 +2469,8 @@ def test_agent_config_persists_to_overlay(tmp_path):
     assert data["AI_AUTONOMOUS_AGENT_ENABLED"] is True
     assert data["AI_AUTONOMOUS_AGENT_ALLOW_LIVE"] is True
     assert data["AI_AUTONOMOUS_AGENT_COOLDOWN_SEC"] == 60
+    assert data["AI_AUTONOMOUS_AGENT_MAX_TOTAL_EXPOSURE_RATIO"] == pytest.approx(0.35)
+    assert data["AI_AUTONOMOUS_AGENT_MAX_TOTAL_EXPOSURE_USDT"] == pytest.approx(250.0)
 
     # New agent reading same overlay
     agent2 = AutonomousTradingAgent(cache_root=tmp_path / "agent_b")
@@ -2339,6 +2480,9 @@ def test_agent_config_persists_to_overlay(tmp_path):
     assert cfg["enabled"] is True
     assert cfg["allow_live"] is True
     assert cfg["cooldown_sec"] == 60
+    assert cfg["max_total_exposure_ratio"] == pytest.approx(0.35)
+    assert cfg["max_total_exposure_usdt"] == pytest.approx(250.0)
+    assert cfg["total_exposure_limit_mode"] == "fixed_amount"
 
 
 def test_agent_corrupt_overlay_safe_start(tmp_path):

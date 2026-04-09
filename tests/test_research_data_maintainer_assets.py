@@ -17,16 +17,16 @@ def test_research_universe_refresh_scripts_exist_and_are_wired():
     web_ps = _read("scripts/web.ps1")
 
     assert "maintain_research_universe_data.py" in runner
-    assert "1m,5m,15m" in runner
+    assert "1m,5m,15m,1h" in runner
     assert "BTC/USDT,ETH/USDT" in runner
     assert "CryptoTradingSystem_ResearchUniverseRefresh" in ensure
     assert "Register-ScheduledTask" in ensure
     assert "schtasks /Create" in ensure
     assert "StartNowIfCreated" in ensure
-    assert "1m,5m,15m" in ensure
+    assert "1m,5m,15m,1h" in ensure
     assert "BTC/USDT,ETH/USDT" in ensure
     assert "DEFAULT_RESEARCH_SYMBOLS" in python_script
-    assert "1m,5m,15m" in python_script
+    assert "1m,5m,15m,1h" in python_script
     assert "BTC/USDT,ETH/USDT" in python_script
     assert "run_research_universe_refresh.ps1" in bat
     assert "Ensure-ResearchUniverseRefreshTask" in once

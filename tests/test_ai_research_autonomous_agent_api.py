@@ -61,11 +61,46 @@ def test_update_autonomous_agent_runtime_config_endpoint(monkeypatch):
     assert result["config"]["provider"] == "codex"
 
 
+def test_update_autonomous_agent_runtime_config_endpoint_allows_clearing_fixed_budget(monkeypatch):
+    from web.api import ai_agent as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    captured = {}
+
+    async def _fake_update(**kwargs):
+        captured.update(kwargs)
+        return dict(kwargs)
+
+    monkeypatch.setattr(
+        ai_module.ai_research_module.autonomous_trading_agent,
+        "update_runtime_config",
+        _fake_update,
+    )
+
+    payload = ai_module.AIAutonomousAgentConfigUpdateRequest(
+        max_total_exposure_ratio=0.3,
+        max_total_exposure_usdt=None,
+    )
+    result = asyncio.run(ai_module.update_ai_autonomous_agent_runtime_config(request, payload))
+
+    assert result["updated"] is True
+    assert captured["max_total_exposure_ratio"] == pytest.approx(0.3)
+    assert "max_total_exposure_usdt" in captured
+    assert captured["max_total_exposure_usdt"] is None
+
+
 def test_update_autonomous_agent_runtime_config_payload_rejects_non_one_leverage():
     from web.api import ai_agent as ai_module
 
     with pytest.raises(ValidationError):
         ai_module.AIAutonomousAgentConfigUpdateRequest(default_leverage=2.0)
+
+
+def test_update_autonomous_agent_runtime_config_payload_rejects_non_positive_fixed_budget():
+    from web.api import ai_agent as ai_module
+
+    with pytest.raises(ValidationError):
+        ai_module.AIAutonomousAgentConfigUpdateRequest(max_total_exposure_usdt=0)
 
 
 def test_update_autonomous_agent_runtime_config_payload_rejects_auto_start():

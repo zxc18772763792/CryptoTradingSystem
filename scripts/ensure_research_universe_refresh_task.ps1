@@ -2,7 +2,7 @@ param(
     [string]$TaskName = "CryptoTradingSystem_ResearchUniverseRefresh",
     [string]$EnvName = "crypto_trading",
     [string]$Exchange = "binance",
-    [string]$Timeframes = "1m,5m,15m",
+    [string]$Timeframes = "1m,5m,15m,1h",
     [int]$Days = 90,
     [int]$OverlapBars = 48,
     [string]$SecondsSymbols = "BTC/USDT,ETH/USDT",

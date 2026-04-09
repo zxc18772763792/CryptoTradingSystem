@@ -73,6 +73,8 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "renderOneClickFeedback" in ai_js
     assert "completed_without_compatible_runtime_target" in ai_js
     assert "manual_action_required" in ai_js
+    assert "const watchlist = Array.from(new Set([...DEFAULT_SIGNAL_SYMBOLS, selectedSymbol]));" in ai_js
+    assert "loadSignal(undefined, { compact: true })" not in ai_js
     assert "liveDecisionActivityLastGood" in ai_js
     assert "FLOW_HINT_QUICK_PATH" in ai_js
     assert "候选回填" in ai_js

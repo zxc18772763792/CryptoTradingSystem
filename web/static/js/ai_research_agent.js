@@ -828,9 +828,19 @@
     const modeEl = document.getElementById('ai-agent-symbol-mode');
     const manualEl = document.getElementById('ai-agent-manual-symbol');
     const universeEl = document.getElementById('ai-agent-universe-symbols');
+    const ratioEl = document.getElementById('ai-agent-max-total-exposure-ratio');
+    const fixedBudgetEl = document.getElementById('ai-agent-max-total-exposure-usdt');
     if (modeEl) modeEl.value = String(cfg.symbol_mode || 'manual').toLowerCase();
     if (manualEl) manualEl.value = String(cfg.symbol || 'BTC/USDT');
     if (universeEl) universeEl.value = Array.isArray(cfg.universe_symbols) ? cfg.universe_symbols.join(', ') : '';
+    if (ratioEl) {
+      const ratioValue = Number(cfg?.max_total_exposure_ratio);
+      ratioEl.value = Number.isFinite(ratioValue) ? String(ratioValue) : '';
+    }
+    if (fixedBudgetEl) {
+      const fixedBudgetValue = Number(cfg?.max_total_exposure_usdt);
+      fixedBudgetEl.value = Number.isFinite(fixedBudgetValue) && fixedBudgetValue > 0 ? String(fixedBudgetValue) : '';
+    }
     updateAgentSymbolModeVisibility();
   }
 
@@ -853,7 +863,42 @@
     const raw = String(document.getElementById(id)?.value || '').trim();
     if (!raw) return null;
     const value = Number(raw);
-    return Number.isFinite(value) ? value : null;
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+
+  function readOptionalPositiveInputValue(id) {
+    const raw = String(document.getElementById(id)?.value || '').trim();
+    if (!raw) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+
+  function resolveAgentBudgetConfig(cfg = {}, accountRisk = {}) {
+    const ratio = Number(cfg?.max_total_exposure_ratio);
+    const fixedBudgetUsdt = Number(cfg?.max_total_exposure_usdt);
+    const limitNotional = Number(accountRisk?.total_exposure_limit_notional);
+    const accountEquity = Number(accountRisk?.account_equity);
+    const mode = String(
+      cfg?.total_exposure_limit_mode
+      || (Number.isFinite(fixedBudgetUsdt) && fixedBudgetUsdt > 0 ? 'fixed_amount' : 'ratio')
+    ).toLowerCase();
+    return {
+      mode,
+      ratio,
+      fixedBudgetUsdt,
+      limitNotional,
+      accountEquity,
+      configuredText: mode === 'fixed_amount' && Number.isFinite(fixedBudgetUsdt) && fixedBudgetUsdt > 0
+        ? `固定 ${formatNumber(fixedBudgetUsdt, 2)} USDT`
+        : `比例 ${formatPct(ratio, 1)}`,
+      effectiveText: Number.isFinite(limitNotional) && limitNotional > 0
+        ? `当前上限 ${formatNumber(limitNotional, 2)} USDT`
+        : (mode === 'fixed_amount' && Number.isFinite(fixedBudgetUsdt) && fixedBudgetUsdt > 0
+          ? `当前上限 ${formatNumber(fixedBudgetUsdt, 2)} USDT`
+          : (Number.isFinite(accountEquity) && accountEquity > 0 && Number.isFinite(ratio)
+            ? `账户权益 ${formatNumber(accountEquity, 2)} USDT × ${formatPct(ratio, 1)}`
+            : '等待账户权益后计算')),
+    };
   }
 
   function blockerDisplayLabel(item = {}) {
@@ -1149,6 +1194,11 @@
     const primaryBlocker = blockers[0] || null;
     const closeOnly = Boolean(riskStatus?.close_only_effective);
     const freshEntryAllowed = Boolean(riskStatus?.effective_fresh_entry_allowed);
+    const runtimeAccountRisk = lastStatusSnapshot?.last_diagnostics?.account_risk
+      && typeof lastStatusSnapshot.last_diagnostics.account_risk === 'object'
+      ? lastStatusSnapshot.last_diagnostics.account_risk
+      : {};
+    const budgetConfig = resolveAgentBudgetConfig(lastConfigSnapshot || {}, runtimeAccountRisk);
     const primaryTone = closeOnly ? (risk?.trading_halted ? 'danger' : 'warn') : (freshEntryAllowed ? 'good' : 'warn');
     const primaryLabel = closeOnly
       ? (risk?.trading_halted ? '当前只允许平仓 / 熔断中' : '当前处于 reduce-only')
@@ -1176,6 +1226,9 @@
       `3日滚动 ${formatPct(config?.autonomy_rolling_3d_drawdown_reduce_only, 2)}`,
       `7日滚动 ${formatPct(config?.autonomy_rolling_7d_drawdown_reduce_only, 2)}`,
     ].join(' / ');
+    const budgetConfiguredText = budgetConfig.mode === 'fixed_amount' && Number.isFinite(budgetConfig.fixedBudgetUsdt) && budgetConfig.fixedBudgetUsdt > 0
+      ? `固定 ${formatNumber(budgetConfig.fixedBudgetUsdt, 2)} USDT 优先 / 比例备用 ${formatPct(budgetConfig.ratio, 1)}`
+      : `按比例执行 / ${budgetConfig.configuredText}`;
     const effectiveText = [
       `stop basis ${formatPct(thresholds?.daily_stop_buffer_ratio, 2)}`,
       `max DD ${formatPct(thresholds?.max_drawdown_reduce_only, 2)}`,
@@ -1244,6 +1297,10 @@
         <div class="ai-agent-note-card">
           <div class="ai-agent-note-label">当前配置阈值</div>
           <div class="ai-agent-note-body">${esc(thresholdText)}</div>
+        </div>
+        <div class="ai-agent-note-card">
+          <div class="ai-agent-note-label">AI 资金上限</div>
+          <div class="ai-agent-note-body">${esc(`${budgetConfiguredText} / ${budgetConfig.effectiveText}`)}</div>
         </div>
         <div class="ai-agent-note-card">
           <div class="ai-agent-note-label">实际生效阈值</div>
@@ -1912,6 +1969,8 @@
     const symbolMode = String(document.getElementById('ai-agent-symbol-mode')?.value || 'manual').toLowerCase();
     const symbol = String(document.getElementById('ai-agent-manual-symbol')?.value || 'BTC/USDT').trim().toUpperCase();
     const universeSymbols = parseSymbolList(document.getElementById('ai-agent-universe-symbols')?.value || '');
+    const maxTotalExposureRatio = readOptionalPositiveInputValue('ai-agent-max-total-exposure-ratio');
+    const maxTotalExposureUsdt = readOptionalPositiveInputValue('ai-agent-max-total-exposure-usdt');
 
     try {
       const payload = {
@@ -1919,6 +1978,8 @@
         symbol,
         universe_symbols: universeSymbols,
         selection_top_n: 10,
+        max_total_exposure_ratio: maxTotalExposureRatio,
+        max_total_exposure_usdt: maxTotalExposureUsdt,
       };
       const response = await rootApi(AGENT_CONFIG_API, {
         method: 'POST',

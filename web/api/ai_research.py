@@ -198,6 +198,7 @@ class AIAutonomousAgentConfigUpdateRequest(BaseModel):
     temperature: Optional[float] = Field(default=None, ge=0.0, le=1.5)
     cooldown_sec: Optional[int] = Field(default=None, ge=0, le=86400)
     max_total_exposure_ratio: Optional[float] = Field(default=None, ge=0.05, le=0.4)
+    max_total_exposure_usdt: Optional[float] = Field(default=None, gt=0)
     allow_live: Optional[bool] = None
     account_id: Optional[str] = None
     strategy_name: Optional[str] = None
@@ -2720,7 +2721,7 @@ async def update_ai_autonomous_agent_runtime_config(
     payload: AIAutonomousAgentConfigUpdateRequest,
 ):
     try:
-        updated = await autonomous_trading_agent.update_runtime_config(**payload.model_dump(exclude_none=True))
+        updated = await autonomous_trading_agent.update_runtime_config(**payload.model_dump(exclude_unset=True))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"updated": True, "config": updated}
