@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-    <link rel="stylesheet" href="/static/css/style.css?v=87">
+    <link rel="stylesheet" href="/static/css/style.css?v=88">
     <script>
         (function (root) {
             if (!root) return;
@@ -2045,6 +2045,12 @@
                         <div class="ai-agent-cockpit-kicker">AI自治代理运行驾驶舱</div>
                         <div class="ai-agent-cockpit-title">先看状态，再看动作、风险、复盘</div>
                         <div class="ai-agent-cockpit-desc">这一页只负责自治代理的实时盯盘、执行与复盘，不再和 AI 研究提案混在一起。把“是否在跑、盯哪个币、最近做了什么、当前成本是否可接受”拆开看，读起来会更快。</div>
+                        <div class="ai-agent-cockpit-flow">
+                            <span class="ai-agent-cockpit-flow-step">状态开关</span>
+                            <span class="ai-agent-cockpit-flow-step">观望原因</span>
+                            <span class="ai-agent-cockpit-flow-step">选币纪律</span>
+                            <span class="ai-agent-cockpit-flow-step">日志复盘</span>
+                        </div>
                         <div class="ai-agent-cockpit-meta">
                             <span id="ai-agent-cockpit-state-badge" class="ai-agent-cockpit-badge">等待状态</span>
                             <span id="ai-agent-cockpit-state-note" class="ai-agent-cockpit-note">加载中...</span>
@@ -2091,7 +2097,10 @@
                                 <div class="ai-workspace-section-kicker">AI自治代理</div>
                                 <div class="ai-workspace-section-title">独立的盯盘、决策、试跑、日志与复盘工作区</div>
                             </div>
-                            <div class="ai-workspace-section-note">这里负责实时交易判断和执行观察，不参与研究提案生成，和 AI 研究页完全分开。</div>
+                            <div class="ai-workspace-section-note ai-agent-workspace-note">
+                                <span class="ai-agent-workspace-note-label">运行时工作区</span>
+                                <span>这里负责实时交易判断和执行观察，不参与研究提案生成，和 AI 研究页完全分开。</span>
+                            </div>
                         </div>
 
                         <div class="ai-agent-workspace-grid">
@@ -2101,10 +2110,18 @@
                                         <div class="ai-top-intro-title">🤖 AI自动交易面板</div>
                                         <div class="ai-top-intro-subtitle">启动、试跑、诊断、选币、日志和复盘按任务拆开排版，减少上下跳读。</div>
                                     </div>
-                                    <div class="ai-agent-command-tags">
-                                        <span class="ai-agent-command-tag">独立执行链路</span>
-                                        <span class="ai-agent-command-tag">实时盯盘</span>
-                                        <span class="ai-agent-command-tag">交易后复盘</span>
+                                    <div class="ai-agent-command-side">
+                                        <div class="ai-agent-command-tags">
+                                            <span class="ai-agent-command-tag">独立执行链路</span>
+                                            <span class="ai-agent-command-tag">实时盯盘</span>
+                                            <span class="ai-agent-command-tag">交易后复盘</span>
+                                        </div>
+                                        <div class="ai-agent-command-links">
+                                            <a class="ai-agent-command-link" href="#ai-agent-card">状态开关</a>
+                                            <a class="ai-agent-command-link" href="#ai-agent-ranking-panel">选币纪律</a>
+                                            <a class="ai-agent-command-link" href="#ai-agent-journal-panel">决策日志</a>
+                                            <a class="ai-agent-command-link" href="#ai-agent-review-panel">交易复盘</a>
+                                        </div>
                                     </div>
                                 </div>
 
@@ -2154,7 +2171,7 @@
                                         </div>
                                     </section>
 
-                                    <section class="ai-agent-section ai-agent-panel ai-agent-panel-diagnostics">
+                                    <section id="ai-agent-diagnostics-panel" class="ai-agent-section ai-agent-panel ai-agent-panel-diagnostics">
                                         <div class="ai-agent-section-head">
                                             <div>
                                                 <div class="ai-agent-section-title">为什么现在是 Hold / 观望</div>
@@ -2165,7 +2182,7 @@
                                         <div id="ai-agent-reasons" class="ai-agent-reasons-box">加载中...</div>
                                     </section>
 
-                                    <section class="ai-agent-section ai-agent-panel ai-agent-panel-ranking">
+                                    <section id="ai-agent-ranking-panel" class="ai-agent-section ai-agent-panel ai-agent-panel-ranking">
                                         <div class="ai-agent-section-head">
                                             <div>
                                                 <div class="ai-agent-section-title">币种模式与自动选币</div>
@@ -2221,7 +2238,7 @@
                                     </section>
                                 </div>
 
-                                <section class="ai-agent-panel ai-agent-panel-journal">
+                                <section id="ai-agent-journal-panel" class="ai-agent-panel ai-agent-panel-journal">
                                     <div class="ai-auto-step-head">
                                         <div>
                                             <div class="ai-auto-step-title">最近决策日志与聚合信号快照</div>
@@ -2232,7 +2249,7 @@
                                     <div id="ai-agent-journal" class="ai-agent-journal-box">加载中...</div>
                                 </section>
 
-                                <section class="ai-agent-panel ai-agent-panel-review">
+                                <section id="ai-agent-review-panel" class="ai-agent-panel ai-agent-panel-review">
                                     <div class="ai-auto-step-head">
                                         <div>
                                             <div class="ai-auto-step-title">最近放行交易复盘</div>
