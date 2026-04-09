@@ -63,8 +63,8 @@ class Settings(BaseSettings):
     ZHIPU_BASE_URL: str = "https://open.bigmodel.cn/api/coding/paas/v4"
     ZHIPU_MODEL: str = "GLM-4.5-Air"
     OPENAI_API_KEY: str = ""
-    OPENAI_BASE_URL: str = "https://sub.a-j.app/v1"
-    OPENAI_BACKUP_BASE_URL: str = "https://sub2api.czl.net/v1,https://api.xiaomimimo.com/v1"
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    OPENAI_BACKUP_BASE_URL: str = ""
     OPENAI_BACKUP_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-5.4"
     OPENAI_BACKUP_MODEL: str = "gpt-5.4,mimo-v2-flash"
@@ -83,6 +83,7 @@ class Settings(BaseSettings):
 
     # Trading
     TRADING_MODE: str = "paper"  # paper/live
+    ALLOW_PERSISTED_LIVE_MODE_START: bool = False
     MAX_POSITION_SIZE: float = 0.1
     MAX_DAILY_LOSS: float = 0.02
     MAX_OPEN_POSITIONS: int = 100
@@ -154,7 +155,7 @@ class Settings(BaseSettings):
     EXCHANGE_STARTUP_CONNECT_TIMEOUT_SEC: float = 18.0
 
     # Web server
-    WEB_HOST: str = "0.0.0.0"
+    WEB_HOST: str = "127.0.0.1"
     WEB_PORT: int = 8000
     WEB_SECRET_KEY: str = "change_this_secret_key_in_production"
 
@@ -199,7 +200,7 @@ class Settings(BaseSettings):
     MAX_CANDLES_PER_REQUEST: int = 1000
     DATA_DOWNLOAD_MAX_CONCURRENT_TASKS: int = 2
     DATA_DOWNLOAD_TASK_RETENTION: int = 400
-    ANALYTICS_HISTORY_ENABLED: bool = True
+    ANALYTICS_HISTORY_ENABLED: bool = False
     ANALYTICS_HISTORY_MICRO_INTERVAL_SEC: int = 300
     ANALYTICS_HISTORY_COMMUNITY_INTERVAL_SEC: int = 900
     ANALYTICS_HISTORY_WHALE_INTERVAL_SEC: int = 600

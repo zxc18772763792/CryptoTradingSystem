@@ -54,7 +54,9 @@ from core.strategies import (
     strategy_manager,
 )
 from core.trading import account_manager, execution_engine, order_manager, position_manager
+from web.asset_versions import static_asset_url
 from web.api import ai_research
+from web.startup_mode import StartupModeDecision, resolve_startup_trading_mode
 
 _AUTO_SYNC_SYMBOLS = [
     "BTC/USDT",
@@ -135,6 +137,7 @@ _ANALYTICS_HISTORY_WORKER_SPECS = (
 _STATUS_CACHE_TTL_SEC = 1.5
 _status_cache_payload: Dict[str, Any] | None = None
 _status_cache_at: float = 0.0
+_startup_mode_decision: StartupModeDecision | None = None
 
 
 def invalidate_status_cache() -> None:
@@ -1112,21 +1115,38 @@ async def lifespan(app: FastAPI):
 
     await initialize_ops_runtime(app, standalone=False)
 
-    restored_mode = "paper"
+    global _startup_mode_decision
+    main_account: Dict[str, Any] = {}
     try:
         main_account = account_manager.get_account("main") or {}
-        restored_mode = str(main_account.get("mode") or settings.TRADING_MODE or "paper").strip().lower()
-        if restored_mode not in {"paper", "live"}:
-            restored_mode = "paper"
     except Exception as e:
         logger.warning(f"Failed to restore trading mode from account config: {e}")
-        restored_mode = str(settings.TRADING_MODE or "paper").strip().lower()
-        if restored_mode not in {"paper", "live"}:
-            restored_mode = "paper"
+        main_account = {}
 
-    runtime_state.initialize_mode(restored_mode, reason="lifespan.startup")
-    execution_engine.set_paper_trading(restored_mode != "live", sync_runtime_state=False)
-    logger.info(f"Startup trading mode restored: {restored_mode}")
+    _startup_mode_decision = resolve_startup_trading_mode(
+        configured_mode=settings.TRADING_MODE,
+        persisted_account=main_account,
+        allow_persisted_live_mode_start=bool(settings.ALLOW_PERSISTED_LIVE_MODE_START),
+    )
+    if _startup_mode_decision.blocked_persisted_live_restore:
+        logger.warning(
+            "Blocked persisted live-mode restore during startup. "
+            "Managed start now falls back to paper unless ALLOW_PERSISTED_LIVE_MODE_START=true "
+            "or TRADING_MODE=live is set explicitly."
+        )
+
+    runtime_state.initialize_mode(_startup_mode_decision.effective_mode, reason="lifespan.startup")
+    execution_engine.set_paper_trading(
+        _startup_mode_decision.effective_mode != "live",
+        sync_runtime_state=False,
+    )
+    logger.info(
+        "Startup trading mode resolved: effective={}, configured={}, persisted={}, source={}",
+        _startup_mode_decision.effective_mode,
+        _startup_mode_decision.configured_mode,
+        _startup_mode_decision.persisted_mode or "unset",
+        _startup_mode_decision.source,
+    )
     await execution_engine.start()
 
     if not getattr(app.state, "strategy_signal_hooked", False):
@@ -1233,6 +1253,7 @@ app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
 templates_path = Path(__file__).parent / "templates"
 templates_path.mkdir(parents=True, exist_ok=True)
 templates = Jinja2Templates(directory=str(templates_path))
+templates.env.globals["static_asset_url"] = static_asset_url
 
 from web.api import (
     ai_agent,
@@ -1311,6 +1332,18 @@ async def get_status():
                 "account_scope": runtime_state.get_account_scope(),
                 "task_count": len(runtime_state.get_task_diagnostics()),
                 "last_mode_switch_at": runtime_state.snapshot().get("last_mode_switch_at"),
+                "startup_mode": {
+                    "configured_mode": (
+                        _startup_mode_decision.configured_mode if _startup_mode_decision else settings.TRADING_MODE
+                    ),
+                    "persisted_mode": (
+                        _startup_mode_decision.persisted_mode if _startup_mode_decision else ""
+                    ),
+                    "source": _startup_mode_decision.source if _startup_mode_decision else "unknown",
+                    "blocked_persisted_live_restore": bool(
+                        _startup_mode_decision.blocked_persisted_live_restore if _startup_mode_decision else False
+                    ),
+                },
             },
             "execution_engine": {
                 "running": bool(execution_engine.is_running),

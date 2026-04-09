@@ -20,13 +20,8 @@ services:
 
   news_service:
     build: .
-    command: ["python", "main.py", "--mode", "news_service"]
-    ports:
-      - "8000:8000"
+    command: ["python", "-m", "core.news.service.worker"]
     environment:
-      - MODE=news_service
-      - WEB_HOST=0.0.0.0
-      - WEB_PORT=8000
       - DATABASE_URL=postgresql+asyncpg://crypto:crypto@db:5432/crypto_trading
       - REDIS_URL=redis://redis:6379/0
     volumes:

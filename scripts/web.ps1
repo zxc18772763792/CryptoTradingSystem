@@ -2,10 +2,11 @@ param(
     [ValidateSet("help", "start", "status", "stop")]
     [string]$Action = "help",
     [string]$EnvName = "crypto_trading",
-    [string]$BindHost = "0.0.0.0",
+    [string]$BindHost = "127.0.0.1",
     [int]$Port = 8000,
     [int]$HealthWaitSec = 150,
     [switch]$OpenBrowser,
+    [switch]$AllowPersistedLiveMode,
     [switch]$StartAutonomousAgent,
     [switch]$StartNewsWorker,
     [switch]$StartNewsLlmWorker,
@@ -282,6 +283,7 @@ function Show-Help {
     Write-Host ""
     Write-Host "Common start variants:"
     Write-Host "  .\web.bat start -OpenBrowser"
+    Write-Host "  .\web.bat start -AllowPersistedLiveMode"
     Write-Host "  .\web.bat start -StartAutonomousAgent"
     Write-Host "  .\web.bat start -NoNewsWorkers"
     Write-Host "  .\web.bat start -NoNewsLlmWorker"
@@ -294,6 +296,7 @@ function Show-Help {
     Write-Host "Managed default profile:"
     Write-Host "  - '.\web.bat start' launches web + news worker + news LLM worker."
     Write-Host "  - Managed start ignores .env START_* worker flags and uses command-line flags."
+    Write-Host "  - Persisted live-mode restore is blocked unless you pass -AllowPersistedLiveMode."
     Write-Host "  - Analytics history stays off unless you pass -EnableAnalyticsHistory."
     Write-Host "  - PM worker remains opt-in via -StartPmWorker."
     Write-Host "  - AI autonomous agent stays separate unless env auto-start is true or you pass -StartAutonomousAgent."
@@ -325,6 +328,7 @@ function Show-Status {
     Write-Host ("  Project root : {0}" -f $projectRoot)
     Write-Host ("  Port         : {0}" -f $PortNumber)
     Write-Host "  Start policy : default web + news engine (analytics-history disabled)"
+    Write-Host "  Live restore : persisted live restore blocked unless -AllowPersistedLiveMode or TRADING_MODE=live is set"
     Write-Host "  Worker start : news workers auto-start by default; PM worker stays opt-in"
     $analyticsEnvValue = if ($envValues.ContainsKey("ANALYTICS_HISTORY_ENABLED")) { [string]$envValues["ANALYTICS_HISTORY_ENABLED"] } else { $null }
     Write-Host ("  Analytics    : default off unless -EnableAnalyticsHistory is used [env ANALYTICS_HISTORY_ENABLED={0}]" -f (Format-ConfigValue -Value $analyticsEnvValue))
@@ -384,6 +388,7 @@ function Show-Status {
     Write-Host "  .\web.bat"
     Write-Host "  .\web.bat help"
     Write-Host "  .\web.bat start"
+    Write-Host "  .\web.bat start -AllowPersistedLiveMode"
     Write-Host "  .\web.bat start -StartAutonomousAgent"
     Write-Host "  .\web.bat start -NoNewsWorkers"
     Write-Host "  .\web.bat start -EnableAnalyticsHistory"
@@ -496,6 +501,7 @@ switch ($Action) {
             -Port $Port `
             -HealthWaitSec $HealthWaitSec `
             -OpenBrowser:$OpenBrowser.IsPresent `
+            -AllowPersistedLiveMode:$AllowPersistedLiveMode.IsPresent `
             -StartAutonomousAgent:$StartAutonomousAgent.IsPresent `
             -StartNewsWorker:$effectiveStartNewsWorker `
             -StartNewsLlmWorker:$effectiveStartNewsLlmWorker `

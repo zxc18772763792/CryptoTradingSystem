@@ -29,7 +29,7 @@ def get_mode_confirm_text() -> str:
     return _MODE_CONFIRM_TEXT
 
 
-def list_pending_mode_switches() -> list[Dict[str, Any]]:
+def list_pending_mode_switches(*, include_token: bool = False) -> list[Dict[str, Any]]:
     pending: list[Dict[str, Any]] = []
     now = datetime.now(timezone.utc)
     for token, item in list(_mode_switch_pending.items()):
@@ -37,15 +37,15 @@ def list_pending_mode_switches() -> list[Dict[str, Any]]:
         if expires_at and expires_at < now:
             _mode_switch_pending.pop(token, None)
             continue
-        pending.append(
-            {
-                "token": token,
-                "target_mode": item.get("target_mode"),
-                "reason": item.get("reason"),
-                "created_at": item.get("created_at"),
-                "expires_at": expires_at.isoformat() if expires_at else None,
-            }
-        )
+        payload = {
+            "target_mode": item.get("target_mode"),
+            "reason": item.get("reason"),
+            "created_at": item.get("created_at"),
+            "expires_at": expires_at.isoformat() if expires_at else None,
+        }
+        if include_token:
+            payload["token"] = token
+        pending.append(payload)
     return pending
 
 

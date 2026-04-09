@@ -23,26 +23,26 @@ env/
 *.swo
 
 # Runtime files
-logs/
-logs/*.log
-logs/*.out
-logs/*.err
-logs/web_*.log
-data/
-data/cache/
-data/tmp/
-data/research/auto_snapshots/
-.tmp_uvicorn_*.log
-.uv_*.log
-runtime/
-test-results/
-.pytest_tmp/
-MagicMock/
-node_modules/
-tmp_ai_proposals*.json
-web_start*.log
-output/
-.playwright-cli/
+/logs/
+/logs/*.log
+/logs/*.out
+/logs/*.err
+/logs/web_*.log
+/data/
+/data/cache/
+/data/tmp/
+/data/research/auto_snapshots/
+/.tmp_uvicorn_*.log
+/.uv_*.log
+/runtime/
+/test-results/
+/.pytest_tmp/
+/MagicMock/
+/node_modules/
+/tmp_ai_proposals*.json
+/web_start*.log
+/output/
+/.playwright-cli/
 
 # Secrets
 .env

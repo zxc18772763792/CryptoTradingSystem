@@ -1,5 +1,9 @@
 from pathlib import Path
 
+from jinja2 import Environment
+
+from web.asset_versions import static_asset_url
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -8,9 +12,15 @@ def _read(rel_path: str) -> str:
     return (REPO_ROOT / rel_path).read_text(encoding="utf-8-sig")
 
 
+def _render_template(source: str) -> str:
+    return Environment(autoescape=False).from_string(source).render(static_asset_url=static_asset_url)
+
+
 def test_ai_research_template_loads_phase5_modules():
-    template = _read("web/templates/index.html")
-    news_template = _read("web/templates/news.html")
+    template_source = _read("web/templates/index.html")
+    news_template_source = _read("web/templates/news.html")
+    template = _render_template(template_source)
+    news_template = _render_template(news_template_source)
 
     assert 'id="ai-flow-console"' in template
     assert 'id="ai-chain-summary-grid"' in template
@@ -27,12 +37,14 @@ def test_ai_research_template_loads_phase5_modules():
     assert '页面时区：上海时间 (UTC+8)' in news_template
     assert '/static/favicon.svg' in template
     assert '/static/favicon.svg' in news_template
-    assert "/static/js/ai_research.js" in template
-    assert "/static/js/ai_research_diagnostics.js" in template
-    assert "/static/js/ai_research_runtime.js" in template
-    assert "/static/js/ai_research_agent.js" in template
+    assert "{{ static_asset_url('js/ai_research.js') }}" in template_source
+    assert "{{ static_asset_url('js/news_tab_runtime.js') }}" in news_template_source
+    assert static_asset_url("js/ai_research.js") in template
+    assert static_asset_url("js/ai_research_diagnostics.js") in template
+    assert static_asset_url("js/ai_research_runtime.js") in template
+    assert static_asset_url("js/ai_research_agent.js") in template
     assert "/static/js/ai_research_patch.js" not in template
-    assert '/static/js/news_tab_runtime.js?v=' in news_template
+    assert static_asset_url("js/news_tab_runtime.js") in news_template
 
 
 def test_ai_research_phase5_assets_exist_and_define_flow_styles():

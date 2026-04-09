@@ -26,3 +26,7 @@ else {
     Write-Warning "pytest-asyncio not installed in current environment, running tests without async plugin."
     python -m pytest -q tests
 }
+
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}

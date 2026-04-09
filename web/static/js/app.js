@@ -672,10 +672,10 @@ const startedAt=Number(tabBootstrapState.startedAt[tab]||0);
 return startedAt>0&&(Date.now()-startedAt)<Math.max(0,Number(windowMs||0));
 }
 function refreshDashboardCore(){
-return Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary()]);
+return Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary(),loadModeInfo()]);
 }
 function refreshDashboardPrimary(){
-return Promise.allSettled([loadSummary(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary()]);
+return Promise.allSettled([loadSummary(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary(),loadModeInfo()]);
 }
 function refreshTradingCore(){
 return Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk()]);
@@ -989,7 +989,7 @@ function renderRisk(r){const p=document.getElementById('risk-panel');if(!p)retur
 <div class="list-item"><span>最近告警</span><span>${a.length} 条</span></div>
 ${a.slice(-3).map(x=>`<div class="list-item"><span>${x.title}</span><span>${x.timestamp?.substring(11,19)||''}</span></div>`).join('')}`;}
 
-function renderExchanges(b){const el=document.getElementById('exchanges-list');if(!el)return;const mode=String(b?.mode||b?.active_account_type||'').toLowerCase();const ex=b?.exchanges||{},keys=Object.keys(ex);const statusRows=keys.map(k=>{const i=ex[k]||{};return `<div class="list-item"><span>${k.toUpperCase()}</span><span class="status-badge ${i.connected?'connected':''}">${i.connected?'已连接':'未连接'}</span></div>`;}).join('')||'<div class="list-item">暂无交易所连接</div>';if(mode==='paper'){const i=b?.paper_account||{};const all=(i.balances||[]).filter(x=>Number(x.total)>0);const stable=all.filter(x=>['USDT','USDC'].includes(String(x.currency||'').toUpperCase()));const others=all.filter(x=>!['USDT','USDC'].includes(String(x.currency||'').toUpperCase()));const pick=[...stable,...others].slice(0,12);const rows=pick.map(v=>`<div class="balance-item"><span class="currency">${v.currency}</span><span class="amount">${Number(v.total||0).toFixed(6)}${Number(v.usd_value||0)>0?` (~$${Number(v.usd_value).toFixed(2)})`:''}</span></div>`).join('')||'<div class="balance-item">无资产</div>';el.innerHTML=`<div class="exchange-section"><div class="exchange-header"><span class="exchange-name">PAPER</span><span class="exchange-usd">$${Number(i.total_usd||0).toFixed(2)}</span><span class="status-badge connected">模拟仓</span></div><div class="balance-list">${rows}</div></div><div class="exchange-section"><div class="exchange-header"><span class="exchange-name">交易所连接状态</span></div><div class="balance-list">${statusRows}</div></div>`;return;}if(!keys.length){el.innerHTML='<div class="list-item">暂无交易所连接</div>';return;}el.innerHTML=keys.map(k=>{const i=ex[k];if(!i.connected)return `<div class="exchange-section"><div class="exchange-header"><span class="exchange-name">${k.toUpperCase()}</span><span class="status-badge">未连接</span></div></div>`;const all=(i.balances||[]).filter(x=>Number(x.total)>0);const stable=all.filter(x=>['USDT','USDC'].includes(String(x.currency||'').toUpperCase()));const others=all.filter(x=>!['USDT','USDC'].includes(String(x.currency||'').toUpperCase()));const pick=[...stable,...others].slice(0,12);const rows=pick.map(v=>`<div class="balance-item"><span class="currency">${v.currency}</span><span class="amount">${Number(v.total||0).toFixed(6)}${Number(v.usd_value||0)>0?` (~$${Number(v.usd_value).toFixed(2)})`:''}</span></div>`).join('')||'<div class="balance-item">无资产</div>';return `<div class="exchange-section"><div class="exchange-header"><span class="exchange-name">${k.toUpperCase()}</span><span class="exchange-usd">$${Number(i.total_usd||0).toFixed(2)}</span><span class="status-badge connected">已连接</span></div><div class="balance-list">${rows}</div></div>`;}).join('');}
+function renderExchanges(b,modeOverride=''){const el=document.getElementById('exchanges-list');if(!el)return;const mode=resolveRuntimeModeSnapshot({balanceMode:modeOverride||b?.mode||b?.active_account_type});const ex=b?.exchanges||{},keys=Object.keys(ex);const statusRows=keys.map(k=>{const i=ex[k]||{};return `<div class="list-item"><span>${k.toUpperCase()}</span><span class="status-badge ${i.connected?'connected':''}">${i.connected?'已连接':'未连接'}</span></div>`;}).join('')||'<div class="list-item">暂无交易所连接</div>';if(mode==='paper'){const i=b?.paper_account||{};const all=(i.balances||[]).filter(x=>Number(x.total)>0);const stable=all.filter(x=>['USDT','USDC'].includes(String(x.currency||'').toUpperCase()));const others=all.filter(x=>!['USDT','USDC'].includes(String(x.currency||'').toUpperCase()));const pick=[...stable,...others].slice(0,12);const rows=pick.map(v=>`<div class="balance-item"><span class="currency">${v.currency}</span><span class="amount">${Number(v.total||0).toFixed(6)}${Number(v.usd_value||0)>0?` (~$${Number(v.usd_value).toFixed(2)})`:''}</span></div>`).join('')||'<div class="balance-item">无资产</div>';el.innerHTML=`<div class="exchange-section"><div class="exchange-header"><span class="exchange-name">PAPER</span><span class="exchange-usd">$${Number(i.total_usd||0).toFixed(2)}</span><span class="status-badge connected">模拟仓</span></div><div class="balance-list">${rows}</div></div><div class="exchange-section"><div class="exchange-header"><span class="exchange-name">交易所连接状态</span></div><div class="balance-list">${statusRows}</div></div>`;return;}if(!keys.length){el.innerHTML='<div class="list-item">暂无交易所连接</div>';return;}el.innerHTML=keys.map(k=>{const i=ex[k];if(!i.connected)return `<div class="exchange-section"><div class="exchange-header"><span class="exchange-name">${k.toUpperCase()}</span><span class="status-badge">未连接</span></div></div>`;const all=(i.balances||[]).filter(x=>Number(x.total)>0);const stable=all.filter(x=>['USDT','USDC'].includes(String(x.currency||'').toUpperCase()));const others=all.filter(x=>!['USDT','USDC'].includes(String(x.currency||'').toUpperCase()));const pick=[...stable,...others].slice(0,12);const rows=pick.map(v=>`<div class="balance-item"><span class="currency">${v.currency}</span><span class="amount">${Number(v.total||0).toFixed(6)}${Number(v.usd_value||0)>0?` (~$${Number(v.usd_value).toFixed(2)})`:''}</span></div>`).join('')||'<div class="balance-item">无资产</div>';return `<div class="exchange-section"><div class="exchange-header"><span class="exchange-name">${k.toUpperCase()}</span><span class="exchange-usd">$${Number(i.total_usd||0).toFixed(2)}</span><span class="status-badge connected">已连接</span></div><div class="balance-list">${rows}</div></div>`;}).join('');}
 
 async function loadSummary(){
 if(summaryLoadPromise)return summaryLoadPromise;
@@ -1009,8 +1009,12 @@ const statsFresh=(sr.status==='fulfilled'&&sr.value&&typeof sr.value==='object')
 const balancesFresh=(br.status==='fulfilled'&&br.value&&typeof br.value==='object')?br.value:null;
 const s=statsFresh||prevStats||{};
 const b=balancesFresh||prevBalances||{};
-const statusMode=String(state?._systemStatusLast?.trading_mode||'').toLowerCase();
-const activeType=String(b?.active_account_type??b?.mode??statusMode??'paper').toLowerCase();
+const statusMode=normalizeRuntimeMode(state?._systemStatusLast?.trading_mode);
+const statsMode=normalizeRuntimeMode(s?.trading_mode);
+const balanceMode=normalizeRuntimeMode(b?.mode??b?.active_account_type);
+const activeType=resolveRuntimeModeSnapshot({statusMode,statsMode,balanceMode});
+const staleCrossModeBalance=Boolean(!balancesFresh&&balanceMode&&balanceMode!==activeType);
+const displayBalances=staleCrossModeBalance?{}:b;
 const historyMode=activeType==='live'?'live':'paper';
 const historyFresh=(statsFresh||balancesFresh||Object.keys(prevHistoryByMode).length)
   ?await api(`/trading/balances/history?hours=72&exchange=all&limit=500&mode=${encodeURIComponent(historyMode)}`,{timeoutMs:5000}).catch(()=>null)
@@ -1021,16 +1025,16 @@ const historyRows=Array.isArray(historyByMode?.[historyMode])?historyByMode[hist
 if(statsFresh||balancesFresh||Array.isArray(historyFresh?.history)){
   state.lastSummarySnapshot={stats:s,balances:b,historyByMode};
 }
-const hasBalanceSnapshot=!!(b&&typeof b==='object'&&(Object.keys(b?.exchanges||{}).length||b?.paper_account||b?.active_account_type||b?.total_usd_estimate!==undefined));
+const hasBalanceSnapshot=!!(displayBalances&&typeof displayBalances==='object'&&(Object.keys(displayBalances?.exchanges||{}).length||displayBalances?.paper_account||displayBalances?.active_account_type||displayBalances?.total_usd_estimate!==undefined));
 const hasStatsSnapshot=!!(s&&typeof s==='object'&&Object.keys(s).length);
-const activeUsd=Number(b?.active_account_usd_estimate??b?.total_usd_estimate??NaN);
-const mergedRisk=(b?.risk_report||s?.risk||null);
+const activeUsd=Number(displayBalances?.active_account_usd_estimate??displayBalances?.total_usd_estimate??NaN);
+const mergedRisk=(displayBalances?.risk_report||s?.risk||null);
 const mergedEquity=(mergedRisk?.equity||{});
-const livePosCount=Number(b?.live_position_count||0);
+const livePosCount=Number(displayBalances?.live_position_count||0);
 const statPosCount=Number(s?.positions?.position_count||0);
 document.getElementById('open-positions').textContent=hasStatsSnapshot||hasBalanceSnapshot?((activeType==='live'?livePosCount:statPosCount)||0):'--';
 document.getElementById('open-orders').textContent=hasStatsSnapshot?(s?.orders?.total_orders||0):'--';
-const exObj=b?.exchanges||{},exKeys=Object.keys(exObj),exConnected=exKeys.filter(k=>Boolean(exObj[k]?.connected)).length;
+const exObj=displayBalances?.exchanges||{},exKeys=Object.keys(exObj),exConnected=exKeys.filter(k=>Boolean(exObj[k]?.connected)).length;
 const exCountEl=document.getElementById('exchange-status-count');
 if(exCountEl)exCountEl.textContent=`${exConnected}/${exKeys.length||0}`;
 const modeEl=document.getElementById('active-account-mode');
@@ -1042,8 +1046,13 @@ const pnlKnown=hasStatsSnapshot||hasBalanceSnapshot;
 const pnl=Number(pnlSource||0),p=document.getElementById('total-pnl');
 if(p){p.textContent=pnlKnown?fmt(pnl):'--';p.className=`value ${pnlKnown&&pnl>=0?'positive':pnlKnown?'negative':''}`.trim();}
 if(hasBalanceSnapshot){
-  renderExchanges(b);
-  drawPie(b?.distribution||[],activeType);
+  renderExchanges(displayBalances,activeType);
+  drawPie(displayBalances?.distribution||[],activeType);
+}else if(staleCrossModeBalance){
+  const ex=document.getElementById('exchanges-list');
+  if(ex)ex.innerHTML='<div class=\"list-item\">资产快照仍在切换到当前模式，稍后自动刷新...</div>';
+  const pie=document.getElementById('holdings-pie');
+  if(pie)pie.innerHTML='<div class=\"list-item\">资产分布正在按当前模式重新同步...</div>';
 }else{
   const ex=document.getElementById('exchanges-list');
   if(ex)ex.innerHTML='<div class=\"list-item\">资产快照暂未返回，稍后自动刷新...</div>';
@@ -1062,6 +1071,8 @@ async function loadStats(){return loadSummary();}
 async function loadBalances(){return loadSummary();}
 async function loadBanlances(){return loadSummary();}
 async function loadRisk(){try{return await loadSummary();}catch{}}
+function normalizeRuntimeMode(value){const text=String(value||'').trim().toLowerCase();return text==='live'||text==='paper'?text:'';}
+function resolveRuntimeModeSnapshot({statusMode='',statsMode='',balanceMode=''}={}){return normalizeRuntimeMode(statusMode)||normalizeRuntimeMode(statsMode)||normalizeRuntimeMode(balanceMode)||'paper';}
 function renderPnlHeatmap(data){
 const box=document.getElementById('pnl-heatmap');
 if(!box)return;
@@ -4009,7 +4020,7 @@ async function cancelConditional(id){try{await api(`/trading/orders/conditional/
 async function loadAccounts(){return runRequestSingleFlight('accounts',async()=>{try{const d=await api('/trading/accounts/summary');const out=document.getElementById('accounts-output');if(out)out.textContent=JSON.stringify(d,null,2);}catch(e){const out=document.getElementById('accounts-output');if(out)out.textContent=`账户加载失败: ${e.message}`;}});}
 async function createAccount(){try{const payload={account_id:document.getElementById('account-id').value.trim(),name:document.getElementById('account-name').value.trim(),exchange:document.getElementById('account-exchange').value,mode:document.getElementById('account-mode').value,parent_account_id:null,enabled:true,metadata:{}};const r=await api('/trading/accounts',{method:'POST',body:JSON.stringify(payload)});notify(`账户 ${r?.account?.account_id||payload.account_id} 已创建`);await loadAccounts();}catch(e){notify(`创建账户失败: ${e.message}`,true);}}
 
-async function loadModeInfo(){return runRequestSingleFlight('modeInfo',async()=>{try{const d=await api('/trading/mode');const cur=document.getElementById('mode-current-text'),pend=document.getElementById('mode-pending-text');if(cur)cur.textContent=d.mode||'-';if(pend)pend.textContent=(d.pending_switches||[]).length?`待确认 ${d.pending_switches[0].target_mode}`:'无待确认切换';if(d.pending_switches?.length)state.modeToken=d.pending_switches[0].token;const out=document.getElementById('mode-output');if(out)out.textContent=JSON.stringify(d,null,2);}catch(e){const out=document.getElementById('mode-output');if(out)out.textContent=`加载模式失败: ${e.message}`;}});}
+async function loadModeInfo(){return runRequestSingleFlight('modeInfo',async()=>{try{const d=await api('/trading/mode');const cur=document.getElementById('mode-current-text'),pend=document.getElementById('mode-pending-text');if(cur)cur.textContent=d.mode||'-';if(pend)pend.textContent=(d.pending_switches||[]).length?`待确认 ${d.pending_switches[0].target_mode}`:'无待确认切换';const out=document.getElementById('mode-output');if(out)out.textContent=JSON.stringify(d,null,2);}catch(e){const out=document.getElementById('mode-output');if(out)out.textContent=`加载模式失败: ${e.message}`;}});}
 async function requestModeSwitch(){try{const payload={target_mode:document.getElementById('mode-target').value,reason:document.getElementById('mode-reason').value||''};const r=await api('/trading/mode/request',{method:'POST',body:JSON.stringify(payload)});state.modeToken=r.token||'';const out=document.getElementById('mode-output');if(out)out.textContent=JSON.stringify(r,null,2);notify('模式切换申请已创建，请二次确认');await loadModeInfo();}catch(e){notify(`申请切换失败: ${e.message}`,true);}}
 async function confirmModeSwitch(){try{if(!state.modeToken){await loadModeInfo();}if(!state.modeToken){notify('没有待确认切换令牌',true);return;}const text=prompt('请输入确认文本：CONFIRM LIVE TRADING','');if(text===null)return;const r=await api('/trading/mode/confirm',{method:'POST',body:JSON.stringify({token:state.modeToken,confirm_text:text})});const out=document.getElementById('mode-output');if(out)out.textContent=JSON.stringify(r,null,2);notify(`交易模式已切换为 ${r.mode}`);state.modeToken='';await loadModeInfo();await loadSystemStatus();}catch(e){notify(`确认切换失败: ${e.message}`,true);}}
 
@@ -6039,7 +6050,7 @@ await Promise.all([loadOrders(),loadPositions(),loadSummary(),loadRisk(),loadCon
 };
 }
 
-async function init(){initTabs();initClock();initEquity();bindTrade();bindOrderView();bindLiveTradeReview();bindData();bindDataAdvanced();bindBacktest();bindArbitragePage();bindNotificationCenter();bindAudit();bindStrategyOps();bindStrategyAdvanced();bindResearchPanel();bindResearchPresets();bindResearchSentiment();bindModeControls();bindAccountControls();initWebSocket();document.addEventListener('visibilitychange',()=>{if(document.hidden){releaseAllSharedPollGroups();closeWebSocketClient();}else{canRunSharedPolling('status');const group=sharedPollGroupForTab(getActiveTabName());if(group)canRunSharedPolling(group);initWebSocket();}});renderStrategyConsolePanel();renderResearchStatusCards();state.bootCompleted=true;state.bootFailed=false;loadSystemStatus().catch(err=>console.warn('initial loadSystemStatus failed:',err?.message||err));setTimeout(()=>{ensureTabLoaded(getActiveTabName(),{force:true}).catch(err=>console.error('initial tab load failed:',err));},0);
+async function init(){initTabs();initClock();initEquity();bindTrade();bindOrderView();bindLiveTradeReview();bindData();bindDataAdvanced();bindBacktest();bindArbitragePage();bindNotificationCenter();bindAudit();bindStrategyOps();bindStrategyAdvanced();bindResearchPanel();bindResearchPresets();bindResearchSentiment();bindModeControls();bindAccountControls();initWebSocket();document.addEventListener('visibilitychange',()=>{if(document.hidden){releaseAllSharedPollGroups();closeWebSocketClient();}else{canRunSharedPolling('status');const group=sharedPollGroupForTab(getActiveTabName());if(group)canRunSharedPolling(group);initWebSocket();}});renderStrategyConsolePanel();renderResearchStatusCards();state.bootCompleted=true;state.bootFailed=false;await loadSystemStatus().catch(err=>console.warn('initial loadSystemStatus failed:',err?.message||err));setTimeout(()=>{ensureTabLoaded(getActiveTabName(),{force:true}).catch(err=>console.error('initial tab load failed:',err));},0);
 // Status polling is lightweight but user-visible; keep it independent from heavier dashboard batches
 setInterval(()=>{if(document.hidden)return;if(!canRunSharedPolling('status'))return;loadSystemStatus();},20000);
 setInterval(()=>{

@@ -1,9 +1,10 @@
 param(
     [string]$EnvName = "crypto_trading",
-    [string]$BindHost = "0.0.0.0",
+    [string]$BindHost = "127.0.0.1",
     [int]$Port = 8000,
     [bool]$OpenBrowser = $true,
     [int]$HealthWaitSec = 20,
+    [bool]$AllowPersistedLiveMode = $false,
     [bool]$StartAutonomousAgent = $false,
     [bool]$StartNewsWorker = $false,
     [bool]$StartNewsLlmWorker = $false,
@@ -262,6 +263,7 @@ if (-not $EnableAnalyticsHistory) {
     $startupProfile += " + analytics-history off"
     Set-Item -Path Env:ANALYTICS_HISTORY_ENABLED -Value "0"
 }
+Set-Item -Path Env:ALLOW_PERSISTED_LIVE_MODE_START -Value $(if ($AllowPersistedLiveMode) { "1" } else { "0" })
 Set-EffectiveWorkerEnvFlags `
     -NewsWorker $StartNewsWorker `
     -NewsLlmWorker $StartNewsLlmWorker `
@@ -272,7 +274,7 @@ $pidOnPort = Get-ListeningPid -PortNumber $Port
 if ($pidOnPort) {
     $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pidOnPort" -ErrorAction SilentlyContinue
     if ($proc -and ($proc.CommandLine -like "*uvicorn*web.main:app*" -or $proc.CommandLine -like "*main.py --mode web*")) {
-        Write-Host "Service already listening on 0.0.0.0:$Port (PID=$pidOnPort)."
+        Write-Host ("Service already listening on {0}:{1} (PID={2})." -f $BindHost, $Port, $pidOnPort)
         Write-Host "Requested startup profile: $startupProfile"
         if ($ignoredEnvWorkerFlags.Count) {
             Write-Host ("Managed start ignored .env worker flags: {0}" -f ($ignoredEnvWorkerFlags -join ", ")) -ForegroundColor Yellow
@@ -281,6 +283,9 @@ if ($pidOnPort) {
         if (-not $EnableAnalyticsHistory) {
             Write-Host "Default start forces ANALYTICS_HISTORY_ENABLED=0." -ForegroundColor Yellow
             Write-Host "Use '.\web.bat start -EnableAnalyticsHistory' to opt into analytics history collectors." -ForegroundColor Yellow
+        }
+        if (-not $AllowPersistedLiveMode) {
+            Write-Host "Managed start blocks persisted live-mode restore unless you pass '.\web.bat start -AllowPersistedLiveMode'." -ForegroundColor Yellow
         }
         if ($requestedExternalWorkerLabels.Count) {
             Write-Host "Worker mix was not changed because the web service is already running." -ForegroundColor Yellow
@@ -314,6 +319,9 @@ if ($ignoredEnvWorkerFlags.Count) {
 if (-not $EnableAnalyticsHistory) {
     Write-Host "Default start forces ANALYTICS_HISTORY_ENABLED=0." -ForegroundColor Yellow
     Write-Host "Use '.\web.bat start -EnableAnalyticsHistory' when you want analytics history collectors." -ForegroundColor Yellow
+}
+if (-not $AllowPersistedLiveMode) {
+    Write-Host "Managed start blocks persisted live-mode restore unless you pass '.\web.bat start -AllowPersistedLiveMode'." -ForegroundColor Yellow
 }
 
 $proc = Start-Process `

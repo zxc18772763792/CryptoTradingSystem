@@ -1,9 +1,10 @@
 param(
     [string]$EnvName = "crypto_trading",
-    [string]$BindHost = "0.0.0.0",
+    [string]$BindHost = "127.0.0.1",
     [int]$Port = 8000,
     [int]$HealthWaitSec = 150,
     [switch]$OpenBrowser,
+    [switch]$AllowPersistedLiveMode,
     [switch]$StartAutonomousAgent,
     [switch]$StartNewsWorker,
     [switch]$StartNewsLlmWorker,
@@ -35,6 +36,7 @@ try {
         Port = $Port
         HealthWaitSec = $HealthWaitSec
         OpenBrowser = $OpenBrowser.IsPresent
+        AllowPersistedLiveMode = $AllowPersistedLiveMode.IsPresent
         StartAutonomousAgent = $StartAutonomousAgent.IsPresent
         StartNewsWorker = $StartNewsWorker.IsPresent
         StartNewsLlmWorker = $StartNewsLlmWorker.IsPresent

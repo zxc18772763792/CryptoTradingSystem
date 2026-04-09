@@ -53,7 +53,7 @@ And it also:
 - keeps analytics-history collectors off unless you explicitly pass `-EnableAnalyticsHistory`
 - keeps the PM worker opt-in via `-StartPmWorker`
 - ignores `.env` `START_*` worker flags for managed startup decisions
-- restores the persisted trading mode, so the service can still come up in `live`
+- blocks persisted `live`-mode restore unless you explicitly pass `-AllowPersistedLiveMode`
 - keeps the AI autonomous agent separate from the default boot path
 
 Important behavior while the service is already running:
@@ -83,6 +83,12 @@ Open the browser too:
 
 ```bat
 .\web.bat start -OpenBrowser
+```
+
+Intentionally allow persisted `live` mode:
+
+```bat
+.\web.bat start -AllowPersistedLiveMode
 ```
 
 Start web only without the news engine:
@@ -160,7 +166,7 @@ If the service comes up in `live` unexpectedly:
 
 1. Treat that as real state, not a display bug
 2. Review the persisted runtime mode and credentials
-3. Do not assume default startup forces `paper`
+3. Confirm whether `TRADING_MODE=live` or `-AllowPersistedLiveMode` was used
 
 ## Script Stack
 
