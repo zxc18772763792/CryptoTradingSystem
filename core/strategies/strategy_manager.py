@@ -87,6 +87,9 @@ class StrategyManager:
         # Strategy runtime should behave like an event-driven backtest: process each
         # completed bar once instead of re-running on the same forming candle.
         self._last_processed_bar_at: Dict[Tuple[str, str, str], pd.Timestamp] = {}
+        # Keep the last auto/manual stop close summary so API/script callers can
+        # report what happened without re-triggering another close attempt.
+        self._last_stop_close_summary: Dict[str, Dict[str, Any]] = {}
 
     def _ensure_strategy_account(self, name: str, params: Dict[str, Any]) -> None:
         from core.trading.account_manager import account_manager
@@ -580,7 +583,7 @@ class StrategyManager:
 
         positions = list(position_manager.get_positions_by_strategy(name) or [])
         if not positions:
-            return {"requested": 0, "closed": 0, "failed": 0}
+            return {"requested": 0, "closed": 0, "failed": 0, "results": []}
 
         closed = 0
         failed = 0
@@ -609,7 +612,22 @@ class StrategyManager:
             except Exception as exc:
                 failed += 1
                 logger.error(f"Auto-close on strategy stop failed: strategy={name} symbol={pos.symbol} error={exc}")
-        return {"requested": len(positions), "closed": closed, "failed": failed}
+        return {"requested": len(positions), "closed": closed, "failed": failed, "results": []}
+
+    def _remember_stop_close_summary(self, name: str, summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        payload = dict(summary or {})
+        payload.setdefault("requested", 0)
+        payload.setdefault("closed", 0)
+        payload.setdefault("failed", 0)
+        payload.setdefault("results", [])
+        self._last_stop_close_summary[name] = payload
+        return payload
+
+    def pop_last_stop_close_summary(self, name: str) -> Dict[str, Any]:
+        return dict(
+            self._last_stop_close_summary.pop(name, None)
+            or {"requested": 0, "closed": 0, "failed": 0, "results": []}
+        )
 
     async def _run_strategy_once(self, name: str) -> None:
         strategy = self._strategies.get(name)
@@ -719,6 +737,7 @@ class StrategyManager:
                 self._runtime_deadlines.pop(name, None)
                 try:
                     close_summary = await self._close_positions_for_strategy_stop(name, reason="runtime_limit_reached")
+                    self._remember_stop_close_summary(name, close_summary)
                     logger.info(
                         f"Strategy {name} auto-closed positions on runtime stop: "
                         f"requested={close_summary.get('requested', 0)} "
@@ -726,6 +745,16 @@ class StrategyManager:
                         f"failed={close_summary.get('failed', 0)}"
                     )
                 except Exception as exc:
+                    self._remember_stop_close_summary(
+                        name,
+                        {
+                            "requested": 0,
+                            "closed": 0,
+                            "failed": 0,
+                            "results": [],
+                            "error": str(exc),
+                        },
+                    )
                     logger.error(f"Strategy {name} runtime-limit auto-close failed: {exc}")
                 break
 
@@ -868,6 +897,27 @@ class StrategyManager:
         self._running_since.pop(name, None)
         self._runtime_deadlines.pop(name, None)
         self._clear_bar_runtime_state(name)
+        try:
+            close_summary = await self._close_positions_for_strategy_stop(name, reason="strategy_stopped")
+            self._remember_stop_close_summary(name, close_summary)
+            logger.info(
+                f"Strategy {name} stop close summary: "
+                f"requested={close_summary.get('requested', 0)} "
+                f"closed={close_summary.get('closed', 0)} "
+                f"failed={close_summary.get('failed', 0)}"
+            )
+        except Exception as exc:
+            self._remember_stop_close_summary(
+                name,
+                {
+                    "requested": 0,
+                    "closed": 0,
+                    "failed": 0,
+                    "results": [],
+                    "error": str(exc),
+                },
+            )
+            logger.error(f"Strategy {name} stop auto-close failed: {exc}")
         logger.info(f"Strategy {name} stopped")
         return True
 

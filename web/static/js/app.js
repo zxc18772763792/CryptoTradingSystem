@@ -6188,6 +6188,112 @@ async function _loadMonitorData(name) {
     }
 }
 
+function monitorChartToMs(value) {
+    if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.getTime() : NaN;
+    if (typeof value === 'number') {
+        const d = new Date(value > 1e12 ? value : value * 1000);
+        return Number.isFinite(d.getTime()) ? d.getTime() : NaN;
+    }
+    const raw = String(value ?? '').trim();
+    if (!raw) return NaN;
+    const text = raw.replace(' ', 'T');
+    const normalized = /(?:[zZ]|[+\-]\d{2}:\d{2})$/.test(text) ? text : `${text}Z`;
+    const d = new Date(normalized);
+    return Number.isFinite(d.getTime()) ? d.getTime() : NaN;
+}
+
+function monitorChartLocalIso(value) {
+    const ms = monitorChartToMs(value);
+    return Number.isFinite(ms) ? klineLocalIso(ms) : '';
+}
+
+function normalizeMonitorOhlcvBar(bar) {
+    if (!bar || typeof bar !== 'object') return null;
+    const ms = monitorChartToMs(bar.t);
+    const t = Number.isFinite(ms) ? klineLocalIso(ms) : '';
+    const o = Number(bar.o);
+    const h = Number(bar.h);
+    const l = Number(bar.l);
+    const c = Number(bar.c);
+    if (!t || ![o, h, l, c].every(Number.isFinite)) return null;
+    const next = { ...bar, t, ms, o, h, l, c };
+    if (bar.v != null && Number.isFinite(Number(bar.v))) next.v = Number(bar.v);
+    ['pair_close', 'spread', 'z_score', 'hedge_ratio'].forEach((key) => {
+        if (bar[key] != null && Number.isFinite(Number(bar[key]))) next[key] = Number(bar[key]);
+    });
+    return next;
+}
+
+function normalizeMonitorEquityPoint(point) {
+    if (!point || typeof point !== 'object') return null;
+    const ms = monitorChartToMs(point.t);
+    const t = Number.isFinite(ms) ? klineLocalIso(ms) : '';
+    const v = Number(point.v);
+    if (!t || !Number.isFinite(v)) return null;
+    return { ...point, t, ms, v };
+}
+
+function findMonitorBarForSignal(bars, signalMs, signalPrice, timeframeMs) {
+    if (!Array.isArray(bars) || !bars.length || !Number.isFinite(signalMs)) return null;
+    const idx = bars.findIndex((bar) => signalMs <= Number(bar?.ms));
+    const nearby = [];
+    const pushBar = (bar) => {
+        if (!bar || nearby.includes(bar)) return;
+        nearby.push(bar);
+    };
+    if (idx === -1) {
+        pushBar(bars[bars.length - 2]);
+        pushBar(bars[bars.length - 1]);
+    } else {
+        pushBar(bars[idx - 1]);
+        pushBar(bars[idx]);
+        pushBar(bars[idx + 1]);
+    }
+    const priceNum = Number(signalPrice);
+    if (Number.isFinite(priceNum)) {
+        const rangeMatches = nearby
+            .filter((bar) => priceNum >= Math.min(bar.l, bar.h) && priceNum <= Math.max(bar.l, bar.h))
+            .sort((a, b) => Math.abs(signalMs - a.ms) - Math.abs(signalMs - b.ms));
+        if (rangeMatches.length) return rangeMatches[0];
+    }
+    for (let i = 0; i < bars.length; i += 1) {
+        const bar = bars[i];
+        const startMs = Number(bar?.ms);
+        const endMs = i < bars.length - 1 ? Number(bars[i + 1]?.ms) : startMs + timeframeMs;
+        if (Number.isFinite(startMs) && Number.isFinite(endMs) && signalMs >= startMs && signalMs < endMs) return bar;
+    }
+    return nearby
+        .filter(Boolean)
+        .sort((a, b) => Math.abs(signalMs - a.ms) - Math.abs(signalMs - b.ms))[0] || bars[0];
+}
+
+function getMonitorSignalPlotPrice(signalType, bar, rawPrice) {
+    const priceNum = Number(rawPrice);
+    if (!bar) return Number.isFinite(priceNum) ? priceNum : null;
+    const low = Math.min(Number(bar.l), Number(bar.h));
+    const high = Math.max(Number(bar.l), Number(bar.h));
+    if (!Number.isFinite(low) || !Number.isFinite(high)) return Number.isFinite(priceNum) ? priceNum : null;
+    const fallback = Number.isFinite(Number(bar.c)) ? Number(bar.c) : (low + high) / 2;
+    const bounded = Number.isFinite(priceNum) ? Math.min(high, Math.max(low, priceNum)) : fallback;
+    let bodyLow = Math.min(Number(bar.o), Number(bar.c));
+    let bodyHigh = Math.max(Number(bar.o), Number(bar.c));
+    if (!(bodyHigh > bodyLow)) {
+        const totalSpan = Math.max(high - low, Math.abs(fallback) * 0.0008, 0.01);
+        const half = totalSpan * 0.18;
+        bodyLow = Math.max(low, fallback - half);
+        bodyHigh = Math.min(high, fallback + half);
+    }
+    if (bounded >= bodyLow && bounded <= bodyHigh) return bounded;
+    const kind = String(signalType || '').trim().toLowerCase();
+    const frac = ['buy', 'close_short'].includes(kind) ? 0.34 : 0.66;
+    return bodyLow + (bodyHigh - bodyLow) * frac;
+}
+
+function formatMonitorSignalTime(value) {
+    const text = String(value || '').trim();
+    return text ? text.replace('T', ' ') : '--';
+}
+
 function _renderMonitorChart(data) {
     const chartEl = document.getElementById('strategy-monitor-chart');
     if (!chartEl || typeof Plotly === 'undefined') return;
@@ -6201,12 +6307,51 @@ function _renderMonitorChart(data) {
     const signals  = Array.isArray(data?.signals) ? data.signals : [];
     const equityRaw = Array.isArray(data?.equity) ? data.equity : [];
     const pairMetrics = (data && typeof data.pair_metrics === 'object' && data.pair_metrics) ? data.pair_metrics : {};
-    const ohlcv = ohlcvRaw.filter((b) => b && b.t != null && [b.o, b.h, b.l, b.c].every((v) => Number.isFinite(Number(v))));
+    const timeframeMs = Math.max(60, timeframeSeconds(data?.timeframe || '1h')) * 1000;
+    const ohlcv = ohlcvRaw.map(normalizeMonitorOhlcvBar).filter(Boolean);
     const equityPts = equityRaw
-        .filter((e) => e && e.t != null && Number.isFinite(Number(e.v)))
-        .map((e) => ({ t: e.t, v: Number(e.v) }));
+        .map(normalizeMonitorEquityPoint)
+        .filter(Boolean);
+    const equityBaseRaw = Number(data?.metrics?.equity_base);
+    const equityBase = Number.isFinite(equityBaseRaw)
+        ? equityBaseRaw
+        : (equityPts.length ? Number(equityPts[0].v) : 0);
+    const equitySeries = equityPts.map((point) => {
+        const equity = Number(point.v);
+        const pnl = equity - equityBase;
+        const returnPct = equityBase > 0 ? (pnl / equityBase) * 100 : 0;
+        return {
+            ...point,
+            equity,
+            pnl,
+            returnPct,
+        };
+    });
+    const latestNetPnl = equitySeries.length ? Number(equitySeries[equitySeries.length - 1].pnl || 0) : 0;
+    const equityLineColor = latestNetPnl >= 0 ? '#4ade80' : '#f87171';
+    const equityFillColor = latestNetPnl >= 0 ? 'rgba(74,222,128,0.12)' : 'rgba(248,113,113,0.12)';
+    const plottedSignals = signals
+        .map((sig) => {
+            const signalMs = monitorChartToMs(sig?.t);
+            const signalTime = Number.isFinite(signalMs) ? klineLocalIso(signalMs) : '';
+            const rawPrice = Number(sig?.price);
+            const bar = findMonitorBarForSignal(ohlcv, signalMs, rawPrice, timeframeMs);
+            const plotTime = bar?.t || signalTime;
+            const plotPrice = getMonitorSignalPlotPrice(sig?.type, bar, rawPrice);
+            return {
+                ...sig,
+                t: signalTime,
+                raw_t: signalTime,
+                plot_t: plotTime,
+                raw_price: Number.isFinite(rawPrice) ? rawPrice : null,
+                plot_price: plotPrice,
+                aligned_bar_time: bar?.t || '',
+                aligned: !!bar && !!signalTime && plotTime !== signalTime,
+            };
+        })
+        .filter((sig) => sig.plot_t && Number.isFinite(Number(sig.plot_price)));
     const hasPrice = ohlcv.length > 0;
-    const hasEquity = equityPts.length > 0;
+    const hasEquity = equitySeries.length > 0;
     const isPairsMonitor =
         String(data?.portfolio_mode || '').trim() === 'pairs_spread_dual_leg' ||
         ohlcv.some((b) => Number.isFinite(Number(b?.pair_close)) || Number.isFinite(Number(b?.spread)) || Number.isFinite(Number(b?.z_score)));
@@ -6229,20 +6374,27 @@ function _renderMonitorChart(data) {
             Plotly.react(chartEl, [{
                 type: 'scatter',
                 mode: 'lines',
-                name: '权益曲线',
-                x: equityPts.map((e) => e.t),
-                y: equityPts.map((e) => e.v),
-                line: { color: '#60a5fa', width: 1.8 },
+                name: '净收益曲线',
+                x: equitySeries.map((e) => e.t),
+                y: equitySeries.map((e) => e.pnl),
+                customdata: equitySeries.map((e) => [e.equity, e.returnPct]),
+                line: { color: equityLineColor, width: 1.8 },
                 fill: 'tozeroy',
-                fillcolor: 'rgba(96,165,250,0.08)',
-                hovertemplate: '权益: %{y:.2f} U<br>时间: %{x}<extra></extra>',
+                fillcolor: equityFillColor,
+                hovertemplate: '净收益: %{y:.2f} U<br>收益率: %{customdata[1]:.2f}%<br>绝对权益: %{customdata[0]:.2f} U<br>时间: %{x}<extra></extra>',
             }], {
                 paper_bgcolor: 'transparent',
                 plot_bgcolor: 'transparent',
                 font: { color: '#dfe9f7', size: 11 },
                 margin: { t: 16, b: 40, l: 60, r: 40 },
                 xaxis: { ...plotlyTimeAxis(), domain: [0, 1], rangeslider: { visible: false } },
-                yaxis: { gridcolor: '#283242', title: { text: '权益(U)', font: { size: 10 } } },
+                yaxis: {
+                    gridcolor: '#283242',
+                    zeroline: true,
+                    zerolinecolor: '#4b5563',
+                    zerolinewidth: 1,
+                    title: { text: '净收益(U)', font: { size: 10 } },
+                },
                 showlegend: true,
                 legend: { orientation: 'h', y: 1.04, x: 0, font: { size: 10 } },
             }, {
@@ -6269,36 +6421,50 @@ function _renderMonitorChart(data) {
         xaxis: 'x', yaxis: 'y',
     };
 
-    const buySigs  = signals.filter(s => ['buy',  'close_short'].includes(s.type));
-    const sellSigs = signals.filter(s => ['sell', 'close_long' ].includes(s.type));
+    const buySigs  = plottedSignals.filter(s => ['buy',  'close_short'].includes(String(s.type || '').toLowerCase()));
+    const sellSigs = plottedSignals.filter(s => ['sell', 'close_long' ].includes(String(s.type || '').toLowerCase()));
+    const buildSignalHover = (sig) => {
+        const parts = [
+            `${sig.type} | 强度 ${(Number(sig.strength || 0)).toFixed(2)}`,
+            sig.raw_price != null ? `成交价 ${Number(sig.raw_price).toFixed(4)}` : null,
+            sig.stop_loss != null ? `SL ${Number(sig.stop_loss).toFixed(4)}` : null,
+            sig.take_profit != null ? `TP ${Number(sig.take_profit).toFixed(4)}` : null,
+        ];
+        if (sig.aligned) {
+            parts.push(`信号时间 ${formatMonitorSignalTime(sig.raw_t)}`);
+            parts.push(`对齐K线 ${formatMonitorSignalTime(sig.plot_t)}`);
+        }
+        return parts.filter(Boolean).join('<br>');
+    };
 
     const buyMarker = {
         type: 'scatter', mode: 'markers', name: '买入/平空',
-        x: buySigs.map(s => s.t),
-        y: buySigs.map(s => s.price),
+        x: buySigs.map(s => s.plot_t),
+        y: buySigs.map(s => s.plot_price),
         marker: { symbol: 'triangle-up', size: buySigs.map(s => 8 + (s.strength || 0.5) * 8), color: '#4ade80', line: { color: '#fff', width: 1 } },
-        text: buySigs.map(s => `${s.type} | 强度 ${(s.strength||0).toFixed(2)}` + (s.stop_loss ? ` | SL ${s.stop_loss.toFixed(4)}` : '') + (s.take_profit ? ` | TP ${s.take_profit.toFixed(4)}` : '')),
-        hovertemplate: '%{text}<br>价格: %{y}<br>时间: %{x}<extra></extra>',
+        text: buySigs.map(buildSignalHover),
+        hovertemplate: '%{text}<extra></extra>',
         xaxis: 'x', yaxis: 'y',
     };
 
     const sellMarker = {
         type: 'scatter', mode: 'markers', name: '卖出/平多',
-        x: sellSigs.map(s => s.t),
-        y: sellSigs.map(s => s.price),
+        x: sellSigs.map(s => s.plot_t),
+        y: sellSigs.map(s => s.plot_price),
         marker: { symbol: 'triangle-down', size: sellSigs.map(s => 8 + (s.strength || 0.5) * 8), color: '#f87171', line: { color: '#fff', width: 1 } },
-        text: sellSigs.map(s => `${s.type} | 强度 ${(s.strength||0).toFixed(2)}`),
-        hovertemplate: '%{text}<br>价格: %{y}<br>时间: %{x}<extra></extra>',
+        text: sellSigs.map(buildSignalHover),
+        hovertemplate: '%{text}<extra></extra>',
         xaxis: 'x', yaxis: 'y',
     };
 
     const equityTrace = {
-        type: 'scatter', mode: 'lines', name: '权益曲线',
-        x: equityPts.map(e => e.t),
-        y: equityPts.map(e => e.v),
-        line: { color: '#60a5fa', width: 1.5 },
-        fill: 'tozeroy', fillcolor: 'rgba(96,165,250,0.08)',
-        hovertemplate: '权益: %{y:.2f} U<br>时间: %{x}<extra></extra>',
+        type: 'scatter', mode: 'lines', name: '净收益曲线',
+        x: equitySeries.map(e => e.t),
+        y: equitySeries.map(e => e.pnl),
+        customdata: equitySeries.map((e) => [e.equity, e.returnPct]),
+        line: { color: equityLineColor, width: 1.6 },
+        fill: 'tozeroy', fillcolor: equityFillColor,
+        hovertemplate: '净收益: %{y:.2f} U<br>收益率: %{customdata[1]:.2f}%<br>绝对权益: %{customdata[0]:.2f} U<br>时间: %{x}<extra></extra>',
         xaxis: 'x', yaxis: 'y2',
     };
 
@@ -6442,7 +6608,15 @@ function _renderMonitorChart(data) {
             yaxis2: { domain: [0.28, 0.50], anchor: 'x', gridcolor: '#283242', title: { text: '价差', font: { size: 10 } } },
             yaxis3: { overlaying: 'y2', side: 'right', position: 0.98, showgrid: false, title: { text: 'Z-Score', font: { size: 10 } } },
             yaxis4: { overlaying: 'y', side: 'right', position: 0.92, showgrid: false, title: { text: '副腿价格', font: { size: 10 } } },
-            yaxis5: { domain: [0, 0.22], anchor: 'x', gridcolor: '#283242', title: { text: hasEquity ? '权益(U)' : '对冲比', font: { size: 10 } } },
+            yaxis5: {
+                domain: [0, 0.22],
+                anchor: 'x',
+                gridcolor: '#283242',
+                zeroline: hasEquity,
+                zerolinecolor: '#4b5563',
+                zerolinewidth: 1,
+                title: { text: hasEquity ? '净收益(U)' : '对冲比', font: { size: 10 } },
+            },
             showlegend: true,
             legend: { orientation: 'h', y: 1.06, x: 0, font: { size: 10 } },
         };
@@ -6477,7 +6651,15 @@ function _renderMonitorChart(data) {
         xaxis:  { ...plotlyTimeAxis(), domain: [0, 1], rangeslider: { visible: false } },
         yaxis:  { domain: hasEquity ? [0.32, 1] : [0, 1], gridcolor: '#283242', title: { text: '价格', font: { size: 10 } } },
         ...(hasEquity ? {
-            yaxis2: { domain: [0, 0.28], anchor: 'x', gridcolor: '#283242', title: { text: '权益(U)', font: { size: 10 } } },
+            yaxis2: {
+                domain: [0, 0.28],
+                anchor: 'x',
+                gridcolor: '#283242',
+                zeroline: true,
+                zerolinecolor: '#4b5563',
+                zerolinewidth: 1,
+                title: { text: '净收益(U)', font: { size: 10 } },
+            },
         } : {}),
         showlegend: true,
         legend: { orientation: 'h', y: 1.04, x: 0, font: { size: 10 } },

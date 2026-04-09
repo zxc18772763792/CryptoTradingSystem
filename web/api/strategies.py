@@ -1550,7 +1550,11 @@ async def stop_all_strategies():
         if not name:
             continue
         success = await strategy_manager.stop_strategy(name)
-        close_summary = await _close_strategy_positions(name) if success else {"requested": 0, "closed": 0, "failed": 0, "results": []}
+        close_summary = (
+            strategy_manager.pop_last_stop_close_summary(name)
+            if success
+            else {"requested": 0, "closed": 0, "failed": 0, "results": []}
+        )
         await _persist_if_exists(item.get("name", ""), state_override="stopped")
         stop_results.append(
             {
@@ -1763,7 +1767,7 @@ async def start_strategy(name: str):
 async def stop_strategy(name: str):
     success = await strategy_manager.stop_strategy(name)
     if success:
-        close_summary = await _close_strategy_positions(name)
+        close_summary = strategy_manager.pop_last_stop_close_summary(name)
         await _persist_if_exists(name, state_override="stopped")
         await audit_logger.log(module="strategy", action="stop", status="success", message=name)
         return {"success": True, "name": name, "status": "stopped", "close_summary": close_summary}

@@ -1746,10 +1746,10 @@
       });
       const ct = String(resp.headers.get('content-type') || '').toLowerCase();
       const data = ct.includes('application/json') ? await resp.json() : { detail: await resp.text() };
-      if (!resp.ok) throw new Error(data.detail || data.error || `璇锋眰澶辫触(${resp.status})`);
+      if (!resp.ok) throw new Error(data.detail || data.error || `请求失败(${resp.status})`);
       return data;
     } catch (err) {
-      if (err?.name === 'AbortError') throw new Error(`鎺ュ彛瓒呮椂(${timeoutMs}ms): ${p}`);
+      if (err?.name === 'AbortError') throw new Error(`接口超时(${timeoutMs}ms): ${p}`);
       throw err;
     } finally {
       clearTimeout(timer);
@@ -1769,7 +1769,7 @@
       });
       const ct = String(resp.headers.get('content-type') || '').toLowerCase();
       const data = ct.includes('application/json') ? await resp.json() : { detail: await resp.text() };
-      if (!resp.ok) throw new Error(data.detail || data.error || `璇锋眰澶辫触(${resp.status})`);
+      if (!resp.ok) throw new Error(data.detail || data.error || `请求失败(${resp.status})`);
       return data;
     } finally {
       clearTimeout(timer);
@@ -1777,7 +1777,7 @@
   }
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     淇″彿杩蜂綘闈㈡澘
+     信号杩蜂綘闈㈡澘
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function renderSignalMini() {
     const box = document.getElementById('ai-signal-mini');
@@ -2045,8 +2045,8 @@
     const hint = proposal
       ? (candidateCount
         ? '鐐瑰嚮鍊欓€夌瓥鐣ュ崱鐗囷紝鍦ㄥ彸渚ц繘鍏ョ 4 姝ユ敞鍐?閮ㄧ讲'
-        : '鍏堣繍琛岃鐮旂┒浠诲姟锛屼骇鍑哄€欓€夊悗鍐嶆煡鐪嬭鎯?)
-      : '鏌ョ湅璇︾粏鍒嗘瀽涓庣 4 姝ユ敞鍐?閮ㄧ讲';
+        : '鍏堣繍琛岃研究浠诲姟锛屼骇鍑哄€欓€夊悗鍐嶆煡鐪嬭鎯?)
+      : '鏌ョ湅璇︾粏分析中庣 4 姝ユ敞鍐?閮ㄧ讲';
     return `<div class="ai-detail-placeholder">
       <div style="font-size:36px;opacity:.3;">馃搳</div>
       <div style="margin-top:10px;color:#6b7fa0;font-size:13px;">${esc(summary)}<br>${esc(hint)}</div>
@@ -2601,7 +2601,7 @@
     const panel = document.getElementById('ai-detail-panel');
     const keepContent = !!options.keepContent;
     if (panel && !(keepContent && panel.dataset.candidateId === String(candidateId))) {
-      panel.innerHTML = '<div style="padding:20px;color:#7e92b2;font-size:13px;">鍔犺浇涓?..</div>';
+      panel.innerHTML = '<div style="padding:20px;color:#7e92b2;font-size:13px;">加载中...</div>';
     }
     const resp  = await aiApi(`/candidates/${encodeURIComponent(candidateId)}`, { timeoutMs: 20000 });
     if (requestSeq !== state.candidateDetailReqSeq) return;
@@ -2957,7 +2957,7 @@
               ${esc(activateLabel)}
             </button>
             <div style="font-size:10px;color:#6b7fa0;margin-top:3px;">
-              灏嗗厛鍒囨崲绯荤粺鍒?live 妯″紡骞惰姹傝緭鍏ョ‘璁ゆ枃鏈紝纭鍚庢墠浼氱湡姝ｅ惎鍔ㄨ鍊欓€夌殑瀹炵洏杩愯銆?
+              灏嗗厛鍒囨崲绯荤粺鍒?live 模式骞惰姹傝緭鍏ョ‘璁ゆ枃鏈紝纭鍚庢墠浼氱湡姝ｅ惎鍔ㄨ鍊欓€夌殑实盘运行銆?
             </div>
            </div>`;
         */ return liveActivateHtml; })()
@@ -3013,9 +3013,9 @@
 
     /* panel.querySelector('#btn-activate-live')?.addEventListener('click', async () => {
       const btn = panel.querySelector('#btn-activate-live');
-      const defaultLabel = String(btn?.dataset?.defaultLabel || btn?.textContent || '鍚姩瀹炵洏杩愯 鈫?);
+      const defaultLabel = String(btn?.dataset?.defaultLabel || btn?.textContent || '鍚姩实盘运行 鈫?);
       if (btn) {
-        btn.textContent = '姝ｅ湪鍚姩瀹炵洏...';
+        btn.textContent = '姝ｅ湪鍚姩实盘...';
         btn.disabled = true;
       }
       try {
@@ -3028,14 +3028,14 @@
           return;
         }
         const strategyName = String(result?.registered_strategy_name || result?.runtime_status || 'live_running');
-        notify(`鍊欓€夊凡鍚姩瀹炵洏杩愯: ${strategyName}`);
+        notify(`鍊欓€夊凡鍚姩实盘运行: ${strategyName}`);
         await refreshWorkbench('', candidateId);
       } catch (err) {
         if (btn) {
           btn.textContent = defaultLabel;
           btn.disabled = false;
         }
-        notify(`鍚姩瀹炵洏澶辫触: ${err.message}`, true);
+        notify(`鍚姩实盘失败: ${err.message}`, true);
       }
     }); */
 
@@ -3076,7 +3076,7 @@
       openRegisterModal(candidateId).catch(err => notify(`\u6253\u5f00\u6ce8\u518c\u5931\u8d25: ${err.message}`, true));
     });
 
-    // 浜哄伐纭鎸夐挳
+    // 人工纭鎸夐挳
     const approvalSelect = panel.querySelector('#approval-target-select');
     if (approvalSelect) {
       approvalSelect.querySelector('option[value="shadow"]')?.remove();
@@ -3465,7 +3465,7 @@
   }
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     浜哄伐纭闃熷垪
+     人工纭闃熷垪
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   async function cancelModeSwitchToken(token) {
     const safeToken = String(token || '').trim();
@@ -3487,7 +3487,7 @@
     if (!safeCandidateId) throw new Error('缂哄皯 candidate_id');
     const candidate = state.candidates.find(item => String(item?.candidate_id || '') === safeCandidateId) || null;
     const notePrompt = candidate
-      ? `纭灏嗗€欓€?${safeCandidateId.slice(0, 8)} 鍚姩涓哄疄鐩樿繍琛岋紵\n绛栫暐锛?{candidate.strategy || '--'} / ${candidate.symbol || '--'} / ${candidate.timeframe || '--'}\n\n璇疯緭鍏ュ娉紙鍙暀绌猴紝鐐瑰彇娑堝垯缁堟鏈鎿嶄綔锛夛細`
+      ? `纭灏嗗€欓€?${safeCandidateId.slice(0, 8)} 鍚姩涓哄疄鐩樿繍琛岋紵\n策略锛?{candidate.strategy || '--'} / ${candidate.symbol || '--'} / ${candidate.timeframe || '--'}\n\n璇疯緭鍏ュ娉紙鍙暀绌猴紝鐐瑰彇娑堝垯缁堟鏈鎿嶄綔锛夛細`
       : `纭灏嗗€欓€?${safeCandidateId.slice(0, 8)} 鍚姩涓哄疄鐩樿繍琛岋紵\n\n璇疯緭鍏ュ娉紙鍙暀绌猴紝鐐瑰彇娑堝垯缁堟鏈鎿嶄綔锛夛細`;
     const notes = window.prompt(notePrompt, '');
     if (notes === null) return { cancelled: true };
@@ -3511,7 +3511,7 @@
       ).trim();
       if (!token) throw new Error('鍒囨崲鍒板疄鐩樻椂鏈繑鍥炵‘璁や护鐗?);
       const confirmInput = window.prompt(
-        `绯荤粺褰撳墠浠嶅湪绾哥洏妯″紡锛屽繀椤诲厛鍒囨崲鍒板疄鐩樻ā寮忋€俓n璇疯緭鍏ョ‘璁ゆ枃鏈互缁х画锛歕n${confirmHint}`,
+        `绯荤粺褰撳墠浠嶅湪纸盘模式锛屽繀椤诲厛鍒囨崲鍒板疄鐩樻ā寮忋€俓n璇疯緭鍏ョ‘璁ゆ枃鏈互缁х画锛歕n${confirmHint}`,
         confirmHint,
       );
       if (confirmInput === null) {
@@ -3520,7 +3520,7 @@
       }
       if (String(confirmInput).trim() !== confirmHint) {
         await cancelModeSwitchToken(token);
-        throw new Error('纭鏂囨湰涓嶅尮閰嶏紝宸插彇娑堝垏鎹㈠埌瀹炵洏');
+        throw new Error('纭鏂囨湰涓嶅尮閰嶏紝宸插彇娑堝垏鎹㈠埌实盘');
       }
       try {
         await rootApi('/trading/mode/confirm', {
@@ -3686,7 +3686,7 @@
   }
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     LLM 杈呭姪鐮旂┒鐟欏嫬鍨?
+     LLM 辅助研究鐟欏嫬鍨?
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   async function generateAIContext() {
     setAIContextButtonState('working');
@@ -3994,7 +3994,7 @@
     const primarySym = symbols[0] || getCurrentResearchSymbol() || 'BTC/USDT';
     const plannerConstraints = buildPlannerConstraints();
 
-    // 鈹€鈹€ 鑷姩閲囬泦瀹炴椂甯傚満涓婁笅鏂?鈹€鈹€
+    // ── 鑷姩閲囬泦瀹炴椂甯傚満涓婁笅鏂?──
     const marketCtxEl = document.getElementById('ai-market-context-hint');
     if (marketCtxEl) marketCtxEl.textContent = '正在采集市场上下文...';
     const liveCtx = await _collectLiveMarketContext(primarySym).catch(() => ({}));
@@ -4013,7 +4013,7 @@
       const optTxt  = optSkew != null
         ? `${Number(optSkew).toFixed(3)}(${optSig || '?'})`
         : '--';
-      marketCtxEl.innerHTML = `<span style="color:${dir==='LONG'?'#20bf78':dir==='SHORT'?'#e05260':'#9fb1c9'}">鏂瑰悜 ${dir} ${conf}%</span> 路 Funding ${frTxt} 路 OFI ${ofiTxt} 路 OI ${oiTxt} 路 鏈熸潈鍋忔枩 ${optTxt} 路 鏂伴椈浜嬩欢 ${ne}`;
+      marketCtxEl.innerHTML = `<span style="color:${dir==='LONG'?'#20bf78':dir==='SHORT'?'#e05260':'#9fb1c9'}">方向 ${dir} ${conf}%</span> · Funding ${frTxt} · OFI ${ofiTxt} · OI ${oiTxt} · 期权偏斜 ${optTxt} · 新闻事件 ${ne}`;
     }
 
     const payload = {
@@ -4508,15 +4508,15 @@
      浜嬩欢缁戝畾
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function bindEvents() {
-    /* 鐢熸垚鐮旂┒ */
+    /* 生成研究 */
     document.getElementById('ai-generate-btn')?.addEventListener('click', () =>
       withActionLock('generate', () => generateProposal()).catch(err => notify(`生成失败: ${err.message}`, true)));
 
-    /* AI鐢熸垚鐮旂┒鎬濊矾 */
+    /* AI生成研究鎬濊矾 */
     document.getElementById('ai-context-btn')?.addEventListener('click', () =>
       generateAIContext().catch(err => notify(`生成研究思路失败: ${err.message}`, true)));
 
-    /* one-click 鑷姩鐮旂┒ */
+    /* one-click 鑷姩研究 */
     document.getElementById('ai-oneclick-btn')?.addEventListener('click', () =>
       withActionLock('oneclick', () => runOneClickResearchDeploy()).catch(err => notify(`one-click 执行失败: ${err.message}`, true)));
 
@@ -4528,13 +4528,13 @@
       const action = String(btn.dataset.action || '').trim();
       if (action === 'view-candidate' && cid) {
         e.stopPropagation();
-        viewCandidate(cid).catch(err => notify(`鍔犺浇璇︽儏澶辫触: ${err.message}`, true));
+        viewCandidate(cid).catch(err => notify(`加载详情失败: ${err.message}`, true));
       }
     });
 
     /* 鍒锋柊 */
     document.getElementById('ai-refresh-btn')?.addEventListener('click', () =>
-      refreshWorkbench().catch(err => notify(`鍒锋柊澶辫触: ${err.message}`, true)));
+      refreshWorkbench().catch(err => notify(`刷新失败: ${err.message}`, true)));
     document.getElementById('ai-data-refresh-btn')?.addEventListener('click', () =>
       loadDataReadiness().catch(err => notify(`数据诊断失败: ${err.message}`, true)));
     document.getElementById('ai-news-pull-btn')?.addEventListener('click', () =>
@@ -4578,12 +4578,12 @@
       emitWorkbenchState('agent-status');
     });
 
-    /* 杩愯鐮旂┒ */
+    /* 运行研究 */
     document.getElementById('run-selected-btn')?.addEventListener('click', () =>
-      withActionLock('run', () => runProposal(state.selectedProposalId)).catch(err => notify(`杩愯澶辫触: ${err.message}`, true)));
+      withActionLock('run', () => runProposal(state.selectedProposalId)).catch(err => notify(`运行失败: ${err.message}`, true)));
     document.getElementById('ai-compare-btn')?.addEventListener('click', () => openCompareModal());
 
-    /* 淇″彿鍒锋柊 */
+    /* 信号鍒锋柊 */
     document.getElementById('signal-refresh-btn')?.addEventListener('click', () =>
       loadSignal().catch(err => notify(`\u4fe1\u53f7\u5931\u8d25: ${err.message}`, true)));
     document.getElementById('signal-symbol')?.addEventListener('change', (e) =>
@@ -4615,7 +4615,7 @@
       if (modal && e.target === modal) modal.style.display = 'none';
     });
 
-    /* 鐮旂┒闃熷垪鐐瑰嚮浠ｇ悊 */
+    /* 研究闃熷垪鐐瑰嚮浠ｇ悊 */
     document.getElementById('ai-proposal-list')?.addEventListener('click', e => {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
@@ -4632,7 +4632,7 @@
       if (action === 'cancel-proposal' && pid) {
         e.stopPropagation();
         selectProposal(pid);
-        cancelProposal(pid).catch(err => notify(`鍙栨秷澶辫触: ${err.message}`, true));
+        cancelProposal(pid).catch(err => notify(`取消失败: ${err.message}`, true));
         return;
       }
       if (action === 'delete-proposal' && pid) {
@@ -4669,12 +4669,12 @@
         const card = e.target.closest('.research-candidate-card');
         const id   = String(card?.dataset?.candidateId || cid || '').trim();
         if (!id) return;
-        viewCandidate(id).catch(err => notify(`鍔犺浇璇︽儏澶辫触: ${err.message}`, true));
+        viewCandidate(id).catch(err => notify(`加载详情失败: ${err.message}`, true));
         return;
       }
       if (action === 'view-candidate' && cid) {
         e.stopPropagation();
-        viewCandidate(cid).catch(err => notify(`鍔犺浇璇︽儏澶辫触: ${err.message}`, true));
+        viewCandidate(cid).catch(err => notify(`加载详情失败: ${err.message}`, true));
         return;
       }
       if (action === 'toggle-compare' && cid) {
@@ -4684,7 +4684,7 @@
       }
       if (action === 'open-register' && cid) {
         e.stopPropagation();
-        openRegisterModal(cid).catch(err => notify(`鎵撳紑娉ㄥ唽澶辫触: ${err.message}`, true));
+        openRegisterModal(cid).catch(err => notify(`打开注册失败: ${err.message}`, true));
       }
     });
   }
@@ -4767,15 +4767,8 @@
   function syncHubLayoutHeight() {
     const hub = document.querySelector('#ai-research .ai-hub-layout');
     if (!hub) return;
-    if (window.innerWidth <= 1280) {
-      hub.style.height = 'auto';
-      return;
-    }
-    const rect = hub.getBoundingClientRect();
-    const viewportH = window.innerHeight || document.documentElement.clientHeight || 0;
-    const available = Math.max(620, viewportH - rect.top + 130);
-    const target = Math.min(1180, available);
-    hub.style.height = `${Math.round(target)}px`;
+    hub.style.height = 'auto';
+    hub.style.minHeight = '0';
   }
 
   function bindLayoutSync() {
@@ -4807,7 +4800,7 @@
   }
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     鍒濆鍖?
+     初始鍖?
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function init() {
     bindInitRetry();
@@ -4845,7 +4838,7 @@
   });
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     Phase A 鈥?瀹炴椂淇″彿闈㈡澘锛?0s 杞锛?
+     Phase A 鈥?瀹炴椂信号闈㈡澘锛?0s 杞锛?
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
@@ -5152,11 +5145,11 @@
     }
   }
 
-  /* 鏆撮湶缁欏閮ㄨ皟鐢紙鍏煎鏃т唬鐮侊級 */
+  /* 暴露缁欏閮ㄨ皟鐢紙兼容鏃т唬鐮侊級 */
   window.AI = {
-    viewCandidate:   id => viewCandidate(id).catch(err => notify(`鍔犺浇璇︽儏澶辫触: ${err.message}`, true)),
-    openRegister:    id => openRegisterModal(id).catch(err => notify(`鎵撳紑娉ㄥ唽澶辫触: ${err.message}`, true)),
-    runProposal:     id => withActionLock('run', () => runProposal(id)).catch(err => notify(`杩愯澶辫触: ${err.message}`, true)),
+    viewCandidate:   id => viewCandidate(id).catch(err => notify(`加载详情失败: ${err.message}`, true)),
+    openRegister:    id => openRegisterModal(id).catch(err => notify(`打开注册失败: ${err.message}`, true)),
+    runProposal:     id => withActionLock('run', () => runProposal(id)).catch(err => notify(`运行失败: ${err.message}`, true)),
     toggleCompare:   id => toggleCandidateCompare(id),
     showComparePanel: () => openCompareModal(),
     refreshWorkbench,

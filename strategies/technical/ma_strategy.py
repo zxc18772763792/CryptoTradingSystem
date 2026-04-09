@@ -1,8 +1,7 @@
 """
 移动平均策略
 """
-from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import pandas as pd
 import numpy as np
 from loguru import logger
@@ -12,6 +11,15 @@ from core.strategies.strategy_base import (
     Signal,
     SignalType,
 )
+
+
+def _latest_bar_context(data: pd.DataFrame) -> Tuple[object, str]:
+    """Use the latest completed bar as the signal context for live/backtest parity."""
+    timestamp = pd.Timestamp(data.index[-1]).to_pydatetime()
+    symbol = "UNKNOWN"
+    if "symbol" in data.columns and not data["symbol"].empty:
+        symbol = str(data["symbol"].iloc[-1] or "UNKNOWN")
+    return timestamp, symbol
 
 
 class MAStrategy(StrategyBase):
@@ -53,8 +61,7 @@ class MAStrategy(StrategyBase):
         prev_diff = diff.iloc[-2]
 
         current_price = data["close"].iloc[-1]
-        timestamp = datetime.now()
-        symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
+        timestamp, symbol = _latest_bar_context(data)
 
         # 金叉：快线上穿慢线
         if prev_diff < self.params["signal_threshold"] and current_diff >= self.params["signal_threshold"]:
@@ -145,8 +152,7 @@ class EMAStrategy(StrategyBase):
         prev_diff = diff.iloc[-2]
 
         current_price = data["close"].iloc[-1]
-        timestamp = datetime.now()
-        symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
+        timestamp, symbol = _latest_bar_context(data)
 
         # 金叉
         if prev_diff < self.params["signal_threshold"] and current_diff >= self.params["signal_threshold"]:

@@ -9615,3 +9615,650 @@ input[type="radio"] {
         justify-content: flex-start;
     }
 }
+
+/* ===== AI Research Layout Refresh ===== */
+#ai-research .ai-workspace-section-research {
+    gap: 18px;
+    padding: 18px;
+    border-radius: 24px;
+    border: 1px solid rgba(89, 169, 255, 0.18);
+    background:
+        radial-gradient(circle at top left, rgba(89, 169, 255, 0.12), transparent 30%),
+        linear-gradient(180deg, rgba(7, 15, 26, 0.98), rgba(5, 12, 20, 0.99));
+}
+
+#ai-research .ai-workspace-section-head {
+    align-items: flex-start;
+    gap: 16px;
+}
+
+#ai-research .ai-workspace-section-note {
+    max-width: 420px;
+    padding: 10px 12px;
+    border-radius: 14px;
+    border: 1px solid rgba(114, 184, 255, 0.16);
+    background: rgba(10, 20, 33, 0.72);
+}
+
+#ai-research .ai-research-overview-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.42fr) minmax(320px, 0.88fr);
+    gap: 18px;
+    align-items: start;
+}
+
+#ai-research .ai-research-hero-card {
+    min-height: 0;
+    display: grid;
+    gap: 12px;
+    align-content: start;
+    padding: 20px 20px 18px !important;
+    border-radius: 24px;
+    border: 1px solid rgba(114, 184, 255, 0.18);
+    background:
+        radial-gradient(circle at top left, rgba(114, 184, 255, 0.16), transparent 34%),
+        linear-gradient(180deg, rgba(18, 31, 49, 0.98), rgba(9, 17, 29, 0.99));
+    box-shadow: 0 20px 40px rgba(4, 10, 18, 0.22);
+}
+
+#ai-research .ai-research-hero-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 0;
+}
+
+#ai-research .ai-research-hero-badge,
+#ai-research .ai-sidebar-badge,
+#ai-research .ai-hub-kicker {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 5px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(114, 184, 255, 0.18);
+    background: rgba(17, 35, 55, 0.8);
+    color: #cfe3ff;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+#ai-research .ai-research-stage-strip {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 9px;
+    margin-bottom: 0;
+}
+
+#ai-research .ai-research-stage-chip {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+    min-height: 0;
+    padding: 10px 12px;
+    border-radius: 16px;
+    border: 1px solid rgba(114, 184, 255, 0.12);
+    background: rgba(10, 21, 35, 0.72);
+}
+
+#ai-research .ai-research-stage-chip span {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #7fa7d9;
+}
+
+#ai-research .ai-research-stage-chip strong {
+    color: #ecf5ff;
+    font-size: 14px;
+    line-height: 1.35;
+}
+
+#ai-research .ai-research-stage-chip small {
+    color: #97b0cf;
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+#ai-research .ai-top-intro-card-research .ai-top-intro-stack {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+#ai-research .ai-top-intro-mini-grid-wide {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+}
+
+#ai-research .ai-top-intro-box,
+#ai-research .ai-top-intro-mini {
+    min-width: 0;
+    min-height: 0;
+    padding: 11px 13px;
+    border-radius: 16px;
+    border: 1px solid rgba(114, 184, 255, 0.12);
+    background: rgba(10, 21, 35, 0.68);
+}
+
+#ai-research .ai-top-intro-box-title {
+    color: #e6f0fd;
+}
+
+#ai-research .ai-top-intro-box-desc,
+#ai-research .ai-top-intro-mini-desc {
+    color: #97b0cf;
+    line-height: 1.65;
+}
+
+#ai-research .ai-research-command-stack {
+    display: grid;
+    gap: 12px;
+    align-content: start;
+}
+
+#ai-research .ai-research-pulse-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    align-items: stretch;
+}
+
+#ai-research .ai-focus-card-primary,
+#ai-research .ai-signal-card,
+#ai-research .ai-research-live-signals-card {
+    border: 1px solid rgba(114, 184, 255, 0.14);
+    border-radius: 18px;
+    box-shadow: 0 16px 30px rgba(4, 10, 18, 0.18);
+}
+
+#ai-research .ai-focus-card-primary {
+    background:
+        radial-gradient(circle at top right, rgba(255, 191, 94, 0.14), transparent 30%),
+        linear-gradient(180deg, rgba(31, 27, 18, 0.98), rgba(12, 18, 29, 0.99));
+}
+
+#ai-research .ai-signal-card {
+    background:
+        radial-gradient(circle at top right, rgba(45, 212, 191, 0.14), transparent 32%),
+        linear-gradient(180deg, rgba(14, 27, 43, 0.98), rgba(9, 17, 29, 0.99));
+}
+
+#ai-research .ai-research-live-signals-card {
+    background:
+        radial-gradient(circle at top right, rgba(123, 195, 255, 0.14), transparent 32%),
+        linear-gradient(180deg, rgba(13, 24, 40, 0.98), rgba(8, 16, 28, 0.99));
+}
+
+#ai-research .ai-signal-card #signal-panel-body,
+#ai-research #ai-research-live-signals-panel {
+    display: grid;
+    gap: 8px;
+}
+
+#ai-research #ai-research-live-signals-panel {
+    max-height: 260px;
+    overflow: auto;
+    padding-right: 2px;
+}
+
+#ai-research .ai-review-panel {
+    margin-top: 0;
+    padding: 18px;
+    border-radius: 22px;
+    border: 1px solid rgba(114, 184, 255, 0.16);
+    background:
+        radial-gradient(circle at top right, rgba(114, 184, 255, 0.08), transparent 28%),
+        linear-gradient(180deg, rgba(15, 27, 43, 0.98), rgba(10, 18, 31, 0.99));
+    box-shadow: 0 18px 36px rgba(3, 10, 18, 0.18);
+}
+
+#ai-research .ai-review-scope {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+#ai-research .ai-review-scope-item {
+    min-height: 100%;
+}
+
+#ai-research .ai-flow-console {
+    padding: 18px 20px !important;
+    border-radius: 24px;
+    border: 1px solid rgba(114, 184, 255, 0.16);
+    background:
+        radial-gradient(circle at top right, rgba(114, 184, 255, 0.1), transparent 30%),
+        linear-gradient(180deg, rgba(14, 24, 40, 0.98), rgba(8, 16, 28, 0.99));
+    box-shadow: 0 20px 40px rgba(4, 10, 18, 0.2);
+}
+
+#ai-research .ai-flow-console-header {
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+#ai-research .ai-flow-stage-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 12px;
+}
+
+#ai-research .ai-flow-stage {
+    min-height: 176px;
+    border-radius: 18px;
+}
+
+#ai-research .ai-hub-layout {
+    display: grid;
+    grid-template-columns: minmax(300px, 340px) minmax(0, 1.22fr) minmax(320px, 0.92fr);
+    gap: 20px;
+    height: auto;
+    min-height: 0;
+    align-items: start;
+}
+
+#ai-research .ai-hub-sidebar,
+#ai-research .ai-hub-detail {
+    position: sticky;
+    top: 14px;
+    align-self: start;
+    max-height: calc(100dvh - 44px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 2px;
+}
+
+@supports not (height: 100dvh) {
+    #ai-research .ai-hub-sidebar,
+    #ai-research .ai-hub-detail {
+        max-height: calc(100vh - 44px);
+    }
+}
+
+#ai-research .ai-hub-main {
+    display: grid;
+    gap: 16px;
+    min-width: 0;
+}
+
+#ai-research .ai-sidebar-card,
+#ai-research .ai-hub-main-header,
+#ai-research .ai-hub-candidates-panel,
+#ai-research .ai-hub-detail {
+    border-radius: 22px;
+    border: 1px solid rgba(114, 184, 255, 0.14);
+    background:
+        linear-gradient(180deg, rgba(14, 24, 39, 0.98), rgba(8, 16, 27, 0.99));
+    box-shadow: 0 18px 36px rgba(4, 10, 18, 0.18);
+}
+
+#ai-research .ai-sidebar-card {
+    padding: 16px 18px !important;
+}
+
+#ai-research .ai-sidebar-card-planner {
+    background:
+        radial-gradient(circle at top right, rgba(100, 216, 180, 0.1), transparent 30%),
+        linear-gradient(180deg, rgba(15, 27, 40, 0.98), rgba(8, 16, 27, 0.99));
+}
+
+#ai-research .ai-sidebar-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+#ai-research .ai-sidebar-kicker {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #80abde;
+}
+
+#ai-research .ai-sidebar-badge-muted {
+    color: #a9bfdc;
+    border-color: rgba(126, 146, 178, 0.16);
+    background: rgba(18, 30, 46, 0.82);
+}
+
+#ai-research .ai-sidebar-badge-warn {
+    color: #ffd17f;
+    border-color: rgba(245, 159, 58, 0.22);
+    background: rgba(44, 28, 12, 0.84);
+}
+
+#ai-research .ai-sidebar-caption {
+    margin-bottom: 10px;
+    color: #91a9c7;
+    font-size: 12px;
+    line-height: 1.65;
+}
+
+#ai-research .ai-hub-main-header,
+#ai-research .ai-hub-candidates-panel,
+#ai-research .ai-hub-detail {
+    padding: 18px 20px;
+}
+
+#ai-research .ai-hub-main-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+}
+
+#ai-research .ai-hub-title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+#ai-research .ai-hub-kicker-detail {
+    border-color: rgba(32, 191, 120, 0.18);
+    background: rgba(11, 31, 25, 0.84);
+    color: #c7f2de;
+}
+
+#ai-research .ai-hub-heading {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+}
+
+#ai-research .ai-hub-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px 12px;
+}
+
+#ai-research .ai-hub-toolbar-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 16px;
+    border: 1px solid rgba(114, 184, 255, 0.1);
+    background: rgba(8, 16, 28, 0.62);
+}
+
+#ai-research .ai-hub-toolbar-group-run {
+    border-color: rgba(100, 216, 180, 0.14);
+    background: rgba(9, 19, 28, 0.82);
+    box-shadow: inset 0 0 0 1px rgba(100, 216, 180, 0.05);
+}
+
+#ai-research .ai-hub-candidates-panel {
+    display: grid;
+    gap: 14px;
+    background:
+        radial-gradient(circle at top right, rgba(114, 184, 255, 0.12), transparent 30%),
+        linear-gradient(180deg, rgba(14, 25, 41, 0.98), rgba(8, 16, 27, 0.99));
+}
+
+#ai-research .ai-hub-candidates-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(114, 184, 255, 0.1);
+}
+
+#ai-research .ai-hub-candidates-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: #e7f0fd;
+}
+
+#ai-research .ai-hub-candidates-desc {
+    margin-top: 4px;
+    color: #90a8c6;
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+#ai-research .ai-candidate-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+    align-content: start;
+    overflow: visible;
+    padding-right: 0;
+}
+
+#ai-research .ai-hub-detail {
+    display: grid;
+    gap: 12px;
+    background:
+        radial-gradient(circle at top right, rgba(32, 191, 120, 0.1), transparent 30%),
+        linear-gradient(180deg, rgba(14, 24, 39, 0.98), rgba(8, 16, 27, 0.99));
+}
+
+#ai-research .ai-hub-detail-header {
+    padding-bottom: 4px;
+    border-bottom: 1px solid rgba(100, 216, 180, 0.12);
+}
+
+#ai-research .ai-detail-panel {
+    min-height: 380px;
+    max-height: none;
+    overflow: visible;
+    padding: 18px;
+    border-radius: 18px;
+    border: 1px solid rgba(114, 184, 255, 0.12);
+    background:
+        radial-gradient(circle at top right, rgba(32, 191, 120, 0.08), transparent 30%),
+        linear-gradient(180deg, rgba(9, 18, 30, 0.94), rgba(6, 13, 23, 0.98));
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+}
+
+#ai-research .research-candidate-card {
+    position: relative;
+    overflow: hidden;
+    gap: 8px;
+    border-radius: 18px;
+    box-shadow: 0 18px 36px rgba(4, 10, 18, 0.18);
+}
+
+#ai-research .research-candidate-card::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.05), transparent 42%);
+    opacity: 0.45;
+    pointer-events: none;
+}
+
+#ai-research .research-candidate-card.selected {
+    transform: translateY(-2px);
+}
+
+#ai-research .cand-card-header {
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 0;
+}
+
+#ai-research .cand-card-title {
+    color: #edf4ff;
+    font-size: 15px;
+    line-height: 1.45;
+}
+
+#ai-research .cand-score-badge {
+    min-width: 40px;
+    text-align: center;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+#ai-research .cand-score-badge.green {
+    background: rgba(32, 191, 120, 0.18);
+    color: #82f0bd;
+}
+
+#ai-research .cand-score-badge.yellow {
+    background: rgba(245, 158, 11, 0.18);
+    color: #ffd178;
+}
+
+#ai-research .cand-score-badge.red {
+    background: rgba(224, 82, 96, 0.18);
+    color: #ff99a5;
+}
+
+#ai-research .cand-card-actions {
+    margin-top: auto;
+    padding-top: 12px;
+}
+
+#ai-research .cand-card-actions .btn {
+    min-width: 86px;
+}
+
+#ai-research .ai-empty-hint {
+    display: grid;
+    place-items: center;
+    gap: 10px;
+    min-height: 240px;
+    padding: 30px 24px;
+    border: 1px dashed rgba(114, 184, 255, 0.2);
+    border-radius: 20px;
+    background:
+        radial-gradient(circle at top right, rgba(114, 184, 255, 0.08), transparent 32%),
+        linear-gradient(180deg, rgba(8, 16, 28, 0.74), rgba(7, 13, 23, 0.9));
+    color: #95acc9;
+}
+
+#ai-research .ai-empty-hint strong {
+    color: #ebf4ff;
+}
+
+#ai-research .ai-detail-placeholder {
+    position: relative;
+    gap: 12px;
+    min-height: 280px;
+    padding: 36px 20px;
+    border-radius: 20px;
+    border: 1px dashed rgba(100, 216, 180, 0.18);
+    background:
+        radial-gradient(circle at top right, rgba(100, 216, 180, 0.08), transparent 30%),
+        linear-gradient(180deg, rgba(8, 16, 27, 0.9), rgba(7, 13, 23, 0.96));
+}
+
+#ai-research .ai-detail-placeholder > div:first-child {
+    width: 68px;
+    height: 68px;
+    display: grid;
+    place-items: center;
+    margin: 0 !important;
+    font-size: 30px !important;
+    opacity: 1 !important;
+    border-radius: 20px;
+    background: linear-gradient(180deg, rgba(24, 52, 46, 0.9), rgba(11, 24, 22, 0.98));
+    box-shadow: inset 0 0 0 1px rgba(100, 216, 180, 0.14);
+}
+
+#ai-research .ai-detail-placeholder > div:last-child {
+    margin-top: 0 !important;
+    max-width: 34ch;
+    color: #9fb6d2 !important;
+    font-size: 13px !important;
+    line-height: 1.8;
+}
+
+@media (max-width: 1500px) {
+    #ai-research .ai-research-stage-strip,
+    #ai-research .ai-flow-stage-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    #ai-research .ai-hub-layout {
+        grid-template-columns: minmax(290px, 320px) minmax(0, 1fr);
+    }
+
+    #ai-research .ai-hub-detail {
+        position: static;
+        max-height: none;
+        overflow: visible;
+        padding-right: 0;
+        grid-column: 2;
+    }
+}
+
+@media (max-width: 1180px) {
+    #ai-research .ai-research-overview-grid,
+    #ai-research .ai-hub-layout,
+    #ai-research .ai-top-intro-card-research .ai-top-intro-stack {
+        grid-template-columns: 1fr;
+    }
+
+    #ai-research .ai-top-intro-mini-grid-wide,
+    #ai-research .ai-review-scope {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    #ai-research .ai-hub-sidebar,
+    #ai-research .ai-hub-detail {
+        position: static;
+        max-height: none;
+        overflow: visible;
+        padding-right: 0;
+    }
+
+    #ai-research .ai-hub-detail {
+        grid-column: auto;
+    }
+}
+
+@media (max-width: 780px) {
+    #ai-research .ai-workspace-section-research,
+    #ai-research .ai-flow-console,
+    #ai-research .ai-sidebar-card,
+    #ai-research .ai-hub-main-header,
+    #ai-research .ai-hub-candidates-panel,
+    #ai-research .ai-hub-detail {
+        padding: 16px;
+    }
+
+    #ai-research .ai-research-hero-head,
+    #ai-research .ai-hub-main-header,
+    #ai-research .ai-hub-candidates-head,
+    #ai-research .ai-sidebar-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    #ai-research .ai-research-stage-strip,
+    #ai-research .ai-top-intro-mini-grid-wide,
+    #ai-research .ai-review-scope,
+    #ai-research .ai-candidate-cards {
+        grid-template-columns: 1fr;
+    }
+
+    #ai-research .ai-hub-toolbar {
+        justify-content: flex-start;
+    }
+
+    #ai-research .ai-hub-toolbar-group {
+        width: 100%;
+    }
+
+    #ai-research #ai-research-live-signals-panel {
+        max-height: none;
+    }
+}

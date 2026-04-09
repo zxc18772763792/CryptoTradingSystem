@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-    <link rel="stylesheet" href="/static/css/style.css?v=85">
+    <link rel="stylesheet" href="/static/css/style.css?v=87">
     <script>
         (function (root) {
             if (!root) return;
@@ -1544,72 +1544,117 @@
                             </div>
                             <div class="ai-workspace-section-note">这里负责研究与增强，不直接替代自治代理下单。</div>
                         </div>
-                    <div class="ai-research-overview-grid">
-                    <div class="card ai-top-intro-card ai-top-intro-card-research">
-                        <div class="ai-top-intro-title">🧪 AI研究新策略</div>
-                        <div class="ai-top-intro-subtitle">把研究目标整理成提案、候选、验证和注册动作，不把交易执行混进来。</div>
-                        <div class="ai-top-intro-stack">
-                            <div class="ai-top-intro-box">
-                                <div class="ai-top-intro-box-title">负责什么</div>
-                                <div class="ai-top-intro-box-desc">把研究目标转成提案、候选、验证结果和注册建议，并在需要时把 AI 草案一起纳入搜索。</div>
-                            </div>
-                            <div class="ai-top-intro-box">
-                                <div class="ai-top-intro-box-title">怎么用</div>
-                                <div class="ai-top-intro-box-desc">可按 1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署，也可以直接走 one-click 自动研究+部署。</div>
-                            </div>
-                            <div class="ai-top-intro-mini-grid">
-                                <div class="ai-top-intro-mini">
-                                    <div class="ai-top-intro-box-title">研究输入</div>
-                                    <div class="ai-top-intro-mini-desc">目标、行情、币种、周期</div>
+                        <div class="ai-research-overview-grid">
+                            <div class="card ai-top-intro-card ai-top-intro-card-research ai-research-hero-card">
+                                <div class="ai-research-hero-head">
+                                    <div>
+                                        <div class="ai-top-intro-title">🧪 AI研究工作台</div>
+                                        <div class="ai-top-intro-subtitle">先明确研究目标，再生成提案、候选和验证结论，最后决定是否注册/部署。</div>
+                                    </div>
+                                    <span class="ai-research-hero-badge">研究链路</span>
                                 </div>
-                                <div class="ai-top-intro-mini">
-                                    <div class="ai-top-intro-box-title">不负责什么</div>
-                                    <div class="ai-top-intro-mini-desc">不直接下单，不替代交易执行</div>
+                                <div class="ai-research-stage-strip">
+                                    <div class="ai-research-stage-chip">
+                                        <span>Step 1</span>
+                                        <strong>研究思路</strong>
+                                        <small>明确目标、市场状态和范围</small>
+                                    </div>
+                                    <div class="ai-research-stage-chip">
+                                        <span>Step 2</span>
+                                        <strong>提案生成</strong>
+                                        <small>把目标转成可运行研究任务</small>
+                                    </div>
+                                    <div class="ai-research-stage-chip">
+                                        <span>Step 3</span>
+                                        <strong>运行研究</strong>
+                                        <small>看候选表现、筛选可用策略</small>
+                                    </div>
+                                    <div class="ai-research-stage-chip">
+                                        <span>Step 4</span>
+                                        <strong>注册建议</strong>
+                                        <small>查看验证细节与部署动作</small>
+                                    </div>
+                                </div>
+                                <div class="ai-top-intro-stack">
+                                    <div class="ai-top-intro-box">
+                                        <div class="ai-top-intro-box-title">这页负责什么</div>
+                                        <div class="ai-top-intro-box-desc">把研究目标转成提案、候选、验证结果和注册建议，并在需要时把 AI 草案一起纳入搜索。</div>
+                                    </div>
+                                    <div class="ai-top-intro-box">
+                                        <div class="ai-top-intro-box-title">推荐阅读顺序</div>
+                                        <div class="ai-top-intro-box-desc">先看顶部当前焦点和研究进度，再去左侧做配置与提案，中间跑候选，右侧看详情与注册动作。</div>
+                                    </div>
+                                    <div class="ai-top-intro-mini-grid ai-top-intro-mini-grid-wide">
+                                        <div class="ai-top-intro-mini">
+                                            <div class="ai-top-intro-box-title">研究输入</div>
+                                            <div class="ai-top-intro-mini-desc">目标、币种、周期、市场状态</div>
+                                        </div>
+                                        <div class="ai-top-intro-mini">
+                                            <div class="ai-top-intro-box-title">研究输出</div>
+                                            <div class="ai-top-intro-mini-desc">提案、候选、结论、注册建议</div>
+                                        </div>
+                                        <div class="ai-top-intro-mini">
+                                            <div class="ai-top-intro-box-title">快捷路径</div>
+                                            <div class="ai-top-intro-mini-desc">one-click 适合快速验证整条研究链路</div>
+                                        </div>
+                                        <div class="ai-top-intro-mini">
+                                            <div class="ai-top-intro-box-title">职责边界</div>
+                                            <div class="ai-top-intro-mini-desc">不直接下单，不替代自治代理执行</div>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
-                        </div>
-                    </div>
 
-                    <div class="ai-research-command-stack">
-                        <div class="ai-research-pulse-grid">
-                            <div class="ai-context-mini-card ai-focus-card ai-focus-card-primary">
-                                <div class="ai-sidebar-title">🎯 当前研究焦点</div>
-                                <div class="ai-focus-summary">
-                                    <div class="ai-focus-row">
-                                        <span>当前提案</span>
-                                        <strong id="ai-focus-proposal">加载中...</strong>
+                            <div class="ai-research-command-stack">
+                                <div class="ai-research-pulse-grid">
+                                    <div class="ai-context-mini-card ai-focus-card ai-focus-card-primary">
+                                        <div class="ai-sidebar-title">🎯 当前研究焦点</div>
+                                        <div class="ai-focus-summary">
+                                            <div class="ai-focus-row">
+                                                <span>当前提案</span>
+                                                <strong id="ai-focus-proposal">加载中...</strong>
+                                            </div>
+                                            <div class="ai-focus-row">
+                                                <span>当前候选</span>
+                                                <strong id="ai-focus-candidate">加载中...</strong>
+                                            </div>
+                                            <div class="ai-focus-row">
+                                                <span>下一步动作</span>
+                                                <strong id="ai-focus-next-action">加载中...</strong>
+                                            </div>
+                                        </div>
                                     </div>
-                                    <div class="ai-focus-row">
-                                        <span>当前候选</span>
-                                        <strong id="ai-focus-candidate">加载中...</strong>
-                                    </div>
-                                    <div class="ai-focus-row">
-                                        <span>下一步动作</span>
-                                        <strong id="ai-focus-next-action">加载中...</strong>
-                                    </div>
-                                </div>
-                            </div>
 
-                            <div class="ai-context-mini-card ai-signal-card">
-                                <div class="ai-context-mini-head ai-sidebar-title" id="signal-panel-toggle">
-                                    <span>📡 实时信号</span>
-                                    <span class="collapse-arrow">▼</span>
+                                    <div class="ai-context-mini-card ai-signal-card">
+                                        <div class="ai-context-mini-head ai-sidebar-title" id="signal-panel-toggle">
+                                            <span>📡 实时信号</span>
+                                            <span class="collapse-arrow">▼</span>
+                                        </div>
+                                        <div id="signal-panel-body">
+                                            <div class="ai-signal-mini-list" id="ai-signal-mini">
+                                                <div style="color:#6b7fa0;font-size:12px;">加载中...</div>
+                                            </div>
+                                            <div class="inline-actions ai-context-inline-actions">
+                                                <select id="signal-symbol" style="flex:1;min-width:0;font-size:12px;">
+                                                    <option value="BTC/USDT">BTC/USDT</option>
+                                                    <option value="ETH/USDT">ETH/USDT</option>
+                                                    <option value="BNB/USDT">BNB/USDT</option>
+                                                    <option value="SOL/USDT">SOL/USDT</option>
+                                                    <option value="XRP/USDT">XRP/USDT</option>
+                                                </select>
+                                                <button class="btn btn-sm" id="signal-refresh-btn" style="font-size:12px;">刷新</button>
+                                            </div>
+                                            <div id="signal-status" class="ai-context-status">每30秒自动刷新</div>
+                                        </div>
+                                    </div>
                                 </div>
-                                <div id="signal-panel-body">
-                                    <div class="ai-signal-mini-list" id="ai-signal-mini">
-                                        <div style="color:#6b7fa0;font-size:12px;">加载中...</div>
+
+                                <div class="ai-context-mini-card ai-research-live-signals-card">
+                                    <div class="ai-sidebar-title">📈 研究候选运行信号</div>
+                                    <div class="ai-agent-runtime-card-desc">这里只看 AI 研究链路里已进入运行状态的候选策略，不混入自治代理 watchlist。会按 symbol + timeframe + strategy + params 去重；若最近行情为空或过旧，会直接标注“缺数据 / 数据旧”。</div>
+                                    <div id="ai-research-live-signals-panel">
+                                        <div style="font-size:11px;color:#6b7fa0;padding:6px 0;">加载中...</div>
                                     </div>
-                                    <div class="inline-actions ai-context-inline-actions">
-                                        <select id="signal-symbol" style="flex:1;min-width:0;font-size:12px;">
-                                            <option value="BTC/USDT">BTC/USDT</option>
-                                            <option value="ETH/USDT">ETH/USDT</option>
-                                            <option value="BNB/USDT">BNB/USDT</option>
-                                            <option value="SOL/USDT">SOL/USDT</option>
-                                            <option value="XRP/USDT">XRP/USDT</option>
-                                        </select>
-                                        <button class="btn btn-sm" id="signal-refresh-btn" style="font-size:12px;">刷新</button>
-                                    </div>
-                                    <div id="signal-status" class="ai-context-status">每30秒自动刷新</div>
                                 </div>
                             </div>
                         </div>
@@ -1672,17 +1717,6 @@
                                 <span id="ai-live-decision-status" class="ai-auto-step-status">未加载</span>
                             </div>
                         </div>
-
-                        <div class="ai-context-mini-card ai-research-live-signals-card">
-                            <div class="ai-sidebar-title">📈 研究候选运行信号</div>
-                            <div class="ai-agent-runtime-card-desc">这里只看 AI 研究链路里已进入运行状态的候选策略，不混入自治代理 watchlist。会按 symbol + timeframe + strategy + params 去重；若最近行情为空或过旧，会直接标注“缺数据 / 数据旧”。</div>
-                            <div id="ai-research-live-signals-panel">
-                                <div style="font-size:11px;color:#6b7fa0;padding:6px 0;">加载中...</div>
-                            </div>
-                        </div>
-                    </div>
-                    </div>
-                </div>
                 <div id="ai-flow-console" class="card ai-flow-console">
                     <div class="ai-flow-console-header">
                         <div>
@@ -1735,8 +1769,15 @@
                     <aside class="ai-hub-sidebar">
 
                         <!-- 研究配置 -->
-                        <div class="card ai-sidebar-card">
-                            <div class="ai-sidebar-title">🔬 研究配置</div>
+                        <div class="card ai-sidebar-card ai-sidebar-card-planner">
+                            <div class="ai-sidebar-header">
+                                <div>
+                                    <div class="ai-sidebar-kicker">Step 1-2</div>
+                                    <div class="ai-sidebar-title">研究配置与提案生成</div>
+                                </div>
+                                <span class="ai-sidebar-badge">Planner</span>
+                            </div>
+                            <div class="ai-sidebar-caption">先定义目标和约束，再生成研究思路与提案。Quick Path 适合快速试跑整条研究链路。</div>
                             <div class="form-group" style="margin-top:4px;">
                                 <label>研究目标</label>
                                 <textarea id="ai-planner-goal" rows="3" placeholder="例如：寻找BTC在趋势行情中的高胜率策略"></textarea>
@@ -1839,11 +1880,16 @@
 
                         <!-- 研究任务 -->
                         <div class="card ai-sidebar-card ai-queue-card">
-                            <div class="ai-sidebar-title" style="margin-bottom:4px;">
-                                <span id="ai-queue-title">研究任务</span>
-                                <span id="ai-queue-badge" style="font-size:11px;color:#7e92b2;font-weight:400;text-transform:none;"></span>
+                            <div class="ai-sidebar-header">
+                                <div>
+                                    <div class="ai-sidebar-kicker">Step 2</div>
+                                    <div class="ai-sidebar-title">
+                                        <span id="ai-queue-title">研究任务</span>
+                                    </div>
+                                </div>
+                                <span id="ai-queue-badge" class="ai-sidebar-badge ai-sidebar-badge-muted"></span>
                             </div>
-                            <div id="ai-queue-hint" style="font-size:11px;color:#7e92b2;margin-bottom:8px;">这里负责切换当前提案。选中后去中栏执行第 3 步“运行研究”，再到右侧完成第 4 步“注册/部署”。</div>
+                            <div id="ai-queue-hint" class="ai-sidebar-caption">这里负责切换当前提案。选中后去中栏执行第 3 步“运行研究”，再到右侧完成第 4 步“注册/部署”。</div>
                             <div id="ai-proposal-list" class="ai-proposal-compact-list">
                                 <div style="color:#6b7fa0;font-size:12px;padding:8px 0;">暂无研究任务</div>
                             </div>
@@ -1851,9 +1897,14 @@
 
                         <!-- 待人工确认队列 -->
                         <div class="card ai-sidebar-card" id="ai-approval-card" style="display:none;">
-                            <div class="ai-sidebar-title" style="margin-bottom:4px;">
-                                <span style="color:#f59e0b;">待人工确认</span>
-                                <span id="ai-approval-badge" style="font-size:11px;color:#f59e0b;font-weight:400;text-transform:none;"></span>
+                            <div class="ai-sidebar-header">
+                                <div>
+                                    <div class="ai-sidebar-kicker">人工介入</div>
+                                    <div class="ai-sidebar-title">
+                                        <span style="color:#f59e0b;">待人工确认</span>
+                                    </div>
+                                </div>
+                                <span id="ai-approval-badge" class="ai-sidebar-badge ai-sidebar-badge-warn"></span>
                             </div>
                             <div id="ai-approval-list"></div>
                         </div>
@@ -1884,13 +1935,14 @@
 
                     <!-- 中栏：候选策略卡片 -->
                     <div class="ai-hub-main">
-                        <div class="ai-hub-main-header">
+                        <section class="ai-hub-main-header">
                             <div class="ai-hub-heading">
                                 <div class="ai-hub-title-row">
+                                    <span class="ai-hub-kicker">Step 3</span>
                                     <span class="ai-hub-title">候选策略工作区</span>
                                     <span id="ai-candidate-count" style="font-size:12px;color:#7e92b2;"></span>
                                 </div>
-                                <div class="ai-hub-subtitle">这里专注比较研究结果本身：先选研究任务，再运行研究；右侧继续看验证结论与注册建议。</div>
+                                <div class="ai-hub-subtitle">先选研究任务，再运行研究；这里专注比较候选结果本身，不把注册动作混在一起。</div>
                             </div>
                             <div class="ai-hub-toolbar">
                                 <div class="ai-hub-toolbar-group">
@@ -1926,27 +1978,42 @@
                                     <button class="btn btn-sm" id="ai-compare-btn" style="display:none;">对比选中</button>
                                 </div>
                             </div>
-                        </div>
-                        <aside class="ai-hub-detail">
-                            <div class="ai-hub-detail-header">
-                                <div class="ai-hub-title">候选详情与注册</div>
-                                <div class="ai-hub-subtitle">选中候选后，在这里看验证、对比、部署模式和第 4 步注册/部署动作。</div>
-                            </div>
-                            <div id="ai-detail-panel" class="ai-detail-panel">
-                                <div class="ai-detail-placeholder">
-                                    <div style="font-size:36px;opacity:.3;">📊</div>
-                                    <div style="margin-top:10px;color:#6b7fa0;font-size:13px;">先选研究任务，再点击候选策略卡片<br>查看详细分析与第 4 步注册/部署</div>
+                        </section>
+
+                        <section class="ai-hub-candidates-panel">
+                            <div class="ai-hub-candidates-head">
+                                <div>
+                                    <div class="ai-hub-candidates-title">候选列表</div>
+                                    <div class="ai-hub-candidates-desc">优先看综合评分、回撤和策略类别，选中后去右侧查看验证细节与注册动作。</div>
                                 </div>
                             </div>
-                        </aside>
-                        <div id="ai-candidate-cards" class="ai-candidate-cards">
-                            <div class="ai-empty-hint">
-                                暂无候选策略。<br>
-                                先在左侧点击 <strong>2) 生成提案</strong>，<br>
-                                再选中研究任务并点击 <strong>3) 运行研究</strong> 开始回测。
+                            <div id="ai-candidate-cards" class="ai-candidate-cards">
+                                <div class="ai-empty-hint">
+                                    暂无候选策略。<br>
+                                    先在左侧点击 <strong>2) 生成提案</strong>，<br>
+                                    再选中研究任务并点击 <strong>3) 运行研究</strong> 开始回测。
+                                </div>
+                            </div>
+                        </section>
+                    </div>
+
+                    <aside class="ai-hub-detail">
+                        <div class="ai-hub-detail-header">
+                            <div class="ai-hub-heading">
+                                <div class="ai-hub-title-row">
+                                    <span class="ai-hub-kicker ai-hub-kicker-detail">Step 4</span>
+                                    <div class="ai-hub-title">候选详情与注册</div>
+                                </div>
+                                <div class="ai-hub-subtitle">选中候选后，在这里看验证、对比、部署模式和第 4 步注册/部署动作。</div>
                             </div>
                         </div>
-                    </div>
+                        <div id="ai-detail-panel" class="ai-detail-panel">
+                            <div class="ai-detail-placeholder">
+                                <div style="font-size:36px;opacity:.3;">📊</div>
+                                <div style="margin-top:10px;color:#6b7fa0;font-size:13px;">先选研究任务，再点击候选策略卡片<br>查看详细分析与第 4 步注册/部署</div>
+                            </div>
+                        </div>
+                    </aside>
 
                 </div>
 
@@ -2629,9 +2696,9 @@
 
     <div id="notification" class="notification"></div>
 
-    <script charset="utf-8" src="/static/js/app.js?v=125"></script>
+    <script charset="utf-8" src="/static/js/app.js?v=127"></script>
     <script charset="utf-8" src="/static/js/research_workbench.js?v=8"></script>
-    <script charset="utf-8" src="/static/js/ai_research.js?v=42"></script>
+    <script charset="utf-8" src="/static/js/ai_research.js?v=44"></script>
     <script charset="utf-8" src="/static/js/ai_research_diagnostics.js?v=5"></script>
     <script charset="utf-8" src="/static/js/ai_research_runtime.js?v=7"></script>
     <script charset="utf-8" src="/static/js/ai_research_agent.js?v=12"></script>
