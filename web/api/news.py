@@ -1322,12 +1322,12 @@ def _feed_summarize_cfg(cfg: Dict[str, Any], *, limit: int) -> Dict[str, Any]:
     llm_cfg = dict(effective.get("llm") or {})
     max_items = max(1, min(int(limit or 1), _env_int("NEWS_API_SUMMARY_MAX_ITEMS", 8)))
     default_batch_size = max(1, min(int(llm_cfg.get("summarize_batch_size") or 6), max_items))
-    default_timeout_sec = max(3, min(int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 20), 20))
+    default_timeout_sec = max(8, min(int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 45), 45))
     batch_size = max(1, min(_env_int("NEWS_API_SUMMARY_BATCH_SIZE", default_batch_size), max_items))
-    timeout_sec = max(3, min(_env_int("NEWS_API_SUMMARIZE_TIMEOUT_SEC", default_timeout_sec), 20))
+    timeout_sec = max(8, min(_env_int("NEWS_API_SUMMARIZE_TIMEOUT_SEC", default_timeout_sec), 45))
     llm_cfg["summarize_limit"] = max(1, min(int(llm_cfg.get("summarize_limit") or max_items), max_items))
     llm_cfg["summarize_batch_size"] = max(1, min(int(llm_cfg.get("summarize_batch_size") or batch_size), batch_size))
-    llm_cfg["summarize_timeout_sec"] = max(3, min(int(llm_cfg.get("summarize_timeout_sec") or timeout_sec), timeout_sec))
+    llm_cfg["summarize_timeout_sec"] = max(8, min(int(llm_cfg.get("summarize_timeout_sec") or timeout_sec), timeout_sec))
     effective["llm"] = llm_cfg
     return effective
 
@@ -1350,8 +1350,8 @@ async def repair_recent_news_summaries(
     event_limit: Optional[int] = None,
 ) -> Dict[str, Any]:
     hours = max(6, min(int(hours or _env_int("NEWS_SUMMARY_REPAIR_HOURS", 24 * 30)), 24 * 90))
-    raw_limit = max(0, min(int(raw_limit if raw_limit is not None else _env_int("NEWS_SUMMARY_REPAIR_RAW_LIMIT", 10)), 80))
-    event_limit = max(0, min(int(event_limit if event_limit is not None else _env_int("NEWS_SUMMARY_REPAIR_EVENT_LIMIT", 10)), 80))
+    raw_limit = max(0, min(int(raw_limit if raw_limit is not None else _env_int("NEWS_SUMMARY_REPAIR_RAW_LIMIT", 8)), 80))
+    event_limit = max(0, min(int(event_limit if event_limit is not None else _env_int("NEWS_SUMMARY_REPAIR_EVENT_LIMIT", 4)), 80))
     total_limit = raw_limit + event_limit
     if total_limit <= 0:
         return {
@@ -1443,7 +1443,8 @@ async def repair_recent_news_summaries(
 
     summary_cfg = dict(cfg or {})
     llm_cfg = dict(summary_cfg.get("llm") or {})
-    timeout_sec = max(6, min(int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 24), _env_int("NEWS_SUMMARY_REPAIR_TIMEOUT_SEC", 30)))
+    repair_timeout_cap = max(45, _env_int("NEWS_SUMMARY_REPAIR_TIMEOUT_SEC", 120))
+    timeout_sec = max(20, min(int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 60), repair_timeout_cap))
     batch_size = max(1, min(int(llm_cfg.get("summarize_batch_size") or 6), _env_int("NEWS_SUMMARY_REPAIR_BATCH_SIZE", 12), len(targets)))
     llm_cfg["summarize_limit"] = len(targets)
     llm_cfg["summarize_batch_size"] = batch_size
@@ -1969,7 +1970,7 @@ async def build_latest_feed(
 
     raw_limit = max(200, limit * 8)
     event_limit = max(300, limit * 10)
-    db_timeout = max(2.5, min(8.0, float(_env_int("NEWS_API_FEED_DB_TIMEOUT_SEC", 5))))
+    db_timeout = max(4.0, min(20.0, float(_env_int("NEWS_API_FEED_DB_TIMEOUT_SEC", 12))))
     db_failures: List[str] = []
     raw_result, events_result = await asyncio.gather(
         asyncio.wait_for(asyncio.shield(news_db.list_news_raw(since=since, limit=raw_limit)), timeout=db_timeout),
@@ -2116,8 +2117,8 @@ async def build_latest_feed(
         llm_cfg = summary_cfg.get("llm") or {}
         summarize_limit = int(llm_cfg.get("summarize_limit") or min(120, limit))
         summarize_limit = max(1, min(limit, summarize_limit))
-        summarize_timeout_sec = int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 20)
-        summarize_timeout_sec = max(3, min(20, summarize_timeout_sec))
+        summarize_timeout_sec = int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 45)
+        summarize_timeout_sec = max(8, min(45, summarize_timeout_sec))
 
         candidates: List[tuple[int, Dict[str, Any]]] = []
         for idx, item in enumerate(sorted_items):
@@ -2854,7 +2855,7 @@ async def raw_coverage(request: Request) -> Dict[str, Any]:
     if cached:
         return cached
 
-    timeout_sec = max(2.0, min(8.0, float(_env_int("NEWS_API_COVERAGE_DB_TIMEOUT_SEC", 5))))
+    timeout_sec = max(6.0, min(40.0, float(_env_int("NEWS_API_COVERAGE_DB_TIMEOUT_SEC", 30))))
     try:
         coverage = await asyncio.wait_for(
             asyncio.shield(news_db.summarize_news_raw_coverage()),
@@ -2915,7 +2916,7 @@ async def latest(
         return cached
 
     try:
-        latest_timeout = max(4.0, min(10.0, float(_env_int("NEWS_API_LATEST_TOTAL_TIMEOUT_SEC", 6 if not summarize else 9))))
+        latest_timeout = max(12.0, min(75.0, float(_env_int("NEWS_API_LATEST_TOTAL_TIMEOUT_SEC", 22 if not summarize else 60))))
         if summarize:
             feed = await asyncio.wait_for(
                 build_latest_feed(cfg=cfg, symbol=symbol, hours=hours, limit=limit, summarize=True),
@@ -3092,7 +3093,7 @@ async def summary(
     if cached:
         return cached
     since = _now_utc() - timedelta(hours=hours)
-    db_timeout = max(3.0, min(10.0, float(_env_int("NEWS_API_SUMMARY_DB_TIMEOUT_SEC", 8))))
+    db_timeout = max(5.0, min(20.0, float(_env_int("NEWS_API_SUMMARY_DB_TIMEOUT_SEC", 12))))
     raw_limit = max(1000, min(3000, feed_limit * 24))
     event_limit = max(1000, min(3000, feed_limit * 24))
     try:

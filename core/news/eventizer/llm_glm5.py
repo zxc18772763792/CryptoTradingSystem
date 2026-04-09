@@ -17,8 +17,10 @@ from core.utils.openai_responses import (
     build_openai_headers,
     build_chat_completions_payload,
     build_responses_payload,
+    build_responses_payload_variants,
     chat_completions_endpoint,
     coerce_responses_to_chat_completions,
+    extract_response_text,
     openai_endpoint_targets,
     prioritize_openai_targets,
     read_requests_responses_json,
@@ -27,6 +29,7 @@ from core.utils.openai_responses import (
     responses_endpoint,
     responses_api_unavailable,
     should_failover_openai_status,
+    unsupported_responses_parameter,
 )
 
 
@@ -60,6 +63,28 @@ _NEG_SENTIMENT_HINTS = {
     "crash", "crashes", "plunge", "plunges", "slump", "slumps", "drop", "drops", "falls",
     "黑客", "被盗", "攻击", "漏洞", "宕机", "暂停提现", "暂停交易", "诉讼", "起诉", "打击", "封禁", "下架", "爆仓", "清算", "利空", "暴跌",
 }
+
+
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _merge_csv_values(*values: Any) -> str:
+    merged: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _normalize_openai_base_urls(value)
+        for item in normalized.split(","):
+            part = str(item or "").strip().rstrip("/")
+            if not part or part in seen:
+                continue
+            seen.add(part)
+            merged.append(part)
+    return ",".join(merged)
 
 
 def _normalize_openai_base_urls(value: Any) -> str:
@@ -127,25 +152,26 @@ def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return openai_endpoint_targets(
         primary_base_url=(
             _normalize_openai_base_urls(
-                llm_cfg.get("base_url")
-                or _runtime_setting("OPENAI_BASE_URL")
+                _first_non_empty(
+                    _runtime_setting("OPENAI_BASE_URL"),
+                    llm_cfg.get("base_url"),
+                )
             )
             or DEFAULT_OPENAI_BASE_URL
         ),
-        backup_base_urls=(
-            _normalize_openai_base_urls(
-                llm_cfg.get("backup_base_url")
-                or _runtime_setting("OPENAI_BACKUP_BASE_URL")
-            )
-            or ""
+        backup_base_urls=_merge_csv_values(
+            _runtime_setting("OPENAI_BACKUP_BASE_URL"),
+            llm_cfg.get("backup_base_url"),
         ),
         primary_api_key=_openai_primary_api_key(),
         backup_api_key=_openai_backup_api_key(),
         primary_model=_openai_model(cfg),
         backup_model=(
             str(
-                llm_cfg.get("backup_model")
-                or _runtime_setting("OPENAI_BACKUP_MODEL")
+                _first_non_empty(
+                    _runtime_setting("OPENAI_BACKUP_MODEL"),
+                    llm_cfg.get("backup_model"),
+                )
                 or ""
             ).strip()
         ),
@@ -164,8 +190,10 @@ def _openai_base_url(cfg: Dict[str, Any]) -> str:
 def _openai_model(cfg: Dict[str, Any]) -> str:
     llm_cfg = cfg.get("llm") or {}
     return _normalize_openai_model(
-        llm_cfg.get("model")
-        or _runtime_setting("OPENAI_MODEL")
+        _first_non_empty(
+            _runtime_setting("OPENAI_MODEL"),
+            llm_cfg.get("model"),
+        )
     )
 
 
@@ -196,7 +224,8 @@ def _summarize_item_cap(llm_cfg: Dict[str, Any], total_titles: int) -> int:
 def _openai_post_with_failover(
     *,
     cfg: Dict[str, Any],
-    payload: Dict[str, Any],
+    payload: Optional[Dict[str, Any]] = None,
+    payload_variants: Optional[List[Dict[str, Any]]] = None,
     chat_fallback_payload: Optional[Dict[str, Any]] = None,
     timeout_sec: int,
     log_prefix: str,
@@ -213,6 +242,10 @@ def _openai_post_with_failover(
     if not available:
         raise RuntimeError("OPENAI_API_KEY is missing")
 
+    request_payload_variants = [dict(item) for item in (payload_variants or ([] if payload is None else [payload]))]
+    if not request_payload_variants:
+        raise RuntimeError("news llm payload is missing")
+
     last_exc: Optional[BaseException] = None
     total_targets = len(available)
     for idx, target in enumerate(available):
@@ -220,26 +253,90 @@ def _openai_post_with_failover(
         api_key = str(target.get("api_key") or "").strip()
         target_model = str(target.get("model") or "").strip()
         url = responses_endpoint(base_url)
-        request_payload = dict(payload)
-        if target_model:
-            request_payload["model"] = target_model
         request_chat_payload = None
         if chat_fallback_payload is not None:
             request_chat_payload = dict(chat_fallback_payload)
             if target_model:
                 request_chat_payload["model"] = target_model
         try:
-            response = requests.post(
-                url,
-                headers=build_openai_headers(api_key),
-                json=request_payload,
-                timeout=timeout_sec,
-            )
-            if response.status_code >= 400:
-                if request_chat_payload and responses_api_unavailable(response.status_code, response.text):
+            advance_to_next_target = False
+            for payload_index, payload_variant in enumerate(request_payload_variants):
+                request_payload = dict(payload_variant)
+                if target_model:
+                    request_payload["model"] = target_model
+                response = requests.post(
+                    url,
+                    headers=build_openai_headers(api_key),
+                    json=request_payload,
+                    timeout=timeout_sec,
+                )
+                if response.status_code >= 400:
+                    if request_chat_payload and responses_api_unavailable(response.status_code, response.text):
+                        chat_url = chat_completions_endpoint(base_url)
+                        logger.warning(
+                            f"{log_prefix}: relay does not support Responses API; retrying via chat/completions"
+                        )
+                        chat_response = requests.post(
+                            chat_url,
+                            headers=build_openai_headers(api_key),
+                            json=request_chat_payload,
+                            timeout=timeout_sec,
+                        )
+                        if chat_response.status_code >= 400:
+                            err = RuntimeError(f"LLM chat HTTP {chat_response.status_code}: {chat_response.text[:300]}")
+                            if should_failover_openai_status(chat_response.status_code):
+                                remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                            if idx + 1 < total_targets and should_failover_openai_status(chat_response.status_code):
+                                last_exc = err
+                                logger.warning(
+                                    f"{log_prefix}: openai chat/completions HTTP {chat_response.status_code}; "
+                                    f"trying backup {idx + 2}/{total_targets}"
+                                )
+                                advance_to_next_target = True
+                                break
+                            raise err
+                        remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        return read_requests_responses_json(chat_response)
+                    err = RuntimeError(f"LLM HTTP {response.status_code}: {response.text[:300]}")
+                    unsupported_param = unsupported_responses_parameter(response.text)
+                    if response.status_code == 400 and unsupported_param in {
+                        "max_output_tokens",
+                        "max_completion_tokens",
+                        "max_tokens",
+                    }:
+                        if payload_index + 1 < len(request_payload_variants):
+                            last_exc = err
+                            logger.warning(
+                                f"{log_prefix}: relay rejected token parameter {unsupported_param}; "
+                                f"retrying payload variant {payload_index + 2}/{len(request_payload_variants)}"
+                            )
+                            continue
+                        if idx + 1 < total_targets:
+                            last_exc = err
+                            remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                            logger.warning(
+                                f"{log_prefix}: relay rejected all token parameter variants; "
+                                f"trying backup {idx + 2}/{total_targets}"
+                            )
+                            advance_to_next_target = True
+                            break
+                        raise err
+                    if should_failover_openai_status(response.status_code):
+                        remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                    if idx + 1 < total_targets and should_failover_openai_status(response.status_code):
+                        last_exc = err
+                        logger.warning(
+                            f"{log_prefix}: openai relay HTTP {response.status_code}; "
+                            f"trying backup {idx + 2}/{total_targets}"
+                        )
+                        advance_to_next_target = True
+                        break
+                    raise err
+                data = read_requests_responses_json(response)
+                if request_chat_payload and not extract_response_text(data):
                     chat_url = chat_completions_endpoint(base_url)
                     logger.warning(
-                        f"{log_prefix}: relay does not support Responses API; retrying via chat/completions"
+                        f"{log_prefix}: responses relay returned empty content; retrying via chat/completions"
                     )
                     chat_response = requests.post(
                         chat_url,
@@ -254,26 +351,31 @@ def _openai_post_with_failover(
                         if idx + 1 < total_targets and should_failover_openai_status(chat_response.status_code):
                             last_exc = err
                             logger.warning(
-                                f"{log_prefix}: openai chat/completions HTTP {chat_response.status_code}; "
+                                f"{log_prefix}: empty responses body and chat/completions HTTP "
+                                f"{chat_response.status_code}; trying backup {idx + 2}/{total_targets}"
+                            )
+                            advance_to_next_target = True
+                            break
+                        raise err
+                    chat_data = read_requests_responses_json(chat_response)
+                    if not extract_response_text(chat_data):
+                        err = RuntimeError("LLM chat response missing content")
+                        remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        if idx + 1 < total_targets:
+                            last_exc = err
+                            logger.warning(
+                                f"{log_prefix}: chat/completions also returned empty content; "
                                 f"trying backup {idx + 2}/{total_targets}"
                             )
-                            continue
+                            advance_to_next_target = True
+                            break
                         raise err
                     remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
-                    return read_requests_responses_json(chat_response)
-                err = RuntimeError(f"LLM HTTP {response.status_code}: {response.text[:300]}")
-                if should_failover_openai_status(response.status_code):
-                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
-                if idx + 1 < total_targets and should_failover_openai_status(response.status_code):
-                    last_exc = err
-                    logger.warning(
-                        f"{log_prefix}: openai relay HTTP {response.status_code}; "
-                        f"trying backup {idx + 2}/{total_targets}"
-                    )
-                    continue
-                raise err
-            remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
-            return read_requests_responses_json(response)
+                    return chat_data
+                remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                return data
+            if advance_to_next_target:
+                continue
         except requests.RequestException as exc:
             remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
             if idx + 1 < total_targets:
@@ -604,7 +706,6 @@ def _call_llm_once(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        temperature=0,
         stream=False,
     )
     chat_payload = build_chat_completions_payload(
@@ -613,7 +714,6 @@ def _call_llm_once(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        temperature=0,
         response_format={"type": "json_object"},
         stream=False,
     )
@@ -741,15 +841,15 @@ def summarize_title_llm(title: str, cfg: Dict[str, Any], max_length: int = 60) -
 
     user_prompt = f"请分析这条加密货币新闻标题，翻译成中文并判断利好利空：\n\n{title}"
 
-    payload = build_responses_payload(
+    payload_variants = build_responses_payload_variants(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
         max_output_tokens=max_length + 50,
-        temperature=0.3,
-        text_format="json_object",
+        temperature=None,
+        text_format=None,
         stream=False,
     )
     chat_payload = build_chat_completions_payload(
@@ -759,7 +859,6 @@ def summarize_title_llm(title: str, cfg: Dict[str, Any], max_length: int = 60) -
             {"role": "user", "content": user_prompt},
         ],
         max_tokens=max_length + 50,
-        temperature=0.3,
         response_format={"type": "json_object"},
         stream=False,
     )
@@ -767,7 +866,7 @@ def summarize_title_llm(title: str, cfg: Dict[str, Any], max_length: int = 60) -
     try:
         data = _openai_post_with_failover(
             cfg=cfg,
-            payload=payload,
+            payload_variants=payload_variants,
             chat_fallback_payload=chat_payload,
             timeout_sec=timeout_sec,
             log_prefix="news_llm.summarize",
@@ -831,12 +930,12 @@ def _call_llm_batch_summarize(
 
     compact = [{"idx": i, "title": str(t or "")[:300]} for i, t in enumerate(titles)]
     system_prompt = (
-        "你是加密新闻标题处理助手。"
-        "将每条标题翻译为简洁中文一行，并标注情绪。"
-        "只返回严格 JSON。"
+        "You summarize crypto news headlines."
+        " For each title, return one concise Simplified Chinese summary and a sentiment label."
+        " Return strict json only."
     )
     user_prompt = {
-        "task": "逐条输出中文一行摘要和情绪",
+        "task": "Return one Simplified Chinese headline summary and sentiment for each title in strict json.",
         "output_schema": {
             "items": [
                 {"idx": 0, "summary": "中文摘要", "sentiment": "positive|negative|neutral"}
@@ -846,14 +945,14 @@ def _call_llm_batch_summarize(
         "titles": compact,
     }
 
-    payload = build_responses_payload(
+    payload_variants = build_responses_payload_variants(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
         ],
-        temperature=0.2,
-        text_format="json_object",
+        temperature=None,
+        text_format=None,
         stream=False,
     )
     chat_payload = build_chat_completions_payload(
@@ -862,7 +961,6 @@ def _call_llm_batch_summarize(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
         ],
-        temperature=0.2,
         response_format={"type": "json_object"},
         stream=False,
     )
@@ -870,7 +968,7 @@ def _call_llm_batch_summarize(
     try:
         data = _openai_post_with_failover(
             cfg=cfg,
-            payload=payload,
+            payload_variants=payload_variants,
             chat_fallback_payload=chat_payload,
             timeout_sec=timeout_sec,
             log_prefix="news_llm.batch_summarize",

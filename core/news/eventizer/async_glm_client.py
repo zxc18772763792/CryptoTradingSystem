@@ -73,6 +73,28 @@ _WEAK_EVENT_ID_RE = re.compile(
 )
 
 
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _merge_csv_values(*values: Any) -> str:
+    merged: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _normalize_openai_base_urls(value)
+        for item in normalized.split(","):
+            part = str(item or "").strip().rstrip("/")
+            if not part or part in seen:
+                continue
+            seen.add(part)
+            merged.append(part)
+    return ",".join(merged)
+
+
 def _normalize_openai_base_urls(value: Any) -> str:
     if isinstance(value, (list, tuple, set)):
         parts = [_normalize_openai_base_urls(item) for item in value]
@@ -138,25 +160,26 @@ def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return openai_endpoint_targets(
         primary_base_url=(
             _normalize_openai_base_urls(
-                llm_cfg.get("base_url")
-                or _runtime_setting("OPENAI_BASE_URL")
+                _first_non_empty(
+                    _runtime_setting("OPENAI_BASE_URL"),
+                    llm_cfg.get("base_url"),
+                )
             )
             or DEFAULT_OPENAI_BASE_URL
         ),
-        backup_base_urls=(
-            _normalize_openai_base_urls(
-                llm_cfg.get("backup_base_url")
-                or _runtime_setting("OPENAI_BACKUP_BASE_URL")
-            )
-            or ""
+        backup_base_urls=_merge_csv_values(
+            _runtime_setting("OPENAI_BACKUP_BASE_URL"),
+            llm_cfg.get("backup_base_url"),
         ),
         primary_api_key=_openai_primary_api_key(),
         backup_api_key=_openai_backup_api_key(),
         primary_model=_openai_model(cfg),
         backup_model=(
             str(
-                llm_cfg.get("backup_model")
-                or _runtime_setting("OPENAI_BACKUP_MODEL")
+                _first_non_empty(
+                    _runtime_setting("OPENAI_BACKUP_MODEL"),
+                    llm_cfg.get("backup_model"),
+                )
                 or ""
             ).strip()
         ),
@@ -175,8 +198,10 @@ def _openai_base_url(cfg: Dict[str, Any]) -> str:
 def _openai_model(cfg: Dict[str, Any]) -> str:
     llm_cfg = cfg.get("llm") or {}
     return _normalize_openai_model(
-        llm_cfg.get("model")
-        or _runtime_setting("OPENAI_MODEL")
+        _first_non_empty(
+            _runtime_setting("OPENAI_MODEL"),
+            llm_cfg.get("model"),
+        )
     )
 
 
@@ -555,6 +580,71 @@ class AsyncGLMClient:
                             data = await read_aiohttp_responses_json(response)
                         else:
                             data = await response.json()
+                        if request_chat_payload and not extract_response_text(data):
+                            chat_url = chat_completions_endpoint(base_url)
+                            logger.warning(
+                                "async_glm_client responses relay returned empty content; "
+                                "retrying via chat/completions"
+                            )
+                            async with session.request(
+                                method=method,
+                                url=chat_url,
+                                headers=build_openai_headers(api_key),
+                                json=request_chat_payload,
+                            ) as chat_response:
+                                if chat_response.status == 429:
+                                    self._requests_rate_limited += 1
+                                    retry_after = None
+                                    retry_after_header = chat_response.headers.get("Retry-After")
+                                    if retry_after_header:
+                                        try:
+                                            retry_after = int(retry_after_header)
+                                        except ValueError:
+                                            pass
+                                    chat_error_text = await chat_response.text()
+                                    logger.warning(
+                                        f"news llm chat/completions rate limited (429): {chat_error_text[:200]}"
+                                    )
+                                    last_error_type = "rate_limit"
+                                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                    if idx + 1 < total_targets:
+                                        logger.warning(
+                                            "async_glm_client empty responses body then chat/completions rate limited; "
+                                            f"trying backup {idx + 2}/{total_targets}"
+                                        )
+                                        continue
+                                    rate_limiter.on_rate_limit(retry_after=retry_after)
+                                    return {}, "rate_limit"
+
+                                if chat_response.status >= 400:
+                                    self._requests_failed += 1
+                                    chat_error_text = await chat_response.text()
+                                    logger.warning(
+                                        f"news llm chat/completions HTTP {chat_response.status}: {chat_error_text[:300]}"
+                                    )
+                                    last_error_type = "timeout" if chat_response.status in (408, 504) else "other"
+                                    if should_failover_openai_status(chat_response.status):
+                                        remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                    if idx + 1 < total_targets and should_failover_openai_status(chat_response.status):
+                                        logger.warning(
+                                            "async_glm_client empty responses body then chat/completions HTTP "
+                                            f"{chat_response.status}; trying backup {idx + 2}/{total_targets}"
+                                        )
+                                        continue
+                                    return {}, last_error_type
+
+                                data = await read_aiohttp_responses_json(chat_response)
+                                if not extract_response_text(data):
+                                    self._requests_failed += 1
+                                    last_error_type = "other"
+                                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                    if idx + 1 < total_targets:
+                                        logger.warning(
+                                            "async_glm_client chat/completions also returned empty content; "
+                                            f"trying backup {idx + 2}/{total_targets}"
+                                        )
+                                        continue
+                                    return {}, "other"
                         self._requests_success += 1
                         remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         rate_limiter.reset_backoff()
@@ -587,7 +677,7 @@ class AsyncGLMClient:
     async def chat_completions(
         self,
         messages: List[Dict[str, str]],
-        temperature: float = 0,
+        temperature: Optional[float] = None,
         top_p: float = 0.1,
         max_tokens: Optional[int] = None,
         timeout: Optional[int] = None,
@@ -596,7 +686,7 @@ class AsyncGLMClient:
 
         Args:
             messages: List of message dicts with 'role' and 'content'
-            temperature: Sampling temperature (0-1)
+            temperature: Optional sampling temperature
             top_p: Nucleus sampling threshold
             max_tokens: Maximum tokens in response
             timeout: Request timeout in seconds (overrides default)
@@ -638,7 +728,7 @@ class AsyncGLMClient:
     async def chat_completions_stream(
         self,
         messages: List[Dict[str, str]],
-        temperature: float = 0,
+        temperature: Optional[float] = None,
         top_p: float = 0.1,
         max_tokens: Optional[int] = None,
         timeout: Optional[int] = None,
@@ -647,7 +737,7 @@ class AsyncGLMClient:
 
         Args:
             messages: List of message dicts with 'role' and 'content'
-            temperature: Sampling temperature (0-1)
+            temperature: Optional sampling temperature
             top_p: Nucleus sampling threshold
             max_tokens: Maximum tokens in response
             timeout: Request timeout in seconds (overrides default)
@@ -850,7 +940,7 @@ class AsyncGLMClient:
             {"role": "user", "content": user_prompt},
         ]
 
-        response, error_type = await self.chat_completions(messages, temperature=0, top_p=0.1)
+        response, error_type = await self.chat_completions(messages, top_p=0.1)
 
         if error_type != "none" or not isinstance(response, dict):
             return [], error_type
@@ -1026,6 +1116,22 @@ class AsyncGLMClient:
             "titles": compact,
         }
 
+        system_prompt = (
+            "You summarize crypto news headlines."
+            " For each title, return one concise Simplified Chinese summary and a sentiment label."
+            " Return strict json only."
+        )
+        user_prompt = {
+            "task": "Return one Simplified Chinese headline summary and sentiment for each title in strict json.",
+            "output_schema": {
+                "items": [
+                    {"idx": 0, "summary": "中文摘要", "sentiment": "positive|negative|neutral"}
+                ]
+            },
+            "max_summary_length": int(max_length),
+            "titles": compact,
+        }
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},
@@ -1034,7 +1140,6 @@ class AsyncGLMClient:
         try:
             response, error_type = await self.chat_completions(
                 messages,
-                temperature=0.2,
                 top_p=0.8,
                 timeout=self._summarize_timeout.total,
             )
@@ -1119,7 +1224,6 @@ class AsyncGLMClient:
         try:
             async for chunk in self.chat_completions_stream(
                 messages,
-                temperature=0.3,
                 timeout=self._summarize_timeout.total,
             ):
                 choices = chunk.get("choices") if isinstance(chunk, dict) else None

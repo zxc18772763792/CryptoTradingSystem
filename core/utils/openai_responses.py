@@ -660,6 +660,18 @@ def _normalize_chat_message_content(content: Any) -> str:
     return str(content or "").strip()
 
 
+def _collect_responses_instructions(messages: Sequence[Mapping[str, Any]]) -> str:
+    parts: List[str] = []
+    for message in messages or []:
+        role = str(message.get("role") or "user").strip().lower() or "user"
+        if role not in {"system", "developer"}:
+            continue
+        content = _normalize_chat_message_content(message.get("content"))
+        if content:
+            parts.append(content)
+    return "\n\n".join(parts).strip()
+
+
 def build_responses_payload(
     *,
     model: str,
@@ -675,9 +687,14 @@ def build_responses_payload(
         "model": str(model or "").strip(),
         "input": [],
     }
+    instructions = _collect_responses_instructions(messages)
+    if instructions:
+        payload["instructions"] = instructions
 
     for message in messages or []:
         role = str(message.get("role") or "user").strip().lower() or "user"
+        if role in {"system", "developer"}:
+            continue
         parts = _normalize_content_parts(message.get("content"))
         if not parts:
             continue

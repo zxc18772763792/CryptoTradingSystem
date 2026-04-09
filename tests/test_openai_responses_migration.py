@@ -141,6 +141,31 @@ def test_openai_requests_reader_falls_back_to_event_stream():
     assert extract_response_text(parsed) == '{"summary":"快讯"}'
 
 
+def test_build_responses_payload_moves_system_messages_to_instructions():
+    from core.utils.openai_responses import build_responses_payload
+
+    payload = build_responses_payload(
+        model="gpt-5.4",
+        messages=[
+            {"role": "system", "content": "system guidance"},
+            {"role": "developer", "content": "developer policy"},
+            {"role": "user", "content": "user asks for help"},
+        ],
+        max_output_tokens=120,
+        text_format="json_object",
+    )
+
+    assert payload["instructions"] == "system guidance\n\ndeveloper policy"
+    assert payload["input"] == [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "user asks for help"}],
+        }
+    ]
+    assert payload["max_output_tokens"] == 120
+    assert payload["text"]["format"]["type"] == "json_object"
+
+
 def test_live_decision_router_codex_uses_responses_api(monkeypatch, tmp_path):
     import core.ai.live_decision_router as module
 
@@ -1012,6 +1037,52 @@ def test_news_legacy_glm_provider_is_normalized_to_openai(monkeypatch):
     assert async_module._llm_base_url(legacy_cfg) == "https://sub.a-j.app/v1"
 
 
+def test_news_runtime_openai_settings_override_yaml_config(monkeypatch):
+    import core.news.eventizer.async_glm_client as async_module
+    import core.news.eventizer.llm_glm5 as sync_module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://runtime-primary.test/v1", raising=False)
+    monkeypatch.setattr(
+        settings,
+        "OPENAI_BACKUP_BASE_URL",
+        "https://runtime-backup-a.test/v1,https://runtime-backup-b.test/v1",
+        raising=False,
+    )
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.4", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "gpt-5.4-mini", raising=False)
+
+    cfg = {
+        "llm": {
+            "provider": "openai",
+            "model": "GLM-4.5-Air",
+            "backup_model": "glm-4.5",
+            "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+            "backup_base_url": "https://legacy-backup.test/v1",
+        }
+    }
+
+    sync_targets = sync_module._openai_endpoint_targets(cfg)
+    async_targets = async_module._openai_endpoint_targets(cfg)
+
+    assert sync_module._llm_base_url(cfg) == "https://runtime-primary.test/v1"
+    assert async_module._llm_base_url(cfg) == "https://runtime-primary.test/v1"
+    assert sync_module._llm_model(cfg) == "gpt-5.4"
+    assert async_module._llm_model(cfg) == "gpt-5.4"
+    assert [target["base_url"] for target in sync_targets[:4]] == [
+        "https://runtime-primary.test/v1",
+        "https://runtime-backup-a.test/v1",
+        "https://runtime-backup-b.test/v1",
+        "https://legacy-backup.test/v1",
+    ]
+    assert [target["base_url"] for target in async_targets[:4]] == [
+        "https://runtime-primary.test/v1",
+        "https://runtime-backup-a.test/v1",
+        "https://runtime-backup-b.test/v1",
+        "https://legacy-backup.test/v1",
+    ]
+
+
 def test_news_sync_summary_uses_openai_mini_source(monkeypatch):
     import core.news.eventizer.llm_glm5 as module
 
@@ -1088,6 +1159,101 @@ def test_news_sync_summary_falls_back_to_chat_completions(monkeypatch):
     result = module.summarize_title_glm5("Bitcoin ETF approved", {"llm": {"provider": "openai"}}, max_length=60)
 
     assert result["summary"] == "chat 摘要"
+    assert result["sentiment"] == "positive"
+    assert capture["urls"] == [
+        "https://example.test/v1/responses",
+        "https://example.test/v1/chat/completions",
+    ]
+
+
+def test_news_sync_summary_retries_responses_token_param_variant(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.4", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    capture = {"urls": [], "payloads": []}
+    responses = iter(
+        [
+            _SyncResponse({"detail": "Unsupported parameter: max_output_tokens"}, status_code=400),
+            _SyncResponse(
+                {
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": '{"summary":"token variant ok","sentiment":"positive"}'}],
+                        }
+                    ]
+                }
+            ),
+        ]
+    )
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        capture["urls"].append(url)
+        capture["payloads"].append(dict(json or {}))
+        return next(responses)
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    result = module.summarize_title_glm5("Bitcoin ETF approved", {"llm": {"provider": "openai"}}, max_length=60)
+
+    assert result["summary"] == "token variant ok"
+    assert result["sentiment"] == "positive"
+    assert capture["urls"] == [
+        "https://example.test/v1/responses",
+        "https://example.test/v1/responses",
+    ]
+    assert capture["payloads"][0]["max_output_tokens"] == 110
+    assert "max_output_tokens" not in capture["payloads"][1]
+    assert capture["payloads"][1]["max_completion_tokens"] == 110
+
+
+def test_news_sync_summary_uses_chat_when_responses_body_is_empty(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.4", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    capture = {"urls": []}
+    responses = iter(
+        [
+            _SyncResponse({"id": "resp_1", "status": "completed", "output": []}, status_code=200),
+            _SyncResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"summary":"empty body recovered","sentiment":"positive"}',
+                                "role": "assistant",
+                            }
+                        }
+                    ]
+                },
+                status_code=200,
+            ),
+        ]
+    )
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        capture["urls"].append(url)
+        return next(responses)
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    result = module.summarize_title_glm5("Bitcoin ETF approved", {"llm": {"provider": "openai"}}, max_length=60)
+
+    assert result["summary"] == "empty body recovered"
     assert result["sentiment"] == "positive"
     assert capture["urls"] == [
         "https://example.test/v1/responses",
@@ -1381,6 +1547,8 @@ def test_async_glm_client_summarize_batch_marks_openai_source(monkeypatch):
     assert result[0]["summary"] == "headline summary"
     assert result[0]["sentiment"] == "neutral"
     assert result[0]["source"] == "openai_responses"
+    assert "temperature" not in request_mock.await_args.args[2]
+    assert "temperature" not in request_mock.await_args.kwargs["chat_fallback_payload"]
 
 
 def test_news_feed_summarize_cfg_uses_llm_defaults_when_env_absent(monkeypatch):
@@ -1401,7 +1569,7 @@ def test_news_feed_summarize_cfg_uses_llm_defaults_when_env_absent(monkeypatch):
     )
 
     assert effective["llm"]["summarize_batch_size"] == 6
-    assert effective["llm"]["summarize_timeout_sec"] == 20
+    assert effective["llm"]["summarize_timeout_sec"] == 45
 
 
 def test_failed_unstructured_with_llm_summary_is_treated_as_repaired():

@@ -521,7 +521,7 @@
         const topText = topSources.length
             ? topSources.map((row) => `${plainText(row.source || "-")}:${Number(row.count || 0)}`).join(" | ")
             : "--";
-        box.innerHTML = [
+        const rows = [
             `<div class="list-item"><span>历史原文总量 / 活跃源(7d)</span><span>${Number(coverage?.total_count || 0)} / ${Number(coverage?.active_sources_7d || 0)}</span></div>`,
             `<div class="list-item"><span>历史跨度 / 最近入库</span><span>${Number(coverage?.history_span_days || 0).toFixed(1)} 天 / ${fmtTs(coverage?.latest_fetched_at)}</span></div>`,
             `<div class="list-item"><span>最早新闻 / 最新新闻</span><span>${fmtTs(coverage?.earliest_published_at)} / ${fmtTs(coverage?.latest_published_at)}</span></div>`,
@@ -529,7 +529,11 @@
             `<div class="list-item"><span>最近写入模式样本</span><span>${esc(Object.entries(coverage?.recent_ingest_mode_counts || {}).map(([name, count]) => `${name}:${count}`).join(" | ") || "--")}</span></div>`,
             `<div class="list-item"><span>样本Top源</span><span>${esc(topText)}</span></div>`,
             `<div class="list-item"><span>归档说明</span><span>${esc(contract?.guarantees_full_upstream_history ? "已保证全历史" : "保存已拉到原文，可额外补拉历史")}</span></div>`,
-        ].join("");
+        ];
+        if (coverage?.degraded) {
+            rows.push(`<div class="list-item"><span>覆盖状态</span><span>${esc(plainText(coverage?.fallback_reason || "覆盖统计暂不可用，已显示降级结果"))}</span></div>`);
+        }
+        box.innerHTML = rows.join("");
     }
 
     function renderSummary() {
@@ -712,15 +716,15 @@
     }
 
     async function loadLatestSummarized() {
-        return request(`/latest?${params({ hours: getVal("news-hours", "24"), limit: String(Math.min(SUMMARY_LIMIT, Number(getVal("news-max-records", "120")) || SUMMARY_LIMIT)), summarize: "true" }).toString()}`, { timeoutMs: 25000 });
+        return request(`/latest?${params({ hours: getVal("news-hours", "24"), limit: String(Math.min(SUMMARY_LIMIT, Number(getVal("news-max-records", "120")) || SUMMARY_LIMIT)), summarize: "true" }).toString()}`, { timeoutMs: 65000 });
     }
 
     async function loadSummary() {
-        return request(`/summary?${params({ hours: getVal("news-hours", "24"), feed_limit: String(Math.min(80, Number(getVal("news-max-records", "120")) || 120)) }).toString()}`, { timeoutMs: 18000 });
+        return request(`/summary?${params({ hours: getVal("news-hours", "24"), feed_limit: String(Math.min(80, Number(getVal("news-max-records", "120")) || 120)) }).toString()}`, { timeoutMs: 65000 });
     }
 
     async function loadCoverage() {
-        return request("/raw/coverage", { timeoutMs: 15000 });
+        return request("/raw/coverage", { timeoutMs: 35000 });
     }
 
     function mergeSummaries(summaryFeed) {
@@ -841,7 +845,14 @@
                                     renderAll();
                                 }
                             })
-                            .catch(() => null),
+                            .catch(() => {
+                                state.coverage = state.coverage || {
+                                    degraded: true,
+                                    fallback_reason: "覆盖统计暂不可用",
+                                };
+                                renderAll();
+                                return null;
+                            }),
                     ];
                     if (shouldLoadSummary) {
                         state.summaryLoading = true;
