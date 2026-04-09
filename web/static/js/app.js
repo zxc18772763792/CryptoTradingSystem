@@ -674,6 +674,9 @@ return startedAt>0&&(Date.now()-startedAt)<Math.max(0,Number(windowMs||0));
 function refreshDashboardCore(){
 return Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary()]);
 }
+function refreshDashboardPrimary(){
+return Promise.allSettled([loadSummary(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary()]);
+}
 function refreshTradingCore(){
 return Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk()]);
 }
@@ -720,7 +723,8 @@ tradingSecondaryTimer=setTimeout(()=>{
 },Math.max(0,Number(delayMs||0)));
 }
 async function loadDashboardTabData(){
-await refreshDashboardCore();
+loadPositions().catch(()=>{});
+await refreshDashboardPrimary();
 scheduleDashboardSecondaryLoads();
 scheduleDashboardSlowHints();
 }

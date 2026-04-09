@@ -3189,7 +3189,57 @@ async def get_positions():
             },
         }
 
-    if not execution_engine.is_paper_mode():
+    def _build_positions_response(
+        all_positions: List[Dict[str, Any]],
+        exchange_rows: List[Dict[str, Any]],
+        diagnostics_payload: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        stats_positions = all_positions
+        stats = {
+            "position_count": len(stats_positions),
+            "total_value": round(sum(float(p.get("value") or 0.0) for p in stats_positions), 8),
+            "total_unrealized_pnl": round(sum(float(p.get("unrealized_pnl") or 0.0) for p in stats_positions), 8),
+            "total_realized_pnl": round(sum(float(p.get("realized_pnl") or 0.0) for p in stats_positions), 8),
+            "long_positions": len([p for p in stats_positions if str(p.get("side") or "").lower() == "long"]),
+            "short_positions": len([p for p in stats_positions if str(p.get("side") or "").lower() == "short"]),
+            "winning_positions": len([p for p in stats_positions if float(p.get("unrealized_pnl") or 0.0) > 0]),
+            "losing_positions": len([p for p in stats_positions if float(p.get("unrealized_pnl") or 0.0) < 0]),
+        }
+        return {
+            "positions": all_positions,
+            "stats": stats,
+            "exchange_positions_count": len(exchange_rows),
+            "diagnostics": diagnostics_payload if not execution_engine.is_paper_mode() else None,
+        }
+
+    live_mode = not execution_engine.is_paper_mode()
+    cache_age_sec = max(0.0, now_ts - cached_ts)
+    if live_mode and cached_positions and cache_age_sec <= _LIVE_POSITION_DETAILS_CACHE_TTL_SEC:
+        exchange_symbol_set = set()
+        for row in cached_positions:
+            exchange_key = str(row.get("exchange", "") or "").strip().lower()
+            symbol_key = _canonical_symbol(row.get("symbol"))
+            if exchange_key and symbol_key:
+                exchange_symbol_set.add((exchange_key, symbol_key))
+        if exchange_symbol_set:
+            positions = [
+                p
+                for p in positions
+                if (
+                    str(p.get("exchange", "")).lower(),
+                    _canonical_symbol(p.get("symbol")),
+                )
+                not in exchange_symbol_set
+            ]
+        diagnostics = copy.deepcopy(cached_diagnostics or diagnostics)
+        diagnostics["cache_hit"] = {
+            "used": True,
+            "age_sec": round(cache_age_sec, 2),
+        }
+        exchange_positions = copy.deepcopy(cached_positions)
+        return _build_positions_response(positions + exchange_positions, exchange_positions, diagnostics)
+
+    if live_mode:
         # Include live exchange positions so manually-held futures positions are visible in the UI.
         # In live mode, exchange positions are treated as source-of-truth for the same symbol.
         exchange_keys = set()
@@ -3345,7 +3395,7 @@ async def get_positions():
         _LIVE_POSITION_DETAILS_CACHE["positions"] = list(exchange_positions)
         _LIVE_POSITION_DETAILS_CACHE["diagnostics"] = copy.deepcopy(diagnostics)
     elif (
-        not execution_engine.is_paper_mode()
+        live_mode
         and cached_positions
         and (now_ts - cached_ts) <= _LIVE_POSITION_DETAILS_CACHE_TTL_SEC
     ):
@@ -3356,24 +3406,7 @@ async def get_positions():
         }
         all_positions = positions + cached_positions
 
-    stats_positions = all_positions
-    stats = {
-        "position_count": len(stats_positions),
-        "total_value": round(sum(float(p.get("value") or 0.0) for p in stats_positions), 8),
-        "total_unrealized_pnl": round(sum(float(p.get("unrealized_pnl") or 0.0) for p in stats_positions), 8),
-        "total_realized_pnl": round(sum(float(p.get("realized_pnl") or 0.0) for p in stats_positions), 8),
-        "long_positions": len([p for p in stats_positions if str(p.get("side") or "").lower() == "long"]),
-        "short_positions": len([p for p in stats_positions if str(p.get("side") or "").lower() == "short"]),
-        "winning_positions": len([p for p in stats_positions if float(p.get("unrealized_pnl") or 0.0) > 0]),
-        "losing_positions": len([p for p in stats_positions if float(p.get("unrealized_pnl") or 0.0) < 0]),
-    }
-
-    return {
-        "positions": all_positions,
-        "stats": stats,
-        "exchange_positions_count": len(exchange_positions),
-        "diagnostics": diagnostics if not execution_engine.is_paper_mode() else None,
-    }
+    return _build_positions_response(all_positions, exchange_positions, diagnostics)
 
 
 async def close_position(req: PositionCloseRequest):
