@@ -1444,6 +1444,31 @@ class StrategyManager:
                     max_dd = dd
         return max(0.0, min(1.0, float(max_dd)))
 
+    @staticmethod
+    def _group_trade_rows(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("strategy") or "").strip()
+            if not name:
+                continue
+            grouped.setdefault(name, []).append(row)
+        for items in grouped.values():
+            items.sort(key=lambda r: str(r.get("timestamp") or ""))
+        return grouped
+
+    def _load_live_review_trade_groups(self) -> Dict[str, List[Dict[str, Any]]]:
+        from core.trading.execution_engine import execution_engine
+
+        try:
+            review = execution_engine.get_live_trade_review(limit=2000, hours=24 * 365)
+            items = review.get("items") if isinstance(review, dict) else []
+            return self._group_trade_rows(list(items or []))
+        except Exception as exc:
+            logger.debug(f"strategy_manager: live review fallback unavailable: {exc}")
+            return {}
+
     def _build_strategy_performance(self) -> Dict[str, Dict[str, Any]]:
         # Lazy imports avoid circular dependency during module initialization.
         from core.risk.risk_manager import risk_manager
@@ -1454,14 +1479,8 @@ class StrategyManager:
         min_notional = max(1.0, float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 100.0) or 100.0))
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        grouped_trades: Dict[str, List[Dict[str, Any]]] = {}
-        for row in risk_manager.get_trade_history(limit=5000):
-            if not isinstance(row, dict):
-                continue
-            name = str(row.get("strategy") or "").strip()
-            if not name:
-                continue
-            grouped_trades.setdefault(name, []).append(row)
+        grouped_trades = self._group_trade_rows(risk_manager.get_trade_history(limit=5000))
+        live_review_trade_groups: Optional[Dict[str, List[Dict[str, Any]]]] = None
 
         out: Dict[str, Dict[str, Any]] = {}
         for name, strategy in self._strategies.items():
@@ -1469,7 +1488,11 @@ class StrategyManager:
             if not cfg:
                 continue
 
-            trades = sorted(grouped_trades.get(name, []), key=lambda r: str(r.get("timestamp") or ""))
+            trades = list(grouped_trades.get(name, []))
+            if not trades:
+                if live_review_trade_groups is None:
+                    live_review_trade_groups = self._load_live_review_trade_groups()
+                trades = list((live_review_trade_groups or {}).get(name, []))
             realized_pnl = 0.0
             ret_samples: List[float] = []
             equity_base = current_equity * float(cfg.allocation or 0.0) if current_equity > 0 else 0.0

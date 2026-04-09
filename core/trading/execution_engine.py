@@ -352,6 +352,7 @@ class ExecutionEngine:
         self._paper_trading = bool(enabled)
         mode = "paper" if self._paper_trading else "live"
         order_manager.set_paper_trading(self._paper_trading)
+        position_manager.set_scope(mode)
         risk_manager.set_account_scope(mode, reset_baseline=True)
         if sync_runtime_state:
             runtime_state.initialize_mode(mode, reason="execution_engine.set_paper_trading")
@@ -2861,10 +2862,18 @@ class ExecutionEngine:
                     "exchange": exchange,
                     "strategy": signal.strategy_name,
                     "side": side.value,
+                    "signal_type": signal.signal_type.value,
+                    "fill_price": float(fill_price or 0.0),
+                    "quantity": float(exec_amount or 0.0),
                     "notional": float(exec_amount * fill_price),
                     "pnl": net_trade_pnl,
                     "fee_usd": fee_usd,
                     "slippage_cost_usd": slippage_cost_usd,
+                    "order_id": order.id,
+                    "strength": float(signal.strength or 0.0),
+                    "stop_loss": signal.stop_loss,
+                    "take_profit": signal.take_profit,
+                    "action": "open_or_add",
                 }
             )
             await self._record_live_strategy_trade(
@@ -3125,10 +3134,18 @@ class ExecutionEngine:
                 "exchange": exchange,
                 "strategy": signal.strategy_name,
                 "side": signal.signal_type.value,
+                "signal_type": signal.signal_type.value,
+                "fill_price": float(close_price or 0.0),
+                "quantity": float(close_qty or 0.0),
                 "pnl": float(closed.realized_pnl or 0.0) - fee_usd - slippage_cost_usd,
                 "notional": float(close_price * close_qty),
                 "fee_usd": fee_usd,
                 "slippage_cost_usd": slippage_cost_usd,
+                "order_id": close_order.id,
+                "strength": float(signal.strength or 0.0),
+                "stop_loss": signal.stop_loss,
+                "take_profit": signal.take_profit,
+                "action": "close",
             }
         )
         gross_close_pnl = float(closed.realized_pnl or 0.0)
@@ -3542,10 +3559,17 @@ class ExecutionEngine:
                 "exchange": exchange,
                 "strategy": strategy,
                 "side": side_lower,
+                "signal_type": side_lower,
+                "fill_price": float(fill_price or 0.0),
+                "quantity": float(exec_amount or 0.0),
                 "notional": float(exec_amount * fill_price),
                 "pnl": net_trade_pnl,
                 "fee_usd": fee_usd,
                 "slippage_cost_usd": slippage_cost_usd,
+                "order_id": order.id,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "action": "manual_order",
             }
         )
 

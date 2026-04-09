@@ -91,6 +91,9 @@ class RiskManager:
         if self._use_persisted_overlay:
             self._load_autonomy_threshold_overlay()
 
+        self._trade_history_limit = 5000
+        self._trade_history_store_root = Path(getattr(settings, "CACHE_PATH", "cache")) / "runtime_state"
+
         # Runtime state
         self._daily_trades = 0
         self._daily_realized_pnl = 0.0
@@ -109,13 +112,81 @@ class RiskManager:
         self._daily_stop_breach_count = 0
         self._daily_stop_required_breaches_paper = 2
         self._daily_stop_required_breaches_live = 4
-        self._risk_scope = "paper"
+        self._risk_scope = self._normalize_scope(getattr(settings, "TRADING_MODE", "paper"))
+        self._trade_history = self._load_persisted_trade_history(self._risk_scope)
         self._scope_states: Dict[str, Dict[str, Any]] = {}
         self._scope_states[self._risk_scope] = self._snapshot_runtime_state()
 
     @staticmethod
     def _day_start(ts: datetime) -> datetime:
         return ts.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    @staticmethod
+    def _normalize_scope(scope: str) -> str:
+        return "live" if str(scope or "").strip().lower() == "live" else "paper"
+
+    def _trade_history_path(self, scope: Optional[str] = None) -> Path:
+        normalized = self._normalize_scope(scope or self._risk_scope)
+        return self._trade_history_store_root / f"risk_trade_history_{normalized}.json"
+
+    def _load_persisted_trade_history(self, scope: Optional[str] = None) -> List[Dict[str, Any]]:
+        path = self._trade_history_path(scope)
+        try:
+            if not path.exists():
+                return []
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            rows = raw.get("trade_history") if isinstance(raw, dict) else raw
+            if not isinstance(rows, list):
+                return []
+            out: List[Dict[str, Any]] = []
+            for row in rows:
+                if isinstance(row, dict):
+                    out.append(dict(row))
+            return out[-self._trade_history_limit:]
+        except Exception as exc:
+            logger.warning(
+                f"risk_manager: failed to load persisted trade history for scope={scope or self._risk_scope}: {exc}"
+            )
+            return []
+
+    def _persist_trade_history(self, scope: Optional[str] = None) -> None:
+        normalized = self._normalize_scope(scope or self._risk_scope)
+        try:
+            path = self._trade_history_path(normalized)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if normalized == self._risk_scope:
+                rows = list(self._trade_history[-self._trade_history_limit:])
+            else:
+                state = self._scope_states.get(normalized) or self._initial_scope_state(normalized)
+                rows = list(state.get("trade_history") or [])
+            payload = {
+                "scope": normalized,
+                "trade_history": rows[-self._trade_history_limit:],
+            }
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
+        except Exception as exc:
+            logger.warning(f"risk_manager: failed to persist trade history for scope={normalized}: {exc}")
+
+    def _initial_scope_state(self, scope: str) -> Dict[str, Any]:
+        return {
+            "daily_trades": 0,
+            "daily_realized_pnl": 0.0,
+            "daily_start": self._day_start(datetime.now(timezone.utc)),
+            "day_start_equity": None,
+            "current_equity": None,
+            "last_equity": None,
+            "current_unrealized_pnl": 0.0,
+            "equity_curve": [],
+            "equity_timeline": [],
+            "trade_history": self._load_persisted_trade_history(scope),
+            "alerts": [],
+            "trading_halted": False,
+            "halt_reason": "",
+            "daily_stop_guard_until": None,
+            "daily_stop_breach_count": 0,
+        }
 
     def _default_autonomy_threshold_values(self) -> Dict[str, float]:
         daily_loss_ratio = abs(float(self.max_daily_loss_ratio or 0.0))
@@ -252,11 +323,14 @@ class RiskManager:
 
     def set_account_scope(self, scope: str, reset_baseline: bool = False) -> None:
         """Switch runtime risk state between paper/live to avoid cross-mode contamination."""
-        target = "paper" if str(scope or "").lower() == "paper" else "live"
+        target = self._normalize_scope(scope)
         current = getattr(self, "_risk_scope", "paper")
 
         if target != current:
             self._scope_states[current] = self._snapshot_runtime_state()
+            self._persist_trade_history(current)
+            if target not in self._scope_states:
+                self._scope_states[target] = self._initial_scope_state(target)
             self._restore_runtime_state(self._scope_states.get(target))
             self._risk_scope = target
             logger.info(f"Risk manager scope switched: {current} -> {target}")
@@ -494,6 +568,8 @@ class RiskManager:
         self._halt_reason = ""
         self._daily_stop_guard_until = datetime.now(timezone.utc) + timedelta(seconds=30)
         self._daily_stop_breach_count = 0
+        self._scope_states[self._risk_scope] = self._snapshot_runtime_state()
+        self._persist_trade_history(self._risk_scope)
 
         return {
             "trade_history_cleared": trade_count,
@@ -621,7 +697,9 @@ class RiskManager:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )
-        self._trade_history = self._trade_history[-2000:]
+        self._trade_history = self._trade_history[-self._trade_history_limit:]
+        self._scope_states[self._risk_scope] = self._snapshot_runtime_state()
+        self._persist_trade_history(self._risk_scope)
 
     def calculate_max_drawdown(self, equity_curve: List[float]) -> float:
         if not equity_curve:

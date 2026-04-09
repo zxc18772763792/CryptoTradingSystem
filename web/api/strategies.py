@@ -1927,6 +1927,18 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     except Exception as exc:
         logger.debug(f"monitor-data: live review load failed for {name}: {exc}")
 
+    history_trades: list = []
+    try:
+        history_trades = sorted(
+            [
+                r for r in risk_manager.get_trade_history(limit=5000)
+                if isinstance(r, dict) and str(r.get("strategy") or "").strip() == name
+            ],
+            key=lambda r: str(r.get("timestamp") or ""),
+        )
+    except Exception as exc:
+        logger.debug(f"monitor-data: trade history load failed for {name}: {exc}")
+
     # ── 2. OHLCV bars ────────────────────────────────────────────────────────
     ohlcv: list = []
     ohlcv_source_timeframe = timeframe
@@ -2030,7 +2042,18 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
             "take_profit": _safe_optional_float(signal_payload.get("take_profit")),
         })
 
-    signals = executed_signals or recent_signals
+    restored_signals: list = []
+    for row in history_trades:
+        restored_signals.append({
+            "t":           str(row.get("timestamp") or "").strip(),
+            "type":        str(row.get("signal_type") or row.get("side") or "").strip().lower(),
+            "price":       _safe_float(row.get("fill_price") or row.get("price") or 0.0, 0.0),
+            "strength":    _safe_float(row.get("strength"), 1.0),
+            "stop_loss":   _safe_optional_float(row.get("stop_loss")),
+            "take_profit": _safe_optional_float(row.get("take_profit")),
+        })
+
+    signals = executed_signals or restored_signals or recent_signals
 
     # ── 4. Equity curve with timestamps ──────────────────────────────────────
     equity: list = []
@@ -2045,10 +2068,6 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
             current_equity * float((config.allocation if config else 0) or 0),
         )
 
-        history_trades = [
-            r for r in risk_manager.get_trade_history(limit=5000)
-            if isinstance(r, dict) and str(r.get("strategy") or "").strip() == name
-        ]
         trades = sorted(
             live_review_items or history_trades,
             key=lambda r: str(r.get("timestamp") or ""),
@@ -2105,7 +2124,7 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
         for pos in position_manager.get_positions_by_strategy(name):
             side = getattr(pos, "side", None)
             side_value = side.value if hasattr(side, "value") else str(side or "")
-            entry_time = getattr(pos, "entry_time", None)
+            entry_time = getattr(pos, "entry_time", None) or getattr(pos, "opened_at", None)
             positions_data.append({
                 "symbol":             str(getattr(pos, "symbol", "") or ""),
                 "side":               side_value,
