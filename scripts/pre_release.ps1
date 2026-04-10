@@ -88,8 +88,20 @@ try {
         Write-Host ($agent | ConvertTo-Json -Depth 8)
         $running = [bool]($agent.status.running)
         $mode = [string]($agent.config.mode)
-        if ($running -and $mode.Trim().ToLowerInvariant() -eq "execute" -and (-not $AllowExecuteAgent.IsPresent)) {
-            throw "Autonomous agent is running in execute mode. Re-run with -AllowExecuteAgent only if this is intentional."
+        $allowLive = [bool]($agent.config.allow_live)
+        $autoStart = [bool]($agent.config.auto_start)
+        $armedReasons = @()
+        if ($running -and $mode.Trim().ToLowerInvariant() -eq "execute") {
+            $armedReasons += "running execute mode"
+        }
+        if ($allowLive) {
+            $armedReasons += "allow_live=true"
+        }
+        if ($autoStart) {
+            $armedReasons += "auto_start=true"
+        }
+        if ($armedReasons.Count -gt 0 -and (-not $AllowExecuteAgent.IsPresent)) {
+            throw ("Autonomous agent safety gate blocked: {0}. Re-run with -AllowExecuteAgent only if this is intentional." -f ($armedReasons -join ", "))
         }
     }
 } catch {

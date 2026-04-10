@@ -340,8 +340,21 @@ function Show-Status {
     elseif (Test-IsManagedWebProcess -ProcessRecord $webProc) {
         $mode = if ($health -and $health.Status) { [string]$health.Status.trading_mode } else { "unknown" }
         $state = if ($health -and $health.Health) { [string]$health.Health.status } else { "listening_no_health" }
+        $startupMode = if ($health -and $health.Status -and $health.Status.runtime) { $health.Status.runtime.startup_mode } else { $null }
         Write-Host ("  Web          : running (PID={0}, state={1}, mode={2})" -f $webPid, $state, $mode)
         Write-Host ("  URL          : http://127.0.0.1:{0}" -f $PortNumber)
+        if ($startupMode) {
+            $configuredMode = [string]$startupMode.configured_mode
+            $persistedMode = [string]$startupMode.persisted_mode
+            $startupSource = [string]$startupMode.source
+            if ([string]::IsNullOrWhiteSpace($persistedMode)) {
+                $persistedMode = "unset"
+            }
+            Write-Host ("  Startup mode : configured={0}, persisted={1}, source={2}" -f $configuredMode, $persistedMode, $startupSource)
+            if ([bool]$startupMode.blocked_persisted_live_restore) {
+                Write-Host "  Guard        : blocked persisted live-mode restore during startup." -ForegroundColor Yellow
+            }
+        }
         if (-not ($health -and $health.Health)) {
             Write-Host "  Hint         : service is listening but health checks did not answer yet." -ForegroundColor Yellow
             Write-Host "                 Try '.\web.bat stop -IncludeWorkers' then '.\web.bat start' if it stays stuck." -ForegroundColor Yellow
@@ -355,6 +368,7 @@ function Show-Status {
             $agentMode = [string]($agentConfig.mode)
             $agentSymbolMode = [string]($agentConfig.symbol_mode)
             $agentAutoStart = if ([bool]$agentConfig.auto_start) { "true" } else { "false" }
+            $agentAllowLive = if ([bool]$agentConfig.allow_live) { "true" } else { "false" }
             $selectedSymbol = [string]($agentSummary.status.last_selected_symbol)
             if ([string]::IsNullOrWhiteSpace($selectedSymbol)) {
                 $selectedSymbol = [string]($agentConfig.symbol)
@@ -363,13 +377,22 @@ function Show-Status {
                 $selectedSymbol = "n/a"
             }
             Write-Host (
-                "  AI Agent     : {0} (mode={1}, auto_start={2}, symbol_mode={3}, symbol={4})" -f
+                "  AI Agent     : {0} (mode={1}, auto_start={2}, allow_live={3}, symbol_mode={4}, symbol={5})" -f
                 $(if ($agentRunning) { "running" } else { "stopped" }),
                 $(if ([string]::IsNullOrWhiteSpace($agentMode)) { "unknown" } else { $agentMode }),
                 $agentAutoStart,
+                $agentAllowLive,
                 $(if ([string]::IsNullOrWhiteSpace($agentSymbolMode)) { "unknown" } else { $agentSymbolMode }),
                 $selectedSymbol
             )
+            $agentModeText = [string]$agentMode
+            if (
+                $agentModeText.Trim().ToLowerInvariant() -eq "execute" -or
+                $agentAutoStart -eq "true" -or
+                $agentAllowLive -eq "true"
+            ) {
+                Write-Host "  Warning      : AI agent config remains armed (execute/auto-start/live-capable)." -ForegroundColor Yellow
+            }
         }
         else {
             Write-Host "  AI Agent     : status unavailable" -ForegroundColor Yellow
