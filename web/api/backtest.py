@@ -28,6 +28,7 @@ from config.strategy_registry import (
 from core.backtest.common_pnl import build_common_pnl_summary
 from core.backtest.cost_models import fee_rate as resolve_fee_rate
 from core.backtest.cost_models import slippage_rate as resolve_slippage_rate
+from core.backtest.exit_engine import resolve_exit_engine_config, run_exit_engine
 from core.ai.ml_signal import build_feature_frame
 from core.data import data_storage
 from core.research.strategy_research import (
@@ -35,7 +36,6 @@ from core.research.strategy_research import (
     _build_research_enrichment as build_research_enrichment,
 )
 from core.strategies.strategy_base import SignalType
-from strategies.factor_based.factor_strategies import CCIStrategy, StochRSIStrategy, WilliamsRStrategy
 from strategies.quantitative.multi_factor_hf import MultiFactorHFStrategy
 
 router = APIRouter()
@@ -139,9 +139,6 @@ _BACKTEST_BIDIRECTIONAL_OHLCV_STRATEGIES = {
     "WhaleActivityStrategy",
 }
 _BACKTEST_SIGNAL_REPLAY_CLASSES = {
-    "WilliamsRStrategy": WilliamsRStrategy,
-    "CCIStrategy": CCIStrategy,
-    "StochRSIStrategy": StochRSIStrategy,
     "MultiFactorHFStrategy": MultiFactorHFStrategy,
 }
 
@@ -996,6 +993,8 @@ def _build_pairs_backtest_components(
     use_stop_take: bool = False,
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
+    exit_template: Optional[str] = None,
+    exit_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     cfg = dict(params or {})
     normalized_bundle: Dict[str, pd.DataFrame] = {}
@@ -1071,144 +1070,153 @@ def _build_pairs_backtest_components(
     spread_mean = spread.rolling(lookback_period, min_periods=lookback_period).mean()
     spread_std = spread.rolling(lookback_period, min_periods=lookback_period).std().replace(0, np.nan)
     z_score = (spread - spread_mean) / spread_std
+    long_entry = (z_score.shift(1) > -entry_z) & (z_score <= -entry_z)
+    short_entry = (z_score.shift(1) < entry_z) & (z_score >= entry_z)
+    exit_signal = (z_score.abs() <= exit_z) & (z_score.shift(1).abs() > exit_z)
+    raw_spread_state = _stateful_directional_position(
+        common_index,
+        long_entry=long_entry.fillna(False),
+        long_exit=exit_signal.fillna(False),
+        short_entry=short_entry.fillna(False),
+        short_exit=exit_signal.fillna(False),
+        allow_long=True,
+        allow_short=True,
+        reverse_on_signal=True,
+    ).fillna(0.0)
 
-    spread_state = pd.Series(0.0, index=common_index, dtype=float)
-    active_hr = pd.Series(0.0, index=common_index, dtype=float)
+    primary_view = primary.reindex(common_index)
+    pair_view = pair_df.reindex(common_index)
+    primary_high = pd.to_numeric(primary_view.get("high", primary_close), errors="coerce").fillna(primary_close)
+    primary_low = pd.to_numeric(primary_view.get("low", primary_close), errors="coerce").fillna(primary_close)
+    pair_high = pd.to_numeric(pair_view.get("high", pair_close), errors="coerce").fillna(pair_close)
+    pair_low = pd.to_numeric(pair_view.get("low", pair_close), errors="coerce").fillna(pair_close)
+
+    hr_prev = hedge_ratio.shift(1).ffill().fillna(hedge_ratio)
+    prev_gross_notional = (primary_close.shift(1).abs() + hr_prev.abs() * pair_close.shift(1).abs()).replace(0, np.nan)
+    spread_prev = spread.shift(1).fillna(spread.iloc[0])
+    spread_close_ret = ((spread - spread_prev) / prev_gross_notional).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    spread_high = pd.Series(np.nan, index=common_index, dtype=float)
+    spread_low = pd.Series(np.nan, index=common_index, dtype=float)
+    positive_hr = hr_prev >= 0
+    spread_high.loc[positive_hr] = primary_high.loc[positive_hr] - hr_prev.loc[positive_hr] * pair_low.loc[positive_hr]
+    spread_low.loc[positive_hr] = primary_low.loc[positive_hr] - hr_prev.loc[positive_hr] * pair_high.loc[positive_hr]
+    spread_high.loc[~positive_hr] = primary_high.loc[~positive_hr] - hr_prev.loc[~positive_hr] * pair_high.loc[~positive_hr]
+    spread_low.loc[~positive_hr] = primary_low.loc[~positive_hr] - hr_prev.loc[~positive_hr] * pair_low.loc[~positive_hr]
+
+    synthetic_close = pd.Series(index=common_index, dtype=float)
+    synthetic_open = pd.Series(index=common_index, dtype=float)
+    synthetic_high = pd.Series(index=common_index, dtype=float)
+    synthetic_low = pd.Series(index=common_index, dtype=float)
+
+    synthetic_prev_close = 100.0
+    for ts in common_index:
+        close_ret = float(spread_close_ret.loc[ts] if pd.notna(spread_close_ret.loc[ts]) else 0.0)
+        close_ret = float(np.clip(close_ret, -0.95, 5.0))
+        high_ret = float(
+            pd.to_numeric(pd.Series([(spread_high.loc[ts] - spread_prev.loc[ts]) / prev_gross_notional.loc[ts]]), errors="coerce").iloc[0]
+            if pd.notna(prev_gross_notional.loc[ts]) and prev_gross_notional.loc[ts] != 0
+            else close_ret
+        )
+        low_ret = float(
+            pd.to_numeric(pd.Series([(spread_low.loc[ts] - spread_prev.loc[ts]) / prev_gross_notional.loc[ts]]), errors="coerce").iloc[0]
+            if pd.notna(prev_gross_notional.loc[ts]) and prev_gross_notional.loc[ts] != 0
+            else close_ret
+        )
+        high_candidate = synthetic_prev_close * (1.0 + np.clip(high_ret, -0.95, 5.0))
+        low_candidate = synthetic_prev_close * (1.0 + np.clip(low_ret, -0.95, 5.0))
+        close_candidate = synthetic_prev_close * (1.0 + close_ret)
+        synthetic_open.loc[ts] = synthetic_prev_close
+        synthetic_close.loc[ts] = max(0.01, close_candidate)
+        synthetic_high.loc[ts] = max(synthetic_open.loc[ts], synthetic_close.loc[ts], high_candidate, low_candidate)
+        synthetic_low.loc[ts] = max(0.01, min(synthetic_open.loc[ts], synthetic_close.loc[ts], high_candidate, low_candidate))
+        synthetic_prev_close = float(synthetic_close.loc[ts])
+
+    spread_frame = pd.DataFrame(
+        {
+            "open": synthetic_open.values,
+            "high": synthetic_high.values,
+            "low": synthetic_low.values,
+            "close": synthetic_close.values,
+        },
+        index=common_index,
+    )
+
+    pair_exit_config = resolve_exit_engine_config(
+        template_name=exit_template,
+        overrides=exit_overrides,
+        fixed_stop_loss_pct=_safe_positive_pct(stop_loss_pct) if bool(use_stop_take) else None,
+        fixed_take_profit_pct=_safe_positive_pct(take_profit_pct) if bool(use_stop_take) else None,
+        allow_same_bar_exit=False,
+    )
+    spread_execution = run_exit_engine(
+        df=spread_frame,
+        signal_position=raw_spread_state,
+        config=pair_exit_config,
+    )
+
+    spread_state = pd.to_numeric(spread_execution.effective_position, errors="coerce").fillna(0.0)
+    active_hr = hedge_ratio.where(spread_state.abs() > 0, 0.0).ffill().fillna(0.0)
+    gross_returns = pd.to_numeric(spread_execution.gross_returns, errors="coerce").fillna(0.0)
+    turnover = pd.to_numeric(spread_execution.turnover, errors="coerce").fillna(0.0)
+    clip_limit = _return_clip_limit(timeframe)
+    anomaly_ratio = float((gross_returns.abs() > clip_limit).mean() or 0.0)
+    latest_hedge_ratio = float(hedge_ratio.iloc[-1]) if len(hedge_ratio) else 0.0
+    latest_z = float(z_score.iloc[-1]) if len(z_score) and np.isfinite(z_score.iloc[-1]) else float("nan")
+
     trade_open_points: List[Dict[str, Any]] = []
     trade_close_points: List[Dict[str, Any]] = []
     buy_points: List[Dict[str, Any]] = []
     sell_points: List[Dict[str, Any]] = []
+    pair_context = pd.DataFrame(
+        {
+            "primary_close": primary_close,
+            "pair_close": pair_close,
+            "spread": spread,
+            "z_score": z_score,
+        },
+        index=common_index,
+    )
 
-    sl_pct = _safe_positive_pct(stop_loss_pct) if bool(use_stop_take) else None
-    tp_pct = _safe_positive_pct(take_profit_pct) if bool(use_stop_take) else None
-    forced_stop = 0
-    forced_take = 0
-    entries = 0
-    exits = 0
-    completed = 0
-    wins = 0
+    for point in list(spread_execution.trade_points.get("open_points") or []):
+        ts = pd.Timestamp(point.get("timestamp"))
+        ctx = pair_context.loc[ts]
+        direction = "long_spread" if str(point.get("direction")) == "long" else "short_spread"
+        item = {
+            "trade_id": point.get("trade_id"),
+            "timestamp": ts.isoformat(),
+            "price": float(ctx["primary_close"]),
+            "pair_price": float(ctx["pair_close"]),
+            "spread": float(ctx["spread"]) if np.isfinite(ctx["spread"]) else None,
+            "z_score": float(ctx["z_score"]) if np.isfinite(ctx["z_score"]) else None,
+            "direction": direction,
+        }
+        trade_open_points.append(item)
+        if direction == "long_spread":
+            buy_points.append({"timestamp": item["timestamp"], "price": item["price"]})
+        else:
+            sell_points.append({"timestamp": item["timestamp"], "price": item["price"]})
 
-    state = 0.0
-    trade_hr = 0.0
-    entry_price1 = 0.0
-    entry_price2 = 0.0
-    entry_notional = 0.0
-
-    for idx, ts in enumerate(common_index):
-        px1 = float(primary_close.iloc[idx])
-        px2 = float(pair_close.iloc[idx])
-        current_hr = float(hedge_ratio.iloc[idx]) if np.isfinite(hedge_ratio.iloc[idx]) else trade_hr
-        current_z = float(z_score.iloc[idx]) if np.isfinite(z_score.iloc[idx]) else float("nan")
-        prev_z = float(z_score.iloc[idx - 1]) if idx > 0 and np.isfinite(z_score.iloc[idx - 1]) else float("nan")
-        valid_signal = np.isfinite(current_z) and np.isfinite(prev_z)
-
-        active_trade_return = None
-        if state != 0 and np.isfinite(px1) and np.isfinite(px2) and entry_notional > 0:
-            active_trade_return = (
-                state * ((px1 - entry_price1) - trade_hr * (px2 - entry_price2)) / entry_notional
-            )
-
-        should_exit = False
-        exit_reason = ""
-        if state != 0:
-            if sl_pct is not None and active_trade_return is not None and active_trade_return <= -sl_pct:
-                should_exit = True
-                exit_reason = "stop_loss"
-                forced_stop += 1
-            elif tp_pct is not None and active_trade_return is not None and active_trade_return >= tp_pct:
-                should_exit = True
-                exit_reason = "take_profit"
-                forced_take += 1
-            elif valid_signal and abs(current_z) <= exit_z < abs(prev_z):
-                should_exit = True
-                exit_reason = "mean_revert_exit"
-
-        if should_exit:
-            exits += 1
-            completed += 1
-            if active_trade_return is not None and active_trade_return > 0:
-                wins += 1
-            close_point = {
-                "timestamp": pd.Timestamp(ts).isoformat(),
-                "price": px1,
-                "pair_price": px2,
-                "spread": float(spread.loc[ts]) if np.isfinite(spread.loc[ts]) else None,
-                "z_score": current_z if np.isfinite(current_z) else None,
-                "direction": "long_spread" if state > 0 else "short_spread",
-                "reason": exit_reason,
-            }
-            trade_close_points.append(close_point)
-            if state > 0:
-                sell_points.append({"timestamp": close_point["timestamp"], "price": px1})
-            else:
-                buy_points.append({"timestamp": close_point["timestamp"], "price": px1})
-            state = 0.0
-            trade_hr = 0.0
-            entry_price1 = 0.0
-            entry_price2 = 0.0
-            entry_notional = 0.0
-
-        elif state == 0 and valid_signal and prev_z > -entry_z >= current_z:
-            proposed_notional = abs(px1) + abs(current_hr) * abs(px2)
-            if np.isfinite(proposed_notional) and proposed_notional > 0:
-                state = 1.0
-                trade_hr = current_hr
-                entry_price1 = px1
-                entry_price2 = px2
-                entry_notional = proposed_notional
-                entries += 1
-                open_point = {
-                    "timestamp": pd.Timestamp(ts).isoformat(),
-                    "price": px1,
-                    "pair_price": px2,
-                    "spread": float(spread.loc[ts]) if np.isfinite(spread.loc[ts]) else None,
-                    "z_score": current_z if np.isfinite(current_z) else None,
-                    "direction": "long_spread",
-                }
-                trade_open_points.append(open_point)
-                buy_points.append({"timestamp": open_point["timestamp"], "price": px1})
-
-        elif state == 0 and valid_signal and prev_z < entry_z <= current_z:
-            proposed_notional = abs(px1) + abs(current_hr) * abs(px2)
-            if np.isfinite(proposed_notional) and proposed_notional > 0:
-                state = -1.0
-                trade_hr = current_hr
-                entry_price1 = px1
-                entry_price2 = px2
-                entry_notional = proposed_notional
-                entries += 1
-                open_point = {
-                    "timestamp": pd.Timestamp(ts).isoformat(),
-                    "price": px1,
-                    "pair_price": px2,
-                    "spread": float(spread.loc[ts]) if np.isfinite(spread.loc[ts]) else None,
-                    "z_score": current_z if np.isfinite(current_z) else None,
-                    "direction": "short_spread",
-                }
-                trade_open_points.append(open_point)
-                sell_points.append({"timestamp": open_point["timestamp"], "price": px1})
-
-        spread_state.iloc[idx] = state
-        active_hr.iloc[idx] = trade_hr if state != 0 else 0.0
-
-    prev_state = spread_state.shift(1).fillna(0.0)
-    prev_hr = active_hr.shift(1).fillna(0.0)
-    delta1 = primary_close.diff().fillna(0.0)
-    delta2 = pair_close.diff().fillna(0.0)
-    prev_gross_notional = (primary_close.shift(1).abs() + prev_hr.abs() * pair_close.shift(1).abs()).replace(0, np.nan)
-    gross_returns = ((prev_state * delta1) - (prev_state * prev_hr * delta2)) / prev_gross_notional
-    gross_returns = gross_returns.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-    current_gross_notional = (primary_close.abs() + active_hr.abs() * pair_close.abs()).replace(0, np.nan)
-    weight1 = (spread_state * primary_close.abs() / current_gross_notional).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    weight2 = ((-spread_state * active_hr * pair_close.abs()) / current_gross_notional).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    turnover = weight1.diff().abs().fillna(weight1.abs()) + weight2.diff().abs().fillna(weight2.abs())
-
-    clip_limit = _return_clip_limit(timeframe)
-    anomaly_ratio = float((gross_returns.abs() > clip_limit).mean() or 0.0)
-    win_rate = (wins / completed * 100.0) if completed else 0.0
-    latest_hedge_ratio = float(hedge_ratio.iloc[-1]) if len(hedge_ratio) else 0.0
-    latest_z = float(z_score.iloc[-1]) if len(z_score) and np.isfinite(z_score.iloc[-1]) else float("nan")
+    for point in list(spread_execution.trade_points.get("close_points") or []):
+        ts = pd.Timestamp(point.get("timestamp"))
+        ctx = pair_context.loc[ts]
+        direction = "long_spread" if str(point.get("direction")) == "long" else "short_spread"
+        item = {
+            "trade_id": point.get("trade_id"),
+            "timestamp": ts.isoformat(),
+            "price": float(ctx["primary_close"]),
+            "pair_price": float(ctx["pair_close"]),
+            "spread": float(ctx["spread"]) if np.isfinite(ctx["spread"]) else None,
+            "z_score": float(ctx["z_score"]) if np.isfinite(ctx["z_score"]) else None,
+            "direction": direction,
+            "reason": point.get("reason"),
+            "size_fraction": point.get("size_fraction"),
+        }
+        trade_close_points.append(item)
+        if direction == "long_spread":
+            sell_points.append({"timestamp": item["timestamp"], "price": item["price"]})
+        else:
+            buy_points.append({"timestamp": item["timestamp"], "price": item["price"]})
 
     return {
         "benchmark_close": primary_close.copy(),
@@ -1223,24 +1231,20 @@ def _build_pairs_backtest_components(
         "position_exposure": spread_state.abs(),
         "gross_returns": gross_returns,
         "turnover": turnover.fillna(0.0),
-        "trade_stats": {
-            "entries": int(entries),
-            "exits": int(exits),
-            "completed": int(completed),
-            "win_rate": round(float(win_rate), 2),
-        },
-        "protective_stats": {
-            "forced_stop_exits": int(forced_stop),
-            "forced_take_exits": int(forced_take),
-        },
+        "trade_stats": dict(spread_execution.trade_stats),
+        "protective_stats": dict(spread_execution.protective_stats),
         "trade_points": {
             "buy_points": buy_points,
             "sell_points": sell_points,
             "open_points": trade_open_points,
             "close_points": trade_close_points,
-            "entries": int(entries),
-            "exits": int(exits),
+            "entries": int(spread_execution.trade_points.get("entries") or 0),
+            "exits": int(spread_execution.trade_points.get("exits") or 0),
         },
+        "exit_reason_breakdown": dict(spread_execution.exit_reason_breakdown),
+        "exit_events": list(spread_execution.exit_events),
+        "completed_trades": list(spread_execution.completed_trades),
+        "exit_config": dict(spread_execution.config),
         "effective_data_points": int(len(common_index)),
         "effective_start_date": pd.Timestamp(common_index[0]).isoformat(),
         "effective_end_date": pd.Timestamp(common_index[-1]).isoformat(),
@@ -1455,7 +1459,81 @@ def _build_positions_v2(strategy: str, df: pd.DataFrame, params: Optional[Dict[s
             reverse_on_signal=reverse_on_signal,
         ).fillna(0.0)
 
-    if strategy == "MAStrategy":
+    if strategy == "WilliamsRStrategy":
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce")
+        period = int(params.get("period", 14))
+        oversold = float(params.get("oversold", -80))
+        overbought = float(params.get("overbought", -20))
+        highest = high.rolling(period, min_periods=period).max()
+        lowest = low.rolling(period, min_periods=period).min()
+        wr = (highest - close) / (highest - lowest).replace(0, np.nan) * -100.0
+        buy = (wr.shift(1) < oversold) & (wr >= oversold)
+        sell = (wr.shift(1) > overbought) & (wr <= overbought)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=buy.fillna(False),
+            long_exit=sell.fillna(False),
+            short_entry=sell.fillna(False),
+            short_exit=buy.fillna(False),
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "CCIStrategy":
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce")
+        period = int(params.get("period", 20))
+        constant = float(params.get("constant", 0.015) or 0.015)
+        oversold = float(params.get("oversold", -100))
+        overbought = float(params.get("overbought", 100))
+        typical_price = (high + low + close) / 3.0
+        sma = typical_price.rolling(period, min_periods=period).mean()
+        mad = typical_price.rolling(period, min_periods=period).apply(
+            lambda values: float(np.abs(values - values.mean()).mean()),
+            raw=True,
+        )
+        cci = (typical_price - sma) / (constant * mad.replace(0, np.nan))
+        buy = (cci.shift(1) < oversold) & (cci >= oversold)
+        sell = (cci.shift(1) > overbought) & (cci <= overbought)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=buy.fillna(False),
+            long_exit=sell.fillna(False),
+            short_entry=sell.fillna(False),
+            short_exit=buy.fillna(False),
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "StochRSIStrategy":
+        rsi_period = int(params.get("rsi_period", 14))
+        stoch_period = int(params.get("stoch_period", 14))
+        oversold = float(params.get("oversold", 20))
+        overbought = float(params.get("overbought", 80))
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = (-delta).where(delta < 0, 0.0)
+        avg_gain = gain.rolling(rsi_period, min_periods=rsi_period).mean()
+        avg_loss = loss.rolling(rsi_period, min_periods=rsi_period).mean()
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        rsi_min = rsi.rolling(stoch_period, min_periods=stoch_period).min()
+        rsi_max = rsi.rolling(stoch_period, min_periods=stoch_period).max()
+        stoch_rsi = (rsi - rsi_min) / (rsi_max - rsi_min).replace(0, np.nan) * 100.0
+        buy = (stoch_rsi.shift(1) < oversold) & (stoch_rsi >= oversold)
+        sell = (stoch_rsi.shift(1) > overbought) & (stoch_rsi <= overbought)
+        position = _stateful_directional_position(
+            df.index,
+            long_entry=buy.fillna(False),
+            long_exit=sell.fillna(False),
+            short_entry=sell.fillna(False),
+            short_exit=buy.fillna(False),
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    elif strategy == "MAStrategy":
         fast_n = int(params.get("fast_period", 20))
         slow_n = int(params.get("slow_period", 60))
         fast = close.rolling(fast_n, min_periods=fast_n).mean()
@@ -2843,174 +2921,28 @@ def _simulate_execution_summary(
     *,
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
+    exit_template: Optional[str] = None,
+    exit_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    base_index = df.index
-    effective = pd.Series(0.0, index=base_index, dtype=float)
-    target = (
-        pd.to_numeric(position.reindex(base_index), errors="coerce")
-        .fillna(0.0)
-        .map(_signed_state)
-        .astype(float)
+    config = resolve_exit_engine_config(
+        template_name=exit_template,
+        overrides=exit_overrides,
+        fixed_stop_loss_pct=_safe_positive_pct(stop_loss_pct),
+        fixed_take_profit_pct=_safe_positive_pct(take_profit_pct),
+        allow_same_bar_exit=False,
     )
-    close = pd.to_numeric(df.get("close"), errors="coerce").reindex(base_index)
-    high = pd.to_numeric(df.get("high", close), errors="coerce").reindex(base_index)
-    low = pd.to_numeric(df.get("low", close), errors="coerce").reindex(base_index)
-
-    buy_points: List[Dict[str, Any]] = []
-    sell_points: List[Dict[str, Any]] = []
-    open_points: List[Dict[str, Any]] = []
-    close_points: List[Dict[str, Any]] = []
-
-    sl_pct = _safe_positive_pct(stop_loss_pct)
-    tp_pct = _safe_positive_pct(take_profit_pct)
-
-    state = 0.0
-    entry_price = 0.0
-    entries = 0
-    exits = 0
-    completed = 0
-    wins = 0
-    forced_stop = 0
-    forced_take = 0
-
-    def _record_open(ts: Any, price: float, direction: str) -> None:
-        point = {
-            "timestamp": pd.Timestamp(ts).isoformat(),
-            "price": float(price),
-            "direction": direction,
-        }
-        open_points.append(point)
-        if direction == "long":
-            buy_points.append({"timestamp": point["timestamp"], "price": point["price"]})
-        else:
-            sell_points.append({"timestamp": point["timestamp"], "price": point["price"]})
-
-    def _record_close(ts: Any, price: float, direction: str, *, reason: str = "") -> None:
-        point = {
-            "timestamp": pd.Timestamp(ts).isoformat(),
-            "price": float(price),
-            "direction": direction,
-        }
-        if reason:
-            point["reason"] = reason
-        close_points.append(point)
-        if direction == "long":
-            sell_points.append({"timestamp": point["timestamp"], "price": point["price"]})
-        else:
-            buy_points.append({"timestamp": point["timestamp"], "price": point["price"]})
-
-    def _trade_return(direction_state: float, exit_price: float) -> float:
-        if entry_price <= 0:
-            return 0.0
-        if direction_state > 0:
-            return (float(exit_price) - entry_price) / entry_price
-        return (entry_price - float(exit_price)) / entry_price
-
-    for idx, ts in enumerate(base_index):
-        desired = _signed_state(target.iloc[idx])
-        px = float(close.iloc[idx]) if pd.notna(close.iloc[idx]) else float("nan")
-        hi = float(high.iloc[idx]) if pd.notna(high.iloc[idx]) else px
-        lo = float(low.iloc[idx]) if pd.notna(low.iloc[idx]) else px
-
-        if (not np.isfinite(px)) or px <= 0:
-            effective.iloc[idx] = state
-            continue
-
-        if state == 0.0 and desired != 0.0:
-            state = desired
-            entry_price = px
-            effective.iloc[idx] = state
-            entries += 1
-            _record_open(ts, px, "long" if state > 0 else "short")
-            continue
-
-        if state == 0.0:
-            effective.iloc[idx] = 0.0
-            continue
-
-        hit_stop = False
-        hit_take = False
-        stop_price = float("nan")
-        take_price = float("nan")
-        if sl_pct is not None:
-            stop_price = entry_price * (1.0 - sl_pct if state > 0 else 1.0 + sl_pct)
-            if state > 0 and np.isfinite(lo) and lo <= stop_price:
-                hit_stop = True
-            if state < 0 and np.isfinite(hi) and hi >= stop_price:
-                hit_stop = True
-        if tp_pct is not None:
-            take_price = entry_price * (1.0 + tp_pct if state > 0 else 1.0 - tp_pct)
-            if state > 0 and np.isfinite(hi) and hi >= take_price:
-                hit_take = True
-            if state < 0 and np.isfinite(lo) and lo <= take_price:
-                hit_take = True
-
-        if hit_stop or hit_take:
-            exits += 1
-            completed += 1
-            if hit_stop:
-                forced_stop += 1
-                exit_price = stop_price
-                exit_reason = "stop_loss"
-            else:
-                forced_take += 1
-                exit_price = take_price
-                exit_reason = "take_profit"
-            if _trade_return(state, exit_price) > 0:
-                wins += 1
-            _record_close(ts, exit_price, "long" if state > 0 else "short", reason=exit_reason)
-            state = 0.0
-            entry_price = 0.0
-            effective.iloc[idx] = 0.0
-            continue
-
-        if desired == 0.0:
-            exits += 1
-            completed += 1
-            if _trade_return(state, px) > 0:
-                wins += 1
-            _record_close(ts, px, "long" if state > 0 else "short", reason="signal_exit")
-            state = 0.0
-            entry_price = 0.0
-            effective.iloc[idx] = 0.0
-            continue
-
-        if desired != state:
-            exits += 1
-            completed += 1
-            if _trade_return(state, px) > 0:
-                wins += 1
-            _record_close(ts, px, "long" if state > 0 else "short", reason="reverse")
-            state = desired
-            entry_price = px
-            entries += 1
-            _record_open(ts, px, "long" if state > 0 else "short")
-            effective.iloc[idx] = state
-            continue
-
-        effective.iloc[idx] = state
-
-    win_rate = (wins / completed * 100.0) if completed else 0.0
+    result = run_exit_engine(df=df, signal_position=position, config=config)
     return {
-        "effective_position": effective,
-        "trade_points": {
-            "buy_points": buy_points,
-            "sell_points": sell_points,
-            "open_points": open_points,
-            "close_points": close_points,
-            "entries": int(entries),
-            "exits": int(exits),
-        },
-        "trade_stats": {
-            "entries": int(entries),
-            "exits": int(exits),
-            "completed": int(completed),
-            "win_rate": round(float(win_rate), 2),
-        },
-        "protective_stats": {
-            "forced_stop_exits": int(forced_stop),
-            "forced_take_exits": int(forced_take),
-        },
+        "effective_position": result.effective_position,
+        "gross_returns": result.gross_returns,
+        "turnover": result.turnover,
+        "trade_points": dict(result.trade_points),
+        "trade_stats": dict(result.trade_stats),
+        "protective_stats": dict(result.protective_stats),
+        "exit_reason_breakdown": dict(result.exit_reason_breakdown),
+        "exit_events": list(result.exit_events),
+        "completed_trades": list(result.completed_trades),
+        "exit_config": dict(result.config),
     }
 
 
@@ -3022,6 +2954,77 @@ def _extract_trade_points(close: pd.Series, position: pd.Series) -> Dict[str, Li
 def _trade_stats(close: pd.Series, position: pd.Series) -> Dict[str, Any]:
     frame = pd.DataFrame({"close": close, "high": close, "low": close})
     return dict(_simulate_execution_summary(frame, position)["trade_stats"])
+
+
+def _trade_metric_summary(
+    completed_trades: List[Dict[str, Any]],
+    *,
+    round_trip_cost_rate: float,
+) -> Dict[str, Any]:
+    if not completed_trades:
+        return {
+            "profit_factor": 0.0,
+            "avg_trade": 0.0,
+            "avg_winner": 0.0,
+            "avg_loser": 0.0,
+            "avg_bars_per_trade": 0.0,
+            "expectancy": 0.0,
+            "max_consecutive_losses": 0,
+            "mfe_avg_pct": 0.0,
+            "mae_avg_pct": 0.0,
+            "mfe_median_pct": 0.0,
+            "mae_median_pct": 0.0,
+            "trade_returns_pct": [],
+        }
+
+    gross_trade_returns = [
+        float(pd.to_numeric(pd.Series([row.get("gross_return_pct")]), errors="coerce").iloc[0] or 0.0) / 100.0
+        for row in completed_trades
+    ]
+    net_trade_returns = [gross - float(round_trip_cost_rate) for gross in gross_trade_returns]
+    winners = [value for value in net_trade_returns if value > 0]
+    losers = [value for value in net_trade_returns if value < 0]
+
+    consecutive_losses = 0
+    max_consecutive_losses = 0
+    for value in net_trade_returns:
+        if value < 0:
+            consecutive_losses += 1
+            max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
+        else:
+            consecutive_losses = 0
+
+    gross_profit = sum(value for value in net_trade_returns if value > 0)
+    gross_loss = abs(sum(value for value in net_trade_returns if value < 0))
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
+
+    bars = [
+        float(pd.to_numeric(pd.Series([row.get("bars_in_trade")]), errors="coerce").iloc[0] or 0.0)
+        for row in completed_trades
+    ]
+    mfe_values = [
+        float(pd.to_numeric(pd.Series([row.get("mfe_pct")]), errors="coerce").iloc[0] or 0.0)
+        for row in completed_trades
+    ]
+    mae_values = [
+        float(pd.to_numeric(pd.Series([row.get("mae_pct")]), errors="coerce").iloc[0] or 0.0)
+        for row in completed_trades
+    ]
+
+    return {
+        "profit_factor": float(profit_factor),
+        "avg_trade": float(np.mean(net_trade_returns) * 100.0),
+        "avg_winner": float(np.mean(winners) * 100.0) if winners else 0.0,
+        "avg_loser": float(np.mean(losers) * 100.0) if losers else 0.0,
+        "avg_bars_per_trade": float(np.mean(bars)) if bars else 0.0,
+        "expectancy": float(np.mean(net_trade_returns) * 100.0),
+        "max_consecutive_losses": int(max_consecutive_losses),
+        "mfe_avg_pct": float(np.mean(mfe_values)) if mfe_values else 0.0,
+        "mae_avg_pct": float(np.mean(mae_values)) if mae_values else 0.0,
+        "mfe_median_pct": float(np.median(mfe_values)) if mfe_values else 0.0,
+        "mae_median_pct": float(np.median(mae_values)) if mae_values else 0.0,
+        "trade_returns_pct": [float(value * 100.0) for value in net_trade_returns],
+    }
 
 
 def _apply_protective_position_rules(
@@ -3140,6 +3143,10 @@ def _run_backtest_core(
     use_stop_take: bool = False,
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
+    exit_template: Optional[str] = None,
+    exit_overrides: Optional[Dict[str, Any]] = None,
+    include_trade_log: bool = False,
+    precomputed_position: Optional[pd.Series] = None,
 ) -> Dict[str, Any]:
     if not is_strategy_backtest_supported(strategy):
         info = get_backtest_strategy_info(strategy)
@@ -3179,6 +3186,17 @@ def _run_backtest_core(
     rendered_trade_points: Optional[Dict[str, Any]] = None
     position_for_diagnostics = pd.Series(0.0, index=df.index, dtype=float)
     pair_components: Optional[Dict[str, Any]] = None
+    exit_reason_breakdown: Dict[str, int] = {
+        "stop": 0,
+        "take_profit": 0,
+        "trailing": 0,
+        "reversal": 0,
+        "partial": 0,
+        "time_stop": 0,
+    }
+    exit_events: List[Dict[str, Any]] = []
+    completed_trades: List[Dict[str, Any]] = []
+    resolved_exit_config: Dict[str, Any] = {}
     if strategy == "FamaFactorArbitrageStrategy":
         components = _build_fama_backtest_components(
             market_bundle=market_bundle or {},
@@ -3207,6 +3225,8 @@ def _run_backtest_core(
             use_stop_take=bool(protective_enabled),
             stop_loss_pct=resolved_stop_loss_pct,
             take_profit_pct=resolved_take_profit_pct,
+            exit_template=exit_template,
+            exit_overrides=exit_overrides,
         )
         benchmark_close = pair_components["benchmark_close"]
         gross_returns = pd.to_numeric(pair_components["gross_returns"], errors="coerce").fillna(0.0)
@@ -3218,25 +3238,36 @@ def _run_backtest_core(
         trade_stats = dict(pair_components.get("trade_stats") or {"entries": 0, "exits": 0, "completed": 0, "win_rate": 0.0})
         protective_stats = dict(pair_components.get("protective_stats") or protective_stats)
         rendered_trade_points = dict(pair_components.get("trade_points") or {})
+        exit_reason_breakdown.update(dict(pair_components.get("exit_reason_breakdown") or {}))
+        exit_events = list(pair_components.get("exit_events") or [])
+        completed_trades = list(pair_components.get("completed_trades") or [])
+        resolved_exit_config = dict(pair_components.get("exit_config") or {})
     else:
-        raw_position = _build_positions(strategy, df, params=merged_params)
+        raw_position = (
+            pd.to_numeric(precomputed_position.reindex(df.index), errors="coerce").fillna(0.0)
+            if precomputed_position is not None
+            else _build_positions(strategy, df, params=merged_params)
+        )
         execution_summary = _simulate_execution_summary(
             df,
             raw_position,
             stop_loss_pct=resolved_stop_loss_pct if protective_enabled else None,
             take_profit_pct=resolved_take_profit_pct if protective_enabled else None,
+            exit_template=exit_template,
+            exit_overrides=exit_overrides,
         )
         position = execution_summary["effective_position"]
         protective_stats = dict(execution_summary["protective_stats"])
         rendered_trade_points = dict(execution_summary["trade_points"])
+        gross_returns = pd.to_numeric(execution_summary.get("gross_returns"), errors="coerce").fillna(0.0)
+        turnover = pd.to_numeric(execution_summary.get("turnover"), errors="coerce").fillna(0.0)
         returns, anomaly_ratio, clip_limit = _safe_bar_returns(df["close"], timeframe)
-        gross_returns = position.shift(1).fillna(0.0) * returns
-
-        turnover = position.diff().abs().fillna(0.0)
-        if len(position) > 0:
-            turnover.iloc[0] = abs(float(position.iloc[0] or 0.0))
         trade_stats = dict(execution_summary["trade_stats"])
         position_for_diagnostics = position.abs().clip(lower=0.0, upper=1.0)
+        exit_reason_breakdown.update(dict(execution_summary.get("exit_reason_breakdown") or {}))
+        exit_events = list(execution_summary.get("exit_events") or [])
+        completed_trades = list(execution_summary.get("completed_trades") or [])
+        resolved_exit_config = dict(execution_summary.get("exit_config") or {})
 
     if not protective_enabled:
         resolved_stop_loss_pct = None
@@ -3263,6 +3294,17 @@ def _run_backtest_core(
     ann = _annual_factor(timeframe)
     std = float(strategy_returns.std() or 0.0)
     sharpe = float(strategy_returns.mean() / std * np.sqrt(ann)) if std > 0 else 0.0
+    periods = max(1, len(strategy_returns))
+    if initial_capital > 0 and final_capital > 0:
+        annualized_return = (float(final_capital / initial_capital) ** (float(ann) / float(periods)) - 1.0) * 100.0
+    else:
+        annualized_return = -100.0
+    calmar = annualized_return / max_drawdown if max_drawdown > 0 else (float("inf") if annualized_return > 0 else 0.0)
+    round_trip_cost_rate = float(total_cost_rate) * 2.0
+    trade_metric_summary = _trade_metric_summary(
+        completed_trades,
+        round_trip_cost_rate=round_trip_cost_rate,
+    )
 
     quality_flag = "ok"
     if anomaly_ratio > 0.02:
@@ -3275,9 +3317,11 @@ def _run_backtest_core(
     result = {
         "final_capital": round(final_capital, 2),
         "total_return": round(total_return, 2),
+        "annualized_return": round(float(annualized_return), 2),
         "total_trades": trade_stats["completed"],
         "win_rate": trade_stats["win_rate"],
         "max_drawdown": round(max_drawdown, 2),
+        "calmar": round(float(calmar), 2) if np.isfinite(calmar) else None,
         "sharpe_ratio": round(sharpe, 2),
         "entry_signals": trade_stats["entries"],
         "exit_signals": trade_stats["exits"],
@@ -3305,6 +3349,20 @@ def _run_backtest_core(
             int(protective_stats.get("forced_stop_exits") or 0)
             + int(protective_stats.get("forced_take_exits") or 0)
         ),
+        "profit_factor": round(float(trade_metric_summary.get("profit_factor") or 0.0), 4),
+        "average_trade": round(float(trade_metric_summary.get("avg_trade") or 0.0), 4),
+        "average_winner": round(float(trade_metric_summary.get("avg_winner") or 0.0), 4),
+        "average_loser": round(float(trade_metric_summary.get("avg_loser") or 0.0), 4),
+        "avg_bars_per_trade": round(float(trade_metric_summary.get("avg_bars_per_trade") or 0.0), 4),
+        "expectancy": round(float(trade_metric_summary.get("expectancy") or 0.0), 4),
+        "max_consecutive_losses": int(trade_metric_summary.get("max_consecutive_losses") or 0),
+        "mfe_avg_pct": round(float(trade_metric_summary.get("mfe_avg_pct") or 0.0), 4),
+        "mae_avg_pct": round(float(trade_metric_summary.get("mae_avg_pct") or 0.0), 4),
+        "mfe_median_pct": round(float(trade_metric_summary.get("mfe_median_pct") or 0.0), 4),
+        "mae_median_pct": round(float(trade_metric_summary.get("mae_median_pct") or 0.0), 4),
+        "exit_reason_breakdown": dict(exit_reason_breakdown),
+        "exit_template": str(exit_template or ""),
+        "exit_config": dict(resolved_exit_config),
         "news_events_count": int(df.attrs.get("news_events_count", 0) or 0),
         "funding_available": bool(df.attrs.get("funding_available", False)),
         "data_mode": str(
@@ -3430,6 +3488,10 @@ def _run_backtest_core(
 
         result["series"] = rendered_series
         result["trade_points"] = points
+
+    if include_trade_log:
+        result["trade_events"] = exit_events
+        result["completed_trades"] = completed_trades
 
     return result
 
