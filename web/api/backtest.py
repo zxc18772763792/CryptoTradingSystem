@@ -28,7 +28,7 @@ from config.strategy_registry import (
 from core.backtest.common_pnl import build_common_pnl_summary
 from core.backtest.cost_models import fee_rate as resolve_fee_rate
 from core.backtest.cost_models import slippage_rate as resolve_slippage_rate
-from core.backtest.exit_engine import resolve_exit_engine_config, run_exit_engine
+from core.backtest.exit_engine import EXIT_TEMPLATE_PRESETS, resolve_exit_engine_config, run_exit_engine
 from core.ai.ml_signal import build_feature_frame
 from core.data import data_storage
 from core.research.strategy_research import (
@@ -96,6 +96,8 @@ _BACKTEST_COMPARE_FAST_MAX_TRIALS = {
     "short": 32,
     "default": 48,
 }
+_BACKTEST_EXIT_TEMPLATE_CHOICES = ["Original", *EXIT_TEMPLATE_PRESETS.keys()]
+_DEFAULT_BACKTEST_EXIT_TEMPLATE = "SignalPlusTimeStop"
 _BACKTEST_BIDIRECTIONAL_OHLCV_STRATEGIES = {
     "MAStrategy",
     "EMAStrategy",
@@ -563,6 +565,34 @@ def _safe_positive_pct(value: Any) -> Optional[float]:
     if out >= 1:
         return None
     return out
+
+
+def _normalize_requested_exit_template(
+    exit_template: Optional[str],
+    *,
+    default_template: str = _DEFAULT_BACKTEST_EXIT_TEMPLATE,
+) -> str:
+    raw = str(exit_template or "").strip()
+    resolved = raw or str(default_template or _DEFAULT_BACKTEST_EXIT_TEMPLATE)
+    if resolved not in _BACKTEST_EXIT_TEMPLATE_CHOICES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"exit_template 非法，可选值: {', '.join(_BACKTEST_EXIT_TEMPLATE_CHOICES)}",
+        )
+    return resolved
+
+
+def _engine_exit_template(exit_template: Optional[str]) -> Optional[str]:
+    resolved = _normalize_requested_exit_template(exit_template)
+    return None if resolved == "Original" else resolved
+
+
+def _apply_exit_template_metadata(payload: Dict[str, Any], requested_exit_template: Optional[str]) -> Dict[str, Any]:
+    resolved = _normalize_requested_exit_template(requested_exit_template)
+    payload["exit_template"] = resolved
+    payload["default_exit_template"] = _DEFAULT_BACKTEST_EXIT_TEMPLATE
+    payload["available_exit_templates"] = list(_BACKTEST_EXIT_TEMPLATE_CHOICES)
+    return payload
 
 
 def _resolve_backtest_protective_settings(
@@ -1271,6 +1301,7 @@ def _optimize_strategy_on_df(
     use_stop_take: bool = False,
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
+    exit_template: Optional[str] = None,
 ) -> Dict[str, Any]:
     if strategy not in _BACKTEST_OPTIMIZATION_GRIDS:
         raise ValueError(f"暂不支持 {strategy} 参数优化")
@@ -1311,6 +1342,7 @@ def _optimize_strategy_on_df(
                 use_stop_take=bool(use_stop_take),
                 stop_loss_pct=effective_stop_loss,
                 take_profit_pct=effective_take_profit,
+                exit_template=exit_template,
             )
             score = float(metrics.get(objective_key, 0))
             trials.append({"params": params, "metrics": metrics, "score": score})
@@ -3660,10 +3692,12 @@ async def run_backtest(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     include_series: bool = True,
+    exit_template: Optional[str] = _DEFAULT_BACKTEST_EXIT_TEMPLATE,
     use_stop_take: bool = False,
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
 ):
+    requested_exit_template = _normalize_requested_exit_template(exit_template)
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
     parsed_end = _parse_backtest_bound(end_date, bound="end_date")
 
@@ -3716,8 +3750,10 @@ async def run_backtest(
         use_stop_take=bool(use_stop_take),
         stop_loss_pct=stop_loss_pct,
         take_profit_pct=take_profit_pct,
+        exit_template=_engine_exit_template(requested_exit_template),
     )
 
+    _apply_exit_template_metadata(result, requested_exit_template)
     result.update(
         {
             "strategy": strategy,
@@ -3758,10 +3794,12 @@ async def compare_backtests(
     pre_optimize: bool = True,
     optimize_objective: str = "total_return",
     optimize_max_trials: int = _BACKTEST_COMPARE_DEFAULT_TRIALS,
+    exit_template: Optional[str] = _DEFAULT_BACKTEST_EXIT_TEMPLATE,
     use_stop_take: bool = False,
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
 ):
+    requested_exit_template = _normalize_requested_exit_template(exit_template)
     strategy_list = [s.strip() for s in strategies.split(",") if s.strip()]
     if not strategy_list:
         raise HTTPException(status_code=400, detail="至少需要一个策略")
@@ -3875,6 +3913,7 @@ async def compare_backtests(
                 use_stop_take=bool(use_stop_take),
                 stop_loss_pct=stop_loss_pct,
                 take_profit_pct=take_profit_pct,
+                exit_template=_engine_exit_template(requested_exit_template),
             )
             if pre_optimize and strategy in _BACKTEST_OPTIMIZATION_GRIDS:
                 baseline_reason = "候选等待预优化"
@@ -3940,6 +3979,7 @@ async def compare_backtests(
                     use_stop_take=bool(use_stop_take),
                     stop_loss_pct=stop_loss_pct,
                     take_profit_pct=take_profit_pct,
+                    exit_template=_engine_exit_template(requested_exit_template),
                 )
                 if opt.get("best"):
                     entry["metrics"] = _decorate_compare_metrics(
@@ -3998,6 +4038,9 @@ async def compare_backtests(
         entry["metrics"] if entry.get("error") is None else {"strategy": entry["strategy"], "error": entry["error"]}
         for entry in compare_entries
     ]
+    for item in results:
+        if isinstance(item, dict) and "error" not in item:
+            _apply_exit_template_metadata(item, requested_exit_template)
 
     ranked = sorted(
         [r for r in results if "error" not in r],
@@ -4005,7 +4048,7 @@ async def compare_backtests(
         reverse=True,
     )
 
-    return {
+    return _apply_exit_template_metadata({
         "symbol": symbol,
         "timeframe": timeframe,
         "initial_capital": initial_capital,
@@ -4025,7 +4068,7 @@ async def compare_backtests(
         "take_profit_pct": _safe_positive_pct(take_profit_pct),
         "results": results,
         "best": ranked[0] if ranked else None,
-    }
+    }, requested_exit_template)
 
 
 @router.post("/run_custom")
@@ -4040,10 +4083,12 @@ async def run_backtest_custom(
     end_date: Optional[str] = None,
     include_series: bool = True,
     params_json: Optional[str] = None,
+    exit_template: Optional[str] = _DEFAULT_BACKTEST_EXIT_TEMPLATE,
     use_stop_take: bool = False,
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
 ):
+    requested_exit_template = _normalize_requested_exit_template(exit_template)
     custom_params: Optional[Dict[str, Any]] = None
     if params_json:
         try:
@@ -4096,7 +4141,9 @@ async def run_backtest_custom(
         use_stop_take=bool(use_stop_take),
         stop_loss_pct=stop_loss_pct,
         take_profit_pct=take_profit_pct,
+        exit_template=_engine_exit_template(requested_exit_template),
     )
+    _apply_exit_template_metadata(result, requested_exit_template)
     result.update(
         {
             "strategy": strategy,
@@ -4130,10 +4177,12 @@ async def optimize_backtest(
     objective: str = "total_return",
     max_trials: int = _BACKTEST_OPTIMIZE_DEFAULT_TRIALS,
     include_all_trials: bool = True,
+    exit_template: Optional[str] = _DEFAULT_BACKTEST_EXIT_TEMPLATE,
     use_stop_take: bool = False,
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
 ):
+    requested_exit_template = _normalize_requested_exit_template(exit_template)
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
     parsed_end = _parse_backtest_bound(end_date, bound="end_date")
 
@@ -4186,11 +4235,12 @@ async def optimize_backtest(
             use_stop_take=bool(use_stop_take),
             stop_loss_pct=stop_loss_pct,
             take_profit_pct=take_profit_pct,
+            exit_template=_engine_exit_template(requested_exit_template),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    return {
+    response = {
         "strategy": strategy,
         "symbol": resolved_symbol,
         "timeframe": timeframe,
@@ -4218,6 +4268,16 @@ async def optimize_backtest(
         "all_trials": (opt_result.get("all_trials") or []) if include_all_trials else [],
         "failures": opt_result.get("failures") or [],
     }
+    best = response.get("best")
+    if isinstance(best, dict):
+        _apply_exit_template_metadata(best, requested_exit_template)
+    for item in response.get("top") or []:
+        if isinstance(item, dict):
+            _apply_exit_template_metadata(item, requested_exit_template)
+    for item in response.get("all_trials") or []:
+        if isinstance(item, dict):
+            _apply_exit_template_metadata(item, requested_exit_template)
+    return _apply_exit_template_metadata(response, requested_exit_template)
 
 
 @router.get("/export")
@@ -4231,10 +4291,12 @@ async def export_backtest_report(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     format: str = "xlsx",
+    exit_template: Optional[str] = _DEFAULT_BACKTEST_EXIT_TEMPLATE,
     use_stop_take: bool = False,
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
 ):
+    requested_exit_template = _normalize_requested_exit_template(exit_template)
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
     parsed_end = _parse_backtest_bound(end_date, bound="end_date")
     df, market_bundle, resolved_symbol = await _load_backtest_inputs(
@@ -4273,7 +4335,9 @@ async def export_backtest_report(
         use_stop_take=bool(use_stop_take),
         stop_loss_pct=stop_loss_pct,
         take_profit_pct=take_profit_pct,
+        exit_template=_engine_exit_template(requested_exit_template),
     )
+    _apply_exit_template_metadata(result, requested_exit_template)
 
     summary_df = pd.DataFrame(
         [
@@ -4303,6 +4367,8 @@ async def export_backtest_report(
                 "anomaly_bar_ratio": result.get("anomaly_bar_ratio"),
                 "return_clip_limit": result.get("return_clip_limit"),
                 "quality_flag": result.get("quality_flag"),
+                "exit_template": result.get("exit_template"),
+                "default_exit_template": result.get("default_exit_template"),
                 "use_stop_take": bool(result.get("use_stop_take", False)),
                 "stop_loss_pct": result.get("stop_loss_pct"),
                 "take_profit_pct": result.get("take_profit_pct"),
@@ -4394,5 +4460,7 @@ async def get_available_strategies():
         "strategies": strategies,
         "supported_count": sum(1 for x in strategies if bool(x.get("backtest_supported"))),
         "unsupported_count": sum(1 for x in strategies if not bool(x.get("backtest_supported"))),
+        "default_exit_template": _DEFAULT_BACKTEST_EXIT_TEMPLATE,
+        "available_exit_templates": list(_BACKTEST_EXIT_TEMPLATE_CHOICES),
     }
 

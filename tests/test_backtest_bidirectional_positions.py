@@ -1,3 +1,5 @@
+import asyncio
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -157,3 +159,103 @@ def test_supported_registry_oscillator_backtests_have_runtime_branch(strategy: s
 
     assert len(position) == len(df)
     assert set(float(v) for v in position.dropna().unique()).issubset({-1.0, 0.0, 1.0})
+
+
+def test_exit_template_normalization_defaults_to_signal_plus_time_stop():
+    assert backtest_api._normalize_requested_exit_template(None) == "SignalPlusTimeStop"
+    assert backtest_api._engine_exit_template("Original") is None
+    assert backtest_api._engine_exit_template("SignalPlusTimeStop") == "SignalPlusTimeStop"
+
+
+def test_run_backtest_wrapper_defaults_to_signal_plus_time_stop(monkeypatch: pytest.MonkeyPatch):
+    df = _wave_df(rows=12)
+    forwarded = {}
+
+    async def fake_load_backtest_inputs(**kwargs):
+        return df.copy(), {}, "BTC/USDT"
+
+    async def fake_attach_backtest_enrichment_if_needed(**kwargs):
+        return kwargs["df"]
+
+    def fake_run_backtest_core(**kwargs):
+        forwarded["exit_template"] = kwargs.get("exit_template")
+        frame = kwargs["df"]
+        return {
+            "effective_data_points": len(frame),
+            "effective_start_date": frame.index[0].isoformat(),
+            "effective_end_date": frame.index[-1].isoformat(),
+            "use_stop_take": False,
+            "stop_loss_pct": None,
+            "take_profit_pct": None,
+            "series": [],
+            "total_return": 1.25,
+        }
+
+    monkeypatch.setattr(backtest_api, "_load_backtest_inputs", fake_load_backtest_inputs)
+    monkeypatch.setattr(
+        backtest_api,
+        "_attach_backtest_enrichment_if_needed",
+        fake_attach_backtest_enrichment_if_needed,
+    )
+    monkeypatch.setattr(backtest_api, "_run_backtest_core", fake_run_backtest_core)
+
+    result = asyncio.run(
+        backtest_api.run_backtest(
+            strategy="MAStrategy",
+            symbol="BTC/USDT",
+            timeframe="1h",
+            include_series=False,
+        )
+    )
+
+    assert forwarded["exit_template"] == "SignalPlusTimeStop"
+    assert result["exit_template"] == "SignalPlusTimeStop"
+    assert result["default_exit_template"] == "SignalPlusTimeStop"
+    assert "Original" in result["available_exit_templates"]
+
+
+def test_run_backtest_wrapper_allows_original_exit_template_override(monkeypatch: pytest.MonkeyPatch):
+    df = _wave_df(rows=12)
+    forwarded = {}
+
+    async def fake_load_backtest_inputs(**kwargs):
+        return df.copy(), {}, "BTC/USDT"
+
+    async def fake_attach_backtest_enrichment_if_needed(**kwargs):
+        return kwargs["df"]
+
+    def fake_run_backtest_core(**kwargs):
+        forwarded["exit_template"] = kwargs.get("exit_template")
+        frame = kwargs["df"]
+        return {
+            "effective_data_points": len(frame),
+            "effective_start_date": frame.index[0].isoformat(),
+            "effective_end_date": frame.index[-1].isoformat(),
+            "use_stop_take": False,
+            "stop_loss_pct": None,
+            "take_profit_pct": None,
+            "series": [],
+            "total_return": 0.75,
+        }
+
+    monkeypatch.setattr(backtest_api, "_load_backtest_inputs", fake_load_backtest_inputs)
+    monkeypatch.setattr(
+        backtest_api,
+        "_attach_backtest_enrichment_if_needed",
+        fake_attach_backtest_enrichment_if_needed,
+    )
+    monkeypatch.setattr(backtest_api, "_run_backtest_core", fake_run_backtest_core)
+
+    result = asyncio.run(
+        backtest_api.run_backtest(
+            strategy="MAStrategy",
+            symbol="BTC/USDT",
+            timeframe="1h",
+            include_series=False,
+            exit_template="Original",
+        )
+    )
+
+    assert forwarded["exit_template"] is None
+    assert result["exit_template"] == "Original"
+    assert result["default_exit_template"] == "SignalPlusTimeStop"

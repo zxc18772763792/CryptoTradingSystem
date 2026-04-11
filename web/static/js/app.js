@@ -6,6 +6,15 @@ const backtestUIState={lastOptimize:null,lastCompare:null,lastRenderedBacktest:n
 const dataHealthState={last:null};
 const dataAnalyticsHealthState={last:null};
 const uiLoadState={tabs:{},inFlight:{},requests:{},dataInitialized:false};
+const BACKTEST_EXIT_TEMPLATE_OPTIONS=['SignalPlusTimeStop','ATRTrail','PartialPlusATR','ReversalOnly','Original'];
+const BACKTEST_EXIT_TEMPLATE_LABELS={
+SignalPlusTimeStop:'SignalPlusTimeStop（默认稳健）',
+ATRTrail:'ATRTrail（趋势留盈）',
+PartialPlusATR:'PartialPlusATR（分批 + ATR）',
+ReversalOnly:'ReversalOnly（仅信号反转）',
+Original:'Original（旧版离场）',
+};
+const DEFAULT_BACKTEST_EXIT_TEMPLATE='SignalPlusTimeStop';
 const summaryFetchState={statsTask:null,balancesTask:null};
 const RESEARCH_DEFAULT_SYMBOLS=['BTC/USDT','ETH/USDT','BNB/USDT','SOL/USDT','XRP/USDT','ADA/USDT','DOGE/USDT','TRX/USDT','LINK/USDT','AVAX/USDT','DOT/USDT','POL/USDT','LTC/USDT','BCH/USDT','ETC/USDT','ATOM/USDT','NEAR/USDT','APT/USDT','ARB/USDT','OP/USDT','SUI/USDT','INJ/USDT','RUNE/USDT','AAVE/USDT','MKR/USDT','UNI/USDT','FIL/USDT','HBAR/USDT','ICP/USDT','TON/USDT'];
 const DEFAULT_STRATEGY_ALLOCATION=0.15;
@@ -401,6 +410,40 @@ if(!exists){
 }
 }
 
+function ensureBacktestExitTemplateSelect(templates=BACKTEST_EXIT_TEMPLATE_OPTIONS, defaultTemplate=DEFAULT_BACKTEST_EXIT_TEMPLATE){
+const el=document.getElementById('backtest-exit-template');
+if(!(el instanceof HTMLSelectElement))return;
+const prev=String(el.value||'').trim();
+const normalized=[...new Set((Array.isArray(templates)&&templates.length?templates:BACKTEST_EXIT_TEMPLATE_OPTIONS).map(v=>String(v||'').trim()).filter(Boolean))];
+if(!normalized.length)return;
+el.innerHTML=normalized.map(name=>`<option value="${esc(name)}">${esc(BACKTEST_EXIT_TEMPLATE_LABELS[name]||name)}</option>`).join('');
+const resolvedDefault=normalized.includes(String(defaultTemplate||'').trim())?String(defaultTemplate).trim():(normalized.includes(DEFAULT_BACKTEST_EXIT_TEMPLATE)?DEFAULT_BACKTEST_EXIT_TEMPLATE:normalized[0]);
+el.value=normalized.includes(prev)?prev:resolvedDefault;
+}
+
+function getBacktestExitTemplate(){
+const el=document.getElementById('backtest-exit-template');
+const value=String(el?.value||'').trim();
+const resolved=BACKTEST_EXIT_TEMPLATE_OPTIONS.includes(value)?value:DEFAULT_BACKTEST_EXIT_TEMPLATE;
+if(el instanceof HTMLSelectElement&&el.value!==resolved)el.value=resolved;
+return resolved;
+}
+
+function backtestExitTemplateLabel(name){
+const key=String(name||'').trim();
+return BACKTEST_EXIT_TEMPLATE_LABELS[key]||key||DEFAULT_BACKTEST_EXIT_TEMPLATE;
+}
+
+function formatBacktestExitReasonBreakdown(breakdown){
+const source=(breakdown&&typeof breakdown==='object'&&!Array.isArray(breakdown))?breakdown:{};
+const labels={stop:'止损',trailing:'跟踪',reversal:'反转',partial:'分批',time_stop:'时限'};
+const parts=Object.entries(labels).map(([key,label])=>{
+  const count=Number(source?.[key]||0);
+  return count>0?`${label}${count}`:'';
+}).filter(Boolean);
+return parts.join(' / ')||'无';
+}
+
 function getBacktestCustomParams(){
 const raw=String(document.getElementById('backtest-custom-params')?.value||'').trim();
 if(!raw)return null;
@@ -467,6 +510,7 @@ activateTab('backtest');
 await ensureTabLoaded('backtest',{force:true});
 await loadDataSymbolOptions(String(spec?.exchange||'binance').trim().toLowerCase()||'binance',['backtest-symbol']);
 await ensureBacktestStrategySelect();
+ensureBacktestExitTemplateSelect();
 const strategyEl=document.getElementById('backtest-strategy');
 if(strategyEl){
   strategyEl.value=strategy;
@@ -493,6 +537,11 @@ const sdEl=document.getElementById('backtest-start-date');
 const edEl=document.getElementById('backtest-end-date');
 if(sdEl&&sd)sdEl.value=sd;
 if(edEl&&ed)edEl.value=ed;
+const exitTemplateEl=document.getElementById('backtest-exit-template');
+const requestedExitTemplate=String(spec?.exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE).trim();
+if(exitTemplateEl instanceof HTMLSelectElement&&[...exitTemplateEl.options].some(opt=>String(opt.value||'').trim()===requestedExitTemplate)){
+  exitTemplateEl.value=requestedExitTemplate;
+}
 const protectionEnabled=spec?.use_stop_take!==undefined?!!spec.use_stop_take:(spec?.stop_loss_pct!=null||spec?.take_profit_pct!=null);
 const protectEl=document.getElementById('backtest-use-stop-take');
 if(protectEl){
@@ -3006,6 +3055,7 @@ setInterval(()=>{if(isDataTabActive()&&!marketDataState.isLoading&&!(marketDataS
 function renderBacktest(r){
 const box=document.getElementById('backtest-results');
 if(!box)return;
+ensureBacktestExitTemplateSelect(r?.available_exit_templates,r?.default_exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE);
 backtestUIState.lastRenderedBacktest={
   strategy:String(r?.strategy||'').trim(),
   symbol:String(r?.symbol||'').trim(),
@@ -3017,6 +3067,10 @@ backtestUIState.lastRenderedBacktest={
 };
 const c=Number(r.total_return||0)>=0?'#3fb950':'#f85149';
 const isPairsMode=String(r?.portfolio_mode||'').trim()==='pairs_spread_dual_leg';
+const exitTemplateName=String(r?.exit_template||r?.default_exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE).trim()||DEFAULT_BACKTEST_EXIT_TEMPLATE;
+const fixedProtectionText=r.use_stop_take?'已启用':'未启用';
+const fixedProtectionRatio=`${Number.isFinite(Number(r.stop_loss_pct))?(Number(r.stop_loss_pct)*100).toFixed(1)+'%':'--'} / ${Number.isFinite(Number(r.take_profit_pct))?(Number(r.take_profit_pct)*100).toFixed(1)+'%':'--'}`;
+const exitBreakdownText=formatBacktestExitReasonBreakdown(r?.exit_reason_breakdown);
 box.innerHTML=`
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px;">
 <div class="stat-box"><div class="stat-label">策略</div><div class="stat-value">${r.strategy}</div></div>
@@ -3043,12 +3097,18 @@ ${isPairsMode?`<div style="display:grid;grid-template-columns:repeat(auto-fit,mi
 <div class="stat-box"><div class="stat-label">手续费/滑点</div><div class="stat-value">${(Number(r.commission_rate||0)*100).toFixed(4)}% / ${Number(r.slippage_bps||0).toFixed(2)}bps</div></div>
 </div>
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-top:12px;">
-<div class="stat-box"><div class="stat-label">止盈止损回测</div><div class="stat-value">${r.use_stop_take?'已启用':'未启用'}</div></div>
-<div class="stat-box"><div class="stat-label">止损/止盈比例</div><div class="stat-value">${Number.isFinite(Number(r.stop_loss_pct))?(Number(r.stop_loss_pct)*100).toFixed(1)+'%':'--'} / ${Number.isFinite(Number(r.take_profit_pct))?(Number(r.take_profit_pct)*100).toFixed(1)+'%':'--'}</div></div>
-<div class="stat-box"><div class="stat-label">保护性平仓次数</div><div class="stat-value">${Number(r.forced_protective_exits||0)} 次</div></div>
-<div class="stat-box"><div class="stat-label">止损/止盈触发</div><div class="stat-value">${Number(r.forced_stop_exits||0)} / ${Number(r.forced_take_exits||0)}</div></div>
+<div class="stat-box"><div class="stat-label">退出模板</div><div class="stat-value">${esc(backtestExitTemplateLabel(exitTemplateName))}</div></div>
+<div class="stat-box"><div class="stat-label">模板退出分布</div><div class="stat-value">${esc(exitBreakdownText)}</div></div>
+<div class="stat-box"><div class="stat-label">固定百分比叠加</div><div class="stat-value">${fixedProtectionText}</div></div>
+<div class="stat-box"><div class="stat-label">固定止损/止盈</div><div class="stat-value">${fixedProtectionRatio}</div></div>
 </div>
-${(()=>{const slPct=Number(r.stop_loss_pct),tpPct=Number(r.take_profit_pct),exits=Number(r.forced_protective_exits||0),trades=Number(r.total_trades||0);if(r.use_stop_take&&exits===0&&trades>0){return`<div class="list-item" style="margin-top:8px;padding:8px 12px;background:rgba(255,177,95,.1);border:1px solid rgba(255,177,95,.3);border-radius:8px;color:#ffb15f;font-size:12px;">提示：止盈止损已启用，但本次回测中未触发任何强制平仓（止损${Number.isFinite(slPct)?(slPct*100).toFixed(1):'--'}% / 止盈${Number.isFinite(tpPct)?(tpPct*100).toFixed(1):'--'}%）。持仓期间价格波动未达阈值，结果与未启用时相同。如需验证，可适当调大止损/止盈比例。</div>`;}return'';})()}
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-top:12px;">
+<div class="stat-box"><div class="stat-label">固定叠加平仓次数</div><div class="stat-value">${Number(r.forced_protective_exits||0)} 次</div></div>
+<div class="stat-box"><div class="stat-label">固定止损/止盈触发</div><div class="stat-value">${Number(r.forced_stop_exits||0)} / ${Number(r.forced_take_exits||0)}</div></div>
+<div class="stat-box"><div class="stat-label">默认模板</div><div class="stat-value">${esc(backtestExitTemplateLabel(r?.default_exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE))}</div></div>
+<div class="stat-box"><div class="stat-label">模板切换</div><div class="stat-value">${Array.isArray(r?.available_exit_templates)?r.available_exit_templates.length:BACKTEST_EXIT_TEMPLATE_OPTIONS.length} 个可选</div></div>
+</div>
+${(()=>{const slPct=Number(r.stop_loss_pct),tpPct=Number(r.take_profit_pct),exits=Number(r.forced_protective_exits||0),trades=Number(r.total_trades||0);if(r.use_stop_take&&exits===0&&trades>0){return`<div class="list-item" style="margin-top:8px;padding:8px 12px;background:rgba(255,177,95,.1);border:1px solid rgba(255,177,95,.3);border-radius:8px;color:#ffb15f;font-size:12px;">提示：固定止盈止损叠加已启用，但本次回测中未触发任何固定百分比强制平仓（止损${Number.isFinite(slPct)?(slPct*100).toFixed(1):'--'}% / 止盈${Number.isFinite(tpPct)?(tpPct*100).toFixed(1):'--'}%）。统一退出模板仍在独立生效；若你想验证固定比例叠加效果，可继续调整这两个阈值。</div>`;}return'';})()}
 ${renderRangeLockIndicatorHtml(r,true)}`;
 const ec=document.getElementById('backtest-equity-chart');
 if(ec&&r.series?.length){
@@ -3363,6 +3423,7 @@ return{enabled,stopLossPct,takeProfitPct};
 function appendBacktestProtectionParams(url,cfg=null){
 const conf=cfg||getBacktestProtectionConfig();
 let out=String(url||'');
+out+=`&exit_template=${encodeURIComponent(getBacktestExitTemplate())}`;
 out+=`&use_stop_take=${conf.enabled?'true':'false'}`;
 if(conf.enabled){
   if(Number.isFinite(conf.stopLossPct))out+=`&stop_loss_pct=${encodeURIComponent(conf.stopLossPct)}`;
@@ -5927,6 +5988,7 @@ function bindDataAdvanced(){const rout=document.getElementById('replay-output');
 
 function bindBacktest(){
 initBacktestComparePicker();
+ensureBacktestExitTemplateSelect();
 bindBacktestProtectionControls();
 const f=document.getElementById('backtest-form');
 if(f)f.onsubmit=async e=>{

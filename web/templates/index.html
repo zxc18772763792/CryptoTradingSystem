@@ -2623,20 +2623,31 @@
                                 <input type="number" id="backtest-capital" value="10000">
                             </div>
                             <div class="form-row backtest-protection-row">
+                                <div class="form-group">
+                                    <label>统一退出模板</label>
+                                    <select id="backtest-exit-template">
+                                        <option value="SignalPlusTimeStop" selected>SignalPlusTimeStop（默认稳健）</option>
+                                        <option value="ATRTrail">ATRTrail（趋势留盈）</option>
+                                        <option value="PartialPlusATR">PartialPlusATR（分批 + ATR）</option>
+                                        <option value="ReversalOnly">ReversalOnly（仅信号反转）</option>
+                                        <option value="Original">Original（旧版离场）</option>
+                                    </select>
+                                    <div class="form-help">默认使用统一退出引擎；下方固定百分比止盈止损是在模板基础上的额外叠加。</div>
+                                </div>
                                 <div class="form-group backtest-protection-toggle">
                                     <label class="backtest-switch" for="backtest-use-stop-take">
                                         <input type="checkbox" id="backtest-use-stop-take">
                                         <span class="backtest-switch-ui" aria-hidden="true"></span>
-                                        <span class="backtest-switch-text">启用止盈止损</span>
+                                        <span class="backtest-switch-text">叠加固定止盈止损</span>
                                     </label>
-                                    <div class="form-help">关闭 = 无止损（等价止损100%）</div>
+                                    <div class="form-help">关闭 = 不叠加固定百分比；统一退出模板仍会照常生效。</div>
                                 </div>
                                 <div class="form-group">
-                                    <label>止损比例（0.01~0.5，如 0.05 = 5%）</label>
+                                    <label>固定止损比例（0.01~0.5，如 0.05 = 5%）</label>
                                     <input type="number" id="backtest-stop-loss-pct" value="0.05" min="0.01" max="0.5" step="0.01" disabled>
                                 </div>
                                 <div class="form-group">
-                                    <label>止盈比例（0.01~1.0，如 0.10 = 10%）</label>
+                                    <label>固定止盈比例（0.01~1.0，如 0.10 = 10%）</label>
                                     <input type="number" id="backtest-take-profit-pct" value="0.10" min="0.01" max="1.0" step="0.01" disabled>
                                 </div>
                             </div>
