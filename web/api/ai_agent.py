@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
+from web.api.auth import require_sensitive_ops_auth
 import web.api.ai_research as ai_research_module
 from web.api.ai_research import (
     AIAutonomousAgentConfigUpdateRequest,
@@ -22,7 +23,7 @@ async def get_ai_autonomous_agent_runtime_config(request: Request):
     return await ai_research_module.get_ai_autonomous_agent_runtime_config(request)
 
 
-@router.post("/runtime-config/autonomous-agent")
+@router.post("/runtime-config/autonomous-agent", dependencies=[Depends(require_sensitive_ops_auth)])
 async def update_ai_autonomous_agent_runtime_config(
     request: Request,
     payload: AIAutonomousAgentConfigUpdateRequest,
@@ -35,7 +36,7 @@ async def get_ai_autonomous_agent_risk_config(request: Request):
     return await ai_research_module.get_ai_autonomous_agent_risk_config(request)
 
 
-@router.post("/autonomous-agent/risk-config")
+@router.post("/autonomous-agent/risk-config", dependencies=[Depends(require_sensitive_ops_auth)])
 async def update_ai_autonomous_agent_risk_config(
     request: Request,
     payload: AIAutonomousAgentRiskConfigUpdateRequest,
@@ -48,7 +49,7 @@ async def get_ai_autonomous_agent_status(request: Request):
     return await ai_research_module.get_ai_autonomous_agent_status(request)
 
 
-@router.post("/autonomous-agent/start")
+@router.post("/autonomous-agent/start", dependencies=[Depends(require_sensitive_ops_auth)])
 async def start_ai_autonomous_agent(
     request: Request,
     payload: AIAutonomousAgentStartRequest = AIAutonomousAgentStartRequest(),
@@ -56,12 +57,12 @@ async def start_ai_autonomous_agent(
     return await ai_research_module.start_ai_autonomous_agent(request, payload)
 
 
-@router.post("/autonomous-agent/stop")
+@router.post("/autonomous-agent/stop", dependencies=[Depends(require_sensitive_ops_auth)])
 async def stop_ai_autonomous_agent(request: Request):
     return await ai_research_module.stop_ai_autonomous_agent(request)
 
 
-@router.post("/autonomous-agent/run-once")
+@router.post("/autonomous-agent/run-once", dependencies=[Depends(require_sensitive_ops_auth)])
 async def run_ai_autonomous_agent_once(
     request: Request,
     payload: AIAutonomousAgentRunOnceRequest = AIAutonomousAgentRunOnceRequest(),

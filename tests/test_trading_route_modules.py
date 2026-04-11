@@ -34,6 +34,7 @@ def test_orders_route_bridges_to_service(monkeypatch):
 
 
 def test_positions_close_route_bridges_to_service(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     app = FastAPI()
     app.include_router(trading_positions.router, prefix="/api/trading")
     client = TestClient(app)
@@ -46,6 +47,7 @@ def test_positions_close_route_bridges_to_service(monkeypatch):
     response = client.post(
         "/api/trading/positions/close",
         json={"exchange": "binance", "symbol": "BTCUSDT", "side": "long"},
+        headers={"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"},
     )
     assert response.status_code == 200
     assert response.json() == {"ok": True, "symbol": "BTCUSDT", "exchange": "binance", "side": "long"}

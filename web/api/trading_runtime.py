@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import time
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.audit import audit_logger
 from core.runtime import runtime_state
 from core.risk.risk_manager import risk_manager
 from core.trading import execution_engine, order_manager, position_manager
+from web.api.auth import require_sensitive_ops_auth
 from web.api.trading import (
     RiskUpdateRequest,
     TradingModeConfirmRequest,
@@ -27,64 +30,19 @@ from web.services import (
 
 
 router = APIRouter()
+_TRADING_STATS_CACHE_TTL_SEC = 2.0
+_trading_stats_cache_payload = None
+_trading_stats_cache_at = 0.0
+_trading_stats_cache_lock = asyncio.Lock()
 
 
-@router.get("/risk/report")
-async def get_risk_report():
-    return await _build_effective_risk_report(force_live_refresh=False)
+def invalidate_trading_stats_cache() -> None:
+    global _trading_stats_cache_payload, _trading_stats_cache_at
+    _trading_stats_cache_payload = None
+    _trading_stats_cache_at = 0.0
 
 
-@router.post("/risk/params")
-async def update_risk_params(request: RiskUpdateRequest):
-    payload = request.model_dump(exclude_none=True)
-    risk_manager.update_parameters(payload)
-    await audit_logger.log(
-        module="risk",
-        action="update_params",
-        status="success",
-        message="Risk params updated",
-        details=payload,
-    )
-    return {
-        "success": True,
-        "report": await _build_effective_risk_report(force_live_refresh=True),
-    }
-
-
-@router.post("/risk/reset")
-async def reset_risk_halt():
-    risk_manager.reset_halt()
-    await audit_logger.log(
-        module="risk",
-        action="reset_halt",
-        status="success",
-        message="Risk halt reset",
-    )
-    return {
-        "success": True,
-        "report": await _build_effective_risk_report(force_live_refresh=True),
-    }
-
-
-@router.post("/paper/reset")
-async def reset_paper_trading_state(clear_snapshots: bool = True):
-    if not execution_engine.is_paper_mode():
-        raise HTTPException(status_code=400, detail="当前不是模拟盘模式")
-
-    payload = await clear_local_runtime_service(clear_paper_snapshots=clear_snapshots)
-    payload["cache_reset"] = runtime_state.clear_registered_caches(scope="paper")
-    await audit_logger.log(
-        module="trading",
-        action="paper_reset",
-        status="success",
-        message="Paper trading state reset",
-        details=payload,
-    )
-    return {"success": True, "result": payload}
-
-
-@router.get("/stats")
-async def get_trading_stats():
+async def _build_trading_stats_payload() -> dict:
     degraded = False
     try:
         risk_report = await asyncio.wait_for(
@@ -103,6 +61,82 @@ async def get_trading_stats():
     }
 
 
+@router.get("/risk/report")
+async def get_risk_report():
+    return await _build_effective_risk_report(force_live_refresh=False)
+
+
+@router.post("/risk/params", dependencies=[Depends(require_sensitive_ops_auth)])
+async def update_risk_params(request: RiskUpdateRequest):
+    payload = request.model_dump(exclude_none=True)
+    risk_manager.update_parameters(payload)
+    invalidate_trading_stats_cache()
+    await audit_logger.log(
+        module="risk",
+        action="update_params",
+        status="success",
+        message="Risk params updated",
+        details=payload,
+    )
+    return {
+        "success": True,
+        "report": await _build_effective_risk_report(force_live_refresh=True),
+    }
+
+
+@router.post("/risk/reset", dependencies=[Depends(require_sensitive_ops_auth)])
+async def reset_risk_halt():
+    risk_manager.reset_halt()
+    invalidate_trading_stats_cache()
+    await audit_logger.log(
+        module="risk",
+        action="reset_halt",
+        status="success",
+        message="Risk halt reset",
+    )
+    return {
+        "success": True,
+        "report": await _build_effective_risk_report(force_live_refresh=True),
+    }
+
+
+@router.post("/paper/reset", dependencies=[Depends(require_sensitive_ops_auth)])
+async def reset_paper_trading_state(clear_snapshots: bool = True):
+    if not execution_engine.is_paper_mode():
+        raise HTTPException(status_code=400, detail="当前不是模拟盘模式")
+
+    payload = await clear_local_runtime_service(clear_paper_snapshots=clear_snapshots)
+    payload["cache_reset"] = runtime_state.clear_registered_caches(scope="paper")
+    invalidate_trading_stats_cache()
+    await audit_logger.log(
+        module="trading",
+        action="paper_reset",
+        status="success",
+        message="Paper trading state reset",
+        details=payload,
+    )
+    return {"success": True, "result": payload}
+
+
+@router.get("/stats")
+async def get_trading_stats(force_refresh: bool = False):
+    global _trading_stats_cache_payload, _trading_stats_cache_at
+    now_mono = time.monotonic()
+    if not force_refresh and _trading_stats_cache_payload is not None:
+        if (now_mono - _trading_stats_cache_at) <= _TRADING_STATS_CACHE_TTL_SEC:
+            return copy.deepcopy(_trading_stats_cache_payload)
+
+    async with _trading_stats_cache_lock:
+        now_mono = time.monotonic()
+        if not force_refresh and _trading_stats_cache_payload is not None:
+            if (now_mono - _trading_stats_cache_at) <= _TRADING_STATS_CACHE_TTL_SEC:
+                return copy.deepcopy(_trading_stats_cache_payload)
+        payload = await _build_trading_stats_payload()
+        _trading_stats_cache_payload = copy.deepcopy(payload)
+        _trading_stats_cache_at = time.monotonic()
+        return payload
+
+
 @router.get("/mode")
 async def get_trading_mode():
     now = datetime.now(timezone.utc).isoformat()
@@ -115,7 +149,7 @@ async def get_trading_mode():
     }
 
 
-@router.post("/mode/request")
+@router.post("/mode/request", dependencies=[Depends(require_sensitive_ops_auth)])
 async def request_trading_mode_switch(req: TradingModeRequest):
     return request_trading_mode_switch_service(
         target_mode=req.target_mode,
@@ -124,7 +158,7 @@ async def request_trading_mode_switch(req: TradingModeRequest):
     )
 
 
-@router.post("/mode/confirm")
+@router.post("/mode/confirm", dependencies=[Depends(require_sensitive_ops_auth)])
 async def confirm_trading_mode_switch(req: TradingModeConfirmRequest, request: Request):
     result = await switch_trading_mode_service(
         token=req.token,
@@ -133,6 +167,7 @@ async def confirm_trading_mode_switch(req: TradingModeConfirmRequest, request: R
         reason="web.api.trading_runtime.confirm_mode",
         clear_paper_snapshots=True,
     )
+    invalidate_trading_stats_cache()
     await audit_logger.log(
         module="trading",
         action="switch_mode",
@@ -143,7 +178,7 @@ async def confirm_trading_mode_switch(req: TradingModeConfirmRequest, request: R
     return result
 
 
-@router.post("/mode/cancel")
+@router.post("/mode/cancel", dependencies=[Depends(require_sensitive_ops_auth)])
 async def cancel_trading_mode_switch(token: str):
     if cancel_trading_mode_switch_token(token):
         return {"success": True, "token": token}

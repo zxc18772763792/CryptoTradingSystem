@@ -29,10 +29,10 @@ from web.api.data import (
 )
 from web.api.trading import (
     _load_analytics_ingest_status_map,
-    get_analytics_overview,
     get_behavior_report,
     get_community_overview,
     get_market_microstructure,
+    get_risk_dashboard,
     get_trading_calendar,
     get_stoploss_policy,
 )
@@ -86,6 +86,7 @@ _MODULE_TIMEOUT_SEC = {
     "onchain": 30.0,
     "discipline": 5.0,
 }
+_MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC = 20 * 60
 
 
 class ResearchProfile(BaseModel):
@@ -455,6 +456,32 @@ def _has_positive_number(value: Any) -> bool:
         return False
 
 
+def _snapshot_age_sec(payload: Dict[str, Any]) -> Optional[float]:
+    if not isinstance(payload, dict):
+        return None
+    ts = _coerce_utc_datetime(payload.get("timestamp"))
+    if ts is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - ts).total_seconds())
+
+
+def _snapshot_is_recent(payload: Dict[str, Any], max_age_sec: float) -> bool:
+    age_sec = _snapshot_age_sec(payload)
+    return age_sec is not None and age_sec <= float(max_age_sec)
+
+
+def _analytics_module_entry(task_name: str, data: Dict[str, Any], *, ok: bool, error: Optional[str] = None) -> Dict[str, Any]:
+    payload = dict(data or {})
+    if error:
+        payload.setdefault("error", error)
+    return {
+        "task": task_name,
+        "ok": bool(ok),
+        "latency_ms": 0.0,
+        "data": payload,
+    }
+
+
 def _microstructure_has_signal(payload: Dict[str, Any]) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -729,72 +756,66 @@ def _fallback_factor_library_from_fama(
 
 
 async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]:
-    analytics_task = _wait_or_none(
-        get_analytics_overview(
-            days=3,
-            lookback=min(720, profile.lookback),
-            calendar_days=7,
-            exchange=profile.exchange,
-            symbol=profile.primary_symbol,
-        ),
-        2.5,
+    risk_task = _wait_or_none(
+        get_risk_dashboard(lookback=min(720, profile.lookback)),
+        2.0,
     )
-    micro_task = _wait_or_none(
-        get_market_microstructure(
-            exchange=profile.exchange,
-            symbol=profile.primary_symbol,
-            depth_limit=20,
-        ),
-        3.0,
-    )
-    community_task = _wait_or_none(
-        get_community_overview(
-            symbol=profile.primary_symbol,
-            exchange=profile.exchange,
-        ),
-        3.0,
-    )
-    news_task = _wait_or_none(_build_news_summary(profile.primary_symbol, hours=24), 10.0)
-    calendar_task = get_trading_calendar(days=7)
-    history_micro_task = _load_latest_microstructure_snapshot(profile.exchange, profile.primary_symbol)
-    history_community_task = _load_latest_community_snapshot(profile.exchange, profile.primary_symbol)
-    history_whale_task = _load_latest_whale_snapshot(profile.exchange, profile.primary_symbol)
-    analytics, direct_micro, direct_community, news, direct_calendar, history_micro, history_community, history_whale = await asyncio.gather(
-        analytics_task,
-        micro_task,
-        community_task,
+    news_task = _wait_or_none(_build_news_summary(profile.primary_symbol, hours=24), 8.0)
+    calendar_task = _wait_or_none(get_trading_calendar(days=7), 2.0)
+    history_micro_task = _wait_or_none(_load_latest_microstructure_snapshot(profile.exchange, profile.primary_symbol), 4.0)
+    history_community_task = _wait_or_none(_load_latest_community_snapshot(profile.exchange, profile.primary_symbol), 4.0)
+    history_whale_task = _wait_or_none(_load_latest_whale_snapshot(profile.exchange, profile.primary_symbol), 4.0)
+    risk_dashboard, news, calendar_data, history_micro, history_community, history_whale = await asyncio.gather(
+        risk_task,
         news_task,
         calendar_task,
         history_micro_task,
         history_community_task,
         history_whale_task,
     )
-    analytics = analytics or {}
-    direct_micro = direct_micro or {}
-    direct_community = direct_community or {}
-    news = news or {}
-    direct_calendar = direct_calendar or {}
-    history_micro = history_micro or {}
-    history_community = history_community or {}
-    history_whale = history_whale or {}
+    risk_dashboard = dict(risk_dashboard or {})
+    news = dict(news or {})
+    calendar_data = dict(calendar_data or {})
+    history_micro = dict(history_micro or {})
+    history_community = dict(history_community or {})
+    history_whale = dict(history_whale or {})
 
-    analytics_modules = dict(analytics.get("modules") or {})
-    analytics_micro = dict((analytics_modules.get("microstructure") or {}).get("data") or {})
-    analytics_community = dict((analytics_modules.get("community") or {}).get("data") or {})
-    micro = dict(_merge_nested_payload(analytics_micro, direct_micro) or {})
-    community = dict(_merge_nested_payload(analytics_community, direct_community) or {})
-    used_history_micro = False
-    used_history_community = False
+    prefer_history_micro = _snapshot_is_recent(history_micro, _MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC) and _microstructure_has_signal(history_micro)
+    prefer_history_community = _snapshot_is_recent(history_community, _MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC) and _community_has_signal(history_community)
+
+    live_micro_task = asyncio.sleep(0, result=None)
+    live_community_task = asyncio.sleep(0, result=None)
+    if not prefer_history_micro:
+        live_micro_task = _wait_or_none(
+            get_market_microstructure(
+                exchange=profile.exchange,
+                symbol=profile.primary_symbol,
+                depth_limit=20,
+            ),
+            2.5,
+        )
+    if not prefer_history_community:
+        live_community_task = _wait_or_none(
+            get_community_overview(
+                symbol=profile.primary_symbol,
+                exchange=profile.exchange,
+            ),
+            2.5,
+        )
+
+    live_micro, live_community = await asyncio.gather(live_micro_task, live_community_task)
+    live_micro = dict(live_micro or {})
+    live_community = dict(live_community or {})
+
+    micro = dict(history_micro if prefer_history_micro else (_merge_nested_payload(live_micro, history_micro) or {}))
+    community = dict(history_community if prefer_history_community else (_merge_nested_payload(live_community, history_community) or {}))
+    used_history_micro = prefer_history_micro or (
+        not prefer_history_micro and _microstructure_has_signal(history_micro) and not _microstructure_has_signal(live_micro)
+    )
+    used_history_community = prefer_history_community or (
+        not prefer_history_community and _community_has_signal(history_community) and not _community_has_signal(live_community)
+    )
     used_history_whale = False
-    used_calendar_fallback = False
-
-    if not _microstructure_has_signal(micro) and _microstructure_has_signal(history_micro):
-        micro = dict(history_micro)
-        used_history_micro = True
-
-    if not _community_has_signal(community) and _community_has_signal(history_community):
-        community = dict(_merge_nested_payload(history_community, community) or {})
-        used_history_community = True
 
     if not isinstance(community.get("whale_transfers"), dict) or "count" not in (community.get("whale_transfers") or {}):
         if history_whale:
@@ -807,32 +828,61 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             }
             used_history_whale = True
 
-    if not news or (int(news.get("events_count") or 0) + int(news.get("feed_count") or 0) + int(news.get("raw_count") or 0) <= 0):
-        news = await _build_news_summary(profile.primary_symbol, hours=24)
-
-    calendar = dict((analytics_modules.get("calendar") or {}).get("data") or {})
-    calendar_rows = _map_calendar_rows(calendar.get("events") or [])
-    if not calendar_rows:
-        calendar_rows = _map_calendar_rows((direct_calendar or {}).get("events") or [])
-        used_calendar_fallback = bool(calendar_rows)
+    calendar_rows = _map_calendar_rows(calendar_data.get("events") or [])
+    analytics_modules = {
+        "risk_dashboard": _analytics_module_entry(
+            "risk_dashboard",
+            risk_dashboard,
+            ok=bool(risk_dashboard),
+            error=None if risk_dashboard else "risk dashboard unavailable",
+        ),
+        "calendar": _analytics_module_entry(
+            "calendar",
+            calendar_data,
+            ok=bool(calendar_rows),
+            error=None if calendar_rows else "calendar unavailable",
+        ),
+        "microstructure": _analytics_module_entry(
+            "microstructure",
+            micro,
+            ok=_microstructure_has_signal(micro),
+            error=None if _microstructure_has_signal(micro) else "microstructure unavailable",
+        ),
+        "community": _analytics_module_entry(
+            "community",
+            community,
+            ok=_community_has_signal(community),
+            error=None if _community_has_signal(community) else "community unavailable",
+        ),
+    }
+    analytics = {
+        "timestamp": _now_iso(),
+        "all_ok": all(bool((item or {}).get("ok")) for item in analytics_modules.values()),
+        "ok_count": len([item for item in analytics_modules.values() if bool((item or {}).get("ok"))]),
+        "total": len(analytics_modules),
+        "modules": analytics_modules,
+    }
 
     regime = _build_market_regime(analytics, micro, news)
     degraded = False
     warnings: List[str] = []
 
-    if not analytics:
+    if not risk_dashboard:
         degraded = True
         warnings.append("分析总览未在时限内返回，当前仅基于局部结果给出判断。")
     if str(news.get("scope")) == "global_fallback":
         degraded = True
         warnings.append("当前标的新闻不足，已回退到全市场摘要。")
-    if used_history_micro:
+    if int(news.get("events_count") or 0) + int(news.get("feed_count") or 0) + int(news.get("raw_count") or 0) <= 0:
+        degraded = True
+        warnings.append("News summary returned no usable samples, so event coverage may be stale.")
+    if used_history_micro and not prefer_history_micro:
         degraded = True
         warnings.append("实时微观结构未及时返回，已回退到历史快照。")
-    if used_history_community or used_history_whale:
+    if (used_history_community and not prefer_history_community) or used_history_whale:
         degraded = True
         warnings.append("社区/巨鲸实时数据未及时返回，已回退到历史快照。")
-    if used_calendar_fallback:
+    if not calendar_rows:
         degraded = True
         warnings.append("交易日历已使用观察清单回退结果。")
     if float(micro.get("orderbook", {}).get("spread_bps") or 0.0) <= 0:
@@ -845,11 +895,11 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
         "market_state",
         status=_status_from_flags(ok=True, degraded=degraded),
         source_labels=[
-            "trading.analytics.overview",
+            "trading.analytics.risk_dashboard",
+            "trading.analytics.calendar",
             "trading.analytics.microstructure",
             "trading.analytics.community",
             "news.storage.summary",
-            "trading.analytics.calendar",
             "analytics.history.snapshots",
         ],
         warnings=warnings,

@@ -56,6 +56,7 @@ from core.strategies import (
 from core.trading import account_manager, execution_engine, order_manager, position_manager
 from web.asset_versions import static_asset_url
 from web.api import ai_research
+from web.api.auth import set_local_ui_session_cookie
 from web.startup_mode import StartupModeDecision, resolve_startup_trading_mode
 
 _AUTO_SYNC_SYMBOLS = [
@@ -1290,12 +1291,16 @@ app.include_router(create_ops_router())
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    response = templates.TemplateResponse("index.html", {"request": request})
+    set_local_ui_session_cookie(request, response)
+    return response
 
 
 @app.get("/news", response_class=HTMLResponse)
 async def news_page(request: Request):
-    return templates.TemplateResponse("news.html", {"request": request})
+    response = templates.TemplateResponse("news.html", {"request": request})
+    set_local_ui_session_cookie(request, response)
+    return response
 
 
 @app.get("/ai")

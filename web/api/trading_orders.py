@@ -2,15 +2,16 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from web.api.auth import require_sensitive_ops_auth
 from web.api import trading as trading_api
 
 
 router = APIRouter()
 
 
-@router.post("/order", response_model=trading_api.OrderResponse)
+@router.post("/order", response_model=trading_api.OrderResponse, dependencies=[Depends(require_sensitive_ops_auth)])
 async def create_order(request: trading_api.OrderRequest):
     return await trading_api.create_order(request)
 
@@ -35,12 +36,12 @@ async def get_conditional_orders():
     return await trading_api.get_conditional_orders()
 
 
-@router.delete("/orders/conditional/{conditional_id}")
+@router.delete("/orders/conditional/{conditional_id}", dependencies=[Depends(require_sensitive_ops_auth)])
 async def cancel_conditional_order(conditional_id: str):
     return await trading_api.cancel_conditional_order(conditional_id)
 
 
-@router.delete("/order/{order_id}")
+@router.delete("/order/{order_id}", dependencies=[Depends(require_sensitive_ops_auth)])
 async def cancel_order(
     order_id: str,
     symbol: str,
@@ -49,7 +50,7 @@ async def cancel_order(
     return await trading_api.cancel_order(order_id=order_id, symbol=symbol, exchange=exchange)
 
 
-@router.delete("/orders")
+@router.delete("/orders", dependencies=[Depends(require_sensitive_ops_auth)])
 async def cancel_all_orders(
     symbol: Optional[str] = None,
     exchange: str = "binance",
