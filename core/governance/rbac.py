@@ -24,6 +24,9 @@ ROLE_PERMISSIONS: Dict[str, Set[str]] = {
         "approve_live",
         "change_leverage_caps",
         "retire_strategy",
+        "reset_paper_runtime",
+        "manage_orders",
+        "close_positions",
     },
     "OPERATOR": {
         "pause_engine",
@@ -31,6 +34,12 @@ ROLE_PERMISSIONS: Dict[str, Set[str]] = {
         "set_reduce_only",
         "rotate_runtime",
         "ack_alerts",
+        "request_live",
+        "reset_paper_runtime",
+        "manage_orders",
+        "close_positions",
+        "manage_notifications",
+        "manage_ai_agent",
     },
     "AUDITOR": {
         "read_audit",
@@ -41,6 +50,7 @@ ROLE_PERMISSIONS: Dict[str, Set[str]] = {
         "migrations",
         "manage_data_sources",
         "deploy_config",
+        "manage_notifications",
     },
     "SYSTEM": {"*"},
 }

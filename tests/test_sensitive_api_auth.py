@@ -8,6 +8,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+from core.governance.rbac import GovernanceIdentity
+from core.ops.service import auth as ops_auth_module
 from web.api import ai_agent, auth as web_auth, notifications, trading as trading_api, trading_orders, trading_positions, trading_runtime
 
 
@@ -23,6 +25,16 @@ def _build_app(*routers: tuple[str, object]) -> FastAPI:
     for prefix, router in routers:
         app.include_router(router, prefix=prefix)
     return app
+
+
+def _api_identity(role: str) -> GovernanceIdentity:
+    return GovernanceIdentity(
+        actor=f"{role.lower()}_api",
+        role=role,
+        api_key_present=True,
+        token_present=False,
+        client_ip="127.0.0.1",
+    )
 
 
 def test_trading_runtime_write_route_requires_ops_auth(monkeypatch):
@@ -76,6 +88,34 @@ def test_loopback_ui_cookie_allows_sensitive_post(monkeypatch):
     response = client.post("/api/trading/mode/request", json={"target_mode": "paper", "reason": "loopback-ui"})
     assert response.status_code == 200
     assert response.json()["target_mode"] == "paper"
+
+
+def test_loopback_ui_cookie_rejects_cross_port_origin(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
+    monkeypatch.setattr(web_auth, "_request_client_ip", lambda request: "127.0.0.1")
+
+    app = _build_app(("/api/trading", trading_runtime.router))
+
+    @app.get("/")
+    async def index(request: Request):
+        response = JSONResponse({"ok": True})
+        web_auth.set_local_ui_session_cookie(request, response)
+        return response
+
+    monkeypatch.setattr(
+        trading_runtime,
+        "request_trading_mode_switch_service",
+        lambda **kwargs: {"success": True, "token": "tok-cross-port", "target_mode": kwargs.get("target_mode")},
+    )
+
+    client = TestClient(app, base_url="http://127.0.0.1:8000")
+    assert client.get("/").status_code == 200
+    response = client.post(
+        "/api/trading/mode/request",
+        json={"target_mode": "paper", "reason": "cross-port"},
+        headers={"Origin": "http://127.0.0.1:3000"},
+    )
+    assert response.status_code == 401
 
 
 def test_trading_stats_route_uses_short_ttl_cache(monkeypatch):
@@ -176,3 +216,83 @@ def test_order_and_position_mutations_require_ops_auth(monkeypatch):
     assert cancel_all_mock.await_count == 1
     assert close_position_mock.await_count == 1
 
+
+def test_api_key_role_must_have_manage_orders_permission(monkeypatch):
+    app = _build_app(("/api/trading", trading_orders.router))
+    client = TestClient(app)
+
+    cancel_all_mock = AsyncMock(return_value={"success": True, "cancelled": 2})
+    monkeypatch.setattr(trading_api, "cancel_all_orders", cancel_all_mock)
+
+    monkeypatch.setattr(
+        ops_auth_module,
+        "resolve_api_key_identity",
+        AsyncMock(return_value=_api_identity("AUDITOR")),
+    )
+    response = client.delete("/api/trading/orders?exchange=binance", headers={"X-API-KEY": "auditor-key"})
+    assert response.status_code == 403
+    assert cancel_all_mock.await_count == 0
+
+    monkeypatch.setattr(
+        ops_auth_module,
+        "resolve_api_key_identity",
+        AsyncMock(return_value=_api_identity("OPERATOR")),
+    )
+    response = client.delete("/api/trading/orders?exchange=binance", headers={"X-API-KEY": "operator-key"})
+    assert response.status_code == 200
+    assert response.json()["cancelled"] == 2
+    assert cancel_all_mock.await_count == 1
+
+
+def test_live_mode_confirm_requires_approve_live_permission_for_api_key(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
+    trading_runtime.invalidate_trading_stats_cache()
+    app = _build_app(("/api/trading", trading_runtime.router))
+    client = TestClient(app)
+
+    monkeypatch.setattr(
+        trading_runtime,
+        "list_pending_mode_switches",
+        lambda include_token=False: (
+            [
+                {
+                    "token": "live-token",
+                    "target_mode": "live",
+                    "reason": "verify",
+                    "created_at": "2026-04-11T00:00:00+00:00",
+                    "expires_at": "2026-04-11T00:05:00+00:00",
+                }
+            ]
+            if include_token
+            else []
+        ),
+    )
+    switch_mock = AsyncMock(return_value={"success": True, "mode": "live"})
+    monkeypatch.setattr(trading_runtime, "switch_trading_mode_service", switch_mock)
+
+    monkeypatch.setattr(
+        ops_auth_module,
+        "resolve_api_key_identity",
+        AsyncMock(return_value=_api_identity("OPERATOR")),
+    )
+    response = client.post(
+        "/api/trading/mode/confirm",
+        json={"token": "live-token", "confirm_text": "CONFIRM LIVE TRADING"},
+        headers={"X-API-KEY": "operator-key"},
+    )
+    assert response.status_code == 403
+    assert switch_mock.await_count == 0
+
+    monkeypatch.setattr(
+        ops_auth_module,
+        "resolve_api_key_identity",
+        AsyncMock(return_value=_api_identity("RISK_OWNER")),
+    )
+    response = client.post(
+        "/api/trading/mode/confirm",
+        json={"token": "live-token", "confirm_text": "CONFIRM LIVE TRADING"},
+        headers={"X-API-KEY": "risk-owner-key"},
+    )
+    assert response.status_code == 200
+    assert response.json()["mode"] == "live"
+    assert switch_mock.await_count == 1

@@ -11,7 +11,7 @@ from core.audit import audit_logger
 from core.runtime import runtime_state
 from core.risk.risk_manager import risk_manager
 from core.trading import execution_engine, order_manager, position_manager
-from web.api.auth import require_sensitive_ops_auth
+from web.api.auth import require_request_permissions, require_sensitive_ops_auth, require_sensitive_ops_permissions
 from web.api.trading import (
     RiskUpdateRequest,
     TradingModeConfirmRequest,
@@ -61,12 +61,22 @@ async def _build_trading_stats_payload() -> dict:
     }
 
 
+def _pending_mode_target(token: str) -> str:
+    safe_token = str(token or "").strip()
+    if not safe_token:
+        return ""
+    for item in list_pending_mode_switches(include_token=True):
+        if str((item or {}).get("token") or "").strip() == safe_token:
+            return str((item or {}).get("target_mode") or "").strip().lower()
+    return ""
+
+
 @router.get("/risk/report")
 async def get_risk_report():
     return await _build_effective_risk_report(force_live_refresh=False)
 
 
-@router.post("/risk/params", dependencies=[Depends(require_sensitive_ops_auth)])
+@router.post("/risk/params", dependencies=[Depends(require_sensitive_ops_permissions("approve_risk_change"))])
 async def update_risk_params(request: RiskUpdateRequest):
     payload = request.model_dump(exclude_none=True)
     risk_manager.update_parameters(payload)
@@ -84,7 +94,7 @@ async def update_risk_params(request: RiskUpdateRequest):
     }
 
 
-@router.post("/risk/reset", dependencies=[Depends(require_sensitive_ops_auth)])
+@router.post("/risk/reset", dependencies=[Depends(require_sensitive_ops_permissions("ack_alerts", "approve_risk_change"))])
 async def reset_risk_halt():
     risk_manager.reset_halt()
     invalidate_trading_stats_cache()
@@ -100,7 +110,7 @@ async def reset_risk_halt():
     }
 
 
-@router.post("/paper/reset", dependencies=[Depends(require_sensitive_ops_auth)])
+@router.post("/paper/reset", dependencies=[Depends(require_sensitive_ops_permissions("reset_paper_runtime", "rotate_runtime"))])
 async def reset_paper_trading_state(clear_snapshots: bool = True):
     if not execution_engine.is_paper_mode():
         raise HTTPException(status_code=400, detail="当前不是模拟盘模式")
@@ -150,7 +160,11 @@ async def get_trading_mode():
 
 
 @router.post("/mode/request", dependencies=[Depends(require_sensitive_ops_auth)])
-async def request_trading_mode_switch(req: TradingModeRequest):
+async def request_trading_mode_switch(req: TradingModeRequest, request: Request):
+    if str(req.target_mode or "").strip().lower() == "live":
+        require_request_permissions(request, "request_live", "approve_live")
+    else:
+        require_request_permissions(request, "rotate_runtime", "reset_paper_runtime")
     return request_trading_mode_switch_service(
         target_mode=req.target_mode,
         current_mode=execution_engine.get_trading_mode(),
@@ -160,6 +174,13 @@ async def request_trading_mode_switch(req: TradingModeRequest):
 
 @router.post("/mode/confirm", dependencies=[Depends(require_sensitive_ops_auth)])
 async def confirm_trading_mode_switch(req: TradingModeConfirmRequest, request: Request):
+    pending_target = _pending_mode_target(req.token)
+    if pending_target == "live":
+        require_request_permissions(request, "approve_live")
+    elif pending_target == "paper":
+        require_request_permissions(request, "rotate_runtime", "reset_paper_runtime")
+    else:
+        require_request_permissions(request, "approve_live", "rotate_runtime", "reset_paper_runtime")
     result = await switch_trading_mode_service(
         token=req.token,
         confirm_text=req.confirm_text,
@@ -179,7 +200,14 @@ async def confirm_trading_mode_switch(req: TradingModeConfirmRequest, request: R
 
 
 @router.post("/mode/cancel", dependencies=[Depends(require_sensitive_ops_auth)])
-async def cancel_trading_mode_switch(token: str):
+async def cancel_trading_mode_switch(token: str, request: Request):
+    pending_target = _pending_mode_target(token)
+    if pending_target == "live":
+        require_request_permissions(request, "request_live", "approve_live")
+    elif pending_target == "paper":
+        require_request_permissions(request, "rotate_runtime", "reset_paper_runtime")
+    else:
+        require_request_permissions(request, "request_live", "approve_live", "rotate_runtime", "reset_paper_runtime")
     if cancel_trading_mode_switch_token(token):
         return {"success": True, "token": token}
     raise HTTPException(status_code=404, detail="切换令牌不存在")

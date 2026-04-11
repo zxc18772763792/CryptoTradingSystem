@@ -10,7 +10,7 @@ from core.notifications import notification_manager
 from core.risk.risk_manager import risk_manager
 from core.strategies import strategy_manager
 from core.trading import position_manager
-from web.api.auth import require_sensitive_ops_auth
+from web.api.auth import require_sensitive_ops_permissions
 
 router = APIRouter()
 
@@ -78,7 +78,7 @@ async def get_channels():
     }
 
 
-@router.post("/test", dependencies=[Depends(require_sensitive_ops_auth)])
+@router.post("/test", dependencies=[Depends(require_sensitive_ops_permissions("manage_notifications"))])
 async def test_notification(request: NotificationTestRequest):
     before_events = len(notification_manager.get_events(limit=1000))
     result = await notification_manager.send_message(
@@ -103,7 +103,7 @@ async def list_rules():
     }
 
 
-@router.post("/rules", dependencies=[Depends(require_sensitive_ops_auth)])
+@router.post("/rules", dependencies=[Depends(require_sensitive_ops_permissions("manage_notifications"))])
 async def create_rule(request: RuleCreateRequest):
     rule = await notification_manager.add_rule(
         name=request.name,
@@ -115,7 +115,7 @@ async def create_rule(request: RuleCreateRequest):
     return {"success": True, "rule": rule}
 
 
-@router.put("/rules/{rule_id}", dependencies=[Depends(require_sensitive_ops_auth)])
+@router.put("/rules/{rule_id}", dependencies=[Depends(require_sensitive_ops_permissions("manage_notifications"))])
 async def update_rule(rule_id: str, request: RuleUpdateRequest):
     updated = await notification_manager.update_rule(rule_id, request.model_dump(exclude_none=True))
     if not updated:
@@ -123,7 +123,7 @@ async def update_rule(rule_id: str, request: RuleUpdateRequest):
     return {"success": True, "rule": updated}
 
 
-@router.delete("/rules/{rule_id}", dependencies=[Depends(require_sensitive_ops_auth)])
+@router.delete("/rules/{rule_id}", dependencies=[Depends(require_sensitive_ops_permissions("manage_notifications"))])
 async def delete_rule(rule_id: str):
     success = await notification_manager.delete_rule(rule_id)
     if not success:
@@ -131,7 +131,7 @@ async def delete_rule(rule_id: str):
     return {"success": True}
 
 
-@router.post("/evaluate", dependencies=[Depends(require_sensitive_ops_auth)])
+@router.post("/evaluate", dependencies=[Depends(require_sensitive_ops_permissions("manage_notifications"))])
 async def evaluate_rules(request: EvaluateRequest):
     prices = await _load_prices(request.exchange, request.symbols)
     context = _build_context(request.total_usd, prices)
