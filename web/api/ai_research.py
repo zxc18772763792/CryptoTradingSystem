@@ -133,6 +133,7 @@ class AICandidatePromotionRequest(BaseModel):
 class AICandidateRegisterRequest(BaseModel):
     mode: str = "paper"       # paper | live_candidate
     name: Optional[str] = None  # optional custom strategy name (stored in metadata)
+    allocation_pct: Optional[float] = Field(default=None, ge=0.001, le=1.0)
 
 
 class AIHumanApprovalRequest(BaseModel):
@@ -3526,11 +3527,14 @@ async def register_ai_candidate(request: Request, candidate_id: str, payload: AI
             status_code=409,
             detail="governance enabled: one-click register disabled; use pending-approval + human-approve workflow",
         )
-    # Persist custom display name into candidate metadata before promoting
-    if payload.name:
+    # Persist optional UI overrides into candidate metadata before promoting.
+    if payload.name or payload.allocation_pct is not None:
         try:
             cand = get_candidate(request.app, candidate_id)
-            cand.metadata["display_name"] = payload.name
+            if payload.name:
+                cand.metadata["display_name"] = payload.name
+            if payload.allocation_pct is not None:
+                cand.metadata["allocation_pct"] = float(payload.allocation_pct)
             request.app.state.ai_candidate_registry.save(cand)
         except Exception:
             pass

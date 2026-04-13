@@ -1208,6 +1208,49 @@ def test_register_ai_candidate_maps_runtime_error_to_http_400(monkeypatch):
     assert "strategy start failed" in str(exc_info.value.detail)
 
 
+def test_register_ai_candidate_persists_allocation_pct_override(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    request = _build_ai_research_request()
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module.settings, "GOVERNANCE_ENABLED", False, raising=False)
+    monkeypatch.setattr(ai_module.execution_engine, "get_trading_mode", lambda: "paper")
+
+    candidate = SimpleNamespace(
+        candidate_id="cand-register-allocation",
+        metadata={},
+        model_dump=lambda mode="json": {"candidate_id": "cand-register-allocation"},
+    )
+    proposal = SimpleNamespace(model_dump=lambda mode="json": {"proposal_id": "proposal-register-allocation"})
+    promotion = SimpleNamespace(model_dump=lambda mode="json": {"decision": "paper"})
+
+    monkeypatch.setattr(ai_module, "get_candidate", lambda app, cid: candidate)
+
+    promote_mock = AsyncMock(
+        return_value={
+            "candidate": candidate,
+            "proposal": proposal,
+            "promotion": promotion,
+            "runtime_status": "paper_running",
+            "registered_strategy_name": "reg_alloc_strategy",
+        }
+    )
+    monkeypatch.setattr(ai_module, "promote_existing_candidate", promote_mock)
+
+    payload = ai_module.AICandidateRegisterRequest(
+        mode="paper",
+        name="reg_alloc_display",
+        allocation_pct=0.17,
+    )
+    result = asyncio.run(ai_module.register_ai_candidate(request, "cand-register-allocation", payload))
+
+    assert candidate.metadata["display_name"] == "reg_alloc_display"
+    assert candidate.metadata["allocation_pct"] == 0.17
+    assert request.app.state.ai_candidate_registry.save.call_count == 1
+    assert promote_mock.await_count == 1
+    assert result["runtime_status"] == "paper_running"
+
+
 def test_step6_autonomous_agent_ui_present():
     """Step 6: AI自治代理控制面板必须出现在 HTML 中."""
     repo_root = Path(__file__).resolve().parents[1]

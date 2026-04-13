@@ -1,23 +1,23 @@
-# Pending UI Fixes (Deferred)
+# Pending UI Fixes
 
-## Fix 1 — One-click deploy hardcoded allocation
+Last updated: 2026-04-13
 
-**File**: `web/static/js/ai_research.js`
-**Functions**: `runOneClickResearchDeploy` (~lines 4377 and 4476)
-**Problem**: Allocation hardcoded to `0.05` (5%). User has no way to change it before deploying.
-**Fix**: Add a numeric input `<input type="number" min="1" max="100" value="5" step="1"> %`
-to the one-click modal so the user can adjust allocation before confirming.
-The input value should be read in `confirmRegister`/`runOneClickResearchDeploy` instead of the hardcoded `0.05`.
+Current status: no pending items.
 
----
+Resolved in latest integration:
 
-## Fix 2 — Dead humanApprove / humanReject standalone functions
+1. One-click deploy allocation is no longer hardcoded.
+- Added `id="ai-oneclick-allocation"` input in `web/templates/index.html`.
+- `web/static/js/ai_research.js` now reads the user-selected percentage and maps it to `allocation_pct` for:
+  - `/oneclick/research-deploy`
+  - `/oneclick/deploy-candidate`
+- One-click summary now includes allocation.
 
-**File**: `web/static/js/ai_research.js`
-**Functions**: `humanApprove(id)` and `humanReject(id)` (~lines 3932–3961)
-**Problem**: These two functions are defined as top-level functions but are never called anywhere
-in the codebase. The approval/rejection UI buttons call `approveCandidate()` and `rejectCandidate()`
-(different function names). The dead functions add confusion and were likely left over from an
-earlier naming convention.
-**Fix**: Delete both dead functions (20 lines). Confirm `approveCandidate`/`rejectCandidate` cover
-all call sites before removing.
+2. Removed dead standalone handlers.
+- Deleted unused `humanApprove(candidateId, target)` and `humanReject(candidateId)` from `web/static/js/ai_research.js`.
+- Approval flows continue through existing `approveCandidate()` / `rejectCandidate()` paths.
+
+3. Register/deploy modal now supports allocation override.
+- Added allocation percent input (`reg-allocation-percent`) to register modal.
+- `confirmRegister()` sends `allocation_pct` to `/candidates/{candidate_id}/register`.
+- Backend `AICandidateRegisterRequest` now accepts optional `allocation_pct` and persists it into candidate metadata before promotion.

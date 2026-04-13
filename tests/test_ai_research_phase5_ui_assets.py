@@ -30,6 +30,7 @@ def test_ai_research_template_loads_phase5_modules():
     assert 'id="ai-planner-max-backtests"' in template
     assert 'id="ai-auto-goal-btn"' in template
     assert 'id="ai-oneclick-btn"' in template
+    assert 'id="ai-oneclick-allocation"' in template
     assert 'id="ai-oneclick-feedback"' in template
     assert 'id="ai-candidate-cards"' in template
     assert 'id="ai-queue-title"' in template
@@ -89,8 +90,11 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "buildOneClickFailureFeedback" in ai_js
     assert "buildOneClickSuccessFeedback" in ai_js
     assert "renderOneClickFeedback" in ai_js
+    assert "parseAllocationPercentInput" in ai_js
     assert "completed_without_compatible_runtime_target" in ai_js
     assert "manual_action_required" in ai_js
+    assert "async function humanApprove" not in ai_js
+    assert "async function humanReject" not in ai_js
     assert "const watchlist = Array.from(new Set([...DEFAULT_SIGNAL_SYMBOLS, selectedSymbol]));" in ai_js
     assert "loadSignal(undefined, { compact: true })" not in ai_js
     assert "liveDecisionActivityLastGood" in ai_js

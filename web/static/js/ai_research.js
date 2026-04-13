@@ -709,6 +709,12 @@
       .slice(0, Math.max(1, limit));
   }
 
+  function parseAllocationPercentInput(rawValue, fallbackPercent = 5) {
+    const parsed = Number.parseFloat(String(rawValue ?? '').trim());
+    const normalized = Number.isFinite(parsed) ? parsed : fallbackPercent;
+    return Math.max(1, Math.min(100, normalized));
+  }
+
   function summarizeOneClickPayload(payload) {
     const symbols = toArray(payload?.symbols).map(item => String(item || '').trim()).filter(Boolean);
     const timeframes = toArray(payload?.timeframes).map(item => String(item || '').trim()).filter(Boolean);
@@ -721,7 +727,11 @@
     const exchangeText = String(payload?.exchange || '--').trim() || '--';
     const days = Number(payload?.days || 0);
     const daysText = Number.isFinite(days) && days > 0 ? `${Math.round(days)} 天` : '--';
-    return normalizeUiText(`当前设置：${symbolText} · ${timeframeText} · ${exchangeText.toUpperCase()} · ${daysText}`);
+    const allocationPct = Number(payload?.allocation_pct || 0);
+    const allocationText = Number.isFinite(allocationPct) && allocationPct > 0
+      ? `${Math.round(allocationPct * 100)}%`
+      : '--';
+    return normalizeUiText(`当前设置：${symbolText} · ${timeframeText} · ${exchangeText.toUpperCase()} · ${daysText} · 仓位 ${allocationText}`);
   }
 
   function renderOneClickFeedback(feedback) {
@@ -3650,6 +3660,10 @@
     const dd  = top.max_drawdown   != null ? Number(top.max_drawdown)   : null;
     const wr  = top.win_rate       != null ? Number(top.win_rate) : null;
     const sr  = top.sharpe_ratio   != null ? Number(top.sharpe_ratio)   : null;
+    const defaultAllocationPercent = parseAllocationPercentInput(
+      Number(cand?.metadata?.allocation_pct || 0.05) * 100,
+      5,
+    );
 
     function metricBox(label, value, cls = '') {
       return `<div class="ai-rm-item">
@@ -3685,6 +3699,10 @@
           <label><input type="radio" name="reg-mode" value="live_candidate" ${decision === 'live_candidate' ? 'checked' : ''}> 实盘候选（待人工确认）</label>
         </div>
       </div>
+      <div class="form-group">
+        <label>部署仓位（%）</label>
+        <input type="number" id="reg-allocation-percent" value="${esc(String(Math.round(defaultAllocationPercent)))}" min="1" max="100" step="1">
+      </div>
       <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;padding-top:12px;border-top:1px solid rgba(255,255,255,.07);">
         <button class="btn" id="reg-cancel-btn">取消</button>
         <button class="btn-register-cta" id="reg-confirm-btn" data-candidate-id="${esc(candidateId)}">确认注册/部署</button>
@@ -3712,11 +3730,14 @@
     document.getElementById('reg-confirm-btn').onclick = () => {
       const name = String(document.getElementById('reg-name')?.value || '').trim();
       const mode = document.querySelector('input[name="reg-mode"]:checked')?.value || defaultRegisterMode;
-      confirmRegister(candidateId, mode, name);
+      const allocationInput = document.getElementById('reg-allocation-percent');
+      const allocationPercent = parseAllocationPercentInput(allocationInput?.value, defaultAllocationPercent);
+      if (allocationInput) allocationInput.value = String(Math.round(allocationPercent));
+      confirmRegister(candidateId, mode, name, allocationPercent / 100);
     };
   }
 
-  async function confirmRegister(candidateId, mode, name) {
+  async function confirmRegister(candidateId, mode, name, allocationPct) {
     if (governanceEnabled()) {
       notify('已开启人工确认，请改用人工确认流程', true);
       return;
@@ -3726,7 +3747,11 @@
     try {
       const result = await aiApi(`/candidates/${encodeURIComponent(candidateId)}/register`, {
         method: 'POST',
-        body: JSON.stringify({ mode, name: name || undefined }),
+        body: JSON.stringify({
+          mode,
+          name: name || undefined,
+          allocation_pct: Number.isFinite(Number(allocationPct)) ? Number(allocationPct) : undefined,
+        }),
         timeoutMs: 30000,
       });
       document.getElementById('ai-register-modal').style.display = 'none';
@@ -3926,38 +3951,6 @@
       </div>`;
     }).join(''));
     normalizeDomText(list);
-  }
-
-  async function humanApprove(candidateId, target) {
-    const notes = window.prompt(`批准候选 ${candidateId.slice(0, 8)} 运行至 [${target}]？\n请输入备注（可留空）：`, '') ?? '';
-    if (notes === null) return; // user cancelled
-    try {
-      await aiApi(`/candidates/${encodeURIComponent(candidateId)}/human-approve`, {
-        method: 'POST',
-        body: JSON.stringify({ target, notes }),
-        timeoutMs: 30000,
-      });
-      notify(`已批准策略候选 (${target})`);
-      await refreshWorkbench('', candidateId);
-    } catch (err) {
-      notify(`批准失败: ${err.message}`, true);
-    }
-  }
-
-  async function humanReject(candidateId) {
-    const reason = window.prompt(`拒绝候选 ${candidateId.slice(0, 8)}？\n请输入拒绝原因：`, '') ?? '';
-    if (reason === null) return; // user cancelled
-    try {
-      await aiApi(`/candidates/${encodeURIComponent(candidateId)}/human-reject`, {
-        method: 'POST',
-        body: JSON.stringify({ notes: reason }),
-        timeoutMs: 15000,
-      });
-      notify('候选已拒绝');
-      await refreshWorkbench('', '');
-    } catch (err) {
-      notify(`拒绝失败: ${err.message}`, true);
-    }
   }
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
@@ -4337,12 +4330,16 @@
   async function runOneClickResearchDeploy() {
     const btn = document.getElementById('ai-oneclick-btn');
     const daysInput = document.getElementById('ai-oneclick-days');
+    const allocationInput = document.getElementById('ai-oneclick-allocation');
     await ensureAutoPlannerGoal({ silent: true });
     const goal = String(document.getElementById('ai-planner-goal')?.value || '').trim();
     const exchange = String(document.getElementById('run-exchange')?.value || getCurrentResearchExchange() || 'binance');
     const days = daysInput
       ? Math.max(7, Math.min(3650, parseInt(daysInput.value || '30', 10) || 30))
       : 30;
+    const allocationPercent = parseAllocationPercentInput(allocationInput?.value, 5);
+    if (allocationInput) allocationInput.value = String(Math.round(allocationPercent));
+    const allocationPct = allocationPercent / 100;
     if (goal.length < 8) {
       renderOneClickFeedback(buildOneClickFailureFeedback(
         new Error('研究目标太短（至少8个字符）'),
@@ -4374,7 +4371,7 @@
       exchange,
       days,
       target: 'auto',
-      allocation_pct: 0.05,
+      allocation_pct: allocationPct,
       strategy_name: '',
       approval_notes: 'oneclick approve from ui',
       skip_deploy: false,
@@ -4473,7 +4470,7 @@
           body: JSON.stringify({
             candidate_id: candidateId,
             target: 'auto',
-            allocation_pct: 0.05,
+            allocation_pct: payload.allocation_pct,
             approval_notes: 'oneclick approve from ui',
           }),
           timeoutMs: 30000,
@@ -4858,6 +4855,8 @@
     document.getElementById('run-days')?.addEventListener('change', () => clearOneClickFeedback());
     document.getElementById('ai-oneclick-days')?.addEventListener('input', () => clearOneClickFeedback());
     document.getElementById('ai-oneclick-days')?.addEventListener('change', () => clearOneClickFeedback());
+    document.getElementById('ai-oneclick-allocation')?.addEventListener('input', () => clearOneClickFeedback());
+    document.getElementById('ai-oneclick-allocation')?.addEventListener('change', () => clearOneClickFeedback());
     window.addEventListener('ai-agent:status', (event) => {
       const nextStatus = event?.detail?.status || null;
       if (!nextStatus) return;
