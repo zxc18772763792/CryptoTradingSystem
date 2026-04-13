@@ -9,6 +9,7 @@ The current repository is organized for local development first: source code and
 - Web dashboard and REST API for trading, research, data download, and monitoring
 - Paper and guarded live trading workflows, with explicit guard rails around live execution
 - AI research and autonomous-agent workflows with configurable providers
+- ML signal pipeline with training/evaluation artifacts, model registry, paper deployment, and factorization APIs (`/api/ml/*`)
 - News collection, enrichment, and LLM-assisted triage
 - Backtesting, factor research, and pairs/relative-value strategy tooling
 - Optional Ops and OpenClaw integration for operational control flows
@@ -115,6 +116,16 @@ Open:
 - News page: `http://127.0.0.1:8000/news`
 - FastAPI docs: `http://127.0.0.1:8000/docs`
 
+### 3.1 Paper Long-Run Selfcheck
+
+For paper long-run operation, run the dedicated smoke/selfcheck after startup:
+
+```powershell
+python scripts/selfcheck_paper_longrun.py --base-url http://127.0.0.1:8000 --token $env:OPS_TOKEN
+```
+
+The script validates process/API health, `paper` safety state, Ops status endpoints, and run-once availability. Non-zero exit means the runtime is not ready for long-run.
+
 ### 4. Switch modes carefully
 
 Direct CLI startup can force paper mode:
@@ -165,6 +176,24 @@ Run the OpenClaw/Ops self-check:
 python scripts/selfcheck_openclaw_ops.py --base-url http://127.0.0.1:8000/ops
 ```
 
+Run ML training from local parquet data:
+
+```powershell
+python scripts/train_ml_signal.py --exchange binance --symbol BTC/USDT --timeframe 1h --days 365
+```
+
+ML API quick references (served under `/api/ml`):
+
+- `GET /api/ml/diagnostics`
+- `POST /api/ml/jobs/train`
+- `GET /api/ml/jobs/{job_id}`
+- `POST /api/ml/models/{model_id}/register`
+- `POST /api/ml/models/{model_id}/deploy/paper`
+- `POST /api/ml/models/{model_id}/factorize`
+- `POST /api/ml/oneclick`
+
+UI note: AI Research one-click deploy now supports configurable allocation percentage (1-100%), and register/deploy modal also supports allocation override.
+
 ## Secret Handling
 
 - `.env`, `keys.txt`, local certificate files, and `config/*_api_key.txt` are intentionally ignored by Git
@@ -179,6 +208,8 @@ See [SECURITY.md](SECURITY.md) for the full pre-push checklist and incident resp
 - [STARTUP.md](STARTUP.md): single-script startup/status/stop reference for new sessions, including one-click and autonomous-agent startup rules
 - [SECURITY.md](SECURITY.md): secret management and safe sharing rules
 - [docs/REPOSITORY_OVERVIEW.md](docs/REPOSITORY_OVERVIEW.md): directory-by-directory repository guide
+- [docs/PAPER_LONGRUN_RUNBOOK.md](docs/PAPER_LONGRUN_RUNBOOK.md): paper long-run startup/stop/restart/selfcheck runbook
+- [docs/PAPER_LONGRUN_BURNIN_CHECKLIST.md](docs/PAPER_LONGRUN_BURNIN_CHECKLIST.md): burn-in checklist for long-run readiness
 - [docs/GOVERNANCE.md](docs/GOVERNANCE.md): governance model and approval flows
 - [docs/INTEGRATION.md](docs/INTEGRATION.md): system integration notes
 - [docs/CHANGELOG.md](docs/CHANGELOG.md): tracked repository milestones
