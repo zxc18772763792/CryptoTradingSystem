@@ -99,6 +99,9 @@ def _risk_delta_score(base: Dict[str, Any], proposed: Dict[str, Any]) -> float:
         b = float(proposed.get(key, 0.0) or 0.0)
         if b > a:
             score += weight
+    for key in ("kill_switch", "reduce_only"):
+        if bool(base.get(key, False)) and not bool(proposed.get(key, False)):
+            score += 1.0
     if _is_list_expanded(base.get("allowed_symbols"), proposed.get("allowed_symbols")):
         score += 1.0
     if _is_list_expanded(base.get("allowed_timeframes"), proposed.get("allowed_timeframes")):
@@ -195,6 +198,8 @@ async def _activate_risk_config(
         # Reuse existing halt path.
         risk_manager._trading_halted = True  # noqa: SLF001
         risk_manager._halt_reason = "governance kill_switch enabled"  # noqa: SLF001
+    else:
+        risk_manager.reset_halt()
     return {"version": new_version, "config": config}
 
 

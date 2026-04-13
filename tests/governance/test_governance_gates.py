@@ -10,11 +10,13 @@ from core.governance.decision_engine import decision_engine
 from core.governance.rbac import GovernanceIdentity
 from core.governance.schemas import RiskConfigPayload
 from core.governance.service import (
+    _activate_risk_config,
     ensure_risk_config_initialized,
     propose_strategy,
     request_risk_change,
     transition_strategy,
 )
+from core.risk.risk_manager import risk_manager
 
 
 def test_decision_gate_blocks_kill_switch(monkeypatch):
@@ -165,6 +167,93 @@ def test_increase_risk_change_requires_approval():
     assert result["status"] == "pending"
     assert result["increase_risk"] is True
     assert result["proposed_version"] is None
+
+
+def test_boolean_relaxations_count_as_risk_increase(monkeypatch):
+    monkeypatch.setattr(settings, "GOVERNANCE_ENABLED", True)
+
+    async def _run():
+        await init_db()
+        requester = GovernanceIdentity(actor="ops_user", role="OPERATOR")
+        base_template = {
+            "max_leverage": 10.0,
+            "max_position_notional_pct": 0.5,
+            "max_trade_risk_pct": 0.3,
+            "max_daily_drawdown_pct": 0.2,
+            "spread_limit_bps": 100.0,
+            "data_staleness_limit_ms": 120_000,
+            "allowed_symbols": [],
+            "allowed_timeframes": [],
+        }
+
+        cases = [
+            ("kill_switch", {"kill_switch": True, "reduce_only": False}),
+            ("reduce_only", {"kill_switch": False, "reduce_only": True}),
+        ]
+        outputs = []
+        for key, flags in cases:
+            base_cfg = dict(base_template)
+            base_cfg.update(flags)
+
+            async def _mock_current():
+                return {"version": 9, "config": dict(base_cfg), "is_active": True}
+
+            monkeypatch.setattr("core.governance.service.get_active_risk_config", _mock_current)
+            result = await request_risk_change(
+                identity=requester,
+                proposed_config=RiskConfigPayload(
+                    max_leverage=10.0,
+                    max_position_notional_pct=0.5,
+                    max_trade_risk_pct=0.3,
+                    max_daily_drawdown_pct=0.2,
+                    spread_limit_bps=100.0,
+                    data_staleness_limit_ms=120_000,
+                    allowed_symbols=[],
+                    allowed_timeframes=[],
+                    reduce_only=False,
+                    kill_switch=False,
+                ),
+                reason=f"test {key} relaxation",
+            )
+            outputs.append(result)
+        return outputs
+
+    results = asyncio.run(_run())
+    assert len(results) == 2
+    for result in results:
+        assert result["status"] == "pending"
+        assert result["increase_risk"] is True
+        assert result["risk_delta_score"] > 0
+
+
+def test_activate_risk_config_clears_runtime_halt_when_kill_switch_disabled():
+    async def _run():
+        await init_db()
+        actor = GovernanceIdentity(actor="governance_bot", role="SYSTEM")
+        original_halted = risk_manager._trading_halted  # noqa: SLF001
+        original_reason = risk_manager._halt_reason  # noqa: SLF001
+        try:
+            risk_manager._trading_halted = True  # noqa: SLF001
+            risk_manager._halt_reason = "governance kill_switch enabled"  # noqa: SLF001
+            await _activate_risk_config(
+                base_version=1,
+                config={
+                    "max_leverage": 10.0,
+                    "max_position_notional_pct": 0.5,
+                    "max_daily_drawdown_pct": 0.2,
+                    "reduce_only": False,
+                    "kill_switch": False,
+                },
+                actor=actor,
+            )
+            return risk_manager._trading_halted, risk_manager._halt_reason  # noqa: SLF001
+        finally:
+            risk_manager._trading_halted = original_halted  # noqa: SLF001
+            risk_manager._halt_reason = original_reason  # noqa: SLF001
+
+    halted, reason = asyncio.run(_run())
+    assert halted is False
+    assert reason == ""
 
 
 def test_live_transition_requires_dual_approval():
