@@ -49,12 +49,18 @@ def test_dashboard_mode_ui_uses_runtime_mode_snapshot():
 
 
 def test_backtest_compare_ui_avoids_single_strategy_hard_dependency():
+    template_source = _read("web/templates/index.html")
     app_js = _read("web/static/js/app.js")
 
+    assert "未填写开始/结束时间时，多策略对比会自动锁定最近窗口来控制耗时" in template_source
+    assert "function recommendBacktestCompareWindowDays" in app_js
+    assert "function resolveBacktestCompareExecutionScope" in app_js
     assert "function estimateBacktestCompareTimeoutMs" in app_js
     assert "await ensureBacktestStrategySelect().catch(err=>{" in app_js
     assert "backtest compare preflight skipped:" in app_js
-    assert "const compareTimeoutMs=estimateBacktestCompareTimeoutMs(chosenStrategies.length,maxTrials,tf);" in app_js
+    assert "const compareScope=resolveBacktestCompareExecutionScope" in app_js
+    assert "const compareTimeoutMs=estimateBacktestCompareTimeoutMs(chosenStrategies.length,maxTrials,tf,compareScope.windowDays);" in app_js
+    assert "autoWindowApplied:!!compareScope.autoWindowApplied" in app_js
     compare_section = app_js.split("const b1=document.getElementById('btn-backtest-compare');", 1)[1]
     compare_section = compare_section.split("const b2=document.getElementById('btn-backtest-optimize');", 1)[0]
     assert "await ensureSelectedBacktestStrategy();" not in compare_section

@@ -488,11 +488,51 @@ if(strategy==='FamaFactorArbitrageStrategy'){
 }
 return 12000;
 }
-function estimateBacktestCompareTimeoutMs(strategyCount,maxTrials,timeframe='1h'){
+function recommendBacktestCompareWindowDays(timeframe='1h',strategyCount=1,maxTrials=48){
+const tf=String(timeframe||'1h').trim()||'1h';
+const sec=Math.max(1,timeframeSeconds(tf));
+let days=365;
+if(sec<=5*60)days=14;
+else if(sec<=15*60)days=30;
+else if(sec<=60*60)days=90;
+else if(sec<=4*3600)days=180;
+const strategies=Math.max(1,Math.min(32,parseInt(strategyCount,10)||1));
+const trials=Math.max(8,Math.min(512,parseInt(maxTrials,10)||48));
+if(strategies>=12)days=Math.round(days*0.5);
+else if(strategies>=6)days=Math.round(days*0.75);
+if(trials>48)days=Math.round(days*0.75);
+const minDays=sec<=15*60?7:(sec<=60*60?30:60);
+return Math.max(minDays,Math.min(3650,days));
+}
+function resolveBacktestCompareExecutionScope({requestedStart='',requestedEnd='',timeframe='1h',strategyCount=1,maxTrials=48}={}){
+const startText=String(requestedStart||'').trim();
+const endText=String(requestedEnd||'').trim();
+if(startText||endText){
+  return {
+    startDate:startText,
+    endDate:endText,
+    windowDays:Math.max(1,estimateBacktestWindowDays()||recommendBacktestCompareWindowDays(timeframe,strategyCount,maxTrials)),
+    autoWindowApplied:false,
+    note:'',
+  };
+}
+const windowDays=recommendBacktestCompareWindowDays(timeframe,strategyCount,maxTrials);
+const endMs=Date.now();
+const startMs=endMs-windowDays*86400000;
+return {
+  startDate:klineLocalIso(startMs),
+  endDate:klineLocalIso(endMs),
+  windowDays,
+  autoWindowApplied:true,
+  note:`未填写区间，已自动锁定最近 ${windowDays} 天进行多策略对比；如需全历史，请手动填写开始/结束时间。`,
+};
+}
+function estimateBacktestCompareTimeoutMs(strategyCount,maxTrials,timeframe='1h',windowDaysOverride=null){
 const strategies=Math.max(1,Math.min(32,parseInt(strategyCount,10)||1));
 const trials=Math.max(8,Math.min(512,parseInt(maxTrials,10)||48));
 const tf=String(timeframe||'1h').trim()||'1h';
-const windowDays=Math.max(60,Math.min(3650,estimateBacktestWindowDays()||recommendDownloadDays(tf)||365));
+const fallbackWindow=Math.max(60,Math.min(3650,estimateBacktestWindowDays()||recommendDownloadDays(tf)||365));
+const windowDays=Math.max(7,Math.min(3650,Number(windowDaysOverride||0)||fallbackWindow));
 const windowFactor=Math.max(1,Math.ceil(windowDays/90));
 const timeoutMs=
   30000+
@@ -3456,7 +3496,7 @@ if(toggle)toggle.addEventListener('change',apply);
 apply();
 }
 function getBacktestExtraPanel(){return document.getElementById('backtest-extra-output');}
-function renderBacktestExtraLoading(title='处理中'){const out=getBacktestExtraPanel();if(!out)return;out.innerHTML=`<div class="list-item"><span>${esc(title)}</span><span>请稍候...</span></div>`;}
+function renderBacktestExtraLoading(title='处理中',detail=''){const out=getBacktestExtraPanel();if(!out)return;out.innerHTML=`<div class="list-item"><span>${esc(title)}</span><span>请稍候...</span></div>${detail?`<div class="list-item"><span>执行提示</span><span style="color:#9fb1c9;white-space:normal;word-break:break-word;text-align:right;">${esc(detail)}</span></div>`:''}`;}
 function renderBacktestExtraError(err){const out=getBacktestExtraPanel();if(!out)return;out.innerHTML=`<div class="list-item"><span>操作失败</span><span style="color:#ff8b8b">${esc(err?.message||String(err||'未知错误'))}</span></div>`;}
 function renderBacktestRawBlock(data,label='原始JSON'){
 return `<details><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(data,null,2))}</pre></details>`;
@@ -3476,12 +3516,14 @@ const avgRet=okRows.length?okRows.reduce((s,x)=>s+Number(x.total_return||0),0)/o
 const avgSharpe=okRows.length?okRows.reduce((s,x)=>s+Number(x.sharpe_ratio||0),0)/okRows.length:0;
 const optimizedCount=okRows.filter(r=>r.optimization_applied).length;
 const compareOpt=(data&&typeof data.compare_optimization==='object'&&data.compare_optimization)?data.compare_optimization:{};
+const compareRequestMeta=(data&&typeof data._compare_request_meta==='object'&&data._compare_request_meta)?data._compare_request_meta:{};
 const compareOptSummary=data?.pre_optimize
   ? String(compareOpt?.summary||`已预优化 ${optimizedCount}/${okRows.length} 个策略（目标: ${esc(data?.optimize_objective||'total_return')}, trials=${Number(data?.optimize_max_trials||0)})`)
   : (bestBalanced?`建议下一步用 ${bestBalanced.strategy} 做参数优化`: '暂无可推荐策略');
 backtestUIState.lastCompare={...(data||{}), ranked:[...ranked]};
 out.innerHTML=`
 <div class="list-item"><span>多策略对比（${esc(data.symbol||'-')} / ${esc(data.timeframe||'-')}）</span><span>成功 ${okRows.length} / 总计 ${rows.length}</span></div>
+${compareRequestMeta.autoWindowApplied?`<div class="list-item"><span>自动区间</span><span style="color:#9fb1c9;white-space:normal;word-break:break-word;text-align:right;">${esc(compareRequestMeta.note||'已自动锁定近期区间')}</span></div>`:''}
 ${renderRangeLockIndicatorHtml(data,false)}
 <div class="backtest-subgrid">
   <div class="stat-box"><div class="stat-label">最佳收益策略</div><div class="stat-value">${esc(best?.strategy||'-')}</div><div class="stat-label">${best?`${btPct(best.total_return)} / 夏普 ${btNum(best.sharpe_ratio)}`:'--'}</div></div>
@@ -6022,7 +6064,6 @@ notify('回测完成');
 const b1=document.getElementById('btn-backtest-compare');
 if(b1)b1.onclick=async()=>{
 try{
-renderBacktestExtraLoading('多策略对比运行中');
 await ensureBacktestStrategySelect().catch(err=>{
   console.warn('backtest compare preflight skipped:',err);
   return [];
@@ -6032,12 +6073,21 @@ const chosenStrategies=getSelectedBacktestCompareStrategies();
 if(!chosenStrategies.length){notify('请至少勾选一个策略',true);return;}
 const objective=String(document.getElementById('backtest-opt-objective')?.value||'total_return');
 const maxTrials=Math.max(8,Math.min(512,parseInt(document.getElementById('backtest-opt-trials')?.value||'48',10)||48));
-const compareTimeoutMs=estimateBacktestCompareTimeoutMs(chosenStrategies.length,maxTrials,tf);
+const compareScope=resolveBacktestCompareExecutionScope({requestedStart:sd,requestedEnd:ed,timeframe:tf,strategyCount:chosenStrategies.length,maxTrials});
+const compareTimeoutMs=estimateBacktestCompareTimeoutMs(chosenStrategies.length,maxTrials,tf,compareScope.windowDays);
+renderBacktestExtraLoading('多策略对比运行中',`${compareScope.note||'按当前所选区间执行对比。'} 预计超时保护 ${Math.round(compareTimeoutMs/1000)} 秒。`);
 let cu=`/backtest/compare?strategies=${encodeURIComponent(chosenStrategies.join(','))}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&pre_optimize=true&optimize_objective=${encodeURIComponent(objective)}&optimize_max_trials=${maxTrials}`;
-if(sd)cu+=`&start_date=${encodeURIComponent(sd)}`;
-if(ed)cu+=`&end_date=${encodeURIComponent(ed)}`;
+if(compareScope.startDate)cu+=`&start_date=${encodeURIComponent(compareScope.startDate)}`;
+if(compareScope.endDate)cu+=`&end_date=${encodeURIComponent(compareScope.endDate)}`;
 cu=appendBacktestProtectionParams(cu);
 const d=await api(cu,{method:'POST',timeoutMs:compareTimeoutMs});
+d._compare_request_meta={
+  autoWindowApplied:!!compareScope.autoWindowApplied,
+  note:String(compareScope.note||''),
+  windowDays:Number(compareScope.windowDays||0),
+  effectiveStartDate:String(compareScope.startDate||''),
+  effectiveEndDate:String(compareScope.endDate||''),
+};
 backtestUIState.lastCompare=d||null;
 renderBacktestCompareOutput(d);
 notify('多策略对比完成');
