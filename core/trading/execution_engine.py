@@ -3130,6 +3130,7 @@ class ExecutionEngine:
                         close_price=fill_price,
                         quantity=close_qty,
                         account_id=account_id,
+                        strategy=strategy_lookup,
                     )
                     if closed:
                         trade_pnl += float(closed.realized_pnl or 0.0) - prev_realized
@@ -3188,6 +3189,7 @@ class ExecutionEngine:
                         close_price=fill_price,
                         quantity=close_qty,
                         account_id=account_id,
+                        strategy=strategy_lookup,
                     )
                     if closed:
                         trade_pnl += float(closed.realized_pnl or 0.0) - prev_realized

@@ -5,10 +5,14 @@ import importlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
+import pytest
 
 from core.strategies import Signal, SignalType
 from core.trading.execution_engine import ExecutionEngine
+from core.trading.position_manager import PositionSide
 
 
 execution_engine_module = importlib.import_module("core.trading.execution_engine")
@@ -119,3 +123,178 @@ def test_record_live_strategy_trade_skips_when_paper_mode(tmp_path: Path, monkey
 
     assert not engine._live_trade_journal_path.exists()
     assert engine.get_live_trade_review(limit=20)["count"] == 0
+
+
+class _FakeStrategyPositionManager:
+    def __init__(self, positions):
+        self.positions = dict(positions)
+        self.close_calls = []
+
+    def get_position(self, exchange, symbol, account_id=None, strategy=None):
+        if strategy is None:
+            matches = [
+                pos
+                for (pos_exchange, pos_symbol, pos_account_id, _), pos in self.positions.items()
+                if pos_exchange == exchange and pos_symbol == symbol and pos_account_id == account_id
+            ]
+            if len(matches) > 1:
+                return matches[0]
+            return matches[0] if matches else None
+        return self.positions.get((exchange, symbol, account_id, strategy))
+
+    def close_position(self, exchange, symbol, close_price, quantity=None, account_id=None, strategy=None):
+        if strategy is None:
+            raise AssertionError("close_position must receive a strategy when multiple strategy positions exist")
+        key = (exchange, symbol, account_id, strategy)
+        position = self.positions.pop(key, None)
+        if position is None:
+            return None
+        self.close_calls.append(
+            {
+                "exchange": exchange,
+                "symbol": symbol,
+                "close_price": close_price,
+                "quantity": quantity,
+                "account_id": account_id,
+                "strategy": strategy,
+            }
+        )
+        position.realized_pnl = float(getattr(position, "realized_pnl", 0.0) or 0.0)
+        return position
+
+    def open_position(self, *args, **kwargs):
+        return None
+
+    def update_position_price(self, *args, **kwargs):
+        return None
+
+
+@pytest.mark.parametrize(
+    ("signal_side", "position_side", "signal_type"),
+    [
+        ("sell", PositionSide.LONG, SignalType.CLOSE_LONG),
+        ("buy", PositionSide.SHORT, SignalType.CLOSE_SHORT),
+    ],
+)
+def test_execute_manual_order_single_closes_only_matching_strategy_position(
+    signal_side: str,
+    position_side: PositionSide,
+    signal_type: SignalType,
+    monkeypatch,
+):
+    engine = ExecutionEngine()
+    engine._paper_trading = True
+
+    target_strategy = "alpha"
+    other_strategy = "beta"
+    target_position = SimpleNamespace(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=position_side,
+        quantity=1.0,
+        leverage=1.0,
+        strategy=target_strategy,
+        account_id="main",
+        realized_pnl=0.0,
+        current_price=100.0,
+        entry_price=100.0,
+        metadata={"source": "strategy"},
+    )
+    other_position = SimpleNamespace(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=position_side,
+        quantity=2.0,
+        leverage=1.0,
+        strategy=other_strategy,
+        account_id="main",
+        realized_pnl=0.0,
+        current_price=100.0,
+        entry_price=100.0,
+        metadata={"source": "strategy"},
+    )
+    fake_position_manager = _FakeStrategyPositionManager(
+        {
+            ("binance", "BTC/USDT", "main", target_strategy): target_position,
+            ("binance", "BTC/USDT", "main", other_strategy): other_position,
+        }
+    )
+
+    monkeypatch.setattr(execution_engine_module, "position_manager", fake_position_manager)
+    monkeypatch.setattr(
+        execution_engine_module.order_manager,
+        "create_order",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                id="order-1",
+                price=100.0,
+                fee=0.0,
+                status=SimpleNamespace(value="filled"),
+                amount=1.0,
+                filled=1.0,
+            )
+        ),
+    )
+    monkeypatch.setattr(execution_engine_module.order_manager, "get_last_error", lambda: "")
+    monkeypatch.setattr(execution_engine_module.order_manager, "get_order_metadata", lambda order_id: {})
+    monkeypatch.setattr(execution_engine_module.risk_manager, "pre_trade_check", lambda **kwargs: True)
+    monkeypatch.setattr(execution_engine_module.risk_manager, "record_trade", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        execution_engine_module.decision_engine,
+        "evaluate_order_intent",
+        AsyncMock(return_value=SimpleNamespace(allowed=True, trace_id="trace-1")),
+    )
+    monkeypatch.setattr(engine, "_resolve_order_context", AsyncMock(return_value=(100.0, 100.0)))
+    monkeypatch.setattr(engine, "_get_account_equity", AsyncMock(return_value=1000.0))
+    monkeypatch.setattr(engine, "_consume_paper_order_cost", lambda order_id: {"fee_usd": 0.0, "slippage_cost_usd": 0.0})
+    monkeypatch.setattr(engine, "_notify_callbacks", AsyncMock(return_value=None))
+
+    signal = Signal(
+        symbol="BTC/USDT",
+        signal_type=signal_type,
+        price=100.0,
+        timestamp=datetime.now(timezone.utc),
+        strategy_name=target_strategy,
+        strength=0.8,
+        quantity=1.0,
+        metadata={"account_id": "main", "exchange": "binance"},
+    )
+
+    result = asyncio.run(
+        engine._execute_manual_order_single(
+            exchange="binance",
+            symbol="BTC/USDT",
+            side=signal_side,
+            order_type="market",
+            amount=1.0,
+            price=100.0,
+            leverage=1.0,
+            stop_loss=None,
+            take_profit=None,
+            trailing_stop_pct=None,
+            trailing_stop_distance=None,
+            trigger_price=None,
+            order_mode="normal",
+            iceberg_parts=1,
+            algo_slices=1,
+            algo_interval_sec=0,
+            account_id="main",
+            reduce_only=False,
+            strategy=target_strategy,
+            params={},
+        )
+    )
+
+    assert result is not None
+    assert result["side"] == signal_side
+    assert fake_position_manager.close_calls == [
+        {
+            "exchange": "binance",
+            "symbol": "BTC/USDT",
+            "close_price": 100.0,
+            "quantity": 1.0,
+            "account_id": "main",
+            "strategy": target_strategy,
+        }
+    ]
+    assert ("binance", "BTC/USDT", "main", other_strategy) in fake_position_manager.positions
