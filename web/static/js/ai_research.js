@@ -6,14 +6,13 @@
   const REFRESH_INTERVAL_MS = 60000;
   const JOB_POLL_MS         = 3000;
   const PREMIUM_SOURCE_LABEL = '高级数据源';
-  const FLOW_HINT_DEFAULT = '当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。也可以直接点击“⚡ one-click 自动研究+部署”。';
   const DEFAULT_SIGNAL_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT'];
   const AGENT_STATUS_API = '/ai/autonomous-agent/status';
   const AGENT_JOURNAL_API = '/ai/autonomous-agent/journal';
   const AGENT_START_API = '/ai/autonomous-agent/start';
   const AGENT_STOP_API = '/ai/autonomous-agent/stop';
   const AGENT_RUN_ONCE_API = '/ai/autonomous-agent/run-once';
-  const FLOW_HINT_QUICK_PATH = '当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。也可以直接点击“⚡ one-click 自动研究+部署”。';
+  const FLOW_HINT_QUICK_PATH = '当前主流程：0) AI判断市场与策略 → 1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。也可以直接点击“⚡ one-click 自动研究+部署”。';
   const AI_UI_TIMEZONE = (typeof window !== 'undefined' && window.CTS_UI_TIMEZONE) || 'Asia/Shanghai';
   const AI_UI_TIMEZONE_LABEL = (typeof window !== 'undefined' && window.CTS_UI_TIMEZONE_LABEL) || '上海时间 (UTC+8)';
   const AI_SHARED_POLL_TAB = 'ai-research';
@@ -106,6 +105,7 @@
     candidateDetailReqSeq: 0,
     perfHistoryCache: {},
     pollingOwnershipTimer: null,
+    autoPlannerRecommendation: null,
     sharedPollingActive: false,
   };
   let initialized = false;
@@ -386,6 +386,16 @@
     };
   }
 
+  const PLANNER_REGIME_LABELS = {
+    mixed: '混合行情',
+    trend_up: '上涨趋势',
+    trend_down: '下跌趋势',
+    mean_reversion: '震荡回归',
+    breakout: '突破行情',
+    stat_arb: '统计套利',
+    news_event: '新闻事件',
+  };
+
   function updatePlannerModeHint() {
     const hintEl = document.getElementById('ai-planner-mode-hint');
     if (!hintEl) return;
@@ -396,6 +406,293 @@
     const draftCount = pendingStrategyDraftCount();
     const draftText = draftCount > 0 ? `当前已挂起 ${draftCount} 个 AI 草案，生成提案时会一起进入搜索。` : '当前还没有 AI 草案，系统会先从模板和市场上下文起步。';
     hintEl.textContent = `当前选择：${requestedText}；实际生成：${effectiveText}；模板上限 ${effective.max_templates}，草案预算 ${effective.max_strategy_drafts}，回测预算 ${effective.max_backtest_runs}，探索强度 ${(effective.exploration_bias * 100).toFixed(0)}%。${draftText}`;
+  }
+
+  function setPlannerFieldValue(id, value) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (el instanceof HTMLSelectElement) {
+      const target = String(value || '').trim();
+      const hasOption = [...el.options].some((opt) => String(opt.value || '').trim() === target);
+      el.value = hasOption ? target : (el.options[0]?.value || '');
+    } else {
+      el.value = value;
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function plannerListOrFallback(id, fallback = []) {
+    const parsed = csvInput(id)
+      .map((item) => String(item || '').trim())
+      .filter(Boolean);
+    const base = parsed.length
+      ? parsed
+      : toArray(fallback)
+        .map((item) => String(item || '').trim())
+        .filter(Boolean);
+    return Array.from(new Set(base));
+  }
+
+  function deriveAutoResearchTimeframes(baseTimeframe) {
+    const presets = {
+      '1m': ['1m', '5m', '15m'],
+      '5m': ['5m', '15m', '1h'],
+      '15m': ['5m', '15m', '1h', '4h'],
+      '1h': ['15m', '1h', '4h'],
+      '4h': ['1h', '4h', '1d'],
+      '1d': ['4h', '1d'],
+    };
+    return Array.from(new Set(presets[String(baseTimeframe || '5m').trim().toLowerCase()] || ['5m', '15m', '1h']));
+  }
+
+  function buildAiPlannerWorkbenchProfile() {
+    const symbols = plannerListOrFallback('ai-planner-symbols', [getCurrentResearchSymbol() || 'BTC/USDT', 'ETH/USDT'])
+      .map((item) => String(item || '').trim().toUpperCase())
+      .filter(Boolean);
+    const primarySymbol = symbols[0] || getCurrentResearchSymbol() || 'BTC/USDT';
+    const timeframes = plannerListOrFallback('ai-planner-timeframes', deriveAutoResearchTimeframes('5m'));
+    return {
+      exchange: getCurrentResearchExchange() || 'binance',
+      primary_symbol: primarySymbol,
+      universe_symbols: symbols.length ? symbols : [primarySymbol],
+      timeframe: timeframes[0] || '5m',
+      lookback: 1200,
+      exclude_retired: true,
+      horizon: 'short_intraday',
+    };
+  }
+
+  function workbenchProfileQuery(profile) {
+    const params = new URLSearchParams();
+    Object.entries(profile || {}).forEach(([key, value]) => {
+      if (Array.isArray(value)) params.set(key, value.join(','));
+      else if (value != null) params.set(key, String(value));
+    });
+    return params.toString();
+  }
+
+  function plannerProfileCacheKey(profile) {
+    return JSON.stringify({
+      exchange: String(profile?.exchange || 'binance').trim().toLowerCase(),
+      primary_symbol: String(profile?.primary_symbol || 'BTC/USDT').trim().toUpperCase(),
+      universe_symbols: toArray(profile?.universe_symbols).map((item) => String(item || '').trim().toUpperCase()),
+      timeframe: String(profile?.timeframe || '5m').trim().toLowerCase(),
+      lookback: Number(profile?.lookback || 1200),
+      horizon: String(profile?.horizon || 'short_intraday').trim(),
+    });
+  }
+
+  function fallbackPlannerRegime(marketContext) {
+    const newsEvents = Number(marketContext?.news?.events_count || 0);
+    const direction = String(marketContext?.sentiment || 'FLAT').trim().toUpperCase();
+    if (newsEvents >= 5) return 'news_event';
+    if (direction === 'LONG') return 'trend_up';
+    if (direction === 'SHORT') return 'trend_down';
+    return 'mixed';
+  }
+
+  function preferredFamiliesForPlanner(regime, directionBias = 'neutral') {
+    if (regime === 'breakout') return ['突破', '趋势跟随', '动量'];
+    if (regime === 'news_event') return ['事件驱动', '突破', '轻仓趋势跟随'];
+    if (regime === 'trend_up' || directionBias === 'bullish') return ['趋势跟随', '动量突破', '低杠杆顺势'];
+    if (regime === 'trend_down' || directionBias === 'bearish') return ['防守型均值回归', '反弹做空', '事件驱动快进快出'];
+    if (regime === 'mean_reversion') return ['均值回归', '震荡反转', '轻仓套利'];
+    return ['均值回归', '轻仓观察', '多策略对比'];
+  }
+
+  function buildFallbackAutoResearchBrief(profile, marketContext = {}) {
+    const direction = String(marketContext?.sentiment || 'FLAT').trim().toUpperCase();
+    const directionBias = direction === 'LONG' ? 'bullish' : direction === 'SHORT' ? 'bearish' : 'neutral';
+    const plannerRegime = fallbackPlannerRegime(marketContext);
+    const regimeLabel = PLANNER_REGIME_LABELS[plannerRegime] || '混合行情';
+    const symbols = plannerListOrFallback('ai-planner-symbols', profile?.universe_symbols || [profile?.primary_symbol || 'BTC/USDT'])
+      .map((item) => String(item || '').trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, 6);
+    const timeframes = plannerListOrFallback('ai-planner-timeframes', deriveAutoResearchTimeframes(profile?.timeframe || '5m'));
+    const preferred = preferredFamiliesForPlanner(plannerRegime, directionBias);
+    const confidencePct = Math.round(Number(marketContext?.confidence || 0) * 100);
+    const goal = `围绕 ${symbols.slice(0, 3).join(' / ')} 在${regimeLabel}环境下，优先研究 ${preferred.join(' / ')} 策略，验证触发条件、失效条件和风控边界。`;
+    const thesis = [
+      `市场当前更接近${regimeLabel}，先比较最匹配的策略族表现。`,
+      confidencePct > 0 ? `现有方向信号置信度约 ${confidencePct}% ，需要验证是否能转化为稳定收益。` : '当前方向判断不够强，适合先做多策略对比而不是过早部署。',
+    ];
+    const riskNotes = [];
+    if (Number(marketContext?.microstructure?.spread_bps || 0) >= 8) riskNotes.push('盘口点差偏高，避免过度依赖高频入场。');
+    if (Number(marketContext?.news?.events_count || 0) >= 5) riskNotes.push('新闻事件密集，注意策略失效速度和波动放大。');
+    if (!riskNotes.length) riskNotes.push('先通过样本外回测和成交质量验证，再决定是否部署。');
+    const nextSteps = [
+      `优先比较 ${preferred.slice(0, 2).join(' / ')} 两类策略的稳定性。`,
+      '确认触发条件、失效条件与风险预算是否清晰。',
+      '先看候选验证结果，再决定是否进入注册或部署。',
+    ];
+    return {
+      headline: regimeLabel,
+      goal,
+      planner_regime: plannerRegime,
+      market_regime: regimeLabel,
+      direction_bias: directionBias,
+      symbols,
+      timeframes,
+      preferred_strategy_families: preferred,
+      thesis,
+      risk_notes: riskNotes,
+      next_steps: nextSteps,
+      prompt_context: [
+        `研究任务：${goal}`,
+        `市场状态：${regimeLabel} / ${directionBias === 'bullish' ? '看多' : directionBias === 'bearish' ? '看空' : '中性'}`,
+        `关注标的：${symbols.join(' / ')}`,
+        `观察周期：${timeframes.join(' / ')}`,
+        `优先策略：${preferred.join(' / ')}`,
+        `研究观察：${thesis.join('；')}`,
+        `风险提示：${riskNotes.join('；')}`,
+        `下一步：${nextSteps.join('；')}`,
+      ].join('\n'),
+      source_label: 'fallback',
+    };
+  }
+
+  function getWorkbenchAutoResearchResult() {
+    const workbench = (typeof window !== 'undefined' && window.workbenchState) || null;
+    const recommendation = workbench?.recommendations || null;
+    if (!recommendation) return null;
+    const action = toArray(recommendation?.action_items).find((item) => String(item?.kind || '').trim() === 'ai_prefill') || null;
+    const brief = action?.params?.brief || recommendation?.ai_brief || null;
+    if (!brief) return null;
+    return {
+      profile: workbench?.profile || null,
+      overview: workbench?.overview || null,
+      recommendation,
+      action,
+      brief,
+      source: 'workbench',
+    };
+  }
+
+  function applyAutoResearchBrief(brief, options = {}) {
+    if (!brief || typeof brief !== 'object') return '';
+    const source = String(options.source || brief.source_label || 'workbench').trim();
+    const goal = String(brief.prompt_context || brief.goal || '').trim();
+    const regime = String(brief.planner_regime || 'mixed').trim();
+    const symbols = toArray(brief.symbols).map((item) => String(item || '').trim().toUpperCase()).filter(Boolean);
+    const timeframes = toArray(brief.timeframes).map((item) => String(item || '').trim()).filter(Boolean);
+    const headline = String(brief.headline || brief.market_regime || PLANNER_REGIME_LABELS[regime] || '').trim();
+
+    if (goal) setPlannerFieldValue('ai-planner-goal', goal);
+    setPlannerFieldValue('ai-planner-regime', regime);
+    if (symbols.length) setPlannerFieldValue('ai-planner-symbols', symbols.join(', '));
+    if (timeframes.length) setPlannerFieldValue('ai-planner-timeframes', timeframes.join(', '));
+
+    const plannerNotesEl = document.getElementById('ai-planner-notes');
+    if (plannerNotesEl) {
+      const notes = [];
+      if (headline) notes.push(`市场判断：${headline}`);
+      if (toArray(brief.preferred_strategy_families).length) notes.push(`优先策略：${toArray(brief.preferred_strategy_families).join(' / ')}`);
+      if (toArray(brief.risk_notes).length) notes.push(`风险提示：${toArray(brief.risk_notes).slice(0, 2).join('；')}`);
+      const sourceLabel = source === 'fallback' ? '当前市场快照' : '研究工作台';
+      plannerNotesEl.innerHTML = `<div style="font-size:11px;color:#7dd3fc;margin-bottom:3px;">已按${esc(sourceLabel)}自动生成研究目标${notes.length ? ` · ${esc(notes.join(' · '))}` : ''}</div>`;
+    }
+
+    const marketHintEl = document.getElementById('ai-market-context-hint');
+    if (marketHintEl) {
+      const preferredText = toArray(brief.preferred_strategy_families).slice(0, 3).join(' / ');
+      const sourceLabel = source === 'fallback' ? 'AI 快照判断' : 'AI 综合判断';
+      marketHintEl.textContent = normalizeUiText(`${sourceLabel}：${headline || PLANNER_REGIME_LABELS[regime] || '混合行情'}${preferredText ? ` · 优先 ${preferredText}` : ''}`);
+    }
+
+    updatePlannerModeHint();
+    clearOneClickFeedback();
+    return goal;
+  }
+
+  async function loadAutoResearchRecommendation({ forceRefresh = false } = {}) {
+    const profile = buildAiPlannerWorkbenchProfile();
+    const profileKey = plannerProfileCacheKey(profile);
+    if (!forceRefresh) {
+      const workbenchResult = getWorkbenchAutoResearchResult();
+      const workbenchProfileKey = plannerProfileCacheKey(workbenchResult?.profile || profile);
+      if (workbenchResult?.brief && workbenchProfileKey === profileKey) return workbenchResult;
+      if (state.autoPlannerRecommendation?.brief && state.autoPlannerRecommendation?.cache_key === profileKey) {
+        return state.autoPlannerRecommendation;
+      }
+    }
+    let overview = null;
+    try {
+      overview = await rootApi(`/research/workbench/overview?${workbenchProfileQuery(profile)}`, { timeoutMs: 90000 });
+      const recommendation = await rootApi('/research/workbench/recommendations', {
+        method: 'POST',
+        body: JSON.stringify({
+          profile,
+          overview,
+          modules: overview?.modules || {},
+        }),
+        timeoutMs: 30000,
+      });
+      const action = toArray(recommendation?.action_items).find((item) => String(item?.kind || '').trim() === 'ai_prefill') || null;
+      const brief = action?.params?.brief || recommendation?.ai_brief || null;
+      if (brief) {
+        state.autoPlannerRecommendation = {
+          cache_key: profileKey,
+          profile,
+          overview,
+          recommendation,
+          action,
+          brief,
+          source: 'workbench',
+        };
+        return state.autoPlannerRecommendation;
+      }
+    } catch (err) {
+      console.debug('loadAutoResearchRecommendation(workbench) failed:', err);
+    }
+
+    const marketContext = await _collectLiveMarketContext(profile.primary_symbol).catch(() => ({}));
+    const brief = buildFallbackAutoResearchBrief(profile, marketContext);
+    if (marketContext && Object.keys(marketContext || {}).length) {
+      state.pendingMacroContext = marketContext;
+    }
+    state.autoPlannerRecommendation = {
+      cache_key: profileKey,
+      profile,
+      overview,
+      recommendation: null,
+      action: {
+        kind: 'ai_prefill',
+        params: {
+          goal: brief.prompt_context,
+          regime: brief.planner_regime,
+          symbols: brief.symbols,
+          timeframes: brief.timeframes,
+          brief,
+        },
+      },
+      brief,
+      source: 'fallback',
+      marketContext,
+    };
+    return state.autoPlannerRecommendation;
+  }
+
+  async function ensureAutoPlannerGoal({ forceRefresh = false, silent = false } = {}) {
+    const current = String(document.getElementById('ai-planner-goal')?.value || '').trim();
+    if (current.length >= 8 && !forceRefresh) return current;
+    const marketHintEl = document.getElementById('ai-market-context-hint');
+    if (marketHintEl) {
+      marketHintEl.textContent = normalizeUiText('AI 正在判断当前市场状态、适配策略和研究目标...');
+    }
+    const recommendation = await loadAutoResearchRecommendation({ forceRefresh });
+    const goal = applyAutoResearchBrief(recommendation?.brief || recommendation?.action?.params?.brief || null, {
+      source: recommendation?.source || 'workbench',
+    });
+    const nextGoal = String(goal || document.getElementById('ai-planner-goal')?.value || '').trim();
+    if (nextGoal.length < 8) {
+      throw new Error('AI 未能自动生成可用的研究目标，请稍后重试');
+    }
+    if (!silent) {
+      notify(forceRefresh ? '已重新根据当前市场生成研究目标' : '已根据当前市场自动生成研究目标');
+    }
+    return nextGoal;
   }
 
   function uniqueTextItems(values, limit = 5) {
@@ -1927,8 +2224,8 @@
       .sort((a, b) => {
         if (a.active !== b.active) return a.active ? -1 : 1;
         if (a.virtual !== b.virtual) return a.virtual ? 1 : -1;
-        if (a.tsMs !== b.tsMs) return b.tsMs - a.tsMs;
         if (a.statusPriority !== b.statusPriority) return a.statusPriority - b.statusPriority;
+        if (a.tsMs !== b.tsMs) return b.tsMs - a.tsMs;
         return a.index - b.index;
       })
       .map((entry) => entry.item);
@@ -2989,25 +3286,6 @@
       showOrderPreview(candidateId);
     });
 
-    // 纸盘 -> 实盘候选升级按钮
-    panel.querySelector('#btn-escalate-live')?.addEventListener('click', async () => {
-      if (!confirm(`确认将纸盘候选 ${candidateId.slice(0, 8)} 升级为实盘候选？\n（不会自动下单，后续需要人工确认才能实际启动实盘）`)) return;
-      const btn = panel.querySelector('#btn-escalate-live');
-      if (btn) { btn.textContent = '升级中...'; btn.disabled = true; }
-      try {
-        await aiApi(`/candidates/${encodeURIComponent(candidateId)}/promote`, {
-          method: 'POST',
-          body: JSON.stringify({ target: 'live_candidate' }),
-          timeoutMs: 20000,
-        });
-        notify('已升级为实盘候选，等待人工确认');
-        await refreshWorkbench('', candidateId);
-      } catch (err) {
-        if (btn) { btn.textContent = '升级为实盘候选 →'; btn.disabled = false; }
-        notify(`\u5347\u7ea7\u5931\u8d25: ${err.message}`, true);
-      }
-    });
-
     /* panel.querySelector('#btn-activate-live')?.addEventListener('click', async () => {
       const btn = panel.querySelector('#btn-activate-live');
       const defaultLabel = String(btn?.dataset?.defaultLabel || btn?.textContent || '鍚姩实盘运行 鈫?);
@@ -3347,7 +3625,13 @@
     modal.style.display = 'flex';
     body.innerHTML = '<div style="padding:20px;color:#7e92b2;">加载中...</div>';
 
-    const resp   = await aiApi(`/candidates/${encodeURIComponent(candidateId)}`, { timeoutMs: 20000 });
+    let resp;
+    try {
+      resp = await aiApi(`/candidates/${encodeURIComponent(candidateId)}`, { timeoutMs: 20000 });
+    } catch (err) {
+      modal.style.display = 'none';
+      throw err;
+    }
     const cand   = resp?.candidate || {};
     const top    = candidateTopResults(cand)[0] || {};
     const decision = cand?.promotion?.decision || cand?.promotion_target || 'paper';
@@ -3397,8 +3681,7 @@
       <div class="form-group">
         <label>运行模式</label>
         <div class="ai-mode-radio-group">
-          <label><input type="radio" name="reg-mode" value="paper" ${decision === 'paper' || !['shadow','live_candidate'].includes(decision) ? 'checked' : ''}> 纸盘（推荐，低风险模拟）</label>
-          <label><input type="radio" name="reg-mode" value="shadow" ${decision === 'shadow' ? 'checked' : ''}> 影子跟踪（虚拟跟踪）</label>
+          <label><input type="radio" name="reg-mode" value="paper" ${decision === 'paper' || !['live_candidate'].includes(decision) ? 'checked' : ''}> 纸盘（推荐，低风险模拟）</label>
           <label><input type="radio" name="reg-mode" value="live_candidate" ${decision === 'live_candidate' ? 'checked' : ''}> 实盘候选（待人工确认）</label>
         </div>
       </div>
@@ -3412,12 +3695,8 @@
     document.getElementById('reg-cancel-btn').onclick  = () => { modal.style.display = 'none'; };
     const paperMode = body.querySelector('input[name="reg-mode"][value="paper"]');
     const liveCandidateMode = body.querySelector('input[name="reg-mode"][value="live_candidate"]');
-    const regModeShadow = body.querySelector('input[name="reg-mode"][value="shadow"]');
     if (paperMode) paperMode.checked = defaultRegisterMode === 'paper';
     if (liveCandidateMode) liveCandidateMode.checked = defaultRegisterMode === 'live_candidate';
-    if (regModeShadow) {
-      regModeShadow.closest('label')?.remove();
-    }
     if (runtimeTradingMode === 'live') {
       const modeGroup = body.querySelector('.ai-mode-radio-group');
       if (modeGroup && !body.querySelector('[data-register-live-hint="true"]')) {
@@ -3432,8 +3711,7 @@
     }
     document.getElementById('reg-confirm-btn').onclick = () => {
       const name = String(document.getElementById('reg-name')?.value || '').trim();
-      let mode = document.querySelector('input[name="reg-mode"]:checked')?.value || defaultRegisterMode;
-      if (mode === 'shadow') mode = 'paper';
+      const mode = document.querySelector('input[name="reg-mode"]:checked')?.value || defaultRegisterMode;
       confirmRegister(candidateId, mode, name);
     };
   }
@@ -3675,7 +3953,7 @@
         body: JSON.stringify({ notes: reason }),
         timeoutMs: 15000,
       });
-      notify('研究提案已生成');
+      notify('候选已拒绝');
       await refreshWorkbench('', '');
     } catch (err) {
       notify(`拒绝失败: ${err.message}`, true);
@@ -3688,6 +3966,7 @@
   async function generateAIContext() {
     setAIContextButtonState('working');
     try {
+      await ensureAutoPlannerGoal({ silent: true });
       const goals = String(document.getElementById('ai-planner-goal')?.value || '').trim();
       if (goals.length < 8) {
         notify('请先填写研究目标（至少8个字符）', true);
@@ -3710,7 +3989,8 @@
         if (macroContext) state.pendingMacroContext = macroContext;
         const goalInput = document.getElementById('ai-planner-goal');
         if (goalInput && hypothesis) {
-          goalInput.value = `${goals.replace(/\s+/g, ' ').trim()}；AI假设：${hypothesis}`.slice(0, 580);
+          const baseGoals = goals.replace(/；AI假设：[\s\S]*$/, '').replace(/\s+/g, ' ').trim();
+          goalInput.value = `${baseGoals}；AI假设：${hypothesis}`.slice(0, 580);
         }
         const maxTemplatesEl = document.getElementById('ai-planner-max-templates');
         if (maxTemplatesEl) maxTemplatesEl.value = String(suggestedMax);
@@ -3733,7 +4013,7 @@
         const plannerNotesEl = document.getElementById('ai-planner-notes');
         const macroSummary = macroContext
           ? `宏观摘要：Funding ${macroContext?.microstructure?.funding_rate ?? '--'} / Basis ${macroContext?.microstructure?.basis_pct ?? '--'} / 巨鲸 ${macroContext?.community?.whale_count ?? 0} / News ${macroContext?.news?.events_count ?? 0}`
-          : '暂无运行中候选';
+          : '未获取宏观数据';
         if (plannerNotesEl && result.llm_research_output.hypothesis) {
           const existing = plannerNotesEl.innerHTML;
           const draftSummary = draftCount > 0
@@ -3985,6 +4265,7 @@
   }
 
   async function generateProposal() {
+    await ensureAutoPlannerGoal({ silent: true });
     const goal = String(document.getElementById('ai-planner-goal')?.value || '').trim();
     if (goal.length < 8) { notify('研究目标太短（至少8个字符）', true); return; }
     const symbols   = csvInput('ai-planner-symbols');
@@ -4033,10 +4314,6 @@
     // A: show filtered templates and planner notes
     const filteredTpls = result?.filtered_templates || result?.proposal?.filtered_templates || [];
     const plannerNotes = result?.planner_notes || [];
-    let notifMsg = '暂无运行中候选';
-    if (filteredTpls.length > 0) {
-      notifMsg += `（过滤了 ${filteredTpls.length} 个不支持的模板）`;
-    }
     // Update planner notes UI if it exists
     const plannerNotesEl = document.getElementById('ai-planner-notes');
     if (plannerNotesEl) {
@@ -4060,6 +4337,7 @@
   async function runOneClickResearchDeploy() {
     const btn = document.getElementById('ai-oneclick-btn');
     const daysInput = document.getElementById('ai-oneclick-days');
+    await ensureAutoPlannerGoal({ silent: true });
     const goal = String(document.getElementById('ai-planner-goal')?.value || '').trim();
     const exchange = String(document.getElementById('run-exchange')?.value || getCurrentResearchExchange() || 'binance');
     const days = daysInput
@@ -4510,6 +4788,8 @@
       withActionLock('generate', () => generateProposal()).catch(err => notify(`生成失败: ${err.message}`, true)));
 
     /* AI生成研究鎬濊矾 */
+    document.getElementById('ai-auto-goal-btn')?.addEventListener('click', () =>
+      ensureAutoPlannerGoal({ forceRefresh: true }).catch(err => notify(`自动生成研究目标失败: ${err.message}`, true)));
     document.getElementById('ai-context-btn')?.addEventListener('click', () =>
       generateAIContext().catch(err => notify(`生成研究思路失败: ${err.message}`, true)));
 
@@ -4544,8 +4824,10 @@
       document.getElementById(id)?.addEventListener('change', () => previewLiveDecisionProviderSelection());
     });
     document.getElementById('ai-live-decision-model')?.addEventListener('input', () => previewLiveDecisionProviderSelection());
-    document.getElementById('ai-planner-symbols')?.addEventListener('change', () =>
-      loadDataReadiness().catch(() => {}));
+    document.getElementById('ai-planner-symbols')?.addEventListener('change', () => {
+      state.autoPlannerRecommendation = null;
+      loadDataReadiness().catch(() => {});
+    });
     [
       'ai-planner-goal',
       'ai-planner-regime',
@@ -4556,10 +4838,19 @@
       'ai-planner-exploration-bias',
       'ai-planner-timeframes',
     ].forEach((id) => {
-      document.getElementById(id)?.addEventListener('input', () => { updatePlannerModeHint(); clearOneClickFeedback(); });
-      document.getElementById(id)?.addEventListener('change', () => { updatePlannerModeHint(); clearOneClickFeedback(); });
+      document.getElementById(id)?.addEventListener('input', () => {
+        state.autoPlannerRecommendation = null;
+        updatePlannerModeHint();
+        clearOneClickFeedback();
+      });
+      document.getElementById(id)?.addEventListener('change', () => {
+        state.autoPlannerRecommendation = null;
+        updatePlannerModeHint();
+        clearOneClickFeedback();
+      });
     });
     document.getElementById('run-exchange')?.addEventListener('change', () => {
+      state.autoPlannerRecommendation = null;
       clearOneClickFeedback();
       loadDataReadiness().catch(() => {});
     });
@@ -4789,7 +5080,7 @@
       if (document.hidden) {
         stopPolling();
       } else if (isAiWorkspaceActive()) {
-        canRunAiPolling();
+        if (!canRunAiPolling()) return;
         startPolling();
         if (isAiResearchActive()) refreshWorkbench().catch(() => {});
       }

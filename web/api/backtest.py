@@ -86,10 +86,11 @@ _BACKTEST_COMPARE_DEFAULT_TRIALS = 48
 _BACKTEST_COMPARE_MAX_TRIALS = 512
 _BACKTEST_OPTIMIZE_DEFAULT_TRIALS = 96
 _BACKTEST_OPTIMIZE_MAX_TRIALS = 1024
+_BACKTEST_COMPARE_FAST_SHORTLIST_CAP = 15
 _BACKTEST_COMPARE_FAST_MAX_CANDIDATES = {
-    "intraday": 8,
-    "short": 10,
-    "default": 12,
+    "intraday": _BACKTEST_COMPARE_FAST_SHORTLIST_CAP,
+    "short": _BACKTEST_COMPARE_FAST_SHORTLIST_CAP,
+    "default": _BACKTEST_COMPARE_FAST_SHORTLIST_CAP,
 }
 _BACKTEST_COMPARE_FAST_MAX_TRIALS = {
     "intraday": 24,
@@ -587,11 +588,39 @@ def _engine_exit_template(exit_template: Optional[str]) -> Optional[str]:
     return None if resolved == "Original" else resolved
 
 
+def _json_safe_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return None if (np.isnan(value) or np.isinf(value)) else float(value)
+    if isinstance(value, np.floating):
+        num = float(value)
+        return None if (np.isnan(num) or np.isinf(num)) else num
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, dict):
+        return {str(k): _json_safe_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(v) for v in value]
+    if hasattr(value, "isoformat") and callable(getattr(value, "isoformat")):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    return str(value)
+
+
 def _apply_exit_template_metadata(payload: Dict[str, Any], requested_exit_template: Optional[str]) -> Dict[str, Any]:
     resolved = _normalize_requested_exit_template(requested_exit_template)
     payload["exit_template"] = resolved
     payload["default_exit_template"] = _DEFAULT_BACKTEST_EXIT_TEMPLATE
     payload["available_exit_templates"] = list(_BACKTEST_EXIT_TEMPLATE_CHOICES)
+    safe_payload = _json_safe_value(payload)
+    if isinstance(safe_payload, dict):
+        payload.clear()
+        payload.update(safe_payload)
     return payload
 
 
@@ -1436,12 +1465,12 @@ def _build_compare_optimization_plan(
 
     dense_compare = int(strategy_count) >= 24
     if dense_compare:
-        selected_count = min(selected_count, 6)
+        selected_count = min(selected_count, _BACKTEST_COMPARE_FAST_SHORTLIST_CAP)
         effective_trials = min(effective_trials, 16)
 
     sample_floor = max(int(_min_required_bars(timeframe) * 4), 240)
     if int(data_points or 0) <= sample_floor:
-        selected_count = min(selected_count, 6)
+        selected_count = min(selected_count, _BACKTEST_COMPARE_FAST_SHORTLIST_CAP)
         effective_trials = min(effective_trials, 16)
 
     # Full-history multi-strategy comparisons can span tens of thousands of
@@ -1451,13 +1480,13 @@ def _build_compare_optimization_plan(
     large_history = int(data_points or 0) >= max(sample_floor * 4, 4000)
     very_large_history = int(data_points or 0) >= max(sample_floor * 8, 8000)
     if medium_history:
-        selected_count = min(selected_count, 8 if tier == "default" else 6)
+        selected_count = min(selected_count, _BACKTEST_COMPARE_FAST_SHORTLIST_CAP)
         effective_trials = min(effective_trials, 24 if tier == "default" else 16)
     if large_history:
-        selected_count = min(selected_count, 6)
+        selected_count = min(selected_count, _BACKTEST_COMPARE_FAST_SHORTLIST_CAP)
         effective_trials = min(effective_trials, 12 if tier == "default" else 8)
     if very_large_history:
-        selected_count = min(selected_count, 4)
+        selected_count = min(selected_count, _BACKTEST_COMPARE_FAST_SHORTLIST_CAP)
         effective_trials = min(effective_trials, 8 if tier == "default" else 6)
 
     selected_count = max(1, min(int(selected_count), int(eligible_count)))

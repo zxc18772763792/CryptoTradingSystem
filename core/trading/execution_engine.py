@@ -8,7 +8,7 @@ import json
 import math
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,6 +24,7 @@ from core.governance.decision_engine import decision_engine
 from core.risk.risk_manager import risk_manager
 from core.runtime import runtime_state
 from core.strategies import Signal, SignalType
+from core.strategies.runtime_policy import parse_timeframe_minutes
 from core.strategies.strategy_manager import strategy_manager
 from core.trading.account_manager import account_manager
 from core.trading.order_manager import OrderRequest, OrderSide, OrderType, order_manager
@@ -147,7 +148,15 @@ class ExecutionEngine:
         self._live_trade_journal_path = self._live_review_root / "strategy_trade_journal.jsonl"
         self._live_trade_counts_path = self._live_review_root / "strategy_trade_counts.json"
         self._live_strategy_trade_counts: Dict[str, int] = self._load_live_trade_counts()
-        self._live_review_lock = asyncio.Lock()
+        self._live_review_lock: Optional[asyncio.Lock] = None
+        self._live_review_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _get_live_review_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._live_review_lock is None or self._live_review_lock_loop is not loop:
+            self._live_review_lock = asyncio.Lock()
+            self._live_review_lock_loop = loop
+        return self._live_review_lock
 
     def _load_live_trade_counts(self) -> Dict[str, int]:
         try:
@@ -246,7 +255,7 @@ class ExecutionEngine:
         resolved_cost_usd = resolved_fee_usd + resolved_slippage_cost_usd
 
         entry: Dict[str, Any]
-        async with self._live_review_lock:
+        async with self._get_live_review_lock():
             strategy_count = int(self._live_strategy_trade_counts.get(strategy, 0)) + 1
             self._live_strategy_trade_counts[strategy] = strategy_count
             self._persist_live_trade_counts()
@@ -889,6 +898,242 @@ class ExecutionEngine:
             return None
 
     @staticmethod
+    def _normalize_exit_template_name(value: Any) -> Optional[str]:
+        raw = str(value or "").strip()
+        if not raw or raw.lower() == "original":
+            return None
+        return raw
+
+    @staticmethod
+    def _kline_numeric_field(item: Any, field_name: str) -> Optional[float]:
+        if isinstance(item, dict):
+            value = item.get(field_name)
+        else:
+            value = getattr(item, field_name, None)
+        try:
+            out = float(value)
+        except Exception:
+            return None
+        if not math.isfinite(out) or out <= 0:
+            return None
+        return out
+
+    @classmethod
+    def _estimate_atr_pct_from_klines(
+        cls,
+        klines: Optional[List[Any]],
+        *,
+        reference_price: Optional[float],
+        period: int = 14,
+    ) -> Optional[float]:
+        items = list(klines or [])
+        if not items:
+            return None
+
+        true_ranges: List[float] = []
+        prev_close: Optional[float] = None
+        last_close: Optional[float] = None
+        for item in items:
+            high = cls._kline_numeric_field(item, "high")
+            low = cls._kline_numeric_field(item, "low")
+            close = cls._kline_numeric_field(item, "close")
+            if high is None or low is None or close is None:
+                continue
+            intrabar_range = max(0.0, float(high) - float(low))
+            if prev_close is None:
+                tr = intrabar_range
+            else:
+                tr = max(
+                    intrabar_range,
+                    abs(float(high) - float(prev_close)),
+                    abs(float(low) - float(prev_close)),
+                )
+            true_ranges.append(float(tr))
+            prev_close = float(close)
+            last_close = float(close)
+
+        if not true_ranges:
+            return None
+
+        atr_window = true_ranges[-max(1, int(period or 14)) :]
+        atr_value = sum(float(v) for v in atr_window) / float(len(atr_window))
+        price = cls._safe_positive_float(reference_price, last_close)
+        if price is None or price <= 0:
+            return None
+        atr_pct = atr_value / float(price)
+        return atr_pct if 0 < atr_pct < 1 else None
+
+    async def _estimate_exit_template_atr_pct(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        reference_price: Optional[float],
+        period: int = 14,
+    ) -> Optional[float]:
+        connector = exchange_manager.get_exchange(exchange)
+        if connector is None:
+            return None
+        try:
+            klines = await connector.get_klines(
+                symbol,
+                timeframe,
+                limit=max(30, int(period or 14) * 3),
+            )
+        except Exception as exc:
+            logger.debug(
+                "Exit template ATR estimate failed: "
+                f"exchange={exchange} symbol={symbol} timeframe={timeframe} error={exc}"
+            )
+            return None
+        return self._estimate_atr_pct_from_klines(
+            list(klines or []),
+            reference_price=reference_price,
+            period=period,
+        )
+
+    async def _apply_exit_template_runtime_overrides(
+        self,
+        *,
+        signal: Signal,
+        trade_policy: Dict[str, Any],
+        exchange: str,
+        entry_price: float,
+    ) -> None:
+        template_name = self._normalize_exit_template_name(trade_policy.get("exit_template"))
+        config = dict(trade_policy.get("exit_template_config") or {})
+        if not template_name or not config:
+            return
+
+        metadata = dict(signal.metadata or {})
+        timeframe = str(metadata.get("timeframe") or trade_policy.get("timeframe") or "1h").strip() or "1h"
+        atr_pct = self._safe_positive_float(metadata.get("atr_pct"))
+        if atr_pct is not None and atr_pct >= 1:
+            atr_pct = atr_pct / 100.0
+        if atr_pct is not None and atr_pct <= 0:
+            atr_pct = None
+
+        uses_atr = (
+            str(config.get("initial_stop_mode") or "none").lower() == "atr"
+            or str(config.get("trailing_mode") or "none").lower() == "atr"
+        )
+        if atr_pct is None and uses_atr:
+            atr_pct = await self._estimate_exit_template_atr_pct(
+                exchange=exchange,
+                symbol=str(signal.symbol or ""),
+                timeframe=timeframe,
+                reference_price=entry_price,
+                period=max(1, int(config.get("atr_period") or 14)),
+            )
+
+        stop_pct_candidates: List[float] = []
+        fixed_stop_loss_pct = self._safe_protective_pct(config.get("fixed_stop_loss_pct"))
+        fixed_take_profit_pct = self._safe_protective_pct(config.get("fixed_take_profit_pct"))
+        if fixed_stop_loss_pct is not None:
+            stop_pct_candidates.append(float(fixed_stop_loss_pct))
+        if (
+            str(config.get("initial_stop_mode") or "none").lower() == "atr"
+            and atr_pct is not None
+            and float(config.get("initial_stop_atr_mult") or 0.0) > 0
+        ):
+            stop_pct_candidates.append(float(config.get("initial_stop_atr_mult") or 0.0) * float(atr_pct))
+
+        effective_stop_pct = None
+        if stop_pct_candidates:
+            effective_stop_pct = min(float(v) for v in stop_pct_candidates if float(v) > 0)
+
+        trailing_stop_pct = None
+        if (
+            str(config.get("trailing_mode") or "none").lower() == "atr"
+            and atr_pct is not None
+            and float(config.get("trailing_atr_mult") or 0.0) > 0
+        ):
+            trailing_stop_pct = float(config.get("trailing_atr_mult") or 0.0) * float(atr_pct)
+
+        if effective_stop_pct is not None and metadata.get("stop_loss_pct") is None:
+            metadata["stop_loss_pct"] = float(effective_stop_pct)
+        if fixed_take_profit_pct is not None and metadata.get("take_profit_pct") is None:
+            metadata["take_profit_pct"] = float(fixed_take_profit_pct)
+        if trailing_stop_pct is not None and metadata.get("trailing_stop_pct") is None:
+            metadata["trailing_stop_pct"] = float(trailing_stop_pct)
+            metadata.pop("trailing_stop_distance", None)
+
+        risk_pct = self._safe_protective_pct(effective_stop_pct)
+        if bool(config.get("breakeven_enabled")) and risk_pct is not None:
+            trigger_pct = max(0.0001, float(config.get("breakeven_trigger_r") or 1.0) * float(risk_pct))
+            metadata["profit_protect_enabled"] = True
+            metadata["profit_protect_trigger_pct"] = float(trigger_pct)
+            metadata["profit_protect_lock_pct"] = 0.0001
+
+        if bool(config.get("partial_take_profit_enabled")) and risk_pct is not None:
+            trigger_pct = max(0.0001, float(config.get("partial_take_profit_r") or 1.5) * float(risk_pct))
+            partial_fraction = min(0.95, max(0.05, float(config.get("partial_take_profit_ratio") or 0.5)))
+            metadata["partial_take_profit_enabled"] = True
+            metadata["partial_take_profit_trigger_pct"] = float(trigger_pct)
+            metadata["partial_take_profit_fraction"] = float(partial_fraction)
+            if trailing_stop_pct is not None:
+                metadata["post_partial_trailing_stop_pct"] = float(trailing_stop_pct)
+            metadata["preserve_take_profit_after_partial"] = bool(fixed_take_profit_pct is not None)
+
+        if bool(config.get("time_stop_enabled")):
+            max_bars = max(1, int(config.get("max_bars_in_trade") or 1))
+            timeframe_minutes = max(1, int(parse_timeframe_minutes(timeframe)))
+            time_stop_minutes = max(1, max_bars * timeframe_minutes)
+            metadata["time_stop_enabled"] = True
+            metadata["max_bars_in_trade"] = int(max_bars)
+            metadata["time_stop_timeframe"] = timeframe
+            metadata["time_stop_minutes"] = int(time_stop_minutes)
+            metadata["time_stop_deadline_at"] = (
+                datetime.now(timezone.utc) + timedelta(minutes=time_stop_minutes)
+            ).isoformat()
+
+        metadata["exit_template"] = str(trade_policy.get("exit_template") or template_name)
+        metadata["runtime_exit_template_managed"] = True
+        metadata["outage_protection_enabled"] = False
+        if atr_pct is not None:
+            metadata["profit_management_atr_pct"] = float(atr_pct)
+        signal.metadata = metadata
+
+    @staticmethod
+    def _as_utc_datetime(value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            text = str(value or "").strip()
+            if not text:
+                return None
+            try:
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except Exception:
+                return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    def _is_position_time_stop_due(self, position: Any) -> bool:
+        metadata = dict(getattr(position, "metadata", {}) or {})
+        if not bool(metadata.get("time_stop_enabled")):
+            return False
+
+        now_utc = datetime.now(timezone.utc)
+        deadline = self._as_utc_datetime(metadata.get("time_stop_deadline_at"))
+        if deadline is not None:
+            return now_utc >= deadline
+
+        hold_minutes = self._safe_nonnegative_float(metadata.get("time_stop_minutes"), 0.0)
+        if hold_minutes <= 0:
+            max_bars = max(1, int(metadata.get("max_bars_in_trade") or 1))
+            timeframe = str(metadata.get("time_stop_timeframe") or metadata.get("timeframe") or "1h").strip() or "1h"
+            hold_minutes = float(max(1, max_bars * int(parse_timeframe_minutes(timeframe))))
+        opened_at = self._as_utc_datetime(getattr(position, "opened_at", None))
+        if opened_at is None or hold_minutes <= 0:
+            return False
+        return now_utc >= opened_at + timedelta(minutes=hold_minutes)
+
+    @staticmethod
     def _merge_position_metadata(
         current: Optional[Dict[str, Any]],
         updates: Optional[Dict[str, Any]],
@@ -1203,7 +1448,8 @@ class ExecutionEngine:
         refreshed_metadata.pop("partial_take_profit_skip_reason", None)
         refreshed_metadata["profit_management_last_event"] = "partial_take_profit"
         refreshed.metadata = refreshed_metadata
-        refreshed.take_profit = None
+        if not bool(refreshed_metadata.get("preserve_take_profit_after_partial")):
+            refreshed.take_profit = None
         trailing_pct = self._safe_protective_pct(refreshed_metadata.get("post_partial_trailing_stop_pct"))
         if trailing_pct is not None:
             self._apply_position_trailing_pct(
@@ -1657,7 +1903,9 @@ class ExecutionEngine:
     ) -> Dict[str, Any]:
         strategy = strategy_manager.get_strategy(strategy_name) if strategy_name else None
         params = dict(getattr(strategy, "params", {}) or {})
+        strategy_info = strategy_manager.get_strategy_info(strategy_name) if strategy_name else None
         strategy_type = str(getattr(getattr(strategy, "__class__", None), "__name__", "") or "")
+        timeframe = str((strategy_info or {}).get("timeframe") or "").strip() or "1h"
 
         market_type = str(params.get("market_type") or "").strip().lower()
         if not market_type and strategy_type == "PairsTradingStrategy":
@@ -1679,6 +1927,21 @@ class ExecutionEngine:
         allow_pyramiding = bool(params.get("allow_pyramiding", False))
         stop_loss_pct = self._safe_protective_pct(params.get("stop_loss_pct"))
         take_profit_pct = self._safe_protective_pct(params.get("take_profit_pct"))
+        raw_exit_template = str(params.get("exit_template") or "").strip()
+        exit_template = self._normalize_exit_template_name(raw_exit_template)
+        exit_template_config: Dict[str, Any] = {}
+        disable_default_protection_injection = False
+
+        if exit_template:
+            from core.backtest.exit_engine import resolve_exit_engine_config
+
+            exit_template_config = resolve_exit_engine_config(
+                template_name=exit_template,
+                fixed_stop_loss_pct=stop_loss_pct,
+                fixed_take_profit_pct=take_profit_pct,
+            ).to_dict()
+            reverse_on_signal = bool(exit_template_config.get("signal_reversal_exit", reverse_on_signal))
+            disable_default_protection_injection = True
 
         return {
             "market_type": market_type,
@@ -1688,6 +1951,10 @@ class ExecutionEngine:
             "allow_pyramiding": allow_pyramiding,
             "stop_loss_pct": stop_loss_pct,
             "take_profit_pct": take_profit_pct,
+            "timeframe": timeframe,
+            "exit_template": raw_exit_template or None,
+            "exit_template_config": exit_template_config,
+            "disable_default_protection_injection": disable_default_protection_injection,
         }
 
     def _normalize_protection_levels(
@@ -1728,6 +1995,10 @@ class ExecutionEngine:
         signal_tp_pct = self._safe_protective_pct(meta.get("take_profit_pct"))
         policy_sl_pct = self._safe_protective_pct(trade_policy.get("stop_loss_pct"))
         policy_tp_pct = self._safe_protective_pct(trade_policy.get("take_profit_pct"))
+        if bool(trade_policy.get("disable_default_protection_injection")):
+            return signal_sl_pct if signal_sl_pct is not None else policy_sl_pct, (
+                signal_tp_pct if signal_tp_pct is not None else policy_tp_pct
+            )
         default_sl_pct = self._safe_protective_pct(
             getattr(settings, "STRATEGY_DEFAULT_STOP_LOSS_PCT", 0.03)
         )
@@ -2441,6 +2712,12 @@ class ExecutionEngine:
                 timeout=8.0,
             )
             level_price = float(quote_price or signal.price or 0.0)
+            await self._apply_exit_template_runtime_overrides(
+                signal=signal,
+                trade_policy=trade_policy,
+                exchange=exchange,
+                entry_price=level_price,
+            )
             resolved_stop_loss, resolved_take_profit = self._ensure_signal_protection_levels(
                 signal=signal,
                 side=side,
@@ -4116,6 +4393,8 @@ class ExecutionEngine:
                     reason = "trailing_stop"
                 elif pos.take_profit is not None and px <= float(pos.take_profit):
                     reason = "take_profit"
+            if reason is None and self._is_position_time_stop_due(pos):
+                reason = "time_stop"
 
             if reason:
                 await self._execute_protective_close(

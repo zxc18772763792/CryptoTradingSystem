@@ -73,3 +73,16 @@ def test_backtest_compare_ui_avoids_single_strategy_hard_dependency():
     assert "await ensureSelectedBacktestStrategy();" not in compare_section
     assert "b1.disabled=true;" in compare_section
     assert "b1.disabled=false;" in compare_section
+
+
+def test_backtest_registration_preserves_exit_management_hooks():
+    app_js = _read("web/static/js/app.js")
+
+    assert "function resolveBacktestRuntimeProtection" in app_js
+    assert "function buildBacktestRuntimeStrategyParams" in app_js
+    assert "function ensureStrategyEditorRuntimeExitFields" in app_js
+    assert "params.exit_template=protection.exitTemplate" in app_js
+    assert "ensureStrategyEditorRuntimeExitFields(panel,info.params||{})" in app_js
+    assert "ensureStrategyEditorRuntimeExitFields(panel,bestParams);" in app_js
+    assert "exit_template: best?.exit_template||opt?.exit_template||opt?.default_exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE" in app_js
+    assert "exit_template: row?.exit_template||backtestUIState?.lastCompare?.exit_template||backtestUIState?.lastCompare?.default_exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE" in app_js

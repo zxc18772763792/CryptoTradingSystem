@@ -176,6 +176,7 @@ class AILiveDecisionConfigUpdateRequest(BaseModel):
 class AIAutonomousAgentConfigUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    profile: Optional[str] = None
     enabled: Optional[bool] = None
     mode: Optional[str] = None
     provider: Optional[str] = None
@@ -200,6 +201,7 @@ class AIAutonomousAgentConfigUpdateRequest(BaseModel):
     max_total_exposure_ratio: Optional[float] = Field(default=None, ge=0.05, le=0.4)
     max_total_exposure_usdt: Optional[float] = Field(default=None, gt=0)
     allow_live: Optional[bool] = None
+    runtime_profile: Optional[str] = None
     account_id: Optional[str] = None
     strategy_name: Optional[str] = None
 
@@ -215,6 +217,8 @@ class AIAutonomousAgentRiskConfigUpdateRequest(BaseModel):
 
 class AIAutonomousAgentStartRequest(BaseModel):
     enable: bool = True
+    profile: Optional[str] = None
+    runtime_profile: Optional[str] = None
 
 
 class AIAutonomousAgentRunOnceRequest(BaseModel):
@@ -2651,20 +2655,100 @@ def _build_autonomous_agent_scorecard(limit: int = 200, hours: int = 24 * 7) -> 
         },
     }
 
+def _current_trading_mode() -> str:
+    trading_mode = str(execution_engine.get_trading_mode() or "").strip().lower() or "paper"
+    if trading_mode not in {"paper", "live"}:
+        fallback = str(getattr(settings, "TRADING_MODE", "paper") or "paper").strip().lower() or "paper"
+        trading_mode = fallback if fallback in {"paper", "live"} else "paper"
+    return trading_mode
+
+
+def _build_autonomous_agent_paper_longrun_safety(
+    runtime_cfg: Optional[Dict[str, Any]] = None,
+    status_payload: Optional[Dict[str, Any]] = None,
+    trading_mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    cfg = dict(runtime_cfg or {})
+    status = dict(status_payload or {})
+
+    candidates = [
+        status.get("paper_longrun_safety"),
+        cfg.get("paper_longrun_safety"),
+        status.get("runtime_safety"),
+        cfg.get("runtime_safety"),
+        status.get("safety"),
+        cfg.get("safety"),
+        status.get("diagnostics"),
+        cfg.get("diagnostics"),
+    ]
+    merged_payload: Dict[str, Any] = {}
+    matched_candidate = False
+    for candidate in reversed(candidates):
+        if isinstance(candidate, dict) and (
+            "safe_for_paper_longrun" in candidate
+            or "paper_longrun_profile_ready" in candidate
+            or "reason_codes" in candidate
+        ):
+            merged_payload.update(dict(candidate))
+            matched_candidate = True
+    if matched_candidate:
+        if not isinstance(merged_payload.get("reason_codes"), list):
+            merged_payload["reason_codes"] = []
+        merged_payload["trading_mode"] = str(trading_mode or _current_trading_mode())
+        merged_payload.setdefault("safe_for_paper_longrun", False)
+        merged_payload.setdefault("paper_longrun_profile_ready", False)
+        merged_payload.setdefault("armed_for_execution", False)
+        merged_payload.setdefault("live_capable", False)
+        merged_payload.setdefault("allow_live", False)
+        return merged_payload
+
+    trading_mode_value = str(trading_mode or _current_trading_mode())
+    mode = str(cfg.get("mode") or "").strip().lower()
+    symbol_mode = str(cfg.get("symbol_mode") or "").strip().lower()
+    allow_live = bool(cfg.get("allow_live", False))
+    armed_for_execution = mode == "execute"
+    profile_ready = armed_for_execution and symbol_mode == "auto" and (not allow_live)
+    safe_for_paper_longrun = trading_mode_value == "paper" and profile_ready
+    reason_codes: List[str] = []
+    if trading_mode_value != "paper":
+        reason_codes.append("trading_mode_not_paper")
+    if mode != "execute":
+        reason_codes.append("mode_not_execute")
+    if symbol_mode != "auto":
+        reason_codes.append("symbol_mode_not_auto")
+    if allow_live:
+        reason_codes.append("allow_live_enabled")
+    return {
+        "safe_for_paper_longrun": bool(safe_for_paper_longrun),
+        "paper_longrun_profile_ready": bool(profile_ready),
+        "armed_for_execution": bool(armed_for_execution),
+        "live_capable": bool(allow_live or trading_mode_value == "live"),
+        "allow_live": bool(allow_live),
+        "trading_mode": trading_mode_value,
+        "reason_codes": reason_codes,
+    }
+
 
 @router.get("/runtime-config")
 async def get_ai_runtime_config(request: Request):
     """Expose lightweight runtime switches for the AI research UI."""
     ensure_ai_research_runtime_state(request.app)
-    trading_mode = str(execution_engine.get_trading_mode() or "").strip().lower() or "paper"
-    if trading_mode not in {"paper", "live"}:
-        trading_mode = str(getattr(settings, "TRADING_MODE", "paper") or "paper")
+    trading_mode = _current_trading_mode()
+    agent_cfg = autonomous_trading_agent.get_runtime_config()
+    if isinstance(agent_cfg, dict):
+        agent_cfg = dict(agent_cfg)
+    else:
+        agent_cfg = {}
+    agent_cfg["paper_longrun_safety"] = _build_autonomous_agent_paper_longrun_safety(
+        runtime_cfg=agent_cfg,
+        trading_mode=trading_mode,
+    )
     return {
         "governance_enabled": bool(getattr(settings, "GOVERNANCE_ENABLED", True)),
         "decision_mode": str(getattr(settings, "DECISION_MODE", "shadow") or "shadow"),
         "trading_mode": trading_mode,
         "ai_live_decision": live_decision_router.get_runtime_config(),
-        "ai_autonomous_agent": autonomous_trading_agent.get_runtime_config(),
+        "ai_autonomous_agent": agent_cfg,
     }
 
 
@@ -2713,7 +2797,17 @@ async def get_ai_live_decision_summary(request: Request):
 
 
 async def get_ai_autonomous_agent_runtime_config(request: Request):
-    return autonomous_trading_agent.get_runtime_config()
+    trading_mode = _current_trading_mode()
+    cfg = autonomous_trading_agent.get_runtime_config()
+    if isinstance(cfg, dict):
+        cfg = dict(cfg)
+    else:
+        cfg = {}
+    cfg["paper_longrun_safety"] = _build_autonomous_agent_paper_longrun_safety(
+        runtime_cfg=cfg,
+        trading_mode=trading_mode,
+    )
+    return cfg
 
 
 async def update_ai_autonomous_agent_runtime_config(
@@ -2745,15 +2839,33 @@ async def update_ai_autonomous_agent_risk_config(
 
 
 async def get_ai_autonomous_agent_status(request: Request):
+    trading_mode = _current_trading_mode()
     cfg = autonomous_trading_agent.get_runtime_config()
+    if isinstance(cfg, dict):
+        cfg = dict(cfg)
+    else:
+        cfg = {}
     if str(cfg.get("symbol_mode") or "manual").strip().lower() == "auto":
         autonomous_trading_agent.ensure_symbol_scan_preview_warm(
             limit=int(cfg.get("selection_top_n") or 10),
             force=False,
         )
+    status_payload = autonomous_trading_agent.get_status()
+    if isinstance(status_payload, dict):
+        status_payload = dict(status_payload)
+    else:
+        status_payload = {}
+    safety_payload = _build_autonomous_agent_paper_longrun_safety(
+        runtime_cfg=cfg,
+        status_payload=status_payload,
+        trading_mode=trading_mode,
+    )
+    cfg["paper_longrun_safety"] = safety_payload
     return {
-        "status": autonomous_trading_agent.get_status(),
+        "status": status_payload,
         "config": cfg,
+        "trading_mode": trading_mode,
+        "paper_longrun_safety": safety_payload,
     }
 
 
@@ -2761,10 +2873,38 @@ async def start_ai_autonomous_agent(
     request: Request,
     payload: AIAutonomousAgentStartRequest = AIAutonomousAgentStartRequest(),
 ):
+    trading_mode = _current_trading_mode()
+    update_kwargs: Dict[str, Any] = {}
     if payload.enable:
-        await autonomous_trading_agent.update_runtime_config(enabled=True)
+        update_kwargs["enabled"] = True
+    if payload.runtime_profile is not None:
+        update_kwargs["runtime_profile"] = payload.runtime_profile
+    elif payload.profile is not None:
+        update_kwargs["profile"] = payload.profile
+    if update_kwargs:
+        try:
+            await autonomous_trading_agent.update_runtime_config(**update_kwargs)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     status = await autonomous_trading_agent.start()
-    return {"started": True, "status": status, "config": autonomous_trading_agent.get_runtime_config()}
+    cfg = autonomous_trading_agent.get_runtime_config()
+    if isinstance(cfg, dict):
+        cfg = dict(cfg)
+    else:
+        cfg = {}
+    safety_payload = _build_autonomous_agent_paper_longrun_safety(
+        runtime_cfg=cfg,
+        status_payload=status if isinstance(status, dict) else {},
+        trading_mode=trading_mode,
+    )
+    cfg["paper_longrun_safety"] = safety_payload
+    return {
+        "started": True,
+        "status": status,
+        "config": cfg,
+        "trading_mode": trading_mode,
+        "paper_longrun_safety": safety_payload,
+    }
 
 
 async def stop_ai_autonomous_agent(request: Request):

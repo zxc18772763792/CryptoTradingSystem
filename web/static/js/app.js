@@ -1841,6 +1841,7 @@ const sizingColor=sizingStatus==='ok'?'#3fb950':(sizingStatus==='blocked'?'#f851
 const sizingResult=sizingStatus==='ok'?'当前可正常下单':(sizingStatus==='blocked'?'当前会被最小下单门槛拦截':'当前预估数据不足，暂无法判断');
 const sizingHtml=sizing?`<div class="form-group" style="margin-top:10px;"><label>下单预估</label><div class="list-item"><span>当前价格 / 账户权益</span><span>${Number(sizing.price||0).toFixed(4)} / ${Number(sizing.account_equity||0).toFixed(2)} USDT</span></div><div class="list-item"><span>价格来源</span><span>${esc(String(sizing.price_source||'unavailable'))}</span></div><div class="list-item"><span>分配资金 / 单笔上限</span><span>${Number(sizing.allocation_cap||0).toFixed(2)} / ${Number(sizing.risk_single_cap||0).toFixed(2)} USDT</span></div><div class="list-item"><span>当前可用名义金额</span><span>${Number(sizing.available_notional||0).toFixed(2)} USDT</span></div><div class="list-item"><span>最小合法数量 / 名义金额</span><span>${fmtQtyPreview(sizing.min_legal_qty||0)} / ${Number(sizing.min_legal_notional||0).toFixed(2)} USDT</span></div><div class="list-item"><span>结果</span><span style="color:${sizingColor};">${sizingResult}</span></div><div class="list-item"><span>说明</span><span>${esc(sizing.note||'-')}</span></div></div>`:'';
 panel.innerHTML=`<div class="form-group"><label>策略: ${info.name} (${info.strategy_type})</label><div class="list-item"><span>归属</span><span class="strategy-owner-inline"><span class="strategy-owner-badge ${ownership.tone}">${esc(ownership.label)}</span><span class="strategy-owner-note" title="${esc(ownership.detail)}">${esc(ownership.detail)}</span></span></div><div class="list-item"><span>状态</span><span>${mapState(info.state)}</span></div><div class="list-item"><span>周期</span><span>${esc(info.timeframe||'-')}</span></div><div class="list-item"><span>交易对</span><span>${esc(currentSymbols.join(', '))}</span></div><div class="list-item"><span>最近运行</span><span>${info.last_run_at?fmtDateTime(info.last_run_at):'-'}</span></div><div class="list-item"><span>运行时长限制</span><span>${runtime.runtime_limit_minutes?`${runtime.runtime_limit_minutes} 分钟`:'不限时'}${runtime.remaining_seconds!==undefined&&runtime.remaining_seconds!==null?` | 剩余 ${fmtDurationSec(runtime.remaining_seconds)}`:''}</span></div></div>${sizingHtml}<div class="inline-actions" style="margin-top:4px;"><button class="btn btn-primary btn-sm" id="edit-toggle">${info.state==='running'?'停止策略':'启动策略'}</button><button class="btn btn-primary btn-sm" id="edit-clone">复制新实例</button><button class="btn btn-danger btn-sm" id="edit-delete">删除实例</button><button class="btn btn-primary btn-sm" id="edit-cmp">刷新对比</button>${canApplyBestOpt?'<button class="btn btn-primary btn-sm" id="edit-apply-best-opt">应用最近优化最佳参数</button>':''}</div><div class="param-grid"><div class="form-group"><label>策略周期（timeframe）</label><select id="edit-timeframe">${tfHtml}</select></div><div class="form-group"><label>交易对（逗号分隔，可多币）</label><input id="edit-symbols" type="text" value="${esc(currentSymbols.join(', '))}" placeholder="例如 ETH/USDT 或 BTC/USDT,ETH/USDT"></div><div class="form-group"><label>策略运行时长（分钟，0=不限）</label><input id="edit-runtime-min" type="number" min="0" max="10080" step="1" value="${Number(runtime.runtime_limit_minutes||0)}"></div><div class="form-group"><label>资金占比 (0~1)</label><input id="edit-alloc" type="number" min="0" max="1" step="0.01" value="${Number(info.allocation||0).toFixed(2)}"></div></div><div class="param-grid">${fields||'<div class="list-item">该策略无可编辑参数</div>'}</div><div class="inline-actions" style="margin-top:10px;"><button class="btn btn-primary btn-sm" id="edit-save">保存参数</button><button class="btn btn-primary btn-sm" id="edit-save-as">另存为新实例（当前编辑值）</button></div><pre id="editor-compare-output" class="output-box">点击“刷新对比”查看实盘与回测差异</pre>`;
+ensureStrategyEditorRuntimeExitFields(panel,info.params||{});
 panel.classList.add('strategy-edit-active');
 openStrategyMonitor(name).catch(() => {});
 panel.dataset.strategyName=String(info.name||name||'');
@@ -3476,6 +3477,36 @@ const stopLossPct=(Number.isFinite(slRaw)&&slRaw>0&&slRaw<1)?slRaw:null;
 const takeProfitPct=(Number.isFinite(tpRaw)&&tpRaw>0&&tpRaw<1)?tpRaw:null;
 return{enabled,stopLossPct,takeProfitPct};
 }
+function resolveBacktestRuntimeProtection(source=null){
+const payload=(source&&typeof source==='object'&&!Array.isArray(source))?source:null;
+const params=(payload?.params&&typeof payload.params==='object'&&!Array.isArray(payload.params))?payload.params:{};
+const ui=payload?null:getBacktestProtectionConfig();
+const rawExitTemplate=payload?.exit_template ?? payload?.default_exit_template ?? params?.exit_template ?? getBacktestExitTemplate();
+const exitTemplate=BACKTEST_EXIT_TEMPLATE_OPTIONS.includes(String(rawExitTemplate||'').trim())?String(rawExitTemplate).trim():DEFAULT_BACKTEST_EXIT_TEMPLATE;
+const stopLossRaw=Number(payload?.stop_loss_pct ?? params?.stop_loss_pct ?? (ui?.stopLossPct ?? NaN));
+const takeProfitRaw=Number(payload?.take_profit_pct ?? params?.take_profit_pct ?? (ui?.takeProfitPct ?? NaN));
+const stopLossPct=(Number.isFinite(stopLossRaw)&&stopLossRaw>0&&stopLossRaw<1)?stopLossRaw:null;
+const takeProfitPct=(Number.isFinite(takeProfitRaw)&&takeProfitRaw>0&&takeProfitRaw<1)?takeProfitRaw:null;
+const enabled=payload?.use_stop_take!==undefined
+  ? !!payload.use_stop_take
+  : (ui ? !!ui.enabled : (stopLossPct!==null || takeProfitPct!==null));
+return{exitTemplate,enabled,stopLossPct,takeProfitPct};
+}
+function buildBacktestRuntimeStrategyParams(baseParams={},source=null){
+const params=(baseParams&&typeof baseParams==='object'&&!Array.isArray(baseParams))?{...baseParams}:{};
+const protection=resolveBacktestRuntimeProtection(source);
+params.exit_template=protection.exitTemplate;
+if(protection.enabled){
+  if(Number.isFinite(protection.stopLossPct))params.stop_loss_pct=protection.stopLossPct;
+  else delete params.stop_loss_pct;
+  if(Number.isFinite(protection.takeProfitPct))params.take_profit_pct=protection.takeProfitPct;
+  else delete params.take_profit_pct;
+}else{
+  delete params.stop_loss_pct;
+  delete params.take_profit_pct;
+}
+return params;
+}
 function appendBacktestProtectionParams(url,cfg=null){
 const conf=cfg||getBacktestProtectionConfig();
 let out=String(url||'');
@@ -3796,12 +3827,53 @@ yaxis:{title:k2,automargin:true}
 },{responsive:true,displaylogo:false});
 schedulePlotlyResize(el.parentElement||document);
 }
+function ensureStrategyEditorRuntimeExitFields(panel,params={}){
+const host=panel&&typeof panel.querySelectorAll==='function'?panel:document.getElementById('strategy-edit-panel');
+if(!host)return;
+const grids=host.querySelectorAll('.param-grid');
+const paramsGrid=grids[grids.length-1];
+if(!paramsGrid)return;
+const payload=(params&&typeof params==='object'&&!Array.isArray(params))?params:{};
+const exitTemplate=String(payload?.exit_template||'').trim();
+const stopLossPct=Number(payload?.stop_loss_pct);
+const takeProfitPct=Number(payload?.take_profit_pct);
+
+const ensureExitTemplateField=(value='')=>{
+  let el=paramsGrid.querySelector('[data-k="exit_template"]');
+  if(!(el instanceof HTMLSelectElement)){
+    paramsGrid.insertAdjacentHTML('beforeend', `<div class="form-group"><label>退出模板（exit_template）</label><select data-k="exit_template" data-t="string">${BACKTEST_EXIT_TEMPLATE_OPTIONS.map(name=>`<option value="${esc(name)}">${esc(BACKTEST_EXIT_TEMPLATE_LABELS[name]||name)}</option>`).join('')}</select></div>`);
+    el=paramsGrid.querySelector('[data-k="exit_template"]');
+  }
+  if(el instanceof HTMLSelectElement){
+    const resolved=BACKTEST_EXIT_TEMPLATE_OPTIONS.includes(String(value||'').trim())?String(value).trim():DEFAULT_BACKTEST_EXIT_TEMPLATE;
+    el.value=resolved;
+  }
+};
+  const ensurePctField=(key,label,value)=>{
+    let el=paramsGrid.querySelector(`[data-k="${key}"]`);
+    if(!(el instanceof HTMLInputElement)){
+      paramsGrid.insertAdjacentHTML('beforeend', `<div class="form-group"><label>${esc(label)}</label><input data-k="${esc(key)}" data-t="number" type="number" min="0" max="1" step="0.001" value=""></div>`);
+      el=paramsGrid.querySelector(`[data-k="${key}"]`);
+    }
+    if(el instanceof HTMLInputElement && Number.isFinite(value) && value>0 && value<1){
+      el.value=String(value);
+    }
+  };
+
+if(exitTemplate)ensureExitTemplateField(exitTemplate);
+if(Number.isFinite(stopLossPct)&&stopLossPct>0&&stopLossPct<1)ensurePctField('stop_loss_pct','止损比例（stop_loss_pct）',stopLossPct);
+if(Number.isFinite(takeProfitPct)&&takeProfitPct>0&&takeProfitPct<1)ensurePctField('take_profit_pct','止盈比例（take_profit_pct）',takeProfitPct);
+}
 async function applyBestOptimizeParamsToStrategyEditor(){
 const opt=backtestUIState.lastOptimize;
 const best=opt?.best;
-const bestParams=best?.params||null;
+const bestParams=buildBacktestRuntimeStrategyParams(best?.params||{},{
+  ...(opt||{}),
+  ...(best||{}),
+  params:best?.params||{},
+});
 if(!opt||!bestParams){notify('暂无可回填的优化结果',true);return;}
-const targetType=String(opt.strategy||'').trim();
+const targetType=String(opt.strategy_type||opt.strategy||'').trim();
 const panel=document.getElementById('strategy-edit-panel');
 if(!panel){notify('未找到策略参数编辑面板',true);return;}
 let activeType=String(panel.dataset?.strategyType||'').trim();
@@ -3836,6 +3908,7 @@ if(!activeType || activeType!==targetType){
   notify(`未找到可编辑的 ${targetType} 实例。请先注册该策略后再回填`,true);
   return;
 }
+ensureStrategyEditorRuntimeExitFields(panel,bestParams);
 let applied=0,skipped=0;
 Object.entries(bestParams).forEach(([k,v])=>{
   const el=panel.querySelector(`[data-k="${CSS.escape(k)}"]`);
@@ -3868,7 +3941,7 @@ const symbolsRaw=Array.isArray(spec?.symbols)?spec.symbols.map(v=>String(v||'').
 const symbol=String(spec?.symbol||symbolsRaw[0]||document.getElementById('backtest-symbol')?.value||'BTC/USDT').trim()||'BTC/USDT';
 const symbols=symbolsRaw.length?symbolsRaw:[symbol];
 const timeframe=String(spec?.timeframe||document.getElementById('backtest-timeframe')?.value||'1h').trim()||'1h';
-const params=(spec?.params&&typeof spec.params==='object')?spec.params:{};
+const params=buildBacktestRuntimeStrategyParams((spec?.params&&typeof spec.params==='object')?spec.params:{},spec);
 const defaults=getBacktestRegisterOptions();
 const allocation=Math.max(0,Math.min(1,Number(spec?.allocation ?? defaults.allocation)));
 const autoStart=(spec?.auto_start!==undefined)?!!spec.auto_start:!!defaults.autoStart;
@@ -3911,6 +3984,9 @@ await registerStrategyInstanceFromBacktestSpec({
   symbol: opt.symbol,
   timeframe: opt.timeframe,
   params: best.params||{},
+  exit_template: best?.exit_template||opt?.exit_template||opt?.default_exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE,
+  stop_loss_pct: best?.stop_loss_pct ?? opt?.stop_loss_pct ?? null,
+  take_profit_pct: best?.take_profit_pct ?? opt?.take_profit_pct ?? null,
   exchange: 'binance',
 });
 }catch(e){
@@ -3933,6 +4009,9 @@ return await registerStrategyInstanceFromBacktestSpec({
   symbol: opt.symbol||document.getElementById('backtest-symbol')?.value||'BTC/USDT',
   timeframe: opt.timeframe||document.getElementById('backtest-timeframe')?.value||'1h',
   params: (row.params&&typeof row.params==='object')?row.params:{},
+  exit_template: row?.exit_template||opt?.exit_template||opt?.default_exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE,
+  stop_loss_pct: row?.stop_loss_pct ?? opt?.stop_loss_pct ?? null,
+  take_profit_pct: row?.take_profit_pct ?? opt?.take_profit_pct ?? null,
   exchange: String(opt.exchange||'binance').toLowerCase(),
 });
 }catch(e){notify(`注册参数组合失败: ${e.message}`,true);}
@@ -3952,6 +4031,9 @@ return await registerStrategyInstanceFromBacktestSpec({
   symbol: backtestUIState?.lastCompare?.symbol||document.getElementById('backtest-symbol')?.value||'BTC/USDT',
   timeframe: backtestUIState?.lastCompare?.timeframe||document.getElementById('backtest-timeframe')?.value||'1h',
   params,
+  exit_template: row?.exit_template||backtestUIState?.lastCompare?.exit_template||backtestUIState?.lastCompare?.default_exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE,
+  stop_loss_pct: row?.stop_loss_pct ?? backtestUIState?.lastCompare?.stop_loss_pct ?? null,
+  take_profit_pct: row?.take_profit_pct ?? backtestUIState?.lastCompare?.take_profit_pct ?? null,
   exchange: 'binance',
 });
 }catch(e){notify(`注册对比策略失败: ${e.message}`,true);}

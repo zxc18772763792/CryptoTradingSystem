@@ -16,6 +16,7 @@ def test_runtime_config_contains_ai_autonomous_agent(monkeypatch):
 
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
     monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module.execution_engine, "get_trading_mode", lambda: "paper")
     monkeypatch.setattr(ai_module.live_decision_router, "get_runtime_config", lambda: {"enabled": False})
     monkeypatch.setattr(
         ai_module.autonomous_trading_agent,
@@ -26,6 +27,8 @@ def test_runtime_config_contains_ai_autonomous_agent(monkeypatch):
     result = asyncio.run(ai_module.get_ai_runtime_config(request))
     assert "ai_autonomous_agent" in result
     assert result["ai_autonomous_agent"]["provider"] == "glm"
+    assert "paper_longrun_safety" in result["ai_autonomous_agent"]
+    assert result["ai_autonomous_agent"]["paper_longrun_safety"]["safe_for_paper_longrun"] is False
 
 
 def test_update_autonomous_agent_runtime_config_endpoint(monkeypatch):
@@ -59,6 +62,29 @@ def test_update_autonomous_agent_runtime_config_endpoint(monkeypatch):
     assert result["config"]["enabled"] is True
     assert result["config"]["mode"] == "execute"
     assert result["config"]["provider"] == "codex"
+
+
+def test_update_autonomous_agent_runtime_config_endpoint_accepts_profile(monkeypatch):
+    from web.api import ai_agent as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    captured = {}
+
+    async def _fake_update(**kwargs):
+        captured.update(kwargs)
+        return dict(kwargs)
+
+    monkeypatch.setattr(
+        ai_module.ai_research_module.autonomous_trading_agent,
+        "update_runtime_config",
+        _fake_update,
+    )
+
+    payload = ai_module.AIAutonomousAgentConfigUpdateRequest(profile="paper_longrun")
+    result = asyncio.run(ai_module.update_ai_autonomous_agent_runtime_config(request, payload))
+
+    assert result["updated"] is True
+    assert captured["profile"] == "paper_longrun"
 
 
 def test_update_autonomous_agent_runtime_config_endpoint_allows_clearing_fixed_budget(monkeypatch):
@@ -150,6 +176,44 @@ def test_autonomous_agent_start_and_run_once_endpoints(monkeypatch):
     assert run_once_mock.await_count == 1
 
 
+def test_autonomous_agent_start_endpoint_applies_profile_before_start(monkeypatch):
+    from web.api import ai_agent as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    update_mock = AsyncMock(
+        return_value={
+            "enabled": True,
+            "runtime_profile": "paper_longrun",
+            "safety": {"paper_longrun_profile_ready": True},
+        }
+    )
+    start_mock = AsyncMock(return_value={"running": True, "safety": {"status": "ready"}})
+
+    monkeypatch.setattr(ai_module.ai_research_module.autonomous_trading_agent, "update_runtime_config", update_mock)
+    monkeypatch.setattr(ai_module.ai_research_module.autonomous_trading_agent, "start", start_mock)
+    monkeypatch.setattr(
+        ai_module.ai_research_module.autonomous_trading_agent,
+        "get_runtime_config",
+        lambda: {
+            "enabled": True,
+            "runtime_profile": "paper_longrun",
+            "safety": {"paper_longrun_profile_ready": True},
+        },
+    )
+
+    result = asyncio.run(
+        ai_module.start_ai_autonomous_agent(
+            request,
+            ai_module.AIAutonomousAgentStartRequest(enable=True, profile="paper_longrun"),
+        )
+    )
+
+    assert result["started"] is True
+    update_mock.assert_awaited_once_with(enabled=True, profile="paper_longrun")
+    start_mock.assert_awaited_once()
+    assert result["config"]["runtime_profile"] == "paper_longrun"
+
+
 def test_autonomous_agent_symbol_ranking_endpoint(monkeypatch):
     from web.api import ai_agent as ai_module
 
@@ -189,6 +253,7 @@ def test_autonomous_agent_status_endpoint_does_not_require_ai_research_runtime(m
         raise AssertionError("autonomous-agent status should not require ai research runtime")
 
     monkeypatch.setattr(ai_module.ai_research_module, "ensure_ai_research_runtime_state", _unexpected_ensure)
+    monkeypatch.setattr(ai_module.ai_research_module.execution_engine, "get_trading_mode", lambda: "paper")
     monkeypatch.setattr(
         ai_module.ai_research_module.autonomous_trading_agent,
         "get_runtime_config",
@@ -198,6 +263,70 @@ def test_autonomous_agent_status_endpoint_does_not_require_ai_research_runtime(m
 
     result = asyncio.run(ai_module.get_ai_autonomous_agent_status(request))
     assert result["status"]["running"] is True
+    assert "paper_longrun_safety" in result
+
+
+def test_autonomous_agent_status_endpoint_returns_structured_safety(monkeypatch):
+    from web.api import ai_agent as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(ai_module.ai_research_module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(
+        ai_module.ai_research_module.autonomous_trading_agent,
+        "get_runtime_config",
+        lambda: {
+            "symbol_mode": "manual",
+            "runtime_profile": "paper_longrun",
+            "safety": {
+                "status": "ready",
+                "safe_for_paper_longrun": True,
+                "paper_longrun_profile_ready": True,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        ai_module.ai_research_module.autonomous_trading_agent,
+        "get_status",
+        lambda: {
+            "running": False,
+            "runtime_profile": "paper_longrun",
+            "safety": {"status": "ready", "paper_longrun_profile_ready": True},
+        },
+    )
+
+    result = asyncio.run(ai_module.get_ai_autonomous_agent_status(request))
+
+    assert result["config"]["safety"]["safe_for_paper_longrun"] is True
+    assert result["status"]["safety"]["paper_longrun_profile_ready"] is True
+    assert result["paper_longrun_safety"]["safe_for_paper_longrun"] is True
+
+
+def test_autonomous_agent_start_endpoint_prefers_runtime_profile_field(monkeypatch):
+    from web.api import ai_agent as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    update_mock = AsyncMock(return_value={"enabled": True, "runtime_profile": "paper_longrun"})
+    start_mock = AsyncMock(return_value={"running": True})
+
+    monkeypatch.setattr(ai_module.ai_research_module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(ai_module.ai_research_module.autonomous_trading_agent, "update_runtime_config", update_mock)
+    monkeypatch.setattr(ai_module.ai_research_module.autonomous_trading_agent, "start", start_mock)
+    monkeypatch.setattr(
+        ai_module.ai_research_module.autonomous_trading_agent,
+        "get_runtime_config",
+        lambda: {"enabled": True, "mode": "execute", "symbol_mode": "auto", "allow_live": False},
+    )
+
+    result = asyncio.run(
+        ai_module.start_ai_autonomous_agent(
+            request,
+            ai_module.AIAutonomousAgentStartRequest(enable=True, runtime_profile="paper_longrun"),
+        )
+    )
+
+    assert result["started"] is True
+    update_mock.assert_awaited_once_with(enabled=True, runtime_profile="paper_longrun")
+    assert result["paper_longrun_safety"]["safe_for_paper_longrun"] is True
 
 
 def test_autonomous_agent_live_signals_endpoint_does_not_require_ai_research_runtime(monkeypatch):

@@ -56,6 +56,7 @@ from core.strategies import (
 from core.trading import account_manager, execution_engine, order_manager, position_manager
 from web.asset_versions import static_asset_url
 from web.api import ai_research
+from web.api import ml
 from web.api.auth import set_local_ui_session_cookie
 from web.startup_mode import StartupModeDecision, resolve_startup_trading_mode
 
@@ -1286,6 +1287,7 @@ app.include_router(strategies.router, prefix="/api/strategies", tags=["strategie
 app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["notifications"])
 app.include_router(news.router, prefix="/api/news", tags=["news"])
+app.include_router(ml.router, prefix="/api/ml", tags=["ml"])
 app.include_router(create_ops_router())
 
 

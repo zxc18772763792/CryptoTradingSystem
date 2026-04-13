@@ -419,11 +419,11 @@ def _build_positions(
         slow_n = int(params.get("slow_period", 30))
         fast = close.rolling(fast_n, min_periods=fast_n).mean()
         slow = close.rolling(slow_n, min_periods=slow_n).mean()
-        position = (fast > slow).astype(float)
+        position = pd.Series(np.where(fast > slow, 1.0, np.where(fast < slow, -1.0, 0.0)), index=df.index)
     elif strategy == "EMAStrategy":
         ema_fast = close.ewm(span=int(params.get("fast_period", 12)), adjust=False).mean()
         ema_slow = close.ewm(span=int(params.get("slow_period", 26)), adjust=False).mean()
-        position = (ema_fast > ema_slow).astype(float)
+        position = pd.Series(np.where(ema_fast > ema_slow, 1.0, np.where(ema_fast < ema_slow, -1.0, 0.0)), index=df.index)
     elif strategy in {"RSIStrategy", "RSIDivergenceStrategy"}:
         period = int(params.get("period", 14))
         oversold = float(params.get("oversold", 30))
@@ -1368,7 +1368,7 @@ def _run_purged_walk_forward(
             if m.get("quality_flag") != "invalid":
                 sr = float(m.get("sharpe_ratio", 0.0) or 0.0)
                 sharpe_list.append(sr)
-                if m.get("total_return", 0.0) > 0:
+                if (m.get("sharpe_ratio", 0.0) or 0.0) > 0:
                     positive_folds += 1
         except Exception:
             pass
@@ -1394,6 +1394,9 @@ def _compute_wf_stability(wf_result) -> Optional[float]:
     if len(sharpe_list) < 2:
         return 0.5  # Cannot measure stability with single fold
     mean_s = float(np.mean(sharpe_list))
+    # Consistently negative Sharpe is not "stable" — it's consistently bad
+    if mean_s <= 0:
+        return 0.0
     std_s = float(np.std(sharpe_list))
     abs_mean = max(abs(mean_s), 0.01)
     cv = std_s / abs_mean  # coefficient of variation
@@ -1773,6 +1776,7 @@ async def run_strategy_research(
                         "anomaly_bar_ratio": float(metrics.get("anomaly_bar_ratio", 0.0)),
                         "return_clip_limit": float(metrics.get("return_clip_limit", 0.0)),
                         "quality_flag": str(metrics.get("quality_flag", "ok")),
+                        "n_bars": len(tf_df),
                     }
                 )
 
@@ -1909,6 +1913,10 @@ async def run_strategy_research(
     best = None
     if not valid_df.empty:
         item = valid_df.iloc[0].to_dict()
+        _is_s = item.get("is_sharpe")
+        _oos_s = item.get("oos_sharpe")
+        _wf_stab = item.get("wf_stability")
+        _wf_con = item.get("wf_consistency")
         best = {
             "strategy": item.get("strategy"),
             "timeframe": item.get("timeframe"),
@@ -1919,9 +1927,14 @@ async def run_strategy_research(
             "max_drawdown": float(item.get("max_drawdown", 0.0)),
             "win_rate": float(item.get("win_rate", 0.0)),
             "total_trades": int(item.get("total_trades", 0) or 0),
+            "n_bars": int(item.get("n_bars", 0) or 0),
             "anomaly_bar_ratio": float(item.get("anomaly_bar_ratio", 0.0)),
             "quality_flag": str(item.get("quality_flag", "ok")),
             "score": float(item.get("score", 0.0)),
+            "is_sharpe": float(_is_s) if _is_s is not None else None,
+            "oos_sharpe": float(_oos_s) if _oos_s is not None else None,
+            "wf_stability": float(_wf_stab) if _wf_stab is not None else None,
+            "wf_consistency": float(_wf_con) if _wf_con is not None else None,
         }
 
     top_results: List[Dict[str, Any]] = []

@@ -1549,7 +1549,7 @@
                                 <div class="ai-research-hero-head">
                                     <div>
                                         <div class="ai-top-intro-title">🧪 AI研究工作台</div>
-                                        <div class="ai-top-intro-subtitle">先明确研究目标，再生成提案、候选和验证结论，最后决定是否注册/部署。</div>
+                                        <div class="ai-top-intro-subtitle">先让 AI 判断当前市场状态与适配策略，再自动生成研究目标、提案和验证结论，最后决定是否注册/部署。</div>
                                     </div>
                                     <span class="ai-research-hero-badge">研究链路</span>
                                 </div>
@@ -1777,10 +1777,10 @@
                                 </div>
                                 <span class="ai-sidebar-badge">Planner</span>
                             </div>
-                            <div class="ai-sidebar-caption">先定义目标和约束，再生成研究思路与提案。Quick Path 适合快速试跑整条研究链路。</div>
+                                <div class="ai-sidebar-caption">优先让 AI 先判断市场状态、策略方向和研究目标；你也可以在自动结果基础上继续微调。Quick Path 适合快速试跑整条研究链路。</div>
                             <div class="form-group" style="margin-top:4px;">
-                                <label>研究目标</label>
-                                <textarea id="ai-planner-goal" rows="3" placeholder="例如：寻找BTC在趋势行情中的高胜率策略"></textarea>
+                                <label>研究目标（可留空自动生成）</label>
+                                <textarea id="ai-planner-goal" rows="3" placeholder="留空即可：AI 会先判断当前市场状态、适合的策略类型，再自动生成研究目标"></textarea>
                             </div>
                             <div class="form-row">
                                 <div class="form-group">
@@ -1834,6 +1834,7 @@
                                 <input type="text" id="ai-planner-timeframes" value="1m, 5m, 15m, 1h">
                             </div>
                             <div class="inline-actions">
+                                <button class="btn btn-sm" id="ai-auto-goal-btn">0) AI判断市场并生成目标</button>
                                 <button class="btn btn-sm" id="ai-context-btn" title="调用 OpenAI 生成研究假设、实验计划和开放式草案">1) 生成研究思路</button>
                                 <button class="btn btn-primary btn-sm" id="ai-generate-btn">2) 生成提案</button>
                                 <button class="btn btn-sm" id="ai-refresh-btn">刷新</button>
@@ -1850,7 +1851,7 @@
                                         <div class="ai-auto-step-title">one-click 自动研究+部署</div>
                                         <span class="ai-review-panel-tag ai-oneclick-entry-tag">Quick Path</span>
                                     </div>
-                                    <div class="ai-auto-step-desc">填好上面的研究目标、币种、周期后，可以一次执行生成提案 → 提交后台研究 → 尝试部署。执行结果和失败原因会直接显示在下面。</div>
+                                    <div class="ai-auto-step-desc">即使不手填研究目标，系统也会先判断市场状态、自动生成研究目标，再执行生成提案 → 提交后台研究 → 尝试部署。执行结果和失败原因会直接显示在下面。</div>
                                     <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
                                         <button class="btn btn-primary btn-sm" id="ai-oneclick-btn">⚡ one-click 自动研究+部署</button>
                                         <span class="ai-auto-step-status">适合想快速验证整个研究链路能否跑通的场景</span>
@@ -1869,7 +1870,7 @@
                                 当前将按“自动判断”生成提案；建议先执行第 1 步生成研究思路，让第 2 步优先纳入 AI 草案。
                             </div>
                             <div id="ai-flow-hint" class="ai-flow-hint">
-                                当前主流程：1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。也可以直接点击“⚡ one-click 自动研究+部署”。
+                                当前主流程：0) AI判断市场与策略 → 1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。也可以直接点击“⚡ one-click 自动研究+部署”。
                             </div>
                             <!-- 实时市场上下文摘要 -->
                             <div id="ai-market-context-hint" style="margin-top:5px;font-size:11px;color:#7a8fa6;min-height:14px;"></div>

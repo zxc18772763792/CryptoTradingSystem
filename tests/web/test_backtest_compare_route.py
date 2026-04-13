@@ -43,7 +43,7 @@ def test_compare_optimization_plan_caps_intraday_large_sets():
     )
 
     assert plan["adaptive_capped"] is True
-    assert plan["selected_count"] == 8
+    assert plan["selected_count"] == 9
     assert plan["effective_trials"] == 24
     assert "24" in plan["summary"]
 
@@ -78,7 +78,7 @@ def test_compare_optimization_plan_caps_large_history_windows():
     )
 
     assert plan["adaptive_capped"] is True
-    assert plan["selected_count"] == 4
+    assert plan["selected_count"] == 15
     assert plan["effective_trials"] == 8
 
 
@@ -160,15 +160,15 @@ def test_compare_backtests_limits_preoptimization_scope_for_intraday(monkeypatch
     )
 
     assert payload["compare_optimization"]["adaptive_capped"] is True
-    assert payload["compare_optimization"]["selected_count"] == 8
+    assert payload["compare_optimization"]["selected_count"] == 9
     assert payload["compare_optimization"]["effective_trials"] == 24
-    assert len(optimize_calls) == 8
+    assert len(optimize_calls) == 9
     assert all(item["max_trials"] == 24 for item in optimize_calls)
 
     optimized_rows = [row for row in payload["results"] if row.get("optimization_applied")]
     skipped_rows = [row for row in payload["results"] if row.get("optimization_skipped_for_budget")]
-    assert len(optimized_rows) == 8
-    assert len(skipped_rows) == 1
+    assert len(optimized_rows) == 9
+    assert len(skipped_rows) == 0
 
 
 def test_compare_backtests_limits_preoptimization_scope_for_large_history(monkeypatch):
@@ -253,12 +253,59 @@ def test_compare_backtests_limits_preoptimization_scope_for_large_history(monkey
     )
 
     assert payload["compare_optimization"]["adaptive_capped"] is True
-    assert payload["compare_optimization"]["selected_count"] == 4
+    assert payload["compare_optimization"]["selected_count"] == 15
     assert payload["compare_optimization"]["effective_trials"] == 8
-    assert len(optimize_calls) == 4
+    assert len(optimize_calls) == 15
     assert all(item["max_trials"] == 8 for item in optimize_calls)
 
     optimized_rows = [row for row in payload["results"] if row.get("optimization_applied")]
     skipped_rows = [row for row in payload["results"] if row.get("optimization_skipped_for_budget")]
-    assert len(optimized_rows) == 4
-    assert len(skipped_rows) == 11
+    assert len(optimized_rows) == 15
+    assert len(skipped_rows) == 0
+
+
+def test_compare_backtests_sanitizes_non_finite_metrics_for_json(monkeypatch):
+    import json
+
+    from web.api import backtest as backtest_api
+
+    df = _compare_frame(rows=720, freq="1h")
+
+    async def fake_load_backtest_df(symbol: str, timeframe: str, start_time=None, end_time=None):
+        return df.copy()
+
+    async def fake_attach_backtest_enrichment_if_needed(strategy: str, df: pd.DataFrame, symbol: str, start_time=None, end_time=None):
+        return _fake_attach_backtest_enrichment_if_needed(df)
+
+    def fake_run_backtest_core(strategy: str, df: pd.DataFrame, timeframe: str, initial_capital: float, **kwargs):
+        return {
+            "strategy": strategy,
+            "total_return": 12.3,
+            "sharpe_ratio": 1.8,
+            "max_drawdown": 4.2,
+            "win_rate": 61.0,
+            "total_trades": 5,
+            "quality_flag": "ok",
+            "recommended_min_bars": 72,
+            "zero_trade_reason": "",
+            "cost_drag_return_pct": 0.001,
+            "profit_factor": float("inf"),
+        }
+
+    monkeypatch.setattr(backtest_api, "_load_backtest_df", fake_load_backtest_df)
+    monkeypatch.setattr(backtest_api, "_attach_backtest_enrichment_if_needed", fake_attach_backtest_enrichment_if_needed)
+    monkeypatch.setattr(backtest_api, "_run_backtest_core", fake_run_backtest_core)
+
+    payload = asyncio.run(
+        backtest_api.compare_backtests(
+            strategies="SortinoRatioStrategy",
+            symbol="BTC/USDT",
+            timeframe="1h",
+            initial_capital=10000,
+            pre_optimize=False,
+        )
+    )
+
+    assert payload["results"][0]["profit_factor"] is None
+    assert payload["best"]["profit_factor"] is None
+    json.dumps(payload, allow_nan=False)

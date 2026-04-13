@@ -61,6 +61,7 @@ _SUPPORTED_PROVIDERS = {"glm", "codex", "claude"}
 _SUPPORTED_MODES = {"shadow", "execute"}
 _SUPPORTED_ACTIONS = {"buy", "sell", "hold", "close_long", "close_short"}
 _SUPPORTED_SYMBOL_MODES = {"manual", "auto"}
+_SUPPORTED_RUNTIME_PROFILES = {"paper_longrun"}
 _FIXED_AUTONOMOUS_AGENT_LEVERAGE = 1.0
 _SAME_DIRECTION_MAX_EXPOSURE_RATIO = 0.5
 _MAX_TOTAL_EXPOSURE_RATIO = 0.4
@@ -182,6 +183,31 @@ def _normalize_action(value: Any) -> str:
     if text not in _SUPPORTED_ACTIONS:
         return "hold"
     return text
+
+
+def _normalize_runtime_profile(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    aliases = {
+        "paper": "paper_longrun",
+        "paper-longrun": "paper_longrun",
+        "paper_long_run": "paper_longrun",
+    }
+    text = aliases.get(text, text)
+    if text not in _SUPPORTED_RUNTIME_PROFILES:
+        raise ValueError("profile must be one of: paper_longrun")
+    return text
+
+
+def _runtime_profile_overrides(profile_name: str) -> Dict[str, Any]:
+    profile = _normalize_runtime_profile(profile_name)
+    if profile == "paper_longrun":
+        return {
+            "AI_AUTONOMOUS_AGENT_ENABLED": True,
+            "AI_AUTONOMOUS_AGENT_MODE": "execute",
+            "AI_AUTONOMOUS_AGENT_ALLOW_LIVE": False,
+            "AI_AUTONOMOUS_AGENT_SYMBOL_MODE": "auto",
+        }
+    raise ValueError("profile must be one of: paper_longrun")
 
 
 def _merge_symbol_sequence(*groups: List[Any], max_items: int = _AUTO_SYMBOL_SCAN_MAX_ITEMS) -> List[str]:
@@ -997,7 +1023,7 @@ class AutonomousTradingAgent:
             self._get("AI_AUTONOMOUS_AGENT_MAX_TOTAL_EXPOSURE_USDT", None)
         )
         total_exposure_limit_mode = "fixed_amount" if max_total_exposure_usdt is not None else "ratio"
-        return {
+        cfg = {
             "enabled": bool(self._get("AI_AUTONOMOUS_AGENT_ENABLED", False)),
             # auto_start remains environment-controlled so runtime config
             # overlays cannot change process boot behavior.
@@ -1032,9 +1058,84 @@ class AutonomousTradingAgent:
             "strategy_name": str(self._get("AI_AUTONOMOUS_AGENT_STRATEGY_NAME", "AI_AutonomousAgent") or "AI_AutonomousAgent").strip() or "AI_AutonomousAgent",
             "providers": providers,
         }
+        cfg["runtime_profile"] = self._detect_runtime_profile(cfg)
+        cfg["safety"] = self._runtime_safety_diagnostics(cfg=cfg)
+        return cfg
+
+    def _detect_runtime_profile(self, cfg: Optional[Dict[str, Any]] = None) -> str:
+        current = dict(cfg or self.get_runtime_config())
+        mode = _normalize_mode(current.get("mode"))
+        symbol_mode = _normalize_symbol_mode(current.get("symbol_mode"))
+        allow_live = bool(current.get("allow_live"))
+        if mode == "execute" and symbol_mode == "auto" and not allow_live:
+            return "paper_longrun"
+        return "custom"
+
+    def _runtime_safety_diagnostics(self, *, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        current = dict(cfg or self.get_runtime_config())
+        trading_mode = str(execution_engine.get_trading_mode() or "paper").strip().lower() or "paper"
+        mode = _normalize_mode(current.get("mode"))
+        symbol_mode = _normalize_symbol_mode(current.get("symbol_mode"))
+        enabled = bool(current.get("enabled"))
+        auto_start = bool(current.get("auto_start"))
+        allow_live = bool(current.get("allow_live"))
+        running = self.is_running()
+        runtime_profile = self._detect_runtime_profile(current)
+
+        reason_codes: List[str] = []
+        recommendations: List[str] = []
+
+        if trading_mode == "live":
+            reason_codes.append("trading_mode_live")
+            recommendations.append("switch_trading_mode_to_paper")
+        if allow_live:
+            reason_codes.append("allow_live_enabled")
+            recommendations.append("disable_allow_live")
+        if not enabled:
+            reason_codes.append("agent_disabled")
+            recommendations.append("enable_agent")
+        if mode != "execute":
+            reason_codes.append("mode_not_execute")
+            recommendations.append("set_mode_execute")
+        if symbol_mode != "auto":
+            reason_codes.append("symbol_mode_manual")
+            recommendations.append("set_symbol_mode_auto")
+
+        safe_for_paper_longrun = bool(trading_mode == "paper" and not allow_live)
+        paper_longrun_profile_applied = runtime_profile == "paper_longrun"
+        paper_longrun_profile_ready = bool(
+            safe_for_paper_longrun and enabled and mode == "execute" and paper_longrun_profile_applied
+        )
+        if paper_longrun_profile_ready:
+            status = "ready"
+        elif trading_mode == "live" or allow_live:
+            status = "unsafe"
+        else:
+            status = "attention"
+
+        return {
+            "status": status,
+            "trading_mode": trading_mode,
+            "running": running,
+            "enabled": enabled,
+            "auto_start": auto_start,
+            "armed_for_execution": bool(mode == "execute"),
+            "live_capable": allow_live,
+            "safe_for_paper_longrun": safe_for_paper_longrun,
+            "paper_longrun_profile_applied": paper_longrun_profile_applied,
+            "paper_longrun_profile_ready": paper_longrun_profile_ready,
+            "runtime_profile": runtime_profile,
+            "reason_codes": reason_codes,
+            "recommendations": recommendations,
+        }
 
     async def update_runtime_config(self, **kwargs: Any) -> Dict[str, Any]:
         updates: Dict[str, Any] = {}
+        profile_name = kwargs.get("runtime_profile")
+        if profile_name is None:
+            profile_name = kwargs.get("profile")
+        if profile_name is not None:
+            updates.update(_runtime_profile_overrides(str(profile_name)))
         if "enabled" in kwargs and kwargs["enabled"] is not None:
             updates["AI_AUTONOMOUS_AGENT_ENABLED"] = bool(kwargs["enabled"])
         if "mode" in kwargs and kwargs["mode"] is not None:
@@ -1200,6 +1301,7 @@ class AutonomousTradingAgent:
         return payload
 
     def get_status(self) -> Dict[str, Any]:
+        runtime_cfg = self.get_runtime_config()
         last_symbol_scan, last_symbol_scan_meta = self._status_symbol_scan()
         preview_symbol_scan, preview_symbol_scan_meta = self._status_preview_symbol_scan()
         return {
@@ -1227,6 +1329,8 @@ class AutonomousTradingAgent:
             "learning_memory": dict(self._learning_memory or {}),
             "journal_path": str(self._journal_path),
             "learning_memory_path": str(self._learning_memory_path),
+            "runtime_profile": runtime_cfg.get("runtime_profile"),
+            "safety": dict(runtime_cfg.get("safety") or {}),
         }
 
     def _model_feedback_guard_status(self) -> Dict[str, Any]:

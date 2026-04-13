@@ -385,13 +385,48 @@ function Show-Status {
                 $(if ([string]::IsNullOrWhiteSpace($agentSymbolMode)) { "unknown" } else { $agentSymbolMode }),
                 $selectedSymbol
             )
-            $agentModeText = [string]$agentMode
-            if (
-                $agentModeText.Trim().ToLowerInvariant() -eq "execute" -or
-                $agentAutoStart -eq "true" -or
-                $agentAllowLive -eq "true"
-            ) {
-                Write-Host "  Warning      : AI agent config remains armed (execute/auto-start/live-capable)." -ForegroundColor Yellow
+            $agentSafety = $null
+            if ($agentSummary.status.safety) {
+                $agentSafety = $agentSummary.status.safety
+            }
+            elseif ($agentConfig.safety) {
+                $agentSafety = $agentConfig.safety
+            }
+            if ($agentSafety) {
+                $safetyStatus = [string]($agentSafety.status)
+                if ([string]::IsNullOrWhiteSpace($safetyStatus)) {
+                    $safetyStatus = "unknown"
+                }
+                $runtimeProfile = [string]($agentSafety.runtime_profile)
+                if ([string]::IsNullOrWhiteSpace($runtimeProfile)) {
+                    $runtimeProfile = [string]($agentConfig.runtime_profile)
+                }
+                if ([string]::IsNullOrWhiteSpace($runtimeProfile)) {
+                    $runtimeProfile = "custom"
+                }
+                $reasonCodes = @($agentSafety.reason_codes | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+                $reasonText = if ($reasonCodes.Count) { $reasonCodes -join ", " } else { "none" }
+                $safetyLine = switch ($safetyStatus.ToLowerInvariant()) {
+                    "ready" { "ready for paper long-run" }
+                    "unsafe" { "unsafe for paper long-run" }
+                    default { "attention needed for paper long-run" }
+                }
+                $safetyColor = switch ($safetyStatus.ToLowerInvariant()) {
+                    "ready" { "Green" }
+                    "unsafe" { "Yellow" }
+                    default { "Yellow" }
+                }
+                Write-Host ("  AI Safety    : {0} (profile={1}, reasons={2})" -f $safetyLine, $runtimeProfile, $reasonText) -ForegroundColor $safetyColor
+            }
+            else {
+                $agentModeText = [string]$agentMode
+                if (
+                    $agentModeText.Trim().ToLowerInvariant() -eq "execute" -or
+                    $agentAutoStart -eq "true" -or
+                    $agentAllowLive -eq "true"
+                ) {
+                    Write-Host "  Warning      : AI agent config remains armed (execute/auto-start/live-capable)." -ForegroundColor Yellow
+                }
             }
         }
         else {

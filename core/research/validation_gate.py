@@ -125,7 +125,11 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
 
     # DSR: deflated for multiple testing across all runs tested
     n_trials_for_dsr = max(1, runs)
-    n_obs_for_dsr = max(50, int(best.get("total_trades", 50) or 50))
+    # n_obs should be bar count, not trade count — use n_bars when available,
+    # fall back to total_trades * 5 as a rough proxy (assuming ~20% trade rate)
+    _n_bars = int(best.get("n_bars", 0) or 0)
+    _n_trades = int(best.get("total_trades", 10) or 10)
+    n_obs_for_dsr = max(50, _n_bars if _n_bars > 0 else _n_trades * 5)
     dsr = _deflated_sharpe_ratio(
         sharpe=effective_sharpe,
         n_trials=n_trials_for_dsr,

@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timedelta, timezone
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
@@ -25,6 +26,7 @@ except ImportError:
     pd_stub.concat = lambda *args, **kwargs: _DummyDataFrame()
     sys.modules["pandas"] = pd_stub
 
+from core.backtest.exit_engine import resolve_exit_engine_config
 from core.trading.execution_engine import ExecutionEngine
 from core.trading.order_manager import OrderSide
 from core.trading.position_manager import PositionSide, position_manager
@@ -32,9 +34,13 @@ from core.trading.position_manager import PositionSide, position_manager
 
 @pytest.fixture(autouse=True)
 def _clear_positions():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     position_manager.clear_all()
     yield
     position_manager.clear_all()
+    loop.close()
+    asyncio.set_event_loop(None)
 
 
 def _make_signal(
@@ -137,6 +143,53 @@ def test_fallback_to_global_default_pct(monkeypatch):
 
     assert stop_loss == pytest.approx(96.0)
     assert take_profit == pytest.approx(108.0)
+
+
+def test_exit_template_disables_default_protection_injection():
+    engine = ExecutionEngine()
+    signal = _make_signal(price=100.0)
+
+    stop_loss, take_profit = engine._ensure_signal_protection_levels(
+        signal=signal,
+        side=OrderSide.BUY,
+        entry_price=100.0,
+        trade_policy={"disable_default_protection_injection": True},
+    )
+
+    assert stop_loss is None
+    assert take_profit is None
+
+
+def test_exit_template_runtime_overrides_attach_atr_partial_and_time_stop(monkeypatch):
+    engine = ExecutionEngine()
+    signal = _make_signal(price=100.0, metadata={"timeframe": "1h"})
+    monkeypatch.setattr(engine, "_estimate_exit_template_atr_pct", AsyncMock(return_value=0.01))
+
+    import asyncio
+
+    asyncio.run(
+        engine._apply_exit_template_runtime_overrides(
+            signal=signal,
+            trade_policy={
+                "exit_template": "PartialPlusATR",
+                "timeframe": "1h",
+                "exit_template_config": resolve_exit_engine_config(template_name="PartialPlusATR").to_dict(),
+            },
+            exchange="binance",
+            entry_price=100.0,
+        )
+    )
+
+    metadata = signal.metadata
+    assert metadata["exit_template"] == "PartialPlusATR"
+    assert metadata["stop_loss_pct"] == pytest.approx(0.02)
+    assert metadata["trailing_stop_pct"] == pytest.approx(0.025)
+    assert metadata["partial_take_profit_enabled"] is True
+    assert metadata["partial_take_profit_trigger_pct"] == pytest.approx(0.03)
+    assert metadata["partial_take_profit_fraction"] == pytest.approx(0.5)
+    assert metadata["time_stop_enabled"] is True
+    assert metadata["time_stop_minutes"] == 20 * 60
+    assert metadata["outage_protection_enabled"] is False
 
 
 def test_execution_engine_profit_protect_raises_stop_loss_for_long():
@@ -251,3 +304,76 @@ def test_execution_engine_partial_take_profit_skips_when_below_min_notional():
     assert position.stop_loss == pytest.approx(100.12)
     assert position.metadata["partial_take_profit_skip_reason"] == "partial_notional_below_min"
     assert execute_mock.await_count == 0
+
+
+def test_execution_engine_time_stop_closes_template_managed_position():
+    engine = ExecutionEngine()
+    position_manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=100.0,
+        quantity=1.0,
+        strategy="unit_test_strategy",
+        account_id="main",
+        metadata={
+            "source": "strategy",
+            "time_stop_enabled": True,
+            "time_stop_deadline_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
+        },
+    )
+    engine._resolve_price = AsyncMock(return_value=100.5)
+    engine._execute_protective_close = AsyncMock(return_value={"reason": "time_stop"})
+
+    import asyncio
+
+    asyncio.run(engine._check_protective_orders())
+
+    assert engine._execute_protective_close.await_count == 1
+    assert engine._execute_protective_close.await_args.args[4] == "time_stop"
+
+
+def test_execution_engine_partial_take_profit_preserves_take_profit_when_requested():
+    engine = ExecutionEngine()
+    position_manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=100.0,
+        quantity=2.0,
+        strategy="unit_test_strategy",
+        account_id="main",
+        take_profit=104.0,
+        metadata={
+            "source": "strategy",
+            "partial_take_profit_enabled": True,
+            "partial_take_profit_trigger_pct": 0.006,
+            "partial_take_profit_fraction": 0.5,
+            "post_partial_trailing_stop_pct": 0.0025,
+            "preserve_take_profit_after_partial": True,
+        },
+    )
+    engine._resolve_price = AsyncMock(return_value=101.0)
+
+    async def _fake_execute_manual_order_single(**kwargs):
+        position_manager.close_position(
+            exchange=kwargs["exchange"],
+            symbol=kwargs["symbol"],
+            close_price=kwargs["price"],
+            quantity=kwargs["amount"],
+            account_id=kwargs["account_id"],
+        )
+        return {"order_id": "partial-preserve-1", "filled": kwargs["amount"], "price": kwargs["price"]}
+
+    engine._execute_manual_order_single = _fake_execute_manual_order_single
+
+    import asyncio
+
+    asyncio.run(engine._check_protective_orders())
+
+    position = position_manager.get_position("binance", "BTC/USDT", account_id="main")
+    assert position is not None
+    assert position.quantity == pytest.approx(1.0)
+    assert position.metadata["partial_take_profit_done"] is True
+    assert position.take_profit == pytest.approx(104.0)
+    assert position.trailing_stop_pct == pytest.approx(0.0025)

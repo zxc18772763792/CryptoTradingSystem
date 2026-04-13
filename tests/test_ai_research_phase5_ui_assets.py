@@ -28,11 +28,14 @@ def test_ai_research_template_loads_phase5_modules():
     assert 'id="ai-planner-research-mode"' in template
     assert 'id="ai-planner-max-drafts"' in template
     assert 'id="ai-planner-max-backtests"' in template
+    assert 'id="ai-auto-goal-btn"' in template
     assert 'id="ai-oneclick-btn"' in template
     assert 'id="ai-oneclick-feedback"' in template
     assert 'id="ai-candidate-cards"' in template
     assert 'id="ai-queue-title"' in template
     assert 'id="ai-queue-hint"' in template
+    assert '研究目标（可留空自动生成）' in template
+    assert '先让 AI 判断当前市场状态与适配策略' in template
     assert '页面时区：上海时间 (UTC+8)' in template
     assert '页面时区：上海时间 (UTC+8)' in news_template
     assert '/static/favicon.svg' in template
@@ -79,6 +82,9 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "function autoSelectCandidateForProposal(" in ai_js
     assert "function sortProposalsForWorkbench(" in ai_js
     assert "buildPlannerConstraints" in ai_js
+    assert "buildAiPlannerWorkbenchProfile" in ai_js
+    assert "loadAutoResearchRecommendation" in ai_js
+    assert "ensureAutoPlannerGoal" in ai_js
     assert "withActionLock('oneclick'" in ai_js
     assert "buildOneClickFailureFeedback" in ai_js
     assert "buildOneClickSuccessFeedback" in ai_js

@@ -917,6 +917,72 @@ def test_autonomous_agent_auto_start_is_env_controlled(monkeypatch, tmp_path: Pa
     assert not agent._overlay_path.exists()
 
 
+def test_autonomous_agent_runtime_config_exposes_paper_longrun_safety(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+
+    asyncio.run(
+        agent.update_runtime_config(
+            enabled=True,
+            mode="execute",
+            allow_live=False,
+            symbol_mode="auto",
+        )
+    )
+
+    cfg = agent.get_runtime_config()
+
+    assert cfg["runtime_profile"] == "paper_longrun"
+    assert cfg["safety"]["status"] == "ready"
+    assert cfg["safety"]["safe_for_paper_longrun"] is True
+    assert cfg["safety"]["paper_longrun_profile_ready"] is True
+    assert cfg["safety"]["reason_codes"] == []
+
+
+def test_autonomous_agent_paper_longrun_profile_applies_safe_overrides(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+
+    asyncio.run(agent.update_runtime_config(profile="paper_longrun"))
+
+    cfg = agent.get_runtime_config()
+
+    assert cfg["enabled"] is True
+    assert cfg["mode"] == "execute"
+    assert cfg["allow_live"] is False
+    assert cfg["symbol_mode"] == "auto"
+    assert cfg["runtime_profile"] == "paper_longrun"
+    assert cfg["safety"]["paper_longrun_profile_ready"] is True
+
+
+def test_autonomous_agent_status_marks_live_mode_unsafe_for_paper_longrun(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "live")
+
+    asyncio.run(
+        agent.update_runtime_config(
+            enabled=True,
+            mode="execute",
+            allow_live=False,
+            symbol_mode="auto",
+        )
+    )
+
+    status = agent.get_status()
+
+    assert status["runtime_profile"] == "paper_longrun"
+    assert status["safety"]["status"] == "unsafe"
+    assert status["safety"]["safe_for_paper_longrun"] is False
+    assert status["safety"]["paper_longrun_profile_ready"] is False
+    assert "trading_mode_live" in status["safety"]["reason_codes"]
+
+
 def test_autonomous_agent_auto_mode_uses_expanded_default_universe(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
 
