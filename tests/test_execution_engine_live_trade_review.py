@@ -298,3 +298,142 @@ def test_execute_manual_order_single_closes_only_matching_strategy_position(
         }
     ]
     assert ("binance", "BTC/USDT", "main", other_strategy) in fake_position_manager.positions
+
+
+def test_execute_manual_order_single_sequential_strategy_reversals_remain_isolated(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = True
+
+    alpha_strategy = "alpha"
+    beta_strategy = "beta"
+    alpha_short = SimpleNamespace(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.SHORT,
+        quantity=1.0,
+        leverage=1.0,
+        strategy=alpha_strategy,
+        account_id="main",
+        realized_pnl=0.0,
+        current_price=100.0,
+        entry_price=100.0,
+        metadata={"source": "strategy"},
+    )
+    beta_long = SimpleNamespace(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        quantity=1.5,
+        leverage=1.0,
+        strategy=beta_strategy,
+        account_id="main",
+        realized_pnl=0.0,
+        current_price=100.0,
+        entry_price=100.0,
+        metadata={"source": "strategy"},
+    )
+    fake_position_manager = _FakeStrategyPositionManager(
+        {
+            ("binance", "BTC/USDT", "main", alpha_strategy): alpha_short,
+            ("binance", "BTC/USDT", "main", beta_strategy): beta_long,
+        }
+    )
+
+    monkeypatch.setattr(execution_engine_module, "position_manager", fake_position_manager)
+    monkeypatch.setattr(
+        execution_engine_module.order_manager,
+        "create_order",
+        AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    id="order-alpha",
+                    price=100.0,
+                    fee=0.0,
+                    status=SimpleNamespace(value="filled"),
+                    amount=1.0,
+                    filled=1.0,
+                ),
+                SimpleNamespace(
+                    id="order-beta",
+                    price=100.0,
+                    fee=0.0,
+                    status=SimpleNamespace(value="filled"),
+                    amount=1.5,
+                    filled=1.5,
+                ),
+            ]
+        ),
+    )
+    monkeypatch.setattr(execution_engine_module.order_manager, "get_last_error", lambda: "")
+    monkeypatch.setattr(execution_engine_module.order_manager, "get_order_metadata", lambda order_id: {})
+    monkeypatch.setattr(execution_engine_module.risk_manager, "pre_trade_check", lambda **kwargs: True)
+    monkeypatch.setattr(execution_engine_module.risk_manager, "record_trade", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        execution_engine_module.decision_engine,
+        "evaluate_order_intent",
+        AsyncMock(
+            side_effect=[
+                SimpleNamespace(allowed=True, trace_id="trace-alpha"),
+                SimpleNamespace(allowed=True, trace_id="trace-beta"),
+            ]
+        ),
+    )
+    monkeypatch.setattr(engine, "_resolve_order_context", AsyncMock(return_value=(100.0, 100.0)))
+    monkeypatch.setattr(engine, "_get_account_equity", AsyncMock(return_value=1000.0))
+    monkeypatch.setattr(engine, "_consume_paper_order_cost", lambda order_id: {"fee_usd": 0.0, "slippage_cost_usd": 0.0})
+    monkeypatch.setattr(engine, "_notify_callbacks", AsyncMock(return_value=None))
+
+    alpha_result = asyncio.run(
+        engine._execute_manual_order_single(
+            exchange="binance",
+            symbol="BTC/USDT",
+            side="buy",
+            order_type="market",
+            amount=1.0,
+            price=100.0,
+            leverage=1.0,
+            stop_loss=None,
+            take_profit=None,
+            trailing_stop_pct=None,
+            trailing_stop_distance=None,
+            trigger_price=None,
+            order_mode="normal",
+            iceberg_parts=1,
+            algo_slices=1,
+            algo_interval_sec=0,
+            account_id="main",
+            reduce_only=False,
+            strategy=alpha_strategy,
+            params={},
+        )
+    )
+    beta_result = asyncio.run(
+        engine._execute_manual_order_single(
+            exchange="binance",
+            symbol="BTC/USDT",
+            side="sell",
+            order_type="market",
+            amount=1.5,
+            price=100.0,
+            leverage=1.0,
+            stop_loss=None,
+            take_profit=None,
+            trailing_stop_pct=None,
+            trailing_stop_distance=None,
+            trigger_price=None,
+            order_mode="normal",
+            iceberg_parts=1,
+            algo_slices=1,
+            algo_interval_sec=0,
+            account_id="main",
+            reduce_only=False,
+            strategy=beta_strategy,
+            params={},
+        )
+    )
+
+    assert alpha_result is not None
+    assert beta_result is not None
+    assert [item["strategy"] for item in fake_position_manager.close_calls] == [alpha_strategy, beta_strategy]
+    assert ("binance", "BTC/USDT", "main", alpha_strategy) not in fake_position_manager.positions
+    assert ("binance", "BTC/USDT", "main", beta_strategy) not in fake_position_manager.positions

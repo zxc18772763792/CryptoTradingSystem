@@ -6,6 +6,13 @@ from fastapi import HTTPException
 from web.services import trading_runtime_service
 
 
+@pytest.fixture(autouse=True)
+def _clear_pending_mode_switches():
+    trading_runtime_service._mode_switch_pending.clear()
+    yield
+    trading_runtime_service._mode_switch_pending.clear()
+
+
 def test_list_pending_mode_switches_hides_tokens_by_default():
     trading_runtime_service._mode_switch_pending.clear()
     try:

@@ -256,6 +256,40 @@ def test_activate_risk_config_clears_runtime_halt_when_kill_switch_disabled():
     assert reason == ""
 
 
+def test_activate_risk_config_kill_switch_toggle_keeps_runtime_state_consistent():
+    async def _run():
+        await init_db()
+        actor = GovernanceIdentity(actor="governance_bot", role="SYSTEM")
+        original_halted = risk_manager._trading_halted  # noqa: SLF001
+        original_reason = risk_manager._halt_reason  # noqa: SLF001
+        snapshots = []
+        try:
+            toggle_plan = [True, False, True, False]
+            for idx, enabled in enumerate(toggle_plan, start=1):
+                await _activate_risk_config(
+                    base_version=idx,
+                    config={
+                        "max_leverage": 10.0,
+                        "max_position_notional_pct": 0.5,
+                        "max_daily_drawdown_pct": 0.2,
+                        "reduce_only": False,
+                        "kill_switch": enabled,
+                    },
+                    actor=actor,
+                )
+                snapshots.append((bool(risk_manager._trading_halted), str(risk_manager._halt_reason or "")))  # noqa: SLF001
+            return snapshots
+        finally:
+            risk_manager._trading_halted = original_halted  # noqa: SLF001
+            risk_manager._halt_reason = original_reason  # noqa: SLF001
+
+    states = asyncio.run(_run())
+    assert states[0] == (True, "governance kill_switch enabled")
+    assert states[1] == (False, "")
+    assert states[2] == (True, "governance kill_switch enabled")
+    assert states[3] == (False, "")
+
+
 def test_live_transition_requires_dual_approval():
     async def _run():
         await init_db()
