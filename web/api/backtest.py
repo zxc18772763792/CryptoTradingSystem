@@ -1444,6 +1444,22 @@ def _build_compare_optimization_plan(
         selected_count = min(selected_count, 6)
         effective_trials = min(effective_trials, 16)
 
+    # Full-history multi-strategy comparisons can span tens of thousands of
+    # bars when the user leaves the date range unlocked. Cap pre-optimization
+    # much more aggressively so the request stays interactive.
+    medium_history = int(data_points or 0) >= max(sample_floor * 2, 2000)
+    large_history = int(data_points or 0) >= max(sample_floor * 4, 4000)
+    very_large_history = int(data_points or 0) >= max(sample_floor * 8, 8000)
+    if medium_history:
+        selected_count = min(selected_count, 8 if tier == "default" else 6)
+        effective_trials = min(effective_trials, 24 if tier == "default" else 16)
+    if large_history:
+        selected_count = min(selected_count, 6)
+        effective_trials = min(effective_trials, 12 if tier == "default" else 8)
+    if very_large_history:
+        selected_count = min(selected_count, 4)
+        effective_trials = min(effective_trials, 8 if tier == "default" else 6)
+
     selected_count = max(1, min(int(selected_count), int(eligible_count)))
     effective_trials = max(4, int(effective_trials))
     adaptive_capped = bool(selected_count < int(eligible_count) or effective_trials < requested)

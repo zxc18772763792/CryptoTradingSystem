@@ -488,6 +488,18 @@ if(strategy==='FamaFactorArbitrageStrategy'){
 }
 return 12000;
 }
+function estimateBacktestCompareTimeoutMs(strategyCount,maxTrials,timeframe='1h'){
+const strategies=Math.max(1,Math.min(32,parseInt(strategyCount,10)||1));
+const trials=Math.max(8,Math.min(512,parseInt(maxTrials,10)||48));
+const tf=String(timeframe||'1h').trim()||'1h';
+const windowDays=Math.max(60,Math.min(3650,estimateBacktestWindowDays()||recommendDownloadDays(tf)||365));
+const windowFactor=Math.max(1,Math.ceil(windowDays/90));
+const timeoutMs=
+  30000+
+  strategies*trials*220+
+  windowFactor*20000;
+return Math.max(45000,Math.min(12*60*1000,timeoutMs));
+}
 
 function setBacktestCustomParams(params=null, note=''){
 const box=document.getElementById('backtest-custom-params');
@@ -6011,13 +6023,16 @@ const b1=document.getElementById('btn-backtest-compare');
 if(b1)b1.onclick=async()=>{
 try{
 renderBacktestExtraLoading('多策略对比运行中');
-await ensureSelectedBacktestStrategy();
+await ensureBacktestStrategySelect().catch(err=>{
+  console.warn('backtest compare preflight skipped:',err);
+  return [];
+});
 const s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2;
 const chosenStrategies=getSelectedBacktestCompareStrategies();
 if(!chosenStrategies.length){notify('请至少勾选一个策略',true);return;}
 const objective=String(document.getElementById('backtest-opt-objective')?.value||'total_return');
-const maxTrials=Math.max(8,Math.min(512,parseInt(document.getElementById('backtest-opt-trials')?.value||'96',10)||96));
-const compareTimeoutMs=Math.max(30000,Math.min(8*60*1000, chosenStrategies.length*maxTrials*220 + 25000));
+const maxTrials=Math.max(8,Math.min(512,parseInt(document.getElementById('backtest-opt-trials')?.value||'48',10)||48));
+const compareTimeoutMs=estimateBacktestCompareTimeoutMs(chosenStrategies.length,maxTrials,tf);
 let cu=`/backtest/compare?strategies=${encodeURIComponent(chosenStrategies.join(','))}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&pre_optimize=true&optimize_objective=${encodeURIComponent(objective)}&optimize_max_trials=${maxTrials}`;
 if(sd)cu+=`&start_date=${encodeURIComponent(sd)}`;
 if(ed)cu+=`&end_date=${encodeURIComponent(ed)}`;

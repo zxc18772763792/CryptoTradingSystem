@@ -46,3 +46,15 @@ def test_dashboard_mode_ui_uses_runtime_mode_snapshot():
     assert "function resolveRuntimeModeSnapshot" in app_js
     assert "renderExchanges(displayBalances,activeType);" in app_js
     assert "await loadSystemStatus().catch" in app_js
+
+
+def test_backtest_compare_ui_avoids_single_strategy_hard_dependency():
+    app_js = _read("web/static/js/app.js")
+
+    assert "function estimateBacktestCompareTimeoutMs" in app_js
+    assert "await ensureBacktestStrategySelect().catch(err=>{" in app_js
+    assert "backtest compare preflight skipped:" in app_js
+    assert "const compareTimeoutMs=estimateBacktestCompareTimeoutMs(chosenStrategies.length,maxTrials,tf);" in app_js
+    compare_section = app_js.split("const b1=document.getElementById('btn-backtest-compare');", 1)[1]
+    compare_section = compare_section.split("const b2=document.getElementById('btn-backtest-optimize');", 1)[0]
+    assert "await ensureSelectedBacktestStrategy();" not in compare_section
