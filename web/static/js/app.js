@@ -528,17 +528,21 @@ return {
 };
 }
 function estimateBacktestCompareTimeoutMs(strategyCount,maxTrials,timeframe='1h',windowDaysOverride=null){
-const strategies=Math.max(1,Math.min(32,parseInt(strategyCount,10)||1));
+const strategies=Math.max(1,Math.min(64,parseInt(strategyCount,10)||1));
 const trials=Math.max(8,Math.min(512,parseInt(maxTrials,10)||48));
 const tf=String(timeframe||'1h').trim()||'1h';
+const sec=Math.max(1,timeframeSeconds(tf));
 const fallbackWindow=Math.max(60,Math.min(3650,estimateBacktestWindowDays()||recommendDownloadDays(tf)||365));
 const windowDays=Math.max(7,Math.min(3650,Number(windowDaysOverride||0)||fallbackWindow));
-const windowFactor=Math.max(1,Math.ceil(windowDays/90));
+const windowFactor=Math.max(1,Math.ceil(windowDays/(sec<=15*60?45:90)));
+const perTrialCost=sec<=15*60?260:230;
+const denseComparePenalty=Math.max(0,strategies-20)*6000;
 const timeoutMs=
-  30000+
-  strategies*trials*220+
-  windowFactor*20000;
-return Math.max(45000,Math.min(12*60*1000,timeoutMs));
+  45000+
+  strategies*trials*perTrialCost+
+  windowFactor*25000+
+  denseComparePenalty;
+return Math.max(60000,Math.min(20*60*1000,timeoutMs));
 }
 
 function setBacktestCustomParams(params=null, note=''){
@@ -3517,6 +3521,17 @@ const avgSharpe=okRows.length?okRows.reduce((s,x)=>s+Number(x.sharpe_ratio||0),0
 const optimizedCount=okRows.filter(r=>r.optimization_applied).length;
 const compareOpt=(data&&typeof data.compare_optimization==='object'&&data.compare_optimization)?data.compare_optimization:{};
 const compareRequestMeta=(data&&typeof data._compare_request_meta==='object'&&data._compare_request_meta)?data._compare_request_meta:{};
+const exitTemplateName=String(data?.exit_template||data?.default_exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE).trim()||DEFAULT_BACKTEST_EXIT_TEMPLATE;
+const selectedCount=Math.max(0,Number(compareOpt?.selected_count||optimizedCount||0));
+const skippedBudgetCount=Math.max(0,Number(compareOpt?.skipped_count||okRows.filter(r=>r?.optimization_skipped_for_budget).length||0));
+const compareRangeText=`${esc(String(data?.requested_start_date||data?.start_date||'-'))} ~ ${esc(String(data?.requested_end_date||data?.end_date||'-'))}`;
+const compareDataSummary=`${Number(data?.data_points||0)} 根K线 / 成功 ${okRows.length} / 总计 ${rows.length}`;
+const compareExecutionSummary=data?.pre_optimize
+  ? `已优化 ${optimizedCount} 个，预算内候选 ${selectedCount} 个${skippedBudgetCount>0?`，跳过 ${skippedBudgetCount} 个`:''}${errRows.length?`，失败 ${errRows.length} 个`:''}`
+  : `未启用预优化${errRows.length?`，失败 ${errRows.length} 个`:''}`;
+const compareBudgetNote=compareOpt?.adaptive_capped
+  ? String(compareOpt?.summary||'已启用快速预优化，以控制大规模多策略对比耗时。')
+  : '';
 const compareOptSummary=data?.pre_optimize
   ? String(compareOpt?.summary||`已预优化 ${optimizedCount}/${okRows.length} 个策略（目标: ${esc(data?.optimize_objective||'total_return')}, trials=${Number(data?.optimize_max_trials||0)})`)
   : (bestBalanced?`建议下一步用 ${bestBalanced.strategy} 做参数优化`: '暂无可推荐策略');
@@ -3525,11 +3540,16 @@ out.innerHTML=`
 <div class="list-item"><span>多策略对比（${esc(data.symbol||'-')} / ${esc(data.timeframe||'-')}）</span><span>成功 ${okRows.length} / 总计 ${rows.length}</span></div>
 ${compareRequestMeta.autoWindowApplied?`<div class="list-item"><span>自动区间</span><span style="color:#9fb1c9;white-space:normal;word-break:break-word;text-align:right;">${esc(compareRequestMeta.note||'已自动锁定近期区间')}</span></div>`:''}
 ${renderRangeLockIndicatorHtml(data,false)}
+<div class="list-item"><span>实际回测区间 / 样本</span><span>${compareRangeText} | ${compareDataSummary}</span></div>
+<div class="list-item"><span>退出模板 / 预优化</span><span>${esc(backtestExitTemplateLabel(exitTemplateName))} | ${esc(compareExecutionSummary)}</span></div>
+${compareBudgetNote?`<div class="list-item"><span>预算提示</span><span style="color:#9fb1c9;white-space:normal;word-break:break-word;text-align:right;">${esc(compareBudgetNote)}</span></div>`:''}
 <div class="backtest-subgrid">
   <div class="stat-box"><div class="stat-label">最佳收益策略</div><div class="stat-value">${esc(best?.strategy||'-')}</div><div class="stat-label">${best?`${btPct(best.total_return)} / 夏普 ${btNum(best.sharpe_ratio)}`:'--'}</div></div>
   <div class="stat-box"><div class="stat-label">均衡推荐（收益-回撤）</div><div class="stat-value">${esc(bestBalanced?.strategy||'-')}</div><div class="stat-label">${bestBalanced?`${btPct(bestBalanced.total_return)} / 回撤 ${btPct(bestBalanced.max_drawdown)}`:'--'}</div></div>
   <div class="stat-box"><div class="stat-label">平均收益 / 平均夏普</div><div class="stat-value">${btPct(avgRet)} / ${btNum(avgSharpe)}</div><div class="stat-label">成本: 手续费 ${(Number(data?.commission_rate||0)*100).toFixed(4)}% + 滑点 ${btNum(data?.slippage_bps||0)}bps</div></div>
   <div class="stat-box"><div class="stat-label">结论建议</div><div class="stat-value">${best&&best.total_return>0?'优先回测前3名细化参数':'先降低周期/成本或换策略组'}</div><div class="stat-label">${esc(compareOptSummary)}</div></div>
+  <div class="stat-box"><div class="stat-label">统一退出模板</div><div class="stat-value">${esc(backtestExitTemplateLabel(exitTemplateName))}</div><div class="stat-label">当前对比结果均基于同一离场模板</div></div>
+  <div class="stat-box"><div class="stat-label">预优化覆盖</div><div class="stat-value">${optimizedCount} / ${selectedCount||okRows.length}</div><div class="stat-label">${skippedBudgetCount>0?`预算跳过 ${skippedBudgetCount} 个候选`:'本次未触发预算跳过'}</div></div>
 </div>
 <div class="inline-actions" style="margin-top:10px;">
   <button type="button" class="btn btn-primary btn-sm" id="btn-backtest-register-best">注册收益第一策略（新实例）</button>
@@ -3544,7 +3564,7 @@ ${renderRangeLockIndicatorHtml(data,false)}
 ${ranked.map((r,i)=>`<tr class="bt-compare-row ${Number(backtestUIState?.lastComparePreviewRank??-1)===i?'active-preview':''}" data-rank-index="${i}" onclick="previewCompareStrategyByRank(${i})" style="cursor:pointer;">
 <td>${i+1}</td>
 <td>${esc(r.strategy||'-')}</td>
-<td>${r.optimization_applied?`已优化 (${esc(r.optimization_objective||'')})`:`默认参数`}</td>
+<td>${r.optimization_applied?`已优化 (${esc(r.optimization_objective||'')})`:(r.optimization_skipped_for_budget?'预算跳过':'默认参数')}</td>
 <td class="${Number(r.total_return||0)>=0?'positive':'negative'}">${btPct(r.total_return)}</td>
 <td>${btNum(r.sharpe_ratio)}</td>
 <td>${btPct(r.max_drawdown)}</td>
@@ -6063,7 +6083,10 @@ notify('回测完成');
 };
 const b1=document.getElementById('btn-backtest-compare');
 if(b1)b1.onclick=async()=>{
+const prevText=String(b1.textContent||'多策略对比');
 try{
+b1.disabled=true;
+b1.textContent='对比中...';
 await ensureBacktestStrategySelect().catch(err=>{
   console.warn('backtest compare preflight skipped:',err);
   return [];
@@ -6075,7 +6098,8 @@ const objective=String(document.getElementById('backtest-opt-objective')?.value|
 const maxTrials=Math.max(8,Math.min(512,parseInt(document.getElementById('backtest-opt-trials')?.value||'48',10)||48));
 const compareScope=resolveBacktestCompareExecutionScope({requestedStart:sd,requestedEnd:ed,timeframe:tf,strategyCount:chosenStrategies.length,maxTrials});
 const compareTimeoutMs=estimateBacktestCompareTimeoutMs(chosenStrategies.length,maxTrials,tf,compareScope.windowDays);
-renderBacktestExtraLoading('多策略对比运行中',`${compareScope.note||'按当前所选区间执行对比。'} 预计超时保护 ${Math.round(compareTimeoutMs/1000)} 秒。`);
+const longCompareHint=(chosenStrategies.length>=24||Number(compareScope.windowDays||0)>=365)?'策略较多或区间较长，本次可能持续数分钟，请勿重复点击。':'';
+renderBacktestExtraLoading('多策略对比运行中',`${compareScope.note||'按当前所选区间执行对比。'} ${longCompareHint} 预计超时保护 ${Math.round(compareTimeoutMs/1000)} 秒。`.trim());
 let cu=`/backtest/compare?strategies=${encodeURIComponent(chosenStrategies.join(','))}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&pre_optimize=true&optimize_objective=${encodeURIComponent(objective)}&optimize_max_trials=${maxTrials}`;
 if(compareScope.startDate)cu+=`&start_date=${encodeURIComponent(compareScope.startDate)}`;
 if(compareScope.endDate)cu+=`&end_date=${encodeURIComponent(compareScope.endDate)}`;
@@ -6092,6 +6116,10 @@ backtestUIState.lastCompare=d||null;
 renderBacktestCompareOutput(d);
 notify('多策略对比完成');
 }catch(err){renderBacktestExtraError(err);notify(`多策略对比失败: ${err.message}`,true);}
+finally{
+  b1.disabled=false;
+  b1.textContent=prevText;
+}
 };
 const b2=document.getElementById('btn-backtest-optimize');
 if(b2)b2.onclick=async()=>{

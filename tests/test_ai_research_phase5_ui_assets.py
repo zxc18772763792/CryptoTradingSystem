@@ -116,6 +116,8 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert ".ai-review-panel select" in style_css
     assert ".agent-journal-current" in style_css
     assert ".agent-journal-signal" in style_css
+    assert "#ai-agent .ai-agent-cockpit-title" in style_css
+    assert "white-space: nowrap;" in style_css
     assert "appearance: none" in style_css
     assert "color-scheme: dark" in style_css
     assert '[data-tone="warn"]' in style_css

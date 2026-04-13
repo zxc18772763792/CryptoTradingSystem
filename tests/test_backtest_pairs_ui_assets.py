@@ -56,11 +56,20 @@ def test_backtest_compare_ui_avoids_single_strategy_hard_dependency():
     assert "function recommendBacktestCompareWindowDays" in app_js
     assert "function resolveBacktestCompareExecutionScope" in app_js
     assert "function estimateBacktestCompareTimeoutMs" in app_js
+    assert "Math.min(64,parseInt(strategyCount,10)||1)" in app_js
+    assert "Math.min(20*60*1000,timeoutMs)" in app_js
     assert "await ensureBacktestStrategySelect().catch(err=>{" in app_js
     assert "backtest compare preflight skipped:" in app_js
     assert "const compareScope=resolveBacktestCompareExecutionScope" in app_js
     assert "const compareTimeoutMs=estimateBacktestCompareTimeoutMs(chosenStrategies.length,maxTrials,tf,compareScope.windowDays);" in app_js
+    assert "本次可能持续数分钟，请勿重复点击" in app_js
     assert "autoWindowApplied:!!compareScope.autoWindowApplied" in app_js
+    assert "实际回测区间 / 样本" in app_js
+    assert "退出模板 / 预优化" in app_js
+    assert "预算提示" in app_js
+    assert "预算跳过" in app_js
     compare_section = app_js.split("const b1=document.getElementById('btn-backtest-compare');", 1)[1]
     compare_section = compare_section.split("const b2=document.getElementById('btn-backtest-optimize');", 1)[0]
     assert "await ensureSelectedBacktestStrategy();" not in compare_section
+    assert "b1.disabled=true;" in compare_section
+    assert "b1.disabled=false;" in compare_section

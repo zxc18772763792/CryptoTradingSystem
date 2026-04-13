@@ -8727,7 +8727,8 @@ input[type="radio"] {
     line-height: 1.12;
     font-weight: 800;
     color: #f4fbff;
-    max-width: 13.5ch;
+    max-width: none;
+    white-space: nowrap;
 }
 
 #ai-agent .ai-agent-cockpit-desc {
@@ -9510,6 +9511,10 @@ input[type="radio"] {
     #ai-agent .ai-agent-review-summary .ai-agent-review-kpis,
     #ai-agent .ai-agent-review-summary .ai-agent-learning-grid {
         grid-template-columns: 1fr;
+    }
+
+    #ai-agent .ai-agent-cockpit-title {
+        white-space: normal;
     }
 
     #ai-research .cand-metrics {
