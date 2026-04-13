@@ -113,7 +113,7 @@ async def reset_risk_halt():
 @router.post("/paper/reset", dependencies=[Depends(require_sensitive_ops_permissions("reset_paper_runtime", "rotate_runtime"))])
 async def reset_paper_trading_state(clear_snapshots: bool = True):
     if not execution_engine.is_paper_mode():
-        raise HTTPException(status_code=400, detail="当前不是模拟盘模式")
+        raise HTTPException(status_code=400, detail="Paper mode is required")
 
     payload = await clear_local_runtime_service(clear_paper_snapshots=clear_snapshots)
     payload["cache_reset"] = runtime_state.clear_registered_caches(scope="paper")
@@ -210,7 +210,7 @@ async def cancel_trading_mode_switch(token: str, request: Request):
         require_request_permissions(request, "request_live", "approve_live", "rotate_runtime", "reset_paper_runtime")
     if cancel_trading_mode_switch_token(token):
         return {"success": True, "token": token}
-    raise HTTPException(status_code=404, detail="切换令牌不存在")
+    raise HTTPException(status_code=404, detail="Mode switch token not found")
 
 
 @router.get("/runtime/diagnostics")

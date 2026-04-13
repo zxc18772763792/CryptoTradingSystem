@@ -53,7 +53,7 @@ def request_mode_switch(*, target_mode: str, current_mode: str, reason: str = ""
     target = "live" if str(target_mode or "").strip().lower() == "live" else "paper"
     current = "live" if str(current_mode or "").strip().lower() == "live" else "paper"
     if target == current:
-        return {"success": True, "mode": target, "message": "当前已经是目标模式"}
+        return {"success": True, "mode": target, "message": "Already in target mode."}
 
     token = uuid4().hex
     created_at = datetime.now(timezone.utc)
@@ -70,7 +70,7 @@ def request_mode_switch(*, target_mode: str, current_mode: str, reason: str = ""
         "target_mode": target,
         "confirm_text": _MODE_CONFIRM_TEXT,
         "expires_at": expires_at.isoformat(),
-        "warning": "切换实盘风险较高，请确认 API 权限与风控参数。",
+        "warning": "Switching to live trading is high risk. Verify API permissions and risk settings.",
     }
 
 
@@ -150,12 +150,12 @@ async def switch_trading_mode(
 ) -> Dict[str, Any]:
     pending = _mode_switch_pending.get(str(token or ""))
     if not pending:
-        raise HTTPException(status_code=404, detail="切换令牌不存在")
+        raise HTTPException(status_code=404, detail="Mode switch token not found")
     if pending.get("expires_at") and pending["expires_at"] < datetime.now(timezone.utc):
         _mode_switch_pending.pop(str(token or ""), None)
-        raise HTTPException(status_code=400, detail="切换令牌已过期")
+        raise HTTPException(status_code=400, detail="Mode switch token expired")
     if str(confirm_text or "").strip() != _MODE_CONFIRM_TEXT:
-        raise HTTPException(status_code=400, detail="确认文本不正确")
+        raise HTTPException(status_code=400, detail="Confirmation text mismatch")
 
     target_mode = str(pending.get("target_mode") or "paper").strip().lower()
     previous_mode = runtime_state.get_trading_mode()
@@ -227,11 +227,12 @@ async def ensure_trading_mode_started(target_mode: str) -> Dict[str, Any]:
     elif normalized == "live":
         with contextlib.suppress(Exception):
             await execution_engine.prime_live_equity()
+    risk_scope = risk_manager.get_risk_report().get("scope")
     return {
         "running": bool(execution_engine.is_running),
         "mode": execution_engine.get_trading_mode(),
         "queue_size": int(execution_engine.get_queue_size()),
-        "risk_scope": risk_manager.get_risk_report().get("scope"),
+        "risk_scope": str(risk_scope or execution_engine.get_trading_mode()),
     }
 
 

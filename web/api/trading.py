@@ -3035,14 +3035,14 @@ async def get_orders(
                 "orders": cached_orders[:request_limit],
                 "cache_fallback": {"used": True, "age_sec": round(cache_age, 2), "reason": "timeout"},
             }
-        raise HTTPException(status_code=504, detail="褰撳墠濮旀墭鏌ヨ瓒呮椂锛岃绋嶅悗閲嶈瘯")
+        raise HTTPException(status_code=504, detail="Order query timed out. Please retry.")
     except Exception as exc:
         if (not execution_engine.is_paper_mode()) and cached_orders and cache_age <= _LIVE_ORDER_DETAILS_CACHE_TTL_SEC:
             return {
                 "orders": cached_orders[:request_limit],
                 "cache_fallback": {"used": True, "age_sec": round(cache_age, 2), "reason": str(exc)},
             }
-        raise HTTPException(status_code=502, detail=f"褰撳墠濮旀墭鏌ヨ澶辫触: {exc}")
+        raise HTTPException(status_code=502, detail=f"Order query failed: {exc}")
 
     serialized = [_serialize_order(o) for o in orders[:request_limit]]
     if not execution_engine.is_paper_mode():
@@ -3442,7 +3442,7 @@ async def close_position(req: PositionCloseRequest):
         )
         result = await execution_engine.execute_signal(close_signal)
         if not result:
-            raise HTTPException(status_code=400, detail="閺堫剙婀撮幐浣风波楠炲厖绮ㄦ径杈Е")
+            raise HTTPException(status_code=400, detail="Failed to close local position")
         await audit_logger.log(
             module="trading",
             action="close_position",
@@ -3470,15 +3470,18 @@ async def close_position(req: PositionCloseRequest):
     # For live-only exchange-synced positions (e.g. manual futures positions not tracked in position_manager),
     # send a reduce-only market order to the exchange.
     if execution_engine.is_paper_mode():
-        raise HTTPException(status_code=400, detail="濡剝瀚欓惄妯绘弓閹垫儳鍩岀€电懓绨查張顒€婀撮幐浣风波")
+        raise HTTPException(status_code=400, detail="Paper mode cannot close exchange-synced positions directly")
 
     connector = exchange_manager.get_exchange(exchange)
     if not connector:
-        raise HTTPException(status_code=404, detail=f"娴溿倖妲楅幍鈧張顏囩箾閹? {exchange}")
+        raise HTTPException(status_code=404, detail=f"Exchange connector not found: {exchange}")
 
     default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").lower()
     if default_type not in {"future", "swap"}:
-        raise HTTPException(status_code=400, detail=f"{exchange} 闂堢偛鎮庣痪锕佸閹?default_type={default_type or 'unknown'})")
+        raise HTTPException(
+            status_code=400,
+            detail=f"{exchange} is not a derivatives exchange (default_type={default_type or 'unknown'})",
+        )
 
     qty = requested_qty
     matched_side = side
@@ -3486,7 +3489,7 @@ async def close_position(req: PositionCloseRequest):
         try:
             ex_positions = await connector.get_positions()
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"鐠囪褰囨禍銈嗘閹碘偓閹镐椒绮ㄦ径杈Е: {e}") from e
+            raise HTTPException(status_code=502, detail=f"Failed to fetch exchange positions: {e}") from e
 
         norm_symbol = symbol.upper()
         for p in ex_positions:
@@ -3505,7 +3508,7 @@ async def close_position(req: PositionCloseRequest):
             matched_side = p_side or ("short" if p_amt < 0 else "long")
             break
     if qty <= 0:
-        raise HTTPException(status_code=404, detail="閺堫亝澹橀崚鏉垮讲楠炲厖绮ㄩ惃鍕唉閺勬挻澧嶉幐浣风波")
+        raise HTTPException(status_code=404, detail="No closable position found")
 
     close_side = "sell" if matched_side == "long" else "buy"
     order = await order_manager.create_order(
@@ -3523,7 +3526,7 @@ async def close_position(req: PositionCloseRequest):
         )
     )
     if not order:
-        raise HTTPException(status_code=400, detail="娴溿倖妲楅幍鈧獮鍏呯波娑撳宕熸径杈Е")
+        raise HTTPException(status_code=400, detail="Failed to place exchange close order")
 
     await audit_logger.log(
         module="trading",
