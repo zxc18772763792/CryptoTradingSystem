@@ -911,6 +911,97 @@ class ExecutionEngine:
             merged["reduce_only"] = bool(reduce_only)
         return merged
 
+    @staticmethod
+    def _position_belongs_to_strategy(position: Any, strategy_name: Optional[str]) -> bool:
+        target_strategy = str(strategy_name or "").strip()
+        if not target_strategy:
+            return True
+        if position is None:
+            return False
+
+        position_strategy = str(getattr(position, "strategy", "") or "").strip()
+        if position_strategy == target_strategy:
+            return True
+
+        metadata = getattr(position, "metadata", None)
+        if isinstance(metadata, dict):
+            for key in ("strategy_name", "registered_strategy_name"):
+                if str(metadata.get(key) or "").strip() == target_strategy:
+                    return True
+        return False
+
+    @staticmethod
+    def _requires_strategy_position_isolation(signal: Signal) -> bool:
+        metadata = dict(getattr(signal, "metadata", {}) or {})
+        if bool(metadata.get("strategy_position_isolation")):
+            return True
+        source = str(metadata.get("source") or "").strip().lower()
+        return source == "ai_autonomous_agent"
+
+    @staticmethod
+    def _strategy_lookup_value(strategy_name: Optional[str]) -> str:
+        return str(strategy_name or "").strip()
+
+    def _resolve_local_position(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        account_id: str,
+        strategy_name: Optional[str] = None,
+        require_strategy_match: bool = False,
+    ) -> Optional[Any]:
+        lookup_strategy = self._strategy_lookup_value(strategy_name) if require_strategy_match else None
+        return position_manager.get_position(
+            exchange,
+            symbol,
+            account_id=account_id,
+            strategy=lookup_strategy,
+        )
+
+    def _get_foreign_local_position(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        account_id: str,
+        strategy_name: Optional[str],
+    ) -> Optional[Any]:
+        position = position_manager.get_position(exchange, symbol, account_id=account_id)
+        if position is None:
+            return None
+        if self._position_belongs_to_strategy(position, strategy_name):
+            return None
+        return position
+
+    def _record_strategy_isolation_block(
+        self,
+        *,
+        signal: Signal,
+        exchange: str,
+        account_id: str,
+        foreign_position: Optional[Any],
+    ) -> None:
+        foreign_strategy = str(getattr(foreign_position, "strategy", "") or "").strip()
+        foreign_side = str(getattr(getattr(foreign_position, "side", None), "value", "") or "").strip().lower()
+        self._signal_diagnostics["last_result"] = {
+            "status": "strategy_position_isolation_blocked",
+            "strategy": signal.strategy_name,
+            "symbol": signal.symbol,
+            "exchange": exchange,
+            "account_id": account_id,
+            "reason": "foreign_strategy_position_present",
+            "foreign_strategy": foreign_strategy,
+            "foreign_side": foreign_side,
+        }
+        self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+        logger.warning(
+            "Strategy position isolation blocked signal execution: "
+            f"strategy={signal.strategy_name} symbol={signal.symbol} exchange={exchange} "
+            f"account_id={account_id} foreign_strategy={foreign_strategy or 'unknown'} "
+            f"foreign_side={foreign_side or 'unknown'}"
+        )
+
     def _effective_profit_management_metadata(self, position: Any) -> Dict[str, Any]:
         metadata = dict(getattr(position, "metadata", {}) or {})
         source = str(metadata.get("source") or "").strip().lower()
@@ -1099,6 +1190,7 @@ class ExecutionEngine:
             str(getattr(position, "exchange", "") or ""),
             str(getattr(position, "symbol", "") or ""),
             account_id=str(getattr(position, "account_id", "main") or "main"),
+            strategy=self._strategy_lookup_value(getattr(position, "strategy", None)),
         )
         if refreshed is None:
             return {"applied": False, "reason": "position_closed"}
@@ -1205,6 +1297,7 @@ class ExecutionEngine:
             str(getattr(position, "exchange", "") or ""),
             str(getattr(position, "symbol", "") or ""),
             account_id=str(getattr(position, "account_id", "main") or "main"),
+            strategy=self._strategy_lookup_value(getattr(position, "strategy", None)),
         ) or position
 
     @staticmethod
@@ -1811,10 +1904,21 @@ class ExecutionEngine:
         symbol: str,
         account_id: str,
         preferred_side: Optional[PositionSide] = None,
+        strategy_name: Optional[str] = None,
+        require_local_strategy_match: bool = False,
+        allow_exchange_fallback: bool = True,
     ) -> Optional[Any]:
-        exact = position_manager.get_position(exchange, symbol, account_id=account_id)
+        exact = self._resolve_local_position(
+            exchange=exchange,
+            symbol=symbol,
+            account_id=account_id,
+            strategy_name=strategy_name,
+            require_strategy_match=require_local_strategy_match,
+        )
         if exact is not None:
             return exact
+        if require_local_strategy_match or not allow_exchange_fallback:
+            return None
         return await self._get_exchange_position_snapshot(
             exchange=exchange,
             symbol=symbol,
@@ -1965,6 +2069,7 @@ class ExecutionEngine:
                     close_price=close_price,
                     quantity=float(getattr(local_pos, "quantity", 0.0) or 0.0),
                     account_id=str(getattr(local_pos, "account_id", "main") or "main"),
+                    strategy=self._strategy_lookup_value(getattr(local_pos, "strategy", None)),
                 )
                 if not closed:
                     continue
@@ -2086,11 +2191,16 @@ class ExecutionEngine:
             exchange = account_manager.resolve_exchange(account_id, str(signal.metadata.get("exchange", "binance")))
             leverage = float(signal.metadata.get("leverage", 1.0) or 1.0)
             trade_policy = self._resolve_strategy_trade_policy(signal.strategy_name, exchange)
+            strategy_lookup = self._strategy_lookup_value(signal.strategy_name)
+            require_strategy_isolation = bool(strategy_lookup) or self._requires_strategy_position_isolation(signal)
             existing_position = await self._resolve_existing_position(
                 exchange=exchange,
                 symbol=signal.symbol,
                 account_id=account_id,
                 preferred_side=position_side,
+                strategy_name=strategy_lookup if require_strategy_isolation else None,
+                require_local_strategy_match=require_strategy_isolation,
+                allow_exchange_fallback=not require_strategy_isolation,
             )
             if bool((signal.metadata or {}).get("close_only")):
                 if not existing_position:
@@ -2221,6 +2331,9 @@ class ExecutionEngine:
                         symbol=signal.symbol,
                         account_id=account_id,
                         preferred_side=position_side,
+                        strategy_name=strategy_lookup if require_strategy_isolation else None,
+                        require_local_strategy_match=require_strategy_isolation,
+                        allow_exchange_fallback=not require_strategy_isolation,
                     )
                     if existing_position and existing_position.side != position_side:
                         return None
@@ -2670,7 +2783,13 @@ class ExecutionEngine:
                     fee_usd = order_fee
             fill_price = float(order.price or signal.price or quote_price or 0.0)
             trade_pnl = 0.0
-            current_position = position_manager.get_position(exchange, signal.symbol, account_id=account_id)
+            current_position = self._resolve_local_position(
+                exchange=exchange,
+                symbol=signal.symbol,
+                account_id=account_id,
+                strategy_name=strategy_lookup if require_strategy_isolation else None,
+                require_strategy_match=require_strategy_isolation,
+            )
             if fill_price > 0 and (req.stop_loss is None or req.take_profit is None):
                 fill_stop_loss, fill_take_profit = self._ensure_signal_protection_levels(
                     signal=signal,
@@ -2963,11 +3082,16 @@ class ExecutionEngine:
         account_id = str(signal.metadata.get("account_id", "main"))
         exchange = account_manager.resolve_exchange(account_id, str(signal.metadata.get("exchange", "binance")))
         trade_policy = self._resolve_strategy_trade_policy(signal.strategy_name, exchange)
+        strategy_lookup = self._strategy_lookup_value(signal.strategy_name)
+        require_strategy_isolation = bool(strategy_lookup) or self._requires_strategy_position_isolation(signal)
         position = await self._resolve_existing_position(
             exchange=exchange,
             symbol=signal.symbol,
             account_id=account_id,
             preferred_side=position_side,
+            strategy_name=strategy_lookup if require_strategy_isolation else None,
+            require_local_strategy_match=require_strategy_isolation,
+            allow_exchange_fallback=not require_strategy_isolation,
         )
         if not position or position.side != position_side:
             return None
@@ -3055,6 +3179,7 @@ class ExecutionEngine:
                         close_price=close_price,
                         quantity=close_qty,
                         account_id=account_id,
+                        strategy=strategy_lookup,
                     )
                     if closed:
                         logger.warning(
@@ -3114,6 +3239,7 @@ class ExecutionEngine:
             close_price=close_price,
             quantity=close_qty,
             account_id=account_id,
+            strategy=strategy_lookup,
         )
         if not closed:
             source = str((getattr(position, "metadata", {}) or {}).get("source") or "").strip().lower()
@@ -3303,7 +3429,13 @@ class ExecutionEngine:
         if not account_manager.is_enabled(account_id):
             return None
 
-        existing_position = position_manager.get_position(exchange, symbol, account_id=account_id)
+        strategy_lookup = self._strategy_lookup_value(strategy)
+        existing_position = position_manager.get_position(
+            exchange,
+            symbol,
+            account_id=account_id,
+            strategy=strategy_lookup,
+        )
         closes_existing = bool(
             (is_sell and existing_position and existing_position.side == PositionSide.LONG)
             or ((not is_sell) and existing_position and existing_position.side == PositionSide.SHORT)
@@ -3431,6 +3563,7 @@ class ExecutionEngine:
                     close_price=fill_price,
                     quantity=close_qty,
                     account_id=account_id,
+                    strategy=strategy_lookup,
                 )
                 if closed:
                     trade_pnl += float(closed.realized_pnl or 0.0) - prev_realized
@@ -3489,6 +3622,7 @@ class ExecutionEngine:
                     close_price=fill_price,
                     quantity=close_qty,
                     account_id=account_id,
+                    strategy=strategy_lookup,
                 )
                 if closed:
                     trade_pnl += float(closed.realized_pnl or 0.0) - prev_realized
@@ -3757,8 +3891,22 @@ class ExecutionEngine:
                 "algo_interval_sec": int(algo_interval_sec or 0),
             },
         )
-    async def _execute_protective_close(self, exchange: str, symbol: str, account_id: str, price: float, reason: str) -> None:
-        pos = position_manager.get_position(exchange, symbol, account_id=account_id)
+    async def _execute_protective_close(
+        self,
+        exchange: str,
+        symbol: str,
+        account_id: str,
+        price: float,
+        reason: str,
+        strategy_name: Optional[str] = None,
+    ) -> None:
+        strategy_lookup = self._strategy_lookup_value(strategy_name)
+        pos = position_manager.get_position(
+            exchange,
+            symbol,
+            account_id=account_id,
+            strategy=(strategy_lookup if strategy_name is not None else None),
+        )
         if not pos:
             return
         close_side = "sell" if pos.side == PositionSide.LONG else "buy"
@@ -3803,10 +3951,17 @@ class ExecutionEngine:
         exchange: str,
         symbol: str,
         account_id: str = "main",
+        strategy_name: Optional[str] = None,
         current_price: Optional[float] = None,
         reason: str = "model_feedback_outage",
     ) -> Dict[str, Any]:
-        position = position_manager.get_position(exchange, symbol, account_id=account_id)
+        strategy_lookup = self._strategy_lookup_value(strategy_name)
+        position = position_manager.get_position(
+            exchange,
+            symbol,
+            account_id=account_id,
+            strategy=(strategy_lookup if strategy_name is not None else None),
+        )
         if position is None:
             return {"applied": False, "reason": "no_local_position"}
 
@@ -3823,8 +3978,14 @@ class ExecutionEngine:
             symbol=symbol,
             current_price=price,
             account_id=account_id,
+            strategy=(strategy_lookup if strategy_name is not None else None),
         )
-        position = position_manager.get_position(exchange, symbol, account_id=account_id) or position
+        position = position_manager.get_position(
+            exchange,
+            symbol,
+            account_id=account_id,
+            strategy=(strategy_lookup if strategy_name is not None else None),
+        ) or position
         profit_pct = self._position_profit_pct(position)
         if profit_pct <= 0:
             return {"applied": False, "reason": "position_not_profitable", "profit_pct": float(profit_pct)}
@@ -3929,10 +4090,16 @@ class ExecutionEngine:
                 symbol=pos.symbol,
                 current_price=px,
                 account_id=pos.account_id,
+                strategy=self._strategy_lookup_value(getattr(pos, "strategy", None)),
             )
             pos = updated_position or pos
             pos = await self._apply_position_profit_management(pos, px)
-            pos = position_manager.get_position(pos.exchange, pos.symbol, account_id=pos.account_id) or pos
+            pos = position_manager.get_position(
+                pos.exchange,
+                pos.symbol,
+                account_id=pos.account_id,
+                strategy=self._strategy_lookup_value(getattr(pos, "strategy", None)),
+            ) or pos
 
             reason = None
             if pos.side == PositionSide.LONG:
@@ -3951,7 +4118,14 @@ class ExecutionEngine:
                     reason = "take_profit"
 
             if reason:
-                await self._execute_protective_close(pos.exchange, pos.symbol, pos.account_id, px, reason)
+                await self._execute_protective_close(
+                    pos.exchange,
+                    pos.symbol,
+                    pos.account_id,
+                    px,
+                    reason,
+                    strategy_name=getattr(pos, "strategy", None),
+                )
 
     async def _check_conditional_orders(self) -> None:
         if not self._conditional_orders:

@@ -139,6 +139,10 @@ class PositionManager:
         return "live" if str(scope or "").strip().lower() == "live" else "paper"
 
     @staticmethod
+    def _normalize_strategy(strategy: Any) -> str:
+        return str(strategy or "").strip()
+
+    @staticmethod
     def _parse_datetime(value: Any) -> datetime:
         if isinstance(value, datetime):
             return value
@@ -264,7 +268,9 @@ class PositionManager:
             position = self._position_from_state(row)
             if position is None:
                 continue
-            self._positions[self._make_key(position.exchange, position.symbol, position.account_id)] = position
+            self._positions[
+                self._make_key(position.exchange, position.symbol, position.account_id, position.strategy)
+            ] = position
 
         for row in payload.get("closed_positions") or []:
             position = self._position_from_state(row)
@@ -317,16 +323,54 @@ class PositionManager:
         self._last_persist_at = 0.0
         self._restore_scope_state(self._load_scope_state(target))
 
-    def _make_key(self, exchange: str, symbol: str, account_id: str = "main") -> str:
-        return f"{account_id}:{exchange}_{symbol}"
+    def _make_key(
+        self,
+        exchange: str,
+        symbol: str,
+        account_id: str = "main",
+        strategy: Optional[str] = None,
+    ) -> str:
+        strategy_key = self._normalize_strategy(strategy) or "__default__"
+        return f"{account_id}:{exchange}_{symbol}::{strategy_key}"
 
-    def _match_key(self, exchange: str, symbol: str, account_id: Optional[str] = None) -> Optional[str]:
-        if account_id:
-            key = self._make_key(exchange, symbol, account_id)
-            return key if key in self._positions else None
+    def _matching_items(
+        self,
+        exchange: str,
+        symbol: str,
+        *,
+        account_id: Optional[str] = None,
+        strategy: Optional[str] = None,
+    ) -> List[tuple[str, Position]]:
+        target_account = str(account_id or "main") if account_id is not None else None
+        strategy_filter_enabled = strategy is not None
+        target_strategy = self._normalize_strategy(strategy) if strategy_filter_enabled else ""
+        matches: List[tuple[str, Position]] = []
         for key, position in self._positions.items():
-            if position.exchange == exchange and position.symbol == symbol:
-                return key
+            if position.exchange != exchange or position.symbol != symbol:
+                continue
+            if target_account is not None and str(position.account_id or "main") != target_account:
+                continue
+            if strategy_filter_enabled and self._normalize_strategy(position.strategy) != target_strategy:
+                continue
+            matches.append((key, position))
+        return matches
+
+    def _match_key(
+        self,
+        exchange: str,
+        symbol: str,
+        *,
+        account_id: Optional[str] = None,
+        strategy: Optional[str] = None,
+    ) -> Optional[str]:
+        matches = self._matching_items(
+            exchange,
+            symbol,
+            account_id=account_id,
+            strategy=strategy,
+        )
+        if len(matches) == 1:
+            return matches[0][0]
         return None
 
     def register_callback(self, callback: Any) -> None:
@@ -355,7 +399,8 @@ class PositionManager:
         trailing_stop_distance: Optional[float] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Position:
-        key = self._make_key(exchange, symbol, account_id)
+        strategy_key = self._normalize_strategy(strategy) or None
+        key = self._make_key(exchange, symbol, account_id, strategy_key)
         qty = float(quantity)
         price = float(entry_price)
         lev = max(1e-9, float(leverage or 1.0))
@@ -372,7 +417,7 @@ class PositionManager:
             value=price * qty,
             leverage=lev,
             margin=(price * qty) / lev,
-            strategy=strategy,
+            strategy=strategy_key,
             account_id=account_id or "main",
             stop_loss=float(stop_loss) if stop_loss is not None else None,
             take_profit=float(take_profit) if take_profit is not None else None,
@@ -407,12 +452,26 @@ class PositionManager:
         close_price: float,
         quantity: Optional[float] = None,
         account_id: Optional[str] = None,
+        strategy: Optional[str] = None,
     ) -> Optional[Position]:
-        key = self._match_key(exchange, symbol, account_id=account_id)
-        if not key:
-            logger.warning(f"No position found for {exchange}_{symbol} account={account_id or '*'}")
+        matches = self._matching_items(
+            exchange,
+            symbol,
+            account_id=account_id,
+            strategy=strategy,
+        )
+        if not matches:
+            logger.warning(
+                f"No position found for {exchange}_{symbol} account={account_id or '*'} strategy={strategy!r}"
+            )
             return None
-        position = self._positions.get(key)
+        if len(matches) > 1:
+            logger.warning(
+                f"Ambiguous position close for {exchange}_{symbol} account={account_id or '*'} "
+                f"strategy={strategy!r}: {len(matches)} matches"
+            )
+            return None
+        key, position = matches[0]
         if not position:
             logger.warning(f"No position found for {exchange}_{symbol}")
             return None
@@ -472,8 +531,9 @@ class PositionManager:
         symbol: str,
         current_price: float,
         account_id: Optional[str] = None,
+        strategy: Optional[str] = None,
     ) -> Optional[Position]:
-        key = self._match_key(exchange, symbol, account_id=account_id)
+        key = self._match_key(exchange, symbol, account_id=account_id, strategy=strategy)
         if not key:
             return None
         position = self._positions.get(key)
@@ -494,9 +554,32 @@ class PositionManager:
             self._dirty = True
             self._persist_scope_state(force=True)
 
-    def get_position(self, exchange: str, symbol: str, account_id: Optional[str] = None) -> Optional[Position]:
-        key = self._match_key(exchange, symbol, account_id=account_id)
+    def get_position(
+        self,
+        exchange: str,
+        symbol: str,
+        account_id: Optional[str] = None,
+        strategy: Optional[str] = None,
+    ) -> Optional[Position]:
+        key = self._match_key(exchange, symbol, account_id=account_id, strategy=strategy)
         return self._positions.get(key) if key else None
+
+    def get_positions(
+        self,
+        exchange: str,
+        symbol: str,
+        account_id: Optional[str] = None,
+        strategy: Optional[str] = None,
+    ) -> List[Position]:
+        return [
+            position
+            for _, position in self._matching_items(
+                exchange,
+                symbol,
+                account_id=account_id,
+                strategy=strategy,
+            )
+        ]
 
     def get_all_positions(self) -> List[Position]:
         return list(self._positions.values())
@@ -522,8 +605,14 @@ class PositionManager:
             return list(self._position_history)
         return self._position_history[-limit:]
 
-    def has_position(self, exchange: str, symbol: str, account_id: Optional[str] = None) -> bool:
-        return self.get_position(exchange, symbol, account_id=account_id) is not None
+    def has_position(
+        self,
+        exchange: str,
+        symbol: str,
+        account_id: Optional[str] = None,
+        strategy: Optional[str] = None,
+    ) -> bool:
+        return self.get_position(exchange, symbol, account_id=account_id, strategy=strategy) is not None
 
     def get_position_count(self) -> int:
         return len(self._positions)
@@ -551,10 +640,13 @@ class PositionManager:
         self,
         prices: Dict[str, Dict[str, float]],
         account_id: Optional[str] = None,
+        strategy: Optional[str] = None,
     ) -> List[Position]:
         closed: List[Position] = []
         for position in list(self._positions.values()):
             if account_id and position.account_id != account_id:
+                continue
+            if strategy is not None and self._normalize_strategy(position.strategy) != self._normalize_strategy(strategy):
                 continue
             exchange_prices = prices.get(position.exchange, {})
             if position.symbol not in exchange_prices:
@@ -564,6 +656,7 @@ class PositionManager:
                 symbol=position.symbol,
                 close_price=exchange_prices[position.symbol],
                 account_id=position.account_id,
+                strategy=self._normalize_strategy(position.strategy),
             )
             if result:
                 closed.append(result)

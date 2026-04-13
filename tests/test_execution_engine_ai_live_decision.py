@@ -237,7 +237,7 @@ def test_execute_signal_enforces_ai_reduce_only_on_opposite_side_fill(monkeypatc
             status=OrderStatus.CLOSED,
         )
 
-    def _close_position(exchange, symbol, close_price, quantity=None, account_id=None):
+    def _close_position(exchange, symbol, close_price, quantity=None, account_id=None, strategy=None):
         close_qty = float(quantity or 0.0)
         closed_quantities.append(close_qty)
         existing_position.realized_pnl = float(existing_position.realized_pnl or 0.0)
@@ -305,12 +305,22 @@ def test_execute_signal_enforces_ai_reduce_only_on_opposite_side_fill(monkeypatc
     assert trade_records[-1]["notional"] == 2.0
 
 
-def test_execute_signal_skips_same_direction_when_exchange_live_position_exists(monkeypatch):
+def test_execute_signal_ignores_exchange_live_position_when_local_strategy_position_missing(monkeypatch):
     engine = ExecutionEngine()
     engine._paper_trading = False
 
     signal = _make_signal(signal_type=SignalType.SELL)
-    create_order_mock = AsyncMock(return_value=None)
+    signal.quantity = 0.02
+    opened_positions = []
+    create_order_mock = AsyncMock(
+        return_value=SimpleNamespace(
+            id="ord-strategy-open-ignores-exchange-live",
+            price=100.0,
+            amount=0.02,
+            filled=0.02,
+            status=OrderStatus.CLOSED,
+        )
+    )
     fake_connector = SimpleNamespace(
         config=SimpleNamespace(default_type="future"),
         get_positions=AsyncMock(
@@ -332,20 +342,50 @@ def test_execute_signal_skips_same_direction_when_exchange_live_position_exists(
     monkeypatch.setattr(
         engine,
         "_resolve_strategy_trade_policy",
-        lambda strategy_name, exchange: {"allow_long": True, "allow_short": True, "allow_pyramiding": False},
+        lambda strategy_name, exchange: {
+            "allow_long": True,
+            "allow_short": True,
+            "allow_pyramiding": False,
+            "reverse_on_signal": True,
+            "market_type": "future",
+        },
     )
     monkeypatch.setattr(execution_engine_module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        execution_engine_module.position_manager,
+        "open_position",
+        lambda **kwargs: opened_positions.append(kwargs) or None,
+    )
     monkeypatch.setattr(execution_engine_module.exchange_manager, "get_exchange", lambda exchange: fake_connector)
+    monkeypatch.setattr(engine, "_resolve_order_context", AsyncMock(return_value=(100.0, 2.0)))
     monkeypatch.setattr(engine, "_get_account_equity", AsyncMock(return_value=10000.0))
     monkeypatch.setattr(execution_engine_module.strategy_manager, "get_strategy_allocation", lambda name: 0.1)
+    monkeypatch.setattr(engine, "_ensure_signal_protection_levels", lambda **kwargs: (101.0, 96.0))
+    monkeypatch.setattr(
+        engine,
+        "_evaluate_live_ai_decision",
+        AsyncMock(return_value={"action": "allow", "applied": False, "reason": ""}),
+    )
+    monkeypatch.setattr(
+        execution_engine_module.decision_engine,
+        "evaluate_order_intent",
+        AsyncMock(return_value=SimpleNamespace(allowed=True, reason="", trace_id="trace-ignore-exchange-live")),
+    )
+    monkeypatch.setattr(execution_engine_module.risk_manager, "pre_trade_check", lambda **kwargs: True)
+    monkeypatch.setattr(execution_engine_module.risk_manager, "record_trade", lambda payload: None)
     monkeypatch.setattr(execution_engine_module.order_manager, "create_order", create_order_mock)
+    monkeypatch.setattr(engine, "_record_live_strategy_trade", AsyncMock(return_value=None))
+    monkeypatch.setattr(engine, "_notify_callbacks", AsyncMock(return_value=None))
+    monkeypatch.setattr(execution_engine_module, "write_audit", AsyncMock(return_value=None))
 
     result = asyncio.run(engine.execute_signal(signal))
 
-    assert result is None
-    assert create_order_mock.await_count == 0
-    assert engine.get_signal_diagnostics()["last_result"]["status"] == "existing_position_blocked"
-    assert engine.get_signal_diagnostics()["last_result"]["position_source"] == "exchange_live"
+    assert result is not None
+    assert create_order_mock.await_count == 1
+    assert len(opened_positions) == 1
+    assert opened_positions[0]["strategy"] == "ai_gate_strategy"
+    assert opened_positions[0]["side"] == PositionSide.SHORT
+    assert fake_connector.get_positions.await_count == 0
 
 
 def test_execute_signal_allows_same_direction_add_below_half_cap_and_caps_quantity(monkeypatch):
@@ -443,12 +483,11 @@ def test_calculate_quantity_respects_total_exposure_cap_from_signal_metadata(mon
     assert qty == 0.0
 
 
-def test_close_signal_uses_exchange_live_position_when_local_missing(monkeypatch):
+def test_close_signal_requires_local_strategy_position_when_local_missing(monkeypatch):
     engine = ExecutionEngine()
     engine._paper_trading = False
 
     signal = _make_signal(signal_type=SignalType.CLOSE_SHORT)
-    trade_records = []
     create_order_mock = AsyncMock(
         return_value=SimpleNamespace(
             id="ord-close-live",
@@ -478,25 +517,14 @@ def test_close_signal_uses_exchange_live_position_when_local_missing(monkeypatch
     monkeypatch.setattr(execution_engine_module.account_manager, "resolve_exchange", lambda account_id, exchange: "binance")
     monkeypatch.setattr(engine, "_resolve_strategy_trade_policy", lambda strategy_name, exchange: {"market_type": "future"})
     monkeypatch.setattr(execution_engine_module.position_manager, "get_position", lambda *args, **kwargs: None)
-    monkeypatch.setattr(execution_engine_module.position_manager, "close_position", lambda *args, **kwargs: None)
     monkeypatch.setattr(execution_engine_module.exchange_manager, "get_exchange", lambda exchange: fake_connector)
-    monkeypatch.setattr(engine, "_resolve_order_context", AsyncMock(return_value=(100.0, 2.0)))
-    monkeypatch.setattr(engine, "_get_account_equity", AsyncMock(return_value=10000.0))
-    monkeypatch.setattr(execution_engine_module.strategy_manager, "get_strategy_allocation", lambda name: 0.1)
-    monkeypatch.setattr(execution_engine_module.risk_manager, "pre_trade_check", lambda **kwargs: True)
-    monkeypatch.setattr(execution_engine_module.risk_manager, "record_trade", lambda payload: trade_records.append(payload))
     monkeypatch.setattr(execution_engine_module.order_manager, "create_order", create_order_mock)
-    monkeypatch.setattr(engine, "_record_live_strategy_trade", AsyncMock(return_value=None))
-    monkeypatch.setattr(engine, "_notify_callbacks", AsyncMock(return_value=None))
-    monkeypatch.setattr(execution_engine_module.audit_logger, "log", AsyncMock(return_value=None))
 
     result = asyncio.run(engine.execute_signal(signal))
 
-    assert result is not None
-    assert result["action"] == "close_position"
-    assert result["order"]["id"] == "ord-close-live"
-    assert trade_records[-1]["side"] == "close_short"
-    assert trade_records[-1]["notional"] == 2.0
+    assert result is None
+    assert create_order_mock.await_count == 0
+    assert fake_connector.get_positions.await_count == 0
 
 
 def test_reconcile_local_positions_requires_repeated_absence_before_closing(monkeypatch):
@@ -671,6 +699,132 @@ def test_execute_signal_can_still_request_explicit_limit_order(monkeypatch):
     assert len(captured_requests) == 1
     assert captured_requests[0].order_type == OrderType.LIMIT
     assert captured_requests[0].price == 1995.0
+
+
+def test_execute_signal_opens_strategy_scoped_position_without_touching_foreign_local_position(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+
+    signal = _make_signal(signal_type=SignalType.BUY)
+    signal.strategy_name = "AI_AutonomousAgent"
+    signal.metadata.update(
+        {
+            "source": "ai_autonomous_agent",
+            "strategy_position_isolation": True,
+        }
+    )
+    foreign_position = _make_position(PositionSide.SHORT, quantity=0.02)
+    foreign_position.strategy = "mean_reversion_strategy"
+    foreign_position.metadata = {"source": "strategy"}
+    opened_positions = []
+
+    async def _create_order(request):
+        return SimpleNamespace(
+            id="ord-strategy-scope-open",
+            price=100.0,
+            amount=request.amount,
+            filled=request.amount,
+            status=OrderStatus.CLOSED,
+        )
+
+    def _get_position(exchange, symbol, account_id=None, strategy=None):
+        if strategy == "AI_AutonomousAgent":
+            return None
+        if strategy == "mean_reversion_strategy":
+            return foreign_position
+        return None
+
+    def _open_position(**kwargs):
+        opened_positions.append(kwargs)
+        return None
+
+    monkeypatch.setattr(execution_engine_module.account_manager, "resolve_exchange", lambda account_id, exchange: "binance")
+    monkeypatch.setattr(
+        engine,
+        "_resolve_strategy_trade_policy",
+        lambda strategy_name, exchange: {
+            "allow_long": True,
+            "allow_short": True,
+            "reverse_on_signal": True,
+            "allow_pyramiding": False,
+            "market_type": "future",
+        },
+    )
+    monkeypatch.setattr(execution_engine_module.position_manager, "get_position", _get_position)
+    monkeypatch.setattr(execution_engine_module.position_manager, "open_position", _open_position)
+    monkeypatch.setattr(execution_engine_module.position_manager, "close_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(engine, "_get_account_equity", AsyncMock(return_value=5000.0))
+    monkeypatch.setattr(execution_engine_module.strategy_manager, "get_strategy_allocation", lambda name: 0.2)
+    monkeypatch.setattr(engine, "_resolve_order_context", AsyncMock(return_value=(100.0, 100.0)))
+    monkeypatch.setattr(engine, "_ensure_signal_protection_levels", lambda **kwargs: (99.0, 104.0))
+    monkeypatch.setattr(
+        engine,
+        "_evaluate_live_ai_decision",
+        AsyncMock(return_value={"action": "allow", "applied": False, "reason": ""}),
+    )
+    monkeypatch.setattr(
+        execution_engine_module.decision_engine,
+        "evaluate_order_intent",
+        AsyncMock(return_value=SimpleNamespace(allowed=True, reason="", trace_id="trace-strategy-scope-open")),
+    )
+    monkeypatch.setattr(execution_engine_module.risk_manager, "pre_trade_check", lambda **kwargs: True)
+    monkeypatch.setattr(execution_engine_module.risk_manager, "record_trade", lambda payload: None)
+    monkeypatch.setattr(execution_engine_module.order_manager, "create_order", AsyncMock(side_effect=_create_order))
+    monkeypatch.setattr(engine, "_record_live_strategy_trade", AsyncMock(return_value=None))
+    monkeypatch.setattr(engine, "_notify_callbacks", AsyncMock(return_value=None))
+    monkeypatch.setattr(execution_engine_module, "write_audit", AsyncMock(return_value=None))
+
+    result = asyncio.run(engine.execute_signal(signal))
+
+    assert result is not None
+    assert len(opened_positions) == 1
+    assert opened_positions[0]["strategy"] == "AI_AutonomousAgent"
+    assert opened_positions[0]["side"] == PositionSide.LONG
+
+
+def test_close_signal_ignores_foreign_local_position_for_other_strategy(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+
+    signal = _make_signal(signal_type=SignalType.CLOSE_LONG)
+    signal.strategy_name = "AI_AutonomousAgent"
+    signal.metadata.update(
+        {
+            "source": "ai_autonomous_agent",
+            "strategy_position_isolation": True,
+        }
+    )
+    foreign_position = _make_position(PositionSide.LONG, quantity=0.02)
+    foreign_position.strategy = "breakout_strategy"
+    foreign_position.metadata = {"source": "strategy"}
+    create_order_mock = AsyncMock(return_value=None)
+
+    def _get_position(exchange, symbol, account_id=None, strategy=None):
+        if strategy == "AI_AutonomousAgent":
+            return None
+        if strategy == "breakout_strategy":
+            return foreign_position
+        return None
+
+    monkeypatch.setattr(execution_engine_module.account_manager, "resolve_exchange", lambda account_id, exchange: "binance")
+    monkeypatch.setattr(
+        engine,
+        "_resolve_strategy_trade_policy",
+        lambda strategy_name, exchange: {
+            "allow_long": True,
+            "allow_short": True,
+            "reverse_on_signal": True,
+            "allow_pyramiding": False,
+            "market_type": "future",
+        },
+    )
+    monkeypatch.setattr(execution_engine_module.position_manager, "get_position", _get_position)
+    monkeypatch.setattr(execution_engine_module.order_manager, "create_order", create_order_mock)
+
+    result = asyncio.run(engine.execute_signal(signal))
+
+    assert result is None
+    assert create_order_mock.await_count == 0
 
 
 def test_execute_signal_sizes_pair_legs_with_shared_hedge_ratio(monkeypatch):

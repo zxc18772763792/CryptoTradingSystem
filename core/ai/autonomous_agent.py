@@ -772,6 +772,25 @@ class AutonomousTradingAgent:
         return getattr(settings, name, fallback)
 
     @staticmethod
+    def _position_owned_by_strategy(position: Any, strategy_name: Optional[str]) -> bool:
+        target_strategy = str(strategy_name or "").strip()
+        if not target_strategy:
+            return True
+        if position is None:
+            return False
+
+        position_strategy = str(getattr(position, "strategy", "") or "").strip()
+        if position_strategy == target_strategy:
+            return True
+
+        metadata = getattr(position, "metadata", None)
+        if isinstance(metadata, dict):
+            for key in ("strategy_name", "registered_strategy_name"):
+                if str(metadata.get(key) or "").strip() == target_strategy:
+                    return True
+        return False
+
+    @staticmethod
     def _extract_live_position_snapshot(row: Any) -> Optional[Dict[str, Any]]:
         row_symbol = str((row.get("symbol") if isinstance(row, dict) else getattr(row, "symbol", "")) or "")
         symbol = _normalize_symbol_text(_canonical_symbol_key(row_symbol))
@@ -836,13 +855,31 @@ class AutonomousTradingAgent:
                 snapshots.append(snapshot)
         return snapshots
 
-    async def _tracked_position_symbols(self, *, exchange: str, account_id: str) -> List[str]:
-        position_map = await self._scan_position_map(exchange=exchange, account_id=account_id)
+    async def _tracked_position_symbols(
+        self,
+        *,
+        exchange: str,
+        account_id: str,
+        strategy_name: Optional[str] = None,
+    ) -> List[str]:
+        position_map = await self._scan_position_map(
+            exchange=exchange,
+            account_id=account_id,
+            strategy_name=strategy_name,
+        )
         return [str(symbol) for symbol in position_map.keys() if str(symbol).strip()]
 
-    async def _scan_position_map(self, *, exchange: str, account_id: str) -> Dict[str, Dict[str, Any]]:
+    async def _scan_position_map(
+        self,
+        *,
+        exchange: str,
+        account_id: str,
+        strategy_name: Optional[str] = None,
+    ) -> Dict[str, Dict[str, Any]]:
         symbol_map: Dict[str, Dict[str, Any]] = {}
         local_symbols: List[str] = []
+        blocked_symbol_keys: set[str] = set()
+        target_strategy = str(strategy_name or "").strip()
         for position in position_manager.get_all_positions():
             try:
                 if str(getattr(position, "exchange", "") or "").strip().lower() != str(exchange or "").strip().lower():
@@ -854,6 +891,9 @@ class AutonomousTradingAgent:
                 symbol_text = _normalize_symbol_text(str(getattr(position, "symbol", "") or ""))
                 symbol_key = _canonical_symbol_key(symbol_text)
                 if not symbol_key:
+                    continue
+                if target_strategy and not self._position_owned_by_strategy(position, target_strategy):
+                    blocked_symbol_keys.add(symbol_key)
                     continue
                 local_symbols.append(symbol_text)
                 symbol_map[symbol_key] = {
@@ -873,6 +913,8 @@ class AutonomousTradingAgent:
             symbol_text = _normalize_symbol_text(str(snapshot.get("symbol") or ""))
             symbol_key = _canonical_symbol_key(symbol_text)
             if not symbol_key:
+                continue
+            if symbol_key in blocked_symbol_keys:
                 continue
             live_symbols.append(symbol_text)
             if symbol_key in symbol_map:
@@ -895,8 +937,20 @@ class AutonomousTradingAgent:
                 ordered_map[symbol_key] = dict(payload)
         return ordered_map
 
-    async def _resolve_position_payload(self, *, exchange: str, symbol: str, account_id: str) -> Dict[str, Any]:
-        position = position_manager.get_position(exchange, symbol, account_id=account_id)
+    async def _resolve_position_payload(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        account_id: str,
+        strategy_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        position = position_manager.get_position(
+            exchange,
+            symbol,
+            account_id=account_id,
+            strategy=(str(strategy_name or "").strip() if strategy_name is not None else None),
+        )
         if position is not None:
             with contextlib.suppress(Exception):
                 return {
@@ -1267,13 +1321,20 @@ class AutonomousTradingAgent:
         exchange = str(cfg.get("exchange") or context_payload.get("exchange") or "binance")
         symbol = str(cfg.get("symbol") or context_payload.get("symbol") or "BTC/USDT")
         account_id = str(cfg.get("account_id") or "main")
-        local_position = position_manager.get_position(exchange, symbol, account_id=account_id)
-        if local_position is None:
-            return {"applied": False, "reason": "no_local_position"}
+        strategy_name = str(cfg.get("strategy_name") or "AI_AutonomousAgent")
+        local_position = position_manager.get_position(
+            exchange,
+            symbol,
+            account_id=account_id,
+            strategy=strategy_name,
+        )
+        if local_position is None or not self._position_owned_by_strategy(local_position, strategy_name):
+            return {"applied": False, "reason": "no_owned_local_position"}
         result = await execution_engine.tighten_profitable_position_protection(
             exchange=exchange,
             symbol=symbol,
             account_id=account_id,
+            strategy_name=strategy_name,
             current_price=_safe_nonnegative_float(context_payload.get("price"), 0.0),
             reason=f"model_feedback_outage:{model_feedback_issue.get('kind') or 'unknown'}",
         )
@@ -2297,6 +2358,7 @@ class AutonomousTradingAgent:
             observed_position_map = await self._scan_position_map(
                 exchange=str(cfg.get("exchange") or "binance"),
                 account_id=str(cfg.get("account_id") or "main"),
+                strategy_name=str(cfg.get("strategy_name") or "AI_AutonomousAgent"),
             )
         observed_account_open_notional = self._position_map_total_notional(observed_position_map)
         total_strategy_open_notional = max(strategy_open_notional, observed_account_open_notional)
@@ -3414,6 +3476,7 @@ class AutonomousTradingAgent:
                     exchange=exchange,
                     symbol=symbol,
                     account_id=account_id,
+                    strategy_name=str(cfg.get("strategy_name") or "AI_AutonomousAgent"),
                 )
         else:
             account_risk_base = await self._resolve_account_risk_base(cfg)
@@ -3421,6 +3484,7 @@ class AutonomousTradingAgent:
                 exchange=exchange,
                 symbol=symbol,
                 account_id=account_id,
+                strategy_name=str(cfg.get("strategy_name") or "AI_AutonomousAgent"),
             )
             position_payload = await self._annotate_position_payload(
                 cfg=cfg,
@@ -4057,6 +4121,7 @@ class AutonomousTradingAgent:
             "leverage": _FIXED_AUTONOMOUS_AGENT_LEVERAGE,
             "timeframe": str(cfg.get("timeframe") or ""),
             "source": "ai_autonomous_agent",
+            "strategy_position_isolation": True,
             "skip_live_decision_review": True,
             "agent_provider": str(cfg.get("provider") or ""),
             "agent_model": str(cfg.get("model") or ""),
@@ -4534,6 +4599,7 @@ class AutonomousTradingAgent:
             scan_position_map = await self._scan_position_map(
                 exchange=str(cfg.get("exchange") or "binance"),
                 account_id=str(cfg.get("account_id") or "main"),
+                strategy_name=str(cfg.get("strategy_name") or "AI_AutonomousAgent"),
             )
             tracked_symbols = [str(symbol) for symbol in scan_position_map.keys() if str(symbol).strip()]
             universe_symbols = _merge_symbol_sequence(

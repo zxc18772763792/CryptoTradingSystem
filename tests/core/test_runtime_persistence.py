@@ -54,10 +54,10 @@ def test_position_manager_restores_positions_from_persisted_scope(tmp_path, monk
         strategy="alpha_strategy",
         account_id="main",
     )
-    manager.update_position_price("binance", "BTC/USDT", 105.0, account_id="main")
+    manager.update_position_price("binance", "BTC/USDT", 105.0, account_id="main", strategy="alpha_strategy")
 
     restored = position_module.PositionManager()
-    position = restored.get_position("binance", "BTC/USDT", account_id="main")
+    position = restored.get_position("binance", "BTC/USDT", account_id="main", strategy="alpha_strategy")
 
     assert position is not None
     assert position.strategy == "alpha_strategy"
@@ -68,3 +68,40 @@ def test_position_manager_restores_positions_from_persisted_scope(tmp_path, monk
 
     restored.set_scope("paper")
     assert len(restored.get_all_positions()) == 1
+
+
+def test_position_manager_persists_multiple_strategies_per_symbol(tmp_path, monkeypatch):
+    monkeypatch.setattr(position_module.settings, "CACHE_PATH", tmp_path, raising=False)
+    monkeypatch.setattr(position_module.settings, "TRADING_MODE", "paper", raising=False)
+
+    manager = position_module.PositionManager()
+    manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=100.0,
+        quantity=1.0,
+        strategy="alpha_strategy",
+        account_id="main",
+    )
+    manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.SHORT,
+        entry_price=101.0,
+        quantity=2.0,
+        strategy="beta_strategy",
+        account_id="main",
+    )
+
+    restored = position_module.PositionManager()
+    alpha = restored.get_position("binance", "BTC/USDT", account_id="main", strategy="alpha_strategy")
+    beta = restored.get_position("binance", "BTC/USDT", account_id="main", strategy="beta_strategy")
+    ambiguous = restored.get_position("binance", "BTC/USDT", account_id="main")
+
+    assert alpha is not None
+    assert beta is not None
+    assert alpha.strategy == "alpha_strategy"
+    assert beta.strategy == "beta_strategy"
+    assert ambiguous is None
+    assert len(restored.get_positions("binance", "BTC/USDT", account_id="main")) == 2

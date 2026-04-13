@@ -3082,6 +3082,7 @@ def test_agent_model_outage_tightens_profitable_local_position(monkeypatch, tmp_
         current_price=101.2,
         unrealized_pnl=1.2,
         leverage=1.0,
+        strategy="AI_AutonomousAgent",
     )
 
     monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
@@ -3106,6 +3107,49 @@ def test_agent_model_outage_tightens_profitable_local_position(monkeypatch, tmp_
     assert result["decision"]["action"] == "hold"
     assert "profit_protection_armed" in result["decision"]["reason"]
     assert tighten_mock.await_count == 1
+
+
+def test_build_signal_marks_strategy_position_isolation(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_signal_isolation")
+
+    signal = agent._build_signal(
+        decision={
+            "action": "buy",
+            "confidence": 0.82,
+            "strength": 0.7,
+            "reason": "isolation_guard",
+        },
+        cfg={
+            "exchange": "binance",
+            "account_id": "main",
+            "timeframe": "15m",
+            "strategy_name": "AI_AutonomousAgent",
+            "provider": "codex",
+            "model": "gpt-5.4",
+            "effective_min_confidence": 0.58,
+            "min_confidence": 0.58,
+            "same_direction_max_exposure_ratio": 0.5,
+            "max_total_exposure_ratio": 0.4,
+            "entry_size_scale": 1.0,
+            "default_stop_loss_pct": 0.02,
+            "default_take_profit_pct": 0.04,
+        },
+        context_payload={
+            "symbol": "BTC/USDT",
+            "price": 100.0,
+            "position": {},
+            "account_risk": {
+                "max_total_exposure_ratio": 0.4,
+                "total_exposure_limit_mode": "ratio",
+            },
+        },
+    )
+
+    assert signal is not None
+    assert signal.metadata["source"] == "ai_autonomous_agent"
+    assert signal.metadata["strategy_position_isolation"] is True
 
 
 def test_agent_symbol_scan_prefers_trade_ready_symbol(monkeypatch, tmp_path: Path):
@@ -3227,7 +3271,15 @@ def test_agent_symbol_scan_prioritizes_existing_positions(monkeypatch, tmp_path:
     monkeypatch.setattr(
         module.position_manager,
         "get_all_positions",
-        lambda: [SimpleNamespace(exchange="binance", account_id="main", quantity=1.0, symbol="BTC/USDT")],
+        lambda: [
+            SimpleNamespace(
+                exchange="binance",
+                account_id="main",
+                quantity=1.0,
+                symbol="BTC/USDT",
+                strategy="AI_AutonomousAgent",
+            )
+        ],
     )
     monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
 
