@@ -31,6 +31,7 @@ from core.trading import execution_engine, order_manager, position_manager
 from core.research.orchestrator import (
     cancel_proposal_job,
     create_manual_proposal,
+    delete_orphan_candidate,
     delete_proposal,
     ensure_ai_research_runtime_state,
     generate_planned_proposal,
@@ -3411,6 +3412,17 @@ async def get_ai_candidate_endpoint(request: Request, candidate_id: str):
     ensure_ai_research_runtime_state(request.app)
     row = get_candidate(request.app, candidate_id)
     return {"candidate": row.model_dump(mode="json")}
+
+
+@router.delete("/candidates/{candidate_id}")
+async def delete_ai_candidate_endpoint(request: Request, candidate_id: str):
+    ensure_ai_research_runtime_state(request.app)
+    result = delete_orphan_candidate(
+        request.app,
+        candidate_id=candidate_id,
+        actor="web_ui",
+    )
+    return result
 
 
 @router.get("/candidates/{candidate_id}/lifecycle")

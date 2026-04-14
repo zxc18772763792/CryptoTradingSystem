@@ -10010,7 +10010,10 @@ input[type="radio"] {
 
 #ai-research .ai-research-command-stack {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1.38fr) minmax(340px, 0.92fr);
+    grid-template-areas:
+        "focus signal"
+        "focus live";
     gap: 16px;
     align-items: stretch;
 }
@@ -10030,20 +10033,22 @@ input[type="radio"] {
 }
 
 #ai-research .ai-focus-card-primary {
-    grid-column: 1 / -1;
+    grid-area: focus;
+    align-self: stretch;
     background:
         radial-gradient(circle at top right, rgba(255, 191, 94, 0.14), transparent 30%),
         linear-gradient(180deg, rgba(31, 27, 18, 0.98), rgba(12, 18, 29, 0.99));
 }
 
 #ai-research .ai-signal-card {
+    grid-area: signal;
     background:
         radial-gradient(circle at top right, rgba(45, 212, 191, 0.14), transparent 32%),
         linear-gradient(180deg, rgba(14, 27, 43, 0.98), rgba(9, 17, 29, 0.99));
 }
 
 #ai-research .ai-research-live-signals-card {
-    grid-column: auto;
+    grid-area: live;
     background:
         radial-gradient(circle at top right, rgba(123, 195, 255, 0.14), transparent 32%),
         linear-gradient(180deg, rgba(13, 24, 40, 0.98), rgba(8, 16, 28, 0.99));
@@ -10169,6 +10174,15 @@ input[type="radio"] {
     margin-bottom: 10px;
 }
 
+#ai-research .ai-sidebar-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-left: auto;
+}
+
 #ai-research .ai-sidebar-kicker {
     font-size: 11px;
     font-weight: 700;
@@ -10187,6 +10201,10 @@ input[type="radio"] {
     color: #ffd17f;
     border-color: rgba(245, 159, 58, 0.22);
     background: rgba(44, 28, 12, 0.84);
+}
+
+#ai-research .ai-queue-clear-btn {
+    white-space: nowrap;
 }
 
 #ai-research .ai-sidebar-caption {
@@ -10457,11 +10475,7 @@ input[type="radio"] {
     }
 
     #ai-research .ai-research-command-stack {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    #ai-research .ai-focus-card-primary {
-        grid-column: 1 / -1;
+        grid-template-columns: minmax(0, 1.22fr) minmax(320px, 0.92fr);
     }
 
     #ai-research .ai-research-stage-strip,
@@ -10482,8 +10496,11 @@ input[type="radio"] {
         grid-template-columns: 1fr;
     }
 
-    #ai-research .ai-focus-card-primary {
-        grid-column: auto;
+    #ai-research .ai-research-command-stack {
+        grid-template-areas:
+            "focus"
+            "signal"
+            "live";
     }
 
     #ai-research .ai-top-intro-mini-grid-wide,
@@ -10525,6 +10542,12 @@ input[type="radio"] {
     #ai-research .ai-sidebar-header {
         flex-direction: column;
         align-items: flex-start;
+    }
+
+    #ai-research .ai-sidebar-actions {
+        width: 100%;
+        justify-content: flex-start;
+        margin-left: 0;
     }
 
     #ai-research .ai-research-stage-strip,

@@ -22,6 +22,7 @@
   const AGENT_LIVE_SIGNALS_TIMEOUT_MS = 90000;
   const DEFAULT_ACTION_LOCKS = Object.freeze({ generate: false, run: false, oneclick: false, clear: false });
   const DELETE_BLOCKED_PROPOSAL_STATUSES = new Set(['paper_running', 'shadow_running', 'live_running']);
+  const DELETE_BLOCKED_CANDIDATE_STATUSES = new Set(['paper_running', 'shadow_running', 'live_running']);
 
   /* 策略类别与颜色 */
   const STRATEGY_CATEGORIES = {
@@ -2453,6 +2454,59 @@
     return state.candidates.find((item) => String(item?.candidate_id || '').trim() === target) || null;
   }
 
+  function fallbackCandidateIdForProposal(item) {
+    return String(item?.metadata?.fallback_candidate_id || '').trim();
+  }
+
+  function getVisibleProposalQueueItems() {
+    return sortProposalsForWorkbench(state.proposals, state.selectedProposalId);
+  }
+
+  function getVisibleProposalQueueTargets(visibleProposals = getVisibleProposalQueueItems()) {
+    const clearableProposalIds = [];
+    const clearableCandidateIds = [];
+    const skippedBlocked = [];
+    const skippedMissing = [];
+    const seenProposalIds = new Set();
+    const seenCandidateIds = new Set();
+
+    toArray(visibleProposals).forEach((item) => {
+      const proposalId = String(item?.proposal_id || '').trim();
+      if (!proposalId || seenProposalIds.has(proposalId)) return;
+      seenProposalIds.add(proposalId);
+
+      if (isVirtualProposal(item)) {
+        const candidateId = fallbackCandidateIdForProposal(item);
+        if (!candidateId || seenCandidateIds.has(candidateId)) {
+          if (!candidateId) skippedMissing.push({ type: 'candidate', proposalId });
+          return;
+        }
+        seenCandidateIds.add(candidateId);
+        const candidate = findCandidateById(candidateId);
+        if (!candidate) {
+          skippedMissing.push({ type: 'candidate', proposalId, candidateId });
+          return;
+        }
+        const status = String(candidate?.status || '').trim();
+        if (DELETE_BLOCKED_CANDIDATE_STATUSES.has(status)) {
+          skippedBlocked.push({ type: 'candidate', candidateId, status });
+          return;
+        }
+        clearableCandidateIds.push(candidateId);
+        return;
+      }
+
+      const status = String(item?.status || '').trim();
+      if (DELETE_BLOCKED_PROPOSAL_STATUSES.has(status)) {
+        skippedBlocked.push({ type: 'proposal', proposalId, status });
+        return;
+      }
+      clearableProposalIds.push(proposalId);
+    });
+
+    return { clearableProposalIds, clearableCandidateIds, skippedBlocked, skippedMissing };
+  }
+
   function proposalIdForCandidate(candidateId) {
     return String(findCandidateById(candidateId)?.proposal_id || '').trim();
   }
@@ -2580,8 +2634,8 @@
     const badge = document.getElementById('ai-queue-badge');
     const titleEl = document.getElementById('ai-queue-title');
     const hintEl = document.getElementById('ai-queue-hint');
+    const visibleProposals = getVisibleProposalQueueItems();
     if (!box) return;
-    const visibleProposals = sortProposalsForWorkbench(state.proposals, state.selectedProposalId);
     const realCount = visibleProposals.filter((item) => !isVirtualProposal(item)).length;
     const virtualCount = visibleProposals.filter((item) => isVirtualProposal(item)).length;
     if (badge) {
@@ -2600,6 +2654,7 @@
       }
     }
     if (!visibleProposals.length) {
+      updateClearQueueButton([]);
       box.innerHTML = '<div style="color:#6b7fa0;font-size:12px;padding:8px 0;">暂无研究任务</div>';
       normalizeDomText(box);
       emitWorkbenchState('proposal-list');
@@ -2648,8 +2703,45 @@
         </div>
       </div>`;
     }).join('');
+    updateClearQueueButton(visibleProposals);
     normalizeDomText(box);
     emitWorkbenchState('proposal-list');
+  }
+
+  function updateClearQueueButton(visibleProposals = getVisibleProposalQueueItems()) {
+    const btn = document.getElementById('ai-clear-queue-btn');
+    if (!btn) return;
+
+    const visibleCount = toArray(visibleProposals).length;
+    const { clearableProposalIds, clearableCandidateIds, skippedBlocked, skippedMissing } = getVisibleProposalQueueTargets(visibleProposals);
+    const clearableCount = clearableProposalIds.length + clearableCandidateIds.length;
+    const busy = hasActionLock();
+
+    btn.textContent = visibleCount ? `一键清空当前任务 (${visibleCount})` : '一键清空当前任务';
+    btn.disabled = !visibleCount || busy || !clearableCount;
+
+    if (!visibleCount) {
+      btn.title = '当前没有可清空的研究任务';
+      return;
+    }
+    if (busy) {
+      btn.title = '当前有任务执行中，请等待当前流程完成后再清空任务队列';
+      return;
+    }
+    if (!clearableCount) {
+      const reasons = [];
+      if (skippedBlocked.length) reasons.push(`运行中条目 ${skippedBlocked.length} 个`);
+      if (skippedMissing.length) reasons.push(`无效回填 ${skippedMissing.length} 个`);
+      btn.title = reasons.length ? `当前可见任务暂不可清空：${reasons.join('，')}` : '当前没有可清空的研究任务';
+      return;
+    }
+
+    const hints = [];
+    if (clearableProposalIds.length) hints.push(`将删除 ${clearableProposalIds.length} 个研究任务`);
+    if (clearableCandidateIds.length) hints.push(`将清理 ${clearableCandidateIds.length} 个候选回填`);
+    if (skippedBlocked.length) hints.push(`跳过 ${skippedBlocked.length} 个运行中条目`);
+    if (skippedMissing.length) hints.push(`忽略 ${skippedMissing.length} 个无效回填`);
+    btn.title = hints.join('；');
   }
 
   function renderCandidateCards() {
@@ -4307,6 +4399,7 @@
         : FLOW_HINT_QUICK_PATH;
     }
     updateRunBtn();
+    updateClearQueueButton();
     updateClearCandidatesButton();
     emitWorkbenchState('action-locks');
   }
@@ -4935,6 +5028,99 @@
     await refreshWorkbench('', '');
   }
 
+  async function clearVisibleProposalQueue() {
+    const visibleProposals = getVisibleProposalQueueItems();
+    if (!visibleProposals.length) {
+      updateClearQueueButton([]);
+      notify('当前没有可清空的研究任务', true);
+      return;
+    }
+
+    const { clearableProposalIds, clearableCandidateIds, skippedBlocked, skippedMissing } = getVisibleProposalQueueTargets(visibleProposals);
+    if (!clearableProposalIds.length && !clearableCandidateIds.length) {
+      const reasons = [];
+      if (skippedBlocked.length) reasons.push(`运行中条目 ${skippedBlocked.length} 个`);
+      if (skippedMissing.length) reasons.push(`无效回填 ${skippedMissing.length} 个`);
+      notify(reasons.length ? `当前可见任务暂不可清空：${reasons.join('，')}` : '当前没有可清空的研究任务', true);
+      updateClearQueueButton(visibleProposals);
+      return;
+    }
+
+    const clearableProposalSet = new Set(clearableProposalIds);
+    const clearableCandidateSet = new Set(clearableCandidateIds);
+    const clearableVisibleCount = visibleProposals.filter((item) => {
+      if (isVirtualProposal(item)) return clearableCandidateSet.has(fallbackCandidateIdForProposal(item));
+      return clearableProposalSet.has(String(item?.proposal_id || '').trim());
+    }).length;
+
+    const confirmLines = [
+      `确认清空当前可见的 ${visibleProposals.length} 个任务条目吗？`,
+      `将移除 ${clearableVisibleCount} 个当前条目。`,
+    ];
+    if (clearableProposalIds.length) confirmLines.push(`其中删除研究任务 ${clearableProposalIds.length} 个（会级联清理候选记录）`);
+    if (clearableCandidateIds.length) confirmLines.push(`清理候选回填 ${clearableCandidateIds.length} 个`);
+    if (skippedBlocked.length) confirmLines.push(`运行中条目将跳过：${skippedBlocked.length} 个`);
+    if (skippedMissing.length) confirmLines.push(`无效回填将忽略：${skippedMissing.length} 个`);
+    if (!window.confirm(confirmLines.join('\n'))) return;
+
+    await withActionLock('clear', async () => {
+      const deletedProposalIds = new Set();
+      const deletedCandidateIds = new Set();
+      const failures = [];
+
+      for (const proposalId of clearableProposalIds) {
+        try {
+          await aiApi(`/proposals/${encodeURIComponent(proposalId)}`, { method: 'DELETE', timeoutMs: 20000 });
+          deletedProposalIds.add(proposalId);
+        } catch (err) {
+          failures.push({
+            type: 'proposal',
+            id: proposalId,
+            message: String(err?.message || '删除失败'),
+          });
+        }
+      }
+
+      for (const candidateId of clearableCandidateIds) {
+        try {
+          await aiApi(`/candidates/${encodeURIComponent(candidateId)}`, { method: 'DELETE', timeoutMs: 20000 });
+          deletedCandidateIds.add(candidateId);
+        } catch (err) {
+          failures.push({
+            type: 'candidate',
+            id: candidateId,
+            message: String(err?.message || '清理失败'),
+          });
+        }
+      }
+
+      const selectedProposal = findProposalById(state.selectedProposalId);
+      if (deletedProposalIds.has(String(state.selectedProposalId || '').trim())) {
+        state.selectedProposalId = '';
+      } else if (selectedProposal && isVirtualProposal(selectedProposal) && deletedCandidateIds.has(fallbackCandidateIdForProposal(selectedProposal))) {
+        state.selectedProposalId = '';
+      }
+
+      if (deletedCandidateIds.has(String(state.selectedCandidateId || '').trim())) {
+        state.selectedCandidateId = '';
+      } else if (deletedProposalIds.has(proposalIdForCandidate(state.selectedCandidateId))) {
+        state.selectedCandidateId = '';
+      }
+
+      await refreshWorkbench('', '');
+
+      const summary = [];
+      if (clearableVisibleCount) summary.push(`已清空 ${clearableVisibleCount} 个当前任务条目`);
+      if (deletedProposalIds.size) summary.push(`删除了 ${deletedProposalIds.size} 个研究任务`);
+      if (deletedCandidateIds.size) summary.push(`清理了 ${deletedCandidateIds.size} 个候选回填`);
+      if (skippedBlocked.length) summary.push(`跳过 ${skippedBlocked.length} 个运行中条目`);
+      if (skippedMissing.length) summary.push(`忽略 ${skippedMissing.length} 个无效回填`);
+      if (failures.length) summary.push(`失败 ${failures.length} 个`);
+      notify(summary.join('，') || '任务队列已清空', failures.length > 0);
+      if (failures.length) console.warn('clearVisibleProposalQueue failures:', failures);
+    });
+  }
+
   async function clearVisibleCandidates() {
     const visibleCandidates = getVisibleCandidates();
     if (!visibleCandidates.length) {
@@ -5016,6 +5202,8 @@
       ensureAutoPlannerGoal({ forceRefresh: true }).catch(err => notify(`自动生成研究目标失败: ${err.message}`, true)));
     document.getElementById('ai-context-btn')?.addEventListener('click', () =>
       generateAIContext().catch(err => notify(`生成研究思路失败: ${err.message}`, true)));
+    document.getElementById('ai-clear-queue-btn')?.addEventListener('click', () =>
+      clearVisibleProposalQueue().catch(err => notify(`清空任务失败: ${err.message}`, true)));
     document.getElementById('ai-clear-candidates-btn')?.addEventListener('click', () =>
       clearVisibleCandidates().catch(err => notify(`清空候选失败: ${err.message}`, true)));
 

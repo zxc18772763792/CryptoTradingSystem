@@ -34,6 +34,7 @@ def test_ai_research_template_loads_phase5_modules():
     assert 'id="ai-oneclick-feedback"' in template
     assert 'id="ai-candidate-cards"' in template
     assert 'id="ai-clear-candidates-btn"' in template
+    assert 'id="ai-clear-queue-btn"' in template
     assert 'id="ai-queue-title"' in template
     assert 'id="ai-queue-hint"' in template
     assert '研究目标（可留空自动生成）' in template
@@ -94,8 +95,12 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "renderOneClickFeedback" in ai_js
     assert "function getVisibleCandidates()" in ai_js
     assert "function getVisibleCandidateProposalTargets(" in ai_js
+    assert "function getVisibleProposalQueueItems()" in ai_js
+    assert "function getVisibleProposalQueueTargets(" in ai_js
     assert "function clearVisibleCandidates()" in ai_js
+    assert "function clearVisibleProposalQueue()" in ai_js
     assert "function updateClearCandidatesButton(" in ai_js
+    assert "function updateClearQueueButton(" in ai_js
     assert "function proposalResearchThesis(" in ai_js
     assert "function normalizeProposalPresentation(" in ai_js
     assert "parseAllocationPercentInput" in ai_js
@@ -111,7 +116,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "该条目由候选结果回填" in ai_js
     assert "fallback_candidate_created_at" in ai_js
     assert "fallback_candidate_updated_at" in ai_js
-    assert "const visibleProposals = sortProposalsForWorkbench(state.proposals, state.selectedProposalId);" in ai_js
+    assert "const visibleProposals = getVisibleProposalQueueItems();" in ai_js
     assert "toArray(res?.items).map((item, index) => normalizeProposalPresentation(item, index))" in ai_js
     assert "Asia/Shanghai" in ai_js
     assert "Asia/Shanghai" in agent_js
@@ -126,6 +131,9 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "provider_fallback" in ai_js
     assert 'option value="codex">OpenAI' in template
     assert "一键清空当前候选" in template
+    assert "一键清空当前任务" in template
+    assert ".ai-sidebar-actions" in style_css
+    assert ".ai-queue-clear-btn" in style_css
     assert ".ai-flow-console" in style_css
     assert ".ai-chain-summary-grid" in style_css
     assert ".ai-flow-stage-grid" in style_css
@@ -138,8 +146,10 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert ".agent-journal-current" in style_css
     assert ".agent-journal-signal" in style_css
     assert "#ai-agent .ai-agent-cockpit-title" in style_css
-    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in style_css
-    assert "grid-column: 1 / -1;" in style_css
+    assert 'grid-template-areas:\n        "focus signal"\n        "focus live";' in style_css
+    assert "grid-area: focus;" in style_css
+    assert "grid-area: signal;" in style_css
+    assert "grid-area: live;" in style_css
     assert "white-space: nowrap;" in style_css
     assert "overflow-wrap: break-word;" in style_css
     assert "appearance: none" in style_css

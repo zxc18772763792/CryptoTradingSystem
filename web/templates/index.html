@@ -1895,7 +1895,17 @@
                                         <span id="ai-queue-title">研究任务</span>
                                     </div>
                                 </div>
-                                <span id="ai-queue-badge" class="ai-sidebar-badge ai-sidebar-badge-muted"></span>
+                                <div class="ai-sidebar-actions">
+                                    <button
+                                        class="btn btn-danger btn-sm ai-queue-clear-btn"
+                                        id="ai-clear-queue-btn"
+                                        type="button"
+                                        disabled
+                                        title="当前没有可清空的研究任务">
+                                        一键清空当前任务
+                                    </button>
+                                    <span id="ai-queue-badge" class="ai-sidebar-badge ai-sidebar-badge-muted"></span>
+                                </div>
                             </div>
                             <div id="ai-queue-hint" class="ai-sidebar-caption">这里负责切换当前提案。选中后去中栏执行第 3 步“运行研究”，再到右侧完成第 4 步“注册/部署”。</div>
                             <div id="ai-proposal-list" class="ai-proposal-compact-list">

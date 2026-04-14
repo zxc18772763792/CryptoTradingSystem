@@ -683,6 +683,44 @@ def delete_proposal(
     }
 
 
+def delete_orphan_candidate(
+    app: FastAPI,
+    *,
+    candidate_id: str,
+    actor: str,
+) -> Dict[str, Any]:
+    ensure_ai_research_runtime_state(app)
+    candidate = get_candidate(app, candidate_id)
+
+    blocked_states = {
+        "paper_running",
+        "shadow_running",
+        "live_running",
+    }
+    if str(candidate.status) in blocked_states:
+        raise HTTPException(status_code=409, detail=f"candidate in state {candidate.status}, cannot delete")
+
+    linked_proposal = app.state.ai_proposal_registry.get(str(candidate.proposal_id))
+    if linked_proposal is not None:
+        raise HTTPException(status_code=409, detail="candidate belongs to existing proposal, cannot delete individually")
+
+    removed_candidate = 1 if app.state.ai_candidate_registry.delete(candidate_id) else 0
+    lifecycle_removed = app.state.ai_lifecycle_registry.delete_for_object("candidate", candidate_id)
+
+    if removed_candidate > 0:
+        _refresh_runtime_eligibility_snapshot_safe(reason="delete_orphan_candidate")
+
+    return {
+        "candidate_id": str(candidate_id),
+        "deleted": bool(removed_candidate),
+        "deleted_counts": {
+            "candidate": removed_candidate,
+            "lifecycle_records": lifecycle_removed,
+        },
+        "actor": str(actor or "system"),
+    }
+
+
 def _build_experiment_spec(proposal: ResearchProposal, config: ResearchConfig, actor: str) -> ExperimentSpec:
     now = _now_utc()
     return ExperimentSpec(
