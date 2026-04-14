@@ -495,8 +495,11 @@
   function preferredFamiliesForPlanner(regime, directionBias = 'neutral') {
     if (regime === 'breakout') return ['突破', '趋势跟随', '动量'];
     if (regime === 'news_event') return ['事件驱动', '突破', '轻仓趋势跟随'];
-    if (regime === 'trend_up' || directionBias === 'bullish') return ['趋势跟随', '动量突破', '低杠杆顺势'];
-    if (regime === 'trend_down' || directionBias === 'bearish') return ['防守型均值回归', '反弹做空', '事件驱动快进快出'];
+    if (regime === 'trend_up' || regime === 'trend_bullish' || directionBias === 'bullish') return ['趋势跟随', '动量突破', '低杠杆顺势'];
+    if (regime === 'trend_down' || regime === 'trend_bearish' || directionBias === 'bearish') return ['防守型均值回归', '反弹做空', '事件驱动快进快出'];
+    if (regime === 'high_risk_chop') return ['均值回归', '轻仓观察', '防守型套利'];
+    if (regime === 'low_info_range') return ['均值回归', '震荡反转', '轻仓套利'];
+    if (regime === 'event_driven_mixed') return ['事件驱动', '突破', '轻仓趋势跟随'];
     if (regime === 'mean_reversion') return ['均值回归', '震荡反转', '轻仓套利'];
     return ['均值回归', '轻仓观察', '多策略对比'];
   }
@@ -5115,7 +5118,6 @@
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
-    window.addEventListener('load', init);
   } else {
     init();
   }

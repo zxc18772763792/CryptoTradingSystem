@@ -9878,23 +9878,36 @@ input[type="radio"] {
 
 #ai-research .ai-research-overview-grid {
     display: grid;
-    grid-template-columns: minmax(0, 1.42fr) minmax(320px, 0.88fr);
-    gap: 18px;
+    grid-template-columns: 1fr;
+    gap: 16px;
     align-items: start;
 }
 
 #ai-research .ai-research-hero-card {
     min-height: 0;
     display: grid;
-    gap: 12px;
+    gap: 16px;
     align-content: start;
-    padding: 20px 20px 18px !important;
+    padding: 24px 24px 22px !important;
     border-radius: 24px;
     border: 1px solid rgba(114, 184, 255, 0.18);
     background:
         radial-gradient(circle at top left, rgba(114, 184, 255, 0.16), transparent 34%),
         linear-gradient(180deg, rgba(18, 31, 49, 0.98), rgba(9, 17, 29, 0.99));
     box-shadow: 0 20px 40px rgba(4, 10, 18, 0.22);
+}
+
+#ai-research .ai-research-hero-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.28fr) minmax(360px, 0.92fr);
+    gap: 18px;
+    align-items: start;
+}
+
+#ai-research .ai-research-hero-copy {
+    display: grid;
+    gap: 14px;
+    min-width: 0;
 }
 
 #ai-research .ai-research-hero-head {
@@ -9962,22 +9975,22 @@ input[type="radio"] {
 
 #ai-research .ai-top-intro-card-research .ai-top-intro-stack {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    min-width: 0;
 }
 
 #ai-research .ai-top-intro-mini-grid-wide {
-    grid-column: 1 / -1;
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 10px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
 }
 
 #ai-research .ai-top-intro-box,
 #ai-research .ai-top-intro-mini {
     min-width: 0;
     min-height: 0;
-    padding: 11px 13px;
+    padding: 12px 14px;
     border-radius: 16px;
     border: 1px solid rgba(114, 184, 255, 0.12);
     background: rgba(10, 21, 35, 0.68);
@@ -9995,14 +10008,15 @@ input[type="radio"] {
 
 #ai-research .ai-research-command-stack {
     display: grid;
-    gap: 12px;
-    align-content: start;
+    grid-template-columns: minmax(0, 1.2fr) minmax(340px, 0.88fr);
+    gap: 16px;
+    align-items: stretch;
 }
 
 #ai-research .ai-research-pulse-grid {
     display: grid;
-    grid-template-columns: 1fr;
-    gap: 12px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
     align-items: stretch;
 }
 
@@ -10082,26 +10096,25 @@ input[type="radio"] {
 }
 
 #ai-research .ai-flow-stage-grid {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
     gap: 12px;
 }
 
 #ai-research .ai-flow-stage {
-    min-height: 176px;
+    min-height: 160px;
     border-radius: 18px;
 }
 
 #ai-research .ai-hub-layout {
     display: grid;
-    grid-template-columns: minmax(300px, 340px) minmax(0, 1.22fr) minmax(320px, 0.92fr);
-    gap: 20px;
+    grid-template-columns: minmax(300px, 332px) minmax(0, 1fr);
+    gap: 18px 20px;
     height: auto;
     min-height: 0;
     align-items: start;
 }
 
-#ai-research .ai-hub-sidebar,
-#ai-research .ai-hub-detail {
+#ai-research .ai-hub-sidebar {
     position: sticky;
     top: 14px;
     align-self: start;
@@ -10112,8 +10125,7 @@ input[type="radio"] {
 }
 
 @supports not (height: 100dvh) {
-    #ai-research .ai-hub-sidebar,
-    #ai-research .ai-hub-detail {
+    #ai-research .ai-hub-sidebar {
         max-height: calc(100vh - 44px);
     }
 }
@@ -10122,6 +10134,7 @@ input[type="radio"] {
     display: grid;
     gap: 16px;
     min-width: 0;
+    grid-column: 2;
 }
 
 #ai-research .ai-sidebar-card,
@@ -10269,8 +10282,8 @@ input[type="radio"] {
 
 #ai-research .ai-candidate-cards {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 16px;
     align-content: start;
     overflow: visible;
     padding-right: 0;
@@ -10279,6 +10292,11 @@ input[type="radio"] {
 #ai-research .ai-hub-detail {
     display: grid;
     gap: 12px;
+    position: static;
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
+    grid-column: 2;
     background:
         radial-gradient(circle at top right, rgba(32, 191, 120, 0.1), transparent 30%),
         linear-gradient(180deg, rgba(14, 24, 39, 0.98), rgba(8, 16, 27, 0.99));
@@ -10418,21 +10436,19 @@ input[type="radio"] {
 }
 
 @media (max-width: 1500px) {
+    #ai-research .ai-research-hero-layout,
+    #ai-research .ai-research-command-stack,
+    #ai-research .ai-research-pulse-grid {
+        grid-template-columns: 1fr;
+    }
+
     #ai-research .ai-research-stage-strip,
     #ai-research .ai-flow-stage-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
     #ai-research .ai-hub-layout {
-        grid-template-columns: minmax(290px, 320px) minmax(0, 1fr);
-    }
-
-    #ai-research .ai-hub-detail {
-        position: static;
-        max-height: none;
-        overflow: visible;
-        padding-right: 0;
-        grid-column: 2;
+        grid-template-columns: minmax(280px, 312px) minmax(0, 1fr);
     }
 }
 
@@ -10456,6 +10472,7 @@ input[type="radio"] {
         padding-right: 0;
     }
 
+    #ai-research .ai-hub-main,
     #ai-research .ai-hub-detail {
         grid-column: auto;
     }
@@ -10482,7 +10499,8 @@ input[type="radio"] {
     #ai-research .ai-research-stage-strip,
     #ai-research .ai-top-intro-mini-grid-wide,
     #ai-research .ai-review-scope,
-    #ai-research .ai-candidate-cards {
+    #ai-research .ai-candidate-cards,
+    #ai-research .ai-focus-summary {
         grid-template-columns: 1fr;
     }
 

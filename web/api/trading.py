@@ -87,6 +87,7 @@ _ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC = 3.6
 _ANALYTICS_FUNDING_TIMEOUT_SEC = 1.8
 _ANALYTICS_BASIS_TIMEOUT_SEC = 2.2
 _ANALYTICS_OI_TIMEOUT_SEC = 3.2
+_ANALYTICS_LONG_SHORT_TIMEOUT_SEC = 3.2
 _ANALYTICS_OPTIONS_TIMEOUT_SEC = 1.8
 _ANALYTICS_WHALE_TIMEOUT_SEC = 6.0
 _ANALYTICS_WHALE_MIN_BTC = 10.0
@@ -606,6 +607,125 @@ async def _fetch_open_interest_snapshot(exchange: str, symbol: str) -> Dict[str,
     return payload
 
 
+def _normalize_long_short_ratio_payload(
+    *,
+    symbol: str,
+    source: str,
+    error: Optional[str] = None,
+    long_ratio: Optional[float] = None,
+    short_ratio: Optional[float] = None,
+    long_short_ratio: Optional[float] = None,
+    sample_size: int = 0,
+    timestamp: Optional[str] = None,
+) -> Dict[str, Any]:
+    lr = _safe_float(long_ratio) if long_ratio is not None else 0.0
+    sr = _safe_float(short_ratio) if short_ratio is not None else 0.0
+    ratio = _safe_float(long_short_ratio) if long_short_ratio is not None else 0.0
+
+    if ratio <= 0 and lr > 0 and sr > 0:
+        ratio = lr / max(sr, 1e-9)
+    if ratio > 0 and lr <= 0 and sr <= 0:
+        lr = ratio / (1.0 + ratio)
+        sr = 1.0 - lr
+
+    available = bool(ratio > 0 or lr > 0 or sr > 0)
+    if not available:
+        lr = 0.0
+        sr = 0.0
+        ratio = 0.0
+
+    return {
+        "available": available,
+        "source": source,
+        "error": str(error or "") or None,
+        "symbol": symbol,
+        "long_ratio": round(lr, 6),
+        "short_ratio": round(sr, 6),
+        "long_short_ratio": round(ratio, 6),
+        "sample_size": int(max(0, sample_size)),
+        "timestamp": timestamp,
+    }
+
+
+async def _fetch_binance_public_long_short_ratio(symbol: str) -> Dict[str, Any]:
+    rest_symbol = _binance_rest_symbol(symbol)
+    try:
+        rows = await _fetch_binance_public_json(
+            "/futures/data/globalLongShortAccountRatio",
+            params={"symbol": rest_symbol, "period": "5m", "limit": 12},
+            timeout_sec=_ANALYTICS_LONG_SHORT_TIMEOUT_SEC,
+            futures=True,
+        )
+    except Exception as exc:
+        return _normalize_long_short_ratio_payload(
+            symbol=symbol,
+            source="binance_public",
+            error=str(exc),
+        )
+
+    items = [dict(row) for row in list(rows or []) if isinstance(row, dict)]
+    items.sort(key=lambda row: _safe_float(row.get("timestamp") or row.get("time") or 0))
+    latest = dict(items[-1] if items else {})
+    ts = _safe_dt(latest.get("timestamp") or latest.get("time"))
+
+    return _normalize_long_short_ratio_payload(
+        symbol=symbol,
+        source="binance_public",
+        long_ratio=latest.get("longAccount") or latest.get("longPosition"),
+        short_ratio=latest.get("shortAccount") or latest.get("shortPosition"),
+        long_short_ratio=latest.get("longShortRatio"),
+        sample_size=len(items),
+        timestamp=ts.isoformat() if ts else None,
+    )
+
+
+async def _fetch_gate_public_long_short_ratio(symbol: str) -> Dict[str, Any]:
+    contract = _gate_futures_contract_symbol(symbol)
+    try:
+        payload = await _fetch_gate_public_json(
+            f"/futures/usdt/contracts/{contract}",
+            timeout_sec=_ANALYTICS_LONG_SHORT_TIMEOUT_SEC,
+        )
+    except Exception as exc:
+        return _normalize_long_short_ratio_payload(
+            symbol=symbol,
+            source="gate_public",
+            error=str(exc),
+        )
+
+    row = dict(payload or {})
+    ts = _safe_dt(
+        row.get("funding_next_apply")
+        or row.get("next_funding_time")
+        or row.get("funding_next_apply_time")
+        or datetime.now(timezone.utc).isoformat()
+    )
+    return _normalize_long_short_ratio_payload(
+        symbol=symbol,
+        source="gate_public",
+        long_ratio=row.get("long_users") or row.get("long_user"),
+        short_ratio=row.get("short_users") or row.get("short_user"),
+        long_short_ratio=row.get("long_short_ratio") or row.get("ls_ratio"),
+        sample_size=1,
+        timestamp=ts.isoformat() if ts else None,
+    )
+
+
+async def _fetch_long_short_ratio_snapshot(exchange: str, symbol: str) -> Dict[str, Any]:
+    normalized = str(exchange or "").lower()
+    if normalized == "binance":
+        return await _fetch_binance_public_long_short_ratio(symbol=symbol)
+    if normalized == "gate":
+        gate_payload = await _fetch_gate_public_long_short_ratio(symbol=symbol)
+        if bool((gate_payload or {}).get("available")):
+            return gate_payload
+
+    fallback = await _fetch_binance_public_long_short_ratio(symbol=symbol)
+    fallback = dict(fallback or {})
+    fallback["source"] = "binance_public_fallback"
+    return fallback
+
+
 async def _fetch_funding_basis_snapshot(exchange: str, symbol: str) -> Dict[str, Dict[str, Any]]:
     funding = {"available": False}
     basis = {"available": False}
@@ -907,6 +1027,7 @@ def _compact_microstructure_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "large_orders": list(payload.get("large_orders") or [])[:10],
         "iceberg_detection": payload.get("iceberg_detection") or {},
         "aggressor_flow": payload.get("aggressor_flow") or {},
+        "long_short_ratio": payload.get("long_short_ratio") or {},
         "funding_rate": payload.get("funding_rate") or {},
         "spot_futures_basis": payload.get("spot_futures_basis") or {},
     }
@@ -1538,6 +1659,7 @@ def _analytics_fallback_microstructure(exchange: str, symbol: str, error: str) -
         "aggressor_flow": {"imbalance": 0.0, "buy_volume": 0.0, "sell_volume": 0.0},
         "large_orders": [],
         "iceberg_detection": {"candidate_count": 0},
+        "long_short_ratio": {"available": False},
         "funding_rate": {"available": False},
         "spot_futures_basis": {"available": False},
     }
@@ -4354,6 +4476,7 @@ async def get_market_microstructure(
             return copy.deepcopy(payload)
 
     funding_basis_task = asyncio.create_task(_fetch_funding_basis_snapshot(exchange=exchange, symbol=symbol))
+    long_short_task = asyncio.create_task(_fetch_long_short_ratio_snapshot(exchange=exchange, symbol=symbol))
     options_task = asyncio.create_task(_fetch_options_snapshot(symbol=symbol))
 
     ob, flow, oi = await asyncio.gather(
@@ -4363,6 +4486,7 @@ async def get_market_microstructure(
     )
 
     funding_basis = await funding_basis_task
+    long_short_ratio = await long_short_task
     funding = dict((funding_basis or {}).get("funding") or {"available": False})
     basis = dict((funding_basis or {}).get("basis") or {"available": False})
     options_data = await options_task
@@ -4453,6 +4577,17 @@ async def get_market_microstructure(
             "buy_volume": _safe_float(flow.get("buy_volume")),
             "sell_volume": _safe_float(flow.get("sell_volume")),
             "imbalance": _safe_float(flow.get("imbalance")),
+        },
+        "long_short_ratio": {
+            "available": bool(long_short_ratio.get("available", False)),
+            "source": long_short_ratio.get("source"),
+            "error": long_short_ratio.get("error"),
+            "symbol": long_short_ratio.get("symbol"),
+            "long_ratio": _safe_float(long_short_ratio.get("long_ratio")),
+            "short_ratio": _safe_float(long_short_ratio.get("short_ratio")),
+            "long_short_ratio": _safe_float(long_short_ratio.get("long_short_ratio")),
+            "sample_size": int(_safe_float(long_short_ratio.get("sample_size"))),
+            "timestamp": long_short_ratio.get("timestamp"),
         },
         "oi": {
             "available": bool(oi.get("available", False)),

@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import math
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from zoneinfo import ZoneInfo
 
@@ -4321,131 +4323,750 @@ async def generate_order_preview(request: Request, candidate_id: str):
     }
 
 
-# ── Premium Data Status ────────────────────────────────────────────────────────
+# ── Source Health / Premium Data Status ──────────────────────────────────────
+
+def _source_cache_mtime(cache_dir: str, name: str) -> Optional[str]:
+    path = Path(cache_dir) / f"{name}.parquet"
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+def _source_latest_cache_mtime(cache_dir: str, names: List[str]) -> Optional[str]:
+    latest: Optional[float] = None
+    for name in names:
+        path = Path(cache_dir) / f"{name}.parquet"
+        try:
+            mtime = path.stat().st_mtime
+        except Exception:
+            continue
+        if latest is None or mtime > latest:
+            latest = mtime
+    if latest is None:
+        return None
+    return datetime.fromtimestamp(latest, tz=timezone.utc).isoformat()
+
+
+def _parse_timestamp_to_utc(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed
+
+
+def _age_seconds(value: Any) -> Optional[float]:
+    parsed = _parse_timestamp_to_utc(value)
+    if parsed is None:
+        return None
+    return round(max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds()), 3)
+
+
+def _dedupe_text_items(values: List[Any]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for raw in values or []:
+        text = str(raw or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _build_source_entry(
+    *,
+    label: str,
+    available: bool,
+    configured: Optional[bool] = None,
+    key_configured: Optional[bool] = None,
+    has_cached_data: bool = False,
+    ready: Optional[bool] = None,
+    last_updated: Optional[str] = None,
+    max_age_sec: Optional[float] = None,
+    support_level: str = "optional",
+    issues: Optional[List[Any]] = None,
+    recommendation: str = "",
+    snapshot: Optional[Dict[str, Any]] = None,
+    error: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    age_sec = _age_seconds(last_updated)
+    stale = bool(age_sec is not None and max_age_sec is not None and age_sec > max_age_sec)
+    issue_list = _dedupe_text_items([*(issues or []), *(["cache/state freshness threshold exceeded"] if stale else []), error])
+    configured_value = bool(configured) if configured is not None else bool(available)
+
+    if ready is not None:
+        if stale:
+            health = "stale"
+        elif ready:
+            health = "healthy" if not issue_list else "degraded"
+        elif available or has_cached_data or configured_value:
+            health = "degraded"
+        else:
+            health = "missing"
+    else:
+        if stale:
+            health = "stale"
+        elif has_cached_data and not issue_list:
+            health = "healthy"
+        elif available or configured_value:
+            health = "degraded" if issue_list or not has_cached_data else "healthy"
+        else:
+            health = "missing"
+
+    payload = {
+        "label": label,
+        "available": bool(available),
+        "configured": configured_value,
+        "has_cached_data": bool(has_cached_data),
+        "last_updated": last_updated,
+        "age_sec": age_sec,
+        "stale": stale,
+        "health": health,
+        "support_level": support_level,
+        "issues": issue_list,
+        "recommendation": str(recommendation or "").strip() or None,
+    }
+    if key_configured is not None:
+        payload["key_configured"] = bool(key_configured)
+    if snapshot is not None:
+        payload["snapshot"] = snapshot
+    if error:
+        payload["error"] = str(error)
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _configured_news_source_flags() -> Dict[str, bool]:
+    def _enabled(name: str, default: bool = True) -> bool:
+        raw = str(os.getenv(name, "1" if default else "0")).strip().lower()
+        return raw not in {"0", "false", "no", "off"}
+
+    newsapi_enabled = _enabled("NEWS_ENABLE_NEWSAPI", True) and bool(str(os.getenv("NEWSAPI_KEY") or "").strip())
+    cryptopanic_enabled = _enabled("NEWS_ENABLE_CRYPTOPANIC", True) and bool(
+        str(os.getenv("CRYPTOPANIC_TOKEN") or os.getenv("CRYPTOPANIC_API_KEY") or "").strip()
+    )
+    return {
+        "jin10": _enabled("NEWS_ENABLE_JIN10", True),
+        "rss": _enabled("NEWS_ENABLE_RSS", True),
+        "gdelt": _enabled("NEWS_ENABLE_GDELT", True),
+        "newsapi": newsapi_enabled,
+        "cryptopanic": cryptopanic_enabled,
+        "chaincatcher_flash": _enabled("NEWS_ENABLE_CHAINCATCHER_FLASH", True),
+        "okx_announcements": _enabled("NEWS_ENABLE_OKX_ANNOUNCEMENTS", True),
+        "bybit_announcements": _enabled("NEWS_ENABLE_BYBIT_ANNOUNCEMENTS", True),
+        "binance_announcements": _enabled("NEWS_ENABLE_BINANCE_ANNOUNCEMENTS", True),
+        "cryptocompare_news": _enabled("NEWS_ENABLE_CRYPTOCOMPARE_NEWS", True),
+    }
+
+
+def _news_source_catalog() -> Dict[str, Dict[str, Any]]:
+    return {
+        "jin10": {"label": "Jin10 Macro Flash", "support_level": "core", "requires_key": False, "source_type": "macro_flash"},
+        "rss": {"label": "RSS Aggregation", "support_level": "core", "requires_key": False, "source_type": "aggregated"},
+        "gdelt": {"label": "GDELT", "support_level": "core", "requires_key": False, "source_type": "global_news"},
+        "binance_announcements": {"label": "Binance Announcements", "support_level": "core", "requires_key": False, "source_type": "official_exchange"},
+        "okx_announcements": {"label": "OKX Announcements", "support_level": "core", "requires_key": False, "source_type": "official_exchange"},
+        "bybit_announcements": {"label": "Bybit Announcements", "support_level": "core", "requires_key": False, "source_type": "official_exchange"},
+        "chaincatcher_flash": {"label": "ChainCatcher Flash", "support_level": "enhancement", "requires_key": False, "source_type": "crypto_flash"},
+        "newsapi": {"label": "NewsAPI", "support_level": "enhancement", "requires_key": True, "source_type": "media_api"},
+        "cryptopanic": {"label": "CryptoPanic", "support_level": "enhancement", "requires_key": True, "source_type": "crypto_api"},
+        "cryptocompare_news": {"label": "CryptoCompare News", "support_level": "enhancement", "requires_key": False, "source_type": "crypto_api"},
+    }
+
+
+def _collect_source_entries(categories: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for category_name, category in (categories or {}).items():
+        sources = category.get("sources") or {}
+        for source_name, payload in sources.items():
+            item = dict(payload or {})
+            item["name"] = source_name
+            item["category"] = category_name
+            rows.append(item)
+    return rows
+
+
+def _build_source_health_summary(categories: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    rows = _collect_source_entries(categories)
+    health_counts = Counter(str(row.get("health") or "unknown") for row in rows)
+    core_rows = [row for row in rows if str(row.get("support_level") or "") == "core"]
+    core_blockers = [row for row in core_rows if str(row.get("health") or "") in {"missing", "stale"}]
+    core_degraded = [row for row in core_rows if str(row.get("health") or "") == "degraded"]
+    if core_blockers:
+        support_assessment = "insufficient"
+        headline = "美国/中国宏观研究主链路仍有缺口，当前支持度不足。"
+    elif core_degraded:
+        support_assessment = "partial"
+        headline = "核心研究链路基本可用，但仍有退化项需要补强。"
+    else:
+        support_assessment = "sufficient"
+        headline = "核心研究链路已足够支持美国与中国宏观研究，增强源仍可继续完善。"
+
+    recommendations = _dedupe_text_items(
+        [row.get("recommendation") for row in rows if str(row.get("health") or "") != "healthy"]
+    )[:8]
+    problematic_sources = [
+        f"{row.get('category')}:{row.get('name')}"
+        for row in rows
+        if str(row.get("health") or "") in {"missing", "stale", "degraded"}
+    ]
+    category_counts: Dict[str, Dict[str, int]] = {}
+    for category_name, category in (categories or {}).items():
+        source_rows = list((category.get("sources") or {}).values())
+        counts = Counter(str(row.get("health") or "unknown") for row in source_rows)
+        category_counts[category_name] = {
+            "total": len(source_rows),
+            "healthy": int(counts.get("healthy", 0)),
+            "degraded": int(counts.get("degraded", 0)),
+            "stale": int(counts.get("stale", 0)),
+            "missing": int(counts.get("missing", 0)),
+        }
+
+    return {
+        "support_assessment": support_assessment,
+        "headline": headline,
+        "total_sources": len(rows),
+        "healthy_count": int(health_counts.get("healthy", 0)),
+        "degraded_count": int(health_counts.get("degraded", 0)),
+        "stale_count": int(health_counts.get("stale", 0)),
+        "missing_count": int(health_counts.get("missing", 0)),
+        "core_sources": len(core_rows),
+        "core_healthy": len([row for row in core_rows if str(row.get("health") or "") == "healthy"]),
+        "core_ready": support_assessment == "sufficient",
+        "problematic_sources": problematic_sources[:12],
+        "recommendations": recommendations,
+        "by_category": category_counts,
+    }
+
+
+async def _build_sources_health_payload() -> Dict[str, Any]:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    categories: Dict[str, Dict[str, Any]] = {
+        "macro": {"label": "US + China Macro", "support_level": "core", "sources": {}},
+        "funding": {"label": "Funding Cache", "support_level": "core", "sources": {}},
+        "news": {"label": "News & Event Sources", "support_level": "core", "sources": {}},
+        "search_interest": {"label": "Search Interest", "support_level": "enhancement", "sources": {}},
+        "options": {"label": "Options Structure", "support_level": "enhancement", "sources": {}},
+        "premium_onchain": {"label": "Premium / On-chain", "support_level": "optional", "sources": {}},
+        "ai_sources": {"label": "AI Sources", "support_level": "core", "sources": {}},
+    }
+
+    try:
+        from core.data.macro_collector import group_macro_snapshot, load_macro_snapshot, _api_key as _fred_key  # noqa: PLC0415
+
+        snapshot = load_macro_snapshot()
+        grouped = group_macro_snapshot(snapshot)
+        has_data = any(value is not None for value in snapshot.values())
+        key_configured = bool(_fred_key())
+        active_series = [name for name, value in snapshot.items() if value is not None]
+        issues: List[str] = []
+        if not any(snapshot.get(key) is not None for key in ("fed_rate", "cpi_yoy", "ppi_yoy")):
+            issues.append("US macro series missing")
+        if snapshot.get("ppi_cpi_gap") is None:
+            issues.append("US scissors spread missing")
+        if not any(snapshot.get(key) is not None for key in ("cn_cpi_yoy", "cn_ppi_yoy")):
+            issues.append("China macro series missing")
+        if snapshot.get("cn_ppi_cpi_gap") is None:
+            issues.append("China scissors spread missing")
+        if snapshot.get("cn_m1_m2_gap") is None:
+            issues.append("China liquidity scissors missing")
+        categories["macro"]["sources"]["fred_macro"] = _build_source_entry(
+            label="US + China Macro Composite",
+            available=True,
+            configured=True,
+            key_configured=key_configured,
+            has_cached_data=has_data,
+            ready=has_data,
+            last_updated=_source_latest_cache_mtime("data/macro", active_series or list(snapshot.keys())),
+            max_age_sec=14 * 24 * 3600,
+            support_level="core",
+            issues=issues,
+            recommendation="Keep US and China macro cache refreshed so CPI/PPI and scissors metrics stay continuous.",
+            snapshot=snapshot,
+            extra={
+                "active_series": active_series,
+                "regions": grouped,
+                "focus_regions": ["us", "china"],
+                "upstreams": {
+                    "market": "yfinance/yahoo",
+                    "us_macro": "fred",
+                    "china_macro": "stats.gov.cn + pbc.gov.cn",
+                },
+            },
+        )
+    except Exception as exc:
+        categories["macro"]["sources"]["fred_macro"] = _build_source_entry(
+            label="US + China Macro Composite",
+            available=False,
+            configured=True,
+            key_configured=False,
+            has_cached_data=False,
+            ready=False,
+            support_level="core",
+            error=str(exc),
+            recommendation="Restore macro collection/cache before relying on US and China macro research.",
+            extra={"active_series": [], "regions": {"market": {}, "us": {}, "china": {}}, "focus_regions": ["us", "china"]},
+        )
+
+    try:
+        provider = FundingRateProvider(FundingProviderConfig(exchange="binance", source="local"))
+        series = provider.load_local_cache("BTC/USDT", exchange="binance")
+        funding_snapshot = _serialize_funding_cache(provider, exchange="binance", symbol="BTC/USDT", series=series)
+        rows = int(funding_snapshot.get("rows") or 0)
+        last_updated = ((funding_snapshot.get("coverage") or {}).get("end")) if rows > 0 else None
+        issues = []
+        if rows <= 0:
+            issues.append("Funding cache empty")
+        if not bool(funding_snapshot.get("cache_exists")):
+            issues.append("Funding parquet missing")
+        categories["funding"]["sources"]["binance_funding_cache"] = _build_source_entry(
+            label="Binance Funding Cache",
+            available=True,
+            configured=True,
+            has_cached_data=rows > 0,
+            ready=rows > 0,
+            last_updated=last_updated,
+            max_age_sec=36 * 3600,
+            support_level="core",
+            issues=issues,
+            recommendation="Warm local funding cache before research/backtest so perp funding signals remain available.",
+            snapshot=funding_snapshot,
+            extra={"upstream": "binance public funding rate"},
+        )
+    except Exception as exc:
+        categories["funding"]["sources"]["binance_funding_cache"] = _build_source_entry(
+            label="Binance Funding Cache",
+            available=False,
+            configured=True,
+            has_cached_data=False,
+            ready=False,
+            support_level="core",
+            error=str(exc),
+            recommendation="Fix funding cache read/write path so perp research does not degrade.",
+            extra={"upstream": "binance public funding rate"},
+        )
+
+    news_catalog = _news_source_catalog()
+    news_flags = _configured_news_source_flags()
+    news_source_names = list(news_catalog.keys())
+    try:
+        from core.news.collectors.manager import MultiSourceNewsCollector  # noqa: PLC0415
+
+        manager = MultiSourceNewsCollector()
+        if manager.sources:
+            news_source_names = list(manager.sources)
+    except Exception:
+        pass
+
+    coverage_payload: Dict[str, Any] = {}
+    coverage_error: Optional[str] = None
+    source_states: List[Dict[str, Any]] = []
+    state_error: Optional[str] = None
+    llm_queue: Dict[str, Any] = {}
+    queue_error: Optional[str] = None
+    try:
+        coverage_payload = await news_db.summarize_news_raw_coverage(max_sources=30)
+    except Exception as exc:
+        coverage_error = str(exc)
+    try:
+        source_states = await news_db.list_source_states()
+    except Exception as exc:
+        state_error = str(exc)
+    try:
+        llm_queue = await news_db.get_llm_queue_stats()
+    except Exception as exc:
+        queue_error = str(exc)
+
+    coverage_by_source = dict(coverage_payload.get("source_summary") or {})
+    states_by_source = {
+        str(row.get("source") or "").strip().lower(): dict(row)
+        for row in source_states
+        if isinstance(row, dict) and str(row.get("source") or "").strip()
+    }
+    categories["news"]["runtime"] = {
+        "tracked_sources": len(news_source_names),
+        "coverage_error": coverage_error,
+        "state_error": state_error,
+        "llm_queue_error": queue_error,
+        "llm_queue": llm_queue,
+        "coverage": {
+            "raw_news_total": int(coverage_payload.get("raw_news_total") or 0),
+            "events_total": int(coverage_payload.get("events_total") or 0),
+        },
+    }
+    for source_name in news_source_names:
+        meta = dict(news_catalog.get(source_name) or {})
+        coverage_row = dict(coverage_by_source.get(source_name) or {})
+        state_row = dict(states_by_source.get(source_name) or {})
+        configured = bool(news_flags.get(source_name, False))
+        inserted_count = int(coverage_row.get("inserted_count") or 0)
+        last_updated = coverage_row.get("latest_at") or state_row.get("last_success_at") or state_row.get("updated_at")
+        issues = []
+        if not configured:
+            issues.append("Disabled or key missing" if meta.get("requires_key") else "Disabled")
+        elif inserted_count <= 0 and not state_row.get("last_success_at") and not state_row.get("updated_at"):
+            issues.append("No successful pull recorded")
+        if state_row.get("last_error"):
+            issues.append(f"Last error: {state_row.get('last_error')}")
+        failure_rate = float(coverage_row.get("failure_rate") or 0.0)
+        if failure_rate >= 0.5:
+            issues.append(f"Failure rate high: {failure_rate:.0%}")
+        if state_row.get("paused_until"):
+            issues.append(f"Paused until {state_row.get('paused_until')}")
+        if not state_row and not coverage_row and state_error:
+            issues.append(f"State read failed: {state_error}")
+        ready = bool(configured and (inserted_count > 0 or state_row.get("last_success_at") or state_row.get("updated_at")))
+        if meta.get("requires_key") and not configured:
+            recommendation = "Optional keyed source is unavailable; core free/official news sources can still support baseline research."
+        elif issues:
+            recommendation = "Check news worker, source configuration, and source_state freshness so this feed keeps updating."
+        else:
+            recommendation = "Keep this source enabled to maintain event coverage."
+        categories["news"]["sources"][source_name] = _build_source_entry(
+            label=str(meta.get("label") or source_name),
+            available=bool(configured or inserted_count > 0 or state_row),
+            configured=configured,
+            has_cached_data=inserted_count > 0,
+            ready=ready,
+            last_updated=last_updated,
+            max_age_sec=48 * 3600,
+            support_level=str(meta.get("support_level") or "enhancement"),
+            issues=issues,
+            recommendation=recommendation,
+            snapshot={
+                "inserted_count": inserted_count,
+                "latest_at": coverage_row.get("latest_at"),
+                "failure_rate": failure_rate,
+                "success_count": int(state_row.get("success_count") or 0),
+                "error_count": int(state_row.get("error_count") or 0),
+            },
+            extra={
+                "requires_key": bool(meta.get("requires_key")),
+                "source_type": meta.get("source_type"),
+            },
+        )
+
+    try:
+        from core.data.google_trends_collector import load_latest as _gt  # noqa: PLC0415
+
+        bitcoin_value = _gt("bitcoin")
+        categories["search_interest"]["sources"]["google_trends"] = _build_source_entry(
+            label="Google Trends (bitcoin)",
+            available=True,
+            configured=True,
+            has_cached_data=bitcoin_value is not None,
+            ready=bitcoin_value is not None,
+            last_updated=_source_cache_mtime("data/google_trends", "bitcoin_trends"),
+            max_age_sec=72 * 3600,
+            support_level="enhancement",
+            issues=["Google Trends cache empty"] if bitcoin_value is None else [],
+            recommendation="pytrends is unofficial; use it as enhancement data and refresh cache proactively.",
+            snapshot={"bitcoin": bitcoin_value},
+            extra={"upstream": "pytrends (unofficial)"},
+        )
+    except Exception as exc:
+        categories["search_interest"]["sources"]["google_trends"] = _build_source_entry(
+            label="Google Trends (bitcoin)",
+            available=False,
+            configured=True,
+            has_cached_data=False,
+            ready=False,
+            support_level="enhancement",
+            error=str(exc),
+            recommendation="Restore pytrends dependency or cache generation if search-interest signals are needed.",
+            extra={"upstream": "pytrends (unofficial)"},
+        )
+
+    try:
+        from core.data.options_collector import options_collector  # noqa: PLC0415
+
+        cached = options_collector._cache.get("BTC")  # noqa: SLF001
+        options_snapshot = cached[1].to_dict() if cached and cached[1] else {}
+        categories["options"]["sources"]["deribit_options"] = _build_source_entry(
+            label="Deribit Options Snapshot",
+            available=True,
+            configured=True,
+            has_cached_data=bool(options_snapshot),
+            ready=bool(options_snapshot),
+            last_updated=options_snapshot.get("timestamp"),
+            max_age_sec=6 * 3600,
+            support_level="enhancement",
+            issues=["Options snapshot not warmed"] if not options_snapshot else [],
+            recommendation="Persist options cache if you want this source to survive restarts.",
+            snapshot=options_snapshot,
+            extra={"upstream": "deribit public REST", "storage": "memory_cache"},
+        )
+    except Exception as exc:
+        categories["options"]["sources"]["deribit_options"] = _build_source_entry(
+            label="Deribit Options Snapshot",
+            available=False,
+            configured=True,
+            has_cached_data=False,
+            ready=False,
+            support_level="enhancement",
+            error=str(exc),
+            recommendation="Restore Deribit snapshot fetch if options-structure signals are required.",
+            extra={"upstream": "deribit public REST", "storage": "memory_cache"},
+        )
+
+    premium_specs = [
+        {
+            "name": "glassnode",
+            "label": "Glassnode",
+            "module": "core.data.glassnode_collector",
+            "load_fn": "load_glassnode_snapshot",
+            "key_fn": "_api_key",
+            "cache_dir": "data/premium/glassnode",
+            "cache_probe": "sopr",
+            "recommendation": "Add Glassnode key if you want this on-chain confirmation source.",
+        },
+        {
+            "name": "cryptoquant",
+            "label": "CryptoQuant",
+            "module": "core.data.cryptoquant_collector",
+            "load_fn": "load_cryptoquant_snapshot",
+            "key_fn": "_api_key",
+            "cache_dir": "data/premium/cryptoquant",
+            "cache_probe": "exchange_netflow",
+            "recommendation": "Add CryptoQuant key if you want exchange flow confirmation.",
+        },
+        {
+            "name": "nansen",
+            "label": "Nansen",
+            "module": "core.data.nansen_collector",
+            "load_fn": "load_nansen_snapshot",
+            "key_fn": "_api_key",
+            "cache_dir": "data/premium/nansen",
+            "cache_probe": "smart_money_netflow",
+            "recommendation": "Add Nansen key if you want smart-money flow confirmation.",
+        },
+        {
+            "name": "kaiko",
+            "label": "Kaiko",
+            "module": "core.data.kaiko_collector",
+            "load_fn": "load_kaiko_snapshot",
+            "key_fn": "_api_key",
+            "cache_dir": "data/premium/kaiko",
+            "cache_probe": "cross_exchange_spread_bps",
+            "recommendation": "Add Kaiko key if you want institution-grade market structure enrichment.",
+        },
+    ]
+    for spec in premium_specs:
+        try:
+            module = __import__(spec["module"], fromlist=[spec["load_fn"], spec["key_fn"]])
+            premium_snapshot = getattr(module, spec["load_fn"])()
+            key_configured = bool(getattr(module, spec["key_fn"])())
+            has_cached_data = any(value is not None for value in premium_snapshot.values())
+            issues = []
+            if key_configured and not has_cached_data:
+                issues.append("Key configured but local cache empty")
+            if not key_configured and not has_cached_data:
+                issues.append("Key missing and no cache")
+            categories["premium_onchain"]["sources"][spec["name"]] = _build_source_entry(
+                label=str(spec["label"]),
+                available=bool(key_configured or has_cached_data),
+                configured=key_configured,
+                key_configured=key_configured,
+                has_cached_data=has_cached_data,
+                ready=has_cached_data,
+                last_updated=_source_cache_mtime(str(spec["cache_dir"]), str(spec["cache_probe"])),
+                max_age_sec=48 * 3600,
+                support_level="optional",
+                issues=issues,
+                recommendation=str(spec["recommendation"]),
+                snapshot=premium_snapshot,
+            )
+        except Exception as exc:
+            categories["premium_onchain"]["sources"][spec["name"]] = _build_source_entry(
+                label=str(spec["label"]),
+                available=False,
+                configured=False,
+                key_configured=False,
+                has_cached_data=False,
+                ready=False,
+                support_level="optional",
+                error=str(exc),
+                recommendation=str(spec["recommendation"]),
+            )
+
+    primary_openai_key = bool(str(getattr(settings, "OPENAI_API_KEY", "") or "").strip())
+    backup_openai_key = bool(str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip())
+    research_llm_ready = bool(primary_openai_key or backup_openai_key)
+    categories["ai_sources"]["sources"]["research_context_llm"] = _build_source_entry(
+        label="Research Context LLM",
+        available=research_llm_ready,
+        configured=research_llm_ready,
+        has_cached_data=False,
+        ready=research_llm_ready,
+        support_level="core",
+        issues=[] if research_llm_ready else ["OPENAI_API_KEY / OPENAI_BACKUP_API_KEY missing"],
+        recommendation="At least one OpenAI-compatible key is required for AI research planning.",
+        snapshot={
+            "provider": "codex",
+            "default_model": str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.4"),
+            "primary_available": primary_openai_key,
+            "backup_available": backup_openai_key,
+            "failover_enabled": bool(
+                backup_openai_key or str(getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "").strip()
+            ),
+        },
+    )
+
+    live_cfg = live_decision_router.get_runtime_config()
+    live_providers = dict(live_cfg.get("providers") or {})
+    live_provider = str(live_cfg.get("provider") or "codex").strip().lower() or "codex"
+    live_any_available = any(bool((meta or {}).get("available")) for meta in live_providers.values())
+    live_active_available = bool((live_providers.get(live_provider) or {}).get("available"))
+    live_issues = []
+    if not live_any_available:
+        live_issues.append("No live decision provider available")
+    if bool(live_cfg.get("provider_fallback")):
+        live_issues.append(f"Requested provider unavailable; fell back to {live_provider}")
+    categories["ai_sources"]["sources"]["live_decision_llm"] = _build_source_entry(
+        label="Live Decision LLM",
+        available=live_any_available,
+        configured=live_any_available,
+        has_cached_data=False,
+        ready=live_active_available,
+        support_level="enhancement",
+        issues=live_issues,
+        recommendation="Live-decision AI is optional, but it should not rely on silent provider fallback.",
+        snapshot={
+            "enabled": bool(live_cfg.get("enabled")),
+            "mode": live_cfg.get("mode"),
+            "provider": live_provider,
+            "model": live_cfg.get("model"),
+            "provider_requested": live_cfg.get("provider_requested"),
+            "provider_fallback": bool(live_cfg.get("provider_fallback")),
+            "providers": live_providers,
+        },
+    )
+
+    agent_cfg = autonomous_trading_agent.get_runtime_config()
+    agent_providers = dict(agent_cfg.get("providers") or {})
+    agent_provider = str(agent_cfg.get("provider") or "codex").strip().lower() or "codex"
+    agent_any_available = any(bool((meta or {}).get("available")) for meta in agent_providers.values())
+    agent_active_available = bool((agent_providers.get(agent_provider) or {}).get("available"))
+    agent_issues = []
+    if not agent_any_available:
+        agent_issues.append("No autonomous agent provider available")
+    if bool(agent_cfg.get("provider_fallback")):
+        agent_issues.append(f"Requested provider unavailable; fell back to {agent_provider}")
+    safety = dict(agent_cfg.get("safety") or {})
+    if bool(agent_cfg.get("enabled")) and str(safety.get("status") or "") not in {"ready", ""}:
+        agent_issues.append(f"Safety status: {safety.get('status')}")
+    categories["ai_sources"]["sources"]["autonomous_agent_llm"] = _build_source_entry(
+        label="Autonomous Agent LLM",
+        available=agent_any_available,
+        configured=agent_any_available,
+        has_cached_data=False,
+        ready=agent_active_available,
+        support_level="enhancement",
+        issues=agent_issues,
+        recommendation="Autonomous agent AI is optional, but should stay provider-ready and safety-ready.",
+        snapshot={
+            "enabled": bool(agent_cfg.get("enabled")),
+            "mode": agent_cfg.get("mode"),
+            "provider": agent_provider,
+            "model": agent_cfg.get("model"),
+            "provider_requested": agent_cfg.get("provider_requested"),
+            "provider_fallback": bool(agent_cfg.get("provider_fallback")),
+            "runtime_profile": agent_cfg.get("runtime_profile"),
+            "allow_live": bool(agent_cfg.get("allow_live")),
+            "safety": safety,
+            "providers": agent_providers,
+        },
+    )
+
+    try:
+        from importlib import util as importlib_util  # noqa: PLC0415
+
+        xgboost_installed = importlib_util.find_spec("xgboost") is not None
+    except Exception:
+        xgboost_installed = False
+    canonical_model_path = Path("models") / "ml_signal_xgb.json"
+    alternative_candidates = [
+        Path("models") / "ml_signal_xgb",
+        Path("models") / "ml_signal_xgb.ubj",
+        Path("models") / "ml_signal_xgb.bin",
+        Path("models") / "ml_signal_xgb.model",
+    ]
+    detected_alternatives = [str(path) for path in alternative_candidates if path.exists()]
+    ml_ready = bool(xgboost_installed and canonical_model_path.exists())
+    ml_issues = []
+    if not xgboost_installed:
+        ml_issues.append("xgboost not installed")
+    if not canonical_model_path.exists():
+        if detected_alternatives:
+            ml_issues.append("Non-canonical model filename detected; runtime still expects models/ml_signal_xgb.json")
+        else:
+            ml_issues.append("Default ML model file missing")
+    categories["ai_sources"]["sources"]["ml_signal_model"] = _build_source_entry(
+        label="ML Signal Model",
+        available=bool(xgboost_installed and (canonical_model_path.exists() or detected_alternatives)),
+        configured=bool(canonical_model_path.exists()),
+        has_cached_data=bool(canonical_model_path.exists()),
+        ready=ml_ready,
+        last_updated=(
+            datetime.fromtimestamp(canonical_model_path.stat().st_mtime, tz=timezone.utc).isoformat()
+            if canonical_model_path.exists()
+            else None
+        ),
+        max_age_sec=30 * 24 * 3600,
+        support_level="enhancement",
+        issues=ml_issues,
+        recommendation="Use the canonical path models/ml_signal_xgb.json so ML signal loading stays deterministic.",
+        snapshot={
+            "canonical_path": str(canonical_model_path),
+            "canonical_path_exists": canonical_model_path.exists(),
+            "alternative_candidates": detected_alternatives,
+            "xgboost_installed": xgboost_installed,
+        },
+    )
+
+    summary = _build_source_health_summary(categories)
+    return {
+        "ts": generated_at,
+        "focus_regions": ["us", "china"],
+        "summary": summary,
+        "categories": categories,
+    }
+
+
+@router.get("/sources/health")
+async def get_sources_health():
+    """Return a unified health inventory for data and AI sources."""
+    return await _build_sources_health_payload()
+
 
 @router.get("/premium-data/status")
 async def get_premium_data_status():
-    """Return availability and latest snapshot for all premium/optional data sources.
-
-    Sources: Glassnode, CryptoQuant, Nansen, Kaiko, Google Trends, FRED Macro.
-    Each entry includes: available (bool), last_updated (str|None), snapshot (dict).
-    No keys required — sources without keys report available=False gracefully.
-    """
-    from pathlib import Path as _Path  # noqa: PLC0415
-
-    def _cache_mtime(cache_dir: str, name: str) -> Optional[str]:
-        p = _Path(cache_dir) / f"{name}.parquet"
-        try:
-            mtime = p.stat().st_mtime
-            return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
-        except Exception:
-            return None
-
-    result = {}
-
-    # Glassnode
-    try:
-        from core.data.glassnode_collector import load_glassnode_snapshot, _api_key as _gn_key  # noqa: PLC0415
-        snap = load_glassnode_snapshot()
-        has_data = any(v is not None for v in snap.values())
-        key_configured = bool(_gn_key())
-        result["glassnode"] = {
-            "available": bool(has_data or key_configured),
-            "key_configured": key_configured,
-            "has_cached_data": has_data,
-            "last_updated": _cache_mtime("data/premium/glassnode", "sopr"),
-            "snapshot": snap,
-        }
-    except Exception as exc:
-        result["glassnode"] = {"available": False, "error": str(exc)}
-
-    # CryptoQuant
-    try:
-        from core.data.cryptoquant_collector import load_cryptoquant_snapshot, _api_key as _cq_key  # noqa: PLC0415
-        snap = load_cryptoquant_snapshot()
-        has_data = any(v is not None for v in snap.values())
-        key_configured = bool(_cq_key())
-        result["cryptoquant"] = {
-            "available": bool(has_data or key_configured),
-            "key_configured": key_configured,
-            "has_cached_data": has_data,
-            "last_updated": _cache_mtime("data/premium/cryptoquant", "exchange_netflow"),
-            "snapshot": snap,
-        }
-    except Exception as exc:
-        result["cryptoquant"] = {"available": False, "error": str(exc)}
-
-    # Nansen
-    try:
-        from core.data.nansen_collector import load_nansen_snapshot, _api_key as _ns_key  # noqa: PLC0415
-        snap = load_nansen_snapshot()
-        has_data = any(v is not None for v in snap.values())
-        key_configured = bool(_ns_key())
-        result["nansen"] = {
-            "available": bool(has_data or key_configured),
-            "key_configured": key_configured,
-            "has_cached_data": has_data,
-            "last_updated": _cache_mtime("data/premium/nansen", "smart_money_netflow"),
-            "snapshot": snap,
-        }
-    except Exception as exc:
-        result["nansen"] = {"available": False, "error": str(exc)}
-
-    # Kaiko
-    try:
-        from core.data.kaiko_collector import load_kaiko_snapshot, _api_key as _kk_key  # noqa: PLC0415
-        snap = load_kaiko_snapshot()
-        has_data = any(v is not None for v in snap.values())
-        key_configured = bool(_kk_key())
-        result["kaiko"] = {
-            "available": bool(has_data or key_configured),
-            "key_configured": key_configured,
-            "has_cached_data": has_data,
-            "last_updated": _cache_mtime("data/premium/kaiko", "cross_exchange_spread_bps"),
-            "snapshot": snap,
-        }
-    except Exception as exc:
-        result["kaiko"] = {"available": False, "error": str(exc)}
-
-    # Google Trends (free)
-    try:
-        from core.data.google_trends_collector import load_latest as _gt  # noqa: PLC0415
-        btc_val = _gt("bitcoin")
-        result["google_trends"] = {
-            "available": True,
-            "has_cached_data": btc_val is not None,
-            "last_updated": _cache_mtime("data/google_trends", "bitcoin_trends"),
-            "snapshot": {"bitcoin": btc_val},
-        }
-    except Exception as exc:
-        result["google_trends"] = {"available": False, "error": str(exc)}
-
-    # FRED Macro (free with key)
-    try:
-        from core.data.macro_collector import load_macro_snapshot, _api_key as _fred_key  # noqa: PLC0415
-        snap = load_macro_snapshot()
-        has_data = any(v is not None for v in snap.values())
-        result["fred_macro"] = {
-            "available": bool(_fred_key()),
-            "has_cached_data": has_data,
-            "last_updated": _cache_mtime("data/macro", "vix"),
-            "snapshot": snap,
-        }
-    except Exception as exc:
-        result["fred_macro"] = {"available": False, "error": str(exc)}
-
-    # Deribit Options (free)
-    try:
-        from core.data.options_collector import options_collector  # noqa: PLC0415
-        cached = options_collector._cache.get("BTC")
-        snap_dict = cached[1].to_dict() if cached and cached[1] else {}
-        result["deribit_options"] = {
-            "available": True,
-            "has_cached_data": bool(snap_dict),
-            "last_updated": snap_dict.get("timestamp"),
-            "snapshot": snap_dict,
-        }
-    except Exception as exc:
-        result["deribit_options"] = {"available": False, "error": str(exc)}
-
-    return {"sources": result, "ts": datetime.now(timezone.utc).isoformat()}
+    """Backward-compatible premium data status with richer metadata."""
+    payload = await _build_sources_health_payload()
+    categories = payload.get("categories") or {}
+    sources = {
+        "glassnode": dict((((categories.get("premium_onchain") or {}).get("sources") or {}).get("glassnode") or {})),
+        "cryptoquant": dict((((categories.get("premium_onchain") or {}).get("sources") or {}).get("cryptoquant") or {})),
+        "nansen": dict((((categories.get("premium_onchain") or {}).get("sources") or {}).get("nansen") or {})),
+        "kaiko": dict((((categories.get("premium_onchain") or {}).get("sources") or {}).get("kaiko") or {})),
+        "google_trends": dict((((categories.get("search_interest") or {}).get("sources") or {}).get("google_trends") or {})),
+        "fred_macro": dict((((categories.get("macro") or {}).get("sources") or {}).get("fred_macro") or {})),
+        "deribit_options": dict((((categories.get("options") or {}).get("sources") or {}).get("deribit_options") or {})),
+    }
+    return {
+        "sources": sources,
+        "focus_regions": payload.get("focus_regions") or ["us", "china"],
+        "summary": payload.get("summary") or {},
+        "ts": payload.get("ts") or datetime.now(timezone.utc).isoformat(),
+    }

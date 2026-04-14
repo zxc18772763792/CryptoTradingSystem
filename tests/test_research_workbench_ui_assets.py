@@ -44,3 +44,32 @@ def test_research_workbench_recommendations_render_structured_actions():
     assert ".research-conclusion-action-btn" in style_css
     assert ".research-brief-grid" in style_css
     assert ".research-conclusion-tag" in style_css
+
+
+def test_research_workbench_microstructure_summary_wires_long_short_and_order_walls():
+    workbench_js = _read("web/static/js/research_workbench.js")
+    app_js = _read("web/static/js/app.js")
+    trading_api = _read("web/api/trading.py")
+    research_api = _read("web/api/research.py")
+
+    assert "function summarizeMicrostructureSignal" in workbench_js
+    assert "long_short_ratio" in workbench_js
+    assert "microstructure_summary" in workbench_js
+    assert "Long/short ratio unavailable" in workbench_js
+    assert "iceberg_candidates" in app_js
+    assert "large_order_count" in app_js
+    assert "_fetch_long_short_ratio_snapshot" in trading_api
+    assert "_build_microstructure_summary" in research_api
+
+
+def test_ai_research_diagnostics_warm_action_covers_macro_and_funding():
+    template = _read("web/templates/index.html")
+    diagnostics_js = _read("web/static/js/ai_research_diagnostics.js")
+    ai_api = _read("web/api/ai_research.py")
+
+    assert 'id="ai-funding-warm-btn"' in template
+    assert "预热研究缓存" in template
+    assert "/diagnostics/funding-cache/warm" in diagnostics_js
+    assert "/diagnostics/macro-cache/warm" in diagnostics_js
+    assert "研究缓存已预热:" in diagnostics_js
+    assert '@router.post("/diagnostics/macro-cache/warm")' in ai_api

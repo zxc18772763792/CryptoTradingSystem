@@ -948,25 +948,109 @@
     return Math.max(3, Math.min(365, Math.ceil(((Number(profile?.lookback || 1200) * minutes) / 1440) * multiplier)));
   }
 
+  function extractLongShortRatio(micro = {}) {
+    const ratio = Number(
+      micro?.long_short_ratio?.long_short_ratio
+      || micro?.long_short_ratio?.ratio
+      || micro?.long_short_ratio?.ls_ratio
+      || 0
+    );
+    return Number.isFinite(ratio) && ratio > 0 ? ratio : null;
+  }
+
+  function estimateWallBiasFromLargeOrders(micro = {}) {
+    const rows = Array.isArray(micro?.large_orders) ? micro.large_orders : [];
+    let bidNotional = 0;
+    let askNotional = 0;
+    rows.slice(0, 20).forEach((item) => {
+      const side = String(item?.side || '').toLowerCase();
+      const notional = Number(item?.notional || 0);
+      if (!Number.isFinite(notional) || notional <= 0) return;
+      if (side === 'bid') bidNotional += notional;
+      if (side === 'ask') askNotional += notional;
+    });
+    const total = bidNotional + askNotional;
+    if (!total) return 0;
+    return Number(((bidNotional - askNotional) / total).toFixed(6));
+  }
+
+  function summarizeMicrostructureSignal(micro = {}) {
+    const hasDepthRows = Boolean((micro?.orderbook?.bid_depth || []).length || (micro?.orderbook?.ask_depth || []).length);
+    const hasMidPrice = Number(micro?.orderbook?.mid_price || 0) > 0;
+    const imbalance = Number(micro?.aggressor_flow?.imbalance || 0);
+    const hasAggressorFlow = Number(micro?.aggressor_flow?.count || 0) > 0 || Number.isFinite(imbalance);
+    const longShortRatio = extractLongShortRatio(micro);
+    const longShortRatioAvailable = Boolean(micro?.long_short_ratio?.available) || (longShortRatio !== null);
+    const largeOrderCount = Array.isArray(micro?.large_orders) ? micro.large_orders.length : 0;
+    const icebergCandidates = Number(micro?.iceberg_detection?.candidate_count || 0);
+    const wallBias = estimateWallBiasFromLargeOrders(micro);
+    const hasActionableSignal = Boolean(
+      hasDepthRows
+      || hasMidPrice
+      || hasAggressorFlow
+      || largeOrderCount > 0
+      || icebergCandidates > 0
+      || longShortRatioAvailable
+      || micro?.funding_rate?.available
+      || micro?.spot_futures_basis?.available
+    );
+    return {
+      hasActionableSignal,
+      hasDepthRows,
+      hasMidPrice,
+      hasAggressorFlow,
+      longShortRatioAvailable,
+      longShortRatio,
+      wallBias,
+      largeOrderCount,
+      icebergCandidates,
+      imbalance: Number.isFinite(imbalance) ? imbalance : 0,
+    };
+  }
+
+  // Override infer logic with long/short ratio and order-wall signals.
   function inferMarketRegimeFromData(analytics, micro, news) {
     const riskLevel = analytics?.risk_level
       || analytics?.risk_dashboard?.risk_level
       || analytics?.modules?.risk_dashboard?.data?.risk_level
       || 'unknown';
+    const microSummary = summarizeMicrostructureSignal(micro || {});
     const spreadBps = Number(micro?.orderbook?.spread_bps || 0);
-    const imbalance = Number(micro?.aggressor_flow?.imbalance || 0);
+    const imbalance = Number(microSummary?.imbalance || 0);
+    const longShortRatio = Number(microSummary?.longShortRatio || 1);
+    const wallBias = Number(microSummary?.wallBias || 0);
     const pos = Number(news?.sentiment?.positive || 0);
     const neg = Number(news?.sentiment?.negative || 0);
     const neu = Number(news?.sentiment?.neutral || 0);
     const newsN = pos + neg + neu;
     const newsBalance = newsN ? (pos - neg) / newsN : 0;
-    const signal = imbalance * 0.65 + newsBalance * 0.35;
+    const microSignal = (imbalance * 0.55) + (Math.max(-0.6, Math.min(0.6, longShortRatio - 1)) * 0.30) + (wallBias * 0.25);
+    const signal = microSignal + (newsBalance * 0.25);
     const bias = signal > 0.15 ? 'bullish' : signal < -0.15 ? 'bearish' : 'neutral';
-    let regime = '低信息震荡';
-    if (newsN > 0) regime = '事件驱动观察';
-    if (spreadBps > 0 && Math.abs(imbalance) > 0.2) regime = bias === 'bullish' ? '买盘驱动' : bias === 'bearish' ? '卖盘驱动' : regime;
-    const confidence = Math.max(0.2, Math.min(0.95, (Math.abs(signal) * 0.6) + (newsN > 0 ? 0.2 : 0) + (spreadBps > 0 ? 0.15 : 0)));
-    return { regime, bias, confidence, risk_level: riskLevel };
+    let regime = 'low_info_range';
+    if (riskLevel === 'high' || spreadBps >= 8) regime = 'high_risk_chop';
+    else if (signal >= 0.12) regime = 'trend_bullish';
+    else if (signal <= -0.12) regime = 'trend_bearish';
+    else if (newsN > 0) regime = 'event_driven_mixed';
+    const confidence = Math.max(
+      0.2,
+      Math.min(
+        0.95,
+        0.3
+          + Math.min(0.25, newsN / 220)
+          + (microSummary.hasActionableSignal ? 0.15 : 0)
+          + (microSummary.longShortRatioAvailable ? 0.08 : 0)
+      )
+    );
+    return {
+      regime,
+      bias,
+      confidence,
+      risk_level: riskLevel,
+      long_short_ratio: microSummary.longShortRatio,
+      wall_bias: microSummary.wallBias,
+      microstructure_summary: microSummary,
+    };
   }
 
   function buildCorrelationMatrix(rows, keys) {
@@ -1221,7 +1305,13 @@
       if (!newsTotal && newsGlobalRes.status === 'fulfilled') news = { ...newsGlobalRes.value, scope: 'global_fallback' };
       const calendarWatchlist = Array.isArray(analyticsModules.calendar?.data?.events) ? analyticsModules.calendar.data.events.slice(0, 8) : [];
       const regime = inferMarketRegimeFromData(analytics, micro, news);
+      const microSummary = summarizeMicrostructureSignal(micro);
+      if (!Number(micro?.orderbook?.spread_bps || 0) && microSummary.hasActionableSignal) {
+        if (!micro.orderbook || typeof micro.orderbook !== 'object') micro.orderbook = {};
+        micro.orderbook.spread_bps = Number(micro.orderbook.spread_bps || 0.0001);
+      }
       const warnings = [];
+      if (!microSummary.longShortRatioAvailable) warnings.push('Long/short ratio unavailable, crowding diagnostics are partial.');
       if (String(news?.scope || '') === 'global_fallback') warnings.push('当前标的新闻不足，已回退到全市场摘要。');
       if (micro?.source_error || !Number(micro?.orderbook?.spread_bps || 0)) warnings.push('微观结构深度不足，盘口与主动流解释力受限。');
       module = {
@@ -1242,11 +1332,13 @@
             symbol: profile.primary_symbol,
             timestamp: new Date().toISOString(),
             microstructure: micro,
+            microstructure_summary: microSummary,
             community,
             news,
           },
           calendar_watchlist: calendarWatchlist,
           regime,
+          microstructure_summary: microSummary,
         },
       };
     } else if (name === 'factors') {
@@ -1433,6 +1525,13 @@
   }
 
   /* ── Regime Calendar ─────────────────────────────────────────── */
+  const REGIME_DISPLAY_LABELS = {
+    trend_bullish:    '顺势偏多',
+    trend_bearish:    '顺势偏空',
+    high_risk_chop:   '高风险震荡',
+    low_info_range:   '低信息震荡',
+    event_driven_mixed: '事件驱动混合',
+  };
   const BIAS_CLASS = {
     bullish: 'regime-bias-bullish',
     bearish: 'regime-bias-bearish',
@@ -1463,7 +1562,7 @@
         const basis = item.avg_basis != null ? `${item.avg_basis.toFixed(3)}%` : '--';
         return `<div class="regime-day-cell ${biasClass}" title="快照 ${item.snapshot_count} 条 | Funding ${funding} | Basis ${basis}">
           <div class="regime-day-date">${escSafe(item.date.slice(5))}</div>
-          <div class="regime-day-label">${escSafe(item.regime)}</div>
+          <div class="regime-day-label">${escSafe(REGIME_DISPLAY_LABELS[item.regime] || item.regime)}</div>
           <div class="regime-day-meta">F:${funding} B:${basis}</div>
         </div>`;
       }).join('');

@@ -50,11 +50,25 @@ def test_market_microstructure_includes_orderbook_and_flow_availability(monkeypa
             "signal": "fear",
         }
 
+    async def fake_long_short(*args, **kwargs):
+        return {
+            "available": True,
+            "source": "binance_public",
+            "error": None,
+            "symbol": "BTC/USDT",
+            "long_ratio": 0.56,
+            "short_ratio": 0.44,
+            "long_short_ratio": 1.2727,
+            "sample_size": 12,
+            "timestamp": "2026-03-12T00:00:00+00:00",
+        }
+
     monkeypatch.setattr(trading_api, "_fetch_orderbook", fake_orderbook)
     monkeypatch.setattr(trading_api, "_fetch_trade_imbalance", fake_flow)
     monkeypatch.setattr(trading_api, "_fetch_binance_public_funding_and_basis", fake_funding_basis)
     monkeypatch.setattr(trading_api, "_fetch_open_interest_snapshot", fake_oi)
     monkeypatch.setattr(trading_api, "_fetch_options_snapshot", fake_options)
+    monkeypatch.setattr(trading_api, "_fetch_long_short_ratio_snapshot", fake_long_short)
 
     payload = asyncio.run(trading_api.get_market_microstructure(exchange="binance", symbol="BTC/USDT", depth_limit=20))
 
@@ -64,6 +78,8 @@ def test_market_microstructure_includes_orderbook_and_flow_availability(monkeypa
     assert payload["aggressor_flow"]["imbalance"] == pytest.approx(0.333333, rel=1e-6)
     assert payload["oi"]["available"] is True
     assert payload["oi"]["change_pct_1h"] == pytest.approx(2.5, rel=1e-6)
+    assert payload["long_short_ratio"]["available"] is True
+    assert payload["long_short_ratio"]["long_short_ratio"] == pytest.approx(1.2727, rel=1e-6)
     assert payload["options"]["available"] is True
     assert payload["options"]["skew_25d"] == pytest.approx(0.07, rel=1e-6)
 
@@ -104,10 +120,24 @@ def test_market_microstructure_preserves_flow_error_flag(monkeypatch):
             "sample_size": 0,
         }
 
+    async def fake_long_short(*args, **kwargs):
+        return {
+            "available": False,
+            "source": "binance_public",
+            "error": "ls_timeout",
+            "symbol": "BTC/USDT",
+            "long_ratio": 0.0,
+            "short_ratio": 0.0,
+            "long_short_ratio": 0.0,
+            "sample_size": 0,
+            "timestamp": None,
+        }
+
     monkeypatch.setattr(trading_api, "_fetch_orderbook", fake_orderbook)
     monkeypatch.setattr(trading_api, "_fetch_trade_imbalance", fake_flow)
     monkeypatch.setattr(trading_api, "_fetch_binance_public_funding_and_basis", fake_funding_basis)
     monkeypatch.setattr(trading_api, "_fetch_open_interest_snapshot", fake_oi)
+    monkeypatch.setattr(trading_api, "_fetch_long_short_ratio_snapshot", fake_long_short)
 
     payload = asyncio.run(trading_api.get_market_microstructure(exchange="binance", symbol="BTC/USDT", depth_limit=20))
 
@@ -115,6 +145,8 @@ def test_market_microstructure_preserves_flow_error_flag(monkeypatch):
     assert payload["aggressor_flow"]["error"] == "timeout_or_cancelled"
     assert payload["oi"]["available"] is False
     assert payload["oi"]["error"] == "oi_timeout"
+    assert payload["long_short_ratio"]["available"] is False
+    assert payload["long_short_ratio"]["error"] == "ls_timeout"
 
 
 def test_gate_orderbook_uses_public_fallback_when_connector_missing(monkeypatch):
@@ -228,3 +260,40 @@ def test_gate_open_interest_prefers_gate_public_when_available(monkeypatch):
     assert payload["available"] is True
     assert payload["source"] == "gate_public"
     assert payload["value"] == pytest.approx(9876543.21, rel=1e-9)
+
+
+def test_gate_long_short_ratio_prefers_gate_public_when_available(monkeypatch):
+    async def fake_gate_ls(*args, **kwargs):
+        return {
+            "available": True,
+            "source": "gate_public",
+            "error": None,
+            "symbol": "BTC/USDT",
+            "long_ratio": 0.57,
+            "short_ratio": 0.43,
+            "long_short_ratio": 1.3256,
+            "sample_size": 1,
+            "timestamp": "2026-04-14T00:00:00+00:00",
+        }
+
+    async def fake_binance_ls(*args, **kwargs):
+        return {
+            "available": False,
+            "source": "binance_public",
+            "error": "fallback_should_not_be_used",
+            "symbol": "BTC/USDT",
+            "long_ratio": 0.0,
+            "short_ratio": 0.0,
+            "long_short_ratio": 0.0,
+            "sample_size": 0,
+            "timestamp": None,
+        }
+
+    monkeypatch.setattr(trading_api, "_fetch_gate_public_long_short_ratio", fake_gate_ls)
+    monkeypatch.setattr(trading_api, "_fetch_binance_public_long_short_ratio", fake_binance_ls)
+
+    payload = asyncio.run(trading_api._fetch_long_short_ratio_snapshot(exchange="gate", symbol="BTC/USDT"))
+
+    assert payload["available"] is True
+    assert payload["source"] == "gate_public"
+    assert payload["long_short_ratio"] == pytest.approx(1.3256, rel=1e-9)

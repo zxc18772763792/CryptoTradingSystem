@@ -14,6 +14,12 @@ def _history_micro_snapshot() -> dict:
         "timestamp": _recent_snapshot_ts(),
         "orderbook": {"mid_price": 100000.0, "spread_bps": 2.5},
         "aggressor_flow": {"count": 8, "imbalance": 0.18},
+        "large_orders": [
+            {"side": "bid", "notional": 5000000.0},
+            {"side": "ask", "notional": 3000000.0},
+        ],
+        "iceberg_detection": {"candidate_count": 2},
+        "long_short_ratio": {"available": True, "long_short_ratio": 1.22},
         "funding_rate": {"available": True, "funding_rate": 0.0001},
         "spot_futures_basis": {"available": True, "basis_pct": 0.12},
     }
@@ -63,6 +69,8 @@ def test_market_state_prefers_recent_history_snapshots(monkeypatch):
     assert result["status"] == "ok"
     assert result["payload"]["analytics_overview"]["modules"]["risk_dashboard"]["ok"] is True
     assert result["payload"]["sentiment_dashboard"]["microstructure"]["orderbook"]["spread_bps"] == 2.5
+    assert result["payload"]["microstructure_summary"]["long_short_ratio"] == 1.22
+    assert result["payload"]["microstructure_summary"]["iceberg_candidates"] == 2
     assert result["payload"]["calendar_watchlist"][0]["title"] == "CPI"
     assert live_micro_mock.await_count == 0
     assert live_community_mock.await_count == 0

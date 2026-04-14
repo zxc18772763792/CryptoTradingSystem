@@ -4984,16 +4984,21 @@ const merged={
 ...(liveMicro||{}),
 orderbook:{...((liveMicro||{})?.orderbook||{})},
 aggressor_flow:{...((liveMicro||{})?.aggressor_flow||{})},
+long_short_ratio:{...((liveMicro||{})?.long_short_ratio||{})},
 };
 const usedSpread=!hasUsableSpreadValue(merged)&&hasUsableSpreadValue(cachedMicro);
 const usedFlow=!hasUsableFlowValue(merged)&&hasUsableFlowValue(cachedMicro);
+const usedLongShort=(!Number(merged?.long_short_ratio?.long_short_ratio||0))&&Number(cachedMicro?.long_short_ratio?.long_short_ratio||0)>0;
 if(usedSpread){
   merged.orderbook={...(cachedMicro?.orderbook||{}),available:true,stale:true};
 }
 if(usedFlow){
   merged.aggressor_flow={...(cachedMicro?.aggressor_flow||{}),available:true,stale:true};
 }
-if(usedSpread||usedFlow){
+if(usedLongShort){
+  merged.long_short_ratio={...(cachedMicro?.long_short_ratio||{}),available:true,stale:true};
+}
+if(usedSpread||usedFlow||usedLongShort){
   const baseErr=String(merged?.source_error||merged?.error||'').trim();
   const fallbackMsg='实时微观结构波动，已回退最近快照';
   merged.available=true;
@@ -5823,7 +5828,17 @@ const spreadBps=Number.isFinite(Number(micro?.orderbook?.spread_bps))&&Number(mi
 const imbalance=Number.isFinite(Number(micro?.aggressor_flow?.imbalance))?Number(micro.aggressor_flow.imbalance):null;
 const funding=firstFiniteNumber(micro?.funding_rate?.funding_rate,micro?.funding_rate?.rate,researchState?.lastSentiment?.funding_rate);
 const basisPct=firstFiniteNumber(micro?.spot_futures_basis?.basis_pct,micro?.spot_futures_basis?.basis,researchState?.lastSentiment?.basis_pct);
+const longShortRatio=firstFiniteNumber(micro?.long_short_ratio?.long_short_ratio,micro?.long_short_ratio?.ratio,payload?.microstructure_summary?.long_short_ratio);
+const longShortAvailable=Boolean(micro?.long_short_ratio?.available)||longShortRatio!==null;
+const largeOrders=Array.isArray(micro?.large_orders)?micro.large_orders:[];
+const icebergCandidates=Number(micro?.iceberg_detection?.candidate_count??payload?.microstructure_summary?.iceberg_candidates??0);
+let bidWallNotional=0;
+let askWallNotional=0;
+largeOrders.slice(0,20).forEach((item)=>{const side=String(item?.side||'').toLowerCase();const notional=Number(item?.notional||0);if(!Number.isFinite(notional)||notional<=0)return;if(side==='bid')bidWallNotional+=notional;else if(side==='ask')askWallNotional+=notional;});
+const wallTotal=bidWallNotional+askWallNotional;
+const wallBias=firstFiniteNumber(payload?.microstructure_summary?.wall_bias,wallTotal>0?(bidWallNotional-askWallNotional)/wallTotal:null);
 const sourceError=String(micro?.source_error||'').trim();
+const microReady=!sourceError&&(spreadBps!==null||imbalance!==null||longShortAvailable||largeOrders.length>0||icebergCandidates>0);
 const announcements=Array.isArray(community?.announcements)?community.announcements:[];
 const whaleCount=Number(community?.whale_transfers?.count||0);
 const warnings=(Array.isArray(module?.warnings)?module.warnings:[]).filter(Boolean);
@@ -5832,20 +5847,21 @@ const cards=[
 {title:'交易日历',badge:calendarRows.length?`${calendarRows.length}条`:'暂无',status:calendarRows.length?'connected':'warning',lines:[calendarRows.length?`事件 ${calendarRows.length} 条`:'当前窗口内暂无重点事件',calendarRows[0]?.title||calendarRows[0]?.event||'等待下一次刷新']},
 {title:'情绪与新闻',badge:newsCount.total?`${newsCount.total}样本`:'样本不足',status:newsCount.total?'connected':'warning',lines:[`结构化 ${newsCount.events} | 当前流 ${newsCount.feed}`,`原始新闻 ${newsCount.raw}`]},
 {title:'社区与公告',badge:(announcements.length||whaleCount)?'正常':'稀疏',status:(announcements.length||whaleCount)?'connected':'warning',lines:[`公告 ${announcements.length} | 巨鲸 ${whaleCount}`,announcements[0]?.title||announcements[0]?.headline||'暂无公告样本']},
-{title:'微观结构',badge:sourceError?'降级':(spreadBps!==null?'正常':'样本不足'),status:sourceError?'warning':'connected',lines:[`点差 ${fmtWorkbenchMetric(spreadBps,'bps')} | 主动流 ${fmtWorkbenchMetric(imbalance,'fixed4')}`,sourceError?`来源 ${sourceError}`:`费率 ${fmtWorkbenchMetric(funding,'pct4')} | 基差 ${fmtWorkbenchMetric(basisPct,'pct2')}`]},
+{title:'微观结构',badge:sourceError?'降级':(microReady?'正常':'样本不足'),status:sourceError?'warning':'connected',lines:[`点差 ${fmtWorkbenchMetric(spreadBps,'bps')} | 主动流 ${fmtWorkbenchMetric(imbalance,'fixed4')}`,`多空比 ${fmtWorkbenchMetric(longShortRatio,'fixed4')} | 墙偏置 ${fmtWorkbenchMetric(wallBias,'fixed4')}`,sourceError?`来源 ${sourceError}`:`冰山候选 ${Number.isFinite(icebergCandidates)?icebergCandidates:0} | 大额挂单 ${largeOrders.length}`]},
 {title:'数据提醒',badge:warnings.length?`${warnings.length}条`:'正常',status:warnings.length?'warning':'connected',lines:warnings.length?[String(warnings[0]||'').slice(0,40),String(warnings[1]||'无额外警告').slice(0,40)]:['当前模块已返回有效摘要','可继续查看因子与链上模块']},
 ];
-researchState.lastAnalytics={workbench:true,risk_level:regime?.risk_level||'unknown',market_regime:regime?.regime||'未知',direction_bias:regime?.bias||'neutral',confidence:Number(regime?.confidence||0),calendar_count:calendarRows.length,news_samples:newsCount.total,whale_count:whaleCount,microstructure_available:!sourceError&&spreadBps!==null};
+researchState.lastAnalytics={workbench:true,risk_level:regime?.risk_level||'unknown',market_regime:regime?.regime||'未知',direction_bias:regime?.bias||'neutral',confidence:Number(regime?.confidence||0),calendar_count:calendarRows.length,news_samples:newsCount.total,whale_count:whaleCount,microstructure_available:microReady,long_short_ratio:longShortRatio,wall_bias:wallBias,iceberg_candidates:Number.isFinite(icebergCandidates)?icebergCandidates:0,large_order_count:largeOrders.length};
 summary.innerHTML=[
 `<div class="list-item"><span>市场状态 / 方向</span><span>${esc(regime?.regime||'未知')} / ${esc(regime?.bias||'neutral')}</span></div>`,
 `<div class="list-item"><span>置信度 / 风险等级</span><span>${Number(regime?.confidence||0).toFixed(2)} / ${esc(regime?.risk_level||'unknown')}</span></div>`,
 `<div class="list-item"><span>交易日历 / 新闻样本</span><span>${calendarRows.length} / ${newsCount.total}</span></div>`,
 `<div class="list-item"><span>公告 / 巨鲸</span><span>${announcements.length} / ${whaleCount}</span></div>`,
-`<div class="list-item"><span>微观结构</span><span>${sourceError?esc(sourceError):(spreadBps!==null?`${spreadBps.toFixed(3)} bps / ${fmtWorkbenchMetric(imbalance,'fixed4')}`:'样本不足')}</span></div>`,
+`<div class="list-item"><span>微观结构</span><span>${sourceError?esc(sourceError):(microReady?`${fmtWorkbenchMetric(spreadBps,'bps')} / ${fmtWorkbenchMetric(imbalance,'fixed4')}`:'样本不足')}</span></div>`,
+`<div class="list-item"><span>多空比 / 冰山</span><span>${fmtWorkbenchMetric(longShortRatio,'fixed4')} / ${Number.isFinite(icebergCandidates)?icebergCandidates:0}</span></div>`,
 ].join('');
 grid.innerHTML=cards.map(card=>`<div class="strategy-card"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${esc(card.title)}</h4><span class="status-badge ${esc(card.status)}">${esc(card.badge)}</span></div>${card.lines.map(line=>`<p>${esc(String(line||'--'))}</p>`).join('')}</div>`).join('');
 if(out){
-out.textContent=JSON.stringify({market_state:regime,calendar_watchlist:calendarRows.slice(0,8),community:{announcements:announcements.length,whale_count:whaleCount},microstructure:{spread_bps:spreadBps,imbalance,funding_rate:funding,basis_pct:basisPct,source_error:sourceError||null},news:newsCount,warnings},null,2);
+  out.textContent=JSON.stringify({market_state:regime,calendar_watchlist:calendarRows.slice(0,8),community:{announcements:announcements.length,whale_count:whaleCount},microstructure:{spread_bps:spreadBps,imbalance,funding_rate:funding,basis_pct:basisPct,long_short_ratio:longShortRatio,wall_bias:wallBias,large_order_count:largeOrders.length,iceberg_candidates:Number.isFinite(icebergCandidates)?icebergCandidates:0,source_error:sourceError||null},news:newsCount,warnings},null,2);
 }
 renderResearchConclusionCard();
 }

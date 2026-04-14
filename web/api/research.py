@@ -82,7 +82,7 @@ _MODULE_ORDER = ["market_state", "factors", "cross_asset", "onchain", "disciplin
 _MODULE_TIMEOUT_SEC = {
     "market_state": 40.0,
     "factors": 45.0,
-    "cross_asset": 8.0,
+    "cross_asset": 16.0,
     "onchain": 30.0,
     "discipline": 5.0,
 }
@@ -398,6 +398,77 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
     }
 
 
+def _extract_long_short_ratio(payload: Dict[str, Any]) -> Optional[float]:
+    if not isinstance(payload, dict):
+        return None
+    row = payload.get("long_short_ratio") or {}
+    ratio = float(
+        row.get("long_short_ratio")
+        or row.get("ratio")
+        or row.get("ls_ratio")
+        or 0.0
+    )
+    return ratio if ratio > 0 else None
+
+
+def _microstructure_wall_bias(payload: Dict[str, Any]) -> float:
+    if not isinstance(payload, dict):
+        return 0.0
+    rows = list(payload.get("large_orders") or [])
+    bid_notional = 0.0
+    ask_notional = 0.0
+    for row in rows[:20]:
+        if not isinstance(row, dict):
+            continue
+        side = str(row.get("side") or "").strip().lower()
+        notional = float(row.get("notional") or 0.0)
+        if notional <= 0:
+            continue
+        if side == "bid":
+            bid_notional += notional
+        elif side == "ask":
+            ask_notional += notional
+    total = bid_notional + ask_notional
+    return round(((bid_notional - ask_notional) / total) if total > 0 else 0.0, 6)
+
+
+def _build_microstructure_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
+    orderbook = dict((payload or {}).get("orderbook") or {})
+    aggressor = dict((payload or {}).get("aggressor_flow") or {})
+    long_short = dict((payload or {}).get("long_short_ratio") or {})
+    iceberg = dict((payload or {}).get("iceberg_detection") or {})
+    large_orders = list((payload or {}).get("large_orders") or [])
+
+    has_depth_rows = bool(orderbook.get("bid_depth") or orderbook.get("ask_depth"))
+    has_mid_price = float(orderbook.get("mid_price") or 0.0) > 0
+    has_flow = bool(aggressor.get("count")) or abs(float(aggressor.get("imbalance") or 0.0)) > 0
+    long_short_ratio = _extract_long_short_ratio(payload)
+    wall_bias = _microstructure_wall_bias(payload)
+    iceberg_count = int(float(iceberg.get("candidate_count") or 0.0))
+    actionable_signal = bool(
+        has_mid_price
+        or has_depth_rows
+        or has_flow
+        or bool(large_orders)
+        or bool(long_short_ratio and long_short_ratio > 0)
+        or iceberg_count > 0
+        or bool((payload.get("funding_rate") or {}).get("available"))
+        or bool((payload.get("spot_futures_basis") or {}).get("available"))
+    )
+
+    return {
+        "has_actionable_signal": actionable_signal,
+        "has_orderbook_depth": has_depth_rows,
+        "has_mid_price": has_mid_price,
+        "has_aggressor_flow": has_flow,
+        "large_order_count": len(large_orders),
+        "iceberg_candidates": iceberg_count,
+        "long_short_ratio_available": bool(long_short.get("available")) or bool(long_short_ratio and long_short_ratio > 0),
+        "long_short_ratio": round(long_short_ratio, 6) if long_short_ratio else None,
+        "wall_bias": wall_bias,
+    }
+
+
 def _build_market_regime(
     analytics: Dict[str, Any],
     microstructure: Dict[str, Any],
@@ -405,37 +476,50 @@ def _build_market_regime(
 ) -> Dict[str, Any]:
     risk_module = dict((analytics.get("modules") or {}).get("risk_dashboard", {}).get("data") or {})
     micro_module = dict((analytics.get("modules") or {}).get("microstructure", {}).get("data") or {})
+    merged_micro = dict(_merge_nested_payload(microstructure or {}, micro_module or {}) or {})
+    micro_summary = _build_microstructure_summary(merged_micro)
 
     risk_level = str(risk_module.get("risk_level") or "unknown")
-    spread_bps = float(
-        microstructure.get("orderbook", {}).get("spread_bps")
-        or micro_module.get("orderbook", {}).get("spread_bps")
-        or 0.0
-    )
-    imbalance = float(
-        microstructure.get("aggressor_flow", {}).get("imbalance")
-        or micro_module.get("aggressor_flow", {}).get("imbalance")
-        or 0.0
-    )
+    spread_bps = float((merged_micro.get("orderbook") or {}).get("spread_bps") or 0.0)
+    imbalance = float((merged_micro.get("aggressor_flow") or {}).get("imbalance") or 0.0)
+    long_short_ratio = float(micro_summary.get("long_short_ratio") or 1.0)
+    wall_bias = float(micro_summary.get("wall_bias") or 0.0)
+
     sentiment = dict(news.get("sentiment") or {})
     total_news = sum(int(sentiment.get(key) or 0) for key in ("positive", "neutral", "negative"))
     news_bias = ((sentiment.get("positive", 0) - sentiment.get("negative", 0)) / total_news) if total_news else 0.0
-    confidence = min(0.95, max(0.2, 0.35 + min(0.25, total_news / 200.0) + (0.15 if spread_bps > 0 else 0.0)))
+
+    micro_signal = (
+        imbalance * 0.55
+        + max(-0.6, min(0.6, long_short_ratio - 1.0)) * 0.30
+        + wall_bias * 0.25
+    )
+    joint_signal = micro_signal + (news_bias * 0.25)
+    confidence = min(
+        0.95,
+        max(
+            0.2,
+            0.3
+            + min(0.25, total_news / 220.0)
+            + (0.15 if micro_summary.get("has_actionable_signal") else 0.0)
+            + (0.08 if micro_summary.get("long_short_ratio_available") else 0.0),
+        ),
+    )
 
     if risk_level == "high" or spread_bps >= 8:
-        regime = "高风险震荡"
+        regime = "high_risk_chop"
         bias = "defensive"
-    elif imbalance >= 0.12 and news_bias >= 0.1:
-        regime = "顺势偏多"
+    elif joint_signal >= 0.12:
+        regime = "trend_bullish"
         bias = "bullish"
-    elif imbalance <= -0.12 and news_bias <= -0.1:
-        regime = "顺势偏空"
+    elif joint_signal <= -0.12:
+        regime = "trend_bearish"
         bias = "bearish"
-    elif abs(imbalance) <= 0.05 and total_news < 5:
-        regime = "低信息震荡"
+    elif abs(joint_signal) <= 0.05 and total_news < 5:
+        regime = "low_info_range"
         bias = "neutral"
     else:
-        regime = "事件驱动混合"
+        regime = "event_driven_mixed"
         bias = "neutral"
 
     return {
@@ -446,6 +530,8 @@ def _build_market_regime(
         "spread_bps": round(spread_bps, 4),
         "imbalance": round(imbalance, 4),
         "news_bias": round(news_bias, 4),
+        "long_short_ratio": round(long_short_ratio, 6) if long_short_ratio > 0 else None,
+        "wall_bias": round(wall_bias, 6),
     }
 
 
@@ -485,19 +571,8 @@ def _analytics_module_entry(task_name: str, data: Dict[str, Any], *, ok: bool, e
 def _microstructure_has_signal(payload: Dict[str, Any]) -> bool:
     if not isinstance(payload, dict):
         return False
-    orderbook = payload.get("orderbook") or {}
-    aggressor = payload.get("aggressor_flow") or {}
-    funding = payload.get("funding_rate") or {}
-    basis = payload.get("spot_futures_basis") or {}
-    return any(
-        [
-            _has_positive_number(orderbook.get("mid_price")),
-            _has_positive_number(orderbook.get("spread_bps")),
-            bool(aggressor.get("count")),
-            funding.get("available") is True,
-            basis.get("available") is True,
-        ]
-    )
+    summary = _build_microstructure_summary(payload)
+    return bool(summary.get("has_actionable_signal"))
 
 
 def _community_has_signal(payload: Dict[str, Any]) -> bool:
@@ -528,6 +603,188 @@ def _map_calendar_rows(rows: Any) -> List[Dict[str, Any]]:
             }
         )
     return mapped
+
+
+def _coerce_finite_float(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    if parsed != parsed:
+        return None
+    return parsed
+
+
+def _macro_has_signal(payload: Dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return any(_coerce_finite_float(value) is not None for value in payload.values())
+
+
+def _build_macro_region_summary(
+    snapshot: Dict[str, Any],
+    *,
+    name: str,
+    scalar_fields: List[tuple[str, str]],
+    ppi_key: Optional[str] = None,
+    cpi_key: Optional[str] = None,
+    scissors_key: Optional[str] = None,
+    m1_key: Optional[str] = None,
+    m2_key: Optional[str] = None,
+    liquidity_key: Optional[str] = None,
+    fed_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    values = {key: _coerce_finite_float(snapshot.get(key)) for key, _ in scalar_fields}
+    parts: List[str] = []
+    active_series = [key for key, value in values.items() if value is not None]
+
+    if fed_key:
+        fed_rate = _coerce_finite_float(snapshot.get(fed_key))
+        if fed_rate is not None:
+            parts.append(f"FF {fed_rate:.2f}%")
+            if fed_key not in active_series:
+                active_series.append(fed_key)
+    else:
+        fed_rate = None
+
+    cpi_yoy = _coerce_finite_float(snapshot.get(cpi_key)) if cpi_key else None
+    ppi_yoy = _coerce_finite_float(snapshot.get(ppi_key)) if ppi_key else None
+    m1_yoy = _coerce_finite_float(snapshot.get(m1_key)) if m1_key else None
+    m2_yoy = _coerce_finite_float(snapshot.get(m2_key)) if m2_key else None
+    scissors_spread = _coerce_finite_float(snapshot.get(scissors_key)) if scissors_key else None
+    liquidity_spread = _coerce_finite_float(snapshot.get(liquidity_key)) if liquidity_key else None
+
+    for key, label in scalar_fields:
+        value = values.get(key)
+        if value is None:
+            continue
+        if key in {cpi_key, ppi_key, m1_key, m2_key}:
+            parts.append(f"{label} {value:.2f}%")
+        elif key in {scissors_key, liquidity_key}:
+            parts.append(f"{label} {value:+.2f}pp")
+
+    headline = f"{name}: " + " | ".join(parts[:4]) if parts else f"{name}: unavailable"
+    return {
+        "name": name,
+        "available_series": active_series,
+        "available_count": len(active_series),
+        "headline": headline,
+        "fed_rate": round(fed_rate, 4) if fed_rate is not None else None,
+        "cpi_yoy": round(cpi_yoy, 4) if cpi_yoy is not None else None,
+        "ppi_yoy": round(ppi_yoy, 4) if ppi_yoy is not None else None,
+        "m1_yoy": round(m1_yoy, 4) if m1_yoy is not None else None,
+        "m2_yoy": round(m2_yoy, 4) if m2_yoy is not None else None,
+        "scissors_spread_pp": round(scissors_spread, 4) if scissors_spread is not None else None,
+        "liquidity_scissors_spread_pp": round(liquidity_spread, 4) if liquidity_spread is not None else None,
+    }
+
+
+def _build_macro_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = dict(payload or {})
+    active_series = [name for name, value in snapshot.items() if _coerce_finite_float(value) is not None]
+    market_parts: List[str] = []
+    vix = _coerce_finite_float(snapshot.get("vix"))
+    dxy = _coerce_finite_float(snapshot.get("dxy"))
+    tnx = _coerce_finite_float(snapshot.get("tnx_10y"))
+    if vix is not None:
+        market_parts.append(f"VIX {vix:.1f}")
+    if dxy is not None:
+        market_parts.append(f"DXY {dxy:.1f}")
+    if tnx is not None:
+        market_parts.append(f"UST10Y {tnx:.2f}%")
+
+    market_headline = "Cross-market: " + " | ".join(market_parts) if market_parts else "Cross-market: unavailable"
+    us_summary = _build_macro_region_summary(
+        snapshot,
+        name="US",
+        scalar_fields=[
+            ("cpi_yoy", "CPI"),
+            ("ppi_yoy", "PPI"),
+            ("ppi_cpi_gap", "PPI-CPI"),
+            ("m1_yoy", "M1"),
+            ("m2_yoy", "M2"),
+            ("m1_m2_gap", "M1-M2"),
+        ],
+        ppi_key="ppi_yoy",
+        cpi_key="cpi_yoy",
+        scissors_key="ppi_cpi_gap",
+        m1_key="m1_yoy",
+        m2_key="m2_yoy",
+        liquidity_key="m1_m2_gap",
+        fed_key="fed_rate",
+    )
+    china_summary = _build_macro_region_summary(
+        snapshot,
+        name="China",
+        scalar_fields=[
+            ("cn_cpi_yoy", "CPI"),
+            ("cn_ppi_yoy", "PPI"),
+            ("cn_ppi_cpi_gap", "PPI-CPI"),
+            ("cn_m1_yoy", "M1"),
+            ("cn_m2_yoy", "M2"),
+            ("cn_m1_m2_gap", "M1-M2"),
+        ],
+        ppi_key="cn_ppi_yoy",
+        cpi_key="cn_cpi_yoy",
+        scissors_key="cn_ppi_cpi_gap",
+        m1_key="cn_m1_yoy",
+        m2_key="cn_m2_yoy",
+        liquidity_key="cn_m1_m2_gap",
+    )
+
+    headline_parts = []
+    if market_parts:
+        headline_parts.append(market_headline)
+    if us_summary["available_count"]:
+        headline_parts.append(us_summary["headline"])
+    if china_summary["available_count"]:
+        headline_parts.append(china_summary["headline"])
+
+    return {
+        "available_series": active_series,
+        "available_count": len(active_series),
+        "headline": " || ".join(headline_parts) if headline_parts else "Macro snapshot unavailable",
+        "cross_market_headline": market_headline,
+        "us_headline": us_summary["headline"],
+        "china_headline": china_summary["headline"],
+        "scissors_spread_pp": us_summary["scissors_spread_pp"],
+        "liquidity_scissors_spread_pp": us_summary["liquidity_scissors_spread_pp"],
+        "china_scissors_spread_pp": china_summary["scissors_spread_pp"],
+        "china_liquidity_scissors_spread_pp": china_summary["liquidity_scissors_spread_pp"],
+        "fed_rate": us_summary["fed_rate"],
+        "cpi_yoy": us_summary["cpi_yoy"],
+        "ppi_yoy": us_summary["ppi_yoy"],
+        "m1_yoy": us_summary["m1_yoy"],
+        "m2_yoy": us_summary["m2_yoy"],
+        "cn_cpi_yoy": china_summary["cpi_yoy"],
+        "cn_ppi_yoy": china_summary["ppi_yoy"],
+        "cn_m1_yoy": china_summary["m1_yoy"],
+        "cn_m2_yoy": china_summary["m2_yoy"],
+        "regions": {
+            "market": {
+                "headline": market_headline,
+                "available_series": [key for key in ("vix", "dxy", "tnx_10y") if _coerce_finite_float(snapshot.get(key)) is not None],
+                "available_count": len([key for key in ("vix", "dxy", "tnx_10y") if _coerce_finite_float(snapshot.get(key)) is not None]),
+                "vix": round(vix, 4) if vix is not None else None,
+                "dxy": round(dxy, 4) if dxy is not None else None,
+                "tnx_10y": round(tnx, 4) if tnx is not None else None,
+            },
+            "us": us_summary,
+            "china": china_summary,
+        },
+    }
+
+
+async def _load_macro_snapshot_payload() -> Dict[str, Any]:
+    def _sync() -> Dict[str, Any]:
+        try:
+            from core.data.macro_collector import load_macro_snapshot  # noqa: PLC0415
+
+            return dict(load_macro_snapshot() or {})
+        except Exception:
+            return {}
+
+    return await asyncio.to_thread(_sync)
 
 
 async def _load_latest_snapshot(model: Any, exchange: str, symbol: str) -> Optional[Any]:
@@ -745,7 +1002,7 @@ def _fallback_factor_library_from_fama(
         "factors": factor_names,
         "universe_size": int(fama.get("universe_size") or len(asset_scores)),
         "universe_quality": fama.get("universe_quality") or "low",
-        "warnings": ["因子库已降级为 Fama 风格快照，横截面打分使用多币种收益近似生成。"],
+        "warnings": ["Factor library degraded to Fama snapshot fallback for fast workbench response."],
         "latest": dict(fama.get("latest") or {}),
         "mean_24": dict(fama.get("mean_24") or {}),
         "std_24": dict(fama.get("std_24") or {}),
@@ -758,17 +1015,19 @@ def _fallback_factor_library_from_fama(
 async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]:
     risk_task = _wait_or_none(
         get_risk_dashboard(lookback=min(720, profile.lookback)),
-        2.0,
+        4.0,
     )
     news_task = _wait_or_none(_build_news_summary(profile.primary_symbol, hours=24), 8.0)
-    calendar_task = _wait_or_none(get_trading_calendar(days=7), 2.0)
+    calendar_task = _wait_or_none(get_trading_calendar(days=7), 4.0)
+    macro_task = _wait_or_none(_load_macro_snapshot_payload(), 2.0)
     history_micro_task = _wait_or_none(_load_latest_microstructure_snapshot(profile.exchange, profile.primary_symbol), 4.0)
     history_community_task = _wait_or_none(_load_latest_community_snapshot(profile.exchange, profile.primary_symbol), 4.0)
     history_whale_task = _wait_or_none(_load_latest_whale_snapshot(profile.exchange, profile.primary_symbol), 4.0)
-    risk_dashboard, news, calendar_data, history_micro, history_community, history_whale = await asyncio.gather(
+    risk_dashboard, news, calendar_data, macro_snapshot, history_micro, history_community, history_whale = await asyncio.gather(
         risk_task,
         news_task,
         calendar_task,
+        macro_task,
         history_micro_task,
         history_community_task,
         history_whale_task,
@@ -776,6 +1035,7 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
     risk_dashboard = dict(risk_dashboard or {})
     news = dict(news or {})
     calendar_data = dict(calendar_data or {})
+    macro_snapshot = dict(macro_snapshot or {})
     history_micro = dict(history_micro or {})
     history_community = dict(history_community or {})
     history_whale = dict(history_whale or {})
@@ -783,8 +1043,8 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
     prefer_history_micro = _snapshot_is_recent(history_micro, _MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC) and _microstructure_has_signal(history_micro)
     prefer_history_community = _snapshot_is_recent(history_community, _MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC) and _community_has_signal(history_community)
 
-    live_micro_task = asyncio.sleep(0, result=None)
-    live_community_task = asyncio.sleep(0, result=None)
+    live_micro_task: Optional[Any] = None
+    live_community_task: Optional[Any] = None
     if not prefer_history_micro:
         live_micro_task = _wait_or_none(
             get_market_microstructure(
@@ -792,7 +1052,7 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
                 symbol=profile.primary_symbol,
                 depth_limit=20,
             ),
-            2.5,
+            4.0,
         )
     if not prefer_history_community:
         live_community_task = _wait_or_none(
@@ -800,12 +1060,10 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
                 symbol=profile.primary_symbol,
                 exchange=profile.exchange,
             ),
-            2.5,
+            4.0,
         )
-
-    live_micro, live_community = await asyncio.gather(live_micro_task, live_community_task)
-    live_micro = dict(live_micro or {})
-    live_community = dict(live_community or {})
+    live_micro = dict((await live_micro_task) or {}) if live_micro_task is not None else {}
+    live_community = dict((await live_community_task) or {}) if live_community_task is not None else {}
 
     micro = dict(history_micro if prefer_history_micro else (_merge_nested_payload(live_micro, history_micro) or {}))
     community = dict(history_community if prefer_history_community else (_merge_nested_payload(live_community, history_community) or {}))
@@ -829,6 +1087,7 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             used_history_whale = True
 
     calendar_rows = _map_calendar_rows(calendar_data.get("events") or [])
+    macro_summary = _build_macro_summary(macro_snapshot)
     analytics_modules = {
         "risk_dashboard": _analytics_module_entry(
             "risk_dashboard",
@@ -854,6 +1113,12 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             ok=_community_has_signal(community),
             error=None if _community_has_signal(community) else "community unavailable",
         ),
+        "macro": _analytics_module_entry(
+            "macro",
+            {"snapshot": macro_snapshot, "summary": macro_summary},
+            ok=_macro_has_signal(macro_snapshot),
+            error=None if _macro_has_signal(macro_snapshot) else "macro snapshot unavailable",
+        ),
     }
     analytics = {
         "timestamp": _now_iso(),
@@ -863,37 +1128,44 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
         "modules": analytics_modules,
     }
 
+    micro_summary = _build_microstructure_summary(micro)
     regime = _build_market_regime(analytics, micro, news)
     degraded = False
     warnings: List[str] = []
 
     if not risk_dashboard:
         degraded = True
-        warnings.append("分析总览未在时限内返回，当前仅基于局部结果给出判断。")
+        warnings.append("Risk dashboard timed out; market-state decision is based on partial inputs.")
     if str(news.get("scope")) == "global_fallback":
         degraded = True
-        warnings.append("当前标的新闻不足，已回退到全市场摘要。")
+        warnings.append("Symbol-scoped news was sparse; switched to global market news fallback.")
     if int(news.get("events_count") or 0) + int(news.get("feed_count") or 0) + int(news.get("raw_count") or 0) <= 0:
         degraded = True
         warnings.append("News summary returned no usable samples, so event coverage may be stale.")
     if used_history_micro and not prefer_history_micro:
         degraded = True
-        warnings.append("实时微观结构未及时返回，已回退到历史快照。")
+        warnings.append("Live microstructure timed out; using recent snapshot fallback.")
     if (used_history_community and not prefer_history_community) or used_history_whale:
         degraded = True
-        warnings.append("社区/巨鲸实时数据未及时返回，已回退到历史快照。")
+        warnings.append("Live community/whale stream timed out; using recent snapshot fallback.")
     if not calendar_rows:
         degraded = True
-        warnings.append("交易日历已使用观察清单回退结果。")
-    orderbook_payload = dict(micro.get("orderbook") or {})
-    has_depth_rows = bool(orderbook_payload.get("bid_depth") or orderbook_payload.get("ask_depth"))
-    has_mid_price = float(orderbook_payload.get("mid_price") or 0.0) > 0
-    if not has_mid_price and not has_depth_rows:
+        warnings.append("Trading calendar unavailable; watchlist fallback was used.")
+    if not micro_summary.get("has_actionable_signal"):
         degraded = True
-        warnings.append("微观结构深度不足，盘口与主动流解释力受限。")
+        warnings.append("Microstructure signal unavailable, so orderbook and order-flow interpretation is limited.")
+    elif not micro_summary.get("has_orderbook_depth"):
+        warnings.append("Orderbook depth rows are sparse; wall and liquidity diagnostics may be incomplete.")
+    if not micro_summary.get("long_short_ratio_available"):
+        warnings.append("Long/short ratio is unavailable for this snapshot; crowding diagnostics are partial.")
+    if not _macro_has_signal(macro_snapshot):
+        warnings.append("Macro snapshot is unavailable; regime view leans on microstructure/news only.")
+    elif macro_summary.get("scissors_spread_pp") is None:
+        warnings.append("Macro snapshot is missing the PPI-CPI scissors spread; refresh macro cache to restore it.")
+    elif macro_summary.get("china_scissors_spread_pp") is None:
+        warnings.append("China macro snapshot is missing the PPI-CPI scissors spread; China regime read is partial.")
     if regime.get("risk_level") == "high":
-        warnings.append("当前风险等级偏高，建议下调研究结论置信度。")
-
+        warnings.append("Current risk level is high; lower confidence and tighten risk budgets.")
     return _module_result(
         "market_state",
         status=_status_from_flags(ok=True, degraded=degraded),
@@ -904,6 +1176,7 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             "trading.analytics.community",
             "news.storage.summary",
             "analytics.history.snapshots",
+            "data.macro.snapshot",
         ],
         warnings=warnings,
         summary={
@@ -912,6 +1185,7 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             "direction_bias": regime["bias"],
             "confidence": regime["confidence"],
             "risk_level": regime["risk_level"],
+            "macro_focus": macro_summary["headline"],
         },
         payload={
             "analytics_overview": analytics,
@@ -920,11 +1194,18 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
                 "symbol": profile.primary_symbol,
                 "timestamp": _now_iso(),
                 "microstructure": micro,
+                "microstructure_summary": micro_summary,
                 "community": community,
                 "news": news,
+                "macro": macro_snapshot,
+                "macro_regions": dict(macro_summary.get("regions") or {}),
             },
             "calendar_watchlist": calendar_rows,
             "regime": regime,
+            "microstructure_summary": micro_summary,
+            "macro_snapshot": macro_snapshot,
+            "macro_summary": macro_summary,
+            "macro_regions": dict(macro_summary.get("regions") or {}),
         },
     )
 
@@ -961,7 +1242,7 @@ async def _build_factors_module(profile: ResearchProfile) -> Dict[str, Any]:
             lookback=min(360, profile.lookback),
             exclude_retired=profile.exclude_retired,
         ),
-        8.0,
+        12.0,
     )
     factor_raw, fama_raw, cross_asset_raw = await asyncio.gather(factor_task, fama_task, cross_task)
     fama = _compact_fama(fama_raw or {})
@@ -979,13 +1260,12 @@ async def _build_factors_module(profile: ResearchProfile) -> Dict[str, Any]:
 
     warnings: List[str] = list(factor_library.get("warnings") or [])
     if not factor_library:
-        warnings.append("因子库未在时限内完成，当前仅保留最小摘要。")
+        warnings.append("Factor library timed out; returning a minimal fallback summary.")
     if not fama:
-        warnings.append("Fama 风格因子已降级，当前不展示完整时序。")
+        warnings.append("Fama-style factors unavailable for this run.")
     if not cross_asset:
-        warnings.append("多币种横截面快照未在时限内完成，资产排序可能不完整。")
-    warnings.append("当前为高级研究快路径，因子模块展示的是轻量摘要，不等同于全量因子实验。")
-
+        warnings.append("Cross-asset snapshot timed out; asset ranking may be incomplete.")
+    warnings.append("Workbench factor module is optimized for speed and does not replace full factor research jobs.")
     latest_fama = dict(fama.get("latest") or {})
     top_symbols = [str(item.get("symbol") or "") for item in list(factor_library.get("asset_scores") or [])[:3] if item.get("symbol")]
     degraded = (
@@ -1001,7 +1281,7 @@ async def _build_factors_module(profile: ResearchProfile) -> Dict[str, Any]:
         source_labels=["data.factors.library", "data.factors.fama"],
         warnings=warnings[:8],
         summary={
-            "headline": "因子与风格偏置",
+            "headline": "Factor & Style",
             "top_symbols": top_symbols,
             "universe_size": int(factor_library.get("universe_size") or 0),
             "factor_count": len(factor_library.get("factors") or []),
@@ -1021,12 +1301,12 @@ async def _build_cross_asset_module(profile: ResearchProfile) -> Dict[str, Any]:
             lookback=min(720, profile.lookback),
             exclude_retired=profile.exclude_retired,
         ),
-        8.0,
+        12.0,
     ) or {}
     assets = list(data.get("assets") or [])
     leader = assets[0] if assets else {}
     degraded = int(data.get("count") or 0) < 3
-    warnings = ["可用币种不足 3 个，轮动判断可能失真。"] if degraded else []
+    warnings = ["Available symbols are fewer than 3; cross-asset rotation may be noisy."] if degraded else []
 
     return _module_result(
         "cross_asset",
@@ -1034,7 +1314,7 @@ async def _build_cross_asset_module(profile: ResearchProfile) -> Dict[str, Any]:
         source_labels=["data.multi_assets.overview"],
         warnings=warnings,
         summary={
-            "headline": "多币种强弱与相关性",
+            "headline": "Cross-Asset Rotation",
             "asset_count": int(data.get("count") or 0),
             "leader_symbol": str(leader.get("symbol") or "-"),
             "leader_return_pct": float(leader.get("return_pct") or 0.0),
@@ -1086,15 +1366,15 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
     )
     warnings: List[str] = []
     if not onchain:
-        warnings.append("链上概览未在时限内返回，当前使用外生信息摘要。")
+        warnings.append("Onchain overview timed out; returning fallback summary.")
     elif onchain.get("degraded"):
-        warnings.append("链上数据包含代理源或缓存结果，可靠性低于实时链路。")
+        warnings.append("Onchain payload contains proxy/cache data; confidence is reduced.")
     if funding_count <= 0:
-        warnings.append("多交易所 Funding 费率暂不可用。")
+        warnings.append("Multi-exchange funding rates are currently unavailable.")
     if not fear_greed_available:
-        warnings.append("恐慌贪婪指数暂不可用。")
+        warnings.append("Fear & Greed index is currently unavailable.")
     if str(news.get("scope")) == "global_fallback":
-        warnings.append("当前标的外生新闻覆盖不足。")
+        warnings.append("Symbol-specific exogenous news is sparse; using global fallback.")
 
     return _module_result(
         "onchain",
@@ -1102,7 +1382,7 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
         source_labels=["data.onchain.overview", "trading.analytics.community", "news.storage.summary", "analytics.history"],
         warnings=warnings[:8],
         summary={
-            "headline": "链上与外生信息",
+            "headline": "Onchain & Exogenous",
             "whale_count": int(
                 (onchain.get("whale_activity") or {}).get("count")
                 or (community.get("whale_transfers") or {}).get("count")
@@ -1126,7 +1406,6 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
         },
     )
 
-
 async def _build_discipline_module(_: ResearchProfile) -> Dict[str, Any]:
     behavior_task = _wait_or_none(get_behavior_report(days=7), 4.0)
     stoploss_task = _wait_or_none(get_stoploss_policy(), 4.0)
@@ -1140,11 +1419,11 @@ async def _build_discipline_module(_: ResearchProfile) -> Dict[str, Any]:
 
     warnings: List[str] = []
     if degraded:
-        warnings.append("近期没有行为记录，纪律模块只能提供通用建议。")
+        warnings.append("No recent behavior logs; discipline module is showing generic guidance only.")
     if overtrade:
-        warnings.append("检测到过度交易风险。")
+        warnings.append("Overtrading risk detected.")
     if impulsive_ratio >= 0.3:
-        warnings.append("近期冲动交易占比偏高。")
+        warnings.append("Impulsive trading ratio is elevated.")
 
     return _module_result(
         "discipline",
@@ -1152,7 +1431,7 @@ async def _build_discipline_module(_: ResearchProfile) -> Dict[str, Any]:
         source_labels=["trading.analytics.behavior.report", "trading.analytics.stoploss.policy"],
         warnings=warnings,
         summary={
-            "headline": "纪律与风控",
+            "headline": "Discipline & Risk Control",
             "entries": int(behavior.get("entries") or 0),
             "impulsive_ratio": round(impulsive_ratio, 4),
             "overtrading_warning": overtrade,
@@ -1160,7 +1439,6 @@ async def _build_discipline_module(_: ResearchProfile) -> Dict[str, Any]:
         },
         payload={"behavior_report": behavior, "stoploss_policy": stoploss},
     )
-
 
 async def _build_module(module_name: str, profile: ResearchProfile) -> Dict[str, Any]:
     if module_name == "market_state":
@@ -1184,8 +1462,8 @@ async def _capture_module_build(module_name: str, profile: ResearchProfile) -> D
             module_name,
             status="error",
             source_labels=[f"research.workbench.{module_name}"],
-            warnings=[f"{module_name} 超时，已跳过本轮结果。"],
-            summary={"headline": f"{module_name} 加载超时", "error": "timeout"},
+            warnings=[f"{module_name} timed out and was skipped this round."],
+            summary={"headline": f"{module_name} timeout", "error": "timeout"},
             payload={"error": "timeout"},
         )
     except HTTPException as exc:
@@ -1197,7 +1475,7 @@ async def _capture_module_build(module_name: str, profile: ResearchProfile) -> D
             status="error",
             source_labels=[f"research.workbench.{module_name}"],
             warnings=[error_text],
-            summary={"headline": f"{module_name} 加载失败", "error": error_text},
+            summary={"headline": f"{module_name} failed", "error": error_text},
             payload={"error": error_text},
         )
     except Exception as exc:
@@ -1207,7 +1485,7 @@ async def _capture_module_build(module_name: str, profile: ResearchProfile) -> D
             status="error",
             source_labels=[f"research.workbench.{module_name}"],
             warnings=[error_text],
-            summary={"headline": f"{module_name} 加载失败", "error": error_text},
+            summary={"headline": f"{module_name} failed", "error": error_text},
             payload={"error": error_text},
         )
 
@@ -1218,13 +1496,11 @@ def _build_recommendations(
     overview: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     market_payload = _extract_module_payload(modules.get("market_state"))
-    factors_payload = _extract_module_payload(modules.get("factors"))
     cross_payload = _extract_module_payload(modules.get("cross_asset"))
     onchain_payload = _extract_module_payload(modules.get("onchain"))
     discipline_payload = _extract_module_payload(modules.get("discipline"))
 
     regime = dict(market_payload.get("regime") or {})
-    factor_library = dict(factors_payload.get("factor_library") or {})
     cross_asset = dict(cross_payload.get("cross_asset") or {})
     onchain = dict(onchain_payload.get("onchain") or {})
     sentiment_dashboard = dict(market_payload.get("sentiment_dashboard") or {})
@@ -1233,55 +1509,49 @@ def _build_recommendations(
 
     direction_bias = str(regime.get("bias") or "neutral")
     if direction_bias == "bullish":
-        preferred = ["趋势跟随", "动量突破", "低杠杆顺势"]
+        preferred = ["trend_following", "momentum_breakout", "pullback_entry"]
     elif direction_bias == "bearish":
-        preferred = ["防守型均值回归", "反弹做空", "事件驱动快进快出"]
+        preferred = ["defensive_mean_reversion", "short_rebound", "event_scalp"]
     else:
-        preferred = ["均值回归", "低频震荡", "轻仓事件跟踪"]
+        preferred = ["mean_reversion", "range_trade", "light_positioning"]
 
     avoid: List[str] = []
     next_actions: List[str] = []
     jump_targets: List[Dict[str, Any]] = []
 
-    asset_scores = list(factor_library.get("asset_scores") or [])
-    top_symbols = [str(item.get("symbol") or "") for item in asset_scores[:3] if item.get("symbol")]
-    if top_symbols:
-        next_actions.append(f"优先观察 {' / '.join(top_symbols)} 的短周期结构与回测表现。")
-        jump_targets.append(
-            {
-                "label": "去回测这些币",
-                "target": "backtest",
-                "params": {"symbols": top_symbols, "timeframe": profile.timeframe},
-            }
-        )
-
     if bool(onchain.get("degraded")):
-        avoid.append("链上与外生信息当前包含降级样本，不适合单独作为开仓依据。")
+        avoid.append("Onchain context is degraded; do not use it as a sole entry trigger.")
     if int(news_summary.get("events_count") or 0) == 0:
-        avoid.append("当前标的新闻事件覆盖不足，不要过度依赖事件驱动判断。")
+        avoid.append("Symbol-level news coverage is sparse; avoid event-only decisions.")
     if bool(behavior.get("overtrading_warning")):
-        avoid.append("当前存在过度交易风险，建议减少试错频率。")
+        avoid.append("Overtrading risk is active; reduce trial frequency.")
     if float(behavior.get("impulsive_ratio") or 0.0) >= 0.3:
-        avoid.append("近期执行纪律偏弱，避免同时追多个币。")
+        avoid.append("Execution discipline is weak; avoid chasing multiple symbols.")
 
     if direction_bias == "bullish":
-        next_actions.append("先验证顺势策略在 5m / 15m 上的连续性，再决定是否放大仓位。")
-        jump_targets.append(
-            {
-                "label": "去 AI 研究筛候选",
-                "target": "ai-research",
-                "params": {"goal": "短周期顺势与动量候选", "timeframe": profile.timeframe},
-            }
-        )
+        next_actions.append("Validate trend continuity on 5m/15m before scaling positions.")
     elif direction_bias == "bearish":
-        next_actions.append("优先评估防守型与回撤控制策略，不建议直接追单边。")
+        next_actions.append("Prioritize defensive setups and downside risk control.")
     else:
-        next_actions.append("先在回测页验证均值回归或震荡策略，不要直接扩到过多币种。")
+        next_actions.append("Validate range or mean-reversion setups before expanding coverage.")
 
     if int(cross_asset.get("count") or 0) < 3:
-        next_actions.append("先补足多币种覆盖，再做横截面轮动判断。")
+        next_actions.append("Expand symbol coverage before making rotation conclusions.")
 
-    headline = str((overview or {}).get("market_regime") or regime.get("regime") or "短周期研究建议")
+    headline = str((overview or {}).get("market_regime") or regime.get("regime") or "research_recommendation")
+    if profile.primary_symbol:
+        jump_targets.append(
+            {
+                "label": f"Backtest {profile.primary_symbol}",
+                "target": "backtest",
+                "params": {
+                    "exchange": profile.exchange,
+                    "symbol": profile.primary_symbol,
+                    "timeframe": profile.timeframe,
+                },
+            }
+        )
+
     return {
         "direction_bias": direction_bias,
         "preferred_strategy_families": preferred,
@@ -1318,54 +1588,48 @@ def _build_structured_recommendations(
     def _pick_backtest_strategy(bias: str, title: str) -> Dict[str, str]:
         headline_text = str(title or "")
         headline_lower = headline_text.lower()
-        if "breakout" in headline_lower or "突破" in headline_text:
-            return {"strategy_type": "DonchianBreakoutStrategy", "label": "突破"}
+        if "breakout" in headline_lower or "break" in headline_lower or "绐佺牬" in headline_text or "突破" in headline_text:
+            return {"strategy_type": "DonchianBreakoutStrategy", "label": "breakout"}
         if bias == "bullish":
-            return {"strategy_type": "TrendFollowingStrategy", "label": "趋势"}
+            return {"strategy_type": "TrendFollowingStrategy", "label": "trend"}
         if bias == "bearish":
-            return {"strategy_type": "MeanReversionStrategy", "label": "防守"}
-        return {"strategy_type": "MeanReversionStrategy", "label": "均值回归"}
+            return {"strategy_type": "MeanReversionStrategy", "label": "defensive"}
+        return {"strategy_type": "MeanReversionStrategy", "label": "mean_reversion"}
 
     def _map_planner_regime(bias: str, title: str) -> str:
         headline_text = str(title or "")
         headline_lower = headline_text.lower()
-        if "news" in headline_lower or "事件" in headline_text or "新闻" in headline_text:
+        if "news" in headline_lower or "event" in headline_lower or "浜嬩欢" in headline_text or "鏂伴椈" in headline_text:
             return "news_event"
-        if "breakout" in headline_lower or "突破" in headline_text:
+        if "breakout" in headline_lower or "break" in headline_lower or "绐佺牬" in headline_text or "突破" in headline_text:
             return "breakout"
         if bias == "bullish":
             return "trend_up"
         if bias == "bearish":
             return "trend_down"
-        if "mean" in headline_lower or "回归" in headline_text or "震荡" in headline_text:
+        if "mean" in headline_lower or "range" in headline_lower:
             return "mean_reversion"
         return "mixed"
 
+    base = _build_recommendations(profile, modules, overview)
     market_payload = _extract_module_payload(modules.get("market_state"))
     factors_payload = _extract_module_payload(modules.get("factors"))
     cross_payload = _extract_module_payload(modules.get("cross_asset"))
     onchain_payload = _extract_module_payload(modules.get("onchain"))
-    discipline_payload = _extract_module_payload(modules.get("discipline"))
 
     regime = dict(market_payload.get("regime") or {})
     factor_library = dict(factors_payload.get("factor_library") or {})
     cross_asset = dict(cross_payload.get("cross_asset") or {})
     onchain = dict(onchain_payload.get("onchain") or {})
     sentiment_dashboard = dict(market_payload.get("sentiment_dashboard") or {})
+    macro_snapshot = dict(market_payload.get("macro_snapshot") or sentiment_dashboard.get("macro") or {})
     news_summary = dict(onchain_payload.get("news_summary") or sentiment_dashboard.get("news") or {})
-    behavior = dict(discipline_payload.get("behavior_report") or {})
 
-    direction_bias = str(regime.get("bias") or "neutral")
-    if direction_bias == "bullish":
-        preferred = ["趋势跟随", "动量突破", "低杠杆顺势"]
-    elif direction_bias == "bearish":
-        preferred = ["防守型均值回归", "反弹做空", "事件驱动快进快出"]
-    else:
-        preferred = ["均值回归", "低频震荡", "轻仓事件跟踪"]
-
-    avoid: List[str] = []
-    next_actions: List[str] = []
-    jump_targets: List[Dict[str, Any]] = []
+    direction_bias = str(base.get("direction_bias") or "neutral")
+    preferred = list(base.get("preferred_strategy_families") or [])
+    avoid = list(base.get("avoid_conditions") or [])
+    next_actions = list(base.get("next_actions") or [])
+    jump_targets = list(base.get("backtest_jump_targets") or [])
 
     asset_scores = list(factor_library.get("asset_scores") or [])
     factor_focus = [
@@ -1381,29 +1645,11 @@ def _build_structured_recommendations(
     top_symbols = [item["symbol"] for item in factor_focus]
     focus_symbols = top_symbols or [profile.primary_symbol]
 
-    if bool(onchain.get("degraded")):
-        avoid.append("链上与外生信息当前包含降级样本，不适合作为单独开仓依据。")
-    if int(news_summary.get("events_count") or 0) == 0:
-        avoid.append("当前标的新闻事件覆盖不足，不要过度依赖事件驱动判断。")
-    if bool(behavior.get("overtrading_warning")):
-        avoid.append("当前存在过度交易风险，建议减少试错频率。")
-    if float(behavior.get("impulsive_ratio") or 0.0) >= 0.3:
-        avoid.append("近期执行纪律偏弱，避免同时追多个币。")
-
-    if direction_bias == "bullish":
-        next_actions.append("先验证顺势策略在 5m / 15m 上的连续性，再决定是否放大仓位。")
-    elif direction_bias == "bearish":
-        next_actions.append("优先评估防守型与回撤控制策略，不建议直接追单边。")
-    else:
-        next_actions.append("先在回测页验证均值回归或震荡策略，不要直接扩到过多币种。")
-
-    if int(cross_asset.get("count") or 0) < 3:
-        next_actions.append("先补足多币种覆盖，再做横截面轮动判断。")
-
-    headline = str((overview or {}).get("market_regime") or regime.get("regime") or "短周期研究建议")
+    headline = str((overview or {}).get("market_regime") or regime.get("regime") or base.get("headline") or "research_recommendation")
     planner_regime = _map_planner_regime(direction_bias, headline)
     research_timeframes = _derive_research_timeframes(profile.timeframe)
     backtest_strategy = _pick_backtest_strategy(direction_bias, headline)
+
     factor_source_meta = {
         "served_mode": str(factor_library.get("served_mode") or "unknown"),
         "cached": bool(factor_library.get("cached")),
@@ -1412,32 +1658,37 @@ def _build_structured_recommendations(
         "symbols_used": int(len(factor_library.get("symbols_used") or [])),
         "generated_at": str(modules.get("factors", {}).get("generated_at") or ""),
     }
+
+    thesis_points: List[str] = []
+    if factor_focus:
+        thesis_points.append(
+            "Factor focus: "
+            + " / ".join(f"{item['symbol']}({item['score']:.2f})" for item in factor_focus)
+        )
     cross_leader = str(
         cross_asset.get("leader_symbol")
         or ((cross_asset.get("assets") or [{}])[0].get("symbol") if isinstance(cross_asset.get("assets"), list) else "")
         or ""
     )
-    whale_count = int((onchain.get("whale_activity") or {}).get("count") or 0)
-
-    thesis_points: List[str] = []
-    if factor_focus:
-        thesis_points.append(
-            "因子面当前靠前："
-            + " / ".join(f"{item['symbol']}({item['score']:.2f})" for item in factor_focus)
-            + "。"
-        )
     if cross_leader:
-        thesis_points.append(f"横截面轮动当前由 {cross_leader} 领涨领跌，可作为强弱锚点。")
+        thesis_points.append(f"Cross-asset leader: {cross_leader}.")
+    whale_count = int((onchain.get("whale_activity") or {}).get("count") or 0)
     if whale_count > 0:
-        thesis_points.append(f"链上巨鲸活跃 {whale_count} 笔，短期波动可能被放大。")
+        thesis_points.append(f"Whale transfers active ({whale_count}).")
+    macro_gap = _coerce_finite_float(macro_snapshot.get("ppi_cpi_gap"))
+    if macro_gap is not None:
+        thesis_points.append(f"Macro scissors spread (PPI-CPI): {macro_gap:+.2f}pp.")
+    liquidity_gap = _coerce_finite_float(macro_snapshot.get("m1_m2_gap"))
+    if liquidity_gap is not None:
+        thesis_points.append(f"Liquidity scissors spread (M1-M2): {liquidity_gap:+.2f}pp.")
     if int(news_summary.get("events_count") or 0) > 0:
-        thesis_points.append(f"近 24h 新闻事件 {int(news_summary.get('events_count') or 0)} 条，可作为事件风向参考。")
+        thesis_points.append(f"News events in last 24h: {int(news_summary.get('events_count') or 0)}.")
     if not thesis_points:
-        thesis_points.append("当前结论主要来自研究总览摘要，建议补齐模块后再下结论。")
+        thesis_points.append("Current conclusion is built from lightweight module summaries.")
 
     ai_goal = (
-        f"围绕 {'、'.join(focus_symbols)} 在 {headline} 环境下，"
-        f"优先验证 {' / '.join(preferred[:2])} 策略，明确触发条件、失效条件与仓位约束。"
+        f"Focus on {' / '.join(focus_symbols)} under {headline}, validate {' / '.join(preferred[:2] or ['core'])}, "
+        "and define trigger, invalidation, and position constraints."
     )
     ai_brief = {
         "headline": headline,
@@ -1449,20 +1700,20 @@ def _build_structured_recommendations(
         "timeframes": research_timeframes,
         "preferred_strategy_families": preferred,
         "thesis": thesis_points[:4],
-        "risk_notes": (avoid or ["暂无明显额外风险，但仍需先做回测与成交质量验证。"])[:4],
+        "risk_notes": (avoid or ["No extra abnormal risk flagged, but backtest/execution quality checks are required."])[:4],
         "next_steps": next_actions[:4],
         "factor_focus": factor_focus,
     }
     ai_brief["prompt_context"] = "\n".join(
         [
-            f"研究任务：{ai_goal}",
-            f"市场状态：{headline} / {direction_bias}",
-            f"关注标的：{' / '.join(ai_brief['symbols'])}",
-            f"观察周期：{' / '.join(ai_brief['timeframes'])}",
-            f"优先策略：{' / '.join(preferred)}",
-            f"研究观察：{'；'.join(ai_brief['thesis'])}",
-            f"风险提示：{'；'.join(ai_brief['risk_notes'])}",
-            f"下一步：{'；'.join(ai_brief['next_steps'])}",
+            f"Research goal: {ai_goal}",
+            f"Market state: {headline} / {direction_bias}",
+            f"Symbols: {' / '.join(ai_brief['symbols'])}",
+            f"Timeframes: {' / '.join(ai_brief['timeframes'])}",
+            f"Preferred families: {' / '.join(preferred)}",
+            f"Thesis: {'; '.join(ai_brief['thesis'])}",
+            f"Risk notes: {'; '.join(ai_brief['risk_notes'])}",
+            f"Next steps: {'; '.join(ai_brief['next_steps'])}",
         ]
     )
 
@@ -1470,8 +1721,8 @@ def _build_structured_recommendations(
         {
             "id": "prefill_ai_research",
             "kind": "ai_prefill",
-            "label": "填入 AI 研究器",
-            "description": "把市场状态、币种、周期和风险约束写入 AI 研究页面。",
+            "label": "Prefill AI Research",
+            "description": "Fill AI research panel with market state, symbols, and risk constraints.",
             "tone": "primary",
             "params": {
                 "goal": ai_brief["prompt_context"],
@@ -1482,6 +1733,7 @@ def _build_structured_recommendations(
             },
         }
     ]
+
     if focus_symbols:
         backtest_params = {
             "exchange": profile.exchange,
@@ -1494,26 +1746,27 @@ def _build_structured_recommendations(
             {
                 "id": "open_backtest_focus_symbol",
                 "kind": "backtest",
-                "label": f"回测 {focus_symbols[0]} {backtest_strategy['label']}策略",
-                "description": f"跳转到回测页并预填 {focus_symbols[0]} / {profile.timeframe}。",
+                "label": f"Backtest {focus_symbols[0]} ({backtest_strategy['label']})",
+                "description": f"Open backtest with {focus_symbols[0]} / {profile.timeframe} preset.",
                 "tone": "positive",
                 "params": backtest_params,
             }
         )
         jump_targets.append(
             {
-                "label": f"回测 {focus_symbols[0]} {backtest_strategy['label']}策略",
+                "label": f"Backtest {focus_symbols[0]} ({backtest_strategy['label']})",
                 "target": "backtest",
                 "params": backtest_params,
             }
         )
+
     if not top_symbols:
         action_items.append(
             {
                 "id": "refresh_factor_module",
                 "kind": "module",
-                "label": "刷新因子面",
-                "description": "当前还没有清晰的优先币种，先补齐因子排序。",
+                "label": "Refresh Factors",
+                "description": "No clear priority symbols yet; refresh factor ranking.",
                 "tone": "neutral",
                 "module": "factors",
             }
@@ -1523,8 +1776,8 @@ def _build_structured_recommendations(
             {
                 "id": "refresh_cross_asset_module",
                 "kind": "module",
-                "label": "补齐横截面覆盖",
-                "description": "可用币种不足，先刷新多币种轮动面板。",
+                "label": "Refresh Cross-Asset",
+                "description": "Symbol coverage is sparse; refresh cross-asset module.",
                 "tone": "neutral",
                 "module": "cross_asset",
             }
@@ -1534,8 +1787,8 @@ def _build_structured_recommendations(
             {
                 "id": "refresh_onchain_module",
                 "kind": "module",
-                "label": "刷新链上与外生",
-                "description": "链上或新闻覆盖偏弱，先补齐外部上下文。",
+                "label": "Refresh Onchain",
+                "description": "Onchain/news context is weak; refresh exogenous module.",
                 "tone": "warn",
                 "module": "onchain",
             }
@@ -1548,15 +1801,15 @@ def _build_structured_recommendations(
                 "title": "因子观察",
                 "tone": "neutral",
                 "body": " / ".join(
-                    f"{item['symbol']} 评分 {item['score']:.2f}"
-                    + (f" | 动量 {item['momentum']:.2f}" if item["momentum"] else "")
+                    f"{item['symbol']} score {item['score']:.2f}" + (f" | momentum {item['momentum']:.2f}" if item["momentum"] else "")
                     for item in factor_focus
                 ),
             }
         )
-    insight_cards.extend({"title": "下一步", "tone": "positive", "body": text} for text in next_actions[:4])
-    insight_cards.extend({"title": "风险提示", "tone": "warn", "body": text} for text in avoid[:4])
+    insight_cards.extend({"title": "Next Step", "tone": "positive", "body": text} for text in next_actions[:4])
+    insight_cards.extend({"title": "Risk Note", "tone": "warn", "body": text} for text in avoid[:4])
     insight_cards.extend({"title": "研究观察", "tone": "neutral", "body": text} for text in thesis_points[:4])
+
     return {
         "direction_bias": direction_bias,
         "preferred_strategy_families": preferred,
@@ -1572,7 +1825,6 @@ def _build_structured_recommendations(
         "headline": headline,
         "generated_at": _now_iso(),
     }
-
 
 async def _get_research_workbench_context(exchange: str = "binance") -> Dict[str, Any]:
     symbols = await get_research_symbols(exchange=exchange)
@@ -1617,7 +1869,7 @@ async def _run_research_workbench_overview(payload: ResearchWorkbenchRequest) ->
                 status="error",
                 source_labels=[f"research.workbench.{name}"],
                 warnings=[str(result)],
-                summary={"headline": f"{name} 加载失败", "error": str(result)},
+                summary={"headline": f"{name} failed", "error": str(result)},
                 payload={"error": str(result)},
             )
             continue
@@ -1630,7 +1882,7 @@ async def _run_research_workbench_overview(payload: ResearchWorkbenchRequest) ->
     regime = dict(_extract_module_payload(modules.get("market_state")).get("regime") or {})
     return {
         "profile": profile.model_dump(),
-        "market_regime": regime.get("regime") or "待确认",
+        "market_regime": regime.get("regime") or "pending_confirmation",
         "direction_bias": regime.get("bias") or "neutral",
         "confidence": float(regime.get("confidence") or 0.0),
         "coverage": {
@@ -1781,19 +2033,19 @@ async def get_regime_calendar(
 
         # Classify daily regime
         if avg_spread >= 8:
-            regime = "高风险震荡"
+            regime = "high_risk_chop"
             bias = "defensive"
         elif avg_imbalance >= 0.12:
-            regime = "顺势偏多"
+            regime = "trend_bullish"
             bias = "bullish"
         elif avg_imbalance <= -0.12:
-            regime = "顺势偏空"
+            regime = "trend_bearish"
             bias = "bearish"
         elif abs(avg_imbalance) <= 0.05:
-            regime = "低信息震荡"
+            regime = "low_info_range"
             bias = "neutral"
         else:
-            regime = "事件驱动混合"
+            regime = "event_driven_mixed"
             bias = "neutral"
 
         calendar.append({
@@ -1814,3 +2066,10 @@ async def get_regime_calendar(
         "calendar": calendar,
         "generated_at": _now_iso(),
     }
+
+
+
+
+
+
+

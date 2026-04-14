@@ -76,36 +76,41 @@ def _normalize_timeframes(values: List[str]) -> List[str]:
 
 def _category_aliases() -> Dict[str, List[str]]:
     return {
-        "trend_up":      ["趋势", "动量", "突破"],
-        "trend_down":    ["趋势", "动量", "风险"],
-        "trend":         ["趋势", "动量"],
-        "mean_reversion":["震荡", "均值回归", "成交量"],
-        "reversion":     ["震荡", "均值回归"],
-        "breakout":      ["突破", "动量", "成交量"],
-        "stat_arb":      ["统计套利", "量化"],
-        "cross_sectional":["统计套利"],
-        "news_event":    ["宏观", "趋势"],
-        "event":         ["宏观", "趋势"],
-        "volatile":      ["波动率", "风险", "突破"],
-        "ranging":       ["震荡", "均值回归", "成交量"],
+        "trend_up":         ["趋势", "动量", "突破"],
+        "trend_bullish":    ["趋势", "动量", "突破"],
+        "trend_down":       ["趋势", "动量", "风险"],
+        "trend_bearish":    ["趋势", "动量", "风险"],
+        "trend":            ["趋势", "动量"],
+        "mean_reversion":   ["震荡", "均值回归", "成交量"],
+        "reversion":        ["震荡", "均值回归"],
+        "low_info_range":   ["震荡", "均值回归", "成交量"],
+        "breakout":         ["突破", "动量", "成交量"],
+        "stat_arb":         ["统计套利", "量化"],
+        "cross_sectional":  ["统计套利"],
+        "news_event":       ["宏观", "趋势"],
+        "event":            ["宏观", "趋势"],
+        "event_driven_mixed":["宏观", "趋势", "突破"],
+        "volatile":         ["波动率", "风险", "突破"],
+        "high_risk_chop":   ["波动率", "风险", "震荡"],
+        "ranging":          ["震荡", "均值回归", "成交量"],
         # mixed = all categories, let catalog sort by priority
-        "mixed":         ["趋势", "震荡", "动量", "均值回归", "突破", "成交量", "统计套利", "量化", "波动率", "风险"],
+        "mixed":            ["趋势", "震荡", "动量", "均值回归", "突破", "成交量", "统计套利", "量化", "波动率", "风险"],
     }
 
 
 def _default_strategy_templates(market_regime: str, symbols: List[str]) -> List[str]:
     regime = str(market_regime or "").strip().lower()
-    if regime in {"trend", "trending", "trend_up", "trend_down"}:
+    if regime in {"trend", "trending", "trend_up", "trend_down", "trend_bullish", "trend_bearish"}:
         return ["MAStrategy", "EMAStrategy", "MACDStrategy", "ADXTrendStrategy", "AroonStrategy", "TrendFollowingStrategy"]
-    if regime in {"mean_reversion", "reversion", "ranging"}:
+    if regime in {"mean_reversion", "reversion", "ranging", "low_info_range"}:
         return ["RSIStrategy", "StochasticStrategy", "CCIStrategy", "BollingerBandsStrategy", "MeanReversionStrategy", "VWAPReversionStrategy"]
     if regime in {"breakout"}:
         return ["DonchianBreakoutStrategy", "BollingerSqueezeStrategy", "MomentumStrategy", "ROCStrategy", "OBVStrategy"]
     if regime in {"stat_arb", "statarb", "cross_sectional"}:
         return ["PairsTradingStrategy", "HurstExponentStrategy", "MultiFactorHFStrategy"]
-    if regime in {"volatile"}:
+    if regime in {"volatile", "high_risk_chop"}:
         return ["ParkinsonVolStrategy", "UlcerIndexStrategy", "VaRBreakoutStrategy", "BollingerSqueezeStrategy"]
-    if regime in {"news", "news_event", "event"}:
+    if regime in {"news", "news_event", "event", "event_driven_mixed"}:
         return ["MarketSentimentStrategy", "SocialSentimentStrategy", "FundFlowStrategy", "WhaleActivityStrategy"]
     if len(symbols) >= 2:
         return ["PairsTradingStrategy", "HurstExponentStrategy", "MAStrategy", "MultiFactorHFStrategy"]
@@ -290,6 +295,18 @@ def _parse_market_context(market_context: Dict[str, Any]) -> Tuple[List[str], Li
                 suppressed.extend(["动量"])
             elif tnx < 3.5:     # low rates → risk-on
                 boosted.extend(["动量"])
+        ppi_cpi_gap = macro.get("ppi_cpi_gap")
+        if ppi_cpi_gap is not None and abs(float(ppi_cpi_gap or 0.0)) >= 2.0:
+            boosted.extend(["宏观"])
+        m1_m2_gap = macro.get("m1_m2_gap")
+        if m1_m2_gap is not None and abs(float(m1_m2_gap or 0.0)) >= 2.0:
+            boosted.extend(["宏观"])
+        cn_ppi_cpi_gap = macro.get("cn_ppi_cpi_gap")
+        if cn_ppi_cpi_gap is not None and abs(float(cn_ppi_cpi_gap or 0.0)) >= 2.0:
+            boosted.extend(["宏观"])
+        cn_m1_m2_gap = macro.get("cn_m1_m2_gap")
+        if cn_m1_m2_gap is not None and abs(float(cn_m1_m2_gap or 0.0)) >= 2.0:
+            boosted.extend(["宏观"])
     except Exception:
         pass
 
@@ -738,6 +755,8 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
             from core.data.macro_collector import load_macro_snapshot as _macro_snap  # noqa: PLC0415
             _m = _macro_snap()
             _macro_parts = []
+            _us_parts = []
+            _cn_parts = []
             if _m.get("vix") is not None:
                 _macro_parts.append(f"VIX={_m['vix']:.1f}")
             if _m.get("dxy") is not None:
@@ -745,9 +764,29 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
             if _m.get("tnx_10y") is not None:
                 _macro_parts.append(f"10Y={_m['tnx_10y']:.2f}%")
             if _m.get("fed_rate") is not None:
-                _macro_parts.append(f"FF={_m['fed_rate']:.2f}%")
+                _us_parts.append(f"FF={_m['fed_rate']:.2f}%")
+            if _m.get("cpi_yoy") is not None:
+                _us_parts.append(f"CPI={_m['cpi_yoy']:.2f}%")
+            if _m.get("ppi_yoy") is not None:
+                _us_parts.append(f"PPI={_m['ppi_yoy']:.2f}%")
+            if _m.get("ppi_cpi_gap") is not None:
+                _us_parts.append(f"PPI-CPI={_m['ppi_cpi_gap']:+.2f}pp")
+            if _m.get("m1_m2_gap") is not None:
+                _us_parts.append(f"M1-M2={_m['m1_m2_gap']:+.2f}pp")
+            if _m.get("cn_cpi_yoy") is not None:
+                _cn_parts.append(f"CPI={_m['cn_cpi_yoy']:.2f}%")
+            if _m.get("cn_ppi_yoy") is not None:
+                _cn_parts.append(f"PPI={_m['cn_ppi_yoy']:.2f}%")
+            if _m.get("cn_ppi_cpi_gap") is not None:
+                _cn_parts.append(f"PPI-CPI={_m['cn_ppi_cpi_gap']:+.2f}pp")
+            if _m.get("cn_m1_m2_gap") is not None:
+                _cn_parts.append(f"M1-M2={_m['cn_m1_m2_gap']:+.2f}pp")
             if _macro_parts:
-                signal_parts.append("宏观=[" + " · ".join(_macro_parts) + "]")
+                signal_parts.append("Macro[Cross]=" + " · ".join(_macro_parts))
+            if _us_parts:
+                signal_parts.append("Macro[US]=" + " · ".join(_us_parts))
+            if _cn_parts:
+                signal_parts.append("Macro[China]=" + " · ".join(_cn_parts))
         except Exception:
             pass
         try:

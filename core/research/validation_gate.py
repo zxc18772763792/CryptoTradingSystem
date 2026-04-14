@@ -210,7 +210,7 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
         reasons.append(f"walk-forward unstable (stability={wf_stability:.2f})")
 
     # C: Promotion decision — OOS takes priority over IS for gating
-    oos_passes = oos_sharpe is None or oos_sharpe >= 0.8  # must not fail OOS gate
+    oos_passes = oos_sharpe is None or oos_sharpe >= 0.6  # must not fail OOS gate
     decision = "reject"
     if deployment_score >= 75 and effective_sharpe >= 1.2 and max_drawdown <= 12 and valid_ratio >= 60 and oos_passes:
         decision = "live_candidate"
@@ -231,7 +231,7 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
             reasons.append(f"downgraded paper→shadow: DSR={dsr:.2f}<0.5")
 
     # Explicit downgrade: OOS fails → cap at shadow
-    if oos_sharpe is not None and oos_sharpe < 0.8:
+    if oos_sharpe is not None and oos_sharpe < 0.6:
         if decision == "live_candidate":
             decision = "shadow"
             reasons.append("downgraded live_candidate→shadow: OOS Sharpe below threshold")
