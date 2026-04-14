@@ -154,6 +154,7 @@
     function requeueReasonText(v) {
         const key = String(v || "").toLowerCase();
         if (key === "requeued") return "已温和重排队";
+        if (key === "repaired") return "已自动归档已修复失败项";
         if (key === "queue_busy") return "有新任务优先";
         if (key === "cooldown") return "补跑冷却中";
         if (key === "no_failed") return "没有失败历史";
@@ -400,7 +401,7 @@
         const errors = sourceStates.filter((row) => Number(row?.error_count || 0) > 0).length;
         const failed = Number(queue?.counts?.failed || 0);
         badge.className = `status-badge ${(errors || failed) ? "warning" : "connected"}`;
-        badge.textContent = `来源 ${enabled} | 待处理 ${Number(queue?.pending_total || 0)} | 失败待修 ${failed} | 异常源 ${errors}`;
+        badge.textContent = `来源 ${enabled} | 待处理 ${Number(queue?.pending_total || 0)} | 失败待重试 ${failed} | 异常源 ${errors}`;
         if (el("news-now-time")) {
             el("news-now-time").textContent = fmtTs(state.health?.timestamp || state.worker?.timestamp || new Date().toISOString());
         }
@@ -432,6 +433,8 @@
         const retryResult = lastLlm?.retry_result || {};
         const summaryRepair = lastLlm?.summary_repair || {};
         const requeueCount = Number(failedRequeue?.requeued_count || 0);
+        const closedSummaryCount = Number(failedRequeue?.closed_summary_repaired_count || 0);
+        const closedEventCount = Number(failedRequeue?.closed_existing_event_count || 0);
         const repairUpdates = Number(summaryRepair?.updated_raw_count || 0) + Number(summaryRepair?.updated_event_count || 0);
         const backgroundEnabled = Boolean(state.worker?.background_llm_enabled);
         const backgroundRunning = Boolean(state.worker?.background_llm_running ?? backgroundEnabled);
@@ -450,18 +453,21 @@
         if (queue?.backoff_until) queuePhase = "全局退避中";
         else if (running > 0) queuePhase = "AI处理中";
         else if (pending > 0) queuePhase = backgroundEnabled ? (backgroundRunning ? "新任务待处理" : "后台已启用，等待进程拉起") : "新任务待手动触发";
-        else if (failed > 0) queuePhase = backgroundEnabled ? (backgroundRunning ? "温和修补失败历史" : "后台已启用，等待进程拉起") : "失败历史待手动补跑";
+        else if (failed > 0) queuePhase = backgroundEnabled ? (backgroundRunning ? "温和补跑失败队列" : "后台已启用，等待进程拉起") : "失败队列待手动补跑";
         const repairPaceText = lastLlm?.timestamp
             ? `${fmtTs(lastLlm.timestamp)} | ${requeueReasonText(failedRequeue?.reason)} | 重排 ${requeueCount} | 立即补跑 ${Number(retryResult?.claimed || 0)}`
             : "--";
         const summaryRepairText = lastLlm?.timestamp
             ? `${fmtTs(lastLlm.timestamp)} | 原始 ${Number(summaryRepair?.updated_raw_count || 0)} | 事件 ${Number(summaryRepair?.updated_event_count || 0)}`
             : "--";
+        const retryQueueHint = "这里只统计历史 LLM 失败任务，不代表历史新闻缺失；已补好摘要或已有结构化事件的失败项会自动归档。";
         el("news-llm-queue-note").innerHTML = [
             `<div class="list-item"><span>LLM 模式</span><span>${esc(llmMode)}</span></div>`,
             `<div class="list-item"><span>处理阶段</span><span>${esc(queuePhase)}</span></div>`,
-            `<div class="list-item"><span>新任务待处理 / 失败待修补</span><span>${pending} / ${failed}</span></div>`,
+            `<div class="list-item"><span>新任务待处理 / 失败队列待重试</span><span>${pending} / ${failed}</span></div>`,
             `<div class="list-item"><span>重试中 / 已完成</span><span>${retry} / ${done}</span></div>`,
+            `<div class="list-item"><span>失败队列说明</span><span>${esc(retryQueueHint)}</span></div>`,
+            `<div class="list-item"><span>本轮自动归档</span><span>摘要已补 ${closedSummaryCount} | 已有事件 ${closedEventCount}</span></div>`,
             `<div class="list-item"><span>失败历史清理节奏</span><span>${esc(repairPaceText)}</span></div>`,
             `<div class="list-item"><span>最近摘要修补</span><span>${esc(summaryRepairText)}</span></div>`,
             `<div class="list-item"><span>最高优先级 / 本轮修补数</span><span>${Number(queue?.max_priority || 0)} / ${repairUpdates}</span></div>`,

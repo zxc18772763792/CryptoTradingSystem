@@ -16,7 +16,10 @@ from config.settings import settings
 from core.ai.runtime_eligibility import resolve_runtime_eligibility_context
 from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.utils.openai_responses import (
+    anthropic_messages_endpoint,
+    build_anthropic_messages_payload,
     build_openai_headers,
+    build_target_headers,
     build_chat_completions_payload,
     build_responses_payload,
     chat_completions_endpoint,
@@ -29,6 +32,7 @@ from core.utils.openai_responses import (
     responses_endpoint,
     responses_api_unavailable,
     should_failover_openai_status,
+    target_transport,
 )
 
 # Persistent overlay for runtime config — survives service restarts
@@ -373,12 +377,13 @@ class LiveAIDecisionRouter:
             targets = prioritize_openai_targets(self._provider_endpoint_targets(provider))
             if not any(bool(str(target.get("api_key") or "").strip()) for target in targets):
                 raise RuntimeError(f"{provider}_api_key_missing")
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
             chat_payload = build_chat_completions_payload(
                 model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
+                messages=messages,
                 max_tokens=int(max_tokens),
                 temperature=temperature_value if temperature_value is not None else 0.0,
                 response_format={"type": "json_object"},
@@ -386,14 +391,17 @@ class LiveAIDecisionRouter:
             )
             payload = build_responses_payload(
                 model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
+                messages=messages,
                 max_output_tokens=int(max_tokens),
                 temperature=None,
                 text_format="json_object",
                 stream=False,
+            )
+            anthropic_payload = build_anthropic_messages_payload(
+                model=model,
+                messages=messages,
+                max_tokens=int(max_tokens),
+                temperature=temperature_value if temperature_value is not None else 0.0,
             )
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 last_exc: Optional[BaseException] = None
@@ -404,61 +412,81 @@ class LiveAIDecisionRouter:
                     target_model = str(target.get("model") or model or "").strip() or model
                     if not target_base_url or not target_api_key:
                         continue
-                    url = responses_endpoint(target_base_url)
-                    headers = build_openai_headers(target_api_key)
+                    transport = target_transport(target)
+                    headers = build_target_headers({**dict(target), "api_key": target_api_key})
                     try:
                         request_payload = dict(payload, model=target_model)
                         request_chat_payload = dict(chat_payload, model=target_model)
-                        async with session.post(url, headers=headers, json=request_payload) as resp:
-                            if resp.status >= 400:
-                                body = (await resp.text())[:300]
-                                if responses_api_unavailable(resp.status, body):
-                                    chat_url = chat_completions_endpoint(target_base_url)
-                                    logger.warning(
-                                        "live_decision_router codex relay does not support Responses API; "
-                                        "retrying via chat/completions"
-                                    )
-                                    async with session.post(chat_url, headers=headers, json=request_chat_payload) as chat_resp:
-                                        if chat_resp.status >= 400:
-                                            chat_body = (await chat_resp.text())[:300]
-                                            err = RuntimeError(f"{provider}_chat_http_{chat_resp.status}:{chat_body}")
-                                            if should_failover_openai_status(chat_resp.status):
-                                                remember_openai_target_failure(targets, target_base_url)
-                                            if idx + 1 < total_targets and should_failover_openai_status(chat_resp.status):
+                        request_anthropic_payload = dict(anthropic_payload, model=target_model)
+                        if transport == "anthropic":
+                            url = anthropic_messages_endpoint(target_base_url)
+                            async with session.post(url, headers=headers, json=request_anthropic_payload) as resp:
+                                if resp.status >= 400:
+                                    body = (await resp.text())[:300]
+                                    err = RuntimeError(f"{provider}_anthropic_http_{resp.status}:{body}")
+                                    if should_failover_openai_status(resp.status):
+                                        remember_openai_target_failure(targets, target_base_url)
+                                    if idx + 1 < total_targets and should_failover_openai_status(resp.status):
+                                        last_exc = err
+                                        logger.warning(
+                                            f"live_decision_router codex anthropic-style backup failed with "
+                                            f"{resp.status}; trying backup {idx + 2}/{total_targets}"
+                                        )
+                                        continue
+                                    raise err
+                                data = await read_aiohttp_responses_json(resp)
+                        else:
+                            url = responses_endpoint(target_base_url)
+                            async with session.post(url, headers=headers, json=request_payload) as resp:
+                                if resp.status >= 400:
+                                    body = (await resp.text())[:300]
+                                    if responses_api_unavailable(resp.status, body):
+                                        chat_url = chat_completions_endpoint(target_base_url)
+                                        logger.warning(
+                                            "live_decision_router codex relay does not support Responses API; "
+                                            "retrying via chat/completions"
+                                        )
+                                        async with session.post(chat_url, headers=headers, json=request_chat_payload) as chat_resp:
+                                            if chat_resp.status >= 400:
+                                                chat_body = (await chat_resp.text())[:300]
+                                                err = RuntimeError(f"{provider}_chat_http_{chat_resp.status}:{chat_body}")
+                                                if should_failover_openai_status(chat_resp.status):
+                                                    remember_openai_target_failure(targets, target_base_url)
+                                                if idx + 1 < total_targets and should_failover_openai_status(chat_resp.status):
+                                                    last_exc = err
+                                                    logger.warning(
+                                                        f"live_decision_router codex chat/completions failed with "
+                                                        f"{chat_resp.status}; trying backup {idx + 2}/{total_targets}"
+                                                    )
+                                                    continue
+                                                raise err
+                                            data = await read_aiohttp_responses_json(chat_resp)
+                                        text = extract_response_text(data)
+                                        if not text:
+                                            err = RuntimeError(f"{provider}_chat_empty_content")
+                                            if idx + 1 < total_targets:
                                                 last_exc = err
+                                                remember_openai_target_failure(targets, target_base_url)
                                                 logger.warning(
-                                                    f"live_decision_router codex chat/completions failed with "
-                                                    f"{chat_resp.status}; trying backup {idx + 2}/{total_targets}"
+                                                    "live_decision_router codex chat/completions returned empty content; "
+                                                    f"trying backup {idx + 2}/{total_targets}"
                                                 )
                                                 continue
                                             raise err
-                                        data = await read_aiohttp_responses_json(chat_resp)
-                                    text = extract_response_text(data)
-                                    if not text:
-                                        err = RuntimeError(f"{provider}_chat_empty_content")
-                                        if idx + 1 < total_targets:
-                                            last_exc = err
-                                            remember_openai_target_failure(targets, target_base_url)
-                                            logger.warning(
-                                                "live_decision_router codex chat/completions returned empty content; "
-                                                f"trying backup {idx + 2}/{total_targets}"
-                                            )
-                                            continue
-                                        raise err
-                                    remember_openai_target_success(targets, target_base_url)
-                                    return _extract_json_obj(text)
-                                err = RuntimeError(f"{provider}_http_{resp.status}:{body}")
-                                if should_failover_openai_status(resp.status):
-                                    remember_openai_target_failure(targets, target_base_url)
-                                if idx + 1 < total_targets and should_failover_openai_status(resp.status):
-                                    last_exc = err
-                                    logger.warning(
-                                        f"live_decision_router codex endpoint failed with {resp.status}; "
-                                        f"trying backup {idx + 2}/{total_targets}"
-                                    )
-                                    continue
-                                raise err
-                            data = await read_aiohttp_responses_json(resp)
+                                        remember_openai_target_success(targets, target_base_url)
+                                        return _extract_json_obj(text)
+                                    err = RuntimeError(f"{provider}_http_{resp.status}:{body}")
+                                    if should_failover_openai_status(resp.status):
+                                        remember_openai_target_failure(targets, target_base_url)
+                                    if idx + 1 < total_targets and should_failover_openai_status(resp.status):
+                                        last_exc = err
+                                        logger.warning(
+                                            f"live_decision_router codex endpoint failed with {resp.status}; "
+                                            f"trying backup {idx + 2}/{total_targets}"
+                                        )
+                                        continue
+                                    raise err
+                                data = await read_aiohttp_responses_json(resp)
                         text = extract_response_text(data)
                         if not text:
                             err = RuntimeError(f"{provider}_empty_content")

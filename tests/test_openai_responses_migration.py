@@ -264,6 +264,59 @@ def test_live_decision_router_codex_falls_back_to_chat_completions(monkeypatch, 
     assert capture["requests"][1]["json"]["response_format"]["type"] == "json_object"
 
 
+def test_live_decision_router_codex_fails_over_to_anthropic_style_backup(monkeypatch, tmp_path):
+    import core.ai.live_decision_router as module
+
+    monkeypatch.setattr(module, "_OVERLAY_PATH", tmp_path / "ai_runtime_config.json")
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://primary.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "https://api.xiaomimimo.com/anthropic/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "mimo-key", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "mimo-v2-flash", raising=False)
+
+    capture = {}
+    responses = [
+        _FakeResponse({"error": {"message": "Service temporarily unavailable"}}, status=503),
+        _FakeResponse(
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": '{"action":"block","reason":"mimo_backup","confidence":0.77}',
+                    }
+                ]
+            },
+            status=200,
+        ),
+    ]
+    monkeypatch.setattr(
+        module.aiohttp,
+        "ClientSession",
+        lambda **kwargs: _FakeSequenceSession(capture=capture, responses=responses, **kwargs),
+    )
+
+    router = module.LiveAIDecisionRouter()
+    result = asyncio.run(
+        router._call_provider(
+            provider="codex",
+            model="gpt-5.4",
+            timeout_ms=5000,
+            max_tokens=180,
+            temperature=0.0,
+            system_prompt="sys",
+            user_prompt="usr",
+        )
+    )
+
+    assert result["reason"] == "mimo_backup"
+    assert capture["urls"] == [
+        "https://primary.test/v1/responses",
+        "https://api.xiaomimimo.com/anthropic/v1/messages",
+    ]
+    assert capture["requests"][1]["headers"]["api-key"] == "mimo-key"
+    assert capture["requests"][1]["json"]["model"] == "mimo-v2-flash"
+
+
 def test_autonomous_agent_codex_uses_responses_api(monkeypatch, tmp_path):
     import core.ai.autonomous_agent as module
 
@@ -1774,6 +1827,44 @@ def test_news_auto_requeue_calls_db_when_queue_idle(monkeypatch):
     delta_hours = (module._now_utc() - since).total_seconds() / 3600
     assert 47 <= delta_hours <= 49
     assert module._FAILED_REQUEUE_LAST_AT is not None
+
+
+def test_news_auto_requeue_reports_repaired_when_failed_items_are_auto_closed(monkeypatch):
+    import web.api.news as module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+    monkeypatch.setattr(module, "_FAILED_REQUEUE_LAST_AT", None)
+
+    queue_mock = AsyncMock(
+        return_value={
+            "pending_total": 0,
+            "counts": {"pending": 0, "running": 0, "retry": 0, "failed": 3},
+        }
+    )
+    requeue_mock = AsyncMock(
+        return_value={
+            "scanned_count": 3,
+            "candidate_count": 0,
+            "requeued_count": 0,
+            "raw_news_ids_sample": [],
+            "skipped_summary_repaired_count": 2,
+            "skipped_existing_event_count": 1,
+            "closed_summary_repaired_count": 2,
+            "closed_existing_event_count": 1,
+        }
+    )
+
+    monkeypatch.setattr(module.news_db, "get_llm_queue_stats", queue_mock)
+    monkeypatch.setattr(module.news_db, "auto_requeue_failed_llm_tasks", requeue_mock)
+
+    result = asyncio.run(module.auto_requeue_failed_llm_tasks({}, limit=3, hours=48, cooldown_sec=0))
+
+    assert result["enabled"] is True
+    assert result["reason"] == "repaired"
+    assert result["requeued_count"] == 0
+    assert result["closed_summary_repaired_count"] == 2
+    assert result["closed_existing_event_count"] == 1
 
 
 def test_news_auto_requeue_scales_limit_for_large_failed_backlog(monkeypatch):

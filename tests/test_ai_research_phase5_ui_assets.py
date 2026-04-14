@@ -35,6 +35,7 @@ def test_ai_research_template_loads_phase5_modules():
     assert 'id="ai-candidate-cards"' in template
     assert 'id="ai-clear-candidates-btn"' in template
     assert 'id="ai-clear-queue-btn"' in template
+    assert 'id="ai-exit-running-queue-btn"' in template
     assert 'id="ai-queue-title"' in template
     assert 'id="ai-queue-hint"' in template
     assert '研究目标（可留空自动生成）' in template
@@ -59,6 +60,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     candidates_js = _read("web/static/js/ai_research_candidates.js")
     agent_js = _read("web/static/js/ai_research_agent.js")
     ai_js = _read("web/static/js/ai_research.js")
+    news_runtime_js = _read("web/static/js/news_tab_runtime.js")
     app_js = _read("web/static/js/app.js")
     template = _read("web/templates/index.html")
     style_css = _read("web/static/css/style.css")
@@ -97,10 +99,13 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "function getVisibleCandidateProposalTargets(" in ai_js
     assert "function getVisibleProposalQueueItems()" in ai_js
     assert "function getVisibleProposalQueueTargets(" in ai_js
+    assert "function getVisibleRunningQueueTargets(" in ai_js
     assert "function clearVisibleCandidates()" in ai_js
     assert "function clearVisibleProposalQueue()" in ai_js
+    assert "function exitVisibleRunningQueueItems()" in ai_js
     assert "function updateClearCandidatesButton(" in ai_js
     assert "function updateClearQueueButton(" in ai_js
+    assert "function updateExitRunningQueueButton(" in ai_js
     assert "function proposalResearchThesis(" in ai_js
     assert "function normalizeProposalPresentation(" in ai_js
     assert "parseAllocationPercentInput" in ai_js
@@ -120,6 +125,9 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "toArray(res?.items).map((item, index) => normalizeProposalPresentation(item, index))" in ai_js
     assert "Asia/Shanghai" in ai_js
     assert "Asia/Shanghai" in agent_js
+    assert "失败队列待重试" in news_runtime_js
+    assert "不代表历史新闻缺失" in news_runtime_js
+    assert "已自动归档已修复失败项" in news_runtime_js
     assert "window.CTS_UI_TIMEZONE" in ai_js
     assert "window.CTS_UI_TIMEZONE_LABEL" in ai_js
     assert "const TIME_ZONE='Asia/Shanghai';" in app_js
@@ -130,9 +138,11 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "else if(tab==='ai-research')refreshAiResearchModules();" in app_js
     assert "provider_fallback" in ai_js
     assert 'option value="codex">OpenAI' in template
+    assert "一键退出运行中条目" in template
     assert "一键清空当前候选" in template
     assert "一键清空当前任务" in template
     assert ".ai-sidebar-actions" in style_css
+    assert ".ai-queue-exit-btn" in style_css
     assert ".ai-queue-clear-btn" in style_css
     assert ".ai-flow-console" in style_css
     assert ".ai-chain-summary-grid" in style_css

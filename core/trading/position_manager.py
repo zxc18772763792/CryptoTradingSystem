@@ -280,6 +280,22 @@ class PositionManager:
 
         self._dirty = False
 
+    def _read_scope_positions(self, scope: Optional[str] = None) -> List[Position]:
+        normalized = self._normalize_scope(scope or self._scope)
+        if normalized == self._scope:
+            return list(self._positions.values())
+
+        payload = self._load_scope_state(normalized)
+        if not isinstance(payload, dict):
+            return []
+
+        positions: List[Position] = []
+        for row in payload.get("open_positions") or []:
+            position = self._position_from_state(row)
+            if position is not None:
+                positions.append(position)
+        return positions
+
     def _load_scope_state(self, scope: Optional[str] = None) -> Optional[Dict[str, Any]]:
         path = self._scope_state_path(scope)
         try:
@@ -322,6 +338,9 @@ class PositionManager:
         self._scope = target
         self._last_persist_at = 0.0
         self._restore_scope_state(self._load_scope_state(target))
+
+    def get_scope(self) -> str:
+        return str(self._scope or "paper")
 
     def _make_key(
         self,
@@ -581,14 +600,18 @@ class PositionManager:
             )
         ]
 
-    def get_all_positions(self) -> List[Position]:
-        return list(self._positions.values())
+    def get_all_positions(self, scope: Optional[str] = None) -> List[Position]:
+        return self._read_scope_positions(scope)
 
-    def get_positions_by_exchange(self, exchange: str) -> List[Position]:
-        return [p for p in self._positions.values() if p.exchange == exchange]
+    def get_positions_by_exchange(self, exchange: str, scope: Optional[str] = None) -> List[Position]:
+        return [p for p in self._read_scope_positions(scope) if p.exchange == exchange]
 
-    def get_positions_by_strategy(self, strategy: str) -> List[Position]:
-        return [p for p in self._positions.values() if p.strategy == strategy]
+    def get_positions_by_strategy(self, strategy: str, scope: Optional[str] = None) -> List[Position]:
+        target_strategy = self._normalize_strategy(strategy)
+        return [
+            p for p in self._read_scope_positions(scope)
+            if self._normalize_strategy(p.strategy) == target_strategy
+        ]
 
     def get_total_value(self) -> float:
         return sum(p.value for p in self._positions.values())
@@ -670,6 +693,35 @@ class PositionManager:
         self._position_history.clear()
         self._dirty = True
         self._persist_scope_state(force=True)
+        return {
+            "open_positions_cleared": open_count,
+            "closed_positions_cleared": closed_count,
+        }
+
+    def clear_scope(self, scope: str) -> Dict[str, int]:
+        target = self._normalize_scope(scope)
+        if target == self._scope:
+            return self.clear_all()
+
+        payload = self._load_scope_state(target) or {
+            "scope": target,
+            "open_positions": [],
+            "closed_positions": [],
+        }
+        open_count = len(list(payload.get("open_positions") or []))
+        closed_count = len(list(payload.get("closed_positions") or []))
+        path = self._scope_state_path(target)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps(
+                {"scope": target, "open_positions": [], "closed_positions": []},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
         return {
             "open_positions_cleared": open_count,
             "closed_positions_cleared": closed_count,

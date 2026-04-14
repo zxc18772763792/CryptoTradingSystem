@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -103,3 +106,140 @@ def test_delete_orphan_candidate_rejects_running_candidate(tmp_path, monkeypatch
     assert exc_info.value.status_code == 409
     assert "cannot delete" in str(exc_info.value.detail)
     assert app.state.ai_candidate_registry.get("cand-running") is not None
+
+
+def test_exit_ai_proposal_stops_runtime_and_retires_candidate(tmp_path, monkeypatch):
+    from web.api import ai_research as ai_module
+    import core.strategies as strategies_module
+    from core.strategies import persistence as persistence_module
+
+    app = _build_app(tmp_path)
+    proposal = _build_proposal(proposal_id="proposal-running")
+    proposal.status = "paper_running"
+    proposal.metadata = {}
+    app.state.ai_proposal_registry.save(proposal)
+
+    candidate = _build_candidate(candidate_id="cand-running", proposal_id=proposal.proposal_id, status="paper_running")
+    candidate.metadata = {
+        "registered_strategy_name": "paper_strategy",
+        "promotion_runtime": {
+            "mode": "paper",
+            "registered_strategy_name": "paper_strategy",
+            "started": True,
+        },
+    }
+    app.state.ai_candidate_registry.save(candidate)
+
+    class _FakeStrategyManager:
+        def __init__(self):
+            self.stopped = []
+            self.unregistered = []
+
+        def get_strategy(self, name: str):
+            return object() if name == "paper_strategy" else None
+
+        def get_strategy_info(self, name: str):
+            return {"name": name} if name == "paper_strategy" else None
+
+        async def stop_strategy(self, name: str):
+            self.stopped.append(name)
+            return True
+
+        def unregister_strategy(self, name: str):
+            self.unregistered.append(name)
+            return True
+
+    fake_manager = _FakeStrategyManager()
+    delete_snapshot = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(strategies_module, "strategy_manager", fake_manager)
+    monkeypatch.setattr(persistence_module, "delete_strategy_snapshot", delete_snapshot)
+
+    result = asyncio.run(
+        ai_module.exit_ai_proposal(
+            SimpleNamespace(app=app),
+            proposal.proposal_id,
+            ai_module.AIRetireRequest(notes="queue exit"),
+        )
+    )
+
+    saved_candidate = app.state.ai_candidate_registry.get(candidate.candidate_id)
+    saved_proposal = app.state.ai_proposal_registry.get(proposal.proposal_id)
+
+    assert result["status"] == "retired"
+    assert result["retired_candidates"] == 1
+    assert result["stopped_strategies"] == ["paper_strategy"]
+    assert saved_candidate is not None
+    assert saved_candidate.status == "retired"
+    assert saved_candidate.metadata["promotion_runtime"]["started"] is False
+    assert saved_candidate.metadata["promotion_runtime"]["unregistered"] is True
+    assert saved_proposal is not None
+    assert saved_proposal.status == "retired"
+    assert fake_manager.stopped == ["paper_strategy"]
+    assert fake_manager.unregistered == ["paper_strategy"]
+    delete_snapshot.assert_awaited_once_with("paper_strategy")
+
+
+def test_exit_ai_candidate_endpoint_retires_orphan_runtime_candidate(tmp_path, monkeypatch):
+    from web.api import ai_research as ai_module
+    import core.strategies as strategies_module
+    from core.strategies import persistence as persistence_module
+
+    app = _build_app(tmp_path)
+    candidate = _build_candidate(candidate_id="cand-orphan-running", proposal_id="proposal-missing", status="live_running")
+    candidate.metadata = {
+        "registered_strategy_name": "live_strategy",
+        "promotion_runtime": {
+            "mode": "live",
+            "registered_strategy_name": "live_strategy",
+            "started": True,
+        },
+    }
+    app.state.ai_candidate_registry.save(candidate)
+
+    class _FakeStrategyManager:
+        def __init__(self):
+            self.stopped = []
+            self.unregistered = []
+
+        def get_strategy(self, name: str):
+            return object() if name == "live_strategy" else None
+
+        def get_strategy_info(self, name: str):
+            return {"name": name} if name == "live_strategy" else None
+
+        async def stop_strategy(self, name: str):
+            self.stopped.append(name)
+            return True
+
+        def unregister_strategy(self, name: str):
+            self.unregistered.append(name)
+            return True
+
+    fake_manager = _FakeStrategyManager()
+    delete_snapshot = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(strategies_module, "strategy_manager", fake_manager)
+    monkeypatch.setattr(persistence_module, "delete_strategy_snapshot", delete_snapshot)
+
+    result = asyncio.run(
+        ai_module.exit_ai_candidate_endpoint(
+            SimpleNamespace(app=app),
+            candidate.candidate_id,
+            ai_module.AIRetireRequest(notes="queue exit"),
+        )
+    )
+
+    saved_candidate = app.state.ai_candidate_registry.get(candidate.candidate_id)
+
+    assert result["status"] == "retired"
+    assert result["strategy_name"] == "live_strategy"
+    assert saved_candidate is not None
+    assert saved_candidate.status == "retired"
+    assert saved_candidate.metadata["promotion_runtime"]["started"] is False
+    assert saved_candidate.metadata["promotion_runtime"]["unregistered"] is True
+    assert fake_manager.stopped == ["live_strategy"]
+    assert fake_manager.unregistered == ["live_strategy"]
+    delete_snapshot.assert_awaited_once_with("live_strategy")

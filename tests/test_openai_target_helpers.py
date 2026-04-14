@@ -3,7 +3,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import core.utils.openai_responses as openai_responses
-from core.utils.openai_responses import openai_endpoint_targets
+from core.utils.openai_responses import build_target_headers, openai_endpoint_targets
 
 
 def test_openai_endpoint_targets_support_multiple_backup_api_keys():
@@ -41,6 +41,24 @@ def test_openai_endpoint_targets_support_per_source_models():
         "gpt-5.4",
         "mimo-v2-flash",
     ]
+
+
+def test_openai_endpoint_targets_detect_anthropic_style_backup():
+    targets = openai_endpoint_targets(
+        primary_base_url="https://primary.test/v1",
+        backup_base_urls="https://secondary.test/v1,https://api.xiaomimimo.com/anthropic/v1",
+        primary_api_key="primary-key",
+        backup_api_key="secondary-key,mimo-key",
+        primary_model="gpt-5.4",
+        backup_model="gpt-5.4,mimo-v2-flash",
+    )
+
+    assert [target["transport"] for target in targets] == [
+        "openai",
+        "openai",
+        "anthropic",
+    ]
+    assert build_target_headers(targets[2])["api-key"] == "mimo-key"
 
 
 class _SyncResponse:
@@ -112,6 +130,56 @@ def test_news_failover_uses_per_source_models(monkeypatch, tmp_path):
         "gpt-5.4",
         "mimo-v2-flash",
     ]
+
+
+def test_news_failover_supports_anthropic_style_backup(monkeypatch, tmp_path):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setenv("OPENAI_FAILOVER_STATE_PATH", str(tmp_path / "openai_failover_state.json"))
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://primary.test/v1")
+    monkeypatch.setenv("OPENAI_BACKUP_BASE_URL", "https://api.xiaomimimo.com/anthropic/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "primary-key")
+    monkeypatch.setenv("OPENAI_BACKUP_API_KEY", "mimo-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
+    monkeypatch.setenv("OPENAI_BACKUP_MODEL", "mimo-v2-flash")
+    monkeypatch.setenv("ZHIPU_API_KEY", "")
+    openai_responses.reset_openai_target_preferences(scope="news")
+
+    calls = []
+    responses = iter(
+        [
+            _SyncResponse({"error": {"message": "primary failed"}}, status_code=503),
+            _SyncResponse(
+                {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": '{"summary":"MiMo anthropic backup","sentiment":"positive"}',
+                        }
+                    ]
+                }
+            ),
+        ]
+    )
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        calls.append({"url": url, "headers": headers, "json": dict(json or {}), "timeout": timeout})
+        return next(responses)
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    result = module.summarize_title_glm5("BTC ETF approved", {"llm": {"provider": "openai"}}, max_length=60)
+
+    assert result["summary"] == "MiMo anthropic backup"
+    assert result["sentiment"] == "positive"
+    assert result["source"] == "openai_responses"
+    assert [call["url"] for call in calls] == [
+        "https://primary.test/v1/responses",
+        "https://api.xiaomimimo.com/anthropic/v1/messages",
+    ]
+    assert calls[1]["json"]["model"] == "mimo-v2-flash"
+    assert calls[1]["headers"]["api-key"] == "mimo-key"
 
 
 def test_scoped_openai_failover_sticks_to_backup_until_next_day(monkeypatch, tmp_path):

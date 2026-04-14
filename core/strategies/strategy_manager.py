@@ -91,23 +91,73 @@ class StrategyManager:
         # report what happened without re-triggering another close attempt.
         self._last_stop_close_summary: Dict[str, Dict[str, Any]] = {}
 
-    def _ensure_strategy_account(self, name: str, params: Dict[str, Any]) -> None:
+    @staticmethod
+    def _normalize_runtime_mode(value: Any, default: str = "paper") -> str:
+        text = str(value or default).strip().lower()
+        return "live" if text == "live" else "paper"
+
+    def _resolve_strategy_runtime_mode(
+        self,
+        name: str,
+        params: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        from core.trading.account_manager import account_manager
+
+        resolved_params = dict(params or {})
+        resolved_metadata = dict(metadata or {})
+        account_id = str(
+            resolved_params.get("account_id")
+            or self._default_strategy_account_id(name)
+        ).strip()
+        candidates = [
+            resolved_metadata.get("runtime_mode"),
+            resolved_params.get("runtime_mode"),
+            resolved_params.get("trading_mode"),
+            resolved_params.get("mode"),
+        ]
+        existing = account_manager.get_account(account_id) if account_id else None
+        if existing:
+            candidates.append(existing.get("mode"))
+        main_account = account_manager.get_account("main") or {}
+        candidates.append(main_account.get("mode"))
+        candidates.append(getattr(settings, "TRADING_MODE", "paper"))
+        for candidate in candidates:
+            text = str(candidate or "").strip().lower()
+            if text in {"paper", "live"}:
+                return text
+        return "paper"
+
+    def _ensure_strategy_account(
+        self,
+        name: str,
+        params: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
         from core.trading.account_manager import account_manager
 
         account_id = str(params.get("account_id") or self._default_strategy_account_id(name)).strip()
         if not account_id:
             return
         exchange = str(params.get("exchange") or "binance").strip().lower() or "binance"
-        main_account = account_manager.get_account("main") or {}
-        mode = str(main_account.get("mode") or settings.TRADING_MODE or "paper").strip().lower()
+        mode = self._resolve_strategy_runtime_mode(name, params=params, metadata=metadata)
         existing = account_manager.get_account(account_id)
+        account_metadata = dict((existing or {}).get("metadata") or {})
+        account_metadata.update(
+            {
+                "strategy_name": name,
+                "auto_created": True,
+                "isolated": account_id != "main",
+                "runtime_mode": mode,
+            }
+        )
         payload = {
             "name": f"策略账户 {name}",
             "exchange": exchange,
-            "mode": mode if mode in {"paper", "live"} else "paper",
+            "mode": mode,
             "parent_account_id": "main",
             "enabled": True,
-            "metadata": {"strategy_name": name, "auto_created": True, "isolated": account_id != "main"},
+            "metadata": account_metadata,
         }
         try:
             if existing:
@@ -116,6 +166,81 @@ class StrategyManager:
                 account_manager.create_account(account_id=account_id, **payload)
         except Exception as e:
             logger.warning(f"Failed to ensure strategy account for {name}: {e}")
+
+    def _sync_strategy_account(
+        self,
+        name: str,
+        params: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        ensure_fn = self._ensure_strategy_account
+        try:
+            signature = inspect.signature(ensure_fn)
+            if "metadata" in signature.parameters:
+                ensure_fn(name, params, metadata)
+                return
+            positional_params = [
+                item for item in signature.parameters.values()
+                if item.kind in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+            if len(positional_params) >= 3:
+                ensure_fn(name, params, metadata)
+                return
+        except Exception:
+            pass
+        ensure_fn(name, params)
+        
+    def _mode_counter(self) -> Dict[str, int]:
+        return {"paper": 0, "live": 0}
+
+    @staticmethod
+    def _count_mode(counter: Dict[str, int], mode: str) -> None:
+        normalized = "live" if str(mode or "").strip().lower() == "live" else "paper"
+        counter[normalized] = int(counter.get(normalized, 0)) + 1
+
+    def _runtime_mode_for_strategy(self, name: str) -> str:
+        return self.get_strategy_runtime_mode(name)
+
+    def _positions_for_strategy(
+        self,
+        name: str,
+        runtime_mode: Optional[str] = None,
+    ) -> List[Any]:
+        from core.trading.position_manager import position_manager
+
+        normalized_mode = self._normalize_runtime_mode(
+            runtime_mode or self.get_strategy_runtime_mode(name)
+        )
+        get_positions = position_manager.get_positions_by_strategy
+        try:
+            signature = inspect.signature(get_positions)
+            parameters = list(signature.parameters.values())
+            if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters):
+                return list(get_positions(name, scope=normalized_mode) or [])
+            for parameter in parameters:
+                if parameter.name != "scope":
+                    continue
+                if parameter.kind == inspect.Parameter.POSITIONAL_ONLY:
+                    return list(get_positions(name, normalized_mode) or [])
+                return list(get_positions(name, scope=normalized_mode) or [])
+            positional_params = [
+                item for item in parameters
+                if item.kind in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+            if len(positional_params) >= 2:
+                return list(get_positions(name, normalized_mode) or [])
+            return list(get_positions(name) or [])
+        except (TypeError, ValueError):
+            try:
+                return list(get_positions(name, scope=normalized_mode) or [])
+            except TypeError:
+                return list(get_positions(name) or [])
 
     def _timeframe_to_seconds(self, timeframe: str) -> int:
         if not timeframe:
@@ -466,6 +591,20 @@ class StrategyManager:
                 return self._sanitize_account_id(str(raw))
         return self._default_strategy_account_id(name)
 
+    def get_strategy_runtime_mode(self, name: str) -> str:
+        from core.trading.account_manager import account_manager
+
+        cfg = self._configs.get(name)
+        params = dict((cfg.params if cfg else {}) or {})
+        metadata = dict((cfg.metadata if cfg else {}) or {})
+        account_id = self._strategy_account_id(name)
+        account_mode = account_manager.get_account_mode(account_id, default="")
+        if account_mode in {"paper", "live"} and account_id:
+            account = account_manager.get_account(account_id) or {}
+            if account:
+                return account_mode
+        return self._resolve_strategy_runtime_mode(name, params=params, metadata=metadata)
+
     async def _run_async_strategy(self, strategy: StrategyBase, symbol: str, config: StrategyConfig) -> List[Signal]:
         async_method = getattr(strategy, "generate_signals_async", None)
         if not callable(async_method):
@@ -509,6 +648,7 @@ class StrategyManager:
         config = self._configs.get(strategy_name)
         default_exchange = str((config.exchange if config else "binance") or "binance")
         account_id = self._strategy_account_id(strategy_name)
+        runtime_mode = self.get_strategy_runtime_mode(strategy_name)
         stats = self._stats_for(strategy_name)
         if signals:
             stats.signal_count += len(signals)
@@ -549,6 +689,7 @@ class StrategyManager:
             meta.setdefault("exchange", default_exchange)
             meta.setdefault("source", "strategy")
             meta.setdefault("is_strategy_isolated", True)
+            meta.setdefault("runtime_mode", runtime_mode)
             if config:
                 meta.setdefault("timeframe", str(config.timeframe or ""))
             signal.metadata = meta
@@ -579,9 +720,10 @@ class StrategyManager:
     async def _close_positions_for_strategy_stop(self, name: str, reason: str = "strategy_stopped") -> Dict[str, Any]:
         from core.strategies import Signal, SignalType
         from core.trading.execution_engine import execution_engine
-        from core.trading.position_manager import PositionSide, position_manager
+        from core.trading.position_manager import PositionSide
 
-        positions = list(position_manager.get_positions_by_strategy(name) or [])
+        runtime_mode = self.get_strategy_runtime_mode(name)
+        positions = self._positions_for_strategy(name, runtime_mode)
         if not positions:
             return {"requested": 0, "closed": 0, "failed": 0, "results": []}
 
@@ -601,6 +743,7 @@ class StrategyManager:
                     "account_id": str(pos.account_id or "main"),
                     "source": "strategy_stop_close",
                     "close_reason": reason,
+                    "runtime_mode": runtime_mode,
                 },
             )
             try:
@@ -803,7 +946,8 @@ class StrategyManager:
         try:
             params = dict(params or {})
             params.setdefault("account_id", self._default_strategy_account_id(name))
-            self._ensure_strategy_account(name, params)
+            metadata = dict(metadata or {})
+            self._sync_strategy_account(name, params, metadata)
             strategy = strategy_class(name=name, params=params)
 
             config = StrategyConfig(
@@ -819,7 +963,7 @@ class StrategyManager:
                     if runtime_limit_minutes is not None
                     else None
                 ),
-                metadata=dict(metadata or {}),
+                metadata=metadata,
             )
 
             self._strategies[name] = strategy
@@ -857,11 +1001,30 @@ class StrategyManager:
     def get_strategy(self, name: str) -> Optional[StrategyBase]:
         return self._strategies.get(name)
 
-    def get_all_strategies(self) -> Dict[str, StrategyBase]:
-        return self._strategies
+    def get_all_strategies_by_mode(self, runtime_mode: Optional[str] = None) -> Dict[str, StrategyBase]:
+        if runtime_mode is None:
+            return dict(self._strategies)
+        target = self._normalize_runtime_mode(runtime_mode)
+        return {
+            name: strategy
+            for name, strategy in self._strategies.items()
+            if self.get_strategy_runtime_mode(name) == target
+        }
 
-    def get_running_strategies(self) -> List[StrategyBase]:
-        return [s for s in self._strategies.values() if s.is_running]
+    def get_all_strategies(self, runtime_mode: Optional[str] = None) -> Dict[str, StrategyBase]:
+        if runtime_mode is None:
+            return self._strategies
+        return self.get_all_strategies_by_mode(runtime_mode)
+
+    def get_running_strategies(self, runtime_mode: Optional[str] = None) -> List[StrategyBase]:
+        if runtime_mode is None:
+            return [s for s in self._strategies.values() if s.is_running]
+        target = self._normalize_runtime_mode(runtime_mode)
+        return [
+            strategy
+            for name, strategy in self._strategies.items()
+            if strategy.is_running and self.get_strategy_runtime_mode(name) == target
+        ]
 
     async def start_strategy(self, name: str) -> bool:
         strategy = self._strategies.get(name)
@@ -873,11 +1036,13 @@ class StrategyManager:
             logger.warning(f"Strategy {name} already running")
             return True
 
+        cfg = self._configs.get(name)
+        if cfg:
+            self._sync_strategy_account(name, cfg.params, cfg.metadata)
         self._clear_bar_runtime_state(name)
         strategy.initialize()
         strategy.start()
         self._running_since[name] = datetime.now(timezone.utc)
-        cfg = self._configs.get(name)
         if cfg and cfg.runtime_limit_minutes and int(cfg.runtime_limit_minutes) > 0:
             self._runtime_deadlines[name] = datetime.now(timezone.utc) + pd.Timedelta(minutes=int(cfg.runtime_limit_minutes))
         else:
@@ -953,8 +1118,12 @@ class StrategyManager:
         for name in self._strategies:
             await self.start_strategy(name)
 
-    async def stop_all(self) -> None:
-        for name in list(self._strategies.keys()):
+    async def stop_all(self, runtime_mode: Optional[str] = None) -> None:
+        names = list(self._strategies.keys())
+        if runtime_mode is not None:
+            target = self._normalize_runtime_mode(runtime_mode)
+            names = [name for name in names if self.get_strategy_runtime_mode(name) == target]
+        for name in names:
             await self.stop_strategy(name)
 
     def register_signal_callback(self, callback: callable) -> None:
@@ -1009,6 +1178,8 @@ class StrategyManager:
             self._configs[name].exchange = str(params["exchange"])
         if "allocation" in params:
             self._configs[name].allocation = max(0.0, min(float(params["allocation"]), 1.0))
+        if any(key in params for key in {"account_id", "exchange", "runtime_mode", "trading_mode", "mode"}):
+            self._sync_strategy_account(name, self._configs[name].params, self._configs[name].metadata)
 
         logger.info(f"Strategy {name} params updated: {params}")
         return True
@@ -1034,6 +1205,8 @@ class StrategyManager:
             cfg.metadata = next_metadata
         else:
             cfg.metadata.update(next_metadata)
+        if "runtime_mode" in next_metadata:
+            self._sync_strategy_account(name, cfg.params, cfg.metadata)
         return True
 
     def update_strategy_runtime_config(
@@ -1242,6 +1415,7 @@ class StrategyManager:
             "stop_at": deadline.isoformat() if deadline else None,
             "remaining_seconds": remaining_seconds,
             "account_id": account_id,
+            "runtime_mode": self.get_strategy_runtime_mode(name),
             "isolated_account": account_id != "main",
             "runner_task": runner.get_name() if runner else None,
             "runner_alive": bool(runner and not runner.done()),
@@ -1269,14 +1443,17 @@ class StrategyManager:
             "params": editable_params,
             "metadata": self._sanitize_params_for_api(dict(config.metadata or {})),
             "account_id": self._strategy_account_id(name),
+            "runtime_mode": self.get_strategy_runtime_mode(name),
             "last_run_at": self._last_run_at.get(name).isoformat() if self._last_run_at.get(name) else None,
             "runtime": self.get_strategy_runtime(name),
             "param_schema": self._infer_param_schema_from_params(dict(config.params or {})),
         }
 
-    def list_strategies(self) -> List[Dict[str, Any]]:
+    def list_strategies(self, runtime_mode: Optional[str] = None) -> List[Dict[str, Any]]:
         infos = []
         for name in self._strategies:
+            if runtime_mode is not None and self.get_strategy_runtime_mode(name) != self._normalize_runtime_mode(runtime_mode):
+                continue
             info = self.get_strategy_info(name)
             if info:
                 infos.append(info)
@@ -1345,6 +1522,9 @@ class StrategyManager:
             "paused": 0,
             "stopped": 0,
         }
+        registered_by_mode = self._mode_counter()
+        running_by_mode = self._mode_counter()
+        stale_running_by_mode = self._mode_counter()
         now_utc = datetime.now(timezone.utc)
 
         for name, strategy in self._strategies.items():
@@ -1352,9 +1532,12 @@ class StrategyManager:
             if not config:
                 continue
 
+            runtime_mode = self._runtime_mode_for_strategy(name)
+            self._count_mode(registered_by_mode, runtime_mode)
             info = self.get_strategy_info(name)
             if info and strategy.is_running:
                 running.append(info)
+                self._count_mode(running_by_mode, runtime_mode)
             state_name = str((info or {}).get("state") or strategy.state.value).lower()
             state_counter[state_name] = state_counter.get(state_name, 0) + 1
 
@@ -1382,6 +1565,7 @@ class StrategyManager:
                     stale_running.append(
                         {
                             "strategy": name,
+                            "runtime_mode": runtime_mode,
                             "timeframe": config.timeframe,
                             "expected_cycle_seconds": expected_cycle,
                             "stale_threshold_seconds": stale_threshold_seconds,
@@ -1389,6 +1573,7 @@ class StrategyManager:
                             "last_run_at": last_run_raw,
                         }
                     )
+                    self._count_mode(stale_running_by_mode, runtime_mode)
 
             for signal in strategy.get_recent_signals(signal_limit):
                 recent_signals.append(
@@ -1413,6 +1598,8 @@ class StrategyManager:
             "running": running,
             "running_count": len(running),
             "registered_count": len(self._strategies),
+            "registered_by_mode": registered_by_mode,
+            "running_by_mode": running_by_mode,
             "idle_count": int(state_counter.get("idle", 0)),
             "paused_count": int(state_counter.get("paused", 0)),
             "stopped_count": int(state_counter.get("stopped", 0)),
@@ -1422,6 +1609,7 @@ class StrategyManager:
             "strategy_performance": strategy_performance,
             "stale_running": stale_running,
             "stale_running_count": len(stale_running),
+            "stale_running_by_mode": stale_running_by_mode,
             "refresh_hint_seconds": 5,
             "timestamp": datetime.now().isoformat(),
         }
@@ -1513,7 +1701,11 @@ class StrategyManager:
                 if ts:
                     last_update = ts
 
-            unrealized_pnl = sum(float(p.unrealized_pnl or 0.0) for p in position_manager.get_positions_by_strategy(name))
+            runtime_mode = self._runtime_mode_for_strategy(name)
+            unrealized_pnl = sum(
+                float(p.unrealized_pnl or 0.0)
+                for p in self._positions_for_strategy(name, runtime_mode)
+            )
             total_pnl = float(realized_pnl + unrealized_pnl)
             equity_curve.append(mark_equity + unrealized_pnl)
 

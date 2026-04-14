@@ -20,7 +20,10 @@ from core.news.eventizer.rate_limiter import rate_limiter
 from core.news.eventizer.rules import SymbolMapper, extract_events_rules
 from core.news.storage.models import EVENT_TYPES, EventSchema
 from core.utils.openai_responses import (
+    anthropic_messages_endpoint,
+    build_anthropic_messages_payload,
     build_openai_headers,
+    build_target_headers,
     build_chat_completions_payload,
     build_responses_payload,
     chat_completions_endpoint,
@@ -34,6 +37,7 @@ from core.utils.openai_responses import (
     responses_endpoint,
     responses_api_unavailable,
     should_failover_openai_status,
+    target_transport,
 )
 
 DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
@@ -464,8 +468,8 @@ class AsyncGLMClient:
                 base_url = str(target.get("base_url") or "").rstrip("/")
                 api_key = str(target.get("api_key") or "").strip()
                 target_model = str(target.get("model") or "").strip()
-                is_openai_responses = True
-                url = responses_endpoint(base_url)
+                transport = target_transport(target)
+                headers = build_target_headers({**dict(target), "api_key": api_key})
                 request_payload = dict(payload)
                 if target_model:
                     request_payload["model"] = target_model
@@ -475,10 +479,81 @@ class AsyncGLMClient:
                     if target_model:
                         request_chat_payload["model"] = target_model
                 try:
+                    if transport == "anthropic":
+                        if not request_chat_payload or not isinstance(request_chat_payload.get("messages"), list):
+                            raise RuntimeError("news llm anthropic backup requires chat_fallback_payload messages")
+                        request_anthropic_payload = build_anthropic_messages_payload(
+                            model=target_model or str(request_chat_payload.get("model") or ""),
+                            messages=request_chat_payload.get("messages") or [],
+                            max_tokens=int(request_chat_payload.get("max_tokens") or 0) or None,
+                            temperature=request_chat_payload.get("temperature"),
+                        )
+                        async with session.request(
+                            method=method,
+                            url=anthropic_messages_endpoint(base_url),
+                            headers=headers,
+                            json=request_anthropic_payload,
+                        ) as response:
+                            if response.status == 429:
+                                self._requests_rate_limited += 1
+                                retry_after = None
+                                retry_after_header = response.headers.get("Retry-After")
+                                if retry_after_header:
+                                    try:
+                                        retry_after = int(retry_after_header)
+                                    except ValueError:
+                                        pass
+                                error_text = await response.text()
+                                logger.warning(f"news llm anthropic-style backup rate limited (429): {error_text[:200]}")
+                                last_error_type = "rate_limit"
+                                remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                if idx + 1 < total_targets:
+                                    logger.warning(
+                                        "async_glm_client news anthropic-style backup rate limited; "
+                                        f"trying backup {idx + 2}/{total_targets}"
+                                    )
+                                    continue
+                                rate_limiter.on_rate_limit(retry_after=retry_after)
+                                return {}, "rate_limit"
+
+                            if response.status >= 400:
+                                error_text = await response.text()
+                                self._requests_failed += 1
+                                logger.warning(
+                                    f"news llm anthropic-style backup HTTP {response.status}: {error_text[:300]}"
+                                )
+                                last_error_type = "timeout" if response.status in (408, 504) else "other"
+                                if should_failover_openai_status(response.status):
+                                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                if idx + 1 < total_targets and should_failover_openai_status(response.status):
+                                    logger.warning(
+                                        f"async_glm_client news anthropic-style backup HTTP {response.status}; "
+                                        f"trying backup {idx + 2}/{total_targets}"
+                                    )
+                                    continue
+                                return {}, last_error_type
+
+                            data = await read_aiohttp_responses_json(response)
+                            if not extract_response_text(data):
+                                self._requests_failed += 1
+                                last_error_type = "other"
+                                remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                if idx + 1 < total_targets:
+                                    logger.warning(
+                                        "async_glm_client anthropic-style backup returned empty content; "
+                                        f"trying backup {idx + 2}/{total_targets}"
+                                    )
+                                    continue
+                                return {}, "other"
+                        self._requests_success += 1
+                        remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        rate_limiter.reset_backoff()
+                        return data, "none"
+
                     async with session.request(
                         method=method,
-                        url=url,
-                        headers=build_openai_headers(api_key),
+                        url=responses_endpoint(base_url),
+                        headers=headers,
                         json=request_payload,
                     ) as response:
                         if response.status == 429:
@@ -515,7 +590,7 @@ class AsyncGLMClient:
                                 async with session.request(
                                     method=method,
                                     url=chat_url,
-                                    headers=build_openai_headers(api_key),
+                                    headers=headers,
                                     json=request_chat_payload,
                                 ) as chat_response:
                                     if chat_response.status == 429:
@@ -576,10 +651,7 @@ class AsyncGLMClient:
                                 continue
                             return {}, last_error_type
 
-                        if is_openai_responses:
-                            data = await read_aiohttp_responses_json(response)
-                        else:
-                            data = await response.json()
+                        data = await read_aiohttp_responses_json(response)
                         if request_chat_payload and not extract_response_text(data):
                             chat_url = chat_completions_endpoint(base_url)
                             logger.warning(
@@ -589,7 +661,7 @@ class AsyncGLMClient:
                             async with session.request(
                                 method=method,
                                 url=chat_url,
-                                headers=build_openai_headers(api_key),
+                                headers=headers,
                                 json=request_chat_payload,
                             ) as chat_response:
                                 if chat_response.status == 429:

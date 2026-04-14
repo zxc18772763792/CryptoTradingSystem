@@ -940,6 +940,14 @@ async def auto_requeue_failed_llm_tasks(limit: int = 4, since: Optional[datetime
     scan_limit = min(480, max(80, max_rows * 24))
 
     async with news_session_scope() as session:
+        def _close_repaired_failed_task(task_row: NewsLLMTask) -> None:
+            task_row.status = "done"
+            task_row.last_error = None
+            task_row.next_retry_at = None
+            task_row.started_at = None
+            task_row.finished_at = now
+            task_row.updated_at = now
+
         stmt = (
             select(NewsLLMTask, NewsRaw)
             .join(NewsRaw, NewsRaw.id == NewsLLMTask.raw_news_id)
@@ -952,6 +960,8 @@ async def auto_requeue_failed_llm_tasks(limit: int = 4, since: Optional[datetime
         scanned_count = 0
         skipped_summary_count = 0
         skipped_event_count = 0
+        closed_summary_count = 0
+        closed_event_count = 0
         candidate_rows: List[tuple[NewsLLMTask, NewsRaw]] = []
         candidate_ids: List[int] = []
         for task_row, raw_row in rows:
@@ -964,6 +974,8 @@ async def auto_requeue_failed_llm_tasks(limit: int = 4, since: Optional[datetime
             summary_source = _normalize_summary_source(payload.get("summary_source") or "")
             if _is_llm_summary_source(summary_source):
                 skipped_summary_count += 1
+                _close_repaired_failed_task(task_row)
+                closed_summary_count += 1
                 continue
             candidate_rows.append((task_row, raw_row))
             candidate_ids.append(int(raw_row.id))
@@ -987,6 +999,8 @@ async def auto_requeue_failed_llm_tasks(limit: int = 4, since: Optional[datetime
             raw_id = int(raw_row.id)
             if raw_id in event_raw_ids:
                 skipped_event_count += 1
+                _close_repaired_failed_task(task_row)
+                closed_event_count += 1
                 continue
             task_row.status = "retry"
             task_row.next_retry_at = now
@@ -1007,6 +1021,8 @@ async def auto_requeue_failed_llm_tasks(limit: int = 4, since: Optional[datetime
         "raw_news_ids_sample": affected_ids[:20],
         "skipped_summary_repaired_count": skipped_summary_count,
         "skipped_existing_event_count": skipped_event_count,
+        "closed_summary_repaired_count": closed_summary_count,
+        "closed_existing_event_count": closed_event_count,
         "since": _utc_iso(since_ts),
     }
 

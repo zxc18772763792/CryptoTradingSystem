@@ -1,11 +1,13 @@
 ﻿"""Strategy API endpoints."""
 import asyncio
+import inspect
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
+from loguru import logger
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -115,6 +117,45 @@ def _effective_strategy_defaults(strategy_type: str, exchange: str, klass: Any =
 
 def _clean_strategy_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _strategy_runtime_mode(name: str, info: Optional[Dict[str, Any]] = None) -> str:
+    payload = dict(info or {})
+    runtime = dict(payload.get("runtime") or {}) if isinstance(payload.get("runtime"), dict) else {}
+    raw = payload.get("runtime_mode") or runtime.get("runtime_mode")
+    text = str(raw or "").strip().lower()
+    return "live" if text == "live" else "paper"
+
+
+def _positions_by_strategy(name: str, runtime_mode: Optional[str] = None) -> List[Any]:
+    normalized_mode = "live" if str(runtime_mode or "").strip().lower() == "live" else "paper"
+    get_positions = position_manager.get_positions_by_strategy
+    try:
+        signature = inspect.signature(get_positions)
+        parameters = list(signature.parameters.values())
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters):
+            return list(get_positions(name, scope=normalized_mode) or [])
+        for parameter in parameters:
+            if parameter.name != "scope":
+                continue
+            if parameter.kind == inspect.Parameter.POSITIONAL_ONLY:
+                return list(get_positions(name, normalized_mode) or [])
+            return list(get_positions(name, scope=normalized_mode) or [])
+        positional_params = [
+            item for item in parameters
+            if item.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        if len(positional_params) >= 2:
+            return list(get_positions(name, normalized_mode) or [])
+        return list(get_positions(name) or [])
+    except (TypeError, ValueError):
+        try:
+            return list(get_positions(name, scope=normalized_mode) or [])
+        except TypeError:
+            return list(get_positions(name) or [])
 
 
 def _strategy_metadata(info: Dict[str, Any]) -> Dict[str, Any]:
@@ -890,7 +931,8 @@ async def _build_strategy_sizing_preview(name: str) -> Dict[str, Any]:
 
 
 async def _close_strategy_positions(name: str) -> Dict[str, Any]:
-    positions = list(position_manager.get_positions_by_strategy(name) or [])
+    runtime_mode = _strategy_runtime_mode(name, strategy_manager.get_strategy_info(name) or {})
+    positions = _positions_by_strategy(name, runtime_mode)
     if not positions:
         return {"requested": 0, "closed": 0, "failed": 0, "results": []}
 
@@ -911,6 +953,7 @@ async def _close_strategy_positions(name: str) -> Dict[str, Any]:
                 "account_id": str(pos.account_id or "main"),
                 "source": "strategy_stop_close",
                 "close_reason": "strategy_stopped",
+                "runtime_mode": runtime_mode,
             },
         )
         try:
@@ -1319,6 +1362,7 @@ async def export_strategy(name: str):
     info = strategy_manager.get_strategy_info(name)
     if not info:
         raise HTTPException(status_code=404, detail="Strategy not found")
+    runtime_mode = _strategy_runtime_mode(name, info)
     return {
         "strategy": {
             "name": info.get("name"),
@@ -1912,6 +1956,7 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     exchange = str(info.get("exchange") or "binance").strip().lower() or "binance"
     strategy_type = str(info.get("strategy_type") or info.get("name") or "").strip()
     strategy_params = dict(info.get("params") or {})
+    runtime_mode = _strategy_runtime_mode(name, info)
 
     live_review_items: list = []
     try:
@@ -2093,7 +2138,7 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
 
         unrealized = sum(
             float(p.unrealized_pnl or 0.0)
-            for p in position_manager.get_positions_by_strategy(name)
+            for p in _positions_by_strategy(name, runtime_mode)
         )
         final_value = round(mark + unrealized, 4)
         if equity:
@@ -2121,7 +2166,7 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     # ── 5. Current open positions ─────────────────────────────────────────────
     positions_data: list = []
     try:
-        for pos in position_manager.get_positions_by_strategy(name):
+        for pos in _positions_by_strategy(name, runtime_mode):
             side = getattr(pos, "side", None)
             side_value = side.value if hasattr(side, "value") else str(side or "")
             entry_time = getattr(pos, "entry_time", None) or getattr(pos, "opened_at", None)
@@ -2143,6 +2188,7 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
         "strategy_type": strategy_type,
         "symbol":     symbol,
         "timeframe":  timeframe,
+        "runtime_mode": runtime_mode,
         "ohlcv_source_timeframe": ohlcv_source_timeframe,
         "portfolio_mode": pair_monitor.get("portfolio_mode") if pair_monitor else None,
         "pair_symbol": pair_symbol or None,

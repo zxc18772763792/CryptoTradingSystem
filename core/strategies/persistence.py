@@ -32,6 +32,14 @@ def _build_payload(info: Dict[str, Any]) -> Dict[str, Any]:
     params = dict(info.get("params") or {})
     runtime = dict(info.get("runtime") or {})
     metadata = dict(info.get("metadata") or {}) if isinstance(info.get("metadata"), dict) else {}
+    runtime_mode = str(
+        info.get("runtime_mode")
+        or runtime.get("runtime_mode")
+        or metadata.get("runtime_mode")
+        or ""
+    ).strip().lower()
+    if runtime_mode in {"paper", "live"}:
+        metadata.setdefault("runtime_mode", runtime_mode)
     return {
         "user_params": params,
         "symbols": list(info.get("symbols") or []),
@@ -40,6 +48,7 @@ def _build_payload(info: Dict[str, Any]) -> Dict[str, Any]:
         "allocation": float(info.get("allocation") or settings.DEFAULT_STRATEGY_ALLOCATION),
         "runtime_limit_minutes": runtime.get("runtime_limit_minutes"),
         "runtime_started_at": runtime.get("started_at"),
+        "runtime_mode": runtime_mode if runtime_mode in {"paper", "live"} else None,
         "state": str(info.get("state") or "idle"),
         "metadata": metadata,
     }
@@ -148,6 +157,9 @@ async def restore_strategies_from_db() -> Dict[str, Any]:
         runtime_started_at = _parse_runtime_anchor(payload.get("runtime_started_at"))
         state = str(payload.get("state") or ("running" if row.is_active else "stopped")).lower()
         metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
+        runtime_mode = str(payload.get("runtime_mode") or metadata.get("runtime_mode") or "").strip().lower()
+        if runtime_mode in {"paper", "live"}:
+            metadata.setdefault("runtime_mode", runtime_mode)
 
         if strategy_manager.get_strategy(name) is None:
             ok = strategy_manager.register_strategy(

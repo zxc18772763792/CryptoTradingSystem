@@ -1589,11 +1589,12 @@ async def auto_requeue_failed_llm_tasks(
             since=now - timedelta(hours=since_hours),
         )
         requeued = int(result.get("requeued_count") or 0)
+        repaired_closed = int(result.get("closed_summary_repaired_count") or 0) + int(result.get("closed_existing_event_count") or 0)
         if requeued > 0:
             _FAILED_REQUEUE_LAST_AT = now
         return {
             "enabled": True,
-            "reason": "requeued" if requeued > 0 else "no_candidates",
+            "reason": "requeued" if requeued > 0 else ("repaired" if repaired_closed > 0 else "no_candidates"),
             "cooldown_sec": cooldown,
             "hours": since_hours,
             "queue_counts": counts,

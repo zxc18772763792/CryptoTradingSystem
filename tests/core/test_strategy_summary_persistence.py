@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from importlib import import_module
 
 from core.strategies.strategy_manager import StrategyConfig, StrategyManager
+from core.strategies.persistence import _build_payload
 
 
 risk_module = import_module("core.risk.risk_manager")
@@ -83,3 +84,77 @@ def test_dashboard_summary_uses_live_review_when_runtime_history_is_empty(monkey
     assert performance["realized_pnl"] == 3.0
     assert performance["unrealized_pnl"] == 12.5
     assert performance["last_update"] == "2026-04-09T09:00:00+00:00"
+
+
+def test_dashboard_summary_counts_runtime_modes(monkeypatch):
+    manager = StrategyManager()
+    manager._strategies["paper_alpha"] = _DummyStrategy()
+    manager._strategies["live_beta"] = _DummyStrategy()
+    manager._configs["paper_alpha"] = StrategyConfig(
+        name="paper_alpha",
+        strategy_class=type("DemoStrategy", (), {}),
+        params={},
+        symbols=["BTC/USDT"],
+        timeframe="1h",
+        allocation=0.2,
+        metadata={"runtime_mode": "paper"},
+    )
+    manager._configs["live_beta"] = StrategyConfig(
+        name="live_beta",
+        strategy_class=type("DemoStrategy", (), {}),
+        params={},
+        symbols=["ETH/USDT"],
+        timeframe="1h",
+        allocation=0.2,
+        metadata={"runtime_mode": "live"},
+    )
+
+    monkeypatch.setattr(
+        risk_module.risk_manager,
+        "get_risk_report",
+        lambda: {"equity": {"current": 1000.0}},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        risk_module.risk_manager,
+        "get_trade_history",
+        lambda limit=5000: [],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        position_module.position_manager,
+        "get_positions_by_strategy",
+        lambda name, scope=None: [],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        execution_module.execution_engine,
+        "get_live_trade_review",
+        lambda **kwargs: {"items": []},
+        raising=False,
+    )
+
+    summary = manager.get_dashboard_summary(signal_limit=5)
+
+    assert summary["registered_by_mode"] == {"paper": 1, "live": 1}
+    assert summary["running_by_mode"] == {"paper": 0, "live": 0}
+
+
+def test_strategy_snapshot_payload_keeps_runtime_mode():
+    payload = _build_payload(
+        {
+            "name": "alpha_strategy",
+            "params": {"exchange": "binance"},
+            "symbols": ["BTC/USDT"],
+            "timeframe": "15m",
+            "exchange": "binance",
+            "allocation": 0.2,
+            "runtime_mode": "live",
+            "runtime": {"runtime_limit_minutes": 60, "started_at": None, "runtime_mode": "live"},
+            "state": "running",
+            "metadata": {"source": "ai_research"},
+        }
+    )
+
+    assert payload["runtime_mode"] == "live"
+    assert payload["metadata"]["runtime_mode"] == "live"

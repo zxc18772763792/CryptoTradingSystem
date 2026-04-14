@@ -154,6 +154,11 @@ class AIRetireRequest(BaseModel):
     notes: str = ""
 
 
+PROPOSAL_CANCEL_ONLY_STATUSES = {"research_queued", "research_running"}
+PROPOSAL_EXITABLE_STATUSES = {"shadow_running", "live_candidate", "paper_running", "live_running"}
+CANDIDATE_EXITABLE_STATUSES = {"shadow_running", "live_candidate", "paper_running", "live_running"}
+
+
 class AICandidateActivateLiveRequest(BaseModel):
     notes: str = ""
 
@@ -505,6 +510,115 @@ def _candidate_registered_strategy_name(candidate: Any) -> Optional[str]:
         if text:
             return text
     return None
+
+
+def _ensure_candidate_metadata(candidate: Any) -> Dict[str, Any]:
+    meta = getattr(candidate, "metadata", None)
+    if not isinstance(meta, dict):
+        meta = {}
+        candidate.metadata = meta
+    return meta
+
+
+def _ensure_proposal_metadata(proposal: Any) -> Dict[str, Any]:
+    meta = getattr(proposal, "metadata", None)
+    if not isinstance(meta, dict):
+        meta = {}
+        proposal.metadata = meta
+    return meta
+
+
+async def _exit_candidate_runtime_strategy(candidate: Any) -> Dict[str, Any]:
+    from core.strategies import strategy_manager  # noqa: PLC0415
+    from core.strategies.persistence import delete_strategy_snapshot  # noqa: PLC0415
+
+    strategy_name = _candidate_registered_strategy_name(candidate)
+    result = {
+        "strategy_name": strategy_name,
+        "stopped": False,
+        "unregistered": False,
+        "snapshot_deleted": False,
+    }
+    if not strategy_name:
+        return result
+
+    strategy_exists = (
+        strategy_manager.get_strategy(strategy_name) is not None
+        or strategy_manager.get_strategy_info(strategy_name) is not None
+    )
+    if strategy_exists:
+        stopped = await strategy_manager.stop_strategy(strategy_name)
+        if not stopped:
+            raise RuntimeError(f"failed to stop runtime strategy: {strategy_name}")
+        result["stopped"] = True
+
+        unregistered = strategy_manager.unregister_strategy(strategy_name)
+        if not unregistered:
+            raise RuntimeError(f"failed to unregister runtime strategy: {strategy_name}")
+        result["unregistered"] = True
+
+    result["snapshot_deleted"] = await delete_strategy_snapshot(strategy_name)
+    return result
+
+
+async def _exit_candidate_record(
+    app: Any,
+    candidate: Any,
+    *,
+    notes: str,
+    actor: str,
+) -> Dict[str, Any]:
+    status = str(getattr(candidate, "status", "") or "")
+    if status not in CANDIDATE_EXITABLE_STATUSES and status != "retired":
+        raise HTTPException(status_code=409, detail=f"candidate in state {status}, exit is not allowed")
+
+    runtime_result = await _exit_candidate_runtime_strategy(candidate)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    metadata = _ensure_candidate_metadata(candidate)
+    runtime_meta = metadata.get("promotion_runtime")
+    if not isinstance(runtime_meta, dict):
+        runtime_meta = {}
+    runtime_meta["started"] = False
+    runtime_meta["exit_requested_at"] = now_iso
+    runtime_meta["exit_source"] = actor
+    runtime_meta["exit_notes"] = notes
+    runtime_meta["stopped"] = bool(runtime_result.get("stopped"))
+    runtime_meta["unregistered"] = bool(runtime_result.get("unregistered"))
+    runtime_meta["snapshot_deleted"] = bool(runtime_result.get("snapshot_deleted"))
+    if runtime_result.get("strategy_name"):
+        runtime_meta["registered_strategy_name"] = runtime_result["strategy_name"]
+    metadata["promotion_runtime"] = runtime_meta
+    metadata["retired_manually_at"] = now_iso
+    metadata["retired_manually_reason"] = notes
+    if runtime_result.get("strategy_name"):
+        metadata["retired_strategy_name"] = runtime_result["strategy_name"]
+    candidate.promotion_target = None
+
+    if status != "retired":
+        transition_candidate(
+            candidate,
+            to_state="retired",
+            lifecycle_registry=app.state.ai_lifecycle_registry,
+            actor=actor,
+            reason=notes or "exited manually from AI research queue",
+            metadata={
+                "source": "ai_research_queue",
+                "strategy_name": runtime_result.get("strategy_name"),
+                "strategy_stopped": bool(runtime_result.get("stopped")),
+                "strategy_unregistered": bool(runtime_result.get("unregistered")),
+            },
+        )
+
+    app.state.ai_candidate_registry.save(candidate)
+    return {
+        "candidate_id": str(getattr(candidate, "candidate_id", "") or ""),
+        "status": "retired",
+        "previous_status": status,
+        "strategy_name": runtime_result.get("strategy_name"),
+        "strategy_stopped": bool(runtime_result.get("stopped")),
+        "strategy_unregistered": bool(runtime_result.get("unregistered")),
+        "snapshot_deleted": bool(runtime_result.get("snapshot_deleted")),
+    }
 
 
 def _candidate_timeframe(candidate: Any, default: str = "1h") -> str:
@@ -3102,6 +3216,68 @@ async def retire_ai_proposal(request: Request, proposal_id: str, payload: AIReti
     }
 
 
+@router.post("/proposals/{proposal_id}/exit")
+async def exit_ai_proposal(request: Request, proposal_id: str, payload: AIRetireRequest = AIRetireRequest()):
+    ensure_ai_research_runtime_state(request.app)
+    proposal = get_proposal(request.app, proposal_id)
+    proposal_status = str(proposal.status or "")
+    if proposal_status in PROPOSAL_CANCEL_ONLY_STATUSES:
+        raise HTTPException(status_code=409, detail=f"proposal in state {proposal_status}, cancel it before exit")
+    if proposal_status not in PROPOSAL_EXITABLE_STATUSES and proposal_status != "retired":
+        raise HTTPException(status_code=409, detail=f"proposal in state {proposal_status}, exit is not allowed")
+
+    notes = payload.notes or "exited manually from AI research queue"
+    candidate_results: List[Dict[str, Any]] = []
+    all_candidates = request.app.state.ai_candidate_registry.list(limit=None)
+    for cand in all_candidates:
+        if str(getattr(cand, "proposal_id", "") or "") != str(proposal_id):
+            continue
+        if str(getattr(cand, "status", "") or "") == "retired":
+            continue
+        candidate_results.append(
+            await _exit_candidate_record(
+                request.app,
+                cand,
+                notes=notes,
+                actor="web_ui",
+            )
+        )
+
+    if proposal_status != "retired":
+        transition_proposal(
+            proposal,
+            to_state="retired",
+            lifecycle_registry=request.app.state.ai_lifecycle_registry,
+            actor="web_ui",
+            reason=notes,
+            metadata={
+                "retired_candidates": len(candidate_results),
+                "stopped_strategies": [
+                    item["strategy_name"]
+                    for item in candidate_results
+                    if item.get("strategy_stopped") and item.get("strategy_name")
+                ],
+            },
+        )
+    proposal_meta = _ensure_proposal_metadata(proposal)
+    proposal_meta["retired_manually_at"] = datetime.now(timezone.utc).isoformat()
+    proposal_meta["retired_manually_reason"] = notes
+    proposal_meta["runtime_exit_candidates"] = [item["candidate_id"] for item in candidate_results if item.get("candidate_id")]
+    save_proposal(request.app, proposal)
+
+    return {
+        "proposal_id": proposal_id,
+        "status": "retired",
+        "retired_candidates": len(candidate_results),
+        "stopped_strategies": [
+            item["strategy_name"]
+            for item in candidate_results
+            if item.get("strategy_stopped") and item.get("strategy_name")
+        ],
+        "proposal": _serialize_proposal(request, proposal),
+    }
+
+
 @router.post("/proposals/{proposal_id}/run")
 async def run_ai_proposal_endpoint(request: Request, proposal_id: str, payload: AIProposalRunRequest):
     ensure_ai_research_runtime_state(request.app)
@@ -3423,6 +3599,28 @@ async def delete_ai_candidate_endpoint(request: Request, candidate_id: str):
         actor="web_ui",
     )
     return result
+
+
+@router.post("/candidates/{candidate_id}/exit")
+async def exit_ai_candidate_endpoint(request: Request, candidate_id: str, payload: AIRetireRequest = AIRetireRequest()):
+    ensure_ai_research_runtime_state(request.app)
+    candidate = get_candidate(request.app, candidate_id)
+    proposal_id = str(getattr(candidate, "proposal_id", "") or "").strip()
+    if proposal_id:
+        try:
+            get_proposal(request.app, proposal_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+        else:
+            raise HTTPException(status_code=409, detail="candidate belongs to an existing proposal, exit the proposal instead")
+
+    return await _exit_candidate_record(
+        request.app,
+        candidate,
+        notes=payload.notes or "exited manually from AI research queue",
+        actor="web_ui",
+    )
 
 
 @router.get("/candidates/{candidate_id}/lifecycle")

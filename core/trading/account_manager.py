@@ -33,6 +33,11 @@ class AccountManager:
         self._ensure_default()
         self._load()
 
+    @staticmethod
+    def _normalize_mode(mode: Any, default: str = "paper") -> str:
+        text = str(mode or default).strip().lower()
+        return "live" if text == "live" else "paper"
+
     def _ensure_default(self) -> None:
         if "main" not in self._accounts:
             self._accounts["main"] = TradingAccount(
@@ -60,7 +65,7 @@ class AccountManager:
                     account_id=aid,
                     name=str(row.get("name") or aid),
                     exchange=str(row.get("exchange") or "binance").lower(),
-                    mode=str(row.get("mode") or "paper").lower(),
+                    mode=self._normalize_mode(row.get("mode"), default="paper"),
                     parent_account_id=row.get("parent_account_id"),
                     enabled=bool(row.get("enabled", True)),
                     created_at=str(row.get("created_at") or datetime.now(timezone.utc).isoformat()),
@@ -110,7 +115,7 @@ class AccountManager:
             account_id=aid,
             name=str(name or aid),
             exchange=str(exchange or "binance").lower(),
-            mode=str(mode or "paper").lower(),
+            mode=self._normalize_mode(mode, default="paper"),
             parent_account_id=parent_account_id,
             enabled=bool(enabled),
             created_at=now,
@@ -129,7 +134,7 @@ class AccountManager:
         if "exchange" in updates:
             item.exchange = str(updates["exchange"] or item.exchange).lower()
         if "mode" in updates:
-            item.mode = str(updates["mode"] or item.mode).lower()
+            item.mode = self._normalize_mode(updates["mode"], default=item.mode)
         if "parent_account_id" in updates:
             item.parent_account_id = updates["parent_account_id"]
         if "enabled" in updates:
@@ -159,16 +164,36 @@ class AccountManager:
             return default_exchange
         return item.exchange or default_exchange
 
+    def get_account_mode(self, account_id: Optional[str], default: str = "paper") -> str:
+        if account_id:
+            item = self._accounts.get(str(account_id))
+            if item and item.enabled:
+                return self._normalize_mode(item.mode, default=default)
+        return self._normalize_mode(default, default="paper")
+
     def is_enabled(self, account_id: Optional[str]) -> bool:
         if not account_id:
             return True
         item = self._accounts.get(account_id)
         return bool(item and item.enabled)
 
+    def set_mode(self, account_id: str, mode: str) -> bool:
+        aid = str(account_id or "").strip()
+        if not aid:
+            raise ValueError("account_id must not be empty")
+        item = self._accounts.get(aid)
+        if not item:
+            raise ValueError(f"account not found: {aid}")
+        target = self._normalize_mode(mode, default=item.mode)
+        if item.mode == target:
+            return False
+        item.mode = target
+        item.updated_at = datetime.now(timezone.utc).isoformat()
+        self._save()
+        return True
+
     def set_mode_for_all(self, mode: str) -> int:
-        target = str(mode or "paper").strip().lower()
-        if target not in {"paper", "live"}:
-            raise ValueError("mode must be paper or live")
+        target = self._normalize_mode(mode, default="paper")
         updated = 0
         now = datetime.now(timezone.utc).isoformat()
         for item in self._accounts.values():

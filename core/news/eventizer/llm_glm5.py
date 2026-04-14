@@ -14,7 +14,10 @@ from config.settings import settings
 from core.news.eventizer.rules import SymbolMapper, extract_events_rules
 from core.news.storage.models import EVENT_TYPES, EventSchema
 from core.utils.openai_responses import (
+    anthropic_messages_endpoint,
+    build_anthropic_messages_payload,
     build_openai_headers,
+    build_target_headers,
     build_chat_completions_payload,
     build_responses_payload,
     build_responses_payload_variants,
@@ -29,6 +32,7 @@ from core.utils.openai_responses import (
     responses_endpoint,
     responses_api_unavailable,
     should_failover_openai_status,
+    target_transport,
     unsupported_responses_parameter,
 )
 
@@ -252,7 +256,8 @@ def _openai_post_with_failover(
         base_url = str(target.get("base_url") or "").rstrip("/")
         api_key = str(target.get("api_key") or "").strip()
         target_model = str(target.get("model") or "").strip()
-        url = responses_endpoint(base_url)
+        transport = target_transport(target)
+        headers = build_target_headers({**dict(target), "api_key": api_key})
         request_chat_payload = None
         if chat_fallback_payload is not None:
             request_chat_payload = dict(chat_fallback_payload)
@@ -260,13 +265,55 @@ def _openai_post_with_failover(
                 request_chat_payload["model"] = target_model
         try:
             advance_to_next_target = False
+            if transport == "anthropic":
+                if not request_chat_payload or not isinstance(request_chat_payload.get("messages"), list):
+                    raise RuntimeError("news llm anthropic backup requires chat_fallback_payload messages")
+                request_anthropic_payload = build_anthropic_messages_payload(
+                    model=target_model or str(request_chat_payload.get("model") or ""),
+                    messages=request_chat_payload.get("messages") or [],
+                    max_tokens=int(request_chat_payload.get("max_tokens") or 0) or None,
+                    temperature=request_chat_payload.get("temperature"),
+                )
+                response = requests.post(
+                    anthropic_messages_endpoint(base_url),
+                    headers=headers,
+                    json=request_anthropic_payload,
+                    timeout=timeout_sec,
+                )
+                if response.status_code >= 400:
+                    err = RuntimeError(f"LLM anthropic HTTP {response.status_code}: {response.text[:300]}")
+                    if should_failover_openai_status(response.status_code):
+                        remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                    if idx + 1 < total_targets and should_failover_openai_status(response.status_code):
+                        last_exc = err
+                        logger.warning(
+                            f"{log_prefix}: anthropic-style backup HTTP {response.status_code}; "
+                            f"trying backup {idx + 2}/{total_targets}"
+                        )
+                        continue
+                    raise err
+                data = read_requests_responses_json(response)
+                if not extract_response_text(data):
+                    err = RuntimeError("LLM anthropic response missing content")
+                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                    if idx + 1 < total_targets:
+                        last_exc = err
+                        logger.warning(
+                            f"{log_prefix}: anthropic-style backup returned empty content; "
+                            f"trying backup {idx + 2}/{total_targets}"
+                        )
+                        continue
+                    raise err
+                remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                return data
             for payload_index, payload_variant in enumerate(request_payload_variants):
+                url = responses_endpoint(base_url)
                 request_payload = dict(payload_variant)
                 if target_model:
                     request_payload["model"] = target_model
                 response = requests.post(
                     url,
-                    headers=build_openai_headers(api_key),
+                    headers=headers,
                     json=request_payload,
                     timeout=timeout_sec,
                 )
@@ -278,7 +325,7 @@ def _openai_post_with_failover(
                         )
                         chat_response = requests.post(
                             chat_url,
-                            headers=build_openai_headers(api_key),
+                            headers=headers,
                             json=request_chat_payload,
                             timeout=timeout_sec,
                         )

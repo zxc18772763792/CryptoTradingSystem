@@ -74,7 +74,7 @@ def test_ensure_trading_mode_started_defaults_risk_scope_to_mode(monkeypatch):
     monkeypatch.setattr(trading_runtime_service.risk_manager, "get_risk_report", lambda: {"equity": {}, "limits": {}, "alerts": []})
     monkeypatch.setattr(trading_runtime_service.execution_engine, "_running", False, raising=False)
     monkeypatch.setattr(trading_runtime_service.execution_engine, "set_paper_trading", lambda *args, **kwargs: None)
-    monkeypatch.setattr(trading_runtime_service.account_manager, "set_mode_for_all", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(trading_runtime_service.account_manager, "set_mode", lambda *args, **kwargs: False)
     monkeypatch.setattr(trading_runtime_service.runtime_state, "clear_registered_caches", lambda *args, **kwargs: {})
 
     async def _start():
@@ -130,3 +130,70 @@ def test_switch_trading_mode_rejects_bad_confirm_text_with_clear_text():
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "Confirmation text mismatch"
+
+
+def test_switch_trading_mode_preserves_running_strategies_and_only_switches_main_account(monkeypatch):
+    pending = trading_runtime_service.request_mode_switch(
+        target_mode="live",
+        current_mode="paper",
+        reason="verify",
+    )
+    events = []
+    stop_all_called = False
+    cleared_runtime = False
+    switched_accounts = []
+
+    async def _restart_runtime_workers(_app):
+        return {"stopped": [], "started": []}
+
+    async def _publish_nowait_safe(**payload):
+        events.append(payload)
+
+    async def _start_engine():
+        trading_runtime_service.execution_engine._running = True
+
+    async def _clear_runtime(**_kwargs):
+        nonlocal cleared_runtime
+        cleared_runtime = True
+        return {"should_not": "run"}
+
+    async def _stop_all(*_args, **_kwargs):
+        nonlocal stop_all_called
+        stop_all_called = True
+
+    monkeypatch.setattr(trading_runtime_service, "_restart_runtime_workers", _restart_runtime_workers)
+    monkeypatch.setattr(trading_runtime_service, "clear_local_trading_runtime", _clear_runtime)
+    monkeypatch.setattr(trading_runtime_service.strategy_manager, "stop_all", _stop_all)
+    monkeypatch.setattr(
+        trading_runtime_service.strategy_manager,
+        "get_running_strategies",
+        lambda *args, **kwargs: ["paper_strategy", "live_strategy"],
+    )
+    monkeypatch.setattr(trading_runtime_service.execution_engine, "_running", True, raising=False)
+    monkeypatch.setattr(trading_runtime_service.execution_engine, "set_paper_trading", lambda *args, **kwargs: None)
+    monkeypatch.setattr(trading_runtime_service.execution_engine, "start", _start_engine)
+    monkeypatch.setattr(trading_runtime_service.execution_engine, "prime_live_equity", _start_engine)
+    monkeypatch.setattr(trading_runtime_service.account_manager, "set_mode", lambda account_id, mode: switched_accounts.append((account_id, mode)) or True)
+    monkeypatch.setattr(trading_runtime_service.runtime_state, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(trading_runtime_service.runtime_state, "is_paper_mode", lambda: False)
+    monkeypatch.setattr(trading_runtime_service.runtime_state, "begin_mode_switch", lambda *args, **kwargs: None)
+    monkeypatch.setattr(trading_runtime_service.runtime_state, "finish_mode_switch", lambda *args, **kwargs: None)
+    monkeypatch.setattr(trading_runtime_service.runtime_state, "fail_mode_switch", lambda *args, **kwargs: None)
+    monkeypatch.setattr(trading_runtime_service.runtime_state, "clear_registered_caches", lambda *args, **kwargs: {})
+    monkeypatch.setattr(trading_runtime_service.event_bus, "publish_nowait_safe", _publish_nowait_safe)
+
+    result = asyncio.run(
+        trading_runtime_service.switch_trading_mode(
+            token=pending["token"],
+            confirm_text=trading_runtime_service.get_mode_confirm_text(),
+            app=None,
+            reason="verify",
+        )
+    )
+
+    assert stop_all_called is False
+    assert cleared_runtime is False
+    assert switched_accounts == [("main", "live")]
+    assert result["strategies_stopped"] == 0
+    assert result["cleanup"]["skipped"] is True
+    assert events and events[0]["event"] == "mode_changed"

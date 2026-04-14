@@ -59,10 +59,31 @@ class OrderManager:
         self._last_error: str = ""
 
     @staticmethod
-    def _request_meta(request: OrderRequest) -> Dict[str, Any]:
+    def _normalize_mode(value: Any, default: str = "paper") -> str:
+        text = str(value or default).strip().lower()
+        return "live" if text == "live" else "paper"
+
+    def _resolve_request_mode(self, request: OrderRequest) -> str:
+        try:
+            from core.trading.account_manager import account_manager
+
+            params = dict(request.params or {})
+            explicit_mode = params.get("trading_mode") or params.get("runtime_mode") or params.get("mode")
+            account_mode = account_manager.get_account_mode(request.account_id, default="")
+            if explicit_mode in {"paper", "live"}:
+                return self._normalize_mode(explicit_mode)
+            if account_mode in {"paper", "live"}:
+                return self._normalize_mode(account_mode)
+        except Exception:
+            pass
+        return "paper" if self._paper_trading else "live"
+
+    def _request_meta(self, request: OrderRequest) -> Dict[str, Any]:
+        resolved_mode = self._resolve_request_mode(request)
         return {
             "strategy": request.strategy,
             "account_id": request.account_id,
+            "mode": resolved_mode,
             "order_mode": request.order_mode,
             "stop_loss": request.stop_loss,
             "take_profit": request.take_profit,
@@ -165,7 +186,7 @@ class OrderManager:
 
     async def create_order(self, request: OrderRequest) -> Optional[Order]:
         self._last_error = ""
-        if self._paper_trading:
+        if self._resolve_request_mode(request) == "paper":
             return await self._create_paper_order(request)
         return await self._create_real_order(request)
 
@@ -655,15 +676,29 @@ class OrderManager:
             "sell_orders": len([o for o in orders if o.side == OrderSide.SELL]),
         }
 
-    def clear_paper_history(self) -> Dict[str, int]:
-        """Clear in-memory paper-trading order history."""
-        total = len(self._orders)
-        meta_total = len(self._order_meta)
-        pending_total = len(self._pending_orders)
-        self._orders.clear()
-        self._order_meta.clear()
-        self._pending_orders.clear()
-        self._paper_order_seq = 0
+    def clear_paper_history(self, mode: str = "paper") -> Dict[str, int]:
+        """Clear in-memory order history for the requested runtime mode."""
+        target = self._normalize_mode(mode, default="paper")
+        order_ids_to_remove = {
+            order_id
+            for order_id, meta in self._order_meta.items()
+            if self._normalize_mode(meta.get("mode"), default="paper") == target
+        }
+        pending_ids_to_remove = {
+            order_id
+            for order_id, request in self._pending_orders.items()
+            if self._resolve_request_mode(request) == target
+        }
+        total = len(order_ids_to_remove)
+        meta_total = len(order_ids_to_remove)
+        pending_total = len(pending_ids_to_remove)
+        for order_id in order_ids_to_remove:
+            self._orders.pop(order_id, None)
+            self._order_meta.pop(order_id, None)
+        for order_id in pending_ids_to_remove:
+            self._pending_orders.pop(order_id, None)
+        if target == "paper":
+            self._paper_order_seq = 0
         return {
             "orders_cleared": total,
             "metadata_cleared": meta_total,

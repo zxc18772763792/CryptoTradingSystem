@@ -81,19 +81,33 @@ def cancel_mode_switch(token: str) -> bool:
     return False
 
 
-async def clear_local_trading_runtime(*, clear_paper_snapshots: bool = False) -> Dict[str, Any]:
-    runtime_reset = execution_engine.clear_paper_runtime()
-    order_reset = order_manager.clear_paper_history()
-    position_reset = position_manager.clear_all()
+async def clear_local_trading_runtime(
+    *,
+    clear_paper_snapshots: bool = False,
+    mode: str = "paper",
+) -> Dict[str, Any]:
+    normalized_mode = "live" if str(mode or "").strip().lower() == "live" else "paper"
+    current_default_mode = execution_engine.get_trading_mode()
+    runtime_reset = execution_engine.clear_paper_runtime() if normalized_mode == "paper" else {
+        "conditional_orders_cleared": 0,
+        "queued_signals_cleared": 0,
+        "paper_fee_orders_cleared": 0,
+        "paper_fee_total_cleared": 0.0,
+    }
+    order_reset = order_manager.clear_paper_history(mode=normalized_mode)
+    position_reset = position_manager.clear_scope(normalized_mode)
+    risk_manager.set_account_scope(normalized_mode, reset_baseline=False)
     risk_reset = risk_manager.clear_runtime_history()
+    if current_default_mode != normalized_mode:
+        risk_manager.set_account_scope(current_default_mode, reset_baseline=False)
     snapshots_deleted = 0
-    if clear_paper_snapshots:
+    if clear_paper_snapshots and normalized_mode == "paper":
         with contextlib.suppress(Exception):
             snapshots_deleted = int(await account_snapshot_manager.clear_history(mode="paper"))
 
     strategy_signal_cleared = 0
     strategy_position_cleared = 0
-    for strategy in strategy_manager.get_all_strategies().values():
+    for strategy in strategy_manager.get_all_strategies(runtime_mode=normalized_mode).values():
         try:
             strategy_signal_cleared += len(getattr(strategy, "signals_history", []) or [])
             strategy_position_cleared += len(getattr(strategy, "positions", {}) or {})
@@ -170,13 +184,15 @@ async def switch_trading_mode(
         if app is not None:
             restart_result = await _restart_runtime_workers(app)
 
-        with contextlib.suppress(Exception):
-            strategies_stopped = int(len(strategy_manager.get_running_strategies()))
-        await strategy_manager.stop_all()
-
-        cleanup_result = await clear_local_trading_runtime(clear_paper_snapshots=clear_paper_snapshots)
         execution_engine.set_paper_trading(target_mode != "live", sync_runtime_state=False)
-        updated_accounts = int(account_manager.set_mode_for_all(target_mode) or 0)
+        try:
+            updated_accounts = 1 if account_manager.set_mode("main", target_mode) else 0
+        except Exception:
+            updated_accounts = 0
+        cleanup_result = {
+            "skipped": True,
+            "reason": "mode_switch_preserves_registered_and_running_strategies",
+        }
         cache_reset = runtime_state.clear_registered_caches(scope=target_mode)
 
         if was_running and not execution_engine.is_running:
@@ -210,7 +226,7 @@ async def switch_trading_mode(
     except Exception as exc:
         execution_engine.set_paper_trading(previous_mode != "live", sync_runtime_state=False)
         with contextlib.suppress(Exception):
-            account_manager.set_mode_for_all(previous_mode)
+            account_manager.set_mode("main", previous_mode)
         runtime_state.clear_registered_caches(scope=previous_mode)
         runtime_state.fail_mode_switch(previous_mode, error=str(exc))
         raise
@@ -220,7 +236,7 @@ async def ensure_trading_mode_started(target_mode: str) -> Dict[str, Any]:
     normalized = "live" if str(target_mode or "").strip().lower() == "live" else "paper"
     execution_engine.set_paper_trading(normalized != "live")
     with contextlib.suppress(Exception):
-        account_manager.set_mode_for_all(normalized)
+        account_manager.set_mode("main", normalized)
     runtime_state.clear_registered_caches(scope=normalized)
     if not execution_engine.is_running:
         await execution_engine.start()

@@ -108,6 +108,11 @@ class ExecutionEngine:
         self._queue_task: Optional[asyncio.Task] = None
         self._execution_callbacks: List[callable] = []
         self._paper_trading: bool = True
+        self._default_paper_trading: bool = True
+        self._mode_lock: Optional[asyncio.Lock] = None
+        self._mode_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._mode_lock_owner: Optional[asyncio.Task] = None
+        self._mode_lock_depth: int = 0
 
         self._cached_equity: float = 0.0
         self._equity_updated_at: Optional[datetime] = None
@@ -155,8 +160,89 @@ class ExecutionEngine:
         loop = asyncio.get_running_loop()
         if self._live_review_lock is None or self._live_review_lock_loop is not loop:
             self._live_review_lock = asyncio.Lock()
-            self._live_review_lock_loop = loop
+        self._live_review_lock_loop = loop
         return self._live_review_lock
+
+    def _get_mode_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._mode_lock is None or self._mode_lock_loop is not loop:
+            self._mode_lock = asyncio.Lock()
+            self._mode_lock_loop = loop
+            self._mode_lock_owner = None
+            self._mode_lock_depth = 0
+        return self._mode_lock
+
+    async def _acquire_mode_lock(self) -> None:
+        task = asyncio.current_task()
+        if task is not None and self._mode_lock_owner is task:
+            self._mode_lock_depth += 1
+            return
+        lock = self._get_mode_lock()
+        await lock.acquire()
+        self._mode_lock_owner = task
+        self._mode_lock_depth = 1
+
+    def _release_mode_lock(self) -> None:
+        task = asyncio.current_task()
+        lock = self._mode_lock
+        if lock is None or self._mode_lock_owner is not task:
+            return
+        if self._mode_lock_depth > 1:
+            self._mode_lock_depth -= 1
+            return
+        self._mode_lock_owner = None
+        self._mode_lock_depth = 0
+        if lock.locked():
+            lock.release()
+
+    @staticmethod
+    def _normalize_trading_mode(mode: Any, default: str = "paper") -> str:
+        text = str(mode or default).strip().lower()
+        return "live" if text == "live" else "paper"
+
+    def _current_trading_mode(self) -> str:
+        return "paper" if self._paper_trading else "live"
+
+    def _resolve_account_trading_mode(
+        self,
+        account_id: Optional[str],
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+        fallback: Optional[str] = None,
+    ) -> str:
+        meta = dict(metadata or {})
+        explicit = meta.get("trading_mode") or meta.get("runtime_mode") or meta.get("mode")
+        if str(explicit or "").strip().lower() in {"paper", "live"}:
+            return self._normalize_trading_mode(explicit)
+        default_mode = fallback or self.get_trading_mode()
+        return account_manager.get_account_mode(account_id, default=default_mode)
+
+    def _resolve_signal_trading_mode(self, signal: Signal) -> str:
+        metadata = dict(getattr(signal, "metadata", {}) or {})
+        account_id = str(metadata.get("account_id") or "main")
+        return self._resolve_account_trading_mode(account_id, metadata=metadata, fallback=self.get_trading_mode())
+
+    def _activate_runtime_mode(self, mode: str, *, reset_baseline: bool = False) -> None:
+        resolved = self._normalize_trading_mode(mode)
+        self._paper_trading = resolved == "paper"
+        order_manager.set_paper_trading(self._paper_trading)
+        position_manager.set_scope(resolved)
+        risk_manager.set_account_scope(resolved, reset_baseline=reset_baseline)
+
+    @contextlib.asynccontextmanager
+    async def _mode_guard(self, mode: str, *, reset_baseline: bool = False):
+        await self._acquire_mode_lock()
+        previous_mode = self._current_trading_mode()
+        try:
+            if self._normalize_trading_mode(mode) != previous_mode:
+                self._activate_runtime_mode(mode, reset_baseline=reset_baseline)
+            yield
+        finally:
+            try:
+                if self._current_trading_mode() != previous_mode:
+                    self._activate_runtime_mode(previous_mode, reset_baseline=False)
+            finally:
+                self._release_mode_lock()
 
     def _load_live_trade_counts(self) -> Dict[str, int]:
         try:
@@ -358,26 +444,24 @@ class ExecutionEngine:
         }
 
     def set_paper_trading(self, enabled: bool, *, sync_runtime_state: bool = True) -> None:
-        self._paper_trading = bool(enabled)
-        mode = "paper" if self._paper_trading else "live"
-        order_manager.set_paper_trading(self._paper_trading)
-        position_manager.set_scope(mode)
-        risk_manager.set_account_scope(mode, reset_baseline=True)
+        self._default_paper_trading = bool(enabled)
+        mode = "paper" if self._default_paper_trading else "live"
+        self._activate_runtime_mode(mode, reset_baseline=True)
         if sync_runtime_state:
             runtime_state.initialize_mode(mode, reason="execution_engine.set_paper_trading")
-        if self._paper_trading and self._paper_equity_anchor < 100:
+        if self._default_paper_trading and self._paper_equity_anchor < 100:
             report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
             seed = float(self._cached_equity or 0.0)
             if report_eq > 0:
                 seed = max(seed, report_eq)
             self._paper_equity_anchor = max(seed, float(getattr(settings, "PAPER_INITIAL_EQUITY", 10000.0) or 10000.0))
-        logger.info(f"Execution engine paper trading: {self._paper_trading}")
+        logger.info(f"Execution engine default trading mode: {mode}")
 
     def get_trading_mode(self) -> str:
-        return "paper" if self._paper_trading else "live"
+        return "paper" if self._default_paper_trading else "live"
 
     def is_paper_mode(self) -> bool:
-        return self._paper_trading
+        return self._default_paper_trading
 
     def register_callback(self, callback: callable) -> None:
         self._execution_callbacks.append(callback)
@@ -2427,7 +2511,7 @@ class ExecutionEngine:
         )
 
         return await live_decision_router.evaluate_signal(
-            trading_mode=self.get_trading_mode(),
+            trading_mode=self._current_trading_mode(),
             strategy=str(signal.strategy_name or ""),
             symbol=str(signal.symbol or ""),
             signal_type=str(getattr(signal.signal_type, "value", side.value) or side.value),
@@ -2443,11 +2527,16 @@ class ExecutionEngine:
         )
 
     async def execute_signal(self, signal: Signal) -> Optional[Dict[str, Any]]:
+        mode = self._resolve_signal_trading_mode(signal)
+        async with self._mode_guard(mode):
+            return await self._execute_signal_in_active_mode(signal)
+
+    async def _execute_signal_in_active_mode(self, signal: Signal) -> Optional[Dict[str, Any]]:
         try:
             if signal.signal_type == SignalType.CLOSE_LONG:
-                return await self._close_position(signal, PositionSide.LONG)
+                return await self._close_position_in_active_mode(signal, PositionSide.LONG)
             if signal.signal_type == SignalType.CLOSE_SHORT:
-                return await self._close_position(signal, PositionSide.SHORT)
+                return await self._close_position_in_active_mode(signal, PositionSide.SHORT)
 
             if signal.signal_type == SignalType.BUY:
                 side = OrderSide.BUY
@@ -2488,7 +2577,7 @@ class ExecutionEngine:
                         take_profit=signal.take_profit,
                         metadata=dict(signal.metadata or {}),
                     )
-                    return await self._close_position(close_signal, PositionSide.SHORT)
+                    return await self._close_position_in_active_mode(close_signal, PositionSide.SHORT)
                 if side == OrderSide.SELL and existing_position.side == PositionSide.LONG:
                     close_signal = Signal(
                         symbol=signal.symbol,
@@ -2501,7 +2590,7 @@ class ExecutionEngine:
                         take_profit=signal.take_profit,
                         metadata=dict(signal.metadata or {}),
                     )
-                    return await self._close_position(close_signal, PositionSide.LONG)
+                    return await self._close_position_in_active_mode(close_signal, PositionSide.LONG)
                 return None
             same_direction = False
             same_direction_source = ""
@@ -2521,7 +2610,7 @@ class ExecutionEngine:
                         take_profit=signal.take_profit,
                         metadata=dict(signal.metadata or {}),
                     )
-                    return await self._close_position(close_signal, PositionSide.SHORT)
+                    return await self._close_position_in_active_mode(close_signal, PositionSide.SHORT)
                 return None
 
             if side == OrderSide.SELL and not bool(trade_policy.get("allow_short", True)):
@@ -2538,7 +2627,7 @@ class ExecutionEngine:
                         take_profit=signal.take_profit,
                         metadata=dict(signal.metadata or {}),
                     )
-                    return await self._close_position(close_signal, PositionSide.LONG)
+                    return await self._close_position_in_active_mode(close_signal, PositionSide.LONG)
                 return None
 
             if existing_position:
@@ -2593,7 +2682,7 @@ class ExecutionEngine:
                         take_profit=signal.take_profit,
                         metadata=dict(signal.metadata or {}),
                     )
-                    await self._close_position(
+                    await self._close_position_in_active_mode(
                         close_signal,
                         PositionSide.SHORT if side == OrderSide.BUY else PositionSide.LONG,
                     )
@@ -3358,6 +3447,11 @@ class ExecutionEngine:
             return None
 
     async def _close_position(self, signal: Signal, position_side: PositionSide) -> Optional[Dict[str, Any]]:
+        mode = self._resolve_signal_trading_mode(signal)
+        async with self._mode_guard(mode):
+            return await self._close_position_in_active_mode(signal, position_side)
+
+    async def _close_position_in_active_mode(self, signal: Signal, position_side: PositionSide) -> Optional[Dict[str, Any]]:
         account_id = str(signal.metadata.get("account_id", "main"))
         exchange = account_manager.resolve_exchange(account_id, str(signal.metadata.get("exchange", "binance")))
         trade_policy = self._resolve_strategy_trade_policy(signal.strategy_name, exchange)
@@ -3677,6 +3771,58 @@ class ExecutionEngine:
         return payload
 
     async def _execute_manual_order_single(
+        self,
+        exchange: str,
+        symbol: str,
+        side: str,
+        order_type: str,
+        amount: float,
+        price: Optional[float],
+        leverage: float,
+        stop_loss: Optional[float],
+        take_profit: Optional[float],
+        trailing_stop_pct: Optional[float],
+        trailing_stop_distance: Optional[float],
+        trigger_price: Optional[float],
+        order_mode: str,
+        iceberg_parts: int,
+        algo_slices: int,
+        algo_interval_sec: int,
+        account_id: str,
+        reduce_only: bool,
+        strategy: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        mode = self._resolve_account_trading_mode(
+            account_id,
+            metadata=dict(params or {}),
+            fallback=self.get_trading_mode(),
+        )
+        async with self._mode_guard(mode):
+            return await self._execute_manual_order_single_in_active_mode(
+                exchange=exchange,
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                amount=amount,
+                price=price,
+                leverage=leverage,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                trailing_stop_pct=trailing_stop_pct,
+                trailing_stop_distance=trailing_stop_distance,
+                trigger_price=trigger_price,
+                order_mode=order_mode,
+                iceberg_parts=iceberg_parts,
+                algo_slices=algo_slices,
+                algo_interval_sec=algo_interval_sec,
+                account_id=account_id,
+                reduce_only=reduce_only,
+                strategy=strategy,
+                params=params,
+            )
+
+    async def _execute_manual_order_single_in_active_mode(
         self,
         exchange: str,
         symbol: str,
@@ -4234,6 +4380,27 @@ class ExecutionEngine:
         current_price: Optional[float] = None,
         reason: str = "model_feedback_outage",
     ) -> Dict[str, Any]:
+        mode = self._resolve_account_trading_mode(account_id, fallback=self.get_trading_mode())
+        async with self._mode_guard(mode):
+            return await self._tighten_profitable_position_protection_in_active_mode(
+                exchange=exchange,
+                symbol=symbol,
+                account_id=account_id,
+                strategy_name=strategy_name,
+                current_price=current_price,
+                reason=reason,
+            )
+
+    async def _tighten_profitable_position_protection_in_active_mode(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        account_id: str = "main",
+        strategy_name: Optional[str] = None,
+        current_price: Optional[float] = None,
+        reason: str = "model_feedback_outage",
+    ) -> Dict[str, Any]:
         strategy_lookup = self._strategy_lookup_value(strategy_name)
         position = position_manager.get_position(
             exchange,
@@ -4416,6 +4583,11 @@ class ExecutionEngine:
             cond = self._conditional_orders.get(cid)
             if not cond:
                 continue
+            if self._resolve_account_trading_mode(
+                getattr(cond, "account_id", "main"),
+                fallback=self._current_trading_mode(),
+            ) != self._current_trading_mode():
+                continue
             current = await self._resolve_price(cond.exchange, cond.symbol, cond.price)
             if current <= 0:
                 continue
@@ -4464,9 +4636,12 @@ class ExecutionEngine:
         if self._last_bg_check_at and (now - self._last_bg_check_at).total_seconds() < self._bg_check_interval_seconds:
             return
         self._last_bg_check_at = now
-        await self._reconcile_local_positions_with_exchange()
-        await self._check_conditional_orders()
-        await self._check_protective_orders()
+        for mode in ("paper", "live"):
+            async with self._mode_guard(mode):
+                if mode == "live":
+                    await self._reconcile_local_positions_with_exchange()
+                await self._check_conditional_orders()
+                await self._check_protective_orders()
 
     async def _process_signal_queue(self) -> None:
         queue = self._ensure_signal_queue()
@@ -4492,13 +4667,12 @@ class ExecutionEngine:
         if self._running:
             return
         self._running = True
-        self._paper_trading = runtime_state.is_paper_mode()
-        order_manager.set_paper_trading(self._paper_trading)
-        risk_manager.set_account_scope("paper" if self._paper_trading else "live", reset_baseline=False)
+        self._default_paper_trading = runtime_state.is_paper_mode()
+        self._activate_runtime_mode("paper" if self._default_paper_trading else "live", reset_baseline=False)
         await self._ensure_queue_worker()
-        if not self._paper_trading:
+        if not self._default_paper_trading:
             asyncio.create_task(self._prime_live_equity(), name="execution_prime_live_equity")
-        logger.info(f"Execution engine started (paper trading: {self._paper_trading})")
+        logger.info(f"Execution engine started (default trading mode: {self.get_trading_mode()})")
 
     async def stop(self) -> None:
         self._running = False
@@ -4525,24 +4699,39 @@ class ExecutionEngine:
 
     def clear_paper_runtime(self) -> Dict[str, int]:
         """Clear pending conditional/signal runtime state for paper reset."""
-        conditional_count = len(self._conditional_orders)
+        paper_conditional_ids = [
+            cid
+            for cid, cond in self._conditional_orders.items()
+            if self._resolve_account_trading_mode(
+                getattr(cond, "account_id", "main"),
+                fallback="paper",
+            ) == "paper"
+        ]
+        conditional_count = len(paper_conditional_ids)
         fee_count = len(self._paper_fee_applied_orders)
         fee_total = float(self._paper_total_fees_usd or 0.0)
-        self._conditional_orders.clear()
+        for cid in paper_conditional_ids:
+            self._conditional_orders.pop(cid, None)
         queue_cleared = 0
         queue = self._signal_queue
         if queue is not None:
+            retained_signals: List[Signal] = []
             while not queue.empty():
                 try:
-                    queue.get_nowait()
-                    queue_cleared += 1
+                    queued_signal = queue.get_nowait()
+                    if self._resolve_signal_trading_mode(queued_signal) == "paper":
+                        queue_cleared += 1
+                    else:
+                        retained_signals.append(queued_signal)
                 except Exception:
                     break
+            for queued_signal in retained_signals:
+                with contextlib.suppress(Exception):
+                    queue.put_nowait(queued_signal)
         self._last_bg_check_at = None
-        self._last_live_reconcile_at = None
         self._paper_total_fees_usd = 0.0
         self._paper_fee_applied_orders.clear()
-        if self._paper_trading:
+        if self._current_trading_mode() == "paper":
             report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
             if report_eq > 0:
                 self._paper_equity_anchor = max(

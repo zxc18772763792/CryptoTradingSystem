@@ -10207,6 +10207,10 @@ input[type="radio"] {
     white-space: nowrap;
 }
 
+#ai-research .ai-queue-exit-btn {
+    white-space: nowrap;
+}
+
 #ai-research .ai-sidebar-caption {
     margin-bottom: 10px;
     color: #91a9c7;

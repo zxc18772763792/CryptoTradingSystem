@@ -20,7 +20,7 @@
   const AI_SHARED_POLL_SYNC_MS = 5000;
   const LIVE_SIGNALS_TIMEOUT_MS = 45000;
   const AGENT_LIVE_SIGNALS_TIMEOUT_MS = 90000;
-  const DEFAULT_ACTION_LOCKS = Object.freeze({ generate: false, run: false, oneclick: false, clear: false });
+  const DEFAULT_ACTION_LOCKS = Object.freeze({ generate: false, run: false, oneclick: false, clear: false, exit: false });
   const DELETE_BLOCKED_PROPOSAL_STATUSES = new Set(['paper_running', 'shadow_running', 'live_running']);
   const DELETE_BLOCKED_CANDIDATE_STATUSES = new Set(['paper_running', 'shadow_running', 'live_running']);
 
@@ -2507,6 +2507,46 @@
     return { clearableProposalIds, clearableCandidateIds, skippedBlocked, skippedMissing };
   }
 
+  function getVisibleRunningQueueTargets(visibleProposals = getVisibleProposalQueueItems()) {
+    const proposalIds = [];
+    const candidateIds = [];
+    const skippedMissing = [];
+    const seenProposalIds = new Set();
+    const seenCandidateIds = new Set();
+
+    toArray(visibleProposals).forEach((item) => {
+      const proposalId = String(item?.proposal_id || '').trim();
+      if (!proposalId || seenProposalIds.has(proposalId)) return;
+      seenProposalIds.add(proposalId);
+
+      if (isVirtualProposal(item)) {
+        const candidateId = fallbackCandidateIdForProposal(item);
+        if (!candidateId || seenCandidateIds.has(candidateId)) {
+          if (!candidateId) skippedMissing.push({ type: 'candidate', proposalId });
+          return;
+        }
+        seenCandidateIds.add(candidateId);
+        const candidate = findCandidateById(candidateId);
+        if (!candidate) {
+          skippedMissing.push({ type: 'candidate', proposalId, candidateId });
+          return;
+        }
+        const status = String(candidate?.status || '').trim();
+        if (DELETE_BLOCKED_CANDIDATE_STATUSES.has(status)) {
+          candidateIds.push(candidateId);
+        }
+        return;
+      }
+
+      const status = String(item?.status || '').trim();
+      if (DELETE_BLOCKED_PROPOSAL_STATUSES.has(status)) {
+        proposalIds.push(proposalId);
+      }
+    });
+
+    return { proposalIds, candidateIds, skippedMissing };
+  }
+
   function proposalIdForCandidate(candidateId) {
     return String(findCandidateById(candidateId)?.proposal_id || '').trim();
   }
@@ -2655,6 +2695,7 @@
     }
     if (!visibleProposals.length) {
       updateClearQueueButton([]);
+      updateExitRunningQueueButton([]);
       box.innerHTML = '<div style="color:#6b7fa0;font-size:12px;padding:8px 0;">暂无研究任务</div>';
       normalizeDomText(box);
       emitWorkbenchState('proposal-list');
@@ -2704,6 +2745,7 @@
       </div>`;
     }).join('');
     updateClearQueueButton(visibleProposals);
+    updateExitRunningQueueButton(visibleProposals);
     normalizeDomText(box);
     emitWorkbenchState('proposal-list');
   }
@@ -2741,6 +2783,69 @@
     if (clearableCandidateIds.length) hints.push(`将清理 ${clearableCandidateIds.length} 个候选回填`);
     if (skippedBlocked.length) hints.push(`跳过 ${skippedBlocked.length} 个运行中条目`);
     if (skippedMissing.length) hints.push(`忽略 ${skippedMissing.length} 个无效回填`);
+    btn.title = hints.join('；');
+  }
+
+  updateClearQueueButton = function updateClearQueueButtonOverride(visibleProposals = getVisibleProposalQueueItems()) {
+    const btn = document.getElementById('ai-clear-queue-btn');
+    if (!btn) return;
+
+    const visibleCount = toArray(visibleProposals).length;
+    const { clearableProposalIds, clearableCandidateIds, skippedBlocked, skippedMissing } = getVisibleProposalQueueTargets(visibleProposals);
+    const clearableCount = clearableProposalIds.length + clearableCandidateIds.length;
+    const busy = hasActionLock();
+
+    btn.textContent = visibleCount ? `一键清空当前任务 (${visibleCount})` : '一键清空当前任务';
+    btn.disabled = !visibleCount || busy || !clearableCount;
+
+    if (!visibleCount) {
+      btn.title = '当前没有可清空的研究任务';
+      return;
+    }
+    if (busy) {
+      btn.title = '当前有其他操作正在执行，请等待完成后再清空任务队列';
+      return;
+    }
+    if (!clearableCount) {
+      const reasons = [];
+      if (skippedBlocked.length) reasons.push(`运行/跟踪中的条目 ${skippedBlocked.length} 个，需要先退出`);
+      if (skippedMissing.length) reasons.push(`失效回填 ${skippedMissing.length} 个`);
+      btn.title = reasons.length ? `当前可见任务暂不可清空：${reasons.join('；')}` : '当前没有可清空的研究任务';
+      return;
+    }
+
+    const hints = [];
+    if (clearableProposalIds.length) hints.push(`将删除 ${clearableProposalIds.length} 个研究任务`);
+    if (clearableCandidateIds.length) hints.push(`将清理 ${clearableCandidateIds.length} 个候选回填`);
+    if (skippedBlocked.length) hints.push(`另有 ${skippedBlocked.length} 个运行/跟踪中的条目不会被清空`);
+    if (skippedMissing.length) hints.push(`忽略 ${skippedMissing.length} 个失效回填`);
+    btn.title = hints.join('；');
+  };
+
+  function updateExitRunningQueueButton(visibleProposals = getVisibleProposalQueueItems()) {
+    const btn = document.getElementById('ai-exit-running-queue-btn');
+    if (!btn) return;
+
+    const { proposalIds, candidateIds, skippedMissing } = getVisibleRunningQueueTargets(visibleProposals);
+    const exitableCount = proposalIds.length + candidateIds.length;
+    const busy = hasActionLock();
+
+    btn.textContent = exitableCount ? `一键退出运行中条目 (${exitableCount})` : '一键退出运行中条目';
+    btn.disabled = busy || !exitableCount;
+
+    if (busy) {
+      btn.title = '当前有其他操作正在执行，请等待完成后再退出运行中条目';
+      return;
+    }
+    if (!exitableCount) {
+      btn.title = skippedMissing.length ? '当前没有可退出的运行中条目，部分回填记录已失效' : '当前没有可退出的运行中条目';
+      return;
+    }
+
+    const hints = [];
+    if (proposalIds.length) hints.push(`将退出 ${proposalIds.length} 个研究任务`);
+    if (candidateIds.length) hints.push(`将退出 ${candidateIds.length} 个候选回填`);
+    if (skippedMissing.length) hints.push(`忽略 ${skippedMissing.length} 个失效回填`);
     btn.title = hints.join('；');
   }
 
@@ -4400,6 +4505,7 @@
     }
     updateRunBtn();
     updateClearQueueButton();
+    updateExitRunningQueueButton();
     updateClearCandidatesButton();
     emitWorkbenchState('action-locks');
   }
@@ -4870,6 +4976,70 @@
     await refreshWorkbench(proposalId, '');
   }
 
+  async function exitRunningQueueCandidate(candidateId) {
+    if (!candidateId) return null;
+    return aiApi(`/candidates/${encodeURIComponent(candidateId)}/exit`, {
+      method: 'POST',
+      body: JSON.stringify({ notes: 'exited from AI research queue' }),
+      timeoutMs: 20000,
+    });
+  }
+
+  async function exitProposal(proposalId) {
+    if (!proposalId) return null;
+    return aiApi(`/proposals/${encodeURIComponent(proposalId)}/exit`, {
+      method: 'POST',
+      body: JSON.stringify({ notes: 'exited from AI research queue' }),
+      timeoutMs: 20000,
+    });
+  }
+
+  retireProposal = async function retireProposalOverride(proposalId) {
+    const item = state.proposals.find(p => String(p?.proposal_id || '') === proposalId);
+    if (isVirtualProposal(item)) {
+      notify('候选回填条目没有可退役的原始研究任务', true);
+      return;
+    }
+    const status = String(item?.status || '');
+    if (!proposalId) {
+      notify('缺少 proposal_id，无法退出/退役', true);
+      return;
+    }
+    if (!['shadow_running', 'live_candidate', 'paper_running', 'live_running'].includes(status)) {
+      notify(`当前状态“${statusText(status)}”不支持退出/退役`, true);
+      return;
+    }
+
+    const shouldExitRuntime = ['shadow_running', 'paper_running', 'live_running'].includes(status);
+    const confirmMessage = shouldExitRuntime
+      ? `确认退出该运行中条目？\n${proposalId}\n这会停止相关运行并将条目标记为退役，之后才可清空或删除。`
+      : `确认将该研究退役？\n${proposalId}\n退役后会退出跟踪并允许删除。`;
+    if (!window.confirm(confirmMessage)) return;
+
+    try {
+      if (shouldExitRuntime) {
+        await exitProposal(proposalId);
+        notify('运行中条目已退出');
+      } else {
+        await aiApi(`/proposals/${encodeURIComponent(proposalId)}/retire`, {
+          method: 'POST',
+          body: JSON.stringify({ notes: 'retired from AI research queue' }),
+          timeoutMs: 15000,
+        });
+        notify('研究已退役');
+      }
+    } catch (err) {
+      const msg = String(err?.message || '');
+      if (/404|not found/i.test(msg)) {
+        await deleteProposal(proposalId);
+        notify('旧记录未命中退役接口，已直接删除');
+        return;
+      }
+      throw err;
+    }
+    await refreshWorkbench(proposalId, '');
+  };
+
   async function pullNewsForResearch() {
     if (window.AI?.modules?.diagnostics?.pullNews) {
       return window.AI.modules.diagnostics.pullNews();
@@ -5121,6 +5291,171 @@
     });
   }
 
+  clearVisibleProposalQueue = async function clearVisibleProposalQueueOverride() {
+    const visibleProposals = getVisibleProposalQueueItems();
+    if (!visibleProposals.length) {
+      updateClearQueueButton([]);
+      updateExitRunningQueueButton([]);
+      notify('当前没有可清空的研究任务', true);
+      return;
+    }
+
+    const { clearableProposalIds, clearableCandidateIds, skippedBlocked, skippedMissing } = getVisibleProposalQueueTargets(visibleProposals);
+    if (!clearableProposalIds.length && !clearableCandidateIds.length) {
+      const reasons = [];
+      if (skippedBlocked.length) reasons.push(`运行/跟踪中的条目 ${skippedBlocked.length} 个，请先点“一键退出运行中条目”`);
+      if (skippedMissing.length) reasons.push(`失效回填 ${skippedMissing.length} 个`);
+      notify(reasons.length ? `当前可见任务暂不可清空：${reasons.join('；')}` : '当前没有可清空的研究任务', true);
+      updateClearQueueButton(visibleProposals);
+      updateExitRunningQueueButton(visibleProposals);
+      return;
+    }
+
+    const clearableProposalSet = new Set(clearableProposalIds);
+    const clearableCandidateSet = new Set(clearableCandidateIds);
+    const clearableVisibleCount = visibleProposals.filter((item) => {
+      if (isVirtualProposal(item)) return clearableCandidateSet.has(fallbackCandidateIdForProposal(item));
+      return clearableProposalSet.has(String(item?.proposal_id || '').trim());
+    }).length;
+
+    const confirmLines = [
+      `确认清空当前可见的 ${visibleProposals.length} 个任务条目吗？`,
+      `将移除 ${clearableVisibleCount} 个当前条目。`,
+    ];
+    if (clearableProposalIds.length) confirmLines.push(`其中删除研究任务 ${clearableProposalIds.length} 个（会级联清理候选记录）`);
+    if (clearableCandidateIds.length) confirmLines.push(`清理候选回填 ${clearableCandidateIds.length} 个`);
+    if (skippedBlocked.length) confirmLines.push(`运行/跟踪中的条目不会被清空，请先点“一键退出运行中条目”：${skippedBlocked.length} 个`);
+    if (skippedMissing.length) confirmLines.push(`失效回填将忽略：${skippedMissing.length} 个`);
+    if (!window.confirm(confirmLines.join('\n'))) return;
+
+    await withActionLock('clear', async () => {
+      const deletedProposalIds = new Set();
+      const deletedCandidateIds = new Set();
+      const failures = [];
+
+      for (const proposalId of clearableProposalIds) {
+        try {
+          await aiApi(`/proposals/${encodeURIComponent(proposalId)}`, { method: 'DELETE', timeoutMs: 20000 });
+          deletedProposalIds.add(proposalId);
+        } catch (err) {
+          failures.push({
+            type: 'proposal',
+            id: proposalId,
+            message: String(err?.message || '删除失败'),
+          });
+        }
+      }
+
+      for (const candidateId of clearableCandidateIds) {
+        try {
+          await aiApi(`/candidates/${encodeURIComponent(candidateId)}`, { method: 'DELETE', timeoutMs: 20000 });
+          deletedCandidateIds.add(candidateId);
+        } catch (err) {
+          failures.push({
+            type: 'candidate',
+            id: candidateId,
+            message: String(err?.message || '清理失败'),
+          });
+        }
+      }
+
+      const selectedProposal = findProposalById(state.selectedProposalId);
+      if (deletedProposalIds.has(String(state.selectedProposalId || '').trim())) {
+        state.selectedProposalId = '';
+      } else if (selectedProposal && isVirtualProposal(selectedProposal) && deletedCandidateIds.has(fallbackCandidateIdForProposal(selectedProposal))) {
+        state.selectedProposalId = '';
+      }
+
+      if (deletedCandidateIds.has(String(state.selectedCandidateId || '').trim())) {
+        state.selectedCandidateId = '';
+      } else if (deletedProposalIds.has(proposalIdForCandidate(state.selectedCandidateId))) {
+        state.selectedCandidateId = '';
+      }
+
+      await refreshWorkbench('', '');
+
+      const summary = [];
+      if (clearableVisibleCount) summary.push(`已清空 ${clearableVisibleCount} 个当前任务条目`);
+      if (deletedProposalIds.size) summary.push(`删除了 ${deletedProposalIds.size} 个研究任务`);
+      if (deletedCandidateIds.size) summary.push(`清理了 ${deletedCandidateIds.size} 个候选回填`);
+      if (skippedBlocked.length) summary.push(`保留 ${skippedBlocked.length} 个运行/跟踪中的条目`);
+      if (skippedMissing.length) summary.push(`忽略 ${skippedMissing.length} 个失效回填`);
+      if (failures.length) summary.push(`失败 ${failures.length} 个`);
+      notify(summary.join('；') || '任务队列已清空', failures.length > 0);
+      if (failures.length) console.warn('clearVisibleProposalQueue failures:', failures);
+    });
+  };
+
+  async function exitVisibleRunningQueueItems() {
+    const visibleProposals = getVisibleProposalQueueItems();
+    if (!visibleProposals.length) {
+      updateExitRunningQueueButton([]);
+      notify('当前没有可退出的运行中条目', true);
+      return;
+    }
+
+    const { proposalIds, candidateIds, skippedMissing } = getVisibleRunningQueueTargets(visibleProposals);
+    const exitableCount = proposalIds.length + candidateIds.length;
+    if (!exitableCount) {
+      const reasons = [];
+      if (skippedMissing.length) reasons.push(`失效回填 ${skippedMissing.length} 个`);
+      notify(reasons.length ? `当前没有可退出的运行中条目：${reasons.join('；')}` : '当前没有可退出的运行中条目', true);
+      updateExitRunningQueueButton(visibleProposals);
+      return;
+    }
+
+    const confirmLines = [
+      `确认退出当前可见的 ${exitableCount} 个运行中条目吗？`,
+      '这会停止相关运行或跟踪，并把条目标记为退役。',
+    ];
+    if (proposalIds.length) confirmLines.push(`退出研究任务 ${proposalIds.length} 个`);
+    if (candidateIds.length) confirmLines.push(`退出候选回填 ${candidateIds.length} 个`);
+    if (skippedMissing.length) confirmLines.push(`忽略失效回填 ${skippedMissing.length} 个`);
+    if (!window.confirm(confirmLines.join('\n'))) return;
+
+    await withActionLock('exit', async () => {
+      const exitedProposalIds = new Set();
+      const exitedCandidateIds = new Set();
+      const failures = [];
+
+      for (const proposalId of proposalIds) {
+        try {
+          await exitProposal(proposalId);
+          exitedProposalIds.add(proposalId);
+        } catch (err) {
+          failures.push({
+            type: 'proposal',
+            id: proposalId,
+            message: String(err?.message || '退出失败'),
+          });
+        }
+      }
+
+      for (const candidateId of candidateIds) {
+        try {
+          await exitRunningQueueCandidate(candidateId);
+          exitedCandidateIds.add(candidateId);
+        } catch (err) {
+          failures.push({
+            type: 'candidate',
+            id: candidateId,
+            message: String(err?.message || '退出失败'),
+          });
+        }
+      }
+
+      await refreshWorkbench('', '');
+
+      const summary = [];
+      if (exitedProposalIds.size) summary.push(`退出了 ${exitedProposalIds.size} 个研究任务`);
+      if (exitedCandidateIds.size) summary.push(`退出了 ${exitedCandidateIds.size} 个候选回填`);
+      if (skippedMissing.length) summary.push(`忽略 ${skippedMissing.length} 个失效回填`);
+      if (failures.length) summary.push(`失败 ${failures.length} 个`);
+      notify(summary.join('；') || '运行中条目已退出', failures.length > 0);
+      if (failures.length) console.warn('exitVisibleRunningQueueItems failures:', failures);
+    });
+  }
+
   async function clearVisibleCandidates() {
     const visibleCandidates = getVisibleCandidates();
     if (!visibleCandidates.length) {
@@ -5193,6 +5528,8 @@
      浜嬩欢缁戝畾
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function bindEvents() {
+    document.getElementById('ai-exit-running-queue-btn')?.addEventListener('click', () =>
+      exitVisibleRunningQueueItems().catch(err => notify(`退出运行中条目失败: ${err.message}`, true)));
     /* 生成研究 */
     document.getElementById('ai-generate-btn')?.addEventListener('click', () =>
       withActionLock('generate', () => generateProposal()).catch(err => notify(`生成失败: ${err.message}`, true)));

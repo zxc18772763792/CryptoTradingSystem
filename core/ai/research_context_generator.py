@@ -16,7 +16,9 @@ from loguru import logger
 
 from config.settings import settings
 from core.utils.openai_responses import (
-    build_openai_headers,
+    anthropic_messages_endpoint,
+    build_anthropic_messages_payload,
+    build_target_headers,
     build_chat_completions_payload,
     build_responses_payload,
     chat_completions_endpoint,
@@ -29,6 +31,7 @@ from core.utils.openai_responses import (
     responses_endpoint,
     responses_api_unavailable,
     should_failover_openai_status,
+    target_transport,
 )
 
 
@@ -209,12 +212,13 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
         return None
 
     model = str(getattr(settings, "OPENAI_MODEL", "") or _DEFAULT_OPENAI_MODEL).strip() or _DEFAULT_OPENAI_MODEL
+    messages = [
+        {"role": "system", "content": _CONTEXT_SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
     payload = build_responses_payload(
         model=model,
-        messages=[
-            {"role": "system", "content": _CONTEXT_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
+        messages=messages,
         max_output_tokens=2400,
         temperature=0.2,
         text_format="json_object",
@@ -222,14 +226,17 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
     )
     chat_payload = build_chat_completions_payload(
         model=model,
-        messages=[
-            {"role": "system", "content": _CONTEXT_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
+        messages=messages,
         max_tokens=2400,
         temperature=0.2,
         response_format={"type": "json_object"},
         stream=False,
+    )
+    anthropic_payload = build_anthropic_messages_payload(
+        model=model,
+        messages=messages,
+        max_tokens=2400,
+        temperature=0.2,
     )
     timeout_cfg = aiohttp.ClientTimeout(total=max(5, int(timeout)))
 
@@ -241,85 +248,114 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
             target_model = str(target.get("model") or model or "").strip() or model
             if not base_url or not api_key:
                 continue
-            url = responses_endpoint(base_url)
+            transport = target_transport(target)
             request_payload = dict(payload, model=target_model)
             request_chat_payload = dict(chat_payload, model=target_model)
+            request_anthropic_payload = dict(anthropic_payload, model=target_model)
+            headers = build_target_headers({**dict(target), "api_key": api_key})
             try:
-                async with session.post(url, headers=build_openai_headers(api_key), json=request_payload) as resp:
-                    if resp.status >= 400:
-                        body = (await resp.text())[:400]
-                        if responses_api_unavailable(resp.status, body):
-                            logger.warning(
-                                "research_context_generator: relay does not support Responses API; "
-                                "retrying via chat/completions"
-                            )
-                            chat_url = chat_completions_endpoint(base_url)
-                            async with session.post(
-                                chat_url,
-                                headers=build_openai_headers(api_key),
-                                json=request_chat_payload,
-                            ) as chat_resp:
-                                if chat_resp.status >= 400:
-                                    chat_body = (await chat_resp.text())[:400]
-                                    logger.debug(
-                                        "research_context_generator: "
-                                        f"openai_chat_http_{chat_resp.status}:{chat_body}"
-                                    )
-                                    if should_failover_openai_status(chat_resp.status):
-                                        remember_openai_target_failure(
-                                            targets,
-                                            base_url,
-                                            scope=_OPENAI_FAILOVER_SCOPE,
-                                        )
-                                    if idx + 1 < total_targets and should_failover_openai_status(chat_resp.status):
-                                        logger.warning(
-                                            "research_context_generator: chat/completions relay failed with "
-                                            f"{chat_resp.status}; trying backup {idx + 2}/{total_targets}"
-                                        )
-                                        continue
-                                    return None
-                                data = await read_aiohttp_responses_json(chat_resp)
-                            raw = extract_response_text(data)
-                            if not raw:
-                                logger.debug("research_context_generator: empty OpenAI chat/completions content")
+                if transport == "anthropic":
+                    url = anthropic_messages_endpoint(base_url)
+                    async with session.post(url, headers=headers, json=request_anthropic_payload) as resp:
+                        if resp.status >= 400:
+                            body = (await resp.text())[:400]
+                            logger.debug(f"research_context_generator: anthropic_http_{resp.status}:{body}")
+                            if should_failover_openai_status(resp.status):
                                 remember_openai_target_failure(
                                     targets,
                                     base_url,
                                     scope=_OPENAI_FAILOVER_SCOPE,
                                 )
-                                if idx + 1 < total_targets:
-                                    continue
-                                return None
-                            remember_openai_target_success(
-                                targets,
-                                base_url,
-                                scope=_OPENAI_FAILOVER_SCOPE,
-                            )
-                            try:
-                                return _parse_json_payload(raw)
-                            except Exception as exc:
-                                logger.debug(f"research_context_generator: failed to parse chat payload: {exc}")
-                                return None
-                        logger.debug(f"research_context_generator: openai_http_{resp.status}:{body}")
-                        if should_failover_openai_status(resp.status):
-                            remember_openai_target_failure(
-                                targets,
-                                base_url,
-                                scope=_OPENAI_FAILOVER_SCOPE,
-                            )
-                        if idx + 1 < total_targets and should_failover_openai_status(resp.status):
-                            logger.warning(
-                                f"research_context_generator: primary relay failed with {resp.status}; "
-                                f"trying backup {idx + 2}/{total_targets}"
-                            )
-                            continue
-                        return None
-                    data = await read_aiohttp_responses_json(resp)
-                    remember_openai_target_success(
-                        targets,
-                        base_url,
-                        scope=_OPENAI_FAILOVER_SCOPE,
-                    )
+                            if idx + 1 < total_targets and should_failover_openai_status(resp.status):
+                                logger.warning(
+                                    "research_context_generator: anthropic-style backup failed with "
+                                    f"{resp.status}; trying backup {idx + 2}/{total_targets}"
+                                )
+                                continue
+                            return None
+                        data = await read_aiohttp_responses_json(resp)
+                        remember_openai_target_success(
+                            targets,
+                            base_url,
+                            scope=_OPENAI_FAILOVER_SCOPE,
+                        )
+                else:
+                    url = responses_endpoint(base_url)
+                    async with session.post(url, headers=headers, json=request_payload) as resp:
+                        if resp.status >= 400:
+                            body = (await resp.text())[:400]
+                            if responses_api_unavailable(resp.status, body):
+                                logger.warning(
+                                    "research_context_generator: relay does not support Responses API; "
+                                    "retrying via chat/completions"
+                                )
+                                chat_url = chat_completions_endpoint(base_url)
+                                async with session.post(
+                                    chat_url,
+                                    headers=headers,
+                                    json=request_chat_payload,
+                                ) as chat_resp:
+                                    if chat_resp.status >= 400:
+                                        chat_body = (await chat_resp.text())[:400]
+                                        logger.debug(
+                                            "research_context_generator: "
+                                            f"openai_chat_http_{chat_resp.status}:{chat_body}"
+                                        )
+                                        if should_failover_openai_status(chat_resp.status):
+                                            remember_openai_target_failure(
+                                                targets,
+                                                base_url,
+                                                scope=_OPENAI_FAILOVER_SCOPE,
+                                            )
+                                        if idx + 1 < total_targets and should_failover_openai_status(chat_resp.status):
+                                            logger.warning(
+                                                "research_context_generator: chat/completions relay failed with "
+                                                f"{chat_resp.status}; trying backup {idx + 2}/{total_targets}"
+                                            )
+                                            continue
+                                        return None
+                                    data = await read_aiohttp_responses_json(chat_resp)
+                                raw = extract_response_text(data)
+                                if not raw:
+                                    logger.debug("research_context_generator: empty OpenAI chat/completions content")
+                                    remember_openai_target_failure(
+                                        targets,
+                                        base_url,
+                                        scope=_OPENAI_FAILOVER_SCOPE,
+                                    )
+                                    if idx + 1 < total_targets:
+                                        continue
+                                    return None
+                                remember_openai_target_success(
+                                    targets,
+                                    base_url,
+                                    scope=_OPENAI_FAILOVER_SCOPE,
+                                )
+                                try:
+                                    return _parse_json_payload(raw)
+                                except Exception as exc:
+                                    logger.debug(f"research_context_generator: failed to parse chat payload: {exc}")
+                                    return None
+                            logger.debug(f"research_context_generator: openai_http_{resp.status}:{body}")
+                            if should_failover_openai_status(resp.status):
+                                remember_openai_target_failure(
+                                    targets,
+                                    base_url,
+                                    scope=_OPENAI_FAILOVER_SCOPE,
+                                )
+                            if idx + 1 < total_targets and should_failover_openai_status(resp.status):
+                                logger.warning(
+                                    f"research_context_generator: primary relay failed with {resp.status}; "
+                                    f"trying backup {idx + 2}/{total_targets}"
+                                )
+                                continue
+                            return None
+                        data = await read_aiohttp_responses_json(resp)
+                        remember_openai_target_success(
+                            targets,
+                            base_url,
+                            scope=_OPENAI_FAILOVER_SCOPE,
+                        )
             except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                 logger.debug(f"research_context_generator: openai transport error: {exc}")
                 remember_openai_target_failure(

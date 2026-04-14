@@ -19,6 +19,9 @@ _OPENAI_TARGET_STATE_LOCK = threading.Lock()
 _OPENAI_TARGET_PREFERRED: Dict[Tuple[str, ...], str] = {}
 _OPENAI_FAILOVER_STATE_VERSION = 1
 _OPENAI_FAILOVER_DEFAULT_TZ = "Asia/Shanghai"
+_TARGET_TRANSPORT_OPENAI = "openai"
+_TARGET_TRANSPORT_ANTHROPIC = "anthropic"
+_ANTHROPIC_VERSION = "2023-06-01"
 # Keep failover ordering request-local by default. This avoids global sticky
 # state leaking across independent requests/tests.
 _ENABLE_CROSS_REQUEST_FAILOVER_CACHE = False
@@ -38,11 +41,75 @@ def chat_completions_endpoint(base_url: str) -> str:
     return f"{base}/v1/chat/completions"
 
 
+def anthropic_messages_endpoint(base_url: str) -> str:
+    base = _normalize_target_base_url(base_url)
+    if base.endswith("/v1"):
+        return f"{base}/messages"
+    return f"{base}/v1/messages"
+
+
 def build_openai_headers(api_key: str) -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {str(api_key or '').strip()}",
         "Content-Type": "application/json",
     }
+
+
+def build_anthropic_headers(api_key: str, *, base_url: Any = "") -> Dict[str, str]:
+    key = str(api_key or "").strip()
+    base = str(base_url or "").strip().lower()
+    headers: Dict[str, str] = {
+        "Content-Type": "application/json",
+        "anthropic-version": _ANTHROPIC_VERSION,
+    }
+    if "xiaomimimo.com" in base:
+        headers["api-key"] = key
+        headers["x-api-key"] = key
+    else:
+        headers["x-api-key"] = key
+    return headers
+
+
+def _normalize_target_base_url(value: Any) -> str:
+    base = str(value or "").strip().rstrip("/")
+    lowered = base.lower()
+    for suffix in ("/responses", "/chat/completions", "/messages"):
+        if lowered.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    return base.rstrip("/")
+
+
+def _infer_target_transport(base_url: Any) -> str:
+    lowered = str(base_url or "").strip().lower()
+    if "/anthropic/" in lowered or lowered.endswith("/messages"):
+        return _TARGET_TRANSPORT_ANTHROPIC
+    return _TARGET_TRANSPORT_OPENAI
+
+
+def _decorate_target(item: Mapping[str, Any], index: int) -> Dict[str, Any]:
+    target = dict(item or {})
+    base_url = _normalize_target_base_url(target.get("base_url"))
+    transport = str(target.get("transport") or _infer_target_transport(base_url)).strip().lower()
+    if transport not in {_TARGET_TRANSPORT_OPENAI, _TARGET_TRANSPORT_ANTHROPIC}:
+        transport = _TARGET_TRANSPORT_OPENAI
+    target["index"] = int(target.get("index") if target.get("index") is not None else index)
+    target["base_url"] = base_url
+    target["transport"] = transport
+    return target
+
+
+def target_transport(target: Mapping[str, Any] | None) -> str:
+    decorated = _decorate_target(target or {}, int((target or {}).get("index") or 0))
+    return str(decorated.get("transport") or _TARGET_TRANSPORT_OPENAI)
+
+
+def build_target_headers(target: Mapping[str, Any] | None) -> Dict[str, str]:
+    item = _decorate_target(target or {}, int((target or {}).get("index") or 0))
+    api_key = str(item.get("api_key") or "").strip()
+    if str(item.get("transport") or "") == _TARGET_TRANSPORT_ANTHROPIC:
+        return build_anthropic_headers(api_key, base_url=item.get("base_url"))
+    return build_openai_headers(api_key)
 
 
 def _split_endpoint_candidates(value: Any) -> List[str]:
@@ -128,6 +195,7 @@ def openai_endpoint_targets(
     backup_api_key: Any = "",
     primary_model: Any = "",
     backup_model: Any = "",
+    extra_targets: Sequence[Mapping[str, Any]] | None = None,
 ) -> List[Dict[str, Any]]:
     base_urls = _split_endpoint_candidates(primary_base_url)
     for item in _split_endpoint_candidates(backup_base_urls):
@@ -174,7 +242,26 @@ def openai_endpoint_targets(
                 "is_backup": idx > 0,
             }
         )
-    return targets
+
+    seen_base_urls = {str(item.get("base_url") or "").rstrip("/") for item in targets}
+    for extra in extra_targets or []:
+        item = dict(extra or {})
+        base_url = _normalize_target_base_url(item.get("base_url"))
+        if not base_url or base_url in seen_base_urls:
+            continue
+        seen_base_urls.add(base_url)
+        targets.append(
+            {
+                "index": len(targets),
+                "base_url": base_url,
+                "api_key": str(item.get("api_key") or "").strip(),
+                "model": str(item.get("model") or "").strip(),
+                "is_backup": bool(item.get("is_backup", True)),
+                "transport": str(item.get("transport") or "").strip().lower(),
+            }
+        )
+
+    return [_decorate_target(item, idx) for idx, item in enumerate(targets)]
 
 
 def is_retryable_openai_status(status: Any) -> bool:
@@ -748,6 +835,38 @@ def build_chat_completions_payload(
     if stream is not None:
         payload["stream"] = bool(stream)
 
+    return payload
+
+
+def build_anthropic_messages_payload(
+    *,
+    model: str,
+    messages: Sequence[Mapping[str, Any]],
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "model": str(model or "").strip(),
+        "messages": [],
+    }
+    instructions = _collect_responses_instructions(messages)
+    if instructions:
+        payload["system"] = instructions
+
+    for message in messages or []:
+        role = str(message.get("role") or "user").strip().lower() or "user"
+        if role in {"system", "developer"}:
+            continue
+        normalized_role = "assistant" if role == "assistant" else "user"
+        content = _normalize_chat_message_content(message.get("content"))
+        if not content:
+            continue
+        payload["messages"].append({"role": normalized_role, "content": content})
+
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max_tokens)
+    if temperature is not None:
+        payload["temperature"] = float(temperature)
     return payload
 
 

@@ -35,7 +35,10 @@ from core.strategies import Signal, SignalType
 from core.strategies.strategy_manager import strategy_manager
 from core.trading import execution_engine, position_manager
 from core.utils.openai_responses import (
+    anthropic_messages_endpoint,
+    build_anthropic_messages_payload,
     build_openai_headers,
+    build_target_headers,
     build_chat_completions_payload,
     build_responses_payload_variants,
     chat_completions_endpoint,
@@ -48,6 +51,7 @@ from core.utils.openai_responses import (
     responses_endpoint,
     responses_api_unavailable,
     should_failover_openai_status,
+    target_transport,
     unsupported_responses_parameter,
 )
 
@@ -1734,12 +1738,13 @@ class AutonomousTradingAgent:
             )
             if not any(bool(str(target.get("api_key") or "").strip()) for target in targets):
                 raise RuntimeError(f"{provider}_api_key_missing")
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
             chat_payload = build_chat_completions_payload(
                 model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
+                messages=messages,
                 max_tokens=int(max_tokens),
                 temperature=temperature_value if temperature_value is not None else 0.0,
                 response_format={"type": "json_object"},
@@ -1747,9 +1752,7 @@ class AutonomousTradingAgent:
             )
             payload_variants = build_responses_payload_variants(
                 model=model,
-                messages=[
-                    {"role": "user", "content": user_prompt},
-                ],
+                messages=[{"role": "user", "content": user_prompt}],
                 max_output_tokens=int(max_tokens),
                 temperature=None,
                 # Some OpenAI-compatible relays return intermittent 502s for
@@ -1763,6 +1766,12 @@ class AutonomousTradingAgent:
                 instructions = str(system_prompt or "").strip()
                 for payload in payload_variants:
                     payload["instructions"] = instructions
+            anthropic_payload = build_anthropic_messages_payload(
+                model=model,
+                messages=messages,
+                max_tokens=int(max_tokens),
+                temperature=temperature_value if temperature_value is not None else 0.0,
+            )
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 last_exc: Optional[BaseException] = None
                 total_targets = len(targets)
@@ -1772,11 +1781,62 @@ class AutonomousTradingAgent:
                     target_model = str(target.get("model") or model or "").strip() or model
                     if not target_base_url or not target_api_key:
                         continue
-                    url = responses_endpoint(target_base_url)
-                    headers = build_openai_headers(target_api_key)
+                    headers = build_target_headers({**dict(target), "api_key": target_api_key})
+                    transport = target_transport(target)
                     advance_to_next_target = False
                     try:
+                        if transport == "anthropic":
+                            request_anthropic_payload = dict(anthropic_payload, model=target_model)
+                            url = anthropic_messages_endpoint(target_base_url)
+                            async with session.post(url, headers=headers, json=request_anthropic_payload) as resp:
+                                if resp.status >= 400:
+                                    body = (await resp.text())[:300]
+                                    err = RuntimeError(f"{provider}_anthropic_http_{resp.status}:{body}")
+                                    if should_failover_openai_status(resp.status):
+                                        remember_openai_target_failure(
+                                            targets,
+                                            target_base_url,
+                                            scope=_OPENAI_FAILOVER_SCOPE,
+                                        )
+                                    if idx + 1 < total_targets and should_failover_openai_status(resp.status):
+                                        last_exc = err
+                                        logger.warning(
+                                            f"autonomous_agent codex anthropic-style backup failed with "
+                                            f"{resp.status}; trying backup {idx + 2}/{total_targets}"
+                                        )
+                                        advance_to_next_target = True
+                                    else:
+                                        raise err
+                                else:
+                                    data = await read_aiohttp_responses_json(resp)
+                                    text = extract_response_text(data)
+                                    if not text:
+                                        err = RuntimeError(f"{provider}_empty_content")
+                                        if idx + 1 < total_targets:
+                                            last_exc = err
+                                            remember_openai_target_failure(
+                                                targets,
+                                                target_base_url,
+                                                scope=_OPENAI_FAILOVER_SCOPE,
+                                            )
+                                            logger.warning(
+                                                f"autonomous_agent codex anthropic-style backup returned empty content; "
+                                                f"trying backup {idx + 2}/{total_targets}"
+                                            )
+                                            advance_to_next_target = True
+                                        else:
+                                            raise err
+                                    else:
+                                        remember_openai_target_success(
+                                            targets,
+                                            target_base_url,
+                                            scope=_OPENAI_FAILOVER_SCOPE,
+                                        )
+                                        return _extract_json_obj(text)
+                            if advance_to_next_target:
+                                continue
                         for payload_index, payload in enumerate(payload_variants):
+                            url = responses_endpoint(target_base_url)
                             request_payload = dict(payload, model=target_model)
                             request_chat_payload = dict(chat_payload, model=target_model)
                             async with session.post(url, headers=headers, json=request_payload) as resp:
