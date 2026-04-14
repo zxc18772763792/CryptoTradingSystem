@@ -885,7 +885,10 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
     if not calendar_rows:
         degraded = True
         warnings.append("交易日历已使用观察清单回退结果。")
-    if float(micro.get("orderbook", {}).get("spread_bps") or 0.0) <= 0:
+    orderbook_payload = dict(micro.get("orderbook") or {})
+    has_depth_rows = bool(orderbook_payload.get("bid_depth") or orderbook_payload.get("ask_depth"))
+    has_mid_price = float(orderbook_payload.get("mid_price") or 0.0) > 0
+    if not has_mid_price and not has_depth_rows:
         degraded = True
         warnings.append("微观结构深度不足，盘口与主动流解释力受限。")
     if regime.get("risk_level") == "high":

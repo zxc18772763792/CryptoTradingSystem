@@ -170,6 +170,51 @@ def _binance_rest_symbol(symbol: str) -> str:
     return text.replace("/", "").replace("-", "")
 
 
+def _gate_futures_contract_symbol(symbol: str) -> str:
+    text = str(symbol or "").upper().strip()
+    if ":" in text:
+        text = text.split(":", 1)[0]
+    text = text.replace("-", "/")
+    if "/" in text:
+        base, quote = text.split("/", 1)
+        base = base.strip() or "BTC"
+        quote = quote.strip() or "USDT"
+        return f"{base}_{quote}"
+    for quote in ("USDT", "USDC", "USD"):
+        if text.endswith(quote) and len(text) > len(quote):
+            base = text[: -len(quote)]
+            return f"{base}_{quote}"
+    return f"{text}_USDT" if text else "BTC_USDT"
+
+
+def _exchange_symbol_candidates(exchange: str, symbol: str) -> List[str]:
+    raw = str(symbol or "").strip()
+    if not raw:
+        return []
+    text = raw.upper()
+    if ":" in text:
+        text = text.split(":", 1)[0]
+    if "/" in text:
+        base, quote = text.split("/", 1)
+    else:
+        base, quote = text, "USDT"
+    spot = f"{base}/{quote}"
+    perp = f"{spot}:{quote}"
+    gate_contract = f"{base}_{quote}"
+    candidates: List[str] = [raw, text, spot, perp]
+    if str(exchange or "").lower() == "gate":
+        candidates.insert(0, gate_contract)
+    dedup: List[str] = []
+    seen = set()
+    for item in candidates:
+        key = str(item or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        dedup.append(key)
+    return dedup
+
+
 async def _fetch_binance_public_json(
     path: str,
     *,
@@ -184,6 +229,20 @@ async def _fetch_binance_public_json(
         resp = await client.get(f"{base_url}{path}", params=params or {})
         resp.raise_for_status()
         return resp.json() or {}
+
+
+async def _fetch_gate_public_json(
+    path: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    timeout_sec: float,
+) -> Any:
+    client_kwargs: Dict[str, Any] = {"timeout": timeout_sec}
+    _apply_httpx_proxy_kw(client_kwargs, settings.HTTP_PROXY or settings.HTTPS_PROXY)
+    async with httpx.AsyncClient(**client_kwargs) as client:
+        resp = await client.get(f"https://api.gateio.ws/api/v4{path}", params=params or {})
+        resp.raise_for_status()
+        return resp.json()
 
 
 async def _fetch_binance_public_orderbook(symbol: str, limit: int = 80) -> Dict[str, Any]:
@@ -207,6 +266,49 @@ async def _fetch_binance_public_orderbook(symbol: str, limit: int = 80) -> Dict[
             "asks": [],
             "timestamp": None,
         }
+
+
+def _parse_orderbook_level_pair(item: Any) -> Optional[List[float]]:
+    if isinstance(item, (list, tuple)) and len(item) >= 2:
+        price = _safe_float(item[0])
+        qty = _safe_float(item[1])
+        if price > 0 and qty > 0:
+            return [price, qty]
+    if isinstance(item, dict):
+        price = _safe_float(item.get("price") or item.get("p"))
+        qty = _safe_float(item.get("size") or item.get("amount") or item.get("qty") or item.get("q") or item.get("s"))
+        if price > 0 and qty > 0:
+            return [price, qty]
+    return None
+
+
+async def _fetch_gate_public_orderbook(symbol: str, limit: int = 80) -> Dict[str, Any]:
+    contract = _gate_futures_contract_symbol(symbol)
+    try:
+        payload = await _fetch_gate_public_json(
+            "/futures/usdt/order_book",
+            params={"contract": contract, "limit": max(5, min(int(limit), 100)), "with_id": "true"},
+            timeout_sec=_ANALYTICS_ORDERBOOK_TIMEOUT_SEC,
+        )
+    except Exception as exc:
+        return {
+            "available": False,
+            "error": str(exc),
+            "bids": [],
+            "asks": [],
+            "timestamp": None,
+        }
+    raw_bids = list((payload or {}).get("bids") or [])
+    raw_asks = list((payload or {}).get("asks") or [])
+    bids = [level for level in (_parse_orderbook_level_pair(row) for row in raw_bids) if level]
+    asks = [level for level in (_parse_orderbook_level_pair(row) for row in raw_asks) if level]
+    return {
+        "available": bool(bids and asks),
+        "bids": bids,
+        "asks": asks,
+        "timestamp": (payload or {}).get("id") or (payload or {}).get("current"),
+        "source": "gate_public",
+    }
 
 
 async def _fetch_binance_public_trade_imbalance(symbol: str, limit: int = 600) -> Dict[str, Any]:
@@ -234,6 +336,43 @@ async def _fetch_binance_public_trade_imbalance(symbol: str, limit: int = 600) -
         "buy_volume": round(buy_volume, 6),
         "sell_volume": round(sell_volume, 6),
         "imbalance": round(((buy_volume - sell_volume) / total) if total > 0 else 0.0, 6),
+        "source": "binance_public",
+    }
+
+
+async def _fetch_gate_public_trade_imbalance(symbol: str, limit: int = 600) -> Dict[str, Any]:
+    contract = _gate_futures_contract_symbol(symbol)
+    try:
+        rows = await _fetch_gate_public_json(
+            "/futures/usdt/trades",
+            params={"contract": contract, "limit": max(50, min(int(limit), 1000))},
+            timeout_sec=_ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC,
+        )
+        trades = list(rows or [])
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+    buy_volume = 0.0
+    sell_volume = 0.0
+    for row in trades:
+        side = str((row or {}).get("side") or "").strip().lower()
+        size = _safe_float((row or {}).get("size"))
+        qty = abs(size)
+        if qty <= 0:
+            qty = abs(_safe_float((row or {}).get("amount")))
+        if qty <= 0:
+            continue
+        if side in {"buy", "bid"} or (not side and size > 0):
+            buy_volume += qty
+        else:
+            sell_volume += qty
+    total = buy_volume + sell_volume
+    return {
+        "available": bool(total > 0),
+        "count": len(trades),
+        "buy_volume": round(buy_volume, 6),
+        "sell_volume": round(sell_volume, 6),
+        "imbalance": round(((buy_volume - sell_volume) / total) if total > 0 else 0.0, 6),
+        "source": "gate_public",
     }
 
 
@@ -278,6 +417,69 @@ async def _fetch_binance_public_funding_and_basis(symbol: str) -> Dict[str, Dict
             "spot_price": spot_px,
             "perp_price": perp_px,
             "basis_pct": round(basis_val * 100, 6),
+        }
+    else:
+        basis = {"available": False}
+    return {"funding": funding, "basis": basis}
+
+
+async def _fetch_gate_public_funding_and_basis(symbol: str) -> Dict[str, Dict[str, Any]]:
+    contract = _gate_futures_contract_symbol(symbol)
+    try:
+        contract_payload, spot_tickers = await asyncio.gather(
+            _fetch_gate_public_json(
+                f"/futures/usdt/contracts/{contract}",
+                timeout_sec=max(_ANALYTICS_FUNDING_TIMEOUT_SEC, _ANALYTICS_BASIS_TIMEOUT_SEC),
+            ),
+            _fetch_gate_public_json(
+                "/spot/tickers",
+                params={"currency_pair": contract},
+                timeout_sec=_ANALYTICS_BASIS_TIMEOUT_SEC,
+            ),
+        )
+    except Exception:
+        return {"funding": {"available": False}, "basis": {"available": False}}
+
+    contract_payload = dict(contract_payload or {})
+    spot_ticker = {}
+    if isinstance(spot_tickers, list) and spot_tickers:
+        spot_ticker = dict(spot_tickers[0] or {})
+    elif isinstance(spot_tickers, dict):
+        spot_ticker = dict(spot_tickers)
+
+    funding_rate = _safe_float(
+        contract_payload.get("funding_rate")
+        or contract_payload.get("funding_rate_indicative")
+    )
+    next_funding_dt = _safe_dt(
+        contract_payload.get("next_funding_time")
+        or contract_payload.get("funding_next_apply")
+        or contract_payload.get("funding_next_apply_time")
+    )
+    funding = {
+        "available": bool(funding_rate != 0.0 or next_funding_dt is not None),
+        "symbol": symbol if ":" in str(symbol or "") else f"{symbol}:USDT",
+        "funding_rate": funding_rate,
+        "next_funding_time": next_funding_dt.isoformat() if next_funding_dt else None,
+        "source": "gate_public",
+    }
+
+    spot_px = _safe_float(spot_ticker.get("last"))
+    perp_px = _safe_float(
+        contract_payload.get("mark_price")
+        or contract_payload.get("last_price")
+        or contract_payload.get("index_price")
+    )
+    if spot_px > 0 and perp_px > 0:
+        basis_val = (perp_px - spot_px) / spot_px
+        basis = {
+            "available": True,
+            "spot_symbol": symbol,
+            "perp_symbol": symbol if ":" in str(symbol or "") else f"{symbol}:USDT",
+            "spot_price": spot_px,
+            "perp_price": perp_px,
+            "basis_pct": round(basis_val * 100, 6),
+            "source": "gate_public",
         }
     else:
         basis = {"available": False}
@@ -349,18 +551,61 @@ async def _fetch_binance_public_open_interest(symbol: str) -> Dict[str, Any]:
     }
 
 
+async def _fetch_gate_public_open_interest(symbol: str) -> Dict[str, Any]:
+    contract = _gate_futures_contract_symbol(symbol)
+    try:
+        payload = await _fetch_gate_public_json(
+            f"/futures/usdt/contracts/{contract}",
+            timeout_sec=_ANALYTICS_OI_TIMEOUT_SEC,
+        )
+    except Exception as exc:
+        return {
+            "available": False,
+            "source": "gate_public",
+            "error": str(exc),
+            "symbol": symbol,
+            "volume": 0.0,
+            "value": 0.0,
+            "change_pct_1h": None,
+            "timestamp": None,
+            "sample_size": 0,
+        }
+    payload = dict(payload or {})
+    volume = _safe_float(payload.get("open_interest"))
+    value = _safe_float(payload.get("open_interest_usd") or payload.get("open_interest_value"))
+    ts = datetime.now(timezone.utc).isoformat()
+    return {
+        "available": bool(volume > 0 or value > 0),
+        "source": "gate_public",
+        "error": None,
+        "symbol": symbol,
+        "volume": round(volume, 6),
+        "value": round(value, 6),
+        "change_pct_1h": None,
+        "timestamp": ts,
+        "sample_size": 1,
+    }
+
+
 async def _fetch_open_interest_snapshot(exchange: str, symbol: str) -> Dict[str, Any]:
+    normalized = str(exchange or "").lower()
+    if normalized == "binance":
+        return await _fetch_binance_public_open_interest(symbol=symbol)
+    if normalized == "gate":
+        gate_payload = await _fetch_gate_public_open_interest(symbol=symbol)
+        if bool((gate_payload or {}).get("available")):
+            return gate_payload
     payload = await _fetch_binance_public_open_interest(symbol=symbol)
-    if str(exchange or "").lower() != "binance":
-        payload = dict(payload or {})
-        payload["source"] = "binance_public_fallback"
+    payload = dict(payload or {})
+    payload["source"] = "binance_public_fallback"
     return payload
 
 
 async def _fetch_funding_basis_snapshot(exchange: str, symbol: str) -> Dict[str, Dict[str, Any]]:
     funding = {"available": False}
     basis = {"available": False}
-    if str(exchange or "").lower() == "binance":
+    normalized = str(exchange or "").lower()
+    if normalized == "binance":
         funding_basis = await _fetch_binance_public_funding_and_basis(symbol)
         funding = dict(funding_basis.get("funding") or {"available": False})
         basis = dict(funding_basis.get("basis") or {"available": False})
@@ -413,6 +658,13 @@ async def _fetch_funding_basis_snapshot(exchange: str, symbol: str) -> Dict[str,
                         "perp_price": perp_px,
                         "basis_pct": round(basis_val * 100, 6),
                     }
+
+    if normalized == "gate" and (not funding.get("available") or not basis.get("available")):
+        gate_fb = await _fetch_gate_public_funding_and_basis(symbol)
+        if not funding.get("available") and gate_fb.get("funding", {}).get("available"):
+            funding = dict(gate_fb.get("funding") or {"available": False})
+        if not basis.get("available") and gate_fb.get("basis", {}).get("available"):
+            basis = dict(gate_fb.get("basis") or {"available": False})
 
     # Fallback: if still no funding/basis data, use Binance public API as reference
     if not funding.get("available") or not basis.get("available"):
@@ -2654,8 +2906,13 @@ async def _load_symbol_returns(symbol: str, lookback: int = 240) -> pd.Series:
 
 
 async def _fetch_orderbook(exchange: str, symbol: str, limit: int = 80) -> Dict[str, Any]:
-    if str(exchange or "").lower() == "binance":
+    normalized = str(exchange or "").lower()
+    if normalized == "binance":
         return await _fetch_binance_public_orderbook(symbol=symbol, limit=limit)
+    if normalized == "gate":
+        gate_payload = await _fetch_gate_public_orderbook(symbol=symbol, limit=limit)
+        if bool((gate_payload or {}).get("available")):
+            return gate_payload
     connector = exchange_manager.get_exchange(exchange)
     if not connector:
         return {
@@ -2665,48 +2922,44 @@ async def _fetch_orderbook(exchange: str, symbol: str, limit: int = 80) -> Dict[
             "asks": [],
             "timestamp": None,
         }
-    try:
-        orderbook = await asyncio.wait_for(
-            connector.get_order_book(symbol, limit=max(5, min(int(limit), 200))),
-            timeout=_ANALYTICS_ORDERBOOK_TIMEOUT_SEC,
-        )
-    except (asyncio.TimeoutError, asyncio.CancelledError) as e:
-        return {
-            "available": False,
-            "error": f"timeout_or_cancelled:{e}",
-            "bids": [],
-            "asks": [],
-            "timestamp": None,
-        }
-    except (asyncio.TimeoutError, asyncio.CancelledError) as e:
-        return {
-            "available": False,
-            "error": f"orderbook_timeout:{e}",
-            "bids": [],
-            "asks": [],
-            "timestamp": None,
-        }
-    except Exception as e:
-        return {
-            "available": False,
-            "error": str(e),
-            "bids": [],
-            "asks": [],
-            "timestamp": None,
-        }
-    bids = orderbook.get("bids") or []
-    asks = orderbook.get("asks") or []
+    last_error = ""
+    for candidate in _exchange_symbol_candidates(exchange, symbol):
+        try:
+            orderbook = await asyncio.wait_for(
+                connector.get_order_book(candidate, limit=max(5, min(int(limit), 200))),
+                timeout=_ANALYTICS_ORDERBOOK_TIMEOUT_SEC,
+            )
+            bids = list((orderbook or {}).get("bids") or [])
+            asks = list((orderbook or {}).get("asks") or [])
+            if bids and asks:
+                return {
+                    "available": True,
+                    "bids": bids,
+                    "asks": asks,
+                    "timestamp": (orderbook or {}).get("timestamp"),
+                }
+            last_error = "orderbook_empty"
+        except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+            last_error = f"timeout_or_cancelled:{e}"
+        except Exception as e:
+            last_error = str(e)
     return {
-        "available": True,
-        "bids": bids,
-        "asks": asks,
-        "timestamp": orderbook.get("timestamp"),
+        "available": False,
+        "error": last_error or "orderbook_unavailable",
+        "bids": [],
+        "asks": [],
+        "timestamp": None,
     }
 
 
 async def _fetch_trade_imbalance(exchange: str, symbol: str, limit: int = 600) -> Dict[str, Any]:
-    if str(exchange or "").lower() == "binance":
+    normalized = str(exchange or "").lower()
+    if normalized == "binance":
         return await _fetch_binance_public_trade_imbalance(symbol=symbol, limit=limit)
+    if normalized == "gate":
+        gate_flow = await _fetch_gate_public_trade_imbalance(symbol=symbol, limit=limit)
+        if bool((gate_flow or {}).get("available")):
+            return gate_flow
     connector = exchange_manager.get_exchange(exchange)
     if not connector:
         return {"available": False, "error": f"exchange_not_connected:{exchange}", "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
@@ -2714,15 +2967,25 @@ async def _fetch_trade_imbalance(exchange: str, symbol: str, limit: int = 600) -
     fetch_trades = getattr(client, "fetch_trades", None)
     if not callable(fetch_trades):
         return {"available": False, "error": "fetch_trades_unavailable", "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
-    try:
-        trades = await asyncio.wait_for(
-            fetch_trades(symbol, limit=max(50, min(int(limit), 2000))),
-            timeout=_ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC,
-        )
-    except (asyncio.TimeoutError, asyncio.CancelledError) as e:
-        return {"available": False, "error": f"timeout_or_cancelled:{e}", "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
-    except Exception as e:
-        return {"available": False, "error": str(e), "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+    trades: List[Dict[str, Any]] = []
+    last_error = ""
+    for candidate in _exchange_symbol_candidates(exchange, symbol):
+        try:
+            rows = await asyncio.wait_for(
+                fetch_trades(candidate, limit=max(50, min(int(limit), 2000))),
+                timeout=_ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC,
+            )
+            rows = list(rows or [])
+            if rows:
+                trades = rows
+                break
+            last_error = "trades_empty"
+        except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+            last_error = f"timeout_or_cancelled:{e}"
+        except Exception as e:
+            last_error = str(e)
+    if not trades:
+        return {"available": False, "error": last_error or "trades_unavailable", "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
     buy_volume = 0.0
     sell_volume = 0.0
     for row in trades or []:

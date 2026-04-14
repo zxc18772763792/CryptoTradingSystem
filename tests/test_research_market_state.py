@@ -91,3 +91,32 @@ def test_market_state_does_not_retry_empty_news_summary(monkeypatch):
     assert news_mock.await_count == 1
     assert any("News summary returned no usable samples" in warning for warning in result["warnings"])
 
+
+def test_market_state_keeps_ok_when_spread_zero_but_depth_exists(monkeypatch):
+    from web.api import research as module
+
+    micro_snapshot = _history_micro_snapshot()
+    micro_snapshot["orderbook"] = {
+        "mid_price": 100000.0,
+        "spread_bps": 0.0,
+        "bid_depth": [{"price": 99990.0, "qty": 12.0}],
+        "ask_depth": [{"price": 100010.0, "qty": 11.0}],
+    }
+
+    monkeypatch.setattr(module, "get_risk_dashboard", AsyncMock(return_value={"risk_level": "low"}))
+    monkeypatch.setattr(
+        module,
+        "get_trading_calendar",
+        AsyncMock(return_value={"events": [{"name": "CPI", "time_utc": _recent_snapshot_ts(), "importance": "high"}]}),
+    )
+    monkeypatch.setattr(module, "_build_news_summary", AsyncMock(return_value=_news_summary(3)))
+    monkeypatch.setattr(module, "_load_latest_microstructure_snapshot", AsyncMock(return_value=micro_snapshot))
+    monkeypatch.setattr(module, "_load_latest_community_snapshot", AsyncMock(return_value=_history_community_snapshot()))
+    monkeypatch.setattr(module, "_load_latest_whale_snapshot", AsyncMock(return_value={"count": 2, "transactions": []}))
+    monkeypatch.setattr(module, "get_market_microstructure", AsyncMock(side_effect=AssertionError("live microstructure should be skipped")))
+    monkeypatch.setattr(module, "get_community_overview", AsyncMock(side_effect=AssertionError("live community should be skipped")))
+
+    result = asyncio.run(module._build_market_state_module(module.ResearchProfile()))
+
+    assert result["status"] == "ok"
+    assert result["payload"]["sentiment_dashboard"]["microstructure"]["orderbook"]["mid_price"] == 100000.0

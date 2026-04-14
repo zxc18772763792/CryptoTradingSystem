@@ -115,3 +115,79 @@ def test_market_microstructure_preserves_flow_error_flag(monkeypatch):
     assert payload["aggressor_flow"]["error"] == "timeout_or_cancelled"
     assert payload["oi"]["available"] is False
     assert payload["oi"]["error"] == "oi_timeout"
+
+
+def test_gate_orderbook_uses_public_fallback_when_connector_missing(monkeypatch):
+    async def fake_gate_orderbook(*args, **kwargs):
+        return {
+            "available": True,
+            "bids": [[100.0, 3.0]],
+            "asks": [[100.1, 2.5]],
+            "timestamp": 123,
+            "source": "gate_public",
+        }
+
+    monkeypatch.setattr(trading_api, "_fetch_gate_public_orderbook", fake_gate_orderbook)
+    monkeypatch.setattr(trading_api.exchange_manager, "get_exchange", lambda _exchange: None)
+
+    payload = asyncio.run(trading_api._fetch_orderbook(exchange="gate", symbol="BTC/USDT", limit=20))
+
+    assert payload["available"] is True
+    assert payload["source"] == "gate_public"
+    assert payload["bids"]
+    assert payload["asks"]
+
+
+def test_gate_trade_imbalance_uses_public_fallback_when_connector_missing(monkeypatch):
+    async def fake_gate_flow(*args, **kwargs):
+        return {
+            "available": True,
+            "count": 100,
+            "buy_volume": 80.0,
+            "sell_volume": 20.0,
+            "imbalance": 0.6,
+            "source": "gate_public",
+        }
+
+    monkeypatch.setattr(trading_api, "_fetch_gate_public_trade_imbalance", fake_gate_flow)
+    monkeypatch.setattr(trading_api.exchange_manager, "get_exchange", lambda _exchange: None)
+
+    payload = asyncio.run(trading_api._fetch_trade_imbalance(exchange="gate", symbol="BTC/USDT", limit=200))
+
+    assert payload["available"] is True
+    assert payload["source"] == "gate_public"
+    assert payload["count"] == 100
+    assert payload["imbalance"] == pytest.approx(0.6, rel=1e-6)
+
+
+def test_gate_funding_basis_prefers_gate_public_before_binance_fallback(monkeypatch):
+    async def fake_gate_fb(*args, **kwargs):
+        return {
+            "funding": {
+                "available": True,
+                "funding_rate": 0.0002,
+                "next_funding_time": "2026-04-14T08:00:00+00:00",
+                "source": "gate_public",
+            },
+            "basis": {
+                "available": True,
+                "spot_price": 100.0,
+                "perp_price": 100.12,
+                "basis_pct": 0.12,
+                "source": "gate_public",
+            },
+        }
+
+    async def fake_binance_fb(*args, **kwargs):
+        return {"funding": {"available": False}, "basis": {"available": False}}
+
+    monkeypatch.setattr(trading_api.exchange_manager, "get_exchange", lambda _exchange: None)
+    monkeypatch.setattr(trading_api, "_fetch_gate_public_funding_and_basis", fake_gate_fb)
+    monkeypatch.setattr(trading_api, "_fetch_binance_public_funding_and_basis", fake_binance_fb)
+
+    payload = asyncio.run(trading_api._fetch_funding_basis_snapshot(exchange="gate", symbol="BTC/USDT"))
+
+    assert payload["funding"]["available"] is True
+    assert payload["basis"]["available"] is True
+    assert payload["funding"]["source"] == "gate_public"
+    assert payload["basis"]["source"] == "gate_public"
