@@ -8346,6 +8346,8 @@ input[type="radio"] {
     font-size: 14px;
     line-height: 1.55;
     color: #eef6ff;
+    word-break: normal;
+    overflow-wrap: break-word;
 }
 
 #ai-research .ai-signal-card {
@@ -10008,27 +10010,27 @@ input[type="radio"] {
 
 #ai-research .ai-research-command-stack {
     display: grid;
-    grid-template-columns: minmax(0, 1.2fr) minmax(340px, 0.88fr);
-    gap: 16px;
-    align-items: stretch;
-}
-
-#ai-research .ai-research-pulse-grid {
-    display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 16px;
     align-items: stretch;
 }
 
+#ai-research .ai-research-pulse-grid {
+    display: contents;
+}
+
 #ai-research .ai-focus-card-primary,
 #ai-research .ai-signal-card,
 #ai-research .ai-research-live-signals-card {
+    min-width: 0;
+    min-height: 100%;
     border: 1px solid rgba(114, 184, 255, 0.14);
     border-radius: 18px;
     box-shadow: 0 16px 30px rgba(4, 10, 18, 0.18);
 }
 
 #ai-research .ai-focus-card-primary {
+    grid-column: 1 / -1;
     background:
         radial-gradient(circle at top right, rgba(255, 191, 94, 0.14), transparent 30%),
         linear-gradient(180deg, rgba(31, 27, 18, 0.98), rgba(12, 18, 29, 0.99));
@@ -10041,6 +10043,7 @@ input[type="radio"] {
 }
 
 #ai-research .ai-research-live-signals-card {
+    grid-column: auto;
     background:
         radial-gradient(circle at top right, rgba(123, 195, 255, 0.14), transparent 32%),
         linear-gradient(180deg, rgba(13, 24, 40, 0.98), rgba(8, 16, 28, 0.99));
@@ -10267,6 +10270,19 @@ input[type="radio"] {
     border-bottom: 1px solid rgba(114, 184, 255, 0.1);
 }
 
+#ai-research .ai-hub-candidates-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-left: auto;
+}
+
+#ai-research .ai-candidate-clear-btn {
+    white-space: nowrap;
+}
+
 #ai-research .ai-hub-candidates-title {
     font-size: 15px;
     font-weight: 700;
@@ -10436,10 +10452,16 @@ input[type="radio"] {
 }
 
 @media (max-width: 1500px) {
-    #ai-research .ai-research-hero-layout,
-    #ai-research .ai-research-command-stack,
-    #ai-research .ai-research-pulse-grid {
+    #ai-research .ai-research-hero-layout {
         grid-template-columns: 1fr;
+    }
+
+    #ai-research .ai-research-command-stack {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    #ai-research .ai-focus-card-primary {
+        grid-column: 1 / -1;
     }
 
     #ai-research .ai-research-stage-strip,
@@ -10453,10 +10475,15 @@ input[type="radio"] {
 }
 
 @media (max-width: 1180px) {
+    #ai-research .ai-research-command-stack,
     #ai-research .ai-research-overview-grid,
     #ai-research .ai-hub-layout,
     #ai-research .ai-top-intro-card-research .ai-top-intro-stack {
         grid-template-columns: 1fr;
+    }
+
+    #ai-research .ai-focus-card-primary {
+        grid-column: auto;
     }
 
     #ai-research .ai-top-intro-mini-grid-wide,
@@ -10479,6 +10506,10 @@ input[type="radio"] {
 }
 
 @media (max-width: 780px) {
+    #ai-research .ai-focus-summary {
+        grid-template-columns: 1fr;
+    }
+
     #ai-research .ai-workspace-section-research,
     #ai-research .ai-flow-console,
     #ai-research .ai-sidebar-card,
@@ -10505,6 +10536,11 @@ input[type="radio"] {
     }
 
     #ai-research .ai-hub-toolbar {
+        justify-content: flex-start;
+    }
+
+    #ai-research .ai-hub-candidates-actions {
+        width: 100%;
         justify-content: flex-start;
     }
 

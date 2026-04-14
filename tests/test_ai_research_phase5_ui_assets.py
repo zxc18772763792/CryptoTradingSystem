@@ -33,6 +33,7 @@ def test_ai_research_template_loads_phase5_modules():
     assert 'id="ai-oneclick-allocation"' in template
     assert 'id="ai-oneclick-feedback"' in template
     assert 'id="ai-candidate-cards"' in template
+    assert 'id="ai-clear-candidates-btn"' in template
     assert 'id="ai-queue-title"' in template
     assert 'id="ai-queue-hint"' in template
     assert '研究目标（可留空自动生成）' in template
@@ -64,6 +65,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "modules.diagnostics" in diagnostics_js
     assert "ai-flow-stage-grid" in runtime_js
     assert "renderChainSummary" in runtime_js
+    assert "proposalResearchThesis(proposal)" in runtime_js
     assert "modules.candidates" in candidates_js
     assert "window.agentStart = agentStart" in agent_js
     assert "renderAgentChainSummary" in agent_js
@@ -90,6 +92,12 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "buildOneClickFailureFeedback" in ai_js
     assert "buildOneClickSuccessFeedback" in ai_js
     assert "renderOneClickFeedback" in ai_js
+    assert "function getVisibleCandidates()" in ai_js
+    assert "function getVisibleCandidateProposalTargets(" in ai_js
+    assert "function clearVisibleCandidates()" in ai_js
+    assert "function updateClearCandidatesButton(" in ai_js
+    assert "function proposalResearchThesis(" in ai_js
+    assert "function normalizeProposalPresentation(" in ai_js
     assert "parseAllocationPercentInput" in ai_js
     assert "completed_without_compatible_runtime_target" in ai_js
     assert "manual_action_required" in ai_js
@@ -104,7 +112,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "fallback_candidate_created_at" in ai_js
     assert "fallback_candidate_updated_at" in ai_js
     assert "const visibleProposals = sortProposalsForWorkbench(state.proposals, state.selectedProposalId);" in ai_js
-    assert "state.proposals = sortProposalsForWorkbench(toArray(res?.items));" in ai_js
+    assert "toArray(res?.items).map((item, index) => normalizeProposalPresentation(item, index))" in ai_js
     assert "Asia/Shanghai" in ai_js
     assert "Asia/Shanghai" in agent_js
     assert "window.CTS_UI_TIMEZONE" in ai_js
@@ -117,17 +125,23 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "else if(tab==='ai-research')refreshAiResearchModules();" in app_js
     assert "provider_fallback" in ai_js
     assert 'option value="codex">OpenAI' in template
+    assert "一键清空当前候选" in template
     assert ".ai-flow-console" in style_css
     assert ".ai-chain-summary-grid" in style_css
     assert ".ai-flow-stage-grid" in style_css
     assert ".ai-candidate-cards" in style_css
+    assert ".ai-hub-candidates-actions" in style_css
+    assert ".ai-candidate-clear-btn" in style_css
     assert ".ai-oneclick-entry-card" in style_css
     assert ".ai-oneclick-feedback" in style_css
     assert ".ai-review-panel select" in style_css
     assert ".agent-journal-current" in style_css
     assert ".agent-journal-signal" in style_css
     assert "#ai-agent .ai-agent-cockpit-title" in style_css
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in style_css
+    assert "grid-column: 1 / -1;" in style_css
     assert "white-space: nowrap;" in style_css
+    assert "overflow-wrap: break-word;" in style_css
     assert "appearance: none" in style_css
     assert "color-scheme: dark" in style_css
     assert '[data-tone="warn"]' in style_css

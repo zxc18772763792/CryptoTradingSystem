@@ -20,6 +20,8 @@
   const AI_SHARED_POLL_SYNC_MS = 5000;
   const LIVE_SIGNALS_TIMEOUT_MS = 45000;
   const AGENT_LIVE_SIGNALS_TIMEOUT_MS = 90000;
+  const DEFAULT_ACTION_LOCKS = Object.freeze({ generate: false, run: false, oneclick: false, clear: false });
+  const DELETE_BLOCKED_PROPOSAL_STATUSES = new Set(['paper_running', 'shadow_running', 'live_running']);
 
   /* 策略类别与颜色 */
   const STRATEGY_CATEGORIES = {
@@ -98,7 +100,7 @@
     signalPanelCollapsed: false,
     jobPollingTimers: {},   // proposalId → intervalId
     jobPollingConfigs: {},  // proposalId -> { jobId }
-    actionLocks: { generate: false, run: false, oneclick: false },
+    actionLocks: { ...DEFAULT_ACTION_LOCKS },
     sortBy: 'score',        // 'score' | 'sharpe' | 'return' | 'drawdown'
     filterCategory: '',     // '' | '趋势' | '震荡' | ...
     compareCandidateIds: new Set(),
@@ -271,6 +273,15 @@
       ['鐮旂┒瀹屾垚锛屼絾鏈€氳繃楠岃瘉', '研究完成，但未通过验证'],
       ['鐮旂┒浠诲姟宸插畬鎴愶紝宸ヤ綔鍙扮姸鎬佸凡鏇存柊', '研究任务已完成，工作台状态已更新'],
       ['杩愯鐮旂┒', '运行研究'],
+      ['鐮旂┒鐩爣锛堝彲鐣欑┖鑷姩鐢熸垚锛?', '研究目标（可留空自动生成）'],
+      ['鍏堣 AI 鍒ゆ柇褰撳墠甯傚満鐘舵€佷笌閫傞厤绛栫暐', '先让 AI 判断当前市场状态与适配策略'],
+      ['椤甸潰鏃跺尯锛氫笂娴锋椂闂?(UTC+8)', '页面时区：上海时间 (UTC+8)'],
+      ['鍊欓€夊洖濉?', '候选回填'],
+      ['璇ユ潯鐩敱鍊欓€夌粨鏋滃洖濉?', '该条目由候选结果回填'],
+      ['棰勭儹鐮旂┒缂撳瓨', '预热研究缓存'],
+      ['鐮旂┒缂撳瓨宸查鐑?', '研究缓存已预热'],
+      ['鍗曟璇曡窇宸茶Е鍙?', '单次试跑已触发'],
+      ['宸叉湁涓€杞湪杩愯锛屾墜鍔ㄨЕ鍙戝凡鎺掗槦', '已有一轮在运行，手动触发已排队'],
     ];
     replacements.forEach(([from, to]) => {
       value = value.split(from).join(to);
@@ -1774,7 +1785,7 @@
       || fallback?.searchSummary
       || {};
     const lineage = proposalInfo?.lineage || fallback?.lineage || null;
-    const hypothesis = String(llmResearchOutput?.hypothesis || proposalInfo?.thesis || fallback?.thesis || '').trim();
+    const hypothesis = firstMeaningfulText(llmResearchOutput?.hypothesis, proposalResearchThesis(proposalInfo), fallback?.thesis);
     const experimentPlan = joinText(llmResearchOutput?.experiment_plan);
     const evidenceRefs = joinText(llmResearchOutput?.evidence_refs);
     const uncertainty = String(llmResearchOutput?.uncertainty || '').trim();
@@ -1967,6 +1978,58 @@
         hidden_duplicates_count: item.duplicates.length,
       },
     }));
+  }
+
+  function getVisibleCandidates() {
+    let visible = dedupeCandidatesForDisplay(state.candidates);
+    if (state.filterCategory) {
+      visible = visible.filter(c => STRATEGY_CATEGORIES[c.strategy] === state.filterCategory);
+    }
+    visible.sort((a, b) => {
+      const contextDelta = (() => {
+        const activeProposalId = String(state.selectedProposalId || '').trim();
+        if (!activeProposalId) return 0;
+        const aDelta = String(a?.proposal_id || '').trim() === activeProposalId ? 0 : 1;
+        const bDelta = String(b?.proposal_id || '').trim() === activeProposalId ? 0 : 1;
+        return aDelta - bDelta;
+      })();
+      if (contextDelta) return contextDelta;
+      if (state.sortBy === 'sharpe') {
+        return Number(candidateTopResults(b)[0]?.sharpe_ratio ?? 0) - Number(candidateTopResults(a)[0]?.sharpe_ratio ?? 0);
+      }
+      if (state.sortBy === 'return') {
+        return Number(candidateTopResults(b)[0]?.total_return ?? 0) - Number(candidateTopResults(a)[0]?.total_return ?? 0);
+      }
+      if (state.sortBy === 'drawdown') {
+        return Number(candidateTopResults(a)[0]?.max_drawdown ?? 999) - Number(candidateTopResults(b)[0]?.max_drawdown ?? 999);
+      }
+      return Number(b.score || 0) - Number(a.score || 0);
+    });
+    return visible;
+  }
+
+  function getVisibleCandidateProposalTargets(visibleCandidates = getVisibleCandidates()) {
+    const clearableProposalIds = [];
+    const skippedBlocked = [];
+    const skippedVirtual = [];
+    const seen = new Set();
+    toArray(visibleCandidates).forEach((candidate) => {
+      const proposalId = String(candidate?.proposal_id || '').trim();
+      if (!proposalId || seen.has(proposalId)) return;
+      seen.add(proposalId);
+      const proposal = findProposalById(proposalId);
+      if (!proposal || isVirtualProposal(proposal)) {
+        skippedVirtual.push(proposalId);
+        return;
+      }
+      const status = String(proposal?.status || '').trim();
+      if (DELETE_BLOCKED_PROPOSAL_STATUSES.has(status)) {
+        skippedBlocked.push({ proposalId, status });
+        return;
+      }
+      clearableProposalIds.push(proposalId);
+    });
+    return { clearableProposalIds, skippedBlocked, skippedVirtual };
   }
 
   function statusText(s) {
@@ -2190,13 +2253,88 @@
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
      鍊欓€夌瓥鐣ュ崱鐗?
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
-  function proposalDisplayName(item, index) {
-    const metaName = String(item?.metadata?.display_name || '').trim();
-    if (metaName) return metaName;
-    const seq  = String(item?.metadata?.proposal_sequence || '').trim();
+  function textHasMeaningfulContent(value) {
+    const normalized = normalizeUiText(String(value ?? '').trim());
+    if (!normalized) return false;
+    return /[^0-9\s?？#/:：._\-·,，()[\]{}]/.test(normalized);
+  }
+
+  function firstMeaningfulText(...values) {
+    for (const value of values) {
+      const normalized = normalizeUiText(String(value ?? '').replace(/\s+/g, ' ').trim());
+      if (textHasMeaningfulContent(normalized)) return normalized;
+    }
+    return '';
+  }
+
+  function proposalPrimarySymbols(item) {
+    return toArray(item?.target_symbols)
+      .map((symbol) => String(symbol || '').trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, 2)
+      .join(' / ');
+  }
+
+  function proposalBestStrategy(item) {
+    const specId = String(item?.metadata?.latest_strategy_spec?.strategy_id || '').trim();
+    const specName = specId ? specId.split('::').pop() : '';
+    return firstMeaningfulText(
+      item?.metadata?.last_research_result?.best?.strategy,
+      specName,
+      toArray(item?.strategy_templates)[0],
+    );
+  }
+
+  function proposalBestTimeframe(item) {
+    return firstMeaningfulText(
+      item?.metadata?.last_research_result?.best?.timeframe,
+      toArray(item?.target_timeframes)[0],
+    );
+  }
+
+  function buildProposalDisplayFallback(item, index = 0) {
+    const seq = String(item?.metadata?.proposal_sequence || '').trim();
     const mark = seq ? `#${seq}` : `#${String(index + 1).padStart(2, '0')}`;
-    const head = String(item?.thesis || '').trim().slice(0, 20);
-    return `${mark} ${head || String(item?.proposal_id || '').slice(-6)}`.trim();
+    const detail = [
+      proposalPrimarySymbols(item),
+      proposalBestStrategy(item),
+      proposalBestTimeframe(item),
+    ].filter(Boolean).join(' / ');
+    return `${mark} ${detail || String(item?.proposal_id || '').slice(-6)}`.trim();
+  }
+
+  function proposalResearchThesis(item) {
+    const direct = firstMeaningfulText(
+      item?.thesis,
+      item?.origin_context?.goal,
+      item?.metadata?.llm_research_output?.hypothesis,
+    );
+    if (direct) return direct;
+    const symbolText = proposalPrimarySymbols(item) || '当前标的';
+    const strategy = proposalBestStrategy(item) || '候选策略';
+    const timeframe = proposalBestTimeframe(item);
+    const regime = regimeText(item?.market_regime || 'mixed');
+    return `${symbolText} 在${regime}下优先验证 ${strategy}${timeframe ? `（${timeframe}）` : ''} 的稳定性与风控边界`;
+  }
+
+  function normalizeProposalPresentation(item, index = 0) {
+    if (!item || typeof item !== 'object') return item;
+    const metadata = item?.metadata && typeof item.metadata === 'object' ? { ...item.metadata } : {};
+    const originContext = item?.origin_context && typeof item.origin_context === 'object' ? { ...item.origin_context } : {};
+    const normalized = {
+      ...item,
+      metadata,
+      origin_context: originContext,
+    };
+    normalized.thesis = proposalResearchThesis(normalized);
+    originContext.goal = firstMeaningfulText(originContext.goal, normalized.thesis) || normalized.thesis;
+    metadata.display_name = firstMeaningfulText(metadata.display_name) || buildProposalDisplayFallback(normalized, index);
+    return normalized;
+  }
+
+  function proposalDisplayName(item, index) {
+    const normalized = normalizeProposalPresentation(item, index);
+    return firstMeaningfulText(normalized?.metadata?.display_name) || buildProposalDisplayFallback(normalized, index);
   }
 
   function isVirtualProposal(item) {
@@ -2251,14 +2389,15 @@
   }
 
   function upsertProposal(proposal) {
-    const proposalId = String(proposal?.proposal_id || '').trim();
+    const normalizedProposal = normalizeProposalPresentation(proposal, state.proposals.length);
+    const proposalId = String(normalizedProposal?.proposal_id || '').trim();
     if (!proposalId) return null;
     const idx = state.proposals.findIndex((item) => String(item?.proposal_id || '').trim() === proposalId);
     if (idx >= 0) {
-      state.proposals[idx] = { ...state.proposals[idx], ...(proposal || {}) };
+      state.proposals[idx] = normalizeProposalPresentation({ ...state.proposals[idx], ...(normalizedProposal || {}) }, idx);
       return state.proposals[idx];
     }
-    state.proposals = [proposal, ...state.proposals];
+    state.proposals = [normalizedProposal, ...state.proposals];
     return state.proposals[0];
   }
 
@@ -2519,30 +2658,7 @@
     if (!box) return;
 
     const totalCount = state.candidates.length;
-    let visible = dedupeCandidatesForDisplay(state.candidates);
-    if (state.filterCategory) {
-      visible = visible.filter(c => STRATEGY_CATEGORIES[c.strategy] === state.filterCategory);
-    }
-    visible.sort((a, b) => {
-      const contextDelta = (() => {
-        const activeProposalId = String(state.selectedProposalId || '').trim();
-        if (!activeProposalId) return 0;
-        const aDelta = String(a?.proposal_id || '').trim() === activeProposalId ? 0 : 1;
-        const bDelta = String(b?.proposal_id || '').trim() === activeProposalId ? 0 : 1;
-        return aDelta - bDelta;
-      })();
-      if (contextDelta) return contextDelta;
-      if (state.sortBy === 'sharpe') {
-        return Number(candidateTopResults(b)[0]?.sharpe_ratio ?? 0) - Number(candidateTopResults(a)[0]?.sharpe_ratio ?? 0);
-      }
-      if (state.sortBy === 'return') {
-        return Number(candidateTopResults(b)[0]?.total_return ?? 0) - Number(candidateTopResults(a)[0]?.total_return ?? 0);
-      }
-      if (state.sortBy === 'drawdown') {
-        return Number(candidateTopResults(a)[0]?.max_drawdown ?? 999) - Number(candidateTopResults(b)[0]?.max_drawdown ?? 999);
-      }
-      return Number(b.score || 0) - Number(a.score || 0);
-    });
+    const visible = getVisibleCandidates();
     const dedupedIds = new Set(dedupeCandidatesForDisplay(state.candidates).map(c => String(c?.candidate_id || '')));
     Array.from(state.compareCandidateIds).forEach((cid) => {
       if (!dedupedIds.has(String(cid))) state.compareCandidateIds.delete(String(cid));
@@ -2554,6 +2670,7 @@
 
     if (!visible.length) {
       refreshCompareToolbar();
+      updateClearCandidatesButton([]);
       if (cnt) cnt.textContent = totalCount ? `0/${totalCount}` : '';
       box.innerHTML = state.candidates.length
         ? `<div class="ai-empty-hint">当前类别筛选无结果，请调整筛选条件。</div>`
@@ -2565,8 +2682,42 @@
     box.innerHTML = normalizeUiText(box.innerHTML);
     normalizeDomText(box);
     refreshCompareToolbar();
+    updateClearCandidatesButton(visible);
     if (cnt) cnt.textContent = `${visible.length}/${totalCount}`;
     emitWorkbenchState('candidate-cards');
+  }
+
+  function updateClearCandidatesButton(visibleCandidates = getVisibleCandidates()) {
+    const btn = document.getElementById('ai-clear-candidates-btn');
+    if (!btn) return;
+    const visibleCount = toArray(visibleCandidates).length;
+    const { clearableProposalIds, skippedBlocked, skippedVirtual } = getVisibleCandidateProposalTargets(visibleCandidates);
+    const clearableSet = new Set(clearableProposalIds);
+    const clearableVisibleCount = toArray(visibleCandidates)
+      .filter((item) => clearableSet.has(String(item?.proposal_id || '').trim()))
+      .length;
+    const busy = hasActionLock();
+    btn.textContent = visibleCount ? `一键清空当前候选 (${visibleCount})` : '一键清空当前候选';
+    btn.disabled = !visibleCount || busy || !clearableProposalIds.length;
+    if (!visibleCount) {
+      btn.title = '当前没有可清空的候选策略';
+      return;
+    }
+    if (busy) {
+      btn.title = '当前有任务执行中，请等待当前流程完成后再清空候选';
+      return;
+    }
+    if (!clearableProposalIds.length) {
+      const reasons = [];
+      if (skippedBlocked.length) reasons.push(`运行中任务 ${skippedBlocked.length} 个`);
+      if (skippedVirtual.length) reasons.push(`候选回填条目 ${skippedVirtual.length} 个`);
+      btn.title = reasons.length ? `当前可见候选暂不可清空：${reasons.join('，')}` : '当前没有可清空的候选策略';
+      return;
+    }
+    const hints = [`将删除 ${clearableProposalIds.length} 个研究任务，移除 ${clearableVisibleCount} 个当前可见候选`];
+    if (skippedBlocked.length) hints.push(`跳过 ${skippedBlocked.length} 个运行中任务`);
+    if (skippedVirtual.length) hints.push(`跳过 ${skippedVirtual.length} 个候选回填条目`);
+    btn.title = hints.join('；');
   }
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
@@ -4078,9 +4229,14 @@
     const preservedProposalId = String(selectId || state.selectedProposalId || proposalIdForCandidate(state.selectedCandidateId) || '').trim();
     const preservedProposal = findProposalById(preservedProposalId);
     const res = await aiApi('/proposals?limit=50', { timeoutMs: 60000 });
-    state.proposals = sortProposalsForWorkbench(toArray(res?.items));
+    state.proposals = sortProposalsForWorkbench(
+      toArray(res?.items).map((item, index) => normalizeProposalPresentation(item, index)),
+    );
     if (preservedProposal && !findProposalById(preservedProposalId)) {
-      state.proposals = sortProposalsForWorkbench([preservedProposal, ...state.proposals], preservedProposalId);
+      state.proposals = sortProposalsForWorkbench(
+        [normalizeProposalPresentation(preservedProposal, 0), ...state.proposals],
+        preservedProposalId,
+      );
     }
     if (selectId) state.selectedProposalId = selectId;
     syncSelectedProposal(selectId);
@@ -4134,7 +4290,7 @@
   }
 
   function hasActionLock() {
-    const locks = state.actionLocks || {};
+    const locks = { ...DEFAULT_ACTION_LOCKS, ...(state.actionLocks || {}) };
     return Object.values(locks).some(Boolean);
   }
 
@@ -4151,11 +4307,12 @@
         : FLOW_HINT_QUICK_PATH;
     }
     updateRunBtn();
+    updateClearCandidatesButton();
     emitWorkbenchState('action-locks');
   }
 
   function setActionLock(name, locked) {
-    if (!state.actionLocks) state.actionLocks = { generate: false, run: false, oneclick: false };
+    state.actionLocks = { ...DEFAULT_ACTION_LOCKS, ...(state.actionLocks || {}) };
     state.actionLocks[name] = !!locked;
     syncPrimaryActionButtons();
   }
@@ -4764,8 +4921,7 @@
       notify('候选回填条目没有可删除的原始研究任务；如需清理，请删除对应候选记录', true);
       return;
     }
-    const blocked = new Set(['paper_running','shadow_running','live_running']);
-    if (item && blocked.has(String(item?.status || ''))) {
+    if (item && DELETE_BLOCKED_PROPOSAL_STATUSES.has(String(item?.status || ''))) {
       notify(`当前状态「${statusText(item.status)}」不可删除，请先停止后再删除。`, true);
       return;
     }
@@ -4777,6 +4933,74 @@
     }
     if (proposalIdForCandidate(state.selectedCandidateId) === proposalId) state.selectedCandidateId = '';
     await refreshWorkbench('', '');
+  }
+
+  async function clearVisibleCandidates() {
+    const visibleCandidates = getVisibleCandidates();
+    if (!visibleCandidates.length) {
+      updateClearCandidatesButton([]);
+      notify('当前没有可清空的候选策略', true);
+      return;
+    }
+
+    const { clearableProposalIds, skippedBlocked, skippedVirtual } = getVisibleCandidateProposalTargets(visibleCandidates);
+    if (!clearableProposalIds.length) {
+      const reasons = [];
+      if (skippedBlocked.length) reasons.push(`运行中任务 ${skippedBlocked.length} 个`);
+      if (skippedVirtual.length) reasons.push(`候选回填条目 ${skippedVirtual.length} 个`);
+      notify(reasons.length ? `当前可见候选暂不可清空：${reasons.join('，')}` : '当前没有可清空的候选策略', true);
+      updateClearCandidatesButton(visibleCandidates);
+      return;
+    }
+
+    const clearableSet = new Set(clearableProposalIds);
+    const clearableVisibleCount = visibleCandidates
+      .filter((item) => clearableSet.has(String(item?.proposal_id || '').trim()))
+      .length;
+    const confirmLines = [
+      `确认清空当前可见的 ${visibleCandidates.length} 个候选策略吗？`,
+      `将级联删除 ${clearableProposalIds.length} 个对应研究任务，并移除 ${clearableVisibleCount} 个当前可见候选。`,
+    ];
+    if (skippedBlocked.length) confirmLines.push(`运行中任务将跳过：${skippedBlocked.length} 个`);
+    if (skippedVirtual.length) confirmLines.push(`候选回填条目将跳过：${skippedVirtual.length} 个`);
+    if (!window.confirm(confirmLines.join('\n'))) return;
+
+    await withActionLock('clear', async () => {
+      const deletedProposalIds = new Set();
+      const failures = [];
+      for (const proposalId of clearableProposalIds) {
+        try {
+          await aiApi(`/proposals/${encodeURIComponent(proposalId)}`, { method: 'DELETE', timeoutMs: 20000 });
+          deletedProposalIds.add(proposalId);
+        } catch (err) {
+          failures.push({
+            proposalId,
+            message: String(err?.message || '删除失败'),
+          });
+        }
+      }
+
+      if (deletedProposalIds.has(String(state.selectedProposalId || '').trim())) {
+        state.selectedProposalId = '';
+      }
+      if (deletedProposalIds.has(proposalIdForCandidate(state.selectedCandidateId))) {
+        state.selectedCandidateId = '';
+      }
+
+      await refreshWorkbench('', '');
+
+      const clearedVisibleCount = visibleCandidates
+        .filter((item) => deletedProposalIds.has(String(item?.proposal_id || '').trim()))
+        .length;
+      const summary = [];
+      if (clearedVisibleCount) summary.push(`已清空 ${clearedVisibleCount} 个当前候选`);
+      if (deletedProposalIds.size) summary.push(`删除了 ${deletedProposalIds.size} 个研究任务`);
+      if (skippedBlocked.length) summary.push(`跳过 ${skippedBlocked.length} 个运行中任务`);
+      if (skippedVirtual.length) summary.push(`跳过 ${skippedVirtual.length} 个候选回填条目`);
+      if (failures.length) summary.push(`失败 ${failures.length} 个`);
+      notify(summary.join('，') || '候选已清空', failures.length > 0);
+      if (failures.length) console.warn('clearVisibleCandidates failures:', failures);
+    });
   }
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
@@ -4792,6 +5016,8 @@
       ensureAutoPlannerGoal({ forceRefresh: true }).catch(err => notify(`自动生成研究目标失败: ${err.message}`, true)));
     document.getElementById('ai-context-btn')?.addEventListener('click', () =>
       generateAIContext().catch(err => notify(`生成研究思路失败: ${err.message}`, true)));
+    document.getElementById('ai-clear-candidates-btn')?.addEventListener('click', () =>
+      clearVisibleCandidates().catch(err => notify(`清空候选失败: ${err.message}`, true)));
 
     /* one-click 鑷姩研究 */
     document.getElementById('ai-oneclick-btn')?.addEventListener('click', () =>
@@ -5449,7 +5675,9 @@
       fmtTs,
       notify,
       normalizeUiText,
+      firstMeaningfulText,
       providerDisplayName,
+      proposalResearchThesis,
       researchModeText,
       statusText,
       proposalDisplayName,

@@ -33,6 +33,13 @@
     return String(item?.proposal_id || `proposal-${index + 1}`);
   }
 
+  function proposalResearchThesis(item) {
+    if (typeof aiRoot().util?.proposalResearchThesis === 'function') {
+      return aiRoot().util.proposalResearchThesis(item);
+    }
+    return String(item?.thesis || '').trim();
+  }
+
   function researchModeText(mode) {
     if (typeof aiRoot().util?.researchModeText === 'function') return aiRoot().util.researchModeText(mode);
     return String(mode || 'template');
@@ -298,7 +305,7 @@
         1,
         '研究思路',
         hypothesisTone,
-        proposal?.thesis || inputs.goal || '等待输入研究目标',
+        proposalResearchThesis(proposal) || inputs.goal || '等待输入研究目标',
         [
           metric('模式', researchModeText(effectiveResearchMode)),
           metric('市场', inputs.regime || 'mixed'),
