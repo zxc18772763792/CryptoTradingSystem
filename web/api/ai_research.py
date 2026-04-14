@@ -3273,6 +3273,41 @@ async def warm_ai_funding_cache(request: Request, payload: AIFundingWarmRequest)
     }
 
 
+@router.post("/diagnostics/macro-cache/warm")
+async def warm_ai_macro_cache(request: Request):
+    ensure_ai_research_runtime_state(request.app)
+    try:
+        from pathlib import Path as _Path  # noqa: PLC0415
+
+        from core.data.macro_collector import group_macro_snapshot, load_macro_snapshot, update_macro_cache  # noqa: PLC0415
+
+        updated = await update_macro_cache()
+        snapshot = dict(load_macro_snapshot() or {})
+        active_series = [name for name, value in snapshot.items() if value is not None]
+        latest_mtime = None
+        for name in active_series or list(snapshot.keys()):
+            try:
+                mtime = (_Path("data/macro") / f"{name}.parquet").stat().st_mtime
+            except Exception:
+                continue
+            if latest_mtime is None or mtime > latest_mtime:
+                latest_mtime = mtime
+        return {
+            "warmed": True,
+            "macro": {
+                "updated": dict(updated or {}),
+                "updated_count": int(sum(int(value or 0) for value in (updated or {}).values())),
+                "active_series": active_series,
+                "active_series_count": len(active_series),
+                "regions": group_macro_snapshot(snapshot),
+                "snapshot": snapshot,
+                "last_updated": datetime.fromtimestamp(latest_mtime, tz=timezone.utc).isoformat() if latest_mtime is not None else None,
+            },
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"macro warm failed: {exc}") from exc
+
+
 @router.post("/proposals/{proposal_id}/cancel")
 async def cancel_ai_proposal_job(request: Request, proposal_id: str):
     ensure_ai_research_runtime_state(request.app)

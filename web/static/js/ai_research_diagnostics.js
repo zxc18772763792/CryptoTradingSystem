@@ -339,15 +339,53 @@
   async function warmFunding() {
     const exchange = currentExchange();
     const symbol = currentSymbol();
-    const result = await aiApi('/diagnostics/funding-cache/warm', {
-      method: 'POST',
-      body: JSON.stringify({ exchange, symbol, days: 90, source: 'auto' }),
-      timeoutMs: 30000,
-    });
-    const path = String(result?.funding?.cache_path || '');
-    notify(path ? `宏观缓存已预热: ${path}` : '宏观缓存已预热');
-    await refreshDiagnostics({ force: true, reason: 'post-funding-warm' }).catch(() => {});
-    return result;
+    const [fundingResult, macroResult] = await Promise.allSettled([
+      aiApi('/diagnostics/funding-cache/warm', {
+        method: 'POST',
+        body: JSON.stringify({ exchange, symbol, days: 90, source: 'auto' }),
+        timeoutMs: 30000,
+      }),
+      aiApi('/diagnostics/macro-cache/warm', {
+        method: 'POST',
+        timeoutMs: 45000,
+      }),
+    ]);
+    if (fundingResult.status !== 'fulfilled' && macroResult.status !== 'fulfilled') {
+      const errors = [fundingResult, macroResult]
+        .filter((item) => item.status === 'rejected')
+        .map((item) => String(item.reason?.message || item.reason || '').trim())
+        .filter(Boolean);
+      throw new Error(errors.join(' / ') || 'research cache warm failed');
+    }
+
+    const parts = [];
+    const partialErrors = [];
+    const fundingPayload = fundingResult.status === 'fulfilled' ? (fundingResult.value || {}) : null;
+    const macroPayload = macroResult.status === 'fulfilled' ? (macroResult.value || {}) : null;
+
+    if (fundingPayload) {
+      const path = String(fundingPayload?.funding?.cache_path || '');
+      parts.push(path ? `Funding ${path}` : 'Funding');
+    } else {
+      partialErrors.push(String(fundingResult.reason?.message || fundingResult.reason || 'funding warm failed'));
+    }
+
+    if (macroPayload) {
+      const activeSeriesCount = Number(macroPayload?.macro?.active_series_count || 0);
+      parts.push(activeSeriesCount > 0 ? `Macro ${activeSeriesCount} 项` : 'Macro');
+    } else {
+      partialErrors.push(String(macroResult.reason?.message || macroResult.reason || 'macro warm failed'));
+    }
+
+    const suffix = partialErrors.length ? `；部分失败: ${partialErrors.join(' / ')}` : '';
+    notify(`研究缓存已预热: ${parts.join(' + ')}${suffix}`);
+    await refreshDiagnostics({ force: true, reason: 'post-research-warm' }).catch(() => {});
+    return {
+      warmed: true,
+      funding: fundingPayload?.funding || null,
+      macro: macroPayload?.macro || null,
+      partial_errors: partialErrors,
+    };
   }
 
   function stopDiagnosticsPolling() {
