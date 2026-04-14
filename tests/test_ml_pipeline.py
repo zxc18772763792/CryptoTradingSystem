@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from core.ai import ml_signal
 from core.ml import pipeline
 
 
@@ -109,3 +110,13 @@ def test_build_manifest_and_save_model_artifacts(tmp_path: Path) -> None:
     assert (artifact_dir / pipeline.MANIFEST_FILE_NAME).exists()
     assert (artifact_dir / pipeline.METRICS_FILE_NAME).exists()
     assert (artifact_dir / pipeline.FEATURE_IMPORTANCES_FILE_NAME).exists()
+
+
+def test_inference_feature_builder_matches_training_pipeline() -> None:
+    sample = _sample_ohlcv()
+
+    training_features = pipeline.build_feature_frame(sample)
+    inference_features = ml_signal.build_feature_frame(sample)
+
+    pd.testing.assert_frame_equal(inference_features, training_features)
+    assert ml_signal.FEATURE_COLS == pipeline.FEATURE_COLUMNS

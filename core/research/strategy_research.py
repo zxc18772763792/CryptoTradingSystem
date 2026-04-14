@@ -435,14 +435,18 @@ def _build_positions(
         avg_loss = loss.rolling(period, min_periods=period).mean()
         rs = avg_gain / avg_loss.replace(0, np.nan)
         rsi = 100 - (100 / (1 + rs))
-        in_position = False
+        pos_val = 0
         values = []
         for val in rsi.fillna(50):
-            if not in_position and val <= oversold:
-                in_position = True
-            elif in_position and val >= overbought:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if val <= oversold:
+                pos_val = 1
+            elif val >= overbought:
+                pos_val = -1
+            elif pos_val == 1 and val >= 50:
+                pos_val = 0
+            elif pos_val == -1 and val <= 50:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
     elif strategy in {"MACDStrategy", "MACDHistogramStrategy"}:
         fast_n = int(params.get("fast_period", 12))
@@ -452,7 +456,7 @@ def _build_positions(
         ema_slow = close.ewm(span=slow_n, adjust=False).mean()
         macd = ema_fast - ema_slow
         signal = macd.ewm(span=signal_n, adjust=False).mean()
-        position = (macd > signal).astype(float)
+        position = pd.Series(np.where(macd > signal, 1.0, np.where(macd < signal, -1.0, 0.0)), index=df.index)
     elif strategy in {"BollingerBandsStrategy", "BollingerSqueezeStrategy"}:
         period = int(params.get("period", 20))
         num_std = float(params.get("num_std", 2.0))
@@ -460,14 +464,18 @@ def _build_positions(
         std = close.rolling(period, min_periods=period).std()
         upper = ma + num_std * std
         lower = ma - num_std * std
-        in_position = False
+        pos_val = 0
         values = []
-        for c, up, lo in zip(close.ffill(), upper.fillna(float("inf")), lower.fillna(float("-inf"))):
-            if not in_position and c <= lo:
-                in_position = True
-            elif in_position and c >= up:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+        for c, up, lo, m in zip(close.ffill(), upper.fillna(float("inf")), lower.fillna(float("-inf")), ma.fillna(close.mean())):
+            if c <= lo:
+                pos_val = 1
+            elif c >= up:
+                pos_val = -1
+            elif pos_val == 1 and c >= m:
+                pos_val = 0
+            elif pos_val == -1 and c <= m:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
     elif strategy in {"MeanReversionStrategy", "BollingerMeanReversionStrategy", "PairsTradingStrategy"}:
         period = int(params.get("lookback_period", 20))
@@ -475,27 +483,33 @@ def _build_positions(
         mean = close.rolling(period, min_periods=period).mean()
         std = close.rolling(period, min_periods=period).std()
         z = (close - mean) / std.replace(0, np.nan)
-        in_position = False
+        pos_val = 0
         values = []
         for z_val in z.fillna(0):
-            if not in_position and z_val <= -z_entry:
-                in_position = True
-            elif in_position and z_val >= 0:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if z_val <= -z_entry:
+                pos_val = 1
+            elif z_val >= z_entry:
+                pos_val = -1
+            elif pos_val == 1 and z_val >= 0:
+                pos_val = 0
+            elif pos_val == -1 and z_val <= 0:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
     elif strategy in {"MomentumStrategy", "TrendFollowingStrategy"}:
         lookback = int(params.get("lookback_period", 14))
         threshold = float(params.get("momentum_threshold", 0.02))
         momentum = close / close.shift(lookback) - 1
-        in_position = False
+        pos_val = 0
         values = []
         for m in momentum.fillna(0):
-            if not in_position and m >= threshold:
-                in_position = True
-            elif in_position and m <= -threshold * 0.5:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if m >= threshold:
+                pos_val = 1
+            elif m <= -threshold:
+                pos_val = -1
+            elif abs(m) < threshold * 0.3:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
     elif strategy == "DonchianBreakoutStrategy":
         high = df["high"]
@@ -503,15 +517,27 @@ def _build_positions(
         lookback = int(params.get("lookback", 20))
         exit_lookback = int(params.get("exit_lookback", 10))
         upper = high.rolling(lookback, min_periods=lookback).max().shift(1)
+        lower_channel = low.rolling(lookback, min_periods=lookback).min().shift(1)
         exit_low = low.rolling(exit_lookback, min_periods=exit_lookback).min().shift(1)
-        in_position = False
+        exit_high = high.rolling(exit_lookback, min_periods=exit_lookback).max().shift(1)
+        pos_val = 0
         values = []
-        for c, up, ex in zip(close.ffill(), upper.fillna(float("inf")), exit_low.fillna(float("-inf"))):
-            if not in_position and c > up:
-                in_position = True
-            elif in_position and c < ex:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+        for c, up, lo_ch, ex_lo, ex_hi in zip(
+            close.ffill(),
+            upper.fillna(float("inf")),
+            lower_channel.fillna(float("-inf")),
+            exit_low.fillna(float("-inf")),
+            exit_high.fillna(float("inf")),
+        ):
+            if c > up:
+                pos_val = 1
+            elif c < lo_ch:
+                pos_val = -1
+            elif pos_val == 1 and c < ex_lo:
+                pos_val = 0
+            elif pos_val == -1 and c > ex_hi:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
     elif strategy == "StochasticStrategy":
         high = df["high"]
@@ -526,18 +552,22 @@ def _build_positions(
         raw_k = (close - lowest) / (highest - lowest).replace(0, np.nan) * 100
         k_line = raw_k.rolling(smooth_k, min_periods=smooth_k).mean()
         d_line = k_line.rolling(d_period, min_periods=d_period).mean()
-        in_position = False
+        pos_val = 0
         values = []
         k_prev = np.nan
         d_prev = np.nan
         for k, d in zip(k_line.fillna(50), d_line.fillna(50)):
             cross_up = pd.notna(k_prev) and pd.notna(d_prev) and k_prev <= d_prev and k > d
             cross_down = pd.notna(k_prev) and pd.notna(d_prev) and k_prev >= d_prev and k < d
-            if not in_position and cross_up and k <= oversold:
-                in_position = True
-            elif in_position and cross_down and k >= overbought:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if cross_up and k <= oversold:
+                pos_val = 1
+            elif cross_down and k >= overbought:
+                pos_val = -1
+            elif pos_val == 1 and k >= 50:
+                pos_val = 0
+            elif pos_val == -1 and k <= 50:
+                pos_val = 0
+            values.append(float(pos_val))
             k_prev, d_prev = k, d
         position = pd.Series(values, index=df.index)
     elif strategy == "ADXTrendStrategy":
@@ -558,18 +588,20 @@ def _build_positions(
         minus_di = 100 * (minus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr.replace(0, np.nan))
         dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
         adx = dx.ewm(alpha=1 / period, adjust=False).mean()
-        in_position = False
+        pos_val = 0
         values = []
         p_prev = np.nan
         m_prev = np.nan
         for p, m, a in zip(plus_di.fillna(0), minus_di.fillna(0), adx.fillna(0)):
             cross_up = pd.notna(p_prev) and pd.notna(m_prev) and p_prev <= m_prev and p > m
             cross_down = pd.notna(p_prev) and pd.notna(m_prev) and p_prev >= m_prev and p < m
-            if not in_position and cross_up and a >= adx_threshold:
-                in_position = True
-            elif in_position and cross_down:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if cross_up and a >= adx_threshold:
+                pos_val = 1
+            elif cross_down and a >= adx_threshold:
+                pos_val = -1
+            elif a < adx_threshold * 0.7:
+                pos_val = 0
+            values.append(float(pos_val))
             p_prev, m_prev = p, m
         position = pd.Series(values, index=df.index)
     elif strategy == "VWAPReversionStrategy":
@@ -580,14 +612,18 @@ def _build_positions(
         vol = df["volume"].replace(0, np.nan)
         vwap = (typical * vol).rolling(window, min_periods=window).sum() / vol.rolling(window, min_periods=window).sum()
         dev = (close - vwap) / vwap
-        in_position = False
+        pos_val = 0
         values = []
         for d in dev.fillna(0):
-            if not in_position and d <= -entry_dev:
-                in_position = True
-            elif in_position and d >= -exit_dev:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if d <= -entry_dev:
+                pos_val = 1
+            elif d >= entry_dev:
+                pos_val = -1
+            elif pos_val == 1 and d >= -exit_dev:
+                pos_val = 0
+            elif pos_val == -1 and d <= exit_dev:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
     # ── 趋势新增 ──────────────────────────────────────────────
     elif strategy == "AroonStrategy":
@@ -601,14 +637,16 @@ def _build_positions(
         aroon_down = low.rolling(period + 1, min_periods=period + 1).apply(
             lambda x: float(np.argmin(x)) / period * 100, raw=True
         )
-        in_position = False
+        pos_val = 0
         values = []
         for up, dn in zip(aroon_up.fillna(50.0), aroon_down.fillna(50.0)):
-            if not in_position and up >= threshold and up > dn:
-                in_position = True
-            elif in_position and dn > up:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if up >= threshold and up > dn:
+                pos_val = 1
+            elif dn >= threshold and dn > up:
+                pos_val = -1
+            elif abs(up - dn) < 20:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
 
     # ── 震荡新增 ──────────────────────────────────────────────
@@ -619,14 +657,18 @@ def _build_positions(
         hh = df["high"].rolling(period, min_periods=period).max()
         ll = df["low"].rolling(period, min_periods=period).min()
         wr = -100.0 * (hh - df["close"]) / (hh - ll).replace(0, np.nan)
-        in_position = False
+        pos_val = 0
         values = []
         for w in wr.fillna(-50.0):
-            if not in_position and w <= oversold:
-                in_position = True
-            elif in_position and w >= overbought:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if w <= oversold:
+                pos_val = 1
+            elif w >= overbought:
+                pos_val = -1
+            elif pos_val == 1 and w >= -50.0:
+                pos_val = 0
+            elif pos_val == -1 and w <= -50.0:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
 
     elif strategy == "CCIStrategy":
@@ -639,14 +681,18 @@ def _build_positions(
             lambda x: np.abs(x - x.mean()).mean(), raw=True
         )
         cci = (typical - ma) / (0.015 * mad.replace(0, np.nan))
-        in_position = False
+        pos_val = 0
         values = []
         for c in cci.fillna(0.0):
-            if not in_position and c <= oversold:
-                in_position = True
-            elif in_position and c >= overbought:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if c <= oversold:
+                pos_val = 1
+            elif c >= overbought:
+                pos_val = -1
+            elif pos_val == 1 and c >= 0:
+                pos_val = 0
+            elif pos_val == -1 and c <= 0:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
 
     elif strategy == "StochRSIStrategy":
@@ -663,17 +709,21 @@ def _build_positions(
         rsi_max = rsi_val.rolling(stoch_period, min_periods=stoch_period).max()
         stoch_rsi = (rsi_val - rsi_min) / (rsi_max - rsi_min).replace(0, np.nan) * 100.0
         stoch_sig = stoch_rsi.rolling(signal_period, min_periods=signal_period).mean()
-        in_position = False
+        pos_val = 0
         values = []
         prev_s, prev_sig = np.nan, np.nan
         for s, sig in zip(stoch_rsi.fillna(50.0), stoch_sig.fillna(50.0)):
             cross_up = pd.notna(prev_s) and prev_s <= prev_sig and s > sig
             cross_dn = pd.notna(prev_s) and prev_s >= prev_sig and s < sig
-            if not in_position and cross_up and s <= oversold:
-                in_position = True
-            elif in_position and cross_dn and s >= overbought:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if cross_up and s <= oversold:
+                pos_val = 1
+            elif cross_dn and s >= overbought:
+                pos_val = -1
+            elif pos_val == 1 and s >= 50:
+                pos_val = 0
+            elif pos_val == -1 and s <= 50:
+                pos_val = 0
+            values.append(float(pos_val))
             prev_s, prev_sig = s, sig
         position = pd.Series(values, index=df.index)
 
@@ -682,21 +732,23 @@ def _build_positions(
         period = int(params.get("period", 12))
         threshold = float(params.get("threshold", 0.0))
         roc = (df["close"] / df["close"].shift(period).replace(0, np.nan) - 1.0) * 100.0
-        position = (roc > threshold).astype(float)
+        position = pd.Series(np.where(roc > threshold, 1.0, np.where(roc < -threshold, -1.0, 0.0)), index=df.index)
 
     elif strategy == "PriceAccelerationStrategy":
         period = int(params.get("period", 14))
         velocity = df["close"].diff(period)
         acceleration = velocity.diff(period)
-        in_position = False
+        pos_val = 0
         values = []
         prev_acc = np.nan
         for acc in acceleration.fillna(0.0):
-            if not in_position and acc > 0 and pd.notna(prev_acc) and acc > prev_acc:
-                in_position = True
-            elif in_position and acc < 0:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if acc > 0 and pd.notna(prev_acc) and acc > prev_acc:
+                pos_val = 1
+            elif acc < 0 and pd.notna(prev_acc) and acc < prev_acc:
+                pos_val = -1
+            elif acc == 0 or (pd.notna(prev_acc) and abs(acc) < abs(prev_acc) * 0.3):
+                pos_val = 0
+            values.append(float(pos_val))
             prev_acc = acc
         position = pd.Series(values, index=df.index)
 
@@ -706,7 +758,7 @@ def _build_positions(
         typical = (df["high"] + df["low"] + df["close"]) / 3.0
         vol = df["volume"].replace(0, np.nan)
         vwap = (typical * vol).rolling(window, min_periods=window).sum() / vol.rolling(window, min_periods=window).sum()
-        position = (df["close"] > vwap).astype(float)
+        position = pd.Series(np.where(df["close"] > vwap, 1.0, np.where(df["close"] < vwap, -1.0, 0.0)), index=df.index)
 
     elif strategy == "MeanReversionHalfLifeStrategy":
         period = int(params.get("lookback_period", 30))
@@ -714,14 +766,18 @@ def _build_positions(
         mean = df["close"].rolling(period, min_periods=period).mean()
         std = df["close"].rolling(period, min_periods=period).std()
         z = (df["close"] - mean) / std.replace(0, np.nan)
-        in_position = False
+        pos_val = 0
         values = []
         for z_val in z.fillna(0.0):
-            if not in_position and z_val <= -z_entry:
-                in_position = True
-            elif in_position and z_val >= 0.0:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if z_val <= -z_entry:
+                pos_val = 1
+            elif z_val >= z_entry:
+                pos_val = -1
+            elif pos_val == 1 and z_val >= 0.0:
+                pos_val = 0
+            elif pos_val == -1 and z_val <= 0.0:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
 
     # ── 成交量新增 ─────────────────────────────────────────────
@@ -736,21 +792,25 @@ def _build_positions(
         neg_mf = mf.where(typical <= prev_typical, 0.0)
         mfr = pos_mf.rolling(period, min_periods=period).sum() / neg_mf.rolling(period, min_periods=period).sum().replace(0, np.nan)
         mfi = 100.0 - 100.0 / (1.0 + mfr)
-        in_position = False
+        pos_val = 0
         values = []
         for m in mfi.fillna(50.0):
-            if not in_position and m <= oversold:
-                in_position = True
-            elif in_position and m >= overbought:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if m <= oversold:
+                pos_val = 1
+            elif m >= overbought:
+                pos_val = -1
+            elif pos_val == 1 and m >= 50.0:
+                pos_val = 0
+            elif pos_val == -1 and m <= 50.0:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
 
     elif strategy == "OBVStrategy":
         period = int(params.get("period", 20))
         obv = (np.sign(df["close"].diff().fillna(0)) * df["volume"]).cumsum()
         obv_ma = obv.rolling(period, min_periods=period).mean()
-        position = (obv > obv_ma).astype(float)
+        position = pd.Series(np.where(obv > obv_ma, 1.0, np.where(obv < obv_ma, -1.0, 0.0)), index=df.index)
 
     elif strategy == "TradeIntensityStrategy":
         period = int(params.get("period", 20))
@@ -880,14 +940,18 @@ def _build_positions(
             50.0 + 28.0 * np.tanh(news_sentiment * 0.65 + macro_score * 0.90 - funding_rate * 180.0)
         ).clip(0.0, 100.0)
         fear_greed_score = (fear_greed_proxy * 0.55 + sentiment_component * 0.45).clip(0.0, 100.0)
-        in_position = False
+        pos_val = 0
         values = []
         for score in fear_greed_score.fillna(50.0):
-            if not in_position and score <= fear_th:
-                in_position = True
-            elif in_position and score >= max(50.0, greed_th - 15.0):
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if score <= fear_th:
+                pos_val = 1
+            elif score >= greed_th:
+                pos_val = -1
+            elif pos_val == 1 and score >= 50.0:
+                pos_val = 0
+            elif pos_val == -1 and score <= 50.0:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
 
     elif strategy == "SocialSentimentStrategy":
@@ -903,14 +967,18 @@ def _build_positions(
             + momentum * 6.5
             + (volume_ratio.fillna(1.0) - 1.0) * 0.8
         )
-        in_position = False
+        pos_val = 0
         values = []
         for score in social_score.fillna(0.0):
-            if not in_position and score >= pos_th:
-                in_position = True
-            elif in_position and score <= max(0.0, neg_th + 0.1):
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if score >= pos_th:
+                pos_val = 1
+            elif score <= neg_th:
+                pos_val = -1
+            elif pos_val == 1 and score <= 0:
+                pos_val = 0
+            elif pos_val == -1 and score >= 0:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
 
     elif strategy == "FundFlowStrategy":
@@ -928,14 +996,18 @@ def _build_positions(
             - np.tanh(funding_rate * 160.0) * 0.10
         ).clip(-1.0, 1.0)
         neutral_ratio = max(min_ratio * 0.5, 0.01)
-        in_position = False
+        pos_val = 0
         values = []
         for score in flow_score:
-            if not in_position and score >= min_ratio:
-                in_position = True
-            elif in_position and score <= neutral_ratio:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if score >= min_ratio:
+                pos_val = 1
+            elif score <= -min_ratio:
+                pos_val = -1
+            elif pos_val == 1 and score <= neutral_ratio:
+                pos_val = 0
+            elif pos_val == -1 and score >= -neutral_ratio:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
 
     elif strategy == "WhaleActivityStrategy":
@@ -952,14 +1024,18 @@ def _build_positions(
         whale_signal = np.tanh(news_whale * 0.90 + event_intensity * 0.15)
         buy_pressure = buy_spikes.fillna(0.0) + whale_signal.clip(lower=0.0) * float(accumulation)
         sell_pressure = sell_spikes.fillna(0.0) + (-whale_signal.clip(upper=0.0)) * float(distribution)
-        in_position = False
+        pos_val = 0
         values = []
         for buy_count, sell_count in zip(buy_pressure, sell_pressure):
-            if not in_position and buy_count >= accumulation and buy_count > sell_count:
-                in_position = True
-            elif in_position and sell_count >= distribution:
-                in_position = False
-            values.append(1.0 if in_position else 0.0)
+            if buy_count >= accumulation and buy_count > sell_count:
+                pos_val = 1
+            elif sell_count >= distribution and sell_count > buy_count:
+                pos_val = -1
+            elif pos_val == 1 and sell_count >= distribution:
+                pos_val = 0
+            elif pos_val == -1 and buy_count >= accumulation:
+                pos_val = 0
+            values.append(float(pos_val))
         position = pd.Series(values, index=df.index)
 
     elif strategy == "MLXGBoostStrategy":
@@ -1272,46 +1348,6 @@ def _optimize_params_scipy_lhs(
     return best_params, n_trials, method
 
 
-def _run_walk_forward(
-    strategy: str,
-    df: pd.DataFrame,
-    timeframe: str,
-    params: Dict[str, Any],
-    n_splits: int,
-    commission_rate: float,
-    slippage_bps: float,
-    initial_capital: float,
-    strategy_programs: Optional[Dict[str, StrategyProgram]] = None,
-) -> List[float]:
-    """C: Expanding-window walk-forward — return list of OOS Sharpe ratios per fold."""
-    n = len(df)
-    chunk_size = n // (n_splits + 1)
-    if chunk_size < 50:
-        return []
-    sharpe_list: List[float] = []
-    for i in range(1, n_splits + 1):
-        is_end = i * chunk_size
-        oos_end = (i + 1) * chunk_size
-        oos_slice = df.iloc[is_end:oos_end]
-        if len(oos_slice) < 50:
-            continue
-        try:
-            m = _run_backtest_core(
-                strategy=strategy,
-                df=oos_slice,
-                timeframe=timeframe,
-                initial_capital=initial_capital,
-                params=params,
-                commission_rate=commission_rate,
-                slippage_bps=slippage_bps,
-                strategy_programs=strategy_programs,
-            )
-            if m.get("quality_flag") != "invalid":
-                sharpe_list.append(float(m.get("sharpe_ratio", 0.0) or 0.0))
-        except Exception:
-            pass
-    return sharpe_list
-
 
 def _run_purged_walk_forward(
     strategy: str,
@@ -1381,6 +1417,32 @@ def _run_purged_walk_forward(
         "n_folds": n_folds,
         "positive_folds": positive_folds,
     }
+
+
+def _run_walk_forward(
+    strategy: str,
+    df: pd.DataFrame,
+    timeframe: str,
+    params: Dict[str, Any],
+    n_splits: int = 5,
+    commission_rate: float = 0.0004,
+    slippage_bps: float = 2.0,
+    initial_capital: float = 10000.0,
+    strategy_programs: Optional[Dict[str, StrategyProgram]] = None,
+) -> List[float]:
+    """Backward-compatible wrapper returning the legacy Sharpe list shape."""
+    result = _run_purged_walk_forward(
+        strategy=strategy,
+        df=df,
+        timeframe=timeframe,
+        params=params,
+        n_splits=n_splits,
+        commission_rate=commission_rate,
+        slippage_bps=slippage_bps,
+        initial_capital=initial_capital,
+        strategy_programs=strategy_programs,
+    )
+    return list(result.get("sharpe_list", []))
 
 
 def _compute_wf_stability(wf_result) -> Optional[float]:

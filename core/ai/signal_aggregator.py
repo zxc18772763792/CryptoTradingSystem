@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional
 import pandas as pd
 from loguru import logger
 
-from core.ai.ml_signal import MLSignalModel, MLSignalResult
+from core.ai.ml_signal import MLSignalModel, MLSignalResult, build_feature_frame
 from core.ai.risk_gate import RiskGate
 
 
@@ -99,7 +99,7 @@ class SignalAggregator:
     async def aggregate(
         self,
         symbol: str,
-        market_data: pd.DataFrame,
+        market_data: Optional[pd.DataFrame],
         *,
         include_llm: bool = True,
         include_ml: bool = True,
@@ -107,6 +107,7 @@ class SignalAggregator:
     ) -> AggregatedSignal:
         """Compute weighted signal for *symbol* using latest *market_data*."""
         components: Dict[str, Any] = {}
+        has_market_data = market_data is not None and not market_data.empty
 
         # ---- 1. LLM signal ----
         llm_reason = ""
@@ -134,9 +135,9 @@ class SignalAggregator:
         ml_reason = ""
         if include_ml:
             ml_direction, ml_conf = self._get_ml_signal(symbol, market_data)
-            ml_available = bool(self._ml_model.is_loaded() and market_data is not None and not market_data.empty)
+            ml_available = bool(self._ml_model.is_loaded() and has_market_data)
             if not ml_available:
-                ml_reason = "ml_model_unavailable"
+                ml_reason = "insufficient_market_data" if self._ml_model.is_loaded() and not has_market_data else "ml_model_unavailable"
         else:
             ml_direction, ml_conf = "FLAT", 0.0
             ml_available = False
@@ -156,7 +157,7 @@ class SignalAggregator:
         factor_reason = ""
         if include_factor:
             factor_direction, factor_conf = self._get_factor_signal(market_data)
-            factor_available = bool(market_data is not None and not market_data.empty and len(market_data) >= 30)
+            factor_available = bool(has_market_data and len(market_data) >= 30)
             if not factor_available:
                 factor_reason = "insufficient_market_data"
         else:
@@ -218,14 +219,14 @@ class SignalAggregator:
     async def _get_llm_signal(
         self,
         symbol: str,
-        market_data: pd.DataFrame,
+        market_data: Optional[pd.DataFrame],
     ) -> tuple[str, float]:
         """Fetch latest news/event signal from signal_engine."""
         try:
             from core.ai.signal_engine import generate_signal  # noqa: PLC0415
 
             market_features: Dict[str, Any] = {}
-            if not market_data.empty:
+            if market_data is not None and not market_data.empty:
                 last = market_data.iloc[-1]
                 if "atr" in market_data.columns:
                     market_features["atr"] = float(last.get("atr", 0.0))
@@ -248,15 +249,13 @@ class SignalAggregator:
     def _get_ml_signal(
         self,
         symbol: str,
-        market_data: pd.DataFrame,
+        market_data: Optional[pd.DataFrame],
     ) -> tuple[str, float]:
         """Run ML model on the feature DataFrame."""
-        if not self._ml_model.is_loaded() or market_data.empty:
+        if not self._ml_model.is_loaded() or market_data is None or market_data.empty:
             return "FLAT", 0.0
         try:
-            from scripts.train_ml_signal import compute_features  # noqa: PLC0415
-
-            features = compute_features(market_data)
+            features = build_feature_frame(market_data)
             result: MLSignalResult = self._ml_model.predict(features, symbol=symbol)
             return result.direction, result.confidence
         except Exception as exc:
@@ -265,10 +264,10 @@ class SignalAggregator:
 
     def _get_factor_signal(
         self,
-        market_data: pd.DataFrame,
+        market_data: Optional[pd.DataFrame],
     ) -> tuple[str, float]:
         """Rule-based signal using RSI, EMA trend, and momentum."""
-        if market_data.empty or len(market_data) < 30:
+        if market_data is None or market_data.empty or len(market_data) < 30:
             return "FLAT", 0.0
         try:
             close = market_data["close"].astype(float)

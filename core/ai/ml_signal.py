@@ -22,86 +22,23 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from core.ml.pipeline import FEATURE_COLUMNS as PIPELINE_FEATURE_COLUMNS
+from core.ml.pipeline import build_feature_frame as pipeline_build_feature_frame
+
 
 # Canonical feature column order used during training and inference.
 # The training script must produce exactly these columns (in any order;
 # the model reindexes to this list).
-FEATURE_COLS: List[str] = [
-    "rsi",
-    "macd",
-    "macd_signal",
-    "macd_hist",
-    "ema_fast",
-    "ema_slow",
-    "bb_upper",
-    "bb_lower",
-    "bb_mid",
-    "atr",
-    "volume_ratio",
-    "momentum",
-    "close",
-    "high",
-    "low",
-    "open",
-    "volume",
-]
+FEATURE_COLS: List[str] = list(PIPELINE_FEATURE_COLUMNS)
 
 
 def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """Build the canonical ML feature frame from OHLCV data."""
-    if df is None or df.empty:
-        return pd.DataFrame(columns=FEATURE_COLS)
+    """Build the canonical ML feature frame from OHLCV data.
 
-    close = pd.to_numeric(df.get("close"), errors="coerce")
-    high = pd.to_numeric(df.get("high"), errors="coerce")
-    low = pd.to_numeric(df.get("low"), errors="coerce")
-    open_ = pd.to_numeric(df.get("open"), errors="coerce")
-    volume = pd.to_numeric(df.get("volume"), errors="coerce").replace(0, np.nan)
-
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(14, min_periods=14).mean()
-    loss = (-delta).clip(lower=0).rolling(14, min_periods=14).mean()
-    rsi = 100.0 - 100.0 / (1.0 + gain / loss.replace(0, np.nan))
-    ema_fast = close.ewm(span=8, adjust=False).mean()
-    ema_slow = close.ewm(span=21, adjust=False).mean()
-    macd = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
-    macd_signal = macd.ewm(span=9, adjust=False).mean()
-    bb_mid = close.rolling(20, min_periods=20).mean()
-    bb_std = close.rolling(20, min_periods=20).std()
-    true_range = pd.concat(
-        [
-            high - low,
-            (high - close.shift(1)).abs(),
-            (low - close.shift(1)).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    atr = true_range.ewm(span=14, adjust=False).mean()
-    volume_ma = volume.rolling(20, min_periods=20).mean()
-
-    features = pd.DataFrame(
-        {
-            "rsi": rsi,
-            "macd": macd,
-            "macd_signal": macd_signal,
-            "macd_hist": macd - macd_signal,
-            "ema_fast": ema_fast,
-            "ema_slow": ema_slow,
-            "bb_upper": bb_mid + 2.0 * bb_std,
-            "bb_lower": bb_mid - 2.0 * bb_std,
-            "bb_mid": bb_mid,
-            "atr": atr,
-            "volume_ratio": volume / volume_ma.replace(0, np.nan),
-            "momentum": close.pct_change(14),
-            "close": close,
-            "high": high,
-            "low": low,
-            "open": open_,
-            "volume": volume.fillna(0.0),
-        },
-        index=df.index,
-    )
-    return features.reindex(columns=FEATURE_COLS).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    Training, backtesting, and live inference must share the same feature
+    engineering logic to avoid silent train/serve skew.
+    """
+    return pipeline_build_feature_frame(df).reindex(columns=FEATURE_COLS)
 
 
 @dataclass

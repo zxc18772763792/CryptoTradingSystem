@@ -233,6 +233,104 @@ def _upsert_registry(model_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     return current
 
 
+def _resolve_model_manifest(model: Dict[str, Any], registry_entry: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    artifact = dict(model.get("artifact") or {})
+    manifest = dict(artifact.get("manifest") or {})
+    if manifest:
+        return manifest
+
+    manifest_path = str(artifact.get("manifest_path") or "").strip()
+    if manifest_path:
+        loaded = _load_json(Path(manifest_path), {})
+        if isinstance(loaded, dict):
+            return loaded
+
+    registry_entry = dict(registry_entry or {})
+    loaded = registry_entry.get("manifest")
+    if isinstance(loaded, dict):
+        return dict(loaded)
+
+    return {}
+
+
+def _restore_model_from_registry(model_id: str, registry_entry: Dict[str, Any]) -> Dict[str, Any]:
+    entry = dict(registry_entry or {})
+    if not entry:
+        return {}
+
+    strategy_defaults = dict((entry.get("strategy_defaults") or {}).get("params") or {})
+    manifest_path = str(entry.get("manifest_path") or "").strip()
+    model_path = str(entry.get("model_path") or strategy_defaults.get("model_path") or "").strip()
+    manifest = {}
+    if isinstance(entry.get("manifest"), dict):
+        manifest = dict(entry.get("manifest") or {})
+    elif manifest_path:
+        loaded = _load_json(Path(manifest_path), {})
+        if isinstance(loaded, dict):
+            manifest = loaded
+
+    training_window = dict(manifest.get("training_window") or {})
+    exchange = str(
+        strategy_defaults.get("exchange")
+        or entry.get("exchange")
+        or training_window.get("exchange")
+        or "binance"
+    ).strip().lower() or "binance"
+
+    model: Dict[str, Any] = {
+        "model_id": model_id,
+        "name": str(entry.get("name") or model_id),
+        "status": str(entry.get("status") or "registered"),
+        "created_at": str(entry.get("created_at") or _now_utc().isoformat()),
+        "updated_at": str(entry.get("updated_at") or ""),
+        "metadata": dict(entry.get("metadata") or {}),
+        "symbol": str(entry.get("symbol") or manifest.get("symbol") or "BTC/USDT"),
+        "timeframe": str(entry.get("timeframe") or manifest.get("timeframe") or "1h"),
+        "exchange": exchange,
+        "artifact": {
+            "manifest": manifest,
+            "manifest_path": manifest_path,
+            "model_path": model_path,
+            "exchange": exchange,
+        },
+    }
+    if entry.get("strategy_defaults"):
+        model["strategy_defaults"] = dict(entry.get("strategy_defaults") or {})
+    if isinstance(entry.get("deployment"), dict):
+        model["paper_deploy"] = dict(entry.get("deployment") or {})
+    factor_snapshot_path = str(entry.get("factor_snapshot_path") or "").strip()
+    if factor_snapshot_path:
+        model["factorization"] = {
+            "factor_snapshot_path": factor_snapshot_path,
+            "factor_count": int(entry.get("factor_count") or 0),
+        }
+    return model
+
+
+def _load_model_from_state_or_registry(
+    state: Any,
+    model_id: str,
+    *,
+    default_name: Optional[str] = None,
+    allow_create: bool = False,
+) -> Dict[str, Any]:
+    models = getattr(state, "ml_models", {}) or {}
+    state_model = dict(models.get(model_id) or {})
+    registry_entry = _load_registry().get(model_id) or {}
+    if state_model or registry_entry:
+        restored = _restore_model_from_registry(model_id, registry_entry) if registry_entry else {}
+        merged = dict(restored)
+        merged.update(state_model)
+        for key in ("artifact", "metadata", "registration", "paper_deploy", "factorization", "strategy_defaults"):
+            if isinstance(restored.get(key), dict) or isinstance(state_model.get(key), dict):
+                merged[key] = {**dict(restored.get(key) or {}), **dict(state_model.get(key) or {})}
+        _save_model(state, merged)
+        return merged
+    if allow_create:
+        return _get_or_create_model(state, model_id, default_name=default_name)
+    return {}
+
+
 class _CoreMLBackend:
     async def diagnostics(self, **_: Any) -> Dict[str, Any]:
         diagnostics = diagnose_environment().to_dict()
@@ -323,11 +421,25 @@ class _CoreMLBackend:
         if not model_path:
             raise RuntimeError("model path missing; cannot register")
 
+        training_window = dict(manifest.get("training_window") or {})
+        exchange = str(
+            training_window.get("exchange")
+            or artifact.get("exchange")
+            or model.get("exchange")
+            or "binance"
+        ).strip().lower() or "binance"
+        symbol = str(manifest.get("symbol") or model.get("symbol") or "BTC/USDT")
+        timeframe = str(manifest.get("timeframe") or model.get("timeframe") or "1h")
+        threshold = float((manifest.get("metrics") or {}).get("prediction_threshold", 0.55))
+
         entry = _upsert_registry(
             model_id,
             {
                 "name": str(payload.name or model.get("name") or model_id),
                 "status": "registered",
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "exchange": exchange,
                 "manifest": manifest,
                 "manifest_path": str(artifact.get("manifest_path") or ""),
                 "model_path": model_path,
@@ -335,7 +447,8 @@ class _CoreMLBackend:
                     "strategy_class": "MLXGBoostStrategy",
                     "params": {
                         "model_path": model_path,
-                        "threshold": float((manifest.get("metrics") or {}).get("prediction_threshold", 0.55)),
+                        "threshold": threshold,
+                        "exchange": exchange,
                     },
                 },
                 "metadata": {**dict(model.get("metadata") or {}), **dict(payload.metadata or {})},
@@ -356,16 +469,32 @@ class _CoreMLBackend:
             raise RuntimeError(f"deployment requires paper mode, current={current}")
 
         artifact = dict(model.get("artifact") or {})
+        registry = _load_registry().get(model_id) or {}
+        manifest = _resolve_model_manifest(model, registry)
+        registry_strategy_defaults = dict((registry.get("strategy_defaults") or {}).get("params") or {})
         model_path = str(artifact.get("model_path") or "").strip()
         if not model_path:
             artifact_dir = str(artifact.get("artifact_dir") or "").strip()
             if artifact_dir:
                 model_path = str(Path(artifact_dir) / MODEL_FILE_NAME)
         if not model_path:
-            registry = _load_registry().get(model_id) or {}
-            model_path = str(registry.get("model_path") or "").strip()
+            model_path = str(registry.get("model_path") or registry_strategy_defaults.get("model_path") or "").strip()
         if not model_path:
             raise RuntimeError("model path missing; register model first")
+
+        training_window = dict(manifest.get("training_window") or {})
+        threshold = float(
+            registry_strategy_defaults.get("threshold")
+            or (manifest.get("metrics") or {}).get("prediction_threshold")
+            or 0.55
+        )
+        exchange = str(
+            registry_strategy_defaults.get("exchange")
+            or artifact.get("exchange")
+            or model.get("exchange")
+            or training_window.get("exchange")
+            or "binance"
+        ).strip().lower() or "binance"
 
         strategy_name = f"ML_XGB_{_safe_strategy_suffix(model_id)}"
         if strategy_manager.get_strategy(strategy_name):
@@ -374,7 +503,11 @@ class _CoreMLBackend:
         ok = strategy_manager.register_strategy(
             name=strategy_name,
             strategy_class=MLXGBoostStrategy,
-            params={"model_path": model_path},
+            params={
+                "model_path": model_path,
+                "threshold": threshold,
+                "exchange": exchange,
+            },
             symbols=[str(model.get("symbol") or "BTC/USDT")],
             timeframe=str(model.get("timeframe") or "1h"),
             allocation=float(payload.allocation_pct),
@@ -401,6 +534,8 @@ class _CoreMLBackend:
                     "allocation_pct": float(payload.allocation_pct),
                     "deployed_at": _now_utc().isoformat(),
                     "trading_mode": execution_engine.get_trading_mode(),
+                    "exchange": exchange,
+                    "threshold": threshold,
                 },
             },
         )
@@ -409,6 +544,8 @@ class _CoreMLBackend:
             "strategy_name": strategy_name,
             "allocation_pct": float(payload.allocation_pct),
             "trading_mode": execution_engine.get_trading_mode(),
+            "exchange": exchange,
+            "threshold": threshold,
         }
 
     async def factorize_model(
@@ -431,7 +568,7 @@ class _CoreMLBackend:
         if not model_path:
             raise RuntimeError("model path missing; cannot factorize")
 
-        signal_model = MLSignalModel.load_from_path(model_path=model_path, threshold=0.55)
+        signal_model = MLSignalModel.load_from_path(path=model_path, threshold=0.55)
         if not signal_model.is_loaded():
             raise RuntimeError("model is not loadable; check xgboost/model artifact")
 
@@ -780,12 +917,14 @@ async def _run_train_workflow(request: Request, job_id: str, payload: MLTrainReq
         _set_job(job, "failed", phase="failed", message=error, error=error)
         state.ml_jobs[job_id] = job
         return _job_snapshot(job)
+    finally:
+        state.ml_job_tasks.pop(job_id, None)
 
 
 async def _run_register_workflow(request: Request, model_id: str, payload: MLRegisterRequest) -> Dict[str, Any]:
     _ensure_ml_state(request.app)
     state = _state(request.app)
-    model = _get_or_create_model(state, model_id)
+    model = _load_model_from_state_or_registry(state, model_id, default_name=model_id, allow_create=True)
     try:
         backend = _resolve_backend(request)
         result = await _backend_call(
@@ -816,7 +955,7 @@ async def _run_register_workflow(request: Request, model_id: str, payload: MLReg
 async def _run_deploy_paper_workflow(request: Request, model_id: str, payload: MLDeployPaperRequest) -> Dict[str, Any]:
     _ensure_ml_state(request.app)
     state = _state(request.app)
-    model = dict((state.ml_models or {}).get(model_id) or {})
+    model = _load_model_from_state_or_registry(state, model_id)
     if not model:
         raise HTTPException(status_code=404, detail=f"model {model_id} not found")
     try:
@@ -851,7 +990,7 @@ async def _run_deploy_paper_workflow(request: Request, model_id: str, payload: M
 async def _run_factorize_workflow(request: Request, model_id: str, payload: MLFactorizeRequest) -> Dict[str, Any]:
     _ensure_ml_state(request.app)
     state = _state(request.app)
-    model = dict((state.ml_models or {}).get(model_id) or {})
+    model = _load_model_from_state_or_registry(state, model_id)
     if not model:
         raise HTTPException(status_code=404, detail=f"model {model_id} not found")
     try:
@@ -893,11 +1032,18 @@ async def _run_oneclick_workflow(request: Request, job_id: str, payload: MLOneCl
         result = dict(result or {})
         model_id = str(result.get("model_id") or payload.model_id or job_id).strip()
         model = _get_or_create_model(state, model_id, default_name=payload.model_name)
+        next_status = "completed"
+        if result.get("deployment"):
+            next_status = "paper_deployed"
+        elif result.get("factorization"):
+            next_status = "factorized"
+        elif result.get("registration"):
+            next_status = "registered"
         model.update(
             {
                 "model_id": model_id,
                 "name": payload.model_name,
-                "status": "completed",
+                "status": next_status,
                 "oneclick": result,
                 "metadata": dict(payload.metadata or {}),
             }
@@ -916,6 +1062,8 @@ async def _run_oneclick_workflow(request: Request, job_id: str, payload: MLOneCl
         _set_job(job, "failed", phase="failed", message=error, error=error)
         state.ml_jobs[job_id] = job
         return _job_snapshot(job)
+    finally:
+        state.ml_job_tasks.pop(job_id, None)
 
 
 @router.get("/diagnostics")
@@ -925,6 +1073,7 @@ async def diagnostics(request: Request) -> Dict[str, Any]:
     backend = _resolve_backend(request)
     capabilities = _backend_capabilities(backend)
     jobs = _list_jobs(state)
+    registry_items = _load_registry()
     counts = {status: sum(1 for job in jobs if job.get("status") == status) for status in ML_JOB_STATUSES}
     backend_diag = {}
     try:
@@ -937,7 +1086,7 @@ async def diagnostics(request: Request) -> Dict[str, Any]:
         "capabilities": capabilities,
         "job_counts": counts,
         "jobs_total": len(jobs),
-        "models_total": len(getattr(state, "ml_models", {}) or {}),
+        "models_total": len(set((getattr(state, "ml_models", {}) or {}).keys()) | set(registry_items.keys())),
         "recent_jobs": jobs[:10],
         "state_keys": sorted(k for k in vars(state).keys() if k.startswith("ml_")),
         "backend_diagnostics": backend_diag,

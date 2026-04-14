@@ -7,7 +7,7 @@ import pandas as pd
 
 import strategies as strategy_module
 from config import strategy_registry
-from config.strategy_registry import DEFAULT_START_ALL_STRATEGIES, get_backtest_strategy_info, get_strategy_registry_entry
+from config.strategy_registry import DEFAULT_START_ALL_STRATEGIES, get_backtest_strategy_info, get_strategy_defaults, get_strategy_registry_entry
 from core.backtest.cost_models import fee_rate, slippage_rate
 from strategies import ALL_STRATEGIES
 from strategies.quantitative import fama_factor_arbitrage as fama_factor_module
@@ -116,7 +116,14 @@ def test_strategy_catalog_and_library_use_same_effective_defaults():
     assert pairs["market_type"] == "future"
     assert pairs["allow_short"] is True
     assert "factors" in multi and "gates" in multi and "risk" in multi
-    assert ml["model_path"].endswith("models\\ml_signal_xgb.json")
+    assert ml["model_path"].replace("\\", "/").endswith("models/ml_signal_xgb.json")
+
+
+def test_mlxgboost_strategy_defaults_include_model_path_for_non_api_callers():
+    defaults = get_strategy_defaults("MLXGBoostStrategy")
+
+    assert defaults["model_path"] == "models/ml_signal_xgb.json"
+    assert defaults["threshold"] == 0.55
 
 
 def test_arbitrage_registry_backtest_support_flags_match_ui_routing():

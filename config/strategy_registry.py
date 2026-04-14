@@ -367,7 +367,7 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "family": "ml",
         "decision_engine": "ml",
         "ai_driven": True,
-        "defaults": {"threshold": 0.55, "neutral_exit_enabled": True, "stop_loss_pct": 0.025, "take_profit_pct": 0.06},
+        "defaults": {"model_path": "models/ml_signal_xgb.json", "threshold": 0.55, "neutral_exit_enabled": True, "stop_loss_pct": 0.025, "take_profit_pct": 0.06},
         "timeframe": "1h",
         "symbols": ["BTC/USDT"],
         "backtest": {"supported": True, "description": "XGBoost 价格方向分类策略", "optimization_grid": {"threshold": [0.52, 0.55, 0.58, 0.62]}},
