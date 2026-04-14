@@ -191,3 +191,40 @@ def test_gate_funding_basis_prefers_gate_public_before_binance_fallback(monkeypa
     assert payload["basis"]["available"] is True
     assert payload["funding"]["source"] == "gate_public"
     assert payload["basis"]["source"] == "gate_public"
+
+
+def test_gate_open_interest_prefers_gate_public_when_available(monkeypatch):
+    async def fake_gate_oi(*args, **kwargs):
+        return {
+            "available": True,
+            "source": "gate_public",
+            "error": None,
+            "symbol": "BTC/USDT",
+            "volume": 123456.0,
+            "value": 9876543.21,
+            "change_pct_1h": None,
+            "timestamp": "2026-04-14T00:00:00+00:00",
+            "sample_size": 1,
+        }
+
+    async def fake_binance_oi(*args, **kwargs):
+        return {
+            "available": False,
+            "source": "binance_public",
+            "error": "fallback_should_not_be_used",
+            "symbol": "BTC/USDT",
+            "volume": 0.0,
+            "value": 0.0,
+            "change_pct_1h": None,
+            "timestamp": None,
+            "sample_size": 0,
+        }
+
+    monkeypatch.setattr(trading_api, "_fetch_gate_public_open_interest", fake_gate_oi)
+    monkeypatch.setattr(trading_api, "_fetch_binance_public_open_interest", fake_binance_oi)
+
+    payload = asyncio.run(trading_api._fetch_open_interest_snapshot(exchange="gate", symbol="BTC/USDT"))
+
+    assert payload["available"] is True
+    assert payload["source"] == "gate_public"
+    assert payload["value"] == pytest.approx(9876543.21, rel=1e-9)

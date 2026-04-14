@@ -571,8 +571,13 @@ async def _fetch_gate_public_open_interest(symbol: str) -> Dict[str, Any]:
             "sample_size": 0,
         }
     payload = dict(payload or {})
-    volume = _safe_float(payload.get("open_interest"))
+    volume = _safe_float(payload.get("open_interest") or payload.get("position_size"))
     value = _safe_float(payload.get("open_interest_usd") or payload.get("open_interest_value"))
+    if value <= 0 and volume > 0:
+        mark_price = _safe_float(payload.get("mark_price") or payload.get("last_price") or payload.get("index_price"))
+        multiplier = _safe_float(payload.get("quanto_multiplier"), default=1.0)
+        if mark_price > 0:
+            value = volume * max(multiplier, 1e-9) * mark_price
     ts = datetime.now(timezone.utc).isoformat()
     return {
         "available": bool(volume > 0 or value > 0),
