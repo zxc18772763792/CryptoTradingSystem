@@ -5,8 +5,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 
-def test_warm_macro_cache_endpoint_returns_snapshot(monkeypatch):
+def test_warm_macro_cache_endpoint_returns_snapshot(tmp_path, monkeypatch):
     from web.api import ai_research as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
 
     monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
     monkeypatch.setattr(
@@ -33,17 +35,17 @@ def test_warm_macro_cache_endpoint_returns_snapshot(monkeypatch):
             "china": {"cn_cpi_yoy": snapshot["cn_cpi_yoy"], "cn_ppi_cpi_gap": snapshot["cn_ppi_cpi_gap"]},
         },
     )
-    monkeypatch.setattr(
-        ai_module,
-        "_source_latest_cache_mtime",
-        lambda cache_dir, names: "2026-04-14T12:00:00+00:00",
-    )
 
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.chdir(tmp_path)
+    macro_dir = tmp_path / "data" / "macro"
+    macro_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("fed_rate", "ppi_cpi_gap", "cn_cpi_yoy"):
+        (macro_dir / f"{name}.parquet").write_text("placeholder", encoding="utf-8")
+
     result = asyncio.run(ai_module.warm_ai_macro_cache(request))
 
     assert result["warmed"] is True
     assert result["macro"]["updated_count"] == 3
     assert "ppi_cpi_gap" in result["macro"]["active_series"]
     assert result["macro"]["regions"]["china"]["cn_ppi_cpi_gap"] == -0.5
-    assert result["macro"]["last_updated"] == "2026-04-14T12:00:00+00:00"
+    assert result["macro"]["last_updated"] is not None
