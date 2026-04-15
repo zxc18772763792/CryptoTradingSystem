@@ -890,7 +890,7 @@ async def _load_autonomous_watchlist_runtime() -> tuple[Dict[str, Any], Dict[str
         method = getattr(autonomous_trading_agent, method_name, None)
         if not callable(method):
             return {}
-        payload = await asyncio.wait_for(method(force=False), timeout=10.0)
+        payload = await asyncio.wait_for(asyncio.shield(method(force=False)), timeout=10.0)
         return dict(payload or {}) if isinstance(payload, dict) else {}
 
     for method_name in ("get_symbol_scan_preview", "get_symbol_scan"):
@@ -3062,7 +3062,7 @@ async def get_ai_autonomous_agent_risk_status(request: Request):
 async def get_ai_autonomous_agent_symbol_ranking(request: Request, limit: int = 10, refresh: bool = False):
     try:
         payload = await asyncio.wait_for(
-            autonomous_trading_agent.get_symbol_scan_preview(limit=limit, force=bool(refresh)),
+            asyncio.shield(autonomous_trading_agent.get_symbol_scan_preview(limit=limit, force=bool(refresh))),
             timeout=4.0 if bool(refresh) else 2.0,
         )
         return payload

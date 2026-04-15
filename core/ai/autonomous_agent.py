@@ -42,15 +42,18 @@ from core.utils.openai_responses import (
     build_chat_completions_payload,
     build_responses_payload_variants,
     chat_completions_endpoint,
+    clear_openai_target_chat_preference,
     extract_response_text,
     openai_endpoint_targets,
     prioritize_openai_targets,
     read_aiohttp_responses_json,
+    remember_openai_target_chat_preference,
     remember_openai_target_failure,
     remember_openai_target_success,
     responses_endpoint,
     responses_api_unavailable,
     should_failover_openai_status,
+    should_prefer_openai_target_chat_completions,
     target_transport,
     unsupported_responses_parameter,
 )
@@ -1835,6 +1838,59 @@ class AutonomousTradingAgent:
                                         return _extract_json_obj(text)
                             if advance_to_next_target:
                                 continue
+                        if should_prefer_openai_target_chat_completions(
+                            targets,
+                            target_base_url,
+                            scope=_OPENAI_FAILOVER_SCOPE,
+                        ):
+                            request_chat_payload = dict(chat_payload, model=target_model)
+                            chat_url = chat_completions_endpoint(target_base_url)
+                            async with session.post(chat_url, headers=headers, json=request_chat_payload) as chat_resp:
+                                if chat_resp.status >= 400:
+                                    chat_body = (await chat_resp.text())[:300]
+                                    err = RuntimeError(f"{provider}_chat_http_{chat_resp.status}:{chat_body}")
+                                    if should_failover_openai_status(chat_resp.status):
+                                        remember_openai_target_failure(
+                                            targets,
+                                            target_base_url,
+                                            scope=_OPENAI_FAILOVER_SCOPE,
+                                        )
+                                    if idx + 1 < total_targets and should_failover_openai_status(chat_resp.status):
+                                        last_exc = err
+                                        logger.warning(
+                                            "autonomous_agent codex chat-preferred relay failed with "
+                                            f"{chat_resp.status}; trying backup {idx + 2}/{total_targets}"
+                                        )
+                                        continue
+                                    raise err
+                                data = await read_aiohttp_responses_json(chat_resp)
+                            text = extract_response_text(data)
+                            if not text:
+                                err = RuntimeError(f"{provider}_chat_empty_content")
+                                if idx + 1 < total_targets:
+                                    last_exc = err
+                                    remember_openai_target_failure(
+                                        targets,
+                                        target_base_url,
+                                        scope=_OPENAI_FAILOVER_SCOPE,
+                                    )
+                                    logger.warning(
+                                        "autonomous_agent codex chat-preferred relay returned empty content; "
+                                        f"trying backup {idx + 2}/{total_targets}"
+                                    )
+                                    continue
+                                raise err
+                            remember_openai_target_chat_preference(
+                                targets,
+                                target_base_url,
+                                scope=_OPENAI_FAILOVER_SCOPE,
+                            )
+                            remember_openai_target_success(
+                                targets,
+                                target_base_url,
+                                scope=_OPENAI_FAILOVER_SCOPE,
+                            )
+                            return _extract_json_obj(text)
                         for payload_index, payload in enumerate(payload_variants):
                             url = responses_endpoint(target_base_url)
                             request_payload = dict(payload, model=target_model)
@@ -1843,6 +1899,11 @@ class AutonomousTradingAgent:
                                 if resp.status >= 400:
                                     body = (await resp.text())[:300]
                                     if responses_api_unavailable(resp.status, body):
+                                        remember_openai_target_chat_preference(
+                                            targets,
+                                            target_base_url,
+                                            scope=_OPENAI_FAILOVER_SCOPE,
+                                        )
                                         chat_url = chat_completions_endpoint(target_base_url)
                                         logger.warning(
                                             "autonomous_agent codex relay does not support Responses API; "
@@ -1885,6 +1946,11 @@ class AutonomousTradingAgent:
                                                 advance_to_next_target = True
                                                 break
                                             raise err
+                                        remember_openai_target_chat_preference(
+                                            targets,
+                                            target_base_url,
+                                            scope=_OPENAI_FAILOVER_SCOPE,
+                                        )
                                         remember_openai_target_success(
                                             targets,
                                             target_base_url,
@@ -1953,6 +2019,11 @@ class AutonomousTradingAgent:
                                     advance_to_next_target = True
                                     break
                                 raise err
+                            clear_openai_target_chat_preference(
+                                targets,
+                                target_base_url,
+                                scope=_OPENAI_FAILOVER_SCOPE,
+                            )
                             remember_openai_target_success(
                                 targets,
                                 target_base_url,

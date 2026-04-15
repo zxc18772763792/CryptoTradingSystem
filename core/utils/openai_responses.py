@@ -17,6 +17,7 @@ _RESPONSES_TOKEN_PARAM_CANDIDATES = ("max_output_tokens", "max_completion_tokens
 _UNSUPPORTED_PARAMETER_RE = re.compile(r"unsupported parameter:\s*([A-Za-z0-9_]+)", re.IGNORECASE)
 _OPENAI_TARGET_STATE_LOCK = threading.Lock()
 _OPENAI_TARGET_PREFERRED: Dict[Tuple[str, ...], str] = {}
+_OPENAI_SCOPED_FAILOVER_STATE: Dict[str, Dict[str, Any]] = {}
 _OPENAI_FAILOVER_STATE_VERSION = 1
 _OPENAI_FAILOVER_DEFAULT_TZ = "Asia/Shanghai"
 _TARGET_TRANSPORT_OPENAI = "openai"
@@ -414,6 +415,7 @@ def _build_scope_failover_entry(
     day: str,
     mode: str = "primary",
     preferred_base_url: str = "",
+    chat_preferred_base_urls: Sequence[str] | None = None,
 ) -> Dict[str, Any]:
     normalized_base_urls = [str(item or "").rstrip("/") for item in base_urls if str(item or "").strip()]
     primary_base_url = normalized_base_urls[0] if normalized_base_urls else ""
@@ -426,11 +428,21 @@ def _build_scope_failover_entry(
         preferred = str(preferred_base_url or "").rstrip("/")
         if preferred not in backup_base_urls:
             preferred = backup_base_urls[0]
+    normalized_chat_preferred: List[str] = []
+    for item in chat_preferred_base_urls or []:
+        normalized_item = str(item or "").rstrip("/")
+        if (
+            normalized_item
+            and normalized_item in normalized_base_urls
+            and normalized_item not in normalized_chat_preferred
+        ):
+            normalized_chat_preferred.append(normalized_item)
     return {
         "day": str(day or ""),
         "mode": normalized_mode,
         "preferred_base_url": preferred,
         "base_urls": normalized_base_urls,
+        "chat_preferred_base_urls": normalized_chat_preferred,
         "updated_at": _openai_failover_now().isoformat(),
     }
 
@@ -443,37 +455,64 @@ def _load_scope_failover_entry(
     base_urls = [str(item.get("base_url") or "").rstrip("/") for item in canonical]
     today = _openai_failover_today()
     default_entry = _build_scope_failover_entry(base_urls, day=today)
-    if not _scoped_failover_enabled() or not normalized_scope or len(base_urls) <= 1:
+    if not normalized_scope or not base_urls:
         return default_entry
 
     path = _openai_failover_state_path()
     with _OPENAI_TARGET_STATE_LOCK:
-        with _openai_failover_file_lock(path):
-            state = _load_openai_failover_state(path)
-            scopes = dict(state.get("scopes") or {})
-            raw_entry = scopes.get(normalized_scope)
-            if not isinstance(raw_entry, dict):
-                raw_entry = {}
-            raw_day = str(raw_entry.get("day") or "")
-            if raw_day != today:
-                raw_mode = "primary"
-                raw_preferred = ""
-            else:
-                raw_mode = str(raw_entry.get("mode") or "primary").strip().lower()
-                raw_preferred = str(raw_entry.get("preferred_base_url") or "").rstrip("/")
-            entry = _build_scope_failover_entry(
-                base_urls,
-                day=today,
-                mode=raw_mode,
-                preferred_base_url=raw_preferred,
-            )
-            if raw_entry != entry:
-                scopes[normalized_scope] = entry
-                _save_openai_failover_state(
-                    path,
-                    {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": scopes},
+        if _scoped_failover_enabled():
+            with _openai_failover_file_lock(path):
+                state = _load_openai_failover_state(path)
+                scopes = dict(state.get("scopes") or {})
+                raw_entry = scopes.get(normalized_scope)
+                if not isinstance(raw_entry, dict):
+                    raw_entry = {}
+                raw_day = str(raw_entry.get("day") or "")
+                if raw_day != today:
+                    raw_mode = "primary"
+                    raw_preferred = ""
+                    raw_chat_preferred: Sequence[str] = ()
+                else:
+                    raw_mode = str(raw_entry.get("mode") or "primary").strip().lower()
+                    raw_preferred = str(raw_entry.get("preferred_base_url") or "").rstrip("/")
+                    raw_chat_preferred = raw_entry.get("chat_preferred_base_urls") or ()
+                entry = _build_scope_failover_entry(
+                    base_urls,
+                    day=today,
+                    mode=raw_mode,
+                    preferred_base_url=raw_preferred,
+                    chat_preferred_base_urls=raw_chat_preferred,
                 )
-            return entry
+                if raw_entry != entry:
+                    scopes[normalized_scope] = entry
+                    _save_openai_failover_state(
+                        path,
+                        {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": scopes},
+                    )
+                return entry
+
+        raw_entry = _OPENAI_SCOPED_FAILOVER_STATE.get(normalized_scope)
+        if not isinstance(raw_entry, dict):
+            raw_entry = {}
+        raw_day = str(raw_entry.get("day") or "")
+        if raw_day != today:
+            raw_mode = "primary"
+            raw_preferred = ""
+            raw_chat_preferred = ()
+        else:
+            raw_mode = str(raw_entry.get("mode") or "primary").strip().lower()
+            raw_preferred = str(raw_entry.get("preferred_base_url") or "").rstrip("/")
+            raw_chat_preferred = raw_entry.get("chat_preferred_base_urls") or ()
+        entry = _build_scope_failover_entry(
+            base_urls,
+            day=today,
+            mode=raw_mode,
+            preferred_base_url=raw_preferred,
+            chat_preferred_base_urls=raw_chat_preferred,
+        )
+        if raw_entry != entry:
+            _OPENAI_SCOPED_FAILOVER_STATE[normalized_scope] = entry
+        return entry
 
 
 def _remember_scope_failover_state(
@@ -485,7 +524,7 @@ def _remember_scope_failover_state(
 ) -> None:
     normalized_scope = _normalize_openai_failover_scope(scope)
     base_urls = [str(item.get("base_url") or "").rstrip("/") for item in canonical]
-    if not _scoped_failover_enabled() or not normalized_scope or len(base_urls) <= 1:
+    if not normalized_scope or len(base_urls) <= 1:
         return
 
     normalized_success = str(success_base_url or "").rstrip("/")
@@ -500,61 +539,241 @@ def _remember_scope_failover_state(
     backup_base_urls = base_urls[1:]
     path = _openai_failover_state_path()
     with _OPENAI_TARGET_STATE_LOCK:
-        with _openai_failover_file_lock(path):
-            state = _load_openai_failover_state(path)
-            scopes = dict(state.get("scopes") or {})
-            raw_entry = scopes.get(normalized_scope)
-            if not isinstance(raw_entry, dict):
-                raw_entry = {}
-            raw_day = str(raw_entry.get("day") or "")
-            if raw_day != today:
-                raw_mode = "primary"
-                raw_preferred = ""
+        if _scoped_failover_enabled():
+            with _openai_failover_file_lock(path):
+                state = _load_openai_failover_state(path)
+                scopes = dict(state.get("scopes") or {})
+                raw_entry = scopes.get(normalized_scope)
+                if not isinstance(raw_entry, dict):
+                    raw_entry = {}
+                raw_day = str(raw_entry.get("day") or "")
+                if raw_day != today:
+                    raw_mode = "primary"
+                    raw_preferred = ""
+                    raw_chat_preferred: Sequence[str] = ()
+                else:
+                    raw_mode = str(raw_entry.get("mode") or "primary")
+                    raw_preferred = str(raw_entry.get("preferred_base_url") or "")
+                    raw_chat_preferred = raw_entry.get("chat_preferred_base_urls") or ()
+                entry = _build_scope_failover_entry(
+                    base_urls,
+                    day=today,
+                    mode=raw_mode,
+                    preferred_base_url=raw_preferred,
+                    chat_preferred_base_urls=raw_chat_preferred,
+                )
+
+                if normalized_success:
+                    if normalized_success == primary_base_url or not backup_base_urls:
+                        entry = _build_scope_failover_entry(
+                            base_urls,
+                            day=today,
+                            mode="primary",
+                            chat_preferred_base_urls=entry.get("chat_preferred_base_urls") or (),
+                        )
+                    else:
+                        entry = _build_scope_failover_entry(
+                            base_urls,
+                            day=today,
+                            mode="backup",
+                            preferred_base_url=normalized_success,
+                            chat_preferred_base_urls=entry.get("chat_preferred_base_urls") or (),
+                        )
+                elif normalized_failure:
+                    if not backup_base_urls:
+                        entry = _build_scope_failover_entry(
+                            base_urls,
+                            day=today,
+                            mode="primary",
+                            chat_preferred_base_urls=entry.get("chat_preferred_base_urls") or (),
+                        )
+                    elif normalized_failure == primary_base_url:
+                        entry = _build_scope_failover_entry(
+                            base_urls,
+                            day=today,
+                            mode="backup",
+                            preferred_base_url=backup_base_urls[0],
+                            chat_preferred_base_urls=entry.get("chat_preferred_base_urls") or (),
+                        )
+                    else:
+                        failed_backup_idx = backup_base_urls.index(normalized_failure)
+                        next_backup = backup_base_urls[(failed_backup_idx + 1) % len(backup_base_urls)]
+                        entry = _build_scope_failover_entry(
+                            base_urls,
+                            day=today,
+                            mode="backup",
+                            preferred_base_url=next_backup,
+                            chat_preferred_base_urls=entry.get("chat_preferred_base_urls") or (),
+                        )
+
+                scopes[normalized_scope] = entry
+                _save_openai_failover_state(
+                    path,
+                    {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": scopes},
+                )
+                return
+
+        raw_entry = _OPENAI_SCOPED_FAILOVER_STATE.get(normalized_scope)
+        if not isinstance(raw_entry, dict):
+            raw_entry = {}
+        raw_day = str(raw_entry.get("day") or "")
+        if raw_day != today:
+            raw_mode = "primary"
+            raw_preferred = ""
+            raw_chat_preferred = ()
+        else:
+            raw_mode = str(raw_entry.get("mode") or "primary")
+            raw_preferred = str(raw_entry.get("preferred_base_url") or "")
+            raw_chat_preferred = raw_entry.get("chat_preferred_base_urls") or ()
+        entry = _build_scope_failover_entry(
+            base_urls,
+            day=today,
+            mode=raw_mode,
+            preferred_base_url=raw_preferred,
+            chat_preferred_base_urls=raw_chat_preferred,
+        )
+
+        if normalized_success:
+            if normalized_success == primary_base_url or not backup_base_urls:
+                entry = _build_scope_failover_entry(
+                    base_urls,
+                    day=today,
+                    mode="primary",
+                    chat_preferred_base_urls=entry.get("chat_preferred_base_urls") or (),
+                )
             else:
-                raw_mode = str(raw_entry.get("mode") or "primary")
-                raw_preferred = str(raw_entry.get("preferred_base_url") or "")
-            entry = _build_scope_failover_entry(
-                base_urls,
-                day=today,
-                mode=raw_mode,
-                preferred_base_url=raw_preferred,
-            )
+                entry = _build_scope_failover_entry(
+                    base_urls,
+                    day=today,
+                    mode="backup",
+                    preferred_base_url=normalized_success,
+                    chat_preferred_base_urls=entry.get("chat_preferred_base_urls") or (),
+                )
+        elif normalized_failure:
+            if not backup_base_urls:
+                entry = _build_scope_failover_entry(
+                    base_urls,
+                    day=today,
+                    mode="primary",
+                    chat_preferred_base_urls=entry.get("chat_preferred_base_urls") or (),
+                )
+            elif normalized_failure == primary_base_url:
+                entry = _build_scope_failover_entry(
+                    base_urls,
+                    day=today,
+                    mode="backup",
+                    preferred_base_url=backup_base_urls[0],
+                    chat_preferred_base_urls=entry.get("chat_preferred_base_urls") or (),
+                )
+            else:
+                failed_backup_idx = backup_base_urls.index(normalized_failure)
+                next_backup = backup_base_urls[(failed_backup_idx + 1) % len(backup_base_urls)]
+                entry = _build_scope_failover_entry(
+                    base_urls,
+                    day=today,
+                    mode="backup",
+                    preferred_base_url=next_backup,
+                    chat_preferred_base_urls=entry.get("chat_preferred_base_urls") or (),
+                )
 
-            if normalized_success:
-                if normalized_success == primary_base_url or not backup_base_urls:
-                    entry = _build_scope_failover_entry(base_urls, day=today, mode="primary")
-                else:
-                    entry = _build_scope_failover_entry(
-                        base_urls,
-                        day=today,
-                        mode="backup",
-                        preferred_base_url=normalized_success,
-                    )
-            elif normalized_failure:
-                if not backup_base_urls:
-                    entry = _build_scope_failover_entry(base_urls, day=today, mode="primary")
-                elif normalized_failure == primary_base_url:
-                    entry = _build_scope_failover_entry(
-                        base_urls,
-                        day=today,
-                        mode="backup",
-                        preferred_base_url=backup_base_urls[0],
-                    )
-                else:
-                    failed_backup_idx = backup_base_urls.index(normalized_failure)
-                    next_backup = backup_base_urls[(failed_backup_idx + 1) % len(backup_base_urls)]
-                    entry = _build_scope_failover_entry(
-                        base_urls,
-                        day=today,
-                        mode="backup",
-                        preferred_base_url=next_backup,
-                    )
+        _OPENAI_SCOPED_FAILOVER_STATE[normalized_scope] = entry
 
-            scopes[normalized_scope] = entry
-            _save_openai_failover_state(
-                path,
-                {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": scopes},
-            )
+
+def _remember_scope_chat_preference(
+    scope: str,
+    canonical: Sequence[Mapping[str, Any]],
+    *,
+    prefer_base_url: str = "",
+    clear_base_url: str = "",
+) -> None:
+    normalized_scope = _normalize_openai_failover_scope(scope)
+    base_urls = [str(item.get("base_url") or "").rstrip("/") for item in canonical]
+    if not normalized_scope or not base_urls:
+        return
+
+    normalized_prefer = str(prefer_base_url or "").rstrip("/")
+    normalized_clear = str(clear_base_url or "").rstrip("/")
+    if normalized_prefer and normalized_prefer not in base_urls:
+        return
+    if normalized_clear and normalized_clear not in base_urls:
+        return
+
+    today = _openai_failover_today()
+    path = _openai_failover_state_path()
+    with _OPENAI_TARGET_STATE_LOCK:
+        if _scoped_failover_enabled():
+            with _openai_failover_file_lock(path):
+                state = _load_openai_failover_state(path)
+                scopes = dict(state.get("scopes") or {})
+                raw_entry = scopes.get(normalized_scope)
+                if not isinstance(raw_entry, dict):
+                    raw_entry = {}
+                raw_day = str(raw_entry.get("day") or "")
+                if raw_day != today:
+                    raw_mode = "primary"
+                    raw_preferred = ""
+                    raw_chat_preferred: Sequence[str] = ()
+                else:
+                    raw_mode = str(raw_entry.get("mode") or "primary")
+                    raw_preferred = str(raw_entry.get("preferred_base_url") or "")
+                    raw_chat_preferred = raw_entry.get("chat_preferred_base_urls") or ()
+                entry = _build_scope_failover_entry(
+                    base_urls,
+                    day=today,
+                    mode=raw_mode,
+                    preferred_base_url=raw_preferred,
+                    chat_preferred_base_urls=raw_chat_preferred,
+                )
+                chat_preferred = list(entry.get("chat_preferred_base_urls") or [])
+                if normalized_clear:
+                    chat_preferred = [item for item in chat_preferred if item != normalized_clear]
+                if normalized_prefer and normalized_prefer not in chat_preferred:
+                    chat_preferred.append(normalized_prefer)
+                entry = _build_scope_failover_entry(
+                    base_urls,
+                    day=today,
+                    mode=str(entry.get("mode") or "primary"),
+                    preferred_base_url=str(entry.get("preferred_base_url") or ""),
+                    chat_preferred_base_urls=chat_preferred,
+                )
+                scopes[normalized_scope] = entry
+                _save_openai_failover_state(
+                    path,
+                    {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": scopes},
+                )
+                return
+
+        raw_entry = _OPENAI_SCOPED_FAILOVER_STATE.get(normalized_scope)
+        if not isinstance(raw_entry, dict):
+            raw_entry = {}
+        raw_day = str(raw_entry.get("day") or "")
+        if raw_day != today:
+            raw_mode = "primary"
+            raw_preferred = ""
+            raw_chat_preferred = ()
+        else:
+            raw_mode = str(raw_entry.get("mode") or "primary")
+            raw_preferred = str(raw_entry.get("preferred_base_url") or "")
+            raw_chat_preferred = raw_entry.get("chat_preferred_base_urls") or ()
+        entry = _build_scope_failover_entry(
+            base_urls,
+            day=today,
+            mode=raw_mode,
+            preferred_base_url=raw_preferred,
+            chat_preferred_base_urls=raw_chat_preferred,
+        )
+        chat_preferred = list(entry.get("chat_preferred_base_urls") or [])
+        if normalized_clear:
+            chat_preferred = [item for item in chat_preferred if item != normalized_clear]
+        if normalized_prefer and normalized_prefer not in chat_preferred:
+            chat_preferred.append(normalized_prefer)
+        _OPENAI_SCOPED_FAILOVER_STATE[normalized_scope] = _build_scope_failover_entry(
+            base_urls,
+            day=today,
+            mode=str(entry.get("mode") or "primary"),
+            preferred_base_url=str(entry.get("preferred_base_url") or ""),
+            chat_preferred_base_urls=chat_preferred,
+        )
 
 
 def _rotate_targets(
@@ -583,7 +802,7 @@ def prioritize_openai_targets(
     if len(canonical) <= 1:
         return canonical
     normalized_scope = _normalize_openai_failover_scope(scope)
-    if normalized_scope and _scoped_failover_enabled():
+    if normalized_scope:
         entry = _load_scope_failover_entry(normalized_scope, canonical)
         if entry.get("mode") == "backup":
             backup_targets = canonical[1:]
@@ -617,7 +836,7 @@ def remember_openai_target_success(
 ) -> None:
     canonical = _canonical_openai_targets(targets)
     normalized_scope = _normalize_openai_failover_scope(scope)
-    if normalized_scope and len(canonical) > 1 and _scoped_failover_enabled():
+    if normalized_scope and len(canonical) > 1:
         _remember_scope_failover_state(
             normalized_scope,
             canonical,
@@ -650,7 +869,7 @@ def remember_openai_target_failure(
 ) -> None:
     canonical = _canonical_openai_targets(targets)
     normalized_scope = _normalize_openai_failover_scope(scope)
-    if normalized_scope and len(canonical) > 1 and _scoped_failover_enabled():
+    if normalized_scope and len(canonical) > 1:
         _remember_scope_failover_state(
             normalized_scope,
             canonical,
@@ -679,12 +898,69 @@ def remember_openai_target_failure(
         _OPENAI_TARGET_PREFERRED[key] = next_base_url
 
 
+def should_prefer_openai_target_chat_completions(
+    targets: Sequence[Mapping[str, Any]] | None,
+    base_url: Any,
+    *,
+    scope: Any = None,
+) -> bool:
+    canonical = _canonical_openai_targets(targets)
+    normalized_scope = _normalize_openai_failover_scope(scope)
+    if not normalized_scope or not canonical:
+        return False
+
+    normalized = str(base_url or "").strip().rstrip("/")
+    if not normalized:
+        return False
+
+    entry = _load_scope_failover_entry(normalized_scope, canonical)
+    return normalized in set(entry.get("chat_preferred_base_urls") or ())
+
+
+def remember_openai_target_chat_preference(
+    targets: Sequence[Mapping[str, Any]] | None,
+    base_url: Any,
+    *,
+    scope: Any = None,
+) -> None:
+    canonical = _canonical_openai_targets(targets)
+    normalized_scope = _normalize_openai_failover_scope(scope)
+    if not normalized_scope or not canonical:
+        return
+    _remember_scope_chat_preference(
+        normalized_scope,
+        canonical,
+        prefer_base_url=str(base_url or "").strip().rstrip("/"),
+    )
+
+
+def clear_openai_target_chat_preference(
+    targets: Sequence[Mapping[str, Any]] | None,
+    base_url: Any,
+    *,
+    scope: Any = None,
+) -> None:
+    canonical = _canonical_openai_targets(targets)
+    normalized_scope = _normalize_openai_failover_scope(scope)
+    if not normalized_scope or not canonical:
+        return
+    _remember_scope_chat_preference(
+        normalized_scope,
+        canonical,
+        clear_base_url=str(base_url or "").strip().rstrip("/"),
+    )
+
+
 def reset_openai_target_preferences(scope: Any = None) -> None:
     """Clear relay preference cache used by cross-request failover mode."""
+    normalized_scope = _normalize_openai_failover_scope(scope)
     with _OPENAI_TARGET_STATE_LOCK:
         _OPENAI_TARGET_PREFERRED.clear()
+        if normalized_scope:
+            _OPENAI_SCOPED_FAILOVER_STATE.pop(normalized_scope, None)
+        else:
+            _OPENAI_SCOPED_FAILOVER_STATE.clear()
     path = _openai_failover_state_path()
-    normalized_scope = _normalize_openai_failover_scope(scope)
     try:
         with _OPENAI_TARGET_STATE_LOCK:
             with _openai_failover_file_lock(path):

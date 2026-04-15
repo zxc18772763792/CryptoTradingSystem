@@ -108,6 +108,12 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "function updateExitRunningQueueButton(" in ai_js
     assert "function proposalResearchThesis(" in ai_js
     assert "function normalizeProposalPresentation(" in ai_js
+    assert "refreshWorkbenchPendingRequest" in ai_js
+    assert "function mergeWorkbenchRefreshRequest(" in ai_js
+    assert "function takeWorkbenchRefreshRequest(" in ai_js
+    assert "while (state.refreshWorkbenchPendingRequest)" in ai_js
+    assert "arguments.length >= 1" in ai_js
+    assert "arguments.length >= 2" in ai_js
     assert "parseAllocationPercentInput" in ai_js
     assert "completed_without_compatible_runtime_target" in ai_js
     assert "manual_action_required" in ai_js

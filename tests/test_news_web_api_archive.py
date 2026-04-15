@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from unittest.mock import AsyncMock
 
 from web.api import news as news_api
 
@@ -119,6 +120,75 @@ def test_summary_uses_exact_window_counts(monkeypatch):
     assert payload["events_count"] == 9
     assert payload["latest_raw_at"] == "2026-04-04T04:00:00+00:00"
     assert payload["latest_event_at"] == "2026-04-04T03:00:00+00:00"
+
+
+def test_latest_triggers_auto_summary_repair_for_fallback_feed(monkeypatch):
+    async def fake_build_latest_feed(cfg=None, symbol=None, hours=24, limit=60, summarize=False):
+        del cfg, symbol, hours, limit, summarize
+        return {
+            "count": 3,
+            "symbol": None,
+            "hours": 24,
+            "since": "2026-04-04T00:00:00+00:00",
+            "items": [
+                {"id": "raw-1", "title": "row-1", "summary_title": "row-1", "summary_source": "rule_fallback"},
+                {"id": "raw-2", "title": "row-2", "summary_title": "row-2", "summary_source": "api_timeout_fallback"},
+                {"id": "raw-3", "title": "row-3", "summary_title": "row-3", "summary_source": "rule_fallback"},
+            ],
+            "feed_stats": {"total": 3, "structured": 0, "unstructured": 3, "unstructured_breakdown": {}, "sentiment": {"positive": 0, "neutral": 3, "negative": 0}},
+            "source_stats": {"by_provider": {}, "by_source": {}},
+        }
+
+    auto_pull_mock = AsyncMock(return_value=False)
+    repair_mock = AsyncMock(return_value={"queued": True})
+
+    news_api._NEWS_RESPONSE_CACHE.setdefault("latest", {}).clear()
+    monkeypatch.setattr(news_api, "build_latest_feed", fake_build_latest_feed)
+    monkeypatch.setattr(news_api, "_auto_pull_if_stale", auto_pull_mock)
+    monkeypatch.setattr(news_api, "_maybe_schedule_background_summary_repair", repair_mock)
+
+    with TestClient(_build_app()) as client:
+        response = client.get("/api/news/latest?hours=24&limit=10&summarize=false")
+
+    assert response.status_code == 200
+    assert repair_mock.await_count == 1
+    assert repair_mock.await_args.kwargs["trigger"] == "latest_fast"
+    assert len(repair_mock.await_args.kwargs["items"]) == 3
+
+
+def test_latest_cached_payload_still_triggers_auto_summary_repair(monkeypatch):
+    async def fail_build_latest_feed(*args, **kwargs):
+        raise AssertionError("cached latest payload should avoid rebuilding feed")
+
+    repair_mock = AsyncMock(return_value={"queued": True})
+    cache_key = news_api._cache_key(None, 24, 10, "fast")
+    news_api._NEWS_RESPONSE_CACHE.setdefault("latest", {}).clear()
+    news_api._cache_set(
+        "latest",
+        cache_key,
+        {
+            "count": 2,
+            "symbol": None,
+            "hours": 24,
+            "since": "2026-04-04T00:00:00+00:00",
+            "items": [
+                {"id": "raw-1", "title": "row-1", "summary_title": "row-1", "summary_source": "rule_fallback"},
+                {"id": "raw-2", "title": "row-2", "summary_title": "row-2", "summary_source": "rule_fallback"},
+            ],
+            "feed_stats": {"total": 2, "structured": 0, "unstructured": 2, "unstructured_breakdown": {}, "sentiment": {"positive": 0, "neutral": 2, "negative": 0}},
+            "source_stats": {"by_provider": {}, "by_source": {}},
+        },
+    )
+    monkeypatch.setattr(news_api, "build_latest_feed", fail_build_latest_feed)
+    monkeypatch.setattr(news_api, "_maybe_schedule_background_summary_repair", repair_mock)
+
+    with TestClient(_build_app()) as client:
+        response = client.get("/api/news/latest?hours=24&limit=10&summarize=false")
+
+    assert response.status_code == 200
+    assert response.json()["_cache"]["hit"] is True
+    assert repair_mock.await_count == 1
+    assert repair_mock.await_args.kwargs["trigger"] == "latest_cache"
 
 
 def test_ingest_backfill_history_updates_last_pull(monkeypatch):

@@ -225,6 +225,84 @@ def test_scoped_openai_failover_sticks_to_backup_until_next_day(monkeypatch, tmp
     ]
 
 
+def test_scoped_openai_failover_uses_in_memory_state_without_env(monkeypatch):
+    monkeypatch.delenv("OPENAI_FAILOVER_STATE_PATH", raising=False)
+    monkeypatch.setattr(
+        openai_responses,
+        "_openai_failover_now",
+        lambda: datetime(2026, 4, 6, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    openai_responses.reset_openai_target_preferences()
+
+    targets = openai_endpoint_targets(
+        primary_base_url="https://primary.test/v1",
+        backup_base_urls="https://backup.test/v1",
+        primary_api_key="primary-key",
+        backup_api_key="backup-key",
+    )
+
+    openai_responses.remember_openai_target_failure(targets, "https://primary.test/v1", scope="news")
+
+    assert [item["base_url"] for item in openai_responses.prioritize_openai_targets(targets, scope="news")] == [
+        "https://backup.test/v1",
+    ]
+
+
+def test_scoped_openai_chat_preference_resets_next_day(monkeypatch):
+    monkeypatch.delenv("OPENAI_FAILOVER_STATE_PATH", raising=False)
+    day_one = datetime(2026, 4, 6, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    day_two = datetime(2026, 4, 7, 0, 1, tzinfo=ZoneInfo("Asia/Shanghai"))
+    openai_responses.reset_openai_target_preferences()
+
+    targets = openai_endpoint_targets(
+        primary_base_url="https://primary.test/v1",
+        backup_base_urls="https://backup.test/v1",
+        primary_api_key="primary-key",
+        backup_api_key="backup-key",
+    )
+
+    monkeypatch.setattr(openai_responses, "_openai_failover_now", lambda: day_one)
+    assert openai_responses.should_prefer_openai_target_chat_completions(
+        targets,
+        "https://primary.test/v1",
+        scope="news",
+    ) is False
+
+    openai_responses.remember_openai_target_chat_preference(
+        targets,
+        "https://primary.test/v1",
+        scope="news",
+    )
+    assert openai_responses.should_prefer_openai_target_chat_completions(
+        targets,
+        "https://primary.test/v1",
+        scope="news",
+    ) is True
+
+    openai_responses.clear_openai_target_chat_preference(
+        targets,
+        "https://primary.test/v1",
+        scope="news",
+    )
+    assert openai_responses.should_prefer_openai_target_chat_completions(
+        targets,
+        "https://primary.test/v1",
+        scope="news",
+    ) is False
+
+    openai_responses.remember_openai_target_chat_preference(
+        targets,
+        "https://primary.test/v1",
+        scope="news",
+    )
+    monkeypatch.setattr(openai_responses, "_openai_failover_now", lambda: day_two)
+    assert openai_responses.should_prefer_openai_target_chat_completions(
+        targets,
+        "https://primary.test/v1",
+        scope="news",
+    ) is False
+
+
 def test_scoped_openai_failover_is_isolated_per_scope(monkeypatch, tmp_path):
     state_path = tmp_path / "openai_failover_state.json"
     monkeypatch.setenv("OPENAI_FAILOVER_STATE_PATH", str(state_path))

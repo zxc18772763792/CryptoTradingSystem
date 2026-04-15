@@ -65,6 +65,9 @@ _MANUAL_PULL_SEQ = 0
 _MANUAL_LLM_SEQ = 0
 _FAILED_REQUEUE_LOCK = asyncio.Lock()
 _FAILED_REQUEUE_LAST_AT: Optional[datetime] = None
+_SUMMARY_REPAIR_AUTO_LOCK = asyncio.Lock()
+_SUMMARY_REPAIR_AUTO_LAST_AT: Optional[datetime] = None
+_SUMMARY_REPAIR_AUTO_TASK: Optional[asyncio.Task] = None
 _NEWS_ENGINE_START_LOCK = asyncio.Lock()
 _NEWS_RESPONSE_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {"latest": {}, "summary": {}, "brief": {}, "health": {}}
 _NEWS_HEALTH_REFRESH_TASK: Optional[asyncio.Task] = None
@@ -1340,6 +1343,137 @@ def _needs_llm_summary(item: Dict[str, Any]) -> bool:
     if summary_title and not _is_fallback_summary_source(source):
         return False
     return bool(_clean_display_text(item.get("title")))
+
+
+def _summary_repair_pressure(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    total = 0
+    fallback_count = 0
+    llm_count = 0
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        total += 1
+        source = item.get("summary_source")
+        if _is_llm_summary_source(source):
+            llm_count += 1
+            continue
+        if _is_fallback_summary_source(source):
+            fallback_count += 1
+
+    min_items = max(1, min(_env_int("NEWS_SUMMARY_REPAIR_AUTO_MIN_ITEMS", 3), 40))
+    min_ratio_pct = max(10, min(_env_int("NEWS_SUMMARY_REPAIR_AUTO_MIN_RATIO_PCT", 40), 100))
+    all_visible_fallback = total > 0 and fallback_count == total and llm_count <= 0
+    ratio_met = total > 0 and (fallback_count * 100) >= (total * min_ratio_pct)
+    should_schedule = fallback_count > 0 and (all_visible_fallback or (fallback_count >= min_items and ratio_met))
+    if fallback_count <= 0:
+        reason = "no_fallback"
+    elif all_visible_fallback:
+        reason = "all_visible_fallback"
+    elif should_schedule:
+        reason = "threshold_met"
+    else:
+        reason = "threshold_not_met"
+
+    return {
+        "total": total,
+        "fallback_count": fallback_count,
+        "llm_count": llm_count,
+        "min_items": min_items,
+        "min_ratio_pct": min_ratio_pct,
+        "should_schedule": should_schedule,
+        "reason": reason,
+    }
+
+
+async def _run_auto_summary_repair(
+    cfg: Dict[str, Any],
+    *,
+    hours: int,
+    trigger: str,
+    pressure: Dict[str, Any],
+) -> None:
+    global _SUMMARY_REPAIR_AUTO_TASK
+
+    try:
+        result = await repair_recent_news_summaries(cfg, hours=hours)
+        updated_total = int(result.get("updated_raw_count") or 0) + int(result.get("updated_event_count") or 0)
+        if updated_total > 0:
+            _invalidate_news_caches(clear_feed=True)
+        logger.info(
+            "auto summary repair finished trigger={} updated_total={} fallback_count={}/{} skipped_non_llm={}",
+            trigger,
+            updated_total,
+            pressure.get("fallback_count") or 0,
+            pressure.get("total") or 0,
+            result.get("skipped_non_llm") or 0,
+        )
+    except Exception as exc:
+        logger.warning(f"auto summary repair failed trigger={trigger}: {type(exc).__name__}: {exc}")
+    finally:
+        _SUMMARY_REPAIR_AUTO_TASK = None
+
+
+async def _maybe_schedule_background_summary_repair(
+    cfg: Dict[str, Any],
+    *,
+    items: List[Dict[str, Any]],
+    hours: int,
+    trigger: str,
+) -> Dict[str, Any]:
+    global _SUMMARY_REPAIR_AUTO_LAST_AT, _SUMMARY_REPAIR_AUTO_TASK
+
+    pressure = _summary_repair_pressure(items)
+    if not pressure.get("should_schedule"):
+        return {
+            **pressure,
+            "queued": False,
+        }
+    if not _news_llm_enabled():
+        return {
+            **pressure,
+            "queued": False,
+            "reason": "llm_disabled",
+        }
+
+    cooldown_sec = max(15, min(_env_int("NEWS_SUMMARY_REPAIR_AUTO_COOLDOWN_SEC", 60), 3600))
+    repair_hours = max(6, min(int(hours or 24), 24 * 90))
+    async with _SUMMARY_REPAIR_AUTO_LOCK:
+        active_task = _SUMMARY_REPAIR_AUTO_TASK
+        if active_task and active_task.done():
+            _SUMMARY_REPAIR_AUTO_TASK = None
+            active_task = None
+        if active_task:
+            return {
+                **pressure,
+                "queued": False,
+                "reason": "running",
+                "cooldown_sec": cooldown_sec,
+            }
+
+        now = _now_utc()
+        if _SUMMARY_REPAIR_AUTO_LAST_AT and (now - _SUMMARY_REPAIR_AUTO_LAST_AT).total_seconds() < cooldown_sec:
+            return {
+                **pressure,
+                "queued": False,
+                "reason": "cooldown",
+                "cooldown_sec": cooldown_sec,
+            }
+
+        _SUMMARY_REPAIR_AUTO_LAST_AT = now
+        _SUMMARY_REPAIR_AUTO_TASK = asyncio.create_task(
+            _run_auto_summary_repair(
+                dict(cfg or {}),
+                hours=repair_hours,
+                trigger=trigger,
+                pressure=pressure,
+            )
+        )
+        return {
+            **pressure,
+            "queued": True,
+            "cooldown_sec": cooldown_sec,
+            "repair_hours": repair_hours,
+        }
 
 
 async def repair_recent_news_summaries(
@@ -2914,6 +3048,13 @@ async def latest(
     cached = _cache_get("latest", cache_key, ttl_sec)
     if cached:
         cached["auto_pull_triggered"] = False
+        with contextlib.suppress(Exception):
+            await _maybe_schedule_background_summary_repair(
+                cfg,
+                items=list(cached.get("items") or []),
+                hours=hours,
+                trigger="latest_cache",
+            )
         return cached
 
     try:
@@ -2930,6 +3071,13 @@ async def latest(
             )
         auto_pull = await _auto_pull_if_stale(cfg=cfg, latest_items=feed.get("items") or [], hours=hours)
         feed["auto_pull_triggered"] = bool(auto_pull)
+        with contextlib.suppress(Exception):
+            await _maybe_schedule_background_summary_repair(
+                cfg,
+                items=list(feed.get("items") or []),
+                hours=hours,
+                trigger="latest_summarized" if summarize else "latest_fast",
+            )
         return _cache_set("latest", cache_key, feed)
     except Exception as exc:
         logger.warning(f"news latest failed summarize={summarize} symbol={symbol_norm or '-'}: {exc}")
@@ -2948,6 +3096,13 @@ async def latest(
             feed = await build_latest_feed(cfg=cfg, symbol=symbol, hours=hours, limit=limit, summarize=False)
             feed["auto_pull_triggered"] = False
             feed["fallback_reason"] = f"summarize fallback: {exc}"
+            with contextlib.suppress(Exception):
+                await _maybe_schedule_background_summary_repair(
+                    cfg,
+                    items=list(feed.get("items") or []),
+                    hours=hours,
+                    trigger="latest_exception_fallback",
+                )
             return _cache_set("latest", fast_key, feed)
         return {
             "count": 0,
@@ -3252,6 +3407,13 @@ async def summary(
         if failures:
             payload["degraded"] = True
             payload["failures"] = failures
+        with contextlib.suppress(Exception):
+            await _maybe_schedule_background_summary_repair(
+                cfg,
+                items=list(feed_preview.get("items") or []),
+                hours=hours,
+                trigger="summary_preview",
+            )
         return _cache_set("summary", cache_key, payload)
     except Exception as exc:
         logger.warning(f"news summary failed symbol={symbol_norm or '-'}: {exc}")

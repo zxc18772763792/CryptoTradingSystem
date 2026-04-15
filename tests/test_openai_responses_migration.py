@@ -6,6 +6,8 @@ from datetime import datetime
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from config.settings import settings
 
 
@@ -101,6 +103,18 @@ class _SyncResponse:
 class _SyncSSELikeResponse(_SyncResponse):
     def json(self):
         raise ValueError("not json")
+
+
+@pytest.fixture(autouse=True)
+def _reset_openai_target_state():
+    import core.utils.openai_responses as response_helpers
+    import core.news.eventizer.llm_glm5 as news_sync_module
+
+    response_helpers.reset_openai_target_preferences()
+    news_sync_module._SUMMARY_CACHE.clear()
+    yield
+    response_helpers.reset_openai_target_preferences()
+    news_sync_module._SUMMARY_CACHE.clear()
 
 
 def test_openai_responses_parser_supports_event_stream_payload():
@@ -962,6 +976,103 @@ def test_async_glm_client_openai_sticks_to_backup_until_next_day(monkeypatch, tm
     ]
 
 
+def test_autonomous_agent_codex_skips_responses_after_chat_fallback(monkeypatch, tmp_path):
+    import core.ai.autonomous_agent as module
+    import core.utils.openai_responses as response_helpers
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.delenv("OPENAI_FAILOVER_STATE_PATH", raising=False)
+    response_helpers.reset_openai_target_preferences(scope="ai_autonomous_agent")
+
+    session_plans = [
+        [
+            _FakeResponse({"error": {"message": "responses not found"}}, status=404),
+            _FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"action":"hold","confidence":0.6,"strength":0.2,'
+                                    '"leverage":1,"stop_loss_pct":0.01,"take_profit_pct":0.02,'
+                                    '"reason":"chat_fallback"}'
+                                ),
+                                "role": "assistant",
+                            }
+                        }
+                    ]
+                },
+                status=200,
+            ),
+        ],
+        [
+            _FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"action":"hold","confidence":0.61,"strength":0.22,'
+                                    '"leverage":1,"stop_loss_pct":0.01,"take_profit_pct":0.02,'
+                                    '"reason":"chat_sticky"}'
+                                ),
+                                "role": "assistant",
+                            }
+                        }
+                    ]
+                },
+                status=200,
+            ),
+        ],
+    ]
+    captures: list[dict] = []
+
+    def _session_factory(**kwargs):
+        capture = {}
+        captures.append(capture)
+        responses = session_plans[len(captures) - 1]
+        return _FakeSequenceSession(capture=capture, responses=list(responses), **kwargs)
+
+    monkeypatch.setattr(module.aiohttp, "ClientSession", _session_factory)
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent")
+
+    first = asyncio.run(
+        agent._call_provider(
+            provider="codex",
+            model="gpt-5.4",
+            timeout_ms=8000,
+            max_tokens=256,
+            temperature=0.1,
+            system_prompt="sys",
+            user_prompt="usr",
+        )
+    )
+    second = asyncio.run(
+        agent._call_provider(
+            provider="codex",
+            model="gpt-5.4",
+            timeout_ms=8000,
+            max_tokens=256,
+            temperature=0.1,
+            system_prompt="sys",
+            user_prompt="usr",
+        )
+    )
+
+    assert first["reason"] == "chat_fallback"
+    assert second["reason"] == "chat_sticky"
+    assert captures[0]["urls"] == [
+        "https://example.test/v1/responses",
+        "https://example.test/v1/chat/completions",
+    ]
+    assert captures[1]["urls"] == [
+        "https://example.test/v1/chat/completions",
+    ]
+
+
 def test_news_worker_marks_rules_fallback_with_saved_events_as_done(monkeypatch):
     import core.news.service.worker as module
 
@@ -1760,6 +1871,49 @@ def test_build_latest_feed_summarize_persists_event_translation(monkeypatch):
             "summary_source": "openai_responses",
         }
     ]
+
+
+def test_auto_summary_repair_invalidates_feed_cache_after_success(monkeypatch):
+    import web.api.news as module
+
+    repair_mock = AsyncMock(
+        return_value={
+            "updated_raw_count": 2,
+            "updated_event_count": 1,
+            "skipped_non_llm": 0,
+            "errors": [],
+        }
+    )
+    invalidate_calls = []
+
+    monkeypatch.setattr(module, "_SUMMARY_REPAIR_AUTO_LAST_AT", None)
+    monkeypatch.setattr(module, "_SUMMARY_REPAIR_AUTO_TASK", None)
+    monkeypatch.setattr(module, "_news_llm_enabled", lambda: True)
+    monkeypatch.setattr(module, "repair_recent_news_summaries", repair_mock)
+    monkeypatch.setattr(module, "_invalidate_news_caches", lambda clear_feed=False: invalidate_calls.append(clear_feed))
+
+    async def _run():
+        result = await module._maybe_schedule_background_summary_repair(
+            {},
+            items=[
+                {"summary_source": "rule_fallback"},
+                {"summary_source": "api_timeout_fallback"},
+                {"summary_source": "rule_fallback"},
+            ],
+            hours=24,
+            trigger="test_case",
+        )
+        task = module._SUMMARY_REPAIR_AUTO_TASK
+        assert task is not None
+        await task
+        return result
+
+    result = asyncio.run(_run())
+
+    assert result["queued"] is True
+    assert repair_mock.await_count == 1
+    assert invalidate_calls == [True]
+    assert module._SUMMARY_REPAIR_AUTO_TASK is None
 
 
 def test_news_auto_requeue_skips_when_queue_busy(monkeypatch):

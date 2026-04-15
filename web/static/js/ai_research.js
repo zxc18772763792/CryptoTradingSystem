@@ -91,6 +91,7 @@
     liveDecisionActivityLastGood: null,
     liveDecisionActivityRetryTimer: null,
     refreshWorkbenchInFlight: null,
+    refreshWorkbenchPendingRequest: null,
     liveSignalsInFlight: null,
     signalTimer: null,
     refreshTimer: null,
@@ -206,6 +207,59 @@
     });
     state[slot] = task;
     return task;
+  }
+
+  function _normalizeWorkbenchRefreshValue(value) {
+    return String(value || '').trim();
+  }
+
+  function mergeWorkbenchRefreshRequest(
+    current,
+    selectProposalId,
+    selectCandidateId,
+    hasProposalArg = false,
+    hasCandidateArg = false,
+  ) {
+    const next = current && typeof current === 'object'
+      ? {
+          hasProposalArg: !!current.hasProposalArg,
+          hasCandidateArg: !!current.hasCandidateArg,
+          proposalId: _normalizeWorkbenchRefreshValue(current.proposalId),
+          candidateId: _normalizeWorkbenchRefreshValue(current.candidateId),
+        }
+      : {
+          hasProposalArg: false,
+          hasCandidateArg: false,
+          proposalId: '',
+          candidateId: '',
+        };
+    if (hasProposalArg) {
+      next.hasProposalArg = true;
+      next.proposalId = _normalizeWorkbenchRefreshValue(selectProposalId);
+    }
+    if (hasCandidateArg) {
+      next.hasCandidateArg = true;
+      next.candidateId = _normalizeWorkbenchRefreshValue(selectCandidateId);
+    }
+    return next;
+  }
+
+  function takeWorkbenchRefreshRequest() {
+    const next = state.refreshWorkbenchPendingRequest && typeof state.refreshWorkbenchPendingRequest === 'object'
+      ? {
+          hasProposalArg: !!state.refreshWorkbenchPendingRequest.hasProposalArg,
+          hasCandidateArg: !!state.refreshWorkbenchPendingRequest.hasCandidateArg,
+          proposalId: _normalizeWorkbenchRefreshValue(state.refreshWorkbenchPendingRequest.proposalId),
+          candidateId: _normalizeWorkbenchRefreshValue(state.refreshWorkbenchPendingRequest.candidateId),
+        }
+      : {
+          hasProposalArg: false,
+          hasCandidateArg: false,
+          proposalId: '',
+          candidateId: '',
+        };
+    state.refreshWorkbenchPendingRequest = null;
+    return next;
   }
 
   /* ── 工具函数 ── */
@@ -4453,37 +4507,53 @@
   }
 
   async function refreshWorkbench(selectProposalId = '', selectCandidateId = '') {
-    return runStateSingleFlight('refreshWorkbenchInFlight', async () => {
-      const ancillaryTasks = [
-        loadRuntimeConfig().catch((err) => {
-          console.debug('loadRuntimeConfig(refreshWorkbench) failed:', err);
-          return null;
-        }),
-        loadPendingApprovals().catch((err) => {
-          console.debug('loadPendingApprovals(refreshWorkbench) failed:', err);
-          return null;
-        }),
-        loadAgentStatus().catch(() => null),
-        loadLiveDecisionActivitySummary().catch(() => null),
-      ];
+    state.refreshWorkbenchPendingRequest = mergeWorkbenchRefreshRequest(
+      state.refreshWorkbenchPendingRequest,
+      selectProposalId,
+      selectCandidateId,
+      arguments.length >= 1,
+      arguments.length >= 2,
+    );
+    if (state.refreshWorkbenchInFlight) return state.refreshWorkbenchInFlight;
+    state.refreshWorkbenchInFlight = (async () => {
+      while (state.refreshWorkbenchPendingRequest) {
+        const request = takeWorkbenchRefreshRequest();
+        const nextProposalId = request.hasProposalArg ? request.proposalId : '';
+        const nextCandidateId = request.hasCandidateArg ? request.candidateId : '';
+        const ancillaryTasks = [
+          loadRuntimeConfig().catch((err) => {
+            console.debug('loadRuntimeConfig(refreshWorkbench) failed:', err);
+            return null;
+          }),
+          loadPendingApprovals().catch((err) => {
+            console.debug('loadPendingApprovals(refreshWorkbench) failed:', err);
+            return null;
+          }),
+          loadAgentStatus().catch(() => null),
+          loadLiveDecisionActivitySummary().catch(() => null),
+        ];
 
-      await Promise.allSettled([
-        loadProposals(selectProposalId),
-        loadCandidates(selectCandidateId),
-      ]);
-      mergeCandidateFallbackProposals();
-      const autoSelectedCandidateId = applyWorkbenchSelection(selectProposalId);
-      if (autoSelectedCandidateId) {
-        await viewCandidate(autoSelectedCandidateId, { keepContent: true }).catch(() => {
-          renderCandidateDetailPlaceholder(state.selectedProposalId);
-        });
+        await Promise.allSettled([
+          loadProposals(nextProposalId),
+          loadCandidates(nextCandidateId),
+        ]);
+        mergeCandidateFallbackProposals();
+        const autoSelectedCandidateId = applyWorkbenchSelection(nextProposalId);
+        if (autoSelectedCandidateId) {
+          await viewCandidate(autoSelectedCandidateId, { keepContent: true }).catch(() => {
+            renderCandidateDetailPlaceholder(state.selectedProposalId);
+          });
+        }
+        normalizeDomText(document.getElementById('ai-research'));
+        emitWorkbenchState('refresh-workbench');
+        await Promise.allSettled(ancillaryTasks);
+        normalizeDomText(document.getElementById('ai-research'));
+        emitWorkbenchState('refresh-workbench-meta');
       }
-      normalizeDomText(document.getElementById('ai-research'));
-      emitWorkbenchState('refresh-workbench');
-      await Promise.allSettled(ancillaryTasks);
-      normalizeDomText(document.getElementById('ai-research'));
-      emitWorkbenchState('refresh-workbench-meta');
+    })().finally(() => {
+      state.refreshWorkbenchInFlight = null;
     });
+    return state.refreshWorkbenchInFlight;
   }
 
   function hasActionLock() {
