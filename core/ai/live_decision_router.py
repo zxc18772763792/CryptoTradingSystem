@@ -13,6 +13,11 @@ import aiohttp
 from loguru import logger
 
 from config.settings import settings
+from core.ai.model_feedback_errors import describe_model_feedback_issue
+from core.ai.provider_runtime_policy import (
+    provider_runtime_capability_catalog,
+    resolve_provider_for_runtime_capability,
+)
 from core.ai.runtime_eligibility import resolve_runtime_eligibility_context
 from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.utils.openai_responses import (
@@ -129,6 +134,9 @@ class LiveDecisionOutcome:
     confidence: float
     latency_ms: int
     error: Optional[str] = None
+    error_kind: Optional[str] = None
+    error_code: Optional[str] = None
+    error_label: Optional[str] = None
     research_context: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -144,6 +152,9 @@ class LiveDecisionOutcome:
             "confidence": float(self.confidence),
             "latency_ms": int(self.latency_ms),
             "error": self.error,
+            "error_kind": self.error_kind,
+            "error_code": self.error_code,
+            "error_label": self.error_label,
             "research_context": self.research_context or {},
         }
 
@@ -237,6 +248,7 @@ class LiveAIDecisionRouter:
                 "default_model": self._provider_model(item),
                 "base_url": (base_urls[0] if base_urls else self._provider_base_url(item)),
             }
+            providers[item].update(provider_runtime_capability_catalog(item))
             if item == "codex" and len(base_urls) > 1:
                 providers[item]["backup_base_urls"] = base_urls[1:]
                 providers[item]["failover_enabled"] = True
@@ -594,6 +606,7 @@ class LiveAIDecisionRouter:
         mode = str(cfg.get("mode") or "shadow")
         provider = str(cfg.get("provider") or "codex")
         model = str(cfg.get("model") or "")
+        providers = dict(cfg.get("providers") or {})
         timeout_ms = int(cfg.get("timeout_ms") or 6000)
         max_tokens = int(cfg.get("max_tokens") or 220)
         temperature = float(cfg.get("temperature") or 0.0)
@@ -614,6 +627,60 @@ class LiveAIDecisionRouter:
                 latency_ms=0,
                 research_context={},
             ).to_dict()
+
+        if effective_mode == "live":
+            provider_resolution = resolve_provider_for_runtime_capability(
+                requested_provider=provider,
+                providers=providers,
+                capability="live_decision_review",
+            )
+            if provider_resolution.get("fallback") and str(provider_resolution.get("provider") or "").strip():
+                provider = str(provider_resolution.get("provider") or provider)
+                model = self._provider_model(provider)
+            elif provider_resolution.get("restricted"):
+                policy = dict(provider_resolution.get("policy") or {})
+                err = (
+                    f"{provider}_live_trading_not_permitted:"
+                    f"{policy.get('reason') or 'live trading is not permitted'}"
+                )
+                issue = describe_model_feedback_issue(err, fallback_action="allow" if fail_open else "block")
+                latency_ms = 0
+                if fail_open:
+                    return LiveDecisionOutcome(
+                        enabled=True,
+                        applied=False,
+                        mode=mode,
+                        provider=provider,
+                        model=model,
+                        action="allow",
+                        allowed=True,
+                        reason="provider_live_review_restricted_fail_open",
+                        confidence=0.0,
+                        latency_ms=latency_ms,
+                        error=err,
+                        error_kind=issue.get("kind"),
+                        error_code=issue.get("code"),
+                        error_label=issue.get("label"),
+                        research_context={},
+                    ).to_dict()
+                blocked = mode == "enforce"
+                return LiveDecisionOutcome(
+                    enabled=True,
+                    applied=blocked,
+                    mode=mode,
+                    provider=provider,
+                    model=model,
+                    action="block" if blocked else "allow",
+                    allowed=not blocked,
+                    reason="provider_live_review_restricted" if blocked else "provider_live_review_shadow_only",
+                    confidence=0.0,
+                    latency_ms=latency_ms,
+                    error=err,
+                    error_kind=issue.get("kind"),
+                    error_code=issue.get("code"),
+                    error_label=issue.get("label"),
+                    research_context={},
+                ).to_dict()
 
         research_context = resolve_runtime_eligibility_context(
             exchange=str((metadata or {}).get("exchange") or ""),
@@ -684,11 +751,15 @@ class LiveAIDecisionRouter:
                 reason=reason,
                 confidence=confidence,
                 latency_ms=latency_ms,
+                error_kind=None,
+                error_code=None,
+                error_label=None,
                 research_context=research_context,
             ).to_dict()
         except Exception as exc:
             latency_ms = int((time.perf_counter() - started) * 1000)
             err = str(exc)
+            issue = describe_model_feedback_issue(err, fallback_action="allow" if fail_open else "block")
             logger.warning(f"live decision router failed ({provider}/{model}): {err}")
             if fail_open:
                 return LiveDecisionOutcome(
@@ -703,6 +774,9 @@ class LiveAIDecisionRouter:
                     confidence=0.0,
                     latency_ms=latency_ms,
                     error=err,
+                    error_kind=issue.get("kind"),
+                    error_code=issue.get("code"),
+                    error_label=issue.get("label"),
                     research_context=research_context,
                 ).to_dict()
             blocked = mode == "enforce"
@@ -718,6 +792,9 @@ class LiveAIDecisionRouter:
                 confidence=0.0,
                 latency_ms=latency_ms,
                 error=err,
+                error_kind=issue.get("kind"),
+                error_code=issue.get("code"),
+                error_label=issue.get("label"),
                 research_context=research_context,
             ).to_dict()
 

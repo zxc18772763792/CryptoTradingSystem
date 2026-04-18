@@ -28,6 +28,16 @@ if (-not (Test-Path $fallbackBatch)) {
     throw "Fallback batch file not found: $fallbackBatch"
 }
 
+function Test-IsAdministrator {
+    try {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+        return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
+}
+
 function Get-NextAlignedTriggerTime {
     param([int]$Minutes)
     $step = [Math]::Max(5, [int]$Minutes)
@@ -80,18 +90,28 @@ $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyConti
 $created = $null -eq $existingTask
 
 $taskRegistered = $false
-try {
-    Register-ScheduledTask `
-        -TaskName $TaskName `
-        -Action $action `
-        -Trigger @($startupTrigger, $repeatTrigger) `
-        -Settings $settings `
-        -Principal $principal `
-        -Description "Incrementally refresh the default 30-symbol research universe without loading the web process." `
-        -Force | Out-Null
-    Enable-ScheduledTask -TaskName $TaskName | Out-Null
-    $taskRegistered = $true
-} catch {
+$isElevatedSession = Test-IsAdministrator
+if ($isElevatedSession) {
+    try {
+        Register-ScheduledTask `
+            -TaskName $TaskName `
+            -Action $action `
+            -Trigger @($startupTrigger, $repeatTrigger) `
+            -Settings $settings `
+            -Principal $principal `
+            -Description "Incrementally refresh the default 30-symbol research universe without loading the web process." `
+            -Force | Out-Null
+        Enable-ScheduledTask -TaskName $TaskName | Out-Null
+        $taskRegistered = $true
+    } catch {
+        $fallbackCommand = "`"$fallbackBatch`" -Quiet"
+        $null = & schtasks /Create /F /TN $TaskName /SC MINUTE /MO ([Math]::Max(5, $IntervalMinutes)) /TR $fallbackCommand /RL LIMITED
+        if ($LASTEXITCODE -ne 0) {
+            throw
+        }
+        $taskRegistered = $true
+    }
+} else {
     $fallbackCommand = "`"$fallbackBatch`" -Quiet"
     $null = & schtasks /Create /F /TN $TaskName /SC MINUTE /MO ([Math]::Max(5, $IntervalMinutes)) /TR $fallbackCommand /RL LIMITED
     if ($LASTEXITCODE -ne 0) {

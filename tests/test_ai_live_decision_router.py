@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -107,6 +108,54 @@ def test_live_decision_fail_open(monkeypatch):
     assert result["allowed"] is True
     assert result["action"] == "allow"
     assert result["reason"] == "ai_error_fail_open"
+
+
+def test_live_decision_restricts_codex_live_review_fail_open(monkeypatch):
+    router = LiveAIDecisionRouter()
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_ENABLED", True, raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODE", "enforce", raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_PROVIDER", "codex", raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_FAIL_OPEN", True, raising=False)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-openai", raising=False)
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    provider_call = AsyncMock(return_value={"action": "allow", "reason": "should_not_run", "confidence": 0.5})
+    monkeypatch.setattr(router, "_call_provider", provider_call)
+
+    result = asyncio.run(_evaluate(router))
+
+    assert provider_call.await_count == 0
+    assert result["allowed"] is True
+    assert result["reason"] == "provider_live_review_restricted_fail_open"
+    assert result["error_kind"] == "policy_restricted"
+    assert result["error_code"] == "model_policy_restricted"
+
+
+def test_live_decision_falls_back_to_alternative_provider_for_live_review(monkeypatch):
+    router = LiveAIDecisionRouter()
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_ENABLED", True, raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODE", "enforce", raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_PROVIDER", "codex", raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_FAIL_OPEN", False, raising=False)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-openai", raising=False)
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "sk-claude", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    seen = {}
+
+    async def _fake_call_provider(**kwargs):
+        seen.update(kwargs)
+        return {"action": "allow", "reason": "fallback_provider", "confidence": 0.88}
+
+    monkeypatch.setattr(router, "_call_provider", _fake_call_provider)
+
+    result = asyncio.run(_evaluate(router))
+
+    assert seen["provider"] == "claude"
+    assert result["provider"] == "claude"
+    assert result["reason"] == "fallback_provider"
+    assert result["allowed"] is True
 
 
 def test_live_decision_fail_closed(monkeypatch):

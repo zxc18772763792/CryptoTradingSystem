@@ -34,6 +34,7 @@ from core.strategies.persistence import (
 from core.strategies.runtime_policy import build_runtime_limit_policy
 from core.strategies.health_monitor import strategy_health_monitor
 from core.trading.execution_engine import execution_engine
+from core.trading.order_manager import order_manager
 from core.trading.position_manager import PositionSide, position_manager
 from strategies import ALL_STRATEGIES
 from web.api.backtest import (
@@ -668,6 +669,104 @@ def _build_pairs_monitor_enrichment(
         "metrics": metrics,
         "portfolio_mode": "pairs_spread_dual_leg",
     }
+
+
+def _strategy_monitor_trade_key(row: Dict[str, Any]) -> tuple:
+    payload = dict(row or {})
+    order_id = _clean_strategy_text(payload.get("order_id"))
+    if order_id:
+        return ("order_id", order_id)
+    return (
+        "composite",
+        _clean_strategy_text(payload.get("timestamp")),
+        _clean_strategy_text(payload.get("symbol")),
+        _clean_strategy_text(payload.get("side") or payload.get("signal_type")),
+        round(_safe_float(payload.get("fill_price") or payload.get("price") or 0.0), 8),
+        round(_safe_float(payload.get("quantity") or 0.0), 8),
+    )
+
+
+def _merge_strategy_monitor_trades(
+    live_review_items: List[Dict[str, Any]],
+    history_trades: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen_keys: set[tuple] = set()
+
+    for source_rows in (live_review_items, history_trades):
+        for row in source_rows or []:
+            if not isinstance(row, dict):
+                continue
+            key = _strategy_monitor_trade_key(row)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            merged.append(dict(row))
+
+    merged.sort(key=lambda row: str(row.get("timestamp") or ""))
+    return merged
+
+
+def _normalize_order_enum_text(value: Any) -> str:
+    return str(getattr(value, "value", value) or "").strip().lower()
+
+
+def _strategy_monitor_order_payload(order: Any, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    timestamp = getattr(order, "timestamp", None)
+    return {
+        "id": str(getattr(order, "id", "") or ""),
+        "symbol": str(getattr(order, "symbol", "") or ""),
+        "exchange": str(getattr(order, "exchange", "") or ""),
+        "side": _normalize_order_enum_text(getattr(order, "side", None)),
+        "type": _normalize_order_enum_text(getattr(order, "type", None)),
+        "status": _normalize_order_enum_text(getattr(order, "status", None)),
+        "price": _safe_float(getattr(order, "price", 0.0), 0.0),
+        "amount": _safe_float(getattr(order, "amount", 0.0), 0.0),
+        "filled": _safe_float(getattr(order, "filled", 0.0), 0.0),
+        "remaining": _safe_float(getattr(order, "remaining", 0.0), 0.0),
+        "timestamp": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp or ""),
+        "account_id": _clean_strategy_text(metadata.get("account_id")) or "main",
+        "order_mode": _clean_strategy_text(metadata.get("order_mode")) or "normal",
+        "reduce_only": bool(metadata.get("reduce_only", False)),
+        "stop_loss": _safe_optional_float(metadata.get("stop_loss")),
+        "take_profit": _safe_optional_float(metadata.get("take_profit")),
+        "trailing_stop_pct": _safe_optional_float(metadata.get("trailing_stop_pct")),
+        "trailing_stop_distance": _safe_optional_float(metadata.get("trailing_stop_distance")),
+        "trigger_price": _safe_optional_float(metadata.get("trigger_price")),
+    }
+
+
+async def _load_strategy_open_orders(
+    *,
+    name: str,
+    exchange: str,
+    runtime_mode: str,
+) -> List[Dict[str, Any]]:
+    try:
+        rows = await asyncio.wait_for(
+            order_manager.get_open_orders(exchange=exchange),
+            timeout=4.5,
+        )
+    except Exception as exc:
+        logger.debug(f"monitor-data: open orders load failed for {name}: {exc}")
+        return []
+
+    items: List[Dict[str, Any]] = []
+    for order in rows or []:
+        order_id = str(getattr(order, "id", "") or "")
+        metadata = order_manager.get_order_metadata(order_id)
+        strategy_name = _clean_strategy_text(
+            metadata.get("strategy") or getattr(order, "strategy", None)
+        )
+        if strategy_name != name:
+            continue
+        order_mode = str(metadata.get("mode") or "").strip().lower()
+        if order_mode in {"paper", "live"} and order_mode != runtime_mode:
+            continue
+        items.append(_strategy_monitor_order_payload(order, metadata))
+
+    items.sort(key=lambda row: str(row.get("timestamp") or ""), reverse=True)
+    return items
 
 
 def _shift_iso_timestamp(ts_raw: Optional[str], seconds: int) -> Optional[str]:
@@ -1984,6 +2083,13 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     except Exception as exc:
         logger.debug(f"monitor-data: trade history load failed for {name}: {exc}")
 
+    merged_trades = _merge_strategy_monitor_trades(live_review_items, history_trades)
+    open_orders = await _load_strategy_open_orders(
+        name=name,
+        exchange=exchange,
+        runtime_mode=runtime_mode,
+    )
+
     # ── 2. OHLCV bars ────────────────────────────────────────────────────────
     ohlcv: list = []
     ohlcv_source_timeframe = timeframe
@@ -2076,15 +2182,15 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
             logger.debug(f"monitor-data: signals failed for {name}: {exc}")
 
     executed_signals: list = []
-    for row in live_review_items:
+    for row in merged_trades:
         signal_payload = row.get("signal") if isinstance(row.get("signal"), dict) else {}
         executed_signals.append({
             "t":           str(row.get("timestamp") or "").strip(),
             "type":        str(row.get("signal_type") or row.get("side") or "").strip().lower(),
             "price":       _safe_float(row.get("fill_price") or signal_payload.get("price") or 0.0, 0.0),
-            "strength":    _safe_float(signal_payload.get("strength"), 1.0),
-            "stop_loss":   _safe_optional_float(signal_payload.get("stop_loss")),
-            "take_profit": _safe_optional_float(signal_payload.get("take_profit")),
+            "strength":    _safe_float(signal_payload.get("strength", row.get("strength")), 1.0),
+            "stop_loss":   _safe_optional_float(signal_payload.get("stop_loss", row.get("stop_loss"))),
+            "take_profit": _safe_optional_float(signal_payload.get("take_profit", row.get("take_profit"))),
         })
 
     restored_signals: list = []
@@ -2099,6 +2205,13 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
         })
 
     signals = executed_signals or restored_signals or recent_signals
+    signal_mode = "executed_trade" if executed_signals else ("strategy_signal" if recent_signals else "none")
+    signal_summary = {
+        "mode": signal_mode,
+        "executed_count": len(executed_signals),
+        "strategy_signal_count": len(recent_signals),
+        "open_order_count": len(open_orders),
+    }
 
     # ── 4. Equity curve with timestamps ──────────────────────────────────────
     equity: list = []
@@ -2113,10 +2226,7 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
             current_equity * float((config.allocation if config else 0) or 0),
         )
 
-        trades = sorted(
-            live_review_items or history_trades,
-            key=lambda r: str(r.get("timestamp") or ""),
-        )
+        trades = list(merged_trades)
 
         mark = equity_base
         realized = 0.0
@@ -2195,11 +2305,14 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
         "pair_ohlcv_source_timeframe": pair_ohlcv_source_timeframe,
         "pair_metrics": (pair_monitor.get("metrics") if pair_monitor else None),
         "is_running": is_running,
+        "signal_mode": signal_mode,
+        "signal_summary": signal_summary,
         "ohlcv":      ohlcv,
         "signals":    signals,
         "equity":     equity,
         "metrics":    metrics,
         "positions":  positions_data,
+        "open_orders": open_orders,
         "ts":         datetime.now(timezone.utc).isoformat(),
     }
     return _json_safe_value(payload)

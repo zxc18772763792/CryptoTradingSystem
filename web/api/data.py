@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from loguru import logger
 
 from config.settings import settings
+from config.strategy_registry import get_strategy_defaults, get_strategy_recommended_symbols
 from core.data import (
     candidate_symbol_dirs,
     canonical_symbol_dir,
@@ -32,6 +33,12 @@ from core.data import (
 )
 from core.data.factor_library import FACTOR_CATALOG, build_factor_library
 from core.exchanges import exchange_manager
+from web.api.backtest import (
+    _build_fama_backtest_components,
+    _load_backtest_inputs,
+    _run_backtest_core,
+    get_backtest_strategy_info,
+)
 
 try:
     from core.data.funding_rate_collector import FundingRateCollector
@@ -94,6 +101,11 @@ _PAIR_SCAN_DEFAULT_LOOKBACK = {
 }
 _PAIR_SCAN_MAX_SYMBOLS = 24
 _PAIR_SCAN_MAX_ROWS = 20
+_ARBITRAGE_READY_MIN_BARS_PER_LEG = 1000
+_ARBITRAGE_READY_MIN_OVERLAP_BARS = 500
+_ARBITRAGE_COST_PASS_MAX = 30.0
+_ARBITRAGE_COST_WARN_MAX = 60.0
+_ARBITRAGE_MAX_UNIVERSE_SYMBOLS = 12
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _RESEARCH_UNIVERSE_TASK_NAME = "CryptoTradingSystem_ResearchUniverseRefresh"
 _RESEARCH_UNIVERSE_SUMMARY_PATH = _PROJECT_ROOT / "data" / "research" / "research_universe_incremental_latest.json"
@@ -3429,6 +3441,39 @@ def _pair_scan_relationship(level_corr: float, return_corr: float) -> str:
     return "negative_corr" if corr < 0 else "positive_corr"
 
 
+def _pair_scan_entry_snapshot(signal_bias: str) -> Dict[str, Any]:
+    key = str(signal_bias or "").strip()
+    if key == "long_spread_bias":
+        return {
+            "entry_state": "long_spread",
+            "entry_ready": True,
+            "blocked_reasons": [],
+        }
+    if key == "short_spread_bias":
+        return {
+            "entry_state": "short_spread",
+            "entry_ready": True,
+            "blocked_reasons": [],
+        }
+    if key == "balanced":
+        return {
+            "entry_state": "no_trade",
+            "entry_ready": False,
+            "blocked_reasons": ["当前 z-score 已回归到平衡区，缺少新的价差边际"],
+        }
+    if key == "watch":
+        return {
+            "entry_state": "watch",
+            "entry_ready": False,
+            "blocked_reasons": ["当前 z-score 尚未进入开仓区间"],
+        }
+    return {
+        "entry_state": "watch",
+        "entry_ready": False,
+        "blocked_reasons": ["当前缺少有效信号，暂不建议执行"],
+    }
+
+
 def _pair_scan_pair_metrics(
     symbol1: str,
     symbol2: str,
@@ -3548,7 +3593,448 @@ def _pair_scan_pair_metrics(
         "lookback_period": int(lookback),
         "signal_window_bars": int(z_window),
         "signal_bias": _pair_scan_signal_bias(current_z),
+        **_pair_scan_entry_snapshot(_pair_scan_signal_bias(current_z)),
     }
+
+
+def _normalize_symbol_list(raw_symbols: List[Any], max_count: int = _ARBITRAGE_MAX_UNIVERSE_SYMBOLS) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for item in raw_symbols or []:
+        symbol = normalize_symbol(item)
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        out.append(symbol)
+        if len(out) >= max(1, int(max_count)):
+            break
+    return out
+
+
+def _build_arbitrage_readiness_params(
+    strategy: str,
+    exchange: str,
+    timeframe: str,
+    symbol: str,
+    pair_symbol: str,
+    universe_symbols: List[str],
+    venues: List[str],
+    lookback: int,
+) -> Dict[str, Any]:
+    strategy_name = str(strategy or "PairsTradingStrategy").strip() or "PairsTradingStrategy"
+    exchange_name = str(exchange or "binance").strip().lower() or "binance"
+    tf = str(timeframe or "1h").strip().lower() or "1h"
+    primary_symbol = normalize_symbol(symbol) or "BTC/USDT"
+    fallback_symbols = _normalize_symbol_list(get_strategy_recommended_symbols(strategy_name))
+    normalized_universe = _normalize_symbol_list([primary_symbol, pair_symbol, *universe_symbols, *fallback_symbols])
+    defaults = dict(get_strategy_defaults(strategy_name) or {})
+    params = dict(defaults)
+    params["exchange"] = exchange_name
+
+    if strategy_name == "PairsTradingStrategy":
+        secondary = normalize_symbol(pair_symbol)
+        if not secondary or secondary == primary_symbol:
+            secondary = next((item for item in normalized_universe if item != primary_symbol), "")
+        if not secondary:
+            secondary = normalize_symbol(defaults.get("pair_symbol")) or "ETH/USDT"
+        params["pair_symbol"] = secondary
+        params["lookback_period"] = max(20, min(2400, int(lookback or params.get("lookback_period") or 720)))
+        normalized_universe = _normalize_symbol_list([primary_symbol, secondary, *normalized_universe])
+    elif strategy_name == "FamaFactorArbitrageStrategy":
+        fama_universe = normalized_universe[:_ARBITRAGE_MAX_UNIVERSE_SYMBOLS]
+        if len(fama_universe) < 4:
+            fama_universe = _normalize_symbol_list([primary_symbol, *fallback_symbols], max_count=_ARBITRAGE_MAX_UNIVERSE_SYMBOLS)
+        params["factor_timeframe"] = tf
+        params["lookback_bars"] = max(240, int(lookback or params.get("lookback_bars") or 720))
+        params["universe_symbols"] = fama_universe
+        params["max_symbols"] = max(4, min(100, len(fama_universe)))
+        params["min_universe_size"] = max(2, min(int(params.get("min_universe_size", 12) or 12), len(fama_universe)))
+        params["top_n"] = max(1, min(int(params.get("top_n", 8) or 8), max(1, len(fama_universe) // 2)))
+        normalized_universe = fama_universe
+    elif strategy_name == "CEXArbitrageStrategy":
+        params["exchanges"] = [venue for venue in venues if venue in {"binance", "okx", "gate"}] or list(params.get("exchanges") or ["binance", "okx", "gate"])
+    elif strategy_name == "TriangularArbitrageStrategy":
+        params["exchange"] = exchange_name
+        params["bridge_assets"] = list(params.get("bridge_assets") or ["ETH", "BNB", "SOL"])
+    elif strategy_name in {"DEXArbitrageStrategy", "FlashLoanArbitrageStrategy"}:
+        params["dex_list"] = [venue for venue in venues if venue in {"uniswap", "sushiswap"}] or list(params.get("dex_list") or ["uniswap", "sushiswap"])
+
+    return {
+        "strategy": strategy_name,
+        "exchange": exchange_name,
+        "timeframe": tf,
+        "symbol": primary_symbol,
+        "pair_symbol": str(params.get("pair_symbol") or "").strip(),
+        "universe_symbols": normalized_universe,
+        "params": params,
+    }
+
+
+def _arbitrage_leg_snapshot(symbol: str, frame: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    df = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    if not df.empty:
+        df.index = pd.to_datetime(df.index)
+        df = df[~df.index.duplicated(keep="last")].sort_index()
+    latest_timestamp = _safe_iso_timestamp(df.index[-1]) if not df.empty else None
+    return {
+        "symbol": normalize_symbol(symbol) or str(symbol or "").strip(),
+        "bars": int(len(df)),
+        "latest_timestamp": latest_timestamp,
+        "ready": bool(len(df) >= _ARBITRAGE_READY_MIN_BARS_PER_LEG),
+    }
+
+
+def _common_overlap_bars(frames: List[pd.DataFrame]) -> tuple[int, Optional[str]]:
+    cleaned = []
+    for frame in frames:
+        if frame is None or frame.empty:
+            continue
+        item = frame.copy()
+        item.index = pd.to_datetime(item.index)
+        item = item[~item.index.duplicated(keep="last")].sort_index()
+        cleaned.append(item)
+    if not cleaned:
+        return 0, None
+    common_index = pd.Index(cleaned[0].index)
+    for frame in cleaned[1:]:
+        common_index = common_index.intersection(pd.Index(frame.index))
+    common_index = pd.Index(common_index).sort_values()
+    if not len(common_index):
+        return 0, None
+    return int(len(common_index)), _safe_iso_timestamp(common_index[-1])
+
+
+def _build_arbitrage_data_status(
+    strategy: str,
+    resolved_symbol: str,
+    timeframe: str,
+    params: Dict[str, Any],
+    df: pd.DataFrame,
+    market_bundle: Optional[Dict[str, pd.DataFrame]],
+) -> Dict[str, Any]:
+    strategy_name = str(strategy or "").strip()
+    bundle = dict(market_bundle or {})
+    legs: List[Dict[str, Any]] = []
+    overlap_bars = 0
+    latest_overlap_ts = None
+    reasons: List[str] = []
+
+    if strategy_name == "PairsTradingStrategy":
+        primary_symbol = normalize_symbol(resolved_symbol) or normalize_symbol(params.get("symbol")) or "BTC/USDT"
+        pair_symbol = normalize_symbol(params.get("pair_symbol")) or ""
+        primary_df = bundle.get(primary_symbol, df)
+        pair_df = bundle.get(pair_symbol)
+        legs = [
+            _arbitrage_leg_snapshot(primary_symbol, primary_df),
+            _arbitrage_leg_snapshot(pair_symbol, pair_df),
+        ]
+        overlap_bars, latest_overlap_ts = _common_overlap_bars([primary_df, pair_df] if pair_df is not None else [primary_df])
+        if any(int(item.get("bars") or 0) < _ARBITRAGE_READY_MIN_BARS_PER_LEG for item in legs):
+            reasons.append(
+                f"双腿历史数据不足：每条腿至少需要 {_ARBITRAGE_READY_MIN_BARS_PER_LEG} 根 K 线"
+            )
+        if overlap_bars < _ARBITRAGE_READY_MIN_OVERLAP_BARS:
+            reasons.append(
+                f"公共样本不足：当前仅 {overlap_bars} 根，至少需要 {_ARBITRAGE_READY_MIN_OVERLAP_BARS} 根"
+            )
+        ready = not reasons
+    elif strategy_name == "FamaFactorArbitrageStrategy":
+        requested_symbols = _normalize_symbol_list(params.get("universe_symbols") or [], max_count=100)
+        for item in requested_symbols:
+            legs.append(_arbitrage_leg_snapshot(item, bundle.get(item)))
+        loaded_frames = [bundle.get(item) for item in requested_symbols if bundle.get(item) is not None]
+        overlap_bars, latest_overlap_ts = _common_overlap_bars([frame for frame in loaded_frames if frame is not None])
+        eligible_legs = sum(1 for item in legs if int(item.get("bars") or 0) >= _ARBITRAGE_READY_MIN_BARS_PER_LEG)
+        min_universe = max(2, int(params.get("min_universe_size", 12) or 12))
+        if eligible_legs < min_universe:
+            reasons.append(
+                f"可用横截面样本不足：当前满足条件 {eligible_legs} 个，至少需要 {min_universe} 个标的"
+            )
+        if overlap_bars < _ARBITRAGE_READY_MIN_OVERLAP_BARS:
+            reasons.append(
+                f"横截面公共样本不足：当前仅 {overlap_bars} 根，至少需要 {_ARBITRAGE_READY_MIN_OVERLAP_BARS} 根"
+            )
+        ready = not reasons
+    else:
+        primary_df = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+        legs = [_arbitrage_leg_snapshot(resolved_symbol, primary_df)]
+        overlap_bars = int(len(primary_df))
+        latest_overlap_ts = _safe_iso_timestamp(primary_df.index[-1]) if not primary_df.empty else None
+        if overlap_bars < _ARBITRAGE_READY_MIN_BARS_PER_LEG:
+            reasons.append(
+                f"本地历史数据不足：至少需要 {_ARBITRAGE_READY_MIN_BARS_PER_LEG} 根 K 线，当前 {overlap_bars} 根"
+            )
+        ready = not reasons
+
+    return {
+        "ready": bool(ready),
+        "mode": "cross_sectional" if strategy_name == "FamaFactorArbitrageStrategy" else "pair" if strategy_name == "PairsTradingStrategy" else "single_leg",
+        "timeframe": str(timeframe or "1h").strip().lower() or "1h",
+        "required_leg_bars": _ARBITRAGE_READY_MIN_BARS_PER_LEG,
+        "required_overlap_bars": _ARBITRAGE_READY_MIN_OVERLAP_BARS,
+        "legs": legs,
+        "eligible_leg_count": int(sum(1 for item in legs if bool(item.get("ready")))),
+        "requested_leg_count": int(len(legs)),
+        "overlap_bars": int(overlap_bars),
+        "latest_timestamp": latest_overlap_ts,
+        "reasons": reasons,
+    }
+
+
+def _build_arbitrage_backtest_status(strategy: str) -> Dict[str, Any]:
+    info = dict(get_backtest_strategy_info(strategy) or {})
+    supported = bool(info.get("supported", info.get("backtest_supported", False)))
+    description = str(info.get("description") or "").strip()
+    reason = str(info.get("reason") or info.get("backtest_reason") or "").strip()
+
+    if not supported:
+        return {
+            "supported": False,
+            "mode": "realtime_only",
+            "headline": "仅实时验证",
+            "reason": reason or "依赖实时盘口 / 跨场所 / 链上执行，单一 K 线回测会失真",
+        }
+    if str(strategy or "").strip() == "PairsTradingStrategy" or "近似" in description:
+        return {
+            "supported": True,
+            "mode": "spread_approx",
+            "headline": "近似价差回测",
+            "reason": description or "当前回测基于价差合成序列，并非真实交易所执行仿真",
+        }
+    return {
+        "supported": True,
+        "mode": "factor_backtest" if str(strategy or "").strip() == "FamaFactorArbitrageStrategy" else "backtest",
+        "headline": "多因子回测" if str(strategy or "").strip() == "FamaFactorArbitrageStrategy" else "支持回测",
+        "reason": description or "可直接进入单策略自定义回测验证",
+    }
+
+
+def _build_arbitrage_cost_status(result: Optional[Dict[str, Any]], *, supported: bool) -> Dict[str, Any]:
+    if not supported:
+        return {
+            "status": "unknown",
+            "headline": "仅实时验证",
+            "diagnostic": "live_only",
+            "gross_total_return": None,
+            "net_total_return": None,
+            "cost_drag_return_pct": None,
+            "estimated_trade_cost_usd": None,
+            "quality_flag": None,
+            "anomaly_bar_ratio": None,
+            "reasons": ["该策略不支持单策略回测，成本压缩需要实时验证"],
+        }
+    if not result:
+        return {
+            "status": "unknown",
+            "headline": "先回测再评估成本",
+            "diagnostic": "missing_backtest",
+            "gross_total_return": None,
+            "net_total_return": None,
+            "cost_drag_return_pct": None,
+            "estimated_trade_cost_usd": None,
+            "quality_flag": None,
+            "anomaly_bar_ratio": None,
+            "reasons": ["当前缺少可用回测结果，无法判断成本是否吞噬边际"],
+        }
+
+    gross = float(result.get("gross_total_return") or 0.0)
+    net = float(result.get("total_return") or 0.0)
+    drag = float(result.get("cost_drag_return_pct") or max(gross - net, 0.0))
+    estimated_cost_usd = float(result.get("estimated_trade_cost_usd") or 0.0)
+    quality_flag = str(result.get("quality_flag") or "").strip().lower() or "ok"
+    anomaly_ratio = float(result.get("anomaly_bar_ratio") or 0.0)
+    reasons: List[str] = []
+    diagnostic = "cost_ok"
+    status = "pass"
+    headline = "成本可接受"
+
+    if quality_flag == "invalid" or anomaly_ratio > 0.02:
+        status = "fail"
+        diagnostic = "quality_invalid"
+        headline = "结果不可信"
+        reasons.append("回测异常值占比过高或结果已失真，当前结论不宜直接用于开仓")
+    elif gross <= 0:
+        status = "fail"
+        diagnostic = "gross_edge_negative"
+        headline = "结构边际不足"
+        reasons.append("毛收益本身不成立，问题不只是交易成本")
+    elif gross > 0 and net <= 0:
+        status = "fail"
+        diagnostic = "cost_consumes_edge"
+        headline = "成本吞噬边际"
+        reasons.append("毛收益为正但净收益转负，手续费/滑点已吃掉策略边际")
+    elif drag > _ARBITRAGE_COST_WARN_MAX:
+        status = "fail"
+        diagnostic = "cost_too_high"
+        headline = "成本过高"
+        reasons.append("成本拖累已经超过可接受阈值，继续执行的胜率和盈亏比都偏弱")
+    elif drag >= _ARBITRAGE_COST_PASS_MAX:
+        status = "warn"
+        diagnostic = "cost_drag_watch"
+        headline = "成本压缩明显"
+        reasons.append("成本拖累较大，建议收紧执行阈值或继续等待更极端的价差")
+
+    if quality_flag.startswith("warning_") or quality_flag.startswith("watch_") or anomaly_ratio > 0.005:
+        reasons.append("样本存在一定异常波动，回测结果需要保守解读")
+
+    return {
+        "status": status,
+        "headline": headline,
+        "diagnostic": diagnostic,
+        "gross_total_return": round(gross, 4),
+        "net_total_return": round(net, 4),
+        "cost_drag_return_pct": round(drag, 4),
+        "estimated_trade_cost_usd": round(estimated_cost_usd, 2),
+        "quality_flag": quality_flag,
+        "anomaly_bar_ratio": round(anomaly_ratio, 6),
+        "reasons": reasons,
+    }
+
+
+def _build_arbitrage_entry_status(
+    strategy: str,
+    timeframe: str,
+    params: Dict[str, Any],
+    result: Optional[Dict[str, Any]],
+    market_bundle: Optional[Dict[str, pd.DataFrame]],
+) -> Dict[str, Any]:
+    strategy_name = str(strategy or "").strip()
+    if strategy_name == "PairsTradingStrategy":
+        entry_z = abs(float(params.get("entry_z_score", 2.0) or 2.0))
+        exit_z = abs(float(params.get("exit_z_score", 0.6) or 0.6))
+        latest_z = float(result.get("z_score_last") or float("nan")) if result else float("nan")
+        signal_bias = str(result.get("signal_bias") or "").strip() if result else ""
+        if signal_bias == "long_spread_bias" and math.isfinite(latest_z) and abs(latest_z) >= entry_z:
+            return {
+                "state": "long_spread",
+                "entry_ready": True,
+                "headline": "可开多价差",
+                "latest_z_score": round(latest_z, 4),
+                "reasons": [f"当前 |z|={abs(latest_z):.2f}，已达到 entry_z={entry_z:.2f}"],
+            }
+        if signal_bias == "short_spread_bias" and math.isfinite(latest_z) and abs(latest_z) >= entry_z:
+            return {
+                "state": "short_spread",
+                "entry_ready": True,
+                "headline": "可开空价差",
+                "latest_z_score": round(latest_z, 4),
+                "reasons": [f"当前 |z|={abs(latest_z):.2f}，已达到 entry_z={entry_z:.2f}"],
+            }
+        if math.isfinite(latest_z) and abs(latest_z) <= exit_z:
+            return {
+                "state": "no_trade",
+                "entry_ready": False,
+                "headline": "接近回归完成，暂不追单",
+                "latest_z_score": round(latest_z, 4),
+                "reasons": [f"当前 |z|={abs(latest_z):.2f}，已接近 exit_z={exit_z:.2f} 的平衡区"],
+            }
+        if math.isfinite(latest_z):
+            return {
+                "state": "watch",
+                "entry_ready": False,
+                "headline": "研究有效，但仍需等待入场区",
+                "latest_z_score": round(latest_z, 4),
+                "reasons": [f"当前 |z|={abs(latest_z):.2f}，尚未达到 entry_z={entry_z:.2f}"],
+            }
+        return {
+            "state": "no_trade",
+            "entry_ready": False,
+            "headline": "当前缺少有效价差信号",
+            "latest_z_score": None,
+            "reasons": ["缺少有效 z-score，暂不建议执行"],
+        }
+
+    if strategy_name == "FamaFactorArbitrageStrategy" and market_bundle:
+        try:
+            components = _build_fama_backtest_components(market_bundle=market_bundle, timeframe=timeframe, params=params)
+            weights = components.get("weights")
+            if isinstance(weights, pd.DataFrame) and not weights.empty:
+                latest_weights = weights.iloc[-1].fillna(0.0)
+                long_count = int((latest_weights > 1e-9).sum())
+                short_count = int((latest_weights < -1e-9).sum())
+                if long_count > 0 and short_count > 0:
+                    return {
+                        "state": "watch",
+                        "entry_ready": True,
+                        "headline": f"横截面调仓就绪：多 {long_count} / 空 {short_count}",
+                        "latest_z_score": None,
+                        "reasons": [
+                            f"当前横截面已形成可执行多空篮子，quantile={float(components.get('quantile') or 0.0):.2f}"
+                        ],
+                    }
+        except Exception:
+            pass
+        return {
+            "state": "no_trade",
+            "entry_ready": False,
+            "headline": "当前横截面未形成可执行多空篮子",
+            "latest_z_score": None,
+            "reasons": ["当前满足门槛的多空候选不足，继续观察更稳妥"],
+        }
+
+    if str(strategy or "").strip() in {"CEXArbitrageStrategy", "TriangularArbitrageStrategy", "DEXArbitrageStrategy", "FlashLoanArbitrageStrategy"}:
+        return {
+            "state": "watch",
+            "entry_ready": False,
+            "headline": "仅实时验证",
+            "latest_z_score": None,
+            "reasons": ["该策略依赖实时盘口 / 链上报价，页面仅提供风险预检，不直接给开仓指令"],
+        }
+
+    return {
+        "state": "watch",
+        "entry_ready": False,
+        "headline": "等待进一步验证",
+        "latest_z_score": None,
+        "reasons": ["当前策略尚未提供统一的执行闸门解释"],
+    }
+
+
+def _build_arbitrage_gate_snapshot(
+    data_status: Dict[str, Any],
+    backtest_status: Dict[str, Any],
+    cost_status: Dict[str, Any],
+    entry_status: Dict[str, Any],
+) -> Dict[str, Any]:
+    blocked_reasons: List[str] = []
+    blocked_reasons.extend(list(data_status.get("reasons") or []))
+    blocked_reasons.extend(list(cost_status.get("reasons") or []))
+    blocked_reasons.extend(list(entry_status.get("reasons") or []))
+    deduped: List[str] = []
+    seen = set()
+    for item in blocked_reasons:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        deduped.append(text)
+    return {
+        "research_candidate": bool(data_status.get("eligible_leg_count") or data_status.get("ready")),
+        "backtest_required": bool(backtest_status.get("supported")) and str(cost_status.get("status") or "unknown") == "unknown",
+        "live_only": not bool(backtest_status.get("supported")),
+        "cost_blocked": str(cost_status.get("status") or "").strip() == "fail",
+        "entry_ready": bool(entry_status.get("entry_ready")),
+        "blocked_reasons": deduped[:8],
+    }
+
+
+def _recommend_arbitrage_action(
+    data_status: Dict[str, Any],
+    backtest_status: Dict[str, Any],
+    cost_status: Dict[str, Any],
+    entry_status: Dict[str, Any],
+) -> str:
+    if not bool(data_status.get("ready")):
+        return "先补数据"
+    if not bool(backtest_status.get("supported")):
+        return "加入观察"
+    if str(cost_status.get("status") or "unknown") == "unknown":
+        return "先回测"
+    if str(cost_status.get("status") or "") == "fail":
+        return "先回测"
+    if not bool(entry_status.get("entry_ready")):
+        return "加入观察"
+    return "允许开仓"
 
 
 async def _load_pair_scan_series(
@@ -3685,6 +4171,119 @@ async def get_research_pairs_ranking(
         "top_symbols": top_symbols,
         "pairs": top_rows,
         "warnings": warnings,
+        "generated_at": _utc_iso(),
+    }
+
+
+@router.get("/research/arbitrage-readiness")
+async def get_arbitrage_readiness(
+    strategy: str = "PairsTradingStrategy",
+    exchange: str = "binance",
+    timeframe: str = "1h",
+    symbol: str = "BTC/USDT",
+    pair_symbol: str = "",
+    symbols: str = "",
+    venues: str = "",
+    lookback: int = 720,
+    initial_capital: float = 10000,
+    commission_rate: float = 0.0004,
+    slippage_bps: float = 2.0,
+):
+    requested_symbols = _normalize_symbol_list(str(symbols or "").split(","), max_count=_ARBITRAGE_MAX_UNIVERSE_SYMBOLS)
+    requested_venues = [
+        str(item or "").strip().lower()
+        for item in str(venues or "").split(",")
+        if str(item or "").strip()
+    ]
+    spec = _build_arbitrage_readiness_params(
+        strategy=strategy,
+        exchange=exchange,
+        timeframe=timeframe,
+        symbol=symbol,
+        pair_symbol=pair_symbol,
+        universe_symbols=requested_symbols,
+        venues=requested_venues,
+        lookback=lookback,
+    )
+
+    strategy_name = str(spec.get("strategy") or "PairsTradingStrategy").strip() or "PairsTradingStrategy"
+    df, market_bundle, resolved_symbol = await _load_backtest_inputs(
+        strategy=strategy_name,
+        symbol=str(spec.get("symbol") or symbol),
+        timeframe=str(spec.get("timeframe") or timeframe),
+        params=dict(spec.get("params") or {}),
+    )
+    data_status = _build_arbitrage_data_status(
+        strategy=strategy_name,
+        resolved_symbol=resolved_symbol,
+        timeframe=str(spec.get("timeframe") or timeframe),
+        params=dict(spec.get("params") or {}),
+        df=df,
+        market_bundle=market_bundle,
+    )
+    backtest_status = _build_arbitrage_backtest_status(strategy_name)
+
+    result: Optional[Dict[str, Any]] = None
+    backtest_error = ""
+    if bool(backtest_status.get("supported")) and bool(data_status.get("ready")):
+        try:
+            result = _run_backtest_core(
+                strategy=strategy_name,
+                df=df,
+                timeframe=str(spec.get("timeframe") or timeframe),
+                initial_capital=max(100.0, float(initial_capital or 10000.0)),
+                params=dict(spec.get("params") or {}),
+                include_series=False,
+                commission_rate=max(0.0, float(commission_rate or 0.0)),
+                slippage_bps=max(0.0, float(slippage_bps or 0.0)),
+                market_bundle=market_bundle,
+            )
+        except Exception as exc:
+            backtest_error = str(exc)
+
+    cost_status = _build_arbitrage_cost_status(result, supported=bool(backtest_status.get("supported")))
+    if backtest_error and bool(backtest_status.get("supported")):
+        cost_status = {
+            **cost_status,
+            "status": "unknown",
+            "headline": "先回测再评估成本",
+            "diagnostic": "backtest_error",
+            "reasons": list(cost_status.get("reasons") or []) + [f"轻量回测评估失败：{backtest_error}"],
+        }
+
+    entry_status = _build_arbitrage_entry_status(
+        strategy=strategy_name,
+        timeframe=str(spec.get("timeframe") or timeframe),
+        params=dict(spec.get("params") or {}),
+        result=result,
+        market_bundle=market_bundle,
+    )
+    gates = _build_arbitrage_gate_snapshot(
+        data_status=data_status,
+        backtest_status=backtest_status,
+        cost_status=cost_status,
+        entry_status=entry_status,
+    )
+    recommended_action = _recommend_arbitrage_action(
+        data_status=data_status,
+        backtest_status=backtest_status,
+        cost_status=cost_status,
+        entry_status=entry_status,
+    )
+
+    return {
+        "strategy": strategy_name,
+        "exchange": str(spec.get("exchange") or exchange),
+        "timeframe": str(spec.get("timeframe") or timeframe),
+        "symbol": resolved_symbol,
+        "pair_symbol": str(spec.get("pair_symbol") or ""),
+        "universe_symbols": list(spec.get("universe_symbols") or []),
+        "data_status": data_status,
+        "backtest_status": backtest_status,
+        "cost_status": cost_status,
+        "entry_status": entry_status,
+        "recommended_action": recommended_action,
+        "gates": gates,
         "generated_at": _utc_iso(),
     }
 

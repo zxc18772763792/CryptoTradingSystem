@@ -24,6 +24,46 @@ from config.database import async_session_maker
 from config.settings import settings
 
 
+def _normalize_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+ALTCOIN_SCORE_FIELD_MAP = {
+    "layout": "layout_score",
+    "alert": "alert_score",
+    "anomaly": "anomaly_score",
+    "accumulation": "accumulation_score",
+    "control": "control_score",
+}
+ALTCOIN_RANK_SCORE_KEYS = frozenset({"layout", "alert", "control"})
+
+
+def _normalize_altcoin_symbol(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _altcoin_score_field(
+    metric_key: Any, *, allowed_keys: Optional[frozenset[str]] = None
+) -> str:
+    normalized_key = str(metric_key or "layout").strip().lower()
+    if allowed_keys is not None and normalized_key not in allowed_keys:
+        return "layout_score"
+    return ALTCOIN_SCORE_FIELD_MAP.get(normalized_key, "layout_score")
+
+
+def _altcoin_rank_text(rank: Any) -> str:
+    if not str(rank or "").strip():
+        return "当前排名 --"
+    try:
+        return f"当前排名 {int(rank)}"
+    except (TypeError, ValueError):
+        return "当前排名 --"
+
+
 @dataclass
 class AlertRule:
     id: str
@@ -46,9 +86,11 @@ class AlertRule:
             params=dict(model.params or {}),
             enabled=bool(model.enabled),
             cooldown_seconds=int(model.cooldown_seconds or 300),
-            created_at=model.created_at or datetime.now(timezone.utc),
-            updated_at=model.updated_at or datetime.now(timezone.utc),
-            last_triggered_at=model.last_triggered_at,
+            created_at=_normalize_datetime(model.created_at)
+            or datetime.now(timezone.utc),
+            updated_at=_normalize_datetime(model.updated_at)
+            or datetime.now(timezone.utc),
+            last_triggered_at=_normalize_datetime(model.last_triggered_at),
             trigger_count=int(model.trigger_count or 0),
         )
 
@@ -60,13 +102,16 @@ class AlertRule:
             params=self.params,
             enabled=self.enabled,
             cooldown_seconds=self.cooldown_seconds,
-            created_at=self.created_at,
-            updated_at=self.updated_at,
-            last_triggered_at=self.last_triggered_at,
+            created_at=_normalize_datetime(self.created_at),
+            updated_at=_normalize_datetime(self.updated_at),
+            last_triggered_at=_normalize_datetime(self.last_triggered_at),
             trigger_count=self.trigger_count,
         )
 
     def to_dict(self) -> Dict[str, Any]:
+        created_at = _normalize_datetime(self.created_at)
+        updated_at = _normalize_datetime(self.updated_at)
+        last_triggered_at = _normalize_datetime(self.last_triggered_at)
         return {
             "id": self.id,
             "name": self.name,
@@ -74,9 +119,11 @@ class AlertRule:
             "params": self.params,
             "enabled": self.enabled,
             "cooldown_seconds": self.cooldown_seconds,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
-            "last_triggered_at": self.last_triggered_at.isoformat() if self.last_triggered_at else None,
+            "created_at": created_at.isoformat() if created_at else None,
+            "updated_at": updated_at.isoformat() if updated_at else None,
+            "last_triggered_at": last_triggered_at.isoformat()
+            if last_triggered_at
+            else None,
             "trigger_count": self.trigger_count,
         }
 
@@ -129,12 +176,20 @@ class NotificationManager:
 
     def channel_status(self) -> Dict[str, Any]:
         receiver = str(settings.EMAIL_RECEIVER or "")
-        receiver_list = [x.strip() for x in receiver.replace(";", ",").split(",") if x.strip()]
-        email_basic_ready = bool(settings.EMAIL_SMTP_SERVER and settings.EMAIL_SENDER and receiver_list)
-        email_auth_ready = bool((not settings.EMAIL_REQUIRE_AUTH) or settings.EMAIL_PASSWORD)
+        receiver_list = [
+            x.strip() for x in receiver.replace(";", ",").split(",") if x.strip()
+        ]
+        email_basic_ready = bool(
+            settings.EMAIL_SMTP_SERVER and settings.EMAIL_SENDER and receiver_list
+        )
+        email_auth_ready = bool(
+            (not settings.EMAIL_REQUIRE_AUTH) or settings.EMAIL_PASSWORD
+        )
         feishu_webhook_ready = bool(settings.FEISHU_BOT_WEBHOOK_URL)
         feishu_app_ready = bool(
-            settings.FEISHU_APP_ID and settings.FEISHU_APP_SECRET and settings.FEISHU_RECEIVE_ID
+            settings.FEISHU_APP_ID
+            and settings.FEISHU_APP_SECRET
+            and settings.FEISHU_RECEIVE_ID
         )
         return {
             "telegram": bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID),
@@ -194,7 +249,9 @@ class NotificationManager:
         sender = settings.EMAIL_SENDER
         password = settings.EMAIL_PASSWORD
         receiver = str(settings.EMAIL_RECEIVER or "")
-        receivers = [x.strip() for x in receiver.replace(";", ",").split(",") if x.strip()]
+        receivers = [
+            x.strip() for x in receiver.replace(";", ",").split(",") if x.strip()
+        ]
         if not server or not sender or not receivers:
             raise RuntimeError("邮箱配置不完整：需要 SMTP 服务器、发件人、收件人")
         if bool(settings.EMAIL_REQUIRE_AUTH) and not password:
@@ -213,7 +270,9 @@ class NotificationManager:
         use_tls = bool(settings.EMAIL_USE_TLS and not use_ssl)
 
         if use_ssl:
-            with smtplib.SMTP_SSL(server, port, timeout=timeout, context=context) as smtp:
+            with smtplib.SMTP_SSL(
+                server, port, timeout=timeout, context=context
+            ) as smtp:
                 if bool(settings.EMAIL_REQUIRE_AUTH):
                     smtp.login(sender, str(password or ""))
                 smtp.send_message(msg)
@@ -338,7 +397,13 @@ class NotificationManager:
                     )
                     return ok
             except Exception as e:
-                self._record_event("feishu", "failed", title, message, {"mode": "webhook", "error": str(e)})
+                self._record_event(
+                    "feishu",
+                    "failed",
+                    title,
+                    message,
+                    {"mode": "webhook", "error": str(e)},
+                )
                 return False
 
         return await self._send_feishu_app(title=title, message=message)
@@ -371,11 +436,18 @@ class NotificationManager:
                 "failed",
                 "获取飞书 token 失败",
                 "tenant_access_token/internal 返回异常",
-                {"mode": "app", "status_code": resp.status_code, "code": code, "msg": data.get("msg")},
+                {
+                    "mode": "app",
+                    "status_code": resp.status_code,
+                    "code": code,
+                    "msg": data.get("msg"),
+                },
             )
             return None
         except Exception as e:
-            self._record_event("feishu", "failed", "获取飞书 token 异常", str(e), {"mode": "app"})
+            self._record_event(
+                "feishu", "failed", "获取飞书 token 异常", str(e), {"mode": "app"}
+            )
             return None
 
     async def _send_feishu_app(self, title: str, message: str) -> bool:
@@ -417,7 +489,9 @@ class NotificationManager:
             )
             return ok
         except Exception as e:
-            self._record_event("feishu", "failed", title, message, {"mode": "app", "error": str(e)})
+            self._record_event(
+                "feishu", "failed", title, message, {"mode": "app", "error": str(e)}
+            )
             return False
 
     async def send_message(
@@ -474,7 +548,9 @@ class NotificationManager:
         await self._upsert_rule(rule)
         return rule.to_dict()
 
-    async def update_rule(self, rule_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def update_rule(
+        self, rule_id: str, updates: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
         await self._ensure_loaded()
         rule = self._rules.get(rule_id)
         if not rule:
@@ -509,8 +585,88 @@ class NotificationManager:
     def _cooldown_ok(self, rule: AlertRule) -> bool:
         if not rule.last_triggered_at:
             return True
-        elapsed = (datetime.now(timezone.utc) - rule.last_triggered_at).total_seconds()
+        normalized_last_triggered = _normalize_datetime(rule.last_triggered_at)
+        if normalized_last_triggered is None:
+            return True
+        rule.last_triggered_at = normalized_last_triggered
+        elapsed = (
+            datetime.now(timezone.utc) - normalized_last_triggered
+        ).total_seconds()
         return elapsed >= max(1, rule.cooldown_seconds)
+
+    @staticmethod
+    def _altcoin_scan_for_rule(
+        rule: AlertRule, context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        altcoin_ctx = context.get("altcoin") or {}
+        scans = altcoin_ctx.get("scans") or {}
+        params = rule.params or {}
+        config_key = str(params.get("config_key") or "").strip()
+        if config_key and config_key in scans:
+            scan = scans.get(config_key) or {}
+            return scan if isinstance(scan, dict) else {}
+        return {}
+
+    @staticmethod
+    def _altcoin_row_for_rule(
+        rule: AlertRule, context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        scan = NotificationManager._altcoin_scan_for_rule(rule, context)
+        params = rule.params or {}
+        symbol = _normalize_altcoin_symbol(params.get("symbol"))
+        rows = scan.get("rows") or []
+        for row in rows:
+            if _normalize_altcoin_symbol((row or {}).get("symbol")) == symbol:
+                return dict(row or {})
+        return {}
+
+    def _eval_altcoin_score_above(
+        self, rule: AlertRule, context: Dict[str, Any]
+    ) -> Optional[str]:
+        params = rule.params or {}
+        row = self._altcoin_row_for_rule(rule, context)
+        if not row:
+            return None
+        score_key = str(params.get("score_key") or "layout").strip().lower()
+        score_field = _altcoin_score_field(score_key)
+        threshold = float(params.get("threshold", 0.0) or 0.0)
+        score = float(row.get(score_field, 0.0) or 0.0)
+        if threshold <= 0 or score < threshold:
+            return None
+        symbol = _normalize_altcoin_symbol(row.get("symbol") or params.get("symbol"))
+        signal_state = str(row.get("signal_state") or "待跟踪").strip()
+        rank_text = _altcoin_rank_text(row.get("rank"))
+        return (
+            f"山寨雷达 {symbol} 的 {score_key} 分数达到 {score:.4f}，"
+            f"超过阈值 {threshold:.4f}；{rank_text}，状态 {signal_state}"
+        )
+
+    def _eval_altcoin_rank_top_n(
+        self, rule: AlertRule, context: Dict[str, Any]
+    ) -> Optional[str]:
+        params = rule.params or {}
+        scan = self._altcoin_scan_for_rule(rule, context)
+        if not scan:
+            return None
+        symbol = _normalize_altcoin_symbol(params.get("symbol"))
+        if not symbol:
+            return None
+        sort_by = str(params.get("sort_by") or "layout").strip().lower()
+        rank_n = max(1, int(params.get("rank_n", 0) or 0))
+        sort_indexes = (scan.get("sort_indexes") or {}).get(sort_by) or {}
+        rank = int(sort_indexes.get(symbol, 0) or 0)
+        if rank <= 0 or rank > rank_n:
+            return None
+        row = self._altcoin_row_for_rule(rule, context)
+        score_field = _altcoin_score_field(
+            sort_by, allowed_keys=ALTCOIN_RANK_SCORE_KEYS
+        )
+        score = float((row or {}).get(score_field, 0.0) or 0.0)
+        signal_state = str((row or {}).get("signal_state") or "待跟踪").strip()
+        return (
+            f"山寨雷达 {symbol} 进入 {sort_by} 排序前 {rank_n}，"
+            f"当前排名 {rank}，{score_field}={score:.4f}，状态 {signal_state}"
+        )
 
     def _eval_rule(self, rule: AlertRule, context: Dict[str, Any]) -> Optional[str]:
         prices = context.get("prices", {}) or {}
@@ -547,7 +703,9 @@ class NotificationManager:
 
         if rt == "daily_pnl_below_pct":
             threshold = float(p.get("threshold_pct", -2.0))
-            daily_pct = float((risk.get("equity") or {}).get("daily_pnl_ratio", 0.0) * 100)
+            daily_pct = float(
+                (risk.get("equity") or {}).get("daily_pnl_ratio", 0.0) * 100
+            )
             if daily_pct <= threshold:
                 return f"日内收益率 {daily_pct:.2f}% <= 阈值 {threshold:.2f}%"
 
@@ -583,7 +741,11 @@ class NotificationManager:
         if rt == "stale_strategy_count_above":
             threshold = int(p.get("threshold", 0) or 0)
             if threshold > 0 and stale_running_count >= threshold:
-                names = [str(item.get("strategy", "")) for item in stale_running[:8] if item.get("strategy")]
+                names = [
+                    str(item.get("strategy", ""))
+                    for item in stale_running[:8]
+                    if item.get("strategy")
+                ]
                 return (
                     f"策略卡住数量 {stale_running_count} >= 阈值 {threshold}，"
                     f"异常策略: {', '.join(names) if names else 'unknown'}"
@@ -595,10 +757,18 @@ class NotificationManager:
                 return f"运行中策略数 {running_count} < 阈值 {threshold}"
 
         if rt == "strategy_not_running":
-            targets = [str(x).strip() for x in (p.get("strategies") or []) if str(x).strip()]
+            targets = [
+                str(x).strip() for x in (p.get("strategies") or []) if str(x).strip()
+            ]
             missing = [name for name in targets if name not in running_names]
             if missing:
                 return f"策略未运行: {', '.join(missing)}"
+
+        if rt == "altcoin_score_above":
+            return self._eval_altcoin_score_above(rule, context)
+
+        if rt == "altcoin_rank_top_n":
+            return self._eval_altcoin_rank_top_n(rule, context)
 
         return None
 

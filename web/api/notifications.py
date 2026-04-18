@@ -10,6 +10,7 @@ from core.notifications import notification_manager
 from core.risk.risk_manager import risk_manager
 from core.strategies import strategy_manager
 from core.trading import position_manager
+from web.api.altcoin import build_altcoin_notification_context
 from web.api.auth import require_sensitive_ops_permissions
 
 router = APIRouter()
@@ -58,9 +59,11 @@ async def _load_prices(exchange: str, symbols: List[str]) -> Dict[str, float]:
     return prices
 
 
-def _build_context(total_usd: Optional[float], prices: Dict[str, float]) -> Dict[str, Any]:
+async def _build_context(total_usd: Optional[float], prices: Dict[str, float]) -> Dict[str, Any]:
     risk_report = risk_manager.get_risk_report()
     strategy_summary = strategy_manager.get_dashboard_summary(signal_limit=10)
+    rules = await notification_manager.list_rules()
+    altcoin_context = await build_altcoin_notification_context(rules)
     return {
         "total_usd": float(total_usd or ((risk_report.get("equity") or {}).get("current", 0.0) or 0.0)),
         "prices": prices,
@@ -68,6 +71,7 @@ def _build_context(total_usd: Optional[float], prices: Dict[str, float]) -> Dict
         "position_count": position_manager.get_position_count(),
         "connected_exchanges": exchange_manager.get_connected_exchanges(),
         "strategy_summary": strategy_summary,
+        "altcoin": altcoin_context,
     }
 
 
@@ -134,7 +138,7 @@ async def delete_rule(rule_id: str):
 @router.post("/evaluate", dependencies=[Depends(require_sensitive_ops_permissions("manage_notifications"))])
 async def evaluate_rules(request: EvaluateRequest):
     prices = await _load_prices(request.exchange, request.symbols)
-    context = _build_context(request.total_usd, prices)
+    context = await _build_context(request.total_usd, prices)
     result = await notification_manager.evaluate_rules(context)
     return {
         "success": True,

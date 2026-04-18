@@ -244,6 +244,94 @@ def test_autonomous_agent_symbol_ranking_endpoint(monkeypatch):
     assert scan_mock.await_count == 1
 
 
+def test_load_autonomous_watchlist_runtime_prefers_snapshot_before_async_scan(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    preview_mock = AsyncMock(side_effect=AssertionError("async preview scan should not run when snapshot exists"))
+    full_scan_mock = AsyncMock(side_effect=AssertionError("full scan should not run when snapshot exists"))
+
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_runtime_config",
+        lambda: {"exchange": "binance", "selection_top_n": 6},
+    )
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_symbol_scan_preview_snapshot",
+        lambda limit=None: {
+            "selected_symbol": "SOL/USDT",
+            "top_n": int(limit or 0),
+            "top_candidates": [{"rank": 1, "symbol": "SOL/USDT"}],
+        },
+    )
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_status",
+        lambda: (_ for _ in ()).throw(AssertionError("status cache should not be consulted when snapshot exists")),
+    )
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_symbol_scan_preview", preview_mock)
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_symbol_scan", full_scan_mock)
+
+    runtime_cfg, selection = asyncio.run(ai_module._load_autonomous_watchlist_runtime())
+
+    assert runtime_cfg["exchange"] == "binance"
+    assert selection["selected_symbol"] == "SOL/USDT"
+    assert selection["top_n"] == 6
+    assert preview_mock.await_count == 0
+    assert full_scan_mock.await_count == 0
+
+
+def test_load_autonomous_watchlist_runtime_uses_status_cache_before_async_scan(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    preview_mock = AsyncMock(side_effect=AssertionError("async preview scan should not run when status cache exists"))
+    full_scan_mock = AsyncMock(side_effect=AssertionError("full scan should not run when status cache exists"))
+
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_runtime_config",
+        lambda: {"exchange": "binance", "selection_top_n": 5},
+    )
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_symbol_scan_preview_snapshot", lambda limit=None: None)
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_status",
+        lambda: {
+            "preview_symbol_scan": {
+                "selected_symbol": "ETH/USDT",
+                "top_n": 5,
+                "top_candidates": [{"rank": 1, "symbol": "ETH/USDT"}],
+            }
+        },
+    )
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_symbol_scan_preview", preview_mock)
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_symbol_scan", full_scan_mock)
+
+    runtime_cfg, selection = asyncio.run(ai_module._load_autonomous_watchlist_runtime())
+
+    assert runtime_cfg["exchange"] == "binance"
+    assert selection["selected_symbol"] == "ETH/USDT"
+    assert preview_mock.await_count == 0
+    assert full_scan_mock.await_count == 0
+
+
+def test_get_autonomous_agent_learning_memory_reuses_cached_refresh(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    force_flags = []
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_learning_memory",
+        lambda force=False: force_flags.append(bool(force))
+        or {"adaptive_risk": {"effective_min_confidence": 0.63}},
+    )
+
+    result = ai_module._get_autonomous_agent_learning_memory()
+
+    assert result["adaptive_risk"]["effective_min_confidence"] == pytest.approx(0.63)
+    assert force_flags == [False]
+
+
 def test_autonomous_agent_status_endpoint_does_not_require_ai_research_runtime(monkeypatch):
     from web.api import ai_agent as ai_module
 

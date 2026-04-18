@@ -305,10 +305,16 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_path_fields(cls, v: object) -> Path:
         if isinstance(v, Path):
-            return v
-        if isinstance(v, str):
-            return Path(v)
-        raise TypeError(f"unsupported path value type: {type(v)!r}")
+            path = v
+        elif isinstance(v, str):
+            path = Path(v)
+        else:
+            raise TypeError(f"unsupported path value type: {type(v)!r}")
+        if not path.is_absolute():
+            path = (_PROJECT_ROOT / path).resolve()
+        else:
+            path = path.resolve()
+        return path
 
 
 settings = Settings()

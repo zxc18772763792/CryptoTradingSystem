@@ -7,6 +7,13 @@ from types import SimpleNamespace
 import pandas as pd
 
 
+def _async_return(value):
+    async def _inner(*args, **kwargs):
+        return value
+
+    return _inner
+
+
 def _ohlcv_frame(index: pd.DatetimeIndex, *, start_price: float) -> pd.DataFrame:
     rows = []
     price = float(start_price)
@@ -116,6 +123,11 @@ def test_monitor_data_falls_back_to_fresh_ohlcv_and_prefers_executed_trades(monk
         "get_positions_by_strategy",
         lambda name: [],
     )
+    monkeypatch.setattr(
+        strategies_api.order_manager,
+        "get_open_orders",
+        _async_return([]),
+    )
 
     payload = asyncio.run(
         strategies_api.get_strategy_monitor_data(strategy_name, bars=120)
@@ -139,6 +151,8 @@ def test_monitor_data_falls_back_to_fresh_ohlcv_and_prefers_executed_trades(monk
     assert payload["equity"][-1]["t"] is not None
     assert payload["metrics"]["trade_count"] == 1
     assert payload["metrics"]["realized_pnl"] == 1.25
+    assert payload["signal_mode"] == "executed_trade"
+    assert payload["signal_summary"]["open_order_count"] == 0
 
 
 def test_monitor_data_restores_persisted_trade_markers_and_positions(monkeypatch):
@@ -228,6 +242,11 @@ def test_monitor_data_restores_persisted_trade_markers_and_positions(monkeypatch
             )
         ],
     )
+    monkeypatch.setattr(
+        strategies_api.order_manager,
+        "get_open_orders",
+        _async_return([]),
+    )
 
     payload = asyncio.run(
         strategies_api.get_strategy_monitor_data(strategy_name, bars=120)
@@ -247,6 +266,295 @@ def test_monitor_data_restores_persisted_trade_markers_and_positions(monkeypatch
     assert payload["metrics"]["realized_pnl"] == 1.25
     assert payload["metrics"]["unrealized_pnl"] == 0.7296
     assert payload["positions"][0]["entry_time"] == "2026-04-09T08:16:37"
+
+
+def test_monitor_data_merges_live_review_with_history_trades_without_double_counting(monkeypatch):
+    from web.api import strategies as strategies_api
+
+    strategy_name = "xrp_live_monitor_merge"
+
+    class DummyStrategy:
+        def get_recent_signals(self, limit: int = 200):
+            return []
+
+    async def fake_load_klines_from_parquet(
+        *,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        start_time=None,
+        end_time=None,
+    ):
+        idx = pd.date_range("2026-04-15 19:00:00", periods=120, freq="5min")
+        return _ohlcv_frame(idx, start_price=1.39)
+
+    monkeypatch.setattr(strategies_api.strategy_manager, "get_strategy", lambda name: DummyStrategy())
+    monkeypatch.setattr(
+        strategies_api.strategy_manager,
+        "get_strategy_info",
+        lambda name: {
+            "name": name,
+            "symbols": ["XRP/USDT"],
+            "timeframe": "5m",
+            "state": "running",
+            "exchange": "binance",
+            "runtime_mode": "live",
+        },
+    )
+    monkeypatch.setattr(
+        strategies_api.strategy_manager,
+        "_configs",
+        {strategy_name: SimpleNamespace(allocation=0.15)},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        strategies_api.data_storage,
+        "load_klines_from_parquet",
+        fake_load_klines_from_parquet,
+    )
+    monkeypatch.setattr(
+        strategies_api.execution_engine,
+        "get_live_trade_review",
+        lambda **kwargs: {
+            "count": 2,
+            "items": [
+                {
+                    "timestamp": "2026-04-15T19:45:12.489293+00:00",
+                    "strategy": strategy_name,
+                    "signal_type": "buy",
+                    "side": "buy",
+                    "fill_price": 1.3992,
+                    "pnl": 0.0,
+                    "quantity": 97.4,
+                    "order_id": "ord-open-1",
+                    "signal": {
+                        "strength": 0.1,
+                        "stop_loss": 1.3567125,
+                        "take_profit": 1.50282,
+                    },
+                },
+                {
+                    "timestamp": "2026-04-15T21:21:12.359629+00:00",
+                    "strategy": strategy_name,
+                    "signal_type": "sell",
+                    "side": "sell",
+                    "fill_price": 1.3828,
+                    "pnl": 0.0,
+                    "quantity": 784.0,
+                    "order_id": "ord-open-2",
+                    "signal": {
+                        "strength": 0.8,
+                        "stop_loss": 1.3887142857142858,
+                        "take_profit": 1.272544,
+                    },
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        strategies_api.risk_manager,
+        "get_risk_report",
+        lambda: {"equity": {"current": 2000.0}},
+    )
+    monkeypatch.setattr(
+        strategies_api.risk_manager,
+        "get_trade_history",
+        lambda limit=5000: [
+            {
+                "timestamp": "2026-04-15T19:45:12.489293+00:00",
+                "strategy": strategy_name,
+                "signal_type": "buy",
+                "side": "buy",
+                "fill_price": 1.3992,
+                "quantity": 97.4,
+                "order_id": "ord-open-1",
+                "pnl": 0.0,
+            },
+            {
+                "timestamp": "2026-04-15T21:21:12.359629+00:00",
+                "strategy": strategy_name,
+                "signal_type": "sell",
+                "side": "sell",
+                "fill_price": 1.3828,
+                "quantity": 784.0,
+                "order_id": "ord-open-2",
+                "pnl": 0.0,
+            },
+            {
+                "timestamp": "2026-04-15T22:36:09.065792+00:00",
+                "strategy": strategy_name,
+                "signal_type": "close_short",
+                "side": "buy",
+                "fill_price": 1.4014,
+                "quantity": 784.0,
+                "order_id": "ord-close-1",
+                "pnl": -14.5872,
+                "action": "manual_order",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        strategies_api.position_manager,
+        "get_positions_by_strategy",
+        lambda name: [],
+    )
+    monkeypatch.setattr(
+        strategies_api.order_manager,
+        "get_open_orders",
+        _async_return([]),
+    )
+
+    payload = asyncio.run(
+        strategies_api.get_strategy_monitor_data(strategy_name, bars=120)
+    )
+
+    assert [item["type"] for item in payload["signals"]] == ["buy", "sell", "close_short"]
+    assert payload["metrics"]["trade_count"] == 3
+    assert payload["metrics"]["realized_pnl"] == -14.5872
+    assert payload["metrics"]["unrealized_pnl"] == 0.0
+
+
+def test_monitor_data_includes_strategy_open_orders_and_marks_signal_fallback(monkeypatch):
+    from web.api import strategies as strategies_api
+
+    strategy_name = "signal_only_monitor"
+
+    class DummyStrategy:
+        def get_recent_signals(self, limit: int = 200):
+            return [
+                SimpleNamespace(
+                    timestamp=datetime.fromisoformat("2026-04-16T08:00:00"),
+                    signal_type="buy",
+                    price=1.4021,
+                    strength=0.64,
+                    stop_loss=1.381,
+                    take_profit=1.447,
+                )
+            ]
+
+    async def fake_load_klines_from_parquet(
+        *,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        start_time=None,
+        end_time=None,
+    ):
+        idx = pd.date_range("2026-04-16 06:00:00", periods=120, freq="5min")
+        return _ohlcv_frame(idx, start_price=1.39)
+
+    monkeypatch.setattr(strategies_api.strategy_manager, "get_strategy", lambda name: DummyStrategy())
+    monkeypatch.setattr(
+        strategies_api.strategy_manager,
+        "get_strategy_info",
+        lambda name: {
+            "name": name,
+            "symbols": ["XRP/USDT"],
+            "timeframe": "5m",
+            "state": "running",
+            "exchange": "binance",
+            "runtime_mode": "live",
+        },
+    )
+    monkeypatch.setattr(
+        strategies_api.strategy_manager,
+        "_configs",
+        {strategy_name: SimpleNamespace(allocation=0.15)},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        strategies_api.data_storage,
+        "load_klines_from_parquet",
+        fake_load_klines_from_parquet,
+    )
+    monkeypatch.setattr(
+        strategies_api.execution_engine,
+        "get_live_trade_review",
+        lambda **kwargs: {"count": 0, "items": []},
+    )
+    monkeypatch.setattr(
+        strategies_api.risk_manager,
+        "get_risk_report",
+        lambda: {"equity": {"current": 2000.0}},
+    )
+    monkeypatch.setattr(
+        strategies_api.risk_manager,
+        "get_trade_history",
+        lambda limit=5000: [],
+    )
+    monkeypatch.setattr(
+        strategies_api.position_manager,
+        "get_positions_by_strategy",
+        lambda name: [],
+    )
+    monkeypatch.setattr(
+        strategies_api.order_manager,
+        "get_open_orders",
+        _async_return(
+            [
+                SimpleNamespace(
+                    id="open-1",
+                    symbol="XRP/USDT",
+                    exchange="binance",
+                    side=SimpleNamespace(value="buy"),
+                    type=SimpleNamespace(value="limit"),
+                    status=SimpleNamespace(value="open"),
+                    price=1.4012,
+                    amount=150.0,
+                    filled=0.0,
+                    remaining=150.0,
+                    timestamp=datetime.fromisoformat("2026-04-16T08:03:00"),
+                ),
+                SimpleNamespace(
+                    id="open-2",
+                    symbol="ETH/USDT",
+                    exchange="binance",
+                    side=SimpleNamespace(value="sell"),
+                    type=SimpleNamespace(value="limit"),
+                    status=SimpleNamespace(value="open"),
+                    price=2350.0,
+                    amount=0.2,
+                    filled=0.0,
+                    remaining=0.2,
+                    timestamp=datetime.fromisoformat("2026-04-16T08:04:00"),
+                ),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        strategies_api.order_manager,
+        "get_order_metadata",
+        lambda order_id: {
+            "open-1": {
+                "strategy": strategy_name,
+                "account_id": "main",
+                "mode": "live",
+                "order_mode": "normal",
+                "reduce_only": False,
+                "stop_loss": 1.381,
+                "take_profit": 1.447,
+            },
+            "open-2": {
+                "strategy": "other_strategy",
+                "account_id": "main",
+                "mode": "live",
+                "order_mode": "normal",
+            },
+        }.get(order_id, {}),
+    )
+
+    payload = asyncio.run(
+        strategies_api.get_strategy_monitor_data(strategy_name, bars=120)
+    )
+
+    assert payload["signal_mode"] == "strategy_signal"
+    assert payload["signal_summary"]["executed_count"] == 0
+    assert payload["signal_summary"]["strategy_signal_count"] == 1
+    assert payload["signal_summary"]["open_order_count"] == 1
+    assert len(payload["open_orders"]) == 1
+    assert payload["open_orders"][0]["id"] == "open-1"
+    assert payload["open_orders"][0]["stop_loss"] == 1.381
+    assert payload["open_orders"][0]["take_profit"] == 1.447
 
 
 def test_monitor_data_enriches_pairs_strategy_with_dual_leg_series(monkeypatch):
@@ -332,6 +640,11 @@ def test_monitor_data_enriches_pairs_strategy_with_dual_leg_series(monkeypatch):
         strategies_api.position_manager,
         "get_positions_by_strategy",
         lambda name: [],
+    )
+    monkeypatch.setattr(
+        strategies_api.order_manager,
+        "get_open_orders",
+        _async_return([]),
     )
 
     payload = asyncio.run(

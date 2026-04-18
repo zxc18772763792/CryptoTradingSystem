@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from unittest.mock import AsyncMock
 
 from web.api import trading as trading_api
 from web.api import trading_analytics, trading_orders, trading_positions
@@ -82,3 +85,37 @@ def test_analytics_overview_route_bridges_to_service(monkeypatch):
         "symbol": "ETH/USDT",
         "all_ok": True,
     }
+
+
+def test_get_community_overview_reports_security_alert_source_truthfully(monkeypatch):
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_trade_imbalance",
+        AsyncMock(return_value={"imbalance": 0.12, "buy_volume": 12.0, "sell_volume": 8.0}),
+    )
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_whale_transfers",
+        AsyncMock(return_value={"available": True, "count": 1, "transactions": [{"btc": 120.0}]}),
+    )
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_binance_announcements",
+        AsyncMock(return_value=[{"title": "Listing update"}]),
+    )
+
+    payload = asyncio.run(trading_api.get_community_overview(symbol="BTC/USDT", exchange="binance"))
+
+    assert payload["security_alerts"]["available"] is False
+    assert payload["security_alerts"]["source"] == "unavailable"
+    assert payload["security_alerts"]["events"] == []
+    assert "占位" in payload["security_alerts"]["note"]
+
+
+def test_analytics_fallback_community_does_not_fabricate_security_events():
+    payload = trading_api._analytics_fallback_community("binance", "BTC/USDT", "collector offline")
+
+    assert payload["security_alerts"]["available"] is False
+    assert payload["security_alerts"]["source"] == "unavailable"
+    assert payload["security_alerts"]["events"] == []
+    assert "collector offline" in payload["source_error"]

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI, HTTPException
 
+from config.settings import settings
 from core.ai.proposal_schemas import ResearchProposal
 from core.research import orchestrator as orchestrator_module
 from core.research.experiment_registry import CandidateRegistry, LifecycleRegistry, ProposalRegistry
@@ -243,3 +244,42 @@ def test_exit_ai_candidate_endpoint_retires_orphan_runtime_candidate(tmp_path, m
     assert fake_manager.stopped == ["live_strategy"]
     assert fake_manager.unregistered == ["live_strategy"]
     delete_snapshot.assert_awaited_once_with("live_strategy")
+
+
+def test_ensure_runtime_state_recovers_missing_proposal_from_candidate(tmp_path, monkeypatch):
+    app = FastAPI()
+    storage_root = tmp_path / "historical"
+    storage_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(settings, "DATA_STORAGE_PATH", storage_root, raising=False)
+
+    base_dir = (storage_root / ".." / "research" / "ai").resolve()
+    candidate_registry = CandidateRegistry(base_dir / "candidates.json")
+    candidate = _build_candidate(
+        candidate_id="cand-recover",
+        proposal_id="proposal-missing-recover",
+        status="paper_running",
+    )
+    candidate.metadata = {
+        "registered_strategy_name": "EMA_ai_recovered",
+        "search_budget": {"max_templates": 3, "max_strategy_drafts": 1, "max_backtest_runs": 12, "exploration_bias": 0.2},
+    }
+    candidate_registry.save(candidate)
+
+    orchestrator_module.ensure_ai_research_runtime_state(app)
+
+    recovered = app.state.ai_proposal_registry.get(candidate.proposal_id)
+    assert recovered is not None
+    assert recovered.proposal_id == candidate.proposal_id
+    assert recovered.status == "paper_running"
+    assert recovered.latest_candidate_id == candidate.candidate_id
+    assert recovered.latest_experiment_id == candidate.experiment_id
+    assert recovered.target_symbols == ["BTC/USDT"]
+    assert recovered.target_timeframes == ["5m"]
+    assert recovered.strategy_templates == ["EMAStrategy"]
+    assert recovered.metadata["recovered_from_orphan_candidate"] is True
+    assert recovered.metadata["recovered_candidate_id"] == candidate.candidate_id
+    assert recovered.metadata["registered_strategy_name"] == "EMA_ai_recovered"
+
+    lifecycle = app.state.ai_lifecycle_registry.list_for_object("proposal", candidate.proposal_id, limit=None)
+    assert len(lifecycle) == 1
+    assert lifecycle[0].reason == "recovered missing proposal from candidate registry"

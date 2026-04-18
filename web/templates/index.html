@@ -47,6 +47,7 @@
             <button class="tab-btn" data-tab="ai-research">AI研究</button>
             <button class="tab-btn" data-tab="ai-agent">AI自治代理</button>
             <button class="tab-btn" data-tab="research">研究工坊</button>
+            <button class="tab-btn" data-tab="altcoin-radar">山寨雷达</button>
             <button class="tab-btn" data-tab="arbitrage">套利</button>
             <button class="tab-btn" data-tab="backtest">回测</button>
         </nav>
@@ -643,8 +644,10 @@
                         </div>
                         <div id="monitor-metrics-row"
                              style="display:flex;gap:16px;margin-bottom:10px;flex-wrap:wrap"></div>
+                        <div id="monitor-signal-note" class="monitor-note" style="display:none"></div>
                         <div id="strategy-monitor-chart" style="width:100%;height:520px"></div>
                         <div id="monitor-positions-row" style="margin-top:8px"></div>
+                        <div id="monitor-orders-row" style="margin-top:8px"></div>
                     </div>
 
                     <div class="card wide">
@@ -2373,6 +2376,274 @@
                 </div>
             </div>
 
+            <div id="altcoin-radar" class="tab-content">
+                <div class="altcoin-radar-workspace">
+                    <aside class="research-sidebar">
+                        <div class="card research-sticky research-control-card altcoin-radar-control-card">
+                            <h3>山寨雷达配置</h3>
+                            <div class="research-control-notes">
+                                这页负责“预警 + 选币”而不是直接下单。先确认交易所、周期和币池，再看榜单右侧解释，决定是建预警还是带入研究工坊继续验证。
+                            </div>
+
+                            <div class="research-config-section">
+                                <div class="research-config-title">扫描参数</div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>交易所</label>
+                                        <select id="altcoin-radar-exchange">
+                                            <option value="binance" selected>Binance</option>
+                                            <option value="okx">OKX</option>
+                                            <option value="gate">Gate.io</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>周期</label>
+                                        <select id="altcoin-radar-timeframe">
+                                            <option value="1h">1小时</option>
+                                            <option value="4h" selected>4小时</option>
+                                            <option value="1d">日线</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>排序模式</label>
+                                        <select id="altcoin-radar-sort">
+                                            <option value="layout" selected>布局优先</option>
+                                            <option value="alert">异动优先</option>
+                                            <option value="control">高控盘优先</option>
+                                            <option value="anomaly">异动因子</option>
+                                            <option value="heat">综合热度</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>前端过滤</label>
+                                        <select id="altcoin-radar-filter">
+                                            <option value="all" selected>全部候选</option>
+                                            <option value="layout">仅布局吸筹</option>
+                                            <option value="anomaly">仅异动启动</option>
+                                            <option value="control">仅高控盘</option>
+                                            <option value="alerted">仅已建预警</option>
+                                            <option value="fresh">仅数据新鲜</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="research-config-section">
+                                <div class="research-config-title">币池选择 <span style="font-weight:400;color:#7e92b2;">(按住Ctrl多选，默认最多 30 个)</span></div>
+                                <div class="form-group">
+                                    <select id="altcoin-radar-universe" multiple size="12">
+                                        <option value="BTC/USDT" selected>BTC/USDT</option>
+                                        <option value="ETH/USDT" selected>ETH/USDT</option>
+                                        <option value="BNB/USDT" selected>BNB/USDT</option>
+                                        <option value="SOL/USDT" selected>SOL/USDT</option>
+                                        <option value="XRP/USDT" selected>XRP/USDT</option>
+                                        <option value="ADA/USDT" selected>ADA/USDT</option>
+                                        <option value="DOGE/USDT" selected>DOGE/USDT</option>
+                                        <option value="TRX/USDT" selected>TRX/USDT</option>
+                                        <option value="LINK/USDT" selected>LINK/USDT</option>
+                                        <option value="AVAX/USDT" selected>AVAX/USDT</option>
+                                        <option value="DOT/USDT" selected>DOT/USDT</option>
+                                        <option value="TON/USDT" selected>TON/USDT</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div class="research-config-section">
+                                <div class="research-config-title">筛选开关</div>
+                                <label class="research-checkbox-label">
+                                    <input type="checkbox" id="altcoin-radar-only-alerted">
+                                    <span>仅看已建预警</span>
+                                </label>
+                                <label class="research-checkbox-label">
+                                    <input type="checkbox" id="altcoin-radar-exclude-retired" checked>
+                                    <span>排除停更 / 退市币种</span>
+                                </label>
+                            </div>
+
+                            <div class="inline-actions">
+                                <button class="btn btn-primary btn-sm" id="btn-altcoin-radar-refresh">刷新雷达</button>
+                                <button class="btn btn-primary btn-sm" id="btn-altcoin-radar-force-refresh">强制刷新</button>
+                            </div>
+
+                            <div id="altcoin-radar-status-note" class="altcoin-radar-status-note" data-tone="neutral">
+                                等待首次扫描
+                            </div>
+                            <div id="altcoin-radar-cache-hint" class="research-control-notes">
+                                默认缓存：1h 120s / 4h 300s / 1d 900s；强制刷新会绕过缓存重新计算。
+                            </div>
+                        </div>
+                    </aside>
+
+                    <div class="research-main">
+                        <div class="research-top-grid altcoin-radar-top-grid">
+                            <div class="card altcoin-radar-summary-card">
+                                <div class="research-lab-header">
+                                    <div>
+                                        <h3>雷达摘要</h3>
+                                        <div class="research-control-notes">先看今天是否真的有值得追踪的山寨候选，再决定深入哪一个。</div>
+                                    </div>
+                                    <div class="inline-actions">
+                                        <button class="btn btn-sm" id="btn-altcoin-radar-open-research">带入研究工坊</button>
+                                    </div>
+                                </div>
+                                <div id="altcoin-radar-summary-strip" class="altcoin-radar-summary-grid">
+                                    <div class="altcoin-radar-summary-metric">
+                                        <span>扫描币数</span>
+                                        <strong>--</strong>
+                                    </div>
+                                    <div class="altcoin-radar-summary-metric">
+                                        <span>异动启动</span>
+                                        <strong>--</strong>
+                                    </div>
+                                    <div class="altcoin-radar-summary-metric">
+                                        <span>布局吸筹</span>
+                                        <strong>--</strong>
+                                    </div>
+                                    <div class="altcoin-radar-summary-metric">
+                                        <span>高控盘</span>
+                                        <strong>--</strong>
+                                    </div>
+                                    <div class="altcoin-radar-summary-metric">
+                                        <span>降级行数</span>
+                                        <strong>--</strong>
+                                    </div>
+                                    <div class="altcoin-radar-summary-metric">
+                                        <span>当前榜首</span>
+                                        <strong>--</strong>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="card research-status-board altcoin-radar-meta-card">
+                                <h3>扫描元信息</h3>
+                                <div id="altcoin-radar-meta-list" class="list">
+                                    <div class="list-item"><span>状态</span><span>等待扫描</span></div>
+                                    <div class="list-item"><span>缓存</span><span>--</span></div>
+                                    <div class="list-item"><span>币池</span><span>--</span></div>
+                                    <div class="list-item"><span>更新时间</span><span>--</span></div>
+                                </div>
+                                <div id="altcoin-radar-warning-list" class="altcoin-radar-warning-list">
+                                    <div class="altcoin-radar-warning">暂无警告</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card altcoin-radar-table-card">
+                            <div class="research-lab-header">
+                                <div>
+                                    <h3>候选榜单</h3>
+                                    <div class="research-control-notes">点击任一行，右侧会拆开“代理行为引擎”和“链上 / 外生确认引擎”的理由。</div>
+                                </div>
+                                <div class="inline-actions">
+                                    <span id="altcoin-radar-table-note" class="altcoin-radar-inline-note">等待扫描结果...</span>
+                                </div>
+                            </div>
+                            <div class="table-container">
+                                <table class="altcoin-radar-table">
+                                    <thead>
+                                        <tr>
+                                            <th>排名</th>
+                                            <th>币种</th>
+                                            <th>布局分</th>
+                                            <th>异动分</th>
+                                            <th>吸筹分</th>
+                                            <th>控盘分</th>
+                                            <th>链上确认</th>
+                                            <th>新鲜度</th>
+                                            <th>状态标签</th>
+                                            <th>操作</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="altcoin-radar-ranking-body">
+                                        <tr>
+                                            <td colspan="10" class="altcoin-radar-empty">等待扫描结果...</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="card altcoin-radar-inspector-card">
+                            <div class="research-lab-header">
+                                <div>
+                                    <h3>候选检视器</h3>
+                                    <div id="altcoin-radar-selected-subtitle" class="research-control-notes">
+                                        先从左侧榜单选择一个候选，右侧会解释为什么它上榜、哪里需要警惕、下一步怎么处理。
+                                    </div>
+                                </div>
+                                <div class="inline-actions">
+                                    <button class="btn btn-sm" id="btn-altcoin-radar-alert-anomaly">建异动预警</button>
+                                    <button class="btn btn-sm" id="btn-altcoin-radar-alert-layout">建吸筹预警</button>
+                                    <button class="btn btn-sm" id="btn-altcoin-radar-alert-control">建控盘预警</button>
+                                </div>
+                            </div>
+
+                            <div id="altcoin-radar-inspector-empty" class="altcoin-radar-inspector-empty">
+                                暂无已选候选
+                            </div>
+
+                            <div id="altcoin-radar-inspector-shell" class="altcoin-radar-inspector-shell is-hidden">
+                                <div class="altcoin-radar-inspector-head">
+                                    <div>
+                                        <div id="altcoin-radar-selected-symbol" class="altcoin-radar-selected-symbol">--</div>
+                                        <div id="altcoin-radar-selected-tags" class="altcoin-radar-tag-row"></div>
+                                    </div>
+                                    <div id="altcoin-radar-selected-scores" class="altcoin-radar-score-strip"></div>
+                                </div>
+
+                                <div class="altcoin-radar-detail-grid">
+                                    <div class="altcoin-radar-detail-panel">
+                                        <div class="altcoin-radar-panel-title">价格路径</div>
+                                        <div id="altcoin-radar-sparkline" class="altcoin-radar-sparkline">等待加载...</div>
+                                    </div>
+                                    <div class="altcoin-radar-detail-panel">
+                                        <div class="altcoin-radar-panel-title">数据质量</div>
+                                        <div id="altcoin-radar-data-quality" class="list">
+                                            <div class="list-item"><span>状态</span><span>--</span></div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="altcoin-radar-detail-grid altcoin-radar-detail-grid-wide">
+                                    <div class="altcoin-radar-detail-panel">
+                                        <div class="altcoin-radar-panel-title">代理行为证据</div>
+                                        <div id="altcoin-radar-proxy-components" class="altcoin-radar-component-list"></div>
+                                        <div id="altcoin-radar-proxy-reasons" class="altcoin-radar-reason-list"></div>
+                                    </div>
+                                    <div class="altcoin-radar-detail-panel">
+                                        <div class="altcoin-radar-panel-title">链上 / 外生确认</div>
+                                        <div id="altcoin-radar-chain-components" class="altcoin-radar-component-list"></div>
+                                        <div id="altcoin-radar-chain-reasons" class="altcoin-radar-reason-list"></div>
+                                    </div>
+                                </div>
+
+                                <div class="altcoin-radar-detail-grid altcoin-radar-detail-grid-wide">
+                                    <div class="altcoin-radar-detail-panel">
+                                        <div class="altcoin-radar-panel-title">关键指标</div>
+                                        <div id="altcoin-radar-key-metrics" class="list">
+                                            <div class="list-item"><span>指标</span><span>--</span></div>
+                                        </div>
+                                    </div>
+                                    <div class="altcoin-radar-detail-panel">
+                                        <div class="altcoin-radar-panel-title">失效条件 / 风险</div>
+                                        <div id="altcoin-radar-invalidate-list" class="altcoin-radar-reason-list"></div>
+                                    </div>
+                                </div>
+
+                                <div class="altcoin-radar-detail-panel">
+                                    <div class="altcoin-radar-panel-title">相关候选</div>
+                                    <div id="altcoin-radar-related-list" class="altcoin-radar-related-list"></div>
+                                </div>
+                            </div>
+
+                            <pre id="altcoin-radar-output" class="output-box">等待山寨雷达输出...</pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div id="arbitrage" class="tab-content">
                 <div class="arbitrage-workspace">
                     <aside class="research-sidebar">
@@ -2498,28 +2769,43 @@
                                     <button class="btn btn-primary" id="btn-arbitrage-register">接入策略库并运行</button>
                                     <button class="btn btn-primary" id="btn-arbitrage-backtest">带配置进入回测</button>
                                 </div>
-                                <pre id="arbitrage-run-output" class="output-box">等待操作：可先加载模板，再决定注册运行或进入回测。</pre>
+                                <pre id="arbitrage-run-output" class="output-box">等待操作：可先加载模板，再决定注册运行、加入观察或进入回测。</pre>
                             </div>
 
-                            <div class="card research-status-board">
-                                <h3>套利状态</h3>
-                                <div class="research-status-grid">
-                                    <div class="research-status-item" id="arbitrage-config-snapshot">
-                                        <span class="status-label">配置</span>
-                                        <span class="status-value">等待加载</span>
+                            <div class="card arbitrage-risk-board">
+                                <div class="research-lab-header">
+                                    <div>
+                                        <h3>套利风控闸门</h3>
+                                        <div id="arbitrage-action-summary" class="research-control-notes">
+                                            正在评估当前套利配置的样本覆盖、回测可信度、成本压缩与入场状态...
+                                        </div>
                                     </div>
-                                    <div class="research-status-item" id="arbitrage-universe-snapshot">
-                                        <span class="status-label">币池</span>
-                                        <span class="status-value">等待加载</span>
-                                    </div>
-                                    <div class="research-status-item" id="arbitrage-backtest-snapshot">
-                                        <span class="status-label">回测</span>
-                                        <span class="status-value">等待加载</span>
-                                    </div>
-                                    <div class="research-status-item research-status-highlight" id="arbitrage-next-step">
-                                        <span class="status-label">下一步</span>
-                                        <span class="status-value">等待加载</span>
-                                    </div>
+                                    <span id="arbitrage-action-chip" class="arbitrage-chip" data-tone="info">等待评估</span>
+                                </div>
+                                <div class="arbitrage-risk-grid">
+                                    <article class="arbitrage-risk-item" id="arbitrage-data-card" data-tone="info">
+                                        <div class="arbitrage-risk-label">数据就绪</div>
+                                        <div class="arbitrage-risk-value">等待评估</div>
+                                        <div class="arbitrage-risk-meta">加载模板后展示双腿 / 横截面样本覆盖情况</div>
+                                    </article>
+                                    <article class="arbitrage-risk-item" id="arbitrage-backtest-card" data-tone="info">
+                                        <div class="arbitrage-risk-label">回测可信度</div>
+                                        <div class="arbitrage-risk-value">等待评估</div>
+                                        <div class="arbitrage-risk-meta">将根据策略类型自动判断可回测、近似回测或仅实时验证</div>
+                                    </article>
+                                    <article class="arbitrage-risk-item" id="arbitrage-cost-card" data-tone="info">
+                                        <div class="arbitrage-risk-label">成本压缩</div>
+                                        <div class="arbitrage-risk-value">等待评估</div>
+                                        <div class="arbitrage-risk-meta">优先识别结构边际不足、成本吞噬边际与结果失真</div>
+                                    </article>
+                                    <article class="arbitrage-risk-item" id="arbitrage-entry-card" data-tone="info">
+                                        <div class="arbitrage-risk-label">当前入场状态</div>
+                                        <div class="arbitrage-risk-value">等待评估</div>
+                                        <div class="arbitrage-risk-meta">当未进入开仓区时，仅允许加入观察，不建议直接运行</div>
+                                    </article>
+                                </div>
+                                <div id="arbitrage-risk-diagnostics" class="arbitrage-diagnostic-list">
+                                    <div class="list-item"><span>诊断</span><span>等待评估当前阻塞原因...</span></div>
                                 </div>
                             </div>
                         </div>
@@ -2529,39 +2815,77 @@
                                 <div>
                                     <h3>配对币种扫描榜</h3>
                                     <div class="research-control-notes">
-                                        只需确认当前交易所与周期，点击“一键筛选前十”即可从本地K线中筛出更适合做配对交易的候选组合。当前支持正相关与负相关 pair；榜单用于挑选组合，不直接替代策略真实入场信号。
+                                        只需确认当前交易所与周期，点击“一键筛选前十”即可从本地K线中筛出更适合做配对交易的候选组合。榜单会拆分为“研究候选”和“当前可开仓候选”，把高分但仍处于观察区的 pair 与真正触发入场的 pair 分开显示。
                                     </div>
                                 </div>
                                 <div class="inline-actions">
                                     <button class="btn btn-primary" id="btn-arbitrage-scan-pairs">一键筛选前十</button>
-                                    <button class="btn btn-primary btn-sm" id="btn-arbitrage-apply-top-pair">回填榜首组合</button>
+                                    <button class="btn btn-primary btn-sm" id="btn-arbitrage-apply-top-pair">回填研究榜首</button>
+                                    <button class="btn btn-primary btn-sm" id="btn-arbitrage-apply-live-top-pair">回填可执行榜首</button>
                                 </div>
                             </div>
                             <div id="arbitrage-pair-scan-summary" class="list arbitrage-pair-summary">
                                 <div class="list-item"><span>状态</span><span>等待筛选：确认周期后点击“一键筛选前十”</span></div>
                                 <div class="list-item"><span>范围</span><span>默认扫描研究币池与本地可用K线</span></div>
-                                <div class="list-item"><span>提示</span><span>实际开仓仍以 `PairsTradingStrategy` 的 z-score 穿越规则为准</span></div>
+                                <div class="list-item"><span>提示</span><span>研究候选用于挑选组合，真正可执行仍以入场闸门和上方风控卡为准</span></div>
                             </div>
-                            <div class="table-container">
-                                <table class="arbitrage-pair-table">
-                                    <thead>
-                                        <tr>
-                                            <th>排名</th>
-                                            <th>币对</th>
-                                            <th>总分</th>
-                                            <th>相关性</th>
-                                            <th>Z-Score</th>
-                                            <th>半衰期</th>
-                                            <th>状态</th>
-                                            <th>操作</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="arbitrage-pair-ranking-body">
-                                        <tr>
-                                            <td colspan="8" class="arbitrage-pair-empty">等待筛选结果...</td>
-                                        </tr>
-                                    </tbody>
-                                </table>
+                            <div class="arbitrage-pair-split">
+                                <section class="arbitrage-pair-section">
+                                    <div class="arbitrage-pair-section-head">
+                                        <h4>研究候选</h4>
+                                        <span id="arbitrage-research-count" class="arbitrage-chip">0 组</span>
+                                    </div>
+                                    <div class="table-container">
+                                        <table class="arbitrage-pair-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>排名</th>
+                                                    <th>币对</th>
+                                                    <th>总分</th>
+                                                    <th>相关性</th>
+                                                    <th>Z-Score</th>
+                                                    <th>半衰期</th>
+                                                    <th>入场状态</th>
+                                                    <th>阻塞 / 说明</th>
+                                                    <th>操作</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="arbitrage-pair-ranking-body">
+                                                <tr>
+                                                    <td colspan="9" class="arbitrage-pair-empty">等待筛选结果...</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </section>
+                                <section class="arbitrage-pair-section">
+                                    <div class="arbitrage-pair-section-head">
+                                        <h4>当前可开仓候选</h4>
+                                        <span id="arbitrage-executable-count" class="arbitrage-chip" data-tone="ok">0 组</span>
+                                    </div>
+                                    <div class="table-container">
+                                        <table class="arbitrage-pair-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>排名</th>
+                                                    <th>币对</th>
+                                                    <th>总分</th>
+                                                    <th>相关性</th>
+                                                    <th>Z-Score</th>
+                                                    <th>半衰期</th>
+                                                    <th>执行方向</th>
+                                                    <th>说明</th>
+                                                    <th>操作</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="arbitrage-executable-pair-body">
+                                                <tr>
+                                                    <td colspan="9" class="arbitrage-pair-empty">当前还没有进入开仓区的 pair...</td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </section>
                             </div>
                         </div>
 
@@ -2578,7 +2902,7 @@
                                 <pre id="arbitrage-payload-preview" class="output-box">等待生成参数...</pre>
                             </div>
                             <div class="card">
-                                <h3>接入说明</h3>
+                                <h3>诊断与接入说明</h3>
                                 <div id="arbitrage-integration-notes" class="list">
                                     <div class="list-item"><span>策略库</span><span>等待加载</span></div>
                                     <div class="list-item"><span>回测页</span><span>等待加载</span></div>
@@ -2775,6 +3099,7 @@
 
     <div id="notification" class="notification"></div>
 
+    <script charset="utf-8" src="{{ static_asset_url('js/altcoin_radar.js') }}"></script>
     <script charset="utf-8" src="{{ static_asset_url('js/app.js') }}"></script>
     <script charset="utf-8" src="{{ static_asset_url('js/research_workbench.js') }}"></script>
     <script charset="utf-8" src="{{ static_asset_url('js/ai_research.js') }}"></script>

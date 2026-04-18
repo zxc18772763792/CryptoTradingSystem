@@ -24,6 +24,16 @@ from core.ai.autonomous_learning import (
     default_learning_memory,
     normalize_symbol,
 )
+from core.ai.model_feedback_errors import (
+    classify_model_feedback_error as _shared_classify_model_feedback_error,
+    describe_model_feedback_issue as _shared_describe_model_feedback_issue,
+    extract_model_feedback_http_status as _shared_extract_model_feedback_http_status,
+)
+from core.ai.provider_runtime_policy import (
+    provider_runtime_capability_catalog,
+    provider_runtime_policy,
+    resolve_provider_for_runtime_capability,
+)
 from core.ai.signal_aggregator import signal_aggregator
 from core.backtest.cost_models import dynamic_slippage_rate, microstructure_proxies
 from core.data import data_storage
@@ -460,31 +470,11 @@ def _missing_market_bar_count(index: Any, timeframe_sec: int) -> int:
 
 
 def _classify_model_feedback_error(exc: BaseException) -> Optional[str]:
-    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
-        return "timeout"
-    text = str(exc or "").strip().lower()
-    if not text:
-        return None
-    status = _extract_model_feedback_http_status(text)
-    if "timeout" in text:
-        return "timeout"
-    if status == 429 or "_http_429" in text or "usage_limit_exceeded" in text or "rate limit" in text or "too many requests" in text:
-        return "rate_limit"
-    if status in {502, 503, 504} or "service temporarily unavailable" in text or "service unavailable" in text:
-        return "service_unavailable"
-    return None
+    return _shared_classify_model_feedback_error(exc)
 
 
 def _extract_model_feedback_http_status(exc: Any) -> Optional[int]:
-    text = str(exc or "").strip().lower()
-    if not text:
-        return None
-    match = re.search(r"_http_(\d{3})", text)
-    if not match:
-        return None
-    with contextlib.suppress(Exception):
-        return int(match.group(1))
-    return None
+    return _shared_extract_model_feedback_http_status(exc)
 
 
 def _describe_model_feedback_issue_legacy(raw_error: Any) -> Dict[str, Any]:
@@ -561,6 +551,15 @@ def _describe_model_feedback_issue(raw_error: Any) -> Dict[str, Any]:
         "code": code,
         "raw_error": normalized[:300],
     }
+
+
+# Override the inline copies above so all call sites share the same classifier.
+def _describe_model_feedback_issue_legacy(raw_error: Any) -> Dict[str, Any]:
+    return _shared_describe_model_feedback_issue(raw_error, fallback_action="hold")
+
+
+def _describe_model_feedback_issue(raw_error: Any) -> Dict[str, Any]:
+    return _shared_describe_model_feedback_issue(raw_error, fallback_action="hold")
 
 
 def _build_model_output_debug(
@@ -783,6 +782,7 @@ class AutonomousTradingAgent:
                 "default_model": self._provider_model(item),
                 "base_url": (base_urls[0] if base_urls else self._provider_base_url(item)),
             }
+            providers[item].update(provider_runtime_capability_catalog(item))
             if item == "codex" and len(base_urls) > 1:
                 providers[item]["backup_base_urls"] = base_urls[1:]
                 providers[item]["failover_enabled"] = True
@@ -1086,6 +1086,8 @@ class AutonomousTradingAgent:
         enabled = bool(current.get("enabled"))
         auto_start = bool(current.get("auto_start"))
         allow_live = bool(current.get("allow_live"))
+        provider = str(current.get("provider") or "codex")
+        provider_live_policy = provider_runtime_policy(provider, "autonomous_live_execution")
         running = self.is_running()
         runtime_profile = self._detect_runtime_profile(current)
 
@@ -1098,6 +1100,10 @@ class AutonomousTradingAgent:
         if allow_live:
             reason_codes.append("allow_live_enabled")
             recommendations.append("disable_allow_live")
+        if allow_live and bool(provider_live_policy.get("restricted")):
+            if provider_live_policy.get("reason_code"):
+                reason_codes.append(str(provider_live_policy.get("reason_code")))
+            recommendations.append("switch_live_provider")
         if not enabled:
             reason_codes.append("agent_disabled")
             recommendations.append("enable_agent")
@@ -1128,6 +1134,8 @@ class AutonomousTradingAgent:
             "auto_start": auto_start,
             "armed_for_execution": bool(mode == "execute"),
             "live_capable": allow_live,
+            "provider": provider,
+            "provider_live_policy": provider_live_policy,
             "safe_for_paper_longrun": safe_for_paper_longrun,
             "paper_longrun_profile_applied": paper_longrun_profile_applied,
             "paper_longrun_profile_ready": paper_longrun_profile_ready,
@@ -4906,6 +4914,7 @@ class AutonomousTradingAgent:
                         "position_source": "",
                         "position_unrealized_pnl": 0.0,
                         "position_unrealized_pnl_pct": 0.0,
+                        "scan_error": True,
                     }
 
             concurrency = max(1, min(int(_AUTO_SYMBOL_SCAN_CONCURRENCY), len(symbols) or 1))
@@ -4941,6 +4950,8 @@ class AutonomousTradingAgent:
             rows = await _scan_rows(universe_symbols, skip_live_market=False)
 
         rows = _sort_rows(rows)
+        scan_error_rows = [row for row in rows if bool(row.get("scan_error"))]
+        rows = [row for row in rows if not bool(row.get("scan_error"))]
 
         selected_row = rows[0] if rows else {
             "symbol": configured_symbol,
@@ -4963,6 +4974,8 @@ class AutonomousTradingAgent:
         }
         if symbol_mode != "auto":
             selection_reason = "manual_symbol"
+        elif not rows:
+            selection_reason = "no_viable_candidates"
         elif bool(selected_row.get("has_position")):
             selection_reason = "existing_position_priority"
         else:
@@ -4979,6 +4992,7 @@ class AutonomousTradingAgent:
             "selected_symbol": str(selected_row.get("symbol") or configured_symbol),
             "selection_reason": selection_reason,
             "candidate_count": len(rows),
+            "scan_error_count": len(scan_error_rows),
             "top_n": selection_top_n,
             "top_candidates": rows[:selection_top_n],
             "scan_config": {
@@ -5668,6 +5682,26 @@ class AutonomousTradingAgent:
                 model = str(effective_cfg.get("model") or self._provider_model(provider))
                 system_prompt, user_prompt = self._build_prompt(effective_cfg, context_payload)
                 try:
+                    trading_mode = str(context_payload.get("trading_mode") or execution_engine.get_trading_mode() or "paper").strip().lower()
+                    if trading_mode == "live" and bool(effective_cfg.get("allow_live")):
+                        provider_resolution = resolve_provider_for_runtime_capability(
+                            requested_provider=provider,
+                            providers=dict(effective_cfg.get("providers") or {}),
+                            capability="autonomous_live_execution",
+                        )
+                        if provider_resolution.get("fallback") and str(provider_resolution.get("provider") or "").strip():
+                            provider = str(provider_resolution.get("provider") or provider)
+                            model = self._provider_model(provider)
+                            logger.info(
+                                "autonomous agent switched provider for live execution "
+                                f"to {provider}/{model} because requested provider is runtime-restricted"
+                            )
+                        elif provider_resolution.get("restricted"):
+                            policy = dict(provider_resolution.get("policy") or {})
+                            raise RuntimeError(
+                                f"{provider}_live_trading_not_permitted:"
+                                f"{policy.get('reason') or 'live trading is not permitted'}"
+                            )
                     raw_decision = await asyncio.wait_for(
                         self._call_provider(
                             provider=provider,

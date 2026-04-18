@@ -168,7 +168,25 @@ def _derive_parameter_space(strategy_templates: List[str]) -> Dict[str, Dict[str
     return out
 
 
-def _parse_market_context(market_context: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+def _record_optional_context_issue(planner_notes: Optional[List[str]], source: str, exc: Optional[BaseException] = None) -> None:
+    if planner_notes is None:
+        return
+    label = str(source or "").strip()
+    if not label:
+        return
+    detail = str(exc or "").strip()
+    note = f"optional context unavailable: {label}"
+    if detail:
+        note = f"{note} ({detail[:120]})"
+    if note not in planner_notes:
+        planner_notes.append(note)
+
+
+def _parse_market_context(
+    market_context: Dict[str, Any],
+    *,
+    planner_notes: Optional[List[str]] = None,
+) -> Tuple[List[str], List[str]]:
     """E: Extract boosted / suppressed category hints from market context signals."""
     boosted: List[str] = []
     suppressed: List[str] = []
@@ -268,8 +286,8 @@ def _parse_market_context(market_context: Dict[str, Any]) -> Tuple[List[str], Li
                 suppressed.extend(["趋势"])
             elif trend_val < 20:
                 boosted.extend(["均值回归"])
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_optional_context_issue(planner_notes, "Google Trends", exc)
 
     # F3: Macro (yfinance primary + FRED supplement)
     try:
@@ -307,8 +325,8 @@ def _parse_market_context(market_context: Dict[str, Any]) -> Tuple[List[str], Li
         cn_m1_m2_gap = macro.get("cn_m1_m2_gap")
         if cn_m1_m2_gap is not None and abs(float(cn_m1_m2_gap or 0.0)) >= 2.0:
             boosted.extend(["宏观"])
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_optional_context_issue(planner_notes, "Macro snapshot", exc)
 
     # F4a: Glassnode on-chain (no-op if key absent / cache cold)
     try:
@@ -334,8 +352,8 @@ def _parse_market_context(market_context: Dict[str, Any]) -> Tuple[List[str], Li
                 boosted.extend(["风险", "震荡"])
             elif netflow < 0:     # outflow = accumulation signal
                 boosted.extend(["趋势"])
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_optional_context_issue(planner_notes, "Glassnode snapshot", exc)
 
     # F4b: CryptoQuant flows (no-op if key absent / cache cold)
     try:
@@ -350,8 +368,8 @@ def _parse_market_context(market_context: Dict[str, Any]) -> Tuple[List[str], Li
         ffr = cq.get("fund_flow_ratio")
         if ffr is not None and ffr > 0.2:   # >20% of supply on exchanges = sell risk
             boosted.extend(["风险"])
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_optional_context_issue(planner_notes, "CryptoQuant snapshot", exc)
 
     # F4c: Nansen smart money (no-op if key absent / cache cold)
     try:
@@ -368,8 +386,8 @@ def _parse_market_context(market_context: Dict[str, Any]) -> Tuple[List[str], Li
         if lp_chg is not None:
             if lp_chg < -5:       # LP withdrawing = risk-off
                 boosted.extend(["风险"])
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_optional_context_issue(planner_notes, "Nansen snapshot", exc)
 
     # F4d: Kaiko microstructure quality (no-op if key absent / cache cold)
     try:
@@ -384,12 +402,12 @@ def _parse_market_context(market_context: Dict[str, Any]) -> Tuple[List[str], Li
                 boosted.extend(["趋势"])
         depth_1pct = kk.get("liquidity_depth_1pct")
         if depth_1pct is not None and depth_1pct < 2_000_000:
-            boosted.extend(["风险"])
+                boosted.extend(["风险"])
         trade_cnt = kk.get("trade_count_1h")
         if trade_cnt is not None and trade_cnt > 50_000:
             boosted.extend(["动量"])
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_optional_context_issue(planner_notes, "Kaiko snapshot", exc)
 
     return _dedupe_keep_order(boosted), _dedupe_keep_order(suppressed)
 
@@ -710,7 +728,7 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
 
     # E: process market context to get category boost/suppress hints
     market_context = dict(request.market_context or {})
-    boost_categories, suppress_categories = _parse_market_context(market_context)
+    boost_categories, suppress_categories = _parse_market_context(market_context, planner_notes=planner_notes)
 
     # E: record what signals were used
     if market_context:
@@ -749,8 +767,8 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
             _tv = _gt_latest("bitcoin")
             if _tv is not None:
                 signal_parts.append(f"谷歌趋势={_tv:.0f}")
-        except Exception:
-            pass
+        except Exception as exc:
+            _record_optional_context_issue(planner_notes, "Google Trends", exc)
         try:
             from core.data.macro_collector import load_macro_snapshot as _macro_snap  # noqa: PLC0415
             _m = _macro_snap()
@@ -787,8 +805,8 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
                 signal_parts.append("Macro[US]=" + " · ".join(_us_parts))
             if _cn_parts:
                 signal_parts.append("Macro[China]=" + " · ".join(_cn_parts))
-        except Exception:
-            pass
+        except Exception as exc:
+            _record_optional_context_issue(planner_notes, "Macro snapshot", exc)
         try:
             from core.data.kaiko_collector import load_kaiko_snapshot as _kaiko_snap  # noqa: PLC0415
             _k = _kaiko_snap()
@@ -801,8 +819,8 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
                 _kaiko_parts.append(f"成交数={float(_k['trade_count_1h']):.0f}")
             if _kaiko_parts:
                 signal_parts.append("Kaiko=[" + " · ".join(_kaiko_parts) + "]")
-        except Exception:
-            pass
+        except Exception as exc:
+            _record_optional_context_issue(planner_notes, "Kaiko snapshot", exc)
         factors = market_context.get("factors") or {}
         if isinstance(factors, dict) and factors:
             top_factors = [f"{k}={float(v):.2f}" for k, v in factors.items() if float(v or 0) > 0.3]

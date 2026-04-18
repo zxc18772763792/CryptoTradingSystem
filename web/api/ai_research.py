@@ -886,20 +886,67 @@ async def _load_autonomous_watchlist_runtime() -> tuple[Dict[str, Any], Dict[str
         logger.debug(f"live-signals: runtime config unavailable: {exc}")
         runtime_cfg = {}
 
-    async def _load_selection(method_name: str) -> Dict[str, Any]:
+    try:
+        selection_limit = max(3, min(int(runtime_cfg.get("selection_top_n") or 8), 20))
+    except Exception:
+        selection_limit = 8
+
+    def _coerce_selection(payload: Any) -> Dict[str, Any]:
+        return dict(payload or {}) if isinstance(payload, dict) else {}
+
+    def _selection_from_status(payload: Any) -> Dict[str, Any]:
+        status_payload = _coerce_selection(payload)
+        for key in ("preview_symbol_scan", "last_symbol_scan"):
+            selection_payload = _coerce_selection(status_payload.get(key))
+            if selection_payload:
+                return selection_payload
+        return {}
+
+    snapshot_method = getattr(autonomous_trading_agent, "get_symbol_scan_preview_snapshot", None)
+    if callable(snapshot_method):
+        try:
+            selection = _coerce_selection(snapshot_method(limit=selection_limit))
+        except Exception as exc:
+            logger.debug(f"live-signals: get_symbol_scan_preview_snapshot unavailable: {exc}")
+            selection = {}
+        if selection:
+            return runtime_cfg, selection
+
+    status_method = getattr(autonomous_trading_agent, "get_status", None)
+    if callable(status_method):
+        try:
+            selection = _selection_from_status(status_method())
+        except Exception as exc:
+            logger.debug(f"live-signals: get_status unavailable: {exc}")
+            selection = {}
+        if selection:
+            return runtime_cfg, selection
+
+    async def _load_selection(method_name: str, *, timeout_sec: float) -> Dict[str, Any]:
         method = getattr(autonomous_trading_agent, method_name, None)
         if not callable(method):
             return {}
-        payload = await asyncio.wait_for(asyncio.shield(method(force=False)), timeout=10.0)
-        return dict(payload or {}) if isinstance(payload, dict) else {}
+        payload = await asyncio.wait_for(
+            asyncio.shield(method(limit=selection_limit, force=False)),
+            timeout=timeout_sec,
+        )
+        return _coerce_selection(payload)
 
-    for method_name in ("get_symbol_scan_preview", "get_symbol_scan"):
-        if selection:
-            break
+    preview_method = getattr(autonomous_trading_agent, "get_symbol_scan_preview", None)
+    if callable(preview_method):
         try:
-            selection = await _load_selection(method_name)
+            selection = await _load_selection("get_symbol_scan_preview", timeout_sec=4.0)
         except Exception as exc:
-            logger.debug(f"live-signals: {method_name} unavailable: {exc}")
+            logger.debug(f"live-signals: get_symbol_scan_preview unavailable: {exc}")
+            selection = {}
+        return runtime_cfg, selection
+
+    full_scan_method = getattr(autonomous_trading_agent, "get_symbol_scan", None)
+    if callable(full_scan_method):
+        try:
+            selection = await _load_selection("get_symbol_scan", timeout_sec=4.0)
+        except Exception as exc:
+            logger.debug(f"live-signals: get_symbol_scan unavailable: {exc}")
             selection = {}
     return runtime_cfg, selection
 
@@ -2246,7 +2293,7 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
 
 def _get_autonomous_agent_learning_memory() -> Dict[str, Any]:
     try:
-        payload = autonomous_trading_agent.get_learning_memory(force=True)
+        payload = autonomous_trading_agent.get_learning_memory(force=False)
     except Exception as exc:
         logger.debug(f"autonomous-agent scorecard learning memory unavailable: {exc}")
         return {}

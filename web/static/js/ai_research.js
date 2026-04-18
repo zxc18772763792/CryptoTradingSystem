@@ -3640,9 +3640,18 @@
       </div>
 
       ${showRegisterButton
-        ? `<button class="btn-register-cta full" data-action="open-register" data-candidate-id="${esc(candidateId)}">
-            4) 注册/部署 →
-          </button>`
+        ? `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-top:14px;">
+            <button class="btn-register-cta full" data-action="open-register" data-register-mode="paper" data-candidate-id="${esc(candidateId)}" style="margin-top:0;">
+              4) 注册纸盘 →
+            </button>
+            <button class="btn btn-sm" data-action="open-register" data-register-mode="live_candidate" data-candidate-id="${esc(candidateId)}"
+              style="width:100%;padding:10px;font-size:14px;border-radius:8px;color:#f0b429;border-color:#f0b429;">
+              4) 注册实盘候选 →
+            </button>
+            <div style="grid-column:1 / -1;font-size:11px;color:#7e92b2;">
+              纸盘会直接启动模拟运行；实盘候选仅进入待激活链路，后续仍需人工确认与实盘激活。
+            </div>
+          </div>`
         : (governanceGateHint
           ? `<div style="font-size:12px;color:#f0b429;background:#2b1f06;border:1px solid #5c4310;border-radius:6px;padding:8px 10px;">
               \u6cbb\u7406\u6a21\u5f0f\u5df2\u5f00\u542f\uff1a\u8bf7\u4f7f\u7528\u4e0a\u65b9\u201c\u5f85\u4eba\u5de5\u5ba1\u6279\u201d\u8fdb\u884c\u6279\u51c6/\u62d2\u7edd\u3002
@@ -3762,8 +3771,15 @@
     });
 
     // \u7ed1\u5b9a\u8be6\u60c5\u9762\u677f\u91cc\u7684\u6309\u94ae
-    panel.querySelector('.btn-register-cta')?.addEventListener('click', () => {
-      openRegisterModal(candidateId).catch(err => notify(`\u6253\u5f00\u6ce8\u518c\u5931\u8d25: ${err.message}`, true));
+    panel.querySelectorAll('[data-action="open-register"][data-candidate-id]').forEach((registerBtn) => {
+      registerBtn.addEventListener('click', () => {
+        const targetCandidateId = String(registerBtn.dataset.candidateId || candidateId || '').trim();
+        const preferredMode = normalizeRegisterMode(registerBtn.dataset.registerMode, '');
+        openRegisterModal(
+          targetCandidateId,
+          preferredMode ? { preferredMode } : {},
+        ).catch(err => notify(`\u6253\u5f00\u6ce8\u518c\u5931\u8d25: ${err.message}`, true));
+      });
     });
 
     // 人工纭鎸夐挳
@@ -4029,7 +4045,28 @@
     }
   }
 
-  async function openRegisterModal(candidateId) {
+  function normalizeRegisterMode(mode, fallback = 'paper') {
+    const normalized = String(mode || '').trim();
+    if (normalized === 'live_candidate') return 'live_candidate';
+    if (normalized === 'paper') return 'paper';
+    return fallback;
+  }
+
+  function registerModeActionText(mode) {
+    return normalizeRegisterMode(mode) === 'live_candidate' ? '确认注册实盘候选' : '确认注册纸盘';
+  }
+
+  function registerModeHintText(mode, runtimeTradingMode) {
+    if (normalizeRegisterMode(mode) === 'live_candidate') {
+      return '实盘候选不会立即下实盘单；后续仍需人工确认并手动激活实盘运行。';
+    }
+    if (String(runtimeTradingMode || '').trim() === 'live') {
+      return '当前系统运行在 live 模式，直接注册纸盘会失败；如需纸盘，请先切换到 paper 模式。';
+    }
+    return '纸盘会直接注册并启动为模拟运行。';
+  }
+
+  async function openRegisterModal(candidateId, options = {}) {
     if (governanceEnabled()) {
       notify('\u6cbb\u7406\u6a21\u5f0f\u5df2\u5f00\u542f\uff0c\u8bf7\u5148\u5728\u4eba\u5de5\u5ba1\u6279\u4e2d\u6279\u51c6\u540e\u518d\u6ce8\u518c\u3002', true);
       return;
@@ -4051,9 +4088,11 @@
     const top    = candidateTopResults(cand)[0] || {};
     const decision = cand?.promotion?.decision || cand?.promotion_target || 'paper';
     const runtimeTradingMode = currentTradingMode();
-    const defaultRegisterMode = runtimeTradingMode === 'live'
-      ? 'live_candidate'
-      : (decision === 'live_candidate' ? 'live_candidate' : 'paper');
+    const preferredMode = normalizeRegisterMode(options?.preferredMode, '');
+    const defaultRegisterMode = preferredMode
+      || (runtimeTradingMode === 'live'
+        ? 'live_candidate'
+        : (decision === 'live_candidate' ? 'live_candidate' : 'paper'));
     const sym    = String(cand?.symbol || '');
     const tf     = String(cand?.timeframe || '');
     const strat  = String(cand?.strategy || 'AI');
@@ -4077,10 +4116,6 @@
       </div>`;
     }
 
-    const liveModeHint = runtimeTradingMode === 'live'
-      ? '当前系统运行在 live 模式，默认改为“实盘候选”，避免直接触发纸盘注册失败。'
-      : '';
-
     body.innerHTML = `
       <div class="form-group" style="margin-bottom:10px;">
         <label>策略名称（可修改）</label>
@@ -4103,6 +4138,7 @@
           <label><input type="radio" name="reg-mode" value="paper" ${decision === 'paper' || !['live_candidate'].includes(decision) ? 'checked' : ''}> 纸盘（推荐，低风险模拟）</label>
           <label><input type="radio" name="reg-mode" value="live_candidate" ${decision === 'live_candidate' ? 'checked' : ''}> 实盘候选（待人工确认）</label>
         </div>
+        <div id="reg-mode-hint" style="margin-top:10px;font-size:12px;color:#7e92b2;"></div>
       </div>
       <div class="form-group">
         <label>部署仓位（%）</label>
@@ -4110,7 +4146,7 @@
       </div>
       <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;padding-top:12px;border-top:1px solid rgba(255,255,255,.07);">
         <button class="btn" id="reg-cancel-btn">取消</button>
-        <button class="btn-register-cta" id="reg-confirm-btn" data-candidate-id="${esc(candidateId)}">确认注册/部署</button>
+        <button class="btn-register-cta" id="reg-confirm-btn" data-candidate-id="${esc(candidateId)}">${registerModeActionText(defaultRegisterMode)}</button>
       </div>`;
     body.innerHTML = normalizeUiText(body.innerHTML);
     normalizeDomText(body);
@@ -4120,21 +4156,31 @@
     const liveCandidateMode = body.querySelector('input[name="reg-mode"][value="live_candidate"]');
     if (paperMode) paperMode.checked = defaultRegisterMode === 'paper';
     if (liveCandidateMode) liveCandidateMode.checked = defaultRegisterMode === 'live_candidate';
-    if (runtimeTradingMode === 'live') {
-      const modeGroup = body.querySelector('.ai-mode-radio-group');
-      if (modeGroup && !body.querySelector('[data-register-live-hint="true"]')) {
-        const hint = document.createElement('div');
-        hint.setAttribute('data-register-live-hint', 'true');
-        hint.style.marginTop = '10px';
-        hint.style.color = '#fcd34d';
-        hint.style.fontSize = '12px';
-        hint.textContent = liveModeHint;
-        modeGroup.insertAdjacentElement('afterend', hint);
+    const confirmBtn = body.querySelector('#reg-confirm-btn');
+    const modeHint = body.querySelector('#reg-mode-hint');
+    const syncRegisterModeUi = () => {
+      const mode = normalizeRegisterMode(
+        body.querySelector('input[name="reg-mode"]:checked')?.value,
+        defaultRegisterMode,
+      );
+      if (confirmBtn) confirmBtn.textContent = registerModeActionText(mode);
+      if (modeHint) {
+        modeHint.textContent = registerModeHintText(mode, runtimeTradingMode);
+        modeHint.style.color = mode === 'live_candidate' || runtimeTradingMode === 'live'
+          ? '#fcd34d'
+          : '#7e92b2';
       }
-    }
+    };
+    body.querySelectorAll('input[name="reg-mode"]').forEach((input) => {
+      input.addEventListener('change', syncRegisterModeUi);
+    });
+    syncRegisterModeUi();
     document.getElementById('reg-confirm-btn').onclick = () => {
       const name = String(document.getElementById('reg-name')?.value || '').trim();
-      const mode = document.querySelector('input[name="reg-mode"]:checked')?.value || defaultRegisterMode;
+      const mode = normalizeRegisterMode(
+        body.querySelector('input[name="reg-mode"]:checked')?.value,
+        defaultRegisterMode,
+      );
       const allocationInput = document.getElementById('reg-allocation-percent');
       const allocationPercent = parseAllocationPercentInput(allocationInput?.value, defaultAllocationPercent);
       if (allocationInput) allocationInput.value = String(Math.round(allocationPercent));
@@ -4147,24 +4193,35 @@
       notify('已开启人工确认，请改用人工确认流程', true);
       return;
     }
+    const normalizedMode = normalizeRegisterMode(mode);
     const btn = document.getElementById('reg-confirm-btn');
-    if (btn) { btn.textContent = '注册中...'; btn.disabled = true; }
+    if (btn) {
+      btn.textContent = normalizedMode === 'live_candidate' ? '注册实盘候选中...' : '注册纸盘中...';
+      btn.disabled = true;
+    }
     try {
       const result = await aiApi(`/candidates/${encodeURIComponent(candidateId)}/register`, {
         method: 'POST',
         body: JSON.stringify({
-          mode,
+          mode: normalizedMode,
           name: name || undefined,
           allocation_pct: Number.isFinite(Number(allocationPct)) ? Number(allocationPct) : undefined,
         }),
         timeoutMs: 30000,
       });
       document.getElementById('ai-register-modal').style.display = 'none';
-      const stratName = result?.registered_strategy_name || result?.runtime_status || mode;
-      notify(`策略已注册: ${stratName}`);
+      const stratName = result?.registered_strategy_name || result?.runtime_status || normalizedMode;
+      notify(
+        normalizedMode === 'live_candidate'
+          ? `已注册为实盘候选: ${stratName}`
+          : `已注册为纸盘: ${stratName}`,
+      );
       await refreshWorkbench('', candidateId);
     } catch (err) {
-      if (btn) { btn.textContent = '确认注册/部署'; btn.disabled = false; }
+      if (btn) {
+        btn.textContent = registerModeActionText(normalizedMode);
+        btn.disabled = false;
+      }
       notify(`注册失败: ${err.message}`, true);
     }
   }
@@ -5795,7 +5852,8 @@
       }
       if (action === 'open-register' && cid) {
         e.stopPropagation();
-        openRegisterModal(cid).catch(err => notify(`打开注册失败: ${err.message}`, true));
+        const preferredMode = normalizeRegisterMode(target?.dataset?.registerMode, '');
+        openRegisterModal(cid, preferredMode ? { preferredMode } : {}).catch(err => notify(`打开注册失败: ${err.message}`, true));
       }
     });
   }

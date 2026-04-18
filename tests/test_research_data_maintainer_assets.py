@@ -22,6 +22,7 @@ def test_research_universe_refresh_scripts_exist_and_are_wired():
     assert "CryptoTradingSystem_ResearchUniverseRefresh" in ensure
     assert "Register-ScheduledTask" in ensure
     assert "schtasks /Create" in ensure
+    assert "Test-IsAdministrator" in ensure
     assert "StartNowIfCreated" in ensure
     assert "1m,5m,15m,1h" in ensure
     assert "BTC/USDT,ETH/USDT" in ensure

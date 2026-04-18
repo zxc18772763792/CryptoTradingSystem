@@ -82,6 +82,13 @@ def _normalize_symbol_list(raw_symbols: List[str]) -> List[str]:
     return normalized
 
 
+def _ensure_utc_aware_datetime(value: datetime) -> datetime:
+    """Normalize parquet timestamps to UTC-aware datetimes for live window math."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _observed_heavy_worker_pids() -> List[int]:
     command = (
         "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
@@ -263,7 +270,7 @@ async def _refresh_recent_1s_symbol(exchange_name: str, symbol: str, days: int) 
     except Exception:
         existing_today = None
     if existing_today is not None and not existing_today.empty:
-        latest_ts = existing_today.index.max().to_pydatetime()
+        latest_ts = _ensure_utc_aware_datetime(existing_today.index.max().to_pydatetime())
         fetch_start = max(today_start, latest_ts - timedelta(seconds=90))
     result["recent_window_start"] = fetch_start.isoformat()
 

@@ -6966,6 +6966,26 @@ input[type="radio"] {
     font-size: 13px;
     font-weight: 600;
 }
+.monitor-note {
+    font-size: 11px;
+    line-height: 1.5;
+    padding: 8px 10px;
+    margin-bottom: 10px;
+    border-radius: 6px;
+    background: rgba(148, 163, 184, 0.12);
+    color: var(--text-muted);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+}
+.monitor-note-warning {
+    background: rgba(245, 158, 11, 0.12);
+    color: #fcd34d;
+    border-color: rgba(245, 158, 11, 0.22);
+}
+.monitor-note-positive {
+    background: rgba(34, 197, 94, 0.1);
+    color: #86efac;
+    border-color: rgba(34, 197, 94, 0.18);
+}
 .monitor-position-row {
     display: flex;
     flex-wrap: wrap;
@@ -6982,6 +7002,27 @@ input[type="radio"] {
     font-size: 12px;
     padding: 1px 6px;
     border-radius: 4px;
+}
+.monitor-order-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    font-size: 11px;
+    padding: 4px 8px;
+    background: var(--bg-2);
+    border-radius: 5px;
+    margin-bottom: 4px;
+}
+.monitor-order-type {
+    font-weight: 700;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: rgba(96, 165, 250, 0.14);
+    color: #93c5fd;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
 }
 .pos-long  { background: #14532d; color: #86efac; }
 .pos-short { background: #7f1d1d; color: #fca5a5; }
@@ -7689,6 +7730,80 @@ input[type="radio"] {
     grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.9fr);
 }
 
+.arbitrage-risk-board {
+    background:
+        radial-gradient(circle at top right, rgba(32, 191, 120, 0.10), transparent 36%),
+        linear-gradient(180deg, rgba(18, 28, 43, 0.96), rgba(11, 19, 31, 0.96));
+}
+
+.arbitrage-risk-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 14px;
+}
+
+.arbitrage-risk-item {
+    padding: 14px;
+    border-radius: 14px;
+    border: 1px solid rgba(60, 83, 110, 0.4);
+    background: linear-gradient(180deg, rgba(18, 30, 45, 0.94), rgba(11, 21, 33, 0.94));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.arbitrage-risk-item[data-tone="ok"] {
+    border-color: rgba(32, 191, 120, 0.32);
+    background: linear-gradient(180deg, rgba(16, 43, 31, 0.92), rgba(10, 27, 21, 0.94));
+}
+
+.arbitrage-risk-item[data-tone="warn"] {
+    border-color: rgba(255, 209, 102, 0.28);
+    background: linear-gradient(180deg, rgba(57, 45, 16, 0.94), rgba(36, 29, 12, 0.96));
+}
+
+.arbitrage-risk-item[data-tone="bad"] {
+    border-color: rgba(255, 107, 107, 0.30);
+    background: linear-gradient(180deg, rgba(66, 26, 29, 0.94), rgba(40, 17, 20, 0.96));
+}
+
+.arbitrage-risk-item[data-tone="info"] {
+    border-color: rgba(77, 163, 255, 0.26);
+}
+
+.arbitrage-risk-label {
+    font-size: 11px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: #7e92b2;
+}
+
+.arbitrage-risk-value {
+    margin-top: 6px;
+    font-size: 15px;
+    font-weight: 700;
+    color: #eef6ff;
+}
+
+.arbitrage-risk-meta {
+    margin-top: 6px;
+    font-size: 12px;
+    line-height: 1.55;
+    color: #9fb1c9;
+}
+
+.arbitrage-diagnostic-list {
+    margin-top: 14px;
+    display: grid;
+    gap: 8px;
+}
+
+.arbitrage-diagnostic-list .list-item {
+    align-items: flex-start;
+    gap: 12px;
+    border-radius: 12px;
+    background: rgba(9, 18, 29, 0.46);
+}
+
 .arbitrage-roadmap-card .output-box {
     min-height: 160px;
 }
@@ -7814,11 +7929,84 @@ input[type="radio"] {
     background: rgba(65, 51, 12, 0.42);
 }
 
+.arbitrage-chip[data-tone="bad"] {
+    color: #ff9f9f;
+    border-color: rgba(255, 107, 107, 0.28);
+    background: rgba(72, 25, 31, 0.46);
+}
+
+.arbitrage-chip[data-tone="info"] {
+    color: #9cd1ff;
+    border-color: rgba(77, 163, 255, 0.28);
+    background: rgba(16, 38, 61, 0.46);
+}
+
 .arbitrage-card-body {
     margin-top: 12px;
     font-size: 12px;
     line-height: 1.65;
     color: #aebfd4;
+}
+
+.arbitrage-strategy-groups {
+    display: grid;
+    gap: 16px;
+}
+
+.arbitrage-group {
+    display: grid;
+    gap: 12px;
+}
+
+.arbitrage-group-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.arbitrage-group-head h4 {
+    margin: 0;
+    font-size: 14px;
+    color: #eef6ff;
+}
+
+.arbitrage-group-note {
+    font-size: 12px;
+    color: #8fa4c2;
+}
+
+.arbitrage-group-advanced {
+    border-radius: 16px;
+    border: 1px solid rgba(55, 76, 102, 0.72);
+    background: rgba(10, 18, 29, 0.46);
+    padding: 14px;
+}
+
+.arbitrage-group-advanced summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    color: #dce8f7;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.arbitrage-group-advanced summary::-webkit-details-marker {
+    display: none;
+}
+
+.arbitrage-group-advanced[open] summary {
+    margin-bottom: 12px;
+}
+
+.arbitrage-group-summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
 }
 
 .arbitrage-card-meta {
@@ -7858,6 +8046,29 @@ input[type="radio"] {
 
 .arbitrage-pair-summary {
     margin-bottom: 14px;
+}
+
+.arbitrage-pair-split {
+    display: grid;
+    gap: 18px;
+}
+
+.arbitrage-pair-section {
+    display: grid;
+    gap: 10px;
+}
+
+.arbitrage-pair-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.arbitrage-pair-section-head h4 {
+    margin: 0;
+    font-size: 14px;
+    color: #eef6ff;
 }
 
 .arbitrage-pair-table {
@@ -7901,6 +8112,400 @@ input[type="radio"] {
     padding: 28px 12px !important;
 }
 
+/* Altcoin radar page */
+.altcoin-radar-workspace {
+    display: grid;
+    grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
+    gap: 22px;
+    align-items: start;
+}
+
+.altcoin-radar-control-card {
+    background:
+        radial-gradient(circle at top left, rgba(247, 147, 26, 0.10), transparent 34%),
+        linear-gradient(180deg, #182231 0%, #101926 100%);
+}
+
+.altcoin-radar-status-note {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(64, 86, 112, 0.42);
+    background: rgba(14, 24, 38, 0.72);
+    color: #d6e2f0;
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.altcoin-radar-status-note[data-tone="ok"] {
+    border-color: rgba(61, 196, 126, 0.36);
+    color: #8ff0bd;
+    background: rgba(12, 44, 28, 0.56);
+}
+
+.altcoin-radar-status-note[data-tone="warn"] {
+    border-color: rgba(255, 181, 67, 0.34);
+    color: #ffd27a;
+    background: rgba(59, 38, 11, 0.56);
+}
+
+.altcoin-radar-status-note[data-tone="danger"] {
+    border-color: rgba(255, 107, 107, 0.34);
+    color: #ffb0b0;
+    background: rgba(59, 18, 18, 0.58);
+}
+
+.altcoin-radar-top-grid {
+    grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.9fr);
+}
+
+.altcoin-radar-summary-card {
+    background:
+        radial-gradient(circle at top right, rgba(247, 147, 26, 0.10), transparent 36%),
+        linear-gradient(180deg, rgba(18, 28, 42, 0.98), rgba(12, 19, 31, 0.98));
+}
+
+.altcoin-radar-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.altcoin-radar-summary-metric {
+    padding: 14px 14px 12px;
+    border-radius: 14px;
+    border: 1px solid rgba(64, 86, 112, 0.34);
+    background: rgba(9, 18, 29, 0.64);
+}
+
+.altcoin-radar-summary-metric span {
+    display: block;
+    font-size: 12px;
+    color: #88a0bf;
+}
+
+.altcoin-radar-summary-metric strong {
+    display: block;
+    margin-top: 8px;
+    font-size: 20px;
+    line-height: 1.2;
+    color: #f4f8ff;
+}
+
+.altcoin-radar-warning-list {
+    display: grid;
+    gap: 8px;
+    margin-top: 14px;
+}
+
+.altcoin-radar-warning {
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 181, 67, 0.20);
+    background: rgba(62, 42, 16, 0.46);
+    color: #ffd27a;
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.altcoin-radar-inline-note {
+    font-size: 12px;
+    color: #8ba2bf;
+}
+
+.altcoin-radar-table-card {
+    background:
+        radial-gradient(circle at top left, rgba(80, 164, 255, 0.10), transparent 30%),
+        linear-gradient(180deg, rgba(18, 28, 42, 0.98), rgba(11, 18, 29, 0.98));
+}
+
+.altcoin-radar-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.altcoin-radar-table th,
+.altcoin-radar-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    text-align: left;
+    vertical-align: middle;
+}
+
+.altcoin-radar-table th {
+    white-space: nowrap;
+    color: #d7e5f6;
+    font-weight: 700;
+}
+
+.altcoin-radar-table td {
+    color: #bdd0e4;
+}
+
+.altcoin-radar-table tbody tr {
+    transition: background-color 0.18s ease, transform 0.18s ease;
+}
+
+.altcoin-radar-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.altcoin-radar-table tbody tr.is-selected {
+    background: rgba(247, 147, 26, 0.12);
+}
+
+.altcoin-radar-empty {
+    text-align: center !important;
+    color: #7e92b2 !important;
+    padding: 30px 12px !important;
+}
+
+.altcoin-radar-rank-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 30px;
+    height: 30px;
+    padding: 0 8px;
+    border-radius: 999px;
+    background: rgba(247, 147, 26, 0.15);
+    border: 1px solid rgba(247, 147, 26, 0.28);
+    color: #ffc274;
+    font-weight: 700;
+}
+
+.altcoin-radar-symbol-cell {
+    display: grid;
+    gap: 4px;
+}
+
+.altcoin-radar-symbol-main {
+    font-size: 14px;
+    font-weight: 700;
+    color: #eef5ff;
+}
+
+.altcoin-radar-symbol-sub {
+    font-size: 11px;
+    color: #7e92b2;
+}
+
+.altcoin-radar-score-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 58px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: rgba(17, 28, 42, 0.94);
+    border: 1px solid rgba(60, 82, 108, 0.74);
+    color: #eaf1ff;
+    font-weight: 700;
+}
+
+.altcoin-radar-freshness {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: #90a6c1;
+}
+
+.altcoin-radar-tag-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.altcoin-radar-tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 9px;
+    border-radius: 999px;
+    border: 1px solid rgba(60, 82, 108, 0.72);
+    background: rgba(15, 24, 37, 0.9);
+    color: #d2e0f2;
+    font-size: 11px;
+}
+
+.altcoin-radar-tag[data-tone="layout"] {
+    color: #7ce0bc;
+    border-color: rgba(61, 196, 126, 0.26);
+    background: rgba(15, 57, 35, 0.50);
+}
+
+.altcoin-radar-tag[data-tone="anomaly"] {
+    color: #ffd27a;
+    border-color: rgba(255, 181, 67, 0.26);
+    background: rgba(65, 49, 16, 0.48);
+}
+
+.altcoin-radar-tag[data-tone="control"] {
+    color: #8dc3ff;
+    border-color: rgba(80, 164, 255, 0.26);
+    background: rgba(17, 42, 70, 0.48);
+}
+
+.altcoin-radar-tag[data-tone="danger"] {
+    color: #ffb0b0;
+    border-color: rgba(255, 107, 107, 0.28);
+    background: rgba(62, 21, 21, 0.50);
+}
+
+.altcoin-radar-tag[data-tone="muted"] {
+    color: #9db2cb;
+}
+
+.altcoin-radar-row-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.altcoin-radar-inspector-card {
+    background:
+        radial-gradient(circle at top right, rgba(247, 147, 26, 0.08), transparent 34%),
+        linear-gradient(180deg, rgba(18, 28, 42, 0.98), rgba(11, 18, 29, 0.98));
+}
+
+.altcoin-radar-inspector-empty {
+    padding: 26px 16px;
+    border-radius: 14px;
+    border: 1px dashed rgba(82, 103, 128, 0.42);
+    color: #8da2bb;
+    text-align: center;
+}
+
+.altcoin-radar-inspector-shell.is-hidden {
+    display: none;
+}
+
+.altcoin-radar-inspector-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 18px;
+    align-items: flex-start;
+    margin-bottom: 16px;
+}
+
+.altcoin-radar-selected-symbol {
+    font-size: 24px;
+    font-weight: 800;
+    color: #f5f8ff;
+}
+
+.altcoin-radar-score-strip {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 10px;
+    min-width: min(560px, 100%);
+}
+
+.altcoin-radar-score-pill {
+    padding: 10px 12px;
+    border-radius: 14px;
+    background: rgba(10, 19, 31, 0.68);
+    border: 1px solid rgba(57, 79, 106, 0.52);
+}
+
+.altcoin-radar-score-pill span {
+    display: block;
+    font-size: 11px;
+    color: #8ea7c5;
+}
+
+.altcoin-radar-score-pill strong {
+    display: block;
+    margin-top: 6px;
+    font-size: 18px;
+    color: #f4f8ff;
+}
+
+.altcoin-radar-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.altcoin-radar-detail-panel {
+    padding: 16px;
+    border-radius: 16px;
+    border: 1px solid rgba(55, 76, 101, 0.48);
+    background: rgba(10, 18, 30, 0.62);
+}
+
+.altcoin-radar-panel-title {
+    margin-bottom: 10px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #edf4ff;
+}
+
+.altcoin-radar-sparkline {
+    min-height: 120px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #8ca1bb;
+}
+
+.altcoin-radar-component-list,
+.altcoin-radar-reason-list,
+.altcoin-radar-related-list {
+    display: grid;
+    gap: 8px;
+}
+
+.altcoin-radar-component {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 10px;
+    border-radius: 12px;
+    background: rgba(17, 27, 40, 0.88);
+    color: #d6e2f2;
+    font-size: 12px;
+}
+
+.altcoin-radar-component small {
+    color: #7f93af;
+}
+
+.altcoin-radar-reason {
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(14, 24, 36, 0.82);
+    color: #cfe0f5;
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.altcoin-radar-related-btn {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    padding: 11px 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(57, 79, 106, 0.52);
+    background: rgba(13, 22, 35, 0.84);
+    color: #d9e6f5;
+    cursor: pointer;
+    transition: border-color 0.18s ease, transform 0.18s ease;
+}
+
+.altcoin-radar-related-btn:hover {
+    border-color: rgba(247, 147, 26, 0.36);
+    transform: translateY(-1px);
+}
+
+.altcoin-radar-related-btn strong {
+    color: #f3f8ff;
+}
+
 .backtest-custom-params {
     margin-top: 12px;
     border: 1px solid rgba(78, 115, 150, 0.22);
@@ -7929,6 +8534,7 @@ input[type="radio"] {
     }
 
     .ai-agent-workspace-grid,
+    .altcoin-radar-workspace,
     .arbitrage-workspace,
     .ai-top-intro-mini-grid,
     .ai-auto-trade-rail,
@@ -7945,11 +8551,28 @@ input[type="radio"] {
         grid-template-columns: 1fr;
     }
 
+    .altcoin-radar-summary-grid,
+    .altcoin-radar-detail-grid,
     .arbitrage-plan-steps {
         grid-template-columns: 1fr;
     }
 
+    .altcoin-radar-top-grid,
     .arbitrage-top-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .altcoin-radar-inspector-head {
+        flex-direction: column;
+    }
+
+    .altcoin-radar-score-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        min-width: 0;
+        width: 100%;
+    }
+
+    .arbitrage-risk-grid {
         grid-template-columns: 1fr;
     }
 
@@ -7962,6 +8585,7 @@ input[type="radio"] {
         white-space: normal;
     }
 
+    .altcoin-radar-table,
     .arbitrage-pair-table {
         min-width: 780px;
     }

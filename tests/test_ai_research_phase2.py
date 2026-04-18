@@ -184,14 +184,164 @@ def test_attach_research_enrichment_adds_news_and_funding_columns():
             }
         ],
         "funding_provider": _FakeFundingProvider(),
+        "constant_features": {
+            "macro_vix": 14.2,
+            "glassnode_sopr": 1.03,
+            "factor_asset_score": 0.88,
+        },
+        "time_series_features": pd.DataFrame(
+            {
+                "cross_asset_market_return": np.linspace(-0.02, 0.04, len(df)),
+                "factor_mom": np.linspace(0.0, 0.2, len(df)),
+            },
+            index=df.index,
+        ),
     }
     out = _attach_research_enrichment(df, "BTC/USDT", enrichment)
 
     assert "news_sentiment_score" in out.columns
     assert "news_flow_score" in out.columns
     assert "funding_rate" in out.columns
+    assert "macro_vix" in out.columns
+    assert "glassnode_sopr" in out.columns
+    assert "factor_asset_score" in out.columns
+    assert "cross_asset_market_return" in out.columns
+    assert "factor_mom" in out.columns
     assert out["funding_rate"].iloc[-1] == pytest.approx(0.0003)
+    assert out["macro_vix"].iloc[-1] == pytest.approx(14.2)
+    assert out["factor_mom"].iloc[-1] == pytest.approx(0.2)
     assert out["news_flow_score"].abs().sum() > 0
+
+
+def test_build_research_enrichment_merges_macro_premium_and_cross_sectional_sources(monkeypatch):
+    """B+: run_strategy_research enrichment should merge macro/premium snapshots and universe features."""
+    import asyncio
+
+    from core.research.strategy_research import _build_research_enrichment
+
+    class _FakeFundingProvider:
+        def ensure_history(self, **kwargs):
+            return None
+
+        def get_series(self, symbol, start_time=None, end_time=None):
+            return pd.Series([0.0001], index=pd.date_range("2024-01-01", periods=1, freq="1h"))
+
+    async def _fake_load_news_events_for_symbol(symbol, start_time, end_time, limit=5000):
+        return []
+
+    async def _fake_cross_sectional(*args, **kwargs):
+        return {
+            "available": True,
+            "timeframe": "1h",
+            "symbols_used": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"],
+            "feature_frame": pd.DataFrame(
+                {
+                    "cross_asset_market_return": [0.01, 0.02, 0.03],
+                    "factor_mom": [0.0, 0.1, 0.2],
+                },
+                index=pd.date_range("2024-01-01", periods=3, freq="1h"),
+            ),
+            "constant_features": {
+                "multi_asset_return_rank_pct": 0.75,
+                "factor_asset_score": 1.2,
+            },
+            "multi_asset_summary": {"available": True, "universe_size": 4},
+            "factor_library_summary": {"available": True, "factor_count": 2, "universe_size": 4},
+        }
+
+    monkeypatch.setattr(
+        "core.research.strategy_research._load_news_events_for_symbol",
+        _fake_load_news_events_for_symbol,
+    )
+    monkeypatch.setattr(
+        "core.research.strategy_research.FundingRateProvider",
+        lambda: _FakeFundingProvider(),
+    )
+    monkeypatch.setattr(
+        "core.research.strategy_research._build_macro_research_features",
+        lambda: {
+            "features": {"macro_vix": 14.5, "macro_dxy": 103.2},
+            "summary": {"available": True, "available_count": 2},
+        },
+    )
+    monkeypatch.setattr(
+        "core.research.strategy_research._build_premium_snapshot_research_features",
+        lambda: {
+            "features": {"glassnode_sopr": 1.01, "kaiko_trade_count_1h": 420.0},
+            "summary": {
+                "available": True,
+                "available_sources": ["glassnode", "kaiko"],
+                "available_count": 2,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "core.research.strategy_research._build_cross_sectional_research_features",
+        _fake_cross_sectional,
+    )
+
+    result = asyncio.run(
+        _build_research_enrichment(
+            exchange="binance",
+            symbol="BTC/USDT",
+            start_time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end_time=datetime(2024, 1, 2, tzinfo=timezone.utc),
+            requested_timeframes=["1m", "1h"],
+            preferred_universe_timeframe="1h",
+            universe_max_symbols=8,
+        )
+    )
+
+    assert result["funding_available"] is True
+    assert result["constant_features"]["macro_vix"] == pytest.approx(14.5)
+    assert result["constant_features"]["glassnode_sopr"] == pytest.approx(1.01)
+    assert result["constant_features"]["factor_asset_score"] == pytest.approx(1.2)
+    assert {"cross_asset_market_return", "factor_mom"} <= set(result["time_series_features"].columns)
+    assert result["summary"]["constant_feature_count"] >= 4
+    assert result["summary"]["premium_source_count"] == 2
+    assert result["summary"]["cross_sectional_available"] is True
+    assert result["summary"]["cross_sectional_timeframe"] == "1h"
+
+
+def test_run_strategy_research_rejects_when_cross_exchange_preflight_fails(monkeypatch, tmp_path):
+    """B+: cross-exchange consistency is a hard preflight gate before research runs."""
+    import asyncio
+
+    from core.research.strategy_research import ResearchConfig, run_strategy_research
+
+    async def _fake_preflight(config, start_time, end_time):
+        return {
+            "required": True,
+            "primary_exchange": "binance",
+            "secondary_exchange": "gate",
+            "ok": False,
+            "reason": "cross-exchange preflight failed: 1m close_mean=2.5000% close_p95=3.1000% volume_mean=35.0000% volume_p95=90.0000%",
+            "results": [],
+        }
+
+    async def _unexpected_enrichment(*args, **kwargs):
+        raise AssertionError("enrichment should not run when preflight fails")
+
+    monkeypatch.setattr(
+        "core.research.strategy_research._run_cross_exchange_consistency_preflight",
+        _fake_preflight,
+    )
+    monkeypatch.setattr(
+        "core.research.strategy_research._build_research_enrichment",
+        _unexpected_enrichment,
+    )
+
+    config = ResearchConfig(
+        exchange="binance",
+        symbol="BTC/USDT",
+        days=10,
+        timeframes=["1m"],
+        strategies=["MAStrategy"],
+        output_dir=tmp_path,
+    )
+
+    with pytest.raises(ValueError, match="cross-exchange preflight failed"):
+        asyncio.run(run_strategy_research(config))
 
 
 def test_run_backtest_core_with_params():
@@ -774,6 +924,32 @@ def test_planner_market_context_empty_is_harmless():
         market_context={},
     )
     out = generate_research_proposal(req)
+    assert len(out.proposal.strategy_templates) > 0
+
+
+def test_planner_notes_optional_context_unavailable_instead_of_silent_pass(monkeypatch):
+    """E: Optional market context failures should be visible in planner notes."""
+    from core.ai.research_planner import PlannerGenerateRequest, generate_research_proposal
+
+    def _raise_google(*args, **kwargs):
+        raise RuntimeError("google cache missing")
+
+    def _raise_macro(*args, **kwargs):
+        raise RuntimeError("macro snapshot unavailable")
+
+    monkeypatch.setattr("core.data.google_trends_collector.load_latest", _raise_google)
+    monkeypatch.setattr("core.data.macro_collector.load_macro_snapshot", _raise_macro)
+
+    req = PlannerGenerateRequest(
+        goal="Test optional context visibility",
+        market_regime="mixed",
+        market_context={"sentiment": "LONG", "volatility": "high"},
+    )
+    out = generate_research_proposal(req)
+    notes_combined = " | ".join(out.planner_notes)
+
+    assert "optional context unavailable: Google Trends" in notes_combined
+    assert "optional context unavailable: Macro snapshot" in notes_combined
     assert len(out.proposal.strategy_templates) > 0
 
 

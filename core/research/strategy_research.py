@@ -1,6 +1,8 @@
 """Run strategy research on second-level market data."""
 from __future__ import annotations
 
+import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,6 +16,8 @@ from config.settings import settings
 from core.ai.proposal_schemas import StrategyProgram
 from core.backtest.funding_provider import FundingRateProvider
 from core.data import data_storage
+from core.data.factor_library import build_factor_library
+from core.data.path_utils import symbol_from_storage_dirname
 from core.news.storage import db as news_db
 from core.research.strategy_program import build_program_positions
 
@@ -112,6 +116,704 @@ _RETURN_CLIP_BY_TIMEFRAME = {
     "4h": 1.80,
     "1d": 3.00,
 }
+
+_RESEARCH_UNIVERSE_FALLBACK_TIMEFRAMES = ["1h", "15m", "5m", "1m"]
+_CROSS_EXCHANGE_SECONDARY_DEFAULTS = {
+    "binance": "gate",
+    "gate": "binance",
+}
+_RESEARCH_UNIVERSE_SUMMARY_PATH = Path(__file__).resolve().parents[2] / "data" / "research" / "research_universe_incremental_latest.json"
+_FACTOR_SCORE_COLUMNS = [
+    "score",
+    "momentum",
+    "value",
+    "value_hml",
+    "quality",
+    "profitability",
+    "investment",
+    "low_vol",
+    "liquidity",
+    "low_beta",
+    "size",
+]
+
+
+def _safe_float_value(value: Any, default: float = 0.0) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return float(default)
+    if np.isnan(out) or np.isinf(out):
+        return float(default)
+    return float(out)
+
+
+def _sanitize_feature_name(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    parts: List[str] = []
+    last_sep = True
+    for ch in text:
+        if ch.isalnum():
+            parts.append(ch)
+            last_sep = False
+            continue
+        if not last_sep:
+            parts.append("_")
+            last_sep = True
+    return "".join(parts).strip("_")
+
+
+def _flatten_numeric_features(prefix: str, payload: Optional[Dict[str, Any]]) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for key, value in dict(payload or {}).items():
+        name = _sanitize_feature_name(key)
+        if not name:
+            continue
+        try:
+            numeric = float(value)
+        except Exception:
+            continue
+        if np.isnan(numeric) or np.isinf(numeric):
+            continue
+        out[f"{prefix}_{name}"] = numeric
+    return out
+
+
+def _build_constant_feature_frame(index: pd.DatetimeIndex, features: Optional[Dict[str, Any]]) -> pd.DataFrame:
+    idx = _as_naive_utc_index(index)
+    payload = dict(features or {})
+    if not payload:
+        return pd.DataFrame(index=idx)
+    numeric_features: Dict[str, float] = {}
+    for key, value in payload.items():
+        name = _sanitize_feature_name(key)
+        if not name:
+            continue
+        numeric_features[name] = _safe_float_value(value, 0.0)
+    if not numeric_features:
+        return pd.DataFrame(index=idx)
+    return pd.DataFrame({key: np.full(len(idx), val, dtype=float) for key, val in numeric_features.items()}, index=idx)
+
+
+def _align_feature_frame(index: pd.DatetimeIndex, feature_frame: Optional[pd.DataFrame]) -> pd.DataFrame:
+    idx = _as_naive_utc_index(index)
+    if feature_frame is None or feature_frame.empty:
+        return pd.DataFrame(index=idx)
+    frame = feature_frame.copy()
+    frame.index = _as_naive_utc_index(frame.index)
+    frame = frame.sort_index()
+    frame = frame[~frame.index.duplicated(keep="last")]
+    aligned = frame.reindex(idx, method="ffill")
+    return aligned.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
+def _research_universe_timeframe_candidates(
+    requested_timeframes: Optional[List[str]],
+    preferred: Optional[str] = None,
+) -> List[str]:
+    candidates: List[str] = []
+
+    def add(timeframe: Optional[str]) -> None:
+        tf = str(timeframe or "").strip().lower()
+        if tf and tf in _RESAMPLE_RULES and tf in _RESEARCH_UNIVERSE_FALLBACK_TIMEFRAMES and tf not in candidates:
+            candidates.append(tf)
+
+    add(preferred)
+    for tf in _RESEARCH_UNIVERSE_FALLBACK_TIMEFRAMES:
+        if tf in list(requested_timeframes or []):
+            add(tf)
+    for tf in _RESEARCH_UNIVERSE_FALLBACK_TIMEFRAMES:
+        add(tf)
+    return candidates
+
+
+def _load_research_universe_symbols_from_summary(exchange: str) -> List[str]:
+    path = _RESEARCH_UNIVERSE_SUMMARY_PATH
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    summary_exchange = str(payload.get("exchange") or "").strip().lower()
+    if summary_exchange and summary_exchange != str(exchange or "").strip().lower():
+        return []
+
+    rows = payload.get("selected_symbols") or payload.get("requested_symbols") or []
+    symbols: List[str] = []
+    seen: set[str] = set()
+    for raw in list(rows or []):
+        symbol = _normalize_symbol(str(raw or ""))
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        symbols.append(symbol)
+    return symbols
+
+
+def _discover_local_storage_symbols(exchange: str, timeframe: str, max_symbols: int = 60) -> List[str]:
+    root = Path(settings.DATA_STORAGE_PATH) / str(exchange or "").strip().lower()
+    if not root.exists():
+        return []
+    symbols: List[str] = []
+    for path in sorted([item for item in root.iterdir() if item.is_dir()]):
+        if not ((path / f"{timeframe}.parquet").exists() or (path / f"{timeframe}_parts").exists()):
+            continue
+        symbol = _normalize_symbol(symbol_from_storage_dirname(path.name))
+        if symbol:
+            symbols.append(symbol)
+        if len(symbols) >= max(1, int(max_symbols)):
+            break
+    return symbols
+
+
+def _select_research_universe_symbols(
+    exchange: str,
+    timeframe: str,
+    focus_symbol: str,
+    max_symbols: int = 40,
+) -> List[str]:
+    symbols: List[str] = []
+    seen: set[str] = set()
+
+    def add(symbol: Optional[str]) -> None:
+        normalized = _normalize_symbol(str(symbol or ""))
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            symbols.append(normalized)
+
+    add(focus_symbol)
+    for symbol in _load_research_universe_symbols_from_summary(exchange):
+        add(symbol)
+        if len(symbols) >= max(4, int(max_symbols)):
+            return symbols[: max(4, int(max_symbols))]
+    for symbol in _discover_local_storage_symbols(exchange, timeframe, max_symbols=max_symbols * 2):
+        add(symbol)
+        if len(symbols) >= max(4, int(max_symbols)):
+            break
+    return symbols[: max(4, int(max_symbols))]
+
+
+def _aggregation_base_timeframe(target_timeframe: str) -> Optional[str]:
+    target = str(target_timeframe or "").strip().lower()
+    if target == "1s":
+        return None
+    sec = _timeframe_seconds(target)
+    if sec <= 0:
+        return None
+    if sec < 60:
+        return "1s"
+    if sec == 60:
+        return None
+    if sec < 3600:
+        return "1m"
+    if sec == 3600:
+        return None
+    return "1h"
+
+
+async def _load_research_timeframe_df(
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+) -> pd.DataFrame:
+    df = await data_storage.load_klines_from_parquet(
+        exchange=exchange,
+        symbol=symbol,
+        timeframe=timeframe,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    if not df.empty:
+        return _validate_df(df)
+
+    base_timeframe = _aggregation_base_timeframe(timeframe)
+    if not base_timeframe:
+        return pd.DataFrame()
+
+    pad_seconds = max(0, _timeframe_seconds(timeframe))
+    padded_start = start_time
+    if start_time is not None and pad_seconds > 0:
+        padded_start = start_time - timedelta(seconds=pad_seconds)
+
+    base_df = await data_storage.load_klines_from_parquet(
+        exchange=exchange,
+        symbol=symbol,
+        timeframe=base_timeframe,
+        start_time=padded_start,
+        end_time=end_time,
+    )
+    if base_df.empty:
+        return pd.DataFrame()
+
+    resampled = _resample_ohlcv(_validate_df(base_df), timeframe)
+    if start_time is not None:
+        resampled = resampled[resampled.index >= start_time]
+    if end_time is not None:
+        resampled = resampled[resampled.index <= end_time]
+    if resampled.empty:
+        return pd.DataFrame()
+    return _validate_df(resampled)
+
+
+async def _load_research_universe_frames(
+    exchange: str,
+    symbols: List[str],
+    timeframe: str,
+    start_time: Optional[datetime],
+    end_time: Optional[datetime],
+    min_rows: int,
+) -> Dict[str, pd.DataFrame]:
+    async def _load_one(sym: str) -> tuple[str, pd.DataFrame]:
+        try:
+            df = await _load_research_timeframe_df(
+                exchange=exchange,
+                symbol=sym,
+                timeframe=timeframe,
+                start_time=start_time,
+                end_time=end_time,
+            )
+        except Exception:
+            return sym, pd.DataFrame()
+        if df.empty or len(df) < int(min_rows):
+            return sym, pd.DataFrame()
+        return sym, df
+
+    pairs = await asyncio.gather(*[_load_one(sym) for sym in list(symbols or [])], return_exceptions=False)
+    return {sym: df for sym, df in pairs if not df.empty}
+
+
+def _cross_asset_window(timeframe: str, rows: int) -> int:
+    tf_sec = max(60, _timeframe_seconds(timeframe) or 3600)
+    approx_day = max(4, int(round(24 * 3600 / tf_sec)))
+    cap = max(12, int(rows * 0.33))
+    return max(12, min(approx_day, cap))
+
+
+def _build_multi_asset_research_features(
+    close_df: pd.DataFrame,
+    volume_df: pd.DataFrame,
+    symbol: str,
+    timeframe: str,
+) -> Dict[str, Any]:
+    normalized_symbol = _normalize_symbol(symbol)
+    close = close_df.apply(pd.to_numeric, errors="coerce").sort_index()
+    volume = volume_df.apply(pd.to_numeric, errors="coerce").sort_index()
+    common_cols = [col for col in close.columns if col in volume.columns]
+    if normalized_symbol not in common_cols:
+        return {
+            "features": pd.DataFrame(),
+            "constant_features": {},
+            "summary": {
+                "available": False,
+                "reason": "focus_symbol_missing_from_universe",
+                "universe_size": int(len(common_cols)),
+                "timeframe": timeframe,
+            },
+        }
+
+    close = close[common_cols]
+    volume = volume[common_cols]
+    returns_df = close.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan)
+    market_ret = returns_df.mean(axis=1).fillna(0.0)
+    window = _cross_asset_window(timeframe, len(close))
+    min_periods = max(6, window // 2)
+
+    momentum = close.pct_change(window).replace([np.inf, -np.inf], np.nan)
+    dollar_volume = (close * volume).replace([np.inf, -np.inf], np.nan)
+    avg_dollar_volume = dollar_volume.rolling(window, min_periods=min_periods).mean()
+    corr_to_market = returns_df[normalized_symbol].rolling(window, min_periods=min_periods).corr(market_ret)
+    market_var = market_ret.rolling(window, min_periods=min_periods).var().replace(0, np.nan)
+    beta_to_market = returns_df[normalized_symbol].rolling(window, min_periods=min_periods).cov(market_ret) / market_var
+
+    feature_frame = pd.DataFrame(index=close.index)
+    feature_frame["cross_asset_market_return"] = market_ret
+    feature_frame["cross_asset_market_dispersion"] = returns_df.std(axis=1).fillna(0.0)
+    feature_frame["cross_asset_market_breadth"] = returns_df.gt(0).mean(axis=1).fillna(0.5)
+    feature_frame["cross_asset_relative_strength"] = (
+        momentum.get(normalized_symbol) - momentum.mean(axis=1)
+    ).fillna(0.0)
+    feature_frame["cross_asset_momentum_rank"] = momentum.rank(axis=1, pct=True).get(normalized_symbol).fillna(0.5)
+    feature_frame["cross_asset_volume_rank"] = avg_dollar_volume.rank(axis=1, pct=True).get(normalized_symbol).fillna(0.5)
+    feature_frame["cross_asset_corr_to_market"] = corr_to_market.fillna(0.0)
+    feature_frame["cross_asset_beta_to_market"] = beta_to_market.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    feature_frame["cross_asset_distance_to_leader"] = (
+        momentum.get(normalized_symbol) - momentum.max(axis=1)
+    ).fillna(0.0)
+    feature_frame = feature_frame.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    asset_rows: List[Dict[str, Any]] = []
+    for col in common_cols:
+        series = close[col].dropna()
+        if len(series) < 3:
+            continue
+        ret = series.pct_change(fill_method=None).dropna()
+        asset_rows.append(
+            {
+                "symbol": col,
+                "return_pct": _safe_float_value((series.iloc[-1] / series.iloc[0] - 1.0) * 100.0),
+                "volatility_pct": _safe_float_value(ret.std(ddof=0) * np.sqrt(max(1, len(ret))) * 100.0),
+                "avg_volume": _safe_float_value(volume[col].dropna().mean()),
+                "max_drawdown_pct": _safe_float_value(((series / series.cummax()) - 1.0).min() * 100.0),
+            }
+        )
+
+    assets_df = pd.DataFrame(asset_rows)
+    constant_features: Dict[str, float] = {
+        "multi_asset_universe_size": float(len(common_cols)),
+    }
+    leader_symbol = ""
+    if not assets_df.empty:
+        assets_df = assets_df.sort_values("return_pct", ascending=False).reset_index(drop=True)
+        assets_df["return_rank_pct"] = assets_df["return_pct"].rank(pct=True, ascending=True)
+        assets_df["volatility_rank_pct"] = assets_df["volatility_pct"].rank(pct=True, ascending=True)
+        current = assets_df[assets_df["symbol"] == normalized_symbol]
+        if not current.empty:
+            row = current.iloc[0]
+            constant_features.update(
+                {
+                    "multi_asset_return_pct": _safe_float_value(row.get("return_pct")),
+                    "multi_asset_volatility_pct": _safe_float_value(row.get("volatility_pct")),
+                    "multi_asset_avg_volume": _safe_float_value(row.get("avg_volume")),
+                    "multi_asset_max_drawdown_pct": _safe_float_value(row.get("max_drawdown_pct")),
+                    "multi_asset_return_rank_pct": _safe_float_value(row.get("return_rank_pct")),
+                    "multi_asset_volatility_rank_pct": _safe_float_value(row.get("volatility_rank_pct")),
+                }
+            )
+        leader_symbol = str(assets_df.iloc[0].get("symbol") or "")
+
+    corr_matrix: Dict[str, Dict[str, float]] = {}
+    corr_series = returns_df.corr().round(4).fillna(0.0) if len(common_cols) >= 2 else pd.DataFrame()
+    if not corr_series.empty:
+        corr_matrix = corr_series.to_dict()
+
+    return {
+        "features": feature_frame,
+        "constant_features": constant_features,
+        "summary": {
+            "available": not feature_frame.empty,
+            "timeframe": timeframe,
+            "universe_size": int(len(common_cols)),
+            "leader_symbol": leader_symbol,
+            "assets": asset_rows,
+            "correlation": corr_matrix,
+        },
+    }
+
+
+def _build_factor_library_research_features(
+    close_df: pd.DataFrame,
+    volume_df: pd.DataFrame,
+    symbol: str,
+    timeframe: str,
+) -> Dict[str, Any]:
+    normalized_symbol = _normalize_symbol(symbol)
+    result = build_factor_library(close_df=close_df, volume_df=volume_df, quantile=0.3, timeframe=timeframe)
+
+    factor_frame = result.factors.copy()
+    if not factor_frame.empty:
+        factor_frame = factor_frame.add_prefix("factor_")
+        factor_frame.columns = [_sanitize_feature_name(col) for col in factor_frame.columns]
+        factor_frame = factor_frame.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    asset_scores = result.asset_scores.copy()
+    constant_features: Dict[str, float] = {}
+    rank_pct = 0.0
+    if not asset_scores.empty:
+        asset_scores["symbol"] = asset_scores["symbol"].astype(str).map(_normalize_symbol)
+        asset_scores = asset_scores.drop_duplicates(subset=["symbol"], keep="first").reset_index(drop=True)
+        asset_scores["rank"] = np.arange(1, len(asset_scores) + 1)
+        denom = max(1, len(asset_scores) - 1)
+        asset_scores["rank_pct"] = 1.0 - ((asset_scores["rank"] - 1.0) / float(denom))
+        row = asset_scores[asset_scores["symbol"] == normalized_symbol]
+        if not row.empty:
+            record = row.iloc[0]
+            for col in _FACTOR_SCORE_COLUMNS:
+                if col in record.index:
+                    constant_features[f"factor_asset_{_sanitize_feature_name(col)}"] = _safe_float_value(record.get(col))
+            rank_pct = _safe_float_value(record.get("rank_pct"))
+            constant_features["factor_asset_rank_pct"] = rank_pct
+
+    return {
+        "features": factor_frame,
+        "constant_features": constant_features,
+        "summary": {
+            "available": not factor_frame.empty,
+            "timeframe": timeframe,
+            "factor_count": int(factor_frame.shape[1]) if not factor_frame.empty else 0,
+            "universe_size": int(len(asset_scores)),
+            "asset_rank_pct": rank_pct,
+            "asset_scores": asset_scores.to_dict("records") if not asset_scores.empty else [],
+        },
+    }
+
+
+async def _build_cross_sectional_research_features(
+    exchange: str,
+    symbol: str,
+    requested_timeframes: List[str],
+    start_time: Optional[datetime],
+    end_time: Optional[datetime],
+    preferred_timeframe: Optional[str] = None,
+    max_symbols: int = 40,
+) -> Dict[str, Any]:
+    for timeframe in _research_universe_timeframe_candidates(requested_timeframes, preferred=preferred_timeframe):
+        symbols = _select_research_universe_symbols(
+            exchange=exchange,
+            timeframe=timeframe,
+            focus_symbol=symbol,
+            max_symbols=max_symbols,
+        )
+        if len(symbols) < 4:
+            continue
+
+        universe_frames = await _load_research_universe_frames(
+            exchange=exchange,
+            symbols=symbols,
+            timeframe=timeframe,
+            start_time=start_time,
+            end_time=end_time,
+            min_rows=120,
+        )
+        if len(universe_frames) < 4 or _normalize_symbol(symbol) not in universe_frames:
+            continue
+
+        close_df = pd.DataFrame({sym: df["close"] for sym, df in universe_frames.items()}).sort_index()
+        volume_df = pd.DataFrame({sym: df["volume"] for sym, df in universe_frames.items()}).sort_index()
+        valid_cols = [col for col in close_df.columns if int(close_df[col].notna().sum()) >= 80]
+        close_df = close_df[valid_cols].ffill()
+        volume_df = volume_df[valid_cols].fillna(0.0)
+        if len(valid_cols) < 4 or _normalize_symbol(symbol) not in valid_cols:
+            continue
+
+        multi_asset = _build_multi_asset_research_features(
+            close_df=close_df,
+            volume_df=volume_df,
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+        factor_library = _build_factor_library_research_features(
+            close_df=close_df,
+            volume_df=volume_df,
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+        multi_asset_features = multi_asset.get("features")
+        if not isinstance(multi_asset_features, pd.DataFrame):
+            multi_asset_features = pd.DataFrame()
+        factor_library_features = factor_library.get("features")
+        if not isinstance(factor_library_features, pd.DataFrame):
+            factor_library_features = pd.DataFrame()
+        feature_frame = pd.concat(
+            [multi_asset_features, factor_library_features],
+            axis=1,
+        ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        constant_features = dict(multi_asset.get("constant_features") or {})
+        constant_features.update(dict(factor_library.get("constant_features") or {}))
+        return {
+            "available": True,
+            "timeframe": timeframe,
+            "symbols_used": list(valid_cols),
+            "feature_frame": feature_frame,
+            "constant_features": constant_features,
+            "multi_asset_summary": multi_asset.get("summary") or {},
+            "factor_library_summary": factor_library.get("summary") or {},
+        }
+
+    return {
+        "available": False,
+        "timeframe": None,
+        "symbols_used": [],
+        "feature_frame": pd.DataFrame(),
+        "constant_features": {},
+        "multi_asset_summary": {"available": False},
+        "factor_library_summary": {"available": False},
+    }
+
+
+def _build_macro_research_features() -> Dict[str, Any]:
+    from core.data import macro_collector
+
+    snapshot = dict(macro_collector.load_macro_snapshot() or {})
+    grouped = dict(macro_collector.group_macro_snapshot(snapshot) or {})
+    features = _flatten_numeric_features("macro", snapshot)
+    available_count = int(sum(1 for value in snapshot.values() if value is not None))
+    return {
+        "features": features,
+        "summary": {
+            "available": bool(features),
+            "available_count": available_count,
+            "snapshot": snapshot,
+            "grouped": grouped,
+        },
+    }
+
+
+def _build_premium_snapshot_research_features() -> Dict[str, Any]:
+    from core.data import cryptoquant_collector, glassnode_collector, kaiko_collector, nansen_collector
+
+    source_snapshots = {
+        "glassnode": dict(glassnode_collector.load_glassnode_snapshot() or {}),
+        "cryptoquant": dict(cryptoquant_collector.load_cryptoquant_snapshot() or {}),
+        "nansen": dict(nansen_collector.load_nansen_snapshot() or {}),
+        "kaiko": dict(kaiko_collector.load_kaiko_snapshot() or {}),
+    }
+
+    features: Dict[str, float] = {}
+    available_sources: List[str] = []
+    for source_name, snapshot in source_snapshots.items():
+        flattened = _flatten_numeric_features(source_name, snapshot)
+        if flattened:
+            available_sources.append(source_name)
+            features.update(flattened)
+
+    return {
+        "features": features,
+        "summary": {
+            "available": bool(features),
+            "available_sources": available_sources,
+            "snapshots": source_snapshots,
+            "available_count": int(len(available_sources)),
+        },
+    }
+
+
+def _preflight_timeframes(config: "ResearchConfig") -> List[str]:
+    requested = list(config.cross_exchange_timeframes or config.timeframes or [])
+    minute_plus = [tf for tf in requested if (_timeframe_seconds(tf) or 0) >= 60 and tf in _RESAMPLE_RULES]
+    ordered = sorted(set(minute_plus), key=lambda tf: (_timeframe_seconds(tf) or 10**9, tf))
+    if not ordered:
+        ordered = ["1m"]
+    return ordered
+
+
+async def _run_cross_exchange_consistency_preflight(
+    config: "ResearchConfig",
+    start_time: Optional[datetime],
+    end_time: Optional[datetime],
+) -> Dict[str, Any]:
+    secondary_exchange = str(
+        config.cross_exchange_secondary_exchange
+        or _CROSS_EXCHANGE_SECONDARY_DEFAULTS.get(config.exchange, "binance")
+    ).strip().lower()
+    if not secondary_exchange or secondary_exchange == config.exchange:
+        secondary_exchange = "gate" if config.exchange != "gate" else "binance"
+
+    results: List[Dict[str, Any]] = []
+    checked: List[Dict[str, Any]] = []
+    for timeframe in _preflight_timeframes(config):
+        primary = await _load_research_timeframe_df(
+            exchange=config.exchange,
+            symbol=config.symbol,
+            timeframe=timeframe,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        secondary = await _load_research_timeframe_df(
+            exchange=secondary_exchange,
+            symbol=config.symbol,
+            timeframe=timeframe,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        if primary.empty or secondary.empty:
+            results.append(
+                {
+                    "timeframe": timeframe,
+                    "status": "missing",
+                    "primary_rows": int(len(primary)),
+                    "secondary_rows": int(len(secondary)),
+                    "is_consistent": False,
+                }
+            )
+            continue
+
+        p = primary.tail(max(50, int(config.cross_exchange_limit)))[["close", "volume"]].copy()
+        s = secondary.tail(max(50, int(config.cross_exchange_limit)))[["close", "volume"]].copy()
+        merged = p.join(s, how="inner", lsuffix="_p", rsuffix="_s")
+        if len(merged) < int(config.cross_exchange_min_overlap_bars):
+            results.append(
+                {
+                    "timeframe": timeframe,
+                    "status": "insufficient_overlap",
+                    "overlap_bars": int(len(merged)),
+                    "required_overlap_bars": int(config.cross_exchange_min_overlap_bars),
+                    "is_consistent": False,
+                }
+            )
+            continue
+
+        close_diff_pct = (merged["close_p"] - merged["close_s"]).abs() / merged["close_p"].replace(0, np.nan)
+        volume_diff_pct = (merged["volume_p"] - merged["volume_s"]).abs() / merged["volume_p"].replace(0, np.nan)
+        close_diff_pct = close_diff_pct.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        volume_diff_pct = volume_diff_pct.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+        row = {
+            "timeframe": timeframe,
+            "status": "checked",
+            "overlap_bars": int(len(merged)),
+            "close_diff": {
+                "mean_pct": round(_safe_float_value(close_diff_pct.mean() * 100.0), 6),
+                "max_pct": round(_safe_float_value(close_diff_pct.max() * 100.0), 6),
+                "p95_pct": round(_safe_float_value(close_diff_pct.quantile(0.95) * 100.0), 6),
+            },
+            "volume_diff": {
+                "mean_pct": round(_safe_float_value(volume_diff_pct.mean() * 100.0), 6),
+                "max_pct": round(_safe_float_value(volume_diff_pct.max() * 100.0), 6),
+                "p95_pct": round(_safe_float_value(volume_diff_pct.quantile(0.95) * 100.0), 6),
+            },
+        }
+        row["is_consistent"] = (
+            row["close_diff"]["mean_pct"] <= float(config.cross_exchange_close_mean_threshold_pct)
+            and row["close_diff"]["p95_pct"] <= float(config.cross_exchange_close_p95_threshold_pct)
+            and row["volume_diff"]["mean_pct"] <= float(config.cross_exchange_volume_mean_threshold_pct)
+            and row["volume_diff"]["p95_pct"] <= float(config.cross_exchange_volume_p95_threshold_pct)
+        )
+        checked.append(row)
+        results.append(row)
+
+    if not checked:
+        return {
+            "required": bool(config.cross_exchange_consistency_required),
+            "primary_exchange": config.exchange,
+            "secondary_exchange": secondary_exchange,
+            "ok": False,
+            "reason": "cross-exchange preflight failed: insufficient overlapping local data",
+            "results": results,
+        }
+
+    failed = [row for row in checked if not bool(row.get("is_consistent"))]
+    if failed:
+        first = failed[0]
+        return {
+            "required": bool(config.cross_exchange_consistency_required),
+            "primary_exchange": config.exchange,
+            "secondary_exchange": secondary_exchange,
+            "ok": False,
+            "reason": (
+                "cross-exchange preflight failed: "
+                f"{first['timeframe']} close_mean={first['close_diff']['mean_pct']:.4f}% "
+                f"close_p95={first['close_diff']['p95_pct']:.4f}% "
+                f"volume_mean={first['volume_diff']['mean_pct']:.4f}% "
+                f"volume_p95={first['volume_diff']['p95_pct']:.4f}%"
+            ),
+            "results": results,
+        }
+
+    return {
+        "required": bool(config.cross_exchange_consistency_required),
+        "primary_exchange": config.exchange,
+        "secondary_exchange": secondary_exchange,
+        "ok": True,
+        "reason": "ok",
+        "results": results,
+    }
 
 
 def _annual_factor(timeframe: str) -> int:
@@ -337,10 +1039,42 @@ def _build_news_feature_frame(index: pd.DatetimeIndex, events: List[Dict[str, An
     return out
 
 
+def _empty_research_enrichment() -> Dict[str, Any]:
+    return {
+        "events": [],
+        "events_count": 0,
+        "funding_provider": None,
+        "funding_available": False,
+        "constant_features": {},
+        "time_series_features": pd.DataFrame(),
+        "macro_summary": {"available": False, "available_count": 0},
+        "premium_summary": {"available": False, "available_sources": [], "available_count": 0},
+        "cross_sectional_summary": {
+            "available": False,
+            "timeframe": None,
+            "symbols_used": [],
+            "universe_size": 0,
+        },
+        "summary": {
+            "constant_feature_count": 0,
+            "time_series_feature_count": 0,
+            "macro_available": False,
+            "premium_source_count": 0,
+            "cross_sectional_available": False,
+            "cross_sectional_timeframe": None,
+            "universe_size": 0,
+        },
+    }
+
+
 async def _build_research_enrichment(
+    exchange: str,
     symbol: str,
     start_time: Optional[datetime],
     end_time: Optional[datetime],
+    requested_timeframes: Optional[List[str]] = None,
+    preferred_universe_timeframe: Optional[str] = None,
+    universe_max_symbols: int = 40,
 ) -> Dict[str, Any]:
     events = await _load_news_events_for_symbol(symbol=symbol, start_time=start_time, end_time=end_time, limit=5000)
 
@@ -358,12 +1092,91 @@ async def _build_research_enrichment(
     except Exception:
         funding_available = False
 
-    return {
-        "events": events,
-        "events_count": len(events),
-        "funding_provider": funding_provider if funding_available else None,
-        "funding_available": funding_available,
+    enrichment = _empty_research_enrichment()
+    enrichment.update(
+        {
+            "events": events,
+            "events_count": len(events),
+            "funding_provider": funding_provider if funding_available else None,
+            "funding_available": funding_available,
+        }
+    )
+
+    try:
+        macro_bundle = _build_macro_research_features()
+    except Exception as exc:
+        logger.warning(f"macro research enrichment unavailable for {symbol}: {exc}")
+        macro_bundle = {"features": {}, "summary": {"available": False, "available_count": 0, "error": str(exc)}}
+
+    try:
+        premium_bundle = _build_premium_snapshot_research_features()
+    except Exception as exc:
+        logger.warning(f"premium research enrichment unavailable for {symbol}: {exc}")
+        premium_bundle = {
+            "features": {},
+            "summary": {"available": False, "available_sources": [], "available_count": 0, "error": str(exc)},
+        }
+
+    try:
+        cross_sectional_bundle = await _build_cross_sectional_research_features(
+            exchange=exchange,
+            symbol=symbol,
+            requested_timeframes=list(requested_timeframes or []),
+            start_time=start_time,
+            end_time=end_time,
+            preferred_timeframe=preferred_universe_timeframe,
+            max_symbols=max(8, int(universe_max_symbols)),
+        )
+    except Exception as exc:
+        logger.warning(f"cross-sectional research enrichment unavailable for {symbol}: {exc}")
+        cross_sectional_bundle = {
+            "available": False,
+            "timeframe": None,
+            "symbols_used": [],
+            "feature_frame": pd.DataFrame(),
+            "constant_features": {},
+            "multi_asset_summary": {"available": False, "error": str(exc)},
+            "factor_library_summary": {"available": False, "error": str(exc)},
+        }
+
+    constant_features: Dict[str, float] = {}
+    constant_features.update(dict(macro_bundle.get("features") or {}))
+    constant_features.update(dict(premium_bundle.get("features") or {}))
+    constant_features.update(dict(cross_sectional_bundle.get("constant_features") or {}))
+
+    time_series_features = cross_sectional_bundle.get("feature_frame")
+    if not isinstance(time_series_features, pd.DataFrame):
+        time_series_features = pd.DataFrame()
+    time_series_feature_count = int(time_series_features.shape[1]) if not time_series_features.empty else 0
+
+    cross_sectional_summary = {
+        "available": bool(cross_sectional_bundle.get("available")),
+        "timeframe": cross_sectional_bundle.get("timeframe"),
+        "symbols_used": list(cross_sectional_bundle.get("symbols_used") or []),
+        "universe_size": int(len(cross_sectional_bundle.get("symbols_used") or [])),
+        "multi_asset": cross_sectional_bundle.get("multi_asset_summary") or {},
+        "factor_library": cross_sectional_bundle.get("factor_library_summary") or {},
     }
+
+    enrichment.update(
+        {
+            "constant_features": constant_features,
+            "time_series_features": time_series_features,
+            "macro_summary": macro_bundle.get("summary") or {},
+            "premium_summary": premium_bundle.get("summary") or {},
+            "cross_sectional_summary": cross_sectional_summary,
+            "summary": {
+                "constant_feature_count": int(len(constant_features)),
+                "time_series_feature_count": time_series_feature_count,
+                "macro_available": bool((macro_bundle.get("summary") or {}).get("available")),
+                "premium_source_count": int(len((premium_bundle.get("summary") or {}).get("available_sources") or [])),
+                "cross_sectional_available": bool(cross_sectional_summary.get("available")),
+                "cross_sectional_timeframe": cross_sectional_summary.get("timeframe"),
+                "universe_size": int(cross_sectional_summary.get("universe_size") or 0),
+            },
+        }
+    )
+    return enrichment
 
 
 def _attach_research_enrichment(
@@ -398,6 +1211,15 @@ def _attach_research_enrichment(
         out["funding_rate"] = 0.0
 
     out["funding_rate"] = pd.to_numeric(out.get("funding_rate"), errors="coerce").fillna(0.0)
+    constant_feature_frame = _build_constant_feature_frame(idx, enrichment.get("constant_features"))
+    if not constant_feature_frame.empty:
+        for col in constant_feature_frame.columns:
+            out[col] = constant_feature_frame[col].values
+
+    aligned_time_series = _align_feature_frame(idx, enrichment.get("time_series_features"))
+    if not aligned_time_series.empty:
+        for col in aligned_time_series.columns:
+            out[col] = aligned_time_series[col].values
     return out
 
 
@@ -1192,6 +2014,17 @@ class ResearchConfig:
     # B: parameter space for grid search {strategy_name: {param: [val1, val2, ...]}}
     parameter_space: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     strategy_programs: Dict[str, StrategyProgram] = field(default_factory=dict)
+    enrichment_universe_timeframe: Optional[str] = None
+    enrichment_universe_max_symbols: int = 40
+    cross_exchange_consistency_required: bool = True
+    cross_exchange_secondary_exchange: Optional[str] = None
+    cross_exchange_timeframes: List[str] = field(default_factory=list)
+    cross_exchange_limit: int = 500
+    cross_exchange_min_overlap_bars: int = 120
+    cross_exchange_close_mean_threshold_pct: float = 1.0
+    cross_exchange_close_p95_threshold_pct: float = 3.0
+    cross_exchange_volume_mean_threshold_pct: float = 25.0
+    cross_exchange_volume_p95_threshold_pct: float = 80.0
 
 
 def _normalize_symbol(symbol: str) -> str:
@@ -1627,25 +2460,80 @@ async def run_strategy_research(
     config.days = max(1, int(config.days))
     config.min_rows_per_timeframe = max(80, int(config.min_rows_per_timeframe))
     config.timeframes = [tf for tf in config.timeframes if tf in _RESAMPLE_RULES]
+    config.enrichment_universe_timeframe = (
+        str(config.enrichment_universe_timeframe or "").strip().lower() or None
+    )
+    config.enrichment_universe_max_symbols = max(8, int(config.enrichment_universe_max_symbols))
+    config.cross_exchange_secondary_exchange = (
+        str(config.cross_exchange_secondary_exchange or "").strip().lower() or None
+    )
+    config.cross_exchange_timeframes = [tf for tf in list(config.cross_exchange_timeframes or []) if tf in _RESAMPLE_RULES]
+    config.cross_exchange_limit = max(50, int(config.cross_exchange_limit))
+    config.cross_exchange_min_overlap_bars = max(20, int(config.cross_exchange_min_overlap_bars))
     if not config.timeframes:
         raise ValueError("timeframes 为空或不支持")
 
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(days=config.days)
-    try:
-        enrichment = await _build_research_enrichment(
-            symbol=config.symbol,
+    if progress_callback is not None:
+        try:
+            progress_callback(
+                {
+                    "stage": "preflight",
+                    "strategy": "",
+                    "timeframe": "",
+                    "completed": 0,
+                    "total": 0,
+                }
+            )
+        except Exception:
+            pass
+
+    if config.cross_exchange_consistency_required:
+        preflight = await _run_cross_exchange_consistency_preflight(
+            config=config,
             start_time=start_time,
             end_time=end_time,
         )
+        if not bool(preflight.get("ok")):
+            if progress_callback is not None:
+                try:
+                    progress_callback(
+                        {
+                            "stage": "preflight_failed",
+                            "strategy": "",
+                            "timeframe": "",
+                            "completed": 0,
+                            "total": 0,
+                            "reason": str(preflight.get("reason") or ""),
+                        }
+                    )
+                except Exception:
+                    pass
+            raise ValueError(str(preflight.get("reason") or "cross-exchange preflight failed"))
+    else:
+        preflight = {
+            "required": False,
+            "primary_exchange": config.exchange,
+            "secondary_exchange": config.cross_exchange_secondary_exchange,
+            "ok": True,
+            "reason": "skipped",
+            "results": [],
+        }
+
+    try:
+        enrichment = await _build_research_enrichment(
+            exchange=config.exchange,
+            symbol=config.symbol,
+            start_time=start_time,
+            end_time=end_time,
+            requested_timeframes=list(config.timeframes),
+            preferred_universe_timeframe=config.enrichment_universe_timeframe,
+            universe_max_symbols=config.enrichment_universe_max_symbols,
+        )
     except Exception as e:
         logger.warning(f"research enrichment unavailable for {config.symbol}: {e}")
-        enrichment = {
-            "events": [],
-            "events_count": 0,
-            "funding_provider": None,
-            "funding_available": False,
-        }
+        enrichment = _empty_research_enrichment()
 
     base_df = await _load_second_level_df(
         exchange=config.exchange,
@@ -2076,6 +2964,8 @@ async def run_strategy_research(
         "slippage_bps": float(config.slippage_bps),
         "news_events_count": int(enrichment.get("events_count", 0) or 0),
         "funding_available": bool(enrichment.get("funding_available", False)),
+        "preflight": preflight,
+        "enrichment_summary": dict(enrichment.get("summary") or {}),
         "runs": int(len(result_df)),
         "valid_runs": int(len(valid_df)),
         "quality_counts": (

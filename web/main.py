@@ -1258,6 +1258,7 @@ templates = Jinja2Templates(directory=str(templates_path))
 templates.env.globals["static_asset_url"] = static_asset_url
 
 from web.api import (
+    altcoin,
     ai_agent,
     backtest,
     data,
@@ -1280,6 +1281,7 @@ app.include_router(trading_balances.router, prefix="/api/trading", tags=["tradin
 app.include_router(trading_analytics.router, prefix="/api/trading", tags=["trading"])
 app.include_router(trading_runtime.router, prefix="/api/trading", tags=["trading"])
 app.include_router(data.router, prefix="/api/data", tags=["data"])
+app.include_router(altcoin.router, prefix="/api/altcoin", tags=["altcoin"])
 app.include_router(research.router, prefix="/api/research", tags=["research"])
 app.include_router(ai_research.router, prefix="/api/ai", tags=["ai_research"])
 app.include_router(ai_agent.router, prefix="/api/ai", tags=["ai_agent"])

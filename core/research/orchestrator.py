@@ -271,6 +271,106 @@ def _recover_stale_jobs_on_startup(app: FastAPI) -> None:
         pass  # Recovery is best-effort; don't crash startup
 
 
+def _proposal_state_from_candidate_status(status: Any) -> str:
+    text = str(status or "").strip().lower()
+    if text in {"paper_running", "shadow_running", "live_candidate", "live_running", "retired"}:
+        return text
+    return "validated"
+
+
+def _recover_missing_proposals_from_candidates(app: FastAPI) -> int:
+    recovered = 0
+    candidates = app.state.ai_candidate_registry.list(limit=None)
+    for candidate in candidates:
+        proposal_id = str(getattr(candidate, "proposal_id", "") or "").strip()
+        if not proposal_id:
+            continue
+        if app.state.ai_proposal_registry.get(proposal_id) is not None:
+            continue
+
+        experiment = app.state.ai_experiment_registry.get(str(getattr(candidate, "experiment_id", "") or ""))
+        candidate_meta = dict(getattr(candidate, "metadata", {}) or {})
+        created_at_values = [
+            value
+            for value in (
+                getattr(experiment, "created_at", None),
+                getattr(candidate, "created_at", None),
+            )
+            if isinstance(value, datetime)
+        ]
+        created_at = min(created_at_values) if created_at_values else _now_utc()
+        strategy_name = str(getattr(candidate, "strategy", "") or "").strip() or "RecoveredStrategy"
+        symbol_name = str(getattr(candidate, "symbol", "") or "").strip() or "BTC/USDT"
+        timeframe_name = str(getattr(candidate, "timeframe", "") or "").strip() or "1h"
+
+        strategy_templates = _dedupe_keep_order(
+            list(getattr(experiment, "strategies", []) or []) + [strategy_name]
+        )
+        target_symbols = _dedupe_keep_order(
+            [str(getattr(experiment, "symbol", "") or "").strip(), symbol_name]
+        )
+        target_timeframes = _dedupe_keep_order(
+            list(getattr(experiment, "timeframes", []) or []) + [timeframe_name]
+        )
+        parameter_space = dict(getattr(experiment, "parameter_space", {}) or {})
+        if not parameter_space and getattr(candidate, "params", None):
+            parameter_space = {strategy_name: dict(getattr(candidate, "params", {}) or {})}
+
+        proposal = ResearchProposal(
+            proposal_id=proposal_id,
+            created_at=created_at,
+            updated_at=_now_utc(),
+            status=_proposal_state_from_candidate_status(getattr(candidate, "status", None)),
+            source="ai",
+            research_mode=str(
+                getattr(experiment, "research_mode", None)
+                or candidate_meta.get("research_mode")
+                or "template"
+            ),
+            thesis=f"Recovered proposal for {strategy_name} on {symbol_name}",
+            market_regime=str(candidate_meta.get("market_regime") or "mixed"),
+            target_symbols=target_symbols,
+            target_timeframes=target_timeframes,
+            strategy_templates=strategy_templates,
+            parameter_space=parameter_space,
+            latest_experiment_id=str(getattr(candidate, "experiment_id", "") or "") or None,
+            latest_candidate_id=str(getattr(candidate, "candidate_id", "") or "") or None,
+            notes=["Recovered missing proposal record from candidate registry."],
+            metadata={
+                "created_by": "system_recovery",
+                "recovered_from_orphan_candidate": True,
+                "recovered_candidate_id": str(getattr(candidate, "candidate_id", "") or ""),
+                "recovered_at": _now_utc().isoformat(),
+                "registered_strategy_name": str(candidate_meta.get("registered_strategy_name") or ""),
+            },
+            search_budget=getattr(experiment, "search_budget", None) or candidate_meta.get("search_budget") or {},
+            search_summary=getattr(experiment, "search_summary", None) or candidate_meta.get("search_summary"),
+            lineage=getattr(experiment, "lineage", None) or candidate_meta.get("lineage"),
+            validation_summary=getattr(candidate, "validation_summary", None),
+        )
+        app.state.ai_proposal_registry.save(proposal)
+        record_lifecycle(
+            app.state.ai_lifecycle_registry,
+            object_type="proposal",
+            object_id=proposal.proposal_id,
+            from_state=None,
+            to_state=str(proposal.status),
+            actor="system",
+            reason="recovered missing proposal from candidate registry",
+            metadata={
+                "recovered_from_candidate_id": str(getattr(candidate, "candidate_id", "") or ""),
+                "recovered_from_candidate_status": str(getattr(candidate, "status", "") or ""),
+            },
+        )
+        recovered += 1
+        logger.warning(
+            "Recovered missing AI research proposal from candidate registry: "
+            f"proposal_id={proposal_id} candidate_id={getattr(candidate, 'candidate_id', '')} "
+            f"status={getattr(candidate, 'status', '')}"
+        )
+    return recovered
+
+
 def ensure_ai_research_runtime_state(app: FastAPI) -> None:
     base_dir = (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "ai").resolve()
     if not hasattr(app.state, "ai_research_dir"):
@@ -308,6 +408,7 @@ def ensure_ai_research_runtime_state(app: FastAPI) -> None:
     # D: Job recovery — on first init, fix any stale running/queued proposals
     if first_init:
         _recover_stale_jobs_on_startup(app)
+        _recover_missing_proposals_from_candidates(app)
 
 
 def save_proposal(app: FastAPI, proposal: ResearchProposal) -> ResearchProposal:

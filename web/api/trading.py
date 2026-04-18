@@ -1675,8 +1675,10 @@ def _analytics_fallback_community(exchange: str, symbol: str, error: str) -> Dic
         "flow_proxy": {"imbalance": 0.0, "buy_volume": 0.0, "sell_volume": 0.0},
         "whale_transfers": {"available": False, "count": 0, "transactions": [], "error": str(error or "")},
         "security_alerts": {
-            "source": "fallback",
-            "events": [{"level": "warning", "message": str(error or "社区/巨鲸数据暂不可用")}],
+            "available": False,
+            "source": "unavailable",
+            "events": [],
+            "note": "社区/安全告警源暂不可用，当前未返回安全事件。",
         },
         "announcements": [],
     }
@@ -4800,10 +4802,10 @@ async def get_community_overview(symbol: str = "BTC/USDT", exchange: str = "bina
         "flow_proxy": flow,
         "whale_transfers": whales,
         "security_alerts": {
-            "source": "internal_placeholder",
-            "events": [
-                {"level": "info", "message": "未检测到系统级合约安全事件（需外部安全源接入增强）。"}
-            ],
+            "available": False,
+            "source": "unavailable",
+            "events": [],
+            "note": "安全告警源尚未接入，当前不返回占位事件。",
         },
         "announcements": announcements,
     }

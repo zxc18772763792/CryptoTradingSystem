@@ -39,6 +39,7 @@ env/
 /.pytest_tmp/
 /MagicMock/
 /node_modules/
+/tmp/
 /tmp_ai_proposals*.json
 /web_start*.log
 /output/

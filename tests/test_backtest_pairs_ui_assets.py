@@ -44,7 +44,13 @@ def test_dashboard_mode_ui_uses_runtime_mode_snapshot():
 
     assert "function normalizeRuntimeMode" in app_js
     assert "function resolveRuntimeModeSnapshot" in app_js
+    assert "function hasRenderableBalanceSnapshot" in app_js
+    assert "function resolveActiveAccountUsdEstimate" in app_js
     assert "renderExchanges(displayBalances,activeType);" in app_js
+    assert "const activeUsd=resolveActiveAccountUsdEstimate(displayBalances,mergedRisk,activeType);" in app_js
+    assert "const balanceWarning=String(displayBalances?.warning||'').trim();" in app_js
+    assert "else if(balanceWarning){" in app_js
+    assert "资产分布暂不可用：" in app_js
     assert "await loadSystemStatus().catch" in app_js
 
 

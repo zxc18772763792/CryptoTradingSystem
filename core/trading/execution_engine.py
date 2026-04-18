@@ -226,8 +226,12 @@ class ExecutionEngine:
         resolved = self._normalize_trading_mode(mode)
         self._paper_trading = resolved == "paper"
         order_manager.set_paper_trading(self._paper_trading)
-        position_manager.set_scope(resolved)
-        risk_manager.set_account_scope(resolved, reset_baseline=reset_baseline)
+        set_scope = getattr(position_manager, "set_scope", None)
+        if callable(set_scope):
+            set_scope(resolved)
+        set_account_scope = getattr(risk_manager, "set_account_scope", None)
+        if callable(set_account_scope):
+            set_account_scope(resolved, reset_baseline=reset_baseline)
 
     @contextlib.asynccontextmanager
     async def _mode_guard(self, mode: str, *, reset_baseline: bool = False):
@@ -1508,7 +1512,11 @@ class ExecutionEngine:
             account_id=str(getattr(position, "account_id", "main") or "main"),
             reduce_only=True,
             strategy=str(getattr(position, "strategy", "") or "risk"),
-            params={"close_reason": "partial_take_profit", "profit_management": True},
+            params={
+                "close_reason": "partial_take_profit",
+                "profit_management": True,
+                "trading_mode": self._current_trading_mode(),
+            },
         )
         if not result:
             metadata["partial_take_profit_skip_reason"] = "execution_rejected"
@@ -4355,7 +4363,10 @@ class ExecutionEngine:
             account_id=account_id,
             reduce_only=True,
             strategy=pos.strategy or "risk",
-            params={"close_reason": reason},
+            params={
+                "close_reason": reason,
+                "trading_mode": self._current_trading_mode(),
+            },
         )
         if result:
             await self._notify_callbacks(

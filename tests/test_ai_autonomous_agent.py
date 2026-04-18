@@ -1656,6 +1656,80 @@ def test_agent_model_feedback_outage_alert_is_suppressed_in_paper_mode(monkeypat
     assert guard["alert_sent_at"] is None
 
 
+def test_agent_live_execution_policy_restriction_is_classified_locally(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "LONG", "confidence": 0.78}
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-openai", raising=False)
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "live")
+    monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=True))
+
+    provider_call = AsyncMock(return_value={"action": "buy", "confidence": 0.91, "strength": 0.9, "reason": "should_not_run"})
+    monkeypatch.setattr(agent, "_call_provider", provider_call)
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", provider="codex", allow_live=True, cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    diagnostics = result["diagnostics"]
+    assert provider_call.await_count == 0
+    assert result["decision"]["action"] == "hold"
+    assert "live_trading_not_permitted" in str(result["decision"]["reason"] or "")
+    assert diagnostics["primary"]["code"] == "model_policy_restricted"
+    assert diagnostics["model_feedback"]["kind"] == "policy_restricted"
+
+
+def test_agent_live_execution_falls_back_to_alternative_provider(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "LONG", "confidence": 0.81}
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-openai", raising=False)
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "sk-claude", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "live")
+    monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=True))
+
+    seen = {}
+
+    async def _fake_call_provider(**kwargs):
+        seen.update(kwargs)
+        return {
+            "action": "buy",
+            "confidence": 0.93,
+            "strength": 0.9,
+            "leverage": 1.0,
+            "stop_loss_pct": 0.02,
+            "take_profit_pct": 0.04,
+            "reason": "fallback_provider",
+        }
+
+    monkeypatch.setattr(agent, "_call_provider", _fake_call_provider)
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", provider="codex", allow_live=True, cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert seen["provider"] == "claude"
+    assert result["decision"]["action"] == "buy"
+    assert result["execution"]["submitted"] is True
+
+
 def test_agent_model_feedback_classifies_503_service_unavailable(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
 
@@ -3366,6 +3440,38 @@ def test_agent_symbol_scan_prioritizes_existing_positions(monkeypatch, tmp_path:
     assert scan["selection_reason"] == "existing_position_priority"
     assert [row["symbol"] for row in scan["top_candidates"][:2]] == ["BTC/USDT", "ETH/USDT"]
     assert scan["top_candidates"][0]["has_position"] is True
+
+
+def test_agent_symbol_scan_ignores_scan_error_rows_for_selection(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_scan_error_filter")
+    monkeypatch.setattr(
+        agent,
+        "get_runtime_config",
+        lambda: {
+            "exchange": "binance",
+            "symbol": "BTC/USDT",
+            "symbol_mode": "auto",
+            "universe_symbols": ["ETH/USDT", "SOL/USDT"],
+            "selection_top_n": 5,
+            "timeframe": "15m",
+            "lookback_bars": 240,
+            "account_id": "main",
+            "min_confidence": 0.58,
+        },
+    )
+    monkeypatch.setattr(agent, "_cfg_with_learning_overlays", lambda cfg, force_learning_refresh=False: dict(cfg))
+    monkeypatch.setattr(agent, "_scan_position_map", AsyncMock(return_value={}))
+    monkeypatch.setattr(agent, "_build_context", AsyncMock(side_effect=RuntimeError("market data unavailable")))
+
+    scan = asyncio.run(agent.get_symbol_scan(limit=5, force=True))
+
+    assert scan["selected_symbol"] == "BTC/USDT"
+    assert scan["selection_reason"] == "no_viable_candidates"
+    assert scan["candidate_count"] == 0
+    assert scan["scan_error_count"] == 3
+    assert scan["top_candidates"] == []
 
 
 def test_agent_no_price_closes_losing_position_when_learning_memory_requires(monkeypatch, tmp_path: Path):
