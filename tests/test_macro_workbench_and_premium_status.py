@@ -98,6 +98,64 @@ def test_market_state_exposes_macro_snapshot(monkeypatch):
     assert result["payload"]["macro_regions"]["us"]["fed_rate"] == 3.64
 
 
+def test_onchain_module_exposes_derivatives_shadow_summary(monkeypatch):
+    from web.api import research as module
+
+    monkeypatch.setattr(
+        module,
+        "get_onchain_overview",
+        AsyncMock(
+            return_value={
+                "degraded": False,
+                "served_mode": "cache",
+                "whale_activity": {"count": 3},
+                "defi_tvl": {"chain": "Ethereum"},
+                "funding_rate_multi_source": {"count": 4, "mean_rate_pct": 0.08},
+                "fear_greed_index": {"available": True, "value": 67, "classification": "greed"},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_load_latest_community_snapshot",
+        AsyncMock(return_value={"announcements": [{"title": "listing"}], "whale_transfers": {"count": 1}}),
+    )
+    monkeypatch.setattr(module, "_load_latest_whale_snapshot", AsyncMock(return_value={"count": 2, "transactions": []}))
+    monkeypatch.setattr(module, "_build_news_summary", AsyncMock(return_value=_news_summary(3)))
+    monkeypatch.setattr(
+        module,
+        "get_analytics_history_status",
+        AsyncMock(
+            return_value={
+                "collectors": [
+                    {
+                        "collector": "derivatives",
+                        "status": "ok",
+                        "available": True,
+                        "details": {
+                            "provider": "coinglass",
+                            "freshness_sec": 180.0,
+                            "active_datasets": ["funding_rate_exchange_list", "open_interest_exchange_list"],
+                            "quota_headroom": {"daily_remaining": 49900},
+                            "snapshot": {"timestamp": "2026-04-18T10:02:00Z"},
+                        },
+                    }
+                ]
+            }
+        ),
+    )
+
+    result = asyncio.run(module._build_onchain_module(module.ResearchProfile()))
+
+    assert result["status"] == "ok"
+    assert result["summary"]["derivatives_status"] == "ok"
+    assert result["summary"]["derivatives_dataset_count"] == 2
+    assert result["summary"]["derivatives_freshness_sec"] == 180.0
+    assert result["payload"]["derivatives_summary"]["provider"] == "coinglass"
+    assert result["payload"]["derivatives_summary"]["quota_headroom"]["daily_remaining"] == 49900
+    assert result["payload"]["derivatives_summary"]["funding_mean_rate_pct"] == 0.08
+
+
 def test_premium_data_status_reports_cached_fred_macro(tmp_path, monkeypatch):
     from web.api import ai_research as ai_module
 
@@ -133,9 +191,23 @@ def test_premium_data_status_reports_cached_fred_macro(tmp_path, monkeypatch):
         },
     )
     monkeypatch.setattr("core.data.macro_collector._api_key", lambda: "")
+    monkeypatch.setattr(
+        "core.data.coinglass_feature_builder.load_coinglass_status_snapshot",
+        AsyncMock(
+            return_value={
+                "available": True,
+                "freshness_sec": 120.0,
+                "active_datasets": ["derivatives", "open_interest_exchange_list"],
+                "status": [{"dataset": "derivatives", "status": "ok"}],
+                "quota_headroom": {"minute_remaining": 8, "daily_remaining": 49900, "monthly_remaining": 499000},
+                "key_configured": True,
+            }
+        ),
+    )
 
     result = asyncio.run(ai_module.get_premium_data_status())
     source = result["sources"]["fred_macro"]
+    coinglass = result["sources"]["coinglass"]
 
     assert source["available"] is True
     assert source["key_configured"] is False
@@ -146,6 +218,10 @@ def test_premium_data_status_reports_cached_fred_macro(tmp_path, monkeypatch):
     assert source["last_updated"] is not None
     assert source["regions"]["china"]["cn_cpi_yoy"] == 1.0
     assert source["upstreams"]["china_macro"] == "stats.gov.cn + pbc.gov.cn"
+    assert coinglass["available"] is True
+    assert coinglass["has_cached_data"] is True
+    assert coinglass["snapshot"]["active_datasets"] == ["derivatives", "open_interest_exchange_list"]
+    assert coinglass["snapshot"]["quota_headroom"]["daily_remaining"] == 49900
     assert result["focus_regions"] == ["us", "china"]
 
 

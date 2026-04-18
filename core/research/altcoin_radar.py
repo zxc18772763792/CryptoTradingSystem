@@ -8,6 +8,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from config.settings import settings
+
 
 VALID_TIMEFRAMES = {"1h", "4h", "1d"}
 TIMEFRAME_SECONDS = {"1h": 3600, "4h": 14400, "1d": 86400}
@@ -327,10 +329,12 @@ def _sort_key_for_row(row: Mapping[str, Any], sort_by: str) -> float:
         return _to_float(row.get("chain_confirmation_score"), 0.0)
     if normalized == "heat":
         return (
-            _to_float(row.get("layout_score"), 0.0) * 0.4
-            + _to_float(row.get("alert_score"), 0.0) * 0.3
-            + _to_float(row.get("control_score"), 0.0) * 0.2
-            + _to_float(row.get("chain_confirmation_score"), 0.0) * 0.1
+            _to_float(row.get("layout_score"), 0.0) * 0.25
+            + _to_float(row.get("alert_score"), 0.0) * 0.20
+            + _to_float(row.get("control_score"), 0.0) * 0.15
+            + _to_float(row.get("chain_confirmation_score"), 0.0) * 0.10
+            + _to_float(row.get("derivatives_heat_score"), 0.0) * 0.20
+            + _to_float(row.get("flow_confirmation_score"), 0.0) * 0.10
         )
     return _to_float(row.get("layout_score"), 0.0)
 
@@ -445,6 +449,7 @@ def build_altcoin_rows(
     micro_snapshots: Optional[Mapping[str, Mapping[str, Any]]] = None,
     community_snapshots: Optional[Mapping[str, Mapping[str, Any]]] = None,
     whale_snapshots: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    derivatives_snapshots: Optional[Mapping[str, Mapping[str, Any]]] = None,
     alerted_symbols: Optional[Iterable[str]] = None,
     now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
@@ -458,6 +463,7 @@ def build_altcoin_rows(
     micro_map = {str(k).upper(): dict(v or {}) for k, v in (micro_snapshots or {}).items()}
     community_map = {str(k).upper(): dict(v or {}) for k, v in (community_snapshots or {}).items()}
     whale_map = {str(k).upper(): dict(v or {}) for k, v in (whale_snapshots or {}).items()}
+    derivatives_map = {str(k).upper(): dict(v or {}) for k, v in (derivatives_snapshots or {}).items()}
     factor_rows = {
         str(item.get("symbol") or "").strip().upper(): dict(item or {})
         for item in (factor_payload.get("asset_scores") or [])
@@ -493,6 +499,11 @@ def build_altcoin_rows(
         "stale_data": {},
         "liquidity_risk": {},
         "snapshot_missing": {},
+        "derivatives_heat": {},
+        "squeeze_signal": {},
+        "crowding_risk": {},
+        "liquidity_trap": {},
+        "flow_confirmation": {},
     }
 
     interim: Dict[str, Dict[str, Any]] = {}
@@ -511,21 +522,29 @@ def build_altcoin_rows(
         micro = dict(micro_map.get(normalized_symbol) or {})
         community = dict(community_map.get(normalized_symbol) or {})
         whale = dict(whale_map.get(normalized_symbol) or {})
+        derivatives = dict(derivatives_map.get(normalized_symbol) or {})
         factor_row = dict(factor_rows.get(normalized_symbol) or {})
         multi_row = dict(multi_rows.get(normalized_symbol) or {})
         market_age_sec = _age_seconds(df.index[-1], current)
+        derivatives_age_sec = _age_seconds(derivatives.get("timestamp"), current)
         snapshot_ages = [
             age
             for age in (
                 _age_seconds(micro.get("timestamp"), current),
                 _age_seconds(community.get("timestamp"), current),
                 _age_seconds(whale.get("timestamp"), current),
+                derivatives_age_sec,
             )
             if age is not None
         ]
         snapshot_age_sec = (sum(snapshot_ages) / len(snapshot_ages)) if snapshot_ages else None
         market_freshness = _freshness_score(market_age_sec, expected_bar_sec, hard_cap_multiple=4.0)
         snapshot_freshness = _freshness_score(snapshot_age_sec, expected_bar_sec * 2.0, hard_cap_multiple=6.0)
+        derivatives_freshness = _freshness_score(
+            derivatives_age_sec,
+            expected_bar_sec * 2.0,
+            hard_cap_multiple=6.0,
+        )
         available_snapshots = sum(1 for snapshot in (micro, community, whale) if snapshot)
         chain_quality = _clamp01((available_snapshots / 3.0) * 0.45 + snapshot_freshness * 0.55)
 
@@ -545,6 +564,7 @@ def build_altcoin_rows(
         micro_payload = _snapshot_payload(micro)
         community_payload = _snapshot_payload(community)
         whale_payload = _snapshot_payload(whale)
+        derivatives_payload = _snapshot_payload(derivatives)
         orderbook = micro.get("orderbook") or {}
         spread_bps = _to_float(orderbook.get("spread_bps"), 0.0)
         avg_dollar_volume = _to_float((close.tail(24) * volume.tail(24)).mean(), 0.0)
@@ -562,6 +582,24 @@ def build_altcoin_rows(
         announcements = _announcement_value(community)
         funding_basis = _funding_basis_value(micro)
         whale_context = _whale_context_value(whale)
+        derivatives_heat = max(
+            _to_float(derivatives.get("crowding_score"), 0.0),
+            _to_float(derivatives.get("squeeze_score"), 0.0),
+        )
+        squeeze_signal = _to_float(derivatives.get("squeeze_score"), 0.0)
+        crowding_risk = max(
+            _to_float(derivatives.get("crowding_score"), 0.0),
+            _to_float(derivatives.get("distribution_score"), 0.0),
+        )
+        liquidity_trap = max(
+            _to_float(derivatives.get("depth_thinness_score"), 0.0),
+            _to_float(derivatives.get("distribution_score"), 0.0) * 0.6,
+        )
+        flow_confirmation = _clamp01(
+            max(_to_float(derivatives.get("taker_buy_sell_imbalance"), 0.0), 0.0) * 0.5
+            + max(_to_float(derivatives.get("oi_change_1h"), 0.0), 0.0) / 20.0
+            + _to_float(community_flow or 0.0) * 0.2
+        )
 
         security_events = _security_event_value(community)
         missing_count = 3 - available_snapshots
@@ -581,6 +619,8 @@ def build_altcoin_rows(
             degraded_reason.append("liquidity_thin")
         if security_events > 0:
             degraded_reason.append("security_event")
+        if bool(getattr(settings, "COINGLASS_INCLUDE_RADAR", True)) and not derivatives:
+            degraded_reason.append("derivatives_missing")
 
         raw_components["return_shock"][normalized_symbol] = max(positive_return_burst, absolute_return_burst * 0.75)
         raw_components["volume_burst"][normalized_symbol] = volume_burst
@@ -603,6 +643,11 @@ def build_altcoin_rows(
         raw_components["stale_data"][normalized_symbol] = stale_data
         raw_components["liquidity_risk"][normalized_symbol] = liquidity_risk
         raw_components["snapshot_missing"][normalized_symbol] = float(max(missing_count, 0))
+        raw_components["derivatives_heat"][normalized_symbol] = derivatives_heat
+        raw_components["squeeze_signal"][normalized_symbol] = squeeze_signal
+        raw_components["crowding_risk"][normalized_symbol] = crowding_risk
+        raw_components["liquidity_trap"][normalized_symbol] = liquidity_trap
+        raw_components["flow_confirmation"][normalized_symbol] = flow_confirmation
 
         interim[normalized_symbol] = {
             "symbol": normalized_symbol,
@@ -611,6 +656,7 @@ def build_altcoin_rows(
             "micro": micro,
             "community": community,
             "whale": whale,
+            "derivatives": derivatives,
             "metrics_raw": {
                 "last_price": _to_float(close.iloc[-1], 0.0),
                 "return_1_bar": recent_return_1,
@@ -630,6 +676,20 @@ def build_altcoin_rows(
                 "announcement_count": _to_float((community_payload.get("announcement_count") or 0), 0.0)
                 or _to_float(len(community.get("announcements") or []), 0.0),
                 "whale_count": _to_float(whale.get("count"), 0.0),
+                "derivatives_heat_score": derivatives_heat,
+                "squeeze_score": squeeze_signal,
+                "crowding_risk_score": crowding_risk,
+                "liquidity_trap_score": liquidity_trap,
+                "flow_confirmation_score": flow_confirmation,
+                "oi_change_1h": _to_float(derivatives.get("oi_change_1h"), 0.0),
+                "funding_rate": _to_float(derivatives.get("funding_rate"), 0.0),
+                "basis_pct": _to_float(derivatives.get("basis_pct"), 0.0),
+                "long_short_ratio": _to_float(derivatives.get("long_short_ratio"), 0.0),
+                "taker_buy_sell_imbalance": _to_float(derivatives.get("taker_buy_sell_imbalance"), 0.0),
+                "crowding_score": _to_float(derivatives.get("crowding_score"), 0.0),
+                "distribution_score": _to_float(derivatives.get("distribution_score"), 0.0),
+                "depth_thinness_score": _to_float(derivatives.get("depth_thinness_score"), 0.0),
+                "orderbook_imbalance_score": _to_float(derivatives.get("orderbook_imbalance_score"), 0.0),
                 "btc_correlation": btc_corr,
                 "factor_liquidity": factor_liquidity,
                 "factor_low_beta": _to_float(factor_row.get("low_beta"), 0.0),
@@ -639,18 +699,43 @@ def build_altcoin_rows(
                 "as_of": df.index[-1].isoformat() if hasattr(df.index[-1], "isoformat") else str(df.index[-1]),
                 "market_data_age_sec": None if market_age_sec is None else round(market_age_sec, 2),
                 "snapshot_age_sec": None if snapshot_age_sec is None else round(snapshot_age_sec, 2),
+                "derivatives_age_sec": None if derivatives_age_sec is None else round(derivatives_age_sec, 2),
                 "market_label": "fresh" if market_freshness >= 0.7 else "watch" if market_freshness >= 0.45 else "stale",
                 "snapshot_label": "fresh"
                 if snapshot_freshness >= 0.7
                 else "watch"
                 if snapshot_freshness >= 0.45
                 else "stale",
+                "derivatives_label": "missing"
+                if not derivatives
+                else "fresh"
+                if derivatives_freshness >= 0.7
+                else "watch"
+                if derivatives_freshness >= 0.45
+                else "stale",
             },
             "data_quality": {
                 "market_data_freshness": _round4(market_freshness),
                 "snapshot_freshness": _round4(snapshot_freshness),
+                "derivatives_data_freshness": _round4(derivatives_freshness),
                 "chain_quality": _round4(chain_quality),
+                "derivatives_present": bool(derivatives),
                 "degraded_reason": degraded_reason,
+            },
+            "derivatives_context": {
+                "available": bool(derivatives),
+                "timestamp": derivatives.get("timestamp"),
+                "age_sec": None if derivatives_age_sec is None else round(derivatives_age_sec, 2),
+                "freshness_label": "missing"
+                if not derivatives
+                else "fresh"
+                if derivatives_freshness >= 0.7
+                else "watch"
+                if derivatives_freshness >= 0.45
+                else "stale",
+                "source_name": derivatives.get("source_name"),
+                "capture_status": derivatives.get("capture_status"),
+                "source_error": derivatives.get("source_error"),
             },
             "sparkline": close.tail(36).tolist(),
             "has_alert_rule": normalized_symbol in alerted,
@@ -719,18 +804,62 @@ def build_altcoin_rows(
         )
         chain_quality_factor = _to_float(item["data_quality"].get("chain_quality"), 0.0)
         chain_confirmation_score = chain_base * chain_quality_factor
+        derivatives_heat_score = _weighted_score(
+            {
+                "derivatives_heat": pct["derivatives_heat"],
+                "squeeze_signal": pct["squeeze_signal"],
+            },
+            {
+                "derivatives_heat": 0.55,
+                "squeeze_signal": 0.45,
+            },
+        )
+        crowding_risk_score = _weighted_score(
+            {
+                "crowding_risk": pct["crowding_risk"],
+            },
+            {
+                "crowding_risk": 1.0,
+            },
+        )
+        liquidity_trap_score = _weighted_score(
+            {
+                "liquidity_trap": pct["liquidity_trap"],
+                "liquidity_risk": pct["liquidity_risk"],
+            },
+            {
+                "liquidity_trap": 0.65,
+                "liquidity_risk": 0.35,
+            },
+        )
+        flow_confirmation_score = _weighted_score(
+            {
+                "flow_confirmation": pct["flow_confirmation"],
+                "community_flow": pct["community_flow"],
+                "whale_context": pct["whale_context"],
+            },
+            {
+                "flow_confirmation": 0.45,
+                "community_flow": 0.35,
+                "whale_context": 0.20,
+            },
+        )
         risk_penalty = _weighted_score(
             {
                 "security_events": pct["security_events"],
                 "stale_data": pct["stale_data"],
                 "liquidity_risk": pct["liquidity_risk"],
                 "snapshot_missing": pct["snapshot_missing"],
+                "crowding_risk": pct["crowding_risk"],
+                "liquidity_trap": pct["liquidity_trap"],
             },
             {
-                "security_events": 0.35,
-                "stale_data": 0.25,
-                "liquidity_risk": 0.25,
-                "snapshot_missing": 0.15,
+                "security_events": 0.25,
+                "stale_data": 0.20,
+                "liquidity_risk": 0.15,
+                "snapshot_missing": 0.10,
+                "crowding_risk": 0.20,
+                "liquidity_trap": 0.10,
             },
         )
         layout_score = (
@@ -738,6 +867,8 @@ def build_altcoin_rows(
             + control_score * 0.30
             + anomaly_score * 0.15
             + chain_confirmation_score * 0.10
+            + derivatives_heat_score * 0.12
+            + flow_confirmation_score * 0.08
             - risk_penalty
         )
         alert_score = (
@@ -745,6 +876,7 @@ def build_altcoin_rows(
             + accumulation_score * 0.20
             + control_score * 0.15
             + chain_confirmation_score * 0.10
+            + squeeze_signal * 0.08
             - risk_penalty
         )
         row = {
@@ -755,6 +887,11 @@ def build_altcoin_rows(
             "accumulation_score": _round4(_clamp01(accumulation_score)),
             "control_score": _round4(_clamp01(control_score)),
             "chain_confirmation_score": _round4(_clamp01(chain_confirmation_score)),
+            "derivatives_heat_score": _round4(_clamp01(derivatives_heat_score)),
+            "squeeze_score": _round4(_clamp01(squeeze_signal)),
+            "crowding_risk_score": _round4(_clamp01(crowding_risk_score)),
+            "liquidity_trap_score": _round4(_clamp01(liquidity_trap_score)),
+            "flow_confirmation_score": _round4(_clamp01(flow_confirmation_score)),
             "risk_penalty": _round4(_clamp01(risk_penalty)),
             "signal_state": "",
             "tags": [],
@@ -762,6 +899,7 @@ def build_altcoin_rows(
             "reasons_chain": [],
             "data_quality": item["data_quality"],
             "freshness": item["freshness"],
+            "derivatives_context": item["derivatives_context"],
             "metrics": {
                 **{key: _round4(value) for key, value in item["metrics_raw"].items()},
                 "percentiles": {key: (None if value is None else _round4(value)) for key, value in pct.items()},
@@ -776,6 +914,22 @@ def build_altcoin_rows(
             degraded=degraded,
             has_alert_rule=bool(item["has_alert_rule"]),
         )
+        extra_tags: List[str] = []
+        if _to_float(row.get("derivatives_heat_score"), 0.0) >= 0.65:
+            extra_tags.append("Derivatives Heat")
+        if _to_float(row.get("squeeze_score"), 0.0) >= 0.65:
+            extra_tags.append("Squeeze Setup")
+        if _to_float(row.get("crowding_risk_score"), 0.0) >= 0.70:
+            extra_tags.append("Crowding Risk")
+        if _to_float(row.get("liquidity_trap_score"), 0.0) >= 0.70:
+            extra_tags.append("Liquidity Trap")
+        if row.get("freshness", {}).get("derivatives_label") == "stale":
+            extra_tags.append("Derivatives Stale")
+        if "derivatives_missing" in row.get("data_quality", {}).get("degraded_reason", []):
+            extra_tags.append("Derivatives Missing")
+        for tag in extra_tags:
+            if tag not in row["tags"]:
+                row["tags"].append(tag)
         proxy_reasons: List[str] = []
         chain_reasons: List[str] = []
         if pct["compression_inverse"] is not None and pct["compression_inverse"] >= 0.7:
@@ -794,6 +948,12 @@ def build_altcoin_rows(
             proxy_reasons.append("收盘位置持续贴近区间上沿，控盘痕迹偏强")
         if pct["impulse_after_compression"] is not None and pct["impulse_after_compression"] >= 0.68:
             proxy_reasons.append("压缩后存在定向冲击，疑似试盘/拉抬")
+        if pct["squeeze_signal"] is not None and pct["squeeze_signal"] >= 0.65:
+            proxy_reasons.append("Derivatives squeeze setup is confirming the tape instead of staying neutral.")
+        if pct["crowding_risk"] is not None and pct["crowding_risk"] >= 0.70:
+            proxy_reasons.append("Crowding risk is elevated, so any chase entry should stay size-aware.")
+        if pct["liquidity_trap"] is not None and pct["liquidity_trap"] >= 0.70:
+            proxy_reasons.append("Liquidity trap score is high, so failed breakouts can unwind quickly.")
         if not proxy_reasons:
             proxy_reasons.append("代理行为证据一般，当前更多作为待跟踪候选")
 
@@ -805,6 +965,8 @@ def build_altcoin_rows(
             chain_reasons.append("资金费率/基差偏强，短期情绪支持启动")
         if pct["whale_context"] is not None and pct["whale_context"] >= 0.65:
             chain_reasons.append("巨鲸上下文活跃，提升候选确认度")
+        if pct["flow_confirmation"] is not None and pct["flow_confirmation"] >= 0.65:
+            chain_reasons.append("Derivatives flow is aligned with community and whale confirmation.")
         if not chain_reasons:
             if row["data_quality"].get("chain_quality", 0.0) < 0.45:
                 chain_reasons.append("链上/外生确认较弱，本次排序主要依赖量价代理行为")
@@ -817,6 +979,9 @@ def build_altcoin_rows(
             proxy_reasons.append("盘口价差偏大，需警惕控盘与出货风险")
         if "snapshot_missing" in row["data_quality"].get("degraded_reason", []):
             chain_reasons.append("部分快照缺失，确认引擎已自动降权")
+
+        if "derivatives_missing" in row["data_quality"].get("degraded_reason", []):
+            chain_reasons.append("Derivatives cache is missing for this symbol, so heat and crowding stay conservative.")
 
         row["reasons_proxy"] = proxy_reasons[:4]
         row["reasons_chain"] = chain_reasons[:4]
@@ -845,6 +1010,7 @@ def build_detail_payload(
     if selected is None:
         return {
             "selected_row": None,
+            "derivatives_context": {},
             "proxy_breakdown": {},
             "chain_breakdown": {},
             "sparkline": [],
@@ -863,6 +1029,12 @@ def build_detail_payload(
             "anomaly": selected.get("anomaly_score"),
             "accumulation": selected.get("accumulation_score"),
             "control": selected.get("control_score"),
+            "derivatives_heat": selected.get("derivatives_heat_score"),
+            "squeeze": selected.get("squeeze_score"),
+            "crowding_risk": selected.get("crowding_risk_score"),
+            "liquidity_trap": selected.get("liquidity_trap_score"),
+            "flow_confirmation": selected.get("flow_confirmation_score"),
+            "risk_penalty": selected.get("risk_penalty"),
         },
         "components": [
             {"label": "收益冲击", "pctile": percentiles.get("return_shock"), "weight": 0.45},
@@ -873,6 +1045,10 @@ def build_detail_payload(
             {"label": "承接吸收", "pctile": percentiles.get("absorption_proxy"), "weight": 0.20},
             {"label": "收盘控制", "pctile": percentiles.get("close_control"), "weight": 0.30},
             {"label": "流动性稀薄", "pctile": percentiles.get("liquidity_thinness"), "weight": 0.25},
+            {"label": "Derivatives Heat", "pctile": percentiles.get("derivatives_heat"), "weight": 0.55},
+            {"label": "Squeeze Setup", "pctile": percentiles.get("squeeze_signal"), "weight": 0.45},
+            {"label": "Crowding Risk", "pctile": percentiles.get("crowding_risk"), "weight": 1.00},
+            {"label": "Liquidity Trap", "pctile": percentiles.get("liquidity_trap"), "weight": 0.65},
         ],
         "reasons": list(selected.get("reasons_proxy") or []),
     }
@@ -885,6 +1061,7 @@ def build_detail_payload(
             {"label": "announcements", "pctile": percentiles.get("announcements"), "weight": 0.25},
             {"label": "funding/basis", "pctile": percentiles.get("funding_basis"), "weight": 0.20},
             {"label": "whale context", "pctile": percentiles.get("whale_context"), "weight": 0.15},
+            {"label": "flow confirmation", "pctile": percentiles.get("flow_confirmation"), "weight": 0.45},
         ],
         "reasons": list(selected.get("reasons_chain") or []),
         "onchain_context": dict(onchain_context or {}),
@@ -945,6 +1122,7 @@ def build_detail_payload(
                     "layout_score": row.get("layout_score"),
                     "alert_score": row.get("alert_score"),
                     "control_score": row.get("control_score"),
+                    "derivatives_heat_score": row.get("derivatives_heat_score"),
                     "rank": row.get("rank"),
                 }
             )
@@ -953,6 +1131,7 @@ def build_detail_payload(
 
     return {
         "selected_row": selected,
+        "derivatives_context": dict(selected.get("derivatives_context") or {}),
         "proxy_breakdown": proxy_breakdown,
         "chain_breakdown": chain_breakdown,
         "sparkline": _normalized_sparkline(selected.get("sparkline") or []),

@@ -28,8 +28,8 @@ from web.api.data import (
     get_research_symbols,
 )
 from web.api.trading import (
-    _load_analytics_ingest_status_map,
     get_behavior_report,
+    get_analytics_history_status,
     get_community_overview,
     get_market_microstructure,
     get_risk_dashboard,
@@ -78,6 +78,16 @@ _DEFAULT_UNIVERSE = [
     "ICP/USDT",
     "TON/USDT",
 ]
+
+
+def _analytics_status_collectors_to_map(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    collectors = list((payload or {}).get("collectors") or [])
+    mapped: Dict[str, Any] = {}
+    for item in collectors:
+        collector = str((item or {}).get("collector") or "").strip()
+        if collector:
+            mapped[collector] = dict(item or {})
+    return mapped
 _MODULE_ORDER = ["market_state", "factors", "cross_asset", "onchain", "discipline"]
 _MODULE_TIMEOUT_SEC = {
     "market_state": 40.0,
@@ -466,6 +476,38 @@ def _build_microstructure_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
         "long_short_ratio_available": bool(long_short.get("available")) or bool(long_short_ratio and long_short_ratio > 0),
         "long_short_ratio": round(long_short_ratio, 6) if long_short_ratio else None,
         "wall_bias": wall_bias,
+    }
+
+
+def _build_derivatives_shadow_summary(
+    history_status: Dict[str, Any],
+    onchain: Dict[str, Any],
+) -> Dict[str, Any]:
+    derivatives = dict((history_status or {}).get("derivatives") or {})
+    details = dict(derivatives.get("details") or {})
+    quota_headroom = dict(details.get("quota_headroom") or {})
+    snapshot = dict(details.get("snapshot") or {})
+    active_datasets = list(details.get("active_datasets") or [])
+    freshness_raw = details.get("freshness_sec")
+    try:
+        freshness_sec = float(freshness_raw) if freshness_raw is not None else None
+    except Exception:
+        freshness_sec = None
+    funding_multi = dict((onchain or {}).get("funding_rate_multi_source") or {})
+    funding_count = int(funding_multi.get("count") or 0)
+    funding_mean_rate_pct = float(funding_multi.get("mean_rate_pct") or 0.0) if funding_count > 0 else None
+
+    return {
+        "available": bool(derivatives.get("available")),
+        "status": str(derivatives.get("status") or "missing"),
+        "provider": str(details.get("provider") or "coinglass"),
+        "freshness_sec": freshness_sec,
+        "degraded_reason": details.get("degraded_reason"),
+        "active_datasets": active_datasets,
+        "dataset_count": len(active_datasets),
+        "quota_headroom": quota_headroom,
+        "snapshot_at": snapshot.get("timestamp"),
+        "funding_mean_rate_pct": funding_mean_rate_pct,
     }
 
 
@@ -1337,7 +1379,10 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
     community_snapshot_task = _wait_or_none(_load_latest_community_snapshot(profile.exchange, profile.primary_symbol), 4.0)
     whale_snapshot_task = _wait_or_none(_load_latest_whale_snapshot(profile.exchange, profile.primary_symbol), 4.0)
     news_task = _wait_or_none(_build_news_summary(profile.primary_symbol, hours=72), 8.0)
-    history_task = _wait_or_none(_load_analytics_ingest_status_map(), 6.0)
+    history_task = _wait_or_none(
+        get_analytics_history_status(exchange=profile.exchange, symbol=profile.primary_symbol),
+        6.0,
+    )
     onchain, community_snapshot, whale_snapshot, news, history_status = await asyncio.gather(
         onchain_task,
         community_snapshot_task,
@@ -1351,10 +1396,11 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
     community = community_snapshot
     whale_snapshot = dict(whale_snapshot or {})
     news = dict(news or {})
-    history_status = dict(history_status or {})
+    history_status = _analytics_status_collectors_to_map(dict(history_status or {}))
 
     funding_multi = dict(onchain.get("funding_rate_multi_source") or {})
     fear_greed = dict(onchain.get("fear_greed_index") or {})
+    derivatives_summary = _build_derivatives_shadow_summary(history_status, onchain)
     funding_count = int(funding_multi.get("count") or 0)
     fear_greed_available = bool(fear_greed.get("available"))
 
@@ -1373,6 +1419,12 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
         warnings.append("Multi-exchange funding rates are currently unavailable.")
     if not fear_greed_available:
         warnings.append("Fear & Greed index is currently unavailable.")
+    if not derivatives_summary.get("available"):
+        warnings.append("CoinGlass derivatives shadow is unavailable, so crowding context is reduced.")
+    elif derivatives_summary.get("freshness_sec") is not None and float(derivatives_summary.get("freshness_sec") or 0.0) > 1800:
+        warnings.append("CoinGlass derivatives shadow is stale, so funding/crowding context may lag.")
+    elif derivatives_summary.get("degraded_reason"):
+        warnings.append(f"CoinGlass derivatives shadow degraded: {derivatives_summary.get('degraded_reason')}.")
     if str(news.get("scope")) == "global_fallback":
         warnings.append("Symbol-specific exogenous news is sparse; using global fallback.")
 
@@ -1396,6 +1448,9 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
             "funding_mean_rate_pct": float(funding_multi.get("mean_rate_pct") or 0.0) if funding_count > 0 else None,
             "fear_greed_value": int(fear_greed.get("value") or 0) if fear_greed_available else None,
             "fear_greed_classification": str(fear_greed.get("classification") or "") if fear_greed_available else None,
+            "derivatives_status": str(derivatives_summary.get("status") or "missing"),
+            "derivatives_freshness_sec": derivatives_summary.get("freshness_sec"),
+            "derivatives_dataset_count": int(derivatives_summary.get("dataset_count") or 0),
         },
         payload={
             "onchain": onchain,
@@ -1403,6 +1458,7 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
             "whale_snapshot": whale_snapshot,
             "news_summary": news,
             "analytics_history_status": history_status,
+            "derivatives_summary": derivatives_summary,
         },
     )
 
@@ -1503,6 +1559,7 @@ def _build_recommendations(
     regime = dict(market_payload.get("regime") or {})
     cross_asset = dict(cross_payload.get("cross_asset") or {})
     onchain = dict(onchain_payload.get("onchain") or {})
+    derivatives_summary = dict(onchain_payload.get("derivatives_summary") or {})
     sentiment_dashboard = dict(market_payload.get("sentiment_dashboard") or {})
     news_summary = dict(onchain_payload.get("news_summary") or sentiment_dashboard.get("news") or {})
     behavior = dict(discipline_payload.get("behavior_report") or {})
@@ -1521,6 +1578,10 @@ def _build_recommendations(
 
     if bool(onchain.get("degraded")):
         avoid.append("Onchain context is degraded; do not use it as a sole entry trigger.")
+    if not bool(derivatives_summary.get("available")):
+        avoid.append("Derivatives shadow is unavailable; do not rely on crowding/funding confirmation.")
+    elif _coerce_finite_float(derivatives_summary.get("freshness_sec")) is not None and float(derivatives_summary.get("freshness_sec") or 0.0) > 1800:
+        avoid.append("Derivatives shadow is stale; confirm funding/crowding before acting.")
     if int(news_summary.get("events_count") or 0) == 0:
         avoid.append("Symbol-level news coverage is sparse; avoid event-only decisions.")
     if bool(behavior.get("overtrading_warning")):
@@ -1537,6 +1598,8 @@ def _build_recommendations(
 
     if int(cross_asset.get("count") or 0) < 3:
         next_actions.append("Expand symbol coverage before making rotation conclusions.")
+    if bool(derivatives_summary.get("available")):
+        next_actions.append("Use derivatives shadow to confirm funding and crowding before execution.")
 
     headline = str((overview or {}).get("market_regime") or regime.get("regime") or "research_recommendation")
     if profile.primary_symbol:
@@ -1621,6 +1684,7 @@ def _build_structured_recommendations(
     factor_library = dict(factors_payload.get("factor_library") or {})
     cross_asset = dict(cross_payload.get("cross_asset") or {})
     onchain = dict(onchain_payload.get("onchain") or {})
+    derivatives_summary = dict(onchain_payload.get("derivatives_summary") or {})
     sentiment_dashboard = dict(market_payload.get("sentiment_dashboard") or {})
     macro_snapshot = dict(market_payload.get("macro_snapshot") or sentiment_dashboard.get("macro") or {})
     news_summary = dict(onchain_payload.get("news_summary") or sentiment_dashboard.get("news") or {})
@@ -1675,6 +1739,18 @@ def _build_structured_recommendations(
     whale_count = int((onchain.get("whale_activity") or {}).get("count") or 0)
     if whale_count > 0:
         thesis_points.append(f"Whale transfers active ({whale_count}).")
+    derivatives_freshness = _coerce_finite_float(derivatives_summary.get("freshness_sec"))
+    if bool(derivatives_summary.get("available")):
+        dataset_count = int(derivatives_summary.get("dataset_count") or 0)
+        provider = str(derivatives_summary.get("provider") or "coinglass")
+        thesis_points.append(
+            f"Derivatives shadow: {provider} / {str(derivatives_summary.get('status') or 'ok')} / {dataset_count} datasets."
+        )
+        if derivatives_freshness is not None:
+            thesis_points.append(f"Derivatives freshness: {derivatives_freshness:.0f}s.")
+        funding_mean_rate_pct = _coerce_finite_float(derivatives_summary.get("funding_mean_rate_pct"))
+        if funding_mean_rate_pct is not None:
+            thesis_points.append(f"Derivatives funding mean: {funding_mean_rate_pct:+.2f}%.")
     macro_gap = _coerce_finite_float(macro_snapshot.get("ppi_cpi_gap"))
     if macro_gap is not None:
         thesis_points.append(f"Macro scissors spread (PPI-CPI): {macro_gap:+.2f}pp.")
@@ -1685,6 +1761,11 @@ def _build_structured_recommendations(
         thesis_points.append(f"News events in last 24h: {int(news_summary.get('events_count') or 0)}.")
     if not thesis_points:
         thesis_points.append("Current conclusion is built from lightweight module summaries.")
+
+    if not bool(derivatives_summary.get("available")):
+        avoid.append("Derivatives shadow is missing, so crowding/funding confirmation is incomplete.")
+    elif derivatives_freshness is not None and derivatives_freshness > 1800:
+        avoid.append("Derivatives shadow is stale, so crowding/funding confirmation may lag.")
 
     ai_goal = (
         f"Focus on {' / '.join(focus_symbols)} under {headline}, validate {' / '.join(preferred[:2] or ['core'])}, "
@@ -1703,6 +1784,13 @@ def _build_structured_recommendations(
         "risk_notes": (avoid or ["No extra abnormal risk flagged, but backtest/execution quality checks are required."])[:4],
         "next_steps": next_actions[:4],
         "factor_focus": factor_focus,
+        "derivatives_context": {
+            "available": bool(derivatives_summary.get("available")),
+            "status": str(derivatives_summary.get("status") or "missing"),
+            "provider": str(derivatives_summary.get("provider") or "coinglass"),
+            "freshness_sec": derivatives_freshness,
+            "dataset_count": int(derivatives_summary.get("dataset_count") or 0),
+        },
     }
     ai_brief["prompt_context"] = "\n".join(
         [
@@ -1711,6 +1799,7 @@ def _build_structured_recommendations(
             f"Symbols: {' / '.join(ai_brief['symbols'])}",
             f"Timeframes: {' / '.join(ai_brief['timeframes'])}",
             f"Preferred families: {' / '.join(preferred)}",
+            f"Derivatives shadow: {ai_brief['derivatives_context']['status']} / {ai_brief['derivatives_context']['provider']} / {ai_brief['derivatives_context']['dataset_count']} datasets",
             f"Thesis: {'; '.join(ai_brief['thesis'])}",
             f"Risk notes: {'; '.join(ai_brief['risk_notes'])}",
             f"Next steps: {'; '.join(ai_brief['next_steps'])}",
@@ -1828,7 +1917,9 @@ def _build_structured_recommendations(
 
 async def _get_research_workbench_context(exchange: str = "binance") -> Dict[str, Any]:
     symbols = await get_research_symbols(exchange=exchange)
-    analytics_history_status = await _load_analytics_ingest_status_map()
+    analytics_history_status = _analytics_status_collectors_to_map(
+        await get_analytics_history_status(exchange=exchange, symbol="BTC/USDT")
+    )
     available_symbols = list(symbols.get("symbols") or [])
     default_symbols = available_symbols[:30] or list(_DEFAULT_UNIVERSE)
     profile = _normalize_profile(

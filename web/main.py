@@ -962,6 +962,78 @@ async def _kaiko_worker(stop_event: asyncio.Event) -> None:
             await asyncio.sleep(1)
 
 
+async def _coinglass_worker(stop_event: asyncio.Event) -> None:
+    """Refresh CoinGlass premium cache in the background (no-op when disabled)."""
+    INTERVAL = 300
+    await asyncio.sleep(360)  # stagger: 6 min after startup
+    while not stop_event.is_set():
+        try:
+            from core.data.coinglass_feature_builder import update_coinglass_cache  # noqa: PLC0415
+
+            result = await update_coinglass_cache(max_symbols_per_run=1, manual=False)
+            if result.get("updated"):
+                logger.debug(
+                    "coinglass_worker: updated {} datasets for {}",
+                    len(result.get("updated") or []),
+                    ",".join(result.get("symbols") or []),
+                )
+            _touch_runtime_task("coinglass", success=True)
+        except Exception as exc:
+            logger.debug(f"coinglass_worker: {exc}")
+        for _ in range(INTERVAL):
+            if stop_event.is_set():
+                break
+            await asyncio.sleep(1)
+
+
+async def _exchange_watchdog_worker(stop_event: asyncio.Event) -> None:
+    """Periodically health-check all exchanges and reconnect any that have dropped.
+
+    Runs every 60 s. A failed health-check triggers one reconnect attempt per
+    exchange; subsequent failures are retried on the next cycle with exponential
+    back-off (max 5 min between attempts for a persistently-failing exchange).
+    """
+    _INTERVAL = 60
+    _MAX_BACKOFF = 300  # 5 min
+    # {exchange_name: next_attempt_monotonic_time}
+    _backoff_until: Dict[str, float] = {}
+
+    await asyncio.sleep(30)  # let exchange_manager.initialize() finish first
+
+    while not stop_event.is_set():
+        try:
+            _touch_runtime_task("exchange_watchdog", success=True)
+            now = asyncio.get_event_loop().time()
+            health = await exchange_manager.health_check()
+            for name, healthy in health.items():
+                if healthy:
+                    _backoff_until.pop(name, None)  # reset backoff on recovery
+                    continue
+                # Check backoff
+                retry_at = _backoff_until.get(name, 0.0)
+                if now < retry_at:
+                    logger.debug(
+                        f"exchange_watchdog: {name} unhealthy, retry in "
+                        f"{retry_at - now:.0f}s"
+                    )
+                    continue
+                logger.warning(f"exchange_watchdog: {name} unhealthy, attempting reconnect")
+                ok = await exchange_manager.reconnect_exchange(name)
+                if not ok:
+                    # Exponential backoff: 60 → 120 → 240 → 300 → 300...
+                    prior = _backoff_until.get(name, now)
+                    gap = max(_INTERVAL, min(prior - now + _INTERVAL * 2, _MAX_BACKOFF))
+                    _backoff_until[name] = now + gap
+                    logger.warning(
+                        f"exchange_watchdog: {name} reconnect failed, "
+                        f"next retry in {gap:.0f}s"
+                    )
+        except Exception as exc:
+            logger.error(f"exchange_watchdog: unexpected error: {exc}")
+
+        await asyncio.sleep(_INTERVAL)
+
+
 async def _cusum_monitor_worker(stop_event: asyncio.Event, app: FastAPI) -> None:
     """Periodically scan all running candidates for CUSUM decay (every 5 min)."""
     from core.monitoring.cusum_watcher import run_cusum_checks_for_all_candidates
@@ -1032,6 +1104,10 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
             "factory": lambda stop_event: _runtime_pusher(stop_event),
             "restart_on_failure": True,
         },
+        "exchange_watchdog": {
+            "factory": lambda stop_event: _exchange_watchdog_worker(stop_event),
+            "restart_on_failure": True,  # must stay alive for the session lifetime
+        },
         "ai_research_scheduler": {
             "factory": lambda stop_event: _ai_research_scheduler_worker(app, stop_event),
             "restart_on_failure": True,
@@ -1062,6 +1138,10 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
         },
         "kaiko": {
             "factory": lambda stop_event: _kaiko_worker(stop_event),
+            "restart_on_failure": False,
+        },
+        "coinglass": {
+            "factory": lambda stop_event: _coinglass_worker(stop_event),
             "restart_on_failure": False,
         },
     }

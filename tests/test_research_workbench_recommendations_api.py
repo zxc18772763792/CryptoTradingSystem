@@ -55,6 +55,14 @@ def test_workbench_recommendations_return_structured_actions_and_ai_brief():
                         "whale_activity": {"count": 2},
                     },
                     "news_summary": {"events_count": 4},
+                    "derivatives_summary": {
+                        "available": True,
+                        "status": "ok",
+                        "provider": "coinglass",
+                        "freshness_sec": 180.0,
+                        "dataset_count": 2,
+                        "funding_mean_rate_pct": 0.08,
+                    },
                 }
             },
             "discipline": {
@@ -81,6 +89,12 @@ def test_workbench_recommendations_return_structured_actions_and_ai_brief():
     assert data["ai_brief"]["symbols"] == ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
     assert data["ai_brief"]["timeframes"] == ["5m", "15m", "1h"]
     assert data["ai_brief"]["factor_focus"][1]["symbol"] == "ETH/USDT"
+    assert data["ai_brief"]["derivatives_context"]["available"] is True
+    assert data["ai_brief"]["derivatives_context"]["provider"] == "coinglass"
+    assert data["ai_brief"]["derivatives_context"]["freshness_sec"] == 180.0
+    assert "Derivatives shadow: ok / coinglass / 2 datasets" in data["ai_brief"]["prompt_context"]
+    assert any("Derivatives shadow: coinglass / ok / 2 datasets." == item for item in data["ai_brief"]["thesis"])
+    assert any("funding and crowding" in item for item in data["ai_brief"]["next_steps"])
     assert data["source_meta"]["served_mode"] == "unknown"
     assert data["source_meta"]["universe_size"] == 0
     assert any(item["kind"] == "ai_prefill" for item in data["action_items"])

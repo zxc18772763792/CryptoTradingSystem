@@ -31,7 +31,9 @@ from core.data import (
     second_level_backfill_manager,
     download_binance_1s_daily_archive,
 )
+from core.data.coinglass_client import load_coinglass_cached_source_snapshot
 from core.data.factor_library import FACTOR_CATALOG, build_factor_library
+from core.data.coinglass_feature_builder import build_coinglass_overview_payload
 from core.exchanges import exchange_manager
 from web.api.backtest import (
     _build_fama_backtest_components,
@@ -238,8 +240,18 @@ def _load_premium_external_snapshot() -> Dict[str, Any]:
     """Load optional premium source snapshots from local cache (no remote requests)."""
     sources: Dict[str, Dict[str, Any]] = {}
 
-    def _append_source(name: str, snapshot: Dict[str, Any], key_configured: Optional[bool]) -> None:
-        has_cached_data = _has_snapshot_values(snapshot)
+    def _append_source(
+        name: str,
+        snapshot: Dict[str, Any],
+        key_configured: Optional[bool],
+        *,
+        has_cached_data_override: Optional[bool] = None,
+    ) -> None:
+        has_cached_data = (
+            bool(has_cached_data_override)
+            if has_cached_data_override is not None
+            else _has_snapshot_values(snapshot)
+        )
         available = bool(has_cached_data or key_configured is True)
         sources[name] = {
             "available": available,
@@ -275,6 +287,17 @@ def _load_premium_external_snapshot() -> Dict[str, Any]:
         _append_source("kaiko", load_kaiko_snapshot() or {}, bool(_kk_key()))
     except Exception as exc:
         sources["kaiko"] = {"available": False, "has_cached_data": False, "key_configured": False, "error": _error_text(exc), "snapshot": {}}
+
+    try:
+        coinglass_snapshot = load_coinglass_cached_source_snapshot()
+        _append_source(
+            "coinglass",
+            coinglass_snapshot,
+            bool(coinglass_snapshot.get("key_configured")),
+            has_cached_data_override=bool(coinglass_snapshot.get("has_cached_data")),
+        )
+    except Exception as exc:
+        sources["coinglass"] = {"available": False, "has_cached_data": False, "key_configured": False, "error": _error_text(exc), "snapshot": {}}
 
     total_sources = len(sources)
     configured_keys = sum(1 for source in sources.values() if source.get("key_configured") is True)
@@ -1370,7 +1393,7 @@ def _build_onchain_component_status(payload: Dict[str, Any]) -> Dict[str, Any]:
         },
         "premium_external": {
             "status": "ok" if premium_ok else "degraded",
-            "source": "glassnode+cryptoquant+nansen+kaiko",
+            "source": "glassnode+cryptoquant+nansen+kaiko+coinglass",
             "detail": f"cached={cached_sources}/{max(total_sources, 0)} key={configured_keys}",
             "error": None if premium_ok else "premium_sources_configured_but_cache_empty",
         },
@@ -4581,6 +4604,24 @@ async def get_onchain_overview(
     )
     placeholder["window_hours"] = max(4, int(hours or 4))
     return placeholder
+
+
+@router.get("/coinglass/overview")
+async def get_coinglass_overview(
+    symbol: str = "BTC/USDT",
+    refresh: bool = False,
+    manual: bool = False,
+):
+    return await build_coinglass_overview_payload(symbol=symbol, refresh=bool(refresh), manual=bool(manual))
+
+
+@router.get("/derivatives/overview")
+async def get_derivatives_overview(
+    symbol: str = "BTC/USDT",
+    refresh: bool = False,
+    manual: bool = False,
+):
+    return await build_coinglass_overview_payload(symbol=symbol, refresh=bool(refresh), manual=bool(manual))
 
 
 @router.get("/multi-assets/overview")

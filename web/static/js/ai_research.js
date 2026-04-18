@@ -23,6 +23,7 @@
   const DEFAULT_ACTION_LOCKS = Object.freeze({ generate: false, run: false, oneclick: false, clear: false, exit: false });
   const DELETE_BLOCKED_PROPOSAL_STATUSES = new Set(['paper_running', 'shadow_running', 'live_running']);
   const DELETE_BLOCKED_CANDIDATE_STATUSES = new Set(['paper_running', 'shadow_running', 'live_running']);
+  const AI_PLANNER_GOAL_MAX_CHARS = 600;
 
   /* 策略类别与颜色 */
   const STRATEGY_CATEGORIES = {
@@ -582,12 +583,17 @@
     const timeframes = plannerListOrFallback('ai-planner-timeframes', deriveAutoResearchTimeframes(profile?.timeframe || '5m'));
     const preferred = preferredFamiliesForPlanner(plannerRegime, directionBias);
     const confidencePct = Math.round(Number(marketContext?.confidence || 0) * 100);
+    const derivativesContext = marketContext?.derivatives_context && typeof marketContext.derivatives_context === 'object'
+      ? marketContext.derivatives_context
+      : {};
+    const derivativesLine = formatDerivativesContextLine(derivativesContext);
     const goal = `围绕 ${symbols.slice(0, 3).join(' / ')} 在${regimeLabel}环境下，优先研究 ${preferred.join(' / ')} 策略，验证触发条件、失效条件和风控边界。`;
     const thesis = [
       `市场当前更接近${regimeLabel}，先比较最匹配的策略族表现。`,
       confidencePct > 0 ? `现有方向信号置信度约 ${confidencePct}% ，需要验证是否能转化为稳定收益。` : '当前方向判断不够强，适合先做多策略对比而不是过早部署。',
     ];
     const riskNotes = [];
+    if (derivativesLine) riskNotes.push(`Derivatives context: ${derivativesLine}.`);
     if (Number(marketContext?.microstructure?.spread_bps || 0) >= 8) riskNotes.push('盘口点差偏高，避免过度依赖高频入场。');
     if (Number(marketContext?.news?.events_count || 0) >= 5) riskNotes.push('新闻事件密集，注意策略失效速度和波动放大。');
     if (!riskNotes.length) riskNotes.push('先通过样本外回测和成交质量验证，再决定是否部署。');
@@ -605,6 +611,7 @@
       symbols,
       timeframes,
       preferred_strategy_families: preferred,
+      derivatives_context: derivativesContext,
       thesis,
       risk_notes: riskNotes,
       next_steps: nextSteps,
@@ -639,10 +646,41 @@
     };
   }
 
+  function clampPlannerGoalText(value, maxLength = AI_PLANNER_GOAL_MAX_CHARS) {
+    const limit = Math.max(32, Number(maxLength) || AI_PLANNER_GOAL_MAX_CHARS);
+    const normalized = String(value || '').replace(/\r\n/g, '\n').trim();
+    if (!normalized) return '';
+    if (normalized.length <= limit) return normalized;
+    return `${normalized.slice(0, Math.max(0, limit - 3)).trimEnd()}...`;
+  }
+
+  function resolveAutoPlannerGoal(brief) {
+    const longGoal = String(brief?.prompt_context || '').trim();
+    const conciseGoal = String(brief?.goal || '').trim();
+    if (conciseGoal && conciseGoal.length <= AI_PLANNER_GOAL_MAX_CHARS) return conciseGoal;
+    if (longGoal && longGoal.length <= AI_PLANNER_GOAL_MAX_CHARS) return longGoal;
+    if (conciseGoal) return clampPlannerGoalText(conciseGoal);
+    return clampPlannerGoalText(longGoal);
+  }
+
+  function formatDerivativesContextLine(derivativesContext) {
+    const ctx = derivativesContext && typeof derivativesContext === 'object' ? derivativesContext : {};
+    const status = String(ctx.status || '').trim();
+    const provider = String(ctx.provider || '').trim();
+    const freshness = Number(ctx.freshness_sec);
+    const datasetCount = Number(ctx.dataset_count || 0);
+    const parts = [];
+    if (status) parts.push(`Derivatives ${status}`);
+    if (provider) parts.push(provider);
+    if (Number.isFinite(freshness) && freshness >= 0) parts.push(`${Math.round(freshness)}s`);
+    if (Number.isFinite(datasetCount) && datasetCount > 0) parts.push(`${datasetCount} datasets`);
+    return parts.join(' / ');
+  }
+
   function applyAutoResearchBrief(brief, options = {}) {
     if (!brief || typeof brief !== 'object') return '';
     const source = String(options.source || brief.source_label || 'workbench').trim();
-    const goal = String(brief.prompt_context || brief.goal || '').trim();
+    const goal = resolveAutoPlannerGoal(brief);
     const regime = String(brief.planner_regime || 'mixed').trim();
     const symbols = toArray(brief.symbols).map((item) => String(item || '').trim().toUpperCase()).filter(Boolean);
     const timeframes = toArray(brief.timeframes).map((item) => String(item || '').trim()).filter(Boolean);
@@ -656,6 +694,8 @@
     const plannerNotesEl = document.getElementById('ai-planner-notes');
     if (plannerNotesEl) {
       const notes = [];
+      const derivativesLine = formatDerivativesContextLine(brief.derivatives_context);
+      if (derivativesLine) notes.push(`Derivatives: ${derivativesLine}`);
       if (headline) notes.push(`市场判断：${headline}`);
       if (toArray(brief.preferred_strategy_families).length) notes.push(`优先策略：${toArray(brief.preferred_strategy_families).join(' / ')}`);
       if (toArray(brief.risk_notes).length) notes.push(`风险提示：${toArray(brief.risk_notes).slice(0, 2).join('；')}`);
@@ -667,7 +707,10 @@
     if (marketHintEl) {
       const preferredText = toArray(brief.preferred_strategy_families).slice(0, 3).join(' / ');
       const sourceLabel = source === 'fallback' ? 'AI 快照判断' : 'AI 综合判断';
-      marketHintEl.textContent = normalizeUiText(`${sourceLabel}：${headline || PLANNER_REGIME_LABELS[regime] || '混合行情'}${preferredText ? ` · 优先 ${preferredText}` : ''}`);
+      const derivativesText = formatDerivativesContextLine(brief.derivatives_context);
+      marketHintEl.textContent = normalizeUiText(
+        `${sourceLabel}：${headline || PLANNER_REGIME_LABELS[regime] || '混合行情'}${preferredText ? ` · 优先 ${preferredText}` : ''}${derivativesText ? ` · ${derivativesText}` : ''}`
+      );
     }
 
     updatePlannerModeHint();
@@ -754,6 +797,10 @@
     const goal = applyAutoResearchBrief(recommendation?.brief || recommendation?.action?.params?.brief || null, {
       source: recommendation?.source || 'workbench',
     });
+    const derivativesLine = formatDerivativesContextLine(recommendation?.brief?.derivatives_context || recommendation?.action?.params?.brief?.derivatives_context);
+    if (derivativesLine && marketHintEl) {
+      marketHintEl.textContent = normalizeUiText(`${marketHintEl.textContent} · ${derivativesLine}`);
+    }
     const nextGoal = String(goal || document.getElementById('ai-planner-goal')?.value || '').trim();
     if (nextGoal.length < 8) {
       throw new Error('AI 未能自动生成可用的研究目标，请稍后重试');
@@ -4691,14 +4738,16 @@
   async function _collectLiveMarketContext(primarySymbol) {
     const sym = primarySymbol || getCurrentResearchSymbol() || 'BTC/USDT';
     const exchange = getCurrentResearchExchange() || 'binance';
-    const [signalRes, microRes, newsSummaryRes] = await Promise.allSettled([
+    const [signalRes, microRes, newsSummaryRes, analyticsHistoryRes] = await Promise.allSettled([
       aiApi(`/signals/latest?symbol=${encodeURIComponent(sym)}`, { timeoutMs: 8000 }),
       rootApi(`/trading/analytics/microstructure?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(sym)}&depth_limit=10`, { timeoutMs: 8000 }),
       rootApi(`/news/summary?symbol=${encodeURIComponent(sym.split('/')[0])}&hours=6`, { timeoutMs: 8000 }),
+      rootApi(`/trading/analytics/history/status?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(sym)}`, { timeoutMs: 8000 }),
     ]);
     const signal  = signalRes.status  === 'fulfilled' ? (signalRes.value  || {}) : {};
     const micro   = microRes.status   === 'fulfilled' ? (microRes.value   || {}) : {};
     const news    = newsSummaryRes.status === 'fulfilled' ? (newsSummaryRes.value || {}) : {};
+    const analyticsHistory = analyticsHistoryRes.status === 'fulfilled' ? (analyticsHistoryRes.value || {}) : {};
 
     const direction   = String(signal.direction || 'FLAT').toUpperCase();
     const confidence  = Number(signal.confidence || 0);
@@ -4711,6 +4760,16 @@
     const optionsSkew   = micro?.options?.skew_25d ?? null;
     const optionsPcRatio = micro?.options?.put_call_ratio ?? null;
     const optionsSignal  = micro?.options?.signal ?? null;
+    const derivativesCollector = Array.isArray(analyticsHistory?.collectors)
+      ? analyticsHistory.collectors.find((item) => String(item?.collector || '').trim() === 'derivatives')
+      : null;
+    const derivativesContext = {
+      available: !!derivativesCollector?.available,
+      status: String(derivativesCollector?.status || 'missing'),
+      provider: String(derivativesCollector?.details?.provider || 'coinglass'),
+      freshness_sec: Number(derivativesCollector?.details?.freshness_sec || 0) || null,
+      dataset_count: Array.isArray(derivativesCollector?.details?.active_datasets) ? derivativesCollector.details.active_datasets.length : 0,
+    };
 
     // Derive volatility hint from spread
     let volatility = '';
@@ -4736,6 +4795,7 @@
       },
       news:  { events_count: newsEvents },
       whale: { count: whaleCount },
+      derivatives_context: derivativesContext,
       oi_change_pct: oiChangePct,
       options_skew_25d:   optionsSkew,
       options_pc_ratio:   optionsPcRatio,
@@ -4745,7 +4805,9 @@
 
   async function generateProposal() {
     await ensureAutoPlannerGoal({ silent: true });
-    const goal = String(document.getElementById('ai-planner-goal')?.value || '').trim();
+    const goalInput = document.getElementById('ai-planner-goal');
+    const goal = clampPlannerGoalText(goalInput?.value || '');
+    if (goalInput && goal && goalInput.value !== goal) goalInput.value = goal;
     if (goal.length < 8) { notify('研究目标太短（至少8个字符）', true); return; }
     const symbols   = csvInput('ai-planner-symbols');
     const primarySym = symbols[0] || getCurrentResearchSymbol() || 'BTC/USDT';
@@ -4770,7 +4832,8 @@
       const optTxt  = optSkew != null
         ? `${Number(optSkew).toFixed(3)}(${optSig || '?'})`
         : '--';
-      marketCtxEl.innerHTML = `<span style="color:${dir==='LONG'?'#20bf78':dir==='SHORT'?'#e05260':'#9fb1c9'}">方向 ${dir} ${conf}%</span> · Funding ${frTxt} · OFI ${ofiTxt} · OI ${oiTxt} · 期权偏斜 ${optTxt} · 新闻事件 ${ne}`;
+      const derivativesTxt = formatDerivativesContextLine(liveCtx.derivatives_context);
+      marketCtxEl.innerHTML = `<span style="color:${dir==='LONG'?'#20bf78':dir==='SHORT'?'#e05260':'#9fb1c9'}">方向 ${dir} ${conf}%</span> · Funding ${frTxt} · OFI ${ofiTxt} · OI ${oiTxt} · 期权偏斜 ${optTxt} · 新闻事件 ${ne}${derivativesTxt ? ` · ${esc(derivativesTxt)}` : ''}`;
     }
 
     const payload = {
@@ -4826,11 +4889,14 @@
     const allocationPercent = parseAllocationPercentInput(allocationInput?.value, 5);
     if (allocationInput) allocationInput.value = String(Math.round(allocationPercent));
     const allocationPct = allocationPercent / 100;
-    if (goal.length < 8) {
+    const goalInput = document.getElementById('ai-planner-goal');
+    const normalizedGoal = clampPlannerGoalText(goalInput?.value || goal);
+    if (goalInput && normalizedGoal && goalInput.value !== normalizedGoal) goalInput.value = normalizedGoal;
+    if (normalizedGoal.length < 8) {
       renderOneClickFeedback(buildOneClickFailureFeedback(
         new Error('研究目标太短（至少8个字符）'),
         {
-          goal,
+          goal: normalizedGoal,
           symbols: csvInput('ai-planner-symbols'),
           timeframes: csvInput('ai-planner-timeframes'),
           exchange,
@@ -4845,7 +4911,7 @@
     const timeframes = csvInput('ai-planner-timeframes');
     const plannerConstraints = buildPlannerConstraints();
     const payload = {
-      goal,
+      goal: normalizedGoal,
       market_regime: String(document.getElementById('ai-planner-regime')?.value || 'mixed'),
       symbols: symbols.length ? symbols : [getCurrentResearchSymbol() || 'BTC/USDT'],
       timeframes: timeframes.length ? timeframes : ['15m', '1h'],

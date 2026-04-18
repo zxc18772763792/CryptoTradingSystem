@@ -1128,6 +1128,316 @@ def _status_map_to_collectors(status_map: Dict[str, Dict[str, Any]], *, exchange
     return collectors
 
 
+def _merge_analytics_collector_row(
+    collectors: List[Dict[str, Any]],
+    row: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    merged = [dict(item or {}) for item in list(collectors or [])]
+    collector_key = str((row or {}).get("collector") or "").strip().lower()
+    if not collector_key:
+        return merged
+    replaced = False
+    for idx, item in enumerate(merged):
+        if str(item.get("collector") or "").strip().lower() == collector_key:
+            merged[idx] = dict(row or {})
+            replaced = True
+            break
+    if not replaced:
+        merged.append(dict(row or {}))
+    return merged
+
+
+def _merge_analytics_dataset_row(
+    datasets: List[Dict[str, Any]],
+    row: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    merged = [dict(item or {}) for item in list(datasets or [])]
+    dataset_key = str((row or {}).get("key") or "").strip().lower()
+    if not dataset_key:
+        return merged
+    replaced = False
+    for idx, item in enumerate(merged):
+        if str(item.get("key") or "").strip().lower() == dataset_key:
+            merged[idx] = dict(row or {})
+            replaced = True
+            break
+    if not replaced:
+        merged.append(dict(row or {}))
+    return merged
+
+
+def _merge_analytics_source_row(
+    sources: List[Dict[str, Any]],
+    row: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    merged = [dict(item or {}) for item in list(sources or [])]
+    stored_as = str((row or {}).get("stored_as") or "").strip().lower()
+    if not stored_as:
+        return merged
+    replaced = False
+    for idx, item in enumerate(merged):
+        if str(item.get("stored_as") or "").strip().lower() == stored_as:
+            merged[idx] = dict(row or {})
+            replaced = True
+            break
+    if not replaced:
+        merged.append(dict(row or {}))
+    return merged
+
+
+def _coinglass_overview_to_analytics_status(
+    overview: Dict[str, Any],
+    *,
+    exchange: str,
+    symbol: str,
+    generated_at: str,
+) -> Dict[str, Any]:
+    overview = dict(overview or {})
+    status_rows = list(overview.get("status") or [])
+    active_datasets = list(overview.get("active_datasets") or [])
+    freshness_sec = overview.get("freshness_sec")
+    degraded_reason = str(overview.get("degraded_reason") or "").strip() or None
+    latest_candidates: List[datetime] = []
+    snapshot_ts = _safe_dt((overview.get("snapshot") or {}).get("timestamp"))
+    if snapshot_ts:
+        latest_candidates.append(snapshot_ts)
+    for item in status_rows:
+        for field in ("last_success_at", "updated_at", "last_attempt_at"):
+            parsed = _safe_dt((item or {}).get(field))
+            if parsed:
+                latest_candidates.append(parsed)
+    latest_at = max(latest_candidates) if latest_candidates else None
+
+    status_value = "idle"
+    if bool(overview.get("available")) and not degraded_reason:
+        status_value = "ok"
+    elif degraded_reason or active_datasets or bool(overview.get("key_configured")) or status_rows:
+        status_value = "degraded"
+
+    error_text = degraded_reason
+    if not error_text:
+        for item in status_rows:
+            candidate = _clip_analytics_error((item or {}).get("error"))
+            if candidate:
+                error_text = candidate
+                break
+
+    return {
+        "collector": "derivatives",
+        "title": "衍生品/CoinGlass",
+        "exchange": exchange,
+        "symbol": str(overview.get("symbol") or symbol),
+        "status": status_value,
+        "source_name": "coinglass_cache",
+        "available": bool(overview.get("available")),
+        "cached": bool(overview.get("cached")),
+        "finished_at": _utc_iso(latest_at) if latest_at else None,
+        "updated_at": generated_at,
+        "error": error_text,
+        "details": {
+            "provider": "coinglass",
+            "key_configured": bool(overview.get("key_configured")),
+            "active_datasets": active_datasets,
+            "freshness_sec": _safe_float(freshness_sec, default=0.0) if freshness_sec is not None else None,
+            "degraded_reason": degraded_reason,
+            "quota_headroom": dict(overview.get("quota_headroom") or {}),
+            "status_count": len(status_rows),
+        },
+    }
+
+
+async def _build_derivatives_analytics_status(
+    *,
+    exchange: str,
+    symbol: str,
+) -> Dict[str, Any]:
+    generated_at = _utc_iso(datetime.now(timezone.utc))
+    try:
+        from core.data.coinglass_feature_builder import build_coinglass_overview_payload  # noqa: PLC0415
+
+        overview = await build_coinglass_overview_payload(symbol=symbol, refresh=False, manual=False)
+    except Exception as exc:
+        return {
+            "collector": "derivatives",
+            "title": "衍生品/CoinGlass",
+            "exchange": exchange,
+            "symbol": symbol,
+            "status": "failed",
+            "source_name": "coinglass_cache",
+            "available": False,
+            "cached": False,
+            "finished_at": None,
+            "updated_at": generated_at,
+            "error": _clip_analytics_error(exc) or "coinglass_status_unavailable",
+            "details": {
+                "provider": "coinglass",
+                "key_configured": False,
+                "active_datasets": [],
+                "freshness_sec": None,
+                "degraded_reason": "coinglass_status_unavailable",
+                "quota_headroom": {},
+                "status_count": 0,
+            },
+        }
+    return _coinglass_overview_to_analytics_status(
+        overview,
+        exchange=exchange,
+        symbol=symbol,
+        generated_at=generated_at,
+    )
+
+
+async def _attach_derivatives_analytics_status(
+    payload: Dict[str, Any],
+    *,
+    exchange: str,
+    symbol: str,
+) -> Dict[str, Any]:
+    out = dict(payload or {})
+    derivatives = await _build_derivatives_analytics_status(exchange=exchange, symbol=symbol)
+    out["collectors"] = _merge_analytics_collector_row(
+        list(out.get("collectors") or []),
+        derivatives,
+    )
+    out["derivatives"] = dict(derivatives)
+    return out
+
+
+async def _attach_derivatives_analytics_health(
+    payload: Dict[str, Any],
+    *,
+    exchange: str,
+    symbol: str,
+) -> Dict[str, Any]:
+    out = dict(payload or {})
+    generated_at = _utc_iso(datetime.now(timezone.utc))
+    try:
+        from core.data.coinglass_feature_builder import build_coinglass_overview_payload  # noqa: PLC0415
+
+        overview = await build_coinglass_overview_payload(symbol=symbol, refresh=False, manual=False)
+        derivatives_status = _coinglass_overview_to_analytics_status(
+            overview,
+            exchange=exchange,
+            symbol=symbol,
+            generated_at=generated_at,
+        )
+    except Exception as exc:
+        overview = {}
+        derivatives_status = {
+            "collector": "derivatives",
+            "title": "衍生品/CoinGlass",
+            "exchange": exchange,
+            "symbol": symbol,
+            "status": "failed",
+            "source_name": "coinglass_cache",
+            "available": False,
+            "cached": False,
+            "finished_at": None,
+            "updated_at": generated_at,
+            "error": _clip_analytics_error(exc) or "coinglass_status_unavailable",
+            "details": {
+                "provider": "coinglass",
+                "key_configured": False,
+                "active_datasets": [],
+                "freshness_sec": None,
+                "degraded_reason": "coinglass_status_unavailable",
+                "quota_headroom": {},
+                "status_count": 0,
+            },
+        }
+
+    snapshot = dict(overview.get("snapshot") or {})
+    latest_at = str(snapshot.get("timestamp") or derivatives_status.get("finished_at") or "").strip() or None
+    latest_summary = {
+        "capture_status": derivatives_status.get("status"),
+        "source_name": derivatives_status.get("source_name"),
+        "source_error": derivatives_status.get("error"),
+        "funding_rate": snapshot.get("funding_rate"),
+        "basis_pct": snapshot.get("basis_pct"),
+        "long_short_ratio": snapshot.get("long_short_ratio"),
+        "oi_change_1h": snapshot.get("oi_change_1h"),
+        "oi_change_24h": snapshot.get("oi_change_24h"),
+        "crowding_score": snapshot.get("crowding_score"),
+        "squeeze_score": snapshot.get("squeeze_score"),
+        "distribution_score": snapshot.get("distribution_score"),
+        "taker_buy_sell_imbalance": snapshot.get("taker_buy_sell_imbalance"),
+        "orderbook_imbalance_score": snapshot.get("orderbook_imbalance_score"),
+        "depth_thinness_score": snapshot.get("depth_thinness_score"),
+    }
+    derivatives_dataset = {
+        "key": "derivatives",
+        "title": "衍生品/CoinGlass",
+        "count": 1 if latest_at else 0,
+        "recent_count": 1 if latest_at else 0,
+        "first_at": latest_at,
+        "latest_at": latest_at,
+        "ok_count": 1 if derivatives_status.get("status") == "ok" and latest_at else 0,
+        "degraded_count": 1 if derivatives_status.get("status") == "degraded" and latest_at else 0,
+        "failed_count": 1 if derivatives_status.get("status") == "failed" else 0,
+        "coverage_hours": 0.0,
+        "latest_summary": latest_summary,
+    }
+    derivatives_recent = []
+    if latest_at:
+        derivatives_recent.append(
+            {
+                "timestamp": latest_at,
+                "value": _safe_float(snapshot.get("crowding_score"), default=0.0),
+                "capture_status": derivatives_status.get("status"),
+                "source_name": derivatives_status.get("source_name"),
+                "source_error": derivatives_status.get("error"),
+                "latency_ms": int(_safe_float(snapshot.get("latency_ms"), default=0.0)),
+                "funding_rate": snapshot.get("funding_rate"),
+                "basis_pct": snapshot.get("basis_pct"),
+                "long_short_ratio": snapshot.get("long_short_ratio"),
+                "crowding_score": snapshot.get("crowding_score"),
+                "squeeze_score": snapshot.get("squeeze_score"),
+                "distribution_score": snapshot.get("distribution_score"),
+            }
+        )
+
+    storage = dict(out.get("storage") or {})
+    tables = list(storage.get("tables") or [])
+    for table_name in ("analytics_derivatives_snapshots", "analytics_market_structure_snapshots"):
+        if table_name not in tables:
+            tables.append(table_name)
+    storage["tables"] = tables
+    out["storage"] = storage
+
+    out["sources"] = _merge_analytics_source_row(
+        list(out.get("sources") or []),
+        {
+            "name": "衍生品/CoinGlass",
+            "acquisition": "CoinGlass 缓存快照、衍生品聚合指标、后台标准化导出",
+            "stored_as": "analytics_derivatives_snapshots",
+            "quality_note": "前台只读缓存；快照缺失或过旧时会显式降级，并透出额度头寸与活跃数据集。",
+        },
+    )
+    status_map = dict(out.get("status") or {})
+    status_map["derivatives"] = dict(derivatives_status)
+    out["status"] = status_map
+    out["datasets"] = _merge_analytics_dataset_row(
+        list(out.get("datasets") or []),
+        derivatives_dataset,
+    )
+    recent = dict(out.get("recent") or {})
+    recent["derivatives"] = derivatives_recent
+    out["recent"] = recent
+    out["derivatives"] = dict(derivatives_status)
+
+    datasets = list(out.get("datasets") or [])
+    out["summary"] = {
+        "dataset_count": len(datasets),
+        "total_rows": sum(int(item.get("count") or 0) for item in datasets),
+        "ready_datasets": sum(1 for item in datasets if int(item.get("count") or 0) > 0),
+        "latest_at": max((item.get("latest_at") for item in datasets if item.get("latest_at")), default=None),
+        "ok_rows": sum(int(item.get("ok_count") or 0) for item in datasets),
+        "degraded_rows": sum(int(item.get("degraded_count") or 0) for item in datasets),
+        "failed_rows": sum(int(item.get("failed_count") or 0) for item in datasets),
+    }
+    return out
+
+
 def _empty_analytics_history_health(
     *,
     exchange: str,
@@ -4862,7 +5172,11 @@ async def get_analytics_history_health(
         max_age_sec=_ANALYTICS_HISTORY_HEALTH_CACHE_TTL_SEC,
     )
     if cached is not None:
-        return _with_common_fields(cached, cache_hit=True, cache_age=float(cached_age or 0.0), stale=False)
+        return await _attach_derivatives_analytics_health(
+            _with_common_fields(cached, cache_hit=True, cache_age=float(cached_age or 0.0), stale=False),
+            exchange=exchange,
+            symbol=symbol,
+        )
 
     stale_cached, stale_age = _cache_get(
         _ANALYTICS_HISTORY_HEALTH_CACHE,
@@ -4870,7 +5184,11 @@ async def get_analytics_history_health(
         max_age_sec=None,
     )
     if (not bool(refresh)) and (stale_cached is not None):
-        return _with_common_fields(stale_cached, cache_hit=True, cache_age=float(stale_age or 0.0), stale=True)
+        return await _attach_derivatives_analytics_health(
+            _with_common_fields(stale_cached, cache_hit=True, cache_age=float(stale_age or 0.0), stale=True),
+            exchange=exchange,
+            symbol=symbol,
+        )
 
     # Fast path for dashboard polling: derive health from ingest status map only.
     # This avoids expensive aggregate scans causing frontend timeout.
@@ -4915,7 +5233,11 @@ async def get_analytics_history_health(
         )
         quick_payload["fallback_mode"] = "quick_status"
         _cache_put(_ANALYTICS_HISTORY_HEALTH_CACHE, cache_key, quick_payload)
-        return _with_common_fields(quick_payload, cache_hit=False, cache_age=0.0, stale=True)
+        return await _attach_derivatives_analytics_health(
+            _with_common_fields(quick_payload, cache_hit=False, cache_age=0.0, stale=True),
+            exchange=exchange,
+            symbol=symbol,
+        )
 
     # Explicit refresh mode: allow expensive read and fallback to stale snapshot on failure.
     try:
@@ -4924,19 +5246,31 @@ async def get_analytics_history_health(
             timeout=max(1.0, _ANALYTICS_HISTORY_HEALTH_READ_TIMEOUT_SEC),
         )
         _cache_put(_ANALYTICS_HISTORY_HEALTH_CACHE, cache_key, health)
-        return _with_common_fields(health, cache_hit=False, cache_age=0.0, stale=False)
+        return await _attach_derivatives_analytics_health(
+            _with_common_fields(health, cache_hit=False, cache_age=0.0, stale=False),
+            exchange=exchange,
+            symbol=symbol,
+        )
     except Exception as exc:
         if stale_cached is not None:
             stale_payload = dict(stale_cached)
             stale_payload["stale_reason"] = _clip_analytics_error(exc)
-            return _with_common_fields(stale_payload, cache_hit=True, cache_age=float(stale_age or 0.0), stale=True)
+            return await _attach_derivatives_analytics_health(
+                _with_common_fields(stale_payload, cache_hit=True, cache_age=float(stale_age or 0.0), stale=True),
+                exchange=exchange,
+                symbol=symbol,
+            )
         fallback = _empty_analytics_history_health(
             exchange=exchange,
             symbol=symbol,
             hours=hours,
             error=_clip_analytics_error(exc) or "analytics history health read failed",
         )
-        return _with_common_fields(fallback, cache_hit=False, cache_age=None, stale=True)
+        return await _attach_derivatives_analytics_health(
+            _with_common_fields(fallback, cache_hit=False, cache_age=None, stale=True),
+            exchange=exchange,
+            symbol=symbol,
+        )
 
 
 async def get_analytics_history_status(
@@ -4951,13 +5285,13 @@ async def get_analytics_history_status(
         max_age_sec=None,
     )
     if stale_cached is not None and float(stale_age or 0.0) <= 90.0:
-        return {
+        return await _attach_derivatives_analytics_status({
             **stale_cached,
             "generated_at": _utc_iso(datetime.now(timezone.utc)),
             "cache_hit": True,
             "cache_age_sec": round(float(stale_age or 0.0), 3),
             "stale": bool(float(stale_age or 0.0) > _ANALYTICS_HISTORY_STATUS_CACHE_TTL_SEC),
-        }
+        }, exchange=exchange, symbol=symbol)
     cached, cached_age = _cache_get(
         _ANALYTICS_HISTORY_STATUS_CACHE,
         cache_key,
@@ -4965,14 +5299,14 @@ async def get_analytics_history_status(
     )
     if cached is not None:
         collectors = list(cached.get("collectors") or [])
-        return {
+        return await _attach_derivatives_analytics_status({
             "generated_at": _utc_iso(datetime.now(timezone.utc)),
             "exchange": exchange,
             "symbol": symbol,
             "collectors": collectors,
             "cache_hit": True,
             "cache_age_sec": round(float(cached_age or 0.0), 3),
-        }
+        }, exchange=exchange, symbol=symbol)
 
     if _ANALYTICS_HISTORY_STATUS_LAST:
         collectors = _status_map_to_collectors(
@@ -4992,7 +5326,7 @@ async def get_analytics_history_status(
                 "fallback_mode": "in_memory_status",
             }
             _cache_put(_ANALYTICS_HISTORY_STATUS_CACHE, cache_key, payload)
-            return payload
+            return await _attach_derivatives_analytics_status(payload, exchange=exchange, symbol=symbol)
 
     try:
         status_map = await asyncio.wait_for(
@@ -5009,18 +5343,18 @@ async def get_analytics_history_status(
             "cache_age_sec": 0.0,
         }
         _cache_put(_ANALYTICS_HISTORY_STATUS_CACHE, cache_key, payload)
-        return payload
+        return await _attach_derivatives_analytics_status(payload, exchange=exchange, symbol=symbol)
     except Exception as exc:
         stale, stale_age = _cache_get(_ANALYTICS_HISTORY_STATUS_CACHE, cache_key)
         if stale is not None:
-            return {
+            return await _attach_derivatives_analytics_status({
                 **stale,
                 "generated_at": _utc_iso(datetime.now(timezone.utc)),
                 "cache_hit": True,
                 "cache_age_sec": round(float(stale_age or 0.0), 3),
                 "stale": True,
                 "stale_reason": _clip_analytics_error(exc),
-            }
+            }, exchange=exchange, symbol=symbol)
         if _ANALYTICS_HISTORY_STATUS_LAST:
             collectors = _status_map_to_collectors(
                 {k: dict(v) for k, v in _ANALYTICS_HISTORY_STATUS_LAST.items()},
@@ -5028,7 +5362,7 @@ async def get_analytics_history_status(
                 symbol=symbol,
             )
             if collectors:
-                return {
+                return await _attach_derivatives_analytics_status({
                     "generated_at": _utc_iso(datetime.now(timezone.utc)),
                     "exchange": exchange,
                     "symbol": symbol,
@@ -5038,7 +5372,7 @@ async def get_analytics_history_status(
                     "stale": True,
                     "stale_reason": _clip_analytics_error(exc),
                     "fallback_mode": "in_memory_status",
-                }
+                }, exchange=exchange, symbol=symbol)
         fallback_status_map: Dict[str, Dict[str, Any]] = {}
         for collector in _ANALYTICS_HISTORY_COLLECTORS:
             fallback_status_map[collector] = {
@@ -5053,7 +5387,7 @@ async def get_analytics_history_status(
                 "updated_at": _utc_iso(datetime.now(timezone.utc)),
                 "details": {"phase": "fallback"},
             }
-        return {
+        return await _attach_derivatives_analytics_status({
             "generated_at": _utc_iso(datetime.now(timezone.utc)),
             "exchange": exchange,
             "symbol": symbol,
@@ -5062,7 +5396,7 @@ async def get_analytics_history_status(
             "cache_age_sec": None,
             "stale": True,
             "stale_reason": _clip_analytics_error(exc),
-        }
+        }, exchange=exchange, symbol=symbol)
 
 
 async def get_audit_logs(

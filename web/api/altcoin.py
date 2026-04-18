@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from config.database import (
     AnalyticsCommunitySnapshot,
+    AnalyticsDerivativesSnapshot,
     AnalyticsMicrostructureSnapshot,
     AnalyticsWhaleSnapshot,
     async_session_maker,
@@ -220,6 +221,33 @@ def _serialize_whale_snapshot(row: AnalyticsWhaleSnapshot) -> Dict[str, Any]:
     }
 
 
+def _serialize_derivatives_snapshot(row: AnalyticsDerivativesSnapshot) -> Dict[str, Any]:
+    payload = dict(row.payload or {})
+    return {
+        "exchange": row.exchange,
+        "symbol": row.symbol,
+        "timestamp": row.timestamp.replace(tzinfo=timezone.utc).isoformat() if row.timestamp else None,
+        "capture_status": row.capture_status,
+        "source_error": row.source_error,
+        "source_name": row.source_name,
+        "latency_ms": row.latency_ms,
+        "payload": payload,
+        "oi_usd": row.oi_usd,
+        "oi_change_1h": row.oi_change_1h,
+        "oi_change_4h": row.oi_change_4h,
+        "oi_change_24h": row.oi_change_24h,
+        "funding_rate": row.funding_rate,
+        "long_short_ratio": row.long_short_ratio,
+        "basis_pct": row.basis_pct,
+        "taker_buy_sell_imbalance": row.taker_buy_sell_imbalance,
+        "crowding_score": row.crowding_score,
+        "squeeze_score": row.squeeze_score,
+        "distribution_score": row.distribution_score,
+        "orderbook_imbalance_score": row.orderbook_imbalance_score,
+        "depth_thinness_score": row.depth_thinness_score,
+    }
+
+
 async def _load_latest_snapshot_map(
     model: Any,
     *,
@@ -249,11 +277,12 @@ async def _load_snapshot_maps(
     *,
     exchange: str,
     symbols: Sequence[str],
-) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
-    micro_rows, community_rows, whale_rows = await asyncio.gather(
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    micro_rows, community_rows, whale_rows, derivatives_rows = await asyncio.gather(
         _load_latest_snapshot_map(AnalyticsMicrostructureSnapshot, exchange=exchange, symbols=symbols),
         _load_latest_snapshot_map(AnalyticsCommunitySnapshot, exchange=exchange, symbols=symbols),
         _load_latest_snapshot_map(AnalyticsWhaleSnapshot, exchange=exchange, symbols=symbols),
+        _load_latest_snapshot_map(AnalyticsDerivativesSnapshot, exchange="aggregate", symbols=symbols),
     )
     micro = {
         str(row.symbol).strip().upper(): _serialize_micro_snapshot(row)
@@ -270,7 +299,12 @@ async def _load_snapshot_maps(
         for row in whale_rows
         if getattr(row, "symbol", None)
     }
-    return micro, community, whale
+    derivatives = {
+        str(row.symbol).strip().upper(): _serialize_derivatives_snapshot(row)
+        for row in derivatives_rows
+        if getattr(row, "symbol", None)
+    }
+    return micro, community, whale, derivatives
 
 
 async def _resolve_universe(
@@ -427,7 +461,7 @@ async def _compute_scan_payload(
         snapshots_task,
         rules_task,
     )
-    micro_map, community_map, whale_map = snapshots
+    micro_map, community_map, whale_map, derivatives_map = snapshots
     alerted_symbols = _alerted_symbols_for_scan(
         rules,
         exchange=exchange,
@@ -447,6 +481,7 @@ async def _compute_scan_payload(
         micro_snapshots=micro_map,
         community_snapshots=community_map,
         whale_snapshots=whale_map,
+        derivatives_snapshots=derivatives_map,
         alerted_symbols=alerted_symbols,
     )
     return {

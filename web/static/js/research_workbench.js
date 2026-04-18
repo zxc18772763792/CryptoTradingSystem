@@ -51,6 +51,15 @@
     }
   }
 
+  function fmtAgeSeconds(value) {
+    const sec = Number(value);
+    if (!Number.isFinite(sec) || sec < 0) return '-';
+    if (sec < 60) return `${Math.round(sec)}s`;
+    if (sec < 3600) return `${Math.round(sec / 60)}m`;
+    if (sec < 86400) return `${Math.round(sec / 3600)}h`;
+    return `${Math.round(sec / 86400)}d`;
+  }
+
   function apiResearch(path, options = {}) {
     if (typeof window.api !== 'function') throw new Error('API 未初始化');
     return window.api(`/research/workbench${path}`, options);
@@ -527,31 +536,26 @@
     return items;
   }
 
+  // ── Recommendation rendering helpers (redesigned: verdict-first layout) ──
+
+  function _biasConfig(bias) {
+    const b = String(bias || '').trim().toLowerCase();
+    if (b === 'bullish') return { icon: '▲', label: '偏多', cls: 'bias-bullish' };
+    if (b === 'bearish') return { icon: '▼', label: '偏空', cls: 'bias-bearish' };
+    return { icon: '─', label: '中性', cls: 'bias-neutral' };
+  }
+
   function renderRecommendationActions(actionItems) {
-    if (!actionItems.length) {
-      return '<div class="research-conclusion-empty">暂无可执行动作，先运行研究总览补齐上下文。</div>';
-    }
-    return `
-      <section class="research-conclusion-section">
-        <div class="research-conclusion-section-head">
-          <h4>可执行动作</h4>
-          <span>${actionItems.length} 项</span>
-        </div>
-        <div class="research-conclusion-actions">
-          ${actionItems.map((action) => `
-            <button
-              type="button"
-              class="btn btn-sm research-conclusion-action-btn"
-              data-action-id="${escSafe(String(action.id || ''))}"
-              data-tone="${escSafe(String(action.tone || 'neutral'))}"
-            >
-              <span class="action-label">${escSafe(action.label || '执行动作')}</span>
-              <span class="action-desc">${escSafe(action.description || '')}</span>
-            </button>
-          `).join('')}
-        </div>
-      </section>
-    `;
+    if (!actionItems.length) return '';
+    const toneIcon = (t) => t === 'warn' ? '⚠' : t === 'positive' ? '→' : '→';
+    return `<div class="rec-action-row">
+      ${actionItems.map((a) => `
+        <button type="button" class="rec-action-btn" data-action-id="${escSafe(String(a.id || ''))}" data-tone="${escSafe(String(a.tone || 'neutral'))}">
+          <span class="rec-action-icon">${toneIcon(a.tone)}</span>
+          <span class="rec-action-label">${escSafe(a.label || '执行')}</span>
+        </button>
+      `).join('')}
+    </div>`;
   }
 
   function renderRecommendationBrief(brief) {
@@ -569,12 +573,9 @@
       { label: '下一步', value: (brief.next_steps || []).join('；') || '-' },
     ];
     return `
-      <section class="research-conclusion-section">
-        <div class="research-conclusion-section-head">
-          <h4>AI 摘要</h4>
-          <span>结构化上下文</span>
-        </div>
-        <div class="research-brief-grid">
+      <details class="rec-brief-details">
+        <summary>AI 结构化摘要</summary>
+        <div class="research-brief-grid" style="margin-top:10px">
           ${rows.map((row) => `
             <div class="research-brief-item">
               <div class="research-brief-label">${escSafe(row.label)}</div>
@@ -582,7 +583,7 @@
             </div>
           `).join('')}
         </div>
-      </section>
+      </details>
     `;
   }
 
@@ -591,29 +592,25 @@
       ? rec.insight_cards
       : buildFallbackInsightCards(rec);
     if (!cards.length) return '';
-    return `
-      <section class="research-conclusion-section">
-        <div class="research-conclusion-section-head">
-          <h4>研究观察与风险</h4>
-          <span>${cards.length} 条</span>
-        </div>
-        <div class="research-conclusion-insights">
-          ${cards.map((item) => {
-            const tone = String(item.tone || 'neutral');
-            const tag = tone === 'warn' ? '风险' : tone === 'positive' ? '建议' : '观察';
-            return `
-              <div class="research-conclusion-item" data-tone="${escSafe(tone)}">
-                <div class="title">
-                  <span>${escSafe(item.title || '研究观察')}</span>
-                  <span class="research-conclusion-tag" data-tone="${escSafe(tone)}">${escSafe(tag)}</span>
-                </div>
-                <div class="body">${escSafe(item.body || '-')}</div>
-              </div>
-            `;
-          }).join('')}
-        </div>
-      </section>
-    `;
+    const iconMap = { positive: '✓', warn: '⚠', neutral: '○' };
+    return `<div class="rec-insights">
+      ${cards.map((item) => {
+        const tone = String(item.tone || 'neutral');
+        const icon = iconMap[tone] || '○';
+        const label = tone === 'warn' ? '风险' : tone === 'positive' ? '建议' : '观察';
+        const body = String(item.body || '').trim();
+        return `
+          <details class="rec-insight-item" data-tone="${escSafe(tone)}">
+            <summary>
+              <span class="rec-insight-icon" data-tone="${escSafe(tone)}">${icon}</span>
+              <span class="rec-insight-title">${escSafe(item.title || '研究观察')}</span>
+              <span class="rec-insight-tag" data-tone="${escSafe(tone)}">${label}</span>
+            </summary>
+            ${body ? `<div class="rec-insight-body">${escSafe(body)}</div>` : ''}
+          </details>
+        `;
+      }).join('')}
+    </div>`;
   }
 
   function setPlannerFieldValue(id, value) {
@@ -703,31 +700,52 @@
     if (!summaryEl || !bulletEl) return;
 
     if (!state.recommendations) {
-      summaryEl.innerHTML = listItem('状态', '等待研究建议');
-      bulletEl.innerHTML = '<div class="research-conclusion-empty">暂无建议。先运行“研究总览”。</div>';
+      summaryEl.innerHTML = '<div class=”research-conclusion-empty”>先运行「研究总览」，30秒内生成结论</div>';
+      bulletEl.innerHTML = '';
       return;
     }
 
     const rec = state.recommendations;
     const brief = rec.ai_brief || {};
-    const focusSymbols = (brief.symbols || rec.focus_symbols || []).join(' / ');
-    const factorFocusText = formatFactorFocusSummary(getFactorFocusItems(rec));
+    const bias = rec.direction_bias || state.overview?.direction_bias || 'neutral';
+    const headline = String(rec.headline || state.overview?.market_regime || '综合判断中').trim();
+    const focusSymbols = (brief.symbols || rec.focus_symbols || []).filter(Boolean);
     const sourceMeta = getRecommendationSourceMeta(rec);
-    summaryEl.innerHTML = [
-      listItem('研究结论', buildRecommendationConclusion(rec, state.overview)),
-      listItem('方向偏向', formatRecommendationBias(rec.direction_bias || '-')),
-      listItem('关注标的', focusSymbols || '-'),
-      listItem('因子观察', factorFocusText),
-      listItem('策略家族', (rec.preferred_strategy_families || []).join(' / ') || '-'),
-      listItem('因子来源', describeRecommendationSource(sourceMeta)),
-      listItem('建议生成', sourceMeta.generated_at ? fmtTime(sourceMeta.generated_at) : '-'),
-    ].join('');
+    const timeLabel = sourceMeta.generated_at ? fmtTime(sourceMeta.generated_at) : '';
+    const conf = Number(state.overview?.confidence || rec.confidence || 0);
+    const confLabel = conf >= 0.7 ? '高' : conf >= 0.4 ? '中' : conf > 0 ? '低' : '';
+    const bc = _biasConfig(bias);
 
+    // ── Verdict hero block (goes into #research-conclusion-summary) ──
+    const symbolTags = focusSymbols.length
+      ? `<div class=”rec-symbols”>${focusSymbols.map((s) => `<span class=”rec-symbol-tag”>${escSafe(s)}</span>`).join('')}</div>`
+      : '';
+    const confBadge = confLabel
+      ? `<span class=”rec-conf-badge”>置信 ${escSafe(confLabel)}</span>`
+      : '';
+    const strategies = (rec.preferred_strategy_families || brief.preferred_strategy_families || []);
+    const strategyLine = strategies.length
+      ? `<div class=”rec-strategy-line”>优先策略：${escSafe(strategies.slice(0, 3).join(' / '))}</div>`
+      : '';
+
+    summaryEl.className = 'rec-verdict';
+    summaryEl.innerHTML = `
+      <div class=”rec-verdict-top”>
+        <span class=”rec-bias-badge ${bc.cls}”>${bc.icon} ${bc.label}</span>
+        ${confBadge}
+        ${timeLabel ? `<span class=”rec-time-label”>${escSafe(timeLabel)}</span>` : ''}
+      </div>
+      <div class=”rec-headline”>${escSafe(headline)}</div>
+      ${symbolTags}
+      ${strategyLine}
+    `;
+
+    // ── Bullets: action row → insights → brief (collapsed) ──
     const actionItems = Array.isArray(rec.action_items) ? rec.action_items : [];
     bulletEl.innerHTML = [
       renderRecommendationActions(actionItems),
-      renderRecommendationBrief(brief),
       renderRecommendationInsights(rec),
+      renderRecommendationBrief(brief),
     ].filter(Boolean).join('');
   }
 
@@ -742,13 +760,25 @@
     const news = payload.news_summary || {};
     const community = payload.community || {};
     const history = payload.analytics_history_status || {};
-    const collectors = Object.values(history).slice(0, 3).map((item) => `${item.collector}:${item.status}`).join(' | ');
+    const derivatives = payload.derivatives_summary || {};
+    const collectors = Object.values(history).slice(0, 4).map((item) => `${item.collector}:${item.status}`).join(' | ');
+    const derivativesParts = [
+      String(derivatives.status || 'missing'),
+      derivatives.freshness_sec != null ? fmtAgeSeconds(derivatives.freshness_sec) : '',
+      Number(derivatives.dataset_count || 0) > 0 ? `${Number(derivatives.dataset_count || 0)} datasets` : '',
+    ].filter(Boolean).join(' | ');
+    const dailyRemaining = Number(derivatives?.quota_headroom?.daily_remaining);
+    const derivativesSummaryRows = [
+      listItem('Derivatives', derivativesParts || '-'),
+      listItem('Derivatives Source / Quota', `${String(derivatives.provider || '-')} / ${Number.isFinite(dailyRemaining) ? dailyRemaining : '-'}`),
+    ];
     box.innerHTML = [
       listItem('新闻范围', news.scope || '-'),
       listItem('事件 / 原始新闻', `${Number(news.events_count || 0)} / ${Number(news.raw_count || 0)}`),
       listItem('公告 / 巨鲸', `${Number((community.announcements || []).length || 0)} / ${Number(community.whale_transfers?.count || 0)}`),
       listItem('历史采集', collectors || '暂无'),
     ].join('');
+    box.innerHTML += derivativesSummaryRows.join('');
   }
 
   function renderDiscipline(module) {
@@ -1235,15 +1265,32 @@
 
   async function buildOnchainModule(profile, exchange, primarySymbol) {
     const newsKey = String(profile.primary_symbol || 'BTC/USDT').split('/')[0];
-    const [onchainRes, community, newsScoped, newsGlobal] = await Promise.all([
+    const [onchainRes, community, newsScoped, newsGlobal, analyticsHistoryStatus] = await Promise.all([
       window.api(`/data/onchain/overview?exchange=${exchange}&symbol=${primarySymbol}&whale_threshold_btc=10&chain=Ethereum&hours=72&refresh=true`, { timeoutMs: getModuleTimeoutMs('onchain') }).catch(() => ({})),
       window.api(`/trading/analytics/community/overview?exchange=${exchange}&symbol=${primarySymbol}`, { timeoutMs: 15000 }).catch(() => ({})),
       window.api(`/news/summary?symbol=${encodeURIComponent(newsKey)}&hours=72`, { timeoutMs: 15000 }).catch(() => ({})),
       window.api('/news/summary?hours=72', { timeoutMs: 15000 }).catch(() => ({})),
+      window.api(`/trading/analytics/history/status?exchange=${exchange}&symbol=${primarySymbol}`, { timeoutMs: 15000 }).catch(() => ({})),
     ]);
     const newsTotal = Number(newsScoped?.events_count || 0) + Number(newsScoped?.feed_count || 0) + Number(newsScoped?.raw_count || 0);
     const news = newsTotal ? newsScoped : { ...newsGlobal, scope: 'global_fallback' };
     const warnings = [...(onchainRes?.warnings || [])];
+    const derivativesCollector = Array.isArray(analyticsHistoryStatus?.collectors)
+      ? analyticsHistoryStatus.collectors.find((item) => String(item?.collector || '').trim() === 'derivatives')
+      : null;
+    const derivativesSummary = {
+      available: !!derivativesCollector?.available,
+      status: String(derivativesCollector?.status || 'missing'),
+      provider: String(derivativesCollector?.details?.provider || 'coinglass'),
+      freshness_sec: derivativesCollector?.details?.freshness_sec,
+      degraded_reason: derivativesCollector?.details?.degraded_reason || null,
+      active_datasets: Array.isArray(derivativesCollector?.details?.active_datasets) ? derivativesCollector.details.active_datasets : [],
+      dataset_count: Array.isArray(derivativesCollector?.details?.active_datasets) ? derivativesCollector.details.active_datasets.length : 0,
+      quota_headroom: derivativesCollector?.details?.quota_headroom || {},
+      snapshot_at: derivativesCollector?.details?.snapshot?.timestamp || null,
+      funding_mean_rate_pct: Number(onchainRes?.funding_rate_multi_source?.mean_rate_pct || 0) || null,
+    };
+    if (!derivativesSummary.available) warnings.push('CoinGlass derivatives shadow unavailable; exogenous context is partial.');
     if (isAsyncPendingPayload(onchainRes, 'onchain')) warnings.unshift('链上面板正在后台补拉完整数据。');
     return {
       name: 'onchain',
@@ -1255,8 +1302,17 @@
         news_events: Number(news?.events_count || 0),
         tvl_chain: onchainRes?.defi_tvl?.chain || 'Ethereum',
         served_mode: onchainRes?.served_mode || 'background',
+        derivatives_status: String(derivativesSummary.status || 'missing'),
+        derivatives_freshness_sec: derivativesSummary.freshness_sec,
+        derivatives_dataset_count: Number(derivativesSummary.dataset_count || 0),
       },
-      payload: { onchain: onchainRes || {}, community: community || {}, news_summary: news || {}, analytics_history_status: {} },
+      payload: {
+        onchain: onchainRes || {},
+        community: community || {},
+        news_summary: news || {},
+        analytics_history_status: analyticsHistoryStatus || {},
+        derivatives_summary: derivativesSummary,
+      },
     };
   }
 

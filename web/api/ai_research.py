@@ -850,7 +850,6 @@ async def _load_live_signal_snapshot(
             symbol,
             df,
             include_llm=False,
-            include_ml=False,
         )
         signal_payload = sig.to_dict() if callable(getattr(sig, "to_dict", None)) else dict(sig or {})
         return {
@@ -4816,6 +4815,7 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
         "search_interest": {"label": "Search Interest", "support_level": "enhancement", "sources": {}},
         "options": {"label": "Options Structure", "support_level": "enhancement", "sources": {}},
         "premium_onchain": {"label": "Premium / On-chain", "support_level": "optional", "sources": {}},
+        "premium_derivatives": {"label": "Premium / Derivatives", "support_level": "optional", "sources": {}},
         "ai_sources": {"label": "AI Sources", "support_level": "core", "sources": {}},
     }
 
@@ -5157,6 +5157,49 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
                 recommendation=str(spec["recommendation"]),
             )
 
+    try:
+        from core.data.coinglass_feature_builder import load_coinglass_status_snapshot  # noqa: PLC0415
+
+        coinglass_status = await load_coinglass_status_snapshot()
+        active_datasets = list(coinglass_status.get("active_datasets") or [])
+        quota_headroom = dict(coinglass_status.get("quota_headroom") or {})
+        freshness_sec = coinglass_status.get("freshness_sec")
+        issues: List[str] = []
+        if bool(coinglass_status.get("key_configured")) and not active_datasets:
+            issues.append("CoinGlass key configured but cache is empty")
+        if freshness_sec is not None and float(freshness_sec or 0.0) > 1800:
+            issues.append("CoinGlass cache is stale")
+        categories["premium_derivatives"]["sources"]["coinglass"] = _build_source_entry(
+            label="CoinGlass Premium Derivatives",
+            available=bool(coinglass_status.get("key_configured") or active_datasets),
+            configured=bool(coinglass_status.get("key_configured")),
+            key_configured=bool(coinglass_status.get("key_configured")),
+            has_cached_data=bool(active_datasets),
+            ready=bool(coinglass_status.get("available")),
+            last_updated=None,
+            max_age_sec=1800,
+            support_level="optional",
+            issues=issues,
+            recommendation="Keep CoinGlass behind the background cache path and watch quota headroom before widening coverage.",
+            snapshot={
+                "freshness_sec": freshness_sec,
+                "active_datasets": active_datasets,
+                "quota_headroom": quota_headroom,
+                "status_count": len(coinglass_status.get("status") or []),
+            },
+        )
+    except Exception as exc:
+        categories["premium_derivatives"]["sources"]["coinglass"] = _build_source_entry(
+            label="CoinGlass Premium Derivatives",
+            available=False,
+            configured=False,
+            has_cached_data=False,
+            ready=False,
+            support_level="optional",
+            error=str(exc),
+            recommendation="Restore CoinGlass worker/cache wiring if derivatives context is required.",
+        )
+
     primary_openai_key = bool(str(getattr(settings, "OPENAI_API_KEY", "") or "").strip())
     backup_openai_key = bool(str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip())
     research_llm_ready = bool(primary_openai_key or backup_openai_key)
@@ -5317,6 +5360,7 @@ async def get_premium_data_status():
         "cryptoquant": dict((((categories.get("premium_onchain") or {}).get("sources") or {}).get("cryptoquant") or {})),
         "nansen": dict((((categories.get("premium_onchain") or {}).get("sources") or {}).get("nansen") or {})),
         "kaiko": dict((((categories.get("premium_onchain") or {}).get("sources") or {}).get("kaiko") or {})),
+        "coinglass": dict((((categories.get("premium_derivatives") or {}).get("sources") or {}).get("coinglass") or {})),
         "google_trends": dict((((categories.get("search_interest") or {}).get("sources") or {}).get("google_trends") or {})),
         "fred_macro": dict((((categories.get("macro") or {}).get("sources") or {}).get("fred_macro") or {})),
         "deribit_options": dict((((categories.get("options") or {}).get("sources") or {}).get("deribit_options") or {})),

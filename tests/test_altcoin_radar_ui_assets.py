@@ -49,6 +49,11 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "altcoin-radar-related-list" in radar_js
     assert "altcoin-radar-universe" in radar_js
 
+    assert "function formatDerivativesStatus(detailPayload, selected)" in radar_js
+    assert "['Derivatives 来源', String(derivativesContext.source_name || '--')]" in radar_js
+    assert "['Long/Short', shortNumber(metrics.long_short_ratio)]" in radar_js
+    assert "['Derivatives 错误', derivativesError || '--']" in radar_js
+
     assert ".altcoin-radar-workspace" in style_css
     assert ".altcoin-radar-table" in style_css
     assert ".altcoin-radar-inspector-card" in style_css

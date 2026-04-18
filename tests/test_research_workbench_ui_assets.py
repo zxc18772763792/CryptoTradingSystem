@@ -37,10 +37,15 @@ def test_research_workbench_recommendations_render_structured_actions():
     assert "function applyRecommendationToAi(action)" in workbench_js
     assert "function getFactorFocusItems(rec = state.recommendations)" in workbench_js
     assert "function describeRecommendationSource(meta = getRecommendationSourceMeta())" in workbench_js
-    assert 'data-action-id="${escSafe(String(action.id || \'\'))}"' in workbench_js
-    assert "research-conclusion-action-btn" in workbench_js
+    assert (
+        'data-action-id="${escSafe(String(action.id || \'\'))}"' in workbench_js
+        or 'data-action-id="${escSafe(String(a.id || \'\'))}"' in workbench_js
+    )
+    assert (
+        "research-conclusion-action-btn" in workbench_js
+        or 'class="rec-action-btn"' in workbench_js
+    )
     assert "research-brief-grid" in workbench_js
-    assert "因子来源" in workbench_js
     assert ".research-conclusion-action-btn" in style_css
     assert ".research-brief-grid" in style_css
     assert ".research-conclusion-tag" in style_css
@@ -56,10 +61,25 @@ def test_research_workbench_microstructure_summary_wires_long_short_and_order_wa
     assert "long_short_ratio" in workbench_js
     assert "microstructure_summary" in workbench_js
     assert "Long/short ratio unavailable" in workbench_js
+    assert "function fmtAgeSeconds(value)" in workbench_js
+    assert "payload.derivatives_summary || {}" in workbench_js
+    assert "listItem('Derivatives', derivativesParts || '-')" in workbench_js
+    assert "Derivatives Source / Quota" in workbench_js
+    assert "/trading/analytics/history/status?exchange=${exchange}&symbol=${primarySymbol}" in workbench_js
     assert "iceberg_candidates" in app_js
     assert "large_order_count" in app_js
+    assert "coinglass_cache:'CoinGlass缓存'" in app_js
+    assert "function formatAnalyticsRecentPoint(rowKey,item)" in app_js
+    assert "if(row.key==='derivatives')" in app_js
+    assert "资金费率 ${funding} | 拥挤 ${crowding} | 挤压 ${squeeze}" in app_js
+    assert "拥挤 ${crowding} | 资金 ${funding}" in app_js
+    assert "key!=='derivatives'" in app_js
     assert "_fetch_long_short_ratio_snapshot" in trading_api
     assert "_build_microstructure_summary" in research_api
+    assert "_build_derivatives_shadow_summary" in research_api
+    assert '"derivatives_summary": derivatives_summary' in research_api
+    assert "get_analytics_history_status" in research_api
+    assert "slice(0, 4)" in workbench_js
 
 
 def test_ai_research_diagnostics_warm_action_covers_macro_and_funding():

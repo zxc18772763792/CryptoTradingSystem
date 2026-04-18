@@ -303,6 +303,84 @@ def test_build_research_enrichment_merges_macro_premium_and_cross_sectional_sour
     assert result["summary"]["cross_sectional_timeframe"] == "1h"
 
 
+def test_build_research_enrichment_includes_coinglass_strategy_features_when_enabled(monkeypatch):
+    import asyncio
+
+    from core.research.strategy_research import _build_research_enrichment
+
+    class _FakeFundingProvider:
+        def ensure_history(self, **kwargs):
+            return None
+
+        def get_series(self, symbol, start_time=None, end_time=None):
+            return pd.Series([0.0001], index=pd.date_range("2024-01-01", periods=1, freq="1h"))
+
+    async def _fake_load_news_events_for_symbol(symbol, start_time, end_time, limit=5000):
+        return []
+
+    async def _fake_cross_sectional(*args, **kwargs):
+        return {
+            "available": False,
+            "timeframe": None,
+            "symbols_used": [],
+            "feature_frame": pd.DataFrame(),
+            "constant_features": {},
+            "multi_asset_summary": {"available": False},
+            "factor_library_summary": {"available": False},
+        }
+
+    async def _fake_coinglass(symbol):
+        return {
+            "features": {
+                "coinglass_available": 1.0,
+                "coinglass_crowding_score": 0.81,
+                "coinglass_squeeze_score": 0.67,
+                "coinglass_context_crowding_warning": 1.0,
+            },
+            "summary": {
+                "available": True,
+                "available_sources": ["coinglass"],
+                "snapshot": {"timestamp": "2024-01-01T00:00:00Z", "crowding_score": 0.81},
+                "latest_timestamp": "2024-01-01T00:00:00Z",
+                "context": {"crowding_warning": True},
+            },
+        }
+
+    monkeypatch.setattr("core.research.strategy_research._load_news_events_for_symbol", _fake_load_news_events_for_symbol)
+    monkeypatch.setattr("core.research.strategy_research.FundingRateProvider", lambda: _FakeFundingProvider())
+    monkeypatch.setattr(
+        "core.research.strategy_research._build_macro_research_features",
+        lambda: {"features": {}, "summary": {"available": False, "available_count": 0}},
+    )
+    monkeypatch.setattr(
+        "core.research.strategy_research._build_premium_snapshot_research_features",
+        lambda: {"features": {}, "summary": {"available": False, "available_sources": [], "available_count": 0}},
+    )
+    monkeypatch.setattr("core.research.strategy_research._build_cross_sectional_research_features", _fake_cross_sectional)
+    monkeypatch.setattr("core.research.strategy_research._build_coinglass_research_features", _fake_coinglass)
+    monkeypatch.setattr("core.research.strategy_research.settings.COINGLASS_ENABLED", True, raising=False)
+    monkeypatch.setattr("core.research.strategy_research.settings.COINGLASS_INCLUDE_STRATEGIES", True, raising=False)
+
+    result = asyncio.run(
+        _build_research_enrichment(
+            exchange="binance",
+            symbol="BTC/USDT",
+            start_time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end_time=datetime(2024, 1, 2, tzinfo=timezone.utc),
+            requested_timeframes=["1h"],
+            preferred_universe_timeframe="1h",
+            universe_max_symbols=8,
+        )
+    )
+
+    assert result["constant_features"]["coinglass_available"] == pytest.approx(1.0)
+    assert result["constant_features"]["coinglass_crowding_score"] == pytest.approx(0.81)
+    assert result["constant_features"]["coinglass_context_crowding_warning"] == pytest.approx(1.0)
+    assert result["summary"]["premium_source_count"] == 1
+    assert result["premium_summary"]["available_sources"] == ["coinglass"]
+    assert result["premium_summary"]["coinglass_latest_timestamp"] == "2024-01-01T00:00:00Z"
+
+
 def test_run_strategy_research_rejects_when_cross_exchange_preflight_fails(monkeypatch, tmp_path):
     """B+: cross-exchange consistency is a hard preflight gate before research runs."""
     import asyncio

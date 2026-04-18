@@ -3,6 +3,7 @@ const state={positions:[],orders:[],strategies:[],availableStrategyTypes:[],stra
 const researchState={lastFactorLibrary:null,lastMultiAsset:null,lastSentiment:null,lastAnalytics:null,lastOnchain:null,lastFama:null,lastOverview:null,pendingTimers:{},lastSentimentReqId:0};
 const arbitrageState={catalog:[],selectedStrategy:'PairsTradingStrategy',initialized:false,lastSpec:null,pairRanking:null,pairRankingKey:'',pairRankingNote:'等待筛选：确认周期后点击“一键筛选前十”',readiness:null,readinessKey:'',readinessLoading:false,readinessError:'',readinessSeq:0,readinessTimer:null};
 const backtestUIState={lastOptimize:null,lastCompare:null,lastRenderedBacktest:null,defaultCompareStrategies:[]};
+const mlWorkflowState={models:[],features:[],loadedAt:0,featuresLoadedAt:0,lastTrainResult:null};
 const dataHealthState={last:null};
 const dataAnalyticsHealthState={last:null};
 const uiLoadState={tabs:{},inFlight:{},requests:{},dataInitialized:false};
@@ -30,6 +31,7 @@ const SUMMARY_STATS_SETTLE_TIMEOUT_MS=5000;
 const SUMMARY_BALANCES_SETTLE_TIMEOUT_MS=6500;
 const SUMMARY_BALANCES_TIMEOUT_MS=22000;
 const SUMMARY_TASK_REUSE_MAX_AGE_MS=12000;
+const KNOWN_STRATEGY_CATEGORIES=['趋势','震荡','动量','均值回归','突破','成交量','波动率','风险','统计套利','Fama因子','微观结构','套利','量化','ML','宏观','其他'];
 const TRADING_ORDERS_TIMEOUT_MS=20000;
 const TRADING_OPEN_ORDERS_TIMEOUT_MS=25000;
 const TRADING_POSITIONS_TIMEOUT_MS=30000;
@@ -245,7 +247,7 @@ MaxDrawdownStrategy:{cat:'风险',desc:'回撤反弹买入'},
 SortinoRatioStrategy:{cat:'风险',desc:'风险调整趋势'},
 // ===== 统计套利类 =====
 PairsTradingStrategy:{cat:'统计套利',desc:'配对价差回归'},
-FamaFactorArbitrageStrategy:{cat:'统计套利',desc:'多因子横截面'},
+FamaFactorArbitrageStrategy:{cat:'Fama因子',desc:'多因子横截面'},
 HurstExponentStrategy:{cat:'统计套利',desc:'长记忆regime'},
 // ===== 微观结构类 =====
 OrderFlowImbalanceStrategy:{cat:'微观结构',desc:'订单流失衡'},
@@ -262,13 +264,13 @@ WhaleActivityStrategy:{cat:'宏观',desc:'巨鲸地址追踪',family:'ai_openai'
 // ===== 量化多因子类 =====
 MultiFactorHFStrategy:{cat:'量化',desc:'多因子高频组合(5m)'},
 // ===== ML 类 =====
-MLXGBoostStrategy:{cat:'机器学习',desc:'XGBoost 方向预测',family:'ml',decisionEngine:'ml',aiDriven:true}
+MLXGBoostStrategy:{cat:'ML',desc:'XGBoost 方向预测',family:'ml',decisionEngine:'ml',aiDriven:true}
 };
 const ARBITRAGE_STRATEGY_ORDER=['PairsTradingStrategy','FamaFactorArbitrageStrategy','CEXArbitrageStrategy','TriangularArbitrageStrategy','DEXArbitrageStrategy','FlashLoanArbitrageStrategy'];
 function getStrategyMeta(name){
 const meta=STRATEGY_META[String(name||'').trim()]||{};
 return{
-cat:String(meta.cat||'其他'),
+cat:normalizeStrategyCategory(meta.cat,'其他'),
 desc:String(meta.desc||'可注册后在参数面板调整'),
 risk:String(meta.risk||'medium'),
 family:String(meta.family||'traditional'),
@@ -279,14 +281,22 @@ aiDriven:!!meta.aiDriven,
 function strategyCatalogMap(){
 return Object.fromEntries((state.strategyCatalogRows||[]).map(row=>[String(row?.name||'').trim(),row]).filter(([name])=>Boolean(name)));
 }
+function normalizeStrategyCategory(category,fallback='其他'){
+const candidate=String(category||'').trim();
+if(KNOWN_STRATEGY_CATEGORIES.includes(candidate))return candidate;
+const fallbackText=String(fallback||'').trim();
+if(KNOWN_STRATEGY_CATEGORIES.includes(fallbackText))return fallbackText;
+return'其他';
+}
 function mergeStrategyCatalogRows(rows){
 const normalized=(Array.isArray(rows)?rows:[]).map(row=>{
   const name=String(row?.name||'').trim();
   if(!name)return null;
   const existing=STRATEGY_META[name]||{};
+  const category=normalizeStrategyCategory(row?.category, existing.cat||'其他');
   STRATEGY_META[name]={
     ...existing,
-    cat:String(row?.category||existing.cat||'其他'),
+    cat:category,
     desc:String(row?.usage||existing.desc||name),
     risk:String(row?.risk||existing.risk||'medium'),
     family:String(row?.family||existing.family||'traditional'),
@@ -301,7 +311,7 @@ const normalized=(Array.isArray(rows)?rows:[]).map(row=>{
   return{
     ...row,
     name,
-    category:String(row?.category||existing.cat||'其他'),
+    category,
     usage:String(row?.usage||existing.desc||name),
     risk:String(row?.risk||existing.risk||'medium'),
     family:String(row?.family||existing.family||'traditional'),
@@ -332,28 +342,29 @@ try{
 function syncBacktestStrategyMeta(strategyName){
 const catalogMap=strategyCatalogMap();
 const row=catalogMap[String(strategyName||'').trim()];
+renderBacktestSymbolMode(strategyName);
+updateBacktestMlModelMeta();
 if(!row)return;
 // Sync recommended timeframe
 const tf=String(row.recommended_timeframe||'').trim();
 const tfSel=document.getElementById('backtest-timeframe');
 if(tf&&tfSel){const opts=[...tfSel.options].map(o=>o.value);if(opts.includes(tf))tfSel.value=tf;}
-// Sync recommended symbols into #backtest-symbol
 const syms=Array.isArray(row.recommended_symbols)&&row.recommended_symbols.length?row.recommended_symbols:null;
-if(!syms)return;
-const symSel=document.getElementById('backtest-symbol');
-if(!symSel)return;
-const currentVal=String(symSel.value||'').trim();
-const existingVals=new Set([...symSel.options].map(o=>String(o.value||'').trim()));
-// Insert recommended symbols at the top (before existing options) if not already present
-const toAdd=syms.filter(s=>String(s||'').trim()&&!existingVals.has(String(s).trim()));
-if(toAdd.length){
-  const frag=document.createDocumentFragment();
-  toAdd.forEach(s=>{const opt=document.createElement('option');opt.value=s;opt.textContent=s;frag.appendChild(opt);});
-  symSel.insertBefore(frag,symSel.firstChild);
+if(syms&&syms.length){
+  const existing=[
+    ...[...(document.getElementById('backtest-symbol')?.options||[])].map(o=>String(o.value||'').trim()).filter(Boolean),
+    ...[...(document.getElementById('backtest-pair-symbol')?.options||[])].map(o=>String(o.value||'').trim()).filter(Boolean),
+  ];
+  const preferredPrimary=String(syms[0]||'').trim();
+  const preferredSecondary=String(row?.defaults?.pair_symbol||syms.find(sym=>String(sym||'').trim()&&String(sym||'').trim()!==preferredPrimary)||'').trim();
+  syncBacktestSymbolSelectOptions([...syms,...existing], preferredPrimary, preferredSecondary);
 }
-// Select the first recommended symbol if the current selection is not in the recommended list
-const recSet=new Set(syms.map(s=>String(s||'').trim()));
-if(!recSet.has(currentVal)&&syms.length){symSel.value=String(syms[0]).trim();}
+if(isBacktestMlStrategy(strategyName)){
+  ensureBacktestMlModelOptions().then(()=>{
+    applyBacktestMlModelSelection();
+  }).catch(err=>console.warn('ensureBacktestMlModelOptions failed',err?.message||err));
+}
+renderBacktestSymbolMode(strategyName);
 }
 function renderBacktestStrategySelect(rows){
 const sel=document.getElementById('backtest-strategy');
@@ -366,7 +377,7 @@ for(const row of supported){
   const groupLabel=mapStrategyCatToBacktestGroup(row.category||'其他');
   (grouped[groupLabel]||(grouped[groupLabel]=[])).push(row);
 }
-const groupOrder=['趋势类','震荡类','动量类','均值回归类','突破类','成交量类','波动率类','风险类','统计套利类','微观结构类','套利类','宏观类','其他'];
+const groupOrder=['趋势类','震荡类','动量类','均值回归类','突破类','成交量类','波动率类','风险类','统计套利类','Fama因子类','微观结构类','套利类','ML类','宏观类','其他'];
 sel.innerHTML=groupOrder.filter(group=>Array.isArray(grouped[group])&&grouped[group].length).map(group=>{
   const options=grouped[group].sort((a,b)=>String(a.name).localeCompare(String(b.name),'zh-CN')).map(row=>{
     const usage=String(row.usage||'').trim();
@@ -455,6 +466,279 @@ let parsed=null;
 try{parsed=JSON.parse(raw);}catch(e){throw new Error(`自定义参数 JSON 无效: ${e.message}`);}
 if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new Error('自定义参数 JSON 必须是对象');
 return parsed;
+}
+function getBacktestStrategyCatalogRow(strategyName=''){
+const name=String(strategyName||document.getElementById('backtest-strategy')?.value||'').trim();
+return (strategyCatalogMap()||{})[name]||null;
+}
+function isBacktestDualLegStrategy(strategyName=''){
+const strategy=String(strategyName||document.getElementById('backtest-strategy')?.value||'').trim();
+const row=getBacktestStrategyCatalogRow(strategy);
+const defaults=(row&&typeof row.defaults==='object'&&!Array.isArray(row.defaults))?row.defaults:{};
+return !!String(defaults?.pair_symbol||'').trim()||strategy==='PairsTradingStrategy';
+}
+function getBacktestPrimarySymbol(){
+return String(document.getElementById('backtest-symbol')?.value||'').trim();
+}
+function getBacktestSecondarySymbol(){
+return String(document.getElementById('backtest-pair-symbol')?.value||'').trim();
+}
+function syncBacktestSymbolSelectOptions(symbols, preferredPrimary='', preferredSecondary=''){
+const normalized=[];
+const seen=new Set();
+(Array.isArray(symbols)?symbols:[]).forEach(sym=>{
+  const text=String(sym||'').trim();
+  if(!text||seen.has(text))return;
+  seen.add(text);
+  normalized.push(text);
+});
+const finalSymbols=normalized.length?normalized:[...RESEARCH_DEFAULT_SYMBOLS];
+const primaryEl=document.getElementById('backtest-symbol');
+const pairEl=document.getElementById('backtest-pair-symbol');
+const currentPrimary=String(primaryEl?.value||preferredPrimary||'BTC/USDT').trim()||'BTC/USDT';
+const currentSecondary=String(pairEl?.value||preferredSecondary||'').trim();
+if(primaryEl){
+  primaryEl.innerHTML=finalSymbols.map(sym=>`<option value="${esc(sym)}"${sym===currentPrimary?' selected':''}>${esc(sym)}</option>`).join('');
+  primaryEl.value=finalSymbols.includes(currentPrimary)?currentPrimary:(finalSymbols.includes(preferredPrimary)?preferredPrimary:(finalSymbols.includes('BTC/USDT')?'BTC/USDT':finalSymbols[0]));
+}
+const primaryValue=String(primaryEl?.value||currentPrimary||'BTC/USDT').trim()||'BTC/USDT';
+if(pairEl){
+  const secondaryFallback=
+    finalSymbols.find(sym=>sym===preferredSecondary&&sym!==primaryValue)
+    || finalSymbols.find(sym=>sym!==primaryValue)
+    || preferredSecondary
+    || 'ETH/USDT';
+  pairEl.innerHTML=finalSymbols.map(sym=>`<option value="${esc(sym)}"${sym===currentSecondary?' selected':''}>${esc(sym)}</option>`).join('');
+  pairEl.value=(currentSecondary&&currentSecondary!==primaryValue&&finalSymbols.includes(currentSecondary))?currentSecondary:secondaryFallback;
+}
+}
+function renderBacktestSymbolMode(strategyName=''){
+const strategy=String(strategyName||document.getElementById('backtest-strategy')?.value||'').trim();
+const dualLeg=isBacktestDualLegStrategy(strategy);
+const labelEl=document.getElementById('backtest-symbol-label');
+const pairGroupEl=document.getElementById('backtest-pair-symbol-group');
+const primaryEl=document.getElementById('backtest-symbol');
+const pairEl=document.getElementById('backtest-pair-symbol');
+if(labelEl)labelEl.textContent=dualLeg?'主腿':'交易对';
+if(pairGroupEl)pairGroupEl.style.display=dualLeg?'':'none';
+if(!dualLeg||!(primaryEl instanceof HTMLSelectElement)||!(pairEl instanceof HTMLSelectElement))return;
+const primaryValue=String(primaryEl.value||'').trim();
+const preferredSecondary=String(getBacktestStrategyCatalogRow(strategy)?.defaults?.pair_symbol||'').trim();
+if(!pairEl.value||String(pairEl.value||'').trim()===primaryValue){
+  const fallback=
+    [...pairEl.options].map(opt=>String(opt.value||'').trim()).find(sym=>sym&&sym!==primaryValue&&sym===preferredSecondary)
+    || [...pairEl.options].map(opt=>String(opt.value||'').trim()).find(sym=>sym&&sym!==primaryValue)
+    || preferredSecondary
+    || 'ETH/USDT';
+  if(fallback)pairEl.value=fallback;
+}
+}
+function isBacktestMlStrategy(strategyName=''){
+return isMlStrategyType(strategyName||document.getElementById('backtest-strategy')?.value||'');
+}
+function getSelectedBacktestMlModel(){
+const modelId=String(document.getElementById('backtest-ml-model')?.value||'').trim();
+return getMlModelById(modelId);
+}
+function requireSelectedBacktestMlModel(){
+const model=getSelectedBacktestMlModel();
+if(!model)throw new Error('请先在“已训练模型”中选择一个可用模型');
+return model;
+}
+function updateBacktestMlModelMeta(){
+const row=document.getElementById('backtest-ml-model-row');
+const metaEl=document.getElementById('backtest-ml-model-meta');
+const comparePanel=document.getElementById('backtest-ml-compare-panel');
+if(!row||!metaEl)return;
+const strategy=String(document.getElementById('backtest-strategy')?.value||'').trim();
+const isMl=isBacktestMlStrategy(strategy);
+row.style.display=isMl?'':'none';
+if(comparePanel)comparePanel.style.display=isMl?'':'none';
+if(!isMl){
+  metaEl.textContent='选择 ML 策略后，可直接选用已训练模型进行回测。';
+  return;
+}
+const model=getSelectedBacktestMlModel();
+if(!model){
+  metaEl.textContent='当前未选择模型，请先训练或刷新模型列表。选择 ML 策略后，“多策略对比”会切换为多模型对比。';
+  return;
+}
+const metrics=model?.metrics||{};
+metaEl.textContent=`${String(model.symbol||'BTC/USDT')} / ${String(model.timeframe||'1h')} / 阈值 ${Number(metrics?.prediction_threshold||0.55).toFixed(2)} / 特征 ${(Array.isArray(model.feature_columns)?model.feature_columns.length:0)} 个 / “多策略对比”会改为多模型对比`;
+}
+async function ensureBacktestMlModelOptions(force=false){
+const selectEl=document.getElementById('backtest-ml-model');
+if(!(selectEl instanceof HTMLSelectElement))return[];
+const rows=await ensureMlModelCatalog(force);
+selectEl.innerHTML=rows.length?rows.map(model=>`<option value="${esc(String(model?.model_id||''))}">${esc(mlModelLabel(model))}</option>`).join(''):'<option value="">暂无已训练模型</option>';
+if(rows.length&&!String(selectEl.value||'').trim())selectEl.value=String(rows[0]?.model_id||'').trim();
+renderBacktestMlCompareList(rows,{preserveSelection:!force,useDefault:true});
+updateBacktestMlModelMeta();
+return rows;
+}
+function applyBacktestMlModelSelection(){
+const model=getSelectedBacktestMlModel();
+if(!model)return;
+const modelId=String(model?.model_id||'').trim();
+const compareCheckbox=[...document.querySelectorAll('input[data-bt-ml-model]')].find(el=>String(el.value||'').trim()===modelId);
+if(compareCheckbox)compareCheckbox.checked=true;
+const comparePickedCount=document.getElementById('backtest-ml-picked-count');
+if(comparePickedCount)comparePickedCount.textContent=`已选 ${getSelectedBacktestMlCompareModels().length}`;
+const symbol=String(model.symbol||'').trim();
+const timeframe=String(model.timeframe||'').trim();
+if(symbol){
+  ensureSelectOption('backtest-symbol',symbol);
+  const el=document.getElementById('backtest-symbol');
+  if(el)el.value=symbol;
+}
+if(timeframe){
+  const tfEl=document.getElementById('backtest-timeframe');
+  if(tfEl&&[...tfEl.options].some(opt=>String(opt.value||'').trim()===timeframe))tfEl.value=timeframe;
+}
+const params={
+  model_path:resolveMlModelPath(model),
+  model_id:String(model?.model_id||'').trim(),
+  threshold:Number(model?.metrics?.prediction_threshold||0.55),
+  feature_columns:Array.isArray(model?.feature_columns)?model.feature_columns:[],
+};
+setBacktestCustomParams(params,`已载入模型 ${String(model?.model_id||'')} 的回测参数；运行回测时会自动带上该模型。`);
+updateBacktestMlModelMeta();
+}
+function mlCompareDefaultSelection(modelIds=[]){
+const normalized=[...new Set((Array.isArray(modelIds)?modelIds:[]).map(id=>String(id||'').trim()).filter(Boolean))];
+return normalized.slice(0,Math.min(3, normalized.length));
+}
+function getSelectedBacktestMlCompareModels(){
+const ids=[...document.querySelectorAll('input[data-bt-ml-model]:checked')].map(el=>String(el.value||'').trim()).filter(Boolean);
+return ids.map(id=>getMlModelById(id)).filter(Boolean);
+}
+function renderBacktestMlCompareList(rows,opts={}){
+const box=document.getElementById('backtest-ml-compare-list');
+if(!box)return;
+const preserveSelection=opts.preserveSelection!==false;
+const useDefault=opts.useDefault!==false;
+const prevIds=new Set(preserveSelection?getSelectedBacktestMlCompareModels().map(model=>String(model?.model_id||'').trim()):[]);
+const defaultIds=new Set(mlCompareDefaultSelection((rows||[]).map(model=>String(model?.model_id||'').trim())));
+  box.innerHTML=(Array.isArray(rows)&&rows.length?rows:[]).map(model=>{
+    const modelId=String(model?.model_id||'').trim();
+    const selectedDropdownId=String(document.getElementById('backtest-ml-model')?.value||'').trim();
+    const checked=prevIds.has(modelId)||(!preserveSelection&&selectedDropdownId===modelId)||(useDefault&&defaultIds.has(modelId));
+    const metrics=model?.metrics||{};
+    const summary=[
+      String(model?.symbol||'BTC/USDT').trim()||'BTC/USDT',
+      String(model?.timeframe||'1h').trim()||'1h',
+      `AUC ${Number(metrics?.auc||0).toFixed(3)}`,
+      `阈值 ${Number(metrics?.prediction_threshold||0.55).toFixed(2)}`,
+      `特征 ${Array.isArray(model?.feature_columns)?model.feature_columns.length:0} 个`,
+    ].join(' ｜ ');
+    return `<label class="backtest-compare-item"><input type="checkbox" data-bt-ml-model value="${esc(modelId)}" ${checked?'checked':''}><span>${esc(modelId)}</span><span class="mini">${esc(summary)}</span></label>`;
+  }).join('')||'<div class="list-item">暂无可用于对比的训练模型</div>';
+const updateCount=()=>{const el=document.getElementById('backtest-ml-picked-count');if(el)el.textContent=`已选 ${getSelectedBacktestMlCompareModels().length}`;};
+box.querySelectorAll('input[data-bt-ml-model]').forEach(cb=>cb.addEventListener('change',updateCount));
+updateCount();
+}
+function bindBacktestMlCompareControls(){
+if(backtestUIState._mlCompareBound)return;
+backtestUIState._mlCompareBound=true;
+const listEl=document.getElementById('backtest-ml-compare-list');
+const allBtn=document.getElementById('btn-backtest-ml-select-all');
+const noneBtn=document.getElementById('btn-backtest-ml-select-none');
+const defaultBtn=document.getElementById('btn-backtest-ml-select-default');
+const refreshBtn=document.getElementById('btn-backtest-ml-refresh-models');
+const updateCount=()=>{const el=document.getElementById('backtest-ml-picked-count');if(el)el.textContent=`已选 ${getSelectedBacktestMlCompareModels().length}`;};
+if(allBtn)allBtn.onclick=()=>{listEl?.querySelectorAll('input[data-bt-ml-model]').forEach(cb=>cb.checked=true);updateCount();};
+if(noneBtn)noneBtn.onclick=()=>{listEl?.querySelectorAll('input[data-bt-ml-model]').forEach(cb=>cb.checked=false);updateCount();};
+if(defaultBtn)defaultBtn.onclick=()=>renderBacktestMlCompareList(mlWorkflowState.models||[],{preserveSelection:false,useDefault:true});
+if(refreshBtn)refreshBtn.onclick=async()=>{
+  try{
+    await ensureBacktestMlModelOptions(true);
+    notify('ML 模型列表已刷新');
+  }catch(err){
+    notify(`刷新 ML 模型失败: ${err.message}`,true);
+  }
+};
+}
+function buildMlBacktestParamsFromModel(model,baseParams=null){
+const params=(baseParams&&typeof baseParams==='object'&&!Array.isArray(baseParams))?{...baseParams}:{};
+params.model_path=resolveMlModelPath(model);
+params.model_id=String(model?.model_id||'').trim();
+params.threshold=Number(model?.metrics?.prediction_threshold||params.threshold||0.55);
+params.feature_columns=Array.isArray(model?.feature_columns)?model.feature_columns:[];
+return params;
+}
+async function loadBacktestSymbolOptions(exchange){
+const seedSymbols=Array.from(new Set([
+  ...[...(document.getElementById('backtest-symbol')?.options||[])].map(opt=>String(opt.value||'').trim()).filter(Boolean),
+  ...[...(document.getElementById('backtest-pair-symbol')?.options||[])].map(opt=>String(opt.value||'').trim()).filter(Boolean),
+  ...RESEARCH_DEFAULT_SYMBOLS,
+]));
+syncBacktestSymbolSelectOptions(seedSymbols);
+renderBacktestSymbolMode();
+try{
+  const ex=String(exchange||'binance').trim().toLowerCase()||'binance';
+  const resp=await api(`/data/symbols?exchange=${encodeURIComponent(ex)}`,{timeoutMs:15000});
+  const symbols=(Array.isArray(resp?.symbols)?resp.symbols:[]).filter(Boolean);
+  if(symbols.length){
+    const row=getBacktestStrategyCatalogRow();
+    const defaults=(row&&typeof row.defaults==='object'&&!Array.isArray(row.defaults))?row.defaults:{};
+    const recommended=Array.isArray(row?.recommended_symbols)?row.recommended_symbols:[];
+    syncBacktestSymbolSelectOptions(
+      [...recommended,...symbols],
+      recommended[0]||getBacktestPrimarySymbol(),
+      String(defaults?.pair_symbol||recommended.find(sym=>String(sym||'').trim()!==String(recommended[0]||'').trim())||getBacktestSecondarySymbol()).trim()
+    );
+  }
+}catch(e){console.warn('loadBacktestSymbolOptions failed',e?.message||e);}
+renderBacktestSymbolMode();
+}
+function buildBacktestRequestContext(strategyName='',options={}){
+const strategy=String(strategyName||document.getElementById('backtest-strategy')?.value||'').trim();
+const includeCustomParams=options?.includeCustomParams!==false;
+const primarySymbol=getBacktestPrimarySymbol();
+const dualLeg=isBacktestDualLegStrategy(strategy);
+let params=includeCustomParams?getBacktestCustomParams():null;
+let pairSymbol='';
+if(dualLeg){
+  pairSymbol=String(getBacktestSecondarySymbol()||'').trim();
+  if(!pairSymbol||pairSymbol===primarySymbol){
+    renderBacktestSymbolMode(strategy);
+    pairSymbol=String(getBacktestSecondarySymbol()||'').trim();
+  }
+  if(pairSymbol){
+    params={...(params&&typeof params==='object'&&!Array.isArray(params)?params:{}),pair_symbol:pairSymbol};
+  }
+}
+let symbol=primarySymbol;
+if(isBacktestMlStrategy(strategy)){
+  const model=getSelectedBacktestMlModel();
+  if(model){
+    symbol=String(model?.symbol||primarySymbol).trim()||primarySymbol;
+    params={
+      ...(params&&typeof params==='object'&&!Array.isArray(params)?params:{}),
+      model_path:resolveMlModelPath(model),
+      model_id:String(model?.model_id||'').trim(),
+      threshold:Number(model?.metrics?.prediction_threshold||0.55),
+      feature_columns:Array.isArray(model?.feature_columns)?model.feature_columns:[],
+    };
+  }
+}
+return{
+  strategy,
+  symbol,
+  pairSymbol,
+  params:(params&&typeof params==='object'&&!Array.isArray(params))?params:null,
+  useCustomRun:!!(params&&typeof params==='object'&&!Array.isArray(params)&&Object.keys(params).length),
+};
+}
+function bindBacktestSymbolControls(){
+if(backtestUIState._symbolModeBound)return;
+backtestUIState._symbolModeBound=true;
+const primaryEl=document.getElementById('backtest-symbol');
+const pairEl=document.getElementById('backtest-pair-symbol');
+if(primaryEl)primaryEl.addEventListener('change',()=>renderBacktestSymbolMode());
+if(pairEl)pairEl.addEventListener('change',()=>renderBacktestSymbolMode());
+const mlModelEl=document.getElementById('backtest-ml-model');
+if(mlModelEl)mlModelEl.addEventListener('change',()=>applyBacktestMlModelSelection());
 }
 
 function estimateBacktestWindowDays(){
@@ -568,7 +852,7 @@ if(row&&!row.backtest_supported){
 }
 activateTab('backtest');
 await ensureTabLoaded('backtest',{force:true});
-await loadDataSymbolOptions(String(spec?.exchange||'binance').trim().toLowerCase()||'binance',['backtest-symbol']);
+await loadBacktestSymbolOptions(String(spec?.exchange||'binance').trim().toLowerCase()||'binance');
 await ensureBacktestStrategySelect();
 ensureBacktestExitTemplateSelect();
 const strategyEl=document.getElementById('backtest-strategy');
@@ -576,11 +860,34 @@ if(strategyEl){
   strategyEl.value=strategy;
   syncBacktestStrategyMeta(strategy);
 }
+if(isBacktestMlStrategy(strategy)){
+  await ensureBacktestMlModelOptions();
+  const modelSelect=document.getElementById('backtest-ml-model');
+  const requestedModelId=String(spec?.params?.model_id||spec?.model_id||'').trim();
+  const requestedModelPath=String(spec?.params?.model_path||spec?.model_path||'').trim();
+  if(modelSelect instanceof HTMLSelectElement){
+    let selectedValue=requestedModelId;
+    if(!selectedValue&&requestedModelPath){
+      const matched=(mlWorkflowState.models||[]).find(model=>resolveMlModelPath(model)===requestedModelPath);
+      selectedValue=String(matched?.model_id||'').trim();
+    }
+    if(selectedValue&&[...modelSelect.options].some(opt=>String(opt.value||'').trim()===selectedValue)){
+      modelSelect.value=selectedValue;
+    }
+    applyBacktestMlModelSelection();
+  }
+}
 const symbol=String(spec?.symbol||(Array.isArray(spec?.symbols)?spec.symbols[0]:'')||'').trim();
 if(symbol){
   ensureSelectOption('backtest-symbol', symbol);
   setSelectValues('backtest-symbol',[symbol],symbol);
 }
+const pairSymbol=String(spec?.pair_symbol||spec?.params?.pair_symbol||(Array.isArray(spec?.symbols)?spec.symbols[1]:'')||'').trim();
+if(pairSymbol){
+  ensureSelectOption('backtest-pair-symbol', pairSymbol);
+  setSelectValues('backtest-pair-symbol',[pairSymbol],pairSymbol);
+}
+renderBacktestSymbolMode(strategy);
 const tf=String(spec?.timeframe||'').trim();
 if(tf){
   const tfEl=document.getElementById('backtest-timeframe');
@@ -719,6 +1026,326 @@ const rnd=Math.floor(Math.random()*1000).toString().padStart(3,'0');
 const suffixTxt=normalizeInstanceSuffixText(suffix);
 return `${base}_${prefix}_${stamp}_${rnd}${suffixTxt?`_${suffixTxt}`:''}`;
 }
+function isMlStrategyType(strategyType=''){
+return String(getStrategyMeta(strategyType).family||'').trim()==='ml'||String(strategyType||'').trim()==='MLXGBoostStrategy';
+}
+function resolveMlModelPath(model){
+return String(model?.artifact?.model_path||model?.strategy_defaults?.params?.model_path||'').trim();
+}
+function isUsableMlModel(model){
+return !!String(model?.model_id||'').trim()&&!!resolveMlModelPath(model);
+}
+async function ensureMlFeatureCatalog(force=false){
+const freshEnough=!force&&Array.isArray(mlWorkflowState.features)&&mlWorkflowState.features.length&&(Date.now()-Number(mlWorkflowState.featuresLoadedAt||0)<60000);
+if(freshEnough)return mlWorkflowState.features;
+const resp=await api('/ml/features',{timeoutMs:15000});
+mlWorkflowState.features=Array.isArray(resp?.items)?resp.items:[];
+mlWorkflowState.featuresLoadedAt=Date.now();
+return mlWorkflowState.features;
+}
+async function ensureMlModelCatalog(force=false){
+const freshEnough=!force&&Array.isArray(mlWorkflowState.models)&&mlWorkflowState.models.length&&(Date.now()-Number(mlWorkflowState.loadedAt||0)<30000);
+if(freshEnough)return mlWorkflowState.models;
+const resp=await api('/ml/models',{timeoutMs:20000});
+mlWorkflowState.models=(Array.isArray(resp?.items)?resp.items:[])
+  .filter(model=>isUsableMlModel(model))
+  .sort((a,b)=>String(b?.updated_at||b?.created_at||'').localeCompare(String(a?.updated_at||a?.created_at||'')));
+mlWorkflowState.loadedAt=Date.now();
+return mlWorkflowState.models;
+}
+function getMlModelById(modelId=''){
+const key=String(modelId||'').trim();
+return (mlWorkflowState.models||[]).find(item=>String(item?.model_id||'').trim()===key)||null;
+}
+function mlModelLabel(model){
+const symbol=String(model?.symbol||'BTC/USDT').trim()||'BTC/USDT';
+const timeframe=String(model?.timeframe||'1h').trim()||'1h';
+const modelId=String(model?.model_id||'').trim();
+const stamp=model?.updated_at||model?.created_at||'';
+return `${symbol} / ${timeframe} / ${modelId}${stamp?` / ${fmtDateTime(stamp)}`:''}`;
+}
+function selectedMlFeatureColumns(host=document){
+return Array.from(host.querySelectorAll('input[data-ml-feature]')).filter(el=>!!el.checked).map(el=>String(el.value||'').trim()).filter(Boolean);
+}
+function getMlRegisterModalElements(){
+return{
+  modal:document.getElementById('ml-register-modal'),
+  body:document.getElementById('ml-register-body'),
+  title:document.getElementById('ml-register-title'),
+};
+}
+function closeMlRegisterModal(){
+const {modal,body}=getMlRegisterModalElements();
+if(modal)modal.style.display='none';
+if(body)body.innerHTML='加载中...';
+}
+function bindMlRegisterModalStatic(){
+if(mlWorkflowState._modalBound)return;
+mlWorkflowState._modalBound=true;
+const {modal}=getMlRegisterModalElements();
+const closeBtn=document.getElementById('ml-register-close');
+if(closeBtn)closeBtn.onclick=()=>closeMlRegisterModal();
+if(modal)modal.addEventListener('click',evt=>{if(evt.target===modal)closeMlRegisterModal();});
+}
+function defaultMlFeatureSelection(){
+const features=Array.isArray(mlWorkflowState.features)&&mlWorkflowState.features.length?mlWorkflowState.features:[];
+return features.map(item=>String(item?.name||'').trim()).filter(Boolean);
+}
+function renderMlModelSelectOptions(selectedId=''){
+const rows=Array.isArray(mlWorkflowState.models)?mlWorkflowState.models:[];
+if(!rows.length)return'<option value="">暂无已训练模型，请先点击“开始训练”</option>';
+const selectedKey=String(selectedId||rows[0]?.model_id||'').trim();
+return rows.map(model=>{
+  const modelId=String(model?.model_id||'').trim();
+  return `<option value="${esc(modelId)}" ${modelId===selectedKey?'selected':''}>${esc(mlModelLabel(model))}</option>`;
+}).join('');
+}
+function updateMlRegisterModelMeta(host=document){
+const modelId=String(host.querySelector('#ml-model-select')?.value||'').trim();
+const model=getMlModelById(modelId);
+const metaEl=host.querySelector('#ml-model-meta');
+if(!metaEl)return;
+if(!model){
+  metaEl.textContent='当前未选择模型，请先训练或刷新模型列表。';
+  return;
+}
+const metrics=model?.metrics||{};
+const featureCount=Array.isArray(model?.feature_columns)?model.feature_columns.length:0;
+const threshold=Number(metrics?.prediction_threshold||0.55);
+metaEl.textContent=`${String(model.symbol||'BTC/USDT')} / ${String(model.timeframe||'1h')} / 特征 ${featureCount} 个 / 阈值 ${threshold.toFixed(2)}`;
+}
+function updateMlRegisterDraftMeta(host=document){
+const previewEl=host.querySelector('#ml-register-preview');
+if(!previewEl)return;
+const draft=collectMlRegisterDraft(host);
+const instanceName=buildStrategyInstanceName('MLXGBoostStrategy',{prefix:'ml',suffix:draft.suffix||symbolBaseAsset(draft.symbol).toLowerCase()});
+previewEl.textContent=[
+  `实例预览: ${instanceName}`,
+  `训练: ${draft.symbol} / ${draft.timeframe} / ${draft.trainingWindowDays} 天 / ${draft.trainParameters.feature_columns.length} 个特征`,
+  `运行: 阈值 ${Number(draft.strategyParams.threshold||0.55).toFixed(2)} / 止损 ${(Number(draft.strategyParams.stop_loss_pct||0)*100).toFixed(2)}% / 止盈 ${(Number(draft.strategyParams.take_profit_pct||0)*100).toFixed(2)}% / 资金占比 ${Number(draft.allocation||0).toFixed(2)}`,
+  `模型: ${draft.modelId||'尚未选择，训练完成后可直接注册'}`,
+  `说明: 训练好的模型会作为“模型资产”复用，策略实例只引用模型与运行参数。`,
+].join('\n');
+}
+async function refreshMlRegisterModelSelect(host=document, preferredModelId=''){
+await ensureMlModelCatalog(true);
+const selectEl=host.querySelector('#ml-model-select');
+if(selectEl){
+  selectEl.innerHTML=renderMlModelSelectOptions(preferredModelId);
+}
+updateMlRegisterModelMeta(host);
+updateMlRegisterDraftMeta(host);
+}
+function collectMlRegisterDraft(host=document){
+const symbol=String(host.querySelector('#ml-train-symbol')?.value||'BTC/USDT').trim()||'BTC/USDT';
+const timeframe=String(host.querySelector('#ml-train-timeframe')?.value||'1h').trim()||'1h';
+const exchange=String(host.querySelector('#ml-train-exchange')?.value||'binance').trim()||'binance';
+const modelId=String(host.querySelector('#ml-model-select')?.value||'').trim();
+const model=getMlModelById(modelId);
+const features=selectedMlFeatureColumns(host);
+const trainingWindowDays=Math.max(30,Math.min(3650,parseInt(host.querySelector('#ml-train-days')?.value||'365',10)||365));
+const params={
+  threshold:Math.max(0.5,Math.min(0.99,Number(host.querySelector('#ml-threshold')?.value||'0.55')||0.55)),
+  stop_loss_pct:Math.max(0,Math.min(1,Number(host.querySelector('#ml-stop-loss')?.value||'0.025')||0.025)),
+  take_profit_pct:Math.max(0,Math.min(1,Number(host.querySelector('#ml-take-profit')?.value||'0.06')||0.06)),
+};
+const trainParameters={
+  exchange,
+  forward_bars:Math.max(1,Math.min(96,parseInt(host.querySelector('#ml-forward-bars')?.value||'4',10)||4)),
+  test_size:Math.max(0.05,Math.min(0.4,Number(host.querySelector('#ml-test-size')?.value||'0.2')||0.2)),
+  n_estimators:Math.max(50,Math.min(2000,parseInt(host.querySelector('#ml-n-estimators')?.value||'300',10)||300)),
+  max_depth:Math.max(2,Math.min(12,parseInt(host.querySelector('#ml-max-depth')?.value||'5',10)||5)),
+  learning_rate:Math.max(0.001,Math.min(1,Number(host.querySelector('#ml-learning-rate')?.value||'0.05')||0.05)),
+  prediction_threshold:params.threshold,
+  min_rows:Math.max(120,Math.min(50000,parseInt(host.querySelector('#ml-min-rows')?.value||'120',10)||120)),
+  feature_columns:features,
+};
+return{
+  symbol,
+  timeframe,
+  exchange,
+  model,
+  modelId,
+  trainingWindowDays,
+  trainParameters,
+  strategyParams:{
+    ...params,
+    exchange,
+    model_path:resolveMlModelPath(model),
+  },
+  allocation:Math.max(0,Math.min(1,Number(host.querySelector('#ml-register-allocation')?.value||DEFAULT_STRATEGY_ALLOCATION)||DEFAULT_STRATEGY_ALLOCATION)),
+  suffix:normalizeInstanceSuffixText(host.querySelector('#ml-register-suffix')?.value||''),
+};
+}
+async function trainMlModelFromModal(host=document){
+const draft=collectMlRegisterDraft(host);
+if(draft.trainParameters.feature_columns.length<2){
+  throw new Error('至少选择 2 个训练特征');
+}
+const outputEl=host.querySelector('#ml-train-output');
+if(outputEl)outputEl.textContent='正在训练 ML 模型，请稍候...';
+const payload={
+  model_name:`ml_${draft.symbol.replace(/[^A-Z0-9]/gi,'_').toLowerCase()}_${draft.timeframe}`,
+  symbols:[draft.symbol],
+  timeframes:[draft.timeframe],
+  training_window_days:draft.trainingWindowDays,
+  background:false,
+  factorize:false,
+  parameters:draft.trainParameters,
+  metadata:{
+    source:'strategy_register_modal',
+    feature_columns:draft.trainParameters.feature_columns,
+  },
+};
+const result=await api('/ml/jobs/train',{method:'POST',timeoutMs:180000,body:JSON.stringify(payload)});
+mlWorkflowState.lastTrainResult=result;
+if(outputEl){
+  const metrics=result?.result?.metrics||result?.metrics||{};
+  outputEl.textContent=`训练完成\nmodel_id: ${result?.model_id||result?.result?.model_id||'-'}\nAUC: ${Number(metrics?.auc||0).toFixed(4)}\n特征数: ${(Array.isArray(result?.feature_columns)?result.feature_columns.length:draft.trainParameters.feature_columns.length)}`;
+}
+await refreshMlRegisterModelSelect(host, String(result?.model_id||result?.result?.model_id||'').trim());
+return result;
+}
+async function registerMlStrategyFromModal(host=document){
+const draft=collectMlRegisterDraft(host);
+let model=draft.model;
+if(!model&&mlWorkflowState.lastTrainResult){
+  await refreshMlRegisterModelSelect(host, String(mlWorkflowState.lastTrainResult?.model_id||'').trim());
+  model=getMlModelById(String(host.querySelector('#ml-model-select')?.value||'').trim());
+}
+if(!model)throw new Error('请先选择一个已训练模型，或先完成训练');
+const modelPath=resolveMlModelPath(model);
+if(!modelPath)throw new Error('所选模型缺少 model_path');
+const strategyName=buildStrategyInstanceName('MLXGBoostStrategy',{prefix:'ml',suffix:draft.suffix||symbolBaseAsset(model.symbol||draft.symbol).toLowerCase()});
+await api('/strategies/register',{
+  method:'POST',
+  body:JSON.stringify({
+    name:strategyName,
+    strategy_type:'MLXGBoostStrategy',
+    params:{
+      ...draft.strategyParams,
+      model_path:modelPath,
+      model_id:String(model.model_id||'').trim(),
+      feature_columns:Array.isArray(model.feature_columns)?model.feature_columns:[],
+    },
+    symbols:[String(model.symbol||draft.symbol||'BTC/USDT').trim()||'BTC/USDT'],
+    timeframe:String(model.timeframe||draft.timeframe||'1h').trim()||'1h',
+    exchange:String(model.exchange||draft.exchange||'binance').trim()||'binance',
+    allocation:draft.allocation,
+    metadata:{
+      source:'manual_ml_register',
+      model_id:String(model.model_id||'').trim(),
+      training_window:model.training_window||{},
+    },
+  }),
+});
+notify(`ML 策略注册成功: ${strategyName}`);
+closeMlRegisterModal();
+await Promise.all([loadStrategies(),loadStrategySummary()]);
+activateTab('strategies');
+setTimeout(()=>openEditor(strategyName).catch(()=>{}),80);
+}
+async function showMlRegisterModal(strategyType='MLXGBoostStrategy'){
+bindMlRegisterModalStatic();
+const {modal,body,title}=getMlRegisterModalElements();
+if(!modal||!body)return;
+if(title)title.textContent=`${strategyType} 训练与注册`;
+modal.style.display='flex';
+body.innerHTML='<div class="list-item">正在加载 ML 模型目录与训练参数...</div>';
+await Promise.all([ensureMlModelCatalog(),ensureMlFeatureCatalog()]);
+const features=defaultMlFeatureSelection();
+body.innerHTML=`
+  <div class="form-row">
+    <div class="form-group">
+      <label>训练币种</label>
+      <select id="ml-train-symbol">${RESEARCH_DEFAULT_SYMBOLS.map(sym=>`<option value="${esc(sym)}">${esc(sym)}</option>`).join('')}</select>
+    </div>
+    <div class="form-group">
+      <label>训练周期</label>
+      <select id="ml-train-timeframe"><option value="15m">15m</option><option value="1h" selected>1h</option><option value="4h">4h</option><option value="1d">1d</option></select>
+    </div>
+    <div class="form-group">
+      <label>交易所</label>
+      <select id="ml-train-exchange"><option value="binance" selected>binance</option><option value="gate">gate</option></select>
+    </div>
+    <div class="form-group">
+      <label>训练窗口（天）</label>
+      <input id="ml-train-days" type="number" min="30" max="3650" step="1" value="365">
+    </div>
+  </div>
+  <div class="form-row">
+    <div class="form-group"><label>forward_bars</label><input id="ml-forward-bars" type="number" min="1" max="96" step="1" value="4"></div>
+    <div class="form-group"><label>test_size</label><input id="ml-test-size" type="number" min="0.05" max="0.4" step="0.01" value="0.20"></div>
+    <div class="form-group"><label>n_estimators</label><input id="ml-n-estimators" type="number" min="50" max="2000" step="10" value="300"></div>
+    <div class="form-group"><label>max_depth</label><input id="ml-max-depth" type="number" min="2" max="12" step="1" value="5"></div>
+    <div class="form-group"><label>learning_rate</label><input id="ml-learning-rate" type="number" min="0.001" max="1" step="0.001" value="0.05"></div>
+    <div class="form-group"><label>min_rows</label><input id="ml-min-rows" type="number" min="120" max="50000" step="10" value="120"></div>
+  </div>
+  <div class="form-group">
+    <label>训练特征 / 输入信号</label>
+    <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;">
+      ${(mlWorkflowState.features||[]).map(item=>{
+        const name=String(item?.name||'').trim();
+        return `<label class="backtest-compare-item"><input type="checkbox" data-ml-feature value="${esc(name)}" ${features.includes(name)?'checked':''}><span>${esc(String(item?.label||name))}</span></label>`;
+      }).join('')}
+    </div>
+    <div class="form-help">这些特征会真正传入训练流程，并记录到模型 manifest 中。</div>
+  </div>
+  <div class="inline-actions" style="margin-top:10px;">
+    <button type="button" class="btn btn-primary btn-sm" id="btn-ml-train-run">开始训练</button>
+    <button type="button" class="btn btn-primary btn-sm" id="btn-ml-model-refresh">刷新模型列表</button>
+  </div>
+  <pre id="ml-train-output" class="output-box">点击“开始训练”后，这里会展示训练结果摘要。</pre>
+  <div class="form-row">
+    <div class="form-group">
+      <label>选择已训练模型</label>
+      <select id="ml-model-select">${renderMlModelSelectOptions()}</select>
+    </div>
+    <div class="form-group">
+      <label>模型摘要</label>
+      <div id="ml-model-meta" class="form-help">选择模型后显示其符号、周期与特征信息。</div>
+    </div>
+  </div>
+  <div class="form-row">
+    <div class="form-group"><label>信号阈值</label><input id="ml-threshold" type="number" min="0.50" max="0.99" step="0.01" value="0.55"></div>
+    <div class="form-group"><label>止损</label><input id="ml-stop-loss" type="number" min="0" max="1" step="0.001" value="0.025"></div>
+    <div class="form-group"><label>止盈</label><input id="ml-take-profit" type="number" min="0" max="1" step="0.001" value="0.06"></div>
+    <div class="form-group"><label>资金占比</label><input id="ml-register-allocation" type="number" min="0" max="1" step="0.01" value="${DEFAULT_STRATEGY_ALLOCATION}"></div>
+    <div class="form-group"><label>实例后缀</label><input id="ml-register-suffix" type="text" placeholder="例如 btc_1h_v2"></div>
+  </div>
+  <div class="inline-actions" style="margin-top:10px;">
+    <button type="button" class="btn btn-primary" id="btn-ml-register-strategy">注册到策略池</button>
+  </div>
+  <pre id="ml-register-preview" class="output-box">实例预览加载中...</pre>
+`;
+body.querySelector('#ml-model-select')?.addEventListener('change',()=>updateMlRegisterModelMeta(body));
+body.querySelector('#ml-model-select')?.addEventListener('change',()=>updateMlRegisterDraftMeta(body));
+body.querySelectorAll('input,select').forEach(el=>{
+  if(String(el.id||'').startsWith('ml-'))el.addEventListener('change',()=>updateMlRegisterDraftMeta(body));
+});
+body.querySelector('#btn-ml-model-refresh')?.addEventListener('click',async()=>{
+  try{await refreshMlRegisterModelSelect(body);}catch(err){notify(`刷新模型列表失败: ${err.message}`,true);}
+});
+body.querySelector('#btn-ml-train-run')?.addEventListener('click',async()=>{
+  const btn=body.querySelector('#btn-ml-train-run');
+  try{
+    if(btn){btn.disabled=true;btn.textContent='训练中...';}
+    await trainMlModelFromModal(body);
+    notify('ML 模型训练完成');
+  }catch(err){notify(`ML 训练失败: ${err.message}`,true);}
+  finally{if(btn){btn.disabled=false;btn.textContent='开始训练';}}
+});
+body.querySelector('#btn-ml-register-strategy')?.addEventListener('click',async()=>{
+  const btn=body.querySelector('#btn-ml-register-strategy');
+  try{
+    if(btn){btn.disabled=true;btn.textContent='注册中...';}
+    await registerMlStrategyFromModal(body);
+  }catch(err){notify(`ML 策略注册失败: ${err.message}`,true);}
+  finally{if(btn){btn.disabled=false;btn.textContent='注册到策略池';}}
+});
+updateMlRegisterModelMeta(body);
+updateMlRegisterDraftMeta(body);
+}
 function getBacktestRegisterOptions(){
 const allocation=Math.max(0,Math.min(1,Number(document.getElementById('backtest-register-allocation')?.value||DEFAULT_STRATEGY_ALLOCATION)));
 const autoStart=!!document.getElementById('backtest-register-auto-start')?.checked;
@@ -764,7 +1391,7 @@ if(uiLoadState.dataInitialized)return;
 uiLoadState.dataInitialized=true;
 loadDataSymbolOptions(document.getElementById('data-exchange')?.value||'binance',['data-symbol']);
 loadDataSymbolOptions(document.getElementById('download-exchange')?.value||'binance',['download-symbol']);
-loadDataSymbolOptions('binance',['backtest-symbol']);
+loadBacktestSymbolOptions('binance');
 scheduleKlineRealtime();
 setTimeout(()=>{loadDataStorageHealth(null,{skipStorage:true}).catch(err=>console.warn('loadDataStorageHealth failed',err?.message||err));},900);
 setTimeout(()=>{if(document.getElementById('candlestick-chart')&&!marketDataState.bars.length){loadKlinesByForm().catch(()=>{});}},500);
@@ -1608,7 +2235,7 @@ const typeCounts=filteredStrategies.reduce((m,s)=>{const k=String(s?.strategy_ty
 const typeSeen={};
 const grouped={};
 filteredStrategies.forEach(s=>{const cat=getStrategyMeta(s?.strategy_type).cat;(grouped[cat]||(grouped[cat]=[])).push(s);});
-const catOrder=['趋势','震荡','突破','均值回归','动量','反转','统计套利','成交量','波动率','风险','微观结构','套利','量化','宏观','其他'];
+const catOrder=['趋势','震荡','突破','均值回归','动量','反转','统计套利','Fama因子','成交量','波动率','风险','微观结构','套利','量化','ML','宏观','其他'];
 grid.innerHTML=catOrder.filter(cat=>Array.isArray(grouped[cat])&&grouped[cat].length).map(cat=>{
   const cards=(grouped[cat]||[]).map(s=>{
 const stype=String(s?.strategy_type||'未知');
@@ -1722,6 +2349,10 @@ if(notes){
 }
 async function registerStrategy(type){
 try{
+if(isMlStrategyType(type)){
+  await showMlRegisterModal(type);
+  return;
+}
 // Use catalog metadata first; library metadata is only a fallback.
 const libEntry=(state.strategyLibraryRows||[]).find(r=>r.name===type);
 const catalogEntry=(strategyCatalogMap()||{})[String(type||'').trim()]||{};
@@ -2728,6 +3359,7 @@ const raw=String(sourceName||'').trim();
 if(!raw)return'--';
 return raw.split('+').map(part=>({
   exchange_public:'交易所公开源',
+  coinglass_cache:'CoinGlass缓存',
   official_announcements:'官方公告源',
   proxy_layer:'代理源',
   internal_placeholder:'占位源',
@@ -2743,6 +3375,15 @@ if(Array.isArray(statusPayload?.collectors)){
 if(statusPayload&&typeof statusPayload==='object'&&!Array.isArray(statusPayload))return statusPayload;
 return{};
 }
+function formatAnalyticsRecentPoint(rowKey,item){
+if(!item)return'';
+if(rowKey==='derivatives'){
+  const crowding=(item.crowding_score===null||item.crowding_score===undefined)?'--':Number(item.crowding_score||0).toFixed(2);
+  const funding=(item.funding_rate===null||item.funding_rate===undefined)?'--':Number(item.funding_rate||0).toFixed(6);
+  return `${fmtDateTime(item.timestamp)} 拥挤 ${crowding} | 资金 ${funding}`;
+}
+return `${fmtDateTime(item.timestamp)} ${Number(item.value||0).toFixed(rowKey==='whales'?0:4)}`;
+}
 function formatAnalyticsDatasetSummary(row){
 if(!row)return'--';
 const latest=row.latest_summary||{};
@@ -2757,6 +3398,12 @@ if(row.key==='community'){
 }
 if(row.key==='whales'){
   return `巨鲸 ${Number(latest.whale_count||0)} 笔 | 合计 ${Number(latest.total_btc||0).toFixed(2)} BTC | 最大 ${Number(latest.max_btc||0).toFixed(2)} BTC`;
+}
+if(row.key==='derivatives'){
+  const funding=(latest.funding_rate===null||latest.funding_rate===undefined)?'--':Number(latest.funding_rate||0).toFixed(6);
+  const crowding=(latest.crowding_score===null||latest.crowding_score===undefined)?'--':Number(latest.crowding_score||0).toFixed(2);
+  const squeeze=(latest.squeeze_score===null||latest.squeeze_score===undefined)?'--':Number(latest.squeeze_score||0).toFixed(2);
+  return `资金费率 ${funding} | 拥挤 ${crowding} | 挤压 ${squeeze}`;
 }
 return'--';
 }
@@ -2803,7 +3450,7 @@ if(tableEl){
     <tbody>
       ${rows.map(row=>{
         const series=Array.isArray(data?.recent?.[row.key])?data.recent[row.key]:[];
-        const recentPreview=series.slice(-3).map(item=>`${fmtDateTime(item.timestamp)} ${Number(item.value||0).toFixed(row.key==='whales'?0:4)}`).join(' | ');
+        const recentPreview=series.slice(-3).map(item=>formatAnalyticsRecentPoint(row.key,item)).filter(Boolean).join(' | ');
         const latest=row.latest_summary||{};
         const status=statusMap?.[row.key]||{};
         return `<tr>
@@ -2862,7 +3509,7 @@ return Date.now()-ts>3*60*60*1000;
 }
 function pickAnalyticsCollectorsForRefresh(payload,{manual=false}={}){
 const rows=Array.isArray(payload?.datasets)?payload.datasets:[];
-const priority=rows.filter(row=>Number(row?.count||0)<=0||Number(row?.failed_count||0)>0||Number(row?.degraded_count||0)>0).map(row=>String(row?.key||'').trim()).filter(Boolean);
+const priority=rows.filter(row=>Number(row?.count||0)<=0||Number(row?.failed_count||0)>0||Number(row?.degraded_count||0)>0).map(row=>String(row?.key||'').trim()).filter(key=>Boolean(key)&&key!=='derivatives');
 if(manual){
   if(priority.length)return Array.from(new Set(priority));
   return['microstructure','community','whales'];
@@ -3218,6 +3865,12 @@ box.innerHTML=`
 <div class="stat-box"><div class="stat-label">周期</div><div class="stat-value">${r.timeframe}</div></div>
 <div class="stat-box"><div class="stat-label">样本数</div><div class="stat-value">${r.data_points||0}</div></div>
 </div>
+${r?.model_id?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px;">
+<div class="stat-box"><div class="stat-label">模型ID</div><div class="stat-value" style="font-size:13px;">${esc(String(r.model_id||'-'))}</div></div>
+<div class="stat-box"><div class="stat-label">模型阈值</div><div class="stat-value">${Number.isFinite(Number(r.threshold))?Number(r.threshold).toFixed(2):'--'}</div></div>
+<div class="stat-box"><div class="stat-label">模型特征数</div><div class="stat-value">${Array.isArray(r?.feature_columns)?r.feature_columns.length:'--'}</div></div>
+<div class="stat-box"><div class="stat-label">模型标签</div><div class="stat-value" style="font-size:13px;">${esc(String(r.display_name||r.model_label||'-'))}</div></div>
+</div>`:''}
 ${isPairsMode?`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px;">
 <div class="stat-box"><div class="stat-label">回测模式</div><div class="stat-value">双腿Spread</div></div>
 <div class="stat-box"><div class="stat-label">副腿</div><div class="stat-value">${esc(r.pair_symbol||'--')}</div></div>
@@ -3321,8 +3974,10 @@ if(['成交量'].includes(c))return'成交量类';
 if(['波动率'].includes(c))return'波动率类';
 if(['风险'].includes(c))return'风险类';
 if(['统计套利'].includes(c))return'统计套利类';
+if(['Fama因子'].includes(c))return'Fama因子类';
 if(['微观结构'].includes(c))return'微观结构类';
 if(['套利'].includes(c))return'套利类';
+if(['ML'].includes(c))return'ML类';
 if(['宏观'].includes(c))return'宏观类';
 return'其他';
 }
@@ -3619,12 +4274,93 @@ function renderBacktestExtraError(err){const out=getBacktestExtraPanel();if(!out
 function renderBacktestRawBlock(data,label='原始JSON'){
 return `<details><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(data,null,2))}</pre></details>`;
 }
+function backtestCompareEntryTitle(row){
+return String(row?.display_name||row?.model_label||row?.strategy||'-').trim()||'-';
+}
+async function runMlModelBacktestCompare(){
+const selectedModels=getSelectedBacktestMlCompareModels();
+if(!selectedModels.length)throw new Error('请至少勾选一个训练模型');
+const capital=Number(document.getElementById('backtest-capital')?.value||10000);
+const sd=String(document.getElementById('backtest-start-date')?.value||'').trim();
+const ed=String(document.getElementById('backtest-end-date')?.value||'').trim();
+const compareTimeoutMs=Math.max(90000, Math.min(10*60*1000, selectedModels.length*90000));
+renderBacktestExtraLoading('ML 模型对比运行中',`将按模型原生币种 / 周期逐个回测，共 ${selectedModels.length} 个模型，预计超时保护 ${Math.round(compareTimeoutMs/1000)} 秒。`);
+const exitTemplateName=getBacktestExitTemplate();
+const protection=getBacktestProtectionConfig();
+const tasks=selectedModels.map(async model=>{
+  const params=buildMlBacktestParamsFromModel(model,buildBacktestRuntimeStrategyParams({},null));
+  let u=`/backtest/run_custom?strategy=${encodeURIComponent('MLXGBoostStrategy')}&symbol=${encodeURIComponent(String(model?.symbol||'BTC/USDT'))}&timeframe=${encodeURIComponent(String(model?.timeframe||'1h'))}&initial_capital=${encodeURIComponent(capital)}&commission_rate=${encodeURIComponent(0.0004)}&slippage_bps=${encodeURIComponent(2)}&include_series=false&params_json=${encodeURIComponent(JSON.stringify(params))}`;
+  if(sd)u+=`&start_date=${encodeURIComponent(sd)}`;
+  if(ed)u+=`&end_date=${encodeURIComponent(ed)}`;
+  u=appendBacktestProtectionParams(u,protection);
+  try{
+    const resp=await api(u,{method:'POST',timeoutMs:compareTimeoutMs});
+    return{
+      ...resp,
+      strategy:'MLXGBoostStrategy',
+      display_name:`${String(model?.symbol||'BTC/USDT')} / ${String(model?.timeframe||'1h')} / ${String(model?.model_id||'')}`,
+      model_id:String(model?.model_id||'').trim(),
+      model_label:mlModelLabel(model),
+      register_spec:{
+        strategy_type:'MLXGBoostStrategy',
+        symbol:String(model?.symbol||'BTC/USDT'),
+        timeframe:String(model?.timeframe||'1h'),
+        params,
+        exchange:String(model?.exchange||'binance').trim().toLowerCase()||'binance',
+      },
+    };
+  }catch(err){
+    return{
+      strategy:'MLXGBoostStrategy',
+      display_name:`${String(model?.symbol||'BTC/USDT')} / ${String(model?.timeframe||'1h')} / ${String(model?.model_id||'')}`,
+      model_id:String(model?.model_id||'').trim(),
+      model_label:mlModelLabel(model),
+      symbol:String(model?.symbol||'BTC/USDT'),
+      timeframe:String(model?.timeframe||'1h'),
+      error:err?.message||String(err||'未知错误'),
+      register_spec:{
+        strategy_type:'MLXGBoostStrategy',
+        symbol:String(model?.symbol||'BTC/USDT'),
+        timeframe:String(model?.timeframe||'1h'),
+        params,
+        exchange:String(model?.exchange||'binance').trim().toLowerCase()||'binance',
+      },
+    };
+  }
+});
+const results=await Promise.all(tasks);
+return{
+  compare_mode:'ml_models',
+  strategy:'MLXGBoostStrategy',
+  symbol:'按模型原生币种',
+  timeframe:'按模型原生周期',
+  initial_capital:capital,
+  requested_start_date:sd||'',
+  requested_end_date:ed||'',
+  start_date:sd||'',
+  end_date:ed||'',
+  commission_rate:0.0004,
+  slippage_bps:2,
+  exit_template:exitTemplateName,
+  default_exit_template:DEFAULT_BACKTEST_EXIT_TEMPLATE,
+  use_stop_take:!!protection.enabled,
+  stop_loss_pct:protection.stopLossPct,
+  take_profit_pct:protection.takeProfitPct,
+  results,
+  data_points:results.reduce((sum,row)=>sum+Number(row?.data_points||0),0),
+  _compare_request_meta:{
+    mode:'ml_models',
+    note:'已按训练模型的原生配置执行回测对比',
+  },
+};
+}
 function renderBacktestCompareOutput(data){
 const out=getBacktestExtraPanel();if(!out)return;
 const regCfg=getBacktestRegisterOptions();
 const rows=Array.isArray(data?.results)?data.results:[];
 const okRows=rows.filter(r=>r&&typeof r==='object'&&!r.error);
 const errRows=rows.filter(r=>r&&r.error);
+const isMlCompare=String(data?.compare_mode||'').trim()==='ml_models';
 if(!rows.length){out.innerHTML='<div class="list-item"><span>多策略对比</span><span>无结果</span></div>';return;}
 const ranked=[...okRows].sort((a,b)=>Number(b?.total_return||-1e9)-Number(a?.total_return||-1e9)||Number(b?.sharpe_ratio||-1e9)-Number(a?.sharpe_ratio||-1e9));
 const best=ranked[0]||null;
@@ -3640,45 +4376,50 @@ const selectedCount=Math.max(0,Number(compareOpt?.selected_count||optimizedCount
 const skippedBudgetCount=Math.max(0,Number(compareOpt?.skipped_count||okRows.filter(r=>r?.optimization_skipped_for_budget).length||0));
 const compareRangeText=`${esc(String(data?.requested_start_date||data?.start_date||'-'))} ~ ${esc(String(data?.requested_end_date||data?.end_date||'-'))}`;
 const compareDataSummary=`${Number(data?.data_points||0)} 根K线 / 成功 ${okRows.length} / 总计 ${rows.length}`;
-const compareExecutionSummary=data?.pre_optimize
+const compareExecutionSummary=isMlCompare
+  ? `已执行 ${okRows.length} 个模型资产回测${errRows.length?`，失败 ${errRows.length} 个`:''}`
+  : data?.pre_optimize
   ? `已优化 ${optimizedCount} 个，预算内候选 ${selectedCount} 个${skippedBudgetCount>0?`，跳过 ${skippedBudgetCount} 个`:''}${errRows.length?`，失败 ${errRows.length} 个`:''}`
   : `未启用预优化${errRows.length?`，失败 ${errRows.length} 个`:''}`;
-const compareBudgetNote=compareOpt?.adaptive_capped
+const compareBudgetNote=!isMlCompare&&compareOpt?.adaptive_capped
   ? String(compareOpt?.summary||'已启用快速预优化，以控制大规模多策略对比耗时。')
   : '';
-const compareOptSummary=data?.pre_optimize
+const compareOptSummary=isMlCompare
+  ? (bestBalanced?`建议下一步用 ${backtestCompareEntryTitle(bestBalanced)} 做滚动验证 / 阈值微调`:'暂无可推荐模型')
+  : data?.pre_optimize
   ? String(compareOpt?.summary||`已预优化 ${optimizedCount}/${okRows.length} 个策略（目标: ${esc(data?.optimize_objective||'total_return')}, trials=${Number(data?.optimize_max_trials||0)})`)
-  : (bestBalanced?`建议下一步用 ${bestBalanced.strategy} 做参数优化`: '暂无可推荐策略');
+  : (bestBalanced?`建议下一步用 ${backtestCompareEntryTitle(bestBalanced)} ${isMlCompare?'做滚动验证 / 阈值微调':'做参数优化'}`: '暂无可推荐策略');
 backtestUIState.lastCompare={...(data||{}), ranked:[...ranked]};
 out.innerHTML=`
-<div class="list-item"><span>多策略对比（${esc(data.symbol||'-')} / ${esc(data.timeframe||'-')}）</span><span>成功 ${okRows.length} / 总计 ${rows.length}</span></div>
+<div class="list-item"><span>${isMlCompare?'ML 模型对比':'多策略对比'}（${esc(data.symbol||'-')} / ${esc(data.timeframe||'-')}）</span><span>成功 ${okRows.length} / 总计 ${rows.length}</span></div>
 ${compareRequestMeta.autoWindowApplied?`<div class="list-item"><span>自动区间</span><span style="color:#9fb1c9;white-space:normal;word-break:break-word;text-align:right;">${esc(compareRequestMeta.note||'已自动锁定近期区间')}</span></div>`:''}
 ${renderRangeLockIndicatorHtml(data,false)}
 <div class="list-item"><span>实际回测区间 / 样本</span><span>${compareRangeText} | ${compareDataSummary}</span></div>
 <div class="list-item"><span>退出模板 / 预优化</span><span>${esc(backtestExitTemplateLabel(exitTemplateName))} | ${esc(compareExecutionSummary)}</span></div>
 ${compareBudgetNote?`<div class="list-item"><span>预算提示</span><span style="color:#9fb1c9;white-space:normal;word-break:break-word;text-align:right;">${esc(compareBudgetNote)}</span></div>`:''}
 <div class="backtest-subgrid">
-  <div class="stat-box"><div class="stat-label">最佳收益策略</div><div class="stat-value">${esc(best?.strategy||'-')}</div><div class="stat-label">${best?`${btPct(best.total_return)} / 夏普 ${btNum(best.sharpe_ratio)}`:'--'}</div></div>
-  <div class="stat-box"><div class="stat-label">均衡推荐（收益-回撤）</div><div class="stat-value">${esc(bestBalanced?.strategy||'-')}</div><div class="stat-label">${bestBalanced?`${btPct(bestBalanced.total_return)} / 回撤 ${btPct(bestBalanced.max_drawdown)}`:'--'}</div></div>
+  <div class="stat-box"><div class="stat-label">${isMlCompare?'最佳收益模型':'最佳收益策略'}</div><div class="stat-value">${esc(backtestCompareEntryTitle(best))}</div><div class="stat-label">${best?`${btPct(best.total_return)} / 夏普 ${btNum(best.sharpe_ratio)}`:'--'}</div></div>
+  <div class="stat-box"><div class="stat-label">均衡推荐（收益-回撤）</div><div class="stat-value">${esc(backtestCompareEntryTitle(bestBalanced))}</div><div class="stat-label">${bestBalanced?`${btPct(bestBalanced.total_return)} / 回撤 ${btPct(bestBalanced.max_drawdown)}`:'--'}</div></div>
   <div class="stat-box"><div class="stat-label">平均收益 / 平均夏普</div><div class="stat-value">${btPct(avgRet)} / ${btNum(avgSharpe)}</div><div class="stat-label">成本: 手续费 ${(Number(data?.commission_rate||0)*100).toFixed(4)}% + 滑点 ${btNum(data?.slippage_bps||0)}bps</div></div>
-  <div class="stat-box"><div class="stat-label">结论建议</div><div class="stat-value">${best&&best.total_return>0?'优先回测前3名细化参数':'先降低周期/成本或换策略组'}</div><div class="stat-label">${esc(compareOptSummary)}</div></div>
+  <div class="stat-box"><div class="stat-label">结论建议</div><div class="stat-value">${best&&best.total_return>0?(isMlCompare?'优先保留前3个模型做滚动验证':'优先回测前3名细化参数'):'先降低周期/成本或换策略组'}</div><div class="stat-label">${esc(compareOptSummary)}</div></div>
   <div class="stat-box"><div class="stat-label">统一退出模板</div><div class="stat-value">${esc(backtestExitTemplateLabel(exitTemplateName))}</div><div class="stat-label">当前对比结果均基于同一离场模板</div></div>
   <div class="stat-box"><div class="stat-label">预优化覆盖</div><div class="stat-value">${optimizedCount} / ${selectedCount||okRows.length}</div><div class="stat-label">${skippedBudgetCount>0?`预算跳过 ${skippedBudgetCount} 个候选`:'本次未触发预算跳过'}</div></div>
 </div>
 <div class="inline-actions" style="margin-top:10px;">
-  <button type="button" class="btn btn-primary btn-sm" id="btn-backtest-register-best">注册收益第一策略（新实例）</button>
-  <button type="button" class="btn btn-primary btn-sm" id="btn-backtest-register-top3">注册前3策略（新实例）</button>
+  <button type="button" class="btn btn-primary btn-sm" id="btn-backtest-register-best">${isMlCompare?'注册收益第一模型（新实例）':'注册收益第一策略（新实例）'}</button>
+  <button type="button" class="btn btn-primary btn-sm" id="btn-backtest-register-top3">${isMlCompare?'注册前3模型（新实例）':'注册前3策略（新实例）'}</button>
   <span style="font-size:12px;color:#9fb1c9;">新实例选项：资金占比 ${regCfg.allocation.toFixed(2)}${regCfg.autoStart?' | 自动启动':''}${regCfg.suffix?` | 后缀 ${regCfg.suffix}`:''}</span>
 </div>
-<div class="section-title">策略排行榜（按收益率排序，点击行可在上方预览该策略区间回测）</div>
+<div class="section-title">${isMlCompare?'模型排行榜（按收益率排序，点击行可在上方预览该模型区间回测）':'策略排行榜（按收益率排序，点击行可在上方预览该策略区间回测）'}</div>
 <div class="backtest-table-wrap">
 <table class="data-table">
-<thead><tr><th>排名</th><th>策略</th><th>参数来源</th><th>收益率</th><th>夏普</th><th>回撤</th><th>胜率</th><th>交易数</th><th>建议样本</th><th>零交易诊断</th><th>成本拖累</th><th>质量</th><th>操作</th></tr></thead>
+<thead><tr><th>排名</th><th>${isMlCompare?'模型':'策略'}</th><th>标的 / 周期</th><th>参数来源</th><th>收益率</th><th>夏普</th><th>回撤</th><th>胜率</th><th>交易数</th><th>建议样本</th><th>零交易诊断</th><th>成本拖累</th><th>质量</th><th>操作</th></tr></thead>
 <tbody>
 ${ranked.map((r,i)=>`<tr class="bt-compare-row ${Number(backtestUIState?.lastComparePreviewRank??-1)===i?'active-preview':''}" data-rank-index="${i}" onclick="previewCompareStrategyByRank(${i})" style="cursor:pointer;">
 <td>${i+1}</td>
-<td>${esc(r.strategy||'-')}</td>
-<td>${r.optimization_applied?`已优化 (${esc(r.optimization_objective||'')})`:(r.optimization_skipped_for_budget?'预算跳过':'默认参数')}</td>
+<td>${esc(backtestCompareEntryTitle(r))}</td>
+<td>${esc(String(r?.symbol||'-'))} / ${esc(String(r?.timeframe||'-'))}</td>
+<td>${isMlCompare?'模型参数':(r.optimization_applied?`已优化 (${esc(r.optimization_objective||'')})`:(r.optimization_skipped_for_budget?'预算跳过':'默认参数'))}</td>
 <td class="${Number(r.total_return||0)>=0?'positive':'negative'}">${btPct(r.total_return)}</td>
 <td>${btNum(r.sharpe_ratio)}</td>
 <td>${btPct(r.max_drawdown)}</td>
@@ -3694,7 +4435,7 @@ ${ranked.map((r,i)=>`<tr class="bt-compare-row ${Number(backtestUIState?.lastCom
     <button type="button" class="btn btn-primary btn-sm" onclick="event.stopPropagation();registerCompareStrategyByRank(${i})">注册</button>
   </div>
 </td>
-</tr>`).join('') || '<tr><td colspan="13">无成功结果</td></tr>'}
+</tr>`).join('') || '<tr><td colspan="14">无成功结果</td></tr>'}
 </tbody></table></div>
 <div id="backtest-extra-chart" class="backtest-chart"></div>
 ${errRows.length?`<div class="section-title">失败策略</div><div class="backtest-table-wrap"><table class="data-table"><thead><tr><th>策略</th><th>错误</th></tr></thead><tbody>${errRows.map(r=>`<tr><td>${esc(r.strategy||'-')}</td><td>${esc(r.error||'')}</td></tr>`).join('')}</tbody></table></div>`:''}
@@ -3712,7 +4453,7 @@ if(!el)return;
 if(typeof Plotly==='undefined'){el.innerHTML='<div class="list-item">图表库未加载，无法显示对比图。</div>';return;}
 preparePlotlyHost(el);
 if(!rows.length){el.innerHTML='<div class="list-item">暂无可视化数据</div>';return;}
-const names=rows.map(r=>String(r.strategy||''));
+const names=rows.map(r=>backtestCompareEntryTitle(r));
 const ret=rows.map(r=>Number(r.total_return||0));
 const dd=rows.map(r=>-Math.abs(Number(r.max_drawdown||0)));
 const sharpe=rows.map(r=>Number(r.sharpe_ratio||0));
@@ -4107,6 +4848,17 @@ async function registerCompareStrategyByRank(rankIndex){
 const ranked=Array.isArray(backtestUIState?.lastCompare?.ranked)?backtestUIState.lastCompare.ranked:[];
 const row=ranked[Number(rankIndex)||0];
 if(!row){notify('未找到该排名策略结果',true);return null;}
+if(row?.register_spec&&typeof row.register_spec==='object'){
+  try{
+    return await registerStrategyInstanceFromBacktestSpec({
+      ...row.register_spec,
+      exit_template: row?.exit_template||backtestUIState?.lastCompare?.exit_template||backtestUIState?.lastCompare?.default_exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE,
+      stop_loss_pct: row?.stop_loss_pct ?? backtestUIState?.lastCompare?.stop_loss_pct ?? null,
+      take_profit_pct: row?.take_profit_pct ?? backtestUIState?.lastCompare?.take_profit_pct ?? null,
+    });
+  }catch(e){notify(`注册模型策略失败: ${e.message}`,true);}
+  return null;
+}
 const params=(row.optimization_applied&&row.optimized_params)?row.optimized_params:{};
 try{
 return await registerStrategyInstanceFromBacktestSpec({
@@ -4131,7 +4883,7 @@ for(let i=0;i<count;i++){
   const name=await registerCompareStrategyByRank(i);
   if(name)ok++; else fail++;
 }
-notify(`前${count}策略注册完成：成功 ${ok}，失败 ${fail}`,fail>0);
+notify(`前${count}个对比结果注册完成：成功 ${ok}，失败 ${fail}`,fail>0);
 }
 async function previewOptimizeTrialByRank(rankIndex){
 try{
@@ -4210,34 +4962,39 @@ try{
   const row=ranked[Number(rankIndex)||0];
   if(!row){notify('未找到该排名策略',true);return;}
   const st=String(row.strategy||'').trim();
-  const symbol=String(compare.symbol||document.getElementById('backtest-symbol')?.value||'BTC/USDT');
-  const tf=String(compare.timeframe||document.getElementById('backtest-timeframe')?.value||'1h');
+  const symbol=String(row?.symbol||compare.symbol||document.getElementById('backtest-symbol')?.value||'BTC/USDT');
+  const tf=String(row?.timeframe||compare.timeframe||document.getElementById('backtest-timeframe')?.value||'1h');
   const capital=Number(document.getElementById('backtest-capital')?.value||compare.initial_capital||10000);
   const sd=String(document.getElementById('backtest-start-date')?.value||'').trim();
   const ed=String(document.getElementById('backtest-end-date')?.value||'').trim();
   const cr=Number(compare.commission_rate ?? 0.0004);
   const sb=Number(compare.slippage_bps ?? 2);
-  const params=(row.optimization_applied&&row.optimized_params&&typeof row.optimized_params==='object')?row.optimized_params:null;
+  const params=(row?.register_spec?.params&&typeof row.register_spec.params==='object')?row.register_spec.params:((row.optimization_applied&&row.optimized_params&&typeof row.optimized_params==='object')?row.optimized_params:null);
   let u=`/backtest/run_custom?strategy=${encodeURIComponent(st)}&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(tf)}&initial_capital=${encodeURIComponent(capital)}&commission_rate=${encodeURIComponent(cr)}&slippage_bps=${encodeURIComponent(sb)}&include_series=true`;
   if(sd)u+=`&start_date=${encodeURIComponent(sd)}`;
   if(ed)u+=`&end_date=${encodeURIComponent(ed)}`;
   if(params)u+=`&params_json=${encodeURIComponent(JSON.stringify(params))}`;
   u=appendBacktestProtectionParams(u);
-  notify(`正在预览策略: ${st}`);
+  notify(`正在预览: ${backtestCompareEntryTitle(row)}`);
   const r=await api(u,{method:'POST',timeoutMs:90000});
   r._from_compare_preview=true;
   r._compare_rank=Number(rankIndex)+1;
   r._compare_optimized=!!params;
+  if(row?.model_id){
+    r.model_id=String(row.model_id||'').trim();
+    r.display_name=backtestCompareEntryTitle(row);
+    r.model_label=String(row.model_label||'').trim();
+  }
   renderBacktest(r);
   const box=document.getElementById('backtest-results');
   if(box){
     const hint=document.createElement('div');
     hint.className='list-item';
     hint.style.marginTop='8px';
-    hint.innerHTML=`<span>对比预览来源</span><span>#${Number(rankIndex)+1} ${esc(st)} ${params?'（优化参数）':'（默认参数）'}</span>`;
+    hint.innerHTML=`<span>对比预览来源</span><span>#${Number(rankIndex)+1} ${esc(backtestCompareEntryTitle(row))} ${params?'（已带模型/参数）':'（默认参数）'}</span>`;
     box.appendChild(hint);
   }
-  notify(`已在上方展示 #${Number(rankIndex)+1} ${st} 的区间回测结果`);
+  notify(`已在上方展示 #${Number(rankIndex)+1} ${backtestCompareEntryTitle(row)} 的区间回测结果`);
 }catch(e){notify(`预览回测失败: ${e.message}`,true);}
 }
 function buildNotifyRulePayload(){const name=(document.getElementById('notify-rule-name')?.value||'自定义规则').trim(),rule_type=(document.getElementById('notify-rule-type')?.value||'price_above').trim(),symbol=(document.getElementById('notify-rule-symbol')?.value||'BTC/USDT').trim(),thresholdRaw=document.getElementById('notify-rule-threshold')?.value||'0',threshold=Number(thresholdRaw||0);let params={channels:['feishu']};if(rule_type==='price_above'||rule_type==='price_below'){params={...params,symbol,threshold};}if(rule_type==='daily_pnl_below_pct'){params={...params,threshold_pct:threshold||-2};}if(rule_type==='position_count_above'){params={...params,threshold:Math.max(1,parseInt(String(threshold||1),10))};}if(rule_type==='exchange_disconnected'){params={...params,exchanges:symbol.split(',').map(x=>x.trim().toLowerCase()).filter(Boolean)};}if(rule_type==='stale_strategy_count_above'||rule_type==='running_strategy_count_below'){params={...params,threshold:Math.max(1,parseInt(String(threshold||1),10))};}if(rule_type==='strategy_not_running'){params={...params,strategies:symbol.split(',').map(x=>x.trim()).filter(Boolean)};}return{name,rule_type,params,enabled:true,cooldown_seconds:300};}
@@ -6728,20 +7485,34 @@ function bindBacktest(){
 initBacktestComparePicker();
 ensureBacktestExitTemplateSelect();
 bindBacktestProtectionControls();
+bindBacktestSymbolControls();
+bindBacktestMlCompareControls();
 const f=document.getElementById('backtest-form');
 if(f)f.onsubmit=async e=>{
 e.preventDefault();
 try{
 notify('回测运行中...');
-const st=await ensureSelectedBacktestStrategy(),s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date').value,ed=document.getElementById('backtest-end-date').value,cr=0.0004,sb=2;
-const customParams=getBacktestCustomParams();
-let u=`/backtest/${customParams&&Object.keys(customParams).length?'run_custom':'run'}?strategy=${encodeURIComponent(st)}&symbol=${encodeURIComponent(s)}&timeframe=${encodeURIComponent(tf)}&initial_capital=${encodeURIComponent(c)}&commission_rate=${encodeURIComponent(cr)}&slippage_bps=${encodeURIComponent(sb)}&include_series=true`;
+const st=await ensureSelectedBacktestStrategy(),tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date').value,ed=document.getElementById('backtest-end-date').value,cr=0.0004,sb=2;
+if(isBacktestMlStrategy(st))requireSelectedBacktestMlModel();
+const ctx=buildBacktestRequestContext(st,{includeCustomParams:true});
+let u=`/backtest/${ctx.useCustomRun?'run_custom':'run'}?strategy=${encodeURIComponent(st)}&symbol=${encodeURIComponent(ctx.symbol)}&timeframe=${encodeURIComponent(tf)}&initial_capital=${encodeURIComponent(c)}&commission_rate=${encodeURIComponent(cr)}&slippage_bps=${encodeURIComponent(sb)}&include_series=true`;
 if(sd)u+=`&start_date=${encodeURIComponent(sd)}`;
 if(ed)u+=`&end_date=${encodeURIComponent(ed)}`;
-if(customParams&&Object.keys(customParams).length)u+=`&params_json=${encodeURIComponent(JSON.stringify(customParams))}`;
+if(ctx.useCustomRun&&ctx.params&&Object.keys(ctx.params).length)u+=`&params_json=${encodeURIComponent(JSON.stringify(ctx.params))}`;
 u=appendBacktestProtectionParams(u);
-const runTimeoutMs=estimateBacktestRunTimeoutMs(st, customParams);
-renderBacktest(await api(u,{method:'POST',timeoutMs:runTimeoutMs}));
+const runTimeoutMs=estimateBacktestRunTimeoutMs(st, ctx.params);
+const result=await api(u,{method:'POST',timeoutMs:runTimeoutMs});
+if(isBacktestMlStrategy(st)&&ctx.params){
+  result.model_id=String(ctx.params.model_id||'').trim();
+  result.threshold=Number(ctx.params.threshold||0.55);
+  result.feature_columns=Array.isArray(ctx.params.feature_columns)?ctx.params.feature_columns:[];
+  const model=getMlModelById(String(ctx.params.model_id||'').trim());
+  if(model){
+    result.display_name=`${String(model?.symbol||'BTC/USDT')} / ${String(model?.timeframe||'1h')} / ${String(model?.model_id||'')}`;
+    result.model_label=mlModelLabel(model);
+  }
+}
+renderBacktest(result);
 notify('回测完成');
 }catch(err){notify(`回测失败: ${err.message}`,true);}
 };
@@ -6755,7 +7526,16 @@ await ensureBacktestStrategySelect().catch(err=>{
   console.warn('backtest compare preflight skipped:',err);
   return [];
 });
-const s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2;
+const selectedStrategy=String(document.getElementById('backtest-strategy')?.value||'').trim();
+if(isBacktestMlStrategy(selectedStrategy)){
+  const d=await runMlModelBacktestCompare();
+  backtestUIState.lastCompare=d||null;
+  renderBacktestCompareOutput(d);
+  notify('ML 模型对比完成');
+  return;
+}
+const ctx=buildBacktestRequestContext(selectedStrategy,{includeCustomParams:false});
+const tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2;
 const chosenStrategies=getSelectedBacktestCompareStrategies();
 if(!chosenStrategies.length){notify('请至少勾选一个策略',true);return;}
 const objective=String(document.getElementById('backtest-opt-objective')?.value||'total_return');
@@ -6764,7 +7544,8 @@ const compareScope=resolveBacktestCompareExecutionScope({requestedStart:sd,reque
 const compareTimeoutMs=estimateBacktestCompareTimeoutMs(chosenStrategies.length,maxTrials,tf,compareScope.windowDays);
 const longCompareHint=(chosenStrategies.length>=24||Number(compareScope.windowDays||0)>=365)?'策略较多或区间较长，本次可能持续数分钟，请勿重复点击。':'';
 renderBacktestExtraLoading('多策略对比运行中',`${compareScope.note||'按当前所选区间执行对比。'} ${longCompareHint} 预计超时保护 ${Math.round(compareTimeoutMs/1000)} 秒。`.trim());
-let cu=`/backtest/compare?strategies=${encodeURIComponent(chosenStrategies.join(','))}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&pre_optimize=true&optimize_objective=${encodeURIComponent(objective)}&optimize_max_trials=${maxTrials}`;
+let cu=`/backtest/compare?strategies=${encodeURIComponent(chosenStrategies.join(','))}&symbol=${encodeURIComponent(ctx.symbol)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&pre_optimize=true&optimize_objective=${encodeURIComponent(objective)}&optimize_max_trials=${maxTrials}`;
+if(ctx.pairSymbol)cu+=`&pair_symbol=${encodeURIComponent(ctx.pairSymbol)}`;
 if(compareScope.startDate)cu+=`&start_date=${encodeURIComponent(compareScope.startDate)}`;
 if(compareScope.endDate)cu+=`&end_date=${encodeURIComponent(compareScope.endDate)}`;
 cu=appendBacktestProtectionParams(cu);
@@ -6791,13 +7572,17 @@ try{
 const selectedSt=await ensureSelectedBacktestStrategy();
 const displayedSt=String(backtestUIState?.lastRenderedBacktest?.strategy||'').trim();
 const st=displayedSt||selectedSt;
-const s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2;
+if(isBacktestMlStrategy(st))requireSelectedBacktestMlModel();
+const ctx=buildBacktestRequestContext(st,{includeCustomParams:false});
+const tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2;
 renderBacktestExtraLoading(`参数优化运行中（${st}${displayedSt&&displayedSt!==selectedSt?'，来自当前展示':'，来自下拉选择'}）`);
 const objective=String(document.getElementById('backtest-opt-objective')?.value||'total_return');
 const maxTrials=Math.max(8,Math.min(1024,parseInt(document.getElementById('backtest-opt-trials')?.value||'96',10)||96));
-let ou=`/backtest/optimize?strategy=${st}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&objective=${encodeURIComponent(objective)}&max_trials=${maxTrials}&include_all_trials=true`;
+let ou=`/backtest/optimize?strategy=${st}&symbol=${encodeURIComponent(ctx.symbol)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&objective=${encodeURIComponent(objective)}&max_trials=${maxTrials}&include_all_trials=true`;
+if(ctx.pairSymbol)ou+=`&pair_symbol=${encodeURIComponent(ctx.pairSymbol)}`;
 if(sd)ou+=`&start_date=${encodeURIComponent(sd)}`;
 if(ed)ou+=`&end_date=${encodeURIComponent(ed)}`;
+if(ctx.useCustomRun&&ctx.params&&Object.keys(ctx.params).length)ou+=`&params_json=${encodeURIComponent(JSON.stringify(ctx.params))}`;
 ou=appendBacktestProtectionParams(ou);
 const d=await api(ou,{method:'POST',timeoutMs:90000});
 renderBacktestOptimizeOutput(d);
@@ -6806,11 +7591,16 @@ notify('参数优化完成');
 };
 const b3=document.getElementById('btn-backtest-export');
 if(b3)b3.onclick=()=>{
-const st=String(document.getElementById('backtest-strategy')?.value||'').trim(),s=document.getElementById('backtest-symbol').value,tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2,fmt=document.getElementById('backtest-export-format')?.value||'xlsx';
+const st=String(document.getElementById('backtest-strategy')?.value||'').trim(),ctx=buildBacktestRequestContext(st,{includeCustomParams:false}),tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2,fmt=document.getElementById('backtest-export-format')?.value||'xlsx';
 if(!st){notify('回测策略目录尚未加载完成',true);return;}
-let eu=`${API_BASE}/backtest/export?strategy=${st}&symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&format=${fmt}`;
+if(isBacktestMlStrategy(st)){
+  try{requireSelectedBacktestMlModel();}catch(err){notify(err.message,true);return;}
+}
+let eu=`${API_BASE}/backtest/export?strategy=${st}&symbol=${encodeURIComponent(ctx.symbol)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&format=${fmt}`;
+if(ctx.pairSymbol)eu+=`&pair_symbol=${encodeURIComponent(ctx.pairSymbol)}`;
 if(sd)eu+=`&start_date=${encodeURIComponent(sd)}`;
 if(ed)eu+=`&end_date=${encodeURIComponent(ed)}`;
+if(ctx.useCustomRun&&ctx.params&&Object.keys(ctx.params).length)eu+=`&params_json=${encodeURIComponent(JSON.stringify(ctx.params))}`;
 eu=appendBacktestProtectionParams(eu);
 window.open(eu,'_blank');
 };

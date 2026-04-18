@@ -94,6 +94,12 @@
     return num.toFixed(2);
   }
 
+  function shortNumber(value, digits = 2) {
+    const num = toNumber(value, NaN);
+    if (!Number.isFinite(num)) return '--';
+    return num.toFixed(digits);
+  }
+
   function fmtAge(seconds) {
     const sec = Math.max(0, Math.round(toNumber(seconds, 0)));
     if (!Number.isFinite(sec)) return '--';
@@ -378,6 +384,15 @@
     `;
   }
 
+  function formatDerivativesStatus(detailPayload, selected) {
+    const context = detailPayload?.derivatives_context || selected?.derivatives_context || {};
+    const label = String(context.freshness_label || selected?.freshness?.derivatives_label || '').trim() || 'missing';
+    const parts = [label];
+    if (context.available !== false && context.age_sec != null) parts.push(fmtAge(context.age_sec));
+    if (context.capture_status) parts.push(String(context.capture_status));
+    return parts.join(' · ');
+  }
+
   function renderRanking(rows) {
     const tbody = q('altcoin-radar-ranking-body');
     if (!tbody) return;
@@ -524,6 +539,10 @@
       : `当前聚焦 ${selected.symbol || '--'}。先看它为什么上榜，再决定建预警还是带入研究工坊。`;
     q('altcoin-radar-selected-tags').innerHTML = renderTagRow(selected.tags);
     q('altcoin-radar-selected-scores').innerHTML = [
+      ['Derivatives Heat', selected.derivatives_heat_score],
+      ['Squeeze', selected.squeeze_score],
+      ['Crowding Risk', selected.crowding_risk_score],
+      ['Flow Confirm', selected.flow_confirmation_score],
       ['布局分', selected.layout_score],
       ['异动分', selected.alert_score],
       ['吸筹分', selected.accumulation_score],
@@ -560,15 +579,29 @@
     );
 
     const dataQuality = selected?.data_quality || {};
+    const derivativesContext = detailPayload?.derivatives_context || selected?.derivatives_context || {};
+    const derivativesError = String(derivativesContext.source_error || '').trim();
     renderListItems('altcoin-radar-data-quality', [
       ['市场新鲜度', toPercent(dataQuality.market_data_freshness, 0)],
       ['快照新鲜度', toPercent(dataQuality.snapshot_freshness, 0)],
+      ['Derivatives', formatDerivativesStatus(detailPayload, selected)],
+      ['Derivatives 来源', String(derivativesContext.source_name || '--')],
+      ['Derivatives 快照', derivativesContext.timestamp ? fmtDateTime(derivativesContext.timestamp) : '--'],
       ['链上质量', toPercent(dataQuality.chain_quality, 0)],
       ['降级原因', Array.isArray(dataQuality.degraded_reason) && dataQuality.degraded_reason.length ? dataQuality.degraded_reason.join(', ') : '无'],
+      ['Derivatives 错误', derivativesError || '--'],
     ]);
 
     const metrics = selected?.metrics || {};
     renderListItems('altcoin-radar-key-metrics', [
+      ['OI 1h', shortPercent(metrics.oi_change_1h)],
+      ['Funding', shortPercent(metrics.funding_rate)],
+      ['Basis', shortPercent(metrics.basis_pct)],
+      ['Long/Short', shortNumber(metrics.long_short_ratio)],
+      ['Taker Imbalance', shortPercent(metrics.taker_buy_sell_imbalance)],
+      ['Crowding', shortPercent(metrics.crowding_score)],
+      ['Distribution', shortPercent(metrics.distribution_score)],
+      ['Depth Thinness', shortPercent(metrics.depth_thinness_score)],
       ['1 bar', toPercent(metrics.return_1_bar, 1)],
       ['3 bar', toPercent(metrics.return_3_bar, 1)],
       ['6 bar', toPercent(metrics.return_6_bar, 1)],

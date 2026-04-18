@@ -91,6 +91,10 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "buildAiPlannerWorkbenchProfile" in ai_js
     assert "loadAutoResearchRecommendation" in ai_js
     assert "ensureAutoPlannerGoal" in ai_js
+    assert "function formatDerivativesContextLine(derivativesContext)" in ai_js
+    assert "AI_PLANNER_GOAL_MAX_CHARS = 600" in ai_js
+    assert "function clampPlannerGoalText(" in ai_js
+    assert "function resolveAutoPlannerGoal(" in ai_js
     assert "withActionLock('oneclick'" in ai_js
     assert "buildOneClickFailureFeedback" in ai_js
     assert "buildOneClickSuccessFeedback" in ai_js
@@ -143,6 +147,10 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "modules.agent?.refresh?.({includeDetails:activeTab==='ai-agent'})" in app_js
     assert "else if(tab==='ai-research')refreshAiResearchModules();" in app_js
     assert "provider_fallback" in ai_js
+    assert "marketContext?.derivatives_context" in ai_js
+    assert "/trading/analytics/history/status?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(sym)}" in ai_js
+    assert "Derivatives context:" in ai_js
+    assert "recommendation?.brief?.derivatives_context" in ai_js
     assert 'option value="codex">OpenAI' in template
     assert "一键退出运行中条目" in template
     assert "一键清空当前候选" in template

@@ -56,6 +56,34 @@ _PROFIT_MANAGEMENT_STATE_KEYS = (
     "outage_protection_reason",
     "profit_management_last_event",
 )
+_COINGLASS_TREND_FILTER_STRATEGIES = {
+    "MAStrategy",
+    "EMAStrategy",
+    "MACDStrategy",
+    "MACDHistogramStrategy",
+    "ADXTrendStrategy",
+    "TrendFollowingStrategy",
+    "AroonStrategy",
+    "MomentumStrategy",
+    "ROCStrategy",
+    "PriceAccelerationStrategy",
+    "DonchianBreakoutStrategy",
+    "BollingerSqueezeStrategy",
+}
+_COINGLASS_REVERSAL_FILTER_STRATEGIES = {
+    "RSIStrategy",
+    "RSIDivergenceStrategy",
+    "StochasticStrategy",
+    "BollingerBandsStrategy",
+    "WilliamsRStrategy",
+    "CCIStrategy",
+    "StochRSIStrategy",
+    "MeanReversionStrategy",
+    "BollingerMeanReversionStrategy",
+    "VWAPReversionStrategy",
+    "MeanReversionHalfLifeStrategy",
+}
+_COINGLASS_REVERSAL_LIQUIDATION_COOLDOWN_USD = 25_000_000.0
 
 
 @dataclass
@@ -126,6 +154,7 @@ class ExecutionEngine:
             "executed": 0,
             "skipped_zero_qty": 0,
             "risk_rejected": 0,
+            "derivatives_filtered": 0,
             "ai_rejected": 0,
             "ai_reduce_only_rejected": 0,
             "ai_review_bypassed": 0,
@@ -305,6 +334,107 @@ class ExecutionEngine:
             "take_profit": getattr(signal, "take_profit", None),
             "metadata": dict(getattr(signal, "metadata", {}) or {}),
         }
+
+    async def _evaluate_coinglass_strategy_filter(
+        self,
+        *,
+        signal: Signal,
+        side: OrderSide,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "enabled": False,
+            "available": False,
+            "applied": False,
+            "action": "allow",
+            "reason": "coinglass_strategy_filter_disabled",
+        }
+        if not self._paper_trading:
+            result["reason"] = "live_mode_not_filtered"
+            return result
+        if not bool(getattr(settings, "COINGLASS_ENABLED", False) and getattr(settings, "COINGLASS_INCLUDE_STRATEGIES", False)):
+            return result
+
+        result["enabled"] = True
+        strategy_name = str(getattr(signal, "strategy_name", "") or "").strip()
+        if strategy_name not in _COINGLASS_TREND_FILTER_STRATEGIES and strategy_name not in _COINGLASS_REVERSAL_FILTER_STRATEGIES:
+            result["reason"] = "strategy_not_in_coinglass_scope"
+            return result
+
+        try:
+            from core.data.coinglass_feature_builder import (  # noqa: PLC0415
+                build_coinglass_runtime_context,
+                load_latest_derivatives_snapshot,
+            )
+        except Exception as exc:
+            result["reason"] = f"coinglass_import_failed:{exc}"
+            return result
+
+        try:
+            snapshot = await load_latest_derivatives_snapshot(signal.symbol)
+        except Exception as exc:
+            result["reason"] = f"coinglass_snapshot_error:{exc}"
+            return result
+        if not isinstance(snapshot, dict) or not snapshot:
+            result["reason"] = "coinglass_snapshot_unavailable"
+            return result
+
+        crowding_score = self._safe_float(snapshot.get("crowding_score"), 0.0)
+        squeeze_score = self._safe_float(snapshot.get("squeeze_score"), 0.0)
+        distribution_score = self._safe_float(snapshot.get("distribution_score"), 0.0)
+        funding_rate = self._safe_float(snapshot.get("funding_rate"), 0.0)
+        liquidation_long_usd = self._safe_float(snapshot.get("liquidation_long_usd"), 0.0)
+        liquidation_short_usd = self._safe_float(snapshot.get("liquidation_short_usd"), 0.0)
+        context = build_coinglass_runtime_context(snapshot)
+        crowding_warning = bool(context.get("crowding_warning"))
+
+        result.update(
+            {
+                "available": True,
+                "strategy_category": (
+                    "trend"
+                    if strategy_name in _COINGLASS_TREND_FILTER_STRATEGIES
+                    else "reversal"
+                ),
+                "snapshot": {
+                    "crowding_score": crowding_score,
+                    "squeeze_score": squeeze_score,
+                    "distribution_score": distribution_score,
+                    "funding_rate": funding_rate,
+                    "liquidation_long_usd": liquidation_long_usd,
+                    "liquidation_short_usd": liquidation_short_usd,
+                    "timestamp": snapshot.get("timestamp"),
+                },
+                "context": context,
+            }
+        )
+
+        if strategy_name in _COINGLASS_TREND_FILTER_STRATEGIES:
+            if side == OrderSide.BUY and crowding_score >= 0.72 and (crowding_warning or funding_rate > 0 or distribution_score >= 0.62):
+                result.update(
+                    {
+                        "applied": True,
+                        "action": "block",
+                        "reason": "coinglass_crowding_filter_long",
+                    }
+                )
+                return result
+            result["reason"] = "trend_filter_clear"
+            return result
+
+        largest_liquidation = max(liquidation_long_usd, liquidation_short_usd)
+        if squeeze_score >= 0.68 or largest_liquidation >= _COINGLASS_REVERSAL_LIQUIDATION_COOLDOWN_USD:
+            result.update(
+                {
+                    "applied": True,
+                    "action": "block",
+                    "reason": "coinglass_liquidation_squeeze_cooldown",
+                    "largest_liquidation_usd": largest_liquidation,
+                }
+            )
+            return result
+
+        result["reason"] = "reversal_cooldown_clear"
+        return result
 
     async def _record_live_strategy_trade(
         self,
@@ -2855,6 +2985,39 @@ class ExecutionEngine:
                     "market_type": str(trade_policy.get("market_type") or ""),
                 },
             )
+            coinglass_filter = await self._evaluate_coinglass_strategy_filter(signal=signal, side=side)
+            req.params["coinglass_strategy_filter"] = dict(coinglass_filter)
+            if str(coinglass_filter.get("action") or "").lower() == "block" and bool(coinglass_filter.get("applied")):
+                self._signal_diagnostics["derivatives_filtered"] = int(
+                    self._signal_diagnostics.get("derivatives_filtered", 0)
+                ) + 1
+                reason = f"CoinGlass策略过滤: {coinglass_filter.get('reason')}"
+                self._signal_diagnostics["last_result"] = {
+                    "status": "derivatives_filtered",
+                    "strategy": signal.strategy_name,
+                    "symbol": signal.symbol,
+                    "exchange": exchange,
+                    "reason": reason,
+                    "coinglass_filter": dict(coinglass_filter),
+                }
+                self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                rejected = await order_manager.record_rejected_order(
+                    request=req,
+                    reason=reason,
+                    price=quote_price or signal.price,
+                )
+                await self._notify_callbacks(
+                    "derivatives_strategy_rejected",
+                    {
+                        "type": "strategy_signal",
+                        "symbol": signal.symbol,
+                        "strategy": signal.strategy_name,
+                        "reason": reason,
+                        "order_id": rejected.id,
+                        "coinglass_filter": dict(coinglass_filter),
+                    },
+                )
+                return None
 
             # Treat opposite-side action against existing position as close/reduce.
             # This avoids blocking legitimate close actions when max-open-position limit is reached.
@@ -4656,14 +4819,26 @@ class ExecutionEngine:
 
     async def _process_signal_queue(self) -> None:
         queue = self._ensure_signal_queue()
+        _pending_signal = None
         while self._running:
             try:
-                signal = await asyncio.wait_for(queue.get(), timeout=1.0)
-                await self.execute_signal(signal)
+                _pending_signal = await asyncio.wait_for(queue.get(), timeout=1.0)
+                await self.execute_signal(_pending_signal)
+                _pending_signal = None
             except asyncio.TimeoutError:
+                _pending_signal = None
                 await self._background_tick()
             except Exception as e:
-                logger.error(f"Signal processing error: {e}")
+                ctx = ""
+                if _pending_signal is not None:
+                    with contextlib.suppress(Exception):
+                        ctx = (
+                            f" [signal={getattr(_pending_signal, 'signal_type', '?')}"
+                            f" symbol={getattr(_pending_signal, 'symbol', '?')}"
+                            f" strategy={getattr(_pending_signal, 'strategy_name', '?')}]"
+                        )
+                    _pending_signal = None
+                logger.error(f"Signal processing error{ctx}: {e}")
 
     async def _prime_live_equity(self) -> None:
         if self._paper_trading:
