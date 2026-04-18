@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from core.ai.ml_signal import MLSignalModel, build_feature_frame
 from core.data import data_storage
 from core.ml.pipeline import (
+    FEATURE_COLUMNS,
     MANIFEST_FILE_NAME,
     MODEL_FILE_NAME,
     PipelineError,
@@ -77,6 +78,19 @@ class MLOneClickRequest(BaseModel):
     factorize: bool = True
     parameters: Dict[str, Any] = Field(default_factory=dict)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+def _normalize_feature_columns(raw: Iterable[Any]) -> List[str]:
+    allowed = {str(column).strip() for column in FEATURE_COLUMNS}
+    ordered: List[str] = []
+    seen: set[str] = set()
+    for item in raw or []:
+        name = str(item or "").strip()
+        if not name or name not in allowed or name in seen:
+            continue
+        seen.add(name)
+        ordered.append(name)
+    return ordered
 
 
 def _now_utc() -> datetime:
@@ -198,6 +212,49 @@ def _save_json(path: Path, payload: Any) -> None:
     tmp.replace(path)
 
 
+def _resolve_existing_path(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    candidate = Path(text)
+    if candidate.exists():
+        return str(candidate.resolve())
+    repo_candidate = (_ROOT / text).resolve() if not candidate.is_absolute() else candidate
+    if repo_candidate.exists():
+        return str(repo_candidate)
+    return ""
+
+
+def _summarize_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    source = dict(metrics or {})
+    keep_keys = {
+        "auc",
+        "prediction_threshold",
+        "positive_rate_test",
+        "positive_rate_train",
+        "metric_source",
+        "feature_columns",
+        "quality_gate",
+    }
+    return {key: source.get(key) for key in keep_keys if key in source}
+
+
+def _summarize_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    source = dict(manifest or {})
+    keep_keys = {
+        "model_id",
+        "created_at",
+        "symbol",
+        "timeframe",
+        "feature_columns",
+        "feature_set_version",
+        "training_window",
+    }
+    summarized = {key: source.get(key) for key in keep_keys if key in source}
+    summarized["metrics"] = _summarize_metrics(dict(source.get("metrics") or {}))
+    return summarized
+
+
 def _load_registry() -> Dict[str, Dict[str, Any]]:
     payload = _load_json(_REGISTRY_PATH, {"models": []})
     rows = payload.get("models") if isinstance(payload, dict) else []
@@ -210,6 +267,97 @@ def _load_registry() -> Dict[str, Dict[str, Any]]:
             continue
         items[model_id] = dict(row)
     return items
+
+
+def _scan_artifact_models() -> Dict[str, Dict[str, Any]]:
+    items: Dict[str, Dict[str, Any]] = {}
+    if not _ARTIFACT_ROOT.exists():
+        return items
+    for manifest_path in sorted(_ARTIFACT_ROOT.glob("*/manifest.json"), reverse=True):
+        try:
+            manifest = _load_json(manifest_path, {})
+        except Exception:
+            manifest = {}
+        if not isinstance(manifest, dict):
+            continue
+        model_id = str(manifest.get("model_id") or manifest_path.parent.name).strip()
+        if not model_id:
+            continue
+        model_path = manifest_path.parent / MODEL_FILE_NAME
+        metrics = _summarize_metrics(dict(manifest.get("metrics") or {}))
+        training_window = dict(manifest.get("training_window") or {})
+        feature_columns = _normalize_feature_columns(metrics.get("feature_columns") or manifest.get("feature_columns") or [])
+        items[model_id] = {
+            "model_id": model_id,
+            "name": str(manifest.get("symbol") or model_id),
+            "status": "artifact",
+            "created_at": str(manifest.get("created_at") or ""),
+            "updated_at": str(manifest.get("created_at") or ""),
+            "symbol": str(manifest.get("symbol") or training_window.get("symbol") or "BTC/USDT"),
+            "timeframe": str(manifest.get("timeframe") or training_window.get("timeframe") or "1h"),
+            "exchange": str(training_window.get("exchange") or "binance"),
+            "artifact": {
+                "manifest": _summarize_manifest(manifest),
+                "manifest_path": str(manifest_path),
+                "model_path": str(model_path),
+                "artifact_dir": str(manifest_path.parent),
+                "exchange": str(training_window.get("exchange") or "binance"),
+            },
+            "metrics": metrics,
+            "feature_columns": feature_columns or list(FEATURE_COLUMNS),
+            "training_window": training_window,
+        }
+    return items
+
+
+def _list_models_with_artifacts(state: Any) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    artifacts = _scan_artifact_models()
+    registry = _load_registry()
+    state_models = dict(getattr(state, "ml_models", {}) or {})
+    for model_id in set(artifacts) | set(registry) | set(state_models):
+        payload: Dict[str, Any] = {}
+        if model_id in artifacts:
+            payload.update(dict(artifacts[model_id]))
+        if model_id in registry:
+            payload.update(_restore_model_from_registry(model_id, registry[model_id]))
+            payload["registry"] = dict(registry[model_id] or {})
+        if model_id in state_models:
+            payload.update(dict(state_models[model_id] or {}))
+        artifact = dict(payload.get("artifact") or {})
+        manifest = _resolve_model_manifest(payload, registry.get(model_id) or {})
+        metrics = _summarize_metrics(dict(payload.get("metrics") or manifest.get("metrics") or {}))
+        training_window = dict(payload.get("training_window") or manifest.get("training_window") or {})
+        payload["model_id"] = model_id
+        payload.setdefault("name", str(payload.get("symbol") or model_id))
+        payload.setdefault("symbol", str(manifest.get("symbol") or training_window.get("symbol") or "BTC/USDT"))
+        payload.setdefault("timeframe", str(manifest.get("timeframe") or training_window.get("timeframe") or "1h"))
+        payload.setdefault("exchange", str(training_window.get("exchange") or payload.get("exchange") or "binance"))
+        payload["artifact"] = artifact
+        payload["metrics"] = metrics
+        payload["training_window"] = training_window
+        payload["feature_columns"] = _normalize_feature_columns(
+            payload.get("feature_columns")
+            or metrics.get("feature_columns")
+            or manifest.get("feature_columns")
+            or []
+        ) or list(FEATURE_COLUMNS)
+        resolved_model_path = _resolve_existing_path(
+            artifact.get("model_path")
+            or ((payload.get("strategy_defaults") or {}).get("params") or {}).get("model_path")
+        )
+        if not resolved_model_path:
+            continue
+        payload["artifact"] = {
+            **{k: v for k, v in artifact.items() if k in {"manifest_path", "model_path", "artifact_dir", "exchange"}},
+            "manifest": _summarize_manifest(manifest),
+            "model_path": resolved_model_path,
+        }
+        payload["available"] = True
+        merged[model_id] = payload
+    rows = list(merged.values())
+    rows.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+    return rows
 
 
 def _save_registry(items: Dict[str, Dict[str, Any]]) -> None:
@@ -362,6 +510,7 @@ class _CoreMLBackend:
             )
 
         params = dict(payload.parameters or {})
+        feature_columns = _normalize_feature_columns(params.get("feature_columns") or [])
         run = await asyncio.to_thread(
             run_signal_training_pipeline,
             df=df,
@@ -377,6 +526,7 @@ class _CoreMLBackend:
             scale_pos_weight=float(params.get("scale_pos_weight", 0.0)),
             prediction_threshold=float(params.get("prediction_threshold", 0.55)),
             min_rows=int(params.get("min_rows", 120)),
+            feature_columns=feature_columns or None,
         )
 
         manifest = dict(run.manifest)
@@ -394,6 +544,7 @@ class _CoreMLBackend:
             "symbol": symbol,
             "timeframe": timeframe,
             "exchange": exchange,
+            "feature_columns": list(run.dataset.feature_columns),
         }
 
     async def register_model(
@@ -908,6 +1059,19 @@ async def _run_train_workflow(request: Request, job_id: str, payload: MLTrainReq
                     }
                 )
                 _save_model(state, archived_model)
+                job["result"] = {
+                    "model_id": model_id,
+                    "model": _model_snapshot(archived_model),
+                    "metrics": dict(exc.details.get("metrics") or {}),
+                    "gate": {
+                        "passed": False,
+                        "reasons": list(exc.details.get("reasons") or []),
+                        "thresholds": dict(exc.details.get("thresholds") or {}),
+                    },
+                    "manifest_path": manifest_path_raw,
+                    "artifact_dir": str(exc.details.get("artifact_dir") or ""),
+                    "backend": _backend_name(backend),
+                }
         error = _readable_error(exc, context="ML training failed")
         _set_job(job, "failed", phase="failed", message=error, error=error)
         state.ml_jobs[job_id] = job
@@ -1091,6 +1255,23 @@ async def diagnostics(request: Request) -> Dict[str, Any]:
         "state_keys": sorted(k for k in vars(state).keys() if k.startswith("ml_")),
         "backend_diagnostics": backend_diag,
     }
+
+
+@router.get("/features")
+async def list_features() -> Dict[str, Any]:
+    items = [
+        {"name": str(column), "label": str(column).upper() if str(column).isalpha() else str(column)}
+        for column in FEATURE_COLUMNS
+    ]
+    return {"ok": True, "items": items, "count": len(items)}
+
+
+@router.get("/models")
+async def list_models(request: Request) -> Dict[str, Any]:
+    _ensure_ml_state(request.app)
+    state = _state(request.app)
+    rows = _list_models_with_artifacts(state)
+    return {"ok": True, "items": rows, "count": len(rows)}
 
 
 @router.post("/jobs/train")

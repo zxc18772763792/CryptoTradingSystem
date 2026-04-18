@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     GATE_API_SECRET: str = ""
     BYBIT_API_KEY: str = ""
     BYBIT_API_SECRET: str = ""
+    COINGLASS_ENABLED: bool = False
+    COINGLASS_BASE_URL: str = "https://www.keystore.com.cn/api/v1/proxy/coinglass"
+    COINGLASS_API_KEY: str = ""
+    COINGLASS_RATE_LIMIT_PER_MIN: int = 10
+    COINGLASS_DAILY_BUDGET: int = 50000
+    COINGLASS_MONTHLY_BUDGET: int = 500000
+    COINGLASS_INCLUDE_AI: bool = True
+    COINGLASS_INCLUDE_RADAR: bool = True
+    COINGLASS_INCLUDE_STRATEGIES: bool = False
+    COINGLASS_LIVE_GATING_ENABLED: bool = False
 
     # LLM API
     ZHIPU_API_KEY: str = ""

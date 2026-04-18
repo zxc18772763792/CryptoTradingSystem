@@ -3074,6 +3074,259 @@ canvas {
     border-radius: 12px;
 }
 
+/* ===== 研究建议 — Verdict-first 重排版 ===== */
+
+/* Hero verdict block */
+.rec-verdict {
+    padding: 16px 18px;
+    border-radius: 14px;
+    background: linear-gradient(160deg, rgba(14,26,44,0.96), rgba(9,18,30,0.99));
+    border: 1px solid rgba(78,115,150,0.22);
+    margin-bottom: 12px;
+}
+.rec-verdict-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+.rec-bias-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 15px;
+    font-weight: 800;
+    padding: 4px 12px;
+    border-radius: 999px;
+    letter-spacing: 0.5px;
+}
+.rec-bias-badge.bias-bullish {
+    color: #4ade80;
+    background: rgba(74,222,128,0.12);
+    border: 1px solid rgba(74,222,128,0.28);
+}
+.rec-bias-badge.bias-bearish {
+    color: #f87171;
+    background: rgba(248,113,113,0.12);
+    border: 1px solid rgba(248,113,113,0.28);
+}
+.rec-bias-badge.bias-neutral {
+    color: #94a3b8;
+    background: rgba(148,163,184,0.08);
+    border: 1px solid rgba(148,163,184,0.2);
+}
+.rec-conf-badge {
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: rgba(96,165,250,0.1);
+    border: 1px solid rgba(96,165,250,0.22);
+    color: #93c5fd;
+    font-weight: 600;
+}
+.rec-time-label {
+    font-size: 11px;
+    color: #5a7090;
+    margin-left: auto;
+}
+.rec-headline {
+    font-size: 17px;
+    font-weight: 700;
+    color: #e2edf9;
+    line-height: 1.4;
+    margin-bottom: 10px;
+}
+.rec-symbols {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+.rec-symbol-tag {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 8px;
+    background: rgba(58,130,246,0.1);
+    border: 1px solid rgba(58,130,246,0.22);
+    color: #7eb8f7;
+}
+.rec-strategy-line {
+    font-size: 11px;
+    color: #6a84a4;
+    padding-top: 4px;
+    border-top: 1px solid rgba(78,115,150,0.12);
+}
+
+/* Compact action row */
+.rec-action-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+.rec-action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border-radius: 10px;
+    border: 1px solid rgba(78,115,150,0.25);
+    background: rgba(18,32,52,0.9);
+    font-size: 12px;
+    font-weight: 600;
+    color: #c8daf0;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, transform 0.1s;
+    white-space: nowrap;
+}
+.rec-action-btn:hover {
+    border-color: rgba(255,255,255,0.2);
+    background: rgba(26,44,70,0.95);
+    transform: translateY(-1px);
+}
+.rec-action-btn[data-tone="primary"] {
+    border-color: rgba(58,166,255,0.35);
+    background: rgba(18,44,80,0.92);
+    color: #7eb8f7;
+}
+.rec-action-btn[data-tone="positive"] {
+    border-color: rgba(32,191,120,0.32);
+    background: rgba(15,42,32,0.92);
+    color: #6ee7b7;
+}
+.rec-action-btn[data-tone="warn"] {
+    border-color: rgba(245,158,11,0.32);
+    background: rgba(50,32,8,0.92);
+    color: #fbbf24;
+}
+.rec-action-icon {
+    font-size: 13px;
+    opacity: 0.8;
+}
+.rec-action-label {
+    font-size: 12px;
+}
+
+/* Compact stacked insight items */
+.rec-insights {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+.rec-insight-item {
+    border-radius: 10px;
+    border: 1px solid rgba(78,115,150,0.18);
+    background: rgba(13,24,38,0.7);
+    overflow: hidden;
+    transition: border-color 0.15s;
+}
+.rec-insight-item[data-tone="positive"] {
+    border-color: rgba(32,191,120,0.2);
+}
+.rec-insight-item[data-tone="warn"] {
+    border-color: rgba(245,158,11,0.22);
+}
+.rec-insight-item summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+    font-size: 12px;
+    color: #cddaf0;
+}
+.rec-insight-item summary::-webkit-details-marker { display: none; }
+.rec-insight-item summary::marker { display: none; }
+.rec-insight-item[open] summary {
+    border-bottom: 1px solid rgba(78,115,150,0.12);
+}
+.rec-insight-icon {
+    font-size: 12px;
+    font-weight: 700;
+    width: 18px;
+    text-align: center;
+    flex-shrink: 0;
+}
+.rec-insight-icon[data-tone="positive"] { color: #4ade80; }
+.rec-insight-icon[data-tone="warn"]     { color: #fbbf24; }
+.rec-insight-icon[data-tone="neutral"]  { color: #64748b; }
+.rec-insight-title {
+    flex: 1;
+    font-weight: 600;
+    line-height: 1.4;
+}
+.rec-insight-tag {
+    font-size: 10px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    flex-shrink: 0;
+    background: rgba(15,23,35,0.7);
+    color: #8ea6c4;
+    border: 1px solid rgba(78,115,150,0.2);
+}
+.rec-insight-tag[data-tone="positive"] {
+    color: #6ee7b7;
+    border-color: rgba(32,191,120,0.22);
+    background: rgba(16,48,34,0.6);
+}
+.rec-insight-tag[data-tone="warn"] {
+    color: #fcd34d;
+    border-color: rgba(245,158,11,0.22);
+    background: rgba(56,35,10,0.6);
+}
+.rec-insight-body {
+    padding: 8px 12px 10px 38px;
+    font-size: 12px;
+    line-height: 1.65;
+    color: #9bb5d0;
+}
+
+/* Collapsed AI brief */
+.rec-brief-details {
+    border-radius: 10px;
+    border: 1px solid rgba(78,115,150,0.15);
+    background: rgba(11,20,32,0.5);
+    overflow: hidden;
+}
+.rec-brief-details summary {
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 600;
+    color: #5a7090;
+    letter-spacing: 0.4px;
+    list-style: none;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.rec-brief-details summary::-webkit-details-marker { display: none; }
+.rec-brief-details summary::marker { display: none; }
+.rec-brief-details summary::before {
+    content: '▶';
+    font-size: 9px;
+    opacity: 0.5;
+    transition: transform 0.15s;
+}
+.rec-brief-details[open] summary::before {
+    transform: rotate(90deg);
+}
+.rec-brief-details[open] summary {
+    border-bottom: 1px solid rgba(78,115,150,0.12);
+    color: #7e95b5;
+}
+.rec-brief-details .research-brief-grid {
+    padding: 0 12px 12px;
+}
+
 /* ===== 研究总览卡片式布局 ===== */
 .research-overview-cards {
     display: grid;

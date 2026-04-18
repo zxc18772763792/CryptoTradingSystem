@@ -278,6 +278,7 @@ def build_dataset(
     forward_bars: int,
     feature_set_version: str = FEATURE_SET_VERSION,
     min_rows: int = 100,
+    feature_columns: Optional[Sequence[str]] = None,
 ) -> MLDataSet:
     if df is None or df.empty:
         raise PipelineError("dataset", "input OHLCV dataframe is empty")
@@ -306,13 +307,25 @@ def build_dataset(
             },
         )
 
-    clean_features = frame[FEATURE_COLUMNS].astype(float)
+    selected_columns = [
+        str(column).strip()
+        for column in (feature_columns or FEATURE_COLUMNS)
+        if str(column).strip() in FEATURE_COLUMNS
+    ]
+    if not selected_columns:
+        raise PipelineError(
+            "dataset",
+            "no valid feature columns selected",
+            details={"requested_feature_columns": list(feature_columns or [])},
+        )
+
+    clean_features = frame[selected_columns].astype(float)
     clean_labels = frame["_label"].astype(int)
     return MLDataSet(
         frame=frame,
         features=clean_features,
         labels=clean_labels,
-        feature_columns=list(FEATURE_COLUMNS),
+        feature_columns=list(selected_columns),
         forward_bars=int(forward_bars),
         feature_set_version=str(feature_set_version),
     )
@@ -681,9 +694,15 @@ def run_signal_training_pipeline(
     min_rows: int = 100,
     gate_thresholds: Optional[Mapping[str, float]] = None,
     fail_on_gate: bool = True,
+    feature_columns: Optional[Sequence[str]] = None,
 ) -> MLTrainingRun:
     diagnostics = assert_environment_ready(require_xgboost=True, require_sklearn=False)
-    dataset = build_dataset(df, forward_bars=forward_bars, min_rows=min_rows)
+    dataset = build_dataset(
+        df,
+        forward_bars=forward_bars,
+        min_rows=min_rows,
+        feature_columns=feature_columns,
+    )
     split = split_dataset(dataset, test_size=test_size)
     model, feature_importances = train_xgboost_classifier(
         split,
@@ -724,6 +743,7 @@ def run_signal_training_pipeline(
         metrics={
             **metrics,
             "quality_gate": gate.to_dict(),
+            "feature_columns": list(dataset.feature_columns),
         },
         created_at=created_at,
         source_commit=source_commit,
@@ -736,6 +756,7 @@ def run_signal_training_pipeline(
         metrics={
             **metrics,
             "quality_gate": gate.to_dict(),
+            "feature_columns": list(dataset.feature_columns),
         },
         feature_importances=feature_importances,
     )

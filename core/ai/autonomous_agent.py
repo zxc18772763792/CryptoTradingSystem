@@ -2443,7 +2443,7 @@ class AutonomousTradingAgent:
             )
             aggregate_kwargs: Dict[str, Any]
             if aggregate_fast:
-                aggregate_kwargs = {"include_llm": False, "include_ml": False}
+                aggregate_kwargs = {"include_llm": False}
             else:
                 aggregate_kwargs = {"include_llm": False}
             agg_signal: Dict[str, Any] = {}
@@ -3679,7 +3679,7 @@ class AutonomousTradingAgent:
             if bool(cfg.get("_preview_symbol_scan")) or (light_symbol_scan and bool(cfg.get("_scan_skip_live_market"))):
                 # Coarse prescan only needs a cheap directional prior. The shortlist
                 # still gets the full aggregate before final selection.
-                aggregate_kwargs = {"include_llm": False, "include_ml": False}
+                aggregate_kwargs = {"include_llm": False}
             agg = await signal_aggregator.aggregate(
                 symbol=str(cfg["symbol"]),
                 market_data=market_data,
@@ -3915,6 +3915,9 @@ class AutonomousTradingAgent:
                         "available": bool(component_payload.get("available")),
                         "status": component_payload.get("status"),
                         "reason": component_payload.get("reason"),
+                        "regime": component_payload.get("regime"),
+                        "risk_flags": _slice_text_list(component_payload.get("risk_flags"), 4),
+                        "context": _compact_value(component_payload.get("context") or {}),
                     }
                 )
             return _compact_value(
@@ -3926,6 +3929,7 @@ class AutonomousTradingAgent:
                     "timestamp": aggregated_signal.get("timestamp"),
                     "market_data_last_bar_at": aggregated_signal.get("market_data_last_bar_at") or fallback_last_bar_at,
                     "components": compact_components,
+                    "market_context": _compact_value(aggregated_signal.get("market_context") or {}),
                 }
             )
 
@@ -5143,6 +5147,9 @@ class AutonomousTradingAgent:
                 "available": bool(payload.get("available")),
                 "status": str(payload.get("status") or "").strip(),
                 "reason": str(payload.get("reason") or "").strip(),
+                "regime": str(payload.get("regime") or "").strip(),
+                "risk_flags": list(payload.get("risk_flags") or [])[:4],
+                "context": _compact_value(payload.get("context") or {}),
                 "effective_weight": _coerce_float(
                     payload.get("effective_weight", payload.get("weight", 0.0)),
                     0.0,
@@ -5220,6 +5227,7 @@ class AutonomousTradingAgent:
                 "timestamp": agg_timestamp,
                 "market_data_last_bar_at": agg_market_data_last_bar_at,
                 "components": compact_agg_components,
+                "market_context": _compact_value(agg.get("market_context") or {}),
             },
             "execution_cost": {
                 "fee_bps": _safe_nonnegative_float(execution_cost.get("fee_bps"), 0.0),

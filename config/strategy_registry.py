@@ -448,7 +448,11 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
 
 
 _STRATEGY_META_OVERRIDES: Dict[str, Dict[str, Any]] = {
+    "FamaFactorArbitrageStrategy": {
+        "category": "\u0046ama\u56e0\u5b50",
+    },
     "MLXGBoostStrategy": {
+        "category": "ML",
         "family": "ml",
         "decision_engine": "ml",
         "ai_driven": True,

@@ -79,14 +79,20 @@ def test_compute_onchain_overview_includes_premium_snapshot(monkeypatch):
                     "has_cached_data": True,
                     "key_configured": True,
                     "snapshot": {"cross_exchange_spread_bps": 1.8},
-                }
+                },
+                "coinglass": {
+                    "available": True,
+                    "has_cached_data": True,
+                    "key_configured": True,
+                    "snapshot": {"active_datasets": ["derivatives"], "freshness_sec": 120.0},
+                },
             },
             "summary": {
-                "total_sources": 4,
-                "configured_keys": 1,
-                "cached_sources": 1,
-                "available_sources": 1,
-                "active_sources": ["kaiko"],
+                "total_sources": 5,
+                "configured_keys": 2,
+                "cached_sources": 2,
+                "available_sources": 2,
+                "active_sources": ["kaiko", "coinglass"],
             },
         }
 
@@ -105,7 +111,38 @@ def test_compute_onchain_overview_includes_premium_snapshot(monkeypatch):
             chain="Ethereum",
         )
     )
-    assert payload["premium_external"]["summary"]["cached_sources"] == 1
+    assert payload["premium_external"]["summary"]["cached_sources"] == 2
     assert payload["component_status"]["premium_external"]["status"] == "ok"
-    assert payload["component_status"]["premium_external"]["detail"].startswith("cached=1/")
+    assert payload["component_status"]["premium_external"]["detail"].startswith("cached=2/")
 
+
+def test_load_premium_external_snapshot_includes_coinglass(monkeypatch):
+    from web.api import data as data_api
+
+    monkeypatch.setattr("core.data.glassnode_collector.load_glassnode_snapshot", lambda: {})
+    monkeypatch.setattr("core.data.glassnode_collector._api_key", lambda: "")
+    monkeypatch.setattr("core.data.cryptoquant_collector.load_cryptoquant_snapshot", lambda: {})
+    monkeypatch.setattr("core.data.cryptoquant_collector._api_key", lambda: "")
+    monkeypatch.setattr("core.data.nansen_collector.load_nansen_snapshot", lambda: {})
+    monkeypatch.setattr("core.data.nansen_collector._api_key", lambda: "")
+    monkeypatch.setattr("core.data.kaiko_collector.load_kaiko_snapshot", lambda: {})
+    monkeypatch.setattr("core.data.kaiko_collector._api_key", lambda: "")
+    monkeypatch.setattr(
+        data_api,
+        "load_coinglass_cached_source_snapshot",
+        lambda: {
+            "key_configured": True,
+            "has_cached_data": True,
+            "active_datasets": ["derivatives"],
+            "freshness_sec": 120.0,
+            "dataset_count": 1,
+        },
+    )
+
+    payload = data_api._load_premium_external_snapshot()
+
+    assert payload["summary"]["total_sources"] == 5
+    assert payload["sources"]["coinglass"]["available"] is True
+    assert payload["sources"]["coinglass"]["has_cached_data"] is True
+    assert payload["sources"]["coinglass"]["snapshot"]["active_datasets"] == ["derivatives"]
+    assert "coinglass" in payload["summary"]["active_sources"]

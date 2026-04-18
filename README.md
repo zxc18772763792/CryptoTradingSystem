@@ -164,6 +164,16 @@ Run focused tests:
 pytest -q tests/ops tests/polymarket tests/web
 ```
 
+Clean local caches and stale runtime artifacts:
+
+```powershell
+.\scripts\cleanup_repo.ps1 -DryRun
+.\scripts\cleanup_repo.ps1
+```
+
+Add `-IncludeOutput` if you also want to prune stale Playwright captures and historical generated folders under `output/`.
+Add `-IncludeNodeModules` if you want to remove the local Playwright-only `node_modules/` cache when there is no `package.json` in the repo root.
+
 Run the Polymarket worker once:
 
 ```powershell

@@ -24,6 +24,13 @@ def test_backtest_pairs_dual_leg_ui_hooks_exist():
     assert "{{ static_asset_url('js/app.js') }}" in template_source
     assert static_asset_url("js/app.js") == f"/static/js/app.js?v={ASSET_VERSIONS['js/app.js']}"
     assert static_asset_url("js/app.js") in template
+    assert 'id="backtest-pair-symbol-group"' in template_source
+    assert 'id="backtest-pair-symbol"' in template_source
+    assert 'id="backtest-symbol-label"' in template_source
+    assert "function isBacktestDualLegStrategy" in app_js
+    assert "function renderBacktestSymbolMode" in app_js
+    assert "function loadBacktestSymbolOptions" in app_js
+    assert "function buildBacktestRequestContext" in app_js
     assert "pairs_spread_dual_leg" in app_js
     assert "pair_symbol" in app_js
     assert "pair_metrics" in app_js

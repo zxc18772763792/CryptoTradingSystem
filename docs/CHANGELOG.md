@@ -19,7 +19,7 @@
 
 ### Added
 
-- `docs/STARTUP_STABILIZATION_PLAN_2026-04-01.md`: startup recovery plan, work tracks, and acceptance criteria captured during the stabilization pass.
+- startup recovery plan, work tracks, and acceptance criteria captured during the stabilization pass.
 
 ### Changed
 

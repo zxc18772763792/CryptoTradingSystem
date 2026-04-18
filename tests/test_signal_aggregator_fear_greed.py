@@ -196,3 +196,83 @@ def test_signal_aggregator_handles_missing_market_data(monkeypatch):
     assert result.components["ml"]["reason"] == "insufficient_market_data"
     assert result.components["factor"]["available"] is False
     assert result.components["factor"]["reason"] == "insufficient_market_data"
+
+
+def test_signal_aggregator_derivatives_shadow_penalizes_confidence(monkeypatch):
+    from core.ai.signal_aggregator import SignalAggregator, settings as agg_settings
+
+    agg = SignalAggregator()
+    df = _build_close_df("up")
+
+    async def _fake_llm_signal(symbol, market_data):
+        return "LONG", 0.80
+
+    async def _fake_derivatives_signal(symbol):
+        return (
+            "SHORT",
+            0.95,
+            {
+                "available": True,
+                "context": {"crowding_warning": True},
+                "risk_flags": ["crowding_hot", "distribution_risk"],
+                "regime": "mixed",
+                "explain": "shadow-only derivatives context",
+            },
+        )
+
+    monkeypatch.setattr(agg_settings, "COINGLASS_LIVE_GATING_ENABLED", False)
+    monkeypatch.setattr(agg, "_get_llm_signal", _fake_llm_signal)
+    monkeypatch.setattr(agg, "_get_ml_signal", lambda symbol, market_data: ("FLAT", 0.0))
+    monkeypatch.setattr(agg, "_get_factor_signal", lambda market_data: ("LONG", 0.60))
+    monkeypatch.setattr(agg, "_get_derivatives_signal", _fake_derivatives_signal)
+    monkeypatch.setattr(agg, "_apply_risk_gate", lambda symbol, direction, confidence, market_data: (False, ""))
+    agg._ml_model = SimpleNamespace(is_loaded=lambda: False)
+
+    result = asyncio.run(agg.aggregate("BTC/USDT", df))
+
+    baseline_conf = ((0.40 * 0.80) + (0.25 * 0.60)) / (0.40 + 0.25)
+    expected_conf = baseline_conf - 0.16
+
+    assert result.direction == "LONG"
+    assert result.confidence == pytest.approx(expected_conf, abs=1e-6)
+    assert result.market_context["crowding_warning"] is True
+    assert result.components["derivatives"]["shadow_only"] is True
+    assert result.components["derivatives"]["effective_weight"] == pytest.approx(0.0, rel=1e-9)
+    assert result.components["derivatives"]["confidence_adjustment"] == pytest.approx(-0.16, rel=1e-9)
+
+
+def test_signal_aggregator_derivatives_vote_stays_off_until_live_gating(monkeypatch):
+    from core.ai.signal_aggregator import SignalAggregator, settings as agg_settings
+
+    agg = SignalAggregator()
+    df = _build_close_df("up")
+
+    async def _fake_llm_signal(symbol, market_data):
+        return "LONG", 0.40
+
+    async def _fake_derivatives_signal(symbol):
+        return (
+            "SHORT",
+            1.0,
+            {
+                "available": True,
+                "context": {},
+                "risk_flags": [],
+                "regime": "distribution",
+                "explain": "live gating vote enabled",
+            },
+        )
+
+    monkeypatch.setattr(agg_settings, "COINGLASS_LIVE_GATING_ENABLED", True)
+    monkeypatch.setattr(agg, "_get_llm_signal", _fake_llm_signal)
+    monkeypatch.setattr(agg, "_get_ml_signal", lambda symbol, market_data: ("FLAT", 0.0))
+    monkeypatch.setattr(agg, "_get_factor_signal", lambda market_data: ("FLAT", 0.0))
+    monkeypatch.setattr(agg, "_get_derivatives_signal", _fake_derivatives_signal)
+    monkeypatch.setattr(agg, "_apply_risk_gate", lambda symbol, direction, confidence, market_data: (False, ""))
+    agg._ml_model = SimpleNamespace(is_loaded=lambda: False)
+
+    result = asyncio.run(agg.aggregate("BTC/USDT", df))
+
+    assert result.direction == "SHORT"
+    assert result.components["derivatives"]["shadow_only"] is False
+    assert result.components["derivatives"]["effective_weight"] == pytest.approx(0.20, rel=1e-9)

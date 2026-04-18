@@ -391,6 +391,119 @@ class AnalyticsHistoryIngestStatus(Base):
     details = Column(JSON, default={})
 
 
+class CoinglassBudgetLedger(Base):
+    """Singleton budget tracker for CoinGlass proxy requests."""
+    __tablename__ = "coinglass_budget_ledger"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scope = Column(String(32), nullable=False, unique=True, index=True)
+    minute_window_started_at = Column(DateTime, nullable=True, index=True)
+    minute_requests_used = Column(Integer, default=0)
+    day_key = Column(String(16), default="", index=True)
+    day_requests_used = Column(Integer, default=0)
+    month_key = Column(String(16), default="", index=True)
+    month_requests_used = Column(Integer, default=0)
+    request_success_count = Column(Integer, default=0)
+    rate_limit_hit_count = Column(Integer, default=0)
+    last_success_at = Column(DateTime, nullable=True, index=True)
+    last_http_status = Column(Integer, nullable=True)
+    last_error = Column(Text, default="")
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False, index=True)
+
+
+class CoinglassIngestStatus(Base):
+    """Last known ingest status per CoinGlass dataset/scope."""
+    __tablename__ = "coinglass_ingest_status"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dataset = Column(String(80), nullable=False, index=True)
+    scope_key = Column(String(160), nullable=False, unique=True, index=True)
+    symbol = Column(String(40), default="", index=True)
+    exchange = Column(String(40), default="aggregate", index=True)
+    interval = Column(String(16), default="", index=True)
+    status = Column(String(20), default="idle", index=True)
+    error = Column(Text, default="")
+    rows_written = Column(Integer, default=0)
+    latency_ms = Column(Integer, default=0)
+    last_attempt_at = Column(DateTime, nullable=True, index=True)
+    last_success_at = Column(DateTime, nullable=True, index=True)
+    fresh_until_at = Column(DateTime, nullable=True, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False, index=True)
+    details = Column(JSON, default={})
+
+
+class AnalyticsDerivativesSnapshot(Base):
+    """Structured CoinGlass-derived derivatives snapshots for AI and radar."""
+    __tablename__ = "analytics_derivatives_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    exchange = Column(String(20), nullable=False, index=True)
+    symbol = Column(String(40), nullable=False, index=True)
+    source_key = Column(String(160), nullable=False, index=True)
+    source_ts = Column(DateTime, nullable=True, index=True)
+    capture_status = Column(String(20), default="ok", index=True)
+    source_error = Column(Text, default="")
+    source_name = Column(String(80), default="coinglass_proxy", index=True)
+    latency_ms = Column(Integer, default=0)
+    ingest_version = Column(String(20), default="v1", index=True)
+    oi_usd = Column(Float, nullable=True)
+    oi_change_5m = Column(Float, nullable=True)
+    oi_change_15m = Column(Float, nullable=True)
+    oi_change_1h = Column(Float, nullable=True)
+    oi_change_4h = Column(Float, nullable=True)
+    oi_change_24h = Column(Float, nullable=True)
+    funding_rate = Column(Float, nullable=True)
+    funding_rate_oi_weighted = Column(Float, nullable=True)
+    funding_rate_vol_weighted = Column(Float, nullable=True)
+    liquidation_long_usd = Column(Float, nullable=True)
+    liquidation_short_usd = Column(Float, nullable=True)
+    long_short_ratio = Column(Float, nullable=True)
+    top_trader_ratio = Column(Float, nullable=True)
+    basis_pct = Column(Float, nullable=True)
+    taker_buy_sell_imbalance = Column(Float, nullable=True)
+    futures_volume_usd = Column(Float, nullable=True)
+    crowding_score = Column(Float, nullable=True)
+    squeeze_score = Column(Float, nullable=True)
+    distribution_score = Column(Float, nullable=True)
+    orderbook_imbalance_score = Column(Float, nullable=True)
+    depth_thinness_score = Column(Float, nullable=True)
+    payload = Column(JSON, default={})
+
+    __table_args__ = (
+        UniqueConstraint("exchange", "symbol", "source_key", name="uq_derivatives_snapshot_source"),
+    )
+
+
+class AnalyticsMarketStructureSnapshot(Base):
+    """Compact market-structure snapshots derived from premium datasets."""
+    __tablename__ = "analytics_market_structure_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    exchange = Column(String(20), nullable=False, index=True)
+    symbol = Column(String(40), nullable=False, index=True)
+    source_key = Column(String(160), nullable=False, index=True)
+    capture_status = Column(String(20), default="ok", index=True)
+    source_error = Column(Text, default="")
+    source_name = Column(String(80), default="coinglass_proxy", index=True)
+    latency_ms = Column(Integer, default=0)
+    ingest_version = Column(String(20), default="v1", index=True)
+    spread_bps = Column(Float, nullable=True)
+    depth_1pct_usd = Column(Float, nullable=True)
+    depth_2pct_usd = Column(Float, nullable=True)
+    orderbook_imbalance = Column(Float, nullable=True)
+    cvd = Column(Float, nullable=True)
+    trade_delta = Column(Float, nullable=True)
+    heatmap_pressure_score = Column(Float, nullable=True)
+    liquidity_void_score = Column(Float, nullable=True)
+    payload = Column(JSON, default={})
+
+    __table_args__ = (
+        UniqueConstraint("exchange", "symbol", "source_key", name="uq_market_structure_snapshot_source"),
+    )
+
+
 # 创建异步引擎
 try:
     _SQLITE_BUSY_TIMEOUT_SEC = max(3.0, float(os.environ.get("SQLITE_BUSY_TIMEOUT_SEC", "8")))

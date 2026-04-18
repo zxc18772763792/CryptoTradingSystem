@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-    <link rel="stylesheet" href="/static/css/style.css?v=89">
+    <link rel="stylesheet" href="/static/css/style.css?v=90">
     <script>
         (function (root) {
             if (!root) return;
@@ -599,7 +599,10 @@
                                 <option value="动量">动量</option>
                                 <option value="反转">反转</option>
                                 <option value="统计套利">统计套利</option>
+                                <option value="Fama因子">Fama因子</option>
                                 <option value="套利">套利</option>
+                                <option value="量化">量化</option>
+                                <option value="ML">ML</option>
                                 <option value="宏观">宏观</option>
                                 <option value="其他">其他</option>
                             </select>
@@ -2925,30 +2928,57 @@
                                     <option value="" selected disabled>策略目录加载中...</option>
                                 </select>
                             </div>
-                            <div class="form-group">
-                                <label>交易对</label>
-                                <select id="backtest-symbol">
-                                    <option value="BTC/USDT" selected>BTC/USDT</option>
-                                    <option value="ETH/USDT">ETH/USDT</option>
-                                    <option value="BNB/USDT">BNB/USDT</option>
-                                    <option value="SOL/USDT">SOL/USDT</option>
-                                    <option value="XRP/USDT">XRP/USDT</option>
-                                    <option value="ADA/USDT">ADA/USDT</option>
-                                    <option value="DOGE/USDT">DOGE/USDT</option>
-                                    <option value="AVAX/USDT">AVAX/USDT</option>
-                                    <option value="DOT/USDT">DOT/USDT</option>
-                                    <option value="LINK/USDT">LINK/USDT</option>
-                                    <option value="LTC/USDT">LTC/USDT</option>
-                                    <option value="BCH/USDT">BCH/USDT</option>
-                                    <option value="ATOM/USDT">ATOM/USDT</option>
-                                    <option value="NEAR/USDT">NEAR/USDT</option>
-                                    <option value="ARB/USDT">ARB/USDT</option>
-                                    <option value="OP/USDT">OP/USDT</option>
-                                    <option value="SUI/USDT">SUI/USDT</option>
-                                    <option value="INJ/USDT">INJ/USDT</option>
-                                    <option value="TRX/USDT">TRX/USDT</option>
-                                    <option value="TON/USDT">TON/USDT</option>
-                                </select>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label id="backtest-symbol-label">交易对</label>
+                                    <select id="backtest-symbol">
+                                        <option value="BTC/USDT" selected>BTC/USDT</option>
+                                        <option value="ETH/USDT">ETH/USDT</option>
+                                        <option value="BNB/USDT">BNB/USDT</option>
+                                        <option value="SOL/USDT">SOL/USDT</option>
+                                        <option value="XRP/USDT">XRP/USDT</option>
+                                        <option value="ADA/USDT">ADA/USDT</option>
+                                        <option value="DOGE/USDT">DOGE/USDT</option>
+                                        <option value="AVAX/USDT">AVAX/USDT</option>
+                                        <option value="DOT/USDT">DOT/USDT</option>
+                                        <option value="LINK/USDT">LINK/USDT</option>
+                                        <option value="LTC/USDT">LTC/USDT</option>
+                                        <option value="BCH/USDT">BCH/USDT</option>
+                                        <option value="ATOM/USDT">ATOM/USDT</option>
+                                        <option value="NEAR/USDT">NEAR/USDT</option>
+                                        <option value="ARB/USDT">ARB/USDT</option>
+                                        <option value="OP/USDT">OP/USDT</option>
+                                        <option value="SUI/USDT">SUI/USDT</option>
+                                        <option value="INJ/USDT">INJ/USDT</option>
+                                        <option value="TRX/USDT">TRX/USDT</option>
+                                        <option value="TON/USDT">TON/USDT</option>
+                                    </select>
+                                </div>
+                                <div class="form-group" id="backtest-pair-symbol-group" style="display:none;">
+                                    <label>副腿</label>
+                                    <select id="backtest-pair-symbol">
+                                        <option value="ETH/USDT" selected>ETH/USDT</option>
+                                        <option value="BTC/USDT">BTC/USDT</option>
+                                        <option value="BNB/USDT">BNB/USDT</option>
+                                        <option value="SOL/USDT">SOL/USDT</option>
+                                        <option value="XRP/USDT">XRP/USDT</option>
+                                        <option value="ADA/USDT">ADA/USDT</option>
+                                        <option value="DOGE/USDT">DOGE/USDT</option>
+                                        <option value="AVAX/USDT">AVAX/USDT</option>
+                                        <option value="DOT/USDT">DOT/USDT</option>
+                                        <option value="LINK/USDT">LINK/USDT</option>
+                                        <option value="LTC/USDT">LTC/USDT</option>
+                                        <option value="BCH/USDT">BCH/USDT</option>
+                                        <option value="ATOM/USDT">ATOM/USDT</option>
+                                        <option value="NEAR/USDT">NEAR/USDT</option>
+                                        <option value="ARB/USDT">ARB/USDT</option>
+                                        <option value="OP/USDT">OP/USDT</option>
+                                        <option value="SUI/USDT">SUI/USDT</option>
+                                        <option value="INJ/USDT">INJ/USDT</option>
+                                        <option value="TRX/USDT">TRX/USDT</option>
+                                        <option value="TON/USDT">TON/USDT</option>
+                                    </select>
+                                </div>
                             </div>
                             <div class="form-group">
                                 <label>周期</label>
@@ -2967,6 +2997,18 @@
                                     <option value="1w">周线</option>
                                     <option value="1M">月线</option>
                                 </select>
+                            </div>
+                            <div class="form-row" id="backtest-ml-model-row" style="display:none;">
+                                <div class="form-group">
+                                    <label>已训练模型</label>
+                                    <select id="backtest-ml-model">
+                                        <option value="">加载中...</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>模型信息</label>
+                                    <div id="backtest-ml-model-meta" class="form-help">选择 ML 策略后，可直接选用已训练模型进行回测。</div>
+                                </div>
                             </div>
                             <div class="form-row">
                                 <div class="form-group">
@@ -3063,6 +3105,17 @@
                                 </div>
                                 <div id="backtest-compare-strategy-list" class="backtest-compare-groups"></div>
                             </details>
+                            <details class="backtest-compare-picker" id="backtest-ml-compare-panel" style="display:none;">
+                                <summary>ML 模型集合（可自选）<span id="backtest-ml-picked-count" style="margin-left:8px;color:#9fb1c9;">已选 0</span></summary>
+                                <div class="form-help" style="margin-top:8px;">这里管理“训练好的模型资产”，点击“多策略对比”时会改为执行“多模型回测对比”。每个模型默认使用自己的训练币种、训练周期与模型参数。</div>
+                                <div class="inline-actions" style="margin-top:8px;">
+                                    <button type="button" class="btn btn-primary btn-sm" id="btn-backtest-ml-select-all">全选模型</button>
+                                    <button type="button" class="btn btn-primary btn-sm" id="btn-backtest-ml-select-none">清空模型</button>
+                                    <button type="button" class="btn btn-primary btn-sm" id="btn-backtest-ml-select-default">恢复默认</button>
+                                    <button type="button" class="btn btn-primary btn-sm" id="btn-backtest-ml-refresh-models">刷新模型</button>
+                                </div>
+                                <div id="backtest-ml-compare-list" class="backtest-compare-groups" style="margin-top:10px;"></div>
+                            </details>
                             <div class="backtest-register-options">
                                 <div class="form-group">
                                     <label>注册新实例资金占比</label>
@@ -3098,6 +3151,15 @@
     </div>
 
     <div id="notification" class="notification"></div>
+    <div id="ml-register-modal" class="modal-overlay" style="display:none;">
+        <div class="modal-box modal-box-lg">
+            <div class="modal-header">
+                <h3 id="ml-register-title">ML 策略训练与注册</h3>
+                <button type="button" class="modal-close" id="ml-register-close">×</button>
+            </div>
+            <div id="ml-register-body" style="padding:4px 0;">加载中...</div>
+        </div>
+    </div>
 
     <script charset="utf-8" src="{{ static_asset_url('js/altcoin_radar.js') }}"></script>
     <script charset="utf-8" src="{{ static_asset_url('js/app.js') }}"></script>

@@ -394,6 +394,43 @@ def _resolve_cost_rates(commission_rate: float, slippage_bps: float) -> tuple[fl
     )
 
 
+def _resolve_ml_model_path(params: Optional[Dict[str, Any]] = None) -> str:
+    payload = dict(params or {})
+    model_path = str(payload.get("model_path", "")).strip()
+    if model_path and Path(model_path).exists():
+        return model_path
+    candidates = [
+        Path(model_path) if model_path else None,
+        Path("models/ml_signal_xgb.json"),
+        Path(__file__).resolve().parents[2] / "models" / "ml_signal_xgb.json",
+    ]
+    return next((str(path) for path in candidates if path and path.exists()), "")
+
+
+def _build_ml_backtest_feature_frame(
+    df: pd.DataFrame,
+    model: Any,
+    params: Optional[Dict[str, Any]] = None,
+) -> pd.DataFrame:
+    feat_df = build_feature_frame(df).copy()
+    payload = dict(params or {})
+    requested_features = [
+        str(col).strip()
+        for col in (payload.get("feature_columns") or [])
+        if str(col).strip()
+    ]
+    model_features = [
+        str(col).strip()
+        for col in (getattr(model, "feature_names", None) or [])
+        if str(col).strip()
+    ]
+    feature_names = requested_features or model_features or list(feat_df.columns)
+    for col in feature_names:
+        if col not in feat_df.columns:
+            feat_df[col] = 0.0
+    return feat_df.reindex(columns=feature_names).fillna(0.0)
+
+
 def _annual_factor(timeframe: str) -> int:
     tf = (timeframe or "1d")
     unit = tf[-1]
@@ -1043,6 +1080,19 @@ def _pairs_candidate_symbols(
     return candidates
 
 
+def _with_backtest_request_overrides(
+    strategy: str,
+    params: Optional[Dict[str, Any]] = None,
+    *,
+    pair_symbol: Optional[str] = None,
+) -> Dict[str, Any]:
+    resolved = dict(params or get_strategy_defaults(strategy) or {})
+    normalized_pair = _normalize_symbol(pair_symbol)
+    if strategy == "PairsTradingStrategy" and normalized_pair:
+        resolved["pair_symbol"] = normalized_pair
+    return resolved
+
+
 def _build_pairs_backtest_components(
     primary_df: pd.DataFrame,
     market_bundle: Dict[str, pd.DataFrame],
@@ -1331,6 +1381,7 @@ def _optimize_strategy_on_df(
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
     exit_template: Optional[str] = None,
+    base_params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if strategy not in _BACKTEST_OPTIMIZATION_GRIDS:
         raise ValueError(f"暂不支持 {strategy} 参数优化")
@@ -1350,9 +1401,10 @@ def _optimize_strategy_on_df(
     objective_key = _normalize_optimize_objective(objective)
     trials: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
+    static_params = dict(base_params or {})
 
     for combo in combo_iter:
-        params = {keys[idx]: combo[idx] for idx in range(len(keys))}
+        params = {**static_params, **{keys[idx]: combo[idx] for idx in range(len(keys))}}
         trial_stop_loss = _safe_positive_pct(params.get("stop_loss_pct"))
         trial_take_profit = _safe_positive_pct(params.get("take_profit_pct"))
         effective_stop_loss = trial_stop_loss if trial_stop_loss is not None else _safe_positive_pct(stop_loss_pct)
@@ -1997,21 +2049,14 @@ def _build_positions_v2(strategy: str, df: pd.DataFrame, params: Optional[Dict[s
         except ImportError:
             raise HTTPException(status_code=400, detail="MLXGBoostStrategy 需要安装 xgboost")
 
-        model_path = str(params.get("model_path", ""))
-        if not model_path or not Path(model_path).exists():
-            candidates = [
-                Path(model_path) if model_path else None,
-                Path("models/ml_signal_xgb.json"),
-                Path(__file__).resolve().parents[2] / "models" / "ml_signal_xgb.json",
-            ]
-            model_path = next((str(p) for p in candidates if p and p.exists()), "")
+        model_path = _resolve_ml_model_path(params)
         if not model_path:
             raise HTTPException(status_code=400, detail="MLXGBoostStrategy 模型文件不存在")
 
         model = xgb.Booster()
         model.load_model(model_path)
-        feat_df = build_feature_frame(df)
-        proba = model.predict(xgb.DMatrix(feat_df.values, feature_names=list(feat_df.columns)))
+        feat_df = _build_ml_backtest_feature_frame(df, model, params)
+        proba = model.predict(xgb.DMatrix(feat_df, feature_names=list(feat_df.columns)))
         proba = pd.Series(proba, index=df.index).clip(0.0, 1.0)
         threshold_ml = float(params.get("threshold", 0.55))
         short_threshold = float(params.get("short_threshold", max(0.0, 1.0 - threshold_ml)))
@@ -2672,20 +2717,13 @@ def _build_positions_legacy(strategy: str, df: pd.DataFrame, params: Optional[Di
             import xgboost as xgb  # noqa: F401
         except ImportError:
             raise HTTPException(status_code=400, detail="MLXGBoostStrategy 需要安装 xgboost")
-        model_path = str(params.get("model_path", ""))
-        if not model_path or not Path(model_path).exists():
-            candidates = [
-                Path(model_path) if model_path else None,
-                Path("models/ml_signal_xgb.json"),
-                Path(__file__).resolve().parents[2] / "models" / "ml_signal_xgb.json",
-            ]
-            model_path = next((str(p) for p in candidates if p and p.exists()), "")
+        model_path = _resolve_ml_model_path(params)
         if not model_path:
             raise HTTPException(status_code=400, detail="MLXGBoostStrategy 模型文件不存在")
         model = xgb.Booster()
         model.load_model(model_path)
-        feat_df = build_feature_frame(df)
-        proba = model.predict(xgb.DMatrix(feat_df.values, feature_names=list(feat_df.columns)))
+        feat_df = _build_ml_backtest_feature_frame(df, model, params)
+        proba = model.predict(xgb.DMatrix(feat_df, feature_names=list(feat_df.columns)))
         proba = pd.Series(proba, index=df.index).clip(0.0, 1.0)
         threshold_ml = float(params.get("threshold", 0.55))
         position = (proba >= threshold_ml).astype(float)
@@ -3830,6 +3868,7 @@ async def compare_backtests(
         "WhaleActivityStrategy,FamaFactorArbitrageStrategy"
     ),
     symbol: str = "BTC/USDT",
+    pair_symbol: Optional[str] = None,
     timeframe: str = "1h",
     initial_capital: float = 10000,
     commission_rate: float = 0.0004,
@@ -3922,17 +3961,20 @@ async def compare_backtests(
             "error": None,
             "df": None,
             "market_bundle": None,
+            "base_params": None,
         }
         try:
             loop_df = common_df
             loop_bundle = None
             resolved_loop_symbol = _normalize_symbol(symbol) or symbol
+            base_params = _with_backtest_request_overrides(strategy, pair_symbol=pair_symbol)
+            entry["base_params"] = base_params
             if strategy in {"FamaFactorArbitrageStrategy", "PairsTradingStrategy"}:
                 loop_df, loop_bundle, resolved_loop_symbol = await _load_backtest_inputs(
                     strategy=strategy,
                     symbol=symbol,
                     timeframe=timeframe,
-                    params=get_strategy_defaults(strategy),
+                    params=base_params,
                     start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
                     end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
                 )
@@ -3954,7 +3996,7 @@ async def compare_backtests(
                 commission_rate=max(0.0, float(commission_rate or 0.0)),
                 slippage_bps=max(0.0, float(slippage_bps or 0.0)),
                 market_bundle=loop_bundle,
-                params=get_strategy_defaults(strategy),
+                params=base_params,
                 use_stop_take=bool(use_stop_take),
                 stop_loss_pct=stop_loss_pct,
                 take_profit_pct=take_profit_pct,
@@ -4025,6 +4067,7 @@ async def compare_backtests(
                     stop_loss_pct=stop_loss_pct,
                     take_profit_pct=take_profit_pct,
                     exit_template=_engine_exit_template(requested_exit_template),
+                    base_params=entry.get("base_params"),
                 )
                 if opt.get("best"):
                     entry["metrics"] = _decorate_compare_metrics(
@@ -4213,6 +4256,7 @@ async def run_backtest_custom(
 async def optimize_backtest(
     strategy: str = "MAStrategy",
     symbol: str = "BTC/USDT",
+    pair_symbol: Optional[str] = None,
     timeframe: str = "1h",
     initial_capital: float = 10000,
     commission_rate: float = 0.0004,
@@ -4222,6 +4266,7 @@ async def optimize_backtest(
     objective: str = "total_return",
     max_trials: int = _BACKTEST_OPTIMIZE_DEFAULT_TRIALS,
     include_all_trials: bool = True,
+    params_json: Optional[str] = None,
     exit_template: Optional[str] = _DEFAULT_BACKTEST_EXIT_TEMPLATE,
     use_stop_take: bool = False,
     stop_loss_pct: Optional[float] = None,
@@ -4230,11 +4275,24 @@ async def optimize_backtest(
     requested_exit_template = _normalize_requested_exit_template(exit_template)
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
     parsed_end = _parse_backtest_bound(end_date, bound="end_date")
+    custom_params: Optional[Dict[str, Any]] = None
+    if params_json:
+        try:
+            parsed = json.loads(params_json)
+        except Exception:
+            raise HTTPException(status_code=400, detail="params_json 不是合法JSON")
+        if not isinstance(parsed, dict):
+            raise HTTPException(status_code=400, detail="params_json 必须是对象JSON")
+        custom_params = parsed
+    base_params = _with_backtest_request_overrides(strategy, pair_symbol=pair_symbol)
+    if custom_params:
+        base_params.update(custom_params)
 
     df, market_bundle, resolved_symbol = await _load_backtest_inputs(
         strategy=strategy,
         symbol=symbol,
         timeframe=timeframe,
+        params=base_params,
         start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
         end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
     )
@@ -4281,6 +4339,7 @@ async def optimize_backtest(
             stop_loss_pct=stop_loss_pct,
             take_profit_pct=take_profit_pct,
             exit_template=_engine_exit_template(requested_exit_template),
+            base_params=base_params,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -4291,6 +4350,7 @@ async def optimize_backtest(
         "timeframe": timeframe,
         "requested_start_date": start_date,
         "requested_end_date": end_date,
+        "params": dict(base_params or {}),
         "data_points": int(len(df)),
         "start_date": df.index[0].isoformat(),
         "end_date": df.index[-1].isoformat(),
@@ -4329,6 +4389,7 @@ async def optimize_backtest(
 async def export_backtest_report(
     strategy: str = "MAStrategy",
     symbol: str = "BTC/USDT",
+    pair_symbol: Optional[str] = None,
     timeframe: str = "1h",
     initial_capital: float = 10000,
     commission_rate: float = 0.0004,
@@ -4336,6 +4397,7 @@ async def export_backtest_report(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     format: str = "xlsx",
+    params_json: Optional[str] = None,
     exit_template: Optional[str] = _DEFAULT_BACKTEST_EXIT_TEMPLATE,
     use_stop_take: bool = False,
     stop_loss_pct: Optional[float] = None,
@@ -4344,10 +4406,20 @@ async def export_backtest_report(
     requested_exit_template = _normalize_requested_exit_template(exit_template)
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
     parsed_end = _parse_backtest_bound(end_date, bound="end_date")
+    base_params = _with_backtest_request_overrides(strategy, pair_symbol=pair_symbol)
+    if params_json:
+        try:
+            parsed = json.loads(params_json)
+        except Exception:
+            raise HTTPException(status_code=400, detail="params_json 不是合法JSON")
+        if not isinstance(parsed, dict):
+            raise HTTPException(status_code=400, detail="params_json 必须是对象JSON")
+        base_params.update(parsed)
     df, market_bundle, resolved_symbol = await _load_backtest_inputs(
         strategy=strategy,
         symbol=symbol,
         timeframe=timeframe,
+        params=base_params,
         start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
         end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
     )
@@ -4376,7 +4448,7 @@ async def export_backtest_report(
         commission_rate=max(0.0, float(commission_rate or 0.0)),
         slippage_bps=max(0.0, float(slippage_bps or 0.0)),
         market_bundle=market_bundle,
-        params=get_strategy_defaults(strategy),
+        params=base_params,
         use_stop_take=bool(use_stop_take),
         stop_loss_pct=stop_loss_pct,
         take_profit_pct=take_profit_pct,

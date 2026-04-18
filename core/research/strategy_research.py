@@ -683,6 +683,89 @@ def _build_premium_snapshot_research_features() -> Dict[str, Any]:
     }
 
 
+async def _build_coinglass_research_features(symbol: str) -> Dict[str, Any]:
+    if not bool(getattr(settings, "COINGLASS_ENABLED", False) and getattr(settings, "COINGLASS_INCLUDE_STRATEGIES", False)):
+        return {
+            "features": {},
+            "summary": {
+                "available": False,
+                "available_sources": [],
+                "snapshot": {},
+                "reason": "coinglass_strategy_features_disabled",
+            },
+        }
+
+    try:
+        from core.data.coinglass_feature_builder import (  # noqa: PLC0415
+            build_coinglass_runtime_context,
+            load_latest_derivatives_snapshot,
+        )
+    except Exception as exc:
+        return {
+            "features": {},
+            "summary": {
+                "available": False,
+                "available_sources": [],
+                "snapshot": {},
+                "error": str(exc),
+            },
+        }
+
+    try:
+        snapshot = await load_latest_derivatives_snapshot(symbol)
+    except Exception as exc:
+        return {
+            "features": {},
+            "summary": {
+                "available": False,
+                "available_sources": [],
+                "snapshot": {},
+                "error": str(exc),
+            },
+        }
+
+    if not isinstance(snapshot, dict) or not snapshot:
+        return {
+            "features": {},
+            "summary": {
+                "available": False,
+                "available_sources": [],
+                "snapshot": {},
+                "reason": "coinglass_snapshot_unavailable",
+            },
+        }
+
+    context = build_coinglass_runtime_context(snapshot)
+    features: Dict[str, float] = {
+        "coinglass_available": 1.0,
+        "coinglass_crowding_score": _safe_float_value(snapshot.get("crowding_score")),
+        "coinglass_squeeze_score": _safe_float_value(snapshot.get("squeeze_score")),
+        "coinglass_distribution_score": _safe_float_value(snapshot.get("distribution_score")),
+        "coinglass_oi_change_1h": _safe_float_value(snapshot.get("oi_change_1h")),
+        "coinglass_oi_change_24h": _safe_float_value(snapshot.get("oi_change_24h")),
+        "coinglass_funding_rate": _safe_float_value(snapshot.get("funding_rate")),
+        "coinglass_basis_pct": _safe_float_value(snapshot.get("basis_pct")),
+        "coinglass_long_short_ratio": _safe_float_value(snapshot.get("long_short_ratio")),
+        "coinglass_taker_buy_sell_imbalance": _safe_float_value(snapshot.get("taker_buy_sell_imbalance")),
+        "coinglass_orderbook_imbalance_score": _safe_float_value(snapshot.get("orderbook_imbalance_score")),
+        "coinglass_depth_thinness_score": _safe_float_value(snapshot.get("depth_thinness_score")),
+        "coinglass_context_crowding_warning": 1.0 if bool(context.get("crowding_warning")) else 0.0,
+    }
+    features.update(_flatten_numeric_features("coinglass_context", context))
+    features.update(_flatten_numeric_features("coinglass_payload", snapshot.get("payload") or {}))
+
+    return {
+        "features": features,
+        "summary": {
+            "available": True,
+            "available_sources": ["coinglass"],
+            "snapshot": snapshot,
+            "latest_timestamp": snapshot.get("timestamp"),
+            "context": context,
+        },
+    }
+
+
 def _preflight_timeframes(config: "ResearchConfig") -> List[str]:
     requested = list(config.cross_exchange_timeframes or config.timeframes or [])
     minute_plus = [tf for tf in requested if (_timeframe_seconds(tf) or 0) >= 60 and tf in _RESAMPLE_RULES]
@@ -1118,6 +1201,15 @@ async def _build_research_enrichment(
         }
 
     try:
+        coinglass_bundle = await _build_coinglass_research_features(symbol)
+    except Exception as exc:
+        logger.warning(f"coinglass research enrichment unavailable for {symbol}: {exc}")
+        coinglass_bundle = {
+            "features": {},
+            "summary": {"available": False, "available_sources": [], "snapshot": {}, "error": str(exc)},
+        }
+
+    try:
         cross_sectional_bundle = await _build_cross_sectional_research_features(
             exchange=exchange,
             symbol=symbol,
@@ -1141,8 +1233,33 @@ async def _build_research_enrichment(
 
     constant_features: Dict[str, float] = {}
     constant_features.update(dict(macro_bundle.get("features") or {}))
-    constant_features.update(dict(premium_bundle.get("features") or {}))
+    premium_features = dict(premium_bundle.get("features") or {})
+    premium_features.update(dict(coinglass_bundle.get("features") or {}))
+    constant_features.update(premium_features)
     constant_features.update(dict(cross_sectional_bundle.get("constant_features") or {}))
+
+    premium_summary = dict(premium_bundle.get("summary") or {})
+    coinglass_summary = dict(coinglass_bundle.get("summary") or {})
+    premium_sources = list(premium_summary.get("available_sources") or [])
+    premium_sources.extend(list(coinglass_summary.get("available_sources") or []))
+    premium_sources = list(dict.fromkeys(str(item or "").strip() for item in premium_sources if str(item or "").strip()))
+    premium_snapshots = dict(premium_summary.get("snapshots") or {})
+    if isinstance(coinglass_summary.get("snapshot"), dict) and coinglass_summary.get("snapshot"):
+        premium_snapshots["coinglass"] = dict(coinglass_summary.get("snapshot") or {})
+    premium_summary.update(
+        {
+            "available": bool(premium_features),
+            "available_sources": premium_sources,
+            "available_count": int(len(premium_sources)),
+            "snapshots": premium_snapshots,
+        }
+    )
+    if coinglass_summary.get("latest_timestamp"):
+        premium_summary["coinglass_latest_timestamp"] = coinglass_summary.get("latest_timestamp")
+    if coinglass_summary.get("reason"):
+        premium_summary["coinglass_reason"] = coinglass_summary.get("reason")
+    if coinglass_summary.get("error"):
+        premium_summary["coinglass_error"] = coinglass_summary.get("error")
 
     time_series_features = cross_sectional_bundle.get("feature_frame")
     if not isinstance(time_series_features, pd.DataFrame):
@@ -1163,13 +1280,13 @@ async def _build_research_enrichment(
             "constant_features": constant_features,
             "time_series_features": time_series_features,
             "macro_summary": macro_bundle.get("summary") or {},
-            "premium_summary": premium_bundle.get("summary") or {},
+            "premium_summary": premium_summary,
             "cross_sectional_summary": cross_sectional_summary,
             "summary": {
                 "constant_feature_count": int(len(constant_features)),
                 "time_series_feature_count": time_series_feature_count,
                 "macro_available": bool((macro_bundle.get("summary") or {}).get("available")),
-                "premium_source_count": int(len((premium_bundle.get("summary") or {}).get("available_sources") or [])),
+                "premium_source_count": int(len(premium_sources)),
                 "cross_sectional_available": bool(cross_sectional_summary.get("available")),
                 "cross_sectional_timeframe": cross_sectional_summary.get("timeframe"),
                 "universe_size": int(cross_sectional_summary.get("universe_size") or 0),
@@ -2239,8 +2356,11 @@ def _run_purged_walk_forward(
                 sharpe_list.append(sr)
                 if (m.get("sharpe_ratio", 0.0) or 0.0) > 0:
                     positive_folds += 1
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                f"walk-forward fold {i} failed: strategy={strategy}, "
+                f"oos_bars={oos_end - oos_start}, error={exc}"
+            )
 
     n_folds = len(sharpe_list)
     consistency = (positive_folds / max(n_folds, 1)) if n_folds > 0 else None
@@ -2312,7 +2432,20 @@ def _validate_df(df: pd.DataFrame) -> pd.DataFrame:
     if missing_cols:
         raise ValueError(f"数据缺失字段: {','.join(missing_cols)}")
 
-    return out[["open", "high", "low", "close", "volume"]]
+    out = out[["open", "high", "low", "close", "volume"]]
+
+    # Sanitize corrupt bars: negative/zero prices, inverted candles, negative volume
+    n_before = len(out)
+    price_ok = (out["close"] > 0) & (out["open"] > 0) & (out["high"] > 0) & (out["low"] > 0)
+    candle_ok = out["high"] >= out["low"]
+    volume_ok = out["volume"] >= 0
+    mask = price_ok & candle_ok & volume_ok
+    out = out[mask]
+    n_removed = n_before - len(out)
+    if n_removed > 0:
+        logger.warning(f"_validate_df: removed {n_removed} corrupt bars ({n_removed/max(n_before,1)*100:.1f}%)")
+
+    return out
 
 
 def _resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:

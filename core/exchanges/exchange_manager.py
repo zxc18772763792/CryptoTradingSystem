@@ -246,6 +246,45 @@ class ExchangeManager:
 
         return results
 
+    async def reconnect_exchange(self, name: str, *, timeout_sec: Optional[float] = 20.0) -> bool:
+        """Attempt to reconnect a single exchange by name.
+
+        First tries calling ``connect()`` on the existing connector (cheap).
+        If that fails or the exchange was never initialized, falls back to
+        creating a fresh connector via ``_create_connector``.
+
+        Returns True if the exchange is connected after this call.
+        """
+        connector = self._exchanges.get(name)
+        if connector is not None:
+            # Fast path: try reconnecting the existing connector
+            try:
+                ok = await asyncio.wait_for(connector.connect(), timeout=timeout_sec)
+                if ok:
+                    logger.info(f"exchange_manager: {name} reconnected (fast path)")
+                    self._connected = any(e.is_connected for e in self._exchanges.values())
+                    return True
+            except Exception as exc:
+                logger.warning(f"exchange_manager: {name} fast-path reconnect failed: {exc}")
+
+        # Slow path: recreate the connector from config
+        base_config = EXCHANGE_CONFIGS.get(name)
+        if base_config is None:
+            logger.warning(f"exchange_manager: no config for {name}, cannot reconnect")
+            return False
+
+        runtime_type = self._resolve_default_type(name, base_config.default_type)
+        config = replace(base_config, default_type=runtime_type)
+        fresh = await self._create_connector(name, config, timeout_sec=timeout_sec)
+        if fresh:
+            self._exchanges[name] = fresh
+            self._connected = any(e.is_connected for e in self._exchanges.values())
+            logger.info(f"exchange_manager: {name} reconnected (fresh connector)")
+            return True
+
+        logger.warning(f"exchange_manager: {name} reconnect failed")
+        return False
+
     def get_supported_symbols(self, exchange_name: str) -> List[str]:
         """获取交易所支持的交易对"""
         exchange = self._exchanges.get(exchange_name)

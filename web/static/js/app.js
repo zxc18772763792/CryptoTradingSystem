@@ -32,6 +32,9 @@ const SUMMARY_BALANCES_SETTLE_TIMEOUT_MS=6500;
 const SUMMARY_BALANCES_TIMEOUT_MS=22000;
 const SUMMARY_TASK_REUSE_MAX_AGE_MS=12000;
 const KNOWN_STRATEGY_CATEGORIES=['趋势','震荡','动量','均值回归','突破','成交量','波动率','风险','统计套利','Fama因子','微观结构','套利','量化','ML','宏观','其他'];
+const STRATEGY_CATEGORY_ALIASES={机器学习:'ML',量化因子:'量化',量化多因子:'量化',多因子:'量化'};
+const STRATEGY_LIST_TIMEOUT_MS=20000;
+const STRATEGY_SUMMARY_TIMEOUT_MS=20000;
 const TRADING_ORDERS_TIMEOUT_MS=20000;
 const TRADING_OPEN_ORDERS_TIMEOUT_MS=25000;
 const TRADING_POSITIONS_TIMEOUT_MS=30000;
@@ -282,11 +285,27 @@ function strategyCatalogMap(){
 return Object.fromEntries((state.strategyCatalogRows||[]).map(row=>[String(row?.name||'').trim(),row]).filter(([name])=>Boolean(name)));
 }
 function normalizeStrategyCategory(category,fallback='其他'){
-const candidate=String(category||'').trim();
+const candidate=normalizeStrategyCategoryText(category);
 if(KNOWN_STRATEGY_CATEGORIES.includes(candidate))return candidate;
-const fallbackText=String(fallback||'').trim();
+const fallbackText=normalizeStrategyCategoryText(fallback);
 if(KNOWN_STRATEGY_CATEGORIES.includes(fallbackText))return fallbackText;
 return'其他';
+}
+function normalizeStrategyCategoryText(category){
+const raw=String(category||'').trim();
+if(!raw)return'';
+const repaired=repairPotentialMojibake(raw);
+return String(STRATEGY_CATEGORY_ALIASES[repaired]||repaired).trim();
+}
+function repairPotentialMojibake(value){
+const raw=String(value||'').trim();
+if(!raw)return'';
+if(/[\u4e00-\u9fff]/.test(raw))return raw;
+try{
+  const repaired=decodeURIComponent(escape(raw));
+  if(repaired&&/[\u4e00-\u9fff]/.test(repaired))return repaired;
+}catch{}
+return raw;
 }
 function mergeStrategyCatalogRows(rows){
 const normalized=(Array.isArray(rows)?rows:[]).map(row=>{
@@ -377,7 +396,7 @@ for(const row of supported){
   const groupLabel=mapStrategyCatToBacktestGroup(row.category||'其他');
   (grouped[groupLabel]||(grouped[groupLabel]=[])).push(row);
 }
-const groupOrder=['趋势类','震荡类','动量类','均值回归类','突破类','成交量类','波动率类','风险类','统计套利类','Fama因子类','微观结构类','套利类','ML类','宏观类','其他'];
+const groupOrder=['趋势类','震荡类','动量类','均值回归类','突破类','成交量类','波动率类','风险类','统计套利类','Fama因子类','微观结构类','套利类','量化类','ML类','宏观类','其他'];
 sel.innerHTML=groupOrder.filter(group=>Array.isArray(grouped[group])&&grouped[group].length).map(group=>{
   const options=grouped[group].sort((a,b)=>String(a.name).localeCompare(String(b.name),'zh-CN')).map(row=>{
     const usage=String(row.usage||'').trim();
@@ -1200,11 +1219,72 @@ const payload={
 const result=await api('/ml/jobs/train',{method:'POST',timeoutMs:180000,body:JSON.stringify(payload)});
 mlWorkflowState.lastTrainResult=result;
 if(outputEl){
-  const metrics=result?.result?.metrics||result?.metrics||{};
-  outputEl.textContent=`训练完成\nmodel_id: ${result?.model_id||result?.result?.model_id||'-'}\nAUC: ${Number(metrics?.auc||0).toFixed(4)}\n特征数: ${(Array.isArray(result?.feature_columns)?result.feature_columns.length:draft.trainParameters.feature_columns.length)}`;
+  outputEl.textContent=renderMlTrainResultText(result,draft);
 }
-await refreshMlRegisterModelSelect(host, String(result?.model_id||result?.result?.model_id||'').trim());
+const resolvedModelId=resolveMlTrainResultModelId(result);
+await refreshMlRegisterModelSelect(host, String(result?.status||'').trim()==='completed'?resolvedModelId:'');
 return result;
+}
+function resolveMlTrainResultModelId(result){
+return String(result?.model_id||result?.result?.model_id||result?.result?.model?.model_id||result?.model?.model_id||'').trim();
+}
+function resolveMlTrainResultMetrics(result){
+return result?.result?.metrics||result?.metrics||result?.result?.model?.metrics||result?.model?.metrics||{};
+}
+function resolveMlTrainResultFeatureCount(result,fallbackCount=0){
+const featureColumns=result?.result?.model?.feature_columns||result?.feature_columns||result?.result?.feature_columns||result?.model?.feature_columns;
+return Array.isArray(featureColumns)?featureColumns.length:Number(fallbackCount||0);
+}
+function renderMlTrainResultText(result,draft){
+const status=String(result?.status||'').trim();
+const modelId=resolveMlTrainResultModelId(result)||'-';
+const metrics=resolveMlTrainResultMetrics(result);
+const gate=result?.result?.gate||result?.gate||result?.result?.model?.gate||result?.model?.gate||{};
+const aucText=Number.isFinite(Number(metrics?.auc))?Number(metrics.auc).toFixed(4):'--';
+const featureCount=resolveMlTrainResultFeatureCount(result,draft?.trainParameters?.feature_columns?.length||0);
+if(status==='completed'){
+  return[`训练完成`,`model_id: ${modelId}`,`AUC: ${aucText}`,`特征数: ${featureCount}`].join('\n');
+}
+const reasons=Array.isArray(gate?.reasons)?gate.reasons.filter(Boolean):[];
+const lines=['训练未通过',`状态: ${status||'failed'}`,`model_id: ${modelId}`,`AUC: ${aucText}`,`特征数: ${featureCount}`];
+if(reasons.length)lines.push(`原因: ${reasons.join('；')}`);
+if(result?.error)lines.push(`详情: ${String(result.error)}`);
+return lines.join('\n');
+}
+function bindMlNumericInputs(host=document){
+const numericConfigs={
+  'ml-train-days':{min:30,max:3650,step:1,decimals:0},
+  'ml-forward-bars':{min:1,max:96,step:1,decimals:0},
+  'ml-test-size':{min:0.05,max:0.4,step:0.01,decimals:2},
+  'ml-n-estimators':{min:50,max:2000,step:10,decimals:0},
+  'ml-max-depth':{min:2,max:12,step:1,decimals:0},
+  'ml-learning-rate':{min:0.001,max:1,step:0.001,decimals:3},
+  'ml-min-rows':{min:120,max:50000,step:10,decimals:0},
+  'ml-threshold':{min:0.5,max:0.99,step:0.01,decimals:2},
+  'ml-stop-loss':{min:0,max:1,step:0.001,decimals:3},
+  'ml-take-profit':{min:0,max:1,step:0.001,decimals:3},
+  'ml-register-allocation':{min:0,max:1,step:0.01,decimals:2},
+  };
+Object.entries(numericConfigs).forEach(([id,config])=>{
+  const input=host.querySelector(`#${id}`);
+  if(!(input instanceof HTMLInputElement)||input.dataset.mlNumericBound==='1')return;
+  input.dataset.mlNumericBound='1';
+  const applyNormalizedValue=()=>{
+    const raw=String(input.value||'').trim();
+    if(!raw)return;
+    let value=Number(raw);
+    if(!Number.isFinite(value))return;
+    value=Math.max(config.min,Math.min(config.max,value));
+    if(config.decimals===0){
+      input.value=String(Math.round(value));
+      return;
+    }
+    input.value=value.toFixed(config.decimals).replace(/0+$/,'').replace(/\.$/,'');
+  };
+  input.addEventListener('focus',()=>{try{input.select();}catch{}});
+  input.addEventListener('blur',applyNormalizedValue);
+  input.addEventListener('change',applyNormalizedValue);
+});
 }
 async function registerMlStrategyFromModal(host=document){
 const draft=collectMlRegisterDraft(host);
@@ -1330,8 +1410,9 @@ body.querySelector('#btn-ml-train-run')?.addEventListener('click',async()=>{
   const btn=body.querySelector('#btn-ml-train-run');
   try{
     if(btn){btn.disabled=true;btn.textContent='训练中...';}
-    await trainMlModelFromModal(body);
-    notify('ML 模型训练完成');
+    const result=await trainMlModelFromModal(body);
+    if(String(result?.status||'').trim()==='completed')notify('ML 模型训练完成');
+    else notify('ML 训练未通过质量门禁，请调整训练窗口、特征或参数后重试',true);
   }catch(err){notify(`ML 训练失败: ${err.message}`,true);}
   finally{if(btn){btn.disabled=false;btn.textContent='开始训练';}}
 });
@@ -1343,6 +1424,7 @@ body.querySelector('#btn-ml-register-strategy')?.addEventListener('click',async(
   }catch(err){notify(`ML 策略注册失败: ${err.message}`,true);}
   finally{if(btn){btn.disabled=false;btn.textContent='注册到策略池';}}
 });
+bindMlNumericInputs(body);
 updateMlRegisterModelMeta(body);
 updateMlRegisterDraftMeta(body);
 }
@@ -2167,7 +2249,7 @@ async function cancelOrder(id,symbol,exchange){try{await api(`/trading/order/${i
 
 async function loadStrategies(){return runRequestSingleFlight('strategies',async()=>{try{
 await Promise.allSettled([ensureStrategyCatalog(),ensureBacktestStrategySelect()]);
-const d=await api('/strategies/list');
+const d=await api('/strategies/list',{timeoutMs:STRATEGY_LIST_TIMEOUT_MS});
 const availableTypes=Array.isArray(d?.strategies)?d.strategies:[];
 state.availableStrategyTypes=availableTypes;
 state.strategies=d.registered||[];
@@ -2439,7 +2521,7 @@ async function saveAllocation(name){const i=document.querySelector(`input[data-a
 async function toggleStrategy(name,st){const act=st==='running'?'stop':'start';try{await api(`/strategies/${encodeURIComponent(name)}/${act}`,{method:'POST',timeoutMs:15000});notify(`策略已${act==='start'?'启动':'停止'}`);await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`策略${act}失败: ${e.message}`,true);}}
 
 async function loadStrategySummary(){return runRequestSingleFlight('strategySummary',async()=>{try{
-const d=await api('/strategies/summary?limit=20');
+const d=await api('/strategies/summary?limit=20',{timeoutMs:STRATEGY_SUMMARY_TIMEOUT_MS});
 state.summary=d;
 const running=d.running||[],signals=(d.recent_signals||[]).slice(0,12),stale=(d.stale_running||[]);
 const perf=d.strategy_performance||{};
@@ -2498,7 +2580,7 @@ lastErr=e.message;
 }
 }
 try{
-const s=await api('/strategies/summary?limit=20');
+const s=await api('/strategies/summary?limit=20',{timeoutMs:STRATEGY_SUMMARY_TIMEOUT_MS});
 renderStrategyHealthAlerts(s,state.strategyHealth);
 renderStrategyConsolePanel();
 out.textContent=JSON.stringify({fallback:'summary',running_count:(s.running||[]).length,stale_running:s.stale_running||[],runtime:s.runtime||{},timestamp:s.timestamp||new Date().toISOString(),note:'健康监控接口不可用，已降级显示策略摘要'},null,2);
@@ -3964,7 +4046,7 @@ return{items,groups,byValue,orderIndex};
 function backtestCompareCatalog(){if(!backtestUIState.compareCatalog)backtestUIState.compareCatalog=getBacktestStrategyCatalogFromSelect();return backtestUIState.compareCatalog||{items:[],groups:[],byValue:{},orderIndex:{}};}
 function backtestCompareCurrentSource(){return String(document.getElementById('backtest-compare-source')?.value||'library').trim()||'library';}
 function mapStrategyCatToBacktestGroup(cat){
-const c=String(cat||'').trim();
+const c=normalizeStrategyCategoryText(cat);
 if(['趋势'].includes(c))return'趋势类';
 if(['震荡'].includes(c))return'震荡类';
 if(['动量'].includes(c))return'动量类';
@@ -3977,6 +4059,7 @@ if(['统计套利'].includes(c))return'统计套利类';
 if(['Fama因子'].includes(c))return'Fama因子类';
 if(['微观结构'].includes(c))return'微观结构类';
 if(['套利'].includes(c))return'套利类';
+if(['量化'].includes(c))return'量化类';
 if(['ML'].includes(c))return'ML类';
 if(['宏观'].includes(c))return'宏观类';
 return'其他';
@@ -3984,7 +4067,7 @@ return'其他';
 async function getRegisteredStrategyTypesForCompare(){
 if(!Array.isArray(state.strategies)||!state.strategies.length){
   try{
-    const d=await api('/strategies/list',{timeoutMs:12000});
+const d=await api('/strategies/list',{timeoutMs:STRATEGY_LIST_TIMEOUT_MS});
     state.strategies=Array.isArray(d?.registered)?d.registered:[];
   }catch(e){
     console.error(e);
@@ -4012,7 +4095,7 @@ for(const it of (items||[])){
   const g=String(it.groupLabel||'其他');
   (groupsMap[g]||(groupsMap[g]=[])).push(it);
 }
-const groupOrder=[...(catalog.groups||[]).map(g=>g.label), '其他'].filter((v,i,a)=>a.indexOf(v)===i);
+const groupOrder=[...(catalog.groups||[]).map(g=>g.label),'量化类','其他'].filter((v,i,a)=>a.indexOf(v)===i);
 const html=groupOrder.filter(g=>Array.isArray(groupsMap[g])&&groupsMap[g].length).map(g=>{
   const rows=(groupsMap[g]||[]).sort((a,b)=>{
     const ai=Number(catalog.orderIndex?.[a.value]??9999),bi=Number(catalog.orderIndex?.[b.value]??9999);
@@ -4069,7 +4152,7 @@ if(src==='registered'){
   }
   if(!available.length){
     try{
-      const d=await api('/strategies/list',{timeoutMs:12000});
+const d=await api('/strategies/list',{timeoutMs:STRATEGY_LIST_TIMEOUT_MS});
       state.availableStrategyTypes=Array.isArray(d?.strategies)?d.strategies:[];
       if(Array.isArray(d?.registered))state.strategies=d.registered;
       available=state.availableStrategyTypes;
@@ -4984,6 +5067,8 @@ try{
     r.model_id=String(row.model_id||'').trim();
     r.display_name=backtestCompareEntryTitle(row);
     r.model_label=String(row.model_label||'').trim();
+    if(Number.isFinite(Number(params?.threshold)))r.threshold=Number(params.threshold);
+    if(Array.isArray(params?.feature_columns))r.feature_columns=params.feature_columns;
   }
   renderBacktest(r);
   const box=document.getElementById('backtest-results');

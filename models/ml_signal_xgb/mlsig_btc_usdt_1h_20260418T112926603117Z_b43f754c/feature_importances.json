@@ -1,0 +1,10 @@
+{
+  "bb_lower": 0.043052,
+  "bb_mid": 0.047797,
+  "bb_upper": 0.046437,
+  "ema_fast": 0.0896,
+  "ema_slow": 0.050927,
+  "macd_hist": 0.039187,
+  "macd_signal": 0.064016,
+  "volume_ratio": 0.618984
+}
