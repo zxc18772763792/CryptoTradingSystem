@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+﻿from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -43,7 +43,7 @@ class RSIStrategy(StrategyBase):
         current_rsi = float(rsi.iloc[-1])
         prev_rsi = float(rsi.iloc[-2])
         current_price = float(data["close"].iloc[-1])
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
 
         oversold = float(self.params["oversold"])
@@ -197,7 +197,7 @@ class RSIDivergenceStrategy(StrategyBase):
         rsi_troughs = self._find_troughs(rsi, order=order)
 
         current_price = float(data["close"].iloc[-1])
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
 
         signals: List[Signal] = []

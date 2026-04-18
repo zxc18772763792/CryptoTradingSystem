@@ -658,8 +658,12 @@ class StrategyManager:
             # Conflict detection: drop weaker conflicting signals within the window
             prior = self._recent_signal_by_symbol.get(signal.symbol)
             if prior is not None:
-                age = (signal.timestamp - prior.timestamp).total_seconds()
-                if age <= _SIGNAL_CONFLICT_WINDOW_SECONDS:
+                try:
+                    age = (signal.timestamp - prior.timestamp).total_seconds()
+                except TypeError:
+                    # Mixed naive/aware timestamps — treat as unrelated signals
+                    age = _SIGNAL_CONFLICT_WINDOW_SECONDS + 1
+                if 0 <= age <= _SIGNAL_CONFLICT_WINDOW_SECONDS:
                     prior_side = prior.signal_type.value
                     new_side = signal.signal_type.value
                     buy_sides = {"buy", "close_short"}

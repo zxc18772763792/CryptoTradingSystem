@@ -1,7 +1,7 @@
 """
 布林带策略
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import pandas as pd
 import numpy as np
@@ -48,7 +48,7 @@ class BollingerBandsStrategy(StrategyBase):
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         """生成交易信号"""
-        if data.empty or len(data) < self.params["period"]:
+        if data.empty or len(data) < self.params["period"] + 1:
             return []
 
         signals = []
@@ -64,11 +64,14 @@ class BollingerBandsStrategy(StrategyBase):
         prev_upper = upper.iloc[-2]
         prev_lower = lower.iloc[-2]
 
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
 
         # 计算价格在布林带中的位置
-        bb_position = (current_close - current_lower) / (current_upper - current_lower)
+        band_width = current_upper - current_lower
+        if band_width <= 0:
+            return []
+        bb_position = (current_close - current_lower) / band_width
 
         # 价格触及下轨后反弹 - 买入信号
         if prev_close <= prev_lower and current_close > current_lower:
@@ -177,7 +180,7 @@ class BollingerSqueezeStrategy(StrategyBase):
         breakout_threshold = max(0.0, float(self.params.get("breakout_threshold", 0.0) or 0.0))
         stop_loss_pct = max(0.0, float(self.params.get("stop_loss_pct", 0.0) or 0.0))
 
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
 
         # Detect a breakout only after the previous bar was in a squeeze regime.

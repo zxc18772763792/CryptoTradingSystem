@@ -1,7 +1,7 @@
 """
 均值回归策略
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import pandas as pd
 import numpy as np
@@ -61,7 +61,7 @@ class MeanReversionStrategy(StrategyBase):
         exit_z = max(0.0, float(self.params.get("exit_z_score", 0.0)))
 
         current_price = data["close"].iloc[-1]
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
 
         # Buy when price recovers from an oversold z-score extreme.
@@ -180,7 +180,7 @@ class BollingerMeanReversionStrategy(StrategyBase):
         prev_upper = upper.iloc[-2]
         prev_lower = lower.iloc[-2]
 
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
 
         # 价格从下轨反弹

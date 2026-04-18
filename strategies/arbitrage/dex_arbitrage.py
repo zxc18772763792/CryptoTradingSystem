@@ -1,7 +1,7 @@
 """
 DEX套利策略
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import asyncio
 from decimal import Decimal
@@ -121,7 +121,7 @@ class DEXArbitrageStrategy(StrategyBase):
                         "sell_quote": sell_quote,
                         "profit": profit,
                         "profit_pct": profit_pct,
-                        "timestamp": datetime.now(),
+                        "timestamp": datetime.now(timezone.utc),
                     })
 
         return opportunities

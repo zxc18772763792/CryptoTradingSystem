@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -75,7 +75,7 @@ class MarketSentimentStrategy(StrategyBase):
             "fear_greed_index": int(max(0, min(100, fear_greed_index))),
             "social_sentiment": float(social_sentiment or 0.0),
             "news_sentiment": float(news_sentiment or 0.0),
-            "timestamp": datetime.now(),
+            "timestamp": datetime.now(timezone.utc),
         }
 
     async def _fetch_fear_greed_index(self) -> Optional[int]:
@@ -149,7 +149,7 @@ class MarketSentimentStrategy(StrategyBase):
         signals: List[Signal] = []
         fgi = int(self._sentiment_data.get("fear_greed_index", 50))
         momentum = float(self._sentiment_data.get("social_sentiment", 0.0) or 0.0)
-        timestamp = self._sentiment_data.get("timestamp", datetime.now())
+        timestamp = self._sentiment_data.get("timestamp", datetime.now(timezone.utc))
 
         current_price = float(data["close"].iloc[-1]) if not data.empty else 0.0
         symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
@@ -273,7 +273,7 @@ class SocialSentimentStrategy(StrategyBase):
             "mentions": int(max(0, mentions)),
             "sentiment_score": float(max(-1.0, min(1.0, sentiment_score))),
             "trending_score": float(max(0.0, min(1.0, trending_score))),
-            "timestamp": datetime.now(),
+            "timestamp": datetime.now(timezone.utc),
         }
 
     @staticmethod
@@ -357,7 +357,7 @@ class SocialSentimentStrategy(StrategyBase):
         mentions = int(self._social_data.get("mentions", 0))
         sentiment = float(self._social_data.get("sentiment_score", 0.0))
         trending = float(self._social_data.get("trending_score", 0.0))
-        timestamp = self._social_data.get("timestamp", datetime.now())
+        timestamp = self._social_data.get("timestamp", datetime.now(timezone.utc))
 
         if mentions < int(self.params["min_mentions"]):
             return []

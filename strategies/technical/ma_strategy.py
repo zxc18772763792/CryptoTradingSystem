@@ -44,7 +44,7 @@ class MAStrategy(StrategyBase):
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         """生成交易信号"""
-        if data.empty or len(data) < self.params["slow_period"]:
+        if data.empty or len(data) < self.params["slow_period"] + 1:
             return []
 
         signals = []
@@ -136,7 +136,7 @@ class EMAStrategy(StrategyBase):
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         """生成交易信号"""
-        if data.empty or len(data) < self.params["slow_period"]:
+        if data.empty or len(data) < self.params["slow_period"] + 1:
             return []
 
         signals = []

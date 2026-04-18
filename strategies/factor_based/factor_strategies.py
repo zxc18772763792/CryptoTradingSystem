@@ -4,7 +4,7 @@ Factor-based trading strategies.
 Each strategy corresponds to a specific time-series factor from the extended factor library.
 Strategies generate signals based on factor value thresholds and transitions.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import pandas as pd
 import numpy as np
@@ -44,7 +44,7 @@ class FactorStrategyBase(StrategyBase):
             symbol=symbol,
             signal_type=signal_type,
             price=price,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             strategy_name=self.name,
             strength=min(max(strength, 0.0), 1.0),
             stop_loss=None,

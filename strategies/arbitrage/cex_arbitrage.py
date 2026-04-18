@@ -1,4 +1,4 @@
-﻿from datetime import datetime, timedelta
+﻿from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -124,7 +124,7 @@ class CEXArbitrageStrategy(StrategyBase):
                         "spread": spread,
                         "effective_spread": effective_spread,
                         "cross_exchange_vol": cross_vol,
-                        "timestamp": datetime.now(),
+                        "timestamp": datetime.now(timezone.utc),
                     }
                 )
 
@@ -136,7 +136,7 @@ class CEXArbitrageStrategy(StrategyBase):
         return []
 
     async def generate_signals_async(self, symbol: str) -> List[Signal]:
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         symbol_key = str(symbol or "").upper()
         if not self._cooldown_ready(symbol_key, now):
             return []
@@ -287,7 +287,7 @@ class TriangularArbitrageStrategy(StrategyBase):
         for triangle in self._triangles:
             profit = self.calculate_profit(rates, triangle)
             if profit >= min_profit:
-                opportunities.append({"triangle": triangle, "profit": profit, "timestamp": datetime.now()})
+                opportunities.append({"triangle": triangle, "profit": profit, "timestamp": datetime.now(timezone.utc)})
         opportunities.sort(key=lambda x: float(x["profit"]), reverse=True)
         return opportunities
 
@@ -300,7 +300,7 @@ class TriangularArbitrageStrategy(StrategyBase):
         if not connector:
             return []
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         symbol_key = str(symbol or "").upper()
         if not self._cooldown_ready(symbol_key, now):
             return []
@@ -341,7 +341,7 @@ class TriangularArbitrageStrategy(StrategyBase):
                     "direct": direct,
                     "implied": implied,
                     "edge": edge_after_fee,
-                    "timestamp": datetime.now(),
+                    "timestamp": datetime.now(timezone.utc),
                 }
             )
 

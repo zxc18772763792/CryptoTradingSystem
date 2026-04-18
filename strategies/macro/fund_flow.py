@@ -1,7 +1,7 @@
 """Fund-flow and whale-activity macro strategies."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -91,7 +91,7 @@ class FundFlowStrategy(StrategyBase):
             "exchange_outflow": float(exchange_outflow),
             "net_flow": net_flow,
             "whale_activity": float(whale_activity or 0.0),
-            "timestamp": datetime.now(),
+            "timestamp": datetime.now(timezone.utc),
         }
 
         self._flow_history.append(self._flow_data)
@@ -163,7 +163,7 @@ class FundFlowStrategy(StrategyBase):
         net_flow = float(self._flow_data.get("net_flow", 0.0))
         inflow = float(self._flow_data.get("exchange_inflow", 0.0))
         outflow = float(self._flow_data.get("exchange_outflow", 0.0))
-        timestamp = self._flow_data.get("timestamp", datetime.now())
+        timestamp = self._flow_data.get("timestamp", datetime.now(timezone.utc))
 
         current_price = float(data["close"].iloc[-1]) if not data.empty else 0.0
         symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
@@ -295,11 +295,11 @@ class WhaleActivityStrategy(StrategyBase):
                 "direction": str(direction).lower(),
                 "price": float(price),
                 "usd_value": float(usd_value),
-                "timestamp": datetime.now(),
+                "timestamp": datetime.now(timezone.utc),
             }
         )
 
-        cutoff = datetime.now() - pd.Timedelta(hours=float(self.params["lookback_hours"]))
+        cutoff = datetime.now(timezone.utc) - pd.Timedelta(hours=float(self.params["lookback_hours"]))
         self._whale_transactions = [t for t in self._whale_transactions if t["timestamp"] > cutoff]
 
     @staticmethod
@@ -416,7 +416,7 @@ class WhaleActivityStrategy(StrategyBase):
                     symbol=symbol,
                     signal_type=SignalType.BUY,
                     price=current_price,
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(timezone.utc),
                     strategy_name=self.name,
                     strength=min(1.0, float(analysis.get("buy_ratio", 0.5))),
                     stop_loss=current_price * (1 - float(self.params["stop_loss_pct"])),
@@ -435,7 +435,7 @@ class WhaleActivityStrategy(StrategyBase):
                     symbol=symbol,
                     signal_type=SignalType.SELL,
                     price=current_price,
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(timezone.utc),
                     strategy_name=self.name,
                     strength=min(1.0, 1 - float(analysis.get("buy_ratio", 0.5))),
                     stop_loss=current_price * (1 + float(self.params["stop_loss_pct"])),
@@ -452,7 +452,7 @@ class WhaleActivityStrategy(StrategyBase):
             close_signal = _emit_neutral_close_signal(
                 symbol=symbol,
                 price=current_price,
-                timestamp=datetime.now(),
+                timestamp=datetime.now(timezone.utc),
                 strategy_name=self.name,
                 prev_bias=prev_bias,
                 metadata={"whale_analysis": analysis, "macro_exit_reason": "whale_activity_back_to_neutral"},

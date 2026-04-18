@@ -1,7 +1,7 @@
 """
 MACD策略
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import pandas as pd
 import numpy as np
@@ -67,7 +67,7 @@ class MACDStrategy(StrategyBase):
         prev_hist = histogram.iloc[-2]
 
         current_price = data["close"].iloc[-1]
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
 
         # MACD金叉：MACD上穿信号线
@@ -172,7 +172,7 @@ class MACDHistogramStrategy(StrategyBase):
         hist_scale = max(min_histogram, 1e-9)
 
         current_price = data["close"].iloc[-1]
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
 
         # Bullish crossover with enough histogram expansion to avoid noise.

@@ -1,7 +1,7 @@
 """Config-driven multi-factor high-frequency strategy (5m oriented)."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -277,7 +277,7 @@ class MultiFactorHFStrategy(StrategyBase):
         if self._cooldown_left > 0:
             self._cooldown_left -= 1
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
 
         def _emit(sig_type: SignalType, extra: Optional[Dict[str, Any]] = None) -> None:
             md = dict(metadata)

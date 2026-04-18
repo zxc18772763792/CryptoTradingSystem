@@ -1,7 +1,7 @@
 """Live ML strategy backed by the shared XGBoost directional model."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,7 +29,7 @@ def _emit_close_signal(
         symbol=symbol,
         signal_type=signal_type,
         price=price,
-        timestamp=datetime.now(),
+        timestamp=datetime.now(timezone.utc),
         strategy_name=strategy_name,
         strength=max(0.1, min(1.0, confidence)),
         metadata={"reason": "ml_signal_flat"},
@@ -82,7 +82,7 @@ class MLXGBoostStrategy(StrategyBase):
                     symbol=symbol,
                     signal_type=SignalType.BUY,
                     price=current_price,
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(timezone.utc),
                     strategy_name=self.name,
                     strength=max(0.1, min(1.0, confidence)),
                     stop_loss=current_price * (1 - float(self.params.get("stop_loss_pct", 0.025))),
@@ -98,7 +98,7 @@ class MLXGBoostStrategy(StrategyBase):
                     symbol=symbol,
                     signal_type=SignalType.SELL,
                     price=current_price,
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(timezone.utc),
                     strategy_name=self.name,
                     strength=max(0.1, min(1.0, confidence)),
                     stop_loss=current_price * (1 + float(self.params.get("stop_loss_pct", 0.025))),

@@ -1,5 +1,5 @@
 """Common technical strategies."""
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -48,7 +48,7 @@ class DonchianBreakoutStrategy(StrategyBase):
         prev_up = float(upper.iloc[-2]) if pd.notna(upper.iloc[-2]) else np.nan
         ex = float(exit_low.iloc[-1]) if pd.notna(exit_low.iloc[-1]) else np.nan
         symbol = _symbol_of(data)
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         signals: List[Signal] = []
 
         if pd.notna(up) and pd.notna(prev_up):
@@ -131,7 +131,7 @@ class StochasticStrategy(StrategyBase):
 
         c = float(close.iloc[-1])
         symbol = _symbol_of(data)
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         oversold = float(self.params["oversold"])
         overbought = float(self.params["overbought"])
         signals: List[Signal] = []
@@ -234,7 +234,7 @@ class ADXTrendStrategy(StrategyBase):
 
         c = float(data["close"].iloc[-1])
         symbol = _symbol_of(data)
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         signals: List[Signal] = []
 
         if strong and cross_up:
@@ -308,7 +308,7 @@ class VWAPReversionStrategy(StrategyBase):
         exit_dev = float(self.params["exit_deviation_pct"])
         c = float(data["close"].iloc[-1])
         symbol = _symbol_of(data)
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         signals: List[Signal] = []
 
         if d_prev >= -entry and d_now < -entry:

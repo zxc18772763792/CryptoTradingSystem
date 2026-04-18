@@ -1,7 +1,7 @@
 """
 动量策略
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import pandas as pd
 import numpy as np
@@ -52,7 +52,7 @@ class MomentumStrategy(StrategyBase):
         prev_momentum = momentum.iloc[-2]
 
         current_price = data["close"].iloc[-1]
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
 
         threshold = self.params["momentum_threshold"]
@@ -172,7 +172,7 @@ class TrendFollowingStrategy(StrategyBase):
         prev_short_ma = short_ma.iloc[-2]
         prev_long_ma = long_ma.iloc[-2]
 
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
         symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
 
         # 只有在趋势足够强时才发出信号
