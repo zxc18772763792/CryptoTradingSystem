@@ -45,6 +45,7 @@ env/
 /web_start*.log
 /output/
 /.playwright-cli/
+/models/ml_signal_xgb/mlsig_*/
 
 # Secrets
 .env
