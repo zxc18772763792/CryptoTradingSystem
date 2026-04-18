@@ -48,6 +48,15 @@ $script:ResearchUniverseTaskName = "CryptoTradingSystem_ResearchUniverseRefresh"
 function Get-ListeningPid {
     param([int]$PortNumber)
 
+    try {
+        $listening = Get-NetTCPConnection -LocalPort $PortNumber -State Listen -ErrorAction Stop |
+            Select-Object -First 1
+        if ($listening -and $listening.OwningProcess) {
+            return [int]$listening.OwningProcess
+        }
+    } catch {
+    }
+
     $line = netstat -ano |
         Select-String -Pattern "LISTENING\s+(\d+)$" |
         Select-String -Pattern "[:\.]$PortNumber\s"
@@ -215,8 +224,8 @@ function Test-IsManagedWebProcess {
 function Get-HealthSummary {
     param([int]$PortNumber)
 
-    $healthTimeoutSec = 12
-    $statusTimeoutSec = 8
+    $healthTimeoutSec = 18
+    $statusTimeoutSec = 15
 
     try {
         $health = Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/health" -TimeoutSec $healthTimeoutSec
@@ -315,6 +324,11 @@ function Show-Status {
 
     $webPid = Get-ListeningPid -PortNumber $PortNumber
     $webProc = Get-ProcessRecord -ProcessId $webPid
+    $managedWebProcesses = @(Get-ManagedWebProcesses | Sort-Object CreationDate -Descending)
+    if ((-not $webPid) -and $managedWebProcesses.Count) {
+        $webProc = $managedWebProcesses | Select-Object -First 1
+        $webPid = [int]$webProc.ProcessId
+    }
     $health = Get-HealthSummary -PortNumber $PortNumber
     $agentSummary = if ($health -and $health.Health) {
         Get-AutonomousAgentSummary -PortNumber $PortNumber
@@ -331,15 +345,31 @@ function Show-Status {
     Write-Host "  Live restore : persisted live restore blocked unless -AllowPersistedLiveMode or TRADING_MODE=live is set"
     Write-Host "  Worker start : news workers auto-start by default; PM worker stays opt-in"
     $analyticsEnvValue = if ($envValues.ContainsKey("ANALYTICS_HISTORY_ENABLED")) { [string]$envValues["ANALYTICS_HISTORY_ENABLED"] } else { $null }
-    Write-Host ("  Analytics    : default off unless -EnableAnalyticsHistory is used [env ANALYTICS_HISTORY_ENABLED={0}]" -f (Format-ConfigValue -Value $analyticsEnvValue))
+    $runtimeAnalyticsKnown = $false
+    $runtimeAnalyticsText = "unknown"
+    if ($health -and $health.Status -and $health.Status.runtime -and $null -ne $health.Status.runtime.analytics_history_enabled) {
+        $runtimeAnalyticsKnown = $true
+        $runtimeAnalyticsText = if ([bool]$health.Status.runtime.analytics_history_enabled) { "runtime on" } else { "runtime off" }
+    }
+    if ($runtimeAnalyticsKnown) {
+        Write-Host ("  Analytics    : {0} [env ANALYTICS_HISTORY_ENABLED={1}]" -f $runtimeAnalyticsText, (Format-ConfigValue -Value $analyticsEnvValue))
+    } else {
+        Write-Host ("  Analytics    : default off unless -EnableAnalyticsHistory is used [env ANALYTICS_HISTORY_ENABLED={0}]" -f (Format-ConfigValue -Value $analyticsEnvValue))
+    }
     Write-Host ("  Research job : {0}" -f (Get-ResearchUniverseTaskSummary))
 
-    if (-not $webPid) {
+    if ((-not $webPid) -and (-not $managedWebProcesses.Count)) {
         Write-Host "  Web          : stopped"
     }
     elseif (Test-IsManagedWebProcess -ProcessRecord $webProc) {
         $mode = if ($health -and $health.Status) { [string]$health.Status.trading_mode } else { "unknown" }
-        $state = if ($health -and $health.Health) { [string]$health.Health.status } else { "listening_no_health" }
+        $state = if ($health -and $health.Health -and $health.Status) {
+            [string]$health.Health.status
+        } elseif ($health -and $health.Health) {
+            "warming_up"
+        } else {
+            "warming_up"
+        }
         $startupMode = if ($health -and $health.Status -and $health.Status.runtime) { $health.Status.runtime.startup_mode } else { $null }
         Write-Host ("  Web          : running (PID={0}, state={1}, mode={2})" -f $webPid, $state, $mode)
         Write-Host ("  URL          : http://127.0.0.1:{0}" -f $PortNumber)
@@ -356,8 +386,11 @@ function Show-Status {
             }
         }
         if (-not ($health -and $health.Health)) {
-            Write-Host "  Hint         : service is listening but health checks did not answer yet." -ForegroundColor Yellow
-            Write-Host "                 Try '.\web.bat stop -IncludeWorkers' then '.\web.bat start' if it stays stuck." -ForegroundColor Yellow
+            Write-Host "  Hint         : managed web process exists but health checks are still warming up." -ForegroundColor Yellow
+            Write-Host "                 If analytics-history was enabled, allow extra startup time before restarting it." -ForegroundColor Yellow
+        } elseif (-not ($health -and $health.Status)) {
+            Write-Host "  Hint         : /health is ready but /api/status is still warming up." -ForegroundColor Yellow
+            Write-Host "                 This can happen briefly during analytics-history startup." -ForegroundColor Yellow
         }
         elseif ($mode -eq "live") {
             Write-Host "  Warning      : service is currently running in live mode." -ForegroundColor Yellow

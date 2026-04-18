@@ -216,6 +216,19 @@ def _clip_error(error: Any, limit: int = 280) -> str:
     return text[:limit]
 
 
+def should_pause_coinglass_requests(error: Any) -> bool:
+    text = _clip_error(error).lower()
+    if not text:
+        return False
+    return (
+        "minute_budget_exhausted" in text
+        or "daily_budget_exhausted" in text
+        or "monthly_budget_exhausted" in text
+        or "http_429" in text
+        or "rate_limit" in text
+    )
+
+
 def _safe_json_dumps(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))
 
@@ -802,6 +815,7 @@ async def discover_and_persist_coinglass_capabilities(
     requested = [str(item or "").strip() for item in (datasets or COINGLASS_DEFAULT_DATASETS) if str(item or "").strip()]
     capabilities: List[Dict[str, Any]] = []
     api_spec_payload: Dict[str, Any] = {}
+    stop_reason = ""
     async with CoinglassClient() as client:
         try:
             api_spec_payload = await client.fetch_api_spec(manual=manual)
@@ -831,6 +845,7 @@ async def discover_and_persist_coinglass_capabilities(
                     )
                     break
                 except Exception as exc:
+                    error_text = _clip_error(exc)
                     capabilities.append(
                         {
                             "dataset": dataset,
@@ -838,9 +853,14 @@ async def discover_and_persist_coinglass_capabilities(
                             "path": route.path,
                             "status_code": None,
                             "available": False,
-                            "error": _clip_error(exc),
+                            "error": error_text,
                         }
                     )
+                    if should_pause_coinglass_requests(error_text):
+                        stop_reason = error_text
+                        break
+            if stop_reason:
+                break
     _ensure_cache_dirs()
     capability_payload = {"generated_at": _utc_now().isoformat(), "items": capabilities}
     _CAPABILITY_MATRIX_PATH.write_text(_safe_json_dumps(capability_payload), encoding="utf-8")
@@ -850,4 +870,6 @@ async def discover_and_persist_coinglass_capabilities(
         "capability_matrix_path": str(_CAPABILITY_MATRIX_PATH),
         "items": capabilities,
         "available_count": sum(1 for item in capabilities if item.get("available")),
+        "stopped_early": bool(stop_reason),
+        "stop_reason": stop_reason or None,
     }

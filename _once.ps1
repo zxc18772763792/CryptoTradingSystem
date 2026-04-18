@@ -27,6 +27,15 @@ function Open-WebConsole {
 
 function Get-ListeningPid {
     param([int]$PortNumber)
+    try {
+        $listening = Get-NetTCPConnection -LocalPort $PortNumber -State Listen -ErrorAction Stop |
+            Select-Object -First 1
+        if ($listening -and $listening.OwningProcess) {
+            return [int]$listening.OwningProcess
+        }
+    } catch {
+    }
+
     $line = netstat -ano | Select-String -Pattern "LISTENING\s+(\d+)$" | Select-String -Pattern "[:\.]$PortNumber\s"
     if (-not $line) { return $null }
     $text = ($line | Select-Object -First 1).Line.Trim()
@@ -262,6 +271,8 @@ $startupProfile = if ($requestedStartupLabels.Count) {
 if (-not $EnableAnalyticsHistory) {
     $startupProfile += " + analytics-history off"
     Set-Item -Path Env:ANALYTICS_HISTORY_ENABLED -Value "0"
+} else {
+    Set-Item -Path Env:ANALYTICS_HISTORY_ENABLED -Value "1"
 }
 Set-Item -Path Env:ALLOW_PERSISTED_LIVE_MODE_START -Value $(if ($AllowPersistedLiveMode) { "1" } else { "0" })
 Set-EffectiveWorkerEnvFlags `
@@ -380,16 +391,32 @@ Start-Sleep -Seconds 2
 
 $status = $null
 $health = $null
-$deadline = (Get-Date).AddSeconds([Math]::Max(3, $HealthWaitSec))
-while ((Get-Date) -lt $deadline) {
+$healthTimeoutSec = if ($EnableAnalyticsHistory) { 18 } else { 12 }
+$statusTimeoutSec = if ($EnableAnalyticsHistory) { 15 } else { 8 }
+$pollIntervalMs = if ($EnableAnalyticsHistory) { 1200 } else { 800 }
+$healthDeadline = (Get-Date).AddSeconds([Math]::Max(3, $HealthWaitSec))
+$statusDeadline = $healthDeadline.AddSeconds($(if ($EnableAnalyticsHistory) { 45 } else { 12 }))
+$healthReadyAt = $null
+$lastProbeError = $null
+while ((Get-Date) -lt $statusDeadline) {
+    if ($proc.HasExited) {
+        break
+    }
     try {
-        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 12
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec $healthTimeoutSec
         if ($health) {
+            if (-not $healthReadyAt) {
+                $healthReadyAt = Get-Date
+            }
             try {
-                $status = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/status" -TimeoutSec 8
+                $status = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/status" -TimeoutSec $statusTimeoutSec
             }
             catch {
-                Start-Sleep -Milliseconds 800
+                $lastProbeError = $_.Exception.Message
+                if ((Get-Date) -ge $healthDeadline) {
+                    break
+                }
+                Start-Sleep -Milliseconds $pollIntervalMs
                 continue
             }
             if ($status) {
@@ -398,11 +425,23 @@ while ((Get-Date) -lt $deadline) {
         }
     }
     catch {
-        Start-Sleep -Milliseconds 800
+        $lastProbeError = $_.Exception.Message
+        if ((Get-Date) -ge $healthDeadline) {
+            break
+        }
+        Start-Sleep -Milliseconds $pollIntervalMs
     }
 }
 
-if ($health -and $status) {
+if ($proc.HasExited) {
+    Write-Host "Managed web process exited during startup (PID=$($proc.Id))." -ForegroundColor Red
+    if ($lastProbeError) {
+        Write-Host ("Last probe error: {0}" -f $lastProbeError) -ForegroundColor Yellow
+    }
+    if ($StartAutonomousAgent) {
+        Write-Host "Autonomous agent start skipped because the web process exited early." -ForegroundColor Yellow
+    }
+} elseif ($health -and $status) {
     $runtimeStatus = if ($status) { $status.status } else { $health.status }
     $tradingMode = if ($status -and $status.trading_mode) { $status.trading_mode } else { "unknown" }
     Write-Host "Started PID=$($proc.Id), status=$runtimeStatus, mode=$tradingMode, profile=$startupProfile, url=http://127.0.0.1:$Port"
@@ -414,12 +453,20 @@ if ($health -and $status) {
         Open-WebConsole -WebPort $Port
     }
 } elseif ($health) {
-    Write-Host "Process started (PID=$($proc.Id)) and /health is responding, but /api/status did not become ready within ${HealthWaitSec}s. Startup profile: $startupProfile." -ForegroundColor Yellow
+    $warmNote = if ($EnableAnalyticsHistory) {
+        " analytics-history warm-up can take longer than the default status probe window."
+    } else {
+        ""
+    }
+    Write-Host "Process started (PID=$($proc.Id)) and /health is responding, but /api/status is still warming up. Startup profile: $startupProfile.$warmNote" -ForegroundColor Yellow
     if ($StartAutonomousAgent) {
         Write-Host "Autonomous agent start skipped because the full runtime status endpoint was not ready yet." -ForegroundColor Yellow
     }
 } else {
-    Write-Host "Process started (PID=$($proc.Id)) but health endpoint not ready within ${HealthWaitSec}s. Startup profile: $startupProfile."
+    Write-Host "Process started (PID=$($proc.Id)) but health endpoint is still warming up. Startup profile: $startupProfile." -ForegroundColor Yellow
+    if ($lastProbeError) {
+        Write-Host ("Last probe error: {0}" -f $lastProbeError) -ForegroundColor Yellow
+    }
     if ($StartAutonomousAgent) {
         Write-Host "Autonomous agent start skipped because the web health endpoint was not ready yet." -ForegroundColor Yellow
     }

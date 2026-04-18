@@ -27,6 +27,7 @@ from core.data.coinglass_client import (
     persist_raw_snapshot,
     persist_symbol_registry,
     record_coinglass_ingest_status,
+    should_pause_coinglass_requests,
 )
 from core.data.coinglass_registry import (
     COINGLASS_DEFAULT_DATASETS,
@@ -487,9 +488,12 @@ async def update_coinglass_cache(
         "datasets": selected_datasets,
         "updated": [],
         "errors": [],
+        "stopped_early": False,
+        "stop_reason": None,
     }
     if not coinglass_enabled():
         return summary
+    stop_reason = ""
     async with CoinglassClient() as client:
         for symbol in selected_symbols:
             for dataset in selected_datasets:
@@ -566,20 +570,26 @@ async def update_coinglass_cache(
                         manifest=manifest,
                     )
                     summary["errors"].append({"dataset": dataset, "symbol": symbol, "error": str(exc)})
+                    stop_reason = str(exc)
                     break
                 except Exception as exc:
+                    error_text = str(exc)
+                    degrade_due_to_budget = should_pause_coinglass_requests(error_text)
                     await record_coinglass_ingest_status(
                         dataset=dataset,
                         symbol=symbol,
                         exchange="aggregate",
                         interval=interval,
-                        status="failed",
+                        status="degraded" if degrade_due_to_budget else "failed",
                         rows_written=0,
-                        error=str(exc),
-                        details={"reason": "request_failed"},
+                        error=error_text,
+                        details={"reason": "budget_guard" if degrade_due_to_budget else "request_failed"},
                         manifest=manifest,
                     )
-                    summary["errors"].append({"dataset": dataset, "symbol": symbol, "error": str(exc)})
+                    summary["errors"].append({"dataset": dataset, "symbol": symbol, "error": error_text})
+                    if degrade_due_to_budget:
+                        stop_reason = error_text
+                        break
             snapshot = build_derivatives_snapshot(symbol)
             if snapshot is not None:
                 await persist_derivatives_snapshot(snapshot)
@@ -593,8 +603,12 @@ async def update_coinglass_cache(
                     rows_written=1,
                     details={"source_key": snapshot.source_key, "active_datasets": snapshot.payload.get("active_datasets", [])},
                 )
+            if stop_reason:
+                break
     persist_symbol_registry(selected_symbols)
     summary["budget"] = (await get_coinglass_budget_state()).to_dict()
+    summary["stopped_early"] = bool(stop_reason)
+    summary["stop_reason"] = stop_reason or None
     return summary
 
 

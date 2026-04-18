@@ -1421,6 +1421,12 @@ async def get_status():
                 "account_scope": runtime_state.get_account_scope(),
                 "task_count": len(runtime_state.get_task_diagnostics()),
                 "last_mode_switch_at": runtime_state.snapshot().get("last_mode_switch_at"),
+                "analytics_history_enabled": bool(_ANALYTICS_HISTORY_ENABLED),
+                "analytics_history_collectors": (
+                    [collector for collector, _, _ in _ANALYTICS_HISTORY_WORKER_SPECS]
+                    if _ANALYTICS_HISTORY_ENABLED
+                    else []
+                ),
                 "startup_mode": {
                     "configured_mode": (
                         _startup_mode_decision.configured_mode if _startup_mode_decision else settings.TRADING_MODE

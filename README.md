@@ -72,6 +72,8 @@ For daily use, remember this small command family:
 
 `.\web.bat start` uses the same managed profile but does not force the browser open. Managed startup ignores `.env` worker auto-start flags, starts the news engine by default, keeps analytics-history collectors off unless you explicitly opt in, and blocks persisted `live`-mode restore unless you explicitly allow it.
 
+When analytics-history is enabled, `.\web.bat status` may briefly show the service as `warming_up` while `/health` or `/api/status` finishes coming online. That is expected during heavier startup paths and is different from a true stopped state.
+
 To start the service and explicitly request the AI autonomous agent too:
 
 ```bat
