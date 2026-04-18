@@ -40,6 +40,9 @@ ALTCOIN_SCORE_FIELD_MAP = {
     "control": "control_score",
 }
 ALTCOIN_RANK_SCORE_KEYS = frozenset({"layout", "alert", "control"})
+ALTCOIN_RULE_TYPES = frozenset({"altcoin_score_above", "altcoin_rank_top_n"})
+ALTCOIN_RUNTIME_CONDITION_MET_KEY = "_runtime_condition_met"
+ALTCOIN_RUNTIME_CONDITION_UPDATED_AT_KEY = "_runtime_condition_updated_at"
 
 
 def _normalize_altcoin_symbol(value: Any) -> str:
@@ -62,6 +65,10 @@ def _altcoin_rank_text(rank: Any) -> str:
         return f"当前排名 {int(rank)}"
     except (TypeError, ValueError):
         return "当前排名 --"
+
+
+def _is_altcoin_rule_type(rule_type: Any) -> bool:
+    return str(rule_type or "").strip() in ALTCOIN_RULE_TYPES
 
 
 @dataclass
@@ -620,12 +627,30 @@ class NotificationManager:
                 return dict(row or {})
         return {}
 
+    @staticmethod
+    def _altcoin_runtime_state(rule: AlertRule) -> Optional[bool]:
+        params = rule.params or {}
+        if ALTCOIN_RUNTIME_CONDITION_MET_KEY not in params:
+            return None
+        return bool(params.get(ALTCOIN_RUNTIME_CONDITION_MET_KEY))
+
+    @staticmethod
+    def _set_altcoin_runtime_state(rule: AlertRule, condition_met: bool) -> None:
+        params = dict(rule.params or {})
+        params[ALTCOIN_RUNTIME_CONDITION_MET_KEY] = bool(condition_met)
+        params[ALTCOIN_RUNTIME_CONDITION_UPDATED_AT_KEY] = datetime.now(
+            timezone.utc
+        ).isoformat()
+        rule.params = params
+
     def _eval_altcoin_score_above(
         self, rule: AlertRule, context: Dict[str, Any]
     ) -> Optional[str]:
         params = rule.params or {}
         row = self._altcoin_row_for_rule(rule, context)
         if not row:
+            return None
+        if not bool(row.get("alt_eligible", True)):
             return None
         score_key = str(params.get("score_key") or "layout").strip().lower()
         score_field = _altcoin_score_field(score_key)
@@ -658,6 +683,8 @@ class NotificationManager:
         if rank <= 0 or rank > rank_n:
             return None
         row = self._altcoin_row_for_rule(rule, context)
+        if not row or not bool(row.get("alt_eligible", True)):
+            return None
         score_field = _altcoin_score_field(
             sort_by, allowed_keys=ALTCOIN_RANK_SCORE_KEYS
         )
@@ -776,17 +803,36 @@ class NotificationManager:
         await self._ensure_loaded()
 
         triggered: List[Dict[str, Any]] = []
-        dirty_rules: List[AlertRule] = []
+        dirty_rules: Dict[str, AlertRule] = {}
 
         for rule in self._rules.values():
             if not rule.enabled:
                 continue
-            if not self._cooldown_ok(rule):
-                continue
 
             reason = self._eval_rule(rule, context)
-            if not reason:
-                continue
+            if _is_altcoin_rule_type(rule.rule_type):
+                condition_met = bool(reason)
+                previous_state = self._altcoin_runtime_state(rule)
+                if previous_state is None:
+                    self._set_altcoin_runtime_state(rule, condition_met)
+                    rule.updated_at = datetime.now(timezone.utc)
+                    dirty_rules[rule.id] = rule
+                    continue
+                if not condition_met:
+                    if previous_state:
+                        self._set_altcoin_runtime_state(rule, False)
+                        rule.updated_at = datetime.now(timezone.utc)
+                        dirty_rules[rule.id] = rule
+                    continue
+                if previous_state:
+                    continue
+                if not self._cooldown_ok(rule):
+                    continue
+            else:
+                if not self._cooldown_ok(rule):
+                    continue
+                if not reason:
+                    continue
 
             title = f"告警规则触发: {rule.name}"
             channels = rule.params.get("channels") or ["feishu"]
@@ -796,10 +842,12 @@ class NotificationManager:
                 channels=channels,
             )
 
+            if _is_altcoin_rule_type(rule.rule_type):
+                self._set_altcoin_runtime_state(rule, True)
             rule.last_triggered_at = datetime.now(timezone.utc)
             rule.trigger_count += 1
             rule.updated_at = datetime.now(timezone.utc)
-            dirty_rules.append(rule)
+            dirty_rules[rule.id] = rule
 
             triggered.append(
                 {
@@ -811,7 +859,7 @@ class NotificationManager:
                 }
             )
 
-        for rule in dirty_rules:
+        for rule in dirty_rules.values():
             await self._upsert_rule(rule)
 
         return {

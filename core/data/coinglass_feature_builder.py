@@ -366,6 +366,7 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
     oi_history_rows = list(payloads.get("open_interest_history") or [])
     funding_history_rows = list(payloads.get("funding_rate_history") or [])
     taker_rows = list(payloads.get("taker_buy_sell_volume_exchange_list") or [])
+    taker_history_rows = list(payloads.get("taker_buy_sell_volume_history") or [])
     liquidation_rows = list(payloads.get("liquidation_history") or [])
     ratio_rows = list(payloads.get("global_long_short_account_ratio_history") or [])
     arbitrage_rows = list(payloads.get("funding_arbitrage") or [])
@@ -530,6 +531,15 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
     if taker_buy is not None and taker_sell is not None and (taker_buy + taker_sell) > 0:
         taker_buy_sell_imbalance = (taker_buy - taker_sell) / (taker_buy + taker_sell)
 
+    taker_history_series = _history_value_series(
+        taker_history_rows,
+        "taker_buy_sell_imbalance",
+    )
+    bars_1h = max(1, int(round(3600 / max(history_interval_sec, 60))))
+    bars_4h = max(1, int(round(4 * 3600 / max(history_interval_sec, 60))))
+    taker_imbalance_1h = _series_mean(taker_history_series, bars_1h)
+    taker_imbalance_4h = _series_mean(taker_history_series, bars_4h)
+
     basis_pct = _coalesce_float(arbitrage_row, "basis_pct", "basisPercent", "basis")
     futures_volume_usd = _sum(_coalesce_float(item, "volume_usd", "turnover_usd", "notionalUsd") for item in taker_rows)
     if futures_volume_usd is None and taker_buy is not None and taker_sell is not None:
@@ -617,7 +627,8 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
     )
     basis_dislocation = bool((basis_dislocation_score or 0.0) >= 0.65)
     flow_divergence = bool((flow_divergence_score or 0.0) >= 0.55)
-    order_flow_confirmed = bool((taker_buy_sell_imbalance or 0.0) >= 0.08 and (oi_change_1h or 0.0) > 0)
+    _flow_signal = taker_imbalance_1h if taker_imbalance_1h is not None else taker_buy_sell_imbalance
+    order_flow_confirmed = bool((_flow_signal or 0.0) >= 0.08 and (oi_change_1h or 0.0) > 0)
     derivatives_labels = [
         label
         for label, enabled in (
@@ -674,6 +685,9 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
         "orderbook_state": "buy_pressure" if (taker_buy_sell_imbalance or 0.0) > 0 else "sell_pressure" if (taker_buy_sell_imbalance or 0.0) < 0 else "balanced",
         "crowding_warning": bool((crowding_score or 0.0) >= 0.70),
         "history_ready": bool(oi_history_series and funding_history_series),
+        "taker_history_ready": bool(taker_history_series),
+        "taker_imbalance_1h": taker_imbalance_1h,
+        "taker_imbalance_4h": taker_imbalance_4h,
         "active_datasets": [dataset for dataset, items in payloads.items() if items],
         "payload_counts": {dataset: len(items or []) for dataset, items in payloads.items()},
         "history_exchange": str((oi_history_rows[-1] if oi_history_rows else {}).get("_exchange") or (funding_history_rows[-1] if funding_history_rows else {}).get("_exchange") or "Binance"),
@@ -1169,6 +1183,9 @@ def build_coinglass_runtime_context(snapshot: Optional[Mapping[str, Any]]) -> Di
         "orderbook_state": payload.get("orderbook_state"),
         "crowding_warning": bool(payload.get("crowding_warning")),
         "history_ready": bool(payload.get("history_ready")),
+        "taker_history_ready": bool(payload.get("taker_history_ready")),
+        "taker_imbalance_1h": payload.get("taker_imbalance_1h"),
+        "taker_imbalance_4h": payload.get("taker_imbalance_4h"),
         "history_exchange": payload.get("history_exchange"),
         "history_interval": payload.get("history_interval"),
         "funding_mean": payload.get("funding_mean"),

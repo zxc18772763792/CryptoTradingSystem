@@ -18,6 +18,7 @@
   const AGENT_SCORECARD_API = '/ai/autonomous-agent/scorecard';
   const AGENT_STATUS_TIMEOUT_MS = 60000;
   const AGENT_DETAIL_TIMEOUT_MS = 60000;
+  const AGENT_REVIEW_TIMEOUT_MS = 30000;
 
   let pollTimer = null;
   let initialized = false;
@@ -31,6 +32,7 @@
   let governanceInFlight = null;
   let reviewLayoutSyncFrame = 0;
   let reviewLayoutObserver = null;
+  let reviewRequestSeq = 0;
 
   function scheduleInitRetry() {
     if (typeof window === 'undefined') return;
@@ -60,11 +62,6 @@
     const workspace = document.querySelector('#ai-agent-review-panel .ai-agent-review-workspace');
     const summaryEl = document.getElementById('ai-agent-review-summary');
     if (!workspace || !summaryEl) return;
-
-    if (window.innerWidth <= 1280) {
-      workspace.style.removeProperty('--ai-agent-review-history-height');
-      return;
-    }
 
     const summaryHeight = Math.ceil(summaryEl.getBoundingClientRect().height || 0);
     if (summaryHeight > 0) {
@@ -96,6 +93,97 @@
     }
 
     window.addEventListener('resize', queueAgentReviewHistorySync);
+    queueAgentReviewHistorySync();
+  }
+
+  function withTimeout(promise, timeoutMs, message) {
+    const limit = Math.max(1000, Number(timeoutMs || 0));
+    let timerId = 0;
+    return Promise.race([
+      Promise.resolve(promise).finally(() => {
+        if (timerId) window.clearTimeout(timerId);
+      }),
+      new Promise((_, reject) => {
+        timerId = window.setTimeout(() => {
+          reject(new Error(message || '请求超时'));
+        }, limit);
+      }),
+    ]);
+  }
+
+  function hasStableAgentReviewContent() {
+    const summaryEl = document.getElementById('ai-agent-review-summary');
+    const listEl = document.getElementById('ai-agent-review');
+    const summaryText = String(summaryEl?.textContent || '').trim();
+    const listText = String(listEl?.textContent || '').trim();
+    if (!summaryText || !listText) return false;
+    if (/(加载中|请稍候)/.test(summaryText) || /(加载中|请稍候)/.test(listText)) return false;
+    if (/加载失败/.test(summaryText) || /加载失败/.test(listText)) return false;
+    return true;
+  }
+
+  function renderAgentReviewLoading() {
+    const summaryEl = document.getElementById('ai-agent-review-summary');
+    const historyMetaEl = document.getElementById('ai-agent-review-history-meta');
+    const listEl = document.getElementById('ai-agent-review');
+    if (hasStableAgentReviewContent()) {
+      if (historyMetaEl) {
+        historyMetaEl.innerHTML = `
+          <div class="ai-agent-review-history-title">复盘历史</div>
+          <div class="ai-agent-review-history-note">正在后台刷新最近放行交易，当前内容保持可读。</div>
+        `;
+        normalizeElementHtml(historyMetaEl);
+      }
+      return;
+    }
+    if (summaryEl) {
+      summaryEl.innerHTML = '<div class="ai-agent-empty">复盘摘要加载中...</div>';
+      normalizeElementHtml(summaryEl);
+    }
+    if (historyMetaEl) {
+      historyMetaEl.innerHTML = `
+        <div class="ai-agent-review-history-title">复盘历史</div>
+        <div class="ai-agent-review-history-note">正在拉取最近放行交易，请稍候。</div>
+      `;
+      normalizeElementHtml(historyMetaEl);
+    }
+    if (listEl) {
+      listEl.innerHTML = '<div class="ai-agent-empty">复盘历史加载中...</div>';
+      normalizeElementHtml(listEl);
+    }
+    queueAgentReviewHistorySync();
+  }
+
+  function renderAgentReviewError(message) {
+    const summaryEl = document.getElementById('ai-agent-review-summary');
+    const historyMetaEl = document.getElementById('ai-agent-review-history-meta');
+    const listEl = document.getElementById('ai-agent-review');
+    const text = compactText(message || '复盘数据加载失败', 80) || '复盘数据加载失败';
+    if (hasStableAgentReviewContent()) {
+      if (historyMetaEl) {
+        historyMetaEl.innerHTML = `
+          <div class="ai-agent-review-history-title">复盘历史</div>
+          <div class="ai-agent-review-history-note">后台刷新失败，暂时保留上一版复盘内容。</div>
+        `;
+        normalizeElementHtml(historyMetaEl);
+      }
+      return;
+    }
+    if (summaryEl) {
+      summaryEl.innerHTML = `<div class="ai-agent-empty">${esc(text)}</div>`;
+      normalizeElementHtml(summaryEl);
+    }
+    if (historyMetaEl) {
+      historyMetaEl.innerHTML = `
+        <div class="ai-agent-review-history-title">复盘历史</div>
+        <div class="ai-agent-review-history-note">右侧历史卡片暂时不可用，请稍后重试。</div>
+      `;
+      normalizeElementHtml(historyMetaEl);
+    }
+    if (listEl) {
+      listEl.innerHTML = '<div class="ai-agent-empty">复盘列表加载失败</div>';
+      normalizeElementHtml(listEl);
+    }
     queueAgentReviewHistorySync();
   }
 
@@ -1915,21 +2003,20 @@
     const historyMetaEl = document.getElementById('ai-agent-review-history-meta');
     const listEl = document.getElementById('ai-agent-review');
     if (!summaryEl || !listEl) return null;
+    const requestId = ++reviewRequestSeq;
+    renderAgentReviewLoading();
     try {
-      const response = await rootApi(`${AGENT_REVIEW_API}?limit=12`, { timeoutMs: AGENT_DETAIL_TIMEOUT_MS });
+      const response = await withTimeout(
+        rootApi(`${AGENT_REVIEW_API}?limit=12`, { timeoutMs: AGENT_REVIEW_TIMEOUT_MS }),
+        AGENT_REVIEW_TIMEOUT_MS + 500,
+        '复盘加载超时'
+      );
+      if (requestId !== reviewRequestSeq) return response;
       renderAgentReview(response || {});
       return response;
-    } catch (_) {
-      summaryEl.innerHTML = '<div class="ai-agent-empty">复盘摘要加载失败</div>';
-      if (historyMetaEl) {
-        historyMetaEl.innerHTML = `
-          <div class="ai-agent-review-history-title">复盘历史</div>
-          <div class="ai-agent-review-history-note">右侧历史卡片暂时加载失败，请稍后重试。</div>
-        `;
-        normalizeElementHtml(historyMetaEl);
-      }
-      listEl.innerHTML = '<div class="ai-agent-empty">复盘列表加载失败</div>';
-      queueAgentReviewHistorySync();
+    } catch (err) {
+      if (requestId !== reviewRequestSeq) return null;
+      renderAgentReviewError(err?.message || '复盘数据加载失败');
       return null;
     }
   }

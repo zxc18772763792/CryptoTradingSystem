@@ -24,6 +24,7 @@ from config.database import (
 from core.notifications import notification_manager
 from core.data.coinglass_altcoin import (
     build_derivatives_snapshot_from_market_snapshot,
+    is_alt_candidate_symbol,
     load_coinglass_market_snapshots,
 )
 from core.research.altcoin_radar import (
@@ -656,6 +657,20 @@ def _score_key_to_field(score_key: str) -> str:
     return mapping.get(normalized, "layout_score")
 
 
+def _notification_eligible_altcoin_rows(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    eligible: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row or {})
+        symbol = str(item.get("symbol") or "").strip().upper()
+        alt_eligible = item.get("alt_eligible")
+        if alt_eligible is None:
+            alt_eligible = is_alt_candidate_symbol(symbol)
+        if not bool(alt_eligible):
+            continue
+        eligible.append(item)
+    return eligible
+
+
 async def build_altcoin_notification_context(
     rules: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Any]:
@@ -705,14 +720,15 @@ async def build_altcoin_notification_context(
         if isinstance(result, Exception):
             scans[config_key] = {"error": str(result), "rows": [], "sort_indexes": {}}
             continue
-        layout_rows = sort_rows(result.get("rows") or [], sort_by="layout")
-        alert_rows = sort_rows(result.get("rows") or [], sort_by="alert")
-        control_rows = sort_rows(result.get("rows") or [], sort_by="control")
+        eligible_rows = _notification_eligible_altcoin_rows(result.get("rows") or [])
+        layout_rows = sort_rows(eligible_rows, sort_by="layout")
+        alert_rows = sort_rows(eligible_rows, sort_by="alert")
+        control_rows = sort_rows(eligible_rows, sort_by="control")
         scans[config_key] = {
             "config": unique_configs[config_key],
             "generated_at": result.get("generated_at"),
             "warnings": result.get("warnings") or [],
-            "rows": result.get("rows") or [],
+            "rows": eligible_rows,
             "sort_indexes": {
                 "layout": {str(row.get("symbol") or ""): int(row.get("rank") or 0) for row in layout_rows},
                 "alert": {str(row.get("symbol") or ""): int(row.get("rank") or 0) for row in alert_rows},
@@ -798,6 +814,25 @@ async def create_altcoin_alert_preset(request: AltcoinAlertPresetRequest):
     if not symbol:
         raise HTTPException(status_code=400, detail="symbol is required")
     universe_symbols = _normalize_symbols(request.universe_symbols) or [symbol]
+    target_scan = await get_altcoin_scan_snapshot(
+        exchange=normalized_exchange,
+        timeframe=normalized_timeframe,
+        symbols=universe_symbols,
+        exclude_retired=True,
+        refresh=False,
+    )
+    target_row = next(
+        (
+            dict(row or {})
+            for row in (target_scan.get("rows") or [])
+            if str((row or {}).get("symbol") or "").strip().upper() == symbol
+        ),
+        None,
+    )
+    if target_row is not None and not bool(target_row.get("alt_eligible", True)):
+        raise HTTPException(status_code=400, detail="benchmark symbols are not supported for altcoin radar alerts")
+    if target_row is None and not is_alt_candidate_symbol(symbol):
+        raise HTTPException(status_code=400, detail="benchmark symbols are not supported for altcoin radar alerts")
     config_key = build_altcoin_notification_config_key(
         exchange=normalized_exchange,
         timeframe=normalized_timeframe,

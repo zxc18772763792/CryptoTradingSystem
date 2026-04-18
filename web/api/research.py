@@ -97,6 +97,7 @@ _MODULE_TIMEOUT_SEC = {
     "discipline": 5.0,
 }
 _MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC = 20 * 60
+_COINGLASS_PREFERRED_MAX_AGE_SEC = 5 * 60
 
 
 class ResearchProfile(BaseModel):
@@ -185,6 +186,26 @@ def _symbol_to_news_key(symbol: str) -> str:
         if main.endswith(suffix):
             return main[: -len(suffix)] or main
     return main
+
+
+def _symbol_to_news_keys(symbol: str) -> List[str]:
+    raw = str(symbol or "").strip().upper()
+    if not raw:
+        return ["BTCUSDT", "BTC"]
+    main = raw.split(":")[0]
+    keys: List[str] = []
+
+    compact = main.replace("/", "")
+    if compact:
+        keys.append(compact)
+
+    asset_key = _symbol_to_news_key(main)
+    if asset_key and asset_key not in keys:
+        keys.append(asset_key)
+
+    if main and "/" not in main and main not in keys:
+        keys.append(main)
+    return keys
 
 
 def _normalize_symbol(symbol: str) -> str:
@@ -301,6 +322,51 @@ async def _wait_or_none(coro: Any, timeout_sec: float) -> Any:
         return None
 
 
+async def _load_preferred_coinglass_overview(
+    symbol: str,
+    *,
+    max_age_sec: float = _COINGLASS_PREFERRED_MAX_AGE_SEC,
+) -> Dict[str, Any]:
+    try:
+        from core.data.coinglass_feature_builder import build_coinglass_overview_payload  # noqa: PLC0415
+    except Exception:
+        return {}
+
+    try:
+        overview = dict(
+            await build_coinglass_overview_payload(symbol=symbol, refresh=False, manual=False) or {}
+        )
+    except Exception:
+        return {}
+
+    try:
+        freshness_sec = (
+            float(overview.get("freshness_sec"))
+            if overview.get("freshness_sec") is not None
+            else None
+        )
+    except Exception:
+        freshness_sec = None
+
+    degraded_reason = str(overview.get("degraded_reason") or "").strip()
+    should_refresh = bool(overview.get("key_configured")) and (
+        not bool(overview.get("available"))
+        or degraded_reason
+        or freshness_sec is None
+        or freshness_sec > float(max_age_sec)
+    )
+    if not should_refresh:
+        return overview
+
+    try:
+        refreshed = dict(
+            await build_coinglass_overview_payload(symbol=symbol, refresh=True, manual=False) or {}
+        )
+    except Exception:
+        return overview
+    return refreshed or overview
+
+
 def _merge_nested_payload(primary: Any, fallback: Any) -> Any:
     if isinstance(primary, dict) and isinstance(fallback, dict):
         merged = dict(fallback)
@@ -315,20 +381,39 @@ def _merge_nested_payload(primary: Any, fallback: Any) -> Any:
 async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
     since = datetime.now(timezone.utc) - timedelta(hours=max(1, min(int(hours or 24), 168)))
     symbol_key = _symbol_to_news_key(symbol)
+    symbol_keys = _symbol_to_news_keys(symbol)
     db_timeout = 8.0
-    events_task = asyncio.wait_for(news_db.list_events(symbol=symbol_key, since=since, limit=300), timeout=db_timeout)
+    event_tasks = [
+        asyncio.wait_for(
+            news_db.list_events(symbol=news_symbol, since=since, limit=300),
+            timeout=db_timeout,
+        )
+        for news_symbol in symbol_keys
+    ]
     raw_task = asyncio.wait_for(news_db.list_news_raw(since=since, limit=400), timeout=db_timeout)
     states_task = asyncio.wait_for(news_db.list_source_states(), timeout=db_timeout)
     queue_task = asyncio.wait_for(news_db.get_llm_queue_stats(), timeout=db_timeout)
-    events_raw, raw_rows_raw, source_states_raw, llm_queue_raw = await asyncio.gather(
-        events_task,
+    event_results, raw_rows_raw, source_states_raw, llm_queue_raw = await asyncio.gather(
+        asyncio.gather(*event_tasks, return_exceptions=True),
         raw_task,
         states_task,
         queue_task,
         return_exceptions=True,
     )
 
-    events = [] if isinstance(events_raw, Exception) else list(events_raw or [])
+    events: List[Dict[str, Any]] = []
+    if not isinstance(event_results, Exception):
+        seen_event_ids: set[str] = set()
+        for batch in list(event_results or []):
+            if isinstance(batch, Exception):
+                continue
+            for event in list(batch or []):
+                event_id = str((event or {}).get("event_id") or "").strip()
+                dedupe_key = event_id or str(event)
+                if dedupe_key in seen_event_ids:
+                    continue
+                seen_event_ids.add(dedupe_key)
+                events.append(dict(event or {}))
     raw_rows = [] if isinstance(raw_rows_raw, Exception) else list(raw_rows_raw or [])
     source_states = [] if isinstance(source_states_raw, Exception) else list(source_states_raw or [])
     llm_queue = {} if isinstance(llm_queue_raw, Exception) else dict(llm_queue_raw or {})
@@ -388,6 +473,7 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
     generated_at = _now_iso()
     return {
         "symbol": symbol_key,
+        "query_symbols": symbol_keys,
         "hours": int(hours),
         "scope": scope,
         "events_count": int(len(events or [])),
@@ -509,6 +595,7 @@ def _build_derivatives_shadow_summary(
     return {
         "available": bool(derivatives.get("available")),
         "status": str(derivatives.get("status") or "missing"),
+        "key_configured": bool(details.get("key_configured")),
         "provider": str(details.get("provider") or "coinglass"),
         "freshness_sec": freshness_sec,
         "degraded_reason": details.get("degraded_reason"),
@@ -542,15 +629,155 @@ def _build_derivatives_shadow_summary(
     }
 
 
+def _build_derivatives_summary_from_overview(overview: Dict[str, Any]) -> Dict[str, Any]:
+    overview = dict(overview or {})
+    snapshot = dict(overview.get("snapshot") or {})
+    snapshot_payload = dict(snapshot.get("payload") or {})
+    active_datasets = list(
+        overview.get("active_datasets")
+        or snapshot_payload.get("active_datasets")
+        or []
+    )
+    freshness_sec = _coerce_finite_float(overview.get("freshness_sec"))
+    degraded_reason = str(overview.get("degraded_reason") or "").strip() or None
+    status_rows = list(overview.get("status") or [])
+    funding_mean = _coerce_finite_float(snapshot_payload.get("funding_mean"))
+    derivatives_labels = [
+        str(item).strip()
+        for item in list(snapshot_payload.get("derivatives_labels") or [])
+        if str(item).strip()
+    ]
+
+    status = "missing"
+    if bool(overview.get("available")) and not degraded_reason:
+        status = "ok"
+    elif degraded_reason or active_datasets or bool(overview.get("key_configured")) or status_rows:
+        status = "degraded"
+
+    return {
+        "available": bool(overview.get("available")),
+        "status": status,
+        "key_configured": bool(overview.get("key_configured")),
+        "provider": "coinglass",
+        "freshness_sec": freshness_sec,
+        "degraded_reason": degraded_reason,
+        "active_datasets": active_datasets,
+        "dataset_count": len(active_datasets),
+        "quota_headroom": dict(overview.get("quota_headroom") or {}),
+        "snapshot_at": snapshot.get("timestamp"),
+        "history_ready": bool(snapshot_payload.get("history_ready")),
+        "history_exchange": snapshot_payload.get("history_exchange"),
+        "history_interval": snapshot_payload.get("history_interval"),
+        "funding_rate": _coerce_finite_float(snapshot.get("funding_rate")),
+        "funding_mean": funding_mean,
+        "funding_mean_rate_pct": (funding_mean * 100.0) if funding_mean is not None else None,
+        "funding_zscore": _coerce_finite_float(snapshot_payload.get("funding_zscore")),
+        "funding_reversion_speed": _coerce_finite_float(snapshot_payload.get("funding_reversion_speed")),
+        "long_short_ratio": _coerce_finite_float(snapshot.get("long_short_ratio")),
+        "long_short_ratio_change_24h": _coerce_finite_float(snapshot_payload.get("long_short_ratio_change_24h")),
+        "liquidation_burst_score": _coerce_finite_float(snapshot_payload.get("liquidation_burst_score")),
+        "derivatives_heat_score": _coerce_finite_float(snapshot_payload.get("derivatives_heat_score")),
+        "crowding_score": _coerce_finite_float(snapshot.get("crowding_score")),
+        "squeeze_score": _coerce_finite_float(snapshot.get("squeeze_score")),
+        "distribution_score": _coerce_finite_float(snapshot.get("distribution_score")),
+        "basis_pct": _coerce_finite_float(snapshot.get("basis_pct")),
+        "taker_buy_sell_imbalance": _coerce_finite_float(snapshot.get("taker_buy_sell_imbalance")),
+        "crowded_long": bool(snapshot_payload.get("crowded_long")),
+        "crowded_short": bool(snapshot_payload.get("crowded_short")),
+        "squeeze_building": bool(snapshot_payload.get("squeeze_building")),
+        "flush_risk": bool(snapshot_payload.get("flush_risk")),
+        "basis_dislocation": bool(snapshot_payload.get("basis_dislocation")),
+        "flow_divergence": bool(snapshot_payload.get("flow_divergence")),
+        "order_flow_confirmed": bool(snapshot_payload.get("order_flow_confirmed")),
+        "derivatives_labels": derivatives_labels,
+    }
+
+
+def _apply_derivatives_shadow_to_microstructure(
+    microstructure: Dict[str, Any],
+    derivatives_summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    merged = dict(microstructure or {})
+    derivatives_summary = dict(derivatives_summary or {})
+    snapshot_at = derivatives_summary.get("snapshot_at")
+
+    long_short_ratio = _coerce_finite_float(derivatives_summary.get("long_short_ratio"))
+    if long_short_ratio is not None and long_short_ratio > 0:
+        merged["long_short_ratio"] = {
+            "available": True,
+            "source": "coinglass_cache",
+            "symbol": merged.get("symbol"),
+            "long_short_ratio": round(long_short_ratio, 6),
+            "timestamp": snapshot_at,
+        }
+
+    funding_rate = _coerce_finite_float(derivatives_summary.get("funding_rate"))
+    if funding_rate is not None:
+        existing_funding = dict(merged.get("funding_rate") or {})
+        merged["funding_rate"] = {
+            **existing_funding,
+            "available": True,
+            "source": "coinglass_cache",
+            "funding_rate": funding_rate,
+            "timestamp": snapshot_at,
+        }
+
+    basis_pct = _coerce_finite_float(derivatives_summary.get("basis_pct"))
+    if basis_pct is not None:
+        existing_basis = dict(merged.get("spot_futures_basis") or {})
+        merged["spot_futures_basis"] = {
+            **existing_basis,
+            "available": True,
+            "source": "coinglass_cache",
+            "basis_pct": basis_pct,
+            "timestamp": snapshot_at,
+        }
+
+    taker_imbalance = _coerce_finite_float(derivatives_summary.get("taker_buy_sell_imbalance"))
+    current_flow = dict(merged.get("aggressor_flow") or {})
+    current_flow_count = int(current_flow.get("count") or 0)
+    current_flow_imbalance = _coerce_finite_float(current_flow.get("imbalance")) or 0.0
+    has_live_flow = bool(current_flow.get("available")) and (
+        current_flow_count > 0 or abs(current_flow_imbalance) > 1e-9
+    )
+    if taker_imbalance is not None and not has_live_flow:
+        merged["aggressor_flow"] = {
+            **current_flow,
+            "available": True,
+            "source": "coinglass_cache",
+            "error": None,
+            "count": current_flow_count,
+            "buy_volume": current_flow.get("buy_volume"),
+            "sell_volume": current_flow.get("sell_volume"),
+            "imbalance": taker_imbalance,
+            "timestamp": snapshot_at,
+        }
+
+    merged["derivatives_context"] = {
+        "provider": str(derivatives_summary.get("provider") or "coinglass"),
+        "available": bool(derivatives_summary.get("available")),
+        "status": str(derivatives_summary.get("status") or "missing"),
+        "key_configured": bool(derivatives_summary.get("key_configured")),
+        "freshness_sec": derivatives_summary.get("freshness_sec"),
+        "degraded_reason": derivatives_summary.get("degraded_reason"),
+        "dataset_count": int(derivatives_summary.get("dataset_count") or 0),
+        "active_datasets": list(derivatives_summary.get("active_datasets") or []),
+        "snapshot_at": snapshot_at,
+    }
+    return merged
+
+
 def _build_market_regime(
     analytics: Dict[str, Any],
     microstructure: Dict[str, Any],
     news: Dict[str, Any],
+    derivatives_summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     risk_module = dict((analytics.get("modules") or {}).get("risk_dashboard", {}).get("data") or {})
     micro_module = dict((analytics.get("modules") or {}).get("microstructure", {}).get("data") or {})
     merged_micro = dict(_merge_nested_payload(microstructure or {}, micro_module or {}) or {})
     micro_summary = _build_microstructure_summary(merged_micro)
+    derivatives_summary = dict(derivatives_summary or {})
 
     risk_level = str(risk_module.get("risk_level") or "unknown")
     spread_bps = float((merged_micro.get("orderbook") or {}).get("spread_bps") or 0.0)
@@ -568,6 +795,16 @@ def _build_market_regime(
         + wall_bias * 0.25
     )
     joint_signal = micro_signal + (news_bias * 0.25)
+    derivatives_ready = bool(derivatives_summary.get("available"))
+    derivatives_history_ready = bool(derivatives_summary.get("history_ready"))
+    derivatives_freshness_sec = _coerce_finite_float(derivatives_summary.get("freshness_sec"))
+    derivatives_confidence_bonus = 0.0
+    if derivatives_ready:
+        derivatives_confidence_bonus += 0.08
+    if derivatives_history_ready:
+        derivatives_confidence_bonus += 0.04
+    if derivatives_freshness_sec is not None and derivatives_freshness_sec > float(_COINGLASS_PREFERRED_MAX_AGE_SEC):
+        derivatives_confidence_bonus -= 0.05
     confidence = min(
         0.95,
         max(
@@ -575,7 +812,8 @@ def _build_market_regime(
             0.3
             + min(0.25, total_news / 220.0)
             + (0.15 if micro_summary.get("has_actionable_signal") else 0.0)
-            + (0.08 if micro_summary.get("long_short_ratio_available") else 0.0),
+            + (0.08 if micro_summary.get("long_short_ratio_available") else 0.0)
+            + derivatives_confidence_bonus,
         ),
     )
 
@@ -1096,7 +1334,11 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
     history_micro_task = _wait_or_none(_load_latest_microstructure_snapshot(profile.exchange, profile.primary_symbol), 4.0)
     history_community_task = _wait_or_none(_load_latest_community_snapshot(profile.exchange, profile.primary_symbol), 4.0)
     history_whale_task = _wait_or_none(_load_latest_whale_snapshot(profile.exchange, profile.primary_symbol), 4.0)
-    risk_dashboard, news, calendar_data, macro_snapshot, history_micro, history_community, history_whale = await asyncio.gather(
+    derivatives_overview_task = _wait_or_none(
+        _load_preferred_coinglass_overview(profile.primary_symbol),
+        8.0,
+    )
+    risk_dashboard, news, calendar_data, macro_snapshot, history_micro, history_community, history_whale, derivatives_overview = await asyncio.gather(
         risk_task,
         news_task,
         calendar_task,
@@ -1104,6 +1346,7 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
         history_micro_task,
         history_community_task,
         history_whale_task,
+        derivatives_overview_task,
     )
     risk_dashboard = dict(risk_dashboard or {})
     news = dict(news or {})
@@ -1112,6 +1355,8 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
     history_micro = dict(history_micro or {})
     history_community = dict(history_community or {})
     history_whale = dict(history_whale or {})
+    derivatives_overview = dict(derivatives_overview or {})
+    derivatives_summary = _build_derivatives_summary_from_overview(derivatives_overview)
 
     prefer_history_micro = _snapshot_is_recent(history_micro, _MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC) and _microstructure_has_signal(history_micro)
     prefer_history_community = _snapshot_is_recent(history_community, _MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC) and _community_has_signal(history_community)
@@ -1140,6 +1385,7 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
 
     micro = dict(history_micro if prefer_history_micro else (_merge_nested_payload(live_micro, history_micro) or {}))
     community = dict(history_community if prefer_history_community else (_merge_nested_payload(live_community, history_community) or {}))
+    micro = _apply_derivatives_shadow_to_microstructure(micro, derivatives_summary)
     used_history_micro = prefer_history_micro or (
         not prefer_history_micro and _microstructure_has_signal(history_micro) and not _microstructure_has_signal(live_micro)
     )
@@ -1202,7 +1448,7 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
     }
 
     micro_summary = _build_microstructure_summary(micro)
-    regime = _build_market_regime(analytics, micro, news)
+    regime = _build_market_regime(analytics, micro, news, derivatives_summary)
     degraded = False
     warnings: List[str] = []
 
@@ -1231,6 +1477,16 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
         warnings.append("Orderbook depth rows are sparse; wall and liquidity diagnostics may be incomplete.")
     if not micro_summary.get("long_short_ratio_available"):
         warnings.append("Long/short ratio is unavailable for this snapshot; crowding diagnostics are partial.")
+    if derivatives_summary.get("key_configured"):
+        if not derivatives_summary.get("available"):
+            degraded = True
+            warnings.append("CoinGlass derivatives snapshot is unavailable; research is using exchange/public fallbacks.")
+        elif _coerce_finite_float(derivatives_summary.get("freshness_sec")) is not None and float(derivatives_summary.get("freshness_sec") or 0.0) > float(_COINGLASS_PREFERRED_MAX_AGE_SEC):
+            degraded = True
+            warnings.append("CoinGlass derivatives snapshot is stale; crowding/funding context may lag.")
+        elif derivatives_summary.get("degraded_reason"):
+            degraded = True
+            warnings.append(f"CoinGlass derivatives snapshot degraded: {derivatives_summary.get('degraded_reason')}.")
     if not _macro_has_signal(macro_snapshot):
         warnings.append("Macro snapshot is unavailable; regime view leans on microstructure/news only.")
     elif macro_summary.get("scissors_spread_pp") is None:
@@ -1250,6 +1506,7 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             "news.storage.summary",
             "analytics.history.snapshots",
             "data.macro.snapshot",
+            "data.coinglass.derivatives",
         ],
         warnings=warnings,
         summary={
@@ -1259,6 +1516,8 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             "confidence": regime["confidence"],
             "risk_level": regime["risk_level"],
             "macro_focus": macro_summary["headline"],
+            "derivatives_status": str(derivatives_summary.get("status") or "missing"),
+            "derivatives_freshness_sec": derivatives_summary.get("freshness_sec"),
         },
         payload={
             "analytics_overview": analytics,
@@ -1272,10 +1531,12 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
                 "news": news,
                 "macro": macro_snapshot,
                 "macro_regions": dict(macro_summary.get("regions") or {}),
+                "derivatives": derivatives_summary,
             },
             "calendar_watchlist": calendar_rows,
             "regime": regime,
             "microstructure_summary": micro_summary,
+            "derivatives_summary": derivatives_summary,
             "macro_snapshot": macro_snapshot,
             "macro_summary": macro_summary,
             "macro_regions": dict(macro_summary.get("regions") or {}),

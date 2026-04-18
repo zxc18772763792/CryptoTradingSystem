@@ -7,11 +7,12 @@ from unittest.mock import AsyncMock
 def test_build_news_summary_exposes_timezone_basis(monkeypatch):
     from web.api import research as module
 
-    monkeypatch.setattr(
-        module.news_db,
-        "list_events",
-        AsyncMock(
-            return_value=[
+    requested_symbols = []
+
+    async def fake_list_events(*, symbol=None, since=None, limit=300):
+        requested_symbols.append(symbol)
+        if symbol == "BTCUSDT":
+            return [
                 {
                     "event_id": "evt-1",
                     "ts": "2026-04-06T08:00:00+00:00",
@@ -20,7 +21,12 @@ def test_build_news_summary_exposes_timezone_basis(monkeypatch):
                     "sentiment": 1,
                 }
             ]
-        ),
+        return []
+
+    monkeypatch.setattr(
+        module.news_db,
+        "list_events",
+        fake_list_events,
     )
     monkeypatch.setattr(
         module.news_db,
@@ -43,6 +49,9 @@ def test_build_news_summary_exposes_timezone_basis(monkeypatch):
     payload = asyncio.run(module._build_news_summary("BTC/USDT", hours=24))
 
     assert payload["symbol"] == "BTC"
+    assert payload["query_symbols"] == ["BTCUSDT", "BTC"]
+    assert requested_symbols == ["BTCUSDT", "BTC"]
+    assert payload["events_count"] == 1
     assert payload["ui_timezone"] == "Asia/Shanghai"
     assert "UTC storage" in payload["timezone_basis"]
     assert payload["generated_at_utc"].endswith("+00:00")

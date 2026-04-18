@@ -93,6 +93,7 @@ _ANALYTICS_WHALE_TIMEOUT_SEC = 6.0
 _ANALYTICS_WHALE_MIN_BTC = 10.0
 _ANALYTICS_ANNOUNCEMENT_TIMEOUT_SEC = 4.0
 _ANALYTICS_COLLECTOR_TIMEOUT_SEC = 8.0
+_ANALYTICS_COINGLASS_REFRESH_MAX_AGE_SEC = 5 * 60.0
 _ANALYTICS_HISTORY_HEALTH_CACHE_TTL_SEC = 20.0
 _ANALYTICS_HISTORY_STATUS_CACHE_TTL_SEC = 8.0
 _ANALYTICS_HISTORY_HEALTH_READ_TIMEOUT_SEC = 6.0
@@ -998,6 +999,166 @@ def _safe_dt(value: Any) -> Optional[datetime]:
         return None
 
 
+def _optional_finite_float(value: Any) -> Optional[float]:
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    if math.isnan(out) or math.isinf(out):
+        return None
+    return out
+
+
+def _should_refresh_coinglass_overview(
+    overview: Dict[str, Any],
+    *,
+    max_age_sec: float = _ANALYTICS_COINGLASS_REFRESH_MAX_AGE_SEC,
+) -> bool:
+    overview = dict(overview or {})
+    if not bool(overview.get("key_configured")):
+        return False
+    freshness_sec = _optional_finite_float(overview.get("freshness_sec"))
+    degraded_reason = str(overview.get("degraded_reason") or "").strip()
+    return (
+        not bool(overview.get("available"))
+        or bool(degraded_reason)
+        or freshness_sec is None
+        or freshness_sec > float(max_age_sec)
+    )
+
+
+async def _load_preferred_coinglass_overview(
+    symbol: str,
+    *,
+    max_age_sec: float = _ANALYTICS_COINGLASS_REFRESH_MAX_AGE_SEC,
+) -> Dict[str, Any]:
+    try:
+        from core.data.coinglass_feature_builder import build_coinglass_overview_payload  # noqa: PLC0415
+    except Exception as exc:
+        logger.debug(f"coinglass overview import unavailable for {symbol}: {exc}")
+        return {}
+
+    try:
+        overview = dict(
+            await build_coinglass_overview_payload(symbol=symbol, refresh=False, manual=False) or {}
+        )
+    except Exception as exc:
+        logger.debug(f"coinglass overview unavailable for {symbol}: {exc}")
+        return {}
+
+    if not _should_refresh_coinglass_overview(overview, max_age_sec=max_age_sec):
+        return overview
+
+    try:
+        refreshed = dict(
+            await build_coinglass_overview_payload(symbol=symbol, refresh=True, manual=False) or {}
+        )
+    except Exception as exc:
+        logger.debug(f"coinglass overview refresh failed for {symbol}: {exc}")
+        return overview
+    return refreshed or overview
+
+
+def _apply_coinglass_derivatives_overlay(
+    payload: Dict[str, Any],
+    overview: Dict[str, Any],
+) -> Dict[str, Any]:
+    out = copy.deepcopy(payload or {})
+    overview = dict(overview or {})
+    snapshot = dict(overview.get("snapshot") or {})
+    snapshot_payload = dict(snapshot.get("payload") or {})
+    freshness_sec = _optional_finite_float(overview.get("freshness_sec"))
+    context = {
+        "provider": "coinglass",
+        "available": bool(overview.get("available")),
+        "key_configured": bool(overview.get("key_configured")),
+        "freshness_sec": freshness_sec,
+        "degraded_reason": str(overview.get("degraded_reason") or "").strip() or None,
+        "active_datasets": list(overview.get("active_datasets") or []),
+        "snapshot_at": snapshot.get("timestamp"),
+    }
+    out["derivatives_context"] = context
+
+    if not context["available"]:
+        return out
+
+    snapshot_at = snapshot.get("timestamp")
+    symbol = str(overview.get("symbol") or out.get("symbol") or "").strip() or None
+    long_short_ratio = _optional_finite_float(snapshot.get("long_short_ratio"))
+    if long_short_ratio is None:
+        long_short_ratio = _optional_finite_float(snapshot_payload.get("long_short_ratio"))
+    if long_short_ratio is not None and long_short_ratio > 0:
+        out["long_short_ratio"] = {
+            "available": True,
+            "source": "coinglass_cache",
+            "error": None,
+            "symbol": symbol,
+            "long_ratio": _optional_finite_float(snapshot.get("long_ratio")),
+            "short_ratio": _optional_finite_float(snapshot.get("short_ratio")),
+            "long_short_ratio": round(long_short_ratio, 6),
+            "sample_size": int(_safe_float(snapshot.get("sample_size"), default=0.0)),
+            "timestamp": snapshot_at,
+        }
+
+    funding_rate = _optional_finite_float(snapshot.get("funding_rate"))
+    if funding_rate is None:
+        funding_rate = _optional_finite_float(snapshot.get("funding_rate_oi_weighted"))
+    if funding_rate is None:
+        funding_rate = _optional_finite_float(snapshot_payload.get("funding_rate_oi_weighted"))
+    if funding_rate is None:
+        funding_rate = _optional_finite_float(snapshot_payload.get("funding_rate"))
+    if funding_rate is not None:
+        existing_funding = dict(out.get("funding_rate") or {})
+        out["funding_rate"] = {
+            **existing_funding,
+            "available": True,
+            "source": "coinglass_cache",
+            "error": None,
+            "funding_rate": funding_rate,
+            "timestamp": snapshot_at,
+        }
+
+    basis_pct = _optional_finite_float(snapshot.get("basis_pct"))
+    if basis_pct is None:
+        basis_pct = _optional_finite_float(snapshot_payload.get("basis_pct"))
+    if basis_pct is not None:
+        existing_basis = dict(out.get("spot_futures_basis") or {})
+        out["spot_futures_basis"] = {
+            **existing_basis,
+            "available": True,
+            "source": "coinglass_cache",
+            "error": None,
+            "basis_pct": basis_pct,
+            "timestamp": snapshot_at,
+        }
+
+    taker_imbalance = _optional_finite_float(snapshot.get("taker_buy_sell_imbalance"))
+    if taker_imbalance is None:
+        taker_imbalance = _optional_finite_float(snapshot_payload.get("taker_imbalance_1h"))
+    if taker_imbalance is None:
+        taker_imbalance = _optional_finite_float(snapshot_payload.get("taker_imbalance_4h"))
+    existing_flow = dict(out.get("aggressor_flow") or {})
+    existing_flow_count = int(_safe_float(existing_flow.get("count"), default=0.0))
+    existing_flow_imbalance = _optional_finite_float(existing_flow.get("imbalance")) or 0.0
+    has_exchange_flow = bool(existing_flow.get("available")) and (
+        existing_flow_count > 0 or abs(existing_flow_imbalance) > 1e-9
+    )
+    if taker_imbalance is not None and not has_exchange_flow:
+        out["aggressor_flow"] = {
+            **existing_flow,
+            "available": True,
+            "source": "coinglass_cache",
+            "error": None,
+            "count": existing_flow_count,
+            "buy_volume": existing_flow.get("buy_volume"),
+            "sell_volume": existing_flow.get("sell_volume"),
+            "imbalance": taker_imbalance,
+            "timestamp": snapshot_at,
+        }
+
+    return out
+
+
 def _utc_now_naive() -> datetime:
     return datetime.utcnow().replace(tzinfo=None)
 
@@ -1242,6 +1403,7 @@ def _coinglass_overview_to_analytics_status(
             "degraded_reason": degraded_reason,
             "quota_headroom": dict(overview.get("quota_headroom") or {}),
             "status_count": len(status_rows),
+            "snapshot": dict(overview.get("snapshot") or {}),
         },
     }
 
@@ -1253,9 +1415,7 @@ async def _build_derivatives_analytics_status(
 ) -> Dict[str, Any]:
     generated_at = _utc_iso(datetime.now(timezone.utc))
     try:
-        from core.data.coinglass_feature_builder import build_coinglass_overview_payload  # noqa: PLC0415
-
-        overview = await build_coinglass_overview_payload(symbol=symbol, refresh=False, manual=False)
+        overview = await _load_preferred_coinglass_overview(symbol=symbol)
     except Exception as exc:
         return {
             "collector": "derivatives",
@@ -1312,9 +1472,7 @@ async def _attach_derivatives_analytics_health(
     out = dict(payload or {})
     generated_at = _utc_iso(datetime.now(timezone.utc))
     try:
-        from core.data.coinglass_feature_builder import build_coinglass_overview_payload  # noqa: PLC0415
-
-        overview = await build_coinglass_overview_payload(symbol=symbol, refresh=False, manual=False)
+        overview = await _load_preferred_coinglass_overview(symbol=symbol)
         derivatives_status = _coinglass_overview_to_analytics_status(
             overview,
             exchange=exchange,
@@ -4790,6 +4948,7 @@ async def get_market_microstructure(
     funding_basis_task = asyncio.create_task(_fetch_funding_basis_snapshot(exchange=exchange, symbol=symbol))
     long_short_task = asyncio.create_task(_fetch_long_short_ratio_snapshot(exchange=exchange, symbol=symbol))
     options_task = asyncio.create_task(_fetch_options_snapshot(symbol=symbol))
+    coinglass_task = asyncio.create_task(_load_preferred_coinglass_overview(symbol=symbol))
 
     ob, flow, oi = await asyncio.gather(
         _fetch_orderbook(exchange=exchange, symbol=symbol, limit=depth_limit),
@@ -4802,6 +4961,7 @@ async def get_market_microstructure(
     funding = dict((funding_basis or {}).get("funding") or {"available": False})
     basis = dict((funding_basis or {}).get("basis") or {"available": False})
     options_data = await options_task
+    coinglass_overview = await coinglass_task
     bids = [[_safe_float(x[0]), _safe_float(x[1])] for x in (ob.get("bids") or []) if len(x) >= 2]
     asks = [[_safe_float(x[0]), _safe_float(x[1])] for x in (ob.get("asks") or []) if len(x) >= 2]
     bids = [x for x in bids if x[0] > 0 and x[1] > 0]
@@ -4915,6 +5075,7 @@ async def get_market_microstructure(
         "spot_futures_basis": basis,
         "options": options_payload,
     }
+    payload = _apply_coinglass_derivatives_overlay(payload, coinglass_overview)
     _MICROSTRUCTURE_SNAPSHOT_CACHE[cache_key] = {"ts": time.time(), "payload": copy.deepcopy(payload)}
     return payload
 

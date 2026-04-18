@@ -4906,20 +4906,20 @@ input[type="radio"] {
 
 .ai-agent-review-summary {
     display: grid;
-    gap: 10px;
+    gap: 6px;
     margin-top: 8px;
 }
 
 .ai-agent-review-kpis {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 8px;
+    gap: 5px;
 }
 
 .ai-agent-review-kpi {
     display: grid;
-    gap: 4px;
-    padding: 10px 12px;
+    gap: 3px;
+    padding: 6px 8px;
     border-radius: 12px;
     border: 1px solid rgba(126, 146, 178, 0.18);
     background: rgba(12, 20, 32, 0.58);
@@ -4931,7 +4931,7 @@ input[type="radio"] {
 }
 
 .ai-agent-review-kpi-value {
-    font-size: 18px;
+    font-size: 17px;
     font-weight: 700;
     color: #ecf3fb;
     line-height: 1.2;
@@ -4940,20 +4940,20 @@ input[type="radio"] {
 .ai-agent-review-kpi-note {
     font-size: 11px;
     color: #9fb1c9;
-    line-height: 1.5;
+    line-height: 1.22;
 }
 
 .ai-agent-review-meta {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 5px;
 }
 
 .ai-agent-review-meta span {
     display: inline-flex;
     align-items: center;
-    min-height: 28px;
-    padding: 0 10px;
+    min-height: 22px;
+    padding: 0 8px;
     border-radius: 999px;
     border: 1px solid rgba(126, 146, 178, 0.16);
     background: rgba(15, 23, 42, 0.42);
@@ -4968,34 +4968,34 @@ input[type="radio"] {
 
 .ai-agent-review-insights {
     display: grid;
-    gap: 8px;
+    gap: 5px;
 }
 
 .ai-agent-review-insight {
-    padding: 9px 12px;
+    padding: 6px 8px;
     border-radius: 10px;
     border-left: 3px solid rgba(91, 156, 255, 0.75);
     background: rgba(17, 28, 43, 0.62);
     font-size: 12px;
     color: #dbe7f5;
-    line-height: 1.6;
+    line-height: 1.28;
 }
 
 .ai-agent-learning-panel {
-    margin-top: 14px;
-    padding: 14px;
+    margin-top: 6px;
+    padding: 8px 9px;
     border-radius: 18px;
     background: linear-gradient(180deg, rgba(9, 16, 30, 0.94), rgba(10, 20, 36, 0.88));
     border: 1px solid rgba(93, 173, 226, 0.18);
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 6px;
 }
 
 .ai-agent-learning-head {
     display: flex;
     justify-content: space-between;
-    gap: 10px;
+    gap: 8px;
     align-items: flex-end;
     flex-wrap: wrap;
 }
@@ -5014,21 +5014,21 @@ input[type="radio"] {
 .ai-agent-learning-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-    gap: 10px;
+    gap: 6px;
 }
 
 .ai-agent-learning-card {
-    padding: 12px;
+    padding: 7px 8px;
     border-radius: 14px;
     background: rgba(12, 21, 37, 0.92);
     border: 1px solid rgba(148, 163, 184, 0.14);
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 4px;
 }
 
 .ai-agent-learning-card strong {
-    font-size: 18px;
+    font-size: 17px;
     color: #f8fbff;
     line-height: 1.2;
 }
@@ -5042,14 +5042,14 @@ input[type="radio"] {
 
 .ai-agent-learning-note {
     font-size: 11px;
-    line-height: 1.6;
+    line-height: 1.32;
     color: #9bb2ce;
 }
 
 .ai-agent-learning-tags {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 5px;
 }
 
 .ai-agent-learning-tag {
@@ -10320,8 +10320,8 @@ input[type="radio"] {
 
 #ai-agent .ai-agent-decision-strip {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 16px;
+    grid-template-columns: minmax(390px, 1.08fr) minmax(320px, 0.92fr);
+    gap: 14px;
     align-items: stretch;
 }
 
@@ -10331,6 +10331,7 @@ input[type="radio"] {
     flex-direction: column;
     gap: 12px;
     min-height: 100%;
+    min-width: 0;
 }
 
 #ai-agent .ai-agent-decision-strip .ai-agent-panel-ranking > *,
@@ -10342,6 +10343,11 @@ input[type="radio"] {
 #ai-agent .ai-agent-panel-review {
     display: grid;
     gap: 12px;
+}
+
+#ai-agent .ai-agent-decision-strip .ai-agent-panel-journal {
+    min-height: 0;
+    overflow: hidden;
 }
 
 #ai-agent .ai-agent-panel-journal .ai-auto-step-head,
@@ -10366,6 +10372,9 @@ input[type="radio"] {
     flex: 1 1 auto;
     max-height: none;
     min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-gutter: stable;
     background: rgba(8, 15, 25, 0.72);
     border-color: rgba(126, 146, 178, 0.14);
     padding: 14px 16px;
@@ -10373,15 +10382,15 @@ input[type="radio"] {
 
 #ai-agent .ai-agent-panel-review .ai-agent-review-workspace {
     display: grid;
-    grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
-    gap: 16px;
-    align-items: start;
+    grid-template-columns: minmax(280px, 312px) minmax(0, 1fr);
+    gap: 12px;
+    align-items: stretch;
     min-height: 0;
 }
 
 #ai-agent .ai-agent-panel-review .ai-agent-review-summary {
     margin-top: 0;
-    padding: 16px;
+    padding: 8px;
     border-radius: 18px;
     border: 1px solid rgba(126, 146, 178, 0.16);
     background:
@@ -10408,6 +10417,7 @@ input[type="radio"] {
         radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 28%),
         linear-gradient(180deg, rgba(9, 17, 30, 0.94), rgba(8, 15, 25, 0.96));
     box-shadow: 0 18px 38px rgba(3, 9, 18, 0.12);
+    min-width: 0;
 }
 
 #ai-agent .ai-agent-panel-review .ai-agent-review-history-meta {
@@ -10420,12 +10430,17 @@ input[type="radio"] {
 #ai-agent .ai-agent-panel-review .ai-agent-review-box {
     margin-top: 0;
     display: grid;
-    gap: 14px;
+    gap: 12px;
     min-height: 0;
     flex: 1 1 auto;
     overflow-y: auto;
     overflow-x: hidden;
-    padding-right: 2px;
+    padding-right: 4px;
+    scrollbar-gutter: stable;
+}
+
+#ai-agent .ai-agent-review-summary .ai-agent-review-insights {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 #ai-agent .ai-agent-panel-review .ai-agent-review-card {
@@ -10815,7 +10830,8 @@ input[type="radio"] {
     }
 
     #ai-agent .ai-agent-review-summary .ai-agent-review-kpis,
-    #ai-agent .ai-agent-review-summary .ai-agent-learning-grid {
+    #ai-agent .ai-agent-review-summary .ai-agent-learning-grid,
+    #ai-agent .ai-agent-review-summary .ai-agent-review-insights {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
@@ -10904,7 +10920,8 @@ input[type="radio"] {
 
     #ai-agent .ai-agent-info-grid,
     #ai-agent .ai-agent-review-summary .ai-agent-review-kpis,
-    #ai-agent .ai-agent-review-summary .ai-agent-learning-grid {
+    #ai-agent .ai-agent-review-summary .ai-agent-learning-grid,
+    #ai-agent .ai-agent-review-summary .ai-agent-review-insights {
         grid-template-columns: 1fr;
     }
 

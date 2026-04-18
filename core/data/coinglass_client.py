@@ -766,7 +766,7 @@ def normalize_dataset_response(
                 rows.append(_normalize_open_interest_history_row(row))
             elif dataset == "funding_rate_history":
                 rows.append(_normalize_funding_rate_history_row(row))
-            elif dataset == "taker_buy_sell_volume_exchange_list":
+            elif dataset in {"taker_buy_sell_volume_exchange_list", "taker_buy_sell_volume_history"}:
                 rows.append(_normalize_taker_row(row))
             elif dataset == "liquidation_history":
                 rows.append(_normalize_liquidation_row(row))
@@ -1032,6 +1032,7 @@ def _manifest_params(
             "global_long_short_account_ratio_history",
             "open_interest_history",
             "funding_rate_history",
+            "taker_buy_sell_volume_history",
             "price_history",
         }:
             params["symbol"] = coinglass_pair_symbol(symbol, normalized_exchange)
@@ -1105,6 +1106,15 @@ class CoinglassClient:
             raise
         finally:
             await _finalize_budget(status_code=status_code, error_text=error_text)
+
+    async def request_json(
+        self,
+        path: str,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+        manual: bool = False,
+    ) -> Dict[str, Any]:
+        return await self._request_json(path, params=dict(params or {}), manual=manual)
 
     async def request_dataset(
         self,

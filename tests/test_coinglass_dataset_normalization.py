@@ -81,6 +81,20 @@ def test_history_manifest_params_use_defaults_and_pair_symbol_mapping():
     assert funding_params["interval"] == "h1"
     assert funding_params["limit"] == 4
 
+    taker_history_manifest = get_coinglass_manifest("taker_buy_sell_volume_history")
+    taker_history_params = client_module._manifest_params(
+        taker_history_manifest,
+        taker_history_manifest.routes[0],
+        symbol="BTC/USDT",
+        exchange="Bybit",
+        interval=None,
+        limit=5,
+    )
+    assert taker_history_params["exchange"] == "Bybit"
+    assert taker_history_params["symbol"] == "BTCUSDT"
+    assert taker_history_params["interval"] == "h1"
+    assert taker_history_params["limit"] == 5
+
 
 def test_normalize_dataset_response_rejects_business_error_payload():
     result = client_module.normalize_dataset_response(
@@ -462,3 +476,28 @@ def test_build_coinglass_overview_prefers_snapshot_active_datasets(monkeypatch):
 
     assert payload["available"] is True
     assert payload["active_datasets"] == sorted(["open_interest_exchange_list", "funding_rate_exchange_list"])
+
+
+def test_normalize_taker_history_row_computes_imbalance():
+    row = {"buyVolUsd": 1_000_000.0, "sellVolUsd": 600_000.0}
+    result = client_module._normalize_taker_row(row)
+    assert result["taker_buy_volume"] == 1_000_000.0
+    assert result["taker_sell_volume"] == 600_000.0
+    assert abs(result["taker_buy_sell_imbalance"] - (400_000.0 / 1_600_000.0)) < 1e-9
+
+
+def test_feature_builder_computes_taker_imbalance_from_history():
+    now = datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
+    taker_history_rows = [
+        {"_source_ts": (now - timedelta(hours=i)).isoformat(), "taker_buy_sell_imbalance": 0.10 + i * 0.01}
+        for i in range(5, -1, -1)
+    ]
+    series = builder_module._history_value_series(taker_history_rows, "taker_buy_sell_imbalance")
+    bars_1h = 1
+    bars_4h = 4
+    imbalance_1h = builder_module._series_mean(series, bars_1h)
+    imbalance_4h = builder_module._series_mean(series, bars_4h)
+    assert imbalance_1h is not None
+    assert imbalance_4h is not None
+    assert abs(imbalance_1h - series[-1][1]) < 1e-9
+    assert imbalance_4h > imbalance_1h

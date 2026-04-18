@@ -188,6 +188,7 @@ def test_analytics_history_status_includes_derivatives_coinglass_surface(monkeyp
     assert collectors["derivatives"]["details"]["provider"] == "coinglass"
     assert collectors["derivatives"]["details"]["freshness_sec"] == 120.0
     assert collectors["derivatives"]["details"]["quota_headroom"]["daily_remaining"] == 49900
+    assert collectors["derivatives"]["details"]["snapshot"]["timestamp"] == "2026-04-18T10:02:00Z"
 
 
 def test_analytics_history_health_includes_derivatives_coinglass_dataset(monkeypatch):

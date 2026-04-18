@@ -51,6 +51,7 @@ def _news_summary(events_count: int = 2) -> dict:
 def test_market_state_exposes_macro_snapshot(monkeypatch):
     from web.api import research as module
 
+    monkeypatch.setattr(module, "_load_preferred_coinglass_overview", AsyncMock(return_value={}))
     monkeypatch.setattr(module, "get_risk_dashboard", AsyncMock(return_value={"risk_level": "low"}))
     monkeypatch.setattr(
         module,

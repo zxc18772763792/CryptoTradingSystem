@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 from core.notifications.notification_manager import AlertRule, NotificationManager
@@ -108,3 +109,111 @@ def test_cooldown_ok_handles_naive_last_triggered_datetime():
     assert rule.last_triggered_at is not None
     assert rule.last_triggered_at.tzinfo is not None
     assert rule.to_dict()["last_triggered_at"].endswith("+00:00")
+
+
+def test_eval_altcoin_score_above_skips_benchmark_excluded_row():
+    manager = NotificationManager()
+    rule = _rule(
+        "altcoin_score_above",
+        {
+            "config_key": "cfg-1",
+            "symbol": "BTC/USDT",
+            "score_key": "anomaly",
+            "threshold": 0.72,
+        },
+    )
+    context = {
+        "altcoin": {
+            "scans": {
+                "cfg-1": {
+                    "rows": [
+                        {
+                            "symbol": "BTC/USDT",
+                            "alt_eligible": False,
+                            "anomaly_score": 0.96,
+                            "signal_state": "",
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    reason = manager._eval_rule(rule, context)
+
+    assert reason is None
+
+
+def test_evaluate_rules_only_triggers_altcoin_alert_when_condition_crosses_up(monkeypatch):
+    manager = NotificationManager()
+    manager._loaded = True
+    rule = _rule(
+        "altcoin_score_above",
+        {
+            "config_key": "cfg-1",
+            "symbol": "AVAX/USDT",
+            "score_key": "anomaly",
+            "threshold": 0.72,
+            "channels": ["feishu"],
+        },
+    )
+    manager._rules = {rule.id: rule}
+
+    async def fake_upsert(_rule):
+        return None
+
+    sent_messages = []
+
+    async def fake_send_message(title, message, channels):
+        sent_messages.append((title, message, tuple(channels)))
+        return {"feishu": True}
+
+    monkeypatch.setattr(manager, "_upsert_rule", fake_upsert)
+    monkeypatch.setattr(manager, "send_message", fake_send_message)
+
+    warm_context = {
+        "altcoin": {
+            "scans": {
+                "cfg-1": {
+                    "rows": [
+                        {
+                            "symbol": "AVAX/USDT",
+                            "alt_eligible": True,
+                            "anomaly_score": 0.81,
+                            "signal_state": "异动启动",
+                            "rank": 1,
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    cool_context = {
+        "altcoin": {
+            "scans": {
+                "cfg-1": {
+                    "rows": [
+                        {
+                            "symbol": "AVAX/USDT",
+                            "alt_eligible": True,
+                            "anomaly_score": 0.42,
+                            "signal_state": "",
+                            "rank": 3,
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    first = asyncio.run(manager.evaluate_rules(warm_context))
+    second = asyncio.run(manager.evaluate_rules(warm_context))
+    cooled = asyncio.run(manager.evaluate_rules(cool_context))
+    third = asyncio.run(manager.evaluate_rules(warm_context))
+
+    assert first["triggered_count"] == 0
+    assert second["triggered_count"] == 0
+    assert cooled["triggered_count"] == 0
+    assert third["triggered_count"] == 1
+    assert len(sent_messages) == 1
+    assert "AVAX/USDT" in third["triggered"][0]["reason"]
