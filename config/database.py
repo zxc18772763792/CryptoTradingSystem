@@ -35,7 +35,7 @@ class Kline(Base):
     trades = Column(Integer, default=0)
 
     __table_args__ = (
-        # 创建复合唯一索引
+        UniqueConstraint("exchange", "symbol", "timeframe", "timestamp", name="uq_kline_bar"),
         {"sqlite_autoincrement": True},
     )
 

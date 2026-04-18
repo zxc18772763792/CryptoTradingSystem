@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 from fastapi import HTTPException
@@ -166,6 +167,114 @@ def test_failed_train_returns_readable_error_and_missing_job_404(monkeypatch):
     except HTTPException as exc:
         assert exc.status_code == 404
         assert "missing-job" in str(exc.detail)
+
+
+def test_gate_warning_is_reported_as_completed(monkeypatch, tmp_path):
+    from web.api import ml as ml_module
+
+    request = _request()
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps({"model_id": "model-gate", "symbol": "BTC/USDT", "timeframe": "1h"}),
+        encoding="utf-8",
+    )
+
+    class _GateBackend:
+        async def train_model(self, **_kwargs):
+            raise ml_module.PipelineError(
+                "gate",
+                "ML quality gate failed",
+                details={
+                    "artifact_dir": str(tmp_path),
+                    "manifest_path": str(manifest_path),
+                    "metrics": {"auc": 0.49},
+                    "reasons": ["auc below gate (0.49 < 0.52)"],
+                    "thresholds": {"min_auc": 0.52},
+                },
+            )
+
+    monkeypatch.setattr(ml_module, "_resolve_backend", lambda _request: _GateBackend())
+
+    result = asyncio.run(ml_module.train_job(request, ml_module.MLTrainRequest(model_name="gate-demo", background=False)))
+
+    assert result["status"] == "completed"
+    assert result["progress"]["phase"] == "completed"
+    assert result["result"]["gate"]["passed"] is False
+    assert request.app.state.ml_models["model-gate"]["status"] == "evaluated_gate_failed"
+
+
+def test_delete_model_removes_local_artifacts(monkeypatch, tmp_path):
+    from web.api import ml as ml_module
+
+    request = _request()
+    artifact_dir = tmp_path / "models" / "ml_signal_xgb" / "model-del"
+    artifact_dir.mkdir(parents=True)
+    manifest_path = artifact_dir / "manifest.json"
+    model_path = artifact_dir / "model.json"
+    metrics_path = artifact_dir / "metrics.json"
+    manifest_path.write_text(json.dumps({"model_id": "model-del"}), encoding="utf-8")
+    model_path.write_text("{}", encoding="utf-8")
+    metrics_path.write_text("{}", encoding="utf-8")
+
+    request.app.state.ml_models["model-del"] = {
+        "model_id": "model-del",
+        "name": "delete-demo",
+        "artifact": {
+            "artifact_dir": str(artifact_dir),
+            "manifest_path": str(manifest_path),
+            "model_path": str(model_path),
+        },
+    }
+
+    monkeypatch.setattr(ml_module, "_ARTIFACT_ROOT", tmp_path / "models" / "ml_signal_xgb")
+    monkeypatch.setattr(ml_module, "_FACTOR_ROOT", tmp_path / "runtime" / "ml" / "factors")
+    monkeypatch.setattr(ml_module, "_load_registry", lambda: {})
+    monkeypatch.setattr(ml_module, "_remove_registry_model", lambda model_id: {})
+    monkeypatch.setattr(ml_module.strategy_manager, "list_strategies", lambda: [])
+    monkeypatch.setattr(ml_module, "async_session_maker", None)
+
+    result = asyncio.run(ml_module.delete_model(request, "model-del"))
+
+    assert result["deleted"] is True
+    assert not artifact_dir.exists()
+    assert "model-del" not in request.app.state.ml_models
+
+
+def test_delete_model_blocks_when_strategy_still_references_it(monkeypatch, tmp_path):
+    from web.api import ml as ml_module
+
+    request = _request()
+    model_path = tmp_path / "model.json"
+    model_path.write_text("{}", encoding="utf-8")
+    request.app.state.ml_models["model-used"] = {
+        "model_id": "model-used",
+        "name": "used-demo",
+        "artifact": {
+            "model_path": str(model_path),
+        },
+    }
+
+    monkeypatch.setattr(ml_module, "_load_registry", lambda: {})
+    monkeypatch.setattr(
+        ml_module.strategy_manager,
+        "list_strategies",
+        lambda: [
+            {
+                "name": "ML_XGB_in_use",
+                "state": "running",
+                "runtime_mode": "paper",
+                "params": {"model_id": "model-used", "model_path": str(model_path)},
+            }
+        ],
+    )
+    monkeypatch.setattr(ml_module, "async_session_maker", None)
+
+    try:
+        asyncio.run(ml_module.delete_model(request, "model-used"))
+        assert False, "expected HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 409
+        assert "ML_XGB_in_use" in str(exc.detail)
 
 
 def test_core_factorize_uses_real_loader_signature(monkeypatch, tmp_path):

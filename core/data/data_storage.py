@@ -14,6 +14,7 @@ import pyarrow.parquet as pq
 from loguru import logger
 import redis.asyncio as redis
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from config.settings import settings
 from config.database import (
@@ -110,18 +111,6 @@ class DataStorage:
         async with async_session_maker() as session:
             count = 0
             for kline in klines:
-                # 检查是否已存在
-                existing = await session.execute(
-                    select(KlineModel.id).where(
-                        KlineModel.exchange == kline.exchange,
-                        KlineModel.symbol == kline.symbol,
-                        KlineModel.timeframe == kline.timeframe,
-                        KlineModel.timestamp == kline.timestamp,
-                    ).limit(1)
-                )
-                if existing.scalar_one_or_none() is not None:
-                    continue
-
                 db_kline = KlineModel(
                     exchange=kline.exchange,
                     symbol=kline.symbol,
@@ -134,7 +123,12 @@ class DataStorage:
                     volume=kline.volume,
                 )
                 session.add(db_kline)
-                count += 1
+                try:
+                    await session.flush()
+                    count += 1
+                except IntegrityError:
+                    # Duplicate bar (concurrent writer or re-fetch) — skip silently.
+                    await session.rollback()
 
             await session.commit()
             return count

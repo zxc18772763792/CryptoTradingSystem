@@ -29,6 +29,8 @@
   let lastScorecardSnapshot = null;
   let statusInFlight = null;
   let governanceInFlight = null;
+  let reviewLayoutSyncFrame = 0;
+  let reviewLayoutObserver = null;
 
   function scheduleInitRetry() {
     if (typeof window === 'undefined') return;
@@ -52,6 +54,50 @@
   let rankingInFlight = null;
   let lastRankingAutoRefreshAt = 0;
   let rankingPendingRetryTimer = null;
+
+  function syncAgentReviewHistoryHeight() {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const workspace = document.querySelector('#ai-agent-review-panel .ai-agent-review-workspace');
+    const summaryEl = document.getElementById('ai-agent-review-summary');
+    if (!workspace || !summaryEl) return;
+
+    if (window.innerWidth <= 1280) {
+      workspace.style.removeProperty('--ai-agent-review-history-height');
+      return;
+    }
+
+    const summaryHeight = Math.ceil(summaryEl.getBoundingClientRect().height || 0);
+    if (summaryHeight > 0) {
+      workspace.style.setProperty('--ai-agent-review-history-height', `${summaryHeight}px`);
+    }
+  }
+
+  function queueAgentReviewHistorySync() {
+    if (typeof window === 'undefined') return;
+    if (reviewLayoutSyncFrame) {
+      window.cancelAnimationFrame(reviewLayoutSyncFrame);
+    }
+    reviewLayoutSyncFrame = window.requestAnimationFrame(() => {
+      reviewLayoutSyncFrame = 0;
+      syncAgentReviewHistoryHeight();
+    });
+  }
+
+  function bindAgentReviewLayoutSync() {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const summaryEl = document.getElementById('ai-agent-review-summary');
+    const workspace = document.querySelector('#ai-agent-review-panel .ai-agent-review-workspace');
+    if (!summaryEl || !workspace) return;
+
+    if (typeof ResizeObserver === 'function' && !reviewLayoutObserver) {
+      reviewLayoutObserver = new ResizeObserver(() => queueAgentReviewHistorySync());
+      reviewLayoutObserver.observe(summaryEl);
+      reviewLayoutObserver.observe(workspace);
+    }
+
+    window.addEventListener('resize', queueAgentReviewHistorySync);
+    queueAgentReviewHistorySync();
+  }
 
   function aiRoot() {
     return window.AI || {};
@@ -1611,6 +1657,7 @@
 
   function renderAgentReview(payload = {}) {
     const summaryEl = document.getElementById('ai-agent-review-summary');
+    const historyMetaEl = document.getElementById('ai-agent-review-history-meta');
     const listEl = document.getElementById('ai-agent-review');
     if (!summaryEl || !listEl) return;
 
@@ -1634,6 +1681,19 @@
     const dataOutageExit = Boolean(adaptiveRisk?.force_close_on_data_outage_losing_position);
     const serviceInstabilityGuard = Boolean(adaptiveRisk?.avoid_new_entries_during_service_instability);
     const learningGeneratedAt = fmtAgentTs(learningMemory?.generated_at);
+    const totalReviewCount = Number.isFinite(Number(summary?.submitted_count)) ? Number(summary.submitted_count) : null;
+    const historyCountText = items.length ? `最近 ${items.length} 条` : '最近复盘';
+    const historyScopeText = totalReviewCount !== null && totalReviewCount > items.length
+      ? `历史累计 ${totalReviewCount} 条放行单`
+      : (items.length ? '向下滚动查看完整卡片' : '等待新的放行交易沉淀');
+
+    if (historyMetaEl) {
+      historyMetaEl.innerHTML = `
+        <div class="ai-agent-review-history-title">${esc(historyCountText)}</div>
+        <div class="ai-agent-review-history-note">${esc(historyScopeText)}，左侧保留摘要与复盘记忆。</div>
+      `;
+      normalizeElementHtml(historyMetaEl);
+    }
 
     summaryEl.innerHTML = `
       <div class="ai-agent-review-kpis">
@@ -1710,6 +1770,14 @@
     normalizeElementHtml(summaryEl);
     if (!items.length) {
       listEl.innerHTML = '<div class="ai-agent-empty">暂无放行交易复盘</div>';
+      if (historyMetaEl) {
+        historyMetaEl.innerHTML = `
+          <div class="ai-agent-review-history-title">最近复盘</div>
+          <div class="ai-agent-review-history-note">还没有可展示的放行交易，后续这里会自动滚动沉淀历史。</div>
+        `;
+        normalizeElementHtml(historyMetaEl);
+      }
+      queueAgentReviewHistorySync();
       return;
     }
 
@@ -1839,10 +1907,12 @@
     if (typeof window.schedulePlotlyResize === 'function') {
       window.schedulePlotlyResize(document.getElementById('ai-agent-card') || document);
     }
+    queueAgentReviewHistorySync();
   }
 
   async function loadAgentReview() {
     const summaryEl = document.getElementById('ai-agent-review-summary');
+    const historyMetaEl = document.getElementById('ai-agent-review-history-meta');
     const listEl = document.getElementById('ai-agent-review');
     if (!summaryEl || !listEl) return null;
     try {
@@ -1851,7 +1921,15 @@
       return response;
     } catch (_) {
       summaryEl.innerHTML = '<div class="ai-agent-empty">复盘摘要加载失败</div>';
+      if (historyMetaEl) {
+        historyMetaEl.innerHTML = `
+          <div class="ai-agent-review-history-title">复盘历史</div>
+          <div class="ai-agent-review-history-note">右侧历史卡片暂时加载失败，请稍后重试。</div>
+        `;
+        normalizeElementHtml(historyMetaEl);
+      }
       listEl.innerHTML = '<div class="ai-agent-empty">复盘列表加载失败</div>';
+      queueAgentReviewHistorySync();
       return null;
     }
   }
@@ -2247,6 +2325,7 @@
     window.agentRefreshRisk = () => loadAgentGovernance({ notifyOnError: true, timeoutMs: AGENT_DETAIL_TIMEOUT_MS }).catch(() => {});
     window.agentSaveRiskConfig = () => saveAgentRiskConfig();
     window.agentToggleSymbolMode = () => updateAgentSymbolModeVisibility();
+    bindAgentReviewLayoutSync();
 
     window.addEventListener('ai-research:state', (event) => {
       const reason = String(event?.detail?.reason || '');

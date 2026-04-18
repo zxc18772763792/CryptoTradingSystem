@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-    <link rel="stylesheet" href="/static/css/style.css?v=90">
+    <link rel="stylesheet" href="/static/css/style.css?v=92">
     <script>
         (function (root) {
             if (!root) return;
@@ -2224,86 +2224,88 @@
                                         <div id="ai-agent-reasons" class="ai-agent-reasons-box">加载中...</div>
                                     </section>
 
-                                    <section id="ai-agent-ranking-panel" class="ai-agent-section ai-agent-panel ai-agent-panel-ranking">
-                                        <div class="ai-agent-section-head">
-                                            <div>
-                                                <div class="ai-agent-section-title">币种模式与自动选币</div>
-                                                <div class="ai-agent-section-subtitle">固定币种时只盯一个 symbol；自动模式会扫描候选币池，优先选当前最值得跟踪的标的。</div>
+                                    <div class="ai-agent-decision-strip">
+                                        <section id="ai-agent-ranking-panel" class="ai-agent-section ai-agent-panel ai-agent-panel-ranking">
+                                            <div class="ai-agent-section-head">
+                                                <div>
+                                                    <div class="ai-agent-section-title">币种模式与自动选币</div>
+                                                    <div class="ai-agent-section-subtitle">固定币种时只盯一个 symbol；自动模式会扫描候选币池，优先选当前最值得跟踪的标的。</div>
+                                                </div>
+                                                <button class="btn btn-sm" type="button" onclick="agentRefreshRanking()">刷新排行榜</button>
                                             </div>
-                                            <button class="btn btn-sm" type="button" onclick="agentRefreshRanking()">刷新排行榜</button>
-                                        </div>
-                                        <div class="ai-agent-config-grid">
-                                            <label id="ai-agent-symbol-mode-wrap" class="ai-agent-field">
-                                                <span>币种模式</span>
-                                                <select id="ai-agent-symbol-mode" onchange="agentToggleSymbolMode()">
-                                                    <option value="manual">固定币种</option>
-                                                    <option value="auto">自动选币</option>
-                                                </select>
+                                            <div class="ai-agent-config-grid">
+                                                <label id="ai-agent-symbol-mode-wrap" class="ai-agent-field">
+                                                    <span>币种模式</span>
+                                                    <select id="ai-agent-symbol-mode" onchange="agentToggleSymbolMode()">
+                                                        <option value="manual">固定币种</option>
+                                                        <option value="auto">自动选币</option>
+                                                    </select>
+                                                </label>
+                                                <label id="ai-agent-manual-symbol-wrap" class="ai-agent-field">
+                                                    <span>固定 symbol</span>
+                                                    <input id="ai-agent-manual-symbol" type="text" value="BTC/USDT" />
+                                                </label>
+                                            </div>
+                                            <label id="ai-agent-universe-symbols-wrap" class="ai-agent-field ai-agent-field-block">
+                                                <span>候选币池</span>
+                                                <textarea id="ai-agent-universe-symbols" rows="3" placeholder="留空使用默认主流币池；或手动填写 BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT ..."></textarea>
                                             </label>
-                                            <label id="ai-agent-manual-symbol-wrap" class="ai-agent-field">
-                                                <span>固定 symbol</span>
-                                                <input id="ai-agent-manual-symbol" type="text" value="BTC/USDT" />
-                                            </label>
-                                        </div>
-                                        <label id="ai-agent-universe-symbols-wrap" class="ai-agent-field ai-agent-field-block">
-                                            <span>候选币池</span>
-                                            <textarea id="ai-agent-universe-symbols" rows="3" placeholder="留空使用默认主流币池；或手动填写 BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT ..."></textarea>
-                                        </label>
-                                        <div class="ai-agent-config-divider">AI 资金预算</div>
-                                        <div class="ai-agent-risk-config-note">默认按总资金比例限制 AI 可用仓位；如果填写固定总金额，就会直接覆盖比例上限。</div>
-                                        <div class="ai-agent-config-grid">
-                                            <label class="ai-agent-field">
-                                                <span>总资金比例</span>
-                                                <input id="ai-agent-max-total-exposure-ratio" type="number" min="0.05" max="0.4" step="0.01" placeholder="0.40" />
-                                                <div class="ai-agent-field-hint">默认生效。0.40 代表 AI 最多可使用账户权益的 40%。</div>
-                                            </label>
-                                            <label class="ai-agent-field">
-                                                <span>固定总金额（USDT，可选）</span>
-                                                <input id="ai-agent-max-total-exposure-usdt" type="number" min="0" step="10" placeholder="留空则按比例" />
-                                                <div class="ai-agent-field-hint">填写后优先按固定金额生效，例如 500 表示 AI 总持仓上限约 500 USDT。</div>
-                                            </label>
-                                        </div>
-                                        <div class="ai-agent-config-divider">自治风险纪律阈值</div>
-                                        <div class="ai-agent-risk-config-note">这组阈值只作用于自治代理的新单纪律，不直接改动全局账户风控上限。</div>
-                                        <div class="ai-agent-config-grid ai-agent-risk-config-grid">
-                                            <label class="ai-agent-field">
-                                                <span>日内止损缓冲</span>
-                                                <input id="ai-agent-risk-daily-stop" type="number" min="0" max="1" step="0.001" placeholder="0.010" />
-                                            </label>
-                                            <label class="ai-agent-field">
-                                                <span>最大回撤 close-only</span>
-                                                <input id="ai-agent-risk-max-dd" type="number" min="0" max="1" step="0.001" placeholder="0.030" />
-                                            </label>
-                                            <label class="ai-agent-field">
-                                                <span>3日滚动回撤 close-only</span>
-                                                <input id="ai-agent-risk-rolling-3d" type="number" min="0" max="1" step="0.001" placeholder="0.050" />
-                                            </label>
-                                            <label class="ai-agent-field">
-                                                <span>7日滚动回撤 close-only</span>
-                                                <input id="ai-agent-risk-rolling-7d" type="number" min="0" max="1" step="0.001" placeholder="0.080" />
-                                            </label>
-                                        </div>
-                                        <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
-                                            <button class="btn btn-sm" type="button" onclick="agentSaveConfig()">保存 AI 配置</button>
-                                            <button class="btn btn-sm" type="button" onclick="agentSaveRiskConfig()">保存风险纪律</button>
-                                        </div>
-                                        <div class="ai-agent-scroll-shell ai-agent-scroll-shell-ranking">
-                                            <div id="ai-agent-ranking-summary" class="ai-agent-ranking-summary">加载中...</div>
-                                            <div id="ai-agent-ranking" class="ai-agent-ranking-box">加载中...</div>
-                                        </div>
-                                    </section>
-                                </div>
+                                            <div class="ai-agent-config-divider">AI 资金预算</div>
+                                            <div class="ai-agent-risk-config-note">默认按总资金比例限制 AI 可用仓位；如果填写固定总金额，就会直接覆盖比例上限。</div>
+                                            <div class="ai-agent-config-grid">
+                                                <label class="ai-agent-field">
+                                                    <span>总资金比例</span>
+                                                    <input id="ai-agent-max-total-exposure-ratio" type="number" min="0.05" max="0.4" step="0.01" placeholder="0.40" />
+                                                    <div class="ai-agent-field-hint">默认生效。0.40 代表 AI 最多可使用账户权益的 40%。</div>
+                                                </label>
+                                                <label class="ai-agent-field">
+                                                    <span>固定总金额（USDT，可选）</span>
+                                                    <input id="ai-agent-max-total-exposure-usdt" type="number" min="0" step="10" placeholder="留空则按比例" />
+                                                    <div class="ai-agent-field-hint">填写后优先按固定金额生效，例如 500 表示 AI 总持仓上限约 500 USDT。</div>
+                                                </label>
+                                            </div>
+                                            <div class="ai-agent-config-divider">自治风险纪律阈值</div>
+                                            <div class="ai-agent-risk-config-note">这组阈值只作用于自治代理的新单纪律，不直接改动全局账户风控上限。</div>
+                                            <div class="ai-agent-config-grid ai-agent-risk-config-grid">
+                                                <label class="ai-agent-field">
+                                                    <span>日内止损缓冲</span>
+                                                    <input id="ai-agent-risk-daily-stop" type="number" min="0" max="1" step="0.001" placeholder="0.010" />
+                                                </label>
+                                                <label class="ai-agent-field">
+                                                    <span>最大回撤 close-only</span>
+                                                    <input id="ai-agent-risk-max-dd" type="number" min="0" max="1" step="0.001" placeholder="0.030" />
+                                                </label>
+                                                <label class="ai-agent-field">
+                                                    <span>3日滚动回撤 close-only</span>
+                                                    <input id="ai-agent-risk-rolling-3d" type="number" min="0" max="1" step="0.001" placeholder="0.050" />
+                                                </label>
+                                                <label class="ai-agent-field">
+                                                    <span>7日滚动回撤 close-only</span>
+                                                    <input id="ai-agent-risk-rolling-7d" type="number" min="0" max="1" step="0.001" placeholder="0.080" />
+                                                </label>
+                                            </div>
+                                            <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
+                                                <button class="btn btn-sm" type="button" onclick="agentSaveConfig()">保存 AI 配置</button>
+                                                <button class="btn btn-sm" type="button" onclick="agentSaveRiskConfig()">保存风险纪律</button>
+                                            </div>
+                                            <div class="ai-agent-scroll-shell ai-agent-scroll-shell-ranking">
+                                                <div id="ai-agent-ranking-summary" class="ai-agent-ranking-summary">加载中...</div>
+                                                <div id="ai-agent-ranking" class="ai-agent-ranking-box">加载中...</div>
+                                            </div>
+                                        </section>
 
-                                <section id="ai-agent-journal-panel" class="ai-agent-panel ai-agent-panel-journal">
-                                    <div class="ai-auto-step-head">
-                                        <div>
-                                            <div class="ai-auto-step-title">最近决策日志与聚合信号快照</div>
-                                            <div class="ai-auto-step-desc">先看当前周期快照，再看最近每轮决策日志，避免只盯着最终提交结果。</div>
-                                        </div>
-                                        <button class="btn btn-sm" type="button" onclick="agentRefreshJournal()">刷新日志</button>
+                                        <section id="ai-agent-journal-panel" class="ai-agent-panel ai-agent-panel-journal">
+                                            <div class="ai-auto-step-head">
+                                                <div>
+                                                    <div class="ai-auto-step-title">最近决策日志与聚合信号快照</div>
+                                                    <div class="ai-auto-step-desc">先看当前周期快照，再看最近每轮决策日志，避免只盯着最终提交结果。</div>
+                                                </div>
+                                                <button class="btn btn-sm" type="button" onclick="agentRefreshJournal()">刷新日志</button>
+                                            </div>
+                                            <div id="ai-agent-journal" class="ai-agent-journal-box">加载中...</div>
+                                        </section>
                                     </div>
-                                    <div id="ai-agent-journal" class="ai-agent-journal-box">加载中...</div>
-                                </section>
+                                </div>
 
                                 <section id="ai-agent-review-panel" class="ai-agent-panel ai-agent-panel-review">
                                     <div class="ai-auto-step-head">
@@ -2315,7 +2317,10 @@
                                     </div>
                                     <div class="ai-agent-review-workspace">
                                         <div id="ai-agent-review-summary" class="ai-agent-review-summary">加载中...</div>
-                                        <div id="ai-agent-review" class="ai-agent-review-box">加载中...</div>
+                                        <div class="ai-agent-scroll-shell ai-agent-scroll-shell-review ai-agent-review-history-shell">
+                                            <div id="ai-agent-review-history-meta" class="ai-agent-review-history-meta">加载中...</div>
+                                            <div id="ai-agent-review" class="ai-agent-review-box">加载中...</div>
+                                        </div>
                                     </div>
                                 </section>
                             </div>

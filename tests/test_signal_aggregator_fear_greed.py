@@ -79,6 +79,11 @@ def test_signal_aggregator_excludes_unavailable_component_weights(monkeypatch):
     monkeypatch.setattr(agg, "_get_llm_signal", _fake_llm_signal)
     monkeypatch.setattr(agg, "_get_ml_signal", lambda symbol, market_data: ("FLAT", 0.0))
     monkeypatch.setattr(agg, "_get_factor_signal", lambda market_data: ("SHORT", 0.64))
+    monkeypatch.setattr(
+        agg,
+        "_get_derivatives_signal",
+        lambda symbol: asyncio.sleep(0, result=("FLAT", 0.0, {"available": False, "reason": "disabled_in_test"})),
+    )
     monkeypatch.setattr(agg, "_apply_risk_gate", lambda symbol, direction, confidence, market_data: (False, ""))
     agg._ml_model = SimpleNamespace(is_loaded=lambda: False)
 
@@ -239,6 +244,44 @@ def test_signal_aggregator_derivatives_shadow_penalizes_confidence(monkeypatch):
     assert result.components["derivatives"]["shadow_only"] is True
     assert result.components["derivatives"]["effective_weight"] == pytest.approx(0.0, rel=1e-9)
     assert result.components["derivatives"]["confidence_adjustment"] == pytest.approx(-0.16, rel=1e-9)
+
+
+def test_signal_aggregator_shadow_adjustment_penalizes_long_for_history_and_basis_context():
+    from core.ai.signal_aggregator import SignalAggregator
+
+    penalty = SignalAggregator._apply_derivatives_shadow_adjustment(
+        direction="LONG",
+        confidence=0.9,
+        market_context={
+            "history_ready": False,
+            "crowded_long": True,
+            "basis_dislocation": True,
+            "flow_divergence": True,
+            "funding_zscore": 2.1,
+        },
+        risk_flags=["basis_dislocation", "flow_divergence", "history_incomplete"],
+    )
+
+    assert penalty == pytest.approx(0.24, rel=1e-9)
+
+
+def test_signal_aggregator_shadow_adjustment_penalizes_short_for_squeeze_context():
+    from core.ai.signal_aggregator import SignalAggregator
+
+    penalty = SignalAggregator._apply_derivatives_shadow_adjustment(
+        direction="SHORT",
+        confidence=0.9,
+        market_context={
+            "history_ready": True,
+            "crowded_short": True,
+            "squeeze_building": True,
+            "order_flow_confirmed": True,
+            "basis_dislocation": True,
+        },
+        risk_flags=["squeeze_active", "basis_dislocation"],
+    )
+
+    assert penalty == pytest.approx(0.26, rel=1e-9)
 
 
 def test_signal_aggregator_derivatives_vote_stays_off_until_live_gating(monkeypatch):

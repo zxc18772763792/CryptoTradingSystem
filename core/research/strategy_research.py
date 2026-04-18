@@ -749,7 +749,17 @@ async def _build_coinglass_research_features(symbol: str) -> Dict[str, Any]:
         "coinglass_taker_buy_sell_imbalance": _safe_float_value(snapshot.get("taker_buy_sell_imbalance")),
         "coinglass_orderbook_imbalance_score": _safe_float_value(snapshot.get("orderbook_imbalance_score")),
         "coinglass_depth_thinness_score": _safe_float_value(snapshot.get("depth_thinness_score")),
+        "coinglass_funding_mean": _safe_float_value(context.get("funding_mean")),
+        "coinglass_funding_zscore": _safe_float_value(context.get("funding_zscore")),
+        "coinglass_funding_reversion_speed": _safe_float_value(context.get("funding_reversion_speed")),
+        "coinglass_long_short_ratio_change_24h": _safe_float_value(context.get("long_short_ratio_change_24h")),
+        "coinglass_liquidation_burst_score": _safe_float_value(context.get("liquidation_burst_score")),
+        "coinglass_derivatives_heat_score": _safe_float_value(context.get("derivatives_heat_score")),
         "coinglass_context_crowding_warning": 1.0 if bool(context.get("crowding_warning")) else 0.0,
+        "coinglass_context_history_ready": 1.0 if bool(context.get("history_ready")) else 0.0,
+        "coinglass_context_order_flow_confirmed": 1.0 if bool(context.get("order_flow_confirmed")) else 0.0,
+        "coinglass_context_basis_dislocation": 1.0 if bool(context.get("basis_dislocation")) else 0.0,
+        "coinglass_context_flow_divergence": 1.0 if bool(context.get("flow_divergence")) else 0.0,
     }
     features.update(_flatten_numeric_features("coinglass_context", context))
     features.update(_flatten_numeric_features("coinglass_payload", snapshot.get("payload") or {}))

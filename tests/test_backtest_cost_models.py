@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -148,3 +149,34 @@ def test_common_pnl_summary_schema():
     assert payload["net_pnl"] == 11.11111
     assert payload["trade_count"] == 8
     assert payload["win_rate"] == 62.5
+
+
+def test_backtest_engine_leverage_keeps_position_pct_as_notional():
+    engine = BacktestEngine(
+        BacktestConfig(
+            initial_capital=10000,
+            position_size_pct=0.1,
+            max_positions=1,
+            leverage=2.0,
+            fee_model="flat",
+            commission_rate=0.0,
+            slippage_model="flat",
+            slippage=0.0,
+        )
+    )
+    signal = Signal(
+        symbol="BTC/USDT",
+        signal_type=SignalType.BUY,
+        price=100.0,
+        timestamp=datetime(2025, 1, 1),
+        strategy_name="unit_test",
+        strength=1.0,
+    )
+
+    asyncio.run(engine._execute_buy(signal, current_price=100.0, timestamp=signal.timestamp, window=None))
+
+    position = engine._positions["BTC/USDT"]
+    assert position["notional_entry"] == 1000.0
+    assert position["margin"] == 500.0
+    assert position["quantity"] == 10.0
+    assert engine._capital == 9500.0

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
+from core.data.coinglass_altcoin import build_derivatives_snapshot_from_market_snapshot
 from core.research.altcoin_radar import build_altcoin_rows
 
 
@@ -90,6 +91,66 @@ def test_build_altcoin_rows_includes_derivatives_context_and_metrics():
     assert row["metrics"]["depth_thinness_score"] == 0.18
 
 
+def test_build_altcoin_rows_surfaces_derivatives_labels_and_plan_tags():
+    now = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
+    rows = build_altcoin_rows(
+        market_frames={"AAA/USDT": _market_frame(now)},
+        timeframe="4h",
+        derivatives_snapshots={
+            "AAA/USDT": {
+                "timestamp": "2026-04-18T11:58:00+00:00",
+                "source_name": "coinglass_cache",
+                "capture_status": "ok",
+                "source_error": None,
+                "oi_change_1h": 8.2,
+                "funding_rate": 0.0014,
+                "basis_pct": 0.012,
+                "long_short_ratio": 1.15,
+                "taker_buy_sell_imbalance": 0.21,
+                "crowding_score": 0.78,
+                "squeeze_score": 0.74,
+                "distribution_score": 0.24,
+                "orderbook_imbalance_score": 0.28,
+                "depth_thinness_score": 0.18,
+                "payload": {
+                    "history_ready": True,
+                    "history_exchange": "Binance",
+                    "history_interval": "h1",
+                    "funding_mean": 0.0008,
+                    "funding_zscore": 1.9,
+                    "funding_reversion_speed": 0.22,
+                    "long_short_ratio_change_24h": 0.18,
+                    "liquidation_burst_score": 0.66,
+                    "derivatives_heat_score": 0.84,
+                    "crowded_long": True,
+                    "squeeze_building": True,
+                    "order_flow_confirmed": True,
+                    "derivatives_labels": ["crowded_long", "squeeze_building", "order_flow_confirmed"],
+                },
+            }
+        },
+        now=now,
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+
+    assert row["derivatives_context"]["history_ready"] is True
+    assert row["derivatives_context"]["history_exchange"] == "Binance"
+    assert row["derivatives_context"]["history_interval"] == "h1"
+    assert row["derivatives_context"]["crowded_long"] is True
+    assert row["derivatives_context"]["squeeze_building"] is True
+    assert row["derivatives_context"]["order_flow_confirmed"] is True
+    assert "crowded_long" in row["derivatives_context"]["derivatives_labels"]
+    assert row["metrics"]["funding_zscore"] == 1.9
+    assert row["metrics"]["funding_reversion_speed"] == 0.22
+    assert row["metrics"]["long_short_ratio_change_24h"] == 0.18
+    assert row["metrics"]["history_ready"] == 1.0
+    assert "Crowded Long" in row["tags"]
+    assert "Short Squeeze Risk" in row["tags"]
+    assert "Order Flow Confirmed" in row["tags"]
+
+
 def test_build_altcoin_rows_marks_missing_derivatives_in_tags():
     now = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
     rows = build_altcoin_rows(
@@ -104,3 +165,97 @@ def test_build_altcoin_rows_marks_missing_derivatives_in_tags():
     assert row["freshness"]["derivatives_label"] == "missing"
     assert "derivatives_missing" in row["data_quality"]["degraded_reason"]
     assert "Derivatives Missing" in row["tags"]
+
+
+def test_build_altcoin_rows_prefers_coinglass_market_snapshot_when_local_frame_is_stale():
+    now = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
+    stale_now = now - timedelta(days=30)
+    market_snapshot = {
+        "symbol": "AAA/USDT",
+        "base_symbol": "AAA",
+        "timestamp": now.isoformat(),
+        "source_name": "coinglass_coins_markets",
+        "current_price": 12.5,
+        "market_cap_usd": 2_500_000_000,
+        "price_change_percent_4h": 6.2,
+        "price_change_percent_12h": 11.8,
+        "price_change_percent_24h": 19.4,
+        "volume_change_percent_4h": 44.0,
+        "open_interest_change_percent_1h": 3.4,
+        "open_interest_change_percent_4h": 8.8,
+        "open_interest_change_percent_24h": 18.2,
+        "avg_funding_rate_by_oi": 0.0006,
+        "oi_vol_ratio_change_percent_4h": 2.4,
+        "long_short_ratio_4h": 1.12,
+        "long_volume_usd_4h": 24_000_000,
+        "short_volume_usd_4h": 17_000_000,
+        "long_liquidation_usd_4h": 180_000,
+        "short_liquidation_usd_4h": 620_000,
+        "long_liquidation_usd_24h": 950_000,
+        "short_liquidation_usd_24h": 2_250_000,
+        "latency_ms": 120,
+    }
+    derivatives_snapshot = build_derivatives_snapshot_from_market_snapshot(market_snapshot)
+
+    rows = build_altcoin_rows(
+        market_frames={"AAA/USDT": _market_frame(stale_now)},
+        timeframe="4h",
+        market_snapshots={"AAA/USDT": market_snapshot},
+        derivatives_snapshots={"AAA/USDT": derivatives_snapshot},
+        now=now,
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+
+    assert row["freshness"]["market_label"] == "fresh"
+    assert row["freshness"]["derivatives_label"] == "fresh"
+    assert row["derivatives_context"]["source_name"] == "coinglass_coins_markets"
+    assert row["data_quality"]["market_data_freshness"] >= 0.9
+    assert "market_data_stale" not in row["data_quality"]["degraded_reason"]
+    assert row["metrics"]["market_cap_usd"] == 2500000000.0
+
+
+def test_build_altcoin_rows_suppresses_major_benchmark_symbols():
+    now = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
+    market_snapshot = {
+        "symbol": "BTC/USDT",
+        "base_symbol": "BTC",
+        "timestamp": now.isoformat(),
+        "source_name": "coinglass_coins_markets",
+        "current_price": 76162.5,
+        "market_cap_usd": 1_525_000_000_000,
+        "price_change_percent_4h": 1.6,
+        "price_change_percent_12h": 2.8,
+        "price_change_percent_24h": 4.1,
+        "volume_change_percent_4h": 31.0,
+        "open_interest_change_percent_1h": 2.9,
+        "open_interest_change_percent_4h": 7.5,
+        "open_interest_change_percent_24h": 14.2,
+        "avg_funding_rate_by_oi": 0.0011,
+        "oi_vol_ratio_change_percent_4h": 3.1,
+        "long_short_ratio_4h": 1.18,
+        "long_volume_usd_4h": 2_150_000_000,
+        "short_volume_usd_4h": 1_420_000_000,
+        "long_liquidation_usd_4h": 1_650_000,
+        "short_liquidation_usd_4h": 5_250_000,
+        "long_liquidation_usd_24h": 8_750_000,
+        "short_liquidation_usd_24h": 21_250_000,
+        "latency_ms": 100,
+    }
+    derivatives_snapshot = build_derivatives_snapshot_from_market_snapshot(market_snapshot)
+
+    rows = build_altcoin_rows(
+        market_frames={},
+        timeframe="4h",
+        market_snapshots={"BTC/USDT": market_snapshot},
+        derivatives_snapshots={"BTC/USDT": derivatives_snapshot},
+        now=now,
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+
+    assert row["alt_eligible"] is False
+    assert row["signal_state"] == ""
+    assert "Benchmark Excluded" in row["tags"]

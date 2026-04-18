@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from config.settings import settings
+from core.data.coinglass_altcoin import is_alt_candidate_symbol
 
 
 VALID_TIMEFRAMES = {"1h", "4h", "1d"}
@@ -268,6 +269,123 @@ def _age_seconds(value: Any, now: Optional[datetime] = None) -> Optional[float]:
     return max(0.0, (current - ts).total_seconds())
 
 
+def _pair_base(symbol: str) -> str:
+    return str(symbol or "").strip().upper().split("/", 1)[0]
+
+
+def _pct_fraction(value: Any) -> float:
+    return _to_float(value, 0.0) / 100.0
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, float(value)))
+
+
+def _timeframe_window_map(timeframe: str) -> Dict[str, str]:
+    tf = str(timeframe or "4h").strip().lower()
+    if tf == "1h":
+        return {"1": "1h", "3": "4h", "6": "12h", "flow": "1h", "liq": "1h", "oi": "1h", "volume": "1h"}
+    if tf == "1d":
+        return {"1": "24h", "3": "24h", "6": "24h", "flow": "24h", "liq": "24h", "oi": "24h", "volume": "24h"}
+    return {"1": "4h", "3": "12h", "6": "24h", "flow": "4h", "liq": "4h", "oi": "4h", "volume": "4h"}
+
+
+def _market_snapshot_flow_imbalance(snapshot: Mapping[str, Any], window: str) -> float:
+    long_volume = _to_float(snapshot.get(f"long_volume_usd_{window}"), 0.0)
+    short_volume = _to_float(snapshot.get(f"short_volume_usd_{window}"), 0.0)
+    total = long_volume + short_volume
+    if total <= 0:
+        return 0.0
+    return (long_volume - short_volume) / total
+
+
+def _synthetic_sparkline(snapshot: Mapping[str, Any], timeframe: str) -> List[float]:
+    current_price = max(_to_float(snapshot.get("current_price"), 0.0), 1e-6)
+    windows = _timeframe_window_map(timeframe)
+    ret1 = _pct_fraction(snapshot.get(f"price_change_percent_{windows['1']}"))
+    ret3 = _pct_fraction(snapshot.get(f"price_change_percent_{windows['3']}"))
+    ret6 = _pct_fraction(snapshot.get(f"price_change_percent_{windows['6']}"))
+
+    def _backsolve(price: float, change: float) -> float:
+        return price / max(1.0 + change, 1e-6)
+
+    p6 = _backsolve(current_price, ret6)
+    p3 = _backsolve(current_price, ret3)
+    p1 = _backsolve(current_price, ret1)
+    mid_a = p6 + (p3 - p6) * 0.5
+    mid_b = p3 + (p1 - p3) * 0.5
+    return [round(value, 4) for value in [p6, mid_a, p3, mid_b, p1, current_price]]
+
+
+def _market_snapshot_metrics(
+    snapshot: Mapping[str, Any],
+    *,
+    timeframe: str,
+    now: datetime,
+) -> Dict[str, Any]:
+    windows = _timeframe_window_map(timeframe)
+    ret1 = _pct_fraction(snapshot.get(f"price_change_percent_{windows['1']}"))
+    ret3 = _pct_fraction(snapshot.get(f"price_change_percent_{windows['3']}"))
+    ret6 = _pct_fraction(snapshot.get(f"price_change_percent_{windows['6']}"))
+    volume_change = _to_float(snapshot.get(f"volume_change_percent_{windows['volume']}"), 0.0)
+    flow_window = windows["flow"]
+    liq_window = windows["liq"]
+    oi_window = windows["oi"]
+
+    imbalance = _market_snapshot_flow_imbalance(snapshot, flow_window)
+    long_liq = _to_float(snapshot.get(f"long_liquidation_usd_{liq_window}"), 0.0)
+    short_liq = _to_float(snapshot.get(f"short_liquidation_usd_{liq_window}"), 0.0)
+    liq_total = long_liq + short_liq
+    short_liq_share = short_liq / max(liq_total, 1.0)
+    liq_ratio = liq_total / max(
+        _to_float(snapshot.get(f"long_volume_usd_{flow_window}"), 0.0)
+        + _to_float(snapshot.get(f"short_volume_usd_{flow_window}"), 0.0),
+        1.0,
+    )
+    oi_change = _to_float(snapshot.get(f"open_interest_change_percent_{oi_window}"), 0.0)
+    ret_path = abs(ret1) + abs(ret3) + abs(ret6) + 1e-6
+    positive_trend = max(ret6, 0.0)
+
+    drift_stability = positive_trend / ret_path
+    absorption = _clamp(max(imbalance, 0.0) * 0.6 + short_liq_share * 0.4, 0.0, 1.5)
+    breakout_proximity = _clamp(0.5 + ret3 * 5.0 + max(ret1, 0.0) * 2.0, 0.0, 1.2)
+    close_control = _clamp(0.5 + max(ret1, 0.0) * 6.0 + max(imbalance, 0.0) * 0.35 + max(oi_change, 0.0) / 25.0, 0.0, 1.2)
+    range_expansion_ratio = 1.0 + min((abs(ret1) * 18.0) + (liq_ratio * 4.0), 3.0)
+    recent_vol = abs(ret1 - (ret3 / 3.0)) + abs(ret3 - (ret6 / 2.0))
+    impulse = max(ret1, 0.0) / max(abs(ret6), 0.01)
+    avg_dollar_volume = (
+        _to_float(snapshot.get(f"long_volume_usd_{flow_window}"), 0.0)
+        + _to_float(snapshot.get(f"short_volume_usd_{flow_window}"), 0.0)
+    )
+
+    timestamp = snapshot.get("timestamp") or _utcnow().isoformat()
+    age_sec = _age_seconds(timestamp, now) or 0.0
+    freshness = _freshness_score(age_sec, TIMEFRAME_SECONDS.get(timeframe, TIMEFRAME_SECONDS["4h"]), 4.0)
+    return {
+        "last_price": _to_float(snapshot.get("current_price"), 0.0),
+        "return_1_bar": ret1,
+        "return_3_bar": ret3,
+        "return_6_bar": ret6,
+        "volume_burst_ratio": max(0.15, 1.0 + (volume_change / 100.0)),
+        "range_expansion_ratio": range_expansion_ratio,
+        "compression_volatility": recent_vol,
+        "drift_stability": drift_stability,
+        "absorption_proxy": absorption,
+        "breakout_proximity": breakout_proximity,
+        "close_control": close_control,
+        "avg_dollar_volume": avg_dollar_volume,
+        "spread_bps": 0.0,
+        "order_flow_imbalance": imbalance,
+        "market_age_sec": age_sec,
+        "market_freshness": freshness,
+        "market_as_of": timestamp,
+        "sparkline": _synthetic_sparkline(snapshot, timeframe),
+        "impulse_after_compression": impulse,
+        "market_cap_usd": _to_float(snapshot.get("market_cap_usd"), 0.0),
+        "source_name": snapshot.get("source_name"),
+    }
+
+
 def _normalize_symbols(symbols: Sequence[str]) -> List[str]:
     normalized: List[str] = []
     seen = set()
@@ -412,6 +530,8 @@ def summarize_rows(
 
 
 def _signal_state_for_row(row: Mapping[str, Any]) -> str:
+    if not bool(row.get("alt_eligible", True)):
+        return ""
     anomaly = _to_float(row.get("anomaly_score"), 0.0)
     accumulation = _to_float(row.get("accumulation_score"), 0.0)
     control = _to_float(row.get("control_score"), 0.0)
@@ -446,6 +566,7 @@ def build_altcoin_rows(
     timeframe: str,
     factor_library: Optional[Mapping[str, Any]] = None,
     multi_assets: Optional[Mapping[str, Any]] = None,
+    market_snapshots: Optional[Mapping[str, Mapping[str, Any]]] = None,
     micro_snapshots: Optional[Mapping[str, Mapping[str, Any]]] = None,
     community_snapshots: Optional[Mapping[str, Mapping[str, Any]]] = None,
     whale_snapshots: Optional[Mapping[str, Mapping[str, Any]]] = None,
@@ -460,6 +581,7 @@ def build_altcoin_rows(
     factor_payload = dict(factor_library or {})
     multi_payload = dict(multi_assets or {})
     alerted = {str(symbol or "").strip().upper() for symbol in (alerted_symbols or []) if str(symbol or "").strip()}
+    market_snapshot_map = {str(k).upper(): dict(v or {}) for k, v in (market_snapshots or {}).items()}
     micro_map = {str(k).upper(): dict(v or {}) for k, v in (micro_snapshots or {}).items()}
     community_map = {str(k).upper(): dict(v or {}) for k, v in (community_snapshots or {}).items()}
     whale_map = {str(k).upper(): dict(v or {}) for k, v in (whale_snapshots or {}).items()}
@@ -507,25 +629,33 @@ def build_altcoin_rows(
     }
 
     interim: Dict[str, Dict[str, Any]] = {}
-    for symbol, frame in market_frames.items():
-        normalized_symbol = str(symbol or "").strip().upper()
+    all_symbols = _normalize_symbols(list(market_frames.keys()) + list(market_snapshot_map.keys()))
+    for normalized_symbol in all_symbols:
         if not normalized_symbol:
             continue
+        frame = market_frames.get(normalized_symbol)
         df = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
-        if df.empty or "close" not in df.columns:
+        market_snapshot = dict(market_snapshot_map.get(normalized_symbol) or {})
+        if (df.empty or "close" not in df.columns) and not market_snapshot:
             continue
-        df = df.sort_index().tail(180)
+        if not df.empty and "close" in df.columns:
+            df = df.sort_index().tail(180)
         close = _safe_series(df, "close")
         volume = _safe_series(df, "volume")
-        if close.empty:
-            continue
         micro = dict(micro_map.get(normalized_symbol) or {})
         community = dict(community_map.get(normalized_symbol) or {})
         whale = dict(whale_map.get(normalized_symbol) or {})
         derivatives = dict(derivatives_map.get(normalized_symbol) or {})
         factor_row = dict(factor_rows.get(normalized_symbol) or {})
         multi_row = dict(multi_rows.get(normalized_symbol) or {})
-        market_age_sec = _age_seconds(df.index[-1], current)
+        coinglass_market_metrics = _market_snapshot_metrics(market_snapshot, timeframe=tf, now=current) if market_snapshot else {}
+        local_market_age_sec = _age_seconds(df.index[-1], current) if not df.empty else None
+        local_market_freshness = _freshness_score(local_market_age_sec, expected_bar_sec, hard_cap_multiple=4.0) if local_market_age_sec is not None else 0.0
+        use_market_snapshot = bool(
+            market_snapshot and (close.empty or local_market_freshness < 0.45)
+        )
+        if close.empty and not use_market_snapshot:
+            continue
         derivatives_age_sec = _age_seconds(derivatives.get("timestamp"), current)
         snapshot_ages = [
             age
@@ -534,11 +664,21 @@ def build_altcoin_rows(
                 _age_seconds(community.get("timestamp"), current),
                 _age_seconds(whale.get("timestamp"), current),
                 derivatives_age_sec,
+                _age_seconds(market_snapshot.get("timestamp"), current) if market_snapshot else None,
             )
             if age is not None
         ]
         snapshot_age_sec = (sum(snapshot_ages) / len(snapshot_ages)) if snapshot_ages else None
-        market_freshness = _freshness_score(market_age_sec, expected_bar_sec, hard_cap_multiple=4.0)
+        market_age_sec = (
+            coinglass_market_metrics.get("market_age_sec")
+            if use_market_snapshot
+            else local_market_age_sec
+        )
+        market_freshness = (
+            _to_float(coinglass_market_metrics.get("market_freshness"), 0.0)
+            if use_market_snapshot
+            else local_market_freshness
+        )
         snapshot_freshness = _freshness_score(snapshot_age_sec, expected_bar_sec * 2.0, hard_cap_multiple=6.0)
         derivatives_freshness = _freshness_score(
             derivatives_age_sec,
@@ -548,26 +688,59 @@ def build_altcoin_rows(
         available_snapshots = sum(1 for snapshot in (micro, community, whale) if snapshot)
         chain_quality = _clamp01((available_snapshots / 3.0) * 0.45 + snapshot_freshness * 0.55)
 
-        recent_range_ratio = _avg_true_range_ratio(df)
-        recent_vol = _rolling_return_volatility(close)
-        recent_return_1 = _pct_change(close, 1)
-        recent_return_3 = _pct_change(close, 3)
-        recent_return_6 = _pct_change(close, 6)
+        if use_market_snapshot:
+            recent_range_ratio = _to_float(coinglass_market_metrics.get("range_expansion_ratio"), 0.0)
+            recent_vol = _to_float(coinglass_market_metrics.get("compression_volatility"), 0.0)
+            recent_return_1 = _to_float(coinglass_market_metrics.get("return_1_bar"), 0.0)
+            recent_return_3 = _to_float(coinglass_market_metrics.get("return_3_bar"), 0.0)
+            recent_return_6 = _to_float(coinglass_market_metrics.get("return_6_bar"), 0.0)
+            volume_burst = _to_float(coinglass_market_metrics.get("volume_burst_ratio"), 0.0)
+            drift_stability = _to_float(coinglass_market_metrics.get("drift_stability"), 0.0)
+            absorption = _to_float(coinglass_market_metrics.get("absorption_proxy"), 0.0)
+            breakout_proximity = _to_float(coinglass_market_metrics.get("breakout_proximity"), 0.0)
+            close_control = _to_float(coinglass_market_metrics.get("close_control"), 0.0)
+            impulse = _to_float(coinglass_market_metrics.get("impulse_after_compression"), 0.0)
+            avg_dollar_volume = _to_float(coinglass_market_metrics.get("avg_dollar_volume"), 0.0)
+            spread_bps = _to_float(coinglass_market_metrics.get("spread_bps"), 0.0)
+            last_price = _to_float(coinglass_market_metrics.get("last_price"), 0.0)
+            sparkline = list(coinglass_market_metrics.get("sparkline") or [])
+        else:
+            recent_range_ratio = _avg_true_range_ratio(df)
+            recent_vol = _rolling_return_volatility(close)
+            recent_return_1 = _pct_change(close, 1)
+            recent_return_3 = _pct_change(close, 3)
+            recent_return_6 = _pct_change(close, 6)
+            volume_burst = _volume_ratio(volume)
+            drift_stability = _drift_stability(close)
+            absorption = _absorption_proxy(df)
+            breakout_proximity = _breakout_proximity(close)
+            close_control = _close_control(df)
+            impulse = _impulse_after_compression(close)
+            avg_dollar_volume = _to_float((close.tail(24) * volume.tail(24)).mean(), 0.0)
+            spread_bps = _to_float((micro.get("orderbook") or {}).get("spread_bps"), 0.0)
+            last_price = _to_float(close.iloc[-1], 0.0)
+            sparkline = close.tail(36).tolist()
         positive_return_burst = max(recent_return_1, recent_return_3, recent_return_6, 0.0)
         absolute_return_burst = max(abs(recent_return_1), abs(recent_return_3), abs(recent_return_6))
-        volume_burst = _volume_ratio(volume)
-        drift_stability = _drift_stability(close)
-        absorption = _absorption_proxy(df)
-        breakout_proximity = _breakout_proximity(close)
-        close_control = _close_control(df)
-        impulse = _impulse_after_compression(close)
         micro_payload = _snapshot_payload(micro)
         community_payload = _snapshot_payload(community)
         whale_payload = _snapshot_payload(whale)
         derivatives_payload = _snapshot_payload(derivatives)
+        derivatives_labels = [
+            str(item).strip()
+            for item in list(derivatives_payload.get("derivatives_labels") or [])
+            if str(item).strip()
+        ]
+        history_ready = bool(derivatives_payload.get("history_ready"))
+        crowded_long = bool(derivatives_payload.get("crowded_long"))
+        crowded_short = bool(derivatives_payload.get("crowded_short"))
+        squeeze_building = bool(derivatives_payload.get("squeeze_building"))
+        flush_risk = bool(derivatives_payload.get("flush_risk"))
+        basis_dislocation = bool(derivatives_payload.get("basis_dislocation"))
+        flow_divergence = bool(derivatives_payload.get("flow_divergence"))
+        order_flow_confirmed = bool(derivatives_payload.get("order_flow_confirmed"))
         orderbook = micro.get("orderbook") or {}
-        spread_bps = _to_float(orderbook.get("spread_bps"), 0.0)
-        avg_dollar_volume = _to_float((close.tail(24) * volume.tail(24)).mean(), 0.0)
+        spread_bps = max(spread_bps, _to_float(orderbook.get("spread_bps"), 0.0))
         factor_liquidity = _to_float(factor_row.get("liquidity"), 0.0)
         btc_corr = _to_float((corr_map.get(normalized_symbol) or {}).get("BTC/USDT"), 0.0)
         liquidity_thinness = (
@@ -600,6 +773,11 @@ def build_altcoin_rows(
             + max(_to_float(derivatives.get("oi_change_1h"), 0.0), 0.0) / 20.0
             + _to_float(community_flow or 0.0) * 0.2
         )
+        derivatives_heat = max(derivatives_heat, _to_float(derivatives_payload.get("derivatives_heat_score"), 0.0))
+        if squeeze_building:
+            squeeze_signal = max(squeeze_signal, 0.72)
+        if order_flow_confirmed:
+            flow_confirmation = max(flow_confirmation, 0.78)
 
         security_events = _security_event_value(community)
         missing_count = 3 - available_snapshots
@@ -609,9 +787,9 @@ def build_altcoin_rows(
         degraded_reason: List[str] = []
         if market_freshness < 0.45:
             degraded_reason.append("market_data_stale")
-        if snapshot_freshness < 0.45:
+        if snapshot_freshness < 0.45 and not market_snapshot:
             degraded_reason.append("snapshot_stale")
-        if missing_count > 0:
+        if missing_count > 0 and not market_snapshot:
             degraded_reason.append("snapshot_missing")
         if spread_bps >= 30:
             degraded_reason.append("spread_too_wide")
@@ -642,7 +820,7 @@ def build_altcoin_rows(
         raw_components["security_events"][normalized_symbol] = security_events
         raw_components["stale_data"][normalized_symbol] = stale_data
         raw_components["liquidity_risk"][normalized_symbol] = liquidity_risk
-        raw_components["snapshot_missing"][normalized_symbol] = float(max(missing_count, 0))
+        raw_components["snapshot_missing"][normalized_symbol] = 0.0 if market_snapshot else float(max(missing_count, 0))
         raw_components["derivatives_heat"][normalized_symbol] = derivatives_heat
         raw_components["squeeze_signal"][normalized_symbol] = squeeze_signal
         raw_components["crowding_risk"][normalized_symbol] = crowding_risk
@@ -653,12 +831,13 @@ def build_altcoin_rows(
             "symbol": normalized_symbol,
             "factor_row": factor_row,
             "multi_row": multi_row,
+            "market_snapshot": market_snapshot,
             "micro": micro,
             "community": community,
             "whale": whale,
             "derivatives": derivatives,
             "metrics_raw": {
-                "last_price": _to_float(close.iloc[-1], 0.0),
+                "last_price": last_price,
                 "return_1_bar": recent_return_1,
                 "return_3_bar": recent_return_3,
                 "return_6_bar": recent_return_6,
@@ -671,7 +850,10 @@ def build_altcoin_rows(
                 "close_control": close_control,
                 "avg_dollar_volume": avg_dollar_volume,
                 "spread_bps": spread_bps,
-                "order_flow_imbalance": _to_float((micro.get("aggressor_flow") or {}).get("imbalance"), 0.0),
+                "order_flow_imbalance": _to_float(
+                    (micro.get("aggressor_flow") or {}).get("imbalance"),
+                    _to_float(coinglass_market_metrics.get("order_flow_imbalance"), 0.0),
+                ),
                 "community_flow_imbalance": _to_float((community.get("flow_proxy") or {}).get("imbalance"), 0.0),
                 "announcement_count": _to_float((community_payload.get("announcement_count") or 0), 0.0)
                 or _to_float(len(community.get("announcements") or []), 0.0),
@@ -683,20 +865,38 @@ def build_altcoin_rows(
                 "flow_confirmation_score": flow_confirmation,
                 "oi_change_1h": _to_float(derivatives.get("oi_change_1h"), 0.0),
                 "funding_rate": _to_float(derivatives.get("funding_rate"), 0.0),
+                "funding_mean": _to_float(derivatives_payload.get("funding_mean"), 0.0),
+                "funding_zscore": _to_float(derivatives_payload.get("funding_zscore"), 0.0),
+                "funding_reversion_speed": _to_float(derivatives_payload.get("funding_reversion_speed"), 0.0),
                 "basis_pct": _to_float(derivatives.get("basis_pct"), 0.0),
+                "basis_dislocation_score": _to_float(derivatives_payload.get("basis_dislocation_score"), 0.0),
+                "flow_divergence_score": _to_float(derivatives_payload.get("flow_divergence_score"), 0.0),
                 "long_short_ratio": _to_float(derivatives.get("long_short_ratio"), 0.0),
+                "long_short_ratio_change_24h": _to_float(derivatives_payload.get("long_short_ratio_change_24h"), 0.0),
                 "taker_buy_sell_imbalance": _to_float(derivatives.get("taker_buy_sell_imbalance"), 0.0),
+                "liquidation_burst_score": _to_float(derivatives_payload.get("liquidation_burst_score"), 0.0),
                 "crowding_score": _to_float(derivatives.get("crowding_score"), 0.0),
                 "distribution_score": _to_float(derivatives.get("distribution_score"), 0.0),
                 "depth_thinness_score": _to_float(derivatives.get("depth_thinness_score"), 0.0),
                 "orderbook_imbalance_score": _to_float(derivatives.get("orderbook_imbalance_score"), 0.0),
+                "history_ready": 1.0 if history_ready else 0.0,
                 "btc_correlation": btc_corr,
                 "factor_liquidity": factor_liquidity,
                 "factor_low_beta": _to_float(factor_row.get("low_beta"), 0.0),
                 "factor_low_vol": _to_float(factor_row.get("low_vol"), 0.0),
+                "market_cap_usd": _to_float(
+                    (derivatives_payload.get("market_cap_usd"))
+                    or coinglass_market_metrics.get("market_cap_usd")
+                    or market_snapshot.get("market_cap_usd"),
+                    0.0,
+                ),
             },
             "freshness": {
-                "as_of": df.index[-1].isoformat() if hasattr(df.index[-1], "isoformat") else str(df.index[-1]),
+                "as_of": (
+                    coinglass_market_metrics.get("market_as_of")
+                    if use_market_snapshot
+                    else df.index[-1].isoformat() if not df.empty and hasattr(df.index[-1], "isoformat") else str(df.index[-1]) if not df.empty else market_snapshot.get("timestamp")
+                ),
                 "market_data_age_sec": None if market_age_sec is None else round(market_age_sec, 2),
                 "snapshot_age_sec": None if snapshot_age_sec is None else round(snapshot_age_sec, 2),
                 "derivatives_age_sec": None if derivatives_age_sec is None else round(derivatives_age_sec, 2),
@@ -736,8 +936,24 @@ def build_altcoin_rows(
                 "source_name": derivatives.get("source_name"),
                 "capture_status": derivatives.get("capture_status"),
                 "source_error": derivatives.get("source_error"),
+                "history_ready": history_ready,
+                "history_exchange": derivatives_payload.get("history_exchange"),
+                "history_interval": derivatives_payload.get("history_interval"),
+                "funding_zscore": derivatives_payload.get("funding_zscore"),
+                "funding_reversion_speed": derivatives_payload.get("funding_reversion_speed"),
+                "long_short_ratio_change_24h": derivatives_payload.get("long_short_ratio_change_24h"),
+                "liquidation_burst_score": derivatives_payload.get("liquidation_burst_score"),
+                "derivatives_heat_score": round(derivatives_heat, 4),
+                "crowded_long": crowded_long,
+                "crowded_short": crowded_short,
+                "squeeze_building": squeeze_building,
+                "flush_risk": flush_risk,
+                "basis_dislocation": basis_dislocation,
+                "flow_divergence": flow_divergence,
+                "order_flow_confirmed": order_flow_confirmed,
+                "derivatives_labels": derivatives_labels,
             },
-            "sparkline": close.tail(36).tolist(),
+            "sparkline": sparkline,
             "has_alert_rule": normalized_symbol in alerted,
         }
 
@@ -862,6 +1078,8 @@ def build_altcoin_rows(
                 "liquidity_trap": 0.10,
             },
         )
+        market_cap_usd = _to_float(item["metrics_raw"].get("market_cap_usd"), 0.0)
+        alt_eligible = is_alt_candidate_symbol(symbol, market_cap_usd if market_cap_usd > 0 else None)
         layout_score = (
             accumulation_score * 0.45
             + control_score * 0.30
@@ -879,6 +1097,11 @@ def build_altcoin_rows(
             + squeeze_signal * 0.08
             - risk_penalty
         )
+        if not alt_eligible:
+            control_score = min(control_score, 0.35)
+            accumulation_score = min(accumulation_score, 0.35)
+            layout_score = min(layout_score, 0.30)
+            alert_score = min(alert_score, 0.45)
         row = {
             "symbol": symbol,
             "layout_score": _round4(_clamp01(layout_score)),
@@ -893,6 +1116,7 @@ def build_altcoin_rows(
             "liquidity_trap_score": _round4(_clamp01(liquidity_trap_score)),
             "flow_confirmation_score": _round4(_clamp01(flow_confirmation_score)),
             "risk_penalty": _round4(_clamp01(risk_penalty)),
+            "alt_eligible": bool(alt_eligible),
             "signal_state": "",
             "tags": [],
             "reasons_proxy": [],
@@ -923,10 +1147,18 @@ def build_altcoin_rows(
             extra_tags.append("Crowding Risk")
         if _to_float(row.get("liquidity_trap_score"), 0.0) >= 0.70:
             extra_tags.append("Liquidity Trap")
+        if row.get("derivatives_context", {}).get("crowded_long"):
+            extra_tags.append("Crowded Long")
+        if row.get("derivatives_context", {}).get("squeeze_building"):
+            extra_tags.append("Short Squeeze Risk")
+        if row.get("derivatives_context", {}).get("order_flow_confirmed"):
+            extra_tags.append("Order Flow Confirmed")
         if row.get("freshness", {}).get("derivatives_label") == "stale":
             extra_tags.append("Derivatives Stale")
         if "derivatives_missing" in row.get("data_quality", {}).get("degraded_reason", []):
             extra_tags.append("Derivatives Missing")
+        if not alt_eligible:
+            extra_tags.append("Benchmark Excluded")
         for tag in extra_tags:
             if tag not in row["tags"]:
                 row["tags"].append(tag)
@@ -982,6 +1214,8 @@ def build_altcoin_rows(
 
         if "derivatives_missing" in row["data_quality"].get("degraded_reason", []):
             chain_reasons.append("Derivatives cache is missing for this symbol, so heat and crowding stay conservative.")
+        if not alt_eligible:
+            proxy_reasons.insert(0, "This symbol is treated as a benchmark / major coin, so altcoin radar alerts stay suppressed.")
 
         row["reasons_proxy"] = proxy_reasons[:4]
         row["reasons_chain"] = chain_reasons[:4]

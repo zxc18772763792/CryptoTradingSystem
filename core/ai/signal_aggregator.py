@@ -435,16 +435,46 @@ class SignalAggregator:
         penalty = 0.0
         normalized_flags = {str(flag or "").strip().lower() for flag in risk_flags}
         crowding_warning = bool(market_context.get("crowding_warning"))
+        history_ready = market_context.get("history_ready")
+        crowded_long = bool(market_context.get("crowded_long"))
+        crowded_short = bool(market_context.get("crowded_short"))
+        squeeze_building = bool(market_context.get("squeeze_building"))
+        flush_risk = bool(market_context.get("flush_risk"))
+        basis_dislocation = bool(market_context.get("basis_dislocation"))
+        flow_divergence = bool(market_context.get("flow_divergence"))
+        order_flow_confirmed = bool(market_context.get("order_flow_confirmed"))
+        funding_zscore = abs(float(market_context.get("funding_zscore") or 0.0))
+        history_incomplete = "history_incomplete" in normalized_flags or history_ready is False
         direction_upper = str(direction or "").upper()
 
         if direction_upper == "LONG":
-            if crowding_warning or "crowding_hot" in normalized_flags:
+            if crowded_long or crowding_warning or "crowding_hot" in normalized_flags:
                 penalty += 0.10
-            if "distribution_risk" in normalized_flags:
+            if flush_risk or "distribution_risk" in normalized_flags:
                 penalty += 0.06
+            if basis_dislocation or "basis_dislocation" in normalized_flags:
+                penalty += 0.05
+            if flow_divergence or "flow_divergence" in normalized_flags:
+                penalty += 0.04
+            if history_incomplete:
+                penalty += 0.03
+            if funding_zscore >= 1.75:
+                penalty += 0.02
         elif direction_upper == "SHORT":
-            if "squeeze_active" in normalized_flags:
+            if squeeze_building or "squeeze_active" in normalized_flags:
                 penalty += 0.10
+            if crowded_short:
+                penalty += 0.06
+            if order_flow_confirmed:
+                penalty += 0.06
+            if basis_dislocation or "basis_dislocation" in normalized_flags:
+                penalty += 0.04
+            if flow_divergence or "flow_divergence" in normalized_flags:
+                penalty += 0.03
+            if history_incomplete:
+                penalty += 0.03
+            if funding_zscore >= 1.75:
+                penalty += 0.02
 
         return min(float(confidence), penalty)
 

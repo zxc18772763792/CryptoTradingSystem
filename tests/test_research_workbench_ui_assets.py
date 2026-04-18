@@ -65,6 +65,14 @@ def test_research_workbench_microstructure_summary_wires_long_short_and_order_wa
     assert "payload.derivatives_summary || {}" in workbench_js
     assert "listItem('Derivatives', derivativesParts || '-')" in workbench_js
     assert "Derivatives Source / Quota" in workbench_js
+    assert "Derivatives History" in workbench_js
+    assert "Funding Z-Score / Mean" in workbench_js
+    assert "Long/Short 24h / Liq Burst" in workbench_js
+    assert "Derivatives Labels" in workbench_js
+    assert "history_ready: !!derivativesPayload?.history_ready" in workbench_js
+    assert "funding_zscore: Number(derivativesPayload?.funding_zscore)" in workbench_js
+    assert "long_short_ratio_change_24h: Number(derivativesPayload?.long_short_ratio_change_24h)" in workbench_js
+    assert "derivatives_labels: Array.isArray(derivativesPayload?.derivatives_labels)" in workbench_js
     assert "/trading/analytics/history/status?exchange=${exchange}&symbol=${primarySymbol}" in workbench_js
     assert "iceberg_candidates" in app_js
     assert "large_order_count" in app_js

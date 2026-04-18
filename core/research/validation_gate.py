@@ -183,9 +183,10 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
             + efficiency_score * 0.20
         )
 
-    # DSR-based promotion gating (add to reasons list built below)
-    dsr_reject = dsr < 0.3
-    dsr_downgrade = 0.3 <= dsr < 0.5
+    # DSR-based promotion gating — Bailey & Lopez de Prado (2014).
+    # Threshold 0.5 rejects strategies where the Sharpe is likely spurious under multiple testing.
+    dsr_reject = dsr < 0.4
+    dsr_downgrade = 0.4 <= dsr < 0.65
 
     reasons: List[str] = []
     if total_return <= 0:
@@ -201,12 +202,12 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
         reasons.append(f"trade count too low ({int(total_trades)})")
     if valid_ratio < 50:
         reasons.append(f"valid run ratio too low ({valid_ratio:.1f}%)")
-    # C: OOS degradation warning
+    # C: OOS degradation warning — 35% degradation is the industry warning threshold
     if oos_sharpe is not None and is_sharpe is not None and is_sharpe > 0:
         degradation = (is_sharpe - oos_sharpe) / max(abs(is_sharpe), 0.01)
-        if degradation > 0.5:
-            reasons.append(f"OOS degradation too high (IS={is_sharpe:.2f} OOS={oos_sharpe:.2f})")
-    if wf_stability is not None and wf_stability < 0.3:
+        if degradation > 0.35:
+            reasons.append(f"OOS degradation too high (IS={is_sharpe:.2f} OOS={oos_sharpe:.2f}, deg={degradation:.0%})")
+    if wf_stability is not None and wf_stability < 0.5:
         reasons.append(f"walk-forward unstable (stability={wf_stability:.2f})")
 
     # C: Promotion decision — OOS takes priority over IS for gating

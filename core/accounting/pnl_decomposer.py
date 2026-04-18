@@ -230,8 +230,6 @@ class PnLDecomposer:
                 lot.qty -= consume
             remaining -= consume
 
-        net = realized_gross - consumed_fee - consumed_slip + pos.realized.funding_pnl
-
         pos.realized.gross_pnl += realized_gross
         pos.realized.fee += consumed_fee
         pos.realized.slippage_cost += consumed_slip

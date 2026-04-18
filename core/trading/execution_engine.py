@@ -384,8 +384,21 @@ class ExecutionEngine:
         funding_rate = self._safe_float(snapshot.get("funding_rate"), 0.0)
         liquidation_long_usd = self._safe_float(snapshot.get("liquidation_long_usd"), 0.0)
         liquidation_short_usd = self._safe_float(snapshot.get("liquidation_short_usd"), 0.0)
+        taker_buy_sell_imbalance = self._safe_float(snapshot.get("taker_buy_sell_imbalance"), 0.0)
+        basis_pct = self._safe_float(snapshot.get("basis_pct"), 0.0)
         context = build_coinglass_runtime_context(snapshot)
         crowding_warning = bool(context.get("crowding_warning"))
+        history_ready = bool(context.get("history_ready"))
+        crowded_long = bool(context.get("crowded_long"))
+        crowded_short = bool(context.get("crowded_short"))
+        squeeze_building = bool(context.get("squeeze_building"))
+        flush_risk = bool(context.get("flush_risk"))
+        basis_dislocation = bool(context.get("basis_dislocation"))
+        flow_divergence = bool(context.get("flow_divergence"))
+        order_flow_confirmed = bool(context.get("order_flow_confirmed"))
+        funding_zscore = self._safe_float(context.get("funding_zscore"), 0.0)
+        liquidation_burst_score = self._safe_float(context.get("liquidation_burst_score"), 0.0)
+        long_short_ratio_change_24h = self._safe_float(context.get("long_short_ratio_change_24h"), 0.0)
 
         result.update(
             {
@@ -402,6 +415,12 @@ class ExecutionEngine:
                     "funding_rate": funding_rate,
                     "liquidation_long_usd": liquidation_long_usd,
                     "liquidation_short_usd": liquidation_short_usd,
+                    "liquidation_burst_score": liquidation_burst_score,
+                    "long_short_ratio_change_24h": long_short_ratio_change_24h,
+                    "funding_zscore": funding_zscore,
+                    "taker_buy_sell_imbalance": taker_buy_sell_imbalance,
+                    "basis_pct": basis_pct,
+                    "history_ready": history_ready,
                     "timestamp": snapshot.get("timestamp"),
                 },
                 "context": context,
@@ -409,26 +428,101 @@ class ExecutionEngine:
         )
 
         if strategy_name in _COINGLASS_TREND_FILTER_STRATEGIES:
-            if side == OrderSide.BUY and crowding_score >= 0.72 and (crowding_warning or funding_rate > 0 or distribution_score >= 0.62):
-                result.update(
-                    {
-                        "applied": True,
-                        "action": "block",
-                        "reason": "coinglass_crowding_filter_long",
-                    }
-                )
-                return result
+            if side == OrderSide.BUY:
+                long_flags = []
+                if crowded_long:
+                    long_flags.append("crowded_long")
+                if flush_risk:
+                    long_flags.append("flush_risk")
+                if basis_dislocation:
+                    long_flags.append("basis_dislocation")
+                if flow_divergence and taker_buy_sell_imbalance <= 0:
+                    long_flags.append("flow_divergence")
+                if history_ready and long_short_ratio_change_24h >= 0.08:
+                    long_flags.append("ratio_extension")
+                if liquidation_burst_score >= 0.60 and liquidation_long_usd >= liquidation_short_usd:
+                    long_flags.append("liquidation_burst")
+                if crowding_score >= 0.72 and (crowding_warning or funding_rate > 0 or distribution_score >= 0.62):
+                    long_flags.append("crowding_score")
+                if long_flags:
+                    result.update(
+                        {
+                            "applied": True,
+                            "action": "block",
+                            "reason": "coinglass_crowding_filter_long",
+                            "trigger_flags": long_flags,
+                        }
+                    )
+                    return result
+            elif side == OrderSide.SELL:
+                short_flags = []
+                if crowded_short:
+                    short_flags.append("crowded_short")
+                if squeeze_building:
+                    short_flags.append("squeeze_building")
+                if order_flow_confirmed and taker_buy_sell_imbalance > 0:
+                    short_flags.append("order_flow_confirmed")
+                if history_ready and long_short_ratio_change_24h <= -0.08:
+                    short_flags.append("ratio_extension")
+                if liquidation_burst_score >= 0.60 and liquidation_short_usd >= liquidation_long_usd:
+                    short_flags.append("liquidation_burst")
+                if squeeze_score >= 0.68:
+                    short_flags.append("squeeze_score")
+                if short_flags:
+                    result.update(
+                        {
+                            "applied": True,
+                            "action": "block",
+                            "reason": "coinglass_crowding_filter_short",
+                            "trigger_flags": short_flags,
+                        }
+                    )
+                    return result
             result["reason"] = "trend_filter_clear"
             return result
 
         largest_liquidation = max(liquidation_long_usd, liquidation_short_usd)
-        if squeeze_score >= 0.68 or largest_liquidation >= _COINGLASS_REVERSAL_LIQUIDATION_COOLDOWN_USD:
+        reversal_flags = []
+        if basis_dislocation and abs(funding_zscore) >= 1.5:
+            reversal_flags.append("basis_dislocation")
+        if flow_divergence and not order_flow_confirmed:
+            reversal_flags.append("flow_divergence")
+        if liquidation_burst_score >= 0.68:
+            reversal_flags.append("liquidation_burst")
+        if squeeze_score >= 0.68:
+            reversal_flags.append("squeeze_score")
+        if largest_liquidation >= _COINGLASS_REVERSAL_LIQUIDATION_COOLDOWN_USD:
+            reversal_flags.append("liquidation_cooldown")
+        if side == OrderSide.BUY:
+            if flush_risk:
+                reversal_flags.append("flush_risk")
+            if liquidation_long_usd >= _COINGLASS_REVERSAL_LIQUIDATION_COOLDOWN_USD:
+                reversal_flags.append("long_liquidation")
+            if history_ready and long_short_ratio_change_24h <= -0.08:
+                reversal_flags.append("ratio_flush")
+            if taker_buy_sell_imbalance < -0.08 and not order_flow_confirmed:
+                reversal_flags.append("sell_pressure")
+        elif side == OrderSide.SELL:
+            if squeeze_building:
+                reversal_flags.append("squeeze_building")
+            if crowded_short:
+                reversal_flags.append("crowded_short")
+            if order_flow_confirmed:
+                reversal_flags.append("order_flow_confirmed")
+            if liquidation_short_usd >= _COINGLASS_REVERSAL_LIQUIDATION_COOLDOWN_USD:
+                reversal_flags.append("short_liquidation")
+            if history_ready and long_short_ratio_change_24h >= 0.08:
+                reversal_flags.append("ratio_squeeze")
+            if taker_buy_sell_imbalance > 0.08:
+                reversal_flags.append("buy_pressure")
+        if reversal_flags:
             result.update(
                 {
                     "applied": True,
                     "action": "block",
                     "reason": "coinglass_liquidation_squeeze_cooldown",
                     "largest_liquidation_usd": largest_liquidation,
+                    "trigger_flags": reversal_flags,
                 }
             )
             return result

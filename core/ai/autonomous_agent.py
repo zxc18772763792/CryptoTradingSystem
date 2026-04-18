@@ -64,6 +64,7 @@ from core.utils.openai_responses import (
     responses_api_unavailable,
     should_failover_openai_status,
     should_prefer_openai_target_chat_completions,
+    target_max_tokens_for_request,
     target_transport,
     unsupported_responses_parameter,
 )
@@ -274,6 +275,34 @@ def _safe_nonnegative_float(value: Any, default: float = 0.0) -> float:
     if parsed < 0:
         return float(default)
     return parsed
+
+
+def _compact_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        compacted: Dict[str, Any] = {}
+        for key, item in value.items():
+            child = _compact_value(item)
+            if child is None:
+                continue
+            if isinstance(child, (dict, list)) and not child:
+                continue
+            if isinstance(child, str) and not child.strip():
+                continue
+            compacted[str(key)] = child
+        return compacted
+    if isinstance(value, list):
+        compacted_list = []
+        for item in value:
+            child = _compact_value(item)
+            if child is None:
+                continue
+            if isinstance(child, (dict, list)) and not child:
+                continue
+            if isinstance(child, str) and not child.strip():
+                continue
+            compacted_list.append(child)
+        return compacted_list
+    return value
 
 
 def _coerce_optional_positive_float(value: Any, *, high: Optional[float] = None) -> Optional[float]:
@@ -777,10 +806,27 @@ class AutonomousTradingAgent:
         for item in sorted(_SUPPORTED_PROVIDERS):
             targets = self._provider_endpoint_targets(item)
             base_urls = [str(target.get("base_url") or "").rstrip("/") for target in targets if str(target.get("base_url") or "").strip()]
+            exposed_targets: List[Dict[str, Any]] = []
+            default_model = self._provider_model(item)
+            for order, target in enumerate(targets, start=1):
+                base_url = str(target.get("base_url") or "").rstrip("/")
+                if not base_url:
+                    continue
+                exposed_targets.append(
+                    {
+                        "order": order,
+                        "base_url": base_url,
+                        "model": str(target.get("model") or default_model or "").strip() or default_model,
+                        "transport": str(target.get("transport") or "openai").strip().lower() or "openai",
+                        "is_backup": bool(target.get("is_backup")),
+                        "available": bool(str(target.get("api_key") or "").strip()),
+                    }
+                )
             providers[item] = {
                 "available": any(bool(str(target.get("api_key") or "").strip()) for target in targets),
-                "default_model": self._provider_model(item),
+                "default_model": default_model,
                 "base_url": (base_urls[0] if base_urls else self._provider_base_url(item)),
+                "targets": exposed_targets,
             }
             providers[item].update(provider_runtime_capability_catalog(item))
             if item == "codex" and len(base_urls) > 1:
@@ -1797,7 +1843,11 @@ class AutonomousTradingAgent:
                     advance_to_next_target = False
                     try:
                         if transport == "anthropic":
-                            request_anthropic_payload = dict(anthropic_payload, model=target_model)
+                            request_anthropic_payload = dict(
+                                anthropic_payload,
+                                model=target_model,
+                                max_tokens=target_max_tokens_for_request(target, max_tokens),
+                            )
                             url = anthropic_messages_endpoint(target_base_url)
                             async with session.post(url, headers=headers, json=request_anthropic_payload) as resp:
                                 if resp.status >= 400:
@@ -2443,7 +2493,7 @@ class AutonomousTradingAgent:
             )
             aggregate_kwargs: Dict[str, Any]
             if aggregate_fast:
-                aggregate_kwargs = {"include_llm": False}
+                aggregate_kwargs = {"include_llm": False, "include_ml": False}
             else:
                 aggregate_kwargs = {"include_llm": False}
             agg_signal: Dict[str, Any] = {}
@@ -3679,7 +3729,7 @@ class AutonomousTradingAgent:
             if bool(cfg.get("_preview_symbol_scan")) or (light_symbol_scan and bool(cfg.get("_scan_skip_live_market"))):
                 # Coarse prescan only needs a cheap directional prior. The shortlist
                 # still gets the full aggregate before final selection.
-                aggregate_kwargs = {"include_llm": False}
+                aggregate_kwargs = {"include_llm": False, "include_ml": False}
             agg = await signal_aggregator.aggregate(
                 symbol=str(cfg["symbol"]),
                 market_data=market_data,
@@ -3813,33 +3863,6 @@ class AutonomousTradingAgent:
             with contextlib.suppress(Exception):
                 return float(value)
             return float(default)
-
-        def _compact_value(value: Any) -> Any:
-            if isinstance(value, dict):
-                compacted: Dict[str, Any] = {}
-                for key, item in value.items():
-                    child = _compact_value(item)
-                    if child is None:
-                        continue
-                    if isinstance(child, (dict, list)) and not child:
-                        continue
-                    if isinstance(child, str) and not child.strip():
-                        continue
-                    compacted[str(key)] = child
-                return compacted
-            if isinstance(value, list):
-                compacted_list = []
-                for item in value:
-                    child = _compact_value(item)
-                    if child is None:
-                        continue
-                    if isinstance(child, (dict, list)) and not child:
-                        continue
-                    if isinstance(child, str) and not child.strip():
-                        continue
-                    compacted_list.append(child)
-                return compacted_list
-            return value
 
         def _slice_text_list(value: Any, limit: int) -> List[str]:
             items: List[str] = []

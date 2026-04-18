@@ -487,6 +487,7 @@ def _build_derivatives_shadow_summary(
     details = dict(derivatives.get("details") or {})
     quota_headroom = dict(details.get("quota_headroom") or {})
     snapshot = dict(details.get("snapshot") or {})
+    snapshot_payload = dict(snapshot.get("payload") or {})
     active_datasets = list(details.get("active_datasets") or [])
     freshness_raw = details.get("freshness_sec")
     try:
@@ -495,7 +496,15 @@ def _build_derivatives_shadow_summary(
         freshness_sec = None
     funding_multi = dict((onchain or {}).get("funding_rate_multi_source") or {})
     funding_count = int(funding_multi.get("count") or 0)
-    funding_mean_rate_pct = float(funding_multi.get("mean_rate_pct") or 0.0) if funding_count > 0 else None
+    funding_mean = _coerce_finite_float(snapshot_payload.get("funding_mean"))
+    funding_mean_rate_pct = (funding_mean * 100.0) if funding_mean is not None else None
+    if funding_mean_rate_pct is None and funding_count > 0:
+        funding_mean_rate_pct = float(funding_multi.get("mean_rate_pct") or 0.0)
+    derivatives_labels = [
+        str(item).strip()
+        for item in list(snapshot_payload.get("derivatives_labels") or [])
+        if str(item).strip()
+    ]
 
     return {
         "available": bool(derivatives.get("available")),
@@ -507,7 +516,29 @@ def _build_derivatives_shadow_summary(
         "dataset_count": len(active_datasets),
         "quota_headroom": quota_headroom,
         "snapshot_at": snapshot.get("timestamp"),
+        "history_ready": bool(snapshot_payload.get("history_ready")),
+        "history_exchange": snapshot_payload.get("history_exchange"),
+        "history_interval": snapshot_payload.get("history_interval"),
+        "funding_mean": funding_mean,
         "funding_mean_rate_pct": funding_mean_rate_pct,
+        "funding_zscore": _coerce_finite_float(snapshot_payload.get("funding_zscore")),
+        "funding_reversion_speed": _coerce_finite_float(snapshot_payload.get("funding_reversion_speed")),
+        "long_short_ratio_change_24h": _coerce_finite_float(snapshot_payload.get("long_short_ratio_change_24h")),
+        "liquidation_burst_score": _coerce_finite_float(snapshot_payload.get("liquidation_burst_score")),
+        "derivatives_heat_score": _coerce_finite_float(snapshot_payload.get("derivatives_heat_score")),
+        "crowding_score": _coerce_finite_float(snapshot.get("crowding_score")),
+        "squeeze_score": _coerce_finite_float(snapshot.get("squeeze_score")),
+        "distribution_score": _coerce_finite_float(snapshot.get("distribution_score")),
+        "basis_pct": _coerce_finite_float(snapshot.get("basis_pct")),
+        "taker_buy_sell_imbalance": _coerce_finite_float(snapshot.get("taker_buy_sell_imbalance")),
+        "crowded_long": bool(snapshot_payload.get("crowded_long")),
+        "crowded_short": bool(snapshot_payload.get("crowded_short")),
+        "squeeze_building": bool(snapshot_payload.get("squeeze_building")),
+        "flush_risk": bool(snapshot_payload.get("flush_risk")),
+        "basis_dislocation": bool(snapshot_payload.get("basis_dislocation")),
+        "flow_divergence": bool(snapshot_payload.get("flow_divergence")),
+        "order_flow_confirmed": bool(snapshot_payload.get("order_flow_confirmed")),
+        "derivatives_labels": derivatives_labels,
     }
 
 
@@ -1740,6 +1771,9 @@ def _build_structured_recommendations(
     if whale_count > 0:
         thesis_points.append(f"Whale transfers active ({whale_count}).")
     derivatives_freshness = _coerce_finite_float(derivatives_summary.get("freshness_sec"))
+    derivatives_labels = list(derivatives_summary.get("derivatives_labels") or [])
+    funding_zscore = _coerce_finite_float(derivatives_summary.get("funding_zscore"))
+    long_short_ratio_change = _coerce_finite_float(derivatives_summary.get("long_short_ratio_change_24h"))
     if bool(derivatives_summary.get("available")):
         dataset_count = int(derivatives_summary.get("dataset_count") or 0)
         provider = str(derivatives_summary.get("provider") or "coinglass")
@@ -1751,6 +1785,14 @@ def _build_structured_recommendations(
         funding_mean_rate_pct = _coerce_finite_float(derivatives_summary.get("funding_mean_rate_pct"))
         if funding_mean_rate_pct is not None:
             thesis_points.append(f"Derivatives funding mean: {funding_mean_rate_pct:+.2f}%.")
+        if funding_zscore is not None:
+            thesis_points.insert(min(len(thesis_points), 1), f"Derivatives funding z-score: {funding_zscore:+.2f}.")
+        if derivatives_summary.get("squeeze_building"):
+            thesis_points.insert(min(len(thesis_points), 2), "Derivatives short squeeze risk is building.")
+        if derivatives_summary.get("order_flow_confirmed"):
+            thesis_points.insert(min(len(thesis_points), 2), "Order flow is confirming the current derivatives positioning.")
+        if long_short_ratio_change is not None:
+            thesis_points.append(f"Long/short ratio 24h change: {long_short_ratio_change:+.2f}.")
     macro_gap = _coerce_finite_float(macro_snapshot.get("ppi_cpi_gap"))
     if macro_gap is not None:
         thesis_points.append(f"Macro scissors spread (PPI-CPI): {macro_gap:+.2f}pp.")
@@ -1766,6 +1808,21 @@ def _build_structured_recommendations(
         avoid.append("Derivatives shadow is missing, so crowding/funding confirmation is incomplete.")
     elif derivatives_freshness is not None and derivatives_freshness > 1800:
         avoid.append("Derivatives shadow is stale, so crowding/funding confirmation may lag.")
+    elif not bool(derivatives_summary.get("history_ready")):
+        avoid.append("Derivatives history is incomplete, so z-score and reversion signals are lower confidence.")
+    if derivatives_summary.get("crowded_long"):
+        avoid.append("Crowded long conditions raise squeeze-down risk for fresh chase entries.")
+    if derivatives_summary.get("basis_dislocation"):
+        avoid.append("Basis/funding dislocation is elevated, so leverage and execution timing should stay conservative.")
+    if derivatives_summary.get("flow_divergence"):
+        avoid.append("Taker flow is diverging from positioning, so confirmation quality is reduced.")
+
+    if derivatives_summary.get("squeeze_building") or derivatives_summary.get("order_flow_confirmed"):
+        next_actions.append("Track whether taker flow and open interest continue to confirm the squeeze setup.")
+    if derivatives_summary.get("crowded_long"):
+        next_actions.append("Wait for crowding or funding to cool before sizing fresh momentum longs.")
+    if derivatives_summary.get("basis_dislocation"):
+        next_actions.append("Re-check basis and funding dislocation before execution to avoid poor fills.")
 
     ai_goal = (
         f"Focus on {' / '.join(focus_symbols)} under {headline}, validate {' / '.join(preferred[:2] or ['core'])}, "
@@ -1790,6 +1847,10 @@ def _build_structured_recommendations(
             "provider": str(derivatives_summary.get("provider") or "coinglass"),
             "freshness_sec": derivatives_freshness,
             "dataset_count": int(derivatives_summary.get("dataset_count") or 0),
+            "history_ready": bool(derivatives_summary.get("history_ready")),
+            "history_interval": derivatives_summary.get("history_interval"),
+            "funding_zscore": funding_zscore,
+            "derivatives_labels": derivatives_labels,
         },
     }
     ai_brief["prompt_context"] = "\n".join(

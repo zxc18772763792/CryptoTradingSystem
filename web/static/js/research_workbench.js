@@ -69,6 +69,33 @@
     return `<div class="list-item"><span>${escSafe(label)}</span><span>${escSafe(String(value ?? '-'))}</span></div>`;
   }
 
+  function fmtNumber(value, digits = 2) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return '-';
+    return num.toFixed(digits);
+  }
+
+  function fmtSignedNumber(value, digits = 2) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return '-';
+    return `${num > 0 ? '+' : ''}${num.toFixed(digits)}`;
+  }
+
+  function fmtSignedPct(value, digits = 2, scale = 1) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return '-';
+    const pct = num * scale;
+    return `${pct > 0 ? '+' : ''}${pct.toFixed(digits)}%`;
+  }
+
+  function joinCompact(values, limit = 4) {
+    return (Array.isArray(values) ? values : [])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .slice(0, limit)
+      .join(' / ');
+  }
+
   function isResearchActive() {
     return document.querySelector('.tab-content.active')?.id === 'research';
   }
@@ -762,15 +789,33 @@
     const history = payload.analytics_history_status || {};
     const derivatives = payload.derivatives_summary || {};
     const collectors = Object.values(history).slice(0, 4).map((item) => `${item.collector}:${item.status}`).join(' | ');
+    const derivativesHistory = derivatives.history_ready
+      ? `${String(derivatives.history_interval || '-')} / ${String(derivatives.history_exchange || '-')}`
+      : 'incomplete';
+    const derivativesFlags = [
+      derivatives.crowded_long ? 'Crowded Long' : '',
+      derivatives.crowded_short ? 'Crowded Short' : '',
+      derivatives.squeeze_building ? 'Short Squeeze Risk' : '',
+      derivatives.flush_risk ? 'Flush Risk' : '',
+      derivatives.basis_dislocation ? 'Basis Dislocation' : '',
+      derivatives.flow_divergence ? 'Flow Divergence' : '',
+      derivatives.order_flow_confirmed ? 'Order Flow Confirmed' : '',
+    ].filter(Boolean);
+    const derivativesLabels = joinCompact(derivatives.derivatives_labels, 4) || joinCompact(derivativesFlags, 4) || '-';
     const derivativesParts = [
       String(derivatives.status || 'missing'),
       derivatives.freshness_sec != null ? fmtAgeSeconds(derivatives.freshness_sec) : '',
       Number(derivatives.dataset_count || 0) > 0 ? `${Number(derivatives.dataset_count || 0)} datasets` : '',
+      derivatives.history_ready ? 'history-ready' : 'history-partial',
     ].filter(Boolean).join(' | ');
     const dailyRemaining = Number(derivatives?.quota_headroom?.daily_remaining);
     const derivativesSummaryRows = [
       listItem('Derivatives', derivativesParts || '-'),
       listItem('Derivatives Source / Quota', `${String(derivatives.provider || '-')} / ${Number.isFinite(dailyRemaining) ? dailyRemaining : '-'}`),
+      listItem('Derivatives History', derivativesHistory),
+      listItem('Funding Z-Score / Mean', `${fmtSignedNumber(derivatives.funding_zscore)} / ${fmtSignedPct(derivatives.funding_mean_rate_pct)}`),
+      listItem('Long/Short 24h / Liq Burst', `${fmtSignedPct(derivatives.long_short_ratio_change_24h, 2, 100)} / ${fmtNumber(derivatives.liquidation_burst_score)}`),
+      listItem('Derivatives Labels', derivativesLabels),
     ];
     box.innerHTML = [
       listItem('新闻范围', news.scope || '-'),
@@ -1278,6 +1323,12 @@
     const derivativesCollector = Array.isArray(analyticsHistoryStatus?.collectors)
       ? analyticsHistoryStatus.collectors.find((item) => String(item?.collector || '').trim() === 'derivatives')
       : null;
+    const derivativesSnapshot = derivativesCollector?.details?.snapshot || {};
+    const derivativesPayload = derivativesSnapshot?.payload || {};
+    const fundingMean = Number(derivativesPayload?.funding_mean);
+    const fundingMeanRatePct = Number.isFinite(fundingMean)
+      ? fundingMean * 100
+      : Number(onchainRes?.funding_rate_multi_source?.mean_rate_pct || 0) || null;
     const derivativesSummary = {
       available: !!derivativesCollector?.available,
       status: String(derivativesCollector?.status || 'missing'),
@@ -1287,8 +1338,23 @@
       active_datasets: Array.isArray(derivativesCollector?.details?.active_datasets) ? derivativesCollector.details.active_datasets : [],
       dataset_count: Array.isArray(derivativesCollector?.details?.active_datasets) ? derivativesCollector.details.active_datasets.length : 0,
       quota_headroom: derivativesCollector?.details?.quota_headroom || {},
-      snapshot_at: derivativesCollector?.details?.snapshot?.timestamp || null,
-      funding_mean_rate_pct: Number(onchainRes?.funding_rate_multi_source?.mean_rate_pct || 0) || null,
+      snapshot_at: derivativesSnapshot?.timestamp || null,
+      history_ready: !!derivativesPayload?.history_ready,
+      history_exchange: derivativesPayload?.history_exchange || null,
+      history_interval: derivativesPayload?.history_interval || null,
+      funding_mean_rate_pct: fundingMeanRatePct,
+      funding_zscore: Number(derivativesPayload?.funding_zscore),
+      long_short_ratio_change_24h: Number(derivativesPayload?.long_short_ratio_change_24h),
+      liquidation_burst_score: Number(derivativesPayload?.liquidation_burst_score),
+      derivatives_heat_score: Number(derivativesPayload?.derivatives_heat_score),
+      crowded_long: !!derivativesPayload?.crowded_long,
+      crowded_short: !!derivativesPayload?.crowded_short,
+      squeeze_building: !!derivativesPayload?.squeeze_building,
+      flush_risk: !!derivativesPayload?.flush_risk,
+      basis_dislocation: !!derivativesPayload?.basis_dislocation,
+      flow_divergence: !!derivativesPayload?.flow_divergence,
+      order_flow_confirmed: !!derivativesPayload?.order_flow_confirmed,
+      derivatives_labels: Array.isArray(derivativesPayload?.derivatives_labels) ? derivativesPayload.derivatives_labels : [],
     };
     if (!derivativesSummary.available) warnings.push('CoinGlass derivatives shadow unavailable; exogenous context is partial.');
     if (isAsyncPendingPayload(onchainRes, 'onchain')) warnings.unshift('链上面板正在后台补拉完整数据。');

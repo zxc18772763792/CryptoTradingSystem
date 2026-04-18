@@ -28,6 +28,72 @@ class CoinglassDatasetManifest:
     routes: tuple[CoinglassRouteSpec, ...] = ()
 
 
+_COINGLASS_EXCHANGE_ALIASES: Dict[str, str] = {
+    "BINANCE": "Binance",
+    "OKX": "OKX",
+    "BYBIT": "Bybit",
+    "BITGET": "Bitget",
+    "DYDX": "dYdX",
+    "HUOBI": "HTX",
+    "HTX": "HTX",
+    "GATE.IO": "Gate",
+    "GATE": "Gate",
+    "COINEX": "CoinEx",
+    "BINGX": "BingX",
+    "MEXC": "MEXC",
+    "WHITEBIT": "WhiteBIT",
+    "KUCOIN": "KuCoin",
+    "LBANK": "LBank",
+}
+
+_COINGLASS_PAIR_TEMPLATES: Dict[str, str] = {
+    "BINANCE": "{base}USDT",
+    "BYBIT": "{base}USDT",
+    "BITGET": "{base}USDT",
+    "BINGX": "{base}USDT",
+    "MEXC": "{base}USDT",
+    "GATE": "{base}USDT",
+    "COINEX": "{base}USDT",
+    "HTX": "{base}USDT",
+    "KUCOIN": "{base}USDT",
+    "WHITEBIT": "{base}USDT",
+    "OKX": "{base}-USDT-SWAP",
+    "DYDX": "{base}-USD",
+}
+
+_COINGLASS_INTERVAL_ALIASES: Dict[str, str] = {
+    "1m": "1m",
+    "m1": "1m",
+    "5m": "5m",
+    "m5": "5m",
+    "15m": "15m",
+    "m15": "15m",
+    "30m": "30m",
+    "m30": "30m",
+    "1h": "h1",
+    "h1": "h1",
+    "4h": "h4",
+    "h4": "h4",
+    "12h": "h12",
+    "h12": "h12",
+    "24h": "h24",
+    "h24": "h24",
+    "1d": "h24",
+    "d1": "h24",
+}
+
+_COINGLASS_RANGE_BY_INTERVAL: Dict[str, str] = {
+    "1m": "1m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "h1": "1h",
+    "h4": "4h",
+    "h12": "12h",
+    "h24": "24h",
+}
+
+
 def normalize_coinglass_symbol(symbol: Any) -> str:
     text = str(symbol or "").strip().upper()
     if not text:
@@ -50,7 +116,62 @@ def normalize_coinglass_symbol(symbol: Any) -> str:
     return text
 
 
+def normalize_coinglass_exchange(exchange: Any, *, default: str = "Binance") -> str:
+    text = str(exchange or "").strip()
+    if not text:
+        return default
+    return _COINGLASS_EXCHANGE_ALIASES.get(text.upper(), text)
+
+
+def normalize_coinglass_interval(interval: Any, *, default: str = "h4") -> str:
+    text = str(interval or "").strip().lower()
+    if not text:
+        return default
+    return _COINGLASS_INTERVAL_ALIASES.get(text, text)
+
+
+def coinglass_range_for_interval(interval: Any, *, default: str = "4h") -> str:
+    normalized = normalize_coinglass_interval(interval, default="h4")
+    return _COINGLASS_RANGE_BY_INTERVAL.get(normalized, default)
+
+
+def coinglass_pair_symbol(symbol: Any, exchange: Any) -> str:
+    base_symbol = normalize_coinglass_symbol(symbol)
+    if not base_symbol:
+        return ""
+    normalized_exchange = normalize_coinglass_exchange(exchange)
+    template = _COINGLASS_PAIR_TEMPLATES.get(normalized_exchange.upper())
+    if not template:
+        return base_symbol
+    return template.format(base=base_symbol)
+
+
+def coinglass_symbol_matches(expected_symbol: Any, actual_symbol: Any) -> bool:
+    expected = normalize_coinglass_symbol(expected_symbol)
+    actual = normalize_coinglass_symbol(actual_symbol)
+    return bool(expected and actual and expected == actual)
+
+
 COINGLASS_DATASET_MANIFESTS: Dict[str, CoinglassDatasetManifest] = {
+    "price_history": CoinglassDatasetManifest(
+        dataset="price_history",
+        label="Price History (OHLC)",
+        market_type="futures",
+        storage_group="futures",
+        ttl_sec=600,
+        freshness_sec=1800,
+        include_in_ai=False,
+        include_in_radar=False,
+        include_in_strategies=False,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/futures/price/history",
+                required_params=("exchange", "symbol", "interval"),
+                default_params={"exchange": "Binance", "interval": "1h"},
+            ),
+        ),
+    ),
     "open_interest_exchange_list": CoinglassDatasetManifest(
         dataset="open_interest_exchange_list",
         label="Open Interest Exchange List",
@@ -71,6 +192,24 @@ COINGLASS_DATASET_MANIFESTS: Dict[str, CoinglassDatasetManifest] = {
                 path="/v3/api/futures/openInterest/exchange-list",
                 required_params=("symbol",),
                 fallback=True,
+            ),
+        ),
+    ),
+    "open_interest_history": CoinglassDatasetManifest(
+        dataset="open_interest_history",
+        label="Open Interest History",
+        market_type="futures",
+        storage_group="futures",
+        ttl_sec=600,
+        freshness_sec=1800,
+        include_in_ai=True,
+        include_in_radar=True,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/futures/open-interest/history",
+                required_params=("symbol", "exchange", "interval"),
+                default_params={"exchange": "Binance", "interval": "h1", "unit": "usd"},
             ),
         ),
     ),
@@ -97,6 +236,24 @@ COINGLASS_DATASET_MANIFESTS: Dict[str, CoinglassDatasetManifest] = {
             ),
         ),
     ),
+    "funding_rate_history": CoinglassDatasetManifest(
+        dataset="funding_rate_history",
+        label="Funding Rate History",
+        market_type="futures",
+        storage_group="futures",
+        ttl_sec=600,
+        freshness_sec=1800,
+        include_in_ai=True,
+        include_in_radar=True,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/futures/funding-rate/history",
+                required_params=("symbol", "exchange", "interval"),
+                default_params={"exchange": "Binance", "interval": "h1"},
+            ),
+        ),
+    ),
     "taker_buy_sell_volume_exchange_list": CoinglassDatasetManifest(
         dataset="taker_buy_sell_volume_exchange_list",
         label="Taker Buy Sell Volume Exchange List",
@@ -110,12 +267,14 @@ COINGLASS_DATASET_MANIFESTS: Dict[str, CoinglassDatasetManifest] = {
             CoinglassRouteSpec(
                 api_version="v4",
                 path="/v4/api/futures/taker-buy-sell-volume/exchange-list",
-                required_params=("symbol",),
+                required_params=("symbol", "range"),
+                default_params={"range": "4h"},
             ),
             CoinglassRouteSpec(
                 api_version="v3",
                 path="/v3/api/futures/takerBuySellVolume/exchange-list",
-                required_params=("symbol",),
+                required_params=("symbol", "range"),
+                default_params={"range": "4h"},
                 fallback=True,
             ),
         ),
@@ -126,21 +285,21 @@ COINGLASS_DATASET_MANIFESTS: Dict[str, CoinglassDatasetManifest] = {
         market_type="futures",
         storage_group="futures",
         ttl_sec=300,
-        freshness_sec=900,
+        freshness_sec=1800,
         include_in_ai=True,
         include_in_radar=True,
         routes=(
             CoinglassRouteSpec(
                 api_version="v4",
                 path="/v4/api/futures/liquidation/history",
-                required_params=("symbol", "interval"),
-                default_params={"interval": "h4"},
+                required_params=("symbol", "exchange", "interval"),
+                default_params={"exchange": "Binance", "interval": "h4"},
             ),
             CoinglassRouteSpec(
                 api_version="v3",
                 path="/v3/api/futures/liquidation/history",
-                required_params=("symbol", "interval"),
-                default_params={"interval": "h4"},
+                required_params=("symbol", "exchange", "interval"),
+                default_params={"exchange": "Binance", "interval": "h4"},
                 fallback=True,
             ),
         ),
@@ -151,7 +310,7 @@ COINGLASS_DATASET_MANIFESTS: Dict[str, CoinglassDatasetManifest] = {
         market_type="futures",
         storage_group="futures",
         ttl_sec=300,
-        freshness_sec=900,
+        freshness_sec=1800,
         include_in_ai=True,
         include_in_radar=True,
         routes=(
@@ -169,7 +328,7 @@ COINGLASS_DATASET_MANIFESTS: Dict[str, CoinglassDatasetManifest] = {
         market_type="futures",
         storage_group="futures",
         ttl_sec=900,
-        freshness_sec=1800,
+        freshness_sec=3600,
         include_in_ai=True,
         include_in_radar=False,
         routes=(
@@ -181,7 +340,11 @@ COINGLASS_DATASET_MANIFESTS: Dict[str, CoinglassDatasetManifest] = {
     ),
 }
 
-COINGLASS_DEFAULT_DATASETS: tuple[str, ...] = tuple(COINGLASS_DATASET_MANIFESTS.keys())
+COINGLASS_DEFAULT_DATASETS: tuple[str, ...] = tuple(
+    dataset
+    for dataset in COINGLASS_DATASET_MANIFESTS.keys()
+    if dataset != "price_history"
+)
 
 
 def get_coinglass_manifest(dataset: str) -> Optional[CoinglassDatasetManifest]:

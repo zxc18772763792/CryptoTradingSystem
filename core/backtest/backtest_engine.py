@@ -158,7 +158,10 @@ class BacktestEngine:
             self._update_positions(current_price, symbol)
 
             try:
-                signals = strategy.generate_signals(current_data)
+                # Pass data EXCLUDING the current bar so strategy cannot use the current
+                # close to decide its own fill price (lookahead bias).  Execution uses
+                # the current bar's price, simulating a fill at or shortly after bar close.
+                signals = strategy.generate_signals(data.iloc[:i])
             except Exception as e:
                 logger.error(f"Strategy generate_signals failed at {current_time}: {e}")
                 signals = []
@@ -253,11 +256,12 @@ class BacktestEngine:
         if len(self._positions) >= self.config.max_positions:
             return
 
-        margin = self._capital * float(self.config.position_size_pct)
-        margin = max(0.0, margin)
-        if margin <= 0:
+        notional = self._capital * float(self.config.position_size_pct)
+        notional = max(0.0, notional)
+        if notional <= 0:
             return
-        notional = margin * max(1.0, float(self.config.leverage))
+        leverage = max(1.0, float(self.config.leverage))
+        margin = notional / leverage
         quantity = notional / current_price
 
         slip_rate = self._slippage_rate(window)
@@ -326,11 +330,12 @@ class BacktestEngine:
         if len(self._positions) >= self.config.max_positions:
             return
 
-        margin = self._capital * float(self.config.position_size_pct)
-        margin = max(0.0, margin)
-        if margin <= 0:
+        notional = self._capital * float(self.config.position_size_pct)
+        notional = max(0.0, notional)
+        if notional <= 0:
             return
-        notional = margin * max(1.0, float(self.config.leverage))
+        leverage = max(1.0, float(self.config.leverage))
+        margin = notional / leverage
         quantity = notional / current_price
 
         slip_rate = self._slippage_rate(window)

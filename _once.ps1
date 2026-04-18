@@ -182,9 +182,20 @@ function Set-EffectiveWorkerEnvFlags {
 function Start-AutonomousAgent {
     param([int]$WebPort)
 
+    $opsToken = [string]($env:OPS_TOKEN)
+    if ([string]::IsNullOrWhiteSpace($opsToken)) {
+        throw "OPS_TOKEN is required to start the autonomous agent through the protected API. Configure OPS_TOKEN in .env or .env.local before using -StartAutonomousAgent."
+    }
+
+    $headers = @{
+        "X-OPS-TOKEN"  = $opsToken.Trim()
+        "X-OPS-CALLER" = "web_startup"
+    }
+
     $response = Invoke-RestMethod `
         -Method POST `
         -Uri "http://127.0.0.1:$WebPort/api/ai/autonomous-agent/start" `
+        -Headers $headers `
         -TimeoutSec 20
 
     if (-not $response) {

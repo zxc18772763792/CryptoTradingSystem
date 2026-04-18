@@ -75,6 +75,55 @@ def _sample_df_for_timeframe(timeframe: str, *, periods: int = 240, start: str =
     return _sample_df(freq=freq_map.get(str(timeframe or "").strip(), "15min"), periods=periods, start=start)
 
 
+def test_autonomous_agent_runtime_config_exposes_codex_target_order(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://primary.test/v1", raising=False)
+    monkeypatch.setattr(
+        settings,
+        "OPENAI_BACKUP_BASE_URL",
+        "https://api.xiaomimimo.com/anthropic/v1,https://backup-glm.test/v4",
+        raising=False,
+    )
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "primary-key", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "mimo-key,glm-key", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.4", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "mimo-v2-pro,GLM-4.5-Air", raising=False)
+
+    config = agent.get_runtime_config()
+    codex = config["providers"]["codex"]
+
+    assert codex["failover_enabled"] is True
+    assert codex["targets"] == [
+        {
+            "order": 1,
+            "base_url": "https://primary.test/v1",
+            "model": "gpt-5.4",
+            "transport": "openai",
+            "is_backup": False,
+            "available": True,
+        },
+        {
+            "order": 2,
+            "base_url": "https://api.xiaomimimo.com/anthropic/v1",
+            "model": "mimo-v2-pro",
+            "transport": "anthropic",
+            "is_backup": True,
+            "available": True,
+        },
+        {
+            "order": 3,
+            "base_url": "https://backup-glm.test/v4",
+            "model": "GLM-4.5-Air",
+            "transport": "openai",
+            "is_backup": True,
+            "available": True,
+        },
+    ]
+
+
 def test_risk_report_exposes_reduce_only_discipline_contract(monkeypatch):
     risk_module = importlib.import_module("core.risk.risk_manager")
 

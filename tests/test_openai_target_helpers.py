@@ -3,7 +3,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import core.utils.openai_responses as openai_responses
-from core.utils.openai_responses import build_target_headers, openai_endpoint_targets
+from core.utils.openai_responses import build_target_headers, openai_endpoint_targets, target_max_tokens_for_request
 
 
 def test_openai_endpoint_targets_support_multiple_backup_api_keys():
@@ -59,6 +59,21 @@ def test_openai_endpoint_targets_detect_anthropic_style_backup():
         "anthropic",
     ]
     assert build_target_headers(targets[2])["api-key"] == "mimo-key"
+
+
+def test_target_max_tokens_for_request_raises_floor_for_xiaomi_anthropic_backup():
+    targets = openai_endpoint_targets(
+        primary_base_url="https://primary.test/v1",
+        backup_base_urls="https://api.xiaomimimo.com/anthropic/v1",
+        primary_api_key="primary-key",
+        backup_api_key="mimo-key",
+        primary_model="gpt-5.4",
+        backup_model="mimo-v2-pro",
+    )
+
+    assert target_max_tokens_for_request(targets[0], 220) == 220
+    assert target_max_tokens_for_request(targets[1], 220) == 384
+    assert target_max_tokens_for_request(targets[1], 420) == 420
 
 
 class _SyncResponse:

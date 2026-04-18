@@ -19,7 +19,12 @@ from core.data.coinglass_registry import (
     COINGLASS_DEFAULT_DATASETS,
     CoinglassDatasetManifest,
     CoinglassRouteSpec,
+    coinglass_pair_symbol,
+    coinglass_range_for_interval,
+    coinglass_symbol_matches,
     get_coinglass_manifest,
+    normalize_coinglass_exchange,
+    normalize_coinglass_interval,
     normalize_coinglass_symbol,
 )
 
@@ -225,6 +230,7 @@ def should_pause_coinglass_requests(error: Any) -> bool:
         or "daily_budget_exhausted" in text
         or "monthly_budget_exhausted" in text
         or "http_429" in text
+        or "code_429" in text
         or "rate_limit" in text
     )
 
@@ -391,8 +397,9 @@ def load_dataset_rows_for_symbol(dataset: str, symbol: str) -> pd.DataFrame:
         frame = frame[frame["normalized_symbol"].astype(str).str.upper() == normalized_symbol]
     if frame.empty:
         return frame
-    if "source_ts" in frame.columns:
-        frame = frame.sort_values("source_ts")
+    sort_columns = [column for column in ("ingested_at", "source_ts") if column in frame.columns]
+    if sort_columns:
+        frame = frame.sort_values(sort_columns)
     return frame.reset_index(drop=True)
 
 
@@ -486,6 +493,315 @@ def _unwrap_rows(payload: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def _coinglass_business_code(payload: Any) -> Optional[int]:
+    if not isinstance(payload, Mapping):
+        return None
+    value = payload.get("code")
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _coinglass_business_message(payload: Any) -> str:
+    if not isinstance(payload, Mapping):
+        return ""
+    for key in ("msg", "message", "error"):
+        text = str(payload.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _to_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    if pd.isna(parsed):
+        return None
+    return float(parsed)
+
+
+def _row_value(row: Mapping[str, Any], *candidates: str) -> Any:
+    lowered = {"".join(ch for ch in str(key or "").lower() if ch.isalnum()): value for key, value in dict(row or {}).items()}
+    for candidate in candidates:
+        key = "".join(ch for ch in str(candidate or "").lower() if ch.isalnum())
+        if key in lowered:
+            return lowered[key]
+    return None
+
+
+def _coalesce_float(row: Mapping[str, Any], *candidates: str) -> Optional[float]:
+    for candidate in candidates:
+        value = _to_float(_row_value(row, candidate))
+        if value is not None:
+            return value
+    return None
+
+
+def _normalize_open_interest_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    record = dict(row or {})
+    for interval_key in ("5m", "15m", "1h", "4h", "24h"):
+        source = _coalesce_float(
+            record,
+            f"open_interest_change_percent_{interval_key}",
+            f"open_interest_change_{interval_key}",
+            f"change{interval_key}",
+            f"oiChange{interval_key}",
+        )
+        if source is not None:
+            record[f"open_interest_change_{interval_key}"] = source
+    return record
+
+
+def _normalize_open_interest_history_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    record = dict(row or {})
+    open_value = _coalesce_float(record, "open", "o")
+    high_value = _coalesce_float(record, "high", "h")
+    low_value = _coalesce_float(record, "low", "l")
+    close_value = _coalesce_float(record, "close", "c")
+    if open_value is not None:
+        record["open_interest_open"] = open_value
+    if high_value is not None:
+        record["open_interest_high"] = high_value
+    if low_value is not None:
+        record["open_interest_low"] = low_value
+    if close_value is not None:
+        record["open_interest_close"] = close_value
+        record["open_interest_usd"] = close_value
+    return record
+
+
+def _normalize_funding_rate_history_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    record = dict(row or {})
+    open_value = _coalesce_float(record, "open", "o")
+    high_value = _coalesce_float(record, "high", "h")
+    low_value = _coalesce_float(record, "low", "l")
+    close_value = _coalesce_float(record, "close", "c")
+    if open_value is not None:
+        record["funding_rate_open"] = open_value
+    if high_value is not None:
+        record["funding_rate_high"] = high_value
+    if low_value is not None:
+        record["funding_rate_low"] = low_value
+    if close_value is not None:
+        record["funding_rate_close"] = close_value
+        record["funding_rate"] = close_value
+    return record
+
+
+def _normalize_taker_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    record = dict(row or {})
+    buy_volume = _coalesce_float(
+        record,
+        "taker_buy_volume",
+        "buy_volume",
+        "buyVolume",
+        "buy",
+        "buy_usd",
+        "buyUsd",
+        "buyVolUsd",
+    )
+    sell_volume = _coalesce_float(
+        record,
+        "taker_sell_volume",
+        "sell_volume",
+        "sellVolume",
+        "sell",
+        "sell_usd",
+        "sellUsd",
+        "sellVolUsd",
+    )
+    if buy_volume is not None:
+        record["taker_buy_volume"] = buy_volume
+    if sell_volume is not None:
+        record["taker_sell_volume"] = sell_volume
+    if buy_volume is not None and sell_volume is not None:
+        record["volume_usd"] = float(buy_volume + sell_volume)
+        total = buy_volume + sell_volume
+        if total > 0:
+            record["taker_buy_sell_imbalance"] = float((buy_volume - sell_volume) / total)
+    return record
+
+
+def _normalize_liquidation_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    record = dict(row or {})
+    long_liquidation = _coalesce_float(
+        record,
+        "long_liquidation_usd",
+        "longLiquidationUsd",
+        "longVolUsd",
+        "longUsd",
+        "long",
+    )
+    short_liquidation = _coalesce_float(
+        record,
+        "short_liquidation_usd",
+        "shortLiquidationUsd",
+        "shortVolUsd",
+        "shortUsd",
+        "short",
+    )
+    if long_liquidation is not None:
+        record["long_liquidation_usd"] = long_liquidation
+    if short_liquidation is not None:
+        record["short_liquidation_usd"] = short_liquidation
+    total = (long_liquidation or 0.0) + (short_liquidation or 0.0)
+    if total > 0:
+        record["liquidation_total_usd"] = total
+        record["burst_score"] = max(0.0, min(total / 50_000_000.0, 1.0))
+    return record
+
+
+def _normalize_ratio_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    record = dict(row or {})
+    long_short_ratio = _coalesce_float(
+        record,
+        "long_short_ratio",
+        "longShortRatio",
+        "global_account_long_short_ratio",
+        "globalAccountLongShortRatio",
+        "ratio",
+    )
+    if long_short_ratio is None:
+        long_account = _coalesce_float(record, "long_account", "longAccount", "longRate", "long_ratio")
+        short_account = _coalesce_float(record, "short_account", "shortAccount", "shortRate", "short_ratio")
+        if long_account is not None and short_account not in (None, 0):
+            long_short_ratio = float(long_account / short_account)
+    if long_short_ratio is not None:
+        record["long_short_ratio"] = long_short_ratio
+    return record
+
+
+def _normalize_funding_rate_rows(rows: List[Dict[str, Any]], *, requested_symbol: str) -> List[Dict[str, Any]]:
+    normalized_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        row_symbol = row.get("symbol")
+        if not coinglass_symbol_matches(requested_symbol, row_symbol):
+            continue
+        for margin_key, margin_type in (
+            ("stablecoin_margin_list", "stablecoin"),
+            ("token_margin_list", "token"),
+        ):
+            margin_rows = row.get(margin_key)
+            if not isinstance(margin_rows, list):
+                continue
+            for item in margin_rows:
+                if not isinstance(item, Mapping):
+                    continue
+                normalized = dict(item or {})
+                normalized["symbol"] = row_symbol
+                normalized["margin_type"] = margin_type
+                normalized_rows.append(normalized)
+    return normalized_rows
+
+
+def _normalize_funding_arbitrage_rows(rows: List[Dict[str, Any]], *, requested_symbol: str) -> List[Dict[str, Any]]:
+    normalized_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        if not coinglass_symbol_matches(requested_symbol, row.get("symbol")):
+            continue
+        normalized = dict(row or {})
+        buy = dict(normalized.get("buy") or {})
+        sell = dict(normalized.get("sell") or {})
+        normalized["buy_exchange"] = buy.get("exchange")
+        normalized["sell_exchange"] = sell.get("exchange")
+        normalized["buy_open_interest_usd"] = _to_float(buy.get("open_interest_usd"))
+        normalized["sell_open_interest_usd"] = _to_float(sell.get("open_interest_usd"))
+        normalized["buy_funding_rate"] = _to_float(buy.get("funding_rate"))
+        normalized["sell_funding_rate"] = _to_float(sell.get("funding_rate"))
+        funding_spread = None
+        if normalized["buy_funding_rate"] is not None and normalized["sell_funding_rate"] is not None:
+            funding_spread = float(normalized["sell_funding_rate"] - normalized["buy_funding_rate"])
+        if funding_spread is not None:
+            normalized["funding_rate_spread"] = funding_spread
+        normalized_rows.append(normalized)
+    return normalized_rows
+
+
+def normalize_dataset_response(
+    *,
+    dataset: str,
+    request_meta: Mapping[str, Any],
+    response_payload: Any,
+) -> Dict[str, Any]:
+    business_code = _coinglass_business_code(response_payload)
+    business_message = _coinglass_business_message(response_payload)
+    raw_rows = _unwrap_rows(response_payload)
+    requested_symbol = normalize_coinglass_symbol(request_meta.get("symbol"))
+
+    if business_code not in (None, 0):
+        status = "degraded" if int(business_code or 0) == 429 else "failed"
+        return {
+            "status": status,
+            "error": f"coinglass_code_{business_code}:{business_message or 'request_failed'}",
+            "rows": [],
+            "details": {
+                "response_code": business_code,
+                "response_msg": business_message,
+                "raw_rows": len(raw_rows),
+                "matched_rows": 0,
+            },
+        }
+
+    if dataset == "funding_rate_exchange_list":
+        rows = _normalize_funding_rate_rows(raw_rows, requested_symbol=requested_symbol)
+    elif dataset == "funding_arbitrage":
+        rows = _normalize_funding_arbitrage_rows(raw_rows, requested_symbol=requested_symbol)
+    else:
+        rows = []
+        for row in raw_rows:
+            if dataset in {"open_interest_exchange_list", "taker_buy_sell_volume_exchange_list"}:
+                row_symbol = row.get("symbol")
+                if row_symbol and not coinglass_symbol_matches(requested_symbol, row_symbol):
+                    continue
+            if dataset == "open_interest_exchange_list":
+                rows.append(_normalize_open_interest_row(row))
+            elif dataset == "open_interest_history":
+                rows.append(_normalize_open_interest_history_row(row))
+            elif dataset == "funding_rate_history":
+                rows.append(_normalize_funding_rate_history_row(row))
+            elif dataset == "taker_buy_sell_volume_exchange_list":
+                rows.append(_normalize_taker_row(row))
+            elif dataset == "liquidation_history":
+                rows.append(_normalize_liquidation_row(row))
+            elif dataset == "global_long_short_account_ratio_history":
+                rows.append(_normalize_ratio_row(row))
+            else:
+                rows.append(dict(row or {}))
+
+    if rows:
+        return {
+            "status": "ok",
+            "error": "",
+            "rows": rows,
+            "details": {
+                "response_code": business_code if business_code is not None else 0,
+                "response_msg": business_message,
+                "raw_rows": len(raw_rows),
+                "matched_rows": len(rows),
+            },
+        }
+
+    empty_reason = business_message or "no_rows_after_dataset_filter"
+    return {
+        "status": "empty",
+        "error": empty_reason,
+        "rows": [],
+        "details": {
+            "response_code": business_code if business_code is not None else 0,
+            "response_msg": business_message,
+            "raw_rows": len(raw_rows),
+            "matched_rows": 0,
+        },
+    }
+
+
 def persist_raw_snapshot(
     *,
     dataset: str,
@@ -534,22 +850,25 @@ def persist_normalized_rows(
     response_payload: Any,
 ) -> pd.DataFrame:
     rows = _unwrap_rows(response_payload)
-    if not rows and isinstance(response_payload, Mapping):
-        rows = [dict(response_payload)]
+    if not rows:
+        return pd.DataFrame()
     now = _utc_now()
-    normalized_symbol = normalize_coinglass_symbol(request_meta.get("symbol"))
+    requested_symbol = normalize_coinglass_symbol(request_meta.get("symbol"))
     exchange = str(request_meta.get("exchange") or "aggregate").strip() or "aggregate"
     interval = str(request_meta.get("interval") or "").strip()
     records: List[Dict[str, Any]] = []
     for row in rows:
         source_ts = _extract_source_ts(row, fallback=now)
+        row_symbol = normalize_coinglass_symbol(row.get("symbol") or requested_symbol)
         row_exchange = str(row.get("exchange") or row.get("exchange_name") or exchange or "aggregate").strip() or "aggregate"
+        row_variant = str(row.get("margin_type") or "").strip().lower()
+        canonical_exchange = row_exchange if not row_variant else f"{row_exchange}:{row_variant}"
         canonical_key = canonical_request_key(
             dataset=dataset,
             api_version=route.api_version,
             market_type=manifest.market_type,
-            normalized_symbol=normalized_symbol,
-            exchange=row_exchange,
+            normalized_symbol=row_symbol,
+            exchange=canonical_exchange,
             interval=interval,
             source_ts=source_ts.isoformat(),
         )
@@ -558,8 +877,9 @@ def persist_normalized_rows(
                 "dataset": dataset,
                 "api_version": route.api_version,
                 "market_type": manifest.market_type,
-                "normalized_symbol": normalized_symbol,
+                "normalized_symbol": row_symbol,
                 "exchange": row_exchange,
+                "row_variant": row_variant,
                 "interval": interval,
                 "request_key": str(request_meta.get("request_key") or canonical_key),
                 "canonical_key": canonical_key,
@@ -583,7 +903,7 @@ def persist_normalized_rows(
         if not existing.empty:
             frame = pd.concat([existing, frame], ignore_index=True)
     frame = frame.drop_duplicates(subset=["canonical_key"], keep="last").sort_values(
-        ["normalized_symbol", "source_ts", "exchange"], ignore_index=True
+        ["normalized_symbol", "source_ts", "exchange", "row_variant"], ignore_index=True
     )
     frame.to_parquet(path, index=False)
     return frame
@@ -693,22 +1013,45 @@ async def load_coinglass_ingest_statuses(*, symbol: Optional[str] = None) -> Lis
 
 
 def _manifest_params(
+    manifest: CoinglassDatasetManifest,
     route: CoinglassRouteSpec,
     *,
     symbol: Optional[str],
     exchange: Optional[str],
     interval: Optional[str],
     limit: Optional[int],
+    start_time: Optional[Any] = None,
+    end_time: Optional[Any] = None,
 ) -> Dict[str, Any]:
     params = dict(route.default_params or {})
+    normalized_exchange = normalize_coinglass_exchange(exchange or params.get("exchange") or "Binance")
+    normalized_interval = normalize_coinglass_interval(interval or params.get("interval") or "h4")
     if "symbol" in route.required_params:
-        params["symbol"] = normalize_coinglass_symbol(symbol)
+        if manifest.dataset in {
+            "liquidation_history",
+            "global_long_short_account_ratio_history",
+            "open_interest_history",
+            "funding_rate_history",
+            "price_history",
+        }:
+            params["symbol"] = coinglass_pair_symbol(symbol, normalized_exchange)
+        else:
+            params["symbol"] = normalize_coinglass_symbol(symbol)
     if "exchange" in route.required_params:
-        params["exchange"] = str(exchange or params.get("exchange") or "Binance").strip() or "Binance"
+        params["exchange"] = normalized_exchange
     if "interval" in route.required_params:
-        params["interval"] = str(interval or params.get("interval") or "h4").strip() or "h4"
+        if manifest.dataset == "price_history":
+            params["interval"] = str(interval or params.get("interval") or "1h").strip().lower() or "1h"
+        else:
+            params["interval"] = normalized_interval
+    if "range" in route.required_params:
+        params["range"] = coinglass_range_for_interval(interval or params.get("interval") or "h4")
     if limit is not None:
         params["limit"] = int(limit)
+    if start_time is not None:
+        params["start_time"] = start_time
+    if end_time is not None:
+        params["end_time"] = end_time
     return params
 
 
@@ -771,11 +1114,22 @@ class CoinglassClient:
         exchange: Optional[str] = None,
         interval: Optional[str] = None,
         limit: Optional[int] = None,
+        start_time: Optional[Any] = None,
+        end_time: Optional[Any] = None,
         manual: bool = False,
     ) -> Dict[str, Any]:
         last_error = ""
         for route in manifest.routes:
-            params = _manifest_params(route, symbol=symbol, exchange=exchange, interval=interval, limit=limit)
+            params = _manifest_params(
+                manifest,
+                route,
+                symbol=symbol,
+                exchange=exchange,
+                interval=interval,
+                limit=limit,
+                start_time=start_time,
+                end_time=end_time,
+            )
             try:
                 response = await self._request_json(route.path, params=params, manual=manual)
                 request_key = canonical_request_key(
@@ -831,7 +1185,7 @@ async def discover_and_persist_coinglass_capabilities(
             if manifest is None:
                 continue
             for route in manifest.routes:
-                params = _manifest_params(route, symbol="BTC", exchange="Binance", interval="h4", limit=2)
+                params = _manifest_params(manifest, route, symbol="BTC", exchange="Binance", interval="h4", limit=2)
                 try:
                     result = await client._request_json(route.path, params=params, manual=manual)
                     capabilities.append(

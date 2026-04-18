@@ -62,6 +62,8 @@ class RiskManager:
         self.max_daily_trades = 200
         self.max_open_positions = max(1, int(getattr(settings, "MAX_OPEN_POSITIONS", 100) or 100))
         self.max_leverage = 3.0
+        # Portfolio gross notional cap (all open positions combined, regardless of strategy count)
+        self.max_gross_exposure_ratio = float(getattr(settings, "MAX_GROSS_EXPOSURE_RATIO", 0.8))
         self.balance_volatility_alert_pct = 0.12
         autonomy_thresholds = self._default_autonomy_threshold_values()
         self.autonomy_daily_stop_buffer_ratio = float(
@@ -663,11 +665,25 @@ class RiskManager:
                 )
                 return False
 
+            # Portfolio gross exposure cap — prevents N strategies all longing the same asset
+            gross_cap = equity * self.max_gross_exposure_ratio
+            position_manager = _position_manager()
+            current_gross = float(sum(float(p.value or 0.0) for p in position_manager.get_all_positions()))
+            if current_gross + notional > gross_cap + epsilon:
+                self._add_alert(
+                    title="组合总敞口超限",
+                    message=(
+                        f"当前总敞口 {current_gross:.2f} + 本次 {notional:.2f} "
+                        f"将超过上限 {gross_cap:.2f} ({self.max_gross_exposure_ratio * 100:.0f}% 权益)"
+                    ),
+                    severity="critical",
+                )
+                return False
+
             if strategy_name:
                 allocation = max(0.0, min(float(strategy_allocation or 1.0), 1.0))
                 if allocation > 0:
                     allocated_capital = equity * allocation
-                    position_manager = _position_manager()
                     current_strategy_exposure = sum(
                         p.value for p in position_manager.get_positions_by_strategy(strategy_name)
                     )

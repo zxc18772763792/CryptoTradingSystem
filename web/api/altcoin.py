@@ -22,6 +22,10 @@ from config.database import (
     async_session_maker,
 )
 from core.notifications import notification_manager
+from core.data.coinglass_altcoin import (
+    build_derivatives_snapshot_from_market_snapshot,
+    load_coinglass_market_snapshots,
+)
 from core.research.altcoin_radar import (
     VALID_TIMEFRAMES,
     build_altcoin_rows,
@@ -307,6 +311,32 @@ async def _load_snapshot_maps(
     return micro, community, whale, derivatives
 
 
+def _snapshot_age_seconds(value: Any) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        ts = pd.Timestamp(value).to_pydatetime()
+    except Exception:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    else:
+        ts = ts.astimezone(timezone.utc)
+    return max(0.0, (_utcnow() - ts).total_seconds())
+
+
+def _should_overlay_coinglass_market_snapshot(snapshot: Optional[Mapping[str, Any]]) -> bool:
+    if not snapshot:
+        return True
+    capture_status = str(snapshot.get("capture_status") or "").strip().lower()
+    if capture_status and capture_status not in {"ok", "success"}:
+        return True
+    age_sec = _snapshot_age_seconds(snapshot.get("timestamp"))
+    if age_sec is None:
+        return True
+    return age_sec > 1800.0
+
+
 async def _resolve_universe(
     *,
     exchange: str,
@@ -414,6 +444,7 @@ async def _compute_scan_payload(
     timeframe: str,
     symbols: Sequence[str],
     exclude_retired: bool,
+    refresh: bool = False,
 ) -> Dict[str, Any]:
     requested_symbols, symbols_used, excluded_retired, warnings = await _resolve_universe(
         exchange=exchange,
@@ -423,7 +454,17 @@ async def _compute_scan_payload(
     )
     frames, frame_warnings = await _load_market_frames(exchange=exchange, timeframe=timeframe, symbols=symbols_used)
     warnings.extend(frame_warnings)
-    symbols_used = _normalize_symbols(frames.keys())
+    try:
+        market_snapshots = await load_coinglass_market_snapshots(
+            exchange=exchange,
+            symbols=symbols_used,
+            refresh=refresh,
+        )
+    except Exception as exc:
+        market_snapshots = {}
+        warnings.append(f"CoinGlass market snapshot unavailable: {exc}")
+
+    symbols_used = _normalize_symbols(list(frames.keys()) + list(market_snapshots.keys()))
     if not symbols_used:
         return {
             "exchange": exchange,
@@ -462,6 +503,11 @@ async def _compute_scan_payload(
         rules_task,
     )
     micro_map, community_map, whale_map, derivatives_map = snapshots
+    for symbol, snapshot in market_snapshots.items():
+        if symbol not in symbols_used:
+            continue
+        if _should_overlay_coinglass_market_snapshot(derivatives_map.get(symbol)):
+            derivatives_map[symbol] = build_derivatives_snapshot_from_market_snapshot(snapshot)
     alerted_symbols = _alerted_symbols_for_scan(
         rules,
         exchange=exchange,
@@ -478,6 +524,7 @@ async def _compute_scan_payload(
         timeframe=timeframe,
         factor_library=factor_payload,
         multi_assets=multi_payload,
+        market_snapshots=market_snapshots,
         micro_snapshots=micro_map,
         community_snapshots=community_map,
         whale_snapshots=whale_map,
@@ -551,6 +598,7 @@ async def get_altcoin_scan_snapshot(
             timeframe=normalized_timeframe,
             symbols=filtered_symbols or requested_symbols,
             exclude_retired=exclude_retired,
+            refresh=refresh,
         )
         payload["warnings"] = list(dict.fromkeys(pre_warnings + list(payload.get("warnings") or [])))
         stored_at = time.time()

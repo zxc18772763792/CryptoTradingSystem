@@ -5,13 +5,17 @@ import asyncio
 import inspect
 import json
 import secrets
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
+from config.database import Strategy as StrategyModel
+from config.database import async_session_maker
 from core.ai.ml_signal import MLSignalModel, build_feature_frame
 from core.data import data_storage
 from core.ml.pipeline import (
@@ -381,6 +385,21 @@ def _upsert_registry(model_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     return current
 
 
+def _remove_registry_model(model_id: str) -> Dict[str, Any]:
+    items = _load_registry()
+    removed = dict(items.pop(str(model_id or "").strip(), {}) or {})
+    _save_registry(items)
+    return removed
+
+
+def _path_is_within(base: Path, candidate: Path) -> bool:
+    try:
+        candidate.resolve().relative_to(base.resolve())
+        return True
+    except Exception:
+        return False
+
+
 def _resolve_model_manifest(model: Dict[str, Any], registry_entry: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     artifact = dict(model.get("artifact") or {})
     manifest = dict(artifact.get("manifest") or {})
@@ -479,6 +498,143 @@ def _load_model_from_state_or_registry(
     return {}
 
 
+def _load_model_from_all_sources(state: Any, model_id: str) -> Dict[str, Any]:
+    model = _load_model_from_state_or_registry(state, model_id, default_name=model_id, allow_create=False)
+    if model:
+        return model
+    for row in _list_models_with_artifacts(state):
+        if str(row.get("model_id") or "").strip() == str(model_id or "").strip():
+            return dict(row)
+    return {}
+
+
+def _model_reference_matches(params: Dict[str, Any], *, model_id: str, model_path: str) -> bool:
+    payload = dict(params or {})
+    candidate_id = str(payload.get("model_id") or "").strip()
+    if candidate_id and candidate_id == str(model_id or "").strip():
+        return True
+
+    resolved_expected = _resolve_existing_path(model_path)
+    resolved_candidate = _resolve_existing_path(payload.get("model_path"))
+    return bool(resolved_expected and resolved_candidate and resolved_expected == resolved_candidate)
+
+
+async def _collect_model_usages(*, model_id: str, model_path: str) -> List[Dict[str, Any]]:
+    usages: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for info in strategy_manager.list_strategies():
+        params = dict(info.get("params") or {})
+        if not _model_reference_matches(params, model_id=model_id, model_path=model_path):
+            continue
+        name = str(info.get("name") or "").strip() or "(unnamed)"
+        key = ("runtime", name)
+        if key in seen:
+            continue
+        seen.add(key)
+        usages.append(
+            {
+                "name": name,
+                "source": "runtime",
+                "state": str(info.get("state") or "unknown"),
+                "runtime_mode": str(info.get("runtime_mode") or ""),
+            }
+        )
+
+    try:
+        async with async_session_maker() as session:
+            result = await session.execute(
+                select(StrategyModel).where(StrategyModel.description == "strategy_runtime_snapshot")
+            )
+            rows = result.scalars().all()
+    except Exception:
+        rows = []
+
+    for row in rows:
+        payload = dict(row.params or {})
+        params = dict(payload.get("user_params") or {})
+        if not _model_reference_matches(params, model_id=model_id, model_path=model_path):
+            continue
+        name = str(row.name or "").strip() or "(unnamed)"
+        key = ("snapshot", name)
+        if key in seen:
+            continue
+        seen.add(key)
+        usages.append(
+            {
+                "name": name,
+                "source": "snapshot",
+                "state": str(payload.get("state") or ("running" if row.is_active else "stopped")),
+                "runtime_mode": str(payload.get("runtime_mode") or ""),
+            }
+        )
+
+    usages.sort(key=lambda item: (item.get("source") != "runtime", str(item.get("name") or "")))
+    return usages
+
+
+def _purge_model_local_artifacts(model: Dict[str, Any], registry_entry: Optional[Dict[str, Any]] = None) -> List[str]:
+    removed: List[str] = []
+    artifact = dict(model.get("artifact") or {})
+    registry_entry = dict(registry_entry or {})
+
+    factor_snapshot_path = str(
+        (model.get("factorization") or {}).get("factor_snapshot_path")
+        or registry_entry.get("factor_snapshot_path")
+        or ""
+    ).strip()
+    if factor_snapshot_path:
+        factor_path = Path(factor_snapshot_path)
+        if factor_path.exists() and _path_is_within(_FACTOR_ROOT, factor_path):
+            factor_path.unlink(missing_ok=True)
+            removed.append(str(factor_path.resolve()))
+
+    artifact_dir_candidates: List[Path] = []
+    for raw in (
+        artifact.get("artifact_dir"),
+        registry_entry.get("artifact_dir"),
+        Path(str(artifact.get("manifest_path") or "")).parent if artifact.get("manifest_path") else None,
+        Path(str(registry_entry.get("manifest_path") or "")).parent if registry_entry.get("manifest_path") else None,
+        Path(str(artifact.get("model_path") or "")).parent if artifact.get("model_path") else None,
+        Path(str(registry_entry.get("model_path") or "")).parent if registry_entry.get("model_path") else None,
+    ):
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        candidate = Path(text)
+        if candidate.exists() and candidate.is_dir() and _path_is_within(_ARTIFACT_ROOT, candidate):
+            artifact_dir_candidates.append(candidate.resolve())
+
+    for artifact_dir in artifact_dir_candidates:
+        if artifact_dir.exists():
+            shutil.rmtree(artifact_dir)
+            removed.append(str(artifact_dir))
+
+    for raw in (
+        artifact.get("manifest_path"),
+        artifact.get("model_path"),
+        registry_entry.get("manifest_path"),
+        registry_entry.get("model_path"),
+    ):
+        resolved = _resolve_existing_path(raw)
+        if not resolved:
+            continue
+        path = Path(resolved)
+        if path.exists() and path.is_file() and _path_is_within(_ARTIFACT_ROOT, path):
+            path.unlink(missing_ok=True)
+            removed.append(str(path.resolve()))
+
+    unique_removed: List[str] = []
+    seen_removed: set[str] = set()
+    for item in removed:
+        normalized = str(item or "").strip()
+        if not normalized or normalized in seen_removed:
+            continue
+        seen_removed.add(normalized)
+        unique_removed.append(normalized)
+    return unique_removed
+
+
 class _CoreMLBackend:
     async def diagnostics(self, **_: Any) -> Dict[str, Any]:
         diagnostics = diagnose_environment().to_dict()
@@ -526,6 +682,7 @@ class _CoreMLBackend:
             scale_pos_weight=float(params.get("scale_pos_weight", 0.0)),
             prediction_threshold=float(params.get("prediction_threshold", 0.55)),
             min_rows=int(params.get("min_rows", 120)),
+            fail_on_gate=False,
             feature_columns=feature_columns or None,
         )
 
@@ -1011,14 +1168,24 @@ async def _run_train_workflow(request: Request, job_id: str, payload: MLTrainReq
 
         gate = dict(result.get("gate") or {})
         metrics = dict(result.get("metrics") or {})
+        gate_passed = bool(gate.get("passed", True))
         model["gate"] = gate
         model["metrics"] = metrics
         model["factorization"] = factorization
-        model["status"] = "evaluated"
+        model["status"] = "evaluated" if gate_passed else "evaluated_gate_failed"
         model["evaluated_at"] = _now_utc().isoformat()
         _save_model(state, model)
 
-        _set_job(job, "completed", phase="completed", message="Model training completed.")
+        if gate_passed:
+            _set_job(job, "completed", phase="completed", message="Model training completed.")
+        else:
+            _set_job(
+                job,
+                "completed",
+                phase="completed",
+                message="Model training completed, but the quality gate did not pass.",
+            )
+            job["warning"] = "quality_gate_failed"
         job["result"] = {
             "model_id": model_id,
             "model": _model_snapshot(model),
@@ -1036,42 +1203,53 @@ async def _run_train_workflow(request: Request, job_id: str, payload: MLTrainReq
             model_id = str(manifest.get("model_id") or "").strip()
             if model_id:
                 archived_model = _get_or_create_model(state, model_id, default_name=payload.model_name)
+                gate_payload = {
+                    "passed": False,
+                    "reasons": list(exc.details.get("reasons") or []),
+                    "thresholds": dict(exc.details.get("thresholds") or {}),
+                }
                 archived_model.update(
                     {
-                        "status": "archived_gate_failed",
+                        "status": "evaluated_gate_failed",
                         "trained_at": _now_utc().isoformat(),
+                        "evaluated_at": _now_utc().isoformat(),
                         "symbol": _normalize_symbol(payload.symbols),
                         "timeframe": _normalize_timeframe(payload.timeframes),
                         "training_window_days": int(payload.training_window_days),
                         "parameters": dict(payload.parameters or {}),
                         "metadata": dict(payload.metadata or {}),
+                        "metrics": dict(exc.details.get("metrics") or {}),
+                        "gate": gate_payload,
                         "artifact": {
                             "artifact_dir": str(exc.details.get("artifact_dir") or ""),
                             "manifest_path": manifest_path_raw,
                             "manifest": manifest,
                             "metrics": dict(exc.details.get("metrics") or {}),
-                            "gate": {
-                                "passed": False,
-                                "reasons": list(exc.details.get("reasons") or []),
-                                "thresholds": dict(exc.details.get("thresholds") or {}),
-                            },
+                            "gate": gate_payload,
                         },
                     }
                 )
                 _save_model(state, archived_model)
+                warning = _readable_error(exc, context="ML quality gate warning")
+                _set_job(
+                    job,
+                    "completed",
+                    phase="completed",
+                    message="Model training completed, but the quality gate did not pass.",
+                    error=None,
+                )
+                job["warning"] = warning
                 job["result"] = {
                     "model_id": model_id,
                     "model": _model_snapshot(archived_model),
                     "metrics": dict(exc.details.get("metrics") or {}),
-                    "gate": {
-                        "passed": False,
-                        "reasons": list(exc.details.get("reasons") or []),
-                        "thresholds": dict(exc.details.get("thresholds") or {}),
-                    },
+                    "gate": gate_payload,
                     "manifest_path": manifest_path_raw,
                     "artifact_dir": str(exc.details.get("artifact_dir") or ""),
                     "backend": _backend_name(backend),
                 }
+                state.ml_jobs[job_id] = job
+                return _job_snapshot(job)
         error = _readable_error(exc, context="ML training failed")
         _set_job(job, "failed", phase="failed", message=error, error=error)
         state.ml_jobs[job_id] = job
@@ -1272,6 +1450,41 @@ async def list_models(request: Request) -> Dict[str, Any]:
     state = _state(request.app)
     rows = _list_models_with_artifacts(state)
     return {"ok": True, "items": rows, "count": len(rows)}
+
+
+@router.delete("/models/{model_id}")
+async def delete_model(request: Request, model_id: str) -> Dict[str, Any]:
+    _ensure_ml_state(request.app)
+    state = _state(request.app)
+    model = _load_model_from_all_sources(state, model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail=f"ML model {model_id} not found")
+
+    registry_entry = _load_registry().get(model_id) or {}
+    artifact = dict(model.get("artifact") or {})
+    resolved_model_path = _resolve_existing_path(
+        artifact.get("model_path")
+        or registry_entry.get("model_path")
+        or ((model.get("strategy_defaults") or {}).get("params") or {}).get("model_path")
+    )
+    usages = await _collect_model_usages(model_id=model_id, model_path=resolved_model_path)
+    if usages:
+        usage_names = "、".join(str(item.get("name") or "") for item in usages[:6] if item.get("name"))
+        suffix = " 等策略仍在引用" if len(usages) > 6 else " 仍在引用"
+        raise HTTPException(status_code=409, detail=f"模型正在被 {usage_names}{suffix}，请先解除引用后再删除")
+
+    removed_paths = _purge_model_local_artifacts(model, registry_entry)
+    _remove_registry_model(model_id)
+    models = dict(getattr(state, "ml_models", {}) or {})
+    models.pop(model_id, None)
+    state.ml_models = models
+    return {
+        "ok": True,
+        "deleted": True,
+        "model_id": model_id,
+        "removed_paths": removed_paths,
+        "removed_count": len(removed_paths),
+    }
 
 
 @router.post("/jobs/train")

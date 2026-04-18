@@ -39,6 +39,8 @@ def test_coinglass_strategy_filter_blocks_trend_long_in_paper(monkeypatch):
                 "squeeze_score": 0.42,
                 "distribution_score": 0.66,
                 "funding_rate": 0.0016,
+                "taker_buy_sell_imbalance": -0.09,
+                "basis_pct": 0.031,
                 "payload": {"crowding_warning": True},
             }
         ),
@@ -51,6 +53,9 @@ def test_coinglass_strategy_filter_blocks_trend_long_in_paper(monkeypatch):
     assert result["applied"] is True
     assert result["action"] == "block"
     assert result["reason"] == "coinglass_crowding_filter_long"
+    assert "crowding_score" in result["trigger_flags"]
+    assert result["snapshot"]["taker_buy_sell_imbalance"] == -0.09
+    assert result["snapshot"]["basis_pct"] == 0.031
 
 
 def test_coinglass_strategy_filter_blocks_reversal_during_squeeze_cooldown(monkeypatch):
@@ -70,7 +75,13 @@ def test_coinglass_strategy_filter_blocks_reversal_during_squeeze_cooldown(monke
                 "funding_rate": 0.0002,
                 "liquidation_short_usd": 31_000_000.0,
                 "liquidation_long_usd": 4_000_000.0,
-                "payload": {"crowding_warning": False},
+                "taker_buy_sell_imbalance": 0.12,
+                "payload": {
+                    "crowding_warning": False,
+                    "history_ready": True,
+                    "long_short_ratio_change_24h": 0.11,
+                    "order_flow_confirmed": True,
+                },
             }
         ),
     )
@@ -83,6 +94,92 @@ def test_coinglass_strategy_filter_blocks_reversal_during_squeeze_cooldown(monke
     assert result["action"] == "block"
     assert result["reason"] == "coinglass_liquidation_squeeze_cooldown"
     assert result["largest_liquidation_usd"] == 31_000_000.0
+    assert "liquidation_cooldown" in result["trigger_flags"]
+    assert "order_flow_confirmed" in result["trigger_flags"]
+
+
+def test_coinglass_strategy_filter_blocks_trend_short_when_short_side_is_crowded(monkeypatch):
+    engine = ExecutionEngine()
+    signal = _make_signal(strategy_name="TrendFollowingStrategy", signal_type=SignalType.SELL)
+
+    monkeypatch.setattr(execution_engine_module.settings, "COINGLASS_ENABLED", True, raising=False)
+    monkeypatch.setattr(execution_engine_module.settings, "COINGLASS_INCLUDE_STRATEGIES", True, raising=False)
+    monkeypatch.setattr(
+        "core.data.coinglass_feature_builder.load_latest_derivatives_snapshot",
+        AsyncMock(
+            return_value={
+                "timestamp": "2024-01-01T00:00:00Z",
+                "crowding_score": 0.44,
+                "squeeze_score": 0.54,
+                "distribution_score": 0.21,
+                "funding_rate": -0.0012,
+                "liquidation_short_usd": 19_000_000.0,
+                "liquidation_long_usd": 3_000_000.0,
+                "taker_buy_sell_imbalance": 0.14,
+                "payload": {
+                    "history_ready": True,
+                    "crowded_short": True,
+                    "squeeze_building": True,
+                    "order_flow_confirmed": True,
+                    "long_short_ratio_change_24h": -0.10,
+                },
+            }
+        ),
+    )
+
+    result = asyncio.run(engine._evaluate_coinglass_strategy_filter(signal=signal, side=OrderSide.SELL))
+
+    assert result["enabled"] is True
+    assert result["available"] is True
+    assert result["applied"] is True
+    assert result["action"] == "block"
+    assert result["reason"] == "coinglass_crowding_filter_short"
+    assert "crowded_short" in result["trigger_flags"]
+    assert "order_flow_confirmed" in result["trigger_flags"]
+    assert result["snapshot"]["long_short_ratio_change_24h"] == -0.10
+
+
+def test_coinglass_strategy_filter_blocks_reversal_long_on_flush_risk(monkeypatch):
+    engine = ExecutionEngine()
+    signal = _make_signal(strategy_name="RSIStrategy", signal_type=SignalType.BUY)
+
+    monkeypatch.setattr(execution_engine_module.settings, "COINGLASS_ENABLED", True, raising=False)
+    monkeypatch.setattr(execution_engine_module.settings, "COINGLASS_INCLUDE_STRATEGIES", True, raising=False)
+    monkeypatch.setattr(
+        "core.data.coinglass_feature_builder.load_latest_derivatives_snapshot",
+        AsyncMock(
+            return_value={
+                "timestamp": "2024-01-01T00:00:00Z",
+                "crowding_score": 0.36,
+                "squeeze_score": 0.33,
+                "distribution_score": 0.76,
+                "funding_rate": 0.0001,
+                "liquidation_short_usd": 2_500_000.0,
+                "liquidation_long_usd": 28_000_000.0,
+                "taker_buy_sell_imbalance": -0.16,
+                "basis_pct": 0.012,
+                "payload": {
+                    "history_ready": True,
+                    "flush_risk": True,
+                    "liquidation_burst_score": 0.72,
+                    "long_short_ratio_change_24h": -0.12,
+                    "order_flow_confirmed": False,
+                    "flow_divergence": True,
+                },
+            }
+        ),
+    )
+
+    result = asyncio.run(engine._evaluate_coinglass_strategy_filter(signal=signal, side=OrderSide.BUY))
+
+    assert result["enabled"] is True
+    assert result["available"] is True
+    assert result["applied"] is True
+    assert result["action"] == "block"
+    assert result["reason"] == "coinglass_liquidation_squeeze_cooldown"
+    assert "flush_risk" in result["trigger_flags"]
+    assert "ratio_flush" in result["trigger_flags"]
+    assert result["snapshot"]["liquidation_burst_score"] == 0.72
 
 
 def test_execute_signal_rejects_when_coinglass_strategy_filter_blocks(monkeypatch):

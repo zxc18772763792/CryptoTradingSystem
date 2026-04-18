@@ -137,7 +137,29 @@ def test_onchain_module_exposes_derivatives_shadow_summary(monkeypatch):
                             "freshness_sec": 180.0,
                             "active_datasets": ["funding_rate_exchange_list", "open_interest_exchange_list"],
                             "quota_headroom": {"daily_remaining": 49900},
-                            "snapshot": {"timestamp": "2026-04-18T10:02:00Z"},
+                            "snapshot": {
+                                "timestamp": "2026-04-18T10:02:00Z",
+                                "crowding_score": 0.76,
+                                "squeeze_score": 0.71,
+                                "distribution_score": 0.24,
+                                "basis_pct": 0.013,
+                                "taker_buy_sell_imbalance": 0.18,
+                                "payload": {
+                                    "history_ready": True,
+                                    "history_exchange": "Binance",
+                                    "history_interval": "h1",
+                                    "funding_mean": 0.0008,
+                                    "funding_zscore": 1.7,
+                                    "funding_reversion_speed": 0.21,
+                                    "long_short_ratio_change_24h": 0.14,
+                                    "liquidation_burst_score": 0.62,
+                                    "derivatives_heat_score": 0.83,
+                                    "crowded_long": True,
+                                    "squeeze_building": True,
+                                    "order_flow_confirmed": True,
+                                    "derivatives_labels": ["crowded_long", "squeeze_building", "order_flow_confirmed"],
+                                },
+                            },
                         },
                     }
                 ]
@@ -154,6 +176,14 @@ def test_onchain_module_exposes_derivatives_shadow_summary(monkeypatch):
     assert result["payload"]["derivatives_summary"]["provider"] == "coinglass"
     assert result["payload"]["derivatives_summary"]["quota_headroom"]["daily_remaining"] == 49900
     assert result["payload"]["derivatives_summary"]["funding_mean_rate_pct"] == 0.08
+    assert result["payload"]["derivatives_summary"]["history_ready"] is True
+    assert result["payload"]["derivatives_summary"]["history_interval"] == "h1"
+    assert result["payload"]["derivatives_summary"]["funding_zscore"] == 1.7
+    assert result["payload"]["derivatives_summary"]["derivatives_labels"] == [
+        "crowded_long",
+        "squeeze_building",
+        "order_flow_confirmed",
+    ]
 
 
 def test_premium_data_status_reports_cached_fred_macro(tmp_path, monkeypatch):

@@ -8,6 +8,7 @@ import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -31,9 +32,18 @@ from core.data import (
     second_level_backfill_manager,
     download_binance_1s_daily_archive,
 )
-from core.data.coinglass_client import load_coinglass_cached_source_snapshot
+from core.data.coinglass_altcoin import build_exchange_altcoin_universe
+from core.data.coinglass_client import (
+    CoinglassBudgetExceeded,
+    CoinglassClient,
+    CoinglassError,
+    coinglass_enabled,
+    load_coinglass_cached_source_snapshot,
+    normalize_dataset_response,
+)
 from core.data.factor_library import FACTOR_CATALOG, build_factor_library
 from core.data.coinglass_feature_builder import build_coinglass_overview_payload
+from core.data.coinglass_registry import get_coinglass_manifest
 from core.exchanges import exchange_manager
 from web.api.backtest import (
     _build_fama_backtest_components,
@@ -236,6 +246,116 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _download_task_progress_defaults() -> Dict[str, Any]:
+    return {
+        "downloaded_candles": 0,
+        "estimated_total_candles": 0,
+        "total_candles": 0,
+        "progress_pct": 0.0,
+        "pages_fetched": 0,
+        "retry_count": 0,
+        "consecutive_errors": 0,
+        "current_time": None,
+        "heartbeat_at": None,
+        "updated_at": None,
+        "last_success_at": None,
+        "last_error": "",
+        "status_message": "",
+        "progress": {
+            "downloaded_candles": 0,
+            "estimated_total_candles": 0,
+            "total_candles": 0,
+            "progress_pct": 0.0,
+            "pages_fetched": 0,
+            "retry_count": 0,
+            "consecutive_errors": 0,
+            "current_time": None,
+            "heartbeat_at": None,
+            "updated_at": None,
+            "last_success_at": None,
+            "last_error": "",
+            "status": "pending",
+            "message": "",
+            "is_complete": False,
+        },
+    }
+
+
+def _apply_download_progress(task: Dict[str, Any], progress: Any) -> None:
+    if not isinstance(task, dict) or progress is None:
+        return
+
+    progress_pct = float(getattr(progress, "progress_pct", 0.0) or 0.0)
+    progress_payload = {
+        "downloaded_candles": _safe_int(getattr(progress, "downloaded_candles", 0), 0),
+        "estimated_total_candles": _safe_int(getattr(progress, "estimated_total_candles", 0), 0),
+        "total_candles": _safe_int(getattr(progress, "total_candles", 0), 0),
+        "progress_pct": round(progress_pct, 2),
+        "pages_fetched": _safe_int(getattr(progress, "pages_fetched", 0), 0),
+        "retry_count": _safe_int(getattr(progress, "retry_count", 0), 0),
+        "consecutive_errors": _safe_int(getattr(progress, "consecutive_errors", 0), 0),
+        "current_time": _safe_iso_timestamp(getattr(progress, "current_time", None)),
+        "heartbeat_at": _safe_iso_timestamp(getattr(progress, "updated_at", None)),
+        "updated_at": _safe_iso_timestamp(getattr(progress, "updated_at", None)),
+        "last_success_at": _safe_iso_timestamp(getattr(progress, "last_success_at", None)),
+        "last_error": str(getattr(progress, "last_error", "") or "").strip(),
+        "status": str(getattr(progress, "status", "") or "").strip() or str(task.get("status") or "pending"),
+        "message": str(getattr(progress, "message", "") or "").strip(),
+        "is_complete": bool(getattr(progress, "is_complete", False)),
+        "started_at": _safe_iso_timestamp(getattr(progress, "started_at", None)),
+        "finished_at": _safe_iso_timestamp(getattr(progress, "finished_at", None)),
+    }
+
+    task["downloaded_candles"] = progress_payload["downloaded_candles"]
+    task["estimated_total_candles"] = progress_payload["estimated_total_candles"]
+    task["total_candles"] = progress_payload["total_candles"]
+    task["progress_pct"] = progress_payload["progress_pct"]
+    task["pages_fetched"] = progress_payload["pages_fetched"]
+    task["retry_count"] = progress_payload["retry_count"]
+    task["consecutive_errors"] = progress_payload["consecutive_errors"]
+    task["current_time"] = progress_payload["current_time"]
+    task["heartbeat_at"] = progress_payload["heartbeat_at"]
+    task["updated_at"] = progress_payload["updated_at"]
+    task["last_success_at"] = progress_payload["last_success_at"]
+    task["last_error"] = progress_payload["last_error"]
+    task["status_message"] = progress_payload["message"]
+    task["progress"] = progress_payload
+
+
+def _touch_download_task_progress(task: Dict[str, Any]) -> None:
+    if not isinstance(task, dict):
+        return
+    progress = task.get("progress")
+    if not isinstance(progress, dict):
+        progress = {}
+        task["progress"] = progress
+    progress["status"] = str(task.get("status") or progress.get("status") or "pending")
+    progress["message"] = str(task.get("status_message") or progress.get("message") or "")
+    progress["last_error"] = str(task.get("last_error") or progress.get("last_error") or "")
+    progress["progress_pct"] = float(task.get("progress_pct") or progress.get("progress_pct") or 0.0)
+    progress["downloaded_candles"] = _safe_int(task.get("downloaded_candles"), progress.get("downloaded_candles") or 0)
+    progress["estimated_total_candles"] = _safe_int(task.get("estimated_total_candles"), progress.get("estimated_total_candles") or 0)
+    progress["total_candles"] = _safe_int(task.get("total_candles"), progress.get("total_candles") or 0)
+    progress["pages_fetched"] = _safe_int(task.get("pages_fetched"), progress.get("pages_fetched") or 0)
+    progress["retry_count"] = _safe_int(task.get("retry_count"), progress.get("retry_count") or 0)
+    progress["consecutive_errors"] = _safe_int(task.get("consecutive_errors"), progress.get("consecutive_errors") or 0)
+    progress["current_time"] = task.get("current_time") or progress.get("current_time")
+    progress["updated_at"] = task.get("updated_at") or progress.get("updated_at")
+    progress["heartbeat_at"] = task.get("heartbeat_at") or progress.get("heartbeat_at")
+    progress["last_success_at"] = task.get("last_success_at") or progress.get("last_success_at")
+    progress["is_complete"] = str(task.get("status") or "").strip() == "completed"
+
+
+def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    try:
+        out = float(value)
+    except Exception:
+        return default
+    if not math.isfinite(out):
+        return default
+    return out
+
+
 def _load_premium_external_snapshot() -> Dict[str, Any]:
     """Load optional premium source snapshots from local cache (no remote requests)."""
     sources: Dict[str, Dict[str, Any]] = {}
@@ -372,6 +492,181 @@ def _estimate_expected_bars(start_ts: Any, end_ts: Any, timeframe: str) -> Optio
     return max(1, int(total_seconds // step_seconds) + 1)
 
 
+_COINGLASS_PRICE_HISTORY_TIMEFRAMES = {"1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d"}
+
+
+def _datetime_to_epoch_ms(value: Optional[datetime]) -> Optional[int]:
+    if value is None:
+        return None
+    current = value
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    return int(current.timestamp() * 1000)
+
+
+def _coinglass_row_float(row: Dict[str, Any], *keys: str) -> Optional[float]:
+    lowered = {"".join(ch for ch in str(key or "").lower() if ch.isalnum()): value for key, value in dict(row or {}).items()}
+    for key in keys:
+        candidate = "".join(ch for ch in str(key or "").lower() if ch.isalnum())
+        if candidate not in lowered:
+            continue
+        try:
+            value = float(lowered[candidate])
+        except Exception:
+            continue
+        if math.isfinite(value):
+            return value
+    return None
+
+
+def _coinglass_row_timestamp(row: Dict[str, Any]) -> Optional[pd.Timestamp]:
+    for key in ("t", "ts", "time", "timestamp", "date"):
+        value = row.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            if isinstance(value, (int, float)):
+                numeric = float(value)
+                if numeric > 1_000_000_000_000:
+                    numeric = numeric / 1000.0
+                ts = pd.Timestamp(datetime.fromtimestamp(numeric, tz=timezone.utc))
+            else:
+                ts = pd.Timestamp(value)
+            if pd.isna(ts):
+                continue
+            if getattr(ts, "tzinfo", None) is not None:
+                ts = ts.tz_convert(None)
+            return ts.tz_localize(None) if getattr(ts, "tzinfo", None) is not None else ts
+        except Exception:
+            continue
+    return None
+
+
+def _coinglass_rows_to_price_df(rows: List[Dict[str, Any]], start_time: datetime, end_time: datetime) -> pd.DataFrame:
+    records: List[Dict[str, Any]] = []
+    for row in rows or []:
+        ts = _coinglass_row_timestamp(row)
+        if ts is None:
+            continue
+        ts_dt = ts.to_pydatetime().replace(tzinfo=None)
+        if ts_dt < start_time or ts_dt > end_time:
+            continue
+        open_value = _coinglass_row_float(row, "open", "o")
+        high_value = _coinglass_row_float(row, "high", "h")
+        low_value = _coinglass_row_float(row, "low", "l")
+        close_value = _coinglass_row_float(row, "close", "c")
+        if None in {open_value, high_value, low_value, close_value}:
+            continue
+        volume_value = _coinglass_row_float(
+            row,
+            "volume",
+            "v",
+            "vol",
+            "base_volume",
+            "baseVolume",
+            "amount",
+            "amount_usd",
+        )
+        records.append(
+            {
+                "timestamp": ts_dt,
+                "open": float(open_value),
+                "high": float(high_value),
+                "low": float(low_value),
+                "close": float(close_value),
+                "volume": float(volume_value or 0.0),
+            }
+        )
+
+    if not records:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(records)
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"])
+    frame = frame.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp")
+    frame = frame.set_index("timestamp")
+    return frame[["open", "high", "low", "close", "volume"]]
+
+
+async def _emit_download_progress_message(
+    progress_callback: Optional[Any],
+    *,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    start_time: datetime,
+    end_time: datetime,
+    message: str,
+    status: str = "running",
+    downloaded_candles: int = 0,
+    estimated_total_candles: int = 0,
+    total_candles: int = 0,
+    progress_pct: float = 0.0,
+    pages_fetched: int = 0,
+    retry_count: int = 0,
+    consecutive_errors: int = 0,
+    current_time: Optional[datetime] = None,
+    last_success_at: Optional[datetime] = None,
+    last_error: str = "",
+    is_complete: bool = False,
+) -> None:
+    if not progress_callback:
+        return
+    now = datetime.now()
+    payload = SimpleNamespace(
+        exchange=exchange,
+        symbol=symbol,
+        timeframe=timeframe,
+        downloaded_candles=int(max(0, downloaded_candles)),
+        estimated_total_candles=int(max(0, estimated_total_candles)),
+        total_candles=int(max(0, total_candles)),
+        progress_pct=float(max(0.0, progress_pct)),
+        pages_fetched=int(max(0, pages_fetched)),
+        retry_count=int(max(0, retry_count)),
+        consecutive_errors=int(max(0, consecutive_errors)),
+        current_time=current_time or start_time,
+        updated_at=now,
+        last_success_at=last_success_at,
+        last_error=str(last_error or ""),
+        status=str(status or "running"),
+        message=str(message or ""),
+        is_complete=bool(is_complete),
+        started_at=now,
+        finished_at=now if is_complete or status in {"completed", "failed"} else None,
+    )
+    result = progress_callback(payload)
+    if asyncio.iscoroutine(result):
+        await result
+
+
+def _copy_progress_snapshot(progress: Any, **overrides: Any) -> SimpleNamespace:
+    data = {
+        "exchange": getattr(progress, "exchange", ""),
+        "symbol": getattr(progress, "symbol", ""),
+        "timeframe": getattr(progress, "timeframe", ""),
+        "downloaded_candles": getattr(progress, "downloaded_candles", 0),
+        "estimated_total_candles": getattr(progress, "estimated_total_candles", 0),
+        "total_candles": getattr(progress, "total_candles", 0),
+        "progress_pct": getattr(progress, "progress_pct", 0.0),
+        "pages_fetched": getattr(progress, "pages_fetched", 0),
+        "retry_count": getattr(progress, "retry_count", 0),
+        "consecutive_errors": getattr(progress, "consecutive_errors", 0),
+        "current_time": getattr(progress, "current_time", None),
+        "updated_at": getattr(progress, "updated_at", None),
+        "last_success_at": getattr(progress, "last_success_at", None),
+        "last_error": getattr(progress, "last_error", ""),
+        "status": getattr(progress, "status", "running"),
+        "message": getattr(progress, "message", ""),
+        "is_complete": getattr(progress, "is_complete", False),
+        "started_at": getattr(progress, "started_at", None),
+        "finished_at": getattr(progress, "finished_at", None),
+    }
+    data.update(overrides)
+    return SimpleNamespace(**data)
+
+
 def _scan_parquet_files(file_paths: List[Path]) -> Dict[str, Any]:
     rows = 0
     size_bytes = 0
@@ -448,6 +743,8 @@ def _normalize_symbol_alias(symbol: str) -> str:
     s = str(symbol or "").strip().upper()
     if s in {"MATIC/USDT", "MATICUSDT"}:
         return "POL/USDT"
+    if s in {"RNDR/USDT", "RNDRUSDT"}:
+        return "RENDER/USDT"
     return s
 
 
@@ -2529,7 +2826,9 @@ async def run_download_historical_data(
     days: int = 365,
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
+    progress_callback: Optional[Any] = None,
 ):
+    symbol = _normalize_symbol_alias(normalize_symbol(symbol) or str(symbol or "").strip())
     start_time = _normalize_query_datetime(start_time)
     end_time = _normalize_query_datetime(end_time)
     if end_time is None:
@@ -2557,6 +2856,186 @@ async def run_download_historical_data(
             "error": "没有可用的交易所连接",
             "start": start_time.isoformat(),
             "end": end_time.isoformat(),
+        }
+
+    async def _download_with_native_source(source_exchange: str) -> Dict[str, Any]:
+        estimated_total = _estimate_expected_bars(start_time, end_time, timeframe) or 0
+        await _emit_download_progress_message(
+            progress_callback,
+            exchange=exchange,
+            symbol=symbol,
+            timeframe=timeframe,
+            start_time=start_time,
+            end_time=end_time,
+            message=(
+                f"开始尝试 {source_exchange} 原生K线源"
+                if source_exchange == exchange
+                else f"{exchange} 原生下载失败，切换到 {source_exchange} K线源兜底"
+            ),
+            status="running",
+            estimated_total_candles=estimated_total,
+        )
+
+        async def _native_progress(progress: Any) -> None:
+            if not progress_callback:
+                return
+            prefix = f"数据源 {source_exchange}"
+            message = str(getattr(progress, "message", "") or "").strip()
+            proxied = _copy_progress_snapshot(
+                progress,
+                exchange=exchange,
+                message=f"{prefix} | {message}" if message else prefix,
+            )
+            result = progress_callback(proxied)
+            if asyncio.iscoroutine(result):
+                await result
+
+        klines = await historical_data_manager.download_historical_klines(
+            exchange=source_exchange,
+            symbol=symbol,
+            timeframe=timeframe,
+            start_time=start_time,
+            end_time=end_time,
+            save_to_parquet=False,
+            progress_callback=_native_progress,
+        )
+        if not klines:
+            raise RuntimeError(f"{source_exchange} 未返回有效K线")
+
+        await data_storage.save_klines_to_parquet(
+            klines,
+            exchange,
+            symbol,
+            timeframe,
+        )
+        return {
+            "exchange": exchange,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "count": len(klines),
+            "start": klines[0].timestamp.isoformat(),
+            "end": klines[-1].timestamp.isoformat(),
+            "source": "native",
+            "source_exchange": source_exchange,
+            "message": (
+                "历史K线下载完成"
+                if source_exchange == exchange
+                else f"{exchange} 原生不可用，已使用 {source_exchange} K线源补齐并写回本地"
+            ),
+        }
+
+    async def _download_with_coinglass_source(source_exchange: str) -> Dict[str, Any]:
+        if str(timeframe or "").strip().lower() not in _COINGLASS_PRICE_HISTORY_TIMEFRAMES:
+            raise RuntimeError(f"Coinglass 价格历史暂不支持 {timeframe}")
+        if not coinglass_enabled():
+            raise RuntimeError("Coinglass 未启用或缺少 API Key")
+
+        manifest = get_coinglass_manifest("price_history")
+        if manifest is None:
+            raise RuntimeError("Coinglass price_history manifest 未注册")
+
+        estimated_total = _estimate_expected_bars(start_time, end_time, timeframe) or 0
+        start_ms = _datetime_to_epoch_ms(start_time)
+        end_ms = _datetime_to_epoch_ms(end_time)
+        if start_ms is None or end_ms is None:
+            raise RuntimeError("Coinglass 时间范围无效")
+
+        all_rows: List[Dict[str, Any]] = []
+        cursor_ms = start_ms
+        pages_fetched = 0
+        last_success_at: Optional[datetime] = None
+        request_limit = max(1, min(int(settings.MAX_CANDLES_PER_REQUEST or 1000), 1000))
+
+        await _emit_download_progress_message(
+            progress_callback,
+            exchange=exchange,
+            symbol=symbol,
+            timeframe=timeframe,
+            start_time=start_time,
+            end_time=end_time,
+            message=f"Binance/Gate 原生K线失败，切换到 Coinglass {source_exchange} 价格历史",
+            status="running",
+            estimated_total_candles=estimated_total,
+        )
+
+        async with CoinglassClient() as client:
+            while cursor_ms <= end_ms:
+                pages_fetched += 1
+                response = await client.request_dataset(
+                    manifest,
+                    symbol=symbol,
+                    exchange=source_exchange,
+                    interval=timeframe,
+                    limit=request_limit,
+                    start_time=cursor_ms,
+                    end_time=end_ms,
+                    manual=False,
+                )
+                normalized = normalize_dataset_response(
+                    dataset="price_history",
+                    request_meta=response.get("params") or {},
+                    response_payload=response.get("payload"),
+                )
+                rows = list(normalized.get("rows") or [])
+                if not rows:
+                    if pages_fetched == 1:
+                        raise RuntimeError(normalized.get("error") or f"Coinglass {source_exchange} 未返回价格历史")
+                    break
+
+                all_rows.extend(rows)
+                page_df = _coinglass_rows_to_price_df(rows, start_time, end_time)
+                if page_df.empty:
+                    if pages_fetched == 1:
+                        raise RuntimeError(f"Coinglass {source_exchange} 返回了数据，但无法解析为OHLC")
+                    break
+
+                last_ts = page_df.index.max()
+                if pd.isna(last_ts):
+                    raise RuntimeError(f"Coinglass {source_exchange} 返回了空时间戳")
+                next_cursor_ms = int(last_ts.to_pydatetime().replace(tzinfo=timezone.utc).timestamp() * 1000) + 1
+                if next_cursor_ms <= cursor_ms:
+                    raise RuntimeError(f"Coinglass {source_exchange} 返回重复时间戳，下载无法推进")
+
+                cursor_ms = next_cursor_ms
+                last_success_at = datetime.now()
+                progress_pct = 0.0
+                if estimated_total > 0:
+                    progress_pct = min(99.5 if cursor_ms <= end_ms else 100.0, (len(all_rows) / estimated_total) * 100.0)
+                await _emit_download_progress_message(
+                    progress_callback,
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    start_time=start_time,
+                    end_time=end_time,
+                    message=f"Coinglass {source_exchange} 第 {pages_fetched} 页已返回 {len(page_df)} 根价格K线",
+                    status="running",
+                    downloaded_candles=len(all_rows),
+                    estimated_total_candles=estimated_total,
+                    progress_pct=progress_pct,
+                    pages_fetched=pages_fetched,
+                    current_time=last_ts.to_pydatetime().replace(tzinfo=None),
+                    last_success_at=last_success_at,
+                )
+
+                if len(rows) < request_limit or cursor_ms > end_ms:
+                    break
+
+        frame = _coinglass_rows_to_price_df(all_rows, start_time, end_time)
+        if frame.empty:
+            raise RuntimeError(f"Coinglass {source_exchange} 未返回可保存的价格K线")
+
+        await _save_df_to_parquet(exchange, symbol, timeframe, frame)
+        return {
+            "exchange": exchange,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "count": int(len(frame)),
+            "start": frame.index.min().isoformat(),
+            "end": frame.index.max().isoformat(),
+            "source": "coinglass",
+            "source_exchange": source_exchange,
+            "message": f"{exchange} 与 Gate 原生K线不可用，已使用 Coinglass {source_exchange} 价格历史补齐",
         }
 
     if timeframe in _SUB_MINUTE_TIMEFRAMES:
@@ -2633,6 +3112,7 @@ async def run_download_historical_data(
             timeframe="1d",
             start_time=start_time,
             end_time=end_time,
+            progress_callback=progress_callback,
         )
         day_df = await data_storage.load_klines_from_parquet(exchange=exchange, symbol=symbol, timeframe="1d")
         agg_df = _resample_ohlcv(day_df, timeframe)
@@ -2658,19 +3138,40 @@ async def run_download_historical_data(
             "message": "周/月线已聚合生成",
         }
 
-    klines = await historical_data_manager.download_historical_klines(
-        exchange=exchange,
-        symbol=symbol,
-        timeframe=timeframe,
-        start_time=start_time,
-        end_time=end_time,
-    )
+    source_attempts: List[str] = []
+    for candidate in [exchange, "binance", "gate"]:
+        normalized_exchange = str(candidate or "").strip().lower()
+        if not normalized_exchange or normalized_exchange in source_attempts:
+            continue
+        source_attempts.append(normalized_exchange)
 
+    source_errors: List[str] = []
+
+    for source_exchange in source_attempts:
+        if exchange_manager.get_exchange(source_exchange) is None:
+            source_errors.append(f"{source_exchange}: connector_unavailable")
+            continue
+        try:
+            return await _download_with_native_source(source_exchange)
+        except Exception as exc:
+            source_errors.append(f"{source_exchange}: {exc}")
+            logger.warning(f"native historical download failed source={source_exchange} symbol={symbol} timeframe={timeframe}: {exc}")
+
+    coinglass_errors: List[str] = []
+    for source_exchange in source_attempts:
+        try:
+            return await _download_with_coinglass_source(source_exchange)
+        except (CoinglassBudgetExceeded, CoinglassError, RuntimeError) as exc:
+            coinglass_errors.append(f"{source_exchange}: {exc}")
+            logger.warning(f"coinglass historical fallback failed source={source_exchange} symbol={symbol} timeframe={timeframe}: {exc}")
+
+    combined_errors = " | ".join(source_errors + coinglass_errors) or "unknown_download_failure"
     return {
         "exchange": exchange,
         "symbol": symbol,
         "timeframe": timeframe,
-        "count": len(klines),
+        "count": 0,
+        "error": combined_errors,
         "start": start_time.isoformat(),
         "end": end_time.isoformat(),
     }
@@ -2683,8 +3184,20 @@ async def _run_download_task(task_id: str, payload: Dict[str, Any]) -> None:
     semaphore = _get_download_task_semaphore()
     try:
         async with semaphore:
+            task["error"] = None
             task["status"] = "running"
             task["started_at"] = datetime.now(timezone.utc).isoformat()
+            task["updated_at"] = task["started_at"]
+            task["heartbeat_at"] = task["started_at"]
+            task["status_message"] = "任务已开始，正在下载历史K线"
+            _touch_download_task_progress(task)
+
+            async def _progress_callback(progress: Any) -> None:
+                live_task = _DOWNLOAD_TASKS.get(task_id)
+                if not live_task:
+                    return
+                _apply_download_progress(live_task, progress)
+
             result = await run_download_historical_data(
                 exchange=str(payload.get("exchange") or "binance"),
                 symbol=str(payload.get("symbol") or "BTC/USDT"),
@@ -2692,22 +3205,41 @@ async def _run_download_task(task_id: str, payload: Dict[str, Any]) -> None:
                 days=int(payload.get("days") or 365),
                 start_time=payload.get("start_time"),
                 end_time=payload.get("end_time"),
+                progress_callback=_progress_callback,
             )
             task["result"] = result
             result_error = ""
             if isinstance(result, dict):
                 result_error = str(result.get("error") or "").strip()
+                if result.get("count") is not None:
+                    task["total_candles"] = _safe_int(result.get("count"), task.get("total_candles") or 0)
+                    task["downloaded_candles"] = _safe_int(result.get("count"), task.get("downloaded_candles") or 0)
+                if str(result.get("message") or "").strip():
+                    task["status_message"] = str(result.get("message") or "").strip()
             if result_error:
                 task["status"] = "failed"
                 task["error"] = result_error
+                task["last_error"] = result_error
             else:
                 task["status"] = "completed"
                 task["error"] = None
+                task["progress_pct"] = 100.0
+                task["heartbeat_at"] = datetime.now(timezone.utc).isoformat()
+                task["updated_at"] = task["heartbeat_at"]
+            _touch_download_task_progress(task)
     except Exception as e:
         task["status"] = "failed"
         task["error"] = str(e)
+        task["last_error"] = str(e)
+        task["status_message"] = str(e)
+        task["updated_at"] = datetime.now(timezone.utc).isoformat()
+        task["heartbeat_at"] = task["updated_at"]
+        _touch_download_task_progress(task)
     finally:
         task["finished_at"] = datetime.now(timezone.utc).isoformat()
+        task["updated_at"] = task["finished_at"]
+        task["heartbeat_at"] = task["finished_at"]
+        _touch_download_task_progress(task)
         _prune_download_tasks()
 
 
@@ -2715,7 +3247,7 @@ def _normalize_download_symbol_list(symbols: List[str]) -> List[str]:
     out: List[str] = []
     seen: set[str] = set()
     for raw in symbols or []:
-        normalized = normalize_symbol(str(raw or "").strip())
+        normalized = _normalize_symbol_alias(normalize_symbol(str(raw or "").strip()))
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
@@ -2733,7 +3265,7 @@ def _queue_download_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         "status": "pending",
         "batch_id": str(payload.get("batch_id") or ""),
         "exchange": str(payload.get("exchange") or "binance"),
-        "symbol": str(payload.get("symbol") or "BTC/USDT"),
+        "symbol": _normalize_symbol_alias(normalize_symbol(str(payload.get("symbol") or "BTC/USDT"))),
         "timeframe": str(payload.get("timeframe") or "1h"),
         "days": int(payload.get("days") or 0),
         "start_time": start_time.isoformat() if isinstance(start_time, datetime) else (str(start_time) if start_time else None),
@@ -2744,6 +3276,9 @@ def _queue_download_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         "result": None,
         "error": None,
     }
+    task_record.update(_download_task_progress_defaults())
+    task_record["status_message"] = "任务排队中，等待下载槽位"
+    task_record["progress"]["message"] = task_record["status_message"]
     _DOWNLOAD_TASKS[task_id] = task_record
     asyncio.create_task(_run_download_task(task_id, payload))
     return task_record
@@ -3370,8 +3905,22 @@ async def get_data_symbols(exchange: str = "binance"):
 
 @router.get("/research/symbols")
 async def get_research_symbols(exchange: str = "binance"):
-    data = await get_data_symbols(exchange=exchange)
-    data["source"] = "research_universe"
+    try:
+        data = await build_exchange_altcoin_universe(exchange=exchange)
+    except Exception as exc:
+        logger.warning(f"research_symbols: coinglass altcoin universe failed: {exc}")
+        data = await get_data_symbols(exchange=exchange)
+        data["source"] = "research_universe_fallback"
+        data["warning"] = str(exc)
+        data["default_count"] = min(30, len(data.get("symbols") or []))
+        return data
+
+    if not data.get("symbols"):
+        fallback = await get_data_symbols(exchange=exchange)
+        fallback["source"] = "research_universe_fallback_empty"
+        fallback["default_count"] = min(30, len(fallback.get("symbols") or []))
+        return fallback
+
     data["default_count"] = min(30, len(data.get("symbols") or []))
     return data
 
@@ -4060,6 +4609,172 @@ def _recommend_arbitrage_action(
     return "允许开仓"
 
 
+async def _build_arbitrage_derivatives_overlay(
+    *,
+    strategy: str,
+    symbol: str,
+    pair_symbol: str = "",
+    universe_symbols: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    strategy_name = str(strategy or "").strip()
+    supported_strategies = {"PairsTradingStrategy", "FamaFactorArbitrageStrategy", "CEXArbitrageStrategy"}
+    if strategy_name not in supported_strategies:
+        return {
+            "available": False,
+            "source": "coinglass",
+            "strategy": strategy_name,
+            "sample_size": 0,
+            "monitored_symbols": [],
+            "cards": [],
+            "alerts": [],
+            "alert_count": 0,
+            "reason": "strategy_not_supported",
+        }
+    if not bool(getattr(settings, "COINGLASS_ENABLED", False)):
+        return {
+            "available": False,
+            "source": "coinglass",
+            "strategy": strategy_name,
+            "sample_size": 0,
+            "monitored_symbols": [],
+            "cards": [],
+            "alerts": [],
+            "alert_count": 0,
+            "reason": "coinglass_disabled",
+        }
+
+    raw_symbols: List[str] = [symbol, pair_symbol, *(universe_symbols or [])]
+    monitored_symbols: List[str] = []
+    seen = set()
+    for item in raw_symbols:
+        normalized = normalize_symbol(item)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        monitored_symbols.append(normalized)
+        if strategy_name == "PairsTradingStrategy" and len(monitored_symbols) >= 2:
+            break
+        if strategy_name == "CEXArbitrageStrategy" and len(monitored_symbols) >= 1:
+            break
+        if strategy_name == "FamaFactorArbitrageStrategy" and len(monitored_symbols) >= 4:
+            break
+
+    cards: List[Dict[str, Any]] = []
+    alerts: List[str] = []
+
+    def _promote_severity(current: str, target: str) -> str:
+        order = {"ok": 0, "warn": 1, "alert": 2}
+        if order.get(target, 0) > order.get(current, 0):
+            return target
+        return current
+
+    for monitored_symbol in monitored_symbols:
+        try:
+            overview = await build_coinglass_overview_payload(symbol=monitored_symbol, refresh=False, manual=False)
+        except Exception as exc:
+            cards.append(
+                {
+                    "symbol": monitored_symbol,
+                    "available": False,
+                    "tone": "unavailable",
+                    "headline": "CoinGlass 衍生品上下文缺失",
+                    "reasons": [f"读取 {monitored_symbol} 的 CoinGlass 快照失败：{_error_text(exc)}"],
+                    "labels": [],
+                    "history_ready": False,
+                    "funding_zscore": None,
+                    "basis_pct": None,
+                    "liquidation_burst_score": None,
+                    "long_short_ratio_change_24h": None,
+                }
+            )
+            continue
+
+        snapshot = dict(overview.get("snapshot") or {})
+        payload = dict(snapshot.get("payload") or {})
+        history_ready = bool(payload.get("history_ready"))
+        funding_zscore = _safe_float(payload.get("funding_zscore"))
+        basis_pct = _safe_float(snapshot.get("basis_pct"))
+        liquidation_burst_score = _safe_float(payload.get("liquidation_burst_score"))
+        long_short_ratio_change = _safe_float(payload.get("long_short_ratio_change_24h"))
+        labels = [str(item).strip() for item in list(payload.get("derivatives_labels") or []) if str(item).strip()]
+
+        reasons: List[str] = []
+        severity = "ok"
+        if not bool(overview.get("available")) or not snapshot:
+            severity = "unavailable"
+            reasons.append("尚无可用的 CoinGlass 快照，funding / basis 风险仅能依赖本地回测判断。")
+        else:
+            if not history_ready:
+                severity = _promote_severity(severity, "warn")
+                reasons.append("历史序列未就绪，Funding z-score 与回归速度信号置信度偏低。")
+            if funding_zscore is not None and abs(funding_zscore) >= 1.5:
+                severity = _promote_severity(severity, "alert" if abs(funding_zscore) >= 2.0 else "warn")
+                reasons.append(f"Funding z-score {funding_zscore:+.2f}，资金费率相对近期开出明显偏离。")
+            if basis_pct is not None and abs(basis_pct) >= 0.02:
+                severity = _promote_severity(severity, "alert" if abs(basis_pct) >= 0.03 else "warn")
+                reasons.append(f"Basis {basis_pct:+.2%}，跨腿或跨所执行需防止基差回归与滑点放大。")
+            if bool(payload.get("basis_dislocation")):
+                severity = _promote_severity(severity, "alert")
+                reasons.append("CoinGlass 已标记 basis dislocation，当前更适合降杠杆或延后执行。")
+            if bool(payload.get("crowded_long")) or bool(payload.get("crowded_short")):
+                severity = _promote_severity(severity, "warn")
+                reasons.append("持仓拥挤度抬升，套利腿可能被拥挤方向拖累。")
+            if liquidation_burst_score is not None and liquidation_burst_score >= 0.65:
+                severity = _promote_severity(severity, "warn")
+                reasons.append(f"Liquidation burst {liquidation_burst_score:.2f}，短时冲击仍偏强。")
+            if long_short_ratio_change is not None and abs(long_short_ratio_change) >= 0.08:
+                reasons.append(f"24h 多空比变化 {long_short_ratio_change:+.2%}，说明仓位偏移仍在继续。")
+            if strategy_name == "CEXArbitrageStrategy" and bool(payload.get("order_flow_confirmed")):
+                severity = _promote_severity(severity, "alert")
+                reasons.append("订单流仍在确认当前方向，跨所价差更容易被单边挤压。")
+
+        headline = (
+            "Funding / Basis 异常"
+            if severity == "alert"
+            else "Funding / Basis 风险抬升"
+            if severity == "warn"
+            else "CoinGlass 衍生品上下文缺失"
+            if severity == "unavailable"
+            else "Funding / Basis 正常"
+        )
+        cards.append(
+            {
+                "symbol": monitored_symbol,
+                "available": bool(overview.get("available")) and bool(snapshot),
+                "tone": severity,
+                "headline": headline,
+                "reasons": reasons[:4],
+                "labels": labels[:6],
+                "history_ready": history_ready,
+                "funding_zscore": funding_zscore,
+                "basis_pct": basis_pct,
+                "liquidation_burst_score": liquidation_burst_score,
+                "long_short_ratio_change_24h": long_short_ratio_change,
+            }
+        )
+        if severity in {"warn", "alert"}:
+            summary_bits: List[str] = [monitored_symbol, headline]
+            if labels:
+                summary_bits.append(",".join(labels[:2]))
+            if funding_zscore is not None and abs(funding_zscore) >= 1.5:
+                summary_bits.append(f"funding_z={funding_zscore:+.2f}")
+            if basis_pct is not None and abs(basis_pct) >= 0.02:
+                summary_bits.append(f"basis={basis_pct:+.2%}")
+            alerts.append(" | ".join(summary_bits))
+
+    return {
+        "available": any(bool(item.get("available")) for item in cards),
+        "source": "coinglass",
+        "strategy": strategy_name,
+        "sample_size": len(cards),
+        "monitored_symbols": monitored_symbols,
+        "cards": cards,
+        "alerts": alerts[:6],
+        "alert_count": len(alerts),
+        "reason": None if cards else "no_symbols_to_monitor",
+    }
+
+
 async def _load_pair_scan_series(
     exchange: str,
     timeframe: str,
@@ -4293,6 +5008,14 @@ async def get_arbitrage_readiness(
         cost_status=cost_status,
         entry_status=entry_status,
     )
+    derivatives_overlay = await _build_arbitrage_derivatives_overlay(
+        strategy=strategy_name,
+        symbol=resolved_symbol,
+        pair_symbol=str(spec.get("pair_symbol") or ""),
+        universe_symbols=list(spec.get("universe_symbols") or []),
+    )
+    gates["derivatives_alert"] = bool(derivatives_overlay.get("alert_count"))
+    gates["derivatives_notes"] = list(derivatives_overlay.get("alerts") or [])[:4]
 
     return {
         "strategy": strategy_name,
@@ -4307,6 +5030,7 @@ async def get_arbitrage_readiness(
         "entry_status": entry_status,
         "recommended_action": recommended_action,
         "gates": gates,
+        "derivatives_overlay": derivatives_overlay,
         "generated_at": _utc_iso(),
     }
 

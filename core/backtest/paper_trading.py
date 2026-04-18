@@ -24,6 +24,7 @@ class PaperTradingEngine:
         self._strategies: List[StrategyBase] = []
         self._callbacks: List[Callable] = []
         self._trade_history: List[Dict[str, Any]] = []
+        self._main_task: asyncio.Task | None = None
 
     def add_strategy(self, strategy: StrategyBase) -> None:
         """Register a strategy for simulation."""
@@ -61,11 +62,17 @@ class PaperTradingEngine:
         await execution_engine.start()
 
         logger.info(f"Paper trading started with capital: ${self._capital:,.2f}")
-        asyncio.create_task(self._main_loop())
+        self._main_task = asyncio.create_task(self._main_loop())
+        self._main_task.add_done_callback(
+            lambda t: logger.error(f"Paper trading loop exited: {t.exception()}") if not t.cancelled() and t.exception() else None
+        )
 
     async def stop(self) -> None:
         """Stop the paper trading engine."""
         self._running = False
+
+        if self._main_task and not self._main_task.done():
+            self._main_task.cancel()
 
         for strategy in self._strategies:
             strategy.stop()

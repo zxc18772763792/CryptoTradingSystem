@@ -68,11 +68,13 @@ if _NEWS_DATABASE_URL.startswith("sqlite"):
 
 # Global rate limit backoff state
 _global_rate_limit_backoff: Optional[datetime] = None
-_global_rate_limit_lock = asyncio.Lock()
+_global_rate_limit_lock: Optional[asyncio.Lock] = None
+_global_rate_limit_lock_loop: Optional[asyncio.AbstractEventLoop] = None
 
 # Per-provider rate limit backoff state
 _provider_rate_limit_backoff: Dict[str, datetime] = {}
-_provider_rate_limit_lock = asyncio.Lock()
+_provider_rate_limit_lock: Optional[asyncio.Lock] = None
+_provider_rate_limit_lock_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 SOURCE_IMPORTANCE = {
@@ -122,6 +124,34 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _get_global_rate_limit_lock() -> asyncio.Lock:
+    global _global_rate_limit_lock, _global_rate_limit_lock_loop
+    current_loop = asyncio.get_running_loop()
+    if (
+        _global_rate_limit_lock is None
+        or _global_rate_limit_lock_loop is None
+        or _global_rate_limit_lock_loop.is_closed()
+        or _global_rate_limit_lock_loop is not current_loop
+    ):
+        _global_rate_limit_lock = asyncio.Lock()
+        _global_rate_limit_lock_loop = current_loop
+    return _global_rate_limit_lock
+
+
+def _get_provider_rate_limit_lock() -> asyncio.Lock:
+    global _provider_rate_limit_lock, _provider_rate_limit_lock_loop
+    current_loop = asyncio.get_running_loop()
+    if (
+        _provider_rate_limit_lock is None
+        or _provider_rate_limit_lock_loop is None
+        or _provider_rate_limit_lock_loop.is_closed()
+        or _provider_rate_limit_lock_loop is not current_loop
+    ):
+        _provider_rate_limit_lock = asyncio.Lock()
+        _provider_rate_limit_lock_loop = current_loop
+    return _provider_rate_limit_lock
 
 
 def _utc_iso(value: Optional[datetime]) -> Optional[str]:
@@ -1605,7 +1635,7 @@ async def set_global_backoff(backoff_until: datetime) -> None:
         backoff_until: UTC datetime until which all LLM tasks should be paused
     """
     global _global_rate_limit_backoff
-    async with _global_rate_limit_lock:
+    async with _get_global_rate_limit_lock():
         _global_rate_limit_backoff = parse_any_datetime(backoff_until)
 
 
@@ -1616,7 +1646,7 @@ async def get_global_backoff() -> Optional[datetime]:
         UTC datetime until which LLM processing should be paused, or None
     """
     global _global_rate_limit_backoff
-    async with _global_rate_limit_lock:
+    async with _get_global_rate_limit_lock():
         if _global_rate_limit_backoff is None:
             return None
         # Clear expired backoff
@@ -1629,7 +1659,7 @@ async def get_global_backoff() -> Optional[datetime]:
 async def clear_global_backoff() -> None:
     """Clear the global rate limit backoff."""
     global _global_rate_limit_backoff
-    async with _global_rate_limit_lock:
+    async with _get_global_rate_limit_lock():
         _global_rate_limit_backoff = None
 
 
@@ -1641,13 +1671,13 @@ async def is_in_global_backoff() -> bool:
 
 async def set_provider_backoff(provider: str, until: datetime) -> None:
     """Set a per-provider rate limit backoff."""
-    async with _provider_rate_limit_lock:
+    async with _get_provider_rate_limit_lock():
         _provider_rate_limit_backoff[provider] = parse_any_datetime(until)
 
 
 async def get_provider_backoff(provider: str) -> Optional[datetime]:
     """Get the current per-provider rate limit backoff time."""
-    async with _provider_rate_limit_lock:
+    async with _get_provider_rate_limit_lock():
         backoff = _provider_rate_limit_backoff.get(provider)
         if backoff is None:
             return None

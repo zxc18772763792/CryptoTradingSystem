@@ -669,11 +669,20 @@
     const provider = String(ctx.provider || '').trim();
     const freshness = Number(ctx.freshness_sec);
     const datasetCount = Number(ctx.dataset_count || 0);
+    const historyReady = !!ctx.history_ready;
+    const historyInterval = String(ctx.history_interval || '').trim();
+    const historyExchange = String(ctx.history_exchange || '').trim();
+    const fundingZscore = Number(ctx.funding_zscore);
+    const labels = toArray(ctx.derivatives_labels).map((item) => String(item || '').trim()).filter(Boolean).slice(0, 3);
     const parts = [];
     if (status) parts.push(`Derivatives ${status}`);
     if (provider) parts.push(provider);
     if (Number.isFinite(freshness) && freshness >= 0) parts.push(`${Math.round(freshness)}s`);
     if (Number.isFinite(datasetCount) && datasetCount > 0) parts.push(`${datasetCount} datasets`);
+    if (historyReady) parts.push(`hist ${historyInterval || '?'}${historyExchange ? `/${historyExchange}` : ''}`);
+    else if (status) parts.push('hist incomplete');
+    if (Number.isFinite(fundingZscore)) parts.push(`z ${fundingZscore > 0 ? '+' : ''}${fundingZscore.toFixed(2)}`);
+    if (labels.length) parts.push(labels.join(','));
     return parts.join(' / ');
   }
 
@@ -4763,12 +4772,24 @@
     const derivativesCollector = Array.isArray(analyticsHistory?.collectors)
       ? analyticsHistory.collectors.find((item) => String(item?.collector || '').trim() === 'derivatives')
       : null;
+    const derivativesSnapshot = derivativesCollector?.details?.snapshot || {};
+    const derivativesPayload = derivativesSnapshot?.payload || {};
     const derivativesContext = {
       available: !!derivativesCollector?.available,
       status: String(derivativesCollector?.status || 'missing'),
       provider: String(derivativesCollector?.details?.provider || 'coinglass'),
       freshness_sec: Number(derivativesCollector?.details?.freshness_sec || 0) || null,
       dataset_count: Array.isArray(derivativesCollector?.details?.active_datasets) ? derivativesCollector.details.active_datasets.length : 0,
+      history_ready: !!derivativesPayload?.history_ready,
+      history_interval: derivativesPayload?.history_interval || null,
+      history_exchange: derivativesPayload?.history_exchange || null,
+      funding_zscore: Number(derivativesPayload?.funding_zscore),
+      long_short_ratio_change_24h: Number(derivativesPayload?.long_short_ratio_change_24h),
+      liquidation_burst_score: Number(derivativesPayload?.liquidation_burst_score),
+      crowded_long: !!derivativesPayload?.crowded_long,
+      basis_dislocation: !!derivativesPayload?.basis_dislocation,
+      order_flow_confirmed: !!derivativesPayload?.order_flow_confirmed,
+      derivatives_labels: Array.isArray(derivativesPayload?.derivatives_labels) ? derivativesPayload.derivatives_labels : [],
     };
 
     // Derive volatility hint from spread

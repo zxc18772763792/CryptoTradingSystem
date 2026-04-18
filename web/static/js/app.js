@@ -1116,8 +1116,74 @@ if(!rows.length)return'<option value="">暂无已训练模型，请先点击“�
 const selectedKey=String(selectedId||rows[0]?.model_id||'').trim();
 return rows.map(model=>{
   const modelId=String(model?.model_id||'').trim();
-  return `<option value="${esc(modelId)}" ${modelId===selectedKey?'selected':''}>${esc(mlModelLabel(model))}</option>`;
+  return `<option value="${esc(modelId)}" ${modelId===selectedKey?'selected':''}>${esc(mlModelLabel(model))}${mlModelGatePassed(model)===false?' [未过门禁]':''}</option>`;
 }).join('');
+}
+function getMlModelGate(model){
+const metricsGate=model?.metrics?.quality_gate;
+if(metricsGate&&typeof metricsGate==='object')return metricsGate;
+const gate=model?.gate;
+if(gate&&typeof gate==='object')return gate;
+return null;
+}
+function mlModelGatePassed(model){
+const gate=getMlModelGate(model);
+if(!gate||gate.passed===undefined||gate.passed===null)return null;
+return !!gate.passed;
+}
+function mlModelGateBadge(model){
+const passed=mlModelGatePassed(model);
+if(passed===false)return{label:'未过门禁',tone:'warn'};
+if(passed===true)return{label:'通过门禁',tone:'good'};
+return{label:'未评估',tone:'info'};
+}
+function mlModelStatusSummary(model){
+const metrics=model?.metrics||{};
+const auc=Number(metrics?.auc);
+const featureCount=Array.isArray(model?.feature_columns)?model.feature_columns.length:0;
+const threshold=Number(metrics?.prediction_threshold||0.55);
+return{
+  aucText:Number.isFinite(auc)?auc.toFixed(4):'--',
+  featureCount,
+  thresholdText:threshold.toFixed(2),
+};
+}
+function renderMlModelActionList(selectedId=''){
+const rows=Array.isArray(mlWorkflowState.models)?mlWorkflowState.models:[];
+if(!rows.length)return'<div class="ml-model-empty">当前还没有训练好的模型，先在左侧跑一轮训练即可。</div>';
+const selectedKey=String(selectedId||rows[0]?.model_id||'').trim();
+return rows.map(model=>{
+  const modelId=String(model?.model_id||'').trim();
+  const selected=modelId===selectedKey;
+  const badge=mlModelGateBadge(model);
+  const summary=mlModelStatusSummary(model);
+  const reasons=Array.isArray(getMlModelGate(model)?.reasons)?getMlModelGate(model).reasons.filter(Boolean):[];
+  return `
+    <article class="ml-model-item ${selected?'is-selected':''}" data-ml-model-row="${esc(modelId)}">
+      <div class="ml-model-item-main">
+        <div class="ml-model-item-top">
+          <button type="button" class="ml-model-pick-btn" data-ml-model-pick="${esc(modelId)}">${selected?'当前选择':'选用模型'}</button>
+          <span class="ml-model-gate-badge is-${esc(badge.tone)}">${esc(badge.label)}</span>
+        </div>
+        <div class="ml-model-item-title">${esc(String(model?.symbol||'BTC/USDT'))} / ${esc(String(model?.timeframe||'1h'))}</div>
+        <div class="ml-model-item-id">${esc(modelId)}</div>
+        <div class="ml-model-item-chips">
+          <span class="ml-model-chip">AUC ${esc(summary.aucText)}</span>
+          <span class="ml-model-chip">特征 ${esc(summary.featureCount)}</span>
+          <span class="ml-model-chip">阈值 ${esc(summary.thresholdText)}</span>
+        </div>
+        <div class="ml-model-item-meta">${esc(fmtDateTime(model?.updated_at||model?.created_at||''))}</div>
+        ${reasons.length?`<div class="ml-model-item-note">门禁原因：${esc(reasons.join('；'))}</div>`:''}
+      </div>
+      <button type="button" class="btn btn-danger btn-sm ml-model-delete-btn" data-ml-model-delete="${esc(modelId)}">删除</button>
+    </article>
+  `;
+}).join('');
+}
+function syncMlModelActionSelection(host=document){
+const selectedId=String(host.querySelector('#ml-model-select')?.value||'').trim();
+const listEl=host.querySelector('#ml-model-action-list');
+if(listEl)listEl.innerHTML=renderMlModelActionList(selectedId);
 }
 function updateMlRegisterModelMeta(host=document){
 const modelId=String(host.querySelector('#ml-model-select')?.value||'').trim();
@@ -1125,24 +1191,43 @@ const model=getMlModelById(modelId);
 const metaEl=host.querySelector('#ml-model-meta');
 if(!metaEl)return;
 if(!model){
-  metaEl.textContent='当前未选择模型，请先训练或刷新模型列表。';
+  metaEl.innerHTML='<div class="ml-meta-empty">当前未选择模型，请先训练或刷新模型列表。</div>';
   return;
 }
-const metrics=model?.metrics||{};
-const featureCount=Array.isArray(model?.feature_columns)?model.feature_columns.length:0;
-const threshold=Number(metrics?.prediction_threshold||0.55);
-metaEl.textContent=`${String(model.symbol||'BTC/USDT')} / ${String(model.timeframe||'1h')} / 特征 ${featureCount} 个 / 阈值 ${threshold.toFixed(2)}`;
+const badge=mlModelGateBadge(model);
+const summary=mlModelStatusSummary(model);
+const reasons=Array.isArray(getMlModelGate(model)?.reasons)?getMlModelGate(model).reasons.filter(Boolean):[];
+metaEl.innerHTML=`
+  <div class="ml-meta-stack">
+    <div class="ml-meta-row">
+      <span class="ml-meta-k">模型</span>
+      <span class="ml-meta-v">${esc(String(model.symbol||'BTC/USDT'))} / ${esc(String(model.timeframe||'1h'))}</span>
+    </div>
+    <div class="ml-meta-row">
+      <span class="ml-meta-k">状态</span>
+      <span class="ml-model-gate-badge is-${esc(badge.tone)}">${esc(badge.label)}</span>
+    </div>
+    <div class="ml-meta-grid">
+      <div class="ml-meta-pill"><span>AUC</span><strong>${esc(summary.aucText)}</strong></div>
+      <div class="ml-meta-pill"><span>特征</span><strong>${esc(summary.featureCount)}</strong></div>
+      <div class="ml-meta-pill"><span>阈值</span><strong>${esc(summary.thresholdText)}</strong></div>
+      <div class="ml-meta-pill"><span>时间</span><strong>${esc(fmtDateTime(model?.updated_at||model?.created_at||''))}</strong></div>
+    </div>
+    ${reasons.length?`<div class="ml-meta-note">门禁原因：${esc(reasons.join('；'))}</div>`:''}
+  </div>
+`;
 }
 function updateMlRegisterDraftMeta(host=document){
 const previewEl=host.querySelector('#ml-register-preview');
 if(!previewEl)return;
 const draft=collectMlRegisterDraft(host);
 const instanceName=buildStrategyInstanceName('MLXGBoostStrategy',{prefix:'ml',suffix:draft.suffix||symbolBaseAsset(draft.symbol).toLowerCase()});
+const gateBadge=mlModelGateBadge(draft.model);
 previewEl.textContent=[
   `实例预览: ${instanceName}`,
   `训练: ${draft.symbol} / ${draft.timeframe} / ${draft.trainingWindowDays} 天 / ${draft.trainParameters.feature_columns.length} 个特征`,
   `运行: 阈值 ${Number(draft.strategyParams.threshold||0.55).toFixed(2)} / 止损 ${(Number(draft.strategyParams.stop_loss_pct||0)*100).toFixed(2)}% / 止盈 ${(Number(draft.strategyParams.take_profit_pct||0)*100).toFixed(2)}% / 资金占比 ${Number(draft.allocation||0).toFixed(2)}`,
-  `模型: ${draft.modelId||'尚未选择，训练完成后可直接注册'}`,
+  `模型: ${draft.modelId||'尚未选择，训练完成后可直接注册'}${draft.model?` / ${gateBadge.label}`:''}`,
   `说明: 训练好的模型会作为“模型资产”复用，策略实例只引用模型与运行参数。`,
 ].join('\n');
 }
@@ -1151,9 +1236,60 @@ await ensureMlModelCatalog(true);
 const selectEl=host.querySelector('#ml-model-select');
 if(selectEl){
   selectEl.innerHTML=renderMlModelSelectOptions(preferredModelId);
+  const nextValue=String(preferredModelId||selectEl.value||selectEl.options[0]?.value||'').trim();
+  if(nextValue)selectEl.value=nextValue;
 }
+syncMlModelActionSelection(host);
 updateMlRegisterModelMeta(host);
 updateMlRegisterDraftMeta(host);
+}
+async function deleteMlModelFromModal(modelId,host=document){
+const id=String(modelId||'').trim();
+const model=getMlModelById(id);
+if(!id||!model)throw new Error('模型不存在或已被删除');
+if(!confirm(`确认删除模型？\n${mlModelLabel(model)}\n\n这会删除本地模型工件与参数文件。`))return false;
+const deleteBtn=[...host.querySelectorAll('[data-ml-model-delete]')].find(el=>String(el.getAttribute('data-ml-model-delete')||'').trim()===id);
+const previousText=String(deleteBtn?.textContent||'删除');
+try{
+  if(deleteBtn){deleteBtn.disabled=true;deleteBtn.textContent='删除中...';}
+  await api(`/ml/models/${encodeURIComponent(id)}`,{method:'DELETE',timeoutMs:30000});
+  if(String(mlWorkflowState.lastTrainResult?.result?.model_id||mlWorkflowState.lastTrainResult?.model_id||'').trim()===id){
+    mlWorkflowState.lastTrainResult=null;
+  }
+  const currentSelected=String(host.querySelector('#ml-model-select')?.value||'').trim();
+  const nextPreferred=currentSelected===id?'':currentSelected;
+  await refreshMlRegisterModelSelect(host,nextPreferred);
+  try{await ensureBacktestMlModelOptions(true);}catch(err){console.warn('sync backtest ml models failed',err?.message||err);}
+  notify(`已删除模型: ${id}`);
+  return true;
+}finally{
+  if(deleteBtn){deleteBtn.disabled=false;deleteBtn.textContent=previousText;}
+}
+}
+function bindMlModelActionList(host=document){
+const actionList=host.querySelector('#ml-model-action-list');
+if(!actionList||actionList.dataset.bound==='1')return;
+actionList.dataset.bound='1';
+actionList.addEventListener('click',async evt=>{
+  const pickBtn=evt.target?.closest?.('[data-ml-model-pick]');
+  if(pickBtn){
+    const modelId=String(pickBtn.getAttribute('data-ml-model-pick')||'').trim();
+    const selectEl=host.querySelector('#ml-model-select');
+    if(selectEl)selectEl.value=modelId;
+    syncMlModelActionSelection(host);
+    updateMlRegisterModelMeta(host);
+    updateMlRegisterDraftMeta(host);
+    return;
+  }
+  const deleteBtn=evt.target?.closest?.('[data-ml-model-delete]');
+  if(deleteBtn){
+    try{
+      await deleteMlModelFromModal(String(deleteBtn.getAttribute('data-ml-model-delete')||'').trim(),host);
+    }catch(err){
+      notify(`删除模型失败: ${err.message}`,true);
+    }
+  }
+ });
 }
 function collectMlRegisterDraft(host=document){
 const symbol=String(host.querySelector('#ml-train-symbol')?.value||'BTC/USDT').trim()||'BTC/USDT';
@@ -1242,8 +1378,15 @@ const metrics=resolveMlTrainResultMetrics(result);
 const gate=result?.result?.gate||result?.gate||result?.result?.model?.gate||result?.model?.gate||{};
 const aucText=Number.isFinite(Number(metrics?.auc))?Number(metrics.auc).toFixed(4):'--';
 const featureCount=resolveMlTrainResultFeatureCount(result,draft?.trainParameters?.feature_columns?.length||0);
-if(status==='completed'){
+if(status==='completed'&&gate?.passed!==false){
   return[`训练完成`,`model_id: ${modelId}`,`AUC: ${aucText}`,`特征数: ${featureCount}`].join('\n');
+}
+if(status==='completed'&&gate?.passed===false){
+  const reasons=Array.isArray(gate?.reasons)?gate.reasons.filter(Boolean):[];
+  const lines=['训练完成，但未通过质量门禁',`model_id: ${modelId}`,`AUC: ${aucText}`,`特征数: ${featureCount}`];
+  if(reasons.length)lines.push(`原因: ${reasons.join('；')}`);
+  lines.push('说明: 模型工件已保留，可继续回测、对比或手动决定是否注册。');
+  return lines.join('\n');
 }
 const reasons=Array.isArray(gate?.reasons)?gate.reasons.filter(Boolean):[];
 const lines=['训练未通过',`状态: ${status||'failed'}`,`model_id: ${modelId}`,`AUC: ${aucText}`,`特征数: ${featureCount}`];
@@ -1331,75 +1474,113 @@ const {modal,body,title}=getMlRegisterModalElements();
 if(!modal||!body)return;
 if(title)title.textContent=`${strategyType} 训练与注册`;
 modal.style.display='flex';
+body.className='ml-register-modal-body';
 body.innerHTML='<div class="list-item">正在加载 ML 模型目录与训练参数...</div>';
 await Promise.all([ensureMlModelCatalog(),ensureMlFeatureCatalog()]);
 const features=defaultMlFeatureSelection();
 body.innerHTML=`
-  <div class="form-row">
-    <div class="form-group">
-      <label>训练币种</label>
-      <select id="ml-train-symbol">${RESEARCH_DEFAULT_SYMBOLS.map(sym=>`<option value="${esc(sym)}">${esc(sym)}</option>`).join('')}</select>
+  <section class="ml-modal-hero">
+    <div>
+      <div class="ml-modal-kicker">ML Workspace</div>
+      <h4>训练模型、管理模型资产、再按结果注册策略</h4>
+      <p>左边专注训练配置，右边管理已训练模型。门禁不过不会再把整次训练视为失败，你可以继续回测、比较或删除。</p>
     </div>
-    <div class="form-group">
-      <label>训练周期</label>
-      <select id="ml-train-timeframe"><option value="15m">15m</option><option value="1h" selected>1h</option><option value="4h">4h</option><option value="1d">1d</option></select>
+    <div class="ml-modal-hero-chips">
+      <span class="ml-model-chip">模型数 ${esc((mlWorkflowState.models||[]).length)}</span>
+      <span class="ml-model-chip">特征库 ${esc((mlWorkflowState.features||[]).length)}</span>
+      <span class="ml-model-chip">策略类型 ${esc(strategyType)}</span>
     </div>
-    <div class="form-group">
-      <label>交易所</label>
-      <select id="ml-train-exchange"><option value="binance" selected>binance</option><option value="gate">gate</option></select>
+  </section>
+  <div class="ml-modal-grid">
+    <section class="ml-modal-panel">
+      <div class="ml-panel-head">
+        <div>
+          <div class="ml-panel-title">训练配置</div>
+          <div class="ml-panel-desc">选择币种、周期、样本窗口与特征组合，直接生成新的模型工件。</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>训练币种</label>
+          <select id="ml-train-symbol">${RESEARCH_DEFAULT_SYMBOLS.map(sym=>`<option value="${esc(sym)}">${esc(sym)}</option>`).join('')}</select>
+        </div>
+        <div class="form-group">
+          <label>训练周期</label>
+          <select id="ml-train-timeframe"><option value="15m">15m</option><option value="1h" selected>1h</option><option value="4h">4h</option><option value="1d">1d</option></select>
+        </div>
+        <div class="form-group">
+          <label>交易所</label>
+          <select id="ml-train-exchange"><option value="binance" selected>binance</option><option value="gate">gate</option></select>
+        </div>
+        <div class="form-group">
+          <label>训练窗口（天）</label>
+          <input id="ml-train-days" type="number" min="30" max="3650" step="1" value="365">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>forward_bars</label><input id="ml-forward-bars" type="number" min="1" max="96" step="1" value="4"></div>
+        <div class="form-group"><label>test_size</label><input id="ml-test-size" type="number" min="0.05" max="0.4" step="0.01" value="0.20"></div>
+        <div class="form-group"><label>n_estimators</label><input id="ml-n-estimators" type="number" min="50" max="2000" step="10" value="300"></div>
+        <div class="form-group"><label>max_depth</label><input id="ml-max-depth" type="number" min="2" max="12" step="1" value="5"></div>
+        <div class="form-group"><label>learning_rate</label><input id="ml-learning-rate" type="number" min="0.001" max="1" step="0.001" value="0.05"></div>
+        <div class="form-group"><label>min_rows</label><input id="ml-min-rows" type="number" min="120" max="50000" step="10" value="120"></div>
+      </div>
+      <div class="form-group">
+        <label>训练特征 / 输入信号</label>
+        <div class="ml-feature-grid">
+          ${(mlWorkflowState.features||[]).map(item=>{
+            const name=String(item?.name||'').trim();
+            return `<label class="backtest-compare-item"><input type="checkbox" data-ml-feature value="${esc(name)}" ${features.includes(name)?'checked':''}><span>${esc(String(item?.label||name))}</span></label>`;
+          }).join('')}
+        </div>
+        <div class="form-help">这些特征会真正写入训练流程，并记录到模型 manifest / metrics 中。</div>
+      </div>
+      <div class="inline-actions" style="margin-top:10px;">
+        <button type="button" class="btn btn-primary btn-sm" id="btn-ml-train-run">开始训练</button>
+        <button type="button" class="btn btn-primary btn-sm" id="btn-ml-model-refresh">刷新模型列表</button>
+      </div>
+      <pre id="ml-train-output" class="output-box ml-output-box">点击“开始训练”后，这里会展示训练结果摘要。</pre>
+    </section>
+    <section class="ml-modal-panel ml-modal-panel-side">
+      <div class="ml-panel-head">
+        <div>
+          <div class="ml-panel-title">模型资产</div>
+          <div class="ml-panel-desc">选择一个已训练模型用于注册，也可以逐个删除本地模型工件。</div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>当前选中模型</label>
+        <select id="ml-model-select">${renderMlModelSelectOptions()}</select>
+      </div>
+      <div id="ml-model-meta" class="ml-model-meta-card">选择模型后显示其符号、周期与特征信息。</div>
+      <div id="ml-model-action-list" class="ml-model-action-list">${renderMlModelActionList()}</div>
+    </section>
+  </div>
+  <section class="ml-modal-panel ml-modal-panel-bottom">
+    <div class="ml-panel-head">
+      <div>
+        <div class="ml-panel-title">注册参数</div>
+        <div class="ml-panel-desc">模型与运行参数分离管理。下面只控制阈值、止盈止损与实例命名。</div>
+      </div>
     </div>
-    <div class="form-group">
-      <label>训练窗口（天）</label>
-      <input id="ml-train-days" type="number" min="30" max="3650" step="1" value="365">
+    <div class="form-row">
+      <div class="form-group"><label>信号阈值</label><input id="ml-threshold" type="number" min="0.50" max="0.99" step="0.01" value="0.55"></div>
+      <div class="form-group"><label>止损</label><input id="ml-stop-loss" type="number" min="0" max="1" step="0.001" value="0.025"></div>
+      <div class="form-group"><label>止盈</label><input id="ml-take-profit" type="number" min="0" max="1" step="0.001" value="0.06"></div>
+      <div class="form-group"><label>资金占比</label><input id="ml-register-allocation" type="number" min="0" max="1" step="0.01" value="${DEFAULT_STRATEGY_ALLOCATION}"></div>
+      <div class="form-group"><label>实例后缀</label><input id="ml-register-suffix" type="text" placeholder="例如 btc_1h_v2"></div>
     </div>
-  </div>
-  <div class="form-row">
-    <div class="form-group"><label>forward_bars</label><input id="ml-forward-bars" type="number" min="1" max="96" step="1" value="4"></div>
-    <div class="form-group"><label>test_size</label><input id="ml-test-size" type="number" min="0.05" max="0.4" step="0.01" value="0.20"></div>
-    <div class="form-group"><label>n_estimators</label><input id="ml-n-estimators" type="number" min="50" max="2000" step="10" value="300"></div>
-    <div class="form-group"><label>max_depth</label><input id="ml-max-depth" type="number" min="2" max="12" step="1" value="5"></div>
-    <div class="form-group"><label>learning_rate</label><input id="ml-learning-rate" type="number" min="0.001" max="1" step="0.001" value="0.05"></div>
-    <div class="form-group"><label>min_rows</label><input id="ml-min-rows" type="number" min="120" max="50000" step="10" value="120"></div>
-  </div>
-  <div class="form-group">
-    <label>训练特征 / 输入信号</label>
-    <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;">
-      ${(mlWorkflowState.features||[]).map(item=>{
-        const name=String(item?.name||'').trim();
-        return `<label class="backtest-compare-item"><input type="checkbox" data-ml-feature value="${esc(name)}" ${features.includes(name)?'checked':''}><span>${esc(String(item?.label||name))}</span></label>`;
-      }).join('')}
+    <div class="inline-actions" style="margin-top:10px;">
+      <button type="button" class="btn btn-primary" id="btn-ml-register-strategy">注册到策略池</button>
     </div>
-    <div class="form-help">这些特征会真正传入训练流程，并记录到模型 manifest 中。</div>
-  </div>
-  <div class="inline-actions" style="margin-top:10px;">
-    <button type="button" class="btn btn-primary btn-sm" id="btn-ml-train-run">开始训练</button>
-    <button type="button" class="btn btn-primary btn-sm" id="btn-ml-model-refresh">刷新模型列表</button>
-  </div>
-  <pre id="ml-train-output" class="output-box">点击“开始训练”后，这里会展示训练结果摘要。</pre>
-  <div class="form-row">
-    <div class="form-group">
-      <label>选择已训练模型</label>
-      <select id="ml-model-select">${renderMlModelSelectOptions()}</select>
-    </div>
-    <div class="form-group">
-      <label>模型摘要</label>
-      <div id="ml-model-meta" class="form-help">选择模型后显示其符号、周期与特征信息。</div>
-    </div>
-  </div>
-  <div class="form-row">
-    <div class="form-group"><label>信号阈值</label><input id="ml-threshold" type="number" min="0.50" max="0.99" step="0.01" value="0.55"></div>
-    <div class="form-group"><label>止损</label><input id="ml-stop-loss" type="number" min="0" max="1" step="0.001" value="0.025"></div>
-    <div class="form-group"><label>止盈</label><input id="ml-take-profit" type="number" min="0" max="1" step="0.001" value="0.06"></div>
-    <div class="form-group"><label>资金占比</label><input id="ml-register-allocation" type="number" min="0" max="1" step="0.01" value="${DEFAULT_STRATEGY_ALLOCATION}"></div>
-    <div class="form-group"><label>实例后缀</label><input id="ml-register-suffix" type="text" placeholder="例如 btc_1h_v2"></div>
-  </div>
-  <div class="inline-actions" style="margin-top:10px;">
-    <button type="button" class="btn btn-primary" id="btn-ml-register-strategy">注册到策略池</button>
-  </div>
-  <pre id="ml-register-preview" class="output-box">实例预览加载中...</pre>
+    <pre id="ml-register-preview" class="output-box ml-output-box">实例预览加载中...</pre>
+  </section>
 `;
-body.querySelector('#ml-model-select')?.addEventListener('change',()=>updateMlRegisterModelMeta(body));
-body.querySelector('#ml-model-select')?.addEventListener('change',()=>updateMlRegisterDraftMeta(body));
+body.querySelector('#ml-model-select')?.addEventListener('change',()=>{
+  syncMlModelActionSelection(body);
+  updateMlRegisterModelMeta(body);
+  updateMlRegisterDraftMeta(body);
+});
 body.querySelectorAll('input,select').forEach(el=>{
   if(String(el.id||'').startsWith('ml-'))el.addEventListener('change',()=>updateMlRegisterDraftMeta(body));
 });
@@ -1411,8 +1592,10 @@ body.querySelector('#btn-ml-train-run')?.addEventListener('click',async()=>{
   try{
     if(btn){btn.disabled=true;btn.textContent='训练中...';}
     const result=await trainMlModelFromModal(body);
-    if(String(result?.status||'').trim()==='completed')notify('ML 模型训练完成');
-    else notify('ML 训练未通过质量门禁，请调整训练窗口、特征或参数后重试',true);
+    const gate=result?.result?.gate||result?.gate||{};
+    if(String(result?.status||'').trim()==='completed'&&gate?.passed===false)notify('ML 训练已完成，但未通过质量门禁；模型已保留，可继续回测或删除',true);
+    else if(String(result?.status||'').trim()==='completed')notify('ML 模型训练完成');
+    else notify('ML 训练未完成，请检查返回结果',true);
   }catch(err){notify(`ML 训练失败: ${err.message}`,true);}
   finally{if(btn){btn.disabled=false;btn.textContent='开始训练';}}
 });
@@ -1424,7 +1607,9 @@ body.querySelector('#btn-ml-register-strategy')?.addEventListener('click',async(
   }catch(err){notify(`ML 策略注册失败: ${err.message}`,true);}
   finally{if(btn){btn.disabled=false;btn.textContent='注册到策略池';}}
 });
+bindMlModelActionList(body);
 bindMlNumericInputs(body);
+syncMlModelActionSelection(body);
 updateMlRegisterModelMeta(body);
 updateMlRegisterDraftMeta(body);
 }
@@ -3078,31 +3263,90 @@ if(symbols.length)renderResearchSymbolSelects(symbols);
 renderResearchStatusCards();
 }catch(e){console.warn('loadResearchSymbolOptions failed',e?.message||e);}
 }
-async function pollDownloadTask(taskId,{timeoutMs=12*60*1000,intervalMs=2500}={}){
+function mapDownloadTaskStatus(status){
+const key=String(status||'').trim().toLowerCase();
+return({pending:'排队中',running:'下载中',completed:'已完成',failed:'失败',cancelled:'已取消'}[key]||'处理中');
+}
+function formatDownloadProgressText(task){
+const pct=Number(task?.progress_pct??task?.progress?.progress_pct);
+return Number.isFinite(pct)&&pct>0?`${pct>=100?pct.toFixed(0):pct.toFixed(1)}%`:'--';
+}
+function formatDownloadTaskLine(task){
+const symbol=String(task?.symbol||task?.task_id||'-').trim()||'-';
+const statusText=mapDownloadTaskStatus(task?.status);
+const pctText=formatDownloadProgressText(task);
+const downloaded=Number(task?.downloaded_candles??task?.progress?.downloaded_candles??task?.result?.count??0);
+const estimated=Number(task?.estimated_total_candles??task?.progress?.estimated_total_candles??0);
+const total=Number(task?.total_candles??task?.progress?.total_candles??task?.result?.count??0);
+const countText=estimated>0
+  ?`${downloaded.toLocaleString('zh-CN')} / ${estimated.toLocaleString('zh-CN')}`
+  :(Math.max(downloaded,total)).toLocaleString('zh-CN');
+const cursor=task?.current_time?fmtDateTime(task.current_time):'--';
+const retries=Math.max(Number(task?.retry_count||task?.progress?.retry_count||0),0);
+const msg=String(task?.status_message||task?.progress?.message||'').trim();
+const err=String(task?.error||task?.last_error||task?.progress?.last_error||'').trim();
+const extras=[
+  `进度 ${pctText}`,
+  `K线 ${countText}`,
+  cursor!=='--'?`游标 ${cursor}`:'',
+  retries>0?`重试 ${retries}`:'',
+  msg,
+  err&&err!==msg?`错误 ${err}`:'',
+].filter(Boolean);
+return `${statusText} ${symbol}${extras.length?` | ${extras.join(' | ')}`:''}`;
+}
+function formatSingleDownloadTaskSummary(task,fallback={}){
+const statusText=mapDownloadTaskStatus(task?.status);
+const symbol=task?.symbol||fallback?.symbol||'-';
+const timeframe=task?.timeframe||fallback?.timeframe||'-';
+const count=Number(task?.result?.count??task?.total_candles??task?.downloaded_candles??0);
+const start=task?.result?.start||task?.start_time||fallback?.start_time||'-';
+const end=task?.result?.end||task?.end_time||fallback?.end_time||'现在';
+const lines=[
+  `历史下载任务`,
+  `状态: ${statusText}`,
+  `交易对: ${symbol}`,
+  `周期: ${timeframe}`,
+  `K线数量: ${count.toLocaleString('zh-CN')}`,
+  `范围: ${start} -> ${end}`,
+];
+const detailLine=formatDownloadTaskLine(task);
+if(detailLine)lines.push(detailLine);
+return lines.join('\n');
+}
+async function pollDownloadTask(taskId,{timeoutMs=12*60*1000,intervalMs=2500,onUpdate=null}={}){
 const start=Date.now();
+let lastTask=null;
 while(Date.now()-start<timeoutMs){
 const task=await api(`/data/download/tasks/${encodeURIComponent(taskId)}`,{timeoutMs:15000});
+lastTask=task||lastTask;
+if(typeof onUpdate==='function')onUpdate(task||null);
 if(task?.status==='completed')return task;
-if(task?.status==='failed')throw new Error(task?.error||'后台下载失败');
+if(task?.status==='failed')throw new Error(task?.error||task?.last_error||task?.status_message||'后台下载失败');
 await new Promise(r=>setTimeout(r,intervalMs));
 }
-throw new Error(`后台下载超时: ${taskId}`);
+const timeoutDetail=lastTask?`${lastTask?.symbol||taskId} ${mapDownloadTaskStatus(lastTask?.status)}${lastTask?.status_message?`：${lastTask.status_message}`:''}`:taskId;
+throw new Error(`后台下载超时: ${timeoutDetail}`);
 }
-async function pollBatchDownloadTasks(taskIds,{timeoutMs=25*60*1000,intervalMs=3000}={}){
+async function pollBatchDownloadTasks(taskIds,{timeoutMs=25*60*1000,intervalMs=3000,onUpdate=null}={}){
 const ids=Array.from(new Set((Array.isArray(taskIds)?taskIds:[]).map(v=>String(v||'').trim()).filter(Boolean)));
 if(!ids.length)return[];
 const start=Date.now();
+let lastTasks=[];
 while(Date.now()-start<timeoutMs){
   const resp=await api(`/data/download/tasks?task_ids=${encodeURIComponent(ids.join(','))}`,{timeoutMs:15000});
   const tasks=Array.isArray(resp?.tasks)?resp.tasks:[];
   const taskMap=new Map(tasks.map(task=>[String(task?.task_id||'').trim(),task]));
   const matched=ids.map(id=>taskMap.get(id)).filter(Boolean);
+  if(matched.length)lastTasks=matched;
+  if(typeof onUpdate==='function')onUpdate(matched,resp||null);
   if(matched.length===ids.length&&matched.every(task=>['completed','failed'].includes(String(task?.status||'')))){
     return ids.map(id=>taskMap.get(id)).filter(Boolean);
   }
   await new Promise(r=>setTimeout(r,intervalMs));
 }
-throw new Error(`批量下载超时: ${ids.length} 个任务`);
+const lastSummary=lastTasks.length?lastTasks.map(task=>`${task?.symbol||task?.task_id}:${mapDownloadTaskStatus(task?.status)}`).join(' / '):`${ids.length} 个任务`;
+throw new Error(`批量下载超时: ${lastSummary}`);
 }
 function getDownloadOutputEl(){return document.getElementById('download-output');}
 function getResearchRefreshStatusEl(){return document.getElementById('download-research-refresh-status');}
@@ -3188,16 +3432,20 @@ return Math.max(1,Math.min(1200,manualDays));
 function formatDownloadBatchSummary(payload,tasks=[]){
 const symbols=Array.isArray(payload?.symbols)?payload.symbols:[];
 const taskRows=Array.isArray(tasks)?tasks:[];
+const pending=taskRows.filter(task=>String(task?.status||'')==='pending');
+const running=taskRows.filter(task=>String(task?.status||'')==='running');
 const completed=taskRows.filter(task=>String(task?.status||'')==='completed');
 const failed=taskRows.filter(task=>String(task?.status||'')==='failed');
 const totalCount=completed.reduce((sum,task)=>sum+Number(task?.result?.count||0),0);
+const detailLines=taskRows.length?taskRows.map(task=>formatDownloadTaskLine(task)).join('\n'):'任务明细: 暂无';
 return [
   `批量下载: ${payload?.exchange||'-'} / ${payload?.timeframe||'-'}`,
   `时间范围: ${(payload?.start_time||'未指定')} -> ${(payload?.end_time||'现在')}`,
   `币种数量: ${symbols.length}`,
-  `任务结果: 完成 ${completed.length} / 失败 ${failed.length}`,
+  `任务结果: 排队 ${pending.length} / 下载中 ${running.length} / 完成 ${completed.length} / 失败 ${failed.length}`,
   `累计K线: ${Number(totalCount||0).toLocaleString('zh-CN')}`,
   `${symbols.length?`Symbols: ${symbols.join(', ')}`:'Symbols: -'}`,
+  detailLines,
   `${failed.length?`失败详情: ${failed.map(task=>`${task.symbol||task.task_id}: ${task.error||'unknown error'}`).join(' | ')}`:'失败详情: 无'}`,
 ].join('\n');
 }
@@ -3757,9 +4005,24 @@ if(d)d.onsubmit=async e=>{
       if(r?.task_id){
         if(downloadOut)downloadOut.textContent=`后台下载已启动\nTask: ${r.task_id}\n交易对: ${batchSymbols[0]||s}\n时间范围: ${range.start_time||'未指定'} -> ${range.end_time||'现在'}`;
         notify(`后台下载已启动: ${r.task_id}`);
-        const task=await pollDownloadTask(r.task_id);
+        const task=await pollDownloadTask(r.task_id,{
+          onUpdate:(liveTask)=>{
+            if(!downloadOut||!liveTask)return;
+            downloadOut.textContent=formatSingleDownloadTaskSummary(liveTask,{
+              symbol:batchSymbols[0]||s,
+              timeframe:tf,
+              start_time:range.start_time||'未指定',
+              end_time:range.end_time||'现在',
+            });
+          },
+        });
         const count=Number(task?.result?.count||0);
-        if(downloadOut)downloadOut.textContent=`下载完成\n交易对: ${task?.symbol||batchSymbols[0]||s}\n周期: ${task?.timeframe||tf}\nK线数量: ${count.toLocaleString('zh-CN')}\n范围: ${task?.result?.start||range.start_time||'-'} -> ${task?.result?.end||range.end_time||'现在'}`;
+        if(downloadOut)downloadOut.textContent=formatSingleDownloadTaskSummary(task,{
+          symbol:batchSymbols[0]||s,
+          timeframe:tf,
+          start_time:range.start_time||'未指定',
+          end_time:range.end_time||'现在',
+        });
         notify(`下载完成: ${count} 根K线`);
         if(document.getElementById('data-exchange')?.value===ex&&document.getElementById('data-symbol')?.value===(batchSymbols[0]||s)&&document.getElementById('data-timeframe')?.value===tf){loadKlinesByForm().catch(()=>{});}
         return;
@@ -3788,7 +4051,11 @@ if(d)d.onsubmit=async e=>{
       `Task IDs: ${(Array.isArray(r?.task_ids)?r.task_ids:[]).join(', ')}`
     ].join('\n');
     notify(`批量下载已排队: ${Number(r?.task_count||0)} 个任务`);
-    const tasks=await pollBatchDownloadTasks(Array.isArray(r?.task_ids)?r.task_ids:[]);
+    const tasks=await pollBatchDownloadTasks(Array.isArray(r?.task_ids)?r.task_ids:[],{
+      onUpdate:(liveTasks)=>{
+        if(downloadOut)downloadOut.textContent=formatDownloadBatchSummary(r,liveTasks);
+      },
+    });
     if(downloadOut)downloadOut.textContent=formatDownloadBatchSummary(r,tasks);
     const completed=tasks.filter(task=>String(task?.status||'')==='completed').length;
     const failed=tasks.filter(task=>String(task?.status||'')==='failed').length;
@@ -5365,7 +5632,7 @@ return({
 }
 function formatArbitragePercent(value,digits=2){
 const num=Number(value);
-return Number.isFinite(num)?`${(num*100).toFixed(digits)}%`:'--';
+return Number.isFinite(num)?`${num.toFixed(digits)}%`:'--';
 }
 function formatArbitrageNumber(value,digits=2){
 const num=Number(value);

@@ -202,6 +202,75 @@ def test_update_runtime_config_roundtrip():
     assert updated["apply_in_paper"] is True
 
 
+def test_live_decision_router_raises_xiaomi_anthropic_token_budget(monkeypatch):
+    import core.ai.live_decision_router as module
+
+    capture = {}
+
+    class _FakeResponse:
+        status = 200
+        headers = {"content-type": "application/json"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def json(self):
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": '{"action":"allow","reason":"xiaomi_backup","confidence":0.88}',
+                    }
+                ]
+            }
+
+        async def text(self):
+            return ""
+
+    class _FakeSession:
+        def __init__(self, **kwargs):
+            capture["session_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, *, headers=None, json=None):
+            capture["url"] = url
+            capture["headers"] = headers
+            capture["json"] = json
+            return _FakeResponse()
+
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://api.xiaomimimo.com/anthropic/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "mimo-key", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "mimo-v2-pro", raising=False)
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda **kwargs: _FakeSession(**kwargs))
+
+    router = module.LiveAIDecisionRouter()
+    result = asyncio.run(
+        router._call_provider(
+            provider="codex",
+            model="mimo-v2-pro",
+            timeout_ms=5000,
+            max_tokens=220,
+            temperature=0.0,
+            system_prompt="sys",
+            user_prompt="usr",
+        )
+    )
+
+    assert result["action"] == "allow"
+    assert capture["url"] == "https://api.xiaomimimo.com/anthropic/v1/messages"
+    assert capture["json"]["max_tokens"] == 384
+
+
 # ── Step 4 回归：运行时配置持久化 ────────────────────────────────────────────
 
 def test_runtime_config_persists_to_overlay(tmp_path, monkeypatch):

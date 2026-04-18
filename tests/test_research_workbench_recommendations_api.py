@@ -62,6 +62,12 @@ def test_workbench_recommendations_return_structured_actions_and_ai_brief():
                         "freshness_sec": 180.0,
                         "dataset_count": 2,
                         "funding_mean_rate_pct": 0.08,
+                        "history_ready": True,
+                        "history_interval": "h1",
+                        "funding_zscore": 1.7,
+                        "crowded_long": True,
+                        "order_flow_confirmed": True,
+                        "derivatives_labels": ["crowded_long", "order_flow_confirmed"],
                     },
                 }
             },
@@ -92,9 +98,15 @@ def test_workbench_recommendations_return_structured_actions_and_ai_brief():
     assert data["ai_brief"]["derivatives_context"]["available"] is True
     assert data["ai_brief"]["derivatives_context"]["provider"] == "coinglass"
     assert data["ai_brief"]["derivatives_context"]["freshness_sec"] == 180.0
+    assert data["ai_brief"]["derivatives_context"]["history_ready"] is True
+    assert data["ai_brief"]["derivatives_context"]["history_interval"] == "h1"
+    assert data["ai_brief"]["derivatives_context"]["funding_zscore"] == 1.7
     assert "Derivatives shadow: ok / coinglass / 2 datasets" in data["ai_brief"]["prompt_context"]
-    assert any("Derivatives shadow: coinglass / ok / 2 datasets." == item for item in data["ai_brief"]["thesis"])
+    assert any("Derivatives" in item for item in data["ai_brief"]["thesis"])
+    assert any("Derivatives funding z-score: +1.70." == item for item in data["ai_brief"]["thesis"])
+    assert any("Order flow is confirming" in item for item in data["ai_brief"]["thesis"])
     assert any("funding and crowding" in item for item in data["ai_brief"]["next_steps"])
+    assert any("open interest continue to confirm the squeeze setup" in item for item in data["ai_brief"]["next_steps"])
     assert data["source_meta"]["served_mode"] == "unknown"
     assert data["source_meta"]["universe_size"] == 0
     assert any(item["kind"] == "ai_prefill" for item in data["action_items"])

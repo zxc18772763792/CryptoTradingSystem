@@ -37,6 +37,7 @@ from core.utils.openai_responses import (
     responses_endpoint,
     responses_api_unavailable,
     should_failover_openai_status,
+    target_max_tokens_for_request,
     target_transport,
 )
 
@@ -243,10 +244,27 @@ class LiveAIDecisionRouter:
         for item in sorted(_SUPPORTED_PROVIDERS):
             targets = self._provider_endpoint_targets(item)
             base_urls = [str(target.get("base_url") or "").rstrip("/") for target in targets if str(target.get("base_url") or "").strip()]
+            exposed_targets: list[Dict[str, Any]] = []
+            default_model = self._provider_model(item)
+            for order, target in enumerate(targets, start=1):
+                base_url = str(target.get("base_url") or "").rstrip("/")
+                if not base_url:
+                    continue
+                exposed_targets.append(
+                    {
+                        "order": order,
+                        "base_url": base_url,
+                        "model": str(target.get("model") or default_model or "").strip() or default_model,
+                        "transport": str(target.get("transport") or "openai").strip().lower() or "openai",
+                        "is_backup": bool(target.get("is_backup")),
+                        "available": bool(str(target.get("api_key") or "").strip()),
+                    }
+                )
             providers[item] = {
                 "available": any(bool(str(target.get("api_key") or "").strip()) for target in targets),
-                "default_model": self._provider_model(item),
+                "default_model": default_model,
                 "base_url": (base_urls[0] if base_urls else self._provider_base_url(item)),
+                "targets": exposed_targets,
             }
             providers[item].update(provider_runtime_capability_catalog(item))
             if item == "codex" and len(base_urls) > 1:
@@ -429,7 +447,11 @@ class LiveAIDecisionRouter:
                     try:
                         request_payload = dict(payload, model=target_model)
                         request_chat_payload = dict(chat_payload, model=target_model)
-                        request_anthropic_payload = dict(anthropic_payload, model=target_model)
+                        request_anthropic_payload = dict(
+                            anthropic_payload,
+                            model=target_model,
+                            max_tokens=target_max_tokens_for_request(target, max_tokens),
+                        )
                         if transport == "anthropic":
                             url = anthropic_messages_endpoint(target_base_url)
                             async with session.post(url, headers=headers, json=request_anthropic_payload) as resp:

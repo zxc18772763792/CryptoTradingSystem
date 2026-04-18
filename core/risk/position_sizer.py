@@ -97,13 +97,13 @@ class PositionSizer:
         **kwargs,
     ) -> float:
         """风险平价仓位"""
-        if not volatility:
-            # 如果没有波动率，使用默认比例
+        if not volatility or volatility < 1e-6:
+            # 如果没有波动率或波动率极小，使用默认比例
             return self._percent_sizing(account_balance, entry_price, **kwargs)
 
         # 根据波动率调整仓位
         # 目标是使每个仓位的波动风险相同
-        position_value = (account_balance * target_risk) / volatility
+        position_value = (account_balance * target_risk) / max(volatility, 1e-6)
         return position_value / entry_price
 
     def _kelly_sizing(

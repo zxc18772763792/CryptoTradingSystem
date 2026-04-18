@@ -92,6 +92,10 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "loadAutoResearchRecommendation" in ai_js
     assert "ensureAutoPlannerGoal" in ai_js
     assert "function formatDerivativesContextLine(derivativesContext)" in ai_js
+    assert "history_ready: !!derivativesPayload?.history_ready" in ai_js
+    assert "funding_zscore: Number(derivativesPayload?.funding_zscore)" in ai_js
+    assert "derivatives_labels: Array.isArray(derivativesPayload?.derivatives_labels)" in ai_js
+    assert "hist ${historyInterval || '?'}" in ai_js
     assert "AI_PLANNER_GOAL_MAX_CHARS = 600" in ai_js
     assert "function clampPlannerGoalText(" in ai_js
     assert "function resolveAutoPlannerGoal(" in ai_js

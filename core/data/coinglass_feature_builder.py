@@ -23,6 +23,7 @@ from core.data.coinglass_client import (
     get_coinglass_budget_state,
     load_coinglass_ingest_statuses,
     load_dataset_rows_for_symbol,
+    normalize_dataset_response,
     persist_normalized_rows,
     persist_raw_snapshot,
     persist_symbol_registry,
@@ -31,7 +32,8 @@ from core.data.coinglass_client import (
 )
 from core.data.coinglass_registry import (
     COINGLASS_DEFAULT_DATASETS,
-    COINGLASS_DATASET_MANIFESTS,
+    coinglass_symbol_matches,
+    normalize_coinglass_exchange,
     get_coinglass_manifest,
     normalize_coinglass_symbol,
 )
@@ -187,7 +189,14 @@ def _latest_payload_rows(dataset: str, symbol: str) -> List[Dict[str, Any]]:
     frame = load_dataset_rows_for_symbol(dataset, symbol)
     if frame.empty:
         return []
-    latest_request_key = str(frame.iloc[-1].get("request_key") or "")
+    latest_request_key = ""
+    if "ingested_at" in frame.columns:
+        ingested = pd.to_datetime(frame["ingested_at"], utc=True, errors="coerce")
+        if not ingested.dropna().empty:
+            latest_idx = ingested.fillna(pd.Timestamp.min.tz_localize("UTC")).idxmax()
+            latest_request_key = str(frame.loc[latest_idx].get("request_key") or "")
+    if not latest_request_key:
+        latest_request_key = str(frame.iloc[-1].get("request_key") or "")
     if latest_request_key:
         frame = frame[frame["request_key"].astype(str) == latest_request_key]
     rows: List[Dict[str, Any]] = []
@@ -195,8 +204,12 @@ def _latest_payload_rows(dataset: str, symbol: str) -> List[Dict[str, Any]]:
         payload = _parse_payload_json(row.get("payload_json"))
         if not payload:
             continue
+        payload_symbol = payload.get("symbol")
+        if payload_symbol and not coinglass_symbol_matches(symbol, payload_symbol):
+            continue
         payload["_source_ts"] = str(row.get("source_ts") or "")
         payload["_exchange"] = str(row.get("exchange") or "aggregate")
+        payload["_interval"] = str(row.get("interval") or "")
         rows.append(payload)
     return rows
 
@@ -222,6 +235,115 @@ def _sum(values: Iterable[Optional[float]]) -> Optional[float]:
     return sum(numeric)
 
 
+def _weighted_mean(pairs: Iterable[tuple[Optional[float], Optional[float]]]) -> Optional[float]:
+    weighted_total = 0.0
+    weight_total = 0.0
+    for value, weight in pairs:
+        if value is None or weight is None or weight <= 0:
+            continue
+        weighted_total += float(value) * float(weight)
+        weight_total += float(weight)
+    if weight_total <= 0:
+        return None
+    return weighted_total / weight_total
+
+
+def _aggregate_exchange_row(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    for row in rows:
+        exchange = str(row.get("exchange") or row.get("_exchange") or "").strip().lower()
+        if exchange in {"all", "aggregate"}:
+            return dict(row)
+    return dict(rows[-1]) if rows else {}
+
+
+def _interval_seconds(interval: Any) -> int:
+    normalized = str(interval or "").strip().lower()
+    mapping = {
+        "1m": 60,
+        "5m": 300,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+        "h1": 3600,
+        "4h": 14400,
+        "h4": 14400,
+        "12h": 43200,
+        "h12": 43200,
+        "24h": 86400,
+        "h24": 86400,
+        "1d": 86400,
+    }
+    return int(mapping.get(normalized, 3600))
+
+
+def _history_value_series(rows: Sequence[Mapping[str, Any]], *candidates: str) -> List[tuple[datetime, float]]:
+    series: List[tuple[datetime, float]] = []
+    for row in rows:
+        source_ts = row.get("_source_ts") or row.get("source_ts") or row.get("time") or row.get("timestamp")
+        if not source_ts:
+            continue
+        try:
+            ts = pd.Timestamp(source_ts).to_pydatetime().astimezone(timezone.utc)
+        except Exception:
+            continue
+        value = _coalesce_float(row, *candidates)
+        if value is None:
+            continue
+        series.append((ts, value))
+    series.sort(key=lambda item: item[0])
+    return series
+
+
+def _series_change_pct(series: Sequence[tuple[datetime, float]], lookback_sec: int) -> Optional[float]:
+    if len(series) < 2 or lookback_sec <= 0:
+        return None
+    latest_ts, latest_value = series[-1]
+    target_ts = latest_ts - pd.Timedelta(seconds=int(lookback_sec)).to_pytimedelta()
+    baseline_value = None
+    for ts, value in reversed(series[:-1]):
+        if ts <= target_ts:
+            baseline_value = value
+            break
+    if baseline_value in (None, 0):
+        return None
+    return (float(latest_value) / float(baseline_value)) - 1.0
+
+
+def _tail_values(series: Sequence[tuple[datetime, float]], count: int) -> List[float]:
+    if count <= 0:
+        return []
+    return [float(value) for _, value in list(series)[-count:]]
+
+
+def _series_mean(series: Sequence[tuple[datetime, float]], count: int) -> Optional[float]:
+    values = _tail_values(series, count)
+    if not values:
+        return None
+    return float(sum(values) / len(values))
+
+
+def _series_zscore(series: Sequence[tuple[datetime, float]], count: int) -> Optional[float]:
+    values = _tail_values(series, count)
+    if len(values) < 2:
+        return None
+    sample = pd.Series(values, dtype=float)
+    std = float(sample.std(ddof=0) or 0.0)
+    if std <= 0:
+        return None
+    latest = float(values[-1])
+    mean = float(sample.mean())
+    return (latest - mean) / std
+
+
+def _series_reversion_speed(series: Sequence[tuple[datetime, float]]) -> Optional[float]:
+    if len(series) < 2:
+        return None
+    latest = float(series[-1][1])
+    previous = float(series[-2][1])
+    denominator = max(abs(previous), 1e-9)
+    return abs(latest - previous) / denominator
+
+
 def _clamp01(value: Optional[float]) -> Optional[float]:
     if value is None:
         return None
@@ -241,53 +363,165 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
     payloads = _dataset_payloads(normalized_symbol)
     oi_rows = list(payloads.get("open_interest_exchange_list") or [])
     funding_rows = list(payloads.get("funding_rate_exchange_list") or [])
+    oi_history_rows = list(payloads.get("open_interest_history") or [])
+    funding_history_rows = list(payloads.get("funding_rate_history") or [])
     taker_rows = list(payloads.get("taker_buy_sell_volume_exchange_list") or [])
     liquidation_rows = list(payloads.get("liquidation_history") or [])
     ratio_rows = list(payloads.get("global_long_short_account_ratio_history") or [])
     arbitrage_rows = list(payloads.get("funding_arbitrage") or [])
-    oi_row = oi_rows[-1] if oi_rows else {}
-    funding_row = funding_rows[-1] if funding_rows else {}
-    taker_row = taker_rows[-1] if taker_rows else {}
     liquidation_row = liquidation_rows[-1] if liquidation_rows else {}
     ratio_row = ratio_rows[-1] if ratio_rows else {}
     arbitrage_row = arbitrage_rows[-1] if arbitrage_rows else {}
     if not any(payloads.values()):
         return None
 
-    oi_usd = _sum(_coalesce_float(item, "open_interest_usd", "openInterestUsd", "oivalue") for item in oi_rows)
-    oi_change_5m = _mean(_coalesce_float(item, "open_interest_change_5m", "change5m", "oiChange5m") for item in oi_rows)
-    oi_change_15m = _mean(_coalesce_float(item, "open_interest_change_15m", "change15m", "oiChange15m") for item in oi_rows)
-    oi_change_1h = _mean(_coalesce_float(item, "open_interest_change_1h", "change1h", "oiChange1h") for item in oi_rows)
-    oi_change_4h = _mean(_coalesce_float(item, "open_interest_change_4h", "change4h", "oiChange4h") for item in oi_rows)
-    oi_change_24h = _mean(_coalesce_float(item, "open_interest_change_24h", "change24h", "oiChange24h") for item in oi_rows)
-
-    funding_rate = _mean(_coalesce_float(item, "funding_rate", "fundingRate") for item in funding_rows)
-    funding_rate_oi_weighted = _mean(
-        _coalesce_float(
-            item,
-            "funding_rate_oi_weighted",
-            "oi_weighted_funding_rate",
-            "weightedFundingRateByOi",
-        )
-        for item in funding_rows
+    aggregate_oi_row = _aggregate_exchange_row(oi_rows)
+    non_aggregate_oi_rows = [
+        item
+        for item in oi_rows
+        if str(item.get("exchange") or item.get("_exchange") or "").strip().lower() not in {"all", "aggregate"}
+    ]
+    oi_usd = _coalesce_float(aggregate_oi_row, "open_interest_usd", "openInterestUsd", "oivalue")
+    if oi_usd is None:
+        oi_usd = _sum(_coalesce_float(item, "open_interest_usd", "openInterestUsd", "oivalue") for item in non_aggregate_oi_rows)
+    oi_change_5m = _coalesce_float(
+        aggregate_oi_row,
+        "open_interest_change_5m",
+        "open_interest_change_percent_5m",
+        "change5m",
+        "oiChange5m",
     )
-    funding_rate_vol_weighted = _mean(
-        _coalesce_float(
-            item,
-            "funding_rate_vol_weighted",
-            "volume_weighted_funding_rate",
-            "weightedFundingRateByVolume",
+    if oi_change_5m is None:
+        oi_change_5m = _mean(_coalesce_float(item, "open_interest_change_5m", "open_interest_change_percent_5m", "change5m", "oiChange5m") for item in non_aggregate_oi_rows)
+    oi_change_15m = _coalesce_float(
+        aggregate_oi_row,
+        "open_interest_change_15m",
+        "open_interest_change_percent_15m",
+        "change15m",
+        "oiChange15m",
+    )
+    if oi_change_15m is None:
+        oi_change_15m = _mean(_coalesce_float(item, "open_interest_change_15m", "open_interest_change_percent_15m", "change15m", "oiChange15m") for item in non_aggregate_oi_rows)
+    oi_change_1h = _coalesce_float(
+        aggregate_oi_row,
+        "open_interest_change_1h",
+        "open_interest_change_percent_1h",
+        "change1h",
+        "oiChange1h",
+    )
+    if oi_change_1h is None:
+        oi_change_1h = _mean(_coalesce_float(item, "open_interest_change_1h", "open_interest_change_percent_1h", "change1h", "oiChange1h") for item in non_aggregate_oi_rows)
+    oi_change_4h = _coalesce_float(
+        aggregate_oi_row,
+        "open_interest_change_4h",
+        "open_interest_change_percent_4h",
+        "change4h",
+        "oiChange4h",
+    )
+    if oi_change_4h is None:
+        oi_change_4h = _mean(_coalesce_float(item, "open_interest_change_4h", "open_interest_change_percent_4h", "change4h", "oiChange4h") for item in non_aggregate_oi_rows)
+    oi_change_24h = _coalesce_float(
+        aggregate_oi_row,
+        "open_interest_change_24h",
+        "open_interest_change_percent_24h",
+        "change24h",
+        "oiChange24h",
+    )
+    if oi_change_24h is None:
+        oi_change_24h = _mean(_coalesce_float(item, "open_interest_change_24h", "open_interest_change_percent_24h", "change24h", "oiChange24h") for item in non_aggregate_oi_rows)
+
+    oi_history_series = _history_value_series(
+        oi_history_rows,
+        "open_interest_close",
+        "open_interest_usd",
+        "close",
+        "c",
+    )
+    history_interval = (
+        str((oi_history_rows[-1] if oi_history_rows else {}).get("_interval") or "")
+        or str((funding_history_rows[-1] if funding_history_rows else {}).get("_interval") or "")
+        or str((ratio_rows[-1] if ratio_rows else {}).get("_interval") or "")
+        or "h1"
+    )
+    oi_change_1h_history = _series_change_pct(oi_history_series, 3600)
+    oi_change_4h_history = _series_change_pct(oi_history_series, 4 * 3600)
+    oi_change_24h_history = _series_change_pct(oi_history_series, 24 * 3600)
+    if oi_change_1h_history is not None:
+        oi_change_1h = oi_change_1h_history * 100.0
+    if oi_change_4h_history is not None:
+        oi_change_4h = oi_change_4h_history * 100.0
+    if oi_change_24h_history is not None:
+        oi_change_24h = oi_change_24h_history * 100.0
+
+    stablecoin_funding_rows = [item for item in funding_rows if str(item.get("margin_type") or "").strip().lower() == "stablecoin"]
+    token_funding_rows = [item for item in funding_rows if str(item.get("margin_type") or "").strip().lower() == "token"]
+    primary_funding_rows = stablecoin_funding_rows or funding_rows
+    funding_rate = _mean(_coalesce_float(item, "funding_rate", "fundingRate") for item in primary_funding_rows)
+    funding_rate_oi_weighted = _weighted_mean(
+        (
+            _coalesce_float(item, "funding_rate", "fundingRate"),
+            _coalesce_float(item, "open_interest_usd", "openInterestUsd", "oi_usd", "oiUsd"),
         )
-        for item in funding_rows
+        for item in primary_funding_rows
+    )
+    funding_rate_vol_weighted = _weighted_mean(
+        (
+            _coalesce_float(item, "funding_rate", "fundingRate"),
+            _coalesce_float(item, "volume_usd", "turnover_usd", "notionalUsd"),
+        )
+        for item in primary_funding_rows
     )
     if funding_rate_oi_weighted is None:
-        funding_rate_oi_weighted = _coalesce_float(arbitrage_row, "oi_weighted_funding_rate", "oiWeightedFundingRate")
+        funding_rate_oi_weighted = _coalesce_float(
+            arbitrage_row,
+            "oi_weighted_funding_rate",
+            "oiWeightedFundingRate",
+        )
     if funding_rate_vol_weighted is None:
-        funding_rate_vol_weighted = _coalesce_float(arbitrage_row, "volume_weighted_funding_rate", "volWeightedFundingRate")
+        funding_rate_vol_weighted = _coalesce_float(
+            arbitrage_row,
+            "volume_weighted_funding_rate",
+            "volWeightedFundingRate",
+        )
+    if funding_rate_oi_weighted is None:
+        funding_rate_oi_weighted = funding_rate
+    if funding_rate_vol_weighted is None:
+        funding_rate_vol_weighted = funding_rate
+
+    funding_history_series = _history_value_series(
+        funding_history_rows,
+        "funding_rate_close",
+        "funding_rate",
+        "close",
+        "c",
+    )
+    history_interval_sec = _interval_seconds(history_interval)
+    bars_24h = max(2, int(round(86400 / max(history_interval_sec, 60))))
+    funding_mean = _series_mean(funding_history_series, bars_24h)
+    funding_zscore = _series_zscore(funding_history_series, max(bars_24h, bars_24h * 3))
+    funding_reversion_speed = _series_reversion_speed(funding_history_series)
+    if funding_mean is not None:
+        funding_rate_vol_weighted = funding_rate_vol_weighted if funding_rate_vol_weighted is not None else funding_mean
 
     liquidation_long_usd = _coalesce_float(liquidation_row, "long_liquidation_usd", "longLiquidationUsd", "longVolUsd")
     liquidation_short_usd = _coalesce_float(liquidation_row, "short_liquidation_usd", "shortLiquidationUsd", "shortVolUsd")
-    long_short_ratio = _coalesce_float(ratio_row, "long_short_ratio", "longShortRatio", "ratio")
+    long_short_ratio = _coalesce_float(
+        ratio_row,
+        "long_short_ratio",
+        "longShortRatio",
+        "global_account_long_short_ratio",
+        "globalAccountLongShortRatio",
+        "ratio",
+    )
+    ratio_series = _history_value_series(
+        ratio_rows,
+        "long_short_ratio",
+        "longShortRatio",
+        "global_account_long_short_ratio",
+        "globalAccountLongShortRatio",
+        "ratio",
+    )
+    long_short_ratio_change = _series_change_pct(ratio_series, 24 * 3600)
     top_trader_ratio = _coalesce_float(ratio_row, "top_trader_ratio", "topTraderRatio")
 
     taker_buy = _sum(_coalesce_float(item, "taker_buy_volume", "buyVolume", "buy") for item in taker_rows)
@@ -298,6 +532,44 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
 
     basis_pct = _coalesce_float(arbitrage_row, "basis_pct", "basisPercent", "basis")
     futures_volume_usd = _sum(_coalesce_float(item, "volume_usd", "turnover_usd", "notionalUsd") for item in taker_rows)
+    if futures_volume_usd is None and taker_buy is not None and taker_sell is not None:
+        futures_volume_usd = taker_buy + taker_sell
+
+    funding_extreme_deviation = None
+    funding_rates = [
+        _coalesce_float(item, "funding_rate", "fundingRate")
+        for item in primary_funding_rows
+        if _coalesce_float(item, "funding_rate", "fundingRate") is not None
+    ]
+    if funding_rates and funding_rate is not None:
+        funding_extreme_deviation = max(abs(rate - funding_rate) for rate in funding_rates)
+
+    liquidation_burst_score = _coalesce_float(liquidation_row, "burst_score")
+    if liquidation_burst_score is None:
+        liquidation_burst_score = _clamp01(
+            _scale_percent((liquidation_long_usd or 0.0) + (liquidation_short_usd or 0.0), 50_000_000.0)
+        )
+
+    oi_funding_divergence_score = 0.0
+    if oi_change_24h is not None and funding_zscore is not None and (oi_change_24h * funding_zscore) < 0:
+        oi_funding_divergence_score = _clamp01(
+            _scale_percent(oi_change_24h, 12.0) * 0.55
+            + _scale_percent(funding_zscore, 2.5) * 0.45
+        ) or 0.0
+
+    basis_dislocation_score = _clamp01(
+        max(
+            _scale_percent(basis_pct, 0.03),
+            _scale_percent(funding_extreme_deviation, 0.004),
+            _scale_percent(funding_zscore, 2.5),
+        )
+    )
+    flow_divergence_score = 0.0
+    if taker_buy_sell_imbalance is not None and oi_change_1h is not None and (taker_buy_sell_imbalance * oi_change_1h) < 0:
+        flow_divergence_score = _clamp01(
+            _scale_percent(taker_buy_sell_imbalance, 0.20) * 0.55
+            + _scale_percent(oi_change_1h, 5.0) * 0.45
+        ) or 0.0
 
     squeeze_score = _clamp01(
         (
@@ -326,6 +598,39 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
     depth_thinness_score = _clamp01(
         1.0 - _scale_percent(futures_volume_usd, 250_000_000.0)
     )
+    derivatives_heat_score = _clamp01(
+        max(crowding_score or 0.0, squeeze_score or 0.0, distribution_score or 0.0)
+    )
+
+    crowded_long = bool((crowding_score or 0.0) >= 0.70 and (funding_rate or 0.0) > 0 and (long_short_ratio or 1.0) >= 1.05)
+    crowded_short = bool((crowding_score or 0.0) >= 0.70 and (funding_rate or 0.0) < 0 and (long_short_ratio or 1.0) <= 0.95)
+    squeeze_building = bool(
+        (squeeze_score or 0.0) >= 0.62
+        and (taker_buy_sell_imbalance or 0.0) > 0
+        and (oi_change_1h or 0.0) > 0
+        and (liquidation_short_usd or 0.0) >= (liquidation_long_usd or 0.0)
+    )
+    flush_risk = bool(
+        (distribution_score or 0.0) >= 0.62
+        and (taker_buy_sell_imbalance or 0.0) <= 0
+        and (liquidation_long_usd or 0.0) >= (liquidation_short_usd or 0.0)
+    )
+    basis_dislocation = bool((basis_dislocation_score or 0.0) >= 0.65)
+    flow_divergence = bool((flow_divergence_score or 0.0) >= 0.55)
+    order_flow_confirmed = bool((taker_buy_sell_imbalance or 0.0) >= 0.08 and (oi_change_1h or 0.0) > 0)
+    derivatives_labels = [
+        label
+        for label, enabled in (
+            ("crowded_long", crowded_long),
+            ("crowded_short", crowded_short),
+            ("squeeze_building", squeeze_building),
+            ("flush_risk", flush_risk),
+            ("basis_dislocation", basis_dislocation),
+            ("flow_divergence", flow_divergence),
+            ("order_flow_confirmed", order_flow_confirmed),
+        )
+        if enabled
+    ]
 
     source_candidates = []
     for payload_group in payloads.values():
@@ -342,14 +647,62 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
     source_ts = max(source_candidates) if source_candidates else _utc_now()
     source_key = f"{normalized_symbol}|{source_ts.isoformat()}"
     payload = {
-        "market_regime": "trend_follow" if (squeeze_score or 0.0) >= 0.62 else "mixed",
-        "funding_regime": "hot" if (funding_rate or 0.0) >= 0.001 else "balanced",
-        "oi_regime": "expanding" if (oi_change_1h or 0.0) > 0 else "flat",
-        "liquidation_state": "short_squeeze" if (liquidation_short_usd or 0.0) > (liquidation_long_usd or 0.0) else "long_flush",
-        "orderbook_state": "buy_pressure" if (taker_buy_sell_imbalance or 0.0) > 0 else "sell_pressure",
+        "market_regime": (
+            "distribution"
+            if crowded_long and (distribution_score or 0.0) >= 0.65
+            else "squeeze_building"
+            if squeeze_building
+            else "short_crowded"
+            if crowded_short
+            else "trend_follow"
+            if (squeeze_score or 0.0) >= 0.62
+            else "mixed"
+        ),
+        "funding_regime": (
+            "crowded_long"
+            if crowded_long
+            else "crowded_short"
+            if crowded_short
+            else "hot"
+            if (funding_rate or 0.0) >= 0.001
+            else "discounted"
+            if (funding_rate or 0.0) <= -0.001
+            else "balanced"
+        ),
+        "oi_regime": "expanding" if (oi_change_1h or 0.0) > 0 else "contracting" if (oi_change_1h or 0.0) < 0 else "flat",
+        "liquidation_state": "short_squeeze" if (liquidation_short_usd or 0.0) > (liquidation_long_usd or 0.0) else "long_flush" if (liquidation_long_usd or 0.0) > 0 else "calm",
+        "orderbook_state": "buy_pressure" if (taker_buy_sell_imbalance or 0.0) > 0 else "sell_pressure" if (taker_buy_sell_imbalance or 0.0) < 0 else "balanced",
         "crowding_warning": bool((crowding_score or 0.0) >= 0.70),
+        "history_ready": bool(oi_history_series and funding_history_series),
         "active_datasets": [dataset for dataset, items in payloads.items() if items],
         "payload_counts": {dataset: len(items or []) for dataset, items in payloads.items()},
+        "history_exchange": str((oi_history_rows[-1] if oi_history_rows else {}).get("_exchange") or (funding_history_rows[-1] if funding_history_rows else {}).get("_exchange") or "Binance"),
+        "history_interval": history_interval,
+        "funding_exchange_count": len(primary_funding_rows),
+        "funding_token_exchange_count": len(token_funding_rows),
+        "funding_mean": funding_mean,
+        "funding_zscore": funding_zscore,
+        "funding_reversion_speed": funding_reversion_speed,
+        "funding_extreme_deviation": funding_extreme_deviation,
+        "liquidation_burst_score": liquidation_burst_score,
+        "long_short_ratio_change_24h": long_short_ratio_change,
+        "oi_change_1h_history": None if oi_change_1h_history is None else oi_change_1h_history * 100.0,
+        "oi_change_4h_history": None if oi_change_4h_history is None else oi_change_4h_history * 100.0,
+        "oi_change_24h_history": None if oi_change_24h_history is None else oi_change_24h_history * 100.0,
+        "oi_funding_divergence_score": oi_funding_divergence_score,
+        "oi_funding_divergence": bool(oi_funding_divergence_score >= 0.55),
+        "basis_dislocation_score": basis_dislocation_score,
+        "basis_dislocation": basis_dislocation,
+        "flow_divergence_score": flow_divergence_score,
+        "flow_divergence": flow_divergence,
+        "derivatives_heat_score": derivatives_heat_score,
+        "crowded_long": crowded_long,
+        "crowded_short": crowded_short,
+        "squeeze_building": squeeze_building,
+        "flush_risk": flush_risk,
+        "order_flow_confirmed": order_flow_confirmed,
+        "derivatives_labels": derivatives_labels,
+        "funding_arbitrage_symbol_matched": bool(arbitrage_rows),
     }
     return DerivativesSnapshot(
         timestamp=_utc_now(),
@@ -500,13 +853,25 @@ async def update_coinglass_cache(
                 manifest = get_coinglass_manifest(dataset)
                 if manifest is None:
                     continue
-                interval = "h4" if "history" in dataset else ""
+                primary_route = manifest.routes[0] if manifest.routes else None
+                requested_exchange = (
+                    normalize_coinglass_exchange(
+                        (primary_route.default_params.get("exchange") if primary_route else None) or "Binance"
+                    )
+                    if any("exchange" in route.required_params for route in manifest.routes)
+                    else "aggregate"
+                )
+                requested_interval = (
+                    str((primary_route.default_params.get("interval") if primary_route else None) or "h4")
+                    if any("interval" in route.required_params for route in manifest.routes)
+                    else ""
+                )
                 try:
                     result = await client.request_dataset(
                         manifest,
                         symbol=symbol,
-                        exchange="Binance",
-                        interval=interval or None,
+                        exchange=requested_exchange if requested_exchange != "aggregate" else None,
+                        interval=requested_interval or None,
                         manual=manual,
                     )
                     persist_raw_snapshot(
@@ -521,7 +886,45 @@ async def update_coinglass_cache(
                         },
                         response_payload=result["payload"],
                     )
-                    frame = persist_normalized_rows(
+                    normalized_result = normalize_dataset_response(
+                        dataset=dataset,
+                        request_meta={
+                            "symbol": symbol,
+                            "exchange": result["params"].get("exchange"),
+                            "interval": result["params"].get("interval"),
+                        },
+                        response_payload=result["payload"],
+                    )
+                    if str(normalized_result.get("status") or "") != "ok":
+                        error_text = str(normalized_result.get("error") or normalized_result.get("status") or "request_failed")
+                        degrade_due_to_budget = (
+                            str(normalized_result.get("status") or "") == "degraded"
+                            or should_pause_coinglass_requests(error_text)
+                        )
+                        await record_coinglass_ingest_status(
+                            dataset=dataset,
+                            symbol=symbol,
+                            exchange=str(result["params"].get("exchange") or requested_exchange),
+                            interval=str(result["params"].get("interval") or requested_interval),
+                            status="degraded" if degrade_due_to_budget else str(normalized_result.get("status") or "failed"),
+                            rows_written=0,
+                            latency_ms=int(result["latency_ms"] or 0),
+                            error=error_text,
+                            details={
+                                "request_key": result["request_key"],
+                                "api_version": result["route"].api_version,
+                                "path": result["route"].path,
+                                **dict(normalized_result.get("details") or {}),
+                            },
+                            manifest=manifest,
+                        )
+                        summary["errors"].append({"dataset": dataset, "symbol": symbol, "error": error_text})
+                        if degrade_due_to_budget:
+                            stop_reason = error_text
+                            break
+                        continue
+                    normalized_rows = list(normalized_result.get("rows") or [])
+                    persist_normalized_rows(
                         dataset=dataset,
                         manifest=manifest,
                         route=result["route"],
@@ -532,20 +935,22 @@ async def update_coinglass_cache(
                             "request_key": result["request_key"],
                             "latency_ms": result["latency_ms"],
                         },
-                        response_payload=result["payload"],
+                        response_payload=normalized_rows,
                     )
+                    rows_written = len(normalized_rows)
                     await record_coinglass_ingest_status(
                         dataset=dataset,
                         symbol=symbol,
                         exchange=str(result["params"].get("exchange") or "aggregate"),
                         interval=str(result["params"].get("interval") or ""),
                         status="ok",
-                        rows_written=len(frame.index),
+                        rows_written=rows_written,
                         latency_ms=int(result["latency_ms"] or 0),
                         details={
                             "request_key": result["request_key"],
                             "api_version": result["route"].api_version,
                             "path": result["route"].path,
+                            **dict(normalized_result.get("details") or {}),
                         },
                         manifest=manifest,
                     )
@@ -553,7 +958,7 @@ async def update_coinglass_cache(
                         {
                             "dataset": dataset,
                             "symbol": symbol,
-                            "rows_written": len(frame.index),
+                            "rows_written": rows_written,
                             "latency_ms": int(result["latency_ms"] or 0),
                         }
                     )
@@ -561,8 +966,8 @@ async def update_coinglass_cache(
                     await record_coinglass_ingest_status(
                         dataset=dataset,
                         symbol=symbol,
-                        exchange="aggregate",
-                        interval=interval,
+                        exchange=requested_exchange,
+                        interval=requested_interval,
                         status="degraded",
                         rows_written=0,
                         error=str(exc),
@@ -578,8 +983,8 @@ async def update_coinglass_cache(
                     await record_coinglass_ingest_status(
                         dataset=dataset,
                         symbol=symbol,
-                        exchange="aggregate",
-                        interval=interval,
+                        exchange=requested_exchange,
+                        interval=requested_interval,
                         status="degraded" if degrade_due_to_budget else "failed",
                         rows_written=0,
                         error=error_text,
@@ -719,7 +1124,12 @@ async def build_coinglass_overview_payload(
     snapshot = await load_latest_derivatives_snapshot(normalized_symbol)
     statuses = await load_coinglass_ingest_statuses(symbol=normalized_symbol)
     budget = await get_coinglass_budget_state()
-    active_datasets = [str(row.get("dataset") or "") for row in statuses if str(row.get("status") or "") == "ok"]
+    snapshot_active_datasets = list(((snapshot or {}).get("payload") or {}).get("active_datasets") or [])
+    active_datasets = snapshot_active_datasets or [
+        str(row.get("dataset") or "")
+        for row in statuses
+        if str(row.get("status") or "") == "ok" and int(row.get("rows_written") or 0) > 0
+    ]
     freshness_sec = None
     degraded_reason = None
     if snapshot and snapshot.get("timestamp"):
@@ -758,6 +1168,31 @@ def build_coinglass_runtime_context(snapshot: Optional[Mapping[str, Any]]) -> Di
         "liquidation_state": payload.get("liquidation_state"),
         "orderbook_state": payload.get("orderbook_state"),
         "crowding_warning": bool(payload.get("crowding_warning")),
+        "history_ready": bool(payload.get("history_ready")),
+        "history_exchange": payload.get("history_exchange"),
+        "history_interval": payload.get("history_interval"),
+        "funding_mean": payload.get("funding_mean"),
+        "funding_zscore": payload.get("funding_zscore"),
+        "funding_reversion_speed": payload.get("funding_reversion_speed"),
+        "funding_extreme_deviation": payload.get("funding_extreme_deviation"),
+        "liquidation_burst_score": payload.get("liquidation_burst_score"),
+        "long_short_ratio_change_24h": payload.get("long_short_ratio_change_24h"),
+        "oi_change_1h_history": payload.get("oi_change_1h_history"),
+        "oi_change_4h_history": payload.get("oi_change_4h_history"),
+        "oi_change_24h_history": payload.get("oi_change_24h_history"),
+        "oi_funding_divergence": bool(payload.get("oi_funding_divergence")),
+        "oi_funding_divergence_score": payload.get("oi_funding_divergence_score"),
+        "basis_dislocation": bool(payload.get("basis_dislocation")),
+        "basis_dislocation_score": payload.get("basis_dislocation_score"),
+        "flow_divergence": bool(payload.get("flow_divergence")),
+        "flow_divergence_score": payload.get("flow_divergence_score"),
+        "crowded_long": bool(payload.get("crowded_long")),
+        "crowded_short": bool(payload.get("crowded_short")),
+        "squeeze_building": bool(payload.get("squeeze_building")),
+        "flush_risk": bool(payload.get("flush_risk")),
+        "order_flow_confirmed": bool(payload.get("order_flow_confirmed")),
+        "derivatives_labels": list(payload.get("derivatives_labels") or []),
+        "derivatives_heat_score": payload.get("derivatives_heat_score"),
         "crowding_score": snapshot.get("crowding_score") if isinstance(snapshot, Mapping) else None,
         "squeeze_score": snapshot.get("squeeze_score") if isinstance(snapshot, Mapping) else None,
         "distribution_score": snapshot.get("distribution_score") if isinstance(snapshot, Mapping) else None,
