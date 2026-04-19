@@ -11,6 +11,11 @@
       binance_announcements,
       okx_announcements,
       bybit_announcements,
+      coinglass_newsflash,
+      coinglass_articles,
+      coinglass_economic_data,
+      coinglass_financial_events,
+      coinglass_central_bank,
       jin10,
       cryptopanic,
       cryptocompare_news,
@@ -21,6 +26,8 @@
   # Optional env toggles:
   # NEWS_ENABLE_CHAINCATCHER_FLASH / NEWS_ENABLE_BINANCE_ANNOUNCEMENTS / NEWS_ENABLE_OKX_ANNOUNCEMENTS
   # NEWS_ENABLE_BYBIT_ANNOUNCEMENTS / NEWS_ENABLE_CRYPTOCOMPARE_NEWS / NEWS_PULL_SYNC_LLM
+  # NEWS_ENABLE_COINGLASS_NEWSFLASH / NEWS_ENABLE_COINGLASS_ARTICLES / NEWS_ENABLE_COINGLASS_ECONOMIC_DATA
+  # NEWS_ENABLE_COINGLASS_FINANCIAL_EVENTS / NEWS_ENABLE_COINGLASS_CENTRAL_BANK
   # CRYPTOCOMPARE_API_KEY optional; without key collector still runs with stricter rate limit.
   chaincatcher_flash_timeout_sec: 20
   chaincatcher_flash_max_records: 80
@@ -34,6 +41,15 @@
   binance_announcements_categories: [listing, delisting, api, maintenance]
   cryptocompare_news_timeout_sec: 20
   cryptocompare_news_max_records: 120
+  coinglass_news_language: en
+  coinglass_newsflash_timeout_sec: 20
+  coinglass_newsflash_page_size: 50
+  coinglass_articles_timeout_sec: 25
+  coinglass_articles_page_size: 30
+  coinglass_economic_data_timeout_sec: 20
+  coinglass_economic_data_page_size: 40
+  coinglass_financial_events_timeout_sec: 20
+  coinglass_central_bank_timeout_sec: 20
   jin10_timeout_sec: 18
   jin10_max_records: 120
   jin10_endpoint: "https://flash-api.jin10.com/get_flash_list"

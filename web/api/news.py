@@ -21,6 +21,7 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 from config.settings import settings
+from core.data.coinglass_client import coinglass_enabled
 from core.news.collectors.manager import MultiSourceNewsCollector
 from core.news.eventizer.llm_glm5 import (
     _summarize_fallback,
@@ -29,7 +30,7 @@ from core.news.eventizer.llm_glm5 import (
 )
 from core.news.text_normalizer import clean_news_text
 from core.news.eventizer.rules import SymbolMapper, load_news_rule_config
-from core.news.service.worker import process_llm_batch
+from core.news.service.worker import DEFAULT_INTERVALS, process_llm_batch
 from core.news.storage import db as news_db
 from core.news.storage.models import parse_any_datetime
 
@@ -90,6 +91,14 @@ _TRACKING_QUERY_KEYS = {
     "ref_src",
     "source",
 }
+_COINGLASS_SUMMARY_SOURCES = {
+    "coinglass_newsflash",
+    "coinglass_articles",
+    "coinglass_economic_data",
+    "coinglass_financial_events",
+    "coinglass_central_bank",
+}
+_SUMMARY_ALERT_RANK = {"critical": 3, "warning": 2, "notice": 1, "none": 0}
 
 
 class PullNowRequest(BaseModel):
@@ -209,6 +218,7 @@ def _news_source_flags() -> Dict[str, bool]:
     cryptopanic_enabled = bool(os.environ.get("CRYPTOPANIC_TOKEN") or os.environ.get("CRYPTOPANIC_API_KEY"))
     if str(os.environ.get("NEWS_ENABLE_CRYPTOPANIC", "1")).strip().lower() in {"0", "false", "no", "off"}:
         cryptopanic_enabled = False
+    coinglass_news_enabled = bool(coinglass_enabled())
     return {
         "jin10": jin10_enabled,
         "rss": rss_enabled,
@@ -220,6 +230,11 @@ def _news_source_flags() -> Dict[str, bool]:
         "okx_announcements": _enabled("NEWS_ENABLE_OKX_ANNOUNCEMENTS", True),
         "bybit_announcements": _enabled("NEWS_ENABLE_BYBIT_ANNOUNCEMENTS", True),
         "cryptocompare_news": _enabled("NEWS_ENABLE_CRYPTOCOMPARE_NEWS", True),
+        "coinglass_newsflash": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_NEWSFLASH", True),
+        "coinglass_articles": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_ARTICLES", True),
+        "coinglass_economic_data": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_ECONOMIC_DATA", True),
+        "coinglass_financial_events": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_FINANCIAL_EVENTS", True),
+        "coinglass_central_bank": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_CENTRAL_BANK", True),
     }
 
 
@@ -1237,6 +1252,101 @@ def _first_iso_ts(rows: List[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
+def _parse_optional_ts(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    with contextlib.suppress(Exception):
+        return parse_any_datetime(value)
+    return None
+
+
+def _source_expected_interval_minutes(source: str) -> Optional[int]:
+    interval = DEFAULT_INTERVALS.get(str(source or "").strip().lower())
+    if not interval:
+        return None
+    try:
+        return max(1, int(interval))
+    except Exception:
+        return None
+
+
+def _source_recent_threshold_minutes(source: str) -> int:
+    interval = _source_expected_interval_minutes(source)
+    if interval is None:
+        return 360
+    return max(60, interval * 2)
+
+
+def _source_stale_threshold_minutes(source: str) -> int:
+    interval = _source_expected_interval_minutes(source)
+    if interval is None:
+        return 720
+    return max(180, interval * 4)
+
+
+def _source_recent_window_status(
+    *,
+    source: str,
+    inserted_count: int,
+    last_success_at: Optional[datetime],
+    updated_at: Optional[datetime],
+) -> str:
+    if inserted_count > 0:
+        return "has_recent_rows"
+    if last_success_at or updated_at:
+        if source in _COINGLASS_SUMMARY_SOURCES:
+            return "empty_recent_window"
+        return "no_recent_rows"
+    return "unknown"
+
+
+def _source_freshness_status(
+    *,
+    source: str,
+    now: datetime,
+    anchor_at: Optional[datetime],
+    paused_until: Optional[datetime],
+) -> tuple[str, Optional[float]]:
+    if paused_until and paused_until > now:
+        return "paused", 0.0
+    if anchor_at is None:
+        return "unknown", None
+    age_minutes = round(max(0.0, (now - anchor_at).total_seconds() / 60.0), 1)
+    if age_minutes > _source_stale_threshold_minutes(source):
+        return "stale", age_minutes
+    if age_minutes > _source_recent_threshold_minutes(source):
+        return "delayed", age_minutes
+    return "fresh", age_minutes
+
+
+def _source_alert_state(
+    *,
+    source: str,
+    hours: int,
+    freshness_status: str,
+    recent_window_status: str,
+    pending_errors: int,
+    failure_rate: float,
+    paused_until: Optional[datetime],
+    last_error: Optional[str],
+) -> tuple[str, Optional[str]]:
+    if paused_until is not None:
+        return "critical", "paused"
+    if freshness_status == "stale":
+        return "critical", "stale"
+    if pending_errors >= 3:
+        return "critical", "error_burst"
+    if failure_rate >= 0.5 and (pending_errors > 0 or last_error):
+        return "warning", "failure_rate_high"
+    if freshness_status == "delayed":
+        return "warning", "delayed"
+    if pending_errors > 0 or last_error:
+        return "warning", "recent_errors"
+    if source in _COINGLASS_SUMMARY_SOURCES and recent_window_status == "empty_recent_window":
+        return "notice", f"no_rows_last_{max(1, int(hours))}h"
+    return "none", None
+
+
 def _bucket_has_data(bucket_stats: Dict[str, List[Dict[str, Any]]]) -> bool:
     for rows in (bucket_stats or {}).values():
         if rows:
@@ -1788,34 +1898,119 @@ def _count_by_provider(items: List[Dict[str, Any]]) -> Dict[str, int]:
     return dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True))
 
 
-def _build_source_summary(raw_rows: List[Dict[str, Any]], source_states: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def _build_source_summary(
+    raw_rows: List[Dict[str, Any]],
+    source_states: List[Dict[str, Any]],
+    *,
+    hours: int = 24,
+) -> Dict[str, Dict[str, Any]]:
     summary: Dict[str, Dict[str, Any]] = {}
+    state_map = {str(item.get("source") or "").strip().lower(): item for item in source_states}
+    for source in state_map:
+        if not source:
+            continue
+        summary[source] = {
+            "inserted_count": 0,
+            "latencies": [],
+            "max_importance": 0,
+            "latest_raw_at": None,
+            "latest_at": None,
+            "is_coinglass": source in _COINGLASS_SUMMARY_SOURCES,
+            "expected_interval_minutes": _source_expected_interval_minutes(source),
+        }
     for row in raw_rows:
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         source = str(row.get("source") or payload.get("provider") or "unknown").strip().lower() or "unknown"
-        slot = summary.setdefault(source, {"inserted_count": 0, "latencies": [], "max_importance": 0, "latest_at": None})
+        slot = summary.setdefault(
+            source,
+            {
+                "inserted_count": 0,
+                "latencies": [],
+                "max_importance": 0,
+                "latest_raw_at": None,
+                "latest_at": None,
+                "is_coinglass": source in _COINGLASS_SUMMARY_SOURCES,
+                "expected_interval_minutes": _source_expected_interval_minutes(source),
+            },
+        )
         slot["inserted_count"] += 1
         latency = _safe_float(payload.get("latency_sec"), 0.0)
         if latency > 0:
             slot["latencies"].append(latency)
         slot["max_importance"] = max(int(slot["max_importance"]), int(payload.get("importance_score") or 0))
-        published = row.get("published_at")
-        if published:
-            slot["latest_at"] = str(published)
-    state_map = {str(item.get("source") or "").strip().lower(): item for item in source_states}
+        published = _parse_optional_ts(row.get("published_at"))
+        latest_raw_at = _parse_optional_ts(slot.get("latest_raw_at"))
+        if published and (latest_raw_at is None or published > latest_raw_at):
+            slot["latest_raw_at"] = published.isoformat()
+            slot["latest_at"] = published.isoformat()
+
+    now = _now_utc()
     for source, slot in summary.items():
         latencies = slot.pop("latencies", [])
         state = state_map.get(source) or {}
         success_count = int(state.get("success_count") or 0)
         failure_count = int(state.get("failure_count") or 0)
         total_runs = success_count + failure_count
-        slot["failure_rate"] = round((failure_count / total_runs), 4) if total_runs else 0.0
+        failure_rate = round((failure_count / total_runs), 4) if total_runs else 0.0
+        last_success_at = _parse_optional_ts(state.get("last_success_at"))
+        updated_at = _parse_optional_ts(state.get("updated_at"))
+        paused_until = _parse_optional_ts(state.get("paused_until"))
+        if paused_until and paused_until <= now:
+            paused_until = None
+        latest_raw_at = _parse_optional_ts(slot.get("latest_raw_at"))
+        anchor_candidates = [ts for ts in (latest_raw_at, last_success_at, updated_at) if ts is not None]
+        latest_at = max(anchor_candidates) if anchor_candidates else None
+        recent_window_status = _source_recent_window_status(
+            source=source,
+            inserted_count=int(slot.get("inserted_count") or 0),
+            last_success_at=last_success_at,
+            updated_at=updated_at,
+        )
+        freshness_status, freshness_age_minutes = _source_freshness_status(
+            source=source,
+            now=now,
+            anchor_at=latest_at,
+            paused_until=paused_until,
+        )
+        last_error = state.get("last_error")
+        pending_errors = int(state.get("error_count") or 0)
+        alert_status, alert_reason = _source_alert_state(
+            source=source,
+            hours=hours,
+            freshness_status=freshness_status,
+            recent_window_status=recent_window_status,
+            pending_errors=pending_errors,
+            failure_rate=failure_rate,
+            paused_until=paused_until,
+            last_error=last_error,
+        )
+        slot["latest_raw_at"] = latest_raw_at.isoformat() if latest_raw_at else None
+        slot["latest_at"] = latest_at.isoformat() if latest_at else None
+        slot["updated_at"] = updated_at.isoformat() if updated_at else None
+        slot["last_success_at"] = last_success_at.isoformat() if last_success_at else None
+        slot["failure_rate"] = failure_rate
         slot["latency_p50"] = _percentile(latencies, 50)
         slot["latency_p95"] = _percentile(latencies, 95)
-        slot["last_error"] = state.get("last_error")
-        slot["paused_until"] = state.get("paused_until")
-        slot["pending_errors"] = int(state.get("error_count") or 0)
-    return dict(sorted(summary.items(), key=lambda kv: kv[1]["inserted_count"], reverse=True))
+        slot["last_error"] = last_error
+        slot["paused_until"] = paused_until.isoformat() if paused_until else None
+        slot["pending_errors"] = pending_errors
+        slot["success_count"] = success_count
+        slot["failure_count"] = failure_count
+        slot["recent_window_status"] = recent_window_status
+        slot["freshness_status"] = freshness_status
+        slot["freshness_age_minutes"] = freshness_age_minutes
+        slot["alert_status"] = alert_status
+        slot["alert_reason"] = alert_reason
+    return dict(
+        sorted(
+            summary.items(),
+            key=lambda kv: (
+                -_SUMMARY_ALERT_RANK.get(str(kv[1].get("alert_status") or "none"), 0),
+                -int(kv[1].get("inserted_count") or 0),
+                str(kv[0]),
+            ),
+        )
+    )
 
 
 async def _emit_news_update_snapshot(limit: int = 12, hours: int = 24) -> None:
@@ -3398,7 +3593,7 @@ async def summary(
             "by_type": sorted_by_type,
             "by_symbol": sorted_by_symbol,
             "by_provider": by_provider,
-            "source_summary": _build_source_summary(raw_rows, source_states),
+            "source_summary": _build_source_summary(raw_rows, source_states, hours=hours),
             "source_states": source_states,
             "llm_queue": llm_queue,
             "bucket_stats": bucket_stats,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock
@@ -120,6 +122,54 @@ def test_summary_uses_exact_window_counts(monkeypatch):
     assert payload["events_count"] == 9
     assert payload["latest_raw_at"] == "2026-04-04T04:00:00+00:00"
     assert payload["latest_event_at"] == "2026-04-04T03:00:00+00:00"
+
+
+def test_build_source_summary_keeps_coinglass_state_without_recent_rows():
+    now = datetime.now(timezone.utc)
+    source_states = [
+        {
+            "source": "coinglass_articles",
+            "updated_at": (now - timedelta(hours=2)).isoformat(),
+            "last_success_at": (now - timedelta(hours=2)).isoformat(),
+            "paused_until": None,
+            "last_error": None,
+            "error_count": 0,
+            "success_count": 5,
+            "failure_count": 0,
+        }
+    ]
+
+    summary = news_api._build_source_summary([], source_states, hours=24)
+
+    assert "coinglass_articles" in summary
+    slot = summary["coinglass_articles"]
+    assert slot["inserted_count"] == 0
+    assert slot["recent_window_status"] == "empty_recent_window"
+    assert slot["freshness_status"] == "fresh"
+    assert slot["alert_status"] == "notice"
+
+
+def test_build_source_summary_marks_paused_coinglass_source_critical():
+    now = datetime.now(timezone.utc)
+    source_states = [
+        {
+            "source": "coinglass_newsflash",
+            "updated_at": (now - timedelta(minutes=20)).isoformat(),
+            "last_success_at": (now - timedelta(minutes=20)).isoformat(),
+            "paused_until": (now + timedelta(minutes=8)).isoformat(),
+            "last_error": "minute_budget_exhausted",
+            "error_count": 1,
+            "success_count": 4,
+            "failure_count": 1,
+        }
+    ]
+
+    summary = news_api._build_source_summary([], source_states, hours=24)
+
+    slot = summary["coinglass_newsflash"]
+    assert slot["freshness_status"] == "paused"
+    assert slot["alert_status"] == "critical"
+    assert slot["alert_reason"] == "paused"
 
 
 def test_latest_triggers_auto_summary_repair_for_fallback_feed(monkeypatch):

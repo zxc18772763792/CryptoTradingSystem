@@ -32,6 +32,7 @@ from config.database import (
 from config.exchanges import get_exchange_config
 from config.settings import settings
 from core.audit import audit_logger
+from core.data.coinglass_client import CoinglassClient, coinglass_enabled
 from core.data import data_storage
 from core.exchanges import exchange_manager
 from core.exchanges.binance_connector import BinanceConnector
@@ -1200,6 +1201,8 @@ def _compact_community_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "twitter_watchlist": list(payload.get("twitter_watchlist") or [])[:10],
         "flow_proxy": payload.get("flow_proxy") or {},
         "security_alerts": payload.get("security_alerts") or {},
+        "news_provider": payload.get("news_provider"),
+        "news_sources": list(payload.get("news_sources") or [])[:10],
         "announcements": list(payload.get("announcements") or [])[:10],
     }
 
@@ -1208,9 +1211,11 @@ def _compact_whale_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "available": bool(payload.get("available", False)),
         "error": payload.get("error"),
+        "source_name": payload.get("source_name"),
         "threshold_btc": _safe_float(payload.get("threshold_btc")),
         "btc_price": _safe_float(payload.get("btc_price")),
         "count": int(_safe_float(payload.get("count"))),
+        "exchange_flow_summary": dict(payload.get("exchange_flow_summary") or {}),
         "transactions": list(payload.get("transactions") or [])[:10],
     }
 
@@ -1738,6 +1743,9 @@ def _community_source_name(payload: Dict[str, Any]) -> str:
     parts: List[str] = ["proxy_layer"]
     if list(payload.get("announcements") or []):
         parts.append("official_announcements")
+    news_provider = str(payload.get("news_provider") or "").strip().lower()
+    if news_provider:
+        parts.append(news_provider)
     source = str(((payload.get("security_alerts") or {}).get("source")) or "").strip().lower()
     if source:
         parts.append(source)
@@ -1784,6 +1792,7 @@ def _community_quality(payload: Dict[str, Any], latency_ms: int) -> Dict[str, An
 def _whale_quality(payload: Dict[str, Any], latency_ms: int) -> Dict[str, Any]:
     source_error = _clip_analytics_error(payload.get("error"))
     available = bool(payload.get("available", False))
+    source_name = str(payload.get("source_name") or "public_chain_proxy").strip() or "public_chain_proxy"
     if available and not source_error:
         capture_status = "ok"
     elif source_error:
@@ -1793,7 +1802,7 @@ def _whale_quality(payload: Dict[str, Any], latency_ms: int) -> Dict[str, Any]:
     return {
         "capture_status": capture_status,
         "source_error": source_error,
-        "source_name": "public_chain_proxy",
+        "source_name": source_name,
         "latency_ms": int(max(0, latency_ms)),
         "ingest_version": _ANALYTICS_HISTORY_INGEST_VERSION,
     }
@@ -4483,9 +4492,21 @@ async def _fetch_whale_transfers(min_btc: float = _ANALYTICS_WHALE_MIN_BTC) -> D
             tx_json = tx_res.json() or {}
             px_json = px_res.json() or {}
     except (asyncio.TimeoutError, asyncio.CancelledError) as e:
-        return {"available": False, "error": f"whale_timeout:{type(e).__name__}", "count": 0, "transactions": []}
+        return {
+            "available": False,
+            "error": f"whale_timeout:{type(e).__name__}",
+            "source_name": "public_chain_proxy",
+            "count": 0,
+            "transactions": [],
+        }
     except Exception as e:
-        return {"available": False, "error": str(e), "count": 0, "transactions": []}
+        return {
+            "available": False,
+            "error": str(e),
+            "source_name": "public_chain_proxy",
+            "count": 0,
+            "transactions": [],
+        }
 
     btc_price = _safe_float(px_json.get("price"), default=0.0)
     candidates = []
@@ -4510,6 +4531,7 @@ async def _fetch_whale_transfers(min_btc: float = _ANALYTICS_WHALE_MIN_BTC) -> D
     whales.sort(key=lambda x: _safe_float(x.get("btc")), reverse=True)
     return {
         "available": True,
+        "source_name": "public_chain_proxy",
         "threshold_btc": float(effective_threshold),
         "requested_threshold_btc": float(requested_threshold),
         "btc_price": btc_price,
@@ -4540,6 +4562,360 @@ async def _fetch_binance_announcements(limit: int = 6) -> List[Dict[str, Any]]:
     except Exception:
         return announcements
     return announcements
+
+
+def _symbol_base(symbol: str) -> str:
+    text = str(symbol or "").strip().upper()
+    if ":" in text:
+        text = text.split(":", 1)[0]
+    if "/" in text:
+        text = text.split("/", 1)[0]
+    return text
+
+
+def _coinglass_ts_to_iso(value: Any) -> Optional[str]:
+    ts = _safe_dt(value)
+    if ts is None:
+        numeric = int(_safe_float(value))
+        if numeric > 0:
+            with contextlib.suppress(Exception):
+                ts = datetime.fromtimestamp(numeric, tz=timezone.utc)
+    if ts is None:
+        return None
+    return ts.astimezone(timezone.utc).isoformat()
+
+
+def _normalize_coinglass_news_item(row: Dict[str, Any]) -> Dict[str, Any]:
+    title = str(row.get("article_title") or row.get("title") or "").strip()
+    article_id = row.get("article_id") or row.get("id")
+    published_at = (
+        _coinglass_ts_to_iso(row.get("article_publish_time"))
+        or _coinglass_ts_to_iso(row.get("created_at"))
+        or _coinglass_ts_to_iso(row.get("published_at"))
+    )
+    source = str(row.get("article_source_name") or row.get("source_name") or "coinglass").strip()
+    return {
+        "title": title,
+        "code": article_id,
+        "release_date": published_at,
+        "url": row.get("article_url") or row.get("url"),
+        "source": source,
+        "provider": "coinglass_news",
+    }
+
+
+def _normalize_coinglass_whale_item(row: Dict[str, Any], *, btc_price: float) -> Dict[str, Any]:
+    amount_usd = _safe_float(row.get("amount_usd"))
+    asset_qty = _safe_float(row.get("asset_quantity"))
+    btc_equiv = amount_usd / btc_price if btc_price > 0 and amount_usd > 0 else 0.0
+    return {
+        "hash": row.get("transaction_hash"),
+        "btc": round(btc_equiv, 6),
+        "amount_usd": round(amount_usd, 2),
+        "asset_quantity": round(asset_qty, 8),
+        "asset_symbol": str(row.get("asset_symbol") or "").upper(),
+        "from": row.get("from"),
+        "to": row.get("to"),
+        "chain": str(row.get("blockchain_name") or "").lower(),
+        "timestamp": _coinglass_ts_to_iso(row.get("block_timestamp")),
+        "provider": "coinglass_whale_transfer",
+    }
+
+
+def _normalize_coinglass_exchange_chain_item(row: Dict[str, Any], *, btc_price: float) -> Dict[str, Any]:
+    amount_usd = _safe_float(row.get("amount_usd"))
+    asset_qty = _safe_float(row.get("asset_quantity"))
+    btc_equiv = amount_usd / btc_price if btc_price > 0 and amount_usd > 0 else 0.0
+    return {
+        "hash": row.get("transaction_hash"),
+        "btc": round(btc_equiv, 6),
+        "amount_usd": round(amount_usd, 2),
+        "asset_quantity": round(asset_qty, 8),
+        "asset_symbol": str(row.get("asset_symbol") or "").upper(),
+        "exchange_name": str(row.get("exchange_name") or "").strip(),
+        "transfer_type": str(row.get("transfer_type") or "").strip(),
+        "from": row.get("from_address"),
+        "to": row.get("to_address"),
+        "timestamp": _coinglass_ts_to_iso(row.get("transaction_time")),
+        "provider": "coinglass_exchange_chain_tx",
+    }
+
+
+def _exchange_flow_direction(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "other"
+    if any(token in text for token in ("deposit", "inflow", "to_exchange")):
+        return "inflow"
+    if any(token in text for token in ("withdraw", "outflow", "from_exchange")):
+        return "outflow"
+    if text in {"in", "into", "inbound"}:
+        return "inflow"
+    if text in {"out", "outbound"}:
+        return "outflow"
+    return "other"
+
+
+def _build_exchange_flow_summary(transactions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    relevant = [
+        dict(item or {})
+        for item in transactions
+        if str((item or {}).get("provider") or "").strip() == "coinglass_exchange_chain_tx"
+    ]
+    if not relevant:
+        return {}
+
+    inflow_count = 0
+    outflow_count = 0
+    other_count = 0
+    transfer_type_breakdown: Dict[str, int] = {}
+    exchange_names: List[str] = []
+    asset_symbols: List[str] = []
+    total_amount_usd = 0.0
+
+    for item in relevant:
+        direction = _exchange_flow_direction(item.get("transfer_type"))
+        if direction == "inflow":
+            inflow_count += 1
+        elif direction == "outflow":
+            outflow_count += 1
+        else:
+            other_count += 1
+        transfer_type = str(item.get("transfer_type") or "").strip().lower() or "unknown"
+        transfer_type_breakdown[transfer_type] = int(transfer_type_breakdown.get(transfer_type) or 0) + 1
+        exchange_name = str(item.get("exchange_name") or "").strip()
+        if exchange_name:
+            exchange_names.append(exchange_name)
+        asset_symbol = str(item.get("asset_symbol") or "").strip().upper()
+        if asset_symbol:
+            asset_symbols.append(asset_symbol)
+        total_amount_usd += _safe_float(item.get("amount_usd"))
+
+    return {
+        "count": len(relevant),
+        "inflow_count": inflow_count,
+        "outflow_count": outflow_count,
+        "other_count": other_count,
+        "transfer_type_breakdown": transfer_type_breakdown,
+        "exchange_names": list(dict.fromkeys(exchange_names))[:10],
+        "asset_symbols": list(dict.fromkeys(asset_symbols))[:10],
+        "total_amount_usd": round(total_amount_usd, 2),
+    }
+
+
+def _dedupe_announcements(items: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for item in items:
+        title = str((item or {}).get("title") or "").strip()
+        code = str((item or {}).get("code") or "").strip()
+        key = (title.lower(), code.lower())
+        if not title or key in seen:
+            continue
+        seen.add(key)
+        out.append(dict(item or {}))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _merge_whale_payloads(*payloads: Dict[str, Any], threshold_btc: float, btc_price: float) -> Dict[str, Any]:
+    transactions: List[Dict[str, Any]] = []
+    seen_hashes = set()
+    source_names: List[str] = []
+    available = False
+    errors: List[str] = []
+    for payload in payloads:
+        item = dict(payload or {})
+        if bool(item.get("available")):
+            available = True
+        source_name = str(item.get("source_name") or "").strip()
+        if source_name:
+            source_names.append(source_name)
+        error = str(item.get("error") or "").strip()
+        if error:
+            errors.append(error)
+        for tx in list(item.get("transactions") or []):
+            tx_hash = str((tx or {}).get("hash") or (tx or {}).get("transaction_hash") or "").strip().lower()
+            dedupe_key = tx_hash or json.dumps(tx, ensure_ascii=False, sort_keys=True)
+            if dedupe_key in seen_hashes:
+                continue
+            seen_hashes.add(dedupe_key)
+            transactions.append(dict(tx or {}))
+    transactions.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
+    return {
+        "available": available,
+        "error": "; ".join(dict.fromkeys(error for error in errors if error)),
+        "source_name": "+".join(dict.fromkeys(name for name in source_names if name)) or "public_chain_proxy",
+        "threshold_btc": threshold_btc,
+        "btc_price": btc_price,
+        "count": len(transactions),
+        "exchange_flow_summary": _build_exchange_flow_summary(transactions),
+        "transactions": transactions[:20],
+    }
+
+
+async def _fetch_coinglass_news(*, symbol: str, limit: int = 6) -> List[Dict[str, Any]]:
+    if not coinglass_enabled():
+        return []
+    base_symbol = _symbol_base(symbol)
+    try:
+        async with CoinglassClient(timeout_sec=_ANALYTICS_ANNOUNCEMENT_TIMEOUT_SEC) as client:
+            response = await client.request_json(
+                "/v4/api/article/list",
+                params={"page": 1, "per_page": max(1, min(int(limit) * 3, 30)), "language": "en"},
+                manual=False,
+            )
+    except Exception:
+        return []
+
+    rows = list(((response.get("payload") or {}).get("data") or []))
+    announcements: List[Dict[str, Any]] = []
+    for row in rows:
+        normalized = _normalize_coinglass_news_item(dict(row or {}))
+        title_upper = str(normalized.get("title") or "").upper()
+        if base_symbol and title_upper and base_symbol not in title_upper:
+            continue
+        announcements.append(normalized)
+        if len(announcements) >= limit:
+            break
+    if announcements:
+        return announcements
+    return [_normalize_coinglass_news_item(dict(row or {})) for row in rows[:limit]]
+
+
+async def _fetch_coinglass_whale_transfers(
+    *,
+    symbol: str,
+    min_btc: float = _ANALYTICS_WHALE_MIN_BTC,
+) -> Dict[str, Any]:
+    if not coinglass_enabled():
+        return {
+            "available": False,
+            "error": "coinglass_disabled",
+            "source_name": "coinglass_whale_transfer",
+            "threshold_btc": min_btc,
+            "btc_price": 0.0,
+            "count": 0,
+            "transactions": [],
+        }
+
+    btc_price = 0.0
+    try:
+        px = await _fetch_binance_public_json(
+            "/api/v3/ticker/price",
+            params={"symbol": "BTCUSDT"},
+            timeout_sec=_ANALYTICS_FUNDING_TIMEOUT_SEC,
+        )
+        btc_price = _safe_float((px or {}).get("price"))
+    except Exception:
+        btc_price = 0.0
+
+    base_symbol = _symbol_base(symbol)
+    try:
+        async with CoinglassClient(timeout_sec=_ANALYTICS_WHALE_TIMEOUT_SEC) as client:
+            response = await client.request_json(
+                "/v4/api/chain/v2/whale-transfer",
+                params={"symbol": base_symbol, "limit": 20},
+                manual=False,
+            )
+    except Exception as exc:
+        return {
+            "available": False,
+            "error": str(exc),
+            "source_name": "coinglass_whale_transfer",
+            "threshold_btc": min_btc,
+            "btc_price": btc_price,
+            "count": 0,
+            "transactions": [],
+        }
+
+    rows = list(((response.get("payload") or {}).get("data") or []))
+    transactions = [_normalize_coinglass_whale_item(dict(row or {}), btc_price=btc_price) for row in rows]
+    threshold_usd = (min_btc * btc_price) if btc_price > 0 else 0.0
+    filtered = [
+        item for item in transactions
+        if _safe_float(item.get("amount_usd")) >= threshold_usd
+    ] if threshold_usd > 0 else transactions
+    return {
+        "available": bool(filtered),
+        "error": "",
+        "source_name": "coinglass_whale_transfer",
+        "threshold_btc": min_btc,
+        "btc_price": btc_price,
+        "count": len(filtered),
+        "transactions": filtered[:20],
+    }
+
+
+async def _fetch_coinglass_exchange_chain_transfers(
+    *,
+    symbol: str,
+    min_btc: float = _ANALYTICS_WHALE_MIN_BTC,
+) -> Dict[str, Any]:
+    if not coinglass_enabled():
+        return {
+            "available": False,
+            "error": "coinglass_disabled",
+            "source_name": "coinglass_exchange_chain_tx",
+            "threshold_btc": min_btc,
+            "btc_price": 0.0,
+            "count": 0,
+            "transactions": [],
+        }
+
+    btc_price = 0.0
+    try:
+        px = await _fetch_binance_public_json(
+            "/api/v3/ticker/price",
+            params={"symbol": "BTCUSDT"},
+            timeout_sec=_ANALYTICS_FUNDING_TIMEOUT_SEC,
+        )
+        btc_price = _safe_float((px or {}).get("price"))
+    except Exception:
+        btc_price = 0.0
+
+    base_symbol = _symbol_base(symbol)
+    threshold_usd = (min_btc * btc_price) if btc_price > 0 else 0.0
+    try:
+        async with CoinglassClient(timeout_sec=_ANALYTICS_WHALE_TIMEOUT_SEC) as client:
+            response = await client.request_json(
+                "/v4/api/exchange/chain/tx/list",
+                params={
+                    "symbol": base_symbol,
+                    "min_usd": round(threshold_usd, 2) if threshold_usd > 0 else None,
+                    "per_page": 20,
+                    "page": 1,
+                },
+                manual=False,
+            )
+    except Exception as exc:
+        return {
+            "available": False,
+            "error": str(exc),
+            "source_name": "coinglass_exchange_chain_tx",
+            "threshold_btc": min_btc,
+            "btc_price": btc_price,
+            "count": 0,
+            "transactions": [],
+        }
+
+    rows = list(((response.get("payload") or {}).get("data") or []))
+    transactions = [_normalize_coinglass_exchange_chain_item(dict(row or {}), btc_price=btc_price) for row in rows]
+    filtered = [
+        item
+        for item in transactions
+        if _safe_float(item.get("amount_usd")) >= threshold_usd
+    ] if threshold_usd > 0 else transactions
+    return {
+        "available": bool(filtered),
+        "error": "",
+        "source_name": "coinglass_exchange_chain_tx",
+        "threshold_btc": min_btc,
+        "btc_price": btc_price,
+        "count": len(filtered),
+        "transactions": filtered[:20],
+    }
 
 
 async def _capture_analytics(task_name: str, coro: Any) -> Dict[str, Any]:
@@ -5253,10 +5629,48 @@ async def get_equity_rebalance(
 
 
 async def get_community_overview(symbol: str = "BTC/USDT", exchange: str = "binance"):
-    flow, whales, announcements = await asyncio.gather(
+    (
+        flow,
+        whales,
+        announcements,
+        coinglass_whales,
+        coinglass_exchange_transfers,
+        coinglass_news,
+    ) = await asyncio.gather(
         _fetch_trade_imbalance(exchange=exchange, symbol=symbol, limit=600),
         _fetch_whale_transfers(min_btc=_ANALYTICS_WHALE_MIN_BTC),
         _fetch_binance_announcements(limit=6),
+        _fetch_coinglass_whale_transfers(symbol=symbol, min_btc=_ANALYTICS_WHALE_MIN_BTC),
+        _fetch_coinglass_exchange_chain_transfers(symbol=symbol, min_btc=_ANALYTICS_WHALE_MIN_BTC),
+        _fetch_coinglass_news(symbol=symbol, limit=6),
+    )
+    merged_whales = _merge_whale_payloads(
+        whales,
+        coinglass_whales,
+        coinglass_exchange_transfers,
+        threshold_btc=_ANALYTICS_WHALE_MIN_BTC,
+        btc_price=(
+            _safe_float(whales.get("btc_price"))
+            or _safe_float(coinglass_whales.get("btc_price"))
+            or _safe_float(coinglass_exchange_transfers.get("btc_price"))
+        ),
+    )
+    merged_announcements = _dedupe_announcements(
+        [*(announcements or []), *(coinglass_news or [])],
+        limit=10,
+    )
+    news_sources = list(
+        dict.fromkeys(
+            source
+            for source in (
+                *(
+                    str(item.get("provider") or "binance_announcements").strip()
+                    for item in (announcements or [])
+                ),
+                *(str(item.get("provider") or "").strip() for item in (coinglass_news or [])),
+            )
+            if source
+        )
     )
 
     return {
@@ -5271,14 +5685,16 @@ async def get_community_overview(symbol: str = "BTC/USDT", exchange: str = "bina
             "WuBlockchain",
         ],
         "flow_proxy": flow,
-        "whale_transfers": whales,
+        "whale_transfers": merged_whales,
         "security_alerts": {
             "available": False,
             "source": "unavailable",
             "events": [],
             "note": "安全告警源尚未接入，当前不返回占位事件。",
         },
-        "announcements": announcements,
+        "announcements": merged_announcements,
+        "news_provider": "+".join(news_sources) if news_sources else None,
+        "news_sources": news_sources,
     }
 
 

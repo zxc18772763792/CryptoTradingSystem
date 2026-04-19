@@ -1,5 +1,12 @@
 """News collectors package."""
 
+from core.news.collectors.coinglass_news import (
+    CoinGlassArticlesCollector,
+    CoinGlassCentralBankCollector,
+    CoinGlassEconomicDataCollector,
+    CoinGlassFinancialEventsCollector,
+    CoinGlassNewsflashCollector,
+)
 from core.news.collectors.cryptopanic import CryptoPanicCollector
 from core.news.collectors.gdelt import GDELTCollector
 from core.news.collectors.jin10 import Jin10Collector
@@ -13,5 +20,10 @@ __all__ = [
     "CryptoPanicCollector",
     "Jin10Collector",
     "RSSNewsCollector",
+    "CoinGlassNewsflashCollector",
+    "CoinGlassArticlesCollector",
+    "CoinGlassEconomicDataCollector",
+    "CoinGlassFinancialEventsCollector",
+    "CoinGlassCentralBankCollector",
     "MultiSourceNewsCollector",
 ]

@@ -306,6 +306,21 @@ def test_get_community_overview_reports_security_alert_source_truthfully(monkeyp
         "_fetch_binance_announcements",
         AsyncMock(return_value=[{"title": "Listing update"}]),
     )
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_coinglass_whale_transfers",
+        AsyncMock(return_value={"available": False, "source_name": "coinglass_whale_transfer", "count": 0, "transactions": []}),
+    )
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_coinglass_exchange_chain_transfers",
+        AsyncMock(return_value={"available": False, "source_name": "coinglass_exchange_chain_tx", "count": 0, "transactions": []}),
+    )
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_coinglass_news",
+        AsyncMock(return_value=[]),
+    )
 
     payload = asyncio.run(trading_api.get_community_overview(symbol="BTC/USDT", exchange="binance"))
 
@@ -313,6 +328,145 @@ def test_get_community_overview_reports_security_alert_source_truthfully(monkeyp
     assert payload["security_alerts"]["source"] == "unavailable"
     assert payload["security_alerts"]["events"] == []
     assert "占位" in payload["security_alerts"]["note"]
+
+
+def test_get_community_overview_merges_coinglass_news_and_whales(monkeypatch):
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_trade_imbalance",
+        AsyncMock(return_value={"imbalance": 0.18, "buy_volume": 14.0, "sell_volume": 7.0}),
+    )
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_whale_transfers",
+        AsyncMock(
+            return_value={
+                "available": True,
+                "source_name": "public_chain_proxy",
+                "btc_price": 100000.0,
+                "count": 1,
+                "transactions": [
+                    {
+                        "hash": "shared-tx",
+                        "btc": 120.0,
+                        "timestamp": "2026-04-19T10:00:00+00:00",
+                    }
+                ],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_binance_announcements",
+        AsyncMock(
+            return_value=[
+                {
+                    "title": "AVAX listing update",
+                    "code": "avax-1",
+                    "release_date": "2026-04-19T09:00:00+00:00",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_coinglass_whale_transfers",
+        AsyncMock(
+            return_value={
+                "available": True,
+                "source_name": "coinglass_whale_transfer",
+                "btc_price": 100000.0,
+                "count": 2,
+                "transactions": [
+                    {
+                        "hash": "shared-tx",
+                        "btc": 120.0,
+                        "amount_usd": 12000000.0,
+                        "timestamp": "2026-04-19T10:00:00+00:00",
+                    },
+                    {
+                        "hash": "coinglass-only",
+                        "btc": 95.0,
+                        "amount_usd": 9500000.0,
+                        "timestamp": "2026-04-19T11:00:00+00:00",
+                    },
+                ],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_coinglass_exchange_chain_transfers",
+        AsyncMock(
+            return_value={
+                "available": True,
+                "source_name": "coinglass_exchange_chain_tx",
+                "btc_price": 100000.0,
+                "count": 1,
+                "transactions": [
+                    {
+                        "hash": "exchange-only",
+                        "btc": 70.0,
+                        "amount_usd": 7000000.0,
+                        "asset_symbol": "AVAX",
+                        "exchange_name": "Binance",
+                        "transfer_type": "deposit",
+                        "timestamp": "2026-04-19T12:00:00+00:00",
+                        "provider": "coinglass_exchange_chain_tx",
+                    }
+                ],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_coinglass_news",
+        AsyncMock(
+            return_value=[
+                {
+                    "title": "AVAX listing update",
+                    "code": "avax-1",
+                    "release_date": "2026-04-19T09:00:00+00:00",
+                    "provider": "coinglass_news",
+                },
+                {
+                    "title": "AVAX whale activity surges",
+                    "code": "avax-2",
+                    "release_date": "2026-04-19T10:30:00+00:00",
+                    "provider": "coinglass_news",
+                },
+            ]
+        ),
+    )
+
+    payload = asyncio.run(trading_api.get_community_overview(symbol="AVAX/USDT", exchange="binance"))
+
+    assert payload["news_provider"] == "binance_announcements+coinglass_news"
+    assert payload["news_sources"] == ["binance_announcements", "coinglass_news"]
+    assert [item["title"] for item in payload["announcements"]] == [
+        "AVAX listing update",
+        "AVAX whale activity surges",
+    ]
+    assert (
+        payload["whale_transfers"]["source_name"]
+        == "public_chain_proxy+coinglass_whale_transfer+coinglass_exchange_chain_tx"
+    )
+    assert payload["whale_transfers"]["count"] == 3
+    assert [item["hash"] for item in payload["whale_transfers"]["transactions"]] == [
+        "exchange-only",
+        "coinglass-only",
+        "shared-tx",
+    ]
+    assert payload["whale_transfers"]["exchange_flow_summary"] == {
+        "count": 1,
+        "inflow_count": 1,
+        "outflow_count": 0,
+        "other_count": 0,
+        "transfer_type_breakdown": {"deposit": 1},
+        "exchange_names": ["Binance"],
+        "asset_symbols": ["AVAX"],
+        "total_amount_usd": 7000000.0,
+    }
 
 
 def test_analytics_fallback_community_does_not_fabricate_security_events():

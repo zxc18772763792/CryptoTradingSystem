@@ -20,17 +20,34 @@ DEFAULT_INTERVALS = {
     "okx_announcements": 25,
     "bybit_announcements": 25,
     "binance_announcements": 25,
+    "coinglass_newsflash": 30,
     "cryptopanic": 90,
+    "coinglass_articles": 180,
     "cryptocompare_news": 90,
     "jin10": 120,
+    "coinglass_economic_data": 300,
+    "coinglass_financial_events": 600,
+    "coinglass_central_bank": 900,
     "rss": 300,
     "gdelt": 600,
     "newsapi": 600,
 }
 
-HIGH_PRIORITY = {"chaincatcher_flash", "okx_announcements", "bybit_announcements", "binance_announcements"}
-MID_PRIORITY = {"cryptopanic", "cryptocompare_news", "jin10"}
-LOW_PRIORITY = {"rss", "gdelt", "newsapi"}
+HIGH_PRIORITY = {
+    "chaincatcher_flash",
+    "okx_announcements",
+    "bybit_announcements",
+    "binance_announcements",
+    "coinglass_newsflash",
+}
+MID_PRIORITY = {
+    "cryptopanic",
+    "cryptocompare_news",
+    "jin10",
+    "coinglass_articles",
+    "coinglass_economic_data",
+}
+LOW_PRIORITY = {"rss", "gdelt", "newsapi", "coinglass_financial_events", "coinglass_central_bank"}
 
 
 def _norm_url(u: str) -> str:

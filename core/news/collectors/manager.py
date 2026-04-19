@@ -15,9 +15,17 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dateutil import parser as dt_parser
 from loguru import logger
 
+from core.data.coinglass_client import coinglass_enabled
 from core.news.collectors.binance_announcements import BinanceAnnouncementsCollector
 from core.news.collectors.bybit_announcements import BybitAnnouncementsCollector
 from core.news.collectors.chaincatcher_flash import ChainCatcherFlashCollector
+from core.news.collectors.coinglass_news import (
+    CoinGlassArticlesCollector,
+    CoinGlassCentralBankCollector,
+    CoinGlassEconomicDataCollector,
+    CoinGlassFinancialEventsCollector,
+    CoinGlassNewsflashCollector,
+)
 from core.news.collectors.cryptocompare_news import CryptoCompareNewsCollector
 from core.news.collectors.cryptopanic import CryptoPanicCollector
 from core.news.collectors.gdelt import GDELTCollector
@@ -123,6 +131,11 @@ class MultiSourceNewsCollector:
             "bybit_announcements",
             "binance_announcements",
             "cryptocompare_news",
+            "coinglass_newsflash",
+            "coinglass_articles",
+            "coinglass_economic_data",
+            "coinglass_financial_events",
+            "coinglass_central_bank",
         ]
         self.sources: List[str] = [str(x).strip().lower() for x in raw_sources if str(x).strip()]
         if not self.sources:
@@ -145,6 +158,7 @@ class MultiSourceNewsCollector:
         selected = {str(x).strip().lower() for x in (source_names or self.sources) if str(x).strip()}
         if not selected:
             selected = set(self.sources)
+        coinglass_ready = bool(coinglass_enabled())
 
         for name in self.sources:
             if name not in selected:
@@ -199,6 +213,41 @@ class MultiSourceNewsCollector:
                     if not str(os.getenv("CRYPTOCOMPARE_API_KEY") or "").strip():
                         errors.append("cryptocompare running without CRYPTOCOMPARE_API_KEY; stricter rate limit applied")
                     specs.append(_CollectorSpec(name=name, collector=CryptoCompareNewsCollector(self.cfg)))
+                continue
+            if name == "coinglass_newsflash":
+                if _env_bool("NEWS_ENABLE_COINGLASS_NEWSFLASH", True):
+                    if not coinglass_ready:
+                        errors.append("coinglass_newsflash disabled: CoinGlass key/base url missing")
+                        continue
+                    specs.append(_CollectorSpec(name=name, collector=CoinGlassNewsflashCollector(self.cfg)))
+                continue
+            if name == "coinglass_articles":
+                if _env_bool("NEWS_ENABLE_COINGLASS_ARTICLES", True):
+                    if not coinglass_ready:
+                        errors.append("coinglass_articles disabled: CoinGlass key/base url missing")
+                        continue
+                    specs.append(_CollectorSpec(name=name, collector=CoinGlassArticlesCollector(self.cfg)))
+                continue
+            if name == "coinglass_economic_data":
+                if _env_bool("NEWS_ENABLE_COINGLASS_ECONOMIC_DATA", True):
+                    if not coinglass_ready:
+                        errors.append("coinglass_economic_data disabled: CoinGlass key/base url missing")
+                        continue
+                    specs.append(_CollectorSpec(name=name, collector=CoinGlassEconomicDataCollector(self.cfg)))
+                continue
+            if name == "coinglass_financial_events":
+                if _env_bool("NEWS_ENABLE_COINGLASS_FINANCIAL_EVENTS", True):
+                    if not coinglass_ready:
+                        errors.append("coinglass_financial_events disabled: CoinGlass key/base url missing")
+                        continue
+                    specs.append(_CollectorSpec(name=name, collector=CoinGlassFinancialEventsCollector(self.cfg)))
+                continue
+            if name == "coinglass_central_bank":
+                if _env_bool("NEWS_ENABLE_COINGLASS_CENTRAL_BANK", True):
+                    if not coinglass_ready:
+                        errors.append("coinglass_central_bank disabled: CoinGlass key/base url missing")
+                        continue
+                    specs.append(_CollectorSpec(name=name, collector=CoinGlassCentralBankCollector(self.cfg)))
                 continue
             errors.append(f"unsupported collector source: {name}")
 
