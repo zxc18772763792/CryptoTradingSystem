@@ -921,8 +921,8 @@ const sd=String(spec?.start_date||'').trim();
 const ed=String(spec?.end_date||'').trim();
 const sdEl=document.getElementById('backtest-start-date');
 const edEl=document.getElementById('backtest-end-date');
-if(sdEl&&sd)sdEl.value=sd;
-if(edEl&&ed)edEl.value=ed;
+if(sdEl)sdEl.value=sd||'';
+if(edEl)edEl.value=ed||'';
 const exitTemplateEl=document.getElementById('backtest-exit-template');
 const requestedExitTemplate=String(spec?.exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE).trim();
 if(exitTemplateEl instanceof HTMLSelectElement&&[...exitTemplateEl.options].some(opt=>String(opt.value||'').trim()===requestedExitTemplate)){

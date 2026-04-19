@@ -1011,380 +1011,390 @@
 
                     <!-- ========== 右侧：主内容区 ========== -->
                     <div class="research-main">
-                        
-                        <!-- 顶部：工作台 + 状态 -->
-                        <div class="research-top-grid">
-                            <!-- 研究工作台 -->
-                            <div class="card research-actions-panel">
-                                <h3>🧪 研究工作台</h3>
-                                
-                                <!-- 快捷操作区 -->
-                                <div class="research-quick-actions">
-                                    <div class="research-action-group">
-                                        <div class="research-action-group-title">一键分析</div>
-                                        <div class="research-action-group-desc">先拿到全局研究结论和下一步建议，适合快速判断今天该不该继续深入。</div>
-                                        <div class="inline-actions">
-                                            <button class="btn btn-primary" id="btn-workbench-overview">🔍 研究总览</button>
-                                            <button class="btn btn-primary" id="btn-workbench-recommendations">💡 刷新建议</button>
+                        <div class="research-body-grid">
+                            <div class="research-primary-stack">
+                                <div class="research-command-deck">
+                                    <!-- 顶部：工作台 + 状态 -->
+                                    <div class="research-top-grid">
+                                        <!-- 研究工作台 -->
+                                        <div class="card research-actions-panel">
+                                            <h3>🧪 研究工作台</h3>
+                                            
+                                            <!-- 快捷操作区 -->
+                                            <div class="research-quick-actions">
+                                                <div class="research-action-group">
+                                                    <div class="research-action-group-title">一键分析</div>
+                                                    <div class="research-action-group-desc">先拿到全局研究结论和下一步建议，适合快速判断今天该不该继续深入。</div>
+                                                    <div class="inline-actions">
+                                                        <button class="btn btn-primary" id="btn-workbench-overview">🔍 研究总览</button>
+                                                        <button class="btn btn-primary" id="btn-workbench-recommendations">💡 刷新建议</button>
+                                                    </div>
+                                                </div>
+                                                
+                                                <div class="research-action-group">
+                                                <div class="research-action-group-title">分模块分析</div>
+                                                <div class="research-action-group-desc">按市场、因子、链上、多币种和纪律逐块验证，适合确认具体假设哪里成立、哪里失效。</div>
+                                                <div class="inline-actions research-module-btns">
+                                                        <button class="btn btn-primary btn-sm" id="btn-workbench-market-state">📊 市场状态</button>
+                                                        <button class="btn btn-primary btn-sm" id="btn-workbench-factors">📈 因子风格</button>
+                                                        <button class="btn btn-primary btn-sm" id="btn-workbench-cross-asset">🔄 多币种</button>
+                                                        <button class="btn btn-primary btn-sm" id="btn-workbench-onchain">⛓️ 链上数据</button>
+                                                        <button class="btn btn-primary btn-sm" id="btn-workbench-discipline">🛡️ 纪律风控</button>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <!-- 行为金融（折叠） -->
+                                            <details class="research-behavior-section">
+                                                <summary>🧠 行为金融与纪律（可选）</summary>
+                                                <div class="research-behavior-form">
+                                                    <div class="form-row">
+                                                        <div class="form-group">
+                                                            <label>当前情绪</label>
+                                                            <select id="behavior-mood">
+                                                                <option value="calm">😌 冷静</option>
+                                                                <option value="neutral" selected>😐 中性</option>
+                                                                <option value="fear">😰 恐惧</option>
+                                                                <option value="fomo">🤑 FOMO</option>
+                                                                <option value="greed">😈 贪婪</option>
+                                                            </select>
+                                                        </div>
+                                                        <div class="form-group">
+                                                            <label>自信度</label>
+                                                            <input type="number" id="behavior-confidence" min="0" max="1" step="0.1" value="0.6">
+                                                        </div>
+                                                        <div class="form-group">
+                                                            <label>执行度</label>
+                                                            <input type="number" id="behavior-plan" min="0" max="1" step="0.1" value="0.7">
+                                                        </div>
+                                                    </div>
+                                                    <div class="form-group">
+                                                        <label>备注</label>
+                                                        <input type="text" id="behavior-note" placeholder="例如：回踩确认后再加仓">
+                                                    </div>
+                                                    <div class="inline-actions">
+                                                        <button class="btn btn-sm" id="btn-behavior-log">📝 记录</button>
+                                                        <button class="btn btn-sm" id="btn-load-behavior-report">📊 报告</button>
+                                                        <button class="btn btn-sm" id="btn-load-stoploss-policy">🛑 止损策略</button>
+                                                    </div>
+                                                </div>
+                                            </details>
+                                        </div>
+
+                                        <!-- 状态面板 -->
+                                        <div class="card research-status-board">
+                                            <h3>📡 研究状态</h3>
+                                            <div class="research-status-grid">
+                                                <div class="research-status-item" id="research-config-snapshot">
+                                                    <span class="status-label">配置</span>
+                                                    <span class="status-value">等待加载</span>
+                                                </div>
+                                                <div class="research-status-item" id="research-data-snapshot">
+                                                    <span class="status-label">数据</span>
+                                                    <span class="status-value">等待加载</span>
+                                                </div>
+                                                <div class="research-status-item" id="research-module-snapshot">
+                                                    <span class="status-label">模块</span>
+                                                    <span class="status-value">等待加载</span>
+                                                </div>
+                                                <div class="research-status-item research-status-highlight" id="research-next-step">
+                                                    <span class="status-label">结论 / 下一步</span>
+                                                    <span class="status-value">点击「研究总览」开始</span>
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
-                                    
-                                    <div class="research-action-group">
-                                    <div class="research-action-group-title">分模块分析</div>
-                                    <div class="research-action-group-desc">按市场、因子、链上、多币种和纪律逐块验证，适合确认具体假设哪里成立、哪里失效。</div>
-                                    <div class="inline-actions research-module-btns">
-                                            <button class="btn btn-primary btn-sm" id="btn-workbench-market-state">📊 市场状态</button>
-                                            <button class="btn btn-primary btn-sm" id="btn-workbench-factors">📈 因子风格</button>
-                                            <button class="btn btn-primary btn-sm" id="btn-workbench-cross-asset">🔄 多币种</button>
-                                            <button class="btn btn-primary btn-sm" id="btn-workbench-onchain">⛓️ 链上数据</button>
-                                            <button class="btn btn-primary btn-sm" id="btn-workbench-discipline">🛡️ 纪律风控</button>
+
+                                    <!-- 研究总览 - 卡片式 -->
+                                    <div class="card research-overview-board">
+                                        <h3>📋 研究总览</h3>
+                                        <div id="research-overview-summary-list" class="research-overview-cards">
+                                            <div class="research-overview-card">
+                                                <div class="overview-card-icon">📊</div>
+                                                <div class="overview-card-content">
+                                                    <div class="overview-card-label">市场状态</div>
+                                                    <div class="overview-card-value">等待加载</div>
+                                                </div>
+                                            </div>
+                                            <div class="research-overview-card">
+                                                <div class="overview-card-icon">🌡️</div>
+                                                <div class="overview-card-content">
+                                                    <div class="overview-card-label">情绪指标</div>
+                                                    <div class="overview-card-value">等待加载</div>
+                                                </div>
+                                            </div>
+                                            <div class="research-overview-card">
+                                                <div class="overview-card-icon">📈</div>
+                                                <div class="overview-card-content">
+                                                    <div class="overview-card-label">因子信号</div>
+                                                    <div class="overview-card-value">等待加载</div>
+                                                </div>
+                                            </div>
+                                            <div class="research-overview-card">
+                                                <div class="overview-card-icon">🔄</div>
+                                                <div class="overview-card-content">
+                                                    <div class="overview-card-label">多币种</div>
+                                                    <div class="overview-card-value">等待加载</div>
+                                                </div>
+                                            </div>
+                                            <div class="research-overview-card">
+                                                <div class="overview-card-icon">⛓️</div>
+                                                <div class="overview-card-content">
+                                                    <div class="overview-card-label">链上数据</div>
+                                                    <div class="overview-card-value">等待加载</div>
+                                                </div>
+                                            </div>
+                                            <div class="research-overview-card">
+                                                <div class="overview-card-icon">🛡️</div>
+                                                <div class="overview-card-content">
+                                                    <div class="overview-card-label">风控状态</div>
+                                                    <div class="overview-card-value">等待加载</div>
+                                                </div>
+                                            </div>
                                         </div>
+                                        <div id="research-overview-actions" class="research-actions-list" style="margin-top: 12px;"></div>
                                     </div>
                                 </div>
+                            </div>
 
-                                <!-- 行为金融（折叠） -->
-                                <details class="research-behavior-section">
-                                    <summary>🧠 行为金融与纪律（可选）</summary>
-                                    <div class="research-behavior-form">
-                                        <div class="form-row">
-                                            <div class="form-group">
-                                                <label>当前情绪</label>
-                                                <select id="behavior-mood">
-                                                    <option value="calm">😌 冷静</option>
-                                                    <option value="neutral" selected>😐 中性</option>
-                                                    <option value="fear">😰 恐惧</option>
-                                                    <option value="fomo">🤑 FOMO</option>
-                                                    <option value="greed">😈 贪婪</option>
+                            <aside class="research-insight-rail">
+                                <div class="research-rail-stack">
+                                    <!-- 研究建议（突出显示） -->
+                                    <div class="card research-conclusion-card">
+                                        <h3>💡 研究建议</h3>
+                                        <div id="research-conclusion-summary" class="research-metrics-grid">运行「研究总览」后显示建议</div>
+                                        <div id="research-conclusion-bullets" class="research-conclusion-bullets">
+                                            <div class="research-conclusion-empty">暂无结论，请先运行研究总览</div>
+                                        </div>
+                                    </div>
+
+                                    <!-- 市场状态历史日历 -->
+                                    <div class="card research-history-card" id="regime-calendar-card">
+                                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                                            <h3 style="margin:0;">🗓️ 市场状态历史</h3>
+                                            <div style="display:flex;gap:8px;align-items:center;">
+                                                <select id="regime-calendar-days" style="font-size:12px;padding:2px 6px;">
+                                                    <option value="7" selected>近7天</option>
+                                                    <option value="14">近14天</option>
+                                                    <option value="30">近30天</option>
                                                 </select>
-                                            </div>
-                                            <div class="form-group">
-                                                <label>自信度</label>
-                                                <input type="number" id="behavior-confidence" min="0" max="1" step="0.1" value="0.6">
-                                            </div>
-                                            <div class="form-group">
-                                                <label>执行度</label>
-                                                <input type="number" id="behavior-plan" min="0" max="1" step="0.1" value="0.7">
+                                                <button class="btn btn-sm" id="btn-load-regime-calendar">刷新</button>
                                             </div>
                                         </div>
-                                        <div class="form-group">
-                                            <label>备注</label>
-                                            <input type="text" id="behavior-note" placeholder="例如：回踩确认后再加仓">
-                                        </div>
-                                        <div class="inline-actions">
-                                            <button class="btn btn-sm" id="btn-behavior-log">📝 记录</button>
-                                            <button class="btn btn-sm" id="btn-load-behavior-report">📊 报告</button>
-                                            <button class="btn btn-sm" id="btn-load-stoploss-policy">🛑 止损策略</button>
+                                        <div id="regime-calendar-grid" style="display:flex;flex-wrap:wrap;gap:6px;min-height:60px;">
+                                            <div style="color:#6b7fa0;font-size:12px;">点击刷新加载历史状态</div>
                                         </div>
                                     </div>
-                                </details>
+                                </div>
+                            </aside>
+                        </div>
+
+                        <div class="research-analysis-stack">
+                            <!-- 市场状态 + 情绪信号（并排） -->
+                            <div class="research-grid-2 research-market-row">
+                                <div class="card research-market-state-card">
+                                    <h3>📊 市场状态</h3>
+                                    <div id="analytics-overview-summary" class="research-metrics-grid">点击「市场状态」加载分析数据</div>
+                                    <div id="analytics-module-grid" class="strategies-grid research-strip-grid" style="margin-top: 12px;"></div>
+                                </div>
+
+                                <div class="card research-sentiment-card">
+                                    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+                                        <h3 style="margin:0;">🌡️ 情绪与信号</h3>
+                                        <button class="btn btn-sm" id="btn-refresh-market-sentiment-panel" title="仅刷新情绪与信号分面板">刷新</button>
+                                    </div>
+                                    <div id="market-sentiment-summary" class="research-metrics-grid">点击「市场状态」加载情绪数据</div>
+                                    <div id="market-sentiment-chart" class="research-chart-box">暂无情绪图表</div>
+                                    <div id="market-sentiment-grid" class="strategies-grid" style="margin-top: 12px;"></div>
+                                </div>
                             </div>
 
-                            <!-- 状态面板 -->
-                            <div class="card research-status-board">
-                                <h3>📡 研究状态</h3>
-                                <div class="research-status-grid">
-                                    <div class="research-status-item" id="research-config-snapshot">
-                                        <span class="status-label">配置</span>
-                                        <span class="status-value">等待加载</span>
+                            <!-- 因子实验室 -->
+                            <div class="card research-factor-lab">
+                                <div class="research-lab-header">
+                                    <h3>📈 因子与风格实验室</h3>
+                                    <div class="inline-actions">
+                                        <button class="btn btn-sm" id="btn-workbench-factors-secondary">🔄 刷新</button>
+                                        <button class="btn btn-sm" id="btn-factor-export-json">📤 JSON</button>
+                                        <button class="btn btn-sm" id="btn-factor-export-csv">📤 CSV</button>
+                                        <button class="btn btn-sm" id="btn-factor-export-report">📄 报告</button>
                                     </div>
-                                    <div class="research-status-item" id="research-data-snapshot">
-                                        <span class="status-label">数据</span>
-                                        <span class="status-value">等待加载</span>
+                                </div>
+                                
+                                <!-- 筛选工具栏 -->
+                                <div class="research-filter-bar">
+                                    <div class="form-group">
+                                        <label>筛选币种</label>
+                                        <input type="text" id="factor-score-search" placeholder="BTC, ETH...">
                                     </div>
-                                    <div class="research-status-item" id="research-module-snapshot">
-                                        <span class="status-label">模块</span>
-                                        <span class="status-value">等待加载</span>
+                                    <div class="form-group">
+                                        <label>排序</label>
+                                        <select id="factor-score-sort">
+                                            <option value="score_desc" selected>综合得分 ↓</option>
+                                            <option value="score_asc">综合得分 ↑</option>
+                                            <option value="momentum_desc">动量 ↓</option>
+                                            <option value="value_desc">价值 ↓</option>
+                                            <option value="quality_desc">质量 ↓</option>
+                                            <option value="low_vol_desc">低波 ↓</option>
+                                        </select>
                                     </div>
-                                    <div class="research-status-item research-status-highlight" id="research-next-step">
-                                        <span class="status-label">结论 / 下一步</span>
-                                        <span class="status-value">点击「研究总览」开始</span>
+                                    <div class="form-group">
+                                        <label>显示</label>
+                                        <input type="number" id="factor-score-topn" value="50" min="10" max="200" step="10" style="width:80px;">
                                     </div>
+                                </div>
+
+                                <!-- 因子摘要卡片 -->
+                                <div id="factor-library-summary" class="research-factor-cards">
+                                    <div class="factor-card">
+                                        <div class="factor-card-header">
+                                            <span class="factor-icon">📊</span>
+                                            <span class="factor-name">综合得分</span>
+                                        </div>
+                                        <div class="factor-card-value">--</div>
+                                        <div class="factor-card-desc">等待加载</div>
+                                    </div>
+                                    <div class="factor-card">
+                                        <div class="factor-card-header">
+                                            <span class="factor-icon">🚀</span>
+                                            <span class="factor-name">动量因子</span>
+                                        </div>
+                                        <div class="factor-card-value">--</div>
+                                        <div class="factor-card-desc">等待加载</div>
+                                    </div>
+                                    <div class="factor-card">
+                                        <div class="factor-card-header">
+                                            <span class="factor-icon">💎</span>
+                                            <span class="factor-name">价值因子</span>
+                                        </div>
+                                        <div class="factor-card-value">--</div>
+                                        <div class="factor-card-desc">等待加载</div>
+                                    </div>
+                                    <div class="factor-card">
+                                        <div class="factor-card-header">
+                                            <span class="factor-icon">🏆</span>
+                                            <span class="factor-name">质量因子</span>
+                                        </div>
+                                        <div class="factor-card-value">--</div>
+                                        <div class="factor-card-desc">等待加载</div>
+                                    </div>
+                                    <div class="factor-card">
+                                        <div class="factor-card-header">
+                                            <span class="factor-icon">🛡️</span>
+                                            <span class="factor-name">低波因子</span>
+                                        </div>
+                                        <div class="factor-card-value">--</div>
+                                        <div class="factor-card-desc">等待加载</div>
+                                    </div>
+                                    <div class="factor-card">
+                                        <div class="factor-card-header">
+                                            <span class="factor-icon">💧</span>
+                                            <span class="factor-name">流动性</span>
+                                        </div>
+                                        <div class="factor-card-value">--</div>
+                                        <div class="factor-card-desc">等待加载</div>
+                                    </div>
+                                </div>
+
+                                <!-- 因子卡片网格 -->
+                                <div id="factor-library-grid" class="research-factor-mini-grid"></div>
+
+                                <!-- 相关性矩阵单独一行 -->
+                                <div class="research-corr-section">
+                                    <div class="research-corr-title">📊 因子相关性矩阵</div>
+                                    <div id="factor-corr-chart" class="research-corr-chart">暂无因子相关性矩阵</div>
+                                </div>
+
+                                <div class="table-container strategy-scroll">
+                                    <table class="data-table">
+                                        <thead>
+                                            <tr>
+                                                <th>币种</th><th>综合</th><th>动量</th><th>价值</th><th>质量</th><th>低波</th><th>流动性</th><th>低β</th><th>规模</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="factor-scores-tbody">
+                                            <tr><td colspan="9" style="text-align:center;color:#7e92b2;">暂无数据</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- 多币种 + 链上（并排） -->
+                            <div class="card research-multi-lab">
+                                <div class="research-lab-header">
+                                    <h3>🔄 多币种与链上研究</h3>
+                                    <div class="inline-actions">
+                                        <button class="btn btn-sm" id="btn-workbench-cross-asset-secondary">🔄 多币种</button>
+                                        <button class="btn btn-sm" id="btn-workbench-fama-secondary">📊 Fama</button>
+                                        <button class="btn btn-sm" id="btn-workbench-onchain-secondary">⛓️ 链上</button>
+                                    </div>
+                                </div>
+
+                                <div class="research-mini-grid">
+                                    <!-- Fama因子 -->
+                                    <div class="research-mini-panel">
+                                        <div class="mini-title">📊 Fama 风格因子</div>
+                                        <div id="fama-factor-summary" class="research-metrics-mini">点击加载风格暴露</div>
+                                        <div id="fama-factor-chart" class="research-chart-box-mini">暂无Fama因子图</div>
+                                        <div class="table-container strategy-scroll" style="margin-top:8px;">
+                                            <table class="data-table">
+                                                <thead><tr><th>时间</th><th>MKT</th><th>SMB</th><th>HML</th><th>MOM</th></tr></thead>
+                                                <tbody id="fama-factor-tbody">
+                                                    <tr><td colspan="5" style="text-align:center;color:#7e92b2;">暂无数据</td></tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+
+                                    <!-- 链上数据 -->
+                                    <div class="research-mini-panel">
+                                        <div class="mini-title">⛓️ 链上与外生信息</div>
+                                        <div id="onchain-overview-summary" class="research-metrics-mini">点击加载TVL、巨鲸快照</div>
+                                        <div id="onchain-overview-chart" class="research-chart-box-mini">暂无链上图表</div>
+                                        <div id="external-info-summary" class="research-metrics-mini" style="margin-top:8px;">暂无外生摘要</div>
+                                        <div class="table-container strategy-scroll onchain-whale-scroll" id="onchain-whale-scroll" style="margin-top:8px;">
+                                            <table class="data-table">
+                                                <thead><tr><th>时间</th><th>BTC</th><th>估值</th><th>哈希</th></tr></thead>
+                                                <tbody id="onchain-whale-tbody">
+                                                    <tr><td colspan="4" style="text-align:center;color:#7e92b2;">暂无巨鲸转账</td></tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div id="multi-asset-summary" class="research-metrics-grid" style="margin-top:12px;">点击「多币种」加载收益/波动/相关性</div>
+                                <div id="multi-asset-corr-chart" class="research-chart-box">暂无多币种相关性矩阵</div>
+                                
+                                <div class="table-container strategy-scroll" style="margin-top:12px;">
+                                    <table class="data-table">
+                                        <thead>
+                                            <tr><th>币种</th><th>收益率%</th><th>波动率%</th><th>最大回撤%</th><th>成交量</th><th>现价</th></tr>
+                                        </thead>
+                                        <tbody id="multi-asset-tbody">
+                                            <tr><td colspan="6" style="text-align:center;color:#7e92b2;">暂无数据</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- 底部：纪律 + 调试 -->
+                            <div class="research-bottom-grid">
+                                <div class="card research-discipline-card">
+                                    <h3>🛡️ 纪律与风控</h3>
+                                    <div id="discipline-summary" class="research-metrics-grid">点击「纪律风控」加载行为记录</div>
+                                    <div id="discipline-grid" class="strategies-grid" style="margin-top:12px;"></div>
+                                </div>
+
+                                <div class="card research-output-card">
+                                    <h3>🔧 调试输出</h3>
+                                    <details id="research-debug-drawer">
+                                        <summary id="research-debug-summary">展开查看详细日志（默认收起）</summary>
+                                        <pre id="research-output" class="output-box">结构化结果与诊断信息</pre>
+                                    </details>
                                 </div>
                             </div>
                         </div>
-
-                        <!-- 研究总览 - 卡片式 -->
-                        <div class="card research-overview-board">
-                            <h3>📋 研究总览</h3>
-                            <div id="research-overview-summary-list" class="research-overview-cards">
-                                <div class="research-overview-card">
-                                    <div class="overview-card-icon">📊</div>
-                                    <div class="overview-card-content">
-                                        <div class="overview-card-label">市场状态</div>
-                                        <div class="overview-card-value">等待加载</div>
-                                    </div>
-                                </div>
-                                <div class="research-overview-card">
-                                    <div class="overview-card-icon">🌡️</div>
-                                    <div class="overview-card-content">
-                                        <div class="overview-card-label">情绪指标</div>
-                                        <div class="overview-card-value">等待加载</div>
-                                    </div>
-                                </div>
-                                <div class="research-overview-card">
-                                    <div class="overview-card-icon">📈</div>
-                                    <div class="overview-card-content">
-                                        <div class="overview-card-label">因子信号</div>
-                                        <div class="overview-card-value">等待加载</div>
-                                    </div>
-                                </div>
-                                <div class="research-overview-card">
-                                    <div class="overview-card-icon">🔄</div>
-                                    <div class="overview-card-content">
-                                        <div class="overview-card-label">多币种</div>
-                                        <div class="overview-card-value">等待加载</div>
-                                    </div>
-                                </div>
-                                <div class="research-overview-card">
-                                    <div class="overview-card-icon">⛓️</div>
-                                    <div class="overview-card-content">
-                                        <div class="overview-card-label">链上数据</div>
-                                        <div class="overview-card-value">等待加载</div>
-                                    </div>
-                                </div>
-                                <div class="research-overview-card">
-                                    <div class="overview-card-icon">🛡️</div>
-                                    <div class="overview-card-content">
-                                        <div class="overview-card-label">风控状态</div>
-                                        <div class="overview-card-value">等待加载</div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div id="research-overview-actions" class="research-actions-list" style="margin-top: 12px;"></div>
-                        </div>
-
-                        <!-- 市场状态 + 情绪信号（并排） -->
-                        <div class="research-grid-2 research-market-row">
-                            <div class="card">
-                                <h3>📊 市场状态</h3>
-                                <div id="analytics-overview-summary" class="research-metrics-grid">点击「市场状态」加载分析数据</div>
-                                <div id="analytics-module-grid" class="strategies-grid research-strip-grid" style="margin-top: 12px;"></div>
-                            </div>
-
-                            <div class="card">
-                                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-                                    <h3 style="margin:0;">🌡️ 情绪与信号</h3>
-                                    <button class="btn btn-sm" id="btn-refresh-market-sentiment-panel" title="仅刷新情绪与信号分面板">刷新</button>
-                                </div>
-                                <div id="market-sentiment-summary" class="research-metrics-grid">点击「市场状态」加载情绪数据</div>
-                                <div id="market-sentiment-chart" class="research-chart-box">暂无情绪图表</div>
-                                <div id="market-sentiment-grid" class="strategies-grid" style="margin-top: 12px;"></div>
-                            </div>
-                        </div>
-
-                        <!-- 市场状态历史日历 -->
-                        <div class="card" id="regime-calendar-card">
-                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-                                <h3 style="margin:0;">🗓️ 市场状态历史</h3>
-                                <div style="display:flex;gap:8px;align-items:center;">
-                                    <select id="regime-calendar-days" style="font-size:12px;padding:2px 6px;">
-                                        <option value="7" selected>近7天</option>
-                                        <option value="14">近14天</option>
-                                        <option value="30">近30天</option>
-                                    </select>
-                                    <button class="btn btn-sm" id="btn-load-regime-calendar">刷新</button>
-                                </div>
-                            </div>
-                            <div id="regime-calendar-grid" style="display:flex;flex-wrap:wrap;gap:6px;min-height:60px;">
-                                <div style="color:#6b7fa0;font-size:12px;">点击刷新加载历史状态</div>
-                            </div>
-                        </div>
-
-                        <!-- 研究建议（突出显示） -->
-                        <div class="card research-conclusion-card">
-                            <h3>💡 研究建议</h3>
-                            <div id="research-conclusion-summary" class="research-metrics-grid">运行「研究总览」后显示建议</div>
-                            <div id="research-conclusion-bullets" class="research-conclusion-bullets">
-                                <div class="research-conclusion-empty">暂无结论，请先运行研究总览</div>
-                            </div>
-                        </div>
-
-                        <!-- 因子实验室 -->
-                        <div class="card research-factor-lab">
-                            <div class="research-lab-header">
-                                <h3>📈 因子与风格实验室</h3>
-                                <div class="inline-actions">
-                                    <button class="btn btn-sm" id="btn-workbench-factors-secondary">🔄 刷新</button>
-                                    <button class="btn btn-sm" id="btn-factor-export-json">📤 JSON</button>
-                                    <button class="btn btn-sm" id="btn-factor-export-csv">📤 CSV</button>
-                                    <button class="btn btn-sm" id="btn-factor-export-report">📄 报告</button>
-                                </div>
-                            </div>
-                            
-                            <!-- 筛选工具栏 -->
-                            <div class="research-filter-bar">
-                                <div class="form-group">
-                                    <label>筛选币种</label>
-                                    <input type="text" id="factor-score-search" placeholder="BTC, ETH...">
-                                </div>
-                                <div class="form-group">
-                                    <label>排序</label>
-                                    <select id="factor-score-sort">
-                                        <option value="score_desc" selected>综合得分 ↓</option>
-                                        <option value="score_asc">综合得分 ↑</option>
-                                        <option value="momentum_desc">动量 ↓</option>
-                                        <option value="value_desc">价值 ↓</option>
-                                        <option value="quality_desc">质量 ↓</option>
-                                        <option value="low_vol_desc">低波 ↓</option>
-                                    </select>
-                                </div>
-                                <div class="form-group">
-                                    <label>显示</label>
-                                    <input type="number" id="factor-score-topn" value="50" min="10" max="200" step="10" style="width:80px;">
-                                </div>
-                            </div>
-
-                            <!-- 因子摘要卡片 -->
-                            <div id="factor-library-summary" class="research-factor-cards">
-                                <div class="factor-card">
-                                    <div class="factor-card-header">
-                                        <span class="factor-icon">📊</span>
-                                        <span class="factor-name">综合得分</span>
-                                    </div>
-                                    <div class="factor-card-value">--</div>
-                                    <div class="factor-card-desc">等待加载</div>
-                                </div>
-                                <div class="factor-card">
-                                    <div class="factor-card-header">
-                                        <span class="factor-icon">🚀</span>
-                                        <span class="factor-name">动量因子</span>
-                                    </div>
-                                    <div class="factor-card-value">--</div>
-                                    <div class="factor-card-desc">等待加载</div>
-                                </div>
-                                <div class="factor-card">
-                                    <div class="factor-card-header">
-                                        <span class="factor-icon">💎</span>
-                                        <span class="factor-name">价值因子</span>
-                                    </div>
-                                    <div class="factor-card-value">--</div>
-                                    <div class="factor-card-desc">等待加载</div>
-                                </div>
-                                <div class="factor-card">
-                                    <div class="factor-card-header">
-                                        <span class="factor-icon">🏆</span>
-                                        <span class="factor-name">质量因子</span>
-                                    </div>
-                                    <div class="factor-card-value">--</div>
-                                    <div class="factor-card-desc">等待加载</div>
-                                </div>
-                                <div class="factor-card">
-                                    <div class="factor-card-header">
-                                        <span class="factor-icon">🛡️</span>
-                                        <span class="factor-name">低波因子</span>
-                                    </div>
-                                    <div class="factor-card-value">--</div>
-                                    <div class="factor-card-desc">等待加载</div>
-                                </div>
-                                <div class="factor-card">
-                                    <div class="factor-card-header">
-                                        <span class="factor-icon">💧</span>
-                                        <span class="factor-name">流动性</span>
-                                    </div>
-                                    <div class="factor-card-value">--</div>
-                                    <div class="factor-card-desc">等待加载</div>
-                                </div>
-                            </div>
-
-                            <!-- 因子卡片网格 -->
-                            <div id="factor-library-grid" class="research-factor-mini-grid"></div>
-
-                            <!-- 相关性矩阵单独一行 -->
-                            <div class="research-corr-section">
-                                <div class="research-corr-title">📊 因子相关性矩阵</div>
-                                <div id="factor-corr-chart" class="research-corr-chart">暂无因子相关性矩阵</div>
-                            </div>
-
-                            <div class="table-container strategy-scroll">
-                                <table class="data-table">
-                                    <thead>
-                                        <tr>
-                                            <th>币种</th><th>综合</th><th>动量</th><th>价值</th><th>质量</th><th>低波</th><th>流动性</th><th>低β</th><th>规模</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="factor-scores-tbody">
-                                        <tr><td colspan="9" style="text-align:center;color:#7e92b2;">暂无数据</td></tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        <!-- 多币种 + 链上（并排） -->
-                        <div class="card research-multi-lab">
-                            <div class="research-lab-header">
-                                <h3>🔄 多币种与链上研究</h3>
-                                <div class="inline-actions">
-                                    <button class="btn btn-sm" id="btn-workbench-cross-asset-secondary">🔄 多币种</button>
-                                    <button class="btn btn-sm" id="btn-workbench-fama-secondary">📊 Fama</button>
-                                    <button class="btn btn-sm" id="btn-workbench-onchain-secondary">⛓️ 链上</button>
-                                </div>
-                            </div>
-
-                            <div class="research-mini-grid">
-                                <!-- Fama因子 -->
-                                <div class="research-mini-panel">
-                                    <div class="mini-title">📊 Fama 风格因子</div>
-                                    <div id="fama-factor-summary" class="research-metrics-mini">点击加载风格暴露</div>
-                                    <div id="fama-factor-chart" class="research-chart-box-mini">暂无Fama因子图</div>
-                                    <div class="table-container strategy-scroll" style="margin-top:8px;">
-                                        <table class="data-table">
-                                            <thead><tr><th>时间</th><th>MKT</th><th>SMB</th><th>HML</th><th>MOM</th></tr></thead>
-                                            <tbody id="fama-factor-tbody">
-                                                <tr><td colspan="5" style="text-align:center;color:#7e92b2;">暂无数据</td></tr>
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-
-                                <!-- 链上数据 -->
-                                <div class="research-mini-panel">
-                                    <div class="mini-title">⛓️ 链上与外生信息</div>
-                                    <div id="onchain-overview-summary" class="research-metrics-mini">点击加载TVL、巨鲸快照</div>
-                                    <div id="onchain-overview-chart" class="research-chart-box-mini">暂无链上图表</div>
-                                    <div id="external-info-summary" class="research-metrics-mini" style="margin-top:8px;">暂无外生摘要</div>
-                                    <div class="table-container strategy-scroll onchain-whale-scroll" id="onchain-whale-scroll" style="margin-top:8px;">
-                                        <table class="data-table">
-                                            <thead><tr><th>时间</th><th>BTC</th><th>估值</th><th>哈希</th></tr></thead>
-                                            <tbody id="onchain-whale-tbody">
-                                                <tr><td colspan="4" style="text-align:center;color:#7e92b2;">暂无巨鲸转账</td></tr>
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div id="multi-asset-summary" class="research-metrics-grid" style="margin-top:12px;">点击「多币种」加载收益/波动/相关性</div>
-                            <div id="multi-asset-corr-chart" class="research-chart-box">暂无多币种相关性矩阵</div>
-                            
-                            <div class="table-container strategy-scroll" style="margin-top:12px;">
-                                <table class="data-table">
-                                    <thead>
-                                        <tr><th>币种</th><th>收益率%</th><th>波动率%</th><th>最大回撤%</th><th>成交量</th><th>现价</th></tr>
-                                    </thead>
-                                    <tbody id="multi-asset-tbody">
-                                        <tr><td colspan="6" style="text-align:center;color:#7e92b2;">暂无数据</td></tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        <!-- 底部：纪律 + 调试 -->
-                        <div class="research-bottom-grid">
-                            <div class="card research-discipline-card">
-                                <h3>🛡️ 纪律与风控</h3>
-                                <div id="discipline-summary" class="research-metrics-grid">点击「纪律风控」加载行为记录</div>
-                                <div id="discipline-grid" class="strategies-grid" style="margin-top:12px;"></div>
-                            </div>
-
-                            <div class="card research-output-card">
-                                <h3>🔧 调试输出</h3>
-                                <details id="research-debug-drawer">
-                                    <summary id="research-debug-summary">展开查看详细日志（默认收起）</summary>
-                                    <pre id="research-output" class="output-box">结构化结果与诊断信息</pre>
-                                </details>
-                            </div>
-                        </div>
-
                     </div>
                 </div>
             </div>
@@ -2248,7 +2258,7 @@
                                             </div>
                                             <label id="ai-agent-universe-symbols-wrap" class="ai-agent-field ai-agent-field-block">
                                                 <span>候选币池</span>
-                                                <textarea id="ai-agent-universe-symbols" rows="3" placeholder="留空使用默认主流币池；或手动填写 BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT ..."></textarea>
+                                                <textarea id="ai-agent-universe-symbols" rows="2" placeholder="留空使用默认主流币池；或手动填写 BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT ..."></textarea>
                                             </label>
                                             <div class="ai-agent-config-divider">AI 资金预算</div>
                                             <div class="ai-agent-risk-config-note">默认按总资金比例限制 AI 可用仓位；如果填写固定总金额，就会直接覆盖比例上限。</div>

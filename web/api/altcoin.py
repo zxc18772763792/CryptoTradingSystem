@@ -27,6 +27,7 @@ from core.data.coinglass_altcoin import (
     is_alt_candidate_symbol,
     load_coinglass_market_snapshots,
 )
+from core.data.coinglass_registry import normalize_coinglass_symbol
 from core.research.altcoin_radar import (
     VALID_TIMEFRAMES,
     build_altcoin_rows,
@@ -278,6 +279,55 @@ async def _load_latest_snapshot_map(
     return [latest_by_symbol[symbol] for symbol in normalized if symbol in latest_by_symbol]
 
 
+def _map_derivatives_rows_to_requested_symbols(
+    rows: Sequence[Any],
+    *,
+    requested_symbols: Sequence[str],
+) -> Dict[str, Any]:
+    requested = _normalize_symbols(requested_symbols)
+    alias_map: Dict[str, List[str]] = {}
+    for symbol in requested:
+        alias_map.setdefault(symbol, []).append(symbol)
+        base_symbol = str(normalize_coinglass_symbol(symbol) or "").strip().upper()
+        if base_symbol:
+            alias_map.setdefault(base_symbol, []).append(symbol)
+
+    matched: Dict[str, Any] = {}
+    for row in rows:
+        row_symbol = str(getattr(row, "symbol", "") or "").strip().upper()
+        if not row_symbol:
+            continue
+        for requested_symbol in alias_map.get(row_symbol, []):
+            if requested_symbol not in matched:
+                matched[requested_symbol] = row
+    return matched
+
+
+async def _load_latest_derivatives_snapshot_map(symbols: Sequence[str]) -> Dict[str, Any]:
+    requested = _normalize_symbols(symbols)
+    if not requested:
+        return {}
+
+    lookup_keys = set(requested)
+    for symbol in requested:
+        base_symbol = str(normalize_coinglass_symbol(symbol) or "").strip().upper()
+        if base_symbol:
+            lookup_keys.add(base_symbol)
+
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(AnalyticsDerivativesSnapshot)
+            .where(
+                AnalyticsDerivativesSnapshot.exchange == "aggregate",
+                AnalyticsDerivativesSnapshot.symbol.in_(sorted(lookup_keys)),
+            )
+            .order_by(AnalyticsDerivativesSnapshot.timestamp.desc())
+        )
+        rows = result.scalars().all()
+
+    return _map_derivatives_rows_to_requested_symbols(rows, requested_symbols=requested)
+
+
 async def _load_snapshot_maps(
     *,
     exchange: str,
@@ -287,7 +337,7 @@ async def _load_snapshot_maps(
         _load_latest_snapshot_map(AnalyticsMicrostructureSnapshot, exchange=exchange, symbols=symbols),
         _load_latest_snapshot_map(AnalyticsCommunitySnapshot, exchange=exchange, symbols=symbols),
         _load_latest_snapshot_map(AnalyticsWhaleSnapshot, exchange=exchange, symbols=symbols),
-        _load_latest_snapshot_map(AnalyticsDerivativesSnapshot, exchange="aggregate", symbols=symbols),
+        _load_latest_derivatives_snapshot_map(symbols),
     )
     micro = {
         str(row.symbol).strip().upper(): _serialize_micro_snapshot(row)
@@ -305,9 +355,9 @@ async def _load_snapshot_maps(
         if getattr(row, "symbol", None)
     }
     derivatives = {
-        str(row.symbol).strip().upper(): _serialize_derivatives_snapshot(row)
-        for row in derivatives_rows
-        if getattr(row, "symbol", None)
+        str(symbol).strip().upper(): _serialize_derivatives_snapshot(row)
+        for symbol, row in dict(derivatives_rows or {}).items()
+        if symbol and row is not None
     }
     return micro, community, whale, derivatives
 
@@ -336,6 +386,63 @@ def _should_overlay_coinglass_market_snapshot(snapshot: Optional[Mapping[str, An
     if age_sec is None:
         return True
     return age_sec > 1800.0
+
+
+def _needs_detail_chain_fallback(row: Optional[Mapping[str, Any]]) -> bool:
+    percentiles = (((row or {}).get("metrics") or {}).get("percentiles") or {})
+    return any(
+        percentiles.get(key) is None
+        for key in ("community_flow", "announcements", "funding_basis", "whale_context")
+    )
+
+
+async def _load_detail_live_chain_context(
+    *,
+    exchange: str,
+    symbol: str,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    try:
+        from web.api.trading import get_community_overview  # noqa: PLC0415
+    except Exception:
+        return {}, {}
+
+    try:
+        payload = dict(await get_community_overview(symbol=symbol, exchange=exchange) or {})
+    except Exception:
+        return {}, {}
+
+    timestamp = payload.get("timestamp") or _utcnow().isoformat()
+    community_snapshot = {
+        "exchange": exchange,
+        "symbol": symbol,
+        "timestamp": timestamp,
+        "source_error": payload.get("error"),
+        "source_name": "live_community_overview",
+        "capture_status": "ok" if not payload.get("error") else "degraded",
+        "latency_ms": payload.get("latency_ms"),
+        "payload": payload,
+        "flow_proxy": dict(payload.get("flow_proxy") or {}),
+        "announcements": list(payload.get("announcements") or []),
+        "security_alerts": payload.get("security_alerts") or {},
+        "twitter_watchlist": list(payload.get("twitter_watchlist") or []),
+    }
+    whale_payload = dict(payload.get("whale_transfers") or {})
+    whale_snapshot = {
+        "exchange": exchange,
+        "symbol": symbol,
+        "timestamp": timestamp,
+        "available": bool(whale_payload.get("available", True)),
+        "source_error": whale_payload.get("error"),
+        "source_name": "live_community_overview",
+        "capture_status": "ok" if not whale_payload.get("error") else "degraded",
+        "latency_ms": payload.get("latency_ms"),
+        "payload": whale_payload,
+        "count": int(whale_payload.get("count") or 0),
+        "threshold_btc": whale_payload.get("threshold_btc"),
+        "btc_price": whale_payload.get("btc_price"),
+        "transactions": list(whale_payload.get("transactions") or []),
+    }
+    return community_snapshot, whale_snapshot
 
 
 async def _resolve_universe(
@@ -771,6 +878,7 @@ async def get_altcoin_radar_detail(
     normalized_symbol = str(symbol or "").strip().upper()
     if not normalized_symbol:
         raise HTTPException(status_code=400, detail="symbol is required")
+    normalized_exchange = _normalize_exchange(exchange)
     normalized_symbols = _parse_symbols_param(symbols)
     scan_payload = await get_altcoin_scan_snapshot(
         exchange=exchange,
@@ -779,19 +887,54 @@ async def get_altcoin_radar_detail(
         exclude_retired=exclude_retired,
         refresh=refresh,
     )
-    onchain_context = await get_onchain_overview(
+    selected_row = next(
+        (
+            dict(row or {})
+            for row in (scan_payload.get("rows") or [])
+            if str((row or {}).get("symbol") or "").strip().upper() == normalized_symbol
+        ),
+        None,
+    )
+    need_chain_fallback = _needs_detail_chain_fallback(selected_row)
+    onchain_task = get_onchain_overview(
         symbol=normalized_symbol,
-        exchange=_normalize_exchange(exchange),
+        exchange=normalized_exchange,
         whale_threshold_btc=10.0,
         chain="Ethereum",
         refresh=refresh,
         hours=4,
     )
+    live_chain_task = _load_detail_live_chain_context(
+        exchange=normalized_exchange,
+        symbol=normalized_symbol,
+    ) if need_chain_fallback else asyncio.sleep(0, result=({}, {}))
+    onchain_context, live_chain_context = await asyncio.gather(onchain_task, live_chain_task)
+    live_community_snapshot, live_whale_snapshot = live_chain_context
+    if not live_whale_snapshot:
+        onchain_whales = dict((onchain_context or {}).get("whale_activity") or {})
+        if onchain_whales:
+            live_whale_snapshot = {
+                "exchange": normalized_exchange,
+                "symbol": normalized_symbol,
+                "timestamp": (onchain_context or {}).get("generated_at"),
+                "available": bool(onchain_whales.get("available", True)),
+                "source_error": onchain_whales.get("error"),
+                "source_name": "onchain_overview",
+                "capture_status": "ok" if not onchain_whales.get("error") else "degraded",
+                "latency_ms": (onchain_context or {}).get("latency_ms"),
+                "payload": onchain_whales,
+                "count": int(onchain_whales.get("count") or 0),
+                "threshold_btc": onchain_whales.get("threshold_btc"),
+                "btc_price": onchain_whales.get("btc_price"),
+                "transactions": list(onchain_whales.get("transactions") or []),
+            }
     detail = build_detail_payload(
         rows=scan_payload.get("rows") or [],
         symbol=normalized_symbol,
         sort_by=_normalize_sort("layout"),
         onchain_context=onchain_context,
+        detail_community_snapshot=live_community_snapshot,
+        detail_whale_snapshot=live_whale_snapshot,
     )
     detail["scan_meta"] = {
         "exchange": scan_payload.get("exchange"),

@@ -24,6 +24,7 @@ _TAG_CACHE_TTL_SEC = 7 * 86400.0
 _DEFAULT_MARKET_PER_PAGE = 200
 _DEFAULT_MARKET_MAX_PAGES = 4
 _DEFAULT_TAG_SAMPLE_LIMIT = 240
+_RESEARCH_MAJOR_SYMBOL_LIMIT = 10
 _MAJOR_MARKET_CAP_EXCLUSION_USD = 80_000_000_000.0
 _CURRENCY_PAGE_URL = "https://www.coinglass.com/currencies/{symbol}"
 _USER_AGENT = (
@@ -137,6 +138,43 @@ def is_alt_candidate_symbol(symbol: str, market_cap_usd: Optional[float] = None)
     if market_cap is not None and market_cap >= _MAJOR_MARKET_CAP_EXCLUSION_USD:
         return False
     return True
+
+
+def is_research_universe_symbol(symbol: str, market_cap_usd: Optional[float] = None) -> bool:
+    base = _symbol_base(symbol)
+    if not base:
+        return False
+    if re.match(r"^\d", base):
+        return False
+    if base in _NON_ALT_BASES:
+        return False
+    market_cap = _clip_float(market_cap_usd)
+    if market_cap is not None and market_cap <= 0:
+        return False
+    return True
+
+
+def _major_market_cap_symbols(
+    market_ranked: Sequence[Mapping[str, Any]],
+    *,
+    limit: int = _RESEARCH_MAJOR_SYMBOL_LIMIT,
+) -> List[str]:
+    selected: List[str] = []
+    seen: set[str] = set()
+    for item in market_ranked:
+        symbol = str((item or {}).get("symbol") or "").strip()
+        if not symbol or symbol in seen:
+            continue
+        if not is_research_universe_symbol(
+            str((item or {}).get("base_symbol") or symbol),
+            _clip_float((item or {}).get("market_cap_usd")),
+        ):
+            continue
+        selected.append(symbol)
+        seen.add(symbol)
+        if len(selected) >= max(1, int(limit or _RESEARCH_MAJOR_SYMBOL_LIMIT)):
+            break
+    return selected
 
 
 def _market_cache_key(exchange: str) -> str:
@@ -653,6 +691,7 @@ async def build_exchange_altcoin_universe(
         "symbols": final_symbols,
         "count": len(final_symbols),
         "source": "coinglass_altcoin_universe",
+        "major_market_cap_symbols": _major_market_cap_symbols(market_ranked),
         "board_count": len(boards_payload),
         "boards": boards_payload,
         "selection_reasons": {symbol: reasons for symbol, reasons in selected_reasons.items()},

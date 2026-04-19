@@ -55,6 +55,8 @@ def test_arbitrage_page_assets_and_hooks_exist():
     assert "async function openBacktestWithSpec" in app_js
     assert "function setBacktestCustomParams" in app_js
     assert "function getBacktestCustomParams" in app_js
+    assert "if(sdEl)sdEl.value=sd||'';" in app_js
+    assert "if(edEl)edEl.value=ed||'';" in app_js
     assert "function buildArbitrageStrategySpec" in app_js
     assert "async function registerArbitrageStrategy" in app_js
     assert "async function jumpToBacktestFromArbitrage" in app_js

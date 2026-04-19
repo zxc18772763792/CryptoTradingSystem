@@ -63,10 +63,17 @@
     const summaryEl = document.getElementById('ai-agent-review-summary');
     if (!workspace || !summaryEl) return;
 
+    if (window.innerWidth <= 1280) {
+      workspace.style.removeProperty('--ai-agent-review-history-height');
+      return;
+    }
+
     const summaryHeight = Math.ceil(summaryEl.getBoundingClientRect().height || 0);
     if (summaryHeight > 0) {
       workspace.style.setProperty('--ai-agent-review-history-height', `${summaryHeight}px`);
+      return;
     }
+    workspace.style.removeProperty('--ai-agent-review-history-height');
   }
 
   function queueAgentReviewHistorySync() {

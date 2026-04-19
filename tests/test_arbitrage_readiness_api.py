@@ -6,6 +6,7 @@ import pandas as pd
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from web.api import backtest as backtest_api
 from web.api import data as data_api
 
 
@@ -327,3 +328,62 @@ def test_arbitrage_readiness_route_adds_coinglass_alerts_for_cex_arbitrage(monke
     assert payload["gates"]["derivatives_alert"] is True
     assert payload["derivatives_overlay"]["cards"][0]["headline"] == "Funding / Basis 异常"
     assert any("funding_z" in item for item in payload["derivatives_overlay"]["alerts"])
+
+
+def test_arbitrage_readiness_route_respects_explicit_exchange_scope(monkeypatch):
+    monkeypatch.setattr(
+        data_api,
+        "get_backtest_strategy_info",
+        lambda strategy: {"supported": True, "description": "pairs_backtest"},
+    )
+
+    primary_df = _make_frame(1400)
+    pair_df = _make_frame(1400)
+
+    async def fake_load_klines_from_parquet(
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        start_time=None,
+        end_time=None,
+    ):
+        mapping = {
+            ("binance", "BTC/USDT", "1h"): primary_df,
+            ("binance", "ETH/USDT", "1h"): pair_df,
+        }
+        return mapping.get((str(exchange), str(symbol), str(timeframe)), pd.DataFrame()).copy()
+
+    monkeypatch.setattr(backtest_api.data_storage, "load_klines_from_parquet", fake_load_klines_from_parquet)
+
+    with TestClient(_build_app()) as client:
+        gate_response = client.get(
+            "/api/data/research/arbitrage-readiness",
+            params={
+                "strategy": "PairsTradingStrategy",
+                "exchange": "gate",
+                "symbol": "BTC/USDT",
+                "pair_symbol": "ETH/USDT",
+                "timeframe": "1h",
+            },
+        )
+        binance_response = client.get(
+            "/api/data/research/arbitrage-readiness",
+            params={
+                "strategy": "PairsTradingStrategy",
+                "exchange": "binance",
+                "symbol": "BTC/USDT",
+                "pair_symbol": "ETH/USDT",
+                "timeframe": "1h",
+            },
+        )
+
+    assert gate_response.status_code == 200
+    gate_payload = gate_response.json()
+    assert gate_payload["data_status"]["ready"] is False
+    assert gate_payload["cost_status"]["status"] == "unknown"
+    assert gate_payload["recommended_action"] == "先补数据"
+    assert gate_payload["gates"]["blocked_reasons"][0].startswith("双腿历史数据不足")
+
+    assert binance_response.status_code == 200
+    binance_payload = binance_response.json()
+    assert binance_payload["data_status"]["ready"] is True

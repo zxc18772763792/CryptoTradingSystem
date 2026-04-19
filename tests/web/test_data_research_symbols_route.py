@@ -15,6 +15,7 @@ def test_research_symbols_prefers_coinglass_altcoin_universe(monkeypatch):
         assert exchange == "binance"
         return {
             "exchange": "binance",
+            "major_market_cap_symbols": ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT"],
             "symbols": ["LINK/USDT", "AAVE/USDT", "TAO/USDT"],
             "count": 3,
             "source": "coinglass_altcoin_universe",
@@ -29,8 +30,19 @@ def test_research_symbols_prefers_coinglass_altcoin_universe(monkeypatch):
     payload = response.json()
 
     assert payload["source"] == "coinglass_altcoin_universe"
-    assert payload["symbols"] == ["LINK/USDT", "AAVE/USDT", "TAO/USDT"]
-    assert payload["default_count"] == 3
+    assert payload["primary_symbol"] == "BTC/USDT"
+    assert payload["major_market_cap_symbols"] == ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT"]
+    assert payload["symbols"][:8] == [
+        "BTC/USDT",
+        "ETH/USDT",
+        "BNB/USDT",
+        "SOL/USDT",
+        "XRP/USDT",
+        "LINK/USDT",
+        "AAVE/USDT",
+        "TAO/USDT",
+    ]
+    assert payload["default_count"] == 8
 
 
 def test_research_symbols_falls_back_when_coinglass_universe_fails(monkeypatch):
@@ -56,5 +68,6 @@ def test_research_symbols_falls_back_when_coinglass_universe_fails(monkeypatch):
     payload = response.json()
 
     assert payload["source"] == "research_universe_fallback"
+    assert payload["primary_symbol"] == "BTC/USDT"
     assert payload["symbols"] == ["BTC/USDT", "ETH/USDT"]
     assert payload["default_count"] == 2

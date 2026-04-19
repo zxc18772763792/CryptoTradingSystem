@@ -49,6 +49,7 @@ def test_market_state_prefers_recent_history_snapshots(monkeypatch):
     from web.api import research as module
 
     monkeypatch.setattr(module, "_load_preferred_coinglass_overview", AsyncMock(return_value={}))
+    monkeypatch.setattr(module, "get_analytics_history_status", AsyncMock(return_value={}))
     monkeypatch.setattr(module, "get_risk_dashboard", AsyncMock(return_value={"risk_level": "low"}))
     monkeypatch.setattr(
         module,
@@ -81,6 +82,7 @@ def test_market_state_does_not_retry_empty_news_summary(monkeypatch):
     from web.api import research as module
 
     monkeypatch.setattr(module, "_load_preferred_coinglass_overview", AsyncMock(return_value={}))
+    monkeypatch.setattr(module, "get_analytics_history_status", AsyncMock(return_value={}))
     monkeypatch.setattr(module, "get_risk_dashboard", AsyncMock(return_value={"risk_level": "low"}))
     monkeypatch.setattr(
         module,
@@ -106,6 +108,7 @@ def test_market_state_keeps_ok_when_spread_zero_but_depth_exists(monkeypatch):
     from web.api import research as module
 
     monkeypatch.setattr(module, "_load_preferred_coinglass_overview", AsyncMock(return_value={}))
+    monkeypatch.setattr(module, "get_analytics_history_status", AsyncMock(return_value={}))
     micro_snapshot = _history_micro_snapshot()
     micro_snapshot["orderbook"] = {
         "mid_price": 100000.0,
@@ -166,6 +169,7 @@ def test_market_state_prefers_coinglass_derivatives_overlay(monkeypatch):
             }
         ),
     )
+    monkeypatch.setattr(module, "get_analytics_history_status", AsyncMock(return_value={}))
     monkeypatch.setattr(module, "get_risk_dashboard", AsyncMock(return_value={"risk_level": "low"}))
     monkeypatch.setattr(
         module,
@@ -192,4 +196,93 @@ def test_market_state_prefers_coinglass_derivatives_overlay(monkeypatch):
     assert (
         result["payload"]["sentiment_dashboard"]["microstructure"]["spot_futures_basis"]["basis_pct"]
         == 0.18
+    )
+
+
+def test_market_state_falls_back_to_history_derivatives_shadow_when_overview_is_missing(monkeypatch):
+    from web.api import research as module
+
+    micro_snapshot = _history_micro_snapshot()
+    micro_snapshot["long_short_ratio"] = {"available": False}
+    micro_snapshot["funding_rate"] = {"available": False}
+    micro_snapshot["spot_futures_basis"] = {"available": False}
+    micro_snapshot["aggressor_flow"] = {"count": 0, "imbalance": 0.0}
+
+    monkeypatch.setattr(
+        module,
+        "_load_preferred_coinglass_overview",
+        AsyncMock(
+            return_value={
+                "available": False,
+                "key_configured": True,
+                "freshness_sec": None,
+                "degraded_reason": "coinglass_cache_empty",
+                "active_datasets": [],
+                "snapshot": {},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "get_analytics_history_status",
+        AsyncMock(
+            return_value={
+                "collectors": [
+                    {
+                        "collector": "derivatives",
+                        "status": "ok",
+                        "available": True,
+                        "details": {
+                            "provider": "coinglass",
+                            "freshness_sec": 120.0,
+                            "active_datasets": [
+                                "funding_rate_exchange_list",
+                                "open_interest_exchange_list",
+                            ],
+                            "snapshot": {
+                                "timestamp": _recent_snapshot_ts(),
+                                "funding_rate": 0.00042,
+                                "long_short_ratio": 1.31,
+                                "basis_pct": 0.11,
+                                "taker_buy_sell_imbalance": 0.19,
+                                "payload": {
+                                    "history_ready": True,
+                                    "history_exchange": "Binance",
+                                    "history_interval": "h1",
+                                    "funding_mean": 0.0007,
+                                    "funding_zscore": 1.4,
+                                },
+                            },
+                        },
+                    }
+                ]
+            }
+        ),
+    )
+    monkeypatch.setattr(module, "get_risk_dashboard", AsyncMock(return_value={"risk_level": "low"}))
+    monkeypatch.setattr(
+        module,
+        "get_trading_calendar",
+        AsyncMock(return_value={"events": [{"name": "CPI", "time_utc": _recent_snapshot_ts(), "importance": "high"}]}),
+    )
+    monkeypatch.setattr(module, "_build_news_summary", AsyncMock(return_value=_news_summary(2)))
+    monkeypatch.setattr(module, "_load_latest_microstructure_snapshot", AsyncMock(return_value=micro_snapshot))
+    monkeypatch.setattr(module, "_load_latest_community_snapshot", AsyncMock(return_value=_history_community_snapshot()))
+    monkeypatch.setattr(module, "_load_latest_whale_snapshot", AsyncMock(return_value={"count": 2, "transactions": []}))
+    monkeypatch.setattr(module, "get_market_microstructure", AsyncMock(side_effect=AssertionError("live microstructure should be skipped")))
+    monkeypatch.setattr(module, "get_community_overview", AsyncMock(side_effect=AssertionError("live community should be skipped")))
+
+    result = asyncio.run(module._build_market_state_module(module.ResearchProfile()))
+
+    assert result["status"] == "ok"
+    assert result["summary"]["derivatives_status"] == "ok"
+    assert result["payload"]["derivatives_summary"]["available"] is True
+    assert result["payload"]["microstructure_summary"]["long_short_ratio"] == 1.31
+    assert (
+        result["payload"]["sentiment_dashboard"]["microstructure"]["funding_rate"]["funding_rate"]
+        == 0.00042
+    )
+    assert (
+        result["payload"]["sentiment_dashboard"]["microstructure"]["spot_futures_basis"]["basis_pct"]
+        == 0.11
     )

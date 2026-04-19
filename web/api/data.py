@@ -90,6 +90,7 @@ _ONCHAIN_OVERVIEW_CACHE: Dict[str, Dict[str, Any]] = {}
 _ONCHAIN_OVERVIEW_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
 _FACTOR_LIBRARY_CACHE: Dict[str, Dict[str, Any]] = {}
 _FACTOR_LIBRARY_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
+_FACTOR_LIBRARY_REFRESH_META: Dict[str, Dict[str, Any]] = {}
 _FAMA_CACHE: Dict[str, Dict[str, Any]] = {}
 _FAMA_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
 _HEALTH_EXACT_SCAN_ROW_LIMIT = 250000
@@ -102,6 +103,8 @@ _ONCHAIN_OVERVIEW_CACHE_TTL_SEC = 180.0
 _ONCHAIN_OVERVIEW_CACHE_STALE_SEC = 1800.0
 _FACTOR_CACHE_TTL_SEC = 300.0
 _FACTOR_CACHE_STALE_SEC = 1800.0
+_FACTOR_LIBRARY_BOOTSTRAP_WAIT_SEC = 3.0
+_FACTOR_LIBRARY_PENDING_RETRY_SEC = 5.0
 _PAIR_SCAN_ALLOWED_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
 _PAIR_SCAN_DEFAULT_LOOKBACK = {
     "1m": 1440,
@@ -119,6 +122,7 @@ _ARBITRAGE_COST_PASS_MAX = 30.0
 _ARBITRAGE_COST_WARN_MAX = 60.0
 _ARBITRAGE_MAX_UNIVERSE_SYMBOLS = 12
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_RESEARCH_PAYLOAD_CACHE_DIR = _PROJECT_ROOT / "data" / "cache" / "research_payloads"
 _RESEARCH_UNIVERSE_TASK_NAME = "CryptoTradingSystem_ResearchUniverseRefresh"
 _RESEARCH_UNIVERSE_SUMMARY_PATH = _PROJECT_ROOT / "data" / "research" / "research_universe_incremental_latest.json"
 _RESEARCH_UNIVERSE_LOG_PATH = _PROJECT_ROOT / "logs" / "research_universe_refresh.log"
@@ -1945,6 +1949,65 @@ def _store_research_cached_payload(
     return payload
 
 
+def _prime_research_cached_payload(
+    cache_store: Dict[str, Dict[str, Any]],
+    cache_key: str,
+    payload: Dict[str, Any],
+    *,
+    age_sec: float = 0.0,
+) -> Dict[str, Any]:
+    cache_store[cache_key] = {
+        "created_monotonic": max(0.0, time.monotonic() - max(0.0, float(age_sec or 0.0))),
+        "payload": _clone_jsonable(payload),
+    }
+    return payload
+
+
+def _research_payload_disk_cache_path(prefix: str, cache_key: str) -> Path:
+    digest = hashlib.sha1(str(cache_key or "").encode("utf-8")).hexdigest()
+    return _RESEARCH_PAYLOAD_CACHE_DIR / str(prefix or "generic") / f"{digest}.json"
+
+
+def _load_research_disk_cached_payload(
+    prefix: str,
+    cache_key: str,
+    *,
+    max_age_sec: float = 86400.0,
+) -> Optional[Dict[str, Any]]:
+    path = _research_payload_disk_cache_path(prefix, cache_key)
+    if not path.exists():
+        return None
+    try:
+        age_sec = max(0.0, time.time() - float(path.stat().st_mtime))
+    except Exception:
+        age_sec = 0.0
+    if age_sec > max(60.0, float(max_age_sec or 0.0)):
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    payload = dict(payload)
+    payload["cached"] = True
+    payload["cache_age_sec"] = round(age_sec, 3)
+    payload["refreshing"] = False
+    payload["stale"] = age_sec > _FACTOR_CACHE_TTL_SEC
+    payload["stale_too_long"] = age_sec > _FACTOR_CACHE_STALE_SEC
+    payload["served_mode"] = "disk_cache"
+    payload["cache_source"] = "disk"
+    return payload
+
+
+def _store_research_disk_cached_payload(prefix: str, cache_key: str, payload: Dict[str, Any]) -> None:
+    path = _research_payload_disk_cache_path(prefix, cache_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = _clone_jsonable(payload)
+    body["stored_at_utc"] = _utc_iso()
+    path.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _build_factor_library_placeholder(
     *,
     exchange: str,
@@ -1984,6 +2047,114 @@ def _build_factor_library_placeholder(
         "refreshing": False,
         "served_mode": "fallback",
     }
+
+
+def _estimate_factor_library_expected_sec(*, timeframe: str, symbol_count: int, lookback: int) -> float:
+    tf = str(timeframe or "1h").lower()
+    tf_scale = {
+        "1m": 1.25,
+        "5m": 1.15,
+        "15m": 1.0,
+        "1h": 1.1,
+        "4h": 1.15,
+        "1d": 1.2,
+    }.get(tf, 1.1)
+    return max(
+        8.0,
+        min(
+            90.0,
+            (6.0 + max(1, int(symbol_count or 0)) * 2.0 + max(120, int(lookback or 0)) / 70.0) * tf_scale,
+        ),
+    )
+
+
+def _build_factor_library_pending_message(
+    *,
+    timeframe: str,
+    symbol_count: int,
+    lookback: int,
+    elapsed_sec: float,
+    expected_sec: float,
+) -> str:
+    return (
+        f"因子库首次计算中：{str(timeframe or '1h').upper()} / {int(symbol_count or 0)} 币 / "
+        f"lookback {int(lookback or 0)}，已等待 {max(0.0, float(elapsed_sec or 0.0)):.1f} 秒，"
+        f"通常需要约 {max(1.0, float(expected_sec or 0.0)):.0f} 秒。"
+    )
+
+
+def _build_factor_library_pending_placeholder(
+    *,
+    exchange: str,
+    timeframe: str,
+    symbols_requested: List[str],
+    exclude_retired: bool,
+    refresh_meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    meta = dict(refresh_meta or {})
+    symbol_count = max(1, int(meta.get("symbol_count") or len(symbols_requested or []) or 1))
+    lookback = max(120, int(meta.get("lookback") or 0) or 120)
+    elapsed_sec = max(0.0, float(meta.get("elapsed_sec") or 0.0))
+    expected_sec = _estimate_factor_library_expected_sec(
+        timeframe=str(meta.get("timeframe") or timeframe or "1h"),
+        symbol_count=symbol_count,
+        lookback=lookback,
+    )
+    message = _build_factor_library_pending_message(
+        timeframe=str(meta.get("timeframe") or timeframe or "1h"),
+        symbol_count=symbol_count,
+        lookback=lookback,
+        elapsed_sec=elapsed_sec,
+        expected_sec=expected_sec,
+    )
+    payload = _build_factor_library_placeholder(
+        exchange=exchange,
+        timeframe=timeframe,
+        symbols_requested=symbols_requested,
+        exclude_retired=exclude_retired,
+        reason=message,
+    )
+    payload.update(
+        {
+            "refreshing": True,
+            "served_mode": "bootstrap",
+            "pending": True,
+            "pending_stage": "bootstrap",
+            "pending_since": meta.get("started_at"),
+            "pending_elapsed_sec": round(elapsed_sec, 3),
+            "pending_expected_sec": round(expected_sec, 3),
+            "retry_after_sec": float(_FACTOR_LIBRARY_PENDING_RETRY_SEC),
+            "cache_source": "none",
+        }
+    )
+    return payload
+
+
+def _augment_factor_library_refreshing_payload(
+    payload: Dict[str, Any],
+    *,
+    refresh_meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    meta = dict(refresh_meta or {})
+    updated = _clone_jsonable(payload)
+    cache_age_sec = round(float(updated.get("cache_age_sec") or 0.0), 3)
+    updated["refreshing"] = True
+    updated["served_mode"] = "cache_refresh"
+    updated["pending"] = True
+    updated["pending_stage"] = "refreshing"
+    updated["pending_since"] = meta.get("started_at")
+    updated["pending_elapsed_sec"] = round(float(meta.get("elapsed_sec") or 0.0), 3)
+    updated["retry_after_sec"] = float(_FACTOR_LIBRARY_PENDING_RETRY_SEC)
+    updated.setdefault("cache_source", "memory")
+
+    cache_label = "磁盘缓存" if updated.get("cache_source") == "disk" else "缓存"
+    note = f"当前展示的是 {cache_age_sec:.0f} 秒前的{cache_label}，后台仍在刷新因子库。"
+    warnings = [str(item) for item in list(updated.get("warnings") or []) if str(item).strip()]
+    if note not in warnings:
+        warnings.insert(0, note)
+    updated["warnings"] = warnings
+    updated["error"] = ""
+    return updated
 
 
 def _build_fama_placeholder(
@@ -2472,6 +2643,7 @@ async def _refresh_factor_library_cache(
             exclude_retired=exclude_retired,
         )
         _store_research_cached_payload(_FACTOR_LIBRARY_CACHE, cache_key, payload)
+        _store_research_disk_cached_payload("factor_library", cache_key, payload)
     except Exception as e:
         logger.warning(f"factor library refresh failed {cache_key}: {e}")
         cached = dict(_FACTOR_LIBRARY_CACHE.get(cache_key) or {})
@@ -2483,6 +2655,7 @@ async def _refresh_factor_library_cache(
             _FACTOR_LIBRARY_CACHE[cache_key] = cached
     finally:
         _FACTOR_LIBRARY_REFRESH_TASKS.pop(cache_key, None)
+        _FACTOR_LIBRARY_REFRESH_META.pop(cache_key, None)
 
 
 async def _refresh_fama_cache(
@@ -2514,6 +2687,16 @@ async def _refresh_fama_cache(
             _FAMA_CACHE[cache_key] = cached
     finally:
         _FAMA_REFRESH_TASKS.pop(cache_key, None)
+
+
+def _factor_library_refresh_meta(cache_key: str) -> Dict[str, Any]:
+    meta = dict(_FACTOR_LIBRARY_REFRESH_META.get(cache_key) or {})
+    started_monotonic = meta.get("started_monotonic")
+    if started_monotonic is not None:
+        meta["elapsed_sec"] = max(0.0, time.monotonic() - float(started_monotonic))
+    else:
+        meta["elapsed_sec"] = 0.0
+    return meta
 
 
 @router.get("/klines")
@@ -3284,6 +3467,17 @@ def _queue_download_task(payload: Dict[str, Any]) -> Dict[str, Any]:
     return task_record
 
 
+def _should_queue_single_download(
+    *,
+    requested_background: Optional[bool],
+    timeframe: str,
+    span_days: float,
+) -> bool:
+    if requested_background is not None:
+        return bool(requested_background)
+    return not (str(timeframe or "") in {"1h", "4h", "1d"} and span_days <= 30)
+
+
 @router.post("/download")
 async def download_historical_data(
     exchange: str,
@@ -3292,7 +3486,7 @@ async def download_historical_data(
     days: int = 365,
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
-    background: bool = True,
+    background: Optional[bool] = None,
 ):
     payload = {
         "exchange": exchange,
@@ -3305,9 +3499,11 @@ async def download_historical_data(
     span_ref_end = _normalize_query_datetime(end_time) or datetime.now()
     span_ref_start = _normalize_query_datetime(start_time) or (span_ref_end - timedelta(days=max(1, int(days or 1))))
     span_days = max(0.0, (span_ref_end - span_ref_start).total_seconds() / 86400.0)
-    should_background = bool(background)
-    if str(timeframe or "") in {"1h", "4h", "1d"} and span_days <= 30:
-        should_background = bool(background and False)
+    should_background = _should_queue_single_download(
+        requested_background=background,
+        timeframe=timeframe,
+        span_days=span_days,
+    )
     if not should_background:
         return await run_download_historical_data(
             exchange=exchange,
@@ -3894,13 +4090,43 @@ async def get_data_symbols(exchange: str = "binance"):
     exchange_name = str(exchange or "binance").strip().lower() or "binance"
     available_rows = (await get_available_data()).get("available") or []
     preferred = [
-        "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT",
-        "DOGE/USDT", "TRX/USDT", "LINK/USDT", "AVAX/USDT", "DOT/USDT", "POL/USDT",
+        "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT",
+        "ADA/USDT", "TRX/USDT", "TON/USDT", "LINK/USDT", "AVAX/USDT", "DOT/USDT", "POL/USDT",
         "LTC/USDT", "BCH/USDT", "ETC/USDT", "ATOM/USDT", "NEAR/USDT", "APT/USDT",
         "ARB/USDT", "OP/USDT", "SUI/USDT", "INJ/USDT", "RUNE/USDT", "AAVE/USDT",
-        "MKR/USDT", "UNI/USDT", "FIL/USDT", "HBAR/USDT", "ICP/USDT", "TON/USDT",
+        "MKR/USDT", "UNI/USDT", "FIL/USDT", "HBAR/USDT", "ICP/USDT",
     ]
     return _build_symbol_payload(exchange_name, preferred)
+
+
+_RESEARCH_MAJOR_SYMBOL_FALLBACK = [
+    "BTC/USDT",
+    "ETH/USDT",
+    "BNB/USDT",
+    "SOL/USDT",
+    "XRP/USDT",
+    "DOGE/USDT",
+    "ADA/USDT",
+    "TRX/USDT",
+    "TON/USDT",
+    "LINK/USDT",
+]
+
+
+def _merge_research_symbol_lists(*groups: Any, limit: int = 60) -> List[str]:
+    merged: List[str] = []
+    seen: set[str] = set()
+    max_items = max(1, int(limit or 60))
+    for group in groups:
+        for raw in list(group or []):
+            symbol = str(raw or "").strip().upper()
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            merged.append(symbol)
+            if len(merged) >= max_items:
+                return merged
+    return merged
 
 
 @router.get("/research/symbols")
@@ -3912,16 +4138,34 @@ async def get_research_symbols(exchange: str = "binance"):
         data = await get_data_symbols(exchange=exchange)
         data["source"] = "research_universe_fallback"
         data["warning"] = str(exc)
+        data["primary_symbol"] = str((data.get("symbols") or ["BTC/USDT"])[0] or "BTC/USDT")
         data["default_count"] = min(30, len(data.get("symbols") or []))
         return data
 
     if not data.get("symbols"):
         fallback = await get_data_symbols(exchange=exchange)
         fallback["source"] = "research_universe_fallback_empty"
+        fallback["primary_symbol"] = str((fallback.get("symbols") or ["BTC/USDT"])[0] or "BTC/USDT")
         fallback["default_count"] = min(30, len(fallback.get("symbols") or []))
         return fallback
 
-    data["default_count"] = min(30, len(data.get("symbols") or []))
+    major_symbols = list(data.get("major_market_cap_symbols") or [])
+    if not major_symbols:
+        excluded = {
+            str(item or "").strip().upper()
+            for item in list(data.get("excluded_major_symbols") or [])
+            if str(item or "").strip()
+        }
+        if excluded:
+            major_symbols = [symbol for symbol in _RESEARCH_MAJOR_SYMBOL_FALLBACK if symbol in excluded]
+        else:
+            major_symbols = list(_RESEARCH_MAJOR_SYMBOL_FALLBACK)
+    merged_symbols = _merge_research_symbol_lists(major_symbols, data.get("symbols") or [])
+    data["major_market_cap_symbols"] = _merge_research_symbol_lists(major_symbols, limit=10)
+    data["symbols"] = merged_symbols
+    data["count"] = len(merged_symbols)
+    data["primary_symbol"] = str((merged_symbols or ["BTC/USDT"])[0] or "BTC/USDT")
+    data["default_count"] = min(30, len(merged_symbols))
     return data
 
 
@@ -5502,11 +5746,35 @@ async def get_factor_library(
         symbols=requested0,
     )
     cached_payload = _prepare_research_cached_payload(_FACTOR_LIBRARY_CACHE, _FACTOR_LIBRARY_REFRESH_TASKS, cache_key, refresh=False)
+    if not cached_payload:
+        disk_payload = _load_research_disk_cached_payload("factor_library", cache_key)
+        if disk_payload:
+            cached_payload = _prime_research_cached_payload(
+                _FACTOR_LIBRARY_CACHE,
+                cache_key,
+                disk_payload,
+                age_sec=float(disk_payload.get("cache_age_sec") or 0.0),
+            )
+            cached_payload = _prepare_research_cached_payload(
+                _FACTOR_LIBRARY_CACHE,
+                _FACTOR_LIBRARY_REFRESH_TASKS,
+                cache_key,
+                refresh=False,
+            )
     if cached_payload and not cached_payload.get("stale"):
         return cached_payload
 
     existing_task = _FACTOR_LIBRARY_REFRESH_TASKS.get(cache_key)
     if existing_task is None or existing_task.done():
+        _FACTOR_LIBRARY_REFRESH_META[cache_key] = {
+            "started_at": _utc_iso(),
+            "started_monotonic": time.monotonic(),
+            "exchange": exchange,
+            "timeframe": timeframe,
+            "lookback": lookback,
+            "symbol_count": len(requested0),
+            "symbols_requested": list(requested0),
+        }
         _FACTOR_LIBRARY_REFRESH_TASKS[cache_key] = asyncio.create_task(
             _refresh_factor_library_cache(
                 cache_key,
@@ -5522,21 +5790,21 @@ async def get_factor_library(
     current_task = _FACTOR_LIBRARY_REFRESH_TASKS.get(cache_key)
     if not cached_payload and current_task:
         try:
-            await asyncio.wait_for(asyncio.shield(current_task), timeout=3.0)
+            await asyncio.wait_for(asyncio.shield(current_task), timeout=float(_FACTOR_LIBRARY_BOOTSTRAP_WAIT_SEC))
             refreshed = _prepare_research_cached_payload(_FACTOR_LIBRARY_CACHE, _FACTOR_LIBRARY_REFRESH_TASKS, cache_key, refresh=False)
             if refreshed:
                 return refreshed
         except Exception:
             pass
     if cached_payload:
-        payload = _clone_jsonable(cached_payload)
-        payload["refreshing"] = True
-        payload["served_mode"] = "cache_refresh"
-        return payload
-    return _build_factor_library_placeholder(
+        return _augment_factor_library_refreshing_payload(
+            cached_payload,
+            refresh_meta=_factor_library_refresh_meta(cache_key),
+        )
+    return _build_factor_library_pending_placeholder(
         exchange=exchange,
         timeframe=timeframe,
         symbols_requested=requested0,
         exclude_retired=exclude_retired,
-        reason="因子库正在后台计算",
+        refresh_meta=_factor_library_refresh_meta(cache_key),
     )

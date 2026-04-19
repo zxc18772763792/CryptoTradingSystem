@@ -3617,9 +3617,55 @@ async def _load_backtest_df(
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
 ) -> pd.DataFrame:
+    return await _load_backtest_df_from_exchanges(
+        symbol,
+        timeframe,
+        start_time=start_time,
+        end_time=end_time,
+        exchanges=["binance", "gate", "okx"],
+    )
+
+
+def _normalize_backtest_exchanges(raw_exchanges: Any) -> List[str]:
+    allowed = {"binance", "gate", "okx"}
+    normalized: List[str] = []
+    if raw_exchanges is None:
+        items: List[Any] = []
+    elif isinstance(raw_exchanges, (list, tuple, set)):
+        items = list(raw_exchanges)
+    else:
+        items = [raw_exchanges]
+    for item in items:
+        exchange = str(item or "").strip().lower()
+        if exchange and exchange in allowed and exchange not in normalized:
+            normalized.append(exchange)
+    return normalized
+
+
+def _resolve_backtest_exchange_scope(strategy: str, params: Optional[Dict[str, Any]] = None) -> List[str]:
+    payload = dict(params or {})
+    strategy_name = str(strategy or "").strip()
+    requested = _normalize_backtest_exchanges(payload.get("exchanges"))
+    explicit_exchange = str(payload.get("exchange") or "").strip().lower()
+    if explicit_exchange:
+        requested = _normalize_backtest_exchanges([explicit_exchange, *requested])
+    if strategy_name == "CEXArbitrageStrategy":
+        return requested
+    return requested[:1]
+
+
+async def _load_backtest_df_from_exchanges(
+    symbol: str,
+    timeframe: str,
+    *,
+    exchanges: Optional[List[str]] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+) -> pd.DataFrame:
     tf = str(timeframe or "1h")
-    exchanges = ["binance", "gate", "okx"]
+    exchange_list = _normalize_backtest_exchanges(exchanges) or ["binance", "gate", "okx"]
     best = pd.DataFrame()
+    best_exchange = ""
     target_min = _min_required_bars(tf)
     start_hint = pd.to_datetime(start_time) if start_time is not None else None
     end_hint = pd.to_datetime(end_time) if end_time is not None else pd.Timestamp.utcnow()
@@ -3633,7 +3679,7 @@ async def _load_backtest_df(
     end_dt = end_hint.to_pydatetime() if end_hint is not None else None
 
     # 1) Exact timeframe search across exchanges.
-    for exchange in exchanges:
+    for exchange in exchange_list:
         df = await data_storage.load_klines_from_parquet(
             exchange=exchange,
             symbol=symbol,
@@ -3643,13 +3689,16 @@ async def _load_backtest_df(
         )
         if len(df) > len(best):
             best = df
+            best_exchange = exchange
     if len(best) >= target_min:
         best.index = pd.to_datetime(best.index)
-        return _drop_incomplete_last_bar(best.sort_index(), tf, anchor_time=end_dt)
+        best = _drop_incomplete_last_bar(best.sort_index(), tf, anchor_time=end_dt)
+        best.attrs["source_exchange"] = best_exchange or None
+        return best
 
     # 2) Aggregate from finer base timeframe when exact file is missing or insufficient.
     for base_tf in _candidate_base_timeframes(tf):
-        for exchange in exchanges:
+        for exchange in exchange_list:
             base = await data_storage.load_klines_from_parquet(
                 exchange=exchange,
                 symbol=symbol,
@@ -3662,6 +3711,7 @@ async def _load_backtest_df(
             agg = _resample_ohlcv(base, tf)
             if len(agg) > len(best):
                 best = agg
+                best_exchange = exchange
         if len(best) >= target_min:
             break
 
@@ -3669,7 +3719,29 @@ async def _load_backtest_df(
         best.index = pd.to_datetime(best.index)
         best = best[~best.index.duplicated(keep="last")].sort_index()
         best = _drop_incomplete_last_bar(best, tf, anchor_time=end_dt)
+        best.attrs["source_exchange"] = best_exchange or None
     return best
+
+
+async def _load_backtest_df_for_strategy(
+    symbol: str,
+    timeframe: str,
+    *,
+    strategy: str,
+    params: Optional[Dict[str, Any]] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+) -> pd.DataFrame:
+    exchange_scope = _resolve_backtest_exchange_scope(strategy, params=params)
+    if exchange_scope:
+        return await _load_backtest_df_from_exchanges(
+            symbol,
+            timeframe,
+            exchanges=exchange_scope,
+            start_time=start_time,
+            end_time=end_time,
+        )
+    return await _load_backtest_df(symbol, timeframe, start_time=start_time, end_time=end_time)
 
 
 async def _load_fama_market_bundle(
@@ -3697,7 +3769,14 @@ async def _load_fama_market_bundle(
     min_rows = max(_min_required_bars(timeframe), min(300, max(60, int(params.get("min_symbol_bars", 120) or 120))))
     loaded_frames = await asyncio.gather(
         *[
-            _load_backtest_df(sym, timeframe, start_time=start_time, end_time=end_time)
+            _load_backtest_df_for_strategy(
+                sym,
+                timeframe,
+                strategy="FamaFactorArbitrageStrategy",
+                params=params,
+                start_time=start_time,
+                end_time=end_time,
+            )
             for sym in universe
         ]
     )
@@ -3738,9 +3817,11 @@ async def _load_backtest_inputs(
         pair_candidates = _pairs_candidate_symbols(resolved_symbol, merged_params.get("pair_symbol"))
         if not pair_candidates:
             raise HTTPException(status_code=400, detail="PairsTradingStrategy 缺少可用的副腿交易对")
-        primary_df = await _load_backtest_df(
+        primary_df = await _load_backtest_df_for_strategy(
             resolved_symbol,
             timeframe,
+            strategy=strategy,
+            params=merged_params,
             start_time=start_time,
             end_time=end_time,
         )
@@ -3748,9 +3829,11 @@ async def _load_backtest_inputs(
         if not primary_df.empty:
             bundle[resolved_symbol] = primary_df.copy()
         for pair_symbol in pair_candidates:
-            pair_df = await _load_backtest_df(
+            pair_df = await _load_backtest_df_for_strategy(
                 pair_symbol,
                 timeframe,
+                strategy=strategy,
+                params=merged_params,
                 start_time=start_time,
                 end_time=end_time,
             )
@@ -3760,7 +3843,14 @@ async def _load_backtest_inputs(
             break
         return primary_df, bundle or None, resolved_symbol
 
-    df = await _load_backtest_df(symbol, timeframe, start_time=start_time, end_time=end_time)
+    df = await _load_backtest_df_for_strategy(
+        symbol,
+        timeframe,
+        strategy=strategy,
+        params=merged_params,
+        start_time=start_time,
+        end_time=end_time,
+    )
     return df, None, _normalize_symbol(symbol) or symbol
 
 

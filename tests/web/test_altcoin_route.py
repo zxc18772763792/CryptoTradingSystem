@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -235,3 +239,150 @@ def test_altcoin_detail_route_returns_selected_row(monkeypatch):
     assert payload["selected_row"]["metrics"]["long_short_ratio"] == 1.08
     assert payload["chain_breakdown"]["onchain_context"] == {"context": "ok", "symbol": "AAA/USDT"}
     assert payload["scan_meta"]["exchange"] == "binance"
+
+
+def test_altcoin_detail_route_backfills_missing_chain_percentiles(monkeypatch):
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+
+    async def fake_get_altcoin_scan_snapshot(**kwargs):
+        payload = _scan_payload()
+        payload["rows"][0]["metrics"]["percentiles"].update(
+            {
+                "community_flow": None,
+                "announcements": None,
+                "funding_basis": None,
+                "whale_context": None,
+            }
+        )
+        return payload
+
+    async def fake_get_onchain_overview(**kwargs):
+        return {"context": "ok", "symbol": kwargs["symbol"]}
+
+    async def fake_load_detail_live_chain_context(**kwargs):
+        return (
+            {
+                "flow_proxy": {"imbalance": 0.16, "buy_ratio": 0.62},
+                "announcements": [{"title": "listing"}],
+            },
+            {
+                "count": 3,
+                "transactions": [{"btc": 12.0}],
+            },
+        )
+
+    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api, "get_onchain_overview", fake_get_onchain_overview)
+    monkeypatch.setattr(altcoin_api, "_load_detail_live_chain_context", fake_load_detail_live_chain_context)
+
+    response = client.get("/api/altcoin/radar/detail?symbol=AAA/USDT&symbols=AAA/USDT,BBB/USDT")
+    assert response.status_code == 200
+    payload = response.json()
+
+    components = {item["label"]: item["pctile"] for item in payload["chain_breakdown"]["components"]}
+    assert components["community flow"] is not None
+    assert components["announcements"] is not None
+    assert components["funding/basis"] is not None
+    assert components["whale context"] is not None
+    assert payload["selected_row"]["metrics"]["percentiles"]["announcements"] is not None
+
+
+def test_map_derivatives_rows_to_requested_symbols_matches_base_alias():
+    rows = [
+        SimpleNamespace(symbol="BTC", timestamp=datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)),
+        SimpleNamespace(symbol="ETH/USDT", timestamp=datetime(2026, 4, 18, 11, 59, tzinfo=timezone.utc)),
+    ]
+
+    matched = altcoin_api._map_derivatives_rows_to_requested_symbols(
+        rows,
+        requested_symbols=["BTC/USDT", "ETH/USDT"],
+    )
+
+    assert matched["BTC/USDT"].symbol == "BTC"
+    assert matched["ETH/USDT"].symbol == "ETH/USDT"
+
+
+def test_build_altcoin_notification_context_filters_benchmark_rows(monkeypatch):
+    async def fake_get_altcoin_scan_snapshot(**kwargs):
+        return {
+            "generated_at": "2026-04-18T12:00:00+00:00",
+            "warnings": [],
+            "rows": [
+                {
+                    "symbol": "BTC/USDT",
+                    "alt_eligible": False,
+                    "layout_score": 0.92,
+                    "alert_score": 0.88,
+                    "control_score": 0.77,
+                },
+                {
+                    "symbol": "AVAX/USDT",
+                    "alt_eligible": True,
+                    "layout_score": 0.71,
+                    "alert_score": 0.83,
+                    "control_score": 0.62,
+                },
+            ],
+        }
+
+    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+
+    context = asyncio.run(
+        altcoin_api.build_altcoin_notification_context(
+            [
+                {
+                    "id": "r1",
+                    "enabled": True,
+                    "rule_type": "altcoin_score_above",
+                    "params": {
+                        "config_key": "cfg-1",
+                        "exchange": "binance",
+                        "timeframe": "4h",
+                        "symbol": "AVAX/USDT",
+                        "universe_symbols": ["BTC/USDT", "AVAX/USDT"],
+                    },
+                }
+            ]
+        )
+    )
+
+    rows = context["scans"]["cfg-1"]["rows"]
+    assert [row["symbol"] for row in rows] == ["AVAX/USDT"]
+    assert "BTC/USDT" not in context["scans"]["cfg-1"]["sort_indexes"]["layout"]
+
+
+def test_create_altcoin_alert_preset_rejects_benchmark_symbol(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+
+    async def fake_get_altcoin_scan_snapshot(**kwargs):
+        return {
+            "rows": [
+                {
+                    "symbol": "BTC/USDT",
+                    "alt_eligible": False,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+
+    response = client.post(
+        "/api/altcoin/alerts/preset",
+        json={
+            "preset": "异动预警",
+            "exchange": "binance",
+            "timeframe": "4h",
+            "symbol": "BTC/USDT",
+            "universe_symbols": ["BTC/USDT", "AVAX/USDT"],
+            "channels": ["feishu"],
+        },
+        headers={"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "benchmark symbols are not supported for altcoin radar alerts"

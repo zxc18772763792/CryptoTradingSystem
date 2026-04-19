@@ -5,6 +5,7 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 def _pair_frame(close: pd.Series, symbol: str) -> pd.DataFrame:
@@ -211,3 +212,72 @@ def test_compare_backtests_keeps_pairs_strategy_when_primary_matches_default_pai
     assert "error" not in rows["PairsTradingStrategy"]
     assert rows["PairsTradingStrategy"]["portfolio_mode"] == "pairs_spread_dual_leg"
     assert rows["PairsTradingStrategy"]["pair_symbol"] == "BTC/USDT"
+
+
+def test_run_backtest_custom_pairs_strategy_respects_explicit_exchange_scope(monkeypatch):
+    from web.api import backtest as backtest_api
+
+    primary_df, pair_df = _mean_reverting_pair_frames()
+
+    async def fake_load_klines_from_parquet(
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        start_time=None,
+        end_time=None,
+    ):
+        mapping = {
+            ("binance", "AAA/USDT", "1h"): primary_df,
+            ("binance", "BBB/USDT", "1h"): pair_df,
+        }
+        return mapping.get((str(exchange), str(symbol), str(timeframe)), pd.DataFrame()).copy()
+
+    monkeypatch.setattr(backtest_api.data_storage, "load_klines_from_parquet", fake_load_klines_from_parquet)
+
+    with pytest.raises(backtest_api.HTTPException) as exc_info:
+        asyncio.run(
+            backtest_api.run_backtest_custom(
+                strategy="PairsTradingStrategy",
+                symbol="AAA/USDT",
+                timeframe="1h",
+                initial_capital=10000,
+                include_series=False,
+                params_json=json.dumps(
+                    {
+                        "exchange": "gate",
+                        "pair_symbol": "BBB/USDT",
+                        "lookback_period": 30,
+                        "entry_z_score": 1.5,
+                        "exit_z_score": 0.5,
+                        "hedge_ratio_method": "ols",
+                    }
+                ),
+            )
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "缺少历史数据"
+
+    payload = asyncio.run(
+        backtest_api.run_backtest_custom(
+            strategy="PairsTradingStrategy",
+            symbol="AAA/USDT",
+            timeframe="1h",
+            initial_capital=10000,
+            include_series=False,
+            params_json=json.dumps(
+                {
+                    "exchange": "binance",
+                    "pair_symbol": "BBB/USDT",
+                    "lookback_period": 30,
+                    "entry_z_score": 1.5,
+                    "exit_z_score": 0.5,
+                    "hedge_ratio_method": "ols",
+                }
+            ),
+        )
+    )
+
+    assert payload["symbol"] == "AAA/USDT"
+    assert payload["pair_symbol"] == "BBB/USDT"
+    assert payload["portfolio_mode"] == "pairs_spread_dual_leg"

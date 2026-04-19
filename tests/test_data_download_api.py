@@ -22,6 +22,95 @@ def _reset_download_state() -> None:
     data_api._DOWNLOAD_TASK_SEMAPHORE_LOOP_ID = None
 
 
+def test_download_route_honors_explicit_background_true_for_small_single_request(monkeypatch):
+    _reset_download_state()
+    queued_payloads: list[dict] = []
+
+    def fake_queue(payload):
+        queued_payloads.append(dict(payload))
+        return {
+            "task_id": "task-explicit-background",
+            "status": "pending",
+            "exchange": payload["exchange"],
+            "symbol": payload["symbol"],
+            "timeframe": payload["timeframe"],
+            "days": payload["days"],
+            "start_time": payload["start_time"].isoformat() if payload.get("start_time") else None,
+            "end_time": payload["end_time"].isoformat() if payload.get("end_time") else None,
+        }
+
+    async def fake_run_download_historical_data(**kwargs):
+        raise AssertionError(f"route should have queued instead of running inline: {kwargs}")
+
+    monkeypatch.setattr(data_api, "_queue_download_task", fake_queue)
+    monkeypatch.setattr(data_api, "run_download_historical_data", fake_run_download_historical_data)
+
+    with TestClient(_build_app()) as client:
+        response = client.post(
+            "/api/data/download",
+            params={
+                "exchange": "binance",
+                "symbol": "XML/USDT",
+                "timeframe": "1h",
+                "days": 30,
+                "background": "true",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["queued"] is True
+    assert payload["task_id"] == "task-explicit-background"
+    assert payload["status"] == "pending"
+    assert len(queued_payloads) == 1
+    assert queued_payloads[0]["exchange"] == "binance"
+    assert queued_payloads[0]["symbol"] == "XML/USDT"
+    assert queued_payloads[0]["timeframe"] == "1h"
+    assert queued_payloads[0]["days"] == 30
+
+
+def test_download_route_runs_small_single_request_inline_when_background_unspecified(monkeypatch):
+    _reset_download_state()
+    run_calls: list[dict] = []
+
+    def fake_queue(payload):
+        raise AssertionError(f"route should have run inline instead of queuing: {payload}")
+
+    async def fake_run_download_historical_data(**kwargs):
+        run_calls.append(dict(kwargs))
+        return {
+            "exchange": kwargs["exchange"],
+            "symbol": kwargs["symbol"],
+            "timeframe": kwargs["timeframe"],
+            "count": 180,
+            "start": "2026-04-01T00:00:00",
+            "end": "2026-04-08T11:00:00",
+        }
+
+    monkeypatch.setattr(data_api, "_queue_download_task", fake_queue)
+    monkeypatch.setattr(data_api, "run_download_historical_data", fake_run_download_historical_data)
+
+    with TestClient(_build_app()) as client:
+        response = client.post(
+            "/api/data/download",
+            params={
+                "exchange": "binance",
+                "symbol": "XML/USDT",
+                "timeframe": "1h",
+                "days": 7,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 180
+    assert len(run_calls) == 1
+    assert run_calls[0]["exchange"] == "binance"
+    assert run_calls[0]["symbol"] == "XML/USDT"
+    assert run_calls[0]["timeframe"] == "1h"
+    assert run_calls[0]["days"] == 7
+
+
 def test_run_download_task_marks_embedded_error_as_failed(monkeypatch):
     _reset_download_state()
     task_id = "task-embedded-error"

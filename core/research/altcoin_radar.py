@@ -203,13 +203,32 @@ def _announcement_value(snapshot: Mapping[str, Any]) -> Optional[float]:
     return float(max(count, 0))
 
 
-def _funding_basis_value(micro_snapshot: Mapping[str, Any]) -> Optional[float]:
-    if not micro_snapshot:
+def _funding_basis_value(
+    micro_snapshot: Mapping[str, Any],
+    derivatives_snapshot: Optional[Mapping[str, Any]] = None,
+    market_snapshot: Optional[Mapping[str, Any]] = None,
+) -> Optional[float]:
+    funding_rate = 0.0
+    basis_pct = 0.0
+
+    if micro_snapshot:
+        funding = micro_snapshot.get("funding_rate") or {}
+        basis = micro_snapshot.get("spot_futures_basis") or {}
+        funding_rate = max(_to_float(funding.get("funding_rate"), 0.0), funding_rate)
+        basis_pct = max(_to_float(basis.get("basis_pct"), 0.0), basis_pct)
+
+    if derivatives_snapshot:
+        funding_rate = max(_to_float(derivatives_snapshot.get("funding_rate"), 0.0), funding_rate)
+        basis_pct = max(_to_float(derivatives_snapshot.get("basis_pct"), 0.0), basis_pct)
+        derivatives_payload = _snapshot_payload(derivatives_snapshot)
+        funding_rate = max(_to_float(derivatives_payload.get("funding_mean"), 0.0), funding_rate)
+
+    if market_snapshot:
+        funding_rate = max(_to_float(market_snapshot.get("avg_funding_rate_by_oi"), 0.0), funding_rate)
+        basis_pct = max(_to_float(market_snapshot.get("oi_vol_ratio_change_percent_4h"), 0.0) / 100.0, basis_pct)
+
+    if funding_rate <= 0.0 and basis_pct <= 0.0:
         return None
-    funding = micro_snapshot.get("funding_rate") or {}
-    basis = micro_snapshot.get("spot_futures_basis") or {}
-    funding_rate = max(_to_float(funding.get("funding_rate"), 0.0), 0.0)
-    basis_pct = max(_to_float(basis.get("basis_pct"), 0.0), 0.0)
     return funding_rate + basis_pct
 
 
@@ -753,7 +772,11 @@ def build_altcoin_rows(
         positive_flow = _community_flow_value(community)
         community_flow = _community_flow_value(community)
         announcements = _announcement_value(community)
-        funding_basis = _funding_basis_value(micro)
+        funding_basis = _funding_basis_value(
+            micro,
+            derivatives_snapshot=derivatives,
+            market_snapshot=market_snapshot,
+        )
         whale_context = _whale_context_value(whale)
         derivatives_heat = max(
             _to_float(derivatives.get("crowding_score"), 0.0),
@@ -1231,12 +1254,76 @@ def _normalized_sparkline(values: Sequence[Any]) -> List[float]:
     return [round((value / base) * 100.0, 4) for value in numeric]
 
 
+def _row_metrics(row: Mapping[str, Any]) -> Dict[str, Any]:
+    metrics = row.get("metrics") or {}
+    return metrics if isinstance(metrics, dict) else {}
+
+
+def _build_detail_component_raw_maps(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Optional[float]]]:
+    raw_maps: Dict[str, Dict[str, Optional[float]]] = {
+        "community_flow": {},
+        "announcements": {},
+        "funding_basis": {},
+        "whale_context": {},
+    }
+    for row in rows:
+        symbol = str((row or {}).get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        metrics = _row_metrics(row)
+        raw_maps["community_flow"][symbol] = max(_to_float(metrics.get("community_flow_imbalance"), 0.0), 0.0)
+        raw_maps["announcements"][symbol] = max(_to_float(metrics.get("announcement_count"), 0.0), 0.0)
+        raw_maps["funding_basis"][symbol] = (
+            max(_to_float(metrics.get("funding_rate"), 0.0), 0.0) + max(_to_float(metrics.get("basis_pct"), 0.0), 0.0)
+        )
+        raw_maps["whale_context"][symbol] = max(_to_float(metrics.get("whale_count"), 0.0), 0.0)
+    return raw_maps
+
+
+def _backfill_detail_chain_percentiles(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    symbol: str,
+    percentiles: Mapping[str, Any],
+    detail_community_snapshot: Optional[Mapping[str, Any]] = None,
+    detail_whale_snapshot: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Optional[float]]:
+    normalized_symbol = str(symbol or "").strip().upper()
+    raw_maps = _build_detail_component_raw_maps(rows)
+
+    community_snapshot = dict(detail_community_snapshot or {})
+    whale_snapshot = dict(detail_whale_snapshot or {})
+
+    community_flow = _community_flow_value(community_snapshot)
+    if community_flow is not None:
+        raw_maps["community_flow"][normalized_symbol] = community_flow
+
+    announcements = _announcement_value(community_snapshot)
+    if announcements is not None:
+        raw_maps["announcements"][normalized_symbol] = announcements
+
+    whale_context = _whale_context_value(whale_snapshot)
+    if whale_context is not None:
+        raw_maps["whale_context"][normalized_symbol] = whale_context
+
+    backfilled: Dict[str, Optional[float]] = {}
+    for key in ("community_flow", "announcements", "funding_basis", "whale_context"):
+        if percentiles.get(key) is not None:
+            continue
+        pct_map = _series_percentiles(raw_maps.get(key) or {})
+        if normalized_symbol in pct_map:
+            backfilled[key] = pct_map.get(normalized_symbol)
+    return backfilled
+
+
 def build_detail_payload(
     *,
     rows: Sequence[Mapping[str, Any]],
     symbol: str,
     sort_by: str = "layout",
     onchain_context: Optional[Mapping[str, Any]] = None,
+    detail_community_snapshot: Optional[Mapping[str, Any]] = None,
+    detail_whale_snapshot: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     normalized_symbol = str(symbol or "").strip().upper()
     ordered = sort_rows(rows, sort_by=sort_by)
@@ -1251,8 +1338,24 @@ def build_detail_payload(
             "invalidate_conditions": [],
             "related_candidates": [],
         }
-    metrics = selected.get("metrics") or {}
-    percentiles = metrics.get("percentiles") or {}
+    metrics = dict(selected.get("metrics") or {})
+    percentiles = dict(metrics.get("percentiles") or {})
+    percentiles.update(
+        {
+            key: value
+            for key, value in _backfill_detail_chain_percentiles(
+                rows=ordered,
+                symbol=normalized_symbol,
+                percentiles=percentiles,
+                detail_community_snapshot=detail_community_snapshot,
+                detail_whale_snapshot=detail_whale_snapshot,
+            ).items()
+            if value is not None
+        }
+    )
+    if percentiles:
+        metrics["percentiles"] = percentiles
+        selected["metrics"] = metrics
     state = str(selected.get("signal_state") or "").strip()
     proxy_breakdown = {
         "engine": "代理行为引擎",

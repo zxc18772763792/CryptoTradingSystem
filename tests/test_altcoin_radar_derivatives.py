@@ -167,6 +167,40 @@ def test_build_altcoin_rows_marks_missing_derivatives_in_tags():
     assert "Derivatives Missing" in row["tags"]
 
 
+def test_build_altcoin_rows_uses_derivatives_snapshot_for_funding_basis_percentile():
+    now = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
+    rows = build_altcoin_rows(
+        market_frames={"AAA/USDT": _market_frame(now)},
+        timeframe="4h",
+        derivatives_snapshots={
+            "AAA/USDT": {
+                "timestamp": "2026-04-18T11:58:00+00:00",
+                "source_name": "coinglass_cache",
+                "capture_status": "ok",
+                "source_error": None,
+                "funding_rate": 0.0009,
+                "basis_pct": 0.0062,
+                "oi_change_1h": 0.08,
+                "taker_buy_sell_imbalance": 0.19,
+                "crowding_score": 0.44,
+                "squeeze_score": 0.63,
+                "distribution_score": 0.22,
+                "orderbook_imbalance_score": 0.17,
+                "depth_thinness_score": 0.18,
+                "payload": {},
+            }
+        },
+        now=now,
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+
+    assert row["metrics"]["funding_rate"] == 0.0009
+    assert row["metrics"]["basis_pct"] == 0.0062
+    assert row["metrics"]["percentiles"]["funding_basis"] == 0.5
+
+
 def test_build_altcoin_rows_prefers_coinglass_market_snapshot_when_local_frame_is_stale():
     now = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
     stale_now = now - timedelta(days=30)
