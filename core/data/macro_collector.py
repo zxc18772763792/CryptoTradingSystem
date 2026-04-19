@@ -98,7 +98,15 @@ _YOY_SERIES = {
 }
 
 _MARKET_KEYS = ("vix", "dxy", "tnx_10y")
-_US_MACRO_KEYS = ("fed_rate", "cpi_yoy", "ppi_yoy", _SCISSORS_SPREAD_NAME, "m1_yoy", "m2_yoy", _LIQUIDITY_SCISSORS_SPREAD_NAME)
+_US_MACRO_KEYS = (
+    "fed_rate",
+    "cpi_yoy",
+    "ppi_yoy",
+    _SCISSORS_SPREAD_NAME,
+    "m1_yoy",
+    "m2_yoy",
+    _LIQUIDITY_SCISSORS_SPREAD_NAME,
+)
 _CHINA_MACRO_KEYS = (
     "cn_cpi_yoy",
     "cn_ppi_yoy",
@@ -108,25 +116,44 @@ _CHINA_MACRO_KEYS = (
     _CN_LIQUIDITY_SCISSORS_SPREAD_NAME,
 )
 
-_ALL_MACRO_NAMES = list(_MARKET_KEYS) + list(_SERIES_FRED.keys()) + [
-    _SCISSORS_SPREAD_NAME,
-    _LIQUIDITY_SCISSORS_SPREAD_NAME,
-] + list(_CHINA_OFFICIAL_SERIES) + [
-    _CN_SCISSORS_SPREAD_NAME,
-    _CN_LIQUIDITY_SCISSORS_SPREAD_NAME,
-]
+_ALL_MACRO_NAMES = (
+    list(_MARKET_KEYS)
+    + list(_SERIES_FRED.keys())
+    + [
+        _SCISSORS_SPREAD_NAME,
+        _LIQUIDITY_SCISSORS_SPREAD_NAME,
+    ]
+    + list(_CHINA_OFFICIAL_SERIES)
+    + [
+        _CN_SCISSORS_SPREAD_NAME,
+        _CN_LIQUIDITY_SCISSORS_SPREAD_NAME,
+    ]
+)
 
-_NBS_CPI_TITLE_RE = re.compile(r"^Consumer Price Index (?:in|for) .+\d{4}$", re.IGNORECASE)
-_NBS_PPI_TITLE_RE = re.compile(r"^Industrial Producer Price Indexes (?:in|for) .+\d{4}$", re.IGNORECASE)
+_NBS_CPI_TITLE_RE = re.compile(
+    r"^Consumer Price Index (?:in|for) .+\d{4}$", re.IGNORECASE
+)
+_NBS_PPI_TITLE_RE = re.compile(
+    r"^Industrial Producer Price Indexes (?:in|for) .+\d{4}$", re.IGNORECASE
+)
 _PBOC_MONTHLY_REPORT_RE = re.compile(
     r"^Financial Statistics Report \((January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\)$",
     re.IGNORECASE,
 )
 
 _MONTH_RANK: Dict[str, int] = {
-    "january": 1, "february": 2, "march": 3, "april": 4,
-    "may": 5, "june": 6, "july": 7, "august": 8,
-    "september": 9, "october": 10, "november": 11, "december": 12,
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
 }
 
 
@@ -234,7 +261,9 @@ def _series_latest_timestamp(series) -> Optional[datetime]:
         return None
 
 
-def _write_snapshot_value(name: str, value: float, *, timestamp: Optional[datetime] = None) -> None:
+def _write_snapshot_value(
+    name: str, value: float, *, timestamp: Optional[datetime] = None
+) -> None:
     """Persist a single latest value for a macro series."""
     import pandas as pd  # noqa: PLC0415
 
@@ -275,8 +304,45 @@ def _read_cached_series_value(name: str) -> Optional[float]:
         return None
 
 
+def _utc_iso(value: Optional[datetime]) -> Optional[str]:
+    if value is None:
+        return None
+    ts = value
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc).isoformat()
+
+
+def _read_cached_series_timestamp(name: str) -> Optional[datetime]:
+    """Read the latest cached timestamp for a macro series."""
+    path = _CACHE_DIR / f"{name}.parquet"
+    if not path.exists():
+        return None
+
+    try:
+        import pandas as pd  # noqa: PLC0415
+
+        df = pd.read_parquet(path)
+        if not df.empty:
+            idx = pd.to_datetime(df.index, utc=True, errors="coerce").dropna()
+            if len(idx) > 0:
+                return idx[-1].to_pydatetime().astimezone(timezone.utc)
+    except Exception:
+        pass
+
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except Exception:
+        return None
+
+
 def _clean_html_text(html: str) -> str:
-    stripped = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", " ", str(html or ""), flags=re.IGNORECASE | re.DOTALL)
+    stripped = re.sub(
+        r"<(script|style)\b[^>]*>.*?</\1>",
+        " ",
+        str(html or ""),
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     stripped = re.sub(r"<[^>]+>", " ", stripped)
     return _normalize_space(stripped)
 
@@ -314,7 +380,13 @@ def _extract_publish_timestamp(html: str) -> Optional[datetime]:
     if not raw_value:
         return None
 
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M", "%Y-%m-%d", "%Y/%m/%d"):
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M",
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+    ):
         try:
             parsed = datetime.strptime(raw_value, fmt)
             return parsed.replace(tzinfo=timezone.utc)
@@ -323,7 +395,9 @@ def _extract_publish_timestamp(html: str) -> Optional[datetime]:
     return None
 
 
-def _extract_latest_anchor(html: str, title_pattern: re.Pattern[str], *, base_url: str) -> Optional[dict[str, str]]:
+def _extract_latest_anchor(
+    html: str, title_pattern: re.Pattern[str], *, base_url: str
+) -> Optional[dict[str, str]]:
     parser = _AnchorParser()
     parser.feed(html or "")
 
@@ -341,7 +415,9 @@ def _extract_latest_anchor(html: str, title_pattern: re.Pattern[str], *, base_ur
     return None
 
 
-def _extract_triplet_row_value(text: str, row_label: str, value_index: int) -> Optional[float]:
+def _extract_triplet_row_value(
+    text: str, row_label: str, value_index: int
+) -> Optional[float]:
     match = re.search(
         rf"{re.escape(row_label)}\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)",
         text or "",
@@ -375,7 +451,9 @@ def _extract_signed_yoy_from_text(text: str, label_pattern: str) -> Optional[flo
     return None
 
 
-def _extract_latest_percent_from_table(html: str, balance_label: str) -> Optional[float]:
+def _extract_latest_percent_from_table(
+    html: str, balance_label: str
+) -> Optional[float]:
     table_match = re.search(
         rf"{re.escape(balance_label)}.*?</table>",
         html or "",
@@ -413,7 +491,11 @@ def _persist_gap(
 
     gap = round(float(left_value) - float(right_value), 4)
     gap_ts = max(
-        [timestamps.get(left_name), timestamps.get(right_name), datetime.now(timezone.utc)],
+        [
+            timestamps.get(left_name),
+            timestamps.get(right_name),
+            datetime.now(timezone.utc),
+        ],
         key=lambda item: item or datetime.now(timezone.utc),
     )
     result[output_name] = gap
@@ -436,7 +518,9 @@ async def _fetch_yfinance_macro() -> Dict[str, Optional[float]]:
         try:
             import yfinance as yf  # noqa: PLC0415
         except ImportError:
-            logger.debug("macro_collector: yfinance not installed; run: pip install yfinance")
+            logger.debug(
+                "macro_collector: yfinance not installed; run: pip install yfinance"
+            )
             return {}
 
         result: Dict[str, Optional[float]] = {}
@@ -446,8 +530,12 @@ async def _fetch_yfinance_macro() -> Dict[str, Optional[float]]:
             close = raw["Close"] if "Close" in raw.columns else raw
             for ticker, name in _SERIES_YF.items():
                 try:
-                    column = close[ticker] if ticker in close.columns else close.get(ticker)
-                    result[name] = float(column.dropna().iloc[-1]) if column is not None else None
+                    column = (
+                        close[ticker] if ticker in close.columns else close.get(ticker)
+                    )
+                    result[name] = (
+                        float(column.dropna().iloc[-1]) if column is not None else None
+                    )
                 except Exception:
                     result[name] = None
         except Exception as exc:
@@ -455,7 +543,11 @@ async def _fetch_yfinance_macro() -> Dict[str, Optional[float]]:
             for ticker, name in _SERIES_YF.items():
                 try:
                     history = yf.Ticker(ticker).history(period="5d")
-                    result[name] = float(history["Close"].dropna().iloc[-1]) if not history.empty else None
+                    result[name] = (
+                        float(history["Close"].dropna().iloc[-1])
+                        if not history.empty
+                        else None
+                    )
                 except Exception:
                     result[name] = None
         return result
@@ -464,14 +556,18 @@ async def _fetch_yfinance_macro() -> Dict[str, Optional[float]]:
     return await loop.run_in_executor(None, _sync)
 
 
-async def _fetch_yahoo_chart_macro(names: Optional[Dict[str, str]] = None) -> Dict[str, Optional[float]]:
+async def _fetch_yahoo_chart_macro(
+    names: Optional[Dict[str, str]] = None
+) -> Dict[str, Optional[float]]:
     """Fetch VIX/DXY/TNX from Yahoo chart endpoints one by one as a rate-limit fallback."""
 
     def _sync() -> Dict[str, Optional[float]]:
         import requests  # noqa: PLC0415
 
         targets = dict(names or _SERIES_YF)
-        results: Dict[str, Optional[float]] = {local_name: None for local_name in targets.values()}
+        results: Dict[str, Optional[float]] = {
+            local_name: None for local_name in targets.values()
+        }
         headers = {
             "User-Agent": "Mozilla/5.0",
             "Accept": "application/json,text/plain,*/*",
@@ -485,9 +581,15 @@ async def _fetch_yahoo_chart_macro(names: Optional[Dict[str, str]] = None) -> Di
         for symbol, local_name in targets.items():
             url = _YAHOO_CHART_BASE.format(symbol=symbol)
             try:
-                resp = requests.get(url, params=params, headers=headers, timeout=max(5, _TIMEOUT_SEC))
+                resp = requests.get(
+                    url, params=params, headers=headers, timeout=max(5, _TIMEOUT_SEC)
+                )
                 if resp.status_code != 200:
-                    logger.debug("macro_collector: yahoo chart {} HTTP {}", symbol, resp.status_code)
+                    logger.debug(
+                        "macro_collector: yahoo chart {} HTTP {}",
+                        symbol,
+                        resp.status_code,
+                    )
                     continue
                 payload = resp.json()
             except Exception as exc:
@@ -495,8 +597,10 @@ async def _fetch_yahoo_chart_macro(names: Optional[Dict[str, str]] = None) -> Di
                 continue
 
             try:
-                chart = (((payload or {}).get("chart") or {}).get("result") or [])[0] or {}
-                quote = (((chart.get("indicators") or {}).get("quote") or [])[0] or {})
+                chart = (((payload or {}).get("chart") or {}).get("result") or [])[
+                    0
+                ] or {}
+                quote = ((chart.get("indicators") or {}).get("quote") or [])[0] or {}
                 closes = list(quote.get("close") or [])
                 valid = [float(item) for item in closes if item is not None]
                 if valid:
@@ -523,7 +627,9 @@ async def _fetch_fred_series(series_id: str, api_key: str, days: int = 730):
         "sort_order": "asc",
     }
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=_TIMEOUT_SEC)) as session:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=_TIMEOUT_SEC)
+        ) as session:
             async with session.get(_FRED_BASE, params=params) as resp:
                 if resp.status != 200:
                     logger.debug("FRED {}: HTTP {}", series_id, resp.status)
@@ -552,10 +658,7 @@ async def _fetch_fred_macro(api_key: str) -> Dict[str, Optional[float]]:
         name: asyncio.create_task(_fetch_fred_series(series_id, api_key))
         for name, series_id in _SERIES_FRED.items()
     }
-    fetched = {
-        name: await task
-        for name, task in tasks.items()
-    }
+    fetched = {name: await task for name, task in tasks.items()}
 
     for name, series in fetched.items():
         if series is None or getattr(series, "empty", True):
@@ -601,17 +704,25 @@ async def _fetch_china_macro() -> Dict[str, Optional[float]]:
     """Fetch China macro series from official public NBS and PBOC releases."""
 
     def _sync() -> Dict[str, Optional[float]]:
-        result: Dict[str, Optional[float]] = {name: None for name in _CHINA_OFFICIAL_SERIES}
-        timestamps: Dict[str, Optional[datetime]] = {name: None for name in _CHINA_OFFICIAL_SERIES}
+        result: Dict[str, Optional[float]] = {
+            name: None for name in _CHINA_OFFICIAL_SERIES
+        }
+        timestamps: Dict[str, Optional[datetime]] = {
+            name: None for name in _CHINA_OFFICIAL_SERIES
+        }
 
         nbs_index_html = _request_text(_NBS_RELEASE_INDEX_URL)
         if nbs_index_html:
-            cpi_release = _extract_latest_anchor(nbs_index_html, _NBS_CPI_TITLE_RE, base_url=_NBS_RELEASE_INDEX_URL)
+            cpi_release = _extract_latest_anchor(
+                nbs_index_html, _NBS_CPI_TITLE_RE, base_url=_NBS_RELEASE_INDEX_URL
+            )
             if cpi_release:
                 cpi_html = _request_text(cpi_release["url"])
                 if cpi_html:
                     cpi_text = _clean_html_text(cpi_html)
-                    cpi_value = _extract_triplet_row_value(cpi_text, "Consumer Price Index", 2)
+                    cpi_value = _extract_triplet_row_value(
+                        cpi_text, "Consumer Price Index", 2
+                    )
                     if cpi_value is None:
                         match = re.search(
                             r"Consumer Price Index \(CPI\)\s+(increased|decreased)\s+by\s+(\d+(?:\.\d+)?)\s*(?:%|percent)\s+year(?:\s*-\s*|\s+)on(?:\s*-\s*|\s+)year",
@@ -619,20 +730,32 @@ async def _fetch_china_macro() -> Dict[str, Optional[float]]:
                             flags=re.IGNORECASE,
                         )
                         if match:
-                            sign = -1.0 if match.group(1).lower() == "decreased" else 1.0
+                            sign = (
+                                -1.0 if match.group(1).lower() == "decreased" else 1.0
+                            )
                             cpi_value = round(sign * float(match.group(2)), 4)
                     result["cn_cpi_yoy"] = cpi_value
                     timestamps["cn_cpi_yoy"] = _extract_publish_timestamp(cpi_html)
                     if cpi_value is not None:
-                        _write_snapshot_value("cn_cpi_yoy", cpi_value, timestamp=timestamps["cn_cpi_yoy"])
-                        logger.debug("macro_collector: NBS cached cn_cpi_yoy={} from {}", cpi_value, cpi_release["url"])
+                        _write_snapshot_value(
+                            "cn_cpi_yoy", cpi_value, timestamp=timestamps["cn_cpi_yoy"]
+                        )
+                        logger.debug(
+                            "macro_collector: NBS cached cn_cpi_yoy={} from {}",
+                            cpi_value,
+                            cpi_release["url"],
+                        )
 
-            ppi_release = _extract_latest_anchor(nbs_index_html, _NBS_PPI_TITLE_RE, base_url=_NBS_RELEASE_INDEX_URL)
+            ppi_release = _extract_latest_anchor(
+                nbs_index_html, _NBS_PPI_TITLE_RE, base_url=_NBS_RELEASE_INDEX_URL
+            )
             if ppi_release:
                 ppi_html = _request_text(ppi_release["url"])
                 if ppi_html:
                     ppi_text = _clean_html_text(ppi_html)
-                    ppi_value = _extract_triplet_row_value(ppi_text, "I. Producer Price Indexes for Industrial Products", 2)
+                    ppi_value = _extract_triplet_row_value(
+                        ppi_text, "I. Producer Price Indexes for Industrial Products", 2
+                    )
                     if ppi_value is None:
                         match = re.search(
                             r"producer price index for industrial products \(PPI\).*?to a\s+(\d+(?:\.\d+)?)%\s+(increase|decline)",
@@ -645,22 +768,40 @@ async def _fetch_china_macro() -> Dict[str, Optional[float]]:
                     result["cn_ppi_yoy"] = ppi_value
                     timestamps["cn_ppi_yoy"] = _extract_publish_timestamp(ppi_html)
                     if ppi_value is not None:
-                        _write_snapshot_value("cn_ppi_yoy", ppi_value, timestamp=timestamps["cn_ppi_yoy"])
-                        logger.debug("macro_collector: NBS cached cn_ppi_yoy={} from {}", ppi_value, ppi_release["url"])
+                        _write_snapshot_value(
+                            "cn_ppi_yoy", ppi_value, timestamp=timestamps["cn_ppi_yoy"]
+                        )
+                        logger.debug(
+                            "macro_collector: NBS cached cn_ppi_yoy={} from {}",
+                            ppi_value,
+                            ppi_release["url"],
+                        )
 
         pboc_index_html = _request_text(_PBOC_REPORT_INDEX_URL)
         if pboc_index_html:
-            report_entry = _extract_latest_anchor(pboc_index_html, _PBOC_MONTHLY_REPORT_RE, base_url=_PBOC_REPORT_INDEX_URL)
+            report_entry = _extract_latest_anchor(
+                pboc_index_html,
+                _PBOC_MONTHLY_REPORT_RE,
+                base_url=_PBOC_REPORT_INDEX_URL,
+            )
             if report_entry:
                 report_html = _request_text(report_entry["url"])
                 if report_html:
                     report_text = _clean_html_text(report_html)
-                    cn_m2 = _extract_signed_yoy_from_text(report_text, r"broad money supply \(M2\)")
-                    cn_m1 = _extract_signed_yoy_from_text(report_text, r"Narrow money supply \(M1\)")
+                    cn_m2 = _extract_signed_yoy_from_text(
+                        report_text, r"broad money supply \(M2\)"
+                    )
+                    cn_m1 = _extract_signed_yoy_from_text(
+                        report_text, r"Narrow money supply \(M1\)"
+                    )
                     if cn_m2 is None:
-                        cn_m2 = _extract_latest_percent_from_table(report_html, "M2 Balances")
+                        cn_m2 = _extract_latest_percent_from_table(
+                            report_html, "M2 Balances"
+                        )
                     if cn_m1 is None:
-                        cn_m1 = _extract_latest_percent_from_table(report_html, "M1 Balances")
+                        cn_m1 = _extract_latest_percent_from_table(
+                            report_html, "M1 Balances"
+                        )
                     report_ts = _extract_publish_timestamp(report_html)
                     result["cn_m2_yoy"] = cn_m2
                     result["cn_m1_yoy"] = cn_m1
@@ -704,13 +845,19 @@ async def update_macro_cache() -> Dict[str, int]:
     updated: Dict[str, int] = {}
 
     yf_data = await _fetch_yfinance_macro()
-    missing_yf = {symbol: name for symbol, name in _SERIES_YF.items() if yf_data.get(name) is None}
+    missing_yf = {
+        symbol: name for symbol, name in _SERIES_YF.items() if yf_data.get(name) is None
+    }
     if missing_yf:
         yahoo_chart_data = await _fetch_yahoo_chart_macro(missing_yf)
         for name, value in yahoo_chart_data.items():
             if yf_data.get(name) is None and value is not None:
                 yf_data[name] = value
-                logger.debug("macro_collector: yahoo chart fallback filled {}={:.4f}", name, value)
+                logger.debug(
+                    "macro_collector: yahoo chart fallback filled {}={:.4f}",
+                    name,
+                    value,
+                )
     for name, value in yf_data.items():
         if value is None:
             continue
@@ -733,7 +880,9 @@ async def update_macro_cache() -> Dict[str, int]:
             if value is not None:
                 updated[name] = 1
     else:
-        logger.debug("macro_collector: no FRED key; skipping fed_rate/cpi_yoy/ppi_yoy/m1_yoy/m2_yoy/ppi_cpi_gap/m1_m2_gap")
+        logger.debug(
+            "macro_collector: no FRED key; skipping fed_rate/cpi_yoy/ppi_yoy/m1_yoy/m2_yoy/ppi_cpi_gap/m1_m2_gap"
+        )
 
     china_data = await china_task
     for name, value in china_data.items():
@@ -760,28 +909,99 @@ def load_macro_snapshot() -> Dict[str, Optional[float]]:
         m1_yoy = snapshot.get("m1_yoy")
         m2_yoy = snapshot.get("m2_yoy")
         if m1_yoy is not None and m2_yoy is not None:
-            snapshot[_LIQUIDITY_SCISSORS_SPREAD_NAME] = round(float(m1_yoy) - float(m2_yoy), 4)
+            snapshot[_LIQUIDITY_SCISSORS_SPREAD_NAME] = round(
+                float(m1_yoy) - float(m2_yoy), 4
+            )
 
     if snapshot.get(_CN_SCISSORS_SPREAD_NAME) is None:
         cn_ppi_yoy = snapshot.get("cn_ppi_yoy")
         cn_cpi_yoy = snapshot.get("cn_cpi_yoy")
         if cn_ppi_yoy is not None and cn_cpi_yoy is not None:
-            snapshot[_CN_SCISSORS_SPREAD_NAME] = round(float(cn_ppi_yoy) - float(cn_cpi_yoy), 4)
+            snapshot[_CN_SCISSORS_SPREAD_NAME] = round(
+                float(cn_ppi_yoy) - float(cn_cpi_yoy), 4
+            )
 
     if snapshot.get(_CN_LIQUIDITY_SCISSORS_SPREAD_NAME) is None:
         cn_m1_yoy = snapshot.get("cn_m1_yoy")
         cn_m2_yoy = snapshot.get("cn_m2_yoy")
         if cn_m1_yoy is not None and cn_m2_yoy is not None:
-            snapshot[_CN_LIQUIDITY_SCISSORS_SPREAD_NAME] = round(float(cn_m1_yoy) - float(cn_m2_yoy), 4)
+            snapshot[_CN_LIQUIDITY_SCISSORS_SPREAD_NAME] = round(
+                float(cn_m1_yoy) - float(cn_m2_yoy), 4
+            )
 
     return snapshot
 
 
-def _group_values(snapshot: Dict[str, Optional[float]], keys: Iterable[str]) -> Dict[str, Optional[float]]:
+def load_macro_snapshot_metadata(
+    snapshot: Optional[Dict[str, Optional[float]]] = None,
+) -> Dict[str, object]:
+    """Return cache metadata for the latest macro snapshot."""
+    snap = dict(snapshot or load_macro_snapshot() or {})
+    timestamps = {
+        name: _read_cached_series_timestamp(name) for name in _ALL_MACRO_NAMES
+    }
+
+    def _group_meta(keys: Iterable[str], provider: str) -> Dict[str, object]:
+        key_list = [str(key) for key in keys]
+        available_series = [name for name in key_list if snap.get(name) is not None]
+        available_timestamps = [
+            timestamps.get(name)
+            for name in available_series
+            if timestamps.get(name) is not None
+        ]
+        latest_timestamp = max(available_timestamps) if available_timestamps else None
+        oldest_timestamp = min(available_timestamps) if available_timestamps else None
+        return {
+            "provider": provider,
+            "keys": key_list,
+            "available_series": available_series,
+            "available_count": len(available_series),
+            "total_series": len(key_list),
+            "latest_timestamp": _utc_iso(latest_timestamp),
+            "oldest_timestamp": _utc_iso(oldest_timestamp),
+        }
+
+    available_global_timestamps = [
+        timestamps.get(name)
+        for name in _ALL_MACRO_NAMES
+        if timestamps.get(name) is not None
+    ]
+    latest_timestamp = (
+        max(available_global_timestamps) if available_global_timestamps else None
+    )
+    oldest_timestamp = (
+        min(available_global_timestamps) if available_global_timestamps else None
+    )
+
+    return {
+        "source": "yfinance+yahoo_chart+fred+stats.gov.cn+pbc.gov.cn",
+        "latest_timestamp": _utc_iso(latest_timestamp),
+        "oldest_timestamp": _utc_iso(oldest_timestamp),
+        "groups": {
+            "market": _group_meta(_MARKET_KEYS, "yfinance+yahoo_chart"),
+            "us": _group_meta(_US_MACRO_KEYS, "fred"),
+            "china": _group_meta(_CHINA_MACRO_KEYS, "stats.gov.cn+pbc.gov.cn"),
+        },
+        "series": {
+            name: {
+                "available": snap.get(name) is not None,
+                "value": snap.get(name),
+                "timestamp": _utc_iso(timestamps.get(name)),
+            }
+            for name in _ALL_MACRO_NAMES
+        },
+    }
+
+
+def _group_values(
+    snapshot: Dict[str, Optional[float]], keys: Iterable[str]
+) -> Dict[str, Optional[float]]:
     return {key: snapshot.get(key) for key in keys}
 
 
-def group_macro_snapshot(snapshot: Optional[Dict[str, Optional[float]]] = None) -> Dict[str, Dict[str, Optional[float]]]:
+def group_macro_snapshot(
+    snapshot: Optional[Dict[str, Optional[float]]] = None
+) -> Dict[str, Dict[str, Optional[float]]]:
     """Split the flat macro snapshot into cross-market, US, and China views."""
     snap = dict(snapshot or load_macro_snapshot() or {})
     return {

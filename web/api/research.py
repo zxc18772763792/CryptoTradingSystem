@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo
 
+import httpx
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
@@ -28,17 +31,24 @@ from web.api.data import (
     get_research_symbols,
 )
 from web.api.trading import (
-    get_behavior_report,
     get_analytics_history_status,
+    get_behavior_report,
     get_community_overview,
     get_market_microstructure,
     get_risk_dashboard,
-    get_trading_calendar,
     get_stoploss_policy,
+    get_trading_calendar,
 )
 
 router = APIRouter()
-_UI_TIMEZONE = str(os.environ.get("CTS_UI_TIMEZONE") or os.environ.get("UI_TIMEZONE") or "Asia/Shanghai").strip() or "Asia/Shanghai"
+_UI_TIMEZONE = (
+    str(
+        os.environ.get("CTS_UI_TIMEZONE")
+        or os.environ.get("UI_TIMEZONE")
+        or "Asia/Shanghai"
+    ).strip()
+    or "Asia/Shanghai"
+)
 try:
     _UI_ZONEINFO = ZoneInfo(_UI_TIMEZONE)
 except Exception:
@@ -80,7 +90,9 @@ _DEFAULT_UNIVERSE = [
 ]
 
 
-def _analytics_status_collectors_to_map(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _analytics_status_collectors_to_map(
+    payload: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
     collectors = list((payload or {}).get("collectors") or [])
     mapped: Dict[str, Any] = {}
     for item in collectors:
@@ -88,6 +100,8 @@ def _analytics_status_collectors_to_map(payload: Optional[Dict[str, Any]]) -> Di
         if collector:
             mapped[collector] = dict(item or {})
     return mapped
+
+
 _MODULE_ORDER = ["market_state", "factors", "cross_asset", "onchain", "discipline"]
 _MODULE_TIMEOUT_SEC = {
     "market_state": 40.0,
@@ -98,6 +112,29 @@ _MODULE_TIMEOUT_SEC = {
 }
 _MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC = 20 * 60
 _COINGLASS_PREFERRED_MAX_AGE_SEC = 5 * 60
+_MACRO_MARKET_STALE_MAX_AGE_SEC = 3 * 24 * 60 * 60
+_MACRO_MONTHLY_STALE_MAX_AGE_SEC = 62 * 24 * 60 * 60
+_PUBLIC_MARKET_DATA_CACHE_TTL_SEC = 5 * 60
+_PUBLIC_FEAR_GREED_STALE_MAX_AGE_SEC = 6 * 60 * 60
+_PUBLIC_MARKET_BREADTH_STALE_MAX_AGE_SEC = 30 * 60
+_PUBLIC_MARKET_DATA_CACHE: Dict[str, Dict[str, Any]] = {}
+_NEWS_SUMMARY_CACHE_TTL_SEC = 5 * 60
+_NEWS_SUMMARY_STALE_MAX_AGE_SEC = 30 * 60
+_NEWS_SUMMARY_CACHE: Dict[str, Dict[str, Any]] = {}
+_PUBLIC_MARKET_DATA_RUNTIME_FIELDS = {
+    "cache_hit",
+    "cache_age_sec",
+    "stale",
+    "stale_reason",
+    "source_status",
+}
+_NEWS_SUMMARY_RUNTIME_FIELDS = {
+    "cache_hit",
+    "cache_age_sec",
+    "stale",
+    "stale_reason",
+    "source_status",
+}
 
 
 class ResearchProfile(BaseModel):
@@ -117,7 +154,15 @@ class ResearchWorkbenchRequest(BaseModel):
     @classmethod
     def coerce_profile(cls, value: Any) -> Any:
         if isinstance(value, dict) and "profile" not in value:
-            keys = {"exchange", "primary_symbol", "universe_symbols", "timeframe", "lookback", "exclude_retired", "horizon"}
+            keys = {
+                "exchange",
+                "primary_symbol",
+                "universe_symbols",
+                "timeframe",
+                "lookback",
+                "exclude_retired",
+                "horizon",
+            }
             if any(key in value for key in keys):
                 return {"profile": value}
         return value
@@ -132,10 +177,20 @@ class ResearchRecommendationRequest(BaseModel):
     @classmethod
     def coerce_profile(cls, value: Any) -> Any:
         if isinstance(value, dict) and "profile" not in value:
-            keys = {"exchange", "primary_symbol", "universe_symbols", "timeframe", "lookback", "exclude_retired", "horizon"}
+            keys = {
+                "exchange",
+                "primary_symbol",
+                "universe_symbols",
+                "timeframe",
+                "lookback",
+                "exclude_retired",
+                "horizon",
+            }
             if any(key in value for key in keys):
                 cloned = dict(value)
-                profile = {key: cloned.pop(key) for key in list(cloned.keys()) if key in keys}
+                profile = {
+                    key: cloned.pop(key) for key in list(cloned.keys()) if key in keys
+                }
                 cloned["profile"] = profile
                 return cloned
         return value
@@ -260,7 +315,9 @@ def _build_profile_from_query(
     exclude_retired: bool = True,
     horizon: str = "short_intraday",
 ) -> ResearchProfile:
-    symbols = [item.strip() for item in str(universe_symbols or "").split(",") if item.strip()]
+    symbols = [
+        item.strip() for item in str(universe_symbols or "").split(",") if item.strip()
+    ]
     return _normalize_profile(
         ResearchProfile(
             exchange=exchange,
@@ -281,7 +338,9 @@ def _profile_symbol_window(profile: ResearchProfile, limit: int) -> List[str]:
     return universe[: max(2, int(limit))]
 
 
-def _status_from_flags(ok: bool = True, degraded: bool = False) -> Literal["ok", "degraded", "error"]:
+def _status_from_flags(
+    ok: bool = True, degraded: bool = False
+) -> Literal["ok", "degraded", "error"]:
     if not ok:
         return "error"
     return "degraded" if degraded else "ok"
@@ -322,19 +381,341 @@ async def _wait_or_none(coro: Any, timeout_sec: float) -> Any:
         return None
 
 
+def _consume_background_task_result(task: asyncio.Task) -> None:
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        task.result()
+
+
+async def _wait_or_none_keep_running(coro: Any, timeout_sec: float) -> Any:
+    task = asyncio.create_task(coro)
+    task.add_done_callback(_consume_background_task_result)
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout_sec)
+    except Exception:
+        return None
+
+
+def _public_market_cache_entry(
+    cache_key: str,
+    *,
+    max_age_sec: Optional[float] = _PUBLIC_MARKET_DATA_CACHE_TTL_SEC,
+) -> tuple[Optional[Dict[str, Any]], Optional[float]]:
+    cached = _PUBLIC_MARKET_DATA_CACHE.get(str(cache_key or "").strip())
+    if not isinstance(cached, dict):
+        return None, None
+    age_sec = max(0.0, time.time() - float(cached.get("ts") or 0.0))
+    if max_age_sec is not None and age_sec > float(max_age_sec):
+        return None, age_sec
+    payload = cached.get("payload")
+    if not isinstance(payload, dict):
+        return None, age_sec
+    return dict(payload), age_sec
+
+
+def _cached_public_market_data(cache_key: str) -> Dict[str, Any]:
+    payload, _ = _public_market_cache_entry(
+        cache_key, max_age_sec=_PUBLIC_MARKET_DATA_CACHE_TTL_SEC
+    )
+    return dict(payload or {})
+
+
+def _status_error_text(error: Any, limit: int = 240) -> str:
+    text = str(error or "").strip()
+    if not text:
+        return ""
+    return text[:limit]
+
+
+def _strip_public_market_runtime_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(payload or {}).items()
+        if key not in _PUBLIC_MARKET_DATA_RUNTIME_FIELDS
+    }
+
+
+def _with_public_market_runtime_fields(
+    payload: Dict[str, Any],
+    *,
+    cache_hit: bool,
+    cache_age_sec: Optional[float],
+    stale: bool,
+    source_status: str,
+    stale_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    out = dict(_strip_public_market_runtime_fields(payload))
+    out["cache_hit"] = bool(cache_hit)
+    out["cache_age_sec"] = (
+        round(float(cache_age_sec or 0.0), 3) if cache_age_sec is not None else None
+    )
+    out["stale"] = bool(stale)
+    out["source_status"] = str(
+        source_status
+        or ("cache_stale" if stale else ("cache_fresh" if cache_hit else "live"))
+    )
+    if stale_reason:
+        out["stale_reason"] = str(stale_reason)
+    return out
+
+
+def _public_market_unavailable(source: str, error: Any) -> Dict[str, Any]:
+    message = _status_error_text(error)
+    return {
+        "available": False,
+        "source": str(source or "").strip() or None,
+        "error": message or None,
+        "cache_hit": False,
+        "cache_age_sec": None,
+        "stale": False,
+        "source_status": "unavailable",
+    }
+
+
+def _store_public_market_data(
+    cache_key: str, payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    snapshot = _strip_public_market_runtime_fields(dict(payload or {}))
+    _PUBLIC_MARKET_DATA_CACHE[str(cache_key or "").strip()] = {
+        "ts": time.time(),
+        "payload": dict(snapshot),
+    }
+    return dict(snapshot)
+
+
+def _news_summary_cache_key(symbol: str, hours: int) -> str:
+    return f"{_symbol_to_news_key(symbol)}|{max(1, min(int(hours or 24), 168))}"
+
+
+def _news_summary_cache_entry(
+    cache_key: str,
+    *,
+    max_age_sec: Optional[float] = _NEWS_SUMMARY_CACHE_TTL_SEC,
+) -> tuple[Optional[Dict[str, Any]], Optional[float]]:
+    cached = _NEWS_SUMMARY_CACHE.get(str(cache_key or "").strip())
+    if not isinstance(cached, dict):
+        return None, None
+    age_sec = max(0.0, time.time() - float(cached.get("ts") or 0.0))
+    if max_age_sec is not None and age_sec > float(max_age_sec):
+        return None, age_sec
+    payload = cached.get("payload")
+    if not isinstance(payload, dict):
+        return None, age_sec
+    return dict(payload), age_sec
+
+
+def _strip_news_summary_runtime_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(payload or {}).items()
+        if key not in _NEWS_SUMMARY_RUNTIME_FIELDS
+    }
+
+
+def _store_news_summary(cache_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = _strip_news_summary_runtime_fields(dict(payload or {}))
+    _NEWS_SUMMARY_CACHE[str(cache_key or "").strip()] = {
+        "ts": time.time(),
+        "payload": dict(snapshot),
+    }
+    return dict(snapshot)
+
+
+def _with_news_summary_runtime_fields(
+    payload: Dict[str, Any],
+    *,
+    cache_hit: bool,
+    cache_age_sec: Optional[float],
+    stale: bool,
+    source_status: str,
+    stale_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    out = dict(_strip_news_summary_runtime_fields(payload))
+    out["cache_hit"] = bool(cache_hit)
+    out["cache_age_sec"] = (
+        round(float(cache_age_sec or 0.0), 3) if cache_age_sec is not None else None
+    )
+    out["stale"] = bool(stale)
+    out["source_status"] = str(
+        source_status
+        or ("cache_stale" if stale else ("cache_fresh" if cache_hit else "live"))
+    )
+    if stale_reason:
+        out["stale_reason"] = _status_error_text(stale_reason)
+    return out
+
+
+async def _load_public_fear_greed_snapshot() -> Dict[str, Any]:
+    cached, cached_age = _public_market_cache_entry(
+        "fear_greed", max_age_sec=_PUBLIC_MARKET_DATA_CACHE_TTL_SEC
+    )
+    if cached:
+        return _with_public_market_runtime_fields(
+            cached,
+            cache_hit=True,
+            cache_age_sec=cached_age,
+            stale=False,
+            source_status="cache_fresh",
+        )
+    stale_cached, stale_age = _public_market_cache_entry(
+        "fear_greed",
+        max_age_sec=_PUBLIC_FEAR_GREED_STALE_MAX_AGE_SEC,
+    )
+
+    try:
+        from core.data.sentiment.fear_greed_collector import (
+            FearGreedCollector,
+        )  # noqa: PLC0415
+    except Exception as exc:
+        if stale_cached:
+            return _with_public_market_runtime_fields(
+                stale_cached,
+                cache_hit=True,
+                cache_age_sec=stale_age,
+                stale=True,
+                stale_reason=exc,
+                source_status="cache_stale",
+            )
+        return _public_market_unavailable("alternative.me", exc)
+
+    try:
+        async with FearGreedCollector(timeout=8) as collector:
+            current = await collector.fetch_current()
+    except Exception as exc:
+        if stale_cached:
+            return _with_public_market_runtime_fields(
+                stale_cached,
+                cache_hit=True,
+                cache_age_sec=stale_age,
+                stale=True,
+                stale_reason=exc,
+                source_status="cache_stale",
+            )
+        return _public_market_unavailable("alternative.me", exc)
+
+    if not current:
+        if stale_cached:
+            return _with_public_market_runtime_fields(
+                stale_cached,
+                cache_hit=True,
+                cache_age_sec=stale_age,
+                stale=True,
+                stale_reason="empty_response",
+                source_status="cache_stale",
+            )
+        return _public_market_unavailable("alternative.me", "empty_response")
+
+    payload = {
+        "available": True,
+        "value": int(getattr(current, "value", 0)),
+        "classification": str(getattr(current, "classification", "") or ""),
+        "signal": str(getattr(current, "signal", "") or ""),
+        "signal_strength": round(
+            float(getattr(current, "signal_strength", 0.0) or 0.0), 4
+        ),
+        "timestamp": (
+            getattr(current, "timestamp", None).isoformat()
+            if getattr(current, "timestamp", None)
+            else None
+        ),
+        "time_until_update": getattr(current, "time_until_update", None),
+        "source": "alternative.me",
+    }
+    return _with_public_market_runtime_fields(
+        _store_public_market_data("fear_greed", payload),
+        cache_hit=False,
+        cache_age_sec=0.0,
+        stale=False,
+        source_status="live",
+    )
+
+
+async def _load_public_market_breadth_snapshot() -> Dict[str, Any]:
+    cached, cached_age = _public_market_cache_entry(
+        "global_market_breadth", max_age_sec=_PUBLIC_MARKET_DATA_CACHE_TTL_SEC
+    )
+    if cached:
+        return _with_public_market_runtime_fields(
+            cached,
+            cache_hit=True,
+            cache_age_sec=cached_age,
+            stale=False,
+            source_status="cache_fresh",
+        )
+    stale_cached, stale_age = _public_market_cache_entry(
+        "global_market_breadth",
+        max_age_sec=_PUBLIC_MARKET_BREADTH_STALE_MAX_AGE_SEC,
+    )
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        async with httpx.AsyncClient(
+            timeout=8.0,
+            headers=headers,
+            follow_redirects=True,
+            trust_env=True,
+        ) as client:
+            response = await client.get("https://api.coingecko.com/api/v3/global")
+            response.raise_for_status()
+            payload = dict((response.json() or {}).get("data") or {})
+    except Exception as exc:
+        if stale_cached:
+            return _with_public_market_runtime_fields(
+                stale_cached,
+                cache_hit=True,
+                cache_age_sec=stale_age,
+                stale=True,
+                stale_reason=exc,
+                source_status="cache_stale",
+            )
+        return _public_market_unavailable("coingecko_global", exc)
+
+    total_market_cap = dict(payload.get("total_market_cap") or {})
+    total_volume = dict(payload.get("total_volume") or {})
+    market_cap_pct = dict(payload.get("market_cap_percentage") or {})
+    market_breadth = {
+        "available": True,
+        "source": "coingecko_global",
+        "active_cryptocurrencies": int(payload.get("active_cryptocurrencies") or 0),
+        "markets": int(payload.get("markets") or 0),
+        "total_market_cap_usd": _coerce_finite_float(total_market_cap.get("usd")),
+        "total_volume_usd": _coerce_finite_float(total_volume.get("usd")),
+        "market_cap_change_pct_24h": _coerce_finite_float(
+            payload.get("market_cap_change_percentage_24h_usd")
+        ),
+        "volume_change_pct_24h": _coerce_finite_float(
+            payload.get("volume_change_percentage_24h_usd")
+        ),
+        "btc_dominance_pct": _coerce_finite_float(market_cap_pct.get("btc")),
+        "eth_dominance_pct": _coerce_finite_float(market_cap_pct.get("eth")),
+        "updated_at": payload.get("updated_at"),
+    }
+    return _with_public_market_runtime_fields(
+        _store_public_market_data("global_market_breadth", market_breadth),
+        cache_hit=False,
+        cache_age_sec=0.0,
+        stale=False,
+        source_status="live",
+    )
+
+
 async def _load_preferred_coinglass_overview(
     symbol: str,
     *,
     max_age_sec: float = _COINGLASS_PREFERRED_MAX_AGE_SEC,
 ) -> Dict[str, Any]:
     try:
-        from core.data.coinglass_feature_builder import build_coinglass_overview_payload  # noqa: PLC0415
+        from core.data.coinglass_feature_builder import (
+            build_coinglass_overview_payload,
+        )  # noqa: PLC0415
     except Exception:
         return {}
 
     try:
         overview = dict(
-            await build_coinglass_overview_payload(symbol=symbol, refresh=False, manual=False) or {}
+            await build_coinglass_overview_payload(
+                symbol=symbol, refresh=False, manual=False
+            )
+            or {}
         )
     except Exception:
         return {}
@@ -360,7 +741,10 @@ async def _load_preferred_coinglass_overview(
 
     try:
         refreshed = dict(
-            await build_coinglass_overview_payload(symbol=symbol, refresh=True, manual=False) or {}
+            await build_coinglass_overview_payload(
+                symbol=symbol, refresh=True, manual=False
+            )
+            or {}
         )
     except Exception:
         return overview
@@ -379,7 +763,24 @@ def _merge_nested_payload(primary: Any, fallback: Any) -> Any:
 
 
 async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
-    since = datetime.now(timezone.utc) - timedelta(hours=max(1, min(int(hours or 24), 168)))
+    hours = max(1, min(int(hours or 24), 168))
+    cache_key = _news_summary_cache_key(symbol, hours)
+    cached, cached_age = _news_summary_cache_entry(
+        cache_key, max_age_sec=_NEWS_SUMMARY_CACHE_TTL_SEC
+    )
+    if cached:
+        return _with_news_summary_runtime_fields(
+            cached,
+            cache_hit=True,
+            cache_age_sec=cached_age,
+            stale=False,
+            source_status="cache_fresh",
+        )
+    stale_cached, stale_age = _news_summary_cache_entry(
+        cache_key, max_age_sec=_NEWS_SUMMARY_STALE_MAX_AGE_SEC
+    )
+
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
     symbol_key = _symbol_to_news_key(symbol)
     symbol_keys = _symbol_to_news_keys(symbol)
     db_timeout = 8.0
@@ -390,10 +791,17 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
         )
         for news_symbol in symbol_keys
     ]
-    raw_task = asyncio.wait_for(news_db.list_news_raw(since=since, limit=400), timeout=db_timeout)
+    raw_task = asyncio.wait_for(
+        news_db.list_news_raw(since=since, limit=400), timeout=db_timeout
+    )
     states_task = asyncio.wait_for(news_db.list_source_states(), timeout=db_timeout)
     queue_task = asyncio.wait_for(news_db.get_llm_queue_stats(), timeout=db_timeout)
-    event_results, raw_rows_raw, source_states_raw, llm_queue_raw = await asyncio.gather(
+    (
+        event_results,
+        raw_rows_raw,
+        source_states_raw,
+        llm_queue_raw,
+    ) = await asyncio.gather(
         asyncio.gather(*event_tasks, return_exceptions=True),
         raw_task,
         states_task,
@@ -401,11 +809,13 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
         return_exceptions=True,
     )
 
+    source_errors: List[str] = []
     events: List[Dict[str, Any]] = []
     if not isinstance(event_results, Exception):
         seen_event_ids: set[str] = set()
         for batch in list(event_results or []):
             if isinstance(batch, Exception):
+                source_errors.append(_status_error_text(batch))
                 continue
             for event in list(batch or []):
                 event_id = str((event or {}).get("event_id") or "").strip()
@@ -414,9 +824,23 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
                     continue
                 seen_event_ids.add(dedupe_key)
                 events.append(dict(event or {}))
+    else:
+        source_errors.append(_status_error_text(event_results))
+    if isinstance(raw_rows_raw, Exception):
+        source_errors.append(_status_error_text(raw_rows_raw))
     raw_rows = [] if isinstance(raw_rows_raw, Exception) else list(raw_rows_raw or [])
-    source_states = [] if isinstance(source_states_raw, Exception) else list(source_states_raw or [])
-    llm_queue = {} if isinstance(llm_queue_raw, Exception) else dict(llm_queue_raw or {})
+    if isinstance(source_states_raw, Exception):
+        source_errors.append(_status_error_text(source_states_raw))
+    source_states = (
+        []
+        if isinstance(source_states_raw, Exception)
+        else list(source_states_raw or [])
+    )
+    if isinstance(llm_queue_raw, Exception):
+        source_errors.append(_status_error_text(llm_queue_raw))
+    llm_queue = (
+        {} if isinstance(llm_queue_raw, Exception) else dict(llm_queue_raw or {})
+    )
 
     sentiment = {"positive": 0, "neutral": 0, "negative": 0}
     by_type: Dict[str, int] = {}
@@ -438,24 +862,37 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
     if not events:
         scope = "global_fallback"
         try:
-            events = await asyncio.wait_for(news_db.list_events(symbol=None, since=since, limit=300), timeout=5.0)
-        except Exception:
+            events = await asyncio.wait_for(
+                news_db.list_events(symbol=None, since=since, limit=300), timeout=5.0
+            )
+        except Exception as exc:
+            source_errors.append(_status_error_text(exc))
             events = []
         sentiment = {"positive": 0, "neutral": 0, "negative": 0}
         by_type = {}
         consume(events)
 
-    recent_flow_cutoff = datetime.now(timezone.utc) - timedelta(hours=min(4, max(1, int(hours or 24) // 6 or 1)))
+    recent_flow_cutoff = datetime.now(timezone.utc) - timedelta(
+        hours=min(4, max(1, int(hours or 24) // 6 or 1))
+    )
     feed_count = 0
     active_providers: set[str] = set()
     for row in raw_rows or []:
-        provider = str(row.get("provider") or ((row.get("payload") or {}).get("provider")) or "").strip()
+        provider = str(
+            row.get("provider") or ((row.get("payload") or {}).get("provider")) or ""
+        ).strip()
         if provider:
             active_providers.add(provider)
-        published_raw = row.get("published_at") or row.get("timestamp") or row.get("created_at")
+        published_raw = (
+            row.get("published_at") or row.get("timestamp") or row.get("created_at")
+        )
         published_at: Optional[datetime] = None
         if isinstance(published_raw, datetime):
-            published_at = published_raw if published_raw.tzinfo else published_raw.replace(tzinfo=timezone.utc)
+            published_at = (
+                published_raw
+                if published_raw.tzinfo
+                else published_raw.replace(tzinfo=timezone.utc)
+            )
         else:
             text = str(published_raw or "").strip()
             if text:
@@ -471,7 +908,7 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
         feed_count = max(1, min(len(raw_rows), len(active_providers) or 0))
 
     generated_at = _now_iso()
-    return {
+    payload = {
         "symbol": symbol_key,
         "query_symbols": symbol_keys,
         "hours": int(hours),
@@ -481,7 +918,9 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
         "feed_count": int(feed_count),
         "active_provider_count": int(len(active_providers)),
         "sentiment": sentiment,
-        "by_type": dict(sorted(by_type.items(), key=lambda item: item[1], reverse=True)[:8]),
+        "by_type": dict(
+            sorted(by_type.items(), key=lambda item: item[1], reverse=True)[:8]
+        ),
         "source_states": source_states,
         "llm_queue": llm_queue,
         "timestamp": generated_at,
@@ -491,7 +930,28 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
         "window_since_local": _local_iso(since),
         "ui_timezone": _UI_TIMEZONE,
         "timezone_basis": _TIMEZONE_BASIS,
+        "source_errors": [item for item in source_errors if item][:6],
     }
+    if (
+        _news_summary_sample_count(payload) <= 0
+        and payload["source_errors"]
+        and stale_cached is not None
+    ):
+        return _with_news_summary_runtime_fields(
+            stale_cached,
+            cache_hit=True,
+            cache_age_sec=stale_age,
+            stale=True,
+            stale_reason=" | ".join(payload["source_errors"][:4]),
+            source_status="cache_stale",
+        )
+    return _with_news_summary_runtime_fields(
+        _store_news_summary(cache_key, payload),
+        cache_hit=False,
+        cache_age_sec=0.0,
+        stale=False,
+        source_status="live_partial" if payload["source_errors"] else "live",
+    )
 
 
 def _extract_long_short_ratio(payload: Dict[str, Any]) -> Optional[float]:
@@ -499,10 +959,7 @@ def _extract_long_short_ratio(payload: Dict[str, Any]) -> Optional[float]:
         return None
     row = payload.get("long_short_ratio") or {}
     ratio = float(
-        row.get("long_short_ratio")
-        or row.get("ratio")
-        or row.get("ls_ratio")
-        or 0.0
+        row.get("long_short_ratio") or row.get("ratio") or row.get("ls_ratio") or 0.0
     )
     return ratio if ratio > 0 else None
 
@@ -537,7 +994,10 @@ def _build_microstructure_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     has_depth_rows = bool(orderbook.get("bid_depth") or orderbook.get("ask_depth"))
     has_mid_price = float(orderbook.get("mid_price") or 0.0) > 0
-    has_flow = bool(aggressor.get("count")) or abs(float(aggressor.get("imbalance") or 0.0)) > 0
+    has_flow = (
+        bool(aggressor.get("count"))
+        or abs(float(aggressor.get("imbalance") or 0.0)) > 0
+    )
     long_short_ratio = _extract_long_short_ratio(payload)
     wall_bias = _microstructure_wall_bias(payload)
     iceberg_count = int(float(iceberg.get("candidate_count") or 0.0))
@@ -559,7 +1019,8 @@ def _build_microstructure_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
         "has_aggressor_flow": has_flow,
         "large_order_count": len(large_orders),
         "iceberg_candidates": iceberg_count,
-        "long_short_ratio_available": bool(long_short.get("available")) or bool(long_short_ratio and long_short_ratio > 0),
+        "long_short_ratio_available": bool(long_short.get("available"))
+        or bool(long_short_ratio and long_short_ratio > 0),
         "long_short_ratio": round(long_short_ratio, 6) if long_short_ratio else None,
         "wall_bias": wall_bias,
     }
@@ -610,16 +1071,26 @@ def _build_derivatives_shadow_summary(
         "funding_mean": funding_mean,
         "funding_mean_rate_pct": funding_mean_rate_pct,
         "funding_zscore": _coerce_finite_float(snapshot_payload.get("funding_zscore")),
-        "funding_reversion_speed": _coerce_finite_float(snapshot_payload.get("funding_reversion_speed")),
+        "funding_reversion_speed": _coerce_finite_float(
+            snapshot_payload.get("funding_reversion_speed")
+        ),
         "long_short_ratio": _coerce_finite_float(snapshot.get("long_short_ratio")),
-        "long_short_ratio_change_24h": _coerce_finite_float(snapshot_payload.get("long_short_ratio_change_24h")),
-        "liquidation_burst_score": _coerce_finite_float(snapshot_payload.get("liquidation_burst_score")),
-        "derivatives_heat_score": _coerce_finite_float(snapshot_payload.get("derivatives_heat_score")),
+        "long_short_ratio_change_24h": _coerce_finite_float(
+            snapshot_payload.get("long_short_ratio_change_24h")
+        ),
+        "liquidation_burst_score": _coerce_finite_float(
+            snapshot_payload.get("liquidation_burst_score")
+        ),
+        "derivatives_heat_score": _coerce_finite_float(
+            snapshot_payload.get("derivatives_heat_score")
+        ),
         "crowding_score": _coerce_finite_float(snapshot.get("crowding_score")),
         "squeeze_score": _coerce_finite_float(snapshot.get("squeeze_score")),
         "distribution_score": _coerce_finite_float(snapshot.get("distribution_score")),
         "basis_pct": _coerce_finite_float(snapshot.get("basis_pct")),
-        "taker_buy_sell_imbalance": _coerce_finite_float(snapshot.get("taker_buy_sell_imbalance")),
+        "taker_buy_sell_imbalance": _coerce_finite_float(
+            snapshot.get("taker_buy_sell_imbalance")
+        ),
         "crowded_long": bool(snapshot_payload.get("crowded_long")),
         "crowded_short": bool(snapshot_payload.get("crowded_short")),
         "squeeze_building": bool(snapshot_payload.get("squeeze_building")),
@@ -631,14 +1102,14 @@ def _build_derivatives_shadow_summary(
     }
 
 
-def _build_derivatives_summary_from_overview(overview: Dict[str, Any]) -> Dict[str, Any]:
+def _build_derivatives_summary_from_overview(
+    overview: Dict[str, Any]
+) -> Dict[str, Any]:
     overview = dict(overview or {})
     snapshot = dict(overview.get("snapshot") or {})
     snapshot_payload = dict(snapshot.get("payload") or {})
     active_datasets = list(
-        overview.get("active_datasets")
-        or snapshot_payload.get("active_datasets")
-        or []
+        overview.get("active_datasets") or snapshot_payload.get("active_datasets") or []
     )
     freshness_sec = _coerce_finite_float(overview.get("freshness_sec"))
     degraded_reason = str(overview.get("degraded_reason") or "").strip() or None
@@ -653,7 +1124,12 @@ def _build_derivatives_summary_from_overview(overview: Dict[str, Any]) -> Dict[s
     status = "missing"
     if bool(overview.get("available")) and not degraded_reason:
         status = "ok"
-    elif degraded_reason or active_datasets or bool(overview.get("key_configured")) or status_rows:
+    elif (
+        degraded_reason
+        or active_datasets
+        or bool(overview.get("key_configured"))
+        or status_rows
+    ):
         status = "degraded"
 
     return {
@@ -672,18 +1148,30 @@ def _build_derivatives_summary_from_overview(overview: Dict[str, Any]) -> Dict[s
         "history_interval": snapshot_payload.get("history_interval"),
         "funding_rate": _coerce_finite_float(snapshot.get("funding_rate")),
         "funding_mean": funding_mean,
-        "funding_mean_rate_pct": (funding_mean * 100.0) if funding_mean is not None else None,
+        "funding_mean_rate_pct": (funding_mean * 100.0)
+        if funding_mean is not None
+        else None,
         "funding_zscore": _coerce_finite_float(snapshot_payload.get("funding_zscore")),
-        "funding_reversion_speed": _coerce_finite_float(snapshot_payload.get("funding_reversion_speed")),
+        "funding_reversion_speed": _coerce_finite_float(
+            snapshot_payload.get("funding_reversion_speed")
+        ),
         "long_short_ratio": _coerce_finite_float(snapshot.get("long_short_ratio")),
-        "long_short_ratio_change_24h": _coerce_finite_float(snapshot_payload.get("long_short_ratio_change_24h")),
-        "liquidation_burst_score": _coerce_finite_float(snapshot_payload.get("liquidation_burst_score")),
-        "derivatives_heat_score": _coerce_finite_float(snapshot_payload.get("derivatives_heat_score")),
+        "long_short_ratio_change_24h": _coerce_finite_float(
+            snapshot_payload.get("long_short_ratio_change_24h")
+        ),
+        "liquidation_burst_score": _coerce_finite_float(
+            snapshot_payload.get("liquidation_burst_score")
+        ),
+        "derivatives_heat_score": _coerce_finite_float(
+            snapshot_payload.get("derivatives_heat_score")
+        ),
         "crowding_score": _coerce_finite_float(snapshot.get("crowding_score")),
         "squeeze_score": _coerce_finite_float(snapshot.get("squeeze_score")),
         "distribution_score": _coerce_finite_float(snapshot.get("distribution_score")),
         "basis_pct": _coerce_finite_float(snapshot.get("basis_pct")),
-        "taker_buy_sell_imbalance": _coerce_finite_float(snapshot.get("taker_buy_sell_imbalance")),
+        "taker_buy_sell_imbalance": _coerce_finite_float(
+            snapshot.get("taker_buy_sell_imbalance")
+        ),
         "crowded_long": bool(snapshot_payload.get("crowded_long")),
         "crowded_short": bool(snapshot_payload.get("crowded_short")),
         "squeeze_building": bool(snapshot_payload.get("squeeze_building")),
@@ -710,7 +1198,11 @@ _DERIVATIVES_SIGNAL_FIELDS = (
 
 def _derivatives_summary_metric_count(summary: Optional[Dict[str, Any]]) -> int:
     data = dict(summary or {})
-    return sum(1 for field in _DERIVATIVES_SIGNAL_FIELDS if _coerce_finite_float(data.get(field)) is not None)
+    return sum(
+        1
+        for field in _DERIVATIVES_SIGNAL_FIELDS
+        if _coerce_finite_float(data.get(field)) is not None
+    )
 
 
 def _pick_preferred_derivatives_summary(*summaries: Any) -> Dict[str, Any]:
@@ -734,6 +1226,60 @@ def _pick_preferred_derivatives_summary(*summaries: Any) -> Dict[str, Any]:
             best = summary
             best_score = score
     return best
+
+
+def _build_derivatives_source_summary(
+    summary: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    payload = dict(summary or {})
+    source = str(payload.get("provider") or "coinglass").strip() or "coinglass"
+    status = str(payload.get("status") or "missing").strip().lower() or "missing"
+    freshness_sec = _coerce_finite_float(payload.get("freshness_sec"))
+    stale = freshness_sec is not None and freshness_sec > float(
+        _COINGLASS_PREFERRED_MAX_AGE_SEC
+    )
+    degraded_reason = str(payload.get("degraded_reason") or "").strip() or None
+    available = bool(payload.get("available"))
+    dataset_count = int(payload.get("dataset_count") or 0)
+    history_ready = bool(payload.get("history_ready"))
+
+    source_status = "missing"
+    note = None
+    if available and status == "ok" and not stale and not degraded_reason:
+        source_status = "live"
+    elif available and stale:
+        source_status = "cache_stale"
+        note = "CoinGlass derivatives snapshot exceeds the preferred freshness window."
+    elif (
+        available
+        or degraded_reason
+        or bool(payload.get("key_configured"))
+        or dataset_count > 0
+    ):
+        source_status = "degraded"
+        if degraded_reason:
+            note = f"CoinGlass derivatives degraded: {degraded_reason}"
+        elif stale:
+            note = (
+                "CoinGlass derivatives snapshot exceeds the preferred freshness window."
+            )
+        elif not history_ready:
+            note = "CoinGlass derivatives history context is incomplete."
+
+    return {
+        "source": source,
+        "available": available,
+        "source_status": source_status,
+        "status": status,
+        "stale": stale,
+        "cache_age_sec": freshness_sec,
+        "dataset_count": dataset_count,
+        "history_ready": history_ready,
+        "snapshot_at": payload.get("snapshot_at"),
+        "quota_headroom": dict(payload.get("quota_headroom") or {}),
+        "degraded_reason": degraded_reason,
+        "note": note,
+    }
 
 
 def _news_summary_sample_count(summary: Optional[Dict[str, Any]]) -> int:
@@ -808,7 +1354,9 @@ def _apply_derivatives_shadow_to_microstructure(
             "timestamp": snapshot_at,
         }
 
-    taker_imbalance = _coerce_finite_float(derivatives_summary.get("taker_buy_sell_imbalance"))
+    taker_imbalance = _coerce_finite_float(
+        derivatives_summary.get("taker_buy_sell_imbalance")
+    )
     current_flow = dict(merged.get("aggressor_flow") or {})
     current_flow_count = int(current_flow.get("count") or 0)
     current_flow_imbalance = _coerce_finite_float(current_flow.get("imbalance")) or 0.0
@@ -848,21 +1396,35 @@ def _build_market_regime(
     news: Dict[str, Any],
     derivatives_summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    risk_module = dict((analytics.get("modules") or {}).get("risk_dashboard", {}).get("data") or {})
-    micro_module = dict((analytics.get("modules") or {}).get("microstructure", {}).get("data") or {})
-    merged_micro = dict(_merge_nested_payload(microstructure or {}, micro_module or {}) or {})
+    risk_module = dict(
+        (analytics.get("modules") or {}).get("risk_dashboard", {}).get("data") or {}
+    )
+    micro_module = dict(
+        (analytics.get("modules") or {}).get("microstructure", {}).get("data") or {}
+    )
+    merged_micro = dict(
+        _merge_nested_payload(microstructure or {}, micro_module or {}) or {}
+    )
     micro_summary = _build_microstructure_summary(merged_micro)
     derivatives_summary = dict(derivatives_summary or {})
 
     risk_level = str(risk_module.get("risk_level") or "unknown")
     spread_bps = float((merged_micro.get("orderbook") or {}).get("spread_bps") or 0.0)
-    imbalance = float((merged_micro.get("aggressor_flow") or {}).get("imbalance") or 0.0)
+    imbalance = float(
+        (merged_micro.get("aggressor_flow") or {}).get("imbalance") or 0.0
+    )
     long_short_ratio = float(micro_summary.get("long_short_ratio") or 1.0)
     wall_bias = float(micro_summary.get("wall_bias") or 0.0)
 
     sentiment = dict(news.get("sentiment") or {})
-    total_news = sum(int(sentiment.get(key) or 0) for key in ("positive", "neutral", "negative"))
-    news_bias = ((sentiment.get("positive", 0) - sentiment.get("negative", 0)) / total_news) if total_news else 0.0
+    total_news = sum(
+        int(sentiment.get(key) or 0) for key in ("positive", "neutral", "negative")
+    )
+    news_bias = (
+        ((sentiment.get("positive", 0) - sentiment.get("negative", 0)) / total_news)
+        if total_news
+        else 0.0
+    )
 
     micro_signal = (
         imbalance * 0.55
@@ -872,13 +1434,17 @@ def _build_market_regime(
     joint_signal = micro_signal + (news_bias * 0.25)
     derivatives_ready = bool(derivatives_summary.get("available"))
     derivatives_history_ready = bool(derivatives_summary.get("history_ready"))
-    derivatives_freshness_sec = _coerce_finite_float(derivatives_summary.get("freshness_sec"))
+    derivatives_freshness_sec = _coerce_finite_float(
+        derivatives_summary.get("freshness_sec")
+    )
     derivatives_confidence_bonus = 0.0
     if derivatives_ready:
         derivatives_confidence_bonus += 0.08
     if derivatives_history_ready:
         derivatives_confidence_bonus += 0.04
-    if derivatives_freshness_sec is not None and derivatives_freshness_sec > float(_COINGLASS_PREFERRED_MAX_AGE_SEC):
+    if derivatives_freshness_sec is not None and derivatives_freshness_sec > float(
+        _COINGLASS_PREFERRED_MAX_AGE_SEC
+    ):
         derivatives_confidence_bonus -= 0.05
     confidence = min(
         0.95,
@@ -916,7 +1482,9 @@ def _build_market_regime(
         "spread_bps": round(spread_bps, 4),
         "imbalance": round(imbalance, 4),
         "news_bias": round(news_bias, 4),
-        "long_short_ratio": round(long_short_ratio, 6) if long_short_ratio > 0 else None,
+        "long_short_ratio": round(long_short_ratio, 6)
+        if long_short_ratio > 0
+        else None,
         "wall_bias": round(wall_bias, 6),
     }
 
@@ -942,7 +1510,9 @@ def _snapshot_is_recent(payload: Dict[str, Any], max_age_sec: float) -> bool:
     return age_sec is not None and age_sec <= float(max_age_sec)
 
 
-def _analytics_module_entry(task_name: str, data: Dict[str, Any], *, ok: bool, error: Optional[str] = None) -> Dict[str, Any]:
+def _analytics_module_entry(
+    task_name: str, data: Dict[str, Any], *, ok: bool, error: Optional[str] = None
+) -> Dict[str, Any]:
     payload = dict(data or {})
     if error:
         payload.setdefault("error", error)
@@ -975,20 +1545,192 @@ def _community_has_signal(payload: Dict[str, Any]) -> bool:
 
 
 def _map_calendar_rows(rows: Any) -> List[Dict[str, Any]]:
-    mapped: List[Dict[str, Any]] = []
-    for row in list(rows or [])[:8]:
+    def _importance_rank(value: Any) -> int:
+        text = str(value or "").strip().lower()
+        if text == "critical":
+            return 4
+        if text == "high":
+            return 3
+        if text == "medium":
+            return 2
+        if text == "low":
+            return 1
+        return 0
+
+    def _source_label(source: Any) -> str:
+        mapping = {
+            "coinglass_economic_data": "CoinGlass宏观",
+            "coinglass_central_bank": "CoinGlass央行",
+            "coinglass_unlock_list": "CoinGlass解锁",
+            "internal_estimate": "内部估算",
+        }
+        key = str(source or "").strip().lower()
+        return mapping.get(key, str(source or "").strip() or "未标记")
+
+    def _source_rank(source: Any) -> int:
+        text = str(source or "").strip().lower()
+        if text.startswith("coinglass_"):
+            return 0
+        if text == "internal_estimate":
+            return 2
+        return 1
+
+    def _category_rank(category: Any) -> int:
+        text = str(category or "").strip().lower()
+        return {
+            "economic": 0,
+            "central_bank": 1,
+            "unlock": 2,
+            "expiry": 3,
+        }.get(text, 4)
+
+    normalized: List[Dict[str, Any]] = []
+    for row in list(rows or []):
         if not isinstance(row, dict):
             continue
-        mapped.append(
+        source = row.get("source") or row.get("provider")
+        normalized.append(
             {
-                "title": row.get("title") or row.get("name") or row.get("event") or "事件",
-                "timestamp": row.get("timestamp") or row.get("time_utc") or row.get("start_time") or row.get("time"),
+                "title": row.get("title")
+                or row.get("name")
+                or row.get("event")
+                or "事件",
+                "timestamp": row.get("timestamp")
+                or row.get("time_utc")
+                or row.get("start_time")
+                or row.get("time"),
                 "importance": row.get("importance") or "medium",
                 "category": row.get("category") or "event",
                 "note": row.get("note"),
+                "source": source,
+                "source_label": _source_label(source),
+                "official_source": str(source or "")
+                .strip()
+                .lower()
+                .startswith("coinglass_"),
+                "estimated_source": str(source or "").strip().lower()
+                == "internal_estimate",
             }
         )
-    return mapped
+
+    normalized.sort(
+        key=lambda row: (
+            -_importance_rank(row.get("importance")),
+            _source_rank(row.get("source")),
+            _category_rank(row.get("category")),
+            str(row.get("timestamp") or ""),
+        )
+    )
+
+    category_caps = {"economic": 4, "central_bank": 2, "unlock": 3, "expiry": 1}
+    selected: List[Dict[str, Any]] = []
+    selected_keys = set()
+    category_counts: Dict[str, int] = {}
+
+    for row in normalized:
+        category = str(row.get("category") or "event").strip().lower()
+        cap = category_caps.get(category, 2)
+        if int(category_counts.get(category) or 0) >= cap:
+            continue
+        key = (
+            category,
+            str(row.get("timestamp") or ""),
+            str(row.get("title") or "").strip().lower(),
+        )
+        if key in selected_keys:
+            continue
+        selected_keys.add(key)
+        category_counts[category] = int(category_counts.get(category) or 0) + 1
+        selected.append(row)
+        if len(selected) >= 8:
+            break
+
+    if len(selected) < 8:
+        for row in normalized:
+            key = (
+                str(row.get("category") or "event").strip().lower(),
+                str(row.get("timestamp") or ""),
+                str(row.get("title") or "").strip().lower(),
+            )
+            if key in selected_keys:
+                continue
+            selected_keys.add(key)
+            selected.append(row)
+            if len(selected) >= 8:
+                break
+
+    selected.sort(
+        key=lambda row: (
+            str(row.get("timestamp") or ""),
+            -_importance_rank(row.get("importance")),
+        )
+    )
+    return selected
+
+
+def _build_calendar_source_summary(
+    calendar_data: Dict[str, Any], calendar_rows: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    payload = dict(calendar_data or {})
+    source_details = dict(payload.get("source_details") or {})
+    explicit_source_metadata = bool(payload.get("source") or source_details)
+    if not explicit_source_metadata:
+        explicit_source_metadata = any(
+            bool((item or {}).get("source")) for item in list(calendar_rows or [])
+        )
+    official_mapping = {
+        "economic": "coinglass_economic_data",
+        "central_bank": "coinglass_central_bank",
+        "unlocks": "coinglass_unlock_list",
+    }
+    official_sources = [
+        label
+        for key, label in official_mapping.items()
+        if bool((source_details.get(key) or {}).get("available"))
+    ]
+    if not official_sources:
+        official_sources = sorted(
+            {
+                str(item.get("source") or "").strip()
+                for item in list(calendar_rows or [])
+                if str(item.get("source") or "").strip().startswith("coinglass_")
+            }
+        )
+    internal_details = dict(source_details.get("internal_estimate") or {})
+    estimated_count = int(internal_details.get("count") or 0)
+    if estimated_count <= 0:
+        estimated_count = len(
+            [
+                item
+                for item in list(calendar_rows or [])
+                if bool(item.get("estimated_source"))
+            ]
+        )
+    official_count = 0
+    for key in official_mapping:
+        official_count += int((source_details.get(key) or {}).get("count") or 0)
+    if official_count <= 0:
+        official_count = len(
+            [
+                item
+                for item in list(calendar_rows or [])
+                if bool(item.get("official_source"))
+            ]
+        )
+    return {
+        "source": str(payload.get("source") or "").strip() or None,
+        "explicit_source_metadata": explicit_source_metadata,
+        "official_sources": official_sources,
+        "official_available": bool(official_sources),
+        "official_count": official_count,
+        "estimated_count": estimated_count,
+        "fallback_used": bool(internal_details.get("used")) or estimated_count > 0,
+        "note": str(payload.get("note") or "").strip() or None,
+        "stale": bool(payload.get("stale")),
+        "cache_age_sec": payload.get("cache_age_sec"),
+        "source_status": str(payload.get("source_status") or "").strip() or None,
+        "stale_reason": str(payload.get("stale_reason") or "").strip() or None,
+    }
 
 
 def _coerce_finite_float(value: Any) -> Optional[float]:
@@ -1037,8 +1779,12 @@ def _build_macro_region_summary(
     ppi_yoy = _coerce_finite_float(snapshot.get(ppi_key)) if ppi_key else None
     m1_yoy = _coerce_finite_float(snapshot.get(m1_key)) if m1_key else None
     m2_yoy = _coerce_finite_float(snapshot.get(m2_key)) if m2_key else None
-    scissors_spread = _coerce_finite_float(snapshot.get(scissors_key)) if scissors_key else None
-    liquidity_spread = _coerce_finite_float(snapshot.get(liquidity_key)) if liquidity_key else None
+    scissors_spread = (
+        _coerce_finite_float(snapshot.get(scissors_key)) if scissors_key else None
+    )
+    liquidity_spread = (
+        _coerce_finite_float(snapshot.get(liquidity_key)) if liquidity_key else None
+    )
 
     for key, label in scalar_fields:
         value = values.get(key)
@@ -1060,14 +1806,22 @@ def _build_macro_region_summary(
         "ppi_yoy": round(ppi_yoy, 4) if ppi_yoy is not None else None,
         "m1_yoy": round(m1_yoy, 4) if m1_yoy is not None else None,
         "m2_yoy": round(m2_yoy, 4) if m2_yoy is not None else None,
-        "scissors_spread_pp": round(scissors_spread, 4) if scissors_spread is not None else None,
-        "liquidity_scissors_spread_pp": round(liquidity_spread, 4) if liquidity_spread is not None else None,
+        "scissors_spread_pp": round(scissors_spread, 4)
+        if scissors_spread is not None
+        else None,
+        "liquidity_scissors_spread_pp": round(liquidity_spread, 4)
+        if liquidity_spread is not None
+        else None,
     }
 
 
 def _build_macro_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
     snapshot = dict(payload or {})
-    active_series = [name for name, value in snapshot.items() if _coerce_finite_float(value) is not None]
+    active_series = [
+        name
+        for name, value in snapshot.items()
+        if _coerce_finite_float(value) is not None
+    ]
     market_parts: List[str] = []
     vix = _coerce_finite_float(snapshot.get("vix"))
     dxy = _coerce_finite_float(snapshot.get("dxy"))
@@ -1079,7 +1833,11 @@ def _build_macro_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
     if tnx is not None:
         market_parts.append(f"UST10Y {tnx:.2f}%")
 
-    market_headline = "Cross-market: " + " | ".join(market_parts) if market_parts else "Cross-market: unavailable"
+    market_headline = (
+        "Cross-market: " + " | ".join(market_parts)
+        if market_parts
+        else "Cross-market: unavailable"
+    )
     us_summary = _build_macro_region_summary(
         snapshot,
         name="US",
@@ -1129,14 +1887,18 @@ def _build_macro_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "available_series": active_series,
         "available_count": len(active_series),
-        "headline": " || ".join(headline_parts) if headline_parts else "Macro snapshot unavailable",
+        "headline": " || ".join(headline_parts)
+        if headline_parts
+        else "Macro snapshot unavailable",
         "cross_market_headline": market_headline,
         "us_headline": us_summary["headline"],
         "china_headline": china_summary["headline"],
         "scissors_spread_pp": us_summary["scissors_spread_pp"],
         "liquidity_scissors_spread_pp": us_summary["liquidity_scissors_spread_pp"],
         "china_scissors_spread_pp": china_summary["scissors_spread_pp"],
-        "china_liquidity_scissors_spread_pp": china_summary["liquidity_scissors_spread_pp"],
+        "china_liquidity_scissors_spread_pp": china_summary[
+            "liquidity_scissors_spread_pp"
+        ],
         "fed_rate": us_summary["fed_rate"],
         "cpi_yoy": us_summary["cpi_yoy"],
         "ppi_yoy": us_summary["ppi_yoy"],
@@ -1149,8 +1911,18 @@ def _build_macro_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
         "regions": {
             "market": {
                 "headline": market_headline,
-                "available_series": [key for key in ("vix", "dxy", "tnx_10y") if _coerce_finite_float(snapshot.get(key)) is not None],
-                "available_count": len([key for key in ("vix", "dxy", "tnx_10y") if _coerce_finite_float(snapshot.get(key)) is not None]),
+                "available_series": [
+                    key
+                    for key in ("vix", "dxy", "tnx_10y")
+                    if _coerce_finite_float(snapshot.get(key)) is not None
+                ],
+                "available_count": len(
+                    [
+                        key
+                        for key in ("vix", "dxy", "tnx_10y")
+                        if _coerce_finite_float(snapshot.get(key)) is not None
+                    ]
+                ),
                 "vix": round(vix, 4) if vix is not None else None,
                 "dxy": round(dxy, 4) if dxy is not None else None,
                 "tnx_10y": round(tnx, 4) if tnx is not None else None,
@@ -1161,23 +1933,195 @@ def _build_macro_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _build_macro_source_summary(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    snapshot = dict(payload or {})
+    meta = dict(snapshot.get("_meta") or {})
+    groups_meta = dict(meta.get("groups") or {})
+    group_specs = {
+        "market": {
+            "keys": ("vix", "dxy", "tnx_10y"),
+            "provider": "yfinance+yahoo_chart",
+            "max_age_sec": _MACRO_MARKET_STALE_MAX_AGE_SEC,
+        },
+        "us": {
+            "keys": (
+                "fed_rate",
+                "cpi_yoy",
+                "ppi_yoy",
+                "ppi_cpi_gap",
+                "m1_yoy",
+                "m2_yoy",
+                "m1_m2_gap",
+            ),
+            "provider": "fred",
+            "max_age_sec": _MACRO_MONTHLY_STALE_MAX_AGE_SEC,
+        },
+        "china": {
+            "keys": (
+                "cn_cpi_yoy",
+                "cn_ppi_yoy",
+                "cn_ppi_cpi_gap",
+                "cn_m1_yoy",
+                "cn_m2_yoy",
+                "cn_m1_m2_gap",
+            ),
+            "provider": "stats.gov.cn+pbc.gov.cn",
+            "max_age_sec": _MACRO_MONTHLY_STALE_MAX_AGE_SEC,
+        },
+    }
+
+    groups: Dict[str, Any] = {}
+    stale_groups: List[str] = []
+    partial_groups: List[str] = []
+    missing_groups: List[str] = []
+
+    for group_name, spec in group_specs.items():
+        group_payload = dict(groups_meta.get(group_name) or {})
+        keys = tuple(spec["keys"])
+        available_count = int(group_payload.get("available_count") or 0)
+        if available_count <= 0:
+            available_count = sum(
+                1 for key in keys if _coerce_finite_float(snapshot.get(key)) is not None
+            )
+        total_series = int(group_payload.get("total_series") or 0) or len(keys)
+        latest_timestamp = (
+            str(group_payload.get("latest_timestamp") or "").strip() or None
+        )
+        latest_dt = _coerce_utc_datetime(latest_timestamp)
+        age_sec = None
+        if latest_dt is not None:
+            age_sec = max(0.0, (datetime.now(timezone.utc) - latest_dt).total_seconds())
+        stale = bool(
+            available_count > 0
+            and age_sec is not None
+            and age_sec > float(spec["max_age_sec"])
+        )
+        if available_count <= 0:
+            source_status = "missing"
+            missing_groups.append(group_name)
+        elif stale:
+            source_status = "cache_stale"
+            stale_groups.append(group_name)
+        elif available_count < total_series:
+            source_status = "partial"
+            partial_groups.append(group_name)
+        else:
+            source_status = "cache_fresh"
+        groups[group_name] = {
+            "provider": str(group_payload.get("provider") or spec["provider"]),
+            "available_count": available_count,
+            "total_series": total_series,
+            "available_series": list(
+                group_payload.get("available_series")
+                or [
+                    key
+                    for key in keys
+                    if _coerce_finite_float(snapshot.get(key)) is not None
+                ]
+            ),
+            "latest_timestamp": latest_timestamp,
+            "cache_age_sec": age_sec,
+            "stale": stale,
+            "source_status": source_status,
+        }
+
+    explicit_source = str(meta.get("source") or "").strip()
+    if explicit_source:
+        source = explicit_source
+    else:
+        providers = [
+            str(item.get("provider") or "").strip()
+            for item in groups.values()
+            if int(item.get("available_count") or 0) > 0
+        ]
+        source = "+".join([part for part in providers if part]) or None
+
+    latest_timestamp = str(meta.get("latest_timestamp") or "").strip() or None
+    latest_dt = _coerce_utc_datetime(latest_timestamp)
+    cache_age_sec = (
+        max(0.0, (datetime.now(timezone.utc) - latest_dt).total_seconds())
+        if latest_dt is not None
+        else None
+    )
+    available_series = sum(
+        int(item.get("available_count") or 0) for item in groups.values()
+    )
+
+    source_status = "missing"
+    note = None
+    if available_series > 0:
+        if stale_groups:
+            source_status = (
+                "cache_stale"
+                if len(stale_groups)
+                == len(
+                    [
+                        name
+                        for name, item in groups.items()
+                        if int(item.get("available_count") or 0) > 0
+                    ]
+                )
+                else "partial"
+            )
+            note = "Macro cache contains stale groups; verify the daily refresh job and upstream release windows."
+        elif partial_groups or missing_groups:
+            source_status = "partial"
+            note = (
+                "Macro snapshot is partially populated across market/US/China groups."
+            )
+        else:
+            source_status = "cache_fresh"
+
+    return {
+        "source": source,
+        "source_status": source_status,
+        "available": available_series > 0,
+        "available_series": available_series,
+        "groups": groups,
+        "stale": bool(stale_groups),
+        "stale_groups": stale_groups,
+        "partial_groups": partial_groups,
+        "missing_groups": missing_groups,
+        "cache_age_sec": cache_age_sec,
+        "latest_timestamp": latest_timestamp,
+        "note": note,
+    }
+
+
 async def _load_macro_snapshot_payload() -> Dict[str, Any]:
     def _sync() -> Dict[str, Any]:
         try:
-            from core.data.macro_collector import load_macro_snapshot  # noqa: PLC0415
+            from core.data.macro_collector import (  # noqa: PLC0415
+                load_macro_snapshot,
+                load_macro_snapshot_metadata,
+            )
 
-            return dict(load_macro_snapshot() or {})
+            snapshot = dict(load_macro_snapshot() or {})
+            metadata = dict(load_macro_snapshot_metadata(snapshot) or {})
+            if metadata:
+                snapshot["_meta"] = metadata
+                if metadata.get("latest_timestamp"):
+                    snapshot["timestamp"] = metadata.get("latest_timestamp")
+                if metadata.get("source"):
+                    snapshot["source"] = metadata.get("source")
+            return snapshot
         except Exception:
             return {}
 
     return await asyncio.to_thread(_sync)
 
 
-async def _load_latest_snapshot(model: Any, exchange: str, symbol: str) -> Optional[Any]:
+async def _load_latest_snapshot(
+    model: Any, exchange: str, symbol: str
+) -> Optional[Any]:
     async with async_session_maker() as session:
         preferred_stmt = (
             select(model)
-            .where(model.exchange == exchange, model.symbol == symbol, model.capture_status.in_(["ok", "degraded"]))
+            .where(
+                model.exchange == exchange,
+                model.symbol == symbol,
+                model.capture_status.in_(["ok", "degraded"]),
+            )
             .order_by(model.timestamp.desc())
             .limit(1)
         )
@@ -1193,7 +2137,9 @@ async def _load_latest_snapshot(model: Any, exchange: str, symbol: str) -> Optio
         return (await session.execute(fallback_stmt)).scalars().first()
 
 
-async def _load_latest_microstructure_snapshot(exchange: str, symbol: str) -> Dict[str, Any]:
+async def _load_latest_microstructure_snapshot(
+    exchange: str, symbol: str
+) -> Dict[str, Any]:
     row = await _load_latest_snapshot(AnalyticsMicrostructureSnapshot, exchange, symbol)
     if row is None:
         return {}
@@ -1291,7 +2237,12 @@ async def _load_latest_whale_snapshot(exchange: str, symbol: str) -> Dict[str, A
 def _compact_factor_library(data: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(data, dict):
         return {}
-    if not data.get("factors") and not data.get("latest") and not data.get("asset_scores") and not data.get("points"):
+    if (
+        not data.get("factors")
+        and not data.get("latest")
+        and not data.get("asset_scores")
+        and not data.get("points")
+    ):
         return {}
     return {
         "exchange": data.get("exchange"),
@@ -1308,8 +2259,14 @@ def _compact_factor_library(data: Dict[str, Any]) -> Dict[str, Any]:
         "mean_24": dict(data.get("mean_24") or {}),
         "std_24": dict(data.get("std_24") or {}),
         "correlation": dict(data.get("correlation") or {}),
-        "series": [row for row in list(data.get("series") or [])[:120] if isinstance(row, dict)],
-        "asset_scores": [row for row in list(data.get("asset_scores") or [])[:12] if isinstance(row, dict)],
+        "series": [
+            row for row in list(data.get("series") or [])[:120] if isinstance(row, dict)
+        ],
+        "asset_scores": [
+            row
+            for row in list(data.get("asset_scores") or [])[:12]
+            if isinstance(row, dict)
+        ],
     }
 
 
@@ -1328,7 +2285,9 @@ def _compact_fama(data: Dict[str, Any]) -> Dict[str, Any]:
         "latest": dict(data.get("latest") or {}),
         "mean_24": dict(data.get("mean_24") or {}),
         "std_24": dict(data.get("std_24") or {}),
-        "series": [row for row in list(data.get("series") or [])[:120] if isinstance(row, dict)],
+        "series": [
+            row for row in list(data.get("series") or [])[:120] if isinstance(row, dict)
+        ],
     }
 
 
@@ -1340,8 +2299,12 @@ def _fallback_factor_library_from_fama(
     if not isinstance(fama, dict) or not fama:
         return {}
 
-    series_rows = [row for row in list(fama.get("series") or []) if isinstance(row, dict)]
-    factor_names = [str(name) for name in list((fama.get("latest") or {}).keys()) if str(name)]
+    series_rows = [
+        row for row in list(fama.get("series") or []) if isinstance(row, dict)
+    ]
+    factor_names = [
+        str(name) for name in list((fama.get("latest") or {}).keys()) if str(name)
+    ]
     correlation: Dict[str, Dict[str, float]] = {}
 
     if series_rows and factor_names:
@@ -1350,7 +2313,13 @@ def _fallback_factor_library_from_fama(
             frame = frame.drop(columns=["timestamp"])
         usable_cols = [col for col in factor_names if col in frame.columns]
         if usable_cols:
-            corr_df = frame[usable_cols].apply(pd.to_numeric, errors="coerce").corr().round(4).fillna(0.0)
+            corr_df = (
+                frame[usable_cols]
+                .apply(pd.to_numeric, errors="coerce")
+                .corr()
+                .round(4)
+                .fillna(0.0)
+            )
             correlation = corr_df.to_dict()
 
     asset_scores: List[Dict[str, Any]] = []
@@ -1388,7 +2357,9 @@ def _fallback_factor_library_from_fama(
         "factors": factor_names,
         "universe_size": int(fama.get("universe_size") or len(asset_scores)),
         "universe_quality": fama.get("universe_quality") or "low",
-        "warnings": ["Factor library degraded to Fama snapshot fallback for fast workbench response."],
+        "warnings": [
+            "Factor library degraded to Fama snapshot fallback for fast workbench response."
+        ],
         "latest": dict(fama.get("latest") or {}),
         "mean_24": dict(fama.get("mean_24") or {}),
         "std_24": dict(fama.get("std_24") or {}),
@@ -1399,25 +2370,54 @@ def _fallback_factor_library_from_fama(
 
 
 async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]:
-    risk_task = _wait_or_none(
+    risk_task = _wait_or_none_keep_running(
         get_risk_dashboard(lookback=min(720, profile.lookback)),
         4.0,
     )
-    news_task = _wait_or_none(_build_news_summary(profile.primary_symbol, hours=24), 8.0)
-    calendar_task = _wait_or_none(get_trading_calendar(days=7), 4.0)
-    macro_task = _wait_or_none(_load_macro_snapshot_payload(), 2.0)
-    history_micro_task = _wait_or_none(_load_latest_microstructure_snapshot(profile.exchange, profile.primary_symbol), 4.0)
-    history_community_task = _wait_or_none(_load_latest_community_snapshot(profile.exchange, profile.primary_symbol), 4.0)
-    history_whale_task = _wait_or_none(_load_latest_whale_snapshot(profile.exchange, profile.primary_symbol), 4.0)
-    derivatives_overview_task = _wait_or_none(
+    news_task = _wait_or_none_keep_running(
+        _build_news_summary(profile.primary_symbol, hours=24), 8.0
+    )
+    calendar_task = _wait_or_none_keep_running(get_trading_calendar(days=7), 4.0)
+    macro_task = _wait_or_none_keep_running(_load_macro_snapshot_payload(), 2.0)
+    history_micro_task = _wait_or_none_keep_running(
+        _load_latest_microstructure_snapshot(profile.exchange, profile.primary_symbol),
+        4.0,
+    )
+    history_community_task = _wait_or_none_keep_running(
+        _load_latest_community_snapshot(profile.exchange, profile.primary_symbol), 4.0
+    )
+    history_whale_task = _wait_or_none_keep_running(
+        _load_latest_whale_snapshot(profile.exchange, profile.primary_symbol), 4.0
+    )
+    derivatives_overview_task = _wait_or_none_keep_running(
         _load_preferred_coinglass_overview(profile.primary_symbol),
         8.0,
     )
-    history_status_task = _wait_or_none(
-        get_analytics_history_status(exchange=profile.exchange, symbol=profile.primary_symbol),
+    fear_greed_task = _wait_or_none_keep_running(
+        _load_public_fear_greed_snapshot(), 6.0
+    )
+    market_breadth_task = _wait_or_none_keep_running(
+        _load_public_market_breadth_snapshot(), 6.0
+    )
+    history_status_task = _wait_or_none_keep_running(
+        get_analytics_history_status(
+            exchange=profile.exchange, symbol=profile.primary_symbol
+        ),
         6.0,
     )
-    risk_dashboard, news, calendar_data, macro_snapshot, history_micro, history_community, history_whale, derivatives_overview, history_status = await asyncio.gather(
+    (
+        risk_dashboard,
+        news,
+        calendar_data,
+        macro_snapshot,
+        history_micro,
+        history_community,
+        history_whale,
+        derivatives_overview,
+        fear_greed,
+        market_breadth,
+        history_status,
+    ) = await asyncio.gather(
         risk_task,
         news_task,
         calendar_task,
@@ -1426,6 +2426,8 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
         history_community_task,
         history_whale_task,
         derivatives_overview_task,
+        fear_greed_task,
+        market_breadth_task,
         history_status_task,
     )
     risk_dashboard = dict(risk_dashboard or {})
@@ -1436,19 +2438,25 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
     history_community = dict(history_community or {})
     history_whale = dict(history_whale or {})
     derivatives_overview = dict(derivatives_overview or {})
+    fear_greed = dict(fear_greed or {})
+    market_breadth = dict(market_breadth or {})
     history_status = _analytics_status_collectors_to_map(dict(history_status or {}))
     derivatives_summary = _pick_preferred_derivatives_summary(
         _build_derivatives_summary_from_overview(derivatives_overview),
         _build_derivatives_shadow_summary(history_status, {}),
     )
 
-    prefer_history_micro = _snapshot_is_recent(history_micro, _MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC) and _microstructure_has_signal(history_micro)
-    prefer_history_community = _snapshot_is_recent(history_community, _MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC) and _community_has_signal(history_community)
+    prefer_history_micro = _snapshot_is_recent(
+        history_micro, _MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC
+    ) and _microstructure_has_signal(history_micro)
+    prefer_history_community = _snapshot_is_recent(
+        history_community, _MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC
+    ) and _community_has_signal(history_community)
 
     live_micro_task: Optional[Any] = None
     live_community_task: Optional[Any] = None
     if not prefer_history_micro:
-        live_micro_task = _wait_or_none(
+        live_micro_task = _wait_or_none_keep_running(
             get_market_microstructure(
                 exchange=profile.exchange,
                 symbol=profile.primary_symbol,
@@ -1457,28 +2465,48 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             4.0,
         )
     if not prefer_history_community:
-        live_community_task = _wait_or_none(
+        live_community_task = _wait_or_none_keep_running(
             get_community_overview(
                 symbol=profile.primary_symbol,
                 exchange=profile.exchange,
             ),
             4.0,
         )
-    live_micro = dict((await live_micro_task) or {}) if live_micro_task is not None else {}
-    live_community = dict((await live_community_task) or {}) if live_community_task is not None else {}
+    live_micro = (
+        dict((await live_micro_task) or {}) if live_micro_task is not None else {}
+    )
+    live_community = (
+        dict((await live_community_task) or {})
+        if live_community_task is not None
+        else {}
+    )
 
-    micro = dict(history_micro if prefer_history_micro else (_merge_nested_payload(live_micro, history_micro) or {}))
-    community = dict(history_community if prefer_history_community else (_merge_nested_payload(live_community, history_community) or {}))
+    micro = dict(
+        history_micro
+        if prefer_history_micro
+        else (_merge_nested_payload(live_micro, history_micro) or {})
+    )
+    community = dict(
+        history_community
+        if prefer_history_community
+        else (_merge_nested_payload(live_community, history_community) or {})
+    )
     micro = _apply_derivatives_shadow_to_microstructure(micro, derivatives_summary)
     used_history_micro = prefer_history_micro or (
-        not prefer_history_micro and _microstructure_has_signal(history_micro) and not _microstructure_has_signal(live_micro)
+        not prefer_history_micro
+        and _microstructure_has_signal(history_micro)
+        and not _microstructure_has_signal(live_micro)
     )
     used_history_community = prefer_history_community or (
-        not prefer_history_community and _community_has_signal(history_community) and not _community_has_signal(live_community)
+        not prefer_history_community
+        and _community_has_signal(history_community)
+        and not _community_has_signal(live_community)
     )
     used_history_whale = False
 
-    if not isinstance(community.get("whale_transfers"), dict) or "count" not in (community.get("whale_transfers") or {}):
+    if not isinstance(community.get("whale_transfers"), dict) or "count" not in (
+        community.get("whale_transfers") or {}
+    ):
         if history_whale:
             community["whale_transfers"] = {
                 "available": bool(history_whale.get("available", True)),
@@ -1490,7 +2518,12 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             used_history_whale = True
 
     calendar_rows = _map_calendar_rows(calendar_data.get("events") or [])
+    calendar_source_summary = _build_calendar_source_summary(
+        calendar_data, calendar_rows
+    )
     macro_summary = _build_macro_summary(macro_snapshot)
+    macro_source_summary = _build_macro_source_summary(macro_snapshot)
+    derivatives_source_summary = _build_derivatives_source_summary(derivatives_summary)
     analytics_modules = {
         "risk_dashboard": _analytics_module_entry(
             "risk_dashboard",
@@ -1508,7 +2541,9 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             "microstructure",
             micro,
             ok=_microstructure_has_signal(micro),
-            error=None if _microstructure_has_signal(micro) else "microstructure unavailable",
+            error=None
+            if _microstructure_has_signal(micro)
+            else "microstructure unavailable",
         ),
         "community": _analytics_module_entry(
             "community",
@@ -1520,13 +2555,23 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             "macro",
             {"snapshot": macro_snapshot, "summary": macro_summary},
             ok=_macro_has_signal(macro_snapshot),
-            error=None if _macro_has_signal(macro_snapshot) else "macro snapshot unavailable",
+            error=None
+            if _macro_has_signal(macro_snapshot)
+            else "macro snapshot unavailable",
         ),
     }
     analytics = {
         "timestamp": _now_iso(),
-        "all_ok": all(bool((item or {}).get("ok")) for item in analytics_modules.values()),
-        "ok_count": len([item for item in analytics_modules.values() if bool((item or {}).get("ok"))]),
+        "all_ok": all(
+            bool((item or {}).get("ok")) for item in analytics_modules.values()
+        ),
+        "ok_count": len(
+            [
+                item
+                for item in analytics_modules.values()
+                if bool((item or {}).get("ok"))
+            ]
+        ),
         "total": len(analytics_modules),
         "modules": analytics_modules,
     }
@@ -1538,29 +2583,91 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
 
     if not risk_dashboard:
         degraded = True
-        warnings.append("Risk dashboard timed out; market-state decision is based on partial inputs.")
+        warnings.append(
+            "Risk dashboard timed out; market-state decision is based on partial inputs."
+        )
+    elif bool(risk_dashboard.get("stale")):
+        warnings.append(
+            "Risk dashboard live refresh is pending; using recent cached snapshot."
+        )
     if str(news.get("scope")) == "global_fallback":
         degraded = True
-        warnings.append("Symbol-scoped news was sparse; switched to global market news fallback.")
-    if int(news.get("events_count") or 0) + int(news.get("feed_count") or 0) + int(news.get("raw_count") or 0) <= 0:
+        warnings.append(
+            "Symbol-scoped news was sparse; switched to global market news fallback."
+        )
+    if news.get("stale"):
+        warnings.append(
+            "News summary live refresh failed; using recent cached snapshot."
+        )
+    if (
+        int(news.get("events_count") or 0)
+        + int(news.get("feed_count") or 0)
+        + int(news.get("raw_count") or 0)
+        <= 0
+    ):
         degraded = True
-        warnings.append("News summary returned no usable samples, so event coverage may be stale.")
+        warnings.append(
+            "News summary returned no usable samples, so event coverage may be stale."
+        )
     if used_history_micro and not prefer_history_micro:
         degraded = True
-        warnings.append("Live microstructure timed out; using recent snapshot fallback.")
+        warnings.append(
+            "Live microstructure timed out; using recent snapshot fallback."
+        )
+    elif bool(micro.get("stale")):
+        warnings.append(
+            "Microstructure live refresh is pending; using recent cached snapshot."
+        )
     if (used_history_community and not prefer_history_community) or used_history_whale:
         degraded = True
-        warnings.append("Live community/whale stream timed out; using recent snapshot fallback.")
+        warnings.append(
+            "Live community/whale stream timed out; using recent snapshot fallback."
+        )
+    elif bool(community.get("stale")):
+        warnings.append(
+            "Community overview live refresh is pending; using recent cached snapshot."
+        )
+    if bool(((community.get("security_alerts") or {}).get("stale"))):
+        warnings.append(
+            "Security alerts live refresh failed; using recent cached SlowMist incidents."
+        )
     if not calendar_rows:
         degraded = True
         warnings.append("Trading calendar unavailable; watchlist fallback was used.")
+    elif bool(calendar_source_summary.get("stale")) and calendar_rows:
+        warnings.append(
+            "Trading calendar live refresh failed; using recent cached CoinGlass snapshot."
+        )
+    elif bool(
+        calendar_source_summary.get("explicit_source_metadata")
+    ) and not calendar_source_summary.get("official_available"):
+        degraded = True
+        warnings.append(
+            "Trading calendar is currently relying on internal estimates only; official CoinGlass events are unavailable."
+        )
+    elif (
+        bool(calendar_source_summary.get("fallback_used"))
+        and int(calendar_source_summary.get("estimated_count") or 0) > 0
+        and int(calendar_source_summary.get("official_count") or 0) > 0
+        and int(calendar_source_summary.get("estimated_count") or 0)
+        >= int(calendar_source_summary.get("official_count") or 0)
+    ):
+        warnings.append(
+            "Trading calendar currently mixes official CoinGlass events with internal estimate supplements."
+        )
     if not micro_summary.get("has_actionable_signal"):
         degraded = True
-        warnings.append("Microstructure signal unavailable, so orderbook and order-flow interpretation is limited.")
+        warnings.append(
+            "Microstructure signal unavailable, so orderbook and order-flow interpretation is limited."
+        )
     elif not micro_summary.get("has_orderbook_depth"):
-        warnings.append("Orderbook depth rows are sparse; wall and liquidity diagnostics may be incomplete.")
+        warnings.append(
+            "Orderbook depth rows are sparse; wall and liquidity diagnostics may be incomplete."
+        )
     if not micro_summary.get("long_short_ratio_available"):
-        warnings.append("Long/short ratio is unavailable for this snapshot; crowding diagnostics are partial.")
+        warnings.append(
+            "Long/short ratio is unavailable for this snapshot; crowding diagnostics are partial."
+        )
     has_derivatives_context = (
         bool(derivatives_summary.get("key_configured"))
         or bool(derivatives_summary.get("available"))
@@ -1570,21 +2677,85 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
     if has_derivatives_context:
         if not derivatives_summary.get("available"):
             degraded = True
-            warnings.append("CoinGlass derivatives snapshot is unavailable; research is using exchange/public fallbacks.")
-        elif _coerce_finite_float(derivatives_summary.get("freshness_sec")) is not None and float(derivatives_summary.get("freshness_sec") or 0.0) > float(_COINGLASS_PREFERRED_MAX_AGE_SEC):
+            warnings.append(
+                "CoinGlass derivatives snapshot is unavailable; research is using exchange/public fallbacks."
+            )
+        elif _coerce_finite_float(
+            derivatives_summary.get("freshness_sec")
+        ) is not None and float(
+            derivatives_summary.get("freshness_sec") or 0.0
+        ) > float(
+            _COINGLASS_PREFERRED_MAX_AGE_SEC
+        ):
             degraded = True
-            warnings.append("CoinGlass derivatives snapshot is stale; crowding/funding context may lag.")
+            warnings.append(
+                "CoinGlass derivatives snapshot is stale; crowding/funding context may lag."
+            )
         elif derivatives_summary.get("degraded_reason"):
             degraded = True
-            warnings.append(f"CoinGlass derivatives snapshot degraded: {derivatives_summary.get('degraded_reason')}.")
+            warnings.append(
+                f"CoinGlass derivatives snapshot degraded: {derivatives_summary.get('degraded_reason')}."
+            )
     if not _macro_has_signal(macro_snapshot):
-        warnings.append("Macro snapshot is unavailable; regime view leans on microstructure/news only.")
+        warnings.append(
+            "Macro snapshot is unavailable; regime view leans on microstructure/news only."
+        )
+    elif bool(macro_source_summary.get("stale")):
+        degraded = True
+        warnings.append(
+            "Macro snapshot cache is stale; cross-market or regional release context may lag."
+        )
+    elif str(macro_source_summary.get("source_status") or "") == "partial":
+        degraded = True
+        warnings.append(
+            "Macro snapshot is partially populated; some market/US/China legs are missing."
+        )
     elif macro_summary.get("scissors_spread_pp") is None:
-        warnings.append("Macro snapshot is missing the PPI-CPI scissors spread; refresh macro cache to restore it.")
+        warnings.append(
+            "Macro snapshot is missing the PPI-CPI scissors spread; refresh macro cache to restore it."
+        )
     elif macro_summary.get("china_scissors_spread_pp") is None:
-        warnings.append("China macro snapshot is missing the PPI-CPI scissors spread; China regime read is partial.")
+        warnings.append(
+            "China macro snapshot is missing the PPI-CPI scissors spread; China regime read is partial."
+        )
+    fear_greed_value = _coerce_finite_float(fear_greed.get("value"))
+    if not fear_greed.get("available"):
+        warnings.append(
+            "Fear & Greed index is unavailable; crowd sentiment context is partial."
+        )
+    elif fear_greed.get("stale"):
+        warnings.append(
+            "Fear & Greed live refresh failed; using recent cached snapshot."
+        )
+    elif fear_greed_value is not None and fear_greed_value <= 25:
+        warnings.append(
+            "Fear & Greed is in extreme fear; panic-driven reversals may increase."
+        )
+    elif fear_greed_value is not None and fear_greed_value >= 75:
+        warnings.append("Fear & Greed is in extreme greed; crowding risk is elevated.")
+    market_cap_change_pct_24h = _coerce_finite_float(
+        market_breadth.get("market_cap_change_pct_24h")
+    )
+    if not market_breadth.get("available"):
+        warnings.append(
+            "Global market breadth is unavailable; cross-market tape context is partial."
+        )
+    elif market_breadth.get("stale"):
+        warnings.append(
+            "Global market breadth live refresh failed; using recent cached snapshot."
+        )
+    elif market_cap_change_pct_24h is not None and market_cap_change_pct_24h <= -3.0:
+        warnings.append(
+            "Global crypto market cap is falling sharply in 24h; beta risk remains elevated."
+        )
+    elif market_cap_change_pct_24h is not None and market_cap_change_pct_24h >= 3.0:
+        warnings.append(
+            "Global crypto market cap is expanding quickly in 24h; beta follow-through is improving."
+        )
     if regime.get("risk_level") == "high":
-        warnings.append("Current risk level is high; lower confidence and tighten risk budgets.")
+        warnings.append(
+            "Current risk level is high; lower confidence and tighten risk budgets."
+        )
     return _module_result(
         "market_state",
         status=_status_from_flags(ok=True, degraded=degraded),
@@ -1597,6 +2768,8 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             "analytics.history.snapshots",
             "data.macro.snapshot",
             "data.coinglass.derivatives",
+            "alternative.me.fng",
+            "coingecko.global",
         ],
         warnings=warnings,
         summary={
@@ -1606,8 +2779,24 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             "confidence": regime["confidence"],
             "risk_level": regime["risk_level"],
             "macro_focus": macro_summary["headline"],
+            "calendar_source": calendar_source_summary.get("source"),
+            "calendar_official_count": int(
+                calendar_source_summary.get("official_count") or 0
+            ),
+            "calendar_estimated_count": int(
+                calendar_source_summary.get("estimated_count") or 0
+            ),
             "derivatives_status": str(derivatives_summary.get("status") or "missing"),
+            "derivatives_source_status": derivatives_source_summary.get(
+                "source_status"
+            ),
             "derivatives_freshness_sec": derivatives_summary.get("freshness_sec"),
+            "macro_source_status": macro_source_summary.get("source_status"),
+            "macro_cache_age_sec": macro_source_summary.get("cache_age_sec"),
+            "fear_greed_value": int(fear_greed_value)
+            if fear_greed_value is not None
+            else None,
+            "market_cap_change_pct_24h": market_cap_change_pct_24h,
         },
         payload={
             "analytics_overview": analytics,
@@ -1620,16 +2809,26 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
                 "community": community,
                 "news": news,
                 "macro": macro_snapshot,
+                "macro_source_summary": macro_source_summary,
                 "macro_regions": dict(macro_summary.get("regions") or {}),
                 "derivatives": derivatives_summary,
+                "derivatives_source_summary": derivatives_source_summary,
+                "fear_greed": fear_greed,
+                "global_market_breadth": market_breadth,
+                "calendar_source_summary": calendar_source_summary,
             },
             "calendar_watchlist": calendar_rows,
+            "calendar_source_summary": calendar_source_summary,
             "regime": regime,
             "microstructure_summary": micro_summary,
             "derivatives_summary": derivatives_summary,
+            "derivatives_source_summary": derivatives_source_summary,
             "macro_snapshot": macro_snapshot,
             "macro_summary": macro_summary,
+            "macro_source_summary": macro_source_summary,
             "macro_regions": dict(macro_summary.get("regions") or {}),
+            "fear_greed": fear_greed,
+            "global_market_breadth": market_breadth,
         },
     )
 
@@ -1668,30 +2867,48 @@ async def _build_factors_module(profile: ResearchProfile) -> Dict[str, Any]:
         ),
         12.0,
     )
-    factor_raw, fama_raw, cross_asset_raw = await asyncio.gather(factor_task, fama_task, cross_task)
+    factor_raw, fama_raw, cross_asset_raw = await asyncio.gather(
+        factor_task, fama_task, cross_task
+    )
     fama = _compact_fama(fama_raw or {})
     factor_library = _compact_factor_library(factor_raw or {})
     cross_asset = dict(cross_asset_raw or {})
 
-    fallback_library = _fallback_factor_library_from_fama(profile, fama, cross_asset) if fama else {}
+    fallback_library = (
+        _fallback_factor_library_from_fama(profile, fama, cross_asset) if fama else {}
+    )
     if not factor_library and fallback_library:
         factor_library = fallback_library
     elif factor_library:
-        if not factor_library.get("asset_scores") and fallback_library.get("asset_scores"):
+        if not factor_library.get("asset_scores") and fallback_library.get(
+            "asset_scores"
+        ):
             factor_library["asset_scores"] = fallback_library["asset_scores"]
-        if not factor_library.get("correlation") and fallback_library.get("correlation"):
+        if not factor_library.get("correlation") and fallback_library.get(
+            "correlation"
+        ):
             factor_library["correlation"] = fallback_library["correlation"]
 
     warnings: List[str] = list(factor_library.get("warnings") or [])
     if not factor_library:
-        warnings.append("Factor library timed out; returning a minimal fallback summary.")
+        warnings.append(
+            "Factor library timed out; returning a minimal fallback summary."
+        )
     if not fama:
         warnings.append("Fama-style factors unavailable for this run.")
     if not cross_asset:
-        warnings.append("Cross-asset snapshot timed out; asset ranking may be incomplete.")
-    warnings.append("Workbench factor module is optimized for speed and does not replace full factor research jobs.")
+        warnings.append(
+            "Cross-asset snapshot timed out; asset ranking may be incomplete."
+        )
+    warnings.append(
+        "Workbench factor module is optimized for speed and does not replace full factor research jobs."
+    )
     latest_fama = dict(fama.get("latest") or {})
-    top_symbols = [str(item.get("symbol") or "") for item in list(factor_library.get("asset_scores") or [])[:3] if item.get("symbol")]
+    top_symbols = [
+        str(item.get("symbol") or "")
+        for item in list(factor_library.get("asset_scores") or [])[:3]
+        if item.get("symbol")
+    ]
     degraded = (
         not factor_library
         or not fama
@@ -1717,20 +2934,27 @@ async def _build_factors_module(profile: ResearchProfile) -> Dict[str, Any]:
 
 
 async def _build_cross_asset_module(profile: ResearchProfile) -> Dict[str, Any]:
-    data = await _wait_or_none(
-        get_multi_assets_overview(
-            exchange=profile.exchange,
-            symbols=",".join(_profile_symbol_window(profile, 10)),
-            timeframe=profile.timeframe,
-            lookback=min(720, profile.lookback),
-            exclude_retired=profile.exclude_retired,
-        ),
-        12.0,
-    ) or {}
+    data = (
+        await _wait_or_none(
+            get_multi_assets_overview(
+                exchange=profile.exchange,
+                symbols=",".join(_profile_symbol_window(profile, 10)),
+                timeframe=profile.timeframe,
+                lookback=min(720, profile.lookback),
+                exclude_retired=profile.exclude_retired,
+            ),
+            12.0,
+        )
+        or {}
+    )
     assets = list(data.get("assets") or [])
     leader = assets[0] if assets else {}
     degraded = int(data.get("count") or 0) < 3
-    warnings = ["Available symbols are fewer than 3; cross-asset rotation may be noisy."] if degraded else []
+    warnings = (
+        ["Available symbols are fewer than 3; cross-asset rotation may be noisy."]
+        if degraded
+        else []
+    )
 
     return _module_result(
         "cross_asset",
@@ -1758,14 +2982,28 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
         ),
         8.0,
     )
-    community_snapshot_task = _wait_or_none(_load_latest_community_snapshot(profile.exchange, profile.primary_symbol), 4.0)
-    whale_snapshot_task = _wait_or_none(_load_latest_whale_snapshot(profile.exchange, profile.primary_symbol), 4.0)
-    news_task = _wait_or_none(_build_news_summary(profile.primary_symbol, hours=72), 8.0)
+    community_snapshot_task = _wait_or_none(
+        _load_latest_community_snapshot(profile.exchange, profile.primary_symbol), 4.0
+    )
+    whale_snapshot_task = _wait_or_none(
+        _load_latest_whale_snapshot(profile.exchange, profile.primary_symbol), 4.0
+    )
+    news_task = _wait_or_none(
+        _build_news_summary(profile.primary_symbol, hours=72), 8.0
+    )
     history_task = _wait_or_none(
-        get_analytics_history_status(exchange=profile.exchange, symbol=profile.primary_symbol),
+        get_analytics_history_status(
+            exchange=profile.exchange, symbol=profile.primary_symbol
+        ),
         6.0,
     )
-    onchain, community_snapshot, whale_snapshot, news, history_status = await asyncio.gather(
+    (
+        onchain,
+        community_snapshot,
+        whale_snapshot,
+        news,
+        history_status,
+    ) = await asyncio.gather(
         onchain_task,
         community_snapshot_task,
         whale_snapshot_task,
@@ -1783,6 +3021,7 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
     funding_multi = dict(onchain.get("funding_rate_multi_source") or {})
     fear_greed = dict(onchain.get("fear_greed_index") or {})
     derivatives_summary = _build_derivatives_shadow_summary(history_status, onchain)
+    derivatives_source_summary = _build_derivatives_source_summary(derivatives_summary)
     funding_count = int(funding_multi.get("count") or 0)
     fear_greed_available = bool(fear_greed.get("available"))
 
@@ -1796,24 +3035,46 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
     if not onchain:
         warnings.append("Onchain overview timed out; returning fallback summary.")
     elif onchain.get("degraded"):
-        warnings.append("Onchain payload contains proxy/cache data; confidence is reduced.")
+        warnings.append(
+            "Onchain payload contains proxy/cache data; confidence is reduced."
+        )
+    if news.get("stale"):
+        warnings.append(
+            "News summary live refresh failed; using recent cached snapshot."
+        )
     if funding_count <= 0:
         warnings.append("Multi-exchange funding rates are currently unavailable.")
     if not fear_greed_available:
         warnings.append("Fear & Greed index is currently unavailable.")
     if not derivatives_summary.get("available"):
-        warnings.append("CoinGlass derivatives shadow is unavailable, so crowding context is reduced.")
-    elif derivatives_summary.get("freshness_sec") is not None and float(derivatives_summary.get("freshness_sec") or 0.0) > 1800:
-        warnings.append("CoinGlass derivatives shadow is stale, so funding/crowding context may lag.")
+        warnings.append(
+            "CoinGlass derivatives shadow is unavailable, so crowding context is reduced."
+        )
+    elif (
+        derivatives_summary.get("freshness_sec") is not None
+        and float(derivatives_summary.get("freshness_sec") or 0.0) > 1800
+    ):
+        warnings.append(
+            "CoinGlass derivatives shadow is stale, so funding/crowding context may lag."
+        )
     elif derivatives_summary.get("degraded_reason"):
-        warnings.append(f"CoinGlass derivatives shadow degraded: {derivatives_summary.get('degraded_reason')}.")
+        warnings.append(
+            f"CoinGlass derivatives shadow degraded: {derivatives_summary.get('degraded_reason')}."
+        )
     if str(news.get("scope")) == "global_fallback":
-        warnings.append("Symbol-specific exogenous news is sparse; using global fallback.")
+        warnings.append(
+            "Symbol-specific exogenous news is sparse; using global fallback."
+        )
 
     return _module_result(
         "onchain",
         status=_status_from_flags(ok=True, degraded=degraded),
-        source_labels=["data.onchain.overview", "trading.analytics.community", "news.storage.summary", "analytics.history"],
+        source_labels=[
+            "data.onchain.overview",
+            "trading.analytics.community",
+            "news.storage.summary",
+            "analytics.history",
+        ],
         warnings=warnings[:8],
         summary={
             "headline": "Onchain & Exogenous",
@@ -1824,15 +3085,28 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
                 or 0
             ),
             "news_events": int(news.get("events_count") or 0),
-            "tvl_chain": str((onchain.get("defi_tvl") or {}).get("chain") or "Ethereum"),
+            "tvl_chain": str(
+                (onchain.get("defi_tvl") or {}).get("chain") or "Ethereum"
+            ),
             "served_mode": str(onchain.get("served_mode") or "live"),
             "funding_sources": funding_count,
-            "funding_mean_rate_pct": float(funding_multi.get("mean_rate_pct") or 0.0) if funding_count > 0 else None,
-            "fear_greed_value": int(fear_greed.get("value") or 0) if fear_greed_available else None,
-            "fear_greed_classification": str(fear_greed.get("classification") or "") if fear_greed_available else None,
+            "funding_mean_rate_pct": float(funding_multi.get("mean_rate_pct") or 0.0)
+            if funding_count > 0
+            else None,
+            "fear_greed_value": int(fear_greed.get("value") or 0)
+            if fear_greed_available
+            else None,
+            "fear_greed_classification": str(fear_greed.get("classification") or "")
+            if fear_greed_available
+            else None,
             "derivatives_status": str(derivatives_summary.get("status") or "missing"),
+            "derivatives_source_status": derivatives_source_summary.get(
+                "source_status"
+            ),
             "derivatives_freshness_sec": derivatives_summary.get("freshness_sec"),
-            "derivatives_dataset_count": int(derivatives_summary.get("dataset_count") or 0),
+            "derivatives_dataset_count": int(
+                derivatives_summary.get("dataset_count") or 0
+            ),
         },
         payload={
             "onchain": onchain,
@@ -1841,8 +3115,10 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
             "news_summary": news,
             "analytics_history_status": history_status,
             "derivatives_summary": derivatives_summary,
+            "derivatives_source_summary": derivatives_source_summary,
         },
     )
+
 
 async def _build_discipline_module(_: ResearchProfile) -> Dict[str, Any]:
     behavior_task = _wait_or_none(get_behavior_report(days=7), 4.0)
@@ -1857,7 +3133,9 @@ async def _build_discipline_module(_: ResearchProfile) -> Dict[str, Any]:
 
     warnings: List[str] = []
     if degraded:
-        warnings.append("No recent behavior logs; discipline module is showing generic guidance only.")
+        warnings.append(
+            "No recent behavior logs; discipline module is showing generic guidance only."
+        )
     if overtrade:
         warnings.append("Overtrading risk detected.")
     if impulsive_ratio >= 0.3:
@@ -1866,7 +3144,10 @@ async def _build_discipline_module(_: ResearchProfile) -> Dict[str, Any]:
     return _module_result(
         "discipline",
         status=_status_from_flags(ok=True, degraded=degraded),
-        source_labels=["trading.analytics.behavior.report", "trading.analytics.stoploss.policy"],
+        source_labels=[
+            "trading.analytics.behavior.report",
+            "trading.analytics.stoploss.policy",
+        ],
         warnings=warnings,
         summary={
             "headline": "Discipline & Risk Control",
@@ -1877,6 +3158,7 @@ async def _build_discipline_module(_: ResearchProfile) -> Dict[str, Any]:
         },
         payload={"behavior_report": behavior, "stoploss_policy": stoploss},
     )
+
 
 async def _build_module(module_name: str, profile: ResearchProfile) -> Dict[str, Any]:
     if module_name == "market_state":
@@ -1889,12 +3171,19 @@ async def _build_module(module_name: str, profile: ResearchProfile) -> Dict[str,
         return await _build_onchain_module(profile)
     if module_name == "discipline":
         return await _build_discipline_module(profile)
-    raise HTTPException(status_code=404, detail=f"Unknown research module: {module_name}")
+    raise HTTPException(
+        status_code=404, detail=f"Unknown research module: {module_name}"
+    )
 
 
-async def _capture_module_build(module_name: str, profile: ResearchProfile) -> Dict[str, Any]:
+async def _capture_module_build(
+    module_name: str, profile: ResearchProfile
+) -> Dict[str, Any]:
     try:
-        return await asyncio.wait_for(_build_module(module_name, profile), timeout=_MODULE_TIMEOUT_SEC.get(module_name, 12.0))
+        return await asyncio.wait_for(
+            _build_module(module_name, profile),
+            timeout=_MODULE_TIMEOUT_SEC.get(module_name, 12.0),
+        )
     except asyncio.TimeoutError:
         return _module_result(
             module_name,
@@ -1943,7 +3232,9 @@ def _build_recommendations(
     onchain = dict(onchain_payload.get("onchain") or {})
     sentiment_dashboard = dict(market_payload.get("sentiment_dashboard") or {})
     market_derivatives_summary = dict(
-        market_payload.get("derivatives_summary") or sentiment_dashboard.get("derivatives") or {}
+        market_payload.get("derivatives_summary")
+        or sentiment_dashboard.get("derivatives")
+        or {}
     )
     derivatives_summary = _pick_preferred_derivatives_summary(
         onchain_payload.get("derivatives_summary") or {},
@@ -1968,31 +3259,54 @@ def _build_recommendations(
     jump_targets: List[Dict[str, Any]] = []
 
     if bool(onchain.get("degraded")):
-        avoid.append("Onchain context is degraded; do not use it as a sole entry trigger.")
+        avoid.append(
+            "Onchain context is degraded; do not use it as a sole entry trigger."
+        )
     if not bool(derivatives_summary.get("available")):
-        avoid.append("Derivatives shadow is unavailable; do not rely on crowding/funding confirmation.")
-    elif _coerce_finite_float(derivatives_summary.get("freshness_sec")) is not None and float(derivatives_summary.get("freshness_sec") or 0.0) > 1800:
-        avoid.append("Derivatives shadow is stale; confirm funding/crowding before acting.")
+        avoid.append(
+            "Derivatives shadow is unavailable; do not rely on crowding/funding confirmation."
+        )
+    elif (
+        _coerce_finite_float(derivatives_summary.get("freshness_sec")) is not None
+        and float(derivatives_summary.get("freshness_sec") or 0.0) > 1800
+    ):
+        avoid.append(
+            "Derivatives shadow is stale; confirm funding/crowding before acting."
+        )
     if not _news_summary_has_usable_samples(news_summary):
-        avoid.append("Symbol-level news coverage is sparse; avoid event-only decisions.")
+        avoid.append(
+            "Symbol-level news coverage is sparse; avoid event-only decisions."
+        )
     if bool(behavior.get("overtrading_warning")):
         avoid.append("Overtrading risk is active; reduce trial frequency.")
     if float(behavior.get("impulsive_ratio") or 0.0) >= 0.3:
         avoid.append("Execution discipline is weak; avoid chasing multiple symbols.")
 
     if direction_bias == "bullish":
-        next_actions.append("Validate trend continuity on 5m/15m before scaling positions.")
+        next_actions.append(
+            "Validate trend continuity on 5m/15m before scaling positions."
+        )
     elif direction_bias == "bearish":
         next_actions.append("Prioritize defensive setups and downside risk control.")
     else:
-        next_actions.append("Validate range or mean-reversion setups before expanding coverage.")
+        next_actions.append(
+            "Validate range or mean-reversion setups before expanding coverage."
+        )
 
     if int(cross_asset.get("count") or 0) < 3:
-        next_actions.append("Expand symbol coverage before making rotation conclusions.")
+        next_actions.append(
+            "Expand symbol coverage before making rotation conclusions."
+        )
     if bool(derivatives_summary.get("available")):
-        next_actions.append("Use derivatives shadow to confirm funding and crowding before execution.")
+        next_actions.append(
+            "Use derivatives shadow to confirm funding and crowding before execution."
+        )
 
-    headline = str((overview or {}).get("market_regime") or regime.get("regime") or "research_recommendation")
+    headline = str(
+        (overview or {}).get("market_regime")
+        or regime.get("regime")
+        or "research_recommendation"
+    )
     if profile.primary_symbol:
         jump_targets.append(
             {
@@ -2042,7 +3356,12 @@ def _build_structured_recommendations(
     def _pick_backtest_strategy(bias: str, title: str) -> Dict[str, str]:
         headline_text = str(title or "")
         headline_lower = headline_text.lower()
-        if "breakout" in headline_lower or "break" in headline_lower or "绐佺牬" in headline_text or "突破" in headline_text:
+        if (
+            "breakout" in headline_lower
+            or "break" in headline_lower
+            or "绐佺牬" in headline_text
+            or "突破" in headline_text
+        ):
             return {"strategy_type": "DonchianBreakoutStrategy", "label": "breakout"}
         if bias == "bullish":
             return {"strategy_type": "TrendFollowingStrategy", "label": "trend"}
@@ -2053,9 +3372,19 @@ def _build_structured_recommendations(
     def _map_planner_regime(bias: str, title: str) -> str:
         headline_text = str(title or "")
         headline_lower = headline_text.lower()
-        if "news" in headline_lower or "event" in headline_lower or "浜嬩欢" in headline_text or "鏂伴椈" in headline_text:
+        if (
+            "news" in headline_lower
+            or "event" in headline_lower
+            or "浜嬩欢" in headline_text
+            or "鏂伴椈" in headline_text
+        ):
             return "news_event"
-        if "breakout" in headline_lower or "break" in headline_lower or "绐佺牬" in headline_text or "突破" in headline_text:
+        if (
+            "breakout" in headline_lower
+            or "break" in headline_lower
+            or "绐佺牬" in headline_text
+            or "突破" in headline_text
+        ):
             return "breakout"
         if bias == "bullish":
             return "trend_up"
@@ -2076,9 +3405,13 @@ def _build_structured_recommendations(
     cross_asset = dict(cross_payload.get("cross_asset") or {})
     onchain = dict(onchain_payload.get("onchain") or {})
     sentiment_dashboard = dict(market_payload.get("sentiment_dashboard") or {})
-    macro_snapshot = dict(market_payload.get("macro_snapshot") or sentiment_dashboard.get("macro") or {})
+    macro_snapshot = dict(
+        market_payload.get("macro_snapshot") or sentiment_dashboard.get("macro") or {}
+    )
     market_derivatives_summary = dict(
-        market_payload.get("derivatives_summary") or sentiment_dashboard.get("derivatives") or {}
+        market_payload.get("derivatives_summary")
+        or sentiment_dashboard.get("derivatives")
+        or {}
     )
     derivatives_summary = _pick_preferred_derivatives_summary(
         onchain_payload.get("derivatives_summary") or {},
@@ -2109,7 +3442,12 @@ def _build_structured_recommendations(
     top_symbols = [item["symbol"] for item in factor_focus]
     focus_symbols = top_symbols or [profile.primary_symbol]
 
-    headline = str((overview or {}).get("market_regime") or regime.get("regime") or base.get("headline") or "research_recommendation")
+    headline = str(
+        (overview or {}).get("market_regime")
+        or regime.get("regime")
+        or base.get("headline")
+        or "research_recommendation"
+    )
     planner_regime = _map_planner_regime(direction_bias, headline)
     research_timeframes = _derive_research_timeframes(profile.timeframe)
     backtest_strategy = _pick_backtest_strategy(direction_bias, headline)
@@ -2127,11 +3465,17 @@ def _build_structured_recommendations(
     if factor_focus:
         thesis_points.append(
             "Factor focus: "
-            + " / ".join(f"{item['symbol']}({item['score']:.2f})" for item in factor_focus)
+            + " / ".join(
+                f"{item['symbol']}({item['score']:.2f})" for item in factor_focus
+            )
         )
     cross_leader = str(
         cross_asset.get("leader_symbol")
-        or ((cross_asset.get("assets") or [{}])[0].get("symbol") if isinstance(cross_asset.get("assets"), list) else "")
+        or (
+            (cross_asset.get("assets") or [{}])[0].get("symbol")
+            if isinstance(cross_asset.get("assets"), list)
+            else ""
+        )
         or ""
     )
     if cross_leader:
@@ -2139,10 +3483,14 @@ def _build_structured_recommendations(
     whale_count = int((onchain.get("whale_activity") or {}).get("count") or 0)
     if whale_count > 0:
         thesis_points.append(f"Whale transfers active ({whale_count}).")
-    derivatives_freshness = _coerce_finite_float(derivatives_summary.get("freshness_sec"))
+    derivatives_freshness = _coerce_finite_float(
+        derivatives_summary.get("freshness_sec")
+    )
     derivatives_labels = list(derivatives_summary.get("derivatives_labels") or [])
     funding_zscore = _coerce_finite_float(derivatives_summary.get("funding_zscore"))
-    long_short_ratio_change = _coerce_finite_float(derivatives_summary.get("long_short_ratio_change_24h"))
+    long_short_ratio_change = _coerce_finite_float(
+        derivatives_summary.get("long_short_ratio_change_24h")
+    )
     if bool(derivatives_summary.get("available")):
         dataset_count = int(derivatives_summary.get("dataset_count") or 0)
         provider = str(derivatives_summary.get("provider") or "coinglass")
@@ -2150,48 +3498,91 @@ def _build_structured_recommendations(
             f"Derivatives shadow: {provider} / {str(derivatives_summary.get('status') or 'ok')} / {dataset_count} datasets."
         )
         if derivatives_freshness is not None:
-            thesis_points.append(f"Derivatives freshness: {derivatives_freshness:.0f}s.")
-        funding_mean_rate_pct = _coerce_finite_float(derivatives_summary.get("funding_mean_rate_pct"))
+            thesis_points.append(
+                f"Derivatives freshness: {derivatives_freshness:.0f}s."
+            )
+        funding_mean_rate_pct = _coerce_finite_float(
+            derivatives_summary.get("funding_mean_rate_pct")
+        )
         if funding_mean_rate_pct is not None:
-            thesis_points.append(f"Derivatives funding mean: {funding_mean_rate_pct:+.2f}%.")
+            thesis_points.append(
+                f"Derivatives funding mean: {funding_mean_rate_pct:+.2f}%."
+            )
         if funding_zscore is not None:
-            thesis_points.insert(min(len(thesis_points), 1), f"Derivatives funding z-score: {funding_zscore:+.2f}.")
+            thesis_points.insert(
+                min(len(thesis_points), 1),
+                f"Derivatives funding z-score: {funding_zscore:+.2f}.",
+            )
         if derivatives_summary.get("squeeze_building"):
-            thesis_points.insert(min(len(thesis_points), 2), "Derivatives short squeeze risk is building.")
+            thesis_points.insert(
+                min(len(thesis_points), 2),
+                "Derivatives short squeeze risk is building.",
+            )
         if derivatives_summary.get("order_flow_confirmed"):
-            thesis_points.insert(min(len(thesis_points), 2), "Order flow is confirming the current derivatives positioning.")
+            thesis_points.insert(
+                min(len(thesis_points), 2),
+                "Order flow is confirming the current derivatives positioning.",
+            )
         if long_short_ratio_change is not None:
-            thesis_points.append(f"Long/short ratio 24h change: {long_short_ratio_change:+.2f}.")
+            thesis_points.append(
+                f"Long/short ratio 24h change: {long_short_ratio_change:+.2f}."
+            )
     macro_gap = _coerce_finite_float(macro_snapshot.get("ppi_cpi_gap"))
     if macro_gap is not None:
         thesis_points.append(f"Macro scissors spread (PPI-CPI): {macro_gap:+.2f}pp.")
     liquidity_gap = _coerce_finite_float(macro_snapshot.get("m1_m2_gap"))
     if liquidity_gap is not None:
-        thesis_points.append(f"Liquidity scissors spread (M1-M2): {liquidity_gap:+.2f}pp.")
+        thesis_points.append(
+            f"Liquidity scissors spread (M1-M2): {liquidity_gap:+.2f}pp."
+        )
     if int(news_summary.get("events_count") or 0) > 0:
-        thesis_points.append(f"News events in last 24h: {int(news_summary.get('events_count') or 0)}.")
+        thesis_points.append(
+            f"News events in last 24h: {int(news_summary.get('events_count') or 0)}."
+        )
     if not thesis_points:
-        thesis_points.append("Current conclusion is built from lightweight module summaries.")
+        thesis_points.append(
+            "Current conclusion is built from lightweight module summaries."
+        )
 
     if not bool(derivatives_summary.get("available")):
-        avoid.append("Derivatives shadow is missing, so crowding/funding confirmation is incomplete.")
+        avoid.append(
+            "Derivatives shadow is missing, so crowding/funding confirmation is incomplete."
+        )
     elif derivatives_freshness is not None and derivatives_freshness > 1800:
-        avoid.append("Derivatives shadow is stale, so crowding/funding confirmation may lag.")
+        avoid.append(
+            "Derivatives shadow is stale, so crowding/funding confirmation may lag."
+        )
     elif not bool(derivatives_summary.get("history_ready")):
-        avoid.append("Derivatives history is incomplete, so z-score and reversion signals are lower confidence.")
+        avoid.append(
+            "Derivatives history is incomplete, so z-score and reversion signals are lower confidence."
+        )
     if derivatives_summary.get("crowded_long"):
-        avoid.append("Crowded long conditions raise squeeze-down risk for fresh chase entries.")
+        avoid.append(
+            "Crowded long conditions raise squeeze-down risk for fresh chase entries."
+        )
     if derivatives_summary.get("basis_dislocation"):
-        avoid.append("Basis/funding dislocation is elevated, so leverage and execution timing should stay conservative.")
+        avoid.append(
+            "Basis/funding dislocation is elevated, so leverage and execution timing should stay conservative."
+        )
     if derivatives_summary.get("flow_divergence"):
-        avoid.append("Taker flow is diverging from positioning, so confirmation quality is reduced.")
+        avoid.append(
+            "Taker flow is diverging from positioning, so confirmation quality is reduced."
+        )
 
-    if derivatives_summary.get("squeeze_building") or derivatives_summary.get("order_flow_confirmed"):
-        next_actions.append("Track whether taker flow and open interest continue to confirm the squeeze setup.")
+    if derivatives_summary.get("squeeze_building") or derivatives_summary.get(
+        "order_flow_confirmed"
+    ):
+        next_actions.append(
+            "Track whether taker flow and open interest continue to confirm the squeeze setup."
+        )
     if derivatives_summary.get("crowded_long"):
-        next_actions.append("Wait for crowding or funding to cool before sizing fresh momentum longs.")
+        next_actions.append(
+            "Wait for crowding or funding to cool before sizing fresh momentum longs."
+        )
     if derivatives_summary.get("basis_dislocation"):
-        next_actions.append("Re-check basis and funding dislocation before execution to avoid poor fills.")
+        next_actions.append(
+            "Re-check basis and funding dislocation before execution to avoid poor fills."
+        )
 
     ai_goal = (
         f"Focus on {' / '.join(focus_symbols)} under {headline}, validate {' / '.join(preferred[:2] or ['core'])}, "
@@ -2207,7 +3598,12 @@ def _build_structured_recommendations(
         "timeframes": research_timeframes,
         "preferred_strategy_families": preferred,
         "thesis": thesis_points[:4],
-        "risk_notes": (avoid or ["No extra abnormal risk flagged, but backtest/execution quality checks are required."])[:4],
+        "risk_notes": (
+            avoid
+            or [
+                "No extra abnormal risk flagged, but backtest/execution quality checks are required."
+            ]
+        )[:4],
         "next_steps": next_actions[:4],
         "factor_focus": factor_focus,
         "derivatives_context": {
@@ -2301,7 +3697,9 @@ def _build_structured_recommendations(
                 "module": "cross_asset",
             }
         )
-    if bool(onchain.get("degraded")) or not _news_summary_has_usable_samples(news_summary):
+    if bool(onchain.get("degraded")) or not _news_summary_has_usable_samples(
+        news_summary
+    ):
         action_items.append(
             {
                 "id": "refresh_onchain_module",
@@ -2320,14 +3718,26 @@ def _build_structured_recommendations(
                 "title": "因子观察",
                 "tone": "neutral",
                 "body": " / ".join(
-                    f"{item['symbol']} score {item['score']:.2f}" + (f" | momentum {item['momentum']:.2f}" if item["momentum"] else "")
+                    f"{item['symbol']} score {item['score']:.2f}"
+                    + (
+                        f" | momentum {item['momentum']:.2f}"
+                        if item["momentum"]
+                        else ""
+                    )
                     for item in factor_focus
                 ),
             }
         )
-    insight_cards.extend({"title": "Next Step", "tone": "positive", "body": text} for text in next_actions[:4])
-    insight_cards.extend({"title": "Risk Note", "tone": "warn", "body": text} for text in avoid[:4])
-    insight_cards.extend({"title": "研究观察", "tone": "neutral", "body": text} for text in thesis_points[:4])
+    insight_cards.extend(
+        {"title": "Next Step", "tone": "positive", "body": text}
+        for text in next_actions[:4]
+    )
+    insight_cards.extend(
+        {"title": "Risk Note", "tone": "warn", "body": text} for text in avoid[:4]
+    )
+    insight_cards.extend(
+        {"title": "研究观察", "tone": "neutral", "body": text} for text in thesis_points[:4]
+    )
 
     return {
         "direction_bias": direction_bias,
@@ -2344,6 +3754,7 @@ def _build_structured_recommendations(
         "headline": headline,
         "generated_at": _now_iso(),
     }
+
 
 async def _get_research_workbench_context(exchange: str = "binance") -> Dict[str, Any]:
     symbols = await get_research_symbols(exchange=exchange)
@@ -2376,7 +3787,9 @@ async def _get_research_workbench_context(exchange: str = "binance") -> Dict[str
     }
 
 
-async def _run_research_workbench_overview(payload: ResearchWorkbenchRequest) -> Dict[str, Any]:
+async def _run_research_workbench_overview(
+    payload: ResearchWorkbenchRequest,
+) -> Dict[str, Any]:
     profile = _normalize_profile(payload.profile)
     module_names = list(_MODULE_ORDER)
     module_tasks = [_capture_module_build(name, profile) for name in module_names]
@@ -2395,12 +3808,18 @@ async def _run_research_workbench_overview(payload: ResearchWorkbenchRequest) ->
             )
             continue
         modules[name] = dict(result or {})
-    ok_count = len([module for module in modules.values() if module.get("status") == "ok"])
-    degraded_count = len([module for module in modules.values() if module.get("status") == "degraded"])
+    ok_count = len(
+        [module for module in modules.values() if module.get("status") == "ok"]
+    )
+    degraded_count = len(
+        [module for module in modules.values() if module.get("status") == "degraded"]
+    )
     warnings: List[str] = []
     for module in modules.values():
         warnings.extend(module.get("warnings") or [])
-    regime = dict(_extract_module_payload(modules.get("market_state")).get("regime") or {})
+    regime = dict(
+        _extract_module_payload(modules.get("market_state")).get("regime") or {}
+    )
     return {
         "profile": profile.model_dump(),
         "market_regime": regime.get("regime") or "pending_confirmation",
@@ -2417,12 +3836,16 @@ async def _run_research_workbench_overview(payload: ResearchWorkbenchRequest) ->
     }
 
 
-async def _run_research_workbench_module(module_name: str, payload: ResearchWorkbenchRequest) -> Dict[str, Any]:
+async def _run_research_workbench_module(
+    module_name: str, payload: ResearchWorkbenchRequest
+) -> Dict[str, Any]:
     profile = _normalize_profile(payload.profile)
     return await _capture_module_build(module_name, profile)
 
 
-async def _get_research_workbench_recommendations(payload: ResearchRecommendationRequest) -> Dict[str, Any]:
+async def _get_research_workbench_recommendations(
+    payload: ResearchRecommendationRequest,
+) -> Dict[str, Any]:
     profile = _normalize_profile(payload.profile)
     modules = dict(payload.modules or {})
     overview = dict(payload.overview or {})
@@ -2435,7 +3858,9 @@ async def get_research_workbench_context(exchange: str = "binance") -> Dict[str,
 
 
 @router.post("/workbench/overview")
-async def run_research_workbench_overview(payload: ResearchWorkbenchRequest) -> Dict[str, Any]:
+async def run_research_workbench_overview(
+    payload: ResearchWorkbenchRequest,
+) -> Dict[str, Any]:
     return await _run_research_workbench_overview(payload)
 
 
@@ -2458,11 +3883,15 @@ async def run_research_workbench_overview_query(
         exclude_retired=exclude_retired,
         horizon=horizon,
     )
-    return await _run_research_workbench_overview(ResearchWorkbenchRequest(profile=profile))
+    return await _run_research_workbench_overview(
+        ResearchWorkbenchRequest(profile=profile)
+    )
 
 
 @router.post("/workbench/modules/{module_name}")
-async def run_research_workbench_module(module_name: str, payload: ResearchWorkbenchRequest) -> Dict[str, Any]:
+async def run_research_workbench_module(
+    module_name: str, payload: ResearchWorkbenchRequest
+) -> Dict[str, Any]:
     return await _run_research_workbench_module(module_name, payload)
 
 
@@ -2486,11 +3915,15 @@ async def run_research_workbench_module_query(
         exclude_retired=exclude_retired,
         horizon=horizon,
     )
-    return await _run_research_workbench_module(module_name, ResearchWorkbenchRequest(profile=profile))
+    return await _run_research_workbench_module(
+        module_name, ResearchWorkbenchRequest(profile=profile)
+    )
 
 
 @router.post("/workbench/recommendations")
-async def get_research_workbench_recommendations(payload: ResearchRecommendationRequest) -> Dict[str, Any]:
+async def get_research_workbench_recommendations(
+    payload: ResearchRecommendationRequest,
+) -> Dict[str, Any]:
     return await _get_research_workbench_recommendations(payload)
 
 
@@ -2505,8 +3938,13 @@ async def get_regime_calendar(
     Uses stored microstructure + community snapshots to reconstruct the
     intraday regime label for each calendar day.
     """
-    from config.database import AnalyticsMicrostructureSnapshot, AnalyticsCommunitySnapshot, async_session_maker as _asm
     from sqlalchemy import select as _sel
+
+    from config.database import (
+        AnalyticsCommunitySnapshot,
+        AnalyticsMicrostructureSnapshot,
+    )
+    from config.database import async_session_maker as _asm
 
     days = max(1, min(int(days), 30))
     since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -2520,7 +3958,9 @@ async def get_regime_calendar(
                     AnalyticsMicrostructureSnapshot.exchange == exchange,
                     AnalyticsMicrostructureSnapshot.symbol == sym_key,
                     AnalyticsMicrostructureSnapshot.timestamp >= since,
-                    AnalyticsMicrostructureSnapshot.capture_status.in_(["ok", "degraded"]),
+                    AnalyticsMicrostructureSnapshot.capture_status.in_(
+                        ["ok", "degraded"]
+                    ),
                 )
                 .order_by(AnalyticsMicrostructureSnapshot.timestamp.asc())
             )
@@ -2530,6 +3970,7 @@ async def get_regime_calendar(
 
     # Group by calendar date (UTC)
     from collections import defaultdict
+
     daily: Dict[str, list] = defaultdict(list)
     for row in micro_rows:
         ts = row.timestamp
@@ -2542,7 +3983,9 @@ async def get_regime_calendar(
     for date_str in sorted(daily.keys()):
         rows = daily[date_str]
         # Average key metrics over the day
-        imbalances = [r.order_flow_imbalance for r in rows if r.order_flow_imbalance is not None]
+        imbalances = [
+            r.order_flow_imbalance for r in rows if r.order_flow_imbalance is not None
+        ]
         funding_rates = [r.funding_rate for r in rows if r.funding_rate is not None]
         basis_pcts = [r.basis_pct for r in rows if r.basis_pct is not None]
         spread_bps_list = [r.spread_bps for r in rows if r.spread_bps is not None]
@@ -2550,7 +3993,9 @@ async def get_regime_calendar(
         avg_imbalance = sum(imbalances) / len(imbalances) if imbalances else 0.0
         avg_funding = sum(funding_rates) / len(funding_rates) if funding_rates else None
         avg_basis = sum(basis_pcts) / len(basis_pcts) if basis_pcts else None
-        avg_spread = sum(spread_bps_list) / len(spread_bps_list) if spread_bps_list else 0.0
+        avg_spread = (
+            sum(spread_bps_list) / len(spread_bps_list) if spread_bps_list else 0.0
+        )
 
         # Classify daily regime
         if avg_spread >= 8:
@@ -2569,16 +4014,20 @@ async def get_regime_calendar(
             regime = "event_driven_mixed"
             bias = "neutral"
 
-        calendar.append({
-            "date": date_str,
-            "regime": regime,
-            "bias": bias,
-            "avg_imbalance": round(avg_imbalance, 4),
-            "avg_funding": round(avg_funding, 6) if avg_funding is not None else None,
-            "avg_basis": round(avg_basis, 4) if avg_basis is not None else None,
-            "avg_spread_bps": round(avg_spread, 2),
-            "snapshot_count": len(rows),
-        })
+        calendar.append(
+            {
+                "date": date_str,
+                "regime": regime,
+                "bias": bias,
+                "avg_imbalance": round(avg_imbalance, 4),
+                "avg_funding": round(avg_funding, 6)
+                if avg_funding is not None
+                else None,
+                "avg_basis": round(avg_basis, 4) if avg_basis is not None else None,
+                "avg_spread_bps": round(avg_spread, 2),
+                "snapshot_count": len(rows),
+            }
+        )
 
     return {
         "symbol": sym_key,
@@ -2587,10 +4036,3 @@ async def get_regime_calendar(
         "calendar": calendar,
         "generated_at": _now_iso(),
     }
-
-
-
-
-
-
-

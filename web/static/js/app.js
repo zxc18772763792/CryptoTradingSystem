@@ -3689,12 +3689,23 @@ const raw=String(sourceName||'').trim();
 if(!raw)return'--';
 return raw.split('+').map(part=>({
   exchange_public:'交易所公开源',
+  coinglass:'CoinGlass',
   coinglass_cache:'CoinGlass缓存',
+  coinglass_economic_data:'CoinGlass宏观',
+  coinglass_central_bank:'CoinGlass央行',
+  coinglass_unlock_list:'CoinGlass解锁',
+  fred:'FRED',
   official_announcements:'官方公告源',
   proxy_layer:'代理源',
   internal_placeholder:'占位源',
+  internal_estimate:'内部估算',
   fallback:'降级回退',
   public_chain_proxy:'公开链上代理',
+  slowmist_hacked:'SlowMist Hacked',
+  yfinance:'Yahoo Finance',
+  yahoo_chart:'Yahoo Chart',
+  'stats.gov.cn':'国家统计局',
+  'pbc.gov.cn':'中国人民银行',
 }[part]||part)).join(' + ');
 }
 function normalizeAnalyticsStatusMap(payload){
@@ -6725,8 +6736,17 @@ const funding=firstFiniteNumber(fundingFromMicro,fundingFromOnchain,researchStat
 const fundingAvailable=Number.isFinite(Number(funding));
 const basisPct=firstFiniteNumber(micro?.spot_futures_basis?.basis_pct,micro?.spot_futures_basis?.basis,researchState?.lastSentiment?.basis_pct);
 const basisAvailable=Number.isFinite(Number(basisPct));
+const fearGreed=payload?.fear_greed||{};
+const fearGreedValue=firstFiniteNumber(fearGreed?.value,payload?.onchain?.fear_greed_index?.value,researchState?.lastOnchain?.fear_greed_index?.value);
+const fearGreedAvailable=(fearGreed?.available!==false||payload?.onchain?.fear_greed_index?.available===true||researchState?.lastOnchain?.fear_greed_index?.available===true)&&Number.isFinite(Number(fearGreedValue));
+const globalBreadth=payload?.global_market_breadth||{};
+const marketCapChangePct=firstFiniteNumber(globalBreadth?.market_cap_change_pct_24h,globalBreadth?.market_cap_change_percentage_24h_usd);
+const volumeChangePct=firstFiniteNumber(globalBreadth?.volume_change_pct_24h,globalBreadth?.volume_change_percentage_24h_usd);
+const globalBreadthAvailable=globalBreadth?.available!==false&&(Number.isFinite(Number(marketCapChangePct))||Number.isFinite(Number(volumeChangePct)));
 const whaleCount=Number(community?.whale_transfers?.count||0);
 const annCount=Number((community?.announcements||[]).length||0);
+const securityAlerts=community?.security_alerts||{};
+const securityAlertCount=Number((securityAlerts?.events||[]).length||0);
 const newsEvents=Number(news?.events_count||0);
 const newsFeedCount=Number(news?.feed_count||0);
 const newsRawCount=Number(news?.raw_count||0);
@@ -6737,6 +6757,12 @@ const spreadScore=spreadAvailable?clamp11((2.5-spreadBps)/2.5):null;
 const imbalanceScore=flowAvailable?clamp11(imbalance):null;
 const fundingScore=fundingAvailable?clamp11((-funding)/0.0015):null;
 const basisScore=basisAvailable?clamp11((-basisPct)/0.35):null;
+const fearGreedScore=fearGreedAvailable?clamp11((50-fearGreedValue)/25):null;
+const breadthParts=[
+  Number.isFinite(Number(marketCapChangePct))?clamp11(Number(marketCapChangePct)/6):null,
+  Number.isFinite(Number(volumeChangePct))?clamp11(Number(volumeChangePct)/12):null,
+].filter(hasFiniteScore);
+const globalBreadthScore=breadthParts.length?breadthParts.reduce((sum,value)=>sum+Number(value||0),0)/breadthParts.length:null;
 const newsScore=newsAvailable&&newsN>0?clamp11(newsBalance):null;
 const riskCrowding=clamp11(((whaleCount>=10?0.35:0)+((spreadAvailable&&spreadBps>5)?0.35:0)+((fundingAvailable&&funding>0.001)?0.3:0))*-1);
 const metrics=[
@@ -6744,6 +6770,8 @@ const metrics=[
 {name:'新闻情绪',score:newsScore,raw:newsBalance,fmt:newsN>0?newsBalance.toFixed(4):'--',hint:`结构化${newsEvents} / 当前流${newsFeedCount} / 原始${newsRawCount}`,available:newsAvailable},
 {name:'资金费率(反向拥挤)',score:fundingScore,raw:funding,fmt:fundingAvailable?(funding*100).toFixed(4)+'%':'--',hint:fundingAvailable?'费率越高越拥挤':'暂无资金费率数据',available:fundingAvailable},
 {name:'期现基差(反向拥挤)',score:basisScore,raw:basisPct,fmt:basisAvailable?basisPct.toFixed(4)+'%':'--',hint:basisAvailable?'正基差高=多头拥挤风险':'暂无期现基差数据',available:basisAvailable},
+{name:'Fear & Greed(逆向)',score:fearGreedScore,raw:fearGreedValue,fmt:fearGreedAvailable?String(Math.round(fearGreedValue)):'--',hint:fearGreedAvailable?String(fearGreed?.classification||payload?.onchain?.fear_greed_index?.classification||'市场情绪'):'暂无 Fear & Greed 数据',available:fearGreedAvailable},
+{name:'全市场 Breadth',score:globalBreadthScore,raw:marketCapChangePct,fmt:globalBreadthAvailable?`${Number.isFinite(Number(marketCapChangePct))?Number(marketCapChangePct).toFixed(2)+'%':'--'} / ${Number.isFinite(Number(volumeChangePct))?Number(volumeChangePct).toFixed(2)+'%':'--'}`:'--',hint:globalBreadthAvailable?'市值24h / 成交量24h':'暂无全市场 breadth 数据',available:globalBreadthAvailable},
 {name:'点差健康度',score:spreadScore,raw:spreadBps,fmt:spreadAvailable?spreadBps.toFixed(3)+' bps':'--',hint:spreadAvailable?'点差越小流动性越好':'暂无盘口点差数据',available:spreadAvailable},
 {name:'拥挤风险',score:riskCrowding,raw:riskCrowding,fmt:riskCrowding.toFixed(3),hint:`巨鲸=${whaleCount}，公告=${annCount}`},
 ];
@@ -6751,10 +6779,10 @@ const validMetrics=metrics.filter(m=>hasFiniteScore(m.score));
 const composite=validMetrics.length?validMetrics.reduce((s,m)=>s+Number(m.score||0),0)/validMetrics.length:0;
 const confidence=clamp01(validMetrics.length/metrics.length);
 const stance=validMetrics.length===0?'数据不足':composite>0.18?'偏多':composite<-0.18?'偏空':'中性';
-const caution=[spreadAvailable&&spreadBps>5?'点差偏大':null,fundingAvailable&&Math.abs(funding)>0.0015?'资金费率极端':null,whaleCount>=12?'巨鲸转账活跃':null,!newsAvailable?'新闻样本不足':null,newsAvailable&&newsN===0&&newsFeedCount>0?'结构化事件仍在补齐':null,!flowAvailable||!spreadAvailable||!fundingAvailable||!basisAvailable?'部分微观结构数据缺失':null,String(news?.scope||'')==='global_fallback'?'新闻已回退到全市场样本':null,micro?.source_error?`交易所微观结构不可用: ${micro.source_error}`:null].filter(Boolean);
-researchState.lastSentiment={raw:payload,composite_score:composite,confidence,stance,metrics,spread_bps:spreadBps,imbalance,funding_rate:funding,basis_pct:basisPct,whale_count:whaleCount,news_events:newsEvents,news_feed_count:newsFeedCount,news_raw_count:newsRawCount};
+const caution=[spreadAvailable&&spreadBps>5?'点差偏大':null,fundingAvailable&&Math.abs(funding)>0.0015?'资金费率极端':null,whaleCount>=12?'巨鲸转账活跃':null,securityAlertCount>0?`近期安全事件 ${securityAlertCount} 条`:null,fearGreedAvailable&&fearGreedValue>=75?'Fear & Greed 偏贪婪':null,fearGreedAvailable&&fearGreedValue<=25?'Fear & Greed 偏恐慌':null,globalBreadthAvailable&&Number.isFinite(Number(marketCapChangePct))&&Number(marketCapChangePct)<=-3?'全市场市值 24h 明显走弱':null,!newsAvailable?'新闻样本不足':null,newsAvailable&&newsN===0&&newsFeedCount>0?'结构化事件仍在补齐':null,!flowAvailable||!spreadAvailable||!fundingAvailable||!basisAvailable?'部分微观结构数据缺失':null,String(news?.scope||'')==='global_fallback'?'新闻已回退到全市场样本':null,micro?.source_error?`交易所微观结构不可用: ${micro.source_error}`:null].filter(Boolean);
+researchState.lastSentiment={raw:payload,composite_score:composite,confidence,stance,metrics,spread_bps:spreadBps,imbalance,funding_rate:funding,basis_pct:basisPct,fear_greed_value:fearGreedValue,market_cap_change_pct_24h:marketCapChangePct,whale_count:whaleCount,security_alert_count:securityAlertCount,news_events:newsEvents,news_feed_count:newsFeedCount,news_raw_count:newsRawCount};
 if(summary){
-summary.innerHTML=`<div class="list-item"><span>综合情绪 / 置信度</span><span>${stance} (${composite.toFixed(3)}) / ${confidence.toFixed(2)}</span></div><div class="list-item"><span>新闻事件(24h)</span><span>结构化 ${newsEvents} | 当前流 ${newsFeedCount} | 原始 ${newsRawCount}</span></div><div class="list-item"><span>资金费率 / 基差</span><span>${fundingAvailable?(funding*100).toFixed(4)+'%':'--'} / ${basisAvailable?basisPct.toFixed(4)+'%':'--'}</span></div><div class="list-item"><span>点差 / 主动流</span><span>${spreadAvailable?spreadBps.toFixed(3)+' bps':'--'} / ${flowAvailable?imbalance.toFixed(4):'--'}</span></div><div class="list-item"><span>风控提示</span><span>${esc(caution.join('；')||(validMetrics.length?'无明显异常':'数据不足，建议稍后重试'))}</span></div>`;
+summary.innerHTML=`<div class="list-item"><span>综合情绪 / 置信度</span><span>${stance} (${composite.toFixed(3)}) / ${confidence.toFixed(2)}</span></div><div class="list-item"><span>新闻事件(24h)</span><span>结构化 ${newsEvents} | 当前流 ${newsFeedCount} | 原始 ${newsRawCount}</span></div><div class="list-item"><span>资金费率 / 基差</span><span>${fundingAvailable?(funding*100).toFixed(4)+'%':'--'} / ${basisAvailable?basisPct.toFixed(4)+'%':'--'}</span></div><div class="list-item"><span>Fear & Greed / Breadth</span><span>${fearGreedAvailable?Math.round(fearGreedValue):'--'} / ${globalBreadthAvailable&&Number.isFinite(Number(marketCapChangePct))?Number(marketCapChangePct).toFixed(2)+'%':'--'}</span></div><div class="list-item"><span>点差 / 主动流</span><span>${spreadAvailable?spreadBps.toFixed(3)+' bps':'--'} / ${flowAvailable?imbalance.toFixed(4):'--'}</span></div><div class="list-item"><span>巨鲸 / 公告 / 安全</span><span>${whaleCount} / ${annCount} / ${securityAlertCount}</span></div><div class="list-item"><span>风控提示</span><span>${esc(caution.join('；')||(validMetrics.length?'无明显异常':'数据不足，建议稍后重试'))}</span></div>`;
 }
 if(grid){
 grid.innerHTML=metrics.map(m=>{const hasScore=hasFiniteScore(m.score);const positive=hasScore&&Number(m.score)>=0;const badgeText=!hasScore?'缺失':positive?'正向':'负向';const badgeClass=!hasScore?'warning':positive?'connected':'';return `<div class="strategy-card"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${esc(m.name)}</h4><span class="status-badge ${badgeClass}">${badgeText}</span></div><p>标准化分数：${hasScore?Number(m.score).toFixed(3):'--'}</p><p>原始值：${esc(String(m.fmt))}</p><p style="font-size:11px;color:#8fa6c0;">${esc(m.hint||'')}</p></div>`;}).join('');
@@ -7497,7 +7525,52 @@ const sentiment=payload.sentiment_dashboard||{};
 const micro=sentiment.microstructure||{};
 const community=sentiment.community||{};
 const news=sentiment.news||{};
+const macroSnapshot=payload.macro_snapshot||sentiment.macro||{};
+const macroSummary=payload.macro_summary||{};
+const macroSourceSummary=payload.macro_source_summary||sentiment.macro_source_summary||{};
+const derivativesSummary=payload.derivatives_summary||sentiment.derivatives||{};
+const derivativesSourceSummary=payload.derivatives_source_summary||sentiment.derivatives_source_summary||{};
 const calendarRows=Array.isArray(payload.calendar_watchlist)?payload.calendar_watchlist:[];
+const calendarSummary=payload.calendar_source_summary||sentiment.calendar_source_summary||{};
+const calendarSourceLabel=analyticsSourceLabel(calendarSummary?.source||calendarRows.map(item=>item?.source).filter(Boolean).join('+'));
+const calendarOfficialCount=Number(calendarSummary?.official_count||calendarRows.filter(item=>item?.official_source).length||0);
+const calendarEstimatedCount=Number(calendarSummary?.estimated_count||calendarRows.filter(item=>item?.estimated_source).length||0);
+const calendarOfficialSources=Array.isArray(calendarSummary?.official_sources)?calendarSummary.official_sources:[];
+const calendarOfficialSourceLabel=calendarOfficialSources.length?analyticsSourceLabel(calendarOfficialSources.join('+')):'--';
+const calendarStale=Boolean(calendarSummary?.stale);
+const calendarPrimary=calendarRows[0]||{};
+const calendarFocus=calendarRows.find(item=>String(item?.category||'').toLowerCase()==='economic'&&item?.official_source)||calendarRows.find(item=>item?.official_source)||calendarPrimary;
+const calendarStatus=!calendarRows.length?'warning':(calendarStale?'warning':(calendarOfficialCount>0?'connected':'warning'));
+const calendarBadge=!calendarRows.length?'暂无':(calendarStale?'缓存回退':(calendarOfficialCount>0?`${calendarRows.length}条`:'估算'));
+const macroSourceLabel=analyticsSourceLabel(macroSourceSummary?.source||macroSnapshot?.source||'');
+const macroAvailableSeries=Number(macroSourceSummary?.available_series||macroSummary?.available_count||0);
+const macroSourceStatus=String(macroSourceSummary?.source_status||'missing').trim()||'missing';
+const macroStale=Boolean(macroSourceSummary?.stale);
+const macroCacheAgeSec=firstFiniteNumber(macroSourceSummary?.cache_age_sec);
+const macroGroups=macroSourceSummary?.groups&&typeof macroSourceSummary.groups==='object'?macroSourceSummary.groups:{};
+const macroGroupLine=[['market','跨市场'],['us','美国'],['china','中国']].map(([key,label])=>{
+  const row=macroGroups?.[key]||{};
+  const count=Number(row?.available_count||0);
+  const total=Number(row?.total_series||0);
+  if(count<=0&&total<=0)return'';
+  const tag=Boolean(row?.stale)?' 偏旧':(String(row?.source_status||'')==='partial'?' 部分':'');
+  return `${label} ${count}/${total}${tag}`;
+}).filter(Boolean).join(' | ') || (macroAvailableSeries>0?`可用 ${macroAvailableSeries} 项`:'暂无有效宏观项');
+const macroHeadline=String(macroSummary?.cross_market_headline||macroSummary?.headline||'暂无宏观摘要').trim()||'暂无宏观摘要';
+const macroAgeText=macroCacheAgeSec!==null?fmtDurationSec(macroCacheAgeSec):'--';
+const macroStatus=(macroAvailableSeries<=0||macroStale||macroSourceStatus==='partial')?'warning':'connected';
+const macroBadge=macroAvailableSeries<=0?'缺失':(macroStale?'缓存偏旧':(macroSourceStatus==='partial'?'部分':'已缓存'));
+const derivativesSourceLabel=analyticsSourceLabel(derivativesSourceSummary?.source||derivativesSummary?.provider||'coinglass');
+const derivativesAvailable=Boolean(derivativesSourceSummary?.available??derivativesSummary?.available);
+const derivativesSourceStatus=String(derivativesSourceSummary?.source_status||derivativesSummary?.status||'missing').trim()||'missing';
+const derivativesStale=Boolean(derivativesSourceSummary?.stale);
+const derivativesFreshnessSec=firstFiniteNumber(derivativesSourceSummary?.cache_age_sec,derivativesSummary?.freshness_sec);
+const derivativesDatasetCount=Number(derivativesSourceSummary?.dataset_count||derivativesSummary?.dataset_count||0);
+const derivativesHistoryReady=Boolean(derivativesSourceSummary?.history_ready??derivativesSummary?.history_ready);
+const derivativesQuotaRemaining=firstFiniteNumber(derivativesSourceSummary?.quota_headroom?.daily_remaining,derivativesSummary?.quota_headroom?.daily_remaining);
+const derivativesAgeText=derivativesFreshnessSec!==null?fmtDurationSec(derivativesFreshnessSec):'--';
+const derivativesStatus=(!derivativesAvailable||derivativesStale||derivativesSourceStatus==='degraded')?'warning':'connected';
+const derivativesBadge=!derivativesAvailable?'缺失':(derivativesStale?'缓存偏旧':(derivativesSourceStatus==='degraded'?'降级':'实时'));
 const newsCount=countWorkbenchNewsSamples(news);
 const spreadBps=Number.isFinite(Number(micro?.orderbook?.spread_bps))&&Number(micro?.orderbook?.spread_bps)>0?Number(micro.orderbook.spread_bps):null;
 const imbalance=Number.isFinite(Number(micro?.aggressor_flow?.imbalance))?Number(micro.aggressor_flow.imbalance):null;
@@ -7519,24 +7592,29 @@ const whaleCount=Number(community?.whale_transfers?.count||0);
 const warnings=(Array.isArray(module?.warnings)?module.warnings:[]).filter(Boolean);
 const cards=[
 {title:'市场状态',badge:regime?.regime||'待判定',status:'connected',lines:[`方向 ${regime?.bias||'neutral'}`,`置信 ${Number(regime?.confidence||0).toFixed(2)} | 风险 ${regime?.risk_level||'unknown'}`]},
-{title:'交易日历',badge:calendarRows.length?`${calendarRows.length}条`:'暂无',status:calendarRows.length?'connected':'warning',lines:[calendarRows.length?`事件 ${calendarRows.length} 条`:'当前窗口内暂无重点事件',calendarRows[0]?.title||calendarRows[0]?.event||'等待下一次刷新']},
+{title:'交易日历',badge:calendarBadge,status:calendarStatus,lines:[calendarRows.length?`事件 ${calendarRows.length} 条 | 官方 ${calendarOfficialCount} | 估算 ${calendarEstimatedCount}`:'当前窗口内暂无重点事件',calendarRows.length?`来源 ${calendarSourceLabel}${calendarStale?' | 缓存回退':''}`:'等待下一次刷新',calendarFocus?.title||calendarFocus?.event||'等待下一次刷新']},
+{title:'宏观快照',badge:macroBadge,status:macroStatus,lines:[macroGroupLine,`来源 ${macroSourceLabel} | 状态 ${macroSourceStatus}`,`缓存 ${macroAgeText} | ${String(macroSourceSummary?.note||macroHeadline).slice(0,48)}`]},
+{title:'衍生品上下文',badge:derivativesBadge,status:derivativesStatus,lines:[`来源 ${derivativesSourceLabel} | 状态 ${derivativesSourceStatus}`,`新鲜度 ${derivativesAgeText} | 数据集 ${derivativesDatasetCount}`,`${derivativesHistoryReady?'历史序列已就绪':'历史序列部分缺失'} | 日余量 ${derivativesQuotaRemaining!==null?derivativesQuotaRemaining:'--'}`]},
 {title:'情绪与新闻',badge:newsCount.total?`${newsCount.total}样本`:'样本不足',status:newsCount.total?'connected':'warning',lines:[`结构化 ${newsCount.events} | 当前流 ${newsCount.feed}`,`原始新闻 ${newsCount.raw}`]},
 {title:'社区与公告',badge:(announcements.length||whaleCount)?'正常':'稀疏',status:(announcements.length||whaleCount)?'connected':'warning',lines:[`公告 ${announcements.length} | 巨鲸 ${whaleCount}`,announcements[0]?.title||announcements[0]?.headline||'暂无公告样本']},
 {title:'微观结构',badge:sourceError?'降级':(microReady?'正常':'样本不足'),status:sourceError?'warning':'connected',lines:[`点差 ${fmtWorkbenchMetric(spreadBps,'bps')} | 主动流 ${fmtWorkbenchMetric(imbalance,'fixed4')}`,`多空比 ${fmtWorkbenchMetric(longShortRatio,'fixed4')} | 墙偏置 ${fmtWorkbenchMetric(wallBias,'fixed4')}`,sourceError?`来源 ${sourceError}`:`冰山候选 ${Number.isFinite(icebergCandidates)?icebergCandidates:0} | 大额挂单 ${largeOrders.length}`]},
 {title:'数据提醒',badge:warnings.length?`${warnings.length}条`:'正常',status:warnings.length?'warning':'connected',lines:warnings.length?[String(warnings[0]||'').slice(0,40),String(warnings[1]||'无额外警告').slice(0,40)]:['当前模块已返回有效摘要','可继续查看因子与链上模块']},
 ];
-researchState.lastAnalytics={workbench:true,risk_level:regime?.risk_level||'unknown',market_regime:regime?.regime||'未知',direction_bias:regime?.bias||'neutral',confidence:Number(regime?.confidence||0),calendar_count:calendarRows.length,news_samples:newsCount.total,whale_count:whaleCount,microstructure_available:microReady,long_short_ratio:longShortRatio,wall_bias:wallBias,iceberg_candidates:Number.isFinite(icebergCandidates)?icebergCandidates:0,large_order_count:largeOrders.length};
+researchState.lastAnalytics={workbench:true,risk_level:regime?.risk_level||'unknown',market_regime:regime?.regime||'未知',direction_bias:regime?.bias||'neutral',confidence:Number(regime?.confidence||0),calendar_count:calendarRows.length,calendar_source:calendarSummary?.source||null,calendar_official_count:calendarOfficialCount,calendar_estimated_count:calendarEstimatedCount,calendar_stale:calendarStale,macro_source:macroSourceSummary?.source||macroSnapshot?.source||null,macro_source_status:macroSourceStatus,macro_available_series:macroAvailableSeries,macro_stale:macroStale,derivatives_source:derivativesSourceSummary?.source||derivativesSummary?.provider||null,derivatives_source_status:derivativesSourceStatus,derivatives_dataset_count:derivativesDatasetCount,derivatives_stale:derivativesStale,news_samples:newsCount.total,whale_count:whaleCount,microstructure_available:microReady,long_short_ratio:longShortRatio,wall_bias:wallBias,iceberg_candidates:Number.isFinite(icebergCandidates)?icebergCandidates:0,large_order_count:largeOrders.length};
 summary.innerHTML=[
 `<div class="list-item"><span>市场状态 / 方向</span><span>${esc(regime?.regime||'未知')} / ${esc(regime?.bias||'neutral')}</span></div>`,
 `<div class="list-item"><span>置信度 / 风险等级</span><span>${Number(regime?.confidence||0).toFixed(2)} / ${esc(regime?.risk_level||'unknown')}</span></div>`,
 `<div class="list-item"><span>交易日历 / 新闻样本</span><span>${calendarRows.length} / ${newsCount.total}</span></div>`,
+`<div class="list-item"><span>日历来源 / 官方占比</span><span>${esc(calendarSourceLabel)}${calendarStale?' / 缓存回退':''} / ${calendarOfficialCount}-${calendarEstimatedCount}</span></div>`,
+`<div class="list-item"><span>宏观来源 / 缓存状态</span><span>${esc(macroSourceLabel)} / ${esc(macroSourceStatus)}${macroStale?' / 偏旧':''}</span></div>`,
+`<div class="list-item"><span>衍生品来源 / 新鲜度</span><span>${esc(derivativesSourceLabel)} / ${esc(derivativesAgeText)}</span></div>`,
 `<div class="list-item"><span>公告 / 巨鲸</span><span>${announcements.length} / ${whaleCount}</span></div>`,
 `<div class="list-item"><span>微观结构</span><span>${sourceError?esc(sourceError):(microReady?`${fmtWorkbenchMetric(spreadBps,'bps')} / ${fmtWorkbenchMetric(imbalance,'fixed4')}`:'样本不足')}</span></div>`,
 `<div class="list-item"><span>多空比 / 冰山</span><span>${fmtWorkbenchMetric(longShortRatio,'fixed4')} / ${Number.isFinite(icebergCandidates)?icebergCandidates:0}</span></div>`,
 ].join('');
 grid.innerHTML=cards.map(card=>`<div class="strategy-card"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${esc(card.title)}</h4><span class="status-badge ${esc(card.status)}">${esc(card.badge)}</span></div>${card.lines.map(line=>`<p>${esc(String(line||'--'))}</p>`).join('')}</div>`).join('');
 if(out){
-  out.textContent=JSON.stringify({market_state:regime,calendar_watchlist:calendarRows.slice(0,8),community:{announcements:announcements.length,whale_count:whaleCount},microstructure:{spread_bps:spreadBps,imbalance,funding_rate:funding,basis_pct:basisPct,long_short_ratio:longShortRatio,wall_bias:wallBias,large_order_count:largeOrders.length,iceberg_candidates:Number.isFinite(icebergCandidates)?icebergCandidates:0,source_error:sourceError||null},news:newsCount,warnings},null,2);
+  out.textContent=JSON.stringify({market_state:regime,calendar_watchlist:calendarRows.slice(0,8),calendar_source_summary:{source:calendarSummary?.source||null,source_label:calendarSourceLabel,official_sources:calendarOfficialSources,official_source_label:calendarOfficialSourceLabel,official_count:calendarOfficialCount,estimated_count:calendarEstimatedCount,stale:calendarStale,cache_age_sec:calendarSummary?.cache_age_sec??null,note:calendarSummary?.note||null},macro_source_summary:{source:macroSourceSummary?.source||macroSnapshot?.source||null,source_label:macroSourceLabel,source_status:macroSourceStatus,available_series:macroAvailableSeries,stale:macroStale,cache_age_sec:macroSourceSummary?.cache_age_sec??null,groups:macroGroups,note:macroSourceSummary?.note||null},derivatives_source_summary:{source:derivativesSourceSummary?.source||derivativesSummary?.provider||null,source_label:derivativesSourceLabel,source_status:derivativesSourceStatus,stale:derivativesStale,cache_age_sec:derivativesFreshnessSec,dataset_count:derivativesDatasetCount,history_ready:derivativesHistoryReady,note:derivativesSourceSummary?.note||null},community:{announcements:announcements.length,whale_count:whaleCount},microstructure:{spread_bps:spreadBps,imbalance,funding_rate:funding,basis_pct:basisPct,long_short_ratio:longShortRatio,wall_bias:wallBias,large_order_count:largeOrders.length,iceberg_candidates:Number.isFinite(icebergCandidates)?icebergCandidates:0,source_error:sourceError||null},news:newsCount,warnings},null,2);
 }
 renderResearchConclusionCard();
 }

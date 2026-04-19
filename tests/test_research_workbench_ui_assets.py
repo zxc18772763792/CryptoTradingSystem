@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -30,16 +29,19 @@ def test_research_workbench_recommendations_render_structured_actions():
     style_css = _read("web/static/css/style.css")
     workbench_js = _read("web/static/js/research_workbench.js")
 
-    assert '结论 / 下一步' in template
-    assert '_profile_symbol_window(profile, 30)' in research_api
+    assert "结论 / 下一步" in template
+    assert "_profile_symbol_window(profile, 30)" in research_api
     assert "apiResearch('/recommendations'" in workbench_js
     assert "function executeRecommendationAction(action)" in workbench_js
     assert "function applyRecommendationToAi(action)" in workbench_js
     assert "function getFactorFocusItems(rec = state.recommendations)" in workbench_js
-    assert "function describeRecommendationSource(meta = getRecommendationSourceMeta())" in workbench_js
     assert (
-        'data-action-id="${escSafe(String(action.id || \'\'))}"' in workbench_js
-        or 'data-action-id="${escSafe(String(a.id || \'\'))}"' in workbench_js
+        "function describeRecommendationSource(meta = getRecommendationSourceMeta())"
+        in workbench_js
+    )
+    assert (
+        "data-action-id=\"${escSafe(String(action.id || ''))}\"" in workbench_js
+        or "data-action-id=\"${escSafe(String(a.id || ''))}\"" in workbench_js
     )
     assert (
         "research-conclusion-action-btn" in workbench_js
@@ -71,21 +73,40 @@ def test_research_workbench_microstructure_summary_wires_long_short_and_order_wa
     assert "Derivatives Labels" in workbench_js
     assert "history_ready: !!derivativesPayload?.history_ready" in workbench_js
     assert "funding_zscore: Number(derivativesPayload?.funding_zscore)" in workbench_js
-    assert "long_short_ratio_change_24h: Number(derivativesPayload?.long_short_ratio_change_24h)" in workbench_js
-    assert "derivatives_labels: Array.isArray(derivativesPayload?.derivatives_labels)" in workbench_js
-    assert "/trading/analytics/history/status?exchange=${exchange}&symbol=${primarySymbol}" in workbench_js
+    assert (
+        "long_short_ratio_change_24h: Number(derivativesPayload?.long_short_ratio_change_24h)"
+        in workbench_js
+    )
+    assert (
+        "derivatives_labels: Array.isArray(derivativesPayload?.derivatives_labels)"
+        in workbench_js
+    )
+    assert (
+        "/trading/analytics/history/status?exchange=${exchange}&symbol=${primarySymbol}"
+        in workbench_js
+    )
     assert "iceberg_candidates" in app_js
     assert "large_order_count" in app_js
     assert "coinglass_cache:'CoinGlass缓存'" in app_js
+    assert "fred:'FRED'" in app_js
+    assert "'stats.gov.cn':'国家统计局'" in app_js
     assert "function formatAnalyticsRecentPoint(rowKey,item)" in app_js
     assert "if(row.key==='derivatives')" in app_js
     assert "资金费率 ${funding} | 拥挤 ${crowding} | 挤压 ${squeeze}" in app_js
     assert "拥挤 ${crowding} | 资金 ${funding}" in app_js
     assert "key!=='derivatives'" in app_js
+    assert "macro_source_summary" in app_js
+    assert "derivatives_source_summary" in app_js
+    assert "title:'宏观快照'" in app_js
+    assert "title:'衍生品上下文'" in app_js
     assert "_fetch_long_short_ratio_snapshot" in trading_api
     assert "_build_microstructure_summary" in research_api
     assert "_build_derivatives_shadow_summary" in research_api
+    assert "_build_derivatives_source_summary" in research_api
+    assert "_build_macro_source_summary" in research_api
     assert '"derivatives_summary": derivatives_summary' in research_api
+    assert '"macro_source_summary": macro_source_summary' in research_api
+    assert '"derivatives_source_summary": derivatives_source_summary' in research_api
     assert "get_analytics_history_status" in research_api
     assert "slice(0, 4)" in workbench_js
 

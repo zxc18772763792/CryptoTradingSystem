@@ -7,16 +7,18 @@ import hmac
 import inspect
 import json
 import math
+import re
 import statistics
 import time
 from datetime import datetime, timedelta, timezone
+from html import unescape
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 from uuid import uuid4
 
-import pandas as pd
 import httpx
+import pandas as pd
 from fastapi import HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -32,9 +34,10 @@ from config.database import (
 from config.exchanges import get_exchange_config
 from config.settings import settings
 from core.audit import audit_logger
-from core.data.coinglass_client import CoinglassClient, coinglass_enabled
 from core.data import data_storage
+from core.data.coinglass_client import CoinglassClient, coinglass_enabled
 from core.exchanges import exchange_manager
+from core.exchanges.base_exchange import OrderSide, OrderType
 from core.exchanges.binance_connector import BinanceConnector
 from core.notifications import notification_manager
 from core.realtime import event_bus
@@ -49,17 +52,13 @@ from core.trading import (
     position_manager,
 )
 from core.trading.order_manager import OrderRequest as CoreOrderRequest
-from core.exchanges.base_exchange import OrderSide, OrderType
 from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
-from web.services import (
-    build_runtime_diagnostics,
-    cancel_mode_switch as cancel_trading_mode_switch_token,
-    clear_local_trading_runtime as clear_local_runtime_service,
-    get_mode_confirm_text,
-    list_pending_mode_switches,
-    request_mode_switch as request_trading_mode_switch_service,
-    switch_trading_mode as switch_trading_mode_service,
-)
+from web.services import build_runtime_diagnostics
+from web.services import cancel_mode_switch as cancel_trading_mode_switch_token
+from web.services import clear_local_trading_runtime as clear_local_runtime_service
+from web.services import get_mode_confirm_text, list_pending_mode_switches
+from web.services import request_mode_switch as request_trading_mode_switch_service
+from web.services import switch_trading_mode as switch_trading_mode_service
 
 _BALANCE_FETCH_TIMEOUT_SEC = 5.5
 _TICKER_FETCH_TIMEOUT_SEC = 1.6
@@ -71,7 +70,11 @@ _LIVE_POSITION_SNAPSHOT_CACHE: Dict[str, Any] = {"ts": 0.0, "data": {}}
 _LIVE_POSITION_SNAPSHOT_TTL_SEC = 6.0
 _LIVE_POSITION_FETCH_TIMEOUT_SEC = 8.5
 _LIVE_POSITION_DETAILS_CACHE_TTL_SEC = 12.0
-_LIVE_POSITION_DETAILS_CACHE: Dict[str, Any] = {"ts": 0.0, "positions": [], "diagnostics": None}
+_LIVE_POSITION_DETAILS_CACHE: Dict[str, Any] = {
+    "ts": 0.0,
+    "positions": [],
+    "diagnostics": None,
+}
 _LIVE_ORDER_DETAILS_CACHE: Dict[str, Any] = {"ts": 0.0, "orders": []}
 _RULE_PRICE_CACHE_TTL_SEC = 10.0
 _RULE_PRICE_FETCH_TIMEOUT_SEC = 1.5
@@ -79,6 +82,16 @@ _RULE_PRICE_CACHE: Dict[str, Any] = {"ts": 0.0, "prices": {}}
 _RULE_PRICE_IN_FLIGHT: Optional[asyncio.Task] = None
 _MICROSTRUCTURE_SNAPSHOT_CACHE: Dict[str, Any] = {}
 _MICROSTRUCTURE_SNAPSHOT_CACHE_TTL_SEC = 6.0
+_MICROSTRUCTURE_SNAPSHOT_STALE_MAX_AGE_SEC = 120.0
+_COMMUNITY_OVERVIEW_CACHE: Dict[str, Any] = {}
+_COMMUNITY_OVERVIEW_CACHE_TTL_SEC = 15.0
+_COMMUNITY_OVERVIEW_STALE_MAX_AGE_SEC = 10 * 60.0
+_RISK_DASHBOARD_CACHE: Dict[str, Any] = {}
+_RISK_DASHBOARD_CACHE_TTL_SEC = 20.0
+_RISK_DASHBOARD_STALE_MAX_AGE_SEC = 5 * 60.0
+_RISK_DASHBOARD_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
+_MICROSTRUCTURE_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
+_COMMUNITY_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
 _ANALYTICS_ROOT = Path("./data/cache/analytics")
 _BEHAVIOR_JOURNAL_PATH = _ANALYTICS_ROOT / "behavior_journal.json"
 _STOPLOSS_POLICY_PATH = _ANALYTICS_ROOT / "stoploss_policy.json"
@@ -93,6 +106,8 @@ _ANALYTICS_OPTIONS_TIMEOUT_SEC = 1.8
 _ANALYTICS_WHALE_TIMEOUT_SEC = 6.0
 _ANALYTICS_WHALE_MIN_BTC = 10.0
 _ANALYTICS_ANNOUNCEMENT_TIMEOUT_SEC = 4.0
+_ANALYTICS_CALENDAR_TIMEOUT_SEC = 6.0
+_ANALYTICS_SECURITY_ALERT_TIMEOUT_SEC = 6.0
 _ANALYTICS_COLLECTOR_TIMEOUT_SEC = 8.0
 _ANALYTICS_COINGLASS_REFRESH_MAX_AGE_SEC = 5 * 60.0
 _ANALYTICS_HISTORY_HEALTH_CACHE_TTL_SEC = 20.0
@@ -106,18 +121,114 @@ _DEFAULT_STOPLOSS_POLICY: Dict[str, Any] = {
     "trailing": {"enabled": True},
     "partial_stop": {"enabled": True, "r1_ratio": 0.5, "r2_ratio": 0.5},
 }
+_SLOWMIST_HACKED_URL = "https://hacked.slowmist.io/"
+_SECURITY_ALERTS_CACHE: Dict[str, Any] = {}
+_SECURITY_ALERTS_CACHE_TTL_SEC = 10 * 60.0
+_SECURITY_ALERTS_STALE_MAX_AGE_SEC = 6 * 60 * 60.0
+_TRADING_CALENDAR_CACHE: Dict[str, Any] = {}
+_TRADING_CALENDAR_CACHE_TTL_SEC = 5 * 60.0
+_TRADING_CALENDAR_STALE_MAX_AGE_SEC = 60 * 60.0
+_COINGLASS_CALENDAR_LOOKAHEAD_DAYS = 15
+_COINGLASS_UNLOCK_MAX_PAGES = 2
+_COINGLASS_CALENDAR_MAJOR_COUNTRY_CODES = {
+    "US",
+    "USA",
+    "CN",
+    "CHN",
+    "EA",
+    "EMU",
+    "EU",
+    "EUR",
+    "JP",
+    "JPN",
+    "GB",
+    "GBR",
+    "UK",
+    "CA",
+    "CAN",
+    "AU",
+    "AUS",
+    "CH",
+    "CHE",
+}
+_COINGLASS_CALENDAR_PRIORITY_KEYWORDS = (
+    "cpi",
+    "ppi",
+    "pce",
+    "gdp",
+    "pmi",
+    "nonfarm",
+    "nfp",
+    "payroll",
+    "unemployment",
+    "jobless",
+    "retail sales",
+    "interest rate",
+    "rate decision",
+    "fomc",
+    "minutes",
+    "inflation",
+    "利率",
+    "非农",
+    "失业",
+    "就业",
+    "零售销售",
+    "通胀",
+    "纪要",
+    "国内生产总值",
+    "gdp",
+    "制造业pmi",
+    "服务业pmi",
+    "pmi",
+    "消费者物价指数",
+    "生产者物价指数",
+    "核心pce",
+)
+_SLOWMIST_SYMBOL_ALIASES: Dict[str, List[str]] = {
+    "ADA": ["cardano", "ada"],
+    "APT": ["aptos", "apt"],
+    "ARB": ["arbitrum", "arb"],
+    "ATOM": ["cosmos", "atom"],
+    "AVAX": ["avalanche", "avax"],
+    "BNB": ["bnb", "bsc", "binance smart chain", "binance"],
+    "BTC": ["bitcoin", "btc"],
+    "DOGE": ["dogecoin", "doge"],
+    "ETH": ["ethereum", "eth"],
+    "FIL": ["filecoin", "fil"],
+    "HBAR": ["hedera", "hbar"],
+    "ICP": ["internet computer", "icp"],
+    "INJ": ["injective", "inj"],
+    "LINK": ["chainlink", "link"],
+    "MATIC": ["polygon", "matic", "pol"],
+    "MKR": ["maker", "mkr"],
+    "NEAR": ["near"],
+    "OP": ["optimism", "op"],
+    "POL": ["polygon", "pol", "matic"],
+    "SOL": ["solana", "sol"],
+    "SUI": ["sui"],
+    "TON": ["the open network", "ton"],
+    "TRX": ["tron", "trx"],
+    "UNI": ["uniswap", "uni"],
+    "XRP": ["ripple", "xrp"],
+}
 
 _BINANCE_RECV_WINDOW = 5000
 _BINANCE_REST_TIMEOUT_SEC = 4.5
 _BINANCE_TIME_OFFSET_MS: Dict[str, Any] = {"api": 0, "fapi": 0, "ts": 0.0}
-_HTTPX_SUPPORTS_PROXY_KW = "proxy" in inspect.signature(httpx.AsyncClient.__init__).parameters
+_HTTPX_SUPPORTS_PROXY_KW = (
+    "proxy" in inspect.signature(httpx.AsyncClient.__init__).parameters
+)
 
 
 def _clear_trading_api_runtime_caches() -> Dict[str, Any]:
     balance_entries = len(_BALANCE_SNAPSHOT_CACHE)
     micro_entries = len(_MICROSTRUCTURE_SNAPSHOT_CACHE)
+    security_entries = len(_SECURITY_ALERTS_CACHE)
+    calendar_entries = len(_TRADING_CALENDAR_CACHE)
     _BALANCE_SNAPSHOT_CACHE.clear()
     _MICROSTRUCTURE_SNAPSHOT_CACHE.clear()
+    _SECURITY_ALERTS_CACHE.clear()
+    _TRADING_CALENDAR_CACHE.clear()
     _LIVE_POSITION_SNAPSHOT_CACHE["ts"] = 0.0
     _LIVE_POSITION_SNAPSHOT_CACHE["data"] = {}
     _LIVE_POSITION_DETAILS_CACHE["ts"] = 0.0
@@ -128,6 +239,8 @@ def _clear_trading_api_runtime_caches() -> Dict[str, Any]:
     return {
         "balance_entries_cleared": balance_entries,
         "microstructure_entries_cleared": micro_entries,
+        "security_alert_entries_cleared": security_entries,
+        "trading_calendar_entries_cleared": calendar_entries,
     }
 
 
@@ -142,9 +255,17 @@ def _inspect_trading_api_runtime_caches() -> Dict[str, Any]:
     return {
         "balance_snapshot_entries": len(_BALANCE_SNAPSHOT_CACHE),
         "microstructure_snapshot_entries": len(_MICROSTRUCTURE_SNAPSHOT_CACHE),
-        "live_position_snapshot_age_sec": _age(float(_LIVE_POSITION_SNAPSHOT_CACHE.get("ts") or 0.0)),
-        "live_position_details_age_sec": _age(float(_LIVE_POSITION_DETAILS_CACHE.get("ts") or 0.0)),
-        "live_order_details_age_sec": _age(float(_LIVE_ORDER_DETAILS_CACHE.get("ts") or 0.0)),
+        "security_alert_entries": len(_SECURITY_ALERTS_CACHE),
+        "trading_calendar_entries": len(_TRADING_CALENDAR_CACHE),
+        "live_position_snapshot_age_sec": _age(
+            float(_LIVE_POSITION_SNAPSHOT_CACHE.get("ts") or 0.0)
+        ),
+        "live_position_details_age_sec": _age(
+            float(_LIVE_POSITION_DETAILS_CACHE.get("ts") or 0.0)
+        ),
+        "live_order_details_age_sec": _age(
+            float(_LIVE_ORDER_DETAILS_CACHE.get("ts") or 0.0)
+        ),
     }
 
 
@@ -156,7 +277,9 @@ runtime_state.register_cache(
 )
 
 
-def _apply_httpx_proxy_kw(client_kwargs: Dict[str, Any], proxy_url: Optional[str]) -> None:
+def _apply_httpx_proxy_kw(
+    client_kwargs: Dict[str, Any], proxy_url: Optional[str]
+) -> None:
     proxy = str(proxy_url or "").strip()
     if not proxy:
         return
@@ -243,16 +366,23 @@ async def _fetch_gate_public_json(
     client_kwargs: Dict[str, Any] = {"timeout": timeout_sec}
     _apply_httpx_proxy_kw(client_kwargs, settings.HTTP_PROXY or settings.HTTPS_PROXY)
     async with httpx.AsyncClient(**client_kwargs) as client:
-        resp = await client.get(f"https://api.gateio.ws/api/v4{path}", params=params or {})
+        resp = await client.get(
+            f"https://api.gateio.ws/api/v4{path}", params=params or {}
+        )
         resp.raise_for_status()
         return resp.json()
 
 
-async def _fetch_binance_public_orderbook(symbol: str, limit: int = 80) -> Dict[str, Any]:
+async def _fetch_binance_public_orderbook(
+    symbol: str, limit: int = 80
+) -> Dict[str, Any]:
     try:
         payload = await _fetch_binance_public_json(
             "/api/v3/depth",
-            params={"symbol": _binance_rest_symbol(symbol), "limit": max(5, min(int(limit), 100))},
+            params={
+                "symbol": _binance_rest_symbol(symbol),
+                "limit": max(5, min(int(limit), 100)),
+            },
             timeout_sec=_ANALYTICS_ORDERBOOK_TIMEOUT_SEC,
         )
         return {
@@ -279,7 +409,13 @@ def _parse_orderbook_level_pair(item: Any) -> Optional[List[float]]:
             return [price, qty]
     if isinstance(item, dict):
         price = _safe_float(item.get("price") or item.get("p"))
-        qty = _safe_float(item.get("size") or item.get("amount") or item.get("qty") or item.get("q") or item.get("s"))
+        qty = _safe_float(
+            item.get("size")
+            or item.get("amount")
+            or item.get("qty")
+            or item.get("q")
+            or item.get("s")
+        )
         if price > 0 and qty > 0:
             return [price, qty]
     return None
@@ -290,7 +426,11 @@ async def _fetch_gate_public_orderbook(symbol: str, limit: int = 80) -> Dict[str
     try:
         payload = await _fetch_gate_public_json(
             "/futures/usdt/order_book",
-            params={"contract": contract, "limit": max(5, min(int(limit), 100)), "with_id": "true"},
+            params={
+                "contract": contract,
+                "limit": max(5, min(int(limit), 100)),
+                "with_id": "true",
+            },
             timeout_sec=_ANALYTICS_ORDERBOOK_TIMEOUT_SEC,
         )
     except Exception as exc:
@@ -303,8 +443,16 @@ async def _fetch_gate_public_orderbook(symbol: str, limit: int = 80) -> Dict[str
         }
     raw_bids = list((payload or {}).get("bids") or [])
     raw_asks = list((payload or {}).get("asks") or [])
-    bids = [level for level in (_parse_orderbook_level_pair(row) for row in raw_bids) if level]
-    asks = [level for level in (_parse_orderbook_level_pair(row) for row in raw_asks) if level]
+    bids = [
+        level
+        for level in (_parse_orderbook_level_pair(row) for row in raw_bids)
+        if level
+    ]
+    asks = [
+        level
+        for level in (_parse_orderbook_level_pair(row) for row in raw_asks)
+        if level
+    ]
     return {
         "available": bool(bids and asks),
         "bids": bids,
@@ -314,16 +462,28 @@ async def _fetch_gate_public_orderbook(symbol: str, limit: int = 80) -> Dict[str
     }
 
 
-async def _fetch_binance_public_trade_imbalance(symbol: str, limit: int = 600) -> Dict[str, Any]:
+async def _fetch_binance_public_trade_imbalance(
+    symbol: str, limit: int = 600
+) -> Dict[str, Any]:
     try:
         rows = await _fetch_binance_public_json(
             "/api/v3/trades",
-            params={"symbol": _binance_rest_symbol(symbol), "limit": max(50, min(int(limit), 1000))},
+            params={
+                "symbol": _binance_rest_symbol(symbol),
+                "limit": max(50, min(int(limit), 1000)),
+            },
             timeout_sec=_ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC,
         )
         trades = list(rows or [])
     except Exception as exc:
-        return {"available": False, "error": str(exc), "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+        return {
+            "available": False,
+            "error": str(exc),
+            "count": 0,
+            "buy_volume": 0.0,
+            "sell_volume": 0.0,
+            "imbalance": 0.0,
+        }
     buy_volume = 0.0
     sell_volume = 0.0
     for row in trades:
@@ -338,12 +498,16 @@ async def _fetch_binance_public_trade_imbalance(symbol: str, limit: int = 600) -
         "count": len(trades),
         "buy_volume": round(buy_volume, 6),
         "sell_volume": round(sell_volume, 6),
-        "imbalance": round(((buy_volume - sell_volume) / total) if total > 0 else 0.0, 6),
+        "imbalance": round(
+            ((buy_volume - sell_volume) / total) if total > 0 else 0.0, 6
+        ),
         "source": "binance_public",
     }
 
 
-async def _fetch_gate_public_trade_imbalance(symbol: str, limit: int = 600) -> Dict[str, Any]:
+async def _fetch_gate_public_trade_imbalance(
+    symbol: str, limit: int = 600
+) -> Dict[str, Any]:
     contract = _gate_futures_contract_symbol(symbol)
     try:
         rows = await _fetch_gate_public_json(
@@ -353,7 +517,14 @@ async def _fetch_gate_public_trade_imbalance(symbol: str, limit: int = 600) -> D
         )
         trades = list(rows or [])
     except Exception as exc:
-        return {"available": False, "error": str(exc), "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+        return {
+            "available": False,
+            "error": str(exc),
+            "count": 0,
+            "buy_volume": 0.0,
+            "sell_volume": 0.0,
+            "imbalance": 0.0,
+        }
     buy_volume = 0.0
     sell_volume = 0.0
     for row in trades:
@@ -374,12 +545,16 @@ async def _fetch_gate_public_trade_imbalance(symbol: str, limit: int = 600) -> D
         "count": len(trades),
         "buy_volume": round(buy_volume, 6),
         "sell_volume": round(sell_volume, 6),
-        "imbalance": round(((buy_volume - sell_volume) / total) if total > 0 else 0.0, 6),
+        "imbalance": round(
+            ((buy_volume - sell_volume) / total) if total > 0 else 0.0, 6
+        ),
         "source": "gate_public",
     }
 
 
-async def _fetch_binance_public_funding_and_basis(symbol: str) -> Dict[str, Dict[str, Any]]:
+async def _fetch_binance_public_funding_and_basis(
+    symbol: str,
+) -> Dict[str, Dict[str, Any]]:
     rest_symbol = _binance_rest_symbol(symbol)
     try:
         premium_index, spot_ticker, perp_ticker = await asyncio.gather(
@@ -407,7 +582,9 @@ async def _fetch_binance_public_funding_and_basis(symbol: str) -> Dict[str, Dict
         "available": True,
         "symbol": f"{symbol}:USDT" if ":" not in str(symbol or "") else symbol,
         "funding_rate": _safe_float(premium_index.get("lastFundingRate")),
-        "next_funding_time": _safe_dt(premium_index.get("nextFundingTime")).isoformat() if _safe_dt(premium_index.get("nextFundingTime")) else None,
+        "next_funding_time": _safe_dt(premium_index.get("nextFundingTime")).isoformat()
+        if _safe_dt(premium_index.get("nextFundingTime"))
+        else None,
     }
     spot_px = _safe_float(spot_ticker.get("price"))
     perp_px = _safe_float(perp_ticker.get("price") or premium_index.get("markPrice"))
@@ -426,13 +603,17 @@ async def _fetch_binance_public_funding_and_basis(symbol: str) -> Dict[str, Dict
     return {"funding": funding, "basis": basis}
 
 
-async def _fetch_gate_public_funding_and_basis(symbol: str) -> Dict[str, Dict[str, Any]]:
+async def _fetch_gate_public_funding_and_basis(
+    symbol: str,
+) -> Dict[str, Dict[str, Any]]:
     contract = _gate_futures_contract_symbol(symbol)
     try:
         contract_payload, spot_tickers = await asyncio.gather(
             _fetch_gate_public_json(
                 f"/futures/usdt/contracts/{contract}",
-                timeout_sec=max(_ANALYTICS_FUNDING_TIMEOUT_SEC, _ANALYTICS_BASIS_TIMEOUT_SEC),
+                timeout_sec=max(
+                    _ANALYTICS_FUNDING_TIMEOUT_SEC, _ANALYTICS_BASIS_TIMEOUT_SEC
+                ),
             ),
             _fetch_gate_public_json(
                 "/spot/tickers",
@@ -523,8 +704,12 @@ async def _fetch_binance_public_open_interest(symbol: str) -> Dict[str, Any]:
     rows.sort(key=lambda row: _safe_float(row.get("timestamp")))
 
     latest_row = rows[-1] if rows else {}
-    latest_volume = _safe_float(latest_row.get("sumOpenInterest")) if latest_row else 0.0
-    latest_value = _safe_float(latest_row.get("sumOpenInterestValue")) if latest_row else 0.0
+    latest_volume = (
+        _safe_float(latest_row.get("sumOpenInterest")) if latest_row else 0.0
+    )
+    latest_value = (
+        _safe_float(latest_row.get("sumOpenInterestValue")) if latest_row else 0.0
+    )
     current_volume = _safe_float(current_payload.get("openInterest"))
     effective_volume = current_volume if current_volume > 0 else latest_volume
     effective_value = latest_value
@@ -575,9 +760,15 @@ async def _fetch_gate_public_open_interest(symbol: str) -> Dict[str, Any]:
         }
     payload = dict(payload or {})
     volume = _safe_float(payload.get("open_interest") or payload.get("position_size"))
-    value = _safe_float(payload.get("open_interest_usd") or payload.get("open_interest_value"))
+    value = _safe_float(
+        payload.get("open_interest_usd") or payload.get("open_interest_value")
+    )
     if value <= 0 and volume > 0:
-        mark_price = _safe_float(payload.get("mark_price") or payload.get("last_price") or payload.get("index_price"))
+        mark_price = _safe_float(
+            payload.get("mark_price")
+            or payload.get("last_price")
+            or payload.get("index_price")
+        )
         multiplier = _safe_float(payload.get("quanto_multiplier"), default=1.0)
         if mark_price > 0:
             value = volume * max(multiplier, 1e-9) * mark_price
@@ -666,7 +857,9 @@ async def _fetch_binance_public_long_short_ratio(symbol: str) -> Dict[str, Any]:
         )
 
     items = [dict(row) for row in list(rows or []) if isinstance(row, dict)]
-    items.sort(key=lambda row: _safe_float(row.get("timestamp") or row.get("time") or 0))
+    items.sort(
+        key=lambda row: _safe_float(row.get("timestamp") or row.get("time") or 0)
+    )
     latest = dict(items[-1] if items else {})
     ts = _safe_dt(latest.get("timestamp") or latest.get("time"))
 
@@ -713,7 +906,9 @@ async def _fetch_gate_public_long_short_ratio(symbol: str) -> Dict[str, Any]:
     )
 
 
-async def _fetch_long_short_ratio_snapshot(exchange: str, symbol: str) -> Dict[str, Any]:
+async def _fetch_long_short_ratio_snapshot(
+    exchange: str, symbol: str
+) -> Dict[str, Any]:
     normalized = str(exchange or "").lower()
     if normalized == "binance":
         return await _fetch_binance_public_long_short_ratio(symbol=symbol)
@@ -728,7 +923,9 @@ async def _fetch_long_short_ratio_snapshot(exchange: str, symbol: str) -> Dict[s
     return fallback
 
 
-async def _fetch_funding_basis_snapshot(exchange: str, symbol: str) -> Dict[str, Dict[str, Any]]:
+async def _fetch_funding_basis_snapshot(
+    exchange: str, symbol: str
+) -> Dict[str, Dict[str, Any]]:
     funding = {"available": False}
     basis = {"available": False}
     normalized = str(exchange or "").lower()
@@ -747,7 +944,12 @@ async def _fetch_funding_basis_snapshot(exchange: str, symbol: str) -> Dict[str,
             fetch_ticker = getattr(client, "fetch_ticker", None)
             jobs: List[Any] = []
             if callable(fetch_funding_rate):
-                jobs.append(asyncio.wait_for(fetch_funding_rate(perp_symbol), timeout=_ANALYTICS_FUNDING_TIMEOUT_SEC))
+                jobs.append(
+                    asyncio.wait_for(
+                        fetch_funding_rate(perp_symbol),
+                        timeout=_ANALYTICS_FUNDING_TIMEOUT_SEC,
+                    )
+                )
             else:
                 jobs.append(asyncio.sleep(0, result=None))
             if callable(fetch_ticker):
@@ -762,14 +964,20 @@ async def _fetch_funding_basis_snapshot(exchange: str, symbol: str) -> Dict[str,
                 )
             else:
                 jobs.append(asyncio.sleep(0, result=None))
-            funding_result, basis_result = await asyncio.gather(*jobs, return_exceptions=True)
+            funding_result, basis_result = await asyncio.gather(
+                *jobs, return_exceptions=True
+            )
             if not isinstance(funding_result, Exception) and funding_result:
                 fr = funding_result or {}
                 funding = {
                     "available": True,
                     "symbol": perp_symbol,
                     "funding_rate": _safe_float(fr.get("fundingRate")),
-                    "next_funding_time": _safe_dt(fr.get("nextFundingTimestamp")).isoformat() if _safe_dt(fr.get("nextFundingTimestamp")) else None,
+                    "next_funding_time": _safe_dt(
+                        fr.get("nextFundingTimestamp")
+                    ).isoformat()
+                    if _safe_dt(fr.get("nextFundingTimestamp"))
+                    else None,
                 }
             if not isinstance(basis_result, Exception) and basis_result:
                 spot_ticker, perp_ticker = basis_result
@@ -786,7 +994,9 @@ async def _fetch_funding_basis_snapshot(exchange: str, symbol: str) -> Dict[str,
                         "basis_pct": round(basis_val * 100, 6),
                     }
 
-    if normalized == "gate" and (not funding.get("available") or not basis.get("available")):
+    if normalized == "gate" and (
+        not funding.get("available") or not basis.get("available")
+    ):
         gate_fb = await _fetch_gate_public_funding_and_basis(symbol)
         if not funding.get("available") and gate_fb.get("funding", {}).get("available"):
             funding = dict(gate_fb.get("funding") or {"available": False})
@@ -812,6 +1022,7 @@ async def _fetch_options_snapshot(symbol: str) -> Dict[str, Any]:
     options_data: Dict[str, Any] = {"available": False}
     try:
         from core.data.options_collector import options_collector  # noqa: PLC0415
+
         currency = symbol.split("/")[0].split(":")[0].upper()
         snap = await asyncio.wait_for(
             options_collector.fetch_snapshot(currency),
@@ -919,7 +1130,9 @@ class StoplossPolicyUpdateRequest(BaseModel):
 
 def _serialize_order(order: Any) -> Dict[str, Any]:
     meta = order_manager.get_order_metadata(order.id)
-    order_type = str(getattr(getattr(order, "type", None), "value", getattr(order, "type", "")) or "").lower()
+    order_type = str(
+        getattr(getattr(order, "type", None), "value", getattr(order, "type", "")) or ""
+    ).lower()
     order_price = float(order.price or 0.0)
     stop_loss = meta.get("stop_loss")
     take_profit = meta.get("take_profit")
@@ -981,21 +1194,24 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 def _safe_dt(value: Any) -> Optional[datetime]:
     if isinstance(value, datetime):
-        return value
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
     if isinstance(value, (int, float)):
         ts = float(value)
         if ts > 1e12:
             ts = ts / 1000.0
         if ts > 0:
             try:
-                return datetime.utcfromtimestamp(ts)
+                return datetime.fromtimestamp(ts, tz=timezone.utc)
             except Exception:
                 return None
     text = str(value or "").strip()
     if not text:
         return None
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     except Exception:
         return None
 
@@ -1034,14 +1250,19 @@ async def _load_preferred_coinglass_overview(
     max_age_sec: float = _ANALYTICS_COINGLASS_REFRESH_MAX_AGE_SEC,
 ) -> Dict[str, Any]:
     try:
-        from core.data.coinglass_feature_builder import build_coinglass_overview_payload  # noqa: PLC0415
+        from core.data.coinglass_feature_builder import (
+            build_coinglass_overview_payload,
+        )  # noqa: PLC0415
     except Exception as exc:
         logger.debug(f"coinglass overview import unavailable for {symbol}: {exc}")
         return {}
 
     try:
         overview = dict(
-            await build_coinglass_overview_payload(symbol=symbol, refresh=False, manual=False) or {}
+            await build_coinglass_overview_payload(
+                symbol=symbol, refresh=False, manual=False
+            )
+            or {}
         )
     except Exception as exc:
         logger.debug(f"coinglass overview unavailable for {symbol}: {exc}")
@@ -1052,7 +1273,10 @@ async def _load_preferred_coinglass_overview(
 
     try:
         refreshed = dict(
-            await build_coinglass_overview_payload(symbol=symbol, refresh=True, manual=False) or {}
+            await build_coinglass_overview_payload(
+                symbol=symbol, refresh=True, manual=False
+            )
+            or {}
         )
     except Exception as exc:
         logger.debug(f"coinglass overview refresh failed for {symbol}: {exc}")
@@ -1087,7 +1311,9 @@ def _apply_coinglass_derivatives_overlay(
     symbol = str(overview.get("symbol") or out.get("symbol") or "").strip() or None
     long_short_ratio = _optional_finite_float(snapshot.get("long_short_ratio"))
     if long_short_ratio is None:
-        long_short_ratio = _optional_finite_float(snapshot_payload.get("long_short_ratio"))
+        long_short_ratio = _optional_finite_float(
+            snapshot_payload.get("long_short_ratio")
+        )
     if long_short_ratio is not None and long_short_ratio > 0:
         out["long_short_ratio"] = {
             "available": True,
@@ -1105,7 +1331,9 @@ def _apply_coinglass_derivatives_overlay(
     if funding_rate is None:
         funding_rate = _optional_finite_float(snapshot.get("funding_rate_oi_weighted"))
     if funding_rate is None:
-        funding_rate = _optional_finite_float(snapshot_payload.get("funding_rate_oi_weighted"))
+        funding_rate = _optional_finite_float(
+            snapshot_payload.get("funding_rate_oi_weighted")
+        )
     if funding_rate is None:
         funding_rate = _optional_finite_float(snapshot_payload.get("funding_rate"))
     if funding_rate is not None:
@@ -1135,12 +1363,18 @@ def _apply_coinglass_derivatives_overlay(
 
     taker_imbalance = _optional_finite_float(snapshot.get("taker_buy_sell_imbalance"))
     if taker_imbalance is None:
-        taker_imbalance = _optional_finite_float(snapshot_payload.get("taker_imbalance_1h"))
+        taker_imbalance = _optional_finite_float(
+            snapshot_payload.get("taker_imbalance_1h")
+        )
     if taker_imbalance is None:
-        taker_imbalance = _optional_finite_float(snapshot_payload.get("taker_imbalance_4h"))
+        taker_imbalance = _optional_finite_float(
+            snapshot_payload.get("taker_imbalance_4h")
+        )
     existing_flow = dict(out.get("aggressor_flow") or {})
     existing_flow_count = int(_safe_float(existing_flow.get("count"), default=0.0))
-    existing_flow_imbalance = _optional_finite_float(existing_flow.get("imbalance")) or 0.0
+    existing_flow_imbalance = (
+        _optional_finite_float(existing_flow.get("imbalance")) or 0.0
+    )
     has_exchange_flow = bool(existing_flow.get("available")) and (
         existing_flow_count > 0 or abs(existing_flow_imbalance) > 1e-9
     )
@@ -1167,7 +1401,11 @@ def _utc_now_naive() -> datetime:
 def _utc_iso(value: Optional[datetime]) -> Optional[str]:
     if not isinstance(value, datetime):
         return None
-    dt = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    dt = (
+        value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(timezone.utc)
+    )
     return dt.isoformat().replace("+00:00", "Z")
 
 
@@ -1198,12 +1436,14 @@ def _compact_microstructure_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _compact_community_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "timestamp": payload.get("timestamp"),
+        "source_error": payload.get("source_error"),
         "twitter_watchlist": list(payload.get("twitter_watchlist") or [])[:10],
         "flow_proxy": payload.get("flow_proxy") or {},
         "security_alerts": payload.get("security_alerts") or {},
         "news_provider": payload.get("news_provider"),
         "news_sources": list(payload.get("news_sources") or [])[:10],
         "announcements": list(payload.get("announcements") or [])[:10],
+        "whale_transfers": payload.get("whale_transfers") or {},
     }
 
 
@@ -1218,6 +1458,126 @@ def _compact_whale_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "exchange_flow_summary": dict(payload.get("exchange_flow_summary") or {}),
         "transactions": list(payload.get("transactions") or [])[:10],
     }
+
+
+def _strip_risk_dashboard_runtime_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(payload or {}).items()
+        if key
+        not in {"cache_hit", "cache_age_sec", "stale", "stale_reason", "source_status"}
+    }
+
+
+def _with_risk_dashboard_runtime_fields(
+    payload: Dict[str, Any],
+    *,
+    cache_hit: bool,
+    cache_age_sec: Optional[float],
+    stale: bool,
+    source_status: str,
+    stale_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    out = copy.deepcopy(_strip_risk_dashboard_runtime_fields(payload))
+    out["cache_hit"] = bool(cache_hit)
+    out["cache_age_sec"] = (
+        round(float(cache_age_sec or 0.0), 3) if cache_age_sec is not None else None
+    )
+    out["stale"] = bool(stale)
+    out["source_status"] = str(
+        source_status
+        or ("cache_stale" if stale else ("cache_fresh" if cache_hit else "live"))
+    )
+    if stale_reason:
+        out["stale_reason"] = str(stale_reason)
+        note_parts = [
+            str(out.get("note") or "").strip(),
+            "Risk dashboard live refresh pending，已回退到最近一次成功快照",
+        ]
+        out["note"] = "；".join(dict.fromkeys(part for part in note_parts if part))
+    else:
+        out.pop("stale_reason", None)
+    return out
+
+
+def _strip_microstructure_runtime_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(payload or {}).items()
+        if key
+        not in {"cache_hit", "cache_age_sec", "stale", "stale_reason", "source_status"}
+    }
+
+
+def _with_microstructure_runtime_fields(
+    payload: Dict[str, Any],
+    *,
+    cache_hit: bool,
+    cache_age_sec: Optional[float],
+    stale: bool,
+    source_status: str,
+    stale_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    out = copy.deepcopy(_strip_microstructure_runtime_fields(payload))
+    out["cache_hit"] = bool(cache_hit)
+    out["cache_age_sec"] = (
+        round(float(cache_age_sec or 0.0), 3) if cache_age_sec is not None else None
+    )
+    out["stale"] = bool(stale)
+    out["source_status"] = str(
+        source_status
+        or ("cache_stale" if stale else ("cache_fresh" if cache_hit else "live"))
+    )
+    if stale_reason:
+        out["stale_reason"] = str(stale_reason)
+        note_parts = [
+            str(out.get("note") or "").strip(),
+            "Microstructure live refresh pending，已回退到最近一次成功快照",
+        ]
+        out["note"] = "；".join(dict.fromkeys(part for part in note_parts if part))
+    else:
+        out.pop("stale_reason", None)
+    return out
+
+
+def _strip_community_runtime_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(payload or {}).items()
+        if key
+        not in {"cache_hit", "cache_age_sec", "stale", "stale_reason", "source_status"}
+    }
+
+
+def _with_community_runtime_fields(
+    payload: Dict[str, Any],
+    *,
+    cache_hit: bool,
+    cache_age_sec: Optional[float],
+    stale: bool,
+    source_status: str,
+    stale_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    out = copy.deepcopy(_strip_community_runtime_fields(payload))
+    out["cache_hit"] = bool(cache_hit)
+    out["cache_age_sec"] = (
+        round(float(cache_age_sec or 0.0), 3) if cache_age_sec is not None else None
+    )
+    out["stale"] = bool(stale)
+    out["source_status"] = str(
+        source_status
+        or ("cache_stale" if stale else ("cache_fresh" if cache_hit else "live"))
+    )
+    if stale_reason:
+        out["stale_reason"] = str(stale_reason)
+        note_parts = [
+            str(out.get("note") or "").strip(),
+            "Community overview live refresh pending，已回退到最近一次成功快照",
+        ]
+        out["note"] = "；".join(dict.fromkeys(part for part in note_parts if part))
+    else:
+        out.pop("stale_reason", None)
+    return out
 
 
 _ANALYTICS_HISTORY_INGEST_VERSION = "v1"
@@ -1239,7 +1599,9 @@ def _clip_analytics_error(error: Any, limit: int = 280) -> str:
     return text[:limit]
 
 
-def _analytics_history_cache_key(exchange: str, symbol: str, hours: Optional[int] = None) -> str:
+def _analytics_history_cache_key(
+    exchange: str, symbol: str, hours: Optional[int] = None
+) -> str:
     ex = str(exchange or _ANALYTICS_HISTORY_DEFAULT_EXCHANGE).strip().lower()
     sym = str(symbol or _ANALYTICS_HISTORY_DEFAULT_SYMBOL).strip().upper()
     if hours is None:
@@ -1247,7 +1609,9 @@ def _analytics_history_cache_key(exchange: str, symbol: str, hours: Optional[int
     return f"{ex}|{sym}|{int(hours)}"
 
 
-def _cache_put(cache: Dict[str, Dict[str, Any]], key: str, payload: Dict[str, Any]) -> None:
+def _cache_put(
+    cache: Dict[str, Dict[str, Any]], key: str, payload: Dict[str, Any]
+) -> None:
     cache[key] = {
         "ts": time.time(),
         "payload": copy.deepcopy(payload or {}),
@@ -1270,6 +1634,32 @@ def _cache_get(
     return payload, age_sec
 
 
+def _schedule_cache_refresh(
+    tasks: Dict[str, asyncio.Task],
+    key: str,
+    *,
+    build_coro: Any,
+    cache: Dict[str, Dict[str, Any]],
+    strip_payload: Any,
+) -> None:
+    existing = tasks.get(key)
+    if existing is not None and not existing.done():
+        return
+
+    async def _runner() -> None:
+        try:
+            payload = await build_coro()
+            if isinstance(payload, dict) and payload:
+                _cache_put(cache, key, strip_payload(payload))
+        except Exception:
+            return
+        finally:
+            tasks.pop(key, None)
+
+    with contextlib.suppress(RuntimeError):
+        tasks[key] = asyncio.create_task(_runner())
+
+
 def _invalidate_analytics_history_cache(exchange: str, symbol: str) -> None:
     prefix = _analytics_history_cache_key(exchange=exchange, symbol=symbol)
     for cache in (_ANALYTICS_HISTORY_HEALTH_CACHE, _ANALYTICS_HISTORY_STATUS_CACHE):
@@ -1278,7 +1668,9 @@ def _invalidate_analytics_history_cache(exchange: str, symbol: str) -> None:
             cache.pop(key, None)
 
 
-def _status_map_to_collectors(status_map: Dict[str, Dict[str, Any]], *, exchange: str, symbol: str) -> List[Dict[str, Any]]:
+def _status_map_to_collectors(
+    status_map: Dict[str, Dict[str, Any]], *, exchange: str, symbol: str
+) -> List[Dict[str, Any]]:
     collectors: List[Dict[str, Any]] = []
     exchange_lower = str(exchange or "").lower()
     symbol_text = str(symbol or "")
@@ -1377,7 +1769,12 @@ def _coinglass_overview_to_analytics_status(
     status_value = "idle"
     if bool(overview.get("available")) and not degraded_reason:
         status_value = "ok"
-    elif degraded_reason or active_datasets or bool(overview.get("key_configured")) or status_rows:
+    elif (
+        degraded_reason
+        or active_datasets
+        or bool(overview.get("key_configured"))
+        or status_rows
+    ):
         status_value = "degraded"
 
     error_text = degraded_reason
@@ -1404,7 +1801,9 @@ def _coinglass_overview_to_analytics_status(
             "provider": "coinglass",
             "key_configured": bool(overview.get("key_configured")),
             "active_datasets": active_datasets,
-            "freshness_sec": _safe_float(freshness_sec, default=0.0) if freshness_sec is not None else None,
+            "freshness_sec": _safe_float(freshness_sec, default=0.0)
+            if freshness_sec is not None
+            else None,
             "degraded_reason": degraded_reason,
             "quota_headroom": dict(overview.get("quota_headroom") or {}),
             "status_count": len(status_rows),
@@ -1459,7 +1858,9 @@ async def _attach_derivatives_analytics_status(
     symbol: str,
 ) -> Dict[str, Any]:
     out = dict(payload or {})
-    derivatives = await _build_derivatives_analytics_status(exchange=exchange, symbol=symbol)
+    derivatives = await _build_derivatives_analytics_status(
+        exchange=exchange, symbol=symbol
+    )
     out["collectors"] = _merge_analytics_collector_row(
         list(out.get("collectors") or []),
         derivatives,
@@ -1510,7 +1911,12 @@ async def _attach_derivatives_analytics_health(
         }
 
     snapshot = dict(overview.get("snapshot") or {})
-    latest_at = str(snapshot.get("timestamp") or derivatives_status.get("finished_at") or "").strip() or None
+    latest_at = (
+        str(
+            snapshot.get("timestamp") or derivatives_status.get("finished_at") or ""
+        ).strip()
+        or None
+    )
     latest_summary = {
         "capture_status": derivatives_status.get("status"),
         "source_name": derivatives_status.get("source_name"),
@@ -1535,7 +1941,9 @@ async def _attach_derivatives_analytics_health(
         "first_at": latest_at,
         "latest_at": latest_at,
         "ok_count": 1 if derivatives_status.get("status") == "ok" and latest_at else 0,
-        "degraded_count": 1 if derivatives_status.get("status") == "degraded" and latest_at else 0,
+        "degraded_count": 1
+        if derivatives_status.get("status") == "degraded" and latest_at
+        else 0,
         "failed_count": 1 if derivatives_status.get("status") == "failed" else 0,
         "coverage_hours": 0.0,
         "latest_summary": latest_summary,
@@ -1561,7 +1969,10 @@ async def _attach_derivatives_analytics_health(
 
     storage = dict(out.get("storage") or {})
     tables = list(storage.get("tables") or [])
-    for table_name in ("analytics_derivatives_snapshots", "analytics_market_structure_snapshots"):
+    for table_name in (
+        "analytics_derivatives_snapshots",
+        "analytics_market_structure_snapshots",
+    ):
         if table_name not in tables:
             tables.append(table_name)
     storage["tables"] = tables
@@ -1592,8 +2003,13 @@ async def _attach_derivatives_analytics_health(
     out["summary"] = {
         "dataset_count": len(datasets),
         "total_rows": sum(int(item.get("count") or 0) for item in datasets),
-        "ready_datasets": sum(1 for item in datasets if int(item.get("count") or 0) > 0),
-        "latest_at": max((item.get("latest_at") for item in datasets if item.get("latest_at")), default=None),
+        "ready_datasets": sum(
+            1 for item in datasets if int(item.get("count") or 0) > 0
+        ),
+        "latest_at": max(
+            (item.get("latest_at") for item in datasets if item.get("latest_at")),
+            default=None,
+        ),
         "ok_rows": sum(int(item.get("ok_count") or 0) for item in datasets),
         "degraded_rows": sum(int(item.get("degraded_count") or 0) for item in datasets),
         "failed_rows": sum(int(item.get("failed_count") or 0) for item in datasets),
@@ -1628,7 +2044,9 @@ def _empty_analytics_history_health(
         "hours": int(hours),
         "generated_at": _utc_iso(datetime.now(timezone.utc)),
         "storage": {
-            "database": str(Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", ""))).replace("\\", "/")
+            "database": str(
+                Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", ""))
+            ).replace("\\", "/")
             if str(settings.DATABASE_URL).startswith("sqlite+aiosqlite:///")
             else settings.DATABASE_URL,
             "tables": [
@@ -1697,14 +2115,19 @@ def _status_fallback_analytics_history_health(
             }
         )
 
-    latest_at = max((item.get("latest_at") for item in datasets if item.get("latest_at")), default=None)
+    latest_at = max(
+        (item.get("latest_at") for item in datasets if item.get("latest_at")),
+        default=None,
+    )
     return {
         "exchange": exchange,
         "symbol": symbol,
         "hours": int(hours),
         "generated_at": _utc_iso(datetime.now(timezone.utc)),
         "storage": {
-            "database": str(Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", ""))).replace("\\", "/")
+            "database": str(
+                Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", ""))
+            ).replace("\\", "/")
             if str(settings.DATABASE_URL).startswith("sqlite+aiosqlite:///")
             else settings.DATABASE_URL,
             "tables": [
@@ -1719,10 +2142,14 @@ def _status_fallback_analytics_history_health(
         "summary": {
             "dataset_count": len(datasets),
             "total_rows": sum(int(item.get("count") or 0) for item in datasets),
-            "ready_datasets": sum(1 for item in datasets if int(item.get("count") or 0) > 0),
+            "ready_datasets": sum(
+                1 for item in datasets if int(item.get("count") or 0) > 0
+            ),
             "latest_at": latest_at,
             "ok_rows": sum(int(item.get("ok_count") or 0) for item in datasets),
-            "degraded_rows": sum(int(item.get("degraded_count") or 0) for item in datasets),
+            "degraded_rows": sum(
+                int(item.get("degraded_count") or 0) for item in datasets
+            ),
             "failed_rows": sum(int(item.get("failed_count") or 0) for item in datasets),
         },
         "datasets": datasets,
@@ -1746,7 +2173,11 @@ def _community_source_name(payload: Dict[str, Any]) -> str:
     news_provider = str(payload.get("news_provider") or "").strip().lower()
     if news_provider:
         parts.append(news_provider)
-    source = str(((payload.get("security_alerts") or {}).get("source")) or "").strip().lower()
+    source = (
+        str(((payload.get("security_alerts") or {}).get("source")) or "")
+        .strip()
+        .lower()
+    )
     if source:
         parts.append(source)
     return "+".join(dict.fromkeys(parts))
@@ -1760,7 +2191,10 @@ def _micro_quality(payload: Dict[str, Any], latency_ms: int) -> Dict[str, Any]:
     available = bool(payload.get("available", True))
     funding_available = bool(funding.get("available"))
     basis_available = bool(basis.get("available"))
-    has_core = _safe_float(orderbook.get("mid_price")) > 0 and _safe_float(orderbook.get("spread_bps")) >= 0
+    has_core = (
+        _safe_float(orderbook.get("mid_price")) > 0
+        and _safe_float(orderbook.get("spread_bps")) >= 0
+    )
     if not available or not has_core:
         capture_status = "failed" if source_error else "degraded"
     elif source_error or not (funding_available and basis_available):
@@ -1792,7 +2226,10 @@ def _community_quality(payload: Dict[str, Any], latency_ms: int) -> Dict[str, An
 def _whale_quality(payload: Dict[str, Any], latency_ms: int) -> Dict[str, Any]:
     source_error = _clip_analytics_error(payload.get("error"))
     available = bool(payload.get("available", False))
-    source_name = str(payload.get("source_name") or "public_chain_proxy").strip() or "public_chain_proxy"
+    source_name = (
+        str(payload.get("source_name") or "public_chain_proxy").strip()
+        or "public_chain_proxy"
+    )
     if available and not source_error:
         capture_status = "ok"
     elif source_error:
@@ -1822,10 +2259,16 @@ async def _record_analytics_ingest_status(
 ) -> Dict[str, Any]:
     async with async_session_maker() as session:
         row = (
-            await session.execute(
-                select(AnalyticsHistoryIngestStatus).where(AnalyticsHistoryIngestStatus.collector == collector)
+            (
+                await session.execute(
+                    select(AnalyticsHistoryIngestStatus).where(
+                        AnalyticsHistoryIngestStatus.collector == collector
+                    )
+                )
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
         if not row:
             row = AnalyticsHistoryIngestStatus(
                 collector=collector,
@@ -1863,12 +2306,18 @@ async def _record_analytics_ingest_status(
 async def _load_analytics_ingest_status_map() -> Dict[str, Dict[str, Any]]:
     async with async_session_maker() as session:
         rows = (
-            await session.execute(
-                select(AnalyticsHistoryIngestStatus).where(
-                    AnalyticsHistoryIngestStatus.collector.in_(_ANALYTICS_HISTORY_COLLECTORS)
+            (
+                await session.execute(
+                    select(AnalyticsHistoryIngestStatus).where(
+                        AnalyticsHistoryIngestStatus.collector.in_(
+                            _ANALYTICS_HISTORY_COLLECTORS
+                        )
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     out: Dict[str, Dict[str, Any]] = {}
     for row in rows or []:
         out[str(row.collector)] = {
@@ -1932,9 +2381,15 @@ async def _persist_microstructure_snapshot(
         buy_ratio=buy_ratio,
         sell_ratio=sell_ratio,
         large_order_count=len(list(payload.get("large_orders") or [])),
-        iceberg_candidates=int(_safe_float((payload.get("iceberg_detection") or {}).get("candidate_count"))),
-        funding_rate=_safe_float(funding.get("funding_rate")) if bool(funding.get("available")) else None,
-        basis_pct=_safe_float(basis.get("basis_pct")) if bool(basis.get("available")) else None,
+        iceberg_candidates=int(
+            _safe_float((payload.get("iceberg_detection") or {}).get("candidate_count"))
+        ),
+        funding_rate=_safe_float(funding.get("funding_rate"))
+        if bool(funding.get("available"))
+        else None,
+        basis_pct=_safe_float(basis.get("basis_pct"))
+        if bool(basis.get("available"))
+        else None,
         payload=_compact_microstructure_payload(payload),
     )
     async with async_session_maker() as session:
@@ -2026,7 +2481,9 @@ async def _persist_whale_snapshot(
         ingest_version=str(quality.get("ingest_version")),
         whale_count=int(_safe_float(payload.get("count"))),
         total_btc=round(sum(_safe_float(item.get("btc")) for item in transactions), 6),
-        max_btc=round(max((_safe_float(item.get("btc")) for item in transactions), default=0.0), 6),
+        max_btc=round(
+            max((_safe_float(item.get("btc")) for item in transactions), default=0.0), 6
+        ),
         payload=_compact_whale_payload(payload),
     )
     async with async_session_maker() as session:
@@ -2043,7 +2500,9 @@ async def _persist_whale_snapshot(
         "summary": {
             "available": bool(payload.get("available", False)),
             "count": int(_safe_float(payload.get("count"))),
-            "total_btc": round(sum(_safe_float(item.get("btc")) for item in transactions), 6),
+            "total_btc": round(
+                sum(_safe_float(item.get("btc")) for item in transactions), 6
+            ),
         },
     }
 
@@ -2070,14 +2529,23 @@ async def _persist_analytics_snapshots(
         timestamp=captured_at,
         exchange=exchange,
         symbol=symbol,
-        source_ok=bool(microstructure.get("available", True)) and not bool(microstructure.get("source_error")),
+        source_ok=bool(microstructure.get("available", True))
+        and not bool(microstructure.get("source_error")),
         spread_bps=_safe_float(micro_orderbook.get("spread_bps")),
         mid_price=_safe_float(micro_orderbook.get("mid_price")),
         order_flow_imbalance=_safe_float(aggressor_flow.get("imbalance")),
-        buy_ratio=max(0.0, min(1.0, (1.0 + _safe_float(aggressor_flow.get("imbalance"))) / 2.0)),
-        sell_ratio=max(0.0, min(1.0, (1.0 - _safe_float(aggressor_flow.get("imbalance"))) / 2.0)),
+        buy_ratio=max(
+            0.0, min(1.0, (1.0 + _safe_float(aggressor_flow.get("imbalance"))) / 2.0)
+        ),
+        sell_ratio=max(
+            0.0, min(1.0, (1.0 - _safe_float(aggressor_flow.get("imbalance"))) / 2.0)
+        ),
         large_order_count=len(list(microstructure.get("large_orders") or [])),
-        iceberg_candidates=int(_safe_float((microstructure.get("iceberg_detection") or {}).get("candidate_count"))),
+        iceberg_candidates=int(
+            _safe_float(
+                (microstructure.get("iceberg_detection") or {}).get("candidate_count")
+            )
+        ),
         funding_rate=(
             _safe_float(funding.get("funding_rate"))
             if bool(funding.get("available"))
@@ -2108,8 +2576,16 @@ async def _persist_analytics_snapshots(
         exchange=exchange,
         symbol=symbol,
         whale_count=int(_safe_float(whales.get("count"))),
-        total_btc=round(sum(_safe_float(item.get("btc")) for item in whale_transactions), 6),
-        max_btc=round(max((_safe_float(item.get("btc")) for item in whale_transactions), default=0.0), 6),
+        total_btc=round(
+            sum(_safe_float(item.get("btc")) for item in whale_transactions), 6
+        ),
+        max_btc=round(
+            max(
+                (_safe_float(item.get("btc")) for item in whale_transactions),
+                default=0.0,
+            ),
+            6,
+        ),
         payload=_compact_whale_payload(whales),
     )
 
@@ -2125,7 +2601,9 @@ async def _persist_analytics_snapshots(
     }
 
 
-def _analytics_fallback_microstructure(exchange: str, symbol: str, error: str) -> Dict[str, Any]:
+def _analytics_fallback_microstructure(
+    exchange: str, symbol: str, error: str
+) -> Dict[str, Any]:
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "exchange": exchange,
@@ -2142,7 +2620,9 @@ def _analytics_fallback_microstructure(exchange: str, symbol: str, error: str) -
     }
 
 
-def _analytics_fallback_community(exchange: str, symbol: str, error: str) -> Dict[str, Any]:
+def _analytics_fallback_community(
+    exchange: str, symbol: str, error: str
+) -> Dict[str, Any]:
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "symbol": symbol,
@@ -2150,7 +2630,12 @@ def _analytics_fallback_community(exchange: str, symbol: str, error: str) -> Dic
         "source_error": str(error or "community unavailable"),
         "twitter_watchlist": [],
         "flow_proxy": {"imbalance": 0.0, "buy_volume": 0.0, "sell_volume": 0.0},
-        "whale_transfers": {"available": False, "count": 0, "transactions": [], "error": str(error or "")},
+        "whale_transfers": {
+            "available": False,
+            "count": 0,
+            "transactions": [],
+            "error": str(error or ""),
+        },
         "security_alerts": {
             "available": False,
             "source": "unavailable",
@@ -2208,7 +2693,9 @@ async def _collect_analytics_component_with_meta(
     }
 
 
-def _serialize_analytics_series_row(row: Any, metric: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _serialize_analytics_series_row(
+    row: Any, metric: str, extra: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     payload = dict(extra or {})
     payload.update(
         {
@@ -2259,8 +2746,12 @@ async def run_analytics_history_collection(
             jobs["microstructure"] = _collect_analytics_component_with_meta(
                 label="microstructure",
                 timeout_sec=_ANALYTICS_COLLECTOR_TIMEOUT_SEC,
-                coro=get_market_microstructure(exchange=exchange, symbol=symbol, depth_limit=depth_limit),
-                fallback_payload=_analytics_fallback_microstructure(exchange=exchange, symbol=symbol, error="微观结构抓取超时"),
+                coro=get_market_microstructure(
+                    exchange=exchange, symbol=symbol, depth_limit=depth_limit
+                ),
+                fallback_payload=_analytics_fallback_microstructure(
+                    exchange=exchange, symbol=symbol, error="微观结构抓取超时"
+                ),
             )
         if "community" in selected or "whales" in selected:
             if "community" in selected:
@@ -2268,7 +2759,9 @@ async def run_analytics_history_collection(
                     label="community",
                     timeout_sec=_ANALYTICS_COLLECTOR_TIMEOUT_SEC,
                     coro=get_community_overview(symbol=symbol, exchange=exchange),
-                    fallback_payload=_analytics_fallback_community(exchange=exchange, symbol=symbol, error="社区/公告抓取超时"),
+                    fallback_payload=_analytics_fallback_community(
+                        exchange=exchange, symbol=symbol, error="社区/公告抓取超时"
+                    ),
                 )
             else:
                 jobs["whales"] = _collect_analytics_component_with_meta(
@@ -2283,7 +2776,9 @@ async def run_analytics_history_collection(
         resolved = {name: result for name, result in zip(job_names, job_results)}
         collector_results: Dict[str, Dict[str, Any]] = {}
 
-        async def _finalize_collector(collector: str, save_result: Dict[str, Any]) -> None:
+        async def _finalize_collector(
+            collector: str, save_result: Dict[str, Any]
+        ) -> None:
             collector_results[collector] = dict(save_result or {})
             await _record_analytics_ingest_status(
                 collector=collector,
@@ -2373,7 +2868,10 @@ async def run_analytics_history_collection(
             "collectors": selected,
             "started_at": _utc_iso(started_at),
             "finished_at": _utc_iso(finished_at),
-            "rows_written": sum(int(item.get("rows_written") or 0) for item in collector_results.values()),
+            "rows_written": sum(
+                int(item.get("rows_written") or 0)
+                for item in collector_results.values()
+            ),
             "results": collector_results,
         }
 
@@ -2399,7 +2897,10 @@ async def _build_analytics_history_health(
                 lambda row: {
                     "source_ok": bool(row.source_ok),
                     "capture_status": str(getattr(row, "capture_status", "ok") or "ok"),
-                    "source_name": str(getattr(row, "source_name", "exchange_public") or "exchange_public"),
+                    "source_name": str(
+                        getattr(row, "source_name", "exchange_public")
+                        or "exchange_public"
+                    ),
                     "source_error": str(getattr(row, "source_error", "") or ""),
                     "latency_ms": int(getattr(row, "latency_ms", 0) or 0),
                     "ingest_version": str(getattr(row, "ingest_version", "v1") or "v1"),
@@ -2417,7 +2918,9 @@ async def _build_analytics_history_health(
                 "flow_imbalance",
                 lambda row: {
                     "capture_status": str(getattr(row, "capture_status", "ok") or "ok"),
-                    "source_name": str(getattr(row, "source_name", "proxy_layer") or "proxy_layer"),
+                    "source_name": str(
+                        getattr(row, "source_name", "proxy_layer") or "proxy_layer"
+                    ),
                     "source_error": str(getattr(row, "source_error", "") or ""),
                     "latency_ms": int(getattr(row, "latency_ms", 0) or 0),
                     "ingest_version": str(getattr(row, "ingest_version", "v1") or "v1"),
@@ -2434,7 +2937,10 @@ async def _build_analytics_history_health(
                 "whale_count",
                 lambda row: {
                     "capture_status": str(getattr(row, "capture_status", "ok") or "ok"),
-                    "source_name": str(getattr(row, "source_name", "public_chain_proxy") or "public_chain_proxy"),
+                    "source_name": str(
+                        getattr(row, "source_name", "public_chain_proxy")
+                        or "public_chain_proxy"
+                    ),
                     "source_error": str(getattr(row, "source_error", "") or ""),
                     "latency_ms": int(getattr(row, "latency_ms", 0) or 0),
                     "ingest_version": str(getattr(row, "ingest_version", "v1") or "v1"),
@@ -2454,7 +2960,9 @@ async def _build_analytics_history_health(
                         func.min(model.timestamp),
                         func.max(model.timestamp),
                         func.sum(case((model.capture_status == "ok", 1), else_=0)),
-                        func.sum(case((model.capture_status == "degraded", 1), else_=0)),
+                        func.sum(
+                            case((model.capture_status == "degraded", 1), else_=0)
+                        ),
                         func.sum(case((model.capture_status == "failed", 1), else_=0)),
                     ).where(*filters)
                 )
@@ -2468,22 +2976,37 @@ async def _build_analytics_history_health(
             recent_count = int(
                 _safe_float(
                     await session.scalar(
-                        select(func.count()).select_from(model).where(*filters, model.timestamp >= cutoff)
+                        select(func.count())
+                        .select_from(model)
+                        .where(*filters, model.timestamp >= cutoff)
                     ),
                     default=0.0,
                 )
             )
             latest_row = (
-                await session.execute(select(model).where(*filters).order_by(model.timestamp.desc()).limit(1))
-            ).scalars().first()
-            recent_rows = (
-                await session.execute(
-                    select(model)
-                    .where(*filters)
-                    .order_by(model.timestamp.desc())
-                    .limit(24)
+                (
+                    await session.execute(
+                        select(model)
+                        .where(*filters)
+                        .order_by(model.timestamp.desc())
+                        .limit(1)
+                    )
                 )
-            ).scalars().all()
+                .scalars()
+                .first()
+            )
+            recent_rows = (
+                (
+                    await session.execute(
+                        select(model)
+                        .where(*filters)
+                        .order_by(model.timestamp.desc())
+                        .limit(24)
+                    )
+                )
+                .scalars()
+                .all()
+            )
             recent[key] = [
                 _serialize_analytics_series_row(row, metric, extra_builder(row))
                 for row in reversed(list(recent_rows or []))
@@ -2516,7 +3039,9 @@ async def _build_analytics_history_health(
             timeout=max(1.0, _ANALYTICS_HISTORY_STATUS_READ_TIMEOUT_SEC),
         )
     except Exception as exc:
-        logger.warning(f"analytics history status-map read degraded: {_clip_analytics_error(exc)}")
+        logger.warning(
+            f"analytics history status-map read degraded: {_clip_analytics_error(exc)}"
+        )
         status_map = {}
     return {
         "exchange": exchange,
@@ -2524,7 +3049,9 @@ async def _build_analytics_history_health(
         "hours": hours,
         "generated_at": _utc_iso(now_utc),
         "storage": {
-            "database": str(Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", ""))).replace("\\", "/")
+            "database": str(
+                Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", ""))
+            ).replace("\\", "/")
             if str(settings.DATABASE_URL).startswith("sqlite+aiosqlite:///")
             else settings.DATABASE_URL,
             "tables": [
@@ -2558,10 +3085,17 @@ async def _build_analytics_history_health(
         "summary": {
             "dataset_count": len(datasets),
             "total_rows": sum(int(item.get("count") or 0) for item in datasets),
-            "ready_datasets": sum(1 for item in datasets if int(item.get("count") or 0) > 0),
-            "latest_at": max((item.get("latest_at") for item in datasets if item.get("latest_at")), default=None),
+            "ready_datasets": sum(
+                1 for item in datasets if int(item.get("count") or 0) > 0
+            ),
+            "latest_at": max(
+                (item.get("latest_at") for item in datasets if item.get("latest_at")),
+                default=None,
+            ),
             "ok_rows": sum(int(item.get("ok_count") or 0) for item in datasets),
-            "degraded_rows": sum(int(item.get("degraded_count") or 0) for item in datasets),
+            "degraded_rows": sum(
+                int(item.get("degraded_count") or 0) for item in datasets
+            ),
             "failed_rows": sum(int(item.get("failed_count") or 0) for item in datasets),
         },
         "datasets": datasets,
@@ -2569,9 +3103,16 @@ async def _build_analytics_history_health(
     }
 
 
-async def _collect_live_position_snapshot(force_refresh: bool = False) -> Dict[str, Any]:
+async def _collect_live_position_snapshot(
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
     if execution_engine.is_paper_mode():
-        return {"unrealized_pnl_usd": 0.0, "position_count": 0, "by_exchange": {}, "distribution": {}}
+        return {
+            "unrealized_pnl_usd": 0.0,
+            "position_count": 0,
+            "by_exchange": {},
+            "distribution": {},
+        }
 
     now_ts = time.time()
     cached = _LIVE_POSITION_SNAPSHOT_CACHE.get("data") or {}
@@ -2591,7 +3132,12 @@ async def _collect_live_position_snapshot(force_refresh: bool = False) -> Dict[s
         rows.append((exchange_name, connector))
 
     if not rows:
-        snapshot = {"unrealized_pnl_usd": 0.0, "position_count": 0, "by_exchange": {}, "distribution": {}}
+        snapshot = {
+            "unrealized_pnl_usd": 0.0,
+            "position_count": 0,
+            "by_exchange": {},
+            "distribution": {},
+        }
         _LIVE_POSITION_SNAPSHOT_CACHE["ts"] = now_ts
         _LIVE_POSITION_SNAPSHOT_CACHE["data"] = dict(snapshot)
         return snapshot
@@ -2622,7 +3168,9 @@ async def _collect_live_position_snapshot(force_refresh: bool = False) -> Dict[s
                 try:
                     positions = await asyncio.wait_for(
                         _fetch_binance_positions_via_fallback(),
-                        timeout=min(max(_LIVE_POSITION_FETCH_TIMEOUT_SEC * 0.75, 4.0), 7.0),
+                        timeout=min(
+                            max(_LIVE_POSITION_FETCH_TIMEOUT_SEC * 0.75, 4.0), 7.0
+                        ),
                     )
                     if positions is None:
                         positions = []
@@ -2651,19 +3199,63 @@ async def _collect_live_position_snapshot(force_refresh: bool = False) -> Dict[s
         unrealized = 0.0
         distribution: Dict[str, float] = {}
         for pos in positions or []:
-            amount = abs(float((pos.get("amount") if isinstance(pos, dict) else getattr(pos, "amount", 0.0)) or 0.0))
+            amount = abs(
+                float(
+                    (
+                        pos.get("amount")
+                        if isinstance(pos, dict)
+                        else getattr(pos, "amount", 0.0)
+                    )
+                    or 0.0
+                )
+            )
             if amount <= 0:
                 continue
             count += 1
-            unrealized += float((pos.get("unrealized_pnl") if isinstance(pos, dict) else getattr(pos, "unrealized_pnl", 0.0)) or 0.0)
-            current_price = float((pos.get("current_price") if isinstance(pos, dict) else getattr(pos, "current_price", 0.0)) or 0.0)
+            unrealized += float(
+                (
+                    pos.get("unrealized_pnl")
+                    if isinstance(pos, dict)
+                    else getattr(pos, "unrealized_pnl", 0.0)
+                )
+                or 0.0
+            )
+            current_price = float(
+                (
+                    pos.get("current_price")
+                    if isinstance(pos, dict)
+                    else getattr(pos, "current_price", 0.0)
+                )
+                or 0.0
+            )
             if current_price <= 0:
-                current_price = float((pos.get("entry_price") if isinstance(pos, dict) else getattr(pos, "entry_price", 0.0)) or 0.0)
+                current_price = float(
+                    (
+                        pos.get("entry_price")
+                        if isinstance(pos, dict)
+                        else getattr(pos, "entry_price", 0.0)
+                    )
+                    or 0.0
+                )
             notional_usd = amount * max(current_price, 0.0)
             if notional_usd > 0:
                 label = _contract_bucket_label(
-                    str((pos.get("symbol") if isinstance(pos, dict) else getattr(pos, "symbol", "")) or ""),
-                    str((pos.get("side") if isinstance(pos, dict) else getattr(pos, "side", "")) or ""),
+                    str(
+                        (
+                            pos.get("symbol")
+                            if isinstance(pos, dict)
+                            else getattr(pos, "symbol", "")
+                        )
+                        or ""
+                    ),
+                    str(
+                        (
+                            pos.get("side")
+                            if isinstance(pos, dict)
+                            else getattr(pos, "side", "")
+                        )
+                        or ""
+                    ),
                 )
                 distribution[label] = distribution.get(label, 0.0) + float(notional_usd)
         return {
@@ -2673,7 +3265,9 @@ async def _collect_live_position_snapshot(force_refresh: bool = False) -> Dict[s
             "distribution": distribution,
         }
 
-    fetched = await asyncio.gather(*[_fetch_one(name, conn) for name, conn in rows], return_exceptions=False)
+    fetched = await asyncio.gather(
+        *[_fetch_one(name, conn) for name, conn in rows], return_exceptions=False
+    )
 
     by_exchange: Dict[str, Dict[str, Any]] = {}
     total_count = 0
@@ -2695,7 +3289,9 @@ async def _collect_live_position_snapshot(force_refresh: bool = False) -> Dict[s
             key = str(label or "").strip()
             if not key:
                 continue
-            total_distribution[key] = total_distribution.get(key, 0.0) + float(usd_value or 0.0)
+            total_distribution[key] = total_distribution.get(key, 0.0) + float(
+                usd_value or 0.0
+            )
 
     # Fallback: include local live strategy/manual positions when exchange snapshots
     # are unavailable, so dashboard exposure still reflects actual contract holdings.
@@ -2707,15 +3303,22 @@ async def _collect_live_position_snapshot(force_refresh: bool = False) -> Dict[s
             qty = abs(float(getattr(pos, "quantity", 0.0) or 0.0))
             if qty <= 0:
                 continue
-            source = str((getattr(pos, "metadata", {}) or {}).get("source") or "").strip().lower()
+            source = (
+                str((getattr(pos, "metadata", {}) or {}).get("source") or "")
+                .strip()
+                .lower()
+            )
             if source == "exchange_live":
                 continue
-            exchange_row = by_exchange.setdefault(exchange_name, {
-                "position_count": 0,
-                "unrealized_pnl_usd": 0.0,
-                "error": None,
-                "distribution": {},
-            })
+            exchange_row = by_exchange.setdefault(
+                exchange_name,
+                {
+                    "position_count": 0,
+                    "unrealized_pnl_usd": 0.0,
+                    "error": None,
+                    "distribution": {},
+                },
+            )
             if int(exchange_row.get("position_count") or 0) > 0:
                 continue
             current_price = float(getattr(pos, "current_price", 0.0) or 0.0)
@@ -2724,16 +3327,29 @@ async def _collect_live_position_snapshot(force_refresh: bool = False) -> Dict[s
             notional_usd = qty * max(current_price, 0.0)
             if notional_usd <= 0:
                 continue
-            side_value = str(getattr(getattr(pos, "side", None), "value", getattr(pos, "side", "")) or "")
-            label = _contract_bucket_label(str(getattr(pos, "symbol", "") or ""), side_value)
-            exchange_row["position_count"] = int(exchange_row.get("position_count") or 0) + 1
-            exchange_row["unrealized_pnl_usd"] = float(exchange_row.get("unrealized_pnl_usd") or 0.0) + float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
+            side_value = str(
+                getattr(getattr(pos, "side", None), "value", getattr(pos, "side", ""))
+                or ""
+            )
+            label = _contract_bucket_label(
+                str(getattr(pos, "symbol", "") or ""), side_value
+            )
+            exchange_row["position_count"] = (
+                int(exchange_row.get("position_count") or 0) + 1
+            )
+            exchange_row["unrealized_pnl_usd"] = float(
+                exchange_row.get("unrealized_pnl_usd") or 0.0
+            ) + float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
             local_distribution = dict(exchange_row.get("distribution") or {})
-            local_distribution[label] = local_distribution.get(label, 0.0) + float(notional_usd)
+            local_distribution[label] = local_distribution.get(label, 0.0) + float(
+                notional_usd
+            )
             exchange_row["distribution"] = local_distribution
             total_count += 1
             total_unrealized += float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
-            total_distribution[label] = total_distribution.get(label, 0.0) + float(notional_usd)
+            total_distribution[label] = total_distribution.get(label, 0.0) + float(
+                notional_usd
+            )
         except Exception:
             continue
 
@@ -2758,14 +3374,23 @@ def _apply_live_snapshot_to_risk_report(
     equity = dict(out.get("equity") or {})
     live_unrealized = float(live_snapshot.get("unrealized_pnl_usd") or 0.0)
     daily_equity_delta = float(equity.get("daily_pnl_usd") or 0.0)
-    daily_total = float(live_daily_total_pnl) if live_daily_total_pnl is not None else daily_equity_delta
-    has_live_positions = int(live_snapshot.get("position_count") or 0) > 0 or abs(live_unrealized) > 0
+    daily_total = (
+        float(live_daily_total_pnl)
+        if live_daily_total_pnl is not None
+        else daily_equity_delta
+    )
+    has_live_positions = (
+        int(live_snapshot.get("position_count") or 0) > 0 or abs(live_unrealized) > 0
+    )
     daily_realized = (
         daily_total - live_unrealized
         if has_live_positions
         else float(equity.get("daily_realized_pnl_usd") or 0.0)
     )
-    daily_stop_basis = float(equity.get("daily_stop_basis_usd") or (daily_realized + min(0.0, live_unrealized)))
+    daily_stop_basis = float(
+        equity.get("daily_stop_basis_usd")
+        or (daily_realized + min(0.0, live_unrealized))
+    )
 
     equity["current_unrealized_pnl_usd"] = round(live_unrealized, 4)
     equity["daily_total_pnl_usd"] = round(daily_total, 4)
@@ -2773,7 +3398,9 @@ def _apply_live_snapshot_to_risk_report(
     equity["daily_realized_pnl_usd"] = round(daily_realized, 4)
     equity["daily_stop_basis_usd"] = round(daily_stop_basis, 4)
     equity["daily_unrealized_component_usd"] = round(
-        live_unrealized if has_live_positions else float(equity.get("daily_unrealized_component_usd") or 0.0),
+        live_unrealized
+        if has_live_positions
+        else float(equity.get("daily_unrealized_component_usd") or 0.0),
         4,
     )
     day_start_equity = 0.0
@@ -2789,8 +3416,12 @@ def _apply_live_snapshot_to_risk_report(
 
     if day_start_equity > 0:
         equity["day_start"] = round(day_start_equity, 4)
-        equity["daily_total_pnl_ratio"] = round(daily_total / max(day_start_equity, 1e-6), 6)
-        equity["daily_stop_basis_ratio"] = round(daily_stop_basis / max(day_start_equity, 1e-6), 6)
+        equity["daily_total_pnl_ratio"] = round(
+            daily_total / max(day_start_equity, 1e-6), 6
+        )
+        equity["daily_stop_basis_ratio"] = round(
+            daily_stop_basis / max(day_start_equity, 1e-6), 6
+        )
         equity["daily_pnl_ratio"] = equity["daily_stop_basis_ratio"]
     else:
         total_ratio = _safe_float(
@@ -2804,7 +3435,9 @@ def _apply_live_snapshot_to_risk_report(
         equity["daily_total_pnl_ratio"] = round(total_ratio, 6)
         equity["daily_stop_basis_ratio"] = round(stop_ratio, 6)
         equity["daily_pnl_ratio"] = round(stop_ratio, 6)
-    equity["pnl_scope_note"] = "daily_total_pnl_usd 为账户权益变化；daily_stop_basis_usd = 已实现盈亏 + 当前浮亏，仅该值用于熔断"
+    equity[
+        "pnl_scope_note"
+    ] = "daily_total_pnl_usd 为账户权益变化；daily_stop_basis_usd = 已实现盈亏 + 当前浮亏，仅该值用于熔断"
     out["equity"] = equity
     out["live_positions"] = {
         "position_count": int(live_snapshot.get("position_count") or 0),
@@ -2813,11 +3446,15 @@ def _apply_live_snapshot_to_risk_report(
     return out
 
 
-async def _build_effective_risk_report(force_live_refresh: bool = False) -> Dict[str, Any]:
+async def _build_effective_risk_report(
+    force_live_refresh: bool = False,
+) -> Dict[str, Any]:
     report = risk_manager.get_risk_report()
     if execution_engine.is_paper_mode():
         return report
-    live_snapshot = await _collect_live_position_snapshot(force_refresh=force_live_refresh)
+    live_snapshot = await _collect_live_position_snapshot(
+        force_refresh=force_live_refresh
+    )
     return _apply_live_snapshot_to_risk_report(report, live_snapshot)
 
 
@@ -2892,7 +3529,11 @@ async def _create_binance_readonly_connector() -> Optional[BinanceConnector]:
     cfg = copy.deepcopy(base_cfg)
     cfg.api_key = settings.BINANCE_API_KEY or cfg.api_key
     cfg.api_secret = settings.BINANCE_API_SECRET or cfg.api_secret
-    cfg.default_type = str(getattr(settings, "BINANCE_DEFAULT_TYPE", cfg.default_type) or cfg.default_type or "spot")
+    cfg.default_type = str(
+        getattr(settings, "BINANCE_DEFAULT_TYPE", cfg.default_type)
+        or cfg.default_type
+        or "spot"
+    )
     connector = BinanceConnector(cfg)
     try:
         ok = await connector.connect()
@@ -2930,7 +3571,10 @@ async def _fetch_binance_positions_via_fallback() -> Optional[List[Any]]:
 
 
 def _binance_has_credentials() -> bool:
-    return bool((settings.BINANCE_API_KEY or "").strip() and (settings.BINANCE_API_SECRET or "").strip())
+    return bool(
+        (settings.BINANCE_API_KEY or "").strip()
+        and (settings.BINANCE_API_SECRET or "").strip()
+    )
 
 
 def _binance_market_symbol(symbol: Optional[str]) -> Optional[str]:
@@ -2942,7 +3586,9 @@ def _binance_market_symbol(symbol: Optional[str]) -> Optional[str]:
     return text.replace("/", "").replace("-", "")
 
 
-def _binance_ccxt_symbol(symbol: str, quote: str = "USDT", futures: bool = False) -> str:
+def _binance_ccxt_symbol(
+    symbol: str, quote: str = "USDT", futures: bool = False
+) -> str:
     base = str(symbol or "").upper().replace("/", "").replace("-", "")
     if base.endswith(quote):
         asset = base[: -len(quote)]
@@ -2970,7 +3616,9 @@ async def _binance_signed_request(
 
     async def _refresh_time_offset(target_host: str, *, force: bool = False) -> int:
         now_ts = time.time()
-        if (not force) and (now_ts - float(_BINANCE_TIME_OFFSET_MS.get("ts") or 0.0)) <= 180.0:
+        if (not force) and (
+            now_ts - float(_BINANCE_TIME_OFFSET_MS.get("ts") or 0.0)
+        ) <= 180.0:
             cached = int(_BINANCE_TIME_OFFSET_MS.get(target_host, 0) or 0)
             if cached:
                 return cached
@@ -3004,7 +3652,9 @@ async def _binance_signed_request(
         payload: Dict[str, Any] = dict(params or {})
         payload["timestamp"] = int(time.time() * 1000) + offset_ms
         payload["recvWindow"] = int(_BINANCE_RECV_WINDOW)
-        query = urlencode([(k, v) for k, v in payload.items() if v is not None], doseq=True)
+        query = urlencode(
+            [(k, v) for k, v in payload.items() if v is not None], doseq=True
+        )
         secret = (settings.BINANCE_API_SECRET or "").strip().encode("utf-8")
         signature = hmac.new(secret, query.encode("utf-8"), hashlib.sha256).hexdigest()
         headers = {"X-MBX-APIKEY": (settings.BINANCE_API_KEY or "").strip()}
@@ -3065,23 +3715,35 @@ async def _binance_public_quotes_usd(assets: List[str]) -> Dict[str, float]:
             resp.raise_for_status()
             rows = resp.json() or []
         price_map = {
-            str(row.get("symbol") or "").upper(): _safe_float(row.get("price"), default=0.0)
+            str(row.get("symbol") or "").upper(): _safe_float(
+                row.get("price"), default=0.0
+            )
             for row in rows
             if isinstance(row, dict)
         }
-        return {asset: float(price_map.get(f"{asset}USDT", 0.0) or 0.0) for asset in unique_assets}
+        return {
+            asset: float(price_map.get(f"{asset}USDT", 0.0) or 0.0)
+            for asset in unique_assets
+        }
     except Exception:
         prices = await asyncio.gather(
             *[_binance_public_price_usd(asset) for asset in unique_assets],
             return_exceptions=False,
         )
-        return {asset: float(price or 0.0) for asset, price in zip(unique_assets, prices)}
+        return {
+            asset: float(price or 0.0) for asset, price in zip(unique_assets, prices)
+        }
 
 
 async def _fetch_binance_realized_pnl_income(days: int = 30) -> List[Dict[str, Any]]:
     if not _binance_has_credentials():
         return []
-    start_time_ms = int((datetime.now(timezone.utc) - timedelta(days=max(1, int(days or 30)))).timestamp() * 1000)
+    start_time_ms = int(
+        (
+            datetime.now(timezone.utc) - timedelta(days=max(1, int(days or 30)))
+        ).timestamp()
+        * 1000
+    )
     rows = await _binance_signed_request(
         "GET",
         "/fapi/v1/income",
@@ -3149,7 +3811,14 @@ async def _fetch_binance_live_wallet_snapshot_fast() -> Dict[str, Any]:
     components: Dict[str, float] = {"spot": 0.0, "funding": 0.0, "futures": 0.0}
     quote_assets: List[str] = []
 
-    def _append_balance(currency: str, free: float, used: float, total: float, source: str, unit_usd: float = 0.0):
+    def _append_balance(
+        currency: str,
+        free: float,
+        used: float,
+        total: float,
+        source: str,
+        unit_usd: float = 0.0,
+    ):
         ccy = str(currency or "").upper().strip()
         total_amt = float(total or 0.0)
         if not ccy or total_amt <= 0:
@@ -3209,20 +3878,43 @@ async def _fetch_binance_live_wallet_snapshot_fast() -> Dict[str, Any]:
             used = max(total - available, 0.0)
             if total <= 0:
                 continue
-            _append_balance(currency, available, used, total, "futures", 1.0 if currency in STABLE_COINS else 0.0)
+            _append_balance(
+                currency,
+                available,
+                used,
+                total,
+                "futures",
+                1.0 if currency in STABLE_COINS else 0.0,
+            )
 
     quotes = await _binance_public_quotes_usd(quote_assets)
     total_usd = 0.0
     for row in balances:
         currency = str(row.get("currency") or "").upper()
-        unit_usd = 1.0 if currency in STABLE_COINS else _safe_float(quotes.get(currency), default=0.0)
-        usd_value = _safe_float(row.get("total"), default=0.0) * unit_usd if unit_usd > 0 else 0.0
+        unit_usd = (
+            1.0
+            if currency in STABLE_COINS
+            else _safe_float(quotes.get(currency), default=0.0)
+        )
+        usd_value = (
+            _safe_float(row.get("total"), default=0.0) * unit_usd
+            if unit_usd > 0
+            else 0.0
+        )
         row["unit_usd"] = round(unit_usd, 8) if unit_usd > 0 else 0.0
         row["usd_value"] = round(usd_value, 4)
-        row["valuation_source"] = "stable" if currency in STABLE_COINS else ("live" if unit_usd > 0 else "unpriced")
-        distribution[currency] = distribution.get(currency, 0.0) + float(usd_value or 0.0)
+        row["valuation_source"] = (
+            "stable"
+            if currency in STABLE_COINS
+            else ("live" if unit_usd > 0 else "unpriced")
+        )
+        distribution[currency] = distribution.get(currency, 0.0) + float(
+            usd_value or 0.0
+        )
         wallet_source = str(row.get("wallet_source") or "spot")
-        components[wallet_source] = components.get(wallet_source, 0.0) + float(usd_value or 0.0)
+        components[wallet_source] = components.get(wallet_source, 0.0) + float(
+            usd_value or 0.0
+        )
         total_usd += float(usd_value or 0.0)
 
     balances.sort(key=lambda item: float(item.get("usd_value") or 0.0), reverse=True)
@@ -3233,11 +3925,14 @@ async def _fetch_binance_live_wallet_snapshot_fast() -> Dict[str, Any]:
         "components": {k: round(v, 2) for k, v in components.items()},
         "warnings": warnings,
         "valuation_coverage": {
-            "priced_assets": sum(1 for row in balances if float(row.get("usd_value") or 0.0) > 0),
+            "priced_assets": sum(
+                1 for row in balances if float(row.get("usd_value") or 0.0) > 0
+            ),
             "unpriced_assets": sum(
                 1
                 for row in balances
-                if float(row.get("total") or 0.0) > 0 and float(row.get("usd_value") or 0.0) <= 0
+                if float(row.get("total") or 0.0) > 0
+                and float(row.get("usd_value") or 0.0) <= 0
             ),
         },
     }
@@ -3247,9 +3942,13 @@ async def _fetch_binance_positions_fast() -> List[Dict[str, Any]]:
     if not _binance_has_credentials():
         return []
     try:
-        rows = await _binance_signed_request("GET", "/fapi/v2/positionRisk", host="fapi")
+        rows = await _binance_signed_request(
+            "GET", "/fapi/v2/positionRisk", host="fapi"
+        )
     except Exception:
-        rows = await _binance_signed_request("GET", "/fapi/v3/positionRisk", host="fapi")
+        rows = await _binance_signed_request(
+            "GET", "/fapi/v3/positionRisk", host="fapi"
+        )
     out: List[Dict[str, Any]] = []
     for row in rows or []:
         amount = _safe_float(row.get("positionAmt"), default=0.0)
@@ -3258,27 +3957,35 @@ async def _fetch_binance_positions_fast() -> List[Dict[str, Any]]:
         side = "short" if amount < 0 else "long"
         out.append(
             {
-                "symbol": _binance_ccxt_symbol(str(row.get("symbol") or ""), futures=True),
+                "symbol": _binance_ccxt_symbol(
+                    str(row.get("symbol") or ""), futures=True
+                ),
                 "side": side,
                 "amount": abs(amount),
                 "entry_price": _safe_float(row.get("entryPrice"), default=0.0),
                 "current_price": _safe_float(row.get("markPrice"), default=0.0),
                 "unrealized_pnl": _safe_float(row.get("unRealizedProfit"), default=0.0),
                 "leverage": _safe_float(row.get("leverage"), default=1.0),
-                "liquidation_price": _safe_float(row.get("liquidationPrice"), default=0.0),
+                "liquidation_price": _safe_float(
+                    row.get("liquidationPrice"), default=0.0
+                ),
             }
         )
     return out
 
 
-async def _fetch_binance_open_orders_fast(symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+async def _fetch_binance_open_orders_fast(
+    symbol: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     if not _binance_has_credentials():
         return []
     params: Dict[str, Any] = {}
     raw_symbol = _binance_market_symbol(symbol)
     if raw_symbol:
         params["symbol"] = raw_symbol
-    rows = await _binance_signed_request("GET", "/fapi/v1/openOrders", host="fapi", params=params)
+    rows = await _binance_signed_request(
+        "GET", "/fapi/v1/openOrders", host="fapi", params=params
+    )
     orders: List[Dict[str, Any]] = []
     for row in rows or []:
         raw_type = str(row.get("type") or "").lower()
@@ -3286,21 +3993,33 @@ async def _fetch_binance_open_orders_fast(symbol: Optional[str] = None) -> List[
         take_profit = None
         trigger_price = _safe_float(row.get("stopPrice"), default=0.0)
         if "take_profit" in raw_type:
-            take_profit = trigger_price if trigger_price > 0 else _safe_float(row.get("price"), default=0.0)
+            take_profit = (
+                trigger_price
+                if trigger_price > 0
+                else _safe_float(row.get("price"), default=0.0)
+            )
         elif "stop" in raw_type:
-            stop_loss = trigger_price if trigger_price > 0 else _safe_float(row.get("price"), default=0.0)
+            stop_loss = (
+                trigger_price
+                if trigger_price > 0
+                else _safe_float(row.get("price"), default=0.0)
+            )
         orders.append(
             {
                 "id": str(row.get("orderId") or row.get("clientOrderId") or ""),
                 "exchange": "binance",
-                "symbol": _binance_ccxt_symbol(str(row.get("symbol") or ""), futures=True),
+                "symbol": _binance_ccxt_symbol(
+                    str(row.get("symbol") or ""), futures=True
+                ),
                 "side": str(row.get("side") or "").lower(),
                 "type": str(row.get("type") or "").lower(),
                 "price": _safe_float(row.get("price"), default=0.0),
                 "amount": _safe_float(row.get("origQty"), default=0.0),
                 "filled": _safe_float(row.get("executedQty"), default=0.0),
                 "status": str(row.get("status") or "").lower(),
-                "timestamp": _safe_dt(row.get("time") or row.get("updateTime")).isoformat()
+                "timestamp": _safe_dt(
+                    row.get("time") or row.get("updateTime")
+                ).isoformat()
                 if _safe_dt(row.get("time") or row.get("updateTime"))
                 else None,
                 "strategy": None,
@@ -3338,11 +4057,17 @@ async def _resolve_live_equity_baseline(
 
     stored_day = str(stored.get("day") or "")
     stored_portfolio = _safe_float(stored.get("portfolio_total_usd"), default=0.0)
-    stored_by_exchange = stored.get("by_exchange") if isinstance(stored.get("by_exchange"), dict) else {}
+    stored_by_exchange = (
+        stored.get("by_exchange") if isinstance(stored.get("by_exchange"), dict) else {}
+    )
     stored_binance = _safe_float(stored_by_exchange.get("binance"), default=0.0)
 
-    db_portfolio = await account_snapshot_manager.get_day_start_total(mode="live", exchange="all", day=now)
-    db_binance = await account_snapshot_manager.get_day_start_total(mode="live", exchange="binance", day=now)
+    db_portfolio = await account_snapshot_manager.get_day_start_total(
+        mode="live", exchange="all", day=now
+    )
+    db_binance = await account_snapshot_manager.get_day_start_total(
+        mode="live", exchange="binance", day=now
+    )
 
     baseline_portfolio = _safe_float(db_portfolio, default=0.0)
     if baseline_portfolio <= 0 and stored_day == day_key:
@@ -3357,7 +4082,9 @@ async def _resolve_live_equity_baseline(
         baseline_binance = _safe_float(exchange_totals.get("binance"), default=0.0)
 
     current_total = _safe_float(current_total_usd, default=0.0)
-    live_unrealized = abs(_safe_float((live_snapshot or {}).get("unrealized_pnl_usd"), default=0.0))
+    live_unrealized = abs(
+        _safe_float((live_snapshot or {}).get("unrealized_pnl_usd"), default=0.0)
+    )
     if baseline_portfolio > 0 and current_total > 0:
         delta_usd = current_total - baseline_portfolio
         delta_ratio = abs(delta_usd) / max(abs(baseline_portfolio), 1e-6)
@@ -3368,7 +4095,9 @@ async def _resolve_live_equity_baseline(
                 f"delta={delta_usd:.4f}, live_unrealized={live_unrealized:.4f}"
             )
             baseline_portfolio = current_total
-            baseline_binance = _safe_float(exchange_totals.get("binance"), default=baseline_binance)
+            baseline_binance = _safe_float(
+                exchange_totals.get("binance"), default=baseline_binance
+            )
 
     payload = {
         "day": day_key,
@@ -3408,7 +4137,14 @@ def _iter_trade_records(days: int = 90) -> List[Dict[str, Any]]:
                 "source": "position",
             }
         )
-        signatures.add((int(ts.timestamp()), str(getattr(pos, "symbol", "") or ""), round(_safe_float(getattr(pos, "realized_pnl", 0.0)), 6), str(getattr(pos, "strategy", "") or "unknown")))
+        signatures.add(
+            (
+                int(ts.timestamp()),
+                str(getattr(pos, "symbol", "") or ""),
+                round(_safe_float(getattr(pos, "realized_pnl", 0.0)), 6),
+                str(getattr(pos, "strategy", "") or "unknown"),
+            )
+        )
 
     for row in risk_manager.get_trade_history(limit=30000):
         ts = _safe_dt(row.get("timestamp"))
@@ -3455,7 +4191,12 @@ def _calc_max_streak(values: List[float], positive: bool = True) -> int:
 
 def _drawdown_profile(equity: List[float]) -> Dict[str, Any]:
     if not equity:
-        return {"max_drawdown_usd": 0.0, "max_drawdown_pct": 0.0, "duration": 0, "recovery": 0}
+        return {
+            "max_drawdown_usd": 0.0,
+            "max_drawdown_pct": 0.0,
+            "duration": 0,
+            "recovery": 0,
+        }
     peak = equity[0]
     peak_idx = 0
     max_dd = 0.0
@@ -3500,9 +4241,13 @@ def _var_quantile(returns: List[float], confidence: float) -> float:
 async def _load_symbol_returns(symbol: str, lookback: int = 240) -> pd.Series:
     frames = []
     for ex in ["binance", "gate", "okx"]:
-        df = await data_storage.load_klines_from_parquet(exchange=ex, symbol=symbol, timeframe="1h")
+        df = await data_storage.load_klines_from_parquet(
+            exchange=ex, symbol=symbol, timeframe="1h"
+        )
         if df is not None and not df.empty:
-            frames.append(df.tail(max(60, int(lookback)))[["close"]].rename(columns={"close": ex}))
+            frames.append(
+                df.tail(max(60, int(lookback)))[["close"]].rename(columns={"close": ex})
+            )
     if not frames:
         return pd.Series(dtype=float)
     merged = pd.concat(frames, axis=1).ffill().bfill()
@@ -3511,7 +4256,9 @@ async def _load_symbol_returns(symbol: str, lookback: int = 240) -> pd.Series:
     return ret.tail(max(30, int(lookback)))
 
 
-async def _fetch_orderbook(exchange: str, symbol: str, limit: int = 80) -> Dict[str, Any]:
+async def _fetch_orderbook(
+    exchange: str, symbol: str, limit: int = 80
+) -> Dict[str, Any]:
     normalized = str(exchange or "").lower()
     if normalized == "binance":
         return await _fetch_binance_public_orderbook(symbol=symbol, limit=limit)
@@ -3558,7 +4305,9 @@ async def _fetch_orderbook(exchange: str, symbol: str, limit: int = 80) -> Dict[
     }
 
 
-async def _fetch_trade_imbalance(exchange: str, symbol: str, limit: int = 600) -> Dict[str, Any]:
+async def _fetch_trade_imbalance(
+    exchange: str, symbol: str, limit: int = 600
+) -> Dict[str, Any]:
     normalized = str(exchange or "").lower()
     if normalized == "binance":
         return await _fetch_binance_public_trade_imbalance(symbol=symbol, limit=limit)
@@ -3568,11 +4317,25 @@ async def _fetch_trade_imbalance(exchange: str, symbol: str, limit: int = 600) -
             return gate_flow
     connector = exchange_manager.get_exchange(exchange)
     if not connector:
-        return {"available": False, "error": f"exchange_not_connected:{exchange}", "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+        return {
+            "available": False,
+            "error": f"exchange_not_connected:{exchange}",
+            "count": 0,
+            "buy_volume": 0.0,
+            "sell_volume": 0.0,
+            "imbalance": 0.0,
+        }
     client = getattr(connector, "_client", None)
     fetch_trades = getattr(client, "fetch_trades", None)
     if not callable(fetch_trades):
-        return {"available": False, "error": "fetch_trades_unavailable", "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+        return {
+            "available": False,
+            "error": "fetch_trades_unavailable",
+            "count": 0,
+            "buy_volume": 0.0,
+            "sell_volume": 0.0,
+            "imbalance": 0.0,
+        }
     trades: List[Dict[str, Any]] = []
     last_error = ""
     for candidate in _exchange_symbol_candidates(exchange, symbol):
@@ -3591,7 +4354,14 @@ async def _fetch_trade_imbalance(exchange: str, symbol: str, limit: int = 600) -
         except Exception as e:
             last_error = str(e)
     if not trades:
-        return {"available": False, "error": last_error or "trades_unavailable", "count": 0, "buy_volume": 0.0, "sell_volume": 0.0, "imbalance": 0.0}
+        return {
+            "available": False,
+            "error": last_error or "trades_unavailable",
+            "count": 0,
+            "buy_volume": 0.0,
+            "sell_volume": 0.0,
+            "imbalance": 0.0,
+        }
     buy_volume = 0.0
     sell_volume = 0.0
     for row in trades or []:
@@ -3611,7 +4381,9 @@ async def _fetch_trade_imbalance(exchange: str, symbol: str, limit: int = 600) -
         "count": len(trades or []),
         "buy_volume": round(buy_volume, 6),
         "sell_volume": round(sell_volume, 6),
-        "imbalance": round(((buy_volume - sell_volume) / total) if total > 0 else 0.0, 6),
+        "imbalance": round(
+            ((buy_volume - sell_volume) / total) if total > 0 else 0.0, 6
+        ),
     }
 
 
@@ -3639,6 +4411,7 @@ async def _load_rule_prices() -> Dict[str, float]:
             if not connector:
                 continue
             for symbol in symbols:
+
                 async def _fetch_one(
                     *,
                     _exchange_name: str = exchange_name,
@@ -3697,14 +4470,18 @@ async def _precheck_binance_futures_order(request: OrderRequest) -> None:
     connector = exchange_manager.get_exchange("binance")
     if not connector:
         return
-    default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").lower()
+    default_type = str(
+        getattr(getattr(connector, "config", None), "default_type", "") or ""
+    ).lower()
     if default_type not in {"future", "swap"}:
         return
 
     px = float(request.price or 0.0)
     if px <= 0:
         try:
-            ticker = await asyncio.wait_for(connector.get_ticker(request.symbol), timeout=2.5)
+            ticker = await asyncio.wait_for(
+                connector.get_ticker(request.symbol), timeout=2.5
+            )
             px = float(getattr(ticker, "last", 0.0) or 0.0)
         except Exception:
             px = 0.0
@@ -3744,9 +4521,13 @@ async def create_order(request: OrderRequest):
     mode = str(request.order_mode or "normal").lower()
     timeout_sec = 30.0
     if mode in {"iceberg", "twap", "vwap"}:
-        pieces = max(1, int(request.iceberg_parts if mode == "iceberg" else request.algo_slices))
+        pieces = max(
+            1, int(request.iceberg_parts if mode == "iceberg" else request.algo_slices)
+        )
         interval_sec = max(0, int(request.algo_interval_sec or 0))
-        timeout_sec = min(180.0, max(40.0, float(interval_sec * max(0, pieces - 1) + 35)))
+        timeout_sec = min(
+            180.0, max(40.0, float(interval_sec * max(0, pieces - 1) + 35))
+        )
     elif mode == "conditional":
         timeout_sec = 40.0
 
@@ -3796,11 +4577,7 @@ async def create_order(request: OrderRequest):
             mapped_error = "下单名义金额不足 20 USDT（非 reduce-only）。请提高数量或价格。"
         elif "-2019" in raw_error:
             mapped_error = "保证金不足。请确认 Binance U 本位合约可用余额，并降低数量或提高杠杆。"
-        detail = (
-            risk.get("halt_reason")
-            or mapped_error
-            or "下单失败，可能触发风控或交易所限制"
-        )
+        detail = risk.get("halt_reason") or mapped_error or "下单失败，可能触发风控或交易所限制"
         await audit_logger.log(
             module="trading",
             action="create_order",
@@ -3858,17 +4635,22 @@ async def get_orders(
                 for o in orders
                 if not (
                     str(getattr(o, "id", "")).startswith("paper_")
-                    or bool(order_manager.get_order_metadata(str(getattr(o, "id", ""))).get("paper"))
+                    or bool(
+                        order_manager.get_order_metadata(str(getattr(o, "id", ""))).get(
+                            "paper"
+                        )
+                    )
                 )
             ]
         return {"orders": [_serialize_order(o) for o in orders]}
 
     request_limit = max(1, int(limit or 100))
-    cache_age = max(0.0, time.time() - float(_LIVE_ORDER_DETAILS_CACHE.get("ts") or 0.0))
+    cache_age = max(
+        0.0, time.time() - float(_LIVE_ORDER_DETAILS_CACHE.get("ts") or 0.0)
+    )
     cached_orders = list(_LIVE_ORDER_DETAILS_CACHE.get("orders") or [])
-    if (
-        not execution_engine.is_paper_mode()
-        and (exchange is None or str(exchange).lower() == "binance")
+    if not execution_engine.is_paper_mode() and (
+        exchange is None or str(exchange).lower() == "binance"
     ):
         try:
             fast_orders = await asyncio.wait_for(
@@ -3883,11 +4665,19 @@ async def get_orders(
             if cached_orders and cache_age <= _LIVE_ORDER_DETAILS_CACHE_TTL_SEC:
                 return {
                     "orders": cached_orders[:request_limit],
-                    "cache_fallback": {"used": True, "age_sec": round(cache_age, 2), "reason": str(fast_err)},
+                    "cache_fallback": {
+                        "used": True,
+                        "age_sec": round(cache_age, 2),
+                        "reason": str(fast_err),
+                    },
                 }
             return {
                 "orders": [],
-                "cache_fallback": {"used": False, "age_sec": round(cache_age, 2), "reason": str(fast_err)},
+                "cache_fallback": {
+                    "used": False,
+                    "age_sec": round(cache_age, 2),
+                    "reason": str(fast_err),
+                },
             }
 
     try:
@@ -3899,17 +4689,35 @@ async def get_orders(
             timeout=4.5,
         )
     except asyncio.TimeoutError:
-        if (not execution_engine.is_paper_mode()) and cached_orders and cache_age <= _LIVE_ORDER_DETAILS_CACHE_TTL_SEC:
+        if (
+            (not execution_engine.is_paper_mode())
+            and cached_orders
+            and cache_age <= _LIVE_ORDER_DETAILS_CACHE_TTL_SEC
+        ):
             return {
                 "orders": cached_orders[:request_limit],
-                "cache_fallback": {"used": True, "age_sec": round(cache_age, 2), "reason": "timeout"},
+                "cache_fallback": {
+                    "used": True,
+                    "age_sec": round(cache_age, 2),
+                    "reason": "timeout",
+                },
             }
-        raise HTTPException(status_code=504, detail="Order query timed out. Please retry.")
+        raise HTTPException(
+            status_code=504, detail="Order query timed out. Please retry."
+        )
     except Exception as exc:
-        if (not execution_engine.is_paper_mode()) and cached_orders and cache_age <= _LIVE_ORDER_DETAILS_CACHE_TTL_SEC:
+        if (
+            (not execution_engine.is_paper_mode())
+            and cached_orders
+            and cache_age <= _LIVE_ORDER_DETAILS_CACHE_TTL_SEC
+        ):
             return {
                 "orders": cached_orders[:request_limit],
-                "cache_fallback": {"used": True, "age_sec": round(cache_age, 2), "reason": str(exc)},
+                "cache_fallback": {
+                    "used": True,
+                    "age_sec": round(cache_age, 2),
+                    "reason": str(exc),
+                },
             }
         raise HTTPException(status_code=502, detail=f"Order query failed: {exc}")
 
@@ -3918,6 +4726,7 @@ async def get_orders(
         _LIVE_ORDER_DETAILS_CACHE["ts"] = time.time()
         _LIVE_ORDER_DETAILS_CACHE["orders"] = list(serialized)
     return {"orders": serialized}
+
 
 async def get_conditional_orders():
     return {
@@ -3995,7 +4804,9 @@ async def get_positions():
             text = f"{text[:-4]}/USDT"
         return text
 
-    def _parse_exchange_position(raw: Any, exchange_name: str, *, fallback_used: bool = False) -> Optional[Dict[str, Any]]:
+    def _parse_exchange_position(
+        raw: Any, exchange_name: str, *, fallback_used: bool = False
+    ) -> Optional[Dict[str, Any]]:
         exchange_key = str(exchange_name or "").strip().lower()
         if not exchange_key:
             return None
@@ -4004,26 +4815,75 @@ async def get_positions():
             if raw_exchange and raw_exchange != exchange_key:
                 return None
 
-        symbol = str((raw.get("symbol") if isinstance(raw, dict) else getattr(raw, "symbol", "")) or "")
+        symbol = str(
+            (raw.get("symbol") if isinstance(raw, dict) else getattr(raw, "symbol", ""))
+            or ""
+        )
         symbol_key = _canonical_symbol(symbol)
         if not symbol_key:
             return None
 
-        amount = float((raw.get("amount") if isinstance(raw, dict) else getattr(raw, "amount", 0.0)) or 0.0)
+        amount = float(
+            (
+                raw.get("amount")
+                if isinstance(raw, dict)
+                else getattr(raw, "amount", 0.0)
+            )
+            or 0.0
+        )
         if isinstance(raw, dict) and abs(amount) <= 1e-12:
             amount = float(raw.get("quantity") or 0.0)
         if abs(amount) <= 1e-12:
             return None
 
-        side = str((raw.get("side") if isinstance(raw, dict) else getattr(raw, "side", "")) or "").strip().lower()
+        side = (
+            str(
+                (raw.get("side") if isinstance(raw, dict) else getattr(raw, "side", ""))
+                or ""
+            )
+            .strip()
+            .lower()
+        )
         if side not in {"long", "short"}:
             side = "short" if amount < 0 else "long"
 
-        entry_px = float((raw.get("entry_price") if isinstance(raw, dict) else getattr(raw, "entry_price", 0.0)) or 0.0)
-        current_px = float((raw.get("current_price") if isinstance(raw, dict) else getattr(raw, "current_price", 0.0)) or 0.0)
-        unrealized = float((raw.get("unrealized_pnl") if isinstance(raw, dict) else getattr(raw, "unrealized_pnl", 0.0)) or 0.0)
-        leverage = float((raw.get("leverage") if isinstance(raw, dict) else getattr(raw, "leverage", 1.0)) or 1.0)
-        liquidation_price = raw.get("liquidation_price") if isinstance(raw, dict) else getattr(raw, "liquidation_price", None)
+        entry_px = float(
+            (
+                raw.get("entry_price")
+                if isinstance(raw, dict)
+                else getattr(raw, "entry_price", 0.0)
+            )
+            or 0.0
+        )
+        current_px = float(
+            (
+                raw.get("current_price")
+                if isinstance(raw, dict)
+                else getattr(raw, "current_price", 0.0)
+            )
+            or 0.0
+        )
+        unrealized = float(
+            (
+                raw.get("unrealized_pnl")
+                if isinstance(raw, dict)
+                else getattr(raw, "unrealized_pnl", 0.0)
+            )
+            or 0.0
+        )
+        leverage = float(
+            (
+                raw.get("leverage")
+                if isinstance(raw, dict)
+                else getattr(raw, "leverage", 1.0)
+            )
+            or 1.0
+        )
+        liquidation_price = (
+            raw.get("liquidation_price")
+            if isinstance(raw, dict)
+            else getattr(raw, "liquidation_price", None)
+        )
         value = abs(amount) * (current_px if current_px > 0 else entry_px)
 
         meta = {
@@ -4066,24 +4926,60 @@ async def get_positions():
         stats_positions = all_positions
         stats = {
             "position_count": len(stats_positions),
-            "total_value": round(sum(float(p.get("value") or 0.0) for p in stats_positions), 8),
-            "total_unrealized_pnl": round(sum(float(p.get("unrealized_pnl") or 0.0) for p in stats_positions), 8),
-            "total_realized_pnl": round(sum(float(p.get("realized_pnl") or 0.0) for p in stats_positions), 8),
-            "long_positions": len([p for p in stats_positions if str(p.get("side") or "").lower() == "long"]),
-            "short_positions": len([p for p in stats_positions if str(p.get("side") or "").lower() == "short"]),
-            "winning_positions": len([p for p in stats_positions if float(p.get("unrealized_pnl") or 0.0) > 0]),
-            "losing_positions": len([p for p in stats_positions if float(p.get("unrealized_pnl") or 0.0) < 0]),
+            "total_value": round(
+                sum(float(p.get("value") or 0.0) for p in stats_positions), 8
+            ),
+            "total_unrealized_pnl": round(
+                sum(float(p.get("unrealized_pnl") or 0.0) for p in stats_positions), 8
+            ),
+            "total_realized_pnl": round(
+                sum(float(p.get("realized_pnl") or 0.0) for p in stats_positions), 8
+            ),
+            "long_positions": len(
+                [
+                    p
+                    for p in stats_positions
+                    if str(p.get("side") or "").lower() == "long"
+                ]
+            ),
+            "short_positions": len(
+                [
+                    p
+                    for p in stats_positions
+                    if str(p.get("side") or "").lower() == "short"
+                ]
+            ),
+            "winning_positions": len(
+                [
+                    p
+                    for p in stats_positions
+                    if float(p.get("unrealized_pnl") or 0.0) > 0
+                ]
+            ),
+            "losing_positions": len(
+                [
+                    p
+                    for p in stats_positions
+                    if float(p.get("unrealized_pnl") or 0.0) < 0
+                ]
+            ),
         }
         return {
             "positions": all_positions,
             "stats": stats,
             "exchange_positions_count": len(exchange_rows),
-            "diagnostics": diagnostics_payload if not execution_engine.is_paper_mode() else None,
+            "diagnostics": diagnostics_payload
+            if not execution_engine.is_paper_mode()
+            else None,
         }
 
     live_mode = not execution_engine.is_paper_mode()
     cache_age_sec = max(0.0, now_ts - cached_ts)
-    if live_mode and cached_positions and cache_age_sec <= _LIVE_POSITION_DETAILS_CACHE_TTL_SEC:
+    if (
+        live_mode
+        and cached_positions
+        and cache_age_sec <= _LIVE_POSITION_DETAILS_CACHE_TTL_SEC
+    ):
         exchange_symbol_set = set()
         for row in cached_positions:
             exchange_key = str(row.get("exchange", "") or "").strip().lower()
@@ -4106,7 +5002,9 @@ async def get_positions():
             "age_sec": round(cache_age_sec, 2),
         }
         exchange_positions = copy.deepcopy(cached_positions)
-        return _build_positions_response(positions + exchange_positions, exchange_positions, diagnostics)
+        return _build_positions_response(
+            positions + exchange_positions, exchange_positions, diagnostics
+        )
 
     if live_mode:
         # Include live exchange positions so manually-held futures positions are visible in the UI.
@@ -4118,12 +5016,19 @@ async def get_positions():
         for exchange_name in exchange_manager.get_connected_exchanges():
             connector = exchange_manager.get_exchange(exchange_name)
             if not connector:
-                diagnostics["skipped_exchanges"].append({"exchange": exchange_name, "reason": "not_connected"})
+                diagnostics["skipped_exchanges"].append(
+                    {"exchange": exchange_name, "reason": "not_connected"}
+                )
                 continue
-            default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").lower()
+            default_type = str(
+                getattr(getattr(connector, "config", None), "default_type", "") or ""
+            ).lower()
             if default_type not in {"future", "swap"}:
                 diagnostics["skipped_exchanges"].append(
-                    {"exchange": exchange_name, "reason": f"default_type={default_type or 'unknown'}"}
+                    {
+                        "exchange": exchange_name,
+                        "reason": f"default_type={default_type or 'unknown'}",
+                    }
                 )
                 continue
             try:
@@ -4140,27 +5045,43 @@ async def get_positions():
                     )
                 fetched_exchange_set.add(str(exchange_name or "").lower())
                 diagnostics["fetched_exchanges"].append(
-                    {"exchange": exchange_name, "count": len(ex_positions), "default_type": default_type}
+                    {
+                        "exchange": exchange_name,
+                        "count": len(ex_positions),
+                        "default_type": default_type,
+                    }
                 )
                 for p in ex_positions:
-                    parsed = _parse_exchange_position(p, exchange_name, fallback_used=False)
+                    parsed = _parse_exchange_position(
+                        p, exchange_name, fallback_used=False
+                    )
                     if not parsed:
                         continue
                     key = parsed["key"]
                     if key in exchange_keys:
                         continue
                     exchange_keys.add(key)
-                    exchange_symbol_set.add((str(exchange_name).lower(), parsed["symbol_key"]))
+                    exchange_symbol_set.add(
+                        (str(exchange_name).lower(), parsed["symbol_key"])
+                    )
                     exchange_side_set.add(key)
                     exchange_positions.append(parsed["row"])
             except Exception as e:
                 if exchange_name == "binance":
                     try:
-                        ex_positions = await asyncio.wait_for(
-                            _fetch_binance_positions_via_fallback(),
-                            timeout=10.0,
-                        ) or []
-                        if not ex_positions and cached_positions and (now_ts - cached_ts) <= _LIVE_POSITION_DETAILS_CACHE_TTL_SEC:
+                        ex_positions = (
+                            await asyncio.wait_for(
+                                _fetch_binance_positions_via_fallback(),
+                                timeout=10.0,
+                            )
+                            or []
+                        )
+                        if (
+                            not ex_positions
+                            and cached_positions
+                            and (now_ts - cached_ts)
+                            <= _LIVE_POSITION_DETAILS_CACHE_TTL_SEC
+                        ):
                             ex_positions = cached_positions
                         fetched_exchange_set.add(str(exchange_name or "").lower())
                         diagnostics["fetched_exchanges"].append(
@@ -4172,31 +5093,46 @@ async def get_positions():
                             }
                         )
                         for p in ex_positions:
-                            parsed = _parse_exchange_position(p, exchange_name, fallback_used=True)
+                            parsed = _parse_exchange_position(
+                                p, exchange_name, fallback_used=True
+                            )
                             if not parsed:
                                 continue
                             key = parsed["key"]
                             if key in exchange_keys:
                                 continue
                             exchange_keys.add(key)
-                            exchange_symbol_set.add((str(exchange_name).lower(), parsed["symbol_key"]))
+                            exchange_symbol_set.add(
+                                (str(exchange_name).lower(), parsed["symbol_key"])
+                            )
                             exchange_side_set.add(key)
                             exchange_positions.append(parsed["row"])
                         continue
                     except Exception as fallback_err:
                         diagnostics["skipped_exchanges"].append(
-                            {"exchange": exchange_name, "reason": str(fallback_err or e)}
+                            {
+                                "exchange": exchange_name,
+                                "reason": str(fallback_err or e),
+                            }
                         )
                         continue
-                diagnostics["skipped_exchanges"].append({"exchange": exchange_name, "reason": str(e)})
+                diagnostics["skipped_exchanges"].append(
+                    {"exchange": exchange_name, "reason": str(e)}
+                )
 
         reconciled_local_positions: List[Dict[str, Any]] = []
         if fetched_exchange_set:
             for local_pos in list(local_positions):
-                local_exchange = str(getattr(local_pos, "exchange", "") or "").strip().lower()
+                local_exchange = (
+                    str(getattr(local_pos, "exchange", "") or "").strip().lower()
+                )
                 if not local_exchange or local_exchange not in fetched_exchange_set:
                     continue
-                source = str((getattr(local_pos, "metadata", {}) or {}).get("source") or "").strip().lower()
+                source = (
+                    str((getattr(local_pos, "metadata", {}) or {}).get("source") or "")
+                    .strip()
+                    .lower()
+                )
                 if source == "exchange_live":
                     continue
                 local_updated_at = getattr(local_pos, "updated_at", None)
@@ -4205,7 +5141,11 @@ async def get_positions():
                     if age_sec < 20.0:
                         continue
                 local_symbol_key = _canonical_symbol(getattr(local_pos, "symbol", ""))
-                local_side = str(getattr(getattr(local_pos, "side", None), "value", "") or "").strip().lower()
+                local_side = (
+                    str(getattr(getattr(local_pos, "side", None), "value", "") or "")
+                    .strip()
+                    .lower()
+                )
                 if local_side not in {"long", "short"}:
                     continue
                 if (local_exchange, local_symbol_key, local_side) in exchange_side_set:
@@ -4292,11 +5232,15 @@ async def close_position(req: PositionCloseRequest):
 
     # Prefer closing through execution_engine when the position exists in local position_manager
     # so paper/live accounting, risk, and order history remain consistent.
-    local_pos = position_manager.get_position(exchange, symbol, account_id=req.account_id)
+    local_pos = position_manager.get_position(
+        exchange, symbol, account_id=req.account_id
+    )
     if local_pos and str(local_pos.side.value) == side:
         close_signal = Signal(
             symbol=symbol,
-            signal_type=(SignalType.CLOSE_LONG if side == "long" else SignalType.CLOSE_SHORT),
+            signal_type=(
+                SignalType.CLOSE_LONG if side == "long" else SignalType.CLOSE_SHORT
+            ),
             price=float(local_pos.current_price or local_pos.entry_price or 0.0),
             timestamp=datetime.now(timezone.utc),
             strategy_name=str(local_pos.strategy or "manual_ui_close"),
@@ -4311,7 +5255,9 @@ async def close_position(req: PositionCloseRequest):
         )
         result = await execution_engine.execute_signal(close_signal)
         if not result:
-            raise HTTPException(status_code=400, detail="Failed to close local position")
+            raise HTTPException(
+                status_code=400, detail="Failed to close local position"
+            )
         await audit_logger.log(
             module="trading",
             action="close_position",
@@ -4339,13 +5285,20 @@ async def close_position(req: PositionCloseRequest):
     # For live-only exchange-synced positions (e.g. manual futures positions not tracked in position_manager),
     # send a reduce-only market order to the exchange.
     if execution_engine.is_paper_mode():
-        raise HTTPException(status_code=400, detail="Paper mode cannot close exchange-synced positions directly")
+        raise HTTPException(
+            status_code=400,
+            detail="Paper mode cannot close exchange-synced positions directly",
+        )
 
     connector = exchange_manager.get_exchange(exchange)
     if not connector:
-        raise HTTPException(status_code=404, detail=f"Exchange connector not found: {exchange}")
+        raise HTTPException(
+            status_code=404, detail=f"Exchange connector not found: {exchange}"
+        )
 
-    default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").lower()
+    default_type = str(
+        getattr(getattr(connector, "config", None), "default_type", "") or ""
+    ).lower()
     if default_type not in {"future", "swap"}:
         raise HTTPException(
             status_code=400,
@@ -4358,7 +5311,9 @@ async def close_position(req: PositionCloseRequest):
         try:
             ex_positions = await connector.get_positions()
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Failed to fetch exchange positions: {e}") from e
+            raise HTTPException(
+                status_code=502, detail=f"Failed to fetch exchange positions: {e}"
+            ) from e
 
         norm_symbol = symbol.upper()
         for p in ex_positions:
@@ -4395,7 +5350,9 @@ async def close_position(req: PositionCloseRequest):
         )
     )
     if not order:
-        raise HTTPException(status_code=400, detail="Failed to place exchange close order")
+        raise HTTPException(
+            status_code=400, detail="Failed to place exchange close order"
+        )
 
     await audit_logger.log(
         module="trading",
@@ -4422,7 +5379,11 @@ async def close_position(req: PositionCloseRequest):
         "quantity": qty,
         "order": {
             "id": order.id,
-            "status": getattr(getattr(order, "status", None), "value", str(getattr(order, "status", ""))),
+            "status": getattr(
+                getattr(order, "status", None),
+                "value",
+                str(getattr(order, "status", "")),
+            ),
             "price": float(getattr(order, "price", 0.0) or 0.0),
             "amount": float(getattr(order, "amount", 0.0) or qty),
             "filled": float(getattr(order, "filled", 0.0) or 0.0),
@@ -4459,7 +5420,9 @@ def _parse_target_allocations(raw: str) -> Dict[str, float]:
 async def _estimate_atr_for_symbol(symbol: str, period: int = 14) -> Optional[float]:
     period = max(3, min(int(period or 14), 200))
     for ex in ["binance", "gate", "okx"]:
-        df = await data_storage.load_klines_from_parquet(exchange=ex, symbol=symbol, timeframe="1h")
+        df = await data_storage.load_klines_from_parquet(
+            exchange=ex, symbol=symbol, timeframe="1h"
+        )
         if df is None or df.empty or len(df) < (period + 5):
             continue
         src = df.tail(period * 4).copy()
@@ -4480,12 +5443,18 @@ async def _estimate_atr_for_symbol(symbol: str, period: int = 14) -> Optional[fl
     return None
 
 
-async def _fetch_whale_transfers(min_btc: float = _ANALYTICS_WHALE_MIN_BTC) -> Dict[str, Any]:
+async def _fetch_whale_transfers(
+    min_btc: float = _ANALYTICS_WHALE_MIN_BTC,
+) -> Dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=_ANALYTICS_WHALE_TIMEOUT_SEC) as client:
             tx_res, px_res = await asyncio.gather(
-                client.get("https://blockchain.info/unconfirmed-transactions?format=json"),
-                client.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
+                client.get(
+                    "https://blockchain.info/unconfirmed-transactions?format=json"
+                ),
+                client.get(
+                    "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+                ),
             )
             tx_res.raise_for_status()
             px_res.raise_for_status()
@@ -4511,23 +5480,37 @@ async def _fetch_whale_transfers(min_btc: float = _ANALYTICS_WHALE_MIN_BTC) -> D
     btc_price = _safe_float(px_json.get("price"), default=0.0)
     candidates = []
     for tx in (tx_json.get("txs") or [])[:500]:
-        out_value_satoshi = sum(_safe_float(v.get("value")) for v in (tx.get("out") or []))
+        out_value_satoshi = sum(
+            _safe_float(v.get("value")) for v in (tx.get("out") or [])
+        )
         btc_amount = out_value_satoshi / 1e8
         ts = int(_safe_float(tx.get("time"), default=0))
         candidates.append(
             {
                 "hash": tx.get("hash"),
                 "btc": round(btc_amount, 6),
-                "usd_estimate": round(btc_amount * btc_price, 2) if btc_price > 0 else None,
-                "timestamp": datetime.utcfromtimestamp(ts).isoformat() if ts > 0 else None,
+                "usd_estimate": round(btc_amount * btc_price, 2)
+                if btc_price > 0
+                else None,
+                "timestamp": datetime.utcfromtimestamp(ts).isoformat()
+                if ts > 0
+                else None,
             }
         )
     requested_threshold = float(max(1.0, min_btc))
     effective_threshold = requested_threshold
-    whales = [item for item in candidates if _safe_float(item.get("btc")) >= effective_threshold]
+    whales = [
+        item
+        for item in candidates
+        if _safe_float(item.get("btc")) >= effective_threshold
+    ]
     if not whales and requested_threshold > _ANALYTICS_WHALE_MIN_BTC:
         effective_threshold = _ANALYTICS_WHALE_MIN_BTC
-        whales = [item for item in candidates if _safe_float(item.get("btc")) >= effective_threshold]
+        whales = [
+            item
+            for item in candidates
+            if _safe_float(item.get("btc")) >= effective_threshold
+        ]
     whales.sort(key=lambda x: _safe_float(x.get("btc")), reverse=True)
     return {
         "available": True,
@@ -4543,14 +5526,21 @@ async def _fetch_whale_transfers(min_btc: float = _ANALYTICS_WHALE_MIN_BTC) -> D
 async def _fetch_binance_announcements(limit: int = 6) -> List[Dict[str, Any]]:
     announcements: List[Dict[str, Any]] = []
     try:
-        async with httpx.AsyncClient(timeout=_ANALYTICS_ANNOUNCEMENT_TIMEOUT_SEC) as client:
+        async with httpx.AsyncClient(
+            timeout=_ANALYTICS_ANNOUNCEMENT_TIMEOUT_SEC
+        ) as client:
             resp = await client.get(
                 "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query",
-                params={"type": 1, "catalogId": 48, "pageNo": 1, "pageSize": max(1, min(int(limit), 12))},
+                params={
+                    "type": 1,
+                    "catalogId": 48,
+                    "pageNo": 1,
+                    "pageSize": max(1, min(int(limit), 12)),
+                },
             )
             if resp.status_code != 200:
                 return announcements
-            rows = (((resp.json() or {}).get("data") or {}).get("articles") or [])
+            rows = ((resp.json() or {}).get("data") or {}).get("articles") or []
             for row in rows[:limit]:
                 announcements.append(
                     {
@@ -4573,6 +5563,277 @@ def _symbol_base(symbol: str) -> str:
     return text
 
 
+def _strip_html_text(value: Any) -> str:
+    text = re.sub(r"<[^>]+>", " ", str(value or ""))
+    return " ".join(unescape(text).split())
+
+
+def _parse_usd_amount(value: Any) -> Optional[float]:
+    text = str(value or "")
+    match = re.search(r"\$[\s]*([0-9][0-9,]*(?:\.[0-9]+)?)", text)
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", ""))
+    except Exception:
+        return None
+
+
+def _security_alert_severity(amount_usd: Optional[float]) -> str:
+    if amount_usd is None:
+        return "medium"
+    if amount_usd >= 10_000_000:
+        return "critical"
+    if amount_usd >= 1_000_000:
+        return "high"
+    if amount_usd >= 100_000:
+        return "medium"
+    return "low"
+
+
+def _security_aliases_for_symbol(symbol: str) -> List[str]:
+    base = _symbol_base(symbol)
+    aliases = {base.lower()} if base else set()
+    aliases.update(_SLOWMIST_SYMBOL_ALIASES.get(base, []))
+    return [alias.lower() for alias in aliases if str(alias or "").strip()]
+
+
+def _parse_slowmist_security_events(html: str) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    for raw_item in re.findall(
+        r"<li>\s*<span class=\"time\">.*?</li>", str(html or ""), flags=re.S
+    ):
+        date_match = re.search(
+            r"<span class=\"time\">(.*?)</span>", raw_item, flags=re.S
+        )
+        target_match = re.search(
+            r"<h3><em>Hacked target:\s*</em>(.*?)</h3>", raw_item, flags=re.S
+        )
+        desc_match = re.search(
+            r"<p><em>Description of the event:\s*</em>(.*?)</p>",
+            raw_item,
+            flags=re.S,
+        )
+        amount_match = re.search(
+            r"<span><em>Amount of loss:\s*</em>(.*?)</span>",
+            raw_item,
+            flags=re.S,
+        )
+        method_match = re.search(
+            r"<span><em>Attack method:\s*</em>(.*?)</span>",
+            raw_item,
+            flags=re.S,
+        )
+        ref_match = re.search(
+            r"<p class=\"link-reference\"><a href=\"(.*?)\"", raw_item, flags=re.S
+        )
+
+        date_text = _strip_html_text(date_match.group(1) if date_match else "")
+        target = _strip_html_text(target_match.group(1) if target_match else "")
+        description = _strip_html_text(desc_match.group(1) if desc_match else "")
+        amount_label = _strip_html_text(amount_match.group(1) if amount_match else "")
+        attack_method = _strip_html_text(method_match.group(1) if method_match else "")
+        amount_usd = _parse_usd_amount(amount_label)
+        severity = _security_alert_severity(amount_usd)
+        reference_url = str(ref_match.group(1) if ref_match else "").strip() or None
+
+        occurred_at = None
+        try:
+            occurred_at = (
+                datetime.strptime(date_text, "%Y-%m-%d")
+                .replace(tzinfo=timezone.utc)
+                .isoformat()
+            )
+        except Exception:
+            occurred_at = None
+
+        if not (target or description):
+            continue
+        events.append(
+            {
+                "title": target or "Security incident",
+                "target": target,
+                "description": description,
+                "amount_usd": round(amount_usd, 2) if amount_usd is not None else None,
+                "amount_label": amount_label or None,
+                "attack_method": attack_method or None,
+                "severity": severity,
+                "occurred_at": occurred_at,
+                "source": "slowmist_hacked",
+                "reference_url": reference_url,
+            }
+        )
+    return events
+
+
+def _filter_security_events_for_symbol(
+    events: List[Dict[str, Any]], symbol: str
+) -> tuple[List[Dict[str, Any]], str]:
+    aliases = _security_aliases_for_symbol(symbol)
+    if not aliases:
+        return list(events or []), "global_fallback"
+
+    matched: List[Dict[str, Any]] = []
+    for item in list(events or []):
+        haystack = " ".join(
+            [
+                str(item.get("title") or ""),
+                str(item.get("target") or ""),
+                str(item.get("description") or ""),
+                str(item.get("attack_method") or ""),
+            ]
+        ).lower()
+        if any(alias in haystack for alias in aliases):
+            matched.append(dict(item))
+
+    if matched:
+        return matched, "symbol"
+    return list(events or []), "global_fallback"
+
+
+def _strip_security_alert_runtime_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(payload or {}).items()
+        if key
+        not in {"cache_hit", "cache_age_sec", "stale", "stale_reason", "source_status"}
+    }
+
+
+def _with_security_alert_runtime_fields(
+    payload: Dict[str, Any],
+    *,
+    cache_hit: bool,
+    cache_age_sec: Optional[float],
+    stale: bool,
+    source_status: str,
+    stale_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    out = copy.deepcopy(_strip_security_alert_runtime_fields(payload))
+    out["cache_hit"] = bool(cache_hit)
+    out["cache_age_sec"] = (
+        round(float(cache_age_sec or 0.0), 3) if cache_age_sec is not None else None
+    )
+    out["stale"] = bool(stale)
+    out["source_status"] = str(
+        source_status
+        or ("cache_stale" if stale else ("cache_fresh" if cache_hit else "live"))
+    )
+    if stale_reason:
+        out["stale_reason"] = str(stale_reason)
+        stale_note = "SlowMist Hacked 刷新失败，已回退到最近一次成功快照"
+        note_parts = [str(out.get("note") or "").strip(), stale_note]
+        out["note"] = "；".join(dict.fromkeys(part for part in note_parts if part))
+    else:
+        out.pop("stale_reason", None)
+    return out
+
+
+async def _fetch_slowmist_security_alerts(
+    symbol: str, limit: int = 6
+) -> Dict[str, Any]:
+    cache_key = f"{_symbol_base(symbol)}|{max(1, min(int(limit or 6), 12))}"
+    cached, cached_age = _cache_get(
+        _SECURITY_ALERTS_CACHE,
+        cache_key,
+        max_age_sec=_SECURITY_ALERTS_CACHE_TTL_SEC,
+    )
+    if cached is not None:
+        return _with_security_alert_runtime_fields(
+            cached,
+            cache_hit=True,
+            cache_age_sec=cached_age,
+            stale=False,
+            source_status="cache_fresh",
+        )
+    stale_cached, stale_age = _cache_get(
+        _SECURITY_ALERTS_CACHE,
+        cache_key,
+        max_age_sec=_SECURITY_ALERTS_STALE_MAX_AGE_SEC,
+    )
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=_ANALYTICS_SECURITY_ALERT_TIMEOUT_SEC,
+            headers={"User-Agent": "Mozilla/5.0"},
+            follow_redirects=True,
+            trust_env=True,
+        ) as client:
+            resp = await client.get(_SLOWMIST_HACKED_URL)
+            resp.raise_for_status()
+            html = resp.text
+    except Exception as exc:
+        if stale_cached is not None:
+            return _with_security_alert_runtime_fields(
+                stale_cached,
+                cache_hit=True,
+                cache_age_sec=stale_age,
+                stale=True,
+                stale_reason=exc,
+                source_status="cache_stale",
+            )
+        return {
+            "available": False,
+            "source": "slowmist_hacked",
+            "scope": "global_fallback",
+            "error": str(exc),
+            "events": [],
+            "cache_hit": False,
+            "cache_age_sec": None,
+            "stale": False,
+            "source_status": "unavailable",
+        }
+
+    parsed_events = _parse_slowmist_security_events(html)
+    if not parsed_events and stale_cached is not None:
+        return _with_security_alert_runtime_fields(
+            stale_cached,
+            cache_hit=True,
+            cache_age_sec=stale_age,
+            stale=True,
+            stale_reason="empty_parse",
+            source_status="cache_stale",
+        )
+    cutoff = datetime.now(timezone.utc) - timedelta(days=45)
+    recent_events = []
+    for item in parsed_events:
+        occurred_at = _safe_dt(item.get("occurred_at"))
+        if occurred_at and occurred_at < cutoff:
+            continue
+        recent_events.append(dict(item))
+
+    recent_events.sort(
+        key=lambda item: (
+            _safe_dt(item.get("occurred_at"))
+            or datetime.min.replace(tzinfo=timezone.utc),
+            _safe_float(item.get("amount_usd")),
+        ),
+        reverse=True,
+    )
+    filtered_events, scope = _filter_security_events_for_symbol(recent_events, symbol)
+    selected_events = filtered_events[: max(1, min(int(limit or 6), 12))]
+
+    payload = {
+        "available": bool(selected_events),
+        "source": "slowmist_hacked",
+        "scope": scope,
+        "error": "",
+        "events": selected_events,
+        "query_symbol": _symbol_base(symbol),
+        "total_recent": len(recent_events),
+    }
+    _cache_put(
+        _SECURITY_ALERTS_CACHE, cache_key, _strip_security_alert_runtime_fields(payload)
+    )
+    return _with_security_alert_runtime_fields(
+        payload,
+        cache_hit=False,
+        cache_age_sec=0.0,
+        stale=False,
+        source_status="live",
+    )
+
+
 def _coinglass_ts_to_iso(value: Any) -> Optional[str]:
     ts = _safe_dt(value)
     if ts is None:
@@ -4585,6 +5846,653 @@ def _coinglass_ts_to_iso(value: Any) -> Optional[str]:
     return ts.astimezone(timezone.utc).isoformat()
 
 
+def _calendar_importance_label(value: Any) -> str:
+    level = int(_safe_float(value))
+    if level >= 3:
+        return "high"
+    if level >= 2:
+        return "medium"
+    return "low"
+
+
+def _calendar_importance_rank(value: Any) -> int:
+    text = str(value or "").strip().lower()
+    if text == "critical":
+        return 4
+    if text == "high":
+        return 3
+    if text == "medium":
+        return 2
+    if text == "low":
+        return 1
+    return max(0, min(4, int(_safe_float(value))))
+
+
+def _calendar_sort_key(item: Dict[str, Any]) -> tuple[str, int, int, float]:
+    category_rank = {
+        "economic": 0,
+        "central_bank": 1,
+        "unlock": 2,
+        "expiry": 3,
+    }.get(str(item.get("category") or "").strip().lower(), 9)
+    return (
+        str(item.get("time_utc") or ""),
+        category_rank,
+        -_calendar_importance_rank(item.get("importance")),
+        -_safe_float(item.get("amount_usd")),
+    )
+
+
+def _dedupe_calendar_events(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for item in list(items or []):
+        row = dict(item or {})
+        key = (
+            str(row.get("category") or "").strip().lower(),
+            str(row.get("time_utc") or "").strip(),
+            str(row.get("name") or row.get("title") or "").strip().lower(),
+        )
+        if not key[1] or not key[2] or key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    out.sort(key=_calendar_sort_key)
+    return out
+
+
+def _calendar_dt_utc(value: Any) -> Optional[datetime]:
+    dt = _safe_dt(value)
+    if dt is None:
+        return None
+    return (
+        dt.replace(tzinfo=timezone.utc)
+        if dt.tzinfo is None
+        else dt.astimezone(timezone.utc)
+    )
+
+
+def _calendar_note_parts(*parts: Any) -> Optional[str]:
+    values = [str(part or "").strip() for part in parts if str(part or "").strip()]
+    return " | ".join(values) if values else None
+
+
+def _is_major_calendar_country(country_code: Any, country_name: Any) -> bool:
+    code = str(country_code or "").strip().upper()
+    if code in _COINGLASS_CALENDAR_MAJOR_COUNTRY_CODES:
+        return True
+    name = str(country_name or "").strip().lower()
+    return any(
+        token in name
+        for token in (
+            "united states",
+            "america",
+            "美国",
+            "china",
+            "中国",
+            "euro",
+            "欧元",
+            "japan",
+            "日本",
+            "united kingdom",
+            "britain",
+            "英国",
+            "canada",
+            "加拿大",
+            "australia",
+            "澳大利亚",
+            "switzerland",
+            "瑞士",
+        )
+    )
+
+
+def _is_market_moving_calendar_name(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    compact = text.replace(" ", "")
+    return any(
+        keyword in text or keyword.replace(" ", "") in compact
+        for keyword in _COINGLASS_CALENDAR_PRIORITY_KEYWORDS
+    )
+
+
+def _normalize_coinglass_economic_calendar_item(row: Dict[str, Any]) -> Dict[str, Any]:
+    country_name = str(row.get("country_name") or "").strip()
+    country_code = str(row.get("country_code") or "").strip().upper()
+    event_name = str(row.get("calendar_name") or "").strip()
+    if not event_name:
+        return {}
+    timestamp = _coinglass_ts_to_iso(row.get("publish_timestamp"))
+    if not timestamp:
+        return {}
+    note = _calendar_note_parts(
+        f"影响 {str(row.get('data_effect') or '').strip()}",
+        f"前值 {str(row.get('previous_value') or '').strip()}",
+        f"预期 {str(row.get('forecast_value') or '').strip()}",
+        f"公布 {str(row.get('published_value') or '').strip()}",
+    )
+    return {
+        "category": "economic",
+        "name": " ".join(part for part in (country_name, event_name) if part).strip(),
+        "time_utc": timestamp,
+        "importance": _calendar_importance_label(row.get("importance_level")),
+        "source": "coinglass_economic_data",
+        "provider": "coinglass_economic_data",
+        "country_code": country_code or None,
+        "country_name": country_name or None,
+        "event_name": event_name,
+        "has_exact_publish_time": bool(
+            int(_safe_float(row.get("has_exact_publish_time")))
+        ),
+        "note": note,
+    }
+
+
+def _should_keep_coinglass_economic_event(item: Dict[str, Any]) -> bool:
+    importance_rank = _calendar_importance_rank(item.get("importance"))
+    if importance_rank >= 3:
+        return True
+    if importance_rank < 2:
+        return False
+    if not _is_major_calendar_country(
+        item.get("country_code"), item.get("country_name")
+    ):
+        return False
+    return _is_market_moving_calendar_name(item.get("event_name") or item.get("name"))
+
+
+def _normalize_coinglass_central_bank_calendar_item(
+    row: Dict[str, Any]
+) -> Dict[str, Any]:
+    country_name = str(row.get("country_name") or "").strip()
+    country_code = str(row.get("country_code") or "").strip().upper()
+    event_name = str(row.get("calendar_name") or "").strip()
+    if not event_name:
+        return {}
+    timestamp = _coinglass_ts_to_iso(row.get("publish_timestamp"))
+    if not timestamp:
+        return {}
+    return {
+        "category": "central_bank",
+        "name": " ".join(part for part in (country_name, event_name) if part).strip(),
+        "time_utc": timestamp,
+        "importance": _calendar_importance_label(row.get("importance_level")),
+        "source": "coinglass_central_bank",
+        "provider": "coinglass_central_bank",
+        "country_code": country_code or None,
+        "country_name": country_name or None,
+        "event_name": event_name,
+        "has_exact_publish_time": bool(
+            int(_safe_float(row.get("has_exact_publish_time")))
+        ),
+        "note": "央行活动",
+    }
+
+
+def _should_keep_coinglass_central_bank_event(item: Dict[str, Any]) -> bool:
+    importance_rank = _calendar_importance_rank(item.get("importance"))
+    if importance_rank >= 3:
+        return True
+    return importance_rank >= 2 and _is_major_calendar_country(
+        item.get("country_code"), item.get("country_name")
+    )
+
+
+def _unlock_event_importance(
+    amount_usd: Optional[float],
+    circulating_pct: Optional[float],
+    supply_pct: Optional[float],
+) -> str:
+    if (
+        (amount_usd is not None and amount_usd >= 50_000_000)
+        or (circulating_pct is not None and circulating_pct >= 5.0)
+        or (supply_pct is not None and supply_pct >= 2.0)
+    ):
+        return "high"
+    if (
+        (amount_usd is not None and amount_usd >= 10_000_000)
+        or (circulating_pct is not None and circulating_pct >= 1.0)
+        or (supply_pct is not None and supply_pct >= 0.5)
+    ):
+        return "medium"
+    return "low"
+
+
+def _normalize_coinglass_unlock_calendar_item(row: Dict[str, Any]) -> Dict[str, Any]:
+    symbol = str(row.get("symbol") or "").strip().upper()
+    project_name = str(row.get("name") or "").strip()
+    if not symbol:
+        return {}
+    timestamp = _coinglass_ts_to_iso(row.get("next_unlock_date"))
+    if not timestamp:
+        return {}
+    amount_usd = _optional_finite_float(row.get("next_unlock_usd"))
+    circulating_pct = _optional_finite_float(row.get("next_unlock_of_circulating"))
+    supply_pct = _optional_finite_float(row.get("next_unlock_of_supply"))
+    importance = _unlock_event_importance(amount_usd, circulating_pct, supply_pct)
+    note = _calendar_note_parts(
+        f"项目 {project_name}",
+        f"约 ${amount_usd:,.0f}" if amount_usd is not None else None,
+        f"流通占比 {circulating_pct:.2f}%" if circulating_pct is not None else None,
+        f"总供给占比 {supply_pct:.2f}%" if supply_pct is not None else None,
+    )
+    return {
+        "category": "unlock",
+        "name": f"{symbol} 代币解锁",
+        "time_utc": timestamp,
+        "importance": importance,
+        "source": "coinglass_unlock_list",
+        "provider": "coinglass_unlock_list",
+        "symbol": symbol,
+        "project_name": project_name or None,
+        "amount_usd": round(amount_usd, 2) if amount_usd is not None else None,
+        "unlock_of_circulating_pct": round(circulating_pct, 4)
+        if circulating_pct is not None
+        else None,
+        "unlock_of_supply_pct": round(supply_pct, 4)
+        if supply_pct is not None
+        else None,
+        "note": note,
+    }
+
+
+def _coinglass_payload_rows(response: Dict[str, Any]) -> List[Dict[str, Any]]:
+    payload = dict((response or {}).get("payload") or {})
+    rows = payload.get("data")
+    return [dict(item or {}) for item in list(rows or []) if isinstance(item, dict)]
+
+
+async def _fetch_coinglass_economic_calendar_events(
+    *, days: int, language: str = "zh"
+) -> Dict[str, Any]:
+    if not coinglass_enabled():
+        return {
+            "available": False,
+            "source": "coinglass_economic_data",
+            "error": "coinglass_disabled",
+            "events": [],
+            "coverage_end": None,
+        }
+
+    now = datetime.now(timezone.utc)
+    lookahead_days = max(1, min(int(days or 1), _COINGLASS_CALENDAR_LOOKAHEAD_DAYS))
+    coverage_end = now + timedelta(days=lookahead_days)
+    try:
+        async with CoinglassClient(
+            timeout_sec=_ANALYTICS_CALENDAR_TIMEOUT_SEC
+        ) as client:
+            response = await client.request_json(
+                "/v4/api/calendar/economic-data",
+                params={
+                    "language": str(language or "zh"),
+                    "start_time": int(now.timestamp() * 1000),
+                    "end_time": int(coverage_end.timestamp() * 1000),
+                },
+                manual=False,
+            )
+    except Exception as exc:
+        return {
+            "available": False,
+            "source": "coinglass_economic_data",
+            "error": str(exc),
+            "events": [],
+            "coverage_end": coverage_end.isoformat(),
+        }
+
+    events: List[Dict[str, Any]] = []
+    for row in _coinglass_payload_rows(response):
+        event = _normalize_coinglass_economic_calendar_item(row)
+        if not event or not _should_keep_coinglass_economic_event(event):
+            continue
+        event_dt = _calendar_dt_utc(event.get("time_utc"))
+        if not event_dt or event_dt < now or event_dt > coverage_end:
+            continue
+        events.append(event)
+    events = _dedupe_calendar_events(events)[:40]
+    return {
+        "available": bool(events),
+        "source": "coinglass_economic_data",
+        "error": "",
+        "events": events,
+        "coverage_end": coverage_end.isoformat(),
+    }
+
+
+async def _fetch_coinglass_central_bank_calendar_events(
+    *, days: int, language: str = "zh"
+) -> Dict[str, Any]:
+    if not coinglass_enabled():
+        return {
+            "available": False,
+            "source": "coinglass_central_bank",
+            "error": "coinglass_disabled",
+            "events": [],
+            "coverage_end": None,
+        }
+
+    now = datetime.now(timezone.utc)
+    lookahead_days = max(1, min(int(days or 1), _COINGLASS_CALENDAR_LOOKAHEAD_DAYS))
+    coverage_end = now + timedelta(days=lookahead_days)
+    try:
+        async with CoinglassClient(
+            timeout_sec=_ANALYTICS_CALENDAR_TIMEOUT_SEC
+        ) as client:
+            response = await client.request_json(
+                "/v4/api/calendar/central-bank-activities",
+                params={
+                    "language": str(language or "zh"),
+                    "start_time": int(now.timestamp() * 1000),
+                    "end_time": int(coverage_end.timestamp() * 1000),
+                },
+                manual=False,
+            )
+    except Exception as exc:
+        return {
+            "available": False,
+            "source": "coinglass_central_bank",
+            "error": str(exc),
+            "events": [],
+            "coverage_end": coverage_end.isoformat(),
+        }
+
+    events: List[Dict[str, Any]] = []
+    for row in _coinglass_payload_rows(response):
+        event = _normalize_coinglass_central_bank_calendar_item(row)
+        if not event or not _should_keep_coinglass_central_bank_event(event):
+            continue
+        event_dt = _calendar_dt_utc(event.get("time_utc"))
+        if not event_dt or event_dt < now or event_dt > coverage_end:
+            continue
+        events.append(event)
+    events = _dedupe_calendar_events(events)[:24]
+    return {
+        "available": bool(events),
+        "source": "coinglass_central_bank",
+        "error": "",
+        "events": events,
+        "coverage_end": coverage_end.isoformat(),
+    }
+
+
+async def _fetch_coinglass_unlock_calendar_events(*, days: int) -> Dict[str, Any]:
+    if not coinglass_enabled():
+        return {
+            "available": False,
+            "source": "coinglass_unlock_list",
+            "error": "coinglass_disabled",
+            "events": [],
+        }
+
+    now = datetime.now(timezone.utc)
+    end = now + timedelta(days=max(1, min(int(days or 1), 180)))
+    events: List[Dict[str, Any]] = []
+    try:
+        async with CoinglassClient(
+            timeout_sec=_ANALYTICS_CALENDAR_TIMEOUT_SEC
+        ) as client:
+            for page in range(1, _COINGLASS_UNLOCK_MAX_PAGES + 1):
+                response = await client.request_json(
+                    "/v4/api/coin/unlock-list",
+                    params={"page": page, "per_page": 100},
+                    manual=False,
+                )
+                rows = _coinglass_payload_rows(response)
+                if not rows:
+                    break
+
+                page_dates: List[datetime] = []
+                for row in rows:
+                    event = _normalize_coinglass_unlock_calendar_item(row)
+                    if not event:
+                        continue
+                    event_dt = _calendar_dt_utc(event.get("time_utc"))
+                    if event_dt is None:
+                        continue
+                    page_dates.append(event_dt)
+                    if event_dt < now or event_dt > end:
+                        continue
+                    events.append(event)
+
+                if page_dates and min(page_dates) > end:
+                    break
+    except Exception as exc:
+        return {
+            "available": False,
+            "source": "coinglass_unlock_list",
+            "error": str(exc),
+            "events": [],
+        }
+
+    deduped = _dedupe_calendar_events(events)
+    significant = [
+        item
+        for item in deduped
+        if _calendar_importance_rank(item.get("importance")) >= 2
+    ]
+    selected = significant or deduped
+    selected.sort(
+        key=lambda item: (
+            str(item.get("time_utc") or ""),
+            -_safe_float(item.get("amount_usd")),
+            -_calendar_importance_rank(item.get("importance")),
+        )
+    )
+    selected = selected[: max(6, min(int(days or 1), 12))]
+    return {
+        "available": bool(selected),
+        "source": "coinglass_unlock_list",
+        "error": "",
+        "events": selected,
+    }
+
+
+def _build_internal_estimate_calendar_events(
+    *,
+    now: datetime,
+    end: datetime,
+    start: Optional[datetime] = None,
+    include_economic: bool = True,
+    include_unlocks: bool = True,
+    include_expiry: bool = True,
+) -> List[Dict[str, Any]]:
+    window_start = start or now
+    if window_start.tzinfo is None:
+        window_start = window_start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    events: List[Dict[str, Any]] = []
+
+    if include_economic:
+        month_cursor = datetime(
+            window_start.year, window_start.month, 1, tzinfo=timezone.utc
+        )
+        while month_cursor <= end:
+            cpi_day = datetime(
+                month_cursor.year, month_cursor.month, 12, 13, 30, tzinfo=timezone.utc
+            )
+            while cpi_day.weekday() >= 5:
+                cpi_day += timedelta(days=1)
+            if window_start <= cpi_day <= end:
+                events.append(
+                    {
+                        "category": "economic",
+                        "name": "美国 CPI（预估）",
+                        "time_utc": cpi_day.isoformat(),
+                        "importance": "high",
+                        "source": "internal_estimate",
+                        "provider": "internal_estimate",
+                        "note": "内置估算日历",
+                    }
+                )
+
+            first_day = datetime(
+                month_cursor.year, month_cursor.month, 1, 13, 30, tzinfo=timezone.utc
+            )
+            offset = (4 - first_day.weekday()) % 7
+            nfp_day = first_day + timedelta(days=offset)
+            if window_start <= nfp_day <= end:
+                events.append(
+                    {
+                        "category": "economic",
+                        "name": "美国非农就业（预估）",
+                        "time_utc": nfp_day.isoformat(),
+                        "importance": "high",
+                        "source": "internal_estimate",
+                        "provider": "internal_estimate",
+                        "note": "内置估算日历",
+                    }
+                )
+            if month_cursor.month == 12:
+                month_cursor = datetime(
+                    month_cursor.year + 1, 1, 1, tzinfo=timezone.utc
+                )
+            else:
+                month_cursor = datetime(
+                    month_cursor.year, month_cursor.month + 1, 1, tzinfo=timezone.utc
+                )
+
+        fomc_2026 = [
+            "2026-03-18T18:00:00",
+            "2026-04-29T18:00:00",
+            "2026-06-17T18:00:00",
+            "2026-07-29T18:00:00",
+            "2026-09-16T18:00:00",
+            "2026-10-28T18:00:00",
+            "2026-12-09T18:00:00",
+        ]
+        for item in fomc_2026:
+            dt = _calendar_dt_utc(item)
+            if dt and window_start <= dt <= end:
+                events.append(
+                    {
+                        "category": "economic",
+                        "name": "FOMC 利率决议（预估）",
+                        "time_utc": dt.isoformat(),
+                        "importance": "high",
+                        "source": "internal_estimate",
+                        "provider": "internal_estimate",
+                        "note": "内置估算日历",
+                    }
+                )
+
+    if include_unlocks:
+        unlock_templates = [
+            ("APT", 20),
+            ("SUI", 25),
+            ("ARB", 28),
+            ("OP", 21),
+        ]
+        for token, base_day in unlock_templates:
+            dt = datetime(
+                window_start.year,
+                window_start.month,
+                min(base_day, 28),
+                8,
+                0,
+                tzinfo=timezone.utc,
+            )
+            for _ in range(6):
+                if dt < window_start:
+                    dt = (dt + timedelta(days=32)).replace(day=min(base_day, 28))
+                    continue
+                if dt > end:
+                    break
+                events.append(
+                    {
+                        "category": "unlock",
+                        "name": f"{token} 代币解锁（估算）",
+                        "time_utc": dt.isoformat(),
+                        "importance": "medium",
+                        "source": "internal_estimate",
+                        "provider": "internal_estimate",
+                        "symbol": token,
+                        "note": "内置估算日历",
+                    }
+                )
+                dt = (dt + timedelta(days=32)).replace(day=min(base_day, 28))
+
+    if include_expiry:
+        expiry = window_start.replace(hour=8, minute=0, second=0, microsecond=0)
+        for _ in range(24):
+            while expiry.weekday() != 4:
+                expiry += timedelta(days=1)
+            if expiry > end:
+                break
+            if expiry >= window_start:
+                events.append(
+                    {
+                        "category": "expiry",
+                        "name": "周五交割 / 到期提醒",
+                        "time_utc": expiry.isoformat(),
+                        "importance": "medium",
+                        "source": "internal_estimate",
+                        "provider": "internal_estimate",
+                        "note": "内部规则提醒",
+                    }
+                )
+            expiry += timedelta(days=7)
+
+    return _dedupe_calendar_events(events)
+
+
+def _trading_calendar_official_count(payload: Optional[Dict[str, Any]]) -> int:
+    data = dict(payload or {})
+    source_details = dict(data.get("source_details") or {})
+    total = sum(
+        int((source_details.get(key) or {}).get("count") or 0)
+        for key in ("economic", "central_bank", "unlocks")
+    )
+    if total > 0:
+        return total
+    return sum(
+        1
+        for item in list(data.get("events") or [])
+        if str((item or {}).get("source") or "").strip().startswith("coinglass_")
+    )
+
+
+def _calendar_all_official_sources_failed(
+    economic_payload: Dict[str, Any],
+    central_bank_payload: Dict[str, Any],
+    unlock_payload: Dict[str, Any],
+) -> bool:
+    return all(
+        bool(str((payload or {}).get("error") or "").strip())
+        for payload in (economic_payload, central_bank_payload, unlock_payload)
+    )
+
+
+def _with_trading_calendar_runtime_fields(
+    payload: Dict[str, Any],
+    *,
+    cache_hit: bool,
+    cache_age_sec: Optional[float],
+    stale: bool,
+    source_status: str,
+    stale_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    out = copy.deepcopy(payload or {})
+    out["cache_hit"] = bool(cache_hit)
+    out["cache_age_sec"] = (
+        round(float(cache_age_sec or 0.0), 3) if cache_age_sec is not None else None
+    )
+    out["stale"] = bool(stale)
+    out["source_status"] = str(
+        source_status
+        or ("cache_stale" if stale else ("cache_fresh" if cache_hit else "live"))
+    )
+    if stale_reason:
+        out["stale_reason"] = str(stale_reason)
+        stale_note = "CoinGlass 官方日历刷新失败，已回退到最近一次成功快照"
+        note_parts = [str(out.get("note") or "").strip(), stale_note]
+        out["note"] = "；".join(dict.fromkeys(part for part in note_parts if part))
+    else:
+        out.pop("stale_reason", None)
+    return out
+
+
 def _normalize_coinglass_news_item(row: Dict[str, Any]) -> Dict[str, Any]:
     title = str(row.get("article_title") or row.get("title") or "").strip()
     article_id = row.get("article_id") or row.get("id")
@@ -4593,7 +6501,9 @@ def _normalize_coinglass_news_item(row: Dict[str, Any]) -> Dict[str, Any]:
         or _coinglass_ts_to_iso(row.get("created_at"))
         or _coinglass_ts_to_iso(row.get("published_at"))
     )
-    source = str(row.get("article_source_name") or row.get("source_name") or "coinglass").strip()
+    source = str(
+        row.get("article_source_name") or row.get("source_name") or "coinglass"
+    ).strip()
     return {
         "title": title,
         "code": article_id,
@@ -4604,7 +6514,9 @@ def _normalize_coinglass_news_item(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _normalize_coinglass_whale_item(row: Dict[str, Any], *, btc_price: float) -> Dict[str, Any]:
+def _normalize_coinglass_whale_item(
+    row: Dict[str, Any], *, btc_price: float
+) -> Dict[str, Any]:
     amount_usd = _safe_float(row.get("amount_usd"))
     asset_qty = _safe_float(row.get("asset_quantity"))
     btc_equiv = amount_usd / btc_price if btc_price > 0 and amount_usd > 0 else 0.0
@@ -4622,7 +6534,9 @@ def _normalize_coinglass_whale_item(row: Dict[str, Any], *, btc_price: float) ->
     }
 
 
-def _normalize_coinglass_exchange_chain_item(row: Dict[str, Any], *, btc_price: float) -> Dict[str, Any]:
+def _normalize_coinglass_exchange_chain_item(
+    row: Dict[str, Any], *, btc_price: float
+) -> Dict[str, Any]:
     amount_usd = _safe_float(row.get("amount_usd"))
     asset_qty = _safe_float(row.get("asset_quantity"))
     btc_equiv = amount_usd / btc_price if btc_price > 0 and amount_usd > 0 else 0.0
@@ -4660,7 +6574,8 @@ def _build_exchange_flow_summary(transactions: List[Dict[str, Any]]) -> Dict[str
     relevant = [
         dict(item or {})
         for item in transactions
-        if str((item or {}).get("provider") or "").strip() == "coinglass_exchange_chain_tx"
+        if str((item or {}).get("provider") or "").strip()
+        == "coinglass_exchange_chain_tx"
     ]
     if not relevant:
         return {}
@@ -4681,8 +6596,12 @@ def _build_exchange_flow_summary(transactions: List[Dict[str, Any]]) -> Dict[str
             outflow_count += 1
         else:
             other_count += 1
-        transfer_type = str(item.get("transfer_type") or "").strip().lower() or "unknown"
-        transfer_type_breakdown[transfer_type] = int(transfer_type_breakdown.get(transfer_type) or 0) + 1
+        transfer_type = (
+            str(item.get("transfer_type") or "").strip().lower() or "unknown"
+        )
+        transfer_type_breakdown[transfer_type] = (
+            int(transfer_type_breakdown.get(transfer_type) or 0) + 1
+        )
         exchange_name = str(item.get("exchange_name") or "").strip()
         if exchange_name:
             exchange_names.append(exchange_name)
@@ -4703,7 +6622,9 @@ def _build_exchange_flow_summary(transactions: List[Dict[str, Any]]) -> Dict[str
     }
 
 
-def _dedupe_announcements(items: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+def _dedupe_announcements(
+    items: List[Dict[str, Any]], *, limit: int
+) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     seen = set()
     for item in items:
@@ -4719,7 +6640,9 @@ def _dedupe_announcements(items: List[Dict[str, Any]], *, limit: int) -> List[Di
     return out
 
 
-def _merge_whale_payloads(*payloads: Dict[str, Any], threshold_btc: float, btc_price: float) -> Dict[str, Any]:
+def _merge_whale_payloads(
+    *payloads: Dict[str, Any], threshold_btc: float, btc_price: float
+) -> Dict[str, Any]:
     transactions: List[Dict[str, Any]] = []
     seen_hashes = set()
     source_names: List[str] = []
@@ -4736,7 +6659,11 @@ def _merge_whale_payloads(*payloads: Dict[str, Any], threshold_btc: float, btc_p
         if error:
             errors.append(error)
         for tx in list(item.get("transactions") or []):
-            tx_hash = str((tx or {}).get("hash") or (tx or {}).get("transaction_hash") or "").strip().lower()
+            tx_hash = (
+                str((tx or {}).get("hash") or (tx or {}).get("transaction_hash") or "")
+                .strip()
+                .lower()
+            )
             dedupe_key = tx_hash or json.dumps(tx, ensure_ascii=False, sort_keys=True)
             if dedupe_key in seen_hashes:
                 continue
@@ -4746,7 +6673,8 @@ def _merge_whale_payloads(*payloads: Dict[str, Any], threshold_btc: float, btc_p
     return {
         "available": available,
         "error": "; ".join(dict.fromkeys(error for error in errors if error)),
-        "source_name": "+".join(dict.fromkeys(name for name in source_names if name)) or "public_chain_proxy",
+        "source_name": "+".join(dict.fromkeys(name for name in source_names if name))
+        or "public_chain_proxy",
         "threshold_btc": threshold_btc,
         "btc_price": btc_price,
         "count": len(transactions),
@@ -4760,10 +6688,16 @@ async def _fetch_coinglass_news(*, symbol: str, limit: int = 6) -> List[Dict[str
         return []
     base_symbol = _symbol_base(symbol)
     try:
-        async with CoinglassClient(timeout_sec=_ANALYTICS_ANNOUNCEMENT_TIMEOUT_SEC) as client:
+        async with CoinglassClient(
+            timeout_sec=_ANALYTICS_ANNOUNCEMENT_TIMEOUT_SEC
+        ) as client:
             response = await client.request_json(
                 "/v4/api/article/list",
-                params={"page": 1, "per_page": max(1, min(int(limit) * 3, 30)), "language": "en"},
+                params={
+                    "page": 1,
+                    "per_page": max(1, min(int(limit) * 3, 30)),
+                    "language": "en",
+                },
                 manual=False,
             )
     except Exception:
@@ -4831,12 +6765,20 @@ async def _fetch_coinglass_whale_transfers(
         }
 
     rows = list(((response.get("payload") or {}).get("data") or []))
-    transactions = [_normalize_coinglass_whale_item(dict(row or {}), btc_price=btc_price) for row in rows]
+    transactions = [
+        _normalize_coinglass_whale_item(dict(row or {}), btc_price=btc_price)
+        for row in rows
+    ]
     threshold_usd = (min_btc * btc_price) if btc_price > 0 else 0.0
-    filtered = [
-        item for item in transactions
-        if _safe_float(item.get("amount_usd")) >= threshold_usd
-    ] if threshold_usd > 0 else transactions
+    filtered = (
+        [
+            item
+            for item in transactions
+            if _safe_float(item.get("amount_usd")) >= threshold_usd
+        ]
+        if threshold_usd > 0
+        else transactions
+    )
     return {
         "available": bool(filtered),
         "error": "",
@@ -4901,12 +6843,19 @@ async def _fetch_coinglass_exchange_chain_transfers(
         }
 
     rows = list(((response.get("payload") or {}).get("data") or []))
-    transactions = [_normalize_coinglass_exchange_chain_item(dict(row or {}), btc_price=btc_price) for row in rows]
-    filtered = [
-        item
-        for item in transactions
-        if _safe_float(item.get("amount_usd")) >= threshold_usd
-    ] if threshold_usd > 0 else transactions
+    transactions = [
+        _normalize_coinglass_exchange_chain_item(dict(row or {}), btc_price=btc_price)
+        for row in rows
+    ]
+    filtered = (
+        [
+            item
+            for item in transactions
+            if _safe_float(item.get("amount_usd")) >= threshold_usd
+        ]
+        if threshold_usd > 0
+        else transactions
+    )
     return {
         "available": bool(filtered),
         "error": "",
@@ -5000,8 +6949,18 @@ async def get_advanced_performance(days: int = 90):
             "trade_count": 0,
             "risk_adjusted": {"sharpe": 0.0, "sortino": 0.0, "calmar": 0.0},
             "trade_quality": {"ev": 0.0, "avg_r_multiple": 0.0, "profit_factor": 0.0},
-            "win_rate_breakdown": {"overall": 0.0, "by_strategy": [], "by_symbol": [], "by_session": []},
-            "drawdown": {"max_drawdown_usd": 0.0, "max_drawdown_pct": 0.0, "duration": 0, "recovery": 0},
+            "win_rate_breakdown": {
+                "overall": 0.0,
+                "by_strategy": [],
+                "by_symbol": [],
+                "by_session": [],
+            },
+            "drawdown": {
+                "max_drawdown_usd": 0.0,
+                "max_drawdown_pct": 0.0,
+                "duration": 0,
+                "recovery": 0,
+            },
             "streaks": {"max_win_streak": 0, "max_loss_streak": 0},
         }
 
@@ -5037,8 +6996,16 @@ async def get_advanced_performance(days: int = 90):
     for pnl in pnls:
         equity_curve.append(equity_curve[-1] + pnl)
     dd = _drawdown_profile(equity_curve)
-    annual_return = ((equity_curve[-1] / equity_curve[0]) ** (365.0 / max(1.0, float(days))) - 1.0) if equity_curve[0] > 0 else 0.0
-    calmar = (annual_return / max(1e-9, dd["max_drawdown_pct"] / 100.0)) if dd["max_drawdown_pct"] > 0 else 0.0
+    annual_return = (
+        ((equity_curve[-1] / equity_curve[0]) ** (365.0 / max(1.0, float(days))) - 1.0)
+        if equity_curve[0] > 0
+        else 0.0
+    )
+    calmar = (
+        (annual_return / max(1e-9, dd["max_drawdown_pct"] / 100.0))
+        if dd["max_drawdown_pct"] > 0
+        else 0.0
+    )
 
     def _breakdown(key: str) -> List[Dict[str, Any]]:
         rows: Dict[str, List[float]] = {}
@@ -5077,7 +7044,9 @@ async def get_advanced_performance(days: int = 90):
             "avg_loss": round(avg_loss, 6),
             "ev": round(ev, 6),
             "avg_r_multiple": round(statistics.fmean(r_values) if r_values else 0.0, 6),
-            "median_r_multiple": round(statistics.median(r_values) if r_values else 0.0, 6),
+            "median_r_multiple": round(
+                statistics.median(r_values) if r_values else 0.0, 6
+            ),
             "profit_factor": round(profit_factor, 6),
         },
         "win_rate_breakdown": {
@@ -5094,7 +7063,7 @@ async def get_advanced_performance(days: int = 90):
     }
 
 
-async def get_risk_dashboard(lookback: int = 240):
+async def _build_risk_dashboard_payload(lookback: int = 240) -> Dict[str, Any]:
     lookback = max(60, min(int(lookback or 240), 2000))
     report = risk_manager.get_risk_report()
     positions = position_manager.get_all_positions()
@@ -5117,8 +7086,16 @@ async def get_risk_dashboard(lookback: int = 240):
         side = str(getattr(p, "side", "") or "")
         liq_price = _safe_float(getattr(p, "liquidation_price", 0.0))
         if liq_price <= 0 and entry > 0:
-            liq_price = entry * (1.0 - (0.9 / lev)) if side == "long" else entry * (1.0 + (0.9 / lev))
-        dist_pct = abs((current - liq_price) / current * 100) if current > 0 and liq_price > 0 else None
+            liq_price = (
+                entry * (1.0 - (0.9 / lev))
+                if side == "long"
+                else entry * (1.0 + (0.9 / lev))
+            )
+        dist_pct = (
+            abs((current - liq_price) / current * 100)
+            if current > 0 and liq_price > 0
+            else None
+        )
         liq_rows.append(
             {
                 "symbol": symbol,
@@ -5130,12 +7107,16 @@ async def get_risk_dashboard(lookback: int = 240):
         )
 
     concentration = []
-    for symbol, value in sorted(exposure_by_symbol.items(), key=lambda x: x[1], reverse=True):
+    for symbol, value in sorted(
+        exposure_by_symbol.items(), key=lambda x: x[1], reverse=True
+    ):
         concentration.append(
             {
                 "symbol": symbol,
                 "exposure": round(value, 6),
-                "weight": round((value / total_exposure) if total_exposure > 0 else 0.0, 6),
+                "weight": round(
+                    (value / total_exposure) if total_exposure > 0 else 0.0, 6
+                ),
             }
         )
 
@@ -5160,7 +7141,9 @@ async def get_risk_dashboard(lookback: int = 240):
                         vals.append(abs(_safe_float(corr_df.iloc[i, j])))
                 avg_abs_corr = statistics.fmean(vals) if vals else 0.0
 
-    history = await account_snapshot_manager.get_history(hours=168, exchange="all", limit=1200)
+    history = await account_snapshot_manager.get_history(
+        hours=168, exchange="all", limit=1200
+    )
     ret = []
     prev = None
     for row in history:
@@ -5177,7 +7160,9 @@ async def get_risk_dashboard(lookback: int = 240):
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "risk_level": report.get("risk_level", "low"),
         "total_exposure": round(total_exposure, 6),
-        "exposure_pct_of_equity": round((total_exposure / equity * 100) if equity > 0 else 0.0, 4),
+        "exposure_pct_of_equity": round(
+            (total_exposure / equity * 100) if equity > 0 else 0.0, 4
+        ),
         "concentration": concentration,
         "correlation_risk": {
             "avg_abs_correlation": round(avg_abs_corr, 6),
@@ -5196,135 +7181,245 @@ async def get_risk_dashboard(lookback: int = 240):
     }
 
 
+async def get_risk_dashboard(lookback: int = 240):
+    lookback = max(60, min(int(lookback or 240), 2000))
+    cache_key = f"lookback:{lookback}"
+    cached, cached_age = _cache_get(
+        _RISK_DASHBOARD_CACHE,
+        cache_key,
+        max_age_sec=_RISK_DASHBOARD_CACHE_TTL_SEC,
+    )
+    if cached is not None:
+        return _with_risk_dashboard_runtime_fields(
+            cached,
+            cache_hit=True,
+            cache_age_sec=cached_age,
+            stale=False,
+            source_status="cache_fresh",
+        )
+
+    stale_cached, stale_age = _cache_get(
+        _RISK_DASHBOARD_CACHE,
+        cache_key,
+        max_age_sec=_RISK_DASHBOARD_STALE_MAX_AGE_SEC,
+    )
+    if stale_cached is not None:
+        _schedule_cache_refresh(
+            _RISK_DASHBOARD_REFRESH_TASKS,
+            cache_key,
+            build_coro=lambda: _build_risk_dashboard_payload(lookback),
+            cache=_RISK_DASHBOARD_CACHE,
+            strip_payload=_strip_risk_dashboard_runtime_fields,
+        )
+        return _with_risk_dashboard_runtime_fields(
+            stale_cached,
+            cache_hit=True,
+            cache_age_sec=stale_age,
+            stale=True,
+            source_status="cache_stale",
+            stale_reason="background_refresh_scheduled",
+        )
+
+    payload = await _build_risk_dashboard_payload(lookback)
+    _cache_put(
+        _RISK_DASHBOARD_CACHE, cache_key, _strip_risk_dashboard_runtime_fields(payload)
+    )
+    return _with_risk_dashboard_runtime_fields(
+        payload,
+        cache_hit=False,
+        cache_age_sec=0.0,
+        stale=False,
+        source_status="live",
+    )
+
+
 async def get_trading_calendar(days: int = 30):
     days = max(1, min(int(days or 30), 180))
+    cache_key = f"days:{days}"
+    fresh_cached, fresh_age = _cache_get(
+        _TRADING_CALENDAR_CACHE,
+        cache_key,
+        max_age_sec=_TRADING_CALENDAR_CACHE_TTL_SEC,
+    )
+    if fresh_cached is not None:
+        return _with_trading_calendar_runtime_fields(
+            fresh_cached,
+            cache_hit=True,
+            cache_age_sec=fresh_age,
+            stale=False,
+            source_status="cache_fresh",
+        )
+    stale_cached, stale_age = _cache_get(
+        _TRADING_CALENDAR_CACHE,
+        cache_key,
+        max_age_sec=_TRADING_CALENDAR_STALE_MAX_AGE_SEC,
+    )
+
     now = datetime.now(timezone.utc)
     end = now + timedelta(days=days)
-    events: List[Dict[str, Any]] = []
+    coinglass_days = min(days, _COINGLASS_CALENDAR_LOOKAHEAD_DAYS)
+    economic_task = asyncio.create_task(
+        _fetch_coinglass_economic_calendar_events(days=coinglass_days)
+    )
+    central_bank_task = asyncio.create_task(
+        _fetch_coinglass_central_bank_calendar_events(days=coinglass_days)
+    )
+    unlock_task = asyncio.create_task(
+        _fetch_coinglass_unlock_calendar_events(days=days)
+    )
+    economic_payload, central_bank_payload, unlock_payload = await asyncio.gather(
+        economic_task,
+        central_bank_task,
+        unlock_task,
+    )
 
-    month_cursor = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
-    while month_cursor <= end:
-        cpi_day = datetime(month_cursor.year, month_cursor.month, 12, 13, 30, tzinfo=timezone.utc)
-        while cpi_day.weekday() >= 5:
-            cpi_day += timedelta(days=1)
-        if now <= cpi_day <= end:
-            events.append(
-                {
-                    "category": "economic",
-                    "name": "美国 CPI（预估）",
-                    "time_utc": cpi_day.isoformat(),
-                    "importance": "high",
-                }
+    economic_payload = dict(economic_payload or {})
+    central_bank_payload = dict(central_bank_payload or {})
+    unlock_payload = dict(unlock_payload or {})
+
+    macro_events = _dedupe_calendar_events(
+        [
+            *(economic_payload.get("events") or []),
+            *(central_bank_payload.get("events") or []),
+        ]
+    )
+    unlock_events = _dedupe_calendar_events(list(unlock_payload.get("events") or []))
+    macro_available = bool(macro_events)
+    unlock_available = bool(unlock_events)
+
+    fallback_events = _build_internal_estimate_calendar_events(
+        now=now,
+        end=end,
+        start=now,
+        include_economic=not macro_available,
+        include_unlocks=not unlock_available,
+        include_expiry=True,
+    )
+
+    supplemental_macro_events: List[Dict[str, Any]] = []
+    if macro_available and days > _COINGLASS_CALENDAR_LOOKAHEAD_DAYS:
+        supplement_start = now + timedelta(days=_COINGLASS_CALENDAR_LOOKAHEAD_DAYS)
+        if supplement_start < end:
+            supplemental_macro_events = _build_internal_estimate_calendar_events(
+                now=now,
+                end=end,
+                start=supplement_start,
+                include_economic=True,
+                include_unlocks=False,
+                include_expiry=False,
             )
 
-        first_day = datetime(month_cursor.year, month_cursor.month, 1, 13, 30, tzinfo=timezone.utc)
-        offset = (4 - first_day.weekday()) % 7
-        nfp_day = first_day + timedelta(days=offset)
-        if now <= nfp_day <= end:
-            events.append(
-                {
-                    "category": "economic",
-                    "name": "美国非农就业（预估）",
-                    "time_utc": nfp_day.isoformat(),
-                    "importance": "high",
-                }
-            )
-        if month_cursor.month == 12:
-            month_cursor = datetime(month_cursor.year + 1, 1, 1, tzinfo=timezone.utc)
-        else:
-            month_cursor = datetime(month_cursor.year, month_cursor.month + 1, 1, tzinfo=timezone.utc)
+    events = _dedupe_calendar_events(
+        [
+            *macro_events,
+            *unlock_events,
+            *fallback_events,
+            *supplemental_macro_events,
+        ]
+    )
 
-    fomc_2026 = [
-        "2026-03-18T18:00:00",
-        "2026-04-29T18:00:00",
-        "2026-06-17T18:00:00",
-        "2026-07-29T18:00:00",
-        "2026-09-16T18:00:00",
-        "2026-10-28T18:00:00",
-        "2026-12-09T18:00:00",
-    ]
-    for item in fomc_2026:
-        dt = _safe_dt(item)
-        if dt and dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        if dt and now <= dt <= end:
-            events.append(
-                {
-                    "category": "economic",
-                    "name": "FOMC 利率决议（预估）",
-                    "time_utc": dt.isoformat(),
-                    "importance": "high",
-                }
-            )
+    source_parts: List[str] = []
+    if macro_events:
+        if economic_payload.get("events"):
+            source_parts.append("coinglass_economic_data")
+        if central_bank_payload.get("events"):
+            source_parts.append("coinglass_central_bank")
+    if unlock_events:
+        source_parts.append("coinglass_unlock_list")
+    if fallback_events or supplemental_macro_events:
+        source_parts.append("internal_estimate")
 
-    unlock_templates = [
-        ("APT", 20),
-        ("SUI", 25),
-        ("ARB", 28),
-        ("OP", 21),
-    ]
-    for token, base_day in unlock_templates:
-        dt = datetime(now.year, now.month, min(base_day, 28), 8, 0, tzinfo=timezone.utc)
-        for _ in range(4):
-            if dt < now:
-                dt = (dt + timedelta(days=32)).replace(day=min(base_day, 28))
-                continue
-            if dt > end:
-                break
-            events.append(
-                {
-                    "category": "unlock",
-                    "name": f"{token} 代币解锁（估算）",
-                    "time_utc": dt.isoformat(),
-                    "importance": "medium",
-                }
-            )
-            dt = (dt + timedelta(days=32)).replace(day=min(base_day, 28))
+    note_parts: List[str] = []
+    if macro_events:
+        note_parts.append("宏观/央行事件优先使用 CoinGlass 官方日历接口")
+    elif economic_payload.get("error") or central_bank_payload.get("error"):
+        note_parts.append("CoinGlass 宏观日历不可用，已回退到内置估算")
+    else:
+        note_parts.append("当前窗口内未命中可用的 CoinGlass 重点宏观事件，已补内置估算")
 
-    expiry = now.replace(hour=8, minute=0, second=0, microsecond=0)
-    for _ in range(20):
-        while expiry.weekday() != 4:
-            expiry += timedelta(days=1)
-        if expiry > end:
-            break
-        if expiry >= now:
-            events.append(
-                {
-                    "category": "expiry",
-                    "name": "周五交割 / 到期提醒",
-                    "time_utc": expiry.isoformat(),
-                    "importance": "medium",
-                }
-            )
-        expiry += timedelta(days=7)
+    if unlock_events:
+        note_parts.append("代币解锁优先使用 CoinGlass Unlock List")
+    elif unlock_payload.get("error"):
+        note_parts.append("CoinGlass 解锁列表不可用，已回退到内置解锁模板")
+    else:
+        note_parts.append("当前窗口内未命中 CoinGlass 解锁事件，已保留内部提醒")
 
-    events.sort(key=lambda x: x["time_utc"])
-    return {
-        "source": "internal_estimate",
-        "note": "宏观与解锁事件为内置估算日历，建议与专业日历交叉确认。",
+    if days > _COINGLASS_CALENDAR_LOOKAHEAD_DAYS and macro_events:
+        note_parts.append(
+            f"CoinGlass 宏观日历未来视窗最多约 {_COINGLASS_CALENDAR_LOOKAHEAD_DAYS} 天，超出部分以内置估算补齐"
+        )
+
+    payload = {
+        "source": "+".join(dict.fromkeys(source_parts)) or "internal_estimate",
+        "note": "；".join(dict.fromkeys(part for part in note_parts if part)),
         "days": days,
         "events": events,
         "count": len(events),
+        "source_details": {
+            "economic": {
+                "available": bool(economic_payload.get("events")),
+                "count": len(list(economic_payload.get("events") or [])),
+                "coverage_end": economic_payload.get("coverage_end"),
+                "error": economic_payload.get("error") or None,
+            },
+            "central_bank": {
+                "available": bool(central_bank_payload.get("events")),
+                "count": len(list(central_bank_payload.get("events") or [])),
+                "coverage_end": central_bank_payload.get("coverage_end"),
+                "error": central_bank_payload.get("error") or None,
+            },
+            "unlocks": {
+                "available": bool(unlock_payload.get("events")),
+                "count": len(list(unlock_payload.get("events") or [])),
+                "error": unlock_payload.get("error") or None,
+            },
+            "internal_estimate": {
+                "used": bool(fallback_events or supplemental_macro_events),
+                "count": len(fallback_events) + len(supplemental_macro_events),
+            },
+        },
     }
+    if (
+        stale_cached is not None
+        and _calendar_all_official_sources_failed(
+            economic_payload, central_bank_payload, unlock_payload
+        )
+        and _trading_calendar_official_count(payload) <= 0
+        and _trading_calendar_official_count(stale_cached) > 0
+    ):
+        return _with_trading_calendar_runtime_fields(
+            stale_cached,
+            cache_hit=True,
+            cache_age_sec=stale_age,
+            stale=True,
+            stale_reason="official_calendar_refresh_failed",
+            source_status="cache_stale",
+        )
+    _cache_put(_TRADING_CALENDAR_CACHE, cache_key, payload)
+    return _with_trading_calendar_runtime_fields(
+        payload,
+        cache_hit=False,
+        cache_age_sec=0.0,
+        stale=False,
+        source_status="live",
+    )
 
 
-async def get_market_microstructure(
+async def _build_market_microstructure_payload(
     exchange: str = "binance",
     symbol: str = "BTC/USDT",
     depth_limit: int = 80,
 ):
-    cache_key = f"{str(exchange or '').lower()}|{str(symbol or '').upper()}|{max(5, min(int(depth_limit), 200))}"
-    now_ts = time.time()
-    cached = _MICROSTRUCTURE_SNAPSHOT_CACHE.get(cache_key)
-    if cached and (now_ts - float(cached.get("ts") or 0.0)) <= _MICROSTRUCTURE_SNAPSHOT_CACHE_TTL_SEC:
-        payload = cached.get("payload")
-        if isinstance(payload, dict):
-            return copy.deepcopy(payload)
-
-    funding_basis_task = asyncio.create_task(_fetch_funding_basis_snapshot(exchange=exchange, symbol=symbol))
-    long_short_task = asyncio.create_task(_fetch_long_short_ratio_snapshot(exchange=exchange, symbol=symbol))
+    funding_basis_task = asyncio.create_task(
+        _fetch_funding_basis_snapshot(exchange=exchange, symbol=symbol)
+    )
+    long_short_task = asyncio.create_task(
+        _fetch_long_short_ratio_snapshot(exchange=exchange, symbol=symbol)
+    )
     options_task = asyncio.create_task(_fetch_options_snapshot(symbol=symbol))
-    coinglass_task = asyncio.create_task(_load_preferred_coinglass_overview(symbol=symbol))
+    coinglass_task = asyncio.create_task(
+        _load_preferred_coinglass_overview(symbol=symbol)
+    )
 
     ob, flow, oi = await asyncio.gather(
         _fetch_orderbook(exchange=exchange, symbol=symbol, limit=depth_limit),
@@ -5338,8 +7433,16 @@ async def get_market_microstructure(
     basis = dict((funding_basis or {}).get("basis") or {"available": False})
     options_data = await options_task
     coinglass_overview = await coinglass_task
-    bids = [[_safe_float(x[0]), _safe_float(x[1])] for x in (ob.get("bids") or []) if len(x) >= 2]
-    asks = [[_safe_float(x[0]), _safe_float(x[1])] for x in (ob.get("asks") or []) if len(x) >= 2]
+    bids = [
+        [_safe_float(x[0]), _safe_float(x[1])]
+        for x in (ob.get("bids") or [])
+        if len(x) >= 2
+    ]
+    asks = [
+        [_safe_float(x[0]), _safe_float(x[1])]
+        for x in (ob.get("asks") or [])
+        if len(x) >= 2
+    ]
     bids = [x for x in bids if x[0] > 0 and x[1] > 0]
     asks = [x for x in asks if x[0] > 0 and x[1] > 0]
     bids.sort(key=lambda x: x[0], reverse=True)
@@ -5355,11 +7458,23 @@ async def get_market_microstructure(
     cumulative = 0.0
     for price, qty in bids[:100]:
         cumulative += qty
-        bid_depth.append({"price": round(price, 8), "qty": round(qty, 8), "cum_qty": round(cumulative, 8)})
+        bid_depth.append(
+            {
+                "price": round(price, 8),
+                "qty": round(qty, 8),
+                "cum_qty": round(cumulative, 8),
+            }
+        )
     cumulative = 0.0
     for price, qty in asks[:100]:
         cumulative += qty
-        ask_depth.append({"price": round(price, 8), "qty": round(qty, 8), "cum_qty": round(cumulative, 8)})
+        ask_depth.append(
+            {
+                "price": round(price, 8),
+                "qty": round(qty, 8),
+                "cum_qty": round(cumulative, 8),
+            }
+        )
 
     all_sizes = sorted([x[1] for x in bids + asks])
     size_threshold = all_sizes[int(len(all_sizes) * 0.95)] if all_sizes else 0.0
@@ -5382,7 +7497,9 @@ async def get_market_microstructure(
         prev_qty = None
         repeat = 0
         for _, qty in rows:
-            if prev_qty is not None and abs(qty - prev_qty) <= max(1e-9, prev_qty * 0.003):
+            if prev_qty is not None and abs(qty - prev_qty) <= max(
+                1e-9, prev_qty * 0.003
+            ):
                 repeat += 1
             prev_qty = qty
         if repeat >= 3:
@@ -5390,7 +7507,9 @@ async def get_market_microstructure(
 
     options_payload = dict(options_data or {})
     options_payload.setdefault("available", False)
-    options_payload.setdefault("currency", symbol.split("/")[0].split(":")[0].upper() if symbol else None)
+    options_payload.setdefault(
+        "currency", symbol.split("/")[0].split(":")[0].upper() if symbol else None
+    )
     options_payload.setdefault("atm_iv", None)
     options_payload.setdefault("skew_25d", None)
     options_payload.setdefault("put_call_ratio", None)
@@ -5452,8 +7571,68 @@ async def get_market_microstructure(
         "options": options_payload,
     }
     payload = _apply_coinglass_derivatives_overlay(payload, coinglass_overview)
-    _MICROSTRUCTURE_SNAPSHOT_CACHE[cache_key] = {"ts": time.time(), "payload": copy.deepcopy(payload)}
     return payload
+
+
+async def get_market_microstructure(
+    exchange: str = "binance",
+    symbol: str = "BTC/USDT",
+    depth_limit: int = 80,
+):
+    cache_key = f"{str(exchange or '').lower()}|{str(symbol or '').upper()}|{max(5, min(int(depth_limit), 200))}"
+    cached, cached_age = _cache_get(
+        _MICROSTRUCTURE_SNAPSHOT_CACHE,
+        cache_key,
+        max_age_sec=_MICROSTRUCTURE_SNAPSHOT_CACHE_TTL_SEC,
+    )
+    if cached is not None:
+        return _with_microstructure_runtime_fields(
+            cached,
+            cache_hit=True,
+            cache_age_sec=cached_age,
+            stale=False,
+            source_status="cache_fresh",
+        )
+
+    stale_cached, stale_age = _cache_get(
+        _MICROSTRUCTURE_SNAPSHOT_CACHE,
+        cache_key,
+        max_age_sec=_MICROSTRUCTURE_SNAPSHOT_STALE_MAX_AGE_SEC,
+    )
+    if stale_cached is not None:
+        _schedule_cache_refresh(
+            _MICROSTRUCTURE_REFRESH_TASKS,
+            cache_key,
+            build_coro=lambda: _build_market_microstructure_payload(
+                exchange=exchange, symbol=symbol, depth_limit=depth_limit
+            ),
+            cache=_MICROSTRUCTURE_SNAPSHOT_CACHE,
+            strip_payload=_strip_microstructure_runtime_fields,
+        )
+        return _with_microstructure_runtime_fields(
+            stale_cached,
+            cache_hit=True,
+            cache_age_sec=stale_age,
+            stale=True,
+            source_status="cache_stale",
+            stale_reason="background_refresh_scheduled",
+        )
+
+    payload = await _build_market_microstructure_payload(
+        exchange=exchange, symbol=symbol, depth_limit=depth_limit
+    )
+    _cache_put(
+        _MICROSTRUCTURE_SNAPSHOT_CACHE,
+        cache_key,
+        _strip_microstructure_runtime_fields(payload),
+    )
+    return _with_microstructure_runtime_fields(
+        payload,
+        cache_hit=False,
+        cache_age_sec=0.0,
+        stale=False,
+        source_status="live",
+    )
 
 
 async def add_behavior_journal(request: BehaviorJournalRequest):
@@ -5483,14 +7662,21 @@ async def get_behavior_report(days: int = 7):
         rows.append(dict(row, _ts=ts))
 
     total = len(rows)
-    impulsive = [x for x in rows if _safe_float(x.get("plan_adherence")) < 0.5 or _safe_float(x.get("confidence")) < 0.35]
+    impulsive = [
+        x
+        for x in rows
+        if _safe_float(x.get("plan_adherence")) < 0.5
+        or _safe_float(x.get("confidence")) < 0.35
+    ]
     mood_count: Dict[str, int] = {}
     for row in rows:
         mood = str(row.get("mood") or "neutral")
         mood_count[mood] = mood_count.get(mood, 0) + 1
 
     risk = risk_manager.get_risk_report()
-    trade_util = _safe_float((risk.get("utilization") or {}).get("daily_trade_utilization"))
+    trade_util = _safe_float(
+        (risk.get("utilization") or {}).get("daily_trade_utilization")
+    )
     overtrade_warn = trade_util >= 0.8
 
     return {
@@ -5498,8 +7684,18 @@ async def get_behavior_report(days: int = 7):
         "entries": total,
         "mood_distribution": mood_count,
         "impulsive_ratio": round((len(impulsive) / total) if total > 0 else 0.0, 6),
-        "avg_confidence": round(statistics.fmean([_safe_float(x.get("confidence")) for x in rows]) if rows else 0.0, 6),
-        "avg_plan_adherence": round(statistics.fmean([_safe_float(x.get("plan_adherence")) for x in rows]) if rows else 0.0, 6),
+        "avg_confidence": round(
+            statistics.fmean([_safe_float(x.get("confidence")) for x in rows])
+            if rows
+            else 0.0,
+            6,
+        ),
+        "avg_plan_adherence": round(
+            statistics.fmean([_safe_float(x.get("plan_adherence")) for x in rows])
+            if rows
+            else 0.0,
+            6,
+        ),
         "overtrading_warning": overtrade_warn,
         "daily_trade_utilization": round(trade_util, 6),
         "deviation_alert": bool(len(impulsive) >= 3 and total >= 5),
@@ -5521,20 +7717,28 @@ async def get_stoploss_policy():
     suggestions = []
     for pos in position_manager.get_all_positions()[:50]:
         symbol = str(getattr(pos, "symbol", "") or "")
-        atr = await _estimate_atr_for_symbol(symbol, period=int(((policy.get("atr") or {}).get("period") or 14)))
+        atr = await _estimate_atr_for_symbol(
+            symbol, period=int(((policy.get("atr") or {}).get("period") or 14))
+        )
         atr_mult = _safe_float((policy.get("atr") or {}).get("multiplier"), default=2.0)
         entry = _safe_float(getattr(pos, "entry_price", 0.0))
         current = _safe_float(getattr(pos, "current_price", 0.0))
         qty = abs(_safe_float(getattr(pos, "quantity", 0.0)))
         side = str(getattr(pos, "side", "") or "")
         opened_at = getattr(pos, "opened_at", None)
-        hold_hours = ((datetime.now(timezone.utc) - opened_at).total_seconds() / 3600.0) if isinstance(opened_at, datetime) else 0.0
+        hold_hours = (
+            ((datetime.now(timezone.utc) - opened_at).total_seconds() / 3600.0)
+            if isinstance(opened_at, datetime)
+            else 0.0
+        )
 
         atr_stop = None
         if atr and entry > 0:
-            atr_stop = entry - atr * atr_mult if side == "long" else entry + atr * atr_mult
+            atr_stop = (
+                entry - atr * atr_mult if side == "long" else entry + atr * atr_mult
+            )
         risk_unit = max(1e-6, entry * qty * 0.01) if entry > 0 and qty > 0 else 1.0
-        current_r = (_safe_float(getattr(pos, "unrealized_pnl", 0.0)) / risk_unit)
+        current_r = _safe_float(getattr(pos, "unrealized_pnl", 0.0)) / risk_unit
         suggestions.append(
             {
                 "symbol": symbol,
@@ -5543,10 +7747,21 @@ async def get_stoploss_policy():
                 "current_price": round(current, 8),
                 "atr_estimate": round(atr, 8) if atr else None,
                 "atr_dynamic_stop": round(atr_stop, 8) if atr_stop else None,
-                "time_stop_triggered": hold_hours >= _safe_float((policy.get("time_stop") or {}).get("max_hours"), default=24),
+                "time_stop_triggered": hold_hours
+                >= _safe_float(
+                    (policy.get("time_stop") or {}).get("max_hours"), default=24
+                ),
                 "r_value": round(current_r, 6),
-                "r_stop_triggered": current_r <= -abs(_safe_float((policy.get("r_stop") or {}).get("max_loss_r"), default=1.0)),
-                "trailing_stop_price": _safe_float(getattr(pos, "trailing_stop_price", 0.0)) or None,
+                "r_stop_triggered": current_r
+                <= -abs(
+                    _safe_float(
+                        (policy.get("r_stop") or {}).get("max_loss_r"), default=1.0
+                    )
+                ),
+                "trailing_stop_price": _safe_float(
+                    getattr(pos, "trailing_stop_price", 0.0)
+                )
+                or None,
                 "partial_exit_plan": policy.get("partial_stop") or {},
             }
         )
@@ -5566,14 +7781,21 @@ async def get_equity_rebalance(
     months: int = 12,
 ):
     hours = max(24, min(int(hours or 168), 24 * 365))
-    hist = await account_snapshot_manager.get_history(hours=hours, exchange="all", limit=2000)
-    equity_series = [{"timestamp": x.get("timestamp"), "value": _safe_float(x.get("total_usd"))} for x in hist]
+    hist = await account_snapshot_manager.get_history(
+        hours=hours, exchange="all", limit=2000
+    )
+    equity_series = [
+        {"timestamp": x.get("timestamp"), "value": _safe_float(x.get("total_usd"))}
+        for x in hist
+    ]
     equity_series = [x for x in equity_series if x["value"] > 0]
 
     benchmark = {}
     points = max(60, min(len(equity_series), 800))
     for sym in ["BTC/USDT", "ETH/USDT"]:
-        bdf = await data_storage.load_klines_from_parquet(exchange="binance", symbol=sym, timeframe="1h")
+        bdf = await data_storage.load_klines_from_parquet(
+            exchange="binance", symbol=sym, timeframe="1h"
+        )
         if bdf is None or bdf.empty:
             continue
         close = pd.to_numeric(bdf["close"], errors="coerce").dropna().tail(points)
@@ -5590,23 +7812,40 @@ async def get_equity_rebalance(
     dist_map: Dict[str, float] = {}
     for _, item in _BALANCE_SNAPSHOT_CACHE.items():
         for ccy, value in (item.get("distribution") or {}).items():
-            dist_map[str(ccy).upper()] = dist_map.get(str(ccy).upper(), 0.0) + _safe_float(value)
+            dist_map[str(ccy).upper()] = dist_map.get(
+                str(ccy).upper(), 0.0
+            ) + _safe_float(value)
     total_dist = sum(dist_map.values())
-    current_alloc = {k: (v / total_dist) for k, v in dist_map.items()} if total_dist > 0 else {}
+    current_alloc = (
+        {k: (v / total_dist) for k, v in dist_map.items()} if total_dist > 0 else {}
+    )
 
     target = _parse_target_allocations(target_alloc)
     drifts = []
     for sym, tar in target.items():
         cur = _safe_float(current_alloc.get(sym), default=0.0)
         drift = cur - tar
-        drifts.append({"asset": sym, "target": round(tar, 6), "current": round(cur, 6), "drift": round(drift, 6)})
-    suggestions = [x for x in drifts if abs(_safe_float(x["drift"])) >= abs(_safe_float(drift_threshold))]
+        drifts.append(
+            {
+                "asset": sym,
+                "target": round(tar, 6),
+                "current": round(cur, 6),
+                "drift": round(drift, 6),
+            }
+        )
+    suggestions = [
+        x
+        for x in drifts
+        if abs(_safe_float(x["drift"])) >= abs(_safe_float(drift_threshold))
+    ]
     suggestions.sort(key=lambda x: abs(_safe_float(x["drift"])), reverse=True)
 
     latest_equity = equity_series[-1]["value"] if equity_series else 0.0
     months = max(1, min(int(months or 12), 120))
     mret = _safe_float(monthly_return, default=0.03)
-    compound_end = latest_equity * ((1.0 + mret) ** months) if latest_equity > 0 else 0.0
+    compound_end = (
+        latest_equity * ((1.0 + mret) ** months) if latest_equity > 0 else 0.0
+    )
 
     return {
         "hours": hours,
@@ -5628,11 +7867,14 @@ async def get_equity_rebalance(
     }
 
 
-async def get_community_overview(symbol: str = "BTC/USDT", exchange: str = "binance"):
+async def _build_community_overview_payload(
+    symbol: str = "BTC/USDT", exchange: str = "binance"
+) -> Dict[str, Any]:
     (
         flow,
         whales,
         announcements,
+        security_alerts,
         coinglass_whales,
         coinglass_exchange_transfers,
         coinglass_news,
@@ -5640,8 +7882,13 @@ async def get_community_overview(symbol: str = "BTC/USDT", exchange: str = "bina
         _fetch_trade_imbalance(exchange=exchange, symbol=symbol, limit=600),
         _fetch_whale_transfers(min_btc=_ANALYTICS_WHALE_MIN_BTC),
         _fetch_binance_announcements(limit=6),
-        _fetch_coinglass_whale_transfers(symbol=symbol, min_btc=_ANALYTICS_WHALE_MIN_BTC),
-        _fetch_coinglass_exchange_chain_transfers(symbol=symbol, min_btc=_ANALYTICS_WHALE_MIN_BTC),
+        _fetch_slowmist_security_alerts(symbol=symbol, limit=6),
+        _fetch_coinglass_whale_transfers(
+            symbol=symbol, min_btc=_ANALYTICS_WHALE_MIN_BTC
+        ),
+        _fetch_coinglass_exchange_chain_transfers(
+            symbol=symbol, min_btc=_ANALYTICS_WHALE_MIN_BTC
+        ),
         _fetch_coinglass_news(symbol=symbol, limit=6),
     )
     merged_whales = _merge_whale_payloads(
@@ -5659,6 +7906,19 @@ async def get_community_overview(symbol: str = "BTC/USDT", exchange: str = "bina
         [*(announcements or []), *(coinglass_news or [])],
         limit=10,
     )
+    security_alerts_payload = dict(security_alerts or {})
+    security_alerts_payload.setdefault("available", False)
+    security_alerts_payload.setdefault("source", "slowmist_hacked")
+    security_alerts_payload.setdefault("scope", "global_fallback")
+    security_alerts_payload.setdefault("error", "")
+    security_alerts_payload.setdefault("events", [])
+    security_alerts_payload.setdefault("cache_hit", False)
+    security_alerts_payload.setdefault("cache_age_sec", None)
+    security_alerts_payload.setdefault("stale", False)
+    security_alerts_payload.setdefault(
+        "source_status",
+        "live" if security_alerts_payload.get("available") else "unavailable",
+    )
     news_sources = list(
         dict.fromkeys(
             source
@@ -5667,7 +7927,10 @@ async def get_community_overview(symbol: str = "BTC/USDT", exchange: str = "bina
                     str(item.get("provider") or "binance_announcements").strip()
                     for item in (announcements or [])
                 ),
-                *(str(item.get("provider") or "").strip() for item in (coinglass_news or [])),
+                *(
+                    str(item.get("provider") or "").strip()
+                    for item in (coinglass_news or [])
+                ),
             )
             if source
         )
@@ -5686,16 +7949,64 @@ async def get_community_overview(symbol: str = "BTC/USDT", exchange: str = "bina
         ],
         "flow_proxy": flow,
         "whale_transfers": merged_whales,
-        "security_alerts": {
-            "available": False,
-            "source": "unavailable",
-            "events": [],
-            "note": "安全告警源尚未接入，当前不返回占位事件。",
-        },
+        "security_alerts": security_alerts_payload,
         "announcements": merged_announcements,
         "news_provider": "+".join(news_sources) if news_sources else None,
         "news_sources": news_sources,
     }
+
+
+async def get_community_overview(symbol: str = "BTC/USDT", exchange: str = "binance"):
+    cache_key = f"{str(exchange or '').lower()}|{str(symbol or '').upper()}"
+    cached, cached_age = _cache_get(
+        _COMMUNITY_OVERVIEW_CACHE,
+        cache_key,
+        max_age_sec=_COMMUNITY_OVERVIEW_CACHE_TTL_SEC,
+    )
+    if cached is not None:
+        return _with_community_runtime_fields(
+            cached,
+            cache_hit=True,
+            cache_age_sec=cached_age,
+            stale=False,
+            source_status="cache_fresh",
+        )
+
+    stale_cached, stale_age = _cache_get(
+        _COMMUNITY_OVERVIEW_CACHE,
+        cache_key,
+        max_age_sec=_COMMUNITY_OVERVIEW_STALE_MAX_AGE_SEC,
+    )
+    if stale_cached is not None:
+        _schedule_cache_refresh(
+            _COMMUNITY_REFRESH_TASKS,
+            cache_key,
+            build_coro=lambda: _build_community_overview_payload(
+                symbol=symbol, exchange=exchange
+            ),
+            cache=_COMMUNITY_OVERVIEW_CACHE,
+            strip_payload=_strip_community_runtime_fields,
+        )
+        return _with_community_runtime_fields(
+            stale_cached,
+            cache_hit=True,
+            cache_age_sec=stale_age,
+            stale=True,
+            source_status="cache_stale",
+            stale_reason="background_refresh_scheduled",
+        )
+
+    payload = await _build_community_overview_payload(symbol=symbol, exchange=exchange)
+    _cache_put(
+        _COMMUNITY_OVERVIEW_CACHE, cache_key, _strip_community_runtime_fields(payload)
+    )
+    return _with_community_runtime_fields(
+        payload,
+        cache_hit=False,
+        cache_age_sec=0.0,
+        stale=False,
+        source_status="live",
+    )
 
 
 async def collect_analytics_history(
@@ -5717,9 +8028,15 @@ async def collect_analytics_history(
             "captured_at": result.get("finished_at"),
             "rows_written": int(result.get("rows_written") or 0),
         },
-        "microstructure": dict((result.get("results") or {}).get("microstructure", {}).get("summary") or {}),
-        "community": dict((result.get("results") or {}).get("community", {}).get("summary") or {}),
-        "whales": dict((result.get("results") or {}).get("whales", {}).get("summary") or {}),
+        "microstructure": dict(
+            (result.get("results") or {}).get("microstructure", {}).get("summary") or {}
+        ),
+        "community": dict(
+            (result.get("results") or {}).get("community", {}).get("summary") or {}
+        ),
+        "whales": dict(
+            (result.get("results") or {}).get("whales", {}).get("summary") or {}
+        ),
     }
 
 
@@ -5731,16 +8048,28 @@ async def get_analytics_history_health(
     depth_limit: int = 80,
 ):
     hours = max(24, min(int(hours or 24 * 7), 24 * 365))
-    cache_key = _analytics_history_cache_key(exchange=exchange, symbol=symbol, hours=hours)
+    cache_key = _analytics_history_cache_key(
+        exchange=exchange, symbol=symbol, hours=hours
+    )
 
-    def _with_common_fields(payload: Dict[str, Any], *, cache_hit: bool, cache_age: Optional[float], stale: bool) -> Dict[str, Any]:
+    def _with_common_fields(
+        payload: Dict[str, Any],
+        *,
+        cache_hit: bool,
+        cache_age: Optional[float],
+        stale: bool,
+    ) -> Dict[str, Any]:
         out = dict(payload or {})
         out["cache_hit"] = bool(cache_hit)
-        out["cache_age_sec"] = round(float(cache_age or 0.0), 3) if cache_age is not None else None
+        out["cache_age_sec"] = (
+            round(float(cache_age or 0.0), 3) if cache_age is not None else None
+        )
         out["stale"] = bool(stale)
         out["refreshed"] = None
         out["refresh_requested"] = bool(refresh)
-        out["refresh_note"] = "health 接口当前为纯读接口；实时采集请改用 POST /api/trading/analytics/history/collect。"
+        out[
+            "refresh_note"
+        ] = "health 接口当前为纯读接口；实时采集请改用 POST /api/trading/analytics/history/collect。"
         return out
 
     cached, cached_age = _cache_get(
@@ -5750,7 +8079,9 @@ async def get_analytics_history_health(
     )
     if cached is not None:
         return await _attach_derivatives_analytics_health(
-            _with_common_fields(cached, cache_hit=True, cache_age=float(cached_age or 0.0), stale=False),
+            _with_common_fields(
+                cached, cache_hit=True, cache_age=float(cached_age or 0.0), stale=False
+            ),
             exchange=exchange,
             symbol=symbol,
         )
@@ -5762,7 +8093,12 @@ async def get_analytics_history_health(
     )
     if (not bool(refresh)) and (stale_cached is not None):
         return await _attach_derivatives_analytics_health(
-            _with_common_fields(stale_cached, cache_hit=True, cache_age=float(stale_age or 0.0), stale=True),
+            _with_common_fields(
+                stale_cached,
+                cache_hit=True,
+                cache_age=float(stale_age or 0.0),
+                stale=True,
+            ),
             exchange=exchange,
             symbol=symbol,
         )
@@ -5771,7 +8107,9 @@ async def get_analytics_history_health(
     # This avoids expensive aggregate scans causing frontend timeout.
     if not bool(refresh):
         status_map: Dict[str, Dict[str, Any]] = {}
-        status_cache_key = _analytics_history_cache_key(exchange=exchange, symbol=symbol)
+        status_cache_key = _analytics_history_cache_key(
+            exchange=exchange, symbol=symbol
+        )
         cached_status_payload, _ = _cache_get(
             _ANALYTICS_HISTORY_STATUS_CACHE,
             status_cache_key,
@@ -5785,12 +8123,16 @@ async def get_analytics_history_health(
         if not status_map and _ANALYTICS_HISTORY_STATUS_LAST:
             for collector in _ANALYTICS_HISTORY_COLLECTORS:
                 if collector in _ANALYTICS_HISTORY_STATUS_LAST:
-                    status_map[collector] = dict(_ANALYTICS_HISTORY_STATUS_LAST.get(collector) or {})
+                    status_map[collector] = dict(
+                        _ANALYTICS_HISTORY_STATUS_LAST.get(collector) or {}
+                    )
         if not status_map:
             with contextlib.suppress(Exception):
                 status_map = await asyncio.wait_for(
                     _load_analytics_ingest_status_map(),
-                    timeout=max(0.6, min(1.2, _ANALYTICS_HISTORY_STATUS_READ_TIMEOUT_SEC)),
+                    timeout=max(
+                        0.6, min(1.2, _ANALYTICS_HISTORY_STATUS_READ_TIMEOUT_SEC)
+                    ),
                 )
         quick_payload = (
             _status_fallback_analytics_history_health(
@@ -5811,7 +8153,9 @@ async def get_analytics_history_health(
         quick_payload["fallback_mode"] = "quick_status"
         _cache_put(_ANALYTICS_HISTORY_HEALTH_CACHE, cache_key, quick_payload)
         return await _attach_derivatives_analytics_health(
-            _with_common_fields(quick_payload, cache_hit=False, cache_age=0.0, stale=True),
+            _with_common_fields(
+                quick_payload, cache_hit=False, cache_age=0.0, stale=True
+            ),
             exchange=exchange,
             symbol=symbol,
         )
@@ -5819,7 +8163,9 @@ async def get_analytics_history_health(
     # Explicit refresh mode: allow expensive read and fallback to stale snapshot on failure.
     try:
         health = await asyncio.wait_for(
-            _build_analytics_history_health(exchange=exchange, symbol=symbol, hours=hours),
+            _build_analytics_history_health(
+                exchange=exchange, symbol=symbol, hours=hours
+            ),
             timeout=max(1.0, _ANALYTICS_HISTORY_HEALTH_READ_TIMEOUT_SEC),
         )
         _cache_put(_ANALYTICS_HISTORY_HEALTH_CACHE, cache_key, health)
@@ -5833,7 +8179,12 @@ async def get_analytics_history_health(
             stale_payload = dict(stale_cached)
             stale_payload["stale_reason"] = _clip_analytics_error(exc)
             return await _attach_derivatives_analytics_health(
-                _with_common_fields(stale_payload, cache_hit=True, cache_age=float(stale_age or 0.0), stale=True),
+                _with_common_fields(
+                    stale_payload,
+                    cache_hit=True,
+                    cache_age=float(stale_age or 0.0),
+                    stale=True,
+                ),
                 exchange=exchange,
                 symbol=symbol,
             )
@@ -5862,13 +8213,19 @@ async def get_analytics_history_status(
         max_age_sec=None,
     )
     if stale_cached is not None and float(stale_age or 0.0) <= 90.0:
-        return await _attach_derivatives_analytics_status({
-            **stale_cached,
-            "generated_at": _utc_iso(datetime.now(timezone.utc)),
-            "cache_hit": True,
-            "cache_age_sec": round(float(stale_age or 0.0), 3),
-            "stale": bool(float(stale_age or 0.0) > _ANALYTICS_HISTORY_STATUS_CACHE_TTL_SEC),
-        }, exchange=exchange, symbol=symbol)
+        return await _attach_derivatives_analytics_status(
+            {
+                **stale_cached,
+                "generated_at": _utc_iso(datetime.now(timezone.utc)),
+                "cache_hit": True,
+                "cache_age_sec": round(float(stale_age or 0.0), 3),
+                "stale": bool(
+                    float(stale_age or 0.0) > _ANALYTICS_HISTORY_STATUS_CACHE_TTL_SEC
+                ),
+            },
+            exchange=exchange,
+            symbol=symbol,
+        )
     cached, cached_age = _cache_get(
         _ANALYTICS_HISTORY_STATUS_CACHE,
         cache_key,
@@ -5876,14 +8233,18 @@ async def get_analytics_history_status(
     )
     if cached is not None:
         collectors = list(cached.get("collectors") or [])
-        return await _attach_derivatives_analytics_status({
-            "generated_at": _utc_iso(datetime.now(timezone.utc)),
-            "exchange": exchange,
-            "symbol": symbol,
-            "collectors": collectors,
-            "cache_hit": True,
-            "cache_age_sec": round(float(cached_age or 0.0), 3),
-        }, exchange=exchange, symbol=symbol)
+        return await _attach_derivatives_analytics_status(
+            {
+                "generated_at": _utc_iso(datetime.now(timezone.utc)),
+                "exchange": exchange,
+                "symbol": symbol,
+                "collectors": collectors,
+                "cache_hit": True,
+                "cache_age_sec": round(float(cached_age or 0.0), 3),
+            },
+            exchange=exchange,
+            symbol=symbol,
+        )
 
     if _ANALYTICS_HISTORY_STATUS_LAST:
         collectors = _status_map_to_collectors(
@@ -5903,14 +8264,18 @@ async def get_analytics_history_status(
                 "fallback_mode": "in_memory_status",
             }
             _cache_put(_ANALYTICS_HISTORY_STATUS_CACHE, cache_key, payload)
-            return await _attach_derivatives_analytics_status(payload, exchange=exchange, symbol=symbol)
+            return await _attach_derivatives_analytics_status(
+                payload, exchange=exchange, symbol=symbol
+            )
 
     try:
         status_map = await asyncio.wait_for(
             _load_analytics_ingest_status_map(),
             timeout=status_timeout_sec,
         )
-        collectors = _status_map_to_collectors(status_map, exchange=exchange, symbol=symbol)
+        collectors = _status_map_to_collectors(
+            status_map, exchange=exchange, symbol=symbol
+        )
         payload = {
             "generated_at": _utc_iso(datetime.now(timezone.utc)),
             "exchange": exchange,
@@ -5920,18 +8285,24 @@ async def get_analytics_history_status(
             "cache_age_sec": 0.0,
         }
         _cache_put(_ANALYTICS_HISTORY_STATUS_CACHE, cache_key, payload)
-        return await _attach_derivatives_analytics_status(payload, exchange=exchange, symbol=symbol)
+        return await _attach_derivatives_analytics_status(
+            payload, exchange=exchange, symbol=symbol
+        )
     except Exception as exc:
         stale, stale_age = _cache_get(_ANALYTICS_HISTORY_STATUS_CACHE, cache_key)
         if stale is not None:
-            return await _attach_derivatives_analytics_status({
-                **stale,
-                "generated_at": _utc_iso(datetime.now(timezone.utc)),
-                "cache_hit": True,
-                "cache_age_sec": round(float(stale_age or 0.0), 3),
-                "stale": True,
-                "stale_reason": _clip_analytics_error(exc),
-            }, exchange=exchange, symbol=symbol)
+            return await _attach_derivatives_analytics_status(
+                {
+                    **stale,
+                    "generated_at": _utc_iso(datetime.now(timezone.utc)),
+                    "cache_hit": True,
+                    "cache_age_sec": round(float(stale_age or 0.0), 3),
+                    "stale": True,
+                    "stale_reason": _clip_analytics_error(exc),
+                },
+                exchange=exchange,
+                symbol=symbol,
+            )
         if _ANALYTICS_HISTORY_STATUS_LAST:
             collectors = _status_map_to_collectors(
                 {k: dict(v) for k, v in _ANALYTICS_HISTORY_STATUS_LAST.items()},
@@ -5939,17 +8310,21 @@ async def get_analytics_history_status(
                 symbol=symbol,
             )
             if collectors:
-                return await _attach_derivatives_analytics_status({
-                    "generated_at": _utc_iso(datetime.now(timezone.utc)),
-                    "exchange": exchange,
-                    "symbol": symbol,
-                    "collectors": collectors,
-                    "cache_hit": False,
-                    "cache_age_sec": None,
-                    "stale": True,
-                    "stale_reason": _clip_analytics_error(exc),
-                    "fallback_mode": "in_memory_status",
-                }, exchange=exchange, symbol=symbol)
+                return await _attach_derivatives_analytics_status(
+                    {
+                        "generated_at": _utc_iso(datetime.now(timezone.utc)),
+                        "exchange": exchange,
+                        "symbol": symbol,
+                        "collectors": collectors,
+                        "cache_hit": False,
+                        "cache_age_sec": None,
+                        "stale": True,
+                        "stale_reason": _clip_analytics_error(exc),
+                        "fallback_mode": "in_memory_status",
+                    },
+                    exchange=exchange,
+                    symbol=symbol,
+                )
         fallback_status_map: Dict[str, Dict[str, Any]] = {}
         for collector in _ANALYTICS_HISTORY_COLLECTORS:
             fallback_status_map[collector] = {
@@ -5964,16 +8339,22 @@ async def get_analytics_history_status(
                 "updated_at": _utc_iso(datetime.now(timezone.utc)),
                 "details": {"phase": "fallback"},
             }
-        return await _attach_derivatives_analytics_status({
-            "generated_at": _utc_iso(datetime.now(timezone.utc)),
-            "exchange": exchange,
-            "symbol": symbol,
-            "collectors": _status_map_to_collectors(fallback_status_map, exchange=exchange, symbol=symbol),
-            "cache_hit": False,
-            "cache_age_sec": None,
-            "stale": True,
-            "stale_reason": _clip_analytics_error(exc),
-        }, exchange=exchange, symbol=symbol)
+        return await _attach_derivatives_analytics_status(
+            {
+                "generated_at": _utc_iso(datetime.now(timezone.utc)),
+                "exchange": exchange,
+                "symbol": symbol,
+                "collectors": _status_map_to_collectors(
+                    fallback_status_map, exchange=exchange, symbol=symbol
+                ),
+                "cache_hit": False,
+                "cache_age_sec": None,
+                "stale": True,
+                "stale_reason": _clip_analytics_error(exc),
+            },
+            exchange=exchange,
+            symbol=symbol,
+        )
 
 
 async def get_audit_logs(
@@ -6089,15 +8470,30 @@ async def get_pnl_heatmap(
             ts = _safe_dt(getattr(order, "timestamp", None))
             if not ts or ts < cutoff:
                 continue
-            status = str(getattr(getattr(order, "status", None), "value", getattr(order, "status", "")) or "").lower()
+            status = str(
+                getattr(
+                    getattr(order, "status", None),
+                    "value",
+                    getattr(order, "status", ""),
+                )
+                or ""
+            ).lower()
             if status not in {"closed", "filled"}:
                 continue
-            amount = _safe_float(getattr(order, "filled", None), default=_safe_float(getattr(order, "amount", 0.0)))
+            amount = _safe_float(
+                getattr(order, "filled", None),
+                default=_safe_float(getattr(order, "amount", 0.0)),
+            )
             price = _safe_float(getattr(order, "price", 0.0))
             symbol = str(getattr(order, "symbol", "") or "").strip() or "UNKNOWN"
             if amount <= 0 or price <= 0:
                 continue
-            side = str(getattr(getattr(order, "side", None), "value", getattr(order, "side", "")) or "").lower()
+            side = str(
+                getattr(
+                    getattr(order, "side", None), "value", getattr(order, "side", "")
+                )
+                or ""
+            ).lower()
             signed_cashflow = amount * price * (-1.0 if side == "buy" else 1.0)
             fallback_orders.append(
                 {
@@ -6127,7 +8523,9 @@ async def get_pnl_heatmap(
         }
 
     symbol_set = sorted({row["symbol"] for row in filtered})
-    bucket_set = sorted({_bucket_key(row["closed_at"], bucket_name) for row in filtered})
+    bucket_set = sorted(
+        {_bucket_key(row["closed_at"], bucket_name) for row in filtered}
+    )
     symbol_index = {sym: idx for idx, sym in enumerate(symbol_set)}
     bucket_index = {ts: idx for idx, ts in enumerate(bucket_set)}
     matrix = [[0.0 for _ in symbol_set] for _ in bucket_set]
@@ -6149,5 +8547,3 @@ async def get_pnl_heatmap(
         "value_hover": value_hover,
         "note": note,
     }
-
-

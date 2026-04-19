@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 from urllib.parse import urlparse
 
 import aiohttp
-from loguru import logger
 import pandas as pd
+from loguru import logger
 from sqlalchemy import select
 
-from config.database import CoinglassBudgetLedger, CoinglassIngestStatus, async_session_maker
+from config.database import (
+    CoinglassBudgetLedger,
+    CoinglassIngestStatus,
+    async_session_maker,
+)
 from config.settings import settings
 from core.data.coinglass_registry import (
     COINGLASS_DEFAULT_DATASETS,
@@ -27,7 +31,6 @@ from core.data.coinglass_registry import (
     normalize_coinglass_interval,
     normalize_coinglass_symbol,
 )
-
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _CACHE_ROOT = _PROJECT_ROOT / "data" / "premium" / "coinglass"
@@ -184,7 +187,11 @@ def coinglass_key_configured() -> bool:
 
 
 def coinglass_enabled() -> bool:
-    return bool(getattr(settings, "COINGLASS_ENABLED", False) and _coinglass_base_url() and coinglass_key_configured())
+    return bool(
+        getattr(settings, "COINGLASS_ENABLED", False)
+        and _coinglass_base_url()
+        and coinglass_key_configured()
+    )
 
 
 def _ensure_cache_dirs() -> None:
@@ -239,11 +246,53 @@ def _safe_json_dumps(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))
 
 
+def _sanitize_query_params(params: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    sanitized: Dict[str, Any] = {}
+    for raw_key, raw_value in dict(params or {}).items():
+        key = str(raw_key or "").strip()
+        if not key or raw_value is None:
+            continue
+        if isinstance(raw_value, str):
+            value = raw_value.strip()
+            if not value:
+                continue
+            sanitized[key] = value
+            continue
+        if isinstance(raw_value, bool):
+            sanitized[key] = "true" if raw_value else "false"
+            continue
+        if isinstance(raw_value, (int, float)):
+            sanitized[key] = raw_value
+            continue
+        if isinstance(raw_value, datetime):
+            sanitized[key] = raw_value.isoformat()
+            continue
+        if isinstance(raw_value, date):
+            sanitized[key] = raw_value.isoformat()
+            continue
+        if isinstance(raw_value, Mapping):
+            sanitized[key] = _safe_json_dumps(raw_value)
+            continue
+        if isinstance(raw_value, (list, tuple, set)):
+            parts = [str(item).strip() for item in raw_value if item not in (None, "")]
+            parts = [item for item in parts if item]
+            if not parts:
+                continue
+            sanitized[key] = ",".join(parts)
+            continue
+        value = str(raw_value).strip()
+        if value:
+            sanitized[key] = value
+    return sanitized
+
+
 def _coinglass_watch_symbols(max_items: int = 12) -> List[str]:
     seen: set[str] = set()
     out: List[str] = []
     defaults = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-    for symbol in defaults + str(getattr(settings, "AI_AUTONOMOUS_AGENT_UNIVERSE_SYMBOLS", "") or "").split(","):
+    for symbol in defaults + str(
+        getattr(settings, "AI_AUTONOMOUS_AGENT_UNIVERSE_SYMBOLS", "") or ""
+    ).split(","):
         normalized = normalize_coinglass_symbol(symbol)
         if not normalized or normalized in seen:
             continue
@@ -256,8 +305,16 @@ def _coinglass_watch_symbols(max_items: int = 12) -> List[str]:
 
 async def _get_budget_row(session) -> CoinglassBudgetLedger:
     row = (
-        await session.execute(select(CoinglassBudgetLedger).where(CoinglassBudgetLedger.scope == _BUDGET_SCOPE))
-    ).scalars().first()
+        (
+            await session.execute(
+                select(CoinglassBudgetLedger).where(
+                    CoinglassBudgetLedger.scope == _BUDGET_SCOPE
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
     if row is None:
         row = CoinglassBudgetLedger(scope=_BUDGET_SCOPE)
         session.add(row)
@@ -265,10 +322,15 @@ async def _get_budget_row(session) -> CoinglassBudgetLedger:
     return row
 
 
-def _roll_budget_windows(row: CoinglassBudgetLedger, now: Optional[datetime] = None) -> None:
+def _roll_budget_windows(
+    row: CoinglassBudgetLedger, now: Optional[datetime] = None
+) -> None:
     current = now or _utc_now()
     minute_started_at = _minute_window(current)
-    if row.minute_window_started_at is None or row.minute_window_started_at != minute_started_at:
+    if (
+        row.minute_window_started_at is None
+        or row.minute_window_started_at != minute_started_at
+    ):
         row.minute_window_started_at = minute_started_at
         row.minute_requests_used = 0
     if str(row.day_key or "") != _day_key(current):
@@ -290,9 +352,15 @@ async def _reserve_budget(*, manual: bool) -> CoinglassBudgetState:
     async with async_session_maker() as session:
         row = await _get_budget_row(session)
         _roll_budget_windows(row)
-        minute_limit = max(1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 10) or 10))
-        daily_limit = max(1, int(getattr(settings, "COINGLASS_DAILY_BUDGET", 50000) or 50000))
-        monthly_limit = max(1, int(getattr(settings, "COINGLASS_MONTHLY_BUDGET", 500000) or 500000))
+        minute_limit = max(
+            1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 10) or 10)
+        )
+        daily_limit = max(
+            1, int(getattr(settings, "COINGLASS_DAILY_BUDGET", 50000) or 50000)
+        )
+        monthly_limit = max(
+            1, int(getattr(settings, "COINGLASS_MONTHLY_BUDGET", 500000) or 500000)
+        )
         effective_minute_cap = _effective_minute_cap(manual=manual)
         if row.minute_requests_used >= effective_minute_cap:
             raise CoinglassBudgetExceeded("minute_budget_exhausted")
@@ -343,9 +411,15 @@ async def get_coinglass_budget_state() -> CoinglassBudgetState:
         row = await _get_budget_row(session)
         _roll_budget_windows(row)
         await session.commit()
-        minute_limit = max(1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 10) or 10))
-        daily_limit = max(1, int(getattr(settings, "COINGLASS_DAILY_BUDGET", 50000) or 50000))
-        monthly_limit = max(1, int(getattr(settings, "COINGLASS_MONTHLY_BUDGET", 500000) or 500000))
+        minute_limit = max(
+            1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 10) or 10)
+        )
+        daily_limit = max(
+            1, int(getattr(settings, "COINGLASS_DAILY_BUDGET", 50000) or 50000)
+        )
+        monthly_limit = max(
+            1, int(getattr(settings, "COINGLASS_MONTHLY_BUDGET", 500000) or 500000)
+        )
         return CoinglassBudgetState(
             enabled=coinglass_enabled(),
             key_configured=coinglass_key_configured(),
@@ -394,10 +468,14 @@ def load_dataset_rows_for_symbol(dataset: str, symbol: str) -> pd.DataFrame:
         return frame
     normalized_symbol = normalize_coinglass_symbol(symbol)
     if "normalized_symbol" in frame.columns:
-        frame = frame[frame["normalized_symbol"].astype(str).str.upper() == normalized_symbol]
+        frame = frame[
+            frame["normalized_symbol"].astype(str).str.upper() == normalized_symbol
+        ]
     if frame.empty:
         return frame
-    sort_columns = [column for column in ("ingested_at", "source_ts") if column in frame.columns]
+    sort_columns = [
+        column for column in ("ingested_at", "source_ts") if column in frame.columns
+    ]
     if sort_columns:
         frame = frame.sort_values(sort_columns)
     return frame.reset_index(drop=True)
@@ -423,7 +501,9 @@ def load_coinglass_cached_source_snapshot() -> Dict[str, Any]:
             )
         if "source_ts" in frame.columns:
             try:
-                parsed = pd.to_datetime(frame["source_ts"], utc=True, errors="coerce").dropna()
+                parsed = pd.to_datetime(
+                    frame["source_ts"], utc=True, errors="coerce"
+                ).dropna()
                 if not parsed.empty:
                     candidate = parsed.max().to_pydatetime()
                     if latest_source_ts is None or candidate > latest_source_ts:
@@ -433,7 +513,10 @@ def load_coinglass_cached_source_snapshot() -> Dict[str, Any]:
 
     freshness_sec = None
     if latest_source_ts is not None:
-        freshness_sec = max(0.0, (_utc_now() - latest_source_ts.astimezone(timezone.utc)).total_seconds())
+        freshness_sec = max(
+            0.0,
+            (_utc_now() - latest_source_ts.astimezone(timezone.utc)).total_seconds(),
+        )
 
     return {
         "enabled": coinglass_enabled(),
@@ -469,7 +552,9 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
-def _extract_source_ts(row: Mapping[str, Any], fallback: Optional[datetime] = None) -> datetime:
+def _extract_source_ts(
+    row: Mapping[str, Any], fallback: Optional[datetime] = None
+) -> datetime:
     for key in ("t", "ts", "time", "timestamp", "create_time", "updated_at", "date"):
         parsed = _parse_timestamp(row.get(key))
         if parsed is not None:
@@ -528,7 +613,10 @@ def _to_float(value: Any) -> Optional[float]:
 
 
 def _row_value(row: Mapping[str, Any], *candidates: str) -> Any:
-    lowered = {"".join(ch for ch in str(key or "").lower() if ch.isalnum()): value for key, value in dict(row or {}).items()}
+    lowered = {
+        "".join(ch for ch in str(key or "").lower() if ch.isalnum()): value
+        for key, value in dict(row or {}).items()
+    }
     for candidate in candidates:
         key = "".join(ch for ch in str(candidate or "").lower() if ch.isalnum())
         if key in lowered:
@@ -625,7 +713,9 @@ def _normalize_taker_row(row: Mapping[str, Any]) -> Dict[str, Any]:
         record["volume_usd"] = float(buy_volume + sell_volume)
         total = buy_volume + sell_volume
         if total > 0:
-            record["taker_buy_sell_imbalance"] = float((buy_volume - sell_volume) / total)
+            record["taker_buy_sell_imbalance"] = float(
+                (buy_volume - sell_volume) / total
+            )
     return record
 
 
@@ -669,8 +759,12 @@ def _normalize_ratio_row(row: Mapping[str, Any]) -> Dict[str, Any]:
         "ratio",
     )
     if long_short_ratio is None:
-        long_account = _coalesce_float(record, "long_account", "longAccount", "longRate", "long_ratio")
-        short_account = _coalesce_float(record, "short_account", "shortAccount", "shortRate", "short_ratio")
+        long_account = _coalesce_float(
+            record, "long_account", "longAccount", "longRate", "long_ratio"
+        )
+        short_account = _coalesce_float(
+            record, "short_account", "shortAccount", "shortRate", "short_ratio"
+        )
         if long_account is not None and short_account not in (None, 0):
             long_short_ratio = float(long_account / short_account)
     if long_short_ratio is not None:
@@ -678,7 +772,9 @@ def _normalize_ratio_row(row: Mapping[str, Any]) -> Dict[str, Any]:
     return record
 
 
-def _normalize_funding_rate_rows(rows: List[Dict[str, Any]], *, requested_symbol: str) -> List[Dict[str, Any]]:
+def _normalize_funding_rate_rows(
+    rows: List[Dict[str, Any]], *, requested_symbol: str
+) -> List[Dict[str, Any]]:
     normalized_rows: List[Dict[str, Any]] = []
     for row in rows:
         row_symbol = row.get("symbol")
@@ -701,7 +797,9 @@ def _normalize_funding_rate_rows(rows: List[Dict[str, Any]], *, requested_symbol
     return normalized_rows
 
 
-def _normalize_funding_arbitrage_rows(rows: List[Dict[str, Any]], *, requested_symbol: str) -> List[Dict[str, Any]]:
+def _normalize_funding_arbitrage_rows(
+    rows: List[Dict[str, Any]], *, requested_symbol: str
+) -> List[Dict[str, Any]]:
     normalized_rows: List[Dict[str, Any]] = []
     for row in rows:
         if not coinglass_symbol_matches(requested_symbol, row.get("symbol")):
@@ -716,8 +814,13 @@ def _normalize_funding_arbitrage_rows(rows: List[Dict[str, Any]], *, requested_s
         normalized["buy_funding_rate"] = _to_float(buy.get("funding_rate"))
         normalized["sell_funding_rate"] = _to_float(sell.get("funding_rate"))
         funding_spread = None
-        if normalized["buy_funding_rate"] is not None and normalized["sell_funding_rate"] is not None:
-            funding_spread = float(normalized["sell_funding_rate"] - normalized["buy_funding_rate"])
+        if (
+            normalized["buy_funding_rate"] is not None
+            and normalized["sell_funding_rate"] is not None
+        ):
+            funding_spread = float(
+                normalized["sell_funding_rate"] - normalized["buy_funding_rate"]
+            )
         if funding_spread is not None:
             normalized["funding_rate_spread"] = funding_spread
         normalized_rows.append(normalized)
@@ -752,13 +855,20 @@ def normalize_dataset_response(
     if dataset == "funding_rate_exchange_list":
         rows = _normalize_funding_rate_rows(raw_rows, requested_symbol=requested_symbol)
     elif dataset == "funding_arbitrage":
-        rows = _normalize_funding_arbitrage_rows(raw_rows, requested_symbol=requested_symbol)
+        rows = _normalize_funding_arbitrage_rows(
+            raw_rows, requested_symbol=requested_symbol
+        )
     else:
         rows = []
         for row in raw_rows:
-            if dataset in {"open_interest_exchange_list", "taker_buy_sell_volume_exchange_list"}:
+            if dataset in {
+                "open_interest_exchange_list",
+                "taker_buy_sell_volume_exchange_list",
+            }:
                 row_symbol = row.get("symbol")
-                if row_symbol and not coinglass_symbol_matches(requested_symbol, row_symbol):
+                if row_symbol and not coinglass_symbol_matches(
+                    requested_symbol, row_symbol
+                ):
                     continue
             if dataset == "open_interest_exchange_list":
                 rows.append(_normalize_open_interest_row(row))
@@ -766,7 +876,10 @@ def normalize_dataset_response(
                 rows.append(_normalize_open_interest_history_row(row))
             elif dataset == "funding_rate_history":
                 rows.append(_normalize_funding_rate_history_row(row))
-            elif dataset in {"taker_buy_sell_volume_exchange_list", "taker_buy_sell_volume_history"}:
+            elif dataset in {
+                "taker_buy_sell_volume_exchange_list",
+                "taker_buy_sell_volume_history",
+            }:
                 rows.append(_normalize_taker_row(row))
             elif dataset == "liquidation_history":
                 rows.append(_normalize_liquidation_row(row))
@@ -860,9 +973,19 @@ def persist_normalized_rows(
     for row in rows:
         source_ts = _extract_source_ts(row, fallback=now)
         row_symbol = normalize_coinglass_symbol(row.get("symbol") or requested_symbol)
-        row_exchange = str(row.get("exchange") or row.get("exchange_name") or exchange or "aggregate").strip() or "aggregate"
+        row_exchange = (
+            str(
+                row.get("exchange")
+                or row.get("exchange_name")
+                or exchange
+                or "aggregate"
+            ).strip()
+            or "aggregate"
+        )
         row_variant = str(row.get("margin_type") or "").strip().lower()
-        canonical_exchange = row_exchange if not row_variant else f"{row_exchange}:{row_variant}"
+        canonical_exchange = (
+            row_exchange if not row_variant else f"{row_exchange}:{row_variant}"
+        )
         canonical_key = canonical_request_key(
             dataset=dataset,
             api_version=route.api_version,
@@ -939,8 +1062,16 @@ async def record_coinglass_ingest_status(
             fresh_until = now + pd.Timedelta(seconds=fresh_window).to_pytimedelta()
     async with async_session_maker() as session:
         row = (
-            await session.execute(select(CoinglassIngestStatus).where(CoinglassIngestStatus.scope_key == scope_key))
-        ).scalars().first()
+            (
+                await session.execute(
+                    select(CoinglassIngestStatus).where(
+                        CoinglassIngestStatus.scope_key == scope_key
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
         if row is None:
             row = CoinglassIngestStatus(
                 dataset=dataset,
@@ -982,10 +1113,14 @@ async def record_coinglass_ingest_status(
         ).to_dict()
 
 
-async def load_coinglass_ingest_statuses(*, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+async def load_coinglass_ingest_statuses(
+    *, symbol: Optional[str] = None
+) -> List[Dict[str, Any]]:
     normalized_symbol = normalize_coinglass_symbol(symbol)
     async with async_session_maker() as session:
-        stmt = select(CoinglassIngestStatus).order_by(CoinglassIngestStatus.updated_at.desc())
+        stmt = select(CoinglassIngestStatus).order_by(
+            CoinglassIngestStatus.updated_at.desc()
+        )
         if normalized_symbol:
             stmt = stmt.where(CoinglassIngestStatus.symbol == normalized_symbol)
         rows = (await session.execute(stmt)).scalars().all()
@@ -1009,7 +1144,9 @@ async def load_coinglass_ingest_statuses(*, symbol: Optional[str] = None) -> Lis
     ]
     if not normalized_symbol:
         return payloads
-    return [row for row in payloads if str(row.get("symbol") or "") == normalized_symbol]
+    return [
+        row for row in payloads if str(row.get("symbol") or "") == normalized_symbol
+    ]
 
 
 def _manifest_params(
@@ -1024,8 +1161,12 @@ def _manifest_params(
     end_time: Optional[Any] = None,
 ) -> Dict[str, Any]:
     params = dict(route.default_params or {})
-    normalized_exchange = normalize_coinglass_exchange(exchange or params.get("exchange") or "Binance")
-    normalized_interval = normalize_coinglass_interval(interval or params.get("interval") or "h4")
+    normalized_exchange = normalize_coinglass_exchange(
+        exchange or params.get("exchange") or "Binance"
+    )
+    normalized_interval = normalize_coinglass_interval(
+        interval or params.get("interval") or "h4"
+    )
     if "symbol" in route.required_params:
         if manifest.dataset in {
             "liquidation_history",
@@ -1042,11 +1183,15 @@ def _manifest_params(
         params["exchange"] = normalized_exchange
     if "interval" in route.required_params:
         if manifest.dataset == "price_history":
-            params["interval"] = str(interval or params.get("interval") or "1h").strip().lower() or "1h"
+            params["interval"] = (
+                str(interval or params.get("interval") or "1h").strip().lower() or "1h"
+            )
         else:
             params["interval"] = normalized_interval
     if "range" in route.required_params:
-        params["range"] = coinglass_range_for_interval(interval or params.get("interval") or "h4")
+        params["range"] = coinglass_range_for_interval(
+            interval or params.get("interval") or "h4"
+        )
     if limit is not None:
         params["limit"] = int(limit)
     if start_time is not None:
@@ -1076,12 +1221,19 @@ class CoinglassClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         await self.close()
 
-    async def _request_json(self, path: str, *, params: Mapping[str, Any], manual: bool) -> Dict[str, Any]:
+    async def _request_json(
+        self, path: str, *, params: Mapping[str, Any], manual: bool
+    ) -> Dict[str, Any]:
         if not coinglass_enabled():
             raise CoinglassError("coinglass_disabled_or_key_missing")
         headers = {"X-Api-Key": coinglass_api_key()}
-        base_url = _coinglass_root_url() if path.startswith("/api/v1/modules/") else _coinglass_base_url()
+        base_url = (
+            _coinglass_root_url()
+            if path.startswith("/api/v1/modules/")
+            else _coinglass_base_url()
+        )
         url = f"{base_url}{path}"
+        query_params = _sanitize_query_params(params)
         async with _REQUEST_LOCK:
             await _reserve_budget(manual=manual)
         status_code = None
@@ -1089,12 +1241,18 @@ class CoinglassClient:
         started = _utc_now()
         session = await self._get_session()
         try:
-            async with session.get(url, params=dict(params or {}), headers=headers) as response:
+            async with session.get(
+                url, params=query_params, headers=headers
+            ) as response:
                 status_code = int(response.status)
                 payload = await response.json(content_type=None)
                 if status_code >= 400:
-                    error_text = _clip_error(payload.get("msg") if isinstance(payload, Mapping) else payload)
-                    raise CoinglassError(f"http_{status_code}:{error_text or 'request_failed'}")
+                    error_text = _clip_error(
+                        payload.get("msg") if isinstance(payload, Mapping) else payload
+                    )
+                    raise CoinglassError(
+                        f"http_{status_code}:{error_text or 'request_failed'}"
+                    )
                 return {
                     "status_code": status_code,
                     "latency_ms": int((_utc_now() - started).total_seconds() * 1000),
@@ -1141,7 +1299,9 @@ class CoinglassClient:
                 end_time=end_time,
             )
             try:
-                response = await self._request_json(route.path, params=params, manual=manual)
+                response = await self._request_json(
+                    route.path, params=params, manual=manual
+                )
                 request_key = canonical_request_key(
                     dataset=manifest.dataset,
                     api_version=route.api_version,
@@ -1168,7 +1328,9 @@ class CoinglassClient:
         raise CoinglassError(last_error or f"{manifest.dataset}:no_route_available")
 
     async def fetch_api_spec(self, *, manual: bool = True) -> Dict[str, Any]:
-        return await self._request_json("/api/v1/modules/coinglass/api-spec", params={}, manual=manual)
+        return await self._request_json(
+            "/api/v1/modules/coinglass/api-spec", params={}, manual=manual
+        )
 
 
 async def discover_and_persist_coinglass_capabilities(
@@ -1176,7 +1338,11 @@ async def discover_and_persist_coinglass_capabilities(
     datasets: Optional[Iterable[str]] = None,
     manual: bool = True,
 ) -> Dict[str, Any]:
-    requested = [str(item or "").strip() for item in (datasets or COINGLASS_DEFAULT_DATASETS) if str(item or "").strip()]
+    requested = [
+        str(item or "").strip()
+        for item in (datasets or COINGLASS_DEFAULT_DATASETS)
+        if str(item or "").strip()
+    ]
     capabilities: List[Dict[str, Any]] = []
     api_spec_payload: Dict[str, Any] = {}
     stop_reason = ""
@@ -1195,9 +1361,18 @@ async def discover_and_persist_coinglass_capabilities(
             if manifest is None:
                 continue
             for route in manifest.routes:
-                params = _manifest_params(manifest, route, symbol="BTC", exchange="Binance", interval="h4", limit=2)
+                params = _manifest_params(
+                    manifest,
+                    route,
+                    symbol="BTC",
+                    exchange="Binance",
+                    interval="h4",
+                    limit=2,
+                )
                 try:
-                    result = await client._request_json(route.path, params=params, manual=manual)
+                    result = await client._request_json(
+                        route.path, params=params, manual=manual
+                    )
                     capabilities.append(
                         {
                             "dataset": dataset,
@@ -1227,7 +1402,9 @@ async def discover_and_persist_coinglass_capabilities(
                 break
     _ensure_cache_dirs()
     capability_payload = {"generated_at": _utc_now().isoformat(), "items": capabilities}
-    _CAPABILITY_MATRIX_PATH.write_text(_safe_json_dumps(capability_payload), encoding="utf-8")
+    _CAPABILITY_MATRIX_PATH.write_text(
+        _safe_json_dumps(capability_payload), encoding="utf-8"
+    )
     return {
         "generated_at": capability_payload["generated_at"],
         "api_spec_path": str(_API_SPEC_PATH),
