@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
+from config.settings import settings
 from core.news.collectors.manager import MultiSourceNewsCollector
 from core.news.eventizer.async_glm_client import extract_events_async_with_meta
 from core.news.eventizer.rules import load_news_rule_config
@@ -48,6 +49,13 @@ MID_PRIORITY = {
     "coinglass_economic_data",
 }
 LOW_PRIORITY = {"rss", "gdelt", "newsapi", "coinglass_financial_events", "coinglass_central_bank"}
+_COINGLASS_LOW_BUDGET_INTERVALS = {
+    "coinglass_newsflash": 600,
+    "coinglass_articles": 300,
+    "coinglass_economic_data": 1800,
+    "coinglass_financial_events": 3600,
+    "coinglass_central_bank": 3600,
+}
 
 
 def _norm_url(u: str) -> str:
@@ -193,12 +201,35 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw in {"1", "true", "yes", "on", "y"}
 
 
+def _coinglass_rate_limit_per_min() -> int:
+    try:
+        raw_env = os.getenv("COINGLASS_RATE_LIMIT_PER_MIN")
+        if raw_env is not None and str(raw_env).strip():
+            return max(1, int(raw_env))
+    except Exception:
+        pass
+    try:
+        return max(1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 10) or 10))
+    except Exception:
+        return 10
+
+
+def _coinglass_low_budget_mode() -> bool:
+    if os.getenv("NEWS_COINGLASS_LOW_BUDGET_MODE") is not None:
+        return _env_bool("NEWS_COINGLASS_LOW_BUDGET_MODE", True)
+    return _coinglass_rate_limit_per_min() <= 10
+
+
 def _min_importance() -> int:
     return max(0, min(100, _env_int("NEWS_LLM_MIN_IMPORTANCE", 35)))
 
 
 def _source_interval(source: str) -> int:
-    return max(10, _env_int(f"NEWS_INTERVAL_{source.upper()}", DEFAULT_INTERVALS.get(source, 300)))
+    source_name = str(source or "").strip().lower()
+    default_interval = DEFAULT_INTERVALS.get(source_name, 300)
+    if source_name in _COINGLASS_LOW_BUDGET_INTERVALS and _coinglass_low_budget_mode():
+        default_interval = max(default_interval, _COINGLASS_LOW_BUDGET_INTERVALS[source_name])
+    return max(10, _env_int(f"NEWS_INTERVAL_{source_name.upper()}", default_interval))
 
 
 def _worker_cfg(cfg: Dict[str, Any], limit: int) -> Dict[str, Any]:
