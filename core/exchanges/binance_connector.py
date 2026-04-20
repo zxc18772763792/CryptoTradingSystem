@@ -113,9 +113,10 @@ class BinanceConnector(BaseExchange):
         self._connection_lock = asyncio.Lock()
 
     def _build_client_config(self) -> Dict[str, Any]:
+        proxy_url = str(self.config.proxy or settings.HTTP_PROXY or settings.HTTPS_PROXY or "").strip() or None
         client_config: Dict[str, Any] = {
-            "apiKey": settings.BINANCE_API_KEY or self.config.api_key,
-            "secret": settings.BINANCE_API_SECRET or self.config.api_secret,
+            "apiKey": self.config.api_key or settings.BINANCE_API_KEY,
+            "secret": self.config.api_secret or settings.BINANCE_API_SECRET,
             "enableRateLimit": self.config.enable_rate_limit,
             "rateLimit": self.config.rate_limit,
             "timeout": self.config.timeout,
@@ -128,11 +129,11 @@ class BinanceConnector(BaseExchange):
             },
         }
 
-        if settings.HTTP_PROXY:
-            client_config["aiohttp_proxy"] = settings.HTTP_PROXY
+        if proxy_url:
+            client_config["aiohttp_proxy"] = proxy_url
             client_config["proxies"] = {
-                "http": settings.HTTP_PROXY,
-                "https": settings.HTTPS_PROXY or settings.HTTP_PROXY,
+                "http": proxy_url,
+                "https": str(settings.HTTPS_PROXY or proxy_url),
             }
         return client_config
 

@@ -37,7 +37,7 @@ from core.ai.provider_runtime_policy import (
 from core.ai.signal_aggregator import signal_aggregator
 from core.backtest.cost_models import dynamic_slippage_rate, microstructure_proxies
 from core.data import data_storage
-from core.exchanges import exchange_manager
+from core.exchanges.exchange_manager import exchange_manager
 from core.news.storage import db as news_db
 from core.risk.risk_manager import risk_manager
 from core.runtime import runtime_state

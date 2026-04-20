@@ -12,7 +12,7 @@ import pandas as pd
 from loguru import logger
 
 from config.settings import settings
-from core.exchanges import exchange_manager
+from core.exchanges.exchange_manager import exchange_manager
 from core.data.path_utils import canonical_symbol_dir, canonical_symbol_dirname
 
 

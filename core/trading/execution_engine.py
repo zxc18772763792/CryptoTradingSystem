@@ -18,7 +18,7 @@ from loguru import logger
 from config.settings import settings
 from core.ai.live_decision_router import live_decision_router
 from core.audit import audit_logger
-from core.exchanges import exchange_manager
+from core.exchanges.exchange_manager import exchange_manager
 from core.governance.audit import GovernanceAuditEvent, write_audit
 from core.governance.decision_engine import decision_engine
 from core.risk.risk_manager import risk_manager
@@ -27,6 +27,7 @@ from core.strategies import Signal, SignalType
 from core.strategies.runtime_policy import parse_timeframe_minutes
 from core.strategies.strategy_manager import strategy_manager
 from core.trading.account_manager import account_manager
+from core.trading.binance_rest import fetch_binance_live_wallet_snapshot_fast
 from core.trading.order_manager import OrderRequest, OrderSide, OrderType, order_manager
 from core.trading.position_manager import PositionSide, position_manager
 from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
@@ -144,6 +145,8 @@ class ExecutionEngine:
 
         self._cached_equity: float = 0.0
         self._equity_updated_at: Optional[datetime] = None
+        self._account_equity_cache: Dict[str, float] = {}
+        self._account_equity_updated_at: Dict[str, datetime] = {}
         self._equity_cache_seconds = 45
         self._asset_unit_usd_cache: Dict[str, Dict[str, float]] = {}
         self._paper_equity_anchor: float = 0.0
@@ -223,6 +226,67 @@ class ExecutionEngine:
         self._mode_lock_depth = 0
         if lock.locked():
             lock.release()
+
+    @staticmethod
+    def _resolve_cached_exchange(exchange_name: str, account_id: Optional[str] = None):
+        getter = getattr(exchange_manager, "get_exchange")
+        try:
+            return getter(exchange_name, account_id=account_id)
+        except TypeError:
+            return getter(exchange_name)
+
+    @staticmethod
+    async def _ensure_exchange_connector(exchange_name: str, account_id: Optional[str] = None):
+        ensure = getattr(exchange_manager, "ensure_exchange", None)
+        if callable(ensure):
+            try:
+                return await ensure(exchange_name, account_id=account_id)
+            except TypeError:
+                return await ensure(exchange_name)
+        return ExecutionEngine._resolve_cached_exchange(exchange_name, account_id=account_id)
+
+    @staticmethod
+    def _equity_cache_key(account_id: Optional[str] = None) -> str:
+        text = str(account_id or "").strip()
+        return text or "__shared__"
+
+    @staticmethod
+    def _should_publish_equity(account_id: Optional[str] = None) -> bool:
+        text = str(account_id or "").strip().lower()
+        return text in {"", "main"}
+
+    def _get_cached_equity_value(self, account_id: Optional[str] = None) -> float:
+        key = self._equity_cache_key(account_id)
+        if key == "__shared__":
+            return float(self._cached_equity or 0.0)
+        return float(self._account_equity_cache.get(key, 0.0) or 0.0)
+
+    def _get_equity_updated_at(self, account_id: Optional[str] = None) -> Optional[datetime]:
+        key = self._equity_cache_key(account_id)
+        if key == "__shared__":
+            return self._equity_updated_at
+        return self._account_equity_updated_at.get(key)
+
+    def _set_cached_equity_value(
+        self,
+        value: float,
+        *,
+        account_id: Optional[str] = None,
+        updated_at: Optional[datetime] = None,
+    ) -> float:
+        key = self._equity_cache_key(account_id)
+        timestamp = updated_at or datetime.now(timezone.utc)
+        numeric = float(value or 0.0)
+        if key == "__shared__":
+            self._cached_equity = numeric
+            self._equity_updated_at = timestamp
+        else:
+            self._account_equity_cache[key] = numeric
+            self._account_equity_updated_at[key] = timestamp
+        if self._should_publish_equity(account_id):
+            risk_manager.update_equity(numeric)
+            runtime_state.update_equity_snapshot(numeric, updated_at=timestamp)
+        return numeric
 
     @staticmethod
     def _normalize_trading_mode(mode: Any, default: str = "paper") -> str:
@@ -785,23 +849,34 @@ class ExecutionEngine:
         except Exception:
             return 0.0
 
-    async def _refresh_equity(self) -> float:
+    async def _refresh_equity(self, account_id: Optional[str] = None) -> float:
         total_usd = 0.0
         has_unpriced_assets = False
-        report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
-        for exchange_name in exchange_manager.get_connected_exchanges():
-            connector = exchange_manager.get_exchange(exchange_name)
+        cached_eq = self._get_cached_equity_value(account_id)
+        report_eq = 0.0
+        if self._should_publish_equity(account_id):
+            report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
+
+        scoped_connectors: List[Tuple[str, Any]] = []
+        if account_id:
+            exchange_name = account_manager.resolve_exchange(account_id, "binance")
+            connector = await self._ensure_exchange_connector(exchange_name, account_id=account_id)
+            if connector is not None:
+                scoped_connectors.append((exchange_name, connector))
+        else:
+            for exchange_name in exchange_manager.get_connected_exchanges():
+                connector = self._resolve_cached_exchange(exchange_name)
+                if connector is not None:
+                    scoped_connectors.append((exchange_name, connector))
+
+        for exchange_name, connector in scoped_connectors:
             if not connector:
                 continue
             try:
                 if (not self._paper_trading) and str(exchange_name).lower() == "binance":
                     try:
-                        # Reuse the web trading API's fast Binance wallet snapshot logic so live
-                        # strategy sizing does not depend on the slower generic CCXT balance path.
-                        from web.api.trading import _fetch_binance_live_wallet_snapshot_fast
-
                         snap = await asyncio.wait_for(
-                            _fetch_binance_live_wallet_snapshot_fast(),
+                            fetch_binance_live_wallet_snapshot_fast(account_id=account_id),
                             timeout=8.5,
                         )
                         snap_total = float((snap or {}).get("total_usd") or 0.0)
@@ -866,60 +941,66 @@ class ExecutionEngine:
                 candidate = float(report_eq)
             if (
                 has_unpriced_assets
-                and float(self._cached_equity or 0.0) > 0
-                and candidate < float(self._cached_equity) * 0.6
+                and cached_eq > 0
+                and candidate < cached_eq * 0.6
             ):
                 logger.warning(
                     f"Skip abnormal equity drop in execution engine: "
-                    f"cached={self._cached_equity:.4f}, new={candidate:.4f}"
+                    f"cached={cached_eq:.4f}, new={candidate:.4f}"
                 )
-                candidate = float(self._cached_equity)
+                candidate = float(cached_eq)
             # Avoid overwriting a stable cached value with transient tiny estimates.
-            if self._paper_trading and candidate < 100 and float(self._cached_equity or 0.0) >= 100:
-                candidate = float(self._cached_equity)
-            self._cached_equity = candidate
-            self._equity_updated_at = datetime.now(timezone.utc)
-            risk_manager.update_equity(self._cached_equity)
-            runtime_state.update_equity_snapshot(self._cached_equity, updated_at=self._equity_updated_at)
+            if self._paper_trading and candidate < 100 and cached_eq >= 100:
+                candidate = float(cached_eq)
+            self._set_cached_equity_value(candidate, account_id=account_id)
 
-        return float(self._cached_equity or 0.0)
+        return self._get_cached_equity_value(account_id)
 
-    async def _get_account_equity(self, force: bool = False) -> float:
-        report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
+    async def _get_account_equity(
+        self,
+        force: bool = False,
+        *,
+        account_id: Optional[str] = None,
+    ) -> float:
+        publish_equity = self._should_publish_equity(account_id)
+        report_eq = (
+            float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
+            if publish_equity
+            else 0.0
+        )
         if self._paper_trading:
             return await self.get_account_equity_snapshot(force=force)
 
         now = datetime.now(timezone.utc)
-        cached_eq = float(self._cached_equity or 0.0)
+        cached_eq = self._get_cached_equity_value(account_id)
+        updated_at = self._get_equity_updated_at(account_id)
         if not force:
-            if report_eq > 100:
+            if publish_equity and report_eq > 100:
                 if report_eq > cached_eq:
-                    self._cached_equity = report_eq
-                    self._equity_updated_at = now
-                    runtime_state.update_equity_snapshot(self._cached_equity, updated_at=self._equity_updated_at)
+                    self._set_cached_equity_value(report_eq, account_id=account_id, updated_at=now)
                 return float(report_eq)
             if (
                 cached_eq > 100
-                and self._equity_updated_at
-                and (now - self._equity_updated_at).total_seconds() < max(30, int(self._equity_cache_seconds))
+                and updated_at
+                and (now - updated_at).total_seconds() < max(30, int(self._equity_cache_seconds))
             ):
                 return float(cached_eq)
 
         if (
             not force
-            and self._equity_updated_at
-            and (now - self._equity_updated_at).total_seconds() < self._equity_cache_seconds
+            and updated_at
+            and (now - updated_at).total_seconds() < self._equity_cache_seconds
         ):
             eq = cached_eq
         else:
-            eq = await self._refresh_equity()
+            eq = await self._refresh_equity(account_id=account_id)
 
         if eq <= 0:
             if report_eq > 0:
                 eq = report_eq
             elif cached_eq > 0:
                 eq = cached_eq
-        elif (not self._paper_trading) and report_eq > 100 and eq < report_eq * 0.35:
+        elif publish_equity and (not self._paper_trading) and report_eq > 100 and eq < report_eq * 0.35:
             eq = report_eq
 
         if self._paper_trading and eq < 100:
@@ -961,10 +1042,17 @@ class ExecutionEngine:
         runtime_state.update_equity_snapshot(self._cached_equity, updated_at=self._equity_updated_at)
         return float(self._cached_equity)
 
-    async def _resolve_price(self, exchange: str, symbol: str, preferred_price: Optional[float] = None) -> float:
+    async def _resolve_price(
+        self,
+        exchange: str,
+        symbol: str,
+        preferred_price: Optional[float] = None,
+        *,
+        account_id: Optional[str] = None,
+    ) -> float:
         if preferred_price and preferred_price > 0:
             return float(preferred_price)
-        connector = exchange_manager.get_exchange(exchange)
+        connector = self._resolve_cached_exchange(exchange, account_id=account_id)
         if not connector:
             return 0.0
         try:
@@ -993,6 +1081,22 @@ class ExecutionEngine:
             return out
         except Exception:
             return float(default)
+
+    @staticmethod
+    def _order_status_value(order_status: Any) -> str:
+        return str(getattr(order_status, "value", order_status) or "").strip().lower()
+
+    @classmethod
+    def _resolved_order_fill_qty(cls, order: Any, requested_qty: Any) -> float:
+        filled = cls._safe_nonnegative_float(getattr(order, "filled", 0.0), 0.0)
+        if filled > 0:
+            return filled
+        if cls._order_status_value(getattr(order, "status", "")) == "closed":
+            amount = cls._safe_nonnegative_float(getattr(order, "amount", 0.0), 0.0)
+            if amount > 0:
+                return amount
+            return cls._safe_nonnegative_float(requested_qty, 0.0)
+        return 0.0
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -1876,8 +1980,14 @@ class ExecutionEngine:
         factor = 10 ** decimals
         return math.ceil(float(value) * factor) / factor
 
-    async def _get_exchange_amount_rules(self, exchange: str, symbol: str) -> Tuple[float, int]:
-        connector = exchange_manager.get_exchange(exchange)
+    async def _get_exchange_amount_rules(
+        self,
+        exchange: str,
+        symbol: str,
+        *,
+        account_id: Optional[str] = None,
+    ) -> Tuple[float, int]:
+        connector = self._resolve_cached_exchange(exchange, account_id=account_id)
         client = getattr(connector, "_client", None) if connector else None
         min_amount = 0.0
         decimals = 8
@@ -1950,6 +2060,7 @@ class ExecutionEngine:
         account_equity: Optional[float],
         strategy_allocation: float,
     ) -> float:
+        account_id = str((signal.metadata or {}).get("account_id") or "main")
         price = await self._resolve_price(exchange, signal.symbol, signal.price)
         if price <= 0:
             return 0.0
@@ -2110,7 +2221,11 @@ class ExecutionEngine:
                 return 0.0
 
             qty = remaining_leg_notional / price
-            min_amount, amount_decimals = await self._get_exchange_amount_rules(exchange, signal.symbol)
+            min_amount, amount_decimals = await self._get_exchange_amount_rules(
+                exchange,
+                signal.symbol,
+                account_id=account_id,
+            )
             if min_amount > 0 and qty < min_amount:
                 required_leg_notional = min_amount * price
                 required_pair_notional = required_leg_notional / max(pair_leg_fraction, 1e-6)
@@ -2163,7 +2278,11 @@ class ExecutionEngine:
             return 0.0
 
         qty = target_notional / price
-        min_amount, amount_decimals = await self._get_exchange_amount_rules(exchange, signal.symbol)
+        min_amount, amount_decimals = await self._get_exchange_amount_rules(
+            exchange,
+            signal.symbol,
+            account_id=account_id,
+        )
         if min_amount > 0 and qty < min_amount:
             min_amount_notional = min_amount * price
             effective_cap = max(0.0, buffered_cap)
@@ -2398,11 +2517,12 @@ class ExecutionEngine:
         *,
         exchange: str,
         symbol: str,
+        account_id: str,
         preferred_side: Optional[PositionSide] = None,
     ) -> Optional[Any]:
         if self._paper_trading:
             return None
-        connector = exchange_manager.get_exchange(exchange)
+        connector = await self._ensure_exchange_connector(exchange, account_id=account_id)
         if connector is None:
             return None
         default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").strip().lower()
@@ -2509,6 +2629,7 @@ class ExecutionEngine:
         return await self._get_exchange_position_snapshot(
             exchange=exchange,
             symbol=symbol,
+            account_id=account_id,
             preferred_side=preferred_side,
         )
 
@@ -2517,10 +2638,11 @@ class ExecutionEngine:
         *,
         exchange: str,
         symbol: str,
+        account_id: str,
         side: PositionSide,
         min_qty: float = 1e-12,
     ) -> Tuple[bool, bool]:
-        connector = exchange_manager.get_exchange(exchange)
+        connector = await self._ensure_exchange_connector(exchange, account_id=account_id)
         if connector is None:
             return False, False
         try:
@@ -2564,7 +2686,7 @@ class ExecutionEngine:
         self._last_live_reconcile_at = now
 
         now_ts = datetime.now().timestamp()
-        grouped: Dict[str, List[Any]] = {}
+        grouped: Dict[Tuple[str, str], List[Any]] = {}
         active_local_keys: set[Tuple[str, str, str, str]] = set()
         for pos in local_positions:
             exchange_name = str(getattr(pos, "exchange", "") or "").strip().lower()
@@ -2575,10 +2697,10 @@ class ExecutionEngine:
             account_id = str(getattr(pos, "account_id", "main") or "main")
             if local_symbol and local_side in {"long", "short"}:
                 active_local_keys.add((account_id, exchange_name, local_symbol, local_side))
-            grouped.setdefault(exchange_name, []).append(pos)
+            grouped.setdefault((exchange_name, account_id), []).append(pos)
 
-        for exchange_name, positions in grouped.items():
-            connector = exchange_manager.get_exchange(exchange_name)
+        for (exchange_name, account_id), positions in grouped.items():
+            connector = await self._ensure_exchange_connector(exchange_name, account_id=account_id)
             if not connector:
                 continue
             default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").lower()
@@ -2935,10 +3057,17 @@ class ExecutionEngine:
                 f"symbol={signal.symbol} type={signal.signal_type.value}"
             )
             try:
-                account_equity = await asyncio.wait_for(self._get_account_equity(), timeout=12.0)
+                account_equity = await asyncio.wait_for(
+                    self._get_account_equity(account_id=account_id),
+                    timeout=12.0,
+                )
             except asyncio.TimeoutError:
-                report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
-                cached_eq = float(self._cached_equity or 0.0)
+                report_eq = (
+                    float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
+                    if self._should_publish_equity(account_id)
+                    else 0.0
+                )
+                cached_eq = self._get_cached_equity_value(account_id)
                 fallback_eq = max(report_eq, cached_eq, 1000.0 if not self._paper_trading else 0.0)
                 if fallback_eq <= 0:
                     raise
@@ -3460,42 +3589,65 @@ class ExecutionEngine:
                     reset_profit_management_state=not bool(req.reduce_only),
                 )
 
-            exec_amount = float(order.filled or qty or 0.0)
-            if side == OrderSide.BUY:
-                if current_position and current_position.side == PositionSide.LONG:
-                    total_qty = current_position.quantity + exec_amount
-                    if total_qty > 0:
-                        current_position.entry_price = (
-                            (current_position.entry_price * current_position.quantity)
-                            + (fill_price * exec_amount)
-                        ) / total_qty
-                    current_position.quantity = total_qty
-                    current_position.margin = (
-                        current_position.entry_price * current_position.quantity
-                    ) / max(1e-9, float(current_position.leverage or leverage or 1.0))
-                    _merge_protection_settings()
-                    current_position.update_price(fill_price)
-                elif current_position and current_position.side == PositionSide.SHORT:
-                    close_qty = min(exec_amount, float(current_position.quantity or 0.0))
-                    prev_realized = float(current_position.realized_pnl or 0.0)
-                    closed = position_manager.close_position(
-                        exchange=exchange,
-                        symbol=signal.symbol,
-                        close_price=fill_price,
-                        quantity=close_qty,
-                        account_id=account_id,
-                        strategy=strategy_lookup,
-                    )
-                    if closed:
-                        trade_pnl += float(closed.realized_pnl or 0.0) - prev_realized
-                    remaining = max(0.0, exec_amount - close_qty)
-                    if remaining > 0 and not req.reduce_only:
+            exec_amount = self._resolved_order_fill_qty(order, qty)
+            if exec_amount > 0:
+                if side == OrderSide.BUY:
+                    if current_position and current_position.side == PositionSide.LONG:
+                        total_qty = current_position.quantity + exec_amount
+                        if total_qty > 0:
+                            current_position.entry_price = (
+                                (current_position.entry_price * current_position.quantity)
+                                + (fill_price * exec_amount)
+                            ) / total_qty
+                        current_position.quantity = total_qty
+                        current_position.margin = (
+                            current_position.entry_price * current_position.quantity
+                        ) / max(1e-9, float(current_position.leverage or leverage or 1.0))
+                        _merge_protection_settings()
+                        current_position.update_price(fill_price)
+                    elif current_position and current_position.side == PositionSide.SHORT:
+                        close_qty = min(exec_amount, float(current_position.quantity or 0.0))
+                        prev_realized = float(current_position.realized_pnl or 0.0)
+                        closed = position_manager.close_position(
+                            exchange=exchange,
+                            symbol=signal.symbol,
+                            close_price=fill_price,
+                            quantity=close_qty,
+                            account_id=account_id,
+                            strategy=strategy_lookup,
+                        )
+                        if closed:
+                            trade_pnl += float(closed.realized_pnl or 0.0) - prev_realized
+                        remaining = max(0.0, exec_amount - close_qty)
+                        if remaining > 0 and not req.reduce_only:
+                            position_manager.open_position(
+                                exchange=exchange,
+                                symbol=signal.symbol,
+                                side=PositionSide.LONG,
+                                entry_price=fill_price,
+                                quantity=remaining,
+                                leverage=leverage,
+                                strategy=signal.strategy_name,
+                                account_id=account_id,
+                                stop_loss=req.stop_loss,
+                                take_profit=req.take_profit,
+                                trailing_stop_pct=req.trailing_stop_pct,
+                                trailing_stop_distance=req.trailing_stop_distance,
+                                metadata=self._merge_position_metadata(
+                                    None,
+                                    dict(signal.metadata or {}),
+                                    source="strategy",
+                                    reduce_only=bool(req.reduce_only),
+                                    reset_profit_management_state=True,
+                                ),
+                            )
+                    else:
                         position_manager.open_position(
                             exchange=exchange,
                             symbol=signal.symbol,
-                            side=PositionSide.LONG,
+                            side=position_side,
                             entry_price=fill_price,
-                            quantity=remaining,
+                            quantity=exec_amount,
                             leverage=leverage,
                             strategy=signal.strategy_name,
                             account_id=account_id,
@@ -3512,49 +3664,62 @@ class ExecutionEngine:
                             ),
                         )
                 else:
-                    position_manager.open_position(
-                        exchange=exchange,
-                        symbol=signal.symbol,
-                        side=position_side,
-                        entry_price=fill_price,
-                        quantity=exec_amount,
-                        leverage=leverage,
-                        strategy=signal.strategy_name,
-                        account_id=account_id,
-                        stop_loss=req.stop_loss,
-                        take_profit=req.take_profit,
-                        trailing_stop_pct=req.trailing_stop_pct,
-                        trailing_stop_distance=req.trailing_stop_distance,
-                        metadata=self._merge_position_metadata(
-                            None,
-                            dict(signal.metadata or {}),
-                            source="strategy",
-                            reduce_only=bool(req.reduce_only),
-                            reset_profit_management_state=True,
-                        ),
-                    )
-            else:
-                if current_position and current_position.side == PositionSide.LONG:
-                    close_qty = min(exec_amount, float(current_position.quantity or 0.0))
-                    prev_realized = float(current_position.realized_pnl or 0.0)
-                    closed = position_manager.close_position(
-                        exchange=exchange,
-                        symbol=signal.symbol,
-                        close_price=fill_price,
-                        quantity=close_qty,
-                        account_id=account_id,
-                        strategy=strategy_lookup,
-                    )
-                    if closed:
-                        trade_pnl += float(closed.realized_pnl or 0.0) - prev_realized
-                    remaining = max(0.0, exec_amount - close_qty)
-                    if remaining > 0 and not req.reduce_only:
+                    if current_position and current_position.side == PositionSide.LONG:
+                        close_qty = min(exec_amount, float(current_position.quantity or 0.0))
+                        prev_realized = float(current_position.realized_pnl or 0.0)
+                        closed = position_manager.close_position(
+                            exchange=exchange,
+                            symbol=signal.symbol,
+                            close_price=fill_price,
+                            quantity=close_qty,
+                            account_id=account_id,
+                            strategy=strategy_lookup,
+                        )
+                        if closed:
+                            trade_pnl += float(closed.realized_pnl or 0.0) - prev_realized
+                        remaining = max(0.0, exec_amount - close_qty)
+                        if remaining > 0 and not req.reduce_only:
+                            position_manager.open_position(
+                                exchange=exchange,
+                                symbol=signal.symbol,
+                                side=PositionSide.SHORT,
+                                entry_price=fill_price,
+                                quantity=remaining,
+                                leverage=leverage,
+                                strategy=signal.strategy_name,
+                                account_id=account_id,
+                                stop_loss=req.stop_loss,
+                                take_profit=req.take_profit,
+                                trailing_stop_pct=req.trailing_stop_pct,
+                                trailing_stop_distance=req.trailing_stop_distance,
+                                metadata=self._merge_position_metadata(
+                                    None,
+                                    dict(signal.metadata or {}),
+                                    source="strategy",
+                                    reduce_only=bool(req.reduce_only),
+                                    reset_profit_management_state=True,
+                                ),
+                            )
+                    elif current_position and current_position.side == PositionSide.SHORT:
+                        total_qty = current_position.quantity + exec_amount
+                        if total_qty > 0:
+                            current_position.entry_price = (
+                                (current_position.entry_price * current_position.quantity)
+                                + (fill_price * exec_amount)
+                            ) / total_qty
+                        current_position.quantity = total_qty
+                        current_position.margin = (
+                            current_position.entry_price * current_position.quantity
+                        ) / max(1e-9, float(current_position.leverage or leverage or 1.0))
+                        _merge_protection_settings()
+                        current_position.update_price(fill_price)
+                    else:
                         position_manager.open_position(
                             exchange=exchange,
                             symbol=signal.symbol,
-                            side=PositionSide.SHORT,
+                            side=position_side,
                             entry_price=fill_price,
-                            quantity=remaining,
+                            quantity=exec_amount,
                             leverage=leverage,
                             strategy=signal.strategy_name,
                             account_id=account_id,
@@ -3570,80 +3735,46 @@ class ExecutionEngine:
                                 reset_profit_management_state=True,
                             ),
                         )
-                elif current_position and current_position.side == PositionSide.SHORT:
-                    total_qty = current_position.quantity + exec_amount
-                    if total_qty > 0:
-                        current_position.entry_price = (
-                            (current_position.entry_price * current_position.quantity)
-                            + (fill_price * exec_amount)
-                        ) / total_qty
-                    current_position.quantity = total_qty
-                    current_position.margin = (
-                        current_position.entry_price * current_position.quantity
-                    ) / max(1e-9, float(current_position.leverage or leverage or 1.0))
-                    _merge_protection_settings()
-                    current_position.update_price(fill_price)
-                else:
-                    position_manager.open_position(
-                        exchange=exchange,
-                        symbol=signal.symbol,
-                        side=position_side,
-                        entry_price=fill_price,
-                        quantity=exec_amount,
-                        leverage=leverage,
-                        strategy=signal.strategy_name,
-                        account_id=account_id,
-                        stop_loss=req.stop_loss,
-                        take_profit=req.take_profit,
-                        trailing_stop_pct=req.trailing_stop_pct,
-                        trailing_stop_distance=req.trailing_stop_distance,
-                        metadata=self._merge_position_metadata(
-                            None,
-                            dict(signal.metadata or {}),
-                            source="strategy",
-                            reduce_only=bool(req.reduce_only),
-                            reset_profit_management_state=True,
-                        ),
-                    )
 
             gross_trade_pnl = float(trade_pnl or 0.0)
             net_trade_pnl = gross_trade_pnl - fee_usd - slippage_cost_usd
-            risk_manager.record_trade(
-                {
-                    "symbol": signal.symbol,
-                    "exchange": exchange,
-                    "strategy": signal.strategy_name,
-                    "side": side.value,
-                    "signal_type": signal.signal_type.value,
-                    "fill_price": float(fill_price or 0.0),
-                    "quantity": float(exec_amount or 0.0),
-                    "notional": float(exec_amount * fill_price),
-                    "pnl": net_trade_pnl,
-                    "fee_usd": fee_usd,
-                    "slippage_cost_usd": slippage_cost_usd,
-                    "order_id": order.id,
-                    "strength": float(signal.strength or 0.0),
-                    "stop_loss": signal.stop_loss,
-                    "take_profit": signal.take_profit,
-                    "action": "open_or_add",
-                }
-            )
-            await self._record_live_strategy_trade(
-                signal=signal,
-                exchange=exchange,
-                account_id=account_id,
-                side=side.value,
-                quantity=exec_amount,
-                fill_price=float(fill_price or 0.0),
-                order_id=order.id,
-                order_status=order.status.value,
-                pnl=float(net_trade_pnl or 0.0),
-                fee_usd=fee_usd,
-                slippage_cost_usd=slippage_cost_usd,
-                gross_pnl_usd=float(gross_trade_pnl or 0.0),
-                net_pnl_usd=float(net_trade_pnl or 0.0),
-                action="open_or_add",
-            )
+            if exec_amount > 0:
+                risk_manager.record_trade(
+                    {
+                        "symbol": signal.symbol,
+                        "exchange": exchange,
+                        "strategy": signal.strategy_name,
+                        "side": side.value,
+                        "signal_type": signal.signal_type.value,
+                        "fill_price": float(fill_price or 0.0),
+                        "quantity": float(exec_amount or 0.0),
+                        "notional": float(exec_amount * fill_price),
+                        "pnl": net_trade_pnl,
+                        "fee_usd": fee_usd,
+                        "slippage_cost_usd": slippage_cost_usd,
+                        "order_id": order.id,
+                        "strength": float(signal.strength or 0.0),
+                        "stop_loss": signal.stop_loss,
+                        "take_profit": signal.take_profit,
+                        "action": "open_or_add",
+                    }
+                )
+                await self._record_live_strategy_trade(
+                    signal=signal,
+                    exchange=exchange,
+                    account_id=account_id,
+                    side=side.value,
+                    quantity=exec_amount,
+                    fill_price=float(fill_price or 0.0),
+                    order_id=order.id,
+                    order_status=order.status.value,
+                    pnl=float(net_trade_pnl or 0.0),
+                    fee_usd=fee_usd,
+                    slippage_cost_usd=slippage_cost_usd,
+                    gross_pnl_usd=float(gross_trade_pnl or 0.0),
+                    net_pnl_usd=float(net_trade_pnl or 0.0),
+                    action="open_or_add",
+                )
 
             result = {
                 "signal": signal.to_dict(),
@@ -3656,11 +3787,15 @@ class ExecutionEngine:
                     "fee_usd": fee_usd,
                     "slippage_cost_usd": slippage_cost_usd,
                 },
+                "executed_quantity": float(exec_amount or 0.0),
                 "timestamp": datetime.now().isoformat(),
             }
-            self._signal_diagnostics["executed"] = int(self._signal_diagnostics.get("executed", 0)) + 1
+            execution_event = "order_executed" if exec_amount > 0 else "order_submitted"
+            result_status = "executed" if exec_amount > 0 else "submitted"
+            if exec_amount > 0:
+                self._signal_diagnostics["executed"] = int(self._signal_diagnostics.get("executed", 0)) + 1
             self._signal_diagnostics["last_result"] = {
-                "status": "executed",
+                "status": result_status,
                 "strategy": signal.strategy_name,
                 "symbol": signal.symbol,
                 "exchange": exchange,
@@ -3670,34 +3805,37 @@ class ExecutionEngine:
                 "price": float(order.price or 0.0),
             }
             self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
-            await self._notify_callbacks("order_executed", result)
-            await write_audit(
-                GovernanceAuditEvent(
-                    module="trading.execution",
-                    action="order_executed",
-                    status="success",
-                    actor="system",
-                    role="SYSTEM",
-                    trace_id=str(req.params.get("trace_id") or ""),
-                    input_payload={
-                        "symbol": signal.symbol,
-                        "strategy": signal.strategy_name,
-                        "side": side.value,
-                        "qty": exec_amount,
-                        "price": float(fill_price),
-                    },
-                    output_payload={
-                        "order_id": order.id,
-                        "status": order.status.value,
-                        "filled": float(order.filled or 0.0),
-                    },
-                    payload_json={
-                        "fee_usd": fee_usd,
-                        "slippage_cost_usd": slippage_cost_usd,
-                        "account_id": account_id,
-                    },
+            await self._notify_callbacks(execution_event, result)
+            try:
+                await write_audit(
+                    GovernanceAuditEvent(
+                        module="trading.execution",
+                        action=execution_event,
+                        status="success",
+                        actor="system",
+                        role="SYSTEM",
+                        trace_id=str(req.params.get("trace_id") or ""),
+                        input_payload={
+                            "symbol": signal.symbol,
+                            "strategy": signal.strategy_name,
+                            "side": side.value,
+                            "qty": exec_amount,
+                            "price": float(fill_price),
+                        },
+                        output_payload={
+                            "order_id": order.id,
+                            "status": order.status.value,
+                            "filled": float(order.filled or 0.0),
+                        },
+                        payload_json={
+                            "fee_usd": fee_usd,
+                            "slippage_cost_usd": slippage_cost_usd,
+                            "account_id": account_id,
+                        },
+                    )
                 )
-            )
+            except Exception as audit_err:
+                logger.warning(f"Strategy execution audit skipped: {audit_err}")
             return result
         except Exception as e:
             self._signal_diagnostics["exceptions"] = int(self._signal_diagnostics.get("exceptions", 0)) + 1
@@ -3746,7 +3884,7 @@ class ExecutionEngine:
             preferred_price=signal.price,
         )
 
-        account_equity = await self._get_account_equity()
+        account_equity = await self._get_account_equity(account_id=account_id)
         if not risk_manager.pre_trade_check(
             symbol=signal.symbol,
             side=close_side.value,
@@ -3804,6 +3942,7 @@ class ExecutionEngine:
                 has_exchange_pos, checked = await self._exchange_has_side_position(
                     exchange=exchange,
                     symbol=signal.symbol,
+                    account_id=account_id,
                     side=position_side,
                     min_qty=close_qty * 0.5,
                 )
@@ -3871,72 +4010,76 @@ class ExecutionEngine:
             if order_fee > 0:
                 fee_usd = order_fee
         close_price = float(close_order.price or signal.price or quote_price or 0.0)
-        closed = position_manager.close_position(
-            exchange=exchange,
-            symbol=signal.symbol,
-            close_price=close_price,
-            quantity=close_qty,
-            account_id=account_id,
-            strategy=strategy_lookup,
-        )
-        if not closed:
-            source = str((getattr(position, "metadata", {}) or {}).get("source") or "").strip().lower()
-            if source != "exchange_live":
-                return None
-            gross_pnl = 0.0
-            entry_price = float(getattr(position, "entry_price", 0.0) or 0.0)
-            if entry_price > 0 and close_qty > 0:
-                if position_side == PositionSide.LONG:
-                    gross_pnl = (close_price - entry_price) * close_qty
-                else:
-                    gross_pnl = (entry_price - close_price) * close_qty
-            closed = SimpleNamespace(realized_pnl=gross_pnl)
+        executed_close_qty = self._resolved_order_fill_qty(close_order, close_qty)
+        closed = None
+        if executed_close_qty > 0:
+            closed = position_manager.close_position(
+                exchange=exchange,
+                symbol=signal.symbol,
+                close_price=close_price,
+                quantity=executed_close_qty,
+                account_id=account_id,
+                strategy=strategy_lookup,
+            )
+            if not closed:
+                source = str((getattr(position, "metadata", {}) or {}).get("source") or "").strip().lower()
+                if source != "exchange_live":
+                    return None
+                gross_pnl = 0.0
+                entry_price = float(getattr(position, "entry_price", 0.0) or 0.0)
+                if entry_price > 0 and executed_close_qty > 0:
+                    if position_side == PositionSide.LONG:
+                        gross_pnl = (close_price - entry_price) * executed_close_qty
+                    else:
+                        gross_pnl = (entry_price - close_price) * executed_close_qty
+                closed = SimpleNamespace(realized_pnl=gross_pnl)
 
-        risk_manager.record_trade(
-            {
-                "symbol": signal.symbol,
-                "exchange": exchange,
-                "strategy": signal.strategy_name,
-                "side": signal.signal_type.value,
-                "signal_type": signal.signal_type.value,
-                "fill_price": float(close_price or 0.0),
-                "quantity": float(close_qty or 0.0),
-                "pnl": float(closed.realized_pnl or 0.0) - fee_usd - slippage_cost_usd,
-                "notional": float(close_price * close_qty),
-                "fee_usd": fee_usd,
-                "slippage_cost_usd": slippage_cost_usd,
-                "order_id": close_order.id,
-                "strength": float(signal.strength or 0.0),
-                "stop_loss": signal.stop_loss,
-                "take_profit": signal.take_profit,
-                "action": "close",
-            }
-        )
-        gross_close_pnl = float(closed.realized_pnl or 0.0)
+            risk_manager.record_trade(
+                {
+                    "symbol": signal.symbol,
+                    "exchange": exchange,
+                    "strategy": signal.strategy_name,
+                    "side": signal.signal_type.value,
+                    "signal_type": signal.signal_type.value,
+                    "fill_price": float(close_price or 0.0),
+                    "quantity": float(executed_close_qty or 0.0),
+                    "pnl": float(closed.realized_pnl or 0.0) - fee_usd - slippage_cost_usd,
+                    "notional": float(close_price * executed_close_qty),
+                    "fee_usd": fee_usd,
+                    "slippage_cost_usd": slippage_cost_usd,
+                    "order_id": close_order.id,
+                    "strength": float(signal.strength or 0.0),
+                    "stop_loss": signal.stop_loss,
+                    "take_profit": signal.take_profit,
+                    "action": "close",
+                }
+            )
+        gross_close_pnl = float(getattr(closed, "realized_pnl", 0.0) or 0.0)
         close_pnl = gross_close_pnl - fee_usd - slippage_cost_usd
-        await self._record_live_strategy_trade(
-            signal=signal,
-            exchange=exchange,
-            account_id=account_id,
-            side=close_side.value,
-            quantity=float(close_order.filled or close_qty or 0.0),
-            fill_price=float(close_price or 0.0),
-            order_id=close_order.id,
-            order_status=close_order.status.value,
-            pnl=close_pnl,
-            fee_usd=fee_usd,
-            slippage_cost_usd=slippage_cost_usd,
-            gross_pnl_usd=gross_close_pnl,
-            net_pnl_usd=close_pnl,
-            action="close",
-        )
+        if executed_close_qty > 0:
+            await self._record_live_strategy_trade(
+                signal=signal,
+                exchange=exchange,
+                account_id=account_id,
+                side=close_side.value,
+                quantity=float(executed_close_qty or 0.0),
+                fill_price=float(close_price or 0.0),
+                order_id=close_order.id,
+                order_status=close_order.status.value,
+                pnl=close_pnl,
+                fee_usd=fee_usd,
+                slippage_cost_usd=slippage_cost_usd,
+                gross_pnl_usd=gross_close_pnl,
+                net_pnl_usd=close_pnl,
+                action="close",
+            )
 
         result = {
             "action": "close_position",
             "symbol": signal.symbol,
             "side": position_side.value,
             "close_price": close_price,
-            "quantity": float(close_qty or 0.0),
+            "quantity": float(executed_close_qty or 0.0),
             "pnl": close_pnl,
             "fee_usd": fee_usd,
             "slippage_cost_usd": slippage_cost_usd,
@@ -3955,30 +4098,31 @@ class ExecutionEngine:
             },
             "timestamp": datetime.now().isoformat(),
         }
-        try:
-            await audit_logger.log(
-                module="trading",
-                action="trade_close",
-                status="success",
-                message=f"closed {signal.symbol} {position_side.value}",
-                details={
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "symbol": signal.symbol,
-                    "strategy": signal.strategy_name,
-                    "exchange": exchange,
-                    "side": position_side.value,
-                    "pnl": float(result.get("pnl") or 0.0),
-                    "fee_usd": float(result.get("fee_usd") or 0.0),
-                    "slippage_cost_usd": float(result.get("slippage_cost_usd") or 0.0),
-                    "close_price": float(result.get("close_price") or 0.0),
-                    "quantity": float(close_qty or 0.0),
-                    "notional": float(close_price * close_qty),
-                    "account_id": account_id,
-                },
-            )
-        except Exception as audit_err:
-            logger.debug(f"trade_close audit log skipped: {audit_err}")
-        await self._notify_callbacks("order_executed", result)
+        if executed_close_qty > 0:
+            try:
+                await audit_logger.log(
+                    module="trading",
+                    action="trade_close",
+                    status="success",
+                    message=f"closed {signal.symbol} {position_side.value}",
+                    details={
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "symbol": signal.symbol,
+                        "strategy": signal.strategy_name,
+                        "exchange": exchange,
+                        "side": position_side.value,
+                        "pnl": float(result.get("pnl") or 0.0),
+                        "fee_usd": float(result.get("fee_usd") or 0.0),
+                        "slippage_cost_usd": float(result.get("slippage_cost_usd") or 0.0),
+                        "close_price": float(result.get("close_price") or 0.0),
+                        "quantity": float(executed_close_qty or 0.0),
+                        "notional": float(close_price * executed_close_qty),
+                        "account_id": account_id,
+                    },
+                )
+            except Exception as audit_err:
+                logger.debug(f"trade_close audit log skipped: {audit_err}")
+        await self._notify_callbacks("order_executed" if executed_close_qty > 0 else "order_submitted", result)
         return result
 
     def _new_conditional_id(self) -> str:
@@ -4134,14 +4278,14 @@ class ExecutionEngine:
         if reduce_only and not closes_existing:
             return None
 
-        exec_amount = raw_amount
+        requested_amount = raw_amount
         if reduce_only and existing_position and closes_existing:
-            exec_amount = min(exec_amount, float(existing_position.quantity or 0.0))
-            if exec_amount <= 0:
+            requested_amount = min(requested_amount, float(existing_position.quantity or 0.0))
+            if requested_amount <= 0:
                 return None
 
-        quote_price, order_value = await self._resolve_order_context(exchange, symbol, exec_amount, price)
-        account_equity = await self._get_account_equity()
+        quote_price, order_value = await self._resolve_order_context(exchange, symbol, requested_amount, price)
+        account_equity = await self._get_account_equity(account_id=account_id)
         governance_check = await decision_engine.evaluate_order_intent(
             symbol=symbol,
             side=side_lower,
@@ -4173,7 +4317,7 @@ class ExecutionEngine:
             symbol=symbol,
             side=OrderSide.BUY if side_lower == "buy" else OrderSide.SELL,
             order_type=OrderType.MARKET if str(order_type).lower() == "market" else OrderType.LIMIT,
-            amount=exec_amount,
+            amount=requested_amount,
             price=price,
             exchange=exchange,
             strategy=strategy,
@@ -4203,6 +4347,7 @@ class ExecutionEngine:
             if order_fee > 0:
                 fee_usd = order_fee
         fill_price = float(order.price or price or quote_price or 0.0)
+        exec_amount = self._resolved_order_fill_qty(order, requested_amount)
         trade_pnl = 0.0
 
         def _merge_protection_settings() -> None:
@@ -4230,41 +4375,64 @@ class ExecutionEngine:
                 reset_profit_management_state=not bool(reduce_only),
             )
 
-        if side_lower == "buy":
-            if existing_position and existing_position.side == PositionSide.LONG:
-                total_qty = existing_position.quantity + exec_amount
-                if total_qty > 0:
-                    existing_position.entry_price = (
-                        (existing_position.entry_price * existing_position.quantity)
-                        + (fill_price * exec_amount)
-                    ) / total_qty
-                existing_position.quantity = total_qty
-                existing_position.margin = (
-                    existing_position.entry_price * existing_position.quantity
-                ) / max(1e-9, float(existing_position.leverage or leverage or 1.0))
-                _merge_protection_settings()
-                existing_position.update_price(fill_price)
-            elif existing_position and existing_position.side == PositionSide.SHORT:
-                close_qty = min(exec_amount, float(existing_position.quantity or 0.0))
-                prev_realized = float(existing_position.realized_pnl or 0.0)
-                closed = position_manager.close_position(
-                    exchange=exchange,
-                    symbol=symbol,
-                    close_price=fill_price,
-                    quantity=close_qty,
-                    account_id=account_id,
-                    strategy=strategy_lookup,
-                )
-                if closed:
-                    trade_pnl += float(closed.realized_pnl or 0.0) - prev_realized
-                remaining = max(0.0, exec_amount - close_qty)
-                if remaining > 0 and not reduce_only:
+        if exec_amount > 0:
+            if side_lower == "buy":
+                if existing_position and existing_position.side == PositionSide.LONG:
+                    total_qty = existing_position.quantity + exec_amount
+                    if total_qty > 0:
+                        existing_position.entry_price = (
+                            (existing_position.entry_price * existing_position.quantity)
+                            + (fill_price * exec_amount)
+                        ) / total_qty
+                    existing_position.quantity = total_qty
+                    existing_position.margin = (
+                        existing_position.entry_price * existing_position.quantity
+                    ) / max(1e-9, float(existing_position.leverage or leverage or 1.0))
+                    _merge_protection_settings()
+                    existing_position.update_price(fill_price)
+                elif existing_position and existing_position.side == PositionSide.SHORT:
+                    close_qty = min(exec_amount, float(existing_position.quantity or 0.0))
+                    prev_realized = float(existing_position.realized_pnl or 0.0)
+                    closed = position_manager.close_position(
+                        exchange=exchange,
+                        symbol=symbol,
+                        close_price=fill_price,
+                        quantity=close_qty,
+                        account_id=account_id,
+                        strategy=strategy_lookup,
+                    )
+                    if closed:
+                        trade_pnl += float(closed.realized_pnl or 0.0) - prev_realized
+                    remaining = max(0.0, exec_amount - close_qty)
+                    if remaining > 0 and not reduce_only:
+                        position_manager.open_position(
+                            exchange=exchange,
+                            symbol=symbol,
+                            side=PositionSide.LONG,
+                            entry_price=fill_price,
+                            quantity=remaining,
+                            leverage=leverage,
+                            strategy=strategy,
+                            account_id=account_id,
+                            stop_loss=stop_loss,
+                            take_profit=take_profit,
+                            trailing_stop_pct=trailing_stop_pct,
+                            trailing_stop_distance=trailing_stop_distance,
+                            metadata=self._merge_position_metadata(
+                                None,
+                                None,
+                                source="manual",
+                                reduce_only=reduce_only,
+                                reset_profit_management_state=True,
+                            ),
+                        )
+                else:
                     position_manager.open_position(
                         exchange=exchange,
                         symbol=symbol,
                         side=PositionSide.LONG,
                         entry_price=fill_price,
-                        quantity=remaining,
+                        quantity=exec_amount,
                         leverage=leverage,
                         strategy=strategy,
                         account_id=account_id,
@@ -4281,49 +4449,62 @@ class ExecutionEngine:
                         ),
                     )
             else:
-                position_manager.open_position(
-                    exchange=exchange,
-                    symbol=symbol,
-                    side=PositionSide.LONG,
-                    entry_price=fill_price,
-                    quantity=exec_amount,
-                    leverage=leverage,
-                    strategy=strategy,
-                    account_id=account_id,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    trailing_stop_pct=trailing_stop_pct,
-                    trailing_stop_distance=trailing_stop_distance,
-                    metadata=self._merge_position_metadata(
-                        None,
-                        None,
-                        source="manual",
-                        reduce_only=reduce_only,
-                        reset_profit_management_state=True,
-                    ),
-                )
-        else:
-            if existing_position and existing_position.side == PositionSide.LONG:
-                close_qty = min(exec_amount, float(existing_position.quantity or 0.0))
-                prev_realized = float(existing_position.realized_pnl or 0.0)
-                closed = position_manager.close_position(
-                    exchange=exchange,
-                    symbol=symbol,
-                    close_price=fill_price,
-                    quantity=close_qty,
-                    account_id=account_id,
-                    strategy=strategy_lookup,
-                )
-                if closed:
-                    trade_pnl += float(closed.realized_pnl or 0.0) - prev_realized
-                remaining = max(0.0, exec_amount - close_qty)
-                if remaining > 0 and not reduce_only:
+                if existing_position and existing_position.side == PositionSide.LONG:
+                    close_qty = min(exec_amount, float(existing_position.quantity or 0.0))
+                    prev_realized = float(existing_position.realized_pnl or 0.0)
+                    closed = position_manager.close_position(
+                        exchange=exchange,
+                        symbol=symbol,
+                        close_price=fill_price,
+                        quantity=close_qty,
+                        account_id=account_id,
+                        strategy=strategy_lookup,
+                    )
+                    if closed:
+                        trade_pnl += float(closed.realized_pnl or 0.0) - prev_realized
+                    remaining = max(0.0, exec_amount - close_qty)
+                    if remaining > 0 and not reduce_only:
+                        position_manager.open_position(
+                            exchange=exchange,
+                            symbol=symbol,
+                            side=PositionSide.SHORT,
+                            entry_price=fill_price,
+                            quantity=remaining,
+                            leverage=leverage,
+                            strategy=strategy,
+                            account_id=account_id,
+                            stop_loss=stop_loss,
+                            take_profit=take_profit,
+                            trailing_stop_pct=trailing_stop_pct,
+                            trailing_stop_distance=trailing_stop_distance,
+                            metadata=self._merge_position_metadata(
+                                None,
+                                None,
+                                source="manual",
+                                reduce_only=reduce_only,
+                                reset_profit_management_state=True,
+                            ),
+                        )
+                elif existing_position and existing_position.side == PositionSide.SHORT:
+                    total_qty = existing_position.quantity + exec_amount
+                    if total_qty > 0:
+                        existing_position.entry_price = (
+                            (existing_position.entry_price * existing_position.quantity)
+                            + (fill_price * exec_amount)
+                        ) / total_qty
+                    existing_position.quantity = total_qty
+                    existing_position.margin = (
+                        existing_position.entry_price * existing_position.quantity
+                    ) / max(1e-9, float(existing_position.leverage or leverage or 1.0))
+                    _merge_protection_settings()
+                    existing_position.update_price(fill_price)
+                else:
                     position_manager.open_position(
                         exchange=exchange,
                         symbol=symbol,
                         side=PositionSide.SHORT,
                         entry_price=fill_price,
-                        quantity=remaining,
+                        quantity=exec_amount,
                         leverage=leverage,
                         strategy=strategy,
                         account_id=account_id,
@@ -4339,63 +4520,29 @@ class ExecutionEngine:
                             reset_profit_management_state=True,
                         ),
                     )
-            elif existing_position and existing_position.side == PositionSide.SHORT:
-                total_qty = existing_position.quantity + exec_amount
-                if total_qty > 0:
-                    existing_position.entry_price = (
-                        (existing_position.entry_price * existing_position.quantity)
-                        + (fill_price * exec_amount)
-                    ) / total_qty
-                existing_position.quantity = total_qty
-                existing_position.margin = (
-                    existing_position.entry_price * existing_position.quantity
-                ) / max(1e-9, float(existing_position.leverage or leverage or 1.0))
-                _merge_protection_settings()
-                existing_position.update_price(fill_price)
-            else:
-                position_manager.open_position(
-                    exchange=exchange,
-                    symbol=symbol,
-                    side=PositionSide.SHORT,
-                    entry_price=fill_price,
-                    quantity=exec_amount,
-                    leverage=leverage,
-                    strategy=strategy,
-                    account_id=account_id,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    trailing_stop_pct=trailing_stop_pct,
-                    trailing_stop_distance=trailing_stop_distance,
-                    metadata=self._merge_position_metadata(
-                        None,
-                        None,
-                        source="manual",
-                        reduce_only=reduce_only,
-                        reset_profit_management_state=True,
-                    ),
-                )
 
         gross_trade_pnl = float(trade_pnl or 0.0)
         net_trade_pnl = gross_trade_pnl - fee_usd - slippage_cost_usd
-        risk_manager.record_trade(
-            {
-                "symbol": symbol,
-                "exchange": exchange,
-                "strategy": strategy,
-                "side": side_lower,
-                "signal_type": side_lower,
-                "fill_price": float(fill_price or 0.0),
-                "quantity": float(exec_amount or 0.0),
-                "notional": float(exec_amount * fill_price),
-                "pnl": net_trade_pnl,
-                "fee_usd": fee_usd,
-                "slippage_cost_usd": slippage_cost_usd,
-                "order_id": order.id,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "action": "manual_order",
-            }
-        )
+        if exec_amount > 0:
+            risk_manager.record_trade(
+                {
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "strategy": strategy,
+                    "side": side_lower,
+                    "signal_type": side_lower,
+                    "fill_price": float(fill_price or 0.0),
+                    "quantity": float(exec_amount or 0.0),
+                    "notional": float(exec_amount * fill_price),
+                    "pnl": net_trade_pnl,
+                    "fee_usd": fee_usd,
+                    "slippage_cost_usd": slippage_cost_usd,
+                    "order_id": order.id,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "action": "manual_order",
+                }
+            )
 
         result = {
             "order_id": order.id,
@@ -4403,6 +4550,7 @@ class ExecutionEngine:
             "price": fill_price,
             "amount": order.amount,
             "filled": order.filled,
+            "executed_quantity": float(exec_amount or 0.0),
             "exchange": exchange,
             "symbol": symbol,
             "side": side_lower,
@@ -4417,7 +4565,7 @@ class ExecutionEngine:
             "fee_usd": fee_usd,
             "slippage_cost_usd": slippage_cost_usd,
         }
-        await self._notify_callbacks("manual_order_executed", result)
+        await self._notify_callbacks("manual_order_executed" if exec_amount > 0 else "manual_order_submitted", result)
         return result
 
     async def execute_manual_order(

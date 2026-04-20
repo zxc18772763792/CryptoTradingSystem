@@ -98,12 +98,13 @@ async def run_cli(run_config: RunConfig) -> None:
     """Run CLI mode."""
     from config.database import init_db
     from core.data import data_storage
-    from core.exchanges import exchange_manager
+    from core.exchanges.exchange_manager import exchange_manager
 
     logger.info(f"Starting CLI mode with trading mode: {run_config.trading_mode}")
 
     await init_db()
-    await data_storage.initialize()
+    data_storage.mark_db_initialized()
+    await data_storage.initialize(ensure_db=False)
     await exchange_manager.initialize()
 
     logger.info("System initialized")

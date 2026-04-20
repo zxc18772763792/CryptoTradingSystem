@@ -13,7 +13,6 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path as 
 from pydantic import BaseModel, Field
 
 from config.strategy_registry import get_backtest_optimization_grid
-from config.database import close_db, init_db
 from config.settings import settings
 from core.ai.proposal_schemas import ProposalValidationSummary, ResearchProposal
 from core.audit.ops_audit import ops_audit_scope
@@ -38,6 +37,7 @@ from core.governance.service import (
     upsert_api_user as governance_upsert_api_user,
 )
 from core.ops.service.auth import get_ops_token, get_request_auth, ops_token_configured, require_ops_auth
+from core.runtime.bootstrap import runtime_bootstrap
 from core.research.orchestrator import (
     create_manual_proposal,
     delete_proposal as delete_ai_proposal_item,
@@ -859,9 +859,10 @@ async def _ops_startup(app: FastAPI, standalone: bool) -> None:
     if standalone:
         get_ops_token(required=True)
     if standalone:
-        await init_db()
-        await news_db.init_news_db()
-        await data_storage.initialize()
+        await runtime_bootstrap.initialize_shared_runtime(
+            include_news=True,
+            initialize_exchanges=False,
+        )
     await pm_db.init_pm_db()
     try:
         ok = await exchange_manager.initialize(["binance"])
@@ -886,15 +887,11 @@ async def _ops_shutdown(app: FastAPI, standalone: bool) -> None:
         pass
     if standalone:
         try:
-            await data_storage.close()
-        except Exception:
-            pass
-        try:
-            await news_db.close_news_db()
-        except Exception:
-            pass
-        try:
-            await close_db()
+            await runtime_bootstrap.shutdown_shared_runtime(
+                include_news=True,
+                close_exchanges=False,
+                close_database=True,
+            )
         except Exception:
             pass
 

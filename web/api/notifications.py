@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from core.exchanges import exchange_manager
+from core.exchanges.exchange_manager import exchange_manager
 from core.notifications import notification_manager
 from core.risk.risk_manager import risk_manager
 from core.strategies import strategy_manager

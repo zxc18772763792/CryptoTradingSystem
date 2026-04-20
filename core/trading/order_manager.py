@@ -11,10 +11,15 @@ from enum import Enum
 from loguru import logger
 
 from config.settings import settings
-from core.exchanges import exchange_manager
+from core.exchanges.exchange_manager import exchange_manager
 from core.governance.decision_engine import decision_engine
 from core.risk.risk_manager import risk_manager
 from core.exchanges.base_exchange import Order, OrderSide, OrderType, OrderStatus
+from core.trading.binance_rest import (
+    binance_ccxt_symbol,
+    binance_market_symbol,
+    binance_signed_request,
+)
 from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
 
 
@@ -126,16 +131,38 @@ class OrderManager:
         # Binance USDT-M futures leverage is an integer between 1 and 125.
         return int(max(1, min(125, round(lev))))
 
-    async def _sync_binance_futures_leverage(self, symbol: str, leverage: Any) -> bool:
+    @staticmethod
+    def _resolve_cached_exchange(exchange_name: str, account_id: Optional[str] = None):
+        getter = getattr(exchange_manager, "get_exchange")
+        try:
+            return getter(exchange_name, account_id=account_id)
+        except TypeError:
+            return getter(exchange_name)
+
+    @staticmethod
+    async def _ensure_exchange_connector(exchange_name: str, account_id: Optional[str] = None):
+        ensure = getattr(exchange_manager, "ensure_exchange", None)
+        if callable(ensure):
+            try:
+                return await ensure(exchange_name, account_id=account_id)
+            except TypeError:
+                return await ensure(exchange_name)
+        return OrderManager._resolve_cached_exchange(exchange_name, account_id=account_id)
+
+    async def _sync_binance_futures_leverage(
+        self,
+        symbol: str,
+        leverage: Any,
+        *,
+        account_id: str = "main",
+    ) -> bool:
         target_leverage = self._normalize_leverage(leverage, default=1)
         try:
-            from web.api.trading import _binance_market_symbol, _binance_signed_request
-
-            market_symbol = str(_binance_market_symbol(symbol) or "").strip().upper()
+            market_symbol = str(binance_market_symbol(symbol) or "").strip().upper()
             if not market_symbol:
                 self._last_error = f"binance leverage sync failed: invalid symbol {symbol!r}"
                 return False
-            await _binance_signed_request(
+            await binance_signed_request(
                 "POST",
                 "/fapi/v1/leverage",
                 host="fapi",
@@ -144,10 +171,11 @@ class OrderManager:
                     "leverage": target_leverage,
                 },
                 timeout_sec=5.0,
+                account_id=account_id,
             )
             logger.info(
                 f"Binance futures leverage synced: symbol={market_symbol} "
-                f"target={target_leverage}x"
+                f"target={target_leverage}x account_id={account_id}"
             )
             return True
         except Exception as e:
@@ -206,7 +234,7 @@ class OrderManager:
         fill_price = float(request.price or 0.0)
 
         if fill_price <= 0:
-            connector = exchange_manager.get_exchange(request.exchange)
+            connector = self._resolve_cached_exchange(request.exchange, account_id=request.account_id)
             if connector:
                 try:
                     ticker = await connector.get_ticker(request.symbol)
@@ -292,9 +320,9 @@ class OrderManager:
         return order
 
     async def _create_real_order(self, request: OrderRequest) -> Optional[Order]:
-        exchange = exchange_manager.get_exchange(request.exchange)
+        exchange = await self._ensure_exchange_connector(request.exchange, account_id=request.account_id)
         if not exchange:
-            logger.error(f"Exchange not found: {request.exchange}")
+            logger.error(f"Exchange not found: {request.exchange} account_id={request.account_id}")
             return None
 
         try:
@@ -358,6 +386,7 @@ class OrderManager:
                 synced = await self._sync_binance_futures_leverage(
                     symbol=request.symbol,
                     leverage=requested_leverage,
+                    account_id=request.account_id,
                 )
                 if not synced:
                     return None
@@ -367,14 +396,8 @@ class OrderManager:
                 and request.order_type in {OrderType.MARKET, OrderType.LIMIT}
             ):
                 try:
-                    from web.api.trading import (
-                        _binance_signed_request,
-                        _binance_market_symbol,
-                        _binance_ccxt_symbol,
-                    )
-
                     raw_payload: Dict[str, Any] = {
-                        "symbol": _binance_market_symbol(request.symbol),
+                        "symbol": binance_market_symbol(request.symbol),
                         "side": request.side.value.upper(),
                         "type": request.order_type.value.upper(),
                         "quantity": request.amount,
@@ -385,12 +408,13 @@ class OrderManager:
                         raw_payload["timeInForce"] = "GTC"
                     if request.reduce_only:
                         raw_payload["reduceOnly"] = "true"
-                    raw_order = await _binance_signed_request(
+                    raw_order = await binance_signed_request(
                         "POST",
                         "/fapi/v1/order",
                         host="fapi",
                         params=raw_payload,
                         timeout_sec=8.0,
+                        account_id=request.account_id,
                     )
                     status_text = str((raw_order or {}).get("status") or "").upper()
                     status_map = {
@@ -410,7 +434,7 @@ class OrderManager:
                     filled = self._safe_nonnegative_float((raw_order or {}).get("executedQty"), 0.0)
                     order = Order(
                         id=str((raw_order or {}).get("orderId") or ""),
-                        symbol=_binance_ccxt_symbol(str((raw_order or {}).get("symbol") or ""), futures=True),
+                        symbol=binance_ccxt_symbol(str((raw_order or {}).get("symbol") or ""), futures=True),
                         side=request.side,
                         type=request.order_type,
                         price=float(fill_price or 0.0),
@@ -516,7 +540,7 @@ class OrderManager:
         if self._paper_trading:
             return await self._cancel_paper_order(order_id)
 
-        connector = exchange_manager.get_exchange(exchange)
+        connector = self._resolve_cached_exchange(exchange, account_id=self._order_meta.get(order_id, {}).get("account_id"))
         if not connector:
             return False
 
@@ -547,7 +571,7 @@ class OrderManager:
         if self._paper_trading:
             return self._orders.get(order_id)
 
-        connector = exchange_manager.get_exchange(exchange)
+        connector = self._resolve_cached_exchange(exchange, account_id=self._order_meta.get(order_id, {}).get("account_id"))
         if not connector:
             return None
 
@@ -578,7 +602,7 @@ class OrderManager:
                 return []
 
             async def _fetch_open_orders(ex_name: str) -> List[Order]:
-                connector = exchange_manager.get_exchange(ex_name)
+                connector = self._resolve_cached_exchange(ex_name)
                 if not connector:
                     return []
                 try:
@@ -608,7 +632,7 @@ class OrderManager:
             merged.sort(key=lambda x: x.timestamp or datetime.min, reverse=True)
             return merged
 
-        connector = exchange_manager.get_exchange(exchange)
+        connector = self._resolve_cached_exchange(exchange)
         if not connector:
             return []
 

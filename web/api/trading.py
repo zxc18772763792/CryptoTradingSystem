@@ -36,7 +36,7 @@ from config.settings import settings
 from core.audit import audit_logger
 from core.data import data_storage
 from core.data.coinglass_client import CoinglassClient, coinglass_enabled
-from core.exchanges import exchange_manager
+from core.exchanges.exchange_manager import exchange_manager
 from core.exchanges.base_exchange import OrderSide, OrderType
 from core.exchanges.binance_connector import BinanceConnector
 from core.notifications import notification_manager

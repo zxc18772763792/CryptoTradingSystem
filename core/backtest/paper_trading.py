@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List
 
 from loguru import logger
 
-from core.exchanges import exchange_manager
+from core.exchanges.exchange_manager import exchange_manager
 from core.strategies import Signal, StrategyBase
 from core.trading.execution_engine import execution_engine
 from core.trading.position_manager import position_manager

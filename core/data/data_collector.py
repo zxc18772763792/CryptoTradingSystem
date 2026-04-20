@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from enum import Enum
 from loguru import logger
 
-from core.exchanges import exchange_manager, Kline, Ticker
+from core.exchanges import Kline, Ticker
+from core.exchanges.exchange_manager import exchange_manager
 from config.settings import settings
 
 

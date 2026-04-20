@@ -24,7 +24,7 @@ from config.strategy_registry import (
 from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.audit import audit_logger
 from core.data import data_storage
-from core.exchanges import exchange_manager
+from core.exchanges.exchange_manager import exchange_manager
 from core.risk.risk_manager import risk_manager
 from core.strategies import Signal, SignalType, strategy_manager
 from core.strategies.persistence import (

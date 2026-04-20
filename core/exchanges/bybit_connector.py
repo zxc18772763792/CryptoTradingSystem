@@ -30,9 +30,10 @@ class BybitConnector(BaseExchange):
     async def connect(self) -> bool:
         """连接Bybit"""
         try:
+            proxy_url = str(self.config.proxy or settings.HTTP_PROXY or settings.HTTPS_PROXY or "").strip() or None
             self._client = ccxt.bybit({
-                "apiKey": settings.BYBIT_API_KEY or self.config.api_key,
-                "secret": settings.BYBIT_API_SECRET or self.config.api_secret,
+                "apiKey": self.config.api_key or settings.BYBIT_API_KEY,
+                "secret": self.config.api_secret or settings.BYBIT_API_SECRET,
                 "enableRateLimit": self.config.enable_rate_limit,
                 "rateLimit": self.config.rate_limit,
                 "timeout": self.config.timeout,
@@ -40,10 +41,10 @@ class BybitConnector(BaseExchange):
                 "defaultType": self.config.default_type,
             })
 
-            if settings.HTTP_PROXY:
+            if proxy_url:
                 self._client.proxies = {
-                    "http": settings.HTTP_PROXY,
-                    "https": settings.HTTPS_PROXY or settings.HTTP_PROXY,
+                    "http": proxy_url,
+                    "https": settings.HTTPS_PROXY or proxy_url,
                 }
 
             await self._client.load_markets()

@@ -1,39 +1,67 @@
 """
-交易所管理器
-统一管理所有交易所连接
+Exchange connector manager with optional account-scoped isolation.
 """
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import time
 from dataclasses import replace
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
 from loguru import logger
 
-from config.exchanges import ExchangeConfig, EXCHANGE_CONFIGS, ExchangeType
+from config.exchanges import EXCHANGE_CONFIGS, ExchangeConfig, ExchangeType
 from config.settings import settings
 from core.exchanges.base_exchange import BaseExchange
 from core.exchanges.binance_connector import BinanceConnector
-from core.exchanges.okx_connector import OKXConnector
-from core.exchanges.gate_connector import GateConnector
 from core.exchanges.bybit_connector import BybitConnector
+from core.exchanges.gate_connector import GateConnector
+from core.exchanges.okx_connector import OKXConnector
 try:
     from core.exchanges.dex_connectors import (
-        UniswapConnector,
-        SushiSwapConnector,
         PancakeSwapConnector,
+        SushiSwapConnector,
+        UniswapConnector,
     )
 except Exception:  # pragma: no cover - optional dependency
-    UniswapConnector = None
-    SushiSwapConnector = None
     PancakeSwapConnector = None
+    SushiSwapConnector = None
+    UniswapConnector = None
+
+
+class _LazyAccountManagerProxy:
+    def __getattr__(self, name: str):
+        from core.trading.account_manager import account_manager as live_account_manager
+
+        return getattr(live_account_manager, name)
+
+
+account_manager = _LazyAccountManagerProxy()
 
 
 class ExchangeManager:
-    """交易所管理器"""
+    """Manage shared and account-scoped exchange connectors."""
 
     def __init__(self):
         self._exchanges: Dict[str, BaseExchange] = {}
+        self._account_exchanges: Dict[str, Dict[str, BaseExchange]] = {}
         self._connected: bool = False
+
+    @staticmethod
+    def _account_manager():
+        return account_manager
+
+    @staticmethod
+    def _normalize_account_id(account_id: Optional[str]) -> Optional[str]:
+        text = str(account_id or "").strip()
+        return text or None
+
+    def _target_store(self, account_id: Optional[str]) -> Dict[str, BaseExchange]:
+        aid = self._normalize_account_id(account_id)
+        if not aid:
+            return self._exchanges
+        return self._account_exchanges.setdefault(aid, {})
 
     @staticmethod
     def _resolve_default_type(name: str, fallback: str) -> str:
@@ -64,15 +92,59 @@ class ExchangeManager:
             return None
         return timeout
 
-    async def initialize(self, exchange_names: Optional[List[str]] = None) -> bool:
+    def _resolve_exchange_config(
+        self,
+        name: str,
+        *,
+        account_id: Optional[str] = None,
+    ) -> Optional[ExchangeConfig]:
+        base_config = EXCHANGE_CONFIGS.get(name)
+        if not base_config:
+            logger.warning(f"Unknown exchange: {name}")
+            return None
+
+        runtime_default_type = self._resolve_default_type(name, base_config.default_type)
+        config = replace(base_config, default_type=runtime_default_type)
+
+        aid = self._normalize_account_id(account_id)
+        if not aid:
+            return config
+
+        account_manager = self._account_manager()
+        credentials = account_manager.get_exchange_credentials(aid, name)
+        requires_isolation = account_manager.requires_live_connector_isolation(aid)
+        api_key = str(credentials.get("api_key") or "").strip()
+        api_secret = str(credentials.get("api_secret") or "").strip()
+        if requires_isolation and (not api_key or not api_secret):
+            logger.warning(
+                f"Exchange connector isolation requires dedicated credentials: "
+                f"account_id={aid} exchange={name}"
+            )
+            return None
+
+        override_default_type = str(credentials.get("default_type") or config.default_type).strip() or config.default_type
+        return replace(
+            config,
+            api_key=api_key or config.api_key,
+            api_secret=api_secret or config.api_secret,
+            passphrase=str(credentials.get("passphrase") or config.passphrase or "").strip() or config.passphrase,
+            sandbox=bool(credentials.get("sandbox", config.sandbox)),
+            default_type=self._resolve_default_type(name, override_default_type),
+            proxy=str(credentials.get("proxy") or config.proxy or "").strip() or config.proxy,
+        )
+
+    async def initialize(
+        self,
+        exchange_names: Optional[List[str]] = None,
+        *,
+        account_id: Optional[str] = None,
+    ) -> bool:
         """
-        初始化交易所连接
+        Initialize shared or account-scoped exchange connectors.
 
-        Args:
-            exchange_names: 要初始化的交易所列表，None表示初始化所有
-
-        Returns:
-            是否初始化成功
+        When ``account_id`` is omitted, the manager keeps the existing shared
+        connector behavior. Passing an ``account_id`` creates a dedicated
+        connector pool for that account.
         """
         if exchange_names is None:
             exchange_names = ["gate", "binance"]
@@ -81,15 +153,18 @@ class ExchangeManager:
             if settings.BYBIT_API_KEY and settings.BYBIT_API_SECRET:
                 exchange_names.append("bybit")
 
+        target_store = self._target_store(account_id)
         exchange_specs: List[Tuple[str, ExchangeConfig]] = []
+        success_count = 0
 
         for name in exchange_names:
-            base_config = EXCHANGE_CONFIGS.get(name)
-            if not base_config:
-                logger.warning(f"Unknown exchange: {name}")
+            existing = target_store.get(name)
+            if existing is not None and existing.is_connected:
+                success_count += 1
                 continue
-            runtime_default_type = self._resolve_default_type(name, base_config.default_type)
-            config = replace(base_config, default_type=runtime_default_type)
+            config = self._resolve_exchange_config(name, account_id=account_id)
+            if not config:
+                continue
             exchange_specs.append((name, config))
 
         connect_timeout_sec = self._startup_connect_timeout_sec()
@@ -99,27 +174,33 @@ class ExchangeManager:
             tasks = [
                 asyncio.create_task(
                     self._create_connector(name, config, timeout_sec=connect_timeout_sec),
-                    name=f"exchange_init::{name}",
+                    name=f"exchange_init::{account_id or 'shared'}::{name}",
                 )
                 for name, config in exchange_specs
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        success_count = 0
-        for (name, _), result in zip(exchange_specs, results):
+        for (name, _config), result in zip(exchange_specs, results):
             if isinstance(result, BaseException):
                 logger.error(f"Failed to initialize {name}: {result}")
                 continue
             if result:
-                self._exchanges[name] = result
+                existing = target_store.get(name)
+                if existing is not None and existing is not result:
+                    with contextlib.suppress(Exception):
+                        await existing.disconnect()
+                target_store[name] = result
                 success_count += 1
 
         self._connected = any(exchange.is_connected for exchange in self._exchanges.values())
         elapsed_sec = time.perf_counter() - started_at
+        scope = f" account={account_id}" if account_id else ""
         logger.info(
             f"Exchange manager initialized: {success_count}/{len(exchange_names)} exchanges connected "
-            f"in {elapsed_sec:.2f}s"
+            f"in {elapsed_sec:.2f}s{scope}"
         )
+        if account_id:
+            return any(exchange.is_connected for exchange in target_store.values())
         return self._connected
 
     async def _create_connector(
@@ -129,7 +210,6 @@ class ExchangeManager:
         *,
         timeout_sec: Optional[float] = None,
     ) -> Optional[BaseExchange]:
-        """创建交易所连接器"""
         connectors = {
             "binance": BinanceConnector,
             "okx": OKXConnector,
@@ -171,7 +251,6 @@ class ExchangeManager:
         except Exception as e:
             logger.error(f"Connector {name} connect error: {e}")
 
-        # Best-effort cleanup for partially initialized async clients.
         try:
             await connector.disconnect()
         except Exception:
@@ -181,8 +260,28 @@ class ExchangeManager:
                     await client.close()
         return None
 
+    async def ensure_exchange(
+        self,
+        name: str,
+        *,
+        account_id: Optional[str] = None,
+    ) -> Optional[BaseExchange]:
+        try:
+            connector = self.get_exchange(name, account_id=account_id)
+        except TypeError:
+            connector = self.get_exchange(name)
+        if connector is not None and bool(getattr(connector, "is_connected", True)):
+            return connector
+        ok = await self.initialize([name], account_id=account_id)
+        if not ok:
+            return None
+        try:
+            return self.get_exchange(name, account_id=account_id)
+        except TypeError:
+            return self.get_exchange(name)
+
     async def add_dex(self, dex_name: str, chain: str = "ethereum") -> bool:
-        """添加DEX交易所"""
+        del chain
         config = ExchangeConfig(
             name=dex_name,
             exchange_type=ExchangeType.DEX,
@@ -207,37 +306,55 @@ class ExchangeManager:
 
         return False
 
-    def get_exchange(self, name: str) -> Optional[BaseExchange]:
-        """获取交易所连接器"""
+    def get_exchange(
+        self,
+        name: str,
+        account_id: Optional[str] = None,
+    ) -> Optional[BaseExchange]:
+        aid = self._normalize_account_id(account_id)
+        if aid:
+            connector = self._account_exchanges.get(aid, {}).get(name)
+            if connector is not None:
+                return connector
+            account_manager = self._account_manager()
+            if account_manager.requires_live_connector_isolation(aid):
+                return None
         return self._exchanges.get(name)
 
     def get_all_exchanges(self) -> Dict[str, BaseExchange]:
-        """获取所有交易所"""
         return self._exchanges
 
-    def get_connected_exchanges(self) -> List[str]:
-        """获取已连接的交易所列表"""
-        return [
-            name for name, exchange in self._exchanges.items()
-            if exchange.is_connected
-        ]
+    def get_connected_exchanges(self, account_id: Optional[str] = None) -> List[str]:
+        store = self._target_store(account_id)
+        return [name for name, exchange in store.items() if exchange.is_connected]
 
-    async def close_all(self) -> None:
-        """关闭所有连接"""
-        for name, exchange in self._exchanges.items():
-            try:
-                await exchange.disconnect()
-            except Exception as e:
-                logger.error(f"Error disconnecting {name}: {e}")
+    async def close_all(self, *, account_id: Optional[str] = None) -> None:
+        if account_id:
+            target_store = self._account_exchanges.pop(str(account_id), {})
+            for name, exchange in target_store.items():
+                try:
+                    await exchange.disconnect()
+                except Exception as e:
+                    logger.error(f"Error disconnecting {name} for {account_id}: {e}")
+            return
+
+        stores = [self._exchanges, *self._account_exchanges.values()]
+        for store in stores:
+            for name, exchange in store.items():
+                try:
+                    await exchange.disconnect()
+                except Exception as e:
+                    logger.error(f"Error disconnecting {name}: {e}")
 
         self._exchanges.clear()
+        self._account_exchanges.clear()
         self._connected = False
         logger.info("All exchanges disconnected")
 
-    async def health_check(self) -> Dict[str, bool]:
-        """健康检查所有交易所"""
+    async def health_check(self, account_id: Optional[str] = None) -> Dict[str, bool]:
         results = {}
-        for name, exchange in self._exchanges.items():
+        store = self._target_store(account_id)
+        for name, exchange in store.items():
             try:
                 results[name] = await exchange.health_check()
             except Exception as e:
@@ -246,18 +363,15 @@ class ExchangeManager:
 
         return results
 
-    async def reconnect_exchange(self, name: str, *, timeout_sec: Optional[float] = 20.0) -> bool:
-        """Attempt to reconnect a single exchange by name.
-
-        First tries calling ``connect()`` on the existing connector (cheap).
-        If that fails or the exchange was never initialized, falls back to
-        creating a fresh connector via ``_create_connector``.
-
-        Returns True if the exchange is connected after this call.
-        """
-        connector = self._exchanges.get(name)
+    async def reconnect_exchange(
+        self,
+        name: str,
+        *,
+        account_id: Optional[str] = None,
+        timeout_sec: Optional[float] = 20.0,
+    ) -> bool:
+        connector = self.get_exchange(name, account_id=account_id)
         if connector is not None:
-            # Fast path: try reconnecting the existing connector
             try:
                 ok = await asyncio.wait_for(connector.connect(), timeout=timeout_sec)
                 if ok:
@@ -267,17 +381,14 @@ class ExchangeManager:
             except Exception as exc:
                 logger.warning(f"exchange_manager: {name} fast-path reconnect failed: {exc}")
 
-        # Slow path: recreate the connector from config
-        base_config = EXCHANGE_CONFIGS.get(name)
-        if base_config is None:
+        config = self._resolve_exchange_config(name, account_id=account_id)
+        if config is None:
             logger.warning(f"exchange_manager: no config for {name}, cannot reconnect")
             return False
 
-        runtime_type = self._resolve_default_type(name, base_config.default_type)
-        config = replace(base_config, default_type=runtime_type)
         fresh = await self._create_connector(name, config, timeout_sec=timeout_sec)
         if fresh:
-            self._exchanges[name] = fresh
+            self._target_store(account_id)[name] = fresh
             self._connected = any(e.is_connected for e in self._exchanges.values())
             logger.info(f"exchange_manager: {name} reconnected (fresh connector)")
             return True
@@ -285,25 +396,21 @@ class ExchangeManager:
         logger.warning(f"exchange_manager: {name} reconnect failed")
         return False
 
-    def get_supported_symbols(self, exchange_name: str) -> List[str]:
-        """获取交易所支持的交易对"""
-        exchange = self._exchanges.get(exchange_name)
+    def get_supported_symbols(self, exchange_name: str, account_id: Optional[str] = None) -> List[str]:
+        exchange = self.get_exchange(exchange_name, account_id=account_id)
         if exchange:
             return exchange.config.supported_symbols
         return []
 
-    def get_supported_timeframes(self, exchange_name: str) -> List[str]:
-        """获取交易所支持的时间框架"""
-        exchange = self._exchanges.get(exchange_name)
+    def get_supported_timeframes(self, exchange_name: str, account_id: Optional[str] = None) -> List[str]:
+        exchange = self.get_exchange(exchange_name, account_id=account_id)
         if exchange:
             return exchange.config.supported_timeframes
         return []
 
     @property
     def is_connected(self) -> bool:
-        """是否已连接"""
         return self._connected
 
 
-# 全局交易所管理器实例
 exchange_manager = ExchangeManager()

@@ -45,7 +45,7 @@ from core.data.coinglass_client import (
 from core.data.factor_library import FACTOR_CATALOG, build_factor_library
 from core.data.coinglass_feature_builder import build_coinglass_overview_payload
 from core.data.coinglass_registry import get_coinglass_manifest
-from core.exchanges import exchange_manager
+from core.exchanges.exchange_manager import exchange_manager
 from core.runtime import runtime_state
 from web.api.backtest import (
     _build_fama_backtest_components,

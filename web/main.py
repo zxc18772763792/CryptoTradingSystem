@@ -19,7 +19,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from loguru import logger
 
-from config.database import close_db, init_db
 from config.env_utils import env_bool as _env_bool
 from config.env_utils import env_int as _env_int
 from config.env_utils import sync_settings_to_environ
@@ -46,7 +45,7 @@ from core.news.storage import db as news_db
 from core.notifications import notification_manager
 from core.ops.service import create_router as create_ops_router, initialize_ops_runtime, shutdown_ops_runtime
 from core.realtime import event_bus
-from core.runtime import RuntimeTaskSupervisor, runtime_state
+from core.runtime import RuntimeTaskSupervisor, runtime_bootstrap, runtime_state
 from core.strategies import (
     restore_strategies_from_db,
     strategy_health_monitor,
@@ -1167,10 +1166,10 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
 async def lifespan(app: FastAPI):
     logger.info("Starting Crypto Trading System...")
 
-    await init_db()
-    await news_db.init_news_db()
-    await data_storage.initialize()
-    await exchange_manager.initialize()
+    await runtime_bootstrap.initialize_shared_runtime(
+        include_news=True,
+        initialize_exchanges=True,
+    )
 
     try:
         from web.api import news as news_api
@@ -1290,10 +1289,11 @@ async def lifespan(app: FastAPI):
     await shutdown_ops_runtime(app, standalone=False)
     await strategy_manager.stop_all()
     await execution_engine.stop()
-    await exchange_manager.close_all()
-    await data_storage.close()
-    await news_db.close_news_db()
-    await close_db()
+    await runtime_bootstrap.shutdown_shared_runtime(
+        include_news=True,
+        close_exchanges=True,
+        close_database=True,
+    )
 
     logger.info("System shutdown complete")
 

@@ -1,13 +1,15 @@
 """
 数据库配置模块
 """
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Text, JSON, UniqueConstraint, event
-from sqlalchemy.pool import NullPool
+import asyncio
+import os
 from datetime import datetime
 from typing import AsyncGenerator
-import os
+
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, JSON, String, Text, UniqueConstraint, event
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 from config.settings import settings
 
@@ -543,6 +545,18 @@ async_session_maker = async_sessionmaker(
     class_=AsyncSession,
     expire_on_commit=False,
 )
+_init_db_lock: asyncio.Lock | None = None
+_init_db_lock_loop: asyncio.AbstractEventLoop | None = None
+_db_initialized = False
+
+
+def _get_init_db_lock() -> asyncio.Lock:
+    global _init_db_lock, _init_db_lock_loop
+    loop = asyncio.get_running_loop()
+    if _init_db_lock is None or _init_db_lock_loop is not loop:
+        _init_db_lock = asyncio.Lock()
+        _init_db_lock_loop = loop
+    return _init_db_lock
 
 
 async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
@@ -556,11 +570,18 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
-async def init_db():
-    """初始化数据库"""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await _migrate_analytics_history_schema(conn)
+async def init_db(*, force: bool = False):
+    """鍒濆鍖栨暟鎹簱"""
+    global _db_initialized
+    if _db_initialized and not force:
+        return
+    async with _get_init_db_lock():
+        if _db_initialized and not force:
+            return
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            await _migrate_analytics_history_schema(conn)
+        _db_initialized = True
 
 
 async def close_db():

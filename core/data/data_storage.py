@@ -75,15 +75,19 @@ class DataStorage:
         self._redis: Optional[redis.Redis] = None
         self._db_initialized = False
 
-    async def initialize(self) -> None:
+    def mark_db_initialized(self) -> None:
+        self._db_initialized = True
+
+    async def initialize(self, *, ensure_db: bool = True) -> None:
         """初始化存储"""
         # 创建目录
         self.storage_path.mkdir(parents=True, exist_ok=True)
         self.cache_path.mkdir(parents=True, exist_ok=True)
 
         # 初始化数据库
-        await init_db()
-        self._db_initialized = True
+        if ensure_db and not self._db_initialized:
+            await init_db()
+            self._db_initialized = True
 
         # 初始化Redis连接
         try:
@@ -140,11 +144,10 @@ class DataStorage:
         symbol: str,
         timeframe: str,
     ) -> str:
-        """保存K线数据到Parquet文件"""
+        """淇濆瓨K绾挎暟鎹埌Parquet鏂囦欢"""
         if not klines:
             return ""
 
-        # 转换为DataFrame
         data = [
             {
                 "timestamp": k.timestamp,
@@ -160,36 +163,42 @@ class DataStorage:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df = _normalize_parquet_frame_index(df.set_index("timestamp"))
 
-        # 创建存储路径
-        file_path = canonical_symbol_dir(self.storage_path, exchange, symbol) / f"{timeframe}.parquet"
-        file_path.parent.mkdir(parents=True, exist_ok=True)
+        symbol_dir = canonical_symbol_dir(self.storage_path, exchange, symbol)
+        parts_dir = symbol_dir / f"{timeframe}_parts"
+        parts_dir.mkdir(parents=True, exist_ok=True)
 
-        # 如果文件已存在，追加数据
-        for symbol_root in candidate_symbol_dirs(self.storage_path, exchange, symbol):
-            legacy_file = symbol_root / f"{timeframe}.parquet"
-            if not legacy_file.exists():
-                continue
-            try:
-                existing_df = pd.read_parquet(legacy_file)
-                existing_df = _normalize_parquet_frame_index(existing_df)
-                df = pd.concat([existing_df, df])
-            except Exception as e:
-                logger.warning(f"Failed to merge parquet file {legacy_file}: {e}")
-                _quarantine_corrupted_parquet(legacy_file, e)
-        df = df[~df.index.duplicated(keep="last")]
-        df = df.sort_index()
+        def _save_sync() -> List[Path]:
+            written_parts: List[Path] = []
+            grouped = df.groupby(df.index.date, sort=True)
+            for part_day, day_df in grouped:
+                part_path = parts_dir / f"{part_day.isoformat()}.parquet"
+                merged_df = _normalize_parquet_frame_index(day_df)
+                if part_path.exists():
+                    try:
+                        existing_df = pd.read_parquet(part_path)
+                        existing_df = _normalize_parquet_frame_index(existing_df)
+                        merged_df = pd.concat([existing_df, merged_df])
+                    except Exception as e:
+                        logger.warning(f"Failed to merge partition file {part_path}: {e}")
+                        _quarantine_corrupted_parquet(part_path, e)
+                merged_df = merged_df[~merged_df.index.duplicated(keep="last")]
+                merged_df = merged_df.sort_index()
+                table = pa.Table.from_pandas(merged_df)
+                pq.write_table(
+                    table,
+                    str(part_path),
+                    compression="zstd",
+                    compression_level=9,
+                )
+                written_parts.append(part_path)
+            return written_parts
 
-        # 保存
-        table = pa.Table.from_pandas(df)
-        pq.write_table(
-            table,
-            str(file_path),
-            compression="zstd",
-            compression_level=9,
+        written_parts = await asyncio.to_thread(_save_sync)
+        latest_path = written_parts[-1] if written_parts else parts_dir
+        logger.info(
+            f"Saved {len(df)} incremental klines to {len(written_parts)} parquet parts under {parts_dir}"
         )
-
-        logger.info(f"Saved {len(df)} klines to {file_path}")
-        return str(file_path)
+        return str(latest_path)
 
     async def load_klines_from_parquet(
         self,

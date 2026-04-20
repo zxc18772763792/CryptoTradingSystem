@@ -95,6 +95,123 @@ class AccountManager:
         item = self._accounts.get(account_id)
         return asdict(item) if item else None
 
+    def requires_live_connector_isolation(self, account_id: Optional[str]) -> bool:
+        aid = str(account_id or "").strip()
+        if not aid:
+            return False
+        item = self._accounts.get(aid)
+        if not item or not item.enabled:
+            return False
+        if self._normalize_mode(item.mode, default="paper") != "live":
+            return False
+        metadata = dict(item.metadata or {})
+        if aid == "main":
+            return bool(
+                metadata.get("isolated")
+                or metadata.get("require_live_credentials")
+                or metadata.get("require_connector_isolation")
+            )
+        return bool(metadata.get("isolated", True))
+
+    def get_exchange_credentials(
+        self,
+        account_id: Optional[str],
+        exchange: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        aid = str(account_id or "main").strip() or "main"
+        item = self._accounts.get(aid)
+        exchange_name = str(
+            exchange or getattr(item, "exchange", None) or "binance"
+        ).strip().lower() or "binance"
+
+        metadata = dict(getattr(item, "metadata", {}) or {})
+        credentials: Dict[str, Any] = {}
+
+        for container_key in ("credentials", "exchange_credentials", "exchanges"):
+            container = metadata.get(container_key)
+            if not isinstance(container, dict):
+                continue
+            exchange_payload = container.get(exchange_name)
+            if isinstance(exchange_payload, dict):
+                credentials.update(dict(exchange_payload))
+
+        legacy_key_map = {
+            "api_key": (
+                f"{exchange_name}_api_key",
+                f"{exchange_name}_key",
+                "api_key",
+            ),
+            "api_secret": (
+                f"{exchange_name}_api_secret",
+                f"{exchange_name}_secret",
+                "api_secret",
+                "secret",
+            ),
+            "passphrase": (
+                f"{exchange_name}_passphrase",
+                "passphrase",
+            ),
+            "default_type": (
+                f"{exchange_name}_default_type",
+                "default_type",
+                "market_type",
+            ),
+            "sandbox": (
+                f"{exchange_name}_sandbox",
+                "sandbox",
+            ),
+            "proxy": (
+                f"{exchange_name}_proxy",
+                "proxy",
+            ),
+        }
+        for target_key, source_keys in legacy_key_map.items():
+            if target_key in credentials:
+                continue
+            for source_key in source_keys:
+                value = metadata.get(source_key)
+                if value not in (None, ""):
+                    credentials[target_key] = value
+                    break
+
+        allow_parent_fallback = not self.requires_live_connector_isolation(aid)
+        parent_account_id = str(getattr(item, "parent_account_id", "") or "").strip()
+        if not credentials and allow_parent_fallback and parent_account_id and parent_account_id != aid:
+            parent_credentials = self.get_exchange_credentials(parent_account_id, exchange_name)
+            if parent_credentials:
+                return parent_credentials
+
+        if not credentials and aid == "main":
+            settings_map = {
+                "binance": {
+                    "api_key": settings.BINANCE_API_KEY,
+                    "api_secret": settings.BINANCE_API_SECRET,
+                },
+                "okx": {
+                    "api_key": settings.OKX_API_KEY,
+                    "api_secret": settings.OKX_API_SECRET,
+                    "passphrase": settings.OKX_PASSPHRASE,
+                },
+                "gate": {
+                    "api_key": settings.GATE_API_KEY,
+                    "api_secret": settings.GATE_API_SECRET,
+                },
+                "bybit": {
+                    "api_key": settings.BYBIT_API_KEY,
+                    "api_secret": settings.BYBIT_API_SECRET,
+                },
+            }
+            credentials.update(settings_map.get(exchange_name, {}))
+
+        normalized: Dict[str, Any] = {}
+        for key in ("api_key", "api_secret", "passphrase", "default_type", "proxy"):
+            value = credentials.get(key)
+            if value not in (None, ""):
+                normalized[key] = str(value).strip()
+        if "sandbox" in credentials:
+            normalized["sandbox"] = bool(credentials.get("sandbox"))
+        return normalized
+
     def create_account(
         self,
         account_id: str,

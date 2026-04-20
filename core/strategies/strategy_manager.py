@@ -15,7 +15,7 @@ from loguru import logger
 
 from config.settings import settings
 from core.data.data_storage import data_storage
-from core.exchanges import exchange_manager
+from core.exchanges.exchange_manager import exchange_manager
 from core.strategies.strategy_base import Signal, StrategyBase
 
 _SUB_MINUTE_TIMEFRAMES = {"1s", "5s", "10s", "30s"}
