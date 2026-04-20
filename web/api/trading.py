@@ -218,6 +218,13 @@ _BINANCE_TIME_OFFSET_MS: Dict[str, Any] = {"api": 0, "fapi": 0, "ts": 0.0}
 _HTTPX_SUPPORTS_PROXY_KW = (
     "proxy" in inspect.signature(httpx.AsyncClient.__init__).parameters
 )
+_CACHE_RUNTIME_FIELDS = {
+    "cache_hit",
+    "cache_age_sec",
+    "stale",
+    "stale_reason",
+    "source_status",
+}
 
 
 def _cancel_pending_task(task: Optional[asyncio.Task[Any]]) -> bool:
@@ -239,6 +246,59 @@ def _cancel_pending_task_map(tasks: Dict[str, asyncio.Task[Any]]) -> int:
 
 def _pending_tasks_count(tasks: Dict[str, asyncio.Task[Any]]) -> int:
     return sum(1 for task in tasks.values() if task is not None and not task.done())
+
+
+def _strip_cache_runtime_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(payload or {}).items()
+        if key not in _CACHE_RUNTIME_FIELDS
+    }
+
+
+def _resolve_cache_source_status(
+    *,
+    source_status: str,
+    cache_hit: bool,
+    stale: bool,
+) -> str:
+    if source_status:
+        return str(source_status)
+    if stale:
+        return "cache_stale"
+    if cache_hit:
+        return "cache_fresh"
+    return "live"
+
+
+def _with_cache_runtime_fields(
+    payload: Dict[str, Any],
+    *,
+    cache_hit: bool,
+    cache_age_sec: Optional[float],
+    stale: bool,
+    source_status: str,
+    stale_reason: Optional[str] = None,
+    stale_note: Optional[str] = None,
+) -> Dict[str, Any]:
+    out = copy.deepcopy(_strip_cache_runtime_fields(payload))
+    out["cache_hit"] = bool(cache_hit)
+    out["cache_age_sec"] = (
+        round(float(cache_age_sec or 0.0), 3) if cache_age_sec is not None else None
+    )
+    out["stale"] = bool(stale)
+    out["source_status"] = _resolve_cache_source_status(
+        source_status=str(source_status or "").strip(),
+        cache_hit=bool(cache_hit),
+        stale=bool(stale),
+    )
+    if stale_reason:
+        out["stale_reason"] = str(stale_reason)
+        note_parts = [str(out.get("note") or "").strip(), str(stale_note or "").strip()]
+        out["note"] = "；".join(dict.fromkeys(part for part in note_parts if part))
+    else:
+        out.pop("stale_reason", None)
+    return out
 
 
 def _clear_trading_api_runtime_caches() -> Dict[str, Any]:
@@ -1567,12 +1627,7 @@ def _compact_whale_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _strip_risk_dashboard_runtime_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        key: value
-        for key, value in dict(payload or {}).items()
-        if key
-        not in {"cache_hit", "cache_age_sec", "stale", "stale_reason", "source_status"}
-    }
+    return _strip_cache_runtime_fields(payload)
 
 
 def _with_risk_dashboard_runtime_fields(
@@ -1584,35 +1639,19 @@ def _with_risk_dashboard_runtime_fields(
     source_status: str,
     stale_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
-    out = copy.deepcopy(_strip_risk_dashboard_runtime_fields(payload))
-    out["cache_hit"] = bool(cache_hit)
-    out["cache_age_sec"] = (
-        round(float(cache_age_sec or 0.0), 3) if cache_age_sec is not None else None
+    return _with_cache_runtime_fields(
+        payload,
+        cache_hit=cache_hit,
+        cache_age_sec=cache_age_sec,
+        stale=stale,
+        source_status=source_status,
+        stale_reason=stale_reason,
+        stale_note="Risk dashboard live refresh pending，已回退到最近一次成功快照",
     )
-    out["stale"] = bool(stale)
-    out["source_status"] = str(
-        source_status
-        or ("cache_stale" if stale else ("cache_fresh" if cache_hit else "live"))
-    )
-    if stale_reason:
-        out["stale_reason"] = str(stale_reason)
-        note_parts = [
-            str(out.get("note") or "").strip(),
-            "Risk dashboard live refresh pending，已回退到最近一次成功快照",
-        ]
-        out["note"] = "；".join(dict.fromkeys(part for part in note_parts if part))
-    else:
-        out.pop("stale_reason", None)
-    return out
 
 
 def _strip_microstructure_runtime_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        key: value
-        for key, value in dict(payload or {}).items()
-        if key
-        not in {"cache_hit", "cache_age_sec", "stale", "stale_reason", "source_status"}
-    }
+    return _strip_cache_runtime_fields(payload)
 
 
 def _with_microstructure_runtime_fields(
@@ -1624,35 +1663,19 @@ def _with_microstructure_runtime_fields(
     source_status: str,
     stale_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
-    out = copy.deepcopy(_strip_microstructure_runtime_fields(payload))
-    out["cache_hit"] = bool(cache_hit)
-    out["cache_age_sec"] = (
-        round(float(cache_age_sec or 0.0), 3) if cache_age_sec is not None else None
+    return _with_cache_runtime_fields(
+        payload,
+        cache_hit=cache_hit,
+        cache_age_sec=cache_age_sec,
+        stale=stale,
+        source_status=source_status,
+        stale_reason=stale_reason,
+        stale_note="Microstructure live refresh pending，已回退到最近一次成功快照",
     )
-    out["stale"] = bool(stale)
-    out["source_status"] = str(
-        source_status
-        or ("cache_stale" if stale else ("cache_fresh" if cache_hit else "live"))
-    )
-    if stale_reason:
-        out["stale_reason"] = str(stale_reason)
-        note_parts = [
-            str(out.get("note") or "").strip(),
-            "Microstructure live refresh pending，已回退到最近一次成功快照",
-        ]
-        out["note"] = "；".join(dict.fromkeys(part for part in note_parts if part))
-    else:
-        out.pop("stale_reason", None)
-    return out
 
 
 def _strip_community_runtime_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        key: value
-        for key, value in dict(payload or {}).items()
-        if key
-        not in {"cache_hit", "cache_age_sec", "stale", "stale_reason", "source_status"}
-    }
+    return _strip_cache_runtime_fields(payload)
 
 
 def _with_community_runtime_fields(
@@ -1664,26 +1687,15 @@ def _with_community_runtime_fields(
     source_status: str,
     stale_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
-    out = copy.deepcopy(_strip_community_runtime_fields(payload))
-    out["cache_hit"] = bool(cache_hit)
-    out["cache_age_sec"] = (
-        round(float(cache_age_sec or 0.0), 3) if cache_age_sec is not None else None
+    return _with_cache_runtime_fields(
+        payload,
+        cache_hit=cache_hit,
+        cache_age_sec=cache_age_sec,
+        stale=stale,
+        source_status=source_status,
+        stale_reason=stale_reason,
+        stale_note="Community overview live refresh pending，已回退到最近一次成功快照",
     )
-    out["stale"] = bool(stale)
-    out["source_status"] = str(
-        source_status
-        or ("cache_stale" if stale else ("cache_fresh" if cache_hit else "live"))
-    )
-    if stale_reason:
-        out["stale_reason"] = str(stale_reason)
-        note_parts = [
-            str(out.get("note") or "").strip(),
-            "Community overview live refresh pending，已回退到最近一次成功快照",
-        ]
-        out["note"] = "；".join(dict.fromkeys(part for part in note_parts if part))
-    else:
-        out.pop("stale_reason", None)
-    return out
 
 
 _ANALYTICS_HISTORY_INGEST_VERSION = "v1"

@@ -82,3 +82,52 @@ def test_clear_trading_api_runtime_caches_clears_all_cache_families():
         assert inspect["rule_price_cache_age_sec"] is None
 
     asyncio.run(_run())
+
+
+def test_cache_runtime_helpers_strip_runtime_fields_and_preserve_payload_note():
+    payload = {
+        "value": 42,
+        "note": "existing note",
+        "cache_hit": True,
+        "cache_age_sec": 12.3,
+        "stale": True,
+        "stale_reason": "old",
+        "source_status": "cache_stale",
+    }
+
+    stripped = trading_api._strip_microstructure_runtime_fields(payload)
+    enriched = trading_api._with_microstructure_runtime_fields(
+        payload,
+        cache_hit=True,
+        cache_age_sec=18.7654,
+        stale=True,
+        source_status="",
+        stale_reason="background_refresh_scheduled",
+    )
+
+    assert stripped == {"value": 42, "note": "existing note"}
+    assert enriched["value"] == 42
+    assert enriched["cache_hit"] is True
+    assert enriched["cache_age_sec"] == 18.765
+    assert enriched["stale"] is True
+    assert enriched["source_status"] == "cache_stale"
+    assert enriched["stale_reason"] == "background_refresh_scheduled"
+    assert "existing note" in enriched["note"]
+    assert "Microstructure live refresh pending" in enriched["note"]
+
+
+def test_cache_runtime_helpers_drop_stale_reason_when_not_stale():
+    enriched = trading_api._with_community_runtime_fields(
+        {"value": 1},
+        cache_hit=False,
+        cache_age_sec=None,
+        stale=False,
+        source_status="",
+        stale_reason=None,
+    )
+
+    assert enriched["source_status"] == "live"
+    assert enriched["cache_hit"] is False
+    assert enriched["cache_age_sec"] is None
+    assert enriched["stale"] is False
+    assert "stale_reason" not in enriched
