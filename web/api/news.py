@@ -20,6 +20,9 @@ from loguru import logger
 import pandas as pd
 from pydantic import BaseModel, Field
 
+from config.env_utils import env_bool as _env_bool
+from config.env_utils import env_int as _env_int
+from config.env_utils import llm_api_enabled
 from config.settings import settings
 from core.data.coinglass_client import coinglass_enabled
 from core.news.collectors.manager import MultiSourceNewsCollector
@@ -130,27 +133,8 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = str(os.environ.get(name) or "").strip().lower()
-    if not raw:
-        return bool(default)
-    return raw in {"1", "true", "yes", "on", "y"}
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name) or default)
-    except Exception:
-        return int(default)
-
-
 def _news_llm_enabled() -> bool:
-    return bool(
-        str(os.environ.get("OPENAI_API_KEY") or "").strip()
-        or str(getattr(settings, "OPENAI_API_KEY", "") or "").strip()
-        or str(os.environ.get("OPENAI_BACKUP_API_KEY") or "").strip()
-        or str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip()
-    )
+    return llm_api_enabled(settings)
 
 
 def _cache_key(*parts: Any) -> str:

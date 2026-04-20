@@ -1,5 +1,6 @@
 ﻿"""Data API."""
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
@@ -45,6 +46,7 @@ from core.data.factor_library import FACTOR_CATALOG, build_factor_library
 from core.data.coinglass_feature_builder import build_coinglass_overview_payload
 from core.data.coinglass_registry import get_coinglass_manifest
 from core.exchanges import exchange_manager
+from core.runtime import runtime_state
 from web.api.backtest import (
     _build_fama_backtest_components,
     _load_backtest_inputs,
@@ -85,6 +87,7 @@ _RESAMPLE_RULES = {
 _REPLAY_SESSIONS: Dict[str, Dict[str, Any]] = {}
 _RESEARCH_COVERAGE_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "df": None}
 _DOWNLOAD_TASKS: Dict[str, Dict[str, Any]] = {}
+_DOWNLOAD_BACKGROUND_TASKS: Dict[str, asyncio.Task[None]] = {}
 _DOWNLOAD_TASK_SEMAPHORE: Optional[asyncio.Semaphore] = None
 _DOWNLOAD_TASK_SEMAPHORE_LOOP_ID: Optional[int] = None
 _ONCHAIN_OVERVIEW_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -127,6 +130,115 @@ _RESEARCH_PAYLOAD_CACHE_DIR = _PROJECT_ROOT / "data" / "cache" / "research_paylo
 _RESEARCH_UNIVERSE_TASK_NAME = "CryptoTradingSystem_ResearchUniverseRefresh"
 _RESEARCH_UNIVERSE_SUMMARY_PATH = _PROJECT_ROOT / "data" / "research" / "research_universe_incremental_latest.json"
 _RESEARCH_UNIVERSE_LOG_PATH = _PROJECT_ROOT / "logs" / "research_universe_refresh.log"
+_REPLAY_SESSION_TTL_SEC = 30 * 60.0
+_REPLAY_SESSION_MAX_ACTIVE = 12
+
+
+def _cancel_pending_task(task: Optional[asyncio.Task[Any]]) -> bool:
+    if task is None or task.done():
+        return False
+    with contextlib.suppress(Exception):
+        task.cancel()
+    return True
+
+
+def _cancel_pending_task_map(tasks: Dict[str, asyncio.Task[Any]]) -> int:
+    cancelled = 0
+    for task in list(tasks.values()):
+        if _cancel_pending_task(task):
+            cancelled += 1
+    tasks.clear()
+    return cancelled
+
+
+def _pending_tasks_count(tasks: Dict[str, asyncio.Task[Any]]) -> int:
+    return sum(1 for task in tasks.values() if task is not None and not task.done())
+
+
+def _clear_data_api_runtime_caches() -> Dict[str, Any]:
+    global _DOWNLOAD_TASK_SEMAPHORE
+    global _DOWNLOAD_TASK_SEMAPHORE_LOOP_ID
+
+    replay_sessions = len(_REPLAY_SESSIONS)
+    download_tasks = len(_DOWNLOAD_TASKS)
+    completed_download_tasks = sum(
+        1
+        for task in _DOWNLOAD_TASKS.values()
+        if str(task.get("status") or "").strip().lower()
+        in {"completed", "failed", "cancelled"}
+    )
+    active_download_tasks = max(0, download_tasks - completed_download_tasks)
+    onchain_entries = len(_ONCHAIN_OVERVIEW_CACHE)
+    factor_entries = len(_FACTOR_LIBRARY_CACHE)
+    fama_entries = len(_FAMA_CACHE)
+    research_coverage_loaded = bool(
+        isinstance(_RESEARCH_COVERAGE_CACHE.get("df"), pd.DataFrame)
+        and not _RESEARCH_COVERAGE_CACHE["df"].empty
+    )
+    download_background_tasks_cancelled = _cancel_pending_task_map(_DOWNLOAD_BACKGROUND_TASKS)
+    onchain_refresh_tasks_cancelled = _cancel_pending_task_map(_ONCHAIN_OVERVIEW_REFRESH_TASKS)
+    factor_refresh_tasks_cancelled = _cancel_pending_task_map(_FACTOR_LIBRARY_REFRESH_TASKS)
+    fama_refresh_tasks_cancelled = _cancel_pending_task_map(_FAMA_REFRESH_TASKS)
+
+    _REPLAY_SESSIONS.clear()
+    _DOWNLOAD_TASKS.clear()
+    _DOWNLOAD_TASK_SEMAPHORE = None
+    _DOWNLOAD_TASK_SEMAPHORE_LOOP_ID = None
+    _ONCHAIN_OVERVIEW_CACHE.clear()
+    _FACTOR_LIBRARY_CACHE.clear()
+    _FACTOR_LIBRARY_REFRESH_META.clear()
+    _FAMA_CACHE.clear()
+    _RESEARCH_COVERAGE_CACHE.update({"path": None, "mtime": None, "df": None})
+
+    return {
+        "replay_sessions_cleared": replay_sessions,
+        "download_tasks_cleared": download_tasks,
+        "active_download_tasks_cleared": active_download_tasks,
+        "completed_download_tasks_cleared": completed_download_tasks,
+        "onchain_cache_entries_cleared": onchain_entries,
+        "factor_cache_entries_cleared": factor_entries,
+        "fama_cache_entries_cleared": fama_entries,
+        "research_coverage_loaded": research_coverage_loaded,
+        "download_background_tasks_cancelled": download_background_tasks_cancelled,
+        "onchain_refresh_tasks_cancelled": onchain_refresh_tasks_cancelled,
+        "factor_refresh_tasks_cancelled": factor_refresh_tasks_cancelled,
+        "fama_refresh_tasks_cancelled": fama_refresh_tasks_cancelled,
+    }
+
+
+def _inspect_data_api_runtime_caches() -> Dict[str, Any]:
+    coverage_df = _RESEARCH_COVERAGE_CACHE.get("df")
+    coverage_rows = int(len(coverage_df.index)) if isinstance(coverage_df, pd.DataFrame) else 0
+    active_download_tasks = sum(
+        1
+        for task in _DOWNLOAD_TASKS.values()
+        if str(task.get("status") or "").strip().lower() not in {"completed", "failed", "cancelled"}
+    )
+    return {
+        "replay_sessions": len(_REPLAY_SESSIONS),
+        "download_tasks": len(_DOWNLOAD_TASKS),
+        "active_download_tasks": active_download_tasks,
+        "download_background_tasks": _pending_tasks_count(_DOWNLOAD_BACKGROUND_TASKS),
+        "onchain_cache_entries": len(_ONCHAIN_OVERVIEW_CACHE),
+        "onchain_refresh_tasks": _pending_tasks_count(_ONCHAIN_OVERVIEW_REFRESH_TASKS),
+        "factor_cache_entries": len(_FACTOR_LIBRARY_CACHE),
+        "factor_refresh_tasks": _pending_tasks_count(_FACTOR_LIBRARY_REFRESH_TASKS),
+        "factor_refresh_meta_entries": len(_FACTOR_LIBRARY_REFRESH_META),
+        "fama_cache_entries": len(_FAMA_CACHE),
+        "fama_refresh_tasks": _pending_tasks_count(_FAMA_REFRESH_TASKS),
+        "research_coverage_path": _RESEARCH_COVERAGE_CACHE.get("path"),
+        "research_coverage_mtime": _RESEARCH_COVERAGE_CACHE.get("mtime"),
+        "research_coverage_rows": coverage_rows,
+        "download_semaphore_initialized": _DOWNLOAD_TASK_SEMAPHORE is not None,
+    }
+
+
+runtime_state.register_cache(
+    "web_api_data",
+    clear=_clear_data_api_runtime_caches,
+    inspect=_inspect_data_api_runtime_caches,
+    scope="global",
+)
 
 
 class KlineRequest(BaseModel):
@@ -1204,6 +1316,74 @@ def _new_replay_id(payload: Dict[str, Any]) -> str:
         f"{datetime.now(timezone.utc).isoformat()}|{len(_REPLAY_SESSIONS)}"
     )
     return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _touch_replay_session(
+    session: Dict[str, Any],
+    *,
+    now_monotonic: Optional[float] = None,
+    now_utc: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    current_monotonic = float(
+        now_monotonic if now_monotonic is not None else time.monotonic()
+    )
+    current_utc = now_utc or datetime.now(timezone.utc)
+    session["last_access_monotonic"] = current_monotonic
+    session["last_accessed_at"] = current_utc.isoformat()
+    return session
+
+
+def _prune_replay_sessions(
+    *,
+    now_monotonic: Optional[float] = None,
+    keep_id: Optional[str] = None,
+) -> Dict[str, List[str]]:
+    current_monotonic = float(
+        now_monotonic if now_monotonic is not None else time.monotonic()
+    )
+    keep_text = str(keep_id or "").strip()
+    expired_removed: List[str] = []
+    overflow_removed: List[str] = []
+
+    for replay_id, session in list(_REPLAY_SESSIONS.items()):
+        last_access = _safe_float(session.get("last_access_monotonic"))
+        created = _safe_float(session.get("created_monotonic"), 0.0) or 0.0
+        touched_at = last_access if last_access is not None else created
+        if replay_id != keep_text and (current_monotonic - touched_at) > _REPLAY_SESSION_TTL_SEC:
+            _REPLAY_SESSIONS.pop(replay_id, None)
+            expired_removed.append(replay_id)
+
+    active_limit = max(1, int(_REPLAY_SESSION_MAX_ACTIVE))
+    if len(_REPLAY_SESSIONS) > active_limit:
+        sortable: List[tuple[float, str]] = []
+        for replay_id, session in _REPLAY_SESSIONS.items():
+            if replay_id == keep_text:
+                continue
+            last_access = _safe_float(session.get("last_access_monotonic"))
+            created = _safe_float(session.get("created_monotonic"), 0.0) or 0.0
+            touched_at = last_access if last_access is not None else created
+            sortable.append((float(touched_at), replay_id))
+        sortable.sort()
+        overflow = max(0, len(_REPLAY_SESSIONS) - active_limit)
+        for _, replay_id in sortable[:overflow]:
+            if replay_id == keep_text:
+                continue
+            if replay_id in _REPLAY_SESSIONS:
+                _REPLAY_SESSIONS.pop(replay_id, None)
+                overflow_removed.append(replay_id)
+
+    return {
+        "expired_removed": expired_removed,
+        "overflow_removed": overflow_removed,
+    }
+
+
+def _get_replay_session(replay_id: str) -> Optional[Dict[str, Any]]:
+    _prune_replay_sessions()
+    session = _REPLAY_SESSIONS.get(replay_id)
+    if not session:
+        return None
+    return _touch_replay_session(session)
 
 
 def _new_download_task_id(payload: Dict[str, Any]) -> str:
@@ -3424,6 +3604,9 @@ async def _run_download_task(task_id: str, payload: Dict[str, Any]) -> None:
         task["updated_at"] = task["finished_at"]
         task["heartbeat_at"] = task["finished_at"]
         _touch_download_task_progress(task)
+        current_background_task = _DOWNLOAD_BACKGROUND_TASKS.get(task_id)
+        if current_background_task is asyncio.current_task():
+            _DOWNLOAD_BACKGROUND_TASKS.pop(task_id, None)
         _prune_download_tasks()
 
 
@@ -3464,7 +3647,14 @@ def _queue_download_task(payload: Dict[str, Any]) -> Dict[str, Any]:
     task_record["status_message"] = "任务排队中，等待下载槽位"
     task_record["progress"]["message"] = task_record["status_message"]
     _DOWNLOAD_TASKS[task_id] = task_record
-    asyncio.create_task(_run_download_task(task_id, payload))
+    background_task = asyncio.create_task(_run_download_task(task_id, payload))
+    _DOWNLOAD_BACKGROUND_TASKS[task_id] = background_task
+
+    def _cleanup_background_task(done_task: asyncio.Task[None], *, tracked_task_id: str = task_id) -> None:
+        if _DOWNLOAD_BACKGROUND_TASKS.get(tracked_task_id) is done_task:
+            _DOWNLOAD_BACKGROUND_TASKS.pop(tracked_task_id, None)
+
+    background_task.add_done_callback(_cleanup_background_task)
     return task_record
 
 
@@ -5403,6 +5593,7 @@ async def stop_second_level_backfill_task(task_id: str):
 
 @router.post("/replay/start")
 async def start_replay(req: ReplayStartRequest):
+    _prune_replay_sessions()
     df = await _load_symbol_df(
         exchange=req.exchange,
         symbol=req.symbol,
@@ -5421,6 +5612,8 @@ async def start_replay(req: ReplayStartRequest):
             "timeframe": req.timeframe,
         }
     )
+    now_utc = datetime.now(timezone.utc)
+    now_monotonic = time.monotonic()
     _REPLAY_SESSIONS[replay_id] = {
         "exchange": req.exchange,
         "symbol": req.symbol,
@@ -5429,8 +5622,12 @@ async def start_replay(req: ReplayStartRequest):
         "speed": max(0.1, min(float(req.speed or 1.0), 100.0)),
         "data": df,
         "cursor": 0,
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": now_utc.isoformat(),
+        "created_monotonic": now_monotonic,
+        "last_access_monotonic": now_monotonic,
+        "last_accessed_at": now_utc.isoformat(),
     }
+    _prune_replay_sessions(keep_id=replay_id)
     return {
         "replay_id": replay_id,
         "exchange": req.exchange,
@@ -5444,7 +5641,7 @@ async def start_replay(req: ReplayStartRequest):
 
 @router.get("/replay/{replay_id}")
 async def get_replay_status(replay_id: str):
-    session = _REPLAY_SESSIONS.get(replay_id)
+    session = _get_replay_session(replay_id)
     if not session:
         raise HTTPException(status_code=404, detail="Replay session not found")
     total = int(len(session["data"]))
@@ -5463,7 +5660,7 @@ async def get_replay_status(replay_id: str):
 
 @router.get("/replay/{replay_id}/next")
 async def replay_next(replay_id: str, steps: int = 1):
-    session = _REPLAY_SESSIONS.get(replay_id)
+    session = _get_replay_session(replay_id)
     if not session:
         raise HTTPException(status_code=404, detail="Replay session not found")
 
@@ -5500,7 +5697,7 @@ async def replay_next(replay_id: str, steps: int = 1):
 
 @router.post("/replay/{replay_id}/seek")
 async def replay_seek(replay_id: str, timestamp: str):
-    session = _REPLAY_SESSIONS.get(replay_id)
+    session = _get_replay_session(replay_id)
     if not session:
         raise HTTPException(status_code=404, detail="Replay session not found")
     df = session["data"]

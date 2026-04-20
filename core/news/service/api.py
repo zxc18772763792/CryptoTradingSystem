@@ -10,6 +10,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from config.env_utils import env_bool as _env_bool
+from config.env_utils import env_int as _env_int
+from config.env_utils import llm_api_enabled
 from config.settings import settings
 from core.ai.risk_gate import RiskGate
 from core.ai.signal_engine import generate_signal
@@ -46,20 +49,6 @@ def _config_paths() -> Dict[str, Path]:
         "rules": root / "config" / "news_rules.yaml",
         "symbols": root / "config" / "symbols.yaml",
     }
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = str(os.getenv(name) or "").strip().lower()
-    if not raw:
-        return bool(default)
-    return raw in {"1", "true", "yes", "on", "y"}
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name) or default)
-    except Exception:
-        return int(default)
 
 
 def load_service_config() -> Dict[str, Any]:
@@ -162,12 +151,7 @@ def create_app() -> FastAPI:
             "status": "ok",
             "service": "news_signal",
             "ts": datetime.now(timezone.utc).isoformat(),
-            "llm_enabled": bool(
-                str(os.environ.get("OPENAI_API_KEY") or "").strip()
-                or str(getattr(settings, "OPENAI_API_KEY", "") or "").strip()
-                or str(os.environ.get("OPENAI_BACKUP_API_KEY") or "").strip()
-                or str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip()
-            ),
+            "llm_enabled": llm_api_enabled(settings),
             "sync_pull_llm": _env_bool("NEWS_PULL_SYNC_LLM", True),
             "thresholds": cfg.get("thresholds") or {},
             "sources": (cfg.get("defaults") or {}).get("news_sources") or [],

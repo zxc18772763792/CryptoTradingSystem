@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
+from config.env_utils import env_bool as _env_bool
+from config.env_utils import env_int as _env_int
 from config.settings import settings
 from core.news.collectors.manager import MultiSourceNewsCollector
 from core.news.eventizer.async_glm_client import extract_events_async_with_meta
@@ -185,20 +187,6 @@ def _config_paths() -> Dict[str, Path]:
 def load_service_config() -> Dict[str, Any]:
     paths = _config_paths()
     return load_news_rule_config(rules_path=paths["rules"], symbols_path=paths["symbols"])
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name) or default)
-    except Exception:
-        return int(default)
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = str(os.getenv(name) or "").strip().lower()
-    if not raw:
-        return bool(default)
-    return raw in {"1", "true", "yes", "on", "y"}
 
 
 def _coinglass_rate_limit_per_min() -> int:

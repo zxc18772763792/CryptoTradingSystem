@@ -220,15 +220,57 @@ _HTTPX_SUPPORTS_PROXY_KW = (
 )
 
 
+def _cancel_pending_task(task: Optional[asyncio.Task[Any]]) -> bool:
+    if task is None or task.done():
+        return False
+    with contextlib.suppress(Exception):
+        task.cancel()
+    return True
+
+
+def _cancel_pending_task_map(tasks: Dict[str, asyncio.Task[Any]]) -> int:
+    cancelled = 0
+    for task in list(tasks.values()):
+        if _cancel_pending_task(task):
+            cancelled += 1
+    tasks.clear()
+    return cancelled
+
+
+def _pending_tasks_count(tasks: Dict[str, asyncio.Task[Any]]) -> int:
+    return sum(1 for task in tasks.values() if task is not None and not task.done())
+
+
 def _clear_trading_api_runtime_caches() -> Dict[str, Any]:
+    global _RULE_PRICE_IN_FLIGHT
+
     balance_entries = len(_BALANCE_SNAPSHOT_CACHE)
     micro_entries = len(_MICROSTRUCTURE_SNAPSHOT_CACHE)
+    community_entries = len(_COMMUNITY_OVERVIEW_CACHE)
+    risk_entries = len(_RISK_DASHBOARD_CACHE)
     security_entries = len(_SECURITY_ALERTS_CACHE)
     calendar_entries = len(_TRADING_CALENDAR_CACHE)
+    analytics_history_health_entries = len(_ANALYTICS_HISTORY_HEALTH_CACHE)
+    analytics_history_status_entries = len(_ANALYTICS_HISTORY_STATUS_CACHE)
+    analytics_history_last_entries = len(_ANALYTICS_HISTORY_STATUS_LAST)
+    rule_price_entries = len(_RULE_PRICE_CACHE.get("prices") or {})
+    risk_refresh_tasks_cancelled = _cancel_pending_task_map(_RISK_DASHBOARD_REFRESH_TASKS)
+    micro_refresh_tasks_cancelled = _cancel_pending_task_map(_MICROSTRUCTURE_REFRESH_TASKS)
+    community_refresh_tasks_cancelled = _cancel_pending_task_map(_COMMUNITY_REFRESH_TASKS)
+    rule_price_in_flight_cancelled = _cancel_pending_task(_RULE_PRICE_IN_FLIGHT)
+
     _BALANCE_SNAPSHOT_CACHE.clear()
     _MICROSTRUCTURE_SNAPSHOT_CACHE.clear()
+    _COMMUNITY_OVERVIEW_CACHE.clear()
+    _RISK_DASHBOARD_CACHE.clear()
     _SECURITY_ALERTS_CACHE.clear()
     _TRADING_CALENDAR_CACHE.clear()
+    _ANALYTICS_HISTORY_HEALTH_CACHE.clear()
+    _ANALYTICS_HISTORY_STATUS_CACHE.clear()
+    _ANALYTICS_HISTORY_STATUS_LAST.clear()
+    _RULE_PRICE_CACHE["ts"] = 0.0
+    _RULE_PRICE_CACHE["prices"] = {}
+    _RULE_PRICE_IN_FLIGHT = None
     _LIVE_POSITION_SNAPSHOT_CACHE["ts"] = 0.0
     _LIVE_POSITION_SNAPSHOT_CACHE["data"] = {}
     _LIVE_POSITION_DETAILS_CACHE["ts"] = 0.0
@@ -239,8 +281,18 @@ def _clear_trading_api_runtime_caches() -> Dict[str, Any]:
     return {
         "balance_entries_cleared": balance_entries,
         "microstructure_entries_cleared": micro_entries,
+        "community_overview_entries_cleared": community_entries,
+        "risk_dashboard_entries_cleared": risk_entries,
         "security_alert_entries_cleared": security_entries,
         "trading_calendar_entries_cleared": calendar_entries,
+        "analytics_history_health_entries_cleared": analytics_history_health_entries,
+        "analytics_history_status_entries_cleared": analytics_history_status_entries,
+        "analytics_history_status_last_entries_cleared": analytics_history_last_entries,
+        "rule_price_entries_cleared": rule_price_entries,
+        "risk_dashboard_refresh_tasks_cancelled": risk_refresh_tasks_cancelled,
+        "microstructure_refresh_tasks_cancelled": micro_refresh_tasks_cancelled,
+        "community_refresh_tasks_cancelled": community_refresh_tasks_cancelled,
+        "rule_price_in_flight_cancelled": rule_price_in_flight_cancelled,
     }
 
 
@@ -255,8 +307,19 @@ def _inspect_trading_api_runtime_caches() -> Dict[str, Any]:
     return {
         "balance_snapshot_entries": len(_BALANCE_SNAPSHOT_CACHE),
         "microstructure_snapshot_entries": len(_MICROSTRUCTURE_SNAPSHOT_CACHE),
+        "community_overview_entries": len(_COMMUNITY_OVERVIEW_CACHE),
+        "risk_dashboard_entries": len(_RISK_DASHBOARD_CACHE),
         "security_alert_entries": len(_SECURITY_ALERTS_CACHE),
         "trading_calendar_entries": len(_TRADING_CALENDAR_CACHE),
+        "analytics_history_health_entries": len(_ANALYTICS_HISTORY_HEALTH_CACHE),
+        "analytics_history_status_entries": len(_ANALYTICS_HISTORY_STATUS_CACHE),
+        "analytics_history_status_last_entries": len(_ANALYTICS_HISTORY_STATUS_LAST),
+        "rule_price_entries": len(_RULE_PRICE_CACHE.get("prices") or {}),
+        "risk_dashboard_refresh_tasks": _pending_tasks_count(_RISK_DASHBOARD_REFRESH_TASKS),
+        "microstructure_refresh_tasks": _pending_tasks_count(_MICROSTRUCTURE_REFRESH_TASKS),
+        "community_refresh_tasks": _pending_tasks_count(_COMMUNITY_REFRESH_TASKS),
+        "rule_price_in_flight": bool(_RULE_PRICE_IN_FLIGHT and not _RULE_PRICE_IN_FLIGHT.done()),
+        "rule_price_cache_age_sec": _age(float(_RULE_PRICE_CACHE.get("ts") or 0.0)),
         "live_position_snapshot_age_sec": _age(
             float(_LIVE_POSITION_SNAPSHOT_CACHE.get("ts") or 0.0)
         ),

@@ -18,6 +18,7 @@ def _build_app() -> FastAPI:
 
 def _reset_download_state() -> None:
     data_api._DOWNLOAD_TASKS.clear()
+    data_api._DOWNLOAD_BACKGROUND_TASKS.clear()
     data_api._DOWNLOAD_TASK_SEMAPHORE = None
     data_api._DOWNLOAD_TASK_SEMAPHORE_LOOP_ID = None
 

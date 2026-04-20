@@ -15,6 +15,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dateutil import parser as dt_parser
 from loguru import logger
 
+from config.env_utils import env_bool as _env_bool
 from core.data.coinglass_client import coinglass_enabled
 from core.news.collectors.binance_announcements import BinanceAnnouncementsCollector
 from core.news.collectors.bybit_announcements import BybitAnnouncementsCollector
@@ -34,13 +35,6 @@ from core.news.collectors.newsapi import NewsAPICollector
 from core.news.collectors.okx_announcements import OKXAnnouncementsCollector
 from core.news.collectors.rss import RSSNewsCollector
 from core.news.storage import db as news_db
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = str(os.getenv(name, "")).strip().lower()
-    if not raw:
-        return bool(default)
-    return raw in {"1", "true", "yes", "on", "y"}
 
 
 def _safe_int(value: Any, default: int) -> int:

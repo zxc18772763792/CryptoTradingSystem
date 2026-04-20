@@ -20,26 +20,25 @@ from fastapi.templating import Jinja2Templates
 from loguru import logger
 
 from config.database import close_db, init_db
+from config.env_utils import env_bool as _env_bool
+from config.env_utils import env_int as _env_int
+from config.env_utils import sync_settings_to_environ
 from config.settings import settings
 from core.ai.autonomous_agent import autonomous_trading_agent
 
-# Sync LLM API keys to environment variables for modules that use os.environ.get()
-if settings.ZHIPU_API_KEY:
-    os.environ["ZHIPU_API_KEY"] = settings.ZHIPU_API_KEY
-if settings.ZHIPU_BASE_URL:
-    os.environ["ZHIPU_BASE_URL"] = settings.ZHIPU_BASE_URL
-if settings.ZHIPU_MODEL:
-    os.environ["ZHIPU_MODEL"] = settings.ZHIPU_MODEL
-if settings.OPENAI_API_KEY:
-    os.environ["OPENAI_API_KEY"] = settings.OPENAI_API_KEY
-if settings.OPENAI_BASE_URL:
-    os.environ["OPENAI_BASE_URL"] = settings.OPENAI_BASE_URL
-if settings.OPENAI_BACKUP_API_KEY:
-    os.environ["OPENAI_BACKUP_API_KEY"] = settings.OPENAI_BACKUP_API_KEY
-if settings.OPENAI_BACKUP_BASE_URL:
-    os.environ["OPENAI_BACKUP_BASE_URL"] = settings.OPENAI_BACKUP_BASE_URL
-if settings.OPENAI_MODEL:
-    os.environ["OPENAI_MODEL"] = settings.OPENAI_MODEL
+_MODEL_ENV_FIELDS = (
+    "ZHIPU_API_KEY",
+    "ZHIPU_BASE_URL",
+    "ZHIPU_MODEL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_BACKUP_API_KEY",
+    "OPENAI_BACKUP_BASE_URL",
+    "OPENAI_MODEL",
+)
+
+# Sync model settings into environment variables for modules that still read os.environ.
+sync_settings_to_environ(settings, _MODEL_ENV_FIELDS)
 
 from core.data import data_storage, second_level_backfill_manager
 from core.exchanges import exchange_manager
@@ -72,20 +71,6 @@ _AUTO_SYNC_SYMBOLS = [
 _AUTO_SYNC_PRIMARY_EXCHANGE = "binance"
 _AUTO_SYNC_SECONDARY_EXCHANGE = "gate"
 _AUTO_SYNC_TIMEFRAMES = ["10s", "1m", "5m", "15m", "1h", "4h", "1d", "1w", "1M"]
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except Exception:
-        return int(default)
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return bool(default)
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 _NEWS_PULL_INTERVAL_SEC = max(20, _env_int("NEWS_PULL_INTERVAL_SEC", 60))
