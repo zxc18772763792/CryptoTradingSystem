@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import httpx
 import numpy as np
@@ -90,6 +90,7 @@ _DOWNLOAD_TASKS: Dict[str, Dict[str, Any]] = {}
 _DOWNLOAD_BACKGROUND_TASKS: Dict[str, asyncio.Task[None]] = {}
 _DOWNLOAD_TASK_SEMAPHORE: Optional[asyncio.Semaphore] = None
 _DOWNLOAD_TASK_SEMAPHORE_LOOP_ID: Optional[int] = None
+_LIVE_CACHE_REFRESH_TASKS: Dict[str, asyncio.Task[None]] = {}
 _ONCHAIN_OVERVIEW_CACHE: Dict[str, Dict[str, Any]] = {}
 _ONCHAIN_OVERVIEW_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
 _FACTOR_LIBRARY_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -155,6 +156,35 @@ def _pending_tasks_count(tasks: Dict[str, asyncio.Task[Any]]) -> int:
     return sum(1 for task in tasks.values() if task is not None and not task.done())
 
 
+def _live_cache_refresh_key(exchange: str, symbol: str, timeframe: str) -> str:
+    return "|".join(
+        [
+            str(exchange or "").strip().lower(),
+            str(symbol or "").strip().upper(),
+            str(timeframe or "").strip(),
+        ]
+    )
+
+
+def _schedule_live_cache_refresh(
+    refresh_key: str,
+    build_coro: Callable[[], Awaitable[None]],
+) -> bool:
+    existing = _LIVE_CACHE_REFRESH_TASKS.get(refresh_key)
+    if existing is not None and not existing.done():
+        return False
+
+    task = asyncio.create_task(build_coro())
+    _LIVE_CACHE_REFRESH_TASKS[refresh_key] = task
+
+    def _cleanup(done_task: asyncio.Task[None], *, tracked_key: str = refresh_key) -> None:
+        if _LIVE_CACHE_REFRESH_TASKS.get(tracked_key) is done_task:
+            _LIVE_CACHE_REFRESH_TASKS.pop(tracked_key, None)
+
+    task.add_done_callback(_cleanup)
+    return True
+
+
 def _clear_data_api_runtime_caches() -> Dict[str, Any]:
     global _DOWNLOAD_TASK_SEMAPHORE
     global _DOWNLOAD_TASK_SEMAPHORE_LOOP_ID
@@ -176,6 +206,7 @@ def _clear_data_api_runtime_caches() -> Dict[str, Any]:
         and not _RESEARCH_COVERAGE_CACHE["df"].empty
     )
     download_background_tasks_cancelled = _cancel_pending_task_map(_DOWNLOAD_BACKGROUND_TASKS)
+    live_cache_refresh_tasks_cancelled = _cancel_pending_task_map(_LIVE_CACHE_REFRESH_TASKS)
     onchain_refresh_tasks_cancelled = _cancel_pending_task_map(_ONCHAIN_OVERVIEW_REFRESH_TASKS)
     factor_refresh_tasks_cancelled = _cancel_pending_task_map(_FACTOR_LIBRARY_REFRESH_TASKS)
     fama_refresh_tasks_cancelled = _cancel_pending_task_map(_FAMA_REFRESH_TASKS)
@@ -200,6 +231,7 @@ def _clear_data_api_runtime_caches() -> Dict[str, Any]:
         "fama_cache_entries_cleared": fama_entries,
         "research_coverage_loaded": research_coverage_loaded,
         "download_background_tasks_cancelled": download_background_tasks_cancelled,
+        "live_cache_refresh_tasks_cancelled": live_cache_refresh_tasks_cancelled,
         "onchain_refresh_tasks_cancelled": onchain_refresh_tasks_cancelled,
         "factor_refresh_tasks_cancelled": factor_refresh_tasks_cancelled,
         "fama_refresh_tasks_cancelled": fama_refresh_tasks_cancelled,
@@ -219,6 +251,7 @@ def _inspect_data_api_runtime_caches() -> Dict[str, Any]:
         "download_tasks": len(_DOWNLOAD_TASKS),
         "active_download_tasks": active_download_tasks,
         "download_background_tasks": _pending_tasks_count(_DOWNLOAD_BACKGROUND_TASKS),
+        "live_cache_refresh_tasks": _pending_tasks_count(_LIVE_CACHE_REFRESH_TASKS),
         "onchain_cache_entries": len(_ONCHAIN_OVERVIEW_CACHE),
         "onchain_refresh_tasks": _pending_tasks_count(_ONCHAIN_OVERVIEW_REFRESH_TASKS),
         "factor_cache_entries": len(_FACTOR_LIBRARY_CACHE),
@@ -3004,6 +3037,8 @@ async def get_klines(
     else:
         # Merge latest live bars when requesting near-now window to keep chart realtime.
         if end_time is None:
+            live_refresh_key = _live_cache_refresh_key(actual_exchange, symbol, timeframe)
+
             async def _refresh_cache_from_live(ex_name: str, live_limit: int) -> None:
                 try:
                     fresh_df = await _fetch_live_df(ex_name, live_limit=live_limit)
@@ -3049,7 +3084,10 @@ async def get_klines(
                         df = df[~df.index.duplicated(keep="last")].sort_index()
                 except (asyncio.TimeoutError, asyncio.CancelledError) as live_err:
                     logger.debug(f"live refresh timeout/cancelled: {live_err}")
-                    asyncio.create_task(_refresh_cache_from_live(actual_exchange, live_limit))
+                    _schedule_live_cache_refresh(
+                        live_refresh_key,
+                        lambda: _refresh_cache_from_live(actual_exchange, live_limit),
+                    )
                 except Exception as live_err:
                     # When cache is stale, force reconnect once and retry live pull.
                     if stale_seconds > stale_threshold:
@@ -3086,7 +3124,10 @@ async def get_klines(
                                 logger.debug(f"public kline fallback skipped: {public_err}")
                     logger.debug(f"live refresh skipped: {live_err}")
                     # Do not block response on live fetch; refresh cache in background.
-                    asyncio.create_task(_refresh_cache_from_live(actual_exchange, live_limit))
+                    _schedule_live_cache_refresh(
+                        live_refresh_key,
+                        lambda: _refresh_cache_from_live(actual_exchange, live_limit),
+                    )
 
     if df.empty:
         return {
