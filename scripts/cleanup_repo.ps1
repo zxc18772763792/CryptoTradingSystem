@@ -47,9 +47,32 @@ function Remove-PathSafely {
         return $true
     }
 
-    Remove-Item -LiteralPath $resolvedTarget -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "removed: $resolvedTarget"
-    return $true
+    $removed = $false
+
+    try {
+        Remove-Item -LiteralPath $resolvedTarget -Recurse -Force -ErrorAction Stop
+    }
+    catch {
+        # Some Windows temp dirs end up with broken ACLs; fall back to cmd's rd/del.
+        if (Test-Path -LiteralPath $resolvedTarget -PathType Container) {
+            cmd /c "rd /s /q \\?\$resolvedTarget" | Out-Null
+        }
+        elseif (Test-Path -LiteralPath $resolvedTarget -PathType Leaf) {
+            cmd /c "del /f /q \\?\$resolvedTarget" | Out-Null
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $resolvedTarget)) {
+        $removed = $true
+    }
+
+    if ($removed) {
+        Write-Host "removed: $resolvedTarget"
+        return $true
+    }
+
+    Write-Warning "unable to remove: $resolvedTarget"
+    return $false
 }
 
 function Remove-OldFiles {
