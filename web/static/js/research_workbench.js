@@ -914,6 +914,52 @@
     renderStatusCards();
   }
 
+  async function syncWorkbenchMarketSentiment(payload, options = {}) {
+    if (!state.initialized || !payload || typeof payload !== 'object') return null;
+    const refreshRecommendationsAfterSync = options.refreshRecommendations !== false;
+    const profile = state.profile || getProfile();
+    const current = state.modules?.market_state || {};
+    const currentPayload = current.payload && typeof current.payload === 'object' ? current.payload : {};
+    const currentSummary = current.summary && typeof current.summary === 'object' ? current.summary : {};
+    const existingHeadline = String(currentSummary.headline || '').trim();
+    const nextSummary = {
+      ...currentSummary,
+      headline: existingHeadline || `${profile.primary_symbol} | ${profile.timeframe}`,
+      market_regime: currentSummary.market_regime || state.overview?.market_regime || 'sentiment_refresh',
+      direction_bias: currentSummary.direction_bias || state.overview?.direction_bias || 'neutral',
+      confidence: Number(currentSummary.confidence ?? state.overview?.confidence ?? 0),
+    };
+    const nextModule = {
+      module: current.module || 'market_state',
+      status: current.status || 'degraded',
+      freshness_sec: 0,
+      source_labels: Array.isArray(current.source_labels) && current.source_labels.length
+        ? current.source_labels
+        : ['research.workbench.market_state', 'research.sentiment.panel'],
+      warnings: Array.isArray(current.warnings) ? current.warnings : [],
+      summary: nextSummary,
+      payload: {
+        ...currentPayload,
+        sentiment_dashboard: payload,
+      },
+      generated_at: new Date().toISOString(),
+    };
+
+    state.profile = profile;
+    state.modules.market_state = nextModule;
+    state.moduleTimes.market_state = nextModule.generated_at;
+    renderStatusCards();
+
+    if (refreshRecommendationsAfterSync) {
+      try {
+        await refreshRecommendations(true);
+      } catch (err) {
+        setDebug('research.workbench.market_state.sentiment_sync', String(err?.message || err));
+      }
+    }
+    return nextModule;
+  }
+
   function getModuleTimeoutMs(name) {
     if (name === 'factors') return 70000;
     if (name === 'onchain') return 22000;
@@ -1547,21 +1593,37 @@
     if (state.overviewRefreshPromise) return state.overviewRefreshPromise;
     state.overviewRefreshPromise = (async () => {
       state.profile = getProfile();
-      if (typeof window.loadResearchOverview === 'function') await window.loadResearchOverview();
-      state.modules = {};
-      for (const name of MODULE_NAMES) {
-        try {
-          // Run sequentially to keep the page responsive under slow upstream APIs.
-          // eslint-disable-next-line no-await-in-loop
-          await runWorkbenchModuleDirect(name, true);
-        } catch (err) {
-          setDebug(`research.workbench.overview.direct.${name}`, String(err?.message || err));
+      let overview;
+      try {
+        overview = await apiResearch(`/overview?${profileQuery(state.profile)}`, { timeoutMs: 90000 });
+        state.overview = overview;
+        state.modules = {};
+        renderOverview();
+        renderStatusCards();
+        Object.entries(overview.modules || {}).forEach(([name, module]) => {
+          try {
+            renderModule(name, module);
+          } catch (err) {
+            setDebug(`research.workbench.overview.render.${name}`, String(err?.message || err));
+          }
+        });
+      } catch (err) {
+        state.modules = {};
+        for (const name of MODULE_NAMES) {
+          try {
+            // Keep the legacy per-module fallback for resilience when the parallel overview endpoint fails.
+            // eslint-disable-next-line no-await-in-loop
+            await runWorkbenchModuleDirect(name, true);
+          } catch (moduleErr) {
+            setDebug(`research.workbench.overview.fallback.${name}`, String(moduleErr?.message || moduleErr));
+          }
         }
+        overview = buildLocalOverviewFromModules();
+        state.overview = overview;
       }
-      state.overview = buildLocalOverviewFromModules();
       await refreshRecommendations(true);
       state.lastOverviewRefreshAt = Date.now();
-      setDebug('research.workbench.overview', state.overview);
+      setDebug('research.workbench.overview', overview);
       if (!quiet && typeof window.notify === 'function') window.notify('研究总览已更新');
       return state.overview;
     })().finally(() => {
@@ -1743,6 +1805,7 @@
     window.renderResearchStatusCards = renderStatusCards;
     window.renderResearchConclusionCard = renderRecommendations;
     window.refreshResearchWorkbench = (quiet = true) => runWorkbenchOverviewDirect(Boolean(quiet));
+    window.syncWorkbenchMarketSentiment = syncWorkbenchMarketSentiment;
   }
 
   async function lazyInit() {

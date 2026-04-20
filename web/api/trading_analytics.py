@@ -177,5 +177,6 @@ async def get_live_trade_review(
 async def get_pnl_heatmap(
     days: int = 30,
     bucket: str = "day",
+    mode: Optional[str] = None,
 ):
-    return await trading_api.get_pnl_heatmap(days=days, bucket=bucket)
+    return await trading_api.get_pnl_heatmap(days=days, bucket=bucket, mode=mode)

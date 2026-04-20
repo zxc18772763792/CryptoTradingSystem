@@ -11,6 +11,7 @@ def test_research_workbench_module_actions_share_primary_style():
     template = _read("web/templates/index.html")
     style_css = _read("web/static/css/style.css")
     workbench_js = _read("web/static/js/research_workbench.js")
+    app_js = _read("web/static/js/app.js")
 
     assert 'class="btn btn-primary btn-sm" id="btn-workbench-market-state"' in template
     assert 'class="btn btn-primary btn-sm" id="btn-workbench-factors"' in template
@@ -21,6 +22,10 @@ def test_research_workbench_module_actions_share_primary_style():
     assert "linear-gradient(135deg, #1a9a5e, #26dc85)" in style_css
     assert "bindAsyncButton('btn-workbench-market-state'" in workbench_js
     assert "bindAsyncButton('btn-workbench-discipline'" in workbench_js
+    assert 'id="btn-refresh-market-sentiment-panel"' in template
+    assert "async function syncWorkbenchMarketSentiment(payload, options = {})" in workbench_js
+    assert "window.syncWorkbenchMarketSentiment = syncWorkbenchMarketSentiment;" in workbench_js
+    assert "window.syncWorkbenchMarketSentiment(payload).catch(()=>{});" in app_js
 
 
 def test_research_workbench_recommendations_render_structured_actions():
@@ -51,6 +56,30 @@ def test_research_workbench_recommendations_render_structured_actions():
     assert ".research-conclusion-action-btn" in style_css
     assert ".research-brief-grid" in style_css
     assert ".research-conclusion-tag" in style_css
+
+
+def test_research_workbench_overview_button_uses_parallel_overview_endpoint():
+    workbench_js = _read("web/static/js/research_workbench.js")
+
+    marker = "async function runWorkbenchOverviewDirect(quiet = false)"
+    assert marker in workbench_js
+    section = workbench_js.split(marker, 1)[1].split("function maybeAutoRefreshWorkbench", 1)[0]
+
+    assert "apiResearch(`/overview?${profileQuery(state.profile)}`" in section
+    assert "Object.entries(overview.modules || {}).forEach" in section
+    assert "research.workbench.overview.fallback" in section
+
+
+def test_research_symbol_options_keep_defaults_and_retry_after_timeout():
+    app_js = _read("web/static/js/app.js")
+
+    marker = "async function loadResearchSymbolOptions(exchange,options={})"
+    assert marker in app_js
+    section = app_js.split(marker, 1)[1].split("function mapDownloadTaskStatus", 1)[0]
+
+    assert "renderResearchSymbolSelects(RESEARCH_DEFAULT_SYMBOLS);" in section
+    assert "loadResearchSymbolOptions.retryTimer=setTimeout" in section
+    assert "loadResearchSymbolOptions timeout; using defaults for now" in section
 
 
 def test_research_workbench_microstructure_summary_wires_long_short_and_order_walls():

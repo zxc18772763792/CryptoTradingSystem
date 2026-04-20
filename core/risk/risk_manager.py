@@ -911,9 +911,16 @@ class RiskManager:
         limit = max(1, min(limit, 200))
         return list(self._alerts[-limit:])
 
-    def get_trade_history(self, limit: int = 5000) -> List[Dict[str, Any]]:
+    def get_trade_history(
+        self,
+        limit: int = 5000,
+        scope: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         limit = max(1, min(int(limit or 0), 50000))
-        return list(self._trade_history[-limit:])
+        normalized = self._normalize_scope(scope or self._risk_scope)
+        if normalized == self._risk_scope:
+            return list(self._trade_history[-limit:])
+        return list(self._load_persisted_trade_history(normalized)[-limit:])
 
     def get_risk_report(self) -> Dict[str, Any]:
         metrics = self.get_risk_metrics()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -71,3 +73,32 @@ def test_research_symbols_falls_back_when_coinglass_universe_fails(monkeypatch):
     assert payload["primary_symbol"] == "BTC/USDT"
     assert payload["symbols"] == ["BTC/USDT", "ETH/USDT"]
     assert payload["default_count"] == 2
+
+
+def test_research_symbols_falls_back_when_coinglass_universe_times_out(monkeypatch):
+    app = FastAPI()
+    app.include_router(data_api.router, prefix="/api/data")
+    client = TestClient(app)
+
+    async def fake_build_exchange_altcoin_universe(exchange: str, **kwargs):
+        raise asyncio.TimeoutError()
+
+    async def fake_get_data_symbols(exchange: str = "binance"):
+        return {
+            "exchange": exchange,
+            "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
+            "count": 3,
+        }
+
+    monkeypatch.setattr(data_api, "build_exchange_altcoin_universe", fake_build_exchange_altcoin_universe)
+    monkeypatch.setattr(data_api, "get_data_symbols", fake_get_data_symbols)
+
+    response = client.get("/api/data/research/symbols?exchange=binance")
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["source"] == "research_universe_fallback"
+    assert payload["primary_symbol"] == "BTC/USDT"
+    assert payload["symbols"] == ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+    assert payload["default_count"] == 3
+    assert "timed out" in payload["warning"]

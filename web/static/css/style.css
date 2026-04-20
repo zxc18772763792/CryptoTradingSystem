@@ -12606,3 +12606,149 @@ input[type="radio"] {
         grid-template-columns: 1fr !important;
     }
 }
+
+/* ===== Phase 1: Altcoin Radar Enhancement ===== */
+
+/* Radar mode toggle buttons */
+.altcoin-radar-mode-btns {
+    display: flex;
+    gap: 4px;
+    margin-top: 4px;
+}
+.altcoin-mode-btn {
+    flex: 1;
+    padding: 5px 8px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    background: var(--bg-3);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+.altcoin-mode-btn.active {
+    background: #1e40af;
+    color: #93c5fd;
+    border-color: #3b82f6;
+}
+.altcoin-mode-btn:hover:not(.active) {
+    background: var(--bg-4, var(--bg-3));
+    color: var(--text);
+}
+
+/* Signal source chip in ranking table */
+.altcoin-signal-src {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 6px;
+    white-space: nowrap;
+    letter-spacing: 0.3px;
+}
+.altcoin-src-ignition  { background: #1c3a4a; color: #38bdf8; border: 1px solid #0ea5e9; }
+.altcoin-src-continuation { background: #14532d; color: #86efac; border: 1px solid #22c55e; }
+.altcoin-src-crowded   { background: #7f1d1d; color: #fca5a5; border: 1px solid #ef4444; }
+.altcoin-src-narrative { background: #3b0764; color: #d8b4fe; border: 1px solid #a855f7; }
+.altcoin-src-narrative-confirm { background: #1e1b4b; color: #c4b5fd; border: 1px solid #7c3aed; }
+.altcoin-src-empty     { background: transparent; color: var(--text-muted); border: none; }
+/* Phase 2 — narrative tag tone */
+[data-tone="narrative"] { background: #3b0764; color: #d8b4fe; }
+/* Phase 2 — narrative inspector panel */
+.altcoin-narrative-scores-panel { margin-top: 8px; }
+
+/* High score badge variant */
+.altcoin-radar-score-badge.score-high {
+    background: #1c3a4a;
+    color: #38bdf8;
+    font-weight: 700;
+}
+
+/* Perp scores panel */
+.altcoin-perp-scores-panel {
+    margin-top: 8px;
+}
+
+/* Event timeline */
+.altcoin-event-badge {
+    display: inline-block;
+    background: #1e40af;
+    color: #93c5fd;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 5px;
+    border-radius: 8px;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+.altcoin-event-timeline {
+    max-height: 180px;
+    overflow-y: auto;
+}
+.altcoin-event-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    border-radius: 5px;
+    font-size: 11px;
+    margin-bottom: 3px;
+    background: var(--bg-2);
+}
+.altcoin-event-row:hover { background: var(--bg-3); }
+.altcoin-event-time   { color: var(--text-muted); min-width: 44px; }
+.altcoin-event-type   { font-weight: 600; min-width: 60px; }
+.altcoin-event-detail { color: var(--text-muted); flex: 1; }
+
+/* Wider table for new columns */
+.altcoin-radar-table {
+    min-width: 980px;
+}
+
+.altcoin-radar-watchlist-card {
+    margin-top: 12px;
+}
+
+.altcoin-radar-universe-summary {
+    margin-top: 10px;
+    color: #c7d5ea;
+}
+
+.altcoin-radar-universe-group {
+    margin-top: 12px;
+}
+
+.altcoin-radar-universe-group[hidden] {
+    display: none !important;
+}
+
+.altcoin-radar-watchlist-list {
+    margin-top: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.altcoin-radar-watchlist-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border-radius: 999px;
+    border: 1px solid rgba(96, 165, 250, 0.28);
+    background: rgba(37, 99, 235, 0.12);
+    color: #c7d8ee;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.altcoin-radar-watchlist-chip:hover {
+    border-color: rgba(96, 165, 250, 0.52);
+    background: rgba(37, 99, 235, 0.18);
+}
+
+.altcoin-radar-watchlist-empty {
+    color: var(--text-muted);
+    font-size: 12px;
+}

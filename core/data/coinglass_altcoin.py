@@ -20,6 +20,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _CACHE_DIR = _PROJECT_ROOT / "data" / "cache" / "coinglass_altcoin"
 _MARKET_CACHE_TTL_SEC = 120.0
 _UNIVERSE_CACHE_TTL_SEC = 6 * 3600.0
+_UNIVERSE_REFRESH_TIMEOUT_SEC = 20.0
 _TAG_CACHE_TTL_SEC = 7 * 86400.0
 _DEFAULT_MARKET_PER_PAGE = 200
 _DEFAULT_MARKET_MAX_PAGES = 4
@@ -197,6 +198,49 @@ def _tag_cache_path() -> Path:
 def _universe_cache_path(exchange: str) -> Path:
     _ensure_cache_dir()
     return _CACHE_DIR / f"altcoin_universe_{_normalize_exchange(exchange)}.json"
+
+
+def _load_universe_cache_payload(exchange: str) -> Optional[Dict[str, Any]]:
+    path = _universe_cache_path(exchange)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+def _universe_cache_age_sec(payload: Mapping[str, Any]) -> Optional[float]:
+    updated_at = payload.get("updated_at")
+    if not updated_at:
+        return None
+    try:
+        return max(0.0, (_utc_now() - datetime.fromisoformat(str(updated_at))).total_seconds())
+    except Exception:
+        return None
+
+
+def _build_universe_stale_fallback(
+    payload: Mapping[str, Any],
+    *,
+    exchange: str,
+    reason: str,
+) -> Dict[str, Any]:
+    fallback = dict(payload or {})
+    warnings = [
+        str(item).strip()
+        for item in list(fallback.get("warnings") or [])
+        if str(item).strip()
+    ]
+    warning = f"coinglass universe refresh fallback for {exchange}: {reason}"
+    if warning not in warnings:
+        warnings.append(warning)
+    fallback["warnings"] = warnings
+    fallback["stale_fallback"] = True
+    fallback["exchange"] = exchange
+    fallback.setdefault("source", "coinglass_altcoin_universe")
+    return fallback
 
 
 def _load_tag_cache() -> Dict[str, Any]:
@@ -546,23 +590,40 @@ async def build_exchange_altcoin_universe(
         return dict(cached.get("payload") or {})
 
     cache_path = _universe_cache_path(normalized_exchange)
-    if cache_path.exists() and not refresh:
-        try:
-            payload = json.loads(cache_path.read_text(encoding="utf-8"))
-            updated_at = payload.get("updated_at")
-            if updated_at:
-                age_sec = max(0.0, (_utc_now() - datetime.fromisoformat(str(updated_at))).total_seconds())
-                if age_sec <= _UNIVERSE_CACHE_TTL_SEC:
-                    _UNIVERSE_CACHE[cache_key] = {"stored_at": now_ts, "payload": payload}
-                    return payload
-        except Exception:
-            pass
+    stale_payload = _load_universe_cache_payload(normalized_exchange) if not refresh else None
+    if stale_payload:
+        age_sec = _universe_cache_age_sec(stale_payload)
+        if age_sec is not None and age_sec <= _UNIVERSE_CACHE_TTL_SEC:
+            _UNIVERSE_CACHE[cache_key] = {"stored_at": now_ts, "payload": stale_payload}
+            return stale_payload
 
-    market_rows, onboard_map = await asyncio.gather(
-        load_coinglass_market_snapshots(normalized_exchange, refresh=refresh, manual=manual),
-        load_exchange_onboard_map(normalized_exchange, refresh=refresh, manual=manual),
-    )
+    try:
+        market_rows, onboard_map = await asyncio.wait_for(
+            asyncio.gather(
+                load_coinglass_market_snapshots(normalized_exchange, refresh=refresh, manual=manual),
+                load_exchange_onboard_map(normalized_exchange, refresh=refresh, manual=manual),
+            ),
+            timeout=_UNIVERSE_REFRESH_TIMEOUT_SEC,
+        )
+    except Exception as exc:
+        if stale_payload and not refresh:
+            fallback_payload = _build_universe_stale_fallback(
+                stale_payload,
+                exchange=normalized_exchange,
+                reason=str(exc),
+            )
+            _UNIVERSE_CACHE[cache_key] = {"stored_at": now_ts, "payload": fallback_payload}
+            return fallback_payload
+        raise
     if not market_rows:
+        if stale_payload and not refresh:
+            fallback_payload = _build_universe_stale_fallback(
+                stale_payload,
+                exchange=normalized_exchange,
+                reason="empty market rows",
+            )
+            _UNIVERSE_CACHE[cache_key] = {"stored_at": now_ts, "payload": fallback_payload}
+            return fallback_payload
         return {
             "exchange": normalized_exchange,
             "symbols": [],

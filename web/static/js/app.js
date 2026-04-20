@@ -2196,7 +2196,7 @@ xaxis:{title:'币种',tickangle:-40,automargin:true,tickfont:{size:10}},
 yaxis:{title:bucket==='hour'?'时间(本地时区)':'日期(本地时区)',automargin:true,tickfont:{size:11}},
 },{responsive:true,displaylogo:false,scrollZoom:true});
 }
-async function loadPnlHeatmap(){return runRequestSingleFlight('pnlHeatmap',async()=>{try{const d=Number(document.getElementById('pnl-heatmap-days')?.value||30),b=document.getElementById('pnl-heatmap-bucket')?.value||'day';const r=await api(`/trading/pnl/heatmap?days=${Math.max(1,d)}&bucket=${encodeURIComponent(b)}`,{timeoutMs:12000});renderPnlHeatmap(r);}catch(e){const box=document.getElementById('pnl-heatmap');if(box)box.innerHTML=`<div class="list-item">热力图加载失败: ${esc(e.message)}</div>`;}});}
+async function loadPnlHeatmap(){return runRequestSingleFlight('pnlHeatmap',async()=>{try{const d=Number(document.getElementById('pnl-heatmap-days')?.value||30),b=document.getElementById('pnl-heatmap-bucket')?.value||'day';const summaryStats=state?.lastSummarySnapshot?.stats||{};const summaryBalances=state?.lastSummarySnapshot?.balances||{};const mode=resolveRuntimeModeSnapshot({statusMode:normalizeRuntimeMode(state?._systemStatusLast?.trading_mode),statsMode:normalizeRuntimeMode(summaryStats?.trading_mode),balanceMode:normalizeRuntimeMode(summaryBalances?.mode??summaryBalances?.active_account_type)});const r=await api(`/trading/pnl/heatmap?days=${Math.max(1,d)}&bucket=${encodeURIComponent(b)}&mode=${encodeURIComponent(mode)}`,{timeoutMs:12000});renderPnlHeatmap(r);}catch(e){const box=document.getElementById('pnl-heatmap');if(box)box.innerHTML=`<div class="list-item">热力图加载失败: ${esc(e.message)}</div>`;}});}
 
 function fmtNum(v,digits=4){
 const n=Number(v);
@@ -3225,7 +3225,9 @@ if(el instanceof HTMLSelectElement && el.multiple){
 }
 el.value=String((wanted[0]||fallback)||fallback);
 }
-async function loadResearchSymbolOptions(exchange){
+async function loadResearchSymbolOptions(exchange,options={}){
+const attempt=Math.max(0,Number(options?.attempt||0));
+const quiet=options?.quiet===true;
 const renderResearchSymbolSelects=symbols=>{
   const normalized=[];
   const seen=new Set();
@@ -3260,8 +3262,28 @@ const ex=String(exchange||getResearchExchange()||'binance').trim().toLowerCase()
 const resp=await api(`/data/research/symbols?exchange=${encodeURIComponent(ex)}`,{timeoutMs:15000});
 const symbols=(Array.isArray(resp?.symbols)?resp.symbols:[]).filter(Boolean);
 if(symbols.length)renderResearchSymbolSelects(symbols);
+if(loadResearchSymbolOptions.retryTimer){
+  clearTimeout(loadResearchSymbolOptions.retryTimer);
+  loadResearchSymbolOptions.retryTimer=null;
+}
 renderResearchStatusCards();
-}catch(e){console.warn('loadResearchSymbolOptions failed',e?.message||e);}
+}catch(e){
+const ex=String(exchange||getResearchExchange()||'binance').trim().toLowerCase()||'binance';
+const message=String(e?.message||e);
+const isTimeout=/接口超时|timeout/i.test(message);
+if(isTimeout&&attempt<2){
+  if(loadResearchSymbolOptions.retryTimer)clearTimeout(loadResearchSymbolOptions.retryTimer);
+  loadResearchSymbolOptions.retryTimer=setTimeout(()=>{
+    loadResearchSymbolOptions(ex,{attempt:attempt+1,quiet:true});
+  },4000*(attempt+1));
+}
+renderResearchStatusCards();
+if(isTimeout){
+  if(!quiet)console.info('loadResearchSymbolOptions timeout; using defaults for now',message);
+  return;
+}
+if(!quiet)console.warn('loadResearchSymbolOptions failed',message);
+}
 }
 function mapDownloadTaskStatus(status){
 const key=String(status||'').trim().toLowerCase();
@@ -6819,6 +6841,9 @@ onchain:onchain.status==='fulfilled'?onchain.value:{},
 };
 if(reqId!==researchState.lastSentimentReqId)return;
 renderMarketSentimentPanel(payload);
+if(typeof window.syncWorkbenchMarketSentiment==='function'){
+window.syncWorkbenchMarketSentiment(payload).catch(()=>{});
+}
 renderResearchQuickSummary([{label:'情绪模块',value:'市场情绪仪表盘'},{label:'交易所',value:ex},{label:'标的',value:sym},{label:'新闻样本',value:`结构化 ${Number(payload.news?.events_count||0)} / 当前流 ${Number(payload.news?.feed_count||0)}`}]);
 if(out)out.textContent=JSON.stringify(payload,null,2);
 }catch(e){

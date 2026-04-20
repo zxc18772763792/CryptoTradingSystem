@@ -1216,6 +1216,49 @@ def _safe_dt(value: Any) -> Optional[datetime]:
         return None
 
 
+def _normalize_runtime_mode(value: Any, default: str = "paper") -> str:
+    text = str(value or default).strip().lower()
+    return "live" if text == "live" else "paper"
+
+
+def _resolve_account_mode(account_id: Any) -> Optional[str]:
+    aid = str(account_id or "").strip()
+    if not aid:
+        return None
+    if aid == "exchange_live":
+        return "live"
+    try:
+        account = account_manager.get_account(aid)
+    except Exception:
+        account = None
+    if isinstance(account, dict):
+        return _normalize_runtime_mode(account.get("mode"), default="paper")
+    return None
+
+
+def _infer_trade_item_mode(
+    *,
+    payload: Optional[Dict[str, Any]] = None,
+    account_id: Any = None,
+    source: Any = None,
+    order_id: Any = None,
+) -> Optional[str]:
+    details = dict(payload or {})
+    for key in ("mode", "trading_mode", "runtime_mode"):
+        candidate = str(details.get(key) or "").strip().lower()
+        if candidate in {"paper", "live"}:
+            return candidate
+    if details.get("paper") is True:
+        return "paper"
+    source_value = str(details.get("source") or source or "").strip().lower()
+    if source_value == "exchange_live":
+        return "live"
+    order_text = str(order_id or details.get("order_id") or "").strip().lower()
+    if order_text.startswith("paper_"):
+        return "paper"
+    return _resolve_account_mode(account_id or details.get("account_id"))
+
+
 def _optional_finite_float(value: Any) -> Optional[float]:
     try:
         out = float(value)
@@ -4111,13 +4154,14 @@ async def _resolve_live_equity_baseline(
     return payload
 
 
-def _iter_trade_records(days: int = 90) -> List[Dict[str, Any]]:
+def _iter_trade_records(days: int = 90, mode: Optional[str] = None) -> List[Dict[str, Any]]:
     cutoff_ts = datetime.now(timezone.utc).timestamp() - max(1, int(days)) * 86400
+    target_mode = _normalize_runtime_mode(mode or execution_engine.get_trading_mode())
     out: List[Dict[str, Any]] = []
     signatures = set()
 
-    for pos in position_manager.get_closed_positions(limit=20000):
-        ts = getattr(pos, "updated_at", None) or getattr(pos, "opened_at", None)
+    for pos in position_manager.get_closed_positions(limit=20000, scope=target_mode):
+        ts = _safe_dt(getattr(pos, "updated_at", None) or getattr(pos, "opened_at", None))
         if not ts or ts.timestamp() < cutoff_ts:
             continue
         qty = _safe_float(getattr(pos, "quantity", 0.0))
@@ -4146,7 +4190,7 @@ def _iter_trade_records(days: int = 90) -> List[Dict[str, Any]]:
             )
         )
 
-    for row in risk_manager.get_trade_history(limit=30000):
+    for row in risk_manager.get_trade_history(limit=30000, scope=target_mode):
         ts = _safe_dt(row.get("timestamp"))
         if not ts or ts.timestamp() < cutoff_ts:
             continue
@@ -4171,7 +4215,10 @@ def _iter_trade_records(days: int = 90) -> List[Dict[str, Any]]:
         )
         signatures.add(sig)
 
-    out.sort(key=lambda x: x["timestamp"])
+    out.sort(
+        key=lambda x: _safe_dt(x.get("timestamp"))
+        or datetime.min.replace(tzinfo=timezone.utc)
+    )
     return out
 
 
@@ -8393,10 +8440,13 @@ async def get_live_trade_review(
 async def get_pnl_heatmap(
     days: int = 30,
     bucket: str = "day",
+    mode: Optional[str] = None,
 ):
     bucket_name = "hour" if str(bucket or "").lower() == "hour" else "day"
     days = max(1, min(int(days or 30), 365))
-    records = _iter_trade_records(days=days)
+    target_mode = _normalize_runtime_mode(mode or execution_engine.get_trading_mode())
+    mode_label = "模拟盘" if target_mode == "paper" else "实盘"
+    records = _iter_trade_records(days=days, mode=target_mode)
 
     filtered: List[Dict[str, Any]] = []
     for row in records:
@@ -8416,10 +8466,10 @@ async def get_pnl_heatmap(
     display_mode = "realized_pnl"
     value_title = "PnL"
     value_hover = "PnL"
-    note = "按已平仓真实交易盈亏聚合。"
+    note = f"当前展示 {mode_label} 已平仓真实交易盈亏聚合。"
 
     if not filtered:
-        if not execution_engine.is_paper_mode():
+        if target_mode == "live":
             try:
                 live_income_rows = await asyncio.wait_for(
                     _fetch_binance_realized_pnl_income(days=days),
@@ -8450,6 +8500,8 @@ async def get_pnl_heatmap(
             audit_rows = []
         for row in audit_rows:
             details = dict(row.get("details") or {})
+            if _infer_trade_item_mode(payload=details) != target_mode:
+                continue
             ts = _safe_dt(details.get("timestamp") or row.get("timestamp"))
             if not ts:
                 continue
@@ -8467,6 +8519,13 @@ async def get_pnl_heatmap(
         fallback_orders = []
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         for order in order_manager.get_recent_orders(limit=5000):
+            meta = order_manager.get_order_metadata(str(getattr(order, "id", "") or ""))
+            if _infer_trade_item_mode(
+                payload=meta,
+                account_id=getattr(order, "account_id", None),
+                order_id=getattr(order, "id", None),
+            ) != target_mode:
+                continue
             ts = _safe_dt(getattr(order, "timestamp", None))
             if not ts or ts < cutoff:
                 continue
@@ -8506,12 +8565,16 @@ async def get_pnl_heatmap(
         display_mode = "cashflow_proxy"
         value_title = "Cashflow"
         value_hover = "现金流代理"
-        note = "当前无已平仓盈亏记录，回退显示已成交订单现金流代理（卖出为正，买入为负）。"
+        note = (
+            f"当前 {mode_label} 无已平仓盈亏记录，回退显示已成交订单现金流代理"
+            "（卖出为正，买入为负）。"
+        )
 
     if not filtered:
         return {
             "bucket": bucket_name,
             "days": days,
+            "mode": target_mode,
             "times": [],
             "symbols": [],
             "matrix": [],
@@ -8519,7 +8582,7 @@ async def get_pnl_heatmap(
             "display_mode": "empty",
             "value_title": value_title,
             "value_hover": value_hover,
-            "note": "暂无可用于绘制热力图的已平仓交易或已成交订单记录。",
+            "note": f"当前 {mode_label} 暂无可用于绘制热力图的已平仓交易或已成交订单记录。",
         }
 
     symbol_set = sorted({row["symbol"] for row in filtered})
@@ -8538,6 +8601,7 @@ async def get_pnl_heatmap(
     return {
         "bucket": bucket_name,
         "days": days,
+        "mode": target_mode,
         "times": bucket_set,
         "symbols": symbol_set,
         "matrix": [[round(float(v), 6) for v in row] for row in matrix],

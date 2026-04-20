@@ -296,6 +296,22 @@ class PositionManager:
                 positions.append(position)
         return positions
 
+    def _read_scope_closed_positions(self, scope: Optional[str] = None) -> List[Position]:
+        normalized = self._normalize_scope(scope or self._scope)
+        if normalized == self._scope:
+            return list(self._position_history)
+
+        payload = self._load_scope_state(normalized)
+        if not isinstance(payload, dict):
+            return []
+
+        positions: List[Position] = []
+        for row in payload.get("closed_positions") or []:
+            position = self._position_from_state(row)
+            if position is not None:
+                positions.append(position)
+        return positions
+
     def _load_scope_state(self, scope: Optional[str] = None) -> Optional[Dict[str, Any]]:
         path = self._scope_state_path(scope)
         try:
@@ -622,11 +638,16 @@ class PositionManager:
     def get_total_realized_pnl(self) -> float:
         return sum(p.realized_pnl for p in self._position_history)
 
-    def get_closed_positions(self, limit: Optional[int] = None) -> List[Position]:
+    def get_closed_positions(
+        self,
+        limit: Optional[int] = None,
+        scope: Optional[str] = None,
+    ) -> List[Position]:
         """返回历史平仓记录。"""
+        rows = self._read_scope_closed_positions(scope)
         if limit is None or limit <= 0:
-            return list(self._position_history)
-        return self._position_history[-limit:]
+            return rows
+        return rows[-limit:]
 
     def has_position(
         self,

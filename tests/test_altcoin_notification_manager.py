@@ -76,6 +76,66 @@ def test_eval_altcoin_score_above_uses_prefetched_scan_context():
     assert "0.9100" in reason
 
 
+def test_eval_altcoin_ignition_cross_up_uses_event_flag():
+    manager = NotificationManager()
+    rule = _rule(
+        "altcoin_ignition_cross_up",
+        {
+            "config_key": "cfg-1",
+            "symbol": "BBB/USDT",
+        },
+    )
+    context = _altcoin_context()
+    context["altcoin"]["scans"]["cfg-1"]["rows"][1]["event_flags"] = ["altcoin_ignition_cross_up"]
+    context["altcoin"]["scans"]["cfg-1"]["rows"][1]["ignition_score"] = 0.77
+
+    reason = manager._eval_rule(rule, context)
+
+    assert reason is not None
+    assert "BBB/USDT" in reason
+    assert "点火穿越事件" in reason
+
+
+def test_eval_altcoin_rank_jump_top_n_uses_event_flag():
+    manager = NotificationManager()
+    rule = _rule(
+        "altcoin_rank_jump_top_n",
+        {
+            "config_key": "cfg-1",
+            "symbol": "BBB/USDT",
+        },
+    )
+    context = _altcoin_context()
+    context["altcoin"]["scans"]["cfg-1"]["rows"][1]["event_flags"] = ["altcoin_rank_jump_top_n"]
+    context["altcoin"]["scans"]["cfg-1"]["rows"][1]["rank_jump_score"] = 0.55
+
+    reason = manager._eval_rule(rule, context)
+
+    assert reason is not None
+    assert "BBB/USDT" in reason
+    assert "排名跃升事件" in reason
+
+
+def test_eval_altcoin_narrative_heat_spike_uses_event_flag():
+    manager = NotificationManager()
+    rule = _rule(
+        "altcoin_narrative_heat_spike",
+        {
+            "config_key": "cfg-1",
+            "symbol": "BBB/USDT",
+        },
+    )
+    context = _altcoin_context()
+    context["altcoin"]["scans"]["cfg-1"]["rows"][1]["event_flags"] = ["altcoin_narrative_heat_spike"]
+    context["altcoin"]["scans"]["cfg-1"]["rows"][1]["narrative_heat_score"] = 0.72
+
+    reason = manager._eval_rule(rule, context)
+
+    assert reason is not None
+    assert "BBB/USDT" in reason
+    assert "叙事热度事件" in reason
+
+
 def test_eval_altcoin_rank_top_n_uses_sort_index_snapshot():
     manager = NotificationManager()
     rule = _rule(

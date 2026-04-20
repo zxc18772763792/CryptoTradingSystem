@@ -188,6 +188,41 @@ def _scan_payload():
     }
 
 
+def _notification_rule(
+    *,
+    rule_id: str,
+    rule_type: str,
+    symbol: str,
+    exchange: str,
+    timeframe: str,
+    universe_symbols: list[str],
+    score_key: str,
+    threshold: float,
+    mode: str = "combined",
+    view: str = "",
+    universe_scope: str = "research",
+    config_key: str = "",
+    enabled: bool = True,
+):
+    return {
+        "id": rule_id,
+        "enabled": enabled,
+        "rule_type": rule_type,
+        "params": {
+            "exchange": exchange,
+            "timeframe": timeframe,
+            "symbol": symbol,
+            "universe_symbols": universe_symbols,
+            "score_key": score_key,
+            "threshold": threshold,
+            "mode": mode,
+            "view": view,
+            "universe_scope": universe_scope,
+            "config_key": config_key,
+        },
+    }
+
+
 def test_altcoin_scan_route_sorts_and_limits(monkeypatch):
     app = FastAPI()
     app.include_router(altcoin_api.router, prefix="/api/altcoin")
@@ -208,6 +243,26 @@ def test_altcoin_scan_route_sorts_and_limits(monkeypatch):
     assert len(payload["rows"]) == 1
     assert payload["rows"][0]["symbol"] == "BBB/USDT"
     assert payload["rows"][0]["rank"] == 1
+
+
+def test_altcoin_scan_route_uses_view_to_override_timeframe(monkeypatch):
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+    captured = {}
+
+    async def fake_get_altcoin_scan_snapshot(**kwargs):
+        captured.update(kwargs)
+        return _scan_payload()
+
+    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+
+    response = client.get("/api/altcoin/radar/scan?view=15m&timeframe=4h&mode=perp&universe_scope=expanded")
+    assert response.status_code == 200
+    assert captured["timeframe"] == "15m"
+    assert captured["view"] == "15m"
+    assert captured["mode"] == "perp"
+    assert captured["universe_scope"] == "expanded"
 
 
 def test_altcoin_detail_route_returns_selected_row(monkeypatch):
@@ -239,6 +294,30 @@ def test_altcoin_detail_route_returns_selected_row(monkeypatch):
     assert payload["selected_row"]["metrics"]["long_short_ratio"] == 1.08
     assert payload["chain_breakdown"]["onchain_context"] == {"context": "ok", "symbol": "AAA/USDT"}
     assert payload["scan_meta"]["exchange"] == "binance"
+
+
+def test_altcoin_detail_route_accepts_view_and_mode(monkeypatch):
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+    captured = {}
+
+    async def fake_get_altcoin_scan_snapshot(**kwargs):
+        captured.update(kwargs)
+        return _scan_payload()
+
+    async def fake_get_onchain_overview(**kwargs):
+        return {"context": "ok", "symbol": kwargs["symbol"]}
+
+    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api, "get_onchain_overview", fake_get_onchain_overview)
+
+    response = client.get("/api/altcoin/radar/detail?symbol=AAA/USDT&view=15m&mode=perp&universe_scope=watchlist")
+    assert response.status_code == 200
+    assert captured["timeframe"] == "15m"
+    assert captured["view"] == "15m"
+    assert captured["mode"] == "perp"
+    assert captured["universe_scope"] == "watchlist"
 
 
 def test_altcoin_detail_route_backfills_missing_chain_percentiles(monkeypatch):
@@ -353,6 +432,195 @@ def test_build_altcoin_notification_context_filters_benchmark_rows(monkeypatch):
     assert "BTC/USDT" not in context["scans"]["cfg-1"]["sort_indexes"]["layout"]
 
 
+def test_build_altcoin_notification_context_includes_event_driven_rule_types(monkeypatch):
+    async def fake_get_altcoin_scan_snapshot(**kwargs):
+        return {
+            "generated_at": "2026-04-20T12:00:00+00:00",
+            "warnings": [],
+            "rows": [
+                {
+                    "symbol": "PEPE/USDT",
+                    "alt_eligible": True,
+                    "layout_score": 0.66,
+                    "alert_score": 0.74,
+                    "control_score": 0.41,
+                    "narrative_heat_score": 0.81,
+                    "event_flags": ["altcoin_narrative_heat_spike"],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+
+    context = asyncio.run(
+        altcoin_api.build_altcoin_notification_context(
+            [
+                {
+                    "id": "r-narrative",
+                    "enabled": True,
+                    "rule_type": "altcoin_narrative_heat_spike",
+                    "params": {
+                        "config_key": "cfg-narrative",
+                        "exchange": "binance",
+                        "timeframe": "1h",
+                        "symbol": "PEPE/USDT",
+                        "universe_symbols": ["PEPE/USDT"],
+                        "mode": "narrative",
+                        "view": "1h",
+                        "universe_scope": "watchlist",
+                    },
+                }
+            ]
+        )
+    )
+
+    rows = context["scans"]["cfg-narrative"]["rows"]
+    assert [row["symbol"] for row in rows] == ["PEPE/USDT"]
+    assert context["scans"]["cfg-narrative"]["sort_indexes"]["narrative"]["PEPE/USDT"] == 1
+
+
+def test_compute_scan_payload_exposes_contextual_alert_rules(monkeypatch):
+    symbols = ["PEPE/USDT", "WIF/USDT"]
+    config_key = altcoin_api.build_altcoin_notification_config_key(
+        exchange="binance",
+        timeframe="1h",
+        universe_symbols=symbols,
+        exclude_retired=True,
+        mode="narrative",
+        view="1h",
+        universe_scope="watchlist",
+    )
+
+    async def fake_resolve_universe(**kwargs):
+        return symbols, symbols, [], []
+
+    async def fake_load_market_frames(**kwargs):
+        return ({symbol: {"close": [1, 2, 3]} for symbol in symbols}, [])
+
+    async def fake_market_snapshots(**kwargs):
+        return {}
+
+    async def fake_factor_library(**kwargs):
+        return {}
+
+    async def fake_multi_assets_overview(**kwargs):
+        return {"retired_filter": {"excluded_symbols": []}}
+
+    async def fake_snapshot_maps(**kwargs):
+        return ({}, {}, {}, {})
+
+    async def fake_load_active_altcoin_rules():
+        return [
+            _notification_rule(
+                rule_id="r-match",
+                rule_type="altcoin_narrative_heat_spike",
+                symbol="PEPE/USDT",
+                exchange="binance",
+                timeframe="1h",
+                universe_symbols=symbols,
+                score_key="narrative",
+                threshold=0.65,
+                mode="narrative",
+                view="1h",
+                universe_scope="watchlist",
+                config_key=config_key,
+            ),
+            _notification_rule(
+                rule_id="r-mode-mismatch",
+                rule_type="altcoin_narrative_heat_spike",
+                symbol="PEPE/USDT",
+                exchange="binance",
+                timeframe="1h",
+                universe_symbols=symbols,
+                score_key="narrative",
+                threshold=0.65,
+                mode="combined",
+                view="1h",
+                universe_scope="watchlist",
+                config_key=config_key,
+            ),
+            _notification_rule(
+                rule_id="r-view-mismatch",
+                rule_type="altcoin_narrative_heat_spike",
+                symbol="PEPE/USDT",
+                exchange="binance",
+                timeframe="1h",
+                universe_symbols=symbols,
+                score_key="narrative",
+                threshold=0.65,
+                mode="narrative",
+                view="4h",
+                universe_scope="watchlist",
+                config_key=config_key,
+            ),
+            _notification_rule(
+                rule_id="r-scope-mismatch",
+                rule_type="altcoin_narrative_heat_spike",
+                symbol="PEPE/USDT",
+                exchange="binance",
+                timeframe="1h",
+                universe_symbols=symbols,
+                score_key="narrative",
+                threshold=0.65,
+                mode="narrative",
+                view="1h",
+                universe_scope="research",
+                config_key=config_key,
+            ),
+            _notification_rule(
+                rule_id="r-config-mismatch",
+                rule_type="altcoin_narrative_heat_spike",
+                symbol="PEPE/USDT",
+                exchange="binance",
+                timeframe="1h",
+                universe_symbols=symbols,
+                score_key="narrative",
+                threshold=0.65,
+                mode="narrative",
+                view="1h",
+                universe_scope="watchlist",
+                config_key="other-config",
+            ),
+        ]
+
+    def fake_build_altcoin_rows(**kwargs):
+        assert kwargs["alerted_symbols"] == ["PEPE/USDT"]
+        return [
+            {"symbol": "PEPE/USDT", "tags": ["叙事升温"]},
+            {"symbol": "WIF/USDT", "tags": []},
+        ]
+
+    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api, "_load_market_frames", fake_load_market_frames)
+    monkeypatch.setattr(altcoin_api, "load_coinglass_market_snapshots", fake_market_snapshots)
+    monkeypatch.setattr(altcoin_api, "get_factor_library", fake_factor_library)
+    monkeypatch.setattr(altcoin_api, "get_multi_assets_overview", fake_multi_assets_overview)
+    monkeypatch.setattr(altcoin_api, "_load_snapshot_maps", fake_snapshot_maps)
+    monkeypatch.setattr(altcoin_api, "_load_active_altcoin_rules", fake_load_active_altcoin_rules)
+    monkeypatch.setattr(altcoin_api, "build_altcoin_rows", fake_build_altcoin_rows)
+
+    payload = asyncio.run(
+        altcoin_api._compute_scan_payload(
+            exchange="binance",
+            timeframe="1h",
+            symbols=symbols,
+            exclude_retired=True,
+            refresh=False,
+            universe_scope="watchlist",
+            mode="narrative",
+            view="1h",
+        )
+    )
+
+    by_symbol = {row["symbol"]: row for row in payload["rows"]}
+    assert by_symbol["PEPE/USDT"]["has_alert_rule"] is True
+    assert by_symbol["PEPE/USDT"]["alert_rules"][0]["id"] == "r-match"
+    assert by_symbol["PEPE/USDT"]["alert_rules"][0]["kind"] == "narrative"
+    assert by_symbol["PEPE/USDT"]["alert_rules"][0]["config_key"] == config_key
+    assert by_symbol["WIF/USDT"]["has_alert_rule"] is False
+    assert by_symbol["WIF/USDT"]["alert_rules"] == []
+
+
 def test_create_altcoin_alert_preset_rejects_benchmark_symbol(monkeypatch):
     monkeypatch.setenv("OPS_TOKEN", "test-token")
     app = FastAPI()
@@ -386,3 +654,407 @@ def test_create_altcoin_alert_preset_rejects_benchmark_symbol(monkeypatch):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "benchmark symbols are not supported for altcoin radar alerts"
+
+
+def test_create_altcoin_alert_preset_supports_phase1_event_presets(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+
+    async def fake_get_altcoin_scan_snapshot(**kwargs):
+        return {
+            "rows": [
+                {
+                    "symbol": "ORDI/USDT",
+                    "alt_eligible": True,
+                }
+            ]
+        }
+
+    async def fake_list_rules():
+        return []
+
+    async def fake_add_rule(**kwargs):
+        return kwargs
+
+    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.notification_manager, "list_rules", fake_list_rules)
+    monkeypatch.setattr(altcoin_api.notification_manager, "add_rule", fake_add_rule)
+
+    response = client.post(
+        "/api/altcoin/alerts/preset",
+        json={
+            "preset": "点火预警",
+            "exchange": "binance",
+            "timeframe": "15m",
+            "symbol": "ORDI/USDT",
+            "universe_symbols": ["ORDI/USDT", "SATS/USDT"],
+            "channels": ["feishu"],
+        },
+        headers={"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rule"]["rule_type"] == "altcoin_ignition_cross_up"
+    assert payload["rule"]["params"]["score_key"] == "ignition"
+
+
+def test_create_altcoin_alert_preset_supports_narrative_event_preset(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+
+    async def fake_get_altcoin_scan_snapshot(**kwargs):
+        return {
+            "rows": [
+                {
+                    "symbol": "PEPE/USDT",
+                    "alt_eligible": True,
+                }
+            ]
+        }
+
+    async def fake_list_rules():
+        return []
+
+    async def fake_add_rule(**kwargs):
+        return kwargs
+
+    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.notification_manager, "list_rules", fake_list_rules)
+    monkeypatch.setattr(altcoin_api.notification_manager, "add_rule", fake_add_rule)
+
+    response = client.post(
+        "/api/altcoin/alerts/preset",
+        json={
+            "preset": "叙事预警",
+            "exchange": "binance",
+            "timeframe": "1h",
+            "symbol": "PEPE/USDT",
+            "universe_symbols": ["PEPE/USDT", "WIF/USDT"],
+            "channels": ["feishu"],
+            "mode": "narrative",
+            "view": "1h",
+            "universe_scope": "watchlist",
+        },
+        headers={"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rule"]["rule_type"] == "altcoin_narrative_heat_spike"
+    assert payload["rule"]["params"]["score_key"] == "narrative"
+    assert payload["rule"]["params"]["mode"] == "narrative"
+    assert payload["rule"]["params"]["universe_scope"] == "watchlist"
+
+
+def test_create_altcoin_alert_preset_dedupe_respects_config_key(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+    added_rules = []
+    universe_symbols = ["PEPE/USDT", "WIF/USDT"]
+
+    async def fake_get_altcoin_scan_snapshot(**kwargs):
+        return {"rows": [{"symbol": "PEPE/USDT", "alt_eligible": True}]}
+
+    async def fake_list_rules():
+        return [
+            _notification_rule(
+                rule_id="r-existing-other-config",
+                rule_type="altcoin_narrative_heat_spike",
+                symbol="PEPE/USDT",
+                exchange="binance",
+                timeframe="1h",
+                universe_symbols=universe_symbols,
+                score_key="narrative",
+                threshold=0.65,
+                mode="narrative",
+                view="1h",
+                universe_scope="watchlist",
+                config_key="other-config",
+            )
+        ]
+
+    async def fake_add_rule(**kwargs):
+        added_rules.append(kwargs)
+        return {"id": "r-new", **kwargs}
+
+    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.notification_manager, "list_rules", fake_list_rules)
+    monkeypatch.setattr(altcoin_api.notification_manager, "add_rule", fake_add_rule)
+
+    response = client.post(
+        "/api/altcoin/alerts/preset",
+        json={
+            "preset": "叙事预警",
+            "exchange": "binance",
+            "timeframe": "1h",
+            "symbol": "PEPE/USDT",
+            "universe_symbols": universe_symbols,
+            "channels": ["feishu"],
+            "mode": "narrative",
+            "view": "1h",
+            "universe_scope": "watchlist",
+        },
+        headers={"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["existing"] is False
+    assert payload["rule"]["id"] == "r-new"
+    assert payload["rule_meta"]["kind"] == "narrative"
+    assert payload["rule_meta"]["config_key"]
+    assert len(added_rules) == 1
+    assert added_rules[0]["params"]["config_key"] == payload["rule_meta"]["config_key"]
+
+
+def test_delete_altcoin_alert_preset_removes_only_matching_preset_and_config(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+    deleted_ids = []
+    universe_symbols = ["PEPE/USDT", "WIF/USDT"]
+    config_key = altcoin_api.build_altcoin_notification_config_key(
+        exchange="binance",
+        timeframe="1h",
+        universe_symbols=universe_symbols,
+        exclude_retired=True,
+        mode="narrative",
+        view="1h",
+        universe_scope="watchlist",
+    )
+
+    async def fake_list_rules():
+        return [
+            _notification_rule(
+                rule_id="r-match",
+                rule_type="altcoin_narrative_heat_spike",
+                symbol="PEPE/USDT",
+                exchange="binance",
+                timeframe="1h",
+                universe_symbols=universe_symbols,
+                score_key="narrative",
+                threshold=0.65,
+                mode="narrative",
+                view="1h",
+                universe_scope="watchlist",
+                config_key=config_key,
+            ),
+            _notification_rule(
+                rule_id="r-other-preset",
+                rule_type="altcoin_score_above",
+                symbol="PEPE/USDT",
+                exchange="binance",
+                timeframe="1h",
+                universe_symbols=universe_symbols,
+                score_key="alert",
+                threshold=0.65,
+                mode="narrative",
+                view="1h",
+                universe_scope="watchlist",
+                config_key=config_key,
+            ),
+            _notification_rule(
+                rule_id="r-other-config",
+                rule_type="altcoin_narrative_heat_spike",
+                symbol="PEPE/USDT",
+                exchange="binance",
+                timeframe="1h",
+                universe_symbols=universe_symbols,
+                score_key="narrative",
+                threshold=0.65,
+                mode="narrative",
+                view="1h",
+                universe_scope="watchlist",
+                config_key="other-config",
+            ),
+            _notification_rule(
+                rule_id="r-other-symbol",
+                rule_type="altcoin_narrative_heat_spike",
+                symbol="WIF/USDT",
+                exchange="binance",
+                timeframe="1h",
+                universe_symbols=universe_symbols,
+                score_key="narrative",
+                threshold=0.65,
+                mode="narrative",
+                view="1h",
+                universe_scope="watchlist",
+                config_key=config_key,
+            ),
+        ]
+
+    async def fake_delete_rule(rule_id):
+        deleted_ids.append(rule_id)
+        return True
+
+    monkeypatch.setattr(altcoin_api.notification_manager, "list_rules", fake_list_rules)
+    monkeypatch.setattr(altcoin_api.notification_manager, "delete_rule", fake_delete_rule)
+
+    response = client.delete(
+        "/api/altcoin/alerts/preset"
+        "?exchange=binance"
+        "&timeframe=1h"
+        "&symbol=PEPE%2FUSDT"
+        "&symbols=PEPE%2FUSDT,WIF%2FUSDT"
+        "&preset=%E5%8F%99%E4%BA%8B%E9%A2%84%E8%AD%A6"
+        "&mode=narrative"
+        "&view=1h"
+        "&universe_scope=watchlist",
+        headers={"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert deleted_ids == ["r-match"]
+    assert payload["deleted_count"] == 1
+    assert payload["deleted_rules"][0]["kind"] == "narrative"
+    assert payload["config_key"] == config_key
+
+
+def test_delete_altcoin_alert_preset_without_preset_removes_all_symbol_rules_in_current_config(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+    deleted_ids = []
+    universe_symbols = ["PEPE/USDT", "WIF/USDT"]
+    config_key = altcoin_api.build_altcoin_notification_config_key(
+        exchange="binance",
+        timeframe="1h",
+        universe_symbols=universe_symbols,
+        exclude_retired=True,
+        mode="narrative",
+        view="1h",
+        universe_scope="watchlist",
+    )
+
+    async def fake_list_rules():
+        return [
+            _notification_rule(
+                rule_id="r-narrative",
+                rule_type="altcoin_narrative_heat_spike",
+                symbol="PEPE/USDT",
+                exchange="binance",
+                timeframe="1h",
+                universe_symbols=universe_symbols,
+                score_key="narrative",
+                threshold=0.65,
+                mode="narrative",
+                view="1h",
+                universe_scope="watchlist",
+                config_key=config_key,
+            ),
+            _notification_rule(
+                rule_id="r-control",
+                rule_type="altcoin_crowding_risk_spike",
+                symbol="PEPE/USDT",
+                exchange="binance",
+                timeframe="1h",
+                universe_symbols=universe_symbols,
+                score_key="control",
+                threshold=0.72,
+                mode="narrative",
+                view="1h",
+                universe_scope="watchlist",
+                config_key=config_key,
+            ),
+            _notification_rule(
+                rule_id="r-other-config",
+                rule_type="altcoin_score_above",
+                symbol="PEPE/USDT",
+                exchange="binance",
+                timeframe="1h",
+                universe_symbols=universe_symbols,
+                score_key="alert",
+                threshold=0.65,
+                mode="narrative",
+                view="1h",
+                universe_scope="watchlist",
+                config_key="other-config",
+            ),
+            _notification_rule(
+                rule_id="r-other-symbol",
+                rule_type="altcoin_score_above",
+                symbol="WIF/USDT",
+                exchange="binance",
+                timeframe="1h",
+                universe_symbols=universe_symbols,
+                score_key="alert",
+                threshold=0.65,
+                mode="narrative",
+                view="1h",
+                universe_scope="watchlist",
+                config_key=config_key,
+            ),
+        ]
+
+    async def fake_delete_rule(rule_id):
+        deleted_ids.append(rule_id)
+        return True
+
+    monkeypatch.setattr(altcoin_api.notification_manager, "list_rules", fake_list_rules)
+    monkeypatch.setattr(altcoin_api.notification_manager, "delete_rule", fake_delete_rule)
+
+    response = client.delete(
+        "/api/altcoin/alerts/preset"
+        "?exchange=binance"
+        "&timeframe=1h"
+        "&symbol=PEPE%2FUSDT"
+        "&symbols=PEPE%2FUSDT,WIF%2FUSDT"
+        "&mode=narrative"
+        "&view=1h"
+        "&universe_scope=watchlist",
+        headers={"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(deleted_ids) == {"r-narrative", "r-control"}
+    assert payload["deleted_count"] == 2
+    assert payload["symbol"] == "PEPE/USDT"
+    assert payload["preset"] is None
+    assert payload["config_key"] == config_key
+
+
+def test_altcoin_radar_watchlist_routes(monkeypatch):
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+
+    state = {"symbols": ["ORDI/USDT", "PEPE/USDT"]}
+
+    def fake_get_watchlist_symbols():
+        return list(state["symbols"])
+
+    def fake_add_watchlist_symbol(symbol):
+        if symbol not in state["symbols"]:
+            state["symbols"].append(symbol)
+        return list(state["symbols"])
+
+    def fake_remove_watchlist_symbol(symbol):
+        state["symbols"] = [item for item in state["symbols"] if item != symbol]
+        return list(state["symbols"])
+
+    monkeypatch.setattr(altcoin_api, "get_watchlist_symbols", fake_get_watchlist_symbols)
+    monkeypatch.setattr(altcoin_api, "add_watchlist_symbol", fake_add_watchlist_symbol)
+    monkeypatch.setattr(altcoin_api, "remove_watchlist_symbol", fake_remove_watchlist_symbol)
+
+    resp_get = client.get("/api/altcoin/radar/watchlist")
+    assert resp_get.status_code == 200
+    assert resp_get.json()["symbols"] == ["ORDI/USDT", "PEPE/USDT"]
+
+    resp_add = client.post("/api/altcoin/radar/watchlist", json={"symbol": "WIF/USDT"})
+    assert resp_add.status_code == 200
+    assert "WIF/USDT" in resp_add.json()["symbols"]
+
+    resp_delete = client.delete("/api/altcoin/radar/watchlist?symbol=WIF%2FUSDT")
+    assert resp_delete.status_code == 200
+    assert "WIF/USDT" not in resp_delete.json()["symbols"]

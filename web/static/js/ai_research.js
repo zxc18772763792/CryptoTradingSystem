@@ -6213,15 +6213,23 @@
     const sig = item?.signal;
     const metaText = liveSignalSecondaryMeta(item);
     if (!sig) {
+      const hasSignalError = Boolean(String(item?.error || '').trim());
+      const signalStateText = hasSignalError ? 'ERR' : '待刷新';
+      const signalStateColor = hasSignalError ? '#fca5a5' : '#94a3b8';
+      const signalDetailText = hasSignalError
+        ? String(item?.error || '').trim()
+        : (item?.selected
+          ? '当前已选中 watchlist，正在等待最新聚合信号快照。'
+          : '当前 watchlist 暂无聚合信号快照，后续刷新后会自动显示。');
       return `<div class="live-sig-row">
   <div class="live-sig-header">
     <div class="live-sig-title-wrap">
       <div class="live-sig-title-row">${liveSignalPrimaryTitle(item)}</div>
       ${metaText ? `<div class="live-sig-meta">${esc(metaText)}</div>` : ''}
     </div>
-    <span style="font-weight:700;font-size:12px;margin-left:auto;color:#94a3b8;">ERR</span>
+    <span style="font-weight:700;font-size:12px;margin-left:auto;color:${signalStateColor};">${esc(signalStateText)}</span>
   </div>
-  <div class="live-sig-meta">${esc(item?.error || '信号计算失败')}</div>
+  <div class="live-sig-meta">${esc(signalDetailText)}</div>
 </div>`;
     }
 

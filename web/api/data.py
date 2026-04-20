@@ -63,6 +63,7 @@ except Exception:  # pragma: no cover - optional integration
     FearGreedCollector = None
 
 router = APIRouter()
+_RESEARCH_SYMBOLS_TIMEOUT_SEC = 8.0
 
 
 _SUB_MINUTE_TIMEFRAMES = {"1s", "5s", "10s", "30s"}
@@ -4132,7 +4133,26 @@ def _merge_research_symbol_lists(*groups: Any, limit: int = 60) -> List[str]:
 @router.get("/research/symbols")
 async def get_research_symbols(exchange: str = "binance"):
     try:
-        data = await build_exchange_altcoin_universe(exchange=exchange)
+        data = await asyncio.wait_for(
+            build_exchange_altcoin_universe(exchange=exchange),
+            timeout=_RESEARCH_SYMBOLS_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError as exc:
+        logger.warning(
+            "research_symbols: coinglass altcoin universe timed out after %.1fs",
+            _RESEARCH_SYMBOLS_TIMEOUT_SEC,
+        )
+        data = await get_data_symbols(exchange=exchange)
+        data["source"] = "research_universe_fallback"
+        data["warning"] = (
+            f"coinglass altcoin universe timed out after "
+            f"{_RESEARCH_SYMBOLS_TIMEOUT_SEC:.1f}s"
+        )
+        data["primary_symbol"] = str(
+            (data.get("symbols") or ["BTC/USDT"])[0] or "BTC/USDT"
+        )
+        data["default_count"] = min(30, len(data.get("symbols") or []))
+        return data
     except Exception as exc:
         logger.warning(f"research_symbols: coinglass altcoin universe failed: {exc}")
         data = await get_data_symbols(exchange=exchange)
@@ -5609,8 +5629,16 @@ async def get_multi_assets_overview(
     rows = []
     ret_map: Dict[str, pd.Series] = {}
 
-    for sym in symbol_list:
-        df = await _load_symbol_df(exchange=exchange, symbol=sym, timeframe=timeframe)
+    load_tasks = [
+        _load_symbol_df(exchange=exchange, symbol=sym, timeframe=timeframe)
+        for sym in symbol_list
+    ]
+    results = await asyncio.gather(*load_tasks, return_exceptions=True)
+
+    for sym, result in zip(symbol_list, results):
+        if isinstance(result, Exception):
+            continue
+        df = result
         if df.empty:
             continue
         sdf = df.tail(max(80, int(lookback)))

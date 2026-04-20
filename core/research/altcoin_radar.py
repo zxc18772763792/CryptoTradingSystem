@@ -10,10 +10,23 @@ import pandas as pd
 
 from config.settings import settings
 from core.data.coinglass_altcoin import is_alt_candidate_symbol
+from core.research.altcoin_radar_perp import classify_signal_source, compute_perp_scores
+from core.research.altcoin_radar_narrative import classify_narrative_source, compute_narrative_scores
+from core.research.altcoin_radar_universe import get_sector, get_watchlist_symbols
+from core.research.altcoin_radar_events import (
+    bulk_update_ranks,
+    compute_rank_jump_score,
+    get_recent_symbol_events,
+    get_rank_history,
+    record_crowding_spike,
+    record_ignition_cross_up,
+    record_narrative_heat_spike,
+    record_rank_jump_event,
+)
 
 
-VALID_TIMEFRAMES = {"1h", "4h", "1d"}
-TIMEFRAME_SECONDS = {"1h": 3600, "4h": 14400, "1d": 86400}
+VALID_TIMEFRAMES = {"15m", "1h", "4h", "1d"}
+TIMEFRAME_SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
 STATE_LAYOUT = "布局吸筹"
 STATE_ANOMALY = "异动启动"
 STATE_CONTROL_TRACK = "高控盘跟踪"
@@ -302,6 +315,8 @@ def _clamp(value: float, low: float, high: float) -> float:
 
 def _timeframe_window_map(timeframe: str) -> Dict[str, str]:
     tf = str(timeframe or "4h").strip().lower()
+    if tf == "15m":
+        return {"1": "1h", "3": "4h", "6": "12h", "flow": "1h", "liq": "1h", "oi": "1h", "volume": "1h"}
     if tf == "1h":
         return {"1": "1h", "3": "4h", "6": "12h", "flow": "1h", "liq": "1h", "oi": "1h", "volume": "1h"}
     if tf == "1d":
@@ -462,6 +477,20 @@ def _sort_key_for_row(row: Mapping[str, Any], sort_by: str) -> float:
         return _to_float(row.get("accumulation_score"), 0.0)
     if normalized == "control":
         return _to_float(row.get("control_score"), 0.0)
+    # Phase 1 new sort keys
+    if normalized == "ignition":
+        return _to_float(row.get("ignition_score"), 0.0)
+    if normalized == "continuation":
+        return _to_float(row.get("continuation_score"), 0.0)
+    if normalized == "rank_jump":
+        return _to_float(row.get("rank_jump_score"), 0.0)
+    if normalized == "crowding":
+        return _to_float(row.get("crowding_late_score"), 0.0)
+    # Phase 2 new sort keys
+    if normalized == "narrative":
+        return _to_float(row.get("narrative_heat_score"), 0.0)
+    if normalized == "meme_rotation":
+        return _to_float(row.get("meme_rotation_score"), 0.0)
     if normalized == "chain":
         return _to_float(row.get("chain_confirmation_score"), 0.0)
     if normalized == "heat":
@@ -599,6 +628,8 @@ def build_altcoin_rows(
         tf = "4h"
     factor_payload = dict(factor_library or {})
     multi_payload = dict(multi_assets or {})
+    # Phase 2: pre-compute watchlist set for O(1) membership test per symbol
+    _watchlist_set = set(get_watchlist_symbols())
     alerted = {str(symbol or "").strip().upper() for symbol in (alerted_symbols or []) if str(symbol or "").strip()}
     market_snapshot_map = {str(k).upper(): dict(v or {}) for k, v in (market_snapshots or {}).items()}
     micro_map = {str(k).upper(): dict(v or {}) for k, v in (micro_snapshots or {}).items()}
@@ -1125,6 +1156,29 @@ def build_altcoin_rows(
             accumulation_score = min(accumulation_score, 0.35)
             layout_score = min(layout_score, 0.30)
             alert_score = min(alert_score, 0.45)
+
+        # Phase 1: perp-specific scores
+        perp_scores = compute_perp_scores(
+            metrics_raw=item["metrics_raw"],
+            pct=pct,
+            derivatives=item["derivatives"],
+        )
+        ignition_score = perp_scores["ignition_score"]
+        continuation_score = perp_scores["continuation_score"]
+        crowding_late_score = perp_scores["crowding_late_score"]
+
+        # Phase 2: narrative-specific scores
+        sym_sector = get_sector(symbol)
+        in_watchlist = symbol in _watchlist_set
+        narrative_sc = compute_narrative_scores(
+            metrics_raw=item["metrics_raw"],
+            pct=pct,
+            sector=sym_sector,
+            in_watchlist=in_watchlist,
+        )
+        narrative_heat_score = narrative_sc["narrative_heat_score"]
+        meme_rotation_score = narrative_sc["meme_rotation_score"]
+
         row = {
             "symbol": symbol,
             "layout_score": _round4(_clamp01(layout_score)),
@@ -1139,6 +1193,19 @@ def build_altcoin_rows(
             "liquidity_trap_score": _round4(_clamp01(liquidity_trap_score)),
             "flow_confirmation_score": _round4(_clamp01(flow_confirmation_score)),
             "risk_penalty": _round4(_clamp01(risk_penalty)),
+            # Phase 1 new scores
+            "ignition_score": ignition_score,
+            "continuation_score": continuation_score,
+            "crowding_late_score": crowding_late_score,
+            "rank_jump_score": 0.0,  # populated after sort in post-process step
+            "signal_source": "",     # populated below
+            "event_flags": [],
+            "recent_events": [],
+            # Phase 2 new scores
+            "narrative_heat_score": narrative_heat_score,
+            "meme_rotation_score": meme_rotation_score,
+            "sector": sym_sector,
+            "in_watchlist": in_watchlist,
             "alt_eligible": bool(alt_eligible),
             "signal_state": "",
             "tags": [],
@@ -1242,7 +1309,105 @@ def build_altcoin_rows(
 
         row["reasons_proxy"] = proxy_reasons[:4]
         row["reasons_chain"] = chain_reasons[:4]
+
+        # Phase 1 + Phase 2: classify combined signal_source
+        perp_src = classify_signal_source(
+            ignition_score=ignition_score,
+            continuation_score=continuation_score,
+            crowding_late_score=crowding_late_score,
+            derivatives_present=bool(item["derivatives"]),
+        )
+        narrative_src = classify_narrative_source(
+            narrative_heat_score=narrative_heat_score,
+            meme_rotation_score=meme_rotation_score,
+        )
+        # Priority: crowded_late_stage > perp_ignition > perp_continuation > narrative
+        if perp_src == "crowded_late_stage":
+            row["signal_source"] = "crowded_late_stage"
+        elif perp_src in ("perp_ignition", "perp_continuation"):
+            row["signal_source"] = perp_src
+        elif narrative_src:
+            row["signal_source"] = narrative_src
+        else:
+            row["signal_source"] = ""
+
+        # Phase 1: add perp tags
+        if ignition_score >= 0.60 and row["signal_source"] == "perp_ignition":
+            if "Perp Ignition" not in row["tags"]:
+                row["tags"].append("Perp Ignition")
+        if crowding_late_score >= 0.65 and row["signal_source"] == "crowded_late_stage":
+            if "Late Stage" not in row["tags"]:
+                row["tags"].append("Late Stage")
+        # Phase 2: add narrative tags
+        if narrative_heat_score >= 0.55 and row["signal_source"] in ("narrative_ignition", "narrative_confirmation"):
+            if "Narrative" not in row["tags"]:
+                row["tags"].append("Narrative")
+        if in_watchlist and "Watchlist" not in row["tags"]:
+            row["tags"].append("Watchlist")
+        # Multi-engine: both perp and narrative signals present
+        if perp_src and perp_src != "crowded_late_stage" and narrative_src:
+            if "Multi-Engine" not in row["tags"]:
+                row["tags"].append("Multi-Engine")
+
         rows.append(row)
+
+    # Phase 1+2: compute rank_jump_score after sort order is known
+    # Preliminary sort by layout_score for temp ranks; final rank assigned in sort_rows
+    temp_sorted = sorted(rows, key=lambda r: _to_float(r.get("layout_score"), 0.0), reverse=True)
+    temp_ranked_rows: List[Dict[str, Any]] = []
+    for temp_rank, row in enumerate(temp_sorted, start=1):
+        sym = str(row.get("symbol") or "").strip().upper()
+        history = get_rank_history(sym)
+        prev_snapshot = history[-1] if history else {}
+        prev_rank = int(_to_float(prev_snapshot.get("rank"), 0.0)) if prev_snapshot else 0
+        prev_ignition_score = _to_float(prev_snapshot.get("ignition_score"), 0.0) if prev_snapshot else 0.0
+
+        row["rank"] = temp_rank
+        rjs = compute_rank_jump_score(sym, temp_rank)
+        row["rank_jump_score"] = round(rjs, 4)
+        row["event_flags"] = []
+        row["recent_events"] = []
+
+        ignition_event = record_ignition_cross_up(
+            sym,
+            _to_float(row.get("ignition_score"), 0.0),
+            prev_ignition_score,
+        )
+        if ignition_event:
+            row["event_flags"].append(ignition_event["event_type"])
+            row["recent_events"].append(ignition_event)
+
+        rank_jump_event = record_rank_jump_event(
+            sym,
+            current_rank=temp_rank,
+            prev_rank=prev_rank,
+        ) if prev_rank > 0 else None
+        if rank_jump_event:
+            row["event_flags"].append(rank_jump_event["event_type"])
+            row["recent_events"].append(rank_jump_event)
+
+        # Phase 1 events: crowding spike (best-effort)
+        if _to_float(row.get("crowding_late_score"), 0.0) >= 0.65:
+            crowding_event = record_crowding_spike(sym, _to_float(row.get("crowding_late_score"), 0.0))
+            if crowding_event:
+                row["event_flags"].append(crowding_event["event_type"])
+                row["recent_events"].append(crowding_event)
+        # Phase 2 events: narrative heat spike (best-effort)
+        if _to_float(row.get("narrative_heat_score"), 0.0) >= 0.55:
+            narrative_event = record_narrative_heat_spike(
+                sym,
+                _to_float(row.get("narrative_heat_score"), 0.0),
+                metadata={"sector": row.get("sector", ""), "in_watchlist": bool(row.get("in_watchlist"))},
+            )
+            if narrative_event:
+                row["event_flags"].append(narrative_event["event_type"])
+                row["recent_events"].append(narrative_event)
+
+        temp_ranked_rows.append(row)
+
+    # Update rank history cache after this scan
+    bulk_update_ranks(temp_ranked_rows)
+
     return rows
 
 
@@ -1252,6 +1417,21 @@ def _normalized_sparkline(values: Sequence[Any]) -> List[float]:
         return []
     base = numeric[0] if abs(numeric[0]) > 1e-12 else 1.0
     return [round((value / base) * 100.0, 4) for value in numeric]
+
+
+def _detail_top_components(
+    items: Sequence[tuple[str, float]],
+    *,
+    minimum: float = 0.0,
+    limit: int = 3,
+) -> List[str]:
+    ranked = [
+        (label, _to_float(score, 0.0))
+        for label, score in items
+        if _to_float(score, 0.0) > minimum
+    ]
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    return [label for label, _ in ranked[:limit]]
 
 
 def _row_metrics(row: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1335,6 +1515,9 @@ def build_detail_payload(
             "proxy_breakdown": {},
             "chain_breakdown": {},
             "sparkline": [],
+            "ignition_path": {},
+            "narrative_linkage": {},
+            "event_timeline": [],
             "invalidate_conditions": [],
             "related_candidates": [],
         }
@@ -1357,6 +1540,7 @@ def build_detail_payload(
         metrics["percentiles"] = percentiles
         selected["metrics"] = metrics
     state = str(selected.get("signal_state") or "").strip()
+    metrics_raw = _row_metrics(selected)
     proxy_breakdown = {
         "engine": "代理行为引擎",
         "dominant_sort": sort_by,
@@ -1402,6 +1586,87 @@ def build_detail_payload(
         ],
         "reasons": list(selected.get("reasons_chain") or []),
         "onchain_context": dict(onchain_context or {}),
+    }
+
+    ignition_components = _detail_top_components(
+        [
+            ("OI 异动", metrics_raw.get("oi_change_1h")),
+            ("量能爆发", metrics_raw.get("volume_burst_ratio")),
+            ("空头清算占比", metrics_raw.get("short_liq_share")),
+            ("压缩后突破", metrics_raw.get("impulse_after_compression")),
+            ("盘口/交易所扩散", metrics_raw.get("exchange_breadth")),
+        ],
+        minimum=0.0,
+        limit=4,
+    )
+    ignition_path = {
+        "source": str(selected.get("signal_source") or ""),
+        "summary": (
+            "当前更像合约驱动的点火候选。"
+            if str(selected.get("signal_source") or "") == "perp_ignition"
+            else "当前更像延续/确认阶段，点火优先级次于结构确认。"
+            if str(selected.get("signal_source") or "") == "perp_continuation"
+            else "当前不是典型的 Perp 点火路径，需结合叙事与风险面一起看。"
+        ),
+        "scores": {
+            "ignition": selected.get("ignition_score"),
+            "continuation": selected.get("continuation_score"),
+            "crowding": selected.get("crowding_late_score"),
+            "rank_jump": selected.get("rank_jump_score"),
+        },
+        "drivers": ignition_components,
+        "event_flags": list(selected.get("event_flags") or []),
+    }
+
+    selected_sector = str(selected.get("sector") or "").strip()
+    narrative_peers: List[Dict[str, Any]] = []
+    for row in ordered:
+        row_symbol = str(row.get("symbol") or "").strip().upper()
+        if row_symbol == normalized_symbol:
+            continue
+        same_sector = selected_sector and str(row.get("sector") or "").strip() == selected_sector
+        same_watchlist = bool(selected.get("in_watchlist")) and bool(row.get("in_watchlist"))
+        if not same_sector and not same_watchlist:
+            continue
+        narrative_peers.append(
+            {
+                "symbol": row.get("symbol"),
+                "sector": row.get("sector"),
+                "in_watchlist": bool(row.get("in_watchlist")),
+                "signal_source": row.get("signal_source"),
+                "narrative_heat_score": row.get("narrative_heat_score"),
+                "rank": row.get("rank"),
+            }
+        )
+        if len(narrative_peers) >= 5:
+            break
+
+    narrative_drivers = _detail_top_components(
+        [
+            ("板块热度", percentiles.get("announcements")),
+            ("社区流动性", percentiles.get("community_flow")),
+            ("量能轮动", percentiles.get("volume_burst")),
+            ("鲸鱼/活跃地址", percentiles.get("whale_context")),
+            ("短线弹性", percentiles.get("return_shock")),
+        ],
+        minimum=0.0,
+        limit=4,
+    )
+    narrative_linkage = {
+        "sector": selected_sector,
+        "in_watchlist": bool(selected.get("in_watchlist")),
+        "source": str(selected.get("signal_source") or ""),
+        "summary": (
+            "当前候选具备叙事先行特征，即使 Perp 数据一般，也可以进入叙事雷达。"
+            if str(selected.get("signal_source") or "").startswith("narrative_")
+            else "当前更偏合约或结构驱动，叙事层更多是辅助确认。"
+        ),
+        "scores": {
+            "narrative_heat": selected.get("narrative_heat_score"),
+            "meme_rotation": selected.get("meme_rotation_score"),
+        },
+        "drivers": narrative_drivers,
+        "board_peers": narrative_peers,
     }
 
     invalidate_conditions: List[str] = []
@@ -1451,6 +1716,7 @@ def build_detail_payload(
             continue
         related_state = str(row.get("signal_state") or "").strip()
         same_group = bool(state) and related_state == state
+        same_sector = selected_sector and str(row.get("sector") or "").strip() == selected_sector
         if same_group or not related_candidates:
             related_candidates.append(
                 {
@@ -1460,11 +1726,43 @@ def build_detail_payload(
                     "alert_score": row.get("alert_score"),
                     "control_score": row.get("control_score"),
                     "derivatives_heat_score": row.get("derivatives_heat_score"),
+                    "narrative_heat_score": row.get("narrative_heat_score"),
+                    "sector": row.get("sector"),
+                    "rank": row.get("rank"),
+                }
+            )
+        elif same_sector:
+            related_candidates.append(
+                {
+                    "symbol": row.get("symbol"),
+                    "signal_state": related_state,
+                    "layout_score": row.get("layout_score"),
+                    "alert_score": row.get("alert_score"),
+                    "control_score": row.get("control_score"),
+                    "derivatives_heat_score": row.get("derivatives_heat_score"),
+                    "narrative_heat_score": row.get("narrative_heat_score"),
+                    "sector": row.get("sector"),
                     "rank": row.get("rank"),
                 }
             )
         if len(related_candidates) >= 5:
             break
+
+    seen_events = set()
+    event_timeline: List[Dict[str, Any]] = []
+    for event in list(selected.get("recent_events") or []):
+        event_key = (event.get("event_type"), event.get("ts_iso"), event.get("symbol"))
+        if event_key in seen_events:
+            continue
+        seen_events.add(event_key)
+        event_timeline.append(dict(event))
+    for event in get_recent_symbol_events(normalized_symbol, limit=12, max_age_sec=6 * 3600.0):
+        event_key = (event.get("event_type"), event.get("ts_iso"), event.get("symbol"))
+        if event_key in seen_events:
+            continue
+        seen_events.add(event_key)
+        event_timeline.append(dict(event))
+    event_timeline.sort(key=lambda item: _to_float(item.get("ts"), 0.0), reverse=True)
 
     return {
         "selected_row": selected,
@@ -1472,6 +1770,9 @@ def build_detail_payload(
         "proxy_breakdown": proxy_breakdown,
         "chain_breakdown": chain_breakdown,
         "sparkline": _normalized_sparkline(selected.get("sparkline") or []),
+        "ignition_path": ignition_path,
+        "narrative_linkage": narrative_linkage,
+        "event_timeline": event_timeline[:12],
         "invalidate_conditions": invalidate_conditions,
         "related_candidates": related_candidates,
     }

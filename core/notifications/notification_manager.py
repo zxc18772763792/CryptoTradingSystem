@@ -38,9 +38,36 @@ ALTCOIN_SCORE_FIELD_MAP = {
     "anomaly": "anomaly_score",
     "accumulation": "accumulation_score",
     "control": "control_score",
+    "ignition": "ignition_score",
+    "continuation": "continuation_score",
+    "rank_jump": "rank_jump_score",
+    "crowding": "crowding_late_score",
+    "narrative": "narrative_heat_score",
+    "meme_rotation": "meme_rotation_score",
 }
-ALTCOIN_RANK_SCORE_KEYS = frozenset({"layout", "alert", "control"})
-ALTCOIN_RULE_TYPES = frozenset({"altcoin_score_above", "altcoin_rank_top_n"})
+ALTCOIN_RANK_SCORE_KEYS = frozenset(
+    {
+        "layout",
+        "alert",
+        "control",
+        "ignition",
+        "continuation",
+        "rank_jump",
+        "crowding",
+        "narrative",
+        "meme_rotation",
+    }
+)
+ALTCOIN_RULE_TYPES = frozenset(
+    {
+        "altcoin_score_above",
+        "altcoin_rank_top_n",
+        "altcoin_ignition_cross_up",
+        "altcoin_rank_jump_top_n",
+        "altcoin_crowding_risk_spike",
+        "altcoin_narrative_heat_spike",
+    }
+)
 ALTCOIN_RUNTIME_CONDITION_MET_KEY = "_runtime_condition_met"
 ALTCOIN_RUNTIME_CONDITION_UPDATED_AT_KEY = "_runtime_condition_updated_at"
 
@@ -695,6 +722,66 @@ class NotificationManager:
             f"当前排名 {rank}，{score_field}={score:.4f}，状态 {signal_state}"
         )
 
+    def _eval_altcoin_ignition_cross_up(
+        self, rule: AlertRule, context: Dict[str, Any]
+    ) -> Optional[str]:
+        params = rule.params or {}
+        row = self._altcoin_row_for_rule(rule, context)
+        if not row or not bool(row.get("alt_eligible", True)):
+            return None
+        event_flags = {str(item or "").strip() for item in (row.get("event_flags") or [])}
+        if "altcoin_ignition_cross_up" not in event_flags:
+            return None
+        symbol = _normalize_altcoin_symbol(row.get("symbol") or params.get("symbol"))
+        ignition_score = float(row.get("ignition_score", 0.0) or 0.0)
+        rank_text = _altcoin_rank_text(row.get("rank"))
+        return f"山寨雷达 {symbol} 触发点火穿越事件，ignition_score={ignition_score:.4f}；{rank_text}"
+
+    def _eval_altcoin_rank_jump_top_n(
+        self, rule: AlertRule, context: Dict[str, Any]
+    ) -> Optional[str]:
+        params = rule.params or {}
+        row = self._altcoin_row_for_rule(rule, context)
+        if not row or not bool(row.get("alt_eligible", True)):
+            return None
+        event_flags = {str(item or "").strip() for item in (row.get("event_flags") or [])}
+        if "altcoin_rank_jump_top_n" not in event_flags:
+            return None
+        symbol = _normalize_altcoin_symbol(row.get("symbol") or params.get("symbol"))
+        rank_jump_score = float(row.get("rank_jump_score", 0.0) or 0.0)
+        rank_text = _altcoin_rank_text(row.get("rank"))
+        return f"山寨雷达 {symbol} 触发排名跃升事件，rank_jump_score={rank_jump_score:.4f}；{rank_text}"
+
+    def _eval_altcoin_crowding_risk_spike(
+        self, rule: AlertRule, context: Dict[str, Any]
+    ) -> Optional[str]:
+        params = rule.params or {}
+        row = self._altcoin_row_for_rule(rule, context)
+        if not row or not bool(row.get("alt_eligible", True)):
+            return None
+        event_flags = {str(item or "").strip() for item in (row.get("event_flags") or [])}
+        if "altcoin_crowding_risk_spike" not in event_flags:
+            return None
+        symbol = _normalize_altcoin_symbol(row.get("symbol") or params.get("symbol"))
+        crowding_score = float(row.get("crowding_late_score", 0.0) or 0.0)
+        rank_text = _altcoin_rank_text(row.get("rank"))
+        return f"山寨雷达 {symbol} 触发拥挤风险事件，crowding_late_score={crowding_score:.4f}；{rank_text}"
+
+    def _eval_altcoin_narrative_heat_spike(
+        self, rule: AlertRule, context: Dict[str, Any]
+    ) -> Optional[str]:
+        params = rule.params or {}
+        row = self._altcoin_row_for_rule(rule, context)
+        if not row or not bool(row.get("alt_eligible", True)):
+            return None
+        event_flags = {str(item or "").strip() for item in (row.get("event_flags") or [])}
+        if "altcoin_narrative_heat_spike" not in event_flags:
+            return None
+        symbol = _normalize_altcoin_symbol(row.get("symbol") or params.get("symbol"))
+        narrative_score = float(row.get("narrative_heat_score", 0.0) or 0.0)
+        rank_text = _altcoin_rank_text(row.get("rank"))
+        return f"山寨雷达 {symbol} 触发叙事热度事件，narrative_heat_score={narrative_score:.4f}；{rank_text}"
+
     def _eval_rule(self, rule: AlertRule, context: Dict[str, Any]) -> Optional[str]:
         prices = context.get("prices", {}) or {}
         risk = context.get("risk_report", {}) or {}
@@ -796,6 +883,18 @@ class NotificationManager:
 
         if rt == "altcoin_rank_top_n":
             return self._eval_altcoin_rank_top_n(rule, context)
+
+        if rt == "altcoin_ignition_cross_up":
+            return self._eval_altcoin_ignition_cross_up(rule, context)
+
+        if rt == "altcoin_rank_jump_top_n":
+            return self._eval_altcoin_rank_jump_top_n(rule, context)
+
+        if rt == "altcoin_crowding_risk_spike":
+            return self._eval_altcoin_crowding_risk_spike(rule, context)
+
+        if rt == "altcoin_narrative_heat_spike":
+            return self._eval_altcoin_narrative_heat_spike(rule, context)
 
         return None
 

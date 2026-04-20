@@ -35,6 +35,14 @@ from core.research.altcoin_radar import (
     sort_rows,
     summarize_rows,
 )
+from core.research.altcoin_radar_events import get_all_recent_events, get_recent_symbol_events
+from core.research.altcoin_radar_universe import (
+    add_watchlist_symbol,
+    get_watchlist_symbols,
+    remove_watchlist_symbol,
+    resolve_universe_scope,
+    universe_meta,
+)
 from web.api.auth import require_sensitive_ops_permissions
 from web.api.data import (
     _load_symbol_df,
@@ -53,8 +61,28 @@ DEFAULT_TIMEFRAME = "4h"
 DEFAULT_LIMIT = 30
 DEFAULT_SORT = "layout"
 MAX_UNIVERSE_SIZE = 30
+MAX_EXPANDED_SIZE = 100
 TTL_BY_TIMEFRAME = {"1h": 120.0, "4h": 300.0, "1d": 900.0}
-ALLOWED_SORTS = {"layout", "alert", "anomaly", "accumulation", "control", "chain", "heat"}
+# Phase 1: shorter cache for faster radar views
+TTL_BY_VIEW = {"15m": 30.0, "1h": 60.0, "4h": 300.0}
+ALLOWED_SORTS = {
+    "layout", "alert", "anomaly", "accumulation", "control", "chain", "heat",
+    # Phase 1 new sorts
+    "ignition", "continuation", "rank_jump", "crowding",
+    # Phase 2 new sorts
+    "narrative", "meme_rotation",
+}
+ALLOWED_MODES = {"perp", "narrative", "combined"}
+ALLOWED_VIEWS = {"15m", "1h", "4h"}
+ALLOWED_UNIVERSE_SCOPES = {"research", "expanded", "watchlist"}
+ALTCOIN_RULE_TYPES = {
+    "altcoin_score_above",
+    "altcoin_rank_top_n",
+    "altcoin_ignition_cross_up",
+    "altcoin_rank_jump_top_n",
+    "altcoin_crowding_risk_spike",
+    "altcoin_narrative_heat_spike",
+}
 _ALTCOIN_SCAN_CACHE: Dict[str, Dict[str, Any]] = {}
 _ALTCOIN_SCAN_LOCKS: Dict[str, asyncio.Lock] = {}
 
@@ -66,6 +94,57 @@ class AltcoinAlertPresetRequest(BaseModel):
     symbol: str
     universe_symbols: List[str] = Field(default_factory=list)
     channels: List[str] = Field(default_factory=lambda: ["feishu"])
+    mode: str = "combined"
+    view: str = ""
+    universe_scope: str = "research"
+
+
+class AltcoinWatchlistMutationRequest(BaseModel):
+    symbol: str
+
+
+def _preset_definition(preset: str) -> Tuple[str, str, float, str]:
+    text = str(preset or "").strip()
+    if text == "点火预警":
+        return "altcoin_ignition_cross_up", "ignition", 0.60, "anomaly"
+    if text == "跃升预警":
+        return "altcoin_rank_jump_top_n", "rank_jump", 0.30, "accumulation"
+    if text == "拥挤预警":
+        return "altcoin_crowding_risk_spike", "crowding", 0.65, "control"
+    if text == "叙事预警":
+        return "altcoin_narrative_heat_spike", "narrative", 0.55, "narrative"
+    if text == "异动预警":
+        return "altcoin_score_above", "anomaly", 0.72, "legacy_anomaly"
+    if text == "吸筹预警":
+        return "altcoin_score_above", "accumulation", 0.68, "legacy_accumulation"
+    if text == "高控盘预警":
+        return "altcoin_score_above", "control", 0.70, "legacy_control"
+    raise HTTPException(status_code=400, detail="unsupported preset")
+
+
+def _preset_label_from_rule(rule_type: str, score_key: str) -> str:
+    normalized_type = str(rule_type or "").strip()
+    normalized_key = str(score_key or "").strip().lower()
+    if normalized_type == "altcoin_ignition_cross_up" or normalized_key == "ignition":
+        return "点火预警"
+    if normalized_type == "altcoin_rank_jump_top_n" or normalized_key == "rank_jump":
+        return "跃升预警"
+    if normalized_type == "altcoin_crowding_risk_spike" or normalized_key == "crowding":
+        return "拥挤预警"
+    if normalized_type == "altcoin_narrative_heat_spike" or normalized_key == "narrative":
+        return "叙事预警"
+    if normalized_key == "anomaly":
+        return "异动预警"
+    if normalized_key == "accumulation":
+        return "吸筹预警"
+    if normalized_key == "control":
+        return "高控盘预警"
+    return "山寨预警"
+
+
+def _alert_kind_from_rule(rule_type: str, score_key: str) -> str:
+    _, _, _, kind = _preset_definition(_preset_label_from_rule(rule_type, score_key))
+    return kind
 
 
 def _utcnow() -> datetime:
@@ -114,8 +193,32 @@ def _normalize_sort(sort_by: str) -> str:
     return text
 
 
-def _cache_ttl(timeframe: str) -> float:
+def _normalize_mode(mode: str) -> str:
+    text = str(mode or "combined").strip().lower()
+    return text if text in ALLOWED_MODES else "combined"
+
+
+def _normalize_view(view: str) -> str:
+    text = str(view or "4h").strip().lower()
+    return text if text in ALLOWED_VIEWS else "4h"
+
+
+def _normalize_universe_scope(scope: str) -> str:
+    text = str(scope or "research").strip().lower()
+    return text if text in ALLOWED_UNIVERSE_SCOPES else "research"
+
+
+def _cache_ttl(timeframe: str, view: str = "") -> float:
+    if view and view in TTL_BY_VIEW:
+        return TTL_BY_VIEW[view]
     return float(TTL_BY_TIMEFRAME.get(_normalize_timeframe(timeframe), TTL_BY_TIMEFRAME[DEFAULT_TIMEFRAME]))
+
+
+def _resolve_requested_timeframe(*, timeframe: str, view: str) -> str:
+    normalized_view = _normalize_view(view) if view else ""
+    if normalized_view:
+        return _normalize_timeframe(normalized_view)
+    return _normalize_timeframe(timeframe)
 
 
 def _hash_universe(symbols: Sequence[str]) -> str:
@@ -130,20 +233,43 @@ def build_altcoin_notification_config_key(
     timeframe: str,
     universe_symbols: Sequence[str],
     exclude_retired: bool = True,
+    mode: str = "combined",
+    view: str = "",
+    universe_scope: str = "research",
 ) -> str:
     payload = {
         "exchange": _normalize_exchange(exchange),
         "timeframe": _normalize_timeframe(timeframe),
         "universe_symbols": _normalize_symbols(universe_symbols),
         "exclude_retired": bool(exclude_retired),
+        "mode": _normalize_mode(mode),
+        "view": _normalize_view(view) if view else "",
+        "universe_scope": _normalize_universe_scope(universe_scope),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
-def _cache_key(*, exchange: str, timeframe: str, symbols: Sequence[str], exclude_retired: bool) -> str:
+def _cache_key(
+    *,
+    exchange: str,
+    timeframe: str,
+    symbols: Sequence[str],
+    exclude_retired: bool,
+    mode: str = "combined",
+    view: str = "",
+    universe_scope: str = "research",
+) -> str:
     universe_hash = _hash_universe(symbols)
-    return f"{_normalize_exchange(exchange)}|{_normalize_timeframe(timeframe)}|{universe_hash}|{bool(exclude_retired)}"
+    return (
+        f"{_normalize_exchange(exchange)}"
+        f"|{_normalize_timeframe(timeframe)}"
+        f"|{universe_hash}"
+        f"|{bool(exclude_retired)}"
+        f"|{_normalize_mode(mode)}"
+        f"|{_normalize_view(view) if view else 'none'}"
+        f"|{_normalize_universe_scope(universe_scope)}"
+    )
 
 
 def _cache_lock(cache_key: str) -> asyncio.Lock:
@@ -152,6 +278,10 @@ def _cache_lock(cache_key: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _ALTCOIN_SCAN_LOCKS[cache_key] = lock
     return lock
+
+
+def _clear_altcoin_scan_cache() -> None:
+    _ALTCOIN_SCAN_CACHE.clear()
 
 
 def _serialize_micro_snapshot(row: AnalyticsMicrostructureSnapshot) -> Dict[str, Any]:
@@ -451,20 +581,39 @@ async def _resolve_universe(
     timeframe: str,
     symbols: Sequence[str],
     exclude_retired: bool,
+    universe_scope: str = "research",
 ) -> Tuple[List[str], List[str], List[str], List[str]]:
+    scope = _normalize_universe_scope(universe_scope)
+    cap = MAX_EXPANDED_SIZE if scope == "expanded" else MAX_UNIVERSE_SIZE
+
     requested = _normalize_symbols(symbols)
     fallback_used = False
-    if not requested:
+
+    # For watchlist scope: always merge watchlist symbols
+    if scope == "watchlist" and not requested:
+        requested = get_watchlist_symbols()[:cap]
+        fallback_used = True
+    elif scope == "expanded" and not requested:
+        # Load research + watchlist
+        research_symbols = await get_research_symbols(exchange=exchange)
+        base = _normalize_symbols((research_symbols.get("symbols") or []))
+        requested = resolve_universe_scope(
+            scope,
+            research_symbols=base,
+        )[:cap]
+        fallback_used = True
+    elif not requested:
         research_symbols = await get_research_symbols(exchange=exchange)
         requested = _normalize_symbols((research_symbols.get("symbols") or [])[:MAX_UNIVERSE_SIZE])
         fallback_used = True
+
     filtered, excluded_retired = _research_retired_filter(
         exchange=exchange,
         timeframe=timeframe,
         requested=requested,
         exclude_retired=exclude_retired,
     )
-    filtered = _normalize_symbols(filtered)[:MAX_UNIVERSE_SIZE]
+    filtered = _normalize_symbols(filtered)[:cap]
     if not filtered:
         research_symbols = await get_research_symbols(exchange=exchange)
         requested = _normalize_symbols((research_symbols.get("symbols") or [])[:MAX_UNIVERSE_SIZE])
@@ -479,7 +628,7 @@ async def _resolve_universe(
     warnings: List[str] = []
     if fallback_used:
         warnings.append("symbols 为空或不可用，已回退到 research universe 默认币池。")
-    return requested[:MAX_UNIVERSE_SIZE], filtered, excluded_retired, warnings
+    return requested[:cap], filtered, excluded_retired, warnings
 
 
 async def _load_market_frames(
@@ -510,7 +659,7 @@ async def _load_active_altcoin_rules() -> List[Dict[str, Any]]:
         dict(rule or {})
         for rule in rules
         if bool(rule.get("enabled"))
-        and str(rule.get("rule_type") or "") in {"altcoin_score_above", "altcoin_rank_top_n"}
+        and str(rule.get("rule_type") or "") in ALTCOIN_RULE_TYPES
     ]
 
 
@@ -522,28 +671,117 @@ def _universe_matches(rule_symbols: Sequence[str], current_symbols: Sequence[str
     return left == right
 
 
-def _alerted_symbols_for_scan(
+def _rule_matches_scan_context(
+    params: Mapping[str, Any],
+    *,
+    exchange: str,
+    timeframe: str,
+    symbols: Sequence[str],
+    mode: str = "combined",
+    view: str = "",
+    universe_scope: str = "research",
+    config_key: str = "",
+) -> bool:
+    if str(params.get("exchange") or "").strip().lower() != exchange:
+        return False
+    if str(params.get("timeframe") or "").strip().lower() != timeframe:
+        return False
+    params_config_key = str(params.get("config_key") or "").strip()
+    if config_key and params_config_key:
+        return params_config_key == config_key
+    if _normalize_mode(str(params.get("mode") or "combined")) != _normalize_mode(mode):
+        return False
+    params_view_raw = str(params.get("view") or "").strip()
+    params_view = _normalize_view(params_view_raw) if params_view_raw else ""
+    normalized_view = _normalize_view(view) if str(view or "").strip() else ""
+    if params_view != normalized_view:
+        return False
+    if _normalize_universe_scope(str(params.get("universe_scope") or "research")) != _normalize_universe_scope(universe_scope):
+        return False
+    universe = params.get("universe_symbols") or []
+    universe_list = universe if isinstance(universe, list) else _parse_symbols_param(str(universe))
+    if universe_list and not _universe_matches(universe_list, symbols):
+        return False
+    return True
+
+
+def _normalize_alert_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
+    payload = dict(rule or {})
+    params = dict(payload.get("params") or {})
+    rule_type = str(payload.get("rule_type") or "")
+    score_key = str(params.get("score_key") or "")
+    return {
+        "id": str(payload.get("id") or ""),
+        "name": str(payload.get("name") or ""),
+        "rule_type": rule_type,
+        "score_key": score_key,
+        "symbol": str(params.get("symbol") or "").strip().upper(),
+        "preset": _preset_label_from_rule(rule_type, score_key),
+        "kind": _alert_kind_from_rule(rule_type, score_key),
+        "exchange": str(params.get("exchange") or "").strip().lower(),
+        "timeframe": str(params.get("timeframe") or "").strip().lower(),
+        "mode": _normalize_mode(str(params.get("mode") or "combined")),
+        "view": _normalize_view(str(params.get("view") or "")) if str(params.get("view") or "").strip() else "",
+        "universe_scope": _normalize_universe_scope(str(params.get("universe_scope") or "research")),
+        "config_key": str(params.get("config_key") or "").strip(),
+        "threshold": float(params.get("threshold") or 0.0),
+        "enabled": bool(payload.get("enabled")),
+    }
+
+
+def _alert_rules_for_scan(
     rules: Sequence[Mapping[str, Any]],
     *,
     exchange: str,
     timeframe: str,
     symbols: Sequence[str],
-) -> List[str]:
-    out: List[str] = []
+    mode: str = "combined",
+    view: str = "",
+    universe_scope: str = "research",
+    config_key: str = "",
+) -> Dict[str, List[Dict[str, Any]]]:
+    out: Dict[str, List[Dict[str, Any]]] = {}
     for rule in rules:
         params = dict(rule.get("params") or {})
-        if str(params.get("exchange") or "").strip().lower() != exchange:
+        if not _rule_matches_scan_context(
+            params,
+            exchange=exchange,
+            timeframe=timeframe,
+            symbols=symbols,
+            mode=mode,
+            view=view,
+            universe_scope=universe_scope,
+            config_key=config_key,
+        ):
             continue
-        if str(params.get("timeframe") or "").strip().lower() != timeframe:
+        normalized = _normalize_alert_rule(rule)
+        symbol = str(normalized.get("symbol") or "").strip().upper()
+        if not symbol:
             continue
-        universe = params.get("universe_symbols") or []
-        universe_list = universe if isinstance(universe, list) else _parse_symbols_param(str(universe))
-        if universe_list and not _universe_matches(universe_list, symbols):
-            continue
-        symbol = str(params.get("symbol") or "").strip().upper()
-        if symbol:
-            out.append(symbol)
-    return _normalize_symbols(out)
+        out.setdefault(symbol, []).append(normalized)
+    return out
+
+
+def _apply_alert_rules_to_rows(
+    rows: Sequence[Mapping[str, Any]],
+    alert_rules_by_symbol: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row or {})
+        symbol = str(item.get("symbol") or "").strip().upper()
+        alert_rules = [dict(rule or {}) for rule in (alert_rules_by_symbol.get(symbol) or [])]
+        item["alert_rules"] = alert_rules
+        item["has_alert_rule"] = bool(alert_rules)
+        tags = [str(tag or "") for tag in (item.get("tags") or []) if str(tag or "").strip()]
+        if alert_rules:
+            if "已建预警" not in tags:
+                tags.append("已建预警")
+        else:
+            tags = [tag for tag in tags if tag != "已建预警"]
+        item["tags"] = tags
+        out.append(item)
+    return out
 
 
 async def _compute_scan_payload(
@@ -553,12 +791,16 @@ async def _compute_scan_payload(
     symbols: Sequence[str],
     exclude_retired: bool,
     refresh: bool = False,
+    universe_scope: str = "research",
+    mode: str = "combined",
+    view: str = "",
 ) -> Dict[str, Any]:
     requested_symbols, symbols_used, excluded_retired, warnings = await _resolve_universe(
         exchange=exchange,
         timeframe=timeframe,
         symbols=symbols,
         exclude_retired=exclude_retired,
+        universe_scope=universe_scope,
     )
     frames, frame_warnings = await _load_market_frames(exchange=exchange, timeframe=timeframe, symbols=symbols_used)
     warnings.extend(frame_warnings)
@@ -580,9 +822,11 @@ async def _compute_scan_payload(
             "symbols_requested": requested_symbols,
             "symbols_used": [],
             "excluded_retired": excluded_retired,
+            "excluded_reasons": {"retired_like": excluded_retired},
             "warnings": warnings + ["没有可用于山寨雷达扫描的本地 K 线数据。"],
             "rows": [],
             "generated_at": _utcnow().isoformat(),
+            "universe_meta": universe_meta([], universe_scope),
         }
 
     symbol_csv = ",".join(symbols_used)
@@ -616,11 +860,24 @@ async def _compute_scan_payload(
             continue
         if _should_overlay_coinglass_market_snapshot(derivatives_map.get(symbol)):
             derivatives_map[symbol] = build_derivatives_snapshot_from_market_snapshot(snapshot)
-    alerted_symbols = _alerted_symbols_for_scan(
+    config_key = build_altcoin_notification_config_key(
+        exchange=exchange,
+        timeframe=timeframe,
+        universe_symbols=symbols_used,
+        exclude_retired=exclude_retired,
+        mode=mode,
+        view=view,
+        universe_scope=universe_scope,
+    )
+    alert_rules_by_symbol = _alert_rules_for_scan(
         rules,
         exchange=exchange,
         timeframe=timeframe,
         symbols=symbols_used,
+        mode=mode,
+        view=view,
+        universe_scope=universe_scope,
+        config_key=config_key,
     )
 
     if factor_payload.get("warnings"):
@@ -637,17 +894,20 @@ async def _compute_scan_payload(
         community_snapshots=community_map,
         whale_snapshots=whale_map,
         derivatives_snapshots=derivatives_map,
-        alerted_symbols=alerted_symbols,
+        alerted_symbols=list(alert_rules_by_symbol.keys()),
     )
+    rows = _apply_alert_rules_to_rows(rows, alert_rules_by_symbol)
     return {
         "exchange": exchange,
         "timeframe": timeframe,
         "symbols_requested": requested_symbols,
         "symbols_used": symbols_used,
         "excluded_retired": excluded_retired,
+        "excluded_reasons": {"retired_like": excluded_retired},
         "warnings": _normalize_symbols([]) and [] or list(dict.fromkeys(warnings)),
         "rows": rows,
         "generated_at": _utcnow().isoformat(),
+        "universe_meta": universe_meta(symbols_used, universe_scope),
     }
 
 
@@ -658,24 +918,34 @@ async def get_altcoin_scan_snapshot(
     symbols: Sequence[str],
     exclude_retired: bool = True,
     refresh: bool = False,
+    mode: str = "combined",
+    view: str = "",
+    universe_scope: str = "research",
 ) -> Dict[str, Any]:
     normalized_exchange = _normalize_exchange(exchange)
-    normalized_timeframe = _normalize_timeframe(timeframe)
+    normalized_timeframe = _resolve_requested_timeframe(timeframe=timeframe, view=view)
+    normalized_mode = _normalize_mode(mode)
+    normalized_view = _normalize_view(view) if view else ""
+    normalized_scope = _normalize_universe_scope(universe_scope)
     normalized_symbols = _normalize_symbols(symbols)
     requested_symbols, filtered_symbols, _, pre_warnings = await _resolve_universe(
         exchange=normalized_exchange,
         timeframe=normalized_timeframe,
         symbols=normalized_symbols,
         exclude_retired=exclude_retired,
+        universe_scope=normalized_scope,
     )
     cache_key = _cache_key(
         exchange=normalized_exchange,
         timeframe=normalized_timeframe,
         symbols=filtered_symbols or requested_symbols,
         exclude_retired=exclude_retired,
+        mode=normalized_mode,
+        view=normalized_view,
+        universe_scope=normalized_scope,
     )
     cached_entry = _ALTCOIN_SCAN_CACHE.get(cache_key)
-    ttl = _cache_ttl(normalized_timeframe)
+    ttl = _cache_ttl(normalized_timeframe, normalized_view)
     now_ts = time.time()
     if cached_entry and not refresh:
         age_sec = max(0.0, now_ts - float(cached_entry.get("stored_at", 0.0)))
@@ -707,7 +977,12 @@ async def get_altcoin_scan_snapshot(
             symbols=filtered_symbols or requested_symbols,
             exclude_retired=exclude_retired,
             refresh=refresh,
+            universe_scope=normalized_scope,
+            mode=normalized_mode,
+            view=normalized_view,
         )
+        payload["mode"] = normalized_mode
+        payload["view"] = normalized_view or normalized_timeframe
         payload["warnings"] = list(dict.fromkeys(pre_warnings + list(payload.get("warnings") or [])))
         stored_at = time.time()
         _ALTCOIN_SCAN_CACHE[cache_key] = {"stored_at": stored_at, "payload": _clone_payload(payload)}
@@ -720,15 +995,47 @@ async def get_altcoin_scan_snapshot(
         return payload
 
 
+_PERP_ONLY_SOURCES = frozenset({"perp_ignition", "perp_continuation"})
+_NARRATIVE_SOURCES = frozenset({"narrative_ignition", "narrative_confirmation"})
+
+
+def _filter_rows_by_mode(rows: List[Dict[str, Any]], mode: str) -> List[Dict[str, Any]]:
+    """Filter rows based on radar mode.
+
+    perp      : rows with perp signal_source, crowded_late_stage, or derivatives available
+    narrative : rows with narrative signal_source, watchlist members, or no strong perp signal
+    combined  : no filter
+    """
+    m = _normalize_mode(mode)
+    if m == "combined":
+        return rows
+    if m == "perp":
+        return [
+            r for r in rows
+            if (r.get("signal_source") or "") in _PERP_ONLY_SOURCES | {"crowded_late_stage"}
+            or r.get("derivatives_context", {}).get("available")
+        ]
+    # narrative: include narrative sources, watchlist members, or rows without strong perp signal
+    return [
+        r for r in rows
+        if (r.get("signal_source") or "") in _NARRATIVE_SOURCES | {"crowded_late_stage", ""}
+        or bool(r.get("in_watchlist"))
+    ]
+
+
 def _build_scan_response(
     *,
     scan_payload: Mapping[str, Any],
     sort_by: str,
     limit: int,
+    mode: str = "combined",
 ) -> Dict[str, Any]:
     normalized_sort = _normalize_sort(sort_by)
-    rows = sort_rows(scan_payload.get("rows") or [], sort_by=normalized_sort)
-    limited_rows = rows[: max(1, min(int(limit or DEFAULT_LIMIT), MAX_UNIVERSE_SIZE))]
+    all_rows = list(scan_payload.get("rows") or [])
+    filtered_by_mode = _filter_rows_by_mode(all_rows, mode)
+    rows = sort_rows(filtered_by_mode, sort_by=normalized_sort)
+    cap = MAX_EXPANDED_SIZE if len(all_rows) > MAX_UNIVERSE_SIZE else MAX_UNIVERSE_SIZE
+    limited_rows = rows[: max(1, min(int(limit or DEFAULT_LIMIT), cap))]
     summarized = summarize_rows(
         rows=rows,
         exchange=str(scan_payload.get("exchange") or DEFAULT_EXCHANGE),
@@ -742,12 +1049,15 @@ def _build_scan_response(
     )
     response = dict(summarized)
     response["rows"] = limited_rows
+    response["mode"] = _normalize_mode(mode)
+    response["view"] = scan_payload.get("view") or str(scan_payload.get("timeframe") or DEFAULT_TIMEFRAME)
+    response["universe_meta"] = scan_payload.get("universe_meta") or {}
     response["scan_meta"] = {
         **response.get("scan_meta", {}),
         "generated_at": scan_payload.get("generated_at"),
         "cache": scan_payload.get("cache") or {},
         "row_count_before_limit": len(rows),
-        "limit": max(1, min(int(limit or DEFAULT_LIMIT), MAX_UNIVERSE_SIZE)),
+        "limit": max(1, min(int(limit or DEFAULT_LIMIT), cap)),
     }
     return response
 
@@ -760,6 +1070,12 @@ def _score_key_to_field(score_key: str) -> str:
         "anomaly": "anomaly_score",
         "accumulation": "accumulation_score",
         "control": "control_score",
+        "ignition": "ignition_score",
+        "continuation": "continuation_score",
+        "rank_jump": "rank_jump_score",
+        "crowding": "crowding_late_score",
+        "narrative": "narrative_heat_score",
+        "meme_rotation": "meme_rotation_score",
     }
     return mapping.get(normalized, "layout_score")
 
@@ -785,7 +1101,7 @@ async def build_altcoin_notification_context(
         dict(rule or {})
         for rule in rules
         if bool(rule.get("enabled"))
-        and str(rule.get("rule_type") or "") in {"altcoin_score_above", "altcoin_rank_top_n"}
+        and str(rule.get("rule_type") or "") in ALTCOIN_RULE_TYPES
     ]
     unique_configs: Dict[str, Dict[str, Any]] = {}
     for rule in active_rules:
@@ -796,17 +1112,26 @@ async def build_altcoin_notification_context(
         universe_symbols = universe if isinstance(universe, list) else _parse_symbols_param(str(universe))
         universe_symbols = _normalize_symbols(universe_symbols)
         exclude_retired = bool(params.get("exclude_retired", True))
+        mode = _normalize_mode(str(params.get("mode") or "combined"))
+        view = _normalize_view(str(params.get("view") or "")) if str(params.get("view") or "").strip() else ""
+        universe_scope = _normalize_universe_scope(str(params.get("universe_scope") or "research"))
         config_key = str(params.get("config_key") or "").strip() or build_altcoin_notification_config_key(
             exchange=exchange,
             timeframe=timeframe,
             universe_symbols=universe_symbols,
             exclude_retired=exclude_retired,
+            mode=mode,
+            view=view,
+            universe_scope=universe_scope,
         )
         unique_configs[config_key] = {
             "exchange": exchange,
             "timeframe": timeframe,
             "universe_symbols": universe_symbols,
             "exclude_retired": exclude_retired,
+            "mode": mode,
+            "view": view,
+            "universe_scope": universe_scope,
         }
     if not unique_configs:
         return {}
@@ -818,6 +1143,9 @@ async def build_altcoin_notification_context(
             symbols=config["universe_symbols"],
             exclude_retired=bool(config["exclude_retired"]),
             refresh=False,
+            mode=str(config.get("mode") or "combined"),
+            view=str(config.get("view") or ""),
+            universe_scope=str(config.get("universe_scope") or "research"),
         )
         for config_key, config in unique_configs.items()
     }
@@ -840,6 +1168,30 @@ async def build_altcoin_notification_context(
                 "layout": {str(row.get("symbol") or ""): int(row.get("rank") or 0) for row in layout_rows},
                 "alert": {str(row.get("symbol") or ""): int(row.get("rank") or 0) for row in alert_rows},
                 "control": {str(row.get("symbol") or ""): int(row.get("rank") or 0) for row in control_rows},
+                "ignition": {
+                    str(row.get("symbol") or ""): int(row.get("rank") or 0)
+                    for row in sort_rows(eligible_rows, sort_by="ignition")
+                },
+                "rank_jump": {
+                    str(row.get("symbol") or ""): int(row.get("rank") or 0)
+                    for row in sort_rows(eligible_rows, sort_by="rank_jump")
+                },
+                "crowding": {
+                    str(row.get("symbol") or ""): int(row.get("rank") or 0)
+                    for row in sort_rows(eligible_rows, sort_by="crowding")
+                },
+                "continuation": {
+                    str(row.get("symbol") or ""): int(row.get("rank") or 0)
+                    for row in sort_rows(eligible_rows, sort_by="continuation")
+                },
+                "narrative": {
+                    str(row.get("symbol") or ""): int(row.get("rank") or 0)
+                    for row in sort_rows(eligible_rows, sort_by="narrative")
+                },
+                "meme_rotation": {
+                    str(row.get("symbol") or ""): int(row.get("rank") or 0)
+                    for row in sort_rows(eligible_rows, sort_by="meme_rotation")
+                },
             },
         }
     return {"scans": scans}
@@ -854,16 +1206,54 @@ async def scan_altcoin_radar(
     sort_by: str = DEFAULT_SORT,
     exclude_retired: bool = True,
     refresh: bool = False,
+    # Phase 1 new params
+    mode: str = "combined",
+    view: str = "",
+    universe_scope: str = "research",
 ):
     normalized_symbols = _parse_symbols_param(symbols)
+    requested_view = _normalize_view(view) if str(view or "").strip() else ""
     scan_payload = await get_altcoin_scan_snapshot(
         exchange=exchange,
-        timeframe=timeframe,
+        timeframe=_resolve_requested_timeframe(timeframe=timeframe, view=requested_view),
         symbols=normalized_symbols,
         exclude_retired=exclude_retired,
         refresh=refresh,
+        mode=mode,
+        view=requested_view,
+        universe_scope=universe_scope,
     )
-    return _build_scan_response(scan_payload=scan_payload, sort_by=sort_by, limit=limit)
+    return _build_scan_response(scan_payload=scan_payload, sort_by=sort_by, limit=limit, mode=mode)
+
+
+@router.get("/radar/events")
+async def get_altcoin_radar_events(
+    symbol: Optional[str] = None,
+    event_type: Optional[str] = None,
+    limit: int = 50,
+    max_age_sec: float = 3600.0,
+):
+    """Return recent altcoin radar events from in-memory cache.
+
+    Events include: ignition_cross_up, rank_jump_top_n, crowding_risk_spike.
+    """
+    if symbol:
+        events = get_recent_symbol_events(
+            symbol=str(symbol).strip().upper(),
+            limit=max(1, min(int(limit), 200)),
+            max_age_sec=max(60.0, min(float(max_age_sec), 86400.0)),
+        )
+    else:
+        events = get_all_recent_events(
+            limit=max(1, min(int(limit), 200)),
+            max_age_sec=max(60.0, min(float(max_age_sec), 86400.0)),
+            event_type=str(event_type).strip() if event_type else None,
+        )
+    return {
+        "events": events,
+        "count": len(events),
+        "ts": _utcnow().isoformat(),
+    }
 
 
 @router.get("/radar/detail")
@@ -874,18 +1264,25 @@ async def get_altcoin_radar_detail(
     symbols: Optional[str] = None,
     refresh: bool = False,
     exclude_retired: bool = True,
+    mode: str = "combined",
+    view: str = "",
+    universe_scope: str = "research",
 ):
     normalized_symbol = str(symbol or "").strip().upper()
     if not normalized_symbol:
         raise HTTPException(status_code=400, detail="symbol is required")
     normalized_exchange = _normalize_exchange(exchange)
     normalized_symbols = _parse_symbols_param(symbols)
+    requested_view = _normalize_view(view) if str(view or "").strip() else ""
     scan_payload = await get_altcoin_scan_snapshot(
         exchange=exchange,
-        timeframe=timeframe,
+        timeframe=_resolve_requested_timeframe(timeframe=timeframe, view=requested_view),
         symbols=normalized_symbols,
         exclude_retired=exclude_retired,
         refresh=refresh,
+        mode=mode,
+        view=requested_view,
+        universe_scope=universe_scope,
     )
     selected_row = next(
         (
@@ -939,6 +1336,9 @@ async def get_altcoin_radar_detail(
     detail["scan_meta"] = {
         "exchange": scan_payload.get("exchange"),
         "timeframe": scan_payload.get("timeframe"),
+        "view": scan_payload.get("view") or requested_view or scan_payload.get("timeframe"),
+        "mode": scan_payload.get("mode") or _normalize_mode(mode),
+        "universe_meta": scan_payload.get("universe_meta") or {},
         "symbols_used": scan_payload.get("symbols_used") or [],
         "generated_at": scan_payload.get("generated_at"),
         "cache": scan_payload.get("cache") or {},
@@ -951,9 +1351,11 @@ async def create_altcoin_alert_preset(request: AltcoinAlertPresetRequest):
     preset = str(request.preset or "").strip()
     normalized_exchange = _normalize_exchange(request.exchange)
     normalized_timeframe = _normalize_timeframe(request.timeframe)
+    normalized_mode = _normalize_mode(request.mode)
+    normalized_view = _normalize_view(request.view) if str(request.view or "").strip() else ""
+    normalized_scope = _normalize_universe_scope(request.universe_scope)
     symbol = str(request.symbol or "").strip().upper()
-    if preset not in {"异动预警", "吸筹预警", "高控盘预警"}:
-        raise HTTPException(status_code=400, detail="unsupported preset")
+    rule_type, score_key, threshold, kind = _preset_definition(preset)
     if not symbol:
         raise HTTPException(status_code=400, detail="symbol is required")
     universe_symbols = _normalize_symbols(request.universe_symbols) or [symbol]
@@ -963,6 +1365,9 @@ async def create_altcoin_alert_preset(request: AltcoinAlertPresetRequest):
         symbols=universe_symbols,
         exclude_retired=True,
         refresh=False,
+        mode=normalized_mode,
+        view=normalized_view,
+        universe_scope=normalized_scope,
     )
     target_row = next(
         (
@@ -981,18 +1386,10 @@ async def create_altcoin_alert_preset(request: AltcoinAlertPresetRequest):
         timeframe=normalized_timeframe,
         universe_symbols=universe_symbols,
         exclude_retired=True,
+        mode=normalized_mode,
+        view=normalized_view,
+        universe_scope=normalized_scope,
     )
-    rule_type = "altcoin_score_above"
-    if preset == "异动预警":
-        score_key = "anomaly"
-        threshold = 0.72
-    elif preset == "吸筹预警":
-        score_key = "accumulation"
-        threshold = 0.68
-    else:
-        score_key = "control"
-        threshold = 0.70
-
     rule_name = f"山寨雷达 | {preset} | {symbol} | {normalized_exchange} {normalized_timeframe}"
     params = {
         "exchange": normalized_exchange,
@@ -1001,10 +1398,14 @@ async def create_altcoin_alert_preset(request: AltcoinAlertPresetRequest):
         "symbol": symbol,
         "score_key": score_key,
         "threshold": threshold,
+        "rank_n": 15,
         "channels": list(request.channels or ["feishu"]),
         "source_page": "altcoin_radar",
         "exclude_retired": True,
         "config_key": config_key,
+        "mode": normalized_mode,
+        "view": normalized_view,
+        "universe_scope": normalized_scope,
     }
     existing_rules = await notification_manager.list_rules()
     existing = next(
@@ -1017,12 +1418,18 @@ async def create_altcoin_alert_preset(request: AltcoinAlertPresetRequest):
             and dict(rule.get("params") or {}).get("score_key") == score_key
             and str(dict(rule.get("params") or {}).get("exchange") or "") == normalized_exchange
             and str(dict(rule.get("params") or {}).get("timeframe") or "") == normalized_timeframe
+            and str(dict(rule.get("params") or {}).get("config_key") or "") == config_key
             and float(dict(rule.get("params") or {}).get("threshold") or 0.0) == threshold
         ),
         None,
     )
     if existing:
-        return {"success": True, "existing": True, "rule": existing}
+        return {
+            "success": True,
+            "existing": True,
+            "rule": existing,
+            "rule_meta": {"preset": preset, "kind": kind, "config_key": config_key},
+        }
 
     rule = await notification_manager.add_rule(
         name=rule_name,
@@ -1031,4 +1438,118 @@ async def create_altcoin_alert_preset(request: AltcoinAlertPresetRequest):
         enabled=True,
         cooldown_seconds=300,
     )
-    return {"success": True, "existing": False, "rule": rule}
+    return {
+        "success": True,
+        "existing": False,
+        "rule": rule,
+        "rule_meta": {"preset": preset, "kind": kind, "config_key": config_key},
+    }
+
+
+@router.delete("/alerts/preset", dependencies=[Depends(require_sensitive_ops_permissions("manage_notifications"))])
+async def delete_altcoin_alert_preset(
+    exchange: str = DEFAULT_EXCHANGE,
+    timeframe: str = DEFAULT_TIMEFRAME,
+    symbol: str = "",
+    symbols: Optional[str] = None,
+    preset: Optional[str] = None,
+    mode: str = "combined",
+    view: str = "",
+    universe_scope: str = "research",
+):
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    normalized_exchange = _normalize_exchange(exchange)
+    normalized_timeframe = _normalize_timeframe(timeframe)
+    normalized_mode = _normalize_mode(mode)
+    normalized_view = _normalize_view(view) if str(view or "").strip() else ""
+    normalized_scope = _normalize_universe_scope(universe_scope)
+    universe_symbols = _normalize_symbols(_parse_symbols_param(symbols)) or [normalized_symbol]
+    config_key = build_altcoin_notification_config_key(
+        exchange=normalized_exchange,
+        timeframe=normalized_timeframe,
+        universe_symbols=universe_symbols,
+        exclude_retired=True,
+        mode=normalized_mode,
+        view=normalized_view,
+        universe_scope=normalized_scope,
+    )
+    target_rule_type = None
+    target_score_key = None
+    if str(preset or "").strip():
+        target_rule_type, target_score_key, _, _ = _preset_definition(str(preset or "").strip())
+    deleted_rules: List[Dict[str, Any]] = []
+    for rule in await notification_manager.list_rules():
+        params = dict(rule.get("params") or {})
+        if not _rule_matches_scan_context(
+            params,
+            exchange=normalized_exchange,
+            timeframe=normalized_timeframe,
+            symbols=universe_symbols,
+            mode=normalized_mode,
+            view=normalized_view,
+            universe_scope=normalized_scope,
+            config_key=config_key,
+        ):
+            continue
+        if str(params.get("symbol") or "").strip().upper() != normalized_symbol:
+            continue
+        if target_rule_type and str(rule.get("rule_type") or "") != target_rule_type:
+            continue
+        if target_score_key and str(params.get("score_key") or "").strip().lower() != str(target_score_key).strip().lower():
+            continue
+        rule_id = str(rule.get("id") or "").strip()
+        if rule_id and await notification_manager.delete_rule(rule_id):
+            deleted_rules.append(_normalize_alert_rule(rule))
+    return {
+        "success": True,
+        "deleted_count": len(deleted_rules),
+        "deleted_rules": deleted_rules,
+        "symbol": normalized_symbol,
+        "preset": str(preset or "").strip() or None,
+        "config_key": config_key,
+    }
+
+
+@router.get("/radar/watchlist")
+async def get_altcoin_radar_watchlist():
+    symbols = get_watchlist_symbols()
+    return {
+        "symbols": symbols,
+        "count": len(symbols),
+        "meta": universe_meta(symbols, "watchlist"),
+        "ts": _utcnow().isoformat(),
+    }
+
+
+@router.post("/radar/watchlist")
+async def add_altcoin_radar_watchlist_symbol(request: AltcoinWatchlistMutationRequest):
+    symbol = str(request.symbol or "").strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    symbols = add_watchlist_symbol(symbol)
+    _clear_altcoin_scan_cache()
+    return {
+        "success": True,
+        "symbol": symbol,
+        "symbols": symbols,
+        "count": len(symbols),
+        "meta": universe_meta(symbols, "watchlist"),
+    }
+
+
+@router.delete("/radar/watchlist")
+async def remove_altcoin_radar_watchlist_symbol(symbol: str):
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    symbols = remove_watchlist_symbol(normalized_symbol)
+    _clear_altcoin_scan_cache()
+    return {
+        "success": True,
+        "symbol": normalized_symbol,
+        "symbols": symbols,
+        "count": len(symbols),
+        "meta": universe_meta(symbols, "watchlist"),
+    }

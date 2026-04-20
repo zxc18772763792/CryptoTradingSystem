@@ -155,6 +155,10 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "/trading/analytics/history/status?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(sym)}" in ai_js
     assert "Derivatives context:" in ai_js
     assert "recommendation?.brief?.derivatives_context" in ai_js
+    assert "const hasSignalError = Boolean(String(item?.error || '').trim());" in ai_js
+    assert "const signalStateText = hasSignalError ? 'ERR' : '待刷新';" in ai_js
+    assert "当前已选中 watchlist，正在等待最新聚合信号快照。" in ai_js
+    assert "当前 watchlist 暂无聚合信号快照，后续刷新后会自动显示。" in ai_js
     assert 'option value="codex">OpenAI' in template
     assert "一键退出运行中条目" in template
     assert "一键清空当前候选" in template

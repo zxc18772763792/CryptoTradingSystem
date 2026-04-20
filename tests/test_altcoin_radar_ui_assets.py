@@ -41,13 +41,31 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "window.__loadAltcoinRadarTabData = loadAltcoinRadarTabData" in radar_js
     assert "function bindAltcoinRadarPage()" in radar_js
     assert "async function loadAltcoinRadarTabData(force = false)" in radar_js
+    assert "const universePromise = loadUniverseOptions(force).catch((error) => {" in radar_js
+    assert "await scanRadar(force);" in radar_js
+    assert "await universePromise;" in radar_js
     assert "async function openResearchWorkbench(symbol)" in radar_js
     assert "async function createPresetAlert(kind, symbol)" in radar_js
-    assert "const hasAlertRule = !!row?.has_alert_rule;" in radar_js
-    assert "button.textContent = hasAlertRule ? '已建预警' : defaultLabel;" in radar_js
+    assert "async function recyclePresetAlert(kind, symbol)" in radar_js
+    assert "async function recycleAllAlerts(symbol)" in radar_js
+    assert "async function loadWatchlist()" in radar_js
+    assert "async function mutateWatchlist(action, symbol)" in radar_js
+    assert "const activeKinds = alertKindsForRow(row);" in radar_js
+    assert "button.textContent = activeKinds.has(kind) ? `回收${label}` : `建${label}`;" in radar_js
     assert "btn-altcoin-radar-alert-anomaly" in radar_js
+    assert "btn-altcoin-radar-alert-narrative" in template_source
+    assert "btn-altcoin-radar-alert-recycle" in template_source
+    assert "btn-altcoin-radar-watchlist-add" in template_source
+    assert "btn-altcoin-radar-watchlist-remove" in template_source
+    assert "altcoin-radar-watchlist-list" in template_source
+    assert "altcoin-radar-universe-summary" in template_source
+    assert "altcoin-radar-custom-universe-group" in template_source
+    assert "altcoin-radar-watchlist-summary" in template_source
+    assert "altcoin-radar-ignition-summary" in template_source
+    assert "altcoin-radar-theme-summary" in template_source
     assert "altcoin-radar-related-list" in radar_js
     assert "altcoin-radar-universe" in radar_js
+    assert "function renderUniverseManager()" in radar_js
 
     assert "function formatDerivativesStatus(detailPayload, selected)" in radar_js
     assert "['Derivatives 来源', String(derivativesContext.source_name || '--')]" in radar_js
@@ -58,3 +76,4 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert ".altcoin-radar-table" in style_css
     assert ".altcoin-radar-inspector-card" in style_css
     assert ".altcoin-radar-score-strip" in style_css
+    assert ".altcoin-radar-watchlist-list" in style_css
