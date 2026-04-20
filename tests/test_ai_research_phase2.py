@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -420,6 +420,101 @@ def test_run_strategy_research_rejects_when_cross_exchange_preflight_fails(monke
 
     with pytest.raises(ValueError, match="cross-exchange preflight failed"):
         asyncio.run(run_strategy_research(config))
+
+
+def test_load_research_timeframe_df_falls_back_to_minute_data_for_hourly(monkeypatch):
+    import asyncio
+
+    from core.research.strategy_research import _load_research_timeframe_df
+
+    base_df = _make_ohlcv(240)
+
+    async def _fake_load(*, exchange, symbol, timeframe, start_time=None, end_time=None):
+        if timeframe == "1h":
+            return pd.DataFrame()
+        if timeframe == "1m":
+            return base_df
+        raise AssertionError(f"unexpected timeframe: {timeframe}")
+
+    monkeypatch.setattr(
+        "core.research.strategy_research.data_storage.load_klines_from_parquet",
+        _fake_load,
+    )
+
+    result = asyncio.run(
+        _load_research_timeframe_df(
+            exchange="gate",
+            symbol="BTC/USDT",
+            timeframe="1h",
+            start_time=datetime(2024, 1, 1, 1, 0, tzinfo=timezone.utc),
+            end_time=datetime(2024, 1, 1, 4, 0, tzinfo=timezone.utc),
+        )
+    )
+
+    assert not result.empty
+    assert len(result) == 3
+    assert all(ts.minute == 0 for ts in result.index)
+
+
+def test_cross_exchange_preflight_treats_volume_divergence_as_warning(monkeypatch):
+    import asyncio
+
+    from core.research.strategy_research import (
+        ResearchConfig,
+        _run_cross_exchange_consistency_preflight,
+    )
+
+    idx = pd.date_range("2024-01-01", periods=160, freq="1h", tz="UTC")
+    primary = pd.DataFrame(
+        {
+            "open": np.linspace(100, 120, len(idx)),
+            "high": np.linspace(101, 121, len(idx)),
+            "low": np.linspace(99, 119, len(idx)),
+            "close": np.linspace(100, 120, len(idx)),
+            "volume": np.full(len(idx), 1000.0),
+        },
+        index=idx,
+    )
+    secondary = pd.DataFrame(
+        {
+            "open": np.linspace(100.01, 120.01, len(idx)),
+            "high": np.linspace(101.01, 121.01, len(idx)),
+            "low": np.linspace(99.01, 119.01, len(idx)),
+            "close": np.linspace(100.01, 120.01, len(idx)),
+            "volume": np.full(len(idx), 250.0),
+        },
+        index=idx,
+    )
+
+    async def _fake_load(exchange, symbol, timeframe, start_time=None, end_time=None):
+        return primary if exchange == "binance" else secondary
+
+    monkeypatch.setattr(
+        "core.research.strategy_research._load_research_timeframe_df",
+        _fake_load,
+    )
+
+    config = ResearchConfig(
+        exchange="binance",
+        symbol="BTC/USDT",
+        days=7,
+        timeframes=["1h"],
+        strategies=["EMAStrategy"],
+        output_dir=Path("."),
+    )
+
+    result = asyncio.run(
+        _run_cross_exchange_consistency_preflight(
+            config=config,
+            start_time=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end_time=datetime(2024, 1, 8, tzinfo=timezone.utc),
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["results"][0]["price_consistent"] is True
+    assert result["results"][0]["volume_consistent"] is False
+    assert "volume differs materially" in result["results"][0]["warning"]
 
 
 def test_run_backtest_core_with_params():

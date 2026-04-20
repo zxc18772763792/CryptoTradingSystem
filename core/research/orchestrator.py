@@ -1561,6 +1561,42 @@ async def _run_proposal_background_job(
                     },
                 }
             )
+        proposal = get_proposal(app, proposal_id)
+        if proposal.status in {"research_queued", "research_running", "validated"}:
+            cancel_reason = str(job.get("error") or "research cancelled")
+            if proposal.status == "research_running":
+                transition_proposal(
+                    proposal,
+                    to_state="rejected",
+                    lifecycle_registry=app.state.ai_lifecycle_registry,
+                    actor=actor,
+                    reason=cancel_reason,
+                )
+            else:
+                old_status = str(proposal.status)
+                proposal.status = "rejected"  # type: ignore[assignment]
+                proposal.updated_at = _now_utc()
+                record_lifecycle(
+                    app.state.ai_lifecycle_registry,
+                    object_type="proposal",
+                    object_id=proposal.proposal_id,
+                    from_state=old_status,
+                    to_state="rejected",
+                    actor=actor,
+                    reason=cancel_reason,
+                )
+            proposal.metadata["last_research_error"] = cancel_reason
+            save_proposal(app, proposal)
+        experiment = get_experiment(app, experiment_id)
+        if str(experiment.status) in {"queued", "running"}:
+            experiment.status = "failed"
+            app.state.ai_experiment_registry.save(experiment)
+        run = app.state.ai_experiment_run_registry.get(run_id)
+        if run is not None and str(run.status) in {"queued", "running"}:
+            run.status = "failed"
+            run.finished_at = _now_utc()
+            run.error = str(job.get("error") or "cancelled")
+            app.state.ai_experiment_run_registry.save(run)
     except Exception as exc:
         proposal = get_proposal(app, proposal_id)
         if proposal.status in {"research_queued", "research_running", "validated"}:

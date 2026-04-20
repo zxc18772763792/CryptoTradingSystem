@@ -11,15 +11,30 @@ from fastapi import FastAPI, HTTPException
 from config.settings import settings
 from core.ai.proposal_schemas import ResearchProposal
 from core.research import orchestrator as orchestrator_module
-from core.research.experiment_registry import CandidateRegistry, LifecycleRegistry, ProposalRegistry
-from core.research.experiment_schemas import LifecycleRecord, StrategyCandidate
+from core.research.experiment_registry import (
+    CandidateRegistry,
+    ExperimentRegistry,
+    ExperimentRunRegistry,
+    LifecycleRegistry,
+    ProposalRegistry,
+)
+from core.research.experiment_schemas import (
+    ExperimentRun,
+    ExperimentSpec,
+    LifecycleRecord,
+    StrategyCandidate,
+)
 
 
 def _build_app(tmp_path) -> FastAPI:
     app = FastAPI()
     app.state.ai_candidate_registry = CandidateRegistry(tmp_path / "candidates.json")
+    app.state.ai_experiment_registry = ExperimentRegistry(tmp_path / "experiments.json")
+    app.state.ai_experiment_run_registry = ExperimentRunRegistry(tmp_path / "experiment_runs.json")
     app.state.ai_proposal_registry = ProposalRegistry(tmp_path / "proposals.json")
     app.state.ai_lifecycle_registry = LifecycleRegistry(tmp_path / "lifecycle.json")
+    app.state.research_jobs = {}
+    app.state.research_job_tasks = {}
     return app
 
 
@@ -47,6 +62,27 @@ def _build_proposal(*, proposal_id: str) -> ResearchProposal:
         target_symbols=["BTC/USDT"],
         target_timeframes=["5m"],
         strategy_templates=["EMAStrategy"],
+    )
+
+
+def _build_experiment(*, experiment_id: str, proposal_id: str) -> ExperimentSpec:
+    return ExperimentSpec(
+        experiment_id=experiment_id,
+        proposal_id=proposal_id,
+        created_at=datetime.now(timezone.utc),
+        exchange="binance",
+        symbol="BTC/USDT",
+        timeframes=["5m"],
+        strategies=["EMAStrategy"],
+    )
+
+
+def _build_run(*, run_id: str, experiment_id: str) -> ExperimentRun:
+    return ExperimentRun(
+        run_id=run_id,
+        experiment_id=experiment_id,
+        started_at=datetime.now(timezone.utc),
+        status="running",
     )
 
 
@@ -283,3 +319,85 @@ def test_ensure_runtime_state_recovers_missing_proposal_from_candidate(tmp_path,
     lifecycle = app.state.ai_lifecycle_registry.list_for_object("proposal", candidate.proposal_id, limit=None)
     assert len(lifecycle) == 1
     assert lifecycle[0].reason == "recovered missing proposal from candidate registry"
+
+
+def test_background_job_cancellation_marks_research_records_terminal(tmp_path, monkeypatch):
+    app = _build_app(tmp_path)
+    proposal = _build_proposal(proposal_id="proposal-cancelled")
+    proposal.status = "research_running"
+    proposal.metadata = {"last_research_job_id": "job-cancelled"}
+    app.state.ai_proposal_registry.save(proposal)
+
+    experiment = _build_experiment(
+        experiment_id="exp-cancelled",
+        proposal_id=proposal.proposal_id,
+    )
+    experiment.status = "running"
+    app.state.ai_experiment_registry.save(experiment)
+
+    run = _build_run(
+        run_id="run-cancelled",
+        experiment_id=experiment.experiment_id,
+    )
+    app.state.ai_experiment_run_registry.save(run)
+
+    app.state.research_jobs["job-cancelled"] = {
+        "job_id": "job-cancelled",
+        "proposal_id": proposal.proposal_id,
+        "experiment_id": experiment.experiment_id,
+        "run_id": run.run_id,
+        "status": "running",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "error": None,
+        "result": None,
+        "progress": {"phase": "research_running", "message": "running"},
+    }
+
+    monkeypatch.setattr(orchestrator_module, "_persist_research_jobs", lambda app: None)
+    monkeypatch.setattr(
+        orchestrator_module,
+        "_finalize_research_run",
+        AsyncMock(side_effect=asyncio.CancelledError()),
+    )
+
+    config = orchestrator_module.ResearchConfig(
+        exchange="binance",
+        symbol="BTC/USDT",
+        timeframes=["5m"],
+        strategies=["EMAStrategy"],
+        days=7,
+        commission_rate=0.0004,
+        slippage_bps=2.0,
+        initial_capital=10000.0,
+        output_dir=tmp_path / "outputs",
+    )
+
+    asyncio.run(
+        orchestrator_module._run_proposal_background_job(
+            app,
+            job_id="job-cancelled",
+            proposal_id=proposal.proposal_id,
+            experiment_id=experiment.experiment_id,
+            run_id=run.run_id,
+            request_payload={},
+            config=config,
+            actor="tester",
+        )
+    )
+
+    saved_proposal = app.state.ai_proposal_registry.get(proposal.proposal_id)
+    saved_experiment = app.state.ai_experiment_registry.get(experiment.experiment_id)
+    saved_run = app.state.ai_experiment_run_registry.get(run.run_id)
+    saved_job = app.state.research_jobs["job-cancelled"]
+
+    assert saved_job["status"] == "cancelled"
+    assert saved_proposal is not None
+    assert saved_proposal.status == "rejected"
+    assert saved_proposal.metadata["last_research_error"] == "cancelled"
+    assert saved_experiment is not None
+    assert saved_experiment.status == "failed"
+    assert saved_run is not None
+    assert saved_run.status == "failed"
+    assert saved_run.error == "cancelled"

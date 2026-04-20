@@ -4708,6 +4708,13 @@ def _configured_news_source_flags() -> Dict[str, bool]:
         raw = str(os.getenv(name, "1" if default else "0")).strip().lower()
         return raw not in {"0", "false", "no", "off"}
 
+    try:
+        from core.data.coinglass_client import coinglass_enabled as _coinglass_enabled  # noqa: PLC0415
+
+        coinglass_news_enabled = bool(_coinglass_enabled())
+    except Exception:
+        coinglass_news_enabled = False
+
     newsapi_enabled = _enabled("NEWS_ENABLE_NEWSAPI", True) and bool(str(os.getenv("NEWSAPI_KEY") or "").strip())
     cryptopanic_enabled = _enabled("NEWS_ENABLE_CRYPTOPANIC", True) and bool(
         str(os.getenv("CRYPTOPANIC_TOKEN") or os.getenv("CRYPTOPANIC_API_KEY") or "").strip()
@@ -4723,6 +4730,11 @@ def _configured_news_source_flags() -> Dict[str, bool]:
         "bybit_announcements": _enabled("NEWS_ENABLE_BYBIT_ANNOUNCEMENTS", True),
         "binance_announcements": _enabled("NEWS_ENABLE_BINANCE_ANNOUNCEMENTS", True),
         "cryptocompare_news": _enabled("NEWS_ENABLE_CRYPTOCOMPARE_NEWS", True),
+        "coinglass_newsflash": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_NEWSFLASH", True),
+        "coinglass_articles": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_ARTICLES", True),
+        "coinglass_economic_data": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_ECONOMIC_DATA", True),
+        "coinglass_financial_events": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_FINANCIAL_EVENTS", True),
+        "coinglass_central_bank": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_CENTRAL_BANK", True),
     }
 
 
@@ -4738,7 +4750,19 @@ def _news_source_catalog() -> Dict[str, Dict[str, Any]]:
         "newsapi": {"label": "NewsAPI", "support_level": "enhancement", "requires_key": True, "source_type": "media_api"},
         "cryptopanic": {"label": "CryptoPanic", "support_level": "enhancement", "requires_key": True, "source_type": "crypto_api"},
         "cryptocompare_news": {"label": "CryptoCompare News", "support_level": "enhancement", "requires_key": False, "source_type": "crypto_api"},
+        "coinglass_newsflash": {"label": "CoinGlass Newsflash", "support_level": "enhancement", "requires_key": True, "source_type": "crypto_api"},
+        "coinglass_articles": {"label": "CoinGlass Articles", "support_level": "enhancement", "requires_key": True, "source_type": "crypto_api"},
+        "coinglass_economic_data": {"label": "CoinGlass Economic Data", "support_level": "enhancement", "requires_key": True, "source_type": "macro_calendar"},
+        "coinglass_financial_events": {"label": "CoinGlass Financial Events", "support_level": "enhancement", "requires_key": True, "source_type": "macro_calendar"},
+        "coinglass_central_bank": {"label": "CoinGlass Central Bank", "support_level": "enhancement", "requires_key": True, "source_type": "macro_calendar"},
     }
+
+
+def _is_future_timestamp(value: Any) -> bool:
+    dt = _parse_timestamp_to_utc(value)
+    if dt is None:
+        return False
+    return dt > datetime.now(timezone.utc)
 
 
 def _collect_source_entries(categories: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -4979,7 +5003,7 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
         failure_rate = float(coverage_row.get("failure_rate") or 0.0)
         if failure_rate >= 0.5:
             issues.append(f"Failure rate high: {failure_rate:.0%}")
-        if state_row.get("paused_until"):
+        if _is_future_timestamp(state_row.get("paused_until")):
             issues.append(f"Paused until {state_row.get('paused_until')}")
         if not state_row and not coverage_row and state_error:
             issues.append(f"State read failed: {state_error}")
@@ -5048,8 +5072,8 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
     try:
         from core.data.options_collector import options_collector  # noqa: PLC0415
 
-        cached = options_collector._cache.get("BTC")  # noqa: SLF001
-        options_snapshot = cached[1].to_dict() if cached and cached[1] else {}
+        cached_snapshot = options_collector.load_cached_snapshot("BTC")
+        options_snapshot = cached_snapshot.to_dict() if cached_snapshot else {}
         categories["options"]["sources"]["deribit_options"] = _build_source_entry(
             label="Deribit Options Snapshot",
             available=True,

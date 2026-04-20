@@ -542,7 +542,7 @@ def test_sources_health_includes_ai_news_and_ml_inventory(tmp_path, monkeypatch)
 
     class FakeNewsManager:
         def __init__(self, *args, **kwargs):
-            self.sources = ["jin10", "rss", "gdelt"]
+            self.sources = ["jin10", "rss", "gdelt", "coinglass_newsflash"]
 
     class FakeOptionsSnapshot:
         def to_dict(self):
@@ -562,6 +562,11 @@ def test_sources_health_includes_ai_news_and_ml_inventory(tmp_path, monkeypatch)
     monkeypatch.setattr(
         "core.news.collectors.manager.MultiSourceNewsCollector", FakeNewsManager
     )
+    monkeypatch.setattr(
+        "core.data.coinglass_client.coinglass_enabled",
+        lambda: True,
+    )
+    monkeypatch.setenv("NEWS_ENABLE_COINGLASS_NEWSFLASH", "1")
     monkeypatch.setattr(
         "core.data.macro_collector.load_macro_snapshot",
         lambda: {
@@ -632,6 +637,11 @@ def test_sources_health_includes_ai_news_and_ml_inventory(tmp_path, monkeypatch)
                         "latest_at": _recent_snapshot_ts(),
                         "failure_rate": 0.0,
                     },
+                    "coinglass_newsflash": {
+                        "inserted_count": 5,
+                        "latest_at": _recent_snapshot_ts(),
+                        "failure_rate": 0.0,
+                    },
                 },
             }
         ),
@@ -665,6 +675,15 @@ def test_sources_health_includes_ai_news_and_ml_inventory(tmp_path, monkeypatch)
                     "error_count": 0,
                     "success_count": 3,
                 },
+                {
+                    "source": "coinglass_newsflash",
+                    "updated_at": _recent_snapshot_ts(),
+                    "last_success_at": _recent_snapshot_ts(),
+                    "last_error": None,
+                    "error_count": 0,
+                    "success_count": 3,
+                    "paused_until": "2026-04-01T00:00:00+00:00",
+                },
             ]
         ),
     )
@@ -678,9 +697,8 @@ def test_sources_health_includes_ai_news_and_ml_inventory(tmp_path, monkeypatch)
     )
     monkeypatch.setattr(
         options_collector,
-        "_cache",
-        {"BTC": (0.0, FakeOptionsSnapshot())},
-        raising=False,
+        "load_cached_snapshot",
+        lambda currency="BTC": FakeOptionsSnapshot(),
     )
     monkeypatch.setattr(ai_module.settings, "OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setattr(ai_module.settings, "OPENAI_BACKUP_API_KEY", "")
@@ -773,6 +791,9 @@ def test_sources_health_includes_ai_news_and_ml_inventory(tmp_path, monkeypatch)
     assert news["health"] == "healthy"
     assert news["snapshot"]["inserted_count"] == 8
     assert result["categories"]["news"]["runtime"]["llm_queue"]["pending_total"] == 0
+    coinglass_newsflash = result["categories"]["news"]["sources"]["coinglass_newsflash"]
+    assert coinglass_newsflash["health"] == "healthy"
+    assert "Paused until" not in " ".join(coinglass_newsflash["issues"])
 
     research_llm = result["categories"]["ai_sources"]["sources"]["research_context_llm"]
     assert research_llm["health"] == "healthy"

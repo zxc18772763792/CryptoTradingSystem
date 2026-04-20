@@ -311,7 +311,7 @@ def _aggregation_base_timeframe(target_timeframe: str) -> Optional[str]:
     if sec < 3600:
         return "1m"
     if sec == 3600:
-        return None
+        return "1m"
     return "1h"
 
 
@@ -352,10 +352,12 @@ async def _load_research_timeframe_df(
         return pd.DataFrame()
 
     resampled = _resample_ohlcv(_validate_df(base_df), timeframe)
-    if start_time is not None:
-        resampled = resampled[resampled.index >= start_time]
-    if end_time is not None:
-        resampled = resampled[resampled.index <= end_time]
+    start_ts = _to_naive_utc_timestamp(start_time)
+    end_ts = _to_naive_utc_timestamp(end_time)
+    if start_ts is not None:
+        resampled = resampled[resampled.index >= start_ts]
+    if end_ts is not None:
+        resampled = resampled[resampled.index <= end_ts]
     if resampled.empty:
         return pd.DataFrame()
     return _validate_df(resampled)
@@ -862,12 +864,19 @@ async def _run_cross_exchange_consistency_preflight(
                 "p95_pct": round(_safe_float_value(volume_diff_pct.quantile(0.95) * 100.0), 6),
             },
         }
-        row["is_consistent"] = (
+        row["price_consistent"] = (
             row["close_diff"]["mean_pct"] <= float(config.cross_exchange_close_mean_threshold_pct)
             and row["close_diff"]["p95_pct"] <= float(config.cross_exchange_close_p95_threshold_pct)
-            and row["volume_diff"]["mean_pct"] <= float(config.cross_exchange_volume_mean_threshold_pct)
+        )
+        row["volume_consistent"] = (
+            row["volume_diff"]["mean_pct"] <= float(config.cross_exchange_volume_mean_threshold_pct)
             and row["volume_diff"]["p95_pct"] <= float(config.cross_exchange_volume_p95_threshold_pct)
         )
+        row["is_consistent"] = bool(row["price_consistent"])
+        if not bool(row["volume_consistent"]):
+            row["warning"] = (
+                "cross-exchange volume differs materially; treat liquidity comparisons as advisory"
+            )
         checked.append(row)
         results.append(row)
 
@@ -2149,7 +2158,7 @@ class ResearchConfig:
     cross_exchange_limit: int = 500
     cross_exchange_min_overlap_bars: int = 120
     cross_exchange_close_mean_threshold_pct: float = 1.0
-    cross_exchange_close_p95_threshold_pct: float = 3.0
+    cross_exchange_close_p95_threshold_pct: float = 5.0
     cross_exchange_volume_mean_threshold_pct: float = 25.0
     cross_exchange_volume_p95_threshold_pct: float = 80.0
 
@@ -2434,7 +2443,7 @@ def _validate_df(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     out = df.copy()
-    out.index = pd.to_datetime(out.index)
+    out.index = _as_naive_utc_index(out.index)
     out = out.sort_index()
     out = out[~out.index.duplicated(keep="last")]
 
@@ -2736,8 +2745,9 @@ async def run_strategy_research(
     if not frames:
         timeframe_text = ", ".join(list(config.timeframes or [])) or "--"
         raise ValueError(
-            f"找不到 {config.exchange} {config.symbol} 的历史数据（时间框架: {timeframe_text}，天数: {config.days}）。"
-            "请先在“数据管理”页面回填 K 线数据，或切换到有数据的交易对。"
+            f"{config.exchange} {config.symbol} 的研究样本不足（时间框架: {timeframe_text}，天数: {config.days}）。"
+            f"当前至少需要 {config.min_rows_per_timeframe} 根有效 K 线。"
+            "请先补齐历史数据，增加回测天数，或切换到更低时间框架。"
         )
 
     # B: IS split at 65% for parameter optimization

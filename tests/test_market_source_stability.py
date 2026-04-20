@@ -123,6 +123,62 @@ def test_coinglass_request_json_drops_none_query_params(monkeypatch):
     }
 
 
+def test_deribit_options_client_session_respects_env_proxy_settings(monkeypatch):
+    from core.data import options_collector as module
+
+    captured: dict = {}
+
+    class _FakeSession:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            raise RuntimeError("stop after session creation")
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+    monkeypatch.setattr(module.aiohttp, "ClientSession", _FakeSession)
+
+    collector = module.DeribitOptionsCollector()
+    result = asyncio.run(collector._fetch_from_api("BTC"))
+
+    assert result is None
+    assert captured["trust_env"] is True
+    assert captured["timeout"] == collector._timeout
+
+
+def test_deribit_options_uses_persisted_snapshot_when_fetch_unavailable(
+    tmp_path, monkeypatch
+):
+    from core.data import options_collector as module
+
+    monkeypatch.chdir(tmp_path)
+    collector = module.DeribitOptionsCollector()
+    expected = module.OptionsSnapshot(
+        currency="BTC",
+        atm_iv=0.5321,
+        skew_25d=-0.01,
+        put_call_ratio=0.71,
+        n_calls=463,
+        n_puts=463,
+        timestamp=datetime.now(timezone.utc),
+    )
+    collector._persist_snapshot(expected)
+    monkeypatch.setattr(
+        collector,
+        "_fetch_from_api",
+        AsyncMock(return_value=None),
+    )
+
+    result = asyncio.run(collector.fetch_snapshot("BTC"))
+
+    assert result is not None
+    assert result.currency == "BTC"
+    assert result.atm_iv == expected.atm_iv
+    assert result.put_call_ratio == expected.put_call_ratio
+
+
 def test_public_fear_greed_uses_recent_stale_cache_on_refresh_failure(monkeypatch):
     from core.data.sentiment import fear_greed_collector as fg_module
     from web.api import research as module

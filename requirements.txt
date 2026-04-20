@@ -60,6 +60,7 @@ python-dateutil>=2.9,<3
 pytz>=2024,<2026
 requests>=2.32,<3
 pyyaml>=6,<7
+pytrends>=4.9,<5
 
 # News & Sentiment
 feedparser>=6.0,<7

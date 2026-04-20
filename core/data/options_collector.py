@@ -18,8 +18,11 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import aiohttp
@@ -65,6 +68,7 @@ class DeribitOptionsCollector:
 
     _BASE = "https://www.deribit.com/api/v2/public"
     _CACHE_TTL_SEC = 300  # 5-minute cache to avoid hammering public API
+    _PERSIST_DIR = Path("data/options")
 
     def __init__(self, timeout: int = 12) -> None:
         self._timeout = aiohttp.ClientTimeout(total=timeout)
@@ -73,7 +77,7 @@ class DeribitOptionsCollector:
     async def fetch_snapshot(self, currency: str = "BTC") -> Optional[OptionsSnapshot]:
         """Return current options snapshot. Uses in-memory cache (5 min TTL)."""
         key = currency.upper()
-        now = asyncio.get_event_loop().time()
+        now = time.monotonic()
         cached_at, cached_snap = self._cache.get(key, (0.0, None))  # type: ignore[assignment]
         if cached_snap is not None and (now - cached_at) < self._CACHE_TTL_SEC:
             return cached_snap
@@ -81,13 +85,32 @@ class DeribitOptionsCollector:
         snap = await self._fetch_from_api(key)
         if snap is not None:
             self._cache[key] = (now, snap)
-        return snap
+            self._persist_snapshot(snap)
+            return snap
+
+        persisted = self._load_persisted_snapshot(key)
+        if persisted is not None:
+            self._cache[key] = (now, persisted)
+        return persisted
+
+    def load_cached_snapshot(self, currency: str = "BTC") -> Optional[OptionsSnapshot]:
+        """Return the latest cached snapshot from memory or persisted storage."""
+        key = currency.upper()
+        cached = self._cache.get(key)
+        if cached and cached[1] is not None:
+            return cached[1]
+        persisted = self._load_persisted_snapshot(key)
+        if persisted is not None:
+            self._cache[key] = (time.monotonic(), persisted)
+        return persisted
 
     async def _fetch_from_api(self, currency: str) -> Optional[OptionsSnapshot]:
         url = f"{self._BASE}/get_book_summary_by_currency"
         params = {"currency": currency, "kind": "option"}
         try:
-            async with aiohttp.ClientSession(timeout=self._timeout) as session:
+            # Respect system/env proxy settings so public Deribit requests work
+            # in restricted network environments the same way as other collectors.
+            async with aiohttp.ClientSession(timeout=self._timeout, trust_env=True) as session:
                 async with session.get(url, params=params) as resp:
                     if resp.status != 200:
                         logger.debug(f"DeribitOptions: HTTP {resp.status} for {currency}")
@@ -103,6 +126,42 @@ class DeribitOptionsCollector:
             return None
         except Exception as exc:
             logger.debug(f"DeribitOptions: {exc}")
+            return None
+
+    def _cache_path(self, currency: str) -> Path:
+        return self._PERSIST_DIR / f"{currency.lower()}_snapshot.json"
+
+    def _persist_snapshot(self, snapshot: OptionsSnapshot) -> None:
+        try:
+            path = self._cache_path(snapshot.currency)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.debug(f"DeribitOptions: failed to persist snapshot: {exc}")
+
+    def _load_persisted_snapshot(self, currency: str) -> Optional[OptionsSnapshot]:
+        try:
+            path = self._cache_path(currency)
+            if not path.exists():
+                return None
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            timestamp_raw = payload.get("timestamp")
+            if not timestamp_raw:
+                return None
+            return OptionsSnapshot(
+                currency=str(payload.get("currency") or currency).upper(),
+                atm_iv=float(payload.get("atm_iv") or 0.0),
+                skew_25d=float(payload.get("skew_25d") or 0.0),
+                put_call_ratio=float(payload.get("put_call_ratio") or 0.0),
+                n_calls=int(payload.get("n_calls") or 0),
+                n_puts=int(payload.get("n_puts") or 0),
+                timestamp=datetime.fromisoformat(str(timestamp_raw)),
+            )
+        except Exception as exc:
+            logger.debug(f"DeribitOptions: failed to load persisted snapshot: {exc}")
             return None
 
     @staticmethod
