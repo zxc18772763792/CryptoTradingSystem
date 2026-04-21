@@ -269,11 +269,13 @@ def test_altcoin_detail_route_returns_selected_row(monkeypatch):
     app = FastAPI()
     app.include_router(altcoin_api.router, prefix="/api/altcoin")
     client = TestClient(app)
+    captured_onchain = {}
 
     async def fake_get_altcoin_scan_snapshot(**kwargs):
         return _scan_payload()
 
     async def fake_get_onchain_overview(**kwargs):
+        captured_onchain.update(kwargs)
         return {"context": "ok", "symbol": kwargs["symbol"]}
 
     monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
@@ -294,6 +296,7 @@ def test_altcoin_detail_route_returns_selected_row(monkeypatch):
     assert payload["selected_row"]["metrics"]["long_short_ratio"] == 1.08
     assert payload["chain_breakdown"]["onchain_context"] == {"context": "ok", "symbol": "AAA/USDT"}
     assert payload["scan_meta"]["exchange"] == "binance"
+    assert captured_onchain["chain"] == "auto"
 
 
 def test_altcoin_detail_route_accepts_view_and_mode(monkeypatch):
@@ -318,6 +321,59 @@ def test_altcoin_detail_route_accepts_view_and_mode(monkeypatch):
     assert captured["view"] == "15m"
     assert captured["mode"] == "perp"
     assert captured["universe_scope"] == "watchlist"
+
+
+def test_resolve_universe_watchlist_scope_without_symbols_does_not_warn(monkeypatch):
+    monkeypatch.setattr(altcoin_api, "get_watchlist_symbols", lambda: ["ORDI/USDT", "PEPE/USDT"])
+
+    def fake_retired_filter(**kwargs):
+        return list(kwargs["requested"]), []
+
+    monkeypatch.setattr(altcoin_api, "_research_retired_filter", fake_retired_filter)
+
+    requested, filtered, excluded_retired, warnings = asyncio.run(
+        altcoin_api._resolve_universe(
+            exchange="binance",
+            timeframe="4h",
+            symbols=[],
+            exclude_retired=True,
+            universe_scope="watchlist",
+        )
+    )
+
+    assert requested == ["ORDI/USDT", "PEPE/USDT"]
+    assert filtered == ["ORDI/USDT", "PEPE/USDT"]
+    assert excluded_retired == []
+    assert warnings == []
+
+
+def test_resolve_universe_warns_only_when_explicit_symbols_fallback(monkeypatch):
+    async def fake_get_research_symbols(exchange: str):
+        return {"symbols": ["AAA/USDT", "BBB/USDT"]}
+
+    def fake_retired_filter(**kwargs):
+        requested = list(kwargs["requested"])
+        if requested == ["BAD/USDT"]:
+            return [], ["BAD/USDT"]
+        return requested, []
+
+    monkeypatch.setattr(altcoin_api, "get_research_symbols", fake_get_research_symbols)
+    monkeypatch.setattr(altcoin_api, "_research_retired_filter", fake_retired_filter)
+
+    requested, filtered, excluded_retired, warnings = asyncio.run(
+        altcoin_api._resolve_universe(
+            exchange="binance",
+            timeframe="4h",
+            symbols=["BAD/USDT"],
+            exclude_retired=True,
+            universe_scope="research",
+        )
+    )
+
+    assert requested == ["AAA/USDT", "BBB/USDT"]
+    assert filtered == ["AAA/USDT", "BBB/USDT"]
+    assert excluded_retired == []
+    assert warnings == ["传入的 symbols 过滤后为空或不可用，已回退到 research universe 默认币池。"]
 
 
 def test_altcoin_detail_route_backfills_missing_chain_percentiles(monkeypatch):
@@ -619,6 +675,61 @@ def test_compute_scan_payload_exposes_contextual_alert_rules(monkeypatch):
     assert by_symbol["PEPE/USDT"]["alert_rules"][0]["config_key"] == config_key
     assert by_symbol["WIF/USDT"]["has_alert_rule"] is False
     assert by_symbol["WIF/USDT"]["alert_rules"] == []
+
+
+def test_get_altcoin_scan_snapshot_resolves_universe_only_once(monkeypatch):
+    altcoin_api._clear_altcoin_scan_cache()
+    resolve_calls = 0
+
+    async def fake_resolve_universe(**kwargs):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return ["AAA/USDT"], ["AAA/USDT"], [], ["预加载警告"]
+
+    async def fake_load_market_frames(**kwargs):
+        return ({"AAA/USDT": {"close": [1, 2, 3]}}, [])
+
+    async def fake_market_snapshots(**kwargs):
+        return {}
+
+    async def fake_factor_library(**kwargs):
+        return {"warnings": []}
+
+    async def fake_multi_assets_overview(**kwargs):
+        return {"retired_filter": {"excluded_symbols": []}}
+
+    async def fake_snapshot_maps(**kwargs):
+        return ({}, {}, {}, {})
+
+    async def fake_load_active_altcoin_rules():
+        return []
+
+    def fake_build_altcoin_rows(**kwargs):
+        return [{"symbol": "AAA/USDT", "tags": [], "data_quality": {}}]
+
+    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api, "_load_market_frames", fake_load_market_frames)
+    monkeypatch.setattr(altcoin_api, "load_coinglass_market_snapshots", fake_market_snapshots)
+    monkeypatch.setattr(altcoin_api, "get_factor_library", fake_factor_library)
+    monkeypatch.setattr(altcoin_api, "get_multi_assets_overview", fake_multi_assets_overview)
+    monkeypatch.setattr(altcoin_api, "_load_snapshot_maps", fake_snapshot_maps)
+    monkeypatch.setattr(altcoin_api, "_load_active_altcoin_rules", fake_load_active_altcoin_rules)
+    monkeypatch.setattr(altcoin_api, "build_altcoin_rows", fake_build_altcoin_rows)
+
+    payload = asyncio.run(
+        altcoin_api.get_altcoin_scan_snapshot(
+            exchange="binance",
+            timeframe="4h",
+            symbols=["AAA/USDT"],
+            exclude_retired=True,
+        )
+    )
+
+    assert resolve_calls == 1
+    assert payload["rows"][0]["symbol"] == "AAA/USDT"
+    assert "预加载警告" in payload["warnings"]
+    assert payload["cache"]["hit"] is False
+    altcoin_api._clear_altcoin_scan_cache()
 
 
 def test_create_altcoin_alert_preset_rejects_benchmark_symbol(monkeypatch):

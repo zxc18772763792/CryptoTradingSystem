@@ -33,6 +33,7 @@ const SUMMARY_BALANCES_TIMEOUT_MS=22000;
 const SUMMARY_TASK_REUSE_MAX_AGE_MS=12000;
 const KNOWN_STRATEGY_CATEGORIES=['趋势','震荡','动量','均值回归','突破','成交量','波动率','风险','统计套利','Fama因子','微观结构','套利','量化','ML','宏观','其他'];
 const STRATEGY_CATEGORY_ALIASES={机器学习:'ML',量化因子:'量化',量化多因子:'量化',多因子:'量化'};
+const BACKTEST_GROUP_ORDER=['趋势类','震荡类','动量类','均值回归类','突破类','成交量类','波动率类','风险类','统计套利类','Fama因子类','微观结构类','套利类','量化类','ML类','宏观类','其他'];
 const STRATEGY_LIST_TIMEOUT_MS=20000;
 const STRATEGY_SUMMARY_TIMEOUT_MS=20000;
 const TRADING_ORDERS_TIMEOUT_MS=20000;
@@ -350,13 +351,15 @@ return normalized;
 }
 async function ensureStrategyCatalog(force=false){
 if(!force&&Array.isArray(state.strategyCatalogRows)&&state.strategyCatalogRows.length)return state.strategyCatalogRows;
-try{
-  const d=await api('/strategies/catalog',{timeoutMs:18000});
-  return mergeStrategyCatalogRows(Array.isArray(d?.strategies)?d.strategies:[]);
-}catch(e){
-  console.error(e);
-  return Array.isArray(state.strategyCatalogRows)?state.strategyCatalogRows:[];
-}
+return runRequestSingleFlight('strategyCatalog',async()=>{
+  try{
+    const d=await api('/strategies/catalog',{timeoutMs:18000});
+    return mergeStrategyCatalogRows(Array.isArray(d?.strategies)?d.strategies:[]);
+  }catch(e){
+    console.error(e);
+    return Array.isArray(state.strategyCatalogRows)?state.strategyCatalogRows:[];
+  }
+});
 }
 function syncBacktestStrategyMeta(strategyName){
 const catalogMap=strategyCatalogMap();
@@ -396,7 +399,7 @@ for(const row of supported){
   const groupLabel=mapStrategyCatToBacktestGroup(row.category||'其他');
   (grouped[groupLabel]||(grouped[groupLabel]=[])).push(row);
 }
-const groupOrder=['趋势类','震荡类','动量类','均值回归类','突破类','成交量类','波动率类','风险类','统计套利类','Fama因子类','微观结构类','套利类','量化类','ML类','宏观类','其他'];
+const groupOrder=BACKTEST_GROUP_ORDER;
 sel.innerHTML=groupOrder.filter(group=>Array.isArray(grouped[group])&&grouped[group].length).map(group=>{
   const options=grouped[group].sort((a,b)=>String(a.name).localeCompare(String(b.name),'zh-CN')).map(row=>{
     const usage=String(row.usage||'').trim();
@@ -1778,6 +1781,7 @@ async function loadArbitrageTabData(force=false){
 async function loadBacktestTabData(){
   loadDataSymbolOptions('binance',['backtest-symbol']);
   await ensureBacktestStrategySelect().catch(e=>console.error(e));
+  initBacktestComparePicker(true);
 }
 async function ensureTabLoaded(tabName,{force=false}={}){
 const tab=String(tabName||'').trim();
@@ -2433,7 +2437,7 @@ if(strategy)strategy.addEventListener('keydown',e=>{
 async function cancelOrder(id,symbol,exchange){try{await api(`/trading/order/${id}?symbol=${encodeURIComponent(symbol)}&exchange=${exchange}`,{method:'DELETE'});notify('订单已撤销');await Promise.allSettled([loadOrders(),loadOpenOrders()]);}catch(e){notify(`撤销失败: ${e.message}`,true);}}
 
 async function loadStrategies(){return runRequestSingleFlight('strategies',async()=>{try{
-await Promise.allSettled([ensureStrategyCatalog(),ensureBacktestStrategySelect()]);
+await ensureStrategyCatalog();
 const d=await api('/strategies/list',{timeoutMs:STRATEGY_LIST_TIMEOUT_MS});
 const availableTypes=Array.isArray(d?.strategies)?d.strategies:[];
 state.availableStrategyTypes=availableTypes;
@@ -2453,7 +2457,7 @@ const libraryRows=availableTypes.map(s=>{
 if(!libraryRows.length){pool.innerHTML='<div class="list-item">暂无可用策略</div>';}
 else{
   const groupedLib={};libraryRows.forEach(r=>{(groupedLib[r.groupLabel]||(groupedLib[r.groupLabel]=[])).push(r);});
-  const groupOrder=[...(catalog.groups||[]).map(g=>g.label),'其他'].filter((v,i,a)=>a.indexOf(v)===i);
+  const groupOrder=[...(catalog.groups||[]).map(g=>g.label),...BACKTEST_GROUP_ORDER].filter((v,i,a)=>a.indexOf(v)===i);
   pool.innerHTML=groupOrder.filter(g=>Array.isArray(groupedLib[g])&&groupedLib[g].length).map(g=>{
     const cards=(groupedLib[g]||[]).sort((a,b)=>{
       const ai=Number(catalog.orderIndex?.[a.strategy]??9999),bi=Number(catalog.orderIndex?.[b.strategy]??9999);
@@ -2557,7 +2561,7 @@ return `<div class="registered-strategy-card ${active?'active':''}" onclick="sel
     </div>
   </details>`;
 }).join('');
-if(document.getElementById('backtest-compare-strategy-list') && typeof loadBacktestComparePickerSource==='function'){
+if(getActiveTabName()==='backtest'&&document.getElementById('backtest-compare-strategy-list') && typeof loadBacktestComparePickerSource==='function'){
   const src=backtestCompareCurrentSource();
   if(src==='registered'){
     loadBacktestComparePickerSource('registered',{preserveSelection:true,selectAll:false,useDefault:false}).catch(()=>{});
@@ -3054,7 +3058,7 @@ try{
 const firstMs=klineToMs(bars[0]?.timestamp);
 if(!Number.isFinite(firstMs)){marketDataState.isLoadingLeft=false;return;}
 const endTime=new Date(firstMs-1000).toISOString();
-const chunk=await fetchKlinesChunk({exchange:marketDataState.exchange,symbol:marketDataState.symbol,timeframe:marketDataState.timeframe,limit:marketDataState.limit,endTime,align:'tail',timeoutMs:18000});
+const chunk=await fetchKlinesChunk({exchange:marketDataState.exchange,symbol:marketDataState.symbol,timeframe:marketDataState.timeframe,limit:marketDataState.limit,endTime,align:'tail',timeoutMs:30000});
 if(chunk.length){marketDataState.bars=cropBars(mergeBars(chunk,marketDataState.bars));renderKlineChart(true);}else{
   const tfSec=timeframeSeconds(marketDataState.timeframe);
   const spanMs=Math.max(10*60*1000, Math.min(6*3600*1000, marketDataState.limit*tfSec*1000));
@@ -3076,7 +3080,7 @@ try{
 const lastMs=klineToMs(bars[bars.length-1]?.timestamp);
 if(!Number.isFinite(lastMs)){marketDataState.isLoadingRight=false;return;}
 const startTime=new Date(lastMs+1000).toISOString();
-const chunk=await fetchKlinesChunk({exchange:marketDataState.exchange,symbol:marketDataState.symbol,timeframe:marketDataState.timeframe,limit:marketDataState.limit,startTime,align:'head',timeoutMs:18000});
+const chunk=await fetchKlinesChunk({exchange:marketDataState.exchange,symbol:marketDataState.symbol,timeframe:marketDataState.timeframe,limit:marketDataState.limit,startTime,align:'head',timeoutMs:30000});
 if(chunk.length){marketDataState.bars=cropBars(mergeBars(marketDataState.bars,chunk));renderKlineChart(true);}else{
   const tfSec=timeframeSeconds(marketDataState.timeframe);
   const spanMs=Math.max(10*60*1000, Math.min(4*3600*1000, marketDataState.limit*tfSec*1000));
@@ -3128,7 +3132,7 @@ const tfSec=timeframeSeconds(marketDataState.timeframe);
 const lastMs=klineToMs(bars[bars.length-1]?.timestamp);
 if(!Number.isFinite(lastMs))return;
 const startTime=new Date(lastMs-Math.max(1000,tfSec*3000)).toISOString();
-const latest=await fetchKlinesChunk({exchange:marketDataState.exchange,symbol:marketDataState.symbol,timeframe:marketDataState.timeframe,limit:Math.min(600,marketDataState.limit),startTime,align:'head',timeoutMs:9000});
+const latest=await fetchKlinesChunk({exchange:marketDataState.exchange,symbol:marketDataState.symbol,timeframe:marketDataState.timeframe,limit:Math.min(600,marketDataState.limit),startTime,align:'head',timeoutMs:15000});
 if(refreshKey!==`${marketDataState.exchange}|${marketDataState.symbol}|${marketDataState.timeframe}|${marketDataState.loadSeq}`)return;
 marketDataState.lastRealtimePollAt=Date.now();
 if(latest.length){marketDataState.bars=cropBars(mergeBars(marketDataState.bars,latest));renderKlineChart(true);}else if(hasLargeGap(marketDataState.bars,marketDataState.timeframe)){
@@ -3157,10 +3161,10 @@ resetKlineChartForSwitch(`正在加载 ${s} ${tf} 行情...`);
 try{
 let actualExchange=ex;
 const isSubSecond=String(tf||'').endsWith('s');
-let data=await fetchKlinesChunk({exchange:ex,symbol:s,timeframe:tf,limit:marketDataState.limit,align:'tail',timeoutMs:isSubSecond?30000:18000});
+let data=await fetchKlinesChunk({exchange:ex,symbol:s,timeframe:tf,limit:marketDataState.limit,align:'tail',timeoutMs:isSubSecond?35000:45000});
 if(!data.length&&ex!=='binance'){
 const alt='binance';
-const altData=await fetchKlinesChunk({exchange:alt,symbol:s,timeframe:tf,limit:marketDataState.limit,align:'tail',timeoutMs:isSubSecond?30000:18000});
+const altData=await fetchKlinesChunk({exchange:alt,symbol:s,timeframe:tf,limit:marketDataState.limit,align:'tail',timeoutMs:isSubSecond?35000:45000});
 if(altData.length){
 data=altData;
 actualExchange=alt;
@@ -3172,7 +3176,7 @@ notify(`当前 ${ex} 数据不足，已自动切换到 ${alt}`);
 if(!data.length){
 await autoBackfillData({exchange:actualExchange,symbol:s,timeframe:tf,reason:'initial-load'});
 await new Promise(r=>setTimeout(r,isSubSecond?1800:900));
-data=await fetchKlinesChunk({exchange:actualExchange,symbol:s,timeframe:tf,limit:marketDataState.limit,align:'tail',timeoutMs:isSubSecond?35000:22000});
+data=await fetchKlinesChunk({exchange:actualExchange,symbol:s,timeframe:tf,limit:marketDataState.limit,align:'tail',timeoutMs:isSubSecond?40000:50000});
 }
 if(loadSeq!==marketDataState.loadSeq)return;
 if(!data.length){throw new Error(`${s} ${tf} 暂无可用数据，已触发后台自动补数，请稍后再试`);}
@@ -3183,6 +3187,11 @@ if(hasLargeGap(marketDataState.bars,marketDataState.timeframe)){
   const range=inferBackfillRangeFromBars(marketDataState.bars, marketDataState.timeframe);
   await autoBackfillData({exchange:actualExchange,symbol:s,timeframe:tf,reason:'gap-check',...range});
 }
+}catch(err){
+if(loadSeq===marketDataState.loadSeq){
+  resetKlineChartForSwitch(`行情加载失败: ${err?.message||err}`);
+}
+throw err;
 }finally{
 if(loadSeq===marketDataState.loadSeq)marketDataState.isLoading=false;
 }
@@ -4482,7 +4491,7 @@ renderBacktestComparePickerList(items,{
   useDefault: src==='library' && opts.useDefault!==false
 });
 }
-function initBacktestComparePicker(){
+function initBacktestComparePicker(preload=false){
 const box=document.getElementById('backtest-compare-strategy-list');
 if(!box)return;
 if(!backtestUIState._comparePickerBound){
@@ -4505,7 +4514,9 @@ if(!backtestUIState._comparePickerBound){
   bindBacktestComparePresetControls();
 }
 renderBacktestComparePresetOptions();
-loadBacktestComparePickerSource(backtestCompareCurrentSource(),{preserveSelection:true,selectAll:false,useDefault:true}).catch(e=>console.error(e));
+if(preload||getActiveTabName()==='backtest'){
+  loadBacktestComparePickerSource(backtestCompareCurrentSource(),{preserveSelection:true,selectAll:false,useDefault:true}).catch(e=>console.error(e));
+}
 }
 function getSelectedBacktestCompareStrategies(){
 const arr=[...document.querySelectorAll('input[data-bt-compare-strategy]:checked')].map(i=>String(i.value||'').trim()).filter(Boolean);
@@ -5419,7 +5430,7 @@ softRefreshTimer=setTimeout(()=>{
   const tab=getActiveTabName();
   const group=sharedPollGroupForTab(tab);
   if(group&&!canRunSharedPolling(group))return;
-  if(tab==='dashboard')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadStrategies(),loadStrategySummary(),loadRisk()]);
+  if(tab==='dashboard')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadStrategySummary(),loadRisk()]);
   else if(tab==='trading')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
   else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary()]);
   else if(tab==='ai-research')refreshAiResearchModules();
@@ -7232,7 +7243,7 @@ async function loadOnchainOverviewPanel({refresh=false,quiet=false,showLoading=t
 const out=getResearchOutputEl();
 if(showLoading)setResearchMiniPanelLoading('onchain');
 try{
-  const d=await api(`/data/onchain/overview?exchange=${encodeURIComponent(getResearchExchange())}&symbol=${encodeURIComponent(getResearchSymbol())}&whale_threshold_btc=10&chain=Ethereum&refresh=${refresh?'true':'false'}`,{timeoutMs});
+  const d=await api(`/data/onchain/overview?exchange=${encodeURIComponent(getResearchExchange())}&symbol=${encodeURIComponent(getResearchSymbol())}&whale_threshold_btc=10&chain=auto&refresh=${refresh?'true':'false'}`,{timeoutMs});
   renderOnchainPanel(d);
   if(out&&!quiet)out.textContent=JSON.stringify(d,null,2);
   if(isResearchAsyncPending(d,'onchain')||d?.refreshing&&(!d?.cached||d?.served_mode==='bootstrap')){
@@ -7307,7 +7318,7 @@ const fundingLine1=fundingCount>0?`${fundingCount}源 | 均值 ${Number.isFinite
 const fundingLine2=fundingCount>0?`分歧 ${Number.isFinite(fundingSpreadPct)?fundingSpreadPct.toFixed(4)+'%':'--'}`:'';
 if(summary){
   summary.innerHTML=`
-  <div class="list-item"><span>链 / 观察窗口</span>${formatMetricLines([`${tvl?.chain||'Ethereum'} / ${Number(renderData?.window_hours||0)}h`])}</div>
+  <div class="list-item"><span>链 / 观察窗口</span>${formatMetricLines([`${tvl?.chain||renderData?.chain_context?.display_name||'Auto'} / ${Number(renderData?.window_hours||0)}h`])}</div>
   <div class="list-item"><span>最新 TVL</span>${formatMetricLines([`${fmtCompactUsd(tvl?.latest_tvl)} | 1d ${Number(tvl?.change_1d_pct||0).toFixed(2)}%`])}</div>
   <div class="list-item"><span>7d 变化 / 交易所流向</span>${formatMetricLines([`${Number(tvl?.change_7d_pct||0).toFixed(2)}% / ${flow.toFixed(4)}`])}</div>
   <div class="list-item"><span>巨鲸数量</span>${formatMetricLines([`${Number(whales?.count||0)} 笔`,`阈值 ${Number(whales?.threshold_btc||0)} BTC`])}</div>

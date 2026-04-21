@@ -320,24 +320,24 @@
       ['鑳滅巼', '胜率'],
       ['澶忔櫘', '夏普'],
       ['鏂伴椈', '新闻'],
-      ['瀹忚', '宏观'],
+      ['瀹忚', '宏观'],
       ['鍘婚噸闅愯棌', '去重隐藏'],
       ['鍥炴斁妯″紡', '回放模式'],
-      ['AI寤鸿', 'AI建议'],
+      ['AI寤鸿', 'AI建议'],
       ['璇︽儏', '详情'],
       ['鎼滅储瑙掕壊', '搜索角色'],
-      ['鐮旂┒瀹屾垚锛屼絾鏈€氳繃楠岃瘉', '研究完成，但未通过验证'],
+      ['鐮旂┒瀹屾垚锛屼絾鏈€氳繃楠岃瘉', '研究完成，但未通过验证'],
       ['鐮旂┒浠诲姟宸插畬鎴愶紝宸ヤ綔鍙扮姸鎬佸凡鏇存柊', '研究任务已完成，工作台状态已更新'],
-      ['杩愯鐮旂┒', '运行研究'],
-      ['鐮旂┒鐩爣锛堝彲鐣欑┖鑷姩鐢熸垚锛?', '研究目标（可留空自动生成）'],
-      ['鍏堣 AI 鍒ゆ柇褰撳墠甯傚満鐘舵€佷笌閫傞厤绛栫暐', '先让 AI 判断当前市场状态与适配策略'],
+      ['杩愯鐮旂┒', '运行研究'],
+      ['鐮旂┒鐩爣锛堝彲鐣欑┖鑷姩鐢熸垚锛?', '研究目标（可留空自动生成）'],
+      ['鍏堣 AI 鍒ゆ柇褰撳墠甯傚満鐘舵€佷笌閫傞厤绛栫暐', '先让 AI 判断当前市场状态与适配策略'],
       ['椤甸潰鏃跺尯锛氫笂娴锋椂闂?(UTC+8)', '页面时区：上海时间 (UTC+8)'],
       ['鍊欓€夊洖濉?', '候选回填'],
-      ['璇ユ潯鐩敱鍊欓€夌粨鏋滃洖濉?', '该条目由候选结果回填'],
+      ['璇ユ潯鐩敱鍊欓€夌粨鏋滃洖濉?', '该条目由候选结果回填'],
       ['棰勭儹鐮旂┒缂撳瓨', '预热研究缓存'],
-      ['鐮旂┒缂撳瓨宸查鐑?', '研究缓存已预热'],
-      ['鍗曟璇曡窇宸茶Е鍙?', '单次试跑已触发'],
-      ['宸叉湁涓€杞湪杩愯锛屾墜鍔ㄨЕ鍙戝凡鎺掗槦', '已有一轮在运行，手动触发已排队'],
+      ['鐮旂┒缂撳瓨宸查鐑?', '研究缓存已预热'],
+      ['鍗曟璇曡窇宸茶Е鍙?', '单次试跑已触发'],
+      ['宸叉湁涓€杞湪杩愯锛屾墜鍔ㄨЕ鍙戝凡鎺掗槦', '已有一轮在运行，手动触发已排队'],
     ];
     replacements.forEach(([from, to]) => {
       value = value.split(from).join(to);
@@ -1577,7 +1577,7 @@
       state.liveDecisionActivityLastGood = state.liveDecisionActivity;
       renderLiveDecisionActivitySummary(state.liveDecisionActivity);
     } catch (err) {
-      const errorMessage = String(err?.message || '绋嶅悗鑷姩閲嶈瘯');
+      const errorMessage = String(err?.message || '稍后自动重试');
       state.liveDecisionActivity = state.liveDecisionActivityLastGood && typeof state.liveDecisionActivityLastGood === 'object'
         ? {
             ...state.liveDecisionActivityLastGood,
@@ -2694,9 +2694,9 @@
       : '鍏堥€夌爺绌朵换鍔★紝鍐嶇偣鍑诲€欓€夌瓥鐣ュ崱鐗?;
     const hint = proposal
       ? (candidateCount
-        ? '鐐瑰嚮鍊欓€夌瓥鐣ュ崱鐗囷紝鍦ㄥ彸渚ц繘鍏ョ 4 姝ユ敞鍐?閮ㄧ讲'
-        : '鍏堣繍琛岃研究浠诲姟锛屼骇鍑哄€欓€夊悗鍐嶆煡鐪嬭鎯?)
-      : '鏌ョ湅璇︾粏分析中庣 4 姝ユ敞鍐?閮ㄧ讲';
+        ? '点击候选策略卡片，在右侧进入第 4 步注册部分'
+        : '先运行研究任务，产出候选后再查看详情'
+      : '查看详情 / 进入第 4 步注册部分';
     return `<div class="ai-detail-placeholder">
       <div style="font-size:36px;opacity:.3;">馃搳</div>
       <div style="margin-top:10px;color:#6b7fa0;font-size:13px;">${esc(summary)}<br>${esc(hint)}</div>
@@ -3731,7 +3731,7 @@
               ${esc(activateLabel)}
             </button>
             <div style="font-size:10px;color:#6b7fa0;margin-top:3px;">
-              灏嗗厛鍒囨崲绯荤粺鍒?live 模式骞惰姹傝緭鍏ョ‘璁ゆ枃鏈紝纭鍚庢墠浼氱湡姝ｅ惎鍔ㄨ鍊欓€夌殑实盘运行銆?
+              将先切换系统到 live 模式并要求输入确认文本，确认后才会真正启动候选的实盘运行。
             </div>
            </div>`;
         */ return liveActivateHtml; })()
@@ -3768,9 +3768,9 @@
 
     /* panel.querySelector('#btn-activate-live')?.addEventListener('click', async () => {
       const btn = panel.querySelector('#btn-activate-live');
-      const defaultLabel = String(btn?.dataset?.defaultLabel || btn?.textContent || '鍚姩实盘运行 鈫?);
+      const defaultLabel = String(btn?.dataset?.defaultLabel || btn?.textContent || '启动实盘运行 →');
       if (btn) {
-        btn.textContent = '姝ｅ湪鍚姩实盘...';
+        btn.textContent = '正在启动实盘...';
         btn.disabled = true;
       }
       try {
@@ -3783,14 +3783,14 @@
           return;
         }
         const strategyName = String(result?.registered_strategy_name || result?.runtime_status || 'live_running');
-        notify(`鍊欓€夊凡鍚姩实盘运行: ${strategyName}`);
+        notify(`候选已启动实盘运行: ${strategyName}`);
         await refreshWorkbench('', candidateId);
       } catch (err) {
         if (btn) {
           btn.textContent = defaultLabel;
           btn.disabled = false;
         }
-        notify(`鍚姩实盘失败: ${err.message}`, true);
+        notify(`启动实盘失败: ${err.message}`, true);
       }
     }); */
 
@@ -3838,7 +3838,7 @@
       });
     });
 
-    // 人工纭鎸夐挳
+    // 人工确认按钮
     const approvalSelect = panel.querySelector('#approval-target-select');
     if (approvalSelect) {
       approvalSelect.querySelector('option[value="shadow"]')?.remove();
@@ -3960,7 +3960,7 @@
   }
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     涓€閿敞鍐?Modal
+     一键注册 Modal
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function refreshCompareToolbar() {
     const btn = document.getElementById('ai-compare-btn');
@@ -4283,7 +4283,7 @@
   }
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     人工纭闃熷垪
+     人工确认队列
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   async function cancelModeSwitchToken(token) {
     const safeToken = String(token || '').trim();
@@ -4305,8 +4305,13 @@
     if (!safeCandidateId) throw new Error('缂哄皯 candidate_id');
     const candidate = state.candidates.find(item => String(item?.candidate_id || '') === safeCandidateId) || null;
     const notePrompt = candidate
-      ? `纭灏嗗€欓€?${safeCandidateId.slice(0, 8)} 鍚姩涓哄疄鐩樿繍琛岋紵\n策略锛?{candidate.strategy || '--'} / ${candidate.symbol || '--'} / ${candidate.timeframe || '--'}\n\n璇疯緭鍏ュ娉紙鍙暀绌猴紝鐐瑰彇娑堝垯缁堟鏈鎿嶄綔锛夛細`
-      : `纭灏嗗€欓€?${safeCandidateId.slice(0, 8)} 鍚姩涓哄疄鐩樿繍琛岋紵\n\n璇疯緭鍏ュ娉紙鍙暀绌猴紝鐐瑰彇娑堝垯缁堟鏈鎿嶄綔锛夛細`;
+      ? `确认将候选 ${safeCandidateId.slice(0, 8)} 启动为实盘运行？
+策略：${candidate.strategy || '--'} / ${candidate.symbol || '--'} / ${candidate.timeframe || '--'}
+
+请输入备注（可留空，点取消则终止操作）：`
+      : `确认将候选 ${safeCandidateId.slice(0, 8)} 启动为实盘运行？
+
+请输入备注（可留空，点取消则终止操作）：`;
     const notes = window.prompt(notePrompt, '');
     if (notes === null) return { cancelled: true };
 
@@ -4327,9 +4332,11 @@
         || modeSnapshot?.confirm_hint
         || 'CONFIRM LIVE TRADING'
       ).trim();
-      if (!token) throw new Error('鍒囨崲鍒板疄鐩樻椂鏈繑鍥炵‘璁や护鐗?);
+      if (!token) throw new Error('切换到实盘时未返回确认令牌');
       const confirmInput = window.prompt(
-        `绯荤粺褰撳墠浠嶅湪纸盘模式锛屽繀椤诲厛鍒囨崲鍒板疄鐩樻ā寮忋€俓n璇疯緭鍏ョ‘璁ゆ枃鏈互缁х画锛歕n${confirmHint}`,
+        `系统当前仍在纸盘模式，必须先切换到实盘模式。
+请输入确认文本以继续：
+${confirmHint}`,
         confirmHint,
       );
       if (confirmInput === null) {
@@ -4338,7 +4345,7 @@
       }
       if (String(confirmInput).trim() !== confirmHint) {
         await cancelModeSwitchToken(token);
-        throw new Error('纭鏂囨湰涓嶅尮閰嶏紝宸插彇娑堝垏鎹㈠埌实盘');
+        throw new Error('确认文本不匹配，已取消切换到实盘');
       }
       try {
         await rootApi('/trading/mode/confirm', {
@@ -4834,7 +4841,7 @@
     const primarySym = symbols[0] || getCurrentResearchSymbol() || 'BTC/USDT';
     const plannerConstraints = buildPlannerConstraints();
 
-    // ── 鑷姩閲囬泦瀹炴椂甯傚満涓婁笅鏂?──
+    // ── 自动采集实时市场上下文 ──
     const marketCtxEl = document.getElementById('ai-market-context-hint');
     if (marketCtxEl) marketCtxEl.textContent = '正在采集市场上下文...';
     const liveCtx = await _collectLiveMarketContext(primarySym).catch(() => ({}));
@@ -4895,7 +4902,7 @@
     await refreshWorkbench(result?.proposal?.proposal_id || '', '');
   }
 
-  // generateAIContext / generateProposal 浣跨敤涓婃柟鍞竴瀹炵幇锛岄伩鍏嶉噸澶嶈鐩栥€?
+  // generateAIContext / generateProposal 使用上方唯一实现，避免重复覆盖。
 
   async function runOneClickResearchDeploy() {
     const btn = document.getElementById('ai-oneclick-btn');
@@ -5758,7 +5765,7 @@
     document.getElementById('ai-clear-candidates-btn')?.addEventListener('click', () =>
       clearVisibleCandidates().catch(err => notify(`清空候选失败: ${err.message}`, true)));
 
-    /* one-click 鑷姩研究 */
+    /* one-click 自动研究 */
     document.getElementById('ai-oneclick-btn')?.addEventListener('click', () =>
       withActionLock('oneclick', () => runOneClickResearchDeploy()).catch(err => notify(`one-click 执行失败: ${err.message}`, true)));
 
@@ -5946,7 +5953,7 @@
   }
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     杞
+     轮询
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function startPolling() {
     clearInterval(state.signalTimer);
@@ -6056,7 +6063,7 @@
   }
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     初始鍖?
+     初始化
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
   function init() {
     bindInitRetry();
@@ -6093,11 +6100,11 @@
   });
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     Phase A 鈥?瀹炴椂信号闈㈡澘锛?0s 杞锛?
+     Phase A — 实时信号面板，10s 转，
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
 
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     Phase B 鈥?蹇€熸敞鍐?
+     Phase B — 快速注册
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
 
   async function loadLiveSignals() {
@@ -6408,7 +6415,7 @@
     }
   }
 
-  /* 暴露缁欏閮ㄨ皟鐢紙兼容鏃т唬鐮侊級 */
+  /* 暴露给外部调用（兼容旧代码）*/
   window.AI = {
     viewCandidate:   id => viewCandidate(id).catch(err => notify(`加载详情失败: ${err.message}`, true)),
     openRegister:    id => openRegisterModal(id).catch(err => notify(`打开注册失败: ${err.message}`, true)),

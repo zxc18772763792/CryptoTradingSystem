@@ -70,6 +70,16 @@ def test_research_workbench_overview_button_uses_parallel_overview_endpoint():
     assert "research.workbench.overview.fallback" in section
 
 
+def test_onchain_panels_use_auto_chain_resolution():
+    app_js = _read("web/static/js/app.js")
+    workbench_js = _read("web/static/js/research_workbench.js")
+
+    assert "chain=auto" in app_js
+    assert "chain=auto" in workbench_js
+    assert "renderData?.chain_context?.display_name||'Auto'" in app_js
+    assert "onchainRes?.chain_context?.display_name || 'Auto'" in workbench_js
+
+
 def test_research_symbol_options_keep_defaults_and_retry_after_timeout():
     app_js = _read("web/static/js/app.js")
 

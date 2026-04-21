@@ -1496,6 +1496,88 @@ def _backfill_detail_chain_percentiles(
     return backfilled
 
 
+def _build_action_plan(
+    selected: Mapping[str, Any],
+    invalidate_conditions: Sequence[str],
+) -> Dict[str, Any]:
+    source = str(selected.get("signal_source") or "").strip()
+    ignition_score = _to_float(selected.get("ignition_score"), 0.0)
+    continuation_score = _to_float(selected.get("continuation_score"), 0.0)
+    crowding_score = _to_float(selected.get("crowding_late_score"), 0.0)
+    narrative_heat = _to_float(selected.get("narrative_heat_score"), 0.0)
+    meme_rotation = _to_float(selected.get("meme_rotation_score"), 0.0)
+    in_watchlist = bool(selected.get("in_watchlist"))
+    data_quality = selected.get("data_quality") or {}
+    market_freshness = _to_float(data_quality.get("market_data_freshness"), 0.0)
+
+    tone = "muted"
+    stance = "先观察，等待确认"
+    summary = "当前证据还不够集中，先别把它当成明确埋伏位。"
+    primary_action = "加入 Watchlist"
+    secondary_action = "等下一轮扫描"
+    actions = [
+        "先留在观察池，不要急着把榜单名次当成交点。",
+        "下一次扫描若信号来源切成点火/延续，再升级处理。",
+    ]
+
+    if crowding_score >= 0.65 or source == "crowded_late_stage":
+        tone = "danger"
+        stance = "高拥挤，别追"
+        summary = "更像末端拥挤，不是舒服的埋伏位，优先防止追在情绪末端。"
+        primary_action = "建拥挤预警"
+        secondary_action = "等拥挤回落"
+        actions = [
+            "先不要把它当新点火，优先等拥挤分和资金过热回落。",
+            "如果只是想跟踪，保留在 Watchlist 即可，不要因为榜单靠前就直接追。",
+        ]
+    elif ignition_score >= 0.60 or source == "perp_ignition":
+        tone = "ignition"
+        stance = "点火观察，先等确认"
+        summary = "这类最接近“刚启动”，但更适合预警加确认，不适合把榜单本身当作追价理由。"
+        primary_action = "建点火预警"
+        secondary_action = "等首轮回踩确认"
+        actions = [
+            "重点盯 15m / 1h 是否继续放量、OI 继续抬升，而不是只看一根启动K。",
+            "更稳的埋伏方式是等首轮回踩不破，再观察是否有二次发力。",
+        ]
+    elif continuation_score >= 0.55 or source == "perp_continuation":
+        tone = "control"
+        stance = "延续跟踪，别当首爆"
+        summary = "这更像走势已经发动后的延续段，不是最早的点火位。"
+        primary_action = "建跃升预警"
+        secondary_action = "看回踩确认"
+        actions = [
+            "适合跟踪回踩后的承接，不适合把它当成“刚启动”的埋伏点。",
+            "如果 funding 和 crowding 继续抬升，要及时降级成观察而不是硬追。",
+        ]
+    elif source.startswith("narrative_") or narrative_heat >= 0.55 or meme_rotation >= 0.55 or in_watchlist:
+        tone = "narrative"
+        stance = "叙事观察，等合约跟随"
+        summary = "更偏题材轮动 / 板块升温，适合先收藏和跟踪，不够像纯 Perp 点火。"
+        primary_action = "建叙事预警"
+        secondary_action = "保留 Watchlist"
+        actions = [
+            "先看同板块是不是一起升温，再看合约侧点火分会不会补上来。",
+            "如果只是单币热度抬头但没有合约跟随，优先当观察，不要急着追。",
+        ]
+
+    if market_freshness and market_freshness < 0.35:
+        summary = f"当前数据新鲜度偏低，{summary}"
+        actions.insert(0, "先等下一次刷新确认，避免拿旧快照直接下判断。")
+
+    if invalidate_conditions:
+        actions.append(f"失效先看：{invalidate_conditions[0]}")
+
+    return {
+        "tone": tone,
+        "stance": stance,
+        "summary": summary,
+        "primary_action": primary_action,
+        "secondary_action": secondary_action,
+        "actions": actions[:4],
+    }
+
+
 def build_detail_payload(
     *,
     rows: Sequence[Mapping[str, Any]],
@@ -1519,6 +1601,7 @@ def build_detail_payload(
             "narrative_linkage": {},
             "event_timeline": [],
             "invalidate_conditions": [],
+            "action_plan": {},
             "related_candidates": [],
         }
     metrics = dict(selected.get("metrics") or {})
@@ -1710,6 +1793,8 @@ def build_detail_payload(
             ]
         )
 
+    action_plan = _build_action_plan(selected, invalidate_conditions)
+
     related_candidates = []
     for row in ordered:
         if str(row.get("symbol") or "").upper() == normalized_symbol:
@@ -1774,5 +1859,6 @@ def build_detail_payload(
         "narrative_linkage": narrative_linkage,
         "event_timeline": event_timeline[:12],
         "invalidate_conditions": invalidate_conditions,
+        "action_plan": action_plan,
         "related_candidates": related_candidates,
     }

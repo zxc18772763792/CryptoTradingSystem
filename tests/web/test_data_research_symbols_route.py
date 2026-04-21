@@ -63,6 +63,7 @@ def test_research_symbols_falls_back_when_coinglass_universe_fails(monkeypatch):
         }
 
     monkeypatch.setattr(data_api, "build_exchange_altcoin_universe", fake_build_exchange_altcoin_universe)
+    monkeypatch.setattr(data_api, "load_cached_exchange_altcoin_universe", lambda exchange, allow_stale=True: None)
     monkeypatch.setattr(data_api, "get_data_symbols", fake_get_data_symbols)
 
     response = client.get("/api/data/research/symbols?exchange=binance")
@@ -71,8 +72,19 @@ def test_research_symbols_falls_back_when_coinglass_universe_fails(monkeypatch):
 
     assert payload["source"] == "research_universe_fallback"
     assert payload["primary_symbol"] == "BTC/USDT"
-    assert payload["symbols"] == ["BTC/USDT", "ETH/USDT"]
-    assert payload["default_count"] == 2
+    assert payload["symbols"][:10] == [
+        "BTC/USDT",
+        "ETH/USDT",
+        "BNB/USDT",
+        "SOL/USDT",
+        "XRP/USDT",
+        "DOGE/USDT",
+        "ADA/USDT",
+        "TRX/USDT",
+        "TON/USDT",
+        "LINK/USDT",
+    ]
+    assert payload["default_count"] == 10
 
 
 def test_research_symbols_falls_back_when_coinglass_universe_times_out(monkeypatch):
@@ -91,6 +103,7 @@ def test_research_symbols_falls_back_when_coinglass_universe_times_out(monkeypat
         }
 
     monkeypatch.setattr(data_api, "build_exchange_altcoin_universe", fake_build_exchange_altcoin_universe)
+    monkeypatch.setattr(data_api, "load_cached_exchange_altcoin_universe", lambda exchange, allow_stale=True: None)
     monkeypatch.setattr(data_api, "get_data_symbols", fake_get_data_symbols)
 
     response = client.get("/api/data/research/symbols?exchange=binance")
@@ -99,6 +112,57 @@ def test_research_symbols_falls_back_when_coinglass_universe_times_out(monkeypat
 
     assert payload["source"] == "research_universe_fallback"
     assert payload["primary_symbol"] == "BTC/USDT"
-    assert payload["symbols"] == ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-    assert payload["default_count"] == 3
+    assert payload["symbols"][:10] == [
+        "BTC/USDT",
+        "ETH/USDT",
+        "BNB/USDT",
+        "SOL/USDT",
+        "XRP/USDT",
+        "DOGE/USDT",
+        "ADA/USDT",
+        "TRX/USDT",
+        "TON/USDT",
+        "LINK/USDT",
+    ]
+    assert payload["default_count"] == 10
+    assert "timed out" in payload["warning"]
+
+
+def test_research_symbols_prefers_stale_cached_universe_on_timeout(monkeypatch):
+    app = FastAPI()
+    app.include_router(data_api.router, prefix="/api/data")
+    client = TestClient(app)
+
+    async def fake_build_exchange_altcoin_universe(exchange: str, **kwargs):
+        raise asyncio.TimeoutError()
+
+    def fake_load_cached_exchange_altcoin_universe(exchange: str, allow_stale: bool = False):
+        assert exchange == "binance"
+        assert allow_stale is True
+        return {
+            "exchange": "binance",
+            "major_market_cap_symbols": ["BTC/USDT", "ETH/USDT"],
+            "symbols": ["LINK/USDT", "AAVE/USDT"],
+            "count": 2,
+            "source": "coinglass_altcoin_universe",
+            "updated_at": "2026-04-20T00:00:00+00:00",
+        }
+
+    async def fail_get_data_symbols(exchange: str = "binance"):
+        raise AssertionError("get_data_symbols should not be used when cached universe exists")
+
+    monkeypatch.setattr(data_api, "build_exchange_altcoin_universe", fake_build_exchange_altcoin_universe)
+    monkeypatch.setattr(data_api, "load_cached_exchange_altcoin_universe", fake_load_cached_exchange_altcoin_universe)
+    monkeypatch.setattr(data_api, "get_data_symbols", fail_get_data_symbols)
+
+    response = client.get("/api/data/research/symbols?exchange=binance")
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["source"] == "research_universe_fallback"
+    assert payload["fallback_source"] == "coinglass_altcoin_universe_cache"
+    assert payload["stale_fallback"] is True
+    assert payload["primary_symbol"] == "BTC/USDT"
+    assert payload["symbols"][:4] == ["BTC/USDT", "ETH/USDT", "LINK/USDT", "AAVE/USDT"]
+    assert payload["default_count"] == 4
     assert "timed out" in payload["warning"]

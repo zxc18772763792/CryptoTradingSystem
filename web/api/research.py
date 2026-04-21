@@ -29,6 +29,7 @@ from web.api.data import (
     get_multi_assets_overview,
     get_onchain_overview,
     get_research_symbols,
+    resolve_onchain_chain_context,
 )
 from web.api.trading import (
     get_analytics_history_status,
@@ -2972,12 +2973,13 @@ async def _build_cross_asset_module(profile: ResearchProfile) -> Dict[str, Any]:
 
 
 async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
+    chain_context = resolve_onchain_chain_context(profile.primary_symbol, "auto")
     onchain_task = _wait_or_none(
         get_onchain_overview(
             exchange=profile.exchange,
             symbol=profile.primary_symbol,
             whale_threshold_btc=10.0,
-            chain="Ethereum",
+            chain="auto",
             refresh=False,
         ),
         8.0,
@@ -3086,7 +3088,10 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
             ),
             "news_events": int(news.get("events_count") or 0),
             "tvl_chain": str(
-                (onchain.get("defi_tvl") or {}).get("chain") or "Ethereum"
+                (onchain.get("defi_tvl") or {}).get("chain")
+                or (onchain.get("chain_context") or {}).get("display_name")
+                or chain_context.get("display_name")
+                or "Auto"
             ),
             "served_mode": str(onchain.get("served_mode") or "live"),
             "funding_sources": funding_count,

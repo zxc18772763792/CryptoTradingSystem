@@ -880,6 +880,7 @@ def test_execute_signal_sizes_pair_legs_with_shared_hedge_ratio(monkeypatch):
             return float(preferred_price or (100.0 if symbol == "AAA/USDT" else 200.0))
 
         monkeypatch.setattr(execution_engine_module.account_manager, "resolve_exchange", lambda account_id, exchange: "binance")
+        monkeypatch.setattr(execution_engine_module.account_manager, "get_account_mode", lambda account_id, default="paper": "live")
         monkeypatch.setattr(
             engine,
             "_resolve_strategy_trade_policy",

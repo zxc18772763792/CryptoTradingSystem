@@ -790,7 +790,7 @@ async def _run_data_maintenance_once() -> Dict[str, Any]:
             symbol="BTC/USDT",
             exchange=_AUTO_SYNC_PRIMARY_EXCHANGE,
             whale_threshold_btc=100.0,
-            chain="Ethereum",
+            chain="auto",
         ),
     )
     multi_assets = await _maintenance_safe_call(

@@ -116,6 +116,75 @@ def test_compute_onchain_overview_includes_premium_snapshot(monkeypatch):
     assert payload["component_status"]["premium_external"]["detail"].startswith("cached=2/")
 
 
+def test_resolve_onchain_chain_context_maps_bsc_and_brc20():
+    from web.api import data as data_api
+
+    bsc = data_api.resolve_onchain_chain_context("BNB/USDT", "auto")
+    brc20 = data_api.resolve_onchain_chain_context("ORDI/USDT", "auto")
+
+    assert bsc["display_name"] == "BSC"
+    assert bsc["lookup_chain"] == "BSC"
+    assert bsc["tvl_supported"] is True
+    assert brc20["display_name"] == "BRC-20"
+    assert brc20["lookup_chain"] == "Bitcoin"
+    assert brc20["tvl_supported"] is True
+
+
+def test_compute_onchain_overview_uses_lookup_chain_but_preserves_display_chain(monkeypatch):
+    from web.api import data as data_api
+
+    captured: dict[str, object] = {}
+
+    async def fake_tvl(*, chain, display_chain=None, chain_context=None):
+        captured["chain"] = chain
+        captured["display_chain"] = display_chain
+        captured["chain_context"] = dict(chain_context or {})
+        return {
+            "chain": display_chain,
+            "lookup_chain": chain,
+            "available": True,
+            "latest_tvl": 456.0,
+            "change_1d_pct": 1.5,
+            "change_7d_pct": 4.2,
+            "series": [],
+        }
+
+    async def fake_whales(*args, **kwargs):
+        return {"available": True, "count": 0, "transactions": []}
+
+    async def fake_funding(*args, **kwargs):
+        return {"available": True, "count": 1, "rates": {"binance": 0.0001}}
+
+    async def fake_fear(*args, **kwargs):
+        return {"available": True, "value": 52, "classification": "Neutral", "signal": "neutral"}
+
+    monkeypatch.setattr(data_api.exchange_manager, "get_exchange", lambda *_: None)
+    monkeypatch.setattr(data_api, "_fetch_defillama_chain_tvl", fake_tvl)
+    monkeypatch.setattr(data_api, "_fetch_btc_whale_unconfirmed", fake_whales)
+    monkeypatch.setattr(data_api, "_fetch_multi_exchange_funding", fake_funding)
+    monkeypatch.setattr(data_api, "_fetch_fear_greed_snapshot", fake_fear)
+    monkeypatch.setattr(
+        data_api,
+        "_load_premium_external_snapshot",
+        lambda: {"sources": {}, "summary": {"total_sources": 0, "configured_keys": 0, "cached_sources": 0}},
+    )
+
+    payload = asyncio.run(
+        data_api._compute_onchain_overview(
+            exchange="binance",
+            symbol="ORDI/USDT",
+            whale_threshold_btc=10.0,
+            chain="auto",
+        )
+    )
+
+    assert captured["chain"] == "Bitcoin"
+    assert captured["display_chain"] == "BRC-20"
+    assert payload["chain_context"]["display_name"] == "BRC-20"
+    assert payload["defi_tvl"]["chain"] == "BRC-20"
+    assert payload["defi_tvl"]["lookup_chain"] == "Bitcoin"
+
+
 def test_load_premium_external_snapshot_includes_coinglass(monkeypatch):
     from web.api import data as data_api
 

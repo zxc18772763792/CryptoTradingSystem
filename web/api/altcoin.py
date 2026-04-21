@@ -586,13 +586,13 @@ async def _resolve_universe(
     scope = _normalize_universe_scope(universe_scope)
     cap = MAX_EXPANDED_SIZE if scope == "expanded" else MAX_UNIVERSE_SIZE
 
-    requested = _normalize_symbols(symbols)
-    fallback_used = False
+    explicit_requested = _normalize_symbols(symbols)
+    requested = list(explicit_requested)
+    fallback_warning = ""
 
     # For watchlist scope: always merge watchlist symbols
     if scope == "watchlist" and not requested:
         requested = get_watchlist_symbols()[:cap]
-        fallback_used = True
     elif scope == "expanded" and not requested:
         # Load research + watchlist
         research_symbols = await get_research_symbols(exchange=exchange)
@@ -601,11 +601,9 @@ async def _resolve_universe(
             scope,
             research_symbols=base,
         )[:cap]
-        fallback_used = True
     elif not requested:
         research_symbols = await get_research_symbols(exchange=exchange)
         requested = _normalize_symbols((research_symbols.get("symbols") or [])[:MAX_UNIVERSE_SIZE])
-        fallback_used = True
 
     filtered, excluded_retired = _research_retired_filter(
         exchange=exchange,
@@ -624,10 +622,15 @@ async def _resolve_universe(
             exclude_retired=exclude_retired,
         )
         filtered = _normalize_symbols(filtered)[:MAX_UNIVERSE_SIZE]
-        fallback_used = True
+        if explicit_requested:
+            fallback_warning = "传入的 symbols 过滤后为空或不可用，已回退到 research universe 默认币池。"
+        elif scope == "watchlist":
+            fallback_warning = "当前 Watchlist 候选不可用，已回退到 research universe 默认币池。"
+        elif scope == "expanded":
+            fallback_warning = "当前扩展扫描候选不可用，已回退到 research universe 默认币池。"
     warnings: List[str] = []
-    if fallback_used:
-        warnings.append("symbols 为空或不可用，已回退到 research universe 默认币池。")
+    if fallback_warning:
+        warnings.append(fallback_warning)
     return requested[:cap], filtered, excluded_retired, warnings
 
 
@@ -794,25 +797,43 @@ async def _compute_scan_payload(
     universe_scope: str = "research",
     mode: str = "combined",
     view: str = "",
+    resolved_universe: Optional[Tuple[List[str], List[str], List[str], List[str]]] = None,
 ) -> Dict[str, Any]:
-    requested_symbols, symbols_used, excluded_retired, warnings = await _resolve_universe(
-        exchange=exchange,
-        timeframe=timeframe,
-        symbols=symbols,
-        exclude_retired=exclude_retired,
-        universe_scope=universe_scope,
-    )
-    frames, frame_warnings = await _load_market_frames(exchange=exchange, timeframe=timeframe, symbols=symbols_used)
-    warnings.extend(frame_warnings)
-    try:
-        market_snapshots = await load_coinglass_market_snapshots(
+    if resolved_universe is None:
+        requested_symbols, symbols_used, excluded_retired_symbols, warnings = await _resolve_universe(
+            exchange=exchange,
+            timeframe=timeframe,
+            symbols=symbols,
+            exclude_retired=exclude_retired,
+            universe_scope=universe_scope,
+        )
+    else:
+        requested_symbols, symbols_used, excluded_retired_symbols, warnings = resolved_universe
+        requested_symbols = _normalize_symbols(requested_symbols)
+        symbols_used = _normalize_symbols(symbols_used)
+        excluded_retired_symbols = _normalize_symbols(excluded_retired_symbols)
+        warnings = [str(item) for item in (warnings or []) if str(item or "").strip()]
+
+    frame_result, market_snapshot_result = await asyncio.gather(
+        _load_market_frames(exchange=exchange, timeframe=timeframe, symbols=symbols_used),
+        load_coinglass_market_snapshots(
             exchange=exchange,
             symbols=symbols_used,
             refresh=refresh,
-        )
-    except Exception as exc:
+        ),
+        return_exceptions=True,
+    )
+    if isinstance(frame_result, Exception):
+        frames = {}
+        frame_warnings = [f"本地 K 线加载失败: {frame_result}"]
+    else:
+        frames, frame_warnings = frame_result
+    warnings.extend(frame_warnings)
+    if isinstance(market_snapshot_result, Exception):
         market_snapshots = {}
-        warnings.append(f"CoinGlass market snapshot unavailable: {exc}")
+        warnings.append(f"CoinGlass market snapshot unavailable: {market_snapshot_result}")
+    else:
+        market_snapshots = market_snapshot_result
 
     symbols_used = _normalize_symbols(list(frames.keys()) + list(market_snapshots.keys()))
     if not symbols_used:
@@ -821,8 +842,8 @@ async def _compute_scan_payload(
             "timeframe": timeframe,
             "symbols_requested": requested_symbols,
             "symbols_used": [],
-            "excluded_retired": excluded_retired,
-            "excluded_reasons": {"retired_like": excluded_retired},
+            "excluded_retired": excluded_retired_symbols,
+            "excluded_reasons": {"retired_like": excluded_retired_symbols},
             "warnings": warnings + ["没有可用于山寨雷达扫描的本地 K 线数据。"],
             "rows": [],
             "generated_at": _utcnow().isoformat(),
@@ -902,9 +923,9 @@ async def _compute_scan_payload(
         "timeframe": timeframe,
         "symbols_requested": requested_symbols,
         "symbols_used": symbols_used,
-        "excluded_retired": excluded_retired,
-        "excluded_reasons": {"retired_like": excluded_retired},
-        "warnings": _normalize_symbols([]) and [] or list(dict.fromkeys(warnings)),
+        "excluded_retired": excluded_retired_symbols,
+        "excluded_reasons": {"retired_like": excluded_retired_symbols},
+        "warnings": list(dict.fromkeys(warnings)),
         "rows": rows,
         "generated_at": _utcnow().isoformat(),
         "universe_meta": universe_meta(symbols_used, universe_scope),
@@ -928,7 +949,7 @@ async def get_altcoin_scan_snapshot(
     normalized_view = _normalize_view(view) if view else ""
     normalized_scope = _normalize_universe_scope(universe_scope)
     normalized_symbols = _normalize_symbols(symbols)
-    requested_symbols, filtered_symbols, _, pre_warnings = await _resolve_universe(
+    requested_symbols, filtered_symbols, excluded_retired_symbols, pre_warnings = await _resolve_universe(
         exchange=normalized_exchange,
         timeframe=normalized_timeframe,
         symbols=normalized_symbols,
@@ -980,6 +1001,12 @@ async def get_altcoin_scan_snapshot(
             universe_scope=normalized_scope,
             mode=normalized_mode,
             view=normalized_view,
+            resolved_universe=(
+                requested_symbols,
+                filtered_symbols or requested_symbols,
+                excluded_retired_symbols,
+                pre_warnings,
+            ),
         )
         payload["mode"] = normalized_mode
         payload["view"] = normalized_view or normalized_timeframe
@@ -1262,6 +1289,7 @@ async def get_altcoin_radar_detail(
     timeframe: str = DEFAULT_TIMEFRAME,
     symbol: str = "",
     symbols: Optional[str] = None,
+    watchlist_focus: bool = False,
     refresh: bool = False,
     exclude_retired: bool = True,
     mode: str = "combined",
@@ -1292,39 +1320,44 @@ async def get_altcoin_radar_detail(
         ),
         None,
     )
-    need_chain_fallback = _needs_detail_chain_fallback(selected_row)
-    onchain_task = get_onchain_overview(
-        symbol=normalized_symbol,
-        exchange=normalized_exchange,
-        whale_threshold_btc=10.0,
-        chain="Ethereum",
-        refresh=refresh,
-        hours=4,
-    )
-    live_chain_task = _load_detail_live_chain_context(
-        exchange=normalized_exchange,
-        symbol=normalized_symbol,
-    ) if need_chain_fallback else asyncio.sleep(0, result=({}, {}))
-    onchain_context, live_chain_context = await asyncio.gather(onchain_task, live_chain_task)
-    live_community_snapshot, live_whale_snapshot = live_chain_context
-    if not live_whale_snapshot:
-        onchain_whales = dict((onchain_context or {}).get("whale_activity") or {})
-        if onchain_whales:
-            live_whale_snapshot = {
-                "exchange": normalized_exchange,
-                "symbol": normalized_symbol,
-                "timestamp": (onchain_context or {}).get("generated_at"),
-                "available": bool(onchain_whales.get("available", True)),
-                "source_error": onchain_whales.get("error"),
-                "source_name": "onchain_overview",
-                "capture_status": "ok" if not onchain_whales.get("error") else "degraded",
-                "latency_ms": (onchain_context or {}).get("latency_ms"),
-                "payload": onchain_whales,
-                "count": int(onchain_whales.get("count") or 0),
-                "threshold_btc": onchain_whales.get("threshold_btc"),
-                "btc_price": onchain_whales.get("btc_price"),
-                "transactions": list(onchain_whales.get("transactions") or []),
-            }
+    fast_watchlist_focus = bool(watchlist_focus) and normalized_symbols == [normalized_symbol]
+    onchain_context: Dict[str, Any] = {}
+    live_community_snapshot: Dict[str, Any] = {}
+    live_whale_snapshot: Dict[str, Any] = {}
+    if not fast_watchlist_focus:
+        need_chain_fallback = _needs_detail_chain_fallback(selected_row)
+        onchain_task = get_onchain_overview(
+            symbol=normalized_symbol,
+            exchange=normalized_exchange,
+            whale_threshold_btc=10.0,
+            chain="auto",
+            refresh=refresh,
+            hours=4,
+        )
+        live_chain_task = _load_detail_live_chain_context(
+            exchange=normalized_exchange,
+            symbol=normalized_symbol,
+        ) if need_chain_fallback else asyncio.sleep(0, result=({}, {}))
+        onchain_context, live_chain_context = await asyncio.gather(onchain_task, live_chain_task)
+        live_community_snapshot, live_whale_snapshot = live_chain_context
+        if not live_whale_snapshot:
+            onchain_whales = dict((onchain_context or {}).get("whale_activity") or {})
+            if onchain_whales:
+                live_whale_snapshot = {
+                    "exchange": normalized_exchange,
+                    "symbol": normalized_symbol,
+                    "timestamp": (onchain_context or {}).get("generated_at"),
+                    "available": bool(onchain_whales.get("available", True)),
+                    "source_error": onchain_whales.get("error"),
+                    "source_name": "onchain_overview",
+                    "capture_status": "ok" if not onchain_whales.get("error") else "degraded",
+                    "latency_ms": (onchain_context or {}).get("latency_ms"),
+                    "payload": onchain_whales,
+                    "count": int(onchain_whales.get("count") or 0),
+                    "threshold_btc": onchain_whales.get("threshold_btc"),
+                    "btc_price": onchain_whales.get("btc_price"),
+                    "transactions": list(onchain_whales.get("transactions") or []),
+                }
     detail = build_detail_payload(
         rows=scan_payload.get("rows") or [],
         symbol=normalized_symbol,
@@ -1342,6 +1375,7 @@ async def get_altcoin_radar_detail(
         "symbols_used": scan_payload.get("symbols_used") or [],
         "generated_at": scan_payload.get("generated_at"),
         "cache": scan_payload.get("cache") or {},
+        "watchlist_focus": fast_watchlist_focus,
     }
     return detail
 

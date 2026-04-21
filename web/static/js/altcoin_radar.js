@@ -57,19 +57,28 @@
 
   const state = {
     bound: false,
+    dom: Object.create(null),
     universeLoadedFor: '',
+    universeCatalog: null,
     scan: null,
     detail: null,
     selectedSymbol: '',
     filteredRows: [],
     scanSeq: 0,
     detailSeq: 0,
+    eventSeq: 0,
     radarMode: 'combined',  // Phase 1
     watchlist: [],
+    eventTimelineBySymbol: new Map(),
   };
 
   function q(id) {
-    return document.getElementById(id);
+    if (!id) return null;
+    const cached = state.dom[id];
+    if (cached && cached.isConnected) return cached;
+    const node = document.getElementById(id);
+    if (node) state.dom[id] = node;
+    return node;
   }
 
   function eachInspectorAlertButton(callback) {
@@ -186,6 +195,59 @@
     };
   }
 
+  function normalizeWatchlistSymbolInput(symbol) {
+    const raw = String(symbol || '').trim().toUpperCase().replace(/\s+/g, '');
+    if (!raw) return '';
+    if (raw.includes('/')) return raw;
+    if (raw.includes('-')) return raw.replace('-', '/');
+    if (raw.endsWith('USDT') && raw.length > 4) return `${raw.slice(0, -4)}/USDT`;
+    return `${raw}/USDT`;
+  }
+
+  function universeScopeLabel(scope) {
+    if (scope === 'watchlist') return 'Watchlist 收藏列表';
+    if (scope === 'expanded') return '扩展扫描（自动补齐 ~100）';
+    return '研究清单（使用下方多选）';
+  }
+
+  function buildSelectionPlaceholder(symbol) {
+    const normalized = normalizeWatchlistSymbolInput(symbol);
+    if (!normalized) return null;
+    const inWatchlist = normalizeSymbols(state.watchlist || []).includes(normalized);
+    const scopeLabel = universeScopeLabel(readControls().universeScope);
+    return {
+      symbol: normalized,
+      tags: inWatchlist ? ['Watchlist', '榜外观察'] : ['榜外观察'],
+      in_watchlist: inWatchlist,
+      sector: inWatchlist ? 'watchlist' : '',
+      reasons_proxy: [
+        `${normalized} 当前不在本次 ${scopeLabel} 榜单中。`,
+        '可以继续等待详情补载，或把扫描范围切到 Watchlist 收藏列表。',
+      ],
+      reasons_chain: [
+        '当前先展示 Watchlist 占位信息，链上 / 外生确认稍后补齐。',
+      ],
+      data_quality: {},
+      metrics: {},
+      placeholder_reason: `${normalized} 当前不在本次 ${scopeLabel} 榜单中，先展示 Watchlist 占位信息。`,
+    };
+  }
+
+  function resolveSelectedRow(symbol) {
+    const normalized = String(symbol || '').trim().toUpperCase();
+    if (!normalized) return null;
+    return findRow(normalized) || buildSelectionPlaceholder(normalized);
+  }
+
+  function shouldKeepSelectedSymbol(rows, symbol) {
+    const normalized = String(symbol || '').trim().toUpperCase();
+    if (!normalized) return false;
+    if ((Array.isArray(rows) ? rows : []).some((row) => String(row?.symbol || '').trim().toUpperCase() === normalized)) {
+      return true;
+    }
+    return normalizeSymbols(state.watchlist || []).includes(normalized);
+  }
+
   function currentUniverseSymbols() {
     const controls = readControls();
     const used = normalizeSymbols(state.scan?.scan_meta?.symbols_used || state.scan?.summary?.symbols_used || []);
@@ -289,34 +351,39 @@
     const customGroup = q('altcoin-radar-custom-universe-group');
     const customNote = q('altcoin-radar-custom-universe-note');
     const watchlistSummary = q('altcoin-radar-watchlist-summary');
+    const catalogMeta = state.universeCatalog || {};
     const scopeLabelMap = {
-      research: '研究币池',
-      expanded: '扩展 (~100)',
-      watchlist: 'Watchlist',
+      research: '研究清单（使用下方多选）',
+      expanded: '扩展扫描（自动补齐 ~100）',
+      watchlist: 'Watchlist 收藏列表',
     };
-    const currentScopeLabel = scopeLabelMap[controls.universeScope] || '研究币池';
+    const currentScopeLabel = scopeLabelMap[controls.universeScope] || '研究清单（使用下方多选）';
     const selectedCount = controls.universeSymbols.length;
     const watchlistCount = Array.isArray(state.watchlist) ? state.watchlist.length : 0;
     const usedCount = normalizeSymbols(state.scan?.scan_meta?.symbols_used || state.scan?.summary?.symbols_used || []).length;
     if (summaryEl) {
-      let text = `当前范围：${currentScopeLabel}`;
+      let text = `当前模式：${currentScopeLabel}`;
       if (controls.universeScope === 'research') {
-        text += ` · 已选 ${selectedCount || 0} 个自定义币种`;
+        text += ` · 已选 ${selectedCount || 0} 个币种`;
       } else if (controls.universeScope === 'watchlist') {
-        text += ` · Watchlist ${watchlistCount} 个`;
+        text += ` · Watchlist ${watchlistCount} 个成员`;
       } else if (usedCount) {
-        text += ` · 当前扫描 ${usedCount} 个`;
+        text += ` · 当前扫描 ${usedCount} 个币种`;
+      }
+      const sourceText = universeSourceLabel(catalogMeta);
+      if (sourceText) {
+        text += ` · ${sourceText}`;
       }
       summaryEl.textContent = text;
     }
     if (customGroup) customGroup.hidden = controls.universeScope !== 'research';
     if (customNote) {
       customNote.textContent = controls.universeScope === 'research'
-        ? '仅在 `Universe 范围 = 研究币池` 时生效。'
-        : '当前范围不读取这份多选列表，因此这里自动折叠。';
+        ? '这里决定“研究清单”模式下具体扫描哪些币；切到其他模式时，这份多选列表会保留，但不会参与本次扫描。'
+        : '当前不是“研究清单”模式，这份多选列表不会参与扫描。';
     }
     if (watchlistSummary) {
-      watchlistSummary.textContent = `Watchlist 当前 ${watchlistCount} 个成员，用于叙事 / Meme / 板块观察池；切到 \`${currentScopeLabel}\` 时会自动按当前范围扫描。`;
+      watchlistSummary.textContent = `Watchlist 当前 ${watchlistCount} 个成员，用于叙事 / Meme / 板块观察收藏；点击任一标签会在右侧加载该币详情，切到“Watchlist 收藏列表”模式时它们会作为本次扫描来源。`;
     }
   }
 
@@ -395,6 +462,47 @@
     if (el) el.textContent = text;
   }
 
+  function emptyScanPayload() {
+    return { rows: [], summary: {}, scan_meta: {}, warnings: [] };
+  }
+
+  function refreshCurrentScan() {
+    renderScan(state.scan || emptyScanPayload());
+  }
+
+  function syncSelectedRankingRow() {
+    const tbody = q('altcoin-radar-ranking-body');
+    if (!tbody) return;
+    const selectedSymbol = String(state.selectedSymbol || '').trim().toUpperCase();
+    Array.from(tbody.querySelectorAll('tr[data-symbol]')).forEach((row) => {
+      const rowSymbol = String(row.dataset.symbol || '').trim().toUpperCase();
+      row.classList.toggle('is-selected', !!selectedSymbol && rowSymbol === selectedSymbol);
+    });
+  }
+
+  function cacheTimelineEvents(symbol, events) {
+    const normalized = String(symbol || '').trim().toUpperCase();
+    if (!normalized || !Array.isArray(events)) return;
+    state.eventTimelineBySymbol.set(normalized, events.map((event) => ({ ...(event || {}) })));
+  }
+
+  function getCachedTimelineEvents(symbol) {
+    const normalized = String(symbol || '').trim().toUpperCase();
+    if (!normalized || !state.eventTimelineBySymbol.has(normalized)) return null;
+    return state.eventTimelineBySymbol.get(normalized) || [];
+  }
+
+  function universeSourceLabel(meta) {
+    const fallbackSource = String(meta?.fallbackSource || '').trim();
+    const source = String(meta?.source || '').trim();
+    if (fallbackSource === 'coinglass_altcoin_universe_cache') return '候选来源：缓存研究池';
+    if (fallbackSource === 'data_symbols') return '候选来源：默认列表';
+    if (fallbackSource === 'client_default') return '候选来源：前端默认列表';
+    if (source === 'coinglass_altcoin_universe') return '候选来源：CoinGlass 研究池';
+    if (source === 'research_universe_fallback') return '候选来源：回退列表';
+    return '';
+  }
+
   function requireApi() {
     if (typeof api !== 'function') {
       throw new Error('altcoin radar requires global api() helper');
@@ -411,20 +519,41 @@
     const currentSelected = normalizeSymbols(getSelectedValues('altcoin-radar-universe'));
     const apiFetch = requireApi();
     let finalSymbols = DEFAULT_UNIVERSE.slice();
+    let defaultCount = Math.min(12, finalSymbols.length);
     try {
       const resp = await apiFetch(`/data/research/symbols?exchange=${encodeURIComponent(controls.exchange)}`, {
         timeoutMs: 15000,
       });
       const symbols = normalizeSymbols(resp?.symbols || []);
       if (symbols.length) finalSymbols = symbols;
+      defaultCount = Math.max(1, Math.min(finalSymbols.length, toNumber(resp?.default_count, finalSymbols.length)));
+      state.universeCatalog = {
+        source: String(resp?.source || '').trim(),
+        fallbackSource: String(resp?.fallback_source || '').trim(),
+        warning: String(resp?.warning || '').trim(),
+        updatedAt: String(resp?.updated_at || '').trim(),
+        count: finalSymbols.length,
+      };
+      if (resp?.warning) {
+        const sourceLabel = universeSourceLabel(state.universeCatalog) || '候选列表已回退';
+        setStatus(`候选列表加载提示：${sourceLabel}，${resp.warning}`, 'warn');
+      }
     } catch (error) {
       console.warn('loadUniverseOptions failed', error?.message || error);
-      setStatus(`研究币池加载失败，已回退到默认列表：${error.message}`, 'warn');
+      state.universeCatalog = {
+        source: 'client_default',
+        fallbackSource: 'client_default',
+        warning: String(error?.message || error || '').trim(),
+        updatedAt: '',
+        count: finalSymbols.length,
+      };
+      setStatus(`候选列表加载失败，已回退到默认列表：${error.message}`, 'warn');
     }
     selectEl.innerHTML = finalSymbols
       .map((symbol) => `<option value="${escapeHtml(symbol)}">${escapeHtml(symbol)}</option>`)
       .join('');
-    const fallbackSelection = currentSelected.length ? currentSelected : finalSymbols.slice(0, Math.min(12, finalSymbols.length));
+    const preserveCurrentSelection = state.universeLoadedFor === cacheKey && currentSelected.length;
+    const fallbackSelection = preserveCurrentSelection ? currentSelected : finalSymbols.slice(0, defaultCount);
     setSelectedValues('altcoin-radar-universe', fallbackSelection, finalSymbols[0] || 'BTC/USDT');
     state.universeLoadedFor = cacheKey;
     renderUniverseManager();
@@ -450,7 +579,10 @@
       return;
     }
     listEl.innerHTML = state.watchlist
-      .map((symbol) => `<button type="button" class="altcoin-radar-watchlist-chip" data-watchlist-symbol="${escapeHtml(symbol)}">${escapeHtml(symbol)}</button>`)
+      .map((symbol) => {
+        const active = symbol === selectedSymbol;
+        return `<button type="button" class="altcoin-radar-watchlist-chip${active ? ' is-active' : ''}" data-watchlist-symbol="${escapeHtml(symbol)}" aria-pressed="${active ? 'true' : 'false'}">${escapeHtml(symbol)}</button>`;
+      })
       .join('');
     renderUniverseManager();
   }
@@ -464,7 +596,7 @@
   }
 
   async function mutateWatchlist(action, symbol) {
-    const normalized = String(symbol || state.selectedSymbol || '').trim().toUpperCase();
+    const normalized = normalizeWatchlistSymbolInput(symbol || state.selectedSymbol || '');
     if (!normalized) {
       throw new Error('请先选择一个候选币种');
     }
@@ -514,7 +646,12 @@
     params.set('symbol', symbol);
     params.set('exclude_retired', options.excludeRetired ? 'true' : 'false');
     params.set('refresh', refresh ? 'true' : 'false');
-    const universe = currentUniverseSymbols();
+    const currentUniverse = currentUniverseSymbols();
+    const hasSymbolInUniverse = currentUniverse.includes(String(symbol || '').trim().toUpperCase());
+    const universe = hasSymbolInUniverse
+      ? normalizeSymbols([symbol, ...currentUniverse]).slice(0, 30)
+      : normalizeSymbols([symbol]);
+    if (!hasSymbolInUniverse) params.set('watchlist_focus', 'true');
     if (universe.length) params.set('symbols', universe.join(','));
     return params.toString();
   }
@@ -690,6 +827,7 @@
         `;
       })
       .join('');
+    syncSelectedRankingRow();
   }
 
   function findRow(symbol) {
@@ -838,7 +976,7 @@
   function renderInspector(detailPayload, fallbackError = '') {
     const empty = q('altcoin-radar-inspector-empty');
     const shell = q('altcoin-radar-inspector-shell');
-    const selected = detailPayload?.selected_row || findRow(state.selectedSymbol);
+    const selected = detailPayload?.selected_row || resolveSelectedRow(state.selectedSymbol);
     if (!selected) {
       if (empty) empty.textContent = fallbackError || '暂无已选候选';
       if (shell) shell.classList.add('is-hidden');
@@ -847,9 +985,17 @@
     if (empty) empty.textContent = '';
     if (shell) shell.classList.remove('is-hidden');
     q('altcoin-radar-selected-symbol').textContent = selected.symbol || '--';
-    q('altcoin-radar-selected-subtitle').textContent = fallbackError
-      ? `详情加载失败，已回退到扫描快照：${fallbackError}`
-      : `当前聚焦 ${selected.symbol || '--'}。先看它为什么上榜，再决定建预警还是带入研究工坊。`;
+    const subtitleEl = q('altcoin-radar-selected-subtitle');
+    if (subtitleEl) {
+      const statusNote = String(fallbackError || '').trim();
+      const placeholderNote = String(selected?.placeholder_reason || '').trim();
+      const isLoading = statusNote === '__loading__';
+      subtitleEl.textContent = isLoading
+        ? (placeholderNote || `当前聚焦 ${selected.symbol || '--'}，正在加载详情。`)
+        : statusNote
+          ? (placeholderNote ? `${placeholderNote} 详情接口返回：${statusNote}` : `详情加载失败，已回退到扫描快照：${statusNote}`)
+          : (placeholderNote || `当前聚焦 ${selected.symbol || '--'}。先看它为什么上榜，再决定建预警还是带入研究工坊。`);
+    }
     q('altcoin-radar-selected-tags').innerHTML = renderTagRow(selected.tags);
     q('altcoin-radar-selected-scores').innerHTML = [
       ['Derivatives Heat', selected.derivatives_heat_score],
@@ -890,6 +1036,26 @@
       detailPayload?.invalidate_conditions || [],
       '当前没有额外失效条件。'
     );
+    const actionPlan = detailPayload?.action_plan || {};
+    const actionItems = [];
+    if (actionPlan.stance) actionItems.push(`结论：${String(actionPlan.stance)}`);
+    if (actionPlan.summary) actionItems.push(String(actionPlan.summary));
+    if (Array.isArray(actionPlan.actions)) actionItems.push(...actionPlan.actions.map((item) => String(item || '').trim()).filter(Boolean));
+    renderReasonList(
+      'altcoin-radar-action-list',
+      actionItems,
+      '当前暂无观察建议。'
+    );
+    const actionTags = q('altcoin-radar-action-tags');
+    if (actionTags) {
+      const tone = String(actionPlan.tone || 'muted').trim() || 'muted';
+      const tags = [actionPlan.primary_action, actionPlan.secondary_action]
+        .map((item) => String(item || '').trim())
+        .filter(Boolean);
+      actionTags.innerHTML = tags.length
+        ? tags.map((item) => `<span class="altcoin-radar-tag" data-tone="${escapeHtml(tone)}">${escapeHtml(item)}</span>`).join('')
+        : '<span class="altcoin-radar-tag" data-tone="muted">暂无动作标签</span>';
+    }
 
     const dataQuality = selected?.data_quality || {};
     const derivativesContext = detailPayload?.derivatives_context || selected?.derivatives_context || {};
@@ -999,8 +1165,19 @@
       }
     }
 
-    renderTimelineEvents(detailPayload?.event_timeline || selected?.recent_events || []);
-    if (selected?.symbol) loadSymbolEvents(String(selected.symbol).trim().toUpperCase());
+    const shouldBootstrapTimeline = fallbackError !== '__loading__';
+    const detailTimeline = Array.isArray(detailPayload?.event_timeline) ? detailPayload.event_timeline : [];
+    const recentTimeline = Array.isArray(selected?.recent_events) ? selected.recent_events : [];
+    if (detailTimeline.length) {
+      cacheTimelineEvents(selected.symbol, detailTimeline);
+      renderTimelineEvents(detailTimeline);
+    } else {
+      const cachedTimeline = getCachedTimelineEvents(selected.symbol);
+      renderTimelineEvents(cachedTimeline || recentTimeline);
+      if (shouldBootstrapTimeline && selected?.symbol && !cachedTimeline) {
+        loadSymbolEvents(String(selected.symbol).trim().toUpperCase());
+      }
+    }
 
     renderWatchlist();
     updateInspectorButtonState(selected);
@@ -1008,25 +1185,40 @@
 
   // Phase 1: load events for a symbol and render timeline
   async function loadSymbolEvents(symbol) {
+    const normalized = String(symbol || '').trim().toUpperCase();
     const timelineEl = q('altcoin-radar-event-timeline');
     const badgeEl = q('altcoin-radar-events-badge');
-    if (!timelineEl) return;
+    if (!timelineEl || !normalized) return [];
+    const cachedTimeline = getCachedTimelineEvents(normalized);
+    if (cachedTimeline) {
+      renderTimelineEvents(cachedTimeline);
+      return cachedTimeline;
+    }
+    const requestSeq = ++state.eventSeq;
     timelineEl.innerHTML = '<span class="text-muted" style="font-size:12px">加载中...</span>';
     try {
       const apiFetch = requireApi();
-      const resp = await apiFetch(`/altcoin/radar/events?symbol=${encodeURIComponent(symbol)}&limit=10&max_age_sec=3600`, {
+      const resp = await apiFetch(`/altcoin/radar/events?symbol=${encodeURIComponent(normalized)}&limit=10&max_age_sec=3600`, {
         timeoutMs: 8000,
       });
       const events = Array.isArray(resp?.events) ? resp.events : [];
+      cacheTimelineEvents(normalized, events);
+      if (requestSeq !== state.eventSeq || normalized !== String(state.selectedSymbol || '').trim().toUpperCase()) {
+        return events;
+      }
       renderTimelineEvents(events);
+      return events;
     } catch (_) {
-      if (timelineEl) timelineEl.innerHTML = '<span class="text-muted" style="font-size:12px">事件加载失败</span>';
-      if (badgeEl) badgeEl.style.display = 'none';
+      if (requestSeq === state.eventSeq && normalized === String(state.selectedSymbol || '').trim().toUpperCase()) {
+        timelineEl.innerHTML = '<span class="text-muted" style="font-size:12px">事件加载失败</span>';
+        if (badgeEl) badgeEl.style.display = 'none';
+      }
+      return [];
     }
   }
 
   function updateInspectorButtonState(row) {
-    const symbol = String(row?.symbol || '').trim();
+    const symbol = String(row?.symbol || state.selectedSymbol || '').trim();
     const disabled = !symbol;
     const normalized = symbol.toUpperCase();
     const activeKinds = alertKindsForRow(row);
@@ -1088,15 +1280,17 @@
     const normalized = String(symbol || '').trim().toUpperCase();
     if (!normalized) return;
     state.selectedSymbol = normalized;
-    renderRanking(state.scan?.rows || []);
-    const selectedRow = findRow(normalized);
+    renderWatchlist();
+    syncSelectedRankingRow();
+    const selectedRow = resolveSelectedRow(normalized);
+    const inCurrentScan = Boolean(findRow(normalized));
     updateInspectorButtonState(selectedRow);
     const seq = ++state.detailSeq;
-    renderInspector({ selected_row: selectedRow }, '正在加载详情...');
+    renderInspector({ selected_row: selectedRow }, '__loading__');
     try {
       const apiFetch = requireApi();
       const detail = await apiFetch(`/altcoin/radar/detail?${buildDetailQuery(normalized, refresh)}`, {
-        timeoutMs: 30000,
+        timeoutMs: inCurrentScan ? 30000 : 12000,
       });
       if (seq !== state.detailSeq) return;
       state.detail = detail;
@@ -1125,7 +1319,9 @@
       syncUniverseSelection(response?.scan_meta?.symbols_used || response?.summary?.symbols_used || []);
       const cache = response?.scan_meta?.cache || {};
       const leaderSymbol = response?.rows?.[0]?.symbol || '';
-      const preferred = findRow(state.selectedSymbol)?.symbol || leaderSymbol;
+      const preferred = shouldKeepSelectedSymbol(response?.rows || [], state.selectedSymbol)
+        ? String(state.selectedSymbol || '').trim().toUpperCase()
+        : leaderSymbol;
       setStatus(
         cache.hit
           ? `已加载缓存结果：${controls.exchange} / ${controls.timeframe} · ${response?.summary?.scanned_count || 0} 币`
@@ -1298,6 +1494,18 @@
     setOutput(`已将 ${selectedSymbol} 带入研究工坊。下一步建议：在研究工坊先运行“研究总览”，再决定是否继续多币种 / 链上验证。`);
   }
 
+  function focusWatchlistSymbol(symbol) {
+    const normalized = normalizeWatchlistSymbolInput(symbol);
+    if (!normalized) {
+      return Promise.reject(new Error('请输入币种，例如 ORDI/USDT 或 ORDI'));
+    }
+    const controls = readControls();
+    if (controls.universeScope !== 'watchlist') {
+      setStatus(`已聚焦 Watchlist 候选 ${normalized}；当前榜单仍按 ${universeScopeLabel(controls.universeScope)} 扫描。`, 'ok');
+    }
+    return selectSymbol(normalized);
+  }
+
   function bindControls() {
     const refreshBtn = q('btn-altcoin-radar-refresh');
     if (refreshBtn) {
@@ -1352,7 +1560,7 @@
       const el = q(id);
       if (el) {
         el.addEventListener('change', () => {
-          renderScan(state.scan || { rows: [], summary: {}, scan_meta: {}, warnings: [] });
+          refreshCurrentScan();
           if (state.selectedSymbol) renderInspector(state.detail || { selected_row: findRow(state.selectedSymbol) });
         });
       }
@@ -1391,7 +1599,7 @@
               state.detail.selected_row.tags = Array.isArray(state.detail.selected_row.tags) ? state.detail.selected_row.tags : [];
               if (!state.detail.selected_row.tags.includes('Watchlist')) state.detail.selected_row.tags.push('Watchlist');
             }
-            renderScan(state.scan || { rows: [], summary: {}, scan_meta: {}, warnings: [] });
+            refreshCurrentScan();
             renderInspector(state.detail || { selected_row: row || findRow(symbol) });
             if (typeof notify === 'function') notify(`已将 ${symbol} 加入 Watchlist`);
           })
@@ -1399,6 +1607,32 @@
             if (typeof notify === 'function') notify(`Watchlist 更新失败: ${error.message}`, true);
           });
       };
+    }
+    const addWatchlistManualBtn = q('btn-altcoin-radar-watchlist-add-manual');
+    const watchlistInputEl = q('altcoin-radar-watchlist-input');
+    const addWatchlistFromInput = () => {
+      const rawValue = watchlistInputEl?.value || '';
+      mutateWatchlist('add', rawValue)
+        .then((symbol) => {
+          if (watchlistInputEl) watchlistInputEl.value = '';
+          return focusWatchlistSymbol(symbol);
+        })
+        .then(() => {
+          if (typeof notify === 'function') notify('已手动加入 Watchlist');
+        })
+        .catch((error) => {
+          if (typeof notify === 'function') notify(`Watchlist 鏇存柊澶辫触: ${error.message}`, true);
+        });
+    };
+    if (addWatchlistManualBtn) {
+      addWatchlistManualBtn.onclick = addWatchlistFromInput;
+    }
+    if (watchlistInputEl) {
+      watchlistInputEl.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        addWatchlistFromInput();
+      });
     }
     const removeWatchlistBtn = q('btn-altcoin-radar-watchlist-remove');
     if (removeWatchlistBtn) {
@@ -1416,7 +1650,7 @@
                 ? state.detail.selected_row.tags.filter((tag) => tag !== 'Watchlist')
                 : [];
             }
-            renderScan(state.scan || { rows: [], summary: {}, scan_meta: {}, warnings: [] });
+            refreshCurrentScan();
             renderInspector(state.detail || { selected_row: row || findRow(symbol) });
             if (typeof notify === 'function') notify(`已将 ${symbol} 移出 Watchlist`);
           })
@@ -1547,7 +1781,7 @@
         if (!btn) return;
         const symbol = String(btn.dataset.watchlistSymbol || '').trim();
         if (!symbol) return;
-        selectSymbol(symbol).catch((error) => {
+        focusWatchlistSymbol(symbol).catch((error) => {
           if (typeof notify === 'function') notify(`切换 Watchlist 候选失败: ${error.message}`, true);
         });
       });
@@ -1594,9 +1828,9 @@
     const watchlistPromise = loadWatchlist().catch((error) => {
       console.warn('loadAltcoinRadarTabData watchlist bootstrap failed', error?.message || error);
     });
-    await scanRadar(force);
     await universePromise;
     await watchlistPromise;
+    await scanRadar(force);
   }
 
   window.bindAltcoinRadarPage = bindAltcoinRadarPage;

@@ -108,7 +108,7 @@ _ANALYTICS_WHALE_MIN_BTC = 10.0
 _ANALYTICS_ANNOUNCEMENT_TIMEOUT_SEC = 4.0
 _ANALYTICS_CALENDAR_TIMEOUT_SEC = 6.0
 _ANALYTICS_SECURITY_ALERT_TIMEOUT_SEC = 6.0
-_ANALYTICS_COLLECTOR_TIMEOUT_SEC = 8.0
+_ANALYTICS_COLLECTOR_TIMEOUT_SEC = 15.0
 _ANALYTICS_COINGLASS_REFRESH_MAX_AGE_SEC = 5 * 60.0
 _ANALYTICS_HISTORY_HEALTH_CACHE_TTL_SEC = 20.0
 _ANALYTICS_HISTORY_STATUS_CACHE_TTL_SEC = 8.0
@@ -2344,12 +2344,17 @@ def _community_quality(payload: Dict[str, Any], latency_ms: int) -> Dict[str, An
 def _whale_quality(payload: Dict[str, Any], latency_ms: int) -> Dict[str, Any]:
     source_error = _clip_analytics_error(payload.get("error"))
     available = bool(payload.get("available", False))
+    transactions = list(payload.get("transactions") or [])
+    count = int(_safe_float(payload.get("count")))
+    has_core = available and (count > 0 or bool(transactions))
     source_name = (
         str(payload.get("source_name") or "public_chain_proxy").strip()
         or "public_chain_proxy"
     )
-    if available and not source_error:
+    if has_core and not source_error:
         capture_status = "ok"
+    elif has_core:
+        capture_status = "degraded"
     elif source_error:
         capture_status = "failed"
     else:
@@ -2786,8 +2791,9 @@ async def _collect_analytics_component(
         return await asyncio.wait_for(coro, timeout=max(1.0, float(timeout_sec)))
     except Exception as exc:
         payload = dict(fallback_payload or {})
-        payload.setdefault("source_error", f"{label} failed: {exc}")
-        logger.warning(f"{label} analytics fallback: {exc}")
+        exc_text = str(exc).strip() or type(exc).__name__
+        payload.setdefault("source_error", f"{label} failed: {exc_text}")
+        logger.warning(f"{label} analytics fallback: {exc_text}")
         return payload
 
 
@@ -2864,30 +2870,32 @@ async def run_analytics_history_collection(
             jobs["microstructure"] = _collect_analytics_component_with_meta(
                 label="microstructure",
                 timeout_sec=_ANALYTICS_COLLECTOR_TIMEOUT_SEC,
-                coro=get_market_microstructure(
+                coro=_build_microstructure_history_payload(
                     exchange=exchange, symbol=symbol, depth_limit=depth_limit
                 ),
                 fallback_payload=_analytics_fallback_microstructure(
                     exchange=exchange, symbol=symbol, error="微观结构抓取超时"
                 ),
             )
-        if "community" in selected or "whales" in selected:
-            if "community" in selected:
-                jobs["community_bundle"] = _collect_analytics_component_with_meta(
-                    label="community",
-                    timeout_sec=_ANALYTICS_COLLECTOR_TIMEOUT_SEC,
-                    coro=get_community_overview(symbol=symbol, exchange=exchange),
-                    fallback_payload=_analytics_fallback_community(
-                        exchange=exchange, symbol=symbol, error="社区/公告抓取超时"
-                    ),
-                )
-            else:
-                jobs["whales"] = _collect_analytics_component_with_meta(
-                    label="whales",
-                    timeout_sec=_ANALYTICS_COLLECTOR_TIMEOUT_SEC,
-                    coro=_fetch_whale_transfers(min_btc=_ANALYTICS_WHALE_MIN_BTC),
-                    fallback_payload=_analytics_fallback_whales("巨鲸抓取超时"),
-                )
+        if "community" in selected:
+            jobs["community"] = _collect_analytics_component_with_meta(
+                label="community",
+                timeout_sec=_ANALYTICS_COLLECTOR_TIMEOUT_SEC,
+                coro=_build_community_history_payload(symbol=symbol, exchange=exchange),
+                fallback_payload=_analytics_fallback_community(
+                    exchange=exchange, symbol=symbol, error="社区/公告抓取超时"
+                ),
+            )
+        if "whales" in selected:
+            jobs["whales"] = _collect_analytics_component_with_meta(
+                label="whales",
+                timeout_sec=_ANALYTICS_COLLECTOR_TIMEOUT_SEC,
+                coro=_build_whales_history_payload(
+                    symbol=symbol,
+                    min_btc=_ANALYTICS_WHALE_MIN_BTC,
+                ),
+                fallback_payload=_analytics_fallback_whales("巨鲸抓取超时"),
+            )
 
         job_names = list(jobs.keys())
         job_results = await asyncio.gather(*jobs.values()) if jobs else []
@@ -2928,7 +2936,7 @@ async def run_analytics_history_collection(
                     ),
                 )
             if "community" in selected:
-                meta = resolved.get("community_bundle") or {}
+                meta = resolved.get("community") or {}
                 community_payload = dict(meta.get("payload") or {})
                 await _finalize_collector(
                     "community",
@@ -2940,17 +2948,9 @@ async def run_analytics_history_collection(
                     ),
                 )
             if "whales" in selected:
-                if "community" in selected:
-                    bundle = resolved.get("community_bundle") or {}
-                    community_payload = dict(bundle.get("payload") or {})
-                    whale_payload = dict(community_payload.get("whale_transfers") or {})
-                    whale_latency_ms = int(bundle.get("latency_ms") or 0)
-                    if not whale_payload:
-                        whale_payload = _analytics_fallback_whales("社区包内未返回巨鲸数据")
-                else:
-                    whale_meta = resolved.get("whales") or {}
-                    whale_payload = dict(whale_meta.get("payload") or {})
-                    whale_latency_ms = int(whale_meta.get("latency_ms") or 0)
+                whale_meta = resolved.get("whales") or {}
+                whale_payload = dict(whale_meta.get("payload") or {})
+                whale_latency_ms = int(whale_meta.get("latency_ms") or 0)
                 await _finalize_collector(
                     "whales",
                     await _persist_whale_snapshot(
@@ -6039,6 +6039,95 @@ def _calendar_note_parts(*parts: Any) -> Optional[str]:
     return " | ".join(values) if values else None
 
 
+def _build_microstructure_orderbook_view(ob: Dict[str, Any]) -> Dict[str, Any]:
+    bids = [
+        [_safe_float(x[0]), _safe_float(x[1])]
+        for x in (ob.get("bids") or [])
+        if len(x) >= 2
+    ]
+    asks = [
+        [_safe_float(x[0]), _safe_float(x[1])]
+        for x in (ob.get("asks") or [])
+        if len(x) >= 2
+    ]
+    bids = [x for x in bids if x[0] > 0 and x[1] > 0]
+    asks = [x for x in asks if x[0] > 0 and x[1] > 0]
+    bids.sort(key=lambda x: x[0], reverse=True)
+    asks.sort(key=lambda x: x[0])
+
+    best_bid = bids[0][0] if bids else 0.0
+    best_ask = asks[0][0] if asks else 0.0
+    spread = best_ask - best_bid if best_bid > 0 and best_ask > 0 else 0.0
+    mid = (best_bid + best_ask) / 2 if best_bid > 0 and best_ask > 0 else 0.0
+
+    bid_depth: List[Dict[str, float]] = []
+    ask_depth: List[Dict[str, float]] = []
+    cumulative = 0.0
+    for price, qty in bids[:100]:
+        cumulative += qty
+        bid_depth.append(
+            {
+                "price": round(price, 8),
+                "qty": round(qty, 8),
+                "cum_qty": round(cumulative, 8),
+            }
+        )
+    cumulative = 0.0
+    for price, qty in asks[:100]:
+        cumulative += qty
+        ask_depth.append(
+            {
+                "price": round(price, 8),
+                "qty": round(qty, 8),
+                "cum_qty": round(cumulative, 8),
+            }
+        )
+
+    all_sizes = sorted([x[1] for x in bids + asks])
+    size_threshold = all_sizes[int(len(all_sizes) * 0.95)] if all_sizes else 0.0
+    large_orders: List[Dict[str, Any]] = []
+    for side, rows in [("bid", bids), ("ask", asks)]:
+        for price, qty in rows[:200]:
+            if qty >= size_threshold and size_threshold > 0:
+                large_orders.append(
+                    {
+                        "side": side,
+                        "price": round(price, 8),
+                        "qty": round(qty, 8),
+                        "notional": round(price * qty, 4),
+                    }
+                )
+    large_orders = sorted(large_orders, key=lambda x: x["notional"], reverse=True)[:30]
+
+    iceberg_candidates = 0
+    for rows in [bids[:60], asks[:60]]:
+        prev_qty = None
+        repeat = 0
+        for _, qty in rows:
+            if prev_qty is not None and abs(qty - prev_qty) <= max(
+                1e-9, prev_qty * 0.003
+            ):
+                repeat += 1
+            prev_qty = qty
+        if repeat >= 3:
+            iceberg_candidates += 1
+
+    return {
+        "orderbook": {
+            "available": bool(ob.get("available", True)) and mid > 0,
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "mid_price": round(mid, 8),
+            "spread": round(spread, 8),
+            "spread_bps": round((spread / mid * 10000) if mid > 0 else 0.0, 6),
+            "bid_depth": bid_depth,
+            "ask_depth": ask_depth,
+        },
+        "large_orders": large_orders,
+        "iceberg_candidate_count": iceberg_candidates,
+    }
+
+
 def _is_major_calendar_country(country_code: Any, country_name: Any) -> bool:
     code = str(country_code or "").strip().upper()
     if code in _COINGLASS_CALENDAR_MAJOR_COUNTRY_CODES:
@@ -7555,77 +7644,7 @@ async def _build_market_microstructure_payload(
     basis = dict((funding_basis or {}).get("basis") or {"available": False})
     options_data = await options_task
     coinglass_overview = await coinglass_task
-    bids = [
-        [_safe_float(x[0]), _safe_float(x[1])]
-        for x in (ob.get("bids") or [])
-        if len(x) >= 2
-    ]
-    asks = [
-        [_safe_float(x[0]), _safe_float(x[1])]
-        for x in (ob.get("asks") or [])
-        if len(x) >= 2
-    ]
-    bids = [x for x in bids if x[0] > 0 and x[1] > 0]
-    asks = [x for x in asks if x[0] > 0 and x[1] > 0]
-    bids.sort(key=lambda x: x[0], reverse=True)
-    asks.sort(key=lambda x: x[0])
-
-    best_bid = bids[0][0] if bids else 0.0
-    best_ask = asks[0][0] if asks else 0.0
-    spread = best_ask - best_bid if best_bid > 0 and best_ask > 0 else 0.0
-    mid = (best_bid + best_ask) / 2 if best_bid > 0 and best_ask > 0 else 0.0
-
-    bid_depth = []
-    ask_depth = []
-    cumulative = 0.0
-    for price, qty in bids[:100]:
-        cumulative += qty
-        bid_depth.append(
-            {
-                "price": round(price, 8),
-                "qty": round(qty, 8),
-                "cum_qty": round(cumulative, 8),
-            }
-        )
-    cumulative = 0.0
-    for price, qty in asks[:100]:
-        cumulative += qty
-        ask_depth.append(
-            {
-                "price": round(price, 8),
-                "qty": round(qty, 8),
-                "cum_qty": round(cumulative, 8),
-            }
-        )
-
-    all_sizes = sorted([x[1] for x in bids + asks])
-    size_threshold = all_sizes[int(len(all_sizes) * 0.95)] if all_sizes else 0.0
-    large_orders = []
-    for side, rows in [("bid", bids), ("ask", asks)]:
-        for price, qty in rows[:200]:
-            if qty >= size_threshold and size_threshold > 0:
-                large_orders.append(
-                    {
-                        "side": side,
-                        "price": round(price, 8),
-                        "qty": round(qty, 8),
-                        "notional": round(price * qty, 4),
-                    }
-                )
-    large_orders = sorted(large_orders, key=lambda x: x["notional"], reverse=True)[:30]
-
-    iceberg_candidates = 0
-    for rows in [bids[:60], asks[:60]]:
-        prev_qty = None
-        repeat = 0
-        for _, qty in rows:
-            if prev_qty is not None and abs(qty - prev_qty) <= max(
-                1e-9, prev_qty * 0.003
-            ):
-                repeat += 1
-            prev_qty = qty
-        if repeat >= 3:
-            iceberg_candidates += 1
+    orderbook_view = _build_microstructure_orderbook_view(ob)
 
     options_payload = dict(options_data or {})
     options_payload.setdefault("available", False)
@@ -7644,19 +7663,10 @@ async def _build_market_microstructure_payload(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "available": bool(ob.get("available", True)),
         "source_error": ob.get("error"),
-        "orderbook": {
-            "available": bool(ob.get("available", True)) and mid > 0,
-            "best_bid": best_bid,
-            "best_ask": best_ask,
-            "mid_price": round(mid, 8),
-            "spread": round(spread, 8),
-            "spread_bps": round((spread / mid * 10000) if mid > 0 else 0.0, 6),
-            "bid_depth": bid_depth,
-            "ask_depth": ask_depth,
-        },
-        "large_orders": large_orders,
+        "orderbook": dict(orderbook_view.get("orderbook") or {}),
+        "large_orders": list(orderbook_view.get("large_orders") or []),
         "iceberg_detection": {
-            "candidate_count": iceberg_candidates,
+            "candidate_count": int(orderbook_view.get("iceberg_candidate_count") or 0),
             "note": "基于盘口重复量级的启发式检测。",
         },
         "aggressor_flow": {
@@ -8076,6 +8086,130 @@ async def _build_community_overview_payload(
         "news_provider": "+".join(news_sources) if news_sources else None,
         "news_sources": news_sources,
     }
+
+
+async def _build_microstructure_history_payload(
+    *,
+    exchange: str,
+    symbol: str,
+    depth_limit: int,
+) -> Dict[str, Any]:
+    ob, flow, funding_basis = await asyncio.gather(
+        _fetch_orderbook(exchange=exchange, symbol=symbol, limit=depth_limit),
+        _fetch_trade_imbalance(exchange=exchange, symbol=symbol, limit=800),
+        _fetch_funding_basis_snapshot(exchange=exchange, symbol=symbol),
+    )
+    orderbook_view = _build_microstructure_orderbook_view(dict(ob or {}))
+    funding = dict((funding_basis or {}).get("funding") or {"available": False})
+    basis = dict((funding_basis or {}).get("basis") or {"available": False})
+    return {
+        "exchange": exchange,
+        "symbol": symbol,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "available": bool((ob or {}).get("available", True)),
+        "source_error": (ob or {}).get("error"),
+        "orderbook": dict(orderbook_view.get("orderbook") or {}),
+        "large_orders": list(orderbook_view.get("large_orders") or []),
+        "iceberg_detection": {
+            "candidate_count": int(orderbook_view.get("iceberg_candidate_count") or 0),
+            "note": "基于盘口重复量级的启发式检测。",
+        },
+        "aggressor_flow": {
+            "available": bool((flow or {}).get("available", True)),
+            "error": (flow or {}).get("error"),
+            "count": int(_safe_float((flow or {}).get("count"))),
+            "buy_volume": _safe_float((flow or {}).get("buy_volume")),
+            "sell_volume": _safe_float((flow or {}).get("sell_volume")),
+            "imbalance": _safe_float((flow or {}).get("imbalance")),
+        },
+        "long_short_ratio": {"available": False},
+        "funding_rate": funding,
+        "spot_futures_basis": basis,
+    }
+
+
+async def _build_community_history_payload(
+    *,
+    symbol: str,
+    exchange: str,
+) -> Dict[str, Any]:
+    flow, announcements, security_alerts, coinglass_news = await asyncio.gather(
+        _fetch_trade_imbalance(exchange=exchange, symbol=symbol, limit=600),
+        _fetch_binance_announcements(limit=6),
+        _fetch_slowmist_security_alerts(symbol=symbol, limit=6),
+        _fetch_coinglass_news(symbol=symbol, limit=6),
+    )
+    merged_announcements = _dedupe_announcements(
+        [*(announcements or []), *(coinglass_news or [])],
+        limit=10,
+    )
+    security_alerts_payload = dict(security_alerts or {})
+    security_alerts_payload.setdefault("available", False)
+    security_alerts_payload.setdefault("source", "slowmist_hacked")
+    security_alerts_payload.setdefault("scope", "global_fallback")
+    security_alerts_payload.setdefault("error", "")
+    security_alerts_payload.setdefault("events", [])
+    security_alerts_payload.setdefault("cache_hit", False)
+    security_alerts_payload.setdefault("cache_age_sec", None)
+    security_alerts_payload.setdefault("stale", False)
+    security_alerts_payload.setdefault(
+        "source_status",
+        "live" if security_alerts_payload.get("available") else "unavailable",
+    )
+    news_sources = list(
+        dict.fromkeys(
+            source
+            for source in (
+                *(
+                    str(item.get("provider") or "binance_announcements").strip()
+                    for item in (announcements or [])
+                ),
+                *(
+                    str(item.get("provider") or "").strip()
+                    for item in (coinglass_news or [])
+                ),
+            )
+            if source
+        )
+    )
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "symbol": symbol,
+        "exchange": exchange,
+        "source_error": "",
+        "twitter_watchlist": [],
+        "flow_proxy": flow,
+        "whale_transfers": _analytics_fallback_whales(
+            "whale_history_collector_runs_separately"
+        ),
+        "security_alerts": security_alerts_payload,
+        "announcements": merged_announcements,
+        "news_provider": "+".join(news_sources) if news_sources else None,
+        "news_sources": news_sources,
+    }
+
+
+async def _build_whales_history_payload(
+    *,
+    symbol: str,
+    min_btc: float = _ANALYTICS_WHALE_MIN_BTC,
+) -> Dict[str, Any]:
+    whales, coinglass_whales, coinglass_exchange_transfers = await asyncio.gather(
+        _fetch_whale_transfers(min_btc=min_btc),
+        _fetch_coinglass_whale_transfers(symbol=symbol, min_btc=min_btc),
+        _fetch_coinglass_exchange_chain_transfers(symbol=symbol, min_btc=min_btc),
+    )
+    return _merge_whale_payloads(
+        whales,
+        coinglass_whales,
+        coinglass_exchange_transfers,
+        threshold_btc=min_btc,
+        btc_price=(
+            _safe_float((whales or {}).get("btc_price"))
+            or _safe_float((coinglass_whales or {}).get("btc_price"))
+            or _safe_float((coinglass_exchange_transfers or {}).get("btc_price"))
+        ),
+    )
 
 
 async def get_community_overview(symbol: str = "BTC/USDT", exchange: str = "binance"):

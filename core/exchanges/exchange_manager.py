@@ -72,6 +72,11 @@ class ExchangeManager:
             "bybit": str(getattr(settings, "BYBIT_DEFAULT_TYPE", fallback) or fallback),
         }
         resolved = str(mapping.get(name, fallback) or fallback).strip().lower()
+        return ExchangeManager._normalize_default_type(resolved, fallback)
+
+    @staticmethod
+    def _normalize_default_type(value: str, fallback: str) -> str:
+        resolved = str(value or fallback).strip().lower()
         aliases = {
             "futures": "future",
             "perp": "swap",
@@ -122,14 +127,14 @@ class ExchangeManager:
             )
             return None
 
-        override_default_type = str(credentials.get("default_type") or config.default_type).strip() or config.default_type
+        override_default_type = str(credentials.get("default_type") or "").strip()
         return replace(
             config,
             api_key=api_key or config.api_key,
             api_secret=api_secret or config.api_secret,
             passphrase=str(credentials.get("passphrase") or config.passphrase or "").strip() or config.passphrase,
             sandbox=bool(credentials.get("sandbox", config.sandbox)),
-            default_type=self._resolve_default_type(name, override_default_type),
+            default_type=self._normalize_default_type(override_default_type, config.default_type),
             proxy=str(credentials.get("proxy") or config.proxy or "").strip() or config.proxy,
         )
 

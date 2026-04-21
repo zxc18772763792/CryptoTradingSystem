@@ -10,6 +10,7 @@
     lastDebug: null,
     retryTimers: {},
     autoRefreshTimer: null,
+    _countdownTimer: null,
     overviewRefreshPromise: null,
     lastOverviewRefreshAt: 0,
   };
@@ -511,6 +512,19 @@
     } else if (state.overview) nextHtml = '刷新研究建议';
     else if (errorCount > 0) nextHtml = '先修复失败模块，再看综合结论';
     setStatusItemValue(nextEl, nextHtml);
+
+    // Auto-refresh countdown badge
+    const badgeEl = q('research-auto-refresh-badge');
+    if (badgeEl) {
+      if (state.lastOverviewRefreshAt) {
+        const remMs = (state.lastOverviewRefreshAt + WORKBENCH_AUTO_REFRESH_MS) - Date.now();
+        const remMin = Math.ceil(remMs / 60000);
+        badgeEl.textContent = remMs > 0 ? `${remMin}分后自动刷新` : '即将刷新';
+        badgeEl.style.display = '';
+      } else {
+        badgeEl.style.display = 'none';
+      }
+    }
   }
 
   function renderOverview() {
@@ -755,11 +769,17 @@
       ? `<div class=”rec-strategy-line”>优先策略：${escSafe(strategies.slice(0, 3).join(' / '))}</div>`
       : '';
 
+    const sourceDesc = describeRecommendationSource(sourceMeta);
+    const sourceBadge = sourceDesc && sourceDesc !== '未知来源'
+      ? `<span class=”rec-source-badge” title=”数据来源”>${escSafe(sourceDesc)}</span>`
+      : '';
+
     summaryEl.className = 'rec-verdict';
     summaryEl.innerHTML = `
       <div class=”rec-verdict-top”>
         <span class=”rec-bias-badge ${bc.cls}”>${bc.icon} ${bc.label}</span>
         ${confBadge}
+        ${sourceBadge}
         ${timeLabel ? `<span class=”rec-time-label”>${escSafe(timeLabel)}</span>` : ''}
       </div>
       <div class=”rec-headline”>${escSafe(headline)}</div>
@@ -1304,6 +1324,7 @@
     if (typeof loader !== 'function' || attempt > 4) return;
     clearModuleRetry(name);
     state.retryTimers[name] = setTimeout(async () => {
+      delete state.retryTimers[name];
       if (!isResearchActive()) return;
       try {
         const module = await loader();
@@ -1357,7 +1378,7 @@
   async function buildOnchainModule(profile, exchange, primarySymbol) {
     const newsKey = String(profile.primary_symbol || 'BTC/USDT').split('/')[0];
     const [onchainRes, community, newsScoped, newsGlobal, analyticsHistoryStatus] = await Promise.all([
-      window.api(`/data/onchain/overview?exchange=${exchange}&symbol=${primarySymbol}&whale_threshold_btc=10&chain=Ethereum&hours=72&refresh=true`, { timeoutMs: getModuleTimeoutMs('onchain') }).catch(() => ({})),
+      window.api(`/data/onchain/overview?exchange=${exchange}&symbol=${primarySymbol}&whale_threshold_btc=10&chain=auto&hours=72&refresh=true`, { timeoutMs: getModuleTimeoutMs('onchain') }).catch(() => ({})),
       window.api(`/trading/analytics/community/overview?exchange=${exchange}&symbol=${primarySymbol}`, { timeoutMs: 15000 }).catch(() => ({})),
       window.api(`/news/summary?symbol=${encodeURIComponent(newsKey)}&hours=72`, { timeoutMs: 15000 }).catch(() => ({})),
       window.api('/news/summary?hours=72', { timeoutMs: 15000 }).catch(() => ({})),
@@ -1412,7 +1433,7 @@
         headline: 'Onchain & Exogenous',
         whale_count: Number(onchainRes?.whale_activity?.count || community?.whale_transfers?.count || 0),
         news_events: Number(news?.events_count || 0),
-        tvl_chain: onchainRes?.defi_tvl?.chain || 'Ethereum',
+        tvl_chain: onchainRes?.defi_tvl?.chain || onchainRes?.chain_context?.display_name || 'Auto',
         served_mode: onchainRes?.served_mode || 'background',
         derivatives_status: String(derivativesSummary.status || 'missing'),
         derivatives_freshness_sec: derivativesSummary.freshness_sec,
@@ -1540,7 +1561,7 @@
       }
     } else if (name === 'discipline') {
       const [behavior, stoploss] = await Promise.all([
-        window.api('/trading/analytics/behavior/report?days=7', { timeoutMs: 12000 }).catch(() => ({})),
+        window.api(`/trading/analytics/behavior/report?days=${Number(q('discipline-days')?.value || 7)}`, { timeoutMs: 12000 }).catch(() => ({})),
         window.api('/trading/analytics/stoploss/policy', { timeoutMs: 12000 }).catch(() => ({})),
       ]);
       module = {
@@ -1567,26 +1588,6 @@
     setDebug(`research.workbench.modules.${name}`, module);
     if (!quiet && typeof window.notify === 'function') window.notify(`${MODULE_LABELS[name] || name} 已更新`);
     return module;
-  }
-
-  async function runWorkbenchOverviewDirect() {
-    state.profile = getProfile();
-    if (typeof window.loadResearchOverview === 'function') await window.loadResearchOverview();
-    state.modules = {};
-    for (const name of MODULE_NAMES) {
-      try {
-        // Run sequentially to keep the page responsive under slow upstream APIs.
-        // eslint-disable-next-line no-await-in-loop
-        await runWorkbenchModuleDirect(name, true);
-      } catch (err) {
-        setDebug(`research.workbench.overview.direct.${name}`, String(err?.message || err));
-      }
-    }
-    state.overview = buildLocalOverviewFromModules();
-    await refreshRecommendations(true);
-    setDebug('research.workbench.overview', state.overview);
-    if (typeof window.notify === 'function') window.notify('研究总览已更新');
-    return state.overview;
   }
 
   async function runWorkbenchOverviewDirect(quiet = false) {
@@ -1646,6 +1647,11 @@
     state.autoRefreshTimer = setInterval(() => {
       maybeAutoRefreshWorkbench(false);
     }, WORKBENCH_AUTO_REFRESH_MS);
+    // Update countdown badge every minute
+    if (state._countdownTimer) clearInterval(state._countdownTimer);
+    state._countdownTimer = setInterval(() => {
+      if (isResearchActive()) renderStatusCards();
+    }, 60000);
   }
 
   function bindAsyncButton(id, handler) {
@@ -1770,6 +1776,8 @@
     bindAsyncButton('btn-load-regime-calendar', loadRegimeCalendar);
     const calDaysEl = q('regime-calendar-days');
     if (calDaysEl) calDaysEl.addEventListener('change', () => loadRegimeCalendar().catch(() => {}));
+    const disciplineDaysEl = q('discipline-days');
+    if (disciplineDaysEl) disciplineDaysEl.addEventListener('change', () => runWorkbenchModuleDirect('discipline', false).catch(() => {}));
     const recommendationEl = q('research-conclusion-bullets');
     if (recommendationEl && recommendationEl.dataset.bound !== '1') {
       recommendationEl.dataset.bound = '1';

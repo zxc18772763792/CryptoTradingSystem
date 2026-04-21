@@ -95,8 +95,12 @@ class RuntimeTaskSupervisor:
 
     async def stop_all(self, *, timeout_sec: float = 5.0) -> None:
         names = list(self._tasks.keys())
-        for name in names:
-            await self.stop_task(name, timeout_sec=timeout_sec)
+        if not names:
+            return
+        await asyncio.gather(
+            *(self.stop_task(name, timeout_sec=timeout_sec) for name in names),
+            return_exceptions=True,
+        )
 
     def get_task(self, name: str) -> Optional[ManagedTask]:
         return self._tasks.get(name)

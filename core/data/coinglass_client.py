@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import weakref
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -43,7 +44,21 @@ _API_KEY_FILE = _PROJECT_ROOT / "config" / "coinglass_api_key.txt"
 _BUDGET_SCOPE = "global"
 _REQUEST_TIMEOUT_SEC = 20
 _NON_MANUAL_MINUTE_RESERVE = 2
-_REQUEST_LOCK = asyncio.Lock()
+_REQUEST_LOCKS: "weakref.WeakKeyDictionary[Any, asyncio.Lock]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _request_lock() -> asyncio.Lock:
+    # Keep the rate-limit lock scoped to the active loop to avoid
+    # "Future attached to a different loop" when the module is imported
+    # outside the serving loop or reused across standalone asyncio runs.
+    loop = asyncio.get_running_loop()
+    lock = _REQUEST_LOCKS.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _REQUEST_LOCKS[loop] = lock
+    return lock
 
 
 class CoinglassError(RuntimeError):
@@ -346,6 +361,17 @@ def _effective_minute_cap(*, manual: bool) -> int:
     if manual:
         return limit
     return max(1, limit - _NON_MANUAL_MINUTE_RESERVE)
+
+
+def coinglass_minute_headroom(
+    state: CoinglassBudgetState,
+    *,
+    manual: bool,
+) -> int:
+    remaining = max(0, int(getattr(state, "minute_remaining", 0) or 0))
+    if manual:
+        return remaining
+    return max(0, remaining - _NON_MANUAL_MINUTE_RESERVE)
 
 
 async def _reserve_budget(*, manual: bool) -> CoinglassBudgetState:
@@ -1234,7 +1260,7 @@ class CoinglassClient:
         )
         url = f"{base_url}{path}"
         query_params = _sanitize_query_params(params)
-        async with _REQUEST_LOCK:
+        async with _request_lock():
             await _reserve_budget(manual=manual)
         status_code = None
         error_text = ""

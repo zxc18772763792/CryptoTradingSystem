@@ -33,7 +33,10 @@ from core.data import (
     second_level_backfill_manager,
     download_binance_1s_daily_archive,
 )
-from core.data.coinglass_altcoin import build_exchange_altcoin_universe
+from core.data.coinglass_altcoin import (
+    build_exchange_altcoin_universe,
+    load_cached_exchange_altcoin_universe,
+)
 from core.data.coinglass_client import (
     CoinglassBudgetExceeded,
     CoinglassClient,
@@ -367,6 +370,240 @@ def _error_text(err: Any) -> str:
     return text or type(err).__name__
 
 
+def _symbol_base_asset(symbol: str) -> str:
+    raw = str(symbol or "").strip().upper()
+    if not raw:
+        return ""
+    main = raw.split(":")[0]
+    if "/" in main:
+        return main.split("/")[0]
+    for suffix in ("USDT", "USDC", "FDUSD", "BUSD", "USD"):
+        if main.endswith(suffix) and len(main) > len(suffix):
+            return main[: -len(suffix)]
+    return main
+
+
+def _chain_context(
+    display_name: str,
+    *,
+    lookup_chain: Optional[str] = None,
+    family: Optional[str] = None,
+    matched_by: str = "manual",
+) -> Dict[str, Any]:
+    display = str(display_name or "").strip() or "Unknown"
+    lookup = str(lookup_chain or "").strip() or None
+    normalized_family = (
+        str(family or display)
+        .strip()
+        .lower()
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+    return {
+        "display_name": display,
+        "lookup_chain": lookup,
+        "family": normalized_family,
+        "matched_by": str(matched_by or "manual").strip().lower() or "manual",
+        "tvl_supported": bool(lookup),
+        "cache_key": f"{display}|{lookup or '-'}",
+    }
+
+
+_ONCHAIN_CHAIN_ALIAS_CONTEXTS: Dict[str, Dict[str, Any]] = {
+    "ethereum": _chain_context("Ethereum", lookup_chain="Ethereum", family="ethereum"),
+    "eth": _chain_context("Ethereum", lookup_chain="Ethereum", family="ethereum"),
+    "bsc": _chain_context("BSC", lookup_chain="BSC", family="bsc"),
+    "bnb": _chain_context("BSC", lookup_chain="BSC", family="bsc"),
+    "bnb chain": _chain_context("BSC", lookup_chain="BSC", family="bsc"),
+    "bnb smart chain": _chain_context("BSC", lookup_chain="BSC", family="bsc"),
+    "bitcoin": _chain_context("Bitcoin", lookup_chain="Bitcoin", family="bitcoin"),
+    "btc": _chain_context("Bitcoin", lookup_chain="Bitcoin", family="bitcoin"),
+    "brc20": _chain_context("BRC-20", lookup_chain="Bitcoin", family="brc20"),
+    "brc-20": _chain_context("BRC-20", lookup_chain="Bitcoin", family="brc20"),
+    "ordinals": _chain_context("Ordinals", lookup_chain="Bitcoin", family="ordinals"),
+    "runes": _chain_context("Runes", lookup_chain="Bitcoin", family="runes"),
+    "solana": _chain_context("Solana", lookup_chain="Solana", family="solana"),
+    "sol": _chain_context("Solana", lookup_chain="Solana", family="solana"),
+    "base": _chain_context("Base", lookup_chain="Base", family="base"),
+    "tron": _chain_context("Tron", lookup_chain="Tron", family="tron"),
+    "trx": _chain_context("Tron", lookup_chain="Tron", family="tron"),
+    "polygon": _chain_context("Polygon", lookup_chain="Polygon", family="polygon"),
+    "matic": _chain_context("Polygon", lookup_chain="Polygon", family="polygon"),
+    "arbitrum": _chain_context("Arbitrum", lookup_chain="Arbitrum", family="arbitrum"),
+    "optimism": _chain_context("Optimism", lookup_chain="Optimism", family="optimism"),
+    "avalanche": _chain_context("Avalanche", lookup_chain="Avalanche", family="avalanche"),
+    "avax": _chain_context("Avalanche", lookup_chain="Avalanche", family="avalanche"),
+    "xrpl": _chain_context("XRPL", lookup_chain="XRPL", family="xrpl"),
+    "xrp": _chain_context("XRPL", lookup_chain="XRPL", family="xrpl"),
+    "cardano": _chain_context("Cardano", lookup_chain="Cardano", family="cardano"),
+    "ada": _chain_context("Cardano", lookup_chain="Cardano", family="cardano"),
+    "doge": _chain_context("Doge", lookup_chain="Doge", family="doge"),
+    "dogecoin": _chain_context("Doge", lookup_chain="Doge", family="doge"),
+    "polkadot": _chain_context("Polkadot", lookup_chain=None, family="polkadot"),
+    "dot": _chain_context("Polkadot", lookup_chain=None, family="polkadot"),
+    "litecoin": _chain_context("Litecoin", lookup_chain="Litecoin", family="litecoin"),
+    "ltc": _chain_context("Litecoin", lookup_chain="Litecoin", family="litecoin"),
+    "bch": _chain_context("Bitcoincash", lookup_chain="Bitcoincash", family="bitcoincash"),
+    "bitcoincash": _chain_context("Bitcoincash", lookup_chain="Bitcoincash", family="bitcoincash"),
+    "etc": _chain_context("EthereumClassic", lookup_chain="EthereumClassic", family="ethereum_classic"),
+    "ethereum classic": _chain_context("EthereumClassic", lookup_chain="EthereumClassic", family="ethereum_classic"),
+    "ethereumclassic": _chain_context("EthereumClassic", lookup_chain="EthereumClassic", family="ethereum_classic"),
+    "cosmos": _chain_context("CosmosHub", lookup_chain="CosmosHub", family="cosmoshub"),
+    "atom": _chain_context("CosmosHub", lookup_chain="CosmosHub", family="cosmoshub"),
+    "cosmoshub": _chain_context("CosmosHub", lookup_chain="CosmosHub", family="cosmoshub"),
+    "near": _chain_context("Near", lookup_chain="Near", family="near"),
+    "aptos": _chain_context("Aptos", lookup_chain="Aptos", family="aptos"),
+    "apt": _chain_context("Aptos", lookup_chain="Aptos", family="aptos"),
+    "sui": _chain_context("Sui", lookup_chain="Sui", family="sui"),
+    "injective": _chain_context("Injective", lookup_chain="Injective", family="injective"),
+    "inj": _chain_context("Injective", lookup_chain="Injective", family="injective"),
+    "filecoin": _chain_context("Filecoin", lookup_chain="Filecoin", family="filecoin"),
+    "fil": _chain_context("Filecoin", lookup_chain="Filecoin", family="filecoin"),
+    "hedera": _chain_context("Hedera", lookup_chain="Hedera", family="hedera"),
+    "hbar": _chain_context("Hedera", lookup_chain="Hedera", family="hedera"),
+    "icp": _chain_context("ICP", lookup_chain="ICP", family="icp"),
+    "internet computer": _chain_context("ICP", lookup_chain="ICP", family="icp"),
+    "ton": _chain_context("TON", lookup_chain="TON", family="ton"),
+    "thorchain": _chain_context("Thorchain", lookup_chain="Thorchain", family="thorchain"),
+    "rune": _chain_context("Thorchain", lookup_chain="Thorchain", family="thorchain"),
+    "starknet": _chain_context("Starknet", lookup_chain="Starknet", family="starknet"),
+    "strk": _chain_context("Starknet", lookup_chain="Starknet", family="starknet"),
+    "manta": _chain_context("Manta", lookup_chain="Manta", family="manta"),
+    "zetachain": _chain_context("ZetaChain", lookup_chain="ZetaChain", family="zetachain"),
+    "zeta": _chain_context("ZetaChain", lookup_chain="ZetaChain", family="zetachain"),
+    "ronin": _chain_context("Ronin", lookup_chain="Ronin", family="ronin"),
+    "bittensor": _chain_context("Bittensor", lookup_chain="Bittensor", family="bittensor"),
+    "tao": _chain_context("Bittensor", lookup_chain="Bittensor", family="bittensor"),
+    "akash": _chain_context("Akash", lookup_chain=None, family="akash"),
+    "akt": _chain_context("Akash", lookup_chain=None, family="akash"),
+    "okt": _chain_context("OKTChain", lookup_chain="OKTChain", family="oktchain"),
+    "oktchain": _chain_context("OKTChain", lookup_chain="OKTChain", family="oktchain"),
+    "gatelayer": _chain_context("GateLayer", lookup_chain="GateLayer", family="gatelayer"),
+    "gate": _chain_context("GateLayer", lookup_chain="GateLayer", family="gatelayer"),
+}
+
+
+_ONCHAIN_SYMBOL_CHAIN_KEYS: Dict[str, str] = {
+    "BTC": "bitcoin",
+    "ETH": "ethereum",
+    "BNB": "bsc",
+    "SOL": "solana",
+    "XRP": "xrpl",
+    "ADA": "cardano",
+    "DOGE": "doge",
+    "TRX": "tron",
+    "LINK": "ethereum",
+    "AVAX": "avalanche",
+    "DOT": "polkadot",
+    "POL": "polygon",
+    "MATIC": "polygon",
+    "LTC": "litecoin",
+    "BCH": "bitcoincash",
+    "ETC": "ethereumclassic",
+    "ATOM": "cosmoshub",
+    "NEAR": "near",
+    "APT": "aptos",
+    "ARB": "arbitrum",
+    "OP": "optimism",
+    "SUI": "sui",
+    "INJ": "injective",
+    "RUNE": "thorchain",
+    "AAVE": "ethereum",
+    "MKR": "ethereum",
+    "UNI": "ethereum",
+    "FIL": "filecoin",
+    "HBAR": "hedera",
+    "ICP": "icp",
+    "TON": "ton",
+    "ORDI": "brc-20",
+    "SATS": "brc-20",
+    "RATS": "brc-20",
+    "PEPE": "ethereum",
+    "FLOKI": "bsc",
+    "BONK": "solana",
+    "WIF": "solana",
+    "BOME": "solana",
+    "MEME": "ethereum",
+    "NEIRO": "ethereum",
+    "TURBO": "ethereum",
+    "TAO": "bittensor",
+    "FET": "ethereum",
+    "AGIX": "ethereum",
+    "RNDR": "ethereum",
+    "RENDER": "solana",
+    "AKT": "akash",
+    "OCEAN": "ethereum",
+    "GMX": "arbitrum",
+    "GNS": "polygon",
+    "JOE": "avalanche",
+    "AXS": "ronin",
+    "SAND": "ethereum",
+    "MANA": "ethereum",
+    "GALA": "ethereum",
+    "IMX": "ethereum",
+    "PYTH": "solana",
+    "JTO": "solana",
+    "W": "solana",
+    "JUP": "solana",
+    "BGB": "ethereum",
+    "GT": "gatelayer",
+    "OKB": "oktchain",
+    "STRK": "starknet",
+    "MANTA": "manta",
+    "ALT": "ethereum",
+    "ZETA": "zetachain",
+    "CAKE": "bsc",
+}
+
+
+def resolve_onchain_chain_context(
+    symbol: str,
+    chain: Optional[str] = None,
+) -> Dict[str, Any]:
+    requested = str(chain or "").strip()
+    normalized = requested.lower()
+    if requested and normalized not in {"auto", "default"}:
+        direct = _ONCHAIN_CHAIN_ALIAS_CONTEXTS.get(normalized)
+        if direct:
+            resolved = dict(direct)
+            resolved["matched_by"] = "chain_override"
+            resolved["requested_chain"] = requested
+            resolved["symbol_base"] = _symbol_base_asset(symbol)
+            return resolved
+        display = requested
+        return {
+            **_chain_context(
+                display,
+                lookup_chain=requested,
+                family=normalized or display,
+                matched_by="chain_override_raw",
+            ),
+            "requested_chain": requested,
+            "symbol_base": _symbol_base_asset(symbol),
+        }
+
+    base_asset = _symbol_base_asset(symbol)
+    alias_key = _ONCHAIN_SYMBOL_CHAIN_KEYS.get(base_asset)
+    if alias_key:
+        direct = _ONCHAIN_CHAIN_ALIAS_CONTEXTS.get(alias_key)
+        if direct:
+            resolved = dict(direct)
+            resolved["matched_by"] = "symbol_map"
+            resolved["symbol_base"] = base_asset
+            return resolved
+
+    unresolved_display = base_asset or "Unknown"
+    return {
+        **_chain_context(
+            unresolved_display,
+            lookup_chain=None,
+            family="unresolved",
+            matched_by="unresolved_symbol",
+        ),
+        "symbol_base": base_asset,
+    }
+
+
 def _has_snapshot_values(snapshot: Dict[str, Any]) -> bool:
     if not isinstance(snapshot, dict):
         return False
@@ -592,7 +829,7 @@ def _onchain_overview_cache_key(exchange: str, symbol: str, whale_threshold_btc:
             str(exchange or "binance").strip().lower(),
             str(symbol or "BTC/USDT").strip().upper(),
             f"{float(whale_threshold_btc or 0.0):.4f}",
-            str(chain or "Ethereum").strip(),
+            str(chain or "auto").strip(),
         ]
     )
 
@@ -1651,18 +1888,78 @@ async def _load_symbol_df(
     return df
 
 
-async def _fetch_defillama_chain_tvl(chain: str = "Ethereum") -> Dict[str, Any]:
-    url = f"https://api.llama.fi/v2/historicalChainTvl/{chain}"
+def _build_chain_tvl_unavailable_payload(
+    chain_context: Dict[str, Any],
+    *,
+    error: str = "",
+) -> Dict[str, Any]:
+    return {
+        "chain": str(chain_context.get("display_name") or "Unknown"),
+        "lookup_chain": chain_context.get("lookup_chain"),
+        "family": chain_context.get("family"),
+        "matched_by": chain_context.get("matched_by"),
+        "available": False,
+        "latest_tvl": None,
+        "change_1d_pct": 0.0,
+        "change_7d_pct": 0.0,
+        "series": [],
+        "error": error or None,
+    }
+
+
+async def _fetch_defillama_chain_tvl(
+    chain: str = "Ethereum",
+    *,
+    display_chain: Optional[str] = None,
+    chain_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    resolved_context = dict(chain_context or {})
+    if not resolved_context:
+        resolved_context = _chain_context(
+            display_chain or chain,
+            lookup_chain=chain,
+            matched_by="defillama_lookup",
+        )
+    display_name = str(
+        display_chain
+        or resolved_context.get("display_name")
+        or chain
+        or "Unknown"
+    ).strip() or "Unknown"
+    lookup_chain = str(
+        resolved_context.get("lookup_chain") or chain or ""
+    ).strip()
+    if not lookup_chain:
+        return _build_chain_tvl_unavailable_payload(
+            {**resolved_context, "display_name": display_name},
+            error="chain_tvl_not_supported",
+        )
+
+    url = f"https://api.llama.fi/v2/historicalChainTvl/{lookup_chain}"
     try:
         async with httpx.AsyncClient(timeout=12) as client:
             res = await client.get(url)
             res.raise_for_status()
             rows = res.json() or []
     except Exception as e:
-        return {"chain": chain, "available": False, "error": str(e), "series": []}
+        return _build_chain_tvl_unavailable_payload(
+            {
+                **resolved_context,
+                "display_name": display_name,
+                "lookup_chain": lookup_chain,
+            },
+            error=str(e),
+        )
 
     if not isinstance(rows, list) or not rows:
-        return {"chain": chain, "available": False, "series": []}
+        return _build_chain_tvl_unavailable_payload(
+            {
+                **resolved_context,
+                "display_name": display_name,
+                "lookup_chain": lookup_chain,
+            },
+            error="empty_chain_tvl",
+        )
 
     data = []
     for row in rows:
@@ -1673,7 +1970,14 @@ async def _fetch_defillama_chain_tvl(chain: str = "Ethereum") -> Dict[str, Any]:
         data.append({"timestamp": datetime.utcfromtimestamp(ts).isoformat(), "tvl": tvl})
 
     if not data:
-        return {"chain": chain, "available": False, "series": []}
+        return _build_chain_tvl_unavailable_payload(
+            {
+                **resolved_context,
+                "display_name": display_name,
+                "lookup_chain": lookup_chain,
+            },
+            error="empty_chain_tvl",
+        )
 
     latest = data[-1]["tvl"]
     prev_1d = data[-2]["tvl"] if len(data) >= 2 else latest
@@ -1681,7 +1985,10 @@ async def _fetch_defillama_chain_tvl(chain: str = "Ethereum") -> Dict[str, Any]:
     chg_1d = ((latest - prev_1d) / prev_1d * 100) if prev_1d > 0 else 0.0
     chg_7d = ((latest - prev_7d) / prev_7d * 100) if prev_7d > 0 else 0.0
     return {
-        "chain": chain,
+        "chain": display_name,
+        "lookup_chain": lookup_chain,
+        "family": resolved_context.get("family"),
+        "matched_by": resolved_context.get("matched_by"),
         "available": True,
         "latest_tvl": round(latest, 2),
         "change_1d_pct": round(chg_1d, 4),
@@ -1922,6 +2229,7 @@ async def _compute_onchain_overview(
     chain: str,
 ) -> Dict[str, Any]:
     started_at = time.monotonic()
+    chain_context = resolve_onchain_chain_context(symbol, chain)
     premium_external = _load_premium_external_snapshot()
     connector = exchange_manager.get_exchange(exchange)
     if connector is None:
@@ -1943,7 +2251,27 @@ async def _compute_onchain_overview(
             "error": "live_flow_proxy_disabled_for_fast_path",
         }
 
-    tvl_task = asyncio.create_task(asyncio.wait_for(_fetch_defillama_chain_tvl(chain=chain), timeout=6.0))
+    if chain_context.get("tvl_supported") and chain_context.get("lookup_chain"):
+        tvl_task = asyncio.create_task(
+            asyncio.wait_for(
+                _fetch_defillama_chain_tvl(
+                    chain=str(chain_context.get("lookup_chain") or ""),
+                    display_chain=str(chain_context.get("display_name") or ""),
+                    chain_context=chain_context,
+                ),
+                timeout=6.0,
+            )
+        )
+    else:
+        tvl_task = asyncio.create_task(
+            asyncio.sleep(
+                0,
+                result=_build_chain_tvl_unavailable_payload(
+                    chain_context,
+                    error="chain_tvl_not_supported",
+                ),
+            )
+        )
     whale_task = asyncio.create_task(
         asyncio.wait_for(_fetch_btc_whale_unconfirmed(min_btc=max(1.0, whale_threshold_btc)), timeout=8.0)
     )
@@ -1960,7 +2288,10 @@ async def _compute_onchain_overview(
     tvl = (
         tvl_result
         if isinstance(tvl_result, dict)
-        else {"chain": chain, "available": False, "error": _error_text(tvl_result), "series": []}
+        else _build_chain_tvl_unavailable_payload(
+            chain_context,
+            error=_error_text(tvl_result),
+        )
     )
     whales = (
         whale_result
@@ -1981,6 +2312,7 @@ async def _compute_onchain_overview(
         "symbol": symbol,
         "exchange": exchange,
         "window_hours": 4,
+        "chain_context": chain_context,
         "exchange_flow_proxy": imbalance,
         "defi_tvl": tvl,
         "whale_activity": whales,
@@ -2050,10 +2382,12 @@ def _build_onchain_placeholder(
     chain: str,
     reason: str = "后台刷新中",
 ) -> Dict[str, Any]:
+    chain_context = resolve_onchain_chain_context(symbol, chain)
     payload = {
         "symbol": symbol,
         "exchange": exchange,
         "window_hours": 4,
+        "chain_context": chain_context,
         "exchange_flow_proxy": {
             "available": False,
             "count": 0,
@@ -2062,15 +2396,10 @@ def _build_onchain_placeholder(
             "imbalance": 0.0,
             "error": reason,
         },
-        "defi_tvl": {
-            "chain": chain,
-            "available": False,
-            "latest_tvl": None,
-            "change_1d_pct": 0.0,
-            "change_7d_pct": 0.0,
-            "series": [],
-            "error": reason,
-        },
+        "defi_tvl": _build_chain_tvl_unavailable_payload(
+            chain_context,
+            error=reason,
+        ),
         "whale_activity": {
             "available": False,
             "btc_price": None,
@@ -2927,6 +3256,7 @@ async def get_klines(
     end_time = _normalize_query_datetime(end_time)
     limit = max(10, min(limit, 5000))
     requested_exchange = str(exchange or "").lower() or "binance"
+    align_mode = str(align or "tail").lower()
     candidates = [requested_exchange] + [
         ex for ex in ["binance", "gate", "okx"] if ex != requested_exchange
     ]
@@ -2935,11 +3265,14 @@ async def get_klines(
 
     load_start = start_time
     load_end = end_time
-    if timeframe in _SUB_MINUTE_TIMEFRAMES and load_start is None:
+    if load_start is None and align_mode != "head":
         effective_end = load_end or datetime.now()
         seconds = _timeframe_seconds(timeframe)
-        # Only load a bounded recent window for UI requests to avoid scanning full-year second-level partitions.
-        lookback_seconds = max(900, min(limit * seconds * 4, 6 * 3600))
+        # UI tail reads only need a bounded recent window; otherwise partitioned
+        # parquet loads may scan the entire history before trimming to `limit`.
+        lookback_seconds = max(limit * seconds * 4, seconds * 240)
+        if timeframe in _SUB_MINUTE_TIMEFRAMES:
+            lookback_seconds = max(900, min(lookback_seconds, 6 * 3600))
         load_start = effective_end - timedelta(seconds=lookback_seconds)
 
     async def _fetch_live_df(ex_name: str, live_limit: int) -> pd.DataFrame:
@@ -3053,17 +3386,25 @@ async def get_klines(
             stale_threshold = max(90.0, _timeframe_seconds(timeframe) * 3.0)
             if not df.empty:
                 last_local_ts = pd.to_datetime(df.index.max())
-                stale_seconds = max(0.0, (datetime.now() - last_local_ts.to_pydatetime()).total_seconds())
-                if stale_seconds > stale_threshold:
-                    # Cache is stale: allow longer live pull to close chart gaps.
-                    quick_timeout = max(quick_timeout, 8.0)
+                current_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+                stale_seconds = max(
+                    0.0,
+                    (
+                        current_utc_naive
+                        - last_local_ts.to_pydatetime().replace(tzinfo=None)
+                    ).total_seconds(),
+                )
+            should_block_for_refresh = stale_seconds > stale_threshold
             used_public_fallback = False
-            if actual_exchange == "binance" and timeframe not in _SUB_MINUTE_TIMEFRAMES:
+            if should_block_for_refresh and actual_exchange == "binance" and timeframe not in _SUB_MINUTE_TIMEFRAMES:
                 try:
-                    public_df = await _fetch_binance_public_klines(
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        limit=live_limit,
+                    public_df = await asyncio.wait_for(
+                        _fetch_binance_public_klines(
+                            symbol=symbol,
+                            timeframe=timeframe,
+                            limit=live_limit,
+                        ),
+                        timeout=3.0,
                     )
                     if not public_df.empty:
                         await _save_df_to_parquet(actual_exchange, symbol, timeframe, public_df)
@@ -3072,7 +3413,7 @@ async def get_klines(
                         used_public_fallback = True
                 except Exception as public_err:
                     logger.debug(f"public kline fallback skipped: {public_err}")
-            if not used_public_fallback:
+            if should_block_for_refresh and not used_public_fallback:
                 try:
                     live_df = await asyncio.wait_for(
                         _fetch_live_df(actual_exchange, live_limit=live_limit),
@@ -3089,41 +3430,7 @@ async def get_klines(
                         lambda: _refresh_cache_from_live(actual_exchange, live_limit),
                     )
                 except Exception as live_err:
-                    # When cache is stale, force reconnect once and retry live pull.
-                    if stale_seconds > stale_threshold:
-                        try:
-                            connector = exchange_manager.get_exchange(actual_exchange)
-                            if connector:
-                                await connector.connect()
-                            retry_df = await asyncio.wait_for(
-                                _fetch_live_df(actual_exchange, live_limit=live_limit),
-                                timeout=max(10.0, quick_timeout),
-                            )
-                            if not retry_df.empty:
-                                await _save_df_to_parquet(actual_exchange, symbol, timeframe, retry_df)
-                                df = pd.concat([df, retry_df])
-                                df = df[~df.index.duplicated(keep="last")].sort_index()
-                        except (asyncio.TimeoutError, asyncio.CancelledError) as retry_err:
-                            logger.debug(f"live refresh retry timeout/cancelled: {retry_err}")
-                        except Exception as retry_err:
-                            logger.debug(f"live refresh retry skipped: {retry_err}")
-                        # Exchange connector may hang intermittently; use Binance public
-                        # market data as fallback to keep UI candles near realtime.
-                        if actual_exchange == "binance" and timeframe not in _SUB_MINUTE_TIMEFRAMES:
-                            try:
-                                public_df = await _fetch_binance_public_klines(
-                                    symbol=symbol,
-                                    timeframe=timeframe,
-                                    limit=live_limit,
-                                )
-                                if not public_df.empty:
-                                    await _save_df_to_parquet(actual_exchange, symbol, timeframe, public_df)
-                                    df = pd.concat([df, public_df])
-                                    df = df[~df.index.duplicated(keep="last")].sort_index()
-                            except Exception as public_err:
-                                logger.debug(f"public kline fallback skipped: {public_err}")
                     logger.debug(f"live refresh skipped: {live_err}")
-                    # Do not block response on live fetch; refresh cache in background.
                     _schedule_live_cache_refresh(
                         live_refresh_key,
                         lambda: _refresh_cache_from_live(actual_exchange, live_limit),
@@ -3154,7 +3461,6 @@ async def get_klines(
             "message": "指定时间范围内无可用K线数据",
         }
 
-    align_mode = str(align or "tail").lower()
     if align_mode == "head":
         df = df.head(limit)
     else:
@@ -4361,37 +4667,101 @@ def _merge_research_symbol_lists(*groups: Any, limit: int = 60) -> List[str]:
     return merged
 
 
+def _detach_research_symbols_task(task: asyncio.Task[Any], *, label: str) -> None:
+    def _consume_result(done_task: asyncio.Task[Any]) -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            exc = done_task.exception()
+            if exc is not None:
+                logger.debug(f"{label} background task finished after fallback: {exc}")
+
+    task.add_done_callback(_consume_result)
+
+
+async def _build_research_symbols_fallback(
+    *,
+    exchange: str,
+    warning: str,
+    source: str = "research_universe_fallback",
+) -> Dict[str, Any]:
+    cached_universe = load_cached_exchange_altcoin_universe(exchange, allow_stale=True)
+    if cached_universe and list(cached_universe.get("symbols") or []):
+        data = dict(cached_universe)
+        data["fallback_source"] = "coinglass_altcoin_universe_cache"
+        data["stale_fallback"] = True
+    else:
+        data = await get_data_symbols(exchange=exchange)
+        data["fallback_source"] = "data_symbols"
+
+    symbols = list(data.get("symbols") or [])
+    data["source"] = source
+    data["warning"] = warning
+    data["primary_symbol"] = str((symbols or ["BTC/USDT"])[0] or "BTC/USDT")
+    data["default_count"] = min(30, len(symbols))
+    data["count"] = len(symbols)
+    return data
+
+
 @router.get("/research/symbols")
 async def get_research_symbols(exchange: str = "binance"):
+    universe_task: asyncio.Task[Dict[str, Any]] = asyncio.create_task(
+        build_exchange_altcoin_universe(exchange=exchange)
+    )
     try:
-        data = await asyncio.wait_for(
-            build_exchange_altcoin_universe(exchange=exchange),
+        done, _ = await asyncio.wait(
+            {universe_task},
             timeout=_RESEARCH_SYMBOLS_TIMEOUT_SEC,
         )
-    except asyncio.TimeoutError as exc:
+        if universe_task not in done:
+            logger.warning(
+                "research_symbols: coinglass altcoin universe timed out after %.1fs",
+                _RESEARCH_SYMBOLS_TIMEOUT_SEC,
+            )
+            universe_task.cancel()
+            _detach_research_symbols_task(
+                universe_task,
+                label=f"research_symbols:{exchange}",
+            )
+            data = await _build_research_symbols_fallback(
+                exchange=exchange,
+                warning=(
+                    f"coinglass altcoin universe timed out after "
+                    f"{_RESEARCH_SYMBOLS_TIMEOUT_SEC:.1f}s"
+                ),
+            )
+        else:
+            data = await universe_task
+    except asyncio.TimeoutError:
         logger.warning(
             "research_symbols: coinglass altcoin universe timed out after %.1fs",
             _RESEARCH_SYMBOLS_TIMEOUT_SEC,
         )
-        data = await get_data_symbols(exchange=exchange)
-        data["source"] = "research_universe_fallback"
-        data["warning"] = (
-            f"coinglass altcoin universe timed out after "
-            f"{_RESEARCH_SYMBOLS_TIMEOUT_SEC:.1f}s"
+        if not universe_task.done():
+            universe_task.cancel()
+            _detach_research_symbols_task(
+                universe_task,
+                label=f"research_symbols:{exchange}",
+            )
+        data = await _build_research_symbols_fallback(
+            exchange=exchange,
+            warning=(
+                f"coinglass altcoin universe timed out after "
+                f"{_RESEARCH_SYMBOLS_TIMEOUT_SEC:.1f}s"
+            ),
         )
-        data["primary_symbol"] = str(
-            (data.get("symbols") or ["BTC/USDT"])[0] or "BTC/USDT"
-        )
-        data["default_count"] = min(30, len(data.get("symbols") or []))
-        return data
     except Exception as exc:
-        logger.warning(f"research_symbols: coinglass altcoin universe failed: {exc}")
-        data = await get_data_symbols(exchange=exchange)
-        data["source"] = "research_universe_fallback"
-        data["warning"] = str(exc)
-        data["primary_symbol"] = str((data.get("symbols") or ["BTC/USDT"])[0] or "BTC/USDT")
-        data["default_count"] = min(30, len(data.get("symbols") or []))
-        return data
+        logger.warning(
+            f"research_symbols: coinglass altcoin universe failed: {exc}"
+        )
+        if not universe_task.done():
+            universe_task.cancel()
+            _detach_research_symbols_task(
+                universe_task,
+                label=f"research_symbols:{exchange}",
+            )
+        data = await _build_research_symbols_fallback(
+            exchange=exchange,
+            warning=str(exc),
+        )
 
     if not data.get("symbols"):
         fallback = await get_data_symbols(exchange=exchange)
@@ -5765,11 +6135,17 @@ async def get_onchain_overview(
     symbol: str = "BTC/USDT",
     exchange: str = "binance",
     whale_threshold_btc: float = 10.0,
-    chain: str = "Ethereum",
+    chain: str = "auto",
     refresh: bool = False,
     hours: int = 4,
 ):
-    cache_key = _onchain_overview_cache_key(exchange, symbol, whale_threshold_btc, chain)
+    chain_context = resolve_onchain_chain_context(symbol, chain)
+    cache_key = _onchain_overview_cache_key(
+        exchange,
+        symbol,
+        whale_threshold_btc,
+        str(chain_context.get("cache_key") or chain or "auto"),
+    )
     cached_payload = _prepare_cached_onchain_payload(cache_key, refresh=bool(refresh))
     if cached_payload and not refresh and not cached_payload.get("stale"):
         return cached_payload

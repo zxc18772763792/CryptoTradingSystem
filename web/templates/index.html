@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-    <link rel="stylesheet" href="/static/css/style.css?v=93">
+    <link rel="stylesheet" href="{{ static_asset_url('css/style.css') }}">
     <script>
         (function (root) {
             if (!root) return;
@@ -1101,6 +1101,9 @@
                                                     <span class="status-label">结论 / 下一步</span>
                                                     <span class="status-value">点击「研究总览」开始</span>
                                                 </div>
+                                                <div class="research-status-item" style="justify-content:flex-end;padding:4px 8px;">
+                                                    <span id="research-auto-refresh-badge" class="auto-refresh-badge" style="display:none;"></span>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
@@ -1381,7 +1384,13 @@
                             <!-- 底部：纪律 + 调试 -->
                             <div class="research-bottom-grid">
                                 <div class="card research-discipline-card">
-                                    <h3>🛡️ 纪律与风控</h3>
+                                    <h3 style="display:flex;align-items:center;gap:10px;">🛡️ 纪律与风控
+                                        <select id="discipline-days" style="font-size:11px;padding:2px 6px;border-radius:4px;background:var(--bg-3,#1e2535);border:1px solid var(--border,#2a3550);color:var(--text-muted,#8a9ab8);">
+                                            <option value="7" selected>近7天</option>
+                                            <option value="30">近30天</option>
+                                            <option value="90">近90天</option>
+                                        </select>
+                                    </h3>
                                     <div id="discipline-summary" class="research-metrics-grid">点击「纪律风控」加载行为记录</div>
                                     <div id="discipline-grid" class="strategies-grid" style="margin-top:12px;"></div>
                                 </div>
@@ -2406,9 +2415,12 @@
                             <div class="research-config-section">
                                 <div class="research-config-title">雷达模式</div>
                                 <div class="altcoin-radar-mode-btns" id="altcoin-radar-mode-btns">
-                                    <button class="altcoin-mode-btn active" data-mode="combined">Combined</button>
-                                    <button class="altcoin-mode-btn" data-mode="perp">Perp</button>
-                                    <button class="altcoin-mode-btn" data-mode="narrative">Narrative</button>
+                                    <button class="altcoin-mode-btn active" data-mode="combined" title="综合 Perp + Narrative 两类信号">Combined 综合</button>
+                                    <button class="altcoin-mode-btn" data-mode="perp" title="更偏合约/资金/点火/拥挤信号">Perp 合约</button>
+                                    <button class="altcoin-mode-btn" data-mode="narrative" title="更偏叙事/Meme/板块轮动/Watchlist 信号">Narrative 叙事</button>
+                                </div>
+                                <div class="research-control-notes">
+                                    `Combined` 看综合候选；`Perp` 看合约点火/延续/拥挤；`Narrative` 看叙事热度、Meme 轮动和 Watchlist。
                                 </div>
                             </div>
 
@@ -2467,11 +2479,11 @@
                                 </div>
                                 <div class="form-row">
                                     <div class="form-group">
-                                        <label>Universe 范围</label>
+                                        <label>扫描范围</label>
                                         <select id="altcoin-radar-universe-scope">
-                                            <option value="research" selected>研究币池</option>
-                                            <option value="expanded">扩展 (~100)</option>
-                                            <option value="watchlist">Watchlist</option>
+                                            <option value="research" selected>研究清单（使用下方多选）</option>
+                                            <option value="expanded">扩展扫描（自动补齐 ~100）</option>
+                                            <option value="watchlist">Watchlist 收藏列表</option>
                                         </select>
                                     </div>
                                 </div>
@@ -2501,16 +2513,16 @@
                                 默认缓存：15m 30s / 1h 60s / 4h 300s；强制刷新会绕过缓存重新计算。
                             </div>
                             <div class="research-control-notes">
-                                Universe 与 Watchlist 已合并在这里管理：`研究币池` 使用下方自定义多选，`Watchlist` 负责叙事 / Meme / 板块观察池。
+                                上方下拉决定本次扫描来源；下方多选只在 `扫描范围 = 研究清单（使用下方多选）` 时决定具体成分，`Watchlist` 是收藏列表，不单独算第二个池。
                             </div>
                             <div id="altcoin-radar-universe-summary" class="research-control-notes altcoin-radar-universe-summary">
-                                当前范围：研究币池
+                                当前模式：研究清单（使用下方多选）
                             </div>
 
                             <div class="research-config-section altcoin-radar-universe-group" id="altcoin-radar-custom-universe-group">
-                                <div class="research-config-title">自定义研究币池 <span style="font-weight:400;color:#7e92b2;">(按住Ctrl多选，默认最多 30 个)</span></div>
+                                <div class="research-config-title">研究清单成分 <span style="font-weight:400;color:#7e92b2;">(按住Ctrl多选，默认最多 30 个)</span></div>
                                 <div class="research-control-notes" id="altcoin-radar-custom-universe-note">
-                                    仅在 `Universe 范围 = 研究币池` 时生效。
+                                    仅在 `扫描范围 = 研究清单（使用下方多选）` 时生效。
                                 </div>
                                 <div class="form-group">
                                     <select id="altcoin-radar-universe" multiple size="12">
@@ -2531,14 +2543,23 @@
                             </div>
 
                             <div class="research-config-section altcoin-radar-universe-group">
-                                <div class="research-config-title">Watchlist 观察池</div>
+                                <div class="research-config-title">Watchlist 收藏列表</div>
                                 <div class="research-control-notes" id="altcoin-radar-watchlist-summary">
-                                    用于维护叙事 / Meme / 板块观察池。当前选中候选可直接加入或移出，变更后会自动刷新山寨雷达缓存。
+                                    用于维护叙事 / Meme / 板块观察收藏。点击下方标签会在右侧加载该币详情；只有切到 `Watchlist 收藏列表` 模式时，它才会作为本次扫描来源。
                                 </div>
                             </div>
                             <div class="inline-actions">
                                 <button class="btn btn-sm" id="btn-altcoin-radar-watchlist-add">加入 Watchlist</button>
                                 <button class="btn btn-sm" id="btn-altcoin-radar-watchlist-remove">移出 Watchlist</button>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>手动加入 Watchlist</label>
+                                    <input type="text" id="altcoin-radar-watchlist-input" placeholder="输入 ORDI/USDT 或 ORDI">
+                                </div>
+                                <div class="form-group" style="align-self:flex-end;">
+                                    <button class="btn btn-sm" id="btn-altcoin-radar-watchlist-add-manual">手动加入</button>
+                                </div>
                             </div>
                             <div id="altcoin-radar-watchlist-note" class="research-control-notes">
                                 当前未选中候选
@@ -2613,7 +2634,7 @@
                                     <span id="altcoin-radar-table-note" class="altcoin-radar-inline-note">等待扫描结果...</span>
                                 </div>
                             </div>
-                            <div class="table-container">
+                            <div class="table-container altcoin-radar-table-scroll">
                                 <table class="altcoin-radar-table">
                                     <thead>
                                         <tr>
@@ -2711,6 +2732,14 @@
                                         </div>
                                         <div id="altcoin-radar-theme-peers" class="altcoin-radar-related-list"></div>
                                     </div>
+                                </div>
+
+                                <div class="altcoin-radar-detail-panel">
+                                    <div class="altcoin-radar-panel-title">观察建议</div>
+                                    <div id="altcoin-radar-action-list" class="altcoin-radar-reason-list">
+                                        <div class="altcoin-radar-reason">等待加载...</div>
+                                    </div>
+                                    <div id="altcoin-radar-action-tags" class="altcoin-radar-tag-row"></div>
                                 </div>
 
                                 <div class="altcoin-radar-detail-grid altcoin-radar-detail-grid-wide">

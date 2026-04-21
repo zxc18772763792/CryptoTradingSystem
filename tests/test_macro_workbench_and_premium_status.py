@@ -388,6 +388,7 @@ def test_onchain_module_exposes_derivatives_shadow_summary(monkeypatch):
     result = asyncio.run(module._build_onchain_module(module.ResearchProfile()))
 
     assert result["status"] == "ok"
+    assert module.get_onchain_overview.await_args.kwargs["chain"] == "auto"
     assert result["summary"]["derivatives_status"] == "ok"
     assert result["summary"]["derivatives_source_status"] == "live"
     assert result["summary"]["derivatives_dataset_count"] == 2

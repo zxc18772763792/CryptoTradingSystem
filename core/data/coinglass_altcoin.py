@@ -12,7 +12,12 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 import httpx
 from loguru import logger
 
-from core.data.coinglass_client import CoinglassClient, coinglass_enabled
+from core.data.coinglass_client import (
+    CoinglassClient,
+    coinglass_enabled,
+    coinglass_minute_headroom,
+    get_coinglass_budget_state,
+)
 from core.data.coinglass_registry import normalize_coinglass_symbol
 
 
@@ -24,6 +29,7 @@ _UNIVERSE_REFRESH_TIMEOUT_SEC = 20.0
 _TAG_CACHE_TTL_SEC = 7 * 86400.0
 _DEFAULT_MARKET_PER_PAGE = 200
 _DEFAULT_MARKET_MAX_PAGES = 4
+_MIN_UNIVERSE_REMOTE_REQUESTS = 2
 _DEFAULT_TAG_SAMPLE_LIMIT = 240
 _RESEARCH_MAJOR_SYMBOL_LIMIT = 10
 _MAJOR_MARKET_CAP_EXCLUSION_USD = 80_000_000_000.0
@@ -211,6 +217,29 @@ def _load_universe_cache_payload(exchange: str) -> Optional[Dict[str, Any]]:
     return dict(payload) if isinstance(payload, dict) else None
 
 
+def load_cached_exchange_altcoin_universe(
+    exchange: str,
+    *,
+    allow_stale: bool = False,
+) -> Optional[Dict[str, Any]]:
+    normalized_exchange = _normalize_exchange(exchange)
+    cache_key = _universe_cache_key(normalized_exchange)
+    cached = _UNIVERSE_CACHE.get(cache_key)
+    payload = dict(cached.get("payload") or {}) if cached else None
+    if payload:
+        age_sec = _universe_cache_age_sec(payload)
+        if allow_stale or age_sec is None or age_sec <= _UNIVERSE_CACHE_TTL_SEC:
+            return payload
+
+    disk_payload = _load_universe_cache_payload(normalized_exchange)
+    if not disk_payload:
+        return None
+    age_sec = _universe_cache_age_sec(disk_payload)
+    if allow_stale or age_sec is None or age_sec <= _UNIVERSE_CACHE_TTL_SEC:
+        return dict(disk_payload)
+    return None
+
+
 def _universe_cache_age_sec(payload: Mapping[str, Any]) -> Optional[float]:
     updated_at = payload.get("updated_at")
     if not updated_at:
@@ -241,6 +270,24 @@ def _build_universe_stale_fallback(
     fallback["exchange"] = exchange
     fallback.setdefault("source", "coinglass_altcoin_universe")
     return fallback
+
+
+async def _plan_universe_refresh_requests(*, manual: bool) -> Optional[Dict[str, int]]:
+    if not coinglass_enabled():
+        return None
+    try:
+        budget_state = await get_coinglass_budget_state()
+    except Exception as exc:
+        logger.debug(f"coinglass_altcoin: budget probe failed for universe refresh: {exc}")
+        return None
+    available_requests = coinglass_minute_headroom(budget_state, manual=manual)
+    return {
+        "available_requests": available_requests,
+        "market_max_pages": max(
+            0,
+            min(_DEFAULT_MARKET_MAX_PAGES, available_requests - 1),
+        ),
+    }
 
 
 def _load_tag_cache() -> Dict[str, Any]:
@@ -597,10 +644,35 @@ async def build_exchange_altcoin_universe(
             _UNIVERSE_CACHE[cache_key] = {"stored_at": now_ts, "payload": stale_payload}
             return stale_payload
 
+    request_plan = await _plan_universe_refresh_requests(manual=manual)
+    market_max_pages = _DEFAULT_MARKET_MAX_PAGES
+    if request_plan is not None:
+        available_requests = int(request_plan.get("available_requests") or 0)
+        market_max_pages = int(request_plan.get("market_max_pages") or 0)
+        if available_requests < _MIN_UNIVERSE_REMOTE_REQUESTS:
+            reason = (
+                "coinglass minute headroom too low "
+                f"({available_requests} remaining, need {_MIN_UNIVERSE_REMOTE_REQUESTS})"
+            )
+            if stale_payload and not refresh:
+                fallback_payload = _build_universe_stale_fallback(
+                    stale_payload,
+                    exchange=normalized_exchange,
+                    reason=reason,
+                )
+                _UNIVERSE_CACHE[cache_key] = {"stored_at": now_ts, "payload": fallback_payload}
+                return fallback_payload
+            raise RuntimeError(reason)
+
     try:
         market_rows, onboard_map = await asyncio.wait_for(
             asyncio.gather(
-                load_coinglass_market_snapshots(normalized_exchange, refresh=refresh, manual=manual),
+                load_coinglass_market_snapshots(
+                    normalized_exchange,
+                    refresh=refresh,
+                    manual=manual,
+                    max_pages=max(1, market_max_pages),
+                ),
                 load_exchange_onboard_map(normalized_exchange, refresh=refresh, manual=manual),
             ),
             timeout=_UNIVERSE_REFRESH_TIMEOUT_SEC,

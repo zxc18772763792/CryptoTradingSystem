@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from core.runtime.state import RuntimeState
 from core.runtime.supervisor import RuntimeTaskSupervisor
@@ -55,5 +56,34 @@ def test_runtime_task_supervisor_restarts_failed_worker():
         assert attempts["count"] >= 2
         assert diagnostics["restarts"] >= 1
         assert diagnostics["last_success_at"] is not None
+
+    asyncio.run(_run())
+
+
+def test_runtime_task_supervisor_stops_tasks_concurrently():
+    async def _run() -> None:
+        state = RuntimeState()
+        supervisor = RuntimeTaskSupervisor(state)
+
+        async def slow_worker(stop_event: asyncio.Event) -> None:
+            try:
+                while not stop_event.is_set():
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.2)
+                raise
+
+        supervisor.start_task("slow-1", slow_worker)
+        supervisor.start_task("slow-2", slow_worker)
+        await asyncio.sleep(0.05)
+
+        started = time.perf_counter()
+        await supervisor.stop_all(timeout_sec=1.0)
+        elapsed = time.perf_counter() - started
+
+        diagnostics = state.get_task_diagnostics()
+        assert diagnostics["slow-1"]["state"] == "stopped"
+        assert diagnostics["slow-2"]["state"] == "stopped"
+        assert elapsed < 0.35
 
     asyncio.run(_run())

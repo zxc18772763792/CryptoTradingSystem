@@ -3938,6 +3938,8 @@ async def run_backtest(
             "data_points": int(result.get("effective_data_points") or len(df)),
             "start_date": str(result.get("effective_start_date") or df.index[0].isoformat()),
             "end_date": str(result.get("effective_end_date") or df.index[-1].isoformat()),
+            "requested_start_date": start_date or "",
+            "requested_end_date": end_date or "",
             "auto_expanded_range": auto_expanded_range,
             "min_required_bars": min_bars,
             "use_stop_take": bool(result.get("use_stop_take", False)),
@@ -4297,14 +4299,20 @@ async def run_backtest_custom(
     )
     if df.empty:
         raise HTTPException(status_code=404, detail="缺少历史数据")
+    full_df = df.copy()
+    auto_expanded_range = False
     if parsed_start is not None:
         df = df[df.index >= parsed_start]
     if parsed_end is not None:
         df = df[df.index <= parsed_end]
     if df.empty:
         raise HTTPException(status_code=404, detail="该时间范围内无可用数据。")
-    if len(df) < _min_required_bars(timeframe):
-        raise HTTPException(status_code=400, detail="该时间范围K线不足，无法回测。")
+    min_bars = _min_required_bars(timeframe)
+    if len(df) < min_bars and len(full_df) >= min_bars:
+        df = full_df
+        auto_expanded_range = True
+    elif len(df) < min_bars:
+        raise HTTPException(status_code=400, detail=f"该时间范围K线不足（{len(df)} 根），{timeframe} 至少需要 {min_bars} 根")
 
     result = _run_backtest_core(
         strategy=strategy,
@@ -4333,6 +4341,10 @@ async def run_backtest_custom(
             "data_points": int(result.get("effective_data_points") or len(df)),
             "start_date": str(result.get("effective_start_date") or df.index[0].isoformat()),
             "end_date": str(result.get("effective_end_date") or df.index[-1].isoformat()),
+            "requested_start_date": start_date or "",
+            "requested_end_date": end_date or "",
+            "auto_expanded_range": auto_expanded_range,
+            "min_required_bars": min_bars,
             "custom_params": custom_params or {},
             "use_stop_take": bool(result.get("use_stop_take", False)),
             "stop_loss_pct": result.get("stop_loss_pct"),
