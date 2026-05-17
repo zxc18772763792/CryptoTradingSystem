@@ -177,6 +177,7 @@ class Settings(BaseSettings):
     WEB_HOST: str = "127.0.0.1"
     WEB_PORT: int = 8000
     WEB_SECRET_KEY: str = "change_this_secret_key_in_production"
+    OPS_TOKEN: str = ""
 
     # Notification
     TELEGRAM_BOT_TOKEN: Optional[str] = None

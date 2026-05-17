@@ -90,6 +90,34 @@ def test_loopback_ui_cookie_allows_sensitive_post(monkeypatch):
     assert response.json()["target_mode"] == "paper"
 
 
+def test_loopback_ui_cookie_uses_settings_ops_token_when_env_missing(monkeypatch):
+    monkeypatch.delenv("OPS_TOKEN", raising=False)
+    monkeypatch.setattr(ops_auth_module.settings, "OPS_TOKEN", "test-token")
+    monkeypatch.setattr(web_auth, "_request_client_ip", lambda request: "127.0.0.1")
+
+    app = _build_app(("/api/trading", trading_runtime.router))
+
+    @app.get("/")
+    async def index(request: Request):
+        response = JSONResponse({"ok": True})
+        web_auth.set_local_ui_session_cookie(request, response)
+        return response
+
+    monkeypatch.setattr(
+        trading_runtime,
+        "request_trading_mode_switch_service",
+        lambda **kwargs: {"success": True, "token": "tok-settings", "target_mode": kwargs.get("target_mode")},
+    )
+
+    client = TestClient(app, base_url="http://127.0.0.1:8000")
+    assert client.get("/").status_code == 200
+    assert web_auth._LOCAL_UI_COOKIE_NAME in client.cookies
+
+    response = client.post("/api/trading/mode/request", json={"target_mode": "paper", "reason": "settings-token"})
+    assert response.status_code == 200
+    assert response.json()["target_mode"] == "paper"
+
+
 def test_loopback_ui_cookie_rejects_cross_port_origin(monkeypatch):
     monkeypatch.setenv("OPS_TOKEN", "test-token")
     monkeypatch.setattr(web_auth, "_request_client_ip", lambda request: "127.0.0.1")

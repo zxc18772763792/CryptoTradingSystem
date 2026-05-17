@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from fastapi import HTTPException, Request, status
 
+from config.settings import settings
 from core.governance.rbac import resolve_api_key_identity
 
 
@@ -18,7 +19,7 @@ class OpsAuthContext:
 
 
 def get_ops_token(required: bool = True) -> str:
-    token = str(os.getenv("OPS_TOKEN") or "").strip()
+    token = str(os.getenv("OPS_TOKEN") or getattr(settings, "OPS_TOKEN", "") or "").strip()
     if required and not token:
         raise RuntimeError("OPS_TOKEN is required for Ops API")
     return token
