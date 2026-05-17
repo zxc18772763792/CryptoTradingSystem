@@ -1,4 +1,4 @@
-﻿"""Funding rate data models and symbol normalization helpers."""
+"""Funding rate data models and symbol normalization helpers."""
 
 from dataclasses import dataclass, field
 from datetime import datetime

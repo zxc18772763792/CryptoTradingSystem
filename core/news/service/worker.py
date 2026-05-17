@@ -27,6 +27,7 @@ DEFAULT_INTERVALS = {
     "cryptopanic": 90,
     "coinglass_articles": 180,
     "cryptocompare_news": 90,
+    "opennews": 45,
     "jin10": 120,
     "coinglass_economic_data": 300,
     "coinglass_financial_events": 600,

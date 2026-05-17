@@ -1,4 +1,4 @@
-﻿"""Notification API endpoints."""
+"""Notification API endpoints."""
 import asyncio
 from typing import Any, Dict, List, Optional
 

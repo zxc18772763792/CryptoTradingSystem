@@ -15,38 +15,30 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 async def test_funding_rate():
     """测试资金费率采集"""
     print("\n" + "=" * 60)
-    print("Testing Funding Rate Collector")
+    print("Testing CoinGlass Derivatives/Funding Source")
     print("=" * 60)
     
     try:
-        from core.data.funding_rate_collector import FundingRateCollector
-        
-        async with FundingRateCollector() as collector:
-            # 测试单个交易所
-            print("\n[Binance BTCUSDT]")
-            rate = await collector.fetch_binance("BTCUSDT")
-            if rate:
-                print(f"  Funding Rate: {rate.funding_rate_pct:.4f}%")
-                print(f"  Annualized:   {rate.annualized_rate:.2f}%")
-                print(f"  Sentiment:    {rate.sentiment}")
-                print(f"  Funding Time: {rate.funding_time}")
-            else:
-                print("  Failed to fetch")
-            
-            # 测试并行获取
-            print("\n[All Exchanges - ETHUSDT]")
-            rates = await collector.fetch_all("ETHUSDT")
-            for exchange, r in rates.items():
-                print(f"  {exchange.upper():10s}: {r.funding_rate_pct:.4f}%")
-            
-            # 测试预测费率
-            print("\n[Predicted Rate - BTCUSDT]")
-            predicted = await collector.fetch_binance_predicted("BTCUSDT")
-            if predicted:
-                print(f"  Mark Price:    ${predicted['mark_price']:,.2f}")
-                print(f"  Index Price:   ${predicted['index_price']:,.2f}")
-                print(f"  Est. Rate:     {predicted['last_funding_rate']*100:.4f}%")
-                print(f"  Next Funding:  {predicted['next_funding_time']}")
+        from core.data.coinglass_client import coinglass_enabled
+        from core.data.coinglass_feature_builder import build_coinglass_overview_payload
+
+        if not coinglass_enabled():
+            print("  CoinGlass disabled or API key missing")
+            return
+
+        payload = await build_coinglass_overview_payload(
+            symbol="BTC/USDT",
+            refresh=True,
+            manual=True,
+        )
+        snapshot = payload.get("snapshot") or {}
+        print(f"  Available:     {payload.get('available')}")
+        print(f"  Freshness:     {payload.get('freshness_sec')} sec")
+        print(f"  Active sets:   {', '.join(payload.get('active_datasets') or [])}")
+        print(f"  Funding Rate:  {snapshot.get('funding_rate')}")
+        print(f"  OI USD:        {snapshot.get('oi_usd')}")
+        print(f"  Basis %:       {snapshot.get('basis_pct')}")
+        print("  Source:        coinglass_cache")
     except Exception as e:
         print(f"  Error: {e}")
         import traceback

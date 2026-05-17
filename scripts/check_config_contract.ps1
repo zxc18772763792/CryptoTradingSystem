@@ -68,6 +68,24 @@ $checks = @(
         WebPs = $null
     },
     @{
+        Name = "OPENAI_MODEL"
+        Settings = Get-RegexValue -Text $settingsText -Pattern 'OPENAI_MODEL:\s*str\s*=\s*"([^"]*)"' -Label "config/settings.py OPENAI_MODEL"
+        Example = Get-RegexValue -Text $envExampleText -Pattern '^OPENAI_MODEL=(.*)$' -Label ".env.example OPENAI_MODEL"
+        WebPs = $null
+    },
+    @{
+        Name = "OPENAI_BACKUP_MODEL"
+        Settings = Get-RegexValue -Text $settingsText -Pattern 'OPENAI_BACKUP_MODEL:\s*str\s*=\s*"([^"]*)"' -Label "config/settings.py OPENAI_BACKUP_MODEL"
+        Example = Get-RegexValue -Text $envExampleText -Pattern '^OPENAI_BACKUP_MODEL=(.*)$' -Label ".env.example OPENAI_BACKUP_MODEL"
+        WebPs = $null
+    },
+    @{
+        Name = "NEWS_LLM_MODEL"
+        Settings = Get-RegexValue -Text $settingsText -Pattern 'NEWS_LLM_MODEL:\s*str\s*=\s*"([^"]*)"' -Label "config/settings.py NEWS_LLM_MODEL"
+        Example = Get-RegexValue -Text $envExampleText -Pattern '^NEWS_LLM_MODEL=(.*)$' -Label ".env.example NEWS_LLM_MODEL"
+        WebPs = $null
+    },
+    @{
         Name = "ANALYTICS_HISTORY_ENABLED"
         Settings = Get-RegexValue -Text $settingsText -Pattern 'ANALYTICS_HISTORY_ENABLED:\s*bool\s*=\s*(True|False)' -Label "config/settings.py ANALYTICS_HISTORY_ENABLED"
         Example = Get-RegexValue -Text $envExampleText -Pattern '^ANALYTICS_HISTORY_ENABLED=(.+)$' -Label ".env.example ANALYTICS_HISTORY_ENABLED"
@@ -89,21 +107,30 @@ Assert-Equal -Name "WEB_HOST (scripts/web.ps1)" -Expected "127.0.0.1" -Actual $c
 Assert-Equal -Name "WEB_HOST (scripts/start_web_ps.ps1)" -Expected "127.0.0.1" -Actual $checks[0].StartWebPs
 Assert-Equal -Name "WEB_HOST (_once.ps1)" -Expected "127.0.0.1" -Actual $checks[0].OncePs
 
-Assert-Equal -Name "OPENAI_BASE_URL (settings)" -Expected "https://api.openai.com/v1" -Actual $checks[1].Settings
-Assert-Equal -Name "OPENAI_BASE_URL (.env.example)" -Expected "https://api.openai.com/v1" -Actual $checks[1].Example
+Assert-Equal -Name "OPENAI_BASE_URL (settings)" -Expected "https://nowcoding.ai/v1" -Actual $checks[1].Settings
+Assert-Equal -Name "OPENAI_BASE_URL (.env.example)" -Expected "https://nowcoding.ai/v1" -Actual $checks[1].Example
 
-Assert-Equal -Name "OPENAI_BACKUP_BASE_URL (settings)" -Expected "" -Actual $checks[2].Settings
-Assert-Equal -Name "OPENAI_BACKUP_BASE_URL (.env.example)" -Expected "" -Actual $checks[2].Example
+Assert-Equal -Name "OPENAI_BACKUP_BASE_URL (settings)" -Expected "https://fast.vpsairobot.com" -Actual $checks[2].Settings
+Assert-Equal -Name "OPENAI_BACKUP_BASE_URL (.env.example)" -Expected "https://fast.vpsairobot.com" -Actual $checks[2].Example
 
-Assert-Equal -Name "ANALYTICS_HISTORY_ENABLED (settings)" -Expected "False" -Actual $checks[3].Settings
-Assert-Equal -Name "ANALYTICS_HISTORY_ENABLED (.env.example)" -Expected "false" -Actual $checks[3].Example.ToLowerInvariant()
-Assert-Equal -Name "ANALYTICS_HISTORY_ENABLED (scripts/web.ps1)" -Expected "default off" -Actual $checks[3].WebPs
+Assert-Equal -Name "OPENAI_MODEL (settings)" -Expected "gpt-5.5" -Actual $checks[3].Settings
+Assert-Equal -Name "OPENAI_MODEL (.env.example)" -Expected "gpt-5.5" -Actual $checks[3].Example
 
-Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (settings)" -Expected "False" -Actual $checks[4].Settings
-Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (.env.example)" -Expected "false" -Actual $checks[4].Example.ToLowerInvariant()
-Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (scripts/web.ps1)" -Expected "supported" -Actual $checks[4].WebPs
-Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (scripts/start_web_ps.ps1)" -Expected "supported" -Actual $checks[4].StartWebPs
-Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (_once.ps1)" -Expected "managed-override" -Actual $checks[4].OncePs
+Assert-Equal -Name "OPENAI_BACKUP_MODEL (settings)" -Expected "gpt-5.5" -Actual $checks[4].Settings
+Assert-Equal -Name "OPENAI_BACKUP_MODEL (.env.example)" -Expected "gpt-5.5" -Actual $checks[4].Example
+
+Assert-Equal -Name "NEWS_LLM_MODEL (settings default)" -Expected "" -Actual $checks[5].Settings
+Assert-Equal -Name "NEWS_LLM_MODEL (.env.example)" -Expected "deepseek-v4-flash" -Actual $checks[5].Example
+
+Assert-Equal -Name "ANALYTICS_HISTORY_ENABLED (settings)" -Expected "False" -Actual $checks[6].Settings
+Assert-Equal -Name "ANALYTICS_HISTORY_ENABLED (.env.example)" -Expected "false" -Actual $checks[6].Example.ToLowerInvariant()
+Assert-Equal -Name "ANALYTICS_HISTORY_ENABLED (scripts/web.ps1)" -Expected "default off" -Actual $checks[6].WebPs
+
+Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (settings)" -Expected "False" -Actual $checks[7].Settings
+Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (.env.example)" -Expected "false" -Actual $checks[7].Example.ToLowerInvariant()
+Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (scripts/web.ps1)" -Expected "supported" -Actual $checks[7].WebPs
+Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (scripts/start_web_ps.ps1)" -Expected "supported" -Actual $checks[7].StartWebPs
+Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (_once.ps1)" -Expected "managed-override" -Actual $checks[7].OncePs
 
 Write-Host ""
 Write-Host "Configuration contract checks passed." -ForegroundColor Green

@@ -106,9 +106,19 @@ class _SyncSSELikeResponse(_SyncResponse):
 
 
 @pytest.fixture(autouse=True)
-def _reset_openai_target_state():
+def _reset_openai_target_state(monkeypatch):
     import core.utils.openai_responses as response_helpers
     import core.news.eventizer.llm_glm5 as news_sync_module
+
+    for name in (
+        "NEWS_LLM_API_KEY",
+        "NEWS_LLM_BASE_URL",
+        "NEWS_LLM_MODEL",
+        "NEWS_LLM_PROVIDER",
+        "NEWS_LLM_FORCE_CHAT_COMPLETIONS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(settings, name, False if name == "NEWS_LLM_FORCE_CHAT_COMPLETIONS" else "", raising=False)
 
     response_helpers.reset_openai_target_preferences()
     news_sync_module._SUMMARY_CACHE.clear()
@@ -261,7 +271,7 @@ def test_live_decision_router_codex_falls_back_to_chat_completions(monkeypatch, 
     result = asyncio.run(
         router._call_provider(
             provider="codex",
-            model="mimo-v2-flash",
+            model="gpt-5.5",
             timeout_ms=5000,
             max_tokens=180,
             temperature=0.0,
@@ -284,9 +294,9 @@ def test_live_decision_router_codex_fails_over_to_anthropic_style_backup(monkeyp
     monkeypatch.setattr(module, "_OVERLAY_PATH", tmp_path / "ai_runtime_config.json")
     monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
     monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://primary.test/v1", raising=False)
-    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "https://api.xiaomimimo.com/anthropic/v1", raising=False)
-    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "mimo-key", raising=False)
-    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "mimo-v2-flash", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "https://anthropic-proxy.test/anthropic/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "anthropic-key", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "claude-compatible-model", raising=False)
 
     capture = {}
     responses = [
@@ -296,7 +306,7 @@ def test_live_decision_router_codex_fails_over_to_anthropic_style_backup(monkeyp
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"action":"block","reason":"mimo_backup","confidence":0.77}',
+                        "text": '{"action":"block","reason":"anthropic_backup","confidence":0.77}',
                     }
                 ]
             },
@@ -322,13 +332,14 @@ def test_live_decision_router_codex_fails_over_to_anthropic_style_backup(monkeyp
         )
     )
 
-    assert result["reason"] == "mimo_backup"
+    assert result["reason"] == "anthropic_backup"
     assert capture["urls"] == [
         "https://primary.test/v1/responses",
-        "https://api.xiaomimimo.com/anthropic/v1/messages",
+        "https://anthropic-proxy.test/anthropic/v1/messages",
     ]
-    assert capture["requests"][1]["headers"]["api-key"] == "mimo-key"
-    assert capture["requests"][1]["json"]["model"] == "mimo-v2-flash"
+    assert capture["requests"][1]["headers"]["x-api-key"] == "anthropic-key"
+    assert "api-key" not in capture["requests"][1]["headers"]
+    assert capture["requests"][1]["json"]["model"] == "claude-compatible-model"
 
 
 def test_autonomous_agent_codex_uses_responses_api(monkeypatch, tmp_path):
@@ -420,7 +431,7 @@ def test_autonomous_agent_codex_falls_back_to_chat_completions(monkeypatch, tmp_
     result = asyncio.run(
         agent._call_provider(
             provider="codex",
-            model="mimo-v2-flash",
+            model="gpt-5.5",
             timeout_ms=8000,
             max_tokens=256,
             temperature=0.1,
@@ -776,7 +787,7 @@ def test_research_context_generator_falls_back_to_chat_completions(monkeypatch):
     monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
     monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
     monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
-    monkeypatch.setattr(settings, "OPENAI_MODEL", "mimo-v2-flash", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.5", raising=False)
 
     capture = {}
     responses = [
@@ -1122,7 +1133,7 @@ def test_async_glm_client_openai_falls_back_to_chat_completions(monkeypatch):
     monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
     monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
     monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
-    monkeypatch.setattr(settings, "OPENAI_MODEL", "mimo-v2-flash", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.5", raising=False)
 
     capture = {}
     responses = [
@@ -1163,7 +1174,7 @@ def test_async_glm_client_openai_falls_back_to_chat_completions(monkeypatch):
     ]
 
 
-def test_news_llm_defaults_use_openai_gpt_5_4(monkeypatch):
+def test_news_llm_defaults_use_deepseek_flash(monkeypatch):
     import core.news.eventizer.async_glm_client as async_module
     import core.news.eventizer.llm_glm5 as sync_module
 
@@ -1173,8 +1184,8 @@ def test_news_llm_defaults_use_openai_gpt_5_4(monkeypatch):
 
     assert sync_module._llm_provider({}) == "openai"
     assert async_module._llm_provider({}) == "openai"
-    assert sync_module._llm_model({}) == "gpt-5.4"
-    assert async_module._llm_model({}) == "gpt-5.4"
+    assert sync_module._llm_model({}) == "deepseek-v4-flash"
+    assert async_module._llm_model({}) == "deepseek-v4-flash"
 
 
 def test_news_legacy_glm_provider_is_normalized_to_openai(monkeypatch):
@@ -1195,10 +1206,10 @@ def test_news_legacy_glm_provider_is_normalized_to_openai(monkeypatch):
 
     assert sync_module._llm_provider(legacy_cfg) == "openai"
     assert async_module._llm_provider(legacy_cfg) == "openai"
-    assert sync_module._llm_model(legacy_cfg) == "gpt-5.4"
-    assert async_module._llm_model(legacy_cfg) == "gpt-5.4"
-    assert sync_module._llm_base_url(legacy_cfg) == "https://sub.a-j.app/v1"
-    assert async_module._llm_base_url(legacy_cfg) == "https://sub.a-j.app/v1"
+    assert sync_module._llm_model(legacy_cfg) == "deepseek-v4-flash"
+    assert async_module._llm_model(legacy_cfg) == "deepseek-v4-flash"
+    assert sync_module._llm_base_url(legacy_cfg) == "https://kuaipao.ai"
+    assert async_module._llm_base_url(legacy_cfg) == "https://kuaipao.ai"
 
 
 def test_news_runtime_openai_settings_override_yaml_config(monkeypatch):
@@ -1247,6 +1258,39 @@ def test_news_runtime_openai_settings_override_yaml_config(monkeypatch):
     ]
 
 
+def test_news_deepseek_yaml_config_ignores_generic_openai_runtime_settings(monkeypatch):
+    import core.news.eventizer.async_glm_client as async_module
+    import core.news.eventizer.llm_glm5 as sync_module
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-openai", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://old-openai.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "https://anthropic-proxy.test/anthropic/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.5", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "claude-compatible-model", raising=False)
+
+    cfg = {
+        "llm": {
+            "provider": "openai",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://kuaipao.ai",
+            "backup_base_url": "",
+            "force_chat_completions": True,
+        }
+    }
+
+    sync_targets = sync_module._openai_endpoint_targets(cfg)
+    async_targets = async_module._openai_endpoint_targets(cfg)
+
+    assert sync_module._llm_base_url(cfg) == "https://kuaipao.ai"
+    assert async_module._llm_base_url(cfg) == "https://kuaipao.ai"
+    assert sync_module._llm_model(cfg) == "deepseek-v4-flash"
+    assert async_module._llm_model(cfg) == "deepseek-v4-flash"
+    assert [target["base_url"] for target in sync_targets] == ["https://kuaipao.ai"]
+    assert [target["base_url"] for target in async_targets] == ["https://kuaipao.ai"]
+    assert [target["model"] for target in sync_targets] == ["deepseek-v4-flash"]
+    assert [target["model"] for target in async_targets] == ["deepseek-v4-flash"]
+
+
 def test_news_sync_summary_uses_openai_mini_source(monkeypatch):
     import core.news.eventizer.llm_glm5 as module
 
@@ -1281,7 +1325,49 @@ def test_news_sync_summary_uses_openai_mini_source(monkeypatch):
     assert result["sentiment"] == "positive"
     assert result["source"] == "openai_responses"
     assert capture["url"] == "https://example.test/v1/responses"
-    assert capture["json"]["model"] == "gpt-5.4"
+    assert capture["json"]["model"] == "deepseek-v4-flash"
+
+
+def test_news_sync_summary_uses_news_deepseek_chat_override(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-old-openai", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://old-openai.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.4", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "sk-news", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", "https://kuaipao.ai", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "deepseek-v4-flash", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_FORCE_CHAT_COMPLETIONS", True, raising=False)
+
+    capture = {}
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        capture["url"] = url
+        capture["headers"] = headers
+        capture["json"] = json
+        return _SyncResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"summary":"DeepSeek 摘要","sentiment":"neutral"}',
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    result = module.summarize_title_glm5("BTC trades flat", {"llm": {"provider": "openai"}}, max_length=60)
+
+    assert result["summary"] == "DeepSeek 摘要"
+    assert result["sentiment"] == "neutral"
+    assert result["source"] == "openai_chat_completions"
+    assert capture["url"] == "https://kuaipao.ai/v1/chat/completions"
+    assert capture["json"]["model"] == "deepseek-v4-flash"
+    assert capture["headers"]["Authorization"] == "Bearer sk-news"
 
 
 def test_news_sync_summary_falls_back_to_chat_completions(monkeypatch):
@@ -1292,7 +1378,7 @@ def test_news_sync_summary_falls_back_to_chat_completions(monkeypatch):
     monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
     monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
     monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
-    monkeypatch.setattr(settings, "OPENAI_MODEL", "mimo-v2-flash", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.5", raising=False)
     monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
 
     capture = {"urls": []}
@@ -1604,7 +1690,7 @@ def test_news_extract_events_falls_back_to_chat_completions(monkeypatch):
     monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
     monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
     monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
-    monkeypatch.setattr(settings, "OPENAI_MODEL", "mimo-v2-flash", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.5", raising=False)
     monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
 
     capture = {"urls": []}

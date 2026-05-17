@@ -1,4 +1,4 @@
-﻿"""Strategy runtime health monitor."""
+"""Strategy runtime health monitor."""
 from __future__ import annotations
 
 import asyncio

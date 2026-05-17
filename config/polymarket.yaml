@@ -41,6 +41,12 @@ defaults:
   trading:
     enabled: false
     require_approval: true
+    mode: paper
+    paper:
+      initial_cash: 1000
+      max_order_notional: 50
+      max_position_notional: 200
+      fee_rate: 0.0
   worker:
     quote_loop_sec: 10
     ws_enabled: true

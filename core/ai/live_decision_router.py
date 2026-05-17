@@ -20,6 +20,7 @@ from core.ai.provider_runtime_policy import (
 )
 from core.ai.runtime_eligibility import resolve_runtime_eligibility_context
 from core.ai.research_runtime_context import resolve_runtime_research_context
+from core.utils.asyncio_compat import LoopBoundAsyncLock
 from core.utils.openai_responses import (
     anthropic_messages_endpoint,
     build_anthropic_messages_payload,
@@ -37,7 +38,6 @@ from core.utils.openai_responses import (
     responses_endpoint,
     responses_api_unavailable,
     should_failover_openai_status,
-    target_max_tokens_for_request,
     target_transport,
 )
 
@@ -57,9 +57,12 @@ _PERSISTABLE_KEYS = frozenset({
 })
 
 
-_DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
-_DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
-_DEFAULT_GLM_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
+_DEFAULT_OPENAI_BASE_URL = "https://nowcoding.ai/v1"
+_DEFAULT_OPENAI_MODEL = "gpt-5.5"
+_DEFAULT_ANTHROPIC_BASE_URL = ""
+_DEFAULT_ANTHROPIC_MODEL = ""
+_DEFAULT_GLM_BASE_URL = ""
+_DEFAULT_GLM_MODEL = ""
 _SUPPORTED_PROVIDERS = {"glm", "codex", "claude"}
 _SUPPORTED_MODES = {"shadow", "enforce"}
 _SUPPORTED_ACTIONS = {"allow", "block", "reduce_only"}
@@ -163,7 +166,7 @@ class LiveDecisionOutcome:
 class LiveAIDecisionRouter:
     def __init__(self) -> None:
         self._override: Dict[str, Any] = {}
-        self._lock = asyncio.Lock()
+        self._lock = LoopBoundAsyncLock()
         self._load_overlay()
 
     # ── Persistence helpers ───────────────────────────────────────────────────
@@ -203,10 +206,10 @@ class LiveAIDecisionRouter:
     def _provider_model(self, provider: str) -> str:
         provider = _normalize_provider(provider)
         if provider == "codex":
-            return str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.4")
+            return str(getattr(settings, "OPENAI_MODEL", "") or _DEFAULT_OPENAI_MODEL)
         if provider == "claude":
-            return str(getattr(settings, "ANTHROPIC_MODEL", "") or "claude-3-5-sonnet-latest")
-        return str(getattr(settings, "ZHIPU_MODEL", "") or "GLM-4.5-Air")
+            return str(getattr(settings, "ANTHROPIC_MODEL", "") or _DEFAULT_ANTHROPIC_MODEL)
+        return str(getattr(settings, "ZHIPU_MODEL", "") or _DEFAULT_GLM_MODEL)
 
     def _provider_api_key(self, provider: str) -> str:
         provider = _normalize_provider(provider)
@@ -227,7 +230,7 @@ class LiveAIDecisionRouter:
                 backup_base_urls=getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "",
                 primary_api_key=str(getattr(settings, "OPENAI_API_KEY", "") or "").strip(),
                 backup_api_key=str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip(),
-                primary_model=str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.4").strip() or "gpt-5.4",
+                primary_model=str(getattr(settings, "OPENAI_MODEL", "") or _DEFAULT_OPENAI_MODEL).strip() or _DEFAULT_OPENAI_MODEL,
                 backup_model=str(getattr(settings, "OPENAI_BACKUP_MODEL", "") or "").strip(),
             )
         return [
@@ -257,11 +260,14 @@ class LiveAIDecisionRouter:
                         "model": str(target.get("model") or default_model or "").strip() or default_model,
                         "transport": str(target.get("transport") or "openai").strip().lower() or "openai",
                         "is_backup": bool(target.get("is_backup")),
-                        "available": bool(str(target.get("api_key") or "").strip()),
+                        "available": bool(base_url and str(target.get("api_key") or "").strip()),
                     }
                 )
             providers[item] = {
-                "available": any(bool(str(target.get("api_key") or "").strip()) for target in targets),
+                "available": any(
+                    bool(str(target.get("base_url") or "").strip() and str(target.get("api_key") or "").strip())
+                    for target in targets
+                ),
                 "default_model": default_model,
                 "base_url": (base_urls[0] if base_urls else self._provider_base_url(item)),
                 "targets": exposed_targets,
@@ -450,7 +456,7 @@ class LiveAIDecisionRouter:
                         request_anthropic_payload = dict(
                             anthropic_payload,
                             model=target_model,
-                            max_tokens=target_max_tokens_for_request(target, max_tokens),
+                            max_tokens=int(max_tokens),
                         )
                         if transport == "anthropic":
                             url = anthropic_messages_endpoint(target_base_url)

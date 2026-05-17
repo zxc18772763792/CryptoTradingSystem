@@ -21,12 +21,12 @@ def test_factor_signal_extreme_fear_boosts_long_confidence(monkeypatch):
     agg = SignalAggregator()
     df = _build_close_df("up")
 
-    monkeypatch.setattr(fg_module, "fear_greed_collector", SimpleNamespace(_history=[]))
+    monkeypatch.setattr(fg_module, "fear_greed_collector", SimpleNamespace(latest=lambda: None))
     direction_base, conf_base = agg._get_factor_signal(df)
     assert direction_base == "LONG"
 
     fear = SimpleNamespace(is_extreme_fear=True, is_extreme_greed=False)
-    monkeypatch.setattr(fg_module, "fear_greed_collector", SimpleNamespace(_history=[fear]))
+    monkeypatch.setattr(fg_module, "fear_greed_collector", SimpleNamespace(latest=lambda: fear))
     direction_boost, conf_boost = agg._get_factor_signal(df)
 
     assert direction_boost == "LONG"
@@ -40,12 +40,12 @@ def test_factor_signal_extreme_greed_boosts_short_confidence(monkeypatch):
     agg = SignalAggregator()
     df = _build_close_df("down")
 
-    monkeypatch.setattr(fg_module, "fear_greed_collector", SimpleNamespace(_history=[]))
+    monkeypatch.setattr(fg_module, "fear_greed_collector", SimpleNamespace(latest=lambda: None))
     direction_base, conf_base = agg._get_factor_signal(df)
     assert direction_base == "SHORT"
 
     greed = SimpleNamespace(is_extreme_fear=False, is_extreme_greed=True)
-    monkeypatch.setattr(fg_module, "fear_greed_collector", SimpleNamespace(_history=[greed]))
+    monkeypatch.setattr(fg_module, "fear_greed_collector", SimpleNamespace(latest=lambda: greed))
     direction_boost, conf_boost = agg._get_factor_signal(df)
 
     assert direction_boost == "SHORT"

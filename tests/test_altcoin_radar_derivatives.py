@@ -121,6 +121,22 @@ def test_build_altcoin_rows_surfaces_derivatives_labels_and_plan_tags():
                     "funding_reversion_speed": 0.22,
                     "long_short_ratio_change_24h": 0.18,
                     "liquidation_burst_score": 0.66,
+                    "liquidation_map_pressure_score": 0.58,
+                    "liquidation_map_total_usd": 320_000_000.0,
+                    "liquidation_map_above_usd": 210_000_000.0,
+                    "liquidation_map_below_usd": 110_000_000.0,
+                    "liquidation_map_largest_cluster_price": 105.0,
+                    "liquidation_map_largest_cluster_usd": 80_000_000.0,
+                    "orderbook_agg_bid_usd": 180_000_000.0,
+                    "orderbook_agg_ask_usd": 120_000_000.0,
+                    "orderbook_agg_imbalance": 0.2,
+                    "orderbook_wall_above_usd": 45_000_000.0,
+                    "orderbook_wall_below_usd": 55_000_000.0,
+                    "liquidity_heatmap_total_usd": 420_000_000.0,
+                    "liquidity_heatmap_above_usd": 270_000_000.0,
+                    "liquidity_heatmap_below_usd": 150_000_000.0,
+                    "liquidity_void_score": 0.25,
+                    "heatmap_pressure_score": 0.48,
                     "derivatives_heat_score": 0.84,
                     "crowded_long": True,
                     "squeeze_building": True,
@@ -145,6 +161,15 @@ def test_build_altcoin_rows_surfaces_derivatives_labels_and_plan_tags():
     assert row["metrics"]["funding_zscore"] == 1.9
     assert row["metrics"]["funding_reversion_speed"] == 0.22
     assert row["metrics"]["long_short_ratio_change_24h"] == 0.18
+    assert row["metrics"]["liquidation_map_pressure_score"] == 0.58
+    assert row["metrics"]["orderbook_agg_imbalance"] == 0.2
+    assert row["metrics"]["liquidity_heatmap_total_usd"] == 420_000_000.0
+    assert row["metrics"]["liquidity_void_score"] == 0.25
+    assert row["metrics"]["heatmap_pressure_score"] == 0.48
+    assert row["derivatives_context"]["liquidation_map_total_usd"] == 320_000_000.0
+    assert row["derivatives_context"]["liquidation_map_largest_cluster_price"] == 105.0
+    assert row["derivatives_context"]["orderbook_agg_bid_usd"] == 180_000_000.0
+    assert row["derivatives_context"]["liquidity_heatmap_above_usd"] == 270_000_000.0
     assert row["metrics"]["history_ready"] == 1.0
     assert "Crowded Long" in row["tags"]
     assert "Short Squeeze Risk" in row["tags"]

@@ -33,6 +33,7 @@ from core.news.collectors.gdelt import GDELTCollector
 from core.news.collectors.jin10 import Jin10Collector
 from core.news.collectors.newsapi import NewsAPICollector
 from core.news.collectors.okx_announcements import OKXAnnouncementsCollector
+from core.news.collectors.opennews import OpenNewsCollector
 from core.news.collectors.rss import RSSNewsCollector
 from core.news.storage import db as news_db
 
@@ -48,6 +49,11 @@ def _parse_ts_to_unix(value: Any) -> float:
     if not value:
         return 0.0
     try:
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+            if numeric > 1_000_000_000_000:
+                numeric = numeric / 1000.0
+            return numeric
         dt = dt_parser.parse(str(value).strip())
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
@@ -132,6 +138,12 @@ class MultiSourceNewsCollector:
             "coinglass_central_bank",
         ]
         self.sources: List[str] = [str(x).strip().lower() for x in raw_sources if str(x).strip()]
+        if (
+            _env_bool("NEWS_ENABLE_OPENNEWS", False)
+            and str(os.getenv("OPENNEWS_TOKEN") or "").strip()
+            and "opennews" not in self.sources
+        ):
+            self.sources.append("opennews")
         if not self.sources:
             self.sources = ["jin10", "rss", "gdelt"]
 
@@ -150,6 +162,7 @@ class MultiSourceNewsCollector:
         specs: List[_CollectorSpec] = []
         errors: List[str] = []
         selected = {str(x).strip().lower() for x in (source_names or self.sources) if str(x).strip()}
+        explicitly_only_opennews = source_names is not None and selected == {"opennews"}
         if not selected:
             selected = set(self.sources)
         coinglass_ready = bool(coinglass_enabled())
@@ -208,6 +221,16 @@ class MultiSourceNewsCollector:
                         errors.append("cryptocompare running without CRYPTOCOMPARE_API_KEY; stricter rate limit applied")
                     specs.append(_CollectorSpec(name=name, collector=CryptoCompareNewsCollector(self.cfg)))
                 continue
+            if name == "opennews":
+                if not _env_bool("NEWS_ENABLE_OPENNEWS", False):
+                    if source_names is not None:
+                        errors.append("opennews disabled: NEWS_ENABLE_OPENNEWS is not true")
+                    continue
+                if not str(os.getenv("OPENNEWS_TOKEN") or "").strip():
+                    errors.append("opennews disabled: OPENNEWS_TOKEN missing")
+                    continue
+                specs.append(_CollectorSpec(name=name, collector=OpenNewsCollector(self.cfg)))
+                continue
             if name == "coinglass_newsflash":
                 if _env_bool("NEWS_ENABLE_COINGLASS_NEWSFLASH", True):
                     if not coinglass_ready:
@@ -245,7 +268,7 @@ class MultiSourceNewsCollector:
                 continue
             errors.append(f"unsupported collector source: {name}")
 
-        if not specs:
+        if not specs and not explicitly_only_opennews:
             specs.append(_CollectorSpec(name="jin10", collector=Jin10Collector(self.cfg)))
             specs.append(_CollectorSpec(name="rss", collector=RSSNewsCollector(self.cfg)))
             specs.append(_CollectorSpec(name="gdelt", collector=GDELTCollector(self.cfg)))

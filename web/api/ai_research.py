@@ -167,7 +167,7 @@ class AIFundingWarmRequest(BaseModel):
     exchange: str = "binance"
     symbol: str = "BTC/USDT"
     days: int = Field(default=60, ge=1, le=3650)
-    source: str = "auto"
+    source: str = "coinglass"
 
 
 class AILiveDecisionConfigUpdateRequest(BaseModel):
@@ -3002,14 +3002,14 @@ async def update_ai_autonomous_agent_risk_config(
     return {"updated": True, "config": _build_autonomous_agent_risk_config()}
 
 
-async def get_ai_autonomous_agent_status(request: Request):
+async def get_ai_autonomous_agent_status(request: Request, warm_preview: bool = True):
     trading_mode = _current_trading_mode()
     cfg = autonomous_trading_agent.get_runtime_config()
     if isinstance(cfg, dict):
         cfg = dict(cfg)
     else:
         cfg = {}
-    if str(cfg.get("symbol_mode") or "manual").strip().lower() == "auto":
+    if warm_preview and str(cfg.get("symbol_mode") or "manual").strip().lower() == "auto":
         autonomous_trading_agent.ensure_symbol_scan_preview_warm(
             limit=int(cfg.get("selection_top_n") or 10),
             force=False,
@@ -3459,13 +3459,13 @@ async def get_ai_funding_cache_diagnostics(
         "funding": {
             **_serialize_funding_cache(provider, exchange=exchange_norm, symbol=symbol_norm, series=series),
             "requested_days": int(days),
-            "source": "local_cache",
+            "source": "local_or_coinglass_cache",
             "error": cache_error,
         },
         "how_to_enable": [
-            "点击“预热宏观缓存”，系统会从 Binance 公共资金费率接口抓取历史并写入本地。",
-            "缓存文件保存在 data/funding/<exchange>/<symbol>_funding.parquet。",
-            "研究回测会自动读取本地缓存；有缓存时宏观层中的 funding 会显示为已启用。",
+            "CoinGlass funding_rate_history is the preferred funding source.",
+            "Local cache files are stored under data/funding/<exchange>/<symbol>_funding.parquet.",
+            "Exchange HTTP funding is used only when explicitly requested as binance_http or exchange_http.",
         ],
     }
 
@@ -3477,13 +3477,14 @@ async def warm_ai_funding_cache(request: Request, payload: AIFundingWarmRequest)
     symbol_norm = _normalize_symbol(payload.symbol)
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(days=max(1, min(int(payload.days or 60), 3650)))
-    provider = FundingRateProvider(FundingProviderConfig(exchange=exchange_norm, source=str(payload.source or "auto")))
+    requested_source = str(payload.source or "coinglass")
+    provider = FundingRateProvider(FundingProviderConfig(exchange=exchange_norm, source=requested_source))
     try:
         series = provider.ensure_history(
             symbol_norm,
             start_time=start_time,
             end_time=end_time,
-            source=str(payload.source or "auto"),
+            source=requested_source,
             save=True,
         )
     except Exception as exc:
@@ -3493,7 +3494,7 @@ async def warm_ai_funding_cache(request: Request, payload: AIFundingWarmRequest)
         "funding": {
             **_serialize_funding_cache(provider, exchange=exchange_norm, symbol=symbol_norm, series=series),
             "requested_days": int(payload.days),
-            "source": str(payload.source or "auto"),
+            "source": requested_source,
         },
     }
 
@@ -4911,8 +4912,8 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
             issues.append("Funding cache empty")
         if not bool(funding_snapshot.get("cache_exists")):
             issues.append("Funding parquet missing")
-        categories["funding"]["sources"]["binance_funding_cache"] = _build_source_entry(
-            label="Binance Funding Cache",
+        categories["funding"]["sources"]["coinglass_funding_cache"] = _build_source_entry(
+            label="CoinGlass Funding Cache",
             available=True,
             configured=True,
             has_cached_data=rows > 0,
@@ -4921,21 +4922,21 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
             max_age_sec=36 * 3600,
             support_level="core",
             issues=issues,
-            recommendation="Warm local funding cache before research/backtest so perp funding signals remain available.",
+            recommendation="Warm CoinGlass funding cache before research/backtest so perp funding signals remain available.",
             snapshot=funding_snapshot,
-            extra={"upstream": "binance public funding rate"},
+            extra={"upstream": "coinglass funding_rate_history", "exchange_http_fallback": "explicit_only"},
         )
     except Exception as exc:
-        categories["funding"]["sources"]["binance_funding_cache"] = _build_source_entry(
-            label="Binance Funding Cache",
+        categories["funding"]["sources"]["coinglass_funding_cache"] = _build_source_entry(
+            label="CoinGlass Funding Cache",
             available=False,
             configured=True,
             has_cached_data=False,
             ready=False,
             support_level="core",
             error=str(exc),
-            recommendation="Fix funding cache read/write path so perp research does not degrade.",
-            extra={"upstream": "binance public funding rate"},
+            recommendation="Fix CoinGlass funding cache read/write path so perp research does not degrade.",
+            extra={"upstream": "coinglass funding_rate_history", "exchange_http_fallback": "explicit_only"},
         )
 
     news_catalog = _news_source_catalog()
@@ -5238,7 +5239,7 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
         recommendation="At least one OpenAI-compatible key is required for AI research planning.",
         snapshot={
             "provider": "codex",
-            "default_model": str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.4"),
+            "default_model": str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.5"),
             "primary_available": primary_openai_key,
             "backup_available": backup_openai_key,
             "failover_enabled": bool(

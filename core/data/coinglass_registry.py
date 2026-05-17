@@ -93,6 +93,21 @@ _COINGLASS_RANGE_BY_INTERVAL: Dict[str, str] = {
     "h24": "24h",
 }
 
+_COINGLASS_OPTIONAL_DATASETS: tuple[str, ...] = (
+    "open_interest_aggregated_history",
+    "open_interest_stablecoin_margin_history",
+    "top_long_short_account_ratio_history",
+    "top_long_short_position_ratio_history",
+    "net_position_history",
+    "liquidation_aggregated_history",
+    "liquidation_aggregated_map",
+    "liquidation_aggregated_heatmap_model1",
+    "futures_orderbook_aggregated_ask_bids_history",
+    "coinbase_premium_index",
+    "option_max_pain",
+    "bitcoin_etf_flow_history",
+)
+
 
 def normalize_coinglass_symbol(symbol: Any) -> str:
     text = str(symbol or "").strip().upper()
@@ -213,6 +228,42 @@ COINGLASS_DATASET_MANIFESTS: Dict[str, CoinglassDatasetManifest] = {
             ),
         ),
     ),
+    "open_interest_aggregated_history": CoinglassDatasetManifest(
+        dataset="open_interest_aggregated_history",
+        label="Open Interest Aggregated History",
+        market_type="futures",
+        storage_group="futures",
+        ttl_sec=1800,
+        freshness_sec=3600,
+        include_in_ai=True,
+        include_in_radar=True,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/futures/open-interest/aggregated-history",
+                required_params=("symbol", "interval"),
+                default_params={"interval": "h1", "unit": "usd"},
+            ),
+        ),
+    ),
+    "open_interest_stablecoin_margin_history": CoinglassDatasetManifest(
+        dataset="open_interest_stablecoin_margin_history",
+        label="Open Interest Stablecoin Margin History",
+        market_type="futures",
+        storage_group="futures",
+        ttl_sec=1800,
+        freshness_sec=3600,
+        include_in_ai=True,
+        include_in_radar=True,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/futures/open-interest/aggregated-stablecoin-history",
+                required_params=("symbol", "interval"),
+                default_params={"interval": "h1", "exchange_list": "Binance,OKX,Bybit"},
+            ),
+        ),
+    ),
     "funding_rate_exchange_list": CoinglassDatasetManifest(
         dataset="funding_rate_exchange_list",
         label="Funding Rate Exchange List",
@@ -322,6 +373,60 @@ COINGLASS_DATASET_MANIFESTS: Dict[str, CoinglassDatasetManifest] = {
             ),
         ),
     ),
+    "liquidation_aggregated_history": CoinglassDatasetManifest(
+        dataset="liquidation_aggregated_history",
+        label="Coin Liquidation Aggregated History",
+        market_type="futures",
+        storage_group="futures",
+        ttl_sec=900,
+        freshness_sec=3600,
+        include_in_ai=True,
+        include_in_radar=True,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/futures/liquidation/aggregated-history",
+                required_params=("symbol", "interval"),
+                default_params={"interval": "h1", "exchange_list": "Binance,OKX,Bybit"},
+            ),
+        ),
+    ),
+    "liquidation_aggregated_map": CoinglassDatasetManifest(
+        dataset="liquidation_aggregated_map",
+        label="Coin Liquidation Map",
+        market_type="futures",
+        storage_group="futures",
+        ttl_sec=1800,
+        freshness_sec=7200,
+        include_in_ai=True,
+        include_in_radar=True,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/futures/liquidation/aggregated-map",
+                required_params=("symbol", "range"),
+                default_params={"range": "7d"},
+            ),
+        ),
+    ),
+    "liquidation_aggregated_heatmap_model1": CoinglassDatasetManifest(
+        dataset="liquidation_aggregated_heatmap_model1",
+        label="Coin Liquidation Heatmap Model1",
+        market_type="futures",
+        storage_group="futures",
+        ttl_sec=1800,
+        freshness_sec=7200,
+        include_in_ai=True,
+        include_in_radar=True,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/futures/liquidation/aggregated-heatmap/model1",
+                required_params=("symbol", "range"),
+                default_params={"range": "7d"},
+            ),
+        ),
+    ),
     "global_long_short_account_ratio_history": CoinglassDatasetManifest(
         dataset="global_long_short_account_ratio_history",
         label="Global Long Short Account Ratio History",
@@ -337,6 +442,130 @@ COINGLASS_DATASET_MANIFESTS: Dict[str, CoinglassDatasetManifest] = {
                 path="/v4/api/futures/global-long-short-account-ratio/history",
                 required_params=("symbol", "exchange", "interval"),
                 default_params={"exchange": "Binance", "interval": "h4"},
+            ),
+        ),
+    ),
+    "top_long_short_account_ratio_history": CoinglassDatasetManifest(
+        dataset="top_long_short_account_ratio_history",
+        label="Top Account Long Short Ratio History",
+        market_type="futures",
+        storage_group="futures",
+        ttl_sec=900,
+        freshness_sec=3600,
+        include_in_ai=True,
+        include_in_radar=True,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/futures/top-long-short-account-ratio/history",
+                required_params=("symbol", "exchange", "interval"),
+                default_params={"exchange": "Binance", "interval": "h4"},
+            ),
+        ),
+    ),
+    "top_long_short_position_ratio_history": CoinglassDatasetManifest(
+        dataset="top_long_short_position_ratio_history",
+        label="Top Position Long Short Ratio History",
+        market_type="futures",
+        storage_group="futures",
+        ttl_sec=900,
+        freshness_sec=3600,
+        include_in_ai=True,
+        include_in_radar=True,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/futures/top-long-short-position-ratio/history",
+                required_params=("symbol", "exchange", "interval"),
+                default_params={"exchange": "Binance", "interval": "h4"},
+            ),
+        ),
+    ),
+    "net_position_history": CoinglassDatasetManifest(
+        dataset="net_position_history",
+        label="Net Long Short Position History",
+        market_type="futures",
+        storage_group="futures",
+        ttl_sec=900,
+        freshness_sec=3600,
+        include_in_ai=True,
+        include_in_radar=True,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/futures/net-position/history",
+                required_params=("symbol", "exchange", "interval"),
+                default_params={"exchange": "Binance", "interval": "h4"},
+            ),
+        ),
+    ),
+    "futures_orderbook_aggregated_ask_bids_history": CoinglassDatasetManifest(
+        dataset="futures_orderbook_aggregated_ask_bids_history",
+        label="Futures Aggregated Orderbook Bid Ask History",
+        market_type="futures",
+        storage_group="futures",
+        ttl_sec=900,
+        freshness_sec=3600,
+        include_in_ai=True,
+        include_in_radar=True,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/futures/orderbook/aggregated-ask-bids-history",
+                required_params=("symbol", "interval"),
+                default_params={"interval": "h1", "range": "1", "exchange_list": "Binance,OKX,Bybit"},
+            ),
+        ),
+    ),
+    "coinbase_premium_index": CoinglassDatasetManifest(
+        dataset="coinbase_premium_index",
+        label="Coinbase Premium Index",
+        market_type="spot",
+        storage_group="indicator",
+        ttl_sec=900,
+        freshness_sec=3600,
+        include_in_ai=True,
+        include_in_radar=False,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/coinbase-premium-index",
+                required_params=("interval",),
+                default_params={"interval": "h1"},
+            ),
+        ),
+    ),
+    "option_max_pain": CoinglassDatasetManifest(
+        dataset="option_max_pain",
+        label="Option Max Pain",
+        market_type="options",
+        storage_group="options",
+        ttl_sec=3600,
+        freshness_sec=6 * 3600,
+        include_in_ai=True,
+        include_in_radar=False,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/option/max-pain",
+                required_params=("symbol", "exchange"),
+                default_params={"exchange": "Deribit"},
+            ),
+        ),
+    ),
+    "bitcoin_etf_flow_history": CoinglassDatasetManifest(
+        dataset="bitcoin_etf_flow_history",
+        label="Bitcoin ETF Flow History",
+        market_type="spot",
+        storage_group="etf",
+        ttl_sec=6 * 3600,
+        freshness_sec=24 * 3600,
+        include_in_ai=True,
+        include_in_radar=False,
+        routes=(
+            CoinglassRouteSpec(
+                api_version="v4",
+                path="/v4/api/etf/bitcoin/flow-history",
             ),
         ),
     ),
@@ -361,8 +590,16 @@ COINGLASS_DATASET_MANIFESTS: Dict[str, CoinglassDatasetManifest] = {
 COINGLASS_DEFAULT_DATASETS: tuple[str, ...] = tuple(
     dataset
     for dataset in COINGLASS_DATASET_MANIFESTS.keys()
+    if dataset != "price_history" and dataset not in _COINGLASS_OPTIONAL_DATASETS
+)
+
+COINGLASS_SUPPORTED_DATASETS: tuple[str, ...] = tuple(
+    dataset
+    for dataset in COINGLASS_DATASET_MANIFESTS.keys()
     if dataset != "price_history"
 )
+
+COINGLASS_OPTIONAL_DATASETS: tuple[str, ...] = _COINGLASS_OPTIONAL_DATASETS
 
 
 def get_coinglass_manifest(dataset: str) -> Optional[CoinglassDatasetManifest]:

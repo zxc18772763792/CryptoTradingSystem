@@ -110,3 +110,86 @@ class PMSourceState(PMBase):
     success_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     paused_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
+class PMPaperAccount(PMBase):
+    __tablename__ = "pm_paper_accounts"
+
+    account_id: Mapped[str] = mapped_column(String(64), primary_key=True, default="default")
+    initial_cash: Mapped[float] = mapped_column(Float, default=1000.0, nullable=False)
+    cash: Mapped[float] = mapped_column(Float, default=1000.0, nullable=False)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    fees_paid: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
+class PMPaperOrder(PMBase):
+    __tablename__ = "pm_paper_orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), index=True, default="default", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    market_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    token_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(8), index=True, nullable=False)
+    side: Mapped[str] = mapped_column(String(8), index=True, nullable=False)
+    order_type: Mapped[str] = mapped_column(String(16), default="LIMIT", nullable=False)
+    status: Mapped[str] = mapped_column(String(16), index=True, default="OPEN", nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    size: Mapped[float] = mapped_column(Float, nullable=False)
+    filled_size: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    avg_fill_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fee_paid: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    reject_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    __table_args__ = (
+        Index("ix_pm_paper_orders_account_status", "account_id", "status", "created_at"),
+        Index("ix_pm_paper_orders_token_status", "token_id", "status"),
+    )
+
+
+class PMPaperFill(PMBase):
+    __tablename__ = "pm_paper_fills"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fill_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    order_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), index=True, default="default", nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    market_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    token_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(8), index=True, nullable=False)
+    side: Mapped[str] = mapped_column(String(8), index=True, nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    size: Mapped[float] = mapped_column(Float, nullable=False)
+    fee_paid: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    quote_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    payload_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    __table_args__ = (
+        Index("ix_pm_paper_fills_account_ts", "account_id", "ts"),
+        Index("ix_pm_paper_fills_token_ts", "token_id", "ts"),
+    )
+
+
+class PMPaperPosition(PMBase):
+    __tablename__ = "pm_paper_positions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(String(64), index=True, default="default", nullable=False)
+    market_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    token_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(8), index=True, nullable=False)
+    size: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    avg_price: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    fees_paid: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "token_id", name="uq_pm_paper_position_account_token"),
+        Index("ix_pm_paper_positions_account_market", "account_id", "market_id"),
+    )

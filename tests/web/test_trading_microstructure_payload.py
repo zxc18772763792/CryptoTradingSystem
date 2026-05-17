@@ -164,16 +164,41 @@ def test_market_microstructure_prefers_coinglass_derivatives_when_available(monk
                 "basis_pct": 0.18,
                 "long_short_ratio": 1.37,
                 "taker_buy_sell_imbalance": 0.21,
-                "payload": {},
+                "payload": {
+                    "orderbook_agg_bid_usd": 180_000_000.0,
+                    "orderbook_agg_ask_usd": 120_000_000.0,
+                    "orderbook_agg_imbalance": 0.2,
+                    "orderbook_wall_above_usd": 45_000_000.0,
+                    "orderbook_wall_below_usd": 55_000_000.0,
+                    "liquidity_heatmap_total_usd": 420_000_000.0,
+                    "liquidity_heatmap_above_usd": 270_000_000.0,
+                    "liquidity_heatmap_below_usd": 150_000_000.0,
+                    "liquidity_wall_nearest_above_price": 103.0,
+                    "liquidity_wall_nearest_below_price": 97.0,
+                    "liquidity_void_score": 0.25,
+                    "heatmap_pressure_score": 0.48,
+                },
             },
         }
 
     monkeypatch.setattr(trading_api, "_fetch_orderbook", fake_orderbook)
     monkeypatch.setattr(trading_api, "_fetch_trade_imbalance", fake_flow)
-    monkeypatch.setattr(trading_api, "_fetch_binance_public_funding_and_basis", fake_funding_basis)
-    monkeypatch.setattr(trading_api, "_fetch_open_interest_snapshot", fake_oi)
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_funding_basis_snapshot",
+        lambda *args, **kwargs: pytest.fail("exchange funding fallback should not run when Coinglass is available"),
+    )
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_open_interest_snapshot",
+        lambda *args, **kwargs: pytest.fail("exchange OI fallback should not run when Coinglass is available"),
+    )
     monkeypatch.setattr(trading_api, "_fetch_options_snapshot", fake_options)
-    monkeypatch.setattr(trading_api, "_fetch_long_short_ratio_snapshot", fake_long_short)
+    monkeypatch.setattr(
+        trading_api,
+        "_fetch_long_short_ratio_snapshot",
+        lambda *args, **kwargs: pytest.fail("exchange long/short fallback should not run when Coinglass is available"),
+    )
     monkeypatch.setattr(trading_api, "_load_preferred_coinglass_overview", fake_coinglass)
 
     payload = asyncio.run(trading_api.get_market_microstructure(exchange="binance", symbol="BTC/USDT", depth_limit=20))
@@ -187,6 +212,9 @@ def test_market_microstructure_prefers_coinglass_derivatives_when_available(monk
     assert payload["aggressor_flow"]["source"] == "coinglass_cache"
     assert payload["aggressor_flow"]["imbalance"] == pytest.approx(0.21, rel=1e-9)
     assert payload["derivatives_context"]["available"] is True
+    assert payload["derivatives_context"]["orderbook_agg_imbalance"] == pytest.approx(0.2, rel=1e-9)
+    assert payload["derivatives_context"]["liquidity_heatmap_total_usd"] == pytest.approx(420_000_000.0, rel=1e-9)
+    assert payload["derivatives_context"]["liquidity_wall_nearest_above_price"] == pytest.approx(103.0, rel=1e-9)
 
 
 def test_market_microstructure_preserves_flow_error_flag(monkeypatch):

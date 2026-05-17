@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from config.strategy_registry import get_backtest_optimization_grid
 from config.settings import settings
+from config.env_utils import llm_api_enabled
 from core.ai.proposal_schemas import ProposalValidationSummary, ResearchProposal
 from core.audit.ops_audit import ops_audit_scope
 from core.data import data_storage
@@ -64,6 +65,7 @@ from core.trading.position_manager import PositionSide, position_manager
 from prediction_markets.polymarket.clob_trader import PolymarketTrader
 from prediction_markets.polymarket.config import load_polymarket_config
 from prediction_markets.polymarket import db as pm_db
+from prediction_markets.polymarket.utils import parse_ts_any
 from prediction_markets.polymarket.worker import (
     get_runtime_status as get_pm_worker_runtime_status,
     refresh_markets_once as pm_refresh_markets_once,
@@ -155,6 +157,138 @@ class PolymarketWorkerRunRequest(BaseModel):
     categories: List[str] = Field(default_factory=list)
 
 
+class PolymarketPaperResetRequest(BaseModel):
+    account_id: str = Field(default="default")
+    initial_cash: float = Field(default=1000.0, gt=0.0)
+
+
+class PolymarketPaperOrderRequest(BaseModel):
+    account_id: str = Field(default="default")
+    market_id: str
+    token_id: str
+    outcome: str = Field(default="YES")
+    side: str = Field(default="BUY")
+    price: float = Field(gt=0.0, lt=1.0)
+    size: float = Field(gt=0.0)
+    client_order_id: Optional[str] = None
+    fill_immediately: bool = True
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PolymarketPaperCancelRequest(BaseModel):
+    account_id: str = Field(default="default")
+    order_id: str
+
+
+class PolymarketPaperStrategyOnceRequest(BaseModel):
+    token_ids: List[str] = Field(default_factory=list)
+    account_id: str = Field(default="default", min_length=1, max_length=64)
+    profile_path: Optional[str] = None
+    profile: Dict[str, Any] = Field(default_factory=dict)
+    strategy: str = Field(default="threshold")
+    order_size: float = Field(default=10.0, gt=0.0)
+    buy_below: float = Field(default=0.45, gt=0.0, lt=1.0)
+    sell_above: float = Field(default=0.60, gt=0.0, lt=1.0)
+    momentum_window: int = Field(default=3, ge=1, le=1000)
+    momentum_buy_delta: float = Field(default=0.04, ge=0.0, le=1.0)
+    momentum_sell_delta: float = Field(default=0.04, ge=0.0, le=1.0)
+    initial_cash: float = Field(default=1000.0, gt=0.0)
+    max_order_notional: float = Field(default=50.0, gt=0.0)
+    max_position_notional: float = Field(default=200.0, gt=0.0)
+    fee_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    max_tokens: int = Field(default=20, ge=1, le=500)
+    min_quotes: int = Field(default=1, ge=1, le=100000)
+    execute: bool = False
+
+
+class PolymarketPaperProfilePromoteRequest(BaseModel):
+    report_path: str
+    token_ids: List[str] = Field(default_factory=list)
+    account_id: str = Field(default="default", min_length=1, max_length=64)
+    output_path: str = Field(default="data/reports/polymarket_paper_strategy_profile.json")
+    execute_default: bool = False
+    min_segments: int = Field(default=2, ge=0, le=100000)
+    min_positive_segments: int = Field(default=1, ge=0, le=100000)
+    min_total_test_net_pnl: float = 0.0
+    min_worst_test_net_pnl: float = -100.0
+    allow_unsafe: bool = False
+
+
+class PolymarketReplayBatchRequest(BaseModel):
+    token_ids: List[str] = Field(default_factory=list)
+    top_n: int = Field(default=0, ge=0, le=500)
+    min_quotes: int = Field(default=1, ge=1, le=100000)
+    since: str
+    until: str
+    strategy: str = Field(default="threshold")
+    account_prefix: str = Field(default="opsbatch", min_length=1, max_length=64)
+    initial_cash: float = Field(default=1000.0, gt=0.0)
+    order_size: float = Field(default=10.0, gt=0.0)
+    buy_below: float = Field(default=0.45, gt=0.0, lt=1.0)
+    sell_above: float = Field(default=0.60, gt=0.0, lt=1.0)
+    momentum_window: int = Field(default=3, ge=1, le=1000)
+    momentum_buy_delta: float = Field(default=0.04, ge=0.0, le=1.0)
+    momentum_sell_delta: float = Field(default=0.04, ge=0.0, le=1.0)
+    max_order_notional: float = Field(default=100.0, gt=0.0)
+    max_position_notional: float = Field(default=500.0, gt=0.0)
+    fee_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    include_details: bool = False
+    write_report: bool = False
+    output_dir: str = Field(default="data/reports")
+    name: str = Field(default="polymarket_replay_batch", min_length=1, max_length=120)
+
+
+class PolymarketReplayGridRequest(BaseModel):
+    token_ids: List[str] = Field(default_factory=list)
+    top_n: int = Field(default=0, ge=0, le=500)
+    min_quotes: int = Field(default=1, ge=1, le=100000)
+    since: str
+    until: str
+    strategy: str = Field(default="threshold")
+    account_prefix: str = Field(default="opsgrid", min_length=1, max_length=64)
+    initial_cash: float = Field(default=1000.0, gt=0.0)
+    order_size: float = Field(default=10.0, gt=0.0)
+    buy_below_grid: str = Field(default="0.40,0.45,0.50")
+    sell_above_grid: str = Field(default="0.55,0.60,0.65")
+    momentum_windows: str = Field(default="2,3,5")
+    momentum_buy_deltas: str = Field(default="0.03,0.04,0.05")
+    momentum_sell_deltas: str = Field(default="0.03,0.04,0.05")
+    max_order_notional: float = Field(default=100.0, gt=0.0)
+    max_position_notional: float = Field(default=500.0, gt=0.0)
+    fee_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    include_details: bool = False
+    write_report: bool = False
+    output_dir: str = Field(default="data/reports")
+    name: str = Field(default="polymarket_replay_grid", min_length=1, max_length=120)
+
+
+class PolymarketReplayWalkForwardRequest(BaseModel):
+    token_ids: List[str] = Field(default_factory=list)
+    top_n: int = Field(default=0, ge=0, le=500)
+    min_quotes: int = Field(default=1, ge=1, le=100000)
+    since: str
+    until: str
+    strategy: str = Field(default="threshold")
+    account_prefix: str = Field(default="opswf", min_length=1, max_length=64)
+    initial_cash: float = Field(default=1000.0, gt=0.0)
+    order_size: float = Field(default=10.0, gt=0.0)
+    buy_below_grid: str = Field(default="0.40,0.45,0.50")
+    sell_above_grid: str = Field(default="0.55,0.60,0.65")
+    momentum_windows: str = Field(default="2,3,5")
+    momentum_buy_deltas: str = Field(default="0.03,0.04,0.05")
+    momentum_sell_deltas: str = Field(default="0.03,0.04,0.05")
+    train_minutes: int = Field(default=120, ge=1, le=100000)
+    test_minutes: int = Field(default=60, ge=1, le=100000)
+    step_minutes: int = Field(default=60, ge=1, le=100000)
+    max_order_notional: float = Field(default=100.0, gt=0.0)
+    max_position_notional: float = Field(default=500.0, gt=0.0)
+    fee_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    include_details: bool = False
+    write_report: bool = False
+    output_dir: str = Field(default="data/reports")
+    name: str = Field(default="polymarket_replay_walk_forward", min_length=1, max_length=120)
+
+
 class GovernanceStrategyProposeRequest(BaseModel):
     strategy_id: str
     name: str
@@ -196,6 +330,10 @@ class GovernanceApiUserUpsertRequest(BaseModel):
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def parse_any_datetime(value: Any) -> datetime:
+    return parse_ts_any(value)
 
 
 def _ok(data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -396,6 +534,9 @@ async def _build_polymarket_status(app: FastAPI) -> Dict[str, Any]:
     out: Dict[str, Any] = {"worker_runtime": get_pm_worker_runtime_status()}
     try:
         out.update(await pm_db.get_pm_status())
+        out["paper_account"] = await pm_db.get_or_create_paper_account("default")
+        out["paper_positions"] = await pm_db.list_paper_positions("default")
+        out["paper_open_orders"] = len(await pm_db.list_paper_orders("default", status="OPEN", limit=1000))
     except Exception as exc:
         out["error"] = str(exc)
     out["trading_enabled"] = bool((getattr(app.state, "polymarket_cfg", {}) or {}).get("defaults", {}).get("trading", {}).get("enabled", False))
@@ -957,20 +1098,10 @@ def create_router() -> APIRouter:
             data["risk_error"] = str(exc)
         try:
             queue = await asyncio.wait_for(news_db.get_llm_queue_stats(), timeout=2.0)
-            data["llm_enabled"] = bool(
-                os.getenv("OPENAI_API_KEY")
-                or os.getenv("ZHIPU_API_KEY")
-                or getattr(settings, "OPENAI_API_KEY", "")
-                or getattr(settings, "ZHIPU_API_KEY", "")
-            )
+            data["llm_enabled"] = llm_api_enabled(settings)
             data["news_llm_queue_pending"] = int(queue.get("pending_total", 0))
         except Exception as exc:
-            data["llm_enabled"] = bool(
-                os.getenv("OPENAI_API_KEY")
-                or os.getenv("ZHIPU_API_KEY")
-                or getattr(settings, "OPENAI_API_KEY", "")
-                or getattr(settings, "ZHIPU_API_KEY", "")
-            )
+            data["llm_enabled"] = llm_api_enabled(settings)
             data["news_error"] = str(exc)
         return _ok(data)
 

@@ -48,6 +48,26 @@ Copy-Item .env.example .env
 
 Fill in only the credentials you actually use. Keep real API keys, broker secrets, and tokens in `.env` or your shell environment. Do not commit them to Git.
 
+Optional OpenNews/6551 feed:
+
+```powershell
+NEWS_ENABLE_OPENNEWS=true
+OPENNEWS_TOKEN=<your-6551-token>
+```
+
+When enabled, the news worker ingests OpenNews items as another `opennews` source and keeps 6551 AI score/signal metadata in each raw news payload.
+
+Check the OpenNews configuration without printing the token:
+
+```powershell
+python scripts/selfcheck_opennews.py
+python scripts/selfcheck_opennews.py --strict
+```
+
+News LLM enrichment is configured separately from the trading AI paths with `NEWS_LLM_*` variables. The managed local profile can use an OpenAI-compatible relay by setting `NEWS_LLM_BASE_URL`, `NEWS_LLM_MODEL`, and `NEWS_LLM_FORCE_CHAT_COMPLETIONS=true`.
+
+AI research planning, live-decision review, and the autonomous agent use the shared `OPENAI_*` provider chain. The local default profile uses `https://nowcoding.ai/v1` with `gpt-5.5` as primary and `https://fast.vpsairobot.com` with `gpt-5.5` as the backup Responses-compatible source.
+
 ### 3. Start the web application
 
 Use the single startup/control entry from the project root:
@@ -175,6 +195,7 @@ Clean local caches and stale runtime artifacts:
 
 Add `-IncludeOutput` if you also want to prune stale Playwright captures and historical generated folders under `output/`.
 Add `-IncludeNodeModules` if you want to remove the local Playwright-only `node_modules/` cache when there is no `package.json` in the repo root.
+Use `-MaxLogFileMB 50 -MaxRotatedLogFiles 3` to tune size-based log rotation; set `-MaxLogFileMB 0` to disable size rotation.
 
 Run the Polymarket worker once:
 

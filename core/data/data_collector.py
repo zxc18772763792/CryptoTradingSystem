@@ -164,6 +164,28 @@ class DataCollector:
     async def _collect_funding_rate(self, task: CollectionTask) -> Optional[Dict]:
         """采集资金费率数据"""
         try:
+            from core.data.coinglass_client import coinglass_enabled
+
+            if coinglass_enabled():
+                from core.data.coinglass_feature_builder import build_coinglass_overview_payload
+
+                overview = await build_coinglass_overview_payload(
+                    symbol=task.symbol,
+                    refresh=True,
+                    manual=False,
+                )
+                snapshot = dict((overview or {}).get("snapshot") or {})
+                funding_rate = snapshot.get("funding_rate") or snapshot.get("funding_rate_oi_weighted")
+                if funding_rate is not None:
+                    task.last_collected = datetime.now()
+                    return {
+                        "source": "coinglass_cache",
+                        "symbol": task.symbol,
+                        "funding_rate": float(funding_rate),
+                        "timestamp": snapshot.get("timestamp"),
+                        "freshness_sec": (overview or {}).get("freshness_sec"),
+                    }
+
             # 懒加载采集器
             if self._funding_rate_collector is None:
                 from core.data.funding_rate_collector import FundingRateCollector

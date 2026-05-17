@@ -85,6 +85,7 @@ ALTCOIN_RULE_TYPES = {
 }
 _ALTCOIN_SCAN_CACHE: Dict[str, Dict[str, Any]] = {}
 _ALTCOIN_SCAN_LOCKS: Dict[str, asyncio.Lock] = {}
+_ALTCOIN_SCAN_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
 
 
 class AltcoinAlertPresetRequest(BaseModel):
@@ -280,7 +281,182 @@ def _cache_lock(cache_key: str) -> asyncio.Lock:
     return lock
 
 
+def _cache_age_sec(cached_entry: Optional[Mapping[str, Any]], now_ts: Optional[float] = None) -> float:
+    if not cached_entry:
+        return 0.0
+    current_ts = float(now_ts if now_ts is not None else time.time())
+    return max(0.0, current_ts - float(cached_entry.get("stored_at", 0.0)))
+
+
+def _build_cached_scan_payload(
+    *,
+    cached_entry: Mapping[str, Any],
+    cache_key: str,
+    ttl: float,
+    now_ts: Optional[float] = None,
+    stale: bool = False,
+    refreshing: bool = False,
+    served_mode: str = "cache_hit",
+    warnings: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    payload = _clone_payload(cached_entry.get("payload") or {})
+    merged_warnings = [
+        str(item)
+        for item in list(payload.get("warnings") or []) + list(warnings or [])
+        if str(item or "").strip()
+    ]
+    payload["warnings"] = list(dict.fromkeys(merged_warnings))
+    payload["cache"] = {
+        "cache_key": cache_key,
+        "hit": True,
+        "age_sec": round(_cache_age_sec(cached_entry, now_ts), 3),
+        "ttl_sec": ttl,
+        "stale": bool(stale),
+        "refreshing": bool(refreshing),
+        "served_mode": str(served_mode or "cache_hit"),
+    }
+    return payload
+
+
+def _finalize_scan_payload(
+    *,
+    payload: Mapping[str, Any],
+    cache_key: str,
+    ttl: float,
+    mode: str,
+    view: str,
+    timeframe: str,
+    pre_warnings: Sequence[str],
+    cache_hit: bool,
+    age_sec: float = 0.0,
+    stale: bool = False,
+    refreshing: bool = False,
+    served_mode: str = "live_compute",
+) -> Dict[str, Any]:
+    final_payload = _clone_payload(payload)
+    final_payload["mode"] = _normalize_mode(mode)
+    final_payload["view"] = (_normalize_view(view) if view else "") or _normalize_timeframe(timeframe)
+    merged_warnings = [
+        str(item)
+        for item in list(pre_warnings or []) + list(final_payload.get("warnings") or [])
+        if str(item or "").strip()
+    ]
+    final_payload["warnings"] = list(dict.fromkeys(merged_warnings))
+    final_payload["cache"] = {
+        "cache_key": cache_key,
+        "hit": bool(cache_hit),
+        "age_sec": round(float(age_sec or 0.0), 3),
+        "ttl_sec": ttl,
+        "stale": bool(stale),
+        "refreshing": bool(refreshing),
+        "served_mode": str(served_mode or ("cache_hit" if cache_hit else "live_compute")),
+    }
+    return final_payload
+
+
+async def _refresh_altcoin_scan_cache(
+    *,
+    cache_key: str,
+    exchange: str,
+    timeframe: str,
+    symbols: Sequence[str],
+    exclude_retired: bool,
+    refresh: bool,
+    mode: str,
+    view: str,
+    universe_scope: str,
+    resolved_universe: Tuple[List[str], List[str], List[str], List[str]],
+    pre_warnings: Sequence[str],
+    ttl: float,
+) -> Dict[str, Any]:
+    async with _cache_lock(cache_key):
+        payload = await _compute_scan_payload(
+            exchange=exchange,
+            timeframe=timeframe,
+            symbols=symbols,
+            exclude_retired=exclude_retired,
+            refresh=refresh,
+            universe_scope=universe_scope,
+            mode=mode,
+            view=view,
+            resolved_universe=resolved_universe,
+        )
+        stored_payload = _finalize_scan_payload(
+            payload=payload,
+            cache_key=cache_key,
+            ttl=ttl,
+            mode=mode,
+            view=view,
+            timeframe=timeframe,
+            pre_warnings=pre_warnings,
+            cache_hit=False,
+            age_sec=0.0,
+            stale=False,
+            refreshing=False,
+            served_mode="live_compute",
+        )
+        stored_at = time.time()
+        payload_to_store = _clone_payload(stored_payload)
+        payload_to_store.pop("cache", None)
+        _ALTCOIN_SCAN_CACHE[cache_key] = {"stored_at": stored_at, "payload": payload_to_store}
+        return stored_payload
+
+
+def _consume_altcoin_scan_refresh_task(cache_key: str, task: asyncio.Task) -> None:
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+    finally:
+        if _ALTCOIN_SCAN_REFRESH_TASKS.get(cache_key) is task:
+            _ALTCOIN_SCAN_REFRESH_TASKS.pop(cache_key, None)
+
+
+def _ensure_altcoin_scan_refresh_task(
+    *,
+    cache_key: str,
+    exchange: str,
+    timeframe: str,
+    symbols: Sequence[str],
+    exclude_retired: bool,
+    refresh: bool,
+    mode: str,
+    view: str,
+    universe_scope: str,
+    resolved_universe: Tuple[List[str], List[str], List[str], List[str]],
+    pre_warnings: Sequence[str],
+    ttl: float,
+) -> asyncio.Task:
+    task = _ALTCOIN_SCAN_REFRESH_TASKS.get(cache_key)
+    if task is None or task.done():
+        task = asyncio.create_task(
+            _refresh_altcoin_scan_cache(
+                cache_key=cache_key,
+                exchange=exchange,
+                timeframe=timeframe,
+                symbols=symbols,
+                exclude_retired=exclude_retired,
+                refresh=refresh,
+                mode=mode,
+                view=view,
+                universe_scope=universe_scope,
+                resolved_universe=resolved_universe,
+                pre_warnings=pre_warnings,
+                ttl=ttl,
+            )
+        )
+        task.add_done_callback(lambda finished, key=cache_key: _consume_altcoin_scan_refresh_task(key, finished))
+        _ALTCOIN_SCAN_REFRESH_TASKS[cache_key] = task
+    return task
+
+
 def _clear_altcoin_scan_cache() -> None:
+    for task in list(_ALTCOIN_SCAN_REFRESH_TASKS.values()):
+        if task and not task.done():
+            task.cancel()
+    _ALTCOIN_SCAN_REFRESH_TASKS.clear()
     _ALTCOIN_SCAN_CACHE.clear()
 
 
@@ -969,57 +1145,74 @@ async def get_altcoin_scan_snapshot(
     ttl = _cache_ttl(normalized_timeframe, normalized_view)
     now_ts = time.time()
     if cached_entry and not refresh:
-        age_sec = max(0.0, now_ts - float(cached_entry.get("stored_at", 0.0)))
+        age_sec = _cache_age_sec(cached_entry, now_ts)
         if age_sec <= ttl:
-            payload = _clone_payload(cached_entry.get("payload") or {})
-            payload["cache"] = {
-                "cache_key": cache_key,
-                "hit": True,
-                "age_sec": round(age_sec, 3),
-                "ttl_sec": ttl,
-            }
-            return payload
-    async with _cache_lock(cache_key):
-        cached_entry = _ALTCOIN_SCAN_CACHE.get(cache_key)
-        if cached_entry and not refresh:
-            age_sec = max(0.0, now_ts - float(cached_entry.get("stored_at", 0.0)))
-            if age_sec <= ttl:
-                payload = _clone_payload(cached_entry.get("payload") or {})
-                payload["cache"] = {
-                    "cache_key": cache_key,
-                    "hit": True,
-                    "age_sec": round(age_sec, 3),
-                    "ttl_sec": ttl,
-                }
-                return payload
-        payload = await _compute_scan_payload(
+            return _build_cached_scan_payload(
+                cached_entry=cached_entry,
+                cache_key=cache_key,
+                ttl=ttl,
+                now_ts=now_ts,
+                stale=False,
+                refreshing=False,
+                served_mode="cache_hit",
+                warnings=pre_warnings,
+            )
+
+    resolved_universe = (
+        requested_symbols,
+        filtered_symbols or requested_symbols,
+        excluded_retired_symbols,
+        pre_warnings,
+    )
+    symbols_to_scan = filtered_symbols or requested_symbols
+
+    if cached_entry:
+        age_sec = _cache_age_sec(cached_entry, now_ts)
+        refresh_task = _ensure_altcoin_scan_refresh_task(
+            cache_key=cache_key,
             exchange=normalized_exchange,
             timeframe=normalized_timeframe,
-            symbols=filtered_symbols or requested_symbols,
+            symbols=symbols_to_scan,
             exclude_retired=exclude_retired,
             refresh=refresh,
-            universe_scope=normalized_scope,
             mode=normalized_mode,
             view=normalized_view,
-            resolved_universe=(
-                requested_symbols,
-                filtered_symbols or requested_symbols,
-                excluded_retired_symbols,
-                pre_warnings,
-            ),
+            universe_scope=normalized_scope,
+            resolved_universe=resolved_universe,
+            pre_warnings=pre_warnings,
+            ttl=ttl,
         )
-        payload["mode"] = normalized_mode
-        payload["view"] = normalized_view or normalized_timeframe
-        payload["warnings"] = list(dict.fromkeys(pre_warnings + list(payload.get("warnings") or [])))
-        stored_at = time.time()
-        _ALTCOIN_SCAN_CACHE[cache_key] = {"stored_at": stored_at, "payload": _clone_payload(payload)}
-        payload["cache"] = {
-            "cache_key": cache_key,
-            "hit": False,
-            "age_sec": 0.0,
-            "ttl_sec": ttl,
-        }
-        return payload
+        background_warning = (
+            "Altcoin radar refresh started in background; serving previous snapshot."
+            if refresh
+            else "Altcoin radar cache expired; background refresh in progress, serving previous snapshot."
+        )
+        return _build_cached_scan_payload(
+            cached_entry=cached_entry,
+            cache_key=cache_key,
+            ttl=ttl,
+            now_ts=now_ts,
+            stale=age_sec > ttl,
+            refreshing=not refresh_task.done(),
+            served_mode="cache_refresh" if refresh else "stale_cache_refresh",
+            warnings=[*pre_warnings, background_warning],
+        )
+
+    refresh_task = _ensure_altcoin_scan_refresh_task(
+        cache_key=cache_key,
+        exchange=normalized_exchange,
+        timeframe=normalized_timeframe,
+        symbols=symbols_to_scan,
+        exclude_retired=exclude_retired,
+        refresh=refresh,
+        mode=normalized_mode,
+        view=normalized_view,
+        universe_scope=normalized_scope,
+        resolved_universe=resolved_universe,
+        pre_warnings=pre_warnings,
+        ttl=ttl,
+    )
+    return await asyncio.shield(refresh_task)
 
 
 _PERP_ONLY_SOURCES = frozenset({"perp_ignition", "perp_continuation"})

@@ -29,7 +29,9 @@ def _p95(values: List[float]) -> float:
     return statistics.quantiles(values, n=20)[-1]
 
 
-async def _main(minutes: int, categories: List[str], markets_per_category: int, symbol: str) -> None:
+async def _main(minutes: int, categories: List[str], markets_per_category: int, symbol: str, database_url: str = "") -> None:
+    if database_url:
+        pm_db.configure_pm_db(database_url)
     cfg = load_polymarket_config()
     for cat in categories:
         item = (cfg.get("categories") or {}).get(cat) or {}
@@ -59,6 +61,7 @@ async def _main(minutes: int, categories: List[str], markets_per_category: int, 
         alerts = await pm_db.list_alerts(since=utc_now() - timedelta(hours=6), limit=10)
         print(json.dumps({
             "categories": categories,
+            "database_url": pm_db.get_pm_database_url(),
             "status": status,
             "quotes_latency_p95_sec": round(_p95(latencies), 3),
             "top_alerts": alerts[:5],
@@ -75,6 +78,7 @@ if __name__ == "__main__":
     parser.add_argument("--categories", default="PRICE,MACRO,REG_ETF,ELECTION_GEO")
     parser.add_argument("--markets-per-category", type=int, default=3)
     parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--database-url", default="", help="Override Polymarket DB URL, e.g. sqlite+aiosqlite:///data/polymarket.db")
     args = parser.parse_args()
     cats = [x.strip().upper() for x in str(args.categories or "").split(",") if x.strip()]
-    asyncio.run(_main(args.minutes, cats, args.markets_per_category, str(args.symbol or "BTCUSDT").upper()))
+    asyncio.run(_main(args.minutes, cats, args.markets_per_category, str(args.symbol or "BTCUSDT").upper(), args.database_url))

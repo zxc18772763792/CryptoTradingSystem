@@ -1,4 +1,4 @@
-﻿"""Risk management module."""
+"""Risk management module."""
 from __future__ import annotations
 
 import copy

@@ -45,8 +45,11 @@ async def update_ai_autonomous_agent_risk_config(
 
 
 @router.get("/autonomous-agent/status")
-async def get_ai_autonomous_agent_status(request: Request):
-    return await ai_research_module.get_ai_autonomous_agent_status(request)
+async def get_ai_autonomous_agent_status(request: Request, warm_preview: bool = True):
+    return await ai_research_module.get_ai_autonomous_agent_status(
+        request,
+        warm_preview=warm_preview,
+    )
 
 
 @router.post("/autonomous-agent/start", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_agent"))])

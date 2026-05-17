@@ -1,4 +1,4 @@
-﻿"""Crypto Trading System entry point."""
+"""Crypto Trading System entry point."""
 from __future__ import annotations
 
 import argparse

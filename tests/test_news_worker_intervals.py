@@ -16,3 +16,9 @@ def test_explicit_interval_override_wins_under_low_budget(monkeypatch):
     monkeypatch.setenv("NEWS_INTERVAL_COINGLASS_ARTICLES", "120")
 
     assert worker_module._source_interval("coinglass_articles") == 120
+
+
+def test_opennews_default_interval_is_near_realtime(monkeypatch):
+    monkeypatch.delenv("NEWS_INTERVAL_OPENNEWS", raising=False)
+
+    assert worker_module._source_interval("opennews") == 45

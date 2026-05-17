@@ -1,4 +1,4 @@
-﻿"""Backtest API endpoints."""
+"""Backtest API endpoints."""
 import asyncio
 import io
 import itertools

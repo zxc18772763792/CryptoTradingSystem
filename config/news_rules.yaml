@@ -26,9 +26,11 @@
   # Optional env toggles:
   # NEWS_ENABLE_CHAINCATCHER_FLASH / NEWS_ENABLE_BINANCE_ANNOUNCEMENTS / NEWS_ENABLE_OKX_ANNOUNCEMENTS
   # NEWS_ENABLE_BYBIT_ANNOUNCEMENTS / NEWS_ENABLE_CRYPTOCOMPARE_NEWS / NEWS_PULL_SYNC_LLM
+  # NEWS_ENABLE_OPENNEWS
   # NEWS_ENABLE_COINGLASS_NEWSFLASH / NEWS_ENABLE_COINGLASS_ARTICLES / NEWS_ENABLE_COINGLASS_ECONOMIC_DATA
   # NEWS_ENABLE_COINGLASS_FINANCIAL_EVENTS / NEWS_ENABLE_COINGLASS_CENTRAL_BANK
   # CRYPTOCOMPARE_API_KEY optional; without key collector still runs with stricter rate limit.
+  # OPENNEWS_TOKEN is required when NEWS_ENABLE_OPENNEWS=true; opennews is added dynamically when both are present.
   chaincatcher_flash_timeout_sec: 20
   chaincatcher_flash_max_records: 80
   chaincatcher_flash_min_interval_sec: 15
@@ -41,6 +43,13 @@
   binance_announcements_categories: [listing, delisting, api, maintenance]
   cryptocompare_news_timeout_sec: 20
   cryptocompare_news_max_records: 120
+  opennews_timeout_sec: 20
+  opennews_max_records: 100
+  opennews_min_score: 0
+  opennews_has_coin: false
+  opennews_query: ""
+  opennews_coins: "BTC,ETH,SOL,BNB,XRP,DOGE,ADA,LINK,AVAX,TON,SUI,ARB,OP,APT,SEI,NEAR"
+  opennews_engine_types: "news:;listing:;onchain:;market:;prediction:"
   coinglass_news_language: en
   coinglass_newsflash_timeout_sec: 20
   coinglass_newsflash_page_size: 50
@@ -91,9 +100,10 @@
 
 llm:
   provider: openai
-  model: gpt-5.1-codex-mini
-  base_url: https://sub.a-j.app/v1
-  backup_base_url: https://vpsairobot.com/v1
+  model: deepseek-v4-flash
+  base_url: https://kuaipao.ai
+  backup_base_url: ""
+  force_chat_completions: true
   timeout_sec: 90
   batch_size: 3
   summarize_limit: 40

@@ -1,4 +1,4 @@
-﻿"""Strategy manager: registration, runtime orchestration, and signal dispatch."""
+"""Strategy manager: registration, runtime orchestration, and signal dispatch."""
 import asyncio
 import contextlib
 import inspect

@@ -62,8 +62,9 @@ class RateLimiter:
             self._backoff_until = 0.0
             self._max_backoff = 60.0  # Maximum backoff time in seconds
 
-            # Async lock for thread-safe token operations
-            self._token_lock = asyncio.Lock()
+            # Async lock — created lazily on first async access to avoid
+            # "no current event loop" errors at import time (Python 3.9)
+            self._token_lock: Optional[asyncio.Lock] = None
 
             RateLimiter._initialized = True
             logger.info(
@@ -97,13 +98,18 @@ class RateLimiter:
             self._tokens = min(self._burst, self._tokens + new_tokens)
             self._last_update = now
 
+    def _get_lock(self) -> asyncio.Lock:
+        if self._token_lock is None:
+            self._token_lock = asyncio.Lock()
+        return self._token_lock
+
     async def acquire(self) -> bool:
         """Try to acquire a token without waiting.
 
         Returns:
             True if a token was acquired, False otherwise
         """
-        async with self._token_lock:
+        async with self._get_lock():
             self._refill_tokens()
 
             if self._tokens >= 1:

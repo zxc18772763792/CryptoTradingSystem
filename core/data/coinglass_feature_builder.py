@@ -19,6 +19,7 @@ from config.settings import settings
 from core.data.coinglass_client import (
     CoinglassBudgetExceeded,
     CoinglassClient,
+    coinglass_minute_headroom,
     coinglass_enabled,
     get_coinglass_budget_state,
     load_coinglass_ingest_statuses,
@@ -32,6 +33,7 @@ from core.data.coinglass_client import (
 )
 from core.data.coinglass_registry import (
     COINGLASS_DEFAULT_DATASETS,
+    COINGLASS_SUPPORTED_DATASETS,
     coinglass_symbol_matches,
     normalize_coinglass_exchange,
     get_coinglass_manifest,
@@ -42,6 +44,7 @@ from core.data.coinglass_registry import (
 _DEFAULT_WORKER_SYMBOL_LIMIT = 1
 _DEFAULT_OVERVIEW_SYMBOL = "BTC/USDT"
 _STRUCTURED_SOURCE = "coinglass_proxy"
+_NON_MANUAL_DATASET_RESERVE = 1
 
 
 @dataclass
@@ -217,7 +220,7 @@ def _latest_payload_rows(dataset: str, symbol: str) -> List[Dict[str, Any]]:
 def _dataset_payloads(symbol: str) -> Dict[str, Any]:
     return {
         dataset: _latest_payload_rows(dataset, symbol)
-        for dataset in COINGLASS_DEFAULT_DATASETS
+        for dataset in COINGLASS_SUPPORTED_DATASETS
     }
 
 
@@ -364,14 +367,30 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
     oi_rows = list(payloads.get("open_interest_exchange_list") or [])
     funding_rows = list(payloads.get("funding_rate_exchange_list") or [])
     oi_history_rows = list(payloads.get("open_interest_history") or [])
+    oi_aggregated_history_rows = list(payloads.get("open_interest_aggregated_history") or [])
+    oi_stablecoin_history_rows = list(payloads.get("open_interest_stablecoin_margin_history") or [])
     funding_history_rows = list(payloads.get("funding_rate_history") or [])
     taker_rows = list(payloads.get("taker_buy_sell_volume_exchange_list") or [])
     taker_history_rows = list(payloads.get("taker_buy_sell_volume_history") or [])
     liquidation_rows = list(payloads.get("liquidation_history") or [])
+    liquidation_aggregated_rows = list(payloads.get("liquidation_aggregated_history") or [])
+    liquidation_map_rows = list(payloads.get("liquidation_aggregated_map") or [])
+    liquidation_heatmap_rows = list(payloads.get("liquidation_aggregated_heatmap_model1") or [])
     ratio_rows = list(payloads.get("global_long_short_account_ratio_history") or [])
+    top_account_ratio_rows = list(payloads.get("top_long_short_account_ratio_history") or [])
+    top_position_ratio_rows = list(payloads.get("top_long_short_position_ratio_history") or [])
+    net_position_rows = list(payloads.get("net_position_history") or [])
+    futures_orderbook_rows = list(payloads.get("futures_orderbook_aggregated_ask_bids_history") or [])
+    coinbase_premium_rows = list(payloads.get("coinbase_premium_index") or [])
+    option_max_pain_rows = list(payloads.get("option_max_pain") or [])
+    bitcoin_etf_flow_rows = list(payloads.get("bitcoin_etf_flow_history") or [])
     arbitrage_rows = list(payloads.get("funding_arbitrage") or [])
     liquidation_row = liquidation_rows[-1] if liquidation_rows else {}
+    liquidation_aggregated_row = liquidation_aggregated_rows[-1] if liquidation_aggregated_rows else {}
     ratio_row = ratio_rows[-1] if ratio_rows else {}
+    top_account_ratio_row = top_account_ratio_rows[-1] if top_account_ratio_rows else {}
+    top_position_ratio_row = top_position_ratio_rows[-1] if top_position_ratio_rows else {}
+    net_position_row = net_position_rows[-1] if net_position_rows else {}
     arbitrage_row = arbitrage_rows[-1] if arbitrage_rows else {}
     if not any(payloads.values()):
         return None
@@ -431,15 +450,16 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
     if oi_change_24h is None:
         oi_change_24h = _mean(_coalesce_float(item, "open_interest_change_24h", "open_interest_change_percent_24h", "change24h", "oiChange24h") for item in non_aggregate_oi_rows)
 
+    selected_oi_history_rows = oi_history_rows or oi_aggregated_history_rows or oi_stablecoin_history_rows
     oi_history_series = _history_value_series(
-        oi_history_rows,
+        selected_oi_history_rows,
         "open_interest_close",
         "open_interest_usd",
         "close",
         "c",
     )
     history_interval = (
-        str((oi_history_rows[-1] if oi_history_rows else {}).get("_interval") or "")
+        str((selected_oi_history_rows[-1] if selected_oi_history_rows else {}).get("_interval") or "")
         or str((funding_history_rows[-1] if funding_history_rows else {}).get("_interval") or "")
         or str((ratio_rows[-1] if ratio_rows else {}).get("_interval") or "")
         or "h1"
@@ -506,6 +526,10 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
 
     liquidation_long_usd = _coalesce_float(liquidation_row, "long_liquidation_usd", "longLiquidationUsd", "longVolUsd")
     liquidation_short_usd = _coalesce_float(liquidation_row, "short_liquidation_usd", "shortLiquidationUsd", "shortVolUsd")
+    if liquidation_long_usd is None:
+        liquidation_long_usd = _coalesce_float(liquidation_aggregated_row, "long_liquidation_usd", "longLiquidationUsd", "longVolUsd")
+    if liquidation_short_usd is None:
+        liquidation_short_usd = _coalesce_float(liquidation_aggregated_row, "short_liquidation_usd", "shortLiquidationUsd", "shortVolUsd")
     long_short_ratio = _coalesce_float(
         ratio_row,
         "long_short_ratio",
@@ -523,7 +547,32 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
         "ratio",
     )
     long_short_ratio_change = _series_change_pct(ratio_series, 24 * 3600)
-    top_trader_ratio = _coalesce_float(ratio_row, "top_trader_ratio", "topTraderRatio")
+    top_account_ratio = _coalesce_float(
+        top_account_ratio_row,
+        "long_short_ratio",
+        "longShortRatio",
+        "top_trader_ratio",
+        "topTraderRatio",
+        "ratio",
+    )
+    top_position_ratio = _coalesce_float(
+        top_position_ratio_row,
+        "long_short_ratio",
+        "longShortRatio",
+        "top_position_ratio",
+        "topPositionRatio",
+        "ratio",
+    )
+    top_trader_ratio = top_position_ratio or top_account_ratio or _coalesce_float(ratio_row, "top_trader_ratio", "topTraderRatio")
+    net_position = _coalesce_float(
+        net_position_row,
+        "net_position",
+        "netPosition",
+        "net_long_short_position",
+        "netLongShortPosition",
+        "value",
+        "close",
+    )
 
     taker_buy = _sum(_coalesce_float(item, "taker_buy_volume", "buyVolume", "buy") for item in taker_rows)
     taker_sell = _sum(_coalesce_float(item, "taker_sell_volume", "sellVolume", "sell") for item in taker_rows)
@@ -541,6 +590,32 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
     taker_imbalance_4h = _series_mean(taker_history_series, bars_4h)
 
     basis_pct = _coalesce_float(arbitrage_row, "basis_pct", "basisPercent", "basis")
+    coinbase_premium = _coalesce_float(
+        coinbase_premium_rows[-1] if coinbase_premium_rows else {},
+        "premium",
+        "premium_index",
+        "premiumIndex",
+        "coinbase_premium_index",
+        "close",
+        "c",
+    )
+    option_max_pain = _coalesce_float(
+        option_max_pain_rows[-1] if option_max_pain_rows else {},
+        "max_pain",
+        "maxPain",
+        "max_pain_price",
+        "maxPainPrice",
+        "price",
+    )
+    bitcoin_etf_net_flow = _coalesce_float(
+        bitcoin_etf_flow_rows[-1] if bitcoin_etf_flow_rows else {},
+        "net_flow",
+        "netFlow",
+        "flow",
+        "total_net_inflow",
+        "totalNetInflow",
+        "value",
+    )
     futures_volume_usd = _sum(_coalesce_float(item, "volume_usd", "turnover_usd", "notionalUsd") for item in taker_rows)
     if futures_volume_usd is None and taker_buy is not None and taker_sell is not None:
         futures_volume_usd = taker_buy + taker_sell
@@ -556,9 +631,71 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
 
     liquidation_burst_score = _coalesce_float(liquidation_row, "burst_score")
     if liquidation_burst_score is None:
+        liquidation_burst_score = _coalesce_float(liquidation_aggregated_row, "burst_score")
+    if liquidation_burst_score is None:
         liquidation_burst_score = _clamp01(
             _scale_percent((liquidation_long_usd or 0.0) + (liquidation_short_usd or 0.0), 50_000_000.0)
         )
+    liquidation_map_total_usd = _sum(
+        _coalesce_float(item, "liquidation_map_total_usd") for item in liquidation_map_rows
+    )
+    liquidation_map_above_usd = _sum(
+        _coalesce_float(item, "liquidation_map_above_usd") for item in liquidation_map_rows
+    )
+    liquidation_map_below_usd = _sum(
+        _coalesce_float(item, "liquidation_map_below_usd") for item in liquidation_map_rows
+    )
+    liquidation_map_pressure_score = _clamp01(
+        _scale_percent(liquidation_map_total_usd, 750_000_000.0)
+    )
+    liquidation_map_largest_row = max(
+        liquidation_map_rows,
+        key=lambda item: _coalesce_float(item, "liquidation_map_largest_cluster_usd") or 0.0,
+        default={},
+    )
+    liquidity_map_rows = [*liquidation_map_rows, *liquidation_heatmap_rows]
+    liquidity_heatmap_total_usd = _sum(
+        _coalesce_float(item, "liquidity_heatmap_total_usd", "liquidation_map_total_usd")
+        for item in liquidity_map_rows
+    )
+    liquidity_heatmap_above_usd = _sum(
+        _coalesce_float(item, "liquidity_heatmap_above_usd", "liquidation_map_above_usd")
+        for item in liquidity_map_rows
+    )
+    liquidity_heatmap_below_usd = _sum(
+        _coalesce_float(item, "liquidity_heatmap_below_usd", "liquidation_map_below_usd")
+        for item in liquidity_map_rows
+    )
+    heatmap_pressure_score = _mean(
+        _coalesce_float(item, "heatmap_pressure_score", "liquidation_map_pressure_score")
+        for item in liquidity_map_rows
+    )
+    if heatmap_pressure_score is None:
+        heatmap_pressure_score = _scale_percent(liquidity_heatmap_total_usd, 750_000_000.0)
+    heatmap_pressure_score = _clamp01(heatmap_pressure_score)
+    liquidity_above_row = max(
+        liquidity_map_rows,
+        key=lambda item: _coalesce_float(item, "liquidity_wall_nearest_above_usd", "liquidation_map_nearest_above_usd") or 0.0,
+        default={},
+    )
+    liquidity_below_row = max(
+        liquidity_map_rows,
+        key=lambda item: _coalesce_float(item, "liquidity_wall_nearest_below_usd", "liquidation_map_nearest_below_usd") or 0.0,
+        default={},
+    )
+    liquidity_wall_above_usd = _coalesce_float(
+        liquidity_above_row, "liquidity_wall_nearest_above_usd", "liquidation_map_nearest_above_usd"
+    )
+    liquidity_wall_below_usd = _coalesce_float(
+        liquidity_below_row, "liquidity_wall_nearest_below_usd", "liquidation_map_nearest_below_usd"
+    )
+    liquidity_void_score = _mean(
+        _coalesce_float(item, "liquidity_void_score") for item in liquidity_map_rows
+    )
+    if liquidity_void_score is None and liquidity_heatmap_total_usd:
+        nearby_total = (liquidity_wall_above_usd or 0.0) + (liquidity_wall_below_usd or 0.0)
+        liquidity_void_score = 1.0 - (nearby_total / max(liquidity_heatmap_total_usd, 1.0))
+    liquidity_void_score = _clamp01(liquidity_void_score)
 
     oi_funding_divergence_score = 0.0
     if oi_change_24h is not None and funding_zscore is not None and (oi_change_24h * funding_zscore) < 0:
@@ -605,11 +742,73 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
     orderbook_imbalance_score = _clamp01(
         0.5 + (float(taker_buy_sell_imbalance or 0.0) * 0.5)
     )
+    futures_orderbook_row = futures_orderbook_rows[-1] if futures_orderbook_rows else {}
+    orderbook_agg_bid_usd = _coalesce_float(
+        futures_orderbook_row,
+        "orderbook_agg_bid_usd",
+        "bid_usd",
+        "bidUsd",
+    )
+    orderbook_agg_ask_usd = _coalesce_float(
+        futures_orderbook_row,
+        "orderbook_agg_ask_usd",
+        "ask_usd",
+        "askUsd",
+    )
+    orderbook_agg_imbalance = _coalesce_float(
+        futures_orderbook_row,
+        "orderbook_agg_imbalance",
+        "orderbook_imbalance",
+        "bid_ask_imbalance",
+        "imbalance",
+        "ask_bid_ratio",
+        "bidAskRatio",
+    )
+    if (
+        orderbook_agg_imbalance is None
+        and orderbook_agg_bid_usd is not None
+        and orderbook_agg_ask_usd is not None
+        and (orderbook_agg_bid_usd + orderbook_agg_ask_usd) > 0
+    ):
+        orderbook_agg_imbalance = (
+            (orderbook_agg_bid_usd - orderbook_agg_ask_usd)
+            / (orderbook_agg_bid_usd + orderbook_agg_ask_usd)
+        )
+    if orderbook_agg_imbalance is not None:
+        orderbook_imbalance_score = _clamp01(
+            0.5 + (float(orderbook_agg_imbalance) * 0.5)
+            if -1.0 <= float(orderbook_agg_imbalance) <= 1.0
+            else _scale_percent(orderbook_agg_imbalance, 2.0)
+        )
+    orderbook_wall_above_usd = _coalesce_float(
+        futures_orderbook_row, "orderbook_wall_above_usd", "ask_wall_usd", "askWallUsd"
+    )
+    orderbook_wall_below_usd = _coalesce_float(
+        futures_orderbook_row, "orderbook_wall_below_usd", "bid_wall_usd", "bidWallUsd"
+    )
+    orderbook_wall_above_price = _coalesce_float(
+        futures_orderbook_row, "orderbook_wall_above_price", "ask_wall_price", "askWallPrice"
+    )
+    orderbook_wall_below_price = _coalesce_float(
+        futures_orderbook_row, "orderbook_wall_below_price", "bid_wall_price", "bidWallPrice"
+    )
     depth_thinness_score = _clamp01(
         1.0 - _scale_percent(futures_volume_usd, 250_000_000.0)
     )
+    if orderbook_agg_bid_usd is not None or orderbook_agg_ask_usd is not None:
+        orderbook_total_usd = (orderbook_agg_bid_usd or 0.0) + (orderbook_agg_ask_usd or 0.0)
+        depth_thinness_score = _clamp01(
+            max(depth_thinness_score or 0.0, 1.0 - _scale_percent(orderbook_total_usd, 200_000_000.0))
+        )
+    if liquidity_void_score is not None:
+        depth_thinness_score = _clamp01(max(depth_thinness_score or 0.0, liquidity_void_score * 0.65))
     derivatives_heat_score = _clamp01(
-        max(crowding_score or 0.0, squeeze_score or 0.0, distribution_score or 0.0)
+        max(
+            crowding_score or 0.0,
+            squeeze_score or 0.0,
+            distribution_score or 0.0,
+            heatmap_pressure_score or 0.0,
+        )
     )
 
     crowded_long = bool((crowding_score or 0.0) >= 0.70 and (funding_rate or 0.0) > 0 and (long_short_ratio or 1.0) >= 1.05)
@@ -690,8 +889,17 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
         "taker_imbalance_4h": taker_imbalance_4h,
         "active_datasets": [dataset for dataset, items in payloads.items() if items],
         "payload_counts": {dataset: len(items or []) for dataset, items in payloads.items()},
-        "history_exchange": str((oi_history_rows[-1] if oi_history_rows else {}).get("_exchange") or (funding_history_rows[-1] if funding_history_rows else {}).get("_exchange") or "Binance"),
+        "history_exchange": str((selected_oi_history_rows[-1] if selected_oi_history_rows else {}).get("_exchange") or (funding_history_rows[-1] if funding_history_rows else {}).get("_exchange") or "Binance"),
         "history_interval": history_interval,
+        "oi_history_source_dataset": (
+            "open_interest_history"
+            if oi_history_rows
+            else "open_interest_aggregated_history"
+            if oi_aggregated_history_rows
+            else "open_interest_stablecoin_margin_history"
+            if oi_stablecoin_history_rows
+            else None
+        ),
         "funding_exchange_count": len(primary_funding_rows),
         "funding_token_exchange_count": len(token_funding_rows),
         "funding_mean": funding_mean,
@@ -699,6 +907,45 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
         "funding_reversion_speed": funding_reversion_speed,
         "funding_extreme_deviation": funding_extreme_deviation,
         "liquidation_burst_score": liquidation_burst_score,
+        "liquidation_map_total_usd": liquidation_map_total_usd,
+        "liquidation_map_above_usd": liquidation_map_above_usd,
+        "liquidation_map_below_usd": liquidation_map_below_usd,
+        "liquidation_map_pressure_score": liquidation_map_pressure_score,
+        "liquidation_map_largest_cluster_price": _coalesce_float(
+            liquidation_map_largest_row, "liquidation_map_largest_cluster_price"
+        ),
+        "liquidation_map_largest_cluster_usd": _coalesce_float(
+            liquidation_map_largest_row, "liquidation_map_largest_cluster_usd"
+        ),
+        "liquidation_map_last_price": _coalesce_float(
+            liquidation_map_largest_row, "last_price"
+        ),
+        "orderbook_agg_bid_usd": orderbook_agg_bid_usd,
+        "orderbook_agg_ask_usd": orderbook_agg_ask_usd,
+        "orderbook_agg_imbalance": orderbook_agg_imbalance,
+        "orderbook_wall_above_usd": orderbook_wall_above_usd,
+        "orderbook_wall_below_usd": orderbook_wall_below_usd,
+        "orderbook_wall_above_price": orderbook_wall_above_price,
+        "orderbook_wall_below_price": orderbook_wall_below_price,
+        "liquidity_heatmap_total_usd": liquidity_heatmap_total_usd,
+        "liquidity_heatmap_above_usd": liquidity_heatmap_above_usd,
+        "liquidity_heatmap_below_usd": liquidity_heatmap_below_usd,
+        "liquidity_wall_nearest_above_price": _coalesce_float(
+            liquidity_above_row, "liquidity_wall_nearest_above_price", "liquidation_map_nearest_above_price"
+        ),
+        "liquidity_wall_nearest_below_price": _coalesce_float(
+            liquidity_below_row, "liquidity_wall_nearest_below_price", "liquidation_map_nearest_below_price"
+        ),
+        "liquidity_wall_nearest_above_usd": liquidity_wall_above_usd,
+        "liquidity_wall_nearest_below_usd": liquidity_wall_below_usd,
+        "liquidity_void_score": liquidity_void_score,
+        "heatmap_pressure_score": heatmap_pressure_score,
+        "top_account_long_short_ratio": top_account_ratio,
+        "top_position_long_short_ratio": top_position_ratio,
+        "net_position": net_position,
+        "coinbase_premium": coinbase_premium,
+        "option_max_pain": option_max_pain,
+        "bitcoin_etf_net_flow": bitcoin_etf_net_flow,
         "long_short_ratio_change_24h": long_short_ratio_change,
         "oi_change_1h_history": None if oi_change_1h_history is None else oi_change_1h_history * 100.0,
         "oi_change_4h_history": None if oi_change_4h_history is None else oi_change_4h_history * 100.0,
@@ -825,8 +1072,12 @@ async def persist_market_structure_snapshot(snapshot: DerivativesSnapshot) -> No
         row.latency_ms = 0
         row.ingest_version = "v1"
         row.orderbook_imbalance = snapshot.orderbook_imbalance_score
-        row.heatmap_pressure_score = snapshot.squeeze_score
-        row.liquidity_void_score = snapshot.depth_thinness_score
+        row.heatmap_pressure_score = _coalesce_float(
+            snapshot.payload or {}, "heatmap_pressure_score"
+        ) or snapshot.squeeze_score
+        row.liquidity_void_score = _coalesce_float(
+            snapshot.payload or {}, "liquidity_void_score"
+        ) or snapshot.depth_thinness_score
         row.trade_delta = snapshot.taker_buy_sell_imbalance
         row.payload = {
             "crowding_score": snapshot.crowding_score,
@@ -860,6 +1111,29 @@ async def update_coinglass_cache(
     }
     if not coinglass_enabled():
         return summary
+    if not manual:
+        try:
+            budget_state = await get_coinglass_budget_state()
+            headroom = coinglass_minute_headroom(budget_state, manual=False)
+        except Exception:
+            headroom = max(1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 10) or 10) - 2)
+        effective_capacity = max(0, int(headroom) - _NON_MANUAL_DATASET_RESERVE)
+        if effective_capacity <= 0:
+            summary["stopped_early"] = True
+            summary["stop_reason"] = "minute_budget_headroom_low"
+            summary["budget"] = (await get_coinglass_budget_state()).to_dict()
+            return summary
+        total_planned = len(selected_symbols) * len(selected_datasets)
+        if total_planned > effective_capacity:
+            if effective_capacity < len(selected_symbols):
+                selected_symbols = selected_symbols[:effective_capacity]
+                selected_datasets = selected_datasets[:1]
+            else:
+                selected_datasets = selected_datasets[: max(1, effective_capacity // max(1, len(selected_symbols)))]
+            summary["symbols"] = selected_symbols
+            summary["datasets"] = selected_datasets
+            summary["stopped_early"] = True
+            summary["stop_reason"] = "non_manual_refresh_limited_by_10_per_min_budget"
     stop_reason = ""
     async with CoinglassClient() as client:
         for symbol in selected_symbols:
@@ -1026,8 +1300,9 @@ async def update_coinglass_cache(
                 break
     persist_symbol_registry(selected_symbols)
     summary["budget"] = (await get_coinglass_budget_state()).to_dict()
-    summary["stopped_early"] = bool(stop_reason)
-    summary["stop_reason"] = stop_reason or None
+    if stop_reason:
+        summary["stopped_early"] = True
+        summary["stop_reason"] = stop_reason
     return summary
 
 
@@ -1193,6 +1468,34 @@ def build_coinglass_runtime_context(snapshot: Optional[Mapping[str, Any]]) -> Di
         "funding_reversion_speed": payload.get("funding_reversion_speed"),
         "funding_extreme_deviation": payload.get("funding_extreme_deviation"),
         "liquidation_burst_score": payload.get("liquidation_burst_score"),
+        "liquidation_map_total_usd": payload.get("liquidation_map_total_usd"),
+        "liquidation_map_above_usd": payload.get("liquidation_map_above_usd"),
+        "liquidation_map_below_usd": payload.get("liquidation_map_below_usd"),
+        "liquidation_map_pressure_score": payload.get("liquidation_map_pressure_score"),
+        "liquidation_map_largest_cluster_price": payload.get("liquidation_map_largest_cluster_price"),
+        "liquidation_map_largest_cluster_usd": payload.get("liquidation_map_largest_cluster_usd"),
+        "orderbook_agg_bid_usd": payload.get("orderbook_agg_bid_usd"),
+        "orderbook_agg_ask_usd": payload.get("orderbook_agg_ask_usd"),
+        "orderbook_agg_imbalance": payload.get("orderbook_agg_imbalance"),
+        "orderbook_wall_above_usd": payload.get("orderbook_wall_above_usd"),
+        "orderbook_wall_below_usd": payload.get("orderbook_wall_below_usd"),
+        "orderbook_wall_above_price": payload.get("orderbook_wall_above_price"),
+        "orderbook_wall_below_price": payload.get("orderbook_wall_below_price"),
+        "liquidity_heatmap_total_usd": payload.get("liquidity_heatmap_total_usd"),
+        "liquidity_heatmap_above_usd": payload.get("liquidity_heatmap_above_usd"),
+        "liquidity_heatmap_below_usd": payload.get("liquidity_heatmap_below_usd"),
+        "liquidity_wall_nearest_above_price": payload.get("liquidity_wall_nearest_above_price"),
+        "liquidity_wall_nearest_below_price": payload.get("liquidity_wall_nearest_below_price"),
+        "liquidity_wall_nearest_above_usd": payload.get("liquidity_wall_nearest_above_usd"),
+        "liquidity_wall_nearest_below_usd": payload.get("liquidity_wall_nearest_below_usd"),
+        "liquidity_void_score": payload.get("liquidity_void_score"),
+        "heatmap_pressure_score": payload.get("heatmap_pressure_score"),
+        "top_account_long_short_ratio": payload.get("top_account_long_short_ratio"),
+        "top_position_long_short_ratio": payload.get("top_position_long_short_ratio"),
+        "net_position": payload.get("net_position"),
+        "coinbase_premium": payload.get("coinbase_premium"),
+        "option_max_pain": payload.get("option_max_pain"),
+        "bitcoin_etf_net_flow": payload.get("bitcoin_etf_net_flow"),
         "long_short_ratio_change_24h": payload.get("long_short_ratio_change_24h"),
         "oi_change_1h_history": payload.get("oi_change_1h_history"),
         "oi_change_4h_history": payload.get("oi_change_4h_history"),

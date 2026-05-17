@@ -34,6 +34,11 @@ _MODEL_ENV_FIELDS = (
     "OPENAI_BACKUP_API_KEY",
     "OPENAI_BACKUP_BASE_URL",
     "OPENAI_MODEL",
+    "NEWS_LLM_PROVIDER",
+    "NEWS_LLM_API_KEY",
+    "NEWS_LLM_BASE_URL",
+    "NEWS_LLM_MODEL",
+    "NEWS_LLM_FORCE_CHAT_COMPLETIONS",
 )
 
 # Sync model settings into environment variables for modules that still read os.environ.
@@ -84,6 +89,14 @@ _NEWS_LLM_BACKGROUND_ENABLED = _env_bool("NEWS_LLM_BACKGROUND_ENABLED", True)
 _NEWS_LLM_EXTERNAL_ONLY = _env_bool("NEWS_LLM_EXTERNAL_ONLY", False)
 _EXTERNAL_NEWS_WORKER_ENABLED = _env_bool("START_NEWS_WORKER", False)
 _DATA_MAINTENANCE_ENABLED = _env_bool("DATA_MAINTENANCE_ENABLED", False)
+_PUBLIC_MACRO_WORKERS_ENABLED = _env_bool(
+    "PUBLIC_MACRO_WORKERS_ENABLED",
+    bool(getattr(settings, "PUBLIC_MACRO_WORKERS_ENABLED", False)),
+)
+_PREMIUM_EXTERNAL_WORKERS_ENABLED = _env_bool(
+    "PREMIUM_EXTERNAL_WORKERS_ENABLED",
+    bool(getattr(settings, "PREMIUM_EXTERNAL_WORKERS_ENABLED", False)),
+)
 _ANALYTICS_HISTORY_ENABLED = _env_bool(
     "ANALYTICS_HISTORY_ENABLED",
     bool(getattr(settings, "ANALYTICS_HISTORY_ENABLED", False)),
@@ -1100,35 +1113,45 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
             "factory": lambda stop_event: _cusum_monitor_worker(stop_event, app),
             "restart_on_failure": True,
         },
-        "google_trends": {
-            "factory": lambda stop_event: _google_trends_worker(stop_event),
-            "restart_on_failure": False,  # non-critical; don't spam restarts on 429s
-        },
-        "macro_cache": {
-            "factory": lambda stop_event: _macro_cache_worker(stop_event),
-            "restart_on_failure": False,
-        },
-        "glassnode": {
-            "factory": lambda stop_event: _glassnode_worker(stop_event),
-            "restart_on_failure": False,  # no-op without key
-        },
-        "cryptoquant": {
-            "factory": lambda stop_event: _cryptoquant_worker(stop_event),
-            "restart_on_failure": False,
-        },
-        "nansen": {
-            "factory": lambda stop_event: _nansen_worker(stop_event),
-            "restart_on_failure": False,
-        },
-        "kaiko": {
-            "factory": lambda stop_event: _kaiko_worker(stop_event),
-            "restart_on_failure": False,
-        },
         "coinglass": {
             "factory": lambda stop_event: _coinglass_worker(stop_event),
             "restart_on_failure": False,
         },
     }
+    if _PUBLIC_MACRO_WORKERS_ENABLED:
+        factories.update(
+            {
+                "google_trends": {
+                    "factory": lambda stop_event: _google_trends_worker(stop_event),
+                    "restart_on_failure": False,
+                },
+                "macro_cache": {
+                    "factory": lambda stop_event: _macro_cache_worker(stop_event),
+                    "restart_on_failure": False,
+                },
+            }
+        )
+    if _PREMIUM_EXTERNAL_WORKERS_ENABLED:
+        factories.update(
+            {
+                "glassnode": {
+                    "factory": lambda stop_event: _glassnode_worker(stop_event),
+                    "restart_on_failure": False,
+                },
+                "cryptoquant": {
+                    "factory": lambda stop_event: _cryptoquant_worker(stop_event),
+                    "restart_on_failure": False,
+                },
+                "nansen": {
+                    "factory": lambda stop_event: _nansen_worker(stop_event),
+                    "restart_on_failure": False,
+                },
+                "kaiko": {
+                    "factory": lambda stop_event: _kaiko_worker(stop_event),
+                    "restart_on_failure": False,
+                },
+            }
+        )
     if _DATA_MAINTENANCE_ENABLED:
         factories["data_maintenance"] = {
             "factory": lambda stop_event: _data_maintenance_worker(stop_event),

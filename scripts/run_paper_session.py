@@ -1,4 +1,4 @@
-﻿"""Run a timed paper-trading strategy session and save a report."""
+"""Run a timed paper-trading strategy session and save a report."""
 from __future__ import annotations
 
 import argparse

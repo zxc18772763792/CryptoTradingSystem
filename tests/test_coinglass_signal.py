@@ -67,6 +67,9 @@ def test_build_coinglass_signal_adds_new_risk_flags_and_reduces_confidence(monke
                     "basis_dislocation": True,
                     "flow_divergence": True,
                     "flush_risk": True,
+                    "heatmap_pressure_score": 0.76,
+                    "liquidity_void_score": 0.72,
+                    "orderbook_agg_imbalance": -0.24,
                     "derivatives_labels": ["crowded_long", "basis_dislocation", "flow_divergence", "flush_risk"],
                 },
             }
@@ -80,5 +83,8 @@ def test_build_coinglass_signal_adds_new_risk_flags_and_reduces_confidence(monke
     assert "crowded_long" in payload["risk_flags"]
     assert "basis_dislocation" in payload["risk_flags"]
     assert "flow_divergence" in payload["risk_flags"]
+    assert "liquidity_heatmap_hot" in payload["risk_flags"]
+    assert "liquidity_void" in payload["risk_flags"]
+    assert "orderbook_agg_ask_bias" in payload["context_flags"]
     assert "history_incomplete" in payload["risk_flags"]
     assert payload["context"]["history_ready"] is False

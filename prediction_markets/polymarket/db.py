@@ -1,35 +1,83 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
-from sqlalchemy import and_, event, insert, select, text, update
+from sqlalchemy import and_, event, func, insert, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from config.settings import settings
-from prediction_markets.polymarket.models import PMAlert, PMBase, PMMarket, PMQuote, PMSourceState, PMSubscription
+from prediction_markets.polymarket.models import (
+    PMAlert,
+    PMBase,
+    PMMarket,
+    PMPaperAccount,
+    PMPaperFill,
+    PMPaperOrder,
+    PMPaperPosition,
+    PMQuote,
+    PMSourceState,
+    PMSubscription,
+)
 from prediction_markets.polymarket.utils import parse_ts_any, utc_now
 
-_engine_kwargs: Dict[str, Any] = {"echo": False, "future": True}
-if str(settings.DATABASE_URL).startswith("sqlite"):
-    _engine_kwargs["connect_args"] = {"timeout": 30}
+_SQLITE_ASYNC_PREFIX = "sqlite+aiosqlite:///"
+_PM_DATABASE_URL = ""
+pm_engine = None
+PMSessionLocal = None
 
-pm_engine = create_async_engine(settings.DATABASE_URL, **_engine_kwargs)
-PMSessionLocal = async_sessionmaker(pm_engine, class_=AsyncSession, expire_on_commit=False)
 
-if str(settings.DATABASE_URL).startswith("sqlite"):
-    @event.listens_for(pm_engine.sync_engine, "connect")
-    def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
-        cursor = dbapi_connection.cursor()
-        try:
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.execute("PRAGMA busy_timeout=30000")
-        finally:
-            cursor.close()
+def _normalize_pm_database_url(value: Optional[str] = None) -> str:
+    text = str(value or os.getenv("PM_DATABASE_URL") or settings.DATABASE_URL).strip()
+    if not text.startswith(_SQLITE_ASYNC_PREFIX):
+        return text
+    raw_path = Path(text[len(_SQLITE_ASYNC_PREFIX):])
+    if raw_path.is_absolute():
+        return text
+    return f"{_SQLITE_ASYNC_PREFIX}{(settings.BASE_DIR / raw_path).resolve().as_posix()}"
+
+
+def _create_pm_engine(database_url: str):
+    engine_kwargs: Dict[str, Any] = {"echo": False, "future": True}
+    if database_url.startswith("sqlite"):
+        engine_kwargs["connect_args"] = {"timeout": 30}
+    engine = create_async_engine(database_url, **engine_kwargs)
+    if database_url.startswith("sqlite"):
+        @event.listens_for(engine.sync_engine, "connect")
+        def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA busy_timeout=30000")
+            finally:
+                cursor.close()
+    return engine
+
+
+def configure_pm_db(database_url: Optional[str] = None) -> str:
+    global _PM_DATABASE_URL, pm_engine, PMSessionLocal
+    resolved = _normalize_pm_database_url(database_url)
+    if pm_engine is not None and PMSessionLocal is not None and resolved == _PM_DATABASE_URL:
+        return _PM_DATABASE_URL
+    pm_engine = _create_pm_engine(resolved)
+    PMSessionLocal = async_sessionmaker(pm_engine, class_=AsyncSession, expire_on_commit=False)
+    _PM_DATABASE_URL = resolved
+    return _PM_DATABASE_URL
+
+
+def get_pm_database_url() -> str:
+    if not _PM_DATABASE_URL:
+        configure_pm_db()
+    return _PM_DATABASE_URL
+
+
+configure_pm_db()
 
 
 def _utc_iso(value: Optional[datetime]) -> Optional[str]:
@@ -126,8 +174,76 @@ def _state_to_dict(row: PMSourceState) -> Dict[str, Any]:
     }
 
 
+def _paper_account_to_dict(row: PMPaperAccount) -> Dict[str, Any]:
+    return {
+        "account_id": row.account_id,
+        "initial_cash": float(row.initial_cash or 0.0),
+        "cash": float(row.cash or 0.0),
+        "realized_pnl": float(row.realized_pnl or 0.0),
+        "fees_paid": float(row.fees_paid or 0.0),
+        "updated_at": _utc_iso(row.updated_at),
+    }
+
+
+def _paper_order_to_dict(row: PMPaperOrder) -> Dict[str, Any]:
+    return {
+        "order_id": row.order_id,
+        "account_id": row.account_id,
+        "created_at": _utc_iso(row.created_at),
+        "updated_at": _utc_iso(row.updated_at),
+        "market_id": row.market_id,
+        "token_id": row.token_id,
+        "outcome": row.outcome,
+        "side": row.side,
+        "order_type": row.order_type,
+        "status": row.status,
+        "price": float(row.price or 0.0),
+        "size": float(row.size or 0.0),
+        "filled_size": float(row.filled_size or 0.0),
+        "remaining_size": max(0.0, float(row.size or 0.0) - float(row.filled_size or 0.0)),
+        "avg_fill_price": None if row.avg_fill_price is None else float(row.avg_fill_price),
+        "fee_paid": float(row.fee_paid or 0.0),
+        "reject_reason": row.reject_reason,
+        "payload": row.payload_json or {},
+    }
+
+
+def _paper_fill_to_dict(row: PMPaperFill) -> Dict[str, Any]:
+    return {
+        "fill_id": row.fill_id,
+        "order_id": row.order_id,
+        "account_id": row.account_id,
+        "ts": _utc_iso(row.ts),
+        "market_id": row.market_id,
+        "token_id": row.token_id,
+        "outcome": row.outcome,
+        "side": row.side,
+        "price": float(row.price or 0.0),
+        "size": float(row.size or 0.0),
+        "fee_paid": float(row.fee_paid or 0.0),
+        "quote_id": row.quote_id,
+        "payload": row.payload_json or {},
+    }
+
+
+def _paper_position_to_dict(row: PMPaperPosition) -> Dict[str, Any]:
+    return {
+        "account_id": row.account_id,
+        "market_id": row.market_id,
+        "token_id": row.token_id,
+        "outcome": row.outcome,
+        "size": float(row.size or 0.0),
+        "avg_price": float(row.avg_price or 0.0),
+        "realized_pnl": float(row.realized_pnl or 0.0),
+        "fees_paid": float(row.fees_paid or 0.0),
+        "updated_at": _utc_iso(row.updated_at),
+    }
+
+
 @asynccontextmanager
 async def pm_session_scope() -> Iterable[AsyncSession]:
+    if PMSessionLocal is None:
+        configure_pm_db()
     session = PMSessionLocal()
     try:
         yield session
@@ -140,6 +256,8 @@ async def pm_session_scope() -> Iterable[AsyncSession]:
 
 
 async def init_pm_db() -> None:
+    if pm_engine is None:
+        configure_pm_db()
     try:
         async with pm_engine.begin() as conn:
             await conn.run_sync(PMBase.metadata.create_all)
@@ -150,7 +268,8 @@ async def init_pm_db() -> None:
 
 
 async def close_pm_db() -> None:
-    await pm_engine.dispose()
+    if pm_engine is not None:
+        await pm_engine.dispose()
 
 
 async def upsert_markets(markets: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -346,6 +465,83 @@ async def get_market_quotes(market_id: str, since: datetime, until: datetime) ->
     return [_quote_to_dict(row) for row in rows]
 
 
+async def get_latest_quote(token_id: str) -> Optional[Dict[str, Any]]:
+    token = str(token_id or "").strip()
+    if not token:
+        return None
+    async with pm_session_scope() as session:
+        row = (
+            await session.execute(
+                select(PMQuote)
+                .where(PMQuote.token_id == token)
+                .order_by(PMQuote.ts.desc(), PMQuote.id.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+    return _quote_to_dict(row) if row else None
+
+
+async def get_token_quotes(token_id: str, since: datetime, until: datetime, limit: int = 10000) -> List[Dict[str, Any]]:
+    token = str(token_id or "").strip()
+    if not token:
+        return []
+    async with pm_session_scope() as session:
+        rows = (
+            await session.execute(
+                select(PMQuote)
+                .where(and_(PMQuote.token_id == token, PMQuote.ts >= parse_ts_any(since), PMQuote.ts <= parse_ts_any(until)))
+                .order_by(PMQuote.ts.asc(), PMQuote.id.asc())
+                .limit(max(1, min(int(limit or 10000), 200000)))
+            )
+        ).scalars().all()
+    return [_quote_to_dict(row) for row in rows]
+
+
+async def list_active_quote_tokens(
+    since: datetime,
+    until: datetime,
+    *,
+    limit: int = 50,
+    min_quotes: int = 1,
+) -> List[Dict[str, Any]]:
+    async with pm_session_scope() as session:
+        stmt = (
+            select(
+                PMQuote.token_id,
+                func.min(PMQuote.market_id).label("market_id"),
+                func.min(PMQuote.outcome).label("outcome"),
+                func.count(PMQuote.id).label("quotes_count"),
+                func.min(PMQuote.ts).label("first_ts"),
+                func.max(PMQuote.ts).label("last_ts"),
+                func.avg(PMQuote.spread).label("avg_spread"),
+                func.avg(PMQuote.depth1).label("avg_depth1"),
+                func.avg(PMQuote.depth5).label("avg_depth5"),
+            )
+            .where(and_(PMQuote.ts >= parse_ts_any(since), PMQuote.ts <= parse_ts_any(until)))
+            .group_by(PMQuote.token_id)
+            .having(func.count(PMQuote.id) >= max(1, int(min_quotes or 1)))
+            .order_by(func.count(PMQuote.id).desc(), func.avg(PMQuote.depth5).desc())
+            .limit(max(1, min(int(limit or 50), 10000)))
+        )
+        rows = (await session.execute(stmt)).all()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        out.append(
+            {
+                "token_id": row.token_id,
+                "market_id": row.market_id,
+                "outcome": row.outcome,
+                "quotes_count": int(row.quotes_count or 0),
+                "first_ts": _utc_iso(row.first_ts),
+                "last_ts": _utc_iso(row.last_ts),
+                "avg_spread": None if row.avg_spread is None else float(row.avg_spread),
+                "avg_depth1": None if row.avg_depth1 is None else float(row.avg_depth1),
+                "avg_depth5": None if row.avg_depth5 is None else float(row.avg_depth5),
+            }
+        )
+    return out
+
+
 async def get_quotes_for_subscriptions(since: datetime, until: datetime, category: Optional[str] = None) -> List[Dict[str, Any]]:
     async with pm_session_scope() as session:
         stmt = (
@@ -500,3 +696,231 @@ async def cleanup_old_quotes(retention_days: int = 14) -> Dict[str, Any]:
         result = await session.execute(text("DELETE FROM pm_quotes WHERE ts < :cutoff"), {"cutoff": cutoff})
         deleted = int(getattr(result, "rowcount", 0) or 0)
     return {"deleted": deleted, "cutoff": cutoff.isoformat()}
+
+
+async def get_or_create_paper_account(account_id: str = "default", initial_cash: float = 1000.0) -> Dict[str, Any]:
+    account = str(account_id or "default").strip() or "default"
+    now = utc_now()
+    async with pm_session_scope() as session:
+        row = await session.get(PMPaperAccount, account)
+        if row is None:
+            cash = float(initial_cash or 0.0)
+            row = PMPaperAccount(
+                account_id=account,
+                initial_cash=cash,
+                cash=cash,
+                realized_pnl=0.0,
+                fees_paid=0.0,
+                updated_at=now,
+            )
+            session.add(row)
+            await session.flush()
+        return _paper_account_to_dict(row)
+
+
+async def reset_paper_account(account_id: str = "default", initial_cash: float = 1000.0) -> Dict[str, Any]:
+    account = str(account_id or "default").strip() or "default"
+    cash = float(initial_cash or 0.0)
+    now = utc_now()
+    async with pm_session_scope() as session:
+        await session.execute(text("DELETE FROM pm_paper_fills WHERE account_id = :account_id"), {"account_id": account})
+        await session.execute(text("DELETE FROM pm_paper_orders WHERE account_id = :account_id"), {"account_id": account})
+        await session.execute(text("DELETE FROM pm_paper_positions WHERE account_id = :account_id"), {"account_id": account})
+        row = await session.get(PMPaperAccount, account)
+        if row is None:
+            row = PMPaperAccount(account_id=account)
+            session.add(row)
+        row.initial_cash = cash
+        row.cash = cash
+        row.realized_pnl = 0.0
+        row.fees_paid = 0.0
+        row.updated_at = now
+        await session.flush()
+        return _paper_account_to_dict(row)
+
+
+async def create_paper_order(order: Dict[str, Any]) -> Dict[str, Any]:
+    now = parse_ts_any(order.get("created_at") or utc_now())
+    row = PMPaperOrder(
+        order_id=str(order.get("order_id") or ""),
+        account_id=str(order.get("account_id") or "default"),
+        created_at=now,
+        updated_at=now,
+        market_id=str(order.get("market_id") or ""),
+        token_id=str(order.get("token_id") or ""),
+        outcome=str(order.get("outcome") or "YES").upper(),
+        side=str(order.get("side") or "BUY").upper(),
+        order_type=str(order.get("order_type") or "LIMIT").upper(),
+        status=str(order.get("status") or "OPEN").upper(),
+        price=float(order.get("price") or 0.0),
+        size=float(order.get("size") or 0.0),
+        filled_size=float(order.get("filled_size") or 0.0),
+        avg_fill_price=None if order.get("avg_fill_price") is None else float(order.get("avg_fill_price")),
+        fee_paid=float(order.get("fee_paid") or 0.0),
+        reject_reason=order.get("reject_reason"),
+        payload_json=order.get("payload") or order.get("payload_json") or {},
+    )
+    async with pm_session_scope() as session:
+        session.add(row)
+        await session.flush()
+        return _paper_order_to_dict(row)
+
+
+async def update_paper_order(order_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    oid = str(order_id or "").strip()
+    if not oid:
+        return None
+    async with pm_session_scope() as session:
+        row = (
+            await session.execute(select(PMPaperOrder).where(PMPaperOrder.order_id == oid))
+        ).scalars().first()
+        if row is None:
+            return None
+        for key, value in updates.items():
+            if key == "payload":
+                key = "payload_json"
+            if hasattr(row, key):
+                setattr(row, key, value)
+        row.updated_at = parse_ts_any(updates.get("updated_at") or utc_now())
+        await session.flush()
+        return _paper_order_to_dict(row)
+
+
+async def list_paper_orders(account_id: str = "default", status: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
+    account = str(account_id or "default").strip() or "default"
+    async with pm_session_scope() as session:
+        stmt = select(PMPaperOrder).where(PMPaperOrder.account_id == account)
+        if status:
+            stmt = stmt.where(PMPaperOrder.status == str(status).upper())
+        rows = (
+            await session.execute(stmt.order_by(PMPaperOrder.created_at.desc()).limit(max(1, min(int(limit or 200), 1000))))
+        ).scalars().all()
+    return [_paper_order_to_dict(row) for row in rows]
+
+
+async def get_paper_order(order_id: str) -> Optional[Dict[str, Any]]:
+    oid = str(order_id or "").strip()
+    if not oid:
+        return None
+    async with pm_session_scope() as session:
+        row = (
+            await session.execute(select(PMPaperOrder).where(PMPaperOrder.order_id == oid))
+        ).scalars().first()
+    return _paper_order_to_dict(row) if row else None
+
+
+async def cancel_paper_order(order_id: str) -> Optional[Dict[str, Any]]:
+    return await update_paper_order(str(order_id or ""), {"status": "CANCELED"})
+
+
+async def record_paper_fill(fill: Dict[str, Any]) -> Dict[str, Any]:
+    row = PMPaperFill(
+        fill_id=str(fill.get("fill_id") or ""),
+        order_id=str(fill.get("order_id") or ""),
+        account_id=str(fill.get("account_id") or "default"),
+        ts=parse_ts_any(fill.get("ts") or utc_now()),
+        market_id=str(fill.get("market_id") or ""),
+        token_id=str(fill.get("token_id") or ""),
+        outcome=str(fill.get("outcome") or "YES").upper(),
+        side=str(fill.get("side") or "BUY").upper(),
+        price=float(fill.get("price") or 0.0),
+        size=float(fill.get("size") or 0.0),
+        fee_paid=float(fill.get("fee_paid") or 0.0),
+        quote_id=fill.get("quote_id"),
+        payload_json=fill.get("payload") or fill.get("payload_json") or {},
+    )
+    async with pm_session_scope() as session:
+        session.add(row)
+        await session.flush()
+        return _paper_fill_to_dict(row)
+
+
+async def list_paper_fills(account_id: str = "default", limit: int = 200) -> List[Dict[str, Any]]:
+    account = str(account_id or "default").strip() or "default"
+    async with pm_session_scope() as session:
+        rows = (
+            await session.execute(
+                select(PMPaperFill)
+                .where(PMPaperFill.account_id == account)
+                .order_by(PMPaperFill.ts.desc(), PMPaperFill.id.desc())
+                .limit(max(1, min(int(limit or 200), 1000)))
+            )
+        ).scalars().all()
+    return [_paper_fill_to_dict(row) for row in rows]
+
+
+async def list_paper_positions(account_id: str = "default", include_flat: bool = False) -> List[Dict[str, Any]]:
+    account = str(account_id or "default").strip() or "default"
+    async with pm_session_scope() as session:
+        stmt = select(PMPaperPosition).where(PMPaperPosition.account_id == account)
+        if not include_flat:
+            stmt = stmt.where(PMPaperPosition.size != 0.0)
+        rows = (
+            await session.execute(stmt.order_by(PMPaperPosition.updated_at.desc()))
+        ).scalars().all()
+    return [_paper_position_to_dict(row) for row in rows]
+
+
+async def apply_paper_fill_to_account(fill: Dict[str, Any]) -> Dict[str, Any]:
+    account = str(fill.get("account_id") or "default")
+    token_id = str(fill.get("token_id") or "")
+    market_id = str(fill.get("market_id") or "")
+    outcome = str(fill.get("outcome") or "YES").upper()
+    side = str(fill.get("side") or "BUY").upper()
+    price = float(fill.get("price") or 0.0)
+    size = float(fill.get("size") or 0.0)
+    fee = float(fill.get("fee_paid") or 0.0)
+    now = parse_ts_any(fill.get("ts") or utc_now())
+    async with pm_session_scope() as session:
+        account_row = await session.get(PMPaperAccount, account)
+        if account_row is None:
+            account_row = PMPaperAccount(account_id=account, initial_cash=1000.0, cash=1000.0, updated_at=now)
+            session.add(account_row)
+            await session.flush()
+        pos = (
+            await session.execute(
+                select(PMPaperPosition).where(
+                    and_(PMPaperPosition.account_id == account, PMPaperPosition.token_id == token_id)
+                )
+            )
+        ).scalars().first()
+        if pos is None:
+            pos = PMPaperPosition(
+                account_id=account,
+                market_id=market_id,
+                token_id=token_id,
+                outcome=outcome,
+                size=0.0,
+                avg_price=0.0,
+                realized_pnl=0.0,
+                fees_paid=0.0,
+                updated_at=now,
+            )
+            session.add(pos)
+            await session.flush()
+        old_size = float(pos.size or 0.0)
+        old_avg = float(pos.avg_price or 0.0)
+        realized = 0.0
+        if side == "BUY":
+            cost = price * size + fee
+            new_size = old_size + size
+            pos.avg_price = ((old_size * old_avg) + (size * price)) / new_size if new_size > 0 else 0.0
+            pos.size = new_size
+            account_row.cash = float(account_row.cash or 0.0) - cost
+        else:
+            sell_size = min(size, max(0.0, old_size))
+            proceeds = price * size - fee
+            realized = (price - old_avg) * sell_size
+            pos.size = max(0.0, old_size - sell_size)
+            if pos.size <= 1e-12:
+                pos.size = 0.0
+                pos.avg_price = 0.0
+            account_row.cash = float(account_row.cash or 0.0) + proceeds
+        pos.realized_pnl = float(pos.realized_pnl or 0.0) + realized
+        pos.fees_paid = float(pos.fees_paid or 0.0) + fee
+        pos.updated_at = now
+        account_row.realized_pnl = float(account_row.realized_pnl or 0.0) + realized
+        account_row.fees_paid = float(account_row.fees_paid or 0.0) + fee
+        account_row.updated_at = now
+        await session.flush()
+        return {"account": _paper_account_to_dict(account_row), "position": _paper_position_to_dict(pos)}

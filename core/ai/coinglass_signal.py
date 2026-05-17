@@ -33,6 +33,9 @@ async def build_coinglass_signal(symbol: str) -> Tuple[str, float, Dict[str, Any
     funding_zscore = _as_float(context.get("funding_zscore"))
     liquidation_burst_score = _as_float(context.get("liquidation_burst_score"))
     long_short_ratio_change = _as_float(context.get("long_short_ratio_change_24h"))
+    heatmap_pressure_score = _as_float(context.get("heatmap_pressure_score"))
+    liquidity_void_score = _as_float(context.get("liquidity_void_score"))
+    orderbook_agg_imbalance = _as_float(context.get("orderbook_agg_imbalance"))
 
     history_ready = bool(context.get("history_ready"))
     crowded_long = bool(context.get("crowded_long"))
@@ -67,6 +70,8 @@ async def build_coinglass_signal(symbol: str) -> Tuple[str, float, Dict[str, Any
         confidence *= 0.85
     if confidence > 0 and flow_divergence:
         confidence *= 0.80
+    if confidence > 0 and liquidity_void_score >= 0.70:
+        confidence *= 0.90
     if confidence > 0 and not history_ready:
         confidence *= 0.90
 
@@ -87,6 +92,10 @@ async def build_coinglass_signal(symbol: str) -> Tuple[str, float, Dict[str, Any
         risk_flags.append("flow_divergence")
     if liquidation_burst_score >= 0.70:
         risk_flags.append("liquidation_burst")
+    if heatmap_pressure_score >= 0.70:
+        risk_flags.append("liquidity_heatmap_hot")
+    if liquidity_void_score >= 0.70:
+        risk_flags.append("liquidity_void")
     if not history_ready:
         risk_flags.append("history_incomplete")
 
@@ -97,12 +106,16 @@ async def build_coinglass_signal(symbol: str) -> Tuple[str, float, Dict[str, Any
         context_flags.append("squeeze_building")
     if order_flow_confirmed:
         context_flags.append("order_flow_confirmed")
+    if abs(orderbook_agg_imbalance) >= 0.20:
+        context_flags.append("orderbook_agg_bid_bias" if orderbook_agg_imbalance > 0 else "orderbook_agg_ask_bias")
 
     explain_parts = [
         f"crowding={crowding_score:.3f}",
         f"squeeze={squeeze_score:.3f}",
         f"distribution={distribution_score:.3f}",
     ]
+    if heatmap_pressure_score > 0:
+        explain_parts.append(f"heatmap={heatmap_pressure_score:.3f}")
     if history_ready:
         explain_parts.append(f"funding_z={funding_zscore:.2f}")
     if context.get("derivatives_labels"):

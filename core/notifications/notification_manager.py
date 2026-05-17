@@ -1,4 +1,4 @@
-﻿"""Notification channels and alert rule evaluation."""
+"""Notification channels and alert rule evaluation."""
 from __future__ import annotations
 
 import asyncio

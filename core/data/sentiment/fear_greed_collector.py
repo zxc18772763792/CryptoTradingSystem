@@ -1,4 +1,4 @@
-﻿"""Fear & Greed Index collector (Alternative.me)."""
+"""Fear & Greed Index collector (Alternative.me)."""
 
 import asyncio
 from dataclasses import dataclass, field
@@ -150,6 +150,15 @@ class FearGreedCollector:
         except Exception as e:
             logger.error(f"Fear & Greed history parse error: {e}")
             return []
+
+    def latest(self) -> Optional[FearGreedIndex]:
+        """Most recent cached Fear & Greed index, or None if never fetched.
+
+        Reads only from the in-memory cache (no network I/O). ``_history[0]``
+        is the current reading by this collector's own convention (see
+        ``get_statistics``).
+        """
+        return self._history[0] if self._history else None
 
     def get_statistics(self, days: int = 30) -> Dict:
         if not self._history:

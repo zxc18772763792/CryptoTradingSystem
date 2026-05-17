@@ -279,6 +279,8 @@ def test_build_research_enrichment_merges_macro_premium_and_cross_sectional_sour
         "core.research.strategy_research._build_cross_sectional_research_features",
         _fake_cross_sectional,
     )
+    monkeypatch.setattr("core.research.strategy_research.settings.COINGLASS_ENABLED", True, raising=False)
+    monkeypatch.setattr("core.research.strategy_research.settings.COINGLASS_INCLUDE_AI", False, raising=False)
 
     result = asyncio.run(
         _build_research_enrichment(
@@ -303,7 +305,7 @@ def test_build_research_enrichment_merges_macro_premium_and_cross_sectional_sour
     assert result["summary"]["cross_sectional_timeframe"] == "1h"
 
 
-def test_build_research_enrichment_includes_coinglass_strategy_features_when_enabled(monkeypatch):
+def test_build_research_enrichment_includes_coinglass_ai_features_when_enabled(monkeypatch):
     import asyncio
 
     from core.research.strategy_research import _build_research_enrichment
@@ -359,7 +361,7 @@ def test_build_research_enrichment_includes_coinglass_strategy_features_when_ena
     monkeypatch.setattr("core.research.strategy_research._build_cross_sectional_research_features", _fake_cross_sectional)
     monkeypatch.setattr("core.research.strategy_research._build_coinglass_research_features", _fake_coinglass)
     monkeypatch.setattr("core.research.strategy_research.settings.COINGLASS_ENABLED", True, raising=False)
-    monkeypatch.setattr("core.research.strategy_research.settings.COINGLASS_INCLUDE_STRATEGIES", True, raising=False)
+    monkeypatch.setattr("core.research.strategy_research.settings.COINGLASS_INCLUDE_AI", True, raising=False)
 
     result = asyncio.run(
         _build_research_enrichment(
@@ -1052,7 +1054,27 @@ def test_promotion_uses_candidate_params():
 # ══════════════════════════════════════════════════════════════
 
 
-def test_planner_market_context_boosts_trend():
+@pytest.fixture
+def _isolate_optional_market_context(monkeypatch):
+    """Neutralize on-disk optional data caches (macro/onchain/trends) so the
+    sentiment→category mapping is tested in isolation. _parse_market_context
+    imports these lazily, so patch them on their source modules."""
+    import core.data.macro_collector as _macro
+    import core.data.glassnode_collector as _gn
+    import core.data.cryptoquant_collector as _cq
+    import core.data.nansen_collector as _ns
+    import core.data.kaiko_collector as _kk
+    import core.data.google_trends_collector as _gt
+
+    monkeypatch.setattr(_macro, "load_macro_snapshot", lambda: {}, raising=False)
+    monkeypatch.setattr(_gn, "load_glassnode_snapshot", lambda: {}, raising=False)
+    monkeypatch.setattr(_cq, "load_cryptoquant_snapshot", lambda: {}, raising=False)
+    monkeypatch.setattr(_ns, "load_nansen_snapshot", lambda: {}, raising=False)
+    monkeypatch.setattr(_kk, "load_kaiko_snapshot", lambda: {}, raising=False)
+    monkeypatch.setattr(_gt, "load_latest", lambda *a, **k: None, raising=False)
+
+
+def test_planner_market_context_boosts_trend(_isolate_optional_market_context):
     """E: LONG sentiment boosts trend/momentum categories."""
     from core.ai.research_planner import _parse_market_context
 
@@ -1062,7 +1084,7 @@ def test_planner_market_context_boosts_trend():
     assert "均值回归" in suppressed
 
 
-def test_planner_market_context_boosts_reversion():
+def test_planner_market_context_boosts_reversion(_isolate_optional_market_context):
     """E: SHORT sentiment boosts reversion categories."""
     from core.ai.research_planner import _parse_market_context
 
@@ -1417,6 +1439,23 @@ def test_correlation_filter_no_curve_skips():
 
     assert not c1.metadata.get("correlation_filtered")
     assert not c2.metadata.get("correlation_filtered")
+
+
+def test_correlation_filter_rejects_exact_signature_duplicate():
+    """Identical strategy/symbol/timeframe/params must be rejected as a duplicate
+    even if the equity curve is missing (signature-based dedup path)."""
+    from core.research.orchestrator import _correlation_filter_candidates
+
+    c1 = _make_candidate_with_curve("MAStrategy", 80.0, [])
+    c2 = _make_candidate_with_curve("MAStrategy", 70.0, [])  # same signature
+    candidates = [c1, c2]
+
+    _correlation_filter_candidates(candidates, corr_threshold=0.85)
+
+    assert not c1.metadata.get("correlation_filtered"), "First of duplicate pair is kept"
+    assert c2.metadata.get("correlation_filtered"), "Exact-signature duplicate rejected"
+    assert c2.metadata.get("duplicate_signature") is True
+    assert c2.promotion is None or c2.promotion.decision == "reject"
 
 
 def test_cusum_detects_decay():

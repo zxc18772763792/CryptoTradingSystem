@@ -2702,12 +2702,16 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             "Macro snapshot is unavailable; regime view leans on microstructure/news only."
         )
     elif bool(macro_source_summary.get("stale")):
-        degraded = True
+        macro_cache_age = _coerce_finite_float(macro_source_summary.get("cache_age_sec"))
+        if (
+            macro_cache_age is not None
+            and macro_cache_age > float(_MACRO_MONTHLY_STALE_MAX_AGE_SEC)
+        ):
+            degraded = True
         warnings.append(
             "Macro snapshot cache is stale; cross-market or regional release context may lag."
         )
     elif str(macro_source_summary.get("source_status") or "") == "partial":
-        degraded = True
         warnings.append(
             "Macro snapshot is partially populated; some market/US/China legs are missing."
         )
@@ -3984,40 +3988,64 @@ async def get_regime_calendar(
         date_str = ts.strftime("%Y-%m-%d")
         daily[date_str].append(row)
 
+    # "ok" snapshots are trusted fully; "degraded" ones still carry signal but
+    # are noisier, so they contribute at reduced weight to the daily averages.
+    _DEGRADED_WEIGHT = 0.5
+
+    def _weighted_avg(pairs: list) -> "float | None":
+        # pairs: list of (value, weight); ignores None values.
+        num = 0.0
+        den = 0.0
+        for value, weight in pairs:
+            if value is None or weight <= 0:
+                continue
+            num += float(value) * weight
+            den += weight
+        return (num / den) if den > 0 else None
+
     calendar = []
     for date_str in sorted(daily.keys()):
         rows = daily[date_str]
-        # Average key metrics over the day
-        imbalances = [
-            r.order_flow_imbalance for r in rows if r.order_flow_imbalance is not None
-        ]
-        funding_rates = [r.funding_rate for r in rows if r.funding_rate is not None]
-        basis_pcts = [r.basis_pct for r in rows if r.basis_pct is not None]
-        spread_bps_list = [r.spread_bps for r in rows if r.spread_bps is not None]
 
-        avg_imbalance = sum(imbalances) / len(imbalances) if imbalances else 0.0
-        avg_funding = sum(funding_rates) / len(funding_rates) if funding_rates else None
-        avg_basis = sum(basis_pcts) / len(basis_pcts) if basis_pcts else None
-        avg_spread = (
-            sum(spread_bps_list) / len(spread_bps_list) if spread_bps_list else 0.0
-        )
+        def _row_weight(r) -> float:
+            return _DEGRADED_WEIGHT if str(getattr(r, "capture_status", "") or "") == "degraded" else 1.0
 
-        # Classify daily regime
-        if avg_spread >= 8:
+        ok_count = sum(1 for r in rows if str(getattr(r, "capture_status", "") or "") == "ok")
+        degraded_count = len(rows) - ok_count
+
+        # Quality-weighted daily aggregates.
+        avg_imbalance = _weighted_avg([(r.order_flow_imbalance, _row_weight(r)) for r in rows]) or 0.0
+        avg_funding = _weighted_avg([(r.funding_rate, _row_weight(r)) for r in rows])
+        avg_basis = _weighted_avg([(r.basis_pct, _row_weight(r)) for r in rows])
+        avg_spread = _weighted_avg([(r.spread_bps, _row_weight(r)) for r in rows]) or 0.0
+
+        # Classify daily regime. A strong directional imbalance defines the
+        # regime even on wide-spread days (the trend is still the dominant
+        # fact); the wide spread is surfaced via bias="defensive" instead of
+        # masking the trend as chop. Only ambiguous days fall back to
+        # high_risk_chop when spreads are wide.
+        strong_bull = avg_imbalance >= 0.12
+        strong_bear = avg_imbalance <= -0.12
+        wide_spread = avg_spread >= 8
+
+        if strong_bull:
+            regime = "trend_bullish"
+            bias = "defensive" if wide_spread else "bullish"
+        elif strong_bear:
+            regime = "trend_bearish"
+            bias = "defensive" if wide_spread else "bearish"
+        elif wide_spread:
             regime = "high_risk_chop"
             bias = "defensive"
-        elif avg_imbalance >= 0.12:
-            regime = "trend_bullish"
-            bias = "bullish"
-        elif avg_imbalance <= -0.12:
-            regime = "trend_bearish"
-            bias = "bearish"
         elif abs(avg_imbalance) <= 0.05:
             regime = "low_info_range"
             bias = "neutral"
         else:
             regime = "event_driven_mixed"
             bias = "neutral"
+
+        # A day reconstructed solely from degraded snapshots is lower-trust.
+        data_quality = "degraded" if ok_count == 0 and degraded_count > 0 else "ok"
 
         calendar.append(
             {
@@ -4031,6 +4059,9 @@ async def get_regime_calendar(
                 "avg_basis": round(avg_basis, 4) if avg_basis is not None else None,
                 "avg_spread_bps": round(avg_spread, 2),
                 "snapshot_count": len(rows),
+                "ok_count": ok_count,
+                "degraded_count": degraded_count,
+                "data_quality": data_quality,
             }
         )
 

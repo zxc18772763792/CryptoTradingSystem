@@ -1,4 +1,4 @@
-﻿"""Strategy API endpoints."""
+"""Strategy API endpoints."""
 import asyncio
 import inspect
 from copy import deepcopy

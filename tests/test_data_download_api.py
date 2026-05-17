@@ -253,6 +253,11 @@ def test_run_download_historical_data_falls_back_to_coinglass(monkeypatch):
         captured["timeframe"] = timeframe
         captured["rows"] = int(len(df.index))
 
+    monkeypatch.setattr(data_api.exchange_manager, "get_exchange", lambda exchange: object() if exchange in {"binance", "gate"} else None)
+    monkeypatch.setattr(data_api.historical_data_manager, "download_historical_klines", fake_download_historical_klines)
+    monkeypatch.setattr(data_api, "_save_df_to_parquet", fake_save_df_to_parquet)
+    monkeypatch.setattr(data_api, "coinglass_enabled", lambda: True)
+
     class _FakeCoinglassClient:
         async def __aenter__(self):
             return self
@@ -271,10 +276,6 @@ def test_run_download_historical_data_falls_back_to_coinglass(monkeypatch):
                 },
             }
 
-    monkeypatch.setattr(data_api.exchange_manager, "get_exchange", lambda exchange: object() if exchange in {"binance", "gate"} else None)
-    monkeypatch.setattr(data_api.historical_data_manager, "download_historical_klines", fake_download_historical_klines)
-    monkeypatch.setattr(data_api, "_save_df_to_parquet", fake_save_df_to_parquet)
-    monkeypatch.setattr(data_api, "coinglass_enabled", lambda: True)
     monkeypatch.setattr(data_api, "get_coinglass_manifest", lambda dataset: SimpleNamespace(dataset="price_history", routes=()))
     monkeypatch.setattr(data_api, "CoinglassClient", _FakeCoinglassClient)
     monkeypatch.setattr(

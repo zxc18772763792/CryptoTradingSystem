@@ -1,4 +1,4 @@
-﻿"""持仓管理模块。"""
+"""持仓管理模块。"""
 import asyncio
 import json
 import time

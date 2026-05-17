@@ -686,14 +686,14 @@ def _build_premium_snapshot_research_features() -> Dict[str, Any]:
 
 
 async def _build_coinglass_research_features(symbol: str) -> Dict[str, Any]:
-    if not bool(getattr(settings, "COINGLASS_ENABLED", False) and getattr(settings, "COINGLASS_INCLUDE_STRATEGIES", False)):
+    if not bool(getattr(settings, "COINGLASS_ENABLED", False) and getattr(settings, "COINGLASS_INCLUDE_AI", True)):
         return {
             "features": {},
             "summary": {
                 "available": False,
                 "available_sources": [],
                 "snapshot": {},
-                "reason": "coinglass_strategy_features_disabled",
+                "reason": "coinglass_ai_features_disabled",
             },
         }
 

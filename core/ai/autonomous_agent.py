@@ -44,6 +44,7 @@ from core.runtime import runtime_state
 from core.strategies import Signal, SignalType
 from core.strategies.strategy_manager import strategy_manager
 from core.trading import execution_engine, position_manager
+from core.utils.asyncio_compat import LoopBoundAsyncLock
 from core.utils.openai_responses import (
     anthropic_messages_endpoint,
     build_anthropic_messages_payload,
@@ -64,15 +65,17 @@ from core.utils.openai_responses import (
     responses_api_unavailable,
     should_failover_openai_status,
     should_prefer_openai_target_chat_completions,
-    target_max_tokens_for_request,
     target_transport,
     unsupported_responses_parameter,
 )
 
 
-_DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
-_DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
-_DEFAULT_GLM_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
+_DEFAULT_OPENAI_BASE_URL = "https://nowcoding.ai/v1"
+_DEFAULT_OPENAI_MODEL = "gpt-5.5"
+_DEFAULT_ANTHROPIC_BASE_URL = ""
+_DEFAULT_ANTHROPIC_MODEL = ""
+_DEFAULT_GLM_BASE_URL = ""
+_DEFAULT_GLM_MODEL = ""
 _OPENAI_FAILOVER_SCOPE = "ai_autonomous_agent"
 
 _SUPPORTED_PROVIDERS = {"glm", "codex", "claude"}
@@ -710,9 +713,9 @@ class AutonomousTradingAgent:
 
     def __init__(self, cache_root: Optional[Path] = None) -> None:
         self._override: Dict[str, Any] = {}
-        self._lock = asyncio.Lock()
-        self._run_once_lock = asyncio.Lock()
-        self._symbol_scan_lock = asyncio.Lock()
+        self._lock = LoopBoundAsyncLock()
+        self._run_once_lock = LoopBoundAsyncLock()
+        self._symbol_scan_lock = LoopBoundAsyncLock()
         self._task: Optional[asyncio.Task] = None
         self._stop_event: Optional[asyncio.Event] = None
 
@@ -765,10 +768,10 @@ class AutonomousTradingAgent:
     def _provider_model(self, provider: str) -> str:
         provider = _normalize_provider(provider)
         if provider == "codex":
-            return str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.4")
+            return str(getattr(settings, "OPENAI_MODEL", "") or _DEFAULT_OPENAI_MODEL)
         if provider == "claude":
-            return str(getattr(settings, "ANTHROPIC_MODEL", "") or "claude-3-5-sonnet-latest")
-        return str(getattr(settings, "ZHIPU_MODEL", "") or "GLM-4.5-Air")
+            return str(getattr(settings, "ANTHROPIC_MODEL", "") or _DEFAULT_ANTHROPIC_MODEL)
+        return str(getattr(settings, "ZHIPU_MODEL", "") or _DEFAULT_GLM_MODEL)
 
     def _provider_api_key(self, provider: str) -> str:
         provider = _normalize_provider(provider)
@@ -789,7 +792,7 @@ class AutonomousTradingAgent:
                 backup_base_urls=getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "",
                 primary_api_key=str(getattr(settings, "OPENAI_API_KEY", "") or "").strip(),
                 backup_api_key=str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip(),
-                primary_model=str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.4").strip() or "gpt-5.4",
+                primary_model=str(getattr(settings, "OPENAI_MODEL", "") or _DEFAULT_OPENAI_MODEL).strip() or _DEFAULT_OPENAI_MODEL,
                 backup_model=str(getattr(settings, "OPENAI_BACKUP_MODEL", "") or "").strip(),
             )
         return [
@@ -819,11 +822,14 @@ class AutonomousTradingAgent:
                         "model": str(target.get("model") or default_model or "").strip() or default_model,
                         "transport": str(target.get("transport") or "openai").strip().lower() or "openai",
                         "is_backup": bool(target.get("is_backup")),
-                        "available": bool(str(target.get("api_key") or "").strip()),
+                        "available": bool(base_url and str(target.get("api_key") or "").strip()),
                     }
                 )
             providers[item] = {
-                "available": any(bool(str(target.get("api_key") or "").strip()) for target in targets),
+                "available": any(
+                    bool(str(target.get("base_url") or "").strip() and str(target.get("api_key") or "").strip())
+                    for target in targets
+                ),
                 "default_model": default_model,
                 "base_url": (base_urls[0] if base_urls else self._provider_base_url(item)),
                 "targets": exposed_targets,
@@ -1846,7 +1852,7 @@ class AutonomousTradingAgent:
                             request_anthropic_payload = dict(
                                 anthropic_payload,
                                 model=target_model,
-                                max_tokens=target_max_tokens_for_request(target, max_tokens),
+                                max_tokens=int(max_tokens),
                             )
                             url = anthropic_messages_endpoint(target_base_url)
                             async with session.post(url, headers=headers, json=request_anthropic_payload) as resp:

@@ -354,6 +354,31 @@ def test_autonomous_agent_status_endpoint_does_not_require_ai_research_runtime(m
     assert "paper_longrun_safety" in result
 
 
+def test_autonomous_agent_status_endpoint_can_skip_preview_warm(monkeypatch):
+    from web.api import ai_agent as ai_module
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    warm_calls = []
+
+    monkeypatch.setattr(ai_module.ai_research_module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(
+        ai_module.ai_research_module.autonomous_trading_agent,
+        "get_runtime_config",
+        lambda: {"symbol_mode": "auto", "selection_top_n": 7},
+    )
+    monkeypatch.setattr(ai_module.ai_research_module.autonomous_trading_agent, "get_status", lambda: {"running": True})
+    monkeypatch.setattr(
+        ai_module.ai_research_module.autonomous_trading_agent,
+        "ensure_symbol_scan_preview_warm",
+        lambda **kwargs: warm_calls.append(kwargs) or True,
+    )
+
+    result = asyncio.run(ai_module.get_ai_autonomous_agent_status(request, warm_preview=False))
+
+    assert result["status"]["running"] is True
+    assert warm_calls == []
+
+
 def test_autonomous_agent_status_endpoint_returns_structured_safety(monkeypatch):
     from web.api import ai_agent as ai_module
 

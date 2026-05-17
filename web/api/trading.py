@@ -1,4 +1,4 @@
-﻿"""Trading API endpoints."""
+"""Trading API endpoints."""
 import asyncio
 import contextlib
 import copy
@@ -52,6 +52,7 @@ from core.trading import (
     position_manager,
 )
 from core.trading.order_manager import OrderRequest as CoreOrderRequest
+from core.utils.asyncio_compat import LoopBoundAsyncLock
 from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
 from web.services import build_runtime_diagnostics
 from web.services import cancel_mode_switch as cancel_trading_mode_switch_token
@@ -1468,6 +1469,39 @@ def _apply_coinglass_derivatives_overlay(
         "active_datasets": list(overview.get("active_datasets") or []),
         "snapshot_at": snapshot.get("timestamp"),
     }
+    for key in (
+        "liquidation_map_total_usd",
+        "liquidation_map_above_usd",
+        "liquidation_map_below_usd",
+        "liquidation_map_pressure_score",
+        "liquidation_map_largest_cluster_price",
+        "liquidation_map_largest_cluster_usd",
+        "orderbook_agg_bid_usd",
+        "orderbook_agg_ask_usd",
+        "orderbook_agg_imbalance",
+        "orderbook_wall_above_usd",
+        "orderbook_wall_below_usd",
+        "orderbook_wall_above_price",
+        "orderbook_wall_below_price",
+        "liquidity_heatmap_total_usd",
+        "liquidity_heatmap_above_usd",
+        "liquidity_heatmap_below_usd",
+        "liquidity_wall_nearest_above_price",
+        "liquidity_wall_nearest_below_price",
+        "liquidity_wall_nearest_above_usd",
+        "liquidity_wall_nearest_below_usd",
+        "liquidity_void_score",
+        "heatmap_pressure_score",
+        "top_account_long_short_ratio",
+        "top_position_long_short_ratio",
+        "net_position",
+        "coinbase_premium",
+        "option_max_pain",
+        "bitcoin_etf_net_flow",
+    ):
+        value = _optional_finite_float(snapshot_payload.get(key))
+        if value is not None:
+            context[key] = value
     out["derivatives_context"] = context
 
     if not context["available"]:
@@ -1525,6 +1559,26 @@ def _apply_coinglass_derivatives_overlay(
             "error": None,
             "basis_pct": basis_pct,
             "timestamp": snapshot_at,
+        }
+
+    oi_usd = _optional_finite_float(snapshot.get("oi_usd"))
+    if oi_usd is None:
+        oi_usd = _optional_finite_float(snapshot_payload.get("oi_usd"))
+    oi_change_1h = _optional_finite_float(snapshot.get("oi_change_1h"))
+    if oi_change_1h is None:
+        oi_change_1h = _optional_finite_float(snapshot_payload.get("oi_change_1h_history"))
+    if oi_usd is not None or oi_change_1h is not None:
+        existing_oi = dict(out.get("oi") or {})
+        out["oi"] = {
+            **existing_oi,
+            "available": True,
+            "source": "coinglass_cache",
+            "error": None,
+            "value": oi_usd if oi_usd is not None else existing_oi.get("value"),
+            "volume": existing_oi.get("volume"),
+            "change_pct_1h": oi_change_1h,
+            "timestamp": snapshot_at,
+            "sample_size": int(_safe_float(existing_oi.get("sample_size"), default=0.0)),
         }
 
     taker_imbalance = _optional_finite_float(snapshot.get("taker_buy_sell_imbalance"))
@@ -1704,7 +1758,7 @@ _ANALYTICS_HISTORY_DEFAULT_EXCHANGE = "binance"
 _ANALYTICS_HISTORY_DEFAULT_SYMBOL = "BTC/USDT"
 # SQLite writes are serialized to avoid lock contention between background workers
 # and manual refresh endpoints.
-_ANALYTICS_HISTORY_COLLECTION_LOCK = asyncio.Lock()
+_ANALYTICS_HISTORY_COLLECTION_LOCK = LoopBoundAsyncLock()
 _ANALYTICS_HISTORY_HEALTH_CACHE: Dict[str, Dict[str, Any]] = {}
 _ANALYTICS_HISTORY_STATUS_CACHE: Dict[str, Dict[str, Any]] = {}
 _ANALYTICS_HISTORY_STATUS_LAST: Dict[str, Dict[str, Any]] = {}
@@ -7621,29 +7675,31 @@ async def _build_market_microstructure_payload(
     symbol: str = "BTC/USDT",
     depth_limit: int = 80,
 ):
-    funding_basis_task = asyncio.create_task(
-        _fetch_funding_basis_snapshot(exchange=exchange, symbol=symbol)
-    )
-    long_short_task = asyncio.create_task(
-        _fetch_long_short_ratio_snapshot(exchange=exchange, symbol=symbol)
-    )
     options_task = asyncio.create_task(_fetch_options_snapshot(symbol=symbol))
     coinglass_task = asyncio.create_task(
         _load_preferred_coinglass_overview(symbol=symbol)
     )
 
-    ob, flow, oi = await asyncio.gather(
+    ob, flow = await asyncio.gather(
         _fetch_orderbook(exchange=exchange, symbol=symbol, limit=depth_limit),
         _fetch_trade_imbalance(exchange=exchange, symbol=symbol, limit=800),
-        _fetch_open_interest_snapshot(exchange=exchange, symbol=symbol),
     )
 
-    funding_basis = await funding_basis_task
-    long_short_ratio = await long_short_task
-    funding = dict((funding_basis or {}).get("funding") or {"available": False})
-    basis = dict((funding_basis or {}).get("basis") or {"available": False})
     options_data = await options_task
     coinglass_overview = await coinglass_task
+    if bool((coinglass_overview or {}).get("available")):
+        oi = {"available": False}
+        long_short_ratio = {"available": False}
+        funding = {"available": False}
+        basis = {"available": False}
+    else:
+        funding_basis, long_short_ratio, oi = await asyncio.gather(
+            _fetch_funding_basis_snapshot(exchange=exchange, symbol=symbol),
+            _fetch_long_short_ratio_snapshot(exchange=exchange, symbol=symbol),
+            _fetch_open_interest_snapshot(exchange=exchange, symbol=symbol),
+        )
+        funding = dict((funding_basis or {}).get("funding") or {"available": False})
+        basis = dict((funding_basis or {}).get("basis") or {"available": False})
     orderbook_view = _build_microstructure_orderbook_view(ob)
 
     options_payload = dict(options_data or {})

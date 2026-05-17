@@ -409,7 +409,29 @@ def _parse_market_context(
     except Exception as exc:
         _record_optional_context_issue(planner_notes, "Kaiko snapshot", exc)
 
-    return _dedupe_keep_order(boosted), _dedupe_keep_order(suppressed)
+    # Each .extend() above is one "vote" for a category. A category can receive
+    # both boost and suppress votes from different signals (e.g. bullish
+    # sentiment boosts 趋势 while crowded-long funding suppresses it). Resolve
+    # the conflict explicitly by net vote count instead of leaving it to the
+    # caller's implicit ±priority cancellation: the dominant direction wins,
+    # and an exact tie cancels out (category appears in neither list).
+    from collections import Counter
+
+    boost_votes = Counter(boosted)
+    suppress_votes = Counter(suppressed)
+    ordered_categories = list(dict.fromkeys([*boosted, *suppressed]))
+
+    net_boosted: List[str] = []
+    net_suppressed: List[str] = []
+    for category in ordered_categories:
+        net = boost_votes.get(category, 0) - suppress_votes.get(category, 0)
+        if net > 0:
+            net_boosted.append(category)
+        elif net < 0:
+            net_suppressed.append(category)
+        # net == 0 → conflicting signals cancel; omit from both lists
+
+    return net_boosted, net_suppressed
 
 
 def _apply_llm_guidance(

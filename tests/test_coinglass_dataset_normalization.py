@@ -5,10 +5,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from core.data import coinglass_client as client_module
 from core.data import coinglass_feature_builder as builder_module
 from core.data.coinglass_registry import get_coinglass_manifest
+from core.data.coinglass_registry import COINGLASS_DEFAULT_DATASETS
 
 
 def test_manifest_params_add_range_and_pair_symbol_mapping():
@@ -49,6 +51,43 @@ def test_manifest_params_add_range_and_pair_symbol_mapping():
     )
     assert ratio_params["exchange"] == "OKX"
     assert ratio_params["symbol"] == "BTC-USDT-SWAP"
+
+
+def test_optional_coinglass_datasets_are_supported_but_not_default():
+    assert "liquidation_aggregated_map" not in COINGLASS_DEFAULT_DATASETS
+    assert "futures_orderbook_aggregated_ask_bids_history" not in COINGLASS_DEFAULT_DATASETS
+    assert get_coinglass_manifest("liquidation_aggregated_map") is not None
+    assert get_coinglass_manifest("futures_orderbook_aggregated_ask_bids_history") is not None
+    assert get_coinglass_manifest("top_long_short_position_ratio_history") is not None
+    assert get_coinglass_manifest("bitcoin_etf_flow_history") is not None
+
+
+def test_optional_manifest_params_cover_liquidation_map_and_top_ratios():
+    map_manifest = get_coinglass_manifest("liquidation_aggregated_map")
+    map_params = client_module._manifest_params(
+        map_manifest,
+        map_manifest.routes[0],
+        symbol="BTC/USDT",
+        exchange=None,
+        interval="h1",
+        limit=None,
+    )
+    assert map_params["symbol"] == "BTC"
+    assert map_params["range"] == "7d"
+
+    top_manifest = get_coinglass_manifest("top_long_short_position_ratio_history")
+    top_params = client_module._manifest_params(
+        top_manifest,
+        top_manifest.routes[0],
+        symbol="BTC/USDT",
+        exchange="OKX",
+        interval="h4",
+        limit=10,
+    )
+    assert top_params["exchange"] == "OKX"
+    assert top_params["symbol"] == "BTC-USDT-SWAP"
+    assert top_params["interval"] == "h4"
+    assert top_params["limit"] == 10
 
 
 def test_history_manifest_params_use_defaults_and_pair_symbol_mapping():
@@ -154,6 +193,85 @@ def test_normalize_funding_arbitrage_requires_exact_symbol_match():
 
     assert result["status"] == "empty"
     assert result["rows"] == []
+
+
+def test_normalize_liquidation_aggregated_map_extracts_pressure_levels():
+    result = client_module.normalize_dataset_response(
+        dataset="liquidation_aggregated_map",
+        request_meta={"symbol": "BTC"},
+        response_payload={
+            "code": 0,
+            "data": {
+                "last_price": 100.0,
+                "data": [
+                    {
+                        "instrument": {"exName": "Binance", "baseAsset": "BTC"},
+                        "liqMapV2": {
+                            "95": [[95, 10_000_000.0, None, None]],
+                            "105": [[105, 20_000_000.0, None, None]],
+                        },
+                    }
+                ],
+            },
+        },
+    )
+
+    assert result["status"] == "ok"
+    row = result["rows"][0]
+    assert row["exchange"] == "Binance"
+    assert row["symbol"] == "BTC"
+    assert row["liquidation_map_total_usd"] == 30_000_000.0
+    assert row["liquidation_map_above_usd"] == 20_000_000.0
+    assert row["liquidation_map_below_usd"] == 10_000_000.0
+    assert row["liquidation_map_largest_cluster_price"] == 105.0
+    assert row["liquidity_heatmap_total_usd"] == 30_000_000.0
+    assert row["liquidity_wall_nearest_above_price"] == 105.0
+    assert row["liquidity_wall_nearest_below_price"] == 95.0
+
+
+def test_normalize_futures_orderbook_aggregated_history_extracts_depth_and_walls():
+    result = client_module.normalize_dataset_response(
+        dataset="futures_orderbook_aggregated_ask_bids_history",
+        request_meta={"symbol": "BTC"},
+        response_payload={
+            "code": 0,
+            "data": [
+                {
+                    "symbol": "BTC",
+                    "time": 1710000000000,
+                    "bids": [[100.0, 3.0], [99.0, 2.0]],
+                    "asks": [[101.0, 1.0], [102.0, 4.0]],
+                }
+            ],
+        },
+    )
+
+    assert result["status"] == "ok"
+    row = result["rows"][0]
+    assert row["orderbook_agg_bid_usd"] == 498.0
+    assert row["orderbook_agg_ask_usd"] == 509.0
+    assert row["orderbook_agg_imbalance"] == pytest.approx((498.0 - 509.0) / (498.0 + 509.0))
+    assert row["orderbook_wall_below_price"] == 100.0
+    assert row["orderbook_wall_below_usd"] == 300.0
+    assert row["orderbook_wall_above_price"] == 102.0
+    assert row["orderbook_wall_above_usd"] == 408.0
+
+    map_result = client_module.normalize_dataset_response(
+        dataset="futures_orderbook_aggregated_ask_bids_history",
+        request_meta={"symbol": "BTC"},
+        response_payload={
+            "code": 0,
+            "data": [
+                {
+                    "symbol": "BTC",
+                    "bids": {"100": "3", "99": "2"},
+                    "asks": {"101": "1", "102": "4"},
+                }
+            ],
+        },
+    )
+    assert map_result["rows"][0]["orderbook_agg_bid_usd"] == 498.0
+    assert map_result["rows"][0]["orderbook_wall_above_usd"] == 408.0
 
 
 def test_normalize_history_dataset_rows_flattens_ohlc_fields():
@@ -412,6 +530,94 @@ def test_build_derivatives_snapshot_flags_flow_divergence(monkeypatch):
     assert snapshot.payload["flow_divergence"] is True
     assert snapshot.payload["flow_divergence_score"] >= 0.55
     assert snapshot.payload["order_flow_confirmed"] is False
+
+
+def test_build_derivatives_snapshot_adds_optional_coinglass_context(monkeypatch):
+    start = datetime(2026, 4, 17, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        builder_module,
+        "_dataset_payloads",
+        lambda symbol: {
+            "open_interest_exchange_list": [{"exchange": "All", "symbol": "BTC", "open_interest_usd": 220.0}],
+            "open_interest_aggregated_history": [
+                {"_source_ts": (start + timedelta(hours=i)).isoformat(), "_interval": "h1", "open_interest_close": 100.0 + i}
+                for i in range(3)
+            ],
+            "funding_rate_exchange_list": [{"exchange": "Binance", "symbol": "BTC", "funding_rate": 0.0004}],
+            "funding_rate_history": [],
+            "taker_buy_sell_volume_exchange_list": [],
+            "liquidation_history": [],
+            "liquidation_aggregated_map": [
+                {
+                    "exchange": "Binance",
+                    "last_price": 100.0,
+                    "liquidation_map_total_usd": 300_000_000.0,
+                    "liquidation_map_above_usd": 200_000_000.0,
+                    "liquidation_map_below_usd": 100_000_000.0,
+                    "liquidation_map_largest_cluster_price": 105.0,
+                    "liquidation_map_largest_cluster_usd": 80_000_000.0,
+                }
+            ],
+            "liquidation_aggregated_heatmap_model1": [
+                {
+                    "exchange": "Binance",
+                    "last_price": 100.0,
+                    "liquidity_heatmap_total_usd": 120_000_000.0,
+                    "liquidity_heatmap_above_usd": 70_000_000.0,
+                    "liquidity_heatmap_below_usd": 50_000_000.0,
+                    "liquidity_wall_nearest_above_price": 103.0,
+                    "liquidity_wall_nearest_below_price": 97.0,
+                    "liquidity_wall_nearest_above_usd": 30_000_000.0,
+                    "liquidity_wall_nearest_below_usd": 20_000_000.0,
+                    "liquidity_void_score": 0.25,
+                    "heatmap_pressure_score": 0.48,
+                }
+            ],
+            "futures_orderbook_aggregated_ask_bids_history": [
+                {
+                    "exchange": "aggregate",
+                    "symbol": "BTC",
+                    "orderbook_agg_bid_usd": 180_000_000.0,
+                    "orderbook_agg_ask_usd": 120_000_000.0,
+                    "orderbook_agg_imbalance": 0.2,
+                    "orderbook_wall_above_price": 104.0,
+                    "orderbook_wall_above_usd": 45_000_000.0,
+                    "orderbook_wall_below_price": 96.0,
+                    "orderbook_wall_below_usd": 55_000_000.0,
+                }
+            ],
+            "global_long_short_account_ratio_history": [{"long_short_ratio": 1.1}],
+            "top_long_short_account_ratio_history": [{"long_short_ratio": 1.3}],
+            "top_long_short_position_ratio_history": [{"long_short_ratio": 1.5}],
+            "net_position_history": [{"net_position": 42.0}],
+            "coinbase_premium_index": [{"close": 0.0012}],
+            "option_max_pain": [{"maxPain": 95000.0}],
+            "bitcoin_etf_flow_history": [{"netFlow": 123456.0}],
+            "funding_arbitrage": [],
+        },
+    )
+
+    snapshot = builder_module.build_derivatives_snapshot("BTC/USDT")
+    context = builder_module.build_coinglass_runtime_context(snapshot.to_dict())
+
+    assert snapshot is not None
+    assert snapshot.payload["oi_history_source_dataset"] == "open_interest_aggregated_history"
+    assert snapshot.payload["liquidation_map_total_usd"] == 300_000_000.0
+    assert snapshot.payload["liquidation_map_pressure_score"] == 0.4
+    assert snapshot.payload["orderbook_agg_bid_usd"] == 180_000_000.0
+    assert snapshot.payload["orderbook_agg_ask_usd"] == 120_000_000.0
+    assert snapshot.payload["orderbook_agg_imbalance"] == 0.2
+    assert snapshot.payload["liquidity_heatmap_total_usd"] == 420_000_000.0
+    assert snapshot.payload["liquidity_wall_nearest_above_price"] == 103.0
+    assert snapshot.payload["liquidity_void_score"] == 0.25
+    assert snapshot.payload["heatmap_pressure_score"] == 0.48
+    assert snapshot.payload["top_account_long_short_ratio"] == 1.3
+    assert snapshot.payload["top_position_long_short_ratio"] == 1.5
+    assert snapshot.payload["net_position"] == 42.0
+    assert context["coinbase_premium"] == 0.0012
+    assert context["option_max_pain"] == 95000.0
+    assert context["orderbook_agg_imbalance"] == 0.2
+    assert context["liquidity_heatmap_total_usd"] == 420_000_000.0
 
 
 def test_latest_payload_rows_prefers_latest_ingested_request_and_filters_mismatched_symbol(monkeypatch):

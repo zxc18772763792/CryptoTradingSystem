@@ -10461,7 +10461,8 @@ input[type="radio"] {
     display: grid;
     grid-template-columns: minmax(300px, 340px) minmax(0, 1fr);
     gap: 14px;
-    align-items: stretch;
+    --ai-agent-review-history-fallback-height: clamp(760px, calc(100vh - 120px), 1040px);
+    align-items: start;
     min-height: 0;
 }
 
@@ -10476,7 +10477,7 @@ input[type="radio"] {
     background:
         radial-gradient(circle at top left, rgba(45, 212, 191, 0.09), transparent 34%),
         linear-gradient(180deg, rgba(9, 18, 30, 0.94), rgba(7, 14, 24, 0.96));
-    align-self: stretch;
+    align-self: start;
     position: sticky;
     top: 12px;
     box-shadow: 0 16px 36px rgba(3, 9, 18, 0.14);
@@ -10502,9 +10503,9 @@ input[type="radio"] {
     align-self: stretch;
     display: flex;
     flex-direction: column;
-    min-height: var(--ai-agent-review-history-height, 0px);
-    height: var(--ai-agent-review-history-height, auto);
-    max-height: var(--ai-agent-review-history-height, none);
+    min-height: var(--ai-agent-review-history-height, var(--ai-agent-review-history-fallback-height));
+    height: var(--ai-agent-review-history-height, var(--ai-agent-review-history-fallback-height));
+    max-height: var(--ai-agent-review-history-height, var(--ai-agent-review-history-fallback-height));
     overflow: hidden;
     border-radius: 20px;
     border: 1px solid rgba(96, 165, 250, 0.16);

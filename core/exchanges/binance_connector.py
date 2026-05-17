@@ -1,4 +1,4 @@
-﻿"""Binance connector."""
+"""Binance connector."""
 import asyncio
 import contextlib
 import re

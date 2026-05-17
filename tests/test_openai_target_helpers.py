@@ -2,8 +2,24 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
+
+from config.settings import settings
 import core.utils.openai_responses as openai_responses
-from core.utils.openai_responses import build_target_headers, openai_endpoint_targets, target_max_tokens_for_request
+from core.utils.openai_responses import build_target_headers, openai_endpoint_targets
+
+
+@pytest.fixture(autouse=True)
+def _clear_news_llm_overrides(monkeypatch):
+    for name in (
+        "NEWS_LLM_API_KEY",
+        "NEWS_LLM_BASE_URL",
+        "NEWS_LLM_MODEL",
+        "NEWS_LLM_PROVIDER",
+        "NEWS_LLM_FORCE_CHAT_COMPLETIONS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(settings, name, False if name == "NEWS_LLM_FORCE_CHAT_COMPLETIONS" else "", raising=False)
 
 
 def test_openai_endpoint_targets_support_multiple_backup_api_keys():
@@ -32,25 +48,25 @@ def test_openai_endpoint_targets_support_per_source_models():
         backup_base_urls="https://secondary.test/v1,https://tertiary.test/v1",
         primary_api_key="primary-key",
         backup_api_key="secondary-key,tertiary-key",
-        primary_model="gpt-5.4",
-        backup_model="gpt-5.4,mimo-v2-flash",
+        primary_model="gpt-5.5",
+        backup_model="gpt-5.5,gpt-5.5-mini",
     )
 
     assert [target["model"] for target in targets] == [
-        "gpt-5.4",
-        "gpt-5.4",
-        "mimo-v2-flash",
+        "gpt-5.5",
+        "gpt-5.5",
+        "gpt-5.5-mini",
     ]
 
 
 def test_openai_endpoint_targets_detect_anthropic_style_backup():
     targets = openai_endpoint_targets(
         primary_base_url="https://primary.test/v1",
-        backup_base_urls="https://secondary.test/v1,https://api.xiaomimimo.com/anthropic/v1",
+        backup_base_urls="https://secondary.test/v1,https://anthropic-proxy.test/anthropic/v1",
         primary_api_key="primary-key",
-        backup_api_key="secondary-key,mimo-key",
-        primary_model="gpt-5.4",
-        backup_model="gpt-5.4,mimo-v2-flash",
+        backup_api_key="secondary-key,anthropic-key",
+        primary_model="gpt-5.5",
+        backup_model="gpt-5.5,claude-compatible-model",
     )
 
     assert [target["transport"] for target in targets] == [
@@ -58,22 +74,8 @@ def test_openai_endpoint_targets_detect_anthropic_style_backup():
         "openai",
         "anthropic",
     ]
-    assert build_target_headers(targets[2])["api-key"] == "mimo-key"
-
-
-def test_target_max_tokens_for_request_raises_floor_for_xiaomi_anthropic_backup():
-    targets = openai_endpoint_targets(
-        primary_base_url="https://primary.test/v1",
-        backup_base_urls="https://api.xiaomimimo.com/anthropic/v1",
-        primary_api_key="primary-key",
-        backup_api_key="mimo-key",
-        primary_model="gpt-5.4",
-        backup_model="mimo-v2-pro",
-    )
-
-    assert target_max_tokens_for_request(targets[0], 220) == 220
-    assert target_max_tokens_for_request(targets[1], 220) == 384
-    assert target_max_tokens_for_request(targets[1], 420) == 420
+    assert build_target_headers(targets[2])["x-api-key"] == "anthropic-key"
+    assert "api-key" not in build_target_headers(targets[2])
 
 
 class _SyncResponse:
@@ -96,8 +98,8 @@ def test_news_failover_uses_per_source_models(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_BACKUP_BASE_URL", "https://secondary.test/v1,https://tertiary.test/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "primary-key")
     monkeypatch.setenv("OPENAI_BACKUP_API_KEY", "secondary-key,tertiary-key")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
-    monkeypatch.setenv("OPENAI_BACKUP_MODEL", "gpt-5.4,mimo-v2-flash")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.5")
+    monkeypatch.setenv("OPENAI_BACKUP_MODEL", "gpt-5.5,gpt-5.5-mini")
     monkeypatch.setenv("ZHIPU_API_KEY", "")
     openai_responses.reset_openai_target_preferences(scope="news")
 
@@ -141,9 +143,9 @@ def test_news_failover_uses_per_source_models(monkeypatch, tmp_path):
         "https://tertiary.test/v1/responses",
     ]
     assert [call["json"]["model"] for call in calls] == [
-        "gpt-5.4",
-        "gpt-5.4",
-        "mimo-v2-flash",
+        "gpt-5.5",
+        "gpt-5.5",
+        "gpt-5.5-mini",
     ]
 
 
@@ -153,11 +155,11 @@ def test_news_failover_supports_anthropic_style_backup(monkeypatch, tmp_path):
     module._SUMMARY_CACHE.clear()
     monkeypatch.setenv("OPENAI_FAILOVER_STATE_PATH", str(tmp_path / "openai_failover_state.json"))
     monkeypatch.setenv("OPENAI_BASE_URL", "https://primary.test/v1")
-    monkeypatch.setenv("OPENAI_BACKUP_BASE_URL", "https://api.xiaomimimo.com/anthropic/v1")
+    monkeypatch.setenv("OPENAI_BACKUP_BASE_URL", "https://anthropic-proxy.test/anthropic/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "primary-key")
-    monkeypatch.setenv("OPENAI_BACKUP_API_KEY", "mimo-key")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
-    monkeypatch.setenv("OPENAI_BACKUP_MODEL", "mimo-v2-flash")
+    monkeypatch.setenv("OPENAI_BACKUP_API_KEY", "anthropic-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.5")
+    monkeypatch.setenv("OPENAI_BACKUP_MODEL", "claude-compatible-model")
     monkeypatch.setenv("ZHIPU_API_KEY", "")
     openai_responses.reset_openai_target_preferences(scope="news")
 
@@ -170,7 +172,7 @@ def test_news_failover_supports_anthropic_style_backup(monkeypatch, tmp_path):
                     "content": [
                         {
                             "type": "text",
-                            "text": '{"summary":"MiMo anthropic backup","sentiment":"positive"}',
+                                    "text": '{"summary":"Anthropic backup","sentiment":"positive"}',
                         }
                     ]
                 }
@@ -186,15 +188,16 @@ def test_news_failover_supports_anthropic_style_backup(monkeypatch, tmp_path):
 
     result = module.summarize_title_glm5("BTC ETF approved", {"llm": {"provider": "openai"}}, max_length=60)
 
-    assert result["summary"] == "MiMo anthropic backup"
+    assert result["summary"] == "Anthropic backup"
     assert result["sentiment"] == "positive"
     assert result["source"] == "openai_responses"
     assert [call["url"] for call in calls] == [
         "https://primary.test/v1/responses",
-        "https://api.xiaomimimo.com/anthropic/v1/messages",
+        "https://anthropic-proxy.test/anthropic/v1/messages",
     ]
-    assert calls[1]["json"]["model"] == "mimo-v2-flash"
-    assert calls[1]["headers"]["api-key"] == "mimo-key"
+    assert calls[1]["json"]["model"] == "claude-compatible-model"
+    assert calls[1]["headers"]["x-api-key"] == "anthropic-key"
+    assert "api-key" not in calls[1]["headers"]
 
 
 def test_scoped_openai_failover_sticks_to_backup_until_next_day(monkeypatch, tmp_path):

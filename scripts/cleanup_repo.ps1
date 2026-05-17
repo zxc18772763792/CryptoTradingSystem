@@ -1,5 +1,7 @@
 param(
     [int]$LogRetentionDays = 7,
+    [int]$MaxLogFileMB = 50,
+    [int]$MaxRotatedLogFiles = 3,
     [switch]$DryRun,
     [switch]$IncludeOutput,
     [switch]$IncludeNodeModules
@@ -53,13 +55,8 @@ function Remove-PathSafely {
         Remove-Item -LiteralPath $resolvedTarget -Recurse -Force -ErrorAction Stop
     }
     catch {
-        # Some Windows temp dirs end up with broken ACLs; fall back to cmd's rd/del.
-        if (Test-Path -LiteralPath $resolvedTarget -PathType Container) {
-            cmd /c "rd /s /q \\?\$resolvedTarget" | Out-Null
-        }
-        elseif (Test-Path -LiteralPath $resolvedTarget -PathType Leaf) {
-            cmd /c "del /f /q \\?\$resolvedTarget" | Out-Null
-        }
+        Write-Warning "unable to remove: $resolvedTarget ($($_.Exception.Message))"
+        return $false
     }
 
     if (-not (Test-Path -LiteralPath $resolvedTarget)) {
@@ -94,6 +91,72 @@ function Remove-OldFiles {
         Get-ChildItem -Path $resolvedPath -File -Filter $pattern -ErrorAction SilentlyContinue |
             Where-Object { $_.LastWriteTime -lt $Threshold } |
             ForEach-Object { Remove-PathSafely -Target $_.FullName | Out-Null }
+    }
+}
+
+function Rotate-LargeFiles {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string[]]$Patterns,
+        [Parameter(Mandatory = $true)]
+        [int]$MaxSizeMB,
+        [Parameter(Mandatory = $true)]
+        [int]$KeepCount
+    )
+
+    if ($MaxSizeMB -le 0) {
+        return
+    }
+
+    $resolvedPath = Resolve-ProjectPath -Target $Path
+    if (-not (Test-Path -LiteralPath $resolvedPath)) {
+        return
+    }
+
+    $maxBytes = [int64]$MaxSizeMB * 1MB
+
+    foreach ($pattern in $Patterns) {
+        $largeFiles = Get-ChildItem -Path $resolvedPath -File -Filter $pattern -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt $maxBytes -and $_.BaseName -notmatch "\.\d{8}T\d{6}$" }
+
+        foreach ($file in $largeFiles) {
+            $stamp = Get-Date -Format "yyyyMMddTHHmmss"
+            $newName = "{0}.{1}{2}" -f $file.BaseName, $stamp, $file.Extension
+            $newPath = Join-Path $file.DirectoryName $newName
+
+            if (Test-Path -LiteralPath $newPath) {
+                $newName = "{0}.{1}.{2}{3}" -f $file.BaseName, $stamp, (Get-Random), $file.Extension
+                $newPath = Join-Path $file.DirectoryName $newName
+            }
+
+            if ($DryRun) {
+                Write-Host ("[DRY-RUN] rotate: {0} -> {1} ({2:N2} MB)" -f $file.FullName, $newPath, ($file.Length / 1MB))
+            }
+            else {
+                try {
+                    Rename-Item -LiteralPath $file.FullName -NewName $newName -ErrorAction Stop
+                    Write-Host ("rotated: {0} -> {1} ({2:N2} MB)" -f $file.FullName, $newPath, ($file.Length / 1MB))
+                }
+                catch {
+                    Write-Warning "unable to rotate: $($file.FullName) ($($_.Exception.Message))"
+                    continue
+                }
+            }
+
+            if ($KeepCount -ge 0) {
+                $rotatedNamePattern = "^{0}\.\d{{8}}T\d{{6}}(\.\d+)?{1}$" -f [regex]::Escape($file.BaseName), [regex]::Escape($file.Extension)
+                $oldRotations = Get-ChildItem -Path $file.DirectoryName -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match $rotatedNamePattern } |
+                    Sort-Object LastWriteTime -Descending |
+                    Select-Object -Skip $KeepCount
+
+                foreach ($oldRotation in $oldRotations) {
+                    Remove-PathSafely -Target $oldRotation.FullName | Out-Null
+                }
+            }
+        }
     }
 }
 
@@ -180,19 +243,23 @@ Remove-MatchingFiles -Path "." -Patterns @(
 
 # Remove accidental Windows reserved-name file if present in listing
 try {
+    $reservedNamePath = "\\?\$projectRoot\nul"
     if ($DryRun) {
-        Write-Host "[DRY-RUN] remove reserved file: \\?\$projectRoot\nul (if present)"
+        Write-Host "[DRY-RUN] remove reserved file: $reservedNamePath (if present)"
+    }
+    elseif (Test-Path -LiteralPath $reservedNamePath) {
+        Remove-Item -LiteralPath $reservedNamePath -Force -ErrorAction Stop
+        Write-Host "removed: nul"
     }
     else {
-        cmd /c "del /f /q \\?\$projectRoot\nul >nul 2>&1" | Out-Null
-        Write-Host "removed: nul (if existed)"
+        Write-Host "reserved file not present: nul"
     }
 }
 catch {
     Write-Host "skip removing nul: $($_.Exception.Message)"
 }
 
-# Rotate old logs and clear empty log shells
+# Rotate large logs, prune old logs, and clear empty log shells
 $threshold = (Get-Date).AddDays(-[math]::Abs($LogRetentionDays))
 
 @(
@@ -200,6 +267,7 @@ $threshold = (Get-Date).AddDays(-[math]::Abs($LogRetentionDays))
     @{ Path = "logs"; Patterns = @("*.log", "*.out", "*.err", "*.jsonl", "*.txt") },
     @{ Path = "runtime"; Patterns = @("*.log", "*.out", "*.err") }
 ) | ForEach-Object {
+    Rotate-LargeFiles -Path $_.Path -Patterns $_.Patterns -MaxSizeMB $MaxLogFileMB -KeepCount $MaxRotatedLogFiles
     Remove-OldFiles -Path $_.Path -Patterns $_.Patterns -Threshold $threshold
     Remove-ZeroLengthLogs -Path $_.Path
 }
@@ -211,6 +279,7 @@ if ($IncludeOutput) {
     ) | ForEach-Object { Remove-PathSafely -Target $_ | Out-Null }
 
     Remove-OldFiles -Path "output" -Patterns @("*.log", "*.out", "*.err", "*.png", "*.yml") -Threshold $threshold
+    Rotate-LargeFiles -Path "output" -Patterns @("*.log", "*.out", "*.err") -MaxSizeMB $MaxLogFileMB -KeepCount $MaxRotatedLogFiles
     Remove-ZeroLengthLogs -Path "output"
     Remove-OldDirectories -Path "output" -Names @(
         ".playwright-cli",

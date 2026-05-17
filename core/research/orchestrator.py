@@ -870,86 +870,22 @@ def _correlation_filter_candidates(
     corr_threshold: float = 0.85,
     existing_candidates: Optional[List[StrategyCandidate]] = None,
 ) -> None:
-    """In-place: mark candidates whose equity curves are highly correlated with a better one.
+    """In-place: mark candidates that are effectively redundant.
 
-    Uses Pearson correlation of the 50-point equity_curve_sample stored in candidate.metadata["best"].
-    Candidates are assumed to be sorted by score desc (best first). The first one in each
-    correlation group is kept; subsequent highly-correlated ones are downgraded to reject and
-    flagged with metadata["correlation_filtered"] = True.
+    Redundancy is detected two ways:
+      * exact signature match (same strategy/symbol/timeframe/params) against
+        anything already accepted or running → always rejected;
+      * high Pearson correlation of the 50-point ``equity_curve_sample`` against
+        an accepted/running peer (a tighter threshold applies when the peer
+        shares the same strategy family/signature).
 
-    existing_candidates: already-registered strategies (paper/shadow/live) whose
-    equity curves count as pre-accepted baselines for correlation checking.
+    Candidates are assumed to be sorted by score desc (best first). The first
+    candidate in each redundancy group is kept; later ones are flagged with
+    ``metadata["correlation_filtered"] = True`` and downgraded to reject.
+
+    existing_candidates: already-registered strategies (paper/shadow/live)
+    whose equity curves count as pre-accepted baselines.
     """
-    import numpy as np
-
-    def _get_curve(c: StrategyCandidate) -> Optional[List[float]]:
-        best_meta = dict(c.metadata.get("best") or {})
-        raw = best_meta.get("equity_curve_sample") or []
-        return list(raw) if len(raw) >= 10 else None
-
-    curves: Dict[str, Optional[List[float]]] = {c.strategy: _get_curve(c) for c in candidates}
-
-    # Pre-seed accepted list with existing running strategies
-    accepted: List[str] = []
-    accepted_curves: Dict[str, Optional[List[float]]] = {}
-    existing_strategy_set = set()
-    for exc in (existing_candidates or []):
-        strat = exc.strategy
-        curve = _get_curve(exc)
-        if strat not in accepted:
-            accepted.append(strat)
-            accepted_curves[strat] = curve
-            existing_strategy_set.add(strat)
-
-    for cand in candidates:
-        strat = cand.strategy
-        my_curve = curves.get(strat)
-
-        # Check against all accepted (existing + previously accepted new)
-        max_corr = 0.0
-        corr_peer: Optional[str] = None
-        all_accepted_curves = {**accepted_curves, **{s: curves.get(s) for s in accepted if s in curves}}
-
-        if my_curve is not None:
-            for acc_strat, peer_curve in all_accepted_curves.items():
-                if peer_curve is None or acc_strat == strat:
-                    continue
-                n = min(len(my_curve), len(peer_curve))
-                x = np.array(my_curve[:n], dtype=float)
-                y = np.array(peer_curve[:n], dtype=float)
-                if x.std() < 1e-9 or y.std() < 1e-9:
-                    continue
-                corr = abs(float(np.corrcoef(x, y)[0, 1]))
-                if corr > max_corr:
-                    max_corr = corr
-                    corr_peer = acc_strat
-
-        if my_curve is not None and max_corr >= corr_threshold and corr_peer is not None:
-            cand.metadata["correlation_filtered"] = True
-            cand.metadata["correlated_with"] = corr_peer
-            cand.metadata["correlation_value"] = round(max_corr, 3)
-            cand.metadata["correlation_is_cross_batch"] = corr_peer in existing_strategy_set
-            if cand.promotion and cand.promotion.decision != "reject":
-                from core.research.experiment_schemas import PromotionDecision as _PD
-                cand.promotion = _PD(
-                    candidate_id=cand.candidate_id,
-                    decision="reject",
-                    reason=f"redundant — highly correlated with {corr_peer} (ρ={max_corr:.2f})",
-                    constraints={},
-                    created_at=_now_utc(),
-                )
-                cand.promotion_target = None
-        else:
-            accepted.append(strat)
-            accepted_curves[strat] = my_curve
-
-
-def _correlation_filter_candidates_v2(
-    candidates: List[StrategyCandidate],
-    corr_threshold: float = 0.85,
-    existing_candidates: Optional[List[StrategyCandidate]] = None,
-) -> None:
-    """In-place: mark candidates that are effectively redundant."""
     import numpy as np
 
     def _get_curve(c: StrategyCandidate) -> Optional[List[float]]:
@@ -1182,7 +1118,7 @@ def _create_candidates_from_result(
     candidates.sort(key=lambda c: c.score, reverse=True)
     # Correlation filter: mark redundant candidates (within batch + cross-batch vs existing running)
     if len(candidates) > 1 or existing_candidates:
-        _correlation_filter_candidates_v2(candidates, corr_threshold=0.85, existing_candidates=existing_candidates or [])
+        _correlation_filter_candidates(candidates, corr_threshold=0.85, existing_candidates=existing_candidates or [])
 
     best_candidate = next((c for c in candidates if not c.metadata.get("correlation_filtered")), None) or (candidates[0] if candidates else None)
     if best_candidate is not None:

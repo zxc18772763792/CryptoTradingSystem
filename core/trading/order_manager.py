@@ -1,4 +1,4 @@
-﻿"""
+"""
 Order management module.
 """
 import asyncio

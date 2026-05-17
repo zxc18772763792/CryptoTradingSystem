@@ -15,6 +15,13 @@ _MIN_TRADES_FOR_SHADOW = 1
 _MIN_TRADES_FOR_PAPER = 10
 _MIN_TRADES_FOR_LIVE_CANDIDATE = 30
 
+# Deflated Sharpe Ratio gating thresholds (Bailey & López de Prado, 2014).
+# Below _DSR_REJECT_BELOW the Sharpe is almost certainly a multiple-testing
+# artifact → reject. In [_DSR_REJECT_BELOW, _DSR_DOWNGRADE_OK) the edge is weak
+# → downgrade one tier. At or above _DSR_DOWNGRADE_OK no DSR adjustment.
+_DSR_REJECT_BELOW = 0.4
+_DSR_DOWNGRADE_OK = 0.65
+
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -183,10 +190,9 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
             + efficiency_score * 0.20
         )
 
-    # DSR-based promotion gating — Bailey & Lopez de Prado (2014).
-    # Threshold 0.5 rejects strategies where the Sharpe is likely spurious under multiple testing.
-    dsr_reject = dsr < 0.4
-    dsr_downgrade = 0.4 <= dsr < 0.65
+    # DSR-based promotion gating — Bailey & López de Prado (2014).
+    dsr_reject = dsr < _DSR_REJECT_BELOW
+    dsr_downgrade = _DSR_REJECT_BELOW <= dsr < _DSR_DOWNGRADE_OK
 
     reasons: List[str] = []
     if total_return <= 0:
@@ -210,35 +216,50 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
     if wf_stability is not None and wf_stability < 0.5:
         reasons.append(f"walk-forward unstable (stability={wf_stability:.2f})")
 
-    # C: Promotion decision — OOS takes priority over IS for gating
-    oos_passes = oos_sharpe is None or oos_sharpe >= 0.6  # must not fail OOS gate
+    # Base promotion tier from deployment metrics only. OOS and DSR adjustments
+    # are applied as explicit, ordered downgrades below so the final decision
+    # always reflects every gate that fired (rather than silently rejecting).
     decision = "reject"
-    if deployment_score >= 75 and effective_sharpe >= 1.2 and max_drawdown <= 12 and valid_ratio >= 60 and oos_passes:
+    if deployment_score >= 75 and effective_sharpe >= 1.2 and max_drawdown <= 12 and valid_ratio >= 60:
         decision = "live_candidate"
-    elif deployment_score >= 60 and effective_sharpe >= 1.0 and max_drawdown <= 15 and oos_passes:
+    elif deployment_score >= 60 and effective_sharpe >= 1.0 and max_drawdown <= 15:
         decision = "paper"
-    elif deployment_score >= 45 and valid_runs > 0 and oos_passes:
+    elif deployment_score >= 45 and valid_runs > 0:
         decision = "shadow"
-    # DSR gating: reject or downgrade based on multiple-testing correction
+
+    # Out-of-sample gating.
+    #
+    # When OOS is present, ``effective_sharpe`` is already the OOS Sharpe (see
+    # the effective_sharpe assignment above), so a failing OOS automatically
+    # tanks edge_score / robustness / deployment_score and the tier gates land
+    # it on shadow (or reject if deployment / DSR also fail). No explicit
+    # failing-OOS cap is needed — and one would be dead code, since the
+    # paper/live tiers require effective_sharpe ≥ 1.0, which a sub-threshold
+    # OOS Sharpe (< 0.6) can never satisfy.
+    #
+    # The one case the score path cannot catch is *no OOS validation at all*:
+    # there ``effective_sharpe`` falls back to the in-sample Sharpe, which can
+    # be high enough for live_candidate. Such a candidate must not go to
+    # live_candidate on in-sample evidence alone — cap it at paper.
+    if oos_sharpe is None and decision == "live_candidate":
+        decision = "paper"
+        reasons.append(
+            "downgraded live_candidate→paper: no out-of-sample validation available"
+        )
+
+    # DSR gating: reject or downgrade one tier based on multiple-testing correction.
     if dsr_reject:
         decision = "reject"
-        reasons.append(f"DSR too low ({dsr:.2f}) — likely spurious edge from multiple testing")
+        reasons.append(
+            f"DSR too low ({dsr:.2f}<{_DSR_REJECT_BELOW:.2f}) — likely spurious edge from multiple testing"
+        )
     elif dsr_downgrade:
         if decision == "live_candidate":
             decision = "paper"
-            reasons.append(f"downgraded live_candidate→paper: DSR={dsr:.2f}<0.5")
+            reasons.append(f"downgraded live_candidate→paper: DSR={dsr:.2f}<{_DSR_DOWNGRADE_OK:.2f}")
         elif decision == "paper":
             decision = "shadow"
-            reasons.append(f"downgraded paper→shadow: DSR={dsr:.2f}<0.5")
-
-    # Explicit downgrade: OOS fails → cap at shadow
-    if oos_sharpe is not None and oos_sharpe < 0.6:
-        if decision == "live_candidate":
-            decision = "shadow"
-            reasons.append("downgraded live_candidate→shadow: OOS Sharpe below threshold")
-        elif decision == "paper":
-            decision = "shadow"
-            reasons.append("downgraded paper→shadow: OOS Sharpe below threshold")
+            reasons.append(f"downgraded paper→shadow: DSR={dsr:.2f}<{_DSR_DOWNGRADE_OK:.2f}")
 
     # Promotion must respect minimum realized sample size. Thin trading samples are
     # too noisy to treat as paper/live-ready even when return and Sharpe look good.

@@ -1,4 +1,4 @@
-﻿"""Data API."""
+"""Data API."""
 import asyncio
 import contextlib
 import copy
@@ -43,6 +43,7 @@ from core.data.coinglass_client import (
     CoinglassError,
     coinglass_enabled,
     load_coinglass_cached_source_snapshot,
+    load_dataset_rows_for_symbol,
     normalize_dataset_response,
 )
 from core.data.factor_library import FACTOR_CATALOG, build_factor_library
@@ -2047,7 +2048,60 @@ async def _fetch_btc_whale_unconfirmed(min_btc: float = 10.0) -> Dict[str, Any]:
     }
 
 
+async def _fetch_whale_activity(symbol: str, min_btc: float = 10.0) -> Dict[str, Any]:
+    if coinglass_enabled():
+        try:
+            from web.api.trading import (  # noqa: PLC0415
+                _fetch_coinglass_exchange_chain_transfers,
+                _fetch_coinglass_whale_transfers,
+            )
+
+            whale_payload, exchange_chain_payload = await asyncio.gather(
+                _fetch_coinglass_whale_transfers(symbol=symbol, min_btc=min_btc),
+                _fetch_coinglass_exchange_chain_transfers(symbol=symbol, min_btc=min_btc),
+                return_exceptions=True,
+            )
+            payloads = [
+                item
+                for item in (whale_payload, exchange_chain_payload)
+                if isinstance(item, dict) and item.get("available")
+            ]
+            if payloads:
+                transactions: List[Dict[str, Any]] = []
+                btc_price = None
+                source_names: List[str] = []
+                for payload in payloads:
+                    transactions.extend(list(payload.get("transactions") or []))
+                    btc_price = btc_price or payload.get("btc_price")
+                    source_name = str(payload.get("source_name") or "").strip()
+                    if source_name:
+                        source_names.append(source_name)
+                transactions.sort(
+                    key=lambda item: _safe_float(item.get("usd_estimate") or item.get("btc")),
+                    reverse=True,
+                )
+                return {
+                    "available": True,
+                    "btc_price": btc_price,
+                    "threshold_btc": float(min_btc),
+                    "requested_threshold_btc": float(min_btc),
+                    "count": len(transactions),
+                    "transactions": transactions[:50],
+                    "source": "+".join(source_names) or "coinglass_whale_transfer",
+                }
+        except Exception as exc:
+            logger.debug(f"coinglass whale activity unavailable: {exc}")
+
+    fallback = await _fetch_btc_whale_unconfirmed(min_btc=min_btc)
+    fallback["source"] = "blockchain_info_fallback"
+    return fallback
+
+
 async def _fetch_multi_exchange_funding(symbol: str) -> Dict[str, Any]:
+    coinglass_payload = await _fetch_coinglass_multi_exchange_funding(symbol)
+    if bool(coinglass_payload.get("available")):
+        return coinglass_payload
+
     if FundingRateCollector is None:
         return {"available": False, "count": 0, "rates": {}, "error": "funding_collector_unavailable"}
 
@@ -2087,7 +2141,7 @@ async def _fetch_multi_exchange_funding(symbol: str) -> Dict[str, Any]:
                     if getattr(row, "funding_time", None)
                     else None
                 ),
-                "source": "exchange_public_api",
+                "source": "exchange_public_fallback",
             }
         except Exception:
             continue
@@ -2114,6 +2168,133 @@ async def _fetch_multi_exchange_funding(symbol: str) -> Dict[str, Any]:
         "spread_rate_pct": round(spread_rate * 100.0, 6),
         "max_abs_rate_pct": round(max(abs(v) for v in values) * 100.0, 6) if values else 0.0,
         "timestamp": _utc_iso(),
+        "source": "exchange_public_fallback",
+        "fallback_reason": coinglass_payload.get("error") or "coinglass_unavailable",
+    }
+
+
+async def _fetch_coinglass_multi_exchange_funding(symbol: str) -> Dict[str, Any]:
+    if not coinglass_enabled():
+        return {
+            "available": False,
+            "count": 0,
+            "rates": {},
+            "symbol": symbol,
+            "error": "coinglass_disabled",
+            "source": "coinglass_cache",
+        }
+
+    try:
+        overview = dict(
+            await build_coinglass_overview_payload(
+                symbol=symbol,
+                refresh=False,
+                manual=False,
+            )
+            or {}
+        )
+        if not overview.get("available") and overview.get("key_configured"):
+            overview = dict(
+                await build_coinglass_overview_payload(
+                    symbol=symbol,
+                    refresh=True,
+                    manual=False,
+                )
+                or overview
+            )
+    except Exception as exc:
+        return {
+            "available": False,
+            "count": 0,
+            "rates": {},
+            "symbol": symbol,
+            "error": _error_text(exc),
+            "source": "coinglass_cache",
+        }
+
+    rates: Dict[str, Dict[str, Any]] = {}
+    values: List[float] = []
+    frame = load_dataset_rows_for_symbol("funding_rate_exchange_list", symbol)
+    if not frame.empty and "payload_json" in frame.columns:
+        latest_request_key = str(frame.iloc[-1].get("request_key") or "")
+        if latest_request_key and "request_key" in frame.columns:
+            frame = frame[frame["request_key"].astype(str) == latest_request_key]
+        for _, row in frame.iterrows():
+            try:
+                payload = json.loads(str(row.get("payload_json") or "{}"))
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            exchange_name = str(
+                payload.get("exchange")
+                or payload.get("exchange_name")
+                or row.get("exchange")
+                or ""
+            ).strip()
+            value = _safe_float(
+                payload.get("funding_rate")
+                or payload.get("fundingRate")
+                or payload.get("rate"),
+                None,
+            )
+            if not exchange_name or value is None:
+                continue
+            values.append(float(value))
+            rates[exchange_name.lower()] = {
+                "symbol": str(payload.get("symbol") or symbol),
+                "funding_rate": float(value),
+                "funding_rate_pct": round(float(value) * 100.0, 6),
+                "funding_time": payload.get("funding_time")
+                or payload.get("fundingTime")
+                or row.get("source_ts"),
+                "source": "coinglass_cache",
+            }
+
+    snapshot = dict((overview.get("snapshot") or {}))
+    snapshot_payload = dict(snapshot.get("payload") or {})
+    aggregate_value = _safe_float(
+        snapshot.get("funding_rate")
+        or snapshot.get("funding_rate_oi_weighted")
+        or snapshot_payload.get("funding_rate"),
+        None,
+    )
+    if aggregate_value is not None and "aggregate" not in rates:
+        values.append(float(aggregate_value))
+        rates["aggregate"] = {
+            "symbol": symbol,
+            "funding_rate": float(aggregate_value),
+            "funding_rate_pct": round(float(aggregate_value) * 100.0, 6),
+            "funding_time": snapshot.get("timestamp"),
+            "source": "coinglass_cache",
+        }
+
+    if not rates:
+        return {
+            "available": False,
+            "count": 0,
+            "rates": {},
+            "symbol": symbol,
+            "error": overview.get("degraded_reason") or "coinglass_cache_empty",
+            "source": "coinglass_cache",
+        }
+
+    spread_rate = (max(values) - min(values)) if values else 0.0
+    mean_rate = (sum(values) / len(values)) if values else 0.0
+    return {
+        "available": True,
+        "symbol": symbol,
+        "count": len(rates),
+        "rates": rates,
+        "mean_rate": round(mean_rate, 10),
+        "mean_rate_pct": round(mean_rate * 100.0, 6),
+        "spread_rate": round(spread_rate, 10),
+        "spread_rate_pct": round(spread_rate * 100.0, 6),
+        "max_abs_rate_pct": round(max(abs(v) for v in values) * 100.0, 6) if values else 0.0,
+        "timestamp": _utc_iso(),
+        "source": "coinglass_cache",
+        "freshness_sec": overview.get("freshness_sec"),
+        "degraded_reason": overview.get("degraded_reason"),
     }
 
 
@@ -2200,12 +2381,12 @@ def _build_onchain_component_status(payload: Dict[str, Any]) -> Dict[str, Any]:
         },
         "whale_activity": {
             "status": "ok" if whales.get("available") else "degraded",
-            "source": "blockchain_info+binance_price",
+            "source": whales.get("source") or "coinglass_whale_transfer",
             "error": whales.get("error"),
         },
         "funding_rate_multi_source": {
             "status": "ok" if funding_multi.get("available") else "degraded",
-            "source": "binance+bybit+okx+gate",
+            "source": funding_multi.get("source") or "coinglass_cache",
             "error": funding_multi.get("error"),
         },
         "fear_greed_index": {
@@ -2215,7 +2396,7 @@ def _build_onchain_component_status(payload: Dict[str, Any]) -> Dict[str, Any]:
         },
         "premium_external": {
             "status": "ok" if premium_ok else "degraded",
-            "source": "glassnode+cryptoquant+nansen+kaiko+coinglass",
+            "source": "coinglass+optional_cached_external",
             "detail": f"cached={cached_sources}/{max(total_sources, 0)} key={configured_keys}",
             "error": None if premium_ok else "premium_sources_configured_but_cache_empty",
         },
@@ -2273,7 +2454,13 @@ async def _compute_onchain_overview(
             )
         )
     whale_task = asyncio.create_task(
-        asyncio.wait_for(_fetch_btc_whale_unconfirmed(min_btc=max(1.0, whale_threshold_btc)), timeout=8.0)
+        asyncio.wait_for(
+            _fetch_whale_activity(
+                symbol=symbol,
+                min_btc=max(1.0, whale_threshold_btc),
+            ),
+            timeout=8.0,
+        )
     )
     funding_task = asyncio.create_task(asyncio.wait_for(_fetch_multi_exchange_funding(symbol=symbol), timeout=6.5))
     fear_greed_task = asyncio.create_task(asyncio.wait_for(_fetch_fear_greed_snapshot(), timeout=6.5))

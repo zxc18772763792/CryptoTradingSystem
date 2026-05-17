@@ -123,3 +123,137 @@ def test_update_cache_stops_across_symbols_after_budget_guard(monkeypatch):
         ("open_interest_exchange_list", "BTC"),
         ("funding_rate_exchange_list", "BTC"),
     ]
+
+
+def test_non_manual_update_caps_symbols_when_minute_headroom_is_tighter_than_symbol_count(monkeypatch):
+    monkeypatch.setattr(builder_module, "coinglass_enabled", lambda: True)
+    monkeypatch.setattr(builder_module, "persist_raw_snapshot", lambda **kwargs: None)
+    monkeypatch.setattr(builder_module, "persist_normalized_rows", lambda **kwargs: pd.DataFrame([{"symbol": "BTC"}]))
+    monkeypatch.setattr(builder_module, "persist_symbol_registry", lambda symbols: None)
+    monkeypatch.setattr(builder_module, "build_derivatives_snapshot", lambda symbol: None)
+    monkeypatch.setattr(builder_module, "coinglass_minute_headroom", lambda budget_state, manual=False: 3)
+
+    async def fake_record_status(**kwargs):
+        return None
+
+    async def fake_budget_state():
+        class _Budget:
+            def to_dict(self):
+                return {"minute_remaining": 3}
+
+        return _Budget()
+
+    monkeypatch.setattr(builder_module, "record_coinglass_ingest_status", fake_record_status)
+    monkeypatch.setattr(builder_module, "get_coinglass_budget_state", fake_budget_state)
+
+    class _FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+        async def request_dataset(self, manifest, *, symbol=None, exchange=None, interval=None, manual=False):
+            self.calls.append((manifest.dataset, symbol, manual))
+            return {
+                "route": manifest.routes[0],
+                "params": {"exchange": exchange, "interval": interval},
+                "request_key": f"{manifest.dataset}:{symbol}",
+                "latency_ms": 10,
+                "payload": {"data": [{"symbol": symbol}]},
+            }
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(builder_module, "CoinglassClient", lambda: fake_client)
+
+    result = asyncio.run(
+        builder_module.update_coinglass_cache(
+            symbols=["BTC", "ETH", "SOL"],
+            datasets=["open_interest_exchange_list", "funding_rate_exchange_list"],
+            manual=False,
+            max_symbols_per_run=3,
+        )
+    )
+
+    assert result["stopped_early"] is True
+    assert result["stop_reason"] == "non_manual_refresh_limited_by_10_per_min_budget"
+    assert result["symbols"] == ["BTC", "ETH"]
+    assert result["datasets"] == ["open_interest_exchange_list"]
+    assert fake_client.calls == [
+        ("open_interest_exchange_list", "BTC", False),
+        ("open_interest_exchange_list", "ETH", False),
+    ]
+
+
+def test_update_cache_limits_non_manual_refresh_to_minute_headroom(monkeypatch):
+    monkeypatch.setattr(builder_module, "coinglass_enabled", lambda: True)
+    monkeypatch.setattr(builder_module, "persist_raw_snapshot", lambda **kwargs: None)
+    monkeypatch.setattr(builder_module, "persist_normalized_rows", lambda **kwargs: pd.DataFrame([{"symbol": "BTC"}]))
+    monkeypatch.setattr(builder_module, "persist_symbol_registry", lambda symbols: None)
+    monkeypatch.setattr(builder_module, "build_derivatives_snapshot", lambda symbol: None)
+
+    async def fake_record_status(**kwargs):
+        return None
+
+    class _Budget:
+        minute_remaining = 5
+        daily_remaining = 100
+        monthly_remaining = 100
+
+        def to_dict(self):
+            return {"minute_remaining": self.minute_remaining}
+
+    async def fake_budget_state():
+        return _Budget()
+
+    monkeypatch.setattr(builder_module, "record_coinglass_ingest_status", fake_record_status)
+    monkeypatch.setattr(builder_module, "get_coinglass_budget_state", fake_budget_state)
+
+    class _FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+
+        async def request_dataset(self, manifest, *, symbol=None, exchange=None, interval=None, manual=False):
+            self.calls.append((manifest.dataset, manual))
+            return {
+                "route": manifest.routes[0],
+                "params": {"exchange": exchange, "interval": interval},
+                "request_key": f"req-{manifest.dataset}",
+                "latency_ms": 1,
+                "payload": {"data": [{"symbol": symbol}]},
+            }
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr(builder_module, "CoinglassClient", lambda: fake_client)
+
+    result = asyncio.run(
+        builder_module.update_coinglass_cache(
+            symbols=["BTC"],
+            datasets=[
+                "open_interest_exchange_list",
+                "open_interest_history",
+                "funding_rate_exchange_list",
+                "funding_rate_history",
+                "taker_buy_sell_volume_exchange_list",
+            ],
+            manual=False,
+            max_symbols_per_run=1,
+        )
+    )
+
+    assert result["stopped_early"] is True
+    assert result["stop_reason"] == "non_manual_refresh_limited_by_10_per_min_budget"
+    assert result["datasets"] == ["open_interest_exchange_list", "open_interest_history"]
+    assert fake_client.calls == [
+        ("open_interest_exchange_list", False),
+        ("open_interest_history", False),
+    ]

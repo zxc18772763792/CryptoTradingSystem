@@ -22,6 +22,7 @@ from config.database import (
 from config.settings import settings
 from core.data.coinglass_registry import (
     COINGLASS_DEFAULT_DATASETS,
+    COINGLASS_SUPPORTED_DATASETS,
     CoinglassDatasetManifest,
     CoinglassRouteSpec,
     coinglass_pair_symbol,
@@ -774,6 +775,318 @@ def _normalize_liquidation_row(row: Mapping[str, Any]) -> Dict[str, Any]:
     return record
 
 
+def _nested_value(payload: Any, *path: str) -> Any:
+    current = payload
+    for key in path:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _normalize_liquidation_map_rows(
+    rows: List[Dict[str, Any]], *, response_payload: Any
+) -> List[Dict[str, Any]]:
+    last_price = _to_float(
+        _nested_value(response_payload, "data", "last_price")
+        or _nested_value(response_payload, "last_price")
+    )
+    normalized_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        instrument = dict(row.get("instrument") or {})
+        exchange = str(
+            instrument.get("exName")
+            or row.get("exchange")
+            or row.get("exchange_name")
+            or "aggregate"
+        ).strip() or "aggregate"
+        symbol = str(
+            instrument.get("baseAsset")
+            or instrument.get("instrumentId")
+            or row.get("symbol")
+            or ""
+        ).strip()
+        liq_map = row.get("liqMapV2") or row.get("liq_map_v2") or row.get("map")
+        if not isinstance(liq_map, Mapping):
+            continue
+        levels: List[tuple[float, float]] = []
+        for price_key, value in liq_map.items():
+            price = _to_float(price_key)
+            if price is None:
+                price = _to_float((value or [None])[0] if isinstance(value, list) else None)
+            amount = 0.0
+            entries = value if isinstance(value, list) else [value]
+            for entry in entries:
+                if isinstance(entry, Mapping):
+                    amount += _to_float(
+                        entry.get("amount")
+                        or entry.get("usd")
+                        or entry.get("value")
+                        or entry.get("liquidation")
+                    ) or 0.0
+                    continue
+                if isinstance(entry, (list, tuple)):
+                    if price is None and entry:
+                        price = _to_float(entry[0])
+                    if len(entry) > 1:
+                        amount += _to_float(entry[1]) or 0.0
+            if price is not None and amount > 0:
+                levels.append((float(price), float(amount)))
+        if not levels:
+            continue
+        total = sum(amount for _, amount in levels)
+        above = (
+            sum(amount for price, amount in levels if last_price is not None and price > last_price)
+            if last_price is not None
+            else None
+        )
+        below = (
+            sum(amount for price, amount in levels if last_price is not None and price < last_price)
+            if last_price is not None
+            else None
+        )
+        largest_price, largest_amount = max(levels, key=lambda item: item[1])
+        nearest_above = None
+        nearest_below = None
+        if last_price is not None:
+            above_levels = [(price, amount) for price, amount in levels if price > last_price]
+            below_levels = [(price, amount) for price, amount in levels if price < last_price]
+            if above_levels:
+                nearest_above = min(above_levels, key=lambda item: item[0] - last_price)
+            if below_levels:
+                nearest_below = min(below_levels, key=lambda item: last_price - item[0])
+        record = {
+            "exchange": exchange,
+            "symbol": symbol,
+            "last_price": last_price,
+            "liquidation_map_total_usd": total,
+            "liquidation_map_above_usd": above,
+            "liquidation_map_below_usd": below,
+            "liquidation_map_largest_cluster_price": largest_price,
+            "liquidation_map_largest_cluster_usd": largest_amount,
+            "liquidation_map_pressure_score": max(0.0, min(total / 250_000_000.0, 1.0)),
+            "liquidation_map_level_count": len(levels),
+            "liquidity_heatmap_total_usd": total,
+            "liquidity_heatmap_above_usd": above,
+            "liquidity_heatmap_below_usd": below,
+            "heatmap_pressure_score": max(0.0, min(total / 250_000_000.0, 1.0)),
+        }
+        if nearest_above is not None:
+            record["liquidation_map_nearest_above_price"] = nearest_above[0]
+            record["liquidation_map_nearest_above_usd"] = nearest_above[1]
+            record["liquidity_wall_nearest_above_price"] = nearest_above[0]
+            record["liquidity_wall_nearest_above_usd"] = nearest_above[1]
+        if nearest_below is not None:
+            record["liquidation_map_nearest_below_price"] = nearest_below[0]
+            record["liquidation_map_nearest_below_usd"] = nearest_below[1]
+            record["liquidity_wall_nearest_below_price"] = nearest_below[0]
+            record["liquidity_wall_nearest_below_usd"] = nearest_below[1]
+        nearest_total = (nearest_above[1] if nearest_above is not None else 0.0) + (
+            nearest_below[1] if nearest_below is not None else 0.0
+        )
+        record["liquidity_void_score"] = max(
+            0.0, min(1.0, 1.0 - (nearest_total / max(total, 1.0)))
+        )
+        normalized_rows.append(record)
+    return normalized_rows
+
+
+def _sum_orderbook_levels(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    total = 0.0
+    matched = False
+    if isinstance(value, Mapping) and not any(
+        _row_value(value, key) is not None
+        for key in ("price", "p", "amount", "size", "volume", "usd", "value")
+    ):
+        entries = [[price, amount] for price, amount in value.items()]
+    else:
+        entries = value if isinstance(value, list) else [value]
+    for entry in entries:
+        if isinstance(entry, Mapping):
+            amount = _coalesce_float(
+                entry,
+                "usd",
+                "value",
+                "amount_usd",
+                "amountUsd",
+                "volume_usd",
+                "volumeUsd",
+                "notional",
+                "notionalUsd",
+            )
+            if amount is None:
+                price = _coalesce_float(entry, "price", "p")
+                size = _coalesce_float(entry, "size", "amount", "volume", "qty", "quantity")
+                if price is not None and size is not None:
+                    amount = price * size
+            if amount is not None:
+                total += float(amount)
+                matched = True
+            continue
+        if isinstance(entry, (list, tuple)):
+            amount = None
+            if len(entry) >= 3:
+                amount = _to_float(entry[2])
+            if amount is None and len(entry) >= 2:
+                price = _to_float(entry[0])
+                size = _to_float(entry[1])
+                if price is not None and size is not None:
+                    amount = price * size
+            if amount is not None:
+                total += float(amount)
+                matched = True
+            continue
+        amount = _to_float(entry)
+        if amount is not None:
+            total += float(amount)
+            matched = True
+    return total if matched else None
+
+
+def _largest_orderbook_wall(value: Any) -> tuple[Optional[float], Optional[float]]:
+    best_price = None
+    best_amount = None
+    if isinstance(value, Mapping) and not any(
+        _row_value(value, key) is not None
+        for key in ("price", "p", "amount", "size", "volume", "usd", "value")
+    ):
+        entries = [[price, amount] for price, amount in value.items()]
+    else:
+        entries = value if isinstance(value, list) else []
+    for entry in entries:
+        price = None
+        amount = None
+        if isinstance(entry, Mapping):
+            price = _coalesce_float(entry, "price", "p")
+            amount = _coalesce_float(
+                entry,
+                "usd",
+                "value",
+                "amount_usd",
+                "amountUsd",
+                "volume_usd",
+                "volumeUsd",
+                "notional",
+                "notionalUsd",
+            )
+            if amount is None:
+                size = _coalesce_float(entry, "size", "amount", "volume", "qty", "quantity")
+                if price is not None and size is not None:
+                    amount = price * size
+        elif isinstance(entry, (list, tuple)):
+            if entry:
+                price = _to_float(entry[0])
+            if len(entry) >= 3:
+                amount = _to_float(entry[2])
+            if amount is None and len(entry) >= 2:
+                size = _to_float(entry[1])
+                if price is not None and size is not None:
+                    amount = price * size
+        if amount is None:
+            continue
+        if best_amount is None or amount > best_amount:
+            best_price = price
+            best_amount = float(amount)
+    return best_price, best_amount
+
+
+def _normalize_futures_orderbook_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    record = dict(row or {})
+    bid_rows = (
+        record.get("bids")
+        or record.get("bid_list")
+        or record.get("bidList")
+        or record.get("bid")
+        or record.get("buy")
+    )
+    ask_rows = (
+        record.get("asks")
+        or record.get("ask_list")
+        or record.get("askList")
+        or record.get("ask")
+        or record.get("sell")
+    )
+    bid_usd = _coalesce_float(
+        record,
+        "orderbook_agg_bid_usd",
+        "bid_usd",
+        "bidUsd",
+        "bid_volume_usd",
+        "bidVolumeUsd",
+        "bids_usd",
+        "bidsUsd",
+        "bid_notional_usd",
+        "bidNotionalUsd",
+    )
+    ask_usd = _coalesce_float(
+        record,
+        "orderbook_agg_ask_usd",
+        "ask_usd",
+        "askUsd",
+        "ask_volume_usd",
+        "askVolumeUsd",
+        "asks_usd",
+        "asksUsd",
+        "ask_notional_usd",
+        "askNotionalUsd",
+    )
+    if bid_usd is None:
+        bid_usd = _sum_orderbook_levels(bid_rows)
+    if ask_usd is None:
+        ask_usd = _sum_orderbook_levels(ask_rows)
+    if bid_usd is not None:
+        record["orderbook_agg_bid_usd"] = bid_usd
+    if ask_usd is not None:
+        record["orderbook_agg_ask_usd"] = ask_usd
+    imbalance = _coalesce_float(
+        record,
+        "orderbook_agg_imbalance",
+        "orderbook_imbalance",
+        "bid_ask_imbalance",
+        "bidAskImbalance",
+        "imbalance",
+    )
+    if imbalance is None and bid_usd is not None and ask_usd is not None:
+        total = bid_usd + ask_usd
+        if total > 0:
+            imbalance = (bid_usd - ask_usd) / total
+    if imbalance is not None:
+        record["orderbook_agg_imbalance"] = imbalance
+        record["orderbook_imbalance"] = imbalance
+
+    below_price, below_usd = _largest_orderbook_wall(bid_rows)
+    above_price, above_usd = _largest_orderbook_wall(ask_rows)
+    if above_usd is None:
+        above_usd = _coalesce_float(
+            record, "orderbook_wall_above_usd", "ask_wall_usd", "askWallUsd"
+        )
+    if below_usd is None:
+        below_usd = _coalesce_float(
+            record, "orderbook_wall_below_usd", "bid_wall_usd", "bidWallUsd"
+        )
+    if above_price is None:
+        above_price = _coalesce_float(
+            record, "orderbook_wall_above_price", "ask_wall_price", "askWallPrice"
+        )
+    if below_price is None:
+        below_price = _coalesce_float(
+            record, "orderbook_wall_below_price", "bid_wall_price", "bidWallPrice"
+        )
+    if above_usd is not None:
+        record["orderbook_wall_above_usd"] = above_usd
+    if below_usd is not None:
+        record["orderbook_wall_below_usd"] = below_usd
+    if above_price is not None:
+        record["orderbook_wall_above_price"] = above_price
+    if below_price is not None:
+        record["orderbook_wall_below_price"] = below_price
+    return record
+
+
 def _normalize_ratio_row(row: Mapping[str, Any]) -> Dict[str, Any]:
     record = dict(row or {})
     long_short_ratio = _coalesce_float(
@@ -903,13 +1216,34 @@ def normalize_dataset_response(
             elif dataset == "funding_rate_history":
                 rows.append(_normalize_funding_rate_history_row(row))
             elif dataset in {
+                "open_interest_aggregated_history",
+                "open_interest_stablecoin_margin_history",
+            }:
+                rows.append(_normalize_open_interest_history_row(row))
+            elif dataset in {
                 "taker_buy_sell_volume_exchange_list",
                 "taker_buy_sell_volume_history",
             }:
                 rows.append(_normalize_taker_row(row))
-            elif dataset == "liquidation_history":
+            elif dataset in {"liquidation_history", "liquidation_aggregated_history"}:
                 rows.append(_normalize_liquidation_row(row))
-            elif dataset == "global_long_short_account_ratio_history":
+            elif dataset in {
+                "liquidation_aggregated_map",
+                "liquidation_aggregated_heatmap_model1",
+            }:
+                rows.extend(
+                    _normalize_liquidation_map_rows(
+                        [row], response_payload=response_payload
+                    )
+                )
+            elif dataset == "futures_orderbook_aggregated_ask_bids_history":
+                rows.append(_normalize_futures_orderbook_row(row))
+            elif dataset in {
+                "global_long_short_account_ratio_history",
+                "top_long_short_account_ratio_history",
+                "top_long_short_position_ratio_history",
+                "net_position_history",
+            }:
                 rows.append(_normalize_ratio_row(row))
             else:
                 rows.append(dict(row or {}))
@@ -1196,6 +1530,9 @@ def _manifest_params(
     if "symbol" in route.required_params:
         if manifest.dataset in {
             "liquidation_history",
+            "top_long_short_account_ratio_history",
+            "top_long_short_position_ratio_history",
+            "net_position_history",
             "global_long_short_account_ratio_history",
             "open_interest_history",
             "funding_rate_history",
@@ -1215,9 +1552,15 @@ def _manifest_params(
         else:
             params["interval"] = normalized_interval
     if "range" in route.required_params:
-        params["range"] = coinglass_range_for_interval(
-            interval or params.get("interval") or "h4"
-        )
+        if manifest.dataset in {
+            "liquidation_aggregated_map",
+            "liquidation_aggregated_heatmap_model1",
+        }:
+            params["range"] = str(params.get("range") or "7d")
+        else:
+            params["range"] = coinglass_range_for_interval(
+                interval or params.get("interval") or "h4"
+            )
     if limit is not None:
         params["limit"] = int(limit)
     if start_time is not None:
@@ -1366,7 +1709,7 @@ async def discover_and_persist_coinglass_capabilities(
 ) -> Dict[str, Any]:
     requested = [
         str(item or "").strip()
-        for item in (datasets or COINGLASS_DEFAULT_DATASETS)
+        for item in (datasets or COINGLASS_SUPPORTED_DATASETS)
         if str(item or "").strip()
     ]
     capabilities: List[Dict[str, Any]] = []

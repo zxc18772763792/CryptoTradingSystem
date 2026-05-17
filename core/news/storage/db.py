@@ -90,6 +90,7 @@ SOURCE_IMPORTANCE = {
     "jin10": 40,
     "cryptopanic": 35,
     "cryptocompare_news": 34,
+    "opennews": 42,
     "rss": 24,
     "newsapi": 18,
     "gdelt": 12,
@@ -222,6 +223,9 @@ def _is_llm_summary_source(source: Any) -> bool:
 def _importance_score(source: str, title: str, content: str, payload: Dict[str, Any]) -> int:
     text = f"{title} {content}".lower()
     score = SOURCE_IMPORTANCE.get(str(payload.get("provider") or source).lower(), SOURCE_IMPORTANCE.get(str(source).lower(), 10))
+    opennews_score = payload.get("opennews_ai_score")
+    if opennews_score is not None:
+        score = max(score, int(_safe_float(opennews_score, 0.0)))
     for keyword, bonus in KEYWORD_SCORES.items():
         if keyword in text:
             score += bonus

@@ -49,6 +49,19 @@ def _isolate_agent_overlay(tmp_path, monkeypatch):
             },
         },
     )
+    # The live-provider runtime restriction depends on real settings/env keys
+    # and short-circuits before _call_provider. Default tests to a non-restricted
+    # resolution so they exercise the decision path they intend; the dedicated
+    # restriction test re-patches this with the real implementation.
+    monkeypatch.setattr(
+        _mod,
+        "resolve_provider_for_runtime_capability",
+        lambda *args, **kwargs: {
+            "fallback": False,
+            "restricted": False,
+            "provider": kwargs.get("requested_provider", "codex"),
+        },
+    )
 
 
 def _sample_df(*, freq: str = "15min", periods: int = 120, start: str = "2025-01-01") -> pd.DataFrame:
@@ -84,13 +97,13 @@ def test_autonomous_agent_runtime_config_exposes_codex_target_order(monkeypatch,
     monkeypatch.setattr(
         settings,
         "OPENAI_BACKUP_BASE_URL",
-        "https://api.xiaomimimo.com/anthropic/v1,https://backup-glm.test/v4",
+        "https://anthropic-proxy.test/anthropic/v1,https://backup-openai.test/v1",
         raising=False,
     )
     monkeypatch.setattr(settings, "OPENAI_API_KEY", "primary-key", raising=False)
-    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "mimo-key,glm-key", raising=False)
-    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.4", raising=False)
-    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "mimo-v2-pro,GLM-4.5-Air", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "anthropic-key,backup-key", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.5", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "claude-compatible-model,gpt-5.5", raising=False)
 
     config = agent.get_runtime_config()
     codex = config["providers"]["codex"]
@@ -100,23 +113,23 @@ def test_autonomous_agent_runtime_config_exposes_codex_target_order(monkeypatch,
         {
             "order": 1,
             "base_url": "https://primary.test/v1",
-            "model": "gpt-5.4",
+            "model": "gpt-5.5",
             "transport": "openai",
             "is_backup": False,
             "available": True,
         },
         {
             "order": 2,
-            "base_url": "https://api.xiaomimimo.com/anthropic/v1",
-            "model": "mimo-v2-pro",
+            "base_url": "https://anthropic-proxy.test/anthropic/v1",
+            "model": "claude-compatible-model",
             "transport": "anthropic",
             "is_backup": True,
             "available": True,
         },
         {
             "order": 3,
-            "base_url": "https://backup-glm.test/v4",
-            "model": "GLM-4.5-Air",
+            "base_url": "https://backup-openai.test/v1",
+            "model": "gpt-5.5",
             "transport": "openai",
             "is_backup": True,
             "available": True,
@@ -1726,6 +1739,13 @@ def test_agent_live_execution_policy_restriction_is_classified_locally(monkeypat
     provider_call = AsyncMock(return_value={"action": "buy", "confidence": 0.91, "strength": 0.9, "reason": "should_not_run"})
     monkeypatch.setattr(agent, "_call_provider", provider_call)
 
+    # This test specifically validates the real live-provider restriction, so
+    # restore the genuine implementation (the autouse fixture stubs it out).
+    from core.ai.provider_runtime_policy import (
+        resolve_provider_for_runtime_capability as _real_resolve_provider,
+    )
+    monkeypatch.setattr(module, "resolve_provider_for_runtime_capability", _real_resolve_provider)
+
     asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", provider="codex", allow_live=True, cooldown_sec=0))
     result = asyncio.run(agent.run_once(trigger="test", force=True))
 
@@ -1770,6 +1790,13 @@ def test_agent_live_execution_falls_back_to_alternative_provider(monkeypatch, tm
         }
 
     monkeypatch.setattr(agent, "_call_provider", _fake_call_provider)
+
+    # This test validates the real provider-fallback resolution, so restore the
+    # genuine implementation (the autouse fixture stubs it out).
+    from core.ai.provider_runtime_policy import (
+        resolve_provider_for_runtime_capability as _real_resolve_provider,
+    )
+    monkeypatch.setattr(module, "resolve_provider_for_runtime_capability", _real_resolve_provider)
 
     asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", provider="codex", allow_live=True, cooldown_sec=0))
     result = asyncio.run(agent.run_once(trigger="test", force=True))
@@ -2335,18 +2362,20 @@ def test_ensure_symbol_scan_preview_warm_deduplicates_background_task(monkeypatc
     import core.ai.autonomous_agent as module
 
     agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_preview_warm")
-    started = 0
-    release = asyncio.Event()
-
-    async def _fake_preview(*, limit=None, force=False):
-        nonlocal started
-        started += 1
-        await release.wait()
-        return {"selected_symbol": "BTC/USDT"}
-
-    monkeypatch.setattr(agent, "get_symbol_scan_preview", _fake_preview)
+    counter = {"started": 0}
 
     async def _exercise():
+        # asyncio.Event() binds to the running loop on Python 3.9, so it must be
+        # created inside the loop asyncio.run() owns — not at function scope.
+        release = asyncio.Event()
+
+        async def _fake_preview(*, limit=None, force=False):
+            counter["started"] += 1
+            await release.wait()
+            return {"selected_symbol": "BTC/USDT"}
+
+        monkeypatch.setattr(agent, "get_symbol_scan_preview", _fake_preview)
+
         assert agent.ensure_symbol_scan_preview_warm(limit=5) is True
         assert agent.ensure_symbol_scan_preview_warm(limit=5) is False
         release.set()
@@ -2354,6 +2383,7 @@ def test_ensure_symbol_scan_preview_warm_deduplicates_background_task(monkeypatc
         await asyncio.sleep(0)
 
     asyncio.run(_exercise())
+    started = counter["started"]
 
     assert started == 1
     assert agent._preview_symbol_scan_task is None
@@ -2565,22 +2595,25 @@ def test_trigger_run_once_queues_background_run_and_exposes_manual_status(monkey
     import core.ai.autonomous_agent as module
 
     agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_manual_trigger")
-    release_run = asyncio.Event()
-
-    async def _fake_run_once_impl(*, trigger: str = "manual", force: bool = False, request_id: str):
-        await release_run.wait()
-        return {
-            "request_id": request_id,
-            "timestamp": module._utc_now().isoformat(),
-            "trigger": trigger,
-            "decision": {"action": "hold", "reason": "queued_test"},
-            "execution": {"submitted": False, "reason": "hold"},
-            "selection": {"selected_symbol": "BTC/USDT", "selection_reason": "manual_symbol"},
-        }
-
-    monkeypatch.setattr(agent, "_run_once_impl", _fake_run_once_impl)
 
     async def _exercise():
+        # asyncio.Event() binds to the running loop on Python 3.9, so it must be
+        # created inside the loop asyncio.run() owns — not at function scope.
+        release_run = asyncio.Event()
+
+        async def _fake_run_once_impl(*, trigger: str = "manual", force: bool = False, request_id: str):
+            await release_run.wait()
+            return {
+                "request_id": request_id,
+                "timestamp": module._utc_now().isoformat(),
+                "trigger": trigger,
+                "decision": {"action": "hold", "reason": "queued_test"},
+                "execution": {"submitted": False, "reason": "hold"},
+                "selection": {"selected_symbol": "BTC/USDT", "selection_reason": "manual_symbol"},
+            }
+
+        monkeypatch.setattr(agent, "_run_once_impl", _fake_run_once_impl)
+
         response = await agent.trigger_run_once(trigger="api_manual", force=True)
         assert response["accepted"] is True
         assert response["request"]["request_id"]
@@ -2608,22 +2641,25 @@ def test_trigger_run_once_returns_pending_when_manual_run_already_exists(monkeyp
     import core.ai.autonomous_agent as module
 
     agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_manual_pending")
-    gate = asyncio.Event()
-
-    async def _fake_run_once_impl(*, trigger: str = "manual", force: bool = False, request_id: str):
-        await gate.wait()
-        return {
-            "request_id": request_id,
-            "timestamp": module._utc_now().isoformat(),
-            "trigger": trigger,
-            "decision": {"action": "hold", "reason": "pending_test"},
-            "execution": {"submitted": False, "reason": "hold"},
-            "selection": {"selected_symbol": "BTC/USDT", "selection_reason": "manual_symbol"},
-        }
-
-    monkeypatch.setattr(agent, "_run_once_impl", _fake_run_once_impl)
 
     async def _exercise():
+        # asyncio.Event() binds to the running loop on Python 3.9, so it must be
+        # created inside the loop asyncio.run() owns — not at function scope.
+        gate = asyncio.Event()
+
+        async def _fake_run_once_impl(*, trigger: str = "manual", force: bool = False, request_id: str):
+            await gate.wait()
+            return {
+                "request_id": request_id,
+                "timestamp": module._utc_now().isoformat(),
+                "trigger": trigger,
+                "decision": {"action": "hold", "reason": "pending_test"},
+                "execution": {"submitted": False, "reason": "hold"},
+                "selection": {"selected_symbol": "BTC/USDT", "selection_reason": "manual_symbol"},
+            }
+
+        monkeypatch.setattr(agent, "_run_once_impl", _fake_run_once_impl)
+
         first = await agent.trigger_run_once(trigger="api_manual", force=True)
         await asyncio.sleep(0)
         second = await agent.trigger_run_once(trigger="api_manual", force=True)

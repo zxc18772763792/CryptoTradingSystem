@@ -67,20 +67,27 @@ class Settings(BaseSettings):
     COINGLASS_INCLUDE_RADAR: bool = True
     COINGLASS_INCLUDE_STRATEGIES: bool = False
     COINGLASS_LIVE_GATING_ENABLED: bool = False
+    PUBLIC_MACRO_WORKERS_ENABLED: bool = False
+    PREMIUM_EXTERNAL_WORKERS_ENABLED: bool = False
 
     # LLM API
     ZHIPU_API_KEY: str = ""
-    ZHIPU_BASE_URL: str = "https://open.bigmodel.cn/api/coding/paas/v4"
-    ZHIPU_MODEL: str = "GLM-4.5-Air"
+    ZHIPU_BASE_URL: str = ""
+    ZHIPU_MODEL: str = ""
     OPENAI_API_KEY: str = ""
-    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
-    OPENAI_BACKUP_BASE_URL: str = ""
+    OPENAI_BASE_URL: str = "https://nowcoding.ai/v1"
+    OPENAI_BACKUP_BASE_URL: str = "https://fast.vpsairobot.com"
     OPENAI_BACKUP_API_KEY: str = ""
-    OPENAI_MODEL: str = "gpt-5.4"
-    OPENAI_BACKUP_MODEL: str = "gpt-5.4"
+    OPENAI_MODEL: str = "gpt-5.5"
+    OPENAI_BACKUP_MODEL: str = "gpt-5.5"
     ANTHROPIC_API_KEY: str = ""
-    ANTHROPIC_BASE_URL: str = "https://api.anthropic.com"
-    ANTHROPIC_MODEL: str = "claude-3-5-sonnet-latest"
+    ANTHROPIC_BASE_URL: str = ""
+    ANTHROPIC_MODEL: str = ""
+    NEWS_LLM_PROVIDER: str = "openai"
+    NEWS_LLM_API_KEY: str = ""
+    NEWS_LLM_BASE_URL: str = ""
+    NEWS_LLM_MODEL: str = ""
+    NEWS_LLM_FORCE_CHAT_COMPLETIONS: bool = False
 
     # Storage
     DATABASE_URL: str = Field(default_factory=_default_database_url)

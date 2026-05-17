@@ -33,7 +33,14 @@ router = APIRouter()
 _TRADING_STATS_CACHE_TTL_SEC = 2.0
 _trading_stats_cache_payload = None
 _trading_stats_cache_at = 0.0
-_trading_stats_cache_lock = asyncio.Lock()
+_trading_stats_cache_lock: asyncio.Lock | None = None  # lazily created
+
+
+def _get_stats_lock() -> asyncio.Lock:
+    global _trading_stats_cache_lock
+    if _trading_stats_cache_lock is None:
+        _trading_stats_cache_lock = asyncio.Lock()
+    return _trading_stats_cache_lock
 
 
 def invalidate_trading_stats_cache() -> None:
@@ -136,7 +143,7 @@ async def get_trading_stats(force_refresh: bool = False):
         if (now_mono - _trading_stats_cache_at) <= _TRADING_STATS_CACHE_TTL_SEC:
             return copy.deepcopy(_trading_stats_cache_payload)
 
-    async with _trading_stats_cache_lock:
+    async with _get_stats_lock():
         now_mono = time.monotonic()
         if not force_refresh and _trading_stats_cache_payload is not None:
             if (now_mono - _trading_stats_cache_at) <= _TRADING_STATS_CACHE_TTL_SEC:

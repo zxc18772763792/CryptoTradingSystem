@@ -16,16 +16,35 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def format_exception(exc: BaseException) -> str:
+    message = str(exc).strip()
+    if message:
+        return f"{type(exc).__name__}: {message}"
+    return type(exc).__name__
+
+
+def _epoch_seconds(value: Any) -> float:
+    raw = float(value)
+    magnitude = abs(raw)
+    if magnitude > 1e17:
+        return raw / 1_000_000_000.0
+    if magnitude > 1e14:
+        return raw / 1_000_000.0
+    if magnitude > 1e11:
+        return raw / 1_000.0
+    return raw
+
+
 def parse_ts_any(value: Any) -> datetime:
     if isinstance(value, datetime):
         dt = value
     elif isinstance(value, (int, float)):
-        dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        dt = datetime.fromtimestamp(_epoch_seconds(value), tz=timezone.utc)
     elif isinstance(value, str):
         text = value.strip()
-        if text.isdigit():
-            dt = datetime.fromtimestamp(float(text), tz=timezone.utc)
-        else:
+        try:
+            dt = datetime.fromtimestamp(_epoch_seconds(text), tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
             dt = dt_parser.isoparse(text)
     else:
         raise ValueError(f"unsupported ts value: {value!r}")

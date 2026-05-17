@@ -19,6 +19,8 @@
   const AGENT_STATUS_TIMEOUT_MS = 60000;
   const AGENT_DETAIL_TIMEOUT_MS = 60000;
   const AGENT_REVIEW_TIMEOUT_MS = 30000;
+  const AGENT_GOVERNANCE_REFRESH_MS = 90000;
+  const AGENT_DETAIL_REFRESH_MS = 60000;
 
   let pollTimer = null;
   let initialized = false;
@@ -30,6 +32,9 @@
   let lastScorecardSnapshot = null;
   let statusInFlight = null;
   let governanceInFlight = null;
+  let lastGovernanceLoadedAt = 0;
+  let lastJournalLoadedAt = 0;
+  let lastReviewLoadedAt = 0;
   let reviewLayoutSyncFrame = 0;
   let reviewLayoutObserver = null;
   let reviewRequestSeq = 0;
@@ -68,12 +73,13 @@
       return;
     }
 
+    const viewportHeight = Number(window.innerHeight || 0);
+    const fallbackHeight = Math.min(1040, Math.max(760, viewportHeight - 120));
     const summaryHeight = Math.ceil(summaryEl.getBoundingClientRect().height || 0);
-    if (summaryHeight > 0) {
-      workspace.style.setProperty('--ai-agent-review-history-height', `${summaryHeight}px`);
-      return;
-    }
-    workspace.style.removeProperty('--ai-agent-review-history-height');
+    const targetHeight = summaryHeight > 280
+      ? Math.min(summaryHeight, fallbackHeight)
+      : fallbackHeight;
+    workspace.style.setProperty('--ai-agent-review-history-height', `${targetHeight}px`);
   }
 
   function queueAgentReviewHistorySync() {
@@ -946,16 +952,27 @@
 
   async function rootApi(path, options = {}) {
     if (typeof window.api === 'function') return window.api(path, options);
-    const response = await fetch(path, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(options.headers || {}),
-      },
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.detail || payload.error || `请求失败(${response.status})`);
-    return payload;
+    const { timeoutMs = 15000, ...rest } = options || {};
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs || 15000)));
+    try {
+      const response = await fetch(path, {
+        ...rest,
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(rest.headers || {}),
+        },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || payload.error || `请求失败(${response.status})`);
+      return payload;
+    } catch (error) {
+      if (error?.name === 'AbortError') throw new Error(`请求超时(${timeoutMs}ms)`);
+      throw error;
+    } finally {
+      window.clearTimeout(timer);
+    }
   }
 
   function parseSymbolList(value) {
@@ -1701,6 +1718,7 @@
     if (!el) return;
     try {
       const response = await rootApi(`${AGENT_JOURNAL_API}?limit=15`, { timeoutMs: AGENT_DETAIL_TIMEOUT_MS });
+      lastJournalLoadedAt = Date.now();
       const rows = Array.isArray(response?.items) ? response.items.slice().reverse() : [];
       const summaryHtml = buildAgentJournalCurrentSummary(lastStatusSnapshot || {}, lastConfigSnapshot || {});
       if (!rows.length) {
@@ -2019,6 +2037,7 @@
         '复盘加载超时'
       );
       if (requestId !== reviewRequestSeq) return response;
+      lastReviewLoadedAt = Date.now();
       renderAgentReview(response || {});
       return response;
     } catch (err) {
@@ -2100,6 +2119,7 @@
       if (riskStatusResult.payload) lastRiskStatusSnapshot = riskStatusResult.payload || {};
       if (riskConfigResult.payload) lastRiskConfigSnapshot = riskConfigResult.payload || {};
       if (scorecardResult.payload) lastScorecardSnapshot = scorecardResult.payload || {};
+      lastGovernanceLoadedAt = Date.now();
 
       if (lastRiskStatusSnapshot || lastRiskConfigSnapshot) {
         renderAgentRiskGovernance(lastRiskStatusSnapshot || {}, lastRiskConfigSnapshot || {});
@@ -2224,12 +2244,24 @@
     if (!document.getElementById('ai-agent-card')) return null;
     const includeDetails = options.includeDetails !== false && isAgentTabActive();
     const notifyOnError = options.notifyOnError === true;
+    const forceDetails = options.forceDetails === true || notifyOnError;
     const timeoutMs = Math.max(5000, Number(options.timeoutMs || AGENT_STATUS_TIMEOUT_MS));
     if (statusInFlight) {
       if (includeDetails) {
         return statusInFlight.then((response) => {
-          if (document.getElementById('ai-agent-journal')) loadAgentJournal().catch(() => {});
-          if (document.getElementById('ai-agent-review')) loadAgentReview().catch(() => {});
+          const now = Date.now();
+          if (
+            document.getElementById('ai-agent-journal')
+            && (forceDetails || !lastJournalLoadedAt || now - lastJournalLoadedAt > AGENT_DETAIL_REFRESH_MS)
+          ) {
+            loadAgentJournal().catch(() => {});
+          }
+          if (
+            document.getElementById('ai-agent-review')
+            && (forceDetails || !lastReviewLoadedAt || now - lastReviewLoadedAt > AGENT_DETAIL_REFRESH_MS)
+          ) {
+            loadAgentReview().catch(() => {});
+          }
           return response;
         });
       }
@@ -2237,7 +2269,10 @@
     }
     const task = (async () => {
       try {
-        const response = await rootApi(AGENT_STATUS_API, { timeoutMs });
+        const statusUrl = options.warmPreview === true
+          ? AGENT_STATUS_API
+          : `${AGENT_STATUS_API}?warm_preview=0`;
+        const response = await rootApi(statusUrl, { timeoutMs });
         lastStatusSnapshot = response?.status || {};
         lastConfigSnapshot = response?.config || {};
         renderAgentPanel(response?.status || {}, response?.config || {});
@@ -2249,14 +2284,30 @@
             preserveExisting: true,
           }).catch(() => {});
         }
-        loadAgentGovernance({
-          notifyOnError,
-          timeoutMs: Math.min(timeoutMs, AGENT_DETAIL_TIMEOUT_MS),
-        }).catch(() => {});
-        if (includeDetails && document.getElementById('ai-agent-journal')) {
+        const now = Date.now();
+        const shouldLoadGovernance = includeDetails && (
+          forceDetails
+          || !lastGovernanceLoadedAt
+          || now - lastGovernanceLoadedAt > AGENT_GOVERNANCE_REFRESH_MS
+        );
+        if (shouldLoadGovernance) {
+          loadAgentGovernance({
+            notifyOnError,
+            timeoutMs: Math.min(timeoutMs, AGENT_DETAIL_TIMEOUT_MS),
+          }).catch(() => {});
+        }
+        if (
+          includeDetails
+          && document.getElementById('ai-agent-journal')
+          && (forceDetails || !lastJournalLoadedAt || now - lastJournalLoadedAt > AGENT_DETAIL_REFRESH_MS)
+        ) {
           loadAgentJournal().catch(() => {});
         }
-        if (includeDetails && document.getElementById('ai-agent-review')) {
+        if (
+          includeDetails
+          && document.getElementById('ai-agent-review')
+          && (forceDetails || !lastReviewLoadedAt || now - lastReviewLoadedAt > AGENT_DETAIL_REFRESH_MS)
+        ) {
           loadAgentReview().catch(() => {});
         }
         return response;
@@ -2397,7 +2448,7 @@
     const modules = aiRoot().modules || {};
     modules.agent = {
       refresh: (options = {}) => loadAgentStatus(options),
-      refreshJournal: () => loadAgentStatus({ includeDetails: true, notifyOnError: true }),
+      refreshJournal: () => loadAgentStatus({ includeDetails: true, notifyOnError: true, forceDetails: true }),
       refreshReview: () => loadAgentReview(),
       refreshRanking: () => loadAgentSymbolRanking(true, { timeoutMs: 90000, notifyOnError: true, preserveExisting: false }),
       refreshRisk: () => loadAgentGovernance({ notifyOnError: true, timeoutMs: AGENT_DETAIL_TIMEOUT_MS }),
@@ -2412,7 +2463,7 @@
     window.agentStart = agentStart;
     window.agentStop = agentStop;
     window.agentRunOnce = agentRunOnce;
-    window.agentRefreshJournal = () => loadAgentStatus({ includeDetails: true, notifyOnError: true }).catch(() => {});
+    window.agentRefreshJournal = () => loadAgentStatus({ includeDetails: true, notifyOnError: true, forceDetails: true }).catch(() => {});
     window.agentRefreshReview = () => loadAgentReview().catch(() => {});
     window.agentRefreshRanking = () => loadAgentSymbolRanking(true, { timeoutMs: 90000, notifyOnError: true, preserveExisting: false });
     window.agentSaveConfig = () => saveAgentConfig();

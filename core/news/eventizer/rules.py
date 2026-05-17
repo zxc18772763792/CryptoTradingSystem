@@ -1,4 +1,4 @@
-﻿"""Rule-based fallback event extractor."""
+"""Rule-based fallback event extractor."""
 from __future__ import annotations
 
 import hashlib

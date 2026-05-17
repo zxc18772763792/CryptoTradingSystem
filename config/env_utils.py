@@ -48,6 +48,8 @@ def llm_api_enabled(
 ) -> bool:
     env = _resolve_environ(environ)
     return has_configured_value(
+        env.get("NEWS_LLM_API_KEY"),
+        getattr(settings_obj, "NEWS_LLM_API_KEY", ""),
         env.get("OPENAI_API_KEY"),
         getattr(settings_obj, "OPENAI_API_KEY", ""),
         env.get("OPENAI_BACKUP_API_KEY"),

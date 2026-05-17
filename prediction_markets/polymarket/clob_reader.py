@@ -69,9 +69,9 @@ class ClobReader:
             raise
 
     @staticmethod
-    def _normalize_orderbook_side(levels: Iterable[Any], limit: int = 5) -> List[Dict[str, float]]:
+    def _normalize_orderbook_side(levels: Iterable[Any], limit: int = 5, side: str = "") -> List[Dict[str, float]]:
         out: List[Dict[str, float]] = []
-        for raw in list(levels or [])[:limit]:
+        for raw in list(levels or []):
             price = 0.0
             size = 0.0
             if isinstance(raw, dict):
@@ -83,12 +83,16 @@ class ClobReader:
             if price <= 0:
                 continue
             out.append({"price": price, "size": max(0.0, size)})
-        return out
+        if str(side).lower() in {"bid", "bids", "buy", "buys"}:
+            out.sort(key=lambda item: item["price"], reverse=True)
+        elif str(side).lower() in {"ask", "asks", "sell", "sells"}:
+            out.sort(key=lambda item: item["price"])
+        return out[:limit]
 
     @classmethod
     def _quote_from_book(cls, market_id: str, token_id: str, outcome: str, book: Dict[str, Any], ts: Optional[Any] = None) -> Dict[str, Any]:
-        bids = cls._normalize_orderbook_side(book.get("bids") or book.get("buy") or [])
-        asks = cls._normalize_orderbook_side(book.get("asks") or book.get("sell") or [])
+        bids = cls._normalize_orderbook_side(book.get("bids") or book.get("buy") or [], side="bid")
+        asks = cls._normalize_orderbook_side(book.get("asks") or book.get("sell") or [], side="ask")
         best_bid = bids[0]["price"] if bids else None
         best_ask = asks[0]["price"] if asks else None
         midpoint = None
@@ -97,7 +101,7 @@ class ClobReader:
         price = midpoint if midpoint is not None else float(book.get("price") or book.get("mid") or 0.0)
         spread = None
         if best_bid is not None and best_ask is not None:
-            spread = max(0.0, best_ask - best_bid)
+            spread = round(max(0.0, best_ask - best_bid), 10)
         depth1 = (bids[0]["size"] if bids else 0.0) + (asks[0]["size"] if asks else 0.0)
         depth5 = sum(x["size"] for x in bids[:5]) + sum(x["size"] for x in asks[:5])
         ts_value = parse_ts_any(ts or utc_now())
@@ -127,7 +131,28 @@ class ClobReader:
         return await self._request("GET", "/book", params={"token_id": str(token_id)})
 
     async def get_books(self, token_ids: List[str]) -> Any:
-        return await self._request("POST", "/books", json_payload={"token_ids": token_ids})
+        ids = [str(token_id).strip() for token_id in (token_ids or []) if str(token_id).strip()]
+        if not ids:
+            return []
+        payloads: List[Any] = [
+            [{"token_id": token_id} for token_id in ids],
+            {"token_ids": ids},
+        ]
+        last_exc: Optional[BaseException] = None
+        for payload in payloads:
+            try:
+                return await self._request("POST", "/books", json_payload=payload)
+            except requests.HTTPError as exc:
+                status = int(getattr(getattr(exc, "response", None), "status_code", 0) or 0)
+                if status not in {400, 404, 415, 422}:
+                    raise
+                last_exc = exc
+            except Exception as exc:
+                last_exc = exc
+                break
+        if last_exc:
+            raise last_exc
+        return []
 
     async def get_midpoint(self, token_id: str) -> Any:
         return await self._request("GET", "/midpoint", params={"token_id": str(token_id)})
@@ -152,6 +177,8 @@ class ClobReader:
         try:
             books = await self.get_books(token_ids)
             items = books.get("data") if isinstance(books, dict) else books
+            if isinstance(books, dict) and items is None:
+                items = books.get("books") or books.get("results")
             if isinstance(items, dict):
                 items = list(items.values())
             for book in list(items or []):
@@ -201,9 +228,15 @@ class ClobReader:
             async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20, close_timeout=10) as ws:
                 self.ws_connected = True
                 self._last_ws_error = None
-                await ws.send(json.dumps({"type": "market", "assets_ids": token_ids}))
+                await ws.send(json.dumps({"type": "market", "assets_ids": token_ids, "custom_feature_enabled": True}))
                 while not stop_event.is_set():
-                    raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
+                    except asyncio.TimeoutError:
+                        await ws.send("PING")
+                        continue
+                    if str(raw).strip().upper() in {"PONG", "PING"}:
+                        continue
                     payload = json.loads(raw)
                     for quote in self._quotes_from_ws_payload(payload, token_map):
                         await on_quote(quote)
@@ -223,40 +256,82 @@ class ClobReader:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            token_id = str(item.get("asset_id") or item.get("token_id") or item.get("tokenId") or "")
-            sub = token_map.get(token_id)
-            if not sub:
+            if isinstance(item.get("changes"), list):
+                for change in item.get("changes") or []:
+                    if isinstance(change, dict):
+                        quote = self._quote_from_ws_item(change, token_map, parent=item)
+                        if quote:
+                            messages.append(quote)
                 continue
-            bids = self._normalize_orderbook_side(item.get("bids") or item.get("buys") or [])
-            asks = self._normalize_orderbook_side(item.get("asks") or item.get("sells") or [])
-            best_bid = bids[0]["price"] if bids else None
-            best_ask = asks[0]["price"] if asks else None
-            midpoint = item.get("midpoint")
-            midpoint = float(midpoint) if midpoint is not None else ((best_bid + best_ask) / 2.0 if best_bid is not None and best_ask is not None else None)
-            price = item.get("price")
-            if price is None:
-                price = midpoint if midpoint is not None else float(item.get("last_price") or 0.0)
-            spread = item.get("spread")
-            if spread is None and best_bid is not None and best_ask is not None:
-                spread = max(0.0, best_ask - best_bid)
-            messages.append(
-                {
-                    "ts": parse_ts_any(item.get("timestamp") or item.get("ts") or utc_now()),
-                    "market_id": str(sub.get("market_id") or ""),
-                    "token_id": token_id,
-                    "outcome": str(sub.get("outcome") or "YES").upper(),
-                    "price": float(price or 0.0),
-                    "bid": best_bid,
-                    "ask": best_ask,
-                    "midpoint": None if midpoint is None else float(midpoint),
-                    "spread": None if spread is None else float(spread),
-                    "depth1": (bids[0]["size"] if bids else 0.0) + (asks[0]["size"] if asks else 0.0),
-                    "depth5": sum(x["size"] for x in bids[:5]) + sum(x["size"] for x in asks[:5]),
-                    "fetched_at": utc_now(),
-                    "payload": {"ws": item, "source": "clob_ws"},
-                }
-            )
+            quote = self._quote_from_ws_item(item, token_map)
+            if quote:
+                messages.append(quote)
         return messages
+
+    def _quote_from_ws_item(
+        self,
+        item: Dict[str, Any],
+        token_map: Dict[str, Dict[str, Any]],
+        *,
+        parent: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        parent = parent or {}
+        token_id = str(
+            item.get("asset_id")
+            or item.get("assetId")
+            or item.get("token_id")
+            or item.get("tokenId")
+            or parent.get("asset_id")
+            or parent.get("assetId")
+            or parent.get("token_id")
+            or parent.get("tokenId")
+            or ""
+        )
+        sub = token_map.get(token_id)
+        if not sub:
+            return None
+        bids = self._normalize_orderbook_side(item.get("bids") or item.get("buys") or [], side="bid")
+        asks = self._normalize_orderbook_side(item.get("asks") or item.get("sells") or [], side="ask")
+        best_bid = self._float_or_none(item.get("best_bid") or item.get("bestBid") or parent.get("best_bid") or parent.get("bestBid"))
+        best_ask = self._float_or_none(item.get("best_ask") or item.get("bestAsk") or parent.get("best_ask") or parent.get("bestAsk"))
+        if best_bid is None and bids:
+            best_bid = bids[0]["price"]
+        if best_ask is None and asks:
+            best_ask = asks[0]["price"]
+        midpoint = self._float_or_none(item.get("midpoint") or item.get("mid") or parent.get("midpoint") or parent.get("mid"))
+        if midpoint is None and best_bid is not None and best_ask is not None:
+            midpoint = (best_bid + best_ask) / 2.0
+        price = self._float_or_none(item.get("price") or item.get("last_price") or item.get("lastPrice") or parent.get("price") or parent.get("last_price") or parent.get("lastPrice"))
+        if price is None:
+            price = midpoint or 0.0
+        spread = self._float_or_none(item.get("spread") or parent.get("spread"))
+        if spread is None and best_bid is not None and best_ask is not None:
+            spread = round(max(0.0, best_ask - best_bid), 10)
+        ts_raw = item.get("timestamp") or item.get("ts") or parent.get("timestamp") or parent.get("ts") or utc_now()
+        return {
+            "ts": parse_ts_any(ts_raw),
+            "market_id": str(sub.get("market_id") or ""),
+            "token_id": token_id,
+            "outcome": str(sub.get("outcome") or "YES").upper(),
+            "price": float(price or 0.0),
+            "bid": best_bid,
+            "ask": best_ask,
+            "midpoint": midpoint,
+            "spread": spread,
+            "depth1": (bids[0]["size"] if bids else 0.0) + (asks[0]["size"] if asks else 0.0),
+            "depth5": sum(x["size"] for x in bids[:5]) + sum(x["size"] for x in asks[:5]),
+            "fetched_at": utc_now(),
+            "payload": {"ws": parent or item, "change": item if parent else {}, "source": "clob_ws"},
+        }
+
+    @staticmethod
+    def _float_or_none(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
 
     def get_runtime_status(self) -> Dict[str, Any]:
         return {

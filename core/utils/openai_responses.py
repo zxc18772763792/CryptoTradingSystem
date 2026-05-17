@@ -23,7 +23,6 @@ _OPENAI_FAILOVER_DEFAULT_TZ = "Asia/Shanghai"
 _TARGET_TRANSPORT_OPENAI = "openai"
 _TARGET_TRANSPORT_ANTHROPIC = "anthropic"
 _ANTHROPIC_VERSION = "2023-06-01"
-_XIAOMI_MIMO_MIN_ANTHROPIC_MAX_TOKENS = 384
 # Keep failover ordering request-local by default. This avoids global sticky
 # state leaking across independent requests/tests.
 _ENABLE_CROSS_REQUEST_FAILOVER_CACHE = False
@@ -54,22 +53,17 @@ def build_openai_headers(api_key: str) -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {str(api_key or '').strip()}",
         "Content-Type": "application/json",
+        "User-Agent": "OpenAI/Python 1.0",
     }
 
 
 def build_anthropic_headers(api_key: str, *, base_url: Any = "") -> Dict[str, str]:
     key = str(api_key or "").strip()
-    base = str(base_url or "").strip().lower()
-    headers: Dict[str, str] = {
+    return {
         "Content-Type": "application/json",
         "anthropic-version": _ANTHROPIC_VERSION,
+        "x-api-key": key,
     }
-    if "xiaomimimo.com" in base:
-        headers["api-key"] = key
-        headers["x-api-key"] = key
-    else:
-        headers["x-api-key"] = key
-    return headers
 
 
 def _normalize_target_base_url(value: Any) -> str:
@@ -112,18 +106,6 @@ def build_target_headers(target: Mapping[str, Any] | None) -> Dict[str, str]:
     if str(item.get("transport") or "") == _TARGET_TRANSPORT_ANTHROPIC:
         return build_anthropic_headers(api_key, base_url=item.get("base_url"))
     return build_openai_headers(api_key)
-
-
-def target_max_tokens_for_request(target: Mapping[str, Any] | None, requested_max_tokens: Any) -> int:
-    item = _decorate_target(target or {}, int((target or {}).get("index") or 0))
-    try:
-        resolved = max(1, int(requested_max_tokens))
-    except Exception:
-        resolved = 1
-    base_url = str(item.get("base_url") or "").strip().lower()
-    if str(item.get("transport") or "") == _TARGET_TRANSPORT_ANTHROPIC and "xiaomimimo.com" in base_url:
-        return max(resolved, _XIAOMI_MIMO_MIN_ANTHROPIC_MAX_TOKENS)
-    return resolved
 
 
 def _split_endpoint_candidates(value: Any) -> List[str]:

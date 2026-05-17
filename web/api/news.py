@@ -36,6 +36,7 @@ from core.news.eventizer.rules import SymbolMapper, load_news_rule_config
 from core.news.service.worker import DEFAULT_INTERVALS, process_llm_batch
 from core.news.storage import db as news_db
 from core.news.storage.models import parse_any_datetime
+from core.utils.asyncio_compat import LoopBoundAsyncLock
 
 
 router = APIRouter()
@@ -61,18 +62,18 @@ _DEFAULT_TOPIC_KEYWORDS = {
     "降息",
     "加息",
 }
-_AUTO_PULL_LOCK = asyncio.Lock()
+_AUTO_PULL_LOCK = LoopBoundAsyncLock()
 _AUTO_PULL_RUNNING = False
 _AUTO_PULL_LAST_AT: Optional[datetime] = None
-_NEWS_PIPELINE_LOCK = asyncio.Lock()
+_NEWS_PIPELINE_LOCK = LoopBoundAsyncLock()
 _MANUAL_PULL_SEQ = 0
 _MANUAL_LLM_SEQ = 0
-_FAILED_REQUEUE_LOCK = asyncio.Lock()
+_FAILED_REQUEUE_LOCK = LoopBoundAsyncLock()
 _FAILED_REQUEUE_LAST_AT: Optional[datetime] = None
-_SUMMARY_REPAIR_AUTO_LOCK = asyncio.Lock()
+_SUMMARY_REPAIR_AUTO_LOCK = LoopBoundAsyncLock()
 _SUMMARY_REPAIR_AUTO_LAST_AT: Optional[datetime] = None
 _SUMMARY_REPAIR_AUTO_TASK: Optional[asyncio.Task] = None
-_NEWS_ENGINE_START_LOCK = asyncio.Lock()
+_NEWS_ENGINE_START_LOCK = LoopBoundAsyncLock()
 _NEWS_RESPONSE_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {"latest": {}, "summary": {}, "brief": {}, "health": {}}
 _NEWS_HEALTH_REFRESH_TASK: Optional[asyncio.Task] = None
 _NEWS_PROCESS_CACHE_TTL_SEC = 5.0

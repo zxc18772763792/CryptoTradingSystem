@@ -116,6 +116,54 @@ def test_compute_onchain_overview_includes_premium_snapshot(monkeypatch):
     assert payload["component_status"]["premium_external"]["detail"].startswith("cached=2/")
 
 
+def test_compute_onchain_overview_uses_coinglass_whales(monkeypatch):
+    from web.api import data as data_api
+
+    async def fake_tvl(*args, **kwargs):
+        return {"chain": "Bitcoin", "available": True, "latest_tvl": 1.0, "series": []}
+
+    async def fake_whales(*args, **kwargs):
+        return {
+            "available": True,
+            "source": "coinglass_whale_transfer",
+            "count": 1,
+            "transactions": [{"hash": "cg", "btc": 12.0}],
+        }
+
+    async def fail_public_whales(*args, **kwargs):
+        raise AssertionError("public blockchain fallback should not run when Coinglass whales are available")
+
+    async def fake_funding(*args, **kwargs):
+        return {"available": True, "source": "coinglass_cache", "count": 1, "rates": {}}
+
+    async def fake_fear(*args, **kwargs):
+        return {"available": True, "value": 52}
+
+    monkeypatch.setattr(data_api.exchange_manager, "get_exchange", lambda *_: None)
+    monkeypatch.setattr(data_api, "_fetch_defillama_chain_tvl", fake_tvl)
+    monkeypatch.setattr(data_api, "_fetch_whale_activity", fake_whales)
+    monkeypatch.setattr(data_api, "_fetch_btc_whale_unconfirmed", fail_public_whales)
+    monkeypatch.setattr(data_api, "_fetch_multi_exchange_funding", fake_funding)
+    monkeypatch.setattr(data_api, "_fetch_fear_greed_snapshot", fake_fear)
+    monkeypatch.setattr(
+        data_api,
+        "_load_premium_external_snapshot",
+        lambda: {"sources": {}, "summary": {"total_sources": 0, "configured_keys": 0, "cached_sources": 0}},
+    )
+
+    payload = asyncio.run(
+        data_api._compute_onchain_overview(
+            exchange="binance",
+            symbol="BTC/USDT",
+            whale_threshold_btc=10.0,
+            chain="Bitcoin",
+        )
+    )
+
+    assert payload["whale_activity"]["source"] == "coinglass_whale_transfer"
+    assert payload["component_status"]["whale_activity"]["source"] == "coinglass_whale_transfer"
+
+
 def test_resolve_onchain_chain_context_maps_bsc_and_brc20():
     from web.api import data as data_api
 

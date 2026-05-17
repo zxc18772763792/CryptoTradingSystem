@@ -56,6 +56,8 @@ And it also:
 - blocks persisted `live`-mode restore unless you explicitly pass `-AllowPersistedLiveMode`
 - keeps the AI autonomous agent separate from the default boot path
 
+Keep `START_NEWS_WORKER`, `START_NEWS_LLM_WORKER`, and `START_PM_WORKER` unset in local `.env` for the managed path; use the `web.bat` flags above so `status` and startup behavior stay aligned.
+
 Important behavior while the service is already running:
 
 - `start` does not rewire the worker mix for an already-running service

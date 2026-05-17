@@ -1,9 +1,9 @@
-"""Funding rate provider for backtest/research (local cache + Binance HTTP fetch).
+"""Funding rate provider for backtest/research.
 
 Incremental design:
 - Does not alter live execution path
 - Can preload from local parquet/csv
-- Can fetch Binance USDT-M funding history via public REST and cache locally
+- Can hydrate from CoinGlass normalized funding cache before exchange HTTP fallback
 - Can attach an aligned ``funding_rate`` column to a OHLCV DataFrame for backtests
 """
 from __future__ import annotations
@@ -202,6 +202,59 @@ class FundingRateProvider:
         s = s[~s.index.duplicated(keep="last")].sort_index()
         return s
 
+    def load_coinglass_cache(
+        self,
+        symbol: str,
+        *,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        save: bool = True,
+    ) -> pd.Series:
+        try:
+            from core.data.coinglass_client import load_dataset_rows_for_symbol  # noqa: PLC0415
+        except Exception:
+            return pd.Series(dtype=float)
+
+        frame = load_dataset_rows_for_symbol("funding_rate_history", symbol)
+        if frame.empty:
+            return pd.Series(dtype=float)
+        rows = []
+        for _, row in frame.iterrows():
+            try:
+                payload = row.get("payload_json")
+                if isinstance(payload, str):
+                    import json
+
+                    payload = json.loads(payload or "{}")
+                if not isinstance(payload, dict):
+                    payload = {}
+                ts = pd.Timestamp(row.get("source_ts") or payload.get("time") or payload.get("timestamp"))
+                if ts.tzinfo is not None:
+                    ts = ts.tz_convert("UTC").tz_localize(None)
+                value = payload.get("funding_rate")
+                if value is None:
+                    value = payload.get("funding_rate_close")
+                if value is None:
+                    value = payload.get("close")
+                rows.append((ts, float(value)))
+            except Exception:
+                continue
+        if not rows:
+            return pd.Series(dtype=float)
+        series = pd.Series(
+            [value for _, value in rows],
+            index=pd.to_datetime([ts for ts, _ in rows]),
+            dtype=float,
+        )
+        series = series[~series.index.duplicated(keep="last")].sort_index()
+        if start_time is not None:
+            series = series[series.index >= _to_naive_ts(start_time)]
+        if end_time is not None:
+            series = series[series.index <= _to_naive_ts(end_time)]
+        if not series.empty:
+            self.merge_series(symbol, series, exchange=self.config.exchange, save=save)
+        return series
+
     def ensure_history(
         self,
         symbol: str,
@@ -213,8 +266,9 @@ class FundingRateProvider:
     ) -> pd.Series:
         """Ensure local/in-memory funding history covers requested window.
 
-        For ``source in {'local', 'auto'}``, local cache is loaded if present.
-        For ``source in {'binance_http', 'auto'}``, missing tail/head is fetched and merged.
+        For ``source in {'local', 'auto', 'coinglass'}``, local cache is loaded if present.
+        For ``source in {'coinglass', 'auto'}``, CoinGlass normalized cache is used before exchange HTTP.
+        For ``source in {'binance_http', 'exchange_http', 'auto'}``, exchange HTTP is the final fallback.
         """
         sym = _norm_symbol(symbol)
         src = str(source or self.config.source or "local").lower()
@@ -230,7 +284,7 @@ class FundingRateProvider:
         if src == "local":
             return self.get_series(sym, start_time=start_time, end_time=end_time)
 
-        if src not in {"auto", "binance_http"}:
+        if src not in {"auto", "coinglass", "binance_http", "exchange_http"}:
             return self.get_series(sym, start_time=start_time, end_time=end_time)
 
         start_dt = start_time
@@ -247,7 +301,21 @@ class FundingRateProvider:
         if not need_fetch and end_dt is not None:
             need_fetch = _to_naive_ts(cur.index.max()) < _to_naive_ts(end_dt) - pd.Timedelta(hours=12)
 
-        if need_fetch:
+        if need_fetch and src in {"auto", "coinglass"}:
+            try:
+                coinglass_series = self.load_coinglass_cache(
+                    sym,
+                    start_time=start_dt,
+                    end_time=end_dt,
+                    save=save,
+                )
+                if not coinglass_series.empty:
+                    cur = self.get_series(sym)
+                    need_fetch = False
+            except Exception as e:
+                logger.debug(f"load CoinGlass funding cache failed {sym}: {e}")
+
+        if need_fetch and src in {"auto", "binance_http", "exchange_http"}:
             try:
                 fetched = self.fetch_binance_http_history(sym, start_time=start_dt, end_time=end_dt)
                 if not fetched.empty:
@@ -329,4 +397,3 @@ class FundingRateProvider:
             return out
         out[column] = self.align_to_index(symbol=symbol, index=out.index, fill_forward=fill_forward, default_rate=default_rate)
         return out
-

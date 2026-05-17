@@ -43,12 +43,17 @@ from core.utils.openai_responses import (
     target_transport,
 )
 
-DEFAULT_OPENAI_BASE_URL = "https://sub.a-j.app/v1"
-DEFAULT_OPENAI_MODEL = "gpt-5.4"
+DEFAULT_OPENAI_BASE_URL = "https://kuaipao.ai"
+DEFAULT_OPENAI_MODEL = "deepseek-v4-flash"
 _OPENAI_FAILOVER_SCOPE = "news"
 _LEGACY_PROVIDER_ALIASES = {"glm", "glm5", "zhipu"}
 _LEGACY_BASE_URL_HINTS = ("bigmodel.cn", "zhipu")
 _RUNTIME_SETTING_NAMES = (
+    "NEWS_LLM_API_KEY",
+    "NEWS_LLM_BASE_URL",
+    "NEWS_LLM_MODEL",
+    "NEWS_LLM_PROVIDER",
+    "NEWS_LLM_FORCE_CHAT_COMPLETIONS",
     "OPENAI_API_KEY",
     "OPENAI_BACKUP_API_KEY",
     "OPENAI_BASE_URL",
@@ -139,6 +144,52 @@ def _runtime_setting(name: str) -> str:
     return str(os.getenv(name) or current or "").strip()
 
 
+def _truthy_text(value: Any, *, default: bool = False) -> bool:
+    text = str(value if value is not None else "").strip().lower()
+    if not text:
+        return bool(default)
+    return text in {"1", "true", "yes", "on", "y"}
+
+
+def _news_llm_override_enabled() -> bool:
+    return bool(
+        _runtime_setting("NEWS_LLM_API_KEY")
+        or _runtime_setting("NEWS_LLM_BASE_URL")
+        or _runtime_setting("NEWS_LLM_MODEL")
+    )
+
+
+def _news_llm_configured(cfg: Dict[str, Any]) -> bool:
+    llm_cfg = cfg.get("llm") or {}
+    model = str(llm_cfg.get("model") or "").strip().lower()
+    return bool(
+        _news_llm_override_enabled()
+        or _normalize_openai_base_urls(llm_cfg.get("base_url"))
+        or (model and not model.startswith("glm"))
+    )
+
+
+def _news_llm_api_key() -> str:
+    return _runtime_setting("NEWS_LLM_API_KEY")
+
+
+def _news_llm_base_url() -> str:
+    return _runtime_setting("NEWS_LLM_BASE_URL")
+
+
+def _news_llm_model() -> str:
+    return _runtime_setting("NEWS_LLM_MODEL")
+
+
+def _force_chat_completions(cfg: Dict[str, Any]) -> bool:
+    llm_cfg = cfg.get("llm") or {}
+    raw = _first_non_empty(
+        _runtime_setting("NEWS_LLM_FORCE_CHAT_COMPLETIONS"),
+        llm_cfg.get("force_chat_completions"),
+    )
+    return _truthy_text(raw, default=False)
+
+
 def _openai_primary_api_key() -> str:
     return _runtime_setting("OPENAI_API_KEY")
 
@@ -156,7 +207,7 @@ def _openai_api_key() -> str:
 
 def _llm_provider(cfg: Dict[str, Any]) -> str:
     llm_cfg = cfg.get("llm") or {}
-    raw = str(os.getenv("NEWS_LLM_PROVIDER") or llm_cfg.get("provider") or "").strip().lower()
+    raw = str(_runtime_setting("NEWS_LLM_PROVIDER") or llm_cfg.get("provider") or "").strip().lower()
     if raw in {"openai", "codex", "responses"} or raw in _LEGACY_PROVIDER_ALIASES:
         return "openai"
     return "openai"
@@ -164,25 +215,34 @@ def _llm_provider(cfg: Dict[str, Any]) -> str:
 
 def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     llm_cfg = cfg.get("llm") or {}
+    news_llm_configured = _news_llm_configured(cfg)
     return openai_endpoint_targets(
         primary_base_url=(
             _normalize_openai_base_urls(
-                _first_non_empty(
+                _first_non_empty(_news_llm_base_url(), llm_cfg.get("base_url"))
+                if news_llm_configured
+                else _first_non_empty(
                     _runtime_setting("OPENAI_BASE_URL"),
                     llm_cfg.get("base_url"),
                 )
             )
             or DEFAULT_OPENAI_BASE_URL
         ),
-        backup_base_urls=_merge_csv_values(
-            _runtime_setting("OPENAI_BACKUP_BASE_URL"),
-            llm_cfg.get("backup_base_url"),
+        backup_base_urls=(
+            _merge_csv_values(llm_cfg.get("backup_base_url"))
+            if news_llm_configured
+            else _merge_csv_values(
+                _runtime_setting("OPENAI_BACKUP_BASE_URL"),
+                llm_cfg.get("backup_base_url"),
+            )
         ),
-        primary_api_key=_openai_primary_api_key(),
-        backup_api_key=_openai_backup_api_key(),
+        primary_api_key=_first_non_empty(_news_llm_api_key(), _openai_primary_api_key()),
+        backup_api_key="" if news_llm_configured else _openai_backup_api_key(),
         primary_model=_openai_model(cfg),
         backup_model=(
-            str(
+            ""
+            if news_llm_configured
+            else str(
                 _first_non_empty(
                     _runtime_setting("OPENAI_BACKUP_MODEL"),
                     llm_cfg.get("backup_model"),
@@ -204,6 +264,14 @@ def _openai_base_url(cfg: Dict[str, Any]) -> str:
 
 def _openai_model(cfg: Dict[str, Any]) -> str:
     llm_cfg = cfg.get("llm") or {}
+    if _news_llm_configured(cfg):
+        return _normalize_openai_model(
+            _first_non_empty(
+                _news_llm_model(),
+                llm_cfg.get("model"),
+                DEFAULT_OPENAI_MODEL,
+            )
+        )
     return _normalize_openai_model(
         _first_non_empty(
             _runtime_setting("OPENAI_MODEL"),
@@ -213,7 +281,7 @@ def _openai_model(cfg: Dict[str, Any]) -> str:
 
 
 def _llm_api_key(cfg: Dict[str, Any]) -> str:
-    return _openai_api_key()
+    return _first_non_empty(_news_llm_api_key(), _openai_api_key())
 
 
 def _llm_base_url(cfg: Dict[str, Any]) -> str:
@@ -225,6 +293,8 @@ def _llm_model(cfg: Dict[str, Any]) -> str:
 
 
 def _llm_summary_source(cfg: Dict[str, Any]) -> str:
+    if _force_chat_completions(cfg):
+        return "openai_chat_completions"
     return "openai_responses"
 
 
@@ -553,10 +623,13 @@ class AsyncGLMClient:
                         rate_limiter.reset_backoff()
                         return data, "none"
 
-                    if request_chat_payload and should_prefer_openai_target_chat_completions(
-                        targets,
-                        base_url,
-                        scope=_OPENAI_FAILOVER_SCOPE,
+                    if request_chat_payload and (
+                        _force_chat_completions(self._cfg)
+                        or should_prefer_openai_target_chat_completions(
+                            targets,
+                            base_url,
+                            scope=_OPENAI_FAILOVER_SCOPE,
+                        )
                     ):
                         chat_url = chat_completions_endpoint(base_url)
                         async with session.request(

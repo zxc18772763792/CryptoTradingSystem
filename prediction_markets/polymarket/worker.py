@@ -13,7 +13,9 @@ from prediction_markets.polymarket.config import load_polymarket_config
 from prediction_markets.polymarket.db import (
     cleanup_old_quotes,
     close_pm_db,
+    configure_pm_db,
     compute_and_store_alerts,
+    get_pm_database_url,
     get_markets_map,
     get_pm_status,
     init_pm_db,
@@ -26,7 +28,7 @@ from prediction_markets.polymarket.db import (
 )
 from prediction_markets.polymarket.gamma_client import GammaClient
 from prediction_markets.polymarket.market_resolver import MarketResolver
-from prediction_markets.polymarket.utils import parse_ts_any, utc_now
+from prediction_markets.polymarket.utils import format_exception, parse_ts_any, utc_now
 
 
 @dataclass
@@ -49,7 +51,16 @@ _STOP_EVENT: Optional[asyncio.Event] = None
 
 
 def get_runtime_status() -> Dict[str, Any]:
-    return asdict(_RUNTIME)
+    out = asdict(_RUNTIME)
+    out["database_url"] = get_pm_database_url()
+    return out
+
+
+def _configure_db_from_cfg(cfg: Dict[str, Any]) -> None:
+    storage_cfg = ((cfg.get("defaults") or {}).get("storage") or {}) if isinstance(cfg, dict) else {}
+    database_url = storage_cfg.get("database_url") or storage_cfg.get("pm_database_url")
+    if database_url:
+        configure_pm_db(str(database_url))
 
 
 def _fallback_quote_from_market_snapshot(sub: Dict[str, Any], market_row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -124,20 +135,21 @@ async def _discover_markets(cfg: Dict[str, Any], categories: Optional[List[str]]
                 break
             max_offset += page_limit
     except Exception as exc:
-        await set_source_state("gamma_events", last_error=str(exc), mark_failure=True, paused_until=utc_now() + timedelta(minutes=5))
-        logger.warning(f"Polymarket events discovery failed: {type(exc).__name__}: {exc}")
+        err = format_exception(exc)
+        await set_source_state("gamma_events", last_error=err, mark_failure=True, paused_until=utc_now() + timedelta(minutes=5))
+        logger.warning(f"Polymarket events discovery failed: {err}")
 
     try:
         tags = await asyncio.wait_for(gamma.list_tags(limit=200), timeout=8)
         await set_source_state("gamma_tags", cursor_type="ts", cursor_value=str(len(tags)), last_ts=utc_now(), mark_success=True)
     except Exception as exc:
-        await set_source_state("gamma_tags", last_error=str(exc), mark_failure=True)
+        await set_source_state("gamma_tags", last_error=format_exception(exc), mark_failure=True)
 
     async def _safe_search(keyword: str) -> List[Dict[str, Any]]:
         try:
             return await asyncio.wait_for(gamma.search_public(keyword, limit=15), timeout=8)
         except Exception as exc:
-            logger.debug(f"search_public failed for {keyword}: {type(exc).__name__}: {exc}")
+            logger.debug(f"search_public failed for {keyword}: {format_exception(exc)}")
             return []
 
     for category_name in selected_categories:
@@ -196,13 +208,14 @@ async def _poll_quotes_once(cfg: Dict[str, Any], categories: Optional[List[str]]
         await insert_quotes(quotes)
         await set_source_state("clob_rest", cursor_type="ts", cursor_value=str(len(quotes)), last_ts=utc_now(), mark_success=True)
     except Exception as exc:
-        await set_source_state("clob_rest", last_error=str(exc), mark_failure=True, paused_until=utc_now() + timedelta(minutes=2))
-        logger.warning(f"Polymarket quote polling failed: {exc}")
+        err = format_exception(exc)
+        await set_source_state("clob_rest", last_error=err, mark_failure=True, paused_until=utc_now() + timedelta(minutes=2))
+        logger.warning(f"Polymarket quote polling failed: {err}")
     if quotes:
         try:
             alerts = await compute_and_store_alerts(utc_now() - timedelta(minutes=15), utc_now())
         except Exception as exc:
-            logger.debug(f"compute_and_store_alerts failed: {exc}")
+            logger.debug(f"compute_and_store_alerts failed: {format_exception(exc)}")
     _RUNTIME.last_quote_refresh_at = utc_now().isoformat()
     _RUNTIME.quotes_last_run = len(quotes)
     _RUNTIME.alerts_last_run = int(alerts.get("inserted") or 0)
@@ -228,6 +241,7 @@ async def run_worker_once(
     categories: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     config = cfg or load_polymarket_config()
+    _configure_db_from_cfg(config)
     out: Dict[str, Any] = {"ts": utc_now().isoformat()}
     if refresh_markets:
         out["markets"] = await refresh_markets_once(config, categories=categories)
@@ -247,8 +261,8 @@ async def _quotes_loop(cfg: Dict[str, Any], stop_event: asyncio.Event) -> None:
             await cleanup_old_quotes(retention_days)
             _RUNTIME.last_error = None
         except Exception as exc:
-            _RUNTIME.last_error = str(exc)
-            logger.warning(f"Polymarket quotes loop error: {exc}")
+            _RUNTIME.last_error = format_exception(exc)
+            logger.warning(f"Polymarket quotes loop error: {format_exception(exc)}")
         await asyncio.sleep(max(5, interval))
 
 
@@ -288,15 +302,15 @@ async def _ws_quotes_loop(cfg: Dict[str, Any], stop_event: asyncio.Event) -> Non
             failure_count += 1
             _RUNTIME.ws_connected = False
             _RUNTIME.ws_mode = "polling"
-            _RUNTIME.last_error = str(exc)
+            _RUNTIME.last_error = format_exception(exc)
             pause_for = backoffs[min(failure_count - 1, len(backoffs) - 1)]
             await set_source_state(
                 "clob_ws",
-                last_error=str(exc),
+                last_error=format_exception(exc),
                 mark_failure=True,
                 paused_until=utc_now() + timedelta(seconds=pause_for),
             )
-            logger.warning(f"Polymarket WS loop error ({failure_count}): {exc}")
+            logger.warning(f"Polymarket WS loop error ({failure_count}): {format_exception(exc)}")
             await asyncio.sleep(pause_for)
 
 
@@ -307,14 +321,15 @@ async def _markets_loop(cfg: Dict[str, Any], stop_event: asyncio.Event) -> None:
             await refresh_markets_once(cfg)
             _RUNTIME.last_error = None
         except Exception as exc:
-            _RUNTIME.last_error = str(exc)
-            logger.warning(f"Polymarket markets loop error: {exc}")
+            _RUNTIME.last_error = format_exception(exc)
+            logger.warning(f"Polymarket markets loop error: {format_exception(exc)}")
         await asyncio.sleep(max(300, interval))
 
 
 async def run_worker(cfg: Optional[Dict[str, Any]] = None) -> None:
     global _STOP_EVENT
     config = cfg or load_polymarket_config()
+    _configure_db_from_cfg(config)
     await init_pm_db()
     _STOP_EVENT = asyncio.Event()
     _RUNTIME.worker_running = True
@@ -341,10 +356,13 @@ def main() -> int:
     parser.add_argument("--pull-only", action="store_true")
     parser.add_argument("--quotes-only", action="store_true")
     parser.add_argument("--categories", default="")
+    parser.add_argument("--database-url", default="", help="Override Polymarket DB URL, e.g. sqlite+aiosqlite:///data/polymarket.db")
     args = parser.parse_args()
 
     categories = [x.strip().upper() for x in str(args.categories or "").split(",") if x.strip()]
     cfg = load_polymarket_config()
+    if args.database_url:
+        configure_pm_db(args.database_url)
 
     async def _entry() -> None:
         await init_pm_db()

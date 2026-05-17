@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -729,6 +730,92 @@ def test_get_altcoin_scan_snapshot_resolves_universe_only_once(monkeypatch):
     assert payload["rows"][0]["symbol"] == "AAA/USDT"
     assert "预加载警告" in payload["warnings"]
     assert payload["cache"]["hit"] is False
+    altcoin_api._clear_altcoin_scan_cache()
+
+
+def test_get_altcoin_scan_snapshot_serves_stale_cache_while_refreshing(monkeypatch):
+    altcoin_api._clear_altcoin_scan_cache()
+    state = {"compute_calls": 0, "gate": None}
+
+    async def fake_resolve_universe(**kwargs):
+        return ["AAA/USDT"], ["AAA/USDT"], [], []
+
+    async def fake_compute_scan_payload(**kwargs):
+        state["compute_calls"] += 1
+        await state["gate"].wait()
+        return {
+            "exchange": "binance",
+            "timeframe": "4h",
+            "rows": [{"symbol": "AAA/USDT", "tags": ["fresh"], "data_quality": {}}],
+            "symbols_requested": ["AAA/USDT"],
+            "symbols_used": ["AAA/USDT"],
+            "excluded_retired": [],
+            "warnings": ["fresh warning"],
+            "generated_at": "2026-04-21T12:00:00+00:00",
+            "universe_meta": {},
+        }
+
+    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api, "_compute_scan_payload", fake_compute_scan_payload)
+
+    cache_key = altcoin_api._cache_key(
+        exchange="binance",
+        timeframe="4h",
+        symbols=["AAA/USDT"],
+        exclude_retired=True,
+        mode="combined",
+        view="4h",
+        universe_scope="research",
+    )
+    altcoin_api._ALTCOIN_SCAN_CACHE[cache_key] = {
+        "stored_at": time.time() - 900.0,
+        "payload": {
+            "exchange": "binance",
+            "timeframe": "4h",
+            "rows": [{"symbol": "AAA/USDT", "tags": ["cached"], "data_quality": {}}],
+            "symbols_requested": ["AAA/USDT"],
+            "symbols_used": ["AAA/USDT"],
+            "excluded_retired": [],
+            "warnings": ["cached warning"],
+            "generated_at": "2026-04-21T11:55:00+00:00",
+            "universe_meta": {},
+        },
+    }
+
+    async def runner():
+        state["gate"] = asyncio.Event()
+        payload = await altcoin_api.get_altcoin_scan_snapshot(
+            exchange="binance",
+            timeframe="4h",
+            symbols=["AAA/USDT"],
+            exclude_retired=True,
+            refresh=False,
+            mode="combined",
+            view="4h",
+            universe_scope="research",
+        )
+        task = altcoin_api._ALTCOIN_SCAN_REFRESH_TASKS.get(cache_key)
+        assert task is not None
+        assert task.done() is False
+        assert payload["rows"][0]["tags"] == ["cached"]
+        assert payload["cache"]["hit"] is True
+        assert payload["cache"]["stale"] is True
+        assert payload["cache"]["refreshing"] is True
+        assert payload["cache"]["served_mode"] == "stale_cache_refresh"
+        assert any("background refresh" in warning for warning in payload["warnings"])
+        state["gate"].set()
+        refreshed = await asyncio.shield(task)
+        return payload, refreshed
+
+    payload, refreshed = asyncio.run(runner())
+
+    assert state["compute_calls"] == 1
+    assert payload["generated_at"] == "2026-04-21T11:55:00+00:00"
+    assert refreshed["cache"]["hit"] is False
+    assert refreshed["cache"]["stale"] is False
+    assert refreshed["rows"][0]["tags"] == ["fresh"]
+    assert any("fresh warning" in warning for warning in refreshed["warnings"])
+    assert cache_key not in altcoin_api._ALTCOIN_SCAN_REFRESH_TASKS
     altcoin_api._clear_altcoin_scan_cache()
 
 

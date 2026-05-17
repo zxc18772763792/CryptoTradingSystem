@@ -40,15 +40,26 @@ def test_live_decision_shadow_block_not_applied(monkeypatch):
     router = LiveAIDecisionRouter()
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_ENABLED", True, raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODE", "shadow", raising=False)
-    monkeypatch.setattr(settings, "AI_LIVE_DECISION_PROVIDER", "glm", raising=False)
-    monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODEL", "GLM-4.5-Air", raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_PROVIDER", "codex", raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODEL", "gpt-5.5", raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_APPLY_IN_PAPER", True, raising=False)
 
     async def _fake_call_provider(**kwargs):
         return {"action": "block", "reason": "unstable context", "confidence": 0.66}
 
     monkeypatch.setattr(router, "_call_provider", _fake_call_provider)
 
-    result = asyncio.run(_evaluate(router))
+    result = asyncio.run(router.evaluate_signal(
+        trading_mode="paper",
+        strategy="MAStrategy",
+        symbol="BTC/USDT",
+        signal_type="buy",
+        signal_strength=0.82,
+        price=65000.0,
+        account_equity=10000.0,
+        order_value=500.0,
+        leverage=3.0,
+    ))
     assert result["action"] == "block"
     assert result["applied"] is False
     assert result["allowed"] is True
@@ -60,14 +71,25 @@ def test_live_decision_enforce_block_applied(monkeypatch):
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_ENABLED", True, raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODE", "enforce", raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_PROVIDER", "codex", raising=False)
-    monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODEL", "gpt-5-mini", raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODEL", "gpt-5.5", raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_APPLY_IN_PAPER", True, raising=False)
 
     async def _fake_call_provider(**kwargs):
         return {"action": "block", "reason": "risk skew", "confidence": 0.92}
 
     monkeypatch.setattr(router, "_call_provider", _fake_call_provider)
 
-    result = asyncio.run(_evaluate(router))
+    result = asyncio.run(router.evaluate_signal(
+        trading_mode="paper",
+        strategy="MAStrategy",
+        symbol="BTC/USDT",
+        signal_type="buy",
+        signal_strength=0.82,
+        price=65000.0,
+        account_equity=10000.0,
+        order_value=500.0,
+        leverage=3.0,
+    ))
     assert result["action"] == "block"
     assert result["applied"] is True
     assert result["allowed"] is False
@@ -79,14 +101,25 @@ def test_live_decision_enforce_reduce_only_applied(monkeypatch):
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_ENABLED", True, raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODE", "enforce", raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_PROVIDER", "codex", raising=False)
-    monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODEL", "gpt-5.4", raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODEL", "gpt-5.5", raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_APPLY_IN_PAPER", True, raising=False)
 
     async def _fake_call_provider(**kwargs):
         return {"action": "reduce_only", "reason": "only de-risk here", "confidence": 0.71}
 
     monkeypatch.setattr(router, "_call_provider", _fake_call_provider)
 
-    result = asyncio.run(_evaluate(router))
+    result = asyncio.run(router.evaluate_signal(
+        trading_mode="paper",
+        strategy="MAStrategy",
+        symbol="BTC/USDT",
+        signal_type="buy",
+        signal_strength=0.82,
+        price=65000.0,
+        account_equity=10000.0,
+        order_value=500.0,
+        leverage=3.0,
+    ))
     assert result["action"] == "reduce_only"
     assert result["applied"] is True
     assert result["allowed"] is True
@@ -98,13 +131,24 @@ def test_live_decision_fail_open(monkeypatch):
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_ENABLED", True, raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODE", "enforce", raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_FAIL_OPEN", True, raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_APPLY_IN_PAPER", True, raising=False)
 
     async def _raise_call_provider(**kwargs):
         raise RuntimeError("timeout")
 
     monkeypatch.setattr(router, "_call_provider", _raise_call_provider)
 
-    result = asyncio.run(_evaluate(router))
+    result = asyncio.run(router.evaluate_signal(
+        trading_mode="paper",
+        strategy="MAStrategy",
+        symbol="BTC/USDT",
+        signal_type="buy",
+        signal_strength=0.82,
+        price=65000.0,
+        account_equity=10000.0,
+        order_value=500.0,
+        leverage=3.0,
+    ))
     assert result["allowed"] is True
     assert result["action"] == "allow"
     assert result["reason"] == "ai_error_fail_open"
@@ -132,30 +176,28 @@ def test_live_decision_restricts_codex_live_review_fail_open(monkeypatch):
     assert result["error_code"] == "model_policy_restricted"
 
 
-def test_live_decision_falls_back_to_alternative_provider_for_live_review(monkeypatch):
+def test_live_decision_restricts_codex_live_review_fail_closed(monkeypatch):
     router = LiveAIDecisionRouter()
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_ENABLED", True, raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODE", "enforce", raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_PROVIDER", "codex", raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_FAIL_OPEN", False, raising=False)
     monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-openai", raising=False)
-    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "sk-claude", raising=False)
+    # No permitted fallback provider must be available, otherwise the router
+    # correctly falls back (e.g. codex→claude) instead of fail-closed blocking.
+    # This mirrors the fail_open sibling so the restriction path is exercised.
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "", raising=False)
     monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
 
-    seen = {}
-
-    async def _fake_call_provider(**kwargs):
-        seen.update(kwargs)
-        return {"action": "allow", "reason": "fallback_provider", "confidence": 0.88}
-
-    monkeypatch.setattr(router, "_call_provider", _fake_call_provider)
+    provider_call = AsyncMock(return_value={"action": "allow", "reason": "should_not_run", "confidence": 0.5})
+    monkeypatch.setattr(router, "_call_provider", provider_call)
 
     result = asyncio.run(_evaluate(router))
 
-    assert seen["provider"] == "claude"
-    assert result["provider"] == "claude"
-    assert result["reason"] == "fallback_provider"
-    assert result["allowed"] is True
+    assert provider_call.await_count == 0
+    assert result["allowed"] is False
+    assert result["action"] == "block"
+    assert result["reason"] == "provider_live_review_restricted"
 
 
 def test_live_decision_fail_closed(monkeypatch):
@@ -163,13 +205,24 @@ def test_live_decision_fail_closed(monkeypatch):
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_ENABLED", True, raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODE", "enforce", raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_FAIL_OPEN", False, raising=False)
+    monkeypatch.setattr(settings, "AI_LIVE_DECISION_APPLY_IN_PAPER", True, raising=False)
 
     async def _raise_call_provider(**kwargs):
         raise RuntimeError("provider_down")
 
     monkeypatch.setattr(router, "_call_provider", _raise_call_provider)
 
-    result = asyncio.run(_evaluate(router))
+    result = asyncio.run(router.evaluate_signal(
+        trading_mode="paper",
+        strategy="MAStrategy",
+        symbol="BTC/USDT",
+        signal_type="buy",
+        signal_strength=0.82,
+        price=65000.0,
+        account_equity=10000.0,
+        order_value=500.0,
+        leverage=3.0,
+    ))
     assert result["allowed"] is False
     assert result["action"] == "block"
     assert result["applied"] is True
@@ -182,8 +235,8 @@ def test_update_runtime_config_roundtrip():
         router.update_runtime_config(
             enabled=True,
             mode="enforce",
-            provider="claude",
-            model="claude-3-5-sonnet-latest",
+            provider="codex",
+            model="gpt-5.5",
             timeout_ms=9000,
             max_tokens=260,
             temperature=0.15,
@@ -193,8 +246,8 @@ def test_update_runtime_config_roundtrip():
     )
     assert updated["enabled"] is True
     assert updated["mode"] == "enforce"
-    assert updated["provider"] == "claude"
-    assert updated["model"] == "claude-3-5-sonnet-latest"
+    assert updated["provider"] == "codex"
+    assert updated["model"] == "gpt-5.5"
     assert updated["timeout_ms"] == 9000
     assert updated["max_tokens"] == 260
     assert updated["temperature"] == 0.15
@@ -202,7 +255,7 @@ def test_update_runtime_config_roundtrip():
     assert updated["apply_in_paper"] is True
 
 
-def test_live_decision_router_raises_xiaomi_anthropic_token_budget(monkeypatch):
+def test_live_decision_router_uses_anthropic_compatible_endpoint(monkeypatch):
     import core.ai.live_decision_router as module
 
     capture = {}
@@ -222,7 +275,7 @@ def test_live_decision_router_raises_xiaomi_anthropic_token_budget(monkeypatch):
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"action":"allow","reason":"xiaomi_backup","confidence":0.88}',
+                        "text": '{"action":"allow","reason":"anthropic_backup","confidence":0.88}',
                     }
                 ]
             }
@@ -246,18 +299,18 @@ def test_live_decision_router_raises_xiaomi_anthropic_token_budget(monkeypatch):
             capture["json"] = json
             return _FakeResponse()
 
-    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://api.xiaomimimo.com/anthropic/v1", raising=False)
-    monkeypatch.setattr(settings, "OPENAI_API_KEY", "mimo-key", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://anthropic-proxy.test/anthropic/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "anthropic-key", raising=False)
     monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
     monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
-    monkeypatch.setattr(settings, "OPENAI_MODEL", "mimo-v2-pro", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "claude-compatible-model", raising=False)
     monkeypatch.setattr(module.aiohttp, "ClientSession", lambda **kwargs: _FakeSession(**kwargs))
 
     router = module.LiveAIDecisionRouter()
     result = asyncio.run(
         router._call_provider(
             provider="codex",
-            model="mimo-v2-pro",
+            model="claude-compatible-model",
             timeout_ms=5000,
             max_tokens=220,
             temperature=0.0,
@@ -267,8 +320,10 @@ def test_live_decision_router_raises_xiaomi_anthropic_token_budget(monkeypatch):
     )
 
     assert result["action"] == "allow"
-    assert capture["url"] == "https://api.xiaomimimo.com/anthropic/v1/messages"
-    assert capture["json"]["max_tokens"] == 384
+    assert capture["url"] == "https://anthropic-proxy.test/anthropic/v1/messages"
+    assert capture["json"]["max_tokens"] == 220
+    assert capture["headers"]["x-api-key"] == "anthropic-key"
+    assert "api-key" not in capture["headers"]
 
 
 # ── Step 4 回归：运行时配置持久化 ────────────────────────────────────────────
@@ -279,20 +334,20 @@ def test_runtime_config_persists_to_overlay(tmp_path, monkeypatch):
     monkeypatch.setattr("core.ai.live_decision_router._OVERLAY_PATH", overlay_path)
 
     router = LiveAIDecisionRouter()
-    asyncio.run(router.update_runtime_config(enabled=True, mode="enforce", provider="claude"))
+    asyncio.run(router.update_runtime_config(enabled=True, mode="enforce", provider="codex"))
 
     assert overlay_path.exists(), "overlay file should have been created"
     data = json.loads(overlay_path.read_text())
     assert data["AI_LIVE_DECISION_ENABLED"] is True
     assert data["AI_LIVE_DECISION_MODE"] == "enforce"
-    assert data["AI_LIVE_DECISION_PROVIDER"] == "claude"
+    assert data["AI_LIVE_DECISION_PROVIDER"] == "codex"
 
     # New router instance should pick up the persisted values
     router2 = LiveAIDecisionRouter()
     cfg = router2.get_runtime_config()
     assert cfg["enabled"] is True
     assert cfg["mode"] == "enforce"
-    assert cfg["provider"] == "claude"
+    assert cfg["provider"] == "codex"
 
 
 def test_runtime_config_corrupt_overlay_safe_start(tmp_path, monkeypatch):
@@ -337,7 +392,7 @@ def test_runtime_config_falls_back_to_openai_when_glm_unavailable(tmp_path, monk
     )
     monkeypatch.setattr("core.ai.live_decision_router._OVERLAY_PATH", overlay_path)
     monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-openai", raising=False)
-    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.4", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.5", raising=False)
     monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "", raising=False)
     monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
 
@@ -345,6 +400,6 @@ def test_runtime_config_falls_back_to_openai_when_glm_unavailable(tmp_path, monk
     cfg = router.get_runtime_config()
 
     assert cfg["provider"] == "codex"
-    assert cfg["model"] == "gpt-5.4"
+    assert cfg["model"] == "gpt-5.5"
     assert cfg["provider_requested"] == "glm"
     assert cfg["provider_fallback"] is True

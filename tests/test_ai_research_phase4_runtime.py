@@ -348,6 +348,19 @@ def test_live_decision_router_includes_research_context(monkeypatch, tmp_path: P
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODE", "enforce", raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_PROVIDER", "codex", raising=False)
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_MODEL", "gpt-5.4", raising=False)
+    # In live mode the router applies the codex/OpenAI-compat live-review
+    # restriction before calling the provider, short-circuiting with an empty
+    # research_context. That policy is covered by its own tests; here we mock it
+    # so this test can exercise the research_context assembly path.
+    monkeypatch.setattr(
+        live_module,
+        "resolve_provider_for_runtime_capability",
+        lambda *args, **kwargs: {
+            "fallback": False,
+            "restricted": False,
+            "provider": kwargs.get("requested_provider", "codex"),
+        },
+    )
 
     async def _fake_call_provider(**kwargs):
         payload = json.loads(kwargs["user_prompt"])

@@ -54,6 +54,9 @@
   ];
 
   const CLIENT_FILTER_CONTROL_IDS = ['altcoin-radar-filter', 'altcoin-radar-only-alerted'];
+  const SCAN_DEBOUNCE_MS = 250;
+  const BACKGROUND_REFRESH_POLL_MS = 4500;
+  const BACKGROUND_REFRESH_MAX_POLLS = 6;
 
   const state = {
     bound: false,
@@ -70,6 +73,11 @@
     radarMode: 'combined',  // Phase 1
     watchlist: [],
     eventTimelineBySymbol: new Map(),
+    scanDebounceTimer: 0,
+    backgroundRefreshTimer: 0,
+    backgroundRefreshKey: '',
+    backgroundRefreshPolls: 0,
+    scanInFlight: false,
   };
 
   function q(id) {
@@ -193,6 +201,76 @@
       radarMode: state.radarMode || 'combined',
       universeScope: String(q('altcoin-radar-universe-scope')?.value || 'research').trim() || 'research',
     };
+  }
+
+  function scanControlKey(controls = readControls()) {
+    return JSON.stringify({
+      exchange: controls.exchange,
+      timeframe: controls.timeframe,
+      sortBy: controls.sortBy,
+      excludeRetired: controls.excludeRetired,
+      universeSymbols: controls.universeSymbols,
+      radarMode: controls.radarMode,
+      universeScope: controls.universeScope,
+    });
+  }
+
+  function clearBackgroundRefreshPoll() {
+    if (state.backgroundRefreshTimer) {
+      window.clearTimeout(state.backgroundRefreshTimer);
+      state.backgroundRefreshTimer = 0;
+    }
+  }
+
+  function setScanBusy(isBusy) {
+    state.scanInFlight = Boolean(isBusy);
+    ['btn-altcoin-radar-refresh', 'btn-altcoin-radar-force-refresh'].forEach((id) => {
+      const btn = q(id);
+      if (btn) btn.disabled = state.scanInFlight;
+    });
+  }
+
+  function scheduleScan(refresh = false, options = {}) {
+    if (state.scanDebounceTimer) {
+      window.clearTimeout(state.scanDebounceTimer);
+      state.scanDebounceTimer = 0;
+    }
+    const delay = Math.max(0, Number(options.delayMs ?? SCAN_DEBOUNCE_MS));
+    state.scanDebounceTimer = window.setTimeout(() => {
+      state.scanDebounceTimer = 0;
+      scanRadar(refresh, options).catch((error) => {
+        if (typeof notify === 'function' && options.notifyMessage) {
+          notify(`${options.notifyMessage}: ${error.message}`, true);
+        }
+      });
+    }, delay);
+  }
+
+  function scheduleBackgroundRefreshPoll(cache = {}, controls = readControls()) {
+    clearBackgroundRefreshPoll();
+    if (!cache?.refreshing) {
+      state.backgroundRefreshKey = '';
+      state.backgroundRefreshPolls = 0;
+      return;
+    }
+    const key = `${String(cache.cache_key || '')}|${scanControlKey(controls)}`;
+    if (state.backgroundRefreshKey !== key) {
+      state.backgroundRefreshKey = key;
+      state.backgroundRefreshPolls = 0;
+    }
+    if (state.backgroundRefreshPolls >= BACKGROUND_REFRESH_MAX_POLLS) return;
+    state.backgroundRefreshPolls += 1;
+    state.backgroundRefreshTimer = window.setTimeout(() => {
+      state.backgroundRefreshTimer = 0;
+      const nextControls = readControls();
+      const nextKey = `${String(cache.cache_key || '')}|${scanControlKey(nextControls)}`;
+      if (nextKey !== key || document.hidden) return;
+      scanRadar(false, {
+        backgroundPoll: true,
+        preserveStatus: true,
+        notifyMessage: '',
+      }).catch(() => {});
+    }, BACKGROUND_REFRESH_POLL_MS);
   }
 
   function normalizeWatchlistSymbolInput(symbol) {
@@ -711,8 +789,11 @@
     const meta = scanPayload?.scan_meta || {};
     const cache = meta?.cache || {};
     const summary = scanPayload?.summary || {};
+    const cacheStatus = cache.refreshing
+      ? (cache.stale ? '旧结果回显，后台刷新中' : '缓存回显，后台刷新中')
+      : (cache.hit ? '缓存命中' : '新鲜计算');
     const rows = [
-      ['状态', cache.hit ? '缓存命中' : '新鲜计算'],
+      ['状态', cacheStatus],
       ['缓存', cache.ttl_sec ? `${toNumber(cache.age_sec, 0).toFixed(1)}s / ${cache.ttl_sec}s` : '--'],
       ['币池', Array.isArray(meta.symbols_used) && meta.symbols_used.length ? `${meta.symbols_used.length} 个币种` : '--'],
       ['更新时间', meta.generated_at ? fmtDateTime(meta.generated_at) : '--'],
@@ -1304,15 +1385,19 @@
     }
   }
 
-  async function scanRadar(refresh = false) {
+  async function scanRadar(refresh = false, options = {}) {
     const controls = readControls();
     const seq = ++state.scanSeq;
     const previousScan = state.scan;
-    setStatus(refresh ? '正在强制刷新雷达，保留上次榜单...' : '正在加载山寨雷达榜单...', 'warn');
+    clearBackgroundRefreshPoll();
+    if (!options.preserveStatus) {
+      setStatus(refresh ? '正在强制刷新雷达，保留上次榜单...' : '正在加载山寨雷达榜单...', 'warn');
+    }
+    setScanBusy(true);
     try {
       const apiFetch = requireApi();
       const response = await apiFetch(`/altcoin/radar/scan?${buildScanQuery(controls, refresh)}`, {
-        timeoutMs: 45000,
+        timeoutMs: 60000,
       });
       if (seq !== state.scanSeq) return;
       renderScan(response);
@@ -1322,13 +1407,17 @@
       const preferred = shouldKeepSelectedSymbol(response?.rows || [], state.selectedSymbol)
         ? String(state.selectedSymbol || '').trim().toUpperCase()
         : leaderSymbol;
-      setStatus(
-        cache.hit
+      const statusText = cache.refreshing
+        ? `山寨雷达后台刷新中，先展示上一版结果：${controls.exchange} / ${controls.timeframe} · ${response?.summary?.scanned_count || 0} 币`
+        : cache.hit
           ? `已加载缓存结果：${controls.exchange} / ${controls.timeframe} · ${response?.summary?.scanned_count || 0} 币`
-          : `已完成实时扫描：${controls.exchange} / ${controls.timeframe} · ${response?.summary?.scanned_count || 0} 币`,
+          : `已完成实时扫描：${controls.exchange} / ${controls.timeframe} · ${response?.summary?.scanned_count || 0} 币`;
+      setStatus(
+        statusText,
         'ok'
       );
       setOutput(JSON.stringify(response, null, 2));
+      scheduleBackgroundRefreshPoll(cache, controls);
       if (preferred) {
         await selectSymbol(preferred, false);
       } else {
@@ -1346,6 +1435,8 @@
         renderInspector({}, error.message);
       }
       throw error;
+    } finally {
+      if (seq === state.scanSeq) setScanBusy(false);
     }
   }
 
@@ -1509,14 +1600,16 @@
   function bindControls() {
     const refreshBtn = q('btn-altcoin-radar-refresh');
     if (refreshBtn) {
-      refreshBtn.onclick = () => scanRadar(false).catch((error) => {
-        if (typeof notify === 'function') notify(`山寨雷达刷新失败: ${error.message}`, true);
+      refreshBtn.onclick = () => scheduleScan(false, {
+        delayMs: 0,
+        notifyMessage: '山寨雷达刷新失败',
       });
     }
     const forceBtn = q('btn-altcoin-radar-force-refresh');
     if (forceBtn) {
-      forceBtn.onclick = () => scanRadar(true).catch((error) => {
-        if (typeof notify === 'function') notify(`山寨雷达强制刷新失败: ${error.message}`, true);
+      forceBtn.onclick = () => scheduleScan(true, {
+        delayMs: 0,
+        notifyMessage: '山寨雷达强制刷新失败',
       });
     }
     const exchangeEl = q('altcoin-radar-exchange');
@@ -1534,26 +1627,20 @@
     const timeframeEl = q('altcoin-radar-timeframe');
     if (timeframeEl) {
       timeframeEl.addEventListener('change', () => {
-        scanRadar(false).catch((error) => {
-          if (typeof notify === 'function') notify(`山寨雷达切周期失败: ${error.message}`, true);
-        });
+        scheduleScan(false, { notifyMessage: '山寨雷达切周期失败' });
       });
     }
     const sortEl = q('altcoin-radar-sort');
     if (sortEl) {
       sortEl.addEventListener('change', () => {
-        scanRadar(false).catch((error) => {
-          if (typeof notify === 'function') notify(`山寨雷达排序刷新失败: ${error.message}`, true);
-        });
+        scheduleScan(false, { notifyMessage: '山寨雷达排序刷新失败' });
       });
     }
     const universeEl = q('altcoin-radar-universe');
     if (universeEl) {
       universeEl.addEventListener('change', () => {
         renderUniverseManager();
-        scanRadar(false).catch((error) => {
-          if (typeof notify === 'function') notify(`山寨雷达币池更新失败: ${error.message}`, true);
-        });
+        scheduleScan(false, { notifyMessage: '山寨雷达币池更新失败' });
       });
     }
     CLIENT_FILTER_CONTROL_IDS.forEach((id) => {
@@ -1568,9 +1655,7 @@
     const excludeEl = q('altcoin-radar-exclude-retired');
     if (excludeEl) {
       excludeEl.addEventListener('change', () => {
-        scanRadar(false).catch((error) => {
-          if (typeof notify === 'function') notify(`山寨雷达退市过滤刷新失败: ${error.message}`, true);
-        });
+        scheduleScan(false, { notifyMessage: '山寨雷达退市过滤刷新失败' });
       });
     }
     const openResearchBtn = q('btn-altcoin-radar-open-research');

@@ -24,7 +24,12 @@ class RealtimeEvent:
 class RealtimeEventBus:
     def __init__(self) -> None:
         self._subscribers: List[asyncio.Queue] = []
-        self._lock = asyncio.Lock()
+        self._lock: asyncio.Lock | None = None  # lazily created inside async context
+
+    def _get_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     def subscriber_count(self) -> int:
         return len(self._subscribers)
@@ -34,12 +39,12 @@ class RealtimeEventBus:
 
     async def subscribe(self, maxsize: int = 200) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
-        async with self._lock:
+        async with self._get_lock():
             self._subscribers.append(q)
         return q
 
     async def unsubscribe(self, queue: asyncio.Queue) -> None:
-        async with self._lock:
+        async with self._get_lock():
             if queue in self._subscribers:
                 self._subscribers.remove(queue)
 
@@ -50,7 +55,7 @@ class RealtimeEventBus:
             timestamp=datetime.now(timezone.utc).isoformat(),
         ).to_dict()
 
-        async with self._lock:
+        async with self._get_lock():
             subscribers = list(self._subscribers)
 
         stale: List[asyncio.Queue] = []
@@ -63,7 +68,7 @@ class RealtimeEventBus:
                 stale.append(q)
 
         if stale:
-            async with self._lock:
+            async with self._get_lock():
                 for q in stale:
                     if q in self._subscribers:
                         self._subscribers.remove(q)
