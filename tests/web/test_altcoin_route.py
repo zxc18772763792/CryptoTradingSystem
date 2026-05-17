@@ -405,7 +405,8 @@ def test_resolve_universe_watchlist_scope_without_symbols_does_not_warn(monkeypa
 
 
 def test_resolve_universe_warns_only_when_explicit_symbols_fallback(monkeypatch):
-    async def fake_get_research_symbols(exchange: str):
+    async def fake_get_research_symbols(exchange: str, include_major: bool = True):
+        assert include_major is False
         return {"symbols": ["AAA/USDT", "BBB/USDT"]}
 
     def fake_retired_filter(**kwargs):

@@ -35,6 +35,7 @@ from core.data import (
 )
 from core.data.coinglass_altcoin import (
     build_exchange_altcoin_universe,
+    is_alt_candidate_symbol,
     load_cached_exchange_altcoin_universe,
 )
 from core.data.coinglass_client import (
@@ -4911,6 +4912,32 @@ def _merge_research_symbol_lists(*groups: Any, limit: int = 60) -> List[str]:
     return merged
 
 
+def _filter_altcoin_research_symbols(
+    symbols: List[str],
+    *,
+    excluded_major_symbols: Optional[List[str]] = None,
+    limit: int = 60,
+) -> List[str]:
+    excluded = {
+        str(item or "").strip().upper()
+        for item in list(excluded_major_symbols or [])
+        if str(item or "").strip()
+    }
+    out: List[str] = []
+    seen: set[str] = set()
+    for raw in list(symbols or []):
+        symbol = str(raw or "").strip().upper()
+        if not symbol or symbol in seen or symbol in excluded:
+            continue
+        if not is_alt_candidate_symbol(symbol):
+            continue
+        seen.add(symbol)
+        out.append(symbol)
+        if len(out) >= max(1, int(limit or 60)):
+            break
+    return out
+
+
 def _detach_research_symbols_task(task: asyncio.Task[Any], *, label: str) -> None:
     def _consume_result(done_task: asyncio.Task[Any]) -> None:
         with contextlib.suppress(asyncio.CancelledError):
@@ -4946,7 +4973,7 @@ async def _build_research_symbols_fallback(
 
 
 @router.get("/research/symbols")
-async def get_research_symbols(exchange: str = "binance"):
+async def get_research_symbols(exchange: str = "binance", include_major: bool = True):
     universe_task: asyncio.Task[Dict[str, Any]] = asyncio.create_task(
         build_exchange_altcoin_universe(exchange=exchange)
     )
@@ -5010,8 +5037,16 @@ async def get_research_symbols(exchange: str = "binance"):
     if not data.get("symbols"):
         fallback = await get_data_symbols(exchange=exchange)
         fallback["source"] = "research_universe_fallback_empty"
+        if not bool(include_major):
+            fallback["symbols"] = _filter_altcoin_research_symbols(
+                list(fallback.get("symbols") or []),
+                excluded_major_symbols=list(fallback.get("excluded_major_symbols") or []),
+            )
+            fallback["count"] = len(fallback.get("symbols") or [])
         fallback["primary_symbol"] = str((fallback.get("symbols") or ["BTC/USDT"])[0] or "BTC/USDT")
         fallback["default_count"] = min(30, len(fallback.get("symbols") or []))
+        fallback["include_major"] = bool(include_major)
+        fallback["symbol_scope"] = "research_with_benchmarks" if bool(include_major) else "altcoin_only"
         return fallback
 
     major_symbols = list(data.get("major_market_cap_symbols") or [])
@@ -5023,14 +5058,28 @@ async def get_research_symbols(exchange: str = "binance"):
         }
         if excluded:
             major_symbols = [symbol for symbol in _RESEARCH_MAJOR_SYMBOL_FALLBACK if symbol in excluded]
+        elif not bool(include_major):
+            major_symbols = [
+                symbol
+                for symbol in _RESEARCH_MAJOR_SYMBOL_FALLBACK
+                if not is_alt_candidate_symbol(symbol)
+            ]
         else:
             major_symbols = list(_RESEARCH_MAJOR_SYMBOL_FALLBACK)
-    merged_symbols = _merge_research_symbol_lists(major_symbols, data.get("symbols") or [])
+    if bool(include_major):
+        merged_symbols = _merge_research_symbol_lists(major_symbols, data.get("symbols") or [])
+    else:
+        merged_symbols = _filter_altcoin_research_symbols(
+            list(data.get("symbols") or []),
+            excluded_major_symbols=list(data.get("excluded_major_symbols") or []) + major_symbols,
+        )
     data["major_market_cap_symbols"] = _merge_research_symbol_lists(major_symbols, limit=10)
     data["symbols"] = merged_symbols
     data["count"] = len(merged_symbols)
     data["primary_symbol"] = str((merged_symbols or ["BTC/USDT"])[0] or "BTC/USDT")
     data["default_count"] = min(30, len(merged_symbols))
+    data["include_major"] = bool(include_major)
+    data["symbol_scope"] = "research_with_benchmarks" if bool(include_major) else "altcoin_only"
     return data
 
 

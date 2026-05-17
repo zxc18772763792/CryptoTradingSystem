@@ -58,6 +58,9 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "researchProposalInFlight" in radar_js
     assert "new URLSearchParams" in radar_js
     assert "universe_scope: controls.universeScope" in radar_js
+    assert "include_major=false" in radar_js
+    assert "value=\"priority\" selected" in template_source
+    assert "'BTC/USDT'," not in radar_js.split("const PRESET_BY_KIND", 1)[0]
     assert "timeoutMs: 60000" in radar_js
     assert "async function openAiResearchProposal(response, symbol)" in radar_js
     assert "activateTab('ai-research')" in radar_js

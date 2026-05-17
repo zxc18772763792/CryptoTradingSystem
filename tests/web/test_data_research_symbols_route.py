@@ -47,6 +47,67 @@ def test_research_symbols_prefers_coinglass_altcoin_universe(monkeypatch):
     assert payload["default_count"] == 8
 
 
+def test_research_symbols_can_return_altcoin_only_universe(monkeypatch):
+    app = FastAPI()
+    app.include_router(data_api.router, prefix="/api/data")
+    client = TestClient(app)
+
+    async def fake_build_exchange_altcoin_universe(exchange: str, **kwargs):
+        assert exchange == "binance"
+        return {
+            "exchange": "binance",
+            "major_market_cap_symbols": ["BTC/USDT", "ETH/USDT", "BNB/USDT"],
+            "symbols": ["LINK/USDT", "AAVE/USDT", "TAO/USDT"],
+            "count": 3,
+            "source": "coinglass_altcoin_universe",
+            "board_count": 2,
+            "boards": [],
+            "excluded_major_symbols": ["BTC/USDT", "ETH/USDT", "BNB/USDT"],
+        }
+
+    monkeypatch.setattr(data_api, "build_exchange_altcoin_universe", fake_build_exchange_altcoin_universe)
+
+    response = client.get("/api/data/research/symbols?exchange=binance&include_major=false")
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["include_major"] is False
+    assert payload["symbol_scope"] == "altcoin_only"
+    assert payload["primary_symbol"] == "LINK/USDT"
+    assert payload["symbols"] == ["LINK/USDT", "AAVE/USDT", "TAO/USDT"]
+    assert "BTC/USDT" not in payload["symbols"]
+    assert payload["default_count"] == 3
+
+
+def test_research_symbols_altcoin_only_filters_data_symbol_fallback(monkeypatch):
+    app = FastAPI()
+    app.include_router(data_api.router, prefix="/api/data")
+    client = TestClient(app)
+
+    async def fake_build_exchange_altcoin_universe(exchange: str, **kwargs):
+        raise RuntimeError("coinglass unavailable")
+
+    async def fake_get_data_symbols(exchange: str = "binance"):
+        return {
+            "exchange": exchange,
+            "symbols": ["BTC/USDT", "ETH/USDT", "LINK/USDT", "1000PEPE/USDT", "AAVE/USDT"],
+            "count": 5,
+        }
+
+    monkeypatch.setattr(data_api, "build_exchange_altcoin_universe", fake_build_exchange_altcoin_universe)
+    monkeypatch.setattr(data_api, "load_cached_exchange_altcoin_universe", lambda exchange, allow_stale=True: None)
+    monkeypatch.setattr(data_api, "get_data_symbols", fake_get_data_symbols)
+
+    response = client.get("/api/data/research/symbols?exchange=binance&include_major=false")
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["include_major"] is False
+    assert payload["symbol_scope"] == "altcoin_only"
+    assert payload["symbols"] == ["LINK/USDT", "AAVE/USDT"]
+    assert payload["primary_symbol"] == "LINK/USDT"
+
+
 def test_research_symbols_falls_back_when_coinglass_universe_fails(monkeypatch):
     app = FastAPI()
     app.include_router(data_api.router, prefix="/api/data")

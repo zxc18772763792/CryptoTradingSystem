@@ -771,14 +771,14 @@ async def _resolve_universe(
         requested = get_watchlist_symbols()[:cap]
     elif scope == "expanded" and not requested:
         # Load research + watchlist
-        research_symbols = await get_research_symbols(exchange=exchange)
+        research_symbols = await get_research_symbols(exchange=exchange, include_major=False)
         base = _normalize_symbols((research_symbols.get("symbols") or []))
         requested = resolve_universe_scope(
             scope,
             research_symbols=base,
         )[:cap]
     elif not requested:
-        research_symbols = await get_research_symbols(exchange=exchange)
+        research_symbols = await get_research_symbols(exchange=exchange, include_major=False)
         requested = _normalize_symbols((research_symbols.get("symbols") or [])[:MAX_UNIVERSE_SIZE])
 
     filtered, excluded_retired = _research_retired_filter(
@@ -789,7 +789,7 @@ async def _resolve_universe(
     )
     filtered = _normalize_symbols(filtered)[:cap]
     if not filtered:
-        research_symbols = await get_research_symbols(exchange=exchange)
+        research_symbols = await get_research_symbols(exchange=exchange, include_major=False)
         requested = _normalize_symbols((research_symbols.get("symbols") or [])[:MAX_UNIVERSE_SIZE])
         filtered, excluded_retired = _research_retired_filter(
             exchange=exchange,

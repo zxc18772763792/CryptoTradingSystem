@@ -1,35 +1,35 @@
 (function () {
   const DEFAULT_UNIVERSE = [
-    'BTC/USDT',
-    'ETH/USDT',
-    'BNB/USDT',
-    'SOL/USDT',
-    'XRP/USDT',
-    'ADA/USDT',
-    'DOGE/USDT',
-    'TRX/USDT',
     'LINK/USDT',
     'AVAX/USDT',
     'DOT/USDT',
-    'POL/USDT',
-    'LTC/USDT',
-    'BCH/USDT',
-    'ETC/USDT',
     'ATOM/USDT',
-    'NEAR/USDT',
-    'APT/USDT',
-    'ARB/USDT',
-    'OP/USDT',
-    'SUI/USDT',
-    'INJ/USDT',
-    'RUNE/USDT',
+    'FIL/USDT',
+    'TAO/USDT',
+    'RENDER/USDT',
+    'FET/USDT',
+    'GALA/USDT',
     'AAVE/USDT',
     'MKR/USDT',
     'UNI/USDT',
-    'FIL/USDT',
-    'HBAR/USDT',
-    'ICP/USDT',
-    'TON/USDT',
+    'NEAR/USDT',
+    'INJ/USDT',
+    'RUNE/USDT',
+    'ARB/USDT',
+    'OP/USDT',
+    'SUI/USDT',
+    'APT/USDT',
+    'PYTH/USDT',
+    'JTO/USDT',
+    'JUP/USDT',
+    'PEPE/USDT',
+    'WIF/USDT',
+    'BONK/USDT',
+    'FLOKI/USDT',
+    'ORDI/USDT',
+    'SATS/USDT',
+    'IMX/USDT',
+    'CRV/USDT',
   ];
 
   const PRESET_BY_KIND = {
@@ -195,7 +195,7 @@
     return {
       exchange: String(q('altcoin-radar-exchange')?.value || 'binance').trim().toLowerCase() || 'binance',
       timeframe: String(q('altcoin-radar-timeframe')?.value || '4h').trim() || '4h',
-      sortBy: String(q('altcoin-radar-sort')?.value || 'layout').trim() || 'layout',
+      sortBy: String(q('altcoin-radar-sort')?.value || 'priority').trim() || 'priority',
       filter: String(q('altcoin-radar-filter')?.value || 'all').trim() || 'all',
       onlyAlerted: !!q('altcoin-radar-only-alerted')?.checked,
       excludeRetired: q('altcoin-radar-exclude-retired')?.checked !== false,
@@ -659,7 +659,7 @@
     let finalSymbols = DEFAULT_UNIVERSE.slice();
     let defaultCount = Math.min(12, finalSymbols.length);
     try {
-      const resp = await apiFetch(`/data/research/symbols?exchange=${encodeURIComponent(controls.exchange)}`, {
+      const resp = await apiFetch(`/data/research/symbols?exchange=${encodeURIComponent(controls.exchange)}&include_major=false`, {
         timeoutMs: 15000,
       });
       const symbols = normalizeSymbols(resp?.symbols || []);
@@ -670,6 +670,8 @@
         fallbackSource: String(resp?.fallback_source || '').trim(),
         warning: String(resp?.warning || '').trim(),
         updatedAt: String(resp?.updated_at || '').trim(),
+        symbolScope: String(resp?.symbol_scope || '').trim(),
+        benchmarkCount: Array.isArray(resp?.major_market_cap_symbols) ? resp.major_market_cap_symbols.length : 0,
         count: finalSymbols.length,
       };
       if (resp?.warning) {
@@ -692,7 +694,7 @@
       .join('');
     const preserveCurrentSelection = state.universeLoadedFor === cacheKey && currentSelected.length;
     const fallbackSelection = preserveCurrentSelection ? currentSelected : finalSymbols.slice(0, defaultCount);
-    setSelectedValues('altcoin-radar-universe', fallbackSelection, finalSymbols[0] || 'BTC/USDT');
+    setSelectedValues('altcoin-radar-universe', fallbackSelection, finalSymbols[0] || 'LINK/USDT');
     state.universeLoadedFor = cacheKey;
     renderUniverseManager();
   }
