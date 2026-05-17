@@ -112,6 +112,51 @@ def test_operating_mode_endpoint_surfaces_degradations(monkeypatch):
     assert "source_macro.fred_macro" in codes
 
 
+def test_operating_mode_returns_fallback_when_source_health_build_times_out(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    ai_module._reset_operating_mode_cache_for_tests()
+
+    async def _slow_build():
+        await asyncio.sleep(0.2)
+        return {"degradations": [], "source_health": {"categories": {}}}
+
+    monkeypatch.setattr(ai_module, "_OPERATING_MODE_BUILD_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(ai_module, "_build_operating_mode_payload", _slow_build)
+    monkeypatch.setattr(ai_module.live_decision_router, "get_runtime_config", lambda: {"enabled": False})
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_runtime_config", lambda: {"allow_live": True})
+
+    result = asyncio.run(ai_module._get_operating_mode_payload())
+
+    assert result["operating_mode_cache"]["status"] == "fallback"
+    assert result["operating_mode_cache"]["reason"] == "source_health_build_timeout"
+    assert "source_source_health_build" in {item["code"] for item in result["degradations"]}
+
+
+def test_operating_mode_returns_stale_cache_while_refresh_runs(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    ai_module._reset_operating_mode_cache_for_tests()
+
+    async def _slow_build():
+        await asyncio.sleep(0.2)
+        return {"cache_marker": "fresh", "degradations": []}
+
+    ai_module._OPERATING_MODE_CACHE["payload"] = {"cache_marker": "stale", "degradations": []}
+    ai_module._OPERATING_MODE_CACHE["expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+    monkeypatch.setattr(ai_module, "_build_operating_mode_payload", _slow_build)
+
+    async def _call():
+        result = await ai_module._get_operating_mode_payload()
+        task = ai_module._OPERATING_MODE_CACHE_TASK
+        return result, task is not None and not task.done()
+
+    result, refresh_pending = asyncio.run(_call())
+
+    assert result["cache_marker"] == "stale"
+    assert refresh_pending is True
+
+
 def test_work_queue_unifies_drafts_reserve_degradations_and_agent_blocker(monkeypatch):
     from core.ai.proposal_schemas import ProposalValidationSummary
     from web.api import ai_research as ai_module

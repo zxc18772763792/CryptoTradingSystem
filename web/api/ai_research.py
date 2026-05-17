@@ -54,6 +54,7 @@ from core.research.orchestrator import (
 router = APIRouter()
 SIGNAL_MARKET_DATA_TIMEZONE = ZoneInfo("Asia/Shanghai")
 _OPERATING_MODE_CACHE_TTL_SEC = 20.0
+_OPERATING_MODE_BUILD_TIMEOUT_SEC = 2.5
 _OPERATING_MODE_CACHE: Dict[str, Any] = {"payload": None, "expires_at": None}
 _OPERATING_MODE_CACHE_TASK: Optional[asyncio.Task] = None
 
@@ -5668,8 +5669,106 @@ async def _build_operating_mode_payload() -> Dict[str, Any]:
     return snapshot.to_dict()
 
 
-async def _get_operating_mode_payload(*, force: bool = False) -> Dict[str, Any]:
+def _clear_operating_mode_cache_task(task: asyncio.Task) -> None:
     global _OPERATING_MODE_CACHE_TASK
+    if _OPERATING_MODE_CACHE_TASK is task:
+        _OPERATING_MODE_CACHE_TASK = None
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.debug(f"operating mode background refresh failed: {exc}")
+
+
+def _reset_operating_mode_cache_for_tests() -> None:
+    global _OPERATING_MODE_CACHE_TASK
+    task = _OPERATING_MODE_CACHE_TASK
+    if task is not None and not task.done():
+        task.cancel()
+    _OPERATING_MODE_CACHE_TASK = None
+    _OPERATING_MODE_CACHE["payload"] = None
+    _OPERATING_MODE_CACHE["expires_at"] = None
+
+
+def _operating_mode_source_health_fallback(reason: str, *, error: Optional[str] = None) -> Dict[str, Any]:
+    issues = _dedupe_text_items([reason, error])
+    return {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "focus_regions": ["us", "china"],
+        "summary": {
+            "support_assessment": "unknown",
+            "headline": "source health build did not complete before the operating-mode response budget",
+            "total_sources": 1,
+            "healthy_count": 0,
+            "degraded_count": 1,
+            "stale_count": 0,
+            "missing_count": 0,
+            "core_sources": 1,
+            "core_healthy": 0,
+            "core_ready": False,
+            "problematic_sources": ["runtime:source_health_build"],
+            "recommendations": ["Retry source-health diagnostics or inspect the background cache refresh."],
+            "by_category": {"runtime": {"total": 1, "healthy": 0, "degraded": 1, "stale": 0, "missing": 0}},
+        },
+        "categories": {},
+        "items": [
+            {
+                "key": "source_health_build",
+                "label": "Source Health Build",
+                "health": "degraded",
+                "ready": False,
+                "support_level": "core",
+                "issues": issues,
+            }
+        ],
+        "cache_status": "fallback",
+        "degraded_reason": reason,
+    }
+
+
+def _build_operating_mode_fallback_payload(reason: str, *, error: Optional[str] = None) -> Dict[str, Any]:
+    from core.runtime.operating_mode import validate_operating_mode
+    from core.runtime.state import runtime_state
+
+    try:
+        runtime_snapshot = runtime_state.snapshot()
+    except Exception as exc:
+        runtime_snapshot = {"error": str(exc)}
+
+    snapshot = validate_operating_mode(
+        live_decision_config=live_decision_router.get_runtime_config(),
+        agent_config=autonomous_trading_agent.get_runtime_config(),
+        runtime_state_snapshot=runtime_snapshot,
+        source_health=_operating_mode_source_health_fallback(reason, error=error),
+    ).to_dict()
+    snapshot["operating_mode_cache"] = {
+        "status": "fallback",
+        "reason": reason,
+        "error": error,
+    }
+    return snapshot
+
+
+def _start_operating_mode_cache_task(*, force: bool = False) -> asyncio.Task:
+    global _OPERATING_MODE_CACHE_TASK
+    task = _OPERATING_MODE_CACHE_TASK
+    if not force and task is not None and not task.done():
+        return task
+
+    async def _runner() -> Dict[str, Any]:
+        result = await _build_operating_mode_payload()
+        _OPERATING_MODE_CACHE["payload"] = dict(result)
+        _OPERATING_MODE_CACHE["expires_at"] = datetime.now(timezone.utc) + timedelta(seconds=_OPERATING_MODE_CACHE_TTL_SEC)
+        return result
+
+    task = asyncio.create_task(_runner())
+    task.add_done_callback(_clear_operating_mode_cache_task)
+    _OPERATING_MODE_CACHE_TASK = task
+    return task
+
+
+async def _get_operating_mode_payload(*, force: bool = False) -> Dict[str, Any]:
     now = datetime.now(timezone.utc)
     expires_at = _OPERATING_MODE_CACHE.get("expires_at")
     payload = _OPERATING_MODE_CACHE.get("payload")
@@ -5681,24 +5780,19 @@ async def _get_operating_mode_payload(*, force: bool = False) -> Dict[str, Any]:
     ):
         return dict(payload)
 
-    task = _OPERATING_MODE_CACHE_TASK
-    if not force and task is not None and not task.done():
-        result = await task
-        return dict(result)
+    task = _start_operating_mode_cache_task(force=force)
+    if not force and isinstance(payload, dict):
+        return dict(payload)
 
-    async def _runner() -> Dict[str, Any]:
-        result = await _build_operating_mode_payload()
-        _OPERATING_MODE_CACHE["payload"] = dict(result)
-        _OPERATING_MODE_CACHE["expires_at"] = datetime.now(timezone.utc) + timedelta(seconds=_OPERATING_MODE_CACHE_TTL_SEC)
-        return result
-
-    _OPERATING_MODE_CACHE_TASK = asyncio.create_task(_runner())
     try:
-        result = await _OPERATING_MODE_CACHE_TASK
+        result = await asyncio.wait_for(asyncio.shield(task), timeout=max(0.01, float(_OPERATING_MODE_BUILD_TIMEOUT_SEC)))
         return dict(result)
-    finally:
-        if _OPERATING_MODE_CACHE_TASK is not None and _OPERATING_MODE_CACHE_TASK.done():
-            _OPERATING_MODE_CACHE_TASK = None
+    except asyncio.TimeoutError:
+        return _build_operating_mode_fallback_payload("source_health_build_timeout")
+    except Exception as exc:
+        if isinstance(payload, dict):
+            return dict(payload)
+        return _build_operating_mode_fallback_payload("source_health_build_failed", error=str(exc))
 
 
 @router.get("/gate-audit/summary")

@@ -31,22 +31,43 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _get_value(source: Any, *names: str, default: Any = None) -> Any:
+    if isinstance(source, dict):
+        for name in names:
+            if name in source:
+                value = source.get(name)
+                if value is not None:
+                    return value
+        return default
+    for name in names:
+        value = getattr(source, name, None)
+        if value is not None:
+            return value
+    return default
+
+
 def build_performance_divergence_report(
     *,
     candidate: Any,
     snapshots: Iterable[Any],
     min_sample: int = 10,
 ) -> PerformanceDivergenceReport:
-    validation = getattr(candidate, "validation_summary", None)
-    metrics = dict(getattr(validation, "metrics", {}) or {})
+    validation = _get_value(candidate, "validation_summary")
+    metrics = dict(_get_value(validation, "metrics", default={}) or {})
     best = dict(metrics.get("best") or {})
-    expected_sharpe = _safe_float(getattr(validation, "oos_score", None), _safe_float(getattr(validation, "is_score", None), _safe_float(best.get("sharpe_ratio"), 0.0)))
+    expected_sharpe = _safe_float(
+        _get_value(validation, "oos_score"),
+        _safe_float(
+            _get_value(validation, "is_score"),
+            _safe_float(best.get("sharpe_ratio"), 0.0),
+        ),
+    )
     expected_drawdown = _safe_float(best.get("max_drawdown"), 0.0)
     rows = list(snapshots or [])
     if not rows:
         return PerformanceDivergenceReport(
-            candidate_id=str(getattr(candidate, "candidate_id", "") or ""),
-            strategy_name=str(getattr(candidate, "strategy", "") or ""),
+            candidate_id=str(_get_value(candidate, "candidate_id", default="") or ""),
+            strategy_name=str(_get_value(candidate, "strategy", "strategy_name", default="") or ""),
             expected={"sharpe": expected_sharpe, "max_drawdown": expected_drawdown},
             sample_size=0,
             status="insufficient_sample",
@@ -54,9 +75,17 @@ def build_performance_divergence_report(
         )
 
     latest = rows[0]
-    realized_sharpe = _safe_float(getattr(latest, "sharpe", None), _safe_float(getattr(latest, "sharpe_ratio", None), 0.0))
-    realized_drawdown = _safe_float(getattr(latest, "max_drawdown", None), 0.0)
-    trade_count = int(_safe_float(getattr(latest, "trade_count", None), _safe_float(getattr(latest, "trades", None), len(rows))))
+    realized_sharpe = _safe_float(
+        _get_value(latest, "sharpe"),
+        _safe_float(_get_value(latest, "sharpe_ratio"), 0.0),
+    )
+    realized_drawdown = _safe_float(_get_value(latest, "max_drawdown"), 0.0)
+    trade_count = int(
+        _safe_float(
+            _get_value(latest, "trade_count"),
+            _safe_float(_get_value(latest, "trades", "total_trades"), len(rows)),
+        )
+    )
     divergence = max(0.0, expected_sharpe - realized_sharpe)
     status = "aligned"
     notes: List[str] = []
@@ -75,8 +104,8 @@ def build_performance_divergence_report(
             status = "underperforming"
 
     return PerformanceDivergenceReport(
-        candidate_id=str(getattr(candidate, "candidate_id", "") or ""),
-        strategy_name=str(getattr(candidate, "strategy", "") or ""),
+        candidate_id=str(_get_value(candidate, "candidate_id", default="") or ""),
+        strategy_name=str(_get_value(candidate, "strategy", "strategy_name", default="") or ""),
         expected={"sharpe": expected_sharpe, "max_drawdown": expected_drawdown},
         realized={"sharpe": realized_sharpe, "max_drawdown": realized_drawdown, "trade_count": trade_count},
         sample_size=trade_count,
@@ -84,4 +113,3 @@ def build_performance_divergence_report(
         status=status,
         notes=notes,
     )
-

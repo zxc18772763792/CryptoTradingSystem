@@ -206,11 +206,15 @@ def _parse_market_context(
             or market_state_snapshot.get("symbol")
             or ""
         )
-        benchmark_beta = float(
-            market_context.get("benchmark_beta")
-            or (market_context.get("metadata") or {}).get("benchmark_beta")
-            or 0.0
-        )
+        try:
+            benchmark_beta = float(
+                market_context.get("benchmark_beta")
+                or (market_context.get("metadata") or {}).get("benchmark_beta")
+                or 0.0
+            )
+        except Exception as exc:
+            benchmark_beta = 0.0
+            _record_optional_context_issue(planner_notes, "market_state.benchmark_beta", exc)
         ms_boosted, ms_suppressed, ms_notes = market_state_to_planner_hints(
             market_state_snapshot,
             symbol=symbol,

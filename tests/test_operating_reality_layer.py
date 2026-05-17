@@ -47,6 +47,32 @@ def test_operating_mode_surfaces_provider_fallback_and_derivatives_shadow(monkey
     assert "autonomous_allow_live_false" in codes
 
 
+def test_operating_mode_reads_mapping_source_health():
+    from core.runtime.operating_mode import validate_operating_mode
+
+    snapshot = validate_operating_mode(
+        agent_config={"allow_live": True},
+        source_health={
+            "sources": {
+                "cache_ok": {
+                    "status": "ok",
+                    "ready": "true",
+                    "stale": "false",
+                },
+                "macro_cache": {
+                    "status": "failed",
+                    "issues": ["timeout"],
+                }
+            }
+        },
+    ).to_dict()
+
+    degradation = next(item for item in snapshot["degradations"] if item["code"] == "source_macro_cache")
+    assert degradation["severity"] == "danger"
+    assert "timeout" in degradation["detail"]
+    assert "source_cache_ok" not in {item["code"] for item in snapshot["degradations"]}
+
+
 def test_performance_divergence_marks_overfit_suspect():
     from datetime import datetime, timezone
     from types import SimpleNamespace
@@ -70,6 +96,53 @@ def test_performance_divergence_marks_overfit_suspect():
 
     assert report.status == "overfit_suspect"
     assert report.divergence_score > 1.0
+
+
+def test_performance_divergence_accepts_dict_payloads():
+    from core.research.performance_feedback import build_performance_divergence_report
+
+    candidate = {
+        "candidate_id": "cand-dict",
+        "strategy": "TrendStrategy",
+        "validation_summary": {
+            "oos_score": 1.8,
+            "metrics": {"best": {"max_drawdown": 5.0}},
+        },
+    }
+    latest = {"sharpe": 0.2, "max_drawdown": 6.0, "trade_count": 25}
+
+    report = build_performance_divergence_report(candidate=candidate, snapshots=[latest])
+
+    assert report.candidate_id == "cand-dict"
+    assert report.strategy_name == "TrendStrategy"
+    assert report.status == "overfit_suspect"
+    assert report.realized["trade_count"] == 25
+
+
+def test_compact_symbols_are_treated_as_benchmarks_for_reality_hints():
+    from core.market_state.planner_adapter import market_state_to_planner_hints
+    from core.observability.score_calibration import symbol_scope_for_symbol
+
+    assert symbol_scope_for_symbol("BTCUSDT") == "benchmark"
+    assert symbol_scope_for_symbol("BTCUSD_PERP") == "benchmark"
+    assert symbol_scope_for_symbol("ETH-USDT-SWAP") == "benchmark"
+    assert symbol_scope_for_symbol("SOLUSDT") == "altcoin"
+
+    boosted, suppressed, notes = market_state_to_planner_hints(
+        {
+            "scope": "benchmark",
+            "regime": "trend_bullish",
+            "bias": "bullish",
+            "risk_posture": "defensive",
+            "uncertainty": "confirmed",
+        },
+        symbol="BTCUSDT",
+        benchmark_beta=0.0,
+    )
+
+    assert "benchmark_context_advisory_only" not in notes
+    assert len(boosted) >= 2
+    assert suppressed
 
 
 def test_family_regime_prior_loader_reads_advisory_file(tmp_path):

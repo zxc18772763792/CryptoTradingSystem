@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from core.research.validation_gate import build_validation_summary_from_research_result
 
 
@@ -32,6 +35,21 @@ def test_validation_gate_rejects_zero_trade_candidate() -> None:
 
     assert summary.decision == "reject"
     assert any("completed trades 0 < 1" in reason for reason in summary.reasons)
+
+
+def test_validation_gate_counterfactual_audit_uses_test_runtime_path() -> None:
+    from core.audit import gate_counterfactuals as audit_module
+
+    result = _result_with_best(total_trades=0)
+
+    build_validation_summary_from_research_result(result)
+
+    audit_path = Path(os.environ[audit_module.AUDIT_PATH_ENV])
+    assert audit_path.exists()
+    assert "data/audit" not in audit_path.as_posix()
+    summary = audit_module.summarize_gate_counterfactuals()
+    assert summary["path"] == str(audit_path)
+    assert summary["total"] >= 1
 
 
 def test_validation_gate_downgrades_live_candidate_on_thin_trade_sample() -> None:

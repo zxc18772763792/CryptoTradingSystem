@@ -93,6 +93,14 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "/operating-mode" in ai_js
     assert "/work-queue" in ai_js
     assert "/autonomy-handoff" in ai_js
+    assert "operatingModeInFlight" in ai_js
+    assert "workQueueInFlight" in ai_js
+    assert "refreshOperatingModeBanner({ preserveExisting: true })" in ai_js
+    assert "refreshWorkQueuePanel({ preserveExisting: true })" in ai_js
+    assert "btn.dataset.registerMode" in ai_js
+    assert "target?.dataset" not in ai_js
+    assert "toast(" not in ai_js
+    assert "notify('已送入 AI 自治观察队列')" in ai_js
     assert "decision_trace" in agent_js
     assert "refreshAgentOperatingModeBanner" in agent_js
     assert "/ai/operating-mode" in agent_js

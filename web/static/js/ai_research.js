@@ -112,6 +112,10 @@
     pollingOwnershipTimer: null,
     autoPlannerRecommendation: null,
     sharedPollingActive: false,
+    operatingModeInFlight: null,
+    operatingModeLoadedAt: 0,
+    workQueueInFlight: null,
+    workQueueLoadedAt: 0,
   };
   let initialized = false;
   let initRetryBound = false;
@@ -3804,9 +3808,9 @@
       if (btn) btn.disabled = true;
       try {
         await aiApi(`/candidates/${encodeURIComponent(candidateId)}/autonomy-handoff`, { method: 'POST', timeoutMs: 20000 });
-        toast('已送入 AI 自治观察队列', 'success');
+        notify('已送入 AI 自治观察队列');
       } catch (err) {
-        toast(`自治观察交接失败：${err.message || err}`, 'error');
+        notify(`自治观察交接失败：${err.message || err}`, true);
       } finally {
         if (btn) btn.disabled = false;
       }
@@ -4697,6 +4701,8 @@ ${confirmHint}`,
           }),
           loadAgentStatus().catch(() => null),
           loadLiveDecisionActivitySummary().catch(() => null),
+          refreshOperatingModeBanner({ preserveExisting: true }).catch(() => null),
+          refreshWorkQueuePanel({ preserveExisting: true }).catch(() => null),
         ];
 
         await Promise.allSettled([
@@ -5992,7 +5998,7 @@ ${confirmHint}`,
       }
       if (action === 'open-register' && cid) {
         e.stopPropagation();
-        const preferredMode = normalizeRegisterMode(target?.dataset?.registerMode, '');
+        const preferredMode = normalizeRegisterMode(btn.dataset.registerMode, '');
         openRegisterModal(cid, preferredMode ? { preferredMode } : {}).catch(err => notify(`打开注册失败: ${err.message}`, true));
       }
     });
@@ -6111,7 +6117,8 @@ ${confirmHint}`,
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
      初始化
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
-  async function refreshOperatingModeBanner() {
+  async function refreshOperatingModeBanner(options = {}) {
+    const now = Date.now();
     const root = document.getElementById('ai-research') || document.getElementById('ai-candidate-cards')?.parentElement;
     if (!root) return;
     let banner = document.getElementById('ai-operating-mode-banner');
@@ -6122,8 +6129,12 @@ ${confirmHint}`,
       banner.style.cssText = 'margin:8px 0 12px;padding:10px 12px;border:1px solid #263a56;background:#101a29;border-radius:6px;color:#c2d0e8;font-size:12px;';
       root.prepend(banner);
     }
-    try {
+    if (!options.force && state.operatingModeInFlight) return state.operatingModeInFlight;
+    if (!options.force && state.operatingModeLoadedAt && now - state.operatingModeLoadedAt < 60000) return null;
+    const task = (async () => {
       const data = await aiApi('/operating-mode', { timeoutMs: 20000 });
+      state.operatingModeLoadedAt = Date.now();
+      banner.removeAttribute('data-refresh-error');
       const degradations = Array.isArray(data?.degradations) ? data.degradations : [];
       const live = data?.ai_live_decision || {};
       const agent = data?.autonomous_agent || {};
@@ -6137,12 +6148,26 @@ ${confirmHint}`,
           <span>derivatives=${deri.live_gating_enabled ? 'live gating' : 'shadow-only'}</span>
           <span style="color:${degradations.length ? '#f59e0b' : '#20bf78'};">degraded=${degradations.length}</span>
         </div>`;
-    } catch (err) {
-      banner.textContent = `Operating Mode unavailable: ${err.message || err}`;
-    }
+      return data;
+    })()
+      .catch((err) => {
+        const message = `Operating Mode unavailable: ${err.message || err}`;
+        if (!options.preserveExisting || !String(banner.textContent || '').trim()) {
+          banner.textContent = message;
+        } else {
+          banner.dataset.refreshError = message;
+        }
+        return null;
+      })
+      .finally(() => {
+        if (state.operatingModeInFlight === task) state.operatingModeInFlight = null;
+      });
+    state.operatingModeInFlight = task;
+    return task;
   }
 
-  async function refreshWorkQueuePanel() {
+  async function refreshWorkQueuePanel(options = {}) {
+    const now = Date.now();
     const root = document.getElementById('ai-candidate-cards')?.parentElement || document.getElementById('ai-research');
     if (!root) return;
     let panel = document.getElementById('ai-work-queue-panel');
@@ -6152,17 +6177,34 @@ ${confirmHint}`,
       panel.style.cssText = 'margin:8px 0 12px;padding:10px 12px;border:1px solid #263a56;background:#0e1725;border-radius:6px;color:#c2d0e8;font-size:12px;';
       root.prepend(panel);
     }
-    try {
+    if (!options.force && state.workQueueInFlight) return state.workQueueInFlight;
+    if (!options.force && state.workQueueLoadedAt && now - state.workQueueLoadedAt < 30000) return null;
+    const task = (async () => {
       const data = await aiApi('/work-queue', { timeoutMs: 30000 });
+      state.workQueueLoadedAt = Date.now();
+      panel.removeAttribute('data-refresh-error');
       const items = Array.isArray(data?.items) ? data.items.slice(0, 6) : [];
       panel.innerHTML = `<div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Work Queue</div>
         ${items.length ? items.map(item => `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid #1e2d44;">
           <span>${esc(item.type || '--')} · ${esc(item.title || item.id || '--')}</span>
           <span style="color:#7e92b2;">${esc(item.next_action || '--')}</span>
         </div>`).join('') : '<div style="color:#6b7fa0;">No queued actions.</div>'}`;
-    } catch (err) {
-      panel.textContent = `Work Queue unavailable: ${err.message || err}`;
-    }
+      return data;
+    })()
+      .catch((err) => {
+        const message = `Work Queue unavailable: ${err.message || err}`;
+        if (!options.preserveExisting || !String(panel.textContent || '').trim()) {
+          panel.textContent = message;
+        } else {
+          panel.dataset.refreshError = message;
+        }
+        return null;
+      })
+      .finally(() => {
+        if (state.workQueueInFlight === task) state.workQueueInFlight = null;
+      });
+    state.workQueueInFlight = task;
+    return task;
   }
 
   function init() {

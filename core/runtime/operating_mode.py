@@ -35,6 +35,56 @@ def _degradation(code: str, label: str, detail: str = "", severity: str = "warn"
     }
 
 
+def _iter_source_items(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, dict):
+        items: List[Dict[str, Any]] = []
+        for key, value in payload.items():
+            if isinstance(value, dict):
+                item = dict(value)
+                item.setdefault("key", str(key))
+            else:
+                item = {"key": str(key), "status": value}
+            items.append(item)
+        return items
+    if isinstance(payload, list):
+        return [dict(item) for item in payload if isinstance(item, dict)]
+    return []
+
+
+def _source_issue_detail(item: Dict[str, Any], status: str) -> str:
+    issues = item.get("issues")
+    if isinstance(issues, (list, tuple)):
+        issue_text = "; ".join(str(issue) for issue in issues if str(issue).strip())
+    elif issues is not None:
+        issue_text = str(issues)
+    else:
+        issue_text = ""
+    return str(
+        issue_text
+        or item.get("issue")
+        or item.get("stale_reason")
+        or item.get("error")
+        or status
+        or "not ready"
+    )
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "stale"}
+    return bool(value)
+
+
+def _explicit_false(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value is False
+    if isinstance(value, str):
+        return value.strip().lower() in {"0", "false", "no", "n", "not_ready"}
+    return False
+
+
 def validate_operating_mode(
     *,
     live_decision_config: Dict[str, Any] | None = None,
@@ -71,23 +121,29 @@ def validate_operating_mode(
     if not bool(getattr(settings, "COINGLASS_LIVE_GATING_ENABLED", False)):
         degradations.append(_degradation("derivatives_shadow_only", "Derivatives are shadow-only", "COINGLASS_LIVE_GATING_ENABLED=false", "info"))
 
-    source_items = list(sources.get("items") or sources.get("sources") or [])
-    for category_key, category in dict(sources.get("categories") or {}).items():
-        for source_key, source in dict((category or {}).get("sources") or {}).items():
-            if isinstance(source, dict):
-                source_items.append({"key": f"{category_key}.{source_key}", **source})
+    source_items: List[Dict[str, Any]] = []
+    source_items.extend(_iter_source_items(sources.get("items")))
+    source_items.extend(_iter_source_items(sources.get("sources")))
+    categories = sources.get("categories") if isinstance(sources.get("categories"), dict) else {}
+    for category_key, category in categories.items():
+        if not isinstance(category, dict):
+            continue
+        for source in _iter_source_items(category.get("sources")):
+            source_key = str(source.get("key") or source.get("source") or "unknown")
+            source["key"] = f"{category_key}.{source_key}"
+            source_items.append(source)
     for item in source_items:
         if not isinstance(item, dict):
             continue
         status = str(item.get("status") or item.get("health") or "").lower()
         ready = item.get("ready")
-        stale = bool(item.get("stale"))
-        if status in {"missing", "failed", "degraded", "stale"} or stale or ready is False:
+        stale = _truthy(item.get("stale"))
+        if status in {"missing", "failed", "degraded", "stale"} or stale or _explicit_false(ready):
             degradations.append(
                 _degradation(
                     f"source_{str(item.get('key') or item.get('source') or 'unknown')}",
                     "Source degraded",
-                    str("; ".join([str(x) for x in item.get("issues") or []]) or item.get("issue") or item.get("stale_reason") or item.get("error") or status or "not ready"),
+                    _source_issue_detail(item, status),
                     "warn" if status != "failed" else "danger",
                 )
             )

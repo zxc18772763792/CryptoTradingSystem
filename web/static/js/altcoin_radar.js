@@ -80,6 +80,7 @@
     scanInFlight: false,
     operatingModeInFlight: null,
     operatingModeLoadedAt: 0,
+    researchProposalInFlight: new Set(),
   };
 
   function q(id) {
@@ -1641,6 +1642,25 @@
     setOutput(`已将 ${selectedSymbol} 带入研究工坊。下一步建议：在研究工坊先运行“研究总览”，再决定是否继续多币种 / 链上验证。`);
   }
 
+  async function openAiResearchProposal(response, symbol) {
+    const proposalId = String(response?.proposal_id || response?.proposal?.proposal_id || '').trim();
+    if (!proposalId) {
+      await openResearchWorkbench(symbol);
+      return;
+    }
+    if (typeof activateTab === 'function') {
+      activateTab('ai-research');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (typeof window !== 'undefined' && typeof window.AI?.refreshWorkbench === 'function') {
+      await window.AI.refreshWorkbench(proposalId, '');
+      return;
+    }
+    if (typeof refreshAiResearchModules === 'function') {
+      await refreshAiResearchModules();
+    }
+  }
+
   function focusWatchlistSymbol(symbol) {
     const normalized = normalizeWatchlistSymbolInput(symbol);
     if (!normalized) {
@@ -1858,15 +1878,40 @@
             });
           } else if (action === 'research-proposal') {
             const apiFetch = requireApi();
-            apiFetch(`/altcoin/radar/${encodeURIComponent(symbol)}/research-proposal`, {
+            const proposalKey = symbol.toUpperCase();
+            if (state.researchProposalInFlight.has(proposalKey)) return;
+            state.researchProposalInFlight.add(proposalKey);
+            const originalText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = '生成中...';
+            const controls = readControls();
+            const params = new URLSearchParams({
+              exchange: controls.exchange,
+              timeframe: controls.timeframe,
+              mode: controls.radarMode,
+              universe_scope: controls.universeScope,
+            });
+            apiFetch(`/altcoin/radar/${encodeURIComponent(symbol)}/research-proposal?${params.toString()}`, {
               method: 'POST',
+              timeoutMs: 60000,
             }).then((resp) => {
               setOutput(JSON.stringify(resp, null, 2));
-              return openResearchWorkbench(symbol).then(() => resp);
+              return openAiResearchProposal(resp, symbol).catch((error) => {
+                console.warn('open AI research proposal failed', error?.message || error);
+                if (typeof notify === 'function') {
+                  notify(`提案已生成，但打开 AI 研究队列失败: ${error?.message || error}`, true);
+                }
+              }).then(() => resp);
             }).then((resp) => {
               if (typeof notify === 'function') notify(`已为 ${symbol} 生成研究提案 ${resp?.proposal_id || ''}`);
             }).catch((error) => {
               if (typeof notify === 'function') notify(`生成研究提案失败: ${error.message}`, true);
+            }).finally(() => {
+              state.researchProposalInFlight.delete(proposalKey);
+              if (btn.isConnected) {
+                btn.disabled = false;
+                btn.textContent = originalText;
+              }
             });
           } else if (action === 'research') {
             openResearchWorkbench(symbol).then(() => {

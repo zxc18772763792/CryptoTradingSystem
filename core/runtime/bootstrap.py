@@ -75,6 +75,7 @@ class RuntimeBootstrap:
 
             if close_database:
                 await close_db()
+                self._db_ready = False
 
 
 runtime_bootstrap = RuntimeBootstrap()

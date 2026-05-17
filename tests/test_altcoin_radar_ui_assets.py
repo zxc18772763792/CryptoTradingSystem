@@ -55,6 +55,13 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert 'data-row-action="research-proposal"' in radar_js
     assert "生成研究提案" in radar_js
     assert "/altcoin/radar/${encodeURIComponent(symbol)}/research-proposal" in radar_js
+    assert "researchProposalInFlight" in radar_js
+    assert "new URLSearchParams" in radar_js
+    assert "universe_scope: controls.universeScope" in radar_js
+    assert "timeoutMs: 60000" in radar_js
+    assert "async function openAiResearchProposal(response, symbol)" in radar_js
+    assert "activateTab('ai-research')" in radar_js
+    assert "window.AI?.refreshWorkbench" in radar_js
     assert "altcoin-radar-operating-mode-banner" in radar_js
     assert "/ai/operating-mode" in radar_js
     assert "Operating Mode" in radar_js

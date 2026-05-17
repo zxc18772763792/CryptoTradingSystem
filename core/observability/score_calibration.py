@@ -7,14 +7,27 @@ from typing import Any, Dict
 
 
 DEFAULT_PRIOR_PATH = Path(__file__).resolve().parents[2] / "data" / "ai_calibration" / "family_regime_priors.json"
+_QUOTE_SUFFIXES = ("USDT", "USDC", "FDUSD", "BUSD", "USD")
 
 
 def clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value or 0.0)))
 
 
+def _symbol_base(symbol: Any) -> str:
+    text = str(symbol or "").strip().upper()
+    if not text:
+        return ""
+    main = text.split(":", 1)[0].replace("_", "/").replace("-", "/")
+    base = main.split("/", 1)[0] if "/" in main else main
+    for suffix in _QUOTE_SUFFIXES:
+        if base.endswith(suffix) and len(base) > len(suffix):
+            return base[: -len(suffix)]
+    return base
+
+
 def symbol_scope_for_symbol(symbol: Any) -> str:
-    base = str(symbol or "").strip().upper().replace("_", "/").split("/", 1)[0]
+    base = _symbol_base(symbol)
     if base in {"BTC", "ETH"}:
         return "benchmark"
     if base:

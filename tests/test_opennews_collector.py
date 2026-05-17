@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from core.news.collectors.manager import MultiSourceNewsCollector, _parse_ts_to_unix
@@ -51,6 +52,7 @@ def test_opennews_normalizes_ai_rated_item() -> None:
 def test_opennews_pull_latest_posts_expected_body(monkeypatch) -> None:
     monkeypatch.setenv("OPENNEWS_TOKEN", "token-123")
     captured: Dict[str, Any] = {}
+    fresh_ts = datetime.now(timezone.utc).isoformat()
     collector = OpenNewsCollector(
         {
             "defaults": {
@@ -75,7 +77,7 @@ def test_opennews_pull_latest_posts_expected_body(monkeypatch) -> None:
                         "link": "https://example.com/btc",
                         "coins": [{"symbol": "BTC"}],
                         "aiRating": {"score": 74, "signal": "long", "status": "done"},
-                        "ts": "2026-05-05T02:00:00+00:00",
+                        "ts": fresh_ts,
                     }
                 ]
             }

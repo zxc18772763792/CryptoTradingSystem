@@ -4,8 +4,23 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 
 
+_QUOTE_SUFFIXES = ("USDT", "USDC", "FDUSD", "BUSD", "USD")
+
+
+def _symbol_base(symbol: str) -> str:
+    text = str(symbol or "").strip().upper()
+    if not text:
+        return ""
+    main = text.split(":", 1)[0].replace("_", "/").replace("-", "/")
+    base = main.split("/", 1)[0] if "/" in main else main
+    for suffix in _QUOTE_SUFFIXES:
+        if base.endswith(suffix) and len(base) > len(suffix):
+            return base[: -len(suffix)]
+    return base
+
+
 def _is_altcoin(symbol: str) -> bool:
-    base = str(symbol or "").upper().split("/", 1)[0]
+    base = _symbol_base(symbol)
     return bool(base and base not in {"BTC", "ETH"})
 
 
@@ -48,4 +63,3 @@ def market_state_to_planner_hints(
         notes.append(f"market_state_uncertain:{uncertainty}")
 
     return boosted, suppressed, notes
-

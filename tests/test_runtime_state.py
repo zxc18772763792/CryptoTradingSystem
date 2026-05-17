@@ -87,3 +87,49 @@ def test_runtime_task_supervisor_stops_tasks_concurrently():
         assert elapsed < 0.35
 
     asyncio.run(_run())
+
+
+def test_runtime_bootstrap_reinitializes_database_after_shutdown(monkeypatch):
+    from core.runtime import bootstrap as module
+
+    async def _run() -> None:
+        runtime_bootstrap = module.RuntimeBootstrap()
+        init_calls = {"count": 0}
+        close_calls = {"count": 0}
+
+        async def fake_init_db():
+            init_calls["count"] += 1
+
+        async def fake_close_db():
+            close_calls["count"] += 1
+
+        async def fake_initialize(*, ensure_db=True):
+            return None
+
+        async def fake_close():
+            return None
+
+        monkeypatch.setattr(module, "init_db", fake_init_db)
+        monkeypatch.setattr(module, "close_db", fake_close_db)
+        monkeypatch.setattr(module.data_storage, "initialize", fake_initialize)
+        monkeypatch.setattr(module.data_storage, "close", fake_close)
+        monkeypatch.setattr(module.data_storage, "mark_db_initialized", lambda: None)
+
+        await runtime_bootstrap.initialize_shared_runtime(
+            include_news=False,
+            initialize_exchanges=False,
+        )
+        await runtime_bootstrap.shutdown_shared_runtime(
+            include_news=False,
+            close_exchanges=False,
+            close_database=True,
+        )
+        await runtime_bootstrap.initialize_shared_runtime(
+            include_news=False,
+            initialize_exchanges=False,
+        )
+
+        assert init_calls["count"] == 2
+        assert close_calls["count"] == 1
+
+    asyncio.run(_run())
