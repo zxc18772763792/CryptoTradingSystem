@@ -122,3 +122,23 @@ def test_build_news_summary_uses_recent_stale_cache_on_query_failure(monkeypatch
     assert payload["cache_hit"] is True
     assert payload["source_status"] == "cache_stale"
     assert "unavailable" in str(payload.get("stale_reason") or "")
+
+
+def test_build_news_summary_does_not_cache_empty_refresh(monkeypatch):
+    from web.api import research as module
+
+    module._NEWS_SUMMARY_CACHE.clear()
+
+    async def fake_list_events(*, symbol=None, since=None, limit=300):
+        return []
+
+    monkeypatch.setattr(module.news_db, "list_events", fake_list_events)
+    monkeypatch.setattr(module.news_db, "list_news_raw", AsyncMock(return_value=[]))
+    monkeypatch.setattr(module.news_db, "list_source_states", AsyncMock(return_value=[]))
+    monkeypatch.setattr(module.news_db, "get_llm_queue_stats", AsyncMock(return_value={}))
+
+    payload = asyncio.run(module._build_news_summary("BTC/USDT", hours=24))
+
+    assert payload["source_status"] == "empty"
+    assert payload["events_count"] == 0
+    assert module._NEWS_SUMMARY_CACHE == {}

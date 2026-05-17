@@ -191,18 +191,18 @@ def test_market_microstructure_prefers_coinglass_derivatives_when_available(monk
     monkeypatch.setattr(
         trading_api,
         "_fetch_funding_basis_snapshot",
-        lambda *args, **kwargs: pytest.fail("exchange funding fallback should not run when Coinglass is available"),
+        fake_funding_basis,
     )
     monkeypatch.setattr(
         trading_api,
         "_fetch_open_interest_snapshot",
-        lambda *args, **kwargs: pytest.fail("exchange OI fallback should not run when Coinglass is available"),
+        fake_oi,
     )
     monkeypatch.setattr(trading_api, "_fetch_options_snapshot", fake_options)
     monkeypatch.setattr(
         trading_api,
         "_fetch_long_short_ratio_snapshot",
-        lambda *args, **kwargs: pytest.fail("exchange long/short fallback should not run when Coinglass is available"),
+        fake_long_short,
     )
     monkeypatch.setattr(trading_api, "_load_preferred_coinglass_overview", fake_coinglass)
 
@@ -223,6 +223,286 @@ def test_market_microstructure_prefers_coinglass_derivatives_when_available(monk
     assert payload["options"]["source"] == "coinglass_cache"
     assert payload["options"]["put_call_ratio"] == pytest.approx(1.35, rel=1e-9)
     assert payload["options"]["open_interest_usd"] == pytest.approx(8_000_000_000.0, rel=1e-9)
+
+
+def test_market_microstructure_falls_back_when_coinglass_overview_is_slow(monkeypatch):
+    trading_api._MICROSTRUCTURE_SNAPSHOT_CACHE.clear()
+    monkeypatch.setattr(trading_api, "_ANALYTICS_COINGLASS_OVERVIEW_TIMEOUT_SEC", 0.01)
+
+    async def fake_orderbook(*args, **kwargs):
+        return {
+            "available": True,
+            "bids": [[100.0, 2.0]],
+            "asks": [[100.1, 1.5]],
+            "timestamp": 1,
+        }
+
+    async def fake_flow(*args, **kwargs):
+        return {
+            "available": True,
+            "count": 20,
+            "buy_volume": 11.0,
+            "sell_volume": 9.0,
+            "imbalance": 0.1,
+        }
+
+    async def slow_coinglass(*args, **kwargs):
+        await asyncio.sleep(60)
+        return {"available": True}
+
+    async def fake_options(*args, **kwargs):
+        return {"available": False}
+
+    async def fake_funding_basis(*args, **kwargs):
+        return {
+            "funding": {
+                "available": True,
+                "source": "binance_public",
+                "funding_rate": 0.00004,
+            },
+            "basis": {
+                "available": True,
+                "source": "binance_public",
+                "basis_pct": -0.043151,
+            },
+        }
+
+    async def fake_long_short(*args, **kwargs):
+        return {
+            "available": True,
+            "source": "binance_public",
+            "long_short_ratio": 1.05,
+            "sample_size": 1,
+        }
+
+    async def fake_oi(*args, **kwargs):
+        return {
+            "available": False,
+            "source": "binance_public",
+            "error": "oi_unavailable",
+            "sample_size": 0,
+        }
+
+    monkeypatch.setattr(trading_api, "_fetch_orderbook", fake_orderbook)
+    monkeypatch.setattr(trading_api, "_fetch_trade_imbalance", fake_flow)
+    monkeypatch.setattr(trading_api, "_load_preferred_coinglass_overview", slow_coinglass)
+    monkeypatch.setattr(trading_api, "_fetch_options_snapshot", fake_options)
+    monkeypatch.setattr(trading_api, "_fetch_funding_basis_snapshot", fake_funding_basis)
+    monkeypatch.setattr(trading_api, "_fetch_long_short_ratio_snapshot", fake_long_short)
+    monkeypatch.setattr(trading_api, "_fetch_open_interest_snapshot", fake_oi)
+
+    payload = asyncio.run(trading_api.get_market_microstructure(exchange="binance", symbol="BTC/USDT", depth_limit=20))
+
+    assert payload["funding_rate"]["available"] is True
+    assert payload["funding_rate"]["source"] == "binance_public"
+    assert payload["spot_futures_basis"]["available"] is True
+    assert payload["spot_futures_basis"]["basis_pct"] == pytest.approx(-0.043151)
+    assert payload["derivatives_context"]["available"] is True
+    assert payload["derivatives_context"]["provider"] == "exchange_public"
+    assert payload["derivatives_context"]["status"] == "public_fallback"
+    assert "spot_futures_basis" in payload["derivatives_context"]["active_datasets"]
+
+
+def test_market_microstructure_derivative_branches_are_bounded(monkeypatch):
+    trading_api._MICROSTRUCTURE_SNAPSHOT_CACHE.clear()
+    monkeypatch.setattr(trading_api, "_ANALYTICS_FUNDING_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(trading_api, "_ANALYTICS_BASIS_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(trading_api, "_ANALYTICS_PUBLIC_CORE_TIMEOUT_FLOOR_SEC", 0.05)
+
+    async def fake_orderbook(*args, **kwargs):
+        return {
+            "available": True,
+            "bids": [[100.0, 2.0]],
+            "asks": [[100.1, 1.5]],
+            "timestamp": 1,
+        }
+
+    async def fake_flow(*args, **kwargs):
+        return {
+            "available": True,
+            "count": 20,
+            "buy_volume": 11.0,
+            "sell_volume": 9.0,
+            "imbalance": 0.1,
+        }
+
+    async def slow_funding_basis(*args, **kwargs):
+        await asyncio.sleep(60)
+        return {
+            "funding": {"available": True, "funding_rate": 0.00004},
+            "basis": {"available": True, "basis_pct": 0.05},
+        }
+
+    async def fake_long_short(*args, **kwargs):
+        return {
+            "available": True,
+            "source": "binance_public",
+            "long_short_ratio": 1.08,
+            "sample_size": 12,
+        }
+
+    async def fake_oi(*args, **kwargs):
+        return {
+            "available": True,
+            "source": "binance_public",
+            "value": 123456.0,
+            "sample_size": 1,
+        }
+
+    async def fake_options(*args, **kwargs):
+        return {"available": False}
+
+    monkeypatch.setattr(trading_api, "_fetch_orderbook", fake_orderbook)
+    monkeypatch.setattr(trading_api, "_fetch_trade_imbalance", fake_flow)
+    monkeypatch.setattr(trading_api, "_fetch_funding_basis_snapshot", slow_funding_basis)
+    monkeypatch.setattr(trading_api, "_fetch_long_short_ratio_snapshot", fake_long_short)
+    monkeypatch.setattr(trading_api, "_fetch_open_interest_snapshot", fake_oi)
+    monkeypatch.setattr(trading_api, "_fetch_options_snapshot", fake_options)
+
+    payload = asyncio.run(
+        trading_api.get_market_microstructure(
+            exchange="binance", symbol="BTC/USDT", depth_limit=20
+        )
+    )
+
+    assert payload["funding_rate"]["available"] is False
+    assert payload["funding_rate"]["error"] == "funding_timeout"
+    assert payload["spot_futures_basis"]["available"] is False
+    assert payload["spot_futures_basis"]["error"] == "basis_timeout"
+    assert payload["long_short_ratio"]["available"] is True
+    assert payload["long_short_ratio"]["long_short_ratio"] == pytest.approx(1.08)
+    assert payload["oi"]["available"] is True
+    assert payload["oi"]["value"] == pytest.approx(123456.0)
+
+
+def test_market_microstructure_orderbook_timeout_still_returns_derivatives(monkeypatch):
+    trading_api._MICROSTRUCTURE_SNAPSHOT_CACHE.clear()
+    monkeypatch.setattr(trading_api, "_ANALYTICS_ORDERBOOK_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(trading_api, "_ANALYTICS_PUBLIC_CORE_TIMEOUT_FLOOR_SEC", 0.05)
+
+    async def slow_orderbook(*args, **kwargs):
+        await asyncio.sleep(60)
+        return {
+            "available": True,
+            "bids": [[100.0, 2.0]],
+            "asks": [[100.1, 1.5]],
+            "timestamp": 1,
+        }
+
+    async def fake_flow(*args, **kwargs):
+        return {
+            "available": True,
+            "count": 20,
+            "buy_volume": 11.0,
+            "sell_volume": 9.0,
+            "imbalance": 0.1,
+        }
+
+    async def fake_funding_basis(*args, **kwargs):
+        return {
+            "funding": {
+                "available": True,
+                "source": "binance_public",
+                "funding_rate": 0.00004,
+            },
+            "basis": {
+                "available": True,
+                "source": "binance_public",
+                "basis_pct": -0.043151,
+            },
+        }
+
+    async def fake_long_short(*args, **kwargs):
+        return {
+            "available": True,
+            "source": "binance_public",
+            "long_short_ratio": 1.05,
+            "sample_size": 1,
+        }
+
+    async def fake_oi(*args, **kwargs):
+        return {
+            "available": True,
+            "source": "binance_public",
+            "value": 123456.0,
+            "sample_size": 1,
+        }
+
+    async def fake_options(*args, **kwargs):
+        return {"available": False}
+
+    monkeypatch.setattr(trading_api, "_fetch_orderbook", slow_orderbook)
+    monkeypatch.setattr(trading_api, "_fetch_trade_imbalance", fake_flow)
+    monkeypatch.setattr(trading_api, "_fetch_funding_basis_snapshot", fake_funding_basis)
+    monkeypatch.setattr(trading_api, "_fetch_long_short_ratio_snapshot", fake_long_short)
+    monkeypatch.setattr(trading_api, "_fetch_open_interest_snapshot", fake_oi)
+    monkeypatch.setattr(trading_api, "_fetch_options_snapshot", fake_options)
+
+    payload = asyncio.run(
+        trading_api.get_market_microstructure(
+            exchange="binance", symbol="BTC/USDT", depth_limit=20
+        )
+    )
+
+    assert payload["available"] is False
+    assert payload["source_error"] == "orderbook_timeout"
+    assert payload["funding_rate"]["available"] is True
+    assert payload["spot_futures_basis"]["available"] is True
+    assert payload["long_short_ratio"]["available"] is True
+    assert payload["oi"]["available"] is True
+
+
+def test_market_microstructure_does_not_cache_empty_timeout_payload(monkeypatch):
+    trading_api._MICROSTRUCTURE_SNAPSHOT_CACHE.clear()
+    monkeypatch.setattr(trading_api, "_ANALYTICS_ORDERBOOK_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(trading_api, "_ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(trading_api, "_ANALYTICS_FUNDING_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(trading_api, "_ANALYTICS_BASIS_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(trading_api, "_ANALYTICS_LONG_SHORT_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(trading_api, "_ANALYTICS_OI_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(trading_api, "_ANALYTICS_PUBLIC_CORE_TIMEOUT_FLOOR_SEC", 0.05)
+
+    async def slow_orderbook(*args, **kwargs):
+        await asyncio.sleep(60)
+        return {"available": True, "bids": [[100.0, 1.0]], "asks": [[101.0, 1.0]]}
+
+    async def slow_flow(*args, **kwargs):
+        await asyncio.sleep(60)
+        return {"available": True, "count": 1, "imbalance": 0.2}
+
+    async def slow_funding_basis(*args, **kwargs):
+        await asyncio.sleep(60)
+        return {
+            "funding": {"available": True, "funding_rate": 0.00004},
+            "basis": {"available": True, "basis_pct": 0.05},
+        }
+
+    async def slow_long_short(*args, **kwargs):
+        await asyncio.sleep(60)
+        return {"available": True, "long_short_ratio": 1.08}
+
+    async def slow_oi(*args, **kwargs):
+        await asyncio.sleep(60)
+        return {"available": True, "value": 123456.0}
+
+    async def fake_options(*args, **kwargs):
+        return {"available": False}
+
+    monkeypatch.setattr(trading_api, "_fetch_orderbook", slow_orderbook)
+    monkeypatch.setattr(trading_api, "_fetch_trade_imbalance", slow_flow)
+    monkeypatch.setattr(trading_api, "_fetch_funding_basis_snapshot", slow_funding_basis)
+    monkeypatch.setattr(trading_api, "_fetch_long_short_ratio_snapshot", slow_long_short)
+    monkeypatch.setattr(trading_api, "_fetch_open_interest_snapshot", slow_oi)
+    monkeypatch.setattr(trading_api, "_fetch_options_snapshot", fake_options)
+
+    payload = asyncio.run(
+        trading_api.get_market_microstructure(
+            exchange="binance", symbol="BTC/USDT", depth_limit=20
+        )
+    )
+
+    assert payload["source_error"] == "orderbook_timeout"
+    assert trading_api._MICROSTRUCTURE_SNAPSHOT_CACHE == {}
 
 
 def test_market_microstructure_preserves_flow_error_flag(monkeypatch):

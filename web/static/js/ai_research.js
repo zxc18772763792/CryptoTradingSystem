@@ -6136,6 +6136,8 @@ ${confirmHint}`,
       state.operatingModeLoadedAt = Date.now();
       banner.removeAttribute('data-refresh-error');
       const degradations = Array.isArray(data?.degradations) ? data.degradations : [];
+      const actionableDegradations = degradations.filter((item) => String(item?.severity || '').toLowerCase() !== 'info');
+      const advisoryCount = Math.max(0, degradations.length - actionableDegradations.length);
       const live = data?.ai_live_decision || {};
       const agent = data?.autonomous_agent || {};
       const deri = data?.coinglass || {};
@@ -6146,7 +6148,8 @@ ${confirmHint}`,
           <span>AI=${esc(live.mode || '--')} / ${esc(live.provider || '--')}</span>
           <span>agent=${esc(agent.mode || '--')} / ${agent.allow_live ? 'live allowed' : 'paper only'}</span>
           <span>derivatives=${deri.live_gating_enabled ? 'live gating' : 'shadow-only'}</span>
-          <span style="color:${degradations.length ? '#f59e0b' : '#20bf78'};">degraded=${degradations.length}</span>
+          <span style="color:${actionableDegradations.length ? '#f59e0b' : '#20bf78'};">degraded=${actionableDegradations.length}</span>
+          ${advisoryCount ? `<span>advisory=${advisoryCount}</span>` : ''}
         </div>`;
       return data;
     })()

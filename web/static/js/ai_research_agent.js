@@ -995,6 +995,8 @@
       return;
     }
     const degradations = Array.isArray(snapshot.degradations) ? snapshot.degradations : [];
+    const actionableDegradations = degradations.filter((item) => String(item?.severity || '').toLowerCase() !== 'info');
+    const advisoryCount = Math.max(0, degradations.length - actionableDegradations.length);
     const agent = snapshot.autonomous_agent || {};
     const coinglass = snapshot.coinglass || {};
     const provider = agent.provider || snapshot.ai_live_decision?.provider || '--';
@@ -1006,7 +1008,8 @@
         <span>provider=${esc(provider)}</span>
         <span>allow_live=${agent.allow_live ? 'true' : 'false'}</span>
         <span>derivatives=${coinglass.live_gating_enabled ? 'live' : 'shadow'}</span>
-        <span>degraded=${degradations.length}</span>
+        <span>degraded=${actionableDegradations.length}</span>
+        ${advisoryCount ? `<span>advisory=${advisoryCount}</span>` : ''}
       </div>`;
     normalizeElementHtml(banner);
   }

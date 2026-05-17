@@ -5052,7 +5052,8 @@ class ExecutionEngine:
         if self._last_bg_check_at and (now - self._last_bg_check_at).total_seconds() < self._bg_check_interval_seconds:
             return
         self._last_bg_check_at = now
-        for mode in ("paper", "live"):
+        modes = ("paper",) if self._default_paper_trading else ("live",)
+        for mode in modes:
             async with self._mode_guard(mode):
                 if mode == "live":
                     await self._reconcile_local_positions_with_exchange()

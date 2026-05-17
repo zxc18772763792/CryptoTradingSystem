@@ -112,6 +112,8 @@ _MODULE_TIMEOUT_SEC = {
     "discipline": 5.0,
 }
 _MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC = 20 * 60
+_MARKET_STATE_NEWS_TIMEOUT_SEC = 12.0
+_MARKET_STATE_PUBLIC_MARKET_TIMEOUT_SEC = 9.0
 _COINGLASS_PREFERRED_MAX_AGE_SEC = 5 * 60
 _MACRO_MARKET_STALE_MAX_AGE_SEC = 3 * 24 * 60 * 60
 _MACRO_MONTHLY_STALE_MAX_AGE_SEC = 62 * 24 * 60 * 60
@@ -545,6 +547,91 @@ def _with_news_summary_runtime_fields(
     return out
 
 
+def _news_summary_timeout_fallback(
+    symbol: str,
+    hours: int,
+    *,
+    reason: str = "overview_timeout",
+) -> Dict[str, Any]:
+    hours = max(1, min(int(hours or 24), 168))
+    cache_key = _news_summary_cache_key(symbol, hours)
+    stale_cached, stale_age = _news_summary_cache_entry(
+        cache_key,
+        max_age_sec=_NEWS_SUMMARY_STALE_MAX_AGE_SEC,
+    )
+    if stale_cached is not None:
+        return _with_news_summary_runtime_fields(
+            stale_cached,
+            cache_hit=True,
+            cache_age_sec=stale_age,
+            stale=True,
+            stale_reason=reason,
+            source_status="cache_stale",
+        )
+    now = _now_iso()
+    return {
+        "symbol": _symbol_to_news_key(symbol),
+        "query_symbols": _symbol_to_news_keys(symbol),
+        "hours": int(hours),
+        "scope": "pending",
+        "events_count": 0,
+        "raw_count": 0,
+        "feed_count": 0,
+        "active_provider_count": 0,
+        "sentiment": {"positive": 0, "neutral": 0, "negative": 0},
+        "by_type": {},
+        "source_states": [],
+        "llm_queue": {},
+        "timestamp": now,
+        "generated_at_utc": now,
+        "generated_at_local": _local_iso(now),
+        "ui_timezone": _UI_TIMEZONE,
+        "timezone_basis": _TIMEZONE_BASIS,
+        "source_errors": [],
+        "cache_hit": False,
+        "cache_age_sec": None,
+        "stale": True,
+        "stale_reason": reason,
+        "source_status": "pending_timeout",
+    }
+
+
+def _public_market_timeout_fallback(
+    cache_key: str,
+    *,
+    source: str,
+    stale_max_age_sec: float,
+    reason: str = "overview_timeout",
+) -> Dict[str, Any]:
+    stale_cached, stale_age = _public_market_cache_entry(
+        cache_key,
+        max_age_sec=stale_max_age_sec,
+    )
+    if stale_cached is not None:
+        return _with_public_market_runtime_fields(
+            stale_cached,
+            cache_hit=True,
+            cache_age_sec=stale_age,
+            stale=True,
+            stale_reason=reason,
+            source_status="cache_stale",
+        )
+    return {
+        "available": None,
+        "source": source,
+        "error": None,
+        "cache_hit": False,
+        "cache_age_sec": None,
+        "stale": True,
+        "stale_reason": reason,
+        "source_status": "pending_timeout",
+    }
+
+
+def _source_pending_timeout(payload: Optional[Dict[str, Any]]) -> bool:
+    return str((payload or {}).get("source_status") or "").strip().lower() == "pending_timeout"
+
+
 async def _load_public_fear_greed_snapshot() -> Dict[str, Any]:
     cached, cached_age = _public_market_cache_entry(
         "fear_greed", max_age_sec=_PUBLIC_MARKET_DATA_CACHE_TTL_SEC
@@ -769,7 +856,7 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
     cached, cached_age = _news_summary_cache_entry(
         cache_key, max_age_sec=_NEWS_SUMMARY_CACHE_TTL_SEC
     )
-    if cached:
+    if cached and _news_summary_sample_count(cached) > 0:
         return _with_news_summary_runtime_fields(
             cached,
             cache_hit=True,
@@ -780,6 +867,8 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
     stale_cached, stale_age = _news_summary_cache_entry(
         cache_key, max_age_sec=_NEWS_SUMMARY_STALE_MAX_AGE_SEC
     )
+    if stale_cached is not None and _news_summary_sample_count(stale_cached) <= 0:
+        stale_cached = None
 
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
     symbol_key = _symbol_to_news_key(symbol)
@@ -935,7 +1024,6 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
     }
     if (
         _news_summary_sample_count(payload) <= 0
-        and payload["source_errors"]
         and stale_cached is not None
     ):
         return _with_news_summary_runtime_fields(
@@ -945,6 +1033,14 @@ async def _build_news_summary(symbol: str, hours: int = 24) -> Dict[str, Any]:
             stale=True,
             stale_reason=" | ".join(payload["source_errors"][:4]),
             source_status="cache_stale",
+        )
+    if _news_summary_sample_count(payload) <= 0:
+        return _with_news_summary_runtime_fields(
+            payload,
+            cache_hit=False,
+            cache_age_sec=0.0,
+            stale=False,
+            source_status="empty",
         )
     return _with_news_summary_runtime_fields(
         _store_news_summary(cache_key, payload),
@@ -2364,7 +2460,8 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
         4.0,
     )
     news_task = _wait_or_none_keep_running(
-        _build_news_summary(profile.primary_symbol, hours=24), 8.0
+        _build_news_summary(profile.primary_symbol, hours=24),
+        _MARKET_STATE_NEWS_TIMEOUT_SEC,
     )
     calendar_task = _wait_or_none_keep_running(get_trading_calendar(days=7), 4.0)
     macro_task = _wait_or_none_keep_running(_load_macro_snapshot_payload(), 2.0)
@@ -2383,10 +2480,12 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
         8.0,
     )
     fear_greed_task = _wait_or_none_keep_running(
-        _load_public_fear_greed_snapshot(), 6.0
+        _load_public_fear_greed_snapshot(),
+        _MARKET_STATE_PUBLIC_MARKET_TIMEOUT_SEC,
     )
     market_breadth_task = _wait_or_none_keep_running(
-        _load_public_market_breadth_snapshot(), 6.0
+        _load_public_market_breadth_snapshot(),
+        _MARKET_STATE_PUBLIC_MARKET_TIMEOUT_SEC,
     )
     history_status_task = _wait_or_none_keep_running(
         get_analytics_history_status(
@@ -2420,15 +2519,35 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
         history_status_task,
     )
     risk_dashboard = dict(risk_dashboard or {})
-    news = dict(news or {})
+    news = (
+        dict(news)
+        if isinstance(news, dict)
+        else _news_summary_timeout_fallback(profile.primary_symbol, 24)
+    )
     calendar_data = dict(calendar_data or {})
     macro_snapshot = dict(macro_snapshot or {})
     history_micro = dict(history_micro or {})
     history_community = dict(history_community or {})
     history_whale = dict(history_whale or {})
     derivatives_overview = dict(derivatives_overview or {})
-    fear_greed = dict(fear_greed or {})
-    market_breadth = dict(market_breadth or {})
+    fear_greed = (
+        dict(fear_greed)
+        if isinstance(fear_greed, dict)
+        else _public_market_timeout_fallback(
+            "fear_greed",
+            source="alternative.me",
+            stale_max_age_sec=_PUBLIC_FEAR_GREED_STALE_MAX_AGE_SEC,
+        )
+    )
+    market_breadth = (
+        dict(market_breadth)
+        if isinstance(market_breadth, dict)
+        else _public_market_timeout_fallback(
+            "global_market_breadth",
+            source="coingecko_global",
+            stale_max_age_sec=_PUBLIC_MARKET_BREADTH_STALE_MAX_AGE_SEC,
+        )
+    )
     history_status = _analytics_status_collectors_to_map(dict(history_status or {}))
     derivatives_summary = _pick_preferred_derivatives_summary(
         _build_derivatives_summary_from_overview(derivatives_overview),
@@ -2584,11 +2703,16 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
         warnings.append(
             "Symbol-scoped news was sparse; switched to global market news fallback."
         )
-    if news.get("stale"):
+    if news.get("stale") and not _source_pending_timeout(news):
         warnings.append(
             "News summary live refresh failed; using recent cached snapshot."
         )
-    if (
+    if _source_pending_timeout(news):
+        degraded = True
+        warnings.append(
+            "News summary refresh is still pending; event coverage may update shortly."
+        )
+    elif (
         int(news.get("events_count") or 0)
         + int(news.get("feed_count") or 0)
         + int(news.get("raw_count") or 0)
@@ -2712,7 +2836,11 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             "China macro snapshot is missing the PPI-CPI scissors spread; China regime read is partial."
         )
     fear_greed_value = _coerce_finite_float(fear_greed.get("value"))
-    if not fear_greed.get("available"):
+    if _source_pending_timeout(fear_greed):
+        warnings.append(
+            "Fear & Greed refresh is still pending; crowd sentiment context may update shortly."
+        )
+    elif fear_greed.get("available") is False or "available" not in fear_greed:
         warnings.append(
             "Fear & Greed index is unavailable; crowd sentiment context is partial."
         )
@@ -2729,7 +2857,11 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
     market_cap_change_pct_24h = _coerce_finite_float(
         market_breadth.get("market_cap_change_pct_24h")
     )
-    if not market_breadth.get("available"):
+    if _source_pending_timeout(market_breadth):
+        warnings.append(
+            "Global market breadth refresh is still pending; cross-market tape context may update shortly."
+        )
+    elif market_breadth.get("available") is False or "available" not in market_breadth:
         warnings.append(
             "Global market breadth is unavailable; cross-market tape context is partial."
         )

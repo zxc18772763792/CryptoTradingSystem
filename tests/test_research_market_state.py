@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
@@ -399,6 +400,197 @@ def test_market_state_does_not_retry_empty_news_summary(monkeypatch):
     assert news_mock.await_count == 1
     assert any(
         "News summary returned no usable samples" in warning
+        for warning in result["warnings"]
+    )
+
+
+def test_market_state_uses_stale_news_cache_when_overview_refresh_times_out(
+    monkeypatch,
+):
+    from web.api import research as module
+
+    module._NEWS_SUMMARY_CACHE.clear()
+    module._NEWS_SUMMARY_CACHE["BTC|24"] = {
+        "ts": time.time() - (module._NEWS_SUMMARY_CACHE_TTL_SEC + 5),
+        "payload": {
+            **_news_summary(4),
+            "symbol": "BTC",
+            "query_symbols": ["BTCUSDT", "BTC"],
+            "hours": 24,
+        },
+    }
+    monkeypatch.setattr(module, "_MARKET_STATE_NEWS_TIMEOUT_SEC", 0.01)
+    _patch_public_market_sources(
+        monkeypatch,
+        module,
+        fear_greed={"available": True, "value": 45, "source": "alternative.me"},
+        market_breadth={
+            "available": True,
+            "source": "coingecko_global",
+            "market_cap_change_pct_24h": 1.2,
+        },
+    )
+    monkeypatch.setattr(
+        module, "_load_preferred_coinglass_overview", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(
+        module, "get_analytics_history_status", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(
+        module, "get_risk_dashboard", AsyncMock(return_value={"risk_level": "low"})
+    )
+    monkeypatch.setattr(
+        module,
+        "get_trading_calendar",
+        AsyncMock(
+            return_value={
+                "events": [
+                    {
+                        "name": "CPI",
+                        "time_utc": _recent_snapshot_ts(),
+                        "importance": "high",
+                    }
+                ]
+            }
+        ),
+    )
+
+    async def slow_news(*args, **kwargs):
+        await asyncio.sleep(60)
+        return _news_summary(0)
+
+    monkeypatch.setattr(module, "_build_news_summary", slow_news)
+    monkeypatch.setattr(
+        module,
+        "_load_latest_microstructure_snapshot",
+        AsyncMock(return_value=_history_micro_snapshot()),
+    )
+    monkeypatch.setattr(
+        module,
+        "_load_latest_community_snapshot",
+        AsyncMock(return_value=_history_community_snapshot()),
+    )
+    monkeypatch.setattr(
+        module,
+        "_load_latest_whale_snapshot",
+        AsyncMock(return_value={"count": 1, "transactions": []}),
+    )
+    monkeypatch.setattr(
+        module,
+        "get_market_microstructure",
+        AsyncMock(side_effect=AssertionError("live microstructure should be skipped")),
+    )
+    monkeypatch.setattr(
+        module,
+        "get_community_overview",
+        AsyncMock(side_effect=AssertionError("live community should be skipped")),
+    )
+
+    result = asyncio.run(module._build_market_state_module(module.ResearchProfile()))
+    news = result["payload"]["sentiment_dashboard"]["news"]
+
+    assert news["events_count"] == 4
+    assert news["stale"] is True
+    assert news["source_status"] == "cache_stale"
+    assert not any(
+        "News summary returned no usable samples" in warning
+        for warning in result["warnings"]
+    )
+
+
+def test_market_state_uses_stale_breadth_cache_when_overview_refresh_times_out(
+    monkeypatch,
+):
+    from web.api import research as module
+
+    module._PUBLIC_MARKET_DATA_CACHE.clear()
+    module._PUBLIC_MARKET_DATA_CACHE["global_market_breadth"] = {
+        "ts": time.time() - (module._PUBLIC_MARKET_DATA_CACHE_TTL_SEC + 5),
+        "payload": {
+            "available": True,
+            "source": "coingecko_global",
+            "active_cryptocurrencies": 12345,
+            "markets": 900,
+            "market_cap_change_pct_24h": -1.2,
+            "volume_change_pct_24h": 2.4,
+            "btc_dominance_pct": 58.5,
+        },
+    }
+    monkeypatch.setattr(module, "_MARKET_STATE_PUBLIC_MARKET_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(
+        module,
+        "_load_public_fear_greed_snapshot",
+        AsyncMock(
+            return_value={"available": True, "value": 45, "source": "alternative.me"}
+        ),
+    )
+
+    async def slow_breadth(*args, **kwargs):
+        await asyncio.sleep(60)
+        return {"available": False}
+
+    monkeypatch.setattr(module, "_load_public_market_breadth_snapshot", slow_breadth)
+    monkeypatch.setattr(
+        module, "_load_preferred_coinglass_overview", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(
+        module, "get_analytics_history_status", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(
+        module, "get_risk_dashboard", AsyncMock(return_value={"risk_level": "low"})
+    )
+    monkeypatch.setattr(
+        module,
+        "get_trading_calendar",
+        AsyncMock(
+            return_value={
+                "events": [
+                    {
+                        "name": "CPI",
+                        "time_utc": _recent_snapshot_ts(),
+                        "importance": "high",
+                    }
+                ]
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        module, "_build_news_summary", AsyncMock(return_value=_news_summary(3))
+    )
+    monkeypatch.setattr(
+        module,
+        "_load_latest_microstructure_snapshot",
+        AsyncMock(return_value=_history_micro_snapshot()),
+    )
+    monkeypatch.setattr(
+        module,
+        "_load_latest_community_snapshot",
+        AsyncMock(return_value=_history_community_snapshot()),
+    )
+    monkeypatch.setattr(
+        module,
+        "_load_latest_whale_snapshot",
+        AsyncMock(return_value={"count": 1, "transactions": []}),
+    )
+    monkeypatch.setattr(
+        module,
+        "get_market_microstructure",
+        AsyncMock(side_effect=AssertionError("live microstructure should be skipped")),
+    )
+    monkeypatch.setattr(
+        module,
+        "get_community_overview",
+        AsyncMock(side_effect=AssertionError("live community should be skipped")),
+    )
+
+    result = asyncio.run(module._build_market_state_module(module.ResearchProfile()))
+    breadth = result["payload"]["global_market_breadth"]
+
+    assert breadth["available"] is True
+    assert breadth["stale"] is True
+    assert breadth["source_status"] == "cache_stale"
+    assert not any(
+        "Global market breadth is unavailable" in warning
         for warning in result["warnings"]
     )
 

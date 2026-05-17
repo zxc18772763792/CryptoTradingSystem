@@ -111,6 +111,8 @@ _ANALYTICS_CALENDAR_TIMEOUT_SEC = 6.0
 _ANALYTICS_SECURITY_ALERT_TIMEOUT_SEC = 6.0
 _ANALYTICS_COLLECTOR_TIMEOUT_SEC = 15.0
 _ANALYTICS_COINGLASS_REFRESH_MAX_AGE_SEC = 5 * 60.0
+_ANALYTICS_COINGLASS_OVERVIEW_TIMEOUT_SEC = 2.2
+_ANALYTICS_PUBLIC_CORE_TIMEOUT_FLOOR_SEC = 12.0
 _ANALYTICS_HISTORY_HEALTH_CACHE_TTL_SEC = 20.0
 _ANALYTICS_HISTORY_STATUS_CACHE_TTL_SEC = 8.0
 _ANALYTICS_HISTORY_HEALTH_READ_TIMEOUT_SEC = 6.0
@@ -704,6 +706,7 @@ async def _fetch_binance_public_funding_and_basis(
         return {"funding": {"available": False}, "basis": {"available": False}}
     funding = {
         "available": True,
+        "source": "binance_public",
         "symbol": f"{symbol}:USDT" if ":" not in str(symbol or "") else symbol,
         "funding_rate": _safe_float(premium_index.get("lastFundingRate")),
         "next_funding_time": _safe_dt(premium_index.get("nextFundingTime")).isoformat()
@@ -716,6 +719,7 @@ async def _fetch_binance_public_funding_and_basis(
         basis_val = (perp_px - spot_px) / spot_px
         basis = {
             "available": True,
+            "source": "binance_public",
             "spot_symbol": symbol,
             "perp_symbol": f"{symbol}:USDT" if ":" not in str(symbol or "") else symbol,
             "spot_price": spot_px,
@@ -1657,6 +1661,101 @@ def _apply_coinglass_derivatives_overlay(
     return out
 
 
+async def _await_optional_analytics_task(
+    task: asyncio.Task,
+    *,
+    default: Any,
+    timeout_sec: float,
+    label: str,
+) -> Any:
+    try:
+        return await asyncio.wait_for(task, timeout=max(0.05, float(timeout_sec)))
+    except asyncio.TimeoutError:
+        if not task.done():
+            task.cancel()
+        logger.debug(f"{label} timed out after {timeout_sec:.2f}s; using fallback")
+        return default
+    except Exception as exc:
+        logger.debug(f"{label} failed: {exc}")
+        return default
+
+
+async def _bounded_analytics_call(
+    coro: Any,
+    *,
+    default: Any,
+    timeout_sec: float,
+    label: str,
+) -> Any:
+    task = asyncio.create_task(coro)
+    return await _await_optional_analytics_task(
+        task,
+        default=default,
+        timeout_sec=timeout_sec,
+        label=label,
+    )
+
+
+def _public_core_timeout(timeout_sec: float) -> float:
+    return max(
+        float(timeout_sec),
+        float(_ANALYTICS_PUBLIC_CORE_TIMEOUT_FLOOR_SEC),
+    )
+
+
+def _microstructure_has_core_signal(payload: Optional[Dict[str, Any]]) -> bool:
+    data = dict(payload or {})
+    orderbook = dict(data.get("orderbook") or {})
+    aggressor = dict(data.get("aggressor_flow") or {})
+    if bool(orderbook.get("bid_depth") or orderbook.get("ask_depth")):
+        return True
+    if _safe_float(orderbook.get("mid_price")) > 0:
+        return True
+    if bool(aggressor.get("count")) or abs(_safe_float(aggressor.get("imbalance"))) > 0:
+        return True
+    for key in ("funding_rate", "spot_futures_basis", "long_short_ratio", "oi"):
+        if bool((data.get(key) or {}).get("available")):
+            return True
+    return False
+
+
+def _apply_public_derivatives_context(payload: Dict[str, Any]) -> Dict[str, Any]:
+    out = copy.deepcopy(payload or {})
+    existing = dict(out.get("derivatives_context") or {})
+    if bool(existing.get("available")):
+        return out
+
+    active: List[str] = []
+    if bool((out.get("funding_rate") or {}).get("available")):
+        active.append("funding_rate")
+    if bool((out.get("spot_futures_basis") or {}).get("available")):
+        active.append("spot_futures_basis")
+    if bool((out.get("long_short_ratio") or {}).get("available")):
+        active.append("long_short_ratio")
+    if bool((out.get("oi") or {}).get("available")):
+        active.append("open_interest")
+    if bool((out.get("options") or {}).get("available")):
+        active.append("options")
+
+    if not active:
+        return out
+
+    out["derivatives_context"] = {
+        **existing,
+        "provider": "exchange_public",
+        "available": True,
+        "status": "public_fallback",
+        "key_configured": False,
+        "freshness_sec": None,
+        "degraded_reason": existing.get("degraded_reason") or "coinglass_unavailable_public_fallback",
+        "active_datasets": active,
+        "dataset_count": len(active),
+        "snapshot_at": out.get("timestamp"),
+        "note": "CoinGlass enhanced context unavailable; using exchange public derivatives fields.",
+    }
+    return out
+
+
 def _utc_now_naive() -> datetime:
     return datetime.utcnow().replace(tzinfo=None)
 
@@ -1749,6 +1848,13 @@ def _with_risk_dashboard_runtime_fields(
 
 def _strip_microstructure_runtime_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     return _strip_cache_runtime_fields(payload)
+
+
+def _strip_cacheable_microstructure_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    stripped = _strip_microstructure_runtime_fields(payload)
+    if not _microstructure_has_core_signal(stripped):
+        raise ValueError("microstructure refresh returned no core signal")
+    return stripped
 
 
 def _with_microstructure_runtime_fields(
@@ -7718,31 +7824,130 @@ async def _build_market_microstructure_payload(
     symbol: str = "BTC/USDT",
     depth_limit: int = 80,
 ):
-    options_task = asyncio.create_task(_fetch_options_snapshot(symbol=symbol))
-    coinglass_task = asyncio.create_task(
-        _load_preferred_coinglass_overview(symbol=symbol)
-    )
+    tasks = {
+        "orderbook": asyncio.create_task(
+            _bounded_analytics_call(
+                _fetch_orderbook(exchange=exchange, symbol=symbol, limit=depth_limit),
+                default={
+                    "available": False,
+                    "error": "orderbook_timeout",
+                    "bids": [],
+                    "asks": [],
+                    "timestamp": None,
+                },
+                timeout_sec=_public_core_timeout(
+                    _ANALYTICS_ORDERBOOK_TIMEOUT_SEC + 0.3
+                ),
+                label="orderbook",
+            )
+        ),
+        "flow": asyncio.create_task(
+            _bounded_analytics_call(
+                _fetch_trade_imbalance(
+                    exchange=exchange,
+                    symbol=symbol,
+                    limit=800,
+                ),
+                default={
+                    "available": False,
+                    "error": "trade_imbalance_timeout",
+                    "count": 0,
+                    "buy_volume": 0.0,
+                    "sell_volume": 0.0,
+                    "imbalance": 0.0,
+                },
+                timeout_sec=_public_core_timeout(
+                    _ANALYTICS_TRADE_IMBALANCE_TIMEOUT_SEC + 0.3
+                ),
+                label="trade imbalance",
+            )
+        ),
+        "funding_basis": asyncio.create_task(
+            _bounded_analytics_call(
+                _fetch_funding_basis_snapshot(exchange=exchange, symbol=symbol),
+                default={
+                    "funding": {
+                        "available": False,
+                        "error": "funding_timeout",
+                    },
+                    "basis": {
+                        "available": False,
+                        "error": "basis_timeout",
+                    },
+                },
+                timeout_sec=_public_core_timeout(
+                    max(
+                        _ANALYTICS_FUNDING_TIMEOUT_SEC,
+                        _ANALYTICS_BASIS_TIMEOUT_SEC,
+                    )
+                    + 0.4
+                ),
+                label="funding/basis",
+            )
+        ),
+        "long_short": asyncio.create_task(
+            _bounded_analytics_call(
+                _fetch_long_short_ratio_snapshot(exchange=exchange, symbol=symbol),
+                default={
+                    "available": False,
+                    "error": "long_short_timeout",
+                    "sample_size": 0,
+                },
+                timeout_sec=_public_core_timeout(
+                    _ANALYTICS_LONG_SHORT_TIMEOUT_SEC + 0.3
+                ),
+                label="long/short ratio",
+            )
+        ),
+        "open_interest": asyncio.create_task(
+            _bounded_analytics_call(
+                _fetch_open_interest_snapshot(exchange=exchange, symbol=symbol),
+                default={
+                    "available": False,
+                    "error": "open_interest_timeout",
+                    "sample_size": 0,
+                },
+                timeout_sec=_public_core_timeout(_ANALYTICS_OI_TIMEOUT_SEC + 0.3),
+                label="open interest",
+            )
+        ),
+        "options": asyncio.create_task(
+            _bounded_analytics_call(
+                _fetch_options_snapshot(symbol=symbol),
+                default={"available": False, "error": "options_timeout"},
+                timeout_sec=_ANALYTICS_OPTIONS_TIMEOUT_SEC + 0.3,
+                label="options snapshot",
+            )
+        ),
+        "coinglass": asyncio.create_task(
+            _bounded_analytics_call(
+                _load_preferred_coinglass_overview(symbol=symbol),
+                default={},
+                timeout_sec=_ANALYTICS_COINGLASS_OVERVIEW_TIMEOUT_SEC,
+                label="coinglass overview",
+            )
+        ),
+    }
 
-    ob, flow = await asyncio.gather(
-        _fetch_orderbook(exchange=exchange, symbol=symbol, limit=depth_limit),
-        _fetch_trade_imbalance(exchange=exchange, symbol=symbol, limit=800),
+    (
+        ob,
+        flow,
+        funding_basis,
+        long_short_ratio,
+        oi,
+        options_data,
+        coinglass_overview,
+    ) = await asyncio.gather(
+        tasks["orderbook"],
+        tasks["flow"],
+        tasks["funding_basis"],
+        tasks["long_short"],
+        tasks["open_interest"],
+        tasks["options"],
+        tasks["coinglass"],
     )
-
-    options_data = await options_task
-    coinglass_overview = await coinglass_task
-    if bool((coinglass_overview or {}).get("available")):
-        oi = {"available": False}
-        long_short_ratio = {"available": False}
-        funding = {"available": False}
-        basis = {"available": False}
-    else:
-        funding_basis, long_short_ratio, oi = await asyncio.gather(
-            _fetch_funding_basis_snapshot(exchange=exchange, symbol=symbol),
-            _fetch_long_short_ratio_snapshot(exchange=exchange, symbol=symbol),
-            _fetch_open_interest_snapshot(exchange=exchange, symbol=symbol),
-        )
-        funding = dict((funding_basis or {}).get("funding") or {"available": False})
-        basis = dict((funding_basis or {}).get("basis") or {"available": False})
+    funding = dict((funding_basis or {}).get("funding") or {"available": False})
+    basis = dict((funding_basis or {}).get("basis") or {"available": False})
     orderbook_view = _build_microstructure_orderbook_view(ob)
 
     options_payload = dict(options_data or {})
@@ -7802,6 +8007,7 @@ async def _build_market_microstructure_payload(
         "options": options_payload,
     }
     payload = _apply_coinglass_derivatives_overlay(payload, coinglass_overview)
+    payload = _apply_public_derivatives_context(payload)
     return payload
 
 
@@ -7830,7 +8036,7 @@ async def get_market_microstructure(
         cache_key,
         max_age_sec=_MICROSTRUCTURE_SNAPSHOT_STALE_MAX_AGE_SEC,
     )
-    if stale_cached is not None:
+    if stale_cached is not None and _microstructure_has_core_signal(stale_cached):
         _schedule_cache_refresh(
             _MICROSTRUCTURE_REFRESH_TASKS,
             cache_key,
@@ -7838,7 +8044,7 @@ async def get_market_microstructure(
                 exchange=exchange, symbol=symbol, depth_limit=depth_limit
             ),
             cache=_MICROSTRUCTURE_SNAPSHOT_CACHE,
-            strip_payload=_strip_microstructure_runtime_fields,
+            strip_payload=_strip_cacheable_microstructure_payload,
         )
         return _with_microstructure_runtime_fields(
             stale_cached,
@@ -7852,11 +8058,12 @@ async def get_market_microstructure(
     payload = await _build_market_microstructure_payload(
         exchange=exchange, symbol=symbol, depth_limit=depth_limit
     )
-    _cache_put(
-        _MICROSTRUCTURE_SNAPSHOT_CACHE,
-        cache_key,
-        _strip_microstructure_runtime_fields(payload),
-    )
+    if _microstructure_has_core_signal(payload):
+        _cache_put(
+            _MICROSTRUCTURE_SNAPSHOT_CACHE,
+            cache_key,
+            _strip_microstructure_runtime_fields(payload),
+        )
     return _with_microstructure_runtime_fields(
         payload,
         cache_hit=False,

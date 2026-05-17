@@ -61,6 +61,30 @@ def _make_signal(
     )
 
 
+def test_background_tick_stays_in_paper_scope_when_default_is_paper(monkeypatch):
+    engine = ExecutionEngine()
+    engine.set_paper_trading(True, sync_runtime_state=False)
+    engine._bg_check_interval_seconds = 0
+    events = []
+
+    async def fake_reconcile():
+        events.append("live:reconcile")
+
+    async def fake_conditional():
+        events.append(f"{engine._current_trading_mode()}:conditional")
+
+    async def fake_protective():
+        events.append(f"{engine._current_trading_mode()}:protective")
+
+    monkeypatch.setattr(engine, "_reconcile_local_positions_with_exchange", fake_reconcile)
+    monkeypatch.setattr(engine, "_check_conditional_orders", fake_conditional)
+    monkeypatch.setattr(engine, "_check_protective_orders", fake_protective)
+
+    asyncio.run(engine._background_tick())
+
+    assert events == ["paper:conditional", "paper:protective"]
+
+
 def test_auto_inject_buy_levels_from_policy_pct():
     engine = ExecutionEngine()
     signal = _make_signal(price=100.0)
