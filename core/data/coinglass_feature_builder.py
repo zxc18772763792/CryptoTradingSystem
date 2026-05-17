@@ -381,8 +381,15 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
     top_position_ratio_rows = list(payloads.get("top_long_short_position_ratio_history") or [])
     net_position_rows = list(payloads.get("net_position_history") or [])
     futures_orderbook_rows = list(payloads.get("futures_orderbook_aggregated_ask_bids_history") or [])
+    spot_netflow_rows = list(payloads.get("spot_coin_netflow") or [])
+    exchange_balance_rows = list(payloads.get("exchange_balance_list") or [])
+    exchange_balance_chart_rows = list(payloads.get("exchange_balance_chart") or [])
     coinbase_premium_rows = list(payloads.get("coinbase_premium_index") or [])
     option_max_pain_rows = list(payloads.get("option_max_pain") or [])
+    options_info_rows = list(payloads.get("options_info") or [])
+    options_oi_rows = list(payloads.get("options_exchange_oi_history") or [])
+    options_volume_rows = list(payloads.get("options_exchange_volume_history") or [])
+    option_futures_ratio_rows = list(payloads.get("option_vs_futures_oi_ratio") or [])
     bitcoin_etf_flow_rows = list(payloads.get("bitcoin_etf_flow_history") or [])
     arbitrage_rows = list(payloads.get("funding_arbitrage") or [])
     liquidation_row = liquidation_rows[-1] if liquidation_rows else {}
@@ -601,6 +608,7 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
     )
     option_max_pain = _coalesce_float(
         option_max_pain_rows[-1] if option_max_pain_rows else {},
+        "option_max_pain",
         "max_pain",
         "maxPain",
         "max_pain_price",
@@ -616,6 +624,122 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
         "totalNetInflow",
         "value",
     )
+    spot_exchange_inflow_usd = _sum(
+        _coalesce_float(item, "spot_exchange_inflow_usd", "inflow_usd", "inflow")
+        for item in spot_netflow_rows
+    )
+    spot_exchange_outflow_usd = _sum(
+        _coalesce_float(item, "spot_exchange_outflow_usd", "outflow_usd", "outflow")
+        for item in spot_netflow_rows
+    )
+    spot_exchange_netflow_usd = _sum(
+        _coalesce_float(item, "spot_exchange_netflow_usd", "netflow_usd", "netflow")
+        for item in spot_netflow_rows
+    )
+    if (
+        spot_exchange_netflow_usd is None
+        and spot_exchange_inflow_usd is not None
+        and spot_exchange_outflow_usd is not None
+    ):
+        spot_exchange_netflow_usd = spot_exchange_inflow_usd - spot_exchange_outflow_usd
+    spot_exchange_inflow_count = int(
+        _sum(_coalesce_float(item, "spot_exchange_inflow_count", "inflow_count") for item in spot_netflow_rows)
+        or 0
+    )
+    spot_exchange_outflow_count = int(
+        _sum(_coalesce_float(item, "spot_exchange_outflow_count", "outflow_count") for item in spot_netflow_rows)
+        or 0
+    )
+    spot_netflow_score = None
+    flow_gross = (spot_exchange_inflow_usd or 0.0) + (spot_exchange_outflow_usd or 0.0)
+    if flow_gross > 0 and spot_exchange_netflow_usd is not None:
+        spot_netflow_score = max(-1.0, min(1.0, spot_exchange_netflow_usd / flow_gross))
+    exchange_flow_pressure = (
+        "inflow_sell_pressure"
+        if (spot_exchange_netflow_usd or 0.0) > max(flow_gross * 0.1, 0.0)
+        else "outflow_supply_tight"
+        if (spot_exchange_netflow_usd or 0.0) < -max(flow_gross * 0.1, 0.0)
+        else "balanced"
+    )
+    exchange_balance_source_rows = exchange_balance_rows or exchange_balance_chart_rows
+    exchange_balance_btc = _sum(
+        _coalesce_float(item, "exchange_balance_btc", "balance_btc", "balance")
+        for item in exchange_balance_source_rows
+    )
+    exchange_balance_usd = _sum(
+        _coalesce_float(item, "exchange_balance_usd", "balance_usd", "balanceUsd", "value_usd")
+        for item in exchange_balance_source_rows
+    )
+    exchange_balance_change_24h = _mean(
+        _coalesce_float(item, "exchange_balance_change_24h", "change_24h", "change24h")
+        for item in exchange_balance_source_rows
+    )
+    exchange_balance_change_7d = _mean(
+        _coalesce_float(item, "exchange_balance_change_7d", "change_7d", "change7d")
+        for item in exchange_balance_source_rows
+    )
+    stablecoin_exchange_balance_usd = _sum(
+        _coalesce_float(item, "stablecoin_exchange_balance_usd", "stablecoin_balance_usd", "stablecoinBalanceUsd")
+        for item in exchange_balance_source_rows
+    )
+    stablecoin_exchange_balance_change_24h = _mean(
+        _coalesce_float(item, "stablecoin_exchange_balance_change_24h", "stablecoin_change_24h", "stablecoinChange24h")
+        for item in exchange_balance_source_rows
+    )
+    stablecoin_netflow_usd = _sum(
+        _coalesce_float(item, "stablecoin_netflow_usd", "stablecoinNetflowUsd")
+        for item in exchange_balance_source_rows
+    )
+    if stablecoin_netflow_usd is None:
+        stablecoin_netflow_usd = stablecoin_exchange_balance_change_24h
+    onchain_activity_score = _clamp01(
+        max(
+            _scale_percent(flow_gross, 250_000_000.0),
+            _scale_percent(exchange_balance_usd, 25_000_000_000.0),
+        )
+    )
+    exchange_reserve_pressure_score = _clamp01(
+        max(
+            _scale_percent(exchange_balance_change_24h, 5.0),
+            _scale_percent(spot_exchange_netflow_usd, 250_000_000.0),
+        )
+    )
+    option_info_row = options_info_rows[-1] if options_info_rows else {}
+    option_oi_row = options_oi_rows[-1] if options_oi_rows else {}
+    option_volume_row = options_volume_rows[-1] if options_volume_rows else {}
+    option_ratio_row = option_futures_ratio_rows[-1] if option_futures_ratio_rows else {}
+    option_put_call_ratio = _coalesce_float(
+        option_info_row,
+        "option_put_call_ratio",
+        "put_call_ratio",
+        "putCallRatio",
+    )
+    option_open_interest_usd = _coalesce_float(
+        option_info_row, "option_open_interest_usd", "open_interest_usd", "openInterestUsd", "oiUsd"
+    )
+    if option_open_interest_usd is None:
+        option_open_interest_usd = _coalesce_float(
+            option_oi_row, "option_open_interest_usd", "open_interest_usd", "openInterestUsd", "oiUsd", "close", "c"
+        )
+    option_volume_usd = _coalesce_float(
+        option_info_row, "option_volume_usd", "volume_usd", "volumeUsd", "volUsd"
+    )
+    if option_volume_usd is None:
+        option_volume_usd = _coalesce_float(
+            option_volume_row, "option_volume_usd", "volume_usd", "volumeUsd", "volUsd", "close", "c"
+        )
+    option_iv = _coalesce_float(option_info_row, "option_iv", "iv", "atm_iv", "implied_volatility")
+    option_iv_skew = _coalesce_float(option_info_row, "option_iv_skew", "iv_skew", "skew", "skew_25d")
+    gamma_exposure = _coalesce_float(option_info_row, "gamma_exposure", "gammaExposure", "gex")
+    option_vs_futures_oi_ratio = _coalesce_float(
+        option_ratio_row,
+        "option_vs_futures_oi_ratio",
+        "ratio",
+        "value",
+        "close",
+        "c",
+    )
+    option_distance_to_max_pain_pct = None
     futures_volume_usd = _sum(_coalesce_float(item, "volume_usd", "turnover_usd", "notionalUsd") for item in taker_rows)
     if futures_volume_usd is None and taker_buy is not None and taker_sell is not None:
         futures_volume_usd = taker_buy + taker_sell
@@ -792,6 +916,13 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
     orderbook_wall_below_price = _coalesce_float(
         futures_orderbook_row, "orderbook_wall_below_price", "bid_wall_price", "bidWallPrice"
     )
+    spot_reference_price = _coalesce_float(liquidation_map_largest_row, "last_price") or _coalesce_float(
+        futures_orderbook_row, "last_price", "price"
+    )
+    if option_max_pain not in (None, 0) and spot_reference_price:
+        option_distance_to_max_pain_pct = (
+            (spot_reference_price - option_max_pain) / option_max_pain
+        ) * 100.0
     depth_thinness_score = _clamp01(
         1.0 - _scale_percent(futures_volume_usd, 250_000_000.0)
     )
@@ -945,7 +1076,31 @@ def build_derivatives_snapshot(symbol: str) -> Optional[DerivativesSnapshot]:
         "net_position": net_position,
         "coinbase_premium": coinbase_premium,
         "option_max_pain": option_max_pain,
+        "option_put_call_ratio": option_put_call_ratio,
+        "option_open_interest_usd": option_open_interest_usd,
+        "option_volume_usd": option_volume_usd,
+        "option_iv": option_iv,
+        "option_iv_skew": option_iv_skew,
+        "option_distance_to_max_pain_pct": option_distance_to_max_pain_pct,
+        "option_vs_futures_oi_ratio": option_vs_futures_oi_ratio,
+        "gamma_exposure": gamma_exposure,
         "bitcoin_etf_net_flow": bitcoin_etf_net_flow,
+        "spot_exchange_inflow_usd": spot_exchange_inflow_usd,
+        "spot_exchange_outflow_usd": spot_exchange_outflow_usd,
+        "spot_exchange_netflow_usd": spot_exchange_netflow_usd,
+        "spot_exchange_inflow_count": spot_exchange_inflow_count,
+        "spot_exchange_outflow_count": spot_exchange_outflow_count,
+        "spot_netflow_score": spot_netflow_score,
+        "exchange_flow_pressure": exchange_flow_pressure,
+        "exchange_balance_btc": exchange_balance_btc,
+        "exchange_balance_usd": exchange_balance_usd,
+        "exchange_balance_change_24h": exchange_balance_change_24h,
+        "exchange_balance_change_7d": exchange_balance_change_7d,
+        "stablecoin_exchange_balance_usd": stablecoin_exchange_balance_usd,
+        "stablecoin_exchange_balance_change_24h": stablecoin_exchange_balance_change_24h,
+        "stablecoin_netflow_usd": stablecoin_netflow_usd,
+        "onchain_activity_score": onchain_activity_score,
+        "exchange_reserve_pressure_score": exchange_reserve_pressure_score,
         "long_short_ratio_change_24h": long_short_ratio_change,
         "oi_change_1h_history": None if oi_change_1h_history is None else oi_change_1h_history * 100.0,
         "oi_change_4h_history": None if oi_change_4h_history is None else oi_change_4h_history * 100.0,
@@ -1495,7 +1650,31 @@ def build_coinglass_runtime_context(snapshot: Optional[Mapping[str, Any]]) -> Di
         "net_position": payload.get("net_position"),
         "coinbase_premium": payload.get("coinbase_premium"),
         "option_max_pain": payload.get("option_max_pain"),
+        "option_put_call_ratio": payload.get("option_put_call_ratio"),
+        "option_open_interest_usd": payload.get("option_open_interest_usd"),
+        "option_volume_usd": payload.get("option_volume_usd"),
+        "option_iv": payload.get("option_iv"),
+        "option_iv_skew": payload.get("option_iv_skew"),
+        "option_distance_to_max_pain_pct": payload.get("option_distance_to_max_pain_pct"),
+        "option_vs_futures_oi_ratio": payload.get("option_vs_futures_oi_ratio"),
+        "gamma_exposure": payload.get("gamma_exposure"),
         "bitcoin_etf_net_flow": payload.get("bitcoin_etf_net_flow"),
+        "spot_exchange_inflow_usd": payload.get("spot_exchange_inflow_usd"),
+        "spot_exchange_outflow_usd": payload.get("spot_exchange_outflow_usd"),
+        "spot_exchange_netflow_usd": payload.get("spot_exchange_netflow_usd"),
+        "spot_exchange_inflow_count": payload.get("spot_exchange_inflow_count"),
+        "spot_exchange_outflow_count": payload.get("spot_exchange_outflow_count"),
+        "spot_netflow_score": payload.get("spot_netflow_score"),
+        "exchange_flow_pressure": payload.get("exchange_flow_pressure"),
+        "exchange_balance_btc": payload.get("exchange_balance_btc"),
+        "exchange_balance_usd": payload.get("exchange_balance_usd"),
+        "exchange_balance_change_24h": payload.get("exchange_balance_change_24h"),
+        "exchange_balance_change_7d": payload.get("exchange_balance_change_7d"),
+        "stablecoin_exchange_balance_usd": payload.get("stablecoin_exchange_balance_usd"),
+        "stablecoin_exchange_balance_change_24h": payload.get("stablecoin_exchange_balance_change_24h"),
+        "stablecoin_netflow_usd": payload.get("stablecoin_netflow_usd"),
+        "onchain_activity_score": payload.get("onchain_activity_score"),
+        "exchange_reserve_pressure_score": payload.get("exchange_reserve_pressure_score"),
         "long_short_ratio_change_24h": payload.get("long_short_ratio_change_24h"),
         "oi_change_1h_history": payload.get("oi_change_1h_history"),
         "oi_change_4h_history": payload.get("oi_change_4h_history"),

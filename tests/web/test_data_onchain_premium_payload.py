@@ -164,6 +164,70 @@ def test_compute_onchain_overview_uses_coinglass_whales(monkeypatch):
     assert payload["component_status"]["whale_activity"]["source"] == "coinglass_whale_transfer"
 
 
+def test_compute_onchain_overview_surfaces_coinglass_spot_flow_and_balance(monkeypatch):
+    from web.api import data as data_api
+
+    async def fake_tvl(*args, **kwargs):
+        return {"chain": "Bitcoin", "available": True, "latest_tvl": 1.0, "series": []}
+
+    async def fake_whales(*args, **kwargs):
+        return {"available": True, "source": "coinglass_whale_transfer", "count": 0, "transactions": []}
+
+    async def fake_spot_flow(*args, **kwargs):
+        return {
+            "available": True,
+            "source": "coinglass_spot_netflow",
+            "spot_exchange_inflow_usd": 150_000_000.0,
+            "spot_exchange_outflow_usd": 90_000_000.0,
+            "spot_exchange_netflow_usd": 60_000_000.0,
+            "spot_netflow_score": 0.25,
+            "exchange_flow_pressure": "inflow_sell_pressure",
+        }
+
+    async def fake_balance(*args, **kwargs):
+        return {
+            "available": True,
+            "source": "coinglass_exchange_balance",
+            "exchange_balance_btc": 10_000.0,
+            "exchange_balance_usd": 1_000_000_000.0,
+            "exchange_balance_change_24h": 1.2,
+        }
+
+    async def fake_funding(*args, **kwargs):
+        return {"available": True, "source": "coinglass_cache", "count": 1, "rates": {}}
+
+    async def fake_fear(*args, **kwargs):
+        return {"available": True, "value": 52}
+
+    monkeypatch.setattr(data_api.exchange_manager, "get_exchange", lambda *_: None)
+    monkeypatch.setattr(data_api, "_fetch_defillama_chain_tvl", fake_tvl)
+    monkeypatch.setattr(data_api, "_fetch_whale_activity", fake_whales)
+    monkeypatch.setattr(data_api, "fetch_spot_netflow_summary", fake_spot_flow)
+    monkeypatch.setattr(data_api, "fetch_exchange_balance_snapshot", fake_balance)
+    monkeypatch.setattr(data_api, "_fetch_multi_exchange_funding", fake_funding)
+    monkeypatch.setattr(data_api, "_fetch_fear_greed_snapshot", fake_fear)
+    monkeypatch.setattr(
+        data_api,
+        "_load_premium_external_snapshot",
+        lambda: {"sources": {}, "summary": {"total_sources": 0, "configured_keys": 0, "cached_sources": 0}},
+    )
+
+    payload = asyncio.run(
+        data_api._compute_onchain_overview(
+            exchange="binance",
+            symbol="BTC/USDT",
+            whale_threshold_btc=10.0,
+            chain="Bitcoin",
+        )
+    )
+
+    assert payload["exchange_flow_proxy"]["source"] == "coinglass_spot_netflow"
+    assert payload["exchange_flow_proxy"]["spot_exchange_netflow_usd"] == 60_000_000.0
+    assert payload["exchange_balance"]["source"] == "coinglass_exchange_balance"
+    assert payload["exchange_balance"]["exchange_balance_usd"] == 1_000_000_000.0
+    assert payload["component_status"]["exchange_balance"]["status"] == "ok"
+
+
 def test_resolve_onchain_chain_context_maps_bsc_and_brc20():
     from web.api import data as data_api
 

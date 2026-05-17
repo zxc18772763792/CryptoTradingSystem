@@ -36,6 +36,9 @@ async def build_coinglass_signal(symbol: str) -> Tuple[str, float, Dict[str, Any
     heatmap_pressure_score = _as_float(context.get("heatmap_pressure_score"))
     liquidity_void_score = _as_float(context.get("liquidity_void_score"))
     orderbook_agg_imbalance = _as_float(context.get("orderbook_agg_imbalance"))
+    spot_netflow_score = _as_float(context.get("spot_netflow_score"))
+    reserve_pressure_score = _as_float(context.get("exchange_reserve_pressure_score"))
+    option_put_call_ratio = _as_float(context.get("option_put_call_ratio"))
 
     history_ready = bool(context.get("history_ready"))
     crowded_long = bool(context.get("crowded_long"))
@@ -96,6 +99,12 @@ async def build_coinglass_signal(symbol: str) -> Tuple[str, float, Dict[str, Any
         risk_flags.append("liquidity_heatmap_hot")
     if liquidity_void_score >= 0.70:
         risk_flags.append("liquidity_void")
+    if spot_netflow_score >= 0.35:
+        risk_flags.append("spot_exchange_inflow_pressure")
+    if reserve_pressure_score >= 0.60:
+        risk_flags.append("exchange_reserve_pressure")
+    if option_put_call_ratio >= 1.30:
+        risk_flags.append("options_put_hedging")
     if not history_ready:
         risk_flags.append("history_incomplete")
 
@@ -108,6 +117,8 @@ async def build_coinglass_signal(symbol: str) -> Tuple[str, float, Dict[str, Any
         context_flags.append("order_flow_confirmed")
     if abs(orderbook_agg_imbalance) >= 0.20:
         context_flags.append("orderbook_agg_bid_bias" if orderbook_agg_imbalance > 0 else "orderbook_agg_ask_bias")
+    if spot_netflow_score <= -0.35:
+        context_flags.append("spot_outflow_supply_tight")
 
     explain_parts = [
         f"crowding={crowding_score:.3f}",
@@ -116,6 +127,8 @@ async def build_coinglass_signal(symbol: str) -> Tuple[str, float, Dict[str, Any
     ]
     if heatmap_pressure_score > 0:
         explain_parts.append(f"heatmap={heatmap_pressure_score:.3f}")
+    if abs(spot_netflow_score) > 0:
+        explain_parts.append(f"spot_flow={spot_netflow_score:.3f}")
     if history_ready:
         explain_parts.append(f"funding_z={funding_zscore:.2f}")
     if context.get("derivatives_labels"):

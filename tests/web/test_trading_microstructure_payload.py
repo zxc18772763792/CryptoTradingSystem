@@ -177,6 +177,11 @@ def test_market_microstructure_prefers_coinglass_derivatives_when_available(monk
                     "liquidity_wall_nearest_below_price": 97.0,
                     "liquidity_void_score": 0.25,
                     "heatmap_pressure_score": 0.48,
+                    "option_put_call_ratio": 1.35,
+                    "option_open_interest_usd": 8_000_000_000.0,
+                    "option_volume_usd": 650_000_000.0,
+                    "option_iv": 0.62,
+                    "option_iv_skew": 0.08,
                 },
             },
         }
@@ -215,6 +220,9 @@ def test_market_microstructure_prefers_coinglass_derivatives_when_available(monk
     assert payload["derivatives_context"]["orderbook_agg_imbalance"] == pytest.approx(0.2, rel=1e-9)
     assert payload["derivatives_context"]["liquidity_heatmap_total_usd"] == pytest.approx(420_000_000.0, rel=1e-9)
     assert payload["derivatives_context"]["liquidity_wall_nearest_above_price"] == pytest.approx(103.0, rel=1e-9)
+    assert payload["options"]["source"] == "coinglass_cache"
+    assert payload["options"]["put_call_ratio"] == pytest.approx(1.35, rel=1e-9)
+    assert payload["options"]["open_interest_usd"] == pytest.approx(8_000_000_000.0, rel=1e-9)
 
 
 def test_market_microstructure_preserves_flow_error_flag(monkeypatch):

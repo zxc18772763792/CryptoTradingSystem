@@ -5102,6 +5102,62 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
             extra={"upstream": "deribit public REST", "storage": "memory_cache"},
         )
 
+    try:
+        from core.data.coinglass_client import coinglass_key_configured, load_dataset_rows_for_symbol  # noqa: PLC0415
+
+        option_datasets = [
+            "option_max_pain",
+            "options_info",
+            "options_exchange_oi_history",
+            "options_exchange_volume_history",
+            "option_vs_futures_oi_ratio",
+        ]
+        active_option_datasets: List[str] = []
+        latest_option_ts: Optional[str] = None
+        option_rows = 0
+        for dataset in option_datasets:
+            frame = load_dataset_rows_for_symbol(dataset, "BTC")
+            if frame.empty:
+                continue
+            active_option_datasets.append(dataset)
+            option_rows += int(len(frame.index))
+            if "source_ts" in frame.columns:
+                parsed = pd.to_datetime(frame["source_ts"], utc=True, errors="coerce").dropna()
+                if not parsed.empty:
+                    ts = parsed.max().isoformat()
+                    latest_option_ts = max([latest_option_ts, ts]) if latest_option_ts else ts
+        key_configured = bool(coinglass_key_configured())
+        categories["options"]["sources"]["coinglass_options"] = _build_source_entry(
+            label="CoinGlass Options Cache",
+            available=bool(key_configured or active_option_datasets),
+            configured=key_configured,
+            key_configured=key_configured,
+            has_cached_data=bool(active_option_datasets),
+            ready=bool(active_option_datasets),
+            last_updated=latest_option_ts,
+            max_age_sec=6 * 3600,
+            support_level="enhancement",
+            issues=["CoinGlass options cache empty"] if key_configured and not active_option_datasets else [],
+            recommendation="Refresh BTC/ETH CoinGlass options datasets manually or on a low-frequency schedule before options-driven research.",
+            snapshot={
+                "active_datasets": active_option_datasets,
+                "rows": option_rows,
+                "latest_source_ts": latest_option_ts,
+            },
+            extra={"upstream": "coinglass optional options datasets", "symbols": ["BTC", "ETH"]},
+        )
+    except Exception as exc:
+        categories["options"]["sources"]["coinglass_options"] = _build_source_entry(
+            label="CoinGlass Options Cache",
+            available=False,
+            configured=False,
+            has_cached_data=False,
+            ready=False,
+            support_level="enhancement",
+            error=str(exc),
+            recommendation="Restore CoinGlass options cache probing if options source health is required.",
+        )
+
     premium_specs = [
         {
             "name": "glassnode",
@@ -5181,6 +5237,56 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
                 error=str(exc),
                 recommendation=str(spec["recommendation"]),
             )
+
+    try:
+        from core.data.coinglass_client import coinglass_key_configured, load_dataset_rows_for_symbol  # noqa: PLC0415
+
+        onchain_datasets = ["spot_coin_netflow", "exchange_balance_list", "exchange_balance_chart"]
+        active_onchain_datasets: List[str] = []
+        latest_onchain_ts: Optional[str] = None
+        onchain_rows = 0
+        for dataset in onchain_datasets:
+            frame = load_dataset_rows_for_symbol(dataset, "BTC")
+            if frame.empty:
+                continue
+            active_onchain_datasets.append(dataset)
+            onchain_rows += int(len(frame.index))
+            if "source_ts" in frame.columns:
+                parsed = pd.to_datetime(frame["source_ts"], utc=True, errors="coerce").dropna()
+                if not parsed.empty:
+                    ts = parsed.max().isoformat()
+                    latest_onchain_ts = max([latest_onchain_ts, ts]) if latest_onchain_ts else ts
+        key_configured = bool(coinglass_key_configured())
+        categories["premium_onchain"]["sources"]["coinglass_onchain"] = _build_source_entry(
+            label="CoinGlass On-chain / Flow Cache",
+            available=bool(key_configured or active_onchain_datasets),
+            configured=key_configured,
+            key_configured=key_configured,
+            has_cached_data=bool(active_onchain_datasets),
+            ready=bool(active_onchain_datasets),
+            last_updated=latest_onchain_ts,
+            max_age_sec=4 * 3600,
+            support_level="optional",
+            issues=["CoinGlass on-chain cache empty"] if key_configured and not active_onchain_datasets else [],
+            recommendation="Refresh CoinGlass spot netflow and exchange balance datasets at low frequency; use cached values for radar scans.",
+            snapshot={
+                "active_datasets": active_onchain_datasets,
+                "rows": onchain_rows,
+                "latest_source_ts": latest_onchain_ts,
+            },
+            extra={"upstream": "coinglass spot netflow + exchange balance"},
+        )
+    except Exception as exc:
+        categories["premium_onchain"]["sources"]["coinglass_onchain"] = _build_source_entry(
+            label="CoinGlass On-chain / Flow Cache",
+            available=False,
+            configured=False,
+            has_cached_data=False,
+            ready=False,
+            support_level="optional",
+            error=str(exc),
+            recommendation="Restore CoinGlass on-chain cache probing if premium flow status is required.",
+        )
 
     try:
         from core.data.coinglass_feature_builder import load_coinglass_status_snapshot  # noqa: PLC0415

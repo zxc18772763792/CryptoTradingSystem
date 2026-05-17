@@ -1087,6 +1087,140 @@ def _normalize_futures_orderbook_row(row: Mapping[str, Any]) -> Dict[str, Any]:
     return record
 
 
+def _normalize_spot_netflow_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    record = dict(row or {})
+    inflow = _coalesce_float(record, "inflow_usd", "inflowUsd", "inflow", "deposit_usd")
+    outflow = _coalesce_float(record, "outflow_usd", "outflowUsd", "outflow", "withdraw_usd")
+    netflow = _coalesce_float(record, "netflow_usd", "netFlowUsd", "netflow", "netFlow")
+    if netflow is None and inflow is not None and outflow is not None:
+        netflow = inflow - outflow
+    if inflow is not None:
+        record["spot_exchange_inflow_usd"] = inflow
+    if outflow is not None:
+        record["spot_exchange_outflow_usd"] = outflow
+    if netflow is not None:
+        record["spot_exchange_netflow_usd"] = netflow
+    gross = (inflow or 0.0) + (outflow or 0.0)
+    if gross > 0 and netflow is not None:
+        score = max(-1.0, min(1.0, netflow / gross))
+        record["spot_netflow_score"] = score
+        record["exchange_flow_pressure"] = (
+            "inflow_sell_pressure"
+            if score > 0.1
+            else "outflow_supply_tight"
+            if score < -0.1
+            else "balanced"
+        )
+    return record
+
+
+def _normalize_exchange_balance_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    record = dict(row or {})
+    balance_coin = _coalesce_float(
+        record,
+        "exchange_balance_btc",
+        "balance_btc",
+        "balance",
+        "amount",
+        "quantity",
+    )
+    balance_usd = _coalesce_float(
+        record,
+        "exchange_balance_usd",
+        "balance_usd",
+        "balanceUsd",
+        "value_usd",
+        "valueUsd",
+        "close",
+        "c",
+    )
+    change_24h = _coalesce_float(
+        record,
+        "exchange_balance_change_24h",
+        "change_24h",
+        "change24h",
+        "balance_change_24h",
+        "change_24h_pct",
+    )
+    change_7d = _coalesce_float(
+        record,
+        "exchange_balance_change_7d",
+        "change_7d",
+        "change7d",
+        "balance_change_7d",
+        "change_7d_pct",
+    )
+    stablecoin_balance = _coalesce_float(
+        record,
+        "stablecoin_exchange_balance_usd",
+        "stablecoin_balance_usd",
+        "stablecoinBalanceUsd",
+        "stablecoin_usd",
+    )
+    stablecoin_change_24h = _coalesce_float(
+        record,
+        "stablecoin_exchange_balance_change_24h",
+        "stablecoin_change_24h",
+        "stablecoinChange24h",
+    )
+    if balance_coin is not None:
+        record["exchange_balance_btc"] = balance_coin
+    if balance_usd is not None:
+        record["exchange_balance_usd"] = balance_usd
+    if change_24h is not None:
+        record["exchange_balance_change_24h"] = change_24h
+    if change_7d is not None:
+        record["exchange_balance_change_7d"] = change_7d
+    if stablecoin_balance is not None:
+        record["stablecoin_exchange_balance_usd"] = stablecoin_balance
+    if stablecoin_change_24h is not None:
+        record["stablecoin_exchange_balance_change_24h"] = stablecoin_change_24h
+    return record
+
+
+def _normalize_options_row(row: Mapping[str, Any]) -> Dict[str, Any]:
+    record = dict(row or {})
+    max_pain = _coalesce_float(
+        record, "option_max_pain", "max_pain", "maxPain", "max_pain_price", "maxPainPrice"
+    )
+    put_call = _coalesce_float(
+        record, "option_put_call_ratio", "put_call_ratio", "putCallRatio", "put_call", "putCall"
+    )
+    oi_usd = _coalesce_float(
+        record,
+        "option_open_interest_usd",
+        "open_interest_usd",
+        "openInterestUsd",
+        "oi_usd",
+        "oiUsd",
+        "close",
+        "c",
+    )
+    volume_usd = _coalesce_float(
+        record, "option_volume_usd", "volume_usd", "volumeUsd", "vol_usd", "volUsd", "close", "c"
+    )
+    iv = _coalesce_float(
+        record, "option_iv", "iv", "atm_iv", "implied_volatility", "impliedVolatility"
+    )
+    skew = _coalesce_float(record, "option_iv_skew", "iv_skew", "skew", "skew_25d", "skew25d")
+    gamma = _coalesce_float(record, "gamma_exposure", "gammaExposure", "gex")
+    if max_pain is not None:
+        record["option_max_pain"] = max_pain
+    if put_call is not None:
+        record["option_put_call_ratio"] = put_call
+    if oi_usd is not None:
+        record["option_open_interest_usd"] = oi_usd
+    if volume_usd is not None:
+        record["option_volume_usd"] = volume_usd
+    if iv is not None:
+        record["option_iv"] = iv
+    if skew is not None:
+        record["option_iv_skew"] = skew
+    if gamma is not None:
+        record["gamma_exposure"] = gamma
+    return record
+
+
 def _normalize_ratio_row(row: Mapping[str, Any]) -> Dict[str, Any]:
     record = dict(row or {})
     long_short_ratio = _coalesce_float(
@@ -1238,6 +1372,18 @@ def normalize_dataset_response(
                 )
             elif dataset == "futures_orderbook_aggregated_ask_bids_history":
                 rows.append(_normalize_futures_orderbook_row(row))
+            elif dataset == "spot_coin_netflow":
+                rows.append(_normalize_spot_netflow_row(row))
+            elif dataset in {"exchange_balance_list", "exchange_balance_chart"}:
+                rows.append(_normalize_exchange_balance_row(row))
+            elif dataset in {
+                "option_max_pain",
+                "options_info",
+                "options_exchange_oi_history",
+                "options_exchange_volume_history",
+                "option_vs_futures_oi_ratio",
+            }:
+                rows.append(_normalize_options_row(row))
             elif dataset in {
                 "global_long_short_account_ratio_history",
                 "top_long_short_account_ratio_history",

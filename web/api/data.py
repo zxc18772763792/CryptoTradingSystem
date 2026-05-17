@@ -46,6 +46,13 @@ from core.data.coinglass_client import (
     load_dataset_rows_for_symbol,
     normalize_dataset_response,
 )
+from core.data.coinglass_onchain import (
+    fetch_coinglass_exchange_chain_transfers,
+    fetch_coinglass_whale_transfers,
+    fetch_exchange_balance_snapshot,
+    fetch_spot_netflow_summary,
+    summarize_exchange_flows,
+)
 from core.data.factor_library import FACTOR_CATALOG, build_factor_library
 from core.data.coinglass_feature_builder import build_coinglass_overview_payload
 from core.data.coinglass_registry import get_coinglass_manifest
@@ -2051,14 +2058,9 @@ async def _fetch_btc_whale_unconfirmed(min_btc: float = 10.0) -> Dict[str, Any]:
 async def _fetch_whale_activity(symbol: str, min_btc: float = 10.0) -> Dict[str, Any]:
     if coinglass_enabled():
         try:
-            from web.api.trading import (  # noqa: PLC0415
-                _fetch_coinglass_exchange_chain_transfers,
-                _fetch_coinglass_whale_transfers,
-            )
-
             whale_payload, exchange_chain_payload = await asyncio.gather(
-                _fetch_coinglass_whale_transfers(symbol=symbol, min_btc=min_btc),
-                _fetch_coinglass_exchange_chain_transfers(symbol=symbol, min_btc=min_btc),
+                fetch_coinglass_whale_transfers(symbol=symbol, min_btc=min_btc),
+                fetch_coinglass_exchange_chain_transfers(symbol=symbol, min_btc=min_btc),
                 return_exceptions=True,
             )
             payloads = [
@@ -2077,9 +2079,14 @@ async def _fetch_whale_activity(symbol: str, min_btc: float = 10.0) -> Dict[str,
                     if source_name:
                         source_names.append(source_name)
                 transactions.sort(
-                    key=lambda item: _safe_float(item.get("usd_estimate") or item.get("btc")),
+                    key=lambda item: _safe_float(item.get("amount_usd") or item.get("usd_estimate") or item.get("btc")),
                     reverse=True,
                 )
+                exchange_transactions = [
+                    item
+                    for item in transactions
+                    if str((item or {}).get("provider") or "") == "coinglass_exchange_chain_tx"
+                ]
                 return {
                     "available": True,
                     "btc_price": btc_price,
@@ -2087,6 +2094,7 @@ async def _fetch_whale_activity(symbol: str, min_btc: float = 10.0) -> Dict[str,
                     "requested_threshold_btc": float(min_btc),
                     "count": len(transactions),
                     "transactions": transactions[:50],
+                    "exchange_flow_summary": summarize_exchange_flows(exchange_transactions),
                     "source": "+".join(source_names) or "coinglass_whale_transfer",
                 }
         except Exception as exc:
@@ -2359,6 +2367,7 @@ def _build_onchain_component_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     flow = dict(payload.get("exchange_flow_proxy") or {})
     tvl = dict(payload.get("defi_tvl") or {})
     whales = dict(payload.get("whale_activity") or {})
+    exchange_balance = dict(payload.get("exchange_balance") or {})
     funding_multi = dict(payload.get("funding_rate_multi_source") or {})
     fear_greed = dict(payload.get("fear_greed_index") or {})
     premium_external = dict(payload.get("premium_external") or {})
@@ -2371,8 +2380,13 @@ def _build_onchain_component_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "exchange_flow_proxy": {
             "status": "ok" if flow.get("available") else "degraded",
-            "source": "exchange_public_trades",
+            "source": flow.get("source") or "exchange_public_trades",
             "error": flow.get("error"),
+        },
+        "exchange_balance": {
+            "status": "ok" if exchange_balance.get("available") else "degraded",
+            "source": exchange_balance.get("source") or "coinglass_exchange_balance",
+            "error": exchange_balance.get("error"),
         },
         "defi_tvl": {
             "status": "ok" if tvl.get("available") else "degraded",
@@ -2462,12 +2476,20 @@ async def _compute_onchain_overview(
             timeout=8.0,
         )
     )
+    spot_flow_task = asyncio.create_task(
+        asyncio.wait_for(fetch_spot_netflow_summary(symbol=symbol), timeout=7.0)
+    )
+    balance_task = asyncio.create_task(
+        asyncio.wait_for(fetch_exchange_balance_snapshot(symbol=symbol), timeout=7.0)
+    )
     funding_task = asyncio.create_task(asyncio.wait_for(_fetch_multi_exchange_funding(symbol=symbol), timeout=6.5))
     fear_greed_task = asyncio.create_task(asyncio.wait_for(_fetch_fear_greed_snapshot(), timeout=6.5))
 
-    tvl_result, whale_result, funding_result, fear_greed_result = await asyncio.gather(
+    tvl_result, whale_result, spot_flow_result, balance_result, funding_result, fear_greed_result = await asyncio.gather(
         tvl_task,
         whale_task,
+        spot_flow_task,
+        balance_task,
         funding_task,
         fear_greed_task,
         return_exceptions=True,
@@ -2485,6 +2507,26 @@ async def _compute_onchain_overview(
         if isinstance(whale_result, dict)
         else {"available": False, "error": _error_text(whale_result), "count": 0, "transactions": []}
     )
+    spot_flow = (
+        spot_flow_result
+        if isinstance(spot_flow_result, dict)
+        else {"available": False, "error": _error_text(spot_flow_result), "source": "coinglass_spot_netflow"}
+    )
+    exchange_balance = (
+        balance_result
+        if isinstance(balance_result, dict)
+        else {"available": False, "error": _error_text(balance_result), "source": "coinglass_exchange_balance"}
+    )
+    if not spot_flow.get("available"):
+        whale_flow = dict((whales or {}).get("exchange_flow_summary") or {})
+        if whale_flow.get("available"):
+            spot_flow = {
+                **whale_flow,
+                "source": whale_flow.get("source") or "coinglass_exchange_chain_tx",
+                "fallback_source": "whale_activity_exchange_chain",
+            }
+    if not spot_flow.get("available"):
+        spot_flow = imbalance
     funding_multi = (
         funding_result
         if isinstance(funding_result, dict)
@@ -2500,7 +2542,8 @@ async def _compute_onchain_overview(
         "exchange": exchange,
         "window_hours": 4,
         "chain_context": chain_context,
-        "exchange_flow_proxy": imbalance,
+        "exchange_flow_proxy": spot_flow,
+        "exchange_balance": exchange_balance,
         "defi_tvl": tvl,
         "whale_activity": whales,
         "funding_rate_multi_source": funding_multi,
@@ -2587,6 +2630,20 @@ def _build_onchain_placeholder(
             chain_context,
             error=reason,
         ),
+        "exchange_balance": {
+            "available": False,
+            "source": "coinglass_exchange_balance",
+            "symbol": symbol,
+            "exchange_balance_btc": None,
+            "exchange_balance_usd": None,
+            "exchange_balance_change_24h": None,
+            "exchange_balance_change_7d": None,
+            "stablecoin_exchange_balance_usd": None,
+            "stablecoin_netflow_usd": None,
+            "exchange_reserve_pressure_score": None,
+            "onchain_activity_score": None,
+            "error": reason,
+        },
         "whale_activity": {
             "available": False,
             "btc_price": None,

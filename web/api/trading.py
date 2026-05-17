@@ -1497,7 +1497,29 @@ def _apply_coinglass_derivatives_overlay(
         "net_position",
         "coinbase_premium",
         "option_max_pain",
+        "option_put_call_ratio",
+        "option_open_interest_usd",
+        "option_volume_usd",
+        "option_iv",
+        "option_iv_skew",
+        "option_distance_to_max_pain_pct",
+        "option_vs_futures_oi_ratio",
+        "gamma_exposure",
         "bitcoin_etf_net_flow",
+        "spot_exchange_inflow_usd",
+        "spot_exchange_outflow_usd",
+        "spot_exchange_netflow_usd",
+        "spot_exchange_inflow_count",
+        "spot_exchange_outflow_count",
+        "spot_netflow_score",
+        "exchange_balance_btc",
+        "exchange_balance_usd",
+        "exchange_balance_change_24h",
+        "exchange_balance_change_7d",
+        "stablecoin_exchange_balance_usd",
+        "stablecoin_netflow_usd",
+        "onchain_activity_score",
+        "exchange_reserve_pressure_score",
     ):
         value = _optional_finite_float(snapshot_payload.get(key))
         if value is not None:
@@ -1558,6 +1580,27 @@ def _apply_coinglass_derivatives_overlay(
             "source": "coinglass_cache",
             "error": None,
             "basis_pct": basis_pct,
+            "timestamp": snapshot_at,
+        }
+
+    option_fields = {
+        "max_pain": _optional_finite_float(snapshot_payload.get("option_max_pain")),
+        "put_call_ratio": _optional_finite_float(snapshot_payload.get("option_put_call_ratio")),
+        "open_interest_usd": _optional_finite_float(snapshot_payload.get("option_open_interest_usd")),
+        "volume_usd": _optional_finite_float(snapshot_payload.get("option_volume_usd")),
+        "atm_iv": _optional_finite_float(snapshot_payload.get("option_iv")),
+        "skew_25d": _optional_finite_float(snapshot_payload.get("option_iv_skew")),
+        "distance_to_max_pain_pct": _optional_finite_float(snapshot_payload.get("option_distance_to_max_pain_pct")),
+        "option_vs_futures_oi_ratio": _optional_finite_float(snapshot_payload.get("option_vs_futures_oi_ratio")),
+        "gamma_exposure": _optional_finite_float(snapshot_payload.get("gamma_exposure")),
+    }
+    if any(value is not None for value in option_fields.values()):
+        existing_options = dict(out.get("options") or {})
+        out["options"] = {
+            **existing_options,
+            **{key: value for key, value in option_fields.items() if value is not None},
+            "available": True,
+            "source": "coinglass_cache",
             "timestamp": snapshot_at,
         }
 

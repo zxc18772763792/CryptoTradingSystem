@@ -828,6 +828,7 @@ def build_altcoin_rows(
             max(_to_float(derivatives.get("taker_buy_sell_imbalance"), 0.0), 0.0) * 0.5
             + max(_to_float(derivatives.get("oi_change_1h"), 0.0), 0.0) / 20.0
             + _to_float(community_flow or 0.0) * 0.2
+            + max(-_to_float(derivatives_payload.get("spot_netflow_score"), 0.0), 0.0) * 0.2
         )
         derivatives_heat = max(derivatives_heat, _to_float(derivatives_payload.get("derivatives_heat_score"), 0.0))
         if squeeze_building:
@@ -946,6 +947,13 @@ def build_altcoin_rows(
                 "liquidity_heatmap_below_usd": _to_float(derivatives_payload.get("liquidity_heatmap_below_usd"), 0.0),
                 "liquidity_void_score": _to_float(derivatives_payload.get("liquidity_void_score"), 0.0),
                 "heatmap_pressure_score": _to_float(derivatives_payload.get("heatmap_pressure_score"), 0.0),
+                "spot_exchange_netflow_usd": _to_float(derivatives_payload.get("spot_exchange_netflow_usd"), 0.0),
+                "spot_netflow_score": _to_float(derivatives_payload.get("spot_netflow_score"), 0.0),
+                "exchange_balance_change_24h": _to_float(derivatives_payload.get("exchange_balance_change_24h"), 0.0),
+                "exchange_reserve_pressure_score": _to_float(derivatives_payload.get("exchange_reserve_pressure_score"), 0.0),
+                "onchain_activity_score": _to_float(derivatives_payload.get("onchain_activity_score"), 0.0),
+                "option_put_call_ratio": _to_float(derivatives_payload.get("option_put_call_ratio"), 0.0),
+                "option_iv_skew": _to_float(derivatives_payload.get("option_iv_skew"), 0.0),
                 "crowding_score": _to_float(derivatives.get("crowding_score"), 0.0),
                 "distribution_score": _to_float(derivatives.get("distribution_score"), 0.0),
                 "depth_thinness_score": _to_float(derivatives.get("depth_thinness_score"), 0.0),
@@ -1036,6 +1044,26 @@ def build_altcoin_rows(
                 "liquidity_wall_nearest_below_usd": derivatives_payload.get("liquidity_wall_nearest_below_usd"),
                 "liquidity_void_score": derivatives_payload.get("liquidity_void_score"),
                 "heatmap_pressure_score": derivatives_payload.get("heatmap_pressure_score"),
+                "spot_exchange_inflow_usd": derivatives_payload.get("spot_exchange_inflow_usd"),
+                "spot_exchange_outflow_usd": derivatives_payload.get("spot_exchange_outflow_usd"),
+                "spot_exchange_netflow_usd": derivatives_payload.get("spot_exchange_netflow_usd"),
+                "spot_netflow_score": derivatives_payload.get("spot_netflow_score"),
+                "exchange_flow_pressure": derivatives_payload.get("exchange_flow_pressure"),
+                "exchange_balance_btc": derivatives_payload.get("exchange_balance_btc"),
+                "exchange_balance_usd": derivatives_payload.get("exchange_balance_usd"),
+                "exchange_balance_change_24h": derivatives_payload.get("exchange_balance_change_24h"),
+                "exchange_balance_change_7d": derivatives_payload.get("exchange_balance_change_7d"),
+                "stablecoin_exchange_balance_usd": derivatives_payload.get("stablecoin_exchange_balance_usd"),
+                "stablecoin_netflow_usd": derivatives_payload.get("stablecoin_netflow_usd"),
+                "exchange_reserve_pressure_score": derivatives_payload.get("exchange_reserve_pressure_score"),
+                "onchain_activity_score": derivatives_payload.get("onchain_activity_score"),
+                "option_max_pain": derivatives_payload.get("option_max_pain"),
+                "option_put_call_ratio": derivatives_payload.get("option_put_call_ratio"),
+                "option_open_interest_usd": derivatives_payload.get("option_open_interest_usd"),
+                "option_volume_usd": derivatives_payload.get("option_volume_usd"),
+                "option_iv": derivatives_payload.get("option_iv"),
+                "option_iv_skew": derivatives_payload.get("option_iv_skew"),
+                "option_distance_to_max_pain_pct": derivatives_payload.get("option_distance_to_max_pain_pct"),
                 "derivatives_heat_score": round(derivatives_heat, 4),
                 "crowded_long": crowded_long,
                 "crowded_short": crowded_short,

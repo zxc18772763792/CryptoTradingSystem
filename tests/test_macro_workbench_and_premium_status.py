@@ -567,6 +567,36 @@ def test_sources_health_includes_ai_news_and_ml_inventory(tmp_path, monkeypatch)
         "core.data.coinglass_client.coinglass_enabled",
         lambda: True,
     )
+    monkeypatch.setattr(
+        "core.data.coinglass_client.coinglass_key_configured",
+        lambda: True,
+    )
+
+    def fake_coinglass_dataset_rows(dataset, symbol):
+        if dataset in {"options_info", "option_max_pain"}:
+            return pd.DataFrame(
+                [
+                    {
+                        "source_ts": _recent_snapshot_ts(),
+                        "payload_json": '{"symbol":"BTC","option_put_call_ratio":1.1}',
+                    }
+                ]
+            )
+        if dataset in {"spot_coin_netflow", "exchange_balance_list"}:
+            return pd.DataFrame(
+                [
+                    {
+                        "source_ts": _recent_snapshot_ts(),
+                        "payload_json": '{"symbol":"BTC","spot_exchange_netflow_usd":1000000}',
+                    }
+                ]
+            )
+        return pd.DataFrame()
+
+    monkeypatch.setattr(
+        "core.data.coinglass_client.load_dataset_rows_for_symbol",
+        fake_coinglass_dataset_rows,
+    )
     monkeypatch.setenv("NEWS_ENABLE_COINGLASS_NEWSFLASH", "1")
     monkeypatch.setattr(
         "core.data.macro_collector.load_macro_snapshot",
@@ -795,6 +825,14 @@ def test_sources_health_includes_ai_news_and_ml_inventory(tmp_path, monkeypatch)
     coinglass_newsflash = result["categories"]["news"]["sources"]["coinglass_newsflash"]
     assert coinglass_newsflash["health"] == "healthy"
     assert "Paused until" not in " ".join(coinglass_newsflash["issues"])
+
+    coinglass_options = result["categories"]["options"]["sources"]["coinglass_options"]
+    assert coinglass_options["health"] == "healthy"
+    assert "options_info" in coinglass_options["snapshot"]["active_datasets"]
+
+    coinglass_onchain = result["categories"]["premium_onchain"]["sources"]["coinglass_onchain"]
+    assert coinglass_onchain["health"] == "healthy"
+    assert "spot_coin_netflow" in coinglass_onchain["snapshot"]["active_datasets"]
 
     research_llm = result["categories"]["ai_sources"]["sources"]["research_context_llm"]
     assert research_llm["health"] == "healthy"

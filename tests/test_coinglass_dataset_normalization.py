@@ -56,9 +56,15 @@ def test_manifest_params_add_range_and_pair_symbol_mapping():
 def test_optional_coinglass_datasets_are_supported_but_not_default():
     assert "liquidation_aggregated_map" not in COINGLASS_DEFAULT_DATASETS
     assert "futures_orderbook_aggregated_ask_bids_history" not in COINGLASS_DEFAULT_DATASETS
+    assert "spot_coin_netflow" not in COINGLASS_DEFAULT_DATASETS
+    assert "exchange_balance_list" not in COINGLASS_DEFAULT_DATASETS
+    assert "options_info" not in COINGLASS_DEFAULT_DATASETS
     assert get_coinglass_manifest("liquidation_aggregated_map") is not None
     assert get_coinglass_manifest("futures_orderbook_aggregated_ask_bids_history") is not None
+    assert get_coinglass_manifest("spot_coin_netflow") is not None
+    assert get_coinglass_manifest("exchange_balance_list") is not None
     assert get_coinglass_manifest("top_long_short_position_ratio_history") is not None
+    assert get_coinglass_manifest("options_exchange_oi_history") is not None
     assert get_coinglass_manifest("bitcoin_etf_flow_history") is not None
 
 
@@ -272,6 +278,70 @@ def test_normalize_futures_orderbook_aggregated_history_extracts_depth_and_walls
     )
     assert map_result["rows"][0]["orderbook_agg_bid_usd"] == 498.0
     assert map_result["rows"][0]["orderbook_wall_above_usd"] == 408.0
+
+
+def test_normalize_optional_onchain_and_options_datasets_extracts_compact_fields():
+    netflow = client_module.normalize_dataset_response(
+        dataset="spot_coin_netflow",
+        request_meta={"symbol": "BTC"},
+        response_payload={
+            "code": 0,
+            "data": [
+                {"exchange": "Binance", "inflowUsd": 150_000_000, "outflowUsd": 90_000_000},
+            ],
+        },
+    )
+    assert netflow["status"] == "ok"
+    assert netflow["rows"][0]["spot_exchange_inflow_usd"] == 150_000_000
+    assert netflow["rows"][0]["spot_exchange_outflow_usd"] == 90_000_000
+    assert netflow["rows"][0]["spot_exchange_netflow_usd"] == 60_000_000
+    assert netflow["rows"][0]["exchange_flow_pressure"] == "inflow_sell_pressure"
+
+    balance = client_module.normalize_dataset_response(
+        dataset="exchange_balance_list",
+        request_meta={"symbol": "BTC"},
+        response_payload={
+            "code": 0,
+            "data": [
+                {
+                    "exchange": "Binance",
+                    "balance": 10_000,
+                    "balanceUsd": 1_000_000_000,
+                    "change24h": 1.2,
+                    "stablecoinBalanceUsd": 2_500_000_000,
+                },
+            ],
+        },
+    )
+    assert balance["status"] == "ok"
+    assert balance["rows"][0]["exchange_balance_btc"] == 10_000
+    assert balance["rows"][0]["exchange_balance_usd"] == 1_000_000_000
+    assert balance["rows"][0]["exchange_balance_change_24h"] == 1.2
+    assert balance["rows"][0]["stablecoin_exchange_balance_usd"] == 2_500_000_000
+
+    options = client_module.normalize_dataset_response(
+        dataset="options_info",
+        request_meta={"symbol": "BTC"},
+        response_payload={
+            "code": 0,
+            "data": [
+                {
+                    "symbol": "BTC",
+                    "putCallRatio": 1.35,
+                    "openInterestUsd": 8_000_000_000,
+                    "volumeUsd": 650_000_000,
+                    "iv": 0.62,
+                    "skew25d": 0.08,
+                },
+            ],
+        },
+    )
+    assert options["status"] == "ok"
+    assert options["rows"][0]["option_put_call_ratio"] == 1.35
+    assert options["rows"][0]["option_open_interest_usd"] == 8_000_000_000
+    assert options["rows"][0]["option_volume_usd"] == 650_000_000
+    assert options["rows"][0]["option_iv"] == 0.62
+    assert options["rows"][0]["option_iv_skew"] == 0.08
 
 
 def test_normalize_history_dataset_rows_flattens_ohlc_fields():
@@ -586,12 +656,47 @@ def test_build_derivatives_snapshot_adds_optional_coinglass_context(monkeypatch)
                     "orderbook_wall_below_usd": 55_000_000.0,
                 }
             ],
+            "spot_coin_netflow": [
+                {
+                    "exchange": "Binance",
+                    "symbol": "BTC",
+                    "spot_exchange_inflow_usd": 150_000_000.0,
+                    "spot_exchange_outflow_usd": 90_000_000.0,
+                    "spot_exchange_netflow_usd": 60_000_000.0,
+                    "spot_exchange_inflow_count": 3,
+                    "spot_exchange_outflow_count": 2,
+                }
+            ],
+            "exchange_balance_list": [
+                {
+                    "exchange": "Binance",
+                    "symbol": "BTC",
+                    "exchange_balance_btc": 10_000.0,
+                    "exchange_balance_usd": 1_000_000_000.0,
+                    "exchange_balance_change_24h": 1.2,
+                    "exchange_balance_change_7d": -2.0,
+                    "stablecoin_exchange_balance_usd": 2_500_000_000.0,
+                    "stablecoin_exchange_balance_change_24h": -50_000_000.0,
+                }
+            ],
             "global_long_short_account_ratio_history": [{"long_short_ratio": 1.1}],
             "top_long_short_account_ratio_history": [{"long_short_ratio": 1.3}],
             "top_long_short_position_ratio_history": [{"long_short_ratio": 1.5}],
             "net_position_history": [{"net_position": 42.0}],
             "coinbase_premium_index": [{"close": 0.0012}],
             "option_max_pain": [{"maxPain": 95000.0}],
+            "options_info": [
+                {
+                    "option_put_call_ratio": 1.35,
+                    "option_open_interest_usd": 8_000_000_000.0,
+                    "option_volume_usd": 650_000_000.0,
+                    "option_iv": 0.62,
+                    "option_iv_skew": 0.08,
+                }
+            ],
+            "options_exchange_oi_history": [],
+            "options_exchange_volume_history": [],
+            "option_vs_futures_oi_ratio": [{"ratio": 0.42}],
             "bitcoin_etf_flow_history": [{"netFlow": 123456.0}],
             "funding_arbitrage": [],
         },
@@ -611,13 +716,23 @@ def test_build_derivatives_snapshot_adds_optional_coinglass_context(monkeypatch)
     assert snapshot.payload["liquidity_wall_nearest_above_price"] == 103.0
     assert snapshot.payload["liquidity_void_score"] == 0.25
     assert snapshot.payload["heatmap_pressure_score"] == 0.48
+    assert snapshot.payload["spot_exchange_netflow_usd"] == 60_000_000.0
+    assert snapshot.payload["spot_netflow_score"] == pytest.approx(0.25)
+    assert snapshot.payload["exchange_balance_usd"] == 1_000_000_000.0
+    assert snapshot.payload["exchange_reserve_pressure_score"] == pytest.approx(0.24)
     assert snapshot.payload["top_account_long_short_ratio"] == 1.3
     assert snapshot.payload["top_position_long_short_ratio"] == 1.5
     assert snapshot.payload["net_position"] == 42.0
+    assert snapshot.payload["option_put_call_ratio"] == 1.35
+    assert snapshot.payload["option_open_interest_usd"] == 8_000_000_000.0
+    assert snapshot.payload["option_vs_futures_oi_ratio"] == 0.42
     assert context["coinbase_premium"] == 0.0012
     assert context["option_max_pain"] == 95000.0
     assert context["orderbook_agg_imbalance"] == 0.2
     assert context["liquidity_heatmap_total_usd"] == 420_000_000.0
+    assert context["spot_exchange_netflow_usd"] == 60_000_000.0
+    assert context["exchange_balance_usd"] == 1_000_000_000.0
+    assert context["option_put_call_ratio"] == 1.35
 
 
 def test_latest_payload_rows_prefers_latest_ingested_request_and_filters_mismatched_symbol(monkeypatch):
