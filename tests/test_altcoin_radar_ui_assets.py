@@ -52,6 +52,12 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "await watchlistPromise;" in radar_js
     assert "await scanRadar(force);" in radar_js
     assert "async function openResearchWorkbench(symbol)" in radar_js
+    assert 'data-row-action="research-proposal"' in radar_js
+    assert "生成研究提案" in radar_js
+    assert "/altcoin/radar/${encodeURIComponent(symbol)}/research-proposal" in radar_js
+    assert "altcoin-radar-operating-mode-banner" in radar_js
+    assert "/ai/operating-mode" in radar_js
+    assert "Operating Mode" in radar_js
     assert "async function createPresetAlert(kind, symbol)" in radar_js
     assert "async function recyclePresetAlert(kind, symbol)" in radar_js
     assert "async function recycleAllAlerts(symbol)" in radar_js

@@ -246,6 +246,62 @@ def test_altcoin_scan_route_sorts_and_limits(monkeypatch):
     assert payload["rows"][0]["rank"] == 1
 
 
+def test_altcoin_radar_research_proposal_endpoint(monkeypatch):
+    from core.ai.proposal_schemas import ResearchProposal
+    from core.research import orchestrator as orchestrator_module
+
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+
+    async def fake_get_altcoin_radar_detail(**kwargs):
+        return {
+            "selected_row": {
+                "symbol": "AAAUSDT",
+                "priority_score": 0.88,
+                "signal_state": "ignition",
+                "next_best_action": "open_research",
+                "market_state_snapshot_id": "mss-1",
+            },
+            "action_plan": {
+                "risk_hypothesis": "crowding can unwind quickly",
+                "invalidate_conditions": ["priority falls below 0.5"],
+            },
+            "scan_meta": {"exchange": "binance", "timeframe": "1h"},
+        }
+
+    captured = {}
+
+    def fake_create_manual_proposal(app_arg, **kwargs):
+        captured.update(kwargs)
+        now = datetime.now(timezone.utc)
+        return ResearchProposal(
+            proposal_id="proposal-radar",
+            created_at=now,
+            updated_at=now,
+            status="draft",
+            source=kwargs["source"],
+            thesis=kwargs["thesis"],
+            target_symbols=kwargs["symbols"],
+            target_timeframes=kwargs["timeframes"],
+            market_regime=kwargs["market_regime"],
+            metadata=kwargs["metadata"],
+        )
+
+    monkeypatch.setattr(altcoin_api, "get_altcoin_radar_detail", fake_get_altcoin_radar_detail)
+    monkeypatch.setattr(orchestrator_module, "create_manual_proposal", fake_create_manual_proposal)
+
+    response = client.post("/api/altcoin/radar/AAAUSDT/research-proposal?timeframe=1h")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["proposal_id"] == "proposal-radar"
+    assert payload["next_action"] == "open_ai_research_proposal"
+    assert captured["source"] == "hybrid"
+    assert captured["metadata"]["origin_source"] == "altcoin_radar"
+    assert captured["metadata"]["market_state_snapshot_id"] == "mss-1"
+
+
 def test_altcoin_scan_route_uses_view_to_override_timeframe(monkeypatch):
     app = FastAPI()
     app.include_router(altcoin_api.router, prefix="/api/altcoin")

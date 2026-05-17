@@ -3043,6 +3043,34 @@
     </div>`;
   }
 
+  function renderDecisionTracePanel(trace, title = 'Decision Trace') {
+    const gates = Array.isArray(trace?.gates) ? trace.gates : [];
+    const rootCode = trace?.root_blocker_code || '';
+    const rootLabel = trace?.root_blocker_label || rootCode || 'none';
+    if (!trace || (!rootCode && !gates.length)) return '';
+    const gateRows = gates.map(g => {
+      const status = String(g?.status || 'pass');
+      const color = status === 'block' ? '#e05260' : status === 'downgrade' ? '#f59e0b' : status === 'shadow' || status === 'degraded' ? '#7e92b2' : '#20bf78';
+      return `<div style="display:grid;grid-template-columns:110px 1fr;gap:8px;padding:5px 0;border-top:1px solid #22324a;">
+        <div style="font-size:11px;color:${color};font-weight:700;">${esc(status)}</div>
+        <div>
+          <div style="font-size:12px;color:#c2d0e8;">${esc(g?.label || g?.code || '')}</div>
+          <div style="font-size:11px;color:#7e92b2;">${esc(g?.reason || '')}</div>
+        </div>
+      </div>`;
+    }).join('');
+    return `<div class="decision-trace-panel" style="margin-bottom:14px;padding:10px;background:#101a29;border:1px solid #263a56;border-radius:6px;">
+      <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:6px;">
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;">${esc(title)}</div>
+        <div style="font-size:11px;color:#f59e0b;">Root blocker: ${esc(rootLabel)}</div>
+      </div>
+      <details>
+        <summary style="font-size:12px;color:#7e92b2;cursor:pointer;">Gate ladder (${gates.length})</summary>
+        <div style="margin-top:6px;">${gateRows || '<div style="font-size:12px;color:#6b7fa0;">No gates recorded.</div>'}</div>
+      </details>
+    </div>`;
+  }
+
   function normalizeNumberSeries(values, maxPoints = 240) {
     return toArray(values).map(v => Number(v)).filter(v => Number.isFinite(v)).slice(-Math.max(2, maxPoints));
   }
@@ -3469,6 +3497,7 @@
     const validationHtml = `
       <div style="margin-bottom:14px;">
         <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">IS / OOS / \u6eda\u52a8\u9a8c\u8bc1</div>
+        <div style="font-size:11px;color:#7e92b2;margin-bottom:6px;">Effective Sharpe source: ${esc(vs?.effective_sharpe_source || (vs?.oos_score != null ? 'oos' : 'in_sample'))}</div>
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;">
           <div style="text-align:center;padding:6px;background:#1a2436;border-radius:4px;">
             <div style="font-size:10px;color:#6b7fa0;">IS\u590f\u666e</div>
@@ -3498,6 +3527,7 @@
           </div>
         </div>
       </div>`;
+    const decisionTraceHtml = renderDecisionTracePanel(vs?.decision_trace, 'Validation Decision Trace');
 
     const equityCurve = normalizeNumberSeries(cand?.metadata?.best?.equity_curve_sample || []);
     const equityCurveHtml = `
@@ -3602,6 +3632,7 @@
       </div>
 
       ${autonomyHtml}
+      ${decisionTraceHtml}
       ${validationHtml}
       ${bestParamsHtml}
       ${enrichmentHtml}
@@ -3715,6 +3746,9 @@
           : '')}
 
       <div style="margin-bottom:14px;">
+        <button class="btn btn-sm" id="btn-autonomy-handoff" style="font-size:12px;width:100%;margin-bottom:8px;color:#5ec8ff;border-color:#2a6f97;">
+          Send to Autonomy Watch
+        </button>
         <button class="btn btn-sm" id="btn-order-preview" style="font-size:12px;width:100%;">
           \u751f\u6210\u8ba2\u5355\u9884\u89c8
         </button>
@@ -3764,6 +3798,18 @@
     // 订单预览按钮
     panel.querySelector('#btn-order-preview')?.addEventListener('click', () => {
       showOrderPreview(candidateId);
+    });
+    panel.querySelector('#btn-autonomy-handoff')?.addEventListener('click', async () => {
+      const btn = panel.querySelector('#btn-autonomy-handoff');
+      if (btn) btn.disabled = true;
+      try {
+        await aiApi(`/candidates/${encodeURIComponent(candidateId)}/autonomy-handoff`, { method: 'POST', timeoutMs: 20000 });
+        toast('已送入 AI 自治观察队列', 'success');
+      } catch (err) {
+        toast(`自治观察交接失败：${err.message || err}`, 'error');
+      } finally {
+        if (btn) btn.disabled = false;
+      }
     });
 
     /* panel.querySelector('#btn-activate-live')?.addEventListener('click', async () => {
@@ -6065,6 +6111,60 @@ ${confirmHint}`,
   /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
      初始化
   鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
+  async function refreshOperatingModeBanner() {
+    const root = document.getElementById('ai-research') || document.getElementById('ai-candidate-cards')?.parentElement;
+    if (!root) return;
+    let banner = document.getElementById('ai-operating-mode-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'ai-operating-mode-banner';
+      banner.className = 'operating-mode-banner';
+      banner.style.cssText = 'margin:8px 0 12px;padding:10px 12px;border:1px solid #263a56;background:#101a29;border-radius:6px;color:#c2d0e8;font-size:12px;';
+      root.prepend(banner);
+    }
+    try {
+      const data = await aiApi('/operating-mode', { timeoutMs: 20000 });
+      const degradations = Array.isArray(data?.degradations) ? data.degradations : [];
+      const live = data?.ai_live_decision || {};
+      const agent = data?.autonomous_agent || {};
+      const deri = data?.coinglass || {};
+      banner.innerHTML = `
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+          <strong>Operating Mode</strong>
+          <span>trading=${esc(data?.trading_mode || '--')}</span>
+          <span>AI=${esc(live.mode || '--')} / ${esc(live.provider || '--')}</span>
+          <span>agent=${esc(agent.mode || '--')} / ${agent.allow_live ? 'live allowed' : 'paper only'}</span>
+          <span>derivatives=${deri.live_gating_enabled ? 'live gating' : 'shadow-only'}</span>
+          <span style="color:${degradations.length ? '#f59e0b' : '#20bf78'};">degraded=${degradations.length}</span>
+        </div>`;
+    } catch (err) {
+      banner.textContent = `Operating Mode unavailable: ${err.message || err}`;
+    }
+  }
+
+  async function refreshWorkQueuePanel() {
+    const root = document.getElementById('ai-candidate-cards')?.parentElement || document.getElementById('ai-research');
+    if (!root) return;
+    let panel = document.getElementById('ai-work-queue-panel');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'ai-work-queue-panel';
+      panel.style.cssText = 'margin:8px 0 12px;padding:10px 12px;border:1px solid #263a56;background:#0e1725;border-radius:6px;color:#c2d0e8;font-size:12px;';
+      root.prepend(panel);
+    }
+    try {
+      const data = await aiApi('/work-queue', { timeoutMs: 30000 });
+      const items = Array.isArray(data?.items) ? data.items.slice(0, 6) : [];
+      panel.innerHTML = `<div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Work Queue</div>
+        ${items.length ? items.map(item => `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid #1e2d44;">
+          <span>${esc(item.type || '--')} · ${esc(item.title || item.id || '--')}</span>
+          <span style="color:#7e92b2;">${esc(item.next_action || '--')}</span>
+        </div>`).join('') : '<div style="color:#6b7fa0;">No queued actions.</div>'}`;
+    } catch (err) {
+      panel.textContent = `Work Queue unavailable: ${err.message || err}`;
+    }
+  }
+
   function init() {
     bindInitRetry();
     if (!document.getElementById('ai-candidate-cards')) return;  // tab 未激活时跳过
@@ -6083,6 +6183,8 @@ ${confirmHint}`,
     syncPrimaryActionButtons();
     updatePlannerModeHint();
     normalizeDomText(document.getElementById('ai-research'));
+    refreshOperatingModeBanner().catch(() => {});
+    refreshWorkQueuePanel().catch(() => {});
     if (isAiResearchActive() && canRunAiPolling()) {
       refreshWorkbench().catch(err => console.error('AI研究初始化失败', err));
     }

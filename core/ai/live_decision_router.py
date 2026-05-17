@@ -59,8 +59,8 @@ _PERSISTABLE_KEYS = frozenset({
 
 _DEFAULT_OPENAI_BASE_URL = "https://nowcoding.ai/v1"
 _DEFAULT_OPENAI_MODEL = "gpt-5.5"
-_DEFAULT_ANTHROPIC_BASE_URL = ""
-_DEFAULT_ANTHROPIC_MODEL = ""
+_DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+_DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet-latest"
 _DEFAULT_GLM_BASE_URL = ""
 _DEFAULT_GLM_MODEL = ""
 _SUPPORTED_PROVIDERS = {"glm", "codex", "claude"}

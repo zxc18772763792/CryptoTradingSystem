@@ -127,6 +127,8 @@ class Settings(BaseSettings):
     AI_LIVE_DECISION_TEMPERATURE: float = 0.0
     AI_LIVE_DECISION_FAIL_OPEN: bool = True
     AI_LIVE_DECISION_APPLY_IN_PAPER: bool = False
+    AI_MARKET_STATE_RISK_POSTURE_ENABLED: bool = True
+    AI_MARKET_STATE_RISK_POSTURE_LIVE_ENFORCE: bool = False
     AI_AUTONOMOUS_AGENT_ENABLED: bool = False
     AI_AUTONOMOUS_AGENT_AUTO_START: bool = False
     AI_AUTONOMOUS_AGENT_MODE: str = "shadow"  # shadow/execute

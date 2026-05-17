@@ -17,6 +17,8 @@ from core.ai.proposal_schemas import (
 )
 from core.ai.research_search_loop import run_research_search_loop
 from core.governance.schemas import LLMResearchOutput
+from core.market_state.planner_adapter import market_state_to_planner_hints
+from core.observability.score_calibration import get_family_regime_prior, symbol_scope_for_symbol
 from core.research.strategy_program import build_strategy_program_from_draft
 
 
@@ -192,6 +194,36 @@ def _parse_market_context(
     suppressed: List[str] = []
     if not market_context:
         return boosted, suppressed
+
+    market_state_snapshot = (
+        market_context.get("market_state_snapshot")
+        or market_context.get("market_state")
+        or market_context.get("snapshot")
+    )
+    if isinstance(market_state_snapshot, dict) and market_state_snapshot:
+        symbol = str(
+            market_context.get("symbol")
+            or market_state_snapshot.get("symbol")
+            or ""
+        )
+        benchmark_beta = float(
+            market_context.get("benchmark_beta")
+            or (market_context.get("metadata") or {}).get("benchmark_beta")
+            or 0.0
+        )
+        ms_boosted, ms_suppressed, ms_notes = market_state_to_planner_hints(
+            market_state_snapshot,
+            symbol=symbol,
+            benchmark_beta=benchmark_beta,
+        )
+        boosted.extend(ms_boosted)
+        suppressed.extend(ms_suppressed)
+        if planner_notes is not None:
+            planner_notes.extend([note for note in ms_notes if note not in planner_notes])
+        return _dedupe_keep_order(boosted), _dedupe_keep_order(suppressed)
+
+    if planner_notes is not None:
+        planner_notes.append("legacy_market_context_fallback")
 
     # Sentiment direction
     sentiment = str(market_context.get("sentiment") or market_context.get("direction") or "").strip().upper()
@@ -867,6 +899,21 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
         planner_notes.append("fell back to default regime templates")
     else:
         planner_notes.append("selected catalog-backed, backtestable templates")
+
+    symbol_scope = symbol_scope_for_symbol(symbols[0] if symbols else "")
+    advisory_prior_notes: List[str] = []
+    for name in selected[:max_templates]:
+        prior = get_family_regime_prior(
+            strategy_family=name,
+            regime=request.market_regime,
+            symbol_scope=symbol_scope,
+        )
+        if bool(prior.get("available")):
+            advisory_prior_notes.append(
+                f"{name}:{prior.get('key')} sample={prior.get('sample_size', 0)} decay={prior.get('recent_decay_rate', 0)}"
+            )
+    if advisory_prior_notes:
+        planner_notes.append("family_regime_priors advisory: " + " | ".join(advisory_prior_notes[:4]))
 
     if llm_output_validated:
         selected, max_templates, boost_categories = _apply_llm_guidance(

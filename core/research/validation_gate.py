@@ -9,6 +9,12 @@ import math as _math
 
 from config.settings import settings
 from core.ai.proposal_schemas import ProposalValidationSummary
+from core.observability.decision_trace import DecisionTrace, append_gate
+from core.observability.score_calibration import (
+    get_family_regime_prior,
+    symbol_scope_for_symbol,
+    validation_companion_scores,
+)
 from core.research.experiment_schemas import PromotionDecision
 
 _MIN_TRADES_FOR_SHADOW = 1
@@ -89,6 +95,27 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
     quality_ok = int(quality_counts.get("ok", 0) or 0)
 
     if not best or valid_runs <= 0:
+        trace = DecisionTrace(
+            subject_type="research_result",
+            subject_id=str(result.get("candidate_id") or result.get("proposal_id") or ""),
+            stage="validation_gate",
+            final_decision="reject",
+            effective_score=0.0,
+            input_summary={"runs": runs, "valid_runs": valid_runs, "quality_counts": quality_counts},
+        )
+        append_gate(
+            trace,
+            code="no_valid_research_runs",
+            label="No valid research runs",
+            status="block",
+            severity=5,
+            input_value=valid_runs,
+            threshold=">0",
+            decision_before="reject",
+            decision_after="reject",
+            reason="no valid research runs",
+            source="validation_gate",
+        )
         return ProposalValidationSummary(
             computed_at=now,
             decision="reject",
@@ -103,6 +130,14 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
                 "valid_runs": valid_runs,
                 "quality_counts": quality_counts,
             },
+            decision_trace=trace.to_dict(),
+            effective_sharpe_source="none",
+            outcome_type="insufficient_sample",
+            reserve_eligible=False,
+            calibrated_confidence=0.0,
+            expected_edge_bps=0.0,
+            risk_adjusted_edge=0.0,
+            score_explanation="validation rejected before scoring because no valid runs were available",
         )
 
     total_return = float(best.get("total_return", 0.0) or 0.0)
@@ -129,6 +164,37 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
 
     # C: Use OOS Sharpe for edge scoring when available
     effective_sharpe = oos_sharpe if oos_sharpe is not None else sharpe_ratio
+    effective_sharpe_source = "oos" if oos_sharpe is not None else "in_sample"
+    trace = DecisionTrace(
+        subject_type="research_result",
+        subject_id=str(result.get("candidate_id") or result.get("proposal_id") or best.get("strategy") or ""),
+        stage="validation_gate",
+        input_summary={
+            "runs": runs,
+            "valid_runs": valid_runs,
+            "effective_sharpe": effective_sharpe,
+            "effective_sharpe_source": effective_sharpe_source,
+            "total_trades": total_trades,
+        },
+    )
+    append_gate(
+        trace,
+        code="effective_sharpe_source",
+        label="Effective Sharpe source",
+        status="pass" if oos_sharpe is not None else "warn",
+        severity=1 if oos_sharpe is None else 0,
+        input_value=effective_sharpe,
+        threshold={"source": effective_sharpe_source, "oos_required_for_live": True},
+        decision_before="score",
+        decision_after="score",
+        reason=(
+            "OOS Sharpe is used for edge scoring; IS Sharpe is only context"
+            if oos_sharpe is not None
+            else "No OOS Sharpe is available; in-sample Sharpe is used and live promotion is capped"
+        ),
+        source="validation_gate",
+        metadata={"is_sharpe": is_sharpe, "oos_sharpe": oos_sharpe, "raw_sharpe": sharpe_ratio},
+    )
 
     # DSR: deflated for multiple testing across all runs tested
     n_trials_for_dsr = max(1, runs)
@@ -226,6 +292,34 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
         decision = "paper"
     elif deployment_score >= 45 and valid_runs > 0:
         decision = "shadow"
+    append_gate(
+        trace,
+        code="deployment_tier",
+        label="Deployment tier",
+        status="block" if decision == "reject" else "pass",
+        severity=3 if decision == "reject" else 0,
+        input_value={
+            "deployment_score": deployment_score,
+            "effective_sharpe": effective_sharpe,
+            "max_drawdown": max_drawdown,
+            "valid_ratio_pct": valid_ratio,
+        },
+        threshold={
+            "shadow": {"deployment_score": 45, "valid_runs": ">0"},
+            "paper": {"deployment_score": 60, "effective_sharpe": 1.0, "max_drawdown": 15},
+            "live_candidate": {
+                "deployment_score": 75,
+                "effective_sharpe": 1.2,
+                "max_drawdown": 12,
+                "valid_ratio_pct": 60,
+            },
+        },
+        decision_before="score",
+        decision_after=decision,
+        reason=f"base validation tier resolved to {decision}",
+        counterfactual_decision=decision,
+        source="validation_gate",
+    )
 
     # Out-of-sample gating.
     #
@@ -242,46 +336,256 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
     # be high enough for live_candidate. Such a candidate must not go to
     # live_candidate on in-sample evidence alone — cap it at paper.
     if oos_sharpe is None and decision == "live_candidate":
+        before = decision
         decision = "paper"
         reasons.append(
             "downgraded live_candidate→paper: no out-of-sample validation available"
         )
 
+        append_gate(
+            trace,
+            code="no_oos_live_cap",
+            label="No OOS live cap",
+            status="downgrade",
+            severity=4,
+            input_value=oos_sharpe,
+            threshold="OOS Sharpe required for live_candidate",
+            decision_before=before,
+            decision_after=decision,
+            reason="candidate cannot reach live_candidate without out-of-sample validation",
+            counterfactual_decision=before,
+            source="validation_gate",
+        )
+    else:
+        append_gate(
+            trace,
+            code="no_oos_live_cap",
+            label="No OOS live cap",
+            status="pass" if oos_sharpe is not None else "skip",
+            severity=0,
+            input_value=oos_sharpe,
+            threshold="OOS Sharpe required for live_candidate",
+            decision_before=decision,
+            decision_after=decision,
+            reason="OOS validation present or candidate is not live-candidate tier",
+            source="validation_gate",
+        )
+
     # DSR gating: reject or downgrade one tier based on multiple-testing correction.
     if dsr_reject:
+        before = decision
         decision = "reject"
         reasons.append(
             f"DSR too low ({dsr:.2f}<{_DSR_REJECT_BELOW:.2f}) — likely spurious edge from multiple testing"
         )
+        append_gate(
+            trace,
+            code="dsr_reject",
+            label="DSR reject",
+            status="block",
+            severity=5,
+            input_value=round(dsr, 4),
+            threshold=_DSR_REJECT_BELOW,
+            margin=round(dsr - _DSR_REJECT_BELOW, 6),
+            decision_before=before,
+            decision_after=decision,
+            reason="deflated Sharpe is below reject threshold",
+            counterfactual_decision=before,
+            source="validation_gate",
+        )
     elif dsr_downgrade:
         if decision == "live_candidate":
+            before = decision
             decision = "paper"
             reasons.append(f"downgraded live_candidate→paper: DSR={dsr:.2f}<{_DSR_DOWNGRADE_OK:.2f}")
+            append_gate(
+                trace,
+                code="dsr_downgrade",
+                label="DSR downgrade",
+                status="downgrade",
+                severity=4,
+                input_value=round(dsr, 4),
+                threshold=_DSR_DOWNGRADE_OK,
+                margin=round(dsr - _DSR_DOWNGRADE_OK, 6),
+                decision_before=before,
+                decision_after=decision,
+                reason="deflated Sharpe is below promotion threshold",
+                counterfactual_decision=before,
+                source="validation_gate",
+            )
         elif decision == "paper":
+            before = decision
             decision = "shadow"
             reasons.append(f"downgraded paper→shadow: DSR={dsr:.2f}<{_DSR_DOWNGRADE_OK:.2f}")
+
+            append_gate(
+                trace,
+                code="dsr_downgrade",
+                label="DSR downgrade",
+                status="downgrade",
+                severity=4,
+                input_value=round(dsr, 4),
+                threshold=_DSR_DOWNGRADE_OK,
+                margin=round(dsr - _DSR_DOWNGRADE_OK, 6),
+                decision_before=before,
+                decision_after=decision,
+                reason="deflated Sharpe is below promotion threshold",
+                counterfactual_decision=before,
+                source="validation_gate",
+            )
+        else:
+            append_gate(
+                trace,
+                code="dsr_downgrade",
+                label="DSR downgrade",
+                status="warn",
+                severity=2,
+                input_value=round(dsr, 4),
+                threshold=_DSR_DOWNGRADE_OK,
+                decision_before=decision,
+                decision_after=decision,
+                reason="DSR is weak but current tier cannot be downgraded further",
+                source="validation_gate",
+            )
+    else:
+        append_gate(
+            trace,
+            code="dsr_gate",
+            label="DSR gate",
+            status="pass",
+            severity=0,
+            input_value=round(dsr, 4),
+            threshold=_DSR_DOWNGRADE_OK,
+            margin=round(dsr - _DSR_DOWNGRADE_OK, 6),
+            decision_before=decision,
+            decision_after=decision,
+            reason="deflated Sharpe passed multiple-testing gate",
+            source="validation_gate",
+        )
 
     # Promotion must respect minimum realized sample size. Thin trading samples are
     # too noisy to treat as paper/live-ready even when return and Sharpe look good.
     trade_count_int = int(total_trades)
     if trade_count_int < _MIN_TRADES_FOR_SHADOW:
+        before = decision
         decision = "reject"
         reasons.append(
             f"rejected: completed trades {trade_count_int} < {_MIN_TRADES_FOR_SHADOW}"
         )
+        append_gate(
+            trace,
+            code="trade_count_min_shadow",
+            label="Trade count minimum",
+            status="block",
+            severity=5,
+            input_value=trade_count_int,
+            threshold=_MIN_TRADES_FOR_SHADOW,
+            margin=float(trade_count_int - _MIN_TRADES_FOR_SHADOW),
+            decision_before=before,
+            decision_after=decision,
+            reason="completed trades are below the minimum for shadow",
+            counterfactual_decision=before,
+            source="validation_gate",
+        )
     elif decision == "live_candidate" and trade_count_int < _MIN_TRADES_FOR_LIVE_CANDIDATE:
+        before = decision
         decision = "paper" if trade_count_int >= _MIN_TRADES_FOR_PAPER else "shadow"
         reasons.append(
             f"downgraded live_candidate due to trade count ({trade_count_int} < {_MIN_TRADES_FOR_LIVE_CANDIDATE})"
         )
+        append_gate(
+            trace,
+            code="trade_count_live_candidate",
+            label="Live candidate trade count",
+            status="downgrade",
+            severity=4,
+            input_value=trade_count_int,
+            threshold=_MIN_TRADES_FOR_LIVE_CANDIDATE,
+            margin=float(trade_count_int - _MIN_TRADES_FOR_LIVE_CANDIDATE),
+            decision_before=before,
+            decision_after=decision,
+            reason="sample is too thin for live-candidate tier",
+            counterfactual_decision=before,
+            source="validation_gate",
+        )
     elif decision == "paper" and trade_count_int < _MIN_TRADES_FOR_PAPER:
+        before = decision
         decision = "shadow"
         reasons.append(
             f"downgraded paper due to trade count ({trade_count_int} < {_MIN_TRADES_FOR_PAPER})"
         )
+        append_gate(
+            trace,
+            code="trade_count_paper",
+            label="Paper trade count",
+            status="downgrade",
+            severity=4,
+            input_value=trade_count_int,
+            threshold=_MIN_TRADES_FOR_PAPER,
+            margin=float(trade_count_int - _MIN_TRADES_FOR_PAPER),
+            decision_before=before,
+            decision_after=decision,
+            reason="sample is too thin for paper tier",
+            counterfactual_decision=before,
+            source="validation_gate",
+        )
+    else:
+        append_gate(
+            trace,
+            code="trade_count_gate",
+            label="Trade count gate",
+            status="pass",
+            severity=0,
+            input_value=trade_count_int,
+            threshold={
+                "shadow": _MIN_TRADES_FOR_SHADOW,
+                "paper": _MIN_TRADES_FOR_PAPER,
+                "live_candidate": _MIN_TRADES_FOR_LIVE_CANDIDATE,
+            },
+            decision_before=decision,
+            decision_after=decision,
+            reason="trade sample is sufficient for the resolved tier",
+            source="validation_gate",
+        )
 
     if decision != "reject":
         reasons.insert(0, f"recommended for {decision}")
+
+    if trade_count_int < _MIN_TRADES_FOR_SHADOW:
+        outcome_type = "insufficient_sample"
+    elif dsr_reject:
+        outcome_type = "overfit_suspect"
+    elif decision == "reject" and effective_sharpe < 1.0:
+        outcome_type = "poor_edge"
+    elif decision == "reject":
+        outcome_type = "borderline"
+    else:
+        outcome_type = "accepted"
+
+    companion = validation_companion_scores(
+        deployment_score=deployment_score,
+        edge_score=edge_score,
+        risk_score=risk_score,
+    )
+    calibration_prior = get_family_regime_prior(
+        strategy_family=best.get("strategy") or result.get("strategy_family") or result.get("strategy") or "unknown",
+        regime=result.get("market_regime") or result.get("regime") or "mixed",
+        symbol_scope=result.get("symbol_scope") or symbol_scope_for_symbol(best.get("symbol") or result.get("symbol")),
+    )
+    trace.final_decision = decision
+    trace.effective_score = float(deployment_score or 0.0)
+    trace.refresh_root_blocker()
+    if trace.root_blocker_code:
+        try:
+            from core.audit.gate_counterfactuals import record_gate_counterfactual  # noqa: PLC0415
+
+            record_gate_counterfactual(
+                trace=trace.to_dict(),
+                observed_decision=decision,
+                mode="validation_gate",
+            )
+        except Exception:
+            pass
 
     return ProposalValidationSummary(
         computed_at=now,
@@ -298,6 +602,14 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
         dsr_score=round(dsr, 4),
         wf_consistency=wf_consistency,
         reasons=reasons,
+        decision_trace=trace.to_dict(),
+        effective_sharpe_source=effective_sharpe_source,
+        outcome_type=outcome_type,
+        reserve_eligible=bool(outcome_type == "borderline" and deployment_score >= 40.0),
+        calibrated_confidence=companion["calibrated_confidence"],
+        expected_edge_bps=companion["expected_edge_bps"],
+        risk_adjusted_edge=companion["risk_adjusted_edge"],
+        score_explanation=companion["score_explanation"],
         metrics={
             "runs": runs,
             "valid_runs": valid_runs,
@@ -312,6 +624,7 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
             "robustness_score": robustness_score,
             "dsr_score": round(dsr, 4),
             "wf_consistency": wf_consistency,
+            "calibration_prior": calibration_prior,
         },
     )
 

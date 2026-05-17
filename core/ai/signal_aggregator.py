@@ -29,6 +29,7 @@ from loguru import logger
 from config.settings import settings
 from core.ai.ml_signal import MLSignalModel, MLSignalResult, build_feature_frame
 from core.ai.risk_gate import RiskGate
+from core.observability.decision_trace import DecisionTrace, append_gate
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +46,7 @@ class AggregatedSignal:
     requires_approval: bool = True
     blocked_by_risk: bool = False
     risk_reason: str = ""
+    decision_trace: Dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -55,6 +57,7 @@ class AggregatedSignal:
             "requires_approval": self.requires_approval,
             "blocked_by_risk": self.blocked_by_risk,
             "risk_reason": self.risk_reason,
+            "decision_trace": self.decision_trace,
             "components": self.components,
             "market_context": self.market_context,
             "timestamp": self.timestamp.isoformat(),
@@ -108,11 +111,25 @@ class SignalAggregator:
         include_ml: bool = True,
         include_factor: bool = True,
         include_derivatives: bool = True,
+        market_state_snapshot: Optional[Dict[str, Any]] = None,
     ) -> AggregatedSignal:
         """Compute weighted signal for *symbol* using latest *market_data*."""
         components: Dict[str, Any] = {}
-        market_context: Dict[str, Any] = {}
+        market_context: Dict[str, Any] = dict((market_state_snapshot or {}).get("market_context") or {})
+        if market_state_snapshot:
+            market_context["market_state_snapshot_id"] = str(market_state_snapshot.get("snapshot_id") or "")
+            market_context["market_state"] = dict(market_state_snapshot)
         has_market_data = market_data is not None and not market_data.empty
+        trace = DecisionTrace(
+            subject_type="signal",
+            subject_id=str(symbol or ""),
+            stage="signal_aggregator",
+            input_summary={
+                "symbol": symbol,
+                "has_market_data": has_market_data,
+                "market_state_snapshot_id": (market_state_snapshot or {}).get("snapshot_id"),
+            },
+        )
 
         # ---- 1. LLM signal ----
         llm_reason = ""
@@ -135,6 +152,17 @@ class SignalAggregator:
             "status": self._component_status(direction=llm_direction, confidence=llm_conf, available=llm_available),
             "reason": llm_reason,
         }
+        append_gate(
+            trace,
+            code="component_llm",
+            label="LLM component",
+            status="pass" if llm_available else ("skip" if not include_llm else "degraded"),
+            severity=1 if include_llm and not llm_available else 0,
+            input_value={"direction": llm_direction, "confidence": round(llm_conf, 6)},
+            threshold={"configured_weight": self.WEIGHTS["llm"], "effective_weight": round(llm_effective_weight, 6)},
+            reason=llm_reason or "component available",
+            source="signal_aggregator",
+        )
 
         # ---- 2. ML signal ----
         ml_reason = ""
@@ -157,6 +185,17 @@ class SignalAggregator:
             "status": self._component_status(direction=ml_direction, confidence=ml_conf, available=ml_available),
             "reason": ml_reason,
         }
+        append_gate(
+            trace,
+            code="component_ml",
+            label="ML component",
+            status="pass" if ml_available else ("skip" if not include_ml else "degraded"),
+            severity=1 if include_ml and not ml_available else 0,
+            input_value={"direction": ml_direction, "confidence": round(ml_conf, 6)},
+            threshold={"configured_weight": self.WEIGHTS["ml"], "effective_weight": round(ml_effective_weight, 6)},
+            reason=ml_reason or "component available",
+            source="signal_aggregator",
+        )
 
         # ---- 3. Factor signal ----
         factor_reason = ""
@@ -179,6 +218,17 @@ class SignalAggregator:
             "status": self._component_status(direction=factor_direction, confidence=factor_conf, available=factor_available),
             "reason": factor_reason,
         }
+        append_gate(
+            trace,
+            code="component_factor",
+            label="Factor component",
+            status="pass" if factor_available else ("skip" if not include_factor else "degraded"),
+            severity=1 if include_factor and not factor_available else 0,
+            input_value={"direction": factor_direction, "confidence": round(factor_conf, 6)},
+            threshold={"configured_weight": self.WEIGHTS["factor"], "effective_weight": round(factor_effective_weight, 6)},
+            reason=factor_reason or "component available",
+            source="signal_aggregator",
+        )
 
         # ---- 4. Derivatives / structure signal ----
         derivatives_reason = ""
@@ -194,7 +244,10 @@ class SignalAggregator:
             derivatives_regime = derivatives_meta.get("regime")
             derivatives_flags = list(derivatives_meta.get("risk_flags") or [])
             derivatives_explain = str(derivatives_meta.get("explain") or "")
-            market_context = dict(derivatives_meta.get("context") or {})
+            market_context = {
+                **market_context,
+                **dict(derivatives_meta.get("context") or {}),
+            }
         else:
             derivatives_direction, derivatives_conf = "FLAT", 0.0
             derivatives_available = False
@@ -219,6 +272,30 @@ class SignalAggregator:
             "shadow_only": derivatives_shadow_only,
             "confidence_adjustment": 0.0,
         }
+        derivatives_status = "pass"
+        derivatives_severity = 0
+        if derivatives_available and derivatives_shadow_only:
+            derivatives_status = "shadow"
+            derivatives_severity = 2
+        elif not derivatives_available:
+            derivatives_status = "skip" if not include_derivatives else "degraded"
+            derivatives_severity = 1 if include_derivatives else 0
+        append_gate(
+            trace,
+            code="component_derivatives",
+            label="Derivatives component",
+            status=derivatives_status,
+            severity=derivatives_severity,
+            input_value={"direction": derivatives_direction, "confidence": round(derivatives_conf, 6)},
+            threshold={
+                "configured_weight": self.WEIGHTS["derivatives"],
+                "effective_weight": round(derivatives_effective_weight, 6),
+                "live_gating_enabled": not derivatives_shadow_only,
+            },
+            reason=derivatives_reason or "component available",
+            source="signal_aggregator",
+            metadata={"risk_flags": derivatives_flags, "regime": derivatives_regime},
+        )
 
         # ---- 5. Weighted vote ----
         direction, confidence = self._weighted_vote(
@@ -244,10 +321,40 @@ class SignalAggregator:
         # ---- 6. Risk-gate filter ----
         blocked, risk_reason = self._apply_risk_gate(symbol, direction, confidence, market_data)
         final_direction = "FLAT" if blocked else direction
+        append_gate(
+            trace,
+            code="risk_gate",
+            label="Risk gate",
+            status="block" if blocked else "pass",
+            severity=5 if blocked else 0,
+            input_value={"direction": direction, "confidence": round(confidence, 6)},
+            threshold="RiskGate.evaluate",
+            decision_before=direction,
+            decision_after=final_direction,
+            reason=risk_reason or "risk gate passed",
+            counterfactual_decision=direction,
+            source="signal_aggregator",
+        )
 
         requires_approval = blocked or (
             final_direction in {"LONG", "SHORT"} and confidence < self._high_conf_threshold
         )
+        append_gate(
+            trace,
+            code="approval_threshold",
+            label="Approval threshold",
+            status="warn" if requires_approval and not blocked else "pass",
+            severity=2 if requires_approval and not blocked else 0,
+            input_value=round(confidence, 6),
+            threshold=self._high_conf_threshold,
+            decision_before=final_direction,
+            decision_after=final_direction,
+            reason="manual approval recommended below high-confidence threshold" if requires_approval and not blocked else "approval threshold passed",
+            source="signal_aggregator",
+        )
+        trace.final_decision = final_direction
+        trace.effective_score = float(confidence or 0.0)
+        trace.refresh_root_blocker()
 
         return AggregatedSignal(
             symbol=symbol,
@@ -258,6 +365,7 @@ class SignalAggregator:
             requires_approval=requires_approval,
             blocked_by_risk=blocked,
             risk_reason=risk_reason,
+            decision_trace=trace.to_dict(),
         )
 
     @staticmethod

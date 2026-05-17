@@ -16,6 +16,7 @@
   const AGENT_RISK_STATUS_API = '/ai/autonomous-agent/risk-status';
   const AGENT_RISK_CONFIG_API = '/ai/autonomous-agent/risk-config';
   const AGENT_SCORECARD_API = '/ai/autonomous-agent/scorecard';
+  const OPERATING_MODE_API = '/ai/operating-mode';
   const AGENT_STATUS_TIMEOUT_MS = 60000;
   const AGENT_DETAIL_TIMEOUT_MS = 60000;
   const AGENT_REVIEW_TIMEOUT_MS = 30000;
@@ -38,6 +39,8 @@
   let reviewLayoutSyncFrame = 0;
   let reviewLayoutObserver = null;
   let reviewRequestSeq = 0;
+  let operatingModeInFlight = null;
+  let lastOperatingModeLoadedAt = 0;
 
   function scheduleInitRetry() {
     if (typeof window === 'undefined') return;
@@ -975,6 +978,61 @@
     }
   }
 
+  function renderAgentOperatingModeBanner(snapshot = {}, errorText = '') {
+    if (typeof document === 'undefined') return;
+    const card = document.getElementById('ai-agent-card');
+    if (!card) return;
+    let banner = document.getElementById('ai-agent-operating-mode-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'ai-agent-operating-mode-banner';
+      banner.style.cssText = 'margin:0 0 12px;padding:10px 12px;border:1px solid rgba(94,200,255,.24);background:rgba(94,200,255,.08);border-radius:8px;color:#d8e7ff;font-size:12px;';
+      card.parentElement?.insertBefore(banner, card);
+    }
+    if (errorText) {
+      banner.textContent = `Operating Mode unavailable: ${compactText(errorText, 120)}`;
+      normalizeElementText(banner);
+      return;
+    }
+    const degradations = Array.isArray(snapshot.degradations) ? snapshot.degradations : [];
+    const agent = snapshot.autonomous_agent || {};
+    const coinglass = snapshot.coinglass || {};
+    const provider = agent.provider || snapshot.ai_live_decision?.provider || '--';
+    banner.innerHTML = `
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <strong>Operating Mode</strong>
+        <span>trading=${esc(snapshot.trading_mode || '--')}</span>
+        <span>agent=${esc(agent.mode || '--')}</span>
+        <span>provider=${esc(provider)}</span>
+        <span>allow_live=${agent.allow_live ? 'true' : 'false'}</span>
+        <span>derivatives=${coinglass.live_gating_enabled ? 'live' : 'shadow'}</span>
+        <span>degraded=${degradations.length}</span>
+      </div>`;
+    normalizeElementHtml(banner);
+  }
+
+  async function refreshAgentOperatingModeBanner(options = {}) {
+    const now = Date.now();
+    if (!document.getElementById('ai-agent-card')) return null;
+    if (!options.force && operatingModeInFlight) return operatingModeInFlight;
+    if (!options.force && lastOperatingModeLoadedAt && now - lastOperatingModeLoadedAt < 60000) return null;
+    const task = rootApi(OPERATING_MODE_API, { timeoutMs: 20000 })
+      .then((snapshot) => {
+        lastOperatingModeLoadedAt = Date.now();
+        renderAgentOperatingModeBanner(snapshot || {});
+        return snapshot;
+      })
+      .catch((err) => {
+        renderAgentOperatingModeBanner({}, err?.message || String(err || 'unknown'));
+        return null;
+      })
+      .finally(() => {
+        if (operatingModeInFlight === task) operatingModeInFlight = null;
+      });
+    operatingModeInFlight = task;
+    return task;
+  }
+
   function parseSymbolList(value) {
     return String(value || '')
       .split(/[\s,;\n\r\t]+/)
@@ -1297,6 +1355,20 @@
         </div>`
       : '';
 
+    const trace = diagnostics.decision_trace || {};
+    const traceGates = Array.isArray(trace.gates) ? trace.gates : [];
+    const gateLadder = traceGates.length
+      ? `<details class="ai-agent-reason-section" open>
+          <summary class="ai-agent-reason-section-title">Root blocker: ${esc(trace.root_blocker_label || trace.root_blocker_code || '--')}</summary>
+          <div class="ai-agent-reason-list">${traceGates.map((gate) => `
+            <div class="ai-agent-reason-chip ${toneClass(gate.status === 'block' ? 'danger' : gate.status === 'pass' ? 'good' : 'warn')}">
+              <div class="ai-agent-reason-chip-label">${esc(gate.label || gate.code || '--')} · ${esc(gate.status || '--')}</div>
+              <div class="ai-agent-reason-chip-detail">${esc(gate.reason || '--')}</div>
+            </div>
+          `).join('')}</div>
+        </details>`
+      : '';
+
     const detailList = secondaryItems.length
       ? `<div class="ai-agent-reason-section">
           <div class="ai-agent-reason-section-title">仍在限制下单的因素</div>
@@ -1309,7 +1381,7 @@
         </div>`
       : '';
 
-    el.innerHTML = `${primarySummary}${meta}${noteGrid}${detailList}`;
+    el.innerHTML = `${primarySummary}${meta}${noteGrid}${gateLadder}${detailList}`;
     normalizeElementHtml(el);
   }
 
@@ -2276,6 +2348,7 @@
         lastStatusSnapshot = response?.status || {};
         lastConfigSnapshot = response?.config || {};
         renderAgentPanel(response?.status || {}, response?.config || {});
+        refreshAgentOperatingModeBanner({ preserveExisting: true }).catch(() => {});
         if (shouldAutoRefreshAgentRanking(response?.status || {}, response?.config || {})) {
           lastRankingAutoRefreshAt = Date.now();
           loadAgentSymbolRanking(true, {
@@ -2488,6 +2561,7 @@
     window.addEventListener('hashchange', syncPollingState);
 
     syncPollingState();
+    refreshAgentOperatingModeBanner({ force: true }).catch(() => {});
     if (isAgentTabActive()) {
       loadAgentStatus({ includeDetails: true }).catch(() => {});
     }

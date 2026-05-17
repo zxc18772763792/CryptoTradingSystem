@@ -35,6 +35,7 @@ from core.ai.provider_runtime_policy import (
     resolve_provider_for_runtime_capability,
 )
 from core.ai.signal_aggregator import signal_aggregator
+from core.observability.decision_trace import DecisionTrace, append_gate
 from core.backtest.cost_models import dynamic_slippage_rate, microstructure_proxies
 from core.data import data_storage
 from core.exchanges.exchange_manager import exchange_manager
@@ -72,8 +73,8 @@ from core.utils.openai_responses import (
 
 _DEFAULT_OPENAI_BASE_URL = "https://nowcoding.ai/v1"
 _DEFAULT_OPENAI_MODEL = "gpt-5.5"
-_DEFAULT_ANTHROPIC_BASE_URL = ""
-_DEFAULT_ANTHROPIC_MODEL = ""
+_DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+_DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet-latest"
 _DEFAULT_GLM_BASE_URL = ""
 _DEFAULT_GLM_MODEL = ""
 _OPENAI_FAILOVER_SCOPE = "ai_autonomous_agent"
@@ -3540,6 +3541,9 @@ class AutonomousTradingAgent:
         if has_position:
             return None
 
+        if str(cfg.get("market_state_risk_posture_applied") or "").strip().lower() == "halt_new_entries":
+            return "market_state_halt_new_entries"
+
         blocked = blocked_map.get((symbol, normalized_side))
         if blocked:
             return f"review_cooldown({symbol}:{normalized_side})"
@@ -5133,6 +5137,14 @@ class AutonomousTradingAgent:
                 "danger",
                 7,
             )
+        elif decision_reason == "market_state_halt_new_entries":
+            add_item(
+                "market_state_halt_new_entries",
+                "Market state blocks fresh entries",
+                "risk_posture=halt_new_entries",
+                "warn",
+                13,
+            )
         elif decision_reason == "review_service_instability":
             add_item(
                 "review_service_instability",
@@ -5236,12 +5248,75 @@ class AutonomousTradingAgent:
 
         selected_symbol = str((selection or {}).get("selected_symbol") or cfg.get("symbol") or "")
         configured_symbol = str((selection or {}).get("configured_symbol") or cfg.get("symbol") or "")
+        trace = DecisionTrace(
+            subject_type="autonomous_agent_decision",
+            subject_id=selected_symbol,
+            stage="autonomous_agent",
+            final_decision=action,
+            effective_score=float(decision.get("confidence") or agg_confidence or 0.0),
+            input_summary={
+                "configured_symbol": configured_symbol,
+                "selected_symbol": selected_symbol,
+                "action": action,
+                "decision_reason": decision_reason,
+                "execution_reason": execution_reason,
+            },
+        )
+        block_codes = {
+            "no_price",
+            "review_risk_halt",
+            "aggregated_risk_blocked",
+            "live_mode_blocked",
+            "submit_rejected",
+        }
+        for item in items:
+            code = str(item.get("code") or "").strip() or "diagnostic"
+            tone = str(item.get("tone") or "warn").strip().lower()
+            status = "block" if code in block_codes or tone == "danger" else ("warn" if tone == "warn" else "degraded")
+            append_gate(
+                trace,
+                code=code,
+                label=str(item.get("label") or code),
+                status=status,
+                severity=max(0, 100 - int(item.get("priority") or 99)),
+                input_value=decision_reason if code in {str(primary.get("code") or "")} else "",
+                decision_before=str(model_output.get("raw_action") or action),
+                decision_after=action,
+                reason=str(item.get("detail") or ""),
+                counterfactual_decision=str(model_output.get("raw_action") or ""),
+                source="autonomous_agent",
+            )
+        if not trace.gates:
+            append_gate(
+                trace,
+                code="decision_completed",
+                label="Decision completed",
+                status="pass",
+                severity=0,
+                input_value=action,
+                decision_after=action,
+                reason="no blocking diagnostics",
+                source="autonomous_agent",
+            )
+        trace.refresh_root_blocker()
+        if trace.root_blocker_code and action == "hold":
+            try:
+                from core.audit.gate_counterfactuals import record_gate_counterfactual  # noqa: PLC0415
+
+                record_gate_counterfactual(
+                    trace=trace.to_dict(),
+                    observed_decision=action,
+                    mode=str(cfg.get("mode") or "autonomous_agent"),
+                )
+            except Exception:
+                pass
 
         return {
             "outcome": "submitted" if bool(execution.get("submitted")) else ("hold" if action == "hold" else "blocked"),
             "primary": primary,
             "summary": summary,
             "items": items,
+            "decision_trace": trace.to_dict(),
             "action": action,
             "decision_reason_raw": decision_reason,
             "execution_reason": execution_reason,
@@ -5483,6 +5558,23 @@ class AutonomousTradingAgent:
         base_cfg["effective_min_confidence"] = float(max(float(base_cfg.get("min_confidence") or 0.0), effective_min_confidence))
         base_cfg["same_direction_max_exposure_ratio"] = float(same_direction_ratio)
         base_cfg["entry_size_scale"] = float(entry_size_scale)
+        market_state = dict(base_cfg.get("market_state_snapshot") or base_cfg.get("market_state") or {})
+        risk_posture = str(market_state.get("risk_posture") or "").strip().lower()
+        live_enforce = bool(getattr(settings, "AI_MARKET_STATE_RISK_POSTURE_LIVE_ENFORCE", False))
+        posture_enabled = bool(getattr(settings, "AI_MARKET_STATE_RISK_POSTURE_ENABLED", True))
+        mode = str(getattr(settings, "TRADING_MODE", "paper") or "paper").strip().lower()
+        if posture_enabled and risk_posture and (mode != "live" or live_enforce):
+            if risk_posture == "defensive":
+                base_cfg["effective_min_confidence"] = float(min(1.0, max(base_cfg["effective_min_confidence"], float(base_cfg.get("min_confidence") or 0.0) + 0.05)))
+                base_cfg["entry_size_scale"] = float(min(base_cfg["entry_size_scale"], 0.5))
+                base_cfg["market_state_risk_posture_applied"] = "defensive"
+            elif risk_posture == "halt_new_entries":
+                base_cfg["effective_min_confidence"] = 1.0
+                base_cfg["entry_size_scale"] = 0.25
+                base_cfg["market_state_risk_posture_applied"] = "halt_new_entries"
+                base_cfg.setdefault("risk_discipline_overrides", {})["fresh_entry_allowed"] = False
+        elif risk_posture:
+            base_cfg["market_state_risk_posture_applied"] = "advisory_only"
         return base_cfg
 
     def _update_profile(self, decision: Dict[str, Any], *, submitted: bool) -> None:

@@ -4,11 +4,46 @@ import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pandas as pd
 import pytest
 from pydantic import ValidationError
+
+
+def _candidate(*, candidate_id: str = "cand-orl", status: str = "new", metadata=None, validation_summary=None):
+    from core.research.experiment_schemas import StrategyCandidate
+
+    now = datetime.now(timezone.utc)
+    return StrategyCandidate(
+        candidate_id=candidate_id,
+        proposal_id=f"proposal-{candidate_id}",
+        experiment_id=f"experiment-{candidate_id}",
+        created_at=now,
+        strategy="MAStrategy",
+        timeframe="1h",
+        symbol="BTC/USDT",
+        params={"fast_period": 8, "slow_period": 21},
+        status=status,
+        metadata=dict(metadata or {}),
+        validation_summary=validation_summary,
+    )
+
+
+def _proposal(*, proposal_id: str = "proposal-orl", status: str = "draft"):
+    from core.ai.proposal_schemas import ResearchProposal
+
+    now = datetime.now(timezone.utc)
+    return ResearchProposal(
+        proposal_id=proposal_id,
+        created_at=now,
+        updated_at=now,
+        status=status,
+        source="hybrid",
+        thesis="Operating reality draft",
+        target_symbols=["BTC/USDT"],
+        target_timeframes=["1h"],
+    )
 
 
 def test_runtime_config_contains_ai_autonomous_agent(monkeypatch):
@@ -29,6 +64,190 @@ def test_runtime_config_contains_ai_autonomous_agent(monkeypatch):
     assert result["ai_autonomous_agent"]["provider"] == "glm"
     assert "paper_longrun_safety" in result["ai_autonomous_agent"]
     assert result["ai_autonomous_agent"]["paper_longrun_safety"]["safe_for_paper_longrun"] is False
+
+
+def test_operating_mode_endpoint_surfaces_degradations(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    monkeypatch.setattr(
+        ai_module,
+        "_build_sources_health_payload",
+        AsyncMock(
+            return_value={
+                "categories": {
+                    "macro": {
+                        "sources": {
+                            "fred_macro": {
+                                "status": "stale",
+                                "issues": ["snapshot older than ttl"],
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        ai_module.live_decision_router,
+        "get_runtime_config",
+        lambda: {
+            "enabled": True,
+            "provider": "codex",
+            "provider_requested": "claude",
+            "provider_fallback": True,
+            "providers": {"codex": {"available": True}},
+        },
+    )
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_runtime_config",
+        lambda: {"enabled": True, "mode": "execute", "allow_live": False},
+    )
+
+    result = asyncio.run(ai_module.get_operating_mode())
+
+    codes = {item["code"] for item in result["degradations"]}
+    assert "provider_fallback" in codes
+    assert "autonomous_allow_live_false" in codes
+    assert "source_macro.fred_macro" in codes
+
+
+def test_work_queue_unifies_drafts_reserve_degradations_and_agent_blocker(monkeypatch):
+    from core.ai.proposal_schemas import ProposalValidationSummary
+    from web.api import ai_research as ai_module
+
+    validation = ProposalValidationSummary(
+        computed_at=datetime.now(timezone.utc),
+        decision="reject",
+        oos_score=0.4,
+        risk_adjusted_edge=0.42,
+        outcome_type="borderline",
+        reserve_eligible=True,
+        decision_trace={
+            "root_blocker_code": "dsr_reject",
+            "root_blocker_label": "DSR rejected",
+        },
+    )
+    candidate = _candidate(
+        candidate_id="cand-queue",
+        status="live_candidate",
+        metadata={"promotion_pending_human_gate": True, "outcome_type": "borderline"},
+        validation_summary=validation,
+    )
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=300: [candidate])
+    monkeypatch.setattr(ai_module, "list_proposals", lambda app, limit=200: [_proposal()])
+    monkeypatch.setattr(ai_module, "_build_sources_health_payload", AsyncMock(return_value={"categories": {}}))
+    monkeypatch.setattr(
+        ai_module.live_decision_router,
+        "get_runtime_config",
+        lambda: {"enabled": True, "fail_open": True, "providers": {}},
+    )
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_runtime_config",
+        lambda: {"enabled": True, "mode": "execute", "allow_live": False},
+    )
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_status",
+        lambda: {
+            "last_diagnostics": {
+                "decision_trace": {
+                    "trace_id": "trace-hold",
+                    "root_blocker_code": "cooldown",
+                    "root_blocker_label": "Cooldown",
+                    "created_at": "2026-05-17T00:00:00+00:00",
+                }
+            }
+        },
+    )
+
+    result = asyncio.run(ai_module.get_ai_work_queue(request, limit=50))
+
+    types = {item["type"] for item in result["items"]}
+    assert "research_draft" in types
+    assert "human_approval" in types
+    assert "live_activation" in types
+    assert "reserve_candidate" in types
+    assert "runtime_degradation" in types
+    assert "agent_hold_root_blocker" in types
+
+
+def test_reserve_candidates_and_autonomy_handoff_endpoint(monkeypatch):
+    from core.ai.proposal_schemas import ProposalValidationSummary
+    from web.api import ai_research as ai_module
+
+    validation = ProposalValidationSummary(
+        computed_at=datetime.now(timezone.utc),
+        decision="reject",
+        outcome_type="redundant_correlated",
+        reserve_eligible=True,
+    )
+    candidate = _candidate(
+        candidate_id="cand-reserve",
+        metadata={"outcome_type": "redundant_correlated", "reserve_eligible": True},
+        validation_summary=validation,
+    )
+    registry = SimpleNamespace(save=MagicMock())
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ai_candidate_registry=registry)))
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=100: [candidate])
+    monkeypatch.setattr(ai_module, "get_candidate", lambda app, candidate_id: candidate)
+
+    reserve = asyncio.run(ai_module.get_reserve_candidates(request))
+    assert reserve["count"] == 1
+    assert reserve["items"][0]["reserve_reason"] == "redundant_correlated"
+
+    handoff = asyncio.run(ai_module.handoff_candidate_to_autonomy(request, "cand-reserve"))
+    assert handoff["next_actions"] == ["watch", "promote_paper", "request_live_approval"]
+    assert handoff["candidate"]["metadata"]["autonomy_handoff_requested"] is True
+    registry.save.assert_called_once()
+
+
+def test_performance_divergence_endpoint_reports_overfit(monkeypatch):
+    from core.ai.proposal_schemas import ProposalValidationSummary
+    from web.api import ai_research as ai_module
+
+    validation = ProposalValidationSummary(
+        computed_at=datetime.now(timezone.utc),
+        decision="paper",
+        oos_score=1.8,
+        metrics={"best": {"max_drawdown": 8.0}},
+    )
+    candidate = _candidate(candidate_id="cand-overfit", validation_summary=validation)
+    snapshot = SimpleNamespace(sharpe_ratio=0.2, max_drawdown=12.0, trade_count=40)
+
+    class _ScalarResult:
+        def all(self):
+            return [snapshot]
+
+    class _ExecuteResult:
+        def scalars(self):
+            return _ScalarResult()
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def execute(self, _query):
+            return _ExecuteResult()
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "get_candidate", lambda app, candidate_id: candidate)
+    monkeypatch.setattr(ai_module, "async_session_maker", lambda: _Session())
+
+    result = asyncio.run(ai_module.get_candidate_performance_divergence(request, "cand-overfit"))
+
+    assert result["report"]["status"] == "overfit_suspect"
+    assert result["report"]["realized"]["sharpe"] == pytest.approx(0.2)
 
 
 def test_update_autonomous_agent_runtime_config_endpoint(monkeypatch):

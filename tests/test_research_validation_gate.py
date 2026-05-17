@@ -52,6 +52,8 @@ def test_validation_gate_no_oos_cannot_reach_live_candidate() -> None:
 
     assert summary.decision != "live_candidate"
     assert summary.oos_score is None
+    assert summary.effective_sharpe_source == "in_sample"
+    assert summary.decision_trace["root_blocker_code"] == "no_oos_live_cap"
     assert any("no out-of-sample validation" in reason for reason in summary.reasons)
 
 
@@ -65,6 +67,8 @@ def test_validation_gate_failing_oos_never_reaches_paper_or_live() -> None:
 
     assert summary.decision in {"shadow", "reject"}
     assert summary.oos_score == 0.2
+    assert summary.effective_sharpe_source == "oos"
+    assert summary.decision_trace["gates"][0]["code"] == "effective_sharpe_source"
 
 
 def test_validation_gate_passing_oos_allows_live_candidate() -> None:

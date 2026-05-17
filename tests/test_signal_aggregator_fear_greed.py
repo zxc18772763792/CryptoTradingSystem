@@ -244,6 +244,7 @@ def test_signal_aggregator_derivatives_shadow_penalizes_confidence(monkeypatch):
     assert result.components["derivatives"]["shadow_only"] is True
     assert result.components["derivatives"]["effective_weight"] == pytest.approx(0.0, rel=1e-9)
     assert result.components["derivatives"]["confidence_adjustment"] == pytest.approx(-0.16, rel=1e-9)
+    assert any(g["code"] == "component_derivatives" and g["status"] == "shadow" for g in result.decision_trace["gates"])
 
 
 def test_signal_aggregator_shadow_adjustment_penalizes_long_for_history_and_basis_context():

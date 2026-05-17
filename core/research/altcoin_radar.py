@@ -469,6 +469,8 @@ def _weighted_score(values: Mapping[str, Optional[float]], weights: Mapping[str,
 
 def _sort_key_for_row(row: Mapping[str, Any], sort_by: str) -> float:
     normalized = str(sort_by or "layout").strip().lower()
+    if normalized == "priority":
+        return _priority_score(row)
     if normalized == "alert":
         return _to_float(row.get("alert_score"), 0.0)
     if normalized == "anomaly":
@@ -505,6 +507,39 @@ def _sort_key_for_row(row: Mapping[str, Any], sort_by: str) -> float:
     return _to_float(row.get("layout_score"), 0.0)
 
 
+def _priority_score(row: Mapping[str, Any]) -> float:
+    freshness = dict(row.get("freshness") or {})
+    data_quality = dict(row.get("data_quality") or {})
+    degraded = bool(data_quality.get("degraded_reason"))
+    derivatives_present = bool(
+        (row.get("derivatives_context") or {}).get("available")
+        or freshness.get("derivatives_present")
+    )
+    score = (
+        _to_float(row.get("layout_score"), 0.0) * 0.22
+        + _to_float(row.get("alert_score"), 0.0) * 0.18
+        + _to_float(row.get("ignition_score"), 0.0) * 0.18
+        + _to_float(row.get("control_score"), 0.0) * 0.12
+        + _to_float(row.get("crowding_late_score"), 0.0) * 0.10
+        + _to_float(row.get("narrative_heat_score"), 0.0) * 0.08
+        + _to_float(row.get("derivatives_heat_score"), 0.0) * 0.08
+        + (0.04 if derivatives_present else 0.0)
+    )
+    if degraded:
+        score *= 0.75
+    return _clamp01(score)
+
+
+def _next_best_action(row: Mapping[str, Any]) -> str:
+    if _priority_score(row) >= 0.68:
+        return "generate_research_proposal"
+    if _to_float(row.get("crowding_late_score"), 0.0) >= 0.70:
+        return "watch_crowding_risk"
+    if _to_float(row.get("ignition_score"), 0.0) >= 0.65:
+        return "inspect_ignition"
+    return "watch"
+
+
 def sort_rows(rows: Sequence[Mapping[str, Any]], sort_by: str = "layout") -> List[Dict[str, Any]]:
     ordered = [dict(row) for row in rows]
     ordered.sort(
@@ -519,6 +554,11 @@ def sort_rows(rows: Sequence[Mapping[str, Any]], sort_by: str = "layout") -> Lis
     out: List[Dict[str, Any]] = []
     for index, row in enumerate(ordered, start=1):
         row["rank"] = index
+        row.setdefault("scores", {})
+        if isinstance(row["scores"], dict):
+            row["scores"]["priority"] = round(_priority_score(row), 6)
+        row["priority_score"] = round(_priority_score(row), 6)
+        row["next_best_action"] = _next_best_action(row)
         out.append(row)
     return out
 

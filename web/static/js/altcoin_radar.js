@@ -78,6 +78,8 @@
     backgroundRefreshKey: '',
     backgroundRefreshPolls: 0,
     scanInFlight: false,
+    operatingModeInFlight: null,
+    operatingModeLoadedAt: 0,
   };
 
   function q(id) {
@@ -588,6 +590,60 @@
     return api;
   }
 
+  function renderOperatingModeBanner(snapshot = {}, errorText = '') {
+    const root = document.getElementById('altcoin-radar');
+    const workspace = root?.querySelector('.altcoin-radar-workspace');
+    if (!root || !workspace) return;
+    let banner = document.getElementById('altcoin-radar-operating-mode-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'altcoin-radar-operating-mode-banner';
+      banner.style.cssText = 'margin:0 0 12px;padding:10px 12px;border:1px solid rgba(94,200,255,.24);background:rgba(94,200,255,.08);border-radius:8px;color:#d8e7ff;font-size:12px;';
+      root.insertBefore(banner, workspace);
+    }
+    if (errorText) {
+      banner.textContent = `Operating Mode unavailable: ${escapeHtml(errorText)}`;
+      return;
+    }
+    const degradations = Array.isArray(snapshot.degradations) ? snapshot.degradations : [];
+    const agent = snapshot.autonomous_agent || {};
+    const coinglass = snapshot.coinglass || {};
+    const provider = agent.provider || snapshot.ai_live_decision?.provider || '--';
+    banner.innerHTML = `
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <strong>Operating Mode</strong>
+        <span>trading=${escapeHtml(snapshot.trading_mode || '--')}</span>
+        <span>agent=${escapeHtml(agent.mode || '--')}</span>
+        <span>provider=${escapeHtml(provider)}</span>
+        <span>allow_live=${agent.allow_live ? 'true' : 'false'}</span>
+        <span>derivatives=${coinglass.live_gating_enabled ? 'live' : 'shadow'}</span>
+        <span>degraded=${escapeHtml(String(degradations.length))}</span>
+      </div>`;
+  }
+
+  async function refreshOperatingModeBanner(options = {}) {
+    const now = Date.now();
+    if (!document.getElementById('altcoin-radar')) return null;
+    if (!options.force && state.operatingModeInFlight) return state.operatingModeInFlight;
+    if (!options.force && state.operatingModeLoadedAt && now - state.operatingModeLoadedAt < 60000) return null;
+    const apiFetch = requireApi();
+    const task = apiFetch('/ai/operating-mode', { timeoutMs: 20000 })
+      .then((snapshot) => {
+        state.operatingModeLoadedAt = Date.now();
+        renderOperatingModeBanner(snapshot || {});
+        return snapshot;
+      })
+      .catch((error) => {
+        renderOperatingModeBanner({}, error?.message || String(error || 'unknown'));
+        return null;
+      })
+      .finally(() => {
+        if (state.operatingModeInFlight === task) state.operatingModeInFlight = null;
+      });
+    state.operatingModeInFlight = task;
+    return task;
+  }
+
   async function loadUniverseOptions(force = false) {
     const controls = readControls();
     const cacheKey = `${controls.exchange}`;
@@ -900,7 +956,7 @@
             <td>
               <div class="altcoin-radar-row-actions">
                 <button type="button" class="btn btn-primary btn-sm" data-row-action="inspect" data-symbol="${escapeHtml(symbol)}">查看</button>
-                <button type="button" class="btn btn-sm" data-row-action="research" data-symbol="${escapeHtml(symbol)}">研究</button>
+                <button type="button" class="btn btn-sm" data-row-action="research-proposal" data-symbol="${escapeHtml(symbol)}">生成研究提案</button>
                 <button type="button" class="btn btn-sm" data-row-action="alert" data-symbol="${escapeHtml(symbol)}" data-preset-kind="${escapeHtml(defaultPreset)}">${hasDefaultAlert ? '回收' : '预警'}</button>
               </div>
             </td>
@@ -1800,6 +1856,18 @@
             selectSymbol(symbol).catch((error) => {
               if (typeof notify === 'function') notify(`查看详情失败: ${error.message}`, true);
             });
+          } else if (action === 'research-proposal') {
+            const apiFetch = requireApi();
+            apiFetch(`/altcoin/radar/${encodeURIComponent(symbol)}/research-proposal`, {
+              method: 'POST',
+            }).then((resp) => {
+              setOutput(JSON.stringify(resp, null, 2));
+              return openResearchWorkbench(symbol).then(() => resp);
+            }).then((resp) => {
+              if (typeof notify === 'function') notify(`已为 ${symbol} 生成研究提案 ${resp?.proposal_id || ''}`);
+            }).catch((error) => {
+              if (typeof notify === 'function') notify(`生成研究提案失败: ${error.message}`, true);
+            });
           } else if (action === 'research') {
             openResearchWorkbench(symbol).then(() => {
               if (typeof notify === 'function') notify(`已将 ${symbol} 带入研究工坊`);
@@ -1903,10 +1971,12 @@
     bindControls();
     renderUniverseManager();
     updateInspectorButtonState(null);
+    refreshOperatingModeBanner({ force: true }).catch(() => {});
   }
 
   async function loadAltcoinRadarTabData(force = false) {
     bindAltcoinRadarPage();
+    refreshOperatingModeBanner({ force }).catch(() => {});
     const universePromise = loadUniverseOptions(force).catch((error) => {
       console.warn('loadAltcoinRadarTabData universe bootstrap failed', error?.message || error);
     });

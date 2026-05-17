@@ -1459,35 +1459,23 @@ def _build_market_regime(
         ),
     )
 
-    if risk_level == "high" or spread_bps >= 8:
-        regime = "high_risk_chop"
-        bias = "defensive"
-    elif joint_signal >= 0.12:
-        regime = "trend_bullish"
-        bias = "bullish"
-    elif joint_signal <= -0.12:
-        regime = "trend_bearish"
-        bias = "bearish"
-    elif abs(joint_signal) <= 0.05 and total_news < 5:
-        regime = "low_info_range"
-        bias = "neutral"
-    else:
-        regime = "event_driven_mixed"
-        bias = "neutral"
+    from core.market_state.classifier import classify_market_regime
 
-    return {
-        "regime": regime,
-        "bias": bias,
-        "confidence": round(confidence, 4),
-        "risk_level": risk_level,
-        "spread_bps": round(spread_bps, 4),
-        "imbalance": round(imbalance, 4),
-        "news_bias": round(news_bias, 4),
-        "long_short_ratio": round(long_short_ratio, 6)
-        if long_short_ratio > 0
-        else None,
-        "wall_bias": round(wall_bias, 6),
-    }
+    classified = classify_market_regime(
+        risk_level=risk_level,
+        spread_bps=spread_bps,
+        imbalance=imbalance,
+        long_short_ratio=long_short_ratio,
+        wall_bias=wall_bias,
+        news_bias=news_bias,
+        total_news=total_news,
+        derivatives_ready=derivatives_ready,
+        derivatives_history_ready=derivatives_history_ready,
+        derivatives_freshness_sec=derivatives_freshness_sec,
+    )
+    classified["confidence"] = round(confidence, 4)
+    classified["wall_bias"] = round(wall_bias, 6)
+    return classified
 
 
 def _has_positive_number(value: Any) -> bool:
@@ -3866,6 +3854,25 @@ async def get_research_workbench_context(exchange: str = "binance") -> Dict[str,
     return await _get_research_workbench_context(exchange)
 
 
+@router.get("/market-state")
+async def get_market_state_snapshot(
+    exchange: str = "binance",
+    symbol: str = "BTC/USDT",
+) -> Dict[str, Any]:
+    profile = ResearchProfile(exchange=exchange, primary_symbol=_normalize_symbol(symbol))
+    module = await _build_market_state_module(profile)
+    payload = _extract_module_payload(module)
+    regime = dict(payload.get("regime") or {})
+    return {
+        "exchange": exchange,
+        "symbol": _normalize_symbol(symbol),
+        "market_state": regime,
+        "data_manifest": regime.get("data_manifest") or [],
+        "module": module,
+        "generated_at": _now_iso(),
+    }
+
+
 @router.post("/workbench/overview")
 async def run_research_workbench_overview(
     payload: ResearchWorkbenchRequest,
@@ -4019,39 +4026,27 @@ async def get_regime_calendar(
         avg_basis = _weighted_avg([(r.basis_pct, _row_weight(r)) for r in rows])
         avg_spread = _weighted_avg([(r.spread_bps, _row_weight(r)) for r in rows]) or 0.0
 
-        # Classify daily regime. A strong directional imbalance defines the
-        # regime even on wide-spread days (the trend is still the dominant
-        # fact); the wide spread is surfaced via bias="defensive" instead of
-        # masking the trend as chop. Only ambiguous days fall back to
-        # high_risk_chop when spreads are wide.
-        strong_bull = avg_imbalance >= 0.12
-        strong_bear = avg_imbalance <= -0.12
-        wide_spread = avg_spread >= 8
-
-        if strong_bull:
-            regime = "trend_bullish"
-            bias = "defensive" if wide_spread else "bullish"
-        elif strong_bear:
-            regime = "trend_bearish"
-            bias = "defensive" if wide_spread else "bearish"
-        elif wide_spread:
-            regime = "high_risk_chop"
-            bias = "defensive"
-        elif abs(avg_imbalance) <= 0.05:
-            regime = "low_info_range"
-            bias = "neutral"
-        else:
-            regime = "event_driven_mixed"
-            bias = "neutral"
-
         # A day reconstructed solely from degraded snapshots is lower-trust.
         data_quality = "degraded" if ok_count == 0 and degraded_count > 0 else "ok"
+        from core.market_state.classifier import classify_daily_regime
+
+        daily_regime = classify_daily_regime(
+            avg_imbalance=avg_imbalance,
+            avg_spread_bps=avg_spread,
+            data_quality=data_quality,
+        )
+        regime = str(daily_regime.get("regime") or "low_info_range")
+        bias = str(daily_regime.get("bias") or "neutral")
 
         calendar.append(
             {
                 "date": date_str,
                 "regime": regime,
                 "bias": bias,
+                "uncertainty": daily_regime.get("uncertainty"),
+                "risk_posture": daily_regime.get("risk_posture"),
+                "classification_margin": daily_regime.get("classification_margin"),
+                "hysteresis_state": daily_regime.get("hysteresis_state"),
                 "avg_imbalance": round(avg_imbalance, 4),
                 "avg_funding": round(avg_funding, 6)
                 if avg_funding is not None

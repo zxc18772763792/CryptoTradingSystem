@@ -53,6 +53,9 @@ from core.research.orchestrator import (
 
 router = APIRouter()
 SIGNAL_MARKET_DATA_TIMEZONE = ZoneInfo("Asia/Shanghai")
+_OPERATING_MODE_CACHE_TTL_SEC = 20.0
+_OPERATING_MODE_CACHE: Dict[str, Any] = {"payload": None, "expires_at": None}
+_OPERATING_MODE_CACHE_TASK: Optional[asyncio.Task] = None
 
 
 class AIPlannerGenerateRequest(BaseModel):
@@ -3621,6 +3624,126 @@ async def get_ai_candidates(request: Request, limit: int = 50):
     return {"items": [row.model_dump(mode="json") for row in rows], "count": len(rows)}
 
 
+@router.get("/reserve-candidates")
+async def get_reserve_candidates(request: Request, limit: int = 100):
+    ensure_ai_research_runtime_state(request.app)
+    rows = list_candidates(request.app, limit=max(1, min(int(limit), 500)))
+    reserve = []
+    for cand in rows:
+        meta = dict(getattr(cand, "metadata", {}) or {})
+        validation = getattr(cand, "validation_summary", None)
+        reserve_eligible = bool(meta.get("reserve_eligible") or getattr(validation, "reserve_eligible", False))
+        outcome_type = str(meta.get("outcome_type") or getattr(validation, "outcome_type", "") or "")
+        if reserve_eligible or outcome_type in {"redundant_correlated", "borderline"}:
+            payload = cand.model_dump(mode="json")
+            payload["reserve_reason"] = outcome_type or "reserve_eligible"
+            reserve.append(payload)
+    return {"items": reserve, "count": len(reserve)}
+
+
+@router.get("/work-queue")
+async def get_ai_work_queue(request: Request, limit: int = 100):
+    ensure_ai_research_runtime_state(request.app)
+    items: List[Dict[str, Any]] = []
+    now = datetime.now(timezone.utc).isoformat()
+    candidates = list_candidates(request.app, limit=300)
+    proposals = list_proposals(request.app, limit=200)
+
+    for proposal in proposals:
+        if str(getattr(proposal, "status", "") or "") == "draft":
+            items.append(
+                {
+                    "type": "research_draft",
+                    "id": getattr(proposal, "proposal_id", ""),
+                    "title": getattr(proposal, "thesis", "")[:120],
+                    "severity": "info",
+                    "created_at": getattr(proposal, "created_at", now),
+                    "next_action": "run_research",
+                    "source": "ai_research",
+                }
+            )
+
+    for cand in candidates:
+        meta = dict(getattr(cand, "metadata", {}) or {})
+        validation = getattr(cand, "validation_summary", None)
+        payload_base = {
+            "id": getattr(cand, "candidate_id", ""),
+            "candidate_id": getattr(cand, "candidate_id", ""),
+            "title": f"{getattr(cand, 'strategy', '')} {getattr(cand, 'symbol', '')}",
+            "created_at": getattr(cand, "created_at", now),
+            "source": "ai_research",
+            "risk_adjusted_edge": getattr(validation, "risk_adjusted_edge", None),
+        }
+        if meta.get("promotion_pending_human_gate"):
+            items.append({**payload_base, "type": "human_approval", "severity": "warn", "next_action": "human_approve"})
+        if str(getattr(cand, "status", "") or "") == "live_candidate":
+            items.append({**payload_base, "type": "live_activation", "severity": "warn", "next_action": "activate_live"})
+        outcome_type = str(meta.get("outcome_type") or getattr(validation, "outcome_type", "") or "")
+        if outcome_type in {"redundant_correlated", "borderline"} or bool(meta.get("reserve_eligible") or getattr(validation, "reserve_eligible", False)):
+            items.append({**payload_base, "type": "reserve_candidate", "severity": "info", "next_action": "watch_reserve", "outcome_type": outcome_type})
+        if validation is not None and str(getattr(validation, "decision", "") or "") == "reject" and outcome_type not in {"redundant_correlated"}:
+            trace = dict(getattr(validation, "decision_trace", {}) or {})
+            items.append(
+                {
+                    **payload_base,
+                    "type": "validation_blocked",
+                    "severity": "warn",
+                    "next_action": "inspect_root_blocker",
+                    "root_blocker_code": trace.get("root_blocker_code"),
+                    "root_blocker_label": trace.get("root_blocker_label"),
+                    "outcome_type": outcome_type,
+                }
+            )
+
+    try:
+        operating = await _get_operating_mode_payload()
+        for degradation in operating.get("degradations") or []:
+            items.append(
+                {
+                    "type": "runtime_degradation",
+                    "id": degradation.get("code"),
+                    "title": degradation.get("label"),
+                    "severity": degradation.get("severity") or "warn",
+                    "created_at": operating.get("generated_at") or now,
+                    "next_action": "inspect_operating_mode",
+                    "source": "operating_mode",
+                    "detail": degradation.get("detail"),
+                }
+            )
+    except Exception as exc:
+        logger.debug(f"work queue operating mode build failed: {exc}")
+
+    try:
+        diagnostics = dict((autonomous_trading_agent.get_status() or {}).get("last_diagnostics") or {})
+    except Exception:
+        diagnostics = {}
+    trace = dict(diagnostics.get("decision_trace") or {})
+    if trace.get("root_blocker_code"):
+        items.append(
+            {
+                "type": "agent_hold_root_blocker",
+                "id": trace.get("trace_id"),
+                "title": trace.get("root_blocker_label") or trace.get("root_blocker_code"),
+                "severity": "warn",
+                "created_at": trace.get("created_at") or now,
+                "next_action": "inspect_agent",
+                "source": "autonomous_agent",
+                "root_blocker_code": trace.get("root_blocker_code"),
+            }
+        )
+
+    severity_order = {"danger": 0, "warn": 1, "info": 2}
+    items = sorted(
+        items,
+        key=lambda item: (
+            severity_order.get(str(item.get("severity") or "info"), 3),
+            -float(item.get("risk_adjusted_edge") or 0.0),
+            str(item.get("created_at") or ""),
+        ),
+    )
+    return {"items": items[: max(1, min(int(limit), 500))], "count": len(items), "generated_at": now}
+
+
 @router.get("/candidates/pending-approvals")
 async def get_pending_approvals(request: Request):
     """Return all candidates with promotion_pending_human_gate=True."""
@@ -3635,6 +3758,50 @@ async def get_ai_candidate_endpoint(request: Request, candidate_id: str):
     ensure_ai_research_runtime_state(request.app)
     row = get_candidate(request.app, candidate_id)
     return {"candidate": row.model_dump(mode="json")}
+
+
+@router.get("/candidates/{candidate_id}/performance-divergence")
+async def get_candidate_performance_divergence(request: Request, candidate_id: str, limit: int = 100):
+    ensure_ai_research_runtime_state(request.app)
+    candidate = get_candidate(request.app, candidate_id)
+    from core.research.performance_feedback import build_performance_divergence_report
+    from sqlalchemy import select as sa_select
+
+    async with async_session_maker() as session:
+        q = (
+            sa_select(StrategyPerformanceSnapshot)
+            .where(StrategyPerformanceSnapshot.candidate_id == candidate_id)
+            .order_by(StrategyPerformanceSnapshot.snapshot_at.desc())
+            .limit(max(1, min(int(limit), 500)))
+        )
+        rows = (await session.execute(q)).scalars().all()
+    report = build_performance_divergence_report(candidate=candidate, snapshots=rows)
+    return {"candidate_id": candidate_id, "report": report.to_dict()}
+
+
+@router.post("/candidates/{candidate_id}/autonomy-handoff")
+async def handoff_candidate_to_autonomy(request: Request, candidate_id: str):
+    ensure_ai_research_runtime_state(request.app)
+    candidate = get_candidate(request.app, candidate_id)
+    meta = dict(candidate.metadata or {})
+    meta["autonomy_handoff_requested"] = True
+    meta["autonomy_mode"] = "watch"
+    meta["autonomy_handoff_at"] = datetime.now(timezone.utc).isoformat()
+    candidate.metadata = meta
+    registry = getattr(request.app.state, "ai_candidate_registry", None)
+    if registry is not None and hasattr(registry, "save"):
+        registry.save(candidate)
+    try:
+        from core.research.orchestrator import _refresh_runtime_eligibility_snapshot_safe  # noqa: PLC0415
+
+        _refresh_runtime_eligibility_snapshot_safe(reason="autonomy_handoff")
+    except Exception:
+        pass
+    return {
+        "candidate_id": candidate_id,
+        "candidate": candidate.model_dump(mode="json"),
+        "next_actions": ["watch", "promote_paper", "request_live_approval"],
+    }
 
 
 @router.delete("/candidates/{candidate_id}")
@@ -5479,6 +5646,66 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
 async def get_sources_health():
     """Return a unified health inventory for data and AI sources."""
     return await _build_sources_health_payload()
+
+
+@router.get("/operating-mode")
+async def get_operating_mode():
+    """Return the authoritative AI/runtime operating-mode snapshot."""
+    return await _get_operating_mode_payload()
+
+
+async def _build_operating_mode_payload() -> Dict[str, Any]:
+    from core.runtime.operating_mode import validate_operating_mode
+    from core.runtime.state import runtime_state
+
+    sources = await _build_sources_health_payload()
+    snapshot = validate_operating_mode(
+        live_decision_config=live_decision_router.get_runtime_config(),
+        agent_config=autonomous_trading_agent.get_runtime_config(),
+        runtime_state_snapshot=runtime_state.snapshot(),
+        source_health=sources,
+    )
+    return snapshot.to_dict()
+
+
+async def _get_operating_mode_payload(*, force: bool = False) -> Dict[str, Any]:
+    global _OPERATING_MODE_CACHE_TASK
+    now = datetime.now(timezone.utc)
+    expires_at = _OPERATING_MODE_CACHE.get("expires_at")
+    payload = _OPERATING_MODE_CACHE.get("payload")
+    if (
+        not force
+        and isinstance(payload, dict)
+        and isinstance(expires_at, datetime)
+        and expires_at > now
+    ):
+        return dict(payload)
+
+    task = _OPERATING_MODE_CACHE_TASK
+    if not force and task is not None and not task.done():
+        result = await task
+        return dict(result)
+
+    async def _runner() -> Dict[str, Any]:
+        result = await _build_operating_mode_payload()
+        _OPERATING_MODE_CACHE["payload"] = dict(result)
+        _OPERATING_MODE_CACHE["expires_at"] = datetime.now(timezone.utc) + timedelta(seconds=_OPERATING_MODE_CACHE_TTL_SEC)
+        return result
+
+    _OPERATING_MODE_CACHE_TASK = asyncio.create_task(_runner())
+    try:
+        result = await _OPERATING_MODE_CACHE_TASK
+        return dict(result)
+    finally:
+        if _OPERATING_MODE_CACHE_TASK is not None and _OPERATING_MODE_CACHE_TASK.done():
+            _OPERATING_MODE_CACHE_TASK = None
+
+
+@router.get("/gate-audit/summary")
+async def get_gate_audit_summary(limit: int = 500):
+    from core.audit.gate_counterfactuals import summarize_gate_counterfactuals
+
+    return summarize_gate_counterfactuals(limit=max(1, min(int(limit), 5000)))
 
 
 @router.get("/premium-data/status")

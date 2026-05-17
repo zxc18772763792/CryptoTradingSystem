@@ -84,6 +84,18 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "单次试跑已触发" in agent_js
     assert "已有一轮在运行，手动触发已排队" in agent_js
     assert "function selectProposal(" in ai_js
+    assert "function renderDecisionTracePanel(" in ai_js
+    assert "Root blocker:" in ai_js
+    assert "Gate ladder" in ai_js
+    assert "Operating Mode" in ai_js
+    assert "Work Queue" in ai_js
+    assert "Send to Autonomy Watch" in ai_js
+    assert "/operating-mode" in ai_js
+    assert "/work-queue" in ai_js
+    assert "/autonomy-handoff" in ai_js
+    assert "decision_trace" in agent_js
+    assert "refreshAgentOperatingModeBanner" in agent_js
+    assert "/ai/operating-mode" in agent_js
     assert "function isVirtualProposal(" in ai_js
     assert "function autoSelectCandidateForProposal(" in ai_js
     assert "function sortProposalsForWorkbench(" in ai_js

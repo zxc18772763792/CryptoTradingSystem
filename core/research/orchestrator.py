@@ -16,6 +16,7 @@ from config.settings import settings
 from config.strategy_registry import get_strategy_registry_entry
 from core.ai.proposal_schemas import ResearchProposal
 from core.ai.runtime_eligibility import refresh_runtime_eligibility_snapshot
+from core.observability.decision_trace import DecisionTrace, append_gate
 from core.backtest.common_pnl import build_common_pnl_summary
 from core.ai.research_planner import PlannerGenerateRequest, generate_research_proposal
 from core.deployment.promotion_engine import (
@@ -904,7 +905,10 @@ def _correlation_filter_candidates(
         return (family, category, str(c.symbol or ""), str(c.timeframe or ""))
 
     def _reject(c: StrategyCandidate, reason: str) -> None:
+        previous_decision = str(c.promotion.decision if c.promotion else "")
         c.metadata["correlation_filtered"] = True
+        c.metadata["outcome_type"] = "redundant_correlated"
+        c.metadata["reserve_eligible"] = True
         if c.promotion and c.promotion.decision != "reject":
             from core.research.experiment_schemas import PromotionDecision as _PD
 
@@ -916,6 +920,46 @@ def _correlation_filter_candidates(
                 created_at=_now_utc(),
             )
             c.promotion_target = None
+        if c.validation_summary is not None:
+            c.validation_summary.decision = "reject"
+            c.validation_summary.outcome_type = "redundant_correlated"
+            c.validation_summary.reserve_eligible = True
+            trace_data = dict(c.validation_summary.decision_trace or {})
+            try:
+                trace = DecisionTrace.model_validate(trace_data) if trace_data else DecisionTrace(
+                    subject_type="candidate",
+                    subject_id=str(c.candidate_id or ""),
+                    stage="correlation_filter",
+                )
+            except Exception:
+                trace = DecisionTrace(
+                    subject_type="candidate",
+                    subject_id=str(c.candidate_id or ""),
+                    stage="correlation_filter",
+                )
+            trace.subject_type = trace.subject_type or "candidate"
+            trace.subject_id = trace.subject_id or str(c.candidate_id or "")
+            trace.stage = "correlation_filter"
+            trace.final_decision = "reject"
+            append_gate(
+                trace,
+                code="correlation_redundant",
+                label="Correlation redundant",
+                status="block",
+                severity=4,
+                input_value={
+                    "correlated_with": c.metadata.get("correlated_with"),
+                    "correlation_value": c.metadata.get("correlation_value"),
+                    "duplicate_signature": c.metadata.get("duplicate_signature"),
+                },
+                threshold={"corr_threshold": corr_threshold},
+                decision_before=previous_decision,
+                decision_after="reject",
+                reason=reason,
+                counterfactual_decision=previous_decision,
+                source="correlation_filter",
+            )
+            c.validation_summary.decision_trace = trace.to_dict()
 
     curves: Dict[str, Optional[List[float]]] = {c.strategy: _get_curve(c) for c in candidates}
     accepted: List[Dict[str, Any]] = []

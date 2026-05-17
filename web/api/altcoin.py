@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -59,14 +59,14 @@ router = APIRouter()
 DEFAULT_EXCHANGE = "binance"
 DEFAULT_TIMEFRAME = "4h"
 DEFAULT_LIMIT = 30
-DEFAULT_SORT = "layout"
+DEFAULT_SORT = "priority"
 MAX_UNIVERSE_SIZE = 30
 MAX_EXPANDED_SIZE = 100
 TTL_BY_TIMEFRAME = {"1h": 120.0, "4h": 300.0, "1d": 900.0}
 # Phase 1: shorter cache for faster radar views
 TTL_BY_VIEW = {"15m": 30.0, "1h": 60.0, "4h": 300.0}
 ALLOWED_SORTS = {
-    "layout", "alert", "anomaly", "accumulation", "control", "chain", "heat",
+    "priority", "layout", "alert", "anomaly", "accumulation", "control", "chain", "heat",
     # Phase 1 new sorts
     "ignition", "continuation", "rank_jump", "crowding",
     # Phase 2 new sorts
@@ -1571,6 +1571,78 @@ async def get_altcoin_radar_detail(
         "watchlist_focus": fast_watchlist_focus,
     }
     return detail
+
+
+@router.post("/radar/{symbol}/research-proposal")
+async def create_research_proposal_from_radar(
+    request: Request,
+    symbol: str,
+    exchange: str = DEFAULT_EXCHANGE,
+    timeframe: str = DEFAULT_TIMEFRAME,
+    refresh: bool = False,
+    mode: str = "combined",
+    view: str = "",
+    universe_scope: str = "research",
+):
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    detail = await get_altcoin_radar_detail(
+        exchange=exchange,
+        timeframe=timeframe,
+        symbol=normalized_symbol,
+        refresh=refresh,
+        mode=mode,
+        view=view,
+        universe_scope=universe_scope,
+    )
+    selected = dict(detail.get("selected_row") or {})
+    action_plan = dict(detail.get("action_plan") or {})
+    scan_meta = dict(detail.get("scan_meta") or {})
+    thesis = (
+        f"Altcoin radar opportunity for {normalized_symbol}: "
+        f"priority={selected.get('priority_score', 0)} state={selected.get('signal_state') or 'watch'}"
+    )
+    from core.research.orchestrator import create_manual_proposal
+
+    proposal = create_manual_proposal(
+        request.app,
+        actor="altcoin_radar",
+        thesis=thesis,
+        symbols=[normalized_symbol],
+        timeframes=[str(scan_meta.get("timeframe") or timeframe or DEFAULT_TIMEFRAME)],
+        market_regime=str((selected.get("market_regime") or selected.get("signal_state") or "mixed")),
+        strategy_templates=[],
+        source="hybrid",
+        expected_holding_period="1d",
+        risk_hypothesis=str(action_plan.get("risk_hypothesis") or "Radar-derived opportunity requires validation before capital deployment."),
+        invalidation_rules=[
+            str(item)
+            for item in list(action_plan.get("invalidate_conditions") or action_plan.get("invalidation_rules") or [])
+            if str(item or "").strip()
+        ],
+        required_features=["ohlcv", "microstructure", "derivatives_shadow"],
+        parameter_space={},
+        notes=[
+            "created from altcoin radar",
+            f"next_best_action={selected.get('next_best_action') or 'watch'}",
+        ],
+        metadata={
+            "origin_source": "altcoin_radar",
+            "radar_score": selected.get("priority_score"),
+            "radar_lens": "priority",
+            "action_plan": action_plan,
+            "selected_row": selected,
+            "market_state_snapshot_id": selected.get("market_state_snapshot_id"),
+            "scan_meta": scan_meta,
+        },
+    )
+    return {
+        "proposal_id": proposal.proposal_id,
+        "proposal": proposal.model_dump(mode="json"),
+        "next_action": "open_ai_research_proposal",
+        "source_detail": detail,
+    }
 
 
 @router.post("/alerts/preset", dependencies=[Depends(require_sensitive_ops_permissions("manage_notifications"))])

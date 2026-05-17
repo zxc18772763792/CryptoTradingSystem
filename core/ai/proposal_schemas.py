@@ -145,6 +145,16 @@ class ProposalValidationSummary(BaseModel):
     robustness_score: Optional[float] = None  # Combined OOS + WF robustness [0, 100]
     dsr_score: Optional[float] = None      # Deflated Sharpe Ratio (multiple testing correction) [0, 1]
     wf_consistency: Optional[float] = None  # Fraction of WF folds with positive return [0, 1]
+    # Operating Reality Layer additive fields. Keep existing decision/reasons
+    # stable while exposing the structured reason chain for newer UI/API users.
+    decision_trace: Dict[str, Any] = Field(default_factory=dict)
+    effective_sharpe_source: str = ""
+    outcome_type: str = ""
+    reserve_eligible: bool = False
+    calibrated_confidence: Optional[float] = None
+    expected_edge_bps: Optional[float] = None
+    risk_adjusted_edge: Optional[float] = None
+    score_explanation: str = ""
 
 
 class ResearchProposal(BaseModel):
