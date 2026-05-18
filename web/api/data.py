@@ -1848,6 +1848,58 @@ def _download_task_retention() -> int:
     return max(100, min(raw_value, 2000))
 
 
+def _download_task_timeout_sec(payload: Optional[Dict[str, Any]] = None) -> float:
+    raw_value = float(getattr(settings, "DATA_DOWNLOAD_TASK_TIMEOUT_SEC", 1800) or 1800)
+    return max(60.0, min(raw_value, 6 * 3600.0))
+
+
+def _mark_download_task_failed(task: Dict[str, Any], message: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    task["status"] = "failed"
+    task["error"] = message
+    task["last_error"] = message
+    task["status_message"] = message
+    task["updated_at"] = now
+    task["heartbeat_at"] = now
+    if not task.get("finished_at"):
+        task["finished_at"] = now
+    if not isinstance(task.get("result"), dict):
+        task["result"] = {
+            "exchange": task.get("exchange"),
+            "symbol": task.get("symbol"),
+            "timeframe": task.get("timeframe"),
+            "count": _safe_int(task.get("downloaded_candles"), 0),
+            "error": message,
+            "start": task.get("start_time"),
+            "end": task.get("end_time"),
+        }
+    else:
+        task["result"]["error"] = task["result"].get("error") or message
+    _touch_download_task_progress(task)
+
+
+def _sync_download_task_liveness() -> None:
+    for task_id, task in list(_DOWNLOAD_TASKS.items()):
+        status = str(task.get("status") or "").strip().lower()
+        if status not in {"pending", "running"}:
+            continue
+        background_task = _DOWNLOAD_BACKGROUND_TASKS.get(task_id)
+        if background_task is None:
+            _mark_download_task_failed(task, "Download task worker is missing")
+            continue
+        if not background_task.done():
+            continue
+        message = "Download task worker stopped before reporting a result"
+        if background_task.cancelled():
+            message = "Download task worker was cancelled"
+        else:
+            with contextlib.suppress(Exception):
+                exc = background_task.exception()
+                if exc:
+                    message = str(exc)
+        _mark_download_task_failed(task, message)
+
+
 def _get_download_task_semaphore() -> asyncio.Semaphore:
     global _DOWNLOAD_TASK_SEMAPHORE
     global _DOWNLOAD_TASK_SEMAPHORE_LOOP_ID
@@ -4154,14 +4206,18 @@ async def _run_download_task(task_id: str, payload: Dict[str, Any]) -> None:
                     return
                 _apply_download_progress(live_task, progress)
 
-            result = await run_download_historical_data(
-                exchange=str(payload.get("exchange") or "binance"),
-                symbol=str(payload.get("symbol") or "BTC/USDT"),
-                timeframe=str(payload.get("timeframe") or "1h"),
-                days=int(payload.get("days") or 365),
-                start_time=payload.get("start_time"),
-                end_time=payload.get("end_time"),
-                progress_callback=_progress_callback,
+            timeout_sec = _download_task_timeout_sec(payload)
+            result = await asyncio.wait_for(
+                run_download_historical_data(
+                    exchange=str(payload.get("exchange") or "binance"),
+                    symbol=str(payload.get("symbol") or "BTC/USDT"),
+                    timeframe=str(payload.get("timeframe") or "1h"),
+                    days=int(payload.get("days") or 365),
+                    start_time=payload.get("start_time"),
+                    end_time=payload.get("end_time"),
+                    progress_callback=_progress_callback,
+                ),
+                timeout=timeout_sec,
             )
             task["result"] = result
             result_error = ""
@@ -4183,6 +4239,28 @@ async def _run_download_task(task_id: str, payload: Dict[str, Any]) -> None:
                 task["heartbeat_at"] = datetime.now(timezone.utc).isoformat()
                 task["updated_at"] = task["heartbeat_at"]
             _touch_download_task_progress(task)
+    except asyncio.TimeoutError:
+        timeout_sec = _download_task_timeout_sec(payload)
+        timeout_display_sec = max(1, int(math.ceil(timeout_sec)))
+        timeout_message = f"Download task timed out after {timeout_display_sec} seconds"
+        result = {
+            "exchange": str(payload.get("exchange") or task.get("exchange") or "binance"),
+            "symbol": str(payload.get("symbol") or task.get("symbol") or "BTC/USDT"),
+            "timeframe": str(payload.get("timeframe") or task.get("timeframe") or "1h"),
+            "count": _safe_int(task.get("downloaded_candles"), 0),
+            "error": timeout_message,
+            "timeout_sec": timeout_display_sec,
+            "start": task.get("start_time"),
+            "end": task.get("end_time"),
+        }
+        task["result"] = result
+        task["status"] = "failed"
+        task["error"] = timeout_message
+        task["last_error"] = timeout_message
+        task["status_message"] = timeout_message
+        task["updated_at"] = datetime.now(timezone.utc).isoformat()
+        task["heartbeat_at"] = task["updated_at"]
+        _touch_download_task_progress(task)
     except Exception as e:
         task["status"] = "failed"
         task["error"] = str(e)
@@ -4227,6 +4305,7 @@ def _queue_download_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         "symbol": _normalize_symbol_alias(normalize_symbol(str(payload.get("symbol") or "BTC/USDT"))),
         "timeframe": str(payload.get("timeframe") or "1h"),
         "days": int(payload.get("days") or 0),
+        "timeout_sec": int(_download_task_timeout_sec(payload)),
         "start_time": start_time.isoformat() if isinstance(start_time, datetime) else (str(start_time) if start_time else None),
         "end_time": end_time.isoformat() if isinstance(end_time, datetime) else (str(end_time) if end_time else None),
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -6208,6 +6287,7 @@ async def list_download_tasks(
     batch_id: Optional[str] = None,
     limit: int = 100,
 ):
+    _sync_download_task_liveness()
     requested_ids = {
         str(raw or "").strip()
         for raw in str(task_ids or "").split(",")
@@ -6240,6 +6320,7 @@ async def list_download_tasks(
 
 @router.get("/download/tasks/{task_id}")
 async def get_download_task(task_id: str):
+    _sync_download_task_liveness()
     task = _DOWNLOAD_TASKS.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")

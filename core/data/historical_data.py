@@ -18,6 +18,18 @@ from core.exchanges import Kline, exchange_manager
 _DOWNLOAD_REQUEST_TIMEOUT_SEC = 45.0
 _DOWNLOAD_MAX_CONSECUTIVE_ERRORS = 6
 _DOWNLOAD_RETRY_SLEEP_SEC = 2.0
+_NON_RETRYABLE_DOWNLOAD_ERROR_MARKERS = (
+    "does not have market symbol",
+    "bad symbol",
+    "symbol not found",
+    "invalid symbol",
+    "market not found",
+)
+
+
+def _is_non_retryable_download_error(error: Exception) -> bool:
+    message = str(error or "").strip().lower()
+    return any(marker in message for marker in _NON_RETRYABLE_DOWNLOAD_ERROR_MARKERS)
 
 
 @dataclass
@@ -214,6 +226,18 @@ class HistoricalDataManager:
 
             except Exception as e:
                 now = datetime.now()
+                if _is_non_retryable_download_error(e):
+                    progress.last_error = str(e)
+                    progress.status = "failed"
+                    progress.message = f"Non-retryable download error: {progress.last_error}"
+                    progress.finished_at = now
+                    progress.updated_at = now
+                    await self._emit_progress(progress_callback, progress)
+                    logger.error(f"Download non-retryable error for {task_id}: {e}")
+                    raise RuntimeError(
+                        f"{symbol} {timeframe} download failed without retry: {progress.last_error}"
+                    ) from e
+
                 progress.retry_count += 1
                 progress.consecutive_errors += 1
                 progress.last_error = str(e)

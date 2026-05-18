@@ -80,6 +80,48 @@ def _map_futures_symbol(symbol: str, default_type: str) -> str:
     return _FUTURES_SYMBOL_MAP.get(symbol, symbol)
 
 
+def _market_symbol_candidates(symbol: str) -> List[str]:
+    text = str(symbol or "").strip()
+    if not text:
+        return []
+    candidates = [text]
+    if "/" in text and ":" not in text:
+        base, quote = text.split("/", 1)
+        if base and quote:
+            candidates.append(f"{base}/{quote}:{quote}")
+    return candidates
+
+
+def _loaded_market_symbols(markets: Any) -> set[str]:
+    if not isinstance(markets, dict):
+        return set()
+    symbols = {str(key) for key in markets.keys() if key}
+    for market in markets.values():
+        if isinstance(market, dict) and market.get("symbol"):
+            symbols.add(str(market.get("symbol")))
+    return symbols
+
+
+def _resolve_futures_symbol(symbol: str, default_type: str, markets: Any = None) -> str:
+    mapped_symbol = _map_futures_symbol(symbol, default_type)
+    if str(default_type or "").lower() not in ("future", "swap") or mapped_symbol == symbol:
+        return mapped_symbol
+
+    market_symbols = _loaded_market_symbols(markets)
+    if not market_symbols:
+        return mapped_symbol
+
+    for candidate in _market_symbol_candidates(mapped_symbol):
+        if candidate in market_symbols:
+            return candidate
+
+    for candidate in _market_symbol_candidates(symbol):
+        if candidate in market_symbols:
+            return candidate
+
+    return mapped_symbol
+
+
 def _futures_price_divisor(symbol: str, mapped_symbol: str, default_type: str) -> float:
     """Normalize prices for mapped futures symbols like 1000SHIB/USDT."""
     if str(default_type or "").lower() not in ("future", "swap"):
@@ -90,6 +132,8 @@ def _futures_price_divisor(symbol: str, mapped_symbol: str, default_type: str) -
         return 1.0
     src_base, src_quote = src.split("/", 1)
     dst_base, dst_quote = dst.split("/", 1)
+    src_quote = src_quote.split(":", 1)[0]
+    dst_quote = dst_quote.split(":", 1)[0]
     if src_quote != dst_quote:
         return 1.0
     m = re.match(r"^(\d+)([A-Z0-9_]+)$", dst_base)
@@ -213,7 +257,7 @@ class BinanceConnector(BaseExchange):
     async def get_ticker(self, symbol: str) -> Ticker:
         try:
             client = await self._ensure_client()
-            mapped_symbol = _map_futures_symbol(symbol, self.config.default_type)
+            mapped_symbol = _resolve_futures_symbol(symbol, self.config.default_type, getattr(client, "markets", None))
             ticker = await client.fetch_ticker(mapped_symbol)
             divisor = _futures_price_divisor(symbol, mapped_symbol, self.config.default_type)
             def _norm_price(v: Any) -> float:
@@ -244,7 +288,7 @@ class BinanceConnector(BaseExchange):
     ) -> List[Kline]:
         try:
             client = await self._ensure_client()
-            mapped_symbol = _map_futures_symbol(symbol, self.config.default_type)
+            mapped_symbol = _resolve_futures_symbol(symbol, self.config.default_type, getattr(client, "markets", None))
             divisor = _futures_price_divisor(symbol, mapped_symbol, self.config.default_type)
             since_ms = int(since.timestamp() * 1000) if since else None
             ohlcv = await client.fetch_ohlcv(

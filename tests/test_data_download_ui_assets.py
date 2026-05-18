@@ -19,6 +19,7 @@ def test_data_download_batch_controls_and_hooks_exist():
     assert 'id="btn-download-fill-altcoin-research"' in template
     assert 'id="btn-download-fill-altcoin-watchlist"' in template
     assert 'id="btn-download-refresh-research"' in template
+    assert 'id="btn-download-refresh-tasks"' in template
     assert 'id="btn-download-clear-batch"' in template
     assert 'id="download-output"' in template
     assert 'id="download-research-refresh-status"' in template
@@ -29,6 +30,7 @@ def test_data_download_batch_controls_and_hooks_exist():
     assert "async function pollBatchDownloadTasks" in app_js
     assert "async function loadResearchUniverseRefreshStatus" in app_js
     assert "async function triggerResearchUniverseRefresh" in app_js
+    assert "async function refreshDownloadTasks" in app_js
     assert "function getDownloadDateRange()" in app_js
     assert "function getDownloadRequestedDays(" in app_js
     assert "function setDownloadBatchSymbols(" in app_js
@@ -39,6 +41,7 @@ def test_data_download_batch_controls_and_hooks_exist():
     assert "btn-download-fill-altcoin-research" in app_js
     assert "btn-download-fill-altcoin-watchlist" in app_js
     assert "btn-download-refresh-research" in app_js
+    assert "btn-download-refresh-tasks" in app_js
     assert "btn-download-clear-batch" in app_js
     assert "download-days" in app_js
     assert "/data/download/batch" in app_js
@@ -47,5 +50,9 @@ def test_data_download_batch_controls_and_hooks_exist():
     assert "/data/research/refresh/start" in app_js
     assert "/data/research/refresh/status" in app_js
     assert "/data/download/tasks?task_ids=" in app_js
+    assert "DATA_DOWNLOAD_MAX_BATCH_SYMBOLS=100" in app_js
+    assert "isDownloadPollTimeout" in app_js
+    assert "后台任务没有被取消" in app_js
+    assert "前台等待已结束" in app_js
     assert "按钮说明: 刷新体检=重扫并重新生成问题清单" in app_js
     assert "后台会按低并发顺序执行" in template

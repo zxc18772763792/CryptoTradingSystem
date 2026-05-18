@@ -165,6 +165,70 @@ class TestBinanceConnector:
         assert ticker.last == 50000.0
         assert ticker.exchange == "binance"
 
+    def test_get_klines_uses_existing_futures_market_before_1000_alias(self):
+        config = ExchangeConfig(
+            name="binance",
+            exchange_type=ExchangeType.CEX,
+            default_type="future",
+            sandbox=True,
+        )
+        connector = BinanceConnector(config)
+
+        class FakeClient:
+            markets = {
+                "TAO/USDT:USDT": {"symbol": "TAO/USDT:USDT"},
+                "1000PEPE/USDT:USDT": {"symbol": "1000PEPE/USDT:USDT"},
+            }
+
+            def __init__(self):
+                self.last_symbol = ""
+
+            async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None):
+                self.last_symbol = symbol
+                return [[1609459200000, 10.0, 11.0, 9.0, 10.5, 123.0]]
+
+        fake_client = FakeClient()
+        connector._client = fake_client
+        connector._connected = True
+
+        klines = asyncio.run(connector.get_klines("TAO/USDT", "1h"))
+
+        assert fake_client.last_symbol == "TAO/USDT:USDT"
+        assert klines[0].symbol == "TAO/USDT"
+        assert klines[0].close == 10.5
+
+    def test_get_klines_keeps_valid_1000_futures_alias_and_normalizes_price(self):
+        config = ExchangeConfig(
+            name="binance",
+            exchange_type=ExchangeType.CEX,
+            default_type="future",
+            sandbox=True,
+        )
+        connector = BinanceConnector(config)
+
+        class FakeClient:
+            markets = {
+                "PEPE/USDT:USDT": {"symbol": "PEPE/USDT:USDT"},
+                "1000PEPE/USDT:USDT": {"symbol": "1000PEPE/USDT:USDT"},
+            }
+
+            def __init__(self):
+                self.last_symbol = ""
+
+            async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None):
+                self.last_symbol = symbol
+                return [[1609459200000, 1000.0, 1200.0, 900.0, 1100.0, 123.0]]
+
+        fake_client = FakeClient()
+        connector._client = fake_client
+        connector._connected = True
+
+        klines = asyncio.run(connector.get_klines("PEPE/USDT", "1h"))
+
+        assert fake_client.last_symbol == "1000PEPE/USDT:USDT"
+        assert klines[0].symbol == "PEPE/USDT"
+        assert klines[0].close == 1.1
+
     def test_connect_failure_keeps_existing_client(self, connector, monkeypatch):
         class ExistingClient:
             def __init__(self):

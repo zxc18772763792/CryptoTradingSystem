@@ -160,6 +160,53 @@ def test_run_download_task_marks_embedded_error_as_failed(monkeypatch):
     assert task["result"]["error"] == "simulated upstream failure"
 
 
+def test_run_download_task_marks_timeout_as_failed(monkeypatch):
+    _reset_download_state()
+    task_id = "task-timeout"
+    data_api._DOWNLOAD_TASKS[task_id] = {
+        "task_id": task_id,
+        "status": "pending",
+        "exchange": "binance",
+        "symbol": "BTC/USDT",
+        "timeframe": "1h",
+        "days": 30,
+        "start_time": None,
+        "end_time": None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": None,
+        "finished_at": None,
+        "result": None,
+        "error": None,
+        **data_api._download_task_progress_defaults(),
+    }
+
+    async def fake_run_download_historical_data(**kwargs):
+        await asyncio.sleep(1.0)
+        return {"count": 1}
+
+    monkeypatch.setattr(data_api, "run_download_historical_data", fake_run_download_historical_data)
+    monkeypatch.setattr(data_api, "_download_task_timeout_sec", lambda payload=None: 0.01)
+
+    asyncio.run(
+        data_api._run_download_task(
+            task_id,
+            {
+                "exchange": "binance",
+                "symbol": "BTC/USDT",
+                "timeframe": "1h",
+                "days": 30,
+            },
+        )
+    )
+
+    task = data_api._DOWNLOAD_TASKS[task_id]
+    assert task["status"] == "failed"
+    assert "timed out" in task["error"]
+    assert task["result"]["error"] == task["error"]
+    assert task["finished_at"] is not None
+    assert task["progress"]["status"] == "failed"
+
+
 def test_run_download_task_captures_live_progress(monkeypatch):
     _reset_download_state()
     task_id = "task-progress"

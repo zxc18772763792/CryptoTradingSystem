@@ -3294,6 +3294,7 @@ if(isTimeout){
 if(!quiet)console.warn('loadResearchSymbolOptions failed',message);
 }
 }
+const DATA_DOWNLOAD_MAX_BATCH_SYMBOLS=100;
 function mapDownloadTaskStatus(status){
 const key=String(status||'').trim().toLowerCase();
 return({pending:'排队中',running:'下载中',completed:'已完成',failed:'失败',cancelled:'已取消'}[key]||'处理中');
@@ -3357,7 +3358,11 @@ if(task?.status==='failed')throw new Error(task?.error||task?.last_error||task?.
 await new Promise(r=>setTimeout(r,intervalMs));
 }
 const timeoutDetail=lastTask?`${lastTask?.symbol||taskId} ${mapDownloadTaskStatus(lastTask?.status)}${lastTask?.status_message?`：${lastTask.status_message}`:''}`:taskId;
-throw new Error(`后台下载超时: ${timeoutDetail}`);
+const err=new Error(`后台下载仍在进行，前台等待已超时: ${timeoutDetail}`);
+err.isDownloadPollTimeout=true;
+err.partialTask=lastTask;
+err.taskId=taskId;
+throw err;
 }
 async function pollBatchDownloadTasks(taskIds,{timeoutMs=25*60*1000,intervalMs=3000,onUpdate=null}={}){
 const ids=Array.from(new Set((Array.isArray(taskIds)?taskIds:[]).map(v=>String(v||'').trim()).filter(Boolean)));
@@ -3377,7 +3382,11 @@ while(Date.now()-start<timeoutMs){
   await new Promise(r=>setTimeout(r,intervalMs));
 }
 const lastSummary=lastTasks.length?lastTasks.map(task=>`${task?.symbol||task?.task_id}:${mapDownloadTaskStatus(task?.status)}`).join(' / '):`${ids.length} 个任务`;
-throw new Error(`批量下载超时: ${lastSummary}`);
+const err=new Error(`批量下载仍在后台进行，前台等待已超时: ${lastSummary}`);
+err.isDownloadPollTimeout=true;
+err.partialTasks=lastTasks;
+err.taskIds=ids;
+throw err;
 }
 function getDownloadOutputEl(){return document.getElementById('download-output');}
 function getResearchRefreshStatusEl(){return document.getElementById('download-research-refresh-status');}
@@ -3536,23 +3545,55 @@ return Math.max(1,Math.min(1200,manualDays));
 }
 function formatDownloadBatchSummary(payload,tasks=[]){
 const symbols=Array.isArray(payload?.symbols)?payload.symbols:[];
+const taskIds=Array.isArray(payload?.task_ids)?payload.task_ids:[];
 const taskRows=Array.isArray(tasks)?tasks:[];
 const pending=taskRows.filter(task=>String(task?.status||'')==='pending');
 const running=taskRows.filter(task=>String(task?.status||'')==='running');
 const completed=taskRows.filter(task=>String(task?.status||'')==='completed');
 const failed=taskRows.filter(task=>String(task?.status||'')==='failed');
+const cancelled=taskRows.filter(task=>String(task?.status||'')==='cancelled');
+const expectedCount=Math.max(symbols.length,taskIds.length,taskRows.length);
+const missing=Math.max(0,expectedCount-taskRows.length);
 const totalCount=completed.reduce((sum,task)=>sum+Number(task?.result?.count||0),0);
 const detailLines=taskRows.length?taskRows.map(task=>formatDownloadTaskLine(task)).join('\n'):'任务明细: 暂无';
 return [
   `批量下载: ${payload?.exchange||'-'} / ${payload?.timeframe||'-'}`,
   `时间范围: ${(payload?.start_time||'未指定')} -> ${(payload?.end_time||'现在')}`,
   `币种数量: ${symbols.length}`,
-  `任务结果: 排队 ${pending.length} / 下载中 ${running.length} / 完成 ${completed.length} / 失败 ${failed.length}`,
+  `任务结果: 总计 ${expectedCount} / 排队 ${pending.length} / 下载中 ${running.length} / 完成 ${completed.length} / 失败 ${failed.length} / 取消 ${cancelled.length}${missing?` / 未返回 ${missing}`:''}`,
   `累计K线: ${Number(totalCount||0).toLocaleString('zh-CN')}`,
   `${symbols.length?`Symbols: ${symbols.join(', ')}`:'Symbols: -'}`,
   detailLines,
+  `${pending.length||running.length||missing?`后台状态: 仍有 ${pending.length+running.length+missing} 个任务未完成，可稍后刷新任务状态。`:'后台状态: 全部任务已进入终态。'}`,
   `${failed.length?`失败详情: ${failed.map(task=>`${task.symbol||task.task_id}: ${task.error||'unknown error'}`).join(' | ')}`:'失败详情: 无'}`,
 ].join('\n');
+}
+function formatDownloadTaskListSummary(payload){
+const tasks=Array.isArray(payload?.tasks)?payload.tasks:[];
+const summary=payload?.summary||{};
+const detailLines=tasks.length?tasks.map(task=>formatDownloadTaskLine(task)).join('\n'):'任务明细: 暂无';
+return [
+  `下载任务状态: ${Number(payload?.count||tasks.length||0).toLocaleString('zh-CN')} 个最近任务`,
+  `任务结果: 排队 ${Number(summary.pending||0)} / 下载中 ${Number(summary.running||0)} / 完成 ${Number(summary.completed||0)} / 失败 ${Number(summary.failed||0)}`,
+  detailLines,
+].join('\n');
+}
+async function refreshDownloadTasks(btn=null){
+const downloadOut=getDownloadOutputEl();
+const prevText=btn?btn.textContent:'';
+try{
+  if(btn){btn.disabled=true;btn.textContent='刷新中...';}
+  const payload=await api('/data/download/tasks?limit=50',{timeoutMs:15000});
+  if(downloadOut)downloadOut.textContent=formatDownloadTaskListSummary(payload);
+  notify('下载任务状态已刷新');
+  return payload;
+}catch(err){
+  if(downloadOut)downloadOut.textContent=`下载任务状态刷新失败: ${err.message}`;
+  notify(`下载任务状态刷新失败: ${err.message}`,true);
+  throw err;
+}finally{
+  if(btn){btn.disabled=false;btn.textContent=prevText||'刷新下载任务';}
+}
 }
 function scheduleDataChartReload(delay=180){
 if(dataReloadTimer)clearTimeout(dataReloadTimer);
@@ -4098,6 +4139,9 @@ const d=document.getElementById('download-form');
 if(d)d.onsubmit=async e=>{
   e.preventDefault();
   const downloadOut=getDownloadOutputEl();
+  let activeDownloadMode='';
+  let activeDownloadPayload=null;
+  let activeDownloadFallback={};
   try{
     const ex=String(document.getElementById('download-exchange')?.value||'binance').trim()||'binance';
     const s=String(document.getElementById('download-symbol')?.value||'BTC/USDT').trim()||'BTC/USDT';
@@ -4105,9 +4149,19 @@ if(d)d.onsubmit=async e=>{
     const range=getDownloadDateRange();
     const days=getDownloadRequestedDays(tf,range);
     const batchSymbols=parseDownloadBatchSymbols(document.getElementById('download-symbols-batch')?.value||'',s);
+    if(batchSymbols.length>DATA_DOWNLOAD_MAX_BATCH_SYMBOLS){
+      throw new Error(`单次最多下载 ${DATA_DOWNLOAD_MAX_BATCH_SYMBOLS} 个币种，请分批提交。`);
+    }
     if(downloadOut)downloadOut.textContent=`正在创建历史下载任务...\n交易所: ${ex}\n周期: ${tf}\n币种数: ${batchSymbols.length}\n时间范围: ${range.start_time||'未指定'} -> ${range.end_time||'现在'}`;
     notify(batchSymbols.length>1?'正在创建批量历史下载任务...':'正在创建历史下载任务...');
     if(batchSymbols.length<=1){
+      activeDownloadMode='single';
+      activeDownloadFallback={
+        symbol:batchSymbols[0]||s,
+        timeframe:tf,
+        start_time:range.start_time||'未指定',
+        end_time:range.end_time||'现在',
+      };
       const parts=[
         `exchange=${encodeURIComponent(ex)}`,
         `symbol=${encodeURIComponent(batchSymbols[0]||s)}`,
@@ -4119,6 +4173,7 @@ if(d)d.onsubmit=async e=>{
       if(range.end_time)parts.push(`end_time=${encodeURIComponent(range.end_time)}`);
       const r=await api(`/data/download?${parts.join('&')}`,{method:'POST',timeoutMs:20000});
       if(r?.task_id){
+        activeDownloadPayload=r;
         if(downloadOut)downloadOut.textContent=`后台下载已启动\nTask: ${r.task_id}\n交易对: ${batchSymbols[0]||s}\n时间范围: ${range.start_time||'未指定'} -> ${range.end_time||'现在'}`;
         notify(`后台下载已启动: ${r.task_id}`);
         const task=await pollDownloadTask(r.task_id,{
@@ -4157,6 +4212,8 @@ if(d)d.onsubmit=async e=>{
       background:true,
     };
     const r=await api('/data/download/batch',{method:'POST',body:JSON.stringify(payload),timeoutMs:30000});
+    activeDownloadMode='batch';
+    activeDownloadPayload=r;
     if(downloadOut)downloadOut.textContent=[
       `批量下载任务已创建`,
       `Batch: ${r?.batch_id||'-'}`,
@@ -4177,6 +4234,28 @@ if(d)d.onsubmit=async e=>{
     const failed=tasks.filter(task=>String(task?.status||'')==='failed').length;
     notify(`批量下载完成: ${completed} 成功 / ${failed} 失败${failed?`，详见下载输出`:''}`,failed>0);
   }catch(err){
+    if(err?.isDownloadPollTimeout){
+      if(downloadOut){
+        if(activeDownloadMode==='batch'&&activeDownloadPayload){
+          const partialTasks=Array.isArray(err.partialTasks)?err.partialTasks:[];
+          downloadOut.textContent=[
+            formatDownloadBatchSummary(activeDownloadPayload,partialTasks),
+            `前台等待已结束: ${err.message}`,
+            '后台任务没有被取消，可稍后在下载任务状态里继续查看。'
+          ].join('\n');
+        }else if(err.partialTask){
+          downloadOut.textContent=[
+            formatSingleDownloadTaskSummary(err.partialTask,activeDownloadFallback),
+            `前台等待已结束: ${err.message}`,
+            '后台任务没有被取消，可稍后刷新任务状态。'
+          ].join('\n');
+        }else{
+          downloadOut.textContent=`前台等待已结束: ${err.message}`;
+        }
+      }
+      notify(err.message,true);
+      return;
+    }
     if(downloadOut)downloadOut.textContent=`下载失败: ${err.message}`;
     notify(`下载失败: ${err.message}`,true);
   }
@@ -4195,6 +4274,8 @@ if(fillAltcoinWatchlistBtn)fillAltcoinWatchlistBtn.onclick=async()=>{
 };
 const refreshResearchBtn=document.getElementById('btn-download-refresh-research');
 if(refreshResearchBtn)refreshResearchBtn.onclick=()=>triggerResearchUniverseRefresh(refreshResearchBtn);
+const refreshDownloadTasksBtn=document.getElementById('btn-download-refresh-tasks');
+if(refreshDownloadTasksBtn)refreshDownloadTasksBtn.onclick=()=>refreshDownloadTasks(refreshDownloadTasksBtn).catch(()=>{});
   const clearBatchBtn=document.getElementById('btn-download-clear-batch');
 if(clearBatchBtn)clearBatchBtn.onclick=()=>{
   const textarea=document.getElementById('download-symbols-batch');
