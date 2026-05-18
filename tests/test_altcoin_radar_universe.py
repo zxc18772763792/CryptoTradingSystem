@@ -29,3 +29,28 @@ def test_universe_meta_exposes_board_membership(tmp_path, monkeypatch):
     assert meta["board_membership"]["PEPE/USDT"] == "meme"
     assert meta["board_membership"]["ORDI/USDT"] == "ordinals"
     assert Path(meta["watchlist_storage"]).name == "altcoin_watchlist.json"
+
+
+def test_empty_persisted_watchlist_falls_back_to_defaults(tmp_path, monkeypatch):
+    storage = tmp_path / "altcoin_watchlist.json"
+    storage.write_text('{"symbols":[]}\n', encoding="utf-8")
+    monkeypatch.setattr(universe, "_WATCHLIST_STORAGE_PATH", storage)
+
+    loaded = universe.get_watchlist_symbols()
+
+    assert loaded
+    assert "ORDI/USDT" in loaded
+
+
+def test_watchlist_normalizes_rndr_to_render(tmp_path, monkeypatch):
+    storage = tmp_path / "altcoin_watchlist.json"
+    storage.write_text('{"symbols":["RNDR/USDT"]}\n', encoding="utf-8")
+    monkeypatch.setattr(universe, "_WATCHLIST_STORAGE_PATH", storage)
+
+    loaded = universe.get_watchlist_symbols()
+    meta = universe.universe_meta(["RENDER/USDT"], "watchlist")
+
+    assert "RENDER/USDT" in loaded
+    assert "RNDR/USDT" not in loaded
+    assert meta["watchlist_hit_count"] == 1
+    assert meta["board_membership"]["RENDER/USDT"] == "ai"

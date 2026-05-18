@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+import httpx
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -86,6 +87,8 @@ ALTCOIN_RULE_TYPES = {
 _ALTCOIN_SCAN_CACHE: Dict[str, Dict[str, Any]] = {}
 _ALTCOIN_SCAN_LOCKS: Dict[str, asyncio.Lock] = {}
 _ALTCOIN_SCAN_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
+_PUBLIC_MARKET_SNAPSHOT_CACHE: Dict[str, Dict[str, Any]] = {}
+_PUBLIC_MARKET_SNAPSHOT_TTL_SEC = 45.0
 
 
 class AltcoinAlertPresetRequest(BaseModel):
@@ -682,6 +685,204 @@ def _snapshot_age_seconds(value: Any) -> Optional[float]:
     return max(0.0, (_utcnow() - ts).total_seconds())
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        return float(default)
+    if pd.isna(parsed):
+        return float(default)
+    return float(parsed)
+
+
+def _pair_symbol_from_base(base: str) -> str:
+    text = str(base or "").strip().upper()
+    return f"{text}/USDT" if text else ""
+
+
+def _binance_public_symbol_key(symbol: str) -> str:
+    base = normalize_coinglass_symbol(symbol)
+    return f"{base}USDT" if base else ""
+
+
+def _match_binance_public_ticker(
+    ticker_map: Mapping[str, Mapping[str, Any]],
+    symbol: str,
+) -> Tuple[Optional[Mapping[str, Any]], float, str]:
+    direct_key = _binance_public_symbol_key(symbol)
+    if not direct_key:
+        return None, 1.0, ""
+    direct = ticker_map.get(direct_key)
+    if direct:
+        return direct, 1.0, direct_key
+
+    candidates: List[Tuple[float, str, Mapping[str, Any]]] = []
+    for key, ticker in ticker_map.items():
+        key_text = str(key or "").strip().upper()
+        if not key_text.endswith(direct_key):
+            continue
+        prefix = key_text[: -len(direct_key)]
+        if not prefix.isdigit():
+            continue
+        multiplier = _safe_float(prefix, 1.0)
+        if multiplier <= 1:
+            continue
+        candidates.append((multiplier, key_text, ticker))
+    if not candidates:
+        return None, 1.0, ""
+    multiplier, matched_key, ticker = sorted(candidates, key=lambda item: (item[0], item[1]))[0]
+    return ticker, multiplier, matched_key
+
+
+def _binance_timestamp_from_ticker(ticker: Mapping[str, Any]) -> str:
+    for key in ("closeTime", "time", "openTime"):
+        raw = ticker.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            numeric = float(raw)
+        except Exception:
+            continue
+        if numeric > 1_000_000_000_000:
+            numeric = numeric / 1000.0
+        return datetime.fromtimestamp(numeric, tz=timezone.utc).isoformat()
+    return _utcnow().isoformat()
+
+
+def _build_binance_public_market_snapshot(
+    *,
+    requested_symbol: str,
+    ticker: Mapping[str, Any],
+    divisor: float,
+    matched_symbol: str,
+    source_name: str,
+) -> Dict[str, Any]:
+    base = normalize_coinglass_symbol(requested_symbol)
+    symbol = _pair_symbol_from_base(base)
+    price_divisor = max(1.0, float(divisor or 1.0))
+
+    def _price(*keys: str) -> float:
+        for key in keys:
+            value = ticker.get(key)
+            if value not in (None, ""):
+                return _safe_float(value, 0.0) / price_divisor
+        return 0.0
+
+    last_price = _price("lastPrice", "last")
+    high_price = _price("highPrice", "high")
+    low_price = _price("lowPrice", "low")
+    bid_price = _price("bidPrice", "bid")
+    ask_price = _price("askPrice", "ask")
+    quote_volume = _safe_float(
+        ticker.get("quoteVolume")
+        or ticker.get("quote_volume")
+        or ticker.get("turnover")
+        or ticker.get("turnover_usd"),
+        0.0,
+    )
+    spread_bps = 0.0
+    mid = (bid_price + ask_price) / 2.0 if bid_price > 0 and ask_price > 0 else 0.0
+    if mid > 0 and ask_price >= bid_price:
+        spread_bps = ((ask_price - bid_price) / mid) * 10_000.0
+
+    return {
+        "symbol": symbol,
+        "raw_symbol": matched_symbol or str(ticker.get("symbol") or ""),
+        "base_symbol": base,
+        "exchange": "binance",
+        "timestamp": _binance_timestamp_from_ticker(ticker),
+        "source_name": source_name,
+        "capture_status": "ok",
+        "source_error": None,
+        "latency_ms": 0,
+        "current_price": last_price,
+        "high_price_24h": high_price,
+        "low_price_24h": low_price,
+        "bid_price": bid_price,
+        "ask_price": ask_price,
+        "spread_bps": spread_bps,
+        "quote_volume_24h": quote_volume,
+        "base_volume_24h": _safe_float(ticker.get("volume") or ticker.get("baseVolume"), 0.0),
+        "price_change_percent_24h": _safe_float(ticker.get("priceChangePercent"), 0.0),
+        "price_change_abs_24h": _safe_float(ticker.get("priceChange"), 0.0) / price_divisor,
+    }
+
+
+async def _fetch_binance_public_tickers(url: str) -> List[Dict[str, Any]]:
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        payload = response.json()
+    if isinstance(payload, list):
+        return [dict(item or {}) for item in payload if isinstance(item, Mapping)]
+    if isinstance(payload, Mapping):
+        return [dict(payload)]
+    return []
+
+
+async def _load_exchange_public_market_snapshots(
+    *,
+    exchange: str,
+    symbols: Sequence[str],
+) -> Dict[str, Dict[str, Any]]:
+    normalized_exchange = _normalize_exchange(exchange)
+    requested = _normalize_symbols(symbols)
+    if normalized_exchange != "binance" or not requested:
+        return {}
+
+    cache_key = f"{normalized_exchange}|public_ticker_24h"
+    now_ts = time.time()
+    cached = _PUBLIC_MARKET_SNAPSHOT_CACHE.get(cache_key)
+    if cached and (now_ts - float(cached.get("stored_at", 0.0))) <= _PUBLIC_MARKET_SNAPSHOT_TTL_SEC:
+        rows = dict(cached.get("rows") or {})
+    else:
+        spot_rows, futures_rows = await asyncio.gather(
+            _fetch_binance_public_tickers("https://api.binance.com/api/v3/ticker/24hr"),
+            _fetch_binance_public_tickers("https://fapi.binance.com/fapi/v1/ticker/24hr"),
+            return_exceptions=True,
+        )
+        rows = {}
+        if not isinstance(spot_rows, Exception):
+            rows["spot"] = {
+                str(item.get("symbol") or "").strip().upper(): item
+                for item in spot_rows
+                if str(item.get("symbol") or "").strip()
+            }
+        else:
+            rows["spot"] = {}
+        if not isinstance(futures_rows, Exception):
+            rows["futures"] = {
+                str(item.get("symbol") or "").strip().upper(): item
+                for item in futures_rows
+                if str(item.get("symbol") or "").strip()
+            }
+        else:
+            rows["futures"] = {}
+        _PUBLIC_MARKET_SNAPSHOT_CACHE[cache_key] = {"stored_at": now_ts, "rows": rows}
+
+    spot_map = dict(rows.get("spot") or {})
+    futures_map = dict(rows.get("futures") or {})
+    out: Dict[str, Dict[str, Any]] = {}
+    for symbol in requested:
+        ticker, divisor, matched_key = _match_binance_public_ticker(futures_map, symbol)
+        source_name = "binance_futures_ticker_24h"
+        if ticker is None:
+            ticker, divisor, matched_key = _match_binance_public_ticker(spot_map, symbol)
+            source_name = "binance_spot_ticker_24h"
+        if ticker is None:
+            continue
+        snapshot = _build_binance_public_market_snapshot(
+            requested_symbol=symbol,
+            ticker=ticker,
+            divisor=divisor,
+            matched_symbol=matched_key,
+            source_name=source_name,
+        )
+        if snapshot.get("symbol"):
+            out[str(snapshot["symbol"]).strip().upper()] = snapshot
+    return out
+
+
 def _should_overlay_coinglass_market_snapshot(snapshot: Optional[Mapping[str, Any]]) -> bool:
     if not snapshot:
         return True
@@ -1011,6 +1212,47 @@ async def _compute_scan_payload(
     else:
         market_snapshots = market_snapshot_result
 
+    fallback_targets = [symbol for symbol in symbols_used if symbol not in (market_snapshots or {})]
+    if fallback_targets:
+        try:
+            public_snapshots = await _load_exchange_public_market_snapshots(
+                exchange=exchange,
+                symbols=fallback_targets,
+            )
+        except Exception as exc:
+            public_snapshots = {}
+            if isinstance(market_snapshot_result, Exception):
+                warnings.append(f"Exchange public ticker fallback unavailable: {exc}")
+        if public_snapshots:
+            for symbol, snapshot in public_snapshots.items():
+                market_snapshots.setdefault(symbol, snapshot)
+            warnings.append(
+                f"CoinGlass market snapshot fallback: using exchange public ticker for {len(public_snapshots)} symbols."
+            )
+
+    recovered_symbols = {str(symbol or "").strip().upper() for symbol in (market_snapshots or {}).keys()}
+    if recovered_symbols:
+        recovered_kline_warnings = [
+            str(warning or "")
+            for warning in warnings
+            if any(
+                str(warning or "").strip().upper().startswith(f"{symbol} ") and "K" in str(warning or "")
+                for symbol in recovered_symbols
+            )
+        ]
+        if recovered_kline_warnings:
+            warnings = [
+                warning
+                for warning in warnings
+                if not any(
+                    str(warning or "").strip().upper().startswith(f"{symbol} ") and "K" in str(warning or "")
+                    for symbol in recovered_symbols
+                )
+            ]
+            warnings.append(
+                f"Local K-line missing for {len(recovered_kline_warnings)} symbols; using live market snapshots instead."
+            )
+
     symbols_used = _normalize_symbols(list(frames.keys()) + list(market_snapshots.keys()))
     if not symbols_used:
         return {
@@ -1055,7 +1297,10 @@ async def _compute_scan_payload(
     for symbol, snapshot in market_snapshots.items():
         if symbol not in symbols_used:
             continue
-        if _should_overlay_coinglass_market_snapshot(derivatives_map.get(symbol)):
+        if (
+            str((snapshot or {}).get("source_name") or "").strip() == "coinglass_coins_markets"
+            and _should_overlay_coinglass_market_snapshot(derivatives_map.get(symbol))
+        ):
             derivatives_map[symbol] = build_derivatives_snapshot_from_market_snapshot(snapshot)
     config_key = build_altcoin_notification_config_key(
         exchange=exchange,

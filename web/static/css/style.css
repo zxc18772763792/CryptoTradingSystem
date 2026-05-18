@@ -137,6 +137,14 @@ header h1 {
     gap: 18px;
 }
 
+/* ================================================================== *
+ * NOTE: This early generic `.research-*` block is largely SUPERSEDED   *
+ * at runtime by the higher-specificity `#research`-scoped block        *
+ * (~line 12200+, with `!important`) and the >=1761px tier added there. *
+ * Editing rules here usually has NO visible effect — change the        *
+ * `#research`-scoped block instead. Kept only to avoid regressing      *
+ * untested narrow breakpoints. Do not add new workbench layout here.   *
+ * ================================================================== */
 .research-workspace {
     display: grid;
     grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
@@ -6898,6 +6906,12 @@ input[type="radio"] {
 
 
 /* ── Regime Calendar ─────────────────────────────────────────── */
+.regime-calendar-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 60px;
+}
 .regime-day-cell {
   display: flex;
   flex-direction: column;
@@ -12565,6 +12579,40 @@ input[type="radio"] {
     max-height: 420px;
 }
 
+/* ------------------------------------------------------------------ *
+ * Authoritative large-screen tier (>=1761px).                         *
+ * No earlier workbench media query targets this range, so at 1920 the  *
+ * page previously fell through to base rules tuned for narrower wide   *
+ * screens (ultra-wide main column, few over-wide overview cards).      *
+ * These rules are the most specific + last in source for this range    *
+ * and deterministically win the cascade without touching the legacy    *
+ * duplicated rule soup below.                                          *
+ * ------------------------------------------------------------------ */
+@media (min-width: 1761px) {
+    #research .research-workspace {
+        grid-template-columns: minmax(300px, 340px) minmax(0, 1fr) !important;
+        max-width: 1680px;
+        margin-inline: auto;
+    }
+    #research .research-body-grid {
+        grid-template-columns: minmax(0, 1.5fr) minmax(380px, 0.82fr) !important;
+        gap: 22px !important;
+    }
+    #research .research-top-grid {
+        grid-template-columns: minmax(0, 1.5fr) minmax(360px, 0.8fr) !important;
+        gap: 20px !important;
+    }
+    #research .research-overview-cards {
+        grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+        gap: 16px !important;
+    }
+    #research .regime-calendar-grid {
+        display: grid !important;
+        grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+        gap: 8px;
+    }
+}
+
 @media (max-width: 1600px) {
     #research .research-body-grid {
         grid-template-columns: minmax(0, 1.42fr) minmax(320px, 0.92fr) !important;
@@ -13020,5 +13068,2157 @@ input[type="radio"] {
 
     .altcoin-radar-row-actions {
         flex-direction: column;
+    }
+}
+
+/* ===== Altcoin Radar 1920 Workstation Redesign ===== */
+@supports selector(.container:has(#altcoin-radar.active)) {
+    .container:has(#altcoin-radar.active) {
+        max-width: 1900px;
+        padding: 14px 20px 18px;
+    }
+
+    .container:has(#altcoin-radar.active) header {
+        margin-bottom: 12px;
+        padding-bottom: 12px;
+    }
+
+    .container:has(#altcoin-radar.active) .tabs {
+        margin-bottom: 14px;
+        padding-bottom: 8px;
+    }
+}
+
+#altcoin-radar {
+    --radar-bg: #0b111a;
+    --radar-panel: #111a26;
+    --radar-panel-2: #0f1722;
+    --radar-line: rgba(117, 142, 171, 0.24);
+    --radar-line-strong: rgba(126, 155, 188, 0.38);
+    --radar-text: #eef5ff;
+    --radar-muted: #91a5bd;
+    --radar-soft: #c7d6e8;
+    --radar-blue: #58a6ff;
+    --radar-green: #46d39a;
+    --radar-amber: #f5a742;
+    --radar-red: #ef6b73;
+}
+
+#altcoin-radar.active {
+    min-height: calc(100vh - 170px);
+}
+
+#altcoin-radar .altcoin-radar-workspace {
+    display: grid;
+    grid-template-columns: minmax(282px, 312px) minmax(760px, 1fr) minmax(430px, 500px);
+    gap: 16px;
+    align-items: stretch;
+    height: max(760px, calc(100vh - 166px));
+    min-height: 0;
+}
+
+#altcoin-radar .research-sidebar,
+#altcoin-radar .altcoin-radar-center,
+#altcoin-radar .altcoin-radar-inspector-rail {
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+}
+
+#altcoin-radar .research-sidebar {
+    display: block;
+    overflow: hidden;
+}
+
+#altcoin-radar .research-sticky {
+    position: static;
+    top: auto;
+}
+
+#altcoin-radar .altcoin-radar-center {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 14px;
+    overflow: hidden;
+}
+
+#altcoin-radar .altcoin-radar-inspector-rail {
+    overflow: hidden;
+}
+
+#altcoin-radar .altcoin-radar-control-card,
+#altcoin-radar .altcoin-radar-summary-card,
+#altcoin-radar .altcoin-radar-meta-card,
+#altcoin-radar .altcoin-radar-table-card,
+#altcoin-radar .altcoin-radar-inspector-card {
+    border-radius: 8px;
+    border: 1px solid var(--radar-line-strong);
+    background: linear-gradient(180deg, rgba(18, 28, 41, 0.98), rgba(11, 17, 26, 0.98));
+    box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28);
+}
+
+#altcoin-radar .altcoin-radar-control-card {
+    height: 100%;
+    padding: 14px;
+    overflow: auto;
+    scrollbar-gutter: stable;
+}
+
+#altcoin-radar .altcoin-radar-control-card::after,
+#altcoin-radar .altcoin-radar-detail-panel::before {
+    display: none;
+}
+
+#altcoin-radar .card h3 {
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--radar-line);
+    color: var(--radar-text);
+    font-size: 15px;
+    line-height: 1.2;
+}
+
+#altcoin-radar .card h3::before {
+    width: 4px;
+    height: 14px;
+    border-radius: 2px;
+    background: linear-gradient(180deg, var(--radar-amber), var(--radar-green));
+}
+
+#altcoin-radar .research-control-notes {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border-color: rgba(98, 123, 153, 0.24);
+    background: rgba(8, 13, 21, 0.54);
+    color: var(--radar-muted);
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+#altcoin-radar .altcoin-radar-control-card > .research-control-notes:first-of-type {
+    border-color: rgba(70, 211, 154, 0.24);
+    color: #bfe8d6;
+}
+
+#altcoin-radar .altcoin-radar-control-card .research-config-section {
+    margin-top: 10px;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(98, 123, 153, 0.22);
+    background: rgba(9, 15, 23, 0.58);
+}
+
+#altcoin-radar .research-config-title {
+    margin-bottom: 8px;
+    color: #dceaff;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+#altcoin-radar .form-row {
+    gap: 9px;
+}
+
+#altcoin-radar .form-group label,
+#altcoin-radar .research-checkbox-label {
+    color: #a9bbd0;
+    font-size: 11px;
+}
+
+#altcoin-radar select,
+#altcoin-radar input[type="text"] {
+    min-height: 34px;
+    border-radius: 8px;
+    border: 1px solid rgba(103, 130, 162, 0.34);
+    background: rgba(7, 12, 20, 0.9);
+    color: #e6eef9;
+}
+
+#altcoin-radar .altcoin-radar-mode-btns {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+}
+
+#altcoin-radar .altcoin-mode-btn {
+    min-height: 32px;
+    padding: 6px 5px;
+    border-radius: 8px;
+    border-color: rgba(103, 130, 162, 0.34);
+    background: rgba(9, 15, 23, 0.82);
+    color: #aebfd3;
+    font-size: 11px;
+}
+
+#altcoin-radar .altcoin-mode-btn.active {
+    border-color: rgba(88, 166, 255, 0.62);
+    background: rgba(31, 80, 130, 0.42);
+    color: #d7ebff;
+}
+
+#altcoin-radar .altcoin-radar-control-card .inline-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 10px;
+}
+
+#altcoin-radar .altcoin-radar-control-card .inline-actions .btn {
+    min-width: 0;
+    min-height: 34px;
+    padding: 7px 10px;
+}
+
+#altcoin-radar .altcoin-radar-status-note {
+    margin-top: 10px;
+    border-radius: 8px;
+    border-color: rgba(88, 166, 255, 0.28);
+    background: rgba(7, 12, 20, 0.7);
+}
+
+#altcoin-radar #altcoin-radar-universe {
+    min-height: 154px;
+    max-height: 154px;
+    padding: 6px;
+    border-radius: 8px;
+}
+
+#altcoin-radar #altcoin-radar-universe option {
+    padding: 5px 7px;
+}
+
+#altcoin-radar .altcoin-radar-watchlist-list {
+    max-height: 126px;
+    overflow: auto;
+    padding-right: 2px;
+    gap: 5px;
+}
+
+#altcoin-radar .altcoin-radar-watchlist-chip {
+    min-height: 26px;
+    border-radius: 999px;
+    padding: 4px 8px;
+    background: rgba(20, 31, 45, 0.9);
+    border-color: rgba(88, 166, 255, 0.28);
+}
+
+#altcoin-radar .altcoin-radar-watchlist-chip.is-active,
+#altcoin-radar .altcoin-radar-watchlist-chip[aria-pressed="true"] {
+    border-color: rgba(245, 167, 66, 0.7);
+    background: rgba(245, 167, 66, 0.16);
+}
+
+#altcoin-radar .altcoin-radar-top-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 300px);
+    gap: 12px;
+    align-items: stretch;
+}
+
+#altcoin-radar .altcoin-radar-summary-card,
+#altcoin-radar .altcoin-radar-meta-card {
+    padding: 14px;
+}
+
+#altcoin-radar .research-lab-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+#altcoin-radar .research-lab-header h3 {
+    margin-bottom: 0;
+}
+
+#altcoin-radar .altcoin-radar-summary-card .research-control-notes,
+#altcoin-radar .altcoin-radar-table-card .research-control-notes,
+#altcoin-radar .altcoin-radar-inspector-card > .research-lab-header .research-control-notes {
+    display: none;
+}
+
+#altcoin-radar .altcoin-radar-summary-grid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 0;
+}
+
+#altcoin-radar .altcoin-radar-summary-metric {
+    min-height: 70px;
+    padding: 10px 10px 9px;
+    border-radius: 8px;
+    border-color: rgba(103, 130, 162, 0.24);
+    background: rgba(8, 13, 21, 0.64);
+    box-shadow: none;
+}
+
+#altcoin-radar .altcoin-radar-summary-metric span {
+    color: #8ea2ba;
+    font-size: 11px;
+}
+
+#altcoin-radar .altcoin-radar-summary-metric strong {
+    margin-top: 6px;
+    color: #f4f8ff;
+    font-size: 18px;
+}
+
+#altcoin-radar .altcoin-radar-summary-metric:nth-child(5) strong {
+    color: var(--radar-amber);
+}
+
+#altcoin-radar .altcoin-radar-summary-metric:nth-child(6) strong {
+    color: #a5d5ff;
+    font-size: 15px;
+}
+
+#altcoin-radar .altcoin-radar-meta-card {
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr);
+    min-height: 0;
+}
+
+#altcoin-radar .altcoin-radar-meta-card .list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+}
+
+#altcoin-radar .altcoin-radar-meta-card .list-item,
+#altcoin-radar .altcoin-radar-detail-panel .list-item {
+    display: grid;
+    grid-template-columns: minmax(72px, 0.78fr) minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+    min-height: 0;
+    margin: 0;
+    padding: 7px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(103, 130, 162, 0.16);
+    background: rgba(7, 12, 20, 0.52);
+}
+
+#altcoin-radar .altcoin-radar-meta-card .list-item span,
+#altcoin-radar .altcoin-radar-detail-panel .list-item span {
+    min-width: 0;
+    font-size: 11px;
+    overflow-wrap: anywhere;
+}
+
+#altcoin-radar .altcoin-radar-meta-card .list-item span:last-child,
+#altcoin-radar .altcoin-radar-detail-panel .list-item span:last-child {
+    color: #dbe8f8;
+    text-align: right;
+}
+
+#altcoin-radar .altcoin-radar-warning-list {
+    margin-top: 8px;
+    display: grid;
+    gap: 6px;
+    overflow: auto;
+}
+
+#altcoin-radar .altcoin-radar-warning {
+    padding: 7px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+#altcoin-radar .altcoin-radar-table-card {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 14px;
+    overflow: hidden;
+}
+
+#altcoin-radar .altcoin-radar-table-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+    border-radius: 8px;
+    border: 1px solid rgba(103, 130, 162, 0.22);
+}
+
+#altcoin-radar .altcoin-radar-table {
+    min-width: 1110px;
+    table-layout: fixed;
+    font-size: 11px;
+}
+
+#altcoin-radar .altcoin-radar-table th,
+#altcoin-radar .altcoin-radar-table td {
+    padding: 8px 8px;
+}
+
+#altcoin-radar .altcoin-radar-table th {
+    height: 34px;
+    color: #aebfd3;
+    background: rgba(11, 17, 26, 0.98);
+}
+
+#altcoin-radar .altcoin-radar-table td {
+    height: 48px;
+}
+
+#altcoin-radar .altcoin-radar-table th:nth-child(1),
+#altcoin-radar .altcoin-radar-table td:nth-child(1) {
+    width: 52px;
+}
+
+#altcoin-radar .altcoin-radar-table th:nth-child(2),
+#altcoin-radar .altcoin-radar-table td:nth-child(2) {
+    width: 118px;
+}
+
+#altcoin-radar .altcoin-radar-table th:nth-child(n+3):nth-child(-n+8),
+#altcoin-radar .altcoin-radar-table td:nth-child(n+3):nth-child(-n+8) {
+    width: 66px;
+}
+
+#altcoin-radar .altcoin-radar-table th:nth-child(9),
+#altcoin-radar .altcoin-radar-table td:nth-child(9) {
+    width: 74px;
+}
+
+#altcoin-radar .altcoin-radar-table th:nth-child(10),
+#altcoin-radar .altcoin-radar-table td:nth-child(10) {
+    width: 82px;
+}
+
+#altcoin-radar .altcoin-radar-table th:nth-child(11),
+#altcoin-radar .altcoin-radar-table td:nth-child(11) {
+    width: 190px;
+}
+
+#altcoin-radar .altcoin-radar-table th:nth-child(12),
+#altcoin-radar .altcoin-radar-table td:nth-child(12) {
+    width: 112px;
+}
+
+#altcoin-radar .altcoin-radar-rank-chip {
+    min-width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    color: #ffd08a;
+    background: rgba(245, 167, 66, 0.12);
+}
+
+#altcoin-radar .altcoin-radar-symbol-main {
+    font-size: 13px;
+}
+
+#altcoin-radar .altcoin-radar-symbol-sub {
+    max-width: 108px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#altcoin-radar .altcoin-radar-score-badge {
+    min-width: 46px;
+    padding: 3px 6px;
+    border-radius: 7px;
+    font-size: 11px;
+}
+
+#altcoin-radar .altcoin-signal-src {
+    border-radius: 6px;
+    padding: 3px 6px;
+    font-size: 10px;
+}
+
+#altcoin-radar .altcoin-radar-tag-row {
+    gap: 5px;
+    max-height: 42px;
+    overflow: hidden;
+}
+
+#altcoin-radar .altcoin-radar-tag {
+    min-height: 22px;
+    padding: 3px 7px;
+    border-radius: 999px;
+    font-size: 10px;
+}
+
+#altcoin-radar .altcoin-radar-freshness {
+    font-size: 10px;
+    gap: 3px;
+}
+
+#altcoin-radar .altcoin-radar-row-actions {
+    display: grid;
+    grid-template-columns: repeat(3, 30px);
+    gap: 5px;
+}
+
+#altcoin-radar .altcoin-radar-row-actions .btn {
+    width: 30px;
+    min-width: 0;
+    height: 28px;
+    padding: 0;
+    border-radius: 7px;
+    font-size: 0;
+}
+
+#altcoin-radar .altcoin-radar-row-actions .btn::before {
+    font-size: 11px;
+    font-weight: 700;
+}
+
+#altcoin-radar .altcoin-radar-row-actions .btn[data-row-action="inspect"]::before {
+    content: "看";
+}
+
+#altcoin-radar .altcoin-radar-row-actions .btn[data-row-action="research-proposal"]::before {
+    content: "研";
+}
+
+#altcoin-radar .altcoin-radar-row-actions .btn[data-row-action="alert"]::before {
+    content: "警";
+}
+
+#altcoin-radar .altcoin-radar-table tbody tr:hover {
+    transform: none;
+}
+
+#altcoin-radar .altcoin-radar-table tbody tr.is-selected {
+    box-shadow: inset 3px 0 0 var(--radar-amber);
+}
+
+#altcoin-radar .altcoin-radar-inspector-card {
+    height: 100%;
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    padding: 14px;
+    overflow: hidden;
+}
+
+#altcoin-radar .altcoin-radar-inspector-card > .research-lab-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+#altcoin-radar .altcoin-radar-inspector-card > .research-lab-header .inline-actions {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px;
+}
+
+#altcoin-radar .altcoin-radar-inspector-card > .research-lab-header .btn {
+    min-width: 0;
+    min-height: 30px;
+    padding: 5px 7px;
+    border-radius: 7px;
+    font-size: 11px;
+}
+
+#altcoin-radar .altcoin-radar-inspector-empty {
+    padding: 16px 12px;
+    border-radius: 8px;
+}
+
+#altcoin-radar .altcoin-radar-inspector-shell {
+    min-height: 0;
+    overflow: auto;
+    padding-right: 4px;
+}
+
+#altcoin-radar .altcoin-radar-inspector-shell.is-hidden {
+    display: none;
+}
+
+#altcoin-radar .altcoin-radar-inspector-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    margin-bottom: 10px;
+    padding-bottom: 10px;
+}
+
+#altcoin-radar .altcoin-radar-selected-symbol {
+    font-size: 26px;
+    line-height: 1.1;
+}
+
+#altcoin-radar .altcoin-radar-score-strip {
+    width: 100%;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+}
+
+#altcoin-radar .altcoin-radar-score-pill {
+    min-height: 52px;
+    padding: 8px;
+    border-radius: 8px;
+    box-shadow: none;
+}
+
+#altcoin-radar .altcoin-radar-score-pill span {
+    font-size: 10px;
+}
+
+#altcoin-radar .altcoin-radar-score-pill strong {
+    margin-top: 4px;
+    font-size: 15px;
+}
+
+#altcoin-radar .altcoin-radar-detail-grid,
+#altcoin-radar .altcoin-radar-detail-grid-wide {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+#altcoin-radar .altcoin-radar-detail-panel {
+    padding: 11px;
+    border-radius: 8px;
+    border-color: rgba(103, 130, 162, 0.22);
+    background: rgba(7, 12, 20, 0.58);
+    box-shadow: none;
+}
+
+#altcoin-radar .altcoin-radar-panel-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    color: #e6f0ff;
+    font-size: 12px;
+}
+
+#altcoin-radar .altcoin-radar-sparkline {
+    min-height: 94px;
+}
+
+#altcoin-radar .altcoin-radar-component-list,
+#altcoin-radar .altcoin-radar-reason-list,
+#altcoin-radar .altcoin-radar-related-list {
+    gap: 6px;
+}
+
+#altcoin-radar .altcoin-radar-component,
+#altcoin-radar .altcoin-radar-reason,
+#altcoin-radar .altcoin-radar-related-btn {
+    padding: 8px 9px;
+    border-radius: 7px;
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+#altcoin-radar .altcoin-radar-component {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+}
+
+#altcoin-radar .altcoin-radar-related-btn {
+    align-items: center;
+}
+
+#altcoin-radar .altcoin-event-timeline {
+    max-height: 150px;
+}
+
+#altcoin-radar .altcoin-event-row {
+    border-radius: 6px;
+    background: rgba(9, 15, 23, 0.82);
+}
+
+#altcoin-radar #altcoin-radar-output {
+    display: none;
+}
+
+@media (max-width: 1540px) {
+    #altcoin-radar .altcoin-radar-workspace {
+        grid-template-columns: minmax(278px, 306px) minmax(0, 1fr);
+        height: auto;
+    }
+
+    #altcoin-radar .altcoin-radar-inspector-rail {
+        grid-column: 1 / -1;
+        height: auto;
+        min-height: 680px;
+    }
+
+    #altcoin-radar .altcoin-radar-inspector-card {
+        min-height: 680px;
+    }
+}
+
+@media (max-width: 980px) {
+    #altcoin-radar .altcoin-radar-workspace,
+    #altcoin-radar .altcoin-radar-top-grid {
+        grid-template-columns: minmax(0, 1fr);
+        height: auto;
+    }
+
+    #altcoin-radar .altcoin-radar-control-card,
+    #altcoin-radar .altcoin-radar-inspector-card {
+        height: auto;
+        max-height: none;
+    }
+
+    #altcoin-radar .altcoin-radar-summary-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+/* ===== Altcoin Radar Command Layout (authoritative) ===== */
+@supports selector(.container:has(#altcoin-radar.active)) {
+    .container:has(#altcoin-radar.active) {
+        max-width: 1880px;
+        padding: 14px 20px 22px;
+    }
+
+    .container:has(#altcoin-radar.active) header {
+        margin-bottom: 12px;
+        padding-bottom: 12px;
+    }
+
+    .container:has(#altcoin-radar.active) .tabs {
+        margin-bottom: 14px;
+        padding-bottom: 8px;
+    }
+}
+
+#altcoin-radar {
+    --radar-surface: rgba(16, 25, 37, 0.98);
+    --radar-surface-soft: rgba(10, 18, 29, 0.82);
+    --radar-surface-muted: rgba(8, 14, 23, 0.64);
+    --radar-border: rgba(112, 139, 171, 0.24);
+    --radar-border-strong: rgba(127, 158, 194, 0.38);
+    --radar-text-strong: #eef5ff;
+    --radar-text: #c8d8eb;
+    --radar-muted: #91a5bd;
+    --radar-blue: #58a6ff;
+    --radar-green: #46d39a;
+    --radar-amber: #f5a742;
+    --radar-red: #ef6b73;
+}
+
+#altcoin-radar.active {
+    min-height: calc(100vh - 150px);
+}
+
+#altcoin-radar .altcoin-radar-page-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 360px);
+    gap: 16px;
+    align-items: end;
+    margin-bottom: 12px;
+    padding: 0 2px;
+}
+
+#altcoin-radar .altcoin-radar-kicker {
+    margin-bottom: 4px;
+    color: var(--radar-amber);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+}
+
+#altcoin-radar .altcoin-radar-page-head h2 {
+    margin: 0;
+    color: var(--radar-text-strong);
+    font-size: 24px;
+    line-height: 1.25;
+}
+
+#altcoin-radar .altcoin-radar-page-head p,
+#altcoin-radar .altcoin-radar-page-note {
+    margin: 4px 0 0;
+    color: var(--radar-muted);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+#altcoin-radar .altcoin-radar-page-note {
+    justify-self: end;
+    max-width: 340px;
+    padding: 9px 11px;
+    border: 1px solid rgba(70, 211, 154, 0.22);
+    border-radius: 8px;
+    background: rgba(11, 32, 25, 0.46);
+    color: #bfe8d6;
+}
+
+#altcoin-radar-operating-mode-banner {
+    margin: 0 0 12px !important;
+    padding: 9px 12px !important;
+    border: 1px solid rgba(88, 166, 255, 0.24) !important;
+    border-radius: 8px !important;
+    background: rgba(9, 18, 30, 0.74) !important;
+    color: #d8e7ff !important;
+    font-size: 12px !important;
+}
+
+#altcoin-radar .altcoin-radar-workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1.48fr) minmax(390px, 0.62fr);
+    grid-template-areas:
+        "controls controls"
+        "main inspector";
+    gap: 16px;
+    align-items: start;
+    height: auto;
+    min-height: 0;
+}
+
+#altcoin-radar .research-sidebar {
+    grid-area: controls;
+    display: block;
+    height: auto;
+    min-width: 0;
+    min-height: 0;
+    overflow: visible;
+}
+
+#altcoin-radar .altcoin-radar-center {
+    grid-area: main;
+    display: grid;
+    grid-template-rows: auto minmax(480px, auto);
+    gap: 14px;
+    height: auto;
+    min-width: 0;
+    min-height: 0;
+    overflow: visible;
+}
+
+#altcoin-radar .altcoin-radar-inspector-rail {
+    grid-area: inspector;
+    position: sticky;
+    top: 10px;
+    height: auto;
+    max-height: calc(100vh - 118px);
+    min-width: 0;
+    min-height: 0;
+    overflow: visible;
+}
+
+#altcoin-radar .research-sticky {
+    position: static;
+    top: auto;
+}
+
+#altcoin-radar .altcoin-radar-control-card,
+#altcoin-radar .altcoin-radar-summary-card,
+#altcoin-radar .altcoin-radar-meta-card,
+#altcoin-radar .altcoin-radar-table-card,
+#altcoin-radar .altcoin-radar-inspector-card {
+    border: 1px solid var(--radar-border-strong);
+    border-radius: 8px;
+    background: linear-gradient(180deg, rgba(17, 28, 43, 0.98), rgba(10, 17, 27, 0.98));
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.26);
+}
+
+#altcoin-radar .card h3 {
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--radar-border);
+    color: var(--radar-text-strong);
+    font-size: 15px;
+    line-height: 1.25;
+}
+
+#altcoin-radar .card h3::before {
+    width: 4px;
+    height: 14px;
+    border-radius: 2px;
+    background: linear-gradient(180deg, var(--radar-amber), var(--radar-green));
+}
+
+#altcoin-radar .research-control-notes {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border-color: rgba(103, 130, 162, 0.22);
+    background: var(--radar-surface-muted);
+    color: var(--radar-muted);
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+#altcoin-radar .research-config-section {
+    margin-top: 0;
+    padding: 11px;
+    border: 1px solid rgba(103, 130, 162, 0.22);
+    border-radius: 8px;
+    background: rgba(8, 14, 23, 0.58);
+}
+
+#altcoin-radar .research-config-title {
+    margin-bottom: 8px;
+    color: #dceaff;
+    font-size: 12px;
+    font-weight: 800;
+    line-height: 1.35;
+}
+
+#altcoin-radar .altcoin-radar-control-card {
+    height: auto;
+    padding: 14px;
+    overflow: visible;
+}
+
+#altcoin-radar .altcoin-radar-control-card::after,
+#altcoin-radar .altcoin-radar-detail-panel::before {
+    display: none;
+}
+
+#altcoin-radar .altcoin-radar-control-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 370px);
+    gap: 14px;
+    align-items: stretch;
+}
+
+#altcoin-radar .altcoin-radar-control-head h3 {
+    margin-bottom: 0;
+}
+
+#altcoin-radar .altcoin-radar-control-intro {
+    margin-top: 8px;
+    border-color: rgba(70, 211, 154, 0.2);
+    color: #bfe8d6;
+}
+
+#altcoin-radar .altcoin-radar-status-note {
+    display: flex;
+    align-items: center;
+    margin: 0;
+    min-height: 66px;
+    border-radius: 8px;
+    border-color: rgba(88, 166, 255, 0.3);
+    background: rgba(7, 13, 22, 0.72);
+    color: #d9e9ff;
+}
+
+#altcoin-radar .altcoin-radar-control-matrix {
+    display: grid;
+    grid-template-columns: minmax(260px, 0.72fr) minmax(520px, 1.45fr) minmax(290px, 0.72fr);
+    gap: 12px;
+    margin-top: 12px;
+    align-items: start;
+}
+
+#altcoin-radar .altcoin-radar-library-grid {
+    display: grid;
+    grid-template-columns: minmax(320px, 0.82fr) minmax(0, 1.18fr);
+    gap: 12px;
+    margin-top: 12px;
+    align-items: start;
+}
+
+#altcoin-radar .altcoin-radar-advanced-drawer {
+    margin-top: 12px;
+    border: 1px solid rgba(103, 130, 162, 0.22);
+    border-radius: 8px;
+    background: rgba(8, 14, 23, 0.44);
+}
+
+#altcoin-radar .altcoin-radar-advanced-drawer > summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 42px;
+    padding: 9px 12px;
+    color: #dceaff;
+    cursor: pointer;
+    list-style-position: inside;
+}
+
+#altcoin-radar .altcoin-radar-advanced-drawer > summary span {
+    font-size: 12px;
+    font-weight: 800;
+}
+
+#altcoin-radar .altcoin-radar-advanced-drawer > summary small {
+    color: var(--radar-muted);
+    font-size: 11px;
+    font-weight: 400;
+    text-align: right;
+}
+
+#altcoin-radar .altcoin-radar-advanced-drawer[open] {
+    background: rgba(8, 14, 23, 0.62);
+}
+
+#altcoin-radar .altcoin-radar-advanced-drawer:not([open]) > .altcoin-radar-library-grid {
+    display: none !important;
+}
+
+#altcoin-radar .altcoin-radar-advanced-drawer[open] > summary {
+    border-bottom: 1px solid rgba(103, 130, 162, 0.18);
+}
+
+#altcoin-radar .altcoin-radar-advanced-drawer[open] .altcoin-radar-library-grid {
+    padding: 0 12px 12px;
+}
+
+#altcoin-radar .altcoin-radar-mode-btns {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+}
+
+#altcoin-radar .altcoin-mode-btn {
+    min-height: 34px;
+    padding: 6px 7px;
+    border: 1px solid rgba(103, 130, 162, 0.34);
+    border-radius: 8px;
+    background: rgba(9, 15, 23, 0.86);
+    color: #b8c8dc;
+    font-size: 11px;
+    line-height: 1.25;
+}
+
+#altcoin-radar .altcoin-mode-btn.active {
+    border-color: rgba(245, 167, 66, 0.62);
+    background: rgba(245, 167, 66, 0.16);
+    color: #ffe5ad;
+}
+
+#altcoin-radar .altcoin-radar-param-grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 10px;
+}
+
+#altcoin-radar .altcoin-radar-param-grid .form-group,
+#altcoin-radar .altcoin-radar-watchlist-form .form-group {
+    min-width: 0;
+}
+
+#altcoin-radar .form-group label,
+#altcoin-radar .research-checkbox-label {
+    color: #a9bbd0;
+    font-size: 11px;
+    line-height: 1.35;
+}
+
+#altcoin-radar select,
+#altcoin-radar input[type="text"] {
+    width: 100%;
+    min-width: 0;
+    min-height: 34px;
+    border-radius: 8px;
+    border: 1px solid rgba(103, 130, 162, 0.34);
+    background: rgba(7, 12, 20, 0.9);
+    color: #e6eef9;
+}
+
+#altcoin-radar .altcoin-radar-switch-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+#altcoin-radar .research-checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 26px;
+}
+
+#altcoin-radar .altcoin-radar-scan-actions,
+#altcoin-radar .altcoin-radar-watchlist-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 10px;
+}
+
+#altcoin-radar .altcoin-radar-scan-actions .btn,
+#altcoin-radar .altcoin-radar-watchlist-actions .btn,
+#altcoin-radar #btn-altcoin-radar-watchlist-add-manual {
+    min-width: 0;
+    min-height: 34px;
+    padding: 7px 10px;
+    white-space: normal;
+}
+
+#altcoin-radar .altcoin-radar-run-section .research-control-notes {
+    display: block;
+    max-height: 34px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+#altcoin-radar #altcoin-radar-cache-hint {
+    display: none;
+}
+
+#altcoin-radar #altcoin-radar-universe {
+    min-height: 172px;
+    max-height: 172px;
+    padding: 7px;
+    border-radius: 8px;
+}
+
+#altcoin-radar #altcoin-radar-universe option {
+    padding: 5px 7px;
+}
+
+#altcoin-radar .altcoin-radar-watchlist-form {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 112px;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+#altcoin-radar .altcoin-radar-watchlist-list {
+    max-height: 166px;
+    overflow: auto;
+    gap: 6px;
+    padding-right: 2px;
+}
+
+#altcoin-radar .altcoin-radar-watchlist-chip {
+    min-height: 26px;
+    border-radius: 999px;
+    border-color: rgba(88, 166, 255, 0.28);
+    background: rgba(20, 31, 45, 0.9);
+    color: #c9d8ea;
+}
+
+#altcoin-radar .altcoin-radar-watchlist-chip.is-active,
+#altcoin-radar .altcoin-radar-watchlist-chip[aria-pressed="true"] {
+    border-color: rgba(245, 167, 66, 0.68);
+    background: rgba(245, 167, 66, 0.16);
+    color: #ffe1a1;
+}
+
+#altcoin-radar .altcoin-radar-top-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+    gap: 14px;
+    align-items: start;
+}
+
+#altcoin-radar .altcoin-radar-summary-card,
+#altcoin-radar .altcoin-radar-meta-card,
+#altcoin-radar .altcoin-radar-table-card,
+#altcoin-radar .altcoin-radar-inspector-card {
+    padding: 14px;
+}
+
+#altcoin-radar .research-lab-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+#altcoin-radar .research-lab-header h3 {
+    margin-bottom: 0;
+}
+
+#altcoin-radar .altcoin-radar-summary-card .research-control-notes,
+#altcoin-radar .altcoin-radar-table-card .research-control-notes,
+#altcoin-radar .altcoin-radar-inspector-card > .research-lab-header .research-control-notes {
+    display: none;
+}
+
+#altcoin-radar .altcoin-radar-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 0;
+}
+
+#altcoin-radar .altcoin-radar-summary-metric {
+    min-height: 72px;
+    padding: 10px;
+    border-radius: 8px;
+    border-color: rgba(103, 130, 162, 0.24);
+    background: rgba(8, 13, 21, 0.66);
+    box-shadow: none;
+}
+
+#altcoin-radar .altcoin-radar-summary-metric span {
+    color: #8ea2ba;
+    font-size: 11px;
+    line-height: 1.35;
+}
+
+#altcoin-radar .altcoin-radar-summary-metric strong {
+    margin-top: 6px;
+    color: #f4f8ff;
+    font-size: 18px;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+}
+
+#altcoin-radar .altcoin-radar-summary-metric:nth-child(5) strong {
+    color: var(--radar-amber);
+}
+
+#altcoin-radar .altcoin-radar-summary-metric:nth-child(6) strong {
+    color: #a5d5ff;
+    font-size: 15px;
+}
+
+#altcoin-radar .altcoin-radar-meta-card {
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr);
+    min-height: 0;
+}
+
+#altcoin-radar .altcoin-radar-meta-card .list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    max-height: none;
+    overflow: visible;
+}
+
+#altcoin-radar .altcoin-radar-meta-card .list-item,
+#altcoin-radar .altcoin-radar-detail-panel .list-item {
+    display: grid;
+    grid-template-columns: minmax(76px, 0.78fr) minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+    min-height: 0;
+    margin: 0;
+    padding: 7px 8px;
+    border: 1px solid rgba(103, 130, 162, 0.16);
+    border-radius: 6px;
+    background: rgba(7, 12, 20, 0.52);
+}
+
+#altcoin-radar .altcoin-radar-meta-card .list-item span,
+#altcoin-radar .altcoin-radar-detail-panel .list-item span {
+    min-width: 0;
+    font-size: 11px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+#altcoin-radar .altcoin-radar-meta-card .list-item span:last-child,
+#altcoin-radar .altcoin-radar-detail-panel .list-item span:last-child {
+    color: #dbe8f8;
+    text-align: right;
+}
+
+#altcoin-radar .altcoin-radar-warning-list {
+    display: grid;
+    gap: 6px;
+    margin-top: 8px;
+    max-height: 42px;
+    overflow: auto;
+}
+
+#altcoin-radar .altcoin-radar-warning {
+    padding: 7px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+#altcoin-radar .altcoin-radar-table-card {
+    display: flex;
+    flex-direction: column;
+    min-height: 560px;
+    overflow: hidden;
+}
+
+#altcoin-radar .altcoin-radar-table-scroll {
+    flex: 1 1 auto;
+    min-height: 420px;
+    max-height: min(64vh, 720px);
+    overflow: auto;
+    border: 1px solid rgba(103, 130, 162, 0.22);
+    border-radius: 8px;
+    background: linear-gradient(180deg, rgba(12, 20, 31, 0.86), rgba(8, 14, 24, 0.92));
+}
+
+#altcoin-radar .altcoin-radar-table {
+    width: 100%;
+    min-width: 1110px;
+    table-layout: fixed;
+    border-collapse: collapse;
+    font-size: 11px;
+}
+
+#altcoin-radar .altcoin-radar-table th,
+#altcoin-radar .altcoin-radar-table td {
+    padding: 8px;
+    vertical-align: middle;
+}
+
+#altcoin-radar .altcoin-radar-table th {
+    height: 34px;
+    color: #aebfd3;
+    background: rgba(11, 17, 26, 0.98);
+}
+
+#altcoin-radar .altcoin-radar-table td {
+    height: 50px;
+}
+
+#altcoin-radar .altcoin-radar-table tbody tr:nth-child(even) {
+    background: rgba(255, 255, 255, 0.018);
+}
+
+#altcoin-radar .altcoin-radar-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.052);
+    transform: none;
+}
+
+#altcoin-radar .altcoin-radar-table tbody tr.is-selected {
+    background: linear-gradient(90deg, rgba(245, 167, 66, 0.16), rgba(245, 167, 66, 0.05));
+    box-shadow: inset 3px 0 0 var(--radar-amber);
+}
+
+#altcoin-radar .altcoin-radar-table th:nth-child(1),
+#altcoin-radar .altcoin-radar-table td:nth-child(1) {
+    width: 52px;
+}
+
+#altcoin-radar .altcoin-radar-table th:nth-child(2),
+#altcoin-radar .altcoin-radar-table td:nth-child(2) {
+    width: 122px;
+}
+
+#altcoin-radar .altcoin-radar-table th:nth-child(n+3):nth-child(-n+8),
+#altcoin-radar .altcoin-radar-table td:nth-child(n+3):nth-child(-n+8) {
+    width: 66px;
+}
+
+#altcoin-radar .altcoin-radar-table th:nth-child(9),
+#altcoin-radar .altcoin-radar-table td:nth-child(9) {
+    width: 74px;
+}
+
+#altcoin-radar .altcoin-radar-table th:nth-child(10),
+#altcoin-radar .altcoin-radar-table td:nth-child(10) {
+    width: 88px;
+}
+
+#altcoin-radar .altcoin-radar-table th:nth-child(11),
+#altcoin-radar .altcoin-radar-table td:nth-child(11) {
+    width: 190px;
+}
+
+#altcoin-radar .altcoin-radar-table th:nth-child(12),
+#altcoin-radar .altcoin-radar-table td:nth-child(12) {
+    width: 150px;
+}
+
+#altcoin-radar .altcoin-radar-rank-chip {
+    min-width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    color: #ffd08a;
+    background: rgba(245, 167, 66, 0.12);
+}
+
+#altcoin-radar .altcoin-radar-symbol-main {
+    font-size: 13px;
+}
+
+#altcoin-radar .altcoin-radar-symbol-sub {
+    max-width: 108px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#altcoin-radar .altcoin-radar-score-badge {
+    min-width: 46px;
+    padding: 3px 6px;
+    border-radius: 7px;
+    font-size: 11px;
+}
+
+#altcoin-radar .altcoin-signal-src {
+    border-radius: 6px;
+    padding: 3px 6px;
+    font-size: 10px;
+}
+
+#altcoin-radar .altcoin-radar-tag-row {
+    gap: 5px;
+    max-height: 42px;
+    overflow: hidden;
+}
+
+#altcoin-radar .altcoin-radar-tag {
+    min-height: 22px;
+    padding: 3px 7px;
+    border-radius: 999px;
+    font-size: 10px;
+    line-height: 1.3;
+}
+
+#altcoin-radar .altcoin-radar-freshness {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    font-size: 10px;
+}
+
+#altcoin-radar .altcoin-radar-row-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(42px, 1fr));
+    gap: 5px;
+}
+
+#altcoin-radar .altcoin-radar-row-actions .btn {
+    width: auto;
+    min-width: 0;
+    height: 28px;
+    padding: 0 6px;
+    border-radius: 7px;
+    font-size: 11px;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+#altcoin-radar .altcoin-radar-row-actions .btn::before {
+    content: none !important;
+}
+
+#altcoin-radar .altcoin-radar-inspector-card {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    max-height: calc(100vh - 118px);
+    min-height: 560px;
+    overflow: hidden;
+}
+
+#altcoin-radar .altcoin-radar-inspector-card > .research-lab-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+#altcoin-radar .altcoin-radar-inspector-card > .research-lab-header .inline-actions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+    gap: 6px;
+}
+
+#altcoin-radar .altcoin-radar-inspector-card > .research-lab-header .btn {
+    min-width: 0;
+    min-height: 30px;
+    padding: 5px 7px;
+    border-radius: 7px;
+    font-size: 11px;
+    line-height: 1.25;
+    white-space: normal;
+}
+
+#altcoin-radar .altcoin-radar-inspector-empty {
+    padding: 16px 12px;
+    border-radius: 8px;
+}
+
+#altcoin-radar .altcoin-radar-inspector-shell {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 4px;
+}
+
+#altcoin-radar .altcoin-radar-inspector-shell.is-hidden {
+    display: none;
+}
+
+#altcoin-radar .altcoin-radar-inspector-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    margin-bottom: 10px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid rgba(58, 82, 109, 0.38);
+}
+
+#altcoin-radar .altcoin-radar-selected-symbol {
+    font-size: 26px;
+    line-height: 1.1;
+}
+
+#altcoin-radar .altcoin-radar-score-strip {
+    width: 100%;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+    min-width: 0;
+}
+
+#altcoin-radar .altcoin-radar-score-pill {
+    min-height: 52px;
+    padding: 8px;
+    border-radius: 8px;
+    box-shadow: none;
+}
+
+#altcoin-radar .altcoin-radar-score-pill span {
+    font-size: 10px;
+}
+
+#altcoin-radar .altcoin-radar-score-pill strong {
+    margin-top: 4px;
+    font-size: 15px;
+}
+
+#altcoin-radar .altcoin-radar-detail-grid,
+#altcoin-radar .altcoin-radar-detail-grid-wide {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+#altcoin-radar .altcoin-radar-detail-panel {
+    padding: 11px;
+    border-radius: 8px;
+    border-color: rgba(103, 130, 162, 0.22);
+    background: rgba(7, 12, 20, 0.58);
+    box-shadow: none;
+}
+
+#altcoin-radar .altcoin-radar-panel-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    color: #e6f0ff;
+    font-size: 12px;
+}
+
+#altcoin-radar .altcoin-radar-sparkline {
+    min-height: 94px;
+}
+
+#altcoin-radar .altcoin-radar-component-list,
+#altcoin-radar .altcoin-radar-reason-list,
+#altcoin-radar .altcoin-radar-related-list {
+    gap: 6px;
+}
+
+#altcoin-radar .altcoin-radar-component,
+#altcoin-radar .altcoin-radar-reason,
+#altcoin-radar .altcoin-radar-related-btn {
+    padding: 8px 9px;
+    border: 1px solid rgba(52, 76, 101, 0.38);
+    border-radius: 7px;
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+#altcoin-radar .altcoin-radar-component {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+}
+
+#altcoin-radar .altcoin-radar-related-btn {
+    align-items: center;
+}
+
+#altcoin-radar .altcoin-event-timeline {
+    max-height: 150px;
+}
+
+#altcoin-radar .altcoin-event-row {
+    border-radius: 6px;
+    background: rgba(9, 15, 23, 0.82);
+}
+
+#altcoin-radar #altcoin-radar-output {
+    display: none;
+}
+
+@media (max-width: 1500px) {
+    #altcoin-radar .altcoin-radar-workspace {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-areas:
+            "controls"
+            "main"
+            "inspector";
+    }
+
+    #altcoin-radar .altcoin-radar-inspector-rail {
+        position: static;
+        max-height: none;
+    }
+
+    #altcoin-radar .altcoin-radar-inspector-card {
+        max-height: none;
+    }
+
+    #altcoin-radar .altcoin-radar-control-matrix {
+        grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.2fr);
+    }
+
+    #altcoin-radar .altcoin-radar-run-section {
+        grid-column: 1 / -1;
+    }
+
+    #altcoin-radar .altcoin-radar-top-grid {
+        grid-template-columns: minmax(0, 1fr) minmax(300px, 0.46fr);
+    }
+}
+
+@media (max-width: 1060px) {
+    #altcoin-radar .altcoin-radar-page-head,
+    #altcoin-radar .altcoin-radar-control-head,
+    #altcoin-radar .altcoin-radar-control-matrix,
+    #altcoin-radar .altcoin-radar-library-grid,
+    #altcoin-radar .altcoin-radar-top-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    #altcoin-radar .altcoin-radar-page-note {
+        justify-self: stretch;
+        max-width: none;
+    }
+
+    #altcoin-radar .altcoin-radar-param-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    #altcoin-radar .altcoin-radar-summary-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 720px) {
+    #altcoin-radar .altcoin-radar-page-head h2 {
+        font-size: 21px;
+    }
+
+    #altcoin-radar .altcoin-radar-mode-btns,
+    #altcoin-radar .altcoin-radar-param-grid,
+    #altcoin-radar .altcoin-radar-watchlist-form,
+    #altcoin-radar .altcoin-radar-summary-grid,
+    #altcoin-radar .altcoin-radar-meta-card .list {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    #altcoin-radar .altcoin-radar-scan-actions,
+    #altcoin-radar .altcoin-radar-watchlist-actions {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    #altcoin-radar .altcoin-radar-table-card {
+        min-height: 500px;
+    }
+
+    #altcoin-radar .altcoin-radar-table-scroll {
+        min-height: 360px;
+        max-height: 62vh;
+    }
+
+    #altcoin-radar .altcoin-radar-inspector-card {
+        min-height: 520px;
+    }
+}
+
+/* ===== AI autonomous agent 1920x1080 command layout ===== */
+body:has(#ai-agent.active) .container {
+    max-width: 1840px;
+}
+
+#ai-agent {
+    --ai-agent-main-gap: 14px;
+    --ai-agent-decision-panel-height: clamp(460px, 44vh, 540px);
+    --ai-agent-panel-radius: 8px;
+}
+
+#ai-agent.active {
+    width: min(calc(100% - 32px), 1840px);
+    margin: 0 auto 28px;
+}
+
+#ai-agent .ai-agent-cockpit,
+#ai-agent .ai-workspace-section-agent,
+#ai-agent .ai-agent-command-card,
+#ai-agent .ai-agent-panel,
+#ai-agent .ai-agent-runtime-card,
+#ai-agent .ai-live-signals-card,
+#ai-agent .ai-agent-cockpit-stat,
+#ai-agent .ai-top-intro-box,
+#ai-agent .ai-agent-review-summary,
+#ai-agent .ai-agent-review-history-shell,
+#ai-agent .ai-agent-review-card {
+    border-radius: var(--ai-agent-panel-radius) !important;
+}
+
+#ai-agent .ai-agent-command-card::after {
+    display: none;
+}
+
+#ai-agent .ai-runtime-summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+#ai-agent .ai-runtime-chip {
+    min-height: 28px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    line-height: 1.25;
+}
+
+#ai-agent .ai-agent-cockpit {
+    position: relative;
+    margin-bottom: 14px;
+    padding: 18px 20px;
+    border-color: rgba(45, 212, 191, 0.22);
+    background:
+        linear-gradient(90deg, rgba(45, 212, 191, 0.16), transparent 1px),
+        linear-gradient(135deg, rgba(9, 18, 28, 0.99), rgba(11, 20, 33, 0.98));
+    box-shadow: 0 16px 34px rgba(3, 9, 18, 0.22);
+}
+
+#ai-agent .ai-agent-cockpit-title {
+    white-space: normal;
+    letter-spacing: 0;
+}
+
+#ai-agent .ai-agent-cockpit-desc {
+    max-width: 58ch;
+    line-height: 1.62;
+}
+
+#ai-agent .ai-agent-cockpit-flow {
+    gap: 8px;
+}
+
+#ai-agent .ai-agent-cockpit-flow-step {
+    position: relative;
+    min-height: 30px;
+    padding: 0 11px;
+    border-radius: 6px;
+    background: rgba(8, 17, 28, 0.72);
+}
+
+#ai-agent .ai-agent-cockpit-flow-step::before {
+    width: 6px;
+    height: 6px;
+    box-shadow: none;
+}
+
+#ai-agent .ai-agent-cockpit-stat {
+    min-height: 92px;
+    padding: 12px;
+    gap: 7px;
+    background: linear-gradient(180deg, rgba(12, 23, 36, 0.94), rgba(8, 16, 27, 0.98));
+}
+
+#ai-agent .ai-agent-cockpit-stat-label {
+    letter-spacing: 0.06em;
+}
+
+#ai-agent .ai-agent-cockpit-stat strong {
+    font-size: 16px;
+    letter-spacing: 0;
+}
+
+#ai-agent .ai-workspace-stack {
+    margin-top: 0;
+    gap: 12px;
+}
+
+#ai-agent .ai-workspace-section-agent {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
+#ai-agent .ai-workspace-section-head {
+    padding: 11px 12px;
+    border: 1px solid rgba(126, 146, 178, 0.14);
+    border-radius: var(--ai-agent-panel-radius);
+    background: linear-gradient(180deg, rgba(10, 18, 30, 0.86), rgba(8, 15, 25, 0.92));
+}
+
+#ai-agent .ai-agent-workspace-note {
+    max-width: 360px;
+    padding: 9px 11px;
+    border-radius: 6px;
+    background: rgba(7, 20, 29, 0.44);
+}
+
+#ai-agent .ai-agent-command-card {
+    padding: 14px 16px !important;
+    gap: 12px;
+    border-color: rgba(45, 212, 191, 0.18);
+    background:
+        linear-gradient(180deg, rgba(12, 25, 34, 0.98), rgba(8, 16, 27, 0.99));
+    box-shadow: 0 16px 34px rgba(3, 10, 16, 0.22);
+}
+
+#ai-agent .ai-agent-command-hero {
+    align-items: center;
+    padding-bottom: 10px;
+}
+
+#ai-agent .ai-agent-command-side {
+    align-self: center;
+    min-width: min(100%, 360px);
+    padding: 0;
+    border-left: 0;
+}
+
+#ai-agent .ai-agent-command-tags {
+    display: none;
+}
+
+#ai-agent .ai-agent-command-links {
+    gap: 6px;
+}
+
+#ai-agent .ai-agent-command-link {
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: 6px;
+}
+
+#ai-agent .ai-agent-intent-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+}
+
+#ai-agent .ai-agent-command-card .ai-top-intro-box {
+    position: relative;
+    min-height: 76px;
+    padding: 10px 12px;
+    background: rgba(8, 18, 28, 0.72);
+    border-color: rgba(96, 165, 250, 0.12);
+}
+
+#ai-agent .ai-agent-command-card .ai-top-intro-box::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: linear-gradient(180deg, #2dd4bf, #60a5fa);
+}
+
+#ai-agent .ai-top-intro-box-title {
+    margin-bottom: 4px;
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+#ai-agent .ai-agent-command-card .ai-top-intro-box-desc {
+    font-size: 11px;
+    line-height: 1.52;
+}
+
+#ai-agent .ai-agent-control-grid {
+    grid-template-columns: minmax(260px, 0.86fr) minmax(240px, 0.7fr) minmax(320px, 1.04fr);
+    gap: 10px;
+}
+
+#ai-agent #ai-agent-card {
+    grid-row: auto;
+}
+
+#ai-agent .ai-agent-panel-status,
+#ai-agent .ai-agent-panel-single,
+#ai-agent .ai-agent-panel-diagnostics,
+#ai-agent .ai-agent-panel-ranking,
+#ai-agent .ai-agent-panel-journal,
+#ai-agent .ai-agent-panel-review {
+    padding: 12px 14px;
+}
+
+#ai-agent .ai-agent-panel-status,
+#ai-agent .ai-agent-panel-single,
+#ai-agent .ai-agent-panel-diagnostics {
+    min-height: 188px;
+}
+
+#ai-agent .ai-agent-panel-status .ai-auto-step-body,
+#ai-agent .ai-agent-panel-single .ai-auto-step-body {
+    padding-left: 34px;
+    gap: 9px;
+}
+
+#ai-agent .ai-agent-panel-diagnostics {
+    overflow: hidden;
+}
+
+#ai-agent .ai-agent-panel-diagnostics .ai-agent-reasons-box {
+    max-height: 118px;
+    overflow-y: auto;
+    padding-right: 2px;
+    scrollbar-gutter: stable;
+}
+
+#ai-agent #ai-agent-operating-mode-banner {
+    grid-column: 1 / -1;
+    margin: 0 !important;
+    padding: 8px 10px !important;
+    border-radius: 6px !important;
+    border-color: rgba(96, 165, 250, 0.16) !important;
+    background: rgba(8, 18, 31, 0.66) !important;
+    color: #cfe0f3 !important;
+    font-size: 11px !important;
+    line-height: 1.45 !important;
+}
+
+#ai-agent #ai-agent-operating-mode-banner > div {
+    gap: 7px 14px !important;
+}
+
+#ai-agent .ai-auto-step-title,
+#ai-agent .ai-agent-section-title {
+    line-height: 1.35;
+}
+
+#ai-agent .ai-auto-step-desc,
+#ai-agent .ai-agent-section-subtitle,
+#ai-agent .ai-agent-action-note {
+    font-size: 11px;
+    line-height: 1.55;
+}
+
+#ai-agent .ai-agent-action-note {
+    padding: 9px 10px;
+    border-radius: 6px;
+}
+
+#ai-agent .ai-agent-decision-strip {
+    grid-template-columns: minmax(420px, 0.98fr) minmax(440px, 1.02fr);
+    gap: 10px;
+}
+
+#ai-agent .ai-agent-decision-strip .ai-agent-panel-ranking,
+#ai-agent .ai-agent-decision-strip .ai-agent-panel-journal {
+    gap: 10px;
+}
+
+#ai-agent .ai-agent-panel-journal .ai-agent-journal-box,
+#ai-agent .ai-agent-decision-strip .ai-agent-scroll-shell-ranking {
+    border-radius: 6px;
+    padding: 10px;
+}
+
+#ai-agent .ai-agent-panel-ranking .ai-agent-config-grid {
+    gap: 6px 8px;
+}
+
+#ai-agent .ai-agent-panel-ranking .ai-agent-field input,
+#ai-agent .ai-agent-panel-ranking .ai-agent-field select,
+#ai-agent .ai-agent-panel-ranking .ai-agent-field textarea {
+    min-height: 30px;
+    padding: 5px 8px;
+    border-radius: 6px;
+}
+
+#ai-agent .ai-agent-panel-ranking .ai-agent-field textarea {
+    min-height: 50px;
+}
+
+#ai-agent .ai-agent-panel-ranking .ai-agent-config-divider {
+    margin-top: 6px;
+    padding-top: 6px;
+}
+
+#ai-agent .ai-agent-panel-ranking .ai-agent-risk-config-note,
+#ai-agent .ai-agent-panel-ranking .ai-agent-field-hint {
+    font-size: 10px;
+    line-height: 1.35;
+}
+
+#ai-agent .ai-agent-panel-ranking .ai-agent-ranking-summary,
+#ai-agent .ai-agent-panel-ranking .ai-agent-ranking-row,
+#ai-agent .ai-agent-panel-journal .agent-journal-current,
+#ai-agent .ai-agent-panel-review .ai-agent-review-card,
+#ai-agent .ai-agent-review-summary > .ai-agent-review-meta,
+#ai-agent .ai-agent-review-summary > .ai-agent-review-insights {
+    border-radius: 6px !important;
+}
+
+#ai-agent .ai-agent-runtime-stack {
+    gap: 10px;
+}
+
+#ai-agent .ai-agent-runtime-card,
+#ai-agent .ai-live-signals-card {
+    padding: 12px !important;
+    box-shadow: 0 12px 28px rgba(3, 9, 18, 0.18);
+}
+
+#ai-agent .ai-sidebar-title {
+    margin-bottom: 4px;
+    font-size: 13px;
+    line-height: 1.35;
+}
+
+#ai-agent .ai-agent-runtime-card-desc {
+    margin-top: 0;
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+#ai-agent #ai-agent-live-signals-panel {
+    max-height: clamp(210px, 28vh, 300px);
+}
+
+#ai-agent .ai-agent-panel-review .ai-agent-review-workspace {
+    grid-template-columns: minmax(320px, 0.34fr) minmax(0, 0.66fr);
+}
+
+#ai-agent .ai-agent-panel-review .ai-agent-review-history-shell {
+    --ai-agent-review-history-fallback-height: clamp(520px, 58vh, 720px);
+}
+
+@media (min-width: 1600px) {
+    body:has(#ai-agent.active) .container {
+        padding: 18px 28px 28px;
+    }
+
+    body:has(#ai-agent.active) header {
+        margin-bottom: 14px;
+        padding-bottom: 12px;
+    }
+
+    body:has(#ai-agent.active) .tabs {
+        margin-bottom: 14px;
+        padding-bottom: 8px;
+    }
+
+    #ai-agent .ai-agent-cockpit {
+        grid-template-columns: minmax(300px, 0.22fr) minmax(0, 0.78fr);
+        gap: 14px;
+        padding: 14px 16px;
+    }
+
+    #ai-agent .ai-agent-cockpit-main {
+        gap: 8px;
+    }
+
+    #ai-agent .ai-agent-cockpit-title {
+        font-size: 23px;
+    }
+
+    #ai-agent .ai-agent-cockpit-desc,
+    #ai-agent .ai-agent-cockpit-note {
+        display: none;
+    }
+
+    #ai-agent .ai-agent-cockpit-meta {
+        display: block;
+    }
+
+    #ai-agent .ai-agent-cockpit-grid {
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 10px;
+    }
+
+    #ai-agent .ai-agent-cockpit-stat {
+        min-height: 74px;
+        padding: 10px;
+        gap: 5px;
+    }
+
+    #ai-agent .ai-agent-cockpit-stat strong {
+        font-size: 15px;
+    }
+
+    #ai-agent .ai-agent-cockpit-stat-sub {
+        line-height: 1.35;
+    }
+
+    #ai-agent .ai-workspace-section-head {
+        display: none;
+    }
+
+    #ai-agent .ai-agent-workspace-grid {
+        grid-template-columns: minmax(0, 1fr) 392px;
+        gap: 14px;
+    }
+
+    #ai-agent .ai-agent-runtime-stack {
+        top: 10px;
+        max-height: calc(100vh - 154px);
+    }
+
+    #ai-agent .ai-agent-runtime-card-desc {
+        display: none;
+    }
+
+    #ai-agent .ai-agent-runtime-card .ai-chain-summary-card {
+        margin-top: 8px;
+    }
+
+    #ai-agent .ai-agent-command-card {
+        min-height: calc(100vh - 338px);
+    }
+
+    #ai-agent .ai-agent-control-grid {
+        align-items: stretch;
+    }
+
+    #ai-agent #ai-agent-info {
+        max-height: 246px;
+        overflow-y: auto;
+        padding-right: 2px;
+        scrollbar-gutter: stable;
+    }
+
+    #ai-agent #ai-agent-info .ai-agent-muted {
+        display: none;
+    }
+}
+
+@media (max-width: 1599px) {
+    #ai-agent .ai-agent-intent-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    }
+
+    #ai-agent .ai-agent-control-grid {
+        grid-template-columns: minmax(0, 1fr) minmax(280px, 0.9fr);
+    }
+
+    #ai-agent .ai-agent-panel-diagnostics {
+        grid-column: 1 / -1;
+    }
+}
+
+@media (max-width: 1280px) {
+    #ai-agent .ai-agent-control-grid,
+    #ai-agent .ai-agent-decision-strip,
+    #ai-agent .ai-agent-panel-review .ai-agent-review-workspace {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    #ai-agent .ai-agent-panel-diagnostics .ai-agent-reasons-box {
+        max-height: none;
+        overflow: visible;
+        padding-right: 0;
+    }
+}
+
+@media (max-width: 900px) {
+    #ai-agent .ai-runtime-summary,
+    #ai-agent .ai-agent-cockpit-flow,
+    #ai-agent .ai-agent-command-links {
+        align-items: stretch;
+    }
+
+    #ai-agent .ai-agent-intent-grid {
+        grid-template-columns: minmax(0, 1fr) !important;
+    }
+
+    #ai-agent .ai-agent-cockpit {
+        padding: 14px;
     }
 }

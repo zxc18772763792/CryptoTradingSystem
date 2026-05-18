@@ -735,6 +735,80 @@ def test_compute_scan_payload_exposes_contextual_alert_rules(monkeypatch):
     assert by_symbol["WIF/USDT"]["alert_rules"] == []
 
 
+def test_compute_scan_payload_uses_public_ticker_fallback_when_coinglass_unavailable(monkeypatch):
+    symbols = ["AAA/USDT"]
+    captured = {}
+
+    async def fake_resolve_universe(**kwargs):
+        return symbols, symbols, [], []
+
+    async def fake_load_market_frames(**kwargs):
+        return ({}, ["AAA/USDT local K empty skipped"])
+
+    async def fake_market_snapshots(**kwargs):
+        raise RuntimeError("minute_budget_exhausted")
+
+    async def fake_public_snapshots(**kwargs):
+        assert kwargs["symbols"] == symbols
+        return {
+            "AAA/USDT": {
+                "symbol": "AAA/USDT",
+                "timestamp": "2026-04-18T12:00:00+00:00",
+                "source_name": "binance_futures_ticker_24h",
+                "current_price": 12.5,
+                "quote_volume_24h": 9_000_000.0,
+                "price_change_percent_24h": 5.5,
+            }
+        }
+
+    async def fake_factor_library(**kwargs):
+        return {"warnings": []}
+
+    async def fake_multi_assets_overview(**kwargs):
+        return {"retired_filter": {"excluded_symbols": []}}
+
+    async def fake_snapshot_maps(**kwargs):
+        return ({}, {}, {}, {})
+
+    async def fake_load_active_altcoin_rules():
+        return []
+
+    def fake_build_altcoin_rows(**kwargs):
+        captured.update(kwargs)
+        return [{"symbol": "AAA/USDT", "tags": [], "data_quality": {"degraded_reason": []}}]
+
+    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api, "_load_market_frames", fake_load_market_frames)
+    monkeypatch.setattr(altcoin_api, "load_coinglass_market_snapshots", fake_market_snapshots)
+    monkeypatch.setattr(altcoin_api, "_load_exchange_public_market_snapshots", fake_public_snapshots)
+    monkeypatch.setattr(altcoin_api, "get_factor_library", fake_factor_library)
+    monkeypatch.setattr(altcoin_api, "get_multi_assets_overview", fake_multi_assets_overview)
+    monkeypatch.setattr(altcoin_api, "_load_snapshot_maps", fake_snapshot_maps)
+    monkeypatch.setattr(altcoin_api, "_load_active_altcoin_rules", fake_load_active_altcoin_rules)
+    monkeypatch.setattr(altcoin_api, "build_altcoin_rows", fake_build_altcoin_rows)
+
+    payload = asyncio.run(
+        altcoin_api._compute_scan_payload(
+            exchange="binance",
+            timeframe="4h",
+            symbols=symbols,
+            exclude_retired=True,
+            refresh=True,
+            universe_scope="research",
+            mode="combined",
+            view="4h",
+        )
+    )
+
+    assert payload["symbols_used"] == ["AAA/USDT"]
+    assert captured["market_snapshots"]["AAA/USDT"]["source_name"] == "binance_futures_ticker_24h"
+    assert captured["derivatives_snapshots"] == {}
+    assert any("minute_budget_exhausted" in warning for warning in payload["warnings"])
+    assert any("exchange public ticker" in warning for warning in payload["warnings"])
+    assert not any("local K empty" in warning for warning in payload["warnings"])
+    assert any("using live market snapshots instead" in warning for warning in payload["warnings"])
+
+
 def test_get_altcoin_scan_snapshot_resolves_universe_only_once(monkeypatch):
     altcoin_api._clear_altcoin_scan_cache()
     resolve_calls = 0

@@ -185,7 +185,7 @@
     return {
       market_regime: marketSummary.market_regime || marketSummary.headline || '待生成',
       direction_bias: marketSummary.direction_bias || 'neutral',
-      confidence: Number(marketSummary.confidence || 0),
+      confidence: marketSummary.confidence == null || marketSummary.confidence === '' ? null : Number(marketSummary.confidence),
       coverage: {
         ok_count: entries.filter((item) => item?.status === 'ok').length,
         degraded_count: entries.filter((item) => item?.status === 'degraded').length,
@@ -550,7 +550,7 @@
     summaryEl.innerHTML = [
       listItem('市场状态', overview.market_regime || '-'),
       listItem('方向偏向', formatRecommendationBias(overview.direction_bias || '-')),
-      listItem('研究可信度', Number(overview.confidence || 0).toFixed(2)),
+      listItem('研究可信度', fmtNumber(overview.confidence, 2)),
       listItem('模块覆盖', `${Number(overview.coverage?.ok_count || 0)}/${Number(overview.coverage?.total || 0)}`),
       listItem('降级模块', Number(overview.coverage?.degraded_count || 0)),
     ].join('');
@@ -928,6 +928,10 @@
         renderDiscipline(module);
       }
     } catch (err) {
+      // Make the failure visible instead of silently keeping the payload's
+      // "ok" status: flip the module chip to error so the status board shows it.
+      state.modules[name].status = 'error';
+      state.modules[name].status_detail = String(err?.message || err);
       setDebug(`research.workbench.render.${name}`, String(err?.message || err));
     }
 
@@ -1073,7 +1077,7 @@
       window.renderResearchQuickSummary([
         { label: '市场状态', value: overview.market_regime || '-' },
         { label: '方向偏向', value: overview.direction_bias || '-' },
-        { label: '研究可信度', value: Number(overview.confidence || 0).toFixed(2) },
+        { label: '研究可信度', value: fmtNumber(overview.confidence, 2) },
         { label: '模块覆盖', value: `${Number(overview.coverage?.ok_count || 0)}/${Number(overview.coverage?.total || 0)}` },
       ]);
     }

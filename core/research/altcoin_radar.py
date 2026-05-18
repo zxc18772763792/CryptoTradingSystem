@@ -62,6 +62,20 @@ def _round4(value: Any) -> float:
     return round(_to_float(value), 4)
 
 
+def _round_metric(value: Any) -> float:
+    numeric = _to_float(value)
+    magnitude = abs(numeric)
+    if magnitude == 0:
+        return 0.0
+    if magnitude < 0.0001:
+        return round(numeric, 10)
+    if magnitude < 0.01:
+        return round(numeric, 8)
+    if magnitude < 1:
+        return round(numeric, 6)
+    return round(numeric, 4)
+
+
 def _safe_series(df: pd.DataFrame, column: str) -> pd.Series:
     if column not in df.columns:
         return pd.Series(dtype=float)
@@ -309,6 +323,18 @@ def _pct_fraction(value: Any) -> float:
     return _to_float(value, 0.0) / 100.0
 
 
+def _optional_pct_fraction(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return float(parsed) / 100.0
+
+
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, float(value)))
 
@@ -324,6 +350,30 @@ def _timeframe_window_map(timeframe: str) -> Dict[str, str]:
     return {"1": "4h", "3": "12h", "6": "24h", "flow": "4h", "liq": "4h", "oi": "4h", "volume": "4h"}
 
 
+def _window_seconds(window: str) -> int:
+    text = str(window or "").strip().lower()
+    mapping = {"1h": 3600, "4h": 14400, "12h": 43200, "24h": 86400}
+    return int(mapping.get(text, 3600))
+
+
+def _market_snapshot_return_path(snapshot: Mapping[str, Any], timeframe: str) -> Dict[str, float]:
+    windows = _timeframe_window_map(timeframe)
+    ret6 = _optional_pct_fraction(snapshot.get(f"price_change_percent_{windows['6']}"))
+    if ret6 is None and windows["6"] != "24h":
+        ret6 = _optional_pct_fraction(snapshot.get("price_change_percent_24h"))
+    ret3 = _optional_pct_fraction(snapshot.get(f"price_change_percent_{windows['3']}"))
+    if ret3 is None and ret6 is not None:
+        ret3 = ret6 * 0.5
+    ret1 = _optional_pct_fraction(snapshot.get(f"price_change_percent_{windows['1']}"))
+    if ret1 is None and ret6 is not None:
+        ret1 = ret6 / 6.0
+    return {
+        "ret1": float(ret1 or 0.0),
+        "ret3": float(ret3 or 0.0),
+        "ret6": float(ret6 or 0.0),
+    }
+
+
 def _market_snapshot_flow_imbalance(snapshot: Mapping[str, Any], window: str) -> float:
     long_volume = _to_float(snapshot.get(f"long_volume_usd_{window}"), 0.0)
     short_volume = _to_float(snapshot.get(f"short_volume_usd_{window}"), 0.0)
@@ -335,10 +385,10 @@ def _market_snapshot_flow_imbalance(snapshot: Mapping[str, Any], window: str) ->
 
 def _synthetic_sparkline(snapshot: Mapping[str, Any], timeframe: str) -> List[float]:
     current_price = max(_to_float(snapshot.get("current_price"), 0.0), 1e-6)
-    windows = _timeframe_window_map(timeframe)
-    ret1 = _pct_fraction(snapshot.get(f"price_change_percent_{windows['1']}"))
-    ret3 = _pct_fraction(snapshot.get(f"price_change_percent_{windows['3']}"))
-    ret6 = _pct_fraction(snapshot.get(f"price_change_percent_{windows['6']}"))
+    returns = _market_snapshot_return_path(snapshot, timeframe)
+    ret1 = returns["ret1"]
+    ret3 = returns["ret3"]
+    ret6 = returns["ret6"]
 
     def _backsolve(price: float, change: float) -> float:
         return price / max(1.0 + change, 1e-6)
@@ -348,7 +398,7 @@ def _synthetic_sparkline(snapshot: Mapping[str, Any], timeframe: str) -> List[fl
     p1 = _backsolve(current_price, ret1)
     mid_a = p6 + (p3 - p6) * 0.5
     mid_b = p3 + (p1 - p3) * 0.5
-    return [round(value, 4) for value in [p6, mid_a, p3, mid_b, p1, current_price]]
+    return [_round_metric(value) for value in [p6, mid_a, p3, mid_b, p1, current_price]]
 
 
 def _market_snapshot_metrics(
@@ -358,9 +408,10 @@ def _market_snapshot_metrics(
     now: datetime,
 ) -> Dict[str, Any]:
     windows = _timeframe_window_map(timeframe)
-    ret1 = _pct_fraction(snapshot.get(f"price_change_percent_{windows['1']}"))
-    ret3 = _pct_fraction(snapshot.get(f"price_change_percent_{windows['3']}"))
-    ret6 = _pct_fraction(snapshot.get(f"price_change_percent_{windows['6']}"))
+    returns = _market_snapshot_return_path(snapshot, timeframe)
+    ret1 = returns["ret1"]
+    ret3 = returns["ret3"]
+    ret6 = returns["ret6"]
     volume_change = _to_float(snapshot.get(f"volume_change_percent_{windows['volume']}"), 0.0)
     flow_window = windows["flow"]
     liq_window = windows["liq"]
@@ -370,12 +421,15 @@ def _market_snapshot_metrics(
     long_liq = _to_float(snapshot.get(f"long_liquidation_usd_{liq_window}"), 0.0)
     short_liq = _to_float(snapshot.get(f"short_liquidation_usd_{liq_window}"), 0.0)
     liq_total = long_liq + short_liq
-    short_liq_share = short_liq / max(liq_total, 1.0)
-    liq_ratio = liq_total / max(
+    flow_volume_usd = (
         _to_float(snapshot.get(f"long_volume_usd_{flow_window}"), 0.0)
-        + _to_float(snapshot.get(f"short_volume_usd_{flow_window}"), 0.0),
-        1.0,
+        + _to_float(snapshot.get(f"short_volume_usd_{flow_window}"), 0.0)
     )
+    quote_volume_24h = _to_float(snapshot.get("quote_volume_24h"), 0.0)
+    if flow_volume_usd <= 0 and quote_volume_24h > 0:
+        flow_volume_usd = quote_volume_24h * (_window_seconds(flow_window) / 86400.0)
+    short_liq_share = short_liq / max(liq_total, 1.0)
+    liq_ratio = liq_total / max(flow_volume_usd, 1.0)
     oi_change = _to_float(snapshot.get(f"open_interest_change_percent_{oi_window}"), 0.0)
     ret_path = abs(ret1) + abs(ret3) + abs(ret6) + 1e-6
     positive_trend = max(ret6, 0.0)
@@ -387,14 +441,12 @@ def _market_snapshot_metrics(
     range_expansion_ratio = 1.0 + min((abs(ret1) * 18.0) + (liq_ratio * 4.0), 3.0)
     recent_vol = abs(ret1 - (ret3 / 3.0)) + abs(ret3 - (ret6 / 2.0))
     impulse = max(ret1, 0.0) / max(abs(ret6), 0.01)
-    avg_dollar_volume = (
-        _to_float(snapshot.get(f"long_volume_usd_{flow_window}"), 0.0)
-        + _to_float(snapshot.get(f"short_volume_usd_{flow_window}"), 0.0)
-    )
+    avg_dollar_volume = flow_volume_usd
 
     timestamp = snapshot.get("timestamp") or _utcnow().isoformat()
     age_sec = _age_seconds(timestamp, now) or 0.0
     freshness = _freshness_score(age_sec, TIMEFRAME_SECONDS.get(timeframe, TIMEFRAME_SECONDS["4h"]), 4.0)
+    spread_bps = _to_float(snapshot.get("spread_bps"), 0.0)
     return {
         "last_price": _to_float(snapshot.get("current_price"), 0.0),
         "return_1_bar": ret1,
@@ -408,7 +460,7 @@ def _market_snapshot_metrics(
         "breakout_proximity": breakout_proximity,
         "close_control": close_control,
         "avg_dollar_volume": avg_dollar_volume,
-        "spread_bps": 0.0,
+        "spread_bps": spread_bps,
         "order_flow_imbalance": imbalance,
         "market_age_sec": age_sec,
         "market_freshness": freshness,
@@ -880,6 +932,7 @@ def build_altcoin_rows(
         missing_count = 3 - available_snapshots
         stale_data = (1.0 - market_freshness) + (1.0 - snapshot_freshness)
         liquidity_risk = spread_bps + (1.0 / max(avg_dollar_volume, 1.0)) * 1_000_000.0
+        market_snapshot_fresh = bool(market_snapshot and market_freshness >= 0.45)
 
         degraded_reason: List[str] = []
         if market_freshness < 0.45:
@@ -894,7 +947,7 @@ def build_altcoin_rows(
             degraded_reason.append("liquidity_thin")
         if security_events > 0:
             degraded_reason.append("security_event")
-        if bool(getattr(settings, "COINGLASS_INCLUDE_RADAR", True)) and not derivatives:
+        if bool(getattr(settings, "COINGLASS_INCLUDE_RADAR", True)) and not derivatives and not market_snapshot_fresh:
             degraded_reason.append("derivatives_missing")
 
         raw_components["return_shock"][normalized_symbol] = max(positive_return_burst, absolute_return_burst * 0.75)
@@ -1322,7 +1375,7 @@ def build_altcoin_rows(
             "freshness": item["freshness"],
             "derivatives_context": item["derivatives_context"],
             "metrics": {
-                **{key: _round4(value) for key, value in item["metrics_raw"].items()},
+                **{key: _round_metric(value) for key, value in item["metrics_raw"].items()},
                 "percentiles": {key: (None if value is None else _round4(value)) for key, value in pct.items()},
             },
             "sparkline": item["sparkline"],

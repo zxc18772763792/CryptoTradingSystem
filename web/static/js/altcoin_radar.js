@@ -31,6 +31,44 @@
     'IMX/USDT',
     'CRV/USDT',
   ];
+  const DEFAULT_WATCHLIST = [
+    'ORDI/USDT',
+    'SATS/USDT',
+    'RATS/USDT',
+    'PEPE/USDT',
+    'FLOKI/USDT',
+    'BONK/USDT',
+    'WIF/USDT',
+    'BOME/USDT',
+    'MEME/USDT',
+    'NEIRO/USDT',
+    'TURBO/USDT',
+    'TAO/USDT',
+    'FET/USDT',
+    'AGIX/USDT',
+    'RENDER/USDT',
+    'AKT/USDT',
+    'OCEAN/USDT',
+    'GMX/USDT',
+    'GNS/USDT',
+    'JOE/USDT',
+    'AXS/USDT',
+    'SAND/USDT',
+    'MANA/USDT',
+    'GALA/USDT',
+    'IMX/USDT',
+    'PYTH/USDT',
+    'JTO/USDT',
+    'W/USDT',
+    'JUP/USDT',
+    'BGB/USDT',
+    'GT/USDT',
+    'OKB/USDT',
+    'STRK/USDT',
+    'MANTA/USDT',
+    'ALT/USDT',
+    'ZETA/USDT',
+  ];
 
   const PRESET_BY_KIND = {
     anomaly: '点火预警',
@@ -71,7 +109,7 @@
     detailSeq: 0,
     eventSeq: 0,
     radarMode: 'combined',  // Phase 1
-    watchlist: [],
+    watchlist: DEFAULT_WATCHLIST.slice(),
     eventTimelineBySymbol: new Map(),
     scanDebounceTimer: 0,
     backgroundRefreshTimer: 0,
@@ -151,7 +189,8 @@
     const out = [];
     const seen = new Set();
     (Array.isArray(values) ? values : [values]).forEach((item) => {
-      const text = String(item || '').trim();
+      let text = String(item || '').trim().toUpperCase();
+      if (text === 'RNDR/USDT') text = 'RENDER/USDT';
       if (!text || seen.has(text)) return;
       seen.add(text);
       out.push(text);
@@ -279,6 +318,7 @@
   function normalizeWatchlistSymbolInput(symbol) {
     const raw = String(symbol || '').trim().toUpperCase().replace(/\s+/g, '');
     if (!raw) return '';
+    if (raw === 'RNDR' || raw === 'RNDRUSDT' || raw === 'RNDR-USDT' || raw === 'RNDR/USDT') return 'RENDER/USDT';
     if (raw.includes('/')) return raw;
     if (raw.includes('-')) return raw.replace('-', '/');
     if (raw.endsWith('USDT') && raw.length > 4) return `${raw.slice(0, -4)}/USDT`;
@@ -730,7 +770,8 @@
   async function loadWatchlist() {
     const apiFetch = requireApi();
     const resp = await apiFetch('/altcoin/radar/watchlist', { timeoutMs: 10000 });
-    state.watchlist = normalizeSymbols(resp?.symbols || []);
+    const symbols = normalizeSymbols(resp?.symbols || []);
+    state.watchlist = symbols.length ? symbols : DEFAULT_WATCHLIST.slice();
     renderWatchlist();
     return state.watchlist;
   }
@@ -2032,6 +2073,9 @@
     });
     const watchlistPromise = loadWatchlist().catch((error) => {
       console.warn('loadAltcoinRadarTabData watchlist bootstrap failed', error?.message || error);
+      state.watchlist = normalizeSymbols(state.watchlist || []);
+      if (!state.watchlist.length) state.watchlist = DEFAULT_WATCHLIST.slice();
+      renderWatchlist();
     });
     await universePromise;
     await watchlistPromise;

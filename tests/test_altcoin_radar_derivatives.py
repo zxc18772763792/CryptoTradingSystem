@@ -275,6 +275,40 @@ def test_build_altcoin_rows_prefers_coinglass_market_snapshot_when_local_frame_i
     assert row["metrics"]["market_cap_usd"] == 2500000000.0
 
 
+def test_build_altcoin_rows_does_not_hard_degrade_fresh_public_market_snapshot_without_derivatives():
+    now = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
+    stale_now = now - timedelta(days=30)
+    market_snapshot = {
+        "symbol": "PEPE/USDT",
+        "base_symbol": "PEPE",
+        "timestamp": now.isoformat(),
+        "source_name": "binance_futures_ticker_24h",
+        "current_price": 0.00000417,
+        "quote_volume_24h": 18_000_000.0,
+        "price_change_percent_24h": 12.0,
+        "spread_bps": 4.0,
+    }
+
+    rows = build_altcoin_rows(
+        market_frames={"PEPE/USDT": _market_frame(stale_now)},
+        timeframe="4h",
+        market_snapshots={"PEPE/USDT": market_snapshot},
+        derivatives_snapshots={},
+        now=now,
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+
+    assert row["freshness"]["market_label"] == "fresh"
+    assert row["freshness"]["derivatives_label"] == "missing"
+    assert "market_data_stale" not in row["data_quality"]["degraded_reason"]
+    assert "snapshot_missing" not in row["data_quality"]["degraded_reason"]
+    assert "derivatives_missing" not in row["data_quality"]["degraded_reason"]
+    assert row["metrics"]["last_price"] == 0.00000417
+    assert row["metrics"]["avg_dollar_volume"] == 3000000.0
+
+
 def test_build_altcoin_rows_suppresses_major_benchmark_symbols():
     now = datetime(2026, 4, 18, 12, 0, tzinfo=timezone.utc)
     market_snapshot = {

@@ -1,5 +1,33 @@
 {
   "schema_version": "family_regime_priors.v1",
-  "updated_at": null,
-  "priors": {}
+  "updated_at": "2026-05-18T02:59:26.801016+00:00",
+  "priors": {
+    "MAStrategy|mixed|benchmark": {
+      "sample_size": 5,
+      "counterfactual_outcome_sample_size": 0,
+      "sharpe_gap_ewma": 0.0,
+      "edge_delta_ewma": 0.0,
+      "recent_decay_rate": 1.0,
+      "overfit_rate": 0.0,
+      "underperform_rate": 0.0,
+      "confirmation_rate": 0.0,
+      "negative_evidence_rate": 1.0,
+      "status_counts": {
+        "decayed": 5
+      },
+      "last_status": "decayed",
+      "updated_at": "2026-05-18T02:59:26.801016+00:00",
+      "graduation": {
+        "status": "advisory_collecting_samples",
+        "binding_eligible": false,
+        "min_sample_size": 30,
+        "min_counterfactual_outcome_sample_size": 20,
+        "max_binding_adjustment": 0.1,
+        "sample_size": 5,
+        "counterfactual_outcome_sample_size": 0,
+        "confirmation_rate": 0.0,
+        "negative_evidence_rate": 1.0
+      }
+    }
+  }
 }

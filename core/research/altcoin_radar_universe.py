@@ -72,6 +72,10 @@ ALTCOIN_WATCHLIST: List[str] = [
 
 _WATCHLIST_LOCK = threading.Lock()
 _WATCHLIST_STORAGE_PATH = settings.BASE_DIR / "data" / "config" / "altcoin_radar_watchlist.json"
+_WATCHLIST_SYMBOL_ALIASES: Dict[str, str] = {
+    # RNDR was migrated to RENDER on major venues. Keep old persisted entries usable.
+    "RNDR/USDT": "RENDER/USDT",
+}
 
 # Boards / sectors used in narrative scoring (symbol → sector label)
 SECTOR_MAP: Dict[str, str] = {
@@ -90,6 +94,7 @@ SECTOR_MAP: Dict[str, str] = {
     "FET/USDT": "ai",
     "AGIX/USDT": "ai",
     "RNDR/USDT": "ai",
+    "RENDER/USDT": "ai",
     "AKT/USDT": "ai",
     "OCEAN/USDT": "ai",
     "GMX/USDT": "defi",
@@ -131,6 +136,7 @@ def _normalize(symbols: Iterable[str]) -> List[str]:
     seen: set = set()
     for s in symbols:
         text = str(s or "").strip().upper()
+        text = _WATCHLIST_SYMBOL_ALIASES.get(text, text)
         if text and text not in seen:
             seen.add(text)
             out.append(text)
@@ -188,7 +194,7 @@ def resolve_universe_scope(
     research = _normalize(research_symbols)
     cg = _normalize(coinglass_symbols or [])
     active = _normalize(extra_active or [])
-    watch = _normalize(ALTCOIN_WATCHLIST)
+    watch = get_watchlist_symbols()
 
     if s == "watchlist":
         # Watchlist only, but keep research overlap too
@@ -214,7 +220,7 @@ def get_watchlist_symbols() -> List[str]:
     """Return current hardcoded watchlist."""
     with _WATCHLIST_LOCK:
         persisted = _load_watchlist_from_disk()
-        if persisted is not None:
+        if persisted:
             return persisted
         return _normalize(ALTCOIN_WATCHLIST)
 

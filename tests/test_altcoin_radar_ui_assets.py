@@ -72,6 +72,10 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "async function recyclePresetAlert(kind, symbol)" in radar_js
     assert "async function recycleAllAlerts(symbol)" in radar_js
     assert "async function loadWatchlist()" in radar_js
+    assert "const DEFAULT_WATCHLIST = [" in radar_js
+    assert "state.watchlist = symbols.length ? symbols : DEFAULT_WATCHLIST.slice();" in radar_js
+    assert "if (!state.watchlist.length) state.watchlist = DEFAULT_WATCHLIST.slice();" in radar_js
+    assert "return 'RENDER/USDT';" in radar_js
     assert "async function mutateWatchlist(action, symbol)" in radar_js
     assert "const activeKinds = alertKindsForRow(row);" in radar_js
     assert "button.textContent = activeKinds.has(kind) ? `回收${label}` : `建${label}`;" in radar_js
