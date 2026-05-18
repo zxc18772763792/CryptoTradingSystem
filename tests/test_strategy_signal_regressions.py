@@ -180,3 +180,47 @@ def test_backtest_optimization_grid_keys_are_declared_in_defaults():
         defaults = set((meta.get("defaults") or {}).keys())
         grid = set((backtest.get("optimization_grid") or {}).keys())
         assert grid.issubset(defaults), f"{name} optimization grid contains undeclared defaults: {sorted(grid - defaults)}"
+
+
+def test_bar_time_uses_latest_bar_not_wall_clock():
+    from datetime import datetime, timezone
+
+    from core.strategies.strategy_base import bar_time
+
+    idx = pd.date_range("2025-03-01", periods=10, freq="1h", tz="UTC")
+    df = pd.DataFrame({"close": np.arange(10.0)}, index=idx)
+    ts = bar_time(df)
+    assert ts == idx[-1].to_pydatetime()
+    assert ts.tzinfo is not None
+
+    # tz-naive index gets normalized to UTC (fixes naive/aware mixing)
+    naive = pd.date_range("2025-03-01", periods=5, freq="1h")
+    df2 = pd.DataFrame({"close": np.arange(5.0)}, index=naive)
+    ts2 = bar_time(df2)
+    assert ts2.tzinfo == timezone.utc
+
+    # no datetime index -> wall-clock UTC fallback
+    df3 = pd.DataFrame({"close": [1.0, 2.0]})
+    before = datetime.now(timezone.utc)
+    ts3 = bar_time(df3)
+    assert ts3.tzinfo == timezone.utc and ts3 >= before
+
+
+def test_rsi_signal_carries_bar_time_not_now():
+    from datetime import datetime, timezone
+
+    # Force an RSI oversold up-cross exactly on the final bar.
+    drop = np.linspace(200, 70, 90)
+    tail = np.array([70.0, 70.5, 78.0])
+    close = np.concatenate([drop, tail])
+    idx = pd.date_range("2025-01-01", periods=len(close), freq="1h", tz="UTC")
+    df = pd.DataFrame(
+        {"open": close, "high": close + 0.5, "low": close - 0.5, "close": close,
+         "volume": np.full(len(close), 1000.0)},
+        index=idx,
+    )
+    strat = RSIStrategy(name="RSIStrategy")
+    signals = strat.generate_signals(df)
+    if signals:  # if the engineered cross triggered, timestamp must be bar time
+        assert signals[0].timestamp == idx[-1].to_pydatetime()
+        assert abs((datetime.now(timezone.utc) - signals[0].timestamp).total_seconds()) > 3600

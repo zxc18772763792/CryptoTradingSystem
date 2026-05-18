@@ -4,11 +4,45 @@
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional, List, Dict, Any
 import pandas as pd
 from loguru import logger
+
+
+def bar_time(data: Any, *, fallback: Optional[datetime] = None) -> datetime:
+    """Timestamp of the latest bar in ``data``, normalized to tz-aware UTC.
+
+    A strategy signal belongs to the bar that triggered it, not to the wall
+    clock at which ``generate_signals`` happened to run — using ``now()``
+    breaks replay alignment and the cross-strategy conflict window in
+    ``strategy_manager`` (which compares signal timestamps). Falls back to
+    wall-clock UTC only when ``data`` has no usable datetime index (e.g.
+    real-time/opportunity-driven inputs without bars).
+    """
+    try:
+        idx = getattr(data, "index", None)
+        if idx is not None and len(idx):
+            last = idx[-1]
+            # Only treat as a bar time when it is genuinely datetime-like.
+            # A plain int/RangeIndex would be (mis)read by pd.Timestamp as a
+            # 1970 epoch offset, so it must fall through to the wall clock.
+            is_dt = (
+                isinstance(idx, pd.DatetimeIndex)
+                or pd.api.types.is_datetime64_any_dtype(getattr(idx, "dtype", None))
+                or isinstance(last, (pd.Timestamp, datetime))
+            )
+            if is_dt:
+                ts = pd.Timestamp(last)
+                if not pd.isna(ts):
+                    py = ts.to_pydatetime()
+                    if py.tzinfo is None:
+                        py = py.replace(tzinfo=timezone.utc)
+                    return py
+    except Exception:
+        pass
+    return fallback if fallback is not None else datetime.now(timezone.utc)
 
 
 class SignalType(Enum):
@@ -212,6 +246,10 @@ class StrategyBase(ABC):
     def get_recent_signals(self, count: int = 100) -> List[Signal]:
         """获取最近的信号"""
         return self.signals_history[-count:]
+
+    def _bar_time(self, data: Any, *, fallback: Optional[datetime] = None) -> datetime:
+        """Bar timestamp for Signal.timestamp — see module-level bar_time()."""
+        return bar_time(data, fallback=fallback)
 
     def set_param(self, key: str, value: Any) -> None:
         """设置参数"""

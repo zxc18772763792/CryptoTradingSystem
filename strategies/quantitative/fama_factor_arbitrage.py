@@ -9,7 +9,7 @@ from loguru import logger
 
 from core.data import data_storage
 from core.data.factor_library import build_factor_library
-from core.strategies.strategy_base import Signal, SignalType, StrategyBase
+from core.strategies.strategy_base import Signal, SignalType, StrategyBase, bar_time
 
 
 def _normalize_symbol_list(symbols: List[Any]) -> List[str]:
@@ -126,6 +126,7 @@ def _build_fama_rebalance_plan(
 
     score_map = {str(r["symbol"]).upper(): float(r["score"]) for _, r in scores_df.iterrows()}
     universe_size = int(close_df.shape[1])
+    rebalance_bar_ts = bar_time(close_df)
     signals: List[Signal] = []
 
     for sym in sorted(active_longs - target_longs):
@@ -144,6 +145,7 @@ def _build_fama_rebalance_plan(
                 take_profit_pct=take_profit_pct,
                 universe_size=universe_size,
                 quantile=quantile,
+                bar_ts=rebalance_bar_ts,
             )
         )
 
@@ -163,6 +165,7 @@ def _build_fama_rebalance_plan(
                 take_profit_pct=take_profit_pct,
                 universe_size=universe_size,
                 quantile=quantile,
+                bar_ts=rebalance_bar_ts,
             )
         )
 
@@ -182,6 +185,7 @@ def _build_fama_rebalance_plan(
                 take_profit_pct=take_profit_pct,
                 universe_size=universe_size,
                 quantile=quantile,
+                bar_ts=rebalance_bar_ts,
             )
         )
 
@@ -201,6 +205,7 @@ def _build_fama_rebalance_plan(
                 take_profit_pct=take_profit_pct,
                 universe_size=universe_size,
                 quantile=quantile,
+                bar_ts=rebalance_bar_ts,
             )
         )
 
@@ -301,6 +306,7 @@ class FamaFactorArbitrageStrategy(StrategyBase):
         take_profit_pct: float,
         universe_size: int,
         quantile: float,
+        bar_ts: Optional[datetime] = None,
     ) -> Signal:
         strength = FamaFactorArbitrageStrategy._score_strength(score)
         stop_loss = None
@@ -316,7 +322,7 @@ class FamaFactorArbitrageStrategy(StrategyBase):
             symbol=symbol,
             signal_type=signal_type,
             price=price,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=bar_ts if bar_ts is not None else datetime.now(timezone.utc),
             strategy_name=strategy_name,
             strength=strength,
             stop_loss=stop_loss,

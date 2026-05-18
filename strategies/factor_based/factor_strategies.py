@@ -44,7 +44,7 @@ class FactorStrategyBase(StrategyBase):
             symbol=symbol,
             signal_type=signal_type,
             price=price,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=getattr(self, "_active_bar_ts", None) or datetime.now(timezone.utc),
             strategy_name=self.name,
             strength=min(max(strength, 0.0), 1.0),
             stop_loss=None,
@@ -77,6 +77,7 @@ class ROCStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["period"] + 2:
             return []
 
@@ -145,6 +146,7 @@ class PriceAccelerationStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["slow"] * 2 + 5:
             return []
 
@@ -215,6 +217,7 @@ class AroonStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["period"] + 3:
             return []
 
@@ -294,6 +297,7 @@ class ParkinsonVolStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["period"] * 3:
             return []
 
@@ -367,6 +371,7 @@ class UlcerIndexStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["period"] + 2:
             return []
 
@@ -439,6 +444,7 @@ class MFIStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["period"] + 2:
             return []
 
@@ -517,6 +523,7 @@ class VWAPStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["period"] + 1:
             return []
 
@@ -591,6 +598,7 @@ class OBVStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["smooth"] + 2:
             return []
 
@@ -670,6 +678,7 @@ class OrderFlowImbalanceStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["period"] * 2 + 2:
             return []
 
@@ -746,6 +755,7 @@ class TradeIntensityStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["slow"] + 1:
             return []
 
@@ -824,6 +834,7 @@ class MeanReversionHalfLifeStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["lookback"] + 2:
             return []
 
@@ -896,6 +907,7 @@ class HurstExponentStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["hurst_period"] + 2:
             return []
 
@@ -989,6 +1001,7 @@ class VaRBreakoutStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["var_period"] + 2:
             return []
 
@@ -1076,6 +1089,7 @@ class MaxDrawdownStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["lookback"] + 1:
             return []
 
@@ -1142,6 +1156,7 @@ class SortinoRatioStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["period"] + 2:
             return []
 
@@ -1227,6 +1242,7 @@ class WilliamsRStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["period"] + 1:
             return []
 
@@ -1298,6 +1314,7 @@ class CCIStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["period"] + 1:
             return []
 
@@ -1371,6 +1388,7 @@ class StochRSIStrategy(FactorStrategyBase):
         super().__init__(name, default_params)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        self._active_bar_ts = self._bar_time(data)
         if data.empty or len(data) < self.params["rsi_period"] + self.params["stoch_period"] + 5:
             return []
 

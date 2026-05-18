@@ -162,7 +162,7 @@ class PairsTradingStrategy(StrategyBase):
 
         current_price1 = float(data["close"].iloc[-1])
         current_price2 = float(data2["close"].iloc[-1])
-        timestamp = datetime.now(timezone.utc)
+        timestamp = self._bar_time(data)
         symbol1 = self._safe_symbol(data)
         symbol2 = self._safe_symbol(data2)
         pair_regime = "positive_corr" if hedge_ratio >= 0 else "negative_corr"
