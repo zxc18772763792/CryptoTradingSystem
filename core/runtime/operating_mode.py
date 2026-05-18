@@ -91,12 +91,15 @@ def validate_operating_mode(
     agent_config: Dict[str, Any] | None = None,
     runtime_state_snapshot: Dict[str, Any] | None = None,
     source_health: Dict[str, Any] | None = None,
+    trading_mode: str | None = None,
 ) -> OperatingModeSnapshot:
     live_cfg = dict(live_decision_config or {})
     agent_cfg = dict(agent_config or {})
     sources = dict(source_health or {})
     runtime_snapshot = dict(runtime_state_snapshot or {})
-    trading_mode = str(getattr(settings, "TRADING_MODE", "paper") or "paper").lower()
+    trading_mode_value = str(trading_mode or getattr(settings, "TRADING_MODE", "paper") or "paper").strip().lower()
+    if trading_mode_value not in {"paper", "live"}:
+        trading_mode_value = "paper"
     decision_mode = str(getattr(settings, "DECISION_MODE", "shadow") or "shadow").lower()
     degradations: List[Dict[str, Any]] = []
 
@@ -116,7 +119,7 @@ def validate_operating_mode(
         degradations.append(_degradation("ai_live_fail_open", "AI live decision fail-open", "model failure may allow fallback behavior"))
     if not bool(agent_cfg.get("allow_live")):
         degradations.append(_degradation("autonomous_allow_live_false", "Autonomous agent is not live-enabled", "agent can only paper/shadow unless allow_live is enabled", "info"))
-    if trading_mode == "live" and not bool(agent_cfg.get("allow_live")):
+    if trading_mode_value == "live" and not bool(agent_cfg.get("allow_live")):
         degradations.append(_degradation("live_mode_agent_blocked", "Trading live but agent live blocked", "TRADING_MODE=live while autonomous allow_live=false", "danger"))
     if not bool(getattr(settings, "COINGLASS_LIVE_GATING_ENABLED", False)):
         degradations.append(_degradation("derivatives_shadow_only", "Derivatives are shadow-only", "COINGLASS_LIVE_GATING_ENABLED=false", "info"))
@@ -201,7 +204,7 @@ def validate_operating_mode(
         )
 
     return OperatingModeSnapshot(
-        trading_mode=trading_mode,
+        trading_mode=trading_mode_value,
         decision_mode=decision_mode,
         governance_enabled=bool(getattr(settings, "GOVERNANCE_ENABLED", False)),
         ai_live_decision=live_cfg,

@@ -53,7 +53,7 @@ class MomentumStrategy(StrategyBase):
 
         current_price = data["close"].iloc[-1]
         timestamp = self._bar_time(data)
-        symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
+        symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
 
         threshold = self.params["momentum_threshold"]
 
@@ -173,7 +173,7 @@ class TrendFollowingStrategy(StrategyBase):
         prev_long_ma = long_ma.iloc[-2]
 
         timestamp = self._bar_time(data)
-        symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
+        symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
 
         # 只有在趋势足够强时才发出信号
         if current_adx >= self.params["adx_threshold"]:

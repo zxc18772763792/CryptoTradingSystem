@@ -666,11 +666,17 @@ class StrategyManager:
                 if 0 <= age <= _SIGNAL_CONFLICT_WINDOW_SECONDS:
                     prior_side = prior.signal_type.value
                     new_side = signal.signal_type.value
-                    buy_sides = {"buy", "close_short"}
-                    sell_sides = {"sell", "close_long"}
-                    is_conflict = (prior_side in buy_sides and new_side in sell_sides) or (
-                        prior_side in sell_sides and new_side in buy_sides
-                    )
+                    # Risk-reducing exits (close_long/close_short) must never be
+                    # suppressed by conflict detection — dropping a stop/exit can
+                    # strand a losing position. Conflict only applies between
+                    # opposite *entry* signals (buy vs sell).
+                    exit_sides = {"close_long", "close_short"}
+                    if new_side in exit_sides or prior_side in exit_sides:
+                        is_conflict = False
+                    else:
+                        is_conflict = (prior_side == "buy" and new_side == "sell") or (
+                            prior_side == "sell" and new_side == "buy"
+                        )
                     if is_conflict:
                         if signal.strength <= prior.strength:
                             logger.warning(

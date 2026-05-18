@@ -338,7 +338,20 @@ class OrderManager:
                 order_price = None
             report = risk_manager.get_risk_report()
             equity = float((report.get("equity") or {}).get("current") or 0.0)
-            order_value = abs(float(request.amount or 0.0) * float(request.price or 0.0))
+            # Market orders carry no limit price — estimate notional from the
+            # latest ticker so governance/risk size checks are not bypassed
+            # (order_value=0 would fail-open through every cap).
+            valuation_price = float(request.price or 0.0)
+            if valuation_price <= 0:
+                try:
+                    ticker = await exchange.get_ticker(request.symbol)
+                    valuation_price = float(getattr(ticker, "last", 0.0) or 0.0)
+                except Exception as e:
+                    logger.warning(
+                        f"order_manager: failed to resolve market price for "
+                        f"{request.symbol}: {e}"
+                    )
+            order_value = abs(float(request.amount or 0.0) * valuation_price)
             governance_check = await decision_engine.evaluate_order_intent(
                 symbol=request.symbol,
                 side=request.side.value,

@@ -62,7 +62,7 @@ class MeanReversionStrategy(StrategyBase):
 
         current_price = data["close"].iloc[-1]
         timestamp = self._bar_time(data)
-        symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
+        symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
 
         # Buy when price recovers from an oversold z-score extreme.
         if prev_z < -entry_z and current_z >= -entry_z:
@@ -181,7 +181,7 @@ class BollingerMeanReversionStrategy(StrategyBase):
         prev_lower = lower.iloc[-2]
 
         timestamp = self._bar_time(data)
-        symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
+        symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
 
         # 价格从下轨反弹
         if prev_close <= prev_lower and current_close > current_lower:

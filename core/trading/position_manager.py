@@ -575,7 +575,9 @@ class PositionManager:
         if position:
             position.update_price(current_price)
             self._dirty = True
-            self._persist_scope_state(force=True)
+            # Price ticks are high-frequency: rely on the 2s throttle instead of
+            # forcing a synchronous full-state disk write on every update.
+            self._persist_scope_state()
         return position
 
     def update_all_prices(self, prices: Dict[str, Dict[str, float]]) -> None:
@@ -587,7 +589,8 @@ class PositionManager:
                 updated = True
         if updated:
             self._dirty = True
-            self._persist_scope_state(force=True)
+            # High-frequency batch price refresh: throttled persist, not forced.
+            self._persist_scope_state()
 
     def get_position(
         self,

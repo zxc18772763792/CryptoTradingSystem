@@ -16475,3 +16475,508 @@ body:has(#ai-agent.active) .container {
         line-height: 1.34;
     }
 }
+
+/* ===== 1920×1080 大屏优化：字号放大 + 宽列布局 =====
+   断点 1600px：兼容 Chrome 滚动条 + Windows 125% 缩放下的实际视口 */
+@media (min-width: 1600px) {
+    /* 容器 */
+    .container {
+        max-width: 1860px;
+        padding: 28px 36px;
+    }
+
+    /* ---- 三栏 Hub：更宽的侧栏和详情列 ---- */
+    #ai-research .ai-hub-layout {
+        grid-template-columns: 380px minmax(0, 1fr) 480px;
+        gap: 20px;
+    }
+
+    #ai-research .ai-hub-sidebar,
+    #ai-research .ai-hub-detail {
+        top: 10px;
+        max-height: min(84vh, 900px);
+    }
+
+    /* ---- 卡片内边距 ---- */
+    #ai-research .ai-sidebar-card,
+    #ai-research .ai-hub-main-header,
+    #ai-research .ai-hub-candidates-panel,
+    #ai-research .ai-hub-detail {
+        padding: 18px 20px !important;
+    }
+
+    /* ---- 区块标题字号 ---- */
+    #ai-research .ai-workspace-section-title { font-size: 20px; }
+    #ai-research .ai-workspace-section-kicker { font-size: 13px; }
+
+    /* ---- Hub 标题 ---- */
+    #ai-research .ai-hub-title { font-size: 18px; }
+    #ai-research .ai-hub-kicker,
+    #ai-research .ai-hub-kicker-detail { font-size: 12px; padding: 5px 12px; }
+
+    /* ---- Hub 副标题 / 描述 / 侧栏说明 ---- */
+    #ai-research .ai-hub-subtitle,
+    #ai-research .ai-hub-candidates-desc,
+    #ai-research .ai-sidebar-caption {
+        font-size: 13px;
+        line-height: 1.65;
+    }
+
+    /* ---- 侧栏 ---- */
+    #ai-research .ai-sidebar-title { font-size: 13px; }
+    #ai-research .ai-sidebar-kicker { font-size: 12px; }
+
+    /* ---- 表单 ---- */
+    #ai-research .ai-sidebar-card label {
+        font-size: 12px;
+        margin-bottom: 5px;
+    }
+    #ai-research .ai-sidebar-card .form-group { margin-bottom: 10px; }
+    #ai-research .ai-sidebar-card .form-row { gap: 10px; }
+    #ai-research .ai-sidebar-card input,
+    #ai-research .ai-sidebar-card select,
+    #ai-research .ai-sidebar-card textarea,
+    #ai-research .ai-hub-toolbar select,
+    #ai-research .ai-hub-toolbar input {
+        min-height: 36px;
+        font-size: 13px;
+        border-radius: 9px;
+    }
+    #ai-research .ai-sidebar-card textarea { min-height: 84px; }
+
+    /* ---- 按钮 ---- */
+    #ai-research .btn-sm {
+        padding: 6px 12px;
+        font-size: 13px;
+    }
+
+    /* ---- 流程步骤提示文字 ---- */
+    #ai-research .ai-auto-step-desc,
+    #ai-research .ai-planner-mode-hint,
+    #ai-research .ai-flow-hint {
+        font-size: 12px;
+        line-height: 1.65;
+    }
+
+    /* ---- Rail 步骤 ---- */
+    #ai-research .ai-auto-trade-rail { margin: 8px 0; }
+    #ai-research .ai-auto-trade-rail-step {
+        min-height: 32px;
+        font-size: 12px;
+    }
+
+    /* ---- Toolbar ---- */
+    #ai-research .ai-hub-main-header {
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 14px;
+    }
+    #ai-research .ai-hub-toolbar { gap: 10px 14px; }
+    #ai-research .ai-hub-toolbar-group {
+        padding: 8px 10px;
+        gap: 8px;
+    }
+
+    /* ---- 候选卡片区 ---- */
+    #ai-research .ai-hub-candidates-panel { max-height: 820px; }
+    #ai-research .ai-candidate-cards {
+        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+        max-height: 700px;
+        gap: 14px;
+    }
+    #ai-research .research-candidate-card {
+        padding: 18px 18px 16px;
+    }
+    #ai-research .cand-card-title { font-size: 15px; }
+    #ai-research .cand-metrics { gap: 10px 12px; }
+    #ai-research .cand-metric-item {
+        padding: 10px 12px;
+        font-size: 13px;
+    }
+    #ai-research .cand-recommendation { font-size: 13px; line-height: 1.6; }
+    #ai-research .ai-empty-hint { min-height: 260px; }
+
+    /* ---- 详情面板 ---- */
+    #ai-research .ai-detail-panel {
+        min-height: 440px;
+        max-height: 680px;
+        padding: 16px 18px;
+    }
+    #ai-research .ai-detail-placeholder { min-height: 340px; }
+
+    /* ---- 焦点卡片 ---- */
+    #ai-research .ai-context-mini-card,
+    #ai-research .ai-focus-card-primary,
+    #ai-research .ai-signal-card,
+    #ai-research .ai-research-live-signals-card {
+        padding: 14px !important;
+    }
+    #ai-research .ai-focus-row {
+        min-height: 62px;
+        padding: 10px 12px;
+    }
+    #ai-research .ai-focus-row span { font-size: 12px; }
+    #ai-research .ai-focus-row strong { font-size: 14px; line-height: 1.5; }
+    #ai-research #ai-research-live-signals-panel { max-height: 110px; }
+
+    /* ---- 流程看板 ---- */
+    #ai-research .ai-flow-console {
+        gap: 12px 16px;
+        padding: 16px 18px !important;
+    }
+    #ai-research .ai-flow-stage {
+        min-height: 140px;
+        padding: 12px 14px 12px 16px;
+    }
+    #ai-research .ai-flow-stage-title { font-size: 14px; }
+    #ai-research .ai-flow-stage-primary,
+    #ai-research .ai-flow-stage-note {
+        font-size: 13px;
+        line-height: 1.52;
+    }
+    #ai-research .ai-chain-summary-item {
+        min-height: 52px;
+        padding: 10px 12px;
+    }
+
+    /* ---- Hero 卡片 ---- */
+    #ai-research .ai-research-hero-card { padding: 20px 22px !important; }
+    #ai-research .ai-research-hero-layout {
+        grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
+        gap: 14px;
+    }
+    #ai-research .ai-top-intro-title { font-size: 20px; }
+    #ai-research .ai-top-intro-subtitle {
+        font-size: 13px;
+        line-height: 1.72;
+        max-width: 72ch;
+    }
+    #ai-research .ai-research-stage-chip {
+        min-height: 88px;
+        padding: 12px 14px;
+    }
+    #ai-research .ai-research-stage-chip span { font-size: 11px; }
+    #ai-research .ai-research-stage-chip strong { font-size: 14px; }
+    #ai-research .ai-research-stage-chip small { font-size: 11px; line-height: 1.5; }
+    #ai-research .ai-top-intro-box,
+    #ai-research .ai-top-intro-mini {
+        padding: 12px 14px;
+    }
+    #ai-research .ai-research-overview-grid {
+        grid-template-columns: minmax(0, 1.44fr) minmax(500px, 0.56fr);
+        gap: 16px;
+    }
+
+    /* ---- Proposal 列表 ---- */
+    #ai-research .pci-name { font-size: 13px; }
+
+    /* ---- 复核面板 ---- */
+    #ai-research .ai-review-panel {
+        grid-template-columns: minmax(300px, 1fr) minmax(520px, 1.4fr) minmax(480px, 1.2fr);
+        gap: 14px;
+        padding: 18px 20px !important;
+    }
+    #ai-research .ai-review-scope-item,
+    #ai-research .ai-review-dynamic-item,
+    #ai-research .ai-review-activity-item {
+        min-height: 54px;
+        padding: 10px 12px;
+    }
+    #ai-research .ai-review-activity-item small { font-size: 12px; }
+}
+
+/* ============================================================
+   AI 研究页 — 极简扁平设计系统（最终覆盖层）
+   目标：去渐变 / 去光晕 / 去重阴影，纯色面 + 1px 细边框，
+        清晰层级，候选对比区为视觉主体
+   ============================================================ */
+#ai-research {
+    --rs-bg:        #0c121b;   /* 页面底 */
+    --rs-surface:   #121b27;   /* 卡片面 */
+    --rs-surface-2: #17212f;   /* 嵌套/悬浮面 */
+    --rs-inset:     #0e1620;   /* 输入/凹陷面 */
+    --rs-border:    #26344a;   /* 常规边框 */
+    --rs-border-2:  #324560;   /* 强调边框 */
+    --rs-accent:    #3aa6ff;   /* 主强调 */
+    --rs-text:      #e8eef9;
+    --rs-sub:       #9fb1c9;
+    --rs-muted:     #7689a4;
+}
+
+/* 1) 去掉页面级装饰光晕 */
+#ai-research::before,
+#ai-research::after,
+#ai-research .ai-top-intro-card-research::after,
+#ai-research .ai-research-hero-card::after,
+#ai-research .ai-research-hero-card::before {
+    display: none !important;
+}
+
+/* 2) 统一卡片：纯色面 + 1px 边框，无渐变无大阴影 */
+#ai-research .card,
+#ai-research .ai-research-hero-card,
+#ai-research .ai-sidebar-card,
+#ai-research .ai-queue-card,
+#ai-research .ai-signal-card,
+#ai-research .ai-focus-card-primary,
+#ai-research .ai-context-mini-card,
+#ai-research .ai-research-live-signals-card,
+#ai-research .ai-flow-console,
+#ai-research .ai-chain-summary-card,
+#ai-research .ai-flow-stage,
+#ai-research .ai-hub-main-header,
+#ai-research .ai-hub-candidates-panel,
+#ai-research .ai-hub-detail,
+#ai-research .ai-detail-panel,
+#ai-research .ai-detail-placeholder,
+#ai-research .research-candidate-card,
+#ai-research .ai-review-panel,
+#ai-research .ai-empty-hint {
+    background: var(--rs-surface) !important;
+    background-image: none !important;
+    border: 1px solid var(--rs-border) !important;
+    border-radius: 10px !important;
+    box-shadow: none !important;
+}
+
+/* 嵌套/凹陷小块 */
+#ai-research .cand-metric-item,
+#ai-research .ai-focus-row,
+#ai-research .ai-chain-summary-item,
+#ai-research .ai-review-scope-item,
+#ai-research .ai-review-dynamic-item,
+#ai-research .ai-review-activity-item,
+#ai-research .ai-top-intro-box,
+#ai-research .ai-top-intro-mini,
+#ai-research .proposal-compact-item,
+#ai-research .ai-auto-trade-rail-step,
+#ai-research .ai-oneclick-entry-card,
+#ai-research .ai-research-stage-chip {
+    background: var(--rs-inset) !important;
+    background-image: none !important;
+    border: 1px solid var(--rs-border) !important;
+    border-radius: 8px !important;
+    box-shadow: none !important;
+}
+
+/* 输入控件 */
+#ai-research input,
+#ai-research select,
+#ai-research textarea {
+    background: var(--rs-inset) !important;
+    background-image: none !important;
+    border: 1px solid var(--rs-border) !important;
+    border-radius: 7px !important;
+    color: var(--rs-text);
+    box-shadow: none !important;
+}
+#ai-research input:focus,
+#ai-research select:focus,
+#ai-research textarea:focus {
+    border-color: var(--rs-accent) !important;
+    outline: none;
+}
+
+/* 3) 徽章/标签：扁平描边 */
+#ai-research .ai-sidebar-badge,
+#ai-research .ai-hub-kicker,
+#ai-research .ai-hub-kicker-detail,
+#ai-research .ai-research-hero-badge,
+#ai-research .ai-review-panel-tag,
+#ai-research .cand-category-badge,
+#ai-research .ai-oneclick-entry-tag {
+    background: var(--rs-inset) !important;
+    background-image: none !important;
+    border: 1px solid var(--rs-border) !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+    color: var(--rs-sub) !important;
+    font-weight: 600;
+}
+
+/* 4) 去掉 flow-stage 左侧渐变条，改纯色细条 */
+#ai-research .ai-flow-stage::before {
+    background: var(--rs-accent) !important;
+    opacity: 0.55 !important;
+    width: 3px !important;
+}
+
+/* 5) 评分条扁平化 */
+#ai-research .cand-score-bar {
+    background: var(--rs-inset) !important;
+    border-radius: 999px !important;
+}
+
+/* 6) 按钮：扁平，主按钮纯色 */
+#ai-research .btn {
+    border-radius: 7px !important;
+    box-shadow: none !important;
+    transition: filter .15s ease, background .15s ease;
+}
+#ai-research .btn:hover { transform: none !important; filter: brightness(1.08); }
+#ai-research .btn-primary {
+    background: var(--rs-accent) !important;
+    background-image: none !important;
+    color: #06121f !important;
+    font-weight: 700;
+}
+#ai-research .btn-sm:not(.btn-primary):not(.btn-danger) {
+    background: var(--rs-surface-2) !important;
+    background-image: none !important;
+    border: 1px solid var(--rs-border) !important;
+    color: var(--rs-text) !important;
+}
+#ai-research .btn-danger {
+    background: #b9434a !important;
+    background-image: none !important;
+    color: #fff !important;
+}
+
+/* 7) 排版层级 */
+#ai-research .ai-top-intro-title,
+#ai-research .ai-workspace-section-title { color: var(--rs-text); }
+#ai-research .ai-top-intro-subtitle,
+#ai-research .ai-hub-subtitle,
+#ai-research .ai-sidebar-caption,
+#ai-research .ai-review-panel-desc { color: var(--rs-sub) !important; }
+
+/* 8) 候选对比区为视觉主体 —— 选中态用强左边框 + 强调边 */
+#ai-research .research-candidate-card {
+    transition: border-color .15s ease, background .15s ease;
+}
+#ai-research .research-candidate-card:hover {
+    border-color: var(--rs-border-2) !important;
+    background: var(--rs-surface-2) !important;
+}
+#ai-research .research-candidate-card.selected {
+    background: var(--rs-surface-2) !important;
+    border: 1px solid var(--rs-accent) !important;
+    border-left: 3px solid var(--rs-accent) !important;
+    box-shadow: none !important;
+}
+
+/* 详情面板：清晰的主操作容器 */
+#ai-research .ai-hub-detail { border-color: var(--rs-border-2) !important; }
+#ai-research .ai-detail-panel { background: var(--rs-inset) !important; }
+
+/* proposal 选中态 */
+#ai-research .proposal-compact-item.selected {
+    background: var(--rs-surface-2) !important;
+    border-color: var(--rs-accent) !important;
+}
+
+/* 9) 大屏：让 Hub（候选对比）占据主导，弱化次要说明区 */
+@media (min-width: 1600px) {
+    /* slim hero 仅一行标题+副标题 */
+    #ai-research .ai-research-hero-card-slim {
+        padding: 14px 20px !important;
+    }
+    #ai-research .ai-research-hero-card-slim .ai-top-intro-title {
+        font-size: 18px;
+        margin-bottom: 4px;
+    }
+    #ai-research .ai-research-hero-card-slim .ai-top-intro-subtitle {
+        font-size: 13px;
+        margin: 0;
+    }
+    /* overview 区不再两栏占高，单行 */
+    #ai-research .ai-research-overview-grid {
+        grid-template-columns: minmax(0, 1fr) !important;
+        gap: 12px;
+    }
+    /* flow-console 收窄为状态条 */
+    #ai-research .ai-flow-console { padding: 12px 16px !important; }
+    #ai-research .ai-flow-stage { min-height: 96px; }
+
+    /* Hub 三栏：中间候选区最大，详情突出 */
+    #ai-research .ai-hub-layout {
+        grid-template-columns: 360px minmax(0, 1.15fr) 500px;
+        gap: 18px;
+    }
+    #ai-research .ai-hub-candidates-panel { max-height: none; }
+    #ai-research .ai-candidate-cards {
+        grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+        max-height: none;
+    }
+    #ai-research .research-candidate-card { padding: 18px !important; }
+    #ai-research .cand-card-title { font-size: 15px; }
+    #ai-research .ai-detail-panel { max-height: 760px; }
+}
+
+/* Keep the AI research cockpit usable on scaled desktop viewports.
+   A 1920px display at 125%-150% OS/browser scaling often reports a CSS
+   viewport below 1500px, so the earlier tablet breakpoint should not collapse
+   the three-column research hub there. */
+@media (min-width: 1180px) and (max-width: 1499px) {
+    #ai-research .ai-hub-layout {
+        grid-template-columns: minmax(270px, 310px) minmax(0, 1fr) minmax(320px, 360px) !important;
+        gap: 12px;
+    }
+
+    #ai-research .ai-hub-sidebar,
+    #ai-research .ai-hub-detail {
+        position: sticky;
+        top: 10px;
+        max-height: calc(100vh - 154px);
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding-right: 2px;
+    }
+
+    #ai-research .ai-detail-panel {
+        max-height: calc(100vh - 250px);
+    }
+}
+
+/* Desktop repair: the useful research cockpit is the hub.  Claude's visual
+   pass made the intro/status strip sit in the middle of the workflow.  Keep
+   the three-column hub immediately after the heading and demote the auxiliary
+   focus/signal cards below the operational panels. */
+@media (min-width: 1180px) {
+    #ai-research .ai-workspace-section-research {
+        grid-template-areas:
+            "head"
+            "hub"
+            "flow"
+            "review"
+            "overview" !important;
+        gap: 12px;
+    }
+
+    #ai-research .ai-hub-layout {
+        grid-area: hub;
+        align-items: start;
+    }
+
+    #ai-research .ai-research-overview-grid {
+        grid-area: overview;
+        grid-template-columns: minmax(0, 1fr) !important;
+        align-items: start;
+    }
+
+    #ai-research .ai-research-hero-card-slim {
+        display: none !important;
+    }
+
+    #ai-research .ai-research-command-stack {
+        grid-template-columns: minmax(360px, 1fr) minmax(260px, 0.72fr) minmax(280px, 0.78fr);
+        grid-template-areas: "focus signal live";
+        align-content: start;
+        gap: 10px;
+    }
+
+    #ai-research .ai-focus-card-primary,
+    #ai-research .ai-signal-card,
+    #ai-research .ai-research-live-signals-card {
+        min-height: 0;
+    }
+
+    #ai-research .ai-focus-summary {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    #ai-research #signal-panel-body,
+    #ai-research #ai-research-live-signals-panel {
+        max-height: 150px;
+        overflow: auto;
+    }
+}

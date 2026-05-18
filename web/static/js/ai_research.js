@@ -288,11 +288,11 @@
   function normalizeUiText(text) {
     let value = repairUtf8Mojibake(text);
     const replacements = [
-      ['Best Params', '最优参数'],
+      ['Best Params', '最佳参数'],
       ['CSV:', 'CSV 文件：'],
       ['Markdown:', 'Markdown 报告：'],
       ['DSR Score', 'DSR 分数'],
-      ['WF Consistency', 'WF 一致性'],
+      ['WF Consistency', '滚动一致性'],
       ['OHLCV only', '仅 OHLCV'],
       ['OHLCV + News + Macro', 'OHLCV + 新闻 + 宏观'],
       ['OHLCV + News', 'OHLCV + 新闻'],
@@ -312,10 +312,29 @@
       ['No lifecycle records', '暂无生命周期记录'],
       ['No experiment runs', '暂无实验运行记录'],
       ['No equity curve sample.', '暂无资金曲线样本。'],
+      ['Effective Sharpe source:', '有效夏普来源：'],
+      ['Validation Decision Trace', '验证决策链路'],
+      ['Decision Trace', '决策链路'],
+      ['Root blocker:', '关键门槛：'],
+      ['Gate ladder', '检查链路'],
+      ['No gates recorded.', '暂无检查记录。'],
+      ['Send to Autonomy Watch', '发送到自治观察'],
+      ['Accepted', '已采纳'],
+      ['Rejected Drafts', '已淘汰草案'],
+      ['Rejected', '已淘汰'],
+      ['Challengers', '挑战方案'],
+      ['Champion:', '主力方案：'],
+      ['Champion', '主力方案'],
+      ['Mutation:', '变体说明：'],
+      ['Critique:', '评审意见：'],
+      ['Base', '基准'],
+      ['trials', '次试验'],
+      ['live_candidate', '实盘候选'],
+      ['paper_running', '纸盘运行'],
+      ['live_running', '实盘运行'],
+      ['shadow_running', '影子跟踪'],
       ['run:', '运行 ID：'],
       ['Research:', '回放模式：'],
-      ['Macro On', '宏观开启'],
-      ['Macro Off', '宏观关闭'],
       ['News ', '新闻 '],
       ['鍔犲叆瀵规瘮', '加入对比'],
       ['瀵规瘮', '对比'],
@@ -330,18 +349,9 @@
       ['AI寤鸿', 'AI建议'],
       ['璇︽儏', '详情'],
       ['鎼滅储瑙掕壊', '搜索角色'],
-      ['鐮旂┒瀹屾垚锛屼絾鏈€氳繃楠岃瘉', '研究完成，但未通过验证'],
-      ['鐮旂┒浠诲姟宸插畬鎴愶紝宸ヤ綔鍙扮姸鎬佸凡鏇存柊', '研究任务已完成，工作台状态已更新'],
-      ['杩愯鐮旂┒', '运行研究'],
-      ['鐮旂┒鐩爣锛堝彲鐣欑┖鑷姩鐢熸垚锛?', '研究目标（可留空自动生成）'],
-      ['鍏堣 AI 鍒ゆ柇褰撳墠甯傚満鐘舵€佷笌閫傞厤绛栫暐', '先让 AI 判断当前市场状态与适配策略'],
-      ['椤甸潰鏃跺尯锛氫笂娴锋椂闂?(UTC+8)', '页面时区：上海时间 (UTC+8)'],
-      ['鍊欓€夊洖濉?', '候选回填'],
-      ['璇ユ潯鐩敱鍊欓€夌粨鏋滃洖濉?', '该条目由候选结果回填'],
-      ['棰勭儹鐮旂┒缂撳瓨', '预热研究缓存'],
-      ['鐮旂┒缂撳瓨宸查鐑?', '研究缓存已预热'],
-      ['鍗曟璇曡窇宸茶Е鍙?', '单次试跑已触发'],
-      ['宸叉湁涓€杞湪杩愯锛屾墜鍔ㄨЕ鍙戝凡鎺掗槦', '已有一轮在运行，手动触发已排队'],
+      ['鏈€浼樺弬鏁?', '最佳参数'],
+      ['鍏辫瘯楠?', '共试验 '],
+      ['缁勫弬鏁扮粍鍚?', ' 组参数组合'],
     ];
     replacements.forEach(([from, to]) => {
       value = value.split(from).join(to);
@@ -1213,6 +1223,78 @@
     return String((state.runtimeConfig && state.runtimeConfig.trading_mode) || '').trim().toLowerCase();
   }
 
+  function runtimeTargetText(value) {
+    const key = String(value || '').trim();
+    return {
+      paper: '纸盘运行',
+      live_candidate: '实盘候选',
+      live_running: '实盘运行',
+      shadow: '影子跟踪',
+      auto: '自动选择',
+    }[key] || (key || '--');
+  }
+
+  function traceStatusText(value) {
+    const key = String(value || '').trim().toLowerCase();
+    return {
+      pass: '通过',
+      warn: '预警',
+      block: '阻断',
+      downgrade: '降级',
+      shadow: '影子观察',
+      degraded: '降级',
+      skip: '跳过',
+      active: '启用',
+      idle: '未参与',
+      unavailable: '不可用',
+    }[key] || (value ? String(value) : '--');
+  }
+
+  function traceLabelText(value) {
+    const key = String(value || '').trim();
+    return {
+      'Decision Trace': '决策链路',
+      'Validation Decision Trace': '验证决策链路',
+      'LLM component': 'LLM 组件',
+      'ML component': '机器学习组件',
+      'Factor component': '因子组件',
+      'Derivatives component': '衍生品组件',
+      'Risk gate': '风控检查',
+      'Approval threshold': '人工确认阈值',
+      'component_llm': 'LLM 组件',
+      'component_ml': '机器学习组件',
+      'component_factor': '因子组件',
+      'component_derivatives': '衍生品组件',
+      'risk_gate': '风控检查',
+      'approval_threshold': '人工确认阈值',
+      none: '无',
+    }[key] || key;
+  }
+
+  function traceReasonText(value) {
+    const key = String(value || '').trim();
+    return {
+      'component available': '组件可用',
+      'risk gate passed': '风控检查通过',
+      'manual approval recommended below high-confidence threshold': '置信度低于高置信阈值，建议人工确认',
+      'approval threshold passed': '已达到自动通过阈值',
+      'shadow_only_context': '仅作为影子上下文参与',
+      'shadow_penalty_applied': '影子上下文已施加置信度折减',
+      'disabled_for_fast_scan': '快速扫描中已跳过',
+    }[key] || key;
+  }
+
+  function sharpeSourceText(value) {
+    const key = String(value || '').trim();
+    return {
+      oos: '样本外',
+      in_sample: '样本内',
+      is: '样本内',
+      wf: '滚动验证',
+      walk_forward: '滚动验证',
+    }[key] || (key || '--');
+  }
+
   function getLiveDecisionRuntimeConfig() {
     return (state.runtimeConfig && state.runtimeConfig.ai_live_decision) || null;
   }
@@ -1690,20 +1772,20 @@
   function searchDraftStatusMeta(status) {
     const key = String(status || 'seed').trim() || 'seed';
     return {
-      champion: { label: 'Champion', fg: '#20bf78', bg: '#143224', border: '#245b42' },
-      challenger: { label: 'Challenger', fg: '#7dd3fc', bg: '#10263a', border: '#294d69' },
-      accepted: { label: 'Accepted', fg: '#c2d0e8', bg: '#1d2b3d', border: '#32475f' },
-      rejected: { label: 'Rejected', fg: '#f0b429', bg: '#35210f', border: '#6c431b' },
-      seed: { label: 'Seed', fg: '#9fb1c9', bg: '#1a2436', border: '#32475f' },
-    }[key] || { label: key || 'Seed', fg: '#9fb1c9', bg: '#1a2436', border: '#32475f' };
+      champion: { label: '主力方案', fg: '#20bf78', bg: '#143224', border: '#245b42' },
+      challenger: { label: '挑战方案', fg: '#7dd3fc', bg: '#10263a', border: '#294d69' },
+      accepted: { label: '已采纳', fg: '#c2d0e8', bg: '#1d2b3d', border: '#32475f' },
+      rejected: { label: '已淘汰', fg: '#f0b429', bg: '#35210f', border: '#6c431b' },
+      seed: { label: '种子方案', fg: '#9fb1c9', bg: '#1a2436', border: '#32475f' },
+    }[key] || { label: key || '种子方案', fg: '#9fb1c9', bg: '#1a2436', border: '#32475f' };
   }
 
   function candidateSearchRoleMeta(role) {
     const key = String(role || '').trim();
     if (!key) return null;
     return {
-      champion: { label: 'Champion', fg: '#20bf78', bg: '#143224', border: '#245b42' },
-      challenger: { label: 'Challenger', fg: '#7dd3fc', bg: '#10263a', border: '#294d69' },
+      champion: { label: '主力方案', fg: '#20bf78', bg: '#143224', border: '#245b42' },
+      challenger: { label: '挑战方案', fg: '#7dd3fc', bg: '#10263a', border: '#294d69' },
     }[key] || { label: key, fg: '#9fb1c9', bg: '#1a2436', border: '#32475f' };
   }
 
@@ -3056,21 +3138,21 @@
       const status = String(g?.status || 'pass');
       const color = status === 'block' ? '#e05260' : status === 'downgrade' ? '#f59e0b' : status === 'shadow' || status === 'degraded' ? '#7e92b2' : '#20bf78';
       return `<div style="display:grid;grid-template-columns:110px 1fr;gap:8px;padding:5px 0;border-top:1px solid #22324a;">
-        <div style="font-size:11px;color:${color};font-weight:700;">${esc(status)}</div>
+        <div style="font-size:11px;color:${color};font-weight:700;">${esc(traceStatusText(status))}</div>
         <div>
-          <div style="font-size:12px;color:#c2d0e8;">${esc(g?.label || g?.code || '')}</div>
-          <div style="font-size:11px;color:#7e92b2;">${esc(g?.reason || '')}</div>
+          <div style="font-size:12px;color:#c2d0e8;">${esc(traceLabelText(g?.label || g?.code || ''))}</div>
+          <div style="font-size:11px;color:#7e92b2;">${esc(traceReasonText(g?.reason || ''))}</div>
         </div>
       </div>`;
     }).join('');
     return `<div class="decision-trace-panel" style="margin-bottom:14px;padding:10px;background:#101a29;border:1px solid #263a56;border-radius:6px;">
       <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:6px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;">${esc(title)}</div>
-        <div style="font-size:11px;color:#f59e0b;">Root blocker: ${esc(rootLabel)}</div>
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;">${esc(traceLabelText(title))}</div>
+        <div style="font-size:11px;color:#f59e0b;">关键门槛：${esc(traceLabelText(rootLabel))}</div>
       </div>
       <details>
-        <summary style="font-size:12px;color:#7e92b2;cursor:pointer;">Gate ladder (${gates.length})</summary>
-        <div style="margin-top:6px;">${gateRows || '<div style="font-size:12px;color:#6b7fa0;">No gates recorded.</div>'}</div>
+        <summary style="font-size:12px;color:#7e92b2;cursor:pointer;">检查链路（${gates.length} 项）</summary>
+        <div style="margin-top:6px;">${gateRows || '<div style="font-size:12px;color:#6b7fa0;">暂无检查记录。</div>'}</div>
       </details>
     </div>`;
   }
@@ -3201,12 +3283,12 @@
       ? (riskScore >= 70 ? 'vp-ok' : riskScore >= 50 ? 'vp-warn' : 'vp-fail')
       : 'vp-na';
     const steps = [
-      { label: 'Data', cls: dataReady },
+      { label: '数据', cls: dataReady },
       { label: 'IS', cls: _scoreState(summary.is_score, 0.2, 0.8) },
       { label: 'OOS', cls: _scoreState(summary.oos_score, 0.2, 0.8) },
       { label: 'WF', cls: _scoreState(summary.wf_stability, 0.4, 0.7) },
       { label: 'DSR', cls: _scoreState(summary.dsr_score, 0.25, 0.5) },
-      { label: 'Risk', cls: riskState },
+      { label: '风控', cls: riskState },
     ];
     return `<div class="vp-bar">${steps.map((step, idx) => {
       const connector = idx < steps.length - 1 ? '<span class="vp-arrow">→</span>' : '';
@@ -3250,10 +3332,10 @@
     );
     return `<div class="appr-meta">
       <div class="appr-metrics">
-        <span class="appr-m"><span class="appr-ml">Sharpe</span><b>${fmt2(sharpe)}</b></span>
-        <span class="appr-m"><span class="appr-ml">OOS</span><b>${fmt2(oos)}</b></span>
+        <span class="appr-m"><span class="appr-ml">夏普</span><b>${fmt2(sharpe)}</b></span>
+        <span class="appr-m"><span class="appr-ml">样本外</span><b>${fmt2(oos)}</b></span>
         <span class="appr-m"><span class="appr-ml">DSR</span><b>${fmtPct(dsr)}</b></span>
-        <span class="appr-m"><span class="appr-ml">WF</span><b>${fmtPct(wf)}</b></span>
+        <span class="appr-m"><span class="appr-ml">滚动</span><b>${fmtPct(wf)}</b></span>
       </div>
       ${eq.length > 1 ? `<div class="appr-spark">${_inlineSparkline(eq)}</div>` : ''}
     </div>`;
@@ -3300,7 +3382,7 @@
       : '';
     const optMethod = (cand?.metadata && cand.metadata.opt_method) || '';
     const optBadge = optMethod
-      ? `<span class="cand-badge" style="background:#1a3a5a;color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;">${optMethod === 'scipy_lhs' ? 'Bayes' : 'Grid'}</span>`
+      ? `<span class="cand-badge" style="background:#1a3a5a;color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;">${optMethod === 'scipy_lhs' ? '贝叶斯' : '网格'}</span>`
       : '';
     const corrFiltered = cand?.metadata?.correlation_filtered;
     const corrWith = cand?.metadata?.correlated_with || '';
@@ -3312,7 +3394,7 @@
       : '';
     const trials = cand?.metadata?.best?.optimization_trials;
     const paramsBadge = trials > 0
-      ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:#a78bfa22;color:#a78bfa;border:1px solid #a78bfa44;">${trials} trials</span>`
+      ? `<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:#a78bfa22;color:#a78bfa;border:1px solid #a78bfa44;">${trials} 次试验</span>`
       : '';
     let signalBadge = '';
     const sigData = state.latestSignals[sym];
@@ -3500,8 +3582,8 @@
     const wfConsist = vs?.wf_consistency != null ? `${(Number(vs.wf_consistency)*100).toFixed(0)}% folds+` : '--';
     const validationHtml = `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">IS / OOS / \u6eda\u52a8\u9a8c\u8bc1</div>
-        <div style="font-size:11px;color:#7e92b2;margin-bottom:6px;">Effective Sharpe source: ${esc(vs?.effective_sharpe_source || (vs?.oos_score != null ? 'oos' : 'in_sample'))}</div>
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;margin-bottom:6px;">样本内 / 样本外 / 滚动验证</div>
+        <div style="font-size:11px;color:#7e92b2;margin-bottom:6px;">有效夏普来源：${esc(sharpeSourceText(vs?.effective_sharpe_source || (vs?.oos_score != null ? 'oos' : 'in_sample')))}</div>
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;">
           <div style="text-align:center;padding:6px;background:#1a2436;border-radius:4px;">
             <div style="font-size:10px;color:#6b7fa0;">IS\u590f\u666e</div>
@@ -3751,7 +3833,7 @@
 
       <div style="margin-bottom:14px;">
         <button class="btn btn-sm" id="btn-autonomy-handoff" style="font-size:12px;width:100%;margin-bottom:8px;color:#5ec8ff;border-color:#2a6f97;">
-          Send to Autonomy Watch
+          发送到自治观察
         </button>
         <button class="btn btn-sm" id="btn-order-preview" style="font-size:12px;width:100%;">
           \u751f\u6210\u8ba2\u5355\u9884\u89c8
@@ -4058,8 +4140,8 @@
       ['交易对', (c) => esc(String(c?.symbol || '--'))],
       ['周期', (c) => esc(String(c?.timeframe || '--'))],
       ['综合评分', (c) => Number(c?.score || 0).toFixed(1)],
-      ['IS Sharpe', (c) => fmtNum(c?.validation_summary?.is_score, 2)],
-      ['OOS Sharpe', (c) => fmtNum(c?.validation_summary?.oos_score, 2)],
+      ['样本内夏普', (c) => fmtNum(c?.validation_summary?.is_score, 2)],
+      ['样本外夏普', (c) => fmtNum(c?.validation_summary?.oos_score, 2)],
       ['WF 稳定', (c) => c?.validation_summary?.wf_stability != null ? `${(Number(c.validation_summary.wf_stability) * 100).toFixed(0)}%` : '--'],
       ['DSR', (c) => c?.validation_summary?.dsr_score != null ? `${(Number(c.validation_summary.dsr_score) * 100).toFixed(0)}%` : '--'],
       ['风险评分', (c) => fmtNum(c?.validation_summary?.risk_score, 0)],
@@ -4141,7 +4223,7 @@
           <div class="ps-param">${esc(row.param)}</div>
           <div class="ps-bars">
             ${bar(row.sharpe_low, '#f87171', '-20%')}
-            ${bar(row.sharpe_base, '#60a5fa', 'Base')}
+            ${bar(row.sharpe_base, '#60a5fa', '??')}
             ${bar(row.sharpe_high, '#4ade80', '+20%')}
           </div>
         </div>`;
@@ -4159,7 +4241,7 @@
   }
 
   function registerModeActionText(mode) {
-    return normalizeRegisterMode(mode) === 'live_candidate' ? '确认注册实盘候选' : '确认注册纸盘';
+    return normalizeRegisterMode(mode) === 'live_candidate' ? '确认注册为实盘候选' : '确认注册为纸盘';
   }
 
   function registerModeHintText(mode, runtimeTradingMode) {
@@ -4509,7 +4591,7 @@ ${confirmHint}`,
     list.innerHTML = normalizeUiText(items.map(cand => {
       const cid      = esc(cand?.candidate_id || '');
       const strategy = esc(cand?.strategy || '--');
-      const target   = esc(cand?.metadata?.recommended_runtime_target || cand?.promotion?.decision || 'paper');
+      const target   = esc(runtimeTargetText(cand?.metadata?.recommended_runtime_target || cand?.promotion?.decision || 'paper'));
       const score    = Number(cand?.score || 0);
       const color    = scoreColor(score);
       return `<div class="approval-item" style="padding:8px 6px;border-bottom:1px solid rgba(255,255,255,.05);font-size:12px;">

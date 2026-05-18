@@ -347,9 +347,144 @@
   function decisionModeLabel(mode) {
     const value = String(mode || '').trim().toLowerCase();
     if (value === 'shadow') return '只提示';
-    if (value === 'execute') return '直接执行';
+    if (value === 'execute') return '满足纪律后执行';
     if (value === 'enforce') return '可拦截';
     return String(mode || '--');
+  }
+
+  function tradingModeLabel(mode) {
+    const value = String(mode || '').trim().toLowerCase();
+    if (value === 'live') return '实盘引擎';
+    if (value === 'paper') return '纸盘引擎';
+    return value ? `${value} 引擎` : '交易引擎未知';
+  }
+
+  function normalizeAgentMode(mode) {
+    const value = String(mode || '').trim().toLowerCase();
+    return value || 'shadow';
+  }
+
+  function normalizeAgentTradingMode(status = {}, cfg = {}) {
+    const candidates = [
+      cfg.trading_mode,
+      cfg.paper_longrun_safety?.trading_mode,
+      cfg.safety?.trading_mode,
+      status.trading_mode,
+      status.safety?.trading_mode,
+      status.last_diagnostics?.trading_mode,
+      status.last_diagnostics?.account_risk?.trading_mode,
+    ];
+    for (const item of candidates) {
+      const value = String(item || '').trim().toLowerCase();
+      if (value) return value;
+    }
+    return 'paper';
+  }
+
+  function agentProviderPolicy(status = {}, cfg = {}) {
+    const provider = String(cfg.provider || status.safety?.provider || cfg.safety?.provider || '').trim().toLowerCase();
+    const providers = cfg.providers && typeof cfg.providers === 'object' ? cfg.providers : {};
+    const providerMeta = provider ? (providers[provider] || providers[providerDisplayName(provider)] || {}) : {};
+    const candidates = [
+      cfg.safety?.provider_live_policy,
+      status.safety?.provider_live_policy,
+      providerMeta?.autonomous_live_execution,
+    ];
+    for (const item of candidates) {
+      if (item && typeof item === 'object') return item;
+    }
+    return {};
+  }
+
+  function agentReasonCodes(status = {}, cfg = {}) {
+    return [
+      ...(Array.isArray(cfg.safety?.reason_codes) ? cfg.safety.reason_codes : []),
+      ...(Array.isArray(status.safety?.reason_codes) ? status.safety.reason_codes : []),
+      ...(Array.isArray(cfg.paper_longrun_safety?.reason_codes) ? cfg.paper_longrun_safety.reason_codes : []),
+      ...(Array.isArray(status.paper_longrun_safety?.reason_codes) ? status.paper_longrun_safety.reason_codes : []),
+    ].map((item) => String(item || '').trim().toLowerCase()).filter(Boolean);
+  }
+
+  function isAgentProviderLiveRestricted(status = {}, cfg = {}) {
+    const policy = agentProviderPolicy(status, cfg);
+    if (policy && typeof policy === 'object' && Boolean(policy.restricted)) return true;
+    const statusText = String(policy?.status || '').trim().toLowerCase();
+    if (statusText === 'restricted') return true;
+    const codes = agentReasonCodes(status, cfg);
+    return codes.includes('provider_live_execution_restricted') || codes.includes('provider_live_trading_not_permitted');
+  }
+
+  function buildAgentExecutionReality(status = {}, cfg = {}) {
+    const mode = normalizeAgentMode(cfg.mode || 'shadow');
+    const tradingMode = normalizeAgentTradingMode(status, cfg);
+    const running = Boolean(status.running || cfg.safety?.running);
+    const enabled = cfg.enabled !== false;
+    const allowLive = Boolean(cfg.allow_live);
+    const providerRestricted = allowLive && isAgentProviderLiveRestricted(status, cfg);
+    const providerName = providerDisplayName(cfg.provider || status.safety?.provider || cfg.safety?.provider || '-');
+    const configParts = [
+      decisionModeLabel(mode),
+      tradingModeLabel(tradingMode),
+      `实盘权限:${allowLive ? '开' : '关'}`,
+      providerName,
+    ];
+    if (providerRestricted) configParts.push('provider受限');
+
+    let label = '执行边界未知';
+    let tone = 'warn';
+    let moneyAtRisk = false;
+    if (!enabled) {
+      label = '未启用：不会下单';
+      tone = 'warn';
+    } else if (!running) {
+      if (mode === 'execute' && tradingMode === 'live' && allowLive && !providerRestricted) {
+        label = '未运行：实盘配置已开';
+        tone = 'danger';
+      } else if (mode === 'execute' && tradingMode === 'live' && providerRestricted) {
+        label = '未运行：实盘受限';
+        tone = 'warn';
+      } else {
+        label = '未运行：不会下单';
+        tone = 'warn';
+      }
+    } else if (mode !== 'execute') {
+      label = '只提示：不会下单';
+      tone = 'info';
+    } else if (tradingMode === 'paper') {
+      label = '纸盘执行中';
+      tone = 'info';
+    } else if (tradingMode === 'live' && !allowLive) {
+      label = '实盘引擎：代理禁止下单';
+      tone = 'danger';
+    } else if (tradingMode === 'live' && providerRestricted) {
+      label = '受限无法实盘执行';
+      tone = 'warn';
+    } else if (tradingMode === 'live' && allowLive) {
+      label = '实盘执行中';
+      tone = 'danger';
+      moneyAtRisk = true;
+    }
+
+    return {
+      label,
+      detail: configParts.join(' / '),
+      tone,
+      mode,
+      tradingMode,
+      allowLive,
+      providerRestricted,
+      moneyAtRisk,
+    };
+  }
+
+  function agentSubmissionScopeLabel(reality = {}) {
+    const tradingMode = String(reality.tradingMode || '').trim().toLowerCase();
+    if (tradingMode === 'live' && reality.moneyAtRisk) return '实盘提交';
+    if (tradingMode === 'live' && !reality.allowLive) return '实盘禁提交';
+    if (tradingMode === 'live' && reality.providerRestricted) return '受限提交';
+    if (tradingMode === 'live') return '实盘信号';
+    if (tradingMode === 'paper') return '纸盘提交';
+    return '提交信号';
   }
 
   function decisionActionText(action) {
@@ -495,13 +630,18 @@
     const components = signal.components && typeof signal.components === 'object' ? signal.components : {};
     const aggregatedAt = String(signal.aggregated_at || signal.timestamp || '').trim();
     const marketDataAt = String(signal.market_data_last_bar_at || signal.last_bar_at || '').trim();
-    const componentParts = ['llm', 'ml', 'factor']
+    const componentParts = ['llm', 'ml', 'factor', 'derivatives']
       .map((key) => {
         const item = components[key] || {};
         const itemDirection = String(item.direction || 'FLAT').trim().toUpperCase() || 'FLAT';
         const itemConfidence = Number(item.confidence);
         if (!Number.isFinite(itemConfidence)) return '';
-        return `${key.toUpperCase()} ${itemDirection} ${formatPct(itemConfidence, 0)}`;
+        const weight = Number(item.effective_weight ?? item.weight);
+        const contributionText = Number.isFinite(weight)
+          ? (weight > 0 ? `w${formatPct(weight, 0)}` : (item.shadow_only ? '影子/0权重' : '0权重'))
+          : '';
+        const label = key === 'derivatives' ? 'DERIV' : key.toUpperCase();
+        return `${label} ${itemDirection} ${formatPct(itemConfidence, 0)}${contributionText ? ` ${contributionText}` : ''}`;
       })
       .filter(Boolean);
     if (componentParts.length) parts.push(componentParts.join(' / '));
@@ -819,6 +959,8 @@
     const scan = ranking?.scan || {};
     const selectedSymbol = String(scan.selected_symbol || cfg.symbol || '--');
     const selectionReason = symbolSelectionReasonText(scan.selection_reason || 'manual_symbol');
+    const reality = buildAgentExecutionReality(status, cfg);
+    const submissionScope = agentSubmissionScopeLabel(reality);
     const nextRunText = fmtAgentTs(status.next_run_at);
     const latencyText = formatLatencyMs(status.last_latency_ms);
     const intervalSec = Number(cfg.interval_sec || 0);
@@ -826,11 +968,12 @@
     const modelFeedback = describeModelFeedback(status, diagnostics);
     const executionCost = describeExecutionCost(diagnostics);
     const currentAction = String(lastDecision.action || 'hold').trim().toLowerCase();
+    const lastError = String(status.last_error || '').trim();
     const actionText = lastDecision.action
       ? `${decisionActionText(lastDecision.action)} / ${formatNumber(decisionConfidence * 100, 0)}%`
       : '暂无决策';
     const latestActionText = lastExecution.submitted
-      ? `已提交 / ${decisionActionText(lastDecision.action || '')}`
+      ? `${submissionScope} / ${decisionActionText(lastDecision.action || '')}`
       : compactText(lastExecution.reason || '最近未提交', 56);
     const cycleText = nextRunText !== '--'
       ? nextRunText
@@ -838,20 +981,22 @@
     const cycleSubText = latencyText !== '--'
       ? `上次耗时 ${latencyText}${intervalSec > 0 ? ` / 周期 ${intervalSec}s` : ''}`
       : (intervalSec > 0 ? `轮询周期 ${intervalSec}s` : '等待耗时数据');
-    const stateTone = running ? 'good' : (status.last_error ? 'danger' : 'warn');
+    const stateTone = lastError ? 'danger' : (running ? 'good' : 'warn');
     const decisionTone = currentAction === 'hold'
       ? (modelFeedback.tone || 'warn')
       : 'good';
     const modelTone = modelFeedback.tone || executionCost.tone || 'info';
-    const modeText = `${decisionModeLabel(cfg.mode || 'execute')} / ${cfg.allow_live ? '允许实盘' : '仅纸盘'}`;
-    const modeSubText = `${symbolModeLabel(cfg.symbol_mode || 'manual')} / ${providerDisplayName(cfg.provider || '-')}`;
+    const modeText = reality.label;
+    const modeSubText = `${reality.detail} / ${symbolModeLabel(cfg.symbol_mode || 'manual')}`;
     const stateText = running ? '运行中' : '未启动';
     const stateSubText = running
-      ? `${Number(status.tick_count || 0)} 轮决策 / 已提交 ${Number(status.submitted_count || 0)} 次`
+      ? `${Number(status.tick_count || 0)} 轮决策 / ${submissionScope} ${Number(status.submitted_count || 0)} 次`
       : (status.last_run_at ? `最后运行 ${fmtAgentTs(status.last_run_at)}` : '等待首次运行');
     const cockpitNote = running
-      ? `${selectedSymbol} 正在被持续盯盘，最近动作 ${latestActionText}`
-      : (status.last_error ? compactText(status.last_error, 120) : '代理当前未运行，可以先单次试跑再决定是否长期开启。');
+      ? (lastError
+        ? `${selectedSymbol} 仍在运行，最近错误：${compactText(lastError, 96)}`
+        : `${selectedSymbol} 正在被持续盯盘，最近动作 ${latestActionText}`)
+      : (lastError ? compactText(lastError, 120) : '代理当前未运行，可以先单次试跑再决定是否长期开启。');
 
     setAgentCockpitBadge(
       'ai-agent-cockpit-state-badge',
@@ -884,7 +1029,7 @@
       'ai-agent-cockpit-mode-sub',
       modeText,
       modeSubText,
-      cfg.allow_live ? 'warn' : 'info'
+      reality.tone
     );
     setAgentCockpitStat(
       'ai-agent-cockpit-decision-card',
@@ -931,14 +1076,16 @@
     const tickCount = Number(status.tick_count || 0);
     const nextRunAt = fmtAgentTs(status.next_run_at);
     const lastLatencyText = formatLatencyMs(status.last_latency_ms);
+    const reality = buildAgentExecutionReality(status, cfg);
+    const submissionScope = agentSubmissionScopeLabel(reality);
     const confidence = Number(lastDecision.confidence || 0);
     const latestDecisionText = lastDecision.action
       ? `${decisionActionText(lastDecision.action)} / ${(confidence * 100).toFixed(0)}%`
       : '暂无决策';
     const latestActionText = lastExecution.submitted
-      ? `已提交 / ${decisionActionText(lastDecision.action || '')}`
+      ? `${submissionScope} / ${decisionActionText(lastDecision.action || '')}`
       : compactText(lastExecution.reason || '未提交', 42);
-    const modeText = `${decisionModeLabel(cfg.mode || 'execute')} / ${cfg.allow_live ? '允许实盘' : '仅纸盘'}`;
+    const modeText = `${reality.label} · ${reality.detail}`;
     const statusText = running
       ? `运行中 · ${tickCount} 轮${intervalSec > 0 ? ` / ${intervalSec}s` : ''}${nextRunAt !== '--' ? ` · 下次 ${nextRunAt}` : ''}`
       : '未启动';
@@ -1000,13 +1147,19 @@
     const agent = snapshot.autonomous_agent || {};
     const coinglass = snapshot.coinglass || {};
     const provider = agent.provider || snapshot.ai_live_decision?.provider || '--';
+    const reality = buildAgentExecutionReality(
+      { running: Boolean(agent.safety?.running), safety: agent.safety || {} },
+      { ...agent, trading_mode: snapshot.trading_mode }
+    );
     banner.innerHTML = `
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
         <strong>Operating Mode</strong>
+        <span>real=${esc(reality.label)}</span>
         <span>trading=${esc(snapshot.trading_mode || '--')}</span>
         <span>agent=${esc(agent.mode || '--')}</span>
         <span>provider=${esc(provider)}</span>
         <span>allow_live=${agent.allow_live ? 'true' : 'false'}</span>
+        ${reality.providerRestricted ? '<span>provider_restricted=true</span>' : ''}
         <span>derivatives=${coinglass.live_gating_enabled ? 'live' : 'shadow'}</span>
         <span>degraded=${actionableDegradations.length}</span>
         ${advisoryCount ? `<span>advisory=${advisoryCount}</span>` : ''}
@@ -1730,20 +1883,24 @@
     const modelFeedback = describeModelFeedback(status, status.last_diagnostics || {});
     const modelOutput = describeModelOutput(status.last_diagnostics || {});
     const executionCost = describeExecutionCost(status.last_diagnostics || {});
+    const reality = buildAgentExecutionReality(status, cfg);
+    const submissionScope = agentSubmissionScopeLabel(reality);
 
     info.innerHTML = `
       <div class="ai-agent-info-grid">
         <span>模型</span>
         <span>${esc(modelText)}</span>
-        <span>执行模式</span>
-        <span>${esc(decisionModeLabel(cfg.mode || 'execute'))} / ${esc(cfg.allow_live ? '允许实盘' : '仅纸盘')}</span>
+        <span>真实执行态</span>
+        <span class="${toneClass(reality.tone)}">${esc(reality.label)}</span>
+        <span>执行配置</span>
+        <span>${esc(reality.detail)}</span>
         <span>币种模式</span>
         <span>${esc(symbolModeLabel(cfg.symbol_mode || 'manual'))}</span>
         <span>当前盯盘</span>
         <span>${esc(activeSymbol)}</span>
         <span>轮询次数</span>
         <span>${esc(Number(status.tick_count || 0))}</span>
-        <span>已提交信号</span>
+        <span>${esc(submissionScope)}</span>
         <span>${esc(Number(status.submitted_count || 0))}</span>
         <span>选币原因</span>
         <span>${esc(selectionReason)}</span>
@@ -2349,10 +2506,14 @@
           : `${AGENT_STATUS_API}?warm_preview=0`;
         const response = await rootApi(statusUrl, { timeoutMs });
         lastStatusSnapshot = response?.status || {};
-        lastConfigSnapshot = response?.config || {};
-        renderAgentPanel(response?.status || {}, response?.config || {});
+        lastConfigSnapshot = {
+          ...(response?.config || {}),
+          trading_mode: response?.config?.trading_mode || response?.trading_mode,
+          paper_longrun_safety: response?.paper_longrun_safety || response?.config?.paper_longrun_safety,
+        };
+        renderAgentPanel(lastStatusSnapshot, lastConfigSnapshot);
         refreshAgentOperatingModeBanner({ preserveExisting: true }).catch(() => {});
-        if (shouldAutoRefreshAgentRanking(response?.status || {}, response?.config || {})) {
+        if (shouldAutoRefreshAgentRanking(lastStatusSnapshot, lastConfigSnapshot)) {
           lastRankingAutoRefreshAt = Date.now();
           loadAgentSymbolRanking(true, {
             timeoutMs: 90000,

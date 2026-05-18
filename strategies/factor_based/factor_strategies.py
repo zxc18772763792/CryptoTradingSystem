@@ -29,7 +29,7 @@ class FactorStrategyBase(StrategyBase):
 
     def _get_symbol(self, data: pd.DataFrame) -> str:
         """Extract symbol from data."""
-        return data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
+        return str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
 
     def _create_signal(
         self,

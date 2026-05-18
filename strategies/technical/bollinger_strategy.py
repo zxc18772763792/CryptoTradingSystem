@@ -65,7 +65,7 @@ class BollingerBandsStrategy(StrategyBase):
         prev_lower = lower.iloc[-2]
 
         timestamp = datetime.now(timezone.utc)
-        symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
+        symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
 
         # 计算价格在布林带中的位置
         band_width = current_upper - current_lower
@@ -181,7 +181,7 @@ class BollingerSqueezeStrategy(StrategyBase):
         stop_loss_pct = max(0.0, float(self.params.get("stop_loss_pct", 0.0) or 0.0))
 
         timestamp = datetime.now(timezone.utc)
-        symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
+        symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
 
         # Detect a breakout only after the previous bar was in a squeeze regime.
         # This keeps the strategy aligned with the configured squeeze threshold.

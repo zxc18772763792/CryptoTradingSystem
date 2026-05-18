@@ -2452,6 +2452,8 @@ def _validate_df(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"数据缺失字段: {','.join(missing_cols)}")
 
     out = out[["open", "high", "low", "close", "volume"]]
+    for column in ["open", "high", "low", "close", "volume"]:
+        out[column] = pd.to_numeric(out[column], errors="coerce")
 
     # Sanitize corrupt bars: negative/zero prices, inverted candles, negative volume
     n_before = len(out)
@@ -2463,6 +2465,25 @@ def _validate_df(df: pd.DataFrame) -> pd.DataFrame:
     n_removed = n_before - len(out)
     if n_removed > 0:
         logger.warning(f"_validate_df: removed {n_removed} corrupt bars ({n_removed/max(n_before,1)*100:.1f}%)")
+
+    if not out.empty:
+        flat_zero = (
+            out["volume"].eq(0)
+            & out["open"].eq(out["high"])
+            & out["open"].eq(out["low"])
+            & out["open"].eq(out["close"])
+        )
+        if bool(flat_zero.any()):
+            run_id = flat_zero.ne(flat_zero.shift(fill_value=False)).cumsum()
+            run_lengths = flat_zero.groupby(run_id).transform("sum")
+            stale_flat_zero = flat_zero & (run_lengths >= 3)
+            stale_removed = int(stale_flat_zero.sum())
+            if stale_removed > 0:
+                out = out[~stale_flat_zero]
+                logger.warning(
+                    f"_validate_df: removed {stale_removed} stale flat zero-volume bars "
+                    f"({stale_removed/max(n_before,1)*100:.1f}%)"
+                )
 
     return out
 

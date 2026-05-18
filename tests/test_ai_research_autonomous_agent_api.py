@@ -62,6 +62,7 @@ def test_runtime_config_contains_ai_autonomous_agent(monkeypatch):
     result = asyncio.run(ai_module.get_ai_runtime_config(request))
     assert "ai_autonomous_agent" in result
     assert result["ai_autonomous_agent"]["provider"] == "glm"
+    assert result["ai_autonomous_agent"]["trading_mode"] == "paper"
     assert "paper_longrun_safety" in result["ai_autonomous_agent"]
     assert result["ai_autonomous_agent"]["paper_longrun_safety"]["safe_for_paper_longrun"] is False
 
@@ -69,6 +70,7 @@ def test_runtime_config_contains_ai_autonomous_agent(monkeypatch):
 def test_operating_mode_endpoint_surfaces_degradations(monkeypatch):
     from web.api import ai_research as ai_module
 
+    monkeypatch.setattr(ai_module.execution_engine, "get_trading_mode", lambda: "paper")
     monkeypatch.setattr(
         ai_module,
         "_build_sources_health_payload",
@@ -106,6 +108,7 @@ def test_operating_mode_endpoint_surfaces_degradations(monkeypatch):
 
     result = asyncio.run(ai_module.get_operating_mode())
 
+    assert result["trading_mode"] == "paper"
     codes = {item["code"] for item in result["degradations"]}
     assert "provider_fallback" in codes
     assert "autonomous_allow_live_false" in codes
@@ -718,6 +721,8 @@ def test_autonomous_agent_status_endpoint_does_not_require_ai_research_runtime(m
     result = asyncio.run(ai_module.get_ai_autonomous_agent_status(request))
     assert result["status"]["running"] is True
     assert "paper_longrun_safety" in result
+    assert result["config"]["trading_mode"] == "paper"
+    assert result["status"]["trading_mode"] == "paper"
 
 
 def test_autonomous_agent_status_endpoint_can_skip_preview_warm(monkeypatch):
@@ -778,6 +783,7 @@ def test_autonomous_agent_status_endpoint_returns_structured_safety(monkeypatch)
     assert result["config"]["safety"]["safe_for_paper_longrun"] is True
     assert result["status"]["safety"]["paper_longrun_profile_ready"] is True
     assert result["paper_longrun_safety"]["safe_for_paper_longrun"] is True
+    assert result["config"]["trading_mode"] == "paper"
 
 
 def test_autonomous_agent_start_endpoint_prefers_runtime_profile_field(monkeypatch):

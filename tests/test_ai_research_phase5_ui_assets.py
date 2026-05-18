@@ -74,6 +74,13 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "renderAgentChainSummary" in agent_js
     assert "buildAgentJournalCurrentSummary" in agent_js
     assert "summarizeAggregatedSignal" in agent_js
+    assert "buildAgentExecutionReality" in agent_js
+    assert "真实执行态" in agent_js
+    assert "满足纪律后执行" in agent_js
+    assert "纸盘提交" in agent_js
+    assert "影子/0权重" in agent_js
+    assert "provider_live_execution_restricted" in agent_js
+    assert "直接执行" not in agent_js
     assert "function describeExecutionCost" in agent_js
     assert "body: JSON.stringify({ force: true })" in agent_js
     assert agent_js.count("async function loadAgentJournal()") == 1
@@ -85,11 +92,11 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "已有一轮在运行，手动触发已排队" in agent_js
     assert "function selectProposal(" in ai_js
     assert "function renderDecisionTracePanel(" in ai_js
-    assert "Root blocker:" in ai_js
-    assert "Gate ladder" in ai_js
+    assert "关键门槛：" in ai_js
+    assert "检查链路" in ai_js
     assert "Operating Mode" in ai_js
     assert "Work Queue" in ai_js
-    assert "Send to Autonomy Watch" in ai_js
+    assert "发送到自治观察" in ai_js
     assert "/operating-mode" in ai_js
     assert "/work-queue" in ai_js
     assert "/autonomy-handoff" in ai_js
@@ -180,6 +187,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "当前已选中 watchlist，正在等待最新聚合信号快照。" in ai_js
     assert "当前 watchlist 暂无聚合信号快照，后续刷新后会自动显示。" in ai_js
     assert 'option value="codex">OpenAI' in template
+    assert "真实执行边界" in template
     assert "一键退出运行中条目" in template
     assert "一键清空当前候选" in template
     assert "一键清空当前任务" in template

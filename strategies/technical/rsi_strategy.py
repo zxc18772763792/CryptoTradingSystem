@@ -44,7 +44,7 @@ class RSIStrategy(StrategyBase):
         prev_rsi = float(rsi.iloc[-2])
         current_price = float(data["close"].iloc[-1])
         timestamp = self._bar_time(data)
-        symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
+        symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
 
         oversold = float(self.params["oversold"])
         overbought = float(self.params["overbought"])
@@ -198,7 +198,7 @@ class RSIDivergenceStrategy(StrategyBase):
 
         current_price = float(data["close"].iloc[-1])
         timestamp = self._bar_time(data)
-        symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
+        symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
 
         signals: List[Signal] = []
         min_div = float(self.params["min_divergence"])

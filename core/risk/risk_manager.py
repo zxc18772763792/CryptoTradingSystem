@@ -650,6 +650,22 @@ class RiskManager:
 
         equity = float(account_equity or self._current_equity or 0.0)
         notional = float(order_value or 0.0)
+
+        # Fail-closed: a fresh entry whose size/equity cannot be verified must be
+        # rejected rather than silently bypassing every notional cap below.
+        # Closes/exits (allow_close) are always permitted — they reduce risk.
+        if not allow_close and (equity <= 0 or notional <= 0):
+            self._add_alert(
+                title="风控信息不足已拒单",
+                message=(
+                    f"无法校验订单规模 (equity={equity:.2f}, order_value={notional:.2f})，"
+                    f"为防止绕过额度限制已拒绝该入场单"
+                ),
+                severity="critical",
+                data={"symbol": symbol, "side": side, "equity": equity, "order_value": notional},
+            )
+            return False
+
         # Allow tiny float/quote drift when comparing order notional to risk caps.
         epsilon = max(1e-4, float(equity) * 1e-6, 0.05)
         if equity > 0 and notional > 0 and not allow_close:

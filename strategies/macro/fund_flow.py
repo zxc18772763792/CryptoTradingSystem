@@ -166,7 +166,7 @@ class FundFlowStrategy(StrategyBase):
         timestamp = self._flow_data.get("timestamp", datetime.now(timezone.utc))
 
         current_price = float(data["close"].iloc[-1]) if not data.empty else 0.0
-        symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
+        symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
         if current_price <= 0:
             return []
 
@@ -404,7 +404,7 @@ class WhaleActivityStrategy(StrategyBase):
             return []
 
         current_price = float(data["close"].iloc[-1]) if not data.empty else 0.0
-        symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
+        symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
         if current_price <= 0:
             return []
 

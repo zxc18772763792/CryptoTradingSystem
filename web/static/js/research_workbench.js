@@ -986,7 +986,8 @@
 
   function getModuleTimeoutMs(name) {
     if (name === 'factors') return 70000;
-    if (name === 'onchain') return 22000;
+    if (name === 'market_state') return 45000;
+    if (name === 'onchain') return 35000;
     if (name === 'cross_asset') return 40000;
     return 25000;
   }
@@ -1464,11 +1465,21 @@
     const excludeRetired = profile.exclude_retired === false ? 'false' : 'true';
     let module;
 
-    if (name === 'market_state') {
-      try {
-        const backendModule = await window.api(`/research/workbench/modules/${encodeURIComponent(name)}?${profileQuery(profile)}`, {
-          timeoutMs: getModuleTimeoutMs(name),
-        });
+    // Unified data source: every module first tries the server-side workbench
+    // endpoint so the per-module buttons return the same result as the "总览"
+    // (overview) endpoint. The client-side builds below are kept only as a
+    // resilience fallback when the backend errors or returns an error module.
+    try {
+      const backendModule = await window.api(`/research/workbench/modules/${encodeURIComponent(name)}?${profileQuery(profile)}`, {
+        timeoutMs: getModuleTimeoutMs(name),
+      });
+      const backendStatus = String(backendModule?.status || '');
+      const backendErrored = backendStatus === 'error'
+        || Boolean(backendModule?.payload && backendModule.payload.error);
+      if (backendModule && !backendErrored) {
+        // Cancel any pending client-side fallback retry so it cannot later
+        // overwrite this fresh backend module with client-built data.
+        clearModuleRetry(name);
         renderModule(name, backendModule);
         state.overview = buildLocalOverviewFromModules();
         renderOverview();
@@ -1476,9 +1487,13 @@
         setDebug(`research.workbench.modules.${name}.backend`, backendModule);
         if (!quiet && typeof window.notify === 'function') window.notify(`${MODULE_LABELS[name] || name} 已更新`);
         return backendModule;
-      } catch (backendErr) {
-        setDebug(`research.workbench.modules.${name}.backend_fallback`, String(backendErr?.message || backendErr));
       }
+      setDebug(`research.workbench.modules.${name}.backend_degraded`, backendModule);
+    } catch (backendErr) {
+      setDebug(`research.workbench.modules.${name}.backend_fallback`, String(backendErr?.message || backendErr));
+    }
+
+    if (name === 'market_state') {
       const days = estimateProfileDays(profile, 2);
       const calendarDays = Math.max(7, Math.min(90, estimateProfileDays(profile, 1)));
       const newsKey = String(profile.primary_symbol || 'BTC/USDT').split('/')[0];

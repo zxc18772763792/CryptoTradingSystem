@@ -24,6 +24,41 @@ class PositionSizer:
         self.default_method = SizingMethod.PERCENT
         self.default_risk_per_trade = 0.02  # 单笔风险2%
         self.default_position_pct = 0.05  # 默认仓位5%
+        # Hard self-contained ceiling: a single position's notional may not
+        # exceed this fraction of account balance, regardless of method.
+        # Prevents tiny-ATR / near stop-loss inputs from producing absurd,
+        # over-leveraged sizes on paths that call PositionSizer directly
+        # (backtest, sizing preview) without the execution-engine cap.
+        self.max_position_value_pct = 1.0
+
+    def _finalize(
+        self,
+        position_value: float,
+        entry_price: float,
+        account_balance: float,
+    ) -> float:
+        """Validate price and clamp notional to a sane ceiling, return qty."""
+        try:
+            entry_price = float(entry_price)
+            position_value = float(position_value)
+            account_balance = float(account_balance)
+        except (TypeError, ValueError):
+            return 0.0
+        if not (entry_price > 0) or not (position_value > 0):
+            logger.warning(
+                f"PositionSizer: invalid inputs (entry_price={entry_price}, "
+                f"position_value={position_value}), returning 0"
+            )
+            return 0.0
+        if account_balance > 0:
+            ceiling = account_balance * max(0.0, float(self.max_position_value_pct))
+            if ceiling > 0 and position_value > ceiling:
+                logger.warning(
+                    f"PositionSizer: position value {position_value:.2f} exceeds "
+                    f"ceiling {ceiling:.2f}, clamping"
+                )
+                position_value = ceiling
+        return position_value / entry_price
 
     def calculate(
         self,
@@ -74,7 +109,7 @@ class PositionSizer:
         **kwargs,
     ) -> float:
         """固定金额仓位"""
-        return fixed_amount / entry_price
+        return self._finalize(fixed_amount, entry_price, account_balance)
 
     def _percent_sizing(
         self,
@@ -86,7 +121,7 @@ class PositionSizer:
         """固定比例仓位"""
         pct = position_pct or self.default_position_pct
         position_value = account_balance * pct
-        return position_value / entry_price
+        return self._finalize(position_value, entry_price, account_balance)
 
     def _risk_parity_sizing(
         self,
@@ -104,7 +139,7 @@ class PositionSizer:
         # 根据波动率调整仓位
         # 目标是使每个仓位的波动风险相同
         position_value = (account_balance * target_risk) / max(volatility, 1e-6)
-        return position_value / entry_price
+        return self._finalize(position_value, entry_price, account_balance)
 
     def _kelly_sizing(
         self,
@@ -130,7 +165,7 @@ class PositionSizer:
         adjusted_pct = kelly_pct * kelly_fraction
 
         position_value = account_balance * adjusted_pct
-        return position_value / entry_price
+        return self._finalize(position_value, entry_price, account_balance)
 
     def _atr_based_sizing(
         self,
@@ -152,11 +187,14 @@ class PositionSizer:
 
         # 止损距离 = ATR * 风险倍数
         stop_distance = atr * risk_multiple
+        if stop_distance <= 0:
+            return self._percent_sizing(account_balance, entry_price, **kwargs)
 
         # 仓位数量 = 风险金额 / 止损距离
         position_size = risk_amount / stop_distance
 
-        return position_size
+        # Clamp via notional ceiling (tiny ATR → huge size otherwise).
+        return self._finalize(position_size * float(entry_price or 0.0), entry_price, account_balance)
 
     def calculate_with_stop_loss(
         self,
@@ -186,7 +224,7 @@ class PositionSizer:
             return self._percent_sizing(account_balance, entry_price)
 
         position_size = risk_amount / price_risk
-        return position_size
+        return self._finalize(position_size * float(entry_price or 0.0), entry_price, account_balance)
 
     def adjust_for_correlation(
         self,

@@ -2911,6 +2911,7 @@ async def get_ai_runtime_config(request: Request):
         runtime_cfg=agent_cfg,
         trading_mode=trading_mode,
     )
+    agent_cfg["trading_mode"] = trading_mode
     return {
         "governance_enabled": bool(getattr(settings, "GOVERNANCE_ENABLED", True)),
         "decision_mode": str(getattr(settings, "DECISION_MODE", "shadow") or "shadow"),
@@ -2975,6 +2976,7 @@ async def get_ai_autonomous_agent_runtime_config(request: Request):
         runtime_cfg=cfg,
         trading_mode=trading_mode,
     )
+    cfg["trading_mode"] = trading_mode
     return cfg
 
 
@@ -3029,6 +3031,8 @@ async def get_ai_autonomous_agent_status(request: Request, warm_preview: bool = 
         trading_mode=trading_mode,
     )
     cfg["paper_longrun_safety"] = safety_payload
+    cfg["trading_mode"] = trading_mode
+    status_payload["trading_mode"] = trading_mode
     return {
         "status": status_payload,
         "config": cfg,
@@ -3066,6 +3070,9 @@ async def start_ai_autonomous_agent(
         trading_mode=trading_mode,
     )
     cfg["paper_longrun_safety"] = safety_payload
+    cfg["trading_mode"] = trading_mode
+    if isinstance(status, dict):
+        status["trading_mode"] = trading_mode
     return {
         "started": True,
         "status": status,
@@ -3076,8 +3083,29 @@ async def start_ai_autonomous_agent(
 
 
 async def stop_ai_autonomous_agent(request: Request):
+    trading_mode = _current_trading_mode()
     status = await autonomous_trading_agent.stop()
-    return {"stopped": True, "status": status, "config": autonomous_trading_agent.get_runtime_config()}
+    cfg = autonomous_trading_agent.get_runtime_config()
+    if isinstance(cfg, dict):
+        cfg = dict(cfg)
+    else:
+        cfg = {}
+    safety_payload = _build_autonomous_agent_paper_longrun_safety(
+        runtime_cfg=cfg,
+        status_payload=status if isinstance(status, dict) else {},
+        trading_mode=trading_mode,
+    )
+    cfg["paper_longrun_safety"] = safety_payload
+    cfg["trading_mode"] = trading_mode
+    if isinstance(status, dict):
+        status["trading_mode"] = trading_mode
+    return {
+        "stopped": True,
+        "status": status,
+        "config": cfg,
+        "trading_mode": trading_mode,
+        "paper_longrun_safety": safety_payload,
+    }
 
 
 async def run_ai_autonomous_agent_once(
@@ -5876,6 +5904,7 @@ async def _build_operating_mode_payload() -> Dict[str, Any]:
         agent_config=autonomous_trading_agent.get_runtime_config(),
         runtime_state_snapshot=runtime_state.snapshot(),
         source_health=sources,
+        trading_mode=_current_trading_mode(),
     )
     return snapshot.to_dict()
 
@@ -5952,6 +5981,7 @@ def _build_operating_mode_fallback_payload(reason: str, *, error: Optional[str] 
         agent_config=autonomous_trading_agent.get_runtime_config(),
         runtime_state_snapshot=runtime_snapshot,
         source_health=_operating_mode_source_health_fallback(reason, error=error),
+        trading_mode=_current_trading_mode(),
     ).to_dict()
     snapshot["operating_mode_cache"] = {
         "status": "fallback",

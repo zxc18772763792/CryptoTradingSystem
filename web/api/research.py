@@ -3488,7 +3488,6 @@ def _build_structured_recommendations(
         if (
             "breakout" in headline_lower
             or "break" in headline_lower
-            or "绐佺牬" in headline_text
             or "突破" in headline_text
         ):
             return {"strategy_type": "DonchianBreakoutStrategy", "label": "breakout"}
@@ -3504,14 +3503,13 @@ def _build_structured_recommendations(
         if (
             "news" in headline_lower
             or "event" in headline_lower
-            or "浜嬩欢" in headline_text
-            or "鏂伴椈" in headline_text
+            or "事件" in headline_text
+            or "新闻" in headline_text
         ):
             return "news_event"
         if (
             "breakout" in headline_lower
             or "break" in headline_lower
-            or "绐佺牬" in headline_text
             or "突破" in headline_text
         ):
             return "breakout"

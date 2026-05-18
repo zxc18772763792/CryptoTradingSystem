@@ -78,6 +78,22 @@ def test_operating_mode_reads_mapping_source_health():
     assert "source_cache_ok" not in {item["code"] for item in snapshot["degradations"]}
 
 
+def test_operating_mode_prefers_current_trading_mode_override(monkeypatch):
+    from core.runtime.operating_mode import validate_operating_mode
+    from core.runtime import operating_mode as module
+
+    monkeypatch.setattr(module.settings, "TRADING_MODE", "paper", raising=False)
+
+    snapshot = validate_operating_mode(
+        trading_mode="live",
+        agent_config={"enabled": True, "mode": "execute", "allow_live": False},
+        source_health={"categories": {}},
+    ).to_dict()
+
+    assert snapshot["trading_mode"] == "live"
+    assert "live_mode_agent_blocked" in {item["code"] for item in snapshot["degradations"]}
+
+
 def test_performance_divergence_marks_overfit_suspect():
     from datetime import datetime, timezone
     from types import SimpleNamespace

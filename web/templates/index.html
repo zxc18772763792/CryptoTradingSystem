@@ -1574,68 +1574,9 @@
                             <div class="ai-workspace-section-note">这里负责研究与增强，不直接替代自治代理下单。</div>
                         </div>
                         <div class="ai-research-overview-grid">
-                            <div class="card ai-top-intro-card ai-top-intro-card-research ai-research-hero-card">
-                                <div class="ai-research-hero-layout">
-                                    <div class="ai-research-hero-copy">
-                                        <div class="ai-research-hero-head">
-                                            <div>
-                                                <div class="ai-top-intro-title">AI研究工作台</div>
-                                                <div class="ai-top-intro-subtitle">让 AI 先识别市场阶段，再把研究目标推进成提案、候选、验证结论和注册建议。首屏先看链路和当前焦点，下面再进入具体执行区。</div>
-                                            </div>
-                                            <span class="ai-research-hero-badge">Research Pipeline</span>
-                                        </div>
-                                        <div class="ai-research-stage-strip">
-                                            <div class="ai-research-stage-chip">
-                                                <span>Step 1</span>
-                                                <strong>研究思路</strong>
-                                                <small>先定义目标、市场状态和验证范围</small>
-                                            </div>
-                                            <div class="ai-research-stage-chip">
-                                                <span>Step 2</span>
-                                                <strong>提案生成</strong>
-                                                <small>把目标转成可执行的研究任务</small>
-                                            </div>
-                                            <div class="ai-research-stage-chip">
-                                                <span>Step 3</span>
-                                                <strong>运行研究</strong>
-                                                <small>比较候选表现并收敛可用策略</small>
-                                            </div>
-                                            <div class="ai-research-stage-chip">
-                                                <span>Step 4</span>
-                                                <strong>注册建议</strong>
-                                                <small>查看验证细节，再决定是否部署</small>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="ai-top-intro-stack">
-                                        <div class="ai-top-intro-box">
-                                            <div class="ai-top-intro-box-title">这页最适合做什么</div>
-                                            <div class="ai-top-intro-box-desc">把一个想法稳定推进成可验证候选，再看它是否值得进入策略库，而不是直接替你下单。</div>
-                                        </div>
-                                        <div class="ai-top-intro-box">
-                                            <div class="ai-top-intro-box-title">推荐阅读路径</div>
-                                            <div class="ai-top-intro-box-desc">顶部看链路和当前状态，左侧配置研究，中间比较候选，底部和右侧再看验证与注册动作。</div>
-                                        </div>
-                                        <div class="ai-top-intro-mini-grid ai-top-intro-mini-grid-wide">
-                                            <div class="ai-top-intro-mini">
-                                                <div class="ai-top-intro-box-title">输入</div>
-                                                <div class="ai-top-intro-mini-desc">目标、币种、周期、市场状态</div>
-                                            </div>
-                                            <div class="ai-top-intro-mini">
-                                                <div class="ai-top-intro-box-title">输出</div>
-                                                <div class="ai-top-intro-mini-desc">提案、候选、验证、注册建议</div>
-                                            </div>
-                                            <div class="ai-top-intro-mini">
-                                                <div class="ai-top-intro-box-title">Quick Path</div>
-                                                <div class="ai-top-intro-mini-desc">one-click 适合快速验证整条链路能否跑通</div>
-                                            </div>
-                                            <div class="ai-top-intro-mini">
-                                                <div class="ai-top-intro-box-title">边界</div>
-                                                <div class="ai-top-intro-mini-desc">不直接下单，不替代自治代理执行</div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
+                            <div class="card ai-research-hero-card ai-research-hero-card-slim">
+                                <div class="ai-top-intro-title">AI 研究工作台</div>
+                                <div class="ai-top-intro-subtitle">识别市场阶段 → 生成提案 → 运行研究 → 比较候选 → 注册建议。核心操作在下方候选工作区。</div>
                             </div>
 
                             <div class="ai-research-command-stack">
@@ -1698,13 +1639,7 @@
                                 <span class="ai-review-panel-tag">面向已有策略/候选</span>
                             </div>
                             <div class="ai-review-panel-desc">
-                                这一步只给已注册策略、候选策略和人工确认后的策略加一道下单前二次复核。
-                                它不生成新策略，也不会拦截 AI 自动交易自己的直连执行链。
-                            </div>
-                            <div class="ai-review-scope">
-                                <div class="ai-review-scope-item">已注册策略下单前复核</div>
-                                <div class="ai-review-scope-item">运行中的候选策略复核</div>
-                                <div class="ai-review-scope-item">AI自动交易直连执行，不走这里</div>
+                                仅对已注册/候选/人工确认策略加一道下单前复核；不生成新策略，也不拦截 AI 自动交易直连链。
                             </div>
                             <div class="ai-review-dynamic-summary">
                                 <div class="ai-review-dynamic-item">
@@ -2108,9 +2043,9 @@
                     <div class="ai-agent-cockpit-main">
                         <div class="ai-agent-cockpit-kicker">AI自治代理运行驾驶舱</div>
                         <div class="ai-agent-cockpit-title">状态、动作、风险、复盘一屏串联</div>
-                        <div class="ai-agent-cockpit-desc">先确认运行与执行边界，再处理试跑、诊断、选币和日志，最后用右侧摘要判断是否允许继续放大。</div>
+                        <div class="ai-agent-cockpit-desc">先确认运行与真实执行边界，再处理试跑、诊断、选币和日志，最后用右侧摘要判断是否允许继续放大。</div>
                         <div class="ai-agent-cockpit-flow">
-                            <span class="ai-agent-cockpit-flow-step">状态开关</span>
+                            <span class="ai-agent-cockpit-flow-step">真实执行态</span>
                             <span class="ai-agent-cockpit-flow-step">观望原因</span>
                             <span class="ai-agent-cockpit-flow-step">选币纪律</span>
                             <span class="ai-agent-cockpit-flow-step">日志复盘</span>
@@ -2132,7 +2067,7 @@
                             <span id="ai-agent-cockpit-symbol-sub" class="ai-agent-cockpit-stat-sub">等待选币结果</span>
                         </article>
                         <article id="ai-agent-cockpit-mode-card" class="ai-agent-cockpit-stat">
-                            <span class="ai-agent-cockpit-stat-label">执行模式</span>
+                            <span class="ai-agent-cockpit-stat-label">真实执行态</span>
                             <strong id="ai-agent-cockpit-mode">加载中...</strong>
                             <span id="ai-agent-cockpit-mode-sub" class="ai-agent-cockpit-stat-sub">等待模式同步</span>
                         </article>
@@ -2216,7 +2151,7 @@
                                                 <div class="ai-auto-step-title">运行状态与开关</div>
                                                 <span id="ai-agent-status-dot" class="agent-dot agent-dot-off" title="未运行"></span>
                                             </div>
-                                            <div class="ai-auto-step-desc">先确认代理是否在跑、当前盯哪个币、模式是否允许实盘，再决定是否启动或停止。</div>
+                                            <div class="ai-auto-step-desc">先确认代理是否在跑、当前盯哪个币、真实执行边界是否会动用实盘，再决定是否启动或停止。</div>
                                             <div id="ai-agent-info" class="ai-auto-step-info">加载中...</div>
                                             <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
                                                 <button class="btn btn-sm btn-success" id="ai-agent-start-btn" onclick="agentStart()">启动</button>

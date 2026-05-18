@@ -519,6 +519,27 @@ def test_cross_exchange_preflight_treats_volume_divergence_as_warning(monkeypatc
     assert "volume differs materially" in result["results"][0]["warning"]
 
 
+def test_validate_df_removes_stale_flat_zero_volume_runs():
+    from core.research.strategy_research import _validate_df
+
+    idx = pd.date_range("2024-01-01", periods=8, freq="1min")
+    df = pd.DataFrame(
+        {
+            "open": [100, 101, 101, 101, 101, 105, 106, 107],
+            "high": [101, 101, 101, 101, 101, 106, 107, 108],
+            "low": [99, 101, 101, 101, 101, 104, 105, 106],
+            "close": [100, 101, 101, 101, 101, 105, 106, 107],
+            "volume": [10, 0, 0, 0, 0, 20, 0, 30],
+        },
+        index=idx,
+    )
+
+    result = _validate_df(df)
+
+    assert list(result.index) == [idx[0], idx[5], idx[6], idx[7]]
+    assert result.loc[idx[6], "volume"] == pytest.approx(0.0)
+
+
 def test_run_backtest_core_with_params():
     """B: _run_backtest_core accepts and uses params dict."""
     from core.research.strategy_research import _run_backtest_core

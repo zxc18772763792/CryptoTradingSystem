@@ -60,7 +60,7 @@ class MLXGBoostStrategy(StrategyBase):
         if data is None or data.empty or len(data) < 50:
             return []
 
-        symbol = data.get("symbol", ["UNKNOWN"])[0] if "symbol" in data else "UNKNOWN"
+        symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
         current_price = float(data["close"].iloc[-1] or 0.0)
         if current_price <= 0:
             return []
