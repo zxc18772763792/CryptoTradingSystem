@@ -322,7 +322,11 @@ class OrderManager:
     async def _create_real_order(self, request: OrderRequest) -> Optional[Order]:
         exchange = await self._ensure_exchange_connector(request.exchange, account_id=request.account_id)
         if not exchange:
-            logger.error(f"Exchange not found: {request.exchange} account_id={request.account_id}")
+            self._last_error = (
+                f"exchange connector unavailable: exchange={request.exchange} "
+                f"account_id={request.account_id}"
+            )
+            logger.error(self._last_error)
             return None
 
         try:

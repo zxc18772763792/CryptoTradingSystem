@@ -105,12 +105,17 @@ class AccountManager:
         if self._normalize_mode(item.mode, default="paper") != "live":
             return False
         metadata = dict(item.metadata or {})
+        explicit_connector_isolation = bool(
+            metadata.get("require_live_credentials")
+            or metadata.get("require_connector_isolation")
+        )
         if aid == "main":
-            return bool(
-                metadata.get("isolated")
-                or metadata.get("require_live_credentials")
-                or metadata.get("require_connector_isolation")
-            )
+            return explicit_connector_isolation
+        if explicit_connector_isolation:
+            return True
+        parent_account_id = str(getattr(item, "parent_account_id", "") or "").strip()
+        if parent_account_id:
+            return False
         return bool(metadata.get("isolated", True))
 
     def get_exchange_credentials(

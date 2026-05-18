@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from core.strategies.strategy_base import StrategyBase
 from core.strategies.strategy_manager import StrategyManager
-from core.trading.account_manager import account_manager
+from core.trading.account_manager import AccountManager, TradingAccount, account_manager
 from core.trading.order_manager import OrderManager, OrderRequest
 from core.exchanges.base_exchange import OrderSide, OrderType
 
@@ -124,6 +125,111 @@ def test_order_manager_routes_orders_by_account_mode(monkeypatch):
     asyncio.run(_run())
 
     assert calls == [("live", "live_acc"), ("paper", "paper_acc")]
+
+
+def test_auto_created_live_strategy_account_inherits_parent_credentials():
+    manager = AccountManager.__new__(AccountManager)
+    manager._accounts = {
+        "main": TradingAccount(
+            account_id="main",
+            name="main",
+            exchange="binance",
+            mode="live",
+            metadata={
+                "credentials": {
+                    "binance": {
+                        "api_key": "main-key",
+                        "api_secret": "main-secret",
+                        "default_type": "future",
+                    }
+                }
+            },
+        ),
+        "strategy_live": TradingAccount(
+            account_id="strategy_live",
+            name="strategy",
+            exchange="binance",
+            mode="live",
+            parent_account_id="main",
+            metadata={
+                "strategy_name": "unit_strategy",
+                "auto_created": True,
+                "isolated": True,
+                "runtime_mode": "live",
+            },
+        ),
+    }
+
+    assert manager.requires_live_connector_isolation("strategy_live") is False
+    assert manager.get_exchange_credentials("strategy_live", "binance") == {
+        "api_key": "main-key",
+        "api_secret": "main-secret",
+        "default_type": "future",
+    }
+
+
+def test_live_account_can_explicitly_require_dedicated_credentials():
+    manager = AccountManager.__new__(AccountManager)
+    manager._accounts = {
+        "main": TradingAccount(
+            account_id="main",
+            name="main",
+            exchange="binance",
+            mode="live",
+            metadata={
+                "credentials": {
+                    "binance": {
+                        "api_key": "main-key",
+                        "api_secret": "main-secret",
+                    }
+                }
+            },
+        ),
+        "strategy_live": TradingAccount(
+            account_id="strategy_live",
+            name="strategy",
+            exchange="binance",
+            mode="live",
+            parent_account_id="main",
+            metadata={
+                "isolated": True,
+                "require_live_credentials": True,
+            },
+        ),
+    }
+
+    assert manager.requires_live_connector_isolation("strategy_live") is True
+    assert manager.get_exchange_credentials("strategy_live", "binance") == {}
+
+
+def test_order_manager_reports_missing_live_connector(monkeypatch):
+    manager = OrderManager()
+    manager.set_paper_trading(False)
+    monkeypatch.setattr(
+        account_manager,
+        "get_account_mode",
+        lambda account_id, default="paper": "live",
+    )
+    monkeypatch.setattr(manager, "_ensure_exchange_connector", AsyncMock(return_value=None))
+
+    async def _run():
+        return await manager.create_order(
+            OrderRequest(
+                symbol="XRP/USDT",
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                amount=1.0,
+                exchange="binance",
+                account_id="strategy_live",
+            )
+        )
+
+    order = asyncio.run(_run())
+
+    assert order is None
+    assert manager.get_last_error() == (
+        "exchange connector unavailable: exchange=binance account_id=strategy_live"
+    )
 
 
 def test_order_manager_clear_paper_history_preserves_live_orders():
