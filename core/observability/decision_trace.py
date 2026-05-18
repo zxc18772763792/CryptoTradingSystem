@@ -7,6 +7,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from core.observability.gate_codes import is_registered_gate_code, normalize_gate_code
+
 
 GateStatus = Literal["pass", "warn", "block", "downgrade", "skip", "shadow", "degraded"]
 
@@ -107,8 +109,12 @@ def append_gate(
     source: str = "",
     metadata: Optional[Dict[str, Any]] = None,
 ) -> DecisionGateTrace:
+    gate_code = normalize_gate_code(code)
+    gate_metadata = dict(metadata or {})
+    if gate_code and not is_registered_gate_code(gate_code):
+        gate_metadata.setdefault("unregistered_gate_code", True)
     gate = DecisionGateTrace(
-        code=str(code or "").strip(),
+        code=gate_code,
         label=str(label or code or "").strip(),
         status=status,
         severity=int(severity or 0),
@@ -120,7 +126,7 @@ def append_gate(
         reason=str(reason or ""),
         counterfactual_decision=str(counterfactual_decision or ""),
         source=str(source or ""),
-        metadata=dict(metadata or {}),
+        metadata=gate_metadata,
     )
     trace.gates.append(gate)
     trace.refresh_root_blocker()
@@ -135,4 +141,3 @@ def coerce_trace_dict(trace: DecisionTrace | Dict[str, Any] | None) -> Dict[str,
     if isinstance(trace, dict):
         return dict(trace)
     return {}
-

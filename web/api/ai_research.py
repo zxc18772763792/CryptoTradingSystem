@@ -3762,10 +3762,18 @@ async def get_ai_candidate_endpoint(request: Request, candidate_id: str):
 
 
 @router.get("/candidates/{candidate_id}/performance-divergence")
-async def get_candidate_performance_divergence(request: Request, candidate_id: str, limit: int = 100):
+async def get_candidate_performance_divergence(
+    request: Request,
+    candidate_id: str,
+    limit: int = 100,
+    record_feedback: bool = True,
+):
     ensure_ai_research_runtime_state(request.app)
     candidate = get_candidate(request.app, candidate_id)
-    from core.research.performance_feedback import build_performance_divergence_report
+    from core.research.performance_feedback import (
+        build_performance_divergence_report,
+        build_prior_update_from_divergence,
+    )
     from sqlalchemy import select as sa_select
 
     async with async_session_maker() as session:
@@ -3777,7 +3785,40 @@ async def get_candidate_performance_divergence(request: Request, candidate_id: s
         )
         rows = (await session.execute(q)).scalars().all()
     report = build_performance_divergence_report(candidate=candidate, snapshots=rows)
-    return {"candidate_id": candidate_id, "report": report.to_dict()}
+    feedback_update: Dict[str, Any] = {}
+    if bool(record_feedback) and report.status != "insufficient_sample":
+        try:
+            from core.observability.score_calibration import update_family_regime_priors
+            from core.audit.gate_counterfactuals import update_gate_counterfactual_outcomes
+
+            update = build_prior_update_from_divergence(candidate=candidate, report=report)
+            audit_update = update_gate_counterfactual_outcomes(
+                [
+                    {
+                        "subject_type": "candidate",
+                        "subject_id": candidate_id,
+                        "later_outcome_ref": f"performance_divergence:{report.status}",
+                        "status": report.status,
+                        "edge_delta": report.edge_delta,
+                        "divergence_score": report.divergence_score,
+                        "sample_size": report.sample_size,
+                    }
+                ]
+            )
+            if int(audit_update.get("updated") or 0) > 0:
+                update["counterfactual_outcome_count"] = int(audit_update.get("updated") or 0)
+            feedback_update = update_family_regime_priors([update])
+            feedback_update["counterfactual_outcomes"] = audit_update
+            meta = dict(candidate.metadata or {})
+            meta["last_performance_divergence"] = report.to_dict()
+            meta["last_performance_feedback_update"] = update
+            candidate.metadata = meta
+            registry = getattr(request.app.state, "ai_candidate_registry", None)
+            if registry is not None and hasattr(registry, "save"):
+                registry.save(candidate)
+        except Exception as exc:
+            feedback_update = {"applied": 0, "error": str(exc)}
+    return {"candidate_id": candidate_id, "report": report.to_dict(), "feedback_update": feedback_update}
 
 
 @router.post("/candidates/{candidate_id}/autonomy-handoff")
@@ -3785,9 +3826,56 @@ async def handoff_candidate_to_autonomy(request: Request, candidate_id: str):
     ensure_ai_research_runtime_state(request.app)
     candidate = get_candidate(request.app, candidate_id)
     meta = dict(candidate.metadata or {})
+    symbol = _candidate_primary_symbol(candidate)
+    timeframe = _candidate_timeframe(candidate)
+    exchange = _candidate_exchange(candidate)
+    current_runtime = {}
+    updated_runtime = {}
+    watch_registered = False
+    preview_warmed = False
+    agent_running = False
+    try:
+        current_runtime = dict(autonomous_trading_agent.get_runtime_config() or {})
+        existing = [
+            _normalize_symbol(str(item or ""))
+            for item in list(current_runtime.get("universe_symbols") or [])
+            if _normalize_symbol(str(item or ""))
+        ]
+        merged_universe = []
+        for item in [symbol, *existing]:
+            norm = _normalize_symbol(str(item or ""))
+            if norm and norm not in merged_universe:
+                merged_universe.append(norm)
+        update_kwargs = {
+            "symbol_mode": "auto",
+            "universe_symbols": merged_universe,
+            "timeframe": timeframe,
+            "exchange": exchange,
+        }
+        if not _normalize_symbol(str(current_runtime.get("symbol") or "")):
+            update_kwargs["symbol"] = symbol
+        updated_runtime = await autonomous_trading_agent.update_runtime_config(**update_kwargs)
+        watch_registered = symbol in set(_normalize_symbol(str(item or "")) for item in updated_runtime.get("universe_symbols") or [])
+        warm_method = getattr(autonomous_trading_agent, "ensure_symbol_scan_preview_warm", None)
+        if callable(warm_method):
+            preview_warmed = bool(warm_method(limit=int(updated_runtime.get("selection_top_n") or 10), force=True))
+        try:
+            agent_running = bool((autonomous_trading_agent.get_status() or {}).get("running"))
+        except Exception:
+            agent_running = False
+    except Exception as exc:
+        updated_runtime = {"error": str(exc), **(current_runtime or {})}
     meta["autonomy_handoff_requested"] = True
     meta["autonomy_mode"] = "watch"
     meta["autonomy_handoff_at"] = datetime.now(timezone.utc).isoformat()
+    meta["autonomy_watch_scope"] = {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "exchange": exchange,
+        "registered": bool(watch_registered),
+        "preview_warmed": bool(preview_warmed),
+        "active": bool(watch_registered and (preview_warmed or agent_running)),
+    }
     candidate.metadata = meta
     registry = getattr(request.app.state, "ai_candidate_registry", None)
     if registry is not None and hasattr(registry, "save"):
@@ -3801,6 +3889,11 @@ async def handoff_candidate_to_autonomy(request: Request, candidate_id: str):
     return {
         "candidate_id": candidate_id,
         "candidate": candidate.model_dump(mode="json"),
+        "watch_registered": bool(watch_registered),
+        "autonomy_watch_scope": meta["autonomy_watch_scope"],
+        "preview_warmed": bool(preview_warmed),
+        "watch_active": bool(meta["autonomy_watch_scope"]["active"]),
+        "runtime_config": updated_runtime,
         "next_actions": ["watch", "promote_paper", "request_live_approval"],
     }
 

@@ -121,6 +121,46 @@ def validate_operating_mode(
     if not bool(getattr(settings, "COINGLASS_LIVE_GATING_ENABLED", False)):
         degradations.append(_degradation("derivatives_shadow_only", "Derivatives are shadow-only", "COINGLASS_LIVE_GATING_ENABLED=false", "info"))
 
+    # Calibration maturity: be honest that the self-feedback loop may be cold.
+    try:
+        from pathlib import Path
+
+        from core.observability.score_calibration import load_family_regime_priors, prior_graduation_policy
+
+        prior_data = load_family_regime_priors()
+        priors_map = dict(prior_data.get("priors") or {})
+        if not priors_map or not prior_data.get("updated_at"):
+            degradations.append(
+                _degradation(
+                    "feedback_priors_cold",
+                    "Calibration priors are cold",
+                    "no realized-performance feedback has been folded into family/regime priors yet",
+                    "info",
+                )
+            )
+        elif not any(prior_graduation_policy(dict(value or {})).get("binding_eligible") for value in priors_map.values()):
+            degradations.append(
+                _degradation(
+                    "feedback_priors_advisory_only",
+                    "Calibration priors have not graduated",
+                    "priors need enough samples plus linked counterfactual outcomes before capped binding use is allowed",
+                    "info",
+                )
+            )
+        from core.audit.gate_counterfactuals import _resolve_audit_path
+
+        if not Path(_resolve_audit_path()).exists():
+            degradations.append(
+                _degradation(
+                    "cusum_feedback_inactive",
+                    "Gate counterfactual audit is empty",
+                    "no decay/gate counterfactual rows recorded yet — feedback loop unproven",
+                    "info",
+                )
+            )
+    except Exception:
+        pass
+
     source_items: List[Dict[str, Any]] = []
     source_items.extend(_iter_source_items(sources.get("items")))
     source_items.extend(_iter_source_items(sources.get("sources")))

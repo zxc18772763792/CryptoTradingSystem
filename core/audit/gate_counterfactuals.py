@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -73,6 +74,73 @@ def iter_gate_counterfactuals(path: str | Path | None = None) -> Iterable[Dict[s
     return rows
 
 
+def update_gate_counterfactual_outcomes(
+    outcomes: Iterable[Dict[str, Any]],
+    *,
+    path: str | Path | None = None,
+) -> Dict[str, Any]:
+    """Backfill later outcomes onto matching counterfactual audit rows.
+
+    Match keys are intentionally simple: ``trace_id`` wins, otherwise
+    ``subject_type`` + ``subject_id``. Existing outcome refs are not replaced
+    unless ``force`` is truthy in the outcome item.
+    """
+    target = _resolve_audit_path(path)
+    rows = list(iter_gate_counterfactuals(target))
+    if not rows:
+        return {"updated": 0, "total": 0, "path": str(target)}
+
+    normalized = [dict(item or {}) for item in outcomes or [] if isinstance(item, dict)]
+    updated = 0
+    for row in rows:
+        if row.get("later_outcome_ref") and not any(bool(item.get("force")) for item in normalized):
+            continue
+        for outcome in normalized:
+            trace_match = bool(outcome.get("trace_id") and outcome.get("trace_id") == row.get("trace_id"))
+            subject_match = bool(
+                outcome.get("subject_id")
+                and str(outcome.get("subject_id")) == str(row.get("subject_id"))
+                and (
+                    not outcome.get("subject_type")
+                    or str(outcome.get("subject_type")) == str(row.get("subject_type"))
+                )
+            )
+            if not trace_match and not subject_match:
+                continue
+            if row.get("later_outcome_ref") and not bool(outcome.get("force")):
+                continue
+            row["later_outcome_ref"] = str(
+                outcome.get("later_outcome_ref")
+                or outcome.get("outcome_ref")
+                or outcome.get("status")
+                or ""
+            )
+            row["later_outcome"] = {
+                key: value
+                for key, value in outcome.items()
+                if key not in {"force", "trace_id", "subject_id", "subject_type"}
+            }
+            row["outcome_recorded_at"] = _now_iso()
+            updated += 1
+            break
+
+    if updated:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                for row in rows:
+                    fh.write(json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n")
+            os.replace(tmp_name, target)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    return {"updated": updated, "total": len(rows), "path": str(target)}
+
+
 def summarize_gate_counterfactuals(path: str | Path | None = None, *, limit: Optional[int] = None) -> Dict[str, Any]:
     target = _resolve_audit_path(path)
     rows = list(iter_gate_counterfactuals(target))
@@ -80,12 +148,29 @@ def summarize_gate_counterfactuals(path: str | Path | None = None, *, limit: Opt
         rows = rows[-max(0, int(limit)) :]
     gate_counts = Counter(str(row.get("gate_code") or "unknown") for row in rows)
     downgraded = sum(1 for row in rows if str(row.get("counterfactual_decision") or "") and row.get("counterfactual_decision") != row.get("observed_decision"))
+    outcome_rows = [row for row in rows if row.get("later_outcome_ref")]
+    missed_alpha = 0.0
+    avoided_loss = 0.0
+    for row in outcome_rows:
+        outcome = dict(row.get("later_outcome") or {})
+        try:
+            edge_delta = float(outcome.get("edge_delta") or outcome.get("counterfactual_edge_delta") or 0.0)
+        except Exception:
+            edge_delta = 0.0
+        observed = str(row.get("observed_decision") or "").lower()
+        counterfactual = str(row.get("counterfactual_decision") or "").lower()
+        if counterfactual and counterfactual != observed:
+            if edge_delta > 0:
+                missed_alpha += edge_delta
+            elif edge_delta < 0:
+                avoided_loss += abs(edge_delta)
     return {
         "path": str(target),
         "total": len(rows),
         "gate_hit_counts": dict(gate_counts),
         "downgrade_rate": round(downgraded / len(rows), 6) if rows else 0.0,
-        "missed_alpha_proxy": 0.0,
-        "avoided_loss_proxy": 0.0,
+        "outcome_linked_count": len(outcome_rows),
+        "missed_alpha_proxy": round(missed_alpha, 6),
+        "avoided_loss_proxy": round(avoided_loss, 6),
         "items": rows[-20:],
     }

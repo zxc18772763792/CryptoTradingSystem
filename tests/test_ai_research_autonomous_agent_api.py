@@ -242,6 +242,23 @@ def test_reserve_candidates_and_autonomy_handoff_endpoint(monkeypatch):
     monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
     monkeypatch.setattr(ai_module, "list_candidates", lambda app, limit=100: [candidate])
     monkeypatch.setattr(ai_module, "get_candidate", lambda app, candidate_id: candidate)
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_runtime_config",
+        lambda: {"symbol": "BTC/USDT", "symbol_mode": "manual", "universe_symbols": ["BTC/USDT"], "selection_top_n": 8},
+    )
+
+    async def fake_update_runtime_config(**kwargs):
+        return {
+            "symbol": "BTC/USDT",
+            "symbol_mode": kwargs.get("symbol_mode"),
+            "universe_symbols": list(kwargs.get("universe_symbols") or []),
+            "selection_top_n": 8,
+        }
+
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "update_runtime_config", fake_update_runtime_config)
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "ensure_symbol_scan_preview_warm", lambda **kwargs: True)
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_status", lambda: {"running": False})
 
     reserve = asyncio.run(ai_module.get_reserve_candidates(request))
     assert reserve["count"] == 1
@@ -249,7 +266,13 @@ def test_reserve_candidates_and_autonomy_handoff_endpoint(monkeypatch):
 
     handoff = asyncio.run(ai_module.handoff_candidate_to_autonomy(request, "cand-reserve"))
     assert handoff["next_actions"] == ["watch", "promote_paper", "request_live_approval"]
+    assert handoff["watch_registered"] is True
+    assert handoff["preview_warmed"] is True
+    assert handoff["watch_active"] is True
+    assert "cand-reserve" == handoff["candidate_id"]
     assert handoff["candidate"]["metadata"]["autonomy_handoff_requested"] is True
+    assert handoff["candidate"]["metadata"]["autonomy_watch_scope"]["registered"] is True
+    assert handoff["candidate"]["metadata"]["autonomy_watch_scope"]["preview_warmed"] is True
     registry.save.assert_called_once()
 
 
@@ -289,7 +312,7 @@ def test_performance_divergence_endpoint_reports_overfit(monkeypatch):
     monkeypatch.setattr(ai_module, "get_candidate", lambda app, candidate_id: candidate)
     monkeypatch.setattr(ai_module, "async_session_maker", lambda: _Session())
 
-    result = asyncio.run(ai_module.get_candidate_performance_divergence(request, "cand-overfit"))
+    result = asyncio.run(ai_module.get_candidate_performance_divergence(request, "cand-overfit", record_feedback=False))
 
     assert result["report"]["status"] == "overfit_suspect"
     assert result["report"]["realized"]["sharpe"] == pytest.approx(0.2)

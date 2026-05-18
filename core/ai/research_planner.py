@@ -219,6 +219,7 @@ def _parse_market_context(
             market_state_snapshot,
             symbol=symbol,
             benchmark_beta=benchmark_beta,
+            symbol_metadata=dict(market_context.get("metadata") or {}),
         )
         boosted.extend(ms_boosted)
         suppressed.extend(ms_suppressed)
@@ -913,8 +914,12 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
             symbol_scope=symbol_scope,
         )
         if bool(prior.get("available")):
+            graduation = dict(prior.get("graduation") or {})
             advisory_prior_notes.append(
-                f"{name}:{prior.get('key')} sample={prior.get('sample_size', 0)} decay={prior.get('recent_decay_rate', 0)}"
+                f"{name}:{prior.get('key')} sample={prior.get('sample_size', 0)} "
+                f"decay={prior.get('recent_decay_rate', 0)} "
+                f"confirm={prior.get('confirmation_rate', 0)} "
+                f"graduation={graduation.get('status', 'advisory')}"
             )
     if advisory_prior_notes:
         planner_notes.append("family_regime_priors advisory: " + " | ".join(advisory_prior_notes[:4]))

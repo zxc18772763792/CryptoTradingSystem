@@ -15,6 +15,7 @@ class PerformanceDivergenceReport(BaseModel):
     realized: Dict[str, Any] = Field(default_factory=dict)
     sample_size: int = 0
     divergence_score: float = 0.0
+    edge_delta: float = 0.0
     status: str = "insufficient_sample"
     notes: List[str] = Field(default_factory=list)
 
@@ -51,6 +52,7 @@ def build_performance_divergence_report(
     candidate: Any,
     snapshots: Iterable[Any],
     min_sample: int = 10,
+    decay_state: Dict[str, Any] | None = None,
 ) -> PerformanceDivergenceReport:
     validation = _get_value(candidate, "validation_summary")
     metrics = dict(_get_value(validation, "metrics", default={}) or {})
@@ -63,6 +65,11 @@ def build_performance_divergence_report(
         ),
     )
     expected_drawdown = _safe_float(best.get("max_drawdown"), 0.0)
+    decay_triggered = bool((decay_state or {}).get("triggered"))
+    decay_note = ""
+    if decay_triggered:
+        decay_note = f"CUSUM decay triggered (decay_pct={float((decay_state or {}).get('decay_pct') or 0.0):.1f}%)"
+
     rows = list(snapshots or [])
     if not rows:
         return PerformanceDivergenceReport(
@@ -70,8 +77,8 @@ def build_performance_divergence_report(
             strategy_name=str(_get_value(candidate, "strategy", "strategy_name", default="") or ""),
             expected={"sharpe": expected_sharpe, "max_drawdown": expected_drawdown},
             sample_size=0,
-            status="insufficient_sample",
-            notes=["no paper/live snapshots available"],
+            status="decayed" if decay_triggered else "insufficient_sample",
+            notes=[decay_note] if decay_triggered else ["no paper/live snapshots available"],
         )
 
     latest = rows[0]
@@ -86,7 +93,8 @@ def build_performance_divergence_report(
             _safe_float(_get_value(latest, "trades", "total_trades"), len(rows)),
         )
     )
-    divergence = max(0.0, expected_sharpe - realized_sharpe)
+    edge_delta = realized_sharpe - expected_sharpe
+    divergence = max(0.0, -edge_delta)
     status = "aligned"
     notes: List[str] = []
     if trade_count < min_sample:
@@ -103,6 +111,12 @@ def build_performance_divergence_report(
         if status == "aligned":
             status = "underperforming"
 
+    # CUSUM decay takes priority over the divergence-based status: a decayed
+    # strategy is decayed regardless of how the averaged snapshot compares.
+    if decay_triggered:
+        status = "decayed"
+        notes.append(decay_note)
+
     return PerformanceDivergenceReport(
         candidate_id=str(_get_value(candidate, "candidate_id", default="") or ""),
         strategy_name=str(_get_value(candidate, "strategy", "strategy_name", default="") or ""),
@@ -110,6 +124,47 @@ def build_performance_divergence_report(
         realized={"sharpe": realized_sharpe, "max_drawdown": realized_drawdown, "trade_count": trade_count},
         sample_size=trade_count,
         divergence_score=round(divergence, 6),
+        edge_delta=round(edge_delta, 6),
         status=status,
         notes=notes,
     )
+
+
+def build_prior_update_from_divergence(
+    *,
+    candidate: Any,
+    report: PerformanceDivergenceReport,
+    strategy_family: str = "",
+    regime: str = "",
+    symbol_scope: str = "",
+) -> Dict[str, Any]:
+    metadata = dict(_get_value(candidate, "metadata", default={}) or {})
+    family = str(
+        strategy_family
+        or metadata.get("strategy_family")
+        or metadata.get("decision_engine")
+        or _get_value(candidate, "strategy", "strategy_name", default="")
+        or report.strategy_name
+        or "unknown"
+    ).strip() or "unknown"
+    regime_value = str(
+        regime
+        or metadata.get("research_mode")
+        or (metadata.get("market_state") or {}).get("regime")
+        or "mixed"
+    ).strip().lower() or "mixed"
+    scope = str(symbol_scope or metadata.get("symbol_scope") or "").strip().lower()
+    if not scope:
+        from core.observability.score_calibration import symbol_scope_for_symbol
+
+        scope = symbol_scope_for_symbol(_get_value(candidate, "symbol", default=""))
+    return {
+        "strategy_family": family,
+        "regime": regime_value,
+        "symbol_scope": scope,
+        "divergence_score": float(report.divergence_score or 0.0),
+        "edge_delta": float(report.edge_delta or 0.0),
+        "status": str(report.status or "unknown"),
+        "candidate_id": str(report.candidate_id or _get_value(candidate, "candidate_id", default="") or ""),
+        "sample_size": int(report.sample_size or 0),
+    }
