@@ -806,10 +806,13 @@
                             </div>
                             <div class="inline-actions">
                                 <button type="button" class="btn btn-primary btn-sm" id="btn-download-fill-research">填入研究币池</button>
+                                <button type="button" class="btn btn-primary btn-sm" id="btn-download-fill-altcoin-research">填入雷达研究清单</button>
+                                <button type="button" class="btn btn-primary btn-sm" id="btn-download-fill-altcoin-watchlist">填入雷达 Watchlist</button>
                                 <button type="button" class="btn btn-primary btn-sm" id="btn-download-refresh-research">立即刷新研究币池</button>
                                 <button type="button" class="btn btn-primary btn-sm" id="btn-download-clear-batch">清空批量币种</button>
                                 <button type="submit" class="btn btn-primary">开始下载</button>
                             </div>
+                            <div class="form-help">雷达研究清单会排除 BTC / ETH 等大盘锚，Watchlist 会读取山寨雷达收藏列表；填入后选择周期和时间范围，点击开始下载即可补齐本地数据源。</div>
                             <div class="form-help" id="download-research-refresh-status">研究币池增量追平状态：正在读取... 默认追平 1m / 5m / 15m / 1h；机器空闲时会额外为 BTC / ETH 补 1s。</div>
                         </form>
                         <pre id="download-output" class="output-box">下载说明：可选单个交易对快速下载，也可指定开始日期并批量补充多币种历史数据。</pre>

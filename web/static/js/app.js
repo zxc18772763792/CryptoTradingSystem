@@ -3444,6 +3444,80 @@ const source=text||String(fallback||'').trim();
 if(!source)return[];
 return Array.from(new Set(source.split(/[\s,;，、]+/).map(item=>String(item||'').trim().toUpperCase()).filter(Boolean).map(item=>item.includes('/')?item:`${item}/USDT`)));
 }
+function normalizeDownloadSymbolList(symbols,limit=0){
+const raw=Array.isArray(symbols)?symbols.join('\n'):String(symbols||'');
+const normalized=parseDownloadBatchSymbols(raw,'');
+const max=Number(limit||0);
+return max>0?normalized.slice(0,max):normalized;
+}
+function setDownloadBatchSymbols(symbols,{label='批量币种',exchange='',source='',warning='',limit=0}={}){
+const normalized=normalizeDownloadSymbolList(symbols,limit);
+const textarea=document.getElementById('download-symbols-batch');
+const downloadOut=getDownloadOutputEl();
+if(textarea)textarea.value=normalized.join('\n');
+const lines=[
+  `已填入${label}`,
+  `交易所: ${exchange||String(document.getElementById('download-exchange')?.value||'binance').trim()||'binance'}`,
+  `币种数: ${normalized.length}`,
+  `Symbols: ${normalized.join(', ')||'-'}`,
+  '下一步: 选择周期和时间范围后点击「开始下载」，用于补齐本地K线数据源。'
+];
+if(source)lines.splice(3,0,`来源: ${source}`);
+if(warning)lines.push(`提示: ${warning}`);
+if(downloadOut)downloadOut.textContent=lines.join('\n');
+return normalized;
+}
+async function fillDownloadBatchFromResearchSymbols({btn=null,label='研究币池',includeMajor=true,limit=30}={}){
+const ex=String(document.getElementById('download-exchange')?.value||'binance').trim()||'binance';
+const prevText=btn?btn.textContent:'';
+try{
+  if(btn){btn.disabled=true;btn.textContent='读取中...';}
+  const endpoint=`/data/research/symbols?exchange=${encodeURIComponent(ex)}${includeMajor?'':'&include_major=false'}`;
+  const resp=await api(endpoint,{timeoutMs:15000});
+  const fallbackLimit=Number(resp?.default_count||limit||30);
+  const symbols=(Array.isArray(resp?.symbols)?resp.symbols:[]);
+  const filled=setDownloadBatchSymbols(symbols,{
+    label,
+    exchange:ex,
+    source:resp?.source||resp?.fallback_source||'research_symbols',
+    warning:resp?.warning||'',
+    limit:limit>0?limit:fallbackLimit,
+  });
+  notify(`已填入${label}: ${filled.length} 个币种`);
+  return filled;
+}catch(err){
+  const downloadOut=getDownloadOutputEl();
+  if(downloadOut)downloadOut.textContent=`填入${label}失败: ${err.message}`;
+  notify(`填入${label}失败: ${err.message}`,true);
+  throw err;
+}finally{
+  if(btn){btn.disabled=false;btn.textContent=prevText;}
+}
+}
+async function fillDownloadBatchFromAltcoinWatchlist({btn=null}={}){
+const ex=String(document.getElementById('download-exchange')?.value||'binance').trim()||'binance';
+const prevText=btn?btn.textContent:'';
+const label='雷达 Watchlist';
+try{
+  if(btn){btn.disabled=true;btn.textContent='读取中...';}
+  const resp=await api('/altcoin/radar/watchlist',{timeoutMs:10000});
+  const symbols=Array.isArray(resp?.symbols)?resp.symbols:[];
+  const filled=setDownloadBatchSymbols(symbols,{
+    label,
+    exchange:ex,
+    source:'altcoin_radar_watchlist',
+  });
+  notify(`已填入${label}: ${filled.length} 个币种`);
+  return filled;
+}catch(err){
+  const downloadOut=getDownloadOutputEl();
+  if(downloadOut)downloadOut.textContent=`填入${label}失败: ${err.message}`;
+  notify(`填入${label}失败: ${err.message}`,true);
+  throw err;
+}finally{
+  if(btn){btn.disabled=false;btn.textContent=prevText;}
+}
+}
 function getDownloadDateRange(){
 const startRaw=String(document.getElementById('download-start-date')?.value||'').trim();
 const endRaw=String(document.getElementById('download-end-date')?.value||'').trim();
@@ -4109,19 +4183,15 @@ if(d)d.onsubmit=async e=>{
 };
 const fillResearchBtn=document.getElementById('btn-download-fill-research');
 if(fillResearchBtn)fillResearchBtn.onclick=async()=>{
-  const ex=String(document.getElementById('download-exchange')?.value||'binance').trim()||'binance';
-  const textarea=document.getElementById('download-symbols-batch');
-  const downloadOut=getDownloadOutputEl();
-  try{
-    const resp=await api(`/data/research/symbols?exchange=${encodeURIComponent(ex)}`,{timeoutMs:15000});
-    const symbols=(Array.isArray(resp?.symbols)?resp.symbols:[]).slice(0,30);
-    if(textarea)textarea.value=symbols.join('\n');
-    if(downloadOut)downloadOut.textContent=`已填入研究币池\n交易所: ${ex}\n币种数: ${symbols.length}\nSymbols: ${symbols.join(', ')}`;
-    notify(`已填入研究币池: ${symbols.length} 个币种`);
-  }catch(err){
-    if(downloadOut)downloadOut.textContent=`填入研究币池失败: ${err.message}`;
-    notify(`填入研究币池失败: ${err.message}`,true);
-  }
+  await fillDownloadBatchFromResearchSymbols({btn:fillResearchBtn,label:'研究币池',includeMajor:true,limit:30}).catch(()=>{});
+};
+const fillAltcoinResearchBtn=document.getElementById('btn-download-fill-altcoin-research');
+if(fillAltcoinResearchBtn)fillAltcoinResearchBtn.onclick=async()=>{
+  await fillDownloadBatchFromResearchSymbols({btn:fillAltcoinResearchBtn,label:'雷达研究清单',includeMajor:false,limit:30}).catch(()=>{});
+};
+const fillAltcoinWatchlistBtn=document.getElementById('btn-download-fill-altcoin-watchlist');
+if(fillAltcoinWatchlistBtn)fillAltcoinWatchlistBtn.onclick=async()=>{
+  await fillDownloadBatchFromAltcoinWatchlist({btn:fillAltcoinWatchlistBtn}).catch(()=>{});
 };
 const refreshResearchBtn=document.getElementById('btn-download-refresh-research');
 if(refreshResearchBtn)refreshResearchBtn.onclick=()=>triggerResearchUniverseRefresh(refreshResearchBtn);

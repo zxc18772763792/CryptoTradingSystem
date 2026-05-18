@@ -16,6 +16,8 @@ def test_data_download_batch_controls_and_hooks_exist():
     assert 'id="download-end-date"' in template
     assert 'id="download-symbols-batch"' in template
     assert 'id="btn-download-fill-research"' in template
+    assert 'id="btn-download-fill-altcoin-research"' in template
+    assert 'id="btn-download-fill-altcoin-watchlist"' in template
     assert 'id="btn-download-refresh-research"' in template
     assert 'id="btn-download-clear-batch"' in template
     assert 'id="download-output"' in template
@@ -29,12 +31,19 @@ def test_data_download_batch_controls_and_hooks_exist():
     assert "async function triggerResearchUniverseRefresh" in app_js
     assert "function getDownloadDateRange()" in app_js
     assert "function getDownloadRequestedDays(" in app_js
+    assert "function setDownloadBatchSymbols(" in app_js
+    assert "function fillDownloadBatchFromResearchSymbols(" in app_js
+    assert "function fillDownloadBatchFromAltcoinWatchlist(" in app_js
     assert "download-symbols-batch" in app_js
     assert "btn-download-fill-research" in app_js
+    assert "btn-download-fill-altcoin-research" in app_js
+    assert "btn-download-fill-altcoin-watchlist" in app_js
     assert "btn-download-refresh-research" in app_js
     assert "btn-download-clear-batch" in app_js
     assert "download-days" in app_js
     assert "/data/download/batch" in app_js
+    assert "include_major=false" in app_js
+    assert "/altcoin/radar/watchlist" in app_js
     assert "/data/research/refresh/start" in app_js
     assert "/data/research/refresh/status" in app_js
     assert "/data/download/tasks?task_ids=" in app_js

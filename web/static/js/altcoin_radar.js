@@ -1141,13 +1141,13 @@
     timelineEl.innerHTML = rows.map((e) => {
       const ts = e.ts_iso ? new Date(e.ts_iso).toLocaleTimeString('zh-CN', { hour12: false }) : '--';
       const detail = e.ignition_score != null
-        ? `点火=${Number(e.ignition_score).toFixed(2)}`
+        ? `点火=${shortNumber(e.ignition_score)}`
         : e.rank_jump != null
         ? `跃升 ${e.prev_rank}→${e.current_rank}`
         : e.crowding_late_score != null
-        ? `拥挤=${Number(e.crowding_late_score).toFixed(2)}`
+        ? `拥挤=${shortNumber(e.crowding_late_score)}`
         : e.narrative_heat_score != null
-        ? `叙事=${Number(e.narrative_heat_score).toFixed(2)}`
+        ? `叙事=${shortNumber(e.narrative_heat_score)}`
         : '';
       return `<div class="altcoin-event-row">
         <span class="altcoin-event-time">${escapeHtml(ts)}</span>
