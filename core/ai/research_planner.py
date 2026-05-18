@@ -206,24 +206,51 @@ def _parse_market_context(
             or market_state_snapshot.get("symbol")
             or ""
         )
+        metadata = dict(market_context.get("metadata") or {})
+        raw_beta = market_context.get("benchmark_beta")
+        if raw_beta is None:
+            raw_beta = metadata.get("benchmark_beta")
+        benchmark_beta_source = "provided"
         try:
-            benchmark_beta = float(
-                market_context.get("benchmark_beta")
-                or (market_context.get("metadata") or {}).get("benchmark_beta")
-                or 0.0
-            )
+            if raw_beta is None:
+                from core.market_state.benchmark_beta import resolve_benchmark_beta
+
+                beta_payload = resolve_benchmark_beta(
+                    exchange=str(market_context.get("exchange") or market_state_snapshot.get("exchange") or "binance"),
+                    symbol=symbol,
+                    benchmark_symbol=str(
+                        metadata.get("benchmark_symbol")
+                        or market_state_snapshot.get("benchmark_symbol")
+                        or market_state_snapshot.get("symbol")
+                        or "BTC/USDT"
+                    ),
+                    timeframe=str(market_context.get("timeframe") or "1h"),
+                    lookback=int(metadata.get("benchmark_beta_lookback") or 240),
+                )
+                if beta_payload.get("available"):
+                    benchmark_beta = float(beta_payload.get("beta") or 0.0)
+                    benchmark_beta_source = str(beta_payload.get("source") or "local_rolling_returns")
+                    metadata["benchmark_beta"] = benchmark_beta
+                    metadata["benchmark_beta_payload"] = beta_payload
+                else:
+                    benchmark_beta = 0.0
+                    benchmark_beta_source = f"unavailable:{beta_payload.get('reason') or 'unknown'}"
+            else:
+                benchmark_beta = float(raw_beta)
         except Exception as exc:
             benchmark_beta = 0.0
+            benchmark_beta_source = "error"
             _record_optional_context_issue(planner_notes, "market_state.benchmark_beta", exc)
         ms_boosted, ms_suppressed, ms_notes = market_state_to_planner_hints(
             market_state_snapshot,
             symbol=symbol,
             benchmark_beta=benchmark_beta,
-            symbol_metadata=dict(market_context.get("metadata") or {}),
+            symbol_metadata=metadata,
         )
         boosted.extend(ms_boosted)
         suppressed.extend(ms_suppressed)
         if planner_notes is not None:
+            planner_notes.append(f"benchmark_beta={benchmark_beta:.3f} source={benchmark_beta_source}")
             planner_notes.extend([note for note in ms_notes if note not in planner_notes])
         return _dedupe_keep_order(boosted), _dedupe_keep_order(suppressed)
 

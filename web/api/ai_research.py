@@ -4536,8 +4536,119 @@ class PerformanceSnapshotRequest(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
+async def _record_performance_snapshot_outcome_feedback(
+    app: Any,
+    *,
+    candidate_id: str,
+    snapshots: List[Any],
+) -> Dict[str, Any]:
+    """Backfill gate-audit outcomes when real paper/live performance arrives."""
+    candidate_id_text = str(candidate_id or "").strip()
+    if not candidate_id_text or not snapshots:
+        return {"applied": 0, "reason": "missing_candidate_or_snapshot"}
+
+    latest = snapshots[0]
+    candidate = None
+    report_payload: Dict[str, Any] = {}
+    prior_update: Dict[str, Any] = {}
+    feedback_update: Dict[str, Any] = {}
+    try:
+        candidate = get_candidate(app, candidate_id_text)
+    except Exception:
+        candidate = None
+
+    edge_delta = 0.0
+    divergence_score = 0.0
+    status = "performance_snapshot"
+    sample_size = int(getattr(latest, "trade_count", 0) or 0)
+    if candidate is not None:
+        try:
+            from core.research.performance_feedback import (
+                build_performance_divergence_report,
+                build_prior_update_from_divergence,
+            )
+
+            report = build_performance_divergence_report(candidate=candidate, snapshots=snapshots)
+            report_payload = report.to_dict()
+            edge_delta = float(report.edge_delta or 0.0)
+            divergence_score = float(report.divergence_score or 0.0)
+            status = str(report.status or status)
+            sample_size = int(report.sample_size or sample_size)
+            if status != "insufficient_sample":
+                prior_update = build_prior_update_from_divergence(candidate=candidate, report=report)
+        except Exception as exc:
+            report_payload = {"error": str(exc)}
+    else:
+        try:
+            edge_delta = float(getattr(latest, "sharpe_ratio", 0.0) or getattr(latest, "total_pnl_pct", 0.0) or 0.0)
+        except Exception:
+            edge_delta = 0.0
+
+    audit_update: Dict[str, Any] = {}
+    try:
+        from core.audit.gate_counterfactuals import update_gate_counterfactual_outcomes
+
+        audit_update = update_gate_counterfactual_outcomes(
+            [
+                {
+                    "subject_type": "candidate",
+                    "subject_id": candidate_id_text,
+                    "later_outcome_ref": f"performance_snapshot:{getattr(latest, 'id', '') or getattr(latest, 'snapshot_at', '')}",
+                    "status": status,
+                    "edge_delta": edge_delta,
+                    "divergence_score": divergence_score,
+                    "sample_size": sample_size,
+                    "snapshot_at": (
+                        latest.snapshot_at.isoformat()
+                        if getattr(latest, "snapshot_at", None) is not None
+                        else None
+                    ),
+                    "mode": str(getattr(latest, "mode", "") or ""),
+                    "strategy_name": str(getattr(latest, "strategy_name", "") or ""),
+                    "symbol": str(getattr(latest, "symbol", "") or ""),
+                }
+            ]
+        )
+    except Exception as exc:
+        audit_update = {"updated": 0, "error": str(exc)}
+
+    if prior_update:
+        try:
+            from core.observability.score_calibration import update_family_regime_priors
+
+            if int(audit_update.get("updated") or 0) > 0:
+                prior_update["counterfactual_outcome_count"] = int(audit_update.get("updated") or 0)
+            feedback_update = update_family_regime_priors([prior_update])
+        except Exception as exc:
+            feedback_update = {"applied": 0, "error": str(exc)}
+
+    try:
+        if candidate is not None:
+            meta = dict(candidate.metadata or {})
+            meta["last_performance_outcome_feedback"] = {
+                "status": status,
+                "edge_delta": edge_delta,
+                "audit_update": audit_update,
+                "prior_update": prior_update,
+            }
+            candidate.metadata = meta
+            registry = getattr(app.state, "ai_candidate_registry", None)
+            if registry is not None and hasattr(registry, "save"):
+                registry.save(candidate)
+    except Exception:
+        pass
+
+    return {
+        "applied": int(audit_update.get("updated") or 0) + int(feedback_update.get("applied") or 0),
+        "status": status,
+        "audit_update": audit_update,
+        "feedback_update": feedback_update,
+        "report": report_payload,
+    }
+
+
 @router.post("/performance/snapshots")
-async def save_performance_snapshot(body: PerformanceSnapshotRequest):
+async def save_performance_snapshot(request: Request, body: PerformanceSnapshotRequest):
     """Persist a strategy performance snapshot to the DB."""
     from sqlalchemy import insert as sa_insert
 
@@ -4570,7 +4681,14 @@ async def save_performance_snapshot(body: PerformanceSnapshotRequest):
     except Exception as exc:
         logger.warning(f"save_performance_snapshot failed: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
-    return {"ok": True, "snapshot_at": row.snapshot_at.isoformat()}
+    outcome_feedback: Dict[str, Any] = {}
+    if body.candidate_id:
+        outcome_feedback = await _record_performance_snapshot_outcome_feedback(
+            request.app,
+            candidate_id=str(body.candidate_id),
+            snapshots=[row],
+        )
+    return {"ok": True, "snapshot_at": row.snapshot_at.isoformat(), "outcome_feedback": outcome_feedback}
 
 
 @router.get("/performance/snapshots")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 
 def test_decision_trace_picks_block_before_downgrade():
     from core.observability.decision_trace import DecisionTrace, append_gate
@@ -510,3 +512,54 @@ def test_market_state_infers_benchmark_scope_when_snapshot_scope_missing():
     assert boosted == []
     assert suppressed == []
     assert "benchmark_context_risk_only:no_beta_or_sector_rule" in notes
+
+
+def test_planner_computes_rolling_benchmark_beta_when_missing(monkeypatch, tmp_path):
+    import pandas as pd
+
+    from config.settings import settings
+    from core.ai.research_planner import _parse_market_context
+    from core.data.path_utils import canonical_symbol_dir
+    from core.market_state.benchmark_beta import clear_benchmark_beta_cache, resolve_benchmark_beta
+
+    storage_root = tmp_path / "klines"
+    monkeypatch.setattr(settings, "DATA_STORAGE_PATH", storage_root, raising=False)
+    idx = pd.date_range("2026-01-01", periods=80, freq="1h")
+    btc_returns = pd.Series([0.004, -0.002, 0.006, -0.003] * 20, index=idx)
+    sol_returns = btc_returns * 0.8
+    btc_close = 100.0 * (1.0 + btc_returns).cumprod()
+    sol_close = 20.0 * (1.0 + sol_returns).cumprod()
+    for symbol, close in {"BTC/USDT": btc_close, "SOL/USDT": sol_close}.items():
+        folder = canonical_symbol_dir(storage_root, "binance", symbol)
+        folder.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"close": close, "open": close, "high": close, "low": close, "volume": 1.0}, index=idx).to_parquet(
+            folder / "1h.parquet"
+        )
+    clear_benchmark_beta_cache()
+
+    beta = resolve_benchmark_beta(exchange="binance", symbol="SOL/USDT", benchmark_symbol="BTC/USDT", timeframe="1h")
+    assert beta["available"] is True
+    assert beta["beta"] == pytest.approx(0.8, abs=0.05)
+
+    planner_notes = []
+    boosted, suppressed = _parse_market_context(
+        {
+            "exchange": "binance",
+            "symbol": "SOL/USDT",
+            "timeframe": "1h",
+            "market_state_snapshot": {
+                "scope": "benchmark",
+                "symbol": "BTC/USDT",
+                "regime": "trend_bullish",
+                "bias": "bullish",
+                "risk_posture": "normal",
+                "uncertainty": "confirmed",
+            },
+            "metadata": {"benchmark_symbol": "BTC/USDT"},
+        },
+        planner_notes=planner_notes,
+    )
+
+    assert "trend" in boosted
+    assert "mean_reversion" in suppressed
+    assert any("benchmark_beta=" in note and "local_rolling_returns" in note for note in planner_notes)

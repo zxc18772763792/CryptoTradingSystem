@@ -3824,6 +3824,20 @@ class AutonomousTradingAgent:
             if light_symbol_scan or bool(cfg.get("_skip_research_context"))
             else "agent_research_decoupled",
         )
+        if not light_symbol_scan and not bool(cfg.get("_skip_research_context")):
+            try:
+                from core.ai.research_runtime_context import resolve_runtime_research_context  # noqa: PLC0415
+
+                resolved_research_context = resolve_runtime_research_context(
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    strategy_name=str(cfg.get("strategy_name") or "AI_AutonomousAgent"),
+                )
+                if isinstance(resolved_research_context, dict):
+                    research_context = resolved_research_context
+            except Exception as exc:
+                logger.debug(f"autonomous agent runtime research context unavailable: {exc}")
         decision_timeframes = {
             "trigger": _MULTI_SCALE_TRIGGER_TIMEFRAME,
             "setup": timeframe,
@@ -4819,6 +4833,23 @@ class AutonomousTradingAgent:
         }
         return payload
 
+    def _autonomy_handoff_watch_symbols(self, cfg: Dict[str, Any]) -> List[str]:
+        """Symbols explicitly handed off from AI Research into autonomous watch."""
+        try:
+            from core.ai.runtime_eligibility import list_autonomy_handoff_watch_symbols  # noqa: PLC0415
+
+            return list_autonomy_handoff_watch_symbols(
+                exchange=str(cfg.get("exchange") or "binance"),
+                # Handoff observation is symbol-scoped; do not require the
+                # agent's scan timeframe to equal the candidate's research
+                # timeframe, otherwise a real handoff can silently disappear.
+                timeframe="",
+                auto_refresh_if_missing=True,
+            )
+        except Exception as exc:
+            logger.debug(f"autonomous agent handoff watchlist unavailable: {exc}")
+            return []
+
     async def get_symbol_scan(self, *, limit: Optional[int] = None, force: bool = False) -> Dict[str, Any]:
         async with self._symbol_scan_lock:
             return await self._get_symbol_scan_impl(limit=limit, force=force)
@@ -4873,9 +4904,11 @@ class AutonomousTradingAgent:
         )
         scan_position_map: Dict[str, Dict[str, Any]] = {}
         tracked_symbols: List[str] = []
+        autonomy_watch_symbols: List[str] = []
         if symbol_mode != "auto":
             universe_symbols = [configured_symbol]
         else:
+            autonomy_watch_symbols = self._autonomy_handoff_watch_symbols(cfg)
             scan_position_map = await self._scan_position_map(
                 exchange=str(cfg.get("exchange") or "binance"),
                 account_id=str(cfg.get("account_id") or "main"),
@@ -4885,6 +4918,7 @@ class AutonomousTradingAgent:
             universe_symbols = _merge_symbol_sequence(
                 tracked_symbols,
                 [configured_symbol],
+                autonomy_watch_symbols,
                 universe_symbols,
                 max_items=_AUTO_SYMBOL_SCAN_MAX_ITEMS,
             )
@@ -4905,6 +4939,7 @@ class AutonomousTradingAgent:
                 items,
                 key=lambda item: (
                     1 if item.get("has_position") else 0,
+                    1 if item.get("autonomy_handoff_watch") else 0,
                     1 if item.get("tradable_now") else 0,
                     float(item.get("score") or -999.0),
                     abs(float(item.get("position_unrealized_pnl_pct") or 0.0)),
@@ -4913,6 +4948,23 @@ class AutonomousTradingAgent:
                 ),
                 reverse=True,
             )
+
+        watch_keys = {_canonical_symbol_key(symbol) for symbol in autonomy_watch_symbols if str(symbol or "").strip()}
+
+        def _annotate_watch_rows(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if not watch_keys:
+                return items
+            out: List[Dict[str, Any]] = []
+            for item in items:
+                row = dict(item)
+                if _canonical_symbol_key(row.get("symbol")) in watch_keys:
+                    row["autonomy_handoff_watch"] = True
+                    row["score"] = round(float(row.get("score") or 0.0) + 0.05, 6)
+                    summary = str(row.get("summary") or "").strip()
+                    marker = "autonomy handoff watch"
+                    row["summary"] = f"{summary}; {marker}" if summary and marker not in summary else (summary or marker)
+                out.append(row)
+            return out
 
         async def _scan_rows(symbols: List[str], *, skip_live_market: bool) -> List[Dict[str, Any]]:
             async def _scan_symbol(symbol: str, semaphore: asyncio.Semaphore) -> Dict[str, Any]:
@@ -4959,7 +5011,7 @@ class AutonomousTradingAgent:
             return list(await asyncio.gather(*(_scan_symbol(symbol, semaphore) for symbol in symbols)))
 
         if symbol_mode == "auto" and len(universe_symbols) > max(selection_top_n, 6):
-            coarse_rows = _sort_rows(await _scan_rows(universe_symbols, skip_live_market=True))
+            coarse_rows = _sort_rows(_annotate_watch_rows(await _scan_rows(universe_symbols, skip_live_market=True)))
             if preview_only:
                 rows = coarse_rows
             else:
@@ -4978,13 +5030,14 @@ class AutonomousTradingAgent:
                 ]
                 shortlist_symbols = _merge_symbol_sequence(
                     tracked_symbols,
+                    autonomy_watch_symbols,
                     shortlist_symbols,
                     [configured_symbol],
                     max_items=shortlist_capacity,
                 )
-                rows = await _scan_rows(shortlist_symbols or universe_symbols, skip_live_market=False)
+                rows = _annotate_watch_rows(await _scan_rows(shortlist_symbols or universe_symbols, skip_live_market=False))
         else:
-            rows = await _scan_rows(universe_symbols, skip_live_market=False)
+            rows = _annotate_watch_rows(await _scan_rows(universe_symbols, skip_live_market=False))
 
         rows = _sort_rows(rows)
         scan_error_rows = [row for row in rows if bool(row.get("scan_error"))]
@@ -5015,6 +5068,8 @@ class AutonomousTradingAgent:
             selection_reason = "no_viable_candidates"
         elif bool(selected_row.get("has_position")):
             selection_reason = "existing_position_priority"
+        elif bool(selected_row.get("autonomy_handoff_watch")):
+            selection_reason = "autonomy_handoff_watch_symbol"
         else:
             selection_reason = "top_ranked_tradable_symbol" if bool(selected_row.get("tradable_now")) else "top_ranked_watchlist_symbol"
 
@@ -5039,6 +5094,7 @@ class AutonomousTradingAgent:
                 "lookback_bars": int(cfg.get("lookback_bars") or 240),
                 "selection_top_n": selection_top_n,
                 "universe_symbols": list(universe_symbols),
+                "autonomy_handoff_watch_symbols": list(autonomy_watch_symbols),
             },
         }
         payload["scan_meta"] = self._symbol_scan_meta(
@@ -6021,7 +6077,7 @@ class AutonomousTradingAgent:
         self._last_error = None
         self._last_decision = decision
         self._last_execution = execution
-        self._last_research_context = None
+        self._last_research_context = research_context if bool((research_context or {}).get("available")) else None
         self._last_diagnostics = diagnostics
         self._last_symbol_scan = selection
         self._tick_count += 1

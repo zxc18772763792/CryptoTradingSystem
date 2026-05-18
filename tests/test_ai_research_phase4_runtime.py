@@ -12,6 +12,7 @@ import pandas as pd
 from config.settings import settings
 from core.ai.proposal_schemas import ProposalValidationSummary, ResearchProposal
 from core.ai.runtime_eligibility import (
+    list_autonomy_handoff_watch_symbols,
     refresh_runtime_eligibility_snapshot,
     resolve_runtime_eligibility_context,
 )
@@ -166,6 +167,30 @@ def test_refresh_runtime_eligibility_snapshot_builds_contract(monkeypatch, tmp_p
     assert "eligible_for_autonomy" in first
 
 
+def test_runtime_eligibility_exposes_autonomy_handoff_watch(monkeypatch, tmp_path: Path):
+    _, champion = _seed_runtime_research(monkeypatch, tmp_path)
+    champion.status = "new"
+    champion.promotion_target = None
+    champion.symbol = "SOL/USDT"
+    champion.metadata["autonomy_handoff_requested"] = True
+    champion.metadata["autonomy_mode"] = "watch"
+    champion.metadata["autonomy_watch_scope"] = {
+        "symbol": "SOL/USDT",
+        "exchange": "binance",
+        "timeframe": "1h",
+        "registered": True,
+    }
+
+    snapshot = refresh_runtime_eligibility_snapshot(candidates=[champion.model_dump(mode="json")])
+    record = next(item for item in snapshot["records"] if item["candidate_id"] == champion.candidate_id)
+
+    assert record["runtime_mode_cap"] == "watch"
+    assert record["eligible_for_autonomy"] is False
+    assert record["eligible_for_autonomy_watch"] is True
+    assert "AUTONOMY_HANDOFF_WATCH_REQUESTED" in record["reason_codes"]
+    assert list_autonomy_handoff_watch_symbols(snapshot=snapshot, exchange="binance") == ["SOL/USDT"]
+
+
 def test_runtime_eligibility_context_marks_expired_records(monkeypatch, tmp_path: Path):
     data_storage_path = tmp_path / "storage" / "klines"
     monkeypatch.setattr(settings, "DATA_STORAGE_PATH", str(data_storage_path), raising=False)
@@ -285,7 +310,7 @@ def test_runtime_research_context_fallback_to_registry_when_eligibility_unavaila
     assert "FALLBACK_RESEARCH_REGISTRY" in context["reason_codes"]
 
 
-def test_autonomous_agent_run_once_does_not_attach_research_refs(monkeypatch, tmp_path: Path):
+def test_autonomous_agent_run_once_reads_runtime_research_context_without_signal_metadata(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
 
     _, champion = _seed_runtime_research(monkeypatch, tmp_path)
@@ -334,7 +359,7 @@ def test_autonomous_agent_run_once_does_not_attach_research_refs(monkeypatch, tm
     assert "research_candidate_id" not in signal_metadata
     assert "research_proposal_id" not in signal_metadata
     assert "research_champion_candidate_id" not in signal_metadata
-    assert result["status"]["last_research_context"] is None
+    assert result["status"]["last_research_context"]["selected_candidate"]["candidate_id"] == champion.candidate_id
 
 
 def test_live_decision_router_includes_research_context(monkeypatch, tmp_path: Path):

@@ -318,6 +318,85 @@ def test_performance_divergence_endpoint_reports_overfit(monkeypatch):
     assert result["report"]["realized"]["sharpe"] == pytest.approx(0.2)
 
 
+def test_save_performance_snapshot_backfills_counterfactual_outcome(monkeypatch, tmp_path):
+    from core.ai.proposal_schemas import ProposalValidationSummary
+    from core.audit.gate_counterfactuals import record_gate_counterfactual, summarize_gate_counterfactuals
+    from web.api import ai_research as ai_module
+
+    import core.observability.score_calibration as sc
+
+    audit_path = tmp_path / "gate_counterfactuals.jsonl"
+    monkeypatch.setenv("GATE_COUNTERFACTUAL_AUDIT_PATH", str(audit_path))
+    prior_path = tmp_path / "family_regime_priors.json"
+    prior_path.write_text(
+        json.dumps({"schema_version": "family_regime_priors.v1", "updated_at": None, "priors": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sc, "DEFAULT_PRIOR_PATH", prior_path)
+
+    validation = ProposalValidationSummary(
+        computed_at=datetime.now(timezone.utc),
+        decision="paper",
+        oos_score=1.4,
+        metrics={"best": {"max_drawdown": 8.0}},
+    )
+    candidate = _candidate(
+        candidate_id="cand-outcome",
+        metadata={"strategy_family": "trend", "research_mode": "trend_bullish"},
+        validation_summary=validation,
+    )
+    record_gate_counterfactual(
+        trace={
+            "trace_id": "trace-outcome",
+            "subject_type": "candidate",
+            "subject_id": "cand-outcome",
+            "root_blocker_code": "risk_gate",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "gates": [{"code": "risk_gate", "counterfactual_decision": "paper"}],
+        },
+        observed_decision="hold",
+        mode="paper",
+        path=audit_path,
+    )
+
+    class _Session:
+        def add(self, row):
+            self.row = row
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def commit(self):
+            self.row.id = 77
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ai_candidate_registry=SimpleNamespace(save=MagicMock()))))
+    monkeypatch.setattr(ai_module, "async_session_maker", lambda: _Session())
+    monkeypatch.setattr(ai_module, "get_candidate", lambda app, candidate_id: candidate)
+
+    body = ai_module.PerformanceSnapshotRequest(
+        strategy_name="MAStrategy",
+        symbol="BTC/USDT",
+        timeframe="1h",
+        mode="paper",
+        candidate_id="cand-outcome",
+        trade_count=30,
+        sharpe_ratio=1.6,
+        max_drawdown=7.0,
+    )
+
+    result = asyncio.run(ai_module.save_performance_snapshot(request, body))
+
+    assert result["ok"] is True
+    assert result["outcome_feedback"]["audit_update"]["updated"] == 1
+    assert result["outcome_feedback"]["feedback_update"]["applied"] == 1
+    summary = summarize_gate_counterfactuals(path=audit_path)
+    assert summary["outcome_linked_count"] == 1
+    assert summary["missed_alpha_proxy"] > 0
+
+
 def test_update_autonomous_agent_runtime_config_endpoint(monkeypatch):
     from web.api import ai_agent as ai_module
 

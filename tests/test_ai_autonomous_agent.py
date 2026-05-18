@@ -2112,6 +2112,69 @@ def test_get_symbol_scan_auto_uses_two_stage_refresh(monkeypatch, tmp_path: Path
     assert rerank_calls.count("SYM19/USDT") == 0
 
 
+def test_symbol_scan_consumes_autonomy_handoff_watch_symbols(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent_handoff_watch_scan")
+    call_log = []
+    monkeypatch.setattr(
+        agent,
+        "get_runtime_config",
+        lambda: {
+            "exchange": "binance",
+            "symbol": "BTC/USDT",
+            "symbol_mode": "auto",
+            "universe_symbols": ["BTC/USDT"],
+            "selection_top_n": 3,
+            "timeframe": "15m",
+            "lookback_bars": 240,
+            "account_id": "main",
+            "min_confidence": 0.58,
+        },
+    )
+    monkeypatch.setattr(agent, "_cfg_with_learning_overlays", lambda cfg, force_learning_refresh=False: dict(cfg))
+    monkeypatch.setattr(agent, "_scan_position_map", AsyncMock(return_value={}))
+    monkeypatch.setattr(agent, "_autonomy_handoff_watch_symbols", lambda cfg: ["SOL/USDT"])
+
+    async def _fake_build_context(local_cfg):
+        symbol = str(local_cfg.get("symbol") or "")
+        call_log.append(symbol)
+        return {"symbol": symbol}, pd.DataFrame()
+
+    def _fake_score(local_cfg, context_payload):
+        symbol = str(context_payload.get("symbol") or "")
+        score = 0.2 if symbol == "BTC/USDT" else 0.1
+        return {
+            "symbol": symbol,
+            "price": 1.0,
+            "direction": "FLAT",
+            "confidence": 0.1,
+            "score": score,
+            "tradable_now": False,
+            "blocked_by_risk": False,
+            "risk_reason": "",
+            "bars": 240,
+            "realized_vol_annualized": 0.2,
+            "threshold_gap": -0.4,
+            "summary": "watch",
+            "has_position": False,
+            "position_side": "",
+            "position_source": "",
+            "position_unrealized_pnl": 0.0,
+            "position_unrealized_pnl_pct": 0.0,
+        }
+
+    monkeypatch.setattr(agent, "_build_context", _fake_build_context)
+    monkeypatch.setattr(agent, "_score_symbol_candidate", _fake_score)
+
+    result = asyncio.run(agent.get_symbol_scan(limit=3, force=True))
+
+    assert "SOL/USDT" in call_log
+    assert "SOL/USDT" in result["scan_config"]["autonomy_handoff_watch_symbols"]
+    sol = next(item for item in result["top_candidates"] if item["symbol"] == "SOL/USDT")
+    assert sol["autonomy_handoff_watch"] is True
+
+
 def test_get_symbol_scan_preview_uses_fast_mode_without_caching(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
 

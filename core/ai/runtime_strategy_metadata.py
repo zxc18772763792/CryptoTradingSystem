@@ -62,6 +62,11 @@ def build_ai_research_strategy_metadata(
         payload["allocation_pct"] = allocation_pct
     if constraints:
         payload["promotion_constraints"] = constraints
+    if metadata.get("autonomy_handoff_requested"):
+        payload["autonomy_handoff_requested"] = True
+        payload["autonomy_mode"] = _safe_text(metadata.get("autonomy_mode") or "watch")
+    if isinstance(metadata.get("autonomy_watch_scope"), dict):
+        payload["autonomy_watch_scope"] = dict(metadata.get("autonomy_watch_scope") or {})
 
     return {
         key: value

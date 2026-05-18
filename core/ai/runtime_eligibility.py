@@ -12,6 +12,7 @@ from config.settings import settings
 
 _SCHEMA_VERSION = "runtime_eligibility.v1"
 _ACTIVE_CANDIDATE_STATUSES = frozenset({"paper_running", "shadow_running", "live_candidate", "live_running"})
+_WATCHABLE_CANDIDATE_STATUSES = frozenset({"new", "paper_running", "shadow_running", "live_candidate", "live_running"})
 _DEFAULT_MAX_AGE_MINUTES = 240
 
 
@@ -161,6 +162,15 @@ def _resolve_max_age_minutes(candidate: Dict[str, Any], promotion: Dict[str, Any
     return max(5, min(10080, value))
 
 
+def _autonomy_handoff_requested(metadata: Dict[str, Any]) -> bool:
+    watch_scope = metadata.get("autonomy_watch_scope") if isinstance(metadata.get("autonomy_watch_scope"), dict) else {}
+    return bool(
+        metadata.get("autonomy_handoff_requested")
+        or str(metadata.get("autonomy_mode") or "").strip().lower() == "watch"
+        or watch_scope.get("registered")
+    )
+
+
 def _build_eligibility_record(
     candidate: Dict[str, Any],
     *,
@@ -181,8 +191,19 @@ def _build_eligibility_record(
     expires_at = generated_at + timedelta(minutes=max_age_minutes)
     is_active = status in _ACTIVE_CANDIDATE_STATUSES
     validation_decision = str(validation.get("decision") or "").strip().lower()
+    autonomy_handoff_requested = _autonomy_handoff_requested(metadata)
+    autonomy_watch_scope = metadata.get("autonomy_watch_scope") if isinstance(metadata.get("autonomy_watch_scope"), dict) else {}
+    eligible_for_autonomy_watch = bool(
+        autonomy_handoff_requested
+        and _normalize_symbol(candidate.get("symbol"))
+        and status in _WATCHABLE_CANDIDATE_STATUSES
+    )
+    if autonomy_handoff_requested and runtime_mode_cap == "observe":
+        runtime_mode_cap = "watch"
 
     reason_codes: List[str] = []
+    if autonomy_handoff_requested:
+        reason_codes.append("AUTONOMY_HANDOFF_WATCH_REQUESTED")
     if not is_active:
         reason_codes.append("CANDIDATE_NOT_ACTIVE")
     if not validation_decision:
@@ -194,7 +215,7 @@ def _build_eligibility_record(
     if not promotion_target:
         reason_codes.append("NO_PROMOTION_TARGET")
 
-    eligible_for_autonomy = is_active and validation_decision != "reject" and runtime_mode_cap != "observe"
+    eligible_for_autonomy = is_active and validation_decision != "reject" and runtime_mode_cap not in {"observe", "watch"}
     if not eligible_for_autonomy:
         reason_codes.append("NOT_ELIGIBLE_FOR_AUTONOMY")
 
@@ -211,6 +232,9 @@ def _build_eligibility_record(
         "promotion_target": promotion_target,
         "runtime_mode_cap": runtime_mode_cap,
         "eligible_for_autonomy": bool(eligible_for_autonomy),
+        "eligible_for_autonomy_watch": bool(eligible_for_autonomy_watch),
+        "autonomy_handoff_requested": bool(autonomy_handoff_requested),
+        "autonomy_watch_scope": dict(autonomy_watch_scope or {}),
         "require_live_review": True,
         "max_age_minutes": int(max_age_minutes),
         "generated_at": _iso_utc(generated_at),
@@ -341,10 +365,13 @@ def _record_with_expiry(record: Dict[str, Any], now: datetime) -> Dict[str, Any]
     is_expired = bool(expires_at is not None and expires_at < now)
     out["is_expired"] = is_expired
     eligible = bool(out.get("eligible_for_autonomy"))
+    watch_eligible = bool(out.get("eligible_for_autonomy_watch"))
     if is_expired:
         reason_codes.append("ELIGIBILITY_EXPIRED")
         eligible = False
+        watch_eligible = False
     out["eligible_for_autonomy"] = eligible
+    out["eligible_for_autonomy_watch"] = watch_eligible
     out["reason_codes"] = _dedupe_keep_order(reason_codes)
     return out
 
@@ -357,9 +384,11 @@ def _record_rank(record: Dict[str, Any], *, prefer_active_first: bool) -> tuple[
     is_active = status in _ACTIVE_CANDIDATE_STATUSES
     is_champion = search_role == "champion" or champion_candidate_id == candidate_id
     eligible = bool(record.get("eligible_for_autonomy"))
+    watch_eligible = bool(record.get("eligible_for_autonomy_watch"))
     not_expired = 0 if bool(record.get("is_expired")) else 1
     base = (
         1 if eligible else 0,
+        1 if watch_eligible else 0,
         not_expired,
         1 if is_active else 0,
         1 if is_champion else 0,
@@ -368,7 +397,7 @@ def _record_rank(record: Dict[str, Any], *, prefer_active_first: bool) -> tuple[
     )
     if prefer_active_first:
         return base
-    return (base[0], base[1], base[3], base[2], base[4], base[5])
+    return (base[0], base[1], base[2], base[4], base[3], base[5], base[6])
 
 
 def _pick_best(records: List[Dict[str, Any]], *, prefer_active_first: bool) -> Optional[Dict[str, Any]]:
@@ -399,6 +428,10 @@ def _candidate_payload(record: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "strategy_family": str(record.get("strategy_family") or "").strip(),
         "thesis": str(record.get("thesis") or "").strip(),
         "validation": dict(record.get("validation") or {}),
+        "eligible_for_autonomy": bool(record.get("eligible_for_autonomy")),
+        "eligible_for_autonomy_watch": bool(record.get("eligible_for_autonomy_watch")),
+        "autonomy_handoff_requested": bool(record.get("autonomy_handoff_requested")),
+        "autonomy_watch_scope": dict(record.get("autonomy_watch_scope") or {}),
         "reason_codes": list(record.get("reason_codes") or []),
     }
 
@@ -412,6 +445,9 @@ def _brief_payload(record: Dict[str, Any]) -> Dict[str, Any]:
         "search_role": str(record.get("search_role") or "").strip(),
         "promotion_target": str(record.get("promotion_target") or "").strip(),
         "eligible_for_autonomy": bool(record.get("eligible_for_autonomy")),
+        "eligible_for_autonomy_watch": bool(record.get("eligible_for_autonomy_watch")),
+        "autonomy_handoff_requested": bool(record.get("autonomy_handoff_requested")),
+        "autonomy_watch_scope": dict(record.get("autonomy_watch_scope") or {}),
         "is_expired": bool(record.get("is_expired")),
         "reason_codes": list(record.get("reason_codes") or []),
     }
@@ -522,3 +558,59 @@ def resolve_runtime_eligibility_context(
         ],
     }
 
+
+def list_autonomy_handoff_watch_records(
+    *,
+    exchange: str = "",
+    timeframe: str = "",
+    snapshot: Optional[Dict[str, Any]] = None,
+    auto_refresh_if_missing: bool = True,
+) -> List[Dict[str, Any]]:
+    """Return non-expired handoff watch records consumed by the autonomous agent."""
+    exchange_text = str(exchange or "").strip().lower()
+    timeframe_text = str(timeframe or "").strip()
+    loaded = dict(snapshot or load_runtime_eligibility_snapshot())
+    records = [dict(item) for item in loaded.get("records", []) if isinstance(item, dict)]
+    if auto_refresh_if_missing and not records:
+        try:
+            loaded = dict(refresh_runtime_eligibility_snapshot())
+            records = [dict(item) for item in loaded.get("records", []) if isinstance(item, dict)]
+        except Exception as exc:
+            logger.debug(f"runtime_eligibility: handoff watch refresh failed: {exc}")
+            records = []
+
+    out: List[Dict[str, Any]] = []
+    now = _now_utc()
+    for raw in records:
+        row = _record_with_expiry(raw, now)
+        if not bool(row.get("eligible_for_autonomy_watch")):
+            continue
+        if exchange_text:
+            row_exchange = str(row.get("exchange") or "").strip().lower()
+            if row_exchange and row_exchange != exchange_text:
+                continue
+        if timeframe_text and str(row.get("timeframe") or "").strip() != timeframe_text:
+            continue
+        if not _normalize_symbol(row.get("symbol")):
+            continue
+        out.append(row)
+    return sorted(out, key=lambda item: _record_rank(item, prefer_active_first=False), reverse=True)
+
+
+def list_autonomy_handoff_watch_symbols(
+    *,
+    exchange: str = "",
+    timeframe: str = "",
+    snapshot: Optional[Dict[str, Any]] = None,
+    auto_refresh_if_missing: bool = True,
+) -> List[str]:
+    symbols = [
+        _normalize_symbol(item.get("symbol"))
+        for item in list_autonomy_handoff_watch_records(
+            exchange=exchange,
+            timeframe=timeframe,
+            snapshot=snapshot,
+            auto_refresh_if_missing=auto_refresh_if_missing,
+        )
+    ]
+    return _dedupe_keep_order([item for item in symbols if item])
