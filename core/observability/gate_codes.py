@@ -1,11 +1,13 @@
 """Canonical gate codes shared by validation, aggregation, autonomy, and audit."""
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import Enum
 from typing import Any, Dict
 
 
-class GateCode(StrEnum):
+class GateCode(str, Enum):
+    """str-mixin enum (Python 3.9 compatible; StrEnum is 3.11+)."""
+
     # Validation / promotion
     NO_VALID_RESEARCH_RUNS = "no_valid_research_runs"
     EFFECTIVE_SHARPE_SOURCE = "effective_sharpe_source"
@@ -44,6 +46,9 @@ class GateCode(StrEnum):
 
     # Monitoring / audit
     CUSUM_DECAY = "cusum_decay"
+
+    def __str__(self) -> str:  # match StrEnum: str()/f-string yield the value
+        return str(self.value)
 
 
 GATE_CODE_REGISTRY: Dict[str, Dict[str, Any]] = {
