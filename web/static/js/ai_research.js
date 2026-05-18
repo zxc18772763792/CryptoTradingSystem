@@ -1415,40 +1415,12 @@
     const scopeEl = document.getElementById('ai-live-decision-effective-scope');
     const modeEl = document.getElementById('ai-live-decision-effective-mode');
     if (!scopeEl || !modeEl) return;
-    scopeEl.textContent = String(summary.scope || '未加载');
-    modeEl.textContent = String(summary.mode || '未加载');
-  }
-
-  function renderLiveDecisionActivitySummary(summary = {}) {
-    const hitEl = document.getElementById('ai-live-decision-hit-summary');
-    const hitDetailEl = document.getElementById('ai-live-decision-hit-detail');
-    const lastEl = document.getElementById('ai-live-decision-last-hit');
-    const lastDetailEl = document.getElementById('ai-live-decision-last-hit-detail');
-    if (!hitEl || !hitDetailEl || !lastEl || !lastDetailEl) return;
-
-    const hitCount = Math.max(0, Number(summary?.hit_count || 0));
-    const blockCount = Math.max(0, Number(summary?.block_count || 0));
-    const reduceOnlyCount = Math.max(0, Number(summary?.reduce_only_count || 0));
-    const bypassCount = Math.max(0, Number(summary?.bypass_count || 0));
-    const lastHit = summary?.last_hit && typeof summary.last_hit === 'object' ? summary.last_hit : null;
-
-    hitEl.textContent = hitCount > 0 ? `已命中 ${hitCount} 次` : '暂未命中';
-    hitDetailEl.textContent = hitCount > 0
-      ? `直接拦截 ${blockCount} 次 · 减仓拒绝 ${reduceOnlyCount} 次`
-      : String(summary?.scope_note || '仅统计策略库/候选执行链');
-    if (bypassCount > 0) {
-      hitDetailEl.textContent += ` · 自动交易直连 ${bypassCount} 次`;
-    }
-
-    if (lastHit) {
-      const status = String(lastHit.status || '').trim().toLowerCase();
-      const symbolLabel = String(lastHit.symbol || '--').split('/')[0] || '--';
-      lastEl.textContent = `${symbolLabel} ${status === 'ai_reduce_only_rejected' ? '减仓拒绝' : '直接拦截'}`;
-      lastDetailEl.textContent = `${String(lastHit.strategy || '--')} · ${fmtTs(lastHit.ts || summary?.last_updated_at)}`;
-    } else {
-      lastEl.textContent = '最近暂无拦截';
-      lastDetailEl.textContent = 'AI自动交易不计入这里';
-    }
+    const scopeText = String(summary.scope || '未加载');
+    const modeText = String(summary.mode || '未加载');
+    scopeEl.textContent = scopeText;
+    modeEl.textContent = modeText;
+    scopeEl.title = scopeText;
+    modeEl.title = modeText;
   }
 
   function buildLiveDecisionEffectiveSummary(cfg, providerState, overrides = {}) {
@@ -1459,18 +1431,18 @@
     const tradingMode = String((state.runtimeConfig && state.runtimeConfig.trading_mode) || '--').trim().toLowerCase();
     const applyInPaper = overrides.applyInPaper != null ? !!overrides.applyInPaper : !!cfg?.apply_in_paper;
 
-    let scopeText = '未启用，当前策略下单不做AI复核';
+    let scopeText = '未启用';
     if (enabled && applyInPaper) {
-      scopeText = '纸盘/实盘策略执行链（AI自动交易不经过此处）';
+      scopeText = '纸盘+实盘';
     } else if (enabled && tradingMode === 'live') {
-      scopeText = '当前实盘策略执行链（AI自动交易不经过此处）';
+      scopeText = '实盘策略';
     } else if (enabled) {
-      scopeText = '仅实盘策略执行链（纸盘先观察，AI自动交易不经过此处）';
+      scopeText = '仅实盘';
     }
 
     return {
       scope: scopeText,
-      mode: enabled ? `${decisionModeLabel(mode)} / ${providerDisplayName(provider)} / ${model}` : '关闭',
+      mode: enabled ? `${decisionModeLabel(mode)} · ${providerDisplayName(provider)} · ${model}` : '关闭',
     };
   }
 
@@ -1497,11 +1469,11 @@
     const selectedProvider = providerState.provider;
     const available = !!providerState.providerMeta.available;
     const modeText = decisionModeLabel(String(cfg.mode || 'shadow'));
-    const providerText = `${providerDisplayName(selectedProvider)}/${String(providerState.model || '--')}`;
-    const fallbackText = providerState.fallbackUsed
-      ? ` | 已从 ${providerDisplayName(providerState.requestedProvider)} 自动切换`
-      : '';
-    statusEl.textContent = `${cfg.enabled ? '已启用' : '未启用'} | ${modeText} | ${providerText} | ${available ? 'key就绪' : 'key缺失'}${fallbackText}`;
+    const providerText = `${providerDisplayName(selectedProvider)} · ${String(providerState.model || '--')}`;
+    const fallbackText = providerState.fallbackUsed ? `，已从 ${providerDisplayName(providerState.requestedProvider)} 自动切换` : '';
+    const statusText = `${cfg.enabled ? '启用' : '关闭'} · ${modeText} · ${providerText} · ${available ? 'key就绪' : 'key缺失'}${fallbackText}`;
+    statusEl.textContent = `${cfg.enabled ? '启用' : '关闭'} · ${available ? 'key就绪' : 'key缺失'}`;
+    statusEl.title = statusText;
     statusEl.style.color = available ? '#9fb1c9' : '#f0b429';
     renderLiveDecisionEffectiveSummary(buildLiveDecisionEffectiveSummary(cfg, providerState));
   }
@@ -1526,8 +1498,11 @@
     providerEl.dataset.previousProvider = nextProvider;
     const available = !!providers[nextProvider]?.available;
     const previewModel = String(modelEl.value || nextDefaultModel || '--');
-    const providerText = `${providerDisplayName(nextProvider)}/${previewModel}`;
-    statusEl.textContent = `${enabledEl?.checked ? '已启用' : '未启用'} | ${decisionModeLabel(String(modeEl?.value || cfg.mode || 'shadow'))} | ${providerText} | ${available ? 'key就绪' : 'key缺失'}`;
+    const previewMode = decisionModeLabel(String(modeEl?.value || cfg.mode || 'shadow'));
+    const providerText = `${providerDisplayName(nextProvider)} · ${previewModel}`;
+    const statusText = `${enabledEl?.checked ? '启用' : '关闭'} · ${previewMode} · ${providerText} · ${available ? 'key就绪' : 'key缺失'}`;
+    statusEl.textContent = `${enabledEl?.checked ? '启用' : '关闭'} · ${available ? 'key就绪' : 'key缺失'}`;
+    statusEl.title = statusText;
     statusEl.style.color = available ? '#9fb1c9' : '#f0b429';
     renderLiveDecisionEffectiveSummary(buildLiveDecisionEffectiveSummary(cfg, {
       provider: nextProvider,
@@ -1576,32 +1551,6 @@
     }
   }
 
-  async function loadLiveDecisionActivitySummary() {
-    try {
-      clearTimeout(state.liveDecisionActivityRetryTimer);
-      state.liveDecisionActivityRetryTimer = null;
-      const res = await aiApi('/runtime-config/live-decision/summary', { timeoutMs: 20000 });
-      state.liveDecisionActivity = res || {};
-      renderLiveDecisionActivitySummary(state.liveDecisionActivity);
-    } catch (err) {
-      state.liveDecisionActivity = {
-        hit_count: 0,
-        block_count: 0,
-        reduce_only_count: 0,
-        last_hit: null,
-        scope_note: `摘要加载失败: ${err.message}`,
-      };
-      renderLiveDecisionActivitySummary(state.liveDecisionActivity);
-      clearTimeout(state.liveDecisionActivityRetryTimer);
-      state.liveDecisionActivityRetryTimer = setTimeout(() => {
-        state.liveDecisionActivityRetryTimer = null;
-        if (isAiResearchActive()) {
-          loadLiveDecisionActivitySummary().catch(() => {});
-        }
-      }, 3000);
-    }
-  }
-
   function renderLiveDecisionActivitySummary(summary = {}) {
     const hitEl = document.getElementById('ai-live-decision-hit-summary');
     const hitDetailEl = document.getElementById('ai-live-decision-hit-detail');
@@ -1623,31 +1572,35 @@
     const baseScopeNote = String(summary?.scope_note || '仅统计策略库/候选执行链');
     const detailParts = [];
 
-    hitEl.textContent = hitCount > 0 ? `已命中 ${hitCount} 次` : '暂未命中';
+    hitEl.textContent = hitCount > 0 ? `${hitCount} 次` : '0 次';
     if (refreshState === 'retrying' && hitCount === 0) {
       detailParts.push(refreshNote || '摘要刷新中，稍后自动重试');
     } else {
       if (hitCount > 0) {
-        detailParts.push(`直接拦截 ${blockCount} 次 · 减仓拒绝 ${reduceOnlyCount} 次`);
+        detailParts.push(`拦截 ${blockCount} · 减仓 ${reduceOnlyCount}`);
       } else {
         detailParts.push(baseScopeNote);
       }
-      if (bypassCount > 0) detailParts.push(`自动交易直连 ${bypassCount} 次`);
+      if (bypassCount > 0) detailParts.push(`直连 ${bypassCount}`);
       if (refreshNote) detailParts.push(refreshNote);
     }
     hitDetailEl.textContent = detailParts.join(' · ');
+    hitEl.title = hitDetailEl.textContent;
+    hitDetailEl.title = hitDetailEl.textContent;
 
     if (lastHit) {
       const status = String(lastHit.status || '').trim().toLowerCase();
       const symbolLabel = String(lastHit.symbol || '--').split('/')[0] || '--';
-      lastEl.textContent = `${symbolLabel} ${status === 'ai_reduce_only_rejected' ? '减仓拒绝' : '直接拦截'}`;
+      lastEl.textContent = `${symbolLabel} ${status === 'ai_reduce_only_rejected' ? '减仓' : '拦截'}`;
       lastDetailEl.textContent = `${String(lastHit.strategy || '--')} · ${fmtTs(lastHit.ts || summary?.last_updated_at)}${refreshState === 'stale' ? ' · 非实时快照' : ''}`;
     } else {
-      lastEl.textContent = refreshState === 'retrying' ? '摘要刷新中' : '最近暂无拦截';
+      lastEl.textContent = refreshState === 'retrying' ? '刷新中' : '无';
       lastDetailEl.textContent = refreshState === 'retrying'
         ? '正在重试拉取复核摘要'
         : `AI自动交易不计入这里${refreshState === 'stale' ? ' · 当前显示为上次快照' : ''}`;
     }
+    lastEl.title = lastDetailEl.textContent;
+    lastDetailEl.title = lastDetailEl.textContent;
   }
 
   async function loadLiveDecisionActivitySummary() {

@@ -16925,6 +16925,55 @@ body:has(#ai-agent.active) .container {
     #ai-research .ai-detail-panel {
         max-height: calc(100vh - 250px);
     }
+
+    #ai-research .ai-hub-main-header {
+        grid-template-columns: minmax(0, 1fr) !important;
+        gap: 8px !important;
+    }
+
+    #ai-research .ai-hub-heading,
+    #ai-research .ai-hub-title-row,
+    #ai-research .ai-hub-subtitle {
+        min-width: 0;
+    }
+
+    #ai-research .ai-hub-title-row {
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    #ai-research .ai-hub-subtitle {
+        max-width: none;
+        line-height: 1.45;
+    }
+
+    #ai-research .ai-hub-toolbar {
+        width: 100%;
+        display: grid;
+        grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.35fr);
+        gap: 6px;
+    }
+
+    #ai-research .ai-hub-toolbar-group {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+    }
+
+    #ai-research .ai-hub-toolbar-group-run {
+        grid-template-columns: minmax(0, 1fr) 54px auto minmax(92px, 1fr);
+    }
+
+    #ai-research #ai-compare-btn {
+        grid-column: 1 / -1;
+    }
+
+    #ai-research .ai-hub-toolbar select,
+    #ai-research .ai-hub-toolbar input,
+    #ai-research .ai-hub-toolbar button {
+        min-width: 0 !important;
+        width: 100%;
+    }
 }
 
 /* Desktop repair: the useful research cockpit is the hub.  Claude's visual
@@ -16978,5 +17027,189 @@ body:has(#ai-agent.active) .container {
     #ai-research #ai-research-live-signals-panel {
         max-height: 150px;
         overflow: auto;
+    }
+}
+
+/* Compact one-row review bar for the AI research cockpit. */
+#ai-research .ai-review-panel {
+    grid-area: review;
+    display: grid !important;
+    grid-template-columns: minmax(190px, 0.56fr) minmax(440px, 1.08fr) minmax(500px, 1.18fr) !important;
+    align-items: center !important;
+    gap: 10px !important;
+    padding: 10px 12px !important;
+    min-height: 0 !important;
+}
+
+#ai-research .ai-review-intro {
+    grid-column: 1 !important;
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+}
+
+#ai-research .ai-review-panel-head {
+    align-items: center !important;
+    gap: 8px !important;
+    margin: 0 !important;
+    min-width: 0;
+}
+
+#ai-research .ai-review-panel-title {
+    font-size: 13px !important;
+    line-height: 1.25 !important;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#ai-research .ai-review-panel-tag {
+    display: none !important;
+}
+
+#ai-research .ai-review-panel-desc {
+    margin: 2px 0 0 !important;
+    font-size: 11px !important;
+    line-height: 1.35 !important;
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+#ai-research .ai-review-metrics-strip {
+    grid-column: 2 !important;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+    min-width: 0;
+}
+
+#ai-research .ai-review-dynamic-summary,
+#ai-research .ai-review-activity-summary {
+    display: contents !important;
+}
+
+#ai-research .ai-review-dynamic-item,
+#ai-research .ai-review-activity-item {
+    min-height: 44px !important;
+    padding: 6px 8px !important;
+    gap: 2px !important;
+    border-radius: 7px !important;
+    overflow: hidden;
+}
+
+#ai-research .ai-review-dynamic-item span,
+#ai-research .ai-review-activity-item span {
+    font-size: 9px !important;
+    line-height: 1.2 !important;
+    letter-spacing: 0 !important;
+    text-transform: none !important;
+    white-space: nowrap;
+}
+
+#ai-research .ai-review-dynamic-item strong,
+#ai-research .ai-review-activity-item strong {
+    font-size: 11px !important;
+    line-height: 1.25 !important;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#ai-research .ai-review-activity-item small {
+    font-size: 10px !important;
+    line-height: 1.25 !important;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#ai-research .ai-review-config-strip {
+    grid-column: 3 !important;
+    display: grid;
+    grid-template-columns: minmax(172px, 0.96fr) minmax(186px, 0.98fr) minmax(132px, auto);
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+#ai-research .ai-review-config-strip .form-row,
+#ai-research .ai-review-config-strip .inline-actions {
+    grid-column: auto !important;
+    margin: 0 !important;
+}
+
+#ai-research .ai-review-config-strip .ai-auto-step-form-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 6px;
+}
+
+#ai-research .ai-review-config-strip .ai-auto-inline-check {
+    min-height: 30px;
+    padding: 0 8px;
+    align-items: center;
+    border: 1px solid var(--rs-border);
+    border-radius: 7px;
+    background: var(--rs-inset);
+    color: var(--rs-text);
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+#ai-research .ai-review-config-strip .ai-auto-step-actions {
+    display: grid;
+    grid-template-columns: minmax(84px, auto) minmax(42px, 1fr);
+    align-items: center;
+    gap: 6px;
+}
+
+#ai-research .ai-review-panel select,
+#ai-research .ai-review-panel input[type="text"],
+#ai-research .ai-review-panel input[type="number"] {
+    min-height: 30px !important;
+    height: 30px;
+    padding-top: 0;
+    padding-bottom: 0;
+    font-size: 11px;
+}
+
+#ai-research .ai-review-panel .btn-sm {
+    min-height: 30px;
+    height: 30px;
+    padding: 0 8px;
+    white-space: nowrap;
+}
+
+#ai-research .ai-review-panel .ai-auto-step-status {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 10px;
+}
+
+@media (max-width: 1179px) {
+    #ai-research .ai-review-panel {
+        grid-template-columns: minmax(0, 1fr) !important;
+        align-items: stretch !important;
+    }
+
+    #ai-research .ai-review-intro,
+    #ai-research .ai-review-metrics-strip,
+    #ai-research .ai-review-config-strip {
+        grid-column: 1 !important;
+    }
+
+    #ai-research .ai-review-metrics-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    #ai-research .ai-review-config-strip {
+        grid-template-columns: minmax(0, 1fr);
     }
 }

@@ -1634,54 +1634,60 @@
                         </div>
 
                         <div class="ai-review-panel">
-                            <div class="ai-review-panel-head">
-                                <div class="ai-review-panel-title">🛡 策略库增强：下单前AI复核</div>
-                                <span class="ai-review-panel-tag">面向已有策略/候选</span>
-                            </div>
-                            <div class="ai-review-panel-desc">
-                                仅对已注册/候选/人工确认策略加一道下单前复核；不生成新策略，也不拦截 AI 自动交易直连链。
-                            </div>
-                            <div class="ai-review-dynamic-summary">
-                                <div class="ai-review-dynamic-item">
-                                    <span>当前生效范围</span>
-                                    <strong id="ai-live-decision-effective-scope">加载中...</strong>
+                            <div class="ai-review-intro">
+                                <div class="ai-review-panel-head">
+                                    <div class="ai-review-panel-title">🛡 策略库增强：下单前AI复核</div>
+                                    <span class="ai-review-panel-tag">策略/候选</span>
                                 </div>
-                                <div class="ai-review-dynamic-item">
-                                    <span>当前模式</span>
-                                    <strong id="ai-live-decision-effective-mode">加载中...</strong>
+                                <div class="ai-review-panel-desc">
+                                    只给已注册/候选策略加下单前复核；不生成新策略，不拦截 AI 自动交易直连链。
                                 </div>
                             </div>
-                            <div class="ai-review-activity-summary">
-                                <div class="ai-review-activity-item">
-                                    <span>命中记录</span>
-                                    <strong id="ai-live-decision-hit-summary">加载中...</strong>
-                                    <small id="ai-live-decision-hit-detail">仅统计策略库/候选执行链</small>
+                            <div class="ai-review-metrics-strip">
+                                <div class="ai-review-dynamic-summary">
+                                    <div class="ai-review-dynamic-item">
+                                        <span>范围</span>
+                                        <strong id="ai-live-decision-effective-scope">加载中...</strong>
+                                    </div>
+                                    <div class="ai-review-dynamic-item">
+                                        <span>模式</span>
+                                        <strong id="ai-live-decision-effective-mode">加载中...</strong>
+                                    </div>
                                 </div>
-                                <div class="ai-review-activity-item">
-                                    <span>最近拦截结果</span>
-                                    <strong id="ai-live-decision-last-hit">加载中...</strong>
-                                    <small id="ai-live-decision-last-hit-detail">AI自动交易不计入这里</small>
+                                <div class="ai-review-activity-summary">
+                                    <div class="ai-review-activity-item">
+                                        <span>命中</span>
+                                        <strong id="ai-live-decision-hit-summary">加载中...</strong>
+                                        <small id="ai-live-decision-hit-detail">仅统计策略库/候选执行链</small>
+                                    </div>
+                                    <div class="ai-review-activity-item">
+                                        <span>最近拦截</span>
+                                        <strong id="ai-live-decision-last-hit">加载中...</strong>
+                                        <small id="ai-live-decision-last-hit-detail">AI自动交易不计入这里</small>
+                                    </div>
                                 </div>
                             </div>
-                            <div class="form-row ai-auto-step-form-row">
-                                <label class="ai-auto-inline-check">
-                                    <input type="checkbox" id="ai-live-decision-enabled">
-                                    启用下单前复核
-                                </label>
-                                <select id="ai-live-decision-mode">
-                                    <option value="shadow">只提示（shadow，不拦截）</option>
-                                    <option value="enforce">可拦截（enforce，影响实盘）</option>
-                                </select>
-                            </div>
-                            <div class="form-row ai-auto-step-form-row">
-                                <select id="ai-live-decision-provider">
-                                    <option value="codex">OpenAI</option>
-                                </select>
-                                <input id="ai-live-decision-model" type="text" placeholder="模型名（可留空用默认）">
-                            </div>
-                            <div class="inline-actions ai-auto-step-actions">
-                                <button class="btn btn-sm" id="ai-live-decision-save-btn">保存复核配置</button>
-                                <span id="ai-live-decision-status" class="ai-auto-step-status">未加载</span>
+                            <div class="ai-review-config-strip">
+                                <div class="form-row ai-auto-step-form-row">
+                                    <label class="ai-auto-inline-check">
+                                        <input type="checkbox" id="ai-live-decision-enabled">
+                                        启用下单前复核
+                                    </label>
+                                    <select id="ai-live-decision-mode">
+                                        <option value="shadow">只提示（shadow，不拦截）</option>
+                                        <option value="enforce">可拦截（enforce，影响实盘）</option>
+                                    </select>
+                                </div>
+                                <div class="form-row ai-auto-step-form-row">
+                                    <select id="ai-live-decision-provider">
+                                        <option value="codex">OpenAI</option>
+                                    </select>
+                                    <input id="ai-live-decision-model" type="text" placeholder="模型名（可留空用默认）">
+                                </div>
+                                <div class="inline-actions ai-auto-step-actions">
+                                    <button class="btn btn-sm" id="ai-live-decision-save-btn">保存复核配置</button>
+                                    <span id="ai-live-decision-status" class="ai-auto-step-status">未加载</span>
+                                </div>
                             </div>
                         </div>
                 <div id="ai-flow-console" class="card ai-flow-console">
