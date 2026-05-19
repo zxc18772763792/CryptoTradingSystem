@@ -115,8 +115,29 @@
         const key = String(v || "").trim().toLowerCase();
         if (!key || key === "not_summarized") return "未摘要";
         if (key === "stored") return "已入库摘要";
-        if (key.includes("gemma") || key.includes("gm摘要") || key.includes("gm-") || key.includes(":gm")) return "GM摘要";
-        if (key.includes("deepseek") || key.includes("ds摘要") || key.includes("ds-") || key.includes(":ds")) return "DS摘要";
+        if (
+            key.includes("nim_summary") ||
+            key.includes("nvidia") ||
+            key.includes("integrate.api.nvidia") ||
+            key.includes("google/gemma-4-31b-it") ||
+            key.includes("gemma-4-31b-it")
+        ) return "NIM摘要";
+        if (
+            key.includes("gm_summary") ||
+            key.includes("gemma4-local") ||
+            key.includes("local-gemma") ||
+            key.includes("192.168.") ||
+            key.includes("127.0.0.1") ||
+            key.includes("localhost")
+        ) return "GM摘要";
+        if (
+            key.includes("ds_summary") ||
+            key.includes("deepseek") ||
+            key.includes("deepseek-v4-flash") ||
+            key.includes("ds摘要") ||
+            key.includes("ds-") ||
+            key.includes(":ds")
+        ) return "DS摘要";
         if (key.includes("openai") || key.includes("responses") || key.includes("codex") || key.startsWith("gpt")) {
             return "GPT摘要";
         }

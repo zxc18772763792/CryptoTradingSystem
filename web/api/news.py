@@ -682,7 +682,19 @@ def _is_llm_summary_source(source: Any) -> bool:
         return False
     if text in {"glm", "glm5", "llm", "llm_cache", "glm_cache", "glm5_cache", "openai", "openai_responses", "codex", "responses"}:
         return True
-    return ("glm" in text) or text.startswith("llm") or text.startswith("openai") or text.startswith("codex") or text.startswith("responses")
+    if text in {"nim_summary", "gm_summary", "ds_summary"}:
+        return True
+    return (
+        ("glm" in text)
+        or text.startswith("llm")
+        or text.startswith("openai")
+        or text.startswith("codex")
+        or text.startswith("responses")
+        or text.startswith("nim_summary:")
+        or text.startswith("gm_summary:")
+        or text.startswith("ds_summary:")
+        or text.endswith("_summary")
+    )
 
 
 def _is_fallback_summary_source(source: Any) -> bool:

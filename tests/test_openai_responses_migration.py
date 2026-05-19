@@ -1395,7 +1395,7 @@ def test_news_sync_summary_uses_openai_mini_source(monkeypatch):
 
     assert result["summary"] == "ETF approval positive"
     assert result["sentiment"] == "positive"
-    assert result["source"] == "openai_responses"
+    assert result["source"] == "openai_responses:deepseek-v4-flash"
     assert capture["url"] == "https://example.test/v1/responses"
     assert capture["json"]["model"] == "deepseek-v4-flash"
 
@@ -1436,7 +1436,7 @@ def test_news_sync_summary_uses_news_deepseek_chat_override(monkeypatch):
 
     assert result["summary"] == "DeepSeek 摘要"
     assert result["sentiment"] == "neutral"
-    assert result["source"] == "openai_chat_completions"
+    assert result["source"] == "ds_summary:deepseek-v4-flash"
     assert capture["url"] == "https://kuaipao.ai/v1/chat/completions"
     assert capture["json"]["model"] == "deepseek-v4-flash"
     assert capture["headers"]["Authorization"] == "Bearer sk-news"
@@ -1469,7 +1469,64 @@ def test_news_sync_summary_source_includes_response_model(monkeypatch):
 
     result = module.summarize_title_glm5("BTC trades flat", {"llm": {"provider": "openai"}}, max_length=60)
 
-    assert result["source"] == "openai_chat_completions:deepseek-v4-flash"
+    assert result["source"] == "ds_summary:deepseek-v4-flash"
+
+
+def test_news_sync_summary_source_labels_nim_gm_and_ds(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setattr(settings, "NEWS_LLM_FORCE_CHAT_COMPLETIONS", True, raising=False)
+
+    cases = [
+        (
+            {
+                "NEWS_LLM_API_KEY": "nim-key",
+                "NEWS_LLM_BASE_URL": "https://integrate.api.nvidia.com/v1",
+                "NEWS_LLM_MODEL": "google/gemma-4-31b-it",
+            },
+            "nim_summary:google-gemma-4-31b-it",
+        ),
+        (
+            {
+                "NEWS_LLM_API_KEY": "gm-key",
+                "NEWS_LLM_BASE_URL": "http://192.168.1.24:8010/v1",
+                "NEWS_LLM_MODEL": "gemma4-local",
+            },
+            "gm_summary:gemma4-local",
+        ),
+        (
+            {
+                "NEWS_LLM_API_KEY": "ds-key",
+                "NEWS_LLM_BASE_URL": "https://kuaipao.ai",
+                "NEWS_LLM_MODEL": "deepseek-v4-flash",
+            },
+            "ds_summary:deepseek-v4-flash",
+        ),
+    ]
+
+    for env_patch, expected_source in cases:
+        module._SUMMARY_CACHE.clear()
+        for name, value in env_patch.items():
+            monkeypatch.setattr(settings, name, value, raising=False)
+
+        def _fake_post(url, *, headers=None, json=None, timeout=None):
+            return _SyncResponse(
+                {
+                    "model": str(env_patch["NEWS_LLM_MODEL"]),
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"summary":"摘要","sentiment":"neutral"}',
+                            }
+                        }
+                    ],
+                }
+            )
+
+        monkeypatch.setattr(module.requests, "post", _fake_post)
+        result = module.summarize_title_glm5("BTC trades flat", {"llm": {"provider": "openai"}}, max_length=60)
+        assert result["source"] == expected_source
 
 
 def test_news_sync_summary_falls_back_to_chat_completions(monkeypatch):
@@ -1698,7 +1755,7 @@ def test_news_sync_summary_fails_over_to_backup_relay(monkeypatch):
 
     assert result["summary"] == "备用站摘要"
     assert result["sentiment"] == "positive"
-    assert result["source"] == "openai_responses"
+    assert result["source"] == "openai_responses:gpt-5.5"
     assert capture["urls"] == [
         "https://primary.test/v1/responses",
         "https://backup.test/v1/responses",

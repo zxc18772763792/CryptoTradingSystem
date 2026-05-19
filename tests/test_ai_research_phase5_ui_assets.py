@@ -169,9 +169,11 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "失败队列待重试" in news_runtime_js
     assert "不代表历史新闻缺失" in news_runtime_js
     assert "已自动归档已修复失败项" in news_runtime_js
+    assert "NIM摘要" in news_runtime_js
     assert "GM摘要" in news_runtime_js
     assert "DS摘要" in news_runtime_js
-    assert "gemma" in news_runtime_js
+    assert "google/gemma-4-31b-it" in news_runtime_js
+    assert "gemma4-local" in news_runtime_js
     assert "deepseek" in news_runtime_js
     assert "window.CTS_UI_TIMEZONE" in ai_js
     assert "window.CTS_UI_TIMEZONE_LABEL" in ai_js

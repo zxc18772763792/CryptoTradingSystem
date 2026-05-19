@@ -316,11 +316,32 @@ def _llm_summary_source(cfg: Dict[str, Any]) -> str:
     return "openai_responses"
 
 
-def _summary_source_with_model(source: str, response: Any) -> str:
+def _summary_source_label(base_url: Any, model: Any) -> str:
+    text = f"{base_url or ''} {model or ''}".strip().lower()
+    base_text = str(base_url or "").strip().lower()
+    if "nvidia" in text or "integrate.api.nvidia" in text or "nim" in text:
+        return "nim_summary"
+    if "deepseek" in text or "kuaipao.ai" in base_text or re.search(r"(?:^|[-_:./])ds(?:$|[-_:./])", text):
+        return "ds_summary"
+    if "gemma4-local" in text or "local-gemma" in text or "192.168." in text or "localhost" in text or "127.0.0.1" in text:
+        return "gm_summary"
+    return ""
+
+
+def _summary_source_with_model(source: str, response: Any, target: Optional[Dict[str, Any]] = None) -> str:
     model = str((response or {}).get("model") if isinstance(response, dict) else "").strip().lower()
+    target = target or {}
+    target_model = str(target.get("model") or "").strip().lower()
+    target_base_url = str(target.get("base_url") or "").strip().lower()
+    label = _summary_source_label(target_base_url, model or target_model)
     if not model or model in {"none", "null", "unknown"}:
-        return source
+        if target_model and target_model not in {"none", "null", "unknown"}:
+            model = target_model
+        else:
+            return label or source
     safe_model = re.sub(r"[^a-z0-9._-]+", "-", model).strip("-")
+    if label:
+        return f"{label}:{safe_model}" if safe_model else label
     return f"{source}:{safe_model}" if safe_model else source
 
 
@@ -647,6 +668,11 @@ class AsyncGLMClient:
                         self._requests_success += 1
                         remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         rate_limiter.reset_backoff()
+                        data["_cts_openai_target"] = {
+                            "base_url": base_url,
+                            "model": str(target.get("model") or "").strip(),
+                            "index": target.get("index"),
+                        }
                         return data, "none"
 
                     if request_chat_payload and (
@@ -719,6 +745,11 @@ class AsyncGLMClient:
                         remember_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         rate_limiter.reset_backoff()
+                        data["_cts_openai_target"] = {
+                            "base_url": base_url,
+                            "model": str(target.get("model") or "").strip(),
+                            "index": target.get("index"),
+                        }
                         return data, "none"
 
                     used_chat_fallback = False
@@ -810,6 +841,11 @@ class AsyncGLMClient:
                                 remember_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                 remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                 rate_limiter.reset_backoff()
+                                data["_cts_openai_target"] = {
+                                    "base_url": base_url,
+                                    "model": str(target.get("model") or "").strip(),
+                                    "index": target.get("index"),
+                                }
                                 return data, "none"
 
                             self._requests_failed += 1
@@ -899,6 +935,11 @@ class AsyncGLMClient:
                         self._requests_success += 1
                         remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         rate_limiter.reset_backoff()
+                        data["_cts_openai_target"] = {
+                            "base_url": base_url,
+                            "model": str(target.get("model") or "").strip(),
+                            "index": target.get("index"),
+                        }
                         return data, "none"
                 except asyncio.TimeoutError:
                     self._requests_failed += 1
@@ -974,7 +1015,11 @@ class AsyncGLMClient:
         )
         if error_type != "none" or not isinstance(response, dict):
             return response, error_type
-        return coerce_responses_to_chat_completions(response), error_type
+        target_meta = response.get("_cts_openai_target")
+        coerced = coerce_responses_to_chat_completions(response)
+        if target_meta and isinstance(coerced, dict):
+            coerced["_cts_openai_target"] = target_meta
+        return coerced, error_type
 
     async def chat_completions_stream(
         self,

@@ -317,11 +317,32 @@ def _llm_summary_source(cfg: Dict[str, Any]) -> str:
     return "openai_responses"
 
 
-def _summary_source_with_model(source: str, response: Any) -> str:
+def _summary_source_label(base_url: Any, model: Any) -> str:
+    text = f"{base_url or ''} {model or ''}".strip().lower()
+    base_text = str(base_url or "").strip().lower()
+    if "nvidia" in text or "integrate.api.nvidia" in text or "nim" in text:
+        return "nim_summary"
+    if "deepseek" in text or "kuaipao.ai" in base_text or re.search(r"(?:^|[-_:./])ds(?:$|[-_:./])", text):
+        return "ds_summary"
+    if "gemma4-local" in text or "local-gemma" in text or "192.168." in text or "localhost" in text or "127.0.0.1" in text:
+        return "gm_summary"
+    return ""
+
+
+def _summary_source_with_model(source: str, response: Any, target: Optional[Dict[str, Any]] = None) -> str:
     model = str((response or {}).get("model") if isinstance(response, dict) else "").strip().lower()
+    target = target or {}
+    target_model = str(target.get("model") or "").strip().lower()
+    target_base_url = str(target.get("base_url") or "").strip().lower()
+    label = _summary_source_label(target_base_url, model or target_model)
     if not model or model in {"none", "null", "unknown"}:
-        return source
+        if target_model and target_model not in {"none", "null", "unknown"}:
+            model = target_model
+        else:
+            return label or source
     safe_model = re.sub(r"[^a-z0-9._-]+", "-", model).strip("-")
+    if label:
+        return f"{label}:{safe_model}" if safe_model else label
     return f"{source}:{safe_model}" if safe_model else source
 
 
@@ -413,6 +434,11 @@ def _openai_post_with_failover(
                         continue
                     raise err
                 remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                data["_cts_openai_target"] = {
+                    "base_url": base_url,
+                    "model": str(target.get("model") or "").strip(),
+                    "index": target.get("index"),
+                }
                 return data
             if request_chat_payload and (
                 _force_chat_completions(cfg)
@@ -455,6 +481,11 @@ def _openai_post_with_failover(
                     raise err
                 remember_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                 remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                chat_data["_cts_openai_target"] = {
+                    "base_url": base_url,
+                    "model": str(target.get("model") or "").strip(),
+                    "index": target.get("index"),
+                }
                 return chat_data
             for payload_index, payload_variant in enumerate(request_payload_variants):
                 url = responses_endpoint(base_url)
@@ -495,7 +526,13 @@ def _openai_post_with_failover(
                             raise err
                         remember_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
-                        return read_requests_responses_json(chat_response)
+                        chat_data = read_requests_responses_json(chat_response)
+                        chat_data["_cts_openai_target"] = {
+                            "base_url": base_url,
+                            "model": str(target.get("model") or "").strip(),
+                            "index": target.get("index"),
+                        }
+                        return chat_data
                     err = RuntimeError(f"LLM HTTP {response.status_code}: {response.text[:300]}")
                     unsupported_param = unsupported_responses_parameter(response.text)
                     if response.status_code == 400 and unsupported_param in {
@@ -571,9 +608,19 @@ def _openai_post_with_failover(
                         raise err
                     remember_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                     remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                    chat_data["_cts_openai_target"] = {
+                        "base_url": base_url,
+                        "model": str(target.get("model") or "").strip(),
+                        "index": target.get("index"),
+                    }
                     return chat_data
                 clear_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                 remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                data["_cts_openai_target"] = {
+                    "base_url": base_url,
+                    "model": str(target.get("model") or "").strip(),
+                    "index": target.get("index"),
+                }
                 return data
             if advance_to_next_target:
                 continue
@@ -687,22 +734,41 @@ def _semantic_event_key(event: Dict[str, Any]) -> str:
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()
 
 
-def _summary_cache_key(title: str, max_length: int) -> str:
-    seed = f"{str(title or '').strip()}|{int(max_length)}"
+def _summary_cache_scope(cfg: Dict[str, Any]) -> str:
+    try:
+        targets = _openai_endpoint_targets(cfg)
+    except Exception:
+        targets = []
+    parts = [_llm_summary_source(cfg)]
+    for target in targets:
+        base_url = str(target.get("base_url") or "").strip().lower().rstrip("/")
+        model = str(target.get("model") or "").strip().lower()
+        if base_url or model:
+            parts.append(f"{base_url}|{model}")
+    return "||".join(parts) or "default"
+
+
+def _summary_cache_key(title: str, max_length: int, cfg: Optional[Dict[str, Any]] = None) -> str:
+    seed = f"{str(title or '').strip()}|{int(max_length)}|{_summary_cache_scope(cfg or {})}"
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()
 
 
-def _summary_cache_get(title: str, max_length: int) -> Optional[Dict[str, Any]]:
-    return _SUMMARY_CACHE.get(_summary_cache_key(title, max_length))
+def _summary_cache_get(title: str, max_length: int, cfg: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    return _SUMMARY_CACHE.get(_summary_cache_key(title, max_length, cfg))
 
 
-def _summary_cache_set(title: str, max_length: int, result: Dict[str, Any]) -> None:
+def _summary_cache_set(
+    title: str,
+    max_length: int,
+    result: Dict[str, Any],
+    cfg: Optional[Dict[str, Any]] = None,
+) -> None:
     if len(_SUMMARY_CACHE) >= _SUMMARY_CACHE_MAX:
         try:
             _SUMMARY_CACHE.pop(next(iter(_SUMMARY_CACHE)))
         except Exception:
             _SUMMARY_CACHE.clear()
-    _SUMMARY_CACHE[_summary_cache_key(title, max_length)] = {
+    _SUMMARY_CACHE[_summary_cache_key(title, max_length, cfg)] = {
         "summary": str(result.get("summary") or ""),
         "sentiment": str(result.get("sentiment") or "neutral"),
         "source": str(result.get("source") or "unknown"),
@@ -1018,14 +1084,14 @@ def summarize_title_llm(title: str, cfg: Dict[str, Any], max_length: int = 60) -
         return default_result
 
     title = str(title).strip()
-    cached = _summary_cache_get(title, max_length)
+    cached = _summary_cache_get(title, max_length, cfg)
     if cached:
         return cached
 
     api_key = _llm_api_key(cfg)
     if not api_key:
         result = _summarize_fallback(title, max_length)
-        _summary_cache_set(title, max_length, result)
+        _summary_cache_set(title, max_length, result, cfg)
         return result
 
     llm_cfg = cfg.get("llm") or {}
@@ -1072,12 +1138,15 @@ def summarize_title_llm(title: str, cfg: Dict[str, Any], max_length: int = 60) -
             timeout_sec=timeout_sec,
             log_prefix="news_llm.summarize",
         )
+        target_meta = data.get("_cts_openai_target") if isinstance(data, dict) else None
         data = coerce_responses_to_chat_completions(data)
-        result_source = _summary_source_with_model(summary_source, data)
+        if target_meta and isinstance(data, dict):
+            data["_cts_openai_target"] = target_meta
+        result_source = _summary_source_with_model(summary_source, data, data.get("_cts_openai_target") if isinstance(data, dict) else None)
         choices = data.get("choices") if isinstance(data, dict) else None
         if not choices:
             result = _summarize_fallback(title, max_length)
-            _summary_cache_set(title, max_length, result)
+            _summary_cache_set(title, max_length, result, cfg)
             return result
 
         message = choices[0].get("message") or {}
@@ -1091,17 +1160,17 @@ def summarize_title_llm(title: str, cfg: Dict[str, Any], max_length: int = 60) -
             if sentiment not in ("positive", "negative", "neutral"):
                 sentiment = "neutral"
             result = {"summary": summary, "sentiment": sentiment, "source": result_source}
-            _summary_cache_set(title, max_length, result)
+            _summary_cache_set(title, max_length, result, cfg)
             return result
 
         result = _summarize_fallback(title, max_length)
-        _summary_cache_set(title, max_length, result)
+        _summary_cache_set(title, max_length, result, cfg)
         return result
 
     except Exception as e:
         logger.warning(f"LLM summarize error: {e}")
         result = _summarize_fallback(title, max_length)
-        _summary_cache_set(title, max_length, result)
+        _summary_cache_set(title, max_length, result, cfg)
         return result
 
 
@@ -1175,8 +1244,11 @@ def _call_llm_batch_summarize(
             timeout_sec=timeout_sec,
             log_prefix="news_llm.batch_summarize",
         )
+        target_meta = data.get("_cts_openai_target") if isinstance(data, dict) else None
         data = coerce_responses_to_chat_completions(data)
-        result_source = _summary_source_with_model(summary_source, data)
+        if target_meta and isinstance(data, dict):
+            data["_cts_openai_target"] = target_meta
+        result_source = _summary_source_with_model(summary_source, data, data.get("_cts_openai_target") if isinstance(data, dict) else None)
         choices = data.get("choices") if isinstance(data, dict) else None
         if not choices:
             raise ValueError("LLM summarize batch missing choices")
@@ -1237,7 +1309,7 @@ def batch_summarize_titles(titles: List[str], cfg: Dict[str, Any], max_length: i
     results: List[Optional[Dict[str, Any]]] = [None] * len(titles)
     uncached_idx: List[int] = []
     for idx, title in enumerate(titles):
-        cached = _summary_cache_get(title, max_length)
+        cached = _summary_cache_get(title, max_length, cfg)
         if cached:
             results[idx] = cached
         else:
@@ -1248,7 +1320,7 @@ def batch_summarize_titles(titles: List[str], cfg: Dict[str, Any], max_length: i
     for idx in fallback_targets:
         fallback = _summarize_fallback(titles[idx], max_length)
         results[idx] = fallback
-        _summary_cache_set(titles[idx], max_length, fallback)
+        _summary_cache_set(titles[idx], max_length, fallback, cfg)
 
     for i in range(0, len(llm_targets), batch_size):
         chunk_idx = llm_targets[i : i + batch_size]
@@ -1256,13 +1328,13 @@ def batch_summarize_titles(titles: List[str], cfg: Dict[str, Any], max_length: i
         chunk_res = _call_llm_batch_summarize(chunk_titles, cfg, max_length)
         for idx, res in zip(chunk_idx, chunk_res):
             results[idx] = res
-            _summary_cache_set(titles[idx], max_length, res)
+            _summary_cache_set(titles[idx], max_length, res, cfg)
 
     final: List[Dict[str, Any]] = []
     for idx, item in enumerate(results):
         if item is None:
             item = _summarize_fallback(titles[idx], max_length)
-            _summary_cache_set(titles[idx], max_length, item)
+            _summary_cache_set(titles[idx], max_length, item, cfg)
         final.append(item)
     return final
 
