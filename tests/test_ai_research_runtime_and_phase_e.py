@@ -105,6 +105,12 @@ def test_promote_candidate_auto_runtime_limit(monkeypatch):
     monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.register_strategy", register_mock)
     monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.start_strategy", start_mock)
     monkeypatch.setattr("core.deployment.promotion_engine.persist_strategy_snapshot", persist_mock)
+    # Isolate from the process-global strategy_manager: other tests may leave
+    # AI runtime strategies with a colliding runtime_fingerprint, which would
+    # send promote_candidate down the "reuse existing slot" update path and
+    # skip register_strategy entirely (order-dependent failure).
+    monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.list_strategies", lambda: [])
+    monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.get_strategy", lambda *_a, **_k: None)
 
     result = asyncio.run(
         promote_candidate(
@@ -172,6 +178,12 @@ def test_promote_candidate_runtime_override(monkeypatch):
     monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.register_strategy", register_mock)
     monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.start_strategy", start_mock)
     monkeypatch.setattr("core.deployment.promotion_engine.persist_strategy_snapshot", persist_mock)
+    # Isolate from the process-global strategy_manager: other tests may leave
+    # AI runtime strategies with a colliding runtime_fingerprint, which would
+    # send promote_candidate down the "reuse existing slot" update path and
+    # skip register_strategy entirely (order-dependent failure).
+    monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.list_strategies", lambda: [])
+    monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.get_strategy", lambda *_a, **_k: None)
 
     asyncio.run(
         promote_candidate(
