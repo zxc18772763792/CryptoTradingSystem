@@ -59,9 +59,19 @@ def _normalize_parquet_frame_index(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df if df is not None else pd.DataFrame()
     normalized = df.copy()
-    normalized.index = pd.to_datetime(normalized.index, errors="coerce")
-    if getattr(normalized.index, "tz", None) is not None:
-        normalized.index = normalized.index.tz_convert(timezone.utc).tz_localize(None)
+    # utc=True coerces a mixed tz-aware/naive index uniformly (naive is read as
+    # UTC, tz-aware is converted), avoiding the "cannot be converted to
+    # datetime64 unless utc=True" crash when live UTC bars meet parquet bars.
+    idx = pd.to_datetime(normalized.index, errors="coerce", utc=True).tz_localize(None)
+    # Legacy partitions were written in Asia/Shanghai wall-clock (UTC+8). Such
+    # an index runs ~8h ahead of real UTC; shift it back so downstream
+    # consumers (which assume UTC-naive) align with live data. Genuine UTC data
+    # is never in the future, so it is left untouched.
+    now_utc = pd.Timestamp(datetime.now(timezone.utc)).tz_localize(None)
+    valid = idx[~idx.isna()]
+    if len(valid) and valid.max() > now_utc + pd.Timedelta(minutes=2):
+        idx = idx - pd.Timedelta(hours=8)
+    normalized.index = idx
     normalized = normalized[~normalized.index.isna()]
     return normalized.sort_index()
 

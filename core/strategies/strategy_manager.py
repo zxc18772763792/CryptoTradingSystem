@@ -82,6 +82,20 @@ class StrategyManager:
         self._runtime_deadlines: Dict[str, datetime] = {}
         # (symbol, exchange) -> most recent Signal, used for conflict detection
         self._recent_signal_by_symbol: Dict[Tuple[str, str], Signal] = {}
+        # Cumulative count of signals suppressed by cross-strategy conflict
+        # detection, so the loss can be confirmed without log scraping.
+        self._conflict_dropped_count: int = 0
+        self._conflict_replaced_count: int = 0
+        # (exchange, symbol, timeframe) -> monotonic deadline until which live
+        # kline fetch is skipped after a timeout/failure, so a slow endpoint
+        # does not block every strategy cycle for the full fetch timeout.
+        self._live_fetch_backoff_until: Dict[Tuple[str, str, str], float] = {}
+        self._live_fetch_timeout_sec: float = max(
+            1.0, float(getattr(settings, "LIVE_KLINE_FETCH_TIMEOUT_SEC", _MARKET_DATA_FETCH_TIMEOUT_SEC) or _MARKET_DATA_FETCH_TIMEOUT_SEC)
+        )
+        self._live_fetch_backoff_sec: float = max(
+            5.0, float(getattr(settings, "LIVE_KLINE_FETCH_BACKOFF_SEC", 90.0) or 90.0)
+        )
         # Shared market data cache: (exchange, symbol, timeframe, limit) -> (df, timestamp)
         # TTL is dynamic per timeframe to keep sub-minute strategies responsive while
         # still avoiding redundant loads when multiple strategies share the same feed.
@@ -312,13 +326,13 @@ class StrategyManager:
             return pd.DataFrame() if df is None else df
 
         out = df.copy()
-        out.index = pd.to_datetime(out.index)
+        out.index = pd.to_datetime(out.index, utc=True).tz_localize(None)
         out = out[~out.index.duplicated(keep="last")].sort_index()
         if out.empty:
             return out
 
         tf_seconds = max(1, int(self._bar_timeframe_to_seconds(timeframe)))
-        anchor = self._naive_timestamp(now or datetime.now())
+        anchor = self._naive_timestamp(now or datetime.now(timezone.utc))
         last_ts = self._naive_timestamp(out.index[-1])
         bar_close_at = last_ts + pd.Timedelta(seconds=tf_seconds)
         if anchor < bar_close_at:
@@ -387,8 +401,14 @@ class StrategyManager:
         df = local_df.copy() if not local_df.empty else pd.DataFrame()
         connector = exchange_manager.get_exchange(exchange)
 
-        # Always try pulling latest bars so live strategy sees recent market.
-        if connector:
+        # Always try pulling latest bars so live strategy sees recent market —
+        # unless this feed is in failure backoff, in which case skip the live
+        # fetch and serve local/cache data immediately instead of blocking the
+        # whole strategy cycle for the full fetch timeout.
+        backoff_key = (str(exchange), str(symbol), str(timeframe))
+        backoff_until = self._live_fetch_backoff_until.get(backoff_key)
+        in_backoff = backoff_until is not None and now < backoff_until
+        if connector and not in_backoff:
             try:
                 live_df = await asyncio.wait_for(
                     self._load_live_market_data(
@@ -397,7 +417,7 @@ class StrategyManager:
                         timeframe=timeframe,
                         limit=limit,
                     ),
-                    timeout=_MARKET_DATA_FETCH_TIMEOUT_SEC,
+                    timeout=self._live_fetch_timeout_sec,
                 )
                 if not live_df.empty:
                     if df.empty:
@@ -405,14 +425,24 @@ class StrategyManager:
                     else:
                         df = pd.concat([df, live_df])
                         df = df[~df.index.duplicated(keep="last")].sort_index()
+                # Healthy fetch clears any prior backoff for this feed.
+                self._live_fetch_backoff_until.pop(backoff_key, None)
             except asyncio.TimeoutError:
+                self._live_fetch_backoff_until[backoff_key] = (
+                    time.monotonic() + self._live_fetch_backoff_sec
+                )
                 logger.warning(
-                    f"Live kline fetch timed out after {_MARKET_DATA_FETCH_TIMEOUT_SEC:.0f}s "
-                    f"for {exchange} {symbol} {timeframe}; using local/cache data"
+                    f"Live kline fetch timed out after {self._live_fetch_timeout_sec:.0f}s "
+                    f"for {exchange} {symbol} {timeframe}; backing off "
+                    f"{self._live_fetch_backoff_sec:.0f}s, using local/cache data"
                 )
             except Exception as e:
+                self._live_fetch_backoff_until[backoff_key] = (
+                    time.monotonic() + self._live_fetch_backoff_sec
+                )
                 logger.debug(
-                    f"Failed to fetch live klines for {exchange} {symbol} {timeframe}: {e}"
+                    f"Failed to fetch live klines for {exchange} {symbol} {timeframe}: {e}; "
+                    f"backing off {self._live_fetch_backoff_sec:.0f}s"
                 )
 
         if df.empty:
@@ -464,7 +494,11 @@ class StrategyManager:
         )
         if frame.empty:
             return pd.DataFrame()
-        frame["timestamp"] = pd.to_datetime(frame["timestamp"])
+        # Connectors emit tz-aware UTC Kline timestamps; coerce to tz-naive UTC
+        # so live bars concatenate cleanly with UTC-naive parquet bars.
+        frame["timestamp"] = pd.to_datetime(
+            frame["timestamp"], utc=True
+        ).dt.tz_localize(None)
         return frame.set_index("timestamp").sort_index()
 
     @staticmethod
@@ -767,17 +801,21 @@ class StrategyManager:
                         )
                     if is_conflict:
                         if signal.strength <= prior.strength:
+                            self._conflict_dropped_count += 1
                             logger.warning(
                                 f"Signal conflict for {signal.symbol}: dropping {new_side} "
                                 f"(strength={signal.strength:.2f}) vs existing {prior_side} "
-                                f"(strength={prior.strength:.2f})"
+                                f"(strength={prior.strength:.2f}) "
+                                f"[cumulative dropped={self._conflict_dropped_count}]"
                             )
                             continue
                         else:
+                            self._conflict_replaced_count += 1
                             logger.warning(
                                 f"Signal conflict for {signal.symbol}: replacing {prior_side} "
                                 f"(strength={prior.strength:.2f}) with stronger {new_side} "
-                                f"(strength={signal.strength:.2f})"
+                                f"(strength={signal.strength:.2f}) "
+                                f"[cumulative replaced={self._conflict_replaced_count}]"
                             )
             self._recent_signal_by_symbol[conflict_key] = signal
 

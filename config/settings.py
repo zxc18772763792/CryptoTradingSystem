@@ -175,6 +175,11 @@ class Settings(BaseSettings):
     GATE_DEFAULT_TYPE: str = "spot"
     BYBIT_DEFAULT_TYPE: str = "spot"
     EXCHANGE_STARTUP_CONNECT_TIMEOUT_SEC: float = 18.0
+    # Live kline fetch (strategy runtime). On timeout/failure the (exchange,
+    # symbol, timeframe) is put in backoff and served from local/cache data
+    # instead of re-hammering a slow endpoint every cycle.
+    LIVE_KLINE_FETCH_TIMEOUT_SEC: float = 12.0
+    LIVE_KLINE_FETCH_BACKOFF_SEC: float = 90.0
 
     # Web server
     WEB_HOST: str = "127.0.0.1"
