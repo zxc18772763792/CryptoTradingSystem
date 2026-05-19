@@ -3,7 +3,7 @@ import asyncio
 import io
 import itertools
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -321,10 +321,18 @@ def _replay_signal_strategy_position(
     except Exception:
         pass
 
+    # Match the live runtime's fixed trailing window so strategies with
+    # unbounded lookback backtest the same way they trade.
+    try:
+        _min_length = int((inst.get_required_data() or {}).get("min_length", 100))
+    except Exception:
+        _min_length = 100
+    live_window = max(120, _min_length + 20)
+
     state = 0.0
     values: List[float] = []
     for end_idx in range(len(df)):
-        window = df.iloc[: end_idx + 1].copy()
+        window = df.iloc[: end_idx + 1].tail(live_window).copy()
         try:
             signals = inst.generate_signals(window) or []
         except Exception:
@@ -540,7 +548,7 @@ def _drop_incomplete_last_bar(
     if out.empty:
         return out
 
-    anchor = pd.Timestamp(anchor_time or datetime.now())
+    anchor = pd.Timestamp(anchor_time or datetime.now(timezone.utc))
     last_ts = pd.Timestamp(out.index[-1])
     if anchor.tzinfo is not None:
         anchor = anchor.tz_localize(None)

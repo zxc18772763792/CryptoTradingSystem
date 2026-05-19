@@ -144,6 +144,17 @@ class BacktestEngine:
         strategy.initialize()
         strategy.start()
 
+        # Feed the strategy the same fixed-size trailing window the live
+        # runtime uses (StrategyManager._run_strategy_once), so indicators with
+        # unbounded lookback (percentile/Hurst/full-history rolling) produce
+        # the same signals in backtest as in production.
+        try:
+            _required = strategy.get_required_data() or {}
+            _min_length = int(_required.get("min_length", 100))
+        except Exception:
+            _min_length = 100
+        live_window = max(120, _min_length + 20)
+
         total_bars = len(data)
         for i in range(total_bars):
             current_data = data.iloc[: i + 1]
@@ -164,7 +175,7 @@ class BacktestEngine:
                 # Pass data EXCLUDING the current bar so strategy cannot use the current
                 # close to decide its own fill price (lookahead bias).  Execution uses
                 # the current bar's price, simulating a fill at or shortly after bar close.
-                signals = strategy.generate_signals(data.iloc[:i])
+                signals = strategy.generate_signals(data.iloc[:i].tail(live_window))
             except Exception as e:
                 logger.error(f"Strategy generate_signals failed at {current_time}: {e}")
                 signals = []

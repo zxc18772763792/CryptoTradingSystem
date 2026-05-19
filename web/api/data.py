@@ -344,9 +344,10 @@ def _normalize_query_datetime(dt: Optional[datetime]) -> Optional[datetime]:
         return None
     if dt.tzinfo is None:
         return dt
-    # Frontend passes ISO timestamps with timezone; convert to local naive
-    # datetime to match parquet index convention in this project.
-    return dt.astimezone().replace(tzinfo=None)
+    # Parquet indexes are tz-naive UTC (see _normalize_parquet_frame_index).
+    # Convert incoming tz-aware query bounds to UTC before stripping tz so the
+    # data page filters on the same clock as the strategy/backtest pipeline.
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _safe_iso_timestamp(value: Any) -> Optional[str]:
