@@ -65,6 +65,10 @@ class StrategyRuntimeStats:
 
 _SIGNAL_CONFLICT_WINDOW_SECONDS = 60
 _MARKET_DATA_FETCH_TIMEOUT_SEC = 12.0
+# Canonical fetch size so strategies sharing a feed reuse one cached pull
+# instead of each issuing its own get_klines (which overflows the shared ccxt
+# rate-limit queue: "throttle queue is over maxCapacity").
+_CANONICAL_KLINE_LIMIT = 500
 _STRATEGY_CYCLE_TIMEOUT_SEC = 45.0
 _SIGNAL_NOTIFY_CALLBACK_TIMEOUT_SEC = 2.0
 
@@ -99,7 +103,8 @@ class StrategyManager:
         # Shared market data cache: (exchange, symbol, timeframe, limit) -> (df, timestamp)
         # TTL is dynamic per timeframe to keep sub-minute strategies responsive while
         # still avoiding redundant loads when multiple strategies share the same feed.
-        self._market_data_cache: Dict[Tuple, Tuple[pd.DataFrame, float]] = {}
+        # (exchange, symbol, timeframe) -> (df, monotonic_ts, row_count)
+        self._market_data_cache: Dict[Tuple, Tuple[pd.DataFrame, float, int]] = {}
         self._market_data_cache_max_ttl: float = 30.0
         # Strategy runtime should behave like an event-driven backtest: process each
         # completed bar once instead of re-running on the same forming candle.
@@ -383,14 +388,18 @@ class StrategyManager:
         timeframe: str,
         limit: int = 300,
     ) -> pd.DataFrame:
-        cache_key = (exchange, symbol, timeframe, limit)
+        # Cache key intentionally excludes ``limit``: strategies on the same
+        # feed request different limits (min_length varies), so keying on limit
+        # fragments the cache and forces a separate network pull per strategy.
+        cache_key = (exchange, symbol, timeframe)
+        fetch_limit = max(int(limit), _CANONICAL_KLINE_LIMIT)
         now = time.monotonic()
         cached = self._market_data_cache.get(cache_key)
         cache_ttl = self._market_data_cache_ttl_for_timeframe(timeframe)
         if cached is not None:
-            df_cached, ts = cached
-            if now - ts < cache_ttl:
-                return df_cached.copy()
+            df_cached, ts, cached_rows = cached
+            if now - ts < cache_ttl and cached_rows >= int(limit):
+                return df_cached.tail(int(limit)).copy()
 
         local_df = await data_storage.load_klines_from_parquet(
             exchange=exchange,
@@ -415,7 +424,7 @@ class StrategyManager:
                         connector=connector,
                         symbol=symbol,
                         timeframe=timeframe,
-                        limit=limit,
+                        limit=fetch_limit,
                     ),
                     timeout=self._live_fetch_timeout_sec,
                 )
@@ -464,16 +473,18 @@ class StrategyManager:
         if df.empty:
             return pd.DataFrame()
 
-        result = df.tail(limit).copy()
+        # Cache the full canonical-size frame (shared across strategies) and
+        # return only the slice this caller asked for.
+        result = df.tail(fetch_limit).copy()
         result["symbol"] = symbol
-        self._market_data_cache[cache_key] = (result, time.monotonic())
+        self._market_data_cache[cache_key] = (result, time.monotonic(), len(result))
         # Evict cache entries older than 2x TTL to prevent unbounded growth
         if len(self._market_data_cache) > 200:
             cutoff = time.monotonic() - self._market_data_cache_max_ttl * 2
-            stale = [k for k, (_, t) in self._market_data_cache.items() if t < cutoff]
+            stale = [k for k, (_, t, _rows) in self._market_data_cache.items() if t < cutoff]
             for k in stale:
                 del self._market_data_cache[k]
-        return result.copy()
+        return result.tail(int(limit)).copy()
 
     @staticmethod
     def _df_from_klines(klines: List[Any]) -> pd.DataFrame:
