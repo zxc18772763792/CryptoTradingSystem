@@ -114,6 +114,9 @@ def _reset_openai_target_state(monkeypatch):
         "NEWS_LLM_API_KEY",
         "NEWS_LLM_BASE_URL",
         "NEWS_LLM_MODEL",
+        "NEWS_LLM_BACKUP_API_KEY",
+        "NEWS_LLM_BACKUP_BASE_URL",
+        "NEWS_LLM_BACKUP_MODEL",
         "NEWS_LLM_PROVIDER",
         "NEWS_LLM_FORCE_CHAT_COMPLETIONS",
     ):
@@ -1291,6 +1294,33 @@ def test_news_deepseek_yaml_config_ignores_generic_openai_runtime_settings(monke
     assert [target["model"] for target in async_targets] == ["deepseek-v4-flash"]
 
 
+def test_news_llm_runtime_backup_settings_allow_distinct_local_fallback(monkeypatch):
+    import core.news.eventizer.async_glm_client as async_module
+    import core.news.eventizer.llm_glm5 as sync_module
+
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "primary-news-key", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", "https://primary-news.test/v1", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "deepseek-v4-flash", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_API_KEY", "local-gemma-key", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_BASE_URL", "http://192.168.1.24:8010/v1", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_MODEL", "gemma4-local", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "https://generic-backup.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "generic-backup-key", raising=False)
+
+    cfg = {"llm": {"provider": "openai", "force_chat_completions": True}}
+
+    sync_targets = sync_module._openai_endpoint_targets(cfg)
+    async_targets = async_module._openai_endpoint_targets(cfg)
+
+    for targets in (sync_targets, async_targets):
+        assert [target["base_url"] for target in targets] == [
+            "https://primary-news.test/v1",
+            "http://192.168.1.24:8010/v1",
+        ]
+        assert [target["api_key"] for target in targets] == ["primary-news-key", "local-gemma-key"]
+        assert [target["model"] for target in targets] == ["deepseek-v4-flash", "gemma4-local"]
+
+
 def test_news_sync_summary_uses_openai_mini_source(monkeypatch):
     import core.news.eventizer.llm_glm5 as module
 
@@ -1368,6 +1398,36 @@ def test_news_sync_summary_uses_news_deepseek_chat_override(monkeypatch):
     assert capture["url"] == "https://kuaipao.ai/v1/chat/completions"
     assert capture["json"]["model"] == "deepseek-v4-flash"
     assert capture["headers"]["Authorization"] == "Bearer sk-news"
+
+
+def test_news_sync_summary_source_includes_response_model(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "sk-news", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", "https://kuaipao.ai", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "deepseek-v4-flash", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_FORCE_CHAT_COMPLETIONS", True, raising=False)
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        return _SyncResponse(
+            {
+                "model": "deepseek-v4-flash",
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"summary":"DS 摘要","sentiment":"neutral"}',
+                        }
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    result = module.summarize_title_glm5("BTC trades flat", {"llm": {"provider": "openai"}}, max_length=60)
+
+    assert result["source"] == "openai_chat_completions:deepseek-v4-flash"
 
 
 def test_news_sync_summary_falls_back_to_chat_completions(monkeypatch):

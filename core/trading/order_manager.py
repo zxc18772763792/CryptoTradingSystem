@@ -413,15 +413,32 @@ class OrderManager:
                 and request.order_type in {OrderType.MARKET, OrderType.LIMIT}
             ):
                 try:
+                    # Binance rejects prices/quantities that are not aligned to
+                    # the symbol tick/step size (-4014 "Price not increased by
+                    # tick size", -1111 precision). The ccxt client carries the
+                    # loaded market filters, so use it to snap to precision.
+                    fmt_client = getattr(exchange, "_client", None)
+
+                    def _fmt(method: str, value: float) -> float:
+                        if fmt_client is None:
+                            return float(value)
+                        try:
+                            return float(
+                                getattr(fmt_client, method)(request.symbol, value)
+                            )
+                        except Exception:
+                            return float(value)
+
+                    payload_amount = _fmt("amount_to_precision", request.amount)
                     raw_payload: Dict[str, Any] = {
                         "symbol": binance_market_symbol(request.symbol),
                         "side": request.side.value.upper(),
                         "type": request.order_type.value.upper(),
-                        "quantity": request.amount,
+                        "quantity": payload_amount,
                         "newOrderRespType": "RESULT",
                     }
                     if order_price is not None and request.order_type == OrderType.LIMIT:
-                        raw_payload["price"] = float(order_price)
+                        raw_payload["price"] = _fmt("price_to_precision", float(order_price))
                         raw_payload["timeInForce"] = "GTC"
                     if request.reduce_only:
                         raw_payload["reduceOnly"] = "true"

@@ -49,6 +49,9 @@ _RUNTIME_SETTING_NAMES = (
     "NEWS_LLM_API_KEY",
     "NEWS_LLM_BASE_URL",
     "NEWS_LLM_MODEL",
+    "NEWS_LLM_BACKUP_API_KEY",
+    "NEWS_LLM_BACKUP_BASE_URL",
+    "NEWS_LLM_BACKUP_MODEL",
     "NEWS_LLM_PROVIDER",
     "NEWS_LLM_FORCE_CHAT_COMPLETIONS",
     "OPENAI_API_KEY",
@@ -148,6 +151,9 @@ def _news_llm_override_enabled() -> bool:
         _runtime_setting("NEWS_LLM_API_KEY")
         or _runtime_setting("NEWS_LLM_BASE_URL")
         or _runtime_setting("NEWS_LLM_MODEL")
+        or _runtime_setting("NEWS_LLM_BACKUP_API_KEY")
+        or _runtime_setting("NEWS_LLM_BACKUP_BASE_URL")
+        or _runtime_setting("NEWS_LLM_BACKUP_MODEL")
     )
 
 
@@ -171,6 +177,18 @@ def _news_llm_base_url() -> str:
 
 def _news_llm_model() -> str:
     return _runtime_setting("NEWS_LLM_MODEL")
+
+
+def _news_llm_backup_api_key() -> str:
+    return _runtime_setting("NEWS_LLM_BACKUP_API_KEY")
+
+
+def _news_llm_backup_base_url() -> str:
+    return _runtime_setting("NEWS_LLM_BACKUP_BASE_URL")
+
+
+def _news_llm_backup_model() -> str:
+    return _runtime_setting("NEWS_LLM_BACKUP_MODEL")
 
 
 def _force_chat_completions(cfg: Dict[str, Any]) -> bool:
@@ -221,7 +239,7 @@ def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             or DEFAULT_OPENAI_BASE_URL
         ),
         backup_base_urls=(
-            _merge_csv_values(llm_cfg.get("backup_base_url"))
+            _merge_csv_values(_news_llm_backup_base_url(), llm_cfg.get("backup_base_url"))
             if news_llm_configured
             else _merge_csv_values(
                 _runtime_setting("OPENAI_BACKUP_BASE_URL"),
@@ -229,10 +247,10 @@ def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             )
         ),
         primary_api_key=_first_non_empty(_news_llm_api_key(), _openai_primary_api_key()),
-        backup_api_key="" if news_llm_configured else _openai_backup_api_key(),
+        backup_api_key=_news_llm_backup_api_key() if news_llm_configured else _openai_backup_api_key(),
         primary_model=_openai_model(cfg),
         backup_model=(
-            ""
+            _first_non_empty(_news_llm_backup_model(), llm_cfg.get("backup_model"))
             if news_llm_configured
             else str(
                 _first_non_empty(
@@ -288,6 +306,14 @@ def _llm_summary_source(cfg: Dict[str, Any]) -> str:
     if _force_chat_completions(cfg):
         return "openai_chat_completions"
     return "openai_responses"
+
+
+def _summary_source_with_model(source: str, response: Any) -> str:
+    model = str((response or {}).get("model") if isinstance(response, dict) else "").strip().lower()
+    if not model or model in {"none", "null", "unknown"}:
+        return source
+    safe_model = re.sub(r"[^a-z0-9._-]+", "-", model).strip("-")
+    return f"{source}:{safe_model}" if safe_model else source
 
 
 def _summarize_item_cap(llm_cfg: Dict[str, Any], total_titles: int) -> int:
@@ -1038,6 +1064,7 @@ def summarize_title_llm(title: str, cfg: Dict[str, Any], max_length: int = 60) -
             log_prefix="news_llm.summarize",
         )
         data = coerce_responses_to_chat_completions(data)
+        result_source = _summary_source_with_model(summary_source, data)
         choices = data.get("choices") if isinstance(data, dict) else None
         if not choices:
             result = _summarize_fallback(title, max_length)
@@ -1054,7 +1081,7 @@ def summarize_title_llm(title: str, cfg: Dict[str, Any], max_length: int = 60) -
             sentiment = str(parsed.get("sentiment") or "neutral").lower()
             if sentiment not in ("positive", "negative", "neutral"):
                 sentiment = "neutral"
-            result = {"summary": summary, "sentiment": sentiment, "source": summary_source}
+            result = {"summary": summary, "sentiment": sentiment, "source": result_source}
             _summary_cache_set(title, max_length, result)
             return result
 
@@ -1140,6 +1167,7 @@ def _call_llm_batch_summarize(
             log_prefix="news_llm.batch_summarize",
         )
         data = coerce_responses_to_chat_completions(data)
+        result_source = _summary_source_with_model(summary_source, data)
         choices = data.get("choices") if isinstance(data, dict) else None
         if not choices:
             raise ValueError("LLM summarize batch missing choices")
@@ -1171,7 +1199,7 @@ def _call_llm_batch_summarize(
                 sentiment = "neutral"
             if len(summary) > max_length + 10:
                 summary = summary[: max_length + 10]
-            out[idx] = {"summary": summary, "sentiment": sentiment, "source": summary_source}
+            out[idx] = {"summary": summary, "sentiment": sentiment, "source": result_source}
         return out
     except Exception as e:
         logger.warning(f"LLM summarize batch error: {e}")

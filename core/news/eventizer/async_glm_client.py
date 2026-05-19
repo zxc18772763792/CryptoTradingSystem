@@ -52,6 +52,9 @@ _RUNTIME_SETTING_NAMES = (
     "NEWS_LLM_API_KEY",
     "NEWS_LLM_BASE_URL",
     "NEWS_LLM_MODEL",
+    "NEWS_LLM_BACKUP_API_KEY",
+    "NEWS_LLM_BACKUP_BASE_URL",
+    "NEWS_LLM_BACKUP_MODEL",
     "NEWS_LLM_PROVIDER",
     "NEWS_LLM_FORCE_CHAT_COMPLETIONS",
     "OPENAI_API_KEY",
@@ -156,6 +159,9 @@ def _news_llm_override_enabled() -> bool:
         _runtime_setting("NEWS_LLM_API_KEY")
         or _runtime_setting("NEWS_LLM_BASE_URL")
         or _runtime_setting("NEWS_LLM_MODEL")
+        or _runtime_setting("NEWS_LLM_BACKUP_API_KEY")
+        or _runtime_setting("NEWS_LLM_BACKUP_BASE_URL")
+        or _runtime_setting("NEWS_LLM_BACKUP_MODEL")
     )
 
 
@@ -179,6 +185,18 @@ def _news_llm_base_url() -> str:
 
 def _news_llm_model() -> str:
     return _runtime_setting("NEWS_LLM_MODEL")
+
+
+def _news_llm_backup_api_key() -> str:
+    return _runtime_setting("NEWS_LLM_BACKUP_API_KEY")
+
+
+def _news_llm_backup_base_url() -> str:
+    return _runtime_setting("NEWS_LLM_BACKUP_BASE_URL")
+
+
+def _news_llm_backup_model() -> str:
+    return _runtime_setting("NEWS_LLM_BACKUP_MODEL")
 
 
 def _force_chat_completions(cfg: Dict[str, Any]) -> bool:
@@ -229,7 +247,7 @@ def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             or DEFAULT_OPENAI_BASE_URL
         ),
         backup_base_urls=(
-            _merge_csv_values(llm_cfg.get("backup_base_url"))
+            _merge_csv_values(_news_llm_backup_base_url(), llm_cfg.get("backup_base_url"))
             if news_llm_configured
             else _merge_csv_values(
                 _runtime_setting("OPENAI_BACKUP_BASE_URL"),
@@ -237,10 +255,10 @@ def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             )
         ),
         primary_api_key=_first_non_empty(_news_llm_api_key(), _openai_primary_api_key()),
-        backup_api_key="" if news_llm_configured else _openai_backup_api_key(),
+        backup_api_key=_news_llm_backup_api_key() if news_llm_configured else _openai_backup_api_key(),
         primary_model=_openai_model(cfg),
         backup_model=(
-            ""
+            _first_non_empty(_news_llm_backup_model(), llm_cfg.get("backup_model"))
             if news_llm_configured
             else str(
                 _first_non_empty(
@@ -296,6 +314,14 @@ def _llm_summary_source(cfg: Dict[str, Any]) -> str:
     if _force_chat_completions(cfg):
         return "openai_chat_completions"
     return "openai_responses"
+
+
+def _summary_source_with_model(source: str, response: Any) -> str:
+    model = str((response or {}).get("model") if isinstance(response, dict) else "").strip().lower()
+    if not model or model in {"none", "null", "unknown"}:
+        return source
+    safe_model = re.sub(r"[^a-z0-9._-]+", "-", model).strip("-")
+    return f"{source}:{safe_model}" if safe_model else source
 
 
 def _summarize_item_cap(llm_cfg: Dict[str, Any], total_titles: int) -> int:
@@ -1374,6 +1400,7 @@ class AsyncGLMClient:
             choices = response.get("choices") if isinstance(response, dict) else None
             if not choices:
                 raise ValueError("LLM summarize batch missing choices")
+            summary_source = _summary_source_with_model(self._summary_source, response)
 
             message = choices[0].get("message") or {}
             content = _normalize_llm_content(message.get("content")).strip()
@@ -1405,7 +1432,7 @@ class AsyncGLMClient:
                     sentiment = "neutral"
                 if len(summary) > max_length + 10:
                     summary = summary[: max_length + 10]
-                out[idx] = {"summary": summary, "sentiment": sentiment, "source": self._summary_source}
+                out[idx] = {"summary": summary, "sentiment": sentiment, "source": summary_source}
             return out
 
         except Exception as e:

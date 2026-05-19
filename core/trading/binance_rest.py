@@ -148,7 +148,16 @@ async def binance_signed_request(
     resp = await _send_once(force_time_refresh=False)
     if resp.status_code >= 400 and "-1021" in (resp.text or ""):
         resp = await _send_once(force_time_refresh=True)
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        # httpx's default HTTPStatusError omits the response body, which hides
+        # the actionable Binance error code (e.g. -4014 tick size, -1111
+        # precision, -2010 balance). Surface it so callers/logs can diagnose.
+        body = (resp.text or "").strip()
+        raise httpx.HTTPStatusError(
+            f"{method.upper()} {path} -> {resp.status_code}: {body}",
+            request=resp.request,
+            response=resp,
+        )
     return resp.json()
 
 

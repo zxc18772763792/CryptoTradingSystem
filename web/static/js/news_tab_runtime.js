@@ -115,6 +115,8 @@
         const key = String(v || "").trim().toLowerCase();
         if (!key || key === "not_summarized") return "未摘要";
         if (key === "stored") return "已入库摘要";
+        if (key.includes("gemma") || key.includes("gm摘要") || key.includes("gm-") || key.includes(":gm")) return "GM摘要";
+        if (key.includes("deepseek") || key.includes("ds摘要") || key.includes("ds-") || key.includes(":ds")) return "DS摘要";
         if (key.includes("openai") || key.includes("responses") || key.includes("codex") || key.startsWith("gpt")) {
             return "GPT摘要";
         }

@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     NEWS_LLM_API_KEY: str = ""
     NEWS_LLM_BASE_URL: str = ""
     NEWS_LLM_MODEL: str = ""
+    NEWS_LLM_BACKUP_API_KEY: str = ""
+    NEWS_LLM_BACKUP_BASE_URL: str = ""
+    NEWS_LLM_BACKUP_MODEL: str = ""
     NEWS_LLM_FORCE_CHAT_COMPLETIONS: bool = False
 
     # Storage
