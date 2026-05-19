@@ -1321,6 +1321,48 @@ def test_news_llm_runtime_backup_settings_allow_distinct_local_fallback(monkeypa
         assert [target["model"] for target in targets] == ["deepseek-v4-flash", "gemma4-local"]
 
 
+def test_news_llm_runtime_backup_settings_support_three_step_translation_chain(monkeypatch):
+    import core.news.eventizer.async_glm_client as async_module
+    import core.news.eventizer.llm_glm5 as sync_module
+
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "nvidia-key", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", "https://integrate.api.nvidia.com/v1", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "google/gemma-4-31b-it", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_API_KEY", "local-gemma-key,previous-ds-key", raising=False)
+    monkeypatch.setattr(
+        settings,
+        "NEWS_LLM_BACKUP_BASE_URL",
+        "http://192.168.1.24:8010/v1,https://kuaipao.ai",
+        raising=False,
+    )
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_MODEL", "gemma4-local,deepseek-v4-flash", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "https://generic-backup.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "generic-backup-key", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "generic-backup-model", raising=False)
+
+    cfg = {"llm": {"provider": "openai", "force_chat_completions": True}}
+
+    sync_targets = sync_module._openai_endpoint_targets(cfg)
+    async_targets = async_module._openai_endpoint_targets(cfg)
+
+    for targets in (sync_targets, async_targets):
+        assert [target["base_url"] for target in targets] == [
+            "https://integrate.api.nvidia.com/v1",
+            "http://192.168.1.24:8010/v1",
+            "https://kuaipao.ai",
+        ]
+        assert [target["api_key"] for target in targets] == [
+            "nvidia-key",
+            "local-gemma-key",
+            "previous-ds-key",
+        ]
+        assert [target["model"] for target in targets] == [
+            "google/gemma-4-31b-it",
+            "gemma4-local",
+            "deepseek-v4-flash",
+        ]
+
+
 def test_news_sync_summary_uses_openai_mini_source(monkeypatch):
     import core.news.eventizer.llm_glm5 as module
 
