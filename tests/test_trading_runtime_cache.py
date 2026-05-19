@@ -37,6 +37,8 @@ def test_clear_trading_api_runtime_caches_clears_all_cache_families():
         trading_api._LIVE_POSITION_DETAILS_CACHE["diagnostics"] = {"ok": True}
         trading_api._LIVE_ORDER_DETAILS_CACHE["ts"] = time.time()
         trading_api._LIVE_ORDER_DETAILS_CACHE["orders"] = [{"id": "ord-1"}]
+        trading_api._LIVE_CONDITIONAL_ORDER_CACHE["ts"] = time.time()
+        trading_api._LIVE_CONDITIONAL_ORDER_CACHE["orders"] = [{"id": "cond-1"}]
         trading_api._RISK_DASHBOARD_REFRESH_TASKS["30"] = risk_task
         trading_api._MICROSTRUCTURE_REFRESH_TASKS["binance|BTC/USDT"] = micro_task
         trading_api._COMMUNITY_REFRESH_TASKS["binance|BTC/USDT"] = community_task
@@ -80,6 +82,7 @@ def test_clear_trading_api_runtime_caches_clears_all_cache_families():
         assert inspect["community_refresh_tasks"] == 0
         assert inspect["rule_price_in_flight"] is False
         assert inspect["rule_price_cache_age_sec"] is None
+        assert inspect["live_conditional_order_age_sec"] is None
 
     asyncio.run(_run())
 

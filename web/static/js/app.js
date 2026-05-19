@@ -2388,10 +2388,13 @@ return `<tr><td>${o.exchange||'-'} ${o.symbol}</td><td>${sourceBadge}</td><td>${
 }).join('');
 }catch(e){console.error(e);const t=document.getElementById('orders-tbody');if(t)t.innerHTML=`<tr><td colspan="8">订单加载失败：${esc(e.message||'未知错误')}</td></tr>`;}});}
 async function loadOpenOrders(){return runRequestSingleFlight('openOrders',async()=>{try{
-const rows=((await api('/trading/orders?include_history=false&limit=200',{timeoutMs:TRADING_OPEN_ORDERS_TIMEOUT_MS})).orders||[]);
+const payload=await api('/trading/orders?include_history=false&limit=200',{timeoutMs:TRADING_OPEN_ORDERS_TIMEOUT_MS});
+const rows=(payload.orders||[]);
 const t=document.getElementById('open-orders-tbody');
 if(!t)return;
-if(!rows.length){t.innerHTML='<tr><td colspan="8">暂无当前委托</td></tr>';return;}
+const fb=payload.cache_fallback||{};
+const note=fb.used?`<div class="order-reject-reason">使用缓存 ${Number(fb.age_sec||0).toFixed(1)}s：${esc(fb.reason||'交易所暂不可用')}</div>`:(fb.reason?`<div class="order-reject-reason">交易所同步异常：${esc(fb.reason)}</div>`:'');
+if(!rows.length){t.innerHTML=`<tr><td colspan="8">暂无当前委托${note}</td></tr>`;return;}
 t.innerHTML=rows.map(o=>{
 const strategy=(o.strategy&&String(o.strategy).trim())?String(o.strategy):'manual';
 const sourceBadge=strategy==='manual'
@@ -2408,7 +2411,7 @@ const protect=[
 ].filter(Boolean);
 const protectCell=protect.length?protect.map(x=>`<div>${x}</div>`).join(''):'--';
 return `<tr><td>${o.exchange||'-'} ${o.symbol}</td><td>${sourceBadge}</td><td>${esc(o.account_id||'main')}</td><td>${statusCell}</td><td>${Number(o.price||0).toFixed(2)}</td><td>${Number(o.amount||0)}</td><td>${protectCell}</td><td><button class="btn btn-danger btn-sm" onclick="cancelOrder('${o.id}','${o.symbol}','${o.exchange||'binance'}')">撤销</button></td></tr>`;
-}).join('');
+}).join('')+(note?`<tr><td colspan="8">${note}</td></tr>`:'');
 }catch(e){
 console.error(e);
 const t=document.getElementById('open-orders-tbody');
@@ -2434,7 +2437,7 @@ if(strategy)strategy.addEventListener('keydown',e=>{
   }
 });
 }
-async function cancelOrder(id,symbol,exchange){try{await api(`/trading/order/${id}?symbol=${encodeURIComponent(symbol)}&exchange=${exchange}`,{method:'DELETE'});notify('订单已撤销');await Promise.allSettled([loadOrders(),loadOpenOrders()]);}catch(e){notify(`撤销失败: ${e.message}`,true);}}
+async function cancelOrder(id,symbol,exchange){try{await api(`/trading/order/${id}?symbol=${encodeURIComponent(symbol)}&exchange=${exchange}`,{method:'DELETE'});notify('订单已撤销');await Promise.allSettled([loadOrders(),loadOpenOrders(),loadConditionalOrders()]);}catch(e){notify(`撤销失败: ${e.message}`,true);}}
 
 async function loadStrategies(){return runRequestSingleFlight('strategies',async()=>{try{
 await ensureStrategyCatalog();
@@ -5618,7 +5621,7 @@ socket.onerror=()=>{setWsBadge(false);};
 }catch{setWsBadge(false);}
 }
 
-async function loadConditionalOrders(){return runRequestSingleFlight('conditionalOrders',async()=>{try{const d=await api('/trading/orders/conditional');const t=document.getElementById('conditional-orders-tbody');if(!t)return;const rows=d.orders||[];if(!rows.length){t.innerHTML='<tr><td colspan=\"7\">暂无条件单</td></tr>';return;}t.innerHTML=rows.map(o=>`<tr><td>${o.conditional_id}</td><td>${o.exchange} ${o.symbol}</td><td>${mapSide(o.side)}</td><td>${Number(o.trigger_price||0).toFixed(4)}</td><td>${Number(o.amount||0)}</td><td>${o.account_id||'main'}</td><td><button class=\"btn btn-danger btn-sm\" onclick=\"cancelConditional('${o.conditional_id}')\">取消</button></td></tr>`).join('');}catch(e){console.error(e);}});}
+async function loadConditionalOrders(){return runRequestSingleFlight('conditionalOrders',async()=>{try{const d=await api('/trading/orders/conditional',{timeoutMs:TRADING_OPEN_ORDERS_TIMEOUT_MS});const t=document.getElementById('conditional-orders-tbody');if(!t)return;const rows=d.orders||[];const fb=d.cache_fallback||{};const note=fb.used?`<div class="order-reject-reason">使用缓存 ${Number(fb.age_sec||0).toFixed(1)}s：${esc(fb.reason||'交易所暂不可用')}</div>`:(fb.reason?`<div class="order-reject-reason">交易所条件单同步异常：${esc(fb.reason)}</div>`:'');if(!rows.length){t.innerHTML=`<tr><td colspan=\"7\">暂无条件单${note}</td></tr>`;return;}t.innerHTML=rows.map(o=>{const isExchange=String(o.source||'').toLowerCase()==='exchange';const oid=esc(o.exchange_order_id||o.conditional_id||'');const cid=esc(o.conditional_id||'');const sym=esc(o.symbol||'');const ex=esc(o.exchange||'binance');const action=isExchange?`<button class=\"btn btn-danger btn-sm\" onclick=\"cancelOrder('${oid}','${sym}','${ex}')\">撤销</button>`:`<button class=\"btn btn-danger btn-sm\" onclick=\"cancelConditional('${cid}')\">取消</button>`;return `<tr><td>${cid}</td><td>${ex} ${sym}</td><td>${mapSide(o.side)}</td><td>${Number(o.trigger_price||0).toFixed(4)}</td><td>${Number(o.amount||0)}</td><td>${esc(o.account_id||'main')}</td><td>${action}</td></tr>`;}).join('')+(note?`<tr><td colspan=\"7\">${note}</td></tr>`:'');}catch(e){console.error(e);const t=document.getElementById('conditional-orders-tbody');if(t)t.innerHTML=`<tr><td colspan=\"7\">条件单加载失败：${esc(e.message||'未知错误')}</td></tr>`;}});}
 async function cancelConditional(id){try{await api(`/trading/orders/conditional/${encodeURIComponent(id)}`,{method:'DELETE'});notify('条件单已取消');await loadConditionalOrders();}catch(e){notify(`取消条件单失败: ${e.message}`,true);}}
 
 async function loadAccounts(){return runRequestSingleFlight('accounts',async()=>{try{const d=await api('/trading/accounts/summary');const out=document.getElementById('accounts-output');if(out)out.textContent=JSON.stringify(d,null,2);}catch(e){const out=document.getElementById('accounts-output');if(out)out.textContent=`账户加载失败: ${e.message}`;}});}

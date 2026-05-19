@@ -51,6 +51,12 @@ from core.trading import (
     order_manager,
     position_manager,
 )
+from core.trading.binance_rest import (
+    binance_ccxt_symbol as shared_binance_ccxt_symbol,
+    binance_has_credentials as shared_binance_has_credentials,
+    binance_market_symbol as shared_binance_market_symbol,
+    binance_signed_request as shared_binance_signed_request,
+)
 from core.trading.order_manager import OrderRequest as CoreOrderRequest
 from core.utils.asyncio_compat import LoopBoundAsyncLock
 from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
@@ -77,6 +83,7 @@ _LIVE_POSITION_DETAILS_CACHE: Dict[str, Any] = {
     "diagnostics": None,
 }
 _LIVE_ORDER_DETAILS_CACHE: Dict[str, Any] = {"ts": 0.0, "orders": []}
+_LIVE_CONDITIONAL_ORDER_CACHE: Dict[str, Any] = {"ts": 0.0, "orders": []}
 _RULE_PRICE_CACHE_TTL_SEC = 10.0
 _RULE_PRICE_FETCH_TIMEOUT_SEC = 1.5
 _RULE_PRICE_CACHE: Dict[str, Any] = {"ts": 0.0, "prices": {}}
@@ -341,6 +348,8 @@ def _clear_trading_api_runtime_caches() -> Dict[str, Any]:
     _LIVE_POSITION_DETAILS_CACHE["diagnostics"] = None
     _LIVE_ORDER_DETAILS_CACHE["ts"] = 0.0
     _LIVE_ORDER_DETAILS_CACHE["orders"] = []
+    _LIVE_CONDITIONAL_ORDER_CACHE["ts"] = 0.0
+    _LIVE_CONDITIONAL_ORDER_CACHE["orders"] = []
     return {
         "balance_entries_cleared": balance_entries,
         "microstructure_entries_cleared": micro_entries,
@@ -391,6 +400,9 @@ def _inspect_trading_api_runtime_caches() -> Dict[str, Any]:
         ),
         "live_order_details_age_sec": _age(
             float(_LIVE_ORDER_DETAILS_CACHE.get("ts") or 0.0)
+        ),
+        "live_conditional_order_age_sec": _age(
+            float(_LIVE_CONDITIONAL_ORDER_CACHE.get("ts") or 0.0)
         ),
     }
 
@@ -4297,15 +4309,22 @@ async def _fetch_binance_positions_fast() -> List[Dict[str, Any]]:
 
 async def _fetch_binance_open_orders_fast(
     symbol: Optional[str] = None,
+    *,
+    account_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    if not _binance_has_credentials():
+    if not shared_binance_has_credentials(account_id):
         return []
     params: Dict[str, Any] = {}
-    raw_symbol = _binance_market_symbol(symbol)
+    raw_symbol = shared_binance_market_symbol(symbol)
     if raw_symbol:
         params["symbol"] = raw_symbol
-    rows = await _binance_signed_request(
-        "GET", "/fapi/v1/openOrders", host="fapi", params=params
+    rows = await shared_binance_signed_request(
+        "GET",
+        "/fapi/v1/openOrders",
+        host="fapi",
+        params=params,
+        timeout_sec=4.2,
+        account_id=account_id,
     )
     orders: List[Dict[str, Any]] = []
     for row in rows or []:
@@ -4329,7 +4348,7 @@ async def _fetch_binance_open_orders_fast(
             {
                 "id": str(row.get("orderId") or row.get("clientOrderId") or ""),
                 "exchange": "binance",
-                "symbol": _binance_ccxt_symbol(
+                "symbol": shared_binance_ccxt_symbol(
                     str(row.get("symbol") or ""), futures=True
                 ),
                 "side": str(row.get("side") or "").lower(),
@@ -4360,9 +4379,78 @@ async def _fetch_binance_open_orders_fast(
                 "paper_slippage_cost_usd": 0.0,
                 "paper_reference_price": 0.0,
                 "paper_notional_usd": 0.0,
+                "client_order_id": str(row.get("clientOrderId") or ""),
+                "time_in_force": str(row.get("timeInForce") or ""),
+                "working_type": str(row.get("workingType") or ""),
+                "price_protect": bool(row.get("priceProtect")),
+                "raw_type": str(row.get("type") or ""),
             }
         )
     return orders
+
+
+def _is_exchange_trigger_order(order: Dict[str, Any]) -> bool:
+    order_type = str(order.get("type") or order.get("raw_type") or "").lower()
+    return any(
+        token in order_type
+        for token in ("stop", "take_profit", "trailing_stop")
+    ) or _safe_float(order.get("trigger_price"), default=0.0) > 0
+
+
+def _exchange_order_to_conditional(order: Dict[str, Any]) -> Dict[str, Any]:
+    order_type = str(order.get("type") or order.get("raw_type") or "").lower()
+    conditional_id = str(order.get("id") or order.get("client_order_id") or "")
+    trigger_price = _safe_float(order.get("trigger_price"), default=0.0)
+    return {
+        "conditional_id": conditional_id,
+        "exchange_order_id": str(order.get("id") or ""),
+        "client_order_id": str(order.get("client_order_id") or ""),
+        "created_at": order.get("timestamp"),
+        "exchange": str(order.get("exchange") or "binance"),
+        "symbol": str(order.get("symbol") or ""),
+        "side": str(order.get("side") or "").lower(),
+        "order_type": order_type,
+        "amount": _safe_float(order.get("amount"), default=0.0),
+        "price": _safe_float(order.get("price"), default=0.0),
+        "stop_loss": order.get("stop_loss"),
+        "take_profit": order.get("take_profit"),
+        "trigger_price": trigger_price,
+        "account_id": str(order.get("account_id") or "exchange_live"),
+        "strategy": order.get("strategy"),
+        "reduce_only": bool(order.get("reduce_only")),
+        "status": str(order.get("status") or "open"),
+        "source": "exchange",
+        "working_type": str(order.get("working_type") or ""),
+        "price_protect": bool(order.get("price_protect")),
+    }
+
+
+def _merge_conditional_orders(
+    local_orders: List[Dict[str, Any]],
+    exchange_orders: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in list(local_orders or []) + [
+        _exchange_order_to_conditional(order)
+        for order in exchange_orders
+        if _is_exchange_trigger_order(order)
+    ]:
+        exchange = str(row.get("exchange") or "").lower()
+        symbol = str(row.get("symbol") or "").upper()
+        cid = str(
+            row.get("conditional_id")
+            or row.get("exchange_order_id")
+            or row.get("client_order_id")
+            or ""
+        )
+        key = (exchange, symbol, cid)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+    merged.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return merged
 
 
 async def _resolve_live_equity_baseline(
@@ -4984,24 +5072,34 @@ async def get_orders(
             )
             _LIVE_ORDER_DETAILS_CACHE["ts"] = time.time()
             _LIVE_ORDER_DETAILS_CACHE["orders"] = list(fast_orders)
-            return {"orders": fast_orders[:request_limit]}
+            return {
+                "orders": fast_orders[:request_limit],
+                "count": len(fast_orders[:request_limit]),
+                "source": "binance_futures_rest",
+                "cache_fallback": {"used": False},
+            }
         except Exception as fast_err:
-            logger.warning(f"[binance] fast open orders fetch failed: {fast_err}")
+            reason = str(fast_err) or fast_err.__class__.__name__
+            logger.warning(f"[binance] fast open orders fetch failed: {reason}")
             if cached_orders and cache_age <= _LIVE_ORDER_DETAILS_CACHE_TTL_SEC:
                 return {
                     "orders": cached_orders[:request_limit],
+                    "count": len(cached_orders[:request_limit]),
+                    "source": "cache",
                     "cache_fallback": {
                         "used": True,
                         "age_sec": round(cache_age, 2),
-                        "reason": str(fast_err),
+                        "reason": reason,
                     },
                 }
             return {
                 "orders": [],
+                "count": 0,
+                "source": "binance_futures_rest",
                 "cache_fallback": {
                     "used": False,
                     "age_sec": round(cache_age, 2),
-                    "reason": str(fast_err),
+                    "reason": reason,
                 },
             }
 
@@ -5021,6 +5119,8 @@ async def get_orders(
         ):
             return {
                 "orders": cached_orders[:request_limit],
+                "count": len(cached_orders[:request_limit]),
+                "source": "cache",
                 "cache_fallback": {
                     "used": True,
                     "age_sec": round(cache_age, 2),
@@ -5038,6 +5138,8 @@ async def get_orders(
         ):
             return {
                 "orders": cached_orders[:request_limit],
+                "count": len(cached_orders[:request_limit]),
+                "source": "cache",
                 "cache_fallback": {
                     "used": True,
                     "age_sec": round(cache_age, 2),
@@ -5050,14 +5152,78 @@ async def get_orders(
     if not execution_engine.is_paper_mode():
         _LIVE_ORDER_DETAILS_CACHE["ts"] = time.time()
         _LIVE_ORDER_DETAILS_CACHE["orders"] = list(serialized)
-    return {"orders": serialized}
+    return {
+        "orders": serialized,
+        "count": len(serialized),
+        "source": "exchange_connector",
+        "cache_fallback": {"used": False},
+    }
 
 
 async def get_conditional_orders():
-    return {
-        "orders": execution_engine.list_conditional_orders(),
-        "count": len(execution_engine.list_conditional_orders()),
-    }
+    local_orders = execution_engine.list_conditional_orders()
+    if execution_engine.is_paper_mode():
+        return {
+            "orders": local_orders,
+            "count": len(local_orders),
+            "source": "local_execution_engine",
+            "cache_fallback": {"used": False},
+        }
+
+    cache_age = max(
+        0.0, time.time() - float(_LIVE_CONDITIONAL_ORDER_CACHE.get("ts") or 0.0)
+    )
+    cached_orders = list(_LIVE_CONDITIONAL_ORDER_CACHE.get("orders") or [])
+    try:
+        exchange_open_orders = await asyncio.wait_for(
+            _fetch_binance_open_orders_fast(),
+            timeout=4.2,
+        )
+        merged = _merge_conditional_orders(local_orders, exchange_open_orders)
+        exchange_conditionals = [
+            order
+            for order in exchange_open_orders
+            if _is_exchange_trigger_order(order)
+        ]
+        _LIVE_CONDITIONAL_ORDER_CACHE["ts"] = time.time()
+        _LIVE_CONDITIONAL_ORDER_CACHE["orders"] = list(exchange_conditionals)
+        return {
+            "orders": merged,
+            "count": len(merged),
+            "source": "local_plus_binance_futures_rest",
+            "local_count": len(local_orders),
+            "exchange_count": len(exchange_conditionals),
+            "cache_fallback": {"used": False},
+        }
+    except Exception as exc:
+        reason = str(exc) or exc.__class__.__name__
+        logger.warning(f"[binance] conditional orders fetch failed: {reason}")
+        if cached_orders and cache_age <= _LIVE_ORDER_DETAILS_CACHE_TTL_SEC:
+            merged = _merge_conditional_orders(local_orders, cached_orders)
+            return {
+                "orders": merged,
+                "count": len(merged),
+                "source": "local_plus_cache",
+                "local_count": len(local_orders),
+                "exchange_count": len(cached_orders),
+                "cache_fallback": {
+                    "used": True,
+                    "age_sec": round(cache_age, 2),
+                    "reason": reason,
+                },
+            }
+        return {
+            "orders": local_orders,
+            "count": len(local_orders),
+            "source": "local_execution_engine",
+            "local_count": len(local_orders),
+            "exchange_count": 0,
+            "cache_fallback": {
+                "used": False,
+                "age_sec": round(cache_age, 2),
+                "reason": reason,
+            },
+        }
 
 
 async def cancel_conditional_order(conditional_id: str):

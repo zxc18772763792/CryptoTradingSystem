@@ -122,6 +122,9 @@ async def run_cli(run_config: RunConfig) -> None:
 def run_web(run_config: RunConfig) -> None:
     """Run existing trading web service."""
     os.environ["TRADING_MODE"] = run_config.trading_mode
+    # web.main imports the already-created global settings object from this process.
+    # Keep it aligned with CLI args before uvicorn imports the ASGI app.
+    settings.TRADING_MODE = run_config.trading_mode
     logger.info(
         f"Starting Web server on {run_config.web_host}:{run_config.web_port} "
         f"(trading_mode={run_config.trading_mode})"
