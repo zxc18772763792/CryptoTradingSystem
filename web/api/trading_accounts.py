@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from web.api import trading as trading_api
+from web.api.auth import require_sensitive_ops_permissions
 
 
 router = APIRouter()
@@ -15,7 +16,7 @@ async def list_accounts():
     return {"accounts": trading_api.account_manager.list_accounts()}
 
 
-@router.post("/accounts")
+@router.post("/accounts", dependencies=[Depends(require_sensitive_ops_permissions("manage_accounts"))])
 async def create_account(req: trading_api.AccountCreateRequest):
     try:
         item = trading_api.account_manager.create_account(
@@ -32,7 +33,7 @@ async def create_account(req: trading_api.AccountCreateRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.put("/accounts/{account_id}")
+@router.put("/accounts/{account_id}", dependencies=[Depends(require_sensitive_ops_permissions("manage_accounts"))])
 async def update_account(account_id: str, req: trading_api.AccountUpdateRequest):
     payload = req.model_dump(exclude_none=True)
     try:
@@ -42,7 +43,7 @@ async def update_account(account_id: str, req: trading_api.AccountUpdateRequest)
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.delete("/accounts/{account_id}")
+@router.delete("/accounts/{account_id}", dependencies=[Depends(require_sensitive_ops_permissions("manage_accounts"))])
 async def delete_account(account_id: str):
     try:
         ok = trading_api.account_manager.delete_account(account_id)

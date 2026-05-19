@@ -16,6 +16,10 @@ def _build_app() -> FastAPI:
     return app
 
 
+def _ops_headers() -> dict[str, str]:
+    return {"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"}
+
+
 def _reset_download_state() -> None:
     data_api._DOWNLOAD_TASKS.clear()
     data_api._DOWNLOAD_BACKGROUND_TASKS.clear()
@@ -45,6 +49,7 @@ def test_download_route_honors_explicit_background_true_for_small_single_request
 
     monkeypatch.setattr(data_api, "_queue_download_task", fake_queue)
     monkeypatch.setattr(data_api, "run_download_historical_data", fake_run_download_historical_data)
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
 
     with TestClient(_build_app()) as client:
         response = client.post(
@@ -56,6 +61,7 @@ def test_download_route_honors_explicit_background_true_for_small_single_request
                 "days": 30,
                 "background": "true",
             },
+            headers=_ops_headers(),
         )
 
     assert response.status_code == 200
@@ -90,6 +96,7 @@ def test_download_route_runs_small_single_request_inline_when_background_unspeci
 
     monkeypatch.setattr(data_api, "_queue_download_task", fake_queue)
     monkeypatch.setattr(data_api, "run_download_historical_data", fake_run_download_historical_data)
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
 
     with TestClient(_build_app()) as client:
         response = client.post(
@@ -100,6 +107,7 @@ def test_download_route_runs_small_single_request_inline_when_background_unspeci
                 "timeframe": "1h",
                 "days": 7,
             },
+            headers=_ops_headers(),
         )
 
     assert response.status_code == 200

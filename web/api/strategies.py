@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 import numpy as np
 import pandas as pd
@@ -37,6 +37,7 @@ from core.trading.execution_engine import execution_engine
 from core.trading.order_manager import order_manager
 from core.trading.position_manager import PositionSide, position_manager
 from strategies import ALL_STRATEGIES
+from web.api.auth import require_sensitive_ops_permissions
 from web.api.backtest import (
     _load_backtest_inputs,
     _pairs_hedge_ratio_bounds,
@@ -1498,7 +1499,7 @@ async def export_all_strategies():
     return {"strategies": items, "count": len(items)}
 
 
-@router.post("/import")
+@router.post("/import", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def import_strategies(payload: StrategyImportRequest):
     strategy_classes = _get_strategy_classes()
     imported = []
@@ -1664,7 +1665,7 @@ async def get_aggregated_signals(symbol: str):
     return strategy_manager.get_aggregated_signals(symbol)
 
 
-@router.post("/start-all")
+@router.post("/start-all", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def start_all_strategies():
     auto_registered = await _auto_register_defaults_for_start_all()
     await strategy_manager.start_all()
@@ -1685,7 +1686,7 @@ async def start_all_strategies():
     }
 
 
-@router.post("/stop-all")
+@router.post("/stop-all", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def stop_all_strategies():
     stop_results: List[Dict[str, Any]] = []
     for item in list(strategy_manager.list_strategies()):
@@ -1709,7 +1710,7 @@ async def stop_all_strategies():
     return {"success": True, "results": stop_results}
 
 
-@router.post("/register")
+@router.post("/register", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def register_strategy(request: StrategyRegisterRequest):
     strategy_classes = _get_strategy_classes()
     strategy_class = strategy_classes.get(request.strategy_type)
@@ -1776,7 +1777,7 @@ async def register_strategy(request: StrategyRegisterRequest):
     }
 
 
-@router.post("/allocations/rebalance")
+@router.post("/allocations/rebalance", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def rebalance_allocations(request: AllocationRebalanceRequest):
     normalized = strategy_manager.rebalance_allocations(request.allocations)
     for name in normalized.keys():
@@ -1802,7 +1803,7 @@ async def get_strategy_health_monitor_alias():
     return strategy_health_monitor.get_status()
 
 
-@router.post("/health/check")
+@router.post("/health/check", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def run_strategy_health_check():
     result = await strategy_health_monitor.check_once()
     return {
@@ -1895,7 +1896,7 @@ async def get_live_vs_backtest(name: str, initial_capital: float = 10000):
     }
 
 
-@router.post("/{name}/start")
+@router.post("/{name}/start", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def start_strategy(name: str):
     success = await strategy_manager.start_strategy(name)
     if success:
@@ -1906,7 +1907,7 @@ async def start_strategy(name: str):
     raise HTTPException(status_code=400, detail="Failed to start strategy")
 
 
-@router.post("/{name}/stop")
+@router.post("/{name}/stop", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def stop_strategy(name: str):
     success = await strategy_manager.stop_strategy(name)
     if success:
@@ -1918,7 +1919,7 @@ async def stop_strategy(name: str):
     raise HTTPException(status_code=400, detail="Failed to stop strategy")
 
 
-@router.post("/{name}/pause")
+@router.post("/{name}/pause", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def pause_strategy(name: str):
     success = await strategy_manager.pause_strategy(name)
     if success:
@@ -1929,7 +1930,7 @@ async def pause_strategy(name: str):
     raise HTTPException(status_code=400, detail="Failed to pause strategy")
 
 
-@router.put("/{name}/params")
+@router.put("/{name}/params", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def update_strategy_params(name: str, request: StrategyUpdateRequest):
     info = strategy_manager.get_strategy_info(name)
     if not info:
@@ -1957,7 +1958,7 @@ async def update_strategy_params(name: str, request: StrategyUpdateRequest):
     raise HTTPException(status_code=400, detail="Failed to update params")
 
 
-@router.put("/{name}/config")
+@router.put("/{name}/config", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def update_strategy_config(name: str, request: StrategyConfigUpdateRequest):
     info = strategy_manager.get_strategy_info(name)
     if not info:
@@ -1984,7 +1985,7 @@ async def update_strategy_config(name: str, request: StrategyConfigUpdateRequest
     }
 
 
-@router.put("/{name}/allocation")
+@router.put("/{name}/allocation", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def update_strategy_allocation(name: str, request: StrategyAllocationRequest):
     success = strategy_manager.update_strategy_allocation(name, request.allocation)
     if success:
@@ -2007,7 +2008,7 @@ async def update_strategy_allocation(name: str, request: StrategyAllocationReque
     raise HTTPException(status_code=400, detail="Failed to update allocation")
 
 
-@router.delete("/{name}")
+@router.delete("/{name}", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def unregister_strategy(name: str):
     success = strategy_manager.unregister_strategy(name)
     if success:

@@ -10,6 +10,10 @@ def _build_app() -> FastAPI:
     return app
 
 
+def _ops_headers() -> dict[str, str]:
+    return {"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"}
+
+
 def test_research_refresh_status_route_returns_helper_payload(monkeypatch):
     def fake_status():
         return {
@@ -50,11 +54,13 @@ def test_research_refresh_start_route_bridges_to_trigger(monkeypatch):
         }
 
     monkeypatch.setattr(data_api, "_trigger_research_universe_refresh_start", fake_trigger)
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
 
     with TestClient(_build_app()) as client:
         response = client.post(
             "/api/data/research/refresh/start",
             params={"exchange": "binance", "timeframes": "15m,1h", "days": 120, "overlap_bars": 64},
+            headers=_ops_headers(),
         )
 
     assert response.status_code == 200
@@ -85,9 +91,10 @@ def test_research_refresh_start_route_defaults_include_1h(monkeypatch):
         }
 
     monkeypatch.setattr(data_api, "_trigger_research_universe_refresh_start", fake_trigger)
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
 
     with TestClient(_build_app()) as client:
-        response = client.post("/api/data/research/refresh/start")
+        response = client.post("/api/data/research/refresh/start", headers=_ops_headers())
 
     assert response.status_code == 200
     payload = response.json()

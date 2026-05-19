@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
 import pandas as pd
 from loguru import logger
@@ -66,13 +66,14 @@ class StrategyRuntimeStats:
 _SIGNAL_CONFLICT_WINDOW_SECONDS = 60
 _MARKET_DATA_FETCH_TIMEOUT_SEC = 12.0
 _STRATEGY_CYCLE_TIMEOUT_SEC = 45.0
+_SIGNAL_NOTIFY_CALLBACK_TIMEOUT_SEC = 2.0
 
 
 class StrategyManager:
     def __init__(self):
         self._strategies: Dict[str, StrategyBase] = {}
         self._configs: Dict[str, StrategyConfig] = {}
-        self._signal_callbacks: List[callable] = []
+        self._signal_callbacks: List[Callable[[Signal], Any]] = []
         self._running: bool = False
         self._strategy_tasks: Dict[str, asyncio.Task] = {}
         self._last_run_at: Dict[str, datetime] = {}
@@ -650,6 +651,69 @@ class StrategyManager:
         result = await async_method(base, quote, amount)
         return result or []
 
+    @staticmethod
+    def _is_execution_signal_callback(callback: Callable[[Signal], Any]) -> bool:
+        cb_name = str(getattr(callback, "__name__", "") or "")
+        cb_self = getattr(callback, "__self__", None)
+        return cb_name == "submit_signal" or cb_self.__class__.__name__ == "ExecutionEngine"
+
+    async def _invoke_signal_callback(
+        self,
+        callback: Callable[[Signal], Any],
+        signal: Signal,
+        *,
+        timeout: Optional[float] = None,
+    ) -> bool:
+        is_execution_callback = self._is_execution_signal_callback(callback)
+        try:
+            result = callback(signal)
+            if inspect.isawaitable(result):
+                if timeout is not None and timeout > 0:
+                    await asyncio.wait_for(result, timeout=timeout)
+                else:
+                    await result
+            return is_execution_callback
+        except asyncio.TimeoutError:
+            callback_name = str(getattr(callback, "__name__", "") or callback.__class__.__name__)
+            timeout_text = f"{timeout:.2f}s" if timeout is not None else "unknown timeout"
+            logger.warning(
+                f"Signal callback timed out after {timeout_text}: "
+                f"{callback_name} {signal.strategy_name} {signal.symbol}"
+            )
+        except Exception as e:
+            logger.error(f"Signal callback error: {e}")
+        return False
+
+    async def _dispatch_signal_callbacks(self, signal: Signal) -> bool:
+        execution_signal_dispatched = False
+        execution_callbacks: List[Callable[[Signal], Any]] = []
+        notify_callbacks: List[Callable[[Signal], Any]] = []
+
+        for callback in list(self._signal_callbacks):
+            if self._is_execution_signal_callback(callback):
+                execution_callbacks.append(callback)
+            else:
+                notify_callbacks.append(callback)
+
+        for callback in execution_callbacks:
+            if await self._invoke_signal_callback(callback, signal):
+                execution_signal_dispatched = True
+
+        if notify_callbacks:
+            results = await asyncio.gather(
+                *(
+                    self._invoke_signal_callback(
+                        callback,
+                        signal,
+                        timeout=_SIGNAL_NOTIFY_CALLBACK_TIMEOUT_SEC,
+                    )
+                    for callback in notify_callbacks
+                )
+            )
+            execution_signal_dispatched = execution_signal_dispatched or any(results)
+
+        return execution_signal_dispatched
+
     async def _emit_signals(self, strategy_name: str, signals: List[Signal]) -> None:
         strategy = self._strategies.get(strategy_name)
         if not strategy:
@@ -685,13 +749,13 @@ class StrategyManager:
                 try:
                     age = (signal.timestamp - prior.timestamp).total_seconds()
                 except TypeError:
-                    # Mixed naive/aware timestamps — treat as unrelated signals
+                    # Mixed naive/aware timestamps are treated as unrelated signals.
                     age = _SIGNAL_CONFLICT_WINDOW_SECONDS + 1
                 if 0 <= age <= _SIGNAL_CONFLICT_WINDOW_SECONDS:
                     prior_side = prior.signal_type.value
                     new_side = signal.signal_type.value
                     # Risk-reducing exits (close_long/close_short) must never be
-                    # suppressed by conflict detection — dropping a stop/exit can
+                    # suppressed by conflict detection. Dropping a stop/exit can
                     # strand a losing position. Conflict only applies between
                     # opposite *entry* signals (buy vs sell).
                     exit_sides = {"close_long", "close_short"}
@@ -717,17 +781,8 @@ class StrategyManager:
                             )
             self._recent_signal_by_symbol[conflict_key] = signal
 
-            execution_signal_dispatched = False
             strategy.add_signal_to_history(signal)
-            for callback in self._signal_callbacks:
-                try:
-                    await callback(signal)
-                    cb_name = str(getattr(callback, "__name__", "") or "")
-                    cb_self = getattr(callback, "__self__", None)
-                    if cb_name == "submit_signal" or cb_self.__class__.__name__ == "ExecutionEngine":
-                        execution_signal_dispatched = True
-                except Exception as e:
-                    logger.error(f"Signal callback error: {e}")
+            execution_signal_dispatched = await self._dispatch_signal_callbacks(signal)
 
             if not execution_signal_dispatched:
                 try:

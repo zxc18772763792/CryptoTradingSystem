@@ -2299,9 +2299,7 @@
     }
   }
 
-  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     信号杩蜂綘闈㈡澘
-  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
+  /* Signal mini panel */
   function renderSignalMini() {
     const box = document.getElementById('ai-signal-mini');
     if (!box) return;
@@ -2400,9 +2398,7 @@
     }
   }
 
-  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     鍊欓€夌瓥鐣ュ崱鐗?
-  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
+  /* Candidate strategy cards */
   function textHasMeaningfulContent(value) {
     const normalized = normalizeUiText(String(value ?? '').trim());
     if (!normalized) return false;
@@ -2815,9 +2811,7 @@
     emitWorkbenchState('proposal-selection', { proposalId: nextProposalId });
   }
 
-  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     鍊欓€夌瓥鐣ュ崱鐗?
-  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
+  /* Proposal queue */
   function renderProposalList() {
     const box = document.getElementById('ai-proposal-list');
     const badge = document.getElementById('ai-queue-badge');
@@ -3066,9 +3060,7 @@
     btn.title = hints.join('；');
   }
 
-  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     鍙充晶璇︽儏闈㈡澘
-  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
+  /* Right-side detail panel */
   function scoreBar(label, value, max = 100) {
     const n   = Number(value || 0);
     const pct = Math.min(100, (n / max) * 100).toFixed(0);
@@ -3517,11 +3509,11 @@
     const bestParamsKeys = Object.keys(bestParams);
     const bestParamsHtml = bestParamsKeys.length
       ? `<div style="margin-bottom:14px;">
-          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">鏈€浼樺弬鏁?(Best Params)</div>
+          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">最佳参数 (Best Params)</div>
           <div style="font-size:12px;color:#c2d0e8;background:#1a2436;border-radius:4px;padding:8px;font-family:monospace;">
             ${bestParamsKeys.map(k => `<span style="color:#a78bfa">${esc(k)}</span>=<span style="color:#20bf78">${esc(String(bestParams[k]))}</span>`).join('  ')}
           </div>
-          ${(cand?.metadata?.best?.optimization_trials > 0) ? `<div style="font-size:11px;color:#6b7fa0;margin-top:3px;">鍏辫瘯楠?${cand.metadata.best.optimization_trials} 缁勫弬鏁扮粍鍚?/div>` : ''}
+          ${(cand?.metadata?.best?.optimization_trials > 0) ? `<div style="font-size:11px;color:#6b7fa0;margin-top:3px;">共试验 ${cand.metadata.best.optimization_trials} 组参数组合</div>` : ''}
         </div>`
       : '';
 
@@ -4044,9 +4036,7 @@
     });
   }
 
-  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     一键注册 Modal
-  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
+  /* One-click registration modal */
   function refreshCompareToolbar() {
     const btn = document.getElementById('ai-compare-btn');
     if (!btn) return;
@@ -4367,9 +4357,7 @@
     }
   }
 
-  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     人工确认队列
-  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
+  /* Human approval queue */
   async function cancelModeSwitchToken(token) {
     const safeToken = String(token || '').trim();
     if (!safeToken) return false;
@@ -4517,7 +4505,7 @@ ${confirmHint}`,
       renderApprovalQueue();
       emitWorkbenchState('pending-approvals');
     } catch (err) {
-      // Non-fatal 鈥?approval queue is best-effort
+      // Non-fatal: approval queue is best-effort.
       console.debug('loadPendingApprovals failed:', err);
     }
   }
@@ -4563,9 +4551,7 @@ ${confirmHint}`,
     normalizeDomText(list);
   }
 
-  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     LLM 辅助研究鐟欏嫬鍨?
-  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
+  /* LLM-assisted research context */
   async function generateAIContext() {
     setAIContextButtonState('working');
     try {
@@ -4834,9 +4820,7 @@ ${confirmHint}`,
     btn.title = `运行研究：${state.selectedProposalId}`;
   }
 
-  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     鎿嶄綔鍑芥暟
-  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
+  /* Action functions */
   /* -- \u56de\u653e\u5e02\u573a\u4e0a\u4e0b\u6587\u91c7\u96c6\uff08\u751f\u6210\u7814\u7a76\u524d\u81ea\u52a8\u6267\u884c\uff09 -- */
   async function _collectLiveMarketContext(primarySymbol) {
     const sym = primarySymbol || getCurrentResearchSymbol() || 'BTC/USDT';
@@ -5832,9 +5816,7 @@ ${confirmHint}`,
     });
   }
 
-  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     浜嬩欢缁戝畾
-  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
+  /* Event binding */
   function bindEvents() {
     document.getElementById('ai-exit-running-queue-btn')?.addEventListener('click', () =>
       exitVisibleRunningQueueItems().catch(err => notify(`退出运行中条目失败: ${err.message}`, true)));
@@ -5842,7 +5824,7 @@ ${confirmHint}`,
     document.getElementById('ai-generate-btn')?.addEventListener('click', () =>
       withActionLock('generate', () => generateProposal()).catch(err => notify(`生成失败: ${err.message}`, true)));
 
-    /* AI生成研究鎬濊矾 */
+    /* AI-generated research goal */
     document.getElementById('ai-auto-goal-btn')?.addEventListener('click', () =>
       ensureAutoPlannerGoal({ forceRefresh: true }).catch(err => notify(`自动生成研究目标失败: ${err.message}`, true)));
     document.getElementById('ai-context-btn')?.addEventListener('click', () =>
@@ -5856,7 +5838,7 @@ ${confirmHint}`,
     document.getElementById('ai-oneclick-btn')?.addEventListener('click', () =>
       withActionLock('oneclick', () => runOneClickResearchDeploy()).catch(err => notify(`one-click 执行失败: ${err.message}`, true)));
 
-    /* 寰呬汉宸ョ‘璁ら槦鍒椾簨浠朵唬鐞?*/
+    /* Pending human approval queue events */
     document.getElementById('ai-approval-list')?.addEventListener('click', e => {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
@@ -5964,7 +5946,7 @@ ${confirmHint}`,
       if (modal && e.target === modal) modal.style.display = 'none';
     });
 
-    /* 研究闃熷垪鐐瑰嚮浠ｇ悊 */
+    /* Research queue click delegation */
     document.getElementById('ai-proposal-list')?.addEventListener('click', e => {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
@@ -5995,19 +5977,19 @@ ${confirmHint}`,
       }
     });
 
-    /* 鎺掑簭 */
+    /* Sorting */
     document.getElementById('cand-sort-select')?.addEventListener('change', e => {
       state.sortBy = String(e.target.value || 'score');
       renderCandidateCards();
     });
 
-    /* 绫诲埆绛涢€?*/
+    /* Category filter */
     document.getElementById('cand-filter-category')?.addEventListener('change', e => {
       state.filterCategory = String(e.target.value || '');
       renderCandidateCards();
     });
 
-    /* 鍊欓€夊崱鐗囩偣鍑讳唬鐞?*/
+    /* Candidate card click delegation */
     document.getElementById('ai-candidate-cards')?.addEventListener('click', e => {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
@@ -6039,9 +6021,7 @@ ${confirmHint}`,
     });
   }
 
-  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     轮询
-  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
+  /* Polling */
   function startPolling() {
     clearInterval(state.signalTimer);
     clearInterval(state.refreshTimer);
@@ -6149,9 +6129,7 @@ ${confirmHint}`,
     });
   }
 
-  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     初始化
-  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
+  /* Initialization */
   async function refreshOperatingModeBanner(options = {}) {
     const now = Date.now();
     const root = document.getElementById('ai-research') || document.getElementById('ai-candidate-cards')?.parentElement;
@@ -6281,13 +6259,9 @@ ${confirmHint}`,
     Object.values(state.jobPollingTimers).forEach(t => clearInterval(t));
   });
 
-  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     Phase A — 实时信号面板，10s 转，
-  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
+  /* Phase A: live signal panel */
 
-  /* 鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?
-     Phase B — 快速注册
-  鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹?*/
+  /* Phase B: quick register */
 
   async function loadLiveSignals() {
     if (!document.getElementById('ai-research-live-signals-panel') && !document.getElementById('ai-agent-live-signals-panel')) return;

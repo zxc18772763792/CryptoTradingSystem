@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -30,6 +30,7 @@ from core.strategies import strategy_manager
 from core.strategies.persistence import persist_strategy_snapshot
 from core.trading.execution_engine import execution_engine
 from strategies.ai.ml_xgboost_strategy import MLXGBoostStrategy
+from web.api.auth import require_sensitive_ops_permissions
 
 router = APIRouter()
 
@@ -1452,7 +1453,7 @@ async def list_models(request: Request) -> Dict[str, Any]:
     return {"ok": True, "items": rows, "count": len(rows)}
 
 
-@router.delete("/models/{model_id}")
+@router.delete("/models/{model_id}", dependencies=[Depends(require_sensitive_ops_permissions("manage_ml"))])
 async def delete_model(request: Request, model_id: str) -> Dict[str, Any]:
     _ensure_ml_state(request.app)
     state = _state(request.app)
@@ -1487,7 +1488,7 @@ async def delete_model(request: Request, model_id: str) -> Dict[str, Any]:
     }
 
 
-@router.post("/jobs/train")
+@router.post("/jobs/train", dependencies=[Depends(require_sensitive_ops_permissions("manage_ml"))])
 async def train_job(request: Request, payload: MLTrainRequest) -> Dict[str, Any]:
     _ensure_ml_state(request.app)
     state = _state(request.app)
@@ -1517,28 +1518,28 @@ async def list_jobs(request: Request) -> Dict[str, Any]:
     return {"ok": True, "items": jobs, "count": len(jobs)}
 
 
-@router.post("/models/{model_id}/register")
+@router.post("/models/{model_id}/register", dependencies=[Depends(require_sensitive_ops_permissions("manage_ml"))])
 async def register_model(request: Request, model_id: str, payload: Optional[MLRegisterRequest] = None) -> Dict[str, Any]:
     _ensure_ml_state(request.app)
     payload = payload or MLRegisterRequest()
     return await _run_register_workflow(request, model_id, payload)
 
 
-@router.post("/models/{model_id}/deploy/paper")
+@router.post("/models/{model_id}/deploy/paper", dependencies=[Depends(require_sensitive_ops_permissions("manage_ml"))])
 async def deploy_model_paper(request: Request, model_id: str, payload: Optional[MLDeployPaperRequest] = None) -> Dict[str, Any]:
     _ensure_ml_state(request.app)
     payload = payload or MLDeployPaperRequest()
     return await _run_deploy_paper_workflow(request, model_id, payload)
 
 
-@router.post("/models/{model_id}/factorize")
+@router.post("/models/{model_id}/factorize", dependencies=[Depends(require_sensitive_ops_permissions("manage_ml"))])
 async def factorize_model(request: Request, model_id: str, payload: Optional[MLFactorizeRequest] = None) -> Dict[str, Any]:
     _ensure_ml_state(request.app)
     payload = payload or MLFactorizeRequest()
     return await _run_factorize_workflow(request, model_id, payload)
 
 
-@router.post("/oneclick")
+@router.post("/oneclick", dependencies=[Depends(require_sensitive_ops_permissions("manage_ml"))])
 async def oneclick(request: Request, payload: MLOneClickRequest) -> Dict[str, Any]:
     _ensure_ml_state(request.app)
     state = _state(request.app)

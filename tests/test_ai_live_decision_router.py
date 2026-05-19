@@ -154,6 +154,13 @@ def test_live_decision_fail_open(monkeypatch):
     assert result["reason"] == "ai_error_fail_open"
 
 
+def test_live_decision_default_config_is_fail_closed():
+    router = LiveAIDecisionRouter()
+
+    assert settings.AI_LIVE_DECISION_FAIL_OPEN is False
+    assert router.get_runtime_config()["fail_open"] is False
+
+
 def test_live_decision_restricts_codex_live_review_fail_open(monkeypatch):
     router = LiveAIDecisionRouter()
     monkeypatch.setattr(settings, "AI_LIVE_DECISION_ENABLED", True, raising=False)

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,6 +32,7 @@ from core.governance.audit import GovernanceAuditEvent, write_audit
 from core.deployment.promotion_engine import transition_candidate, transition_proposal
 from core.news.storage import db as news_db
 from core.trading import execution_engine, order_manager, position_manager
+from web.api.auth import require_sensitive_ops_permissions
 from core.research.orchestrator import (
     cancel_proposal_job,
     create_manual_proposal,
@@ -2961,7 +2962,7 @@ async def get_ai_live_decision_runtime_config(request: Request):
     return live_decision_router.get_runtime_config()
 
 
-@router.post("/runtime-config/live-decision")
+@router.post("/runtime-config/live-decision", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def update_ai_live_decision_runtime_config(
     request: Request,
     payload: AILiveDecisionConfigUpdateRequest,
@@ -3190,7 +3191,7 @@ async def get_ai_autonomous_agent_symbol_ranking(request: Request, limit: int = 
         return autonomous_trading_agent.build_symbol_scan_preview_pending_payload(limit=limit, reason=str(exc))
 
 
-@router.post("/proposals/generate")
+@router.post("/proposals/generate", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def generate_ai_proposal(request: Request, payload: AIPlannerGenerateRequest):
     ensure_ai_research_runtime_state(request.app)
     try:
@@ -3228,7 +3229,7 @@ async def generate_ai_proposal(request: Request, payload: AIPlannerGenerateReque
     }
 
 
-@router.post("/proposals")
+@router.post("/proposals", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def create_ai_proposal(request: Request, payload: AIProposalCreateRequest):
     ensure_ai_research_runtime_state(request.app)
     proposal = create_manual_proposal(
@@ -3265,7 +3266,7 @@ async def get_ai_proposal(request: Request, proposal_id: str):
     return {"proposal": _serialize_proposal(request, item)}
 
 
-@router.delete("/proposals/{proposal_id}")
+@router.delete("/proposals/{proposal_id}", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def delete_ai_proposal(request: Request, proposal_id: str):
     ensure_ai_research_runtime_state(request.app)
     result = delete_proposal(
@@ -3276,7 +3277,7 @@ async def delete_ai_proposal(request: Request, proposal_id: str):
     return result
 
 
-@router.post("/proposals/{proposal_id}/retire")
+@router.post("/proposals/{proposal_id}/retire", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def retire_ai_proposal(request: Request, proposal_id: str, payload: AIRetireRequest = AIRetireRequest()):
     ensure_ai_research_runtime_state(request.app)
     proposal = get_proposal(request.app, proposal_id)
@@ -3328,7 +3329,7 @@ async def retire_ai_proposal(request: Request, proposal_id: str, payload: AIReti
     }
 
 
-@router.post("/proposals/{proposal_id}/exit")
+@router.post("/proposals/{proposal_id}/exit", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def exit_ai_proposal(request: Request, proposal_id: str, payload: AIRetireRequest = AIRetireRequest()):
     ensure_ai_research_runtime_state(request.app)
     proposal = get_proposal(request.app, proposal_id)
@@ -3390,7 +3391,7 @@ async def exit_ai_proposal(request: Request, proposal_id: str, payload: AIRetire
     }
 
 
-@router.post("/proposals/{proposal_id}/run")
+@router.post("/proposals/{proposal_id}/run", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def run_ai_proposal_endpoint(request: Request, proposal_id: str, payload: AIProposalRunRequest):
     ensure_ai_research_runtime_state(request.app)
     try:
@@ -3427,7 +3428,7 @@ async def run_ai_proposal_endpoint(request: Request, proposal_id: str, payload: 
     }
 
 
-@router.post("/oneclick/research-deploy")
+@router.post("/oneclick/research-deploy", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def oneclick_ai_research_deploy(request: Request, payload: AIOneClickResearchDeployRequest):
     """One-click orchestration stage 1: generate -> queue research job."""
     ensure_ai_research_runtime_state(request.app)
@@ -3494,7 +3495,7 @@ async def oneclick_ai_research_deploy(request: Request, payload: AIOneClickResea
     }
 
 
-@router.post("/oneclick/deploy-candidate")
+@router.post("/oneclick/deploy-candidate", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def oneclick_deploy_candidate(request: Request, payload: AIOneClickDeployRequest):
     """One-click orchestration stage 2: deploy a completed research candidate."""
     result = await _execute_oneclick_candidate_deploy(request, payload=payload)
@@ -3536,7 +3537,7 @@ async def get_ai_funding_cache_diagnostics(
     }
 
 
-@router.post("/diagnostics/funding-cache/warm")
+@router.post("/diagnostics/funding-cache/warm", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def warm_ai_funding_cache(request: Request, payload: AIFundingWarmRequest):
     ensure_ai_research_runtime_state(request.app)
     exchange_norm = _normalize_exchange(payload.exchange)
@@ -3565,7 +3566,7 @@ async def warm_ai_funding_cache(request: Request, payload: AIFundingWarmRequest)
     }
 
 
-@router.post("/diagnostics/macro-cache/warm")
+@router.post("/diagnostics/macro-cache/warm", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def warm_ai_macro_cache(request: Request):
     ensure_ai_research_runtime_state(request.app)
     try:
@@ -3600,7 +3601,7 @@ async def warm_ai_macro_cache(request: Request):
         raise HTTPException(status_code=500, detail=f"macro warm failed: {exc}") from exc
 
 
-@router.post("/proposals/{proposal_id}/cancel")
+@router.post("/proposals/{proposal_id}/cancel", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def cancel_ai_proposal_job(request: Request, proposal_id: str):
     ensure_ai_research_runtime_state(request.app)
     result = await cancel_proposal_job(
@@ -3883,7 +3884,7 @@ async def get_candidate_performance_divergence(
     return {"candidate_id": candidate_id, "report": report.to_dict(), "feedback_update": feedback_update}
 
 
-@router.post("/candidates/{candidate_id}/autonomy-handoff")
+@router.post("/candidates/{candidate_id}/autonomy-handoff", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def handoff_candidate_to_autonomy(request: Request, candidate_id: str):
     ensure_ai_research_runtime_state(request.app)
     candidate = get_candidate(request.app, candidate_id)
@@ -3960,7 +3961,7 @@ async def handoff_candidate_to_autonomy(request: Request, candidate_id: str):
     }
 
 
-@router.delete("/candidates/{candidate_id}")
+@router.delete("/candidates/{candidate_id}", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def delete_ai_candidate_endpoint(request: Request, candidate_id: str):
     ensure_ai_research_runtime_state(request.app)
     result = delete_orphan_candidate(
@@ -3971,7 +3972,7 @@ async def delete_ai_candidate_endpoint(request: Request, candidate_id: str):
     return result
 
 
-@router.post("/candidates/{candidate_id}/exit")
+@router.post("/candidates/{candidate_id}/exit", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def exit_ai_candidate_endpoint(request: Request, candidate_id: str, payload: AIRetireRequest = AIRetireRequest()):
     ensure_ai_research_runtime_state(request.app)
     candidate = get_candidate(request.app, candidate_id)
@@ -4121,7 +4122,7 @@ async def get_candidate_param_sensitivity(
     }
 
 
-@router.post("/candidates/{candidate_id}/promote")
+@router.post("/candidates/{candidate_id}/promote", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def promote_ai_candidate(request: Request, candidate_id: str, payload: AICandidatePromotionRequest):
     ensure_ai_research_runtime_state(request.app)
     result = await promote_existing_candidate(request.app, candidate_id=candidate_id, actor="web_ui", target=payload.target)
@@ -4135,7 +4136,7 @@ async def promote_ai_candidate(request: Request, candidate_id: str, payload: AIC
     }
 
 
-@router.post("/candidates/{candidate_id}/register")
+@router.post("/candidates/{candidate_id}/register", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def register_ai_candidate(request: Request, candidate_id: str, payload: AICandidateRegisterRequest):
     """One-click: promote + register a validated candidate as a live strategy instance."""
     ensure_ai_research_runtime_state(request.app)
@@ -4177,7 +4178,7 @@ async def register_ai_candidate(request: Request, candidate_id: str, payload: AI
     }
 
 
-@router.post("/candidates/{candidate_id}/human-approve")
+@router.post("/candidates/{candidate_id}/human-approve", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def human_approve_candidate(request: Request, candidate_id: str, payload: AIHumanApprovalRequest):
     """Human approval: bypass the governance gate and promote the candidate."""
     from core.deployment.promotion_engine import promote_candidate
@@ -4247,7 +4248,7 @@ async def human_approve_candidate(request: Request, candidate_id: str, payload: 
     }
 
 
-@router.post("/candidates/{candidate_id}/human-reject")
+@router.post("/candidates/{candidate_id}/human-reject", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def human_reject_candidate(request: Request, candidate_id: str, payload: AIHumanApprovalRequest):
     """Human rejection: clear the governance gate and mark candidate as retired."""
     from core.research.experiment_schemas import PromotionDecision as _PD
@@ -4297,7 +4298,7 @@ async def human_reject_candidate(request: Request, candidate_id: str, payload: A
     }
 
 
-@router.post("/candidates/{candidate_id}/activate-live")
+@router.post("/candidates/{candidate_id}/activate-live", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def activate_ai_candidate_live(
     request: Request,
     candidate_id: str,
@@ -4514,7 +4515,7 @@ async def get_ai_deployments_status(request: Request):
     return get_deployment_status(request.app)
 
 
-@router.post("/research/generate-context")
+@router.post("/research/generate-context", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def generate_research_context_endpoint(request: Request, payload: AIResearchContextRequest):
     """Call the configured OpenAI-compatible model to generate a research hypothesis and experiment plan."""
     from core.ai.research_context_generator import generate_research_context
@@ -4709,7 +4710,7 @@ async def _record_performance_snapshot_outcome_feedback(
     }
 
 
-@router.post("/performance/snapshots")
+@router.post("/performance/snapshots", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def save_performance_snapshot(request: Request, body: PerformanceSnapshotRequest):
     """Persist a strategy performance snapshot to the DB."""
 
@@ -4834,7 +4835,7 @@ class AIQuickRegisterRequest(BaseModel):
     allocation_pct: float = Field(default=0.05, ge=0.001, le=1.0)
 
 
-@router.post("/candidates/{candidate_id}/quick-register")
+@router.post("/candidates/{candidate_id}/quick-register", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def quick_register_candidate(
     request: Request,
     candidate_id: str,
@@ -4942,7 +4943,7 @@ async def quick_register_candidate(
 
 # ── Phase D — Order Preview (read-only, no order placed) ──────────────────────
 
-@router.post("/candidates/{candidate_id}/order-preview")
+@router.post("/candidates/{candidate_id}/order-preview", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def generate_order_preview(request: Request, candidate_id: str):
     """Generate a suggested order preview from SignalAggregator. Does NOT place any order.
 

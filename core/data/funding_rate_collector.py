@@ -1,8 +1,8 @@
 """
-璧勯噾璐圭巼閲囬泦鍣?
+Funding rate collector.
 
-鏀寔浠?Binance, Bybit, OKX, Gate 鍥涘ぇ浜ゆ槗鎵€閲囬泦璧勯噾璐圭巼鏁版嵁銆?
-瀹屽叏鍏嶈垂锛屾棤闇€ API Key銆?
+Collects funding rate data from Binance, Bybit, OKX, and Gate.
+All endpoints used here are public and do not require API keys.
 """
 import asyncio
 import aiohttp
@@ -15,38 +15,38 @@ from core.data.funding_rate_models import FundingRate, normalize_symbol
 
 class FundingRateCollector:
     """
-    璧勯噾璐圭巼閲囬泦鍣?
-    
-    鏀寔浠庡涓氦鏄撴墍骞惰閲囬泦璧勯噾璐圭巼鏁版嵁銆?
+    Funding rate collector.
+
+    Supports parallel collection from multiple exchanges.
     
     Example:
         collector = FundingRateCollector()
         
-        # 鑾峰彇鍗曚釜浜ゆ槗鎵€
+        # Fetch a single exchange.
         rate = await collector.fetch_binance("BTCUSDT")
-        
-        # 鑾峰彇鎵€鏈変氦鏄撴墍
+
+        # Fetch all exchanges.
         rates = await collector.fetch_all("BTCUSDT")
-        
-        # 鍚姩瀹氭椂閲囬泦
+
+        # Start scheduled collection.
         await collector.start_collection(["BTCUSDT", "ETHUSDT"], interval=60)
     """
-    
-    # API 绔偣
+
+    # API endpoints
     BINANCE_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
     BYBIT_URL = "https://api.bybit.com/v5/market/funding/history"
     OKX_URL = "https://www.okx.com/api/v5/public/funding-rate"
     GATE_URL = "https://api.gateio.ws/api/v4/futures/usdt/funding_rate"
     
-    # 棰勬祴璐圭巼绔偣
+    # Predicted funding rate endpoint
     BINANCE_PREMIUM_INDEX_URL = "https://fapi.binance.com/fapi/v1/premiumIndex"
     
     def __init__(self, timeout: int = 10):
         """
-        鍒濆鍖栭噰闆嗗櫒
-        
+        Initialize the collector.
+
         Args:
-            timeout: HTTP 璇锋眰瓒呮椂鏃堕棿 (绉?
+            timeout: HTTP request timeout in seconds.
         """
         self._timeout = aiohttp.ClientTimeout(total=timeout)
         self._session: Optional[aiohttp.ClientSession] = None
@@ -54,13 +54,13 @@ class FundingRateCollector:
         self._collected_data: Dict[str, List[FundingRate]] = {}
         
     async def _get_session(self) -> aiohttp.ClientSession:
-        """鑾峰彇鎴栧垱寤?HTTP session"""
+        """Return an existing HTTP session or create a new one."""
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(timeout=self._timeout, trust_env=True)
         return self._session
     
     async def close(self):
-        """鍏抽棴 session"""
+        """Close the HTTP session."""
         if self._session and not self._session.closed:
             await self._session.close()
             
@@ -78,14 +78,14 @@ class FundingRateCollector:
         limit: int = 1
     ) -> Optional[FundingRate]:
         """
-        浠?Binance 鑾峰彇璧勯噾璐圭巼
-        
+        Fetch the latest funding rate from Binance.
+
         Args:
-            symbol: 浜ゆ槗瀵?(濡?BTCUSDT)
-            limit: 杩斿洖璁板綍鏁?
-            
+            symbol: Trading pair, for example BTCUSDT.
+            limit: Number of records to request.
+
         Returns:
-            FundingRate 鎴?None
+            A FundingRate record, or None when no data is available.
         """
         session = await self._get_session()
         symbol = normalize_symbol(symbol, "binance")
@@ -102,7 +102,7 @@ class FundingRateCollector:
                 if not data:
                     return None
                     
-                # 鍙栨渶鏂颁竴鏉?
+                # Use the latest row.
                 latest = data[-1] if isinstance(data, list) else data
                 
                 return FundingRate(
@@ -126,14 +126,14 @@ class FundingRateCollector:
         limit: int = 100
     ) -> List[FundingRate]:
         """
-        浠?Binance 鑾峰彇鍘嗗彶璧勯噾璐圭巼
-        
+        Fetch historical funding rates from Binance.
+
         Args:
-            symbol: 浜ゆ槗瀵?
-            limit: 杩斿洖璁板綍鏁?(鏈€澶?1000)
-            
+            symbol: Trading pair.
+            limit: Number of records to request, capped by Binance at 1000.
+
         Returns:
-            FundingRate 鍒楄〃
+            List of FundingRate records.
         """
         session = await self._get_session()
         symbol = normalize_symbol(symbol, "binance")
@@ -167,10 +167,10 @@ class FundingRateCollector:
         symbol: str
     ) -> Optional[Dict]:
         """
-        浠?Binance 鑾峰彇棰勬祴璧勯噾璐圭巼
-        
+        Fetch Binance premium index data used as predicted funding context.
+
         Returns:
-            鍖呭惈 mark_price, index_price, estimated_settle_price 鐨勫瓧鍏?
+            Dict with mark price, index price, and estimated settle price.
         """
         session = await self._get_session()
         symbol = normalize_symbol(symbol, "binance")
@@ -208,14 +208,14 @@ class FundingRateCollector:
         limit: int = 1
     ) -> Optional[FundingRate]:
         """
-        浠?Bybit 鑾峰彇璧勯噾璐圭巼
-        
+        Fetch the latest funding rate from Bybit.
+
         Args:
-            symbol: 浜ゆ槗瀵?(濡?BTCUSDT)
-            limit: 杩斿洖璁板綍鏁?
-            
+            symbol: Trading pair, for example BTCUSDT.
+            limit: Number of records to request.
+
         Returns:
-            FundingRate 鎴?None
+            A FundingRate record, or None when no data is available.
         """
         session = await self._get_session()
         symbol = normalize_symbol(symbol, "bybit")
@@ -233,7 +233,7 @@ class FundingRateCollector:
                     
                 data = await resp.json()
                 
-                # 妫€鏌ュ搷搴?
+                # Validate response payload.
                 if data.get("retCode") != 0:
                     logger.warning(f"Bybit API error: {data.get('retMsg')}")
                     return None
@@ -265,14 +265,14 @@ class FundingRateCollector:
         limit: int = 200
     ) -> List[FundingRate]:
         """
-        浠?Bybit 鑾峰彇鍘嗗彶璧勯噾璐圭巼
-        
+        Fetch historical funding rates from Bybit.
+
         Args:
-            symbol: 浜ゆ槗瀵?
-            limit: 杩斿洖璁板綍鏁?(鏈€澶?200)
-            
+            symbol: Trading pair.
+            limit: Number of records to request, capped by Bybit at 200.
+
         Returns:
-            FundingRate 鍒楄〃
+            List of FundingRate records.
         """
         session = await self._get_session()
         symbol = normalize_symbol(symbol, "bybit")
@@ -317,13 +317,13 @@ class FundingRateCollector:
         symbol: str
     ) -> Optional[FundingRate]:
         """
-        浠?OKX 鑾峰彇璧勯噾璐圭巼
-        
+        Fetch the latest funding rate from OKX.
+
         Args:
-            symbol: 浜ゆ槗瀵?(濡?BTCUSDT 鎴?BTC-USDT-SWAP)
-            
+            symbol: Trading pair, for example BTCUSDT or BTC-USDT-SWAP.
+
         Returns:
-            FundingRate 鎴?None
+            A FundingRate record, or None when no data is available.
         """
         session = await self._get_session()
         symbol = normalize_symbol(symbol, "okx")
@@ -337,7 +337,7 @@ class FundingRateCollector:
                     
                 data = await resp.json()
                 
-                # 妫€鏌ュ搷搴?
+                # Validate response payload.
                 if data.get("code") != "0":
                     logger.warning(f"OKX API error: {data.get('msg')}")
                     return None
@@ -372,13 +372,13 @@ class FundingRateCollector:
         symbol: str
     ) -> Optional[FundingRate]:
         """
-        浠?Gate 鑾峰彇璧勯噾璐圭巼
-        
+        Fetch the latest funding rate from Gate.
+
         Args:
-            symbol: 浜ゆ槗瀵?(濡?BTCUSDT 鎴?BTC_USDT)
-            
+            symbol: Trading pair, for example BTCUSDT or BTC_USDT.
+
         Returns:
-            FundingRate 鎴?None
+            A FundingRate record, or None when no data is available.
         """
         session = await self._get_session()
         symbol = normalize_symbol(symbol, "gate")
@@ -426,18 +426,18 @@ class FundingRateCollector:
             logger.error(f"Gate funding rate parse error: {e}")
             return None
 
-    # ==================== 缁煎悎鏂规硶 ====================
+    # ==================== Aggregation methods ====================
     
     async def fetch_all(
         self,
         symbol: str
     ) -> Dict[str, FundingRate]:
         """
-        浠庢墍鏈変氦鏄撴墍骞惰鑾峰彇璧勯噾璐圭巼
-        
+        Fetch funding rates from all supported exchanges in parallel.
+
         Args:
-            symbol: 浜ゆ槗瀵?(鑷姩杞崲鏍煎紡)
-            
+            symbol: Trading pair. Exchange-specific formats are normalized internally.
+
         Returns:
             Dict[exchange_name, FundingRate]
         """
@@ -464,12 +464,12 @@ class FundingRateCollector:
         symbol: str
     ) -> Dict:
         """
-        鑾峰彇鎵€鏈変氦鏄撴墍鐨勮祫閲戣垂鐜囷紝鍖呮嫭棰勬祴璐圭巼
-        
+        Fetch funding rates from all exchanges, including predicted funding context.
+
         Returns:
             {
                 "rates": Dict[str, FundingRate],
-                "predicted": Dict (浠?Binance)
+                "predicted": Dict from Binance premium index
             }
         """
         rates = await self.fetch_all(symbol)
@@ -488,12 +488,12 @@ class FundingRateCollector:
         limit: int = 100
     ) -> Dict[str, List[FundingRate]]:
         """
-        浠庢墍鏈夋敮鎸佸巻鍙叉煡璇㈢殑浜ゆ槗鎵€鑾峰彇鍘嗗彶璧勯噾璐圭巼
-        
+        Fetch historical funding rates from all exchanges that support history.
+
         Args:
-            symbol: 浜ゆ槗瀵?
-            limit: 姣忎釜浜ゆ槗鎵€杩斿洖鐨勮褰曟暟
-            
+            symbol: Trading pair.
+            limit: Number of records requested from each exchange.
+
         Returns:
             Dict[exchange_name, List[FundingRate]]
         """
@@ -513,7 +513,7 @@ class FundingRateCollector:
                 
         return output
         
-    # ==================== 瀹氭椂閲囬泦 ====================
+    # ==================== Scheduled collection ====================
     
     async def start_collection(
         self,
@@ -522,12 +522,12 @@ class FundingRateCollector:
         callback: Optional[callable] = None
     ):
         """
-        鍚姩瀹氭椂閲囬泦
-        
+        Start scheduled collection.
+
         Args:
-            symbols: 瑕佺洃鎺х殑浜ゆ槗瀵瑰垪琛?
-            interval: 閲囬泦闂撮殧 (绉?
-            callback: 鏁版嵁鍥炶皟鍑芥暟 async callback(symbol, rates)
+            symbols: Trading pairs to monitor.
+            interval: Collection interval in seconds.
+            callback: Optional async callback with signature callback(symbol, rates).
         """
         self._running = True
         logger.info(f"Starting funding rate collection for {symbols} every {interval}s")
@@ -537,14 +537,14 @@ class FundingRateCollector:
                 for symbol in symbols:
                     rates = await self.fetch_all(symbol)
                     
-                    # 瀛樺偍鏁版嵁
+                    # Store data.
                     if symbol not in self._collected_data:
                         self._collected_data[symbol] = []
                     
                     for exchange, rate in rates.items():
                         self._collected_data[symbol].append(rate)
                     
-                    # 瑙﹀彂鍥炶皟
+                    # Trigger callback.
                     if callback:
                         try:
                             await callback(symbol, rates)
@@ -558,16 +558,16 @@ class FundingRateCollector:
                 await asyncio.sleep(5)
                 
     def stop_collection(self):
-        """鍋滄瀹氭椂閲囬泦"""
+        """Stop scheduled collection."""
         self._running = False
         logger.info("Funding rate collection stopped")
         
     def get_collected_data(self, symbol: str) -> List[FundingRate]:
-        """鑾峰彇宸查噰闆嗙殑鏁版嵁"""
+        """Return collected data for a symbol."""
         return self._collected_data.get(symbol, [])
         
     def clear_collected_data(self, symbol: Optional[str] = None):
-        """娓呴櫎宸查噰闆嗙殑鏁版嵁"""
+        """Clear collected data."""
         if symbol:
             self._collected_data[symbol] = []
         else:
@@ -575,20 +575,20 @@ class FundingRateCollector:
             
     @property
     def is_running(self) -> bool:
-        """鏄惁姝ｅ湪杩愯"""
+        """Whether scheduled collection is running."""
         return self._running
 
 
-# 鍏ㄥ眬瀹炰緥
+# Global instance.
 funding_rate_collector = FundingRateCollector()
 
 
-# ==================== 蹇€熸祴璇?====================
+# ==================== Quick test ====================
 
 async def _test_collector():
     """Quick manual test."""
     async with FundingRateCollector() as collector:
-        # 娴嬭瘯鍗曚釜浜ゆ槗鎵€
+        # Test individual exchanges.
         print("=" * 50)
         print("Testing individual exchanges...")
         
@@ -604,7 +604,7 @@ async def _test_collector():
         gate_rate = await collector.fetch_gate("BTCUSDT")
         print(f"Gate: {gate_rate.funding_rate_pct:.4f}%")
         
-        # 娴嬭瘯骞惰鑾峰彇
+        # Test parallel fetch.
         print("\n" + "=" * 50)
         print("Testing parallel fetch...")
         
@@ -612,7 +612,7 @@ async def _test_collector():
         for exchange, rate in all_rates.items():
             print(f"{exchange}: {rate.funding_rate_pct:.4f}%")
             
-        # 娴嬭瘯棰勬祴璐圭巼
+        # Test predicted funding rate.
         print("\n" + "=" * 50)
         print("Testing predicted rate...")
         

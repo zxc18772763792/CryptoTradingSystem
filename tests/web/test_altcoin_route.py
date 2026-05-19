@@ -11,6 +11,10 @@ from fastapi.testclient import TestClient
 from web.api import altcoin as altcoin_api
 
 
+def _ops_headers() -> dict[str, str]:
+    return {"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"}
+
+
 def _scan_payload():
     rows = [
         {
@@ -290,8 +294,12 @@ def test_altcoin_radar_research_proposal_endpoint(monkeypatch):
 
     monkeypatch.setattr(altcoin_api, "get_altcoin_radar_detail", fake_get_altcoin_radar_detail)
     monkeypatch.setattr(orchestrator_module, "create_manual_proposal", fake_create_manual_proposal)
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
 
-    response = client.post("/api/altcoin/radar/AAAUSDT/research-proposal?timeframe=1h")
+    response = client.post(
+        "/api/altcoin/radar/AAAUSDT/research-proposal?timeframe=1h",
+        headers=_ops_headers(),
+    )
 
     assert response.status_code == 200
     payload = response.json()
@@ -1375,15 +1383,16 @@ def test_altcoin_radar_watchlist_routes(monkeypatch):
     monkeypatch.setattr(altcoin_api, "get_watchlist_symbols", fake_get_watchlist_symbols)
     monkeypatch.setattr(altcoin_api, "add_watchlist_symbol", fake_add_watchlist_symbol)
     monkeypatch.setattr(altcoin_api, "remove_watchlist_symbol", fake_remove_watchlist_symbol)
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
 
     resp_get = client.get("/api/altcoin/radar/watchlist")
     assert resp_get.status_code == 200
     assert resp_get.json()["symbols"] == ["ORDI/USDT", "PEPE/USDT"]
 
-    resp_add = client.post("/api/altcoin/radar/watchlist", json={"symbol": "WIF/USDT"})
+    resp_add = client.post("/api/altcoin/radar/watchlist", json={"symbol": "WIF/USDT"}, headers=_ops_headers())
     assert resp_add.status_code == 200
     assert "WIF/USDT" in resp_add.json()["symbols"]
 
-    resp_delete = client.delete("/api/altcoin/radar/watchlist?symbol=WIF%2FUSDT")
+    resp_delete = client.delete("/api/altcoin/radar/watchlist?symbol=WIF%2FUSDT", headers=_ops_headers())
     assert resp_delete.status_code == 200
     assert "WIF/USDT" not in resp_delete.json()["symbols"]

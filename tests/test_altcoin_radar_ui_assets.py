@@ -124,3 +124,12 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert ".altcoin-radar-watchlist-list" in style_css
     assert ".altcoin-radar-watchlist-chip.is-active" in style_css
     assert ".altcoin-radar-table-scroll" in style_css
+
+
+def test_news_template_uses_versioned_css_asset():
+    template_source = _read("web/templates/news.html")
+    template = _render_template(template_source)
+
+    assert "{{ static_asset_url('css/style.css') }}" in template_source
+    assert "/static/css/style.css?v=88" not in template_source
+    assert static_asset_url("css/style.css") in template

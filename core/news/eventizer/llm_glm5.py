@@ -133,10 +133,14 @@ def _normalize_openai_model(value: Any) -> str:
 
 
 def _runtime_setting(name: str) -> str:
+    env_value = str(os.getenv(name) or "").strip()
     current = str(getattr(settings, name, "") or "").strip()
-    if current != _INITIAL_RUNTIME_SETTINGS.get(name, ""):
+    initial = _INITIAL_RUNTIME_SETTINGS.get(name, "")
+    if env_value and env_value != initial:
+        return env_value
+    if current != initial:
         return current
-    return str(os.getenv(name) or current or "").strip()
+    return env_value or current
 
 
 def _truthy_text(value: Any, *, default: bool = False) -> bool:
@@ -151,9 +155,6 @@ def _news_llm_override_enabled() -> bool:
         _runtime_setting("NEWS_LLM_API_KEY")
         or _runtime_setting("NEWS_LLM_BASE_URL")
         or _runtime_setting("NEWS_LLM_MODEL")
-        or _runtime_setting("NEWS_LLM_BACKUP_API_KEY")
-        or _runtime_setting("NEWS_LLM_BACKUP_BASE_URL")
-        or _runtime_setting("NEWS_LLM_BACKUP_MODEL")
     )
 
 
@@ -226,10 +227,18 @@ def _llm_provider(cfg: Dict[str, Any]) -> str:
 def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     llm_cfg = cfg.get("llm") or {}
     news_llm_configured = _news_llm_configured(cfg)
+    news_backup_base_urls = _merge_csv_values(_news_llm_backup_base_url(), llm_cfg.get("backup_base_url"))
+    news_backup_config_present = bool(_news_llm_backup_base_url()) or "backup_base_url" in llm_cfg
+    news_backup_api_key = _news_llm_backup_api_key()
+    news_backup_model = _first_non_empty(_news_llm_backup_model(), llm_cfg.get("backup_model"))
     return openai_endpoint_targets(
         primary_base_url=(
             _normalize_openai_base_urls(
-                _first_non_empty(_news_llm_base_url(), llm_cfg.get("base_url"))
+                _first_non_empty(
+                    _news_llm_base_url(),
+                    llm_cfg.get("base_url"),
+                    _runtime_setting("OPENAI_BASE_URL"),
+                )
                 if news_llm_configured
                 else _first_non_empty(
                     _runtime_setting("OPENAI_BASE_URL"),
@@ -239,7 +248,7 @@ def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             or DEFAULT_OPENAI_BASE_URL
         ),
         backup_base_urls=(
-            _merge_csv_values(_news_llm_backup_base_url(), llm_cfg.get("backup_base_url"))
+            (news_backup_base_urls if news_backup_config_present else _runtime_setting("OPENAI_BACKUP_BASE_URL"))
             if news_llm_configured
             else _merge_csv_values(
                 _runtime_setting("OPENAI_BACKUP_BASE_URL"),
@@ -247,10 +256,10 @@ def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             )
         ),
         primary_api_key=_first_non_empty(_news_llm_api_key(), _openai_primary_api_key()),
-        backup_api_key=_news_llm_backup_api_key() if news_llm_configured else _openai_backup_api_key(),
+        backup_api_key=news_backup_api_key if news_llm_configured and news_backup_api_key else _openai_backup_api_key(),
         primary_model=_openai_model(cfg),
         backup_model=(
-            _first_non_empty(_news_llm_backup_model(), llm_cfg.get("backup_model"))
+            news_backup_model or _runtime_setting("OPENAI_BACKUP_MODEL")
             if news_llm_configured
             else str(
                 _first_non_empty(

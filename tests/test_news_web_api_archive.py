@@ -16,6 +16,10 @@ def _build_app() -> FastAPI:
     return app
 
 
+def _ops_headers() -> dict[str, str]:
+    return {"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"}
+
+
 def test_health_returns_runtime_snapshot_while_db_refresh_runs(monkeypatch):
     news_api._NEWS_HEALTH_REFRESH_TASK = None
     news_api._NEWS_RESPONSE_CACHE.setdefault("health", {}).clear()
@@ -289,10 +293,15 @@ def test_ingest_backfill_history_updates_last_pull(monkeypatch):
         }
 
     monkeypatch.setattr(news_api, "backfill_and_store_news_history", fake_backfill)
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
 
     app = _build_app()
     with TestClient(app) as client:
-        response = client.post("/api/news/ingest/backfill_history", json={"hours": 72, "max_records": 180})
+        response = client.post(
+            "/api/news/ingest/backfill_history",
+            json={"hours": 72, "max_records": 180},
+            headers=_ops_headers(),
+        )
 
     assert response.status_code == 200
     payload = response.json()
@@ -336,10 +345,11 @@ def test_start_news_engine_launches_missing_workers(monkeypatch):
     monkeypatch.setattr(news_api, "_scan_external_news_processes", fake_scan)
     monkeypatch.setattr(news_api, "_spawn_detached_news_process", fake_spawn)
     monkeypatch.setattr(news_api, "_news_llm_enabled", lambda: True)
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     news_api._invalidate_news_process_cache()
 
     with TestClient(_build_app()) as client:
-        response = client.post("/api/news/engine/start")
+        response = client.post("/api/news/engine/start", headers=_ops_headers())
 
     assert response.status_code == 200
     payload = response.json()

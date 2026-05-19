@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from web.api import trading as trading_api
+from web.api.auth import require_sensitive_ops_permissions
 
 
 router = APIRouter()
@@ -61,7 +62,7 @@ async def get_market_microstructure_compat(
     return await trading_api.get_market_microstructure(exchange=exchange, symbol=symbol, depth_limit=depth_limit)
 
 
-@router.post("/analytics/behavior/journal")
+@router.post("/analytics/behavior/journal", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def add_behavior_journal(request: trading_api.BehaviorJournalRequest):
     return await trading_api.add_behavior_journal(request)
 
@@ -76,7 +77,10 @@ async def get_stoploss_policy():
     return await trading_api.get_stoploss_policy()
 
 
-@router.post("/analytics/stoploss/policy")
+@router.post(
+    "/analytics/stoploss/policy",
+    dependencies=[Depends(require_sensitive_ops_permissions("approve_risk_change", "manage_strategies"))],
+)
 async def update_stoploss_policy(request: trading_api.StoplossPolicyUpdateRequest):
     return await trading_api.update_stoploss_policy(request)
 
@@ -103,7 +107,7 @@ async def get_community_overview(symbol: str = "BTC/USDT", exchange: str = "bina
     return await trading_api.get_community_overview(symbol=symbol, exchange=exchange)
 
 
-@router.post("/analytics/history/collect")
+@router.post("/analytics/history/collect", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def collect_analytics_history(
     exchange: str = "binance",
     symbol: str = "BTC/USDT",

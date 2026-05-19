@@ -573,7 +573,7 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db(*, force: bool = False):
-    """鍒濆鍖栨暟鎹簱"""
+    """Initialize database tables and lightweight migrations."""
     global _db_initialized
     if _db_initialized and not force:
         return

@@ -310,7 +310,7 @@ class LiveAIDecisionRouter:
             high=1.5,
         )
         enabled = bool(self._get("AI_LIVE_DECISION_ENABLED", False))
-        fail_open = bool(self._get("AI_LIVE_DECISION_FAIL_OPEN", True))
+        fail_open = bool(self._get("AI_LIVE_DECISION_FAIL_OPEN", False))
         apply_in_paper = bool(self._get("AI_LIVE_DECISION_APPLY_IN_PAPER", False))
 
         return {
@@ -638,7 +638,7 @@ class LiveAIDecisionRouter:
         timeout_ms = int(cfg.get("timeout_ms") or 6000)
         max_tokens = int(cfg.get("max_tokens") or 220)
         temperature = float(cfg.get("temperature") or 0.0)
-        fail_open = bool(cfg.get("fail_open", True))
+        fail_open = bool(cfg.get("fail_open", False))
 
         effective_mode = str(trading_mode or "paper").strip().lower()
         if (not enabled) or (effective_mode != "live" and not apply_in_paper):

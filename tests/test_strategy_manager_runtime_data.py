@@ -1,11 +1,12 @@
 import asyncio
 import importlib
+import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pandas as pd
 
-from core.strategies.strategy_base import StrategyBase
+from core.strategies.strategy_base import Signal, SignalType, StrategyBase
 from core.strategies.strategy_manager import StrategyConfig, StrategyManager
 
 
@@ -37,6 +38,18 @@ class _CountingStrategy(StrategyBase):
 
     def get_required_data(self):
         return {"type": "kline", "columns": ["close"], "min_length": 1}
+
+
+def _sample_signal(strategy_name: str = "runtime_signal") -> Signal:
+    return Signal(
+        symbol="BTC/USDT",
+        signal_type=SignalType.BUY,
+        price=100.0,
+        timestamp=datetime.now(timezone.utc),
+        strategy_name=strategy_name,
+        strength=0.8,
+        metadata={"exchange": "binance"},
+    )
 
 
 def test_drop_incomplete_last_bar_for_runtime_data():
@@ -143,6 +156,48 @@ def test_run_strategy_once_timeout_records_error(monkeypatch):
         stats = manager.get_strategy_runtime("runtime_timeout")
         assert stats["error_count"] == 1
         assert "timeout" in stats["last_error"]
+
+    asyncio.run(_run())
+
+
+def test_emit_signals_does_not_wait_for_slow_notification_callback(monkeypatch):
+    async def _run() -> None:
+        manager = StrategyManager()
+        strategy = _CountingStrategy(name="smooth_runtime")
+        strategy.start()
+
+        manager._strategies["smooth_runtime"] = strategy
+        manager._configs["smooth_runtime"] = StrategyConfig(
+            name="smooth_runtime",
+            strategy_class=_CountingStrategy,
+            params={},
+            symbols=["BTC/USDT"],
+            timeframe="1m",
+            exchange="binance",
+        )
+
+        submitted = []
+
+        async def submit_signal(signal):
+            submitted.append(signal)
+            return True
+
+        async def slow_notification(signal):
+            await asyncio.sleep(60)
+
+        strategy_manager_module = importlib.import_module("core.strategies.strategy_manager")
+        monkeypatch.setattr(strategy_manager_module, "_SIGNAL_NOTIFY_CALLBACK_TIMEOUT_SEC", 0.01)
+        manager.register_signal_callback(submit_signal)
+        manager.register_signal_callback(slow_notification)
+
+        signal = _sample_signal(strategy_name="smooth_runtime")
+        start = time.monotonic()
+        await manager._emit_signals("smooth_runtime", [signal])
+        elapsed = time.monotonic() - start
+
+        assert submitted == [signal]
+        assert strategy.get_recent_signals(5) == [signal]
+        assert elapsed < 0.5
 
     asyncio.run(_run())
 

@@ -16,12 +16,13 @@ import httpx
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from loguru import logger
 
 from config.settings import settings
 from config.strategy_registry import get_strategy_defaults, get_strategy_recommended_symbols
+from web.api.auth import require_sensitive_ops_permissions
 from core.data import (
     candidate_symbol_dirs,
     canonical_symbol_dir,
@@ -4340,7 +4341,7 @@ def _should_queue_single_download(
     return not (str(timeframe or "") in {"1h", "4h", "1d"} and span_days <= 30)
 
 
-@router.post("/download")
+@router.post("/download", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def download_historical_data(
     exchange: str,
     symbol: str,
@@ -4387,7 +4388,7 @@ async def download_historical_data(
     }
 
 
-@router.post("/download/batch")
+@router.post("/download/batch", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def download_historical_data_batch(req: BatchDownloadRequest):
     exchange = str(req.exchange or "binance").strip().lower() or "binance"
     timeframe = str(req.timeframe or "1h").strip() or "1h"
@@ -4489,7 +4490,7 @@ async def check_data_integrity(
     }
 
 
-@router.post("/integrity/repair")
+@router.post("/integrity/repair", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def repair_data_integrity(
     exchange: str,
     symbol: str,
@@ -4574,7 +4575,7 @@ async def cross_validate_data(
     return result
 
 
-@router.post("/reconnect")
+@router.post("/reconnect", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def reconnect_exchange(exchange: str):
     connector = exchange_manager.get_exchange(exchange)
     if not connector:
@@ -5167,7 +5168,7 @@ async def get_research_refresh_status():
     return await asyncio.to_thread(_get_research_universe_refresh_status_sync)
 
 
-@router.post("/research/refresh/start")
+@router.post("/research/refresh/start", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def start_research_refresh(
     exchange: str = "binance",
     timeframes: str = "1m,5m,15m,1h",
@@ -6327,7 +6328,7 @@ async def get_download_task(task_id: str):
     return task
 
 
-@router.post("/seconds/backfill/start")
+@router.post("/seconds/backfill/start", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def start_second_level_backfill(
     exchange: str = "binance",
     symbol: str = "BTC/USDT",
@@ -6368,7 +6369,7 @@ async def get_second_level_backfill_task(task_id: str):
     return task
 
 
-@router.post("/seconds/backfill/tasks/{task_id}/stop")
+@router.post("/seconds/backfill/tasks/{task_id}/stop", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def stop_second_level_backfill_task(task_id: str):
     ok = second_level_backfill_manager.stop_task(task_id)
     if not ok:
@@ -6376,7 +6377,7 @@ async def stop_second_level_backfill_task(task_id: str):
     return {"success": True, "task_id": task_id}
 
 
-@router.post("/replay/start")
+@router.post("/replay/start", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def start_replay(req: ReplayStartRequest):
     _prune_replay_sessions()
     df = await _load_symbol_df(
@@ -6480,7 +6481,7 @@ async def replay_next(replay_id: str, steps: int = 1):
     }
 
 
-@router.post("/replay/{replay_id}/seek")
+@router.post("/replay/{replay_id}/seek", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def replay_seek(replay_id: str, timestamp: str):
     session = _get_replay_session(replay_id)
     if not session:
@@ -6496,7 +6497,7 @@ async def replay_seek(replay_id: str, timestamp: str):
     return {"replay_id": replay_id, "cursor": idx, "total": int(len(df))}
 
 
-@router.delete("/replay/{replay_id}")
+@router.delete("/replay/{replay_id}", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def stop_replay(replay_id: str):
     if replay_id in _REPLAY_SESSIONS:
         _REPLAY_SESSIONS.pop(replay_id, None)

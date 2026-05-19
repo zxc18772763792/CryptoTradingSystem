@@ -160,4 +160,7 @@ def test_ai_research_diagnostics_warm_action_covers_macro_and_funding():
     assert "/diagnostics/funding-cache/warm" in diagnostics_js
     assert "/diagnostics/macro-cache/warm" in diagnostics_js
     assert "研究缓存已预热:" in diagnostics_js
-    assert '@router.post("/diagnostics/macro-cache/warm")' in ai_api
+    assert (
+        '@router.post("/diagnostics/macro-cache/warm", '
+        'dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])'
+    ) in ai_api

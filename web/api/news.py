@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from fastapi import APIRouter, Body, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from loguru import logger
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -37,6 +37,7 @@ from core.news.service.worker import DEFAULT_INTERVALS, process_llm_batch
 from core.news.storage import db as news_db
 from core.news.storage.models import parse_any_datetime
 from core.utils.asyncio_compat import LoopBoundAsyncLock
+from web.api.auth import require_sensitive_ops_permissions
 
 
 router = APIRouter()
@@ -2792,7 +2793,7 @@ async def health(request: Request) -> Dict[str, Any]:
     return base_payload
 
 
-@router.post("/pull_now")
+@router.post("/pull_now", dependencies=[Depends(require_sensitive_ops_permissions("manage_news"))])
 async def pull_now(
     request: Request,
     payload: PullNowRequest = Body(default_factory=PullNowRequest),
@@ -2836,7 +2837,7 @@ async def pull_now(
     }
 
 
-@router.post("/ingest/pull_now")
+@router.post("/ingest/pull_now", dependencies=[Depends(require_sensitive_ops_permissions("manage_news"))])
 async def pull_now_alias(
     request: Request,
     payload: PullNowRequest = Body(default_factory=PullNowRequest),
@@ -2945,7 +2946,7 @@ async def worker_status(request: Request) -> Dict[str, Any]:
     return _cache_set("worker_status", cache_key, payload)
 
 
-@router.post("/engine/start")
+@router.post("/engine/start", dependencies=[Depends(require_sensitive_ops_permissions("manage_news"))])
 async def start_news_engine(request: Request) -> Dict[str, Any]:
     payload = await _start_news_engine_processes(request)
     if payload.get("status") == "error":
@@ -2953,7 +2954,7 @@ async def start_news_engine(request: Request) -> Dict[str, Any]:
     return payload
 
 
-@router.post("/worker/run_once")
+@router.post("/worker/run_once", dependencies=[Depends(require_sensitive_ops_permissions("manage_news"))])
 async def worker_run_once(
     request: Request,
     llm_limit: int = Query(default=8, ge=1, le=50),
@@ -3024,7 +3025,7 @@ async def worker_run_once(
     }
 
 
-@router.post("/worker/backfill_recent")
+@router.post("/worker/backfill_recent", dependencies=[Depends(require_sensitive_ops_permissions("manage_news"))])
 async def worker_backfill_recent(
     request: Request,
     payload: BackfillRecentRequest = Body(default_factory=BackfillRecentRequest),
@@ -3087,7 +3088,7 @@ async def worker_backfill_recent(
     }
 
 
-@router.post("/worker/requeue")
+@router.post("/worker/requeue", dependencies=[Depends(require_sensitive_ops_permissions("manage_news"))])
 async def worker_requeue_llm_tasks(
     request: Request,
     payload: RequeueLLMTasksRequest = Body(default_factory=RequeueLLMTasksRequest),
@@ -3117,7 +3118,7 @@ async def worker_requeue_llm_tasks(
     }
 
 
-@router.post("/ingest/backfill_history")
+@router.post("/ingest/backfill_history", dependencies=[Depends(require_sensitive_ops_permissions("manage_news"))])
 async def ingest_backfill_history(
     request: Request,
     payload: BackfillHistoryRequest = Body(default_factory=BackfillHistoryRequest),

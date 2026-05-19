@@ -1818,7 +1818,7 @@ async def get_altcoin_radar_detail(
     return detail
 
 
-@router.post("/radar/{symbol}/research-proposal")
+@router.post("/radar/{symbol}/research-proposal", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def create_research_proposal_from_radar(
     request: Request,
     symbol: str,
@@ -2067,7 +2067,7 @@ async def get_altcoin_radar_watchlist():
     }
 
 
-@router.post("/radar/watchlist")
+@router.post("/radar/watchlist", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def add_altcoin_radar_watchlist_symbol(request: AltcoinWatchlistMutationRequest):
     symbol = str(request.symbol or "").strip().upper()
     if not symbol:
@@ -2083,7 +2083,7 @@ async def add_altcoin_radar_watchlist_symbol(request: AltcoinWatchlistMutationRe
     }
 
 
-@router.delete("/radar/watchlist")
+@router.delete("/radar/watchlist", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def remove_altcoin_radar_watchlist_symbol(symbol: str):
     normalized_symbol = str(symbol or "").strip().upper()
     if not normalized_symbol:
