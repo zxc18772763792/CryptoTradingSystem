@@ -77,8 +77,8 @@ class StrategyManager:
         self._stats: Dict[str, StrategyRuntimeStats] = {}
         self._running_since: Dict[str, datetime] = {}
         self._runtime_deadlines: Dict[str, datetime] = {}
-        # symbol -> most recent Signal, used for conflict detection
-        self._recent_signal_by_symbol: Dict[str, Signal] = {}
+        # (symbol, exchange) -> most recent Signal, used for conflict detection
+        self._recent_signal_by_symbol: Dict[Tuple[str, str], Signal] = {}
         # Shared market data cache: (exchange, symbol, timeframe, limit) -> (df, timestamp)
         # TTL is dynamic per timeframe to keep sub-minute strategies responsive while
         # still avoiding redundant loads when multiple strategies share the same feed.
@@ -655,8 +655,22 @@ class StrategyManager:
             stats.last_signal_at = datetime.now(timezone.utc)
 
         for signal in signals:
+            meta = dict(signal.metadata or {})
+            meta.setdefault("account_id", account_id)
+            meta.setdefault("exchange", default_exchange)
+            meta.setdefault("source", "strategy")
+            meta.setdefault("is_strategy_isolated", True)
+            meta.setdefault("runtime_mode", runtime_mode)
+            if config:
+                meta.setdefault("timeframe", str(config.timeframe or ""))
+            signal.metadata = meta
+
+            conflict_key = (
+                str(signal.symbol or "").strip().upper(),
+                str(meta.get("exchange") or default_exchange).strip().lower(),
+            )
             # Conflict detection: drop weaker conflicting signals within the window
-            prior = self._recent_signal_by_symbol.get(signal.symbol)
+            prior = self._recent_signal_by_symbol.get(conflict_key)
             if prior is not None:
                 try:
                     age = (signal.timestamp - prior.timestamp).total_seconds()
@@ -691,18 +705,9 @@ class StrategyManager:
                                 f"(strength={prior.strength:.2f}) with stronger {new_side} "
                                 f"(strength={signal.strength:.2f})"
                             )
-            self._recent_signal_by_symbol[signal.symbol] = signal
+            self._recent_signal_by_symbol[conflict_key] = signal
 
             execution_signal_dispatched = False
-            meta = dict(signal.metadata or {})
-            meta.setdefault("account_id", account_id)
-            meta.setdefault("exchange", default_exchange)
-            meta.setdefault("source", "strategy")
-            meta.setdefault("is_strategy_isolated", True)
-            meta.setdefault("runtime_mode", runtime_mode)
-            if config:
-                meta.setdefault("timeframe", str(config.timeframe or ""))
-            signal.metadata = meta
             strategy.add_signal_to_history(signal)
             for callback in self._signal_callbacks:
                 try:

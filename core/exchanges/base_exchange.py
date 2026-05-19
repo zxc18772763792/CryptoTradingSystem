@@ -220,6 +220,16 @@ class BaseExchange(ABC):
         """是否已连接"""
         return self._connected
 
+    async def _ensure_client(self) -> Any:
+        client = self._client
+        if client is not None and self._connected:
+            return client
+        await self.connect()
+        client = self._client
+        if client is None or not self._connected:
+            raise RuntimeError(f"[{self.name}] client unavailable")
+        return client
+
     async def health_check(self) -> bool:
         """健康检查"""
         try:
@@ -229,7 +239,37 @@ class BaseExchange(ABC):
             logger.error(f"Health check failed for {self.name}: {e}")
             return False
 
+    @staticmethod
+    def _is_transient_connection_error(error: Exception) -> bool:
+        transient_names = {
+            "NetworkError",
+            "RequestTimeout",
+            "ExchangeNotAvailable",
+            "DDoSProtection",
+            "RateLimitExceeded",
+        }
+        if isinstance(error, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
+            return True
+        for cls in type(error).mro():
+            if cls.__name__ in transient_names:
+                return True
+        message = str(error or "").lower()
+        return any(
+            token in message
+            for token in (
+                "timeout",
+                "timed out",
+                "connection",
+                "network",
+                "temporarily unavailable",
+                "exchange not available",
+                "server disconnected",
+            )
+        )
+
     def _handle_error(self, error: Exception, operation: str) -> None:
         """统一错误处理"""
+        if self._is_transient_connection_error(error):
+            self._connected = False
         logger.error(f"[{self.name}] {operation} failed: {error}")
         raise error

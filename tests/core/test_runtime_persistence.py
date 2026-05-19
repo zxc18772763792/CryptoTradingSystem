@@ -55,6 +55,7 @@ def test_position_manager_restores_positions_from_persisted_scope(tmp_path, monk
         account_id="main",
     )
     manager.update_position_price("binance", "BTC/USDT", 105.0, account_id="main", strategy="alpha_strategy")
+    manager.flush()  # price updates are throttled; force-persist before restoring
 
     restored = position_module.PositionManager()
     position = restored.get_position("binance", "BTC/USDT", account_id="main", strategy="alpha_strategy")

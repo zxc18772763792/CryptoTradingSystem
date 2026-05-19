@@ -149,7 +149,10 @@ class BacktestEngine:
             current_data = data.iloc[: i + 1]
             row = current_data.iloc[-1]
             current_price = float(pd.to_numeric(row.get("close"), errors="coerce"))
-            current_time = pd.Timestamp(current_data.index[-1]).to_pydatetime()
+            _ct = pd.Timestamp(current_data.index[-1])
+            if _ct.tzinfo is None:
+                _ct = _ct.tz_localize("UTC")
+            current_time = _ct.to_pydatetime()
             if not np.isfinite(current_price) or current_price <= 0:
                 self._equity_curve.append(self._equity)
                 continue

@@ -6,11 +6,13 @@ import asyncio
 import importlib
 from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from config.exchanges import ExchangeConfig, ExchangeType
 from core.exchanges.base_exchange import (
+    BaseExchange,
     Balance,
     Kline,
     Order,
@@ -164,6 +166,52 @@ class TestBinanceConnector:
         assert calls["count"] == 1
         assert ticker.last == 50000.0
         assert ticker.exchange == "binance"
+
+    def test_transient_error_marks_exchange_disconnected(self):
+        class DummyExchange(BaseExchange):
+            async def connect(self):
+                return True
+
+            async def disconnect(self):
+                return None
+
+            async def get_ticker(self, symbol):
+                raise NotImplementedError
+
+            async def get_klines(self, symbol, timeframe, since=None, limit=None):
+                raise NotImplementedError
+
+            async def get_order_book(self, symbol, limit=20):
+                raise NotImplementedError
+
+            async def get_balance(self):
+                raise NotImplementedError
+
+            async def create_order(self, symbol, side, order_type, amount, price=None, params=None):
+                raise NotImplementedError
+
+            async def cancel_order(self, order_id, symbol):
+                raise NotImplementedError
+
+            async def get_order(self, order_id, symbol):
+                raise NotImplementedError
+
+            async def get_open_orders(self, symbol=None):
+                raise NotImplementedError
+
+            async def get_positions(self):
+                raise NotImplementedError
+
+            async def get_trades(self, symbol, since=None, limit=None):
+                raise NotImplementedError
+
+        exchange = DummyExchange(ExchangeConfig(name="dummy", exchange_type=ExchangeType.CEX))
+        exchange._connected = True
+
+        with pytest.raises(TimeoutError):
+            exchange._handle_error(TimeoutError("request timed out"), "fetch_ticker")
+
+        assert exchange.is_connected is False
 
     def test_get_klines_uses_existing_futures_market_before_1000_alias(self):
         config = ExchangeConfig(
@@ -350,6 +398,25 @@ class TestExchangeManager:
 
             assert connector is None
             assert cleanup["disconnect_calls"] == 1
+
+        asyncio.run(_run())
+
+    def test_ensure_exchange_reconnects_disconnected_connector(self, monkeypatch):
+        async def _run():
+            manager = exchange_manager_module.ExchangeManager()
+            connector = SimpleNamespace(
+                is_connected=False,
+                connect=AsyncMock(return_value=True),
+            )
+            manager._exchanges["binance"] = connector
+
+            reconnect = AsyncMock(return_value=True)
+            monkeypatch.setattr(manager, "reconnect_exchange", reconnect)
+
+            resolved = await manager.ensure_exchange("binance")
+
+            assert resolved is connector
+            reconnect.assert_awaited_once_with("binance", account_id=None, timeout_sec=20.0)
 
         asyncio.run(_run())
 

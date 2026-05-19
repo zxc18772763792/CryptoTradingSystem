@@ -6,7 +6,7 @@
 """
 import asyncio
 import aiohttp
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from loguru import logger
 
@@ -110,7 +110,7 @@ class FundingRateCollector:
                     symbol=symbol,
                     funding_rate=float(latest["fundingRate"]),
                     funding_time=datetime.fromtimestamp(latest["fundingTime"] / 1000),
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(timezone.utc),
                 )
                 
         except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError) as e:
@@ -153,7 +153,7 @@ class FundingRateCollector:
                         symbol=symbol,
                         funding_rate=float(item["fundingRate"]),
                         funding_time=datetime.fromtimestamp(item["fundingTime"] / 1000),
-                        timestamp=datetime.now(),
+                        timestamp=datetime.now(timezone.utc),
                     ))
                     
                 return rates
@@ -193,7 +193,7 @@ class FundingRateCollector:
                     "estimated_settle_price": float(data.get("estimatedSettlePrice", 0)),
                     "last_funding_rate": float(data.get("lastFundingRate", 0)),
                     "next_funding_time": datetime.fromtimestamp(data.get("nextFundingTime", 0) / 1000),
-                    "timestamp": datetime.now(),
+                    "timestamp": datetime.now(timezone.utc),
                 }
                 
         except Exception as e:
@@ -249,7 +249,7 @@ class FundingRateCollector:
                     symbol=symbol,
                     funding_rate=float(latest["fundingRate"]),
                     funding_time=datetime.fromtimestamp(int(latest["fundingRateTimestamp"]) / 1000),
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(timezone.utc),
                 )
                 
         except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError) as e:
@@ -301,7 +301,7 @@ class FundingRateCollector:
                         symbol=symbol,
                         funding_rate=float(item["fundingRate"]),
                         funding_time=datetime.fromtimestamp(int(item["fundingRateTimestamp"]) / 1000),
-                        timestamp=datetime.now(),
+                        timestamp=datetime.now(timezone.utc),
                     ))
                     
                 return rates
@@ -353,7 +353,7 @@ class FundingRateCollector:
                     symbol=symbol,
                     funding_rate=float(latest["fundingRate"]),
                     funding_time=datetime.fromtimestamp(int(latest["fundingTime"]) / 1000),
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(timezone.utc),
                     mark_price=float(latest.get("markPx", 0)) or None,
                     index_price=float(latest.get("idxPx", 0)) or None,
                 )
@@ -415,7 +415,7 @@ class FundingRateCollector:
                     symbol=symbol,
                     funding_rate=float(funding_rate),
                     funding_time=datetime.fromtimestamp(funding_ts),
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(timezone.utc),
                     estimated_rate=float(latest.get("funding_rate_indicative", funding_rate or 0)) or None,
                 )
                 
@@ -479,7 +479,7 @@ class FundingRateCollector:
             "rates": rates,
             "predicted": predicted,
             "symbol": symbol,
-            "timestamp": datetime.now(),
+            "timestamp": datetime.now(timezone.utc),
         }
         
     async def fetch_history_all(

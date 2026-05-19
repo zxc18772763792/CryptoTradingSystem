@@ -277,7 +277,11 @@ class ExchangeManager:
             connector = self.get_exchange(name)
         if connector is not None and bool(getattr(connector, "is_connected", True)):
             return connector
-        ok = await self.initialize([name], account_id=account_id)
+
+        if connector is not None:
+            ok = await self.reconnect_exchange(name, account_id=account_id, timeout_sec=20.0)
+        else:
+            ok = await self.initialize([name], account_id=account_id)
         if not ok:
             return None
         try:

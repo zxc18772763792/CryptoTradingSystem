@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import inspect
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -22,7 +23,18 @@ _BINANCE_TIME_OFFSET_MS: Dict[str, Any] = {"api": 0, "fapi": 0, "ts": 0.0}
 def _apply_httpx_proxy_kw(client_kwargs: Dict[str, Any], proxy_url: Optional[str]) -> None:
     if not proxy_url:
         return
-    client_kwargs["proxy"] = proxy_url
+    try:
+        params = inspect.signature(httpx.AsyncClient.__init__).parameters
+    except (TypeError, ValueError):
+        client_kwargs["proxy"] = proxy_url
+        return
+
+    if "proxy" in params:
+        client_kwargs["proxy"] = proxy_url
+    elif "proxies" in params:
+        client_kwargs["proxies"] = proxy_url
+    else:
+        client_kwargs.setdefault("trust_env", True)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

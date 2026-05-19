@@ -13,7 +13,7 @@ from core.ml import pipeline
 
 
 def _sample_ohlcv(rows: int = 160) -> pd.DataFrame:
-    index = pd.date_range("2026-01-01", periods=rows, freq="H")
+    index = pd.date_range("2026-01-01", periods=rows, freq="h")
     base = np.linspace(100.0, 130.0, rows)
     return pd.DataFrame(
         {

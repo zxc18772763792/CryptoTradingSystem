@@ -391,8 +391,8 @@ def _extract_json_obj(text: str) -> Dict[str, Any]:
         data = json.loads(raw)
         if isinstance(data, dict):
             return data
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"autonomous_agent: direct JSON parse failed, trying brace slice: {exc}")
     left = raw.find("{")
     right = raw.rfind("}")
     if left >= 0 and right > left:
@@ -2540,8 +2540,8 @@ class AutonomousTradingAgent:
                 value = float(pd.to_numeric(market_data["close"], errors="coerce").dropna().iloc[-1])
                 if value > 0:
                     return value
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"autonomous_agent: close-price extraction failed, falling back to connector: {exc}")
         exchange = str(cfg.get("exchange") or "binance")
         symbol = str(cfg.get("symbol") or "BTC/USDT")
         connector = exchange_manager.get_exchange(exchange)
@@ -5364,8 +5364,8 @@ class AutonomousTradingAgent:
                     observed_decision=action,
                     mode=str(cfg.get("mode") or "autonomous_agent"),
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"autonomous_agent: gate counterfactual recording failed (best-effort): {exc}")
 
         return {
             "outcome": "submitted" if bool(execution.get("submitted")) else ("hold" if action == "hold" else "blocked"),

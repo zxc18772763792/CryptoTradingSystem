@@ -3,7 +3,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -38,8 +38,8 @@ class Position:
     leverage: float = 1.0
     margin: float = 0.0
     liquidation_price: Optional[float] = None
-    opened_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
+    opened_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     strategy: Optional[str] = None
     account_id: str = "main"
     stop_loss: Optional[float] = None
@@ -54,7 +54,7 @@ class Position:
     def update_price(self, current_price: float) -> None:
         """更新价格与浮动盈亏。"""
         self.current_price = float(current_price)
-        self.updated_at = datetime.now()
+        self.updated_at = datetime.now(timezone.utc)
 
         if self.entry_price <= 0:
             self.unrealized_pnl = 0.0
@@ -132,7 +132,12 @@ class PositionManager:
         self._persist_throttle_seconds = 2.0
         self._last_persist_at = 0.0
         self._dirty = False
+        self._last_close_error = ""
         self._restore_scope_state(self._load_scope_state(self._scope))
+
+    def get_last_close_error(self) -> str:
+        """Most recent close_position failure reason (empty if last close was clean)."""
+        return str(self._last_close_error or "")
 
     @staticmethod
     def _normalize_scope(scope: str) -> str:
@@ -148,11 +153,11 @@ class PositionManager:
             return value
         text = str(value or "").strip()
         if not text:
-            return datetime.now()
+            return datetime.now(timezone.utc)
         try:
             return datetime.fromisoformat(text.replace("Z", "+00:00"))
         except Exception:
-            return datetime.now()
+            return datetime.now(timezone.utc)
 
     @staticmethod
     def _coerce_side(value: Any) -> PositionSide:
@@ -496,16 +501,27 @@ class PositionManager:
             strategy=strategy,
         )
         if not matches:
-            logger.warning(
-                f"No position found for {exchange}_{symbol} account={account_id or '*'} strategy={strategy!r}"
+            msg = (
+                f"No position found for {exchange}_{symbol} "
+                f"account={account_id or '*'} strategy={strategy!r}"
             )
+            logger.warning(msg)
+            self._last_close_error = msg
             return None
         if len(matches) > 1:
-            logger.warning(
-                f"Ambiguous position close for {exchange}_{symbol} account={account_id or '*'} "
-                f"strategy={strategy!r}: {len(matches)} matches"
+            # Do NOT swallow this silently: an unclosable position is a
+            # risk event. Surface it via error log + queryable last-error so
+            # the caller / health checks can react instead of assuming success.
+            msg = (
+                f"Ambiguous position close for {exchange}_{symbol} "
+                f"account={account_id or '*'} strategy={strategy!r}: "
+                f"{len(matches)} matches — caller must disambiguate by "
+                f"account_id/strategy"
             )
+            logger.error(msg)
+            self._last_close_error = msg
             return None
+        self._last_close_error = ""
         key, position = matches[0]
         if not position:
             logger.warning(f"No position found for {exchange}_{symbol}")
@@ -523,7 +539,7 @@ class PositionManager:
             position.realized_pnl += realized_piece
             position.quantity = origin_qty - closing_qty
             position.value = close_px * position.quantity
-            position.updated_at = datetime.now()
+            position.updated_at = datetime.now(timezone.utc)
 
             logger.info(
                 f"Position partially closed: {symbol} "
@@ -579,6 +595,13 @@ class PositionManager:
             # forcing a synchronous full-state disk write on every update.
             self._persist_scope_state()
         return position
+
+    def flush(self) -> None:
+        """Force-persist current scope state immediately, bypassing the throttle.
+
+        Call before reading back persisted state in tests or before graceful shutdown.
+        """
+        self._persist_scope_state(force=True)
 
     def update_all_prices(self, prices: Dict[str, Dict[str, float]]) -> None:
         updated = False

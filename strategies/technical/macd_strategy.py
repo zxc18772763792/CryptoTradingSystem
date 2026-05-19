@@ -67,7 +67,7 @@ class MACDStrategy(StrategyBase):
         prev_hist = histogram.iloc[-2]
 
         current_price = data["close"].iloc[-1]
-        timestamp = datetime.now(timezone.utc)
+        timestamp = self._bar_time(data)
         symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
 
         # MACD金叉：MACD上穿信号线
@@ -172,7 +172,7 @@ class MACDHistogramStrategy(StrategyBase):
         hist_scale = max(min_histogram, 1e-9)
 
         current_price = data["close"].iloc[-1]
-        timestamp = datetime.now(timezone.utc)
+        timestamp = self._bar_time(data)
         symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
 
         # Bullish crossover with enough histogram expansion to avoid noise.

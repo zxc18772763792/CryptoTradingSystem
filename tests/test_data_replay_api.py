@@ -14,7 +14,7 @@ def _reset_replay_state() -> None:
 
 
 def _sample_replay_frame() -> pd.DataFrame:
-    index = pd.date_range("2026-04-20T00:00:00", periods=3, freq="1H")
+    index = pd.date_range("2026-04-20T00:00:00", periods=3, freq="1h")
     return pd.DataFrame(
         {
             "open": [1.0, 1.1, 1.2],

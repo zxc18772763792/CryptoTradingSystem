@@ -9,7 +9,7 @@ from core.research.altcoin_radar import build_altcoin_rows
 
 
 def _market_frame(now: datetime) -> pd.DataFrame:
-    index = pd.date_range(end=now, periods=48, freq="4H", tz="UTC")
+    index = pd.date_range(end=now, periods=48, freq="4h", tz="UTC")
     base = pd.Series(range(len(index)), index=index, dtype=float)
     return pd.DataFrame(
         {

@@ -77,8 +77,8 @@ class GateConnector(BaseExchange):
             try:
                 if self._client:
                     await self._client.close()
-            except Exception:
-                pass
+            except Exception as close_exc:
+                logger.debug(f"[{self.name}] best-effort client close failed: {close_exc}")
             self._client = None
             self._connected = False
             self._handle_error(e, "connect")
@@ -92,7 +92,8 @@ class GateConnector(BaseExchange):
 
     async def get_ticker(self, symbol: str) -> Ticker:
         try:
-            ticker = await self._client.fetch_ticker(symbol)
+            client = await self._ensure_client()
+            ticker = await client.fetch_ticker(symbol)
             ts = ticker.get("timestamp")
             timestamp = datetime.fromtimestamp(ts / 1000) if ts else datetime.now()
             return Ticker(
@@ -117,8 +118,9 @@ class GateConnector(BaseExchange):
         limit: Optional[int] = None,
     ) -> List[Kline]:
         try:
+            client = await self._ensure_client()
             since_ms = int(since.timestamp() * 1000) if since else None
-            ohlcv = await self._client.fetch_ohlcv(
+            ohlcv = await client.fetch_ohlcv(
                 symbol,
                 timeframe,
                 since=since_ms,
@@ -253,7 +255,8 @@ class GateConnector(BaseExchange):
         params: Optional[dict] = None,
     ) -> Order:
         try:
-            ccxt_order = await self._client.create_order(
+            client = await self._ensure_client()
+            ccxt_order = await client.create_order(
                 symbol=symbol,
                 type=order_type.value,
                 side=side.value,

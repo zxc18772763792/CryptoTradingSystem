@@ -110,10 +110,18 @@ class Position:
         self.current_price = current_price
         if self.side == "long":
             self.unrealized_pnl = (current_price - self.entry_price) * self.quantity
-            self.unrealized_pnl_pct = (current_price - self.entry_price) / self.entry_price
+            self.unrealized_pnl_pct = (
+                (current_price - self.entry_price) / self.entry_price
+                if self.entry_price > 0
+                else 0.0
+            )
         else:
             self.unrealized_pnl = (self.entry_price - current_price) * self.quantity
-            self.unrealized_pnl_pct = (self.entry_price - current_price) / self.entry_price
+            self.unrealized_pnl_pct = (
+                (self.entry_price - current_price) / self.entry_price
+                if self.entry_price > 0
+                else 0.0
+            )
 
 
 class StrategyBase(ABC):
@@ -196,7 +204,7 @@ class StrategyBase(ABC):
             entry_price=price,
             current_price=price,
             quantity=quantity,
-            entry_time=datetime.now(),
+            entry_time=datetime.now(timezone.utc),
             metadata=metadata or {},
         )
         self.positions[symbol] = position

@@ -210,3 +210,33 @@
 | P3 | web/api 第二轮专项审查 | 体量过大，本轮未覆盖 |
 
 > 备注: 本轮为首轮全面排查，深读了风控/交易/策略/执行/回测核心路径；news/ai/data/research/exchanges 为抽样；web/api(42K行) 仅模式扫描，建议单独排期二轮深审。
+
+---
+
+## 7. 修复记录 (2026-05-19)
+
+按优先级逐条修复，全程 `py_compile` + 针对性 pytest（517 项通过，0 失败）。
+
+| 项 | 状态 | 改动摘要 |
+|---|---|---|
+| T-1 | ✅ | position_manager 价格更新路径改走 2s 节流（去掉 force=True），open/close 仍 force |
+| S-1 | ✅ | strategy_manager 冲突检测：close_long/close_short 等退出信号永不被丢弃，仅对反向入场(buy/sell)判冲突 |
+| R-2/T-2 | ✅ | risk_manager.pre_trade_check 缺 equity/notional 时拒入场单(fail-closed)；order_manager 市价单用 ticker.last 估算 notional |
+| R-1 | ✅ | PositionSizer 新增 `_finalize()`：entry_price>0 校验 + 仓位市值钳制到 account_balance×max_position_value_pct；ATR/止损法补 stop_distance>0 |
+| S-4 | ✅ | 9 文件 16 处 `data["symbol"][0]` → `data["symbol"].iloc[0]`(带空表/列守卫) |
+| S-3 | ✅ | bollinger/macd/common_strategies/multi_factor_hf 信号时间戳改 `self._bar_time(data)`；market_sentiment/cex/dex 为事件/实时驱动，wall-clock 语义正确，**保留不改** |
+| G-1 | ✅(范围) | 新增 `core/utils/time_utils.py`(now_utc/ensure_utc)；position_manager、strategy_base 已由用户改为 aware UTC；backtest_engine current_time、funding_rate_collector 8 处改 aware。data_collector/data_storage/historical_data 内部 naive↔naive 比较自洽，转换无收益且增风险，**保留并存档说明** |
+| R-3 | ✅ | calculate_stop_price 的 TRAILING 分支补 trailing_activation 判定，与 update_trailing_stop 行为一致 |
+| R-4 | ✅ | check_take_profit 改为非变更式 + pending 守卫；新增 confirm_take_profit/release_take_profit，由下游成交确认后才永久标记 |
+| T-4 | ✅ | close_position 多匹配改 logger.error + `_last_close_error`，新增 get_last_close_error()，不再静默 |
+| AI-2 | ✅ | autonomous_agent 3 处 except pass → logger.debug |
+| N-1 | ✅ | db.py 新增 `_safe_sql_identifier()` 白名单校验 schema/table；ATTACH 的 escaped_legacy 经核已正确转义 |
+| exchanges | ✅ | bybit/gate/okx/ccxt 清理路径 except pass → logger.debug（best-effort 关闭，debug 级避免噪音） |
+
+### 未处理（需单独排期，非本轮代码修复）
+- **G-4 巨型单文件拆分**（web/api 42K、autonomous_agent 6K、execution_engine 5K）：架构级重构，风险高，建议独立任务。
+- **AI-1 autonomous_agent 职责拆分**：同上。
+- **G-3 fire-and-forget task 统一治理（76 处）**：盲目批量改高风险，建议先建 task_registry 再分批迁移。
+- **web/api 二轮专项审查**：体量过大，本轮未覆盖。
+- **S-2 冲突跨策略隔离**：用户已将冲突键改为 (symbol, exchange) 元组，部分缓解；如需严格按策略隔离再议。
+- **R-5 熔断快路径 / R-6 时区可配**：策略性调整，待用户确认风控口径后再改。

@@ -400,8 +400,18 @@ def _sqlite_url_to_path(value: Any) -> Optional[Path]:
     return None
 
 
+def _safe_sql_identifier(name: str) -> str:
+    """Whitelist a schema/table identifier (PRAGMA can't be parameterized)."""
+    text = str(name or "").strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text):
+        raise ValueError(f"Unsafe SQL identifier: {name!r}")
+    return text
+
+
 def _sqlite_table_columns(conn: sqlite3.Connection, schema_name: str, table_name: str) -> List[str]:
-    rows = conn.execute(f"PRAGMA {schema_name}.table_info('{table_name}')").fetchall()
+    safe_schema = _safe_sql_identifier(schema_name)
+    safe_table = _safe_sql_identifier(table_name)
+    rows = conn.execute(f"PRAGMA {safe_schema}.table_info('{safe_table}')").fetchall()
     return [str(row[1]) for row in rows]
 
 

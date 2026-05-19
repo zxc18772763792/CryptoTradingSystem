@@ -107,8 +107,8 @@ class CCXTExchangeAdapter(ExchangeAdapter):
         if callable(close_fn):
             try:
                 await asyncio.to_thread(close_fn)
-            except Exception:
-                pass
+            except Exception as close_exc:
+                logger.debug(f"CCXT adapter close failed (best-effort): {close_exc}")
         self._client = None
         logger.debug("CCXT adapter closed")
 

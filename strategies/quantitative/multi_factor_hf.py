@@ -277,7 +277,7 @@ class MultiFactorHFStrategy(StrategyBase):
         if self._cooldown_left > 0:
             self._cooldown_left -= 1
 
-        now = datetime.now(timezone.utc)
+        now = self._bar_time(data)
 
         def _emit(sig_type: SignalType, extra: Optional[Dict[str, Any]] = None) -> None:
             md = dict(metadata)

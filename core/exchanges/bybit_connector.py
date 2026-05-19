@@ -56,8 +56,8 @@ class BybitConnector(BaseExchange):
             try:
                 if self._client:
                     await self._client.close()
-            except Exception:
-                pass
+            except Exception as close_exc:
+                logger.debug(f"[{self.name}] best-effort client close failed: {close_exc}")
             self._client = None
             self._connected = False
             self._handle_error(e, "connect")
@@ -73,7 +73,8 @@ class BybitConnector(BaseExchange):
     async def get_ticker(self, symbol: str) -> Ticker:
         """获取行情数据"""
         try:
-            ticker = await self._client.fetch_ticker(symbol)
+            client = await self._ensure_client()
+            ticker = await client.fetch_ticker(symbol)
             return Ticker(
                 symbol=symbol,
                 last=float(ticker.get("last", 0)),
@@ -97,8 +98,9 @@ class BybitConnector(BaseExchange):
     ) -> List[Kline]:
         """获取K线数据"""
         try:
+            client = await self._ensure_client()
             since_ms = int(since.timestamp() * 1000) if since else None
-            ohlcv = await self._client.fetch_ohlcv(
+            ohlcv = await client.fetch_ohlcv(
                 symbol,
                 timeframe,
                 since=since_ms,
@@ -174,7 +176,8 @@ class BybitConnector(BaseExchange):
     ) -> Order:
         """创建订单"""
         try:
-            ccxt_order = await self._client.create_order(
+            client = await self._ensure_client()
+            ccxt_order = await client.create_order(
                 symbol=symbol,
                 type=order_type.value,
                 side=side.value,

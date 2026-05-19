@@ -81,6 +81,15 @@ class StopLossManager:
         if config.type == StopLossType.PERCENTAGE:
             return self._percentage_stop(entry_price, config.value, position_side)
         if config.type == StopLossType.TRAILING:
+            # Respect trailing_activation on BOTH evaluation paths. Previously
+            # only update_trailing_stop() honored it while this path armed the
+            # trail from entry, causing premature stop-outs.
+            if config.trailing_activation and entry_price and entry_price > 0:
+                profit_pct = (current_price - entry_price) / entry_price
+                if position_side == PositionSide.SHORT:
+                    profit_pct = -profit_pct
+                if profit_pct < config.trailing_activation:
+                    return None
             return self._trailing_stop(key, entry_price, current_price, config.value, position_side)
         if config.type == StopLossType.ATR_BASED and atr:
             return self._atr_stop(entry_price, atr, config.value, position_side)
@@ -251,7 +260,14 @@ class TakeProfitManager:
         position_side: PositionSide,
         strategy: Optional[str] = None,
     ) -> Optional[Dict]:
-        """Return the first triggered take profit target, if any."""
+        """Return the first triggered take profit target, if any.
+
+        This is non-mutating: the target is NOT marked executed here, because
+        the actual close happens downstream and may fail. The caller must call
+        ``confirm_take_profit`` once the close fills (or do nothing on failure,
+        so the level re-triggers). A short-lived ``pending`` flag prevents the
+        same level from being dispatched repeatedly within the same poll burst.
+        """
         key = self._position_key(exchange, symbol, strategy)
         targets = self._take_profits.get(key)
         if not targets:
@@ -264,14 +280,25 @@ class TakeProfitManager:
             else:
                 triggered = current_price <= target_price
 
-            if triggered and not target.get("executed", False):
-                target["executed"] = True
+            if triggered and not target.get("executed", False) and not target.get("pending", False):
+                target["pending"] = True
                 logger.info(
                     f"Take profit triggered for {symbol}: price={current_price}, target={target_price}"
                 )
                 return target
 
         return None
+
+    def confirm_take_profit(self, target: Dict) -> None:
+        """Mark a target permanently executed after the close actually filled."""
+        if isinstance(target, dict):
+            target["executed"] = True
+            target.pop("pending", None)
+
+    def release_take_profit(self, target: Dict) -> None:
+        """Clear the pending guard so a failed close lets the level re-trigger."""
+        if isinstance(target, dict):
+            target.pop("pending", None)
 
     def remove_take_profit(self, exchange: str, symbol: str, strategy: Optional[str] = None) -> None:
         """Clear take profit targets for a position bucket."""

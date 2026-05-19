@@ -2,7 +2,7 @@
 策略测试
 """
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 
@@ -85,6 +85,34 @@ class TestStrategyBase:
 
         strategy.stop()
         assert strategy.state == StrategyState.STOPPED
+
+
+    def test_strategy_position_zero_entry_price_does_not_raise(self):
+        class TestStrategy(StrategyBase):
+            def generate_signals(self, data):
+                return []
+            def get_required_data(self):
+                return {}
+
+        strategy = TestStrategy("test")
+        position = strategy.open_position("BTC/USDT", "long", price=0.0, quantity=1.0)
+
+        position.update_price(100.0)
+
+        assert position.unrealized_pnl == pytest.approx(100.0)
+        assert position.unrealized_pnl_pct == 0.0
+
+    def test_strategy_open_position_uses_utc_aware_entry_time(self):
+        class TestStrategy(StrategyBase):
+            def generate_signals(self, data):
+                return []
+            def get_required_data(self):
+                return {}
+
+        strategy = TestStrategy("test")
+        position = strategy.open_position("BTC/USDT", "long", price=100.0, quantity=1.0)
+
+        assert position.entry_time.tzinfo == timezone.utc
 
 
 class TestMAStrategy:

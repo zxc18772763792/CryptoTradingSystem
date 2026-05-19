@@ -810,8 +810,8 @@ class ExecutionEngine:
             f"Signal queue worker unavailable, execute inline: "
             f"{signal.signal_type.value} {signal.symbol}"
         )
-        asyncio.create_task(self.execute_signal(signal))
-        return True
+        result = await self.execute_signal(signal)
+        return bool(result)
 
     async def _ensure_queue_worker(self) -> None:
         if not self._running:
@@ -2880,6 +2880,15 @@ class ExecutionEngine:
             metadata=metadata,
         )
 
+    @staticmethod
+    def _resolve_signal_exchange(signal: Signal, account_id: str) -> str:
+        requested_exchange = str((signal.metadata or {}).get("exchange") or "binance").strip().lower() or "binance"
+        account = account_manager.get_account(account_id) if account_id else None
+        account_metadata = dict((account or {}).get("metadata") or {})
+        if account and bool(account_metadata.get("auto_created")) and str(account_metadata.get("strategy_name") or ""):
+            return requested_exchange
+        return account_manager.resolve_exchange(account_id, requested_exchange)
+
     async def execute_signal(self, signal: Signal) -> Optional[Dict[str, Any]]:
         mode = self._resolve_signal_trading_mode(signal)
         async with self._mode_guard(mode):
@@ -2902,7 +2911,7 @@ class ExecutionEngine:
                 return None
 
             account_id = str(signal.metadata.get("account_id", "main"))
-            exchange = account_manager.resolve_exchange(account_id, str(signal.metadata.get("exchange", "binance")))
+            exchange = self._resolve_signal_exchange(signal, account_id)
             leverage = float(signal.metadata.get("leverage", 1.0) or 1.0)
             trade_policy = self._resolve_strategy_trade_policy(signal.strategy_name, exchange)
             strategy_lookup = self._strategy_lookup_value(signal.strategy_name)

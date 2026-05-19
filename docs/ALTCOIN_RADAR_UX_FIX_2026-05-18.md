@@ -134,3 +134,19 @@ S1 P2 (lowest risk, user-visible) → S2 P1 (CSS, careful, visual parity) →
 S3 P3 (verify non-:has fallback) → S4 P4 bump → S5 P5 verify + completion note.
 Each stage runs the UI-asset/route tests before proceeding. Commit the radar
 fix as ONE unit, excluding unrelated Codex WIP. Do not commit unless asked.
+
+## Completion Note (2026-05-19)
+
+Status: COMPLETE (P1-P5). Not committed.
+
+- P1/P3: `.altcoin-radar-workspace` has a self-contained base rule
+  (`display:grid`, `align-items:start`) and the earlier duplicate location is
+  replaced by an orientation comment; the `min-width:1761px` tier explicitly
+  controls the 1920 workspace.
+- P2: enrichment badges now render non-finite event scores via `shortNumber`,
+  so bad `ignition_score` / `crowding_late_score` / `narrative_heat_score`
+  values show `--`, not `NaN`.
+- P4: asset versions are bumped (`css/style.css` 109,
+  `js/altcoin_radar.js` 19).
+- P5: static checks passed for `altcoin_radar.js`; targeted pytest verification
+  is recorded in the 2026-05-19 daily bug scan memory.
