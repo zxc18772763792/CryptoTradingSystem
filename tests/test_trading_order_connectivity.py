@@ -48,6 +48,10 @@ def test_live_open_orders_uses_recent_cache_when_fast_path_fails(monkeypatch):
     assert payload["cache_fallback"]["reason"] == "TimeoutError"
 
 
+def test_live_open_orders_cache_ttl_tolerates_brief_exchange_outage():
+    assert trading_api._LIVE_ORDER_DETAILS_CACHE_TTL_SEC >= 60.0
+
+
 def test_conditional_orders_include_exchange_trigger_orders(monkeypatch):
     trading_api._LIVE_CONDITIONAL_ORDER_CACHE["ts"] = 0.0
     trading_api._LIVE_CONDITIONAL_ORDER_CACHE["orders"] = []

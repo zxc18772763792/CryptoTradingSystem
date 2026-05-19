@@ -16,6 +16,43 @@ def _build_app() -> FastAPI:
     return app
 
 
+def test_health_returns_runtime_snapshot_while_db_refresh_runs(monkeypatch):
+    news_api._NEWS_HEALTH_REFRESH_TASK = None
+    news_api._NEWS_RESPONSE_CACHE.setdefault("health", {}).clear()
+    news_api._NEWS_PROCESS_CACHE_PAYLOAD = {}
+    news_api._NEWS_PROCESS_CACHE_AT = 0.0
+
+    async def slow_db_snapshot(timeout_sec):
+        del timeout_sec
+        raise AssertionError("health should schedule db refresh, not await it")
+
+    monkeypatch.setattr(news_api, "_collect_news_db_snapshot", slow_db_snapshot)
+
+    with TestClient(_build_app()) as client:
+        response = client.get("/api/news/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "warming_up"
+    assert "db snapshot refresh scheduled" in payload["fallback_reason"]
+
+
+def test_external_news_process_snapshot_defers_first_windows_scan(monkeypatch):
+    monkeypatch.setattr(news_api.sys, "platform", "win32")
+    news_api._NEWS_PROCESS_CACHE_PAYLOAD = {}
+    news_api._NEWS_PROCESS_CACHE_AT = 0.0
+    monkeypatch.setattr(
+        news_api,
+        "_scan_external_news_processes",
+        lambda: (_ for _ in ()).throw(AssertionError("scan should be deferred")),
+    )
+
+    payload = news_api._external_news_process_snapshot()
+
+    assert payload["detector"] == "deferred"
+    assert payload["worker_running"] is False
+
+
 def test_raw_coverage_exposes_archive_contract(monkeypatch):
     async def fake_coverage():
         return {

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import ccxt.async_support as ccxt
@@ -130,7 +130,7 @@ class GateConnector(BaseExchange):
                 Kline(
                     symbol=symbol,
                     timeframe=timeframe,
-                    timestamp=datetime.fromtimestamp(candle[0] / 1000),
+                    timestamp=datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc),
                     open=float(candle[1]),
                     high=float(candle[2]),
                     low=float(candle[3]),

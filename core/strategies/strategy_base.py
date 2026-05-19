@@ -4,7 +4,7 @@
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional, List, Dict, Any
 import pandas as pd
@@ -39,6 +39,16 @@ def bar_time(data: Any, *, fallback: Optional[datetime] = None) -> datetime:
                     py = ts.to_pydatetime()
                     if py.tzinfo is None:
                         py = py.replace(tzinfo=timezone.utc)
+                    py = py.astimezone(timezone.utc)
+                    fallback_utc = fallback if fallback is not None else datetime.now(timezone.utc)
+                    if fallback_utc.tzinfo is None:
+                        fallback_utc = fallback_utc.replace(tzinfo=timezone.utc)
+                    else:
+                        fallback_utc = fallback_utc.astimezone(timezone.utc)
+                    if py > fallback_utc + timedelta(minutes=2):
+                        shifted = py - timedelta(hours=8)
+                        if shifted <= fallback_utc + timedelta(minutes=2):
+                            return shifted
                     return py
     except Exception:
         pass

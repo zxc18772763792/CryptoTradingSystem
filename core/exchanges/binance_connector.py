@@ -3,7 +3,7 @@ import asyncio
 import contextlib
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Any, List, Dict
 
 import ccxt.async_support as ccxt
@@ -301,7 +301,7 @@ class BinanceConnector(BaseExchange):
                 Kline(
                     symbol=symbol,
                     timeframe=timeframe,
-                    timestamp=datetime.fromtimestamp(candle[0] / 1000),
+                    timestamp=datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc),
                     open=(float(candle[1]) / divisor) if divisor > 1 else float(candle[1]),
                     high=(float(candle[2]) / divisor) if divisor > 1 else float(candle[2]),
                     low=(float(candle[3]) / divisor) if divisor > 1 else float(candle[3]),

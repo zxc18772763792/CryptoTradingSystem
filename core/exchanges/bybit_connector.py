@@ -1,7 +1,7 @@
 """
 Bybit交易所连接器
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 import ccxt.async_support as ccxt
 from loguru import logger
@@ -112,7 +112,7 @@ class BybitConnector(BaseExchange):
                 klines.append(Kline(
                     symbol=symbol,
                     timeframe=timeframe,
-                    timestamp=datetime.fromtimestamp(candle[0] / 1000),
+                    timestamp=datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc),
                     open=float(candle[1]),
                     high=float(candle[2]),
                     low=float(candle[3]),

@@ -76,7 +76,7 @@ _SUMMARY_REPAIR_AUTO_TASK: Optional[asyncio.Task] = None
 _NEWS_ENGINE_START_LOCK = LoopBoundAsyncLock()
 _NEWS_RESPONSE_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {"latest": {}, "summary": {}, "brief": {}, "health": {}}
 _NEWS_HEALTH_REFRESH_TASK: Optional[asyncio.Task] = None
-_NEWS_PROCESS_CACHE_TTL_SEC = 5.0
+_NEWS_PROCESS_CACHE_TTL_SEC = 30.0
 _NEWS_PROCESS_CACHE_AT = 0.0
 _NEWS_PROCESS_CACHE_PAYLOAD: Dict[str, Any] = {}
 _NEWS_DB_SNAPSHOT_CACHE_TTL_SEC = 4.0
@@ -257,7 +257,7 @@ def _scan_external_news_processes() -> Dict[str, Any]:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=10,
+                timeout=2,
             )
             snapshot["detector"] = "powershell:Get-CimInstance"
             if proc.returncode != 0:
@@ -275,7 +275,7 @@ def _scan_external_news_processes() -> Dict[str, Any]:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=10,
+                timeout=2,
             )
             snapshot["detector"] = "ps"
             if proc.returncode != 0:
@@ -321,11 +321,24 @@ def _scan_external_news_processes() -> Dict[str, Any]:
     return snapshot
 
 
-def _external_news_process_snapshot() -> Dict[str, Any]:
+def _external_news_process_snapshot(*, allow_initial_scan: bool = False) -> Dict[str, Any]:
     global _NEWS_PROCESS_CACHE_AT, _NEWS_PROCESS_CACHE_PAYLOAD
     now = time.monotonic()
     if _NEWS_PROCESS_CACHE_PAYLOAD and (now - _NEWS_PROCESS_CACHE_AT) <= _NEWS_PROCESS_CACHE_TTL_SEC:
         return dict(_NEWS_PROCESS_CACHE_PAYLOAD)
+    if (
+        not allow_initial_scan
+        and not _NEWS_PROCESS_CACHE_PAYLOAD
+        and sys.platform.startswith("win")
+    ):
+        return {
+            "worker_running": False,
+            "llm_running": False,
+            "worker_pids": [],
+            "llm_pids": [],
+            "detector": "deferred",
+            "error": None,
+        }
     payload = _scan_external_news_processes()
     _NEWS_PROCESS_CACHE_AT = now
     _NEWS_PROCESS_CACHE_PAYLOAD = dict(payload)
@@ -374,7 +387,7 @@ def _spawn_detached_news_process(module_name: str) -> Dict[str, Any]:
 
 async def _start_news_engine_processes(request: Request) -> Dict[str, Any]:
     async with _NEWS_ENGINE_START_LOCK:
-        before = _external_news_process_snapshot()
+        before = _external_news_process_snapshot(allow_initial_scan=True)
         started: List[Dict[str, Any]] = []
         already_running: List[Dict[str, Any]] = []
         skipped: List[Dict[str, Any]] = []
@@ -451,7 +464,7 @@ async def _start_news_engine_processes(request: Request) -> Dict[str, Any]:
         _invalidate_news_caches()
         if started:
             await asyncio.sleep(0.25)
-        runtime = _news_background_state(request)
+        runtime = _news_background_state(request, allow_initial_process_scan=True)
 
         message_parts: List[str] = []
         if started:
@@ -497,7 +510,11 @@ async def _start_news_engine_processes(request: Request) -> Dict[str, Any]:
         }
 
 
-def _news_background_state(request: Request) -> Dict[str, Any]:
+def _news_background_state(
+    request: Request,
+    *,
+    allow_initial_process_scan: bool = False,
+) -> Dict[str, Any]:
     internal_pull_running = _task_running(getattr(request.app.state, "news_task", None))
     internal_llm_running = _task_running(getattr(request.app.state, "news_llm_task", None))
 
@@ -506,7 +523,9 @@ def _news_background_state(request: Request) -> Dict[str, Any]:
     internal_pull_requested = _env_bool("NEWS_BACKGROUND_ENABLED", True) and not external_pull_requested
     internal_llm_requested = _env_bool("NEWS_LLM_BACKGROUND_ENABLED", True) and not external_llm_requested
 
-    external_snapshot = _external_news_process_snapshot()
+    external_snapshot = _external_news_process_snapshot(
+        allow_initial_scan=allow_initial_process_scan
+    )
     external_pull_running = bool(external_snapshot.get("worker_running"))
     external_llm_running = bool(external_snapshot.get("llm_running"))
 
@@ -2748,6 +2767,7 @@ async def backfill_and_store_news_history(cfg: Dict[str, Any], payload: Backfill
 
 @router.get("/health")
 async def health(request: Request) -> Dict[str, Any]:
+    global _NEWS_HEALTH_REFRESH_TASK
     cache_key = "default"
     ttl_sec = _env_int("NEWS_API_HEALTH_CACHE_TTL_SEC", 15)
     cached = _cache_get("health", cache_key, ttl_sec)
@@ -2759,26 +2779,16 @@ async def health(request: Request) -> Dict[str, Any]:
     if stale:
         base_payload["source_states"] = list(stale.get("source_states") or [])
         base_payload["llm_queue"] = dict(stale.get("llm_queue") or {})
-    db_timeout = max(2, _env_int("NEWS_API_HEALTH_DB_TIMEOUT_SEC", 4))
-    db_snapshot = await _collect_news_db_snapshot(db_timeout)
-    base_payload["source_states"] = list(db_snapshot.get("source_states") or [])
-    base_payload["llm_queue"] = dict(db_snapshot.get("llm_queue") or {})
-    failures = list(db_snapshot.get("failures") or [])
+        base_payload["status"] = "stale"
+        base_payload["fallback_reason"] = "serving stale health while db snapshot refreshes"
+    else:
+        base_payload["status"] = "warming_up"
+        base_payload["fallback_reason"] = "db snapshot refresh scheduled"
 
-    if not failures:
-        base_payload["status"] = "ok"
-        return _cache_set("health", cache_key, base_payload)
-
-    reason = ", ".join(failures)
-    logger.warning(f"news health degraded: {reason}")
-    base_payload["status"] = "degraded"
-    base_payload["fallback_reason"] = reason
-    if base_payload.get("source_states") or base_payload.get("llm_queue") or base_payload.get("last_llm_batch") or base_payload.get("last_pull"):
-        return base_payload
-    if stale:
-        stale["status"] = "degraded"
-        stale["fallback_reason"] = reason
-        return stale
+    if _NEWS_HEALTH_REFRESH_TASK is None or _NEWS_HEALTH_REFRESH_TASK.done():
+        _NEWS_HEALTH_REFRESH_TASK = asyncio.create_task(
+            _refresh_news_health_cache(request, cache_key)
+        )
     return base_payload
 
 

@@ -71,7 +71,7 @@ _BALANCE_FETCH_TIMEOUT_SEC = 5.5
 _TICKER_FETCH_TIMEOUT_SEC = 1.6
 _BALANCE_SNAPSHOT_CACHE_TTL_SEC = 300.0
 _BALANCE_SNAPSHOT_FAST_AGE_SEC = 12.0
-_LIVE_ORDER_DETAILS_CACHE_TTL_SEC = 8.0
+_LIVE_ORDER_DETAILS_CACHE_TTL_SEC = 60.0
 _BALANCE_SNAPSHOT_CACHE: Dict[str, Dict[str, Any]] = {}
 _LIVE_POSITION_SNAPSHOT_CACHE: Dict[str, Any] = {"ts": 0.0, "data": {}}
 _LIVE_POSITION_SNAPSHOT_TTL_SEC = 6.0
@@ -4323,7 +4323,7 @@ async def _fetch_binance_open_orders_fast(
         "/fapi/v1/openOrders",
         host="fapi",
         params=params,
-        timeout_sec=4.2,
+        timeout_sec=7.5,
         account_id=account_id,
     )
     orders: List[Dict[str, Any]] = []
@@ -5068,7 +5068,7 @@ async def get_orders(
         try:
             fast_orders = await asyncio.wait_for(
                 _fetch_binance_open_orders_fast(symbol=symbol),
-                timeout=4.2,
+                timeout=8.0,
             )
             _LIVE_ORDER_DETAILS_CACHE["ts"] = time.time()
             _LIVE_ORDER_DETAILS_CACHE["orders"] = list(fast_orders)
