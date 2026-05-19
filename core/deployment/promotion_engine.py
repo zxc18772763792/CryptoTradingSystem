@@ -12,6 +12,7 @@ from config.settings import settings
 from config.strategy_registry import get_strategy_defaults
 from core.ai.proposal_schemas import ResearchProposal
 from core.ai.runtime_strategy_metadata import (
+    ai_research_runtime_fingerprint_from_strategy_info,
     ai_research_runtime_fingerprint_for_candidate,
     build_ai_research_strategy_metadata,
 )
@@ -191,7 +192,11 @@ def _find_existing_ai_runtime_strategy(runtime_fingerprint: str) -> Optional[str
     matches: list[str] = []
     for info in strategy_manager.list_strategies():
         metadata = dict(info.get("metadata") or {}) if isinstance(info.get("metadata"), dict) else {}
-        if metadata.get("runtime_fingerprint") == runtime_fingerprint:
+        inferred_fingerprint = (
+            str(metadata.get("runtime_fingerprint") or "").strip()
+            or ai_research_runtime_fingerprint_from_strategy_info(info)
+        )
+        if inferred_fingerprint == runtime_fingerprint:
             name = str(info.get("name") or "").strip()
             if name:
                 matches.append(name)

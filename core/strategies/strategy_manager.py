@@ -64,6 +64,8 @@ class StrategyRuntimeStats:
 
 
 _SIGNAL_CONFLICT_WINDOW_SECONDS = 60
+_MARKET_DATA_FETCH_TIMEOUT_SEC = 12.0
+_STRATEGY_CYCLE_TIMEOUT_SEC = 45.0
 
 
 class StrategyManager:
@@ -387,11 +389,14 @@ class StrategyManager:
         # Always try pulling latest bars so live strategy sees recent market.
         if connector:
             try:
-                live_df = await self._load_live_market_data(
-                    connector=connector,
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    limit=limit,
+                live_df = await asyncio.wait_for(
+                    self._load_live_market_data(
+                        connector=connector,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        limit=limit,
+                    ),
+                    timeout=_MARKET_DATA_FETCH_TIMEOUT_SEC,
                 )
                 if not live_df.empty:
                     if df.empty:
@@ -399,6 +404,11 @@ class StrategyManager:
                     else:
                         df = pd.concat([df, live_df])
                         df = df[~df.index.duplicated(keep="last")].sort_index()
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Live kline fetch timed out after {_MARKET_DATA_FETCH_TIMEOUT_SEC:.0f}s "
+                    f"for {exchange} {symbol} {timeframe}; using local/cache data"
+                )
             except Exception as e:
                 logger.debug(
                     f"Failed to fetch live klines for {exchange} {symbol} {timeframe}: {e}"
@@ -880,6 +890,21 @@ class StrategyManager:
         stats.total_cycle_ms += cycle_ms
         stats.avg_cycle_ms = stats.total_cycle_ms / max(1, stats.run_count)
 
+    async def _run_strategy_once_with_timeout(self, name: str) -> None:
+        stats = self._stats_for(name)
+        try:
+            await asyncio.wait_for(
+                self._run_strategy_once(name),
+                timeout=_STRATEGY_CYCLE_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            stats.error_count += 1
+            stats.last_error_at = datetime.now(timezone.utc)
+            stats.last_error = (
+                f"strategy cycle timeout after {_STRATEGY_CYCLE_TIMEOUT_SEC:.0f}s"
+            )
+            logger.warning(f"Strategy {name} cycle timed out after {_STRATEGY_CYCLE_TIMEOUT_SEC:.0f}s")
+
     async def _strategy_runner(self, name: str) -> None:
         while True:
             strategy = self._strategies.get(name)
@@ -916,7 +941,7 @@ class StrategyManager:
                     logger.error(f"Strategy {name} runtime-limit auto-close failed: {exc}")
                 break
 
-            await self._run_strategy_once(name)
+            await self._run_strategy_once_with_timeout(name)
             timeframe_seconds = self._timeframe_to_seconds(config.timeframe)
             interval = max(5, min(max(5, timeframe_seconds // 3), 60))
             await asyncio.sleep(interval)
@@ -1564,11 +1589,9 @@ class StrategyManager:
                 last_run_raw = run_stats.get("last_run_at")
                 lag_seconds = None
                 run_count = int(run_stats.get("run_count") or 0)
-                avg_cycle_ms = float(run_stats.get("avg_cycle_ms") or 0.0)
-                avg_cycle_seconds = max(0.0, avg_cycle_ms / 1000.0)
-                effective_cycle = max(float(expected_cycle), avg_cycle_seconds)
-                # Avoid false positives on fast (e.g. 10s) strategies under shared scheduler load.
-                stale_threshold_seconds = int(max(60.0, effective_cycle * 4.0))
+                # Avoid false positives on fast strategies under shared scheduler load, but do not let
+                # one wedged cycle inflate the threshold into hours.
+                stale_threshold_seconds = int(max(60.0, float(expected_cycle) * 4.0))
                 if last_run_raw:
                     try:
                         lag_seconds = max(0, int((now_utc - datetime.fromisoformat(last_run_raw)).total_seconds()))

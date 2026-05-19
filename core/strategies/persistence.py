@@ -224,6 +224,14 @@ async def restore_strategies_from_db() -> Dict[str, Any]:
         )
         if ai_runtime_fingerprint:
             metadata.setdefault("runtime_fingerprint", ai_runtime_fingerprint)
+        if (
+            ai_runtime_fingerprint
+            and ai_runtime_fingerprint in ai_runtime_winners
+            and ai_runtime_winners.get(ai_runtime_fingerprint) != name
+        ):
+            skipped.append({"name": name, "reason": "duplicate_ai_research_runtime"})
+            await persist_strategy_snapshot(name, state_override="stopped")
+            continue
 
         if strategy_manager.get_strategy(name) is None:
             ok = strategy_manager.register_strategy(
@@ -243,10 +251,6 @@ async def restore_strategies_from_db() -> Dict[str, Any]:
         restored.append(name)
 
         if state == "running":
-            if ai_runtime_fingerprint and ai_runtime_winners.get(ai_runtime_fingerprint) != name:
-                skipped.append({"name": name, "reason": "duplicate_ai_research_runtime"})
-                await persist_strategy_snapshot(name, state_override="stopped")
-                continue
             if await strategy_manager.start_strategy(name):
                 if runtime_started_at is not None:
                     strategy_manager.restore_strategy_runtime_anchor(name, runtime_started_at)

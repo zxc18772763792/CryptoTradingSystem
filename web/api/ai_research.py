@@ -23,6 +23,7 @@ from core.ai.autonomous_agent import autonomous_trading_agent
 from core.ai.live_decision_router import live_decision_router
 from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.ai.runtime_strategy_metadata import (
+    ai_research_runtime_fingerprint_from_strategy_info,
     ai_research_runtime_fingerprint_for_candidate,
     build_ai_research_strategy_metadata,
 )
@@ -1173,7 +1174,11 @@ async def _ensure_candidate_runtime_strategy(
     if not strategy_name and runtime_fingerprint:
         for item in sorted(strategy_manager.list_strategies(), key=lambda row: str(row.get("name") or "")):
             metadata = dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), dict) else {}
-            if metadata.get("runtime_fingerprint") == runtime_fingerprint:
+            inferred_fingerprint = (
+                str(metadata.get("runtime_fingerprint") or "").strip()
+                or ai_research_runtime_fingerprint_from_strategy_info(item)
+            )
+            if inferred_fingerprint == runtime_fingerprint:
                 strategy_name = str(item.get("name") or "").strip()
     strategy_name = strategy_name or _build_candidate_strategy_name(candidate)
     strategy_class = _resolve_strategy_class(_candidate_strategy_name(candidate))

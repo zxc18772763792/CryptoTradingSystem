@@ -1,5 +1,6 @@
 import asyncio
-from datetime import datetime
+import importlib
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pandas as pd
@@ -113,3 +114,61 @@ def test_run_strategy_once_processes_each_completed_bar_only_once():
         assert strategy.generate_calls == 2
 
     asyncio.run(_run())
+
+
+def test_run_strategy_once_timeout_records_error(monkeypatch):
+    async def _run() -> None:
+        manager = StrategyManager()
+        strategy = _CountingStrategy(name="runtime_timeout")
+        strategy.start()
+
+        manager._strategies["runtime_timeout"] = strategy
+        manager._configs["runtime_timeout"] = StrategyConfig(
+            name="runtime_timeout",
+            strategy_class=_CountingStrategy,
+            params={},
+            symbols=["BTC/USDT"],
+            timeframe="15m",
+            exchange="binance",
+        )
+
+        async def _slow_once(name: str) -> None:
+            await asyncio.sleep(60)
+
+        strategy_manager_module = importlib.import_module("core.strategies.strategy_manager")
+        monkeypatch.setattr(strategy_manager_module, "_STRATEGY_CYCLE_TIMEOUT_SEC", 0.01)
+        manager._run_strategy_once = _slow_once  # type: ignore[method-assign]
+
+        await manager._run_strategy_once_with_timeout("runtime_timeout")
+        stats = manager.get_strategy_runtime("runtime_timeout")
+        assert stats["error_count"] == 1
+        assert "timeout" in stats["last_error"]
+
+    asyncio.run(_run())
+
+
+def test_dashboard_stale_threshold_ignores_wedged_average_cycle(monkeypatch):
+    manager = StrategyManager()
+    strategy = _CountingStrategy(name="wedged_runtime")
+    strategy.start()
+
+    manager._strategies["wedged_runtime"] = strategy
+    manager._configs["wedged_runtime"] = StrategyConfig(
+        name="wedged_runtime",
+        strategy_class=_CountingStrategy,
+        params={},
+        symbols=["BTC/USDT"],
+        timeframe="15m",
+        exchange="binance",
+    )
+    stats = manager._stats_for("wedged_runtime")
+    stats.run_count = 5
+    stats.last_run_at = datetime.now(timezone.utc) - timedelta(seconds=4000)
+    stats.avg_cycle_ms = 3_600_000.0
+    monkeypatch.setattr(manager, "get_strategy_runtime_mode", lambda name: "paper")
+
+    summary = manager.get_dashboard_summary(signal_limit=5)
+    stale = summary["stale_running"]
+    assert stale
+    assert stale[0]["strategy"] == "wedged_runtime"
+    assert stale[0]["stale_threshold_seconds"] == 2400
