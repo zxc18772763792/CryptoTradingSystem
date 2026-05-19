@@ -255,7 +255,7 @@ async def _download_symbol_timeframe(
         Kline(
             symbol=symbol,
             timeframe=timeframe,
-            timestamp=datetime.fromtimestamp(float(r[0]) / 1000.0),
+            timestamp=datetime.fromtimestamp(float(r[0]) / 1000.0, tz=timezone.utc),
             open=float(r[1]),
             high=float(r[2]),
             low=float(r[3]),

@@ -180,6 +180,10 @@ class Settings(BaseSettings):
     # instead of re-hammering a slow endpoint every cycle.
     LIVE_KLINE_FETCH_TIMEOUT_SEC: float = 12.0
     LIVE_KLINE_FETCH_BACKOFF_SEC: float = 90.0
+    # When True, a parquet index that looks local-stamped (runs ahead of real
+    # UTC) raises instead of being silently shifted — use to flush out any
+    # remaining non-UTC kline writer in CI / debugging.
+    PARQUET_TZ_STRICT: bool = False
 
     # Web server
     WEB_HOST: str = "127.0.0.1"

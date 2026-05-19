@@ -70,10 +70,72 @@ def _normalize_parquet_frame_index(df: pd.DataFrame) -> pd.DataFrame:
     now_utc = pd.Timestamp(datetime.now(timezone.utc)).tz_localize(None)
     valid = idx[~idx.isna()]
     if len(valid) and valid.max() > now_utc + pd.Timedelta(minutes=2):
+        if bool(getattr(settings, "PARQUET_TZ_STRICT", False)):
+            raise ValueError(
+                f"Parquet index runs ahead of UTC (max={valid.max()} > "
+                f"now={now_utc}); a non-UTC kline writer is still active"
+            )
+        logger.warning(
+            f"Parquet index ahead of UTC (max={valid.max()} > now={now_utc}); "
+            f"applying -8h legacy local->UTC correction. Fix the writer / run "
+            f"scripts/migrate_parquet_klines_to_utc.py to remove this fallback."
+        )
         idx = idx - pd.Timedelta(hours=8)
     normalized.index = idx
     normalized = normalized[~normalized.index.isna()]
     return normalized.sort_index()
+
+
+_LOCAL_OFFSET = pd.Timedelta(hours=8)  # Asia/Shanghai, no DST
+
+
+def _heal_local_existing_against_utc(
+    existing_df: pd.DataFrame, incoming_df: pd.DataFrame
+) -> pd.DataFrame:
+    """Shift a legacy local-stamped (UTC+8) partition onto UTC.
+
+    Incoming klines come from the connectors / fixed writer and are
+    authoritative UTC. A legacy partition written by the old maintain
+    script carries the *same* OHLC values but timestamps labelled +8h.
+    If shifting the existing index back 8h makes its OHLC line up exactly
+    with the authoritative incoming bars (and the unshifted index does
+    not), the partition is provably local and is migrated in place.
+
+    Deterministic and self-validating: it acts only on exact OHLC
+    equality across multiple bars, which cannot occur by chance, so it
+    never corrupts a genuinely-UTC partition.
+    """
+    if existing_df is None or existing_df.empty or incoming_df is None or incoming_df.empty:
+        return existing_df
+    cols = ["open", "high", "low", "close"]
+    if not all(c in existing_df.columns and c in incoming_df.columns for c in cols):
+        return existing_df
+
+    def _match_count(idx_shift: pd.Timedelta) -> int:
+        probe = existing_df.copy()
+        probe.index = probe.index + idx_shift
+        join = probe[cols].join(incoming_df[cols], how="inner", lsuffix="_a", rsuffix="_b")
+        if join.empty:
+            return 0
+        same = (
+            (join["open_a"] == join["open_b"])
+            & (join["high_a"] == join["high_b"])
+            & (join["low_a"] == join["low_b"])
+            & (join["close_a"] == join["close_b"])
+        )
+        return int(same.sum())
+
+    shifted_matches = _match_count(-_LOCAL_OFFSET)
+    asis_matches = _match_count(pd.Timedelta(0))
+    if shifted_matches >= 3 and shifted_matches > asis_matches:
+        healed = existing_df.copy()
+        healed.index = healed.index - _LOCAL_OFFSET
+        logger.warning(
+            f"Healed legacy local-time partition to UTC: shifted -8h "
+            f"({shifted_matches} OHLC-anchored bars matched vs {asis_matches} as-is)"
+        )
+        return healed
+    return existing_df
 
 
 class DataStorage:
@@ -187,6 +249,9 @@ class DataStorage:
                     try:
                         existing_df = pd.read_parquet(part_path)
                         existing_df = _normalize_parquet_frame_index(existing_df)
+                        existing_df = _heal_local_existing_against_utc(
+                            existing_df, merged_df
+                        )
                         merged_df = pd.concat([existing_df, merged_df])
                     except Exception as e:
                         logger.warning(f"Failed to merge partition file {part_path}: {e}")
