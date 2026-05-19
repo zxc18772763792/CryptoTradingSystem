@@ -43,6 +43,47 @@
         return d ? d.toLocaleString("zh-CN", { hour12: false, timeZone: UI_TIMEZONE }) : "--";
     }
 
+    const plotlyAxisTimeFormatter = new Intl.DateTimeFormat("en-CA", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+        hourCycle: "h23",
+        timeZone: UI_TIMEZONE,
+    });
+
+    function plotlyBucketAxisTs(v) {
+        const d = parseTs(v);
+        if (!d) return String(v ?? "");
+        const parts = {};
+        plotlyAxisTimeFormatter.formatToParts(d).forEach((part) => {
+            if (part.type !== "literal") parts[part.type] = part.value;
+        });
+        const hour = parts.hour === "24" ? "00" : (parts.hour || "00");
+        return `${parts.year || "1970"}-${parts.month || "01"}-${parts.day || "01"} ${hour}:${parts.minute || "00"}:${parts.second || "00"}`;
+    }
+
+    function newsPlotlyTimeAxis(extra = {}) {
+        return {
+            type: "date",
+            showgrid: true,
+            gridcolor: "#283242",
+            tickformat: "%m-%d %H:%M",
+            hoverformat: "%Y-%m-%d %H:%M:%S",
+            tickformatstops: [
+                { dtickrange: [null, 60000], value: "%H:%M:%S" },
+                { dtickrange: [60000, 3600000], value: "%H:%M" },
+                { dtickrange: [3600000, 86400000], value: "%m-%d %H:%M" },
+                { dtickrange: [86400000, 604800000], value: "%m-%d" },
+                { dtickrange: [604800000, null], value: "%Y-%m-%d" },
+            ],
+            ...extra,
+        };
+    }
+
     function isStandalonePage() {
         return document.body?.classList.contains("news-page") || location.pathname === "/news";
     }
@@ -658,15 +699,19 @@
                     try { Plotly.purge(chart); } catch (_) {}
                     chart.innerHTML = "";
                 }
+                const x = recent.map((row) => plotlyBucketAxisTs(row.bucket_start));
+                const hoverTimes = recent.map((row) => fmtTs(row.bucket_start));
                 Plotly.react(chart, [
-                    { type: "bar", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.count || 0)), name: "总数", marker: { color: "#1f9d63", opacity: 0.35 } },
-                    { type: "scatter", mode: "lines+markers", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.positive || 0)), name: "利好", line: { color: "#20bf78", width: 2 } },
-                    { type: "scatter", mode: "lines+markers", x: recent.map((x) => parseTs(x.bucket_start) || x.bucket_start), y: recent.map((x) => Number(x.negative || 0)), name: "利空", line: { color: "#ea5b61", width: 2 } },
+                    { type: "bar", x, customdata: hoverTimes, y: recent.map((row) => Number(row.count || 0)), name: "总数", marker: { color: "#1f9d63", opacity: 0.35 }, hovertemplate: "%{customdata}<br>总数: %{y}<extra></extra>" },
+                    { type: "scatter", mode: "lines+markers", x, customdata: hoverTimes, y: recent.map((row) => Number(row.positive || 0)), name: "利好", line: { color: "#20bf78", width: 2 }, hovertemplate: "%{customdata}<br>利好: %{y}<extra></extra>" },
+                    { type: "scatter", mode: "lines+markers", x, customdata: hoverTimes, y: recent.map((row) => Number(row.negative || 0)), name: "利空", line: { color: "#ea5b61", width: 2 }, hovertemplate: "%{customdata}<br>利空: %{y}<extra></extra>" },
                 ], {
                     paper_bgcolor: "#111723",
                     plot_bgcolor: "#111723",
                     font: { color: "#d7dde8" },
                     margin: { l: 36, r: 24, t: 16, b: 32 },
+                    xaxis: newsPlotlyTimeAxis({ automargin: true }),
+                    yaxis: { showgrid: true, gridcolor: "#283242", rangemode: "tozero", automargin: true },
                     legend: { orientation: "h", y: 1.12 },
                     barmode: "overlay",
                     hovermode: "x unified",

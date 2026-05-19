@@ -99,8 +99,11 @@ def test_raw_history_rejects_invalid_since():
 
 
 def test_summary_uses_exact_window_counts(monkeypatch):
-    async def fake_list_events(symbol=None, since=None, limit=0):
-        del symbol, since, limit
+    windows = {}
+
+    async def fake_list_events(symbol=None, since=None, until=None, limit=0):
+        del symbol, limit
+        windows["list_events"] = (since, until)
         return [
             {"id": 1, "event_id": "evt-1", "symbol": "BTCUSDT", "event_type": "etf", "sentiment": 1, "ts": "2026-04-04T01:00:00+00:00"},
             {"id": 2, "event_id": "evt-2", "symbol": "ETHUSDT", "event_type": "macro", "sentiment": -1, "ts": "2026-04-04T02:00:00+00:00"},
@@ -128,12 +131,14 @@ def test_summary_uses_exact_window_counts(monkeypatch):
             "items": [],
         }
 
-    async def fake_count_events(symbol=None, since=None):
-        del symbol, since
+    async def fake_count_events(symbol=None, since=None, until=None):
+        del symbol
+        windows["count_events"] = (since, until)
         return 9
 
-    async def fake_latest_event(symbol=None, since=None):
-        del symbol, since
+    async def fake_latest_event(symbol=None, since=None, until=None):
+        del symbol
+        windows["latest_event"] = (since, until)
         return "2026-04-04T03:00:00+00:00"
 
     async def fake_count_raw(since=None):
@@ -163,6 +168,10 @@ def test_summary_uses_exact_window_counts(monkeypatch):
     assert payload["events_count"] == 9
     assert payload["latest_raw_at"] == "2026-04-04T04:00:00+00:00"
     assert payload["latest_event_at"] == "2026-04-04T03:00:00+00:00"
+    assert windows["list_events"][0] is not None
+    assert windows["list_events"][1] is not None
+    assert windows["count_events"][1] == windows["list_events"][1]
+    assert windows["latest_event"][1] == windows["list_events"][1]
 
 
 def test_build_source_summary_keeps_coinglass_state_without_recent_rows():

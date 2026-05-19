@@ -172,6 +172,9 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "NIM摘要" in news_runtime_js
     assert "GM摘要" in news_runtime_js
     assert "DS摘要" in news_runtime_js
+    assert "function plotlyBucketAxisTs(" in news_runtime_js
+    assert "newsPlotlyTimeAxis({ automargin: true })" in news_runtime_js
+    assert "plotlyBucketAxisTs(row.bucket_start)" in news_runtime_js
     assert "google/gemma-4-31b-it" in news_runtime_js
     assert "gemma4-local" in news_runtime_js
     assert "deepseek" in news_runtime_js

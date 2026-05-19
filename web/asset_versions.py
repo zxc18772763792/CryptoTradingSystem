@@ -13,8 +13,8 @@ ASSET_VERSIONS: Final[dict[str, int]] = {
     "js/ai_research_diagnostics.js": 5,
     "js/ai_research_runtime.js": 7,
     "js/ai_research_agent.js": 13,
-    "js/news_tab_runtime.js": 19,
-    "js/dashboard_unstructured_news.js": 16,
+    "js/news_tab_runtime.js": 20,
+    "js/dashboard_unstructured_news.js": 17,
 }
 
 

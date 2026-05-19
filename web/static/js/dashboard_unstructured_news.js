@@ -46,6 +46,29 @@
         return d ? d.toLocaleString("zh-CN", { hour12: false, timeZone: UI_TIMEZONE }) : "--";
     }
 
+    const plotlyAxisTimeFormatter = new Intl.DateTimeFormat("en-CA", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+        hourCycle: "h23",
+        timeZone: UI_TIMEZONE,
+    });
+
+    function plotlyBucketAxisTs(value) {
+        const d = parseTs(value);
+        if (!d) return String(value ?? "");
+        const parts = {};
+        plotlyAxisTimeFormatter.formatToParts(d).forEach((part) => {
+            if (part.type !== "literal") parts[part.type] = part.value;
+        });
+        const hour = parts.hour === "24" ? "00" : (parts.hour || "00");
+        return `${parts.year || "1970"}-${parts.month || "01"}-${parts.day || "01"} ${hour}:${parts.minute || "00"}:${parts.second || "00"}`;
+    }
+
     function summarySentimentClass(sentiment) {
         if (sentiment === "positive") return "news-sentiment-pos";
         if (sentiment === "negative") return "news-sentiment-neg";
@@ -175,7 +198,8 @@
                 return;
             }
             el.innerHTML = "";
-            const x = recent.map((row) => parseTs(row.bucket_start) || row.bucket_start);
+            const x = recent.map((row) => plotlyBucketAxisTs(row.bucket_start));
+            const hoverTimes = recent.map((row) => fmtTs(row.bucket_start));
             const total = recent.map((row) => Number(row.count || 0));
             const pos = recent.map((row) => Number(row.positive || 0));
             const neg = recent.map((row) => Number(row.negative || 0));
@@ -184,16 +208,16 @@
                 Plotly.react(
                     el,
                     [
-                        { type: "bar", x, y: total, name: "总数", marker: { color: "#1f9d63", opacity: 0.35 } },
-                        { type: "scatter", mode: "lines+markers", x, y: pos, name: "正面", line: { color: "#20bf78", width: 1.6 }, marker: { size: 4 } },
-                        { type: "scatter", mode: "lines+markers", x, y: neg, name: "负面", line: { color: "#ea5b61", width: 1.6 }, marker: { size: 4 } },
+                        { type: "bar", x, customdata: hoverTimes, y: total, name: "总数", marker: { color: "#1f9d63", opacity: 0.35 }, hovertemplate: "%{customdata}<br>总数: %{y}<extra></extra>" },
+                        { type: "scatter", mode: "lines+markers", x, customdata: hoverTimes, y: pos, name: "正面", line: { color: "#20bf78", width: 1.6 }, marker: { size: 4 }, hovertemplate: "%{customdata}<br>正面: %{y}<extra></extra>" },
+                        { type: "scatter", mode: "lines+markers", x, customdata: hoverTimes, y: neg, name: "负面", line: { color: "#ea5b61", width: 1.6 }, marker: { size: 4 }, hovertemplate: "%{customdata}<br>负面: %{y}<extra></extra>" },
                     ],
                     {
                         paper_bgcolor: "#111723",
                         plot_bgcolor: "#111723",
                         font: { color: "#d7dde8", size: 10 },
                         margin: { l: 24, r: 12, t: 8, b: 20 },
-                        xaxis: { showgrid: false, tickfont: { size: 10 }, automargin: true },
+                        xaxis: { type: "date", showgrid: false, tickformat: "%H:%M", hoverformat: "%Y-%m-%d %H:%M:%S", tickfont: { size: 10 }, automargin: true },
                         yaxis: { showgrid: true, gridcolor: "#283242", rangemode: "tozero", tickfont: { size: 10 }, automargin: true },
                         legend: { orientation: "h", x: 0, y: 1.18, font: { size: 10 } },
                         barmode: "overlay",

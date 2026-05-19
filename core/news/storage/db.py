@@ -653,13 +653,16 @@ async def count_news_raw(since: Optional[datetime] = None) -> int:
     return int(value or 0)
 
 
-async def count_events(symbol: Optional[str] = None, since: Optional[datetime] = None) -> int:
+async def count_events(symbol: Optional[str] = None, since: Optional[datetime] = None, until: Optional[datetime] = None) -> int:
+    until_ts = parse_any_datetime(until) if until else None
     async with news_session_scope() as session:
         stmt = select(func.count(NewsEvent.id))
         if symbol:
             stmt = stmt.where(NewsEvent.symbol == str(symbol).strip().upper())
         if since is not None:
             stmt = stmt.where(NewsEvent.ts >= parse_any_datetime(since))
+        if until_ts is not None:
+            stmt = stmt.where(NewsEvent.ts <= until_ts)
         value = (await session.execute(stmt)).scalar_one()
     return int(value or 0)
 
@@ -673,13 +676,16 @@ async def latest_news_raw_timestamp(since: Optional[datetime] = None) -> Optiona
     return _utc_iso(value) if value is not None else None
 
 
-async def latest_event_timestamp(symbol: Optional[str] = None, since: Optional[datetime] = None) -> Optional[str]:
+async def latest_event_timestamp(symbol: Optional[str] = None, since: Optional[datetime] = None, until: Optional[datetime] = None) -> Optional[str]:
+    until_ts = parse_any_datetime(until) if until else None
     async with news_session_scope() as session:
         stmt = select(func.max(NewsEvent.ts))
         if symbol:
             stmt = stmt.where(NewsEvent.symbol == str(symbol).strip().upper())
         if since is not None:
             stmt = stmt.where(NewsEvent.ts >= parse_any_datetime(since))
+        if until_ts is not None:
+            stmt = stmt.where(NewsEvent.ts <= until_ts)
         value = (await session.execute(stmt)).scalar_one()
     return _utc_iso(value) if value is not None else None
 
@@ -1638,16 +1644,24 @@ async def summarize_news_raw_coverage(max_sources: int = 20) -> Dict[str, Any]:
     }
 
 
-async def list_events(symbol: Optional[str] = None, since: Optional[datetime] = None, limit: int = 200) -> List[Dict[str, Any]]:
+async def list_events(
+    symbol: Optional[str] = None,
+    since: Optional[datetime] = None,
+    limit: int = 200,
+    until: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
     symbol_norm = str(symbol or "").strip().upper()
     limit = max(1, min(int(limit or 200), 10000))
     since_ts = parse_any_datetime(since) if since else None
+    until_ts = parse_any_datetime(until) if until else None
     async with news_session_scope() as session:
         stmt = select(NewsEvent)
         if symbol_norm:
             stmt = stmt.where(NewsEvent.symbol == symbol_norm)
         if since_ts:
             stmt = stmt.where(NewsEvent.ts >= since_ts)
+        if until_ts:
+            stmt = stmt.where(NewsEvent.ts <= until_ts)
         stmt = stmt.order_by(NewsEvent.ts.desc()).limit(limit)
         rows = (await session.execute(stmt)).scalars().all()
     return [_row_to_event_dict(row) for row in rows]

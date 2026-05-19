@@ -3451,7 +3451,8 @@ async def summary(
     cached = _cache_get("summary", cache_key, ttl_sec)
     if cached:
         return cached
-    since = _now_utc() - timedelta(hours=hours)
+    now = _now_utc()
+    since = now - timedelta(hours=hours)
     db_timeout = max(5.0, min(20.0, float(_env_int("NEWS_API_SUMMARY_DB_TIMEOUT_SEC", 12))))
     raw_limit = max(1000, min(3000, feed_limit * 24))
     event_limit = max(1000, min(3000, feed_limit * 24))
@@ -3460,7 +3461,7 @@ async def summary(
         try:
             events = list(
                 await asyncio.wait_for(
-                    asyncio.shield(news_db.list_events(symbol=symbol_norm, since=since, limit=event_limit)),
+                    asyncio.shield(news_db.list_events(symbol=symbol_norm, since=since, until=now, limit=event_limit)),
                     timeout=db_timeout,
                 )
                 or []
@@ -3514,7 +3515,7 @@ async def summary(
 
         try:
             events_count = int(
-                await asyncio.wait_for(asyncio.shield(news_db.count_events(symbol=symbol_norm, since=since)), timeout=db_timeout)
+                await asyncio.wait_for(asyncio.shield(news_db.count_events(symbol=symbol_norm, since=since, until=now)), timeout=db_timeout)
                 or 0
             )
         except Exception as exc:
@@ -3523,7 +3524,7 @@ async def summary(
 
         try:
             latest_event_at = await asyncio.wait_for(
-                asyncio.shield(news_db.latest_event_timestamp(symbol=symbol_norm, since=since)),
+                asyncio.shield(news_db.latest_event_timestamp(symbol=symbol_norm, since=since, until=now)),
                 timeout=db_timeout,
             )
         except Exception as exc:
