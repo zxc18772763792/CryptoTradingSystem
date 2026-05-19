@@ -124,6 +124,82 @@ def test_restore_strategies_from_db_passes_metadata(monkeypatch):
     assert register_mock.call_args.kwargs["metadata"]["proposal_id"] == "prop-restore"
 
 
+def test_restore_strategies_from_db_starts_one_ai_research_duplicate(monkeypatch):
+    from datetime import datetime, timezone
+
+    from core.strategies import persistence
+
+    fingerprint = "ai_research|paper|champion|binance|mastrategy|btc/usdt|15m"
+
+    def _row(name, updated_at):
+        return SimpleNamespace(
+            name=name,
+            type="MAStrategy",
+            params={
+                "user_params": {"exchange": "binance"},
+                "symbols": ["BTC/USDT"],
+                "timeframe": "15m",
+                "exchange": "binance",
+                "allocation": 0.15,
+                "state": "running",
+                "runtime_mode": "paper",
+                "metadata": {
+                    "source": "ai_research",
+                    "search_role": "champion",
+                    "runtime_mode": "paper",
+                    "runtime_fingerprint": fingerprint,
+                },
+            },
+            is_active=True,
+            updated_at=updated_at,
+            created_at=updated_at,
+        )
+
+    old_row = _row("MAStrategy_ai_old", datetime(2026, 5, 19, 1, tzinfo=timezone.utc))
+    new_row = _row("MAStrategy_ai_new", datetime(2026, 5, 19, 2, tzinfo=timezone.utc))
+
+    class _FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def execute(self, stmt):
+            return _FakeResult([old_row, new_row])
+
+    started = []
+    persist_mock = AsyncMock(return_value=True)
+
+    async def _start(name):
+        started.append(name)
+        return True
+
+    monkeypatch.setattr(persistence, "_get_strategy_classes", lambda: {"MAStrategy": object})
+    monkeypatch.setattr(persistence, "async_session_maker", lambda: _FakeSession())
+    monkeypatch.setattr(persistence.strategy_manager, "get_strategy", lambda name: None)
+    monkeypatch.setattr(persistence.strategy_manager, "register_strategy", MagicMock(return_value=True))
+    monkeypatch.setattr(persistence.strategy_manager, "start_strategy", _start)
+    monkeypatch.setattr(persistence, "persist_strategy_snapshot", persist_mock)
+
+    result = asyncio.run(persistence.restore_strategies_from_db())
+
+    assert started == ["MAStrategy_ai_new"]
+    assert result["started"] == 1
+    assert {"name": "MAStrategy_ai_old", "reason": "duplicate_ai_research_runtime"} in result["skipped"]
+    persist_mock.assert_awaited_once_with("MAStrategy_ai_old", state_override="stopped")
+
+
 def test_list_strategies_backfills_ai_research_ownership(monkeypatch):
     from web.api import strategies as strategies_api
 

@@ -22,7 +22,10 @@ from config.settings import settings
 from core.ai.autonomous_agent import autonomous_trading_agent
 from core.ai.live_decision_router import live_decision_router
 from core.ai.research_runtime_context import resolve_runtime_research_context
-from core.ai.runtime_strategy_metadata import build_ai_research_strategy_metadata
+from core.ai.runtime_strategy_metadata import (
+    ai_research_runtime_fingerprint_for_candidate,
+    build_ai_research_strategy_metadata,
+)
 from core.backtest.funding_provider import FundingProviderConfig, FundingRateProvider
 from core.governance.audit import GovernanceAuditEvent, write_audit
 from core.deployment.promotion_engine import transition_candidate, transition_proposal
@@ -1162,7 +1165,17 @@ async def _ensure_candidate_runtime_strategy(
     if resolved_mode not in {"live", "paper"}:
         raise RuntimeError(f"unsupported runtime mode: {resolved_mode}")
 
-    strategy_name = _candidate_registered_strategy_name(candidate) or _build_candidate_strategy_name(candidate)
+    runtime_fingerprint = ai_research_runtime_fingerprint_for_candidate(
+        candidate,
+        target_mode=resolved_mode,
+    )
+    strategy_name = _candidate_registered_strategy_name(candidate)
+    if not strategy_name and runtime_fingerprint:
+        for item in sorted(strategy_manager.list_strategies(), key=lambda row: str(row.get("name") or "")):
+            metadata = dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), dict) else {}
+            if metadata.get("runtime_fingerprint") == runtime_fingerprint:
+                strategy_name = str(item.get("name") or "").strip()
+    strategy_name = strategy_name or _build_candidate_strategy_name(candidate)
     strategy_class = _resolve_strategy_class(_candidate_strategy_name(candidate))
     if strategy_class is None:
         raise RuntimeError(f"unknown strategy class for candidate: {_candidate_strategy_name(candidate)}")
@@ -1236,6 +1249,20 @@ async def _ensure_candidate_runtime_strategy(
     started = await strategy_manager.start_strategy(strategy_name)
     if not started:
         raise RuntimeError("strategy start failed during live activation")
+    stopped_duplicates: list[str] = []
+    if runtime_fingerprint:
+        for item in list(strategy_manager.list_strategies()):
+            duplicate_name = str(item.get("name") or "").strip()
+            if not duplicate_name or duplicate_name == strategy_name:
+                continue
+            metadata = dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), dict) else {}
+            if metadata.get("runtime_fingerprint") != runtime_fingerprint:
+                continue
+            strategy = strategy_manager.get_strategy(duplicate_name)
+            if strategy is not None and getattr(strategy, "is_running", False):
+                await strategy_manager.stop_strategy(duplicate_name)
+            await persist_strategy_snapshot(duplicate_name, state_override="stopped")
+            stopped_duplicates.append(duplicate_name)
     await persist_strategy_snapshot(strategy_name, state_override="running")
 
     meta = getattr(candidate, "metadata", None)
@@ -1249,6 +1276,7 @@ async def _ensure_candidate_runtime_strategy(
         "started": True,
         "runtime_limit_minutes": runtime_limit_minutes,
         "runtime_policy": runtime_policy,
+        "dedupe_stopped_strategy_names": stopped_duplicates,
         "promoted_at": datetime.now(timezone.utc).isoformat(),
     }
     return {
@@ -1256,6 +1284,7 @@ async def _ensure_candidate_runtime_strategy(
         "allocation": allocation,
         "runtime_limit_minutes": runtime_limit_minutes,
         "runtime_policy": runtime_policy,
+        "dedupe_stopped_strategy_names": stopped_duplicates,
     }
 
 
@@ -4678,7 +4707,6 @@ async def _record_performance_snapshot_outcome_feedback(
 @router.post("/performance/snapshots")
 async def save_performance_snapshot(request: Request, body: PerformanceSnapshotRequest):
     """Persist a strategy performance snapshot to the DB."""
-    from sqlalchemy import insert as sa_insert
 
     row = StrategyPerformanceSnapshot(
         snapshot_at=datetime.now(timezone.utc),

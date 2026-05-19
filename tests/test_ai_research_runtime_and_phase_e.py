@@ -185,6 +185,91 @@ def test_promote_candidate_runtime_override(monkeypatch):
     assert register_mock.call_args.kwargs["runtime_limit_minutes"] == 1800
 
 
+def test_promote_candidate_reuses_ai_runtime_slot(monkeypatch):
+    from core.ai.proposal_schemas import ResearchProposal
+    from core.deployment.promotion_engine import promote_candidate
+    from core.research.experiment_schemas import PromotionDecision, StrategyCandidate
+
+    now = _now()
+    proposal = ResearchProposal(
+        proposal_id="proposal-dedupe",
+        created_at=now,
+        updated_at=now,
+        thesis="dedupe runtime slot",
+        status="validated",
+    )
+    candidate = StrategyCandidate(
+        candidate_id="cand-dedupe-new",
+        proposal_id=proposal.proposal_id,
+        experiment_id="exp-dedupe",
+        created_at=now,
+        strategy="MAStrategy",
+        timeframe="15m",
+        symbol="BTC/USDT",
+        params={"fast_period": 20, "slow_period": 60},
+        metadata={"exchange": "binance", "search_role": "champion"},
+    )
+    promotion = PromotionDecision(
+        candidate_id=candidate.candidate_id,
+        decision="paper",
+        reason="dedupe",
+        constraints={"allocation_cap": 0.1},
+        created_at=now,
+    )
+    existing_fingerprint = (
+        "ai_research|paper|champion|binance|mastrategy|btc/usdt|15m"
+    )
+    existing = {
+        "name": "MAStrategy_ai_existing",
+        "metadata": {"runtime_fingerprint": existing_fingerprint},
+    }
+
+    register_mock = MagicMock(return_value=True)
+    start_mock = AsyncMock(return_value=True)
+    persist_mock = AsyncMock(return_value=True)
+    update_params_mock = MagicMock(return_value=True)
+    update_alloc_mock = MagicMock(return_value=True)
+    update_meta_mock = MagicMock(return_value=True)
+    update_runtime_mock = MagicMock(return_value=True)
+    app = MagicMock()
+    app.state.ai_lifecycle_registry = MagicMock()
+    app.state.ai_lifecycle_registry.append = MagicMock()
+    app.state.ai_experiment_registry = MagicMock()
+    app.state.ai_experiment_registry.get = MagicMock(return_value=SimpleNamespace(days=30))
+
+    monkeypatch.setattr("core.deployment.promotion_engine._resolve_strategy_class", lambda _: object)
+    monkeypatch.setattr("core.deployment.promotion_engine.get_strategy_defaults", lambda _: {})
+    monkeypatch.setattr("core.deployment.promotion_engine.execution_engine.get_trading_mode", lambda: "paper")
+    monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.list_strategies", lambda: [existing])
+    monkeypatch.setattr(
+        "core.deployment.promotion_engine.strategy_manager.get_strategy",
+        lambda name: object() if name == "MAStrategy_ai_existing" else None,
+    )
+    monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.register_strategy", register_mock)
+    monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.update_strategy_params", update_params_mock)
+    monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.update_strategy_allocation", update_alloc_mock)
+    monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.update_strategy_metadata", update_meta_mock)
+    monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.update_strategy_runtime_config", update_runtime_mock)
+    monkeypatch.setattr("core.deployment.promotion_engine.strategy_manager.start_strategy", start_mock)
+    monkeypatch.setattr("core.deployment.promotion_engine.persist_strategy_snapshot", persist_mock)
+
+    result = asyncio.run(
+        promote_candidate(
+            app,
+            proposal=proposal,
+            candidate=candidate,
+            promotion=promotion,
+            actor="unit_test",
+        )
+    )
+
+    assert result["registered_strategy_name"] == "MAStrategy_ai_existing"
+    register_mock.assert_not_called()
+    update_meta_mock.assert_called_once()
+    assert update_meta_mock.call_args.args[1]["runtime_fingerprint"] == existing_fingerprint
+    persist_mock.assert_awaited_once_with("MAStrategy_ai_existing", state_override="running")
+
+
 def test_quick_register_uses_correct_promote_signature(monkeypatch):
     from core.ai.proposal_schemas import ResearchProposal
     from core.research.experiment_schemas import PromotionDecision, StrategyCandidate

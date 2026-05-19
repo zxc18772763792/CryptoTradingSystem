@@ -10,6 +10,7 @@ from sqlalchemy import select
 from config.settings import settings
 from config.database import Strategy as StrategyModel
 from config.database import async_session_maker
+from core.ai.runtime_strategy_metadata import build_ai_research_runtime_fingerprint
 from core.strategies.strategy_manager import strategy_manager
 
 
@@ -65,6 +66,60 @@ def _parse_runtime_anchor(value: Any) -> Optional[datetime]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _ai_runtime_fingerprint_from_payload(
+    *,
+    name: str,
+    strategy_type: str,
+    payload: Dict[str, Any],
+) -> Optional[str]:
+    metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
+    if metadata.get("runtime_fingerprint"):
+        return str(metadata.get("runtime_fingerprint") or "").strip() or None
+    if metadata.get("source") != "ai_research" and metadata.get("owner_group") != "ai_research":
+        return None
+    user_params = dict(payload.get("user_params") or {})
+    symbols = list(payload.get("symbols") or [])
+    return build_ai_research_runtime_fingerprint(
+        strategy=strategy_type or metadata.get("strategy_family") or name,
+        symbol=symbols[0] if symbols else metadata.get("symbol"),
+        timeframe=payload.get("timeframe") or metadata.get("timeframe"),
+        target_mode=payload.get("runtime_mode") or metadata.get("runtime_mode") or metadata.get("promotion_target"),
+        exchange=payload.get("exchange") or user_params.get("exchange") or metadata.get("exchange"),
+        search_role=metadata.get("search_role"),
+    )
+
+
+def _row_sort_time(row: Any) -> datetime:
+    value = getattr(row, "updated_at", None) or getattr(row, "created_at", None)
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _select_ai_runtime_restore_winners(rows: List[Any]) -> Dict[str, str]:
+    grouped: Dict[str, List[Any]] = {}
+    for row in rows:
+        payload = dict(row.params or {})
+        state = str(payload.get("state") or ("running" if row.is_active else "stopped")).lower()
+        if state != "running":
+            continue
+        fingerprint = _ai_runtime_fingerprint_from_payload(
+            name=str(row.name),
+            strategy_type=str(row.type or ""),
+            payload=payload,
+        )
+        if not fingerprint:
+            continue
+        grouped.setdefault(fingerprint, []).append(row)
+    winners: Dict[str, str] = {}
+    for fingerprint, candidates in grouped.items():
+        winner = sorted(candidates, key=lambda item: (_row_sort_time(item), str(item.name)))[-1]
+        winners[fingerprint] = str(winner.name)
+    return winners
 
 
 async def persist_strategy_snapshot(name: str, state_override: Optional[str] = None) -> bool:
@@ -138,6 +193,8 @@ async def restore_strategies_from_db() -> Dict[str, Any]:
             "skipped": [{"name": "*", "reason": str(e)}],
         }
 
+    ai_runtime_winners = _select_ai_runtime_restore_winners(rows)
+
     for row in rows:
         name = str(row.name)
         payload = dict(row.params or {})
@@ -160,6 +217,13 @@ async def restore_strategies_from_db() -> Dict[str, Any]:
         runtime_mode = str(payload.get("runtime_mode") or metadata.get("runtime_mode") or "").strip().lower()
         if runtime_mode in {"paper", "live"}:
             metadata.setdefault("runtime_mode", runtime_mode)
+        ai_runtime_fingerprint = _ai_runtime_fingerprint_from_payload(
+            name=name,
+            strategy_type=strategy_type,
+            payload=payload,
+        )
+        if ai_runtime_fingerprint:
+            metadata.setdefault("runtime_fingerprint", ai_runtime_fingerprint)
 
         if strategy_manager.get_strategy(name) is None:
             ok = strategy_manager.register_strategy(
@@ -179,6 +243,10 @@ async def restore_strategies_from_db() -> Dict[str, Any]:
         restored.append(name)
 
         if state == "running":
+            if ai_runtime_fingerprint and ai_runtime_winners.get(ai_runtime_fingerprint) != name:
+                skipped.append({"name": name, "reason": "duplicate_ai_research_runtime"})
+                await persist_strategy_snapshot(name, state_override="stopped")
+                continue
             if await strategy_manager.start_strategy(name):
                 if runtime_started_at is not None:
                     strategy_manager.restore_strategy_runtime_anchor(name, runtime_started_at)

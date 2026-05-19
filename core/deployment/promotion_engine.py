@@ -11,7 +11,10 @@ import strategies as strategy_module
 from config.settings import settings
 from config.strategy_registry import get_strategy_defaults
 from core.ai.proposal_schemas import ResearchProposal
-from core.ai.runtime_strategy_metadata import build_ai_research_strategy_metadata
+from core.ai.runtime_strategy_metadata import (
+    ai_research_runtime_fingerprint_for_candidate,
+    build_ai_research_strategy_metadata,
+)
 from core.research.experiment_registry import LifecycleRegistry
 from core.research.experiment_schemas import LifecycleRecord, PromotionDecision, StrategyCandidate
 from core.strategies.runtime_policy import build_runtime_limit_policy
@@ -159,6 +162,44 @@ def _resolve_observed_trades_per_day(app: FastAPI, candidate: StrategyCandidate)
     return float(trade_count / days)
 
 
+async def _stop_duplicate_ai_runtime_strategies(
+    *,
+    keep_name: str,
+    runtime_fingerprint: str,
+) -> list[str]:
+    if not runtime_fingerprint:
+        return []
+    stopped: list[str] = []
+    for info in list(strategy_manager.list_strategies()):
+        name = str(info.get("name") or "").strip()
+        if not name or name == keep_name:
+            continue
+        metadata = dict(info.get("metadata") or {}) if isinstance(info.get("metadata"), dict) else {}
+        if metadata.get("runtime_fingerprint") != runtime_fingerprint:
+            continue
+        strategy = strategy_manager.get_strategy(name)
+        if strategy is not None and getattr(strategy, "is_running", False):
+            await strategy_manager.stop_strategy(name)
+        await persist_strategy_snapshot(name, state_override="stopped")
+        stopped.append(name)
+    return stopped
+
+
+def _find_existing_ai_runtime_strategy(runtime_fingerprint: str) -> Optional[str]:
+    if not runtime_fingerprint:
+        return None
+    matches: list[str] = []
+    for info in strategy_manager.list_strategies():
+        metadata = dict(info.get("metadata") or {}) if isinstance(info.get("metadata"), dict) else {}
+        if metadata.get("runtime_fingerprint") == runtime_fingerprint:
+            name = str(info.get("name") or "").strip()
+            if name:
+                matches.append(name)
+    if not matches:
+        return None
+    return sorted(matches)[-1]
+
+
 async def promote_candidate(
     app: FastAPI,
     *,
@@ -191,7 +232,13 @@ async def promote_candidate(
             "registered_strategy_name": None,
         }
 
-    strategy_name = f"{candidate.strategy}_ai_{int(_now_utc().timestamp())}_{secrets.token_hex(2)}"
+    runtime_fingerprint = ai_research_runtime_fingerprint_for_candidate(
+        candidate,
+        target_mode=decision,
+    )
+    strategy_name = _find_existing_ai_runtime_strategy(runtime_fingerprint)
+    if not strategy_name:
+        strategy_name = f"{candidate.strategy}_ai_{int(_now_utc().timestamp())}_{secrets.token_hex(2)}"
     strategy_class = _resolve_strategy_class(candidate.strategy)
     if strategy_class is None:
         raise ValueError(f"unknown strategy class for promotion: {candidate.strategy}")
@@ -234,21 +281,37 @@ async def promote_candidate(
                 observed_trades_per_day=observed_tpd,
             )
             runtime_limit_minutes = int(runtime_policy["runtime_limit_minutes"])
-        ok = strategy_manager.register_strategy(
-            name=strategy_name,
-            strategy_class=strategy_class,
-            params=params,
-            symbols=[candidate.symbol],
-            timeframe=candidate.timeframe,
-            allocation=float(constraints.get("allocation_cap", default_allocation) or default_allocation),
-            runtime_limit_minutes=runtime_limit_minutes,
-            metadata=strategy_metadata,
-        )
-        if not ok:
-            raise RuntimeError("strategy registration failed during paper promotion")
+        allocation = float(constraints.get("allocation_cap", default_allocation) or default_allocation)
+        if strategy_manager.get_strategy(strategy_name) is None:
+            ok = strategy_manager.register_strategy(
+                name=strategy_name,
+                strategy_class=strategy_class,
+                params=params,
+                symbols=[candidate.symbol],
+                timeframe=candidate.timeframe,
+                allocation=allocation,
+                runtime_limit_minutes=runtime_limit_minutes,
+                metadata=strategy_metadata,
+            )
+            if not ok:
+                raise RuntimeError("strategy registration failed during paper promotion")
+        else:
+            strategy_manager.update_strategy_params(strategy_name, params)
+            strategy_manager.update_strategy_allocation(strategy_name, allocation)
+            strategy_manager.update_strategy_metadata(strategy_name, strategy_metadata)
+            strategy_manager.update_strategy_runtime_config(
+                strategy_name,
+                timeframe=candidate.timeframe,
+                symbols=[candidate.symbol],
+                runtime_limit_minutes=runtime_limit_minutes,
+            )
         started = await strategy_manager.start_strategy(strategy_name)
         if not started:
             raise RuntimeError("strategy start failed during paper promotion")
+        stopped_duplicates = await _stop_duplicate_ai_runtime_strategies(
+            keep_name=strategy_name,
+            runtime_fingerprint=runtime_fingerprint,
+        )
         await persist_strategy_snapshot(strategy_name, state_override="running")
         transition_candidate(candidate, to_state="paper_running", lifecycle_registry=lifecycle_registry, actor=actor, reason=promotion.reason, metadata={"strategy_name": strategy_name})
         transition_proposal(proposal, to_state="paper_running", lifecycle_registry=lifecycle_registry, actor=actor, reason=promotion.reason, metadata={"strategy_name": strategy_name})
@@ -259,6 +322,7 @@ async def promote_candidate(
             "runtime_limit_minutes": runtime_limit_minutes,
             "runtime_policy": runtime_policy,
             "promoted_at": _now_utc().isoformat(),
+            "dedupe_stopped_strategy_names": stopped_duplicates,
         }
         candidate.metadata["registered_strategy_name"] = strategy_name
         return {
