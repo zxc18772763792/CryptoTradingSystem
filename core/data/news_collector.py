@@ -365,18 +365,18 @@ async def main():
 
     # 情感分析摘要
     summary = collector.get_sentiment_summary(news)
-    print(f"\n情感分析摘要:")
+    print("\n情感分析摘要:")
     print(f"  平均情感: {summary['average']} ({summary['interpretation']})")
     print(f"  看涨: {summary['bullish_count']}, 看跌: {summary['bearish_count']}, 中性: {summary['neutral_count']}")
 
     # 类别分布
     categories = collector.get_category_distribution(news)
-    print(f"\n类别分布:")
+    print("\n类别分布:")
     for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
         print(f"  {cat}: {count}")
 
     # 显示最新10条新闻
-    print(f"\n最新10条新闻:")
+    print("\n最新10条新闻:")
     for i, item in enumerate(news[:10], 1):
         sentiment_emoji = "🟢" if item.sentiment > 0.1 else "🔴" if item.sentiment < -0.1 else "⚪"
         print(f"{i:2}. {sentiment_emoji} [{item.source:12}] {item.title[:60]}...")

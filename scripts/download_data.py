@@ -173,11 +173,11 @@ async def main():
     # 总结
     logger.info("\n" + "=" * 60)
     logger.info("测试完成!")
-    logger.info(f"  - API连接: ✓ (Gate.io)")
-    logger.info(f"  - 价格获取: ✓")
-    logger.info(f"  - K线下载: ✓")
+    logger.info("  - API连接: ✓ (Gate.io)")
+    logger.info("  - 价格获取: ✓")
+    logger.info("  - K线下载: ✓")
     logger.info(f"  - 本地存储: {saved_count} 个文件")
-    logger.info(f"  - 数据读取: ✓")
+    logger.info("  - 数据读取: ✓")
     logger.info("=" * 60)
 
     # 显示数据统计

@@ -215,7 +215,7 @@ async def main():
         async with aiohttp.ClientSession() as session:
             df = await get_realtime_tick(session, args.symbol)
             if not df.empty:
-                logger.info(f"\n最近100条交易:")
+                logger.info("\n最近100条交易:")
                 print(df)
 
 

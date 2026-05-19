@@ -337,7 +337,7 @@ class OrderBookCollector:
         session = await self._get_session()
         
         try:
-            url = f"https://api.gateio.io/api/v4/futures/usdt/order_book"
+            url = "https://api.gateio.io/api/v4/futures/usdt/order_book"
             params = {"contract": contract, "limit": limit}
             
             async with session.get(url, params=params) as resp:

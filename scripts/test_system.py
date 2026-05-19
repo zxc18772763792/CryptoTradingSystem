@@ -65,7 +65,7 @@ async def main():
         total_trades = (df['signal'].diff() != 0).sum()
         cumulative_return = (1 + df['strategy_returns'].dropna()).prod() - 1
 
-        logger.info(f"✓ MA策略回测完成")
+        logger.info("✓ MA策略回测完成")
         logger.info(f"  总交易次数: {total_trades}")
         logger.info(f"  累计收益率: {cumulative_return*100:.2f}%")
         logger.info(f"  数据条数: {len(df)}")
@@ -86,7 +86,7 @@ async def main():
         rs = avg_gain / avg_loss
         df['rsi'] = 100 - (100 / (1 + rs))
 
-        logger.info(f"✓ RSI计算完成")
+        logger.info("✓ RSI计算完成")
         logger.info(f"  最新RSI: {df['rsi'].iloc[-1]:.2f}")
         logger.info(f"  超买区域(>70): {(df['rsi'] > 70).sum()} 次")
         logger.info(f"  超卖区域(<30): {(df['rsi'] < 30).sum()} 次")
@@ -103,7 +103,7 @@ async def main():
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         df['macd_hist'] = df['macd'] - df['macd_signal']
 
-        logger.info(f"✓ MACD计算完成")
+        logger.info("✓ MACD计算完成")
         logger.info(f"  MACD: {df['macd'].iloc[-1]:.2f}")
         logger.info(f"  Signal: {df['macd_signal'].iloc[-1]:.2f}")
         logger.info(f"  Histogram: {df['macd_hist'].iloc[-1]:.2f}")
@@ -137,7 +137,7 @@ async def main():
         total_size += f.stat().st_size
         file_count += 1
 
-    logger.info(f"✓ 存储统计:")
+    logger.info("✓ 存储统计:")
     logger.info(f"  文件数量: {file_count}")
     logger.info(f"  总大小: {total_size / 1024:.2f} KB")
     logger.info(f"  平均文件大小: {total_size / 1024 / file_count:.2f} KB")
@@ -146,21 +146,21 @@ async def main():
     logger.info("\n--- 测试7: 模块导入测试 ---")
     try:
         from config.settings import settings
-        logger.info(f"✓ 配置模块导入成功")
+        logger.info("✓ 配置模块导入成功")
         logger.info(f"  交易模式: {settings.TRADING_MODE}")
         logger.info(f"  数据路径: {settings.DATA_STORAGE_PATH}")
 
         from core.exchanges import exchange_manager
-        logger.info(f"✓ 交易所模块导入成功")
+        logger.info("✓ 交易所模块导入成功")
 
         from core.strategies import strategy_manager
-        logger.info(f"✓ 策略模块导入成功")
+        logger.info("✓ 策略模块导入成功")
 
         from strategies.technical import MAStrategy, RSIStrategy
-        logger.info(f"✓ 技术指标策略导入成功")
+        logger.info("✓ 技术指标策略导入成功")
 
         from core.backtest import BacktestEngine
-        logger.info(f"✓ 回测模块导入成功")
+        logger.info("✓ 回测模块导入成功")
 
     except Exception as e:
         logger.error(f"✗ 模块导入失败: {e}")

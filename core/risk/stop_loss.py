@@ -1,5 +1,17 @@
 """
 Stop loss and take profit helpers.
+
+NOT ON THE LIVE TRADING PATH. Authoritative SL/TP enforcement for paper and
+live trading lives in ``core/trading/execution_engine.py`` (``take_profit_pct``,
+``partial_take_profit_*``, fixed-stop / exchange-side protective orders). This
+module is a standalone, self-contained calculator/manager used by unit tests
+and offline tooling only — no production code in ``core/trading``, ``web`` or
+``risk_manager`` calls ``StopLossManager`` / ``TakeProfitManager``.
+
+Do NOT wire this into the live close loop without first removing the
+execution_engine path: running both would double-close positions. Treat the
+``confirm_take_profit`` / ``release_take_profit`` contract here as a
+test-surface API until a single source of truth is established.
 """
 
 from dataclasses import dataclass

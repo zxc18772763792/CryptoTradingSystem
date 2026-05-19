@@ -82,24 +82,29 @@
 
 ---
 
-### 🟠 P1 — R-3 追踪止损双路径行为不一致（未修复）
+### 🟠 P1 — R-3 追踪止损双路径行为不一致（✅ 代码已修复，提交 902e54c）
 
-**位置**: `core/risk/stop_loss.py:83` vs `stop_loss.py:214`
+**位置**: `core/risk/stop_loss.py`
 **问题**: `calculate_stop_price → _trailing_stop` 不检查 `config.trailing_activation`，追踪止损从
 开仓即生效；`update_trailing_stop` 正确判断激活阈值。两路径行为不同，可能过早止损。
-**建议**: 将 `trailing_activation` 检查下移到 `_trailing_stop` 共用路径，或在 `calculate_stop_price`
-调用 `_trailing_stop` 前先判断激活阈值。
-**优先级**: P1（可能导致过早止损，但不是资金安全级别）
+**修复**: `calculate_stop_price` 的 TRAILING 分支已补 `trailing_activation` 判定，与
+`update_trailing_stop` 行为一致。
+**⚠ 重要前提**: `core/risk/stop_loss.py` **整模块未接入实盘**（生产 SL/TP 在
+`core/trading/execution_engine.py`），故本修复仅作用于测试面，不改变实盘行为。详见
+`CODE_AUDIT_2026-05-19.md`。
 
 ---
 
-### 🟠 P1 — R-4 止盈标记不可逆（未修复）
+### 🟠 P1 — R-4 止盈标记不可逆（✅ 代码已修复，提交 902e54c）
 
-**位置**: `core/risk/stop_loss.py:268`
+**位置**: `core/risk/stop_loss.py`
 **问题**: `target["executed"] = True` 在发出止盈指令时即标记，若下游执行失败则该档位
 永久失效、不重触发，产生静默丢单。
-**建议**: 将 `executed` 标记移至下游确认成交后（需修改执行引擎接口），或增加失败回滚机制。
-**优先级**: P1（实盘中止盈单若执行失败会静默丢失）
+**修复**: `check_take_profit` 改为非变更式 + 短时 `pending` 守卫；新增
+`confirm_take_profit`（成交后才永久标记）/ `release_take_profit`（失败后清守卫以复触发）。
+**⚠ 重要前提**: 同 R-3 —— `stop_loss.py` 未接入实盘，`confirm/release` 契约在生产中
+**无调用方**，属测试面 API。实盘止盈走 execution_engine 的 `take_profit_pct` /
+`partial_take_profit_*`，与本模块独立。统一事实源前勿接线（详见 `CODE_AUDIT_2026-05-19.md`）。
 
 ---
 
@@ -121,12 +126,13 @@
 
 ---
 
-### 🟠 P1 — T-4 多匹配时平仓静默失败（未修复）
+### 🟠 P1 — T-4 多匹配时平仓静默失败（✅ 代码已修复，提交 902e54c）
 
-**位置**: `core/trading/position_manager.py:503-508`
+**位置**: `core/trading/position_manager.py`
 **问题**: `close_position` 若命中多个持仓且未指定 `strategy`，仅 warning 并 `return None`，
 调用方可能误以为已平仓，留下悬挂持仓。
-**建议**: 强制消歧或显式抛出异常，不应静默返回 None。
+**修复**: 多匹配改 `logger.error` + 记录 `_last_close_error`，新增 `get_last_close_error()`
+供调用方/健康检查查询，不再静默。**注**: position_manager 在实盘路径上，本修复实盘生效。
 
 ---
 
