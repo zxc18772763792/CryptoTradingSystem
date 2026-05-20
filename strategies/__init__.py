@@ -33,6 +33,7 @@ from strategies.quantitative import (
     PairsTradingStrategy,
     FamaFactorArbitrageStrategy,
     MultiFactorHFStrategy,
+    LiquidationOICrowdingStrategy,
 )
 
 from strategies.arbitrage import (
@@ -47,10 +48,15 @@ from strategies.macro import (
     SocialSentimentStrategy,
     FundFlowStrategy,
     WhaleActivityStrategy,
+    OnChainFlowRegimeStrategy,
 )
 
 from strategies.ai import (
     MLXGBoostStrategy,
+)
+
+from strategies.event_driven import (
+    SupplyEventStrategy,
 )
 
 # Factor-based strategies
@@ -105,6 +111,7 @@ ALL_STRATEGIES = [
     "PairsTradingStrategy",
     "FamaFactorArbitrageStrategy",
     "MultiFactorHFStrategy",
+    "LiquidationOICrowdingStrategy",
     "CEXArbitrageStrategy",
     "TriangularArbitrageStrategy",
     "DEXArbitrageStrategy",
@@ -113,6 +120,8 @@ ALL_STRATEGIES = [
     "SocialSentimentStrategy",
     "FundFlowStrategy",
     "WhaleActivityStrategy",
+    "OnChainFlowRegimeStrategy",
+    "SupplyEventStrategy",
     "MLXGBoostStrategy",
     # Factor-based strategies
     "ROCStrategy",
@@ -166,6 +175,7 @@ __all__ = [
     "PairsTradingStrategy",
     "FamaFactorArbitrageStrategy",
     "MultiFactorHFStrategy",
+    "LiquidationOICrowdingStrategy",
     "CEXArbitrageStrategy",
     "TriangularArbitrageStrategy",
     "DEXArbitrageStrategy",
@@ -174,6 +184,8 @@ __all__ = [
     "SocialSentimentStrategy",
     "FundFlowStrategy",
     "WhaleActivityStrategy",
+    "OnChainFlowRegimeStrategy",
+    "SupplyEventStrategy",
     "MLXGBoostStrategy",
     # Factor-based strategies
     "ROCStrategy",

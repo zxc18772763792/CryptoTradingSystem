@@ -9,10 +9,12 @@ from strategies.macro.fund_flow import (
     FundFlowStrategy,
     WhaleActivityStrategy,
 )
+from strategies.macro.onchain_flow_regime import OnChainFlowRegimeStrategy
 
 __all__ = [
     "MarketSentimentStrategy",
     "SocialSentimentStrategy",
     "FundFlowStrategy",
     "WhaleActivityStrategy",
+    "OnChainFlowRegimeStrategy",
 ]

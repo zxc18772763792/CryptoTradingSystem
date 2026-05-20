@@ -1,0 +1,42 @@
+structural_strategy_suite:
+  enabled: true
+  base_position_pct: 0.04
+  max_position_pct: 0.08
+  max_total_structural_exposure_pct: 0.12
+  min_signal_strength_for_entry: 0.55
+  min_signal_strength_for_scale_up: 0.75
+  max_trades_per_day: 3
+  min_hours_between_entries_same_symbol: 12
+  taker_fee_bps_assumption: 6
+  slippage_bps_assumption: 5
+
+liquidation_oi:
+  gate_mode: true
+  trade_mode: true
+  crowded_score_enter: 0.75
+  crowded_score_exit: 0.55
+  liquidation_burst_enter: 0.80
+  max_holding_hours: 36
+  stop_atr_mult: 1.8
+  take_profit_atr_mult: 2.4
+
+supply_events:
+  gate_mode: true
+  trade_mode: true
+  pre_event_window_days: 14
+  post_event_window_days: 14
+  supply_pressure_enter: 0.70
+  absorption_enter: 0.70
+  event_blackout_hours_before: 2
+  event_blackout_hours_after: 6
+
+onchain_flow:
+  regime_mode: true
+  trade_mode: false
+  lookback_days: 180
+  min_data_days: 90
+  stale_data_ttl_hours: 24
+  accumulation_enter: 0.65
+  distribution_enter: 0.65
+  max_scalar_up: 1.20
+  max_scalar_down: 0.40

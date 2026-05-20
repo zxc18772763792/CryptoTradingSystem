@@ -3252,6 +3252,37 @@ class ExecutionEngine:
             if signal.signal_type == SignalType.CLOSE_SHORT:
                 return await self._close_position_in_active_mode(signal, PositionSide.SHORT)
 
+            try:
+                from core.structural.risk_gate import structural_risk_gate  # noqa: PLC0415
+
+                structural_gate = structural_risk_gate.evaluate_signal(signal)
+            except Exception as exc:
+                logger.debug(f"structural risk gate evaluation failed: {exc}")
+                structural_gate = None
+            if structural_gate is not None:
+                signal.metadata = dict(signal.metadata or {})
+                signal.metadata["structural_risk_gate_result"] = structural_gate.to_dict()
+                if not structural_gate.allowed:
+                    self._signal_diagnostics["risk_rejected"] = int(
+                        self._signal_diagnostics.get("risk_rejected", 0)
+                    ) + 1
+                    self._signal_diagnostics["last_result"] = {
+                        "status": "structural_risk_gate_blocked",
+                        "strategy": signal.strategy_name,
+                        "symbol": signal.symbol,
+                        "reason_codes": structural_gate.reason_codes,
+                    }
+                    self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                    logger.warning(
+                        f"Signal blocked by structural risk gate: "
+                        f"strategy={signal.strategy_name} symbol={signal.symbol} "
+                        f"type={signal.signal_type.value} reasons={structural_gate.reason_codes}"
+                    )
+                    return None
+                if structural_gate.adjusted_strength < float(signal.strength or 0.0):
+                    signal.metadata["structural_gate_original_strength"] = float(signal.strength or 0.0)
+                    signal.strength = structural_gate.adjusted_strength
+
             if signal.signal_type == SignalType.BUY:
                 side = OrderSide.BUY
                 position_side = PositionSide.LONG
