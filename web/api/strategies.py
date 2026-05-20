@@ -1,6 +1,7 @@
 """Strategy API endpoints."""
 import asyncio
 import inspect
+import time
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -33,6 +34,11 @@ from core.strategies.persistence import (
 )
 from core.strategies.runtime_policy import build_runtime_limit_policy
 from core.strategies.health_monitor import strategy_health_monitor
+from core.trading.binance_rest import (
+    binance_ccxt_symbol as shared_binance_ccxt_symbol,
+    binance_has_credentials as shared_binance_has_credentials,
+    binance_signed_request as shared_binance_signed_request,
+)
 from core.trading.execution_engine import execution_engine
 from core.trading.order_manager import order_manager
 from core.trading.position_manager import PositionSide, position_manager
@@ -80,6 +86,11 @@ _MONITOR_TIMEFRAME_FALLBACKS: List[str] = [
     "12h",
     "1d",
 ]
+_MONITOR_EXCHANGE_POSITION_CACHE_TTL_SEC = 8.0
+_MONITOR_EXCHANGE_POSITION_CACHE: Dict[str, Any] = {
+    "ts": 0.0,
+    "rows": [],
+}
 
 
 def _recommended_symbols(strategy_type: str) -> List[str]:
@@ -124,7 +135,17 @@ def _clean_strategy_text(value: Any) -> str:
 def _strategy_runtime_mode(name: str, info: Optional[Dict[str, Any]] = None) -> str:
     payload = dict(info or {})
     runtime = dict(payload.get("runtime") or {}) if isinstance(payload.get("runtime"), dict) else {}
-    raw = payload.get("runtime_mode") or runtime.get("runtime_mode")
+    metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
+    raw = (
+        payload.get("runtime_mode")
+        or runtime.get("runtime_mode")
+        or metadata.get("runtime_mode")
+    )
+    if not raw:
+        try:
+            raw = strategy_manager.get_strategy_runtime_mode(name)
+        except Exception:
+            raw = None
     text = str(raw or "").strip().lower()
     return "live" if text == "live" else "paper"
 
@@ -460,6 +481,210 @@ def _safe_optional_float(value: Any) -> Optional[float]:
     if np.isnan(out) or np.isinf(out):
         return None
     return float(out)
+
+
+def _canonical_monitor_symbol(symbol: Any) -> str:
+    raw = str(symbol or "").strip().upper()
+    if not raw:
+        return ""
+    if ":" in raw:
+        raw = raw.split(":", 1)[0]
+    if "_" in raw and "/" not in raw:
+        left, right = raw.split("_", 1)
+        raw = f"{left}/{right}"
+    if raw.endswith("USDT") and "/" not in raw and len(raw) > 4:
+        raw = f"{raw[:-4]}/USDT"
+    return raw
+
+
+def _position_side_text(position: Any) -> str:
+    side = getattr(position, "side", None)
+    return str(getattr(side, "value", side) or "").strip().lower()
+
+
+def _raw_field(raw: Any, *names: str, default: Any = None) -> Any:
+    for name in names:
+        if isinstance(raw, dict):
+            value = raw.get(name)
+        else:
+            value = getattr(raw, name, None)
+        if value is not None:
+            return value
+    return default
+
+
+async def _load_exchange_position_rows_cached(*, force: bool = False) -> List[Dict[str, Any]]:
+    if execution_engine.is_paper_mode() and not force:
+        return []
+    now = time.time()
+    cached_at = float(_MONITOR_EXCHANGE_POSITION_CACHE.get("ts") or 0.0)
+    cached_rows = list(_MONITOR_EXCHANGE_POSITION_CACHE.get("rows") or [])
+    if cached_rows and now - cached_at <= _MONITOR_EXCHANGE_POSITION_CACHE_TTL_SEC:
+        return [dict(row) for row in cached_rows]
+
+    rows: List[Dict[str, Any]] = []
+    for exchange_name in exchange_manager.get_connected_exchanges():
+        connector = exchange_manager.get_exchange(exchange_name)
+        if not connector:
+            continue
+        default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").strip().lower()
+        if default_type not in {"future", "futures", "swap", "contract", "perp", "perpetual"}:
+            continue
+        try:
+            exchange_positions = await asyncio.wait_for(connector.get_positions(), timeout=5.0)
+        except Exception as exc:
+            logger.debug(f"monitor-data: exchange positions unavailable for {exchange_name}: {exc}")
+            continue
+        for raw in exchange_positions or []:
+            symbol = str(_raw_field(raw, "symbol", default="") or "").strip()
+            symbol_key = _canonical_monitor_symbol(symbol)
+            if not symbol_key:
+                continue
+            amount = _safe_float(
+                _raw_field(raw, "amount", "contracts", default=0.0),
+                0.0,
+            )
+            if abs(amount) <= 1e-12:
+                amount = _safe_float(
+                    _raw_field(raw, "quantity", "positionAmt", "size", default=0.0),
+                    0.0,
+                )
+            if abs(amount) <= 1e-12:
+                continue
+            side = str(_raw_field(raw, "side", "positionSide", default="") or "").strip().lower()
+            if side not in {"long", "short"}:
+                side = "short" if amount < 0 else "long"
+            entry_px = _safe_float(
+                _raw_field(raw, "entry_price", "entryPrice", default=0.0),
+                0.0,
+            )
+            current_px = _safe_float(
+                _raw_field(raw, "current_price", "mark_price", "markPrice", default=0.0),
+                0.0,
+            )
+            if current_px <= 0:
+                current_px = entry_px
+            unrealized = _safe_float(
+                _raw_field(raw, "unrealized_pnl", "unrealizedPnl", "unRealizedProfit", default=0.0),
+                0.0,
+            )
+            unrealized_pct = 0.0
+            if entry_px > 0 and current_px > 0:
+                unrealized_pct = (current_px - entry_px) / entry_px if side == "long" else (entry_px - current_px) / entry_px
+            rows.append(
+                {
+                    "symbol": symbol or symbol_key,
+                    "exchange": str(exchange_name or "").strip().lower(),
+                    "side": side,
+                    "entry_price": entry_px,
+                    "current_price": current_px,
+                    "quantity": abs(amount),
+                    "value": abs(amount) * current_px,
+                    "unrealized_pnl": unrealized,
+                    "unrealized_pnl_pct": unrealized_pct,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "strategy": None,
+                    "account_id": "exchange_live",
+                    "metadata": {
+                        "source": "exchange_live",
+                        "synced_from_exchange": exchange_name,
+                    },
+                }
+            )
+
+    if not rows and force and shared_binance_has_credentials():
+        try:
+            raw_rows = await shared_binance_signed_request(
+                "GET",
+                "/fapi/v2/positionRisk",
+                host="fapi",
+                timeout_sec=8.0,
+            )
+        except Exception:
+            try:
+                raw_rows = await shared_binance_signed_request(
+                    "GET",
+                    "/fapi/v3/positionRisk",
+                    host="fapi",
+                    timeout_sec=8.0,
+                )
+            except Exception as exc:
+                logger.debug(f"monitor-data: binance positionRisk fallback unavailable: {exc}")
+                raw_rows = []
+        for raw in raw_rows or []:
+            amount = _safe_float(_raw_field(raw, "positionAmt", "amount", default=0.0), 0.0)
+            if abs(amount) <= 1e-12:
+                continue
+            symbol = str(_raw_field(raw, "symbol", default="") or "").strip()
+            side = "short" if amount < 0 else "long"
+            entry_px = _safe_float(_raw_field(raw, "entryPrice", "entry_price", default=0.0), 0.0)
+            current_px = _safe_float(_raw_field(raw, "markPrice", "current_price", default=0.0), 0.0)
+            unrealized = _safe_float(_raw_field(raw, "unRealizedProfit", "unrealizedPnl", "unrealized_pnl", default=0.0), 0.0)
+            if current_px <= 0:
+                current_px = entry_px
+            unrealized_pct = 0.0
+            if entry_px > 0 and current_px > 0:
+                unrealized_pct = (entry_px - current_px) / entry_px if side == "short" else (current_px - entry_px) / entry_px
+            rows.append(
+                {
+                    "symbol": shared_binance_ccxt_symbol(symbol, futures=True) if symbol else "",
+                    "exchange": "binance",
+                    "side": side,
+                    "entry_price": entry_px,
+                    "current_price": current_px,
+                    "quantity": abs(amount),
+                    "value": abs(amount) * current_px,
+                    "unrealized_pnl": unrealized,
+                    "unrealized_pnl_pct": unrealized_pct,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "strategy": None,
+                    "account_id": "exchange_live",
+                    "metadata": {
+                        "source": "exchange_live",
+                        "synced_from_exchange": "binance",
+                        "fallback": "positionRisk",
+                    },
+                }
+            )
+
+    if rows:
+        _MONITOR_EXCHANGE_POSITION_CACHE["ts"] = now
+        _MONITOR_EXCHANGE_POSITION_CACHE["rows"] = [dict(row) for row in rows]
+    return rows
+
+
+def _refresh_positions_from_exchange_rows(
+    positions: List[Any],
+    exchange_rows: List[Dict[str, Any]],
+) -> List[Any]:
+    if not positions or not exchange_rows:
+        return list(positions or [])
+    index: Dict[tuple, Dict[str, Any]] = {}
+    for row in exchange_rows:
+        exchange = str(row.get("exchange") or "").strip().lower()
+        symbol = _canonical_monitor_symbol(row.get("symbol"))
+        side = str(row.get("side") or "").strip().lower()
+        if exchange and symbol and side in {"long", "short"}:
+            index[(exchange, symbol, side)] = row
+
+    refreshed: List[Any] = []
+    for position in positions:
+        exchange = str(getattr(position, "exchange", "") or "").strip().lower()
+        symbol = _canonical_monitor_symbol(getattr(position, "symbol", ""))
+        side = _position_side_text(position)
+        row = index.get((exchange, symbol, side))
+        if row and _safe_float(row.get("current_price"), 0.0) > 0:
+            try:
+                position.update_price(_safe_float(row.get("current_price"), 0.0))
+            except Exception:
+                pass
+            try:
+                position.unrealized_pnl = _safe_float(row.get("unrealized_pnl"), getattr(position, "unrealized_pnl", 0.0))
+                position.unrealized_pnl_pct = _safe_float(row.get("unrealized_pnl_pct"), getattr(position, "unrealized_pnl_pct", 0.0))
+            except Exception:
+                pass
+        refreshed.append(position)
+    return refreshed
 
 
 def _json_safe_value(value: Any) -> Any:
@@ -1454,7 +1679,43 @@ async def audit_strategy_library(
 
 @router.get("/summary")
 async def get_strategy_summary(limit: int = 20):
-    return strategy_manager.get_dashboard_summary(signal_limit=limit)
+    summary = strategy_manager.get_dashboard_summary(signal_limit=limit)
+    has_live_strategies = any(
+        _strategy_runtime_mode(str(name), strategy_manager.get_strategy_info(str(name)) or {}) == "live"
+        for name in (summary.get("strategy_performance") or {}).keys()
+    )
+    exchange_rows = await _load_exchange_position_rows_cached(force=has_live_strategies)
+    if exchange_rows:
+        performance = summary.get("strategy_performance")
+        if isinstance(performance, dict):
+            exchange_index = strategy_manager._live_exchange_position_index(exchange_rows)
+            for name, row in list(performance.items()):
+                if not isinstance(row, dict):
+                    continue
+                info = strategy_manager.get_strategy_info(name) or {}
+                if _strategy_runtime_mode(name, info) != "live":
+                    continue
+                positions = strategy_manager._positions_for_strategy(name, "live")
+                positions = strategy_manager._refresh_strategy_positions_from_exchange_cache(
+                    positions,
+                    exchange_index=exchange_index,
+                )
+                unrealized = sum(float(getattr(pos, "unrealized_pnl", 0.0) or 0.0) for pos in positions)
+                realized = _safe_float(row.get("realized_pnl"), 0.0)
+                capital_base = _safe_float(row.get("capital_base"), 0.0)
+                total = realized + unrealized
+                equity_curve = [
+                    capital_base,
+                    capital_base + realized,
+                    capital_base + total,
+                ]
+                row["unrealized_pnl"] = round(unrealized, 4)
+                row["return_ratio"] = round(total / capital_base, 8) if capital_base > 0 else 0.0
+                row["return_pct"] = round(row["return_ratio"] * 100.0, 4)
+                row["max_drawdown_ratio"] = round(strategy_manager._calc_max_drawdown_ratio(equity_curve), 8)
+                row["max_drawdown_pct"] = round(row["max_drawdown_ratio"] * 100.0, 4)
+                row["last_update"] = datetime.now(timezone.utc).isoformat()
+    return summary
 
 
 @router.get("/export/{name}")
@@ -2090,6 +2351,7 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
         exchange=exchange,
         runtime_mode=runtime_mode,
     )
+    exchange_position_rows = await _load_exchange_position_rows_cached(force=True) if runtime_mode == "live" else []
 
     # ── 2. OHLCV bars ────────────────────────────────────────────────────────
     ohlcv: list = []
@@ -2247,10 +2509,13 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
             realized += pnl
             equity.append({"t": ts_raw or end_ts, "v": round(mark, 4)})
 
-        unrealized = sum(
-            float(p.unrealized_pnl or 0.0)
-            for p in _positions_by_strategy(name, runtime_mode)
-        )
+        strategy_positions = _positions_by_strategy(name, runtime_mode)
+        if runtime_mode == "live" and exchange_position_rows:
+            strategy_positions = _refresh_positions_from_exchange_rows(
+                strategy_positions,
+                exchange_position_rows,
+            )
+        unrealized = sum(float(p.unrealized_pnl or 0.0) for p in strategy_positions)
         final_value = round(mark + unrealized, 4)
         if equity:
             last_ts = str((equity[-1] or {}).get("t") or "").strip()
@@ -2277,7 +2542,13 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     # ── 5. Current open positions ─────────────────────────────────────────────
     positions_data: list = []
     try:
-        for pos in _positions_by_strategy(name, runtime_mode):
+        strategy_positions = _positions_by_strategy(name, runtime_mode)
+        if runtime_mode == "live" and exchange_position_rows:
+            strategy_positions = _refresh_positions_from_exchange_rows(
+                strategy_positions,
+                exchange_position_rows,
+            )
+        for pos in strategy_positions:
             side = getattr(pos, "side", None)
             side_value = side.value if hasattr(side, "value") else str(side or "")
             entry_time = getattr(pos, "entry_time", None) or getattr(pos, "opened_at", None)

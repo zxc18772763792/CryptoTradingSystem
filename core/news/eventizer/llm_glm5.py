@@ -45,6 +45,8 @@ DEFAULT_OPENAI_MODEL = "deepseek-v4-flash"
 _OPENAI_FAILOVER_SCOPE = "news"
 _LEGACY_PROVIDER_ALIASES = {"glm", "glm5", "zhipu"}
 _LEGACY_BASE_URL_HINTS = ("bigmodel.cn", "zhipu")
+_LOCAL_GEMMA_MODEL_HINTS = ("gemma4-local", "local-gemma")
+_LOCAL_GEMMA_BASE_HINTS = ("192.168.", "localhost", "127.0.0.1", "host.docker.internal")
 _RUNTIME_SETTING_NAMES = (
     "NEWS_LLM_API_KEY",
     "NEWS_LLM_BASE_URL",
@@ -86,6 +88,22 @@ def _first_non_empty(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name) or default)
+    except Exception:
+        return int(default)
+
+
+def _is_local_gemma_target(base_url: Any, model: Any = "") -> bool:
+    text = f"{base_url or ''} {model or ''}".strip().lower()
+    return any(hint in text for hint in (*_LOCAL_GEMMA_MODEL_HINTS, *_LOCAL_GEMMA_BASE_HINTS))
+
+
+def _local_gemma_timeout_sec(timeout_sec: int) -> int:
+    return max(int(timeout_sec or 0), max(30, _env_int("NEWS_LLM_LOCAL_TARGET_TIMEOUT_SEC", 120)))
 
 
 def _merge_csv_values(*values: Any) -> str:
@@ -387,6 +405,11 @@ def _openai_post_with_failover(
         target_model = str(target.get("model") or "").strip()
         transport = target_transport(target)
         headers = build_target_headers({**dict(target), "api_key": api_key})
+        request_timeout_sec = (
+            _local_gemma_timeout_sec(timeout_sec)
+            if _is_local_gemma_target(base_url, target_model)
+            else timeout_sec
+        )
         request_chat_payload = None
         if chat_fallback_payload is not None:
             request_chat_payload = dict(chat_fallback_payload)
@@ -407,7 +430,7 @@ def _openai_post_with_failover(
                     anthropic_messages_endpoint(base_url),
                     headers=headers,
                     json=request_anthropic_payload,
-                    timeout=timeout_sec,
+                    timeout=request_timeout_sec,
                 )
                 if response.status_code >= 400:
                     err = RuntimeError(f"LLM anthropic HTTP {response.status_code}: {response.text[:300]}")
@@ -453,7 +476,7 @@ def _openai_post_with_failover(
                     chat_url,
                     headers=headers,
                     json=request_chat_payload,
-                    timeout=timeout_sec,
+                    timeout=request_timeout_sec,
                 )
                 if chat_response.status_code >= 400:
                     err = RuntimeError(f"LLM chat HTTP {chat_response.status_code}: {chat_response.text[:300]}")
@@ -496,7 +519,7 @@ def _openai_post_with_failover(
                     url,
                     headers=headers,
                     json=request_payload,
-                    timeout=timeout_sec,
+                    timeout=request_timeout_sec,
                 )
                 if response.status_code >= 400:
                     if request_chat_payload and responses_api_unavailable(response.status_code, response.text):
@@ -509,7 +532,7 @@ def _openai_post_with_failover(
                             chat_url,
                             headers=headers,
                             json=request_chat_payload,
-                            timeout=timeout_sec,
+                            timeout=request_timeout_sec,
                         )
                         if chat_response.status_code >= 400:
                             err = RuntimeError(f"LLM chat HTTP {chat_response.status_code}: {chat_response.text[:300]}")
@@ -578,7 +601,7 @@ def _openai_post_with_failover(
                         chat_url,
                         headers=build_openai_headers(api_key),
                         json=request_chat_payload,
-                        timeout=timeout_sec,
+                        timeout=request_timeout_sec,
                     )
                     if chat_response.status_code >= 400:
                         err = RuntimeError(f"LLM chat HTTP {chat_response.status_code}: {chat_response.text[:300]}")

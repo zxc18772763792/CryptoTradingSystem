@@ -271,6 +271,95 @@ class StrategyManager:
             except TypeError:
                 return list(get_positions(name) or [])
 
+    @staticmethod
+    def _position_side_text(position: Any) -> str:
+        side = getattr(position, "side", None)
+        return str(getattr(side, "value", side) or "").strip().lower()
+
+    @staticmethod
+    def _canonical_symbol(symbol: Any) -> str:
+        raw = str(symbol or "").strip().upper()
+        if not raw:
+            return ""
+        if ":" in raw:
+            raw = raw.split(":", 1)[0]
+        if "_" in raw and "/" not in raw:
+            left, right = raw.split("_", 1)
+            raw = f"{left}/{right}"
+        if raw.endswith("USDT") and "/" not in raw and len(raw) > 4:
+            raw = f"{raw[:-4]}/USDT"
+        return raw
+
+    def _live_exchange_position_index(
+        self,
+        seed_rows: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[Tuple[str, str, str], Dict[str, float]]:
+        from core.trading.position_manager import position_manager
+
+        index: Dict[Tuple[str, str, str], Dict[str, float]] = {}
+        for row in seed_rows or []:
+            if not isinstance(row, dict):
+                continue
+            metadata = dict(row.get("metadata") or {})
+            source = str(metadata.get("source") or row.get("source") or "").strip().lower()
+            if source != "exchange_live":
+                continue
+            exchange = str(row.get("exchange") or "").strip().lower()
+            symbol = self._canonical_symbol(row.get("symbol"))
+            side = str(row.get("side") or "").strip().lower()
+            if not exchange or not symbol or side not in {"long", "short"}:
+                continue
+            index[(exchange, symbol, side)] = {
+                "current_price": float(row.get("current_price") or 0.0),
+                "unrealized_pnl": float(row.get("unrealized_pnl") or 0.0),
+                "unrealized_pnl_pct": float(row.get("unrealized_pnl_pct") or 0.0),
+            }
+        for position in position_manager.get_all_positions(scope="live"):
+            metadata = dict(getattr(position, "metadata", {}) or {})
+            if str(metadata.get("source") or "").strip().lower() != "exchange_live":
+                continue
+            exchange = str(getattr(position, "exchange", "") or "").strip().lower()
+            symbol = self._canonical_symbol(getattr(position, "symbol", ""))
+            side = self._position_side_text(position)
+            if not exchange or not symbol or side not in {"long", "short"}:
+                continue
+            index[(exchange, symbol, side)] = {
+                "current_price": float(getattr(position, "current_price", 0.0) or 0.0),
+                "unrealized_pnl": float(getattr(position, "unrealized_pnl", 0.0) or 0.0),
+                "unrealized_pnl_pct": float(getattr(position, "unrealized_pnl_pct", 0.0) or 0.0),
+            }
+        return index
+
+    def _refresh_strategy_positions_from_exchange_cache(
+        self,
+        positions: List[Any],
+        exchange_index: Optional[Dict[Tuple[str, str, str], Dict[str, float]]] = None,
+    ) -> List[Any]:
+        if not positions:
+            return []
+        index = exchange_index if exchange_index is not None else self._live_exchange_position_index()
+        if not index:
+            return list(positions)
+        refreshed: List[Any] = []
+        for position in positions:
+            exchange = str(getattr(position, "exchange", "") or "").strip().lower()
+            symbol = self._canonical_symbol(getattr(position, "symbol", ""))
+            side = self._position_side_text(position)
+            live_row = index.get((exchange, symbol, side))
+            if live_row and float(live_row.get("current_price") or 0.0) > 0:
+                try:
+                    position.update_price(float(live_row["current_price"]))
+                except Exception:
+                    pass
+                if abs(float(live_row.get("unrealized_pnl") or 0.0)) > 1e-12:
+                    try:
+                        position.unrealized_pnl = float(live_row["unrealized_pnl"])
+                        position.unrealized_pnl_pct = float(live_row.get("unrealized_pnl_pct") or 0.0)
+                    except Exception:
+                        pass
+            refreshed.append(position)
+        return refreshed
+
     def _timeframe_to_seconds(self, timeframe: str) -> int:
         if not timeframe:
             return 60
@@ -1231,7 +1320,13 @@ class StrategyManager:
         logger.info(f"Strategy {name} started")
         return True
 
-    async def stop_strategy(self, name: str) -> bool:
+    async def stop_strategy(
+        self,
+        name: str,
+        *,
+        close_positions: bool = True,
+        reason: str = "strategy_stopped",
+    ) -> bool:
         strategy = self._strategies.get(name)
         if not strategy:
             return False
@@ -1241,16 +1336,29 @@ class StrategyManager:
         self._running_since.pop(name, None)
         self._runtime_deadlines.pop(name, None)
         self._clear_bar_runtime_state(name)
-        try:
-            close_summary = await self._close_positions_for_strategy_stop(name, reason="strategy_stopped")
-            self._remember_stop_close_summary(name, close_summary)
-            logger.info(
-                f"Strategy {name} stop close summary: "
-                f"requested={close_summary.get('requested', 0)} "
-                f"closed={close_summary.get('closed', 0)} "
-                f"failed={close_summary.get('failed', 0)}"
-            )
-        except Exception as exc:
+        if close_positions:
+            try:
+                close_summary = await self._close_positions_for_strategy_stop(name, reason=reason)
+                self._remember_stop_close_summary(name, close_summary)
+                logger.info(
+                    f"Strategy {name} stop close summary: "
+                    f"requested={close_summary.get('requested', 0)} "
+                    f"closed={close_summary.get('closed', 0)} "
+                    f"failed={close_summary.get('failed', 0)}"
+                )
+            except Exception as exc:
+                self._remember_stop_close_summary(
+                    name,
+                    {
+                        "requested": 0,
+                        "closed": 0,
+                        "failed": 0,
+                        "results": [],
+                        "error": str(exc),
+                    },
+                )
+                logger.error(f"Strategy {name} stop auto-close failed: {exc}")
+        else:
             self._remember_stop_close_summary(
                 name,
                 {
@@ -1258,10 +1366,11 @@ class StrategyManager:
                     "closed": 0,
                     "failed": 0,
                     "results": [],
-                    "error": str(exc),
+                    "skipped": True,
+                    "reason": reason,
                 },
             )
-            logger.error(f"Strategy {name} stop auto-close failed: {exc}")
+            logger.info(f"Strategy {name} stopped without auto-closing positions: reason={reason}")
         logger.info(f"Strategy {name} stopped")
         return True
 
@@ -1297,13 +1406,19 @@ class StrategyManager:
         for name in self._strategies:
             await self.start_strategy(name)
 
-    async def stop_all(self, runtime_mode: Optional[str] = None) -> None:
+    async def stop_all(
+        self,
+        runtime_mode: Optional[str] = None,
+        *,
+        close_positions: bool = True,
+        reason: str = "strategy_stopped",
+    ) -> None:
         names = list(self._strategies.keys())
         if runtime_mode is not None:
             target = self._normalize_runtime_mode(runtime_mode)
             names = [name for name in names if self.get_strategy_runtime_mode(name) == target]
         for name in names:
-            await self.stop_strategy(name)
+            await self.stop_strategy(name, close_positions=close_positions, reason=reason)
 
     def register_signal_callback(self, callback: callable) -> None:
         self._signal_callbacks.append(callback)
@@ -1879,10 +1994,14 @@ class StrategyManager:
                     last_update = ts
 
             runtime_mode = self._runtime_mode_for_strategy(name)
-            unrealized_pnl = sum(
-                float(p.unrealized_pnl or 0.0)
-                for p in self._positions_for_strategy(name, runtime_mode)
-            )
+            local_positions = self._positions_for_strategy(name, runtime_mode)
+            if runtime_mode == "live":
+                live_exchange_index = self._live_exchange_position_index()
+                local_positions = self._refresh_strategy_positions_from_exchange_cache(
+                    local_positions,
+                    exchange_index=live_exchange_index,
+                )
+            unrealized_pnl = sum(float(p.unrealized_pnl or 0.0) for p in local_positions)
             total_pnl = float(realized_pnl + unrealized_pnl)
             equity_curve.append(mark_equity + unrealized_pnl)
 

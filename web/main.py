@@ -1075,10 +1075,7 @@ async def _circuit_breaker_monitor_worker(stop_event: asyncio.Event, app: FastAP
             closer = getattr(_sm, "_close_positions_for_strategy_stop", None)
             if closer is None:
                 return None
-            result = closer(strategy_name, reason=reason)
-            if asyncio.iscoroutine(result) and monitor_loop.is_running():
-                return asyncio.run_coroutine_threadsafe(result, monitor_loop)
-            return result
+            return closer(strategy_name, reason=reason)
 
         register_close_positions_hook(_hook)
     except Exception as exc:
@@ -1120,10 +1117,15 @@ async def _circuit_breaker_monitor_worker(stop_event: asyncio.Event, app: FastAP
     while not stop_event.is_set():
         try:
             report = await asyncio.to_thread(run_circuit_breaker_checks)
-            if report.get("strategy_trips") or report.get("portfolio_trip"):
+            # `trip_strategy` fires the close-positions hook itself; the
+            # circuit breaker schedules async hooks back onto this loop.
+            new_strategy_trips = [
+                t for t in (report.get("strategy_trips") or []) if t.get("new_trip")
+            ]
+            if new_strategy_trips or report.get("portfolio_trip"):
                 logger.warning(
                     "circuit_breaker_monitor: trip detected "
-                    f"strategy={len(report.get('strategy_trips') or [])} "
+                    f"strategy={len(new_strategy_trips)} "
                     f"portfolio={'yes' if report.get('portfolio_trip') else 'no'}"
                 )
             _touch_runtime_task("circuit_breaker_monitor", success=True)
@@ -1398,7 +1400,7 @@ async def lifespan(app: FastAPI):
 
     await strategy_health_monitor.stop()
     await shutdown_ops_runtime(app, standalone=False)
-    await strategy_manager.stop_all()
+    await strategy_manager.stop_all(close_positions=False, reason="service_shutdown")
     await execution_engine.stop()
     await runtime_bootstrap.shutdown_shared_runtime(
         include_news=True,

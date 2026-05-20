@@ -12,12 +12,12 @@ on runtime_limit expiry, and never restarted it — strategies could
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
-import pytest
 
-from core.strategies.strategy_manager import StrategyConfig
+from core.strategies.strategy_manager import StrategyConfig, StrategyManager
 from strategies.technical.rsi_strategy import RSIStrategy
 
 
@@ -58,8 +58,6 @@ def test_auto_renew_extends_deadline_by_runtime_limit_minutes():
 def test_register_strategy_accepts_auto_renew_kwarg():
     """register_strategy must surface the flag so callers can opt in
     without poking at StrategyConfig directly."""
-    from core.strategies.strategy_manager import StrategyManager
-
     mgr = StrategyManager()
     ok = mgr.register_strategy(
         name="lc_register_probe",
@@ -73,3 +71,75 @@ def test_register_strategy_accepts_auto_renew_kwarg():
     assert ok
     cfg = mgr._configs["lc_register_probe"]
     assert cfg.auto_renew_on_runtime_limit is True
+
+
+def test_stop_strategy_can_skip_position_close(monkeypatch):
+    mgr = StrategyManager()
+    ok = mgr.register_strategy(
+        name="lc_shutdown_probe",
+        strategy_class=RSIStrategy,
+        params={"period": 14},
+        symbols=["BTC/USDT"],
+        timeframe="1h",
+    )
+    assert ok
+    strategy = mgr._strategies["lc_shutdown_probe"]
+    strategy.start()
+
+    called = []
+
+    async def fail_if_called(*args, **kwargs):
+        called.append((args, kwargs))
+        raise AssertionError("position close should be skipped")
+
+    async def noop_stop_task(name):
+        return None
+
+    monkeypatch.setattr(mgr, "_close_positions_for_strategy_stop", fail_if_called)
+    monkeypatch.setattr(mgr, "_stop_task_for_strategy", noop_stop_task)
+
+    assert asyncio.run(
+        mgr.stop_strategy(
+            "lc_shutdown_probe",
+            close_positions=False,
+            reason="service_shutdown",
+        )
+    )
+    assert called == []
+    assert not strategy.is_running
+    assert mgr.pop_last_stop_close_summary("lc_shutdown_probe") == {
+        "requested": 0,
+        "closed": 0,
+        "failed": 0,
+        "results": [],
+        "skipped": True,
+        "reason": "service_shutdown",
+    }
+
+
+def test_stop_all_passes_close_positions_policy(monkeypatch):
+    mgr = StrategyManager()
+    for name in ("lc_all_a", "lc_all_b"):
+        ok = mgr.register_strategy(
+            name=name,
+            strategy_class=RSIStrategy,
+            params={"period": 14},
+            symbols=["BTC/USDT"],
+            timeframe="1h",
+        )
+        assert ok
+
+    calls = []
+
+    async def fake_stop_strategy(name, *, close_positions=True, reason="strategy_stopped"):
+        calls.append((name, close_positions, reason))
+        return True
+
+    monkeypatch.setattr(mgr, "stop_strategy", fake_stop_strategy)
+
+    asyncio.run(mgr.stop_all(close_positions=False, reason="service_shutdown"))
+
+    assert calls == [
+        ("lc_all_a", False, "service_shutdown"),
+        ("lc_all_b", False, "service_shutdown"),
+    ]

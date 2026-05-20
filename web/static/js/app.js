@@ -1689,6 +1689,16 @@ return Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOr
 function refreshTradingSecondary(){
 return Promise.allSettled([loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
 }
+function refreshStrategiesCore(){
+const tasks=[loadStrategies(),loadStrategySummary()];
+try{
+  if(_monitorCurrentName)tasks.push(refreshStrategyMonitor());
+}catch{}
+return Promise.allSettled(tasks);
+}
+function refreshStrategiesSecondary(){
+return Promise.allSettled([loadStrategySummary(),loadStrategyHealth()]);
+}
 function replaceStuckLoading(containerId,message){
 const box=document.getElementById(containerId);
 if(!box)return;
@@ -5586,7 +5596,7 @@ softRefreshTimer=setTimeout(()=>{
   if(group&&!canRunSharedPolling(group))return;
   if(tab==='dashboard')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadStrategySummary(),loadRisk()]);
   else if(tab==='trading')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
-  else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary()]);
+  else if(tab==='strategies')refreshStrategiesCore();
   else if(tab==='ai-research')refreshAiResearchModules();
   else if(tab==='ai-agent')refreshAiResearchModules();
 },delay);
@@ -8298,17 +8308,19 @@ setInterval(()=>{
 setInterval(()=>{
   if(document.hidden)return;
   const tab=getActiveTabName();
-  if(tab!=='dashboard'&&tab!=='trading')return;
+  if(tab!=='dashboard'&&tab!=='trading'&&tab!=='strategies')return;
   const group=sharedPollGroupForTab(tab);
   if(group&&!canRunSharedPolling(group))return;
   if(!state.wsConnected||isTabBootstrapping(tab,18000))return;
   const now=Date.now();
   const lastByTab=state.lastWsBackfillAtByTab||(state.lastWsBackfillAtByTab={});
   const last=Number(lastByTab[tab]||0);
-  if(now-last<30000)return;
+  const minBackfillMs=tab==='strategies'?10000:30000;
+  if(now-last<minBackfillMs)return;
   lastByTab[tab]=now;
   if(tab==='dashboard')refreshDashboardCore();
   else if(tab==='trading')refreshTradingCore();
+  else if(tab==='strategies')refreshStrategiesCore();
 },WS_BACKFILL_INTERVAL_MS);
 setInterval(()=>{
   if(document.hidden)return;
@@ -8318,7 +8330,7 @@ setInterval(()=>{
   if(isTabBootstrapping(tab,18000))return;
   if(tab==='dashboard')scheduleDashboardSecondaryLoads(0);
   else if(tab==='trading')scheduleTradingSecondaryLoads(0);
-  else if(tab==='strategies')Promise.allSettled([loadStrategyHealth()]);
+  else if(tab==='strategies')refreshStrategiesSecondary();
 },SECONDARY_TAB_POLL_INTERVAL_MS);}
 
 window.cancelOrder=cancelOrder;window.cancelConditional=cancelConditional;window.registerStrategy=registerStrategy;window.toggleStrategy=toggleStrategy;window.saveAllocation=saveAllocation;window.openEditor=openEditor;window.compareLive=compareLive;window.openStrategyEditor=openEditor;window.compareStrategyLive=compareLive;window.previewCompareStrategyByRank=previewCompareStrategyByRank;window.registerCompareStrategyByRank=registerCompareStrategyByRank;window.registerOptimizeBestAsNewStrategyInstance=registerOptimizeBestAsNewStrategyInstance;window.registerOptimizeTrialByRank=registerOptimizeTrialByRank;window.editNotifyRule=editNotifyRule;window.toggleNotifyRule=toggleNotifyRule;window.deleteNotifyRule=deleteNotifyRule;window.openBacktestWithSpec=openBacktestWithSpec;window.registerArbitrageStrategy=registerArbitrageStrategy;window.jumpToBacktestFromArbitrage=jumpToBacktestFromArbitrage;window.scanArbitragePairsRanking=scanArbitragePairsRanking;window.applyArbitragePairCandidate=applyArbitragePairCandidate;
@@ -8349,7 +8361,7 @@ async function openStrategyMonitor(name) {
     if (_monitorTimer) clearInterval(_monitorTimer);
     _monitorTimer = setInterval(() => {
         if (_monitorCurrentName) _loadMonitorData(_monitorCurrentName).catch(() => {});
-    }, 30000);
+    }, 12000);
 }
 
 function closeStrategyMonitor() {
@@ -9087,4 +9099,3 @@ async function handleCircuitBreakerReset() {
         start();
     }
 })();
-

@@ -86,6 +86,90 @@ def test_dashboard_summary_uses_live_review_when_runtime_history_is_empty(monkey
     assert performance["last_update"] == "2026-04-09T09:00:00+00:00"
 
 
+def test_dashboard_summary_marks_live_strategy_positions_from_exchange_cache(monkeypatch):
+    manager = StrategyManager()
+    manager._strategies["live_alpha"] = _DummyStrategy()
+    manager._configs["live_alpha"] = StrategyConfig(
+        name="live_alpha",
+        strategy_class=type("DemoStrategy", (), {}),
+        params={},
+        symbols=["XRP/USDT"],
+        timeframe="5m",
+        exchange="binance",
+        allocation=0.25,
+        metadata={"runtime_mode": "live"},
+    )
+
+    local_position = SimpleNamespace(
+        symbol="XRP/USDT",
+        exchange="binance",
+        side=SimpleNamespace(value="short"),
+        entry_price=1.3558,
+        current_price=1.3558,
+        quantity=394.1,
+        unrealized_pnl=0.0,
+        unrealized_pnl_pct=0.0,
+        metadata={},
+    )
+
+    def update_price(price):
+        local_position.current_price = float(price)
+        local_position.unrealized_pnl = (local_position.entry_price - float(price)) * local_position.quantity
+        local_position.unrealized_pnl_pct = (local_position.entry_price - float(price)) / local_position.entry_price
+
+    local_position.update_price = update_price
+
+    monkeypatch.setattr(
+        risk_module.risk_manager,
+        "get_risk_report",
+        lambda: {"equity": {"current": 1000.0}},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        risk_module.risk_manager,
+        "get_trade_history",
+        lambda limit=5000: [],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        position_module.position_manager,
+        "get_positions_by_strategy",
+        lambda name, scope=None: [local_position] if name == "live_alpha" else [],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        position_module.position_manager,
+        "get_all_positions",
+        lambda scope=None: [
+            SimpleNamespace(
+                symbol="XRP/USDT:USDT",
+                exchange="binance",
+                side=SimpleNamespace(value="short"),
+                current_price=1.3566,
+                unrealized_pnl=-0.31528,
+                unrealized_pnl_pct=-0.00059006,
+                metadata={"source": "exchange_live"},
+            )
+        ]
+        if scope == "live"
+        else [],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        execution_module.execution_engine,
+        "get_live_trade_review",
+        lambda **kwargs: {"items": []},
+        raising=False,
+    )
+
+    summary = manager.get_dashboard_summary(signal_limit=5)
+    performance = summary["strategy_performance"]["live_alpha"]
+
+    assert local_position.current_price == 1.3566
+    assert performance["unrealized_pnl"] == -0.3153
+    assert performance["return_pct"] < 0
+
+
 def test_dashboard_summary_counts_runtime_modes(monkeypatch):
     manager = StrategyManager()
     manager._strategies["paper_alpha"] = _DummyStrategy()

@@ -213,6 +213,27 @@ def _min_importance() -> int:
     return max(0, min(100, _env_int("NEWS_LLM_MIN_IMPORTANCE", 35)))
 
 
+def _has_local_gemma_backup(cfg: Optional[Dict[str, Any]] = None) -> bool:
+    llm_cfg = (cfg or {}).get("llm") if isinstance(cfg, dict) else {}
+    if not isinstance(llm_cfg, dict):
+        llm_cfg = {}
+    setting_names = (
+        "NEWS_LLM_BACKUP_BASE_URL",
+        "NEWS_LLM_BACKUP_MODEL",
+        "OPENAI_BACKUP_BASE_URL",
+        "OPENAI_BACKUP_MODEL",
+    )
+    values = [
+        llm_cfg.get("backup_base_url"),
+        llm_cfg.get("backup_model"),
+        *(os.getenv(name) for name in setting_names),
+        *(getattr(settings, name, "") for name in setting_names),
+    ]
+    text = " ".join(str(value or "") for value in values).lower()
+    hints = ("gemma4-local", "local-gemma", "192.168.", "localhost", "127.0.0.1", "host.docker.internal")
+    return any(hint in text for hint in hints)
+
+
 def _source_interval(source: str) -> int:
     source_name = str(source or "").strip().lower()
     default_interval = DEFAULT_INTERVALS.get(source_name, 300)
@@ -226,7 +247,12 @@ def _worker_cfg(cfg: Dict[str, Any], limit: int) -> Dict[str, Any]:
     llm_cfg = dict(effective.get("llm") or {})
     worker_timeout = max(8, _env_int("NEWS_LLM_WORKER_TIMEOUT_SEC", 16))
     worker_connect_timeout = max(3, _env_int("NEWS_LLM_WORKER_CONNECT_TIMEOUT_SEC", 6))
-    worker_batch_size = max(1, min(int(limit or 1), _env_int("NEWS_LLM_WORKER_BATCH_SIZE", 8)))
+    has_local_gemma_backup = _has_local_gemma_backup(effective)
+    default_batch_size = 1 if has_local_gemma_backup else 8
+    worker_batch_size = max(1, min(int(limit or 1), _env_int("NEWS_LLM_WORKER_BATCH_SIZE", default_batch_size)))
+    if has_local_gemma_backup:
+        local_cap = max(1, _env_int("NEWS_LLM_LOCAL_BACKUP_BATCH_SIZE", 1))
+        worker_batch_size = min(worker_batch_size, local_cap)
     current_timeout = int(llm_cfg.get("timeout_sec") or worker_timeout)
     current_connect_timeout = int(llm_cfg.get("connect_timeout_sec") or worker_connect_timeout)
     current_batch_size = int(llm_cfg.get("batch_size") or worker_batch_size)

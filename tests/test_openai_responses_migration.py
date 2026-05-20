@@ -50,10 +50,11 @@ class _FakeSession:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    def post(self, url, *, headers=None, json=None):
+    def post(self, url, *, headers=None, json=None, timeout=None):
         self._capture["url"] = url
         self._capture["headers"] = headers
         self._capture["json"] = json
+        self._capture["timeout"] = timeout
         return _FakeResponse(self._payload, status=self._status, text_payload=self._text_payload, headers=self._headers)
 
 
@@ -69,7 +70,7 @@ class _FakeSequenceSession:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    def request(self, method, url, *, headers=None, json=None):
+    def request(self, method, url, *, headers=None, json=None, timeout=None):
         self._capture.setdefault("urls", []).append(url)
         self._capture.setdefault("requests", []).append(
             {
@@ -77,14 +78,15 @@ class _FakeSequenceSession:
                 "url": url,
                 "headers": headers,
                 "json": json,
+                "timeout": timeout,
             }
         )
         if not self._responses:
             raise AssertionError("unexpected extra request")
         return self._responses.pop(0)
 
-    def post(self, url, *, headers=None, json=None):
-        return self.request("POST", url, headers=headers, json=json)
+    def post(self, url, *, headers=None, json=None, timeout=None):
+        return self.request("POST", url, headers=headers, json=json, timeout=timeout)
 
 
 class _SyncResponse:
@@ -1363,6 +1365,144 @@ def test_news_llm_runtime_backup_settings_support_three_step_translation_chain(m
         ]
 
 
+def test_news_sync_failover_uses_longer_timeout_for_local_gemma(monkeypatch, tmp_path):
+    import core.news.eventizer.llm_glm5 as module
+    import core.utils.openai_responses as response_helpers
+
+    monkeypatch.setenv("OPENAI_FAILOVER_STATE_PATH", str(tmp_path / "openai_failover_state.json"))
+    monkeypatch.setenv("NEWS_LLM_LOCAL_TARGET_TIMEOUT_SEC", "120")
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "nvidia-key", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", "https://integrate.api.nvidia.com/v1", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "google/gemma-4-31b-it", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_API_KEY", "local-gemma-key,previous-ds-key", raising=False)
+    monkeypatch.setattr(
+        settings,
+        "NEWS_LLM_BACKUP_BASE_URL",
+        "http://192.168.1.24:8010/v1,https://kuaipao.ai",
+        raising=False,
+    )
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_MODEL", "gemma4-local,deepseek-v4-flash", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "", raising=False)
+    response_helpers.reset_openai_target_preferences()
+
+    captured: list[dict] = []
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        captured.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        if "integrate.api.nvidia.com" in url:
+            return _SyncResponse({"error": {"message": "temporarily unavailable"}}, status_code=503)
+        return _SyncResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"summary":"GM ok","sentiment":"neutral"}',
+                            "role": "assistant",
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    result = module.summarize_title_llm(
+        "BTC trades flat",
+        {
+            "llm": {
+                "provider": "openai",
+                "force_chat_completions": True,
+                "summarize_timeout_sec": 12,
+            }
+        },
+        max_length=60,
+    )
+
+    assert result["source"] == "gm_summary:gemma4-local"
+    assert [item["url"] for item in captured] == [
+        "https://integrate.api.nvidia.com/v1/chat/completions",
+        "http://192.168.1.24:8010/v1/chat/completions",
+    ]
+    assert captured[0]["timeout"] == 12
+    assert captured[1]["timeout"] == 120
+
+
+def test_async_glm_client_failover_uses_longer_timeout_for_local_gemma(monkeypatch, tmp_path):
+    import core.news.eventizer.async_glm_client as module
+    import core.utils.openai_responses as response_helpers
+
+    monkeypatch.setenv("OPENAI_FAILOVER_STATE_PATH", str(tmp_path / "openai_failover_state.json"))
+    monkeypatch.setenv("NEWS_LLM_LOCAL_TARGET_TIMEOUT_SEC", "120")
+    monkeypatch.setenv("NEWS_LLM_LOCAL_CONNECT_TIMEOUT_SEC", "10")
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "nvidia-key", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", "https://integrate.api.nvidia.com/v1", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "google/gemma-4-31b-it", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_API_KEY", "local-gemma-key,previous-ds-key", raising=False)
+    monkeypatch.setattr(
+        settings,
+        "NEWS_LLM_BACKUP_BASE_URL",
+        "http://192.168.1.24:8010/v1,https://kuaipao.ai",
+        raising=False,
+    )
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_MODEL", "gemma4-local,deepseek-v4-flash", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "", raising=False)
+    response_helpers.reset_openai_target_preferences()
+
+    capture = {}
+    responses = [
+        _FakeResponse({"error": {"message": "temporarily unavailable"}}, status=503),
+        _FakeResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"summary":"GM ok","sentiment":"neutral"}',
+                            "role": "assistant",
+                        }
+                    }
+                ]
+            },
+            status=200,
+        ),
+    ]
+    monkeypatch.setattr(
+        module.aiohttp,
+        "ClientSession",
+        lambda **kwargs: _FakeSequenceSession(capture=capture, responses=responses, **kwargs),
+    )
+
+    client = module.AsyncGLMClient(
+        {
+            "llm": {
+                "provider": "openai",
+                "force_chat_completions": True,
+                "timeout_sec": 16,
+                "connect_timeout_sec": 6,
+            }
+        }
+    )
+    response, error_type = asyncio.run(
+        client.chat_completions(
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=64,
+        )
+    )
+
+    assert error_type == "none"
+    assert response["choices"][0]["message"]["content"] == '{"summary":"GM ok","sentiment":"neutral"}'
+    assert capture["urls"] == [
+        "https://integrate.api.nvidia.com/v1/chat/completions",
+        "http://192.168.1.24:8010/v1/chat/completions",
+    ]
+    assert capture["requests"][0]["timeout"].total == 16
+    assert capture["requests"][1]["timeout"].total == 120
+    assert capture["requests"][1]["timeout"].connect == 10
+
+
 def test_news_sync_summary_uses_openai_mini_source(monkeypatch):
     import core.news.eventizer.llm_glm5 as module
 
@@ -1965,6 +2105,14 @@ def test_news_feed_summarize_cfg_uses_llm_defaults_when_env_absent(monkeypatch):
 
     monkeypatch.delenv("NEWS_API_SUMMARY_BATCH_SIZE", raising=False)
     monkeypatch.delenv("NEWS_API_SUMMARIZE_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("NEWS_LLM_BACKUP_BASE_URL", raising=False)
+    monkeypatch.delenv("NEWS_LLM_BACKUP_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_BACKUP_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BACKUP_MODEL", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_MODEL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "", raising=False)
 
     effective = module._feed_summarize_cfg(
         {
@@ -1979,6 +2127,37 @@ def test_news_feed_summarize_cfg_uses_llm_defaults_when_env_absent(monkeypatch):
 
     assert effective["llm"]["summarize_batch_size"] == 6
     assert effective["llm"]["summarize_timeout_sec"] == 45
+
+
+def test_news_feed_summarize_cfg_caps_batch_and_extends_timeout_for_local_gemma(monkeypatch):
+    import web.api.news as module
+
+    monkeypatch.setenv("NEWS_API_SUMMARY_BATCH_SIZE", "6")
+    monkeypatch.setenv("NEWS_API_SUMMARIZE_TIMEOUT_SEC", "45")
+    monkeypatch.delenv("NEWS_LLM_LOCAL_SUMMARY_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("NEWS_LLM_LOCAL_SUMMARIZE_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("NEWS_LLM_BACKUP_BASE_URL", raising=False)
+    monkeypatch.delenv("NEWS_LLM_BACKUP_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_BACKUP_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BACKUP_MODEL", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_BASE_URL", "http://192.168.1.24:8010/v1", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_MODEL", "gemma4-local", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "", raising=False)
+
+    effective = module._feed_summarize_cfg(
+        {
+            "llm": {
+                "provider": "openai",
+                "summarize_batch_size": 6,
+                "summarize_timeout_sec": 45,
+            }
+        },
+        limit=12,
+    )
+
+    assert effective["llm"]["summarize_batch_size"] == 1
+    assert effective["llm"]["summarize_timeout_sec"] == 120
 
 
 def test_failed_unstructured_with_llm_summary_is_treated_as_repaired():

@@ -268,6 +268,269 @@ def test_monitor_data_restores_persisted_trade_markers_and_positions(monkeypatch
     assert payload["positions"][0]["entry_time"] == "2026-04-09T08:16:37"
 
 
+def test_monitor_data_marks_live_strategy_position_from_exchange_cache(monkeypatch):
+    from web.api import strategies as strategies_api
+
+    strategy_name = "live_mark_monitor"
+    local_position = SimpleNamespace(
+        symbol="XRP/USDT",
+        exchange="binance",
+        side=strategies_api.PositionSide.SHORT,
+        entry_price=1.3558,
+        current_price=1.3558,
+        quantity=394.1,
+        unrealized_pnl=0.0,
+        unrealized_pnl_pct=0.0,
+        opened_at=datetime.fromisoformat("2026-05-20T03:42:50"),
+    )
+
+    def update_price(price):
+        local_position.current_price = float(price)
+        local_position.unrealized_pnl = (local_position.entry_price - float(price)) * local_position.quantity
+        local_position.unrealized_pnl_pct = (local_position.entry_price - float(price)) / local_position.entry_price
+
+    local_position.update_price = update_price
+
+    class DummyStrategy:
+        def get_recent_signals(self, limit: int = 200):
+            return []
+
+    async def fake_load_klines_from_parquet(
+        *,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        start_time=None,
+        end_time=None,
+    ):
+        idx = pd.date_range("2026-05-20 02:00:00", periods=120, freq="5min")
+        return _ohlcv_frame(idx, start_price=1.35)
+
+    monkeypatch.setattr(strategies_api.strategy_manager, "get_strategy", lambda name: DummyStrategy())
+    monkeypatch.setattr(
+        strategies_api.strategy_manager,
+        "get_strategy_info",
+        lambda name: {
+            "name": name,
+            "symbols": ["XRP/USDT"],
+            "timeframe": "5m",
+            "state": "running",
+            "exchange": "binance",
+            "runtime_mode": "live",
+        },
+    )
+    monkeypatch.setattr(
+        strategies_api.strategy_manager,
+        "_configs",
+        {strategy_name: SimpleNamespace(allocation=0.15)},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        strategies_api.data_storage,
+        "load_klines_from_parquet",
+        fake_load_klines_from_parquet,
+    )
+    monkeypatch.setattr(
+        strategies_api.execution_engine,
+        "get_live_trade_review",
+        lambda **kwargs: {
+            "items": [
+                {
+                    "timestamp": "2026-05-20T03:42:50.111869+00:00",
+                    "strategy": strategy_name,
+                    "signal_type": "sell",
+                    "side": "sell",
+                    "fill_price": 1.3558,
+                    "pnl": 0.0,
+                    "quantity": 394.1,
+                    "order_id": "xrp-live-short",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        strategies_api.risk_manager,
+        "get_risk_report",
+        lambda: {"equity": {"current": 2000.0}},
+    )
+    monkeypatch.setattr(
+        strategies_api.risk_manager,
+        "get_trade_history",
+        lambda limit=5000: [],
+    )
+    monkeypatch.setattr(
+        strategies_api.position_manager,
+        "get_positions_by_strategy",
+        lambda name, scope=None: [local_position] if name == strategy_name else [],
+    )
+    monkeypatch.setattr(
+        strategies_api.order_manager,
+        "get_open_orders",
+        _async_return([]),
+    )
+    monkeypatch.setattr(
+        strategies_api,
+        "_load_exchange_position_rows_cached",
+        _async_return(
+            [
+                {
+                    "symbol": "XRP/USDT:USDT",
+                    "exchange": "binance",
+                    "side": "short",
+                    "entry_price": 1.3558,
+                    "current_price": 1.3566,
+                    "quantity": 394.1,
+                    "unrealized_pnl": -0.31528,
+                    "unrealized_pnl_pct": -0.00059006,
+                    "metadata": {"source": "exchange_live"},
+                }
+            ]
+        ),
+    )
+
+    payload = asyncio.run(
+        strategies_api.get_strategy_monitor_data(strategy_name, bars=120)
+    )
+
+    assert payload["positions"][0]["current_price"] == 1.3566
+    assert payload["positions"][0]["unrealized_pnl"] == -0.31528
+    assert payload["metrics"]["unrealized_pnl"] == -0.3153
+    assert payload["metrics"]["return_pct"] < 0
+
+
+def test_summary_reads_live_exchange_rows_for_live_strategy_when_global_mode_is_paper(monkeypatch):
+    from web.api import strategies as strategies_api
+
+    strategy_name = "live_summary_guarded"
+    local_position = SimpleNamespace(
+        symbol="XRP/USDT",
+        exchange="binance",
+        side=strategies_api.PositionSide.SHORT,
+        entry_price=1.3558,
+        current_price=1.3558,
+        quantity=394.1,
+        unrealized_pnl=0.0,
+        unrealized_pnl_pct=0.0,
+    )
+
+    def update_price(price):
+        local_position.current_price = float(price)
+        local_position.unrealized_pnl = (local_position.entry_price - float(price)) * local_position.quantity
+        local_position.unrealized_pnl_pct = (local_position.entry_price - float(price)) / local_position.entry_price
+
+    local_position.update_price = update_price
+
+    summary_payload = {
+        "strategy_performance": {
+            strategy_name: {
+                "realized_pnl": 0.0,
+                "unrealized_pnl": 0.0,
+                "capital_base": 1000.0,
+                "return_ratio": 0.0,
+                "return_pct": 0.0,
+                "max_drawdown_ratio": 0.0,
+                "max_drawdown_pct": 0.0,
+            }
+        }
+    }
+
+    monkeypatch.setattr(
+        strategies_api.execution_engine,
+        "is_paper_mode",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        strategies_api.strategy_manager,
+        "get_dashboard_summary",
+        lambda signal_limit=20: summary_payload,
+    )
+    monkeypatch.setattr(
+        strategies_api.strategy_manager,
+        "get_strategy_info",
+        lambda name: {
+            "name": name,
+            "runtime_mode": "live",
+            "symbols": ["XRP/USDT"],
+            "exchange": "binance",
+        },
+    )
+    monkeypatch.setattr(
+        strategies_api.strategy_manager,
+        "get_strategy_runtime_mode",
+        lambda name: "live",
+    )
+    monkeypatch.setattr(
+        strategies_api.strategy_manager,
+        "_positions_for_strategy",
+        lambda name, runtime_mode=None: [local_position],
+    )
+
+    called = []
+
+    async def fake_load_exchange_rows(*, force=False):
+        called.append(force)
+        return [
+            {
+                "symbol": "XRP/USDT:USDT",
+                "exchange": "binance",
+                "side": "short",
+                "entry_price": 1.3558,
+                "current_price": 1.3566,
+                "quantity": 394.1,
+                "unrealized_pnl": -0.31528,
+                "unrealized_pnl_pct": -0.00059006,
+                "metadata": {"source": "exchange_live"},
+            }
+        ]
+
+    monkeypatch.setattr(strategies_api, "_load_exchange_position_rows_cached", fake_load_exchange_rows)
+
+    payload = asyncio.run(strategies_api.get_strategy_summary())
+
+    assert called == [True]
+    perf = payload["strategy_performance"][strategy_name]
+    assert perf["unrealized_pnl"] == -0.3153
+    assert perf["return_pct"] < 0
+
+
+def test_exchange_position_loader_uses_binance_fallback_when_forced_in_paper(monkeypatch):
+    from web.api import strategies as strategies_api
+
+    monkeypatch.setattr(strategies_api.execution_engine, "is_paper_mode", lambda: True)
+    monkeypatch.setattr(strategies_api.exchange_manager, "get_connected_exchanges", lambda: [])
+    monkeypatch.setattr(strategies_api, "shared_binance_has_credentials", lambda: True)
+    monkeypatch.setattr(
+        strategies_api,
+        "shared_binance_signed_request",
+        _async_return(
+            [
+                {
+                    "symbol": "XRPUSDT",
+                    "positionAmt": "-394.1",
+                    "entryPrice": "1.3558",
+                    "markPrice": "1.3566",
+                    "unRealizedProfit": "-0.31528",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        strategies_api,
+        "_MONITOR_EXCHANGE_POSITION_CACHE",
+        {"ts": 0.0, "rows": []},
+    )
+
+    assert asyncio.run(strategies_api._load_exchange_position_rows_cached(force=False)) == []
+
+    rows = asyncio.run(strategies_api._load_exchange_position_rows_cached(force=True))
+
+    assert rows[0]["symbol"] == "XRP/USDT:USDT"
+    assert rows[0]["side"] == "short"
+    assert rows[0]["quantity"] == 394.1
+    assert rows[0]["unrealized_pnl"] == -0.31528
+    assert rows[0]["metadata"]["fallback"] == "positionRisk"
+
+
 def test_monitor_data_merges_live_review_with_history_trades_without_double_counting(monkeypatch):
     from web.api import strategies as strategies_api
 

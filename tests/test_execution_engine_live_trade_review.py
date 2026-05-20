@@ -54,6 +54,14 @@ def test_record_live_strategy_trade_persists_journal_and_counts(tmp_path: Path, 
             fee_usd=0.05,
             slippage_cost_usd=0.01,
             action="open_or_add",
+            cost_details={
+                "fee_source": "exchange_trades",
+                "fee_asset": "USDT",
+                "slippage_source": "fill_vs_reference",
+                "slippage_bps": 2.5,
+                "slippage_reference_price": 99.975,
+                "exchange_trade_count": 1,
+            },
         )
     )
     asyncio.run(
@@ -79,6 +87,11 @@ def test_record_live_strategy_trade_persists_journal_and_counts(tmp_path: Path, 
     assert lines[-1]["strategy"] == "alpha"
     assert lines[-1]["strategy_trade_count"] == 2
     assert lines[-1]["signal"]["strategy_name"] == "alpha"
+    assert lines[0]["fee_source"] == "exchange_trades"
+    assert lines[0]["fee_asset"] == "USDT"
+    assert lines[0]["slippage_source"] == "fill_vs_reference"
+    assert lines[0]["slippage_bps"] == 2.5
+    assert lines[0]["slippage_reference_price"] == 99.975
 
     summary = engine.get_live_trade_review(limit=10, strategy="alpha", hours=24 * 30)
     assert summary["count"] == 2

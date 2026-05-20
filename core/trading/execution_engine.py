@@ -27,7 +27,12 @@ from core.strategies import Signal, SignalType
 from core.strategies.runtime_policy import parse_timeframe_minutes
 from core.strategies.strategy_manager import strategy_manager
 from core.trading.account_manager import account_manager
-from core.trading.binance_rest import fetch_binance_live_wallet_snapshot_fast
+from core.trading.binance_rest import (
+    binance_has_credentials,
+    binance_market_symbol,
+    binance_signed_request,
+    fetch_binance_live_wallet_snapshot_fast,
+)
 from core.trading.order_manager import OrderRequest, OrderSide, OrderType, order_manager
 from core.trading.position_manager import PositionSide, position_manager
 from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
@@ -187,6 +192,7 @@ class ExecutionEngine:
         self._live_strategy_trade_counts: Dict[str, int] = self._load_live_trade_counts()
         self._live_review_lock: Optional[asyncio.Lock] = None
         self._live_review_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._live_fee_backfill_cache: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
 
     def _get_live_review_lock(self) -> asyncio.Lock:
         loop = asyncio.get_running_loop()
@@ -611,6 +617,7 @@ class ExecutionEngine:
         action: str,
         gross_pnl_usd: Optional[float] = None,
         net_pnl_usd: Optional[float] = None,
+        cost_details: Optional[Dict[str, Any]] = None,
     ) -> None:
         if self._paper_trading:
             return
@@ -631,6 +638,7 @@ class ExecutionEngine:
             self._safe_float(pnl, 0.0),
         )
         resolved_cost_usd = resolved_fee_usd + resolved_slippage_cost_usd
+        resolved_cost_details = dict(cost_details or {})
 
         entry: Dict[str, Any]
         async with self._get_live_review_lock():
@@ -661,6 +669,19 @@ class ExecutionEngine:
                 "cost_usd": float(resolved_cost_usd),
                 "signal": signal_payload,
             }
+            for key in (
+                "fee_source",
+                "fee_asset",
+                "slippage_source",
+                "slippage_bps",
+                "slippage_reference_price",
+                "exchange_trade_count",
+                "exchange_trade_qty",
+                "exchange_trade_cost",
+            ):
+                value = resolved_cost_details.get(key)
+                if value not in (None, ""):
+                    entry[key] = value
             if net_pnl_usd is not None:
                 entry["net_pnl_usd"] = float(resolved_net_pnl_usd)
             with self._live_trade_journal_path.open("a", encoding="utf-8") as fh:
@@ -2033,6 +2054,302 @@ class ExecutionEngine:
         return {
             "fee_usd": float(fee_usd),
             "slippage_cost_usd": float(slippage_cost_usd),
+        }
+
+    @staticmethod
+    def _split_trade_symbol(symbol: str) -> Tuple[str, str]:
+        text = str(symbol or "").strip().upper()
+        if ":" in text:
+            text = text.split(":", 1)[0]
+        if "/" in text:
+            left, right = text.split("/", 1)
+            return left.strip(), right.strip()
+        for quote in ("USDT", "USDC", "BUSD", "USD", "BTC", "ETH", "BNB"):
+            if text.endswith(quote) and len(text) > len(quote):
+                return text[: -len(quote)], quote
+        return text, "USDT"
+
+    @classmethod
+    def _order_fee_usd_from_order(cls, order: Any, *, symbol: str, fill_price: float) -> Tuple[float, str]:
+        fee = cls._safe_nonnegative_float(getattr(order, "fee", 0.0), 0.0)
+        if fee <= 0:
+            return 0.0, ""
+
+        fee_currency = str(getattr(order, "fee_currency", "") or "").strip().upper()
+        _, quote = cls._split_trade_symbol(symbol)
+        if not fee_currency or fee_currency in STABLE_COINS or fee_currency == quote:
+            return fee, "order_fee"
+        if fee_currency == cls._split_trade_symbol(symbol)[0] and fill_price > 0:
+            return fee * fill_price, "order_fee_base_converted"
+        return fee, f"order_fee_{fee_currency.lower()}"
+
+    @classmethod
+    def _extract_trade_order_id(cls, trade: Any) -> str:
+        if not isinstance(trade, dict):
+            return ""
+        for key in ("order", "orderId", "order_id"):
+            raw = trade.get(key)
+            if raw not in (None, ""):
+                return str(raw)
+        info = trade.get("info") if isinstance(trade.get("info"), dict) else {}
+        for key in ("orderId", "order_id", "order"):
+            raw = info.get(key)
+            if raw not in (None, ""):
+                return str(raw)
+        return ""
+
+    @classmethod
+    def _extract_trade_fee(cls, trade: Any) -> Tuple[float, str]:
+        if not isinstance(trade, dict):
+            return 0.0, ""
+
+        fee_info = trade.get("fee") if isinstance(trade.get("fee"), dict) else {}
+        fee_cost = cls._safe_nonnegative_float(fee_info.get("cost"), 0.0)
+        fee_currency = str(fee_info.get("currency") or "").strip().upper()
+        if fee_cost > 0:
+            return fee_cost, fee_currency
+
+        for key in ("commission", "fee", "feeCost", "commissionAmount"):
+            fee_cost = cls._safe_nonnegative_float(trade.get(key), 0.0)
+            if fee_cost > 0:
+                fee_currency = str(
+                    trade.get("commissionAsset")
+                    or trade.get("feeCurrency")
+                    or trade.get("fee_asset")
+                    or ""
+                ).strip().upper()
+                return fee_cost, fee_currency
+
+        info = trade.get("info") if isinstance(trade.get("info"), dict) else {}
+        for key in ("commission", "fee", "feeCost", "commissionAmount"):
+            fee_cost = cls._safe_nonnegative_float(info.get(key), 0.0)
+            if fee_cost > 0:
+                fee_currency = str(
+                    info.get("commissionAsset")
+                    or info.get("feeCurrency")
+                    or info.get("fee_asset")
+                    or ""
+                ).strip().upper()
+                return fee_cost, fee_currency
+        return 0.0, ""
+
+    async def _fee_amount_to_usd(
+        self,
+        *,
+        fee_amount: float,
+        fee_currency: str,
+        symbol: str,
+        fill_price: float,
+        exchange: str,
+        account_id: Optional[str],
+    ) -> float:
+        amount = self._safe_nonnegative_float(fee_amount, 0.0)
+        if amount <= 0:
+            return 0.0
+        currency = str(fee_currency or "").strip().upper()
+        base, quote = self._split_trade_symbol(symbol)
+        if not currency or currency in STABLE_COINS or currency == quote:
+            return amount
+        if currency == base and fill_price > 0:
+            return amount * float(fill_price)
+
+        connector = self._resolve_cached_exchange(exchange, account_id=account_id)
+        converted = await self._estimate_asset_usd(connector, currency, amount)
+        return converted if converted > 0 else amount
+
+    async def _fetch_live_order_trade_costs(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        order_id: Optional[str],
+        account_id: Optional[str],
+        fill_price: float,
+    ) -> Dict[str, Any]:
+        oid = str(order_id or "").strip()
+        if not oid:
+            return {"fee_usd": 0.0, "fee_source": ""}
+
+        exchange_name = str(exchange or "").strip().lower()
+        cache_key = (exchange_name, str(account_id or "main"), str(symbol or ""), oid)
+        cached = self._live_fee_backfill_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+
+        rows: List[Dict[str, Any]] = []
+        if exchange_name == "binance" and binance_has_credentials(account_id):
+            market_symbol = binance_market_symbol(symbol)
+            if market_symbol:
+                try:
+                    raw_rows = await binance_signed_request(
+                        "GET",
+                        "/fapi/v1/userTrades",
+                        host="fapi",
+                        params={"symbol": market_symbol, "orderId": oid, "limit": 100},
+                        timeout_sec=6.0,
+                        account_id=account_id,
+                    )
+                    rows = [row for row in raw_rows or [] if isinstance(row, dict)]
+                except Exception as exc:
+                    logger.debug(f"Live fee backfill skipped for {symbol} order={oid}: {exc}")
+
+        if not rows:
+            connector = self._resolve_cached_exchange(exchange, account_id=account_id)
+            getter = getattr(connector, "get_trades", None) if connector else None
+            if callable(getter):
+                try:
+                    raw_rows = await asyncio.wait_for(getter(symbol, limit=100), timeout=6.0)
+                    rows = [
+                        row
+                        for row in raw_rows or []
+                        if isinstance(row, dict) and self._extract_trade_order_id(row) == oid
+                    ]
+                except Exception as exc:
+                    logger.debug(f"Live fee connector backfill skipped for {symbol} order={oid}: {exc}")
+
+        fee_usd = 0.0
+        filled_qty = 0.0
+        cost_usd = 0.0
+        fee_assets: set[str] = set()
+        for row in rows:
+            qty = self._safe_nonnegative_float(
+                row.get("qty", row.get("amount", row.get("filled"))),
+                0.0,
+            )
+            price = self._safe_nonnegative_float(row.get("price"), 0.0)
+            quote_qty = self._safe_nonnegative_float(
+                row.get("quoteQty", row.get("cost", row.get("quoteQuantity"))),
+                0.0,
+            )
+            if qty > 0:
+                filled_qty += qty
+            if quote_qty > 0:
+                cost_usd += quote_qty
+            elif qty > 0 and price > 0:
+                cost_usd += qty * price
+
+            fee_amount, fee_currency = self._extract_trade_fee(row)
+            if fee_amount > 0:
+                fee_assets.add(str(fee_currency or "").strip().upper())
+                fee_usd += await self._fee_amount_to_usd(
+                    fee_amount=fee_amount,
+                    fee_currency=fee_currency,
+                    symbol=symbol,
+                    fill_price=fill_price,
+                    exchange=exchange,
+                    account_id=account_id,
+                )
+
+        result = {
+            "fee_usd": float(fee_usd),
+            "fee_source": "exchange_trades" if fee_usd > 0 else "",
+            "fee_asset": ",".join(sorted(x for x in fee_assets if x)),
+            "exchange_trade_count": len(rows),
+            "exchange_trade_qty": float(filled_qty),
+            "exchange_trade_cost": float(cost_usd),
+        }
+        self._live_fee_backfill_cache[cache_key] = dict(result)
+        if len(self._live_fee_backfill_cache) > 500:
+            for old_key in list(self._live_fee_backfill_cache.keys())[:100]:
+                self._live_fee_backfill_cache.pop(old_key, None)
+        return result
+
+    @classmethod
+    def _calculate_slippage_cost(
+        cls,
+        *,
+        fill_price: float,
+        reference_price: Optional[float],
+        quantity: float,
+    ) -> Dict[str, float]:
+        fill = cls._safe_nonnegative_float(fill_price, 0.0)
+        reference = cls._safe_nonnegative_float(reference_price, 0.0)
+        qty = cls._safe_nonnegative_float(quantity, 0.0)
+        if fill <= 0 or reference <= 0 or qty <= 0:
+            return {"slippage_cost_usd": 0.0, "slippage_bps": 0.0, "slippage_reference_price": reference}
+        diff = abs(fill - reference)
+        return {
+            "slippage_cost_usd": float(diff * qty),
+            "slippage_bps": float((diff / reference) * 10000.0),
+            "slippage_reference_price": float(reference),
+        }
+
+    async def _resolve_execution_costs(
+        self,
+        *,
+        order: Any,
+        exchange: str,
+        symbol: str,
+        account_id: Optional[str],
+        fill_price: float,
+        quantity: float,
+        reference_price: Optional[float],
+        paper_cost: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        cost = dict(paper_cost or {})
+        fee_usd = self._safe_nonnegative_float(cost.get("fee_usd"), 0.0)
+        slippage_cost_usd = self._safe_nonnegative_float(cost.get("slippage_cost_usd"), 0.0)
+        fee_source = "paper" if fee_usd > 0 else ""
+        slippage_source = "paper" if slippage_cost_usd > 0 else ""
+
+        if self._paper_trading:
+            slippage_bps = self._safe_nonnegative_float(cost.get("slippage_bps"), 0.0)
+            return {
+                "fee_usd": fee_usd,
+                "slippage_cost_usd": slippage_cost_usd,
+                "slippage_bps": slippage_bps,
+                "slippage_reference_price": self._safe_nonnegative_float(reference_price, 0.0),
+                "fee_source": fee_source,
+                "slippage_source": slippage_source,
+                "cost_usd": fee_usd + slippage_cost_usd,
+            }
+
+        if fee_usd <= 0:
+            order_fee_amount = self._safe_nonnegative_float(getattr(order, "fee", 0.0), 0.0)
+            order_fee_currency = str(getattr(order, "fee_currency", "") or "").strip().upper()
+            order_fee_usd = await self._fee_amount_to_usd(
+                fee_amount=order_fee_amount,
+                fee_currency=order_fee_currency,
+                symbol=symbol,
+                fill_price=fill_price,
+                exchange=exchange,
+                account_id=account_id,
+            )
+            if order_fee_usd > 0:
+                fee_usd = order_fee_usd
+                fee_source = "order_fee" if not order_fee_currency else f"order_fee_{order_fee_currency.lower()}"
+
+        trade_costs: Dict[str, Any] = {}
+        if fee_usd <= 0:
+            trade_costs = await self._fetch_live_order_trade_costs(
+                exchange=exchange,
+                symbol=symbol,
+                order_id=getattr(order, "id", None),
+                account_id=account_id,
+                fill_price=fill_price,
+            )
+            fee_usd = self._safe_nonnegative_float(trade_costs.get("fee_usd"), 0.0)
+            fee_source = str(trade_costs.get("fee_source") or fee_source)
+
+        slip = self._calculate_slippage_cost(
+            fill_price=fill_price,
+            reference_price=reference_price,
+            quantity=quantity,
+        )
+        if slippage_cost_usd <= 0:
+            slippage_cost_usd = self._safe_nonnegative_float(slip.get("slippage_cost_usd"), 0.0)
+            if slippage_cost_usd > 0:
+                slippage_source = "fill_vs_reference"
+
+        return {
+            **trade_costs,
+            "fee_usd": float(fee_usd),
+            "slippage_cost_usd": float(slippage_cost_usd),
+            "slippage_bps": float(slip.get("slippage_bps") or 0.0),
+            "slippage_reference_price": float(slip.get("slippage_reference_price") or 0.0),
+            "fee_source": fee_source,
+            "slippage_source": slippage_source,
+            "cost_usd": float(fee_usd + slippage_cost_usd),
         }
 
     def _build_reject_reason(self) -> str:
@@ -3577,15 +3894,20 @@ class ExecutionEngine:
                 )
                 return None
 
-            paper_cost = self._consume_paper_order_cost(order.id)
-            fee_usd = float(paper_cost.get("fee_usd", 0.0) or 0.0)
-            slippage_cost_usd = float(paper_cost.get("slippage_cost_usd", 0.0) or 0.0)
-            # For live orders, read fee from the exchange order object
-            if not self._paper_trading and fee_usd <= 0:
-                order_fee = float(getattr(order, "fee", 0.0) or 0.0)
-                if order_fee > 0:
-                    fee_usd = order_fee
             fill_price = float(order.price or signal.price or quote_price or 0.0)
+            exec_amount = self._resolved_order_fill_qty(order, qty)
+            cost_details = await self._resolve_execution_costs(
+                order=order,
+                exchange=exchange,
+                symbol=signal.symbol,
+                account_id=account_id,
+                fill_price=fill_price,
+                quantity=exec_amount,
+                reference_price=quote_price or signal.price,
+                paper_cost=self._consume_paper_order_cost(order.id),
+            )
+            fee_usd = float(cost_details.get("fee_usd", 0.0) or 0.0)
+            slippage_cost_usd = float(cost_details.get("slippage_cost_usd", 0.0) or 0.0)
             trade_pnl = 0.0
             current_position = self._resolve_local_position(
                 exchange=exchange,
@@ -3633,7 +3955,6 @@ class ExecutionEngine:
                     reset_profit_management_state=not bool(req.reduce_only),
                 )
 
-            exec_amount = self._resolved_order_fill_qty(order, qty)
             if exec_amount > 0:
                 if side == OrderSide.BUY:
                     if current_position and current_position.side == PositionSide.LONG:
@@ -3796,6 +4117,11 @@ class ExecutionEngine:
                         "pnl": net_trade_pnl,
                         "fee_usd": fee_usd,
                         "slippage_cost_usd": slippage_cost_usd,
+                        "cost_usd": float(cost_details.get("cost_usd", fee_usd + slippage_cost_usd) or 0.0),
+                        "fee_source": cost_details.get("fee_source"),
+                        "slippage_source": cost_details.get("slippage_source"),
+                        "slippage_bps": cost_details.get("slippage_bps"),
+                        "slippage_reference_price": cost_details.get("slippage_reference_price"),
                         "order_id": order.id,
                         "strength": float(signal.strength or 0.0),
                         "stop_loss": signal.stop_loss,
@@ -3818,6 +4144,7 @@ class ExecutionEngine:
                     gross_pnl_usd=float(gross_trade_pnl or 0.0),
                     net_pnl_usd=float(net_trade_pnl or 0.0),
                     action="open_or_add",
+                    cost_details=cost_details,
                 )
 
             result = {
@@ -3830,6 +4157,11 @@ class ExecutionEngine:
                     "filled": order.filled,
                     "fee_usd": fee_usd,
                     "slippage_cost_usd": slippage_cost_usd,
+                    "cost_usd": float(cost_details.get("cost_usd", fee_usd + slippage_cost_usd) or 0.0),
+                    "fee_source": cost_details.get("fee_source"),
+                    "slippage_source": cost_details.get("slippage_source"),
+                    "slippage_bps": cost_details.get("slippage_bps"),
+                    "slippage_reference_price": cost_details.get("slippage_reference_price"),
                 },
                 "executed_quantity": float(exec_amount or 0.0),
                 "timestamp": datetime.now().isoformat(),
@@ -3874,6 +4206,7 @@ class ExecutionEngine:
                         payload_json={
                             "fee_usd": fee_usd,
                             "slippage_cost_usd": slippage_cost_usd,
+                            "cost_details": {k: v for k, v in cost_details.items() if v not in (None, "")},
                             "account_id": account_id,
                         },
                     )
@@ -4045,16 +4378,20 @@ class ExecutionEngine:
             )
             return None
 
-        paper_cost = self._consume_paper_order_cost(close_order.id)
-        fee_usd = float(paper_cost.get("fee_usd", 0.0) or 0.0)
-        slippage_cost_usd = float(paper_cost.get("slippage_cost_usd", 0.0) or 0.0)
-        # For live orders, read fee from the exchange order object
-        if not self._paper_trading and fee_usd <= 0:
-            order_fee = float(getattr(close_order, "fee", 0.0) or 0.0)
-            if order_fee > 0:
-                fee_usd = order_fee
         close_price = float(close_order.price or signal.price or quote_price or 0.0)
         executed_close_qty = self._resolved_order_fill_qty(close_order, close_qty)
+        cost_details = await self._resolve_execution_costs(
+            order=close_order,
+            exchange=exchange,
+            symbol=signal.symbol,
+            account_id=account_id,
+            fill_price=close_price,
+            quantity=executed_close_qty,
+            reference_price=quote_price or signal.price,
+            paper_cost=self._consume_paper_order_cost(close_order.id),
+        )
+        fee_usd = float(cost_details.get("fee_usd", 0.0) or 0.0)
+        slippage_cost_usd = float(cost_details.get("slippage_cost_usd", 0.0) or 0.0)
         closed = None
         if executed_close_qty > 0:
             closed = position_manager.close_position(
@@ -4091,6 +4428,11 @@ class ExecutionEngine:
                     "notional": float(close_price * executed_close_qty),
                     "fee_usd": fee_usd,
                     "slippage_cost_usd": slippage_cost_usd,
+                    "cost_usd": float(cost_details.get("cost_usd", fee_usd + slippage_cost_usd) or 0.0),
+                    "fee_source": cost_details.get("fee_source"),
+                    "slippage_source": cost_details.get("slippage_source"),
+                    "slippage_bps": cost_details.get("slippage_bps"),
+                    "slippage_reference_price": cost_details.get("slippage_reference_price"),
                     "order_id": close_order.id,
                     "strength": float(signal.strength or 0.0),
                     "stop_loss": signal.stop_loss,
@@ -4116,6 +4458,7 @@ class ExecutionEngine:
                 gross_pnl_usd=gross_close_pnl,
                 net_pnl_usd=close_pnl,
                 action="close",
+                cost_details=cost_details,
             )
 
         result = {
@@ -4139,6 +4482,11 @@ class ExecutionEngine:
                 "filled": close_order.filled,
                 "fee_usd": fee_usd,
                 "slippage_cost_usd": slippage_cost_usd,
+                "cost_usd": float(cost_details.get("cost_usd", fee_usd + slippage_cost_usd) or 0.0),
+                "fee_source": cost_details.get("fee_source"),
+                "slippage_source": cost_details.get("slippage_source"),
+                "slippage_bps": cost_details.get("slippage_bps"),
+                "slippage_reference_price": cost_details.get("slippage_reference_price"),
             },
             "timestamp": datetime.now().isoformat(),
         }
@@ -4387,16 +4735,20 @@ class ExecutionEngine:
         if not order:
             return None
 
-        paper_cost = self._consume_paper_order_cost(order.id)
-        fee_usd = float(paper_cost.get("fee_usd", 0.0) or 0.0)
-        slippage_cost_usd = float(paper_cost.get("slippage_cost_usd", 0.0) or 0.0)
-        # For live orders, read fee from the exchange order object
-        if not self._paper_trading and fee_usd <= 0:
-            order_fee = float(getattr(order, "fee", 0.0) or 0.0)
-            if order_fee > 0:
-                fee_usd = order_fee
         fill_price = float(order.price or price or quote_price or 0.0)
         exec_amount = self._resolved_order_fill_qty(order, requested_amount)
+        cost_details = await self._resolve_execution_costs(
+            order=order,
+            exchange=exchange,
+            symbol=symbol,
+            account_id=account_id,
+            fill_price=fill_price,
+            quantity=exec_amount,
+            reference_price=quote_price or price,
+            paper_cost=self._consume_paper_order_cost(order.id),
+        )
+        fee_usd = float(cost_details.get("fee_usd", 0.0) or 0.0)
+        slippage_cost_usd = float(cost_details.get("slippage_cost_usd", 0.0) or 0.0)
         trade_pnl = 0.0
 
         def _merge_protection_settings() -> None:
@@ -4586,6 +4938,11 @@ class ExecutionEngine:
                     "pnl": net_trade_pnl,
                     "fee_usd": fee_usd,
                     "slippage_cost_usd": slippage_cost_usd,
+                    "cost_usd": float(cost_details.get("cost_usd", fee_usd + slippage_cost_usd) or 0.0),
+                    "fee_source": cost_details.get("fee_source"),
+                    "slippage_source": cost_details.get("slippage_source"),
+                    "slippage_bps": cost_details.get("slippage_bps"),
+                    "slippage_reference_price": cost_details.get("slippage_reference_price"),
                     "order_id": order.id,
                     "stop_loss": stop_loss,
                     "take_profit": take_profit,
@@ -4613,6 +4970,11 @@ class ExecutionEngine:
             "reduce_only": reduce_only,
             "fee_usd": fee_usd,
             "slippage_cost_usd": slippage_cost_usd,
+            "cost_usd": float(cost_details.get("cost_usd", fee_usd + slippage_cost_usd) or 0.0),
+            "fee_source": cost_details.get("fee_source"),
+            "slippage_source": cost_details.get("slippage_source"),
+            "slippage_bps": cost_details.get("slippage_bps"),
+            "slippage_reference_price": cost_details.get("slippage_reference_price"),
         }
         await self._notify_callbacks("manual_order_executed" if exec_amount > 0 else "manual_order_submitted", result)
         return result

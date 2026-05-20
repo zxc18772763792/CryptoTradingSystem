@@ -100,6 +100,40 @@ def test_pnl_trigger_runs_async_close_positions_hook(isolated_breaker):
     assert "circuit_breaker" in reason
 
 
+def test_pnl_trigger_schedules_async_hook_from_worker_thread(isolated_breaker):
+    async def scenario():
+        captured: List[tuple] = []
+
+        async def hook(name: str, reason: str) -> Any:
+            await asyncio.sleep(0)
+            captured.append((name, reason))
+            return None
+
+        register_close_positions_hook(hook)
+        history = [
+            _trade("StratThreadClose", -700.0, hours_ago=2.0, capital=10000.0),
+        ]
+
+        await asyncio.to_thread(
+            run_circuit_breaker_checks,
+            trade_history=history,
+            portfolio_drawdown={"daily_dd": 0.0, "weekly_dd": 0.0},
+        )
+
+        for _ in range(20):
+            if captured:
+                break
+            await asyncio.sleep(0.01)
+        return captured
+
+    captured = asyncio.run(scenario())
+
+    assert captured, "async close hook should be scheduled back onto the registered event loop"
+    name, reason = captured[-1]
+    assert name == "StratThreadClose"
+    assert "circuit_breaker" in reason
+
+
 def test_pnl_trigger_only_fires_on_first_breach(isolated_breaker):
     """Second pass over the same history should NOT re-fire the hook."""
     fired: List[tuple] = []

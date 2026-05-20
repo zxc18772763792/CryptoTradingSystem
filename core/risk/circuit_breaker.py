@@ -108,15 +108,24 @@ class _PortfolioState:
 # Best-effort hook so the monitor task can request position-flatten without
 # importing strategy_manager at module load time.
 _close_positions_hook: Optional[Callable[[str, str], Any]] = None
+# Main event loop captured at hook registration time. Used to schedule async
+# hooks from worker threads (e.g. `asyncio.to_thread(run_circuit_breaker_checks)`).
+_main_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def register_close_positions_hook(hook: Callable[[str, str], Any]) -> None:
     """Register a callable ``hook(strategy_name, reason)`` that closes positions.
 
-    The hook may be sync or async; if async we will schedule it.
+    The hook may be sync or async. If async, the coroutine will be scheduled
+    onto the running event loop (best-effort across thread / sync / async
+    contexts).
     """
-    global _close_positions_hook
+    global _close_positions_hook, _main_loop
     _close_positions_hook = hook
+    try:
+        _main_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _main_loop = None
 
 
 class CircuitBreaker:
@@ -280,6 +289,8 @@ class CircuitBreaker:
                 "weekly_dd": weekly_dd,
                 "tripped_at": now_iso,
             })
+            # Best-effort fire-and-forget close. Resilient against thread /
+            # sync / async contexts.
             self._fire_close_positions(name, reason)
         return not already
 
@@ -350,20 +361,47 @@ class CircuitBreaker:
         return True
 
     def _fire_close_positions(self, name: str, reason: str) -> None:
+        """Sync, best-effort fire of the close-positions hook.
+
+        Handles three call contexts:
+          (A) Sync context with no running loop (tests) → ``asyncio.run`` the
+              coroutine on a fresh loop.
+          (B) Inside the running event loop → schedule via
+              ``loop.create_task``.
+          (C) From a worker thread spawned by ``asyncio.to_thread`` while the
+              main loop is still running → ``run_coroutine_threadsafe`` onto
+              the captured ``_main_loop``.
+
+        Sync hooks are simply invoked.
+        """
         hook = _close_positions_hook
         if hook is None:
             return
         try:
             result = hook(name, f"circuit_breaker:{reason}")
-            if asyncio.iscoroutine(result):
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    asyncio.run(result)
-                else:
-                    loop.create_task(result)
         except Exception as exc:
-            logger.debug(f"circuit_breaker: close-positions hook failed for {name}: {exc}")
+            logger.debug(f"circuit_breaker: close-positions hook raised for {name}: {exc}")
+            return
+        if not asyncio.iscoroutine(result):
+            return
+        # Async hook → schedule it on whatever loop is reachable.
+        try:
+            running = asyncio.get_running_loop()
+            running.create_task(result)
+            return
+        except RuntimeError:
+            pass  # no loop in this thread
+        loop = _main_loop
+        if loop is not None and loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(result, loop)
+                return
+            except Exception as exc:
+                logger.debug(f"circuit_breaker: run_coroutine_threadsafe failed for {name}: {exc}")
+        try:
+            asyncio.run(result)
+        except Exception as exc:
+            logger.debug(f"circuit_breaker: asyncio.run fallback failed for {name}: {exc}")
 
     # ── snapshots ──
     def snapshot(self) -> Dict[str, Any]:
@@ -402,10 +440,34 @@ def _parse_iso(ts: Any) -> Optional[datetime]:
     return out.astimezone(timezone.utc)
 
 
-def _drawdown_from_pnl(rows: List[Dict[str, Any]], *, hours: int) -> float:
+def _resolve_account_equity() -> float:
+    """Best-effort fetch of live account equity for drawdown anchoring."""
+    try:
+        from core.risk.risk_manager import risk_manager  # noqa: PLC0415
+        for attr in ("_current_equity", "_day_start_equity"):
+            value = float(getattr(risk_manager, attr, 0.0) or 0.0)
+            if value > 0:
+                return value
+        report = risk_manager.get_risk_report() or {}
+        equity = float((report.get("equity") or {}).get("current") or 0.0)
+        if equity > 0:
+            return equity
+    except Exception:
+        pass
+    return 0.0
+
+
+def _drawdown_from_pnl(
+    rows: List[Dict[str, Any]],
+    *,
+    hours: int,
+    base_capital_override: Optional[float] = None,
+) -> float:
     """Compute peak-to-trough drawdown from a chronological trade list within window.
 
     ``rows`` should be dicts with ``timestamp`` (ISO string) and ``pnl`` numeric.
+    The drawdown denominator is the live account equity if available, with the
+    trade-row ``capital_after`` / ``equity`` / ``notional`` fields as fallbacks.
     Returns drawdown as a *positive* float (e.g. 0.04 for -4%).
     """
     if not rows:
@@ -414,7 +476,8 @@ def _drawdown_from_pnl(rows: List[Dict[str, Any]], *, hours: int) -> float:
     cumulative = 0.0
     # Anchor curve at 0 so a single losing trade still registers a drawdown
     equity_curve: List[float] = [0.0]
-    base_capital: Optional[float] = None
+    row_capital: Optional[float] = None
+    max_notional = 0.0
     for row in rows:
         ts = _parse_iso(row.get("timestamp"))
         if ts is None or ts < cutoff:
@@ -424,12 +487,33 @@ def _drawdown_from_pnl(rows: List[Dict[str, Any]], *, hours: int) -> float:
         except Exception:
             pnl = 0.0
         cumulative += pnl
-        if base_capital is None:
-            base_capital = float(row.get("capital_after") or row.get("equity") or 0.0) or None
+        if row_capital is None:
+            row_capital = float(row.get("capital_after") or row.get("equity") or 0.0) or None
+        try:
+            notional = float(row.get("notional") or 0.0)
+        except Exception:
+            notional = 0.0
+        if notional > max_notional:
+            max_notional = notional
         equity_curve.append(cumulative)
     if len(equity_curve) <= 1:
         return 0.0
-    base = abs(base_capital) if base_capital and base_capital > 0 else max(abs(min(equity_curve)), abs(max(equity_curve)), 1.0)
+
+    # Pick the most credible base capital reference. Order:
+    # 1. explicit override (caller-supplied / risk_manager equity at call time)
+    # 2. row-level capital snapshot
+    # 3. largest notional in the window (caps DD at "one full trade" scale)
+    # 4. abs(cumulative span) — last-resort, will exaggerate single-trade losses
+    base: float = 0.0
+    if base_capital_override and base_capital_override > 0:
+        base = float(base_capital_override)
+    elif row_capital and row_capital > 0:
+        base = float(row_capital)
+    elif max_notional > 0:
+        base = float(max_notional)
+    if base <= 0:
+        base = max(abs(min(equity_curve)), abs(max(equity_curve)), 1.0)
+
     peak = equity_curve[0]
     worst_dd = 0.0
     for value in equity_curve:
@@ -442,8 +526,17 @@ def _drawdown_from_pnl(rows: List[Dict[str, Any]], *, hours: int) -> float:
     return float(worst_dd)
 
 
-def evaluate_strategy_drawdowns(trade_history: List[Dict[str, Any]]) -> Dict[str, Dict[str, float]]:
-    """Group ``trade_history`` by strategy and return per-strategy daily/weekly drawdowns."""
+def evaluate_strategy_drawdowns(
+    trade_history: List[Dict[str, Any]],
+    *,
+    base_capital: Optional[float] = None,
+) -> Dict[str, Dict[str, float]]:
+    """Group ``trade_history`` by strategy and return per-strategy daily/weekly drawdowns.
+
+    ``base_capital`` (if positive) is used as the drawdown denominator instead
+    of relying on per-row fields. Typically callers pass
+    ``risk_manager._current_equity``.
+    """
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for row in trade_history or []:
         if not isinstance(row, dict):
@@ -455,8 +548,8 @@ def evaluate_strategy_drawdowns(trade_history: List[Dict[str, Any]]) -> Dict[str
     result: Dict[str, Dict[str, float]] = {}
     for name, rows in grouped.items():
         result[name] = {
-            "daily_dd": _drawdown_from_pnl(rows, hours=24),
-            "weekly_dd": _drawdown_from_pnl(rows, hours=24 * 7),
+            "daily_dd": _drawdown_from_pnl(rows, hours=24, base_capital_override=base_capital),
+            "weekly_dd": _drawdown_from_pnl(rows, hours=24 * 7, base_capital_override=base_capital),
         }
     return result
 
@@ -480,10 +573,11 @@ def run_circuit_breaker_checks(
     *,
     trade_history: Optional[List[Dict[str, Any]]] = None,
     portfolio_drawdown: Optional[Dict[str, float]] = None,
+    account_equity: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Single evaluation pass. Returns a report dict.
 
-    Both inputs are optional so the function is unit-testable with synthetic
+    All inputs are optional so the function is unit-testable with synthetic
     data. When omitted we read from the live risk_manager.
     """
     if trade_history is None:
@@ -494,6 +588,8 @@ def run_circuit_breaker_checks(
             trade_history = []
     if portfolio_drawdown is None:
         portfolio_drawdown = evaluate_portfolio_drawdown()
+    if account_equity is None:
+        account_equity = _resolve_account_equity()
 
     breaker = circuit_breaker
     if not breaker.enabled:
@@ -505,10 +601,14 @@ def run_circuit_breaker_checks(
         "portfolio_trip": None,
         "strategy_dds": {},
         "portfolio_dd": portfolio_drawdown,
+        "account_equity": float(account_equity or 0.0),
         "ts": datetime.now(timezone.utc).isoformat(),
     }
 
-    strat_dds = evaluate_strategy_drawdowns(trade_history)
+    strat_dds = evaluate_strategy_drawdowns(
+        trade_history,
+        base_capital=float(account_equity or 0.0) if account_equity else None,
+    )
     report["strategy_dds"] = strat_dds
     daily_thr = breaker.strategy_daily_threshold
     weekly_thr = breaker.strategy_weekly_threshold

@@ -48,6 +48,8 @@ DEFAULT_OPENAI_MODEL = "deepseek-v4-flash"
 _OPENAI_FAILOVER_SCOPE = "news"
 _LEGACY_PROVIDER_ALIASES = {"glm", "glm5", "zhipu"}
 _LEGACY_BASE_URL_HINTS = ("bigmodel.cn", "zhipu")
+_LOCAL_GEMMA_MODEL_HINTS = ("gemma4-local", "local-gemma")
+_LOCAL_GEMMA_BASE_HINTS = ("192.168.", "localhost", "127.0.0.1", "host.docker.internal")
 _RUNTIME_SETTING_NAMES = (
     "NEWS_LLM_API_KEY",
     "NEWS_LLM_BASE_URL",
@@ -94,6 +96,35 @@ def _first_non_empty(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name) or default)
+    except Exception:
+        return int(default)
+
+
+def _is_local_gemma_target(base_url: Any, model: Any = "") -> bool:
+    text = f"{base_url or ''} {model or ''}".strip().lower()
+    return any(hint in text for hint in (*_LOCAL_GEMMA_MODEL_HINTS, *_LOCAL_GEMMA_BASE_HINTS))
+
+
+def _local_gemma_timeout(total: Any, connect: Any = None) -> aiohttp.ClientTimeout:
+    default_total = max(30, _env_int("NEWS_LLM_LOCAL_TARGET_TIMEOUT_SEC", 120))
+    default_connect = max(3, _env_int("NEWS_LLM_LOCAL_CONNECT_TIMEOUT_SEC", 10))
+    try:
+        total_sec = int(total or default_total)
+    except Exception:
+        total_sec = default_total
+    try:
+        connect_sec = int(connect or default_connect)
+    except Exception:
+        connect_sec = default_connect
+    return aiohttp.ClientTimeout(
+        total=max(total_sec, default_total),
+        connect=max(connect_sec, default_connect),
+    )
 
 
 def _merge_csv_values(*values: Any) -> str:
@@ -590,6 +621,12 @@ class AsyncGLMClient:
                 target_model = str(target.get("model") or "").strip()
                 transport = target_transport(target)
                 headers = build_target_headers({**dict(target), "api_key": api_key})
+                target_timeout = timeout
+                if _is_local_gemma_target(base_url, target_model):
+                    target_timeout = _local_gemma_timeout(
+                        getattr(timeout, "total", None),
+                        getattr(timeout, "connect", None),
+                    )
                 request_payload = dict(payload)
                 if target_model:
                     request_payload["model"] = target_model
@@ -613,6 +650,7 @@ class AsyncGLMClient:
                             url=anthropic_messages_endpoint(base_url),
                             headers=headers,
                             json=request_anthropic_payload,
+                            timeout=target_timeout,
                         ) as response:
                             if response.status == 429:
                                 self._requests_rate_limited += 1
@@ -689,6 +727,7 @@ class AsyncGLMClient:
                             url=chat_url,
                             headers=headers,
                             json=request_chat_payload,
+                            timeout=target_timeout,
                         ) as chat_response:
                             if chat_response.status == 429:
                                 self._requests_rate_limited += 1
@@ -758,6 +797,7 @@ class AsyncGLMClient:
                         url=responses_endpoint(base_url),
                         headers=headers,
                         json=request_payload,
+                        timeout=target_timeout,
                     ) as response:
                         if response.status == 429:
                             self._requests_rate_limited += 1
@@ -796,6 +836,7 @@ class AsyncGLMClient:
                                     url=chat_url,
                                     headers=headers,
                                     json=request_chat_payload,
+                                    timeout=target_timeout,
                                 ) as chat_response:
                                     if chat_response.status == 429:
                                         self._requests_rate_limited += 1
@@ -874,6 +915,7 @@ class AsyncGLMClient:
                                 url=chat_url,
                                 headers=headers,
                                 json=request_chat_payload,
+                                timeout=target_timeout,
                             ) as chat_response:
                                 if chat_response.status == 429:
                                     self._requests_rate_limited += 1

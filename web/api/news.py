@@ -33,7 +33,7 @@ from core.news.eventizer.llm_glm5 import (
 )
 from core.news.text_normalizer import clean_news_text
 from core.news.eventizer.rules import SymbolMapper, load_news_rule_config
-from core.news.service.worker import DEFAULT_INTERVALS, process_llm_batch
+from core.news.service.worker import DEFAULT_INTERVALS, _has_local_gemma_backup, process_llm_batch
 from core.news.storage import db as news_db
 from core.news.storage.models import parse_any_datetime
 from core.utils.asyncio_compat import LoopBoundAsyncLock
@@ -1451,13 +1451,25 @@ def _feed_summarize_cfg(cfg: Dict[str, Any], *, limit: int) -> Dict[str, Any]:
     effective = dict(cfg or {})
     llm_cfg = dict(effective.get("llm") or {})
     max_items = max(1, min(int(limit or 1), _env_int("NEWS_API_SUMMARY_MAX_ITEMS", 8)))
+    has_local_gemma_backup = _has_local_gemma_backup(effective)
     default_batch_size = max(1, min(int(llm_cfg.get("summarize_batch_size") or 6), max_items))
-    default_timeout_sec = max(8, min(int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 45), 45))
     batch_size = max(1, min(_env_int("NEWS_API_SUMMARY_BATCH_SIZE", default_batch_size), max_items))
-    timeout_sec = max(8, min(_env_int("NEWS_API_SUMMARIZE_TIMEOUT_SEC", default_timeout_sec), 45))
+    if has_local_gemma_backup:
+        default_timeout_sec = max(30, int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 120))
+        local_batch_cap = max(1, _env_int("NEWS_LLM_LOCAL_SUMMARY_BATCH_SIZE", 1))
+        local_timeout_sec = max(30, _env_int("NEWS_LLM_LOCAL_SUMMARIZE_TIMEOUT_SEC", 120))
+        timeout_sec = max(default_timeout_sec, local_timeout_sec)
+        batch_size = max(1, min(batch_size, local_batch_cap))
+    else:
+        default_timeout_sec = max(8, min(int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 45), 45))
+        timeout_sec = max(8, min(_env_int("NEWS_API_SUMMARIZE_TIMEOUT_SEC", default_timeout_sec), 45))
     llm_cfg["summarize_limit"] = max(1, min(int(llm_cfg.get("summarize_limit") or max_items), max_items))
     llm_cfg["summarize_batch_size"] = max(1, min(int(llm_cfg.get("summarize_batch_size") or batch_size), batch_size))
-    llm_cfg["summarize_timeout_sec"] = max(8, min(int(llm_cfg.get("summarize_timeout_sec") or timeout_sec), timeout_sec))
+    configured_timeout = int(llm_cfg.get("summarize_timeout_sec") or timeout_sec)
+    if has_local_gemma_backup:
+        llm_cfg["summarize_timeout_sec"] = max(configured_timeout, timeout_sec)
+    else:
+        llm_cfg["summarize_timeout_sec"] = max(8, min(configured_timeout, timeout_sec))
     effective["llm"] = llm_cfg
     return effective
 
@@ -1704,9 +1716,15 @@ async def repair_recent_news_summaries(
 
     summary_cfg = dict(cfg or {})
     llm_cfg = dict(summary_cfg.get("llm") or {})
+    has_local_gemma_backup = _has_local_gemma_backup(summary_cfg)
     repair_timeout_cap = max(45, _env_int("NEWS_SUMMARY_REPAIR_TIMEOUT_SEC", 120))
     timeout_sec = max(20, min(int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 60), repair_timeout_cap))
     batch_size = max(1, min(int(llm_cfg.get("summarize_batch_size") or 6), _env_int("NEWS_SUMMARY_REPAIR_BATCH_SIZE", 12), len(targets)))
+    if has_local_gemma_backup:
+        local_batch_cap = max(1, _env_int("NEWS_LLM_LOCAL_SUMMARY_BATCH_SIZE", 1))
+        local_timeout_sec = max(30, _env_int("NEWS_LLM_LOCAL_SUMMARIZE_TIMEOUT_SEC", 120))
+        batch_size = max(1, min(batch_size, local_batch_cap))
+        timeout_sec = max(timeout_sec, local_timeout_sec)
     llm_cfg["summarize_limit"] = len(targets)
     llm_cfg["summarize_batch_size"] = batch_size
     llm_cfg["summarize_timeout_sec"] = timeout_sec
@@ -2465,7 +2483,10 @@ async def build_latest_feed(
         summarize_limit = int(llm_cfg.get("summarize_limit") or min(120, limit))
         summarize_limit = max(1, min(limit, summarize_limit))
         summarize_timeout_sec = int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 45)
-        summarize_timeout_sec = max(8, min(45, summarize_timeout_sec))
+        if _has_local_gemma_backup(summary_cfg):
+            summarize_timeout_sec = max(30, summarize_timeout_sec)
+        else:
+            summarize_timeout_sec = max(8, min(45, summarize_timeout_sec))
 
         candidates: List[tuple[int, Dict[str, Any]]] = []
         for idx, item in enumerate(sorted_items):
@@ -3261,7 +3282,11 @@ async def latest(
         return cached
 
     try:
-        latest_timeout = max(12.0, min(75.0, float(_env_int("NEWS_API_LATEST_TOTAL_TIMEOUT_SEC", 22 if not summarize else 60))))
+        latest_timeout_default = 22 if not summarize else 60
+        latest_timeout = max(12.0, min(75.0, float(_env_int("NEWS_API_LATEST_TOTAL_TIMEOUT_SEC", latest_timeout_default))))
+        if summarize and _has_local_gemma_backup(cfg):
+            local_latest_timeout = max(30.0, float(_env_int("NEWS_LLM_LOCAL_LATEST_TOTAL_TIMEOUT_SEC", 150)))
+            latest_timeout = max(latest_timeout, local_latest_timeout)
         if summarize:
             feed = await asyncio.wait_for(
                 build_latest_feed(cfg=cfg, symbol=symbol, hours=hours, limit=limit, summarize=True),

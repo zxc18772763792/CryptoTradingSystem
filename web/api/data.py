@@ -6203,17 +6203,34 @@ async def get_arbitrage_readiness(
     result: Optional[Dict[str, Any]] = None
     backtest_error = ""
     if bool(backtest_status.get("supported")) and bool(data_status.get("ready")):
+        params_for_run = dict(spec.get("params") or {})
+        # Trim the dataset for the readiness backtest so it stays interactive
+        # (~3-5 s). The full backtest endpoint still uses the entire history.
+        lookback_hint = int(
+            params_for_run.get("lookback_period")
+            or params_for_run.get("lookback_bars")
+            or lookback
+            or 720
+        )
+        budget_bars = max(1500, min(3000, lookback_hint * 3))
+        trimmed_df = df.iloc[-budget_bars:].copy() if len(df) > budget_bars else df
+        trimmed_bundle = market_bundle
+        if isinstance(market_bundle, dict) and market_bundle:
+            trimmed_bundle = {
+                key: (frame.iloc[-budget_bars:].copy() if len(frame) > budget_bars else frame)
+                for key, frame in market_bundle.items()
+            }
         try:
             result = _run_backtest_core(
                 strategy=strategy_name,
-                df=df,
+                df=trimmed_df,
                 timeframe=str(spec.get("timeframe") or timeframe),
                 initial_capital=max(100.0, float(initial_capital or 10000.0)),
-                params=dict(spec.get("params") or {}),
+                params=params_for_run,
                 include_series=False,
                 commission_rate=max(0.0, float(commission_rate or 0.0)),
                 slippage_bps=max(0.0, float(slippage_bps or 0.0)),
-                market_bundle=market_bundle,
+                market_bundle=trimmed_bundle,
             )
         except Exception as exc:
             backtest_error = str(exc)
