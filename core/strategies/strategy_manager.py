@@ -47,6 +47,11 @@ class StrategyConfig:
     exchange: str = "gate"
     allocation: float = settings.DEFAULT_STRATEGY_ALLOCATION
     runtime_limit_minutes: Optional[int] = None
+    # When True, hitting the runtime_limit extends the deadline by
+    # runtime_limit_minutes instead of stopping the strategy and closing
+    # positions — useful for evergreen live strategies where the limit is a
+    # health check, not a lifecycle gate.
+    auto_renew_on_runtime_limit: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -1025,7 +1030,28 @@ class StrategyManager:
 
             deadline = self._runtime_deadlines.get(name)
             if deadline and datetime.now(timezone.utc) >= deadline:
-                logger.info(f"Strategy {name} reached runtime limit, stopping automatically")
+                limit_min = int(config.runtime_limit_minutes or 0)
+                if config.auto_renew_on_runtime_limit and limit_min > 0:
+                    # Treat the runtime_limit as a heartbeat, not a kill: keep
+                    # the strategy and any open positions alive and extend the
+                    # deadline. Visible at WARNING level so it shows up in
+                    # operator review (the legacy stop path was logged at INFO
+                    # and easy to miss).
+                    new_deadline = deadline + pd.Timedelta(minutes=limit_min)
+                    self._runtime_deadlines[name] = new_deadline
+                    logger.warning(
+                        f"Strategy {name} hit runtime limit; auto-renewed for "
+                        f"{limit_min}min (next deadline {new_deadline.isoformat()})"
+                    )
+                    await self._run_strategy_once_with_timeout(name)
+                    timeframe_seconds = self._timeframe_to_seconds(config.timeframe)
+                    interval = max(5, min(max(5, timeframe_seconds // 3), 60))
+                    await asyncio.sleep(interval)
+                    continue
+                logger.warning(
+                    f"Strategy {name} reached runtime limit, stopping automatically "
+                    f"(set auto_renew_on_runtime_limit=True to keep it running)"
+                )
                 strategy.stop()
                 self._running_since.pop(name, None)
                 self._runtime_deadlines.pop(name, None)
@@ -1088,6 +1114,7 @@ class StrategyManager:
         timeframe: str = "1h",
         allocation: float = settings.DEFAULT_STRATEGY_ALLOCATION,
         runtime_limit_minutes: Optional[int] = None,
+        auto_renew_on_runtime_limit: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
         if name in self._strategies:
@@ -1114,6 +1141,7 @@ class StrategyManager:
                     if runtime_limit_minutes is not None
                     else None
                 ),
+                auto_renew_on_runtime_limit=bool(auto_renew_on_runtime_limit),
                 metadata=metadata,
             )
 
