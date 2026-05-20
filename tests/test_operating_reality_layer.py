@@ -485,6 +485,84 @@ def test_gate_counterfactual_outcomes_are_backfilled(tmp_path):
     assert summary["missed_alpha_proxy"] == 0.5
 
 
+def test_gate_counterfactual_summary_limit_uses_tail_rows(tmp_path):
+    from core.audit.gate_counterfactuals import record_gate_counterfactual, summarize_gate_counterfactuals
+
+    audit_path = tmp_path / "gate_counterfactuals.jsonl"
+    for idx, gate_code in enumerate(["gate_a", "gate_b", "gate_c"], start=1):
+        record_gate_counterfactual(
+            trace={
+                "trace_id": f"trace-{idx}",
+                "subject_type": "candidate",
+                "subject_id": f"cand-{idx}",
+                "root_blocker_code": gate_code,
+                "created_at": "2026-05-17T00:00:00+00:00",
+                "gates": [{"code": gate_code, "counterfactual_decision": "paper"}],
+            },
+            observed_decision="hold",
+            mode="paper",
+            path=audit_path,
+        )
+
+    summary = summarize_gate_counterfactuals(path=audit_path, limit=2)
+
+    assert summary["total"] == 2
+    assert summary["gate_hit_counts"] == {"gate_b": 1, "gate_c": 1}
+    assert [item["subject_id"] for item in summary["items"]] == ["cand-2", "cand-3"]
+
+
+def test_gate_counterfactual_outcome_backfill_preserves_existing_unless_forced(tmp_path):
+    from core.audit.gate_counterfactuals import (
+        record_gate_counterfactual,
+        summarize_gate_counterfactuals,
+        update_gate_counterfactual_outcomes,
+    )
+
+    audit_path = tmp_path / "gate_counterfactuals.jsonl"
+    record_gate_counterfactual(
+        trace={
+            "trace_id": "trace-force",
+            "subject_type": "candidate",
+            "subject_id": "cand-force",
+            "root_blocker_code": "risk_gate",
+            "created_at": "2026-05-17T00:00:00+00:00",
+            "gates": [{"code": "risk_gate", "counterfactual_decision": "paper"}],
+        },
+        observed_decision="hold",
+        mode="paper",
+        path=audit_path,
+    )
+
+    first = update_gate_counterfactual_outcomes(
+        [{"trace_id": "trace-force", "later_outcome_ref": "paper:+0.5", "edge_delta": 0.5}],
+        path=audit_path,
+    )
+    skipped = update_gate_counterfactual_outcomes(
+        [{"trace_id": "trace-force", "later_outcome_ref": "paper:-0.2", "edge_delta": -0.2}],
+        path=audit_path,
+    )
+    forced = update_gate_counterfactual_outcomes(
+        [
+            {
+                "subject_type": "candidate",
+                "subject_id": "cand-force",
+                "later_outcome_ref": "paper:-0.2",
+                "edge_delta": -0.2,
+                "force": True,
+            }
+        ],
+        path=audit_path,
+    )
+
+    assert first["updated"] == 1
+    assert skipped["updated"] == 0
+    assert forced["updated"] == 1
+    summary = summarize_gate_counterfactuals(path=audit_path)
+    assert summary["items"][-1]["later_outcome_ref"] == "paper:-0.2"
+    assert summary["missed_alpha_proxy"] == 0.0
+    assert summary["avoided_loss_proxy"] == 0.2
+
+
 def test_market_state_benchmark_scope_requires_beta_or_sector_rule():
     from core.market_state.planner_adapter import market_state_to_planner_hints
 

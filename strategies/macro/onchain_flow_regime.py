@@ -40,7 +40,12 @@ class OnChainFlowRegimeStrategy(StrategyBase):
         )
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
+        # Guard against tiny frames so callers that haven't accumulated enough
+        # history (e.g. cold-start replay) don't generate a regime decision
+        # from a single bar. Matches the defensive pattern in other strategies.
         if data is None or data.empty or "close" not in data:
+            return []
+        if len(data) < 2:
             return []
         row = data.iloc[-1].to_dict()
         symbol = str(row.get("symbol", "UNKNOWN"))

@@ -724,6 +724,7 @@ class ExecutionEngine:
                             continue
                         if not isinstance(row, dict):
                             continue
+                        row = self._with_live_trade_review_cost_defaults(row)
                         if strategy_filter and str(row.get("strategy") or "") != strategy_filter:
                             continue
                         ts_raw = str(row.get("timestamp") or "")
@@ -1166,6 +1167,106 @@ class ExecutionEngine:
         if action == "close":
             return "long" if side in {"sell", "short"} else "short"
         return "long" if side in {"buy", "long"} else "short"
+
+    @classmethod
+    def _live_default_fee_rate(cls) -> float:
+        return min(
+            1.0,
+            cls._safe_nonnegative_float(
+                getattr(settings, "LIVE_FEE_RATE", 0.0004),
+                0.0004,
+            ),
+        )
+
+    @classmethod
+    def _live_default_slippage_bps(cls) -> float:
+        return min(
+            10000.0,
+            cls._safe_nonnegative_float(
+                getattr(settings, "LIVE_SLIPPAGE_BPS", getattr(settings, "PAPER_SLIPPAGE_BPS", 0.0)),
+                0.0,
+            ),
+        )
+
+    @classmethod
+    def _estimate_live_default_costs(
+        cls,
+        *,
+        fill_price: Any = None,
+        quantity: Any = None,
+        notional: Any = None,
+    ) -> Dict[str, float]:
+        notional_usd = cls._safe_nonnegative_float(notional, 0.0)
+        if notional_usd <= 0:
+            notional_usd = (
+                cls._safe_nonnegative_float(fill_price, 0.0)
+                * cls._safe_nonnegative_float(quantity, 0.0)
+            )
+        fee_rate = cls._live_default_fee_rate()
+        slippage_bps = cls._live_default_slippage_bps()
+        return {
+            "notional": float(notional_usd),
+            "fee_rate": float(fee_rate),
+            "slippage_bps": float(slippage_bps),
+            "fee_usd": float(notional_usd * fee_rate) if notional_usd > 0 and fee_rate > 0 else 0.0,
+            "slippage_cost_usd": (
+                float(notional_usd * (slippage_bps / 10000.0))
+                if notional_usd > 0 and slippage_bps > 0
+                else 0.0
+            ),
+        }
+
+    @classmethod
+    def _with_live_trade_review_cost_defaults(cls, row: Dict[str, Any]) -> Dict[str, Any]:
+        if str(row.get("mode") or "live").strip().lower() not in {"", "live"}:
+            return row
+
+        fee_usd = cls._safe_nonnegative_float(row.get("fee_usd"), 0.0)
+        slippage_cost_usd = cls._safe_nonnegative_float(row.get("slippage_cost_usd"), 0.0)
+        defaults = cls._estimate_live_default_costs(
+            fill_price=row.get("fill_price"),
+            quantity=row.get("quantity"),
+            notional=row.get("notional"),
+        )
+        added_default = False
+        hydrated = dict(row)
+
+        if fee_usd <= 0 and defaults["fee_usd"] > 0:
+            fee_usd = defaults["fee_usd"]
+            hydrated["fee_usd"] = float(fee_usd)
+            if not str(hydrated.get("fee_source") or "").strip():
+                hydrated["fee_source"] = "live_default_fee_rate"
+            added_default = True
+
+        if slippage_cost_usd <= 0 and defaults["slippage_cost_usd"] > 0:
+            slippage_cost_usd = defaults["slippage_cost_usd"]
+            hydrated["slippage_cost_usd"] = float(slippage_cost_usd)
+            if not str(hydrated.get("slippage_source") or "").strip():
+                hydrated["slippage_source"] = "live_default_slippage_bps"
+            hydrated["slippage_bps"] = float(
+                cls._safe_nonnegative_float(hydrated.get("slippage_bps"), 0.0)
+                or defaults["slippage_bps"]
+            )
+            if cls._safe_nonnegative_float(hydrated.get("slippage_reference_price"), 0.0) <= 0:
+                hydrated["slippage_reference_price"] = cls._safe_nonnegative_float(row.get("fill_price"), 0.0)
+            added_default = True
+
+        hydrated["cost_usd"] = float(fee_usd + slippage_cost_usd)
+        if added_default:
+            old_fee = cls._safe_nonnegative_float(row.get("fee_usd"), 0.0)
+            old_slippage = cls._safe_nonnegative_float(row.get("slippage_cost_usd"), 0.0)
+            if row.get("gross_pnl_usd") is not None:
+                gross_pnl_usd = cls._safe_float(row.get("gross_pnl_usd"), 0.0)
+            elif row.get("net_pnl_usd") is not None:
+                gross_pnl_usd = cls._safe_float(row.get("net_pnl_usd"), 0.0) + old_fee + old_slippage
+            else:
+                gross_pnl_usd = cls._safe_float(row.get("pnl"), 0.0) + old_fee + old_slippage
+            net_pnl_usd = gross_pnl_usd - fee_usd - slippage_cost_usd
+            hydrated["gross_pnl_usd"] = float(gross_pnl_usd)
+            hydrated["net_pnl_usd"] = float(net_pnl_usd)
+            hydrated["pnl"] = float(net_pnl_usd)
+            hydrated["cost_estimated"] = True
+        return hydrated
 
     @classmethod
     def _build_live_trade_review_summary(cls, items: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2341,11 +2442,27 @@ class ExecutionEngine:
             if slippage_cost_usd > 0:
                 slippage_source = "fill_vs_reference"
 
+        default_costs = self._estimate_live_default_costs(
+            fill_price=fill_price,
+            quantity=quantity,
+        )
+        if fee_usd <= 0:
+            fee_usd = self._safe_nonnegative_float(default_costs.get("fee_usd"), 0.0)
+            if fee_usd > 0:
+                fee_source = "live_default_fee_rate"
+
+        slippage_bps = self._safe_nonnegative_float(slip.get("slippage_bps"), 0.0)
+        if slippage_cost_usd <= 0:
+            slippage_cost_usd = self._safe_nonnegative_float(default_costs.get("slippage_cost_usd"), 0.0)
+            if slippage_cost_usd > 0:
+                slippage_source = "live_default_slippage_bps"
+                slippage_bps = self._safe_nonnegative_float(default_costs.get("slippage_bps"), 0.0)
+
         return {
             **trade_costs,
             "fee_usd": float(fee_usd),
             "slippage_cost_usd": float(slippage_cost_usd),
-            "slippage_bps": float(slip.get("slippage_bps") or 0.0),
+            "slippage_bps": float(slippage_bps),
             "slippage_reference_price": float(slip.get("slippage_reference_price") or 0.0),
             "fee_source": fee_source,
             "slippage_source": slippage_source,

@@ -1527,6 +1527,7 @@ def _summary_repair_pressure(items: List[Dict[str, Any]]) -> Dict[str, Any]:
 async def _run_auto_summary_repair(
     cfg: Dict[str, Any],
     *,
+    items: Optional[List[Dict[str, Any]]] = None,
     hours: int,
     trigger: str,
     pressure: Dict[str, Any],
@@ -1534,7 +1535,9 @@ async def _run_auto_summary_repair(
     global _SUMMARY_REPAIR_AUTO_TASK
 
     try:
-        result = await repair_recent_news_summaries(cfg, hours=hours)
+        result = await repair_visible_news_summaries(cfg, items=items or [], hours=hours)
+        if int(result.get("requested") or 0) <= 0:
+            result = await repair_recent_news_summaries(cfg, hours=hours)
         updated_total = int(result.get("updated_raw_count") or 0) + int(result.get("updated_event_count") or 0)
         if updated_total > 0:
             _invalidate_news_caches(clear_feed=True)
@@ -1602,6 +1605,7 @@ async def _maybe_schedule_background_summary_repair(
         _SUMMARY_REPAIR_AUTO_TASK = asyncio.create_task(
             _run_auto_summary_repair(
                 dict(cfg or {}),
+                items=list(items or []),
                 hours=repair_hours,
                 trigger=trigger,
                 pressure=pressure,
@@ -1613,6 +1617,157 @@ async def _maybe_schedule_background_summary_repair(
             "cooldown_sec": cooldown_sec,
             "repair_hours": repair_hours,
         }
+
+
+def _summary_target_key(target: Dict[str, Any]) -> str:
+    kind = str(target.get("kind") or "").strip().lower()
+    if kind == "raw" and target.get("raw_news_id"):
+        return f"raw:{int(target['raw_news_id'])}"
+    if kind == "event" and str(target.get("event_id") or "").strip():
+        return f"event:{str(target.get('event_id')).strip()}"
+    return ""
+
+
+def _summary_targets_from_feed_items(items: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+    max_targets = max(1, min(int(limit or 1), 80))
+    targets: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items or []:
+        if len(targets) >= max_targets:
+            break
+        if not isinstance(item, dict) or not _needs_llm_summary(item):
+            continue
+        title = _clean_display_text(item.get("title") or item.get("summary_title"))
+        if not title:
+            continue
+        raw_news_id = item.get("raw_news_id")
+        event_id = str(item.get("event_id") or "").strip()
+        if raw_news_id:
+            target = {"kind": "raw", "raw_news_id": int(raw_news_id), "title": title}
+        elif bool(item.get("has_event")) and event_id:
+            target = {"kind": "event", "event_id": event_id, "title": title}
+        else:
+            continue
+        key = _summary_target_key(target)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        targets.append(target)
+    return targets
+
+
+def _summary_repair_total_timeout(timeout_sec: int, batch_size: int, target_count: int) -> int:
+    per_batch = max(8, int(timeout_sec or 0))
+    chunks = max(1, (max(1, int(target_count or 1)) + max(1, int(batch_size or 1)) - 1) // max(1, int(batch_size or 1)))
+    default_cap = max(per_batch + 2, min(per_batch * max(1, min(chunks, 3)) + 5, 240))
+    return max(per_batch + 2, min(_env_int("NEWS_SUMMARY_REPAIR_TOTAL_TIMEOUT_SEC", default_cap), 1800))
+
+
+async def _summarize_and_persist_summary_targets(
+    cfg: Dict[str, Any],
+    targets: List[Dict[str, Any]],
+    *,
+    errors: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    errors_out = list(errors or [])
+    if not targets:
+        return {
+            "requested": 0,
+            "updated_raw_count": 0,
+            "updated_event_count": 0,
+            "skipped_non_llm": 0,
+            "errors": errors_out,
+        }
+
+    summary_cfg = dict(cfg or {})
+    llm_cfg = dict(summary_cfg.get("llm") or {})
+    has_local_gemma_backup = _has_local_gemma_backup(summary_cfg)
+    repair_timeout_cap = max(45, _env_int("NEWS_SUMMARY_REPAIR_TIMEOUT_SEC", 120))
+    timeout_sec = max(20, min(int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 60), repair_timeout_cap))
+    batch_size = max(1, min(int(llm_cfg.get("summarize_batch_size") or 6), _env_int("NEWS_SUMMARY_REPAIR_BATCH_SIZE", 12), len(targets)))
+    if has_local_gemma_backup:
+        local_batch_cap = max(1, _env_int("NEWS_LLM_LOCAL_SUMMARY_BATCH_SIZE", 1))
+        local_timeout_sec = max(30, _env_int("NEWS_LLM_LOCAL_SUMMARIZE_TIMEOUT_SEC", 120))
+        batch_size = max(1, min(batch_size, local_batch_cap))
+        timeout_sec = max(timeout_sec, local_timeout_sec)
+    llm_cfg["summarize_limit"] = len(targets)
+    llm_cfg["summarize_batch_size"] = batch_size
+    llm_cfg["summarize_timeout_sec"] = timeout_sec
+    summary_cfg["llm"] = llm_cfg
+
+    try:
+        summarized_results = await asyncio.wait_for(
+            asyncio.to_thread(batch_summarize_titles, [item["title"] for item in targets], summary_cfg, 60),
+            timeout=_summary_repair_total_timeout(timeout_sec, batch_size, len(targets)),
+        )
+    except Exception as exc:
+        logger.warning(f"background summary repair failed: {type(exc).__name__}: {exc}")
+        return {
+            "requested": len(targets),
+            "updated_raw_count": 0,
+            "updated_event_count": 0,
+            "skipped_non_llm": len(targets),
+            "errors": errors_out + [f"summarize={type(exc).__name__}"],
+        }
+
+    raw_updates: List[Dict[str, Any]] = []
+    event_updates: List[Dict[str, Any]] = []
+    skipped_non_llm = 0
+    for target, result in zip(targets, summarized_results):
+        result_source = str((result or {}).get("source") or "").strip().lower()
+        if not _is_llm_summary_source(result_source):
+            skipped_non_llm += 1
+            continue
+        row = {
+            "summary_title": (result or {}).get("summary") or target.get("title") or "",
+            "summary_sentiment": (result or {}).get("sentiment") or "neutral",
+            "summary_source": result_source,
+        }
+        if target.get("kind") == "raw" and target.get("raw_news_id"):
+            raw_updates.append({"raw_news_id": int(target["raw_news_id"]), **row})
+            continue
+        if target.get("kind") == "event" and str(target.get("event_id") or "").strip():
+            event_updates.append({"event_id": str(target["event_id"]), **row})
+            raw_news_id = target.get("raw_news_id")
+            if raw_news_id:
+                raw_updates.append({"raw_news_id": int(raw_news_id), **row})
+
+    raw_result = {"updated_count": 0, "skipped_count": 0}
+    event_result = {"updated_count": 0, "skipped_count": 0}
+    if raw_updates:
+        with contextlib.suppress(Exception):
+            raw_result = await news_db.save_news_raw_summaries(raw_updates)
+    if event_updates:
+        with contextlib.suppress(Exception):
+            event_result = await news_db.save_news_event_summaries(event_updates)
+
+    return {
+        "requested": len(targets),
+        "updated_raw_count": int(raw_result.get("updated_count") or 0),
+        "updated_event_count": int(event_result.get("updated_count") or 0),
+        "skipped_non_llm": skipped_non_llm,
+        "errors": errors_out,
+    }
+
+
+async def repair_visible_news_summaries(
+    cfg: Dict[str, Any],
+    *,
+    items: List[Dict[str, Any]],
+    hours: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    hours_value = max(6, min(int(hours or _env_int("NEWS_SUMMARY_REPAIR_HOURS", 24 * 30)), 24 * 90))
+    max_targets = max(1, min(int(limit if limit is not None else _env_int("NEWS_SUMMARY_REPAIR_VISIBLE_LIMIT", 16)), 80))
+    targets = _summary_targets_from_feed_items(items, limit=max_targets)
+    result = await _summarize_and_persist_summary_targets(cfg, targets)
+    return {
+        "hours": hours_value,
+        "raw_candidates": sum(1 for item in targets if item.get("kind") == "raw"),
+        "event_candidates": sum(1 for item in targets if item.get("kind") == "event"),
+        "visible_repair": True,
+        **result,
+    }
 
 
 async def repair_recent_news_summaries(
@@ -1714,80 +1869,13 @@ async def repair_recent_news_summaries(
             "errors": errors,
         }
 
-    summary_cfg = dict(cfg or {})
-    llm_cfg = dict(summary_cfg.get("llm") or {})
-    has_local_gemma_backup = _has_local_gemma_backup(summary_cfg)
-    repair_timeout_cap = max(45, _env_int("NEWS_SUMMARY_REPAIR_TIMEOUT_SEC", 120))
-    timeout_sec = max(20, min(int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 60), repair_timeout_cap))
-    batch_size = max(1, min(int(llm_cfg.get("summarize_batch_size") or 6), _env_int("NEWS_SUMMARY_REPAIR_BATCH_SIZE", 12), len(targets)))
-    if has_local_gemma_backup:
-        local_batch_cap = max(1, _env_int("NEWS_LLM_LOCAL_SUMMARY_BATCH_SIZE", 1))
-        local_timeout_sec = max(30, _env_int("NEWS_LLM_LOCAL_SUMMARIZE_TIMEOUT_SEC", 120))
-        batch_size = max(1, min(batch_size, local_batch_cap))
-        timeout_sec = max(timeout_sec, local_timeout_sec)
-    llm_cfg["summarize_limit"] = len(targets)
-    llm_cfg["summarize_batch_size"] = batch_size
-    llm_cfg["summarize_timeout_sec"] = timeout_sec
-    summary_cfg["llm"] = llm_cfg
-
-    try:
-        summarized_results = await asyncio.wait_for(
-            asyncio.to_thread(batch_summarize_titles, [item["title"] for item in targets], summary_cfg, 60),
-            timeout=timeout_sec + 2,
-        )
-    except Exception as exc:
-        logger.warning(f"background summary repair failed: {type(exc).__name__}: {exc}")
-        return {
-            "hours": hours,
-            "raw_candidates": len(raw_candidates),
-            "event_candidates": len(event_candidates),
-            "requested": len(targets),
-            "updated_raw_count": 0,
-            "updated_event_count": 0,
-            "skipped_non_llm": len(targets),
-            "errors": errors + [f"summarize={type(exc).__name__}"],
-        }
-
-    raw_updates: List[Dict[str, Any]] = []
-    event_updates: List[Dict[str, Any]] = []
-    skipped_non_llm = 0
-    for target, result in zip(targets, summarized_results):
-        result_source = str((result or {}).get("source") or "").strip().lower()
-        if not _is_llm_summary_source(result_source):
-            skipped_non_llm += 1
-            continue
-        row = {
-            "summary_title": (result or {}).get("summary") or target.get("title") or "",
-            "summary_sentiment": (result or {}).get("sentiment") or "neutral",
-            "summary_source": result_source,
-        }
-        if target.get("kind") == "raw" and target.get("raw_news_id"):
-            raw_updates.append({"raw_news_id": int(target["raw_news_id"]), **row})
-            continue
-        if target.get("kind") == "event" and str(target.get("event_id") or "").strip():
-            event_updates.append({"event_id": str(target["event_id"]), **row})
-            raw_news_id = target.get("raw_news_id")
-            if raw_news_id:
-                raw_updates.append({"raw_news_id": int(raw_news_id), **row})
-
-    raw_result = {"updated_count": 0, "skipped_count": 0}
-    event_result = {"updated_count": 0, "skipped_count": 0}
-    if raw_updates:
-        with contextlib.suppress(Exception):
-            raw_result = await news_db.save_news_raw_summaries(raw_updates)
-    if event_updates:
-        with contextlib.suppress(Exception):
-            event_result = await news_db.save_news_event_summaries(event_updates)
-
+    result = await _summarize_and_persist_summary_targets(cfg, targets, errors=errors)
     return {
         "hours": hours,
         "raw_candidates": len(raw_candidates),
         "event_candidates": len(event_candidates),
-        "requested": len(targets),
-        "updated_raw_count": int(raw_result.get("updated_count") or 0),
-        "updated_event_count": int(event_result.get("updated_count") or 0),
-        "skipped_non_llm": skipped_non_llm,
-        "errors": errors,
+        "visible_repair": False,
+        **result,
     }
 
 

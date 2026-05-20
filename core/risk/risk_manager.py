@@ -404,6 +404,7 @@ class RiskManager:
         total_usd: float,
         day_start_equity: Optional[float] = None,
         current_unrealized_pnl: Optional[float] = None,
+        daily_realized_pnl: Optional[float] = None,
     ) -> None:
         """Feed latest account equity to risk manager for drawdown/volatility checks."""
         self._check_new_day()
@@ -422,6 +423,9 @@ class RiskManager:
 
         if current_unrealized_pnl is not None:
             self._current_unrealized_pnl = float(current_unrealized_pnl or 0.0)
+
+        if daily_realized_pnl is not None:
+            self._daily_realized_pnl = float(daily_realized_pnl or 0.0)
 
         if self._last_equity and self._last_equity > 0:
             change_ratio = (equity - self._last_equity) / self._last_equity

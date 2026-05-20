@@ -628,6 +628,8 @@ async def _build_all_balances_payload():
     live_equity_baseline: Dict[str, Any] = {}
     live_day_start_equity = 0.0
     live_daily_total_pnl = 0.0
+    live_daily_realized_pnl: Optional[float] = None
+    live_daily_realized_source = ""
     balance_warning_present = any(
         isinstance(v, dict) and (v.get("error") or v.get("warning"))
         for v in results.values()
@@ -671,6 +673,16 @@ async def _build_all_balances_payload():
                 )
         except Exception as e:
             trading_api.logger.warning(f"Failed to resolve live equity baseline: {e}")
+        try:
+            realized_payload = await trading_api._resolve_live_daily_realized_pnl(
+                force_refresh=False
+            )
+            resolved_realized = realized_payload.get("pnl")
+            if resolved_realized is not None:
+                live_daily_realized_pnl = float(resolved_realized)
+            live_daily_realized_source = str(realized_payload.get("source") or "")
+        except Exception as e:
+            trading_api.logger.debug(f"Failed to resolve live realized PnL: {e}")
 
         for label, usd_value in (
             live_position_snapshot.get("distribution") or {}
@@ -746,6 +758,7 @@ async def _build_all_balances_payload():
             if not is_paper_mode
             else float(trading_api.position_manager.get_total_pnl() or 0.0)
         ),
+        daily_realized_pnl=live_daily_realized_pnl if not is_paper_mode else None,
     )
 
     if is_paper_mode:
@@ -858,6 +871,8 @@ async def _build_all_balances_payload():
             live_position_snapshot,
             live_daily_total_pnl=live_daily_total_pnl,
             live_day_start_equity=live_day_start_equity,
+            live_daily_realized_pnl=live_daily_realized_pnl,
+            live_daily_realized_source=live_daily_realized_source,
         )
         if not is_paper_mode
         else trading_api.risk_manager.get_risk_report()

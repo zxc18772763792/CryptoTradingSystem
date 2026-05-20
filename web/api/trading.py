@@ -76,6 +76,12 @@ _BALANCE_SNAPSHOT_CACHE: Dict[str, Dict[str, Any]] = {}
 _LIVE_POSITION_SNAPSHOT_CACHE: Dict[str, Any] = {"ts": 0.0, "data": {}}
 _LIVE_POSITION_SNAPSHOT_TTL_SEC = 6.0
 _LIVE_POSITION_FETCH_TIMEOUT_SEC = 8.5
+_LIVE_DAILY_REALIZED_PNL_CACHE: Dict[str, Any] = {
+    "ts": 0.0,
+    "day_start": "",
+    "payload": {},
+}
+_LIVE_DAILY_REALIZED_PNL_TTL_SEC = 45.0
 _LIVE_POSITION_DETAILS_CACHE_TTL_SEC = 12.0
 _LIVE_POSITION_DETAILS_CACHE: Dict[str, Any] = {
     "ts": 0.0,
@@ -343,6 +349,9 @@ def _clear_trading_api_runtime_caches() -> Dict[str, Any]:
     _RULE_PRICE_IN_FLIGHT = None
     _LIVE_POSITION_SNAPSHOT_CACHE["ts"] = 0.0
     _LIVE_POSITION_SNAPSHOT_CACHE["data"] = {}
+    _LIVE_DAILY_REALIZED_PNL_CACHE["ts"] = 0.0
+    _LIVE_DAILY_REALIZED_PNL_CACHE["day_start"] = ""
+    _LIVE_DAILY_REALIZED_PNL_CACHE["payload"] = {}
     _LIVE_POSITION_DETAILS_CACHE["ts"] = 0.0
     _LIVE_POSITION_DETAILS_CACHE["positions"] = []
     _LIVE_POSITION_DETAILS_CACHE["diagnostics"] = None
@@ -394,6 +403,9 @@ def _inspect_trading_api_runtime_caches() -> Dict[str, Any]:
         "rule_price_cache_age_sec": _age(float(_RULE_PRICE_CACHE.get("ts") or 0.0)),
         "live_position_snapshot_age_sec": _age(
             float(_LIVE_POSITION_SNAPSHOT_CACHE.get("ts") or 0.0)
+        ),
+        "live_daily_realized_pnl_age_sec": _age(
+            float(_LIVE_DAILY_REALIZED_PNL_CACHE.get("ts") or 0.0)
         ),
         "live_position_details_age_sec": _age(
             float(_LIVE_POSITION_DETAILS_CACHE.get("ts") or 0.0)
@@ -3702,6 +3714,8 @@ def _apply_live_snapshot_to_risk_report(
     live_snapshot: Dict[str, Any],
     live_daily_total_pnl: Optional[float] = None,
     live_day_start_equity: Optional[float] = None,
+    live_daily_realized_pnl: Optional[float] = None,
+    live_daily_realized_source: Optional[str] = None,
 ) -> Dict[str, Any]:
     out = dict(risk_report or {})
     equity = dict(out.get("equity") or {})
@@ -3712,30 +3726,28 @@ def _apply_live_snapshot_to_risk_report(
         if live_daily_total_pnl is not None
         else daily_equity_delta
     )
-    has_live_positions = (
-        int(live_snapshot.get("position_count") or 0) > 0 or abs(live_unrealized) > 0
-    )
+    existing_realized = float(equity.get("daily_realized_pnl_usd") or 0.0)
+    has_live_realized = live_daily_realized_pnl is not None
     daily_realized = (
-        daily_total - live_unrealized
-        if has_live_positions
-        else float(equity.get("daily_realized_pnl_usd") or 0.0)
+        float(live_daily_realized_pnl or 0.0)
+        if has_live_realized
+        else existing_realized
     )
-    daily_stop_basis = float(
-        equity.get("daily_stop_basis_usd")
-        or (daily_realized + min(0.0, live_unrealized))
+    daily_realized_source = (
+        str(live_daily_realized_source or "").strip()
+        or str(equity.get("daily_realized_pnl_source") or "").strip()
+        or ("live_resolved" if has_live_realized else "risk_manager")
     )
+    daily_stop_basis = daily_realized + min(0.0, live_unrealized)
+    daily_unrealized_component = daily_total - daily_realized
 
     equity["current_unrealized_pnl_usd"] = round(live_unrealized, 4)
     equity["daily_total_pnl_usd"] = round(daily_total, 4)
     equity["daily_pnl_usd"] = round(daily_total, 4)
     equity["daily_realized_pnl_usd"] = round(daily_realized, 4)
+    equity["daily_realized_pnl_source"] = daily_realized_source
     equity["daily_stop_basis_usd"] = round(daily_stop_basis, 4)
-    equity["daily_unrealized_component_usd"] = round(
-        live_unrealized
-        if has_live_positions
-        else float(equity.get("daily_unrealized_component_usd") or 0.0),
-        4,
-    )
+    equity["daily_unrealized_component_usd"] = round(daily_unrealized_component, 4)
     day_start_equity = 0.0
     if live_day_start_equity is not None and float(live_day_start_equity or 0.0) > 0:
         day_start_equity = float(live_day_start_equity or 0.0)
@@ -3768,10 +3780,19 @@ def _apply_live_snapshot_to_risk_report(
         equity["daily_total_pnl_ratio"] = round(total_ratio, 6)
         equity["daily_stop_basis_ratio"] = round(stop_ratio, 6)
         equity["daily_pnl_ratio"] = round(stop_ratio, 6)
-    equity[
-        "pnl_scope_note"
-    ] = "daily_total_pnl_usd 为账户权益变化；daily_stop_basis_usd = 已实现盈亏 + 当前浮亏，仅该值用于熔断"
+    equity["pnl_scope_note"] = (
+        "daily_total_pnl_usd is account equity change; current_unrealized_pnl_usd is "
+        "total open-position unrealized PnL, not today's unrealized delta; "
+        "daily_stop_basis_usd = daily_realized_pnl_usd + current floating loss."
+    )
     out["equity"] = equity
+    limits = dict(out.get("limits") or {})
+    max_daily_loss_ratio = abs(_safe_float(limits.get("max_daily_loss_ratio"), default=0.0))
+    stop_ratio_for_level = _safe_float(equity.get("daily_stop_basis_ratio"), default=0.0)
+    if bool(out.get("trading_halted")):
+        out["risk_level"] = "critical"
+    elif max_daily_loss_ratio > 0 and stop_ratio_for_level <= -(max_daily_loss_ratio * 0.7):
+        out["risk_level"] = "high"
     out["live_positions"] = {
         "position_count": int(live_snapshot.get("position_count") or 0),
         "by_exchange": live_snapshot.get("by_exchange") or {},
@@ -3788,7 +3809,18 @@ async def _build_effective_risk_report(
     live_snapshot = await _collect_live_position_snapshot(
         force_refresh=force_live_refresh
     )
-    return _apply_live_snapshot_to_risk_report(report, live_snapshot)
+    realized_payload = await _resolve_live_daily_realized_pnl(
+        force_refresh=force_live_refresh
+    )
+    resolved_realized = realized_payload.get("pnl")
+    return _apply_live_snapshot_to_risk_report(
+        report,
+        live_snapshot,
+        live_daily_realized_pnl=(
+            float(resolved_realized) if resolved_realized is not None else None
+        ),
+        live_daily_realized_source=str(realized_payload.get("source") or ""),
+    )
 
 
 def _bucket_key(ts: datetime, mode: str) -> str:
@@ -4105,6 +4137,100 @@ async def _fetch_binance_realized_pnl_income(days: int = 30) -> List[Dict[str, A
             }
         )
     return out
+
+
+def _current_utc_day_start() -> datetime:
+    now = datetime.now(timezone.utc)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _sum_realized_pnl_since(
+    rows: List[Dict[str, Any]],
+    *,
+    day_start: datetime,
+) -> Dict[str, Any]:
+    total = 0.0
+    count = 0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        ts = _safe_dt(row.get("timestamp"))
+        if ts is None or ts < day_start:
+            continue
+        total += _safe_float(row.get("pnl"), default=0.0)
+        count += 1
+    return {"pnl": total, "row_count": count}
+
+
+def _resolve_live_daily_realized_from_runtime_history(
+    *,
+    day_start: datetime,
+) -> Dict[str, Any]:
+    try:
+        rows = risk_manager.get_trade_history(limit=50000, scope="live")
+    except Exception:
+        rows = []
+    summed = _sum_realized_pnl_since(list(rows or []), day_start=day_start)
+    if int(summed.get("row_count") or 0) <= 0:
+        return {
+            "pnl": None,
+            "source": "unavailable",
+            "row_count": 0,
+            "day_start": day_start.isoformat(),
+        }
+    return {
+        "pnl": float(summed.get("pnl") or 0.0),
+        "source": "runtime_trade_history",
+        "row_count": int(summed.get("row_count") or 0),
+        "day_start": day_start.isoformat(),
+    }
+
+
+async def _resolve_live_daily_realized_pnl(
+    *,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    day_start = _current_utc_day_start()
+    day_key = day_start.isoformat()
+    now_ts = time.time()
+    cached = dict(_LIVE_DAILY_REALIZED_PNL_CACHE.get("payload") or {})
+    cached_ts = float(_LIVE_DAILY_REALIZED_PNL_CACHE.get("ts") or 0.0)
+    if (
+        not force_refresh
+        and cached
+        and str(_LIVE_DAILY_REALIZED_PNL_CACHE.get("day_start") or "") == day_key
+        and (now_ts - cached_ts) <= _LIVE_DAILY_REALIZED_PNL_TTL_SEC
+    ):
+        return dict(cached)
+
+    payload: Dict[str, Any]
+    if _binance_has_credentials():
+        try:
+            rows = await asyncio.wait_for(
+                _fetch_binance_realized_pnl_income(days=2),
+                timeout=5.5,
+            )
+            summed = _sum_realized_pnl_since(list(rows or []), day_start=day_start)
+            payload = {
+                "pnl": float(summed.get("pnl") or 0.0),
+                "source": "binance_income",
+                "row_count": int(summed.get("row_count") or 0),
+                "day_start": day_key,
+            }
+        except Exception as exc:
+            logger.debug(f"binance live realized pnl income unavailable: {exc}")
+            payload = _resolve_live_daily_realized_from_runtime_history(
+                day_start=day_start
+            )
+    else:
+        payload = _resolve_live_daily_realized_from_runtime_history(
+            day_start=day_start
+        )
+
+    _LIVE_DAILY_REALIZED_PNL_CACHE["ts"] = now_ts
+    _LIVE_DAILY_REALIZED_PNL_CACHE["day_start"] = day_key
+    _LIVE_DAILY_REALIZED_PNL_CACHE["payload"] = dict(payload)
+    return dict(payload)
 
 
 async def _fetch_binance_live_wallet_snapshot_fast() -> Dict[str, Any]:

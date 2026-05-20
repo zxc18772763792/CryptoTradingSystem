@@ -25,6 +25,8 @@ def _latest_bar_context(data: pd.DataFrame) -> Tuple[object, str]:
 class MAStrategy(StrategyBase):
     """移动平均交叉策略"""
 
+    mutates_input = False  # only reads data["close"].rolling(...).mean()
+
     def __init__(
         self,
         name: str = "MA_Cross",
@@ -116,6 +118,8 @@ class MAStrategy(StrategyBase):
 
 class EMAStrategy(StrategyBase):
     """EMA策略（使用指数移动平均）"""
+
+    mutates_input = False  # only reads data["close"]
 
     def __init__(
         self,

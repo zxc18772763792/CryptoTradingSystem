@@ -263,6 +263,33 @@ def _build_backtest_position_series(
     allow_long, allow_short, reverse_on_signal = _resolve_backtest_trade_policy(
         strategy, params=params
     )
+
+    # Phase 2 fast_exact path — gated by BACKTEST_FAST_EXACT_STRATEGIES.
+    # The fast builder is locked against the trusted replay by
+    # tests/test_multi_factor_hf_parity.py (5 regime fixtures, bar-by-bar).
+    # Any exception here falls through to the trusted replay below.
+    if (
+        bool(getattr(_settings, "BACKTEST_FAST_EXACT_STRATEGIES", False))
+        and strategy == "MultiFactorHFStrategy"
+    ):
+        try:
+            from strategies.quantitative.multi_factor_hf_fast import (  # noqa: PLC0415
+                build_multifactor_hf_position_series,
+            )
+
+            return build_multifactor_hf_position_series(
+                df,
+                params=params,
+                allow_long=allow_long,
+                allow_short=allow_short,
+                reverse_on_signal=reverse_on_signal,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                f"Fast_exact builder failed for {strategy}: {exc}; "
+                f"falling back to trusted replay"
+            )
+
     try:
         return _replay_signal_strategy_position(
             cls,
@@ -376,23 +403,56 @@ def _replay_signal_strategy_position(
         _min_length = 100
     live_window = max(120, _min_length + 20)
 
+    # Phase 1 view fast path: skip per-bar .copy() ONLY when the strategy
+    # class explicitly opts in via `mutates_input = False`. Default is the
+    # safe copy path. Disable globally via BACKTEST_REPLAY_VIEW_FAST_PATH.
+    use_view = False
+    try:
+        from config.settings import settings as _settings  # lazy
+
+        if bool(getattr(_settings, "BACKTEST_REPLAY_VIEW_FAST_PATH", True)):
+            use_view = bool(getattr(strategy_class, "mutates_input", True) is False)
+    except Exception:
+        use_view = False
+
+    n = len(df)
     state = 0.0
     values: List[float] = []
-    for end_idx in range(len(df)):
-        window = df.iloc[: end_idx + 1].tail(live_window).copy()
-        try:
-            signals = inst.generate_signals(window) or []
-        except Exception:
-            signals = []
-        for signal in signals:
-            state = _apply_signal_to_position_state(
-                state,
-                getattr(signal, "signal_type", ""),
-                allow_long=allow_long,
-                allow_short=allow_short,
-                reverse_on_signal=reverse_on_signal,
-            )
-        values.append(state)
+    if use_view:
+        for end_idx in range(n):
+            start = end_idx + 1 - live_window
+            if start < 0:
+                start = 0
+            window = df.iloc[start : end_idx + 1]
+            try:
+                signals = inst.generate_signals(window) or []
+            except Exception:
+                signals = []
+            for signal in signals:
+                state = _apply_signal_to_position_state(
+                    state,
+                    getattr(signal, "signal_type", ""),
+                    allow_long=allow_long,
+                    allow_short=allow_short,
+                    reverse_on_signal=reverse_on_signal,
+                )
+            values.append(state)
+    else:
+        for end_idx in range(n):
+            window = df.iloc[: end_idx + 1].tail(live_window).copy()
+            try:
+                signals = inst.generate_signals(window) or []
+            except Exception:
+                signals = []
+            for signal in signals:
+                state = _apply_signal_to_position_state(
+                    state,
+                    getattr(signal, "signal_type", ""),
+                    allow_long=allow_long,
+                    allow_short=allow_short,
+                    reverse_on_signal=reverse_on_signal,
+                )
+            values.append(state)
 
     return pd.Series(values, index=df.index, dtype=float)
 
@@ -1422,6 +1482,37 @@ def _build_pairs_backtest_components(
     }
 
 
+def _run_optimize_trial(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Pickle-friendly trial worker for the optimize process pool.
+
+    Returns a dict with either 'metrics' on success or 'error' on
+    failure. The trial index ``i`` is echoed back so callers can restore
+    deterministic ordering regardless of completion order.
+    """
+    i = args["i"]
+    params = args["params"]
+    try:
+        metrics = _run_backtest_core(
+            strategy=args["strategy"],
+            df=args["df"],
+            timeframe=args["timeframe"],
+            initial_capital=args["initial_capital"],
+            params=params,
+            include_series=False,
+            commission_rate=args["commission_rate"],
+            slippage_bps=args["slippage_bps"],
+            market_bundle=args.get("market_bundle"),
+            use_stop_take=args["use_stop_take"],
+            stop_loss_pct=args.get("effective_stop_loss"),
+            take_profit_pct=args.get("effective_take_profit"),
+            exit_template=args.get("exit_template"),
+        )
+        score = float(metrics.get(args["objective_key"], 0))
+        return {"i": i, "params": params, "metrics": metrics, "score": score}
+    except Exception as exc:
+        return {"i": i, "params": params, "error": str(exc)}
+
+
 def _optimize_strategy_on_df(
     strategy: str,
     df: pd.DataFrame,
@@ -1458,32 +1549,73 @@ def _optimize_strategy_on_df(
     failures: List[Dict[str, Any]] = []
     static_params = dict(base_params or {})
 
-    for combo in combo_iter:
+    # Build the work list deterministically so trial-index ordering is
+    # the same regardless of execution mode (serial vs pool).
+    trial_args: List[Dict[str, Any]] = []
+    for i, combo in enumerate(combo_iter):
         params = {**static_params, **{keys[idx]: combo[idx] for idx in range(len(keys))}}
         trial_stop_loss = _safe_positive_pct(params.get("stop_loss_pct"))
         trial_take_profit = _safe_positive_pct(params.get("take_profit_pct"))
         effective_stop_loss = trial_stop_loss if trial_stop_loss is not None else _safe_positive_pct(stop_loss_pct)
         effective_take_profit = trial_take_profit if trial_take_profit is not None else _safe_positive_pct(take_profit_pct)
+        trial_args.append(
+            {
+                "i": i,
+                "strategy": strategy,
+                "df": df,
+                "timeframe": timeframe,
+                "initial_capital": initial_capital,
+                "params": params,
+                "commission_rate": max(0.0, float(commission_rate or 0.0)),
+                "slippage_bps": max(0.0, float(slippage_bps or 0.0)),
+                "market_bundle": market_bundle,
+                "use_stop_take": bool(use_stop_take),
+                "effective_stop_loss": effective_stop_loss,
+                "effective_take_profit": effective_take_profit,
+                "exit_template": exit_template,
+                "objective_key": objective_key,
+            }
+        )
+
+    # Phase 5 parallel path. Skip the pool when serial mode is set OR
+    # when the trial count is too small to amortize the spawn cost.
+    from config.settings import settings as _settings  # noqa: PLC0415
+
+    workers = int(getattr(_settings, "BACKTEST_OPTIMIZE_WORKERS", 1) or 1)
+    min_parallel_trials = int(
+        getattr(_settings, "BACKTEST_OPTIMIZE_PARALLEL_MIN_TRIALS", 8) or 8
+    )
+    use_pool = workers > 1 and len(trial_args) >= min_parallel_trials
+
+    results_by_index: Dict[int, Dict[str, Any]] = {}
+    if use_pool:
+        import multiprocessing as _mp  # noqa: PLC0415
+        from concurrent.futures import ProcessPoolExecutor  # noqa: PLC0415
+
+        # Use "spawn" everywhere — required on Windows, safe on Linux.
+        ctx = _mp.get_context("spawn")
         try:
-            metrics = _run_backtest_core(
-                strategy=strategy,
-                df=df,
-                timeframe=timeframe,
-                initial_capital=initial_capital,
-                params=params,
-                include_series=False,
-                commission_rate=max(0.0, float(commission_rate or 0.0)),
-                slippage_bps=max(0.0, float(slippage_bps or 0.0)),
-                market_bundle=market_bundle,
-                use_stop_take=bool(use_stop_take),
-                stop_loss_pct=effective_stop_loss,
-                take_profit_pct=effective_take_profit,
-                exit_template=exit_template,
-            )
-            score = float(metrics.get(objective_key, 0))
-            trials.append({"params": params, "metrics": metrics, "score": score})
+            with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
+                for res in pool.map(_run_optimize_trial, trial_args, chunksize=1):
+                    results_by_index[int(res["i"])] = res
         except Exception as exc:
-            failures.append({"params": params, "error": str(exc)})
+            logger.warning(
+                f"Optimize pool failed ({exc}); falling back to serial execution"
+            )
+            results_by_index = {}
+
+    # Serial mode (or pool failure): run each trial in this process.
+    if not results_by_index:
+        for ta in trial_args:
+            results_by_index[int(ta["i"])] = _run_optimize_trial(ta)
+
+    # Restore deterministic order (trial index ascending).
+    for i in sorted(results_by_index.keys()):
+        res = results_by_index[i]
+        if "metrics" in res:
+            trials.append({"params": res["params"], "metrics": res["metrics"], "score": res["score"]})
+        else:
+            failures.append({"params": res["params"], "error": res.get("error", "unknown")})
 
     trials.sort(key=lambda x: x["score"], reverse=True)
     best = trials[0] if trials else None
@@ -3101,6 +3233,26 @@ def _simulate_execution_summary(
         fixed_take_profit_pct=_safe_positive_pct(take_profit_pct),
         allow_same_bar_exit=False,
     )
+
+    # Phase 3 array fast path. Only triggers for the supported config
+    # subset (signal_reversal_exit only, no stops/take/trailing/etc.).
+    # Locked by tests/test_execution_arrays_parity.py.
+    from config.settings import settings as _settings  # noqa: PLC0415
+
+    if bool(getattr(_settings, "BACKTEST_FAST_EXIT_ARRAYS", False)):
+        from core.backtest.execution_arrays import (  # noqa: PLC0415
+            is_supported_config,
+            simulate_execution_arrays,
+        )
+
+        if is_supported_config(config):
+            try:
+                return simulate_execution_arrays(df=df, signal_position=position, config=config)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    f"Array exit-simulator failed ({exc}); falling back to run_exit_engine"
+                )
+
     result = run_exit_engine(df=df, signal_position=position, config=config)
     return {
         "effective_position": result.effective_position,

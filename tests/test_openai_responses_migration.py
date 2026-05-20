@@ -1093,6 +1093,7 @@ def test_news_worker_marks_rules_fallback_with_saved_events_as_done(monkeypatch)
     import core.news.service.worker as module
 
     finish_mock = AsyncMock()
+    summarize_mock = AsyncMock()
     monkeypatch.setattr(
         module,
         "extract_events_async_with_meta",
@@ -1112,6 +1113,7 @@ def test_news_worker_marks_rules_fallback_with_saved_events_as_done(monkeypatch)
     )
     monkeypatch.setattr(module.news_db, "save_events", AsyncMock(return_value={"events_count": 1}))
     monkeypatch.setattr(module.news_db, "finish_llm_tasks", finish_mock)
+    monkeypatch.setattr(module, "_persist_llm_title_summaries", summarize_mock)
 
     events, llm_used, error_type, events_count = asyncio.run(
         module._execute_llm_batch(
@@ -1128,6 +1130,70 @@ def test_news_worker_marks_rules_fallback_with_saved_events_as_done(monkeypatch)
     assert events[0]["raw_news_id"] == 1
     assert finish_mock.await_args.kwargs["success"] is True
     assert finish_mock.await_args.kwargs["error"] is None
+    summarize_mock.assert_not_awaited()
+
+
+def test_news_worker_persists_llm_summary_even_when_no_events(monkeypatch):
+    import core.news.service.worker as module
+
+    raw_updates = []
+    event_updates = []
+    finish_mock = AsyncMock()
+
+    monkeypatch.setattr(
+        module,
+        "extract_events_async_with_meta",
+        AsyncMock(return_value=([], True, "none")),
+    )
+    monkeypatch.setattr(module.news_db, "save_events", AsyncMock(return_value={"events_count": 0, "inserted": []}))
+    monkeypatch.setattr(module.news_db, "finish_llm_tasks", finish_mock)
+    monkeypatch.setattr(
+        module,
+        "summarize_batch_async",
+        AsyncMock(return_value=[{"summary": "比特币 ETF 获批", "sentiment": "positive", "source": "openai_responses"}]),
+    )
+
+    async def fake_save_news_raw_summaries(rows):
+        raw_updates.extend(rows)
+        return {"updated_count": len(rows), "skipped_count": 0}
+
+    async def fake_save_news_event_summaries(rows):
+        event_updates.extend(rows)
+        return {"updated_count": len(rows), "skipped_count": 0}
+
+    monkeypatch.setattr(module.news_db, "save_news_raw_summaries", fake_save_news_raw_summaries)
+    monkeypatch.setattr(module.news_db, "save_news_event_summaries", fake_save_news_event_summaries)
+
+    events, llm_used, error_type, events_count = asyncio.run(
+        module._execute_llm_batch(
+            [
+                {
+                    "id": 1,
+                    "title": "Bitcoin ETF approved by SEC",
+                    "url": "https://example.test/news/1",
+                    "source": "jin10",
+                }
+            ],
+            {"llm": {"summarize_batch_size": 2, "summarize_timeout_sec": 10}},
+            [1],
+            url_to_raw_id={"https://example.test/news/1": 1},
+        )
+    )
+
+    assert events == []
+    assert llm_used is True
+    assert error_type == "none"
+    assert events_count == 0
+    assert raw_updates == [
+        {
+            "raw_news_id": 1,
+            "summary_title": "比特币 ETF 获批",
+            "summary_sentiment": "positive",
+            "summary_source": "openai_responses",
+        }
+    ]
+    assert event_updates == []
+    assert finish_mock.await_args.kwargs["success"] is True
 
 
 def test_async_glm_client_openai_falls_back_to_chat_completions(monkeypatch):

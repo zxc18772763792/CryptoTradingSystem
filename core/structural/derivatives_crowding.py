@@ -183,10 +183,84 @@ def _score_from_z(series: pd.Series, lookback: int) -> pd.Series:
     return (z.clip(lower=0.0, upper=3.0) / 3.0).fillna(0.0)
 
 
+# Columns produced by prepare_derivatives_features. If all of these are present
+# on the input frame, the call is a no-op — callers (e.g. detect_flush_reversal)
+# previously re-ran the whole pipeline on already-prepared data, which made the
+# strategy O(n²) over backtest replay; this skip short-circuits that.
+_PREPARED_COLUMNS = (
+    "oi_change_z",
+    "funding_z",
+    "long_short_ratio_z",
+    "basis_z",
+    "taker_imbalance_z",
+    "liquidation_burst_score",
+    "long_liquidation_burst_score",
+    "short_liquidation_burst_score",
+    "crowded_long_score",
+    "crowded_short_score",
+    "execution_risk_score",
+    "price_return_1h",
+    "atr_pct",
+)
+
+
+def _np_clip_z(values: np.ndarray, z_cap: float = 3.0) -> np.ndarray:
+    """Vectorized equivalent of context.clip_z applied to a NumPy array.
+
+    Mirrors ``clamp(max(0, safe_float(x, 0)) / z_cap, 0, 1)`` on every element.
+    NaN → 0 (safe_float default) before clipping.
+    """
+    cap = max(float(z_cap), 1e-9)
+    arr = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
+    return np.clip(np.maximum(0.0, arr) / cap, 0.0, 1.0)
+
+
+def _vectorized_crowding_scores(out: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized form of ``calculate_crowding_scores`` over a whole frame.
+
+    Locked to the per-row implementation by parity tests — see
+    ``tests/test_derivatives_crowding_vectorized_parity.py``.
+    """
+    def _col(name: str) -> np.ndarray:
+        return pd.to_numeric(out.get(name, pd.Series(0.0, index=out.index)), errors="coerce").to_numpy()
+
+    oi = _np_clip_z(_col("oi_change_z"))
+    funding = _col("funding_z")
+    fz_pos = _np_clip_z(funding)
+    fz_neg = _np_clip_z(-funding)
+    ls = _col("long_short_ratio_z")
+    ls_pos = _np_clip_z(ls)
+    ls_neg = _np_clip_z(-ls)
+    bz = _col("basis_z")
+    bz_pos = _np_clip_z(bz)
+    bz_neg = _np_clip_z(-bz)
+    # Per the original: taker_imbalance_z falls back to taker_buy_imbalance_z
+    ti_raw = pd.to_numeric(
+        out.get("taker_imbalance_z", out.get("taker_buy_imbalance_z", pd.Series(0.0, index=out.index))),
+        errors="coerce",
+    ).to_numpy()
+    ti_pos = _np_clip_z(ti_raw)
+    ti_neg = _np_clip_z(-ti_raw)
+
+    long_raw = 0.30 * oi + 0.25 * fz_pos + 0.20 * ls_pos + 0.15 * bz_pos + 0.10 * ti_pos
+    short_raw = 0.30 * oi + 0.25 * fz_neg + 0.20 * ls_neg + 0.15 * bz_neg + 0.10 * ti_neg
+    return np.clip(long_raw, 0.0, 1.0), np.clip(short_raw, 0.0, 1.0)
+
+
 def prepare_derivatives_features(data: pd.DataFrame, *, lookback: int = 120) -> pd.DataFrame:
+    if data is None or len(data) == 0:
+        # ``data.copy()`` on an empty frame is cheap but keep the early return
+        # for the None case (some callers pass None on the cold path).
+        return data.copy() if data is not None else pd.DataFrame()
+
+    # Fast path: if every column this function produces already exists, the
+    # caller has already prepared the frame and we should NOT copy or recompute.
+    # This used to be a hot O(n²) bug — strategy passed prepared df, then
+    # detect_flush_reversal recomputed twice more per bar.
+    if all(col in data.columns for col in _PREPARED_COLUMNS):
+        return data
+
     out = data.copy()
-    if out.empty:
-        return out
 
     if "oi_change_1h" not in out and "oi" in out:
         out["oi_change_1h"] = pd.to_numeric(out["oi"], errors="coerce").pct_change()
@@ -247,16 +321,18 @@ def prepare_derivatives_features(data: pd.DataFrame, *, lookback: int = 120) -> 
         tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
         out["atr_pct"] = (tr.rolling(14, min_periods=3).mean() / close.replace(0, np.nan)).fillna(0.0)
 
-    long_scores = []
-    short_scores = []
-    for _, row in out.iterrows():
-        long_score, short_score = calculate_crowding_scores(row)
-        long_scores.append(long_score)
-        short_scores.append(short_score)
-    if "crowded_long_score" not in out:
-        out["crowded_long_score"] = long_scores
-    if "crowded_short_score" not in out:
-        out["crowded_short_score"] = short_scores
+    # Crowding scores: vectorized, and ONLY run when the columns are missing.
+    # The original code computed these via a Python ``iterrows`` loop on EVERY
+    # call (the missing-column guards were on assignment only, after the loop),
+    # making this function O(n) even on already-prepared frames.
+    needs_long = "crowded_long_score" not in out
+    needs_short = "crowded_short_score" not in out
+    if needs_long or needs_short:
+        long_arr, short_arr = _vectorized_crowding_scores(out)
+        if needs_long:
+            out["crowded_long_score"] = long_arr
+        if needs_short:
+            out["crowded_short_score"] = short_arr
     if "execution_risk_score" not in out:
         spread_pct = pd.to_numeric(out.get("spread_bps_percentile", pd.Series(0.0, index=out.index)), errors="coerce").fillna(0.0)
         low_depth = pd.to_numeric(out.get("low_depth_percentile", pd.Series(0.0, index=out.index)), errors="coerce").fillna(0.0)
@@ -281,7 +357,16 @@ def detect_flush_reversal(
     row = prepared.iloc[-1]
     prev = prepared.iloc[-2]
     symbol = str(row.get("symbol", "UNKNOWN"))
-    timestamp = data.index[-1].to_pydatetime() if hasattr(data.index[-1], "to_pydatetime") else pd.Timestamp(data.index[-1]).to_pydatetime()
+    # Force tz-aware UTC. A naive bar index would otherwise leak through and
+    # mix with the rest of the codebase's timezone-aware timestamps (e.g.
+    # ``StrategyBase._bar_time`` always returns tz-aware UTC).
+    _last = data.index[-1]
+    _ts = pd.Timestamp(_last) if not isinstance(_last, pd.Timestamp) else _last
+    if _ts.tzinfo is None:
+        _ts = _ts.tz_localize("UTC")
+    else:
+        _ts = _ts.tz_convert("UTC")
+    timestamp = _ts.to_pydatetime()
     side = str(side).lower()
 
     if side == "long_flush":

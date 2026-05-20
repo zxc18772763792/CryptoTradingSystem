@@ -13,7 +13,7 @@ from config.env_utils import env_bool as _env_bool
 from config.env_utils import env_int as _env_int
 from config.settings import settings
 from core.news.collectors.manager import MultiSourceNewsCollector
-from core.news.eventizer.async_glm_client import extract_events_async_with_meta
+from core.news.eventizer.async_glm_client import extract_events_async_with_meta, summarize_batch_async
 from core.news.eventizer.rules import load_news_rule_config
 from core.news.storage import db as news_db
 
@@ -65,6 +65,116 @@ def _norm_url(u: str) -> str:
     return str(u or "").strip().split("?")[0].split("#")[0].rstrip("/").lower()
 
 
+def _is_llm_summary_source(source: Any) -> bool:
+    checker = getattr(news_db, "_is_llm_summary_source", None)
+    if callable(checker):
+        return bool(checker(source))
+    text = str(source or "").strip().lower()
+    return bool(
+        text
+        and (
+            "glm" in text
+            or text.startswith(("llm", "openai", "codex", "responses"))
+            or text.startswith(("nim_summary:", "gm_summary:", "ds_summary:"))
+            or text in {"nim_summary", "gm_summary", "ds_summary"}
+            or text.endswith("_summary")
+        )
+    )
+
+
+async def _persist_llm_title_summaries(
+    batch: List[Dict[str, Any]],
+    cfg: Dict[str, Any],
+    *,
+    events: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, int]:
+    """Summarize claimed news immediately so worker output is durable, not UI-lazy."""
+    raw_targets: List[Dict[str, Any]] = []
+    seen_raw_ids: set[int] = set()
+    for item in batch:
+        raw_id = item.get("id")
+        title = str(item.get("title") or "").strip()
+        if not raw_id or not title:
+            continue
+        try:
+            raw_key = int(raw_id)
+        except Exception:
+            continue
+        if raw_key in seen_raw_ids:
+            continue
+        seen_raw_ids.add(raw_key)
+        raw_targets.append({"raw_news_id": raw_key, "title": title})
+
+    if not raw_targets:
+        return {"raw_updated_count": 0, "event_updated_count": 0, "skipped_non_llm": 0}
+
+    summary_cfg = dict(cfg or {})
+    llm_cfg = dict(summary_cfg.get("llm") or {})
+    has_local_gemma_backup = _has_local_gemma_backup(summary_cfg)
+    batch_size = max(1, min(int(llm_cfg.get("summarize_batch_size") or 6), len(raw_targets)))
+    timeout_sec = max(8, min(int(llm_cfg.get("summarize_timeout_sec") or llm_cfg.get("timeout_sec") or 16), 45))
+    if has_local_gemma_backup:
+        batch_size = max(1, min(batch_size, _env_int("NEWS_LLM_LOCAL_SUMMARY_BATCH_SIZE", 1)))
+        timeout_sec = max(timeout_sec, _env_int("NEWS_LLM_LOCAL_SUMMARIZE_TIMEOUT_SEC", 120))
+    llm_cfg["summarize_batch_size"] = batch_size
+    llm_cfg["summarize_timeout_sec"] = timeout_sec
+    llm_cfg.setdefault("summarize_max_llm_items", len(raw_targets))
+    summary_cfg["llm"] = llm_cfg
+
+    try:
+        summarized = await asyncio.wait_for(
+            summarize_batch_async([item["title"] for item in raw_targets], summary_cfg, 60),
+            timeout=max(timeout_sec + 2, timeout_sec * max(1, (len(raw_targets) + batch_size - 1) // batch_size) + 2),
+        )
+    except Exception as exc:
+        logger.warning(f"llm summary persist skipped: {type(exc).__name__}: {exc}")
+        return {"raw_updated_count": 0, "event_updated_count": 0, "skipped_non_llm": len(raw_targets)}
+
+    raw_updates: List[Dict[str, Any]] = []
+    summary_by_raw_id: Dict[int, Dict[str, Any]] = {}
+    skipped_non_llm = 0
+    for target, result in zip(raw_targets, summarized):
+        source = str((result or {}).get("source") or "").strip().lower()
+        if not _is_llm_summary_source(source):
+            skipped_non_llm += 1
+            continue
+        row = {
+            "summary_title": (result or {}).get("summary") or target.get("title") or "",
+            "summary_sentiment": (result or {}).get("sentiment") or "neutral",
+            "summary_source": source,
+        }
+        raw_id = int(target["raw_news_id"])
+        summary_by_raw_id[raw_id] = row
+        raw_updates.append({"raw_news_id": raw_id, **row})
+
+    event_updates: List[Dict[str, Any]] = []
+    for event in events or []:
+        event_id = str(event.get("event_id") or "").strip()
+        if not event_id:
+            continue
+        raw_id = event.get("raw_news_id")
+        try:
+            row = summary_by_raw_id.get(int(raw_id)) if raw_id else None
+        except Exception:
+            row = None
+        if row is None:
+            evidence = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
+            title = str(evidence.get("title") or "").strip()
+            match = next((item for item in raw_targets if item.get("title") == title), None)
+            if match:
+                row = summary_by_raw_id.get(int(match["raw_news_id"]))
+        if row:
+            event_updates.append({"event_id": event_id, **row})
+
+    raw_result = await news_db.save_news_raw_summaries(raw_updates) if raw_updates else {"updated_count": 0}
+    event_result = await news_db.save_news_event_summaries(event_updates) if event_updates else {"updated_count": 0}
+    return {
+        "raw_updated_count": int(raw_result.get("updated_count") or 0),
+        "event_updated_count": int(event_result.get("updated_count") or 0),
+        "skipped_non_llm": skipped_non_llm,
+    }
+
+
 async def _execute_llm_batch(
     batch: List[Dict[str, Any]],
     cfg: Dict[str, Any],
@@ -93,6 +203,18 @@ async def _execute_llm_batch(
                     event["raw_news_id"] = batch[0].get("id")
 
         event_stats = await news_db.save_events(events, model_source="mixed")
+        summary_stats = (
+            await _persist_llm_title_summaries(batch, cfg, events=event_stats.get("inserted") or events)
+            if llm_used
+            else {"raw_updated_count": 0, "event_updated_count": 0, "skipped_non_llm": 0}
+        )
+        if summary_stats.get("raw_updated_count") or summary_stats.get("event_updated_count"):
+            logger.debug(
+                "LLM summaries persisted raw={} event={} skipped_non_llm={}",
+                summary_stats.get("raw_updated_count"),
+                summary_stats.get("event_updated_count"),
+                summary_stats.get("skipped_non_llm"),
+            )
 
         is_rate_limited = error_type == "rate_limit"
         is_transient_failure = error_type in {"rate_limit", "timeout"}

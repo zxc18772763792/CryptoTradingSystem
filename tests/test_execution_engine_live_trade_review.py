@@ -138,6 +138,60 @@ def test_record_live_strategy_trade_skips_when_paper_mode(tmp_path: Path, monkey
     assert engine.get_live_trade_review(limit=20)["count"] == 0
 
 
+def test_live_trade_review_hydrates_zero_cost_legacy_rows(tmp_path: Path, monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+    engine._live_review_root = tmp_path
+    engine._live_trade_journal_path = tmp_path / "strategy_trade_journal.jsonl"
+    engine._live_trade_counts_path = tmp_path / "strategy_trade_counts.json"
+    engine._live_strategy_trade_counts = {"legacy": 1}
+    monkeypatch.setattr(execution_engine_module.settings, "LIVE_FEE_RATE", 0.0004, raising=False)
+    monkeypatch.setattr(execution_engine_module.settings, "LIVE_SLIPPAGE_BPS", 2.0, raising=False)
+
+    row = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "mode": "live",
+        "action": "close",
+        "strategy": "legacy",
+        "strategy_trade_count": 1,
+        "exchange": "binance",
+        "account_id": "main",
+        "symbol": "BTC/USDT",
+        "side": "sell",
+        "signal_type": "close_long",
+        "quantity": 2.0,
+        "fill_price": 100.0,
+        "notional": 200.0,
+        "order_id": "legacy-1",
+        "order_status": "closed",
+        "pnl": 10.0,
+        "gross_pnl_usd": 10.0,
+        "fee_usd": 0.0,
+        "slippage_cost_usd": 0.0,
+        "cost_usd": 0.0,
+        "signal": {"strategy_name": "legacy", "signal_type": "close_long"},
+        "net_pnl_usd": 10.0,
+    }
+    engine._live_review_root.mkdir(parents=True, exist_ok=True)
+    engine._live_trade_journal_path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    review = engine.get_live_trade_review(limit=10, strategy="legacy", hours=24)
+
+    item = review["items"][0]
+    assert item["fee_usd"] == pytest.approx(0.08)
+    assert item["slippage_cost_usd"] == pytest.approx(0.04)
+    assert item["cost_usd"] == pytest.approx(0.12)
+    assert item["fee_source"] == "live_default_fee_rate"
+    assert item["slippage_source"] == "live_default_slippage_bps"
+    assert item["cost_estimated"] is True
+    assert item["gross_pnl_usd"] == pytest.approx(10.0)
+    assert item["net_pnl_usd"] == pytest.approx(9.88)
+    assert review["summary"]["fee_usd"] == pytest.approx(0.08)
+    assert review["summary"]["slippage_cost_usd"] == pytest.approx(0.04)
+    assert review["summary"]["cost_usd"] == pytest.approx(0.12)
+    assert review["summary"]["net_pnl_usd"] == pytest.approx(9.88)
+
+
 class _FakeStrategyPositionManager:
     def __init__(self, positions):
         self.positions = dict(positions)

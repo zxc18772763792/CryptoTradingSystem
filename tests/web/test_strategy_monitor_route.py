@@ -151,6 +151,9 @@ def test_monitor_data_falls_back_to_fresh_ohlcv_and_prefers_executed_trades(monk
     assert payload["equity"][-1]["t"] is not None
     assert payload["metrics"]["trade_count"] == 1
     assert payload["metrics"]["realized_pnl"] == 1.25
+    assert payload["performance_sources"]["realized"] == "trade_history_or_live_review"
+    assert payload["performance_sources"]["unrealized"] == "local_position_manager"
+    assert payload["return_denominator"]["source"] == "current_equity_allocation"
     assert payload["signal_mode"] == "executed_trade"
     assert payload["signal_summary"]["open_order_count"] == 0
 
@@ -490,6 +493,8 @@ def test_summary_reads_live_exchange_rows_for_live_strategy_when_global_mode_is_
     assert called == [True]
     perf = payload["strategy_performance"][strategy_name]
     assert perf["unrealized_pnl"] == -0.3153
+    assert perf["sources"]["unrealized"] == "exchange_position_cache"
+    assert perf["return_denominator"]["source"] == "seed_summary_capital_base"
     assert perf["return_pct"] < 0
 
 

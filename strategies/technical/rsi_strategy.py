@@ -11,6 +11,8 @@ from core.strategies.strategy_base import Signal, SignalType, StrategyBase
 class RSIStrategy(StrategyBase):
     """RSI overbought/oversold reversal strategy."""
 
+    mutates_input = False  # only reads data["close"]
+
     def __init__(self, name: str = "RSI", params: Optional[Dict[str, Any]] = None):
         default_params = {
             "period": 14,

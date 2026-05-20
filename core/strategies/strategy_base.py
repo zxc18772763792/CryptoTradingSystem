@@ -137,6 +137,15 @@ class Position:
 class StrategyBase(ABC):
     """策略基类"""
 
+    # Whether ``generate_signals`` writes into its input DataFrame. Default True
+    # is the safe assumption — the backtest replay loop will hand the strategy
+    # an isolated copy on every bar. Strategies that ONLY read from ``data``
+    # (e.g. simple technical indicators that use ``data["close"].rolling(...)``)
+    # can override this to ``False`` to opt into a zero-copy view path. Setting
+    # this False is a *contract*: violating it will silently corrupt the parent
+    # frame during a backtest.
+    mutates_input: bool = True
+
     def __init__(
         self,
         name: str,

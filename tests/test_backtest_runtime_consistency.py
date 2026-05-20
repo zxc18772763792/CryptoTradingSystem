@@ -128,6 +128,71 @@ def test_backtest_page_uses_real_strategy_path(
     )
 
 
+# Strategies that have opted in to the Phase 1 zero-copy view fast path via
+# `mutates_input = False`. The view path must produce IDENTICAL position
+# series to the legacy copy path on the same input — anything less means a
+# strategy is silently relying on the input copy and the opt-in is wrong.
+_VIEW_FAST_PATH_STRATEGIES = [
+    "MAStrategy",
+    "EMAStrategy",
+    "RSIStrategy",
+    "MACDStrategy",
+    # Structural strategies added 2026-05-20: all three opt in to the view
+    # fast path. They internally call .copy() (via prepare_derivatives_features
+    # or iloc[-1].to_dict()) so passing a view is safe — the parity test
+    # forces both code paths on the same synthetic OHLCV frame and asserts
+    # the resulting position series match.
+    "LiquidationOICrowdingStrategy",
+    "OnChainFlowRegimeStrategy",
+    "SupplyEventStrategy",
+]
+
+
+@pytest.mark.parametrize("name", _VIEW_FAST_PATH_STRATEGIES)
+def test_replay_view_fast_path_parity(
+    name: str, synthetic_ohlcv: pd.DataFrame, monkeypatch
+):
+    """When a strategy declares `mutates_input=False`, the view-fast-path
+    must yield the same position series as the legacy copy path."""
+    from config.settings import settings as _settings  # noqa: PLC0415
+
+    cls = getattr(strategy_pkg, name)
+    assert getattr(cls, "mutates_input", True) is False, (
+        f"{name} is listed in _VIEW_FAST_PATH_STRATEGIES but its class does not "
+        f"declare mutates_input = False"
+    )
+    params = _defaults(name)
+    allow_long, allow_short, reverse_on_signal = _resolve_backtest_trade_policy(
+        name, params=params
+    )
+
+    monkeypatch.setattr(_settings, "BACKTEST_REPLAY_VIEW_FAST_PATH", False)
+    copy_pos = _replay_signal_strategy_position(
+        cls,
+        synthetic_ohlcv.copy(),
+        params=dict(params),
+        allow_long=allow_long,
+        allow_short=allow_short,
+        reverse_on_signal=reverse_on_signal,
+    )
+
+    monkeypatch.setattr(_settings, "BACKTEST_REPLAY_VIEW_FAST_PATH", True)
+    view_pos = _replay_signal_strategy_position(
+        cls,
+        synthetic_ohlcv.copy(),
+        params=dict(params),
+        allow_long=allow_long,
+        allow_short=allow_short,
+        reverse_on_signal=reverse_on_signal,
+    )
+
+    pd.testing.assert_series_equal(
+        pd.Series(pd.to_numeric(copy_pos, errors="coerce").fillna(0.0).values),
+        pd.Series(pd.to_numeric(view_pos, errors="coerce").fillna(0.0).values),
+        check_names=False,
+    )
+
+
 def _direction_agreement(a: pd.Series, b: pd.Series) -> float:
     sa = np.sign(pd.to_numeric(a, errors="coerce").fillna(0.0).to_numpy())
     sb = np.sign(pd.to_numeric(b, errors="coerce").fillna(0.0).to_numpy())

@@ -8442,18 +8442,22 @@ async function _loadMonitorData(name) {
         const executedCount = Number(summary?.executed_count || 0);
         const strategySignalCount = Number(summary?.strategy_signal_count || 0);
         const openOrderCount = Number(summary?.open_order_count || 0);
+        const sources = (data && typeof data.performance_sources === 'object' && data.performance_sources) ? data.performance_sources : {};
+        const freshness = (data && typeof data.performance_freshness === 'object' && data.performance_freshness) ? data.performance_freshness : {};
+        const denominator = (data && typeof data.return_denominator === 'object' && data.return_denominator) ? data.return_denominator : {};
+        const sourceText = `收益口径：已实现=${sources.realized || '--'}，浮盈=${sources.unrealized || '--'}，分母=${denominator.source || sources.capital_base || '--'}；刷新 ${freshness.refresh_interval_sec || 12}s`;
         if (signalMode === 'strategy_signal') {
             signalNoteEl.style.display = '';
             signalNoteEl.className = 'monitor-note monitor-note-warning';
-            signalNoteEl.textContent = `当前图上标记仅来自策略信号（${strategySignalCount} 条），尚未匹配到真实成交；这些标记不会直接带来已实现盈亏或资产变化。`;
+            signalNoteEl.textContent = `当前图上标记仅来自策略信号（${strategySignalCount} 条），尚未匹配到真实成交；这些标记不会直接带来已实现盈亏或资产变化。${sourceText}`;
         } else if (signalMode === 'executed_trade') {
             signalNoteEl.style.display = '';
             signalNoteEl.className = 'monitor-note monitor-note-positive';
-            signalNoteEl.textContent = `当前图上标记来自真实成交（${executedCount} 笔），该策略当前未成交挂单 ${openOrderCount} 笔。`;
+            signalNoteEl.textContent = `当前图上标记来自真实成交（${executedCount} 笔），该策略当前未成交挂单 ${openOrderCount} 笔。${sourceText}`;
         } else {
             signalNoteEl.style.display = '';
             signalNoteEl.className = 'monitor-note';
-            signalNoteEl.textContent = '当前没有可用于监控的真实成交或策略信号。';
+            signalNoteEl.textContent = `当前没有可用于监控的真实成交或策略信号。${sourceText}`;
         }
     }
 

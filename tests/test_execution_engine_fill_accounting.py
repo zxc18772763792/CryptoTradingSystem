@@ -202,6 +202,35 @@ def test_manual_live_order_records_backfilled_fee_and_slippage(monkeypatch):
     assert notify_mock.await_args.args[0] == "manual_order_executed"
 
 
+def test_live_execution_costs_fall_back_to_live_defaults(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+
+    monkeypatch.setattr(execution_engine_module.settings, "LIVE_FEE_RATE", 0.0004, raising=False)
+    monkeypatch.setattr(execution_engine_module.settings, "LIVE_SLIPPAGE_BPS", 2.0, raising=False)
+    monkeypatch.setattr(execution_engine_module, "binance_has_credentials", lambda account_id=None: False)
+
+    result = asyncio.run(
+        engine._resolve_execution_costs(
+            order=SimpleNamespace(id="default-cost-1", fee=0.0, fee_currency="", status=OrderStatus.CLOSED),
+            exchange="binance",
+            symbol="BTC/USDT",
+            account_id="main",
+            fill_price=100.0,
+            quantity=2.0,
+            reference_price=100.0,
+            paper_cost={"fee_usd": 0.0, "slippage_cost_usd": 0.0},
+        )
+    )
+
+    assert result["fee_usd"] == pytest.approx(0.08)
+    assert result["slippage_cost_usd"] == pytest.approx(0.04)
+    assert result["cost_usd"] == pytest.approx(0.12)
+    assert result["fee_source"] == "live_default_fee_rate"
+    assert result["slippage_source"] == "live_default_slippage_bps"
+    assert result["slippage_bps"] == pytest.approx(2.0)
+
+
 def test_close_position_uses_actual_filled_quantity_for_partial_live_close(monkeypatch):
     engine = ExecutionEngine()
     engine._paper_trading = False

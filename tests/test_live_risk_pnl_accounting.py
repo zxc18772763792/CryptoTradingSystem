@@ -1,0 +1,147 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock
+
+import pytest
+
+from web.api import trading as trading_api
+
+
+def _reset_realized_cache() -> None:
+    trading_api._LIVE_DAILY_REALIZED_PNL_CACHE["ts"] = 0.0
+    trading_api._LIVE_DAILY_REALIZED_PNL_CACHE["day_start"] = ""
+    trading_api._LIVE_DAILY_REALIZED_PNL_CACHE["payload"] = {}
+
+
+def test_live_risk_report_uses_resolved_realized_pnl_not_current_unrealized_backsolve():
+    report = {
+        "risk_level": "low",
+        "trading_halted": False,
+        "limits": {"max_daily_loss_ratio": 0.02},
+        "equity": {
+            "current": 5039.4058,
+            "day_start": 5076.3858,
+            "daily_pnl_usd": 0.0,
+            "daily_realized_pnl_usd": 1.0164,
+            "daily_stop_basis_usd": -234.33,
+        },
+    }
+    live_snapshot = {
+        "unrealized_pnl_usd": 197.35,
+        "position_count": 2,
+        "by_exchange": {"binance": {"position_count": 2}},
+    }
+
+    out = trading_api._apply_live_snapshot_to_risk_report(
+        report,
+        live_snapshot,
+        live_daily_total_pnl=-36.98,
+        live_day_start_equity=5076.38581276,
+        live_daily_realized_pnl=1.01643,
+        live_daily_realized_source="runtime_trade_history",
+    )
+
+    equity = out["equity"]
+    assert equity["daily_total_pnl_usd"] == pytest.approx(-36.98)
+    assert equity["current_unrealized_pnl_usd"] == pytest.approx(197.35)
+    assert equity["daily_realized_pnl_usd"] == pytest.approx(1.0164)
+    assert equity["daily_realized_pnl_source"] == "runtime_trade_history"
+    assert equity["daily_stop_basis_usd"] == pytest.approx(1.0164)
+    assert equity["daily_unrealized_component_usd"] == pytest.approx(-37.9964)
+    assert out["risk_level"] == "low"
+
+
+def test_live_risk_report_fallback_preserves_existing_realized_pnl():
+    report = {
+        "risk_level": "low",
+        "trading_halted": False,
+        "limits": {"max_daily_loss_ratio": 0.02},
+        "equity": {
+            "current": 5039.4058,
+            "day_start": 5076.3858,
+            "daily_pnl_usd": -36.98,
+            "daily_realized_pnl_usd": 1.0,
+            "daily_stop_basis_usd": -234.33,
+        },
+    }
+    live_snapshot = {"unrealized_pnl_usd": 197.35, "position_count": 2}
+
+    out = trading_api._apply_live_snapshot_to_risk_report(
+        report,
+        live_snapshot,
+        live_daily_total_pnl=-36.98,
+        live_day_start_equity=5076.38581276,
+    )
+
+    equity = out["equity"]
+    assert equity["daily_realized_pnl_usd"] == pytest.approx(1.0)
+    assert equity["daily_stop_basis_usd"] == pytest.approx(1.0)
+    assert equity["daily_realized_pnl_usd"] != pytest.approx(-234.33)
+
+
+def test_resolve_live_daily_realized_pnl_prefers_binance_income(monkeypatch):
+    _reset_realized_cache()
+    day_start = datetime(2026, 5, 20, tzinfo=timezone.utc)
+    monkeypatch.setattr(trading_api, "_current_utc_day_start", lambda: day_start)
+    monkeypatch.setattr(trading_api, "_binance_has_credentials", lambda: True)
+    fetch_income = AsyncMock(
+        return_value=[
+            {
+                "symbol": "BTC/USDT",
+                "timestamp": datetime(2026, 5, 20, 1, tzinfo=timezone.utc),
+                "pnl": 4.5,
+            },
+            {
+                "symbol": "ETH/USDT",
+                "timestamp": datetime(2026, 5, 19, 23, tzinfo=timezone.utc),
+                "pnl": 99.0,
+            },
+        ]
+    )
+    monkeypatch.setattr(trading_api, "_fetch_binance_realized_pnl_income", fetch_income)
+
+    payload = asyncio.run(
+        trading_api._resolve_live_daily_realized_pnl(force_refresh=True)
+    )
+
+    assert payload["source"] == "binance_income"
+    assert payload["pnl"] == pytest.approx(4.5)
+    assert payload["row_count"] == 1
+
+
+def test_resolve_live_daily_realized_pnl_falls_back_to_runtime_history(monkeypatch):
+    _reset_realized_cache()
+    day_start = datetime(2026, 5, 20, tzinfo=timezone.utc)
+    monkeypatch.setattr(trading_api, "_current_utc_day_start", lambda: day_start)
+    monkeypatch.setattr(trading_api, "_binance_has_credentials", lambda: False)
+    monkeypatch.setattr(
+        trading_api.risk_manager,
+        "get_trade_history",
+        lambda limit=50000, scope="live": [
+            {
+                "timestamp": "2026-05-20T04:49:22+00:00",
+                "symbol": "BNB/USDT",
+                "pnl": 1.6864,
+            },
+            {
+                "timestamp": "2026-05-20T04:50:15+00:00",
+                "symbol": "XRP/USDT",
+                "pnl": -0.66997,
+            },
+            {
+                "timestamp": "2026-05-19T10:00:00+00:00",
+                "symbol": "BTC/USDT",
+                "pnl": -100.0,
+            },
+        ],
+    )
+
+    payload = asyncio.run(
+        trading_api._resolve_live_daily_realized_pnl(force_refresh=True)
+    )
+
+    assert payload["source"] == "runtime_trade_history"
+    assert payload["pnl"] == pytest.approx(1.01643)
+    assert payload["row_count"] == 2

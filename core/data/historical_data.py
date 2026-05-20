@@ -5,7 +5,7 @@ Historical data management helpers.
 """
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from loguru import logger
@@ -30,6 +30,12 @@ _NON_RETRYABLE_DOWNLOAD_ERROR_MARKERS = (
 def _is_non_retryable_download_error(error: Exception) -> bool:
     message = str(error or "").strip().lower()
     return any(marker in message for marker in _NON_RETRYABLE_DOWNLOAD_ERROR_MARKERS)
+
+
+def _as_utc_naive(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 @dataclass
@@ -132,6 +138,8 @@ class HistoricalDataManager:
             end_time = datetime.now()
         if start_time is None:
             start_time = end_time - timedelta(days=365)
+        start_time = _as_utc_naive(start_time)
+        end_time = _as_utc_naive(end_time)
 
         task_id = f"{exchange}_{symbol}_{timeframe}"
         started_at = datetime.now()
@@ -179,7 +187,7 @@ class HistoricalDataManager:
                     await self._emit_progress(progress_callback, progress)
                     break
 
-                last_timestamp = klines[-1].timestamp
+                last_timestamp = _as_utc_naive(klines[-1].timestamp)
                 next_time = last_timestamp + timedelta(milliseconds=1)
                 if next_time <= current_time:
                     raise RuntimeError(
@@ -188,7 +196,7 @@ class HistoricalDataManager:
 
                 filtered_klines = [
                     k for k in klines
-                    if start_time <= k.timestamp <= end_time
+                    if start_time <= _as_utc_naive(k.timestamp) <= end_time
                 ]
                 all_klines.extend(filtered_klines)
 

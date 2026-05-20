@@ -17,6 +17,8 @@ from core.strategies.strategy_base import (
 class MACDStrategy(StrategyBase):
     """MACD策略"""
 
+    mutates_input = False  # only reads data["close"]
+
     def __init__(
         self,
         name: str = "MACD",

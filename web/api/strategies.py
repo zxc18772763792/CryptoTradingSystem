@@ -502,6 +502,207 @@ def _position_side_text(position: Any) -> str:
     return str(getattr(side, "value", side) or "").strip().lower()
 
 
+def _strategy_trade_groups(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        strategy_name = _clean_strategy_text(row.get("strategy"))
+        if not strategy_name:
+            continue
+        grouped.setdefault(strategy_name, []).append(row)
+    for items in grouped.values():
+        items.sort(key=lambda row: str(row.get("timestamp") or ""))
+    return grouped
+
+
+def _performance_source_name(*, trades: List[Dict[str, Any]], fallback_used: bool) -> str:
+    if trades:
+        source_tags = {
+            _clean_strategy_text(row.get("source") or row.get("trade_source") or row.get("origin")).lower()
+            for row in trades
+            if isinstance(row, dict)
+        }
+        if any("exchange" in item or "live" in item for item in source_tags if item):
+            return "live_review_or_exchange_trade"
+        return "trade_history_or_live_review"
+    return "seed_summary" if fallback_used else "none"
+
+
+def _build_strategy_performance_view(
+    *,
+    name: str,
+    info: Optional[Dict[str, Any]],
+    runtime_mode: str,
+    trades: Optional[List[Dict[str, Any]]] = None,
+    exchange_position_rows: Optional[List[Dict[str, Any]]] = None,
+    seed_performance: Optional[Dict[str, Any]] = None,
+    current_equity: Optional[float] = None,
+    include_equity: bool = False,
+    base_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
+    timeframe: str = "1h",
+) -> Dict[str, Any]:
+    """Build the single strategy-performance view used by summary and monitor endpoints."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    payload_info = dict(info or {})
+    seed = dict(seed_performance or {}) if isinstance(seed_performance, dict) else {}
+    trade_rows = list(trades or [])
+    min_notional = max(1.0, _safe_float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 100.0), 100.0))
+
+    if current_equity is None:
+        try:
+            risk_report = risk_manager.get_risk_report()
+            current_equity = _safe_float(((risk_report.get("equity") or {}).get("current") or 0.0), 0.0)
+        except Exception:
+            current_equity = 0.0
+
+    config = getattr(strategy_manager, "_configs", {}).get(name)
+    allocation = _safe_float(getattr(config, "allocation", payload_info.get("allocation", 0.0)), 0.0)
+    seed_capital = _safe_float(seed.get("capital_base"), 0.0)
+    if current_equity and current_equity > 0 and allocation > 0:
+        capital_base = max(min_notional, float(current_equity) * allocation)
+        denominator_source = "current_equity_allocation"
+    elif seed_capital > 0:
+        capital_base = seed_capital
+        denominator_source = "seed_summary_capital_base"
+    else:
+        capital_base = min_notional
+        denominator_source = "minimum_notional_fallback"
+
+    realized = 0.0
+    mark = capital_base
+    ret_samples: List[float] = []
+    equity_curve_values: List[float] = [capital_base]
+    equity_points: List[Dict[str, Any]] = []
+    last_trade_at: Optional[str] = None
+
+    timeframe_sec = max(60, _timeframe_to_seconds(timeframe))
+    if include_equity:
+        start_ts = base_ts
+        if not start_ts and trade_rows:
+            start_ts = _shift_iso_timestamp(str(trade_rows[0].get("timestamp") or "").strip(), -timeframe_sec)
+        if not start_ts:
+            start_ts = _shift_iso_timestamp(end_ts or now_iso, -timeframe_sec) or end_ts or now_iso
+        equity_points.append({"t": start_ts, "v": round(mark, 4)})
+
+    for row in trade_rows:
+        pnl = _safe_float(row.get("pnl"), 0.0)
+        realized += pnl
+        mark += pnl
+        equity_curve_values.append(mark)
+        notional = abs(_safe_float(row.get("notional"), 0.0))
+        if notional > 0:
+            ret_samples.append(pnl / notional)
+        ts_raw = str(row.get("timestamp") or "").strip()
+        if ts_raw:
+            last_trade_at = ts_raw
+        if include_equity:
+            equity_points.append({"t": ts_raw or end_ts or now_iso, "v": round(mark, 4)})
+
+    fallback_realized_used = False
+    if not trade_rows and "realized_pnl" in seed:
+        realized = _safe_float(seed.get("realized_pnl"), 0.0)
+        mark = capital_base + realized
+        equity_curve_values.append(mark)
+        fallback_realized_used = True
+
+    strategy_positions = _positions_by_strategy(name, runtime_mode)
+    if not strategy_positions and hasattr(strategy_manager, "_positions_for_strategy"):
+        try:
+            strategy_positions = list(strategy_manager._positions_for_strategy(name, runtime_mode) or [])
+        except Exception:
+            strategy_positions = []
+    position_source = "local_position_manager"
+    if runtime_mode == "live" and exchange_position_rows:
+        strategy_positions = _refresh_positions_from_exchange_rows(
+            strategy_positions,
+            list(exchange_position_rows or []),
+        )
+        position_source = "exchange_position_cache"
+    unrealized = sum(_safe_float(getattr(pos, "unrealized_pnl", 0.0), 0.0) for pos in strategy_positions)
+    if not strategy_positions and "unrealized_pnl" in seed:
+        unrealized = _safe_float(seed.get("unrealized_pnl"), 0.0)
+        position_source = "seed_summary"
+
+    total = float(realized + unrealized)
+    final_value = mark + unrealized
+    equity_curve_values.append(final_value)
+    if include_equity:
+        final_ts = end_ts or now_iso
+        if equity_points:
+            last_ts = str((equity_points[-1] or {}).get("t") or "").strip()
+            last_val = _safe_float((equity_points[-1] or {}).get("v"), mark)
+            if last_ts != str(final_ts) or abs(last_val - final_value) > 1e-9:
+                equity_points.append({"t": final_ts, "v": round(final_value, 4)})
+            else:
+                equity_points[-1]["v"] = round(final_value, 4)
+
+    win_count = sum(1 for row in trade_rows if _safe_float(row.get("pnl"), 0.0) > 0)
+    trade_count = len(trade_rows) if trade_rows else int(_safe_float(seed.get("trade_count"), 0.0))
+    max_dd_ratio = strategy_manager._calc_max_drawdown_ratio(equity_curve_values)
+    variance = float(np.var(ret_samples)) if len(ret_samples) >= 2 else _safe_float(seed.get("variance"), 0.0)
+    return_ratio = (total / capital_base) if capital_base > 0 else 0.0
+
+    positions_data: List[Dict[str, Any]] = []
+    for pos in strategy_positions:
+        side = getattr(pos, "side", None)
+        side_value = side.value if hasattr(side, "value") else str(side or "")
+        entry_time = getattr(pos, "entry_time", None) or getattr(pos, "opened_at", None)
+        positions_data.append({
+            "symbol":             str(getattr(pos, "symbol", "") or ""),
+            "side":               side_value,
+            "entry_price":        _safe_float(getattr(pos, "entry_price", 0.0), 0.0),
+            "current_price":      _safe_float(getattr(pos, "current_price", 0.0), 0.0),
+            "quantity":           _safe_float(getattr(pos, "quantity", 0.0), 0.0),
+            "unrealized_pnl":     _safe_float(getattr(pos, "unrealized_pnl", 0.0), 0.0),
+            "unrealized_pnl_pct": _safe_float(getattr(pos, "unrealized_pnl_pct", 0.0), 0.0),
+            "entry_time":         entry_time.isoformat() if hasattr(entry_time, "isoformat") else str(entry_time),
+        })
+
+    metrics = {
+        "equity_base": round(capital_base, 2),
+        "capital_base": round(capital_base, 4),
+        "realized_pnl": round(realized, 4),
+        "unrealized_pnl": round(unrealized, 4),
+        "total_pnl": round(total, 4),
+        "return_ratio": round(return_ratio, 8),
+        "return_pct": round(return_ratio * 100.0, 4),
+        "max_drawdown_ratio": round(max_dd_ratio, 8),
+        "max_drawdown_pct": round(max_dd_ratio * 100.0, 4),
+        "variance": round(float(variance), 10),
+        "trade_count": trade_count,
+        "win_count": win_count,
+        "win_rate": round(win_count / len(trade_rows) * 100, 1) if trade_rows else None,
+        "last_update": last_trade_at or seed.get("last_update") or now_iso,
+        "last_trade_at": last_trade_at,
+        "last_mark_at": now_iso,
+        "running": bool(payload_info.get("state") == "running" or seed.get("running")),
+    }
+    sources = {
+        "realized": _performance_source_name(trades=trade_rows, fallback_used=fallback_realized_used),
+        "unrealized": position_source,
+        "capital_base": denominator_source,
+    }
+    freshness = {
+        "pulled_at": now_iso,
+        "refresh_interval_sec": 12,
+        "stale": False,
+    }
+    return {
+        **metrics,
+        "metrics": metrics,
+        "equity": equity_points,
+        "positions": positions_data,
+        "sources": sources,
+        "freshness": freshness,
+        "return_denominator": {
+            "value": round(capital_base, 4),
+            "source": denominator_source,
+        },
+    }
+
+
 def _raw_field(raw: Any, *names: str, default: Any = None) -> Any:
     for name in names:
         if isinstance(raw, dict):
@@ -1680,41 +1881,62 @@ async def audit_strategy_library(
 @router.get("/summary")
 async def get_strategy_summary(limit: int = 20):
     summary = strategy_manager.get_dashboard_summary(signal_limit=limit)
-    has_live_strategies = any(
-        _strategy_runtime_mode(str(name), strategy_manager.get_strategy_info(str(name)) or {}) == "live"
-        for name in (summary.get("strategy_performance") or {}).keys()
-    )
+    performance = summary.get("strategy_performance")
+    performance_rows = performance if isinstance(performance, dict) else {}
+    info_by_name: Dict[str, Dict[str, Any]] = {}
+    runtime_mode_by_name: Dict[str, str] = {}
+    has_live_strategies = False
+    for raw_name in performance_rows.keys():
+        name = str(raw_name)
+        info = strategy_manager.get_strategy_info(name) or {}
+        runtime_mode = _strategy_runtime_mode(name, info)
+        info_by_name[name] = info
+        runtime_mode_by_name[name] = runtime_mode
+        has_live_strategies = has_live_strategies or runtime_mode == "live"
     exchange_rows = await _load_exchange_position_rows_cached(force=has_live_strategies)
-    if exchange_rows:
-        performance = summary.get("strategy_performance")
-        if isinstance(performance, dict):
-            exchange_index = strategy_manager._live_exchange_position_index(exchange_rows)
-            for name, row in list(performance.items()):
-                if not isinstance(row, dict):
-                    continue
-                info = strategy_manager.get_strategy_info(name) or {}
-                if _strategy_runtime_mode(name, info) != "live":
-                    continue
-                positions = strategy_manager._positions_for_strategy(name, "live")
-                positions = strategy_manager._refresh_strategy_positions_from_exchange_cache(
-                    positions,
-                    exchange_index=exchange_index,
-                )
-                unrealized = sum(float(getattr(pos, "unrealized_pnl", 0.0) or 0.0) for pos in positions)
-                realized = _safe_float(row.get("realized_pnl"), 0.0)
-                capital_base = _safe_float(row.get("capital_base"), 0.0)
-                total = realized + unrealized
-                equity_curve = [
-                    capital_base,
-                    capital_base + realized,
-                    capital_base + total,
-                ]
-                row["unrealized_pnl"] = round(unrealized, 4)
-                row["return_ratio"] = round(total / capital_base, 8) if capital_base > 0 else 0.0
-                row["return_pct"] = round(row["return_ratio"] * 100.0, 4)
-                row["max_drawdown_ratio"] = round(strategy_manager._calc_max_drawdown_ratio(equity_curve), 8)
-                row["max_drawdown_pct"] = round(row["max_drawdown_ratio"] * 100.0, 4)
-                row["last_update"] = datetime.now(timezone.utc).isoformat()
+    try:
+        risk_report = risk_manager.get_risk_report()
+        current_equity = _safe_float(((risk_report.get("equity") or {}).get("current") or 0.0), 0.0)
+    except Exception:
+        current_equity = None
+    try:
+        history_groups = _strategy_trade_groups(risk_manager.get_trade_history(limit=5000))
+    except Exception:
+        history_groups = {}
+    live_review_groups: Optional[Dict[str, List[Dict[str, Any]]]] = None
+    for raw_name, row in list(performance_rows.items()):
+        if not isinstance(row, dict):
+            continue
+        name = str(raw_name)
+        info = info_by_name.get(name) or strategy_manager.get_strategy_info(name) or {}
+        runtime_mode = runtime_mode_by_name.get(name) or _strategy_runtime_mode(name, info)
+        trades = list(history_groups.get(name, []))
+        if not trades:
+            if live_review_groups is None:
+                try:
+                    live_review = execution_engine.get_live_trade_review(limit=2000, hours=24 * 365)
+                    live_review_groups = _strategy_trade_groups(list((live_review or {}).get("items") or []))
+                except Exception:
+                    live_review_groups = {}
+            trades = list((live_review_groups or {}).get(name, []))
+        view = _build_strategy_performance_view(
+            name=name,
+            info=info,
+            runtime_mode=runtime_mode,
+            trades=trades,
+            exchange_position_rows=exchange_rows if runtime_mode == "live" else [],
+            seed_performance=row,
+            current_equity=current_equity,
+            include_equity=False,
+            timeframe=str(info.get("timeframe") or "1h"),
+        )
+        performance_rows[name] = {
+            key: value
+            for key, value in view.items()
+            if key not in {"metrics", "equity", "positions"}
+        }
+    if isinstance(performance, dict):
+        summary["strategy_performance"] = performance_rows
     return summary
 
 
@@ -2565,6 +2787,21 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     except Exception as exc:
         logger.debug(f"monitor-data: positions failed for {name}: {exc}")
 
+    performance_view = _build_strategy_performance_view(
+        name=name,
+        info=info,
+        runtime_mode=runtime_mode,
+        trades=list(merged_trades),
+        exchange_position_rows=exchange_position_rows,
+        include_equity=True,
+        base_ts=ohlcv[0]["t"] if ohlcv else None,
+        end_ts=ohlcv[-1]["t"] if ohlcv else None,
+        timeframe=timeframe,
+    )
+    equity = performance_view.get("equity", [])
+    metrics = performance_view.get("metrics", {})
+    positions_data = performance_view.get("positions", [])
+
     payload = {
         "name":       name,
         "strategy_type": strategy_type,
@@ -2585,6 +2822,9 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
         "metrics":    metrics,
         "positions":  positions_data,
         "open_orders": open_orders,
+        "performance_sources": performance_view.get("sources", {}),
+        "performance_freshness": performance_view.get("freshness", {}),
+        "return_denominator": performance_view.get("return_denominator", {}),
         "ts":         datetime.now(timezone.utc).isoformat(),
     }
     return _json_safe_value(payload)

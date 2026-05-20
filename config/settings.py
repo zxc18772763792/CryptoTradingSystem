@@ -198,6 +198,43 @@ class Settings(BaseSettings):
     # rollback only — historical numbers from that path do not predict live.
     BACKTEST_USE_REAL_STRATEGY: bool = True
 
+    # When True, the real-strategy replay loop builds its trailing window via
+    # an iloc slice (a view) rather than .tail().copy() — but ONLY for strategy
+    # classes that explicitly declare `mutates_input = False`. Strategies that
+    # write into the input DataFrame (e.g. MultiFactorHFStrategy) keep the
+    # safe copy path regardless of this flag. Set False to force the legacy
+    # copy-everywhere behavior if a strategy bug surfaces.
+    BACKTEST_REPLAY_VIEW_FAST_PATH: bool = True
+
+    # Phase 2 fast_exact strategy paths. When True, strategies with a
+    # vectorized batch implementation AND a passing bar-by-bar parity test
+    # use the fast path; otherwise the trusted per-bar replay runs as
+    # before. Default off so the trusted path remains the source of truth
+    # until the user explicitly opts in. Currently supports:
+    #     MultiFactorHFStrategy (strategies/quantitative/multi_factor_hf_fast.py)
+    # The fast path is locked by tests/test_multi_factor_hf_parity.py
+    # against the trusted replay on five regime fixtures.
+    BACKTEST_FAST_EXACT_STRATEGIES: bool = False
+
+    # Phase 3 array execution simulator. When True and the resolved
+    # exit-engine config falls into the supported subset (no stops, no
+    # take profits, no breakeven, no partial TP, no trailing, no time
+    # stop — i.e. signal_reversal_exit only), the backtest page uses
+    # core/backtest/execution_arrays.simulate_execution_arrays instead
+    # of run_exit_engine. Any other config falls back to the trusted
+    # engine. Locked by tests/test_execution_arrays_parity.py.
+    BACKTEST_FAST_EXIT_ARRAYS: bool = False
+
+    # Phase 5 optimize parallelism. Number of worker processes for
+    # _optimize_strategy_on_df trials. Default 1 = serial (current
+    # behavior); set higher to spread trials across CPU cores. Bench
+    # numbers: at 32 trials, scaling is near-linear up to 4 workers
+    # on a 4-core machine before the per-worker spawn cost dominates.
+    # Each pool spawn pays ~1s of Python startup cost on Windows, so
+    # below BACKTEST_OPTIMIZE_PARALLEL_MIN_TRIALS we stay serial.
+    BACKTEST_OPTIMIZE_WORKERS: int = 1
+    BACKTEST_OPTIMIZE_PARALLEL_MIN_TRIALS: int = 8
+
     # Web server
     WEB_HOST: str = "127.0.0.1"
     WEB_PORT: int = 8000

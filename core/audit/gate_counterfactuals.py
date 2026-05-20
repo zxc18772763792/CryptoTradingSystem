@@ -4,10 +4,10 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 
 DEFAULT_AUDIT_PATH = Path("data") / "audit" / "gate_counterfactuals.jsonl"
@@ -25,6 +25,29 @@ def _resolve_audit_path(path: str | Path | None = None) -> Path:
     if configured:
         return Path(configured)
     return DEFAULT_AUDIT_PATH
+
+
+def _iter_jsonl_rows(target: Path) -> Iterator[Dict[str, Any]]:
+    if not target.exists():
+        return
+    with target.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(row, dict):
+                yield row
+
+
+def _summary_rows(target: Path, limit: Optional[int]) -> List[Dict[str, Any]]:
+    if limit is None:
+        return list(_iter_jsonl_rows(target))
+    resolved_limit = max(0, int(limit))
+    if resolved_limit == 0:
+        return []
+    rows = deque(_iter_jsonl_rows(target), maxlen=resolved_limit)
+    return list(rows)
 
 
 def record_gate_counterfactual(
@@ -62,16 +85,7 @@ def record_gate_counterfactual(
 
 def iter_gate_counterfactuals(path: str | Path | None = None) -> Iterable[Dict[str, Any]]:
     target = _resolve_audit_path(path)
-    if not target.exists():
-        return []
-    rows: List[Dict[str, Any]] = []
-    with target.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            try:
-                rows.append(json.loads(line))
-            except Exception:
-                continue
-    return rows
+    return _iter_jsonl_rows(target)
 
 
 def update_gate_counterfactual_outcomes(
@@ -91,22 +105,40 @@ def update_gate_counterfactual_outcomes(
         return {"updated": 0, "total": 0, "path": str(target)}
 
     normalized = [dict(item or {}) for item in outcomes or [] if isinstance(item, dict)]
+    force_available = any(bool(item.get("force")) for item in normalized)
+    by_trace: Dict[str, List[int]] = {}
+    by_subject: Dict[tuple[str, str], List[int]] = {}
+    by_subject_any_type: Dict[str, List[int]] = {}
+    for idx, outcome in enumerate(normalized):
+        trace_id = str(outcome.get("trace_id") or "").strip()
+        if trace_id:
+            by_trace.setdefault(trace_id, []).append(idx)
+        subject_id = str(outcome.get("subject_id") or "").strip()
+        if not subject_id:
+            continue
+        subject_type = str(outcome.get("subject_type") or "").strip()
+        if subject_type:
+            by_subject.setdefault((subject_type, subject_id), []).append(idx)
+        else:
+            by_subject_any_type.setdefault(subject_id, []).append(idx)
+
     updated = 0
     for row in rows:
-        if row.get("later_outcome_ref") and not any(bool(item.get("force")) for item in normalized):
+        if row.get("later_outcome_ref") and not force_available:
             continue
-        for outcome in normalized:
-            trace_match = bool(outcome.get("trace_id") and outcome.get("trace_id") == row.get("trace_id"))
-            subject_match = bool(
-                outcome.get("subject_id")
-                and str(outcome.get("subject_id")) == str(row.get("subject_id"))
-                and (
-                    not outcome.get("subject_type")
-                    or str(outcome.get("subject_type")) == str(row.get("subject_type"))
-                )
-            )
-            if not trace_match and not subject_match:
-                continue
+        candidate_indexes: List[int] = []
+        trace_id = str(row.get("trace_id") or "").strip()
+        if trace_id:
+            candidate_indexes.extend(by_trace.get(trace_id, []))
+        subject_id = str(row.get("subject_id") or "").strip()
+        if subject_id:
+            subject_type = str(row.get("subject_type") or "").strip()
+            if subject_type:
+                candidate_indexes.extend(by_subject.get((subject_type, subject_id), []))
+            candidate_indexes.extend(by_subject_any_type.get(subject_id, []))
+
+        for outcome_idx in sorted(set(candidate_indexes)):
+            outcome = normalized[outcome_idx]
             if row.get("later_outcome_ref") and not bool(outcome.get("force")):
                 continue
             row["later_outcome_ref"] = str(
@@ -143,9 +175,7 @@ def update_gate_counterfactual_outcomes(
 
 def summarize_gate_counterfactuals(path: str | Path | None = None, *, limit: Optional[int] = None) -> Dict[str, Any]:
     target = _resolve_audit_path(path)
-    rows = list(iter_gate_counterfactuals(target))
-    if limit is not None:
-        rows = rows[-max(0, int(limit)) :]
+    rows = _summary_rows(target, limit)
     gate_counts = Counter(str(row.get("gate_code") or "unknown") for row in rows)
     downgraded = sum(1 for row in rows if str(row.get("counterfactual_decision") or "") and row.get("counterfactual_decision") != row.get("observed_decision"))
     outcome_rows = [row for row in rows if row.get("later_outcome_ref")]
