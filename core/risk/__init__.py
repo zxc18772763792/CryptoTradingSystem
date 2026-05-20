@@ -20,6 +20,16 @@ from core.risk.stop_loss import (
     stop_loss_manager,
     take_profit_manager,
 )
+from core.risk.circuit_breaker import (
+    CircuitBreaker,
+    Decision,
+    DECISION_ALLOW,
+    DECISION_CLOSE_ONLY,
+    DECISION_BLOCK,
+    circuit_breaker,
+    register_close_positions_hook,
+    run_circuit_breaker_checks,
+)
 
 __all__ = [
     "RiskManager",
@@ -35,4 +45,12 @@ __all__ = [
     "TakeProfitManager",
     "stop_loss_manager",
     "take_profit_manager",
+    "CircuitBreaker",
+    "Decision",
+    "DECISION_ALLOW",
+    "DECISION_CLOSE_ONLY",
+    "DECISION_BLOCK",
+    "circuit_breaker",
+    "register_close_positions_hook",
+    "run_circuit_breaker_checks",
 ]

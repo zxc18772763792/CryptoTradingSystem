@@ -80,6 +80,7 @@ class ExchangeOrderSnapshot:
 class ExchangeAdapter(ABC):
     exchange: str = "unknown"
     market_type: str = "spot"
+    supports_execution: bool = False
 
     @abstractmethod
     async def initialize(self) -> None: ...
@@ -122,4 +123,3 @@ class ExchangeAdapter(ABC):
         end_time: Optional[datetime] = None,
         limit: int = 200,
     ) -> List[FundingRatePoint]: ...
-

@@ -169,6 +169,14 @@ class Settings(BaseSettings):
     AI_AUTONOMOUS_AGENT_ROLLING_3D_DRAWDOWN_REDUCE_ONLY: Optional[float] = None
     AI_AUTONOMOUS_AGENT_ROLLING_7D_DRAWDOWN_REDUCE_ONLY: Optional[float] = None
 
+    # Portfolio / per-strategy circuit breaker (Phase 4.2)
+    CIRCUIT_BREAKER_ENABLED: bool = True
+    CB_STRATEGY_DAILY_DD_PCT: float = 0.05
+    CB_STRATEGY_WEEKLY_DD_PCT: float = 0.10
+    CB_PORTFOLIO_DAILY_DD_PCT: float = 0.03
+    CB_PORTFOLIO_WEEKLY_DD_PCT: float = 0.06
+    CB_MONITOR_INTERVAL_SEC: int = 60
+
     # Exchange market type (spot/future/swap/margin)
     BINANCE_DEFAULT_TYPE: str = "spot"
     OKX_DEFAULT_TYPE: str = "spot"

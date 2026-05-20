@@ -43,6 +43,11 @@ class OrderIntentRouter:
         )
 
     async def submit_intent(self, intent: OrderIntent):
+        if not bool(getattr(self.adapter, "supports_execution", False)):
+            exchange = str(getattr(self.adapter, "exchange", "unknown") or "unknown")
+            raise RuntimeError(
+                f"Exchange adapter {exchange} is not enabled for order execution"
+            )
         req = ExchangeOrderRequest(
             symbol=intent.symbol,
             side=intent.side,
@@ -54,4 +59,3 @@ class OrderIntentRouter:
         )
         # TODO: add rate-limit policy + state machine hooks
         return await self.adapter.create_order(req)
-

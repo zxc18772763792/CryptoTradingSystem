@@ -17213,3 +17213,54 @@ body:has(#ai-agent.active) .container {
         grid-template-columns: minmax(0, 1fr);
     }
 }
+
+/* Phase 4.2 — Circuit breaker banner */
+.cb-banner {
+    background: linear-gradient(90deg, #7f1d1d 0%, #991b1b 100%);
+    border: 1px solid #fca5a5;
+    border-radius: 6px;
+    color: #fee2e2;
+    margin: 8px 0 12px;
+    padding: 10px 14px;
+    font-size: 13px;
+    box-shadow: 0 2px 8px rgba(127, 29, 29, 0.4);
+}
+.cb-banner.cb-banner-strategy {
+    background: linear-gradient(90deg, #78350f 0%, #92400e 100%);
+    border-color: #fcd34d;
+    color: #fef3c7;
+}
+.cb-banner-inner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.cb-banner-icon { font-size: 18px; }
+.cb-banner-title { font-weight: 700; font-size: 14px; }
+.cb-banner-detail { flex: 1; opacity: 0.95; }
+.cb-banner-reset {
+    background: rgba(255, 255, 255, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    color: inherit;
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+}
+.cb-banner-reset:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+.cb-banner-strategy-list {
+    margin: 4px 0 0;
+    padding: 0;
+    list-style: none;
+    font-size: 12px;
+}
+.cb-banner-strategy-list li {
+    display: inline-block;
+    margin: 2px 8px 2px 0;
+    background: rgba(0, 0, 0, 0.2);
+    padding: 1px 6px;
+    border-radius: 3px;
+}

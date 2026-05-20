@@ -2896,6 +2896,40 @@ class ExecutionEngine:
 
     async def _execute_signal_in_active_mode(self, signal: Signal) -> Optional[Dict[str, Any]]:
         try:
+            # ── Circuit breaker gate (Phase 4.2) ──
+            cb_signal_meta = signal.metadata or {}
+            is_close_signal = signal.signal_type in (SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT)
+            is_reduce_only_meta = bool(cb_signal_meta.get("close_only") or cb_signal_meta.get("reduce_only"))
+            try:
+                from core.risk.circuit_breaker import circuit_breaker as _cb  # noqa: PLC0415
+                cb_decision = _cb.evaluate(
+                    strategy_name=signal.strategy_name,
+                    is_reduce_only=is_close_signal or is_reduce_only_meta,
+                )
+            except Exception as exc:
+                logger.debug(f"circuit_breaker evaluation failed: {exc}")
+                cb_decision = None
+            if cb_decision is not None and not cb_decision.is_allow:
+                self._signal_diagnostics["risk_rejected"] = int(
+                    self._signal_diagnostics.get("risk_rejected", 0)
+                ) + 1
+                self._signal_diagnostics["last_result"] = {
+                    "status": "circuit_breaker_blocked",
+                    "strategy": signal.strategy_name,
+                    "symbol": signal.symbol,
+                    "scope": cb_decision.scope,
+                    "reason": cb_decision.reason,
+                    "tripped_at": cb_decision.tripped_at,
+                    "action": cb_decision.action,
+                }
+                self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                logger.warning(
+                    f"Signal blocked by circuit breaker ({cb_decision.scope}): "
+                    f"strategy={signal.strategy_name} symbol={signal.symbol} "
+                    f"reason={cb_decision.reason}"
+                )
+                return None
+
             if signal.signal_type == SignalType.CLOSE_LONG:
                 return await self._close_position_in_active_mode(signal, PositionSide.LONG)
             if signal.signal_type == SignalType.CLOSE_SHORT:
@@ -3411,6 +3445,7 @@ class ExecutionEngine:
                 source="strategy_signal",
             )
             req.params["trace_id"] = governance_check.trace_id
+            req.params["governance_prechecked"] = True
             if not governance_check.allowed:
                 self._signal_diagnostics["risk_rejected"] = int(self._signal_diagnostics.get("risk_rejected", 0)) + 1
                 reason = f"治理风控拦截: {governance_check.reason}"
@@ -4341,7 +4376,12 @@ class ExecutionEngine:
             algo_slices=max(1, int(algo_slices or 1)),
             algo_interval_sec=max(0, int(algo_interval_sec or 0)),
             reduce_only=reduce_only,
-            params=dict(params or {}, leverage=float(leverage), trace_id=governance_check.trace_id),
+            params=dict(
+                params or {},
+                leverage=float(leverage),
+                trace_id=governance_check.trace_id,
+                governance_prechecked=True,
+            ),
         )
         order = await order_manager.create_order(request)
         if not order:

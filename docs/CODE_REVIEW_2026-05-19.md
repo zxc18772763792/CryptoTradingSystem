@@ -258,3 +258,10 @@
 | `tests/web/test_multi_assets_overview.py` | 修复 pandas `freq="4H"` → `"4h"` |
 
 > 本文档由自动化 scheduled task 于 2026-05-19 生成。
+
+---
+
+## 2026-05-20 Follow-up Completion Notes
+
+- `ccxt_adapter` execution TODO boundary: completed the minimal guard recommended by this review. `ExchangeAdapter.supports_execution` now defaults to `False`, and `OrderIntentRouter.submit_intent` raises before calling `create_order` unless an adapter explicitly opts in. Regression coverage: `tests/test_order_intent_router.py`.
+- Paper/live governance parity: direct paper orders in `core/trading/order_manager.py` now pass through the same `decision_engine.evaluate_order_intent` gate used by real orders. Allowed paper orders keep the existing simulated fill, slippage, and fee behavior; blocked paper orders are recorded as `OrderStatus.REJECTED` with governance trace metadata. Regression coverage: `tests/test_strategy_mode_isolation.py`.

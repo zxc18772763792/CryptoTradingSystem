@@ -37,6 +37,14 @@
                 <span id="current-time"></span>
             </div>
         </header>
+        <div id="circuit-breaker-banner" class="cb-banner" style="display:none">
+            <div class="cb-banner-inner">
+                <span class="cb-banner-icon">⛔</span>
+                <span class="cb-banner-title" id="cb-banner-title">熔断已触发</span>
+                <span class="cb-banner-detail" id="cb-banner-detail"></span>
+                <button type="button" class="cb-banner-reset" id="cb-banner-reset">手动解除…</button>
+            </div>
+        </div>
 
         <nav class="tabs">
             <button class="tab-btn active" data-tab="dashboard">仪表盘</button>

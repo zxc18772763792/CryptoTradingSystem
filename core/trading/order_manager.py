@@ -221,6 +221,44 @@ class OrderManager:
     def get_last_error(self) -> str:
         return str(self._last_error or "")
 
+    async def _evaluate_order_governance(
+        self,
+        request: OrderRequest,
+        *,
+        order_value: float,
+        params: Dict[str, Any],
+        source: str,
+    ):
+        report = risk_manager.get_risk_report()
+        equity = float((report.get("equity") or {}).get("current") or 0.0)
+        return await decision_engine.evaluate_order_intent(
+            symbol=request.symbol,
+            side=request.side.value,
+            leverage=float(params.get("leverage", 1.0) or 1.0),
+            order_value=float(order_value or 0.0),
+            account_equity=float(equity or 0.0),
+            signal_ts=datetime.now(timezone.utc),
+            allow_close=bool(request.reduce_only),
+            spread_bps=None,
+            timeframe=str(params.get("timeframe") or ""),
+            source=source,
+        )
+
+    def _governance_rejection_reason(
+        self,
+        governance_check,
+        request: OrderRequest,
+    ) -> str:
+        if not governance_check.allowed:
+            return f"governance blocked: {governance_check.reason}"
+        if governance_check.reduce_only and not bool(request.reduce_only):
+            return "governance reduce_only enabled"
+        return ""
+
+    @staticmethod
+    def _governance_already_checked(params: Dict[str, Any]) -> bool:
+        return bool(params.get("governance_prechecked") and params.get("trace_id"))
+
     def _next_paper_order_id(self) -> str:
         self._paper_order_seq = (self._paper_order_seq + 1) % 1000000
         return f"paper_{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{self._paper_order_seq:06d}"
@@ -278,6 +316,33 @@ class OrderManager:
         notional_usd = abs(amount * float(fill_price or 0.0))
         fee_usd = notional_usd * fee_rate if notional_usd > 0 else 0.0
         slippage_cost_usd = abs(float(fill_price or 0.0) - reference_price) * abs(amount)
+        params = dict(request.params or {})
+        params.setdefault("leverage", 1.0)
+        governance_check = None
+        rejection_reason = ""
+        if not self._governance_already_checked(params):
+            governance_check = await self._evaluate_order_governance(
+                request,
+                order_value=notional_usd,
+                params=params,
+                source="order_manager_paper_submit",
+            )
+            rejection_reason = self._governance_rejection_reason(governance_check, request)
+        if rejection_reason:
+            self._last_error = rejection_reason
+            rejected = await self.record_rejected_order(
+                request,
+                reason=rejection_reason,
+                price=fill_price,
+            )
+            self._order_meta.setdefault(rejected.id, {}).update(
+                {
+                    "governance_trace_id": governance_check.trace_id,
+                    "governance_action": getattr(governance_check, "action", ""),
+                    "governance_reason": getattr(governance_check, "reason", ""),
+                }
+            )
+            return rejected
 
         order = Order(
             id=order_id,
@@ -306,6 +371,16 @@ class OrderManager:
                 "paper_slippage_rate": round(slippage_rate, 8),
                 "paper_slippage_cost_usd": round(slippage_cost_usd, 8),
                 "paper_notional_usd": round(notional_usd, 8),
+                "governance_trace_id": (
+                    getattr(governance_check, "trace_id", None)
+                    or params.get("trace_id")
+                    or ""
+                ),
+                "governance_action": (
+                    getattr(governance_check, "action", None)
+                    or ("prechecked" if self._governance_already_checked(params) else "")
+                ),
+                "governance_reason": getattr(governance_check, "reason", ""),
             }
         )
         self._order_meta[order_id] = meta
@@ -336,8 +411,6 @@ class OrderManager:
             order_price = request.price
             if request.order_type == OrderType.MARKET:
                 order_price = None
-            report = risk_manager.get_risk_report()
-            equity = float((report.get("equity") or {}).get("current") or 0.0)
             # Market orders carry no limit price — estimate notional from the
             # latest ticker so governance/risk size checks are not bypassed
             # (order_value=0 would fail-open through every cap).
@@ -352,23 +425,15 @@ class OrderManager:
                         f"{request.symbol}: {e}"
                     )
             order_value = abs(float(request.amount or 0.0) * valuation_price)
-            governance_check = await decision_engine.evaluate_order_intent(
-                symbol=request.symbol,
-                side=request.side.value,
-                leverage=float(params.get("leverage", 1.0) or 1.0),
-                order_value=float(order_value or 0.0),
-                account_equity=float(equity or 0.0),
-                signal_ts=datetime.now(timezone.utc),
-                allow_close=bool(request.reduce_only),
-                spread_bps=None,
-                timeframe=str(params.get("timeframe") or ""),
+            governance_check = await self._evaluate_order_governance(
+                request,
+                order_value=order_value,
+                params=params,
                 source="order_manager_real_submit",
             )
-            if not governance_check.allowed:
-                self._last_error = f"governance blocked: {governance_check.reason}"
-                return None
-            if governance_check.reduce_only and not bool(request.reduce_only):
-                self._last_error = "governance reduce_only enabled"
+            rejection_reason = self._governance_rejection_reason(governance_check, request)
+            if rejection_reason:
+                self._last_error = rejection_reason
                 return None
             params.setdefault("trace_id", governance_check.trace_id)
             # Binance/major CEX normal MARKET/LIMIT endpoints reject stop-loss / take-profit

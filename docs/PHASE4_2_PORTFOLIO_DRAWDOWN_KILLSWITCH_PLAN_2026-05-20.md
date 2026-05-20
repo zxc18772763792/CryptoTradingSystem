@@ -97,9 +97,27 @@ reason="circuit_breaker")`,复用既有平仓逻辑(P4.3 已存在)。
 
 ## 验收清单
 
-- [ ] settings 阈值与默认值合理(默认从 P0 期保守)。
-- [ ] execution_engine 在 dispatch 前完成状态检查,close-only 路径全开。
-- [ ] cusum_watcher 间隔内能稳定检测并 trip。
-- [ ] UI 能看见熔断状态、能手动解除。
-- [ ] 3 套测试齐全无回归。
-- [ ] 文档示例:阈值触发的 PnL 模拟,记一份在 docs/ 下作运行手册。
+- [x] settings 阈值与默认值合理(默认从 P0 期保守)。
+- [x] execution_engine 在 dispatch 前完成状态检查,close-only 路径全开。
+- [x] cusum_watcher 间隔内能稳定检测并 trip。(独立的 circuit_breaker_monitor,60s 间隔)
+- [x] UI 能看见熔断状态、能手动解除。
+- [x] 3 套测试齐全无回归。(26 passed,2026-05-20)
+- [x] 文档示例:阈值触发的 PnL 模拟,记一份在 docs/ 下作运行手册。
+  → [docs/CIRCUIT_BREAKER_RUNBOOK_2026-05-20.md](CIRCUIT_BREAKER_RUNBOOK_2026-05-20.md)
+
+## 实现摘要 (2026-05-20)
+
+| 改动 | 文件 |
+|---|---|
+| 状态机 / 阈值评估 / 持久化 | [core/risk/circuit_breaker.py](../core/risk/circuit_breaker.py) (新) |
+| `__init__` 导出 | [core/risk/__init__.py](../core/risk/__init__.py) |
+| settings 阈值 (5 个 + 总开关) | [config/settings.py](../config/settings.py) |
+| execution_engine dispatch 前的 CB 门 | [core/trading/execution_engine.py](../core/trading/execution_engine.py) `_execute_signal_in_active_mode` 开头 |
+| 60s 后台监控任务 + 通知监听 + close-positions hook | [web/main.py](../web/main.py) `_circuit_breaker_monitor_worker` |
+| `/api/risk/circuit-breaker` 端点 (get/evaluate/reset) | [web/api/risk.py](../web/api/risk.py) (新) |
+| router 注册 | [web/main.py](../web/main.py) |
+| 顶部红色横幅 + 二次确认解除 | [web/templates/index.html](../web/templates/index.html), [web/static/js/app.js](../web/static/js/app.js) (尾部), [web/static/css/style.css](../web/static/css/style.css) (尾部) |
+| 单元测试 (13 cases) | [tests/test_circuit_breaker.py](../tests/test_circuit_breaker.py) |
+| 执行链路集成测试 (6 cases) | [tests/test_execution_circuit_breaker_integration.py](../tests/test_execution_circuit_breaker_integration.py) |
+| PnL 触发端到端测试 (7 cases) | [tests/test_circuit_breaker_pnl_trigger.py](../tests/test_circuit_breaker_pnl_trigger.py) |
+| 运行手册 | [docs/CIRCUIT_BREAKER_RUNBOOK_2026-05-20.md](CIRCUIT_BREAKER_RUNBOOK_2026-05-20.md) |

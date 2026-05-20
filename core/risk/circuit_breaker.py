@@ -1,0 +1,566 @@
+"""Portfolio / per-strategy drawdown circuit breaker (Phase 4.2).
+
+Provides a singleton ``circuit_breaker`` that the execution engine consults
+before dispatching any signal. State transitions:
+
+    allow       -> normal trade flow
+    close_only  -> only reduce-only / close orders permitted
+    block       -> all orders rejected
+
+Strategy-level trip uses daily / weekly drawdown thresholds against a
+strategy-scoped equity curve. Portfolio-level trip uses the global equity
+timeline from :mod:`core.risk.risk_manager`.
+
+Trips are recorded persistently in ``data/cache/runtime_state/circuit_breaker.json``
+so a process restart will not silently re-arm a strategy that was tripped.
+
+The module is intentionally light on dependencies — it imports
+``risk_manager`` lazily so the monitor task can be unit-tested with a fake
+trade history.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import threading
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+from loguru import logger
+
+from config.settings import settings
+
+
+# ── decision tokens ──
+DECISION_ALLOW = "allow"
+DECISION_CLOSE_ONLY = "close_only"
+DECISION_BLOCK = "block"
+_DECISIONS = (DECISION_ALLOW, DECISION_CLOSE_ONLY, DECISION_BLOCK)
+
+
+@dataclass
+class Decision:
+    """Result of a circuit-breaker check.
+
+    ``action`` is one of ``allow`` / ``close_only`` / ``block``.
+    ``scope`` is ``strategy`` or ``portfolio`` (whichever was the binding
+    constraint). For ``allow`` results, ``scope`` is ``ok``.
+    """
+
+    action: str
+    scope: str = "ok"
+    reason: str = ""
+    strategy_name: Optional[str] = None
+    tripped_at: Optional[str] = None
+
+    @property
+    def is_allow(self) -> bool:
+        return self.action == DECISION_ALLOW
+
+    @property
+    def is_close_only(self) -> bool:
+        return self.action == DECISION_CLOSE_ONLY
+
+    @property
+    def is_block(self) -> bool:
+        return self.action == DECISION_BLOCK
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "action": self.action,
+            "scope": self.scope,
+            "reason": self.reason,
+            "strategy_name": self.strategy_name,
+            "tripped_at": self.tripped_at,
+        }
+
+
+@dataclass
+class _StrategyState:
+    tripped: bool = False
+    tripped_at: Optional[str] = None
+    reason: str = ""
+    daily_dd: float = 0.0
+    weekly_dd: float = 0.0
+    last_reset_at: Optional[str] = None
+    last_reset_by: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class _PortfolioState:
+    tripped: bool = False
+    tripped_at: Optional[str] = None
+    reason: str = ""
+    daily_dd: float = 0.0
+    weekly_dd: float = 0.0
+    last_reset_at: Optional[str] = None
+    last_reset_by: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+# Best-effort hook so the monitor task can request position-flatten without
+# importing strategy_manager at module load time.
+_close_positions_hook: Optional[Callable[[str, str], Any]] = None
+
+
+def register_close_positions_hook(hook: Callable[[str, str], Any]) -> None:
+    """Register a callable ``hook(strategy_name, reason)`` that closes positions.
+
+    The hook may be sync or async; if async we will schedule it.
+    """
+    global _close_positions_hook
+    _close_positions_hook = hook
+
+
+class CircuitBreaker:
+    """Thread-safe singleton state machine."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._strategies: Dict[str, _StrategyState] = {}
+        self._portfolio = _PortfolioState()
+        self._store_path: Path = (
+            Path(getattr(settings, "CACHE_PATH", Path("./data/cache"))) / "runtime_state" / "circuit_breaker.json"
+        )
+        self._listeners: List[Callable[[str, Dict[str, Any]], None]] = []
+        self._load_from_disk()
+
+    # ── persistence ──
+    def _load_from_disk(self) -> None:
+        try:
+            if not self._store_path.exists():
+                return
+            with self._store_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh) or {}
+        except Exception as exc:
+            logger.debug(f"circuit_breaker: could not load persisted state: {exc}")
+            return
+        try:
+            for name, row in (data.get("strategies") or {}).items():
+                if isinstance(row, dict):
+                    self._strategies[str(name)] = _StrategyState(**{k: v for k, v in row.items() if k in _StrategyState.__dataclass_fields__})
+            port = data.get("portfolio") or {}
+            if isinstance(port, dict):
+                self._portfolio = _PortfolioState(**{k: v for k, v in port.items() if k in _PortfolioState.__dataclass_fields__})
+        except Exception as exc:
+            logger.debug(f"circuit_breaker: could not deserialise persisted state: {exc}")
+
+    def _persist(self) -> None:
+        try:
+            self._store_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "portfolio": self._portfolio.to_dict(),
+                "strategies": {name: state.to_dict() for name, state in self._strategies.items()},
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+            }
+            tmp = self._store_path.with_suffix(self._store_path.suffix + ".tmp")
+            with tmp.open("w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+            tmp.replace(self._store_path)
+        except Exception as exc:
+            logger.debug(f"circuit_breaker: could not persist state: {exc}")
+
+    # ── listeners (for notifications, audit) ──
+    def add_listener(self, callback: Callable[[str, Dict[str, Any]], None]) -> None:
+        with self._lock:
+            self._listeners.append(callback)
+
+    def _notify(self, event: str, payload: Dict[str, Any]) -> None:
+        for cb in list(self._listeners):
+            try:
+                cb(event, payload)
+            except Exception as exc:
+                logger.debug(f"circuit_breaker listener {cb} raised: {exc}")
+
+    # ── threshold getters ──
+    @property
+    def enabled(self) -> bool:
+        return bool(getattr(settings, "CIRCUIT_BREAKER_ENABLED", True))
+
+    @property
+    def strategy_daily_threshold(self) -> float:
+        return abs(float(getattr(settings, "CB_STRATEGY_DAILY_DD_PCT", 0.05) or 0.0))
+
+    @property
+    def strategy_weekly_threshold(self) -> float:
+        return abs(float(getattr(settings, "CB_STRATEGY_WEEKLY_DD_PCT", 0.10) or 0.0))
+
+    @property
+    def portfolio_daily_threshold(self) -> float:
+        return abs(float(getattr(settings, "CB_PORTFOLIO_DAILY_DD_PCT", 0.03) or 0.0))
+
+    @property
+    def portfolio_weekly_threshold(self) -> float:
+        return abs(float(getattr(settings, "CB_PORTFOLIO_WEEKLY_DD_PCT", 0.06) or 0.0))
+
+    # ── decision API ──
+    def check_strategy(self, name: str) -> Decision:
+        if not self.enabled:
+            return Decision(action=DECISION_ALLOW)
+        if not name:
+            return Decision(action=DECISION_ALLOW)
+        with self._lock:
+            state = self._strategies.get(str(name))
+            if state and state.tripped:
+                return Decision(
+                    action=DECISION_CLOSE_ONLY,
+                    scope="strategy",
+                    reason=state.reason,
+                    strategy_name=name,
+                    tripped_at=state.tripped_at,
+                )
+        return Decision(action=DECISION_ALLOW)
+
+    def check_portfolio(self) -> Decision:
+        if not self.enabled:
+            return Decision(action=DECISION_ALLOW)
+        with self._lock:
+            if self._portfolio.tripped:
+                return Decision(
+                    action=DECISION_CLOSE_ONLY,
+                    scope="portfolio",
+                    reason=self._portfolio.reason,
+                    tripped_at=self._portfolio.tripped_at,
+                )
+        return Decision(action=DECISION_ALLOW)
+
+    def evaluate(self, *, strategy_name: Optional[str], is_reduce_only: bool) -> Decision:
+        """Combined check used by execution engine.
+
+        Reduce-only / close orders are *always* allowed — the breaker exists
+        to stop the bleeding, not to lock positions in.
+        """
+        if is_reduce_only:
+            return Decision(action=DECISION_ALLOW)
+        portfolio = self.check_portfolio()
+        if not portfolio.is_allow:
+            return portfolio
+        if strategy_name:
+            return self.check_strategy(strategy_name)
+        return Decision(action=DECISION_ALLOW)
+
+    # ── trip / reset ──
+    def trip_strategy(
+        self,
+        name: str,
+        reason: str,
+        *,
+        daily_dd: float = 0.0,
+        weekly_dd: float = 0.0,
+    ) -> bool:
+        """Trip a single strategy. Returns True if a state transition occurred."""
+        if not name:
+            return False
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            state = self._strategies.setdefault(str(name), _StrategyState())
+            already = state.tripped
+            state.tripped = True
+            state.tripped_at = state.tripped_at if already else now_iso
+            state.reason = reason
+            state.daily_dd = float(daily_dd)
+            state.weekly_dd = float(weekly_dd)
+            self._persist()
+        if not already:
+            logger.warning(
+                f"circuit_breaker: tripped strategy={name} reason={reason} "
+                f"daily_dd={daily_dd:.4f} weekly_dd={weekly_dd:.4f}"
+            )
+            self._notify("strategy_tripped", {
+                "strategy": name,
+                "reason": reason,
+                "daily_dd": daily_dd,
+                "weekly_dd": weekly_dd,
+                "tripped_at": now_iso,
+            })
+            self._fire_close_positions(name, reason)
+        return not already
+
+    def trip_portfolio(
+        self,
+        reason: str,
+        *,
+        daily_dd: float = 0.0,
+        weekly_dd: float = 0.0,
+    ) -> bool:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            already = self._portfolio.tripped
+            self._portfolio.tripped = True
+            self._portfolio.tripped_at = self._portfolio.tripped_at if already else now_iso
+            self._portfolio.reason = reason
+            self._portfolio.daily_dd = float(daily_dd)
+            self._portfolio.weekly_dd = float(weekly_dd)
+            self._persist()
+        if not already:
+            logger.warning(
+                f"circuit_breaker: tripped PORTFOLIO reason={reason} "
+                f"daily_dd={daily_dd:.4f} weekly_dd={weekly_dd:.4f}"
+            )
+            self._notify("portfolio_tripped", {
+                "reason": reason,
+                "daily_dd": daily_dd,
+                "weekly_dd": weekly_dd,
+                "tripped_at": now_iso,
+            })
+        return not already
+
+    def reset_strategy(self, name: str, operator: str) -> bool:
+        """Manual reset. Returns True if state was actually cleared."""
+        if not name:
+            return False
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            state = self._strategies.get(str(name))
+            if not state or not state.tripped:
+                return False
+            state.tripped = False
+            state.last_reset_at = now_iso
+            state.last_reset_by = str(operator or "unknown")
+            self._persist()
+        logger.info(f"circuit_breaker: strategy {name} reset by {operator}")
+        self._notify("strategy_reset", {
+            "strategy": name,
+            "operator": operator,
+            "reset_at": now_iso,
+        })
+        return True
+
+    def reset_portfolio(self, operator: str) -> bool:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            if not self._portfolio.tripped:
+                return False
+            self._portfolio.tripped = False
+            self._portfolio.last_reset_at = now_iso
+            self._portfolio.last_reset_by = str(operator or "unknown")
+            self._persist()
+        logger.info(f"circuit_breaker: portfolio reset by {operator}")
+        self._notify("portfolio_reset", {
+            "operator": operator,
+            "reset_at": now_iso,
+        })
+        return True
+
+    def _fire_close_positions(self, name: str, reason: str) -> None:
+        hook = _close_positions_hook
+        if hook is None:
+            return
+        try:
+            result = hook(name, f"circuit_breaker:{reason}")
+            if asyncio.iscoroutine(result):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.run(result)
+                else:
+                    loop.create_task(result)
+        except Exception as exc:
+            logger.debug(f"circuit_breaker: close-positions hook failed for {name}: {exc}")
+
+    # ── snapshots ──
+    def snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "enabled": self.enabled,
+                "portfolio": self._portfolio.to_dict(),
+                "strategies": {name: state.to_dict() for name, state in self._strategies.items()},
+                "thresholds": {
+                    "strategy_daily_pct": self.strategy_daily_threshold,
+                    "strategy_weekly_pct": self.strategy_weekly_threshold,
+                    "portfolio_daily_pct": self.portfolio_daily_threshold,
+                    "portfolio_weekly_pct": self.portfolio_weekly_threshold,
+                },
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+
+circuit_breaker = CircuitBreaker()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Monitoring / threshold evaluation
+# ──────────────────────────────────────────────────────────────────────────
+
+def _parse_iso(ts: Any) -> Optional[datetime]:
+    text = str(ts or "").strip()
+    if not text:
+        return None
+    try:
+        out = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if out.tzinfo is None:
+        out = out.replace(tzinfo=timezone.utc)
+    return out.astimezone(timezone.utc)
+
+
+def _drawdown_from_pnl(rows: List[Dict[str, Any]], *, hours: int) -> float:
+    """Compute peak-to-trough drawdown from a chronological trade list within window.
+
+    ``rows`` should be dicts with ``timestamp`` (ISO string) and ``pnl`` numeric.
+    Returns drawdown as a *positive* float (e.g. 0.04 for -4%).
+    """
+    if not rows:
+        return 0.0
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours or 1)))
+    cumulative = 0.0
+    # Anchor curve at 0 so a single losing trade still registers a drawdown
+    equity_curve: List[float] = [0.0]
+    base_capital: Optional[float] = None
+    for row in rows:
+        ts = _parse_iso(row.get("timestamp"))
+        if ts is None or ts < cutoff:
+            continue
+        try:
+            pnl = float(row.get("pnl") or 0.0)
+        except Exception:
+            pnl = 0.0
+        cumulative += pnl
+        if base_capital is None:
+            base_capital = float(row.get("capital_after") or row.get("equity") or 0.0) or None
+        equity_curve.append(cumulative)
+    if len(equity_curve) <= 1:
+        return 0.0
+    base = abs(base_capital) if base_capital and base_capital > 0 else max(abs(min(equity_curve)), abs(max(equity_curve)), 1.0)
+    peak = equity_curve[0]
+    worst_dd = 0.0
+    for value in equity_curve:
+        if value > peak:
+            peak = value
+        dd_abs = peak - value
+        dd_pct = dd_abs / base if base > 0 else 0.0
+        if dd_pct > worst_dd:
+            worst_dd = dd_pct
+    return float(worst_dd)
+
+
+def evaluate_strategy_drawdowns(trade_history: List[Dict[str, Any]]) -> Dict[str, Dict[str, float]]:
+    """Group ``trade_history`` by strategy and return per-strategy daily/weekly drawdowns."""
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in trade_history or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("strategy") or row.get("strategy_name") or "").strip()
+        if not name:
+            continue
+        grouped.setdefault(name, []).append(row)
+    result: Dict[str, Dict[str, float]] = {}
+    for name, rows in grouped.items():
+        result[name] = {
+            "daily_dd": _drawdown_from_pnl(rows, hours=24),
+            "weekly_dd": _drawdown_from_pnl(rows, hours=24 * 7),
+        }
+    return result
+
+
+def evaluate_portfolio_drawdown() -> Dict[str, float]:
+    """Use ``risk_manager`` equity timeline for portfolio-level drawdown."""
+    try:
+        from core.risk.risk_manager import risk_manager  # noqa: PLC0415
+    except Exception:
+        return {"daily_dd": 0.0, "weekly_dd": 0.0}
+    try:
+        daily = float(risk_manager.get_rolling_drawdown_snapshot(hours=24).get("drawdown") or 0.0)
+        weekly = float(risk_manager.get_rolling_drawdown_snapshot(hours=24 * 7).get("drawdown") or 0.0)
+    except Exception as exc:
+        logger.debug(f"circuit_breaker: portfolio drawdown computation failed: {exc}")
+        return {"daily_dd": 0.0, "weekly_dd": 0.0}
+    return {"daily_dd": daily, "weekly_dd": weekly}
+
+
+def run_circuit_breaker_checks(
+    *,
+    trade_history: Optional[List[Dict[str, Any]]] = None,
+    portfolio_drawdown: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
+    """Single evaluation pass. Returns a report dict.
+
+    Both inputs are optional so the function is unit-testable with synthetic
+    data. When omitted we read from the live risk_manager.
+    """
+    if trade_history is None:
+        try:
+            from core.risk.risk_manager import risk_manager  # noqa: PLC0415
+            trade_history = list(getattr(risk_manager, "_trade_history", []) or [])
+        except Exception:
+            trade_history = []
+    if portfolio_drawdown is None:
+        portfolio_drawdown = evaluate_portfolio_drawdown()
+
+    breaker = circuit_breaker
+    if not breaker.enabled:
+        return {"enabled": False, "skipped": True}
+
+    report: Dict[str, Any] = {
+        "enabled": True,
+        "strategy_trips": [],
+        "portfolio_trip": None,
+        "strategy_dds": {},
+        "portfolio_dd": portfolio_drawdown,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+
+    strat_dds = evaluate_strategy_drawdowns(trade_history)
+    report["strategy_dds"] = strat_dds
+    daily_thr = breaker.strategy_daily_threshold
+    weekly_thr = breaker.strategy_weekly_threshold
+
+    for name, dds in strat_dds.items():
+        daily = float(dds.get("daily_dd") or 0.0)
+        weekly = float(dds.get("weekly_dd") or 0.0)
+        breaches: List[str] = []
+        if daily_thr > 0 and daily >= daily_thr:
+            breaches.append(f"24h_dd {daily:.4f} >= {daily_thr:.4f}")
+        if weekly_thr > 0 and weekly >= weekly_thr:
+            breaches.append(f"7d_dd {weekly:.4f} >= {weekly_thr:.4f}")
+        if breaches:
+            reason = "; ".join(breaches)
+            transitioned = breaker.trip_strategy(name, reason, daily_dd=daily, weekly_dd=weekly)
+            report["strategy_trips"].append({
+                "strategy": name,
+                "reason": reason,
+                "daily_dd": daily,
+                "weekly_dd": weekly,
+                "new_trip": transitioned,
+            })
+
+    port_daily = float((portfolio_drawdown or {}).get("daily_dd") or 0.0)
+    port_weekly = float((portfolio_drawdown or {}).get("weekly_dd") or 0.0)
+    port_breaches: List[str] = []
+    if breaker.portfolio_daily_threshold > 0 and port_daily >= breaker.portfolio_daily_threshold:
+        port_breaches.append(f"24h_dd {port_daily:.4f} >= {breaker.portfolio_daily_threshold:.4f}")
+    if breaker.portfolio_weekly_threshold > 0 and port_weekly >= breaker.portfolio_weekly_threshold:
+        port_breaches.append(f"7d_dd {port_weekly:.4f} >= {breaker.portfolio_weekly_threshold:.4f}")
+    if port_breaches:
+        reason = "; ".join(port_breaches)
+        transitioned = breaker.trip_portfolio(reason, daily_dd=port_daily, weekly_dd=port_weekly)
+        report["portfolio_trip"] = {
+            "reason": reason,
+            "daily_dd": port_daily,
+            "weekly_dd": port_weekly,
+            "new_trip": transitioned,
+        }
+
+    return report
+
+
+__all__ = [
+    "CircuitBreaker",
+    "Decision",
+    "DECISION_ALLOW",
+    "DECISION_CLOSE_ONLY",
+    "DECISION_BLOCK",
+    "circuit_breaker",
+    "register_close_positions_hook",
+    "run_circuit_breaker_checks",
+    "evaluate_strategy_drawdowns",
+    "evaluate_portfolio_drawdown",
+]

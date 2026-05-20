@@ -8979,3 +8979,112 @@ function _renderMonitorChart(data) {
     }
 }
 
+// ── Phase 4.2 — Circuit breaker banner polling ──
+let _cbBannerTimer = null;
+let _cbBannerState = null;
+
+async function loadCircuitBreakerState() {
+    try {
+        const snap = await api('/risk/circuit-breaker', { timeoutMs: 6000 });
+        _cbBannerState = snap;
+        renderCircuitBreakerBanner(snap);
+    } catch (e) {
+        // silent — banner stays as last known state
+    }
+}
+
+function renderCircuitBreakerBanner(snap) {
+    const banner = document.getElementById('circuit-breaker-banner');
+    const titleEl = document.getElementById('cb-banner-title');
+    const detailEl = document.getElementById('cb-banner-detail');
+    const resetBtn = document.getElementById('cb-banner-reset');
+    if (!banner || !titleEl || !detailEl || !resetBtn) return;
+    if (!snap || !snap.enabled) {
+        banner.style.display = 'none';
+        return;
+    }
+    const portfolio = snap.portfolio || {};
+    const strategies = snap.strategies || {};
+    const trippedStrategies = Object.entries(strategies).filter(([_, st]) => st && st.tripped);
+    const portfolioTripped = !!portfolio.tripped;
+
+    if (!portfolioTripped && trippedStrategies.length === 0) {
+        banner.style.display = 'none';
+        return;
+    }
+    banner.style.display = 'block';
+    if (portfolioTripped) {
+        banner.classList.remove('cb-banner-strategy');
+        const pct = (v) => `${(Number(v || 0) * 100).toFixed(2)}%`;
+        titleEl.textContent = '⛔ 组合熔断已触发';
+        detailEl.innerHTML = `原因: ${esc(portfolio.reason || '')} ` +
+            `<span style="opacity:0.85">| 24h回撤 ${pct(portfolio.daily_dd)} ` +
+            `· 7d回撤 ${pct(portfolio.weekly_dd)} · 触发于 ${esc(portfolio.tripped_at || '')}</span>`;
+        resetBtn.dataset.scope = 'portfolio';
+        resetBtn.dataset.target = '';
+        resetBtn.style.display = '';
+    } else {
+        banner.classList.add('cb-banner-strategy');
+        titleEl.textContent = `⚠ ${trippedStrategies.length} 个策略熔断`;
+        const list = trippedStrategies.slice(0, 6).map(([name, st]) => {
+            const pct = (Number(st.daily_dd || 0) * 100).toFixed(1);
+            return `<li>${esc(name)} (24h −${pct}%)</li>`;
+        }).join('');
+        detailEl.innerHTML = `<ul class="cb-banner-strategy-list">${list}</ul>`;
+        // For multi-strategy case, leave the inline reset to ops API; show single shortcut only when one
+        if (trippedStrategies.length === 1) {
+            resetBtn.dataset.scope = 'strategy';
+            resetBtn.dataset.target = trippedStrategies[0][0];
+            resetBtn.style.display = '';
+        } else {
+            resetBtn.style.display = 'none';
+        }
+    }
+}
+
+async function handleCircuitBreakerReset() {
+    const btn = document.getElementById('cb-banner-reset');
+    if (!btn) return;
+    const scope = btn.dataset.scope || 'portfolio';
+    const target = btn.dataset.target || '';
+    const confirmText = scope === 'portfolio'
+        ? '确定要解除【组合熔断】吗？此操作会立即放行新订单（已有持仓不受影响）。\n请再次确认你已查清回撤来源。'
+        : `确定要解除策略【${target}】的熔断吗？该策略将被允许重新建仓。`;
+    if (!window.confirm(confirmText)) return;
+    const note = window.prompt('（可选）记录解除原因，写入审计日志：', '') || '';
+    try {
+        const body = JSON.stringify({
+            scope,
+            strategy_name: scope === 'strategy' ? target : null,
+            confirm: true,
+            note,
+        });
+        const r = await api('/risk/circuit-breaker/reset', { method: 'POST', body, timeoutMs: 8000 });
+        renderCircuitBreakerBanner(r && r.state ? r.state : null);
+        try { notify(scope === 'portfolio' ? '组合熔断已解除' : `策略 ${target} 熔断已解除`); } catch {}
+    } catch (e) {
+        try { notify(`熔断解除失败: ${e.message || e}`, true); } catch {}
+    }
+}
+
+(function bindCircuitBreakerBanner() {
+    const start = () => {
+        const btn = document.getElementById('cb-banner-reset');
+        if (btn && !btn.dataset.cbBound) {
+            btn.dataset.cbBound = '1';
+            btn.addEventListener('click', handleCircuitBreakerReset);
+        }
+        loadCircuitBreakerState();
+        if (_cbBannerTimer) return;
+        _cbBannerTimer = setInterval(() => {
+            if (document.hidden) return;
+            loadCircuitBreakerState();
+        }, 15000);
+    };
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', start, { once: true });
+    } else {
+        start();
+    }
+})();
+

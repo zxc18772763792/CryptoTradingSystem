@@ -8,7 +8,9 @@ from core.strategies.strategy_base import StrategyBase
 from core.strategies.strategy_manager import StrategyManager
 from core.trading.account_manager import AccountManager, TradingAccount, account_manager
 from core.trading.order_manager import OrderManager, OrderRequest
-from core.exchanges.base_exchange import OrderSide, OrderType
+from core.exchanges.base_exchange import OrderSide, OrderStatus, OrderType
+
+order_manager_module = __import__("core.trading.order_manager", fromlist=["decision_engine"])
 
 
 class _NoopStrategy(StrategyBase):
@@ -230,6 +232,153 @@ def test_order_manager_reports_missing_live_connector(monkeypatch):
     assert manager.get_last_error() == (
         "exchange connector unavailable: exchange=binance account_id=strategy_live"
     )
+
+
+def test_paper_order_runs_governance_and_records_rejection(monkeypatch):
+    manager = OrderManager()
+    manager.set_paper_trading(True)
+    monkeypatch.setattr(
+        account_manager,
+        "get_account_mode",
+        lambda account_id, default="paper": "paper",
+    )
+    monkeypatch.setattr(
+        order_manager_module.risk_manager,
+        "get_risk_report",
+        lambda: {"equity": {"current": 1000.0}},
+    )
+    governance_mock = AsyncMock(
+        return_value=SimpleNamespace(
+            allowed=False,
+            reason="kill_switch_enabled",
+            reduce_only=False,
+            trace_id="trace-paper-block",
+            action="blocked",
+        )
+    )
+    monkeypatch.setattr(
+        order_manager_module.decision_engine,
+        "evaluate_order_intent",
+        governance_mock,
+    )
+
+    async def _run():
+        return await manager.create_order(
+            OrderRequest(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                amount=2.0,
+                price=100.0,
+                exchange="binance",
+                account_id="paper_acc",
+                params={"paper_slippage_bps": 0},
+            )
+        )
+
+    order = asyncio.run(_run())
+
+    assert order.status == OrderStatus.REJECTED
+    assert order.filled == 0.0
+    assert manager.get_last_error() == "governance blocked: kill_switch_enabled"
+    assert governance_mock.await_args.kwargs["order_value"] == 200.0
+    assert governance_mock.await_args.kwargs["source"] == "order_manager_paper_submit"
+    metadata = manager.get_order_metadata(order.id)
+    assert metadata["reject_reason"] == "governance blocked: kill_switch_enabled"
+    assert metadata["governance_trace_id"] == "trace-paper-block"
+
+
+def test_paper_order_keeps_fill_simulation_when_governance_allows(monkeypatch):
+    manager = OrderManager()
+    manager.set_paper_trading(True)
+    monkeypatch.setattr(
+        account_manager,
+        "get_account_mode",
+        lambda account_id, default="paper": "paper",
+    )
+    monkeypatch.setattr(
+        order_manager_module.risk_manager,
+        "get_risk_report",
+        lambda: {"equity": {"current": 1000.0}},
+    )
+    monkeypatch.setattr(
+        order_manager_module.decision_engine,
+        "evaluate_order_intent",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                allowed=True,
+                reason="passed",
+                reduce_only=False,
+                trace_id="trace-paper-allow",
+                action="allow",
+            )
+        ),
+    )
+
+    async def _run():
+        return await manager.create_order(
+            OrderRequest(
+                symbol="BTC/USDT",
+                side=OrderSide.SELL,
+                order_type=OrderType.MARKET,
+                amount=1.5,
+                price=100.0,
+                exchange="binance",
+                account_id="paper_acc",
+                params={"paper_fee_rate": 0.001, "paper_slippage_bps": 10},
+            )
+        )
+
+    order = asyncio.run(_run())
+
+    assert order.status == OrderStatus.CLOSED
+    assert order.filled == 1.5
+    assert order.price == 99.9
+    metadata = manager.get_order_metadata(order.id)
+    assert metadata["paper"] is True
+    assert metadata["governance_trace_id"] == "trace-paper-allow"
+
+
+def test_paper_order_reuses_prechecked_governance_trace(monkeypatch):
+    manager = OrderManager()
+    manager.set_paper_trading(True)
+    monkeypatch.setattr(
+        account_manager,
+        "get_account_mode",
+        lambda account_id, default="paper": "paper",
+    )
+    governance_mock = AsyncMock()
+    monkeypatch.setattr(
+        order_manager_module.decision_engine,
+        "evaluate_order_intent",
+        governance_mock,
+    )
+
+    async def _run():
+        return await manager.create_order(
+            OrderRequest(
+                symbol="BTC/USDT",
+                side=OrderSide.BUY,
+                order_type=OrderType.MARKET,
+                amount=1.0,
+                price=100.0,
+                exchange="binance",
+                account_id="paper_acc",
+                params={
+                    "trace_id": "trace-engine",
+                    "governance_prechecked": True,
+                    "paper_slippage_bps": 0,
+                },
+            )
+        )
+
+    order = asyncio.run(_run())
+
+    assert order.status == OrderStatus.CLOSED
+    governance_mock.assert_not_called()
+    metadata = manager.get_order_metadata(order.id)
+    assert metadata["governance_trace_id"] == "trace-engine"
+    assert metadata["governance_action"] == "prechecked"
 
 
 def test_order_manager_clear_paper_history_preserves_live_orders():

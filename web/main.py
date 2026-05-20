@@ -1051,6 +1051,90 @@ async def _cusum_monitor_worker(stop_event: asyncio.Event, app: FastAPI) -> None
             await asyncio.sleep(1)
 
 
+async def _circuit_breaker_monitor_worker(stop_event: asyncio.Event, app: FastAPI) -> None:
+    """Periodically evaluate per-strategy + portfolio drawdown for the circuit breaker."""
+    from core.risk.circuit_breaker import (
+        run_circuit_breaker_checks,
+        register_close_positions_hook,
+        circuit_breaker,
+    )
+
+    if not bool(getattr(settings, "CIRCUIT_BREAKER_ENABLED", True)):
+        logger.info("circuit_breaker_monitor: disabled via settings, worker idling")
+        while not stop_event.is_set():
+            await asyncio.sleep(5)
+        return
+
+    monitor_loop = asyncio.get_running_loop()
+
+    # Wire close-positions hook (best-effort — strategy_manager may not have it yet)
+    try:
+        from core.strategies.strategy_manager import strategy_manager as _sm
+
+        def _hook(strategy_name: str, reason: str) -> Any:
+            closer = getattr(_sm, "_close_positions_for_strategy_stop", None)
+            if closer is None:
+                return None
+            result = closer(strategy_name, reason=reason)
+            if asyncio.iscoroutine(result) and monitor_loop.is_running():
+                return asyncio.run_coroutine_threadsafe(result, monitor_loop)
+            return result
+
+        register_close_positions_hook(_hook)
+    except Exception as exc:
+        logger.debug(f"circuit_breaker_monitor: could not register close hook: {exc}")
+
+    # Notification listener (best-effort)
+    try:
+        from core.notifications import notification_manager  # noqa: PLC0415
+
+        def _notify(event: str, payload: Dict[str, Any]) -> None:
+            if event not in {"strategy_tripped", "portfolio_tripped"}:
+                return
+            title = (
+                "⚠ 组合熔断触发"
+                if event == "portfolio_tripped"
+                else f"⚠ 策略熔断: {payload.get('strategy')}"
+            )
+            msg = (
+                f"原因: {payload.get('reason')}\n"
+                f"24h回撤: {float(payload.get('daily_dd') or 0.0)*100:.2f}%\n"
+                f"7d回撤: {float(payload.get('weekly_dd') or 0.0)*100:.2f}%"
+            )
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    notification_manager.send_message(
+                        title=title, message=msg, channels=["feishu", "telegram"]
+                    ),
+                    monitor_loop,
+                )
+            except Exception:
+                pass
+
+        circuit_breaker.add_listener(_notify)
+    except Exception as exc:
+        logger.debug(f"circuit_breaker_monitor: notification listener not wired: {exc}")
+
+    interval = max(15, int(getattr(settings, "CB_MONITOR_INTERVAL_SEC", 60) or 60))
+    await asyncio.sleep(45)  # stagger startup after CUSUM
+    while not stop_event.is_set():
+        try:
+            report = await asyncio.to_thread(run_circuit_breaker_checks)
+            if report.get("strategy_trips") or report.get("portfolio_trip"):
+                logger.warning(
+                    "circuit_breaker_monitor: trip detected "
+                    f"strategy={len(report.get('strategy_trips') or [])} "
+                    f"portfolio={'yes' if report.get('portfolio_trip') else 'no'}"
+                )
+            _touch_runtime_task("circuit_breaker_monitor", success=True)
+        except Exception as e:
+            logger.warning(f"circuit_breaker_monitor error: {e}")
+        for _ in range(interval):
+            if stop_event.is_set():
+                break
+            await asyncio.sleep(1)
+
+
 async def _data_maintenance_worker(stop_event: asyncio.Event) -> None:
     await asyncio.sleep(10)
     while not stop_event.is_set():
@@ -1111,6 +1195,10 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
         },
         "cusum_monitor": {
             "factory": lambda stop_event: _cusum_monitor_worker(stop_event, app),
+            "restart_on_failure": True,
+        },
+        "circuit_breaker_monitor": {
+            "factory": lambda stop_event: _circuit_breaker_monitor_worker(stop_event, app),
             "restart_on_failure": True,
         },
         "coinglass": {
@@ -1353,6 +1441,7 @@ from web.api import (
     news,
     notifications,
     research,
+    risk as risk_api,
     strategies,
     trading_accounts,
     trading_analytics,
@@ -1378,6 +1467,7 @@ app.include_router(backtest.router, prefix="/api/backtest", tags=["backtest"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["notifications"])
 app.include_router(news.router, prefix="/api/news", tags=["news"])
 app.include_router(ml.router, prefix="/api/ml", tags=["ml"])
+app.include_router(risk_api.router, prefix="/api/risk", tags=["risk"])
 app.include_router(create_ops_router())
 
 
