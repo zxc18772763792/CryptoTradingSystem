@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+from loguru import logger
 from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
@@ -231,6 +232,52 @@ def _resolve_backtest_trade_policy(strategy: str, params: Optional[Dict[str, Any
         bool(cfg.get("allow_short", False)),
         bool(cfg.get("reverse_on_signal", True)),
     )
+
+
+def _resolve_strategy_class(strategy: str) -> Optional[Any]:
+    """Resolve a strategy name to its real class as the live runtime sees it.
+
+    Uses the same ``strategies`` package the live runtime imports from, so a
+    rename or missing strategy here surfaces the same way it would in live.
+    """
+    try:
+        import strategies as _strategy_pkg  # lazy to avoid import cycles
+    except Exception:  # pragma: no cover - import surface
+        return None
+    return getattr(_strategy_pkg, str(strategy or "").strip(), None)
+
+
+def _build_backtest_position_series(
+    strategy: str, df: pd.DataFrame, params: Optional[Dict[str, Any]] = None
+) -> pd.Series:
+    """Backtest position series. Routes to the real strategy class when
+    BACKTEST_USE_REAL_STRATEGY is on, so the backtest page evaluates the same
+    code path that trades live. Falls back to the legacy vectorized model
+    only when the class cannot be resolved or the flag is disabled."""
+    from config.settings import settings as _settings  # lazy
+
+    use_real = bool(getattr(_settings, "BACKTEST_USE_REAL_STRATEGY", True))
+    cls = _resolve_strategy_class(strategy) if use_real else None
+    if cls is None:
+        return _build_positions(strategy, df, params=params)
+    allow_long, allow_short, reverse_on_signal = _resolve_backtest_trade_policy(
+        strategy, params=params
+    )
+    try:
+        return _replay_signal_strategy_position(
+            cls,
+            df,
+            params=params,
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            f"Real-strategy replay failed for {strategy}: {exc}; "
+            f"falling back to vectorized model"
+        )
+        return _build_positions(strategy, df, params=params)
 
 
 def _stateful_directional_position(
@@ -3369,7 +3416,7 @@ def _run_backtest_core(
         raw_position = (
             pd.to_numeric(precomputed_position.reindex(df.index), errors="coerce").fillna(0.0)
             if precomputed_position is not None
-            else _build_positions(strategy, df, params=merged_params)
+            else _build_backtest_position_series(strategy, df, params=merged_params)
         )
         execution_summary = _simulate_execution_summary(
             df,

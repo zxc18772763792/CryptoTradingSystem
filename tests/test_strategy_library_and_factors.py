@@ -328,7 +328,15 @@ def test_fama_runtime_rebalance_offloads_cpu_work(monkeypatch):
     assert strategy._last_rebalance_at is not None
 
 
-def test_backtest_core_stop_take_switch_forces_protective_exits():
+def test_backtest_core_stop_take_switch_forces_protective_exits(monkeypatch):
+    # Test the execution-mechanics switch (stop/take protections), not the
+    # strategy's signal logic. Route through the legacy vectorized position
+    # builder so the trade count is deterministic regardless of strategy
+    # class behavior.
+    from web.api import backtest as _bt_api
+
+    monkeypatch.setattr(_bt_api, "_resolve_strategy_class", lambda name: None)
+
     df = _trend_ohlcv(rows=260)
     params = {"fast_period": 3, "slow_period": 8}
     base = _run_backtest_core(

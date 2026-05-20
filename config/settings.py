@@ -184,6 +184,11 @@ class Settings(BaseSettings):
     # UTC) raises instead of being silently shifted — use to flush out any
     # remaining non-UTC kline writer in CI / debugging.
     PARQUET_TZ_STRICT: bool = False
+    # When True, the backtest page builds positions by replaying the real
+    # strategy class's generate_signals (matches live runtime). Set False to
+    # revert to the legacy vectorized _build_positions model for emergency
+    # rollback only — historical numbers from that path do not predict live.
+    BACKTEST_USE_REAL_STRATEGY: bool = True
 
     # Web server
     WEB_HOST: str = "127.0.0.1"

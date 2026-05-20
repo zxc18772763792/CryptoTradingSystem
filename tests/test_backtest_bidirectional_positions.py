@@ -123,7 +123,11 @@ def test_run_backtest_core_uses_protective_execution_price_for_trade_points(monk
     raw_position = pd.Series([0.0, -1.0, -1.0, 0.0], index=index)
 
     monkeypatch.setattr(backtest_api, "_min_required_bars", lambda timeframe: 2)
-    monkeypatch.setattr(backtest_api, "_build_positions", lambda strategy, frame, params=None: raw_position)
+    monkeypatch.setattr(
+        backtest_api,
+        "_build_backtest_position_series",
+        lambda strategy, frame, params=None: raw_position,
+    )
 
     result = backtest_api._run_backtest_core(
         strategy="MAStrategy",
