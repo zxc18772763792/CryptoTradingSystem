@@ -84,8 +84,10 @@ class StrategyManager:
         self._stats: Dict[str, StrategyRuntimeStats] = {}
         self._running_since: Dict[str, datetime] = {}
         self._runtime_deadlines: Dict[str, datetime] = {}
-        # (symbol, exchange) -> most recent Signal, used for conflict detection
-        self._recent_signal_by_symbol: Dict[Tuple[str, str], Signal] = {}
+        # (account_id, symbol, exchange) -> most recent Signal, used for
+        # per-account conflict detection (preserves strategy isolation while
+        # still preventing back-to-back hedges within a shared account).
+        self._recent_signal_by_symbol: Dict[Tuple[str, str, str], Signal] = {}
         # Cumulative count of signals suppressed by cross-strategy conflict
         # detection, so the loss can be confirmed without log scraping.
         self._conflict_dropped_count: int = 0
@@ -784,7 +786,12 @@ class StrategyManager:
                 meta.setdefault("timeframe", str(config.timeframe or ""))
             signal.metadata = meta
 
+            # Conflict detection is scoped to the *account* — strategies on
+            # isolated accounts (the default) trade independently even on the
+            # same symbol; only strategies sharing an account suppress each
+            # other to avoid back-to-back hedging orders on one balance.
             conflict_key = (
+                str(meta.get("account_id") or account_id or "main").strip(),
                 str(signal.symbol or "").strip().upper(),
                 str(meta.get("exchange") or default_exchange).strip().lower(),
             )
