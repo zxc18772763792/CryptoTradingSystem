@@ -1124,6 +1124,31 @@
     return { jobStatus, proposalStatus, proposalReason, progress, candidateId };
   }
 
+  function isProposalTerminalStatus(status) {
+    return [
+      'rejected',
+      'retired',
+      'validated',
+      'paper_running',
+      'shadow_running',
+      'live_candidate',
+      'live_running',
+    ].includes(String(status || '').trim().toLowerCase());
+  }
+
+  function isJobTerminalStatus(status) {
+    return ['completed', 'cancelled', 'failed'].includes(String(status || '').trim().toLowerCase());
+  }
+
+  function isNotFoundApiError(err) {
+    const message = String(err?.message || '').toLowerCase();
+    return Number(err?.status) === 404
+      || message.includes('(404)')
+      || message.includes('not found')
+      || message.includes('不存在')
+      || message.includes('未找到');
+  }
+
   async function pollOneClickJob(proposalId, jobId, btn, payload) {
     const MAX_WAIT_MS = 20 * 60 * 1000;
     const POLL_INTERVAL_MS = 5000;
@@ -1161,6 +1186,7 @@
         const reason = parsed.proposalReason || String(statusSnapshot?.error || statusSnapshot?.job?.error || '').trim() || '未知原因';
         throw new Error(`研究任务${parsed.jobStatus === 'failed' ? '失败' : '已取消'}: ${reason}`);
       }
+      if (isProposalTerminalStatus(parsed.proposalStatus)) return latest;
 
       const progressMessage = normalizeUiText(
         parsed.progress?.message
@@ -2269,7 +2295,12 @@
       });
       const ct = String(resp.headers.get('content-type') || '').toLowerCase();
       const data = ct.includes('application/json') ? await resp.json() : { detail: await resp.text() };
-      if (!resp.ok) throw new Error(data.detail || data.error || `请求失败(${resp.status})`);
+      if (!resp.ok) {
+        const err = new Error(data.detail || data.error || `请求失败(${resp.status})`);
+        err.status = resp.status;
+        err.data = data;
+        throw err;
+      }
       return data;
     } catch (err) {
       if (err?.name === 'AbortError') throw new Error(`接口超时(${timeoutMs}ms): ${p}`);
@@ -4943,15 +4974,17 @@ ${confirmHint}`,
       constraints: plannerConstraints,
       market_context: liveCtx,
     };
-    // Attach pending LLM context if available, then clear it
-    if (state.pendingLlmContext) {
-      payload.llm_research_output = state.pendingLlmContext;
+    const attachedLlmContext = state.pendingLlmContext || null;
+    if (attachedLlmContext) {
+      payload.llm_research_output = attachedLlmContext;
+    }
+    const result = await aiApi('/proposals/generate', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 30000 });
+    if (attachedLlmContext && state.pendingLlmContext === attachedLlmContext) {
       state.pendingLlmContext = null;
       setAIContextButtonState('idle');
       const btn = document.getElementById('ai-context-btn');
-        if (btn) { btn.textContent = '1) 生成研究思路'; btn.disabled = false; btn.style.color = ''; }
+      if (btn) { btn.textContent = '1) 生成研究思路'; btn.disabled = false; btn.style.color = ''; }
     }
-    const result = await aiApi('/proposals/generate', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 30000 });
     // A: show filtered templates and planner notes
     const filteredTpls = result?.filtered_templates || result?.proposal?.filtered_templates || [];
     const plannerNotes = result?.planner_notes || [];
@@ -5429,7 +5462,7 @@ ${confirmHint}`,
   function startJobPolling(proposalId, jobId) {
     stopJobPolling(proposalId);
     state.jobPollingTimers[proposalId] = setInterval(
-      () => pollJobStatus(proposalId, jobId).catch(() => {}),
+      () => pollJobStatus(proposalId, jobId).catch(err => console.debug('pollJobStatus failed:', err)),
       JOB_POLL_MS,
     );
   }
@@ -5437,10 +5470,24 @@ ${confirmHint}`,
   function stopJobPolling(proposalId) {
     const t = state.jobPollingTimers[proposalId];
     if (t) { clearInterval(t); delete state.jobPollingTimers[proposalId]; }
+    if (state.jobPollingConfigs) delete state.jobPollingConfigs[proposalId];
   }
 
   async function pollJobStatus(proposalId, _jobId) {
-    const data = await aiApi(`/proposals/${encodeURIComponent(proposalId)}/job-status`, { timeoutMs: 8000 });
+    let data = null;
+    try {
+      data = await aiApi(`/proposals/${encodeURIComponent(proposalId)}/job-status`, { timeoutMs: 8000 });
+    } catch (err) {
+      if (isNotFoundApiError(err)) {
+        stopJobPolling(proposalId);
+        notify('研究任务不存在，已停止状态轮询', true);
+        await loadProposals();
+        syncPollingState({ immediate: false, reason: 'job-status-404' });
+      } else {
+        console.debug('pollJobStatus failed:', err);
+      }
+      return;
+    }
     const js   = data?.job_status;
     const proposalStatus = String(data?.proposal_status || '');
     const proposalReason = String(data?.proposal_reason || '').trim();
@@ -5466,6 +5513,12 @@ ${confirmHint}`,
       stopJobPolling(proposalId);
       notify(`研究失败: ${data?.error || '未知错误'}`, true);
       await loadProposals(proposalId);
+    } else if (!js && isProposalTerminalStatus(proposalStatus)) {
+      stopJobPolling(proposalId);
+      await refreshWorkbench(proposalId, '');
+    } else if (js && !isJobTerminalStatus(js) && isProposalTerminalStatus(proposalStatus)) {
+      stopJobPolling(proposalId);
+      await refreshWorkbench(proposalId, '');
     }
   }
 

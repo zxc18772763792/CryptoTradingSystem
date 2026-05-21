@@ -78,3 +78,15 @@ def test_execution_engine_refresh_equity_uses_account_scoped_snapshot(monkeypatc
 
     assert equity == 321.0
     assert snapshot_mock.await_args.kwargs["account_id"] == "acct_live"
+
+
+def test_execution_engine_unknown_account_inherits_active_live_mode(monkeypatch):
+    engine = ExecutionEngine()
+    engine.set_paper_trading(False, sync_runtime_state=False)
+    monkeypatch.setattr(
+        execution_engine_module.account_manager,
+        "get_account",
+        lambda account_id: None,
+    )
+
+    assert engine._resolve_account_trading_mode("acct_A") == "live"

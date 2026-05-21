@@ -69,19 +69,23 @@ class OrderManager:
         return "live" if text == "live" else "paper"
 
     def _resolve_request_mode(self, request: OrderRequest) -> str:
+        fallback_mode = "paper" if self._paper_trading else "live"
         try:
             from core.trading.account_manager import account_manager
 
             params = dict(request.params or {})
             explicit_mode = params.get("trading_mode") or params.get("runtime_mode") or params.get("mode")
-            account_mode = account_manager.get_account_mode(request.account_id, default="")
             if explicit_mode in {"paper", "live"}:
                 return self._normalize_mode(explicit_mode)
+            account_mode = account_manager.get_account_mode(
+                request.account_id,
+                default=fallback_mode,
+            )
             if account_mode in {"paper", "live"}:
                 return self._normalize_mode(account_mode)
         except Exception:
             pass
-        return "paper" if self._paper_trading else "live"
+        return fallback_mode
 
     def _request_meta(self, request: OrderRequest) -> Dict[str, Any]:
         resolved_mode = self._resolve_request_mode(request)

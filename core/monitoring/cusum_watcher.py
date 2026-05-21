@@ -16,6 +16,9 @@ from loguru import logger
 from core.utils import utc_now
 
 
+_NOTIFICATION_TASKS: set[asyncio.Task[Any]] = set()
+
+
 async def run_cusum_checks_for_all_candidates(app: FastAPI) -> List[Dict[str, Any]]:
     """Scan all paper_running/shadow_running candidates for CUSUM decay.
 
@@ -125,11 +128,14 @@ def _send_cusum_notification(cand: Any, decay_result: Dict[str, Any]) -> None:
             f"衰减幅度: {decay_result.get('decay_pct', 0):.1f}%\n"
             f"{decay_result.get('message', '')}"
         )
-        asyncio.create_task(
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(
             notification_manager.send_message(
                 title=title, message=message, channels=["feishu", "telegram"]
             )
         )
+        _NOTIFICATION_TASKS.add(task)
+        task.add_done_callback(_NOTIFICATION_TASKS.discard)
     except Exception as exc:
         logger.debug(f"cusum_watcher: notification failed (non-fatal): {exc}")
 

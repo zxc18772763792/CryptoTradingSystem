@@ -383,6 +383,24 @@ def test_paper_order_keeps_fill_simulation_when_governance_allows(monkeypatch):
     assert metadata["governance_trace_id"] == "trace-paper-allow"
 
 
+def test_unknown_account_order_inherits_active_live_mode(monkeypatch):
+    manager = OrderManager()
+    manager.set_paper_trading(False)
+
+    request = OrderRequest(
+        symbol="BTC/USDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        amount=1.0,
+        price=100.0,
+        exchange="binance",
+        account_id="acct_A",
+    )
+
+    assert manager._resolve_request_mode(request) == "live"
+    assert manager._request_meta(request)["mode"] == "live"
+
+
 def test_paper_order_reuses_prechecked_governance_trace(monkeypatch):
     manager = OrderManager()
     manager.set_paper_trading(True)

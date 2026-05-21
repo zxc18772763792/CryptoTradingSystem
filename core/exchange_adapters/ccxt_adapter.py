@@ -25,9 +25,11 @@ def _to_dt_ms(ms: Any) -> Optional[datetime]:
         v = int(float(ms))
         if v <= 0:
             return None
-        if v > 10**12:  # micro/nano guard
-            v = v // 1000
-        return datetime.utcfromtimestamp(v / 1000.0 if v > 10**10 else v)
+        if v >= 10**17:
+            v = v // 1_000_000
+        elif v >= 10**14:
+            v = v // 1_000
+        return datetime.utcfromtimestamp(v / 1000.0 if v >= 10**11 else v)
     except Exception:
         return None
 

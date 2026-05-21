@@ -72,7 +72,7 @@ def _deflated_sharpe_ratio(
     # Sharpe adjusted for non-normality (skewness/kurtosis correction)
     sr = float(sharpe)
     n = max(int(n_obs), 2)
-    adj = 1.0 - skewness * sr + (kurtosis - 1.0) / 4.0 * sr ** 2
+    adj = 1.0 - skewness * sr + (kurtosis - 3.0) / 4.0 * sr ** 2
     adj = max(adj, 0.01)  # guard against negative
     adj_sr = sr * _math.sqrt(n - 1) / _math.sqrt(n) * _math.sqrt(adj)
 

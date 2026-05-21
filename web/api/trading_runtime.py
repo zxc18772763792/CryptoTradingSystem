@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from loguru import logger
 
 from core.audit import audit_logger
 from core.runtime import runtime_state
@@ -34,6 +35,33 @@ _TRADING_STATS_CACHE_TTL_SEC = 2.0
 _trading_stats_cache_payload = None
 _trading_stats_cache_at = 0.0
 _trading_stats_cache_lock: asyncio.Lock | None = None  # lazily created
+
+
+def _consume_audit_task_result(task) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        logger.warning(f"Background audit log task failed: {exc}")
+
+
+def _schedule_audit_log(**kwargs) -> None:
+    async def _run() -> None:
+        try:
+            await audit_logger.log(**kwargs)
+        except Exception as exc:
+            logger.warning(f"Background audit log failed: {exc}")
+
+    coro = _run()
+    try:
+        task = asyncio.create_task(coro)
+    except RuntimeError as exc:
+        coro.close()
+        logger.warning(f"Failed to schedule audit log: {exc}")
+        return
+    if hasattr(task, "add_done_callback"):
+        task.add_done_callback(_consume_audit_task_result)
 
 
 def _get_stats_lock() -> asyncio.Lock:
@@ -88,7 +116,7 @@ async def update_risk_params(request: RiskUpdateRequest):
     payload = request.model_dump(exclude_none=True)
     risk_manager.update_parameters(payload)
     invalidate_trading_stats_cache()
-    await audit_logger.log(
+    _schedule_audit_log(
         module="risk",
         action="update_params",
         status="success",
@@ -105,7 +133,7 @@ async def update_risk_params(request: RiskUpdateRequest):
 async def reset_risk_halt():
     risk_manager.reset_halt()
     invalidate_trading_stats_cache()
-    await audit_logger.log(
+    _schedule_audit_log(
         module="risk",
         action="reset_halt",
         status="success",
@@ -125,7 +153,7 @@ async def reset_paper_trading_state(clear_snapshots: bool = True):
     payload = await clear_local_runtime_service(clear_paper_snapshots=clear_snapshots)
     payload["cache_reset"] = runtime_state.clear_registered_caches(scope="paper")
     invalidate_trading_stats_cache()
-    await audit_logger.log(
+    _schedule_audit_log(
         module="trading",
         action="paper_reset",
         status="success",
@@ -196,7 +224,7 @@ async def confirm_trading_mode_switch(req: TradingModeConfirmRequest, request: R
         clear_paper_snapshots=True,
     )
     invalidate_trading_stats_cache()
-    await audit_logger.log(
+    _schedule_audit_log(
         module="trading",
         action="switch_mode",
         status="success",

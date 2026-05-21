@@ -107,6 +107,7 @@ class Settings(BaseSettings):
     MAX_POSITION_SIZE: float = 0.1
     MAX_DAILY_LOSS: float = 0.02
     MAX_OPEN_POSITIONS: int = 100
+    POSITION_HISTORY_LIMIT: int = 5000
     MIN_STRATEGY_ORDER_USD: float = 100.0
     DEFAULT_STRATEGY_ALLOCATION: float = 0.15
     STRATEGY_DEFAULT_STOP_LOSS_PCT: float = 0.03

@@ -335,6 +335,24 @@ def _min_importance() -> int:
     return max(0, min(100, _env_int("NEWS_LLM_MIN_IMPORTANCE", 35)))
 
 
+def _env_int_override(name: str) -> Optional[int]:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        return None
+
+
+def _positive_int(value: Any, default: int, minimum: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = int(default)
+    return max(int(minimum), parsed)
+
+
 def _has_local_gemma_backup(cfg: Optional[Dict[str, Any]] = None) -> bool:
     llm_cfg = (cfg or {}).get("llm") if isinstance(cfg, dict) else {}
     if not isinstance(llm_cfg, dict):
@@ -367,19 +385,27 @@ def _source_interval(source: str) -> int:
 def _worker_cfg(cfg: Dict[str, Any], limit: int) -> Dict[str, Any]:
     effective = dict(cfg or {})
     llm_cfg = dict(effective.get("llm") or {})
-    worker_timeout = max(8, _env_int("NEWS_LLM_WORKER_TIMEOUT_SEC", 16))
-    worker_connect_timeout = max(3, _env_int("NEWS_LLM_WORKER_CONNECT_TIMEOUT_SEC", 6))
+    timeout_override = _env_int_override("NEWS_LLM_WORKER_TIMEOUT_SEC")
+    connect_timeout_override = _env_int_override("NEWS_LLM_WORKER_CONNECT_TIMEOUT_SEC")
     has_local_gemma_backup = _has_local_gemma_backup(effective)
     default_batch_size = 1 if has_local_gemma_backup else 8
     worker_batch_size = max(1, min(int(limit or 1), _env_int("NEWS_LLM_WORKER_BATCH_SIZE", default_batch_size)))
     if has_local_gemma_backup:
         local_cap = max(1, _env_int("NEWS_LLM_LOCAL_BACKUP_BATCH_SIZE", 1))
         worker_batch_size = min(worker_batch_size, local_cap)
-    current_timeout = int(llm_cfg.get("timeout_sec") or worker_timeout)
-    current_connect_timeout = int(llm_cfg.get("connect_timeout_sec") or worker_connect_timeout)
+    current_timeout = _positive_int(llm_cfg.get("timeout_sec"), 45, 8)
+    current_connect_timeout = _positive_int(llm_cfg.get("connect_timeout_sec"), 10, 3)
     current_batch_size = int(llm_cfg.get("batch_size") or worker_batch_size)
-    llm_cfg["timeout_sec"] = min(current_timeout, worker_timeout)
-    llm_cfg["connect_timeout_sec"] = min(current_connect_timeout, worker_connect_timeout)
+    llm_cfg["timeout_sec"] = (
+        max(8, int(timeout_override))
+        if timeout_override is not None
+        else current_timeout
+    )
+    llm_cfg["connect_timeout_sec"] = (
+        max(3, int(connect_timeout_override))
+        if connect_timeout_override is not None
+        else current_connect_timeout
+    )
     llm_cfg["batch_size"] = min(current_batch_size, worker_batch_size)
     llm_cfg["disable_thinking"] = bool(llm_cfg.get("disable_thinking", True))
     effective["llm"] = llm_cfg
@@ -449,7 +475,7 @@ async def process_llm_batch(cfg: Dict[str, Any], limit: int = 8) -> Dict[str, An
 
 # Event queue for non-blocking news processing
 _llm_event_queue: Optional[asyncio.Queue] = None
-_event_processor_running = False
+_event_processor_task: Optional[asyncio.Task] = None
 
 
 def _ensure_event_queue() -> asyncio.Queue:
@@ -486,23 +512,20 @@ async def on_news_inserted(news_items: List[Dict[str, Any]]) -> None:
 
 async def _ensure_event_processor() -> None:
     """Ensure the background event processor is running."""
-    global _event_processor_running
-    if _event_processor_running:
+    global _event_processor_task
+    if _event_processor_task is not None and not _event_processor_task.done():
         return
 
-    _event_processor_running = True
-    asyncio.create_task(_event_processor_loop())
+    _event_processor_task = asyncio.create_task(_event_processor_loop(), name="news-llm-event-processor")
 
 
 async def _event_processor_loop() -> None:
     """Background loop to process queued news items with LLM."""
-    global _event_processor_running
+    global _event_processor_task
 
-    cfg = load_service_config()
     queue = _ensure_event_queue()
 
     batch: List[Dict[str, Any]] = []
-    batch_size = 8
     batch_timeout = 2.0  # Wait up to 2 seconds for batch to fill
 
     logger.info("LLM event processor started")
@@ -517,11 +540,12 @@ async def _event_processor_loop() -> None:
                 except asyncio.TimeoutError:
                     # Batch timeout, process current batch
                     if batch:
-                        await _process_event_batch(batch, cfg)
+                        await _process_event_batch(batch)
                         batch.clear()
                     continue
 
                 # Try to collect more items for batching
+                batch_size = max(1, _env_int("NEWS_LLM_EVENT_BATCH_SIZE", 8))
                 while len(batch) < batch_size:
                     try:
                         item = await asyncio.wait_for(queue.get(), timeout=0.1)
@@ -531,7 +555,7 @@ async def _event_processor_loop() -> None:
 
                 # Process the batch
                 if batch:
-                    await _process_event_batch(batch, cfg)
+                    await _process_event_batch(batch)
                     batch.clear()
 
             except Exception as e:
@@ -540,15 +564,23 @@ async def _event_processor_loop() -> None:
 
     finally:
         logger.info("LLM event processor stopped")
-        _event_processor_running = False
+        if _event_processor_task is asyncio.current_task():
+            _event_processor_task = None
 
 
-async def _process_event_batch(batch: List[Dict[str, Any]], cfg: Dict[str, Any]) -> None:
+async def _process_event_batch(batch: List[Dict[str, Any]]) -> None:
     """Process a batch of news items with LLM extraction (called from background event processor)."""
+    if not batch:
+        return
     try:
-        result = await _process_llm_task_batches(batch, cfg)
+        cfg = load_service_config()
+        queue_stats = await news_db.enqueue_llm_tasks(batch, min_importance=_min_importance())
+        limit = max(1, min(len(batch), _env_int("NEWS_LLM_EVENT_PROCESS_LIMIT", len(batch))))
+        result = await process_llm_batch(cfg, limit=limit)
         logger.debug(
             f"Event processor processed batch: {len(batch)} items, "
+            f"queued={int(queue_stats.get('queued_count') or 0)}, "
+            f"claimed={int(result.get('claimed') or 0)}, "
             f"{int(result.get('events_count') or 0)} events, llm_used={bool(result.get('llm_used'))}"
         )
     except Exception as e:
@@ -662,7 +694,7 @@ async def worker_loop(cfg: Dict[str, Any], *, once: bool = False, pull_enabled: 
         # Periodic LLM task polling (in addition to event-driven processing)
         if llm_enabled and now >= next_llm_due:
             try:
-                llm_stats = await process_llm_batch(cfg, limit=llm_batch)
+                llm_stats = await process_llm_batch(load_service_config(), limit=llm_batch)
                 if llm_stats.get("claimed"):
                     errors_count = len(llm_stats.get('errors') or [])
                     logger.info(f"llm worker claimed={llm_stats.get('claimed')} events={llm_stats.get('events_count')} errors={errors_count}")

@@ -92,18 +92,7 @@ class PnLDecomposer:
         pos = self.positions.get(symbol)
 
         if pos is None and not reduce_only:
-            # Open new position
-            position_side = "long" if side_lower == "buy" else "short"
-            lot = _PositionLot(qty=qty, price=price, timestamp=ts, fee=fee, slippage_cost=slippage_cost)
-            self.positions[symbol] = PositionLedger(
-                symbol=symbol,
-                side=position_side,
-                qty=qty,
-                entry_price=price,
-                opened_at=ts,
-                meta=dict(meta or {}),
-                _lots=[lot],
-            )
+            self._open_position(symbol, side_lower, qty, price, fee, slippage_cost, ts, meta)
             return
 
         if pos is None:
@@ -115,7 +104,9 @@ class PnLDecomposer:
                      (pos.side == "short" and side_lower == "buy")
 
         if is_closing:
-            self._apply_closing_fill(pos, symbol, qty, price, fee, slippage_cost, ts)
+            open_qty, open_fee, open_slippage = self._apply_closing_fill(pos, symbol, qty, price, fee, slippage_cost, ts)
+            if open_qty > 1e-12 and not reduce_only:
+                self._open_position(symbol, side_lower, open_qty, price, open_fee, open_slippage, ts, meta)
         else:
             # Adding to existing position
             lot = _PositionLot(qty=qty, price=price, timestamp=ts, fee=fee, slippage_cost=slippage_cost)
@@ -191,6 +182,29 @@ class PnLDecomposer:
 
     # ── internal helpers ─────────────────────────────────────────────────────
 
+    def _open_position(
+        self,
+        symbol: str,
+        side_lower: str,
+        qty: float,
+        price: float,
+        fee: float,
+        slippage_cost: float,
+        ts: datetime,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        position_side = "long" if side_lower == "buy" else "short"
+        lot = _PositionLot(qty=qty, price=price, timestamp=ts, fee=fee, slippage_cost=slippage_cost)
+        self.positions[symbol] = PositionLedger(
+            symbol=symbol,
+            side=position_side,
+            qty=qty,
+            entry_price=price,
+            opened_at=ts,
+            meta=dict(meta or {}),
+            _lots=[lot],
+        )
+
     def _apply_closing_fill(
         self,
         pos: PositionLedger,
@@ -200,15 +214,33 @@ class PnLDecomposer:
         fee: float,
         slippage_cost: float,
         ts: datetime,
-    ) -> None:
+    ) -> Tuple[float, float, float]:
         """FIFO lot matching for closing fills."""
+        open_qty = 0.0
+        open_fee = 0.0
+        open_slippage = 0.0
+        position_qty = sum(lot.qty for lot in pos._lots)
+        if qty_close > position_qty:
+            open_qty = qty_close - position_qty
+            close_ratio = position_qty / max(qty_close, 1e-12)
+            open_fee = fee * (1.0 - close_ratio)
+            open_slippage = slippage_cost * (1.0 - close_ratio)
+            fee *= close_ratio
+            slippage_cost *= close_ratio
+            qty_close = position_qty
+
         remaining = qty_close
         realized_gross = 0.0
         consumed_fee = 0.0
         consumed_slip = 0.0
+        archive_snapshot: Optional[Dict[str, Any]] = None
 
         # Distribute closing fee/slip proportionally across consumed qty
-        total_close_qty = min(qty_close, sum(lot.qty for lot in pos._lots))
+        total_close_qty = min(qty_close, position_qty)
+        if total_close_qty >= position_qty - 1e-12 and position_qty > 0:
+            pos.qty = position_qty
+            pos.entry_price = pos.avg_entry_price()
+            archive_snapshot = self.position_snapshot(symbol)
 
         while remaining > 1e-12 and pos._lots:
             lot = pos._lots[0]
@@ -237,10 +269,14 @@ class PnLDecomposer:
 
         if not pos._lots:
             # Position fully closed — archive and remove
-            record = self.position_snapshot(symbol) or {}
+            record = archive_snapshot or self.position_snapshot(symbol) or {}
+            record["realized"] = pos.realized.__dict__.copy()
+            record["unrealized_gross"] = 0.0
             record["closed_at"] = ts.isoformat()
             self._closed.append(record)
             del self.positions[symbol]
         else:
             pos.qty = sum(lot.qty for lot in pos._lots)
             pos.entry_price = pos.avg_entry_price()
+
+        return open_qty, open_fee, open_slippage

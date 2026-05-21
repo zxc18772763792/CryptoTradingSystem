@@ -2,13 +2,23 @@
 信号生成器模块
 提供信号过滤、组合和验证功能
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
 from loguru import logger
 
 from core.strategies.strategy_base import Signal, SignalType
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class SignalFilter:
@@ -45,8 +55,9 @@ class SignalFilter:
         recent = self._recent_signals.get(key, [])
 
         # 清理过期记录
-        cutoff = datetime.now() - timedelta(hours=1)
-        recent = [t for t in recent if t > cutoff]
+        now = _now_utc()
+        cutoff = now - timedelta(hours=1)
+        recent = [_as_utc(t) for t in recent if _as_utc(t) > cutoff]
         self._recent_signals[key] = recent
 
         # 检查频率限制
@@ -57,12 +68,12 @@ class SignalFilter:
         # 检查冷却时间
         if recent:
             last_time = max(recent)
-            if datetime.now() - last_time < timedelta(minutes=self.cooldown_minutes):
+            if now - last_time < timedelta(minutes=self.cooldown_minutes):
                 logger.debug(f"Signal filtered: cooldown period for {key}")
                 return False
 
         # 记录信号
-        self._recent_signals[key].append(signal.timestamp)
+        self._recent_signals[key].append(_as_utc(signal.timestamp))
         return True
 
 
@@ -115,12 +126,12 @@ class SignalCombiner:
             strength = 0.5
 
         # 使用最新信号的基础信息
-        latest = max(signals, key=lambda s: s.timestamp)
+        latest = max(signals, key=lambda s: _as_utc(s.timestamp))
         return Signal(
             symbol=latest.symbol,
             signal_type=signal_type,
             price=latest.price,
-            timestamp=datetime.now(),
+            timestamp=_now_utc(),
             strategy_name="combined",
             strength=strength,
         )
@@ -137,12 +148,12 @@ class SignalCombiner:
         else:
             signal_type = SignalType.HOLD
 
-        latest = max(signals, key=lambda s: s.timestamp)
+        latest = max(signals, key=lambda s: _as_utc(s.timestamp))
         return Signal(
             symbol=latest.symbol,
             signal_type=signal_type,
             price=latest.price,
-            timestamp=datetime.now(),
+            timestamp=_now_utc(),
             strategy_name="combined",
             strength=len(signals) / 10,  # 简单强度计算
         )
@@ -160,12 +171,12 @@ class SignalCombiner:
 
         signal_type = max(type_counts, key=type_counts.get)
 
-        latest = max(signals, key=lambda s: s.timestamp)
+        latest = max(signals, key=lambda s: _as_utc(s.timestamp))
         return Signal(
             symbol=latest.symbol,
             signal_type=signal_type,
             price=avg_price,
-            timestamp=datetime.now(),
+            timestamp=_now_utc(),
             strategy_name="combined",
             strength=avg_strength,
         )

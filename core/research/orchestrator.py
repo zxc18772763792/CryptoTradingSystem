@@ -233,13 +233,17 @@ def _recover_stale_jobs_on_startup(app: FastAPI) -> None:
     """D: On startup, fix proposals stuck in research_running/research_queued."""
     stale_states = {"research_running", "research_queued"}
     try:
+        recovery_reason = "service restart; research job did not complete"
         proposals = app.state.ai_proposal_registry.list(limit=None)
         for proposal in proposals:
             if str(proposal.status) not in stale_states:
                 continue
             old_status = str(proposal.status)
-            proposal.status = "rejected"  # type: ignore[assignment]
-            proposal.metadata["last_research_error"] = "service restart — job not completed"
+            proposal.status = "draft"  # type: ignore[assignment]
+            proposal.metadata["last_research_error"] = recovery_reason
+            proposal.metadata["research_recovery_reason"] = recovery_reason
+            proposal.metadata["recovered_from_status"] = old_status
+            proposal.metadata["recovered_at"] = _now_utc().isoformat()
             proposal.updated_at = _now_utc()
             app.state.ai_proposal_registry.save(proposal)
             record_lifecycle(
@@ -247,9 +251,9 @@ def _recover_stale_jobs_on_startup(app: FastAPI) -> None:
                 object_type="proposal",
                 object_id=proposal.proposal_id,
                 from_state=old_status,
-                to_state="rejected",
+                to_state="draft",
                 actor="system",
-                reason="service restart — stale job recovered",
+                reason=recovery_reason,
             )
         # Also mark stale experiment runs as failed
         runs = app.state.ai_experiment_run_registry.list(limit=None)
@@ -257,7 +261,7 @@ def _recover_stale_jobs_on_startup(app: FastAPI) -> None:
             if str(run.status) in {"running", "queued"}:
                 run.status = "failed"  # type: ignore[assignment]
                 run.finished_at = _now_utc()
-                run.error = "service restart — run not completed"
+                run.error = recovery_reason
                 app.state.ai_experiment_run_registry.save(run)
         # Mark stale in-flight jobs as failed in persisted job store
         for job_id, job in dict(getattr(app.state, "research_jobs", {}) or {}).items():
@@ -265,7 +269,8 @@ def _recover_stale_jobs_on_startup(app: FastAPI) -> None:
             if status in {"pending", "running"}:
                 job["status"] = "failed"
                 job["finished_at"] = _now_utc().isoformat()
-                job["error"] = "service restart — job not completed"
+                job["error"] = recovery_reason
+                job["recovery_reason"] = recovery_reason
                 app.state.research_jobs[str(job_id)] = job
         _persist_research_jobs(app)
     except Exception:
@@ -961,35 +966,40 @@ def _correlation_filter_candidates(
             )
             c.validation_summary.decision_trace = trace.to_dict()
 
-    curves: Dict[str, Optional[List[float]]] = {c.strategy: _get_curve(c) for c in candidates}
+    curves: Dict[str, Optional[List[float]]] = {str(c.candidate_id): _get_curve(c) for c in candidates}
     accepted: List[Dict[str, Any]] = []
     accepted_exact_keys: set[tuple[str, str, str, tuple[tuple[str, str], ...]]] = set()
-    existing_strategy_set = set()
+    accepted_exact_peers: Dict[tuple[str, str, str, tuple[tuple[str, str], ...]], str] = {}
+    existing_candidate_set = set()
 
     for exc in (existing_candidates or []):
         exact_key = (str(exc.strategy or ""), str(exc.symbol or ""), str(exc.timeframe or ""), _params_key(exc))
         if exact_key in accepted_exact_keys:
             continue
         accepted_exact_keys.add(exact_key)
+        accepted_exact_peers[exact_key] = str(exc.candidate_id)
         accepted.append(
             {
+                "candidate_id": exc.candidate_id,
                 "strategy": exc.strategy,
                 "curve": _get_curve(exc),
                 "signature": _signature(exc),
             }
         )
-        existing_strategy_set.add(exc.strategy)
+        existing_candidate_set.add(str(exc.candidate_id))
 
     for cand in candidates:
         strat = cand.strategy
-        my_curve = curves.get(strat)
+        cand_id = str(cand.candidate_id)
+        my_curve = curves.get(cand_id)
         my_signature = _signature(cand)
         my_exact_key = (str(cand.strategy or ""), str(cand.symbol or ""), str(cand.timeframe or ""), _params_key(cand))
 
         if my_exact_key in accepted_exact_keys:
-            cand.metadata["correlated_with"] = str(cand.strategy)
+            exact_peer = accepted_exact_peers.get(my_exact_key) or str(cand.candidate_id)
+            cand.metadata["correlated_with"] = exact_peer
             cand.metadata["correlation_value"] = 1.0
-            cand.metadata["correlation_is_cross_batch"] = True
+            cand.metadata["correlation_is_cross_batch"] = exact_peer in existing_candidate_set
             cand.metadata["duplicate_signature"] = True
             _reject(cand, "redundant candidate: identical strategy/timeframe/params already exists")
             continue
@@ -1001,9 +1011,9 @@ def _correlation_filter_candidates(
 
         if my_curve is not None:
             for accepted_item in accepted:
-                acc_strat = str(accepted_item.get("strategy") or "")
+                acc_id = str(accepted_item.get("candidate_id") or "")
                 peer_curve = accepted_item.get("curve")
-                if peer_curve is None or acc_strat == strat:
+                if peer_curve is None or acc_id == cand_id:
                     continue
                 n = min(len(my_curve), len(peer_curve))
                 x = np.array(my_curve[:n], dtype=float)
@@ -1013,14 +1023,14 @@ def _correlation_filter_candidates(
                 corr = abs(float(np.corrcoef(x, y)[0, 1]))
                 if corr > max_corr:
                     max_corr = corr
-                    corr_peer = acc_strat
+                    corr_peer = acc_id
                     corr_peer_signature = accepted_item.get("signature")
                     effective_threshold = min(corr_threshold, 0.72) if corr_peer_signature == my_signature else corr_threshold
 
         if my_curve is not None and max_corr >= effective_threshold and corr_peer is not None:
             cand.metadata["correlated_with"] = corr_peer
             cand.metadata["correlation_value"] = round(max_corr, 3)
-            cand.metadata["correlation_is_cross_batch"] = corr_peer in existing_strategy_set
+            cand.metadata["correlation_is_cross_batch"] = corr_peer in existing_candidate_set
             cand.metadata["duplicate_signature"] = corr_peer_signature == my_signature
             if corr_peer_signature == my_signature:
                 reason = f"redundant candidate: same family/signature and highly correlated with {corr_peer} (corr={max_corr:.2f})"
@@ -1030,12 +1040,14 @@ def _correlation_filter_candidates(
         else:
             accepted.append(
                 {
+                    "candidate_id": cand_id,
                     "strategy": strat,
                     "curve": my_curve,
                     "signature": my_signature,
                 }
             )
             accepted_exact_keys.add(my_exact_key)
+            accepted_exact_peers.setdefault(my_exact_key, cand_id)
 
 
 def _create_candidates_from_result(
@@ -1283,6 +1295,7 @@ async def _finalize_research_run(
         worthy = [c for c in candidates if
                   not c.metadata.get("correlation_filtered") and
                   c.promotion and c.promotion.decision != "reject"][:3]
+        tasks: List[asyncio.Task[None]] = []
         if worthy:
             _update_research_job_progress(
                 app,
@@ -1290,10 +1303,18 @@ async def _finalize_research_run(
                 phase="llm_rationale",
                 message=f"正在生成候选解释（{len(worthy)} 个）",
             )
-            results = await _asyncio.wait_for(
-                _asyncio.gather(*[_add_rationale(c) for c in worthy], return_exceptions=True),
-                timeout=30.0,
-            )
+            tasks = [_asyncio.create_task(_add_rationale(c), name=f"llm_rationale_{c.candidate_id}") for c in worthy]
+            try:
+                results = await _asyncio.wait_for(
+                    _asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await _asyncio.gather(*tasks, return_exceptions=True)
+                raise
             for idx, llm_result in enumerate(results):
                 if isinstance(llm_result, Exception):
                     logger.debug(
