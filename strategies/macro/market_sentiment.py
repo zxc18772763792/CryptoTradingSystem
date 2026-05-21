@@ -337,10 +337,8 @@ class SocialSentimentStrategy(StrategyBase):
         price_change_pct, last_price = await self._fetch_price_proxy(symbol)
         sentiment = self._score_sentiment(price_change_pct, trending_score)
 
-        mention_floor = int(self.params.get("min_mentions", 40))
-        effective_mentions = max(mentions, mention_floor if abs(sentiment) >= 0.25 else mentions)
         self.update_social_data(
-            mentions=effective_mentions,
+            mentions=mentions,
             sentiment_score=sentiment,
             trending_score=trending_score,
         )

@@ -52,6 +52,98 @@ class FactorStrategyBase(StrategyBase):
             metadata=metadata or {}
         )
 
+    @staticmethod
+    def _position_side(position: Any) -> str:
+        """Extract a normalized side string ('long'/'short'/'') from a position object."""
+        if position is None:
+            return ""
+        if isinstance(position, dict):
+            raw = position.get("side")
+        else:
+            raw = getattr(position, "side", None)
+        side = getattr(raw, "value", raw)
+        return str(side or "").lower()
+
+    def _oscillator_factor_exit(
+        self,
+        data: pd.DataFrame,
+        position: Any,
+        *,
+        current_value: float,
+        prev_value: float,
+        neutral_line: float,
+        close_reason: str,
+        extra_metadata: Optional[Dict[str, Any]] = None,
+        long_exit_when_crosses_below: bool = True,
+        short_exit_when_crosses_above: bool = True,
+        long_exit_when_crosses_above: bool = False,
+        short_exit_when_crosses_below: bool = False,
+    ) -> Optional[Signal]:
+        """Shared exit helper for oscillator-style factors.
+
+        For a LONG position, close when ``current_value`` crosses back DOWN
+        through ``neutral_line`` (``long_exit_when_crosses_below=True``).
+        For a SHORT position, close when ``current_value`` crosses back UP
+        through ``neutral_line``.
+
+        Edge case: if both prev and current are exactly on the line, no exit
+        (avoid spurious flat-line triggers from NaN/zero indicators).
+        """
+        if not np.isfinite([current_value, prev_value]).all():
+            return None
+        side = self._position_side(position)
+        if not side:
+            return None
+        current_price = float(data["close"].iloc[-1])
+        if not np.isfinite(current_price) or current_price <= 0:
+            return None
+
+        crossed_long = (
+            long_exit_when_crosses_below
+            and prev_value >= neutral_line > current_value
+        ) or (
+            long_exit_when_crosses_above
+            and prev_value <= neutral_line < current_value
+        )
+        crossed_short = (
+            short_exit_when_crosses_above
+            and prev_value <= neutral_line < current_value
+        ) or (
+            short_exit_when_crosses_below
+            and prev_value >= neutral_line > current_value
+        )
+        if not crossed_long and not crossed_short:
+            return None
+        if side == "long" and not crossed_long:
+            return None
+        if side == "short" and not crossed_short:
+            return None
+
+        symbol = str(
+            getattr(position, "symbol", None)
+            or (position.get("symbol") if isinstance(position, dict) else None)
+            or self._get_symbol(data)
+        )
+        metadata: Dict[str, Any] = {
+            "factor_current": float(current_value),
+            "factor_previous": float(prev_value),
+            "factor_neutral_line": float(neutral_line),
+            "close_only": True,
+            "close_reason": close_reason,
+        }
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        signal_type = SignalType.CLOSE_LONG if side == "long" else SignalType.CLOSE_SHORT
+        return Signal(
+            symbol=symbol,
+            signal_type=signal_type,
+            price=current_price,
+            timestamp=self._bar_time(data),
+            strategy_name=self.name,
+            strength=0.7,
+            metadata=metadata,
+        )
+
 
 # ============================================================
 # Momentum and Trend Strategies
@@ -118,6 +210,25 @@ class ROCStrategy(FactorStrategyBase):
             signals.append(signal)
 
         return signals
+
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when ROC crosses back through 0 (against position)."""
+        if data.empty or len(data) < self.params["period"] + 2:
+            return None
+        try:
+            n = self.params["period"]
+            close = data["close"]
+            roc = ((close - close.shift(n)) / close.shift(n) * 100)
+            return self._oscillator_factor_exit(
+                data, position,
+                current_value=float(roc.iloc[-1]),
+                prev_value=float(roc.iloc[-2]),
+                neutral_line=0.0,
+                close_reason="roc_reverse",
+                extra_metadata={"roc": float(roc.iloc[-1])},
+            )
+        except Exception:
+            return None
 
     def get_required_data(self) -> Dict[str, Any]:
         return {
@@ -190,6 +301,28 @@ class PriceAccelerationStrategy(FactorStrategyBase):
 
         return signals
 
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when acceleration crosses back through 0 (against position)."""
+        if data.empty or len(data) < self.params["slow"] * 2 + 5:
+            return None
+        try:
+            fast = self.params["fast"]
+            slow = self.params["slow"]
+            close = data["close"]
+            fast_mom = close.pct_change(fast)
+            slow_mom = close.pct_change(slow)
+            accel = (fast_mom - slow_mom) / slow_mom.abs().replace(0, np.nan)
+            return self._oscillator_factor_exit(
+                data, position,
+                current_value=float(accel.iloc[-1]),
+                prev_value=float(accel.iloc[-2]),
+                neutral_line=0.0,
+                close_reason="price_acceleration_reverse",
+                extra_metadata={"acceleration": float(accel.iloc[-1])},
+            )
+        except Exception:
+            return None
+
     def get_required_data(self) -> Dict[str, Any]:
         return {
             "type": "kline",
@@ -231,12 +364,12 @@ class AroonStrategy(FactorStrategyBase):
 
         # Vectorized Aroon calculation (only compute last 2 values needed for signal)
         window = n + 1
-        aroon_up_curr = float((n - np.argmax(high_arr[-window:])) / n * 100)
-        aroon_down_curr = float((n - np.argmin(low_arr[-window:])) / n * 100)
+        aroon_up_curr = float(np.argmax(high_arr[-window:]) / n * 100)
+        aroon_down_curr = float(np.argmin(low_arr[-window:]) / n * 100)
         aroon_curr = aroon_up_curr - aroon_down_curr
 
-        aroon_up_prev = float((n - np.argmax(high_arr[-window - 1:-1])) / n * 100)
-        aroon_down_prev = float((n - np.argmin(low_arr[-window - 1:-1])) / n * 100)
+        aroon_up_prev = float(np.argmax(high_arr[-window - 1:-1]) / n * 100)
+        aroon_down_prev = float(np.argmin(low_arr[-window - 1:-1]) / n * 100)
         aroon_prev = aroon_up_prev - aroon_down_prev
 
         current_aroon = aroon_curr
@@ -265,6 +398,30 @@ class AroonStrategy(FactorStrategyBase):
             signals.append(signal)
 
         return signals
+
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when Aroon (up - down) crosses back through 0 (neutral)."""
+        if data.empty or len(data) < self.params["period"] + 3:
+            return None
+        try:
+            n = self.params["period"]
+            window = n + 1
+            high_arr = data["high"].values
+            low_arr = data["low"].values
+            aroon_up_curr = float(np.argmax(high_arr[-window:]) / n * 100)
+            aroon_down_curr = float(np.argmin(low_arr[-window:]) / n * 100)
+            aroon_up_prev = float(np.argmax(high_arr[-window - 1:-1]) / n * 100)
+            aroon_down_prev = float(np.argmin(low_arr[-window - 1:-1]) / n * 100)
+            return self._oscillator_factor_exit(
+                data, position,
+                current_value=aroon_up_curr - aroon_down_curr,
+                prev_value=aroon_up_prev - aroon_down_prev,
+                neutral_line=0.0,
+                close_reason="aroon_neutral_cross",
+                extra_metadata={"aroon_up": aroon_up_curr, "aroon_down": aroon_down_curr},
+            )
+        except Exception:
+            return None
 
     def get_required_data(self) -> Dict[str, Any]:
         return {
@@ -496,6 +653,36 @@ class MFIStrategy(FactorStrategyBase):
 
         return signals
 
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when MFI crosses back through 50 (neutral zone)."""
+        if data.empty or len(data) < self.params["period"] + 2:
+            return None
+        try:
+            n = self.params["period"]
+            high = data["high"]; low = data["low"]; close = data["close"]; volume = data["volume"]
+            tp = (high + low + close) / 3
+            mf = tp * volume
+            pos_mf = mf.where(tp > tp.shift(1), 0)
+            neg_mf = mf.where(tp < tp.shift(1), 0)
+            pos_sum = pos_mf.rolling(n).sum()
+            neg_sum = neg_mf.rolling(n).sum()
+            mf_ratio = pos_sum / neg_sum.replace(0, np.nan)
+            mfi = 100 - (100 / (1 + mf_ratio))
+            return self._oscillator_factor_exit(
+                data, position,
+                current_value=float(mfi.iloc[-1]),
+                prev_value=float(mfi.iloc[-2]),
+                neutral_line=50.0,
+                close_reason="mfi_neutral_cross",
+                extra_metadata={"mfi": float(mfi.iloc[-1])},
+                long_exit_when_crosses_below=False,
+                short_exit_when_crosses_above=False,
+                long_exit_when_crosses_above=True,
+                short_exit_when_crosses_below=True,
+            )
+        except Exception:
+            return None
+
     def get_required_data(self) -> Dict[str, Any]:
         return {
             "type": "kline",
@@ -572,6 +759,33 @@ class VWAPStrategy(FactorStrategyBase):
 
         return signals
 
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when price returns to VWAP (deviation crosses back through 0)."""
+        if data.empty or len(data) < self.params["period"] + 1:
+            return None
+        try:
+            n = self.params["period"]
+            high = data["high"]; low = data["low"]; close = data["close"]; volume = data["volume"]
+            tp = (high + low + close) / 3
+            cum_tp_vol = (tp * volume).rolling(n).sum()
+            cum_vol = volume.rolling(n).sum()
+            vwap = cum_tp_vol / cum_vol.replace(0, np.nan)
+            deviation = (close - vwap) / vwap
+            return self._oscillator_factor_exit(
+                data, position,
+                current_value=float(deviation.iloc[-1]),
+                prev_value=float(deviation.iloc[-2]),
+                neutral_line=0.0,
+                close_reason="vwap_reversion_complete",
+                extra_metadata={"vwap_deviation": float(deviation.iloc[-1]), "vwap": float(vwap.iloc[-1])},
+                long_exit_when_crosses_below=False,
+                short_exit_when_crosses_above=False,
+                long_exit_when_crosses_above=True,
+                short_exit_when_crosses_below=True,
+            )
+        except Exception:
+            return None
+
     def get_required_data(self) -> Dict[str, Any]:
         return {
             "type": "kline",
@@ -647,6 +861,29 @@ class OBVStrategy(FactorStrategyBase):
             signals.append(signal)
 
         return signals
+
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when OBV Z-score crosses back through 0 (against position)."""
+        if data.empty or len(data) < self.params["smooth"] + 2:
+            return None
+        try:
+            n = self.params["smooth"]
+            close = data["close"]; volume = data["volume"]
+            direction = np.sign(close.diff())
+            obv = (direction * volume).cumsum()
+            obv_ma = obv.rolling(n).mean()
+            obv_std = obv.rolling(n).std().replace(0, np.nan)
+            obv_z = (obv - obv_ma) / obv_std
+            return self._oscillator_factor_exit(
+                data, position,
+                current_value=float(obv_z.iloc[-1]),
+                prev_value=float(obv_z.iloc[-2]),
+                neutral_line=0.0,
+                close_reason="obv_zscore_reverse",
+                extra_metadata={"obv_z": float(obv_z.iloc[-1])},
+            )
+        except Exception:
+            return None
 
     def get_required_data(self) -> Dict[str, Any]:
         return {
@@ -728,6 +965,29 @@ class OrderFlowImbalanceStrategy(FactorStrategyBase):
 
         return signals
 
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when OFI Z-score crosses back through 0 (imbalance neutralized)."""
+        if data.empty or len(data) < self.params["period"] * 2 + 2:
+            return None
+        try:
+            n = self.params["period"]
+            high = data["high"]; low = data["low"]; close = data["close"]; volume = data["volume"]
+            mid = (high + low) / 2
+            rng = (high - low).replace(0, np.nan)
+            imbalance = ((close - mid) / rng * volume).fillna(0)
+            cum_imbalance = imbalance.rolling(n).sum()
+            ofi_z = (cum_imbalance - cum_imbalance.rolling(n).mean()) / cum_imbalance.rolling(n).std().replace(0, np.nan)
+            return self._oscillator_factor_exit(
+                data, position,
+                current_value=float(ofi_z.iloc[-1]),
+                prev_value=float(ofi_z.iloc[-2]),
+                neutral_line=0.0,
+                close_reason="ofi_neutralized",
+                extra_metadata={"ofi_z": float(ofi_z.iloc[-1])},
+            )
+        except Exception:
+            return None
+
     def get_required_data(self) -> Dict[str, Any]:
         return {
             "type": "kline",
@@ -801,6 +1061,61 @@ class TradeIntensityStrategy(FactorStrategyBase):
             signals.append(signal)
 
         return signals
+
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when intensity ratio drops back to baseline (volume surge dissipated).
+
+        Trade-intensity entry triggers when intensity ≥ threshold for BOTH long and
+        short (direction is decided by price_change). Symmetrically, the exit is
+        direction-agnostic: whenever intensity falls below half-threshold the
+        momentum thesis is over, so both LONG and SHORT close.
+
+        We can't use the generic oscillator helper here because it treats LONG /
+        SHORT crossings asymmetrically; intensity decay is one-sided.
+        """
+        if data.empty or len(data) < self.params["slow"] + 1:
+            return None
+        try:
+            fast = self.params["fast"]; slow = self.params["slow"]
+            volume = data["volume"]
+            fast_vol = volume.rolling(fast).mean()
+            slow_vol = volume.rolling(slow).mean()
+            intensity = fast_vol / slow_vol.replace(0, np.nan) - 1
+            current = float(intensity.iloc[-1])
+            previous = float(intensity.iloc[-2])
+            current_price = float(data["close"].iloc[-1])
+        except Exception:
+            return None
+        if not np.isfinite([current, previous, current_price]).all():
+            return None
+        entry_threshold = self.params["intensity_threshold"] - 1
+        exit_line = entry_threshold * 0.5
+        # Trigger when intensity has crossed below the exit line.
+        if not (previous >= exit_line > current):
+            return None
+        side = self._position_side(position)
+        if side not in {"long", "short"}:
+            return None
+        symbol = str(
+            getattr(position, "symbol", None)
+            or (position.get("symbol") if isinstance(position, dict) else None)
+            or self._get_symbol(data)
+        )
+        signal_type = SignalType.CLOSE_LONG if side == "long" else SignalType.CLOSE_SHORT
+        return Signal(
+            symbol=symbol,
+            signal_type=signal_type,
+            price=current_price,
+            timestamp=self._bar_time(data),
+            strategy_name=self.name,
+            strength=0.7,
+            metadata={
+                "intensity": current,
+                "exit_line": exit_line,
+                "close_only": True,
+                "close_reason": "trade_intensity_decayed",
+            },
+        )
 
     def get_required_data(self) -> Dict[str, Any]:
         return {
@@ -878,6 +1193,58 @@ class MeanReversionHalfLifeStrategy(FactorStrategyBase):
 
         return signals
 
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit mean-reversion positions once z-score has reverted to exit band."""
+        if data.empty or len(data) < self.params["lookback"] + 2:
+            return None
+        try:
+            n = self.params["lookback"]
+            close = data["close"]
+            mean = close.rolling(n).mean()
+            std = close.rolling(n).std().replace(0, np.nan)
+            zscore = (close - mean) / std
+            current_z = float(zscore.iloc[-1])
+            exit_z = float(self.params["zscore_exit"])
+            current_price = float(close.iloc[-1])
+        except Exception:
+            return None
+        if not np.isfinite([current_z, exit_z, current_price]).all() or current_price <= 0:
+            return None
+
+        side = self._position_side(position)
+        if side == "long":
+            should_exit = current_z >= -exit_z
+            signal_type = SignalType.CLOSE_LONG
+            close_reason = "half_life_long_zscore_exit"
+        elif side == "short":
+            should_exit = current_z <= exit_z
+            signal_type = SignalType.CLOSE_SHORT
+            close_reason = "half_life_short_zscore_exit"
+        else:
+            return None
+        if not should_exit:
+            return None
+
+        symbol = str(
+            getattr(position, "symbol", None)
+            or (position.get("symbol") if isinstance(position, dict) else None)
+            or self._get_symbol(data)
+        )
+        return Signal(
+            symbol=symbol,
+            signal_type=signal_type,
+            price=current_price,
+            timestamp=self._bar_time(data),
+            strategy_name=self.name,
+            strength=0.7,
+            metadata={
+                "zscore": current_z,
+                "zscore_exit": exit_z,
+                "close_only": True,
+                "close_reason": close_reason,
+            },
+        )
+
     def get_required_data(self) -> Dict[str, Any]:
         return {
             "type": "kline",
@@ -950,21 +1317,21 @@ class HurstExponentStrategy(FactorStrategyBase):
         elif current_vr < self.params["mean_revert_threshold"]:
             if prev_z > self.params["zscore_threshold"] and current_z <= self.params["zscore_threshold"]:
                 signal = self._create_signal(
-                    symbol, SignalType.BUY, current_price,
-                    strength=0.7,
-                    metadata={"variance_ratio": current_vr, "regime": "mean_reverting"}
-                )
-                signal.stop_loss = current_price * (1 - self.params["stop_loss_pct"])
-                signal.take_profit = mean.iloc[-1]
-                signals.append(signal)
-
-            elif prev_z < -self.params["zscore_threshold"] and current_z >= -self.params["zscore_threshold"]:
-                signal = self._create_signal(
                     symbol, SignalType.SELL, current_price,
                     strength=0.7,
                     metadata={"variance_ratio": current_vr, "regime": "mean_reverting"}
                 )
                 signal.stop_loss = current_price * (1 + self.params["stop_loss_pct"])
+                signal.take_profit = mean.iloc[-1]
+                signals.append(signal)
+
+            elif prev_z < -self.params["zscore_threshold"] and current_z >= -self.params["zscore_threshold"]:
+                signal = self._create_signal(
+                    symbol, SignalType.BUY, current_price,
+                    strength=0.7,
+                    metadata={"variance_ratio": current_vr, "regime": "mean_reverting"}
+                )
+                signal.stop_loss = current_price * (1 - self.params["stop_loss_pct"])
                 signal.take_profit = mean.iloc[-1]
                 signals.append(signal)
 
@@ -1023,7 +1390,7 @@ class VaRBreakoutStrategy(FactorStrategyBase):
         var = returns.rolling(n).apply(calc_var, raw=False)
 
         current_ret = float(returns.iloc[-1])
-        current_var = float(var.iloc[-1])
+        current_var = float(var.iloc[-2])
         var_threshold = abs(current_var) * float(self.params["multiplier"])
 
         # Breakout: return exceeds VaR significantly
@@ -1286,6 +1653,31 @@ class WilliamsRStrategy(FactorStrategyBase):
 
         return signals
 
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when Williams %R crosses back through the mid-zone (-50)."""
+        if data.empty or len(data) < self.params["period"] + 1:
+            return None
+        try:
+            n = self.params["period"]
+            high = data["high"]; low = data["low"]; close = data["close"]
+            highest = high.rolling(n).max()
+            lowest = low.rolling(n).min()
+            wr = (highest - close) / (highest - lowest).replace(0, np.nan) * -100
+            return self._oscillator_factor_exit(
+                data, position,
+                current_value=float(wr.iloc[-1]),
+                prev_value=float(wr.iloc[-2]),
+                neutral_line=-50.0,
+                close_reason="williams_r_neutral_cross",
+                extra_metadata={"williams_r": float(wr.iloc[-1])},
+                long_exit_when_crosses_below=False,
+                short_exit_when_crosses_above=False,
+                long_exit_when_crosses_above=True,
+                short_exit_when_crosses_below=True,
+            )
+        except Exception:
+            return None
+
     def get_required_data(self) -> Dict[str, Any]:
         return {
             "type": "kline",
@@ -1359,6 +1751,33 @@ class CCIStrategy(FactorStrategyBase):
             signals.append(signal)
 
         return signals
+
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when CCI crosses back through 0 (mean-reverted)."""
+        if data.empty or len(data) < self.params["period"] + 1:
+            return None
+        try:
+            n = self.params["period"]
+            constant = self.params["constant"]
+            high = data["high"]; low = data["low"]; close = data["close"]
+            tp = (high + low + close) / 3
+            sma = tp.rolling(n).mean()
+            mad = tp.rolling(n).apply(lambda x: np.abs(x - x.mean()).mean())
+            cci = (tp - sma) / (constant * mad.replace(0, np.nan))
+            return self._oscillator_factor_exit(
+                data, position,
+                current_value=float(cci.iloc[-1]),
+                prev_value=float(cci.iloc[-2]),
+                neutral_line=0.0,
+                close_reason="cci_mean_reversion",
+                extra_metadata={"cci": float(cci.iloc[-1])},
+                long_exit_when_crosses_below=False,
+                short_exit_when_crosses_above=False,
+                long_exit_when_crosses_above=True,
+                short_exit_when_crosses_below=True,
+            )
+        except Exception:
+            return None
 
     def get_required_data(self) -> Dict[str, Any]:
         return {
@@ -1442,6 +1861,38 @@ class StochRSIStrategy(FactorStrategyBase):
             signals.append(signal)
 
         return signals
+
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when StochRSI crosses back through 50 (neutral)."""
+        if data.empty or len(data) < self.params["rsi_period"] + self.params["stoch_period"] + 5:
+            return None
+        try:
+            rsi_n = self.params["rsi_period"]; stoch_n = self.params["stoch_period"]
+            close = data["close"]
+            delta = close.diff()
+            gain = delta.where(delta > 0, 0)
+            loss = (-delta).where(delta < 0, 0)
+            avg_gain = gain.rolling(rsi_n).mean()
+            avg_loss = loss.rolling(rsi_n).mean()
+            rs = avg_gain / avg_loss.replace(0, np.nan)
+            rsi = 100 - (100 / (1 + rs))
+            rsi_min = rsi.rolling(stoch_n).min()
+            rsi_max = rsi.rolling(stoch_n).max()
+            stoch_rsi = (rsi - rsi_min) / (rsi_max - rsi_min).replace(0, np.nan) * 100
+            return self._oscillator_factor_exit(
+                data, position,
+                current_value=float(stoch_rsi.iloc[-1]),
+                prev_value=float(stoch_rsi.iloc[-2]),
+                neutral_line=50.0,
+                close_reason="stoch_rsi_neutral_cross",
+                extra_metadata={"stoch_rsi": float(stoch_rsi.iloc[-1])},
+                long_exit_when_crosses_below=False,
+                short_exit_when_crosses_above=False,
+                long_exit_when_crosses_above=True,
+                short_exit_when_crosses_below=True,
+            )
+        except Exception:
+            return None
 
     def get_required_data(self) -> Dict[str, Any]:
         return {

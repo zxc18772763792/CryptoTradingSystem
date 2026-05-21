@@ -408,6 +408,9 @@ class OrderManager:
             params = dict(request.params or {})
             requested_leverage = self._normalize_leverage(params.get("leverage", 1.0), default=1)
             params["leverage"] = float(requested_leverage)
+            post_only = bool(params.get("post_only") or params.get("postOnly"))
+            if post_only:
+                params["postOnly"] = True
             order_price = request.price
             if request.order_type == OrderType.MARKET:
                 order_price = None
@@ -504,7 +507,7 @@ class OrderManager:
                     }
                     if order_price is not None and request.order_type == OrderType.LIMIT:
                         raw_payload["price"] = _fmt("price_to_precision", float(order_price))
-                        raw_payload["timeInForce"] = "GTC"
+                        raw_payload["timeInForce"] = "GTX" if post_only else "GTC"
                     if request.reduce_only:
                         raw_payload["reduceOnly"] = "true"
                     raw_order = await binance_signed_request(

@@ -46,6 +46,22 @@ def test_backtest_pairs_dual_leg_ui_hooks_exist():
     assert "window.registerOptimizeTrialByRank=registerOptimizeTrialByRank" in app_js
 
 
+def test_backtest_chart_uses_shanghai_axis_for_trade_points():
+    app_js = _read("web/static/js/app.js")
+    section = app_js.split("function renderBacktest(r){", 1)[1].split(
+        "function getBacktestStrategyCatalogFromSelect()", 1
+    )[0]
+
+    assert "const timestampMs=toMs(i.timestamp)" in section
+    assert "const timestampMs=toMs(p?.timestamp)" in section
+    assert "timestamp:klineShanghaiAxisIso(timestampMs)" in section
+    assert "timestamp:toDate(i.timestamp)" not in section
+    assert "timestamp:toDate(p?.timestamp)" not in section
+    assert "const priceByTimestamp=new Map(rows.map(i=>[i.timestamp,i.close]));" in section
+    assert "price:Number.isFinite(linePrice)?linePrice:executionPrice" in section
+    assert "执行价: %{customdata:.6f}" in section
+
+
 def test_dashboard_mode_ui_uses_runtime_mode_snapshot():
     app_js = _read("web/static/js/app.js")
 

@@ -1,4 +1,3 @@
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -6,6 +5,20 @@ import pandas as pd
 from loguru import logger
 
 from core.strategies.strategy_base import Signal, SignalType, StrategyBase
+
+
+def _calculate_rsi_from_close(close: pd.Series, period: int) -> pd.Series:
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    rsi = rsi.mask((avg_gain == 0) & (avg_loss > 0), 0.0)
+    rsi = rsi.mask((avg_gain == 0) & (avg_loss == 0), 50.0)
+    return rsi
 
 
 class RSIStrategy(StrategyBase):
@@ -18,8 +31,9 @@ class RSIStrategy(StrategyBase):
             "period": 14,
             "oversold": 30,
             "overbought": 70,
-            "exit_oversold": 40,
-            "exit_overbought": 60,
+            "exit_oversold": 80,
+            "exit_overbought": 20,
+            "exit_min_profit_pct": 0.002,
             "stop_loss_pct": 0.02,
             "take_profit_pct": 0.05,
         }
@@ -29,13 +43,7 @@ class RSIStrategy(StrategyBase):
         self._regime_bias: Dict[str, int] = {}
 
     def _calculate_rsi(self, data: pd.DataFrame, period: int) -> pd.Series:
-        delta = data["close"].diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = (-delta).where(delta < 0, 0.0)
-        avg_gain = gain.rolling(period).mean()
-        avg_loss = loss.rolling(period).mean()
-        rs = avg_gain / avg_loss.replace(0, np.nan)
-        return 100 - (100 / (1 + rs))
+        return _calculate_rsi_from_close(data["close"], period)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         if data.empty or len(data) < int(self.params["period"]) + 5:
@@ -50,8 +58,7 @@ class RSIStrategy(StrategyBase):
 
         oversold = float(self.params["oversold"])
         overbought = float(self.params["overbought"])
-        exit_oversold = float(self.params.get("exit_oversold", 40))
-        exit_overbought = float(self.params.get("exit_overbought", 60))
+        # NOTE: exit_oversold / exit_overbought are read by check_exit, not here.
         signals: List[Signal] = []
 
         if prev_rsi < oversold <= current_rsi:
@@ -88,44 +95,88 @@ class RSIStrategy(StrategyBase):
                 )
             )
             logger.info(f"RSI overbought decline for {symbol}: RSI={current_rsi:.2f}")
-        elif int(self._regime_bias.get(symbol, 0) or 0) > 0 and prev_rsi < exit_oversold <= current_rsi:
-            signals.append(
-                Signal(
-                    symbol=symbol,
-                    signal_type=SignalType.CLOSE_LONG,
-                    price=current_price,
-                    timestamp=timestamp,
-                    strategy_name=self.name,
-                    strength=0.6,
-                    metadata={
-                        "rsi": current_rsi,
-                        "exit_threshold": exit_oversold,
-                        "reason": "rsi_long_exit",
-                    },
-                )
-            )
-            self._regime_bias.pop(symbol, None)
-            logger.info(f"RSI long exit for {symbol}: RSI={current_rsi:.2f}")
-        elif int(self._regime_bias.get(symbol, 0) or 0) < 0 and prev_rsi > exit_overbought >= current_rsi:
-            signals.append(
-                Signal(
-                    symbol=symbol,
-                    signal_type=SignalType.CLOSE_SHORT,
-                    price=current_price,
-                    timestamp=timestamp,
-                    strategy_name=self.name,
-                    strength=0.6,
-                    metadata={
-                        "rsi": current_rsi,
-                        "exit_threshold": exit_overbought,
-                        "reason": "rsi_short_exit",
-                    },
-                )
-            )
-            self._regime_bias.pop(symbol, None)
-            logger.info(f"RSI short exit for {symbol}: RSI={current_rsi:.2f}")
 
         return signals
+
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when RSI returns through a stricter neutral band with profit.
+
+        Refactored from the old inline exit branch in ``generate_signals`` so that
+        position-driven exits run through the unified ``check_exit`` channel —
+        this lets the framework's Tier 2/3 lifecycle reason about exits without
+        depending on a stale per-symbol ``_regime_bias`` cache (which was lost
+        across restarts and reseeds and went out of sync with the actual
+        positions tracked by ``position_manager``).
+        """
+        if data.empty or len(data) < int(self.params["period"]) + 5:
+            return None
+        try:
+            rsi = self._calculate_rsi(data, int(self.params["period"]))
+            current_rsi = float(rsi.iloc[-1])
+            prev_rsi = float(rsi.iloc[-2])
+            current_price = float(data["close"].iloc[-1])
+        except Exception:
+            return None
+        if not np.isfinite([current_rsi, prev_rsi, current_price]).all():
+            return None
+
+        exit_oversold = float(self.params.get("exit_oversold", 80))
+        exit_overbought = float(self.params.get("exit_overbought", 20))
+        min_profit_pct = max(0.0, float(self.params.get("exit_min_profit_pct", 0.002) or 0.0))
+        if isinstance(position, dict):
+            raw_side = position.get("side")
+            symbol = str(position.get("symbol") or (data["symbol"].iloc[-1] if "symbol" in data else "UNKNOWN"))
+            entry_price = float(position.get("entry_price") or 0.0)
+        else:
+            raw_side = getattr(position, "side", None)
+            symbol = str(getattr(position, "symbol", None) or (data["symbol"].iloc[-1] if "symbol" in data else "UNKNOWN"))
+            entry_price = float(getattr(position, "entry_price", 0.0) or 0.0)
+        side = str(getattr(raw_side, "value", raw_side) or "").lower()
+        timestamp = self._bar_time(data)
+        if entry_price <= 0:
+            return None
+
+        if side == "long" and prev_rsi < exit_oversold <= current_rsi:
+            pnl_pct = (current_price - entry_price) / entry_price
+            if pnl_pct < min_profit_pct:
+                return None
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.CLOSE_LONG,
+                price=current_price,
+                timestamp=timestamp,
+                strategy_name=self.name,
+                strength=0.6,
+                metadata={
+                    "rsi": current_rsi,
+                    "exit_threshold": exit_oversold,
+                    "exit_min_profit_pct": min_profit_pct,
+                    "pnl_pct": pnl_pct,
+                    "close_only": True,
+                    "close_reason": "rsi_long_exit",
+                },
+            )
+        if side == "short" and prev_rsi > exit_overbought >= current_rsi:
+            pnl_pct = (entry_price - current_price) / entry_price
+            if pnl_pct < min_profit_pct:
+                return None
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.CLOSE_SHORT,
+                price=current_price,
+                timestamp=timestamp,
+                strategy_name=self.name,
+                strength=0.6,
+                metadata={
+                    "rsi": current_rsi,
+                    "exit_threshold": exit_overbought,
+                    "exit_min_profit_pct": min_profit_pct,
+                    "pnl_pct": pnl_pct,
+                    "close_only": True,
+                    "close_reason": "rsi_short_exit",
+                },
+            )
+        return None
 
     def get_required_data(self) -> Dict[str, Any]:
         return {
@@ -152,13 +203,31 @@ class RSIDivergenceStrategy(StrategyBase):
         super().__init__(name, default_params)
 
     def _calculate_rsi(self, data: pd.DataFrame, period: int) -> pd.Series:
-        delta = data["close"].diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = (-delta).where(delta < 0, 0.0)
-        avg_gain = gain.rolling(period).mean()
-        avg_loss = loss.rolling(period).mean()
-        rs = avg_gain / avg_loss.replace(0, np.nan)
-        return 100 - (100 / (1 + rs))
+        return _calculate_rsi_from_close(data["close"], period)
+
+    @staticmethod
+    def _paired_extrema(
+        values: pd.Series,
+        value_extrema: pd.Series,
+        rsi: pd.Series,
+        rsi_extrema: pd.Series,
+        max_distance: int,
+    ) -> List[tuple[int, float, float]]:
+        value_positions = np.flatnonzero(value_extrema.to_numpy(dtype=bool))
+        rsi_positions = np.flatnonzero(rsi_extrema.to_numpy(dtype=bool))
+        pairs: List[tuple[int, float, float]] = []
+        used_rsi: set[int] = set()
+        for pos in value_positions:
+            candidates = [rpos for rpos in rsi_positions if rpos not in used_rsi and abs(rpos - pos) <= max_distance]
+            if not candidates:
+                continue
+            rsi_pos = min(candidates, key=lambda rpos: (abs(rpos - pos), rpos))
+            value_at_pos = float(values.iloc[pos])
+            rsi_at_pos = float(rsi.iloc[rsi_pos])
+            if np.isfinite([value_at_pos, rsi_at_pos]).all():
+                pairs.append((pos, value_at_pos, rsi_at_pos))
+                used_rsi.add(rsi_pos)
+        return pairs
 
     @staticmethod
     def _find_peaks(series: pd.Series, order: int = 5) -> pd.Series:
@@ -205,11 +274,16 @@ class RSIDivergenceStrategy(StrategyBase):
         signals: List[Signal] = []
         min_div = float(self.params["min_divergence"])
 
-        recent_troughs = data["close"][price_troughs].tail(2)
-        recent_rsi_troughs = rsi[rsi_troughs].tail(2)
-        if len(recent_troughs) >= 2 and len(recent_rsi_troughs) >= 2:
-            price_trend = (float(recent_troughs.iloc[-1]) - float(recent_troughs.iloc[-2])) / max(float(recent_troughs.iloc[-2]), 1e-9)
-            rsi_trend = float(recent_rsi_troughs.iloc[-1]) - float(recent_rsi_troughs.iloc[-2])
+        max_pair_distance = int(self.params.get("extrema_pair_max_distance", max(1, order)))
+        trough_pairs = self._paired_extrema(
+            data["close"], price_troughs, rsi, rsi_troughs, max_pair_distance
+        )
+        recent_trough_pairs = [pair for pair in trough_pairs if pair[0] >= len(data) - lookback][-2:]
+        if len(recent_trough_pairs) >= 2:
+            _, prev_price, prev_rsi = recent_trough_pairs[-2]
+            _, latest_price, latest_rsi = recent_trough_pairs[-1]
+            price_trend = (latest_price - prev_price) / max(prev_price, 1e-9)
+            rsi_trend = latest_rsi - prev_rsi
             if price_trend < -min_div and rsi_trend > 0:
                 signals.append(
                     Signal(
@@ -225,11 +299,15 @@ class RSIDivergenceStrategy(StrategyBase):
                     )
                 )
 
-        recent_peaks = data["close"][price_peaks].tail(2)
-        recent_rsi_peaks = rsi[rsi_peaks].tail(2)
-        if len(recent_peaks) >= 2 and len(recent_rsi_peaks) >= 2:
-            price_trend = (float(recent_peaks.iloc[-1]) - float(recent_peaks.iloc[-2])) / max(float(recent_peaks.iloc[-2]), 1e-9)
-            rsi_trend = float(recent_rsi_peaks.iloc[-1]) - float(recent_rsi_peaks.iloc[-2])
+        peak_pairs = self._paired_extrema(
+            data["close"], price_peaks, rsi, rsi_peaks, max_pair_distance
+        )
+        recent_peak_pairs = [pair for pair in peak_pairs if pair[0] >= len(data) - lookback][-2:]
+        if len(recent_peak_pairs) >= 2:
+            _, prev_price, prev_rsi = recent_peak_pairs[-2]
+            _, latest_price, latest_rsi = recent_peak_pairs[-1]
+            price_trend = (latest_price - prev_price) / max(prev_price, 1e-9)
+            rsi_trend = latest_rsi - prev_rsi
             if price_trend > min_div and rsi_trend < 0:
                 signals.append(
                     Signal(

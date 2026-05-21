@@ -167,6 +167,79 @@ def test_execute_signal_respects_ai_live_decision_block(monkeypatch):
     assert int(engine.get_signal_diagnostics().get("ai_rejected") or 0) == 1
 
 
+def test_execute_signal_revalidates_protection_levels_against_fill_price(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+
+    signal = _make_signal(signal_type=SignalType.BUY)
+    signal.stop_loss = 98.0
+    signal.take_profit = 101.0
+    signal.metadata["take_profit_pct"] = 0.06
+    ensure_entry_prices = []
+    opened_positions = []
+    trade_records = []
+
+    real_ensure = engine._ensure_signal_protection_levels
+
+    def _ensure_signal_protection_levels(**kwargs):
+        ensure_entry_prices.append(float(kwargs["entry_price"]))
+        return real_ensure(**kwargs)
+
+    async def _create_order(request):
+        return SimpleNamespace(
+            id="fill-revalidate-1",
+            price=102.0,
+            amount=request.amount,
+            filled=request.amount,
+            status=OrderStatus.CLOSED,
+        )
+
+    monkeypatch.setattr(execution_engine_module.account_manager, "resolve_exchange", lambda account_id, exchange: "binance")
+    monkeypatch.setattr(
+        engine,
+        "_resolve_strategy_trade_policy",
+        lambda strategy_name, exchange: {
+            "allow_long": True,
+            "allow_short": True,
+            "stop_loss_pct": 0.02,
+            "take_profit_pct": 0.04,
+        },
+    )
+    monkeypatch.setattr(execution_engine_module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(execution_engine_module.position_manager, "open_position", lambda **kwargs: opened_positions.append(kwargs))
+    monkeypatch.setattr(engine, "_get_account_equity", AsyncMock(return_value=10000.0))
+    monkeypatch.setattr(execution_engine_module.strategy_manager, "get_strategy_allocation", lambda name: 0.1)
+    monkeypatch.setattr(engine, "_calculate_quantity", AsyncMock(return_value=1.0))
+    monkeypatch.setattr(engine, "_resolve_order_context", AsyncMock(return_value=(100.0, 100.0)))
+    monkeypatch.setattr(engine, "_ensure_signal_protection_levels", _ensure_signal_protection_levels)
+    monkeypatch.setattr(engine, "_evaluate_coinglass_strategy_filter", AsyncMock(return_value={"action": "allow"}))
+    monkeypatch.setattr(engine, "_evaluate_live_ai_decision", AsyncMock(return_value={"action": "allow", "applied": True}))
+    monkeypatch.setattr(
+        execution_engine_module.decision_engine,
+        "evaluate_order_intent",
+        AsyncMock(return_value=SimpleNamespace(allowed=True, reason="", trace_id="trace-fill-revalidate")),
+    )
+    monkeypatch.setattr(execution_engine_module.risk_manager, "pre_trade_check", lambda **kwargs: True)
+    monkeypatch.setattr(execution_engine_module.risk_manager, "record_trade", lambda payload: trade_records.append(payload))
+    monkeypatch.setattr(execution_engine_module.order_manager, "create_order", AsyncMock(side_effect=_create_order))
+    monkeypatch.setattr(
+        engine,
+        "_resolve_execution_costs",
+        AsyncMock(return_value={"fee_usd": 0.0, "slippage_cost_usd": 0.0, "cost_usd": 0.0}),
+    )
+    monkeypatch.setattr(engine, "_record_live_strategy_trade", AsyncMock(return_value=None))
+    monkeypatch.setattr(engine, "_notify_callbacks", AsyncMock(return_value=None))
+    monkeypatch.setattr(execution_engine_module, "write_audit", AsyncMock(return_value=None))
+
+    result = asyncio.run(engine.execute_signal(signal))
+
+    assert result is not None
+    assert ensure_entry_prices == [100.0, 102.0]
+    assert result["signal"]["take_profit"] == pytest.approx(108.12)
+    assert opened_positions[0]["take_profit"] == pytest.approx(108.12)
+    assert trade_records[-1]["take_profit"] == pytest.approx(108.12)
+
+
 def test_execute_signal_rejects_same_direction_when_ai_enforces_reduce_only(monkeypatch):
     engine = ExecutionEngine()
     engine._paper_trading = False

@@ -107,6 +107,70 @@ def test_record_live_strategy_trade_persists_journal_and_counts(tmp_path: Path, 
     assert summary["summary"]["dominant_symbol"] == "BTC/USDT"
 
 
+def test_record_live_strategy_close_persists_exit_audit_fields(tmp_path: Path, monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+    engine._live_review_root = tmp_path
+    engine._live_trade_journal_path = tmp_path / "strategy_trade_journal.jsonl"
+    engine._live_trade_counts_path = tmp_path / "strategy_trade_counts.json"
+    engine._live_strategy_trade_counts = {}
+    monkeypatch.setattr(execution_engine_module.audit_logger, "log", AsyncMock(return_value=None))
+
+    signal = Signal(
+        symbol="BTC/USDT",
+        signal_type=SignalType.CLOSE_LONG,
+        price=105.0,
+        timestamp=datetime.now(timezone.utc),
+        strategy_name="exit_audit",
+        strength=0.8,
+        metadata={
+            "account_id": "main",
+            "exchange": "binance",
+            "close_reason": "bollinger_middle_reversion",
+        },
+    )
+
+    asyncio.run(
+        engine._record_live_strategy_trade(
+            signal=signal,
+            exchange="binance",
+            account_id="main",
+            side="sell",
+            quantity=0.2,
+            fill_price=105.0,
+            order_id="market-close-1",
+            order_status="filled",
+            pnl=0.9,
+            gross_pnl_usd=1.0,
+            net_pnl_usd=0.9,
+            fee_usd=0.05,
+            slippage_cost_usd=0.05,
+            action="close",
+            cost_details={
+                "fee_source": "exchange_trades",
+                "slippage_source": "fill_vs_reference",
+                "slippage_bps": 1.25,
+                "close_order_mode": "market_fallback",
+                "limit_first_order_id": "limit-close-1",
+                "fallback_from_order_id": "limit-close-1",
+            },
+        )
+    )
+
+    [row] = [
+        json.loads(x)
+        for x in engine._live_trade_journal_path.read_text(encoding="utf-8").splitlines()
+        if x.strip()
+    ]
+    assert row["action"] == "close"
+    assert row["close_reason"] == "bollinger_middle_reversion"
+    assert row["close_order_mode"] == "market_fallback"
+    assert row["limit_first_order_id"] == "limit-close-1"
+    assert row["fallback_from_order_id"] == "limit-close-1"
+    assert row["slippage_bps"] == pytest.approx(1.25)
+    assert row["signal"]["metadata"]["close_reason"] == "bollinger_middle_reversion"
+
+
 def test_record_live_strategy_trade_skips_when_paper_mode(tmp_path: Path, monkeypatch):
     engine = ExecutionEngine()
     engine._paper_trading = True

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import pandas as pd
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from core.strategies.strategy_base import StrategyBase
+from core.strategies.strategy_base import Signal, SignalType, StrategyBase
 from core.strategies.strategy_manager import StrategyManager
 from core.trading.account_manager import AccountManager, TradingAccount, account_manager
 from core.trading.order_manager import OrderManager, OrderRequest
@@ -19,6 +20,18 @@ class _NoopStrategy(StrategyBase):
 
     def get_required_data(self):
         return {"type": "kline", "columns": ["close"], "min_length": 1}
+
+
+class _ExitStrategy(_NoopStrategy):
+    def check_exit(self, data, position):
+        return Signal(
+            symbol=position.symbol,
+            signal_type=SignalType.CLOSE_LONG,
+            price=float(data["close"].iloc[-1]),
+            timestamp=data.index[-1].to_pydatetime(),
+            strategy_name=self.name,
+            metadata={"close_only": True, "close_reason": "unit_exit"},
+        )
 
 
 def test_strategy_manager_keeps_strategy_runtime_mode_isolated(monkeypatch):
@@ -78,6 +91,37 @@ def test_strategy_manager_keeps_strategy_runtime_mode_isolated(monkeypatch):
     assert set(manager.get_all_strategies("paper").keys()) == {"paper_alpha"}
     assert set(manager.get_all_strategies("live").keys()) == {"live_beta"}
     assert accounts[manager.get_strategy_runtime("live_beta")["account_id"]]["mode"] == "live"
+
+
+def test_collect_exit_signals_uses_strategy_runtime_scope(monkeypatch):
+    manager = StrategyManager()
+    strategy = _ExitStrategy("live_exit")
+    manager._strategies["live_exit"] = strategy
+    manager._configs["live_exit"] = SimpleNamespace(
+        params={"runtime_mode": "live", "account_id": "strategy_live_exit"},
+        metadata={"runtime_mode": "live"},
+    )
+
+    calls = []
+    live_position = SimpleNamespace(symbol="BTC/USDT", strategy="live_exit", side="long", entry_price=100.0)
+
+    def _positions_for_strategy(name, runtime_mode=None):
+        calls.append((name, runtime_mode))
+        return [live_position] if runtime_mode == "live" else []
+
+    monkeypatch.setattr(manager, "_positions_for_strategy", _positions_for_strategy)
+    monkeypatch.setattr(manager, "get_strategy_runtime_mode", lambda name: "live")
+
+    df = pd.DataFrame(
+        {"close": [100.0, 102.0], "symbol": ["BTC/USDT", "BTC/USDT"]},
+        index=pd.date_range("2026-01-01", periods=2, freq="h", tz="UTC"),
+    )
+
+    signals = asyncio.run(manager._collect_exit_signals("live_exit", strategy, df))
+
+    assert calls == [("live_exit", "live")]
+    assert len(signals) == 1
+    assert signals[0].signal_type == SignalType.CLOSE_LONG
 
 
 def test_order_manager_routes_orders_by_account_mode(monkeypatch):

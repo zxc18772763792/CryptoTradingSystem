@@ -138,17 +138,26 @@ class DEXArbitrageStrategy(StrategyBase):
     ) -> List[Signal]:
         """异步生成交易信号"""
         signals = []
+        if not self._dex_connectors:
+            await self.initialize_dex_connectors()
+        if not self._dex_connectors:
+            return signals
 
         opportunities = await self.find_arbitrage_opportunities(
             token_a, token_b, amount
         )
 
         for opp in opportunities:
+            amount_in = Decimal(opp["amount"])
+            buy_quote = Decimal(opp["buy_quote"])
+            sell_quote = Decimal(opp["sell_quote"])
+            buy_unit_price = buy_quote / amount_in if amount_in else Decimal("0")
+            sell_unit_price = sell_quote / buy_quote if buy_quote else Decimal("0")
             # 买入信号
             buy_signal = Signal(
                 symbol=f"{token_a}/{token_b}",
                 signal_type=SignalType.BUY,
-                price=float(opp["buy_quote"]),
+                price=float(buy_unit_price),
                 timestamp=opp["timestamp"],
                 strategy_name=self.name,
                 strength=min(float(opp["profit_pct"]) / self.params["min_spread"], 1.0),
@@ -156,6 +165,9 @@ class DEXArbitrageStrategy(StrategyBase):
                     "dex": opp["buy_dex"],
                     "arbitrage_type": "dex_buy",
                     "profit": float(opp["profit"]),
+                    "amount": float(amount_in),
+                    "quote": float(buy_quote),
+                    "unit_price": float(buy_unit_price),
                 }
             )
             signals.append(buy_signal)
@@ -164,7 +176,7 @@ class DEXArbitrageStrategy(StrategyBase):
             sell_signal = Signal(
                 symbol=f"{token_b}/{token_a}",
                 signal_type=SignalType.SELL,
-                price=float(opp["sell_quote"]),
+                price=float(sell_unit_price),
                 timestamp=opp["timestamp"],
                 strategy_name=self.name,
                 strength=min(float(opp["profit_pct"]) / self.params["min_spread"], 1.0),
@@ -172,6 +184,9 @@ class DEXArbitrageStrategy(StrategyBase):
                     "dex": opp["sell_dex"],
                     "arbitrage_type": "dex_sell",
                     "profit": float(opp["profit"]),
+                    "amount": float(buy_quote),
+                    "quote": float(sell_quote),
+                    "unit_price": float(sell_unit_price),
                 }
             )
             signals.append(sell_signal)

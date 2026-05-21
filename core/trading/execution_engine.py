@@ -48,6 +48,7 @@ _AUTONOMOUS_PROFIT_MANAGEMENT_DEFAULTS = {
     "outage_protection_enabled": True,
     "outage_tight_trailing_stop_pct": 0.0015,
 }
+_DEFAULT_STRATEGY_TIME_STOP_MAX_BARS = 20
 _PROFIT_MANAGEMENT_STATE_KEYS = (
     "profit_protect_armed",
     "profit_protect_armed_at",
@@ -618,6 +619,7 @@ class ExecutionEngine:
         gross_pnl_usd: Optional[float] = None,
         net_pnl_usd: Optional[float] = None,
         cost_details: Optional[Dict[str, Any]] = None,
+        close_reason: Optional[str] = None,
     ) -> None:
         if self._paper_trading:
             return
@@ -627,6 +629,8 @@ class ExecutionEngine:
         ts = datetime.now(timezone.utc)
         signal_payload = self._signal_to_dict_safe(signal)
         signal_type = str(signal_payload.get("signal_type") or side or "").strip().lower()
+        signal_metadata = dict(getattr(signal, "metadata", {}) or {})
+        resolved_close_reason = str(close_reason or signal_metadata.get("close_reason") or "").strip()
         resolved_fee_usd = self._safe_nonnegative_float(fee_usd, 0.0)
         resolved_slippage_cost_usd = self._safe_nonnegative_float(slippage_cost_usd, 0.0)
         resolved_gross_pnl_usd = self._safe_float(
@@ -669,6 +673,8 @@ class ExecutionEngine:
                 "cost_usd": float(resolved_cost_usd),
                 "signal": signal_payload,
             }
+            if resolved_close_reason:
+                entry["close_reason"] = resolved_close_reason
             for key in (
                 "fee_source",
                 "fee_asset",
@@ -678,6 +684,9 @@ class ExecutionEngine:
                 "exchange_trade_count",
                 "exchange_trade_qty",
                 "exchange_trade_cost",
+                "close_order_mode",
+                "limit_first_order_id",
+                "fallback_from_order_id",
             ):
                 value = resolved_cost_details.get(key)
                 if value not in (None, ""):
@@ -817,6 +826,24 @@ class ExecutionEngine:
             "timestamp": signal.timestamp.isoformat() if signal.timestamp else datetime.now(timezone.utc).isoformat(),
         }
         self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        # HOLD signals are informational only (structural strategies emit them
+        # per bar to expose gate context). execute_signal returns None for HOLD
+        # anyway, but routing HOLDs through the queue wakes the worker and
+        # pays for circuit breaker + structural risk gate + position lookup
+        # on every bar. Drop them at the door and report success so callers
+        # (strategy_manager fallback path, test harnesses) don't treat the
+        # no-op as a failure.
+        if signal.signal_type == SignalType.HOLD:
+            self._signal_diagnostics["hold_skipped"] = int(
+                self._signal_diagnostics.get("hold_skipped", 0)
+            ) + 1
+            logger.debug(
+                f"HOLD signal accepted but not queued: "
+                f"{signal.strategy_name} {signal.symbol}"
+            )
+            return True
+
         if self._running:
             await self._ensure_queue_worker()
         queue = self._ensure_signal_queue()
@@ -1602,7 +1629,7 @@ class ExecutionEngine:
             trigger_pct = max(0.0001, float(config.get("breakeven_trigger_r") or 1.0) * float(risk_pct))
             metadata["profit_protect_enabled"] = True
             metadata["profit_protect_trigger_pct"] = float(trigger_pct)
-            metadata["profit_protect_lock_pct"] = 0.0001
+            metadata["profit_protect_lock_pct"] = 0.001
 
         if bool(config.get("partial_take_profit_enabled")) and risk_pct is not None:
             trigger_pct = max(0.0001, float(config.get("partial_take_profit_r") or 1.5) * float(risk_pct))
@@ -1612,6 +1639,10 @@ class ExecutionEngine:
             metadata["partial_take_profit_fraction"] = float(partial_fraction)
             if trailing_stop_pct is not None:
                 metadata["post_partial_trailing_stop_pct"] = float(trailing_stop_pct)
+                metadata["post_partial_trailing_activation_pct"] = max(
+                    0.0001,
+                    float(config.get("trailing_activation_r") or 2.0) * float(risk_pct),
+                )
             metadata["preserve_take_profit_after_partial"] = bool(fixed_take_profit_pct is not None)
 
         if bool(config.get("time_stop_enabled")):
@@ -1630,6 +1661,7 @@ class ExecutionEngine:
         metadata["runtime_exit_template_managed"] = True
         metadata["outage_protection_enabled"] = False
         if atr_pct is not None:
+            metadata["atr_pct"] = float(atr_pct)
             metadata["profit_management_atr_pct"] = float(atr_pct)
         signal.metadata = metadata
 
@@ -1795,13 +1827,61 @@ class ExecutionEngine:
             or source == "ai_autonomous_agent"
             or strategy == "ai_autonomousagent"
         )
-        if not is_autonomous_position:
+        is_strategy_position = bool(
+            is_autonomous_position
+            or source == "strategy"
+            or metadata.get("runtime_exit_template_managed")
+            or metadata.get("is_strategy_isolated")
+            or (strategy and strategy not in {"manual", "risk"})
+        )
+        if not is_strategy_position:
             return metadata
         changed = False
+        if metadata.get("tier2_managed") is None:
+            metadata["tier2_managed"] = True
+            changed = True
+
+        atr_pct = self._safe_protective_pct(metadata.get("profit_management_atr_pct"))
+        if atr_pct is not None:
+            atr_defaults = {
+                "profit_protect_enabled": True,
+                "profit_protect_trigger_pct": max(0.0001, float(atr_pct)),
+                "profit_protect_lock_pct": 0.001,
+                "partial_take_profit_enabled": True,
+                "partial_take_profit_trigger_pct": max(0.0001, float(atr_pct) * 1.5),
+                "partial_take_profit_fraction": 0.5,
+                "post_partial_trailing_stop_pct": max(0.0001, float(atr_pct) * 1.2),
+                "post_partial_trailing_activation_pct": max(0.0001, float(atr_pct) * 2.0),
+            }
+            for key, value in atr_defaults.items():
+                if metadata.get(key) is None:
+                    metadata[key] = value
+                    changed = True
+
         for key, value in _AUTONOMOUS_PROFIT_MANAGEMENT_DEFAULTS.items():
             if metadata.get(key) is None:
                 metadata[key] = value
                 changed = True
+
+        if metadata.get("time_stop_enabled") is None:
+            timeframe = str(metadata.get("timeframe") or metadata.get("time_stop_timeframe") or "1h").strip() or "1h"
+            max_bars = max(1, int(metadata.get("max_bars_in_trade") or _DEFAULT_STRATEGY_TIME_STOP_MAX_BARS))
+            time_stop_minutes = max(1, max_bars * int(parse_timeframe_minutes(timeframe)))
+            metadata["time_stop_enabled"] = True
+            metadata["max_bars_in_trade"] = int(max_bars)
+            metadata["time_stop_timeframe"] = timeframe
+            metadata["time_stop_minutes"] = int(time_stop_minutes)
+            changed = True
+        if bool(metadata.get("time_stop_enabled")) and not metadata.get("time_stop_deadline_at"):
+            hold_minutes = self._safe_nonnegative_float(metadata.get("time_stop_minutes"), 0.0)
+            if hold_minutes <= 0:
+                timeframe = str(metadata.get("time_stop_timeframe") or metadata.get("timeframe") or "1h").strip() or "1h"
+                max_bars = max(1, int(metadata.get("max_bars_in_trade") or _DEFAULT_STRATEGY_TIME_STOP_MAX_BARS))
+                hold_minutes = float(max(1, max_bars * int(parse_timeframe_minutes(timeframe))))
+                metadata["time_stop_minutes"] = int(hold_minutes)
+            metadata["time_stop_deadline_at"] = (datetime.now(timezone.utc) + timedelta(minutes=hold_minutes)).isoformat()
+            changed = True
+
         if changed:
             position.metadata = metadata
         return metadata
@@ -1993,7 +2073,16 @@ class ExecutionEngine:
         if not bool(refreshed_metadata.get("preserve_take_profit_after_partial")):
             refreshed.take_profit = None
         trailing_pct = self._safe_protective_pct(refreshed_metadata.get("post_partial_trailing_stop_pct"))
-        if trailing_pct is not None:
+        trailing_activation_pct = self._safe_protective_pct(
+            refreshed_metadata.get("post_partial_trailing_activation_pct")
+        )
+        if (
+            trailing_pct is not None
+            and (
+                trailing_activation_pct is None
+                or self._position_profit_pct(refreshed) >= trailing_activation_pct
+            )
+        ):
             self._apply_position_trailing_pct(
                 refreshed,
                 trailing_pct=trailing_pct,
@@ -2069,11 +2158,15 @@ class ExecutionEngine:
 
         if bool(metadata.get("partial_take_profit_done")):
             trailing_pct = self._safe_protective_pct(metadata.get("post_partial_trailing_stop_pct"))
-            if self._apply_position_trailing_pct(
-                position,
-                trailing_pct=trailing_pct,
-                current_price=current_price,
-                event="post_partial_trailing",
+            trailing_activation_pct = self._safe_protective_pct(metadata.get("post_partial_trailing_activation_pct"))
+            if (
+                (trailing_activation_pct is None or profit_pct >= trailing_activation_pct)
+                and self._apply_position_trailing_pct(
+                    position,
+                    trailing_pct=trailing_pct,
+                    current_price=current_price,
+                    event="post_partial_trailing",
+                )
             ):
                 logger.info(
                     "Post-partial trailing armed "
@@ -2101,6 +2194,78 @@ class ExecutionEngine:
             decimals = 0
         factor = 10 ** decimals
         return math.ceil(float(value) * factor) / factor
+
+    @staticmethod
+    def _policy_bool(value: Any, default: bool) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"", "0", "false", "no", "off"}:
+                return False
+            if text in {"1", "true", "yes", "on"}:
+                return True
+        return bool(value)
+
+    def _close_limit_first_enabled(self, signal_metadata: Dict[str, Any], trade_policy: Dict[str, Any]) -> bool:
+        raw = signal_metadata.get("close_limit_first")
+        if raw is None:
+            raw = trade_policy.get("close_limit_first", True)
+        return self._policy_bool(raw, True)
+
+    def _close_limit_wait_seconds(self, signal_metadata: Dict[str, Any], trade_policy: Dict[str, Any]) -> float:
+        raw = signal_metadata.get("close_limit_wait_sec")
+        if raw is None:
+            raw = trade_policy.get("close_limit_wait_sec", 5.0)
+        wait_sec = self._safe_nonnegative_float(raw, 5.0)
+        return min(10.0, float(wait_sec or 0.0))
+
+    def _close_limit_spread_bps(self, signal_metadata: Dict[str, Any], trade_policy: Dict[str, Any]) -> float:
+        raw = signal_metadata.get("close_limit_spread_bps")
+        if raw is None:
+            raw = trade_policy.get("close_limit_spread_bps", 5.0)
+        spread_bps = self._safe_nonnegative_float(raw, 5.0)
+        return min(100.0, float(spread_bps or 0.0))
+
+    def _close_limit_price(self, close_side: OrderSide, quote_price: float, spread_bps: float) -> float:
+        price = self._safe_nonnegative_float(quote_price, 0.0)
+        if price <= 0:
+            return 0.0
+        offset = float(spread_bps or 0.0) / 10000.0
+        if close_side == OrderSide.SELL:
+            return price * (1.0 + offset)
+        return price * max(0.0, 1.0 - offset)
+
+    def _close_order_has_fill(self, order: Any, requested_qty: float) -> bool:
+        if not order:
+            return False
+        return self._resolved_order_fill_qty(order, requested_qty) > 0
+
+    async def _wait_for_order_fill(
+        self,
+        order: Any,
+        *,
+        symbol: str,
+        exchange: str,
+        requested_qty: float,
+        timeout_sec: float,
+    ) -> Any:
+        observed = order
+        if self._close_order_has_fill(observed, requested_qty):
+            return observed
+        deadline = asyncio.get_running_loop().time() + max(0.0, float(timeout_sec or 0.0))
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(min(0.25, max(0.0, deadline - asyncio.get_running_loop().time())))
+            try:
+                refreshed = await order_manager.get_order(str(getattr(order, "id", "")), symbol, exchange)
+            except Exception as refresh_err:
+                logger.debug(f"Close limit order refresh failed: {refresh_err}")
+                refreshed = None
+            if refreshed is not None:
+                observed = refreshed
+            if self._close_order_has_fill(observed, requested_qty):
+                return observed
+        return observed
 
     async def _get_exchange_amount_rules(
         self,
@@ -4064,19 +4229,17 @@ class ExecutionEngine:
                 strategy_name=strategy_lookup if require_strategy_isolation else None,
                 require_strategy_match=require_strategy_isolation,
             )
-            if fill_price > 0 and (req.stop_loss is None or req.take_profit is None):
+            if fill_price > 0:
                 fill_stop_loss, fill_take_profit = self._ensure_signal_protection_levels(
                     signal=signal,
                     side=side,
                     entry_price=fill_price,
                     trade_policy=trade_policy,
                 )
-                if req.stop_loss is None:
-                    req.stop_loss = fill_stop_loss
-                if req.take_profit is None:
-                    req.take_profit = fill_take_profit
-                signal.stop_loss = req.stop_loss
-                signal.take_profit = req.take_profit
+                req.stop_loss = fill_stop_loss
+                req.take_profit = fill_take_profit
+                signal.stop_loss = fill_stop_loss
+                signal.take_profit = fill_take_profit
 
             def _merge_protection_settings() -> None:
                 if not current_position:
@@ -4402,6 +4565,8 @@ class ExecutionEngine:
             return None
 
         close_side = OrderSide.SELL if position_side == PositionSide.LONG else OrderSide.BUY
+        signal_metadata = dict(signal.metadata or {})
+        close_reason = str(signal_metadata.get("close_reason") or signal.signal_type.value).strip()
         quote_price, order_value = await self._resolve_order_context(
             exchange=exchange,
             symbol=signal.symbol,
@@ -4432,7 +4597,7 @@ class ExecutionEngine:
                 account_id=account_id,
                 reduce_only=True,
                 params={
-                    "close_reason": signal.signal_type.value,
+                    "close_reason": close_reason,
                     "leverage": float(position.leverage or 1.0),
                     "market_type": str(trade_policy.get("market_type") or ""),
                 },
@@ -4444,23 +4609,98 @@ class ExecutionEngine:
             )
             return None
 
-        close_request = OrderRequest(
-            symbol=signal.symbol,
-            side=close_side,
-            order_type=OrderType.MARKET,
-            amount=close_qty,
-            price=signal.price if float(signal.price or 0.0) > 0 else None,
-            exchange=exchange,
-            strategy=signal.strategy_name,
-            account_id=account_id,
-            reduce_only=True,
-            params={
-                "close_reason": signal.signal_type.value,
-                "leverage": float(position.leverage or 1.0),
-                "market_type": str(trade_policy.get("market_type") or ""),
-            },
-        )
-        close_order = await order_manager.create_order(close_request)
+        close_params = {
+            "close_reason": close_reason,
+            "leverage": float(position.leverage or 1.0),
+            "market_type": str(trade_policy.get("market_type") or ""),
+        }
+        close_request: Optional[OrderRequest] = None
+        close_order = None
+        limit_first_order = None
+        limit_first_attempted = False
+        close_order_mode = "market"
+
+        reference_close_price = float(quote_price or signal.price or 0.0)
+        if self._close_limit_first_enabled(signal_metadata, trade_policy):
+            spread_bps = self._close_limit_spread_bps(signal_metadata, trade_policy)
+            limit_price = self._close_limit_price(close_side, reference_close_price, spread_bps)
+            if limit_price > 0:
+                limit_first_attempted = True
+                limit_params = dict(close_params)
+                limit_params.update(
+                    {
+                        "post_only": True,
+                        "close_order_mode": "limit_first",
+                        "close_limit_fallback": "market",
+                        "close_limit_spread_bps": float(spread_bps),
+                    }
+                )
+                close_request = OrderRequest(
+                    symbol=signal.symbol,
+                    side=close_side,
+                    order_type=OrderType.LIMIT,
+                    amount=close_qty,
+                    price=limit_price,
+                    exchange=exchange,
+                    strategy=signal.strategy_name,
+                    account_id=account_id,
+                    reduce_only=True,
+                    params=limit_params,
+                )
+                limit_first_order = await order_manager.create_order(close_request)
+                if limit_first_order:
+                    wait_sec = self._close_limit_wait_seconds(signal_metadata, trade_policy)
+                    if wait_sec > 0 and not self._close_order_has_fill(limit_first_order, close_qty):
+                        limit_first_order = await self._wait_for_order_fill(
+                            limit_first_order,
+                            symbol=signal.symbol,
+                            exchange=exchange,
+                            requested_qty=close_qty,
+                            timeout_sec=wait_sec,
+                        )
+                    filled_limit_qty = self._resolved_order_fill_qty(limit_first_order, close_qty)
+                    if filled_limit_qty > 0:
+                        close_order = limit_first_order
+                        if filled_limit_qty + 1e-12 >= close_qty:
+                            close_order_mode = "limit_first"
+                        else:
+                            close_order_mode = "limit_first_partial"
+                            with contextlib.suppress(Exception):
+                                await order_manager.cancel_order(
+                                    str(getattr(limit_first_order, "id", "")),
+                                    signal.symbol,
+                                    exchange,
+                                )
+                    else:
+                        close_order_mode = "market_fallback"
+                        with contextlib.suppress(Exception):
+                            await order_manager.cancel_order(
+                                str(getattr(limit_first_order, "id", "")),
+                                signal.symbol,
+                                exchange,
+                            )
+                else:
+                    close_order_mode = "market_fallback"
+
+        if close_order is None:
+            market_params = dict(close_params)
+            market_params["close_order_mode"] = "market_fallback" if limit_first_attempted else "market"
+            if limit_first_order is not None:
+                market_params["fallback_from_order_id"] = getattr(limit_first_order, "id", None)
+            close_order_mode = str(market_params["close_order_mode"])
+            close_request = OrderRequest(
+                symbol=signal.symbol,
+                side=close_side,
+                order_type=OrderType.MARKET,
+                amount=close_qty,
+                price=signal.price if float(signal.price or 0.0) > 0 else (quote_price if quote_price > 0 else None),
+                exchange=exchange,
+                strategy=signal.strategy_name,
+                account_id=account_id,
+                reduce_only=True,
+                params=market_params,
+            )
+            close_order = await order_manager.create_order(close_request)
         if not close_order:
             last_error = str(order_manager.get_last_error() or "")
             if self._is_reduce_only_rejected(last_error):
@@ -4538,6 +4778,9 @@ class ExecutionEngine:
             reference_price=quote_price or signal.price,
             paper_cost=self._consume_paper_order_cost(close_order.id),
         )
+        cost_details["close_order_mode"] = close_order_mode
+        if limit_first_order is not None and limit_first_order is not close_order:
+            cost_details["limit_first_order_id"] = getattr(limit_first_order, "id", None)
         fee_usd = float(cost_details.get("fee_usd", 0.0) or 0.0)
         slippage_cost_usd = float(cost_details.get("slippage_cost_usd", 0.0) or 0.0)
         closed = None
@@ -4585,6 +4828,8 @@ class ExecutionEngine:
                     "strength": float(signal.strength or 0.0),
                     "stop_loss": signal.stop_loss,
                     "take_profit": signal.take_profit,
+                    "close_reason": close_reason,
+                    "close_order_mode": close_order_mode,
                     "action": "close",
                 }
             )
@@ -4607,12 +4852,16 @@ class ExecutionEngine:
                 net_pnl_usd=close_pnl,
                 action="close",
                 cost_details=cost_details,
+                close_reason=close_reason,
             )
 
         result = {
             "action": "close_position",
             "symbol": signal.symbol,
             "side": position_side.value,
+            "close_reason": close_reason,
+            "close_order_mode": close_order_mode,
+            "limit_first_order_id": getattr(limit_first_order, "id", None) if limit_first_order is not None else None,
             "close_price": close_price,
             "quantity": float(executed_close_qty or 0.0),
             "pnl": close_pnl,
@@ -4635,6 +4884,7 @@ class ExecutionEngine:
                 "slippage_source": cost_details.get("slippage_source"),
                 "slippage_bps": cost_details.get("slippage_bps"),
                 "slippage_reference_price": cost_details.get("slippage_reference_price"),
+                "close_order_mode": close_order_mode,
             },
             "timestamp": datetime.now().isoformat(),
         }
@@ -4655,6 +4905,8 @@ class ExecutionEngine:
                         "fee_usd": float(result.get("fee_usd") or 0.0),
                         "slippage_cost_usd": float(result.get("slippage_cost_usd") or 0.0),
                         "close_price": float(result.get("close_price") or 0.0),
+                        "close_reason": close_reason,
+                        "close_order_mode": close_order_mode,
                         "quantity": float(executed_close_qty or 0.0),
                         "notional": float(close_price * executed_close_qty),
                         "account_id": account_id,
@@ -4799,6 +5051,8 @@ class ExecutionEngine:
         raw_amount = float(amount or 0.0)
         if raw_amount <= 0:
             return None
+        request_params = dict(params or {})
+        close_reason = str(request_params.get("close_reason") or "").strip()
 
         if not account_manager.is_enabled(account_id):
             return None
@@ -4853,9 +5107,19 @@ class ExecutionEngine:
         ):
             return None
 
+        request_side = OrderSide.BUY if side_lower == "buy" else OrderSide.SELL
+        level_price = float(quote_price or price or 0.0)
+        if level_price > 0 and not reduce_only:
+            stop_loss, take_profit = self._normalize_protection_levels(
+                side=request_side,
+                entry_price=level_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+            )
+
         request = OrderRequest(
             symbol=symbol,
-            side=OrderSide.BUY if side_lower == "buy" else OrderSide.SELL,
+            side=request_side,
             order_type=OrderType.MARKET if str(order_type).lower() == "market" else OrderType.LIMIT,
             amount=requested_amount,
             price=price,
@@ -4873,7 +5137,7 @@ class ExecutionEngine:
             algo_interval_sec=max(0, int(algo_interval_sec or 0)),
             reduce_only=reduce_only,
             params=dict(
-                params or {},
+                request_params,
                 leverage=float(leverage),
                 trace_id=governance_check.trace_id,
                 governance_prechecked=True,
@@ -4898,6 +5162,13 @@ class ExecutionEngine:
         fee_usd = float(cost_details.get("fee_usd", 0.0) or 0.0)
         slippage_cost_usd = float(cost_details.get("slippage_cost_usd", 0.0) or 0.0)
         trade_pnl = 0.0
+        if fill_price > 0 and not reduce_only:
+            stop_loss, take_profit = self._normalize_protection_levels(
+                side=request_side,
+                entry_price=fill_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+            )
 
         def _merge_protection_settings() -> None:
             if not existing_position:
@@ -5073,30 +5344,31 @@ class ExecutionEngine:
         gross_trade_pnl = float(trade_pnl or 0.0)
         net_trade_pnl = gross_trade_pnl - fee_usd - slippage_cost_usd
         if exec_amount > 0:
-            risk_manager.record_trade(
-                {
-                    "symbol": symbol,
-                    "exchange": exchange,
-                    "strategy": strategy,
-                    "side": side_lower,
-                    "signal_type": side_lower,
-                    "fill_price": float(fill_price or 0.0),
-                    "quantity": float(exec_amount or 0.0),
-                    "notional": float(exec_amount * fill_price),
-                    "pnl": net_trade_pnl,
-                    "fee_usd": fee_usd,
-                    "slippage_cost_usd": slippage_cost_usd,
-                    "cost_usd": float(cost_details.get("cost_usd", fee_usd + slippage_cost_usd) or 0.0),
-                    "fee_source": cost_details.get("fee_source"),
-                    "slippage_source": cost_details.get("slippage_source"),
-                    "slippage_bps": cost_details.get("slippage_bps"),
-                    "slippage_reference_price": cost_details.get("slippage_reference_price"),
-                    "order_id": order.id,
-                    "stop_loss": stop_loss,
-                    "take_profit": take_profit,
-                    "action": "manual_order",
-                }
-            )
+            trade_record = {
+                "symbol": symbol,
+                "exchange": exchange,
+                "strategy": strategy,
+                "side": side_lower,
+                "signal_type": side_lower,
+                "fill_price": float(fill_price or 0.0),
+                "quantity": float(exec_amount or 0.0),
+                "notional": float(exec_amount * fill_price),
+                "pnl": net_trade_pnl,
+                "fee_usd": fee_usd,
+                "slippage_cost_usd": slippage_cost_usd,
+                "cost_usd": float(cost_details.get("cost_usd", fee_usd + slippage_cost_usd) or 0.0),
+                "fee_source": cost_details.get("fee_source"),
+                "slippage_source": cost_details.get("slippage_source"),
+                "slippage_bps": cost_details.get("slippage_bps"),
+                "slippage_reference_price": cost_details.get("slippage_reference_price"),
+                "order_id": order.id,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "action": "manual_order",
+            }
+            if close_reason:
+                trade_record["close_reason"] = close_reason
+            risk_manager.record_trade(trade_record)
 
         result = {
             "order_id": order.id,
@@ -5124,6 +5396,8 @@ class ExecutionEngine:
             "slippage_bps": cost_details.get("slippage_bps"),
             "slippage_reference_price": cost_details.get("slippage_reference_price"),
         }
+        if close_reason:
+            result["close_reason"] = close_reason
         await self._notify_callbacks("manual_order_executed" if exec_amount > 0 else "manual_order_submitted", result)
         return result
 

@@ -27,6 +27,9 @@ class BollingerBandsStrategy(StrategyBase):
             "num_std": 2.0,
             "stop_loss_pct": 0.02,
             "take_profit_pct": 0.05,
+            "exit_confirm_pct": 0.001,
+            "exit_min_profit_pct": 0.006,
+            "exit_min_profit_atr_mult": 0.5,
         }
         if params:
             default_params.update(params)
@@ -116,6 +119,82 @@ class BollingerBandsStrategy(StrategyBase):
             logger.info(f"Bollinger upper band decline for {symbol} at {current_close}")
 
         return signals
+
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        if data.empty or len(data) < self.params["period"] + 1:
+            return None
+
+        _upper, middle, _lower = self._calculate_bollinger_bands(data)
+        current_close = float(data["close"].iloc[-1])
+        prev_close = float(data["close"].iloc[-2])
+        current_middle = float(middle.iloc[-1])
+        prev_middle = float(middle.iloc[-2])
+        if not np.isfinite([current_close, prev_close, current_middle, prev_middle]).all():
+            return None
+
+        if isinstance(position, dict):
+            raw_side = position.get("side")
+            symbol = str(position.get("symbol") or (data["symbol"].iloc[-1] if "symbol" in data else "UNKNOWN"))
+            entry_price = float(position.get("entry_price") or 0.0)
+        else:
+            raw_side = getattr(position, "side", None)
+            symbol = str(getattr(position, "symbol", None) or (data["symbol"].iloc[-1] if "symbol" in data else "UNKNOWN"))
+            entry_price = float(getattr(position, "entry_price", 0.0) or 0.0)
+        side = str(getattr(raw_side, "value", raw_side) or "").lower()
+        if entry_price <= 0:
+            return None
+
+        atr_pct = self.compute_atr_pct(data, default=0.01)
+        confirm_pct = max(0.0, float(self.params.get("exit_confirm_pct", 0.001) or 0.0))
+        min_profit_pct = max(
+            0.0,
+            float(self.params.get("exit_min_profit_pct", 0.006) or 0.0),
+            float(atr_pct or 0.0) * max(0.0, float(self.params.get("exit_min_profit_atr_mult", 0.5) or 0.0)),
+        )
+        metadata = {
+            "middle": current_middle,
+            "close_reason": "bollinger_middle_reversion",
+            "close_only": True,
+            "atr_pct": float(atr_pct or 0.0),
+            "exit_confirm_pct": confirm_pct,
+            "exit_min_profit_pct": min_profit_pct,
+        }
+
+        if side == "long":
+            pnl_pct = (current_close - entry_price) / entry_price
+            if (
+                pnl_pct >= min_profit_pct
+                and prev_close < prev_middle
+                and current_close >= current_middle * (1.0 + confirm_pct)
+            ):
+                metadata["pnl_pct"] = pnl_pct
+                return Signal(
+                    symbol=symbol,
+                    signal_type=SignalType.CLOSE_LONG,
+                    price=current_close,
+                    timestamp=self._bar_time(data),
+                    strategy_name=self.name,
+                    strength=0.8,
+                    metadata=metadata,
+                )
+        if side == "short":
+            pnl_pct = (entry_price - current_close) / entry_price
+            if (
+                pnl_pct >= min_profit_pct
+                and prev_close > prev_middle
+                and current_close <= current_middle * (1.0 - confirm_pct)
+            ):
+                metadata["pnl_pct"] = pnl_pct
+                return Signal(
+                    symbol=symbol,
+                    signal_type=SignalType.CLOSE_SHORT,
+                    price=current_close,
+                    timestamp=self._bar_time(data),
+                    strategy_name=self.name,
+                    strength=0.8,
+                    metadata=metadata,
+                )
+        return None
 
     def get_required_data(self) -> Dict[str, Any]:
         """获取所需数据"""
@@ -242,6 +321,68 @@ class BollingerSqueezeStrategy(StrategyBase):
                 logger.info(f"Bollinger squeeze breakout DOWN for {symbol}")
 
         return signals
+
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when squeeze re-contracts — breakout has failed.
+
+        After a squeeze breakout, if bandwidth shrinks back below the squeeze
+        threshold (or contracts vs prior bar in a way that suggests the move
+        is fading), the trend thesis is invalidated. Close to lock whatever
+        partial profit exists rather than wait for SL.
+        """
+        if data.empty or len(data) < self.params["period"] + 5:
+            return None
+        try:
+            _upper, _middle, _lower, bandwidth = self._calculate_bollinger_bands(data)
+            current_bandwidth = float(bandwidth.iloc[-1])
+            prev_bandwidth = float(bandwidth.iloc[-2])
+            current_close = float(data["close"].iloc[-1])
+        except Exception:
+            return None
+        if not np.isfinite([current_bandwidth, prev_bandwidth, current_close]).all():
+            return None
+
+        squeeze_threshold = float(self.params.get("squeeze_threshold", 0.02))
+        # Trigger when bandwidth contracts AND drops back into squeeze regime.
+        recontracting = (
+            current_bandwidth < prev_bandwidth
+            and current_bandwidth <= squeeze_threshold * 1.1
+        )
+        if not recontracting:
+            return None
+
+        raw_side = position.side if hasattr(position, "side") else (position or {}).get("side")
+        side = str(getattr(raw_side, "value", raw_side) or "").lower()
+        symbol = str(getattr(position, "symbol", None) or (data["symbol"].iloc[-1] if "symbol" in data else "UNKNOWN"))
+
+        metadata = {
+            "bandwidth": current_bandwidth,
+            "prev_bandwidth": prev_bandwidth,
+            "squeeze_threshold": squeeze_threshold,
+            "close_only": True,
+            "close_reason": "bollinger_squeeze_recontract",
+        }
+        if side == "long":
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.CLOSE_LONG,
+                price=current_close,
+                timestamp=self._bar_time(data),
+                strategy_name=self.name,
+                strength=0.7,
+                metadata=metadata,
+            )
+        if side == "short":
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.CLOSE_SHORT,
+                price=current_close,
+                timestamp=self._bar_time(data),
+                strategy_name=self.name,
+                strength=0.7,
+                metadata=metadata,
+            )
+        return None
 
     def get_required_data(self) -> Dict[str, Any]:
         """Describe required market data."""

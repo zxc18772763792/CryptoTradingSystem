@@ -97,36 +97,69 @@ class MeanReversionStrategy(StrategyBase):
             )
             signals.append(signal)
             logger.info(f"Mean reversion SELL for {symbol}: Z-score={current_z:.2f}")
-        elif int(self._regime_bias.get(symbol, 0) or 0) > 0 and prev_z < -exit_z <= current_z:
-            signals.append(
-                Signal(
-                    symbol=symbol,
-                    signal_type=SignalType.CLOSE_LONG,
-                    price=current_price,
-                    timestamp=timestamp,
-                    strategy_name=self.name,
-                    strength=0.6,
-                    metadata={"z_score": current_z, "exit_z_score": exit_z, "reason": "mean_reversion_long_exit"},
-                )
-            )
-            self._regime_bias.pop(symbol, None)
-            logger.info(f"Mean reversion CLOSE_LONG for {symbol}: Z-score={current_z:.2f}")
-        elif int(self._regime_bias.get(symbol, 0) or 0) < 0 and prev_z > exit_z >= current_z:
-            signals.append(
-                Signal(
-                    symbol=symbol,
-                    signal_type=SignalType.CLOSE_SHORT,
-                    price=current_price,
-                    timestamp=timestamp,
-                    strategy_name=self.name,
-                    strength=0.6,
-                    metadata={"z_score": current_z, "exit_z_score": exit_z, "reason": "mean_reversion_short_exit"},
-                )
-            )
-            self._regime_bias.pop(symbol, None)
-            logger.info(f"Mean reversion CLOSE_SHORT for {symbol}: Z-score={current_z:.2f}")
 
         return signals
+
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Close an existing mean-reversion position when z-score normalizes."""
+        if data is None or data.empty or len(data) < self.params["lookback_period"]:
+            return None
+
+        z_score = self._calculate_z_score(data)
+        if len(z_score) < 2:
+            return None
+
+        current_z = float(z_score.iloc[-1])
+        prev_z = float(z_score.iloc[-2])
+        if not np.isfinite(current_z) or not np.isfinite(prev_z):
+            return None
+
+        side = str(getattr(position, "side", "") or "").lower()
+        if side not in {"long", "short"}:
+            return None
+
+        symbol = str(getattr(position, "symbol", "") or "")
+        if not symbol:
+            symbol = str(data["symbol"].iloc[-1]) if "symbol" in data and len(data) else "UNKNOWN"
+        current_price = float(data["close"].iloc[-1])
+        timestamp = self._bar_time(data)
+        exit_z = max(0.0, float(self.params.get("exit_z_score", 0.0)))
+
+        if side == "long" and prev_z < -exit_z <= current_z:
+            self._regime_bias.pop(symbol, None)
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.CLOSE_LONG,
+                price=current_price,
+                timestamp=timestamp,
+                strategy_name=self.name,
+                strength=0.6,
+                metadata={
+                    "z_score": current_z,
+                    "exit_z_score": exit_z,
+                    "close_reason": "mean_reversion_long_exit",
+                    "close_only": True,
+                },
+            )
+
+        if side == "short" and prev_z > exit_z >= current_z:
+            self._regime_bias.pop(symbol, None)
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.CLOSE_SHORT,
+                price=current_price,
+                timestamp=timestamp,
+                strategy_name=self.name,
+                strength=0.6,
+                metadata={
+                    "z_score": current_z,
+                    "exit_z_score": exit_z,
+                    "close_reason": "mean_reversion_short_exit",
+                    "close_only": True,
+                },
+            )
+
+        return None
 
     def get_required_data(self) -> Dict[str, Any]:
         """Describe required market data."""

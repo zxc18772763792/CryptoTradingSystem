@@ -3,6 +3,7 @@
 """
 import pytest
 from datetime import datetime, timezone
+from types import SimpleNamespace
 import pandas as pd
 import numpy as np
 
@@ -12,7 +13,8 @@ from core.strategies.strategy_base import (
     SignalType,
     StrategyState,
 )
-from strategies.technical import MAStrategy, RSIStrategy, MACDStrategy
+from strategies.technical import MAStrategy, RSIStrategy, MACDStrategy, VWAPReversionStrategy
+from strategies.technical.bollinger_strategy import BollingerBandsStrategy
 from strategies.quantitative import MeanReversionStrategy, MomentumStrategy
 
 
@@ -114,6 +116,69 @@ class TestStrategyBase:
 
         assert position.entry_time.tzinfo == timezone.utc
 
+    def test_generated_entry_signals_get_atr_metadata_and_atr_levels(self):
+        class ATRStrategy(StrategyBase):
+            def generate_signals(self, data):
+                return [
+                    Signal(
+                        symbol="BTC/USDT",
+                        signal_type=SignalType.BUY,
+                        price=float(data["close"].iloc[-1]),
+                        timestamp=datetime.now(timezone.utc),
+                        strategy_name=self.name,
+                        stop_loss=float(data["close"].iloc[-1]) * 0.98,
+                        take_profit=float(data["close"].iloc[-1]) * 1.04,
+                    )
+                ]
+
+            def get_required_data(self):
+                return {"type": "kline", "min_length": 20}
+
+        strategy = ATRStrategy("ATR_Test", {"use_atr_stops": True, "atr_stop_loss_mult": 1.5})
+        data = pd.DataFrame(
+            {
+                "high": [101.0, 102.0, 103.0, 104.0, 105.0],
+                "low": [99.0, 100.0, 101.0, 102.0, 103.0],
+                "close": [100.0, 101.0, 102.0, 103.0, 104.0],
+                "symbol": ["BTC/USDT"] * 5,
+            },
+            index=pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC"),
+        )
+
+        signal = strategy.generate_signals(data)[0]
+
+        assert signal.metadata["atr_pct"] > 0
+        assert signal.metadata["atr_protection_applied"] is True
+        assert signal.metadata["stop_loss_pct"] == pytest.approx(signal.metadata["atr_pct"] * 1.5)
+        assert (signal.price - signal.stop_loss) / signal.price == pytest.approx(signal.metadata["stop_loss_pct"])
+
+    def test_base_check_exit_locks_profit_on_sma_crossback(self):
+        class ExitStrategy(StrategyBase):
+            def generate_signals(self, data):
+                return []
+
+            def get_required_data(self):
+                return {"type": "kline", "min_length": 20}
+
+        strategy = ExitStrategy("Exit_Test")
+        data = pd.DataFrame(
+            {"close": [100.0, 104.0, 108.0, 112.0, 116.0, 114.0, 112.0]},
+            index=pd.date_range("2026-01-01", periods=7, freq="h", tz="UTC"),
+        )
+        position = SimpleNamespace(
+            symbol="BTC/USDT",
+            side="long",
+            entry_price=100.0,
+            quantity=1.0,
+            metadata={"atr_pct": 0.01},
+        )
+
+        signal = strategy.check_exit(data, position)
+
+        assert signal is not None
+        assert signal.signal_type == SignalType.CLOSE_LONG
+        assert signal.metadata["close_reason"] == "generic_sma_profit_lock"
+
 
 class TestMAStrategy:
     """MA策略测试"""
@@ -164,6 +229,52 @@ class TestMAStrategy:
         required = strategy.get_required_data()
         assert "type" in required
         assert "min_length" in required
+
+
+class TestVWAPReversionStrategy:
+    def test_reversion_exit_emits_close_long_not_short_entry(self):
+        strategy = VWAPReversionStrategy(
+            "VWAP_Test",
+            {
+                "window": 3,
+                "entry_deviation_pct": 0.01,
+                "exit_deviation_pct": 0.002,
+            },
+        )
+        dates = pd.date_range(start="2024-01-01", periods=6, freq="h")
+        close = [100.0, 100.0, 100.0, 100.0, 99.0, 100.0]
+        data = pd.DataFrame(
+            {
+                "high": close,
+                "low": close,
+                "close": close,
+                "volume": [1000.0] * len(close),
+            },
+            index=dates,
+        )
+        data["symbol"] = "BTC/USDT"
+
+        signals = strategy.generate_signals(data)
+
+        assert len(signals) == 1
+        assert signals[0].signal_type == SignalType.CLOSE_LONG
+        assert signals[0].metadata["close_only"] is True
+        assert signals[0].metadata["close_reason"] == "vwap_mean_reversion_completed"
+
+
+class TestBollingerBandsCheckExit:
+    def test_long_position_exits_on_middle_band_reversion(self):
+        strategy = BollingerBandsStrategy("BB_Test", {"period": 3, "num_std": 2.0})
+        dates = pd.date_range(start="2024-01-01", periods=4, freq="h")
+        data = pd.DataFrame({"close": [100.0, 100.0, 90.0, 100.0]}, index=dates)
+        data["symbol"] = "BTC/USDT"
+        position = SimpleNamespace(symbol="BTC/USDT", side="long", entry_price=90.0)
+
+        signal = strategy.check_exit(data, position)
+
+        assert signal is not None
+        assert signal.signal_type == SignalType.CLOSE_LONG
+        assert signal.metadata["close_reason"] == "bollinger_middle_reversion"
 
 
 class TestRSIStrategy:

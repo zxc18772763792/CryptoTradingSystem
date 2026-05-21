@@ -284,9 +284,11 @@ class PairsTradingStrategy(StrategyBase):
 
         # Exit zone guidance (optional close signals).
         elif abs(current_z) <= exit_z < abs(prev_z):
-            side1 = SignalType.SELL if prev_z < 0 else SignalType.BUY
             active_direction = "long_spread" if prev_z < 0 else "short_spread"
-            side2 = self._opposite_side(self._secondary_entry_side(active_direction, hedge_ratio))
+            entry_side1 = SignalType.BUY if active_direction == "long_spread" else SignalType.SELL
+            entry_side2 = self._secondary_entry_side(active_direction, hedge_ratio)
+            side1 = SignalType.CLOSE_LONG if entry_side1 == SignalType.BUY else SignalType.CLOSE_SHORT
+            side2 = SignalType.CLOSE_LONG if entry_side2 == SignalType.BUY else SignalType.CLOSE_SHORT
             signals.append(
                 Signal(
                     symbol=symbol1,

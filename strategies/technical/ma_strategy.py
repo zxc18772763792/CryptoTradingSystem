@@ -10,16 +10,23 @@ from core.strategies.strategy_base import (
     StrategyBase,
     Signal,
     SignalType,
+    bar_time,
 )
 
 
 def _latest_bar_context(data: pd.DataFrame) -> Tuple[object, str]:
     """Use the latest completed bar as the signal context for live/backtest parity."""
-    timestamp = pd.Timestamp(data.index[-1]).to_pydatetime()
+    timestamp = bar_time(data)
     symbol = "UNKNOWN"
     if "symbol" in data.columns and not data["symbol"].empty:
         symbol = str(data["symbol"].iloc[-1] or "UNKNOWN")
     return timestamp, symbol
+
+
+def _position_attr(position: Any, name: str, default: Any = None) -> Any:
+    if isinstance(position, dict):
+        return position.get(name, default)
+    return getattr(position, name, default)
 
 
 class MAStrategy(StrategyBase):
@@ -107,6 +114,64 @@ class MAStrategy(StrategyBase):
 
         return signals
 
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when fast/slow MA spread compresses toward zero (trend lost).
+
+        - LONG  exit: prev_diff >= +threshold but current_diff <= +threshold/2
+        - SHORT exit: prev_diff <= -threshold but current_diff >= -threshold/2
+
+        Half-threshold acts as an "early warning" before full death-cross — gives back
+        less profit than waiting for full reverse signal.
+        """
+        if data.empty or len(data) < self.params["slow_period"] + 1:
+            return None
+        try:
+            fast_ma = data["close"].rolling(self.params["fast_period"]).mean()
+            slow_ma = data["close"].rolling(self.params["slow_period"]).mean()
+            diff = (fast_ma - slow_ma) / slow_ma
+            current_diff = float(diff.iloc[-1])
+            prev_diff = float(diff.iloc[-2])
+            current_price = float(data["close"].iloc[-1])
+        except Exception:
+            return None
+        if not np.isfinite([current_diff, prev_diff, current_price]).all():
+            return None
+
+        threshold = float(self.params["signal_threshold"])
+        soft_exit = threshold * 0.5
+        raw_side = _position_attr(position, "side")
+        side = str(getattr(raw_side, "value", raw_side) or "").lower()
+        symbol = str(_position_attr(position, "symbol") or (data["symbol"].iloc[-1] if "symbol" in data else "UNKNOWN"))
+
+        metadata = {
+            "ma_diff": current_diff,
+            "prev_ma_diff": prev_diff,
+            "soft_exit_threshold": soft_exit,
+            "close_only": True,
+            "close_reason": "ma_diff_compression",
+        }
+        if side == "long" and prev_diff >= threshold and current_diff <= soft_exit:
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.CLOSE_LONG,
+                price=current_price,
+                timestamp=_latest_bar_context(data)[0],
+                strategy_name=self.name,
+                strength=0.7,
+                metadata=metadata,
+            )
+        if side == "short" and prev_diff <= -threshold and current_diff >= -soft_exit:
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.CLOSE_SHORT,
+                price=current_price,
+                timestamp=_latest_bar_context(data)[0],
+                strategy_name=self.name,
+                strength=0.7,
+                metadata=metadata,
+            )
+        return None
+
     def get_required_data(self) -> Dict[str, Any]:
         """获取所需数据"""
         return {
@@ -187,6 +252,57 @@ class EMAStrategy(StrategyBase):
             signals.append(signal)
 
         return signals
+
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when fast/slow EMA spread compresses toward zero."""
+        if data.empty or len(data) < self.params["slow_period"] + 1:
+            return None
+        try:
+            fast_ema = data["close"].ewm(span=self.params["fast_period"], adjust=False).mean()
+            slow_ema = data["close"].ewm(span=self.params["slow_period"], adjust=False).mean()
+            diff = (fast_ema - slow_ema) / slow_ema
+            current_diff = float(diff.iloc[-1])
+            prev_diff = float(diff.iloc[-2])
+            current_price = float(data["close"].iloc[-1])
+        except Exception:
+            return None
+        if not np.isfinite([current_diff, prev_diff, current_price]).all():
+            return None
+
+        threshold = float(self.params["signal_threshold"])
+        soft_exit = threshold * 0.5
+        raw_side = _position_attr(position, "side")
+        side = str(getattr(raw_side, "value", raw_side) or "").lower()
+        symbol = str(_position_attr(position, "symbol") or (data["symbol"].iloc[-1] if "symbol" in data else "UNKNOWN"))
+
+        metadata = {
+            "ema_diff": current_diff,
+            "prev_ema_diff": prev_diff,
+            "soft_exit_threshold": soft_exit,
+            "close_only": True,
+            "close_reason": "ema_diff_compression",
+        }
+        if side == "long" and prev_diff >= threshold and current_diff <= soft_exit:
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.CLOSE_LONG,
+                price=current_price,
+                timestamp=_latest_bar_context(data)[0],
+                strategy_name=self.name,
+                strength=0.7,
+                metadata=metadata,
+            )
+        if side == "short" and prev_diff <= -threshold and current_diff >= -soft_exit:
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.CLOSE_SHORT,
+                price=current_price,
+                timestamp=_latest_bar_context(data)[0],
+                strategy_name=self.name,
+                strength=0.7,
+                metadata=metadata,
+            )
+        return None
 
     def get_required_data(self) -> Dict[str, Any]:
         """获取所需数据"""

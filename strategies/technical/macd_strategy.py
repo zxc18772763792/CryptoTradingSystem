@@ -114,6 +114,56 @@ class MACDStrategy(StrategyBase):
 
         return signals
 
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Exit when MACD histogram flips against the open position.
+
+        - LONG  exit: histogram was >= 0 last bar, now <= 0 (momentum lost)
+        - SHORT exit: histogram was <= 0 last bar, now >= 0 (downside lost)
+        """
+        if data.empty or len(data) < self.params["slow_period"] + self.params["signal_period"] + 1:
+            return None
+        try:
+            _macd, _signal_line, histogram = self._calculate_macd(data)
+            current_hist = float(histogram.iloc[-1])
+            prev_hist = float(histogram.iloc[-2])
+            current_price = float(data["close"].iloc[-1])
+        except Exception:
+            return None
+        if not np.isfinite([current_hist, prev_hist, current_price]).all():
+            return None
+
+        raw_side = position.side if hasattr(position, "side") else (position or {}).get("side")
+        side = str(getattr(raw_side, "value", raw_side) or "").lower()
+        symbol = str(getattr(position, "symbol", None) or (data["symbol"].iloc[-1] if "symbol" in data else "UNKNOWN"))
+
+        metadata = {
+            "macd_histogram": current_hist,
+            "prev_macd_histogram": prev_hist,
+            "close_only": True,
+            "close_reason": "macd_histogram_flip",
+        }
+        if side == "long" and prev_hist >= 0 and current_hist <= 0:
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.CLOSE_LONG,
+                price=current_price,
+                timestamp=self._bar_time(data),
+                strategy_name=self.name,
+                strength=0.7,
+                metadata=metadata,
+            )
+        if side == "short" and prev_hist <= 0 and current_hist >= 0:
+            return Signal(
+                symbol=symbol,
+                signal_type=SignalType.CLOSE_SHORT,
+                price=current_price,
+                timestamp=self._bar_time(data),
+                strategy_name=self.name,
+                strength=0.7,
+                metadata=metadata,
+            )
+        return None
+
     def get_required_data(self) -> Dict[str, Any]:
         """获取所需数据"""
         return {

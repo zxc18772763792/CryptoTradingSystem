@@ -280,6 +280,7 @@ class WhaleActivityStrategy(StrategyBase):
         price: float,
         usd_value: float,
         trade_id: Optional[str] = None,
+        timestamp: Optional[datetime] = None,
     ) -> None:
         if trade_id:
             tid = str(trade_id)
@@ -289,13 +290,19 @@ class WhaleActivityStrategy(StrategyBase):
             if len(self._seen_trade_ids) > 20000:
                 self._seen_trade_ids = set(list(self._seen_trade_ids)[-12000:])
 
+        ts = timestamp or datetime.now(timezone.utc)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        else:
+            ts = ts.astimezone(timezone.utc)
+
         self._whale_transactions.append(
             {
                 "amount": float(amount),
                 "direction": str(direction).lower(),
                 "price": float(price),
                 "usd_value": float(usd_value),
-                "timestamp": datetime.now(timezone.utc),
+                "timestamp": ts,
             }
         )
 
@@ -307,10 +314,21 @@ class WhaleActivityStrategy(StrategyBase):
         side = str(raw.get("side") or "").lower()
         if side in {"buy", "sell"}:
             return side
-        # ccxt unified trades: takerOrMaker may exist but side may be missing.
-        if bool(raw.get("takerOrMaker")):
-            return "sell"
-        return "buy"
+        return "unknown"
+
+    @staticmethod
+    def _trade_timestamp(raw: Dict[str, Any]) -> datetime:
+        value = raw.get("timestamp") or raw.get("datetime")
+        try:
+            if isinstance(value, (int, float)):
+                ts = pd.to_datetime(value, unit="ms", utc=True).to_pydatetime()
+            else:
+                ts = pd.to_datetime(value, utc=True).to_pydatetime()
+            if ts.tzinfo is None:
+                return ts.replace(tzinfo=timezone.utc)
+            return ts.astimezone(timezone.utc)
+        except Exception:
+            return datetime.now(timezone.utc)
 
     async def _pull_whale_trades(self, symbol: str) -> Tuple[int, float]:
         exchange = str(self.params.get("exchange", "binance"))
@@ -342,6 +360,10 @@ class WhaleActivityStrategy(StrategyBase):
             if usd_value < min_size:
                 continue
 
+            side = self._infer_side(t)
+            if side not in {"buy", "sell"}:
+                continue
+
             trade_id = t.get("id")
             if trade_id is None:
                 trade_id = f"{t.get('timestamp')}|{price}|{amount}"
@@ -349,10 +371,11 @@ class WhaleActivityStrategy(StrategyBase):
             before = len(self._whale_transactions)
             self.add_whale_transaction(
                 amount=amount,
-                direction=self._infer_side(t),
+                direction=side,
                 price=price,
                 usd_value=usd_value,
                 trade_id=str(trade_id),
+                timestamp=self._trade_timestamp(t),
             )
             if len(self._whale_transactions) > before:
                 added += 1

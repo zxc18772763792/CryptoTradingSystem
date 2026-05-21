@@ -14039,44 +14039,59 @@ input[type="radio"] {
 
 #altcoin-radar .altcoin-radar-page-head {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(240px, 360px);
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 420px);
     gap: 16px;
-    align-items: end;
-    margin-bottom: 12px;
-    padding: 0 2px;
+    align-items: center;
+    margin-bottom: 14px;
+    padding: 15px 16px;
+    border: 1px solid rgba(100, 143, 185, 0.18);
+    border-radius: 10px;
+    background:
+        linear-gradient(180deg, rgba(14, 25, 41, 0.98), rgba(8, 16, 27, 0.99));
+    box-shadow: 0 14px 28px rgba(3, 9, 17, 0.22);
 }
 
 #altcoin-radar .altcoin-radar-kicker {
-    margin-bottom: 4px;
-    color: var(--radar-amber);
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    margin-bottom: 8px;
+    padding: 0 9px;
+    border: 1px solid rgba(247, 167, 66, 0.22);
+    border-radius: 999px;
+    background: rgba(247, 167, 66, 0.09);
+    color: #ffc274;
     font-size: 11px;
     font-weight: 800;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.04em;
+    line-height: 1;
 }
 
 #altcoin-radar .altcoin-radar-page-head h2 {
     margin: 0;
     color: var(--radar-text-strong);
-    font-size: 24px;
+    font-size: 20px;
     line-height: 1.25;
 }
 
 #altcoin-radar .altcoin-radar-page-head p,
 #altcoin-radar .altcoin-radar-page-note {
-    margin: 4px 0 0;
+    margin: 6px 0 0;
     color: var(--radar-muted);
     font-size: 12px;
-    line-height: 1.5;
+    line-height: 1.62;
 }
 
 #altcoin-radar .altcoin-radar-page-note {
     justify-self: end;
-    max-width: 340px;
-    padding: 9px 11px;
-    border: 1px solid rgba(70, 211, 154, 0.22);
+    max-width: none;
+    margin: 0;
+    padding: 8px 12px;
+    border: 1px solid rgba(114, 184, 255, 0.16);
     border-radius: 8px;
-    background: rgba(11, 32, 25, 0.46);
-    color: #bfe8d6;
+    background: rgba(10, 20, 33, 0.68);
+    color: #9eb6d4;
+    text-align: right;
 }
 
 #altcoin-radar-operating-mode-banner {
@@ -14913,6 +14928,7 @@ input[type="radio"] {
     #altcoin-radar .altcoin-radar-page-note {
         justify-self: stretch;
         max-width: none;
+        text-align: left;
     }
 
     #altcoin-radar .altcoin-radar-param-grid {
@@ -14925,8 +14941,12 @@ input[type="radio"] {
 }
 
 @media (max-width: 720px) {
+    #altcoin-radar .altcoin-radar-page-head {
+        padding: 13px 14px;
+    }
+
     #altcoin-radar .altcoin-radar-page-head h2 {
-        font-size: 21px;
+        font-size: 20px;
     }
 
     #altcoin-radar .altcoin-radar-mode-btns,

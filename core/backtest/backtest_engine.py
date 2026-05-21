@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
@@ -51,6 +52,14 @@ class BacktestConfig:
     funding_source: str = "binance"
     funding_interval_hours: int = 8
 
+    honor_signal_stop_loss: bool = True
+    honor_signal_take_profit: bool = True
+    enable_protective_check: bool = True
+    enable_trailing_stop: bool = True
+    enable_time_stop: bool = True
+    enable_strategy_check_exit: bool = True  # set False to emulate pre-2026-05-21 Phase 3
+    intrabar_exit_priority: str = "sl_first"  # sl_first | tp_first
+
 
 @dataclass
 class BacktestTrade:
@@ -73,6 +82,7 @@ class BacktestTrade:
     notional: float = 0.0
     execution_role: str = "taker"
     trade_stage: str = "unknown"  # open | close | funding
+    exit_reason: Optional[str] = None
 
 
 @dataclass
@@ -116,6 +126,7 @@ class BacktestEngine:
         self._daily_returns: List[float] = []
         self._turnover_notional: float = 0.0
         self._last_bar_ts: Optional[pd.Timestamp] = None
+        self._bar_index: int = -1
 
     async def run_backtest(
         self,
@@ -157,6 +168,7 @@ class BacktestEngine:
 
         total_bars = len(data)
         for i in range(total_bars):
+            self._bar_index = i
             current_data = data.iloc[: i + 1]
             row = current_data.iloc[-1]
             current_price = float(pd.to_numeric(row.get("close"), errors="coerce"))
@@ -169,6 +181,10 @@ class BacktestEngine:
                 continue
 
             self._apply_funding_for_bar(current_data, current_time)
+            self._update_positions(current_price, symbol)
+            await self._check_position_exits(current_data, current_price, current_time, symbol)
+            self._update_positions(current_price, symbol)
+            await self._check_strategy_exit_signals(strategy, current_data.tail(live_window), current_price, current_time)
             self._update_positions(current_price, symbol)
 
             try:
@@ -241,6 +257,170 @@ class BacktestEngine:
     def _microstructure_proxies(self, window: pd.DataFrame) -> Dict[str, float]:
         return microstructure_proxies(window)
 
+    @staticmethod
+    def _safe_positive_float(value: Any) -> Optional[float]:
+        try:
+            numeric = float(value)
+        except Exception:
+            return None
+        if not np.isfinite(numeric) or numeric <= 0:
+            return None
+        return numeric
+
+    @staticmethod
+    def _signal_metadata(signal: Optional[Signal]) -> Dict[str, Any]:
+        if signal is None or not isinstance(signal.metadata, dict):
+            return {}
+        return dict(signal.metadata)
+
+    @staticmethod
+    def _position_time_stop_bars(pos: Dict[str, Any]) -> Optional[int]:
+        metadata = dict(pos.get("metadata") or {})
+        if not bool(metadata.get("time_stop_enabled")):
+            return None
+        raw_bars = metadata.get("max_bars_in_trade")
+        if raw_bars is None:
+            raw_minutes = metadata.get("time_stop_minutes")
+            timeframe = str(metadata.get("time_stop_timeframe") or metadata.get("timeframe") or "1h").lower()
+            minute_map = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "2h": 120, "4h": 240}
+            frame_minutes = minute_map.get(timeframe, 60)
+            try:
+                raw_bars = max(1, int(float(raw_minutes) / max(1, frame_minutes))) if raw_minutes is not None else None
+            except Exception:
+                raw_bars = None
+        try:
+            bars = int(raw_bars)
+        except Exception:
+            return None
+        return max(1, bars)
+
+    def _resolve_protective_exit(
+        self,
+        pos: Dict[str, Any],
+        *,
+        low_price: float,
+        high_price: float,
+    ) -> Optional[Dict[str, Any]]:
+        side = str(pos.get("side") or "")
+        candidates: Dict[str, float] = {}
+        stop_loss = self._safe_positive_float(pos.get("stop_loss"))
+        take_profit = self._safe_positive_float(pos.get("take_profit"))
+        trailing_stop_price = self._safe_positive_float(pos.get("trailing_stop_price"))
+
+        if side == "long":
+            if stop_loss is not None and low_price <= stop_loss:
+                candidates["stop_loss"] = stop_loss
+            if trailing_stop_price is not None and low_price <= trailing_stop_price:
+                candidates["trailing_stop"] = trailing_stop_price
+            if take_profit is not None and high_price >= take_profit:
+                candidates["take_profit"] = take_profit
+        elif side == "short":
+            if stop_loss is not None and high_price >= stop_loss:
+                candidates["stop_loss"] = stop_loss
+            if trailing_stop_price is not None and high_price >= trailing_stop_price:
+                candidates["trailing_stop"] = trailing_stop_price
+            if take_profit is not None and low_price <= take_profit:
+                candidates["take_profit"] = take_profit
+
+        if not candidates:
+            return None
+        priority = str(self.config.intrabar_exit_priority or "sl_first").lower()
+        ordered = (
+            ("take_profit", "trailing_stop", "stop_loss")
+            if priority == "tp_first"
+            else ("stop_loss", "trailing_stop", "take_profit")
+        )
+        for reason in ordered:
+            if reason in candidates:
+                return {"reason": reason, "price": candidates[reason]}
+        return None
+
+    def _update_backtest_trailing_stop(self, pos: Dict[str, Any], *, high_price: float, low_price: float) -> None:
+        if not bool(self.config.enable_trailing_stop):
+            return
+        trailing_pct = self._safe_positive_float(pos.get("trailing_stop_pct"))
+        trailing_distance = self._safe_positive_float(pos.get("trailing_stop_distance"))
+        if trailing_pct is None and trailing_distance is None:
+            return
+        if pos.get("side") == "long":
+            anchor = max(float(pos.get("trailing_anchor") or pos.get("entry_price") or 0.0), high_price)
+            pos["trailing_anchor"] = anchor
+            if trailing_pct is not None:
+                pos["trailing_stop_price"] = anchor * (1.0 - trailing_pct)
+            elif trailing_distance is not None:
+                pos["trailing_stop_price"] = anchor - trailing_distance
+        elif pos.get("side") == "short":
+            anchor = min(float(pos.get("trailing_anchor") or pos.get("entry_price") or 0.0), low_price)
+            pos["trailing_anchor"] = anchor
+            if trailing_pct is not None:
+                pos["trailing_stop_price"] = anchor * (1.0 + trailing_pct)
+            elif trailing_distance is not None:
+                pos["trailing_stop_price"] = anchor + trailing_distance
+
+    async def _check_position_exits(
+        self,
+        current_data: pd.DataFrame,
+        current_price: float,
+        timestamp: datetime,
+        symbol: str,
+    ) -> None:
+        if not bool(self.config.enable_protective_check) or not self._positions:
+            return
+        row = current_data.iloc[-1]
+        high_price = self._safe_positive_float(row.get("high")) or current_price
+        low_price = self._safe_positive_float(row.get("low")) or current_price
+
+        for pos_symbol, pos in list(self._positions.items()):
+            if pos_symbol != symbol:
+                continue
+            self._update_backtest_trailing_stop(pos, high_price=high_price, low_price=low_price)
+            exit_hit = self._resolve_protective_exit(pos, low_price=low_price, high_price=high_price)
+            if exit_hit is None and bool(self.config.enable_time_stop):
+                max_bars = self._position_time_stop_bars(pos)
+                entry_idx = int(pos.get("entry_bar_index", self._bar_index) or self._bar_index)
+                if max_bars is not None and self._bar_index - entry_idx + 1 >= max_bars:
+                    exit_hit = {"reason": "time_stop", "price": current_price}
+            if exit_hit is None:
+                continue
+            await self._close_position(
+                pos_symbol,
+                float(exit_hit["price"]),
+                timestamp,
+                str(pos.get("side") or ""),
+                current_data,
+                None,
+                exit_reason=str(exit_hit["reason"]),
+            )
+
+    @staticmethod
+    def _position_view(symbol: str, pos: Dict[str, Any]) -> SimpleNamespace:
+        return SimpleNamespace(
+            symbol=symbol,
+            side=str(pos.get("side") or ""),
+            entry_price=float(pos.get("entry_price") or 0.0),
+            current_price=float(pos.get("mark_price") or pos.get("entry_price") or 0.0),
+            quantity=float(pos.get("quantity") or 0.0),
+            strategy=str(pos.get("strategy") or ""),
+            metadata=dict(pos.get("metadata") or {}),
+        )
+
+    async def _check_strategy_exit_signals(
+        self,
+        strategy: StrategyBase,
+        current_data: pd.DataFrame,
+        current_price: float,
+        timestamp: datetime,
+    ) -> None:
+        if not bool(self.config.enable_strategy_check_exit):
+            return
+        for pos_symbol, pos in list(self._positions.items()):
+            if str(pos.get("strategy") or "") != strategy.name:
+                continue
+            exit_signal = strategy.check_exit(current_data, self._position_view(pos_symbol, pos))
+            if not exit_signal:
+                continue
+            await self._execute_signal(exit_signal, current_price, timestamp, current_data)
+
     async def _execute_signal(
         self,
         signal: Signal,
@@ -253,9 +433,11 @@ class BacktestEngine:
         elif signal.signal_type == SignalType.SELL:
             await self._execute_sell(signal, current_price, timestamp, window)
         elif signal.signal_type == SignalType.CLOSE_LONG:
-            await self._close_position(signal.symbol, current_price, timestamp, "long", window, signal)
+            reason = str(self._signal_metadata(signal).get("close_reason") or "signal_close")
+            await self._close_position(signal.symbol, current_price, timestamp, "long", window, signal, exit_reason=reason)
         elif signal.signal_type == SignalType.CLOSE_SHORT:
-            await self._close_position(signal.symbol, current_price, timestamp, "short", window, signal)
+            reason = str(self._signal_metadata(signal).get("close_reason") or "signal_close")
+            await self._close_position(signal.symbol, current_price, timestamp, "short", window, signal, exit_reason=reason)
 
     async def _execute_buy(
         self,
@@ -265,6 +447,9 @@ class BacktestEngine:
         window: Optional[pd.DataFrame],
     ) -> None:
         symbol = signal.symbol
+        if symbol in self._positions and self._positions[symbol]["side"] == "short":
+            await self._close_position(symbol, current_price, timestamp, "short", window, signal, exit_reason="signal_reversal")
+            return
         if symbol in self._positions:
             return
         if len(self._positions) >= self.config.max_positions:
@@ -300,6 +485,15 @@ class BacktestEngine:
             "strategy": signal.strategy_name,
             "funding_pnl": 0.0,
             "last_funding_boundary": None,
+            "entry_bar_index": self._bar_index,
+            "stop_loss": self._safe_positive_float(signal.stop_loss) if self.config.honor_signal_stop_loss else None,
+            "take_profit": self._safe_positive_float(signal.take_profit) if self.config.honor_signal_take_profit else None,
+            "trailing_stop_pct": self._safe_positive_float((signal.metadata or {}).get("trailing_stop_pct")),
+            "trailing_stop_distance": self._safe_positive_float((signal.metadata or {}).get("trailing_stop_distance")),
+            "trailing_stop_price": None,
+            "trailing_anchor": exec_price,
+            "metadata": self._signal_metadata(signal),
+            "max_unrealized_pct": 0.0,
         }
 
         self._trades.append(
@@ -334,7 +528,7 @@ class BacktestEngine:
         symbol = signal.symbol
 
         if symbol in self._positions and self._positions[symbol]["side"] == "long":
-            await self._close_position(symbol, current_price, timestamp, "long", window, signal)
+            await self._close_position(symbol, current_price, timestamp, "long", window, signal, exit_reason="signal_reversal")
             return
 
         if not self.config.enable_shorting:
@@ -374,6 +568,15 @@ class BacktestEngine:
             "strategy": signal.strategy_name,
             "funding_pnl": 0.0,
             "last_funding_boundary": None,
+            "entry_bar_index": self._bar_index,
+            "stop_loss": self._safe_positive_float(signal.stop_loss) if self.config.honor_signal_stop_loss else None,
+            "take_profit": self._safe_positive_float(signal.take_profit) if self.config.honor_signal_take_profit else None,
+            "trailing_stop_pct": self._safe_positive_float((signal.metadata or {}).get("trailing_stop_pct")),
+            "trailing_stop_distance": self._safe_positive_float((signal.metadata or {}).get("trailing_stop_distance")),
+            "trailing_stop_price": None,
+            "trailing_anchor": exec_price,
+            "metadata": self._signal_metadata(signal),
+            "max_unrealized_pct": 0.0,
         }
 
         self._trades.append(
@@ -406,6 +609,7 @@ class BacktestEngine:
         side: str,
         window: Optional[pd.DataFrame],
         signal: Optional[Signal] = None,
+        exit_reason: Optional[str] = None,
     ) -> None:
         pos = self._positions.get(symbol)
         if not pos or pos.get("side") != side:
@@ -431,6 +635,12 @@ class BacktestEngine:
         fee = notional * fee_rate
         slippage_cost = abs(exec_price - current_price) * quantity
         net_pnl = gross_pnl + accrued_funding - fee - slippage_cost
+        signal_metadata = self._signal_metadata(signal)
+        resolved_exit_reason = str(
+            exit_reason
+            or signal_metadata.get("close_reason")
+            or ("signal_close" if signal and signal.signal_type in {SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT} else "")
+        ).strip() or None
 
         self._capital += margin + net_pnl
         self._turnover_notional += notional
@@ -453,6 +663,7 @@ class BacktestEngine:
             notional=notional,
             execution_role=str((signal.metadata.get("execution_role") if signal and isinstance(signal.metadata, dict) else self.config.default_execution_role) or "taker"),
             trade_stage="close",
+            exit_reason=resolved_exit_reason,
         )
         self._trades.append(trade)
         del self._positions[symbol]
@@ -471,6 +682,10 @@ class BacktestEngine:
                 unrealized = (float(pos["entry_price"]) - mark) * quantity
             pos["unrealized_pnl"] = unrealized + funding_pnl
             pos["value"] = margin + unrealized + funding_pnl
+            entry_notional = abs(float(pos.get("entry_price", 0.0) or 0.0) * quantity)
+            if entry_notional > 0:
+                favorable_pct = unrealized / entry_notional
+                pos["max_unrealized_pct"] = max(float(pos.get("max_unrealized_pct", 0.0) or 0.0), favorable_pct)
             total_position_value += float(pos["value"])
         self._equity = self._capital + total_position_value
 

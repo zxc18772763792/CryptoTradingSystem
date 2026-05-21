@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from functools import wraps
+import math
 from typing import Optional, List, Dict, Any
 import pandas as pd
 from loguru import logger
@@ -146,6 +148,21 @@ class StrategyBase(ABC):
     # frame during a backtest.
     mutates_input: bool = True
 
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        generate = cls.__dict__.get("generate_signals")
+        if generate is None or getattr(generate, "_finalizes_strategy_signals", False):
+            return
+
+        @wraps(generate)
+        def _wrapped_generate(self, *args, **kwargs):
+            signals = generate(self, *args, **kwargs)
+            data = args[0] if args else kwargs.get("data")
+            return self._finalize_generated_signals(data, signals)
+
+        _wrapped_generate._finalizes_strategy_signals = True  # type: ignore[attr-defined]
+        setattr(cls, "generate_signals", _wrapped_generate)
+
     def __init__(
         self,
         name: str,
@@ -170,6 +187,201 @@ class StrategyBase(ABC):
             信号列表
         """
         pass
+
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Return an active exit signal for an existing position, if any.
+
+        Concrete strategies can override this with indicator-specific logic.
+        The base implementation provides a conservative generic profit lock:
+        after a position has a small ATR-scaled floating profit, close when
+        price crosses back through a short moving average.
+        """
+        metadata = dict(getattr(position, "metadata", {}) or {})
+        if metadata.get("generic_check_exit_enabled") is False:
+            return None
+        if data is None or len(data) < 4 or "close" not in getattr(data, "columns", []):
+            return None
+        try:
+            close = pd.to_numeric(data["close"], errors="coerce")
+            if close.dropna().shape[0] < 4:
+                return None
+            current_price = float(close.iloc[-1])
+            prev_price = float(close.iloc[-2])
+            ma = close.rolling(min(10, max(3, len(close) // 3)), min_periods=3).mean()
+            current_ma = float(ma.iloc[-1])
+            prev_ma = float(ma.iloc[-2])
+            entry_price = float(getattr(position, "entry_price", 0.0) or 0.0)
+        except Exception:
+            return None
+        if not all(math.isfinite(v) for v in (current_price, prev_price, current_ma, prev_ma, entry_price)):
+            return None
+        if entry_price <= 0 or current_price <= 0:
+            return None
+
+        atr_pct = self.compute_atr_pct(data, default=float(metadata.get("atr_pct") or 0.01))
+        min_profit_pct = max(0.002, float(atr_pct or 0.01) * 0.5)
+        raw_side = getattr(position, "side", "")
+        side = str(getattr(raw_side, "value", raw_side) or "").lower()
+        symbol = str(getattr(position, "symbol", "") or "UNKNOWN")
+        timestamp = bar_time(data)
+
+        if side == "long":
+            pnl_pct = (current_price - entry_price) / entry_price
+            crossed_down = prev_price >= prev_ma and current_price < current_ma
+            if pnl_pct >= min_profit_pct and crossed_down:
+                return Signal(
+                    symbol=symbol,
+                    signal_type=SignalType.CLOSE_LONG,
+                    price=current_price,
+                    timestamp=timestamp,
+                    strategy_name=self.name,
+                    strength=0.7,
+                    metadata={
+                        "close_reason": "generic_sma_profit_lock",
+                        "close_only": True,
+                        "atr_pct": float(atr_pct or 0.0),
+                        "generic_check_exit": True,
+                    },
+                )
+        elif side == "short":
+            pnl_pct = (entry_price - current_price) / entry_price
+            crossed_up = prev_price <= prev_ma and current_price > current_ma
+            if pnl_pct >= min_profit_pct and crossed_up:
+                return Signal(
+                    symbol=symbol,
+                    signal_type=SignalType.CLOSE_SHORT,
+                    price=current_price,
+                    timestamp=timestamp,
+                    strategy_name=self.name,
+                    strength=0.7,
+                    metadata={
+                        "close_reason": "generic_sma_profit_lock",
+                        "close_only": True,
+                        "atr_pct": float(atr_pct or 0.0),
+                        "generic_check_exit": True,
+                    },
+                )
+        return None
+
+    @staticmethod
+    def _as_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"", "0", "false", "no", "off"}:
+                return False
+            if text in {"1", "true", "yes", "on"}:
+                return True
+        return bool(value)
+
+    @staticmethod
+    def _safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+        try:
+            out = float(value)
+        except Exception:
+            return default
+        if not math.isfinite(out):
+            return default
+        return out
+
+    @staticmethod
+    def _has_ohlc(data: Any) -> bool:
+        columns = set(getattr(data, "columns", []))
+        return {"high", "low", "close"}.issubset(columns)
+
+    def compute_atr_pct(
+        self,
+        data: pd.DataFrame,
+        period: int = 14,
+        *,
+        default: Optional[float] = 0.01,
+    ) -> Optional[float]:
+        if data is None or len(data) == 0 or "close" not in getattr(data, "columns", []):
+            return default
+        try:
+            close = pd.to_numeric(data["close"], errors="coerce")
+            reference_price = self._safe_float(close.iloc[-1])
+            if reference_price is None or reference_price <= 0:
+                return default
+            if self._has_ohlc(data):
+                high = pd.to_numeric(data["high"], errors="coerce")
+                low = pd.to_numeric(data["low"], errors="coerce")
+                prev_close = close.shift(1)
+                tr = pd.concat(
+                    [
+                        (high - low).abs(),
+                        (high - prev_close).abs(),
+                        (low - prev_close).abs(),
+                    ],
+                    axis=1,
+                ).max(axis=1)
+            else:
+                tr = close.diff().abs()
+            tr = pd.to_numeric(tr, errors="coerce").dropna()
+            if tr.empty:
+                return default
+            window = tr.tail(max(1, int(period or 14)))
+            atr = self._safe_float(window.mean())
+            if atr is None or atr <= 0:
+                return default
+            atr_pct = atr / float(reference_price)
+            if 0 < atr_pct < 1:
+                return float(atr_pct)
+        except Exception:
+            return default
+        return default
+
+    def _use_atr_stops_for_signal(self, signal: Signal) -> bool:
+        metadata = dict(getattr(signal, "metadata", {}) or {})
+        if metadata.get("use_atr_stops") is not None:
+            return self._as_bool(metadata.get("use_atr_stops"), True)
+        if self.params.get("use_atr_stops") is not None:
+            return self._as_bool(self.params.get("use_atr_stops"), True)
+        return str(self.__class__.__module__ or "").startswith("strategies.")
+
+    def _finalize_generated_signals(self, data: Any, signals: Any) -> Any:
+        if not isinstance(signals, list) or not signals:
+            return signals
+        atr_period = int(self.params.get("atr_period") or 14)
+        atr_pct = self.compute_atr_pct(data, period=atr_period, default=0.01)
+        has_ohlc = self._has_ohlc(data)
+        finalized: List[Signal] = []
+        for signal in signals:
+            if not isinstance(signal, Signal):
+                finalized.append(signal)
+                continue
+            metadata = dict(signal.metadata or {})
+            if atr_pct is not None:
+                metadata.setdefault("atr_pct", float(atr_pct))
+                metadata.setdefault("profit_management_atr_pct", float(atr_pct))
+            is_entry = signal.signal_type in {SignalType.BUY, SignalType.SELL}
+            if is_entry and atr_pct is not None and has_ohlc and self._use_atr_stops_for_signal(signal):
+                price = self._safe_float(signal.price)
+                if price is None or price <= 0:
+                    try:
+                        price = self._safe_float(pd.to_numeric(data["close"], errors="coerce").iloc[-1])
+                    except Exception:
+                        price = None
+                if price is not None and price > 0:
+                    sl_mult = float(self.params.get("atr_stop_loss_mult") or metadata.get("atr_stop_loss_mult") or 1.5)
+                    tp_mult = float(self.params.get("atr_take_profit_mult") or metadata.get("atr_take_profit_mult") or 3.0)
+                    stop_pct = max(0.0001, float(atr_pct) * max(0.0, sl_mult))
+                    take_pct = max(0.0001, float(atr_pct) * max(0.0, tp_mult))
+                    metadata["stop_loss_pct"] = float(stop_pct)
+                    metadata["take_profit_pct"] = float(take_pct)
+                    metadata["atr_stop_loss_mult"] = float(sl_mult)
+                    metadata["atr_take_profit_mult"] = float(tp_mult)
+                    metadata["atr_protection_applied"] = True
+                    if signal.signal_type == SignalType.BUY:
+                        signal.stop_loss = float(price) * (1.0 - stop_pct)
+                        signal.take_profit = float(price) * (1.0 + take_pct)
+                    else:
+                        signal.stop_loss = float(price) * (1.0 + stop_pct)
+                        signal.take_profit = float(price) * (1.0 - take_pct)
+            signal.metadata = metadata
+            finalized.append(signal)
+        return finalized
 
     @abstractmethod
     def get_required_data(self) -> Dict[str, Any]:

@@ -136,7 +136,7 @@ def test_news_failover_uses_per_source_models(monkeypatch, tmp_path):
 
     assert result["summary"] == "ETF approval positive"
     assert result["sentiment"] == "positive"
-    assert result["source"] == "openai_responses"
+    assert result["source"] == "openai_responses:gpt-5.5-mini"
     assert [call["url"] for call in calls] == [
         "https://primary.test/v1/responses",
         "https://secondary.test/v1/responses",
@@ -190,7 +190,7 @@ def test_news_failover_supports_anthropic_style_backup(monkeypatch, tmp_path):
 
     assert result["summary"] == "Anthropic backup"
     assert result["sentiment"] == "positive"
-    assert result["source"] == "openai_responses"
+    assert result["source"] == "openai_responses:claude-compatible-model"
     assert [call["url"] for call in calls] == [
         "https://primary.test/v1/responses",
         "https://anthropic-proxy.test/anthropic/v1/messages",

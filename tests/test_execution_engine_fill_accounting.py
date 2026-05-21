@@ -11,6 +11,7 @@ import pytest
 from core.exchanges.base_exchange import OrderStatus
 from core.strategies import Signal, SignalType
 from core.trading.execution_engine import ExecutionEngine
+from core.trading.order_manager import OrderType
 from core.trading.position_manager import PositionSide, position_manager
 
 execution_engine_module = importlib.import_module("core.trading.execution_engine")
@@ -202,6 +203,162 @@ def test_manual_live_order_records_backfilled_fee_and_slippage(monkeypatch):
     assert notify_mock.await_args.args[0] == "manual_order_executed"
 
 
+def test_manual_open_revalidates_take_profit_against_actual_fill(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+
+    record_trade_calls: list[dict] = []
+
+    monkeypatch.setattr(execution_engine_module.account_manager, "is_enabled", lambda account_id: True)
+    monkeypatch.setattr(
+        execution_engine_module.decision_engine,
+        "evaluate_order_intent",
+        AsyncMock(return_value=SimpleNamespace(allowed=True, trace_id="trace-manual-fill-protection")),
+    )
+    monkeypatch.setattr(execution_engine_module.risk_manager, "pre_trade_check", lambda **kwargs: True)
+    monkeypatch.setattr(
+        execution_engine_module.risk_manager,
+        "record_trade",
+        lambda payload: record_trade_calls.append(dict(payload)),
+    )
+    monkeypatch.setattr(
+        execution_engine_module.order_manager,
+        "create_order",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                id="manual-fill-protection-1",
+                status=OrderStatus.CLOSED,
+                price=105.0,
+                amount=0.5,
+                filled=0.5,
+                fee=0.0,
+            )
+        ),
+    )
+    monkeypatch.setattr(engine, "_resolve_order_context", AsyncMock(return_value=(100.0, 50.0)))
+    monkeypatch.setattr(engine, "_get_account_equity", AsyncMock(return_value=1000.0))
+    monkeypatch.setattr(engine, "_consume_paper_order_cost", lambda order_id: {"fee_usd": 0.0, "slippage_cost_usd": 0.0})
+    monkeypatch.setattr(engine, "_notify_callbacks", AsyncMock(return_value=None))
+
+    result = asyncio.run(
+        engine._execute_manual_order_single_in_active_mode(
+            exchange="binance",
+            symbol="BTC/USDT",
+            side="buy",
+            order_type="market",
+            amount=0.5,
+            price=100.0,
+            leverage=2.0,
+            stop_loss=96.0,
+            take_profit=101.0,
+            trailing_stop_pct=None,
+            trailing_stop_distance=None,
+            trigger_price=None,
+            order_mode="normal",
+            iceberg_parts=1,
+            algo_slices=1,
+            algo_interval_sec=0,
+            account_id="main",
+            reduce_only=False,
+            strategy="manual_fill_protection",
+            params={},
+        )
+    )
+
+    assert result is not None
+    assert result["price"] == pytest.approx(105.0)
+    assert result["stop_loss"] == pytest.approx(96.0)
+    assert result["take_profit"] is None
+    assert record_trade_calls[-1]["take_profit"] is None
+    position = position_manager.get_position("binance", "BTC/USDT", account_id="main", strategy="manual_fill_protection")
+    assert position is not None
+    assert position.entry_price == pytest.approx(105.0)
+    assert position.take_profit is None
+
+
+def test_manual_reduce_order_records_close_reason(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+    position_manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=100.0,
+        quantity=1.0,
+        leverage=2.0,
+        strategy="manual_close_demo",
+        account_id="main",
+    )
+
+    record_trade_calls: list[dict] = []
+    notify_mock = AsyncMock(return_value=None)
+
+    monkeypatch.setattr(execution_engine_module.account_manager, "is_enabled", lambda account_id: True)
+    monkeypatch.setattr(
+        execution_engine_module.decision_engine,
+        "evaluate_order_intent",
+        AsyncMock(return_value=SimpleNamespace(allowed=True, trace_id="trace-manual-close")),
+    )
+    monkeypatch.setattr(execution_engine_module.risk_manager, "pre_trade_check", lambda **kwargs: True)
+    monkeypatch.setattr(
+        execution_engine_module.risk_manager,
+        "record_trade",
+        lambda payload: record_trade_calls.append(dict(payload)),
+    )
+    monkeypatch.setattr(
+        execution_engine_module.order_manager,
+        "create_order",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                id="manual-close-1",
+                status=OrderStatus.CLOSED,
+                price=99.0,
+                amount=1.0,
+                filled=1.0,
+                fee=0.0,
+            )
+        ),
+    )
+    monkeypatch.setattr(engine, "_resolve_order_context", AsyncMock(return_value=(99.0, 99.0)))
+    monkeypatch.setattr(engine, "_get_account_equity", AsyncMock(return_value=1000.0))
+    monkeypatch.setattr(
+        engine,
+        "_resolve_execution_costs",
+        AsyncMock(return_value={"fee_usd": 0.0, "slippage_cost_usd": 0.0, "cost_usd": 0.0}),
+    )
+    monkeypatch.setattr(engine, "_notify_callbacks", notify_mock)
+
+    result = asyncio.run(
+        engine._execute_manual_order_single_in_active_mode(
+            exchange="binance",
+            symbol="BTC/USDT",
+            side="sell",
+            order_type="market",
+            amount=1.0,
+            price=99.0,
+            leverage=2.0,
+            stop_loss=None,
+            take_profit=None,
+            trailing_stop_pct=None,
+            trailing_stop_distance=None,
+            trigger_price=None,
+            order_mode="normal",
+            iceberg_parts=1,
+            algo_slices=1,
+            algo_interval_sec=0,
+            account_id="main",
+            reduce_only=True,
+            strategy="manual_close_demo",
+            params={"close_reason": "stop_loss"},
+        )
+    )
+
+    assert result is not None
+    assert result["close_reason"] == "stop_loss"
+    assert record_trade_calls[-1]["close_reason"] == "stop_loss"
+    assert notify_mock.await_args.args[1]["close_reason"] == "stop_loss"
+
+
 def test_live_execution_costs_fall_back_to_live_defaults(monkeypatch):
     engine = ExecutionEngine()
     engine._paper_trading = False
@@ -287,6 +444,8 @@ def test_close_position_uses_actual_filled_quantity_for_partial_live_close(monke
             )
         ),
     )
+    cancel_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(execution_engine_module.order_manager, "cancel_order", cancel_mock)
     monkeypatch.setattr(engine, "_consume_paper_order_cost", lambda order_id: {"fee_usd": 0.0, "slippage_cost_usd": 0.0})
     monkeypatch.setattr(engine, "_record_live_strategy_trade", live_trade_mock)
     monkeypatch.setattr(engine, "_notify_callbacks", notify_mock)
@@ -296,12 +455,169 @@ def test_close_position_uses_actual_filled_quantity_for_partial_live_close(monke
 
     assert result is not None
     assert result["quantity"] == pytest.approx(0.25)
+    assert result["close_order_mode"] == "limit_first_partial"
     assert record_trade_calls[-1]["quantity"] == pytest.approx(0.25)
     remaining = position_manager.get_position("binance", "BTC/USDT", account_id="main", strategy="demo_close")
     assert remaining is not None
     assert remaining.quantity == pytest.approx(0.75)
     assert live_trade_mock.await_args.kwargs["quantity"] == pytest.approx(0.25)
     assert notify_mock.await_args.args[0] == "order_executed"
+    cancel_mock.assert_awaited_once_with("close-1", "BTC/USDT", "binance")
+
+
+def test_close_position_uses_post_only_limit_before_market_fallback(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+
+    record_trade_calls: list[dict] = []
+    captured_requests = []
+    notify_mock = AsyncMock(return_value=None)
+    live_trade_mock = AsyncMock(return_value=None)
+
+    position_manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=100.0,
+        quantity=1.0,
+        leverage=2.0,
+        strategy="demo_limit_fallback",
+        account_id="main",
+        metadata={"source": "strategy"},
+    )
+    position = position_manager.get_position("binance", "BTC/USDT", account_id="main", strategy="demo_limit_fallback")
+    assert position is not None
+
+    signal = Signal(
+        symbol="BTC/USDT",
+        signal_type=SignalType.CLOSE_LONG,
+        price=105.0,
+        timestamp=datetime.now(timezone.utc),
+        strategy_name="demo_limit_fallback",
+        strength=0.6,
+        metadata={"account_id": "main", "exchange": "binance", "close_limit_wait_sec": 0},
+    )
+
+    async def _create_order(request):
+        captured_requests.append(request)
+        if len(captured_requests) == 1:
+            return SimpleNamespace(
+                id="limit-close-1",
+                status=OrderStatus.OPEN,
+                price=request.price,
+                amount=request.amount,
+                filled=0.0,
+                fee=0.0,
+            )
+        return SimpleNamespace(
+            id="market-close-1",
+            status=OrderStatus.CLOSED,
+            price=105.0,
+            amount=request.amount,
+            filled=request.amount,
+            fee=0.0,
+        )
+
+    monkeypatch.setattr(engine, "_resolve_existing_position", AsyncMock(return_value=position))
+    monkeypatch.setattr(engine, "_resolve_order_context", AsyncMock(return_value=(105.0, 105.0)))
+    monkeypatch.setattr(engine, "_resolve_strategy_trade_policy", lambda *args, **kwargs: {"market_type": "future"})
+    monkeypatch.setattr(execution_engine_module.risk_manager, "pre_trade_check", lambda **kwargs: True)
+    monkeypatch.setattr(
+        execution_engine_module.risk_manager,
+        "record_trade",
+        lambda payload: record_trade_calls.append(dict(payload)),
+    )
+    monkeypatch.setattr(execution_engine_module.order_manager, "create_order", AsyncMock(side_effect=_create_order))
+    monkeypatch.setattr(execution_engine_module.order_manager, "cancel_order", AsyncMock(return_value=True))
+    monkeypatch.setattr(engine, "_consume_paper_order_cost", lambda order_id: {"fee_usd": 0.0, "slippage_cost_usd": 0.0})
+    monkeypatch.setattr(engine, "_record_live_strategy_trade", live_trade_mock)
+    monkeypatch.setattr(engine, "_notify_callbacks", notify_mock)
+    monkeypatch.setattr(execution_engine_module.audit_logger, "log", AsyncMock(return_value=None))
+
+    result = asyncio.run(engine._close_position_in_active_mode(signal, PositionSide.LONG))
+
+    assert result is not None
+    assert len(captured_requests) == 2
+    assert captured_requests[0].order_type == OrderType.LIMIT
+    assert captured_requests[0].price == pytest.approx(105.0 * 1.0005)
+    assert captured_requests[0].reduce_only is True
+    assert captured_requests[0].params["post_only"] is True
+    assert captured_requests[1].order_type == OrderType.MARKET
+    assert captured_requests[1].params["close_order_mode"] == "market_fallback"
+    assert captured_requests[1].params["fallback_from_order_id"] == "limit-close-1"
+    assert result["order"]["id"] == "market-close-1"
+    assert result["close_order_mode"] == "market_fallback"
+    assert result["limit_first_order_id"] == "limit-close-1"
+    assert record_trade_calls[-1]["close_order_mode"] == "market_fallback"
+    assert live_trade_mock.await_args.kwargs["cost_details"]["close_order_mode"] == "market_fallback"
+
+
+def test_close_position_accepts_filled_post_only_limit_without_fallback(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+
+    record_trade_calls: list[dict] = []
+    captured_requests = []
+
+    position_manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=100.0,
+        quantity=1.0,
+        leverage=2.0,
+        strategy="demo_limit_fill",
+        account_id="main",
+        metadata={"source": "strategy"},
+    )
+    position = position_manager.get_position("binance", "BTC/USDT", account_id="main", strategy="demo_limit_fill")
+    assert position is not None
+
+    signal = Signal(
+        symbol="BTC/USDT",
+        signal_type=SignalType.CLOSE_LONG,
+        price=105.0,
+        timestamp=datetime.now(timezone.utc),
+        strategy_name="demo_limit_fill",
+        strength=0.6,
+        metadata={"account_id": "main", "exchange": "binance", "close_limit_wait_sec": 0},
+    )
+
+    async def _create_order(request):
+        captured_requests.append(request)
+        return SimpleNamespace(
+            id="limit-close-filled",
+            status=OrderStatus.CLOSED,
+            price=request.price,
+            amount=request.amount,
+            filled=request.amount,
+            fee=0.0,
+        )
+
+    monkeypatch.setattr(engine, "_resolve_existing_position", AsyncMock(return_value=position))
+    monkeypatch.setattr(engine, "_resolve_order_context", AsyncMock(return_value=(105.0, 105.0)))
+    monkeypatch.setattr(engine, "_resolve_strategy_trade_policy", lambda *args, **kwargs: {"market_type": "future"})
+    monkeypatch.setattr(execution_engine_module.risk_manager, "pre_trade_check", lambda **kwargs: True)
+    monkeypatch.setattr(
+        execution_engine_module.risk_manager,
+        "record_trade",
+        lambda payload: record_trade_calls.append(dict(payload)),
+    )
+    monkeypatch.setattr(execution_engine_module.order_manager, "create_order", AsyncMock(side_effect=_create_order))
+    monkeypatch.setattr(engine, "_consume_paper_order_cost", lambda order_id: {"fee_usd": 0.0, "slippage_cost_usd": 0.0})
+    monkeypatch.setattr(engine, "_record_live_strategy_trade", AsyncMock(return_value=None))
+    monkeypatch.setattr(engine, "_notify_callbacks", AsyncMock(return_value=None))
+    monkeypatch.setattr(execution_engine_module.audit_logger, "log", AsyncMock(return_value=None))
+
+    result = asyncio.run(engine._close_position_in_active_mode(signal, PositionSide.LONG))
+
+    assert result is not None
+    assert len(captured_requests) == 1
+    assert captured_requests[0].order_type == OrderType.LIMIT
+    assert captured_requests[0].params["post_only"] is True
+    assert result["order"]["id"] == "limit-close-filled"
+    assert result["close_order_mode"] == "limit_first"
+    assert record_trade_calls[-1]["close_order_mode"] == "limit_first"
 
 
 def test_live_close_backfills_fee_from_binance_trades_and_records_slippage(monkeypatch):

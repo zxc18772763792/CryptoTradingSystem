@@ -12,14 +12,6 @@ from core.risk.position_sizer import (
     SizingMethod,
     position_sizer,
 )
-from core.risk.stop_loss import (
-    StopLossManager,
-    StopLossType,
-    StopLossConfig,
-    TakeProfitManager,
-    stop_loss_manager,
-    take_profit_manager,
-)
 from core.risk.circuit_breaker import (
     CircuitBreaker,
     Decision,
@@ -39,12 +31,6 @@ __all__ = [
     "PositionSizer",
     "SizingMethod",
     "position_sizer",
-    "StopLossManager",
-    "StopLossType",
-    "StopLossConfig",
-    "TakeProfitManager",
-    "stop_loss_manager",
-    "take_profit_manager",
     "CircuitBreaker",
     "Decision",
     "DECISION_ALLOW",
