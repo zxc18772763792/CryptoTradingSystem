@@ -29,6 +29,39 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _robust_std(values: List[float], center: Optional[float] = None) -> float:
+    """Estimate return scale with MAD so isolated fat-tail bars do not mask decay."""
+    import math
+
+    cleaned = [float(item) for item in values if math.isfinite(float(item))]
+    n = len(cleaned)
+    if n < 2:
+        return 1e-6
+
+    ordered = sorted(cleaned)
+
+    def _median(rows: List[float]) -> float:
+        size = len(rows)
+        mid = size // 2
+        if size % 2:
+            return rows[mid]
+        return (rows[mid - 1] + rows[mid]) / 2.0
+
+    baseline = float(center) if center is not None and math.isfinite(float(center)) else _median(ordered)
+    deviations = sorted(abs(item - baseline) for item in ordered)
+    mad = _median(deviations)
+    if mad <= 0:
+        nonzero_deviations = [item for item in deviations if item > 0]
+        if nonzero_deviations:
+            mad = _median(nonzero_deviations)
+    if mad > 0:
+        return max(1.4826 * mad, 1e-6)
+
+    mean_r = sum(cleaned) / n
+    var_r = sum((r - mean_r) ** 2 for r in cleaned) / max(n - 1, 1)
+    return math.sqrt(max(var_r, 1e-12))
+
+
 def detect_strategy_decay(
     returns: List[float],
     target_return: float = 0.0,
@@ -77,18 +110,7 @@ def detect_strategy_decay(
             "message": "insufficient data",
         }
 
-    import math
-
-    # Estimate std from the full series (robust to outliers via IQR if scipy available)
-    try:
-        from scipy.stats import iqr as _iqr
-        q75, q25 = _iqr(returns, rng=(75, 25)), _iqr(returns, rng=(25, 25))
-        # Fall back to sample std
-        raise ValueError("use std")
-    except Exception:
-        mean_r = sum(returns) / n
-        var_r = sum((r - mean_r) ** 2 for r in returns) / max(n - 1, 1)
-        std_r = math.sqrt(max(var_r, 1e-12))
+    std_r = _robust_std(returns, center=target_return)
 
     threshold = -abs(h) * std_r
     allowance = abs(k) * std_r  # slack: ignore shifts smaller than k*std
@@ -175,11 +197,8 @@ class CUSUMMonitor:
         self._returns.append(float(bar_return))
         n = len(self._returns)
 
-        # Recompute std from full history (cheap enough for typical sizes < 10k)
-        import math
-        mean_r = sum(self._returns) / n
-        var_r = sum((r - mean_r) ** 2 for r in self._returns) / max(n - 1, 1)
-        std_r = math.sqrt(max(var_r, 1e-12))
+        # Recompute scale from full history (cheap enough for typical sizes < 10k)
+        std_r = _robust_std(self._returns, center=self.target_return)
 
         threshold = -abs(self.h) * std_r
         allowance = abs(self.k) * std_r

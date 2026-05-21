@@ -88,6 +88,33 @@ _LIVE_POSITION_DETAILS_CACHE: Dict[str, Any] = {
     "positions": [],
     "diagnostics": None,
 }
+
+
+def _consume_audit_task_result(task) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        logger.warning(f"Background audit log task failed: {exc}")
+
+
+def _schedule_audit_log(**kwargs: Any) -> None:
+    async def _run() -> None:
+        try:
+            await audit_logger.log(**kwargs)
+        except Exception as exc:
+            logger.warning(f"Background audit log failed: {exc}")
+
+    coro = _run()
+    try:
+        task = asyncio.create_task(coro)
+    except RuntimeError as exc:
+        coro.close()
+        logger.warning(f"Failed to schedule audit log: {exc}")
+        return
+    if hasattr(task, "add_done_callback"):
+        task.add_done_callback(_consume_audit_task_result)
 _LIVE_ORDER_DETAILS_CACHE: Dict[str, Any] = {"ts": 0.0, "orders": []}
 _LIVE_CONDITIONAL_ORDER_CACHE: Dict[str, Any] = {"ts": 0.0, "orders": []}
 _RULE_PRICE_CACHE_TTL_SEC = 10.0
@@ -5126,7 +5153,7 @@ async def create_order(request: OrderRequest):
         )
     except asyncio.TimeoutError:
         detail = f"下单超时（{int(timeout_sec)}s），请检查交易所连接后重试"
-        await audit_logger.log(
+        _schedule_audit_log(
             module="trading",
             action="create_order",
             status="failed",
@@ -5144,7 +5171,7 @@ async def create_order(request: OrderRequest):
         elif "-2019" in raw_error:
             mapped_error = "保证金不足。请确认 Binance U 本位合约可用余额，并降低数量或提高杠杆。"
         detail = risk.get("halt_reason") or mapped_error or "下单失败，可能触发风控或交易所限制"
-        await audit_logger.log(
+        _schedule_audit_log(
             module="trading",
             action="create_order",
             status="failed",
@@ -5153,7 +5180,7 @@ async def create_order(request: OrderRequest):
         )
         raise HTTPException(status_code=400, detail=detail)
 
-    await audit_logger.log(
+    _schedule_audit_log(
         module="trading",
         action="create_order",
         status="success",
@@ -5393,7 +5420,7 @@ async def cancel_order(
 ):
     success = await order_manager.cancel_order(order_id, symbol, exchange)
     if success:
-        await audit_logger.log(
+        _schedule_audit_log(
             module="trading",
             action="cancel_order",
             status="success",
@@ -5401,7 +5428,7 @@ async def cancel_order(
             details={"order_id": order_id, "symbol": symbol, "exchange": exchange},
         )
         return {"success": True, "order_id": order_id}
-    await audit_logger.log(
+    _schedule_audit_log(
         module="trading",
         action="cancel_order",
         status="failed",
@@ -5416,7 +5443,7 @@ async def cancel_all_orders(
     exchange: str = "binance",
 ):
     count = await order_manager.cancel_all_orders(symbol, exchange)
-    await audit_logger.log(
+    _schedule_audit_log(
         module="trading",
         action="cancel_all_orders",
         status="success",
@@ -5902,7 +5929,7 @@ async def close_position(req: PositionCloseRequest):
             raise HTTPException(
                 status_code=400, detail="Failed to close local position"
             )
-        await audit_logger.log(
+        _schedule_audit_log(
             module="trading",
             action="close_position",
             status="success",
@@ -5998,7 +6025,7 @@ async def close_position(req: PositionCloseRequest):
             status_code=400, detail="Failed to place exchange close order"
         )
 
-    await audit_logger.log(
+    _schedule_audit_log(
         module="trading",
         action="close_position",
         status="success",

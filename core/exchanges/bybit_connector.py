@@ -1,77 +1,119 @@
-"""
-Bybit交易所连接器
-"""
+"""Bybit exchange connector."""
+
+import asyncio
+import contextlib
 from datetime import datetime, timezone
-from typing import Optional, List
+from typing import Any, List, Optional
+
 import ccxt.async_support as ccxt
 from loguru import logger
 
-from config.settings import settings
 from config.exchanges import ExchangeConfig
+from config.settings import settings
 from core.exchanges.base_exchange import (
+    Balance,
     BaseExchange,
-    Ticker,
     Kline,
     Order,
-    Balance,
-    Position,
     OrderSide,
-    OrderType,
     OrderStatus,
+    OrderType,
+    Position,
+    Ticker,
 )
 
 
 class BybitConnector(BaseExchange):
-    """Bybit交易所连接器"""
+    """Bybit exchange connector."""
 
     def __init__(self, config: ExchangeConfig):
         super().__init__(config)
+        self._connection_lock = asyncio.Lock()
+
+    def _build_client_config(self) -> dict:
+        return {
+            "apiKey": self.config.api_key or settings.BYBIT_API_KEY,
+            "secret": self.config.api_secret or settings.BYBIT_API_SECRET,
+            "enableRateLimit": self.config.enable_rate_limit,
+            "rateLimit": self.config.rate_limit,
+            "timeout": self.config.timeout,
+            "sandbox": self.config.sandbox,
+            "defaultType": self.config.default_type,
+        }
+
+    def _apply_proxy(self, client: Any) -> None:
+        proxy_url = str(self.config.proxy or settings.HTTP_PROXY or settings.HTTPS_PROXY or "").strip() or None
+        if proxy_url:
+            client.proxies = {
+                "http": proxy_url,
+                "https": settings.HTTPS_PROXY or proxy_url,
+            }
+
+    def _format_order_precision(
+        self,
+        client: Any,
+        symbol: str,
+        amount: float,
+        price: Optional[float],
+    ) -> tuple[Any, Optional[Any]]:
+        precise_amount: Any = amount
+        amount_to_precision = getattr(client, "amount_to_precision", None)
+        if callable(amount_to_precision):
+            precise_amount = amount_to_precision(symbol, amount)
+
+        precise_price: Optional[Any] = price
+        price_to_precision = getattr(client, "price_to_precision", None)
+        if price is not None and callable(price_to_precision):
+            precise_price = price_to_precision(symbol, price)
+
+        return precise_amount, precise_price
 
     async def connect(self) -> bool:
-        """连接Bybit"""
-        try:
-            proxy_url = str(self.config.proxy or settings.HTTP_PROXY or settings.HTTPS_PROXY or "").strip() or None
-            self._client = ccxt.bybit({
-                "apiKey": self.config.api_key or settings.BYBIT_API_KEY,
-                "secret": self.config.api_secret or settings.BYBIT_API_SECRET,
-                "enableRateLimit": self.config.enable_rate_limit,
-                "rateLimit": self.config.rate_limit,
-                "timeout": self.config.timeout,
-                "sandbox": self.config.sandbox,
-                "defaultType": self.config.default_type,
-            })
-
-            if proxy_url:
-                self._client.proxies = {
-                    "http": proxy_url,
-                    "https": settings.HTTPS_PROXY or proxy_url,
-                }
-
-            await self._client.load_markets()
-            self._connected = True
-            logger.info(f"[{self.name}] Connected successfully")
-            return True
-
-        except Exception as e:
+        """Connect to Bybit."""
+        async with self._connection_lock:
+            existing_client = self._client
+            existing_connected = bool(existing_client is not None and self._connected)
+            candidate_client = None
             try:
-                if self._client:
-                    await self._client.close()
-            except Exception as close_exc:
-                logger.debug(f"[{self.name}] best-effort client close failed: {close_exc}")
-            self._client = None
-            self._connected = False
-            self._handle_error(e, "connect")
-            return False
+                candidate_client = ccxt.bybit(self._build_client_config())
+                self._apply_proxy(candidate_client)
+                await candidate_client.load_markets()
+                self._client = candidate_client
+                self._connected = True
+                if existing_client is not None and existing_client is not candidate_client:
+                    with contextlib.suppress(Exception):
+                        await existing_client.close()
+                logger.info(f"[{self.name}] Connected successfully")
+                return True
+
+            except BaseException as e:
+                if candidate_client is not None and candidate_client is not existing_client:
+                    with contextlib.suppress(Exception):
+                        await candidate_client.close()
+                if existing_connected:
+                    self._client = existing_client
+                    self._connected = True
+                else:
+                    self._client = None
+                    self._connected = False
+                if isinstance(e, asyncio.CancelledError):
+                    raise
+                self._handle_error(e, "connect")
+                return False
 
     async def disconnect(self) -> None:
-        """断开连接"""
-        if self._client:
-            await self._client.close()
-        self._connected = False
+        """Disconnect from Bybit."""
+        async with self._connection_lock:
+            client = self._client
+            self._client = None
+            self._connected = False
+            if client:
+                with contextlib.suppress(Exception):
+                    await client.close()
         logger.info(f"[{self.name}] Disconnected")
 
     async def get_ticker(self, symbol: str) -> Ticker:
-        """获取行情数据"""
+        """Get ticker data."""
         try:
             client = await self._ensure_client()
             ticker = await client.fetch_ticker(symbol)
@@ -96,7 +138,7 @@ class BybitConnector(BaseExchange):
         since: Optional[datetime] = None,
         limit: Optional[int] = None,
     ) -> List[Kline]:
-        """获取K线数据"""
+        """Get OHLCV data."""
         try:
             client = await self._ensure_client()
             since_ms = int(since.timestamp() * 1000) if since else None
@@ -109,17 +151,19 @@ class BybitConnector(BaseExchange):
 
             klines = []
             for candle in ohlcv:
-                klines.append(Kline(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    timestamp=datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc),
-                    open=float(candle[1]),
-                    high=float(candle[2]),
-                    low=float(candle[3]),
-                    close=float(candle[4]),
-                    volume=float(candle[5]),
-                    exchange=self.name,
-                ))
+                klines.append(
+                    Kline(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        timestamp=datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc),
+                        open=float(candle[1]),
+                        high=float(candle[2]),
+                        low=float(candle[3]),
+                        close=float(candle[4]),
+                        volume=float(candle[5]),
+                        exchange=self.name,
+                    )
+                )
 
             return klines
 
@@ -127,9 +171,10 @@ class BybitConnector(BaseExchange):
             self._handle_error(e, f"get_klines({symbol}, {timeframe})")
 
     async def get_order_book(self, symbol: str, limit: int = 20) -> dict:
-        """获取订单簿"""
+        """Get order book."""
         try:
-            orderbook = await self._client.fetch_order_book(symbol, limit)
+            client = await self._ensure_client()
+            orderbook = await client.fetch_order_book(symbol, limit)
             return {
                 "bids": orderbook.get("bids", []),
                 "asks": orderbook.get("asks", []),
@@ -139,9 +184,10 @@ class BybitConnector(BaseExchange):
             self._handle_error(e, f"get_order_book({symbol})")
 
     async def get_balance(self) -> List[Balance]:
-        """获取账户余额"""
+        """Get account balances."""
         try:
-            balance = await self._client.fetch_balance()
+            client = await self._ensure_client()
+            balance = await client.fetch_balance()
             balances = []
 
             for currency, amounts in balance.items():
@@ -153,12 +199,14 @@ class BybitConnector(BaseExchange):
                 total = float(amounts.get("total", 0) or 0)
 
                 if total > 0:
-                    balances.append(Balance(
-                        currency=currency,
-                        free=free,
-                        used=used,
-                        total=total,
-                    ))
+                    balances.append(
+                        Balance(
+                            currency=currency,
+                            free=free,
+                            used=used,
+                            total=total,
+                        )
+                    )
 
             return balances
 
@@ -174,15 +222,16 @@ class BybitConnector(BaseExchange):
         price: Optional[float] = None,
         params: Optional[dict] = None,
     ) -> Order:
-        """创建订单"""
+        """Create an order."""
         try:
             client = await self._ensure_client()
+            precise_amount, precise_price = self._format_order_precision(client, symbol, amount, price)
             ccxt_order = await client.create_order(
                 symbol=symbol,
                 type=order_type.value,
                 side=side.value,
-                amount=amount,
-                price=price,
+                amount=precise_amount,
+                price=precise_price,
                 params=params or {},
             )
 
@@ -192,9 +241,10 @@ class BybitConnector(BaseExchange):
             self._handle_error(e, f"create_order({symbol}, {side.value}, {order_type.value})")
 
     async def cancel_order(self, order_id: str, symbol: str) -> bool:
-        """取消订单"""
+        """Cancel an order."""
         try:
-            await self._client.cancel_order(order_id, symbol)
+            client = await self._ensure_client()
+            await client.cancel_order(order_id, symbol)
             logger.info(f"[{self.name}] Order {order_id} cancelled")
             return True
         except Exception as e:
@@ -202,39 +252,44 @@ class BybitConnector(BaseExchange):
             return False
 
     async def get_order(self, order_id: str, symbol: str) -> Order:
-        """获取订单信息"""
+        """Get order details."""
         try:
-            ccxt_order = await self._client.fetch_order(order_id, symbol)
+            client = await self._ensure_client()
+            ccxt_order = await client.fetch_order(order_id, symbol)
             return self._parse_order(ccxt_order)
         except Exception as e:
             self._handle_error(e, f"get_order({order_id})")
 
     async def get_open_orders(self, symbol: Optional[str] = None) -> List[Order]:
-        """获取未完成订单"""
+        """Get open orders."""
         try:
-            ccxt_orders = await self._client.fetch_open_orders(symbol)
+            client = await self._ensure_client()
+            ccxt_orders = await client.fetch_open_orders(symbol)
             return [self._parse_order(order) for order in ccxt_orders]
         except Exception as e:
             self._handle_error(e, "get_open_orders")
 
     async def get_positions(self) -> List[Position]:
-        """获取持仓信息"""
+        """Get positions."""
         try:
-            positions = await self._client.fetch_positions()
+            client = await self._ensure_client()
+            positions = await client.fetch_positions()
             result = []
 
             for pos in positions:
                 if float(pos.get("contracts", 0)) > 0:
-                    result.append(Position(
-                        symbol=pos.get("symbol", ""),
-                        side=pos.get("side", ""),
-                        amount=float(pos.get("contracts", 0)),
-                        entry_price=float(pos.get("entryPrice", 0)),
-                        current_price=float(pos.get("markPrice", 0)),
-                        unrealized_pnl=float(pos.get("unrealizedPnl", 0)),
-                        leverage=float(pos.get("leverage", 1)),
-                        liquidation_price=pos.get("liquidationPrice"),
-                    ))
+                    result.append(
+                        Position(
+                            symbol=pos.get("symbol", ""),
+                            side=pos.get("side", ""),
+                            amount=float(pos.get("contracts", 0)),
+                            entry_price=float(pos.get("entryPrice", 0)),
+                            current_price=float(pos.get("markPrice", 0)),
+                            unrealized_pnl=float(pos.get("unrealizedPnl", 0)),
+                            leverage=float(pos.get("leverage", 1)),
+                            liquidation_price=pos.get("liquidationPrice"),
+                        )
+                    )
 
             return result
 
@@ -247,10 +302,11 @@ class BybitConnector(BaseExchange):
         since: Optional[datetime] = None,
         limit: Optional[int] = None,
     ) -> List[dict]:
-        """获取成交记录"""
+        """Get trade history."""
         try:
+            client = await self._ensure_client()
             since_ms = int(since.timestamp() * 1000) if since else None
-            trades = await self._client.fetch_my_trades(
+            trades = await client.fetch_my_trades(
                 symbol,
                 since=since_ms,
                 limit=limit or 100,
@@ -260,7 +316,7 @@ class BybitConnector(BaseExchange):
             self._handle_error(e, f"get_trades({symbol})")
 
     def _parse_order(self, ccxt_order: dict) -> Order:
-        """解析CCXT订单格式"""
+        """Parse a CCXT order payload."""
         status_map = {
             "open": OrderStatus.OPEN,
             "closed": OrderStatus.CLOSED,
@@ -286,6 +342,8 @@ class BybitConnector(BaseExchange):
             fee=fee_cost,
             fee_currency=fee_currency,
             status=status_map.get(ccxt_order.get("status", "open"), OrderStatus.OPEN),
-            timestamp=datetime.fromtimestamp(ccxt_order.get("timestamp", 0) / 1000) if ccxt_order.get("timestamp") else None,
+            timestamp=datetime.fromtimestamp(ccxt_order.get("timestamp", 0) / 1000)
+            if ccxt_order.get("timestamp")
+            else None,
             exchange=self.name,
         )

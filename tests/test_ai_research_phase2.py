@@ -1425,7 +1425,7 @@ def test_correlation_filter_marks_redundant():
 
     assert not c1.metadata.get("correlation_filtered"), "Best candidate should NOT be filtered"
     assert c2.metadata.get("correlation_filtered"), "Redundant candidate SHOULD be filtered"
-    assert c2.metadata.get("correlated_with") == "MAStrategy"
+    assert c2.metadata.get("correlated_with") == c1.candidate_id
     assert c2.promotion is None or c2.promotion.decision == "reject"
 
 
@@ -1603,7 +1603,7 @@ def test_correlation_filter_cross_batch_flag():
 
     assert new_cand.metadata.get("correlation_filtered"), "Should be filtered against existing running strategy"
     assert new_cand.metadata.get("correlation_is_cross_batch") is True, "Should flag as cross-batch correlation"
-    assert new_cand.metadata.get("correlated_with") == "RunningStrategy"
+    assert new_cand.metadata.get("correlated_with") == existing.candidate_id
 
 
 # ══════════════════════════════════════════════════════════════

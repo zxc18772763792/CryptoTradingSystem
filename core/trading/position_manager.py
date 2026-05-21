@@ -126,6 +126,10 @@ class PositionManager:
     def __init__(self):
         self._positions: Dict[str, Position] = {}
         self._position_history: List[Position] = []
+        self._position_history_limit = max(
+            100,
+            int(getattr(settings, "POSITION_HISTORY_LIMIT", 5000) or 5000),
+        )
         self._callbacks: List[Any] = []
         self._scope = self._normalize_scope(getattr(settings, "TRADING_MODE", "paper"))
         self._storage_root = Path(getattr(settings, "CACHE_PATH", "cache")) / "runtime_state"
@@ -224,7 +228,7 @@ class PositionManager:
         if not isinstance(payload, dict):
             return None
         try:
-            return Position(
+            position = Position(
                 symbol=str(payload.get("symbol") or ""),
                 exchange=str(payload.get("exchange") or ""),
                 side=self._coerce_side(payload.get("side")),
@@ -251,9 +255,26 @@ class PositionManager:
                 lowest_price=float(payload["lowest_price"]) if payload.get("lowest_price") is not None else None,
                 metadata=dict(payload.get("metadata") or {}),
             )
+            if not self._is_restorable_position(position):
+                return None
+            return position
         except Exception as e:
             logger.warning(f"Failed to restore persisted position: {e}")
             return None
+
+    @staticmethod
+    def _is_restorable_position(position: Position) -> bool:
+        account_id = str(position.account_id or "").strip()
+        strategy = str(position.strategy or "").strip()
+        metadata = dict(position.metadata or {})
+        source = str(metadata.get("source") or "").strip().lower()
+        if account_id == "acct_A" and strategy == "stub" and source in {"", "strategy"}:
+            logger.warning(
+                "Skipped persisted test stub position: "
+                f"exchange={position.exchange} symbol={position.symbol} account_id={account_id}"
+            )
+            return False
+        return True
 
     def _snapshot_scope_state(self) -> Dict[str, Any]:
         return {
@@ -282,6 +303,7 @@ class PositionManager:
             if position is None:
                 continue
             self._position_history.append(position)
+        self._trim_position_history()
 
         self._dirty = False
 
@@ -347,6 +369,10 @@ class PositionManager:
             self._dirty = False
         except Exception as e:
             logger.warning(f"Failed to persist positions for scope={self._scope}: {e}")
+
+    def _trim_position_history(self) -> None:
+        if len(self._position_history) > self._position_history_limit:
+            self._position_history = self._position_history[-self._position_history_limit:]
 
     def set_scope(self, scope: str) -> None:
         target = self._normalize_scope(scope)
@@ -472,7 +498,7 @@ class PositionManager:
 
         self._positions[key] = position
         self._dirty = True
-        self._persist_scope_state(force=True)
+        self._persist_scope_state()
         logger.info(
             f"Position opened: {symbol} {side.value} "
             f"{qty} @ {price} (leverage: {lev}x)"
@@ -553,7 +579,7 @@ class PositionManager:
             except RuntimeError:
                 pass
             self._dirty = True
-            self._persist_scope_state(force=True)
+            self._persist_scope_state()
             return position
 
         position.update_price(close_px)
@@ -565,9 +591,10 @@ class PositionManager:
         )
 
         self._position_history.append(position)
+        self._trim_position_history()
         del self._positions[key]
         self._dirty = True
-        self._persist_scope_state(force=True)
+        self._persist_scope_state()
 
         try:
             asyncio.get_running_loop()

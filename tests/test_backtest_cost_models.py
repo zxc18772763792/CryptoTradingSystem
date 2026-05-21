@@ -92,6 +92,7 @@ def test_backtest_engine_uses_funding_provider_when_column_missing(tmp_path):
                         timestamp=pd.Timestamp(data.index[-1]).to_pydatetime(),
                         strategy_name=self.name,
                         strength=1.0,
+                        metadata={"generic_check_exit_enabled": False},
                     )
                 ]
             return []

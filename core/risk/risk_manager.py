@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -55,6 +56,8 @@ class RiskManager:
     """Centralized risk checks for signal/manual execution."""
 
     def __init__(self, *, use_persisted_overlay: Optional[bool] = None):
+        self._state_lock = threading.RLock()
+
         # Limits
         self.max_position_size = float(settings.MAX_POSITION_SIZE or 0.1)  # ratio of equity
         self.max_daily_loss_ratio = float(settings.MAX_DAILY_LOSS or 0.02)
@@ -325,36 +328,37 @@ class RiskManager:
 
     def set_account_scope(self, scope: str, reset_baseline: bool = False) -> None:
         """Switch runtime risk state between paper/live to avoid cross-mode contamination."""
-        target = self._normalize_scope(scope)
-        current = getattr(self, "_risk_scope", "paper")
+        with self._state_lock:
+            target = self._normalize_scope(scope)
+            current = getattr(self, "_risk_scope", "paper")
 
-        if target != current:
-            self._scope_states[current] = self._snapshot_runtime_state()
-            self._persist_trade_history(current)
-            if target not in self._scope_states:
-                self._scope_states[target] = self._initial_scope_state(target)
-            self._restore_runtime_state(self._scope_states.get(target))
-            self._risk_scope = target
-            logger.info(f"Risk manager scope switched: {current} -> {target}")
+            if target != current:
+                self._scope_states[current] = self._snapshot_runtime_state()
+                self._persist_trade_history(current)
+                if target not in self._scope_states:
+                    self._scope_states[target] = self._initial_scope_state(target)
+                self._restore_runtime_state(self._scope_states.get(target))
+                self._risk_scope = target
+                logger.info(f"Risk manager scope switched: {current} -> {target}")
 
-        if reset_baseline:
-            self._daily_start = self._day_start(datetime.now(timezone.utc))
-            self._daily_trades = 0
-            self._daily_realized_pnl = 0.0
-            self._alerts.clear()
-            self._trading_halted = False
-            self._halt_reason = ""
-            self._daily_stop_guard_until = datetime.now(timezone.utc) + timedelta(seconds=90)
-            self._daily_stop_breach_count = 0
-            if self._current_equity and float(self._current_equity) > 0:
-                self._day_start_equity = float(self._current_equity)
-                self._last_equity = float(self._current_equity)
-            else:
-                self._day_start_equity = None
-                self._last_equity = None
-            self._current_unrealized_pnl = 0.0
-            self._scope_states[self._risk_scope] = self._snapshot_runtime_state()
-            logger.info(f"Risk manager baseline reset for scope={self._risk_scope}")
+            if reset_baseline:
+                self._daily_start = self._day_start(datetime.now(timezone.utc))
+                self._daily_trades = 0
+                self._daily_realized_pnl = 0.0
+                self._alerts.clear()
+                self._trading_halted = False
+                self._halt_reason = ""
+                self._daily_stop_guard_until = datetime.now(timezone.utc) + timedelta(seconds=90)
+                self._daily_stop_breach_count = 0
+                if self._current_equity and float(self._current_equity) > 0:
+                    self._day_start_equity = float(self._current_equity)
+                    self._last_equity = float(self._current_equity)
+                else:
+                    self._day_start_equity = None
+                    self._last_equity = None
+                self._current_unrealized_pnl = 0.0
+                self._scope_states[self._risk_scope] = self._snapshot_runtime_state()
+                logger.info(f"Risk manager baseline reset for scope={self._risk_scope}")
 
     def _check_new_day(self) -> None:
         now_day = self._day_start(datetime.now(timezone.utc))
@@ -556,26 +560,27 @@ class RiskManager:
 
     def clear_runtime_history(self) -> Dict[str, int]:
         """Clear runtime trade/alert/equity history for paper reset."""
-        trade_count = len(self._trade_history)
-        alert_count = len(self._alerts)
-        curve_count = len(self._equity_curve)
+        with self._state_lock:
+            trade_count = len(self._trade_history)
+            alert_count = len(self._alerts)
+            curve_count = len(self._equity_curve)
 
-        self._trade_history.clear()
-        self._alerts.clear()
-        self._equity_curve.clear()
-        self._equity_timeline.clear()
-        self._daily_trades = 0
-        self._daily_realized_pnl = 0.0
-        self._daily_start = self._day_start(datetime.now(timezone.utc))
-        self._day_start_equity = self._current_equity
-        self._last_equity = self._current_equity
-        self._current_unrealized_pnl = 0.0
-        self._trading_halted = False
-        self._halt_reason = ""
-        self._daily_stop_guard_until = datetime.now(timezone.utc) + timedelta(seconds=30)
-        self._daily_stop_breach_count = 0
-        self._scope_states[self._risk_scope] = self._snapshot_runtime_state()
-        self._persist_trade_history(self._risk_scope)
+            self._trade_history.clear()
+            self._alerts.clear()
+            self._equity_curve.clear()
+            self._equity_timeline.clear()
+            self._daily_trades = 0
+            self._daily_realized_pnl = 0.0
+            self._daily_start = self._day_start(datetime.now(timezone.utc))
+            self._day_start_equity = self._current_equity
+            self._last_equity = self._current_equity
+            self._current_unrealized_pnl = 0.0
+            self._trading_halted = False
+            self._halt_reason = ""
+            self._daily_stop_guard_until = datetime.now(timezone.utc) + timedelta(seconds=30)
+            self._daily_stop_breach_count = 0
+            self._scope_states[self._risk_scope] = self._snapshot_runtime_state()
+            self._persist_trade_history(self._risk_scope)
 
         return {
             "trade_history_cleared": trade_count,
@@ -721,21 +726,36 @@ class RiskManager:
         return True
 
     def record_trade(self, trade: Dict[str, Any]) -> None:
-        self._check_new_day()
-        self._daily_trades += 1
+        with self._state_lock:
+            if self._is_test_stub_trade(trade):
+                logger.warning(
+                    "risk_manager: skipped test stub trade history row "
+                    f"symbol={trade.get('symbol')} strategy={trade.get('strategy')}"
+                )
+                return
+            self._check_new_day()
+            self._daily_trades += 1
 
-        pnl = float(trade.get("pnl", 0.0) or 0.0)
-        self._daily_realized_pnl += pnl
+            pnl = float(trade.get("pnl", 0.0) or 0.0)
+            self._daily_realized_pnl += pnl
 
-        self._trade_history.append(
-            {
-                **trade,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-        self._trade_history = self._trade_history[-self._trade_history_limit:]
-        self._scope_states[self._risk_scope] = self._snapshot_runtime_state()
-        self._persist_trade_history(self._risk_scope)
+            self._trade_history.append(
+                {
+                    **trade,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            self._trade_history = self._trade_history[-self._trade_history_limit:]
+            self._scope_states[self._risk_scope] = self._snapshot_runtime_state()
+            self._persist_trade_history(self._risk_scope)
+
+    @staticmethod
+    def _is_test_stub_trade(trade: Dict[str, Any]) -> bool:
+        strategy = str((trade or {}).get("strategy") or "").strip()
+        account_id = str((trade or {}).get("account_id") or "").strip()
+        if strategy != "stub":
+            return False
+        return account_id in {"", "acct_A"}
 
     def calculate_max_drawdown(self, equity_curve: List[float]) -> float:
         if not equity_curve:

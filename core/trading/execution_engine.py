@@ -315,7 +315,10 @@ class ExecutionEngine:
         if str(explicit or "").strip().lower() in {"paper", "live"}:
             return self._normalize_trading_mode(explicit)
         default_mode = fallback or self.get_trading_mode()
-        return account_manager.get_account_mode(account_id, default=default_mode)
+        account = account_manager.get_account(account_id) if account_id else None
+        if account:
+            return account_manager.get_account_mode(account_id, default=default_mode)
+        return self._normalize_trading_mode(default_mode)
 
     def _resolve_signal_trading_mode(self, signal: Signal) -> str:
         metadata = dict(getattr(signal, "metadata", {}) or {})

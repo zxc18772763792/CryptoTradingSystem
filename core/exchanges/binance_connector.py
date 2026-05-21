@@ -155,6 +155,7 @@ class BinanceConnector(BaseExchange):
         self._balance_cache: List[Balance] = []
         self._balance_cache_ts: float = 0.0
         self._connection_lock = asyncio.Lock()
+        self._client_options_lock = asyncio.Lock()
 
     def _build_client_config(self) -> Dict[str, Any]:
         proxy_url = str(self.config.proxy or settings.HTTP_PROXY or settings.HTTPS_PROXY or "").strip() or None
@@ -444,10 +445,11 @@ class BinanceConnector(BaseExchange):
 
             if not funding_loaded and not funding_timed_out:
                 try:
-                    funding_balance = await asyncio.wait_for(
-                        client.fetch_balance({"type": "funding"}),
-                        timeout=_FUNDING_FETCH_TIMEOUT_SEC,
-                    )
+                    async with self._client_options_lock:
+                        funding_balance = await asyncio.wait_for(
+                            client.fetch_balance({"type": "funding"}),
+                            timeout=_FUNDING_FETCH_TIMEOUT_SEC,
+                        )
                     _merge_ccxt_balance_payload(
                         funding_balance,
                         merged,
@@ -479,16 +481,17 @@ class BinanceConnector(BaseExchange):
                 # Important: when defaultType=future/swap, bare fetch_balance() may return
                 # derivatives wallet instead of spot wallet. Request spot explicitly to avoid
                 # double counting between spot and futures balances.
-                if default_type in {"future", "swap"}:
-                    spot = await asyncio.wait_for(
-                        client.fetch_balance({"type": "spot"}),
-                        timeout=_BALANCE_SPOT_TIMEOUT_SEC,
-                    )
-                else:
-                    spot = await asyncio.wait_for(
-                        client.fetch_balance(),
-                        timeout=_BALANCE_SPOT_TIMEOUT_SEC,
-                    )
+                async with self._client_options_lock:
+                    if default_type in {"future", "swap"}:
+                        spot = await asyncio.wait_for(
+                            client.fetch_balance({"type": "spot"}),
+                            timeout=_BALANCE_SPOT_TIMEOUT_SEC,
+                        )
+                    else:
+                        spot = await asyncio.wait_for(
+                            client.fetch_balance(),
+                            timeout=_BALANCE_SPOT_TIMEOUT_SEC,
+                        )
                 _merge_ccxt_balance_payload(spot, merged)
                 spot_loaded = True
             except Exception as e:
@@ -512,10 +515,11 @@ class BinanceConnector(BaseExchange):
                     continue
                 tried_future_types.add(account_type)
                 try:
-                    future_balance = await asyncio.wait_for(
-                        client.fetch_balance({"type": account_type}),
-                        timeout=_BALANCE_SPOT_TIMEOUT_SEC,
-                    )
+                    async with self._client_options_lock:
+                        future_balance = await asyncio.wait_for(
+                            client.fetch_balance({"type": account_type}),
+                            timeout=_BALANCE_SPOT_TIMEOUT_SEC,
+                        )
                     current_snapshot: Dict[str, Dict[str, float]] = {}
                     _merge_ccxt_balance_payload(future_balance, current_snapshot)
                     if not current_snapshot:
@@ -617,20 +621,21 @@ class BinanceConnector(BaseExchange):
             if default_type in ["future", "swap"]:
                 positions = await client.fetch_positions()
             else:
-                original_default_type = client.options.get("defaultType")
-                for account_type in ("future", "swap"):
-                    try:
-                        client.options["defaultType"] = account_type
-                        positions = await client.fetch_positions()
-                        if positions:
-                            break
-                    except Exception as inner:
-                        logger.debug(f"[{self.name}] fetch_positions fallback {account_type} failed: {inner}")
-                    finally:
-                        if original_default_type is None:
-                            client.options.pop("defaultType", None)
-                        else:
-                            client.options["defaultType"] = original_default_type
+                async with self._client_options_lock:
+                    original_default_type = client.options.get("defaultType")
+                    for account_type in ("future", "swap"):
+                        try:
+                            client.options["defaultType"] = account_type
+                            positions = await client.fetch_positions()
+                            if positions:
+                                break
+                        except Exception as inner:
+                            logger.debug(f"[{self.name}] fetch_positions fallback {account_type} failed: {inner}")
+                        finally:
+                            if original_default_type is None:
+                                client.options.pop("defaultType", None)
+                            else:
+                                client.options["defaultType"] = original_default_type
 
             result = []
             for pos in positions:

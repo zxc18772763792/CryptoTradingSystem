@@ -4,7 +4,10 @@
 """
 import asyncio
 import aiohttp
-import feedparser
+try:
+    import feedparser
+except ModuleNotFoundError:
+    feedparser = None
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, field
@@ -96,7 +99,9 @@ class NewsCollector:
 
         try:
             # 使用feedparser解析RSS
-            feed = feedparser.parse(url)
+            if feedparser is None:
+                raise RuntimeError("feedparser is required for legacy RSS collection")
+            feed = await asyncio.to_thread(feedparser.parse, url)
 
             for entry in feed.entries[:50]:  # 限制50条
                 try:

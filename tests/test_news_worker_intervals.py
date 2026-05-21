@@ -95,6 +95,32 @@ def test_worker_cfg_keeps_batch_size_without_local_gemma_backup(monkeypatch):
     assert effective["llm"]["batch_size"] == 8
 
 
+def test_worker_cfg_preserves_yaml_timeout_when_env_absent(monkeypatch):
+    monkeypatch.delenv("NEWS_LLM_WORKER_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("NEWS_LLM_WORKER_CONNECT_TIMEOUT_SEC", raising=False)
+
+    effective = worker_module._worker_cfg(
+        {"llm": {"provider": "openai", "timeout_sec": 90, "connect_timeout_sec": 12}},
+        limit=8,
+    )
+
+    assert effective["llm"]["timeout_sec"] == 90
+    assert effective["llm"]["connect_timeout_sec"] == 12
+
+
+def test_worker_cfg_explicit_env_timeout_overrides_yaml(monkeypatch):
+    monkeypatch.setenv("NEWS_LLM_WORKER_TIMEOUT_SEC", "30")
+    monkeypatch.setenv("NEWS_LLM_WORKER_CONNECT_TIMEOUT_SEC", "4")
+
+    effective = worker_module._worker_cfg(
+        {"llm": {"provider": "openai", "timeout_sec": 90, "connect_timeout_sec": 12}},
+        limit=8,
+    )
+
+    assert effective["llm"]["timeout_sec"] == 30
+    assert effective["llm"]["connect_timeout_sec"] == 4
+
+
 def test_has_local_gemma_backup_reads_settings_values(monkeypatch):
     monkeypatch.delenv("NEWS_LLM_BACKUP_BASE_URL", raising=False)
     monkeypatch.delenv("NEWS_LLM_BACKUP_MODEL", raising=False)

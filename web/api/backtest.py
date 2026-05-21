@@ -1898,12 +1898,15 @@ def _build_positions_v2(strategy: str, df: pd.DataFrame, params: Optional[Dict[s
         wr = (highest - close) / (highest - lowest).replace(0, np.nan) * -100.0
         buy = (wr.shift(1) < oversold) & (wr >= oversold)
         sell = (wr.shift(1) > overbought) & (wr <= overbought)
+        neutral = -50.0
+        long_exit = ((wr.shift(1) <= neutral) & (wr > neutral)) | sell
+        short_exit = ((wr.shift(1) >= neutral) & (wr < neutral)) | buy
         position = _stateful_directional_position(
             df.index,
             long_entry=buy.fillna(False),
-            long_exit=sell.fillna(False),
+            long_exit=long_exit.fillna(False),
             short_entry=sell.fillna(False),
-            short_exit=buy.fillna(False),
+            short_exit=short_exit.fillna(False),
             allow_long=allow_long,
             allow_short=allow_short,
             reverse_on_signal=reverse_on_signal,
@@ -1924,12 +1927,15 @@ def _build_positions_v2(strategy: str, df: pd.DataFrame, params: Optional[Dict[s
         cci = (typical_price - sma) / (constant * mad.replace(0, np.nan))
         buy = (cci.shift(1) < oversold) & (cci >= oversold)
         sell = (cci.shift(1) > overbought) & (cci <= overbought)
+        neutral = 0.0
+        long_exit = ((cci.shift(1) <= neutral) & (cci > neutral)) | sell
+        short_exit = ((cci.shift(1) >= neutral) & (cci < neutral)) | buy
         position = _stateful_directional_position(
             df.index,
             long_entry=buy.fillna(False),
-            long_exit=sell.fillna(False),
+            long_exit=long_exit.fillna(False),
             short_entry=sell.fillna(False),
-            short_exit=buy.fillna(False),
+            short_exit=short_exit.fillna(False),
             allow_long=allow_long,
             allow_short=allow_short,
             reverse_on_signal=reverse_on_signal,
@@ -1951,12 +1957,15 @@ def _build_positions_v2(strategy: str, df: pd.DataFrame, params: Optional[Dict[s
         stoch_rsi = (rsi - rsi_min) / (rsi_max - rsi_min).replace(0, np.nan) * 100.0
         buy = (stoch_rsi.shift(1) < oversold) & (stoch_rsi >= oversold)
         sell = (stoch_rsi.shift(1) > overbought) & (stoch_rsi <= overbought)
+        neutral = 50.0
+        long_exit = ((stoch_rsi.shift(1) <= neutral) & (stoch_rsi > neutral)) | sell
+        short_exit = ((stoch_rsi.shift(1) >= neutral) & (stoch_rsi < neutral)) | buy
         position = _stateful_directional_position(
             df.index,
             long_entry=buy.fillna(False),
-            long_exit=sell.fillna(False),
+            long_exit=long_exit.fillna(False),
             short_entry=sell.fillna(False),
-            short_exit=buy.fillna(False),
+            short_exit=short_exit.fillna(False),
             allow_long=allow_long,
             allow_short=allow_short,
             reverse_on_signal=reverse_on_signal,

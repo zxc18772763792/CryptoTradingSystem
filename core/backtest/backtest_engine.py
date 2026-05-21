@@ -123,6 +123,7 @@ class BacktestEngine:
         self._positions: Dict[str, Dict[str, Any]] = {}
         self._trades: List[BacktestTrade] = []
         self._equity_curve: List[float] = []
+        self._equity_index: List[pd.Timestamp] = []
         self._daily_returns: List[float] = []
         self._turnover_notional: float = 0.0
         self._last_bar_ts: Optional[pd.Timestamp] = None
@@ -178,13 +179,22 @@ class BacktestEngine:
             current_time = _ct.to_pydatetime()
             if not np.isfinite(current_price) or current_price <= 0:
                 self._equity_curve.append(self._equity)
+                self._equity_index.append(pd.Timestamp(current_data.index[-1]))
                 continue
 
             self._apply_funding_for_bar(current_data, current_time)
             self._update_positions(current_price, symbol)
             await self._check_position_exits(current_data, current_price, current_time, symbol)
             self._update_positions(current_price, symbol)
-            await self._check_strategy_exit_signals(strategy, current_data.tail(live_window), current_price, current_time)
+            # Match generate_signals replay semantics: strategy exits only see
+            # completed bars before the execution bar.
+            await self._check_strategy_exit_signals(
+                strategy,
+                data.iloc[:i].tail(live_window),
+                current_price,
+                current_time,
+                current_data,
+            )
             self._update_positions(current_price, symbol)
 
             try:
@@ -201,7 +211,9 @@ class BacktestEngine:
 
             self._update_positions(current_price, symbol)
             self._equity_curve.append(self._equity)
-            self._last_bar_ts = pd.Timestamp(current_data.index[-1])
+            bar_ts = pd.Timestamp(current_data.index[-1])
+            self._equity_index.append(bar_ts)
+            self._last_bar_ts = bar_ts
 
             if progress_callback and i % 100 == 0:
                 progress_callback(i / max(total_bars, 1))
@@ -242,6 +254,27 @@ class BacktestEngine:
                 except Exception as e:
                     logger.warning(f"funding provider attach failed ({symbol}): {e}")
         return out
+
+    @staticmethod
+    def _annualization_factor_from_index(index: Any) -> float:
+        """Infer bars per year from the median bar interval."""
+        try:
+            dt_index = pd.DatetimeIndex(index)
+        except Exception:
+            return 365.0
+        if len(dt_index) < 2:
+            return 365.0
+
+        deltas = dt_index.to_series().diff().dropna()
+        if deltas.empty:
+            return 365.0
+        try:
+            seconds = float(deltas.median().total_seconds())
+        except Exception:
+            return 365.0
+        if not np.isfinite(seconds) or seconds <= 0:
+            return 365.0
+        return max(1.0, (365.0 * 24.0 * 3600.0) / seconds)
 
     def _fee_rate(self, signal: Optional[Signal] = None) -> float:
         role = str(
@@ -407,19 +440,20 @@ class BacktestEngine:
     async def _check_strategy_exit_signals(
         self,
         strategy: StrategyBase,
-        current_data: pd.DataFrame,
+        signal_data: pd.DataFrame,
         current_price: float,
         timestamp: datetime,
+        execution_window: pd.DataFrame,
     ) -> None:
         if not bool(self.config.enable_strategy_check_exit):
             return
         for pos_symbol, pos in list(self._positions.items()):
             if str(pos.get("strategy") or "") != strategy.name:
                 continue
-            exit_signal = strategy.check_exit(current_data, self._position_view(pos_symbol, pos))
+            exit_signal = strategy.check_exit(signal_data, self._position_view(pos_symbol, pos))
             if not exit_signal:
                 continue
-            await self._execute_signal(exit_signal, current_price, timestamp, current_data)
+            await self._execute_signal(exit_signal, current_price, timestamp, execution_window)
 
     async def _execute_signal(
         self,
@@ -785,7 +819,13 @@ class BacktestEngine:
             base = np.where(equity_array[:-1] == 0, np.nan, equity_array[:-1])
             returns = np.diff(equity_array) / base
             returns = returns[np.isfinite(returns)]
-            sharpe = float(np.mean(returns) / np.std(returns) * np.sqrt(365)) if returns.size > 1 and float(np.std(returns)) > 0 else 0.0
+            return_std = float(np.std(returns))
+            annualization_factor = self._annualization_factor_from_index(self._equity_index)
+            sharpe = (
+                float(np.mean(returns) / return_std * np.sqrt(annualization_factor))
+                if returns.size > 1 and return_std > 0
+                else 0.0
+            )
         else:
             sharpe = 0.0
 

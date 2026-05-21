@@ -57,6 +57,33 @@ from web.api.backtest import (
 router = APIRouter()
 
 
+def _consume_audit_task_result(task) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        logger.warning(f"Background audit log task failed: {exc}")
+
+
+def _schedule_audit_log(**kwargs: Any) -> None:
+    async def _run() -> None:
+        try:
+            await audit_logger.log(**kwargs)
+        except Exception as exc:
+            logger.warning(f"Background audit log failed: {exc}")
+
+    coro = _run()
+    try:
+        task = asyncio.create_task(coro)
+    except RuntimeError as exc:
+        coro.close()
+        logger.warning(f"Failed to schedule audit log: {exc}")
+        return
+    if hasattr(task, "add_done_callback"):
+        task.add_done_callback(_consume_audit_task_result)
+
+
 _MONITOR_RESAMPLE_RULES: Dict[str, str] = {
     "1m": "1min",
     "3m": "3min",
@@ -2274,24 +2301,24 @@ async def register_strategy(request: StrategyRegisterRequest):
     )
 
     if not success:
-        asyncio.create_task(audit_logger.log(
+        _schedule_audit_log(
             module="strategy",
             action="register",
             status="failed",
             message=request.name,
             details=request.model_dump(),
-        ))
+        )
         raise HTTPException(status_code=400, detail="Failed to register strategy")
 
     # Fire-and-forget DB writes so the response returns immediately
     # (avoids blocking on SQLite lock held by the news background worker)
-    asyncio.create_task(audit_logger.log(
+    _schedule_audit_log(
         module="strategy",
         action="register",
         status="success",
         message=request.name,
         details=request.model_dump(),
-    ))
+    )
     asyncio.create_task(_persist_if_exists(request.name, state_override="idle"))
 
     return {
@@ -2429,9 +2456,9 @@ async def start_strategy(name: str):
     success = await strategy_manager.start_strategy(name)
     if success:
         await _persist_if_exists(name, state_override="running")
-        await audit_logger.log(module="strategy", action="start", status="success", message=name)
+        _schedule_audit_log(module="strategy", action="start", status="success", message=name)
         return {"success": True, "name": name, "status": "running"}
-    await audit_logger.log(module="strategy", action="start", status="failed", message=name)
+    _schedule_audit_log(module="strategy", action="start", status="failed", message=name)
     raise HTTPException(status_code=400, detail="Failed to start strategy")
 
 
@@ -2441,9 +2468,9 @@ async def stop_strategy(name: str):
     if success:
         close_summary = strategy_manager.pop_last_stop_close_summary(name)
         await _persist_if_exists(name, state_override="stopped")
-        await audit_logger.log(module="strategy", action="stop", status="success", message=name)
+        _schedule_audit_log(module="strategy", action="stop", status="success", message=name)
         return {"success": True, "name": name, "status": "stopped", "close_summary": close_summary}
-    await audit_logger.log(module="strategy", action="stop", status="failed", message=name)
+    _schedule_audit_log(module="strategy", action="stop", status="failed", message=name)
     raise HTTPException(status_code=400, detail="Failed to stop strategy")
 
 
@@ -2452,9 +2479,9 @@ async def pause_strategy(name: str):
     success = await strategy_manager.pause_strategy(name)
     if success:
         await _persist_if_exists(name, state_override="paused")
-        await audit_logger.log(module="strategy", action="pause", status="success", message=name)
+        _schedule_audit_log(module="strategy", action="pause", status="success", message=name)
         return {"success": True, "name": name, "status": "paused"}
-    await audit_logger.log(module="strategy", action="pause", status="failed", message=name)
+    _schedule_audit_log(module="strategy", action="pause", status="failed", message=name)
     raise HTTPException(status_code=400, detail="Failed to pause strategy")
 
 
@@ -2468,7 +2495,7 @@ async def update_strategy_params(name: str, request: StrategyUpdateRequest):
     success = strategy_manager.update_strategy_params(name, normalized_params)
     if success:
         await _persist_if_exists(name)
-        await audit_logger.log(
+        _schedule_audit_log(
             module="strategy",
             action="update_params",
             status="success",
@@ -2476,7 +2503,7 @@ async def update_strategy_params(name: str, request: StrategyUpdateRequest):
             details=normalized_params,
         )
         return {"success": True, "name": name}
-    await audit_logger.log(
+    _schedule_audit_log(
         module="strategy",
         action="update_params",
         status="failed",
@@ -2518,7 +2545,7 @@ async def update_strategy_allocation(name: str, request: StrategyAllocationReque
     success = strategy_manager.update_strategy_allocation(name, request.allocation)
     if success:
         await _persist_if_exists(name)
-        await audit_logger.log(
+        _schedule_audit_log(
             module="strategy",
             action="update_allocation",
             status="success",
@@ -2526,7 +2553,7 @@ async def update_strategy_allocation(name: str, request: StrategyAllocationReque
             details={"allocation": request.allocation},
         )
         return {"success": True, "name": name, "allocation": request.allocation}
-    await audit_logger.log(
+    _schedule_audit_log(
         module="strategy",
         action="update_allocation",
         status="failed",
@@ -2541,9 +2568,9 @@ async def unregister_strategy(name: str):
     success = strategy_manager.unregister_strategy(name)
     if success:
         asyncio.create_task(delete_strategy_snapshot(name))
-        asyncio.create_task(audit_logger.log(module="strategy", action="unregister", status="success", message=name))
+        _schedule_audit_log(module="strategy", action="unregister", status="success", message=name)
         return {"success": True, "name": name}
-    asyncio.create_task(audit_logger.log(module="strategy", action="unregister", status="failed", message=name))
+    _schedule_audit_log(module="strategy", action="unregister", status="failed", message=name)
     raise HTTPException(status_code=404, detail="Strategy not found")
 
 

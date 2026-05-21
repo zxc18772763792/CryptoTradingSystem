@@ -317,6 +317,66 @@ class TestBinanceConnector:
         assert existing.closed is False
         assert broken.closed is True
 
+    def test_get_positions_default_type_fallback_does_not_pollute_balance_fetch(self):
+        config = ExchangeConfig(
+            name="binance",
+            exchange_type=ExchangeType.CEX,
+            api_key="test_key",
+            api_secret="test_secret",
+            default_type="spot",
+            sandbox=True,
+        )
+        connector = BinanceConnector(config)
+
+        class SharedOptionsClient:
+            def __init__(self):
+                self.options = {"defaultType": "spot"}
+                self.balance_default_types = []
+
+            async def fetch_positions(self):
+                assert self.options.get("defaultType") in {"future", "swap"}
+                await asyncio.sleep(0.02)
+                return [
+                    {
+                        "symbol": "BTC/USDT",
+                        "side": "long",
+                        "contracts": 1,
+                        "entryPrice": 100,
+                        "markPrice": 101,
+                        "unrealizedPnl": 1,
+                        "leverage": 1,
+                        "liquidationPrice": 50,
+                    }
+                ]
+
+            async def fetch_balance(self, params=None):
+                params = params or {}
+                self.balance_default_types.append(
+                    (dict(params), self.options.get("defaultType"))
+                )
+                await asyncio.sleep(0.005)
+                balance_type = params.get("type") or "spot"
+                if balance_type == "spot":
+                    return {"USDT": {"free": 10, "used": 0, "total": 10}}
+                return {}
+
+        client = SharedOptionsClient()
+        connector._client = client
+        connector._connected = True
+
+        async def run_concurrently():
+            positions_task = asyncio.create_task(connector.get_positions())
+            await asyncio.sleep(0.001)
+            balances_task = asyncio.create_task(connector.get_balance())
+            return await asyncio.gather(positions_task, balances_task)
+
+        positions, balances = asyncio.run(run_concurrently())
+
+        assert positions[0].amount == 1
+        assert balances[0].currency == "USDT"
+        assert client.options["defaultType"] == "spot"
+        assert all(default_type == "spot" for _, default_type in client.balance_default_types)
+
 
 class TestExchangeManager:
     def test_exchange_manager_initialization(self):

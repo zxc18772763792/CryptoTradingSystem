@@ -1188,24 +1188,44 @@ async def save_news_raw(news_items: List[Dict[str, Any]], ingest_meta: Optional[
 async def enqueue_llm_tasks(news_items: List[Dict[str, Any]], min_importance: int = 35) -> Dict[str, Any]:
     rows = [item for item in news_items if isinstance(item, dict) and item.get("id")]
     if not rows:
-        return {"queued_count": 0, "skipped_count": 0}
+        return {"queued_count": 0, "requeued_count": 0, "skipped_count": 0}
     raw_ids = [int(item["id"]) for item in rows]
+    now = datetime.now(timezone.utc)
     async with news_session_scope() as session:
-        existing = {
-            row[0]
-            for row in (await session.execute(select(NewsLLMTask.raw_news_id).where(NewsLLMTask.raw_news_id.in_(raw_ids)))).all()
-        }
+        existing_rows = (
+            await session.execute(select(NewsLLMTask).where(NewsLLMTask.raw_news_id.in_(raw_ids)))
+        ).scalars().all()
+        existing = {int(row.raw_news_id): row for row in existing_rows}
         queued = 0
+        requeued = 0
         skipped = 0
+        seen_raw_ids: set[int] = set()
         for item in rows:
             raw_id = int(item["id"])
-            if raw_id in existing:
+            if raw_id in seen_raw_ids:
                 skipped += 1
                 continue
+            seen_raw_ids.add(raw_id)
             payload = item.get("payload") or {}
             importance = int(payload.get("importance_score") or 0)
             if importance < int(min_importance or 0):
                 skipped += 1
+                continue
+            existing_task = existing.get(raw_id)
+            if existing_task is not None:
+                status = str(existing_task.status or "").strip().lower()
+                if status in {"failed", "retry"} and (
+                    existing_task.next_retry_at is None
+                    or parse_any_datetime(existing_task.next_retry_at) <= now
+                ):
+                    existing_task.status = "retry"
+                    existing_task.next_retry_at = now
+                    existing_task.finished_at = None
+                    existing_task.updated_at = now
+                    existing_task.priority = max(int(existing_task.priority or 0), importance)
+                    requeued += 1
+                else:
+                    skipped += 1
                 continue
             session.add(
                 NewsLLMTask(
@@ -1217,7 +1237,7 @@ async def enqueue_llm_tasks(news_items: List[Dict[str, Any]], min_importance: in
             )
             queued += 1
         await session.flush()
-    return {"queued_count": queued, "skipped_count": skipped}
+    return {"queued_count": queued, "requeued_count": requeued, "skipped_count": skipped}
 
 
 async def claim_llm_tasks(limit: int = 10) -> List[Dict[str, Any]]:
