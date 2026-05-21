@@ -77,3 +77,36 @@ def test_strategy_register_endpoint_applies_runtime_policy(monkeypatch):
     assert result["runtime_limit_minutes"] > 0
     assert isinstance(result["runtime_policy"], dict)
     assert register_mock.call_args.kwargs["runtime_limit_minutes"] == result["runtime_limit_minutes"]
+    assert result["runtime_mode"] == "paper"
+    assert register_mock.call_args.kwargs["params"]["runtime_mode"] == "paper"
+    assert register_mock.call_args.kwargs["metadata"]["runtime_mode"] == "paper"
+
+
+def test_strategy_register_endpoint_requires_explicit_live_runtime_mode(monkeypatch):
+    from web.api import strategies as strategies_api
+
+    register_mock = MagicMock(return_value=True)
+    monkeypatch.setattr(strategies_api, "_get_strategy_classes", lambda: {"MAStrategy": object})
+    monkeypatch.setattr(strategies_api.strategy_manager, "register_strategy", register_mock)
+    monkeypatch.setattr(strategies_api, "_persist_if_exists", AsyncMock(return_value=None))
+    monkeypatch.setattr(strategies_api.asyncio, "create_task", lambda coro: coro.close())
+    monkeypatch.setattr(strategies_api.audit_logger, "log", AsyncMock(return_value=None))
+
+    request = strategies_api.StrategyRegisterRequest(
+        name="runtime_live_test",
+        strategy_type="MAStrategy",
+        params={},
+        symbols=["BTC/USDT"],
+        timeframe="15m",
+        exchange="binance",
+        allocation=0.1,
+        runtime_mode="live",
+        metadata={"source": "unit"},
+    )
+
+    result = asyncio.run(strategies_api.register_strategy(request))
+
+    assert result["runtime_mode"] == "live"
+    assert register_mock.call_args.kwargs["params"]["runtime_mode"] == "live"
+    assert register_mock.call_args.kwargs["metadata"]["runtime_mode"] == "live"
+    assert register_mock.call_args.kwargs["metadata"]["source"] == "unit"

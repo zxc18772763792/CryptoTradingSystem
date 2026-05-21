@@ -365,6 +365,42 @@ def _safe_iso_timestamp(value: Any) -> Optional[str]:
         return text or None
 
 
+def _to_utc_iso(value: Any) -> str:
+    """Serialize a pandas Timestamp / datetime as an unambiguous UTC ISO string.
+
+    Parquet indexes in this project are tz-naive UTC (see
+    ``_normalize_parquet_frame_index``). Returning a naive ISO such as
+    ``"2026-05-21T05:00:00"`` to the browser is dangerous — JavaScript
+    ``new Date(...)`` interprets naive ISO as **local time**, visually
+    shifting every bar by the user's timezone offset and breaking the
+    candlestick chart on the data page (see ``static/js/app.js`` ``klineToDate``
+    / ``loadMoreLeftByViewport``). This helper appends an explicit ``Z``
+    suffix so both sides agree on the moment in time.
+
+    Accepts naive (assumed-UTC), tz-aware, or string inputs; returns ``""``
+    if the value is null/NaT/unparseable so callers don't need to guard.
+    """
+    if value is None:
+        return ""
+    try:
+        ts = pd.Timestamp(value)
+    except Exception:
+        text = str(value or "").strip()
+        return text or ""
+    if pd.isna(ts):
+        return ""
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    iso = ts.isoformat()
+    # ``pd.Timestamp(...).isoformat()`` produces ``...+00:00`` for UTC; canonicalize
+    # to the ``Z`` form for shorter wire payload and consistent log eyeballing.
+    if iso.endswith("+00:00"):
+        return iso[:-6] + "Z"
+    return iso
+
+
 def _utc_iso(dt: Optional[datetime] = None) -> str:
     current = dt or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -1395,7 +1431,7 @@ async def _fetch_binance_public_klines(symbol: str, timeframe: str, limit: int =
         ts = item[0]
         rows.append(
             {
-                "timestamp": datetime.fromtimestamp(float(ts) / 1000.0),
+                "timestamp": datetime.fromtimestamp(float(ts) / 1000.0, tz=timezone.utc),
                 "open": float(item[1]),
                 "high": float(item[2]),
                 "low": float(item[3]),
@@ -1426,7 +1462,7 @@ def _trades_to_ohlcv(trades: List[Dict[str, Any]], timeframe: str) -> pd.DataFra
             continue
         rows.append(
             {
-                "timestamp": datetime.fromtimestamp(float(ts) / 1000),
+                "timestamp": datetime.fromtimestamp(float(ts) / 1000, tz=timezone.utc),
                 "price": float(price),
                 "amount": float(amount),
             }
@@ -2030,7 +2066,15 @@ async def _fetch_defillama_chain_tvl(
         tvl = float(row.get("tvl") or 0.0)
         if ts <= 0:
             continue
-        data.append({"timestamp": datetime.utcfromtimestamp(ts).isoformat(), "tvl": tvl})
+        # ``utcfromtimestamp`` produces a tz-naive datetime; without ``Z`` the
+        # browser would interpret this as local time and shift the TVL chart by
+        # the user's timezone offset. See _to_utc_iso() for the full rationale.
+        data.append(
+            {
+                "timestamp": _to_utc_iso(datetime.utcfromtimestamp(ts)),
+                "tvl": tvl,
+            }
+        )
 
     if not data:
         return _build_chain_tvl_unavailable_payload(
@@ -2088,9 +2132,9 @@ async def _fetch_btc_whale_unconfirmed(min_btc: float = 10.0) -> Dict[str, Any]:
                 "hash": tx.get("hash"),
                 "btc": round(btc_amount, 6),
                 "usd_estimate": round(btc_amount * btc_price, 2) if btc_price > 0 else None,
-                "timestamp": datetime.utcfromtimestamp(int(tx.get("time") or 0)).isoformat()
-                if tx.get("time")
-                else None,
+                "timestamp": _to_utc_iso(
+                    datetime.utcfromtimestamp(int(tx.get("time") or 0))
+                ) if tx.get("time") else None,
             }
         )
     requested_threshold = float(max(1.0, min_btc))
@@ -3286,7 +3330,7 @@ async def _compute_factor_library_payload(
     series: List[Dict[str, Any]] = []
     tail = factors.tail(max(30, min(int(series_limit), 800)))
     for idx, row in tail.iterrows():
-        payload = {"timestamp": idx.isoformat()}
+        payload = {"timestamp": _to_utc_iso(idx)}
         for col in factors.columns:
             payload[col] = round(float(row.get(col, 0.0)), 10)
         series.append(payload)
@@ -3424,7 +3468,7 @@ async def _compute_fama_payload(
     for idx, row in factors.tail(400).iterrows():
         out_series.append(
             {
-                "timestamp": idx.isoformat(),
+                "timestamp": _to_utc_iso(idx),
                 "MKT": round(float(row.get("MKT", 0.0)), 8),
                 "SMB": round(float(row.get("SMB", 0.0)), 8),
                 "HML": round(float(row.get("HML", 0.0)), 8),
@@ -3775,7 +3819,7 @@ async def get_klines(
         "timeframe": timeframe,
         "data": [
             {
-                "timestamp": idx.isoformat(),
+                "timestamp": _to_utc_iso(idx),
                 "open": float(row["open"]),
                 "high": float(row["high"]),
                 "low": float(row["low"]),
@@ -6480,7 +6524,10 @@ async def replay_next(replay_id: str, steps: int = 1):
     chunk = df.iloc[start:next_cursor]
     rows = [
         {
-            "timestamp": idx.isoformat(),
+            # Replay session feeds the same candlestick chart on the data page.
+            # Naive ISO would shift bars by the user's TZ offset — see
+            # _to_utc_iso() and the /klines fix on the same module.
+            "timestamp": _to_utc_iso(idx),
             "open": float(row["open"]),
             "high": float(row["high"]),
             "low": float(row["low"]),

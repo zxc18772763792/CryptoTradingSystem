@@ -1,5 +1,5 @@
 structural_strategy_suite:
-  enabled: true
+  enabled: false
   base_position_pct: 0.04
   max_position_pct: 0.08
   max_total_structural_exposure_pct: 0.12
@@ -12,7 +12,7 @@ structural_strategy_suite:
 
 liquidation_oi:
   gate_mode: true
-  trade_mode: true
+  trade_mode: false
   crowded_score_enter: 0.75
   crowded_score_exit: 0.55
   liquidation_burst_enter: 0.80
@@ -22,7 +22,7 @@ liquidation_oi:
 
 supply_events:
   gate_mode: true
-  trade_mode: true
+  trade_mode: false
   pre_event_window_days: 14
   post_event_window_days: 14
   supply_pressure_enter: 0.70

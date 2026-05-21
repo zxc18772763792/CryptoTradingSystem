@@ -41,6 +41,71 @@ from strategies.quantitative.multi_factor_hf import MultiFactorHFStrategy
 
 router = APIRouter()
 
+
+def _to_utc_iso(value: Any) -> str:
+    """Serialize a datetime / pd.Timestamp as unambiguous UTC ISO (``...Z``).
+
+    Mirrors ``web/api/data.py:_to_utc_iso``. Backtest trade markers and equity
+    curves feed UI charts that re-use ``klineToDate`` — naive ISO would shift
+    every point on the chart by the user's timezone offset.
+    """
+    if value is None:
+        return ""
+    try:
+        ts = pd.Timestamp(value)
+    except Exception:
+        text = str(value or "").strip()
+        return text or ""
+    if pd.isna(ts):
+        return ""
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    iso = ts.isoformat()
+    if iso.endswith("+00:00"):
+        return iso[:-6] + "Z"
+    return iso
+
+
+def _utc_naive_timestamp(value: Any) -> Optional[pd.Timestamp]:
+    try:
+        ts = pd.Timestamp(value)
+    except Exception:
+        return None
+    if pd.isna(ts):
+        return None
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+    return ts
+
+
+def _normalize_trade_points_for_api(points: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(points or {})
+    for key in ("buy_points", "sell_points", "open_points", "close_points"):
+        rows = []
+        for point in list(normalized.get(key) or []):
+            if not isinstance(point, dict):
+                continue
+            item = dict(point)
+            item["timestamp"] = _to_utc_iso(item.get("timestamp"))
+            rows.append(item)
+        normalized[key] = rows
+    return normalized
+
+
+def _trade_point_timestamp_keys(points: Dict[str, Any]) -> set[pd.Timestamp]:
+    keys: set[pd.Timestamp] = set()
+    for key in ("buy_points", "sell_points", "open_points", "close_points"):
+        for point in list((points or {}).get(key) or []):
+            if not isinstance(point, dict):
+                continue
+            ts = _utc_naive_timestamp(point.get("timestamp"))
+            if ts is not None:
+                keys.add(ts)
+    return keys
+
+
 _SUB_MINUTE_TIMEFRAMES = {"1s", "5s", "10s", "30s"}
 _RESAMPLE_RULES = {
     "1s": "1S",
@@ -417,41 +482,88 @@ def _replay_signal_strategy_position(
 
     n = len(df)
     state = 0.0
+    entry_price: Optional[float] = None
+    active_symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) else "UNKNOWN"
+    active_metadata: Dict[str, Any] = {}
     values: List[float] = []
+
+    def _current_close(window: pd.DataFrame) -> float:
+        try:
+            value = float(pd.to_numeric(window["close"].iloc[-1], errors="coerce"))
+        except Exception:
+            return 0.0
+        return value if np.isfinite(value) else 0.0
+
+    def _position_view_for(window: pd.DataFrame) -> SimpleNamespace:
+        side = "long" if state > 0 else "short"
+        symbol = active_symbol
+        if "symbol" in window.columns and len(window):
+            symbol = str(window["symbol"].iloc[-1] or symbol)
+        return SimpleNamespace(
+            symbol=symbol,
+            side=side,
+            entry_price=float(entry_price or _current_close(window) or 0.0),
+            current_price=_current_close(window),
+            quantity=1.0,
+            metadata=dict(active_metadata),
+        )
+
+    def _apply_replay_signal(signal: Any, window: pd.DataFrame) -> None:
+        nonlocal state, entry_price, active_symbol, active_metadata
+        prev_state = state
+        state = _apply_signal_to_position_state(
+            state,
+            getattr(signal, "signal_type", ""),
+            allow_long=allow_long,
+            allow_short=allow_short,
+            reverse_on_signal=reverse_on_signal,
+        )
+        signal_type = str(getattr(getattr(signal, "signal_type", ""), "value", getattr(signal, "signal_type", ""))).lower()
+        if state == 0.0:
+            entry_price = None
+            active_metadata = {}
+            return
+        if state != prev_state or entry_price is None:
+            signal_price = getattr(signal, "price", None)
+            try:
+                resolved_entry = float(signal_price)
+            except Exception:
+                resolved_entry = _current_close(window)
+            if not np.isfinite(resolved_entry) or resolved_entry <= 0:
+                resolved_entry = _current_close(window)
+            entry_price = resolved_entry if resolved_entry > 0 else None
+            active_symbol = str(getattr(signal, "symbol", None) or active_symbol)
+            active_metadata = dict(getattr(signal, "metadata", {}) or {})
+        elif signal_type in {SignalType.BUY.value, SignalType.SELL.value}:
+            active_metadata.update(dict(getattr(signal, "metadata", {}) or {}))
+
+    def _run_replay_bar(window: pd.DataFrame) -> None:
+        if state != 0.0:
+            try:
+                exit_signal = inst.check_exit(window, _position_view_for(window))
+            except Exception:
+                exit_signal = None
+            if exit_signal is not None:
+                _apply_replay_signal(exit_signal, window)
+        try:
+            signals = inst.generate_signals(window) or []
+        except Exception:
+            signals = []
+        for signal in signals:
+            _apply_replay_signal(signal, window)
+
     if use_view:
         for end_idx in range(n):
             start = end_idx + 1 - live_window
             if start < 0:
                 start = 0
             window = df.iloc[start : end_idx + 1]
-            try:
-                signals = inst.generate_signals(window) or []
-            except Exception:
-                signals = []
-            for signal in signals:
-                state = _apply_signal_to_position_state(
-                    state,
-                    getattr(signal, "signal_type", ""),
-                    allow_long=allow_long,
-                    allow_short=allow_short,
-                    reverse_on_signal=reverse_on_signal,
-                )
+            _run_replay_bar(window)
             values.append(state)
     else:
         for end_idx in range(n):
             window = df.iloc[: end_idx + 1].tail(live_window).copy()
-            try:
-                signals = inst.generate_signals(window) or []
-            except Exception:
-                signals = []
-            for signal in signals:
-                state = _apply_signal_to_position_state(
-                    state,
-                    getattr(signal, "signal_type", ""),
-                    allow_long=allow_long,
-                    allow_short=allow_short,
-                    reverse_on_signal=reverse_on_signal,
-                )
+            _run_replay_bar(window)
             values.append(state)
 
     return pd.Series(values, index=df.index, dtype=float)
@@ -1408,7 +1520,7 @@ def _build_pairs_backtest_components(
         direction = "long_spread" if str(point.get("direction")) == "long" else "short_spread"
         item = {
             "trade_id": point.get("trade_id"),
-            "timestamp": ts.isoformat(),
+            "timestamp": _to_utc_iso(ts),
             "price": float(ctx["primary_close"]),
             "pair_price": float(ctx["pair_close"]),
             "spread": float(ctx["spread"]) if np.isfinite(ctx["spread"]) else None,
@@ -1427,7 +1539,7 @@ def _build_pairs_backtest_components(
         direction = "long_spread" if str(point.get("direction")) == "long" else "short_spread"
         item = {
             "trade_id": point.get("trade_id"),
-            "timestamp": ts.isoformat(),
+            "timestamp": _to_utc_iso(ts),
             "price": float(ctx["primary_close"]),
             "pair_price": float(ctx["pair_close"]),
             "spread": float(ctx["spread"]) if np.isfinite(ctx["spread"]) else None,
@@ -1900,12 +2012,16 @@ def _build_positions_v2(strategy: str, df: pd.DataFrame, params: Optional[Dict[s
         avg_loss = loss.rolling(period, min_periods=period).mean()
         rs = avg_gain / avg_loss.replace(0, np.nan)
         rsi = 100 - (100 / (1 + rs))
+        long_entry = (rsi.shift(1) < oversold) & (rsi >= oversold)
+        long_exit = (rsi.shift(1) < exit_oversold) & (rsi >= exit_oversold)
+        short_entry = (rsi.shift(1) > overbought) & (rsi <= overbought)
+        short_exit = (rsi.shift(1) > exit_overbought) & (rsi <= exit_overbought)
         position = _stateful_directional_position(
             df.index,
-            long_entry=rsi <= oversold,
-            long_exit=rsi >= exit_oversold,
-            short_entry=rsi >= overbought,
-            short_exit=rsi <= exit_overbought,
+            long_entry=long_entry.fillna(False),
+            long_exit=long_exit.fillna(False),
+            short_entry=short_entry.fillna(False),
+            short_exit=short_exit.fillna(False),
             allow_long=allow_long,
             allow_short=allow_short,
             reverse_on_signal=reverse_on_signal,
@@ -3764,6 +3880,7 @@ def _run_backtest_core(
             if strategy == "FamaFactorArbitrageStrategy"
             else dict(rendered_trade_points or {"buy_points": [], "sell_points": [], "open_points": [], "close_points": [], "entries": 0, "exits": 0})
         )
+        points = _normalize_trade_points_for_api(points)
 
         # Downsample for frontend payload size.
         max_points = 1800
@@ -3784,12 +3901,22 @@ def _run_backtest_core(
         series_df = pd.DataFrame(series_payload)
         if len(series_df) > max_points:
             step = int(np.ceil(len(series_df) / max_points))
-            series_df = series_df.iloc[::step]
+            sampled_df = series_df.iloc[::step]
+            trade_ts = _trade_point_timestamp_keys(points)
+            if trade_ts:
+                trade_rows = series_df[series_df["timestamp"].map(lambda value: _utc_naive_timestamp(value) in trade_ts)]
+                series_df = (
+                    pd.concat([sampled_df, trade_rows])
+                    .drop_duplicates(subset=["timestamp"], keep="first")
+                    .sort_values("timestamp")
+                )
+            else:
+                series_df = sampled_df
 
         rendered_series = []
         for _, row in series_df.iterrows():
             item = {
-                "timestamp": pd.Timestamp(row["timestamp"]).isoformat(),
+                "timestamp": _to_utc_iso(row["timestamp"]),
                 "equity": round(float(row["equity"]), 4),
                 "drawdown": round(float(row["drawdown"]), 4),
                 "position": float(row["position"]),

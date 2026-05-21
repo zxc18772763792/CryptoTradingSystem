@@ -73,12 +73,17 @@ class DonchianBreakoutStrategy(StrategyBase):
             signals.append(
                 Signal(
                     symbol=symbol,
-                    signal_type=SignalType.SELL,
+                    signal_type=SignalType.CLOSE_LONG,
                     price=c,
                     timestamp=now,
                     strategy_name=self.name,
                     strength=0.8,
-                    metadata={"upper": up, "exit_low": ex},
+                    metadata={
+                        "upper": up,
+                        "exit_low": ex,
+                        "close_only": True,
+                        "close_reason": "donchian_exit_low_break",
+                    },
                 )
             )
         return signals
@@ -329,12 +334,17 @@ class VWAPReversionStrategy(StrategyBase):
             signals.append(
                 Signal(
                     symbol=symbol,
-                    signal_type=SignalType.SELL,
+                    signal_type=SignalType.CLOSE_LONG,
                     price=c,
                     timestamp=now,
                     strategy_name=self.name,
                     strength=0.7,
-                    metadata={"vwap": float(vwap.iloc[-1]), "deviation": d_now},
+                    metadata={
+                        "vwap": float(vwap.iloc[-1]),
+                        "deviation": d_now,
+                        "close_only": True,
+                        "close_reason": "vwap_mean_reversion_completed",
+                    },
                 )
             )
         return signals

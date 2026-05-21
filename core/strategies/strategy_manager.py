@@ -16,7 +16,7 @@ from loguru import logger
 from config.settings import settings
 from core.data.data_storage import data_storage
 from core.exchanges.exchange_manager import exchange_manager
-from core.strategies.strategy_base import Signal, StrategyBase
+from core.strategies.strategy_base import Signal, SignalType, StrategyBase
 
 _SUB_MINUTE_TIMEFRAMES = {"1s", "5s", "10s", "30s"}
 _RESAMPLE_RULES = {
@@ -275,6 +275,30 @@ class StrategyManager:
     def _position_side_text(position: Any) -> str:
         side = getattr(position, "side", None)
         return str(getattr(side, "value", side) or "").strip().lower()
+
+    async def _collect_exit_signals(
+        self,
+        strategy_name: str,
+        strategy: StrategyBase,
+        data: Any,
+    ) -> List[Signal]:
+        """Run strategy-specific exits against positions in this strategy's runtime scope."""
+        signals: List[Signal] = []
+        try:
+            runtime_mode = self.get_strategy_runtime_mode(strategy_name)
+            data_symbol = ""
+            if hasattr(data, "columns") and "symbol" in data.columns and len(data["symbol"]) > 0:
+                data_symbol = self._canonical_symbol(data["symbol"].iloc[-1])
+            for position in self._positions_for_strategy(strategy_name, runtime_mode):
+                position_symbol = self._canonical_symbol(getattr(position, "symbol", ""))
+                if data_symbol and position_symbol and position_symbol != data_symbol:
+                    continue
+                exit_signal = strategy.check_exit(data, position)
+                if exit_signal:
+                    signals.append(exit_signal)
+        except Exception as exit_err:
+            logger.debug(f"Strategy {strategy_name} check_exit skipped: {exit_err}")
+        return signals
 
     @staticmethod
     def _canonical_symbol(symbol: Any) -> str:
@@ -880,6 +904,25 @@ class StrategyManager:
                 meta.setdefault("timeframe", str(config.timeframe or ""))
             signal.metadata = meta
 
+            # HOLD signals carry diagnostic context only (e.g. structural-gate
+            # status from LiquidationOICrowdingStrategy / SupplyEventStrategy /
+            # OnChainFlowRegimeStrategy). They MUST NOT:
+            #   1. Pollute the conflict-detection window — writing HOLD into
+            #      ``_recent_signal_by_symbol`` would overwrite a prior BUY/
+            #      SELL and let a subsequent opposite entry slip past conflict
+            #      detection.
+            #   2. Be queued for execution — execution_engine returns None
+            #      for HOLD anyway, but the queue worker still pays for circuit
+            #      breaker + structural risk gate + position lookup per bar.
+            # Keep history + callback dispatch so AI/UI/logging still see them.
+            if signal.signal_type == SignalType.HOLD:
+                strategy.add_signal_to_history(signal)
+                try:
+                    await self._dispatch_signal_callbacks(signal)
+                except Exception as exc:
+                    logger.debug(f"HOLD callback dispatch failed for {strategy_name}: {exc}")
+                continue
+
             # Conflict detection is scoped to the *account* — strategies on
             # isolated accounts (the default) trade independently even on the
             # same symbol; only strategies sharing an account suppress each
@@ -1023,11 +1066,25 @@ class StrategyManager:
         for symbol in symbols:
             try:
                 if hasattr(strategy, "generate_signals_async"):
+                    exit_signals: List[Signal] = []
+                    try:
+                        df = await self._load_market_data(
+                            exchange=config.exchange,
+                            symbol=symbol,
+                            timeframe=config.timeframe,
+                            limit=data_limit,
+                        )
+                        if not df.empty:
+                            exit_signals = await self._collect_exit_signals(name, strategy, df)
+                    except Exception as exit_err:
+                        logger.debug(f"Async strategy {name} exit precheck skipped for {symbol}: {exit_err}")
                     signals = await self._run_async_strategy(
                         strategy=strategy,
                         symbol=symbol,
                         config=config,
                     )
+                    if exit_signals:
+                        signals = exit_signals + list(signals or [])
                     if signals:
                         await self._emit_signals(name, signals)
                     continue
@@ -1069,6 +1126,9 @@ class StrategyManager:
                         signals = strategy.generate_signals(df, pair_df)  # type: ignore[arg-type]
                     else:
                         signals = strategy.generate_signals(df)
+                    exit_signals = await self._collect_exit_signals(name, strategy, df)
+                    if exit_signals:
+                        signals = exit_signals + list(signals or [])
 
                     if signals:
                         await self._emit_signals(name, signals)
@@ -1429,7 +1489,8 @@ class StrategyManager:
             return []
 
         try:
-            signals = strategy.generate_signals(data)
+            signals: List[Signal] = await self._collect_exit_signals(strategy_name, strategy, data)
+            signals.extend(strategy.generate_signals(data))
             if signals:
                 await self._emit_signals(strategy_name, signals)
             return signals

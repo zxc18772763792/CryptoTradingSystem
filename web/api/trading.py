@@ -243,6 +243,33 @@ _CACHE_RUNTIME_FIELDS = {
 }
 
 
+def _to_utc_iso(value: Any) -> str:
+    """Serialize a datetime / pd.Timestamp as unambiguous UTC ISO (``...Z``).
+
+    Mirrors ``web/api/data.py:_to_utc_iso`` — kept local to avoid cross-module
+    import. Returning naive ISO from chart endpoints causes browsers to parse
+    timestamps as local time, visually shifting candlesticks and benchmark
+    series by the user's timezone offset.
+    """
+    if value is None:
+        return ""
+    try:
+        ts = pd.Timestamp(value)
+    except Exception:
+        text = str(value or "").strip()
+        return text or ""
+    if pd.isna(ts):
+        return ""
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    iso = ts.isoformat()
+    if iso.endswith("+00:00"):
+        return iso[:-6] + "Z"
+    return iso
+
+
 def _cancel_pending_task(task: Optional[asyncio.Task[Any]]) -> bool:
     if task is None or task.done():
         return False
@@ -6109,7 +6136,7 @@ async def _fetch_whale_transfers(
                 "usd_estimate": round(btc_amount * btc_price, 2)
                 if btc_price > 0
                 else None,
-                "timestamp": datetime.utcfromtimestamp(ts).isoformat()
+                "timestamp": _to_utc_iso(datetime.utcfromtimestamp(ts))
                 if ts > 0
                 else None,
             }
@@ -8535,7 +8562,9 @@ async def get_equity_rebalance(
         if base <= 0:
             continue
         benchmark[sym] = [
-            {"timestamp": idx.isoformat(), "value": round(_safe_float(px) / base, 6)}
+            # Benchmark series feeds the dashboard chart — naive ISO would
+            # offset every point by the user's TZ. See _to_utc_iso() above.
+            {"timestamp": _to_utc_iso(idx), "value": round(_safe_float(px) / base, 6)}
             for idx, px in close.items()
         ]
 

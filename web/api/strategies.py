@@ -150,6 +150,40 @@ def _strategy_runtime_mode(name: str, info: Optional[Dict[str, Any]] = None) -> 
     return "live" if text == "live" else "paper"
 
 
+def _strategy_account_equity(name: str) -> Optional[float]:
+    """Per-strategy account equity if the strategy runs on an isolated
+    account (the default — strategy_<name>).
+
+    The performance view's capital_base = current_equity * allocation. When
+    a strategy has its own account (the codebase default), the right
+    denominator for return % is that account's equity, not the global one
+    from ``risk_manager.get_risk_report()``. Otherwise every strategy on
+    its own account shares the same baseline and the % column lies — a
+    real isolation gap between execution (correctly scoped) and the UI.
+
+    Returns None when the strategy uses the shared ``main`` account or
+    when its account equity hasn't been cached yet — callers should then
+    fall back to the global equity.
+    """
+    try:
+        account_id = strategy_manager._strategy_account_id(name)
+    except Exception:
+        return None
+    if not account_id or account_id == "main":
+        return None
+    try:
+        cached = execution_engine._get_cached_equity_value(account_id)
+    except Exception:
+        return None
+    if cached is None:
+        return None
+    try:
+        value = float(cached)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def _positions_by_strategy(name: str, runtime_mode: Optional[str] = None) -> List[Any]:
     normalized_mode = "live" if str(runtime_mode or "").strip().lower() == "live" else "paper"
     get_positions = position_manager.get_positions_by_strategy
@@ -1271,6 +1305,7 @@ class StrategyRegisterRequest(BaseModel):
     exchange: str = "gate"
     allocation: float = Field(default=settings.DEFAULT_STRATEGY_ALLOCATION, ge=0.0, le=1.0)
     runtime_limit_minutes: Optional[int] = Field(default=None, ge=0, le=10080)
+    runtime_mode: str = Field(default="paper", pattern="^(paper|live)$")
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -1919,6 +1954,11 @@ async def get_strategy_summary(limit: int = 20):
                 except Exception:
                     live_review_groups = {}
             trades = list((live_review_groups or {}).get(name, []))
+        # Per-strategy isolation: prefer the strategy's own account equity
+        # over the global equity. Strategies on isolated accounts (default)
+        # would otherwise all share the same return-% denominator and the
+        # UI would misattribute capital between them.
+        strategy_equity = _strategy_account_equity(name) or current_equity
         view = _build_strategy_performance_view(
             name=name,
             info=info,
@@ -1926,7 +1966,7 @@ async def get_strategy_summary(limit: int = 20):
             trades=trades,
             exchange_position_rows=exchange_rows if runtime_mode == "live" else [],
             seed_performance=row,
-            current_equity=current_equity,
+            current_equity=strategy_equity,
             include_equity=False,
             timeframe=str(info.get("timeframe") or "1h"),
         )
@@ -2208,6 +2248,10 @@ async def register_strategy(request: StrategyRegisterRequest):
         exchange=request.exchange,
         user_params=request.params,
     )
+    runtime_mode = "live" if str(request.runtime_mode).strip().lower() == "live" else "paper"
+    params["runtime_mode"] = runtime_mode
+    metadata = dict(request.metadata or {})
+    metadata["runtime_mode"] = runtime_mode
 
     runtime_limit_minutes = request.runtime_limit_minutes
     runtime_policy = None
@@ -2226,7 +2270,7 @@ async def register_strategy(request: StrategyRegisterRequest):
         timeframe=request.timeframe,
         allocation=request.allocation,
         runtime_limit_minutes=runtime_limit_minutes,
-        metadata=request.metadata,
+        metadata=metadata,
     )
 
     if not success:
@@ -2255,6 +2299,7 @@ async def register_strategy(request: StrategyRegisterRequest):
         "name": request.name,
         "strategy_type": request.strategy_type,
         "allocation": request.allocation,
+        "runtime_mode": runtime_mode,
         "runtime_limit_minutes": runtime_limit_minutes,
         "runtime_policy": runtime_policy,
     }
@@ -2787,6 +2832,10 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     except Exception as exc:
         logger.debug(f"monitor-data: positions failed for {name}: {exc}")
 
+    # Per-strategy isolation: same fix as in the summary endpoint —
+    # strategies on isolated accounts must be displayed against their
+    # own account equity, not the global one.
+    monitor_equity = _strategy_account_equity(name)
     performance_view = _build_strategy_performance_view(
         name=name,
         info=info,
@@ -2797,6 +2846,7 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
         base_ts=ohlcv[0]["t"] if ohlcv else None,
         end_ts=ohlcv[-1]["t"] if ohlcv else None,
         timeframe=timeframe,
+        current_equity=monitor_equity,
     )
     equity = performance_view.get("equity", [])
     metrics = performance_view.get("metrics", {})

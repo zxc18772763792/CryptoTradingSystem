@@ -830,8 +830,8 @@ const windowDays=recommendBacktestCompareWindowDays(timeframe,strategyCount,maxT
 const endMs=Date.now();
 const startMs=endMs-windowDays*86400000;
 return {
-  startDate:klineLocalIso(startMs),
-  endDate:klineLocalIso(endMs),
+  startDate:klineShanghaiAxisIso(startMs),
+  endDate:klineShanghaiAxisIso(endMs),
   windowDays,
   autoWindowApplied:true,
   note:`未填写区间，已自动锁定最近 ${windowDays} 天进行多策略对比；如需全历史，请手动填写开始/结束时间。`,
@@ -2922,11 +2922,30 @@ async function compareLive(name){try{const d=await api(`/strategies/${name}/live
 const marketDataState={exchange:'',symbol:'',timeframe:'',limit:1200,bars:[],isLoading:false,isLoadingLeft:false,isLoadingRight:false,lastRange:null,realtimeTimer:null,chartBound:false,realtimeInFlight:false,lastRealtimePollAt:0,lastChartKey:'',loadSeq:0};
 const autoDataOpsState={downloadAt:new Map(),repairAt:new Map(),lastHintAt:0};
 const MARKET_MAX_BARS=14000;
+const KLINE_UI_TZ_OFFSET_MS=8*60*60*1000;
 function klinePad2(n){return String(Math.max(0,Number(n)||0)).padStart(2,'0');}
-function klineLocalIso(ms){
+function klineUtcIso(ms){
 const d=new Date(ms);
 if(!Number.isFinite(d.getTime()))return'';
-return `${d.getFullYear()}-${klinePad2(d.getMonth()+1)}-${klinePad2(d.getDate())}T${klinePad2(d.getHours())}:${klinePad2(d.getMinutes())}:${klinePad2(d.getSeconds())}`;
+return d.toISOString().replace(/\.\d{3}Z$/,'Z');
+}
+function klineShanghaiAxisIso(ms){
+const d=new Date(ms+KLINE_UI_TZ_OFFSET_MS);
+if(!Number.isFinite(d.getTime()))return'';
+return `${d.getUTCFullYear()}-${klinePad2(d.getUTCMonth()+1)}-${klinePad2(d.getUTCDate())}T${klinePad2(d.getUTCHours())}:${klinePad2(d.getUTCMinutes())}:${klinePad2(d.getUTCSeconds())}`;
+}
+function klineAxisIsoToUtcMs(value){
+const raw=String(value??'').trim();
+if(!raw)return NaN;
+const text=raw.replace(' ','T');
+if(/[zZ]|[+\-]\d{2}:?\d{2}$/.test(text)){
+  const ms=Date.parse(text);
+  return Number.isFinite(ms)?ms-KLINE_UI_TZ_OFFSET_MS:NaN;
+}
+const m=text.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})(?::(\d{2}))?(?::(\d{2})(?:\.\d+)?)?$/);
+if(!m)return NaN;
+const ms=Date.UTC(Number(m[1]),Number(m[2])-1,Number(m[3]),Number(m[4]||0),Number(m[5]||0),Number(m[6]||0));
+return Number.isFinite(ms)?ms-KLINE_UI_TZ_OFFSET_MS:NaN;
 }
 function klineToDate(value){
 if(value instanceof Date)return Number.isFinite(value.getTime())?value:null;
@@ -2942,7 +2961,7 @@ function normalizeKlineBar(bar){
 if(!bar||typeof bar!=='object')return null;
 const ms=klineToMs(bar.timestamp);
 if(!Number.isFinite(ms))return null;
-return {...bar,timestamp:klineLocalIso(ms)};
+return {...bar,timestamp:klineUtcIso(ms)};
 }
 function timeframeSeconds(tf){if(!tf||tf.length<2)return 60;const unit=tf.slice(-1),val=Math.max(1,parseInt(tf.slice(0,-1),10)||1);if(unit==='s')return val;if(unit==='m')return val*60;if(unit==='h')return val*3600;if(unit==='d')return val*86400;if(unit==='w')return val*86400*7;if(unit==='M')return val*86400*30;return 60;}
 function isSubMinuteTf(tf){return Math.max(1,timeframeSeconds(tf))<60;}
@@ -2972,8 +2991,8 @@ const arr=Array.isArray(bars)?bars:[];
 if(!arr.length)return{};
 let startMs=NaN,endMs=NaN;
 if(marketDataState.lastRange?.start&&marketDataState.lastRange?.end){
-  startMs=toMs(marketDataState.lastRange.start);
-  endMs=toMs(marketDataState.lastRange.end);
+  startMs=klineAxisIsoToUtcMs(marketDataState.lastRange.start);
+  endMs=klineAxisIsoToUtcMs(marketDataState.lastRange.end);
 }
 if(!Number.isFinite(startMs)||!Number.isFinite(endMs)){
   startMs=klineToMs(arr[0]?.timestamp);
@@ -3032,7 +3051,7 @@ if(!c)return;
 const bars=marketDataState.bars||[];
 if(!bars.length){c.innerHTML='<p style="color:#8b949e;text-align:center;padding:50px;">暂无数据，系统会自动后台补数后重试。</p>';return;}
 if(typeof Plotly==='undefined'){c.innerHTML='<p style="color:#8b949e;text-align:center;padding:50px;">图表库未加载，K线图暂不可用。</p>';return;}
-const rows=bars.map(d=>({timestamp:klineToDate(d.timestamp),open:+d.open,high:+d.high,low:+d.low,close:+d.close,volume:+d.volume||0})).filter(d=>d.timestamp&&Number.isFinite(d.open)&&Number.isFinite(d.high)&&Number.isFinite(d.low)&&Number.isFinite(d.close));
+const rows=bars.map(d=>({timestamp:klineToMs(d.timestamp),open:+d.open,high:+d.high,low:+d.low,close:+d.close,volume:+d.volume||0})).filter(d=>Number.isFinite(d.timestamp)&&Number.isFinite(d.open)&&Number.isFinite(d.high)&&Number.isFinite(d.low)&&Number.isFinite(d.close));
 if(!rows.length){c.innerHTML='<p style="color:#8b949e;text-align:center;padding:50px;">时间数据异常，无法渲染K线。</p>';return;}
 const chartKey=`${marketDataState.exchange}|${marketDataState.symbol}|${marketDataState.timeframe}`;
 const chartChanged=marketDataState.lastChartKey!==chartKey;
@@ -3042,7 +3061,7 @@ marketDataState.chartBound=false;
 marketDataState.lastRange=null;
 marketDataState.lastChartKey=chartKey;
 }
-const x=rows.map(d=>d.timestamp),o=rows.map(d=>d.open),h=rows.map(d=>d.high),l=rows.map(d=>d.low),cl=rows.map(d=>d.close),v=rows.map(d=>d.volume),vc=rows.map(d=>d.close>=d.open?'#1f9d63':'#d9534f');
+const x=rows.map(d=>klineShanghaiAxisIso(d.timestamp)),o=rows.map(d=>d.open),h=rows.map(d=>d.high),l=rows.map(d=>d.low),cl=rows.map(d=>d.close),v=rows.map(d=>d.volume),vc=rows.map(d=>d.close>=d.open?'#1f9d63':'#d9534f');
 const minLow=Math.min(...l);
 const maxHigh=Math.max(...h);
 const priceSpan=Math.max(Math.abs(maxHigh-minLow), Math.abs(maxHigh||0)*0.002, 1e-8);
@@ -3118,8 +3137,8 @@ const bars=marketDataState.bars||[];
 if(!bars.length)return;
 const minMs=klineToMs(bars[0]?.timestamp);
 const maxMs=klineToMs(bars[bars.length-1]?.timestamp);
-const leftMs=toMs(s);
-const rightMs=toMs(e);
+const leftMs=klineAxisIsoToUtcMs(s);
+const rightMs=klineAxisIsoToUtcMs(e);
 if(!Number.isFinite(minMs)||!Number.isFinite(maxMs)||!Number.isFinite(leftMs)||!Number.isFinite(rightMs))return;
 const span=Math.max(1000,rightMs-leftMs);
 const edge=Math.max(15000,Math.floor(span*0.12));
@@ -4461,23 +4480,25 @@ ${renderRangeLockIndicatorHtml(r,true)}`;
 const ec=document.getElementById('backtest-equity-chart');
 if(ec&&r.series?.length){
 if(typeof Plotly==='undefined'){ec.innerHTML='<div class="list-item">图表库未加载，回测曲线暂不可用。</div>';return;}
-const rows=(r.series||[]).map(i=>({timestamp:toDate(i.timestamp),equity:+i.equity,gross_equity:+i.gross_equity,drawdown:+i.drawdown,close:+i.close,pair_close:Number(i?.pair_close),spread:Number(i?.spread),z_score:Number(i?.z_score)})).filter(i=>i.timestamp&&Number.isFinite(i.equity)&&Number.isFinite(i.gross_equity)&&Number.isFinite(i.drawdown)&&Number.isFinite(i.close));
+const rows=(r.series||[]).map(i=>{const timestampMs=toMs(i.timestamp);return{timestampMs,timestamp:klineShanghaiAxisIso(timestampMs),equity:+i.equity,gross_equity:+i.gross_equity,drawdown:+i.drawdown,close:+i.close,pair_close:Number(i?.pair_close),spread:Number(i?.spread),z_score:Number(i?.z_score)};}).filter(i=>Number.isFinite(i.timestampMs)&&i.timestamp&&Number.isFinite(i.equity)&&Number.isFinite(i.gross_equity)&&Number.isFinite(i.drawdown)&&Number.isFinite(i.close));
 if(!rows.length){ec.innerHTML='<div class="list-item">回测时间序列为空或时间格式异常。</div>';return;}
 const normalizeTradeDirection=value=>{const raw=String(value||'').trim().toLowerCase();if(raw.startsWith('long'))return'long';if(raw.startsWith('short'))return'short';return'';};
 const tradeDirectionText=direction=>direction==='long'?'Long':direction==='short'?'Short':'--';
 const tradeDirectionColor=direction=>direction==='long'?'#3fb950':direction==='short'?'#f85149':'#9fb1c9';
-const toTradeRows=list=>(list||[]).map(p=>{const direction=normalizeTradeDirection(p?.direction);const reason=String(p?.reason||'').trim();const label=[tradeDirectionText(direction),reason].filter(Boolean).join(' · ')||String(p?.direction||p?.reason||'').trim();return{timestamp:toDate(p?.timestamp),price:Number(p?.price),direction,label};}).filter(p=>p.timestamp&&Number.isFinite(p.price));
 const x=rows.map(i=>i.timestamp),e=rows.map(i=>i.equity),ge=rows.map(i=>i.gross_equity),dd=rows.map(i=>i.drawdown),cl=rows.map(i=>i.close);
+const priceByTimestamp=new Map(rows.map(i=>[i.timestamp,i.close]));
+const toTradeRows=list=>(list||[]).map(p=>{const timestampMs=toMs(p?.timestamp);const timestamp=klineShanghaiAxisIso(timestampMs);const linePrice=Number(priceByTimestamp.get(timestamp));const executionPrice=Number(p?.price);const direction=normalizeTradeDirection(p?.direction);const reason=String(p?.reason||'').trim();const label=[tradeDirectionText(direction),reason].filter(Boolean).join(' · ')||String(p?.direction||p?.reason||'').trim();return{timestampMs,timestamp,price:Number.isFinite(linePrice)?linePrice:executionPrice,executionPrice,direction,label};}).filter(p=>Number.isFinite(p.timestampMs)&&p.timestamp&&Number.isFinite(p.price));
 const tp=r.trade_points||{},buyRows=toTradeRows(tp.buy_points),sellRows=toTradeRows(tp.sell_points),openRows=toTradeRows(tp.open_points),closeRows=toTradeRows(tp.close_points);
 const traces=[{type:'scatter',mode:'lines',x,y:e,name:'净值曲线',line:{color:'#3fb950',width:2},yaxis:'y'},{type:'scatter',mode:'lines',x,y:ge,name:'毛净值曲线',line:{color:'#4da3ff',width:1},yaxis:'y'},{type:'scatter',mode:'lines',x,y:dd,name:'回撤(%)',line:{color:'#f85149',width:1},yaxis:'y2'},{type:'scatter',mode:'lines',x,y:cl,name:isPairsMode?'主腿价格':'价格',line:{color:'#9fb1c9',width:1,dash:'dot'},yaxis:'y3',hovertemplate:`%{x|%Y-%m-%d %H:%M:%S}<br>${isPairsMode?'主腿':'价格'}: %{y:.6f}<extra></extra>`}];
-const pushDirectionalTradeTrace=(items,phase)=>{const isOpen=phase==='open';const phaseLabel=isOpen?'开仓':'平仓';const symbol=isOpen?'circle':'x';let rendered=0;['long','short'].forEach(direction=>{const matches=items.filter(i=>i.direction===direction);if(!matches.length)return;rendered+=matches.length;const directionLabel=tradeDirectionText(direction);traces.push({type:'scatter',mode:'markers',x:matches.map(i=>i.timestamp),y:matches.map(i=>i.price),name:`${directionLabel} ${phaseLabel}`,marker:{symbol,size:9,color:tradeDirectionColor(direction),line:{color:'#0e1b2a',width:1}},text:matches.map(i=>i.label||directionLabel),yaxis:'y3',hovertemplate:`%{x|%Y-%m-%d %H:%M:%S}<br>${phaseLabel}(${directionLabel}): %{y:.6f}<br>%{text}<extra></extra>`});});if(rendered===0&&items.length)traces.push({type:'scatter',mode:'markers',x:items.map(i=>i.timestamp),y:items.map(i=>i.price),name:`${phaseLabel}点`,marker:{symbol,size:9,color:isOpen?'#3fb950':'#f85149',line:{color:'#0e1b2a',width:1}},text:items.map(i=>i.label||phase),yaxis:'y3',hovertemplate:`%{x|%Y-%m-%d %H:%M:%S}<br>${phaseLabel}: %{y:.6f}<br>%{text}<extra></extra>`});};
+const tradeHoverTemplate=(label)=>`%{x|%Y-%m-%d %H:%M:%S}<br>${label}: %{y:.6f}<br>执行价: %{customdata:.6f}<br>%{text}<extra></extra>`;
+const pushDirectionalTradeTrace=(items,phase)=>{const isOpen=phase==='open';const phaseLabel=isOpen?'开仓':'平仓';const symbol=isOpen?'circle':'x';let rendered=0;['long','short'].forEach(direction=>{const matches=items.filter(i=>i.direction===direction);if(!matches.length)return;rendered+=matches.length;const directionLabel=tradeDirectionText(direction);traces.push({type:'scatter',mode:'markers',x:matches.map(i=>i.timestamp),y:matches.map(i=>i.price),name:`${directionLabel} ${phaseLabel}`,marker:{symbol,size:9,color:tradeDirectionColor(direction),line:{color:'#0e1b2a',width:1}},text:matches.map(i=>i.label||directionLabel),customdata:matches.map(i=>i.executionPrice),yaxis:'y3',hovertemplate:tradeHoverTemplate(`${phaseLabel}(${directionLabel})`)});});if(rendered===0&&items.length)traces.push({type:'scatter',mode:'markers',x:items.map(i=>i.timestamp),y:items.map(i=>i.price),name:`${phaseLabel}点`,marker:{symbol,size:9,color:isOpen?'#3fb950':'#f85149',line:{color:'#0e1b2a',width:1}},text:items.map(i=>i.label||phase),customdata:items.map(i=>i.executionPrice),yaxis:'y3',hovertemplate:tradeHoverTemplate(phaseLabel)});};
 if(isPairsMode&&rows.some(i=>Number.isFinite(i.pair_close)))traces.push({type:'scatter',mode:'lines',x,y:rows.map(i=>i.pair_close),name:'副腿价格',line:{color:'#ffb15f',width:1,dash:'dash'},yaxis:'y3',hovertemplate:'%{x|%Y-%m-%d %H:%M:%S}<br>副腿: %{y:.6f}<extra></extra>'});
 if(openRows.length||closeRows.length){
 pushDirectionalTradeTrace(openRows,'open');
 pushDirectionalTradeTrace(closeRows,'close');
 }else{
-if(buyRows.length)traces.push({type:'scatter',mode:'markers',x:buyRows.map(i=>i.timestamp),y:buyRows.map(i=>i.price),name:'买点',marker:{symbol:'triangle-up',size:9,color:'#3fb950',line:{color:'#0e1b2a',width:1}},yaxis:'y3',hovertemplate:'%{x|%Y-%m-%d %H:%M:%S}<br>买入: %{y:.6f}<extra></extra>'});
-if(sellRows.length)traces.push({type:'scatter',mode:'markers',x:sellRows.map(i=>i.timestamp),y:sellRows.map(i=>i.price),name:'卖点',marker:{symbol:'triangle-down',size:9,color:'#f85149',line:{color:'#0e1b2a',width:1}},yaxis:'y3',hovertemplate:'%{x|%Y-%m-%d %H:%M:%S}<br>卖出: %{y:.6f}<extra></extra>'});
+if(buyRows.length)traces.push({type:'scatter',mode:'markers',x:buyRows.map(i=>i.timestamp),y:buyRows.map(i=>i.price),name:'买点',marker:{symbol:'triangle-up',size:9,color:'#3fb950',line:{color:'#0e1b2a',width:1}},customdata:buyRows.map(i=>i.executionPrice),yaxis:'y3',hovertemplate:'%{x|%Y-%m-%d %H:%M:%S}<br>买入: %{y:.6f}<br>执行价: %{customdata:.6f}<extra></extra>'});
+if(sellRows.length)traces.push({type:'scatter',mode:'markers',x:sellRows.map(i=>i.timestamp),y:sellRows.map(i=>i.price),name:'卖点',marker:{symbol:'triangle-down',size:9,color:'#f85149',line:{color:'#0e1b2a',width:1}},customdata:sellRows.map(i=>i.executionPrice),yaxis:'y3',hovertemplate:'%{x|%Y-%m-%d %H:%M:%S}<br>卖出: %{y:.6f}<br>执行价: %{customdata:.6f}<extra></extra>'});
 }
 Plotly.newPlot(ec,traces,{paper_bgcolor:'#111723',plot_bgcolor:'#111723',font:{color:'#d7dde8'},margin:{l:50,r:72,t:20,b:30},xaxis:plotlyTimeAxis({}),yaxis:{title:'权益',side:'left',showgrid:true,gridcolor:'#283242'},yaxis2:{title:'回撤%',overlaying:'y',side:'right',showgrid:false},yaxis3:{title:isPairsMode?'主/副腿价格':'价格',overlaying:'y',side:'right',position:0.9,showgrid:false,tickfont:{color:'#9fb1c9'},titlefont:{color:'#9fb1c9'}},legend:{orientation:'h'}},{responsive:true,displaylogo:false});
 }
@@ -5602,7 +5623,7 @@ softRefreshTimer=setTimeout(()=>{
 },delay);
 }
 function setWsBadge(connected){state.wsConnected=!!connected;const st=document.getElementById('system-status');if(st)st.textContent=connected?'运行中(WS在线)':'运行中(轮询)';}
-function applyMarketTick(payload){try{const ex=marketDataState.exchange||document.getElementById('data-exchange')?.value,sym=marketDataState.symbol||document.getElementById('data-symbol')?.value,tf=marketDataState.timeframe||document.getElementById('data-timeframe')?.value||'1m';if(!ex||!sym||!marketDataState.bars?.length)return;const t=payload?.[ex]?.[sym];if(!t)return;const px=Number(t.last||0);if(px<=0)return;const tfSec=timeframeSeconds(tf);const nowMs=Date.now();const bucketMs=Math.floor(nowMs/(tfSec*1000))*(tfSec*1000);const bars=marketDataState.bars;const last=bars[bars.length-1];const lastMs=klineToMs(last?.timestamp);if(!Number.isFinite(lastMs))return;const lastBucket=Math.floor(lastMs/(tfSec*1000))*(tfSec*1000);if(lastBucket===bucketMs){last.high=Math.max(Number(last.high||px),px);last.low=Math.min(Number(last.low||px),px);if(!Number.isFinite(last.low))last.low=px;if(!Number.isFinite(last.high))last.high=px;last.close=px;}else if(bucketMs>lastBucket){if(isSubMinuteTf(tf)){return;}const openPx=Number(last.close||px);bars.push({timestamp:klineLocalIso(bucketMs),open:openPx,high:Math.max(openPx,px),low:Math.min(openPx,px),close:px,volume:0});marketDataState.bars=cropBars(mergeBars([],bars));}const renderThrottle=isSubMinuteTf(tf)?900:450;const now=Date.now();if(now-lastTickRenderAt>=renderThrottle){lastTickRenderAt=now;renderKlineChart(true);}}catch(e){console.error(e);}}
+function applyMarketTick(payload){try{const ex=marketDataState.exchange||document.getElementById('data-exchange')?.value,sym=marketDataState.symbol||document.getElementById('data-symbol')?.value,tf=marketDataState.timeframe||document.getElementById('data-timeframe')?.value||'1m';if(!ex||!sym||!marketDataState.bars?.length)return;const t=payload?.[ex]?.[sym];if(!t)return;const px=Number(t.last||0);if(px<=0)return;const tfSec=timeframeSeconds(tf);const nowMs=Date.now();const bucketMs=Math.floor(nowMs/(tfSec*1000))*(tfSec*1000);const bars=marketDataState.bars;const last=bars[bars.length-1];const lastMs=klineToMs(last?.timestamp);if(!Number.isFinite(lastMs))return;const lastBucket=Math.floor(lastMs/(tfSec*1000))*(tfSec*1000);if(lastBucket===bucketMs){last.high=Math.max(Number(last.high||px),px);last.low=Math.min(Number(last.low||px),px);if(!Number.isFinite(last.low))last.low=px;if(!Number.isFinite(last.high))last.high=px;last.close=px;}else if(bucketMs>lastBucket){if(isSubMinuteTf(tf)){return;}const openPx=Number(last.close||px);bars.push({timestamp:klineUtcIso(bucketMs),open:openPx,high:Math.max(openPx,px),low:Math.min(openPx,px),close:px,volume:0});marketDataState.bars=cropBars(mergeBars([],bars));}const renderThrottle=isSubMinuteTf(tf)?900:450;const now=Date.now();if(now-lastTickRenderAt>=renderThrottle){lastTickRenderAt=now;renderKlineChart(true);}}catch(e){console.error(e);}}
 function closeWebSocketClient(){
 if(wsRetryTimer){clearTimeout(wsRetryTimer);wsRetryTimer=null;}
 if(!wsClient){setWsBadge(false);return;}
@@ -8520,13 +8541,13 @@ function monitorChartToMs(value) {
 
 function monitorChartLocalIso(value) {
     const ms = monitorChartToMs(value);
-    return Number.isFinite(ms) ? klineLocalIso(ms) : '';
+    return Number.isFinite(ms) ? klineShanghaiAxisIso(ms) : '';
 }
 
 function normalizeMonitorOhlcvBar(bar) {
     if (!bar || typeof bar !== 'object') return null;
     const ms = monitorChartToMs(bar.t);
-    const t = Number.isFinite(ms) ? klineLocalIso(ms) : '';
+    const t = Number.isFinite(ms) ? klineShanghaiAxisIso(ms) : '';
     const o = Number(bar.o);
     const h = Number(bar.h);
     const l = Number(bar.l);
@@ -8543,7 +8564,7 @@ function normalizeMonitorOhlcvBar(bar) {
 function normalizeMonitorEquityPoint(point) {
     if (!point || typeof point !== 'object') return null;
     const ms = monitorChartToMs(point.t);
-    const t = Number.isFinite(ms) ? klineLocalIso(ms) : '';
+    const t = Number.isFinite(ms) ? klineShanghaiAxisIso(ms) : '';
     const v = Number(point.v);
     if (!t || !Number.isFinite(v)) return null;
     return { ...point, t, ms, v };
@@ -8649,7 +8670,7 @@ function _renderMonitorChart(data) {
     const plottedSignals = signals
         .map((sig) => {
             const signalMs = monitorChartToMs(sig?.t);
-            const signalTime = Number.isFinite(signalMs) ? klineLocalIso(signalMs) : '';
+            const signalTime = Number.isFinite(signalMs) ? klineShanghaiAxisIso(signalMs) : '';
             const rawPrice = Number(sig?.price);
             const bar = findMonitorBarForSignal(ohlcv, signalMs, rawPrice, timeframeMs);
             const plotTime = bar?.t || signalTime;

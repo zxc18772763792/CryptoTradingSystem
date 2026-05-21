@@ -142,10 +142,54 @@ def test_run_backtest_core_uses_protective_execution_price_for_trade_points(monk
     )
 
     assert result["forced_take_exits"] == 1
-    assert result["trade_points"]["open_points"][0]["timestamp"] == index[1].isoformat()
-    assert result["trade_points"]["close_points"][0]["timestamp"] == index[2].isoformat()
+    assert result["trade_points"]["open_points"][0]["timestamp"] == "2024-01-01T01:00:00Z"
+    assert result["trade_points"]["close_points"][0]["timestamp"] == "2024-01-01T02:00:00Z"
     assert result["trade_points"]["close_points"][0]["reason"] == "take_profit"
     assert result["trade_points"]["close_points"][0]["price"] == pytest.approx(98.0)
+    assert result["trade_points"]["open_points"][0]["timestamp"].endswith("Z")
+    assert result["trade_points"]["close_points"][0]["timestamp"].endswith("Z")
+
+
+def test_run_backtest_core_downsample_keeps_trade_point_bars(monkeypatch: pytest.MonkeyPatch):
+    index = pd.date_range("2024-01-01", periods=2005, freq="1h")
+    close = pd.Series(np.linspace(100.0, 120.0, len(index)), index=index)
+    df = pd.DataFrame(
+        {
+            "open": close.shift(1).fillna(close.iloc[0]),
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.full(len(index), 100.0),
+        },
+        index=index,
+    )
+    raw_position = pd.Series(0.0, index=index)
+    raw_position.iloc[1801:1803] = 1.0
+
+    monkeypatch.setattr(backtest_api, "_min_required_bars", lambda timeframe: 2)
+    monkeypatch.setattr(
+        backtest_api,
+        "_build_backtest_position_series",
+        lambda strategy, frame, params=None: raw_position,
+    )
+
+    result = backtest_api._run_backtest_core(
+        strategy="MAStrategy",
+        df=df,
+        timeframe="1h",
+        initial_capital=10000.0,
+        params={"fast_period": 3, "slow_period": 8},
+        include_series=True,
+    )
+
+    trade_timestamps = {
+        point["timestamp"]
+        for point in result["trade_points"]["open_points"] + result["trade_points"]["close_points"]
+    }
+    series_timestamps = {row["timestamp"] for row in result["series"]}
+
+    assert trade_timestamps
+    assert trade_timestamps <= series_timestamps
 
 
 @pytest.mark.parametrize(

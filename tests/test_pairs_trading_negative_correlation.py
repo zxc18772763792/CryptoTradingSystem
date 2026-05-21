@@ -77,6 +77,39 @@ def test_exit_guidance_marks_pair_signals_close_only():
     signals = strategy.generate_signals(data1, data2)
 
     assert len(signals) == 2
+    assert signals[0].signal_type == SignalType.CLOSE_LONG
+    assert signals[1].signal_type == SignalType.CLOSE_LONG
     assert signals[0].metadata["direction"] == "mean_revert_exit"
     assert signals[0].metadata["close_only"] is True
     assert signals[1].metadata["close_only"] is True
+
+
+def test_positive_correlation_exit_guidance_uses_close_types():
+    strategy = PairsTradingStrategy(
+        name="pairs_positive_exit_test",
+        params={
+            "lookback_period": 30,
+            "entry_z_score": 1.5,
+            "exit_z_score": 0.5,
+            "allow_negative_hedge_ratio": False,
+            "min_hedge_ratio": 0.0,
+            "max_hedge_ratio": 5.0,
+        },
+    )
+    idx = pd.date_range(start="2025-01-01", periods=80, freq="h")
+    rng = np.random.default_rng(seed=42)
+    leg2 = pd.Series(100 + np.cumsum(rng.normal(0, 0.5, len(idx))), index=idx)
+    spread = pd.Series(rng.normal(0, 0.12, len(idx)), index=idx)
+    spread.iloc[-2] = -2.5
+    spread.iloc[-1] = -0.1
+    leg1 = 1.2 * leg2 + spread
+    data1 = pd.DataFrame({"close": leg1.values, "symbol": ["AAA/USDT"] * len(idx)}, index=idx)
+    data2 = pd.DataFrame({"close": leg2.values, "symbol": ["BBB/USDT"] * len(idx)}, index=idx)
+
+    signals = strategy.generate_signals(data1, data2)
+
+    assert len(signals) == 2
+    assert strategy._hedge_ratio is not None and strategy._hedge_ratio > 0
+    assert signals[0].signal_type == SignalType.CLOSE_LONG
+    assert signals[1].signal_type == SignalType.CLOSE_SHORT
+    assert all(signal.metadata["close_only"] is True for signal in signals)

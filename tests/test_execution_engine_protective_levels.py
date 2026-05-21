@@ -134,6 +134,26 @@ def test_preserve_existing_valid_protection_levels():
     assert take_profit == pytest.approx(112.0)
 
 
+def test_rebuilds_take_profit_invalidated_by_fill_price():
+    engine = ExecutionEngine()
+    signal = _make_signal(
+        price=100.0,
+        stop_loss=98.0,
+        take_profit=101.0,
+        metadata={"take_profit_pct": 0.06},
+    )
+
+    stop_loss, take_profit = engine._ensure_signal_protection_levels(
+        signal=signal,
+        side=OrderSide.BUY,
+        entry_price=102.0,
+        trade_policy={"stop_loss_pct": 0.02, "take_profit_pct": 0.04},
+    )
+
+    assert stop_loss == pytest.approx(98.0)
+    assert take_profit == pytest.approx(108.12)
+
+
 def test_metadata_pct_overrides_policy_pct():
     engine = ExecutionEngine()
     signal = _make_signal(
@@ -208,12 +228,16 @@ def test_exit_template_runtime_overrides_attach_atr_partial_and_time_stop(monkey
     assert metadata["exit_template"] == "PartialPlusATR"
     assert metadata["stop_loss_pct"] == pytest.approx(0.02)
     assert metadata["trailing_stop_pct"] == pytest.approx(0.025)
+    assert metadata["profit_protect_lock_pct"] == pytest.approx(0.001)
     assert metadata["partial_take_profit_enabled"] is True
     assert metadata["partial_take_profit_trigger_pct"] == pytest.approx(0.03)
     assert metadata["partial_take_profit_fraction"] == pytest.approx(0.5)
+    assert metadata["post_partial_trailing_activation_pct"] == pytest.approx(0.04)
     assert metadata["time_stop_enabled"] is True
     assert metadata["time_stop_minutes"] == 20 * 60
     assert metadata["outage_protection_enabled"] is False
+    assert metadata["atr_pct"] == pytest.approx(0.01)
+    assert metadata["profit_management_atr_pct"] == pytest.approx(0.01)
 
 
 def test_execution_engine_profit_protect_raises_stop_loss_for_long():
@@ -242,6 +266,43 @@ def test_execution_engine_profit_protect_raises_stop_loss_for_long():
     position = position_manager.get_position("binance", "BTC/USDT", account_id="main")
     assert position is not None
     assert position.stop_loss == pytest.approx(100.12)
+
+
+def test_strategy_positions_receive_default_profit_management_and_time_stop():
+    engine = ExecutionEngine()
+    position = SimpleNamespace(
+        strategy="unit_test_strategy",
+        metadata={
+            "source": "strategy",
+            "timeframe": "5m",
+            "profit_management_atr_pct": 0.01,
+        },
+    )
+
+    metadata = engine._effective_profit_management_metadata(position)
+
+    assert metadata["tier2_managed"] is True
+    assert metadata["profit_protect_enabled"] is True
+    assert metadata["profit_protect_trigger_pct"] == pytest.approx(0.01)
+    assert metadata["profit_protect_lock_pct"] == pytest.approx(0.001)
+    assert metadata["partial_take_profit_enabled"] is True
+    assert metadata["partial_take_profit_trigger_pct"] == pytest.approx(0.015)
+    assert metadata["post_partial_trailing_stop_pct"] == pytest.approx(0.012)
+    assert metadata["post_partial_trailing_activation_pct"] == pytest.approx(0.02)
+    assert metadata["time_stop_enabled"] is True
+    assert metadata["max_bars_in_trade"] == 20
+    assert metadata["time_stop_minutes"] == 100
+    assert metadata["time_stop_deadline_at"]
+
+
+def test_manual_positions_do_not_receive_strategy_profit_management_defaults():
+    engine = ExecutionEngine()
+    position = SimpleNamespace(strategy="manual", metadata={"source": "manual"})
+
+    metadata = engine._effective_profit_management_metadata(position)
+
+    assert "profit_protect_enabled" not in metadata
+    assert "time_stop_enabled" not in metadata
 
 
 def test_execution_engine_partial_take_profit_reduces_position_and_arms_trailing():
@@ -291,6 +352,58 @@ def test_execution_engine_partial_take_profit_reduces_position_and_arms_trailing
     assert position.trailing_stop_price is not None
     assert position.take_profit is None
     assert position.stop_loss == pytest.approx(100.12)
+
+
+def test_execution_engine_post_partial_trailing_waits_for_activation_pct():
+    engine = ExecutionEngine()
+    position_manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=100.0,
+        quantity=2.0,
+        strategy="unit_test_strategy",
+        account_id="main",
+        metadata={
+            "source": "strategy",
+            "partial_take_profit_enabled": True,
+            "partial_take_profit_trigger_pct": 0.015,
+            "partial_take_profit_fraction": 0.5,
+            "post_partial_trailing_stop_pct": 0.012,
+            "post_partial_trailing_activation_pct": 0.02,
+        },
+    )
+
+    async def _fake_execute_manual_order_single(**kwargs):
+        position_manager.close_position(
+            exchange=kwargs["exchange"],
+            symbol=kwargs["symbol"],
+            close_price=kwargs["price"],
+            quantity=kwargs["amount"],
+            account_id=kwargs["account_id"],
+        )
+        return {"order_id": "partial-wait-1", "filled": kwargs["amount"], "price": kwargs["price"]}
+
+    engine._execute_manual_order_single = _fake_execute_manual_order_single
+
+    import asyncio
+
+    engine._resolve_price = AsyncMock(return_value=101.6)
+    asyncio.run(engine._check_protective_orders())
+
+    position = position_manager.get_position("binance", "BTC/USDT", account_id="main")
+    assert position is not None
+    assert position.quantity == pytest.approx(1.0)
+    assert position.metadata["partial_take_profit_done"] is True
+    assert position.trailing_stop_pct is None
+
+    engine._resolve_price = AsyncMock(return_value=102.1)
+    asyncio.run(engine._check_protective_orders())
+
+    position = position_manager.get_position("binance", "BTC/USDT", account_id="main")
+    assert position is not None
+    assert position.trailing_stop_pct == pytest.approx(0.012)
+    assert position.trailing_stop_price is not None
 
 
 def test_execution_engine_partial_take_profit_skips_when_below_min_notional():

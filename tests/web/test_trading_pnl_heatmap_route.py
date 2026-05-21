@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -44,12 +44,15 @@ def test_pnl_heatmap_route_passes_mode(monkeypatch):
 def test_get_pnl_heatmap_normalizes_mixed_timestamp_awareness(monkeypatch):
     monkeypatch.setattr(trading_api.execution_engine, "get_trading_mode", lambda: "paper")
     monkeypatch.setattr(trading_api.execution_engine, "is_paper_mode", lambda: True)
+    _day = (datetime.now(timezone.utc) - timedelta(days=3)).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
     monkeypatch.setattr(
         trading_api.position_manager,
         "get_closed_positions",
         lambda limit=20000, scope=None: [
             SimpleNamespace(
-                updated_at=datetime(2026, 4, 20, 12, 0, 0),
+                updated_at=_day.replace(tzinfo=None),
                 opened_at=None,
                 quantity=1.0,
                 entry_price=100.0,
@@ -65,7 +68,7 @@ def test_get_pnl_heatmap_normalizes_mixed_timestamp_awareness(monkeypatch):
         "get_trade_history",
         lambda limit=30000, scope=None: [
             {
-                "timestamp": datetime(2026, 4, 20, 13, 0, 0, tzinfo=timezone.utc),
+                "timestamp": _day.replace(hour=11),
                 "symbol": "BTC/USDT",
                 "strategy": "paper_beta",
                 "pnl": 1.0,
@@ -104,10 +107,11 @@ def test_get_pnl_heatmap_separates_paper_and_live_fallback_orders(monkeypatch):
         AsyncMock(return_value=[]),
     )
 
+    _recent2 = datetime.now(timezone.utc) - timedelta(days=2)
     orders = [
         SimpleNamespace(
             id="paper_1",
-            timestamp=datetime(2026, 4, 20, 8, 0, 0),
+            timestamp=_recent2.replace(tzinfo=None),
             status=SimpleNamespace(value="closed"),
             filled=2.0,
             amount=2.0,
@@ -118,7 +122,7 @@ def test_get_pnl_heatmap_separates_paper_and_live_fallback_orders(monkeypatch):
         ),
         SimpleNamespace(
             id="live_1",
-            timestamp=datetime(2026, 4, 20, 9, 0, 0, tzinfo=timezone.utc),
+            timestamp=_recent2 + timedelta(hours=1),
             status=SimpleNamespace(value="filled"),
             filled=1.0,
             amount=1.0,
